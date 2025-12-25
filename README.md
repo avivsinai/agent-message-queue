@@ -1,0 +1,81 @@
+# Agent Message Queue (AMQ)
+
+A local, file-queue mailbox for two or more coding agents running on the same machine. AMQ uses Maildir-style atomic delivery (tmp -> new -> cur) with a minimal CLI so agents can exchange messages without a server, database, or daemon.
+
+Status: implementation-ready. The detailed plan is in `specs/001-local-maildir-queue`.
+
+Requires Go 1.25+.
+
+## Goals
+
+- Minimal, robust file-based message exchange between agents on the same machine
+- Atomic delivery semantics and durable writes
+- No background services or network dependencies
+- Human-auditable artifacts (plain text + JSON frontmatter)
+
+## Non-goals
+
+- Global search or indexing across repos
+- Long-running daemons or background workers
+- Complex auth, ACLs, or multi-tenant isolation
+
+## Quickstart
+
+```bash
+# Build the CLI
+
+go build -o amq ./cmd/amq
+
+# Initialize a root with two agent mailboxes
+./amq init --root .agent-mail --agents codex,cloudcode
+
+# Send a message
+./amq send --me codex --to cloudcode --body "Quick ping"
+```
+
+## Environment variables
+
+- `AM_ROOT`: default root directory for storage
+- `AM_ME`: default agent handle
+
+Handles are normalized to lowercase and must match `[a-z0-9_-]+`.
+
+## CLI
+
+- `amq init --root <path> --agents a,b,c`
+- `amq send --me codex --to cloudcode --subject "Review notes" --thread p2p/codex__cloudcode --body @notes.md`
+- `amq list --me cloudcode --new`
+- `amq read --me cloudcode --id <msg_id>`
+- `amq ack --me cloudcode --id <msg_id>`
+- `amq thread --id p2p/codex__cloudcode --include-body`
+- `amq thread --id p2p/codex__cloudcode --limit 50`
+- `amq presence set --me codex --status busy`
+- `amq cleanup --tmp-older-than 36h`
+- `amq --version`
+
+All commands accept `--root` and `--json`.
+
+See `specs/001-local-maildir-queue/quickstart.md` for the full contract.
+
+## Build, lint, test
+
+```bash
+make build
+make test
+make vet
+make lint
+make ci
+```
+
+`make lint` expects `golangci-lint` to be installed. See https://golangci-lint.run/usage/install/
+
+## Skills
+
+This repo includes minimal, ready-to-use skills for both tools:
+
+- Codex: `.codex/skills/amq-cli`
+- Claude Code: `.claude/skills/amq-cli`
+
+## License
+
+MIT (see `LICENSE`).

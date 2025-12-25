@@ -1,0 +1,9 @@
+.DS_Store
+/amq
+/.agent-mail/
+/bin/
+/dist/
+*.exe
+*.out
+*.test
+*.prof
