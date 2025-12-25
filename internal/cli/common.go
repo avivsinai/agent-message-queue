@@ -52,7 +52,7 @@ func requireMe(handle string) error {
 
 // validateKnownHandle checks if the handle is in config.json (if it exists).
 // Returns nil if config doesn't exist or handle is known.
-// If strict=true, returns an error for unknown handles; otherwise warns to stderr.
+// If strict=true, returns an error for unknown handles or corrupt config; otherwise warns to stderr.
 func validateKnownHandle(root, handle string, strict bool) error {
 	configPath := filepath.Join(root, "meta", "config.json")
 	data, err := os.ReadFile(configPath)
@@ -60,14 +60,26 @@ func validateKnownHandle(root, handle string, strict bool) error {
 		if os.IsNotExist(err) {
 			return nil // No config, no validation
 		}
-		return nil // Can't read config, skip validation
+		// Config exists but unreadable
+		msg := fmt.Sprintf("cannot read config.json: %v", err)
+		if strict {
+			return errors.New(msg)
+		}
+		_ = writeStderr("warning: %s\n", msg)
+		return nil
 	}
 
 	var cfg struct {
 		Agents []string `json:"agents"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil // Invalid config, skip validation
+		// Config exists but invalid JSON
+		msg := fmt.Sprintf("invalid config.json: %v", err)
+		if strict {
+			return errors.New(msg)
+		}
+		_ = writeStderr("warning: %s\n", msg)
+		return nil
 	}
 
 	for _, known := range cfg.Agents {
@@ -85,18 +97,34 @@ func validateKnownHandle(root, handle string, strict bool) error {
 }
 
 // validateKnownHandles validates multiple handles against config.json.
+// If strict=true, returns an error for unknown handles or corrupt config.
 func validateKnownHandles(root string, handles []string, strict bool) error {
 	configPath := filepath.Join(root, "meta", "config.json")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil // No config or can't read, skip validation
+		if os.IsNotExist(err) {
+			return nil // No config, no validation
+		}
+		// Config exists but unreadable
+		msg := fmt.Sprintf("cannot read config.json: %v", err)
+		if strict {
+			return errors.New(msg)
+		}
+		_ = writeStderr("warning: %s\n", msg)
+		return nil
 	}
 
 	var cfg struct {
 		Agents []string `json:"agents"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil // Invalid config, skip validation
+		// Config exists but invalid JSON
+		msg := fmt.Sprintf("invalid config.json: %v", err)
+		if strict {
+			return errors.New(msg)
+		}
+		_ = writeStderr("warning: %s\n", msg)
+		return nil
 	}
 
 	known := make(map[string]bool, len(cfg.Agents))

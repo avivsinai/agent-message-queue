@@ -44,7 +44,8 @@ Handles must be lowercase and match `[a-z0-9_-]+`.
 
 - Directories use 0700 permissions (owner-only access)
 - Files use 0600 permissions (owner read/write only)
-- Unknown handles trigger a warning by default; use `--strict` to make it an error
+- Unknown handles trigger a warning by default; use `--strict` to error instead
+- With `--strict`, corrupt or unreadable `config.json` also causes an error
 
 These defaults are suitable for single-user machines. For shared systems, ensure the AMQ root is in a user-owned directory.
 
@@ -63,7 +64,7 @@ These defaults are suitable for single-user machines. For shared systems, ensure
 - `amq watch --me cloudcode --timeout 60s`
 - `amq --version`
 
-All commands accept `--root` and `--json`.
+All commands accept `--root`, `--json`, and `--strict`.
 
 See `specs/001-local-maildir-queue/quickstart.md` for the full contract.
 

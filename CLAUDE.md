@@ -65,6 +65,8 @@ amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
 amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
 ```
 
+Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or corrupt config)
+
 ## Multi-Agent Coordination
 
 Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).

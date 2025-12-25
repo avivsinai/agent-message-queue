@@ -63,3 +63,26 @@ func TestValidateKnownHandleNoConfig(t *testing.T) {
 		t.Errorf("no config should pass any handle: %v", err)
 	}
 }
+
+func TestValidateKnownHandleCorruptConfig(t *testing.T) {
+	root := t.TempDir()
+	metaDir := filepath.Join(root, "meta")
+	if err := os.MkdirAll(metaDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Write invalid JSON
+	if err := os.WriteFile(filepath.Join(metaDir, "config.json"), []byte("not json"), 0o600); err != nil {
+		t.Fatalf("write corrupt config: %v", err)
+	}
+
+	// Corrupt config with strict=false should warn but not error
+	if err := validateKnownHandle(root, "alice", false); err != nil {
+		t.Errorf("corrupt config with strict=false should warn, not error: %v", err)
+	}
+
+	// Corrupt config with strict=true should error
+	if err := validateKnownHandle(root, "alice", true); err == nil {
+		t.Errorf("corrupt config with strict=true should error")
+	}
+}
