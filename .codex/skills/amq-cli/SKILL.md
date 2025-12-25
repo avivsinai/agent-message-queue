@@ -97,6 +97,8 @@ When you've sent a message and need to wait for a response:
 
 ### Workflow summary
 
+Commands below assume `AM_ME` is set:
+
 | Situation | Command | Behavior |
 |-----------|---------|----------|
 | Working, quick check | `amq list --new` | Non-blocking, <10ms |

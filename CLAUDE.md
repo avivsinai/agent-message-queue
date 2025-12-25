@@ -67,13 +67,15 @@ amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
 
 ## Multi-Agent Coordination
 
-**During active work**: Check inbox between steps with `amq list --new` (non-blocking, <10ms).
+Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 
-**Waiting for reply**: Use `amq watch --timeout 60s` which blocks until a message arrives (uses fsnotify for instant response).
+**During active work**: Check inbox between steps with `amq list --new` (non-blocking).
+
+**Waiting for reply**: Use `amq watch --timeout 60s` which blocks until a message arrives.
 
 | Situation | Command | Behavior |
 |-----------|---------|----------|
-| Working, quick check | `amq list --new` | Non-blocking, <10ms |
+| Working, quick check | `amq list --new` | Non-blocking |
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
 
 ## Testing

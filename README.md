@@ -65,12 +65,13 @@ AMQ supports two primary coordination patterns:
 
 ### Pattern 1: Active Agent Loop
 
-When an agent is actively working, integrate quick inbox checks between steps:
+When an agent is actively working, integrate quick inbox checks between steps.
+Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`):
 
 ```bash
 # Agent work loop (pseudocode):
 # 1. Check inbox (non-blocking)
-amq list --me claude --new --json
+amq list --new --json
 # 2. Process any messages
 # 3. Do work
 # 4. Send updates to other agents
@@ -80,17 +81,17 @@ amq send --to codex --subject "Progress" --body "Completed task X"
 
 ### Pattern 2: Explicit Wait for Reply
 
-When waiting for a response from another agent:
+When waiting for a response from another agent (assumes `AM_ME` is set):
 
 ```bash
 # Send request
-amq send --me claude --to codex --subject "Review request" --body @file.go
+amq send --to codex --subject "Review request" --body @file.go
 
 # Wait for reply (blocks until message arrives or timeout)
-amq watch --me claude --timeout 120s
+amq watch --timeout 120s
 
-# Returns immediately when message arrives (low latency via fsnotify)
-amq read --me claude --id <msg_id>
+# Process the reply
+amq read --id <msg_id>
 ```
 
 ### Watch Command Details
