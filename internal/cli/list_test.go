@@ -113,7 +113,7 @@ func runListJSON(t *testing.T, root, agent string, limit, offset int) []listItem
 
 	err := runList(args)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	if err != nil {
@@ -121,7 +121,7 @@ func runListJSON(t *testing.T, root, agent string, limit, offset int) []listItem
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 
 	var items []listItem
 	if err := json.Unmarshal(buf.Bytes(), &items); err != nil {

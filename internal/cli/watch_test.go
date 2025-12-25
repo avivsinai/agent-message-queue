@@ -52,7 +52,7 @@ func TestRunWatchExistingMessages(t *testing.T) {
 
 	err = runWatch([]string{"--root", root, "--me", "alice", "--json", "--timeout", "1s"})
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	if err != nil {
@@ -60,7 +60,7 @@ func TestRunWatchExistingMessages(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 
 	var result watchResult
 	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
@@ -96,7 +96,7 @@ func TestRunWatchTimeout(t *testing.T) {
 	err := runWatch([]string{"--root", root, "--me", "alice", "--json", "--timeout", "100ms"})
 	elapsed := time.Since(start)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	if err != nil {
@@ -109,7 +109,7 @@ func TestRunWatchTimeout(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 
 	var result watchResult
 	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
@@ -173,7 +173,7 @@ func TestRunWatchNewMessage(t *testing.T) {
 
 	wg.Wait()
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	if watchErr != nil {
@@ -181,7 +181,7 @@ func TestRunWatchNewMessage(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 
 	var result watchResult
 	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {

@@ -91,7 +91,7 @@ func watchWithFsnotify(ctx context.Context, inboxNew string) ([]msgInfo, string,
 		// Fall back to polling if fsnotify fails
 		return watchWithPolling(ctx, inboxNew)
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 
 	if err := watcher.Add(inboxNew); err != nil {
 		return watchWithPolling(ctx, inboxNew)
