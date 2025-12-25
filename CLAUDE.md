@@ -24,7 +24,7 @@ Requires Go 1.25+ and optionally golangci-lint.
 ```
 cmd/amq/           → Entry point (delegates to cli.Run())
 internal/
-├── cli/           → Command handlers (send, list, read, ack, thread, presence, cleanup, init)
+├── cli/           → Command handlers (send, list, read, ack, thread, presence, cleanup, init, watch)
 ├── fsq/           → File system queue (Maildir delivery, atomic ops, scanning)
 ├── format/        → Message serialization (JSON frontmatter + Markdown body)
 ├── config/        → Config management (meta/config.json)
@@ -62,7 +62,19 @@ amq thread --id <thread_id> [--limit N] [--include-body] [--json]
 amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
 amq presence list [--json]
 amq cleanup --tmp-older-than <duration> [--dry-run]
+amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
 ```
+
+## Multi-Agent Coordination
+
+**During active work**: Check inbox between steps with `amq list --new` (non-blocking, <10ms).
+
+**Waiting for reply**: Use `amq watch --timeout 60s` which blocks until a message arrives (uses fsnotify for instant response).
+
+| Situation | Command | Behavior |
+|-----------|---------|----------|
+| Working, quick check | `amq list --new` | Non-blocking, <10ms |
+| Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
 
 ## Testing
 
@@ -72,3 +84,4 @@ Key test files:
 - `internal/fsq/maildir_test.go` - Atomic delivery semantics
 - `internal/format/message_test.go` - Message serialization
 - `internal/thread/thread_test.go` - Thread collection
+- `internal/cli/watch_test.go` - Watch command with fsnotify

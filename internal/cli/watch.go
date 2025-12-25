@@ -1,0 +1,233 @@
+package cli
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/fsnotify/fsnotify"
+)
+
+type watchResult struct {
+	Event    string    `json:"event"`
+	Messages []msgInfo `json:"messages,omitempty"`
+}
+
+type msgInfo struct {
+	ID      string `json:"id"`
+	From    string `json:"from"`
+	Subject string `json:"subject"`
+	Thread  string `json:"thread"`
+	Created string `json:"created"`
+	Path    string `json:"path"`
+}
+
+func runWatch(args []string) error {
+	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	fs.SetOutput(os.Stdout)
+	common := addCommonFlags(fs)
+	timeoutFlag := fs.Duration("timeout", 60*time.Second, "Maximum time to wait for messages (0 = wait forever)")
+	pollFlag := fs.Bool("poll", false, "Use polling fallback instead of fsnotify (for network filesystems)")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := requireMe(common.Me); err != nil {
+		return err
+	}
+	me, err := normalizeHandle(common.Me)
+	if err != nil {
+		return err
+	}
+	common.Me = me
+
+	root := filepath.Clean(common.Root)
+	inboxNew := fsq.AgentInboxNew(root, common.Me)
+
+	// Ensure inbox directory exists
+	if err := os.MkdirAll(inboxNew, 0o755); err != nil {
+		return err
+	}
+
+	// Check for existing messages first
+	existing, err := listNewMessages(inboxNew)
+	if err != nil {
+		return err
+	}
+	if len(existing) > 0 {
+		return outputWatchResult(common.JSON, "existing", existing)
+	}
+
+	// Set up context with timeout
+	ctx := context.Background()
+	if *timeoutFlag > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *timeoutFlag)
+		defer cancel()
+	}
+
+	// Watch for new messages
+	var messages []msgInfo
+	var watchErr error
+
+	if *pollFlag {
+		messages, watchErr = watchWithPolling(ctx, inboxNew)
+	} else {
+		messages, watchErr = watchWithFsnotify(ctx, inboxNew)
+	}
+
+	if watchErr != nil {
+		if errors.Is(watchErr, context.DeadlineExceeded) {
+			return outputWatchResult(common.JSON, "timeout", nil)
+		}
+		return watchErr
+	}
+
+	return outputWatchResult(common.JSON, "new_message", messages)
+}
+
+func watchWithFsnotify(ctx context.Context, inboxNew string) ([]msgInfo, error) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		// Fall back to polling if fsnotify fails
+		return watchWithPolling(ctx, inboxNew)
+	}
+	defer watcher.Close()
+
+	if err := watcher.Add(inboxNew); err != nil {
+		return watchWithPolling(ctx, inboxNew)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return nil, errors.New("watcher closed")
+			}
+			// Only care about new files (Create or Rename into directory)
+			if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
+				// Small delay to ensure file is fully written
+				time.Sleep(10 * time.Millisecond)
+				messages, err := listNewMessages(inboxNew)
+				if err != nil {
+					return nil, err
+				}
+				if len(messages) > 0 {
+					return messages, nil
+				}
+			}
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return nil, errors.New("watcher closed")
+			}
+			return nil, err
+		}
+	}
+}
+
+func watchWithPolling(ctx context.Context, inboxNew string) ([]msgInfo, error) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			messages, err := listNewMessages(inboxNew)
+			if err != nil {
+				return nil, err
+			}
+			if len(messages) > 0 {
+				return messages, nil
+			}
+		}
+	}
+}
+
+func listNewMessages(inboxNew string) ([]msgInfo, error) {
+	entries, err := os.ReadDir(inboxNew)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var messages []msgInfo
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+
+		path := filepath.Join(inboxNew, entry.Name())
+		header, err := format.ReadHeaderFile(path)
+		if err != nil {
+			continue // Skip corrupt messages
+		}
+
+		messages = append(messages, msgInfo{
+			ID:      header.ID,
+			From:    header.From,
+			Subject: header.Subject,
+			Thread:  header.Thread,
+			Created: header.Created,
+			Path:    path,
+		})
+	}
+
+	// Sort by creation time
+	sort.Slice(messages, func(i, j int) bool {
+		return messages[i].Created < messages[j].Created
+	})
+
+	return messages, nil
+}
+
+func outputWatchResult(jsonOutput bool, event string, messages []msgInfo) error {
+	result := watchResult{
+		Event:    event,
+		Messages: messages,
+	}
+
+	if jsonOutput {
+		return writeJSON(os.Stdout, result)
+	}
+
+	switch event {
+	case "timeout":
+		return writeStdoutLine("No new messages (timeout)")
+	case "existing":
+		if err := writeStdoutLine("Found existing messages:"); err != nil {
+			return err
+		}
+	case "new_message":
+		if err := writeStdoutLine("New message(s) received:"); err != nil {
+			return err
+		}
+	}
+
+	for _, msg := range messages {
+		subject := msg.Subject
+		if subject == "" {
+			subject = "(no subject)"
+		}
+		if err := writeStdout("  %s  %s  %s  %s\n", msg.Created, msg.From, msg.ID, subject); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}

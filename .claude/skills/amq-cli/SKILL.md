@@ -42,6 +42,18 @@ export AM_ME=codex
 ./amq thread --id p2p/codex__cloudcode --limit 50 --include-body
 ```
 
+### Watch for messages
+
+Wait for new messages with instant notification (uses fsnotify):
+
+```bash
+# Block until message arrives or timeout
+./amq watch --me cloudcode --timeout 60s
+
+# Use polling fallback for network filesystems
+./amq watch --me cloudcode --timeout 60s --poll
+```
+
 ### Presence (optional)
 
 ```bash
@@ -54,6 +66,42 @@ export AM_ME=codex
 ```bash
 ./amq cleanup --tmp-older-than 36h
 ```
+
+## Multi-Agent Coordination
+
+### During active work: Check inbox between steps
+
+When doing multi-step work, **check your inbox between steps** to pick up coordination messages from other agents:
+
+```bash
+# Quick, non-blocking check (<10ms)
+./amq list --me $AM_ME --new --json
+```
+
+If you receive a message, read and process it before continuing your work. This keeps agents synchronized without blocking.
+
+### Waiting for a reply: Use watch
+
+When you've sent a message and need to wait for a response:
+
+```bash
+# Send request
+./amq send --to codex --subject "Review this" --body @file.go
+
+# Wait for reply (blocks until message arrives, <1ms latency)
+./amq watch --me cloudcode --timeout 120s
+
+# Process the reply
+./amq read --me cloudcode --id <msg_id>
+```
+
+### Workflow summary
+
+| Situation | Command | Behavior |
+|-----------|---------|----------|
+| Working, quick check | `amq list --new` | Non-blocking, <10ms |
+| Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
+| Processing message | `amq read --id <id>` | Retrieve full message |
 
 ## Conventions and safety
 

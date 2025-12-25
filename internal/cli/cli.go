@@ -29,6 +29,8 @@ func Run(args []string) error {
 		return runPresence(args[1:])
 	case "cleanup":
 		return runCleanup(args[1:])
+	case "watch":
+		return runWatch(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
@@ -75,6 +77,9 @@ func printUsage() error {
 		return err
 	}
 	if err := writeStdoutLine("  cleanup   Remove stale tmp files"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  watch     Wait for new messages (uses fsnotify)"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine(""); err != nil {
