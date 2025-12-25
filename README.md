@@ -159,12 +159,11 @@ This repo includes ready-to-use skills for AI coding assistants.
 ### Codex CLI
 
 ```bash
-# Install from the skills marketplace
-$skill-installer avivsinai/skills-marketplace/skills/amq-cli
-
-# Or install directly from this repo
+# Install directly from this repo
 $skill-installer avivsinai/agent-message-queue/.codex/skills/amq-cli
 ```
+
+Note: The skills marketplace is a registry for Claude Code only. Codex CLI must install directly from source repos.
 
 ### Manual Installation
 
