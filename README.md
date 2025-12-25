@@ -126,6 +126,12 @@ make smoke
 
 `make lint` expects `golangci-lint` to be installed. See https://golangci-lint.run/usage/install/
 
+Install git hooks to enforce checks before commit:
+
+```bash
+./scripts/install-hooks.sh
+```
+
 ## Skills
 
 This repo includes ready-to-use skills for AI coding assistants.
