@@ -85,10 +85,14 @@ This repo includes ready-to-use skills for AI coding assistants.
 /plugin install amq-cli@avivsinai-marketplace
 ```
 
-### Codex
+### Codex CLI
 
 ```bash
-$skill-installer amq-cli
+# Install from the skills marketplace
+$skill-installer install https://github.com/avivsinai/skills-marketplace/tree/main/skills/amq-cli
+
+# Or install directly from this repo
+$skill-installer install https://github.com/avivsinai/agent-message-queue/tree/main/.codex/skills/amq-cli
 ```
 
 ### Manual Installation
