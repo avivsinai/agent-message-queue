@@ -52,7 +52,7 @@ func requireMe(handle string) error {
 
 // validateKnownHandle checks if the handle is in config.json (if it exists).
 // Returns nil if config doesn't exist or handle is known.
-// If strict=true, returns an error for unknown handles or corrupt config; otherwise warns to stderr.
+// If strict=true, returns an error for unknown handles or unreadable/corrupt config; otherwise warns to stderr.
 func validateKnownHandle(root, handle string, strict bool) error {
 	configPath := filepath.Join(root, "meta", "config.json")
 	data, err := os.ReadFile(configPath)
@@ -97,7 +97,7 @@ func validateKnownHandle(root, handle string, strict bool) error {
 }
 
 // validateKnownHandles validates multiple handles against config.json.
-// If strict=true, returns an error for unknown handles or corrupt config.
+// If strict=true, returns an error for unknown handles or unreadable/corrupt config.
 func validateKnownHandles(root string, handles []string, strict bool) error {
 	configPath := filepath.Join(root, "meta", "config.json")
 	data, err := os.ReadFile(configPath)

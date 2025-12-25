@@ -64,7 +64,7 @@ These defaults are suitable for single-user machines. For shared systems, ensure
 - `amq watch --me cloudcode --timeout 60s`
 - `amq --version`
 
-All commands accept `--root`, `--json`, and `--strict`.
+Most commands accept `--root`, `--json`, and `--strict` (except `init` which has its own flags).
 
 See `specs/001-local-maildir-queue/quickstart.md` for the full contract.
 
