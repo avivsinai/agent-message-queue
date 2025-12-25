@@ -72,7 +72,8 @@ func runAck(args []string) error {
 		ackPayload = existing
 		needsReceiverWrite = false
 	} else if !os.IsNotExist(err) {
-		return err
+		// Corrupt ack file - warn and rewrite
+		_ = writeStderr("warning: corrupt ack file, rewriting: %v\n", err)
 	}
 
 	data, err := ackPayload.Marshal()

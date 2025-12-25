@@ -23,7 +23,9 @@ func WriteFileAtomic(dir, filename string, data []byte, perm os.FileMode) (strin
 		return "", cleanupTemp(tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
-		if os.IsExist(err) {
+		// On Windows, rename to existing file may return access denied instead of ErrExist.
+		// Check if destination exists and retry after removal.
+		if _, statErr := os.Stat(finalPath); statErr == nil {
 			if removeErr := os.Remove(finalPath); removeErr != nil && !os.IsNotExist(removeErr) {
 				return "", cleanupTemp(tmpPath, err)
 			}

@@ -47,11 +47,17 @@ func runPresenceSet(args []string) error {
 		return err
 	}
 	common.Me = me
+	root := filepath.Clean(common.Root)
+
+	// Validate handle against config.json
+	if err := validateKnownHandle(root, me, common.Strict); err != nil {
+		return err
+	}
+
 	status := strings.TrimSpace(*statusFlag)
 	if status == "" {
 		return fmt.Errorf("--status is required")
 	}
-	root := filepath.Clean(common.Root)
 	p := presence.New(common.Me, status, strings.TrimSpace(*noteFlag), time.Now())
 	if err := presence.Write(root, p); err != nil {
 		return err
