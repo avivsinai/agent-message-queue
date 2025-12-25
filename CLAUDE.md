@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This is the **master agent instruction file** for this repository. Both Claude Code and Codex should follow these guidelines. See also `AGENTS.md` which references this file.
 
 ## Project Overview
 
@@ -65,7 +65,9 @@ amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
 amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
 ```
 
-Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or corrupt config)
+Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Note: `init` has its own flags and doesn't accept these.
+
+Use `amq --version` to check the installed version.
 
 ## Multi-Agent Coordination
 
@@ -89,3 +91,28 @@ Key test files:
 - `internal/format/message_test.go` - Message serialization
 - `internal/thread/thread_test.go` - Thread collection
 - `internal/cli/watch_test.go` - Watch command with fsnotify
+
+## Security
+
+- Directories use 0700 permissions (owner-only access)
+- Files use 0600 permissions (owner read/write only)
+- Unknown handles trigger a warning by default; use `--strict` to error instead
+- With `--strict`, unreadable or corrupt `config.json` also causes an error
+- Handles must be lowercase: `[a-z0-9_-]+`
+
+## Contributing
+
+Install git hooks to enforce checks before push:
+
+```bash
+./scripts/install-hooks.sh
+```
+
+The pre-push hook runs `make ci` (vet, lint, test, smoke) before allowing pushes.
+
+## Commit Conventions
+
+- Use descriptive commit messages (e.g., `fix: handle corrupt ack files gracefully`)
+- Run `make ci` before committing
+- Do not edit message files in place; always use the CLI
+- Cleanup is explicit (`amq cleanup`), never automatic
