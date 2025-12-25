@@ -1,9 +1,10 @@
 .PHONY: build test fmt fmt-check vet lint ci smoke sync-skills
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
 build:
-	go build -o amq ./cmd/amq
+	go build -ldflags "-X main.version=$(VERSION)" -o amq ./cmd/amq
 
 test:
 	go test ./...

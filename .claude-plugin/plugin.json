@@ -1,7 +1,7 @@
 {
   "name": "amq-cli",
   "description": "Agent Message Queue - atomic Maildir-style message delivery for inter-agent communication",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "author": {
     "name": "Aviv Sinai",
     "url": "https://github.com/avivsinai"
