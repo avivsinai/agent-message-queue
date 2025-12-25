@@ -56,15 +56,6 @@ func runWatch(args []string) error {
 		return err
 	}
 
-	// Check for existing messages first
-	existing, err := listNewMessages(inboxNew)
-	if err != nil {
-		return err
-	}
-	if len(existing) > 0 {
-		return outputWatchResult(common.JSON, "existing", existing)
-	}
-
 	// Set up context with timeout
 	ctx := context.Background()
 	if *timeoutFlag > 0 {
@@ -73,14 +64,15 @@ func runWatch(args []string) error {
 		defer cancel()
 	}
 
-	// Watch for new messages
+	// Watch for new messages (includes initial check after watcher setup)
 	var messages []msgInfo
+	var event string
 	var watchErr error
 
 	if *pollFlag {
-		messages, watchErr = watchWithPolling(ctx, inboxNew)
+		messages, event, watchErr = watchWithPolling(ctx, inboxNew)
 	} else {
-		messages, watchErr = watchWithFsnotify(ctx, inboxNew)
+		messages, event, watchErr = watchWithFsnotify(ctx, inboxNew)
 	}
 
 	if watchErr != nil {
@@ -90,10 +82,10 @@ func runWatch(args []string) error {
 		return watchErr
 	}
 
-	return outputWatchResult(common.JSON, "new_message", messages)
+	return outputWatchResult(common.JSON, event, messages)
 }
 
-func watchWithFsnotify(ctx context.Context, inboxNew string) ([]msgInfo, error) {
+func watchWithFsnotify(ctx context.Context, inboxNew string) ([]msgInfo, string, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		// Fall back to polling if fsnotify fails
@@ -105,13 +97,23 @@ func watchWithFsnotify(ctx context.Context, inboxNew string) ([]msgInfo, error) 
 		return watchWithPolling(ctx, inboxNew)
 	}
 
+	// Check for existing messages AFTER watcher is set up to avoid race condition.
+	// Any message arriving after this check will trigger a watcher event.
+	existing, err := listNewMessages(inboxNew)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(existing) > 0 {
+		return existing, "existing", nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		case event, ok := <-watcher.Events:
 			if !ok {
-				return nil, errors.New("watcher closed")
+				return nil, "", errors.New("watcher closed")
 			}
 			// Only care about new files (Create or Rename into directory)
 			if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
@@ -119,36 +121,45 @@ func watchWithFsnotify(ctx context.Context, inboxNew string) ([]msgInfo, error) 
 				time.Sleep(10 * time.Millisecond)
 				messages, err := listNewMessages(inboxNew)
 				if err != nil {
-					return nil, err
+					return nil, "", err
 				}
 				if len(messages) > 0 {
-					return messages, nil
+					return messages, "new_message", nil
 				}
 			}
 		case err, ok := <-watcher.Errors:
 			if !ok {
-				return nil, errors.New("watcher closed")
+				return nil, "", errors.New("watcher closed")
 			}
-			return nil, err
+			return nil, "", err
 		}
 	}
 }
 
-func watchWithPolling(ctx context.Context, inboxNew string) ([]msgInfo, error) {
+func watchWithPolling(ctx context.Context, inboxNew string) ([]msgInfo, string, error) {
+	// Check for existing messages first
+	existing, err := listNewMessages(inboxNew)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(existing) > 0 {
+		return existing, "existing", nil
+	}
+
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		case <-ticker.C:
 			messages, err := listNewMessages(inboxNew)
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			if len(messages) > 0 {
-				return messages, nil
+				return messages, "new_message", nil
 			}
 		}
 	}

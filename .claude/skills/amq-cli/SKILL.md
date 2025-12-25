@@ -44,7 +44,7 @@ export AM_ME=codex
 
 ### Watch for messages
 
-Wait for new messages with instant notification (uses fsnotify):
+Wait for new messages with efficient OS-native notifications (uses fsnotify):
 
 ```bash
 # Block until message arrives or timeout
@@ -88,7 +88,7 @@ When you've sent a message and need to wait for a response:
 # Send request
 ./amq send --to codex --subject "Review this" --body @file.go
 
-# Wait for reply (blocks until message arrives, <1ms latency)
+# Wait for reply (blocks until message arrives, low latency)
 ./amq watch --me cloudcode --timeout 120s
 
 # Process the reply

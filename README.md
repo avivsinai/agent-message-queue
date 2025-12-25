@@ -89,13 +89,13 @@ amq send --me claude --to codex --subject "Review request" --body @file.go
 # Wait for reply (blocks until message arrives or timeout)
 amq watch --me claude --timeout 120s
 
-# Returns immediately when message arrives (<1ms latency via fsnotify)
+# Returns immediately when message arrives (low latency via fsnotify)
 amq read --me claude --id <msg_id>
 ```
 
 ### Watch Command Details
 
-The `watch` command uses OS-level file notifications (fsnotify/inotify) for instant response:
+The `watch` command uses fsnotify for efficient OS-native file notifications:
 
 ```bash
 # Wait up to 60 seconds for new messages
