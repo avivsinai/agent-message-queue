@@ -1,4 +1,4 @@
-// Package presence houses core functionality for the AMQ CLI.
-//
-// TODO: Implement package responsibilities defined in specs/001-local-maildir-queue.
+// Package presence manages agent presence metadata. Each agent
+// can set a status and optional note, stored as presence.json
+// in their mailbox directory with a last_seen timestamp.
 package presence

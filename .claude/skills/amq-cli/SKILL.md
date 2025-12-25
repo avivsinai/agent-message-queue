@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-description: Use when coordinating agents via the AMQ CLI in this repo, including initializing mailboxes, sending/reading/acking messages, listing inboxes, viewing threads, setting presence, and cleaning stale tmp files. Covers Maildir tmp/new/cur semantics and safe, non-destructive usage conventions.
+description: Coordinates agents via the AMQ CLI for atomic Maildir-style message delivery. Handles initializing mailboxes, sending/reading/acking messages, listing inboxes, viewing threads, setting presence, and cleaning stale tmp files. Covers tmp/new/cur semantics and safe, non-destructive usage conventions.
 ---
 
 # AMQ CLI
