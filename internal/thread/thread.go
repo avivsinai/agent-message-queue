@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -49,10 +50,11 @@ func Collect(root, threadID string, agents []string, includeBody bool, onError f
 				if includeBody {
 					msg, err := format.ReadMessageFile(path)
 					if err != nil {
-						if onError != nil {
-							if cbErr := onError(path, err); cbErr != nil {
-								return nil, cbErr
-							}
+						if onError == nil {
+							return nil, fmt.Errorf("parse message %s: %w", path, err)
+						}
+						if cbErr := onError(path, err); cbErr != nil {
+							return nil, cbErr
 						}
 						continue
 					}
@@ -81,10 +83,11 @@ func Collect(root, threadID string, agents []string, includeBody bool, onError f
 
 				header, err := format.ReadHeaderFile(path)
 				if err != nil {
-					if onError != nil {
-						if cbErr := onError(path, err); cbErr != nil {
-							return nil, cbErr
-						}
+					if onError == nil {
+						return nil, fmt.Errorf("parse message %s: %w", path, err)
+					}
+					if cbErr := onError(path, err); cbErr != nil {
+						return nil, cbErr
 					}
 					continue
 				}

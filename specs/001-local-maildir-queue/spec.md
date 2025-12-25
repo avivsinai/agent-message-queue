@@ -94,7 +94,7 @@ Acceptance:
 - If ack is requested but sender mailbox is missing, record the ack locally and warn.
 - If message id is not found, read/ack returns a clear error.
 - If config.json exists and --force is not set, init fails safely.
-- Handles must be normalized to lowercase and match `[a-z0-9_-]+`.
+- Handles must be lowercase and match `[a-z0-9_-]+`.
 
 ## Success Criteria
 

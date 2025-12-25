@@ -1,6 +1,8 @@
 package thread
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -71,5 +73,39 @@ func TestCollectThread(t *testing.T) {
 	}
 	if entries[0].ID != "msg-1" || entries[1].ID != "msg-2" {
 		t.Fatalf("unexpected order: %v, %v", entries[0].ID, entries[1].ID)
+	}
+}
+
+func TestCollectThreadCorruptMessage(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs codex: %v", err)
+	}
+
+	path := filepath.Join(fsq.AgentInboxNew(root, "codex"), "bad.md")
+	if err := os.WriteFile(path, []byte("not a message"), 0o644); err != nil {
+		t.Fatalf("write bad message: %v", err)
+	}
+
+	if _, err := Collect(root, "p2p/codex__cloudcode", []string{"codex"}, false, nil); err == nil {
+		t.Fatalf("expected error for corrupt message")
+	}
+
+	called := false
+	entries, err := Collect(root, "p2p/codex__cloudcode", []string{"codex"}, false, func(path string, err error) error {
+		called = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Collect with onError: %v", err)
+	}
+	if !called {
+		t.Fatalf("expected onError to be called")
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 entries, got %d", len(entries))
 	}
 }

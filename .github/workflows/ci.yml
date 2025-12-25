@@ -24,6 +24,8 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+      - name: Smoke test
+        run: make smoke
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:

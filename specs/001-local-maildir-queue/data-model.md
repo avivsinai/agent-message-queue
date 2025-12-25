@@ -19,7 +19,7 @@
     config.json
 
 Handle constraints:
-- Handles are normalized to lowercase.
+- Handles must be lowercase.
 - Allowed characters: `a-z`, `0-9`, `_`, `-`.
 
 ## Message Files

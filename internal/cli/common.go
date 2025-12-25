@@ -55,8 +55,10 @@ func normalizeHandle(raw string) (string, error) {
 	if strings.ContainsAny(handle, "/\\") {
 		return "", fmt.Errorf("invalid handle (slashes not allowed): %s", handle)
 	}
-	normalized := strings.ToLower(handle)
-	for _, r := range normalized {
+	if handle != strings.ToLower(handle) {
+		return "", fmt.Errorf("handle must be lowercase: %s", handle)
+	}
+	for _, r := range handle {
 		if r >= 'a' && r <= 'z' {
 			continue
 		}
@@ -68,7 +70,7 @@ func normalizeHandle(raw string) (string, error) {
 		}
 		return "", fmt.Errorf("invalid handle (allowed: a-z, 0-9, -, _): %s", handle)
 	}
-	return normalized, nil
+	return handle, nil
 }
 
 func parseHandles(raw string) ([]string, error) {
@@ -99,6 +101,19 @@ func splitRecipients(raw string) ([]string, error) {
 		return nil, errors.New("--to is required")
 	}
 	return out, nil
+}
+
+func dedupeStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func splitList(raw string) []string {
@@ -168,13 +183,36 @@ func ensureFilename(id string) (string, error) {
 	if id == "" {
 		return "", errors.New("message id is required")
 	}
+	if id == "." || id == ".." {
+		return "", fmt.Errorf("invalid message id: %s", id)
+	}
 	if filepath.Base(id) != id {
+		return "", fmt.Errorf("invalid message id: %s", id)
+	}
+	if strings.ContainsAny(id, "/\\") {
 		return "", fmt.Errorf("invalid message id: %s", id)
 	}
 	if !strings.HasSuffix(id, ".md") {
 		id += ".md"
 	}
 	return id, nil
+}
+
+func ensureSafeBaseName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("name cannot be empty")
+	}
+	if name == "." || name == ".." {
+		return "", fmt.Errorf("invalid name: %s", name)
+	}
+	if filepath.Base(name) != name {
+		return "", fmt.Errorf("invalid name: %s", name)
+	}
+	if strings.ContainsAny(name, "/\\") {
+		return "", fmt.Errorf("invalid name: %s", name)
+	}
+	return name, nil
 }
 
 func writeJSON(w io.Writer, v any) error {

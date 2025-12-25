@@ -48,20 +48,28 @@ func runAck(args []string) error {
 	if err != nil {
 		return err
 	}
-	ackPayload := ack.New(header.ID, header.Thread, common.Me, header.From, time.Now())
+	sender, err := normalizeHandle(header.From)
+	if err != nil || sender != header.From {
+		return fmt.Errorf("invalid sender handle in message: %s", header.From)
+	}
+	msgID, err := ensureSafeBaseName(header.ID)
+	if err != nil || msgID != header.ID {
+		return fmt.Errorf("invalid message id in message: %s", header.ID)
+	}
+	ackPayload := ack.New(header.ID, header.Thread, common.Me, sender, time.Now())
 	data, err := ackPayload.Marshal()
 	if err != nil {
 		return err
 	}
 
 	receiverDir := fsq.AgentAcksSent(root, common.Me)
-	if _, err := fsq.WriteFileAtomic(receiverDir, header.ID+".json", data, 0o644); err != nil {
+	if _, err := fsq.WriteFileAtomic(receiverDir, msgID+".json", data, 0o644); err != nil {
 		return err
 	}
 
 	// Best-effort write to sender's received acks; sender may not exist.
-	senderDir := fsq.AgentAcksReceived(root, header.From)
-	if _, err := fsq.WriteFileAtomic(senderDir, header.ID+".json", data, 0o644); err != nil {
+	senderDir := fsq.AgentAcksReceived(root, sender)
+	if _, err := fsq.WriteFileAtomic(senderDir, msgID+".json", data, 0o644); err != nil {
 		if warnErr := writeStderr("warning: unable to write sender ack: %v\n", err); warnErr != nil {
 			return warnErr
 		}

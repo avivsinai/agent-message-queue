@@ -39,6 +39,7 @@ func runSend(args []string) error {
 	if err != nil {
 		return err
 	}
+	recipients = dedupeStrings(recipients)
 
 	body, err := readBody(*bodyFlag)
 	if err != nil {
@@ -82,10 +83,8 @@ func runSend(args []string) error {
 
 	filename := id + ".md"
 	// Deliver to each recipient.
-	for _, recipient := range recipients {
-		if _, err := fsq.DeliverToInbox(root, recipient, filename, data); err != nil {
-			return err
-		}
+	if _, err := fsq.DeliverToInboxes(root, recipients, filename, data); err != nil {
+		return err
 	}
 
 	// Copy to sender outbox/sent for audit.

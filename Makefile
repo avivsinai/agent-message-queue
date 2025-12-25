@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint ci
+.PHONY: build test fmt fmt-check vet lint ci smoke
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 
@@ -21,4 +21,7 @@ lint:
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed. Install from https://golangci-lint.run/usage/install/"; exit 1; }
 	golangci-lint run
 
-ci: fmt-check vet lint test
+smoke:
+	./scripts/smoke-test.sh
+
+ci: fmt-check vet lint test smoke

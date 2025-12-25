@@ -30,6 +30,8 @@ func runList(args []string) error {
 	common := addCommonFlags(fs)
 	newFlag := fs.Bool("new", false, "List messages in inbox/new")
 	curFlag := fs.Bool("cur", false, "List messages in inbox/cur")
+	limitFlag := fs.Int("limit", 0, "Limit number of messages (0 = no limit)")
+	offsetFlag := fs.Int("offset", 0, "Offset into sorted results (0 = start)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -48,6 +50,12 @@ func runList(args []string) error {
 	}
 	if *curFlag {
 		box = "cur"
+	}
+	if *limitFlag < 0 {
+		return errors.New("--limit must be >= 0")
+	}
+	if *offsetFlag < 0 {
+		return errors.New("--offset must be >= 0")
 	}
 
 	root := filepath.Clean(common.Root)
@@ -111,6 +119,17 @@ func runList(args []string) error {
 		}
 		return items[i].Created < items[j].Created
 	})
+
+	if *offsetFlag > 0 {
+		if *offsetFlag >= len(items) {
+			items = []listItem{}
+		} else {
+			items = items[*offsetFlag:]
+		}
+	}
+	if *limitFlag > 0 && len(items) > *limitFlag {
+		items = items[:*limitFlag]
+	}
 
 	if common.JSON {
 		return writeJSON(os.Stdout, items)

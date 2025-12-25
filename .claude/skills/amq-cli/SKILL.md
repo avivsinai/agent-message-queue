@@ -61,4 +61,4 @@ export AM_ME=codex
 - Delivery is Maildir-style: tmp -> new -> cur. Readers must ignore tmp.
 - Cleanup is explicit and never automatic; do not delete files without the cleanup command.
 - Thread naming for p2p: `p2p/<lowerA>__<lowerB>` (sorted lexicographically).
-- Handles are normalized to lowercase and must match `[a-z0-9_-]+`.
+- Handles must be lowercase and match `[a-z0-9_-]+`.

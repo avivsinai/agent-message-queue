@@ -38,13 +38,14 @@ go build -o amq ./cmd/amq
 - `AM_ROOT`: default root directory for storage
 - `AM_ME`: default agent handle
 
-Handles are normalized to lowercase and must match `[a-z0-9_-]+`.
+Handles must be lowercase and match `[a-z0-9_-]+`.
 
 ## CLI
 
 - `amq init --root <path> --agents a,b,c`
 - `amq send --me codex --to cloudcode --subject "Review notes" --thread p2p/codex__cloudcode --body @notes.md`
 - `amq list --me cloudcode --new`
+- `amq list --me cloudcode --new --limit 50 --offset 50`
 - `amq read --me cloudcode --id <msg_id>`
 - `amq ack --me cloudcode --id <msg_id>`
 - `amq thread --id p2p/codex__cloudcode --include-body`
@@ -65,6 +66,7 @@ make test
 make vet
 make lint
 make ci
+make smoke
 ```
 
 `make lint` expects `golangci-lint` to be installed. See https://golangci-lint.run/usage/install/
