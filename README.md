@@ -40,18 +40,26 @@ go build -o amq ./cmd/amq
 
 Handles must be lowercase and match `[a-z0-9_-]+`.
 
+## Security
+
+- Directories use 0700 permissions (owner-only access)
+- Files use 0600 permissions (owner read/write only)
+- Unknown handles trigger a warning by default; use `--strict` to make it an error
+
+These defaults are suitable for single-user machines. For shared systems, ensure the AMQ root is in a user-owned directory.
+
 ## CLI
 
 - `amq init --root <path> --agents a,b,c`
-- `amq send --me codex --to cloudcode --subject "Review notes" --thread p2p/codex__cloudcode --body @notes.md`
+- `amq send --me codex --to cloudcode --subject "Review notes" --thread p2p/cloudcode__codex --body @notes.md`
 - `amq list --me cloudcode --new`
 - `amq list --me cloudcode --new --limit 50 --offset 50`
 - `amq read --me cloudcode --id <msg_id>`
 - `amq ack --me cloudcode --id <msg_id>`
-- `amq thread --id p2p/codex__cloudcode --include-body`
-- `amq thread --id p2p/codex__cloudcode --limit 50`
+- `amq thread --id p2p/cloudcode__codex --include-body`
+- `amq thread --id p2p/cloudcode__codex --limit 50`
 - `amq presence set --me codex --status busy`
-- `amq cleanup --tmp-older-than 36h`
+- `amq cleanup --tmp-older-than 36h [--dry-run]`
 - `amq watch --me cloudcode --timeout 60s`
 - `amq --version`
 

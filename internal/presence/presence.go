@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 // Presence captures the current presence for an agent handle.
@@ -28,15 +30,13 @@ func New(handle, status, note string, now time.Time) Presence {
 
 func Write(root string, p Presence) error {
 	path := filepath.Join(root, "agents", p.Handle, "presence.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
+	_, err = fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), data, 0o600)
+	return err
 }
 
 func Read(root, handle string) (Presence, error) {

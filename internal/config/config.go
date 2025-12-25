@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 // Config is persisted to meta/config.json and captures the initial setup.
@@ -20,15 +22,13 @@ func WriteConfig(path string, cfg Config, force bool) error {
 			return fmt.Errorf("config already exists at %s (use --force to overwrite)", path)
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
+	_, err = fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), data, 0o600)
+	return err
 }
 
 func LoadConfig(path string) (Config, error) {

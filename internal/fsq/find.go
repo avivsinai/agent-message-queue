@@ -30,7 +30,7 @@ func MoveNewToCur(root, agent, filename string) error {
 	newPath := filepath.Join(root, "agents", agent, "inbox", "new", filename)
 	curDir := filepath.Join(root, "agents", agent, "inbox", "cur")
 	curPath := filepath.Join(curDir, filename)
-	if err := os.MkdirAll(curDir, 0o755); err != nil {
+	if err := os.MkdirAll(curDir, 0o700); err != nil {
 		return err
 	}
 	if err := os.Rename(newPath, curPath); err != nil {

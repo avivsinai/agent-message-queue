@@ -39,7 +39,7 @@ The file begins with JSON frontmatter delimited by a JSON fence:
   "id": "2025-12-24T15-02-33.123Z_pid1234_x7k9",
   "from": "codex",
   "to": ["cloudcode"],
-  "thread": "p2p/codex__cloudcode",
+  "thread": "p2p/cloudcode__codex",
   "subject": "Review notes",
   "created": "2025-12-24T15:02:33.123Z",
   "ack_required": true,
@@ -85,7 +85,7 @@ Ack JSON schema:
 {
   "schema": 1,
   "msg_id": "2025-12-24T15-02-33.123Z_pid1234_x7k9",
-  "thread": "p2p/codex__cloudcode",
+  "thread": "p2p/cloudcode__codex",
   "from": "cloudcode",
   "to": "codex",
   "received": "2025-12-24T15:06:10.000Z"

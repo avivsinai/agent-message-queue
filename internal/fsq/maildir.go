@@ -36,15 +36,15 @@ func DeliverToInboxes(root string, recipients []string, filename string, data []
 	for _, recipient := range recipients {
 		tmpDir := AgentInboxTmp(root, recipient)
 		newDir := AgentInboxNew(root, recipient)
-		if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		if err := os.MkdirAll(tmpDir, 0o700); err != nil {
 			return nil, cleanupStagedTmp(stages, err)
 		}
-		if err := os.MkdirAll(newDir, 0o755); err != nil {
+		if err := os.MkdirAll(newDir, 0o700); err != nil {
 			return nil, cleanupStagedTmp(stages, err)
 		}
 		tmpPath := filepath.Join(tmpDir, filename)
 		newPath := filepath.Join(newDir, filename)
-		if err := writeAndSync(tmpPath, data, 0o644); err != nil {
+		if err := writeAndSync(tmpPath, data, 0o600); err != nil {
 			return nil, cleanupStagedTmp(stages, err)
 		}
 		if err := SyncDir(tmpDir); err != nil {

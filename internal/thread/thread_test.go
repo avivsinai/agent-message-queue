@@ -29,7 +29,7 @@ func TestCollectThread(t *testing.T) {
 			ID:      "msg-1",
 			From:    "codex",
 			To:      []string{"cloudcode"},
-			Thread:  "p2p/codex__cloudcode",
+			Thread:  "p2p/cloudcode__codex",
 			Subject: "Hello",
 			Created: now.Format(time.RFC3339Nano),
 		},
@@ -41,7 +41,7 @@ func TestCollectThread(t *testing.T) {
 			ID:      "msg-2",
 			From:    "cloudcode",
 			To:      []string{"codex"},
-			Thread:  "p2p/codex__cloudcode",
+			Thread:  "p2p/cloudcode__codex",
 			Subject: "Re: Hello",
 			Created: now.Add(2 * time.Second).Format(time.RFC3339Nano),
 		},
@@ -64,7 +64,7 @@ func TestCollectThread(t *testing.T) {
 		t.Fatalf("deliver msg2: %v", err)
 	}
 
-	entries, err := Collect(root, "p2p/codex__cloudcode", []string{"codex", "cloudcode"}, false, nil)
+	entries, err := Collect(root, "p2p/cloudcode__codex", []string{"codex", "cloudcode"}, false, nil)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
@@ -90,12 +90,12 @@ func TestCollectThreadCorruptMessage(t *testing.T) {
 		t.Fatalf("write bad message: %v", err)
 	}
 
-	if _, err := Collect(root, "p2p/codex__cloudcode", []string{"codex"}, false, nil); err == nil {
+	if _, err := Collect(root, "p2p/cloudcode__codex", []string{"codex"}, false, nil); err == nil {
 		t.Fatalf("expected error for corrupt message")
 	}
 
 	called := false
-	entries, err := Collect(root, "p2p/codex__cloudcode", []string{"codex"}, false, func(path string, err error) error {
+	entries, err := Collect(root, "p2p/cloudcode__codex", []string{"codex"}, false, func(path string, err error) error {
 		called = true
 		return nil
 	})

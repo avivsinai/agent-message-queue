@@ -11,7 +11,7 @@ func TestMessageRoundTrip(t *testing.T) {
 			ID:          "2025-12-24T15-02-33.123Z_pid1234_abcd",
 			From:        "codex",
 			To:          []string{"cloudcode"},
-			Thread:      "p2p/codex__cloudcode",
+			Thread:      "p2p/cloudcode__codex",
 			Subject:     "Hello",
 			Created:     "2025-12-24T15:02:33.123Z",
 			AckRequired: true,

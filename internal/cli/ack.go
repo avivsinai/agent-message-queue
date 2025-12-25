@@ -15,12 +15,14 @@ import (
 
 func runAck(args []string) error {
 	fs := flag.NewFlagSet("ack", flag.ContinueOnError)
-	fs.SetOutput(os.Stdout)
 	common := addCommonFlags(fs)
 	idFlag := fs.String("id", "", "Message id")
 
-	if err := fs.Parse(args); err != nil {
+	usage := usageWithFlags(fs, "amq ack --me <agent> --id <msg_id> [options]")
+	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
+	} else if handled {
+		return nil
 	}
 	if err := requireMe(common.Me); err != nil {
 		return err
@@ -30,11 +32,17 @@ func runAck(args []string) error {
 		return err
 	}
 	common.Me = me
+	root := filepath.Clean(common.Root)
+
+	// Validate handle against config.json
+	if err := validateKnownHandle(root, me, common.Strict); err != nil {
+		return err
+	}
+
 	filename, err := ensureFilename(*idFlag)
 	if err != nil {
 		return err
 	}
-	root := filepath.Clean(common.Root)
 
 	path, _, err := fsq.FindMessage(root, common.Me, filename)
 	if err != nil {
@@ -57,22 +65,40 @@ func runAck(args []string) error {
 		return fmt.Errorf("invalid message id in message: %s", header.ID)
 	}
 	ackPayload := ack.New(header.ID, header.Thread, common.Me, sender, time.Now())
+	receiverDir := fsq.AgentAcksSent(root, common.Me)
+	receiverPath := filepath.Join(receiverDir, msgID+".json")
+	needsReceiverWrite := true
+	if existing, err := ack.Read(receiverPath); err == nil {
+		ackPayload = existing
+		needsReceiverWrite = false
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
 	data, err := ackPayload.Marshal()
 	if err != nil {
 		return err
 	}
 
-	receiverDir := fsq.AgentAcksSent(root, common.Me)
-	if _, err := fsq.WriteFileAtomic(receiverDir, msgID+".json", data, 0o644); err != nil {
-		return err
+	if needsReceiverWrite {
+		if _, err := fsq.WriteFileAtomic(receiverDir, msgID+".json", data, 0o600); err != nil {
+			return err
+		}
 	}
 
 	// Best-effort write to sender's received acks; sender may not exist.
 	senderDir := fsq.AgentAcksReceived(root, sender)
-	if _, err := fsq.WriteFileAtomic(senderDir, msgID+".json", data, 0o644); err != nil {
-		if warnErr := writeStderr("warning: unable to write sender ack: %v\n", err); warnErr != nil {
-			return warnErr
+	senderPath := filepath.Join(senderDir, msgID+".json")
+	if _, err := os.Stat(senderPath); err == nil {
+		// Already recorded.
+	} else if os.IsNotExist(err) {
+		if _, err := fsq.WriteFileAtomic(senderDir, msgID+".json", data, 0o600); err != nil {
+			if warnErr := writeStderr("warning: unable to write sender ack: %v\n", err); warnErr != nil {
+				return warnErr
+			}
 		}
+	} else if err != nil {
+		return err
 	}
 
 	if common.JSON {

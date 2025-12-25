@@ -30,12 +30,14 @@ func runPresence(args []string) error {
 
 func runPresenceSet(args []string) error {
 	fs := flag.NewFlagSet("presence set", flag.ContinueOnError)
-	fs.SetOutput(os.Stdout)
 	common := addCommonFlags(fs)
 	statusFlag := fs.String("status", "", "Status string")
 	noteFlag := fs.String("note", "", "Optional note")
-	if err := fs.Parse(args); err != nil {
+	usage := usageWithFlags(fs, "amq presence set --me <agent> --status <status> [options]")
+	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
+	} else if handled {
+		return nil
 	}
 	if err := requireMe(common.Me); err != nil {
 		return err
@@ -65,10 +67,12 @@ func runPresenceSet(args []string) error {
 
 func runPresenceList(args []string) error {
 	fs := flag.NewFlagSet("presence list", flag.ContinueOnError)
-	fs.SetOutput(os.Stdout)
 	common := addCommonFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	usage := usageWithFlags(fs, "amq presence list [options]")
+	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
+	} else if handled {
+		return nil
 	}
 	root := filepath.Clean(common.Root)
 

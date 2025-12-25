@@ -14,7 +14,6 @@ import (
 
 func runSend(args []string) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
-	fs.SetOutput(os.Stdout)
 	common := addCommonFlags(fs)
 	toFlag := fs.String("to", "", "Receiver handle (comma-separated)")
 	subjectFlag := fs.String("subject", "", "Message subject")
@@ -23,8 +22,11 @@ func runSend(args []string) error {
 	ackFlag := fs.Bool("ack", false, "Request ack")
 	refsFlag := fs.String("refs", "", "Comma-separated related message ids")
 
-	if err := fs.Parse(args); err != nil {
+	usage := usageWithFlags(fs, "amq send --me <agent> --to <recipients> [options]")
+	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
+	} else if handled {
+		return nil
 	}
 	if err := requireMe(common.Me); err != nil {
 		return err
@@ -40,6 +42,12 @@ func runSend(args []string) error {
 		return err
 	}
 	recipients = dedupeStrings(recipients)
+
+	// Validate handles against config.json
+	allHandles := append([]string{me}, recipients...)
+	if err := validateKnownHandles(root, allHandles, common.Strict); err != nil {
+		return err
+	}
 
 	body, err := readBody(*bodyFlag)
 	if err != nil {
@@ -90,7 +98,7 @@ func runSend(args []string) error {
 	// Copy to sender outbox/sent for audit.
 	outboxDir := fsq.AgentOutboxSent(root, common.Me)
 	outboxErr := error(nil)
-	if _, err := fsq.WriteFileAtomic(outboxDir, filename, data, 0o644); err != nil {
+	if _, err := fsq.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
 		outboxErr = err
 	}
 

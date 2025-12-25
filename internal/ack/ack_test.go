@@ -9,7 +9,7 @@ import (
 
 func TestAckMarshal(t *testing.T) {
 	ts := time.Date(2025, 12, 24, 15, 2, 33, 0, time.UTC)
-	a := New("msg-1", "p2p/codex__cloudcode", "cloudcode", "codex", ts)
+	a := New("msg-1", "p2p/cloudcode__codex", "cloudcode", "codex", ts)
 	data, err := a.Marshal()
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)

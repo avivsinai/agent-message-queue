@@ -43,7 +43,7 @@ func EnsureRootDirs(root string) error {
 		filepath.Join(root, "threads"),
 		filepath.Join(root, "meta"),
 	} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 	}
@@ -63,7 +63,7 @@ func EnsureAgentDirs(root, agent string) error {
 		AgentAcksSent(root, agent),
 	}
 	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 	}

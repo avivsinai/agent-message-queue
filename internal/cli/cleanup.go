@@ -13,12 +13,15 @@ import (
 
 func runCleanup(args []string) error {
 	fs := flag.NewFlagSet("cleanup", flag.ContinueOnError)
-	fs.SetOutput(os.Stdout)
 	common := addCommonFlags(fs)
 	olderFlag := fs.String("tmp-older-than", "", "Duration (e.g. 36h)")
+	dryRunFlag := fs.Bool("dry-run", false, "Show what would be removed without deleting")
 	yesFlag := fs.Bool("yes", false, "Skip confirmation prompt")
-	if err := fs.Parse(args); err != nil {
+	usage := usageWithFlags(fs, "amq cleanup --tmp-older-than <duration> [--dry-run] [--yes] [options]")
+	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
+	} else if handled {
+		return nil
 	}
 	if *olderFlag == "" {
 		return errors.New("--tmp-older-than is required")
@@ -26,6 +29,9 @@ func runCleanup(args []string) error {
 	dur, err := time.ParseDuration(*olderFlag)
 	if err != nil {
 		return err
+	}
+	if dur <= 0 {
+		return errors.New("--tmp-older-than must be > 0")
 	}
 	root := filepath.Clean(common.Root)
 	cutoff := time.Now().Add(-dur)
@@ -37,6 +43,24 @@ func runCleanup(args []string) error {
 	if len(candidates) == 0 {
 		if err := writeStdoutLine("No tmp files to remove."); err != nil {
 			return err
+		}
+		return nil
+	}
+
+	if *dryRunFlag {
+		if common.JSON {
+			return writeJSON(os.Stdout, map[string]any{
+				"candidates": candidates,
+				"count":      len(candidates),
+			})
+		}
+		if err := writeStdout("Would remove %d tmp file(s).\n", len(candidates)); err != nil {
+			return err
+		}
+		for _, path := range candidates {
+			if err := writeStdout("%s\n", path); err != nil {
+				return err
+			}
 		}
 		return nil
 	}

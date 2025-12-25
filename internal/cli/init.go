@@ -3,8 +3,8 @@ package cli
 import (
 	"errors"
 	"flag"
-	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
@@ -14,13 +14,15 @@ import (
 
 func runInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	fs.SetOutput(os.Stdout)
 	rootFlag := fs.String("root", defaultRoot(), "Root directory for the queue")
 	agentsFlag := fs.String("agents", "", "Comma-separated agent handles (required)")
 	forceFlag := fs.Bool("force", false, "Overwrite existing config.json if present")
 
-	if err := fs.Parse(args); err != nil {
+	usage := usageWithFlags(fs, "amq init --root <path> --agents a,b,c [--force]")
+	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
+	} else if handled {
+		return nil
 	}
 
 	agents, err := parseHandles(*agentsFlag)
@@ -30,6 +32,8 @@ func runInit(args []string) error {
 	if len(agents) == 0 {
 		return errors.New("--agents is required")
 	}
+	agents = dedupeStrings(agents)
+	sort.Strings(agents)
 
 	root := filepath.Clean(*rootFlag)
 	if err := fsq.EnsureRootDirs(root); err != nil {

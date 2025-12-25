@@ -14,19 +14,24 @@ import (
 
 func runThread(args []string) error {
 	fs := flag.NewFlagSet("thread", flag.ContinueOnError)
-	fs.SetOutput(os.Stdout)
 	common := addCommonFlags(fs)
 	idFlag := fs.String("id", "", "Thread id")
 	agentsFlag := fs.String("agents", "", "Comma-separated agent handles (optional)")
 	includeBody := fs.Bool("include-body", false, "Include body in output")
 	limitFlag := fs.Int("limit", 0, "Limit number of messages (0 = no limit)")
 
-	if err := fs.Parse(args); err != nil {
+	usage := usageWithFlags(fs, "amq thread --id <thread_id> [options]")
+	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
+	} else if handled {
+		return nil
 	}
 	threadID := strings.TrimSpace(*idFlag)
 	if threadID == "" {
 		return fmt.Errorf("--id is required")
+	}
+	if *limitFlag < 0 {
+		return fmt.Errorf("--limit must be >= 0")
 	}
 	root := filepath.Clean(common.Root)
 

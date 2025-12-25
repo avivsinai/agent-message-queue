@@ -1,10 +1,12 @@
 package format
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -18,8 +20,9 @@ const (
 )
 
 const (
-	frontmatterStart = "---json\n"
-	frontmatterEnd   = "\n---\n"
+	frontmatterStartLine = "---json"
+	frontmatterStart     = frontmatterStartLine + "\n"
+	frontmatterEnd       = "\n---\n"
 )
 
 // Sentinel errors for message parsing.
@@ -103,11 +106,38 @@ func ReadMessageFile(path string) (Message, error) {
 }
 
 func ReadHeaderFile(path string) (Header, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return Header{}, err
 	}
-	return ParseHeader(data)
+	defer func() { _ = file.Close() }()
+	return ReadHeader(file)
+}
+
+func ReadHeader(r io.Reader) (Header, error) {
+	br := bufio.NewReader(r)
+	line, err := br.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return Header{}, err
+	}
+	line = strings.TrimRight(line, "\r\n")
+	if line != frontmatterStartLine {
+		return Header{}, ErrMissingFrontmatterStart
+	}
+	if errors.Is(err, io.EOF) {
+		return Header{}, ErrMissingFrontmatterEnd
+	}
+
+	dec := json.NewDecoder(br)
+	var header Header
+	if err := dec.Decode(&header); err != nil {
+		return Header{}, fmt.Errorf("parse frontmatter: %w", err)
+	}
+	rest := io.MultiReader(dec.Buffered(), br)
+	if err := consumeFrontmatterEnd(bufio.NewReader(rest)); err != nil {
+		return Header{}, err
+	}
+	return header, nil
 }
 
 func splitFrontmatter(data []byte) ([]byte, []byte, error) {
@@ -127,6 +157,26 @@ func splitFrontmatter(data []byte) ([]byte, []byte, error) {
 	}
 	body := rest[len("---\n"):]
 	return header, body, nil
+}
+
+func consumeFrontmatterEnd(br *bufio.Reader) error {
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return ErrMissingFrontmatterEnd
+			}
+			return err
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if line == "---" {
+			return nil
+		}
+		return ErrMissingFrontmatterEnd
+	}
 }
 
 // Timestamped is implemented by types that have a Created timestamp and ID for sorting.

@@ -61,7 +61,7 @@ amq ack --me <agent> --id <msg_id>
 amq thread --id <thread_id> [--limit N] [--include-body] [--json]
 amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
 amq presence list [--json]
-amq cleanup --tmp-older-than <duration> [--dry-run]
+amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
 amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
 ```
 

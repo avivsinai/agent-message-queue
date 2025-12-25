@@ -2,6 +2,7 @@ package ack
 
 import (
 	"encoding/json"
+	"os"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
@@ -34,4 +35,16 @@ func (a Ack) Marshal() ([]byte, error) {
 		return nil, err
 	}
 	return append(b, '\n'), nil
+}
+
+func Read(path string) (Ack, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Ack{}, err
+	}
+	var out Ack
+	if err := json.Unmarshal(data, &out); err != nil {
+		return Ack{}, err
+	}
+	return out, nil
 }

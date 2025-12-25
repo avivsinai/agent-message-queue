@@ -26,15 +26,17 @@ type listItem struct {
 
 func runList(args []string) error {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
-	fs.SetOutput(os.Stdout)
 	common := addCommonFlags(fs)
 	newFlag := fs.Bool("new", false, "List messages in inbox/new")
 	curFlag := fs.Bool("cur", false, "List messages in inbox/cur")
 	limitFlag := fs.Int("limit", 0, "Limit number of messages (0 = no limit)")
 	offsetFlag := fs.Int("offset", 0, "Offset into sorted results (0 = start)")
 
-	if err := fs.Parse(args); err != nil {
+	usage := usageWithFlags(fs, "amq list --me <agent> [--new | --cur] [options]")
+	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
+	} else if handled {
+		return nil
 	}
 	if err := requireMe(common.Me); err != nil {
 		return err
@@ -44,6 +46,13 @@ func runList(args []string) error {
 		return err
 	}
 	common.Me = me
+	root := filepath.Clean(common.Root)
+
+	// Validate handle against config.json
+	if err := validateKnownHandle(root, me, common.Strict); err != nil {
+		return err
+	}
+
 	box := "new"
 	if *newFlag && *curFlag {
 		return errors.New("use only one of --new or --cur")
@@ -58,7 +67,6 @@ func runList(args []string) error {
 		return errors.New("--offset must be >= 0")
 	}
 
-	root := filepath.Clean(common.Root)
 	var dir string
 	if box == "new" {
 		dir = fsq.AgentInboxNew(root, common.Me)

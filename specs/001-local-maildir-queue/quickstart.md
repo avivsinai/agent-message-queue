@@ -9,7 +9,7 @@ amq init --root .agent-mail --agents codex,cloudcode
 ## Send
 
 ```
-amq send --to cloudcode --subject "Review notes" --thread p2p/codex__cloudcode --body @notes.md
+amq send --to cloudcode --subject "Review notes" --thread p2p/cloudcode__codex --body @notes.md
 amq send --to cloudcode --body "Quick ping"
 ```
 
@@ -24,7 +24,7 @@ amq ack  --me cloudcode --id <msg_id>
 ## Thread
 
 ```
-amq thread --me codex --id p2p/codex__cloudcode --limit 50
+amq thread --me codex --id p2p/cloudcode__codex --limit 50
 ```
 
 ## Presence (optional)
@@ -38,4 +38,5 @@ amq presence list
 
 ```
 amq cleanup --tmp-older-than 36h
+amq cleanup --tmp-older-than 36h --dry-run
 ```

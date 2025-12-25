@@ -13,12 +13,14 @@ import (
 
 func runRead(args []string) error {
 	fs := flag.NewFlagSet("read", flag.ContinueOnError)
-	fs.SetOutput(os.Stdout)
 	common := addCommonFlags(fs)
 	idFlag := fs.String("id", "", "Message id")
 
-	if err := fs.Parse(args); err != nil {
+	usage := usageWithFlags(fs, "amq read --me <agent> --id <msg_id> [options]")
+	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
+	} else if handled {
+		return nil
 	}
 	if err := requireMe(common.Me); err != nil {
 		return err
@@ -28,11 +30,17 @@ func runRead(args []string) error {
 		return err
 	}
 	common.Me = me
+	root := filepath.Clean(common.Root)
+
+	// Validate handle against config.json
+	if err := validateKnownHandle(root, me, common.Strict); err != nil {
+		return err
+	}
+
 	filename, err := ensureFilename(*idFlag)
 	if err != nil {
 		return err
 	}
-	root := filepath.Clean(common.Root)
 
 	path, box, err := fsq.FindMessage(root, common.Me, filename)
 	if err != nil {

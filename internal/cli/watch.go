@@ -31,13 +31,15 @@ type msgInfo struct {
 
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
-	fs.SetOutput(os.Stdout)
 	common := addCommonFlags(fs)
 	timeoutFlag := fs.Duration("timeout", 60*time.Second, "Maximum time to wait for messages (0 = wait forever)")
 	pollFlag := fs.Bool("poll", false, "Use polling fallback instead of fsnotify (for network filesystems)")
 
-	if err := fs.Parse(args); err != nil {
+	usage := usageWithFlags(fs, "amq watch --me <agent> [options]")
+	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
+	} else if handled {
+		return nil
 	}
 	if err := requireMe(common.Me); err != nil {
 		return err
@@ -49,10 +51,16 @@ func runWatch(args []string) error {
 	common.Me = me
 
 	root := filepath.Clean(common.Root)
+
+	// Validate handle against config.json
+	if err := validateKnownHandle(root, me, common.Strict); err != nil {
+		return err
+	}
+
 	inboxNew := fsq.AgentInboxNew(root, common.Me)
 
 	// Ensure inbox directory exists
-	if err := os.MkdirAll(inboxNew, 0o755); err != nil {
+	if err := os.MkdirAll(inboxNew, 0o700); err != nil {
 		return err
 	}
 

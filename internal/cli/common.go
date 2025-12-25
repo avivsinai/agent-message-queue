@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,9 +14,10 @@ import (
 )
 
 type commonFlags struct {
-	Root string
-	Me   string
-	JSON bool
+	Root   string
+	Me     string
+	JSON   bool
+	Strict bool
 }
 
 func addCommonFlags(fs *flag.FlagSet) *commonFlags {
@@ -23,6 +25,7 @@ func addCommonFlags(fs *flag.FlagSet) *commonFlags {
 	fs.StringVar(&flags.Root, "root", defaultRoot(), "Root directory for the queue")
 	fs.StringVar(&flags.Me, "me", defaultMe(), "Agent handle (or AM_ME)")
 	fs.BoolVar(&flags.JSON, "json", false, "Emit JSON output")
+	fs.BoolVar(&flags.Strict, "strict", false, "Error on unknown handles (default: warn)")
 	return flags
 }
 
@@ -44,6 +47,79 @@ func requireMe(handle string) error {
 	if strings.TrimSpace(handle) == "" {
 		return errors.New("--me is required (or set AM_ME)")
 	}
+	return nil
+}
+
+// validateKnownHandle checks if the handle is in config.json (if it exists).
+// Returns nil if config doesn't exist or handle is known.
+// If strict=true, returns an error for unknown handles; otherwise warns to stderr.
+func validateKnownHandle(root, handle string, strict bool) error {
+	configPath := filepath.Join(root, "meta", "config.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // No config, no validation
+		}
+		return nil // Can't read config, skip validation
+	}
+
+	var cfg struct {
+		Agents []string `json:"agents"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil // Invalid config, skip validation
+	}
+
+	for _, known := range cfg.Agents {
+		if known == handle {
+			return nil // Handle is known
+		}
+	}
+
+	msg := fmt.Sprintf("handle %q not in config.json agents %v", handle, cfg.Agents)
+	if strict {
+		return errors.New(msg)
+	}
+	_ = writeStderr("warning: %s\n", msg)
+	return nil
+}
+
+// validateKnownHandles validates multiple handles against config.json.
+func validateKnownHandles(root string, handles []string, strict bool) error {
+	configPath := filepath.Join(root, "meta", "config.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil // No config or can't read, skip validation
+	}
+
+	var cfg struct {
+		Agents []string `json:"agents"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil // Invalid config, skip validation
+	}
+
+	known := make(map[string]bool, len(cfg.Agents))
+	for _, a := range cfg.Agents {
+		known[a] = true
+	}
+
+	var unknown []string
+	for _, h := range handles {
+		if !known[h] {
+			unknown = append(unknown, h)
+		}
+	}
+
+	if len(unknown) == 0 {
+		return nil
+	}
+
+	msg := fmt.Sprintf("unknown handles %v (known: %v)", unknown, cfg.Agents)
+	if strict {
+		return errors.New(msg)
+	}
+	_ = writeStderr("warning: %s\n", msg)
 	return nil
 }
 
@@ -157,6 +233,47 @@ func isHelp(arg string) bool {
 	default:
 		return false
 	}
+}
+
+func parseFlags(fs *flag.FlagSet, args []string, usage func()) (bool, error) {
+	fs.SetOutput(io.Discard)
+	if usage != nil {
+		fs.Usage = usage
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
+func usageWithFlags(fs *flag.FlagSet, usage string, notes ...string) func() {
+	return func() {
+		_ = writeStdoutLine("Usage:")
+		_ = writeStdoutLine("  " + usage)
+		if len(notes) > 0 {
+			_ = writeStdoutLine("")
+			for _, note := range notes {
+				_ = writeStdoutLine(note)
+			}
+		}
+		_ = writeStdoutLine("")
+		_ = writeStdoutLine("Options:")
+		_ = writeFlagDefaults(fs)
+	}
+}
+
+func writeFlagDefaults(fs *flag.FlagSet) error {
+	var buf bytes.Buffer
+	fs.SetOutput(&buf)
+	fs.PrintDefaults()
+	fs.SetOutput(io.Discard)
+	if buf.Len() == 0 {
+		return nil
+	}
+	return writeStdout("%s", buf.String())
 }
 
 func confirmPrompt(prompt string) (bool, error) {
