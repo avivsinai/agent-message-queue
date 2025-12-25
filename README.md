@@ -149,21 +149,21 @@ This repo includes ready-to-use skills for AI coding assistants.
 ### Claude Code
 
 ```bash
-# Add the central marketplace (one-time)
+# Add the marketplace (one-time)
 /plugin marketplace add avivsinai/skills-marketplace
 
 # Install this plugin
-/plugin install amq-cli@avivsinai-marketplace
+/plugin install amq-cli@avivsinai/skills-marketplace
 ```
 
 ### Codex CLI
 
 ```bash
 # Install from the skills marketplace
-$skill-installer install https://github.com/avivsinai/skills-marketplace/tree/main/skills/amq-cli
+$skill-installer avivsinai/skills-marketplace/skills/amq-cli
 
 # Or install directly from this repo
-$skill-installer install https://github.com/avivsinai/agent-message-queue/tree/main/.codex/skills/amq-cli
+$skill-installer avivsinai/agent-message-queue/.codex/skills/amq-cli
 ```
 
 ### Manual Installation
@@ -172,6 +172,16 @@ $skill-installer install https://github.com/avivsinai/agent-message-queue/tree/m
 git clone https://github.com/avivsinai/agent-message-queue
 ln -s $(pwd)/agent-message-queue/.claude/skills/amq-cli ~/.claude/skills/amq-cli
 ln -s $(pwd)/agent-message-queue/.codex/skills/amq-cli ~/.codex/skills/amq-cli
+```
+
+### Development
+
+When working in this repo, local skills in `.claude/skills/` and `.codex/skills/` take precedence over user-level installed skills. This lets you test changes before publishing.
+
+The source of truth is `.claude/skills/amq-cli/`. After making changes, sync to Codex:
+
+```bash
+make sync-skills
 ```
 
 ## License

@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint ci smoke
+.PHONY: build test fmt fmt-check vet lint ci smoke sync-skills
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 
@@ -25,3 +25,9 @@ smoke:
 	./scripts/smoke-test.sh
 
 ci: fmt-check vet lint test smoke
+
+sync-skills:
+	@echo "Syncing skills from .claude to .codex..."
+	cp .claude/skills/amq-cli/SKILL.md .codex/skills/amq-cli/SKILL.md
+	cp .claude/skills/amq-cli/plugin.json .codex/skills/amq-cli/plugin.json
+	@echo "Done."

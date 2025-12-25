@@ -12,6 +12,7 @@ See [`CLAUDE.md`](./CLAUDE.md) for complete instructions including:
 - Multi-agent coordination patterns
 - Security practices (0700/0600 permissions, `--strict` flag)
 - Contributing guidelines and commit conventions
+- Skill development workflow (dev vs installed precedence, `make sync-skills`)
 
 ## Essential Commands
 

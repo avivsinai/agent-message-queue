@@ -120,3 +120,41 @@ The pre-push hook runs `make ci` (vet, lint, test, smoke) before allowing pushes
 - Run `make ci` before committing
 - Do not edit message files in place; always use the CLI
 - Cleanup is explicit (`amq cleanup`), never automatic
+
+## Skill Development
+
+This repo includes skills for Claude Code and Codex CLI, distributed via the [skills-marketplace](https://github.com/avivsinai/skills-marketplace).
+
+### Structure
+
+```
+.claude-plugin/plugin.json     → Plugin manifest for marketplace
+.claude/skills/amq-cli/        → Claude Code skill (source of truth)
+├── SKILL.md
+└── plugin.json
+.codex/skills/amq-cli/         → Codex CLI skill (synced copy)
+├── SKILL.md
+└── plugin.json
+```
+
+### Dev vs Installed Skills
+
+When working in this repo, **project-level skills take precedence** over user-level installed skills:
+
+- `.claude/skills/amq-cli/` loads instead of `~/.claude/skills/amq-cli/`
+- `.codex/skills/amq-cli/` loads instead of `~/.codex/skills/amq-cli/`
+
+This lets you test skill changes locally before publishing.
+
+### Editing Skills
+
+1. Edit files in `.claude/skills/amq-cli/` (source of truth)
+2. Sync to Codex: `make sync-skills`
+3. Test locally by running Claude Code or Codex in this repo
+4. Bump version in `.claude-plugin/plugin.json` and `.claude/skills/amq-cli/plugin.json`
+5. Run `make sync-skills` again to update Codex copies
+6. Commit and push
+
+### Installing Skills
+
+See README.md for installation instructions for Claude Code and Codex CLI.
