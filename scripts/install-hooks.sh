@@ -3,21 +3,21 @@
 
 HOOK_DIR="$(git rev-parse --git-dir)/hooks"
 
-cat > "$HOOK_DIR/pre-commit" << 'EOF'
+cat > "$HOOK_DIR/pre-push" << 'EOF'
 #!/bin/sh
-# Pre-commit hook: runs lint and tests before allowing commit
+# Pre-push hook: runs lint and tests before allowing push
 
-echo "Running pre-commit checks..."
+echo "Running pre-push checks..."
 
 # Run the CI checks (fmt-check, vet, lint, test)
 if ! make ci; then
     echo ""
-    echo "❌ Pre-commit checks failed. Fix the issues above before committing."
+    echo "❌ Pre-push checks failed. Fix the issues above before pushing."
     exit 1
 fi
 
-echo "✓ Pre-commit checks passed"
+echo "✓ Pre-push checks passed"
 EOF
 
-chmod +x "$HOOK_DIR/pre-commit"
-echo "✓ Installed pre-commit hook"
+chmod +x "$HOOK_DIR/pre-push"
+echo "✓ Installed pre-push hook"

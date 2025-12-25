@@ -126,7 +126,7 @@ make smoke
 
 `make lint` expects `golangci-lint` to be installed. See https://golangci-lint.run/usage/install/
 
-Install git hooks to enforce checks before commit:
+Install git hooks to enforce checks before push:
 
 ```bash
 ./scripts/install-hooks.sh
