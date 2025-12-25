@@ -5,13 +5,10 @@ run:
   tests: true
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - govet
     - staticcheck
     - ineffassign
     - unused
     - errcheck
-
-issues:
-  exclude-use-default: false

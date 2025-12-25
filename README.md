@@ -73,10 +73,35 @@ make smoke
 
 ## Skills
 
-This repo includes minimal, ready-to-use skills for both tools:
+This repo includes ready-to-use skills for AI coding assistants. Install directly from the marketplace—no cloning required.
 
-- Codex: `.codex/skills/amq-cli`
-- Claude Code: `.claude/skills/amq-cli`
+### Claude Code
+
+```bash
+# Add this repo as a plugin marketplace
+/plugin marketplace add avivsinai/agent-message-queue
+
+# Install the skill
+/plugin install amq-cli@agent-message-queue
+```
+
+### Codex
+
+```bash
+# Install via skill-installer
+$skill-installer amq-cli
+```
+
+### Manual Installation
+
+If you prefer to clone:
+
+```bash
+# Clone and symlink to your skills directory
+git clone https://github.com/avivsinai/agent-message-queue
+ln -s $(pwd)/agent-message-queue/.claude/skills/amq-cli ~/.claude/skills/amq-cli
+ln -s $(pwd)/agent-message-queue/.codex/skills/amq-cli ~/.codex/skills/amq-cli
+```
 
 ## License
 

@@ -1,0 +1,15 @@
+{
+  "name": "agent-message-queue",
+  "description": "AMQ - Local file-based message queue for inter-agent communication using Maildir-style atomic delivery",
+  "owner": {
+    "name": "Aviv Sinai",
+    "url": "https://github.com/avivsinai"
+  },
+  "plugins": [
+    {
+      "name": "amq-cli",
+      "source": ".claude/skills/amq-cli",
+      "description": "Coordinates agents via the AMQ CLI for atomic Maildir-style message delivery"
+    }
+  ]
+}
