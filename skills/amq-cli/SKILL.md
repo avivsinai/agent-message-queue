@@ -1,0 +1,1 @@
+../../.claude/skills/amq-cli/SKILL.md
