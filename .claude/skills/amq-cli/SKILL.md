@@ -19,6 +19,26 @@ export AM_ME=codex
 
 ## Core flows
 
+### Drain (recommended for agents)
+
+One-shot ingestion: reads all new messages, moves to cur, optionally acks. Designed for hooks and scripts.
+
+```bash
+# Drain all new messages with body, auto-ack
+./amq drain --me cloudcode --include-body --ack
+
+# Limit to 10 messages, JSON output
+./amq drain --me cloudcode --limit 10 --json
+
+# Silent when empty (perfect for hooks)
+./amq drain --me $AM_ME --include-body
+```
+
+**Flags:**
+- `--limit N` (default 20): Max messages to drain
+- `--include-body`: Include message body in output
+- `--ack` (default true): Ack messages that require acknowledgment
+
 ### Send
 
 1. Use `--to` (required) and optionally `--thread`.
@@ -28,7 +48,7 @@ export AM_ME=codex
 ./amq send --me codex --to cloudcode --thread p2p/codex__cloudcode --body @notes.md
 ```
 
-### List + Read + Ack
+### List + Read + Ack (manual flow)
 
 ```bash
 ./amq list --me cloudcode --new
@@ -69,18 +89,28 @@ Wait for new messages with efficient OS-native notifications (uses fsnotify):
 
 ## Multi-Agent Coordination
 
-### During active work: Check inbox between steps
+### Preferred: Use drain for message ingestion
 
-When doing multi-step work, **check your inbox between steps** to pick up coordination messages from other agents:
+The `drain` command is designed for agent integration - it does list+read+ack in one atomic operation:
 
 ```bash
-# Quick, non-blocking check (<10ms)
-./amq list --me $AM_ME --new --json
+# Ingest all new messages (silent when empty - hook-friendly)
+./amq drain --me $AM_ME --include-body
+
+# With JSON output for programmatic use
+./amq drain --me $AM_ME --include-body --json
 ```
 
-If you receive a message, read and process it before continuing your work. This keeps agents synchronized without blocking.
+### During active work: Quick inbox check
 
-### Waiting for a reply: Use watch
+When doing multi-step work, use drain to check for coordination messages:
+
+```bash
+# One-shot: get messages, mark read, ack if needed
+./amq drain --me $AM_ME --include-body
+```
+
+### Waiting for a reply: Use watch + drain
 
 When you've sent a message and need to wait for a response:
 
@@ -88,11 +118,11 @@ When you've sent a message and need to wait for a response:
 # Send request
 ./amq send --to codex --subject "Review this" --body @file.go
 
-# Wait for reply (blocks until message arrives, low latency)
+# Wait for reply (blocks until message arrives)
 ./amq watch --me cloudcode --timeout 120s
 
-# Process the reply
-./amq read --me cloudcode --id <msg_id>
+# Ingest the reply
+./amq drain --me cloudcode --include-body
 ```
 
 ### Workflow summary
@@ -101,9 +131,9 @@ Commands below assume `AM_ME` is set:
 
 | Situation | Command | Behavior |
 |-----------|---------|----------|
-| Working, quick check | `amq list --new` | Non-blocking, <10ms |
+| Ingest messages | `amq drain --include-body` | One-shot: read+move+ack |
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
-| Processing message | `amq read --id <id>` | Retrieve full message |
+| Quick peek only | `amq list --new` | Non-blocking, no side effects |
 
 ## Conventions and safety
 

@@ -31,6 +31,8 @@ func Run(args []string) error {
 		return runCleanup(args[1:])
 	case "watch":
 		return runWatch(args[1:])
+	case "drain":
+		return runDrain(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
@@ -80,6 +82,9 @@ func printUsage() error {
 		return err
 	}
 	if err := writeStdoutLine("  watch     Wait for new messages (uses fsnotify)"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  drain     Drain new messages (read, move to cur, ack)"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine(""); err != nil {

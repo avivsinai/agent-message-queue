@@ -24,7 +24,7 @@ Requires Go 1.25+ and optionally golangci-lint.
 ```
 cmd/amq/           → Entry point (delegates to cli.Run())
 internal/
-├── cli/           → Command handlers (send, list, read, ack, thread, presence, cleanup, init, watch)
+├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch)
 ├── fsq/           → File system queue (Maildir delivery, atomic ops, scanning)
 ├── format/        → Message serialization (JSON frontmatter + Markdown body)
 ├── config/        → Config management (meta/config.json)
@@ -58,6 +58,7 @@ amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--bod
 amq list --me <agent> [--new | --cur] [--json]
 amq read --me <agent> --id <msg_id> [--json]
 amq ack --me <agent> --id <msg_id>
+amq drain --me <agent> [--limit N] [--include-body] [--ack] [--json]
 amq thread --id <thread_id> [--limit N] [--include-body] [--json]
 amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
 amq presence list [--json]
@@ -73,14 +74,17 @@ Use `amq --version` to check the installed version.
 
 Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 
-**During active work**: Check inbox between steps with `amq list --new` (non-blocking).
+**Preferred: Use `drain`** - One-shot ingestion that reads, moves to cur, and acks in one atomic operation. Silent when empty (hook-friendly).
 
-**Waiting for reply**: Use `amq watch --timeout 60s` which blocks until a message arrives.
+**During active work**: Use `amq drain --include-body` to ingest messages between steps.
+
+**Waiting for reply**: Use `amq watch --timeout 60s` which blocks until a message arrives, then `amq drain` to process.
 
 | Situation | Command | Behavior |
 |-----------|---------|----------|
-| Working, quick check | `amq list --new` | Non-blocking |
+| Ingest messages | `amq drain --include-body` | One-shot: read+move+ack |
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
+| Quick peek only | `amq list --new` | Non-blocking, no side effects |
 
 ## Testing
 
