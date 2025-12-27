@@ -1,7 +1,0 @@
-{
-  "name": "amq-cli",
-  "version": "0.5.1",
-  "description": "Coordinates agents via the AMQ CLI for atomic Maildir-style message delivery",
-  "skills": ["amq-cli"],
-  "repository": "https://github.com/avivsinai/agent-message-queue"
-}

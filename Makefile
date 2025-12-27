@@ -28,7 +28,7 @@ smoke:
 ci: fmt-check vet lint test smoke
 
 sync-skills:
-	@echo "Syncing skills from .claude to .codex..."
+	@echo "Syncing skills from .claude/skills/ to .codex/skills/ and skills/..."
 	cp .claude/skills/amq-cli/SKILL.md .codex/skills/amq-cli/SKILL.md
-	cp .claude/skills/amq-cli/plugin.json .codex/skills/amq-cli/plugin.json
+	cp .claude/skills/amq-cli/SKILL.md skills/amq-cli/SKILL.md
 	@echo "Done."

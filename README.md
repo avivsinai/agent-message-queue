@@ -142,45 +142,61 @@ Install git hooks to enforce checks before push:
 ./scripts/install-hooks.sh
 ```
 
-## Skills
+## Co-op Mode
 
-This repo includes ready-to-use skills for AI coding assistants.
-
-### Claude Code
+AMQ enables real-time collaboration between Claude Code and Codex CLI sessions. See [COOP.md](COOP.md) for the full protocol.
 
 ```bash
-# Add the marketplace (one-time)
+# Setup
+export AM_ROOT=.agent-mail AM_ME=claude  # or codex
+./amq init --root .agent-mail --agents claude,codex
+
+# Send with priority/kind
+./amq send --to codex --kind review_request --priority normal --body "Please review..."
+
+# Reply (auto thread/refs)
+./amq reply --id <msg_id> --body "LGTM!"
+
+# Background watch
+./amq monitor --timeout 0 --include-body --json
+```
+
+## Installing Skills
+
+### Claude Code (via marketplace)
+
+```bash
+# Add marketplace (one-time)
 /plugin marketplace add avivsinai/skills-marketplace
 
-# Install this plugin
-/plugin install amq-cli@avivsinai/skills-marketplace
+# Install plugin
+/plugin install amq-cli@avivsinai-marketplace
 ```
 
-### Codex CLI
+### Codex CLI (manual)
+
+Codex doesn't support marketplace refs yet. Install manually:
 
 ```bash
-# Install directly from this repo
-$skill-installer avivsinai/agent-message-queue/.codex/skills/amq-cli
-```
+# User-level (available in all projects)
+mkdir -p ~/.codex/skills/amq-cli
+curl -o ~/.codex/skills/amq-cli/SKILL.md \
+  https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/skills/amq-cli/SKILL.md
 
-Note: The skills marketplace is a registry for Claude Code only. Codex CLI must install directly from source repos.
-
-### Manual Installation
-
-```bash
-git clone https://github.com/avivsinai/agent-message-queue
-ln -s $(pwd)/agent-message-queue/.claude/skills/amq-cli ~/.claude/skills/amq-cli
-ln -s $(pwd)/agent-message-queue/.codex/skills/amq-cli ~/.codex/skills/amq-cli
+# Or project-level (in your repo)
+mkdir -p .codex/skills/amq-cli
+curl -o .codex/skills/amq-cli/SKILL.md \
+  https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/skills/amq-cli/SKILL.md
 ```
 
 ### Development
 
-When working in this repo, local skills in `.claude/skills/` and `.codex/skills/` take precedence over user-level installed skills. This lets you test changes before publishing.
+When working in this repo, project skills in `.claude/skills/` and `.codex/skills/` take precedence over installed skills.
 
-The source of truth is `.claude/skills/amq-cli/`. After making changes, sync to Codex:
+Source of truth: `.claude/skills/amq-cli/SKILL.md`. After changes:
 
 ```bash
-make sync-skills
+make sync-skills  # syncs to .codex/skills/ and skills/
 ```
 
 ## License
