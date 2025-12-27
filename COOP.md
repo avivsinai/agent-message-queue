@@ -88,16 +88,16 @@ claude
 **Terminal 2 - Codex CLI:**
 ```bash
 export AM_ME=codex AM_ROOT=.agent-mail
-
-# Enable background terminals (one-time):
-# Add to ~/.codex/config.toml:
-#   [features]
-#   unified_exec = true
-
 codex
 
-# In Codex, say:
-# "Run this in background: while true; do amq monitor --timeout 0 --json; sleep 0.2; done"
+# First, enable Background terminal (one-time):
+# Type: /experimental
+# Toggle "Background terminal" to enabled
+
+# Then tell Codex:
+# "Run this in a background terminal: while true; do amq monitor --timeout 0 --json; sleep 0.2; done"
+
+# Verify with: /ps
 ```
 
 **For full autonomy:**
@@ -251,16 +251,22 @@ The watcher auto-respawns. Only re-launch after 10-min timeout.
 
 ### Background Monitor
 
-1. Enable in `~/.codex/config.toml`:
+1. Enable the "Background terminal" feature (requires Codex 0.77.0+):
+   ```
+   /experimental
+   ```
+   Toggle **Background terminal** to enabled. Or add to `~/.codex/config.toml`:
    ```toml
    [features]
    unified_exec = true
    ```
 
-2. Run the monitor script:
-   ```bash
-   ./scripts/codex-coop-monitor.sh
+2. Start the monitor in a background terminal:
    ```
+   Run this in a background terminal: while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done
+   ```
+
+3. Verify with `/ps` - you should see the monitor in the list.
 
 ### Notify Hook (Fallback)
 
