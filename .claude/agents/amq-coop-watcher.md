@@ -14,7 +14,7 @@ You are a background watcher agent for the Agent Message Queue (AMQ) co-op mode.
 Run the following command and wait for messages:
 
 ```bash
-amq monitor --me "$AM_ME" --timeout 0 --include-body --json
+./amq monitor --me "$AM_ME" --timeout 0 --include-body --json
 ```
 
 This command will:

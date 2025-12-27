@@ -76,6 +76,7 @@ Co-op mode extends the standard AMQ message format with optional fields:
 | `review_request` | normal | Request code review |
 | `review_response` | normal | Code review feedback |
 | `question` | normal | Question needing answer |
+| `answer` | normal | Response to a question |
 | `decision` | normal (urgent if blocking) | Decision request |
 | `brainstorm` | low | Open-ended discussion |
 | `status` | low | Status update/FYI |

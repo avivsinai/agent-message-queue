@@ -166,6 +166,11 @@ def main():
     # Check for messages
     result = check_amq_messages(amq_bin, root, me)
 
+    if result.get("error"):
+        # Preserve bulletin on errors to avoid hiding prior messages/state.
+        print(f"[AMQ] notify hook error: {result['error']}", file=sys.stderr)
+        return
+
     if result["count"] == 0:
         # Clear stale bulletin when no messages
         clear_bulletin(bulletin_path)

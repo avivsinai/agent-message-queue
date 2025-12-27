@@ -118,6 +118,7 @@ func TestValidKind(t *testing.T) {
 		{KindReviewRequest, true},
 		{KindReviewResponse, true},
 		{KindQuestion, true},
+		{KindAnswer, true},
 		{KindBrainstorm, true},
 		{KindDecision, true},
 		{KindStatus, true},

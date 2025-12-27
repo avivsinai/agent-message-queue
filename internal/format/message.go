@@ -64,7 +64,7 @@ type Header struct {
 
 	// Co-op mode fields (optional, for inter-agent communication)
 	Priority string         `json:"priority,omitempty"` // urgent, normal, low
-	Kind     string         `json:"kind,omitempty"`     // brainstorm, review_request, review_response, question, decision, status, todo
+	Kind     string         `json:"kind,omitempty"`     // brainstorm, review_request, review_response, question, answer, decision, status, todo
 	Labels   []string       `json:"labels,omitempty"`   // free-form tags
 	Context  map[string]any `json:"context,omitempty"`  // structured context (paths, symbols, etc.)
 }

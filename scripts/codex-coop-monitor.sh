@@ -33,6 +33,9 @@ echo "[AMQ Co-op Monitor] Starting for agent: $AM_ME"
 echo "[AMQ Co-op Monitor] Root: $AM_ROOT"
 echo "[AMQ Co-op Monitor] Waiting for messages..."
 
-# Single-shot monitor - exits when message arrives
-# Codex should respawn this script or check the output
-exec "$AMQ_BIN" monitor --me "$AM_ME" --root "$AM_ROOT" --timeout 0 --include-body --json
+# Continuous monitor loop - respawns after each message
+# Exit with Ctrl+C to stop
+while true; do
+    "$AMQ_BIN" monitor --me "$AM_ME" --root "$AM_ROOT" --timeout 0 --include-body --json
+    sleep 0.2
+done
