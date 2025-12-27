@@ -349,8 +349,12 @@ This repo includes a Stop hook that prevents the agent from stopping while messa
   "hooks": {
     "Stop": [
       {
-        "type": "command",
-        "command": "./scripts/amq-stop-hook.sh"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/amq-stop-hook.sh"
+          }
+        ]
       }
     ]
   }

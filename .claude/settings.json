@@ -2,8 +2,12 @@
   "hooks": {
     "Stop": [
       {
-        "type": "command",
-        "command": "./scripts/amq-stop-hook.sh"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/amq-stop-hook.sh"
+          }
+        ]
       }
     ]
   }

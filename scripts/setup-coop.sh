@@ -70,23 +70,23 @@ if [ -f "$SETTINGS_FILE" ]; then
         EXISTING_STOP=$(jq -r '.hooks.Stop // empty' "$SETTINGS_FILE" 2>/dev/null)
         if [ -n "$EXISTING_STOP" ]; then
             # Check if our hook is already there
-            if jq -e '.hooks.Stop[] | select(.command == "'"$HOOK_CMD"'")' "$SETTINGS_FILE" &>/dev/null; then
+            if jq -e '.hooks.Stop[].hooks[] | select(.command == "'"$HOOK_CMD"'")' "$SETTINGS_FILE" &>/dev/null; then
                 echo "  AMQ stop hook already configured"
             else
                 echo "  Adding AMQ stop hook to existing Stop hooks"
-                jq '.hooks.Stop += [{"type": "command", "command": "'"$HOOK_CMD"'"}]' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp"
+                jq '.hooks.Stop[0].hooks += [{"type": "command", "command": "'"$HOOK_CMD"'"}]' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp"
                 mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
             fi
         else
             # No Stop hooks yet, add our hook
             echo "  Adding Stop hook section"
-            jq '.hooks.Stop = [{"type": "command", "command": "'"$HOOK_CMD"'"}]' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp"
+            jq '.hooks.Stop = [{"hooks": [{"type": "command", "command": "'"$HOOK_CMD"'"}]}]' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp"
             mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
         fi
     else
         echo -e "  ${YELLOW}jq not available - please manually add the stop hook${NC}"
         echo "  Add to .claude/settings.json:"
-        echo '  {"hooks": {"Stop": [{"type": "command", "command": "./scripts/amq-stop-hook.sh"}]}}'
+        echo '  {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "./scripts/amq-stop-hook.sh"}]}]}}'
     fi
 else
     # Create new settings file
@@ -95,8 +95,12 @@ else
   "hooks": {
     "Stop": [
       {
-        "type": "command",
-        "command": "./scripts/amq-stop-hook.sh"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/amq-stop-hook.sh"
+          }
+        ]
       }
     ]
   }
@@ -113,10 +117,16 @@ cat > scripts/amq-stop-hook.sh << 'HOOK'
 #!/bin/bash
 # AMQ Co-op Stop Hook
 # Blocks stop if there are pending messages in inbox
-# Safe fallback: approves if amq/jq unavailable
+# Safe fallback: approves if amq/jq unavailable or co-op not configured
 
 ROOT="${AM_ROOT:-.agent-mail}"
 ME="${AM_ME:-claude}"
+
+# Fast path: approve immediately if co-op not set up
+if [ ! -d "$ROOT/agents/$ME/inbox/new" ]; then
+    echo '{"decision": "approve"}'
+    exit 0
+fi
 
 # Safe fallback if dependencies missing
 if ! command -v amq &> /dev/null || ! command -v jq &> /dev/null; then
@@ -127,8 +137,13 @@ fi
 # Check for pending messages (safe fallback on any error)
 COUNT=$(amq list --root "$ROOT" --me "$ME" --new --json 2>/dev/null | jq -r 'length // 0' 2>/dev/null || echo "0")
 
-if [ "$COUNT" -gt 0 ] 2>/dev/null; then
-    echo '{"decision": "block", "reason": "You have '"$COUNT"' pending message(s). Run: amq drain --include-body"}'
+# Sanitize COUNT to ensure it's a number
+if ! [[ "$COUNT" =~ ^[0-9]+$ ]]; then
+    COUNT=0
+fi
+
+if [ "$COUNT" -gt 0 ]; then
+    echo '{"decision": "block", "reason": "You have '"$COUNT"' pending message(s). Ask me to drain the inbox before stopping."}'
     exit 0
 fi
 
