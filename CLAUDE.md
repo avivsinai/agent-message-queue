@@ -87,7 +87,7 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 | Ingest messages | `amq drain --include-body` | One-shot: read+move+ack |
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
 | Quick peek only | `amq list --new` | Non-blocking, no side effects |
-| Co-op background watch | `amq monitor --json` | Watch + drain combined |
+| Co-op background watch | `amq monitor --json` | Watch + drain combined (one-shot; loop for continuous watch) |
 | Reply to message | `amq reply --id <msg_id>` | Auto thread/refs handling |
 
 ## Co-op Mode (Claude <-> Codex)
@@ -98,7 +98,8 @@ Co-op mode enables real-time collaboration between Claude Code and Codex CLI ses
 
 On session start:
 1. Set `AM_ME=claude` (or `codex`), `AM_ROOT=.agent-mail`
-2. Spawn watcher: "Run amq-coop-watcher in background while I work"
+2. Claude Code: Spawn watcher (bundled in `.claude/agents/amq-coop-watcher.md`): "Run amq-coop-watcher in background while I work"
+3. Codex CLI: Run a background loop (monitor is one-shot): `while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done`
 
 ### Message Priority Handling
 

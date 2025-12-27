@@ -53,64 +53,8 @@ else
     echo "  Skipping (amq not installed)"
 fi
 
-# Step 2: Create/merge .claude/settings.json
-echo -e "${GREEN}[2/4]${NC} Configuring .claude/settings.json..."
-mkdir -p .claude
-
-SETTINGS_FILE=".claude/settings.json"
-HOOK_CMD="./scripts/amq-stop-hook.sh"
-
-if [ -f "$SETTINGS_FILE" ]; then
-    echo -e "  ${YELLOW}Existing settings found - backing up to ${SETTINGS_FILE}.bak${NC}"
-    cp "$SETTINGS_FILE" "${SETTINGS_FILE}.bak"
-
-    # Check if jq available for merging
-    if command -v jq &> /dev/null; then
-        # Check if Stop hook already exists
-        EXISTING_STOP=$(jq -r '.hooks.Stop // empty' "$SETTINGS_FILE" 2>/dev/null)
-        if [ -n "$EXISTING_STOP" ]; then
-            # Check if our hook is already there
-            if jq -e '.hooks.Stop[].hooks[] | select(.command == "'"$HOOK_CMD"'")' "$SETTINGS_FILE" &>/dev/null; then
-                echo "  AMQ stop hook already configured"
-            else
-                echo "  Adding AMQ stop hook to existing Stop hooks"
-                jq '.hooks.Stop[0].hooks += [{"type": "command", "command": "'"$HOOK_CMD"'"}]' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp"
-                mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
-            fi
-        else
-            # No Stop hooks yet, add our hook
-            echo "  Adding Stop hook section"
-            jq '.hooks.Stop = [{"hooks": [{"type": "command", "command": "'"$HOOK_CMD"'"}]}]' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp"
-            mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
-        fi
-    else
-        echo -e "  ${YELLOW}jq not available - please manually add the stop hook${NC}"
-        echo "  Add to .claude/settings.json:"
-        echo '  {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "./scripts/amq-stop-hook.sh"}]}]}}'
-    fi
-else
-    # Create new settings file
-    cat > "$SETTINGS_FILE" << 'EOF'
-{
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "./scripts/amq-stop-hook.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
-EOF
-    echo "  Created new settings file"
-fi
-
-# Step 3: Create stop hook script
-echo -e "${GREEN}[3/4]${NC} Creating scripts/amq-stop-hook.sh..."
+# Step 2: Create stop hook script (available for opt-in use)
+echo -e "${GREEN}[2/3]${NC} Creating scripts/amq-stop-hook.sh..."
 mkdir -p scripts
 
 cat > scripts/amq-stop-hook.sh << 'HOOK'
@@ -152,8 +96,8 @@ HOOK
 
 chmod +x scripts/amq-stop-hook.sh
 
-# Step 4: Update .gitignore
-echo -e "${GREEN}[4/4]${NC} Updating .gitignore..."
+# Step 3: Update .gitignore
+echo -e "${GREEN}[3/3]${NC} Updating .gitignore..."
 if [ -f .gitignore ]; then
     if ! grep -q ".agent-mail" .gitignore 2>/dev/null; then
         echo "" >> .gitignore
@@ -169,8 +113,7 @@ echo ""
 echo -e "${GREEN}=== Setup Complete ===${NC}"
 echo ""
 echo "Created/updated:"
-echo "  .claude/settings.json     - Stop hook configuration"
-echo "  scripts/amq-stop-hook.sh  - Prevents stopping with pending messages"
+echo "  scripts/amq-stop-hook.sh  - Stop hook (opt-in, see below)"
 echo "  .agent-mail/              - Agent mailboxes (gitignored)"
 echo ""
 echo -e "${BLUE}Next steps:${NC}"
@@ -185,5 +128,9 @@ echo "   # Enable background terminals in ~/.codex/config.toml:"
 echo "   #   [features]"
 echo "   #   unified_exec = true"
 echo "   # Then run: while true; do amq monitor --timeout 0 --json; sleep 0.2; done"
+echo ""
+echo -e "${YELLOW}Optional: Enable stop hook${NC}"
+echo "To prevent stopping with pending messages, add to .claude/settings.json:"
+echo '  {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"./scripts/amq-stop-hook.sh"}]}]}}'
 echo ""
 echo "See: https://github.com/avivsinai/agent-message-queue/blob/main/COOP.md"

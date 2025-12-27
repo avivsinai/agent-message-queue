@@ -71,8 +71,7 @@ curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/sc
 
 This creates:
 - `.agent-mail/` - Agent mailboxes (gitignored)
-- `.claude/settings.json` - Stop hook (prevents stopping with pending messages)
-- `scripts/amq-stop-hook.sh` - The stop hook script
+- `scripts/amq-stop-hook.sh` - Stop hook script (opt-in, see below)
 
 ### Running Co-op Mode
 
@@ -83,6 +82,7 @@ claude
 
 # In Claude Code, say:
 # "Run amq-coop-watcher in background while I work on [task]"
+# (bundled watcher agent: .claude/agents/amq-coop-watcher.md)
 ```
 
 **Terminal 2 - Codex CLI:**
@@ -96,17 +96,18 @@ codex
 
 # Then tell Codex:
 # "Run this in a background terminal: while true; do amq monitor --timeout 0 --json; sleep 0.2; done"
+# (amq monitor exits after each batch; the loop keeps it running)
 
 # Verify with: /ps
 ```
 
 **For full autonomy:**
-- Claude Code: The stop hook prevents stopping until inbox is empty
+- Claude Code: Optionally enable the stop hook (see Advanced section below)
 - Codex CLI: Use `/approvals` to set autonomous mode (command may vary by version; check `codex --help`)
 
 ### How It Works
 
-1. Both agents run background watchers that block until messages arrive
+1. Both agents run background watchers that block until a message arrives, drain, then loop
 2. When Agent A sends a message to Agent B, B's watcher wakes up
 3. Agent B processes the message, responds, continues working
 4. The stop hook ensures agents don't quit while messages are pending
@@ -184,7 +185,7 @@ amq send --me codex --to claude \
 ### Monitor (Combined Watch + Drain)
 
 ```bash
-# Block until message arrives, drain, output JSON
+# One-shot: block until a message arrives, drain, output JSON (loop for continuous watch)
 amq monitor --me claude --timeout 0 --include-body --json
 
 # With timeout (60s default)
@@ -236,8 +237,9 @@ Add to your project's CLAUDE.md:
 ## Co-op Mode (Claude <-> Codex)
 
 On session start:
-1. Set AM_ME=claude, AM_ROOT=.agent-mail
-2. Spawn watcher: "Run amq-coop-watcher in background"
+1. Set `AM_ME=claude` (or `codex`), `AM_ROOT=.agent-mail`
+2. Claude Code: Spawn watcher (bundled in `.claude/agents/amq-coop-watcher.md`): "Run amq-coop-watcher in background while I work"
+3. Codex CLI: Run a background loop (monitor is one-shot): `while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done`
 
 When watcher returns with messages:
 - urgent → interrupt, respond now
@@ -261,7 +263,7 @@ The watcher auto-respawns. Only re-launch after 10-min timeout.
    unified_exec = true
    ```
 
-2. Start the monitor in a background terminal:
+2. Start the monitor in a background terminal (amq monitor exits after each batch; keep it in a loop):
    ```
    Run this in a background terminal: while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done
    ```
@@ -339,11 +341,11 @@ The `context` field accepts any JSON object. Recommended structure:
 }
 ```
 
-## Advanced: Intelligent Stop Hook
+## Advanced: Stop Hook (Opt-In)
 
-This repo includes a Stop hook that prevents the agent from stopping while messages are pending:
+The setup script creates `scripts/amq-stop-hook.sh` which prevents the agent from stopping while messages are pending. This is **opt-in** - not enabled by default.
 
-**Enabled by default** via `.claude/settings.json`:
+**To enable**, add to `.claude/settings.json`:
 ```json
 {
   "hooks": {
@@ -361,11 +363,11 @@ This repo includes a Stop hook that prevents the agent from stopping while messa
 }
 ```
 
-The hook (`scripts/amq-stop-hook.sh`) checks `amq list --new` and returns:
+The hook checks `amq list --new` and returns:
 - `{"decision": "approve"}` → No pending messages, allow stop
-- `{"decision": "block", "reason": "You have N pending message(s)..."}` → Force agent to drain inbox
+- `{"decision": "block", "reason": "You have N pending message(s)..."}` → Prompt agent to drain inbox
 
-This creates a self-sustaining loop where the agent can't stop until all messages are processed.
+**When to enable:** Use this when you want fully autonomous co-op sessions where agents must process all messages before stopping. Skip it if you prefer manual control over when to stop.
 
 See [Claude Code hooks documentation](https://code.claude.com/docs/en/hooks) for more hook options.
 

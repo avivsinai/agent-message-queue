@@ -20,19 +20,23 @@ amq send --to claude --body "Message"          # Codex -> Claude
 amq drain --include-body                       # Receive (recommended)
 amq reply --id <msg_id> --body "Response"      # Reply to any message
 amq watch --timeout 60s                        # Wait for messages (interactive)
-amq monitor --timeout 0 --include-body --json  # Background watcher (drains)
+amq monitor --timeout 0 --include-body --json  # Background watcher (run in a loop)
 ```
 
 ## Co-op Mode (Autonomous Multi-Agent)
 
 In co-op mode, agents work autonomously. **Message your partner, not the user.**
 
-| Blocked? | -> Message partner |
-| Need review? | -> Send `kind: review_request` |
-| Done? | -> Signal completion |
-| Ask user only for: | credentials, unclear requirements |
+| Situation | Action |
+|----------|--------|
+| Blocked | Message partner |
+| Need review | Send `kind: review_request` |
+| Done | Signal completion |
+| Ask user only for | credentials, unclear requirements |
 
 ### Setup (one-time per project)
+
+Install `amq` and ensure it is in PATH (build via `make build` or install a release). Run the setup script to initialize `.agent-mail` (it runs `amq init` if available).
 
 ```bash
 curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/setup-coop.sh | bash
@@ -43,12 +47,12 @@ export AM_ME=codex    # Terminal 2: Codex CLI
 
 ### Background Watcher
 
-**Claude Code:** Spawn `amq-coop-watcher` in background:
+**Claude Code:** Use the bundled watcher agent (`.claude/agents/amq-coop-watcher.md`) and spawn it in background:
 ```
 "Run amq-coop-watcher in background while I work"
 ```
 
-**Codex CLI (0.77.0+):** Enable Background terminal via `/experimental`, then:
+**Codex CLI (0.77.0+):** Enable Background terminal via `/experimental`, then run a continuous loop (`amq monitor` exits after each batch):
 ```
 Run this in a background terminal: while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done
 ```
@@ -77,7 +81,7 @@ amq send --to claude --priority urgent --kind question --body "Blocked on API de
 
 ```bash
 amq drain --include-body         # One-shot, silent when empty
-amq monitor --timeout 0 --json   # Block until message arrives
+amq monitor --timeout 0 --json   # Block until a message, drain, emit JSON (loop for continuous watch)
 amq list --new                   # Peek without side effects
 ```
 
