@@ -34,32 +34,47 @@ amq send --to codex --body "Quick ping"
 
 Co-op mode enables real-time collaboration between Claude Code and Codex CLI sessions.
 
+### Autonomous Operation
+
+**Critical**: In co-op mode, work autonomously until task completion. Don't ask the user—message your partner agent instead.
+
+- **Blocked?** → Message partner, not user
+- **Need review?** → Send `review_request` to partner
+- **Complex decision?** → Use `ultrathink`, then decide (or ask partner via `decision` kind)
+- **Done?** → Signal completion, don't wait for user confirmation
+
+Only ask user for: external credentials, unclear original requirements.
+
+See `COOP.md` for the full autonomous operation protocol.
+
 ### Setup
 
+**First time in a project?** Run the setup script:
 ```bash
-# Both agents use the same root
-export AM_ROOT="$PWD/.agent-mail"
+curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/setup-coop.sh | bash
+```
 
-# Each agent sets its own identity
-export AM_ME=claude   # Claude Code session
-export AM_ME=codex    # Codex CLI session
+This creates mailboxes, stop hook, and settings. Then set your environment:
 
-# Initialize once
-amq init --root "$AM_ROOT" --agents claude,codex
+```bash
+export AM_ME=claude   # or codex
+export AM_ROOT=.agent-mail
 ```
 
 ### Background Watcher
 
-Run this in the background to get notified when messages arrive:
+Both agents should use a `while true` loop to auto-respawn after each message:
 
 ```bash
-amq monitor --timeout 0 --include-body --json
+while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done
 ```
 
-**Claude Code:** Run in background using the Task tool:
-> "Run `amq monitor --timeout 0 --include-body --json` in the background while I work"
+**Claude Code:** Use the `amq-coop-watcher` subagent (Task tool with `subagent_type: amq-coop-watcher`):
+> "Run amq-coop-watcher in background while I work"
 
-**Codex CLI:** Run in a background terminal (requires `unified_exec = true` in config).
+The watcher auto-respawns after each message. Only limitation is the 10-minute background task timeout - if you're working longer, re-launch the watcher.
+
+**Codex CLI:** Run in a background terminal (requires `unified_exec = true` in config). **Do not** run the monitor as a normal one-shot command; it will end at the end of the turn and **will not** appear in `/ps`.
 
 Enable background terminals:
 ```toml
@@ -73,17 +88,13 @@ Preferred (uses the repo script so it "just works"):
 ./scripts/codex-coop-monitor.sh
 ```
 
-Manual loop (equivalent):
-```bash
-while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done
-```
+Verify it's actually running in the background:
+- Run `/ps` and confirm a background terminal shows `codex-coop-monitor.sh` (or `amq monitor --timeout 0`).
 
 When messages arrive, handle by priority:
 - **urgent** -> Interrupt current work, respond immediately
 - **normal** -> Add to TODOs, respond when current task done
 - **low** -> Batch for end of session
-
-After handling messages, respawn the watcher.
 
 ### Monitor (combined watch + drain)
 

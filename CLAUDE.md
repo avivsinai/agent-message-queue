@@ -107,7 +107,14 @@ When the watcher returns with messages:
 - **normal** → Add to TodoWrite, respond when current task done
 - **low** → Batch for end of session
 
-After handling messages, **respawn the watcher immediately**.
+The watcher auto-respawns after each message. Only re-launch after 10-min timeout.
+
+### References
+
+- [Claude Code Best Practices](https://www.anthropic.com/engineering/claude-code-best-practices) - Headless mode, multi-agent workflows, extended thinking (`ultrathink`)
+- [Claude Code Hooks](https://code.claude.com/docs/en/hooks) - Stop hooks, prompt-based hooks, intelligent automation
+- [Codex CLI Features](https://developers.openai.com/codex/cli/features/) - Approval modes, `full-auto`, background terminals
+- [Ralph Plugin](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/ralph-wiggum) - Self-referential loops, completion promises
 
 ### Co-op Commands
 

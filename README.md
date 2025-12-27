@@ -146,20 +146,32 @@ Install git hooks to enforce checks before push:
 
 AMQ enables real-time collaboration between Claude Code and Codex CLI sessions. See [COOP.md](COOP.md) for the full protocol.
 
+**Quick setup** (run in your project):
 ```bash
-# Setup
+curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/setup-coop.sh | bash
+```
+
+This creates mailboxes, stop hook (prevents stopping with pending messages), and settings.
+
+**Usage:**
+```bash
 export AM_ROOT=.agent-mail AM_ME=claude  # or codex
-./amq init --root .agent-mail --agents claude,codex
 
 # Send with priority/kind
-./amq send --to codex --kind review_request --priority normal --body "Please review..."
+amq send --to codex --kind review_request --priority normal --body "Please review..."
 
 # Reply (auto thread/refs)
-./amq reply --id <msg_id> --body "LGTM!"
+amq reply --id <msg_id> --body "LGTM!"
 
 # Background watch
-./amq monitor --timeout 0 --include-body --json
+amq monitor --timeout 0 --include-body --json
 ```
+
+### References
+
+- [Claude Code Best Practices](https://www.anthropic.com/engineering/claude-code-best-practices) - Headless mode, multi-agent workflows, `ultrathink`
+- [Claude Code Hooks](https://code.claude.com/docs/en/hooks) - Stop hooks for autonomous operation
+- [Codex CLI Features](https://developers.openai.com/codex/cli/features/) - Approval modes, `full-auto`, background terminals
 
 ## Installing Skills
 

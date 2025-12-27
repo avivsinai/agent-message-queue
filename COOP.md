@@ -2,38 +2,115 @@
 
 Co-op mode enables Claude Code and Codex CLI to collaborate as **review partners**, sharing context, requesting reviews, and coordinating work through the Agent Message Queue.
 
+## Autonomous Operation
+
+**Critical**: In co-op mode, agents operate autonomously until task completion. Do not ask the user for direction—that's what your partner agent is for.
+
+### Core Principles
+
+1. **Work autonomously** - Complete your assigned task without user prompts. If blocked, message your partner agent, not the user.
+
+2. **Use extended thinking** - For complex decisions, use thinking tiers:
+   - `think` → routine tasks
+   - `think hard` → multi-step problems
+   - `think harder` → architectural decisions
+   - `ultrathink` → critical design choices, security-sensitive code
+
+3. **Multi-agent verification** - Instead of asking "is this right?", send a review request to your partner. This is the co-op advantage: parallel verification without blocking on human input.
+
+4. **Completion signals** - When your task is done, signal completion clearly. Don't wait for user confirmation.
+
+5. **Iteration over perfection** - Ship working code, request review, iterate based on feedback. Initial quality matters less than refinement cycles.
+
+### When to Message Partner vs User
+
+| Situation | Action |
+|-----------|--------|
+| Need code review | → Message partner |
+| Blocked on design decision | → Message partner (kind: `decision`) |
+| Found bug in partner's code | → Message partner (kind: `review_response`) |
+| Task complete, ready for next | → Message partner (kind: `status`) |
+| Need external credentials/access | → Ask user |
+| Unclear on original requirements | → Ask user |
+
+### Context Management
+
+Long autonomous sessions accumulate context. Use `/clear` between major task boundaries to maintain decision quality. Your partner agent provides continuity—you don't need to hold everything in your own context.
+
 ## Quick Start
 
-### Claude Code Session
+### Prerequisites (One-Time)
+
+1. **Install amq CLI** ([releases](https://github.com/avivsinai/agent-message-queue/releases)):
+   ```bash
+   # macOS arm64
+   curl -L https://github.com/avivsinai/agent-message-queue/releases/latest/download/amq_darwin_arm64.tar.gz | tar xz
+   sudo mv amq /usr/local/bin/
+   ```
+
+2. **Install amq-cli skill** for your agents:
+
+   **Claude Code** (via marketplace):
+   ```
+   /plugin marketplace add avivsinai/skills-marketplace
+   /plugin install amq-cli@avivsinai-marketplace
+   ```
+
+   **Codex CLI** (via skill-installer):
+   ```
+   $skill-installer install https://github.com/avivsinai/agent-message-queue/tree/main/skills/amq-cli
+   ```
+
+### Per-Project Setup
+
+Run the setup script in your project:
 
 ```bash
-export AM_ME=claude
-export AM_ROOT=.agent-mail
-
-# Start the co-op watcher in background
-# "Run amq-coop-watcher in the background while I work"
-
-# When messages arrive, handle by priority:
-# - urgent → interrupt and respond
-# - normal → add to TODOs
-# - low → batch for later
+curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/setup-coop.sh | bash
 ```
 
-### Codex CLI Session
+This creates:
+- `.agent-mail/` - Agent mailboxes (gitignored)
+- `.claude/settings.json` - Stop hook (prevents stopping with pending messages)
+- `scripts/amq-stop-hook.sh` - The stop hook script
 
+### Running Co-op Mode
+
+**Terminal 1 - Claude Code:**
 ```bash
-export AM_ME=codex
-export AM_ROOT=.agent-mail
+export AM_ME=claude AM_ROOT=.agent-mail
+claude
 
-# Enable background terminals in ~/.codex/config.toml:
-# [features]
-# unified_exec = true
-
-# Run monitor in background terminal:
-./scripts/codex-coop-monitor.sh
-
-# Or use the notify hook for turn-based checking
+# In Claude Code, say:
+# "Run amq-coop-watcher in background while I work on [task]"
 ```
+
+**Terminal 2 - Codex CLI:**
+```bash
+export AM_ME=codex AM_ROOT=.agent-mail
+
+# Enable background terminals (one-time):
+# Add to ~/.codex/config.toml:
+#   [features]
+#   unified_exec = true
+
+codex
+
+# In Codex, say:
+# "Run this in background: while true; do amq monitor --timeout 0 --json; sleep 0.2; done"
+```
+
+**For full autonomy:**
+- Claude Code: The stop hook prevents stopping until inbox is empty
+- Codex CLI: Use `/approvals` to set autonomous mode (command may vary by version; check `codex --help`)
+
+### How It Works
+
+1. Both agents run background watchers that block until messages arrive
+2. When Agent A sends a message to Agent B, B's watcher wakes up
+3. Agent B processes the message, responds, continues working
+4. The stop hook ensures agents don't quit while messages are pending
+5. Agents work autonomously—messaging each other, not the user
 
 ## Message Format
 
@@ -135,7 +212,7 @@ amq reply --me claude --id "msg_456" \
 
 ### Background Watcher Agent
 
-The `amq-coop-watcher` agent (`.claude/agents/amq-coop-watcher.md`) runs in the background and wakes the main agent when messages arrive.
+The `amq-coop-watcher` agent (`.claude/agents/amq-coop-watcher.md`) runs in the background with a `while true` loop that auto-respawns after each message.
 
 **In your session:**
 ```
@@ -148,7 +225,8 @@ The `amq-coop-watcher` agent (`.claude/agents/amq-coop-watcher.md`) runs in the 
    - `urgent` → Stop current work, address immediately
    - `normal` → Add to TodoWrite, continue current work
    - `low` → Note for later, continue
-3. Respawn the watcher
+
+The watcher auto-respawns after each message. Only re-launch if the 10-minute background task timeout expires.
 
 ### CLAUDE.md Co-op Section
 
@@ -166,7 +244,7 @@ When watcher returns with messages:
 - normal → add to TodoWrite, respond when current task done
 - low → batch, respond at end of session
 
-After handling, respawn watcher immediately.
+The watcher auto-respawns. Only re-launch after 10-min timeout.
 ```
 
 ## Codex CLI Integration
@@ -255,6 +333,32 @@ The `context` field accepts any JSON object. Recommended structure:
 }
 ```
 
+## Advanced: Intelligent Stop Hook
+
+This repo includes a Stop hook that prevents the agent from stopping while messages are pending:
+
+**Enabled by default** via `.claude/settings.json`:
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "./scripts/amq-stop-hook.sh"
+      }
+    ]
+  }
+}
+```
+
+The hook (`scripts/amq-stop-hook.sh`) checks `amq list --new` and returns:
+- `{"decision": "approve"}` → No pending messages, allow stop
+- `{"decision": "block", "reason": "You have N pending message(s)..."}` → Force agent to drain inbox
+
+This creates a self-sustaining loop where the agent can't stop until all messages are processed.
+
+See [Claude Code hooks documentation](https://code.claude.com/docs/en/hooks) for more hook options.
+
 ## Best Practices
 
 1. **Always set priority** - Helps receiving agent triage
@@ -262,7 +366,7 @@ The `context` field accepts any JSON object. Recommended structure:
 3. **Include context.paths** - Helps focus the review
 4. **Keep bodies concise** - Agent context is precious
 5. **Use --ack for important messages** - Ensures delivery confirmation
-6. **Respawn watcher immediately** - Don't miss messages
+6. **Re-launch watcher after timeout** - The 10-min limit requires periodic re-launch
 7. **Thread replies** - Use `amq reply` for conversation continuity
 
 ## Troubleshooting

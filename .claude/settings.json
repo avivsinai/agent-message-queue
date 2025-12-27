@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "./scripts/amq-stop-hook.sh"
+      }
+    ]
+  }
+}
