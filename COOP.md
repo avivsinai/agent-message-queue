@@ -110,7 +110,7 @@ codex
 1. Both agents run background watchers that block until a message arrives, drain, then loop
 2. When Agent A sends a message to Agent B, B's watcher wakes up
 3. Agent B processes the message, responds, continues working
-4. The stop hook ensures agents don't quit while messages are pending
+4. If enabled, the stop hook prevents agents from stopping while messages are pending
 5. Agents work autonomously—messaging each other, not the user
 
 ## Message Format

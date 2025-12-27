@@ -108,7 +108,7 @@ When the watcher returns with messages:
 - **normal** → Add to TodoWrite, respond when current task done
 - **low** → Batch for end of session
 
-The watcher auto-respawns after each message. Only re-launch after 10-min timeout.
+The Claude Code watcher auto-respawns after each message. Only re-launch after 10-min timeout. For Codex, keep the background loop running.
 
 ### References
 
