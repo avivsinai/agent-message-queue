@@ -13,19 +13,23 @@ import (
 )
 
 type drainItem struct {
-	ID          string    `json:"id"`
-	From        string    `json:"from"`
-	To          []string  `json:"to"`
-	Thread      string    `json:"thread"`
-	Subject     string    `json:"subject"`
-	Created     string    `json:"created"`
-	Body        string    `json:"body,omitempty"`
-	AckRequired bool      `json:"ack_required"`
-	MovedToCur  bool      `json:"moved_to_cur"`
-	Acked       bool      `json:"acked"`
-	ParseError  string    `json:"parse_error,omitempty"`
-	Filename    string    `json:"-"` // actual filename on disk
-	SortKey     time.Time `json:"-"`
+	ID          string         `json:"id"`
+	From        string         `json:"from"`
+	To          []string       `json:"to"`
+	Thread      string         `json:"thread"`
+	Subject     string         `json:"subject"`
+	Created     string         `json:"created"`
+	Body        string         `json:"body,omitempty"`
+	AckRequired bool           `json:"ack_required"`
+	MovedToCur  bool           `json:"moved_to_cur"`
+	Acked       bool           `json:"acked"`
+	ParseError  string         `json:"parse_error,omitempty"`
+	Priority    string         `json:"priority,omitempty"`
+	Kind        string         `json:"kind,omitempty"`
+	Labels      []string       `json:"labels,omitempty"`
+	Context     map[string]any `json:"context,omitempty"`
+	Filename    string         `json:"-"` // actual filename on disk
+	SortKey     time.Time      `json:"-"`
 }
 
 type drainResult struct {
@@ -118,6 +122,10 @@ func runDrain(args []string) error {
 			item.Subject = header.Subject
 			item.Created = header.Created
 			item.AckRequired = header.AckRequired
+			item.Priority = header.Priority
+			item.Kind = header.Kind
+			item.Labels = header.Labels
+			item.Context = header.Context
 			if *includeBodyFlag {
 				item.Body = body
 			}
@@ -208,8 +216,16 @@ func runDrain(args []string) error {
 		if subject == "" {
 			subject = "(no subject)"
 		}
-		if err := writeStdout("- From: %s\n  Thread: %s\n  ID: %s\n  Subject: %s\n  Created: %s\n",
-			item.From, item.Thread, item.ID, subject, item.Created); err != nil {
+		priority := item.Priority
+		if priority == "" {
+			priority = "-"
+		}
+		kind := item.Kind
+		if kind == "" {
+			kind = "-"
+		}
+		if err := writeStdout("- From: %s\n  Thread: %s\n  ID: %s\n  Subject: %s\n  Priority: %s\n  Kind: %s\n  Created: %s\n",
+			item.From, item.Thread, item.ID, subject, priority, kind, item.Created); err != nil {
 			return err
 		}
 		if *includeBodyFlag && item.Body != "" {

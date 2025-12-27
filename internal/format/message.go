@@ -31,6 +31,24 @@ var (
 	ErrMissingFrontmatterEnd   = errors.New("missing frontmatter end")
 )
 
+// Priority constants for co-op mode message handling.
+const (
+	PriorityUrgent = "urgent"
+	PriorityNormal = "normal"
+	PriorityLow    = "low"
+)
+
+// Kind constants for co-op mode message classification.
+const (
+	KindBrainstorm     = "brainstorm"
+	KindReviewRequest  = "review_request"
+	KindReviewResponse = "review_response"
+	KindQuestion       = "question"
+	KindDecision       = "decision"
+	KindStatus         = "status"
+	KindTodo           = "todo"
+)
+
 // Header is the JSON frontmatter stored at the top of each message file.
 type Header struct {
 	Schema      int      `json:"schema"`
@@ -42,12 +60,54 @@ type Header struct {
 	Created     string   `json:"created"`
 	AckRequired bool     `json:"ack_required"`
 	Refs        []string `json:"refs,omitempty"`
+
+	// Co-op mode fields (optional, for inter-agent communication)
+	Priority string         `json:"priority,omitempty"` // urgent, normal, low
+	Kind     string         `json:"kind,omitempty"`     // brainstorm, review_request, review_response, question, decision, status, todo
+	Labels   []string       `json:"labels,omitempty"`   // free-form tags
+	Context  map[string]any `json:"context,omitempty"`  // structured context (paths, symbols, etc.)
 }
 
 // Message is the in-memory representation of a message file.
 type Message struct {
 	Header Header
 	Body   string
+}
+
+// ValidPriorities returns the list of valid priority values.
+func ValidPriorities() []string {
+	return []string{PriorityUrgent, PriorityNormal, PriorityLow}
+}
+
+// ValidKinds returns the list of valid kind values.
+func ValidKinds() []string {
+	return []string{KindBrainstorm, KindReviewRequest, KindReviewResponse, KindQuestion, KindDecision, KindStatus, KindTodo}
+}
+
+// IsValidPriority returns true if the priority is valid or empty.
+func IsValidPriority(p string) bool {
+	if p == "" {
+		return true
+	}
+	for _, v := range ValidPriorities() {
+		if p == v {
+			return true
+		}
+	}
+	return false
+}
+
+// IsValidKind returns true if the kind is valid or empty.
+func IsValidKind(k string) bool {
+	if k == "" {
+		return true
+	}
+	for _, v := range ValidKinds() {
+		if k == v {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Message) Marshal() ([]byte, error) {

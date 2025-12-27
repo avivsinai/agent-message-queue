@@ -1,0 +1,223 @@
+package cli
+
+import (
+	"flag"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+)
+
+func runReply(args []string) error {
+	fs := flag.NewFlagSet("reply", flag.ContinueOnError)
+	common := addCommonFlags(fs)
+	idFlag := fs.String("id", "", "Message ID to reply to")
+	bodyFlag := fs.String("body", "", "Body string, @file, or empty to read stdin")
+	subjectFlag := fs.String("subject", "", "Override subject (default: Re: <original>)")
+	ackFlag := fs.Bool("ack", false, "Request ack for the reply")
+
+	// Co-op mode flags
+	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low")
+	kindFlag := fs.String("kind", "", "Message kind (default: same as original or review_response for review_request)")
+	labelsFlag := fs.String("labels", "", "Comma-separated labels/tags")
+	contextFlag := fs.String("context", "", "JSON context object or @file.json")
+
+	usage := usageWithFlags(fs, "amq reply --me <agent> --id <msg_id> [options]",
+		"Reply to a message with automatic thread/refs handling.",
+		"Finds the original message, sets to/thread/refs automatically.")
+	if handled, err := parseFlags(fs, args, usage); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+	if err := requireMe(common.Me); err != nil {
+		return err
+	}
+	me, err := normalizeHandle(common.Me)
+	if err != nil {
+		return err
+	}
+	common.Me = me
+	root := filepath.Clean(common.Root)
+
+	if *idFlag == "" {
+		return writeStderr("--id is required\n")
+	}
+
+	// Validate co-op fields
+	priority := strings.TrimSpace(*priorityFlag)
+	kind := strings.TrimSpace(*kindFlag)
+	if !format.IsValidPriority(priority) {
+		return writeStderr("--priority must be one of: urgent, normal, low\n")
+	}
+	if !format.IsValidKind(kind) {
+		return writeStderr("--kind must be one of: brainstorm, review_request, review_response, question, decision, status, todo\n")
+	}
+
+	labels := splitList(*labelsFlag)
+
+	var context map[string]any
+	if *contextFlag != "" {
+		var err error
+		context, err = parseContext(*contextFlag)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Find the original message
+	originalMsg, originalPath, err := findMessage(root, me, *idFlag)
+	if err != nil {
+		return err
+	}
+
+	// Read the body for the reply
+	body, err := readBody(*bodyFlag)
+	if err != nil {
+		return err
+	}
+
+	// Determine recipient (original sender)
+	recipient := originalMsg.Header.From
+	if recipient == me {
+		// Replying to our own message - use the original recipient
+		if len(originalMsg.Header.To) > 0 {
+			recipient = originalMsg.Header.To[0]
+		} else {
+			return writeStderr("cannot determine recipient for reply\n")
+		}
+	}
+
+	// Validate handles
+	if err := validateKnownHandles(root, []string{me, recipient}, common.Strict); err != nil {
+		return err
+	}
+
+	// Determine subject
+	subject := strings.TrimSpace(*subjectFlag)
+	if subject == "" {
+		origSubject := originalMsg.Header.Subject
+		if origSubject == "" {
+			subject = "Re: (no subject)"
+		} else if !strings.HasPrefix(strings.ToLower(origSubject), "re:") {
+			subject = "Re: " + origSubject
+		} else {
+			subject = origSubject
+		}
+	}
+
+	// Determine kind for reply
+	if kind == "" {
+		// Auto-set kind based on original
+		switch originalMsg.Header.Kind {
+		case format.KindReviewRequest:
+			kind = format.KindReviewResponse
+		case format.KindQuestion:
+			kind = format.KindReviewResponse // Answer is a response
+		default:
+			kind = originalMsg.Header.Kind // Keep same kind
+		}
+	}
+
+	// Default priority to normal if kind is set
+	if kind != "" && priority == "" {
+		priority = format.PriorityNormal
+	}
+
+	// Create the reply message
+	now := time.Now()
+	id, err := format.NewMessageID(now)
+	if err != nil {
+		return err
+	}
+
+	msg := format.Message{
+		Header: format.Header{
+			Schema:      format.CurrentSchema,
+			ID:          id,
+			From:        me,
+			To:          []string{recipient},
+			Thread:      originalMsg.Header.Thread,
+			Subject:     subject,
+			Created:     now.UTC().Format(time.RFC3339Nano),
+			AckRequired: *ackFlag,
+			Refs:        []string{originalMsg.Header.ID},
+			Priority:    priority,
+			Kind:        kind,
+			Labels:      labels,
+			Context:     context,
+		},
+		Body: body,
+	}
+
+	data, err := msg.Marshal()
+	if err != nil {
+		return err
+	}
+
+	filename := id + ".md"
+
+	// Deliver to recipient
+	if _, err := fsq.DeliverToInboxes(root, []string{recipient}, filename, data); err != nil {
+		return err
+	}
+
+	// Copy to sender outbox/sent
+	outboxDir := fsq.AgentOutboxSent(root, me)
+	outboxErr := error(nil)
+	if _, err := fsq.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
+		outboxErr = err
+	}
+
+	if common.JSON {
+		return writeJSON(os.Stdout, map[string]any{
+			"id":           id,
+			"thread":       msg.Header.Thread,
+			"to":           recipient,
+			"subject":      subject,
+			"in_reply_to":  originalMsg.Header.ID,
+			"original_box": filepath.Base(filepath.Dir(originalPath)),
+			"outbox": map[string]any{
+				"written": outboxErr == nil,
+				"error":   errString(outboxErr),
+			},
+		})
+	}
+
+	if outboxErr != nil {
+		_ = writeStderr("warning: outbox write failed: %v\n", outboxErr)
+	}
+	return writeStdout("Replied %s to %s (thread: %s)\n", id, recipient, msg.Header.Thread)
+}
+
+// findMessage searches for a message by ID in the agent's inbox (new and cur).
+func findMessage(root, me, msgID string) (format.Message, string, error) {
+	// Normalize the message ID
+	filename, err := ensureFilename(msgID)
+	if err != nil {
+		return format.Message{}, "", err
+	}
+
+	// Try inbox/new first
+	newPath := filepath.Join(fsq.AgentInboxNew(root, me), filename)
+	if msg, err := format.ReadMessageFile(newPath); err == nil {
+		return msg, newPath, nil
+	}
+
+	// Try inbox/cur
+	curPath := filepath.Join(fsq.AgentInboxCur(root, me), filename)
+	if msg, err := format.ReadMessageFile(curPath); err == nil {
+		return msg, curPath, nil
+	}
+
+	// Try outbox/sent (for replying to our own messages)
+	sentPath := filepath.Join(fsq.AgentOutboxSent(root, me), filename)
+	if msg, err := format.ReadMessageFile(sentPath); err == nil {
+		return msg, sentPath, nil
+	}
+
+	return format.Message{}, "", writeStderr("message not found: %s\n", msgID)
+}

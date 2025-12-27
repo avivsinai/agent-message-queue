@@ -24,7 +24,7 @@ Requires Go 1.25+ and optionally golangci-lint.
 ```
 cmd/amq/           → Entry point (delegates to cli.Run())
 internal/
-├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch)
+├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch, monitor, reply)
 ├── fsq/           → File system queue (Maildir delivery, atomic ops, scanning)
 ├── format/        → Message serialization (JSON frontmatter + Markdown body)
 ├── config/        → Config management (meta/config.json)
@@ -44,7 +44,7 @@ internal/
 
 **Atomic Delivery**: Messages written to `tmp/`, fsynced, then atomically renamed to `new/`. Readers only scan `new/` and `cur/`, never seeing incomplete writes.
 
-**Message Format**: JSON frontmatter (schema, id, from, to, thread, subject, created, ack_required, refs) followed by `---` and Markdown body.
+**Message Format**: JSON frontmatter (schema, id, from, to, thread, subject, created, ack_required, refs, priority, kind, labels, context) followed by `---` and Markdown body.
 
 **Thread Naming**: P2P threads use lexicographic ordering: `p2p/<lower_agent>__<higher_agent>`
 
@@ -54,7 +54,7 @@ internal/
 
 ```bash
 amq init --root <path> --agents a,b,c [--force]
-amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--ack]
+amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--ack] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>]
 amq list --me <agent> [--new | --cur] [--json]
 amq read --me <agent> --id <msg_id> [--json]
 amq ack --me <agent> --id <msg_id>
@@ -64,6 +64,8 @@ amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
 amq presence list [--json]
 amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
 amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
+amq monitor --me <agent> [--timeout <duration>] [--poll] [--once] [--include-body] [--json]
+amq reply --me <agent> --id <msg_id> [--body <str|@file|stdin>] [--priority <p>] [--kind <k>]
 ```
 
 Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Note: `init` has its own flags and doesn't accept these.
@@ -85,6 +87,40 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 | Ingest messages | `amq drain --include-body` | One-shot: read+move+ack |
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
 | Quick peek only | `amq list --new` | Non-blocking, no side effects |
+| Co-op background watch | `amq monitor --once --json` | Watch + drain combined |
+| Reply to message | `amq reply --id <msg_id>` | Auto thread/refs handling |
+
+## Co-op Mode (Claude <-> Codex)
+
+Co-op mode enables real-time collaboration between Claude Code and Codex CLI sessions. See `COOP.md` for full documentation.
+
+### Quick Start
+
+On session start:
+1. Set `AM_ME=claude` (or `codex`), `AM_ROOT=.agent-mail`
+2. Spawn watcher: "Run amq-coop-watcher in background while I work"
+
+### Message Priority Handling
+
+When the watcher returns with messages:
+- **urgent** → Interrupt current work, respond immediately
+- **normal** → Add to TodoWrite, respond when current task done
+- **low** → Batch for end of session
+
+After handling messages, **respawn the watcher immediately**.
+
+### Co-op Commands
+
+```bash
+# Send a review request
+amq send --me claude --to codex --subject "Review needed" \
+  --kind review_request --priority normal \
+  --body "Please review internal/cli/send.go..."
+
+# Reply to a message (auto thread/refs)
+amq reply --me codex --id "msg_123" --kind review_response \
+  --body "LGTM with minor comments..."
+```
 
 ## Testing
 

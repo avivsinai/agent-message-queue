@@ -13,14 +13,17 @@ import (
 
 // Entry is a thread message entry.
 type Entry struct {
-	ID      string    `json:"id"`
-	From    string    `json:"from"`
-	To      []string  `json:"to"`
-	Thread  string    `json:"thread"`
-	Subject string    `json:"subject"`
-	Created string    `json:"created"`
-	Body    string    `json:"body,omitempty"`
-	RawTime time.Time `json:"-"`
+	ID       string    `json:"id"`
+	From     string    `json:"from"`
+	To       []string  `json:"to"`
+	Thread   string    `json:"thread"`
+	Subject  string    `json:"subject"`
+	Created  string    `json:"created"`
+	Body     string    `json:"body,omitempty"`
+	Priority string    `json:"priority,omitempty"`
+	Kind     string    `json:"kind,omitempty"`
+	Labels   []string  `json:"labels,omitempty"`
+	RawTime  time.Time `json:"-"`
 }
 
 // Collect scans agent mailboxes and returns messages for a thread.
@@ -66,13 +69,16 @@ func Collect(root, threadID string, agents []string, includeBody bool, onError f
 					}
 					seen[msg.Header.ID] = struct{}{}
 					entry := Entry{
-						ID:      msg.Header.ID,
-						From:    msg.Header.From,
-						To:      msg.Header.To,
-						Thread:  msg.Header.Thread,
-						Subject: msg.Header.Subject,
-						Created: msg.Header.Created,
-						Body:    msg.Body,
+						ID:       msg.Header.ID,
+						From:     msg.Header.From,
+						To:       msg.Header.To,
+						Thread:   msg.Header.Thread,
+						Subject:  msg.Header.Subject,
+						Created:  msg.Header.Created,
+						Body:     msg.Body,
+						Priority: msg.Header.Priority,
+						Kind:     msg.Header.Kind,
+						Labels:   msg.Header.Labels,
 					}
 					if ts, err := time.Parse(time.RFC3339Nano, msg.Header.Created); err == nil {
 						entry.RawTime = ts
@@ -99,12 +105,15 @@ func Collect(root, threadID string, agents []string, includeBody bool, onError f
 				}
 				seen[header.ID] = struct{}{}
 				entry := Entry{
-					ID:      header.ID,
-					From:    header.From,
-					To:      header.To,
-					Thread:  header.Thread,
-					Subject: header.Subject,
-					Created: header.Created,
+					ID:       header.ID,
+					From:     header.From,
+					To:       header.To,
+					Thread:   header.Thread,
+					Subject:  header.Subject,
+					Created:  header.Created,
+					Priority: header.Priority,
+					Kind:     header.Kind,
+					Labels:   header.Labels,
 				}
 				if ts, err := time.Parse(time.RFC3339Nano, header.Created); err == nil {
 					entry.RawTime = ts

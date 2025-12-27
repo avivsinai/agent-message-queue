@@ -33,6 +33,10 @@ func Run(args []string) error {
 		return runWatch(args[1:])
 	case "drain":
 		return runDrain(args[1:])
+	case "monitor":
+		return runMonitor(args[1:])
+	case "reply":
+		return runReply(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
@@ -85,6 +89,12 @@ func printUsage() error {
 		return err
 	}
 	if err := writeStdoutLine("  drain     Drain new messages (read, move to cur, ack)"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  monitor   Combined watch+drain for co-op mode"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  reply     Reply to a message (auto thread/refs)"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine(""); err != nil {

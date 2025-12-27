@@ -22,6 +22,12 @@ func runSend(args []string) error {
 	ackFlag := fs.Bool("ack", false, "Request ack")
 	refsFlag := fs.String("refs", "", "Comma-separated related message ids")
 
+	// Co-op mode flags
+	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low (default: normal if kind set)")
+	kindFlag := fs.String("kind", "", "Message kind: brainstorm, review_request, review_response, question, decision, status, todo")
+	labelsFlag := fs.String("labels", "", "Comma-separated labels/tags")
+	contextFlag := fs.String("context", "", "JSON context object or @file.json")
+
 	usage := usageWithFlags(fs, "amq send --me <agent> --to <recipients> [options]")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
@@ -54,6 +60,31 @@ func runSend(args []string) error {
 		return err
 	}
 
+	// Validate and process co-op mode fields
+	priority := strings.TrimSpace(*priorityFlag)
+	kind := strings.TrimSpace(*kindFlag)
+	if !format.IsValidPriority(priority) {
+		return errors.New("--priority must be one of: urgent, normal, low")
+	}
+	if !format.IsValidKind(kind) {
+		return errors.New("--kind must be one of: brainstorm, review_request, review_response, question, decision, status, todo")
+	}
+	// Default priority to "normal" if kind is set but priority is not
+	if kind != "" && priority == "" {
+		priority = format.PriorityNormal
+	}
+
+	labels := splitList(*labelsFlag)
+
+	var context map[string]any
+	if *contextFlag != "" {
+		var err error
+		context, err = parseContext(*contextFlag)
+		if err != nil {
+			return err
+		}
+	}
+
 	threadID := strings.TrimSpace(*threadFlag)
 	if threadID == "" {
 		if len(recipients) == 1 {
@@ -80,6 +111,10 @@ func runSend(args []string) error {
 			Created:     now.UTC().Format(time.RFC3339Nano),
 			AckRequired: *ackFlag,
 			Refs:        splitList(*refsFlag),
+			Priority:    priority,
+			Kind:        kind,
+			Labels:      labels,
+			Context:     context,
 		},
 		Body: body,
 	}

@@ -14,14 +14,17 @@ import (
 )
 
 type listItem struct {
-	ID      string    `json:"id"`
-	From    string    `json:"from"`
-	Subject string    `json:"subject"`
-	Thread  string    `json:"thread"`
-	Created string    `json:"created"`
-	Box     string    `json:"box"`
-	Path    string    `json:"path"`
-	SortKey time.Time `json:"-"`
+	ID       string    `json:"id"`
+	From     string    `json:"from"`
+	Subject  string    `json:"subject"`
+	Thread   string    `json:"thread"`
+	Created  string    `json:"created"`
+	Box      string    `json:"box"`
+	Path     string    `json:"path"`
+	Priority string    `json:"priority,omitempty"`
+	Kind     string    `json:"kind,omitempty"`
+	Labels   []string  `json:"labels,omitempty"`
+	SortKey  time.Time `json:"-"`
 }
 
 func runList(args []string) error {
@@ -101,13 +104,16 @@ func runList(args []string) error {
 			continue
 		}
 		item := listItem{
-			ID:      header.ID,
-			From:    header.From,
-			Subject: header.Subject,
-			Thread:  header.Thread,
-			Created: header.Created,
-			Box:     box,
-			Path:    path,
+			ID:       header.ID,
+			From:     header.From,
+			Subject:  header.Subject,
+			Thread:   header.Thread,
+			Created:  header.Created,
+			Box:      box,
+			Path:     path,
+			Priority: header.Priority,
+			Kind:     header.Kind,
+			Labels:   header.Labels,
 		}
 		if ts, err := time.Parse(time.RFC3339Nano, header.Created); err == nil {
 			item.SortKey = ts
@@ -154,7 +160,11 @@ func runList(args []string) error {
 		if subject == "" {
 			subject = "(no subject)"
 		}
-		if err := writeStdout("%s  %s  %s  %s\n", item.Created, item.From, item.ID, strings.TrimSpace(subject)); err != nil {
+		priority := item.Priority
+		if priority == "" {
+			priority = "-"
+		}
+		if err := writeStdout("%s  %-6s  %s  %s  %s\n", item.Created, priority, item.From, item.ID, strings.TrimSpace(subject)); err != nil {
 			return err
 		}
 	}

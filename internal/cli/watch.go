@@ -21,12 +21,15 @@ type watchResult struct {
 }
 
 type msgInfo struct {
-	ID      string `json:"id"`
-	From    string `json:"from"`
-	Subject string `json:"subject"`
-	Thread  string `json:"thread"`
-	Created string `json:"created"`
-	Path    string `json:"path"`
+	ID       string   `json:"id"`
+	From     string   `json:"from"`
+	Subject  string   `json:"subject"`
+	Thread   string   `json:"thread"`
+	Created  string   `json:"created"`
+	Path     string   `json:"path"`
+	Priority string   `json:"priority,omitempty"`
+	Kind     string   `json:"kind,omitempty"`
+	Labels   []string `json:"labels,omitempty"`
 }
 
 func runWatch(args []string) error {
@@ -198,12 +201,15 @@ func listNewMessages(inboxNew string) ([]msgInfo, error) {
 		}
 
 		messages = append(messages, msgInfo{
-			ID:      header.ID,
-			From:    header.From,
-			Subject: header.Subject,
-			Thread:  header.Thread,
-			Created: header.Created,
-			Path:    path,
+			ID:       header.ID,
+			From:     header.From,
+			Subject:  header.Subject,
+			Thread:   header.Thread,
+			Created:  header.Created,
+			Path:     path,
+			Priority: header.Priority,
+			Kind:     header.Kind,
+			Labels:   header.Labels,
 		})
 	}
 

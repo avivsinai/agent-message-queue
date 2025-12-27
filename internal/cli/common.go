@@ -387,3 +387,29 @@ func errString(err error) string {
 	}
 	return err.Error()
 }
+
+// parseContext parses a context JSON string or @file.json.
+func parseContext(raw string) (map[string]any, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+
+	var data []byte
+	if strings.HasPrefix(raw, "@") {
+		path := strings.TrimPrefix(raw, "@")
+		var err error
+		data, err = os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read context file: %w", err)
+		}
+	} else {
+		data = []byte(raw)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("parse context JSON: %w", err)
+	}
+	return result, nil
+}
