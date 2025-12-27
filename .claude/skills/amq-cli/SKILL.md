@@ -46,7 +46,21 @@ Run this in the background to get notified when messages arrive:
 **Claude Code:** Run in background using the Task tool:
 > "Run `./amq monitor --timeout 0 --include-body --json` in the background while I work"
 
-**Codex CLI:** Run in a background terminal (requires `unified_exec = true` in config):
+**Codex CLI:** Run in a background terminal (requires `unified_exec = true` in config).
+
+Enable background terminals:
+```toml
+# ~/.codex/config.toml
+[features]
+unified_exec = true
+```
+
+Preferred (uses the repo script so it "just works"):
+```bash
+./scripts/codex-coop-monitor.sh
+```
+
+Manual loop (equivalent):
 ```bash
 while true; do ./amq monitor --timeout 0 --include-body --json; sleep 0.2; done
 ```
