@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/ack"
@@ -62,6 +63,9 @@ func runMonitor(args []string) error {
 	}
 	if err := requireMe(common.Me); err != nil {
 		return err
+	}
+	if *limitFlag < 0 {
+		return errors.New("--limit must be >= 0")
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
@@ -161,6 +165,10 @@ func drainMessages(root, me string, includeBody, doAck bool, limit int) ([]monit
 			continue
 		}
 		filename := entry.Name()
+		// Skip dotfiles (like .DS_Store) and non-.md files
+		if strings.HasPrefix(filename, ".") || !strings.HasSuffix(filename, ".md") {
+			continue
+		}
 		path := filepath.Join(newDir, filename)
 
 		item := monitorItem{
@@ -309,6 +317,12 @@ func monitorWithFsnotify(ctx context.Context, inboxNew string) (string, error) {
 		return monitorWithPolling(ctx, inboxNew)
 	}
 
+	// Check for existing messages AFTER setting up watcher to avoid race condition
+	// (messages arriving between drain and watcher setup would be missed otherwise)
+	if hasMessageFiles(inboxNew) {
+		return "existing", nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -331,6 +345,11 @@ func monitorWithFsnotify(ctx context.Context, inboxNew string) (string, error) {
 }
 
 func monitorWithPolling(ctx context.Context, inboxNew string) (string, error) {
+	// Check immediately first to avoid missing messages that arrived before polling started
+	if hasMessageFiles(inboxNew) {
+		return "existing", nil
+	}
+
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -339,17 +358,33 @@ func monitorWithPolling(ctx context.Context, inboxNew string) (string, error) {
 		case <-ctx.Done():
 			return "", ctx.Err()
 		case <-ticker.C:
-			entries, err := os.ReadDir(inboxNew)
-			if err != nil && !os.IsNotExist(err) {
-				return "", err
-			}
-			for _, entry := range entries {
-				if !entry.IsDir() {
-					return "new_message", nil
-				}
+			if hasMessageFiles(inboxNew) {
+				return "new_message", nil
 			}
 		}
 	}
+}
+
+// hasMessageFiles checks if inbox/new contains any message files (.md, non-dotfile)
+func hasMessageFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		// Skip dotfiles (like .DS_Store) and require .md suffix
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if strings.HasSuffix(name, ".md") {
+			return true
+		}
+	}
+	return false
 }
 
 func outputMonitorResult(jsonOutput bool, result monitorResult) error {

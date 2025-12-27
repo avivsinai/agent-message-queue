@@ -21,15 +21,16 @@ type watchResult struct {
 }
 
 type msgInfo struct {
-	ID       string   `json:"id"`
-	From     string   `json:"from"`
-	Subject  string   `json:"subject"`
-	Thread   string   `json:"thread"`
-	Created  string   `json:"created"`
-	Path     string   `json:"path"`
-	Priority string   `json:"priority,omitempty"`
-	Kind     string   `json:"kind,omitempty"`
-	Labels   []string `json:"labels,omitempty"`
+	ID         string   `json:"id"`
+	From       string   `json:"from"`
+	Subject    string   `json:"subject"`
+	Thread     string   `json:"thread"`
+	Created    string   `json:"created"`
+	Path       string   `json:"path"`
+	Priority   string   `json:"priority,omitempty"`
+	Kind       string   `json:"kind,omitempty"`
+	Labels     []string `json:"labels,omitempty"`
+	ParseError string   `json:"parse_error,omitempty"`
 }
 
 func runWatch(args []string) error {
@@ -190,14 +191,25 @@ func listNewMessages(inboxNew string) ([]msgInfo, error) {
 		if entry.IsDir() {
 			continue
 		}
-		if !strings.HasSuffix(entry.Name(), ".md") {
+		filename := entry.Name()
+		// Skip dotfiles but process all .md files (even corrupt ones)
+		if strings.HasPrefix(filename, ".") {
+			continue
+		}
+		if !strings.HasSuffix(filename, ".md") {
 			continue
 		}
 
-		path := filepath.Join(inboxNew, entry.Name())
+		path := filepath.Join(inboxNew, filename)
 		header, err := format.ReadHeaderFile(path)
 		if err != nil {
-			continue // Skip corrupt messages
+			// Include corrupt messages so watch doesn't hang
+			messages = append(messages, msgInfo{
+				ID:         filename,
+				Path:       path,
+				ParseError: err.Error(),
+			})
+			continue
 		}
 
 		messages = append(messages, msgInfo{

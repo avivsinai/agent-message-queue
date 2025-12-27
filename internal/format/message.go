@@ -44,6 +44,7 @@ const (
 	KindReviewRequest  = "review_request"
 	KindReviewResponse = "review_response"
 	KindQuestion       = "question"
+	KindAnswer         = "answer"
 	KindDecision       = "decision"
 	KindStatus         = "status"
 	KindTodo           = "todo"
@@ -81,7 +82,7 @@ func ValidPriorities() []string {
 
 // ValidKinds returns the list of valid kind values.
 func ValidKinds() []string {
-	return []string{KindBrainstorm, KindReviewRequest, KindReviewResponse, KindQuestion, KindDecision, KindStatus, KindTodo}
+	return []string{KindBrainstorm, KindReviewRequest, KindReviewResponse, KindQuestion, KindAnswer, KindDecision, KindStatus, KindTodo}
 }
 
 // IsValidPriority returns true if the priority is valid or empty.
@@ -201,6 +202,10 @@ func ReadHeader(r io.Reader) (Header, error) {
 }
 
 func splitFrontmatter(data []byte) ([]byte, []byte, error) {
+	// Normalize CRLF to LF for cross-platform compatibility
+	// (handles files edited on Windows or by editors that normalize line endings)
+	data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+
 	if !bytes.HasPrefix(data, []byte(frontmatterStart)) {
 		return nil, nil, ErrMissingFrontmatterStart
 	}

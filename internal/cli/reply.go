@@ -55,7 +55,7 @@ func runReply(args []string) error {
 		return fmt.Errorf("--priority must be one of: urgent, normal, low")
 	}
 	if !format.IsValidKind(kind) {
-		return fmt.Errorf("--kind must be one of: brainstorm, review_request, review_response, question, decision, status, todo")
+		return fmt.Errorf("--kind must be one of: brainstorm, review_request, review_response, question, answer, decision, status, todo")
 	}
 
 	labels := splitList(*labelsFlag)
@@ -81,18 +81,29 @@ func runReply(args []string) error {
 		return err
 	}
 
-	// Determine recipient (original sender)
-	recipient := originalMsg.Header.From
-	if recipient == me {
+	// Determine recipient (original sender) with path-safety validation
+	rawRecipient := originalMsg.Header.From
+	if rawRecipient == me {
 		// Replying to our own message - use the original recipient
 		if len(originalMsg.Header.To) > 0 {
-			recipient = originalMsg.Header.To[0]
+			rawRecipient = originalMsg.Header.To[0]
 		} else {
 			return fmt.Errorf("cannot determine recipient for reply")
 		}
 	}
 
-	// Validate handles
+	// Normalize and validate recipient handle to prevent path traversal
+	// This is critical: untrusted header values must not become filesystem paths
+	recipientNorm, err := normalizeHandle(rawRecipient)
+	if err != nil {
+		return fmt.Errorf("invalid recipient handle in original message: %q", rawRecipient)
+	}
+	if recipientNorm != rawRecipient {
+		return fmt.Errorf("invalid recipient handle in original message: %q (normalized to %q)", rawRecipient, recipientNorm)
+	}
+	recipient := recipientNorm
+
+	// Validate handles exist in config (if strict mode)
 	if err := validateKnownHandles(root, []string{me, recipient}, common.Strict); err != nil {
 		return err
 	}
@@ -117,7 +128,7 @@ func runReply(args []string) error {
 		case format.KindReviewRequest:
 			kind = format.KindReviewResponse
 		case format.KindQuestion:
-			kind = format.KindReviewResponse // Answer is a response
+			kind = format.KindAnswer
 		default:
 			kind = originalMsg.Header.Kind // Keep same kind
 		}

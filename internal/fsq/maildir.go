@@ -68,9 +68,14 @@ func DeliverToInboxes(root string, recipients []string, filename string, data []
 			}
 			return nil, rollbackDeliveries(stages[:i], stages[i:], err)
 		}
+		// Sync both directories after rename for fully durable delivery:
+		// - newDir: new entry is visible
+		// - tmpDir: old entry removal is durable
 		if err := SyncDir(stage.newDir); err != nil {
 			return nil, rollbackDeliveries(stages[:i+1], stages[i+1:], fmt.Errorf("sync new dir for %s: %w", stage.recipient, err))
 		}
+		// Best-effort sync of tmpDir (non-fatal: message is already delivered)
+		_ = SyncDir(stage.tmpDir)
 	}
 
 	paths := make(map[string]string, len(stages))

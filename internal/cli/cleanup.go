@@ -41,10 +41,14 @@ func runCleanup(args []string) error {
 		return err
 	}
 	if len(candidates) == 0 {
-		if err := writeStdoutLine("No tmp files to remove."); err != nil {
-			return err
+		if common.JSON {
+			return writeJSON(os.Stdout, map[string]any{
+				"removed":    0,
+				"candidates": []string{},
+				"count":      0,
+			})
 		}
-		return nil
+		return writeStdoutLine("No tmp files to remove.")
 	}
 
 	if *dryRunFlag {

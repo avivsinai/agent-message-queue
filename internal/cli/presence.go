@@ -86,7 +86,11 @@ func runPresenceList(args []string) error {
 	if cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json")); err == nil {
 		agents = cfg.Agents
 	} else {
-		agents, _ = fsq.ListAgents(root)
+		var listErr error
+		agents, listErr = fsq.ListAgents(root)
+		if listErr != nil && !os.IsNotExist(listErr) {
+			return listErr
+		}
 	}
 
 	items := make([]presence.Presence, 0, len(agents))

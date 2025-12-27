@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/ack"
@@ -55,6 +57,9 @@ func runDrain(args []string) error {
 	if err := requireMe(common.Me); err != nil {
 		return err
 	}
+	if *limitFlag < 0 {
+		return errors.New("--limit must be >= 0")
+	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
 		return err
@@ -87,6 +92,10 @@ func runDrain(args []string) error {
 			continue
 		}
 		filename := entry.Name()
+		// Skip dotfiles (like .DS_Store) and non-.md files
+		if strings.HasPrefix(filename, ".") || !strings.HasSuffix(filename, ".md") {
+			continue
+		}
 		path := filepath.Join(newDir, filename)
 
 		item := drainItem{

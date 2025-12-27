@@ -67,7 +67,7 @@ func runSend(args []string) error {
 		return errors.New("--priority must be one of: urgent, normal, low")
 	}
 	if !format.IsValidKind(kind) {
-		return errors.New("--kind must be one of: brainstorm, review_request, review_response, question, decision, status, todo")
+		return errors.New("--kind must be one of: brainstorm, review_request, review_response, question, answer, decision, status, todo")
 	}
 	// Default priority to "normal" if kind is set but priority is not
 	if kind != "" && priority == "" {

@@ -113,9 +113,9 @@ func TestReply_Basic(t *testing.T) {
 			t.Errorf("expected refs=[%s], got %v", originalID, replyMsg.Header.Refs)
 		}
 
-		// Verify kind auto-set to review_response for question
-		if replyMsg.Header.Kind != format.KindReviewResponse {
-			t.Errorf("expected kind=review_response (auto-set from question), got %s", replyMsg.Header.Kind)
+		// Verify kind auto-set to answer for question
+		if replyMsg.Header.Kind != format.KindAnswer {
+			t.Errorf("expected kind=answer (auto-set from question), got %s", replyMsg.Header.Kind)
 		}
 	}
 }
