@@ -49,12 +49,11 @@ func TestMonitor_ExistingMessages(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	// Run monitor with --once (should drain existing and exit)
+	// Run monitor (should drain existing and exit)
 	err := runMonitor([]string{
 		"--me", agent,
 		"--root", root,
 		"--json",
-		"--once",
 		"--timeout", "1s",
 		"--include-body",
 	})
@@ -130,7 +129,6 @@ func TestMonitor_Timeout(t *testing.T) {
 		"--me", agent,
 		"--root", root,
 		"--json",
-		"--once",
 		"--timeout", "100ms",
 		"--poll",
 	})
@@ -201,7 +199,6 @@ func TestMonitor_PriorityInOutput(t *testing.T) {
 		"--me", agent,
 		"--root", root,
 		"--json",
-		"--once",
 		"--timeout", "1s",
 	})
 

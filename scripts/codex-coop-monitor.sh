@@ -35,4 +35,4 @@ echo "[AMQ Co-op Monitor] Waiting for messages..."
 
 # Single-shot monitor - exits when message arrives
 # Codex should respawn this script or check the output
-exec "$AMQ_BIN" monitor --me "$AM_ME" --root "$AM_ROOT" --once --timeout 0 --include-body --json
+exec "$AMQ_BIN" monitor --me "$AM_ME" --root "$AM_ROOT" --timeout 0 --include-body --json

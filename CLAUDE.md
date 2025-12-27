@@ -64,7 +64,7 @@ amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
 amq presence list [--json]
 amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
 amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
-amq monitor --me <agent> [--timeout <duration>] [--poll] [--once] [--include-body] [--json]
+amq monitor --me <agent> [--timeout <duration>] [--poll] [--include-body] [--json]
 amq reply --me <agent> --id <msg_id> [--body <str|@file|stdin>] [--priority <p>] [--kind <k>]
 ```
 
@@ -87,7 +87,7 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 | Ingest messages | `amq drain --include-body` | One-shot: read+move+ack |
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
 | Quick peek only | `amq list --new` | Non-blocking, no side effects |
-| Co-op background watch | `amq monitor --once --json` | Watch + drain combined |
+| Co-op background watch | `amq monitor --json` | Watch + drain combined |
 | Reply to message | `amq reply --id <msg_id>` | Auto thread/refs handling |
 
 ## Co-op Mode (Claude <-> Codex)

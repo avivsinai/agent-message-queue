@@ -2,6 +2,7 @@ package cli
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,17 +45,17 @@ func runReply(args []string) error {
 	root := filepath.Clean(common.Root)
 
 	if *idFlag == "" {
-		return writeStderr("--id is required\n")
+		return fmt.Errorf("--id is required")
 	}
 
 	// Validate co-op fields
 	priority := strings.TrimSpace(*priorityFlag)
 	kind := strings.TrimSpace(*kindFlag)
 	if !format.IsValidPriority(priority) {
-		return writeStderr("--priority must be one of: urgent, normal, low\n")
+		return fmt.Errorf("--priority must be one of: urgent, normal, low")
 	}
 	if !format.IsValidKind(kind) {
-		return writeStderr("--kind must be one of: brainstorm, review_request, review_response, question, decision, status, todo\n")
+		return fmt.Errorf("--kind must be one of: brainstorm, review_request, review_response, question, decision, status, todo")
 	}
 
 	labels := splitList(*labelsFlag)
@@ -87,7 +88,7 @@ func runReply(args []string) error {
 		if len(originalMsg.Header.To) > 0 {
 			recipient = originalMsg.Header.To[0]
 		} else {
-			return writeStderr("cannot determine recipient for reply\n")
+			return fmt.Errorf("cannot determine recipient for reply")
 		}
 	}
 
@@ -144,7 +145,7 @@ func runReply(args []string) error {
 			Subject:     subject,
 			Created:     now.UTC().Format(time.RFC3339Nano),
 			AckRequired: *ackFlag,
-			Refs:        []string{originalMsg.Header.ID},
+			Refs:        append(originalMsg.Header.Refs, originalMsg.Header.ID),
 			Priority:    priority,
 			Kind:        kind,
 			Labels:      labels,
@@ -219,5 +220,5 @@ func findMessage(root, me, msgID string) (format.Message, string, error) {
 		return msg, sentPath, nil
 	}
 
-	return format.Message{}, "", writeStderr("message not found: %s\n", msgID)
+	return format.Message{}, "", fmt.Errorf("message not found: %s", msgID)
 }

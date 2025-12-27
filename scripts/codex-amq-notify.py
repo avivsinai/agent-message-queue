@@ -95,10 +95,30 @@ def check_amq_messages(amq_bin: str, root: str, me: str) -> dict:
 
 
 def write_bulletin(bulletin_path: str, data: dict) -> None:
-    """Write message summary to bulletin file."""
-    Path(bulletin_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(bulletin_path, "w") as f:
-        json.dump(data, f, indent=2)
+    """Write message summary to bulletin file with secure permissions."""
+    parent = Path(bulletin_path).parent
+    parent.mkdir(parents=True, exist_ok=True)
+    # Ensure directory has 0700 permissions (owner only)
+    os.chmod(parent, 0o700)
+    # Write file atomically with 0600 permissions
+    tmp_path = bulletin_path + ".tmp"
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.rename(tmp_path, bulletin_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+
+
+def clear_bulletin(bulletin_path: str) -> None:
+    """Remove bulletin file when there are no messages."""
+    try:
+        os.unlink(bulletin_path)
+    except FileNotFoundError:
+        pass
 
 
 def main():
@@ -108,6 +128,14 @@ def main():
         try:
             event = json.loads(sys.argv[1])
         except json.JSONDecodeError:
+            pass
+    elif not sys.stdin.isatty():
+        # Read from stdin if available
+        try:
+            stdin_data = sys.stdin.read().strip()
+            if stdin_data:
+                event = json.loads(stdin_data)
+        except (json.JSONDecodeError, IOError):
             pass
 
     # Only process on agent-turn-complete events (or all events if not specified)
@@ -130,37 +158,41 @@ def main():
     # Check for messages
     result = check_amq_messages(amq_bin, root, me)
 
-    if result["count"] > 0:
-        # Write bulletin
-        write_bulletin(bulletin_path, result)
+    if result["count"] == 0:
+        # Clear stale bulletin when no messages
+        clear_bulletin(bulletin_path)
+        return
 
-        # Count by priority
-        urgent = sum(1 for m in result["messages"] if m.get("priority") == "urgent")
-        normal = sum(1 for m in result["messages"] if m.get("priority") == "normal")
-        low = result["count"] - urgent - normal
+    # Write bulletin
+    write_bulletin(bulletin_path, result)
 
-        # Send notification
-        title = f"AMQ: {result['count']} message(s)"
-        parts = []
-        if urgent:
-            parts.append(f"{urgent} urgent")
-        if normal:
-            parts.append(f"{normal} normal")
-        if low:
-            parts.append(f"{low} low")
-        message = ", ".join(parts) if parts else f"{result['count']} new"
+    # Count by priority
+    urgent = sum(1 for m in result["messages"] if m.get("priority") == "urgent")
+    normal = sum(1 for m in result["messages"] if m.get("priority") == "normal")
+    low = result["count"] - urgent - normal
 
-        send_notification(title, message)
+    # Send notification
+    title = f"AMQ: {result['count']} message(s)"
+    parts = []
+    if urgent:
+        parts.append(f"{urgent} urgent")
+    if normal:
+        parts.append(f"{normal} normal")
+    if low:
+        parts.append(f"{low} low")
+    message = ", ".join(parts) if parts else f"{result['count']} new"
 
-        # Also print to stdout for Codex to see
-        print(f"[AMQ] {result['count']} pending message(s): {message}")
-        for msg in result["messages"][:3]:  # Show first 3
-            priority = msg.get("priority", "-")
-            subject = msg.get("subject", "(no subject)")
-            from_agent = msg.get("from", "?")
-            print(f"  - [{priority}] {from_agent}: {subject}")
-        if result["count"] > 3:
-            print(f"  ... and {result['count'] - 3} more")
+    send_notification(title, message)
+
+    # Also print to stdout for Codex to see
+    print(f"[AMQ] {result['count']} pending message(s): {message}")
+    for msg in result["messages"][:3]:  # Show first 3
+        priority = msg.get("priority", "-")
+        subject = msg.get("subject", "(no subject)")
+        from_agent = msg.get("from", "?")
+        print(f"  - [{priority}] {from_agent}: {subject}")
+    if result["count"] > 3:
+        print(f"  ... and {result['count'] - 3} more")
 
 
 if __name__ == "__main__":

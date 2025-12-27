@@ -107,13 +107,13 @@ amq send --me codex --to claude \
 
 ```bash
 # Block until message arrives, drain, output JSON
-amq monitor --me claude --once --timeout 0 --include-body --json
+amq monitor --me claude --timeout 0 --include-body --json
 
 # With timeout (60s default)
 amq monitor --me codex --timeout 30s --json
 
 # For scripts/hooks
-amq monitor --me claude --once --json
+amq monitor --me claude --json
 ```
 
 ### Reply (Auto Thread/Refs)
@@ -281,7 +281,7 @@ amq init --root .agent-mail --agents claude,codex
 amq list --me claude --new --json
 
 # Force poll mode if fsnotify issues
-amq monitor --me claude --poll --once --json
+amq monitor --me claude --poll --json
 ```
 
 ### Codex notify hook not working

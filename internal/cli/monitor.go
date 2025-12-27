@@ -28,7 +28,9 @@ type monitorItem struct {
 	Kind        string         `json:"kind,omitempty"`
 	Labels      []string       `json:"labels,omitempty"`
 	Context     map[string]any `json:"context,omitempty"`
+	MovedToCur  bool           `json:"moved_to_cur"`
 	Acked       bool           `json:"acked"`
+	ParseError  string         `json:"parse_error,omitempty"`
 	Filename    string         `json:"-"`
 	SortKey     time.Time      `json:"-"`
 }
@@ -49,7 +51,6 @@ func runMonitor(args []string) error {
 	includeBodyFlag := fs.Bool("include-body", false, "Include message body in output")
 	ackFlag := fs.Bool("ack", true, "Acknowledge messages that require ack")
 	limitFlag := fs.Int("limit", 20, "Max messages to drain (0 = no limit)")
-	onceFlag := fs.Bool("once", false, "Exit after first non-empty drain (ideal for background watchers)")
 
 	usage := usageWithFlags(fs, "amq monitor --me <agent> [options]",
 		"Combined watch+drain: waits for messages, drains them, outputs structured payload.",
@@ -141,18 +142,7 @@ func runMonitor(args []string) error {
 		result.Event = "empty"
 	}
 
-	if err := outputMonitorResult(common.JSON, result); err != nil {
-		return err
-	}
-
-	// If --once is set, we're done. Otherwise, in a real implementation
-	// we could loop, but for simplicity we exit after one cycle.
-	// The caller (CC/Codex) should respawn the monitor.
-	if *onceFlag {
-		return nil
-	}
-
-	return nil
+	return outputMonitorResult(common.JSON, result)
 }
 
 func drainMessages(root, me string, includeBody, doAck bool, limit int) ([]monitorItem, error) {
@@ -174,44 +164,48 @@ func drainMessages(root, me string, includeBody, doAck bool, limit int) ([]monit
 		path := filepath.Join(newDir, filename)
 
 		item := monitorItem{
-			ID:       filename,
+			ID:       filename, // fallback to filename if parse fails
 			Filename: filename,
 		}
 
+		// Try to parse the message
 		var header format.Header
 		var body string
+		var parseErr error
 
 		if includeBody {
 			msg, err := format.ReadMessageFile(path)
 			if err != nil {
-				continue // Skip corrupt messages
+				parseErr = err
+			} else {
+				header = msg.Header
+				body = msg.Body
 			}
-			header = msg.Header
-			body = msg.Body
 		} else {
-			var err error
-			header, err = format.ReadHeaderFile(path)
-			if err != nil {
-				continue // Skip corrupt messages
-			}
+			header, parseErr = format.ReadHeaderFile(path)
 		}
 
-		item.ID = header.ID
-		item.From = header.From
-		item.To = header.To
-		item.Thread = header.Thread
-		item.Subject = header.Subject
-		item.Created = header.Created
-		item.AckRequired = header.AckRequired
-		item.Priority = header.Priority
-		item.Kind = header.Kind
-		item.Labels = header.Labels
-		item.Context = header.Context
-		if includeBody {
-			item.Body = body
-		}
-		if ts, err := time.Parse(time.RFC3339Nano, header.Created); err == nil {
-			item.SortKey = ts
+		if parseErr != nil {
+			item.ParseError = parseErr.Error()
+			// Still move corrupt message to cur to avoid reprocessing
+		} else {
+			item.ID = header.ID
+			item.From = header.From
+			item.To = header.To
+			item.Thread = header.Thread
+			item.Subject = header.Subject
+			item.Created = header.Created
+			item.AckRequired = header.AckRequired
+			item.Priority = header.Priority
+			item.Kind = header.Kind
+			item.Labels = header.Labels
+			item.Context = header.Context
+			if includeBody {
+				item.Body = body
+			}
+			if ts, err := time.Parse(time.RFC3339Nano, header.Created); err == nil {
+				item.SortKey = ts
+			}
 		}
 
 		items = append(items, item)
@@ -242,13 +236,23 @@ func drainMessages(root, me string, includeBody, doAck bool, limit int) ([]monit
 
 		// Move new -> cur
 		if err := fsq.MoveNewToCur(root, me, item.Filename); err != nil {
-			if !os.IsNotExist(err) {
+			if os.IsNotExist(err) {
+				// Likely moved by another drain; check if it's already in cur.
+				curPath := filepath.Join(fsq.AgentInboxCur(root, me), item.Filename)
+				if _, statErr := os.Stat(curPath); statErr == nil {
+					item.MovedToCur = true
+				} else if statErr != nil && !os.IsNotExist(statErr) {
+					_ = writeStderr("warning: failed to stat %s in cur: %v\n", item.Filename, statErr)
+				}
+			} else {
 				_ = writeStderr("warning: failed to move %s to cur: %v\n", item.Filename, err)
 			}
+		} else {
+			item.MovedToCur = true
 		}
 
-		// Ack if required
-		if doAck && item.AckRequired {
+		// Ack if required and move succeeded (gate acking on successful move)
+		if doAck && item.AckRequired && item.ParseError == "" && item.MovedToCur {
 			if err := monitorAckMessage(root, me, item); err != nil {
 				_ = writeStderr("warning: failed to ack %s: %v\n", item.ID, err)
 			} else {
