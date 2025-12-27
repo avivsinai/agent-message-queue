@@ -173,19 +173,18 @@ export AM_ROOT=.agent-mail AM_ME=claude  # or codex
 /plugin install amq-cli@avivsinai-marketplace
 ```
 
-### Codex CLI (manual)
+### Codex CLI
 
-Codex doesn't support marketplace refs yet. Install manually:
+**Via skill-installer** (recommended):
+```
+$skill-installer install https://github.com/avivsinai/agent-message-queue/tree/main/skills/amq-cli
+```
+Restart Codex after installing. To update, re-run the same command.
 
+**Manual install**:
 ```bash
-# User-level (available in all projects)
 mkdir -p ~/.codex/skills/amq-cli
 curl -o ~/.codex/skills/amq-cli/SKILL.md \
-  https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/skills/amq-cli/SKILL.md
-
-# Or project-level (in your repo)
-mkdir -p .codex/skills/amq-cli
-curl -o .codex/skills/amq-cli/SKILL.md \
   https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/skills/amq-cli/SKILL.md
 ```
 
