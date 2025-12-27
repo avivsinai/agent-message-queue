@@ -12,10 +12,13 @@ File-based message queue for agent coordination. Requires `amq` binary in PATH.
 ## Quick Reference
 
 ```bash
-export AM_ROOT=.agent-mail AM_ME=claude
-amq send --to codex --body "Message"           # Send
+export AM_ROOT=.agent-mail
+export AM_ME=claude   # or: AM_ME=codex
+
+amq send --to codex --body "Message"           # Claude → Codex
+amq send --to claude --body "Message"          # Codex → Claude
 amq drain --include-body                       # Receive (recommended)
-amq reply --id <msg_id> --body "Response"      # Reply
+amq reply --id <msg_id> --body "Response"      # Reply to any message
 amq monitor --timeout 0 --json                 # Wait for messages
 ```
 
@@ -32,7 +35,9 @@ In co-op mode, agents work autonomously. **Message your partner, not the user.**
 
 ```bash
 curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/setup-coop.sh | bash
-export AM_ME=claude AM_ROOT=.agent-mail
+export AM_ROOT=.agent-mail
+export AM_ME=claude   # Terminal 1: Claude Code
+export AM_ME=codex    # Terminal 2: Codex CLI
 ```
 
 ### Background Watcher
@@ -61,9 +66,10 @@ Verify with `/ps`.
 ### Send
 
 ```bash
-amq send --to codex --body "Quick message"
+amq send --to codex --body "Quick message"                    # Claude → Codex
+amq send --to claude --body "Quick message"                   # Codex → Claude
 amq send --to codex --subject "Review" --kind review_request --body @file.md
-amq send --to codex --priority urgent --kind question --body "Blocked on API design"
+amq send --to claude --priority urgent --kind question --body "Blocked on API design"
 ```
 
 ### Receive
