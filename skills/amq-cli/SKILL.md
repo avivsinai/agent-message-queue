@@ -5,16 +5,29 @@ description: Coordinates agents via the AMQ CLI for atomic Maildir-style message
 
 # AMQ CLI
 
+## Prerequisites
+
+Install `amq` binary (must be in PATH):
+```bash
+# Download from releases and add to PATH
+# https://github.com/avivsinai/agent-message-queue/releases
+
+# Example (macOS arm64):
+curl -L https://github.com/avivsinai/agent-message-queue/releases/latest/download/amq_darwin_arm64.tar.gz | tar xz
+sudo mv amq /usr/local/bin/
+```
+
+Only clone the repo if contributing to the project itself.
+
 ## Quick start
 
-- Build the binary if needed: `go build -o amq ./cmd/amq`
-- Prefer `AM_ROOT` and `AM_ME` environment variables to avoid repeating flags.
+Prefer `AM_ROOT` and `AM_ME` environment variables to avoid repeating flags.
 
 ```bash
 export AM_ROOT=.agent-mail
 export AM_ME=claude   # or codex
-./amq init --root .agent-mail --agents claude,codex
-./amq send --to codex --body "Quick ping"
+amq init --root .agent-mail --agents claude,codex
+amq send --to codex --body "Quick ping"
 ```
 
 ## Co-op Mode (Claude Code <-> Codex CLI)
@@ -32,7 +45,7 @@ export AM_ME=claude   # Claude Code session
 export AM_ME=codex    # Codex CLI session
 
 # Initialize once
-./amq init --root "$AM_ROOT" --agents claude,codex
+amq init --root "$AM_ROOT" --agents claude,codex
 ```
 
 ### Background Watcher
@@ -40,15 +53,29 @@ export AM_ME=codex    # Codex CLI session
 Run this in the background to get notified when messages arrive:
 
 ```bash
-./amq monitor --timeout 0 --include-body --json
+amq monitor --timeout 0 --include-body --json
 ```
 
 **Claude Code:** Run in background using the Task tool:
-> "Run `./amq monitor --timeout 0 --include-body --json` in the background while I work"
+> "Run `amq monitor --timeout 0 --include-body --json` in the background while I work"
 
-**Codex CLI:** Run in a background terminal (requires `unified_exec = true` in config):
+**Codex CLI:** Run in a background terminal (requires `unified_exec = true` in config).
+
+Enable background terminals:
+```toml
+# ~/.codex/config.toml
+[features]
+unified_exec = true
+```
+
+Preferred (uses the repo script so it "just works"):
 ```bash
-while true; do ./amq monitor --timeout 0 --include-body --json; sleep 0.2; done
+./scripts/codex-coop-monitor.sh
+```
+
+Manual loop (equivalent):
+```bash
+while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done
 ```
 
 When messages arrive, handle by priority:
@@ -62,33 +89,33 @@ After handling messages, respawn the watcher.
 
 ```bash
 # Block until message arrives, drain, output JSON
-./amq monitor --timeout 0 --include-body --json
+amq monitor --timeout 0 --include-body --json
 
 # With timeout (default 60s)
-./amq monitor --timeout 30s --json
+amq monitor --timeout 30s --json
 
 # Single-shot for scripts
-./amq monitor --once --json
+amq monitor --once --json
 ```
 
 ### Reply (auto thread/refs)
 
 ```bash
 # Reply to a message (auto-sets thread, refs, recipient)
-./amq reply --id <msg_id> --body "LGTM with minor suggestions..."
+amq reply --id <msg_id> --body "LGTM with minor suggestions..."
 
 # Reply with priority
-./amq reply --id <msg_id> --priority urgent --body "Found a critical issue..."
+amq reply --id <msg_id> --priority urgent --body "Found a critical issue..."
 
 # Reply with kind
-./amq reply --id <msg_id> --kind review_response --body "See my comments..."
+amq reply --id <msg_id> --kind review_response --body "See my comments..."
 ```
 
 ### Send with co-op fields
 
 ```bash
 # Request a code review
-./amq send --to codex \
+amq send --to codex \
   --subject "Review: New parser" \
   --priority normal \
   --kind review_request \
@@ -97,7 +124,7 @@ After handling messages, respawn the watcher.
   --body "Please review the error handling..."
 
 # Urgent blocking question
-./amq send --to claude \
+amq send --to claude \
   --subject "Blocked: API design" \
   --priority urgent \
   --kind question \
@@ -131,13 +158,13 @@ One-shot ingestion: reads all new messages, moves to cur, optionally acks. Desig
 
 ```bash
 # Drain all new messages with body, auto-ack
-./amq drain --include-body --ack
+amq drain --include-body --ack
 
 # Limit to 10 messages, JSON output
-./amq drain --limit 10 --json
+amq drain --limit 10 --json
 
 # Silent when empty (perfect for hooks)
-./amq drain --include-body
+amq drain --include-body
 ```
 
 **Flags:**
@@ -149,66 +176,66 @@ One-shot ingestion: reads all new messages, moves to cur, optionally acks. Desig
 
 ```bash
 # Simple send
-./amq send --to codex --body "Quick message"
+amq send --to codex --body "Quick message"
 
 # With subject and thread
-./amq send --to codex --subject "Review needed" --thread project/feature-123 --body @notes.md
+amq send --to codex --subject "Review needed" --thread project/feature-123 --body @notes.md
 
 # Request acknowledgment
-./amq send --to codex --body "Please confirm" --ack
+amq send --to codex --body "Please confirm" --ack
 ```
 
 ### List + Read + Ack (manual flow)
 
 ```bash
-./amq list --new              # List new messages
-./amq list --cur              # List read messages
-./amq read --id <msg_id>      # Read specific message
-./amq ack --id <msg_id>       # Acknowledge message
+amq list --new              # List new messages
+amq list --cur              # List read messages
+amq read --id <msg_id>      # Read specific message
+amq ack --id <msg_id>       # Acknowledge message
 ```
 
 ### Thread view
 
 ```bash
-./amq thread --id p2p/claude__codex --limit 50 --include-body
+amq thread --id p2p/claude__codex --limit 50 --include-body
 ```
 
 ### Watch for messages
 
 ```bash
 # Block until message arrives or timeout
-./amq watch --timeout 60s
+amq watch --timeout 60s
 
 # Use polling fallback for network filesystems
-./amq watch --timeout 60s --poll
+amq watch --timeout 60s --poll
 ```
 
 ### Presence (optional)
 
 ```bash
-./amq presence set --status busy --note "reviewing PR"
-./amq presence list
+amq presence set --status busy --note "reviewing PR"
+amq presence list
 ```
 
 ### Cleanup (explicit only)
 
 ```bash
-./amq cleanup --tmp-older-than 36h
-./amq cleanup --tmp-older-than 24h --dry-run
+amq cleanup --tmp-older-than 36h
+amq cleanup --tmp-older-than 24h --dry-run
 ```
 
 ## Workflow Summary
 
 | Situation | Command | Behavior |
 |-----------|---------|----------|
-| Ingest messages | `./amq drain --include-body` | One-shot: read+move+ack |
-| Wait for messages | `./amq monitor --timeout 0` | Blocks until message, then drains |
-| Reply to message | `./amq reply --id <id>` | Auto thread/refs handling |
-| Quick peek only | `./amq list --new` | Non-blocking, no side effects |
+| Ingest messages | `amq drain --include-body` | One-shot: read+move+ack |
+| Wait for messages | `amq monitor --timeout 0` | Blocks until message, then drains |
+| Reply to message | `amq reply --id <id>` | Auto thread/refs handling |
+| Quick peek only | `amq list --new` | Non-blocking, no side effects |
 
 ## Conventions and Safety
 
-- Always use `./amq` (repo-local binary) in scripts and commands.
+- Use the globally installed `amq` binary (must be in PATH).
 - Do not edit message files in place; always use the CLI.
 - Delivery is Maildir-style: tmp -> new -> cur. Readers must ignore tmp.
 - Cleanup is explicit and never automatic.
