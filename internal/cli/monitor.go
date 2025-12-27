@@ -319,7 +319,11 @@ func monitorWithFsnotify(ctx context.Context, inboxNew string) (string, error) {
 
 	// Check for existing messages AFTER setting up watcher to avoid race condition
 	// (messages arriving between drain and watcher setup would be missed otherwise)
-	if hasMessageFiles(inboxNew) {
+	hasMessages, err := hasMessageFiles(inboxNew)
+	if err != nil {
+		return "", err
+	}
+	if hasMessages {
 		return "existing", nil
 	}
 
@@ -346,7 +350,11 @@ func monitorWithFsnotify(ctx context.Context, inboxNew string) (string, error) {
 
 func monitorWithPolling(ctx context.Context, inboxNew string) (string, error) {
 	// Check immediately first to avoid missing messages that arrived before polling started
-	if hasMessageFiles(inboxNew) {
+	hasMessages, err := hasMessageFiles(inboxNew)
+	if err != nil {
+		return "", err
+	}
+	if hasMessages {
 		return "existing", nil
 	}
 
@@ -358,7 +366,11 @@ func monitorWithPolling(ctx context.Context, inboxNew string) (string, error) {
 		case <-ctx.Done():
 			return "", ctx.Err()
 		case <-ticker.C:
-			if hasMessageFiles(inboxNew) {
+			hasMessages, err := hasMessageFiles(inboxNew)
+			if err != nil {
+				return "", err
+			}
+			if hasMessages {
 				return "new_message", nil
 			}
 		}
@@ -366,10 +378,13 @@ func monitorWithPolling(ctx context.Context, inboxNew string) (string, error) {
 }
 
 // hasMessageFiles checks if inbox/new contains any message files (.md, non-dotfile)
-func hasMessageFiles(dir string) bool {
+func hasMessageFiles(dir string) (bool, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return false
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
 	}
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -381,10 +396,10 @@ func hasMessageFiles(dir string) bool {
 			continue
 		}
 		if strings.HasSuffix(name, ".md") {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func outputMonitorResult(jsonOutput bool, result monitorResult) error {
