@@ -94,12 +94,20 @@ def check_amq_messages(amq_bin: str, root: str, me: str) -> dict:
         return {"count": 0, "messages": [], "error": str(e)}
 
 
-def write_bulletin(bulletin_path: str, data: dict) -> None:
+def write_bulletin(bulletin_path: str, data: dict, am_root: str) -> None:
     """Write message summary to bulletin file with secure permissions."""
+    # Ensure AM_ROOT and all parent directories have 0700 permissions
     parent = Path(bulletin_path).parent
     parent.mkdir(parents=True, exist_ok=True)
-    # Ensure directory has 0700 permissions (owner only)
+
+    # chmod AM_ROOT (e.g., .agent-mail) if it exists
+    root_path = Path(am_root)
+    if root_path.exists():
+        os.chmod(root_path, 0o700)
+
+    # chmod the meta directory
     os.chmod(parent, 0o700)
+
     # Write file atomically with 0600 permissions
     tmp_path = bulletin_path + ".tmp"
     fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -164,7 +172,7 @@ def main():
         return
 
     # Write bulletin
-    write_bulletin(bulletin_path, result)
+    write_bulletin(bulletin_path, result, root)
 
     # Count by priority
     urgent = sum(1 for m in result["messages"] if m.get("priority") == "urgent")

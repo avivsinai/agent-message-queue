@@ -367,6 +367,13 @@ func outputMonitorResult(jsonOutput bool, result monitorResult) error {
 			return err
 		}
 		for _, item := range result.Drained {
+			// Handle corrupt/unparseable messages like drain does
+			if item.ParseError != "" {
+				if err := writeStdout("- ID: %s\n  ERROR: %s\n---\n", item.ID, item.ParseError); err != nil {
+					return err
+				}
+				continue
+			}
 			subject := item.Subject
 			if subject == "" {
 				subject = "(no subject)"
