@@ -5,22 +5,31 @@ metadata:
   short-description: Inter-agent messaging via AMQ CLI
 ---
 
-# AMQ CLI
+# AMQ CLI Skill
 
-File-based message queue for agent coordination. Requires `amq` binary in PATH.
+File-based message queue for agent-to-agent coordination.
+
+## Prerequisites
+
+Requires `amq` binary in PATH. Install:
+```bash
+curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
+```
+
+Verify: `amq --version`
+
+For manual install or build from source, see [INSTALL.md](https://github.com/avivsinai/agent-message-queue/blob/main/INSTALL.md).
 
 ## Quick Reference
 
 ```bash
-export AM_ROOT=.agent-mail
-export AM_ME=claude   # or: AM_ME=codex
+export AM_ROOT=.agent-mail AM_ME=claude   # or: AM_ME=codex
 
-amq send --to codex --body "Message"           # Claude -> Codex
-amq send --to claude --body "Message"          # Codex -> Claude
+amq send --to codex --body "Message"           # Send
 amq drain --include-body                       # Receive (recommended)
-amq reply --id <msg_id> --body "Response"      # Reply to any message
-amq watch --timeout 60s                        # Wait for messages (interactive)
-amq monitor --timeout 0 --include-body --json  # Background watcher (run in a loop)
+amq reply --id <msg_id> --body "Response"      # Reply
+amq watch --timeout 60s                        # Wait for messages
+amq monitor --timeout 0 --include-body --json  # Background watcher
 ```
 
 ## Co-op Mode (Autonomous Multi-Agent)
@@ -34,37 +43,27 @@ In co-op mode, agents work autonomously. **Message your partner, not the user.**
 | Done | Signal completion |
 | Ask user only for | credentials, unclear requirements |
 
-### Setup (one-time per project)
+### Setup
 
-Install `amq` and ensure it is in PATH (build via `make build` or install a release). Run the setup script to initialize `.agent-mail` (it runs `amq init` if available).
-
+Run once per project:
 ```bash
 curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/setup-coop.sh | bash
-export AM_ROOT=.agent-mail
-export AM_ME=claude   # Terminal 1: Claude Code
-export AM_ME=codex    # Terminal 2: Codex CLI
+export AM_ROOT=.agent-mail AM_ME=claude   # or: codex
 ```
 
 ### Background Watcher
 
-**Claude Code:** Use the bundled watcher agent (`.claude/agents/amq-coop-watcher.md`) and spawn it in background:
+**Claude Code:** Spawn the bundled watcher agent:
 ```
 "Run amq-coop-watcher in background while I work"
 ```
 
-**Codex CLI (0.77.0+):** Enable Background terminal via `/experimental`, then run a continuous loop (`amq monitor` exits after each batch):
+**Codex CLI:** Run a continuous loop (`amq monitor` is one-shot):
+```bash
+while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done
 ```
-Run this in a background terminal: while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done
-```
-Verify with `/ps`. Ensure the current Codex session is using config with `unified_exec = true` (or launch with `codex --enable unified_exec`).
 
-**Notify Hook (fallback, notify-only):** Use when background terminals are flaky; treat this as notify-only (no draining).
-```
-notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
-```
-Use `amq drain --include-body` manually (or keep the background loop) to act on messages.
-
-### Handle Messages by Priority
+### Priority Handling
 
 | Priority | Action |
 |----------|--------|
@@ -75,31 +74,26 @@ Use `amq drain --include-body` manually (or keep the background loop) to act on 
 ## Commands
 
 ### Send
-
 ```bash
-amq send --to codex --body "Quick message"                    # Claude -> Codex
-amq send --to claude --body "Quick message"                   # Codex -> Claude
+amq send --to codex --body "Quick message"
 amq send --to codex --subject "Review" --kind review_request --body @file.md
-amq send --to claude --priority urgent --kind question --body "Blocked on API design"
+amq send --to claude --priority urgent --kind question --body "Blocked on API"
 ```
 
 ### Receive
-
 ```bash
 amq drain --include-body         # One-shot, silent when empty
-amq monitor --timeout 0 --json   # Block until a message, drain, emit JSON (loop for continuous watch)
+amq monitor --timeout 0 --json   # Block until message, drain, emit JSON
 amq list --new                   # Peek without side effects
 ```
 
 ### Reply
-
 ```bash
 amq reply --id <msg_id> --body "LGTM"
 amq reply --id <msg_id> --kind review_response --body "See comments..."
 ```
 
 ### Other
-
 ```bash
 amq thread --id p2p/claude__codex --include-body   # View thread
 amq presence set --status busy --note "reviewing"  # Set presence
@@ -119,7 +113,7 @@ amq cleanup --tmp-older-than 36h                   # Clean stale tmp
 
 - Handles: lowercase `[a-z0-9_-]+`
 - Threads: `p2p/<agentA>__<agentB>` (lexicographic)
-- Delivery: atomic Maildir (tmp→new→cur)
+- Delivery: atomic Maildir (tmp -> new -> cur)
 - Never edit message files directly
 
-See `COOP.md` for full protocol.
+See [COOP.md](https://github.com/avivsinai/agent-message-queue/blob/main/COOP.md) for full protocol.
