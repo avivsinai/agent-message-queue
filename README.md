@@ -4,7 +4,7 @@ File-based message queue for AI agent coordination. Enables Claude Code and Code
 
 ## Installation
 
-### 1. Install Binary
+### 1. Install Binary (macOS/Linux)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
@@ -20,7 +20,7 @@ Verify: `amq --version`
 /plugin install amq-cli@avivsinai-marketplace
 ```
 
-**Codex CLI** (via skill-installer):
+**Codex CLI** (Codex chat command; not a shell command):
 ```
 $skill-installer install https://github.com/avivsinai/agent-message-queue/tree/main/skills/amq-cli
 ```

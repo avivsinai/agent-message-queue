@@ -56,7 +56,7 @@ Long autonomous sessions accumulate context. Use `/clear` between major task bou
    /plugin install amq-cli@avivsinai-marketplace
    ```
 
-   **Codex CLI** (via skill-installer):
+   **Codex CLI** (Codex chat command; not a shell command):
    ```
    $skill-installer install https://github.com/avivsinai/agent-message-queue/tree/main/skills/amq-cli
    ```

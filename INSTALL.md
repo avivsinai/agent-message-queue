@@ -2,7 +2,7 @@
 
 ## Quick Install
 
-### 1. Binary
+### 1. Binary (macOS/Linux)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
@@ -16,10 +16,12 @@ curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/
 /plugin install amq-cli@avivsinai-marketplace
 ```
 
-**Codex CLI:**
+**Codex CLI** (Codex chat command; not a shell command):
 ```
 $skill-installer install https://github.com/avivsinai/agent-message-queue/tree/main/skills/amq-cli
 ```
+
+Restart Codex after installing.
 
 ---
 
