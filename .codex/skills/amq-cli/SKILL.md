@@ -56,7 +56,13 @@ export AM_ME=codex    # Terminal 2: Codex CLI
 ```
 Run this in a background terminal: while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done
 ```
-Verify with `/ps`.
+Verify with `/ps`. Ensure the current Codex session is using config with `unified_exec = true` (or launch with `codex --enable unified_exec`).
+
+**Notify Hook (fallback, notify-only):** Use when background terminals are flaky; treat this as notify-only (no draining).
+```
+notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
+```
+Use `amq drain --include-body` manually (or keep the background loop) to act on messages.
 
 ### Handle Messages by Priority
 
