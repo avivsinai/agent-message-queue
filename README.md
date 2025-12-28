@@ -10,7 +10,7 @@ File-based message queue for AI agent coordination. Enables Claude Code and Code
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
 
-Verify: `amq --version`
+Installs to `~/.local/bin` or `~/go/bin` (no sudo required). Verify: `amq --version`
 
 ### 2. Install Skill
 

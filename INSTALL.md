@@ -8,6 +8,12 @@
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
 
+Installs to user-local directory (no sudo required):
+- `$GOBIN` if set
+- `~/.local/bin` if exists
+- `~/go/bin` if exists
+- `~/.local/bin` (created if needed)
+
 ### 2. Skill
 
 **Claude Code:**
@@ -41,7 +47,8 @@ Download from [Releases](https://github.com/avivsinai/agent-message-queue/releas
 
 ```bash
 tar xzf amq_*.tar.gz
-sudo mv amq /usr/local/bin/
+mkdir -p ~/.local/bin
+mv amq ~/.local/bin/
 ```
 
 ### Binary: Build from Source
@@ -52,7 +59,8 @@ Requires Go 1.25+:
 git clone https://github.com/avivsinai/agent-message-queue.git
 cd agent-message-queue
 make build
-sudo mv amq /usr/local/bin/
+mkdir -p ~/.local/bin
+mv amq ~/.local/bin/
 ```
 
 ### Binary: Install Script Options
