@@ -13,7 +13,7 @@ File-based message queue for agent-to-agent coordination.
 
 Requires `amq` binary in PATH. Install:
 ```bash
-curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
 
 Verify: `amq --version`

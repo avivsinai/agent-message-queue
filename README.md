@@ -9,7 +9,7 @@ Requires Go 1.25+ to build from source.
 ### Quick Install (macOS/Linux)
 
 ```bash
-curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
 
 This downloads the latest binary and installs it to `/usr/local/bin`.

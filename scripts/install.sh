@@ -1,10 +1,10 @@
 #!/bin/bash
 # AMQ Binary Installer
-# Usage: curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 #
-# Options:
-#   VERSION=v0.7.3 ./install.sh   # Install specific version
-#   INSTALL_DIR=~/bin ./install.sh # Install to custom directory
+# Options (set before piping to bash):
+#   curl ... | VERSION=v0.7.3 bash
+#   curl ... | INSTALL_DIR=~/bin bash
 
 set -e
 
@@ -51,7 +51,7 @@ echo "Platform: ${OS}_${ARCH}"
 # Get version
 if [ "$VERSION" = "latest" ]; then
     echo "Fetching latest version..."
-    VERSION=$(curl -sL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+    VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
     if [ -z "$VERSION" ]; then
         echo -e "${RED}Error: Could not determine latest version${NC}"
         exit 1
@@ -71,32 +71,45 @@ echo "Downloading: $ASSET"
 TMP_DIR=$(mktemp -d)
 trap "rm -rf $TMP_DIR" EXIT
 
-# Download and extract
-if ! curl -sL "$URL" -o "$TMP_DIR/$ASSET"; then
-    echo -e "${RED}Error: Download failed${NC}"
+# Download (curl -f fails on HTTP errors like 404)
+if ! curl -fsSL "$URL" -o "$TMP_DIR/$ASSET"; then
+    echo -e "${RED}Error: Download failed (asset not found or network error)${NC}"
     echo "URL: $URL"
+    echo "Check available releases: https://github.com/$REPO/releases"
     exit 1
 fi
 
 cd "$TMP_DIR"
-tar xzf "$ASSET"
+if ! tar xzf "$ASSET" 2>/dev/null; then
+    echo -e "${RED}Error: Failed to extract archive (corrupted download?)${NC}"
+    exit 1
+fi
 
 if [ ! -f "amq" ]; then
     echo -e "${RED}Error: Binary not found in archive${NC}"
     exit 1
 fi
 
-# Install
+# Install using install command (handles permissions correctly)
 echo "Installing to: $INSTALL_DIR/amq"
 
-if [ -w "$INSTALL_DIR" ]; then
-    mv amq "$INSTALL_DIR/amq"
-else
-    echo "Requires sudo for $INSTALL_DIR"
-    sudo mv amq "$INSTALL_DIR/amq"
+# Ensure install directory exists
+if [ ! -d "$INSTALL_DIR" ]; then
+    if [ -w "$(dirname "$INSTALL_DIR")" ]; then
+        mkdir -p "$INSTALL_DIR"
+    else
+        echo "Creating $INSTALL_DIR (requires sudo)"
+        sudo mkdir -p "$INSTALL_DIR"
+    fi
 fi
 
-chmod +x "$INSTALL_DIR/amq"
+# Install binary with correct permissions
+if [ -w "$INSTALL_DIR" ]; then
+    install -m 0755 amq "$INSTALL_DIR/amq"
+else
+    echo "Requires sudo for $INSTALL_DIR"
+    sudo install -m 0755 amq "$INSTALL_DIR/amq"
+fi
 
 echo ""
 echo -e "${GREEN}Installation complete!${NC}"

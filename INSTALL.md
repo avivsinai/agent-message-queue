@@ -9,13 +9,13 @@ AMQ has two components:
 ### One-liner (macOS/Linux)
 
 ```bash
-curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
 
 Options:
 ```bash
-VERSION=v0.7.3 curl -sL .../install.sh | bash    # Specific version
-INSTALL_DIR=~/bin curl -sL .../install.sh | bash # Custom directory
+curl -fsSL .../install.sh | VERSION=v0.7.3 bash      # Specific version
+curl -fsSL .../install.sh | INSTALL_DIR=~/bin bash   # Custom directory
 ```
 
 ### Manual Download
@@ -52,9 +52,9 @@ sudo mv amq /usr/local/bin/
 amq --version
 ```
 
-## Step 2: Install the Skill (Optional)
+## Step 2: Install the Skill
 
-The skill teaches Claude Code and Codex CLI how to use AMQ commands. Skip this if you just want the binary.
+The skill teaches Claude Code and Codex CLI how to use AMQ. Required for AI agent workflows.
 
 ### Claude Code
 
@@ -91,10 +91,10 @@ AM_ME=codex amq list --new
 
 Re-run the install script to upgrade to the latest version:
 ```bash
-curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
 
 Or specify a version:
 ```bash
-VERSION=v0.8.0 curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | VERSION=v0.8.0 bash
 ```
