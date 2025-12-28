@@ -80,9 +80,9 @@ This creates:
 export AM_ME=claude AM_ROOT=.agent-mail
 claude
 
-# In Claude Code, say:
-# "Run amq-coop-watcher in background while I work on [task]"
-# (bundled watcher agent: .claude/agents/amq-coop-watcher.md)
+# In Claude Code, start a background watcher:
+# "Start a background task (haiku model) to run: amq monitor --timeout 0 --include-body --json
+#  When messages arrive, summarize by priority (urgent/normal/low) and report back."
 ```
 
 **Terminal 2 - Codex CLI:**
@@ -95,7 +95,7 @@ codex
 # Toggle "Background terminal" to enabled
 
 # Then tell Codex:
-# "Run this in a background terminal: while true; do amq monitor --timeout 0 --json; sleep 0.2; done"
+# "Run this in a background terminal: while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done"
 # (amq monitor exits after each batch; the loop keeps it running)
 
 # Verify with: /ps
@@ -211,13 +211,14 @@ amq reply --me claude --id "msg_456" \
 
 ## Claude Code Integration
 
-### Background Watcher Agent
+### Background Watcher
 
-The `amq-coop-watcher` agent (`.claude/agents/amq-coop-watcher.md`) runs in the background with a `while true` loop that auto-respawns after each message.
+Use the Task tool with `run_in_background: true` and `model: haiku` to spawn a lightweight watcher:
 
 **In your session:**
 ```
-"Run amq-coop-watcher in the background while I work on this feature"
+"Start a background task (haiku model) to run: amq monitor --timeout 0 --include-body --json
+ When messages arrive, summarize by priority (urgent/normal/low) and report back."
 ```
 
 **When watcher returns:**
@@ -226,8 +227,9 @@ The `amq-coop-watcher` agent (`.claude/agents/amq-coop-watcher.md`) runs in the 
    - `urgent` → Stop current work, address immediately
    - `normal` → Add to TodoWrite, continue current work
    - `low` → Note for later, continue
+3. Respawn the watcher for the next batch
 
-The watcher auto-respawns after each message. Only re-launch if the 10-minute background task timeout expires.
+The main agent must respawn the watcher after each batch. Only re-launch if the 10-minute background task timeout expires.
 
 ### CLAUDE.md Co-op Section
 
@@ -238,7 +240,7 @@ Add to your project's CLAUDE.md:
 
 On session start:
 1. Set `AM_ME=claude` (or `codex`), `AM_ROOT=.agent-mail`
-2. Claude Code: Spawn watcher (bundled in `.claude/agents/amq-coop-watcher.md`): "Run amq-coop-watcher in background while I work"
+2. Claude Code: Spawn a background watcher (Task tool, haiku model): "Run amq monitor --timeout 0 --include-body --json and report messages by priority"
 3. Codex CLI: Run a background loop (monitor is one-shot): `while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done`
 
 When watcher returns with messages:
@@ -246,7 +248,7 @@ When watcher returns with messages:
 - normal → add to TodoWrite, respond when current task done
 - low → batch, respond at end of session
 
-The watcher auto-respawns. Only re-launch after 10-min timeout.
+Respawn the watcher after each batch. Re-launch after 10-min timeout.
 ```
 
 ## Codex CLI Integration

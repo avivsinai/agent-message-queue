@@ -98,7 +98,7 @@ Co-op mode enables real-time collaboration between Claude Code and Codex CLI ses
 
 On session start:
 1. Set `AM_ME=claude` (or `codex`), `AM_ROOT=.agent-mail`
-2. Claude Code: Spawn watcher (bundled in `.claude/agents/amq-coop-watcher.md`): "Run amq-coop-watcher in background while I work"
+2. Claude Code: Spawn a background watcher (Task tool with haiku model): "Run amq monitor --timeout 0 --include-body --json and report messages by priority"
 3. Codex CLI: Run a background loop (monitor is one-shot): `while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done`
 
 ### Message Priority Handling
@@ -108,7 +108,7 @@ When the watcher returns with messages:
 - **normal** → Add to TodoWrite, respond when current task done
 - **low** → Batch for end of session
 
-The Claude Code watcher auto-respawns after each message. Only re-launch after 10-min timeout. For Codex, keep the background loop running.
+Respawn the Claude Code watcher after each batch. Re-launch after 10-min timeout. For Codex, keep the background loop running.
 
 ### References
 

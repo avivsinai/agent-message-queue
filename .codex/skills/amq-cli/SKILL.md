@@ -53,10 +53,23 @@ export AM_ROOT=.agent-mail AM_ME=claude   # or: codex
 
 ### Background Watcher
 
-**Claude Code:** Spawn the bundled watcher agent:
+Start a background watcher to receive messages while you work.
+
+**Claude Code:** Use the Task tool with `run_in_background: true` and `model: haiku`:
+
 ```
-"Run amq-coop-watcher in background while I work"
+Run this command and wait for messages (blocks until one arrives):
+  amq monitor --timeout 0 --include-body --json
+
+When output returns, format a summary by priority:
+- URGENT: List with from/subject/kind + body preview → requires immediate attention
+- NORMAL: List with from/subject/kind → add to TODOs
+- LOW: Count and summarize → batch for later
+
+Do NOT take actions yourself. Just report what arrived, then STOP so the main agent wakes up.
 ```
+
+The main agent will respawn the watcher after processing each batch.
 
 **Codex CLI:** Run a continuous loop (`amq monitor` is one-shot):
 ```bash
