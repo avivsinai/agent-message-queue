@@ -2,7 +2,7 @@
 
 AMQ has two components:
 1. **Binary** (`amq`) - the CLI tool (required)
-2. **Skill** - teaches Claude Code / Codex how to use it (optional)
+2. **Skill** - teaches Claude Code / Codex how to use it (required for AI workflows)
 
 ## Step 1: Install the Binary
 

@@ -69,7 +69,7 @@ echo "Downloading: $ASSET"
 
 # Create temp directory
 TMP_DIR=$(mktemp -d)
-trap "rm -rf $TMP_DIR" EXIT
+trap 'rm -rf "$TMP_DIR"' EXIT
 
 # Download (curl -f fails on HTTP errors like 404)
 if ! curl -fsSL "$URL" -o "$TMP_DIR/$ASSET"; then
@@ -93,10 +93,10 @@ fi
 # Install using install command (handles permissions correctly)
 echo "Installing to: $INSTALL_DIR/amq"
 
-# Ensure install directory exists
+# Ensure install directory exists (try without sudo first)
 if [ ! -d "$INSTALL_DIR" ]; then
-    if [ -w "$(dirname "$INSTALL_DIR")" ]; then
-        mkdir -p "$INSTALL_DIR"
+    if mkdir -p "$INSTALL_DIR" 2>/dev/null; then
+        : # Created successfully
     else
         echo "Creating $INSTALL_DIR (requires sudo)"
         sudo mkdir -p "$INSTALL_DIR"
