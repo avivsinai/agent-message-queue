@@ -2,6 +2,12 @@
 # AMQ Binary Installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 #
+# Installs to user-local directory (no sudo required):
+#   - $GOBIN if set
+#   - ~/.local/bin if exists
+#   - ~/go/bin if exists
+#   - ~/.local/bin (created if needed)
+#
 # Options (set before piping to bash):
 #   curl ... | VERSION=v0.7.3 bash
 #   curl ... | INSTALL_DIR=~/bin bash
@@ -9,8 +15,26 @@
 set -e
 
 REPO="avivsinai/agent-message-queue"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 VERSION="${VERSION:-latest}"
+
+# Determine install directory (user-local, no sudo needed)
+# Priority: explicit INSTALL_DIR > GOBIN > ~/.local/bin > ~/go/bin
+determine_install_dir() {
+    if [ -n "$INSTALL_DIR" ]; then
+        echo "$INSTALL_DIR"
+    elif [ -n "$GOBIN" ]; then
+        echo "$GOBIN"
+    elif [ -d "$HOME/.local/bin" ]; then
+        echo "$HOME/.local/bin"
+    elif [ -d "$HOME/go/bin" ]; then
+        echo "$HOME/go/bin"
+    else
+        # Default to ~/.local/bin (XDG standard)
+        echo "$HOME/.local/bin"
+    fi
+}
+
+INSTALL_DIR=$(determine_install_dir)
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -90,37 +114,33 @@ if [ ! -f "amq" ]; then
     exit 1
 fi
 
-# Install using install command (handles permissions correctly)
+# Install to user-local directory (no sudo needed)
 echo "Installing to: $INSTALL_DIR/amq"
 
-# Ensure install directory exists (try without sudo first)
-if [ ! -d "$INSTALL_DIR" ]; then
-    if mkdir -p "$INSTALL_DIR" 2>/dev/null; then
-        : # Created successfully
-    else
-        echo "Creating $INSTALL_DIR (requires sudo)"
-        sudo mkdir -p "$INSTALL_DIR"
-    fi
-fi
+# Ensure install directory exists
+mkdir -p "$INSTALL_DIR"
 
 # Install binary with correct permissions
-if [ -w "$INSTALL_DIR" ]; then
-    install -m 0755 amq "$INSTALL_DIR/amq"
-else
-    echo "Requires sudo for $INSTALL_DIR"
-    sudo install -m 0755 amq "$INSTALL_DIR/amq"
-fi
+install -m 0755 amq "$INSTALL_DIR/amq"
 
 echo ""
 echo -e "${GREEN}Installation complete!${NC}"
 echo ""
 
-# Verify
+# Verify installation
 if command -v amq &> /dev/null; then
     echo "Installed: $(amq --version)"
 else
-    echo -e "${RED}Warning: amq not in PATH${NC}"
-    echo "Add $INSTALL_DIR to your PATH or run: export PATH=\"\$PATH:$INSTALL_DIR\""
+    echo -e "${RED}Warning: $INSTALL_DIR is not in your PATH${NC}"
+    echo ""
+    echo "Add it to your shell config:"
+    if [ -n "$ZSH_VERSION" ] || [ -f "$HOME/.zshrc" ]; then
+        echo "  echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.zshrc && source ~/.zshrc"
+    else
+        echo "  echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.bashrc && source ~/.bashrc"
+    fi
+    echo ""
+    echo "Or run directly: $INSTALL_DIR/amq --version"
 fi
 
 echo ""
