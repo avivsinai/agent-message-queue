@@ -389,14 +389,24 @@ func TestRunDrainCorruptMessage(t *testing.T) {
 	if result.Drained[0].ParseError == "" {
 		t.Errorf("expected parse error for corrupt message")
 	}
-	if !result.Drained[0].MovedToCur {
-		t.Errorf("corrupt message should still be moved to cur")
+	if !result.Drained[0].MovedToDLQ {
+		t.Errorf("corrupt message should be moved to DLQ")
 	}
 
-	// Verify corrupt message moved to cur
+	// Verify corrupt message moved to DLQ (not cur)
 	curPath := filepath.Join(fsq.AgentInboxCur(root, "alice"), "corrupt.md")
-	if _, err := os.Stat(curPath); err != nil {
-		t.Errorf("corrupt message should be in cur: %v", err)
+	if _, err := os.Stat(curPath); err == nil {
+		t.Errorf("corrupt message should NOT be in cur (should be in DLQ)")
+	}
+
+	// Verify message is in DLQ
+	dlqNewDir := fsq.AgentDLQNew(root, "alice")
+	entries, err := os.ReadDir(dlqNewDir)
+	if err != nil {
+		t.Fatalf("read DLQ dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("expected 1 DLQ message, got %d", len(entries))
 	}
 }
 

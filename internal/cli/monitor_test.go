@@ -111,6 +111,105 @@ func TestMonitor_ExistingMessages(t *testing.T) {
 	}
 }
 
+func TestMonitor_PeekDoesNotDrain(t *testing.T) {
+	root := t.TempDir()
+	agent := "alice"
+
+	// Initialize mailbox
+	if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	// Create a test message that requires ack
+	now := time.Now()
+	id, _ := format.NewMessageID(now)
+	msg := format.Message{
+		Header: format.Header{
+			Schema:      format.CurrentSchema,
+			ID:          id,
+			From:        "bob",
+			To:          []string{agent},
+			Thread:      "p2p/alice__bob",
+			Subject:     "Peek test",
+			Created:     now.UTC().Format(time.RFC3339Nano),
+			AckRequired: true,
+		},
+		Body: "Peek only.",
+	}
+	data, _ := msg.Marshal()
+	filename := id + ".md"
+	if _, err := fsq.DeliverToInboxes(root, []string{agent}, filename, data); err != nil {
+		t.Fatalf("DeliverToInboxes: %v", err)
+	}
+
+	// Capture output
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	// Run monitor in peek mode (should NOT drain)
+	err := runMonitor([]string{
+		"--me", agent,
+		"--root", root,
+		"--json",
+		"--include-body",
+		"--peek",
+	})
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("runMonitor: %v", err)
+	}
+
+	// Read output
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+
+	// Parse JSON
+	var result monitorResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("parse output: %v\noutput: %s", err, output)
+	}
+
+	if result.Event != "messages" {
+		t.Errorf("expected event=messages, got %s", result.Event)
+	}
+	if result.Mode != "peek" {
+		t.Errorf("expected mode=peek, got %s", result.Mode)
+	}
+	if len(result.Drained) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(result.Drained))
+	}
+	item := result.Drained[0]
+	if item.MovedToCur {
+		t.Errorf("expected moved_to_cur=false in peek mode")
+	}
+	if item.Acked {
+		t.Errorf("expected acked=false in peek mode")
+	}
+
+	// Verify message still in new
+	newPath := filepath.Join(fsq.AgentInboxNew(root, agent), filename)
+	if _, err := os.Stat(newPath); os.IsNotExist(err) {
+		t.Error("message not found in new after peek")
+	}
+
+	// Verify message not moved to cur
+	curPath := filepath.Join(fsq.AgentInboxCur(root, agent), filename)
+	if _, err := os.Stat(curPath); err == nil {
+		t.Error("message should not be moved to cur in peek mode")
+	}
+
+	// Verify ack not written
+	ackPath := filepath.Join(fsq.AgentAcksSent(root, agent), id+".json")
+	if _, err := os.Stat(ackPath); err == nil {
+		t.Error("ack should not be written in peek mode")
+	}
+}
+
 func TestMonitor_Timeout(t *testing.T) {
 	root := t.TempDir()
 	agent := "alice"

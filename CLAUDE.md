@@ -24,7 +24,7 @@ Requires Go 1.25+ and optionally golangci-lint.
 ```
 cmd/amq/           → Entry point (delegates to cli.Run())
 internal/
-├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch, monitor, reply)
+├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch, monitor, reply, dlq)
 ├── fsq/           → File system queue (Maildir delivery, atomic ops, scanning)
 ├── format/        → Message serialization (JSON frontmatter + Markdown body)
 ├── config/        → Config management (meta/config.json)
@@ -38,6 +38,7 @@ internal/
 <root>/agents/<agent>/inbox/{tmp,new,cur}/  → Incoming messages
 <root>/agents/<agent>/outbox/sent/          → Sent copies
 <root>/agents/<agent>/acks/{received,sent}/ → Acknowledgments
+<root>/agents/<agent>/dlq/{tmp,new,cur}/    → Dead letter queue
 ```
 
 ## Core Concepts
@@ -64,13 +65,40 @@ amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
 amq presence list [--json]
 amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
 amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
-amq monitor --me <agent> [--timeout <duration>] [--poll] [--include-body] [--json]
+amq monitor --me <agent> [--timeout <duration>] [--poll] [--include-body] [--peek] [--json]
 amq reply --me <agent> --id <msg_id> [--body <str|@file|stdin>] [--priority <p>] [--kind <k>]
+amq dlq list --me <agent> [--new | --cur] [--json]
+amq dlq read --me <agent> --id <dlq_id> [--json]
+amq dlq retry --me <agent> --id <dlq_id> [--all] [--force]
+amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
 ```
 
 Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Note: `init` has its own flags and doesn't accept these.
 
 Use `amq --version` to check the installed version.
+
+## Dead Letter Queue (DLQ)
+
+Messages that fail to parse during `drain` or `monitor` are automatically moved to the Dead Letter Queue instead of `cur/`. This prevents corrupt messages from blocking processing while preserving them for inspection.
+
+**DLQ Layout**:
+```
+<root>/agents/<agent>/dlq/{tmp,new,cur}/
+```
+
+**DLQ Envelope**: Wraps original message with failure metadata:
+- `failure_reason`: `parse_error`
+- `failure_detail`: Specific error message
+- `retry_count`: Number of retry attempts (max 3 before permanent DLQ)
+
+**Commands**:
+- `amq dlq list` - List dead-lettered messages
+- `amq dlq read --id <dlq_id>` - Inspect a DLQ message with failure info
+- `amq dlq retry --id <dlq_id>` - Move message back to inbox for reprocessing
+- `amq dlq retry --all` - Retry all DLQ messages
+- `amq dlq purge` - Permanently remove DLQ messages
+
+Use `--force` with retry to override the max retry limit.
 
 ## Multi-Agent Coordination
 
@@ -87,7 +115,8 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 | Ingest messages | `amq drain --include-body` | One-shot: read+move+ack |
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
 | Quick peek only | `amq list --new` | Non-blocking, no side effects |
-| Co-op background watch | `amq monitor --json` | Watch + drain combined (one-shot; loop for continuous watch) |
+| Co-op background watch | `amq monitor --peek --json` | Watch without draining (one-shot; loop after explicit drain) |
+| Codex notify hook | `notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]` | Mandatory for Codex to surface messages after each turn |
 | Reply to message | `amq reply --id <msg_id>` | Auto thread/refs handling |
 
 ## Co-op Mode (Claude <-> Codex)
@@ -98,8 +127,10 @@ Co-op mode enables real-time collaboration between Claude Code and Codex CLI ses
 
 On session start:
 1. Set `AM_ME=claude` (or `codex`), `AM_ROOT=.agent-mail`
-2. Claude Code: Spawn a background watcher (Task tool with haiku model): "Run amq monitor --timeout 0 --include-body --json and report messages by priority"
-3. Codex CLI: Run a background loop (monitor is one-shot): `while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done`
+2. Claude Code: Spawn a background watcher (subagent, haiku): "Run amq monitor --peek --timeout 0 --include-body --json and report messages by priority"
+3. Claude Code: (Recommended) SessionStart + Stop hooks in `.claude/settings.local.json` using `$CLAUDE_PROJECT_DIR/scripts/claude-session-start.sh` and `$CLAUDE_PROJECT_DIR/scripts/amq-stop-hook.sh` (SessionStart writes to `$CLAUDE_ENV_FILE`)
+4. Codex CLI: Configure notify hook in `~/.codex/config.toml`: `notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]` (uses notify payload `cwd` to locate `.agent-mail` unless `AM_ROOT` is set; optional `AMQ_NOTIFY_LOG` to capture raw payloads)
+5. (Optional) Codex background terminal for /ps visibility only; it does not wake Codex
 
 ### Message Priority Handling
 
@@ -108,7 +139,7 @@ When the watcher returns with messages:
 - **normal** → Add to TodoWrite, respond when current task done
 - **low** → Batch for end of session
 
-Respawn the Claude Code watcher after each batch. Re-launch after 10-min timeout. For Codex, keep the background loop running.
+Respawn the Claude Code watcher after each batch. Re-launch if it times out. For Codex, rely on the notify hook and drain after handling.
 
 ### References
 
@@ -136,6 +167,7 @@ Run individual test: `go test ./internal/fsq -run TestMaildir`
 
 Key test files:
 - `internal/fsq/maildir_test.go` - Atomic delivery semantics
+- `internal/fsq/dlq_test.go` - Dead letter queue operations
 - `internal/format/message_test.go` - Message serialization
 - `internal/thread/thread_test.go` - Thread collection
 - `internal/cli/watch_test.go` - Watch command with fsnotify

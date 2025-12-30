@@ -29,8 +29,17 @@ amq send --to codex --body "Message"           # Send
 amq drain --include-body                       # Receive (recommended)
 amq reply --id <msg_id> --body "Response"      # Reply
 amq watch --timeout 60s                        # Wait for messages
-amq monitor --timeout 0 --include-body --json  # Background watcher
+amq monitor --peek --timeout 0 --include-body --json  # Background watcher (peek)
 ```
+
+Codex notify hook (mandatory):
+```toml
+notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
+```
+Uses notify payload `cwd` to locate `.agent-mail` unless `AM_ROOT` is set. Optional `AMQ_NOTIFY_LOG`
+captures raw payloads for debugging.
+Python is used to parse the JSON payload without requiring `jq`.
+The hook exits quickly when `inbox/new` is empty or missing to avoid extra overhead.
 
 ## Co-op Mode (Autonomous Multi-Agent)
 
@@ -55,11 +64,11 @@ export AM_ROOT=.agent-mail AM_ME=claude   # or: codex
 
 Start a background watcher to receive messages while you work.
 
-**Claude Code:** Use the Task tool with `run_in_background: true` and `model: haiku`:
+**Claude Code:** Use a subagent (haiku) to run the watcher:
 
 ```
 Run this command and wait for messages (blocks until one arrives):
-  amq monitor --timeout 0 --include-body --json
+  amq monitor --peek --timeout 0 --include-body --json
 
 When output returns, format a summary by priority:
 - URGENT: List with from/subject/kind + body preview → requires immediate attention
@@ -71,10 +80,33 @@ Do NOT take actions yourself. Just report what arrived, then STOP so the main ag
 
 The main agent will respawn the watcher after processing each batch.
 
-**Codex CLI:** Run a continuous loop (`amq monitor` is one-shot):
-```bash
-while true; do amq monitor --timeout 0 --include-body --json; sleep 0.2; done
+**Claude Code (recommended):** Add SessionStart + Stop hooks in `.claude/settings.local.json`:
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "$CLAUDE_PROJECT_DIR/scripts/claude-session-start.sh"}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "$CLAUDE_PROJECT_DIR/scripts/amq-stop-hook.sh"}]}
+    ]
+  }
+}
 ```
+The stop hook short-circuits (no `amq` call) when `inbox/new` is empty.
+
+**Codex CLI (mandatory):** Configure notify hook so Codex surfaces AMQ messages after each turn:
+```toml
+notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
+```
+When notified, run `amq drain --include-body`.
+
+**Codex CLI (optional):** Background monitor for /ps visibility or manual diagnostics only; it does not wake Codex:
+```bash
+while true; do amq monitor --peek --timeout 0 --include-body --json; sleep 0.2; done
+```
+Drain after handling to avoid repeated notifications in peek mode.
+(`drain` moves messages from `new` to `cur` as the archive.)
 
 ### Priority Handling
 
@@ -96,7 +128,8 @@ amq send --to claude --priority urgent --kind question --body "Blocked on API"
 ### Receive
 ```bash
 amq drain --include-body         # One-shot, silent when empty
-amq monitor --timeout 0 --json   # Block until message, drain, emit JSON
+amq monitor --timeout 0 --json        # Block until message, drain, emit JSON
+amq monitor --peek --timeout 0 --json # Block until message, peek only
 amq list --new                   # Peek without side effects
 ```
 

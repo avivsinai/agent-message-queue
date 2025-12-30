@@ -4,6 +4,7 @@ Codex CLI AMQ notification hook.
 
 This script is called by Codex's notify hook on events like agent-turn-complete.
 It checks for pending AMQ messages and surfaces them via desktop notification.
+Background terminals do not wake Codex; use this hook for reliable co-op alerts.
 
 Setup:
 1. Add to ~/.codex/config.toml:
@@ -12,10 +13,11 @@ Setup:
 2. Ensure amq binary is in PATH or set AMQ_BIN environment variable.
 
 Environment variables:
-- AM_ROOT: Root directory for AMQ (default: .agent-mail)
+- AM_ROOT: Root directory for AMQ (overrides discovery from notify payload `cwd`)
 - AM_ME: Agent handle (default: codex)
 - AMQ_BIN: Path to amq binary (default: searches PATH)
-- AMQ_BULLETIN: Path to bulletin file (default: .agent-mail/meta/amq-bulletin.json)
+- AMQ_BULLETIN: Path to bulletin file (default: <AM_ROOT>/meta/amq-bulletin.json)
+- AMQ_NOTIFY_LOG: Optional path to append raw notify JSON (one line per event)
 """
 
 import json
@@ -23,6 +25,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import List, Optional
 
 
 def find_amq_binary() -> str:
@@ -52,6 +55,69 @@ def find_amq_binary() -> str:
         pass
 
     return ""
+
+
+def find_agent_mail_root(start: Path) -> Optional[str]:
+    """Walk upwards from start to locate .agent-mail with AMQ structure."""
+    try:
+        start = start.resolve()
+    except OSError:
+        return None
+    for parent in [start] + list(start.parents):
+        candidate = parent / ".agent-mail"
+        if (candidate / "agents").is_dir() or (candidate / "meta" / "config.json").is_file():
+            return str(candidate)
+    return None
+
+
+def resolve_root(event: dict) -> str:
+    """Resolve AM_ROOT with env override and .agent-mail discovery."""
+    if env_root := os.environ.get("AM_ROOT"):
+        return env_root
+
+    candidates: List[Path] = []
+    payload_cwd = event.get("cwd")
+    if isinstance(payload_cwd, str) and payload_cwd:
+        candidates.append(Path(payload_cwd))
+    try:
+        candidates.append(Path.cwd())
+    except FileNotFoundError:
+        pass
+
+    for candidate in candidates:
+        if root := find_agent_mail_root(candidate):
+            return root
+
+    if isinstance(payload_cwd, str) and payload_cwd:
+        return os.path.join(payload_cwd, ".agent-mail")
+    return ".agent-mail"
+
+
+def inbox_has_messages(root: str, me: str) -> bool:
+    """Fast path: check for .md files in inbox/new without invoking amq."""
+    inbox_new = Path(root) / "agents" / me / "inbox" / "new"
+    try:
+        for entry in inbox_new.iterdir():
+            if entry.is_file() and entry.name.endswith(".md") and not entry.name.startswith("."):
+                return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    return False
+
+
+def log_event(event: dict) -> None:
+    """Append raw event payload to AMQ_NOTIFY_LOG if configured."""
+    log_path = os.environ.get("AMQ_NOTIFY_LOG")
+    if not log_path:
+        return
+    try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event, sort_keys=True) + "\n")
+    except OSError:
+        pass
 
 
 def send_notification(title: str, message: str) -> None:
@@ -90,7 +156,14 @@ def check_amq_messages(amq_bin: str, root: str, me: str) -> dict:
         )
         messages = json.loads(result.stdout) if result.stdout.strip() else []
         return {"count": len(messages), "messages": messages}
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()
+        stdout = (e.stdout or "").strip()
+        detail = stderr or stdout or str(e)
+        if "--me is required" in detail:
+            detail = f"{detail}. Set AM_ME=codex (or your handle)."
+        return {"count": 0, "messages": [], "error": detail}
+    except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
         return {"count": 0, "messages": [], "error": str(e)}
 
 
@@ -150,13 +223,20 @@ def main():
     event_type = event.get("type", "")
     if event_type and event_type != "agent-turn-complete":
         return
+    if event:
+        log_event(event)
 
     # Configuration
-    root = os.environ.get("AM_ROOT", ".agent-mail")
-    me = os.environ.get("AM_ME", "codex")
+    root = resolve_root(event)
+    me = os.environ.get("AM_ME") or "codex"
     bulletin_path = os.environ.get(
         "AMQ_BULLETIN", os.path.join(root, "meta", "amq-bulletin.json")
     )
+
+    # Fast path: if inbox/new is empty or missing, clear bulletin and exit quickly.
+    if not inbox_has_messages(root, me):
+        clear_bulletin(bulletin_path)
+        return
 
     # Find amq binary
     amq_bin = find_amq_binary()

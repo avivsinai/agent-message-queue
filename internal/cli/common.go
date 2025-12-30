@@ -45,7 +45,7 @@ func defaultMe() string {
 
 func requireMe(handle string) error {
 	if strings.TrimSpace(handle) == "" {
-		return errors.New("--me is required (or set AM_ME)")
+		return errors.New("--me is required (or set AM_ME, e.g., export AM_ME=your-handle)")
 	}
 	return nil
 }

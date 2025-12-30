@@ -37,6 +37,8 @@ func Run(args []string) error {
 		return runMonitor(args[1:])
 	case "reply":
 		return runReply(args[1:])
+	case "dlq":
+		return runDLQ(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
@@ -95,6 +97,9 @@ func printUsage() error {
 		return err
 	}
 	if err := writeStdoutLine("  reply     Reply to a message (auto thread/refs)"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  dlq       Dead letter queue management"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine(""); err != nil {

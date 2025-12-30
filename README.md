@@ -52,7 +52,7 @@ For real-time Claude Code + Codex CLI collaboration:
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/setup-coop.sh | bash
 ```
 
-See [COOP.md](COOP.md) for the full protocol.
+See [COOP.md](COOP.md) for the full protocol (Codex requires the notify hook; it resolves `.agent-mail` from the notify payload `cwd` unless `AM_ROOT` is set).
 
 ## Documentation
 

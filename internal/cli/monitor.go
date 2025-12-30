@@ -30,6 +30,7 @@ type monitorItem struct {
 	Labels      []string       `json:"labels,omitempty"`
 	Context     map[string]any `json:"context,omitempty"`
 	MovedToCur  bool           `json:"moved_to_cur"`
+	MovedToDLQ  bool           `json:"moved_to_dlq,omitempty"`
 	Acked       bool           `json:"acked"`
 	ParseError  string         `json:"parse_error,omitempty"`
 	Filename    string         `json:"-"`
@@ -39,6 +40,7 @@ type monitorItem struct {
 type monitorResult struct {
 	Event      string        `json:"event"`                 // "messages", "timeout", "empty"
 	WatchEvent string        `json:"watch_event,omitempty"` // "existing", "new_message", ""
+	Mode       string        `json:"mode,omitempty"`        // "drain", "peek"
 	Me         string        `json:"me"`
 	Count      int           `json:"count"`
 	Drained    []monitorItem `json:"drained"`
@@ -52,9 +54,11 @@ func runMonitor(args []string) error {
 	includeBodyFlag := fs.Bool("include-body", false, "Include message body in output")
 	ackFlag := fs.Bool("ack", true, "Acknowledge messages that require ack")
 	limitFlag := fs.Int("limit", 20, "Max messages to drain (0 = no limit)")
+	peekFlag := fs.Bool("peek", false, "Peek without moving messages to cur (no ack)")
 
 	usage := usageWithFlags(fs, "amq monitor --me <agent> [options]",
 		"Combined watch+drain: waits for messages, drains them, outputs structured payload.",
+		"Use --peek to watch without moving messages to cur (no ack).",
 		"Ideal for co-op mode background watchers in Claude Code or Codex.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
@@ -83,16 +87,27 @@ func runMonitor(args []string) error {
 		return err
 	}
 
+	mode := "drain"
+	doAck := *ackFlag
+	if *peekFlag {
+		mode = "peek"
+		doAck = false
+	}
+
 	// First, try to drain existing messages
-	items, err := drainMessages(root, common.Me, *includeBodyFlag, *ackFlag, *limitFlag)
+	items, err := collectMonitorItems(root, common.Me, *includeBodyFlag, *limitFlag)
 	if err != nil {
 		return err
 	}
 
 	if len(items) > 0 {
+		if mode == "drain" {
+			drainMonitorItems(root, common.Me, doAck, items)
+		}
 		return outputMonitorResult(common.JSON, monitorResult{
 			Event:      "messages",
 			WatchEvent: "existing",
+			Mode:       mode,
 			Me:         common.Me,
 			Count:      len(items),
 			Drained:    items,
@@ -120,6 +135,7 @@ func runMonitor(args []string) error {
 		if errors.Is(watchErr, context.DeadlineExceeded) {
 			return outputMonitorResult(common.JSON, monitorResult{
 				Event:   "timeout",
+				Mode:    mode,
 				Me:      common.Me,
 				Count:   0,
 				Drained: []monitorItem{},
@@ -129,14 +145,18 @@ func runMonitor(args []string) error {
 	}
 
 	// New message arrived - drain it
-	items, err = drainMessages(root, common.Me, *includeBodyFlag, *ackFlag, *limitFlag)
+	items, err = collectMonitorItems(root, common.Me, *includeBodyFlag, *limitFlag)
 	if err != nil {
 		return err
+	}
+	if mode == "drain" {
+		drainMonitorItems(root, common.Me, doAck, items)
 	}
 
 	result := monitorResult{
 		Event:      "messages",
 		WatchEvent: watchEvent,
+		Mode:       mode,
 		Me:         common.Me,
 		Count:      len(items),
 		Drained:    items,
@@ -149,7 +169,7 @@ func runMonitor(args []string) error {
 	return outputMonitorResult(common.JSON, result)
 }
 
-func drainMessages(root, me string, includeBody, doAck bool, limit int) ([]monitorItem, error) {
+func collectMonitorItems(root, me string, includeBody bool, limit int) ([]monitorItem, error) {
 	newDir := fsq.AgentInboxNew(root, me)
 	entries, err := os.ReadDir(newDir)
 	if err != nil {
@@ -238,9 +258,23 @@ func drainMessages(root, me string, includeBody, doAck bool, limit int) ([]monit
 		items = items[:limit]
 	}
 
-	// Process each message: move to cur, optionally ack
+	return items, nil
+}
+
+func drainMonitorItems(root, me string, doAck bool, items []monitorItem) {
+	// Process each message: move to cur (or DLQ for parse errors), optionally ack
 	for i := range items {
 		item := &items[i]
+
+		// Move parse errors to DLQ instead of cur
+		if item.ParseError != "" {
+			if _, err := fsq.MoveToDLQ(root, me, item.Filename, item.ID, "parse_error", item.ParseError); err != nil {
+				_ = writeStderr("warning: failed to move %s to DLQ: %v\n", item.Filename, err)
+			} else {
+				item.MovedToDLQ = true
+			}
+			continue
+		}
 
 		// Move new -> cur
 		if err := fsq.MoveNewToCur(root, me, item.Filename); err != nil {
@@ -268,8 +302,6 @@ func drainMessages(root, me string, includeBody, doAck bool, limit int) ([]monit
 			}
 		}
 	}
-
-	return items, nil
 }
 
 func monitorAckMessage(root, me string, item *monitorItem) error {
@@ -407,19 +439,35 @@ func outputMonitorResult(jsonOutput bool, result monitorResult) error {
 		return writeJSON(os.Stdout, result)
 	}
 
+	mode := result.Mode
+	if mode == "" {
+		mode = "drain"
+	}
+
 	switch result.Event {
 	case "timeout":
 		return writeStdoutLine("No new messages (timeout)")
 	case "empty":
+		if mode == "peek" {
+			return writeStdoutLine("No messages available")
+		}
 		return writeStdoutLine("No messages to drain")
 	case "messages":
-		if err := writeStdout("[AMQ] %d message(s) for %s:\n\n", result.Count, result.Me); err != nil {
+		header := "[AMQ] %d message(s) for %s:\n\n"
+		if mode == "peek" {
+			header = "[AMQ] %d message(s) available for %s (peek):\n\n"
+		}
+		if err := writeStdout(header, result.Count, result.Me); err != nil {
 			return err
 		}
 		for _, item := range result.Drained {
 			// Handle corrupt/unparseable messages like drain does
 			if item.ParseError != "" {
-				if err := writeStdout("- ID: %s\n  ERROR: %s\n---\n", item.ID, item.ParseError); err != nil {
+				dlqNote := ""
+				if item.MovedToDLQ {
+					dlqNote = " [moved to DLQ]"
+				}
+				if err := writeStdout("- ID: %s\n  ERROR: %s%s\n---\n", item.ID, item.ParseError, dlqNote); err != nil {
 					return err
 				}
 				continue

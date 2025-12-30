@@ -24,6 +24,7 @@ type drainItem struct {
 	Body        string         `json:"body,omitempty"`
 	AckRequired bool           `json:"ack_required"`
 	MovedToCur  bool           `json:"moved_to_cur"`
+	MovedToDLQ  bool           `json:"moved_to_dlq,omitempty"`
 	Acked       bool           `json:"acked"`
 	ParseError  string         `json:"parse_error,omitempty"`
 	Priority    string         `json:"priority,omitempty"`
@@ -174,9 +175,19 @@ func runDrain(args []string) error {
 		return nil
 	}
 
-	// Process each message: move to cur, optionally ack
+	// Process each message: move to cur (or DLQ for parse errors), optionally ack
 	for i := range items {
 		item := &items[i]
+
+		// Move parse errors to DLQ instead of cur
+		if item.ParseError != "" {
+			if _, err := fsq.MoveToDLQ(root, common.Me, item.Filename, item.ID, "parse_error", item.ParseError); err != nil {
+				_ = writeStderr("warning: failed to move %s to DLQ: %v\n", item.Filename, err)
+			} else {
+				item.MovedToDLQ = true
+			}
+			continue
+		}
 
 		// Move new -> cur
 		if err := fsq.MoveNewToCur(root, common.Me, item.Filename); err != nil {
@@ -216,7 +227,11 @@ func runDrain(args []string) error {
 	}
 	for _, item := range items {
 		if item.ParseError != "" {
-			if err := writeStdout("- ID: %s\n  ERROR: %s\n---\n", item.ID, item.ParseError); err != nil {
+			dlqNote := ""
+			if item.MovedToDLQ {
+				dlqNote = " [moved to DLQ]"
+			}
+			if err := writeStdout("- ID: %s\n  ERROR: %s%s\n---\n", item.ID, item.ParseError, dlqNote); err != nil {
 				return err
 			}
 			continue
