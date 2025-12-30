@@ -139,6 +139,16 @@ amq reply --id <msg_id> --body "LGTM"
 amq reply --id <msg_id> --kind review_response --body "See comments..."
 ```
 
+### Dead Letter Queue
+```bash
+amq dlq list                        # List failed messages
+amq dlq read --id <dlq_id>          # Inspect failure details
+amq dlq retry --id <dlq_id>         # Retry (move back to inbox)
+amq dlq retry --all [--force]       # Retry all (--force ignores max retries)
+amq dlq purge --older-than 24h      # Clean old DLQ entries
+```
+Corrupt/unparseable messages auto-move to DLQ during drain/monitor. Max 3 retries before permanent DLQ.
+
 ### Other
 ```bash
 amq thread --id p2p/claude__codex --include-body   # View thread
