@@ -16,11 +16,11 @@ Co-op mode enables Claude Code and Codex CLI to collaborate as **review partners
    - `think harder` → architectural decisions
    - `ultrathink` → critical design choices, security-sensitive code
 
-3. **Multi-agent verification** - Instead of asking "is this right?", send a review request to your partner. This is the co-op advantage: parallel verification without blocking on human input.
+3. **Multi-agent verification** - Instead of asking "is this right?", send a review request to your partner.
 
-4. **Completion signals** - When your task is done, signal completion clearly. Don't wait for user confirmation.
+4. **Completion signals** - When your task is done, signal completion clearly.
 
-5. **Iteration over perfection** - Ship working code, request review, iterate based on feedback. Initial quality matters less than refinement cycles.
+5. **Iteration over perfection** - Ship working code, request review, iterate based on feedback.
 
 ### When to Message Partner vs User
 
@@ -33,19 +33,13 @@ Co-op mode enables Claude Code and Codex CLI to collaborate as **review partners
 | Need external credentials/access | → Ask user |
 | Unclear on original requirements | → Ask user |
 
-### Context Management
-
-Long autonomous sessions accumulate context. Use `/clear` between major task boundaries to maintain decision quality. Your partner agent provides continuity—you don't need to hold everything in your own context.
-
 ## Quick Start
 
 ### Prerequisites (One-Time)
 
 1. **Install amq CLI** ([releases](https://github.com/avivsinai/agent-message-queue/releases)):
    ```bash
-   # macOS arm64
-   curl -L https://github.com/avivsinai/agent-message-queue/releases/latest/download/amq_darwin_arm64.tar.gz | tar xz
-   sudo mv amq /usr/local/bin/
+   curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
    ```
 
 2. **Install amq-cli skill** for your agents:
@@ -56,7 +50,7 @@ Long autonomous sessions accumulate context. Use `/clear` between major task bou
    /plugin install amq-cli@avivsinai-marketplace
    ```
 
-   **Codex CLI** (Codex chat command; not a shell command):
+   **Codex CLI** (Codex chat command):
    ```
    $skill-installer install https://github.com/avivsinai/agent-message-queue/tree/main/skills/amq-cli
    ```
@@ -71,51 +65,43 @@ curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/sc
 
 This creates:
 - `.agent-mail/` - Agent mailboxes (gitignored)
-- `scripts/amq-stop-hook.sh` - Stop hook script (opt-in, see below)
 
 ### Running Co-op Mode
 
 **Terminal 1 - Claude Code:**
 ```bash
 export AM_ME=claude AM_ROOT=.agent-mail
+amq wake &
 claude
-
-# In Claude Code, start a background watcher:
-# "Start a subagent (haiku) to run: amq monitor --peek --timeout 0 --include-body --json
-#  When messages arrive, summarize by priority (urgent/normal/low) and report back."
 ```
 
 **Terminal 2 - Codex CLI:**
 ```bash
 export AM_ME=codex AM_ROOT=.agent-mail
+amq wake &
 codex
-
-# Mandatory: install the notify hook so Codex can surface AMQ messages after each turn
-# Add to ~/.codex/config.toml:
-#   notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
-
-# Optional: enable background terminals for /ps visibility or manual diagnostics
-# (Background terminal output does NOT wake Codex; don't rely on it for message handling.)
-# Type: /experimental → toggle "Background terminal" to enabled
-# Or add:
-#   [features]
-#   unified_exec = true
-#
-# Optional monitor (peek-only):
-#   while true; do amq monitor --peek --timeout 0 --include-body --json; sleep 0.2; done
 ```
 
-**For full autonomy:**
-- Claude Code: Optionally enable the stop hook (see Advanced section below)
-- Codex CLI: Ensure the notify hook is configured, then use `/approvals` to set autonomous mode (command may vary by version; check `codex --help`)
+That's it. When messages arrive, `amq wake` attempts to inject a notification into your terminal (best-effort).
 
 ### How It Works
 
-1. Claude Code runs a background watcher that blocks until a message arrives, then reports it
-2. Codex relies on the notify hook to surface pending AMQ messages after each turn
-3. Agent B processes the message, responds, then drains to avoid repeats
-4. If enabled, the stop hook prevents agents from stopping while messages are pending
+1. `amq wake` runs as a background job in the same terminal
+2. When a message arrives in your inbox, it uses TIOCSTI to inject text into your terminal
+3. The CLI reads the input at the next prompt (if busy, it queues)
+4. You run `amq drain --include-body` to read messages
 5. Agents work autonomously—messaging each other, not the user
+
+### Fallback: Codex Notify Hook
+
+If `amq wake` doesn't work (e.g., kernel hardening disables TIOCSTI), configure the notify hook:
+
+```toml
+# ~/.codex/config.toml
+notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
+```
+
+The hook surfaces pending messages after each Codex turn.
 
 ## Message Format
 
@@ -132,7 +118,6 @@ Co-op mode extends the standard AMQ message format with optional fields:
   "created": "2025-12-27T12:00:00Z",
   "ack_required": true,
   "refs": ["msg_prev_123"],
-
   "priority": "urgent",
   "kind": "review_request",
   "labels": ["parser", "edge-cases"],
@@ -147,7 +132,7 @@ Co-op mode extends the standard AMQ message format with optional fields:
 
 | Priority | Behavior | Use When |
 |----------|----------|----------|
-| `urgent` | Interrupt current work | Blocking issues, critical bugs, time-sensitive decisions |
+| `urgent` | Interrupt current work | Blocking issues, critical bugs, time-sensitive |
 | `normal` | Add to TODO list | Code reviews, questions, standard requests |
 | `low` | Batch/digest later | Status updates, FYIs, non-blocking info |
 
@@ -159,7 +144,7 @@ Co-op mode extends the standard AMQ message format with optional fields:
 | `review_response` | normal | Code review feedback |
 | `question` | normal | Question needing answer |
 | `answer` | normal | Response to a question |
-| `decision` | normal (urgent if blocking) | Decision request |
+| `decision` | normal | Decision request |
 | `brainstorm` | low | Open-ended discussion |
 | `status` | low | Status update/FYI |
 | `todo` | normal | Task assignment |
@@ -174,8 +159,6 @@ amq send --me claude --to codex \
   --subject "Review: New parser" \
   --priority normal \
   --kind review_request \
-  --labels "parser,refactor" \
-  --context '{"paths": ["internal/format/message.go"], "focus": "error handling"}' \
   --body "Please review the new message parser..."
 
 # Urgent blocking question
@@ -183,217 +166,72 @@ amq send --me codex --to claude \
   --subject "Blocked: API design question" \
   --priority urgent \
   --kind question \
-  --body "I need to decide on the API shape before continuing..."
+  --body "I need to decide on the API shape..."
 ```
 
-### Monitor (Watch + Drain) and Peek Mode
+### Receive Messages
 
 ```bash
-# One-shot: block until a message arrives, drain, output JSON (loop for continuous watch)
-amq monitor --me claude --timeout 0 --include-body --json
+# Recommended: one-shot drain
+amq drain --include-body
 
-# With timeout (60s default)
-amq monitor --me codex --timeout 30s --json
+# Wait for messages (blocking)
+amq watch --timeout 60s
 
-# For scripts/hooks
-amq monitor --me claude --json
-
-# Peek-only: watch without moving to cur or acking
-amq monitor --me claude --peek --timeout 0 --include-body --json
+# Peek without side effects
+amq list --new
 ```
-
-In peek mode, messages remain in `inbox/new` until you explicitly drain them:
-```bash
-amq drain --me claude --include-body
-```
-`drain` moves messages to `inbox/cur` (archive) and optionally writes acks; without it, peek mode will
-continue to surface the same messages.
 
 ### Reply (Auto Thread/Refs)
 
 ```bash
-# Reply to a message (auto-sets thread, refs, recipient)
 amq reply --me codex --id "msg_123" \
   --kind review_response \
   --body "LGTM with minor suggestions..."
-
-# Reply with urgency
-amq reply --me claude --id "msg_456" \
-  --priority urgent \
-  --body "Found a critical issue..."
 ```
 
-## Claude Code Integration
+## Wake Command (Experimental)
 
-### Background Watcher
+`amq wake` uses TIOCSTI to inject notifications into your terminal:
 
-Use a subagent (Task tool) to run a lightweight watcher. Subagents run in a separate context and can
-be invoked in parallel, which keeps the main agent focused.
-
-**In your session:**
-```
-"Start a subagent (haiku) to run: amq monitor --peek --timeout 0 --include-body --json
- When messages arrive, summarize by priority (urgent/normal/low) and report back."
+```bash
+# Start waker before CLI
+amq wake --me claude &
+claude
 ```
 
-**When watcher returns:**
-1. Parse the message summary
-2. Handle by priority:
-   - `urgent` → Stop current work, address immediately
-   - `normal` → Add to TodoWrite, continue current work
-   - `low` → Note for later, continue
-3. Respawn the watcher for the next batch
-4. Drain after handling: `amq drain --include-body`
+**Options:**
+- `--bell` - Ring terminal bell on new messages
+- `--inject-cmd "..."` - Inject actual command instead of notification
+- `--debounce 250ms` - Batch rapid messages
+- `--preview-len 48` - Max subject preview length
 
-The main agent must respawn the watcher after each batch. Re-launch if the watcher times out.
+**Notification format:**
+- Single message: `[AMQ] Message from codex: Review complete`
+- Multiple: `[AMQ] 3 messages: 2 from codex, 1 from claude. Run: amq drain --include-body`
 
-### Claude Hooks (Recommended for Autonomy)
-
-Use `SessionStart` to set AMQ env vars for all tool calls, and `Stop` to block stopping when messages are pending.
-Store this in `.claude/settings.local.json` (local-only settings). `SessionStart` writes exports to
-`$CLAUDE_ENV_FILE`, which Claude sources for subsequent tool calls.
-Hooks are loaded at session start; restart the session to apply changes.
-The stop hook short-circuits (no `amq` call) when `inbox/new` is empty.
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {"type": "command", "command": "$CLAUDE_PROJECT_DIR/scripts/claude-session-start.sh"}
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {"type": "command", "command": "$CLAUDE_PROJECT_DIR/scripts/amq-stop-hook.sh"}
-        ]
-      }
-    ]
-  }
-}
-```
-
-### CLAUDE.md Co-op Section
-
-Add to your project's CLAUDE.md:
-
-```markdown
-## Co-op Mode (Claude <-> Codex)
-
-On session start:
-1. Set `AM_ME=claude` (or `codex`), `AM_ROOT=.agent-mail`
-2. Claude Code: Spawn a background watcher (subagent, haiku): "Run amq monitor --peek --timeout 0 --include-body --json and report messages by priority"
-3. Codex CLI: Configure notify hook in `~/.codex/config.toml`: `notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]`
-4. (Optional) Codex background terminal for /ps visibility only; it does not wake Codex
-5. (Recommended) Claude hooks in `.claude/settings.local.json` (SessionStart + Stop)
-
-When watcher returns with messages:
-- urgent → interrupt, respond now
-- normal → add to TodoWrite, respond when current task done
-- low → batch, respond at end of session
-
-Respawn the watcher after each batch. Re-launch after 10-min timeout. Drain messages after handling to avoid repeat notifications in peek mode.
-```
-
-## Codex CLI Integration (Notify Hook Required)
-
-Codex background terminals do **not** wake the main agent when output arrives. Use the notify hook
-to surface pending AMQ messages after each turn.
-
-### Notify Hook (Mandatory)
-
-1. Add to `~/.codex/config.toml`:
-   ```toml
-   notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
-   ```
-
-2. The script will:
-   - Check for pending messages after each Codex turn
-   - Send desktop notifications for new messages
-   - Write to `.agent-mail/meta/amq-bulletin.json`
-   - Exit quickly if `inbox/new` is empty or missing (no `amq` call)
-   - Resolve `AM_ROOT` by walking upward from the notify payload `cwd` (unless `AM_ROOT` is set)
-   - (Optional) Log raw notify payloads when `AMQ_NOTIFY_LOG` is set
-   - Uses Python to parse the JSON payload without requiring `jq`
-
-3. When you see a notification, drain:
-   ```bash
-   amq drain --me codex --include-body
-   ```
-
-Codex notify payload example (captured via `AMQ_NOTIFY_LOG`):
-```json
-{
-  "type": "agent-turn-complete",
-  "thread-id": "019b6ed1-f954-7b12-bdb1-13660ca291ff",
-  "turn-id": "0",
-  "cwd": "/Users/example/project",
-  "input-messages": ["Reply with OK."],
-  "last-assistant-message": "OK."
-}
-```
-
-### Background Monitor (Optional, does not wake Codex)
-
-Use only for `/ps` visibility or manual diagnostics. It does **not** wake Codex; the notify hook is the
-reliable signal path.
-
-1. Enable the "Background terminal" feature in Codex:
-   ```
-   /experimental
-   ```
-   Toggle **Background terminal** to enabled. Or add to `~/.codex/config.toml`:
-   ```toml
-   [features]
-   unified_exec = true
-   ```
-
-2. Start the monitor in a background terminal (amq monitor exits after each batch; keep it in a loop):
-   ```
-   Run this in a background terminal: while true; do amq monitor --peek --timeout 0 --include-body --json; sleep 0.2; done
-   ```
-
-3. Verify with `/ps` - you should see the monitor in the list.
+**Platform support:**
+- macOS: Works
+- Linux: May be disabled by kernel hardening (CONFIG_LEGACY_TIOCSTI)
+- Windows: Not supported (use WSL)
 
 ## Review Partner Workflow
 
 ### Requesting a Review
 
 ```bash
-# Claude requests review from Codex
 amq send --me claude --to codex \
   --subject "Review: Authentication refactor" \
   --kind review_request \
   --priority normal \
-  --labels "auth,security" \
   --context '{"paths": ["internal/auth/"], "focus": "JWT handling"}' \
   --body @review-request.md \
   --ack
 ```
 
-**review-request.md:**
-```markdown
-## Changes
-- Refactored JWT token validation
-- Added refresh token support
-- Updated error handling
-
-## What to Review
-1. Security implications of refresh tokens
-2. Error message exposure
-3. Token expiration logic
-
-## Context
-See git diff in `internal/auth/` directory.
-```
-
 ### Responding to a Review
 
 ```bash
-# Codex responds
 amq reply --me codex --id "msg_review_123" \
   --kind review_response \
   --body @review-response.md
@@ -409,41 +247,9 @@ The `context` field accepts any JSON object. Recommended structure:
   "symbols": ["Header", "runSend"],
   "focus": "error handling in validation",
   "commands": ["go test ./internal/cli/..."],
-  "hunks": [
-    {"file": "send.go", "lines": "45-60"}
-  ]
+  "hunks": [{"file": "send.go", "lines": "45-60"}]
 }
 ```
-
-## Advanced: Stop Hook (Opt-In)
-
-The setup script creates `scripts/amq-stop-hook.sh` which prevents the agent from stopping while messages are pending. This is **opt-in** - not enabled by default.
-
-**To enable**, add to `.claude/settings.json`:
-```json
-{
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "./scripts/amq-stop-hook.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-The hook checks `amq list --new` and returns:
-- `{"decision": "approve"}` → No pending messages, allow stop
-- `{"decision": "block", "reason": "You have N pending message(s)..."}` → Prompt agent to drain inbox
-
-**When to enable:** Use this when you want fully autonomous co-op sessions where agents must process all messages before stopping. Skip it if you prefer manual control over when to stop.
-
-See [Claude Code hooks documentation](https://code.claude.com/docs/en/hooks) for more hook options.
 
 ## Best Practices
 
@@ -452,18 +258,16 @@ See [Claude Code hooks documentation](https://code.claude.com/docs/en/hooks) for
 3. **Include context.paths** - Helps focus the review
 4. **Keep bodies concise** - Agent context is precious
 5. **Use --ack for important messages** - Ensures delivery confirmation
-6. **Re-launch watcher after timeout** - The 10-min limit requires periodic re-launch
-7. **Thread replies** - Use `amq reply` for conversation continuity
+6. **Thread replies** - Use `amq reply` for conversation continuity
 
 ## Troubleshooting
 
-### Watcher not starting
+### Wake not working
 ```bash
-# Check if inbox exists
-ls -la .agent-mail/agents/claude/inbox/
+# Test: run amq wake and watch for warnings
+amq wake --me claude
 
-# Initialize if needed
-amq init --root .agent-mail --agents claude,codex
+# Fallback: use notify hook for Codex, or run amq drain manually
 ```
 
 ### Messages not appearing
@@ -471,25 +275,12 @@ amq init --root .agent-mail --agents claude,codex
 # Check inbox directly
 amq list --me claude --new --json
 
-# Force poll mode if fsnotify issues (peek-only)
-amq monitor --me claude --peek --poll --json
+# Force poll mode if fsnotify issues
+amq watch --me claude --poll
 ```
 
-### Codex background terminal not waking
-
-This is expected. Codex does not surface background terminal output as a wake signal.
-Use the notify hook to surface pending messages after each turn.
-
-### Stop hook not blocking
-
-Claude Code does not run `Stop` hooks if the user interrupts the session. Use the stop hook for
-normal exits only, and keep watchers running during autonomous co-op.
-
-### Codex notify hook not working
-```bash
-# Test the script directly
-python3 scripts/codex-amq-notify.py '{"type": "agent-turn-complete"}'
-
-# Check bulletin file
-cat .agent-mail/meta/amq-bulletin.json
+### Codex not responding
+Configure the notify hook as fallback:
+```toml
+notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
 ```

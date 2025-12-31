@@ -2,6 +2,8 @@ module github.com/avivsinai/agent-message-queue
 
 go 1.25
 
-require github.com/fsnotify/fsnotify v1.9.0
-
-require golang.org/x/sys v0.13.0 // indirect
+require (
+	github.com/fsnotify/fsnotify v1.9.0
+	golang.org/x/sys v0.39.0
+	golang.org/x/term v0.38.0
+)
