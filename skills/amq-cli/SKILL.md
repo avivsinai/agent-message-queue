@@ -18,8 +18,6 @@ curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/
 
 Verify: `amq --version`
 
-For manual install or build from source, see [INSTALL.md](https://github.com/avivsinai/agent-message-queue/blob/main/INSTALL.md).
-
 ## Quick Reference
 
 ```bash
@@ -29,17 +27,7 @@ amq send --to codex --body "Message"           # Send
 amq drain --include-body                       # Receive (recommended)
 amq reply --id <msg_id> --body "Response"      # Reply
 amq watch --timeout 60s                        # Wait for messages
-amq monitor --peek --timeout 0 --include-body --json  # Background watcher (peek)
 ```
-
-Codex notify hook (mandatory):
-```toml
-notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
-```
-Uses notify payload `cwd` to locate `.agent-mail` unless `AM_ROOT` is set. Optional `AMQ_NOTIFY_LOG`
-captures raw payloads for debugging.
-Python is used to parse the JSON payload without requiring `jq`.
-The hook exits quickly when `inbox/new` is empty or missing to avoid extra overhead.
 
 ## Co-op Mode (Autonomous Multi-Agent)
 
@@ -60,53 +48,28 @@ curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/sc
 export AM_ROOT=.agent-mail AM_ME=claude   # or: codex
 ```
 
-### Background Watcher
+### Wake Notifications (Experimental)
 
-Start a background watcher to receive messages while you work.
+Start a background waker before your CLI to receive notifications when messages arrive:
 
-**Claude Code:** Use a subagent (haiku) to run the watcher:
-
-```
-Run this command and wait for messages (blocks until one arrives):
-  amq monitor --peek --timeout 0 --include-body --json
-
-When output returns, format a summary by priority:
-- URGENT: List with from/subject/kind + body preview → requires immediate attention
-- NORMAL: List with from/subject/kind → add to TODOs
-- LOW: Count and summarize → batch for later
-
-Do NOT take actions yourself. Just report what arrived, then STOP so the main agent wakes up.
-```
-
-The main agent will respawn the watcher after processing each batch.
-
-**Claude Code (recommended):** Add SessionStart + Stop hooks in `.claude/settings.local.json`:
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {"hooks": [{"type": "command", "command": "$CLAUDE_PROJECT_DIR/scripts/claude-session-start.sh"}]}
-    ],
-    "Stop": [
-      {"hooks": [{"type": "command", "command": "$CLAUDE_PROJECT_DIR/scripts/amq-stop-hook.sh"}]}
-    ]
-  }
-}
-```
-The stop hook short-circuits (no `amq` call) when `inbox/new` is empty.
-
-**Codex CLI (mandatory):** Configure notify hook so Codex surfaces AMQ messages after each turn:
-```toml
-notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
-```
-When notified, run `amq drain --include-body`.
-
-**Codex CLI (optional):** Background monitor for /ps visibility or manual diagnostics only; it does not wake Codex:
 ```bash
-while true; do amq monitor --peek --timeout 0 --include-body --json; sleep 0.2; done
+amq wake &
+claude
 ```
-Drain after handling to avoid repeated notifications in peek mode.
-(`drain` moves messages from `new` to `cur` as the archive.)
+
+When messages arrive, you'll see a notification injected into your terminal (best-effort):
+```
+AMQ: message from codex - Review complete. Run: amq drain --include-body
+```
+
+Then run `amq drain --include-body` to read messages.
+
+**Inject Modes**: The wake command auto-detects your CLI type:
+- `--inject-mode=auto` (default): Uses `raw` for Claude Code, `paste` for Codex
+- `--inject-mode=raw`: Plain text + CR (best for Ink-based CLIs like Claude Code)
+- `--inject-mode=paste`: Bracketed paste with delayed CR (best for crossterm CLIs like Codex)
+
+If notifications require manual Enter, try `--inject-mode=raw`.
 
 ### Priority Handling
 
@@ -128,8 +91,7 @@ amq send --to claude --priority urgent --kind question --body "Blocked on API"
 ### Receive
 ```bash
 amq drain --include-body         # One-shot, silent when empty
-amq monitor --timeout 0 --json        # Block until message, drain, emit JSON
-amq monitor --peek --timeout 0 --json # Block until message, peek only
+amq watch --timeout 60s          # Block until message arrives
 amq list --new                   # Peek without side effects
 ```
 
@@ -144,10 +106,9 @@ amq reply --id <msg_id> --kind review_response --body "See comments..."
 amq dlq list                        # List failed messages
 amq dlq read --id <dlq_id>          # Inspect failure details
 amq dlq retry --id <dlq_id>         # Retry (move back to inbox)
-amq dlq retry --all [--force]       # Retry all (--force ignores max retries)
+amq dlq retry --all [--force]       # Retry all
 amq dlq purge --older-than 24h      # Clean old DLQ entries
 ```
-Corrupt/unparseable messages auto-move to DLQ during drain/monitor. Max 3 retries before permanent DLQ.
 
 ### Other
 ```bash

@@ -24,10 +24,16 @@ func runWake(args []string) error {
 	bellFlag := fs.Bool("bell", false, "Ring terminal bell on new messages")
 	debounceFlag := fs.Duration("debounce", 250*time.Millisecond, "Debounce window for batching messages")
 	previewLenFlag := fs.Int("preview-len", 48, "Max subject preview length")
+	injectModeFlag := fs.String("inject-mode", "auto", "Injection mode: auto, raw, paste (auto detects CLI type)")
 
 	usage := usageWithFlags(fs, "amq wake --me <agent> [options]",
 		"Background waker: injects terminal notification when messages arrive.",
 		"Run as background job before starting CLI: amq wake --me claude &",
+		"",
+		"Inject modes:",
+		"  auto  - Detect CLI type: raw for Claude Code (Ink), paste for Codex (crossterm)",
+		"  raw   - Plain text + CR, no bracketed paste (works with Ink-based CLIs)",
+		"  paste - Bracketed paste with delayed CR (works with crossterm-based CLIs)",
 		"",
 		"EXPERIMENTAL: Uses TIOCSTI ioctl (macOS/Linux). May not work on all systems.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
@@ -67,6 +73,7 @@ func runWake(args []string) error {
 		previewLen:   *previewLenFlag,
 		strict:       common.Strict,
 		fallbackWarn: true,
+		injectMode:   *injectModeFlag,
 	}
 
 	return runWakeLoop(cfg)

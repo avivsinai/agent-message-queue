@@ -201,14 +201,22 @@ claude
 ```
 
 **Options:**
+- `--inject-mode auto|raw|paste` - Injection strategy (see below)
 - `--bell` - Ring terminal bell on new messages
 - `--inject-cmd "..."` - Inject actual command instead of notification
 - `--debounce 250ms` - Batch rapid messages
 - `--preview-len 48` - Max subject preview length
 
+**Inject Modes:**
+- `auto` (default) - Detects CLI type: uses `raw` for Claude Code (Ink), `paste` for Codex (crossterm)
+- `raw` - Plain text + carriage return, no bracketed paste (best for Ink-based CLIs)
+- `paste` - Bracketed paste with 25ms delayed CR (best for crossterm-based CLIs)
+
+If notifications appear but require manual Enter, use `--inject-mode=raw`.
+
 **Notification format:**
-- Single message: `[AMQ] Message from codex: Review complete`
-- Multiple: `[AMQ] 3 messages: 2 from codex, 1 from claude. Run: amq drain --include-body`
+- Single message: `AMQ: message from codex - Review complete. Run: amq drain --include-body`
+- Multiple: `AMQ: 3 messages - 2 from codex, 1 from claude. Run: amq drain --include-body`
 
 **Platform support:**
 - macOS: Works

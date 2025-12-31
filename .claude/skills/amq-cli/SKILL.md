@@ -59,10 +59,17 @@ claude
 
 When messages arrive, you'll see a notification injected into your terminal (best-effort):
 ```
-[AMQ] Message from codex: Review complete
+AMQ: message from codex - Review complete. Run: amq drain --include-body
 ```
 
 Then run `amq drain --include-body` to read messages.
+
+**Inject Modes**: The wake command auto-detects your CLI type:
+- `--inject-mode=auto` (default): Uses `raw` for Claude Code, `paste` for Codex
+- `--inject-mode=raw`: Plain text + CR (best for Ink-based CLIs like Claude Code)
+- `--inject-mode=paste`: Bracketed paste with delayed CR (best for crossterm CLIs like Codex)
+
+If notifications require manual Enter, try `--inject-mode=raw`.
 
 ### Priority Handling
 

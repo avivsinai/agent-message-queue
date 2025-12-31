@@ -21,6 +21,7 @@ type wakeConfig struct {
 	previewLen   int
 	strict       bool
 	fallbackWarn bool
+	injectMode   string // auto, raw, paste
 }
 
 type wakeMsgInfo struct {
@@ -99,20 +100,67 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		plainText = "\a" + plainText
 	}
 
-	// Wrap in bracketed paste escape sequences so TUI apps (crossterm/ratatui)
-	// treat it as a paste event rather than individual keystrokes
-	// Start: ESC[200~  End: ESC[201~
-	// Include \r inside paste for Ink-based apps (Claude Code)
-	// Also send \r after for crossterm-based apps (Codex)
-	injectedText := "\x1b[200~" + text + "\r\x1b[201~\r"
-	if cfg.bell {
-		injectedText = "\a" + injectedText
+	// Determine effective inject mode
+	mode := cfg.injectMode
+	if mode == "" || mode == "auto" {
+		// Auto-detect: use raw mode for Claude Code (Ink), paste for others (Codex/crossterm)
+		// Claude Code's Ink framework has buggy bracketed paste handling where CR gets
+		// coalesced with the paste-end sequence and swallowed by the input parser.
+		if strings.Contains(strings.ToLower(cfg.me), "claude") {
+			mode = "raw"
+		} else {
+			mode = "paste"
+		}
 	}
 
-	// Inject into terminal
-	if err := tiocsti.Inject(injectedText); err != nil {
+	// Build injection based on mode
+	var injectErr error
+	switch mode {
+	case "raw":
+		// Raw mode: inject text and CR separately to avoid paste detection
+		// Ink treats multi-char input as paste, not keypresses. Sending text+CR
+		// as one chunk makes Ink see pasted text, not an Enter keypress.
+		// Solution: inject text, wait, then inject CR as separate single byte.
+		injectedText := text
+		if cfg.bell {
+			injectedText = "\a" + injectedText
+		}
+		if err := tiocsti.Inject(injectedText); err != nil {
+			injectErr = err
+		} else {
+			// Delay so CR arrives in separate read cycle, detected as keypress
+			time.Sleep(30 * time.Millisecond)
+			injectErr = tiocsti.Inject("\r")
+		}
+
+	case "paste":
+		// Paste mode: bracketed paste with delayed CR
+		// Works with crossterm/ratatui apps (Codex)
+		// Send paste content first, then CR after short delay to avoid coalescing
+		pasteText := "\x1b[200~" + text + "\x1b[201~"
+		if cfg.bell {
+			pasteText = "\a" + pasteText
+		}
+		if err := tiocsti.Inject(pasteText); err != nil {
+			injectErr = err
+		} else {
+			// Small delay to ensure CR lands in separate read cycle
+			time.Sleep(25 * time.Millisecond)
+			injectErr = tiocsti.Inject("\r")
+		}
+
+	default:
+		// Unknown mode, fall back to raw
+		injectedText := text + "\r"
+		if cfg.bell {
+			injectedText = "\a" + injectedText
+		}
+		injectErr = tiocsti.Inject(injectedText)
+	}
+
+	if injectErr != nil {
 		if cfg.fallbackWarn {
-			_ = writeStderr("amq wake: TIOCSTI injection failed: %v\n", err)
+			_ = writeStderr("amq wake: TIOCSTI injection failed: %v\n", injectErr)
 			_ = writeStderr("amq wake: falling back to stderr notification\n")
 			cfg.fallbackWarn = false
 		}
