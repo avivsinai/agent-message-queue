@@ -251,6 +251,13 @@ func notifyNewMessages(ctx context.Context, cfg *wakeConfig) error {
 		text = "\a" + text
 	}
 
+	// Wrap in bracketed paste escape sequences so TUI apps (crossterm/ratatui)
+	// treat it as a paste event rather than individual keystrokes
+	// Start: ESC[200~  End: ESC[201~
+	// Include \r inside paste for Ink-based apps (Claude Code)
+	// Also send \r after for crossterm-based apps (Codex)
+	text = "\x1b[200~" + text + "\r\x1b[201~\r"
+
 	// Inject into terminal
 	if err := tiocsti.Inject(text); err != nil {
 		if cfg.fallbackWarn {
@@ -277,7 +284,7 @@ func buildNotificationText(messages []wakeMsgInfo, senderCounts map[string]int, 
 			subject = "(no subject)"
 		}
 		subject = truncateSubject(subject, previewLen)
-		return fmt.Sprintf("\n# AMQ: message from %s - %s\n", msg.from, subject)
+		return fmt.Sprintf("AMQ: message from %s - %s. Run: amq drain --include-body", msg.from, subject)
 	}
 
 	// Multiple messages: show counts by sender
@@ -293,7 +300,7 @@ func buildNotificationText(messages []wakeMsgInfo, senderCounts map[string]int, 
 		parts = append(parts, fmt.Sprintf("%d from %s", c, sender))
 	}
 
-	return fmt.Sprintf("\n# AMQ: %d messages - %s\n",
+	return fmt.Sprintf("AMQ: %d messages - %s. Run: amq drain --include-body",
 		count, strings.Join(parts, ", "))
 }
 
