@@ -17,10 +17,27 @@ func TestFindTmpFilesOlderThan(t *testing.T) {
 	}
 
 	tmpDir := filepath.Join(root, "agents", "codex", "inbox", "tmp")
+	dlqTmpDir := filepath.Join(root, "agents", "codex", "dlq", "tmp")
+	outboxDir := filepath.Join(root, "agents", "codex", "outbox", "sent")
+	if err := os.MkdirAll(dlqTmpDir, 0o700); err != nil {
+		t.Fatalf("mkdir dlq tmp: %v", err)
+	}
+	if err := os.MkdirAll(outboxDir, 0o700); err != nil {
+		t.Fatalf("mkdir outbox: %v", err)
+	}
+
 	oldPath := filepath.Join(tmpDir, "old.tmp")
+	dlqOldPath := filepath.Join(dlqTmpDir, "dlq-old.tmp")
+	dotOldPath := filepath.Join(outboxDir, ".outbox.tmp-123")
 	newPath := filepath.Join(tmpDir, "new.tmp")
 	if err := os.WriteFile(oldPath, []byte("old"), 0o644); err != nil {
 		t.Fatalf("write old: %v", err)
+	}
+	if err := os.WriteFile(dlqOldPath, []byte("old dlq"), 0o644); err != nil {
+		t.Fatalf("write dlq old: %v", err)
+	}
+	if err := os.WriteFile(dotOldPath, []byte("old dot"), 0o644); err != nil {
+		t.Fatalf("write dot tmp: %v", err)
 	}
 	if err := os.WriteFile(newPath, []byte("new"), 0o644); err != nil {
 		t.Fatalf("write new: %v", err)
@@ -30,13 +47,29 @@ func TestFindTmpFilesOlderThan(t *testing.T) {
 	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
 		t.Fatalf("chtimes old: %v", err)
 	}
+	if err := os.Chtimes(dlqOldPath, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes dlq old: %v", err)
+	}
+	if err := os.Chtimes(dotOldPath, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes dot old: %v", err)
+	}
 
 	cutoff := time.Now().Add(-36 * time.Hour)
 	matches, err := FindTmpFilesOlderThan(root, cutoff)
 	if err != nil {
 		t.Fatalf("FindTmpFilesOlderThan: %v", err)
 	}
-	if len(matches) != 1 || matches[0] != oldPath {
+	expected := map[string]struct{}{
+		oldPath:    {},
+		dlqOldPath: {},
+		dotOldPath: {},
+	}
+	if len(matches) != len(expected) {
 		t.Fatalf("unexpected matches: %v", matches)
+	}
+	for _, match := range matches {
+		if _, ok := expected[match]; !ok {
+			t.Fatalf("unexpected match: %s", match)
+		}
 	}
 }

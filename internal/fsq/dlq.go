@@ -1,6 +1,7 @@
 package fsq
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -252,14 +253,13 @@ func serializeDLQMessage(env DLQEnvelope, originalContent []byte) ([]byte, error
 
 // parseDLQMessage parses a DLQ file into envelope and original content.
 func parseDLQMessage(data []byte) (*DLQEnvelope, []byte, error) {
-	s := string(data)
-
-	// Find frontmatter boundaries
-	if !strings.HasPrefix(s, "---\n") {
+	// Normalize CRLF to LF for cross-platform compatibility
+	data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+	if !bytes.HasPrefix(data, []byte("---\n")) {
 		return nil, nil, fmt.Errorf("missing frontmatter start")
 	}
-	rest := s[4:]
-	endIdx := strings.Index(rest, "\n---\n")
+	rest := data[4:]
+	endIdx := bytes.Index(rest, []byte("\n---\n"))
 	if endIdx < 0 {
 		return nil, nil, fmt.Errorf("missing frontmatter end")
 	}
@@ -268,9 +268,9 @@ func parseDLQMessage(data []byte) (*DLQEnvelope, []byte, error) {
 	body := rest[endIdx+5:]
 
 	var env DLQEnvelope
-	if err := json.Unmarshal([]byte(headerJSON), &env); err != nil {
+	if err := json.Unmarshal(headerJSON, &env); err != nil {
 		return nil, nil, fmt.Errorf("parse envelope: %w", err)
 	}
 
-	return &env, []byte(body), nil
+	return &env, body, nil
 }

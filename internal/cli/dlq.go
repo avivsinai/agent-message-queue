@@ -496,7 +496,10 @@ func runDLQPurge(args []string) error {
 
 	removed := 0
 	for _, path := range candidates {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(path); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			_ = writeStderr("warning: failed to remove %s: %v\n", path, err)
 		} else {
 			removed++

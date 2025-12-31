@@ -5,35 +5,11 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/ack"
-	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
-
-type drainItem struct {
-	ID          string         `json:"id"`
-	From        string         `json:"from"`
-	To          []string       `json:"to"`
-	Thread      string         `json:"thread"`
-	Subject     string         `json:"subject"`
-	Created     string         `json:"created"`
-	Body        string         `json:"body,omitempty"`
-	AckRequired bool           `json:"ack_required"`
-	MovedToCur  bool           `json:"moved_to_cur"`
-	MovedToDLQ  bool           `json:"moved_to_dlq,omitempty"`
-	Acked       bool           `json:"acked"`
-	ParseError  string         `json:"parse_error,omitempty"`
-	Priority    string         `json:"priority,omitempty"`
-	Kind        string         `json:"kind,omitempty"`
-	Labels      []string       `json:"labels,omitempty"`
-	Context     map[string]any `json:"context,omitempty"`
-	Filename    string         `json:"-"` // actual filename on disk
-	SortKey     time.Time      `json:"-"`
-}
 
 type drainResult struct {
 	Drained []drainItem `json:"drained"`
@@ -71,99 +47,14 @@ func runDrain(args []string) error {
 	if err := validateKnownHandle(root, me, common.Strict); err != nil {
 		return err
 	}
-
-	newDir := fsq.AgentInboxNew(root, common.Me)
-	entries, err := os.ReadDir(newDir)
+	validator, err := newHeaderValidator(root, common.Strict)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// No inbox/new directory - nothing to drain
-			if common.JSON {
-				return writeJSON(os.Stdout, drainResult{Drained: []drainItem{}, Count: 0})
-			}
-			// Silent for text mode when empty (hook-friendly)
-			return nil
-		}
 		return err
 	}
 
-	// Collect items with timestamps for sorting
-	items := make([]drainItem, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		filename := entry.Name()
-		// Skip dotfiles (like .DS_Store) and non-.md files
-		if strings.HasPrefix(filename, ".") || !strings.HasSuffix(filename, ".md") {
-			continue
-		}
-		path := filepath.Join(newDir, filename)
-
-		item := drainItem{
-			ID:       filename, // fallback to filename if parse fails
-			Filename: filename,
-		}
-
-		// Try to parse the message
-		var header format.Header
-		var body string
-		var parseErr error
-
-		if *includeBodyFlag {
-			msg, err := format.ReadMessageFile(path)
-			if err != nil {
-				parseErr = err
-			} else {
-				header = msg.Header
-				body = msg.Body
-			}
-		} else {
-			header, parseErr = format.ReadHeaderFile(path)
-		}
-
-		if parseErr != nil {
-			item.ParseError = parseErr.Error()
-			// Still move corrupt message to cur to avoid reprocessing
-		} else {
-			item.ID = header.ID
-			item.From = header.From
-			item.To = header.To
-			item.Thread = header.Thread
-			item.Subject = header.Subject
-			item.Created = header.Created
-			item.AckRequired = header.AckRequired
-			item.Priority = header.Priority
-			item.Kind = header.Kind
-			item.Labels = header.Labels
-			item.Context = header.Context
-			if *includeBodyFlag {
-				item.Body = body
-			}
-			if ts, err := time.Parse(time.RFC3339Nano, header.Created); err == nil {
-				item.SortKey = ts
-			}
-		}
-
-		items = append(items, item)
-	}
-
-	// Sort by timestamp (oldest first)
-	sort.Slice(items, func(i, j int) bool {
-		if !items[i].SortKey.IsZero() && !items[j].SortKey.IsZero() {
-			if items[i].SortKey.Equal(items[j].SortKey) {
-				return items[i].ID < items[j].ID
-			}
-			return items[i].SortKey.Before(items[j].SortKey)
-		}
-		if items[i].Created == items[j].Created {
-			return items[i].ID < items[j].ID
-		}
-		return items[i].Created < items[j].Created
-	})
-
-	// Apply limit
-	if *limitFlag > 0 && len(items) > *limitFlag {
-		items = items[:*limitFlag]
+	items, err := collectInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator)
+	if err != nil {
+		return err
 	}
 
 	// Nothing to drain
@@ -181,7 +72,11 @@ func runDrain(args []string) error {
 
 		// Move parse errors to DLQ instead of cur
 		if item.ParseError != "" {
-			if _, err := fsq.MoveToDLQ(root, common.Me, item.Filename, item.ID, "parse_error", item.ParseError); err != nil {
+			reason := item.FailureReason
+			if reason == "" {
+				reason = "parse_error"
+			}
+			if _, err := fsq.MoveToDLQ(root, common.Me, item.Filename, item.ID, reason, item.ParseError); err != nil {
 				_ = writeStderr("warning: failed to move %s to DLQ: %v\n", item.Filename, err)
 			} else {
 				item.MovedToDLQ = true

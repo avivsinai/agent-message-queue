@@ -79,8 +79,9 @@ func TestReply_Basic(t *testing.T) {
 	}
 
 	// Verify reply metadata
-	if result["to"] != bob {
-		t.Errorf("expected to=bob, got %v", result["to"])
+	toSlice, ok := result["to"].([]any)
+	if !ok || len(toSlice) != 1 || toSlice[0] != bob {
+		t.Errorf("expected to=[bob], got %v", result["to"])
 	}
 	if result["thread"] != "p2p/alice__bob" {
 		t.Errorf("expected thread=p2p/alice__bob, got %v", result["thread"])

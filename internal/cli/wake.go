@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,7 +38,7 @@ func runWake(args []string) error {
 
 	usage := usageWithFlags(fs, "amq wake --me <agent> [options]",
 		"Background waker: injects terminal notification when messages arrive.",
-		"Run as background job before starting CLI: amq wake claude &",
+		"Run as background job before starting CLI: amq wake --me claude &",
 		"",
 		"EXPERIMENTAL: Uses TIOCSTI ioctl (macOS/Linux). May not work on all systems.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
@@ -115,10 +114,8 @@ func runWakeLoop(cfg wakeConfig) error {
 	var debounceTimer *time.Timer
 	pendingNotify := false
 
-	ctx := context.Background()
-
 	// Notify if messages already exist
-	if err := notifyNewMessages(ctx, &cfg); err != nil {
+	if err := notifyNewMessages(&cfg); err != nil {
 		_ = writeStderr("amq wake: notify error: %v\n", err)
 	}
 
@@ -173,7 +170,7 @@ func runWakeLoop(cfg wakeConfig) error {
 			pendingNotify = false
 
 			// Collect and notify
-			if err := notifyNewMessages(ctx, &cfg); err != nil {
+			if err := notifyNewMessages(&cfg); err != nil {
 				_ = writeStderr("amq wake: notify error: %v\n", err)
 			}
 		}
@@ -185,7 +182,7 @@ type wakeMsgInfo struct {
 	subject string
 }
 
-func notifyNewMessages(ctx context.Context, cfg *wakeConfig) error {
+func notifyNewMessages(cfg *wakeConfig) error {
 	inboxNew := fsq.AgentInboxNew(cfg.root, cfg.me)
 
 	entries, err := os.ReadDir(inboxNew)
@@ -211,6 +208,9 @@ func notifyNewMessages(ctx context.Context, cfg *wakeConfig) error {
 		path := filepath.Join(inboxNew, name)
 		header, err := format.ReadHeaderFile(path)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			// Count corrupt messages too
 			messages = append(messages, wakeMsgInfo{from: "unknown", subject: "(parse error)"})
 			senderCounts["unknown"]++
@@ -308,13 +308,14 @@ func truncateSubject(subject string, previewLen int) string {
 	if previewLen <= 0 {
 		return ""
 	}
-	if len(subject) <= previewLen {
+	runes := []rune(subject)
+	if len(runes) <= previewLen {
 		return subject
 	}
 	if previewLen <= 3 {
-		return subject[:previewLen]
+		return string(runes[:previewLen])
 	}
-	return subject[:previewLen-3] + "..."
+	return string(runes[:previewLen-3]) + "..."
 }
 
 func sanitizeForTTY(s string) string {

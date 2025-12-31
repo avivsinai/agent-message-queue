@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
@@ -100,10 +101,10 @@ func runListJSON(t *testing.T, root, agent string, limit, offset int) []listItem
 	t.Helper()
 	args := []string{"--root", root, "--me", agent, "--json", "--new"}
 	if limit > 0 {
-		args = append(args, "--limit", itoa(limit))
+		args = append(args, "--limit", strconv.Itoa(limit))
 	}
 	if offset > 0 {
-		args = append(args, "--offset", itoa(offset))
+		args = append(args, "--offset", strconv.Itoa(offset))
 	}
 
 	// Capture stdout
@@ -128,16 +129,4 @@ func runListJSON(t *testing.T, root, agent string, limit, offset int) []listItem
 		t.Fatalf("unmarshal: %v (output: %s)", err, buf.String())
 	}
 	return items
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	s := ""
-	for n > 0 {
-		s = string(rune('0'+n%10)) + s
-		n /= 10
-	}
-	return s
 }

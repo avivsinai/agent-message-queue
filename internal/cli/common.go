@@ -328,6 +328,9 @@ func ensureFilename(id string) (string, error) {
 	if id == "" {
 		return "", errors.New("message id is required")
 	}
+	if strings.HasPrefix(id, ".") {
+		return "", fmt.Errorf("invalid message id: %s", id)
+	}
 	if id == "." || id == ".." {
 		return "", fmt.Errorf("invalid message id: %s", id)
 	}
@@ -348,6 +351,9 @@ func ensureSafeBaseName(name string) (string, error) {
 	if name == "" {
 		return "", errors.New("name cannot be empty")
 	}
+	if strings.HasPrefix(name, ".") {
+		return "", fmt.Errorf("invalid name: %s", name)
+	}
 	if name == "." || name == ".." {
 		return "", fmt.Errorf("invalid name: %s", name)
 	}
@@ -355,6 +361,9 @@ func ensureSafeBaseName(name string) (string, error) {
 		return "", fmt.Errorf("invalid name: %s", name)
 	}
 	if strings.ContainsAny(name, "/\\") {
+		return "", fmt.Errorf("invalid name: %s", name)
+	}
+	if strings.HasSuffix(name, ".md") {
 		return "", fmt.Errorf("invalid name: %s", name)
 	}
 	return name, nil
