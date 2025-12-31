@@ -30,29 +30,49 @@ For manual download, build from source, or troubleshooting, see [INSTALL.md](INS
 
 ## Quick Start
 
+### 1. Initialize Project
+
 ```bash
-# Initialize mailboxes
 amq init --root .agent-mail --agents claude,codex
+```
 
-# Set environment
-export AM_ROOT=.agent-mail AM_ME=claude
+### 2. Start Agent Session
 
+**Claude Code:**
+```bash
+export AM_ME=claude AM_ROOT=.agent-mail
+amq wake &
+claude
+```
+
+**Codex CLI:**
+```bash
+export AM_ME=codex AM_ROOT=.agent-mail
+amq wake &
+codex
+```
+
+### 3. Send & Receive
+
+```bash
 # Send a message
 amq send --to codex --body "Hello from Claude!"
 
-# Check inbox (as codex)
-AM_ME=codex amq list --new
+# Check inbox
+amq list --new
+
+# Read all messages (one-shot, moves to cur, auto-acks)
+amq drain --include-body
 ```
 
 ## Co-op Mode
 
-For real-time Claude Code + Codex CLI collaboration:
+For real-time Claude Code + Codex CLI collaboration, see [COOP.md](COOP.md).
 
+**One-liner setup:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/setup-coop.sh | bash
 ```
-
-See [COOP.md](COOP.md) for the full protocol (Codex requires the notify hook; it resolves `.agent-mail` from the notify payload `cwd` unless `AM_ROOT` is set).
 
 ## Documentation
 
