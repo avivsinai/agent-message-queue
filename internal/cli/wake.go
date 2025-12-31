@@ -247,8 +247,10 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		text = buildNotificationText(messages, senderCounts, cfg.previewLen)
 	}
 
+	// Keep plain text for stderr fallback
+	plainText := text
 	if cfg.bell {
-		text = "\a" + text
+		plainText = "\a" + plainText
 	}
 
 	// Wrap in bracketed paste escape sequences so TUI apps (crossterm/ratatui)
@@ -256,17 +258,20 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	// Start: ESC[200~  End: ESC[201~
 	// Include \r inside paste for Ink-based apps (Claude Code)
 	// Also send \r after for crossterm-based apps (Codex)
-	text = "\x1b[200~" + text + "\r\x1b[201~\r"
+	injectedText := "\x1b[200~" + text + "\r\x1b[201~\r"
+	if cfg.bell {
+		injectedText = "\a" + injectedText
+	}
 
 	// Inject into terminal
-	if err := tiocsti.Inject(text); err != nil {
+	if err := tiocsti.Inject(injectedText); err != nil {
 		if cfg.fallbackWarn {
 			_ = writeStderr("amq wake: TIOCSTI injection failed: %v\n", err)
 			_ = writeStderr("amq wake: falling back to stderr notification\n")
 			cfg.fallbackWarn = false
 		}
-		// Fallback: print to stderr
-		_, _ = fmt.Fprint(os.Stderr, text)
+		// Fallback: print plain text to stderr (no escape sequences)
+		_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
 		return nil
 	}
 
@@ -320,7 +325,9 @@ func truncateSubject(subject string, previewLen int) string {
 
 func sanitizeForTTY(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		// Filter ASCII controls (0x00-0x1F), DEL (0x7F), and C1 controls (0x80-0x9F)
+		// C1 range includes 0x9B which some terminals interpret as CSI
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			return ' '
 		}
 		return r

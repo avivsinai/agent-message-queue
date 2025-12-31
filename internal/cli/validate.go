@@ -13,22 +13,23 @@ import (
 )
 
 type headerValidator struct {
-	known map[string]struct{}
+	strict bool
+	known  map[string]struct{}
 }
 
 func newHeaderValidator(root string, strict bool) (*headerValidator, error) {
 	if !strict {
-		return &headerValidator{}, nil
+		return &headerValidator{strict: false}, nil
 	}
 	known, err := loadKnownHandles(root, strict)
 	if err != nil {
 		return nil, err
 	}
-	return &headerValidator{known: known}, nil
+	return &headerValidator{strict: true, known: known}, nil
 }
 
 func (v *headerValidator) validate(header format.Header) error {
-	if err := validateHeaderBasic(header); err != nil {
+	if err := v.validateHeaderBasic(header); err != nil {
 		return err
 	}
 	if len(v.known) == 0 {
@@ -45,10 +46,16 @@ func (v *headerValidator) validate(header format.Header) error {
 	return nil
 }
 
-func validateHeaderBasic(header format.Header) error {
-	if header.Schema != format.CurrentSchema {
-		return fmt.Errorf("unsupported schema: %d", header.Schema)
+func (v *headerValidator) validateHeaderBasic(header format.Header) error {
+	// Schema check only in strict mode - allows interop with older/newer clients
+	if v.strict && header.Schema != format.CurrentSchema {
+		return fmt.Errorf("unsupported schema: %d (expected %d)", header.Schema, format.CurrentSchema)
 	}
+	return validateHeaderFields(header)
+}
+
+// validateHeaderFields checks all header fields except schema version
+func validateHeaderFields(header format.Header) error {
 	if _, err := ensureSafeBaseName(header.ID); err != nil {
 		return fmt.Errorf("invalid message id: %w", err)
 	}
