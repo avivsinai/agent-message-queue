@@ -6,36 +6,12 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/ack"
-	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/fsnotify/fsnotify"
 )
-
-type monitorItem struct {
-	ID          string         `json:"id"`
-	From        string         `json:"from"`
-	To          []string       `json:"to"`
-	Thread      string         `json:"thread"`
-	Subject     string         `json:"subject"`
-	Created     string         `json:"created"`
-	Body        string         `json:"body,omitempty"`
-	AckRequired bool           `json:"ack_required"`
-	Priority    string         `json:"priority,omitempty"`
-	Kind        string         `json:"kind,omitempty"`
-	Labels      []string       `json:"labels,omitempty"`
-	Context     map[string]any `json:"context,omitempty"`
-	MovedToCur  bool           `json:"moved_to_cur"`
-	MovedToDLQ  bool           `json:"moved_to_dlq,omitempty"`
-	Acked       bool           `json:"acked"`
-	ParseError  string         `json:"parse_error,omitempty"`
-	Filename    string         `json:"-"`
-	SortKey     time.Time      `json:"-"`
-}
 
 type monitorResult struct {
 	Event      string        `json:"event"`                 // "messages", "timeout", "empty"
@@ -81,6 +57,10 @@ func runMonitor(args []string) error {
 	if err := validateKnownHandle(root, me, common.Strict); err != nil {
 		return err
 	}
+	validator, err := newHeaderValidator(root, common.Strict)
+	if err != nil {
+		return err
+	}
 
 	inboxNew := fsq.AgentInboxNew(root, common.Me)
 	if err := os.MkdirAll(inboxNew, 0o700); err != nil {
@@ -95,7 +75,7 @@ func runMonitor(args []string) error {
 	}
 
 	// First, try to drain existing messages
-	items, err := collectMonitorItems(root, common.Me, *includeBodyFlag, *limitFlag)
+	items, err := collectInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator)
 	if err != nil {
 		return err
 	}
@@ -145,7 +125,7 @@ func runMonitor(args []string) error {
 	}
 
 	// New message arrived - drain it
-	items, err = collectMonitorItems(root, common.Me, *includeBodyFlag, *limitFlag)
+	items, err = collectInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator)
 	if err != nil {
 		return err
 	}
@@ -169,98 +149,6 @@ func runMonitor(args []string) error {
 	return outputMonitorResult(common.JSON, result)
 }
 
-func collectMonitorItems(root, me string, includeBody bool, limit int) ([]monitorItem, error) {
-	newDir := fsq.AgentInboxNew(root, me)
-	entries, err := os.ReadDir(newDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []monitorItem{}, nil
-		}
-		return nil, err
-	}
-
-	items := make([]monitorItem, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		filename := entry.Name()
-		// Skip dotfiles (like .DS_Store) and non-.md files
-		if strings.HasPrefix(filename, ".") || !strings.HasSuffix(filename, ".md") {
-			continue
-		}
-		path := filepath.Join(newDir, filename)
-
-		item := monitorItem{
-			ID:       filename, // fallback to filename if parse fails
-			Filename: filename,
-		}
-
-		// Try to parse the message
-		var header format.Header
-		var body string
-		var parseErr error
-
-		if includeBody {
-			msg, err := format.ReadMessageFile(path)
-			if err != nil {
-				parseErr = err
-			} else {
-				header = msg.Header
-				body = msg.Body
-			}
-		} else {
-			header, parseErr = format.ReadHeaderFile(path)
-		}
-
-		if parseErr != nil {
-			item.ParseError = parseErr.Error()
-			// Still move corrupt message to cur to avoid reprocessing
-		} else {
-			item.ID = header.ID
-			item.From = header.From
-			item.To = header.To
-			item.Thread = header.Thread
-			item.Subject = header.Subject
-			item.Created = header.Created
-			item.AckRequired = header.AckRequired
-			item.Priority = header.Priority
-			item.Kind = header.Kind
-			item.Labels = header.Labels
-			item.Context = header.Context
-			if includeBody {
-				item.Body = body
-			}
-			if ts, err := time.Parse(time.RFC3339Nano, header.Created); err == nil {
-				item.SortKey = ts
-			}
-		}
-
-		items = append(items, item)
-	}
-
-	// Sort by timestamp (oldest first)
-	sort.Slice(items, func(i, j int) bool {
-		if !items[i].SortKey.IsZero() && !items[j].SortKey.IsZero() {
-			if items[i].SortKey.Equal(items[j].SortKey) {
-				return items[i].ID < items[j].ID
-			}
-			return items[i].SortKey.Before(items[j].SortKey)
-		}
-		if items[i].Created == items[j].Created {
-			return items[i].ID < items[j].ID
-		}
-		return items[i].Created < items[j].Created
-	})
-
-	// Apply limit
-	if limit > 0 && len(items) > limit {
-		items = items[:limit]
-	}
-
-	return items, nil
-}
-
 func drainMonitorItems(root, me string, doAck bool, items []monitorItem) {
 	// Process each message: move to cur (or DLQ for parse errors), optionally ack
 	for i := range items {
@@ -268,7 +156,11 @@ func drainMonitorItems(root, me string, doAck bool, items []monitorItem) {
 
 		// Move parse errors to DLQ instead of cur
 		if item.ParseError != "" {
-			if _, err := fsq.MoveToDLQ(root, me, item.Filename, item.ID, "parse_error", item.ParseError); err != nil {
+			reason := item.FailureReason
+			if reason == "" {
+				reason = "parse_error"
+			}
+			if _, err := fsq.MoveToDLQ(root, me, item.Filename, item.ID, reason, item.ParseError); err != nil {
 				_ = writeStderr("warning: failed to move %s to DLQ: %v\n", item.Filename, err)
 			} else {
 				item.MovedToDLQ = true
@@ -295,47 +187,13 @@ func drainMonitorItems(root, me string, doAck bool, items []monitorItem) {
 
 		// Ack if required and move succeeded (gate acking on successful move)
 		if doAck && item.AckRequired && item.ParseError == "" && item.MovedToCur {
-			if err := monitorAckMessage(root, me, item); err != nil {
+			if err := ackMessage(root, me, item); err != nil {
 				_ = writeStderr("warning: failed to ack %s: %v\n", item.ID, err)
 			} else {
 				item.Acked = true
 			}
 		}
 	}
-}
-
-func monitorAckMessage(root, me string, item *monitorItem) error {
-	sender, err := normalizeHandle(item.From)
-	if err != nil {
-		return err
-	}
-	msgID, err := ensureSafeBaseName(item.ID)
-	if err != nil {
-		return err
-	}
-
-	ackPayload := ack.New(item.ID, item.Thread, me, sender, time.Now())
-
-	receiverDir := fsq.AgentAcksSent(root, me)
-	receiverPath := filepath.Join(receiverDir, msgID+".json")
-	if existing, err := ack.Read(receiverPath); err == nil {
-		ackPayload = existing
-	}
-
-	data, err := ackPayload.Marshal()
-	if err != nil {
-		return err
-	}
-
-	if _, err := fsq.WriteFileAtomic(receiverDir, msgID+".json", data, 0o600); err != nil {
-		return err
-	}
-
-	// Best-effort write to sender's received acks
-	senderDir := fsq.AgentAcksReceived(root, sender)
-	_, _ = fsq.WriteFileAtomic(senderDir, msgID+".json", data, 0o600) // ignore error
-
-	return nil
 }
 
 func monitorWithFsnotify(ctx context.Context, inboxNew string) (string, error) {

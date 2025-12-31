@@ -60,6 +60,10 @@ func runWatch(args []string) error {
 	if err := validateKnownHandle(root, me, common.Strict); err != nil {
 		return err
 	}
+	validator, err := newHeaderValidator(root, common.Strict)
+	if err != nil {
+		return err
+	}
 
 	inboxNew := fsq.AgentInboxNew(root, common.Me)
 
@@ -82,9 +86,9 @@ func runWatch(args []string) error {
 	var watchErr error
 
 	if *pollFlag {
-		messages, event, watchErr = watchWithPolling(ctx, inboxNew)
+		messages, event, watchErr = watchWithPolling(ctx, inboxNew, validator)
 	} else {
-		messages, event, watchErr = watchWithFsnotify(ctx, inboxNew)
+		messages, event, watchErr = watchWithFsnotify(ctx, inboxNew, validator)
 	}
 
 	if watchErr != nil {
@@ -97,21 +101,21 @@ func runWatch(args []string) error {
 	return outputWatchResult(common.JSON, event, messages)
 }
 
-func watchWithFsnotify(ctx context.Context, inboxNew string) ([]msgInfo, string, error) {
+func watchWithFsnotify(ctx context.Context, inboxNew string, validator *headerValidator) ([]msgInfo, string, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		// Fall back to polling if fsnotify fails
-		return watchWithPolling(ctx, inboxNew)
+		return watchWithPolling(ctx, inboxNew, validator)
 	}
 	defer func() { _ = watcher.Close() }()
 
 	if err := watcher.Add(inboxNew); err != nil {
-		return watchWithPolling(ctx, inboxNew)
+		return watchWithPolling(ctx, inboxNew, validator)
 	}
 
 	// Check for existing messages AFTER watcher is set up to avoid race condition.
 	// Any message arriving after this check will trigger a watcher event.
-	existing, err := listNewMessages(inboxNew)
+	existing, err := listNewMessages(inboxNew, validator)
 	if err != nil {
 		return nil, "", err
 	}
@@ -131,7 +135,7 @@ func watchWithFsnotify(ctx context.Context, inboxNew string) ([]msgInfo, string,
 			if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
 				// Small delay to ensure file is fully written
 				time.Sleep(10 * time.Millisecond)
-				messages, err := listNewMessages(inboxNew)
+				messages, err := listNewMessages(inboxNew, validator)
 				if err != nil {
 					return nil, "", err
 				}
@@ -148,9 +152,9 @@ func watchWithFsnotify(ctx context.Context, inboxNew string) ([]msgInfo, string,
 	}
 }
 
-func watchWithPolling(ctx context.Context, inboxNew string) ([]msgInfo, string, error) {
+func watchWithPolling(ctx context.Context, inboxNew string, validator *headerValidator) ([]msgInfo, string, error) {
 	// Check for existing messages first
-	existing, err := listNewMessages(inboxNew)
+	existing, err := listNewMessages(inboxNew, validator)
 	if err != nil {
 		return nil, "", err
 	}
@@ -166,7 +170,7 @@ func watchWithPolling(ctx context.Context, inboxNew string) ([]msgInfo, string, 
 		case <-ctx.Done():
 			return nil, "", ctx.Err()
 		case <-ticker.C:
-			messages, err := listNewMessages(inboxNew)
+			messages, err := listNewMessages(inboxNew, validator)
 			if err != nil {
 				return nil, "", err
 			}
@@ -177,7 +181,7 @@ func watchWithPolling(ctx context.Context, inboxNew string) ([]msgInfo, string, 
 	}
 }
 
-func listNewMessages(inboxNew string) ([]msgInfo, error) {
+func listNewMessages(inboxNew string, validator *headerValidator) ([]msgInfo, error) {
 	entries, err := os.ReadDir(inboxNew)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -201,13 +205,27 @@ func listNewMessages(inboxNew string) ([]msgInfo, error) {
 		}
 
 		path := filepath.Join(inboxNew, filename)
+		baseID := strings.TrimSuffix(filename, ".md")
 		header, err := format.ReadHeaderFile(path)
 		if err != nil {
 			// Include corrupt messages so watch doesn't hang
 			messages = append(messages, msgInfo{
-				ID:         filename,
+				ID:         baseID,
 				Path:       path,
 				ParseError: err.Error(),
+			})
+			continue
+		}
+		if err := validator.validate(header); err != nil {
+			parseErr := "invalid header: " + err.Error()
+			id := baseID
+			if safeID, ok := safeHeaderID(header.ID); ok {
+				id = safeID
+			}
+			messages = append(messages, msgInfo{
+				ID:         id,
+				Path:       path,
+				ParseError: parseErr,
 			})
 			continue
 		}

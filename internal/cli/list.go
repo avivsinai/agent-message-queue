@@ -5,7 +5,6 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -25,6 +24,18 @@ type listItem struct {
 	Kind     string    `json:"kind,omitempty"`
 	Labels   []string  `json:"labels,omitempty"`
 	SortKey  time.Time `json:"-"`
+}
+
+func (l listItem) GetCreated() string {
+	return l.Created
+}
+
+func (l listItem) GetID() string {
+	return l.ID
+}
+
+func (l listItem) GetRawTime() time.Time {
+	return l.SortKey
 }
 
 func runList(args []string) error {
@@ -53,6 +64,10 @@ func runList(args []string) error {
 
 	// Validate handle against config.json
 	if err := validateKnownHandle(root, me, common.Strict); err != nil {
+		return err
+	}
+	validator, err := newHeaderValidator(root, common.Strict)
+	if err != nil {
 		return err
 	}
 
@@ -95,10 +110,20 @@ func runList(args []string) error {
 		if entry.IsDir() {
 			continue
 		}
-		path := filepath.Join(dir, entry.Name())
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		path := filepath.Join(dir, name)
 		header, err := format.ReadHeaderFile(path)
 		if err != nil {
 			if err := writeStderr("warning: skipping corrupt message %s: %v\n", entry.Name(), err); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := validator.validate(header); err != nil {
+			if err := writeStderr("warning: skipping invalid message %s: %v\n", entry.Name(), err); err != nil {
 				return err
 			}
 			continue
@@ -121,18 +146,7 @@ func runList(args []string) error {
 		items = append(items, item)
 	}
 
-	sort.Slice(items, func(i, j int) bool {
-		if !items[i].SortKey.IsZero() && !items[j].SortKey.IsZero() {
-			if items[i].SortKey.Equal(items[j].SortKey) {
-				return items[i].ID < items[j].ID
-			}
-			return items[i].SortKey.Before(items[j].SortKey)
-		}
-		if items[i].Created == items[j].Created {
-			return items[i].ID < items[j].ID
-		}
-		return items[i].Created < items[j].Created
-	})
+	format.SortByTimestamp(items)
 
 	if *offsetFlag > 0 {
 		if *offsetFlag >= len(items) {

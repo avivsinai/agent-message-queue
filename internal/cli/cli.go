@@ -39,6 +39,8 @@ func Run(args []string) error {
 		return runReply(args[1:])
 	case "dlq":
 		return runDLQ(args[1:])
+	case "wake":
+		return runWake(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
@@ -100,6 +102,9 @@ func printUsage() error {
 		return err
 	}
 	if err := writeStdoutLine("  dlq       Dead letter queue management"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  wake      Background waker (TIOCSTI injection, experimental)"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine(""); err != nil {

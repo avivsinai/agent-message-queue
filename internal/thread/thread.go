@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
@@ -24,6 +24,18 @@ type Entry struct {
 	Kind     string    `json:"kind,omitempty"`
 	Labels   []string  `json:"labels,omitempty"`
 	RawTime  time.Time `json:"-"`
+}
+
+func (e Entry) GetCreated() string {
+	return e.Created
+}
+
+func (e Entry) GetID() string {
+	return e.ID
+}
+
+func (e Entry) GetRawTime() time.Time {
+	return e.RawTime
 }
 
 // Collect scans agent mailboxes and returns messages for a thread.
@@ -49,7 +61,11 @@ func Collect(root, threadID string, agents []string, includeBody bool, onError f
 				if file.IsDir() {
 					continue
 				}
-				path := filepath.Join(dir, file.Name())
+				name := file.Name()
+				if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
+					continue
+				}
+				path := filepath.Join(dir, name)
 				if includeBody {
 					msg, err := format.ReadMessageFile(path)
 					if err != nil {
@@ -123,18 +139,7 @@ func Collect(root, threadID string, agents []string, includeBody bool, onError f
 		}
 	}
 
-	sort.Slice(entries, func(i, j int) bool {
-		if !entries[i].RawTime.IsZero() && !entries[j].RawTime.IsZero() {
-			if entries[i].RawTime.Equal(entries[j].RawTime) {
-				return entries[i].ID < entries[j].ID
-			}
-			return entries[i].RawTime.Before(entries[j].RawTime)
-		}
-		if entries[i].Created == entries[j].Created {
-			return entries[i].ID < entries[j].ID
-		}
-		return entries[i].Created < entries[j].Created
-	})
+	format.SortByTimestamp(entries)
 
 	return entries, nil
 }

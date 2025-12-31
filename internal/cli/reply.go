@@ -188,7 +188,7 @@ func runReply(args []string) error {
 		return writeJSON(os.Stdout, map[string]any{
 			"id":           id,
 			"thread":       msg.Header.Thread,
-			"to":           recipient,
+			"to":           []string{recipient},
 			"subject":      subject,
 			"in_reply_to":  originalMsg.Header.ID,
 			"original_box": filepath.Base(filepath.Dir(originalPath)),

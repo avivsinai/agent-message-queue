@@ -3,6 +3,8 @@ package fsq
 import (
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -18,6 +20,7 @@ func ListAgents(root string) ([]string, error) {
 			out = append(out, entry.Name())
 		}
 	}
+	sort.Strings(out)
 	return out, nil
 }
 
@@ -30,14 +33,21 @@ func FindTmpFilesOlderThan(root string, cutoff time.Time) ([]string, error) {
 		return nil, err
 	}
 	matches := []string{}
-	for _, agent := range agents {
-		tmpDir := AgentInboxTmp(root, agent)
-		entries, err := os.ReadDir(tmpDir)
+	seen := make(map[string]struct{})
+	addMatch := func(path string) {
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		matches = append(matches, path)
+	}
+	scanDir := func(dir string) error {
+		entries, err := os.ReadDir(dir)
 		if err != nil {
 			if os.IsNotExist(err) {
-				continue
+				return nil
 			}
-			return nil, err
+			return err
 		}
 		for _, entry := range entries {
 			if entry.IsDir() {
@@ -48,9 +58,36 @@ func FindTmpFilesOlderThan(root string, cutoff time.Time) ([]string, error) {
 				continue // skip unreadable files instead of failing entire scan
 			}
 			if info.ModTime().Before(cutoff) {
-				matches = append(matches, filepath.Join(tmpDir, entry.Name()))
+				addMatch(filepath.Join(dir, entry.Name()))
 			}
 		}
+		return nil
+	}
+	for _, agent := range agents {
+		if err := scanDir(AgentInboxTmp(root, agent)); err != nil {
+			return nil, err
+		}
+		if err := scanDir(AgentDLQTmp(root, agent)); err != nil {
+			return nil, err
+		}
+		agentDir := filepath.Join(root, "agents", agent)
+		_ = filepath.WalkDir(agentDir, func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return nil
+			}
+			name := entry.Name()
+			if !strings.HasPrefix(name, ".") || !strings.Contains(name, ".tmp-") {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return nil
+			}
+			if info.ModTime().Before(cutoff) {
+				addMatch(path)
+			}
+			return nil
+		})
 	}
 	return matches, nil
 }

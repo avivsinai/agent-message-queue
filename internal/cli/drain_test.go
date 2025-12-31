@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/ack"
@@ -464,7 +465,7 @@ func runDrainJSON(t *testing.T, root, agent string, limit int, includeBody, ack 
 	t.Helper()
 	args := []string{"--root", root, "--me", agent, "--json"}
 	if limit > 0 {
-		args = append(args, "--limit", itoa(limit))
+		args = append(args, "--limit", strconv.Itoa(limit))
 	}
 	if includeBody {
 		args = append(args, "--include-body")
@@ -500,7 +501,7 @@ func runDrainText(t *testing.T, root, agent string, limit int, includeBody, ack 
 	t.Helper()
 	args := []string{"--root", root, "--me", agent}
 	if limit > 0 {
-		args = append(args, "--limit", itoa(limit))
+		args = append(args, "--limit", strconv.Itoa(limit))
 	}
 	if includeBody {
 		args = append(args, "--include-body")
