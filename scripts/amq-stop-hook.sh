@@ -26,7 +26,7 @@ if [ ${#files[@]} -eq 0 ]; then
     exit 0
 fi
 
-# Safe fallback if amq missing
+# Safe fallback if dependencies missing
 if ! command -v amq &> /dev/null; then
     echo '{"decision": "approve"}'
     exit 0
