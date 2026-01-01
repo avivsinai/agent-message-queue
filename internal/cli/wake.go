@@ -103,10 +103,12 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	// Determine effective inject mode
 	mode := cfg.injectMode
 	if mode == "" || mode == "auto" {
-		// Auto-detect: use raw mode for Claude Code (Ink), paste for others (Codex/crossterm)
+		// Auto-detect: use raw mode for Claude Code and Codex to avoid bracketed-paste
+		// Enter swallowing in some CLIs. Paste mode remains available via flag.
 		// Claude Code's Ink framework has buggy bracketed paste handling where CR gets
 		// coalesced with the paste-end sequence and swallowed by the input parser.
-		if strings.Contains(strings.ToLower(cfg.me), "claude") {
+		meLower := strings.ToLower(cfg.me)
+		if strings.Contains(meLower, "claude") || strings.Contains(meLower, "codex") {
 			mode = "raw"
 		} else {
 			mode = "paste"
@@ -135,7 +137,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 
 	case "paste":
 		// Paste mode: bracketed paste with delayed CR
-		// Works with crossterm/ratatui apps (Codex)
+		// Works with crossterm/ratatui apps
 		// Send paste content first, then CR after short delay to avoid coalescing
 		pasteText := "\x1b[200~" + text + "\x1b[201~"
 		if cfg.bell {

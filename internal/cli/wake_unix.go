@@ -31,7 +31,7 @@ func runWake(args []string) error {
 		"Run as background job before starting CLI: amq wake --me claude &",
 		"",
 		"Inject modes:",
-		"  auto  - Detect CLI type: raw for Claude Code (Ink), paste for Codex (crossterm)",
+		"  auto  - Detect CLI type: raw for Claude Code/Codex, paste for others",
 		"  raw   - Plain text + CR, no bracketed paste (works with Ink-based CLIs)",
 		"  paste - Bracketed paste with delayed CR (works with crossterm-based CLIs)",
 		"",

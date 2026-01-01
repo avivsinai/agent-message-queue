@@ -146,9 +146,9 @@ When you see a notification, run `amq drain --include-body`:
 - **normal** → Add to TodoWrite, respond when current task done
 - **low** → Batch for end of session
 
-### Fallback: Codex Notify Hook
+### Fallback: Notify Hook
 
-If `amq wake` doesn't work, configure the notify hook:
+If `amq wake` fails (TIOCSTI unavailable on hardened Linux), use notify hook:
 ```toml
 # ~/.codex/config.toml
 notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]

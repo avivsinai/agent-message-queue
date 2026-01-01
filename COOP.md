@@ -92,16 +92,20 @@ That's it. When messages arrive, `amq wake` attempts to inject a notification in
 4. You run `amq drain --include-body` to read messages
 5. Agents work autonomously—messaging each other, not the user
 
-### Fallback: Codex Notify Hook
+### Fallback: Notify Hook (if wake unavailable)
 
-If `amq wake` doesn't work (e.g., kernel hardening disables TIOCSTI), configure the notify hook:
+`amq wake` uses TIOCSTI which may be unavailable on:
+- Hardened Linux (CONFIG_LEGACY_TIOCSTI=n)
+- Windows (use WSL)
+
+If wake fails, configure the notify hook for desktop notifications:
 
 ```toml
 # ~/.codex/config.toml
 notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
 ```
 
-The hook surfaces pending messages after each Codex turn.
+The hook surfaces pending messages after each agent turn + sends desktop notification.
 
 ## Message Format
 
@@ -208,9 +212,9 @@ claude
 - `--preview-len 48` - Max subject preview length
 
 **Inject Modes:**
-- `auto` (default) - Detects CLI type: uses `raw` for Claude Code (Ink), `paste` for Codex (crossterm)
+- `auto` (default) - Detects CLI type: uses `raw` for Claude Code/Codex, `paste` for others
 - `raw` - Plain text + carriage return, no bracketed paste (best for Ink-based CLIs)
-- `paste` - Bracketed paste with 25ms delayed CR (best for crossterm-based CLIs)
+- `paste` - Bracketed paste with delayed CR (best for crossterm-based CLIs)
 
 If notifications appear but require manual Enter, use `--inject-mode=raw`.
 
@@ -275,7 +279,8 @@ The `context` field accepts any JSON object. Recommended structure:
 # Test: run amq wake and watch for warnings
 amq wake --me claude
 
-# Fallback: use notify hook for Codex, or run amq drain manually
+# If TIOCSTI unavailable, use notify hook (see Fallback section above)
+# Or poll manually: amq drain --include-body
 ```
 
 ### Messages not appearing
@@ -285,10 +290,4 @@ amq list --me claude --new --json
 
 # Force poll mode if fsnotify issues
 amq watch --me claude --poll
-```
-
-### Codex not responding
-Configure the notify hook as fallback:
-```toml
-notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
 ```
