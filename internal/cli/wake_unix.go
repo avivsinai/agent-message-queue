@@ -37,25 +37,38 @@ func acquireWakeLock(root, me string) (cleanup func(), err error) {
 		return nil, fmt.Errorf("failed to create agent directory: %w", err)
 	}
 
-	// Resolve absolute path for comparison
+	// Resolve absolute path for comparison (normalize symlinks if possible)
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		absRoot = root
+	}
+	if realRoot, err := filepath.EvalSymlinks(absRoot); err == nil {
+		absRoot = realRoot
 	}
 
 	// Check existing lock
 	if data, err := os.ReadFile(lockPath); err == nil {
 		var existing wakeLock
 		if json.Unmarshal(data, &existing) == nil {
+			// Normalize stored root if possible to avoid symlink mismatches.
+			if realRoot, err := filepath.EvalSymlinks(existing.Root); err == nil {
+				existing.Root = realRoot
+			}
+
 			// Check if process is still alive
 			if processAlive(existing.PID) {
-				// Same inbox (compare absolute paths)?
-				if existing.Root == absRoot {
-					return nil, fmt.Errorf("wake already running for %s (pid %d on %s since %s)",
-						me, existing.PID, existing.TTY, existing.Started)
-				}
+				return nil, fmt.Errorf("wake already running for %s (pid %d on %s since %s)",
+					me, existing.PID, existing.TTY, existing.Started)
 			}
 			// Stale lock - remove it before trying to acquire
+			_ = os.Remove(lockPath)
+		} else {
+			// Invalid/corrupt lock. If it was just created, avoid stomping a writer in progress.
+			if info, statErr := os.Stat(lockPath); statErr == nil {
+				if time.Since(info.ModTime()) < 2*time.Second {
+					return nil, fmt.Errorf("wake lock is being created (retry shortly)")
+				}
+			}
 			_ = os.Remove(lockPath)
 		}
 	}
@@ -127,9 +140,18 @@ func processAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	// On Unix, FindProcess always succeeds; send signal 0 to check
+	// On Unix, FindProcess always succeeds; send signal 0 to check.
+	// ESRCH => process doesn't exist (dead).
+	// EPERM => process exists but we lack permission (alive).
+	// nil   => process exists and we can signal it (alive).
 	err = proc.Signal(syscall.Signal(0))
-	return err == nil
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, syscall.EPERM) {
+		return true // process exists, just can't signal it
+	}
+	return false // ESRCH or other error => treat as dead
 }
 
 func runWake(args []string) error {
@@ -220,7 +242,9 @@ func runWakeLoop(cfg wakeConfig) error {
 		return fmt.Errorf("failed to watch inbox: %w", err)
 	}
 
-	// Ignore job control signals so background job can operate freely:
+	// Ignore job control signals so background job can operate freely.
+	// Note: This also affects foreground mode (Ctrl+Z won't suspend), but wake
+	// is designed to run as a background job (amq wake &) so this is intentional.
 	// - SIGTTOU: allow writing to TTY from background
 	// - SIGTSTP: prevent Ctrl+Z or shell from suspending us
 	// - SIGTTIN: prevent suspension if stdin is accidentally read
@@ -301,9 +325,19 @@ func runWakeLoop(cfg wakeConfig) error {
 
 		case <-healthTicker.C:
 			// Verify TTY is still valid by checking if we can open /dev/tty
-			if !tiocsti.IsTTY() {
+			if !ttyAvailable() {
 				return errors.New("TTY no longer available")
 			}
 		}
 	}
+}
+
+func ttyAvailable() bool {
+	// Mirrors injection path: if /dev/tty can't be opened, wake can't inject.
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	_ = tty.Close()
+	return true
 }
