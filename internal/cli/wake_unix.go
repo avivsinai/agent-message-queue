@@ -396,7 +396,7 @@ func getCurrentTTY() string {
 	if err != nil {
 		return ""
 	}
-	defer tty.Close()
+	defer func() { _ = tty.Close() }()
 	if link, err := os.Readlink(fmt.Sprintf("/dev/fd/%d", tty.Fd())); err == nil {
 		// Normalize symlinks for reliable comparison
 		if real, err := filepath.EvalSymlinks(link); err == nil {
