@@ -16,6 +16,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/fsnotify/fsnotify"
+	"golang.org/x/sys/unix"
 )
 
 // wakeLock represents the lock file content for wake process deduplication.
@@ -86,8 +87,8 @@ func acquireWakeLock(root, me string) (cleanup func(), err error) {
 				}
 				if currentTTY != "" && currentTTY == existingTTY {
 					// Same TTY - check session IDs
-					existingSid, sidErr := syscall.Getsid(existing.PID)
-					currentSid, _ := syscall.Getsid(0)
+					existingSid, sidErr := unix.Getsid(existing.PID)
+					currentSid, _ := unix.Getsid(0)
 					if sidErr == nil && existingSid != currentSid {
 						// Different session on same TTY - old one is orphaned.
 						// Kill the orphaned process before taking over to prevent duplicates.
