@@ -57,6 +57,54 @@ func acquireWakeLock(root, me string) (cleanup func(), err error) {
 
 			// Check if process is still alive
 			if processAlive(existing.PID) {
+				// Process alive, but check if its TTY is still valid.
+				// If terminal was closed, the wake process is orphaned and should be replaced.
+				// Only check absolute paths (skip "stdin", "unknown", "pipe:[...]", etc.)
+				if strings.HasPrefix(existing.TTY, "/dev/") {
+					if _, statErr := os.Stat(existing.TTY); os.IsNotExist(statErr) {
+						// TTY gone - orphaned wake, kill it and take over
+						if proc, err := os.FindProcess(existing.PID); err == nil {
+							_ = proc.Signal(syscall.SIGTERM)
+							time.Sleep(100 * time.Millisecond)
+							if processAlive(existing.PID) {
+								_ = proc.Signal(syscall.SIGKILL)
+							}
+						}
+						_ = os.Remove(lockPath)
+						goto createLock
+					}
+				}
+
+				// Check if existing wake is in a different session (orphaned from closed shell).
+				// Same TTY + different session = old wake is orphaned, safe to take over.
+				currentTTY := getCurrentTTY()
+				existingTTY := existing.TTY
+				if strings.HasPrefix(existingTTY, "/dev/") {
+					if real, err := filepath.EvalSymlinks(existingTTY); err == nil {
+						existingTTY = real
+					}
+				}
+				if currentTTY != "" && currentTTY == existingTTY {
+					// Same TTY - check session IDs
+					existingSid, sidErr := syscall.Getsid(existing.PID)
+					currentSid, _ := syscall.Getsid(0)
+					if sidErr == nil && existingSid != currentSid {
+						// Different session on same TTY - old one is orphaned.
+						// Kill the orphaned process before taking over to prevent duplicates.
+						if proc, err := os.FindProcess(existing.PID); err == nil {
+							_ = proc.Signal(syscall.SIGTERM)
+							// Brief wait for graceful shutdown
+							time.Sleep(100 * time.Millisecond)
+							// Force kill if still alive
+							if processAlive(existing.PID) {
+								_ = proc.Signal(syscall.SIGKILL)
+							}
+						}
+						_ = os.Remove(lockPath)
+						goto createLock
+					}
+				}
+
 				return nil, fmt.Errorf("wake already running for %s (pid %d on %s since %s)",
 					me, existing.PID, existing.TTY, existing.Started)
 			}
@@ -73,12 +121,11 @@ func acquireWakeLock(root, me string) (cleanup func(), err error) {
 		}
 	}
 
-	// Get TTY name
-	ttyName := "unknown"
-	if link, err := os.Readlink("/dev/fd/0"); err == nil {
-		ttyName = link
-	} else if fi, err := os.Stdin.Stat(); err == nil {
-		ttyName = fi.Name()
+createLock:
+	// Get TTY name - reuse getCurrentTTY for consistency
+	ttyName := getCurrentTTY()
+	if ttyName == "" {
+		ttyName = "unknown"
 	}
 
 	// Write lock atomically using O_EXCL to prevent race conditions
@@ -340,4 +387,21 @@ func ttyAvailable() bool {
 	}
 	_ = tty.Close()
 	return true
+}
+
+// getCurrentTTY returns the normalized path to the current controlling terminal.
+func getCurrentTTY() string {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
+	if err != nil {
+		return ""
+	}
+	defer tty.Close()
+	if link, err := os.Readlink(fmt.Sprintf("/dev/fd/%d", tty.Fd())); err == nil {
+		// Normalize symlinks for reliable comparison
+		if real, err := filepath.EvalSymlinks(link); err == nil {
+			return real
+		}
+		return link
+	}
+	return ""
 }

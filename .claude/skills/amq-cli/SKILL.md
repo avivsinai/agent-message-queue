@@ -21,6 +21,7 @@ Verify: `amq --version`
 ## Quick Reference
 
 ```bash
+# Set once per session - commands work from any directory
 export AM_ROOT=.agent-mail AM_ME=claude   # or: AM_ME=codex
 
 amq send --to codex --body "Message"           # Send
@@ -29,14 +30,26 @@ amq reply --id <msg_id> --body "Response"      # Reply
 amq watch --timeout 60s                        # Wait for messages
 ```
 
+**Note**: With env vars set, all commands work from any subdirectory.
+
 ## Co-op Mode (Autonomous Multi-Agent)
 
 In co-op mode, agents work autonomously. **Message your partner, not the user.**
 
+### Shared Workspace
+
+**Both agents work in the same project folder.** Files are shared automatically:
+- If partner says "done with X" → check the files directly, don't ask for code
+- If partner says "see my changes" → read the files, they're already there
+- Don't send code snippets in messages → just reference file paths
+
+Only use messages for: coordination, questions, review requests, status updates.
+
 | Situation | Action |
 |----------|--------|
 | Blocked | Message partner |
-| Need review | Send `kind: review_request` |
+| Need review | Send `kind: review_request` with file paths |
+| Partner done | Read files directly (they're local) |
 | Done | Signal completion |
 | Ask user only for | credentials, unclear requirements |
 
