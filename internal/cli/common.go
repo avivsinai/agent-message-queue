@@ -397,6 +397,22 @@ func errString(err error) string {
 	return err.Error()
 }
 
+// multiStringFlag allows a flag to be specified multiple times.
+// Implements flag.Value interface.
+type multiStringFlag []string
+
+func (m *multiStringFlag) String() string {
+	if m == nil {
+		return ""
+	}
+	return strings.Join(*m, ",")
+}
+
+func (m *multiStringFlag) Set(value string) error {
+	*m = append(*m, value)
+	return nil
+}
+
 // parseContext parses a context JSON string or @file.json.
 func parseContext(raw string) (map[string]any, error) {
 	raw = strings.TrimSpace(raw)

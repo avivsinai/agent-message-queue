@@ -46,6 +46,13 @@ func runList(args []string) error {
 	limitFlag := fs.Int("limit", 0, "Limit number of messages (0 = no limit)")
 	offsetFlag := fs.Int("offset", 0, "Offset into sorted results (0 = start)")
 
+	// Filter flags
+	priorityFlag := fs.String("priority", "", "Filter by priority (urgent, normal, low)")
+	fromFlag := fs.String("from", "", "Filter by sender handle")
+	kindFlag := fs.String("kind", "", "Filter by message kind")
+	var labelFlags multiStringFlag
+	fs.Var(&labelFlags, "label", "Filter by label (can be repeated)")
+
 	usage := usageWithFlags(fs, "amq list --me <agent> [--new | --cur] [options]")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
@@ -145,6 +152,15 @@ func runList(args []string) error {
 		}
 		items = append(items, item)
 	}
+
+	// Apply filters
+	filterOpts := FilterOptions{
+		Priority: *priorityFlag,
+		From:     *fromFlag,
+		Kind:     *kindFlag,
+		Labels:   labelFlags,
+	}
+	items = FilterMessages(items, filterOpts)
 
 	format.SortByTimestamp(items)
 
