@@ -178,6 +178,18 @@ The core queue works on Windows. The `amq wake` notification feature requires WS
 **Is this production-ready?**
 For local development workflows, yes. AMQ is intentionally simple—it's not trying to be a distributed message broker.
 
+**How does AMQ compare to MCP Agent Mail or Gas Town?**
+
+All three solve agent coordination, but for different use cases:
+
+- **[MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail)** is a server-based coordination stack with shared inboxes, file-reservation leases, Git-backed archives, and SQLite/FTS search. It also has a commercial iOS companion for remote oversight. Best when you want centralized coordination, search, and mobile monitoring.
+
+- **[Gas Town](https://github.com/steveyegge/gastown)** is a larger-scale orchestration system built around tmux and the Beads data plane, with multiple agent roles (Mayor, Witness, Refinery). Aimed at managing many parallel agents with richer orchestration primitives.
+
+- **AMQ** is intentionally minimal: a single binary, local file queue, Maildir-style atomic delivery, no server/database/daemon. Best for 2–3 agents on one machine when you want something you can understand and debug in minutes.
+
+Other multi-agent orchestration frameworks exist (e.g., [Claude-Flow](https://github.com/ruvnet/claude-flow), [ccswarm](https://github.com/nwiizo/ccswarm)) with broader automation and agent-pool features. AMQ stays intentionally small.
+
 ## License
 
 MIT
