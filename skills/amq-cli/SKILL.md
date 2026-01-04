@@ -28,6 +28,7 @@ amq send --to codex --body "Message"           # Send
 amq drain --include-body                       # Receive (recommended)
 amq reply --id <msg_id> --body "Response"      # Reply
 amq watch --timeout 60s                        # Wait for messages
+amq list --new --priority urgent               # Filter messages
 ```
 
 **Note**: With env vars set, all commands work from any subdirectory.
@@ -99,6 +100,8 @@ If notifications require manual Enter, try `--inject-mode=raw`.
 amq send --to codex --body "Quick message"
 amq send --to codex --subject "Review" --kind review_request --body @file.md
 amq send --to claude --priority urgent --kind question --body "Blocked on API"
+amq send --to codex --labels "bug,parser" --body "Found issue in parser"
+amq send --to codex --context '{"paths": ["internal/cli/"]}' --body "Review these"
 ```
 
 ### Receive
@@ -106,6 +109,15 @@ amq send --to claude --priority urgent --kind question --body "Blocked on API"
 amq drain --include-body         # One-shot, silent when empty
 amq watch --timeout 60s          # Block until message arrives
 amq list --new                   # Peek without side effects
+```
+
+### Filter Messages
+```bash
+amq list --new --priority urgent              # By priority
+amq list --new --from codex                   # By sender
+amq list --new --kind review_request          # By kind
+amq list --new --label bug --label critical   # By labels (can repeat)
+amq list --new --from codex --priority urgent # Combine filters
 ```
 
 ### Reply
@@ -132,12 +144,30 @@ amq cleanup --tmp-older-than 36h                   # Clean stale tmp
 
 ## Message Kinds
 
-| Kind | Reply kind | Use |
-|------|------------|-----|
-| `review_request` | `review_response` | Code review |
-| `question` | `answer` | Questions |
-| `decision` | — | Design decisions |
-| `status` | — | FYI updates |
+| Kind | Reply Kind | Default Priority | Use |
+|------|------------|------------------|-----|
+| `review_request` | `review_response` | normal | Code review |
+| `review_response` | — | normal | Review feedback |
+| `question` | `answer` | normal | Questions |
+| `answer` | — | normal | Answers |
+| `decision` | — | normal | Design decisions |
+| `brainstorm` | — | low | Open discussion |
+| `status` | — | low | FYI updates |
+| `todo` | — | normal | Task assignments |
+
+## Labels and Context
+
+**Labels** tag messages for filtering:
+```bash
+amq send --to codex --labels "bug,urgent" --body "Critical issue"
+```
+
+**Context** provides structured metadata:
+```bash
+amq send --to codex --kind review_request \
+  --context '{"paths": ["internal/cli/send.go"], "focus": "error handling"}' \
+  --body "Please review"
+```
 
 ## Conventions
 

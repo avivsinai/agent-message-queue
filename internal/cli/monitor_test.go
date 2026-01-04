@@ -235,8 +235,12 @@ func TestMonitor_Timeout(t *testing.T) {
 	_ = w.Close()
 	os.Stdout = oldStdout
 
-	if err != nil {
-		t.Fatalf("runMonitor: %v", err)
+	// Timeout now returns an error with ExitTimeout code
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if GetExitCode(err) != ExitTimeout {
+		t.Errorf("expected ExitTimeout (%d), got %d", ExitTimeout, GetExitCode(err))
 	}
 
 	// Read output

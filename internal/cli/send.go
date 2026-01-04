@@ -51,7 +51,7 @@ func runSend(args []string) error {
 
 	// Validate handles against config.json
 	allHandles := append([]string{me}, recipients...)
-	if err := validateKnownHandles(root, allHandles, common.Strict); err != nil {
+	if err := validateKnownHandles(root, common.Strict, allHandles...); err != nil {
 		return err
 	}
 

@@ -104,7 +104,7 @@ func runReply(args []string) error {
 	recipient := recipientNorm
 
 	// Validate handles exist in config (if strict mode)
-	if err := validateKnownHandles(root, []string{me, recipient}, common.Strict); err != nil {
+	if err := validateKnownHandles(root, common.Strict, me, recipient); err != nil {
 		return err
 	}
 

@@ -45,18 +45,46 @@ internal/
 
 **Atomic Delivery**: Messages written to `tmp/`, fsynced, then atomically renamed to `new/`. Readers only scan `new/` and `cur/`, never seeing incomplete writes.
 
-**Message Format**: JSON frontmatter (schema, id, from, to, thread, subject, created, ack_required, refs, priority, kind, labels, context) followed by `---` and Markdown body.
+**Message Format**: JSON frontmatter followed by `---` and Markdown body:
+- `schema` — Format version (currently 1)
+- `id` — Unique message ID (timestamp + pid + random)
+- `from` — Sender handle
+- `to` — Recipient handles (array)
+- `thread` — Thread ID (auto-generated for P2P: `p2p/<a>__<b>`)
+- `subject` — Message subject
+- `created` — RFC3339Nano timestamp
+- `ack_required` — Whether sender expects acknowledgment
+- `refs` — Related message IDs
+- `priority` — `urgent`, `normal`, or `low`
+- `kind` — Message type (see Message Kinds below)
+- `labels` — Arbitrary tags for filtering
+- `context` — JSON object with additional context (paths, focus, etc.)
 
 **Thread Naming**: P2P threads use lexicographic ordering: `p2p/<lower_agent>__<higher_agent>`
 
 **Environment Variables**: `AM_ROOT` (default root dir), `AM_ME` (default agent handle)
+
+## Message Kinds
+
+| Kind | Reply Kind | Default Priority | Description |
+|------|------------|------------------|-------------|
+| `review_request` | `review_response` | normal | Request code review |
+| `review_response` | — | normal | Code review feedback |
+| `question` | `answer` | normal | Question needing answer |
+| `answer` | — | normal | Response to a question |
+| `decision` | — | normal | Decision request/announcement |
+| `brainstorm` | — | low | Open-ended discussion |
+| `status` | — | low | Status update/FYI |
+| `todo` | — | normal | Task assignment |
+
+When `--kind` is set but `--priority` is not, priority defaults to `normal`.
 
 ## CLI Commands
 
 ```bash
 amq init --root <path> --agents a,b,c [--force]
 amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--ack] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>]
-amq list --me <agent> [--new | --cur] [--json]
+amq list --me <agent> [--new | --cur] [--priority <p>] [--from <h>] [--kind <k>] [--label <l>...] [--limit N] [--offset N] [--json]
 amq read --me <agent> --id <msg_id> [--json]
 amq ack --me <agent> --id <msg_id>
 amq drain --me <agent> [--limit N] [--include-body] [--ack] [--json]
@@ -77,6 +105,58 @@ amq wake --me <agent> [--inject-cmd <cmd>] [--bell] [--debounce <duration>] [--p
 Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Note: `init` has its own flags and doesn't accept these.
 
 Use `amq --version` to check the installed version.
+
+### Message Filtering
+
+The `list` command supports filtering messages:
+
+```bash
+# Filter by priority
+amq list --me claude --new --priority urgent
+
+# Filter by sender
+amq list --me claude --new --from codex
+
+# Filter by message kind
+amq list --me claude --new --kind review_request
+
+# Filter by label (can be repeated for multiple labels)
+amq list --me claude --new --label bug --label critical
+
+# Combine filters
+amq list --me claude --new --from codex --priority urgent --kind question
+```
+
+### Labels and Context
+
+**Labels** are arbitrary tags for categorizing messages:
+
+```bash
+amq send --to codex --labels "bug,urgent,parser" --body "Found critical bug"
+```
+
+**Context** provides structured metadata as JSON:
+
+```bash
+# Inline JSON
+amq send --to codex --kind review_request \
+  --context '{"paths": ["internal/cli/send.go"], "focus": "error handling"}' \
+  --body "Please review error handling"
+
+# From file
+amq send --to codex --context @review-context.json --body "See context file"
+```
+
+Recommended context schema:
+```json
+{
+  "paths": ["internal/cli/send.go", "internal/format/message.go"],
+  "symbols": ["Header", "runSend"],
+  "focus": "error handling in validation",
+  "commands": ["go test ./internal/cli/..."],
+  "hunks": [{"file": "send.go", "lines": "45-60"}]
+}
+```
 
 ## Dead Letter Queue (DLQ)
 
@@ -105,7 +185,7 @@ Use `--force` with retry to override the max retry limit.
 
 Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 
-**Preferred: Use `drain`** - One-shot ingestion that reads, moves to cur, and acks in one atomic operation. Silent when empty (hook-friendly).
+**Preferred: Use `drain`** - One-shot ingestion that reads, moves to cur, and optionally acks (with `--ack`, which defaults to true). Silent when empty (hook-friendly).
 
 **During active work**: Use `amq drain --include-body` to ingest messages between steps.
 
@@ -116,6 +196,7 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 | Ingest messages | `amq drain --include-body` | One-shot: read+move+ack |
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
 | Quick peek only | `amq list --new` | Non-blocking, no side effects |
+| Filter messages | `amq list --new --priority urgent` | Show only urgent messages |
 | Background wake | `amq wake &` | Injects notification via TIOCSTI (experimental) |
 | Reply to message | `amq reply --id <msg_id>` | Auto thread/refs handling |
 
@@ -185,6 +266,7 @@ Key test files:
 - Unknown handles trigger a warning by default; use `--strict` to error instead
 - With `--strict`, unreadable or corrupt `config.json` also causes an error
 - Handles must be lowercase: `[a-z0-9_-]+`
+- Path traversal prevented via strict handle/ID validation
 
 ## Contributing
 
@@ -211,13 +293,25 @@ This repo includes skills for Claude Code and Codex CLI, distributed via the [sk
 
 ```
 .claude-plugin/plugin.json     → Plugin manifest for marketplace
-.claude/skills/amq-cli/        → Claude Code skill (source of truth)
+.claude/skills/amq-cli/        → Claude Code skill (SOURCE OF TRUTH)
 ├── SKILL.md
 └── plugin.json
 .codex/skills/amq-cli/         → Codex CLI skill (synced copy)
 ├── SKILL.md
 └── plugin.json
+skills/amq-cli/                → Standalone skill (synced copy, for direct install)
+├── SKILL.md
+└── plugin.json
 ```
+
+### Why Three Copies?
+
+The skill is distributed through multiple channels:
+1. **Claude Code marketplace** — reads from `.claude/skills/`
+2. **Codex CLI installer** — reads from `skills/` (standalone) or `.codex/skills/`
+3. **Project-local development** — both `.claude/` and `.codex/` override user-installed skills
+
+Each marketplace/installer requires the files to be present (symlinks not universally supported). The `make sync-skills` command keeps all copies identical.
 
 ### Dev vs Installed Skills
 
@@ -231,11 +325,13 @@ This lets you test skill changes locally before publishing.
 ### Editing Skills
 
 1. Edit files in `.claude/skills/amq-cli/` (source of truth)
-2. Sync to Codex: `make sync-skills`
+2. Sync to other locations: `make sync-skills`
 3. Test locally by running Claude Code or Codex in this repo
 4. Bump version in `.claude-plugin/plugin.json` and `.claude/skills/amq-cli/plugin.json`
-5. Run `make sync-skills` again to update Codex copies
-6. Commit and push
+5. Run `make sync-skills` again to update all copies
+6. Commit and push (all three locations will be committed)
+
+**Important**: Never edit `.codex/skills/` or `skills/` directly. Always edit `.claude/skills/` and sync.
 
 ### Installing Skills
 

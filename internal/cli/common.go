@@ -45,90 +45,61 @@ func defaultMe() string {
 
 func requireMe(handle string) error {
 	if strings.TrimSpace(handle) == "" {
-		return errors.New("--me is required (or set AM_ME, e.g., export AM_ME=your-handle)")
+		return UsageError("--me is required (or set AM_ME, e.g., export AM_ME=your-handle)")
 	}
 	return nil
 }
 
-// validateKnownHandle checks if the handle is in config.json (if it exists).
-// Returns nil if config doesn't exist or handle is known.
+// loadKnownAgents loads the agent list from config.json.
+// Returns nil slice if config doesn't exist.
+// If strict=true, returns an error for unreadable/corrupt config; otherwise warns to stderr.
+func loadKnownAgents(root string, strict bool) ([]string, error) {
+	configPath := filepath.Join(root, "meta", "config.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // No config, no validation
+		}
+		// Config exists but unreadable
+		msg := fmt.Sprintf("cannot read config.json: %v", err)
+		if strict {
+			return nil, errors.New(msg)
+		}
+		_ = writeStderr("warning: %s\n", msg)
+		return nil, nil
+	}
+
+	var cfg struct {
+		Agents []string `json:"agents"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		// Config exists but invalid JSON
+		msg := fmt.Sprintf("invalid config.json: %v", err)
+		if strict {
+			return nil, errors.New(msg)
+		}
+		_ = writeStderr("warning: %s\n", msg)
+		return nil, nil
+	}
+
+	return cfg.Agents, nil
+}
+
+// validateKnownHandles validates handles against config.json.
+// Accepts variadic handles for convenience (single or multiple).
+// Returns nil if config doesn't exist or all handles are known.
 // If strict=true, returns an error for unknown handles or unreadable/corrupt config; otherwise warns to stderr.
-func validateKnownHandle(root, handle string, strict bool) error {
-	configPath := filepath.Join(root, "meta", "config.json")
-	data, err := os.ReadFile(configPath)
+func validateKnownHandles(root string, strict bool, handles ...string) error {
+	agents, err := loadKnownAgents(root, strict)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // No config, no validation
-		}
-		// Config exists but unreadable
-		msg := fmt.Sprintf("cannot read config.json: %v", err)
-		if strict {
-			return errors.New(msg)
-		}
-		_ = writeStderr("warning: %s\n", msg)
-		return nil
+		return err
+	}
+	if agents == nil {
+		return nil // No config, no validation
 	}
 
-	var cfg struct {
-		Agents []string `json:"agents"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		// Config exists but invalid JSON
-		msg := fmt.Sprintf("invalid config.json: %v", err)
-		if strict {
-			return errors.New(msg)
-		}
-		_ = writeStderr("warning: %s\n", msg)
-		return nil
-	}
-
-	for _, known := range cfg.Agents {
-		if known == handle {
-			return nil // Handle is known
-		}
-	}
-
-	msg := fmt.Sprintf("handle %q not in config.json agents %v", handle, cfg.Agents)
-	if strict {
-		return errors.New(msg)
-	}
-	_ = writeStderr("warning: %s\n", msg)
-	return nil
-}
-
-// validateKnownHandles validates multiple handles against config.json.
-// If strict=true, returns an error for unknown handles or unreadable/corrupt config.
-func validateKnownHandles(root string, handles []string, strict bool) error {
-	configPath := filepath.Join(root, "meta", "config.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // No config, no validation
-		}
-		// Config exists but unreadable
-		msg := fmt.Sprintf("cannot read config.json: %v", err)
-		if strict {
-			return errors.New(msg)
-		}
-		_ = writeStderr("warning: %s\n", msg)
-		return nil
-	}
-
-	var cfg struct {
-		Agents []string `json:"agents"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		// Config exists but invalid JSON
-		msg := fmt.Sprintf("invalid config.json: %v", err)
-		if strict {
-			return errors.New(msg)
-		}
-		_ = writeStderr("warning: %s\n", msg)
-		return nil
-	}
-
-	known := make(map[string]bool, len(cfg.Agents))
-	for _, a := range cfg.Agents {
+	known := make(map[string]bool, len(agents))
+	for _, a := range agents {
 		known[a] = true
 	}
 
@@ -143,12 +114,23 @@ func validateKnownHandles(root string, handles []string, strict bool) error {
 		return nil
 	}
 
-	msg := fmt.Sprintf("unknown handles %v (known: %v)", unknown, cfg.Agents)
+	var msg string
+	if len(unknown) == 1 {
+		msg = fmt.Sprintf("handle %q not in config.json agents %v", unknown[0], agents)
+	} else {
+		msg = fmt.Sprintf("unknown handles %v (known: %v)", unknown, agents)
+	}
 	if strict {
 		return errors.New(msg)
 	}
 	_ = writeStderr("warning: %s\n", msg)
 	return nil
+}
+
+// validateKnownHandle is a convenience wrapper for validating a single handle.
+// Deprecated: Use validateKnownHandles(root, strict, handle) instead.
+func validateKnownHandle(root, handle string, strict bool) error {
+	return validateKnownHandles(root, strict, handle)
 }
 
 func normalizeHandle(raw string) (string, error) {

@@ -45,21 +45,28 @@ func runRead(args []string) error {
 	path, box, err := fsq.FindMessage(root, common.Me, filename)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("message not found: %s", *idFlag)
+			return NotFoundError("message not found: %s", *idFlag)
 		}
 		return err
 	}
 
+	// Parse first before moving to avoid stuck corrupt messages in cur
+	msg, err := format.ReadMessageFile(path)
+	if err != nil {
+		// If message is corrupt and in new, move to DLQ
+		if box == fsq.BoxNew {
+			if _, dlqErr := fsq.MoveToDLQ(root, common.Me, filename, *idFlag, "parse_error", err.Error()); dlqErr != nil {
+				_ = writeStderr("warning: failed to move corrupt message to DLQ: %v\n", dlqErr)
+			}
+		}
+		return fmt.Errorf("failed to parse message %s: %w", *idFlag, err)
+	}
+
+	// Move to cur only after successful parse
 	if box == fsq.BoxNew {
 		if err := fsq.MoveNewToCur(root, common.Me, filename); err != nil {
 			return err
 		}
-		path = filepath.Join(fsq.AgentInboxCur(root, common.Me), filename)
-	}
-
-	msg, err := format.ReadMessageFile(path)
-	if err != nil {
-		return err
 	}
 
 	if common.JSON {

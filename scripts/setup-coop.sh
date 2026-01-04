@@ -38,17 +38,34 @@ fi
 echo -e "${GREEN}[1/4]${NC} Initializing AMQ mailboxes at ${AM_ROOT} for agents: ${AGENTS}..."
 if command -v amq &> /dev/null; then
     # Check if config exists and has agents
+    CONFIG_EXISTS=false
+    USE_FORCE=true
     if [ -f "$AM_ROOT/meta/config.json" ]; then
-        EXISTING=$(jq -r '.agents // [] | join(",")' "$AM_ROOT/meta/config.json" 2>/dev/null || echo "")
-        if [ -n "$EXISTING" ]; then
-            echo -e "  ${YELLOW}Existing agents found: ${EXISTING}${NC}"
-            # Merge: add new agents to existing list
-            MERGED=$(echo "$EXISTING,$AGENTS" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
-            AGENTS="$MERGED"
-            echo "  Merged agent list: ${AGENTS}"
+        CONFIG_EXISTS=true
+        if command -v jq &> /dev/null; then
+            EXISTING=$(jq -r '.agents // [] | join(",")' "$AM_ROOT/meta/config.json" 2>/dev/null || echo "")
+            if [ -n "$EXISTING" ]; then
+                echo -e "  ${YELLOW}Existing agents found: ${EXISTING}${NC}"
+                # Merge: add new agents to existing list
+                MERGED=$(echo "$EXISTING,$AGENTS" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+                AGENTS="$MERGED"
+                echo "  Merged agent list: ${AGENTS}"
+            fi
+        else
+            # jq not available but config exists - don't use --force to avoid data loss
+            echo -e "  ${YELLOW}Config exists but jq not available for merge. Using existing config safely.${NC}"
+            USE_FORCE=false
         fi
     fi
-    amq init --root "$AM_ROOT" --agents "$AGENTS" --force 2>/dev/null || true
+
+    if [ "$USE_FORCE" = true ]; then
+        amq init --root "$AM_ROOT" --agents "$AGENTS" --force 2>/dev/null || true
+    else
+        # Try without force - will only update if compatible or fail safely
+        amq init --root "$AM_ROOT" --agents "$AGENTS" 2>/dev/null || {
+            echo -e "  ${YELLOW}Init skipped (config exists). Install jq to enable agent merging.${NC}"
+        }
+    fi
 else
     echo "  Skipping (amq not installed)"
 fi

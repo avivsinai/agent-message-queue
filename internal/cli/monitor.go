@@ -113,13 +113,16 @@ func runMonitor(args []string) error {
 
 	if watchErr != nil {
 		if errors.Is(watchErr, context.DeadlineExceeded) {
-			return outputMonitorResult(common.JSON, monitorResult{
+			if err := outputMonitorResult(common.JSON, monitorResult{
 				Event:   "timeout",
 				Mode:    mode,
 				Me:      common.Me,
 				Count:   0,
 				Drained: []monitorItem{},
-			})
+			}); err != nil {
+				return err
+			}
+			return TimeoutError("monitor timed out")
 		}
 		return watchErr
 	}

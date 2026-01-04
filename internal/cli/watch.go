@@ -93,7 +93,11 @@ func runWatch(args []string) error {
 
 	if watchErr != nil {
 		if errors.Is(watchErr, context.DeadlineExceeded) {
-			return outputWatchResult(common.JSON, "timeout", nil)
+			// Output timeout result but return a timeout exit code
+			if err := outputWatchResult(common.JSON, "timeout", nil); err != nil {
+				return err
+			}
+			return TimeoutError("watch timed out")
 		}
 		return watchErr
 	}

@@ -120,16 +120,29 @@ def log_event(event: dict) -> None:
         pass
 
 
+def escape_applescript_string(s: str) -> str:
+    """Escape a string for safe use in AppleScript double-quoted strings.
+
+    AppleScript uses backslash escapes within double-quoted strings.
+    We escape backslashes first, then double quotes.
+    """
+    s = s.replace("\\", "\\\\")  # Escape backslashes first
+    s = s.replace('"', '\\"')    # Escape double quotes
+    return s
+
+
 def send_notification(title: str, message: str) -> None:
     """Send a desktop notification (macOS/Linux)."""
     if sys.platform == "darwin":
-        # macOS
+        # macOS - escape strings to prevent AppleScript injection
+        safe_title = escape_applescript_string(title)
+        safe_message = escape_applescript_string(message)
         try:
             subprocess.run(
                 [
                     "osascript",
                     "-e",
-                    f'display notification "{message}" with title "{title}"',
+                    f'display notification "{safe_message}" with title "{safe_title}"',
                 ],
                 check=False,
             )

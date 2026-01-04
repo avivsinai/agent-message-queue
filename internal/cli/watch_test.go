@@ -99,8 +99,12 @@ func TestRunWatchTimeout(t *testing.T) {
 	_ = w.Close()
 	os.Stdout = oldStdout
 
-	if err != nil {
-		t.Fatalf("runWatch: %v", err)
+	// Timeout now returns an error with ExitTimeout code
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if GetExitCode(err) != ExitTimeout {
+		t.Errorf("expected ExitTimeout (%d), got %d", ExitTimeout, GetExitCode(err))
 	}
 
 	// Should timeout around 100ms

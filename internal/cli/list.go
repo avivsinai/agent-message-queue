@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -80,16 +79,24 @@ func runList(args []string) error {
 
 	box := "new"
 	if *newFlag && *curFlag {
-		return errors.New("use only one of --new or --cur")
+		return UsageError("use only one of --new or --cur")
 	}
 	if *curFlag {
 		box = "cur"
 	}
 	if *limitFlag < 0 {
-		return errors.New("--limit must be >= 0")
+		return UsageError("--limit must be >= 0")
 	}
 	if *offsetFlag < 0 {
-		return errors.New("--offset must be >= 0")
+		return UsageError("--offset must be >= 0")
+	}
+
+	// Validate filter values (allow empty, but reject invalid non-empty values)
+	if *priorityFlag != "" && !format.IsValidPriority(*priorityFlag) {
+		return UsageError("--priority must be one of: urgent, normal, low")
+	}
+	if *kindFlag != "" && !format.IsValidKind(*kindFlag) {
+		return UsageError("--kind must be one of: brainstorm, review_request, review_response, question, answer, decision, status, todo")
 	}
 
 	var dir string
