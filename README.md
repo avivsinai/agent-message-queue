@@ -2,6 +2,10 @@
 
 File-based message queue for AI agent coordination. Enables Claude Code and Codex CLI to communicate on the same machine using atomic Maildir-style delivery.
 
+
+https://github.com/user-attachments/assets/55794884-9d62-4382-9cd9-197ddd5aaf70
+
+
 ## Installation
 
 ### 1. Install Binary (macOS/Linux)
