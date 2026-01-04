@@ -88,7 +88,7 @@ func runDLQList(args []string) error {
 	common.Me = me
 	root := filepath.Clean(common.Root)
 
-	if err := validateKnownHandle(root, me, common.Strict); err != nil {
+	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
 	}
 
@@ -214,7 +214,7 @@ func runDLQRead(args []string) error {
 	common.Me = me
 	root := filepath.Clean(common.Root)
 
-	if err := validateKnownHandle(root, me, common.Strict); err != nil {
+	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
 	}
 
@@ -319,7 +319,7 @@ func runDLQRetry(args []string) error {
 	common.Me = me
 	root := filepath.Clean(common.Root)
 
-	if err := validateKnownHandle(root, me, common.Strict); err != nil {
+	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
 	}
 
@@ -409,7 +409,7 @@ func runDLQPurge(args []string) error {
 	common.Me = me
 	root := filepath.Clean(common.Root)
 
-	if err := validateKnownHandle(root, me, common.Strict); err != nil {
+	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
 	}
 

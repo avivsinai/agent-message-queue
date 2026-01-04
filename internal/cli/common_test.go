@@ -40,17 +40,17 @@ func TestValidateKnownHandle(t *testing.T) {
 	}
 
 	// Known handle should pass
-	if err := validateKnownHandle(root, "alice", false); err != nil {
+	if err := validateKnownHandles(root, false, "alice"); err != nil {
 		t.Errorf("known handle should pass: %v", err)
 	}
 
 	// Unknown handle with strict=false should warn but not error
-	if err := validateKnownHandle(root, "unknown", false); err != nil {
+	if err := validateKnownHandles(root, false, "unknown"); err != nil {
 		t.Errorf("unknown handle with strict=false should warn, not error: %v", err)
 	}
 
 	// Unknown handle with strict=true should error
-	if err := validateKnownHandle(root, "unknown", true); err == nil {
+	if err := validateKnownHandles(root, true, "unknown"); err == nil {
 		t.Errorf("unknown handle with strict=true should error")
 	}
 }
@@ -59,7 +59,7 @@ func TestValidateKnownHandleNoConfig(t *testing.T) {
 	root := t.TempDir()
 
 	// No config file - should pass any handle
-	if err := validateKnownHandle(root, "anyhandle", true); err != nil {
+	if err := validateKnownHandles(root, true, "anyhandle"); err != nil {
 		t.Errorf("no config should pass any handle: %v", err)
 	}
 }
@@ -77,12 +77,12 @@ func TestValidateKnownHandleCorruptConfig(t *testing.T) {
 	}
 
 	// Corrupt config with strict=false should warn but not error
-	if err := validateKnownHandle(root, "alice", false); err != nil {
+	if err := validateKnownHandles(root, false, "alice"); err != nil {
 		t.Errorf("corrupt config with strict=false should warn, not error: %v", err)
 	}
 
 	// Corrupt config with strict=true should error
-	if err := validateKnownHandle(root, "alice", true); err == nil {
+	if err := validateKnownHandles(root, true, "alice"); err == nil {
 		t.Errorf("corrupt config with strict=true should error")
 	}
 }

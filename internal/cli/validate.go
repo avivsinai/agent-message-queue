@@ -1,11 +1,8 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,7 +18,7 @@ func newHeaderValidator(root string, strict bool) (*headerValidator, error) {
 	if !strict {
 		return &headerValidator{strict: false}, nil
 	}
-	known, err := loadKnownHandles(root, strict)
+	known, err := loadKnownAgentSet(root, strict)
 	if err != nil {
 		return nil, err
 	}
@@ -115,42 +112,4 @@ func safeHeaderID(id string) (string, bool) {
 		return "", false
 	}
 	return id, true
-}
-
-func loadKnownHandles(root string, strict bool) (map[string]struct{}, error) {
-	configPath := filepath.Join(root, "meta", "config.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		msg := fmt.Sprintf("cannot read config.json: %v", err)
-		if strict {
-			return nil, errors.New(msg)
-		}
-		_ = writeStderr("warning: %s\n", msg)
-		return nil, nil
-	}
-
-	var cfg struct {
-		Agents []string `json:"agents"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		msg := fmt.Sprintf("invalid config.json: %v", err)
-		if strict {
-			return nil, errors.New(msg)
-		}
-		_ = writeStderr("warning: %s\n", msg)
-		return nil, nil
-	}
-
-	if len(cfg.Agents) == 0 {
-		return nil, nil
-	}
-
-	known := make(map[string]struct{}, len(cfg.Agents))
-	for _, agent := range cfg.Agents {
-		known[agent] = struct{}{}
-	}
-	return known, nil
 }

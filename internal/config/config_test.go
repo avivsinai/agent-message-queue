@@ -11,7 +11,7 @@ func TestConfigWriteRead(t *testing.T) {
 	cfg := Config{
 		Version:    1,
 		CreatedUTC: "2025-12-24T15:02:33Z",
-		Agents:     []string{"codex", "cloudcode"},
+		Agents:     []string{"codex", "claude"},
 	}
 	if err := WriteConfig(path, cfg, false); err != nil {
 		t.Fatalf("WriteConfig: %v", err)

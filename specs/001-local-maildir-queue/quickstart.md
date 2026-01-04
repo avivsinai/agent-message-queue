@@ -3,28 +3,28 @@
 ## Initialize
 
 ```
-amq init --root .agent-mail --agents codex,cloudcode
+amq init --root .agent-mail --agents codex,claude
 ```
 
 ## Send
 
 ```
-amq send --to cloudcode --subject "Review notes" --thread p2p/cloudcode__codex --body @notes.md
-amq send --to cloudcode --body "Quick ping"
+amq send --to claude --subject "Review notes" --thread p2p/claude__codex --body @notes.md
+amq send --to claude --body "Quick ping"
 ```
 
 ## List / Read / Ack
 
 ```
-amq list --me cloudcode --new
-amq read --me cloudcode --id <msg_id>
-amq ack  --me cloudcode --id <msg_id>
+amq list --me claude --new
+amq read --me claude --id <msg_id>
+amq ack  --me claude --id <msg_id>
 ```
 
 ## Thread
 
 ```
-amq thread --me codex --id p2p/cloudcode__codex --limit 50
+amq thread --me codex --id p2p/claude__codex --limit 50
 ```
 
 ## Presence (optional)

@@ -13,6 +13,7 @@ Installs to user-local directory (no sudo required):
 - `~/.local/bin` if exists
 - `~/go/bin` if exists
 - `~/.local/bin` (created if needed)
+The installer verifies release checksums when possible.
 
 ### 2. Skill
 
@@ -49,6 +50,12 @@ Download from [Releases](https://github.com/avivsinai/agent-message-queue/releas
 tar xzf amq_*.tar.gz
 mkdir -p ~/.local/bin
 mv amq ~/.local/bin/
+```
+
+Optionally verify checksums:
+
+```bash
+curl -fsSL https://github.com/avivsinai/agent-message-queue/releases/download/<TAG>/checksums.txt | grep amq_<VERSION>_<OS>_<ARCH>
 ```
 
 ### Binary: Build from Source

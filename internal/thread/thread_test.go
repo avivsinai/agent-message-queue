@@ -18,8 +18,8 @@ func TestCollectThread(t *testing.T) {
 	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
 		t.Fatalf("EnsureAgentDirs codex: %v", err)
 	}
-	if err := fsq.EnsureAgentDirs(root, "cloudcode"); err != nil {
-		t.Fatalf("EnsureAgentDirs cloudcode: %v", err)
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatalf("EnsureAgentDirs claude: %v", err)
 	}
 
 	now := time.Date(2025, 12, 24, 15, 2, 33, 0, time.UTC)
@@ -28,8 +28,8 @@ func TestCollectThread(t *testing.T) {
 			Schema:  1,
 			ID:      "msg-1",
 			From:    "codex",
-			To:      []string{"cloudcode"},
-			Thread:  "p2p/cloudcode__codex",
+			To:      []string{"claude"},
+			Thread:  "p2p/claude__codex",
 			Subject: "Hello",
 			Created: now.Format(time.RFC3339Nano),
 		},
@@ -39,9 +39,9 @@ func TestCollectThread(t *testing.T) {
 		Header: format.Header{
 			Schema:  1,
 			ID:      "msg-2",
-			From:    "cloudcode",
+			From:    "claude",
 			To:      []string{"codex"},
-			Thread:  "p2p/cloudcode__codex",
+			Thread:  "p2p/claude__codex",
 			Subject: "Re: Hello",
 			Created: now.Add(2 * time.Second).Format(time.RFC3339Nano),
 		},
@@ -57,14 +57,14 @@ func TestCollectThread(t *testing.T) {
 		t.Fatalf("marshal msg2: %v", err)
 	}
 
-	if _, err := fsq.DeliverToInbox(root, "cloudcode", "msg-1.md", data1); err != nil {
+	if _, err := fsq.DeliverToInbox(root, "claude", "msg-1.md", data1); err != nil {
 		t.Fatalf("deliver msg1: %v", err)
 	}
 	if _, err := fsq.DeliverToInbox(root, "codex", "msg-2.md", data2); err != nil {
 		t.Fatalf("deliver msg2: %v", err)
 	}
 
-	entries, err := Collect(root, "p2p/cloudcode__codex", []string{"codex", "cloudcode"}, false, nil)
+	entries, err := Collect(root, "p2p/claude__codex", []string{"codex", "claude"}, false, nil)
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
@@ -90,12 +90,12 @@ func TestCollectThreadCorruptMessage(t *testing.T) {
 		t.Fatalf("write bad message: %v", err)
 	}
 
-	if _, err := Collect(root, "p2p/cloudcode__codex", []string{"codex"}, false, nil); err == nil {
+	if _, err := Collect(root, "p2p/claude__codex", []string{"codex"}, false, nil); err == nil {
 		t.Fatalf("expected error for corrupt message")
 	}
 
 	called := false
-	entries, err := Collect(root, "p2p/cloudcode__codex", []string{"codex"}, false, func(path string, err error) error {
+	entries, err := Collect(root, "p2p/claude__codex", []string{"codex"}, false, func(path string, err error) error {
 		called = true
 		return nil
 	})

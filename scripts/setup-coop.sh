@@ -21,6 +21,8 @@ echo ""
 
 AM_ROOT="${AM_ROOT:-.agent-mail}"
 AGENTS="${AGENTS:-claude,codex}"
+REPO="avivsinai/agent-message-queue"
+SCRIPTS_BASE_URL="https://raw.githubusercontent.com/${REPO}/main/scripts"
 
 # Check dependencies
 if ! command -v amq &> /dev/null; then
@@ -70,108 +72,33 @@ else
     echo "  Skipping (amq not installed)"
 fi
 
+fetch_script() {
+    local name="$1"
+    local url="$2"
+    local dest="scripts/$name"
+    if [ -f "$dest" ]; then
+        chmod +x "$dest"
+        return 0
+    fi
+    if curl -fsSL "$url" -o "$dest"; then
+        chmod +x "$dest"
+        return 0
+    fi
+    return 1
+}
+
 # Step 2: Create Claude SessionStart hook (available for opt-in use)
 echo -e "${GREEN}[2/4]${NC} Creating scripts/claude-session-start.sh..."
 mkdir -p scripts
-
-cat > scripts/claude-session-start.sh << 'HOOK'
-#!/bin/bash
-# AMQ Claude SessionStart hook
-# Sets AM_ROOT/AM_ME for Claude Code by appending to CLAUDE_ENV_FILE.
-
-set -euo pipefail
-
-if [ -z "${CLAUDE_ENV_FILE:-}" ]; then
-    exit 0
+if ! fetch_script "claude-session-start.sh" "$SCRIPTS_BASE_URL/claude-session-start.sh"; then
+    echo -e "${YELLOW}Warning: failed to fetch claude-session-start.sh${NC}"
 fi
-
-DEFAULT_ROOT=".agent-mail"
-if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
-    DEFAULT_ROOT="${CLAUDE_PROJECT_DIR}/.agent-mail"
-fi
-
-ROOT="${AM_ROOT:-$DEFAULT_ROOT}"
-ME="${AM_ME:-claude}"
-
-touch "$CLAUDE_ENV_FILE"
-
-if ! grep -q '^export AM_ROOT=' "$CLAUDE_ENV_FILE"; then
-    printf 'export AM_ROOT=%q\n' "$ROOT" >> "$CLAUDE_ENV_FILE"
-fi
-if ! grep -q '^export AM_ME=' "$CLAUDE_ENV_FILE"; then
-    printf 'export AM_ME=%q\n' "$ME" >> "$CLAUDE_ENV_FILE"
-fi
-HOOK
-
-chmod +x scripts/claude-session-start.sh
 
 # Step 3: Create stop hook script (available for opt-in use)
 echo -e "${GREEN}[3/4]${NC} Creating scripts/amq-stop-hook.sh..."
-
-cat > scripts/amq-stop-hook.sh << 'HOOK'
-#!/bin/bash
-# AMQ Co-op Stop Hook
-# Blocks stop if there are pending messages in inbox
-# Safe fallback: approves if amq unavailable or co-op not configured
-
-DEFAULT_ROOT=".agent-mail"
-if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
-    DEFAULT_ROOT="${CLAUDE_PROJECT_DIR}/.agent-mail"
+if ! fetch_script "amq-stop-hook.sh" "$SCRIPTS_BASE_URL/amq-stop-hook.sh"; then
+    echo -e "${YELLOW}Warning: failed to fetch amq-stop-hook.sh${NC}"
 fi
-ROOT="${AM_ROOT:-$DEFAULT_ROOT}"
-ME="${AM_ME:-claude}"
-
-# Fast path: approve immediately if co-op not set up
-if [ ! -d "$ROOT/agents/$ME/inbox/new" ]; then
-    echo '{"decision": "approve"}'
-    exit 0
-fi
-
-# Fast path: if inbox/new has no message files, approve without invoking amq
-inbox_new="$ROOT/agents/$ME/inbox/new"
-shopt -s nullglob
-files=("$inbox_new"/*.md)
-shopt -u nullglob
-if [ ${#files[@]} -eq 0 ]; then
-    echo '{"decision": "approve"}'
-    exit 0
-fi
-
-# Safe fallback if dependencies missing
-if ! command -v amq &> /dev/null; then
-    echo '{"decision": "approve"}'
-    exit 0
-fi
-
-if command -v jq &> /dev/null; then
-    # Check for pending messages (safe fallback on any error)
-    COUNT=$(amq list --root "$ROOT" --me "$ME" --new --json 2>/dev/null | jq -r 'length // 0' 2>/dev/null || echo "0")
-
-    # Sanitize COUNT to ensure it's a number
-    if ! [[ "$COUNT" =~ ^[0-9]+$ ]]; then
-        COUNT=0
-    fi
-
-    if [ "$COUNT" -gt 0 ]; then
-        echo '{"decision": "block", "reason": "You have '"$COUNT"' pending message(s). Ask me to drain the inbox before stopping."}'
-        exit 0
-    fi
-else
-    OUT=$(amq list --root "$ROOT" --me "$ME" --new 2>/dev/null || true)
-    if echo "$OUT" | grep -q "^No messages\\.$"; then
-        echo '{"decision": "approve"}'
-        exit 0
-    fi
-    if [ -n "$OUT" ]; then
-        echo '{"decision": "block", "reason": "You have pending message(s). Ask me to drain the inbox before stopping."}'
-        exit 0
-    fi
-fi
-
-echo '{"decision": "approve"}'
-HOOK
-
-chmod +x scripts/amq-stop-hook.sh
 
 # Step 4: Update .gitignore
 echo -e "${GREEN}[4/4]${NC} Updating .gitignore..."

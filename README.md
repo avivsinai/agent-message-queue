@@ -22,7 +22,7 @@ AMQ enables **autonomous multi-agent collaboration**: agents message each other 
 - **Built for agents** — Priority levels, message kinds, threading, acknowledgments—all the primitives agents need.
 
 
-https://github.com/user-attachments/assets/55794884-9d62-4382-9cd9-197ddd5aaf70
+<video src="docs/assets/demo.mp4" controls playsinline></video>
 
 
 ## Installation
@@ -34,6 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/
 ```
 
 Installs to `~/.local/bin` or `~/go/bin` (no sudo required). Verify: `amq --version`
+Review the script before running; it verifies release checksums when possible.
 
 ### 2. Install Skill
 

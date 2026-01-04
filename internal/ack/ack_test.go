@@ -9,7 +9,7 @@ import (
 
 func TestAckMarshal(t *testing.T) {
 	ts := time.Date(2025, 12, 24, 15, 2, 33, 0, time.UTC)
-	a := New("msg-1", "p2p/cloudcode__codex", "cloudcode", "codex", ts)
+	a := New("msg-1", "p2p/claude__codex", "claude", "codex", ts)
 	data, err := a.Marshal()
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -21,7 +21,7 @@ func TestAckMarshal(t *testing.T) {
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out.MsgID != "msg-1" || out.Thread == "" || out.From != "cloudcode" || out.To != "codex" {
+	if out.MsgID != "msg-1" || out.Thread == "" || out.From != "claude" || out.To != "codex" {
 		t.Fatalf("unexpected ack: %+v", out)
 	}
 }

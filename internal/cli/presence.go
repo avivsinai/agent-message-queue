@@ -50,7 +50,7 @@ func runPresenceSet(args []string) error {
 	root := filepath.Clean(common.Root)
 
 	// Validate handle against config.json
-	if err := validateKnownHandle(root, me, common.Strict); err != nil {
+	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
 	}
 

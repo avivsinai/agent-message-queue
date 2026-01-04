@@ -17,17 +17,17 @@ func TestRunAckRejectsInvalidHeader(t *testing.T) {
 	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
 		t.Fatalf("EnsureAgentDirs codex: %v", err)
 	}
-	if err := fsq.EnsureAgentDirs(root, "cloudcode"); err != nil {
-		t.Fatalf("EnsureAgentDirs cloudcode: %v", err)
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatalf("EnsureAgentDirs claude: %v", err)
 	}
 
 	msg := format.Message{
 		Header: format.Header{
 			Schema:  1,
 			ID:      "bad/../id",
-			From:    "cloudcode",
+			From:    "claude",
 			To:      []string{"codex"},
-			Thread:  "p2p/cloudcode__codex",
+			Thread:  "p2p/claude__codex",
 			Created: "2025-12-24T15:02:33Z",
 		},
 		Body: "test",
@@ -67,8 +67,8 @@ func TestRunAckCorruptAckFileRecovery(t *testing.T) {
 	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
 		t.Fatalf("EnsureAgentDirs codex: %v", err)
 	}
-	if err := fsq.EnsureAgentDirs(root, "cloudcode"); err != nil {
-		t.Fatalf("EnsureAgentDirs cloudcode: %v", err)
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatalf("EnsureAgentDirs claude: %v", err)
 	}
 
 	// Create a valid message
@@ -76,9 +76,9 @@ func TestRunAckCorruptAckFileRecovery(t *testing.T) {
 		Header: format.Header{
 			Schema:  1,
 			ID:      "msg-recover",
-			From:    "cloudcode",
+			From:    "claude",
 			To:      []string{"codex"},
-			Thread:  "p2p/cloudcode__codex",
+			Thread:  "p2p/claude__codex",
 			Created: "2025-12-25T15:02:33Z",
 		},
 		Body: "test",

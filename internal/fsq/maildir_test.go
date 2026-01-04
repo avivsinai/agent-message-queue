@@ -71,17 +71,17 @@ func TestDeliverToInboxesRollback(t *testing.T) {
 	if err := EnsureAgentDirs(root, "codex"); err != nil {
 		t.Fatalf("EnsureAgentDirs codex: %v", err)
 	}
-	if err := EnsureAgentDirs(root, "cloudcode"); err != nil {
-		t.Fatalf("EnsureAgentDirs cloudcode: %v", err)
+	if err := EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatalf("EnsureAgentDirs claude: %v", err)
 	}
 
-	cloudNew := AgentInboxNew(root, "cloudcode")
+	cloudNew := AgentInboxNew(root, "claude")
 	if err := os.Chmod(cloudNew, 0o555); err != nil {
-		t.Fatalf("chmod cloudcode new: %v", err)
+		t.Fatalf("chmod claude new: %v", err)
 	}
 
 	filename := "multi.md"
-	if _, err := DeliverToInboxes(root, []string{"codex", "cloudcode"}, filename, []byte("hello")); err == nil {
+	if _, err := DeliverToInboxes(root, []string{"codex", "claude"}, filename, []byte("hello")); err == nil {
 		t.Fatalf("expected delivery error")
 	}
 
@@ -90,7 +90,7 @@ func TestDeliverToInboxesRollback(t *testing.T) {
 		t.Fatalf("expected rollback to remove %s", codexNew)
 	}
 
-	cloudTmp := filepath.Join(AgentInboxTmp(root, "cloudcode"), filename)
+	cloudTmp := filepath.Join(AgentInboxTmp(root, "claude"), filename)
 	if _, err := os.Stat(cloudTmp); !os.IsNotExist(err) {
 		t.Fatalf("expected rollback to remove %s", cloudTmp)
 	}

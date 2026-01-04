@@ -85,6 +85,18 @@ func loadKnownAgents(root string, strict bool) ([]string, error) {
 	return cfg.Agents, nil
 }
 
+func loadKnownAgentSet(root string, strict bool) (map[string]struct{}, error) {
+	agents, err := loadKnownAgents(root, strict)
+	if err != nil || len(agents) == 0 {
+		return nil, err
+	}
+	known := make(map[string]struct{}, len(agents))
+	for _, agent := range agents {
+		known[agent] = struct{}{}
+	}
+	return known, nil
+}
+
 // validateKnownHandles validates handles against config.json.
 // Accepts variadic handles for convenience (single or multiple).
 // Returns nil if config doesn't exist or all handles are known.
@@ -125,12 +137,6 @@ func validateKnownHandles(root string, strict bool, handles ...string) error {
 	}
 	_ = writeStderr("warning: %s\n", msg)
 	return nil
-}
-
-// validateKnownHandle is a convenience wrapper for validating a single handle.
-// Deprecated: Use validateKnownHandles(root, strict, handle) instead.
-func validateKnownHandle(root, handle string, strict bool) error {
-	return validateKnownHandles(root, strict, handle)
 }
 
 func normalizeHandle(raw string) (string, error) {

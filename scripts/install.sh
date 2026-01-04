@@ -39,6 +39,7 @@ INSTALL_DIR=$(determine_install_dir)
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
 echo -e "${BLUE}=== AMQ Binary Installer ===${NC}"
@@ -88,6 +89,7 @@ echo "Version: $VERSION"
 VERSION_NUM="${VERSION#v}"  # Remove 'v' prefix
 ASSET="amq_${VERSION_NUM}_${OS}_${ARCH}.tar.gz"
 URL="https://github.com/$REPO/releases/download/$VERSION/$ASSET"
+CHECKSUMS_URL="https://github.com/$REPO/releases/download/$VERSION/checksums.txt"
 
 echo "Downloading: $ASSET"
 
@@ -101,6 +103,31 @@ if ! curl -fsSL "$URL" -o "$TMP_DIR/$ASSET"; then
     echo "URL: $URL"
     echo "Check available releases: https://github.com/$REPO/releases"
     exit 1
+fi
+
+# Verify checksums when possible
+CHECKSUMS_FILE="$TMP_DIR/checksums.txt"
+if curl -fsSL "$CHECKSUMS_URL" -o "$CHECKSUMS_FILE"; then
+    CHECKSUM_LINE=$(grep " $ASSET$" "$CHECKSUMS_FILE" || true)
+    if [ -z "$CHECKSUM_LINE" ]; then
+        echo -e "${YELLOW}Warning: checksum entry not found for $ASSET${NC}"
+    elif command -v sha256sum &> /dev/null; then
+        (cd "$TMP_DIR" && echo "$CHECKSUM_LINE" | sha256sum -c -) || {
+            echo -e "${RED}Error: checksum verification failed${NC}"
+            exit 1
+        }
+    elif command -v shasum &> /dev/null; then
+        EXPECTED=$(echo "$CHECKSUM_LINE" | awk '{print $1}')
+        ACTUAL=$(shasum -a 256 "$TMP_DIR/$ASSET" | awk '{print $1}')
+        if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo -e "${RED}Error: checksum verification failed${NC}"
+            exit 1
+        fi
+    else
+        echo -e "${YELLOW}Warning: sha256 tool not found; skipping checksum verification${NC}"
+    fi
+else
+    echo -e "${YELLOW}Warning: failed to download checksums; skipping verification${NC}"
 fi
 
 cd "$TMP_DIR"

@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint ci smoke sync-skills
+.PHONY: build test fmt fmt-check vet lint ci smoke sync-skills check-skills
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -25,10 +25,20 @@ lint:
 smoke:
 	./scripts/smoke-test.sh
 
-ci: fmt-check vet lint test smoke
+ci: check-skills fmt-check vet lint test smoke
 
 sync-skills:
 	@echo "Syncing skills from .claude/skills/ to .codex/skills/ and skills/..."
-	cp .claude/skills/amq-cli/SKILL.md .codex/skills/amq-cli/SKILL.md
-	cp .claude/skills/amq-cli/SKILL.md skills/amq-cli/SKILL.md
+	@mkdir -p .codex/skills/amq-cli skills/amq-cli
+	@if command -v rsync >/dev/null 2>&1; then \
+		rsync -a --delete .claude/skills/amq-cli/ .codex/skills/amq-cli/; \
+		rsync -a --delete .claude/skills/amq-cli/ skills/amq-cli/; \
+	else \
+		cp -R .claude/skills/amq-cli/. .codex/skills/amq-cli/; \
+		cp -R .claude/skills/amq-cli/. skills/amq-cli/; \
+	fi
 	@echo "Done."
+
+check-skills:
+	@diff -ru .claude/skills/amq-cli .codex/skills/amq-cli
+	@diff -ru .claude/skills/amq-cli skills/amq-cli
