@@ -22,7 +22,7 @@ AMQ enables **autonomous multi-agent collaboration**: agents message each other 
 - **Built for agents** — Priority levels, message kinds, threading, acknowledgments—all the primitives agents need.
 
 
-<video src="docs/assets/demo.mp4" controls playsinline></video>
+https://github.com/user-attachments/assets/55794884-9d62-4382-9cd9-197ddd5aaf70
 
 
 ## Installation
