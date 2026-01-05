@@ -234,7 +234,7 @@ func runWake(args []string) error {
 		return err
 	}
 
-	root := filepath.Clean(common.Root)
+	root := resolveRoot(common.Root)
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
 	}

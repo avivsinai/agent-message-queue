@@ -86,3 +86,77 @@ func TestValidateKnownHandleCorruptConfig(t *testing.T) {
 		t.Errorf("corrupt config with strict=true should error")
 	}
 }
+
+func TestResolveRootFindsParent(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, ".agent-mail")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	sub := filepath.Join(base, "nested", "dir")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+	})
+	if err := os.Chdir(sub); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	got := resolveRoot(".agent-mail")
+	want, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	gotEval, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("eval got: %v", err)
+	}
+	wantEval, err := filepath.EvalSymlinks(want)
+	if err != nil {
+		t.Fatalf("eval want: %v", err)
+	}
+	if gotEval != wantEval {
+		t.Fatalf("resolveRoot parent = %q, want %q", got, want)
+	}
+}
+
+func TestResolveRootCurrentDir(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, ".agent-mail")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+	})
+	if err := os.Chdir(base); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	got := resolveRoot(".agent-mail")
+	want, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	gotEval, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("eval got: %v", err)
+	}
+	wantEval, err := filepath.EvalSymlinks(want)
+	if err != nil {
+		t.Fatalf("eval want: %v", err)
+	}
+	if gotEval != wantEval {
+		t.Fatalf("resolveRoot cwd = %q, want %q", got, want)
+	}
+}

@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -30,7 +29,7 @@ func runRead(args []string) error {
 		return err
 	}
 	common.Me = me
-	root := filepath.Clean(common.Root)
+	root := resolveRoot(common.Root)
 
 	// Validate handle against config.json
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {

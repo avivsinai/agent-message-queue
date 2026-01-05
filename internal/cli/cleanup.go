@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -33,7 +32,7 @@ func runCleanup(args []string) error {
 	if dur <= 0 {
 		return errors.New("--tmp-older-than must be > 0")
 	}
-	root := filepath.Clean(common.Root)
+	root := resolveRoot(common.Root)
 	cutoff := time.Now().Add(-dur)
 
 	candidates, err := fsq.FindTmpFilesOlderThan(root, cutoff)

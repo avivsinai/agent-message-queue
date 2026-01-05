@@ -47,7 +47,7 @@ func runPresenceSet(args []string) error {
 		return err
 	}
 	common.Me = me
-	root := filepath.Clean(common.Root)
+	root := resolveRoot(common.Root)
 
 	// Validate handle against config.json
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
@@ -80,7 +80,7 @@ func runPresenceList(args []string) error {
 	} else if handled {
 		return nil
 	}
-	root := filepath.Clean(common.Root)
+	root := resolveRoot(common.Root)
 
 	var agents []string
 	if cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json")); err == nil {

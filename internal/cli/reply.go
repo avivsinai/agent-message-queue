@@ -42,7 +42,7 @@ func runReply(args []string) error {
 		return err
 	}
 	common.Me = me
-	root := filepath.Clean(common.Root)
+	root := resolveRoot(common.Root)
 
 	if *idFlag == "" {
 		return fmt.Errorf("--id is required")

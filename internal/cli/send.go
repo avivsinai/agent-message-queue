@@ -4,7 +4,6 @@ import (
 	"errors"
 	"flag"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,7 +41,7 @@ func runSend(args []string) error {
 		return err
 	}
 	common.Me = me
-	root := filepath.Clean(common.Root)
+	root := resolveRoot(common.Root)
 	recipients, err := splitRecipients(*toFlag)
 	if err != nil {
 		return err

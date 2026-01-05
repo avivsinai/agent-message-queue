@@ -33,7 +33,7 @@ func runThread(args []string) error {
 	if *limitFlag < 0 {
 		return fmt.Errorf("--limit must be >= 0")
 	}
-	root := filepath.Clean(common.Root)
+	root := resolveRoot(common.Root)
 
 	agents, err := parseHandles(*agentsFlag)
 	if err != nil {
