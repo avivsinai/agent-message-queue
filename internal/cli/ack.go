@@ -32,7 +32,7 @@ func runAck(args []string) error {
 		return err
 	}
 	common.Me = me
-	root := filepath.Clean(common.Root)
+	root := resolveRoot(common.Root)
 
 	// Validate handle against config.json
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {

@@ -42,7 +42,7 @@ func runDrain(args []string) error {
 		return err
 	}
 	common.Me = me
-	root := filepath.Clean(common.Root)
+	root := resolveRoot(common.Root)
 
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err

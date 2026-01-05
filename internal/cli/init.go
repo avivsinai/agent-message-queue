@@ -35,7 +35,7 @@ func runInit(args []string) error {
 	agents = dedupeStrings(agents)
 	sort.Strings(agents)
 
-	root := filepath.Clean(*rootFlag)
+	root := resolveRoot(*rootFlag)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		return err
 	}

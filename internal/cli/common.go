@@ -36,6 +36,61 @@ func defaultRoot() string {
 	return ".agent-mail"
 }
 
+func resolveRoot(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return raw
+	}
+	cleaned := filepath.Clean(raw)
+	if filepath.IsAbs(cleaned) {
+		return cleaned
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return cleaned
+	}
+	candidate := filepath.Join(cwd, cleaned)
+	if dirExists(candidate) {
+		return absPath(candidate)
+	}
+	if found, ok := findRootInParents(cwd, cleaned); ok {
+		return found
+	}
+	return cleaned
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
+}
+
+func absPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return abs
+}
+
+func findRootInParents(startDir, relative string) (string, bool) {
+	dir := startDir
+	for {
+		candidate := filepath.Join(dir, relative)
+		if dirExists(candidate) {
+			return absPath(candidate), true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return "", false
+}
+
 func defaultMe() string {
 	if env := strings.TrimSpace(os.Getenv(envMe)); env != "" {
 		return env
