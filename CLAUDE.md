@@ -62,7 +62,7 @@ internal/
 
 **Thread Naming**: P2P threads use lexicographic ordering: `p2p/<lower_agent>__<higher_agent>`
 
-**Environment Variables**: `AM_ROOT` (default root dir), `AM_ME` (default agent handle)
+**Environment Variables**: `AM_ROOT` (default root dir), `AM_ME` (default agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
 ## Message Kinds
 
@@ -100,9 +100,10 @@ amq dlq read --me <agent> --id <dlq_id> [--json]
 amq dlq retry --me <agent> --id <dlq_id> [--all] [--force]
 amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
 amq wake --me <agent> [--inject-cmd <cmd>] [--bell] [--debounce <duration>] [--preview-len <n>]
+amq upgrade
 ```
 
-Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Note: `init` has its own flags and doesn't accept these.
+Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has its own flags and doesn't accept these.
 
 Use `amq --version` to check the installed version.
 

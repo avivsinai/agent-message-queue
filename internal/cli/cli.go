@@ -7,10 +7,15 @@ const (
 	envMe   = "AM_ME"
 )
 
-func Run(args []string) error {
+func Run(args []string, version string) error {
+	args, noUpdate := stripNoUpdateCheckArgs(args)
 	if len(args) == 0 || isHelp(args[0]) {
 		return printUsage()
 	}
+	if isVersionArg(args[0]) {
+		return printVersion(version)
+	}
+	startUpdateNotifier(args[0], version, noUpdate)
 
 	switch args[0] {
 	case "init":
@@ -41,6 +46,8 @@ func Run(args []string) error {
 		return runDLQ(args[1:])
 	case "wake":
 		return runWake(args[1:])
+	case "upgrade":
+		return runUpgrade(args[1:], version)
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
@@ -107,6 +114,18 @@ func printUsage() error {
 	if err := writeStdoutLine("  wake      Background waker (TIOCSTI injection, experimental)"); err != nil {
 		return err
 	}
+	if err := writeStdoutLine("  upgrade   Upgrade amq to the latest release"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine(""); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("Global options:"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  --no-update-check  Disable update check"); err != nil {
+		return err
+	}
 	if err := writeStdoutLine(""); err != nil {
 		return err
 	}
@@ -116,5 +135,21 @@ func printUsage() error {
 	if err := writeStdoutLine("  AM_ROOT   Default root directory for storage"); err != nil {
 		return err
 	}
-	return writeStdoutLine("  AM_ME     Default agent handle")
+	if err := writeStdoutLine("  AM_ME     Default agent handle"); err != nil {
+		return err
+	}
+	return writeStdoutLine("  AMQ_NO_UPDATE_CHECK  Disable update check (1/true/yes/on)")
+}
+
+func isVersionArg(arg string) bool {
+	switch arg {
+	case "--version", "-v", "version":
+		return true
+	default:
+		return false
+	}
+}
+
+func printVersion(version string) error {
+	return writeStdoutLine(version)
 }
