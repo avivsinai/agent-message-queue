@@ -135,6 +135,13 @@ amq dlq retry --all [--force]       # Retry all
 amq dlq purge --older-than 24h      # Clean old DLQ entries
 ```
 
+### Upgrade
+```bash
+amq upgrade                    # Self-update to latest release
+amq --no-update-check ...      # Disable update hint for this command
+export AMQ_NO_UPDATE_CHECK=1   # Disable update hints globally
+```
+
 ### Other
 ```bash
 amq thread --id p2p/claude__codex --include-body   # View thread

@@ -52,6 +52,18 @@ Restart Codex after installing.
 
 For manual download, build from source, or troubleshooting, see [INSTALL.md](INSTALL.md).
 
+### Updating
+
+```bash
+amq upgrade  # Self-updates to latest release
+```
+
+To disable update notifications (for CI/offline):
+```bash
+amq --no-update-check ...      # Per-command
+export AMQ_NO_UPDATE_CHECK=1   # Global
+```
+
 ## Quick Start
 
 ### 1. Initialize Project
