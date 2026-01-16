@@ -48,6 +48,8 @@ func Run(args []string, version string) error {
 		return runWake(args[1:])
 	case "upgrade":
 		return runUpgrade(args[1:], version)
+	case "env":
+		return runEnv(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
@@ -115,6 +117,9 @@ func printUsage() error {
 		return err
 	}
 	if err := writeStdoutLine("  upgrade   Upgrade amq to the latest release"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  env       Output shell commands to set environment variables"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine(""); err != nil {

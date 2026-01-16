@@ -21,7 +21,11 @@ Verify: `amq --version`
 ## Quick Reference
 
 ```bash
-# Set once per session - commands work from any directory
+# Option 1: Using .amqrc (recommended)
+echo '{"root": ".agent-mail", "me": "claude"}' > .amqrc
+eval "$(amq env --wake)"
+
+# Option 2: Manual exports
 export AM_ROOT=.agent-mail AM_ME=claude   # or: AM_ME=codex
 
 amq send --to codex --body "Message"           # Send
@@ -140,6 +144,15 @@ amq dlq purge --older-than 24h      # Clean old DLQ entries
 amq upgrade                    # Self-update to latest release
 amq --no-update-check ...      # Disable update hint for this command
 export AMQ_NO_UPDATE_CHECK=1   # Disable update hints globally
+```
+
+### Environment Setup
+```bash
+amq env                      # Output shell exports (auto-detects .amqrc or .agent-mail/)
+amq env --wake               # Include 'amq wake &' in output
+amq env --me codex           # Override agent handle
+amq env --shell fish         # Fish shell syntax
+amq env --json               # Machine-readable output
 ```
 
 ### Other
