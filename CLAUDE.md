@@ -64,6 +64,25 @@ internal/
 
 **Environment Variables**: `AM_ROOT` (default root dir), `AM_ME` (default agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
+**Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
+1. Command-line flags (`--root`, `--me`)
+2. Environment variables (`AM_ROOT`, `AM_ME`)
+3. `.amqrc` file in current or parent directories
+4. Auto-detect `.agent-mail/` directory
+
+The `.amqrc` file is JSON:
+```json
+{"root": ".agent-mail", "me": "claude"}
+```
+
+Usage:
+```bash
+eval "$(amq env)"           # Load env vars
+eval "$(amq env --wake)"    # Load env vars and start wake
+amq env --shell fish        # Fish shell syntax
+amq env --json              # Machine-readable output
+```
+
 ## Message Kinds
 
 | Kind | Reply Kind | Default Priority | Description |
@@ -101,6 +120,7 @@ amq dlq retry --me <agent> --id <dlq_id> [--all] [--force]
 amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
 amq wake --me <agent> [--inject-cmd <cmd>] [--bell] [--debounce <duration>] [--preview-len <n>]
 amq upgrade
+amq env [--me <agent>] [--root <path>] [--shell sh|bash|zsh|fish] [--wake] [--json]
 ```
 
 Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has its own flags and doesn't accept these.
@@ -206,6 +226,21 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 Co-op mode enables real-time collaboration between Claude Code and Codex CLI sessions. See `COOP.md` for full documentation.
 
 ### Quick Start
+
+**Option 1: Using `.amqrc` (recommended)**
+
+Create `.amqrc` in your project root:
+```json
+{"root": ".agent-mail", "me": "claude"}
+```
+
+Then start your session:
+```bash
+eval "$(amq env --wake)"
+claude
+```
+
+**Option 2: Manual exports**
 
 ```bash
 # Terminal 1 - Claude Code

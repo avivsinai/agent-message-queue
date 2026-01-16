@@ -1,0 +1,273 @@
+package cli
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// amqrc represents the .amqrc configuration file format.
+type amqrc struct {
+	Root string `json:"root"`
+	Me   string `json:"me"`
+}
+
+// envOutput is the JSON output format for amq env --json.
+type envOutput struct {
+	Root  string `json:"root,omitempty"`
+	Me    string `json:"me,omitempty"`
+	Shell string `json:"shell,omitempty"`
+	Wake  bool   `json:"wake,omitempty"`
+}
+
+func runEnv(args []string) error {
+	fs := flag.NewFlagSet("env", flag.ContinueOnError)
+	meFlag := fs.String("me", "", "Agent handle (overrides .amqrc and AM_ME)")
+	rootFlag := fs.String("root", "", "Root directory (overrides .amqrc and AM_ROOT)")
+	shellFlag := fs.String("shell", "sh", "Shell format: sh, bash, zsh, fish")
+	wakeFlag := fs.Bool("wake", false, "Include amq wake & in output")
+	jsonFlag := fs.Bool("json", false, "Output as JSON (for scripts)")
+
+	usage := usageWithFlags(fs, "amq env [options]",
+		"Outputs shell commands to set AM_ROOT and AM_ME environment variables.",
+		"",
+		"Configuration is read from (highest to lowest precedence):",
+		"  1. Command-line flags (--root, --me)",
+		"  2. Environment variables (AM_ROOT, AM_ME)",
+		"  3. .amqrc file in current or parent directories",
+		"  4. Auto-detect .agent-mail/ directory",
+		"",
+		"Usage:",
+		"  eval \"$(amq env)\"           # Load env vars",
+		"  eval \"$(amq env --wake)\"    # Load env vars and start wake",
+		"  amq env --json               # Machine-readable output",
+	)
+
+	if handled, err := parseFlags(fs, args, usage); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+
+	// Resolve configuration with precedence
+	root, me, err := resolveEnvConfig(*rootFlag, *meFlag)
+	if err != nil {
+		return err
+	}
+
+	// Validate shell
+	shell := strings.ToLower(strings.TrimSpace(*shellFlag))
+	if !isValidShell(shell) {
+		return UsageError("invalid shell %q (supported: sh, bash, zsh, fish)", shell)
+	}
+
+	// JSON output mode
+	if *jsonFlag {
+		out := envOutput{
+			Root:  root,
+			Me:    me,
+			Shell: shell,
+			Wake:  *wakeFlag,
+		}
+		return writeJSON(os.Stdout, out)
+	}
+
+	// Generate shell commands
+	return writeShellEnv(root, me, shell, *wakeFlag)
+}
+
+// resolveEnvConfig resolves root and me with proper precedence.
+func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
+	var root, me string
+
+	// 1. Try .amqrc file first (lowest precedence for values we'll override)
+	if rc, err := findAndLoadAmqrc(); err == nil {
+		root = rc.Root
+		me = rc.Me
+	}
+
+	// 2. Auto-detect .agent-mail/ directory if root not set
+	if root == "" {
+		if detected := detectAgentMailDir(); detected != "" {
+			root = detected
+		}
+	}
+
+	// 3. Environment variables override .amqrc
+	if envRoot := strings.TrimSpace(os.Getenv(envRoot)); envRoot != "" {
+		root = envRoot
+	}
+	if envMe := strings.TrimSpace(os.Getenv(envMe)); envMe != "" {
+		me = envMe
+	}
+
+	// 4. Command-line flags have highest precedence
+	if rootFlag != "" {
+		root = rootFlag
+	}
+	if meFlag != "" {
+		me = meFlag
+	}
+
+	// Validate we have at least root
+	if root == "" {
+		return "", "", fmt.Errorf("cannot determine root: no .amqrc found, no .agent-mail/ directory, and AM_ROOT not set")
+	}
+
+	// Normalize and validate me if provided
+	if me != "" {
+		normalized, err := normalizeHandle(me)
+		if err != nil {
+			return "", "", fmt.Errorf("invalid agent handle: %w", err)
+		}
+		me = normalized
+	}
+
+	return root, me, nil
+}
+
+// findAndLoadAmqrc searches for .amqrc in current and parent directories.
+func findAndLoadAmqrc() (amqrc, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return amqrc{}, err
+	}
+
+	dir := cwd
+	for {
+		rcPath := filepath.Join(dir, ".amqrc")
+		if data, err := os.ReadFile(rcPath); err == nil {
+			var rc amqrc
+			if err := json.Unmarshal(data, &rc); err != nil {
+				return amqrc{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, err)
+			}
+			return rc, nil
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	return amqrc{}, fmt.Errorf(".amqrc not found")
+}
+
+// detectAgentMailDir searches for .agent-mail/ in current and parent directories.
+func detectAgentMailDir() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+
+	dir := cwd
+	for {
+		candidate := filepath.Join(dir, ".agent-mail")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			// Return relative path if in cwd, absolute otherwise
+			if dir == cwd {
+				return ".agent-mail"
+			}
+			return candidate
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	return ""
+}
+
+func isValidShell(shell string) bool {
+	switch shell {
+	case "sh", "bash", "zsh", "fish":
+		return true
+	default:
+		return false
+	}
+}
+
+func writeShellEnv(root, me, shell string, wake bool) error {
+	switch shell {
+	case "fish":
+		return writeFishEnv(root, me, wake)
+	default:
+		return writePosixEnv(root, me, wake)
+	}
+}
+
+func writePosixEnv(root, me string, wake bool) error {
+	// Use proper shell quoting
+	if root != "" {
+		if err := writeStdout("export AM_ROOT=%s\n", shellQuote(root)); err != nil {
+			return err
+		}
+	}
+	if me != "" {
+		if err := writeStdout("export AM_ME=%s\n", shellQuote(me)); err != nil {
+			return err
+		}
+	}
+	if wake {
+		if err := writeStdoutLine("amq wake &"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeFishEnv(root, me string, wake bool) error {
+	if root != "" {
+		if err := writeStdout("set -gx AM_ROOT %s\n", shellQuote(root)); err != nil {
+			return err
+		}
+	}
+	if me != "" {
+		if err := writeStdout("set -gx AM_ME %s\n", shellQuote(me)); err != nil {
+			return err
+		}
+	}
+	if wake {
+		if err := writeStdoutLine("amq wake &"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// shellQuote quotes a string for safe use in shell commands.
+// Uses single quotes with proper escaping.
+func shellQuote(s string) string {
+	// If string contains no special characters, return as-is
+	if isSimpleString(s) {
+		return s
+	}
+	// Use single quotes, escaping any single quotes in the string
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+func isSimpleString(s string) bool {
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r >= 'A' && r <= 'Z' {
+			continue
+		}
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if r == '-' || r == '_' || r == '.' || r == '/' {
+			continue
+		}
+		return false
+	}
+	return true
+}
