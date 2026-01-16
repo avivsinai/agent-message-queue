@@ -30,8 +30,13 @@ func addCommonFlags(fs *flag.FlagSet) *commonFlags {
 }
 
 func defaultRoot() string {
+	// Precedence: env > session > default
 	if env := strings.TrimSpace(os.Getenv(envRoot)); env != "" {
 		return env
+	}
+	// Try session file
+	if sessionConfig, err := resolveFromSession(); err == nil && sessionConfig.Root != "" {
+		return sessionConfig.Root
 	}
 	return ".agent-mail"
 }
@@ -92,15 +97,20 @@ func findRootInParents(startDir, relative string) (string, bool) {
 }
 
 func defaultMe() string {
+	// Precedence: env > session
 	if env := strings.TrimSpace(os.Getenv(envMe)); env != "" {
 		return env
+	}
+	// Try session file
+	if sessionConfig, err := resolveFromSession(); err == nil && sessionConfig.Me != "" {
+		return sessionConfig.Me
 	}
 	return ""
 }
 
 func requireMe(handle string) error {
 	if strings.TrimSpace(handle) == "" {
-		return UsageError("--me is required (or set AM_ME, e.g., export AM_ME=your-handle)")
+		return UsageError("--me is required (or run 'amq session start --me <agent>')")
 	}
 	return nil
 }

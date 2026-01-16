@@ -44,16 +44,17 @@ func runEnv(args []string) error {
 	usage := usageWithFlags(fs, "amq env [options]",
 		"Outputs shell commands to set AM_ROOT and AM_ME environment variables.",
 		"",
-		"Configuration is read from (highest to lowest precedence):",
-		"  1. Command-line flags (--root, --me)",
-		"  2. Environment variables (AM_ROOT, AM_ME)",
-		"  3. .amqrc file in current or parent directories",
-		"  4. Auto-detect .agent-mail/ directory",
+		"NOTE: For most users, 'amq session start --me <agent>' is easier.",
+		"Use 'amq env' only if you need shell environment variables.",
+		"",
+		"Configuration precedence (highest to lowest):",
+		"  Root: flags > env > session > .amqrc > auto-detect",
+		"  Me:   flags > env > session (not from .amqrc)",
 		"",
 		"Usage:",
-		"  eval \"$(amq env)\"           # Load env vars",
-		"  eval \"$(amq env --wake)\"    # Load env vars and start wake",
-		"  amq env --json               # Machine-readable output",
+		"  eval \"$(amq env --me claude)\"        # Load env vars",
+		"  eval \"$(amq env --me claude --wake)\" # Load env vars and start wake",
+		"  amq env --json                        # Machine-readable output",
 	)
 
 	if handled, err := parseFlags(fs, args, usage); err != nil {
@@ -90,15 +91,17 @@ func runEnv(args []string) error {
 }
 
 // resolveEnvConfig resolves root and me with proper precedence.
-// Precedence (highest to lowest): flags > env vars > .amqrc > auto-detect
+// Precedence:
+//   - Root: flags > env > session > .amqrc > auto-detect
+//   - Me:   flags > env > session (NOT from .amqrc)
 func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 	var root, me string
 
 	// Collect values from all sources, then apply precedence
 
-	// 1. Try .amqrc file (lowest precedence)
+	// 1. Try .amqrc file (for root only, lowest precedence)
 	var rcErr error
-	var rcRoot, rcMe, rcDir string
+	var rcRoot, rcDir string
 	rcResult, err := findAndLoadAmqrc()
 	if err != nil {
 		if !errors.Is(err, errAmqrcNotFound) {
@@ -108,8 +111,9 @@ func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 		// Not found is fine, continue with other sources
 	} else {
 		rcRoot = rcResult.Config.Root
-		rcMe = rcResult.Config.Me
 		rcDir = rcResult.Dir
+
+		// Note: 'me' in .amqrc is ignored (use 'amq session start --me <agent>' instead)
 
 		// Resolve relative root path against .amqrc directory
 		if rcRoot != "" && !filepath.IsAbs(rcRoot) {
@@ -120,48 +124,57 @@ func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 	// 2. Auto-detect .agent-mail/ directory
 	autoRoot := detectAgentMailDir()
 
-	// 3. Environment variables
+	// 3. Session file
+	var sessionRoot, sessionMe string
+	if sessionConfig, err := resolveFromSession(); err == nil {
+		sessionRoot = sessionConfig.Root
+		sessionMe = sessionConfig.Me
+	}
+
+	// 4. Environment variables
 	envRootVal := strings.TrimSpace(os.Getenv(envRoot))
 	envMeVal := strings.TrimSpace(os.Getenv(envMe))
 
-	// 4. Command-line flags (already have rootFlag, meFlag)
+	// 5. Command-line flags (already have rootFlag, meFlag)
 
-	// Now apply precedence for root: flags > env > .amqrc > auto-detect
+	// Apply precedence for root: flags > env > session > .amqrc > auto-detect
 	if rootFlag != "" {
 		root = rootFlag
 	} else if envRootVal != "" {
 		root = envRootVal
+	} else if sessionRoot != "" {
+		root = sessionRoot
 	} else if rcRoot != "" {
 		root = rcRoot
 	} else if autoRoot != "" {
 		root = autoRoot
 	}
 
-	// Apply precedence for me: flags > env > .amqrc
+	// Apply precedence for me: flags > env > session (NOT from .amqrc)
 	if meFlag != "" {
 		me = meFlag
 	} else if envMeVal != "" {
 		me = envMeVal
-	} else if rcMe != "" {
-		me = rcMe
+	} else if sessionMe != "" {
+		me = sessionMe
 	}
 
 	// If we would have needed .amqrc values but it was invalid, report the error
 	// Only error if .amqrc was invalid AND no higher-precedence source provided root
-	// Note: Only flags and env vars are higher precedence than .amqrc; auto-detect is lower
+	// Note: Only flags, env, and session are higher precedence than .amqrc; auto-detect is lower
 	if rcErr != nil {
-		// Check if a higher-precedence source (flags or env) provided root
-		hasHigherPrecedenceRoot := rootFlag != "" || envRootVal != ""
+		// Check if a higher-precedence source provided root
+		hasHigherPrecedenceRoot := rootFlag != "" || envRootVal != "" || sessionRoot != ""
 		if !hasHigherPrecedenceRoot {
 			return "", "", rcErr
 		}
 		// Otherwise, warn but continue (higher-precedence source provided values)
-		_ = writeStderr("warning: %v (using override from flags/env)\n", rcErr)
+		_ = writeStderr("warning: %v (using override from flags/env/session)\n", rcErr)
 	}
 
 	// Validate we have at least root
 	if root == "" {
-		return "", "", fmt.Errorf("cannot determine root: no .amqrc found, no .agent-mail/ directory, and AM_ROOT not set")
+		return "", "", fmt.Errorf("cannot determine root: no .amqrc found, no .agent-mail/ directory, no session, and AM_ROOT not set")
 	}
 
 	// Normalize and validate me if provided

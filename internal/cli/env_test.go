@@ -64,7 +64,7 @@ func TestFindAndLoadAmqrc(t *testing.T) {
 	}
 
 	// Write .amqrc in root
-	rcContent := `{"root": ".agent-mail", "me": "claude"}`
+	rcContent := `{"root": ".agent-mail"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}
@@ -85,9 +85,7 @@ func TestFindAndLoadAmqrc(t *testing.T) {
 	if result.Config.Root != ".agent-mail" {
 		t.Errorf("expected root=.agent-mail, got %q", result.Config.Root)
 	}
-	if result.Config.Me != "claude" {
-		t.Errorf("expected me=claude, got %q", result.Config.Me)
-	}
+	// Note: 'me' is no longer used from .amqrc (deprecated), so we don't check it
 
 	// Verify Dir is set correctly (should be the root where .amqrc was found)
 	resolvedDir, _ := filepath.EvalSymlinks(result.Dir)
@@ -202,8 +200,8 @@ func TestDetectAgentMailDirNotFound(t *testing.T) {
 func TestResolveEnvConfigFromAmqrc(t *testing.T) {
 	root := t.TempDir()
 
-	// Write .amqrc
-	rcContent := `{"root": ".agent-mail", "me": "claude"}`
+	// Write .amqrc (note: 'me' is no longer read from .amqrc, only root)
+	rcContent := `{"root": ".agent-mail"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}
@@ -231,8 +229,9 @@ func TestResolveEnvConfigFromAmqrc(t *testing.T) {
 	if resolvedRoot != expectedResolved {
 		t.Errorf("expected root=%q, got %q", expectedResolved, resolvedRoot)
 	}
-	if meVal != "claude" {
-		t.Errorf("expected me=claude, got %q", meVal)
+	// me is NOT read from .amqrc (use session instead)
+	if meVal != "" {
+		t.Errorf("expected me=empty (not from .amqrc), got %q", meVal)
 	}
 }
 
@@ -245,8 +244,8 @@ func TestResolveEnvConfigRelativeRootFromSubdir(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	// Write .amqrc in root with relative path
-	rcContent := `{"root": ".agent-mail", "me": "claude"}`
+	// Write .amqrc in root with relative path (no 'me', that's deprecated)
+	rcContent := `{"root": ".agent-mail"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}
@@ -280,7 +279,7 @@ func TestResolveEnvConfigFlagOverride(t *testing.T) {
 	root := t.TempDir()
 
 	// Write .amqrc with one set of values
-	rcContent := `{"root": ".agent-mail", "me": "claude"}`
+	rcContent := `{"root": ".agent-mail"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}
@@ -313,7 +312,7 @@ func TestResolveEnvConfigEnvOverride(t *testing.T) {
 	root := t.TempDir()
 
 	// Write .amqrc with one set of values
-	rcContent := `{"root": ".agent-mail", "me": "claude"}`
+	rcContent := `{"root": ".agent-mail"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}
@@ -348,7 +347,7 @@ func TestResolveEnvConfigFlagOverridesEnv(t *testing.T) {
 	root := t.TempDir()
 
 	// Write .amqrc
-	rcContent := `{"root": ".agent-mail", "me": "claude"}`
+	rcContent := `{"root": ".agent-mail"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}
@@ -561,7 +560,7 @@ func TestRunEnvJSON(t *testing.T) {
 	root := t.TempDir()
 
 	// Write .amqrc
-	rcContent := `{"root": ".agent-mail", "me": "claude"}`
+	rcContent := `{"root": ".agent-mail"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}
@@ -606,8 +605,9 @@ func TestRunEnvJSON(t *testing.T) {
 	if resolvedResult != resolvedExpected {
 		t.Errorf("expected root=%q, got %q", resolvedExpected, resolvedResult)
 	}
-	if result.Me != "claude" {
-		t.Errorf("expected me=claude, got %q", result.Me)
+	// Note: 'me' is no longer read from .amqrc (deprecated)
+	if result.Me != "" {
+		t.Errorf("expected me=empty (not from .amqrc), got %q", result.Me)
 	}
 }
 
@@ -615,7 +615,7 @@ func TestRunEnvPosix(t *testing.T) {
 	root := t.TempDir()
 
 	// Write .amqrc with absolute path to avoid resolution issues
-	rcContent := `{"root": "/tmp/test-root", "me": "claude"}`
+	rcContent := `{"root": "/tmp/test-root"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}
@@ -651,8 +651,9 @@ func TestRunEnvPosix(t *testing.T) {
 	if !strings.Contains(output, "export AM_ROOT=/tmp/test-root") {
 		t.Errorf("expected export AM_ROOT, got: %s", output)
 	}
-	if !strings.Contains(output, "export AM_ME=claude") {
-		t.Errorf("expected export AM_ME, got: %s", output)
+	// Note: AM_ME is not set because 'me' is no longer read from .amqrc
+	if strings.Contains(output, "export AM_ME") {
+		t.Errorf("unexpected AM_ME in output (should not come from .amqrc): %s", output)
 	}
 }
 
@@ -660,7 +661,7 @@ func TestRunEnvFish(t *testing.T) {
 	root := t.TempDir()
 
 	// Write .amqrc with absolute path
-	rcContent := `{"root": "/tmp/test-root", "me": "claude"}`
+	rcContent := `{"root": "/tmp/test-root"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}
@@ -696,8 +697,9 @@ func TestRunEnvFish(t *testing.T) {
 	if !strings.Contains(output, "set -gx AM_ROOT /tmp/test-root") {
 		t.Errorf("expected set -gx AM_ROOT, got: %s", output)
 	}
-	if !strings.Contains(output, "set -gx AM_ME claude") {
-		t.Errorf("expected set -gx AM_ME, got: %s", output)
+	// Note: AM_ME is not set because 'me' is no longer read from .amqrc
+	if strings.Contains(output, "set -gx AM_ME") {
+		t.Errorf("unexpected AM_ME in output (should not come from .amqrc): %s", output)
 	}
 }
 
@@ -705,7 +707,7 @@ func TestRunEnvWake(t *testing.T) {
 	root := t.TempDir()
 
 	// Write .amqrc
-	rcContent := `{"root": "/tmp/test-root", "me": "claude"}`
+	rcContent := `{"root": "/tmp/test-root"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}

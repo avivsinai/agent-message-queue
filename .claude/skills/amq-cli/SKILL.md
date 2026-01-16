@@ -21,21 +21,21 @@ Verify: `amq --version`
 ## Quick Reference
 
 ```bash
-# Option 1: Using .amqrc (recommended)
-echo '{"root": ".agent-mail", "me": "claude"}' > .amqrc
-eval "$(amq env --wake)"
+# Start a session (one command, sets up everything)
+amq session start --me claude   # For Claude Code
+amq session start --me codex    # For Codex CLI
 
-# Option 2: Manual exports
-export AM_ROOT=.agent-mail AM_ME=claude   # or: AM_ME=codex
-
+# Send and receive messages
 amq send --to codex --body "Message"           # Send
 amq drain --include-body                       # Receive (recommended)
 amq reply --id <msg_id> --body "Response"      # Reply
 amq watch --timeout 60s                        # Wait for messages
-amq list --new --priority urgent               # Filter messages
+
+# End session
+amq session stop
 ```
 
-**Note**: With env vars set, all commands work from any subdirectory.
+**Note**: After `amq session start`, all commands work from any subdirectory.
 
 ## Co-op Mode (Autonomous Multi-Agent)
 
@@ -60,34 +60,24 @@ Only use messages for: coordination, questions, review requests, status updates.
 
 ### Setup
 
-Run once per project:
+Run once per project to initialize the queue:
 ```bash
 curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/setup-coop.sh | bash
-export AM_ROOT=.agent-mail AM_ME=claude   # or: codex
 ```
 
-### Wake Notifications (Experimental)
-
-Start a background waker before your CLI to receive notifications when messages arrive:
-
+Optionally create `.amqrc` for project-level root config:
 ```bash
-amq wake &
-claude
+echo '{"root": ".agent-mail"}' > .amqrc
 ```
 
-When messages arrive, you'll see a notification injected into your terminal (best-effort):
+Then start a session in each terminal:
+```bash
+# Terminal 1 - Claude Code
+amq session start --me claude
+
+# Terminal 2 - Codex CLI
+amq session start --me codex
 ```
-AMQ: message from codex - Review complete. Run: amq drain --include-body
-```
-
-Then run `amq drain --include-body` to read messages.
-
-**Inject Modes**: The wake command auto-detects your CLI type:
-- `--inject-mode=auto` (default): Uses `raw` for Claude Code/Codex, `paste` for others
-- `--inject-mode=raw`: Plain text + CR (best for Ink-based CLIs like Claude Code)
-- `--inject-mode=paste`: Bracketed paste with delayed CR (best for crossterm CLIs)
-
-If notifications require manual Enter, try `--inject-mode=raw`.
 
 ### Priority Handling
 
@@ -98,6 +88,15 @@ If notifications require manual Enter, try `--inject-mode=raw`.
 | `low` | Batch for session end |
 
 ## Commands
+
+### Session Management
+```bash
+amq session start --me claude   # Start session (also starts wake)
+amq session start --me codex --no-wake  # Start without wake
+amq session stop                # Stop session and wake process
+amq session status              # Show current session
+amq session status --json       # Machine-readable status
+```
 
 ### Send
 ```bash
@@ -146,21 +145,29 @@ amq --no-update-check ...      # Disable update hint for this command
 export AMQ_NO_UPDATE_CHECK=1   # Disable update hints globally
 ```
 
-### Environment Setup
-```bash
-amq env                      # Output shell exports (auto-detects .amqrc or .agent-mail/)
-amq env --wake               # Include 'amq wake &' in output
-amq env --me codex           # Override agent handle
-amq env --shell fish         # Fish shell syntax
-amq env --json               # Machine-readable output
-```
-
 ### Other
 ```bash
 amq thread --id p2p/claude__codex --include-body   # View thread
 amq presence set --status busy --note "reviewing"  # Set presence
 amq cleanup --tmp-older-than 36h                   # Clean stale tmp
 ```
+
+## Configuration
+
+### .amqrc (Project Config)
+
+Create `.amqrc` in your project root for shared root configuration:
+```json
+{"root": ".agent-mail"}
+```
+
+Note: `.amqrc` only configures `root`. Agent identity (`me`) is set per-session via `amq session start --me <agent>`.
+
+### Precedence
+
+Configuration is resolved in this order (highest to lowest):
+- **Root**: flags > env (AM_ROOT) > session > .amqrc > auto-detect (.agent-mail/)
+- **Me**: flags > env (AM_ME) > session
 
 ## Message Kinds
 

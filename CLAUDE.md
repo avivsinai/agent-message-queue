@@ -64,24 +64,24 @@ internal/
 
 **Environment Variables**: `AM_ROOT` (default root dir), `AM_ME` (default agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
-**Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
-1. Command-line flags (`--root`, `--me`)
-2. Environment variables (`AM_ROOT`, `AM_ME`)
-3. `.amqrc` file in current or parent directories
-4. Auto-detect `.agent-mail/` directory
-
-The `.amqrc` file is JSON:
-```json
-{"root": ".agent-mail", "me": "claude"}
-```
-
-Usage:
+**Session Management**: Use `amq session` to manage sessions:
 ```bash
-eval "$(amq env)"           # Load env vars
-eval "$(amq env --wake)"    # Load env vars and start wake
-amq env --shell fish        # Fish shell syntax
-amq env --json              # Machine-readable output
+amq session start --me claude   # Start session (sets up config, starts wake)
+amq session start --me codex    # For Codex
+amq session stop                # Stop session and wake process
+amq session status              # Show current session
 ```
+
+**Configuration Precedence**:
+- **Root**: flags > env (AM_ROOT) > session > .amqrc > auto-detect (.agent-mail/)
+- **Me**: flags > env (AM_ME) > session
+
+The `.amqrc` file is JSON (only for root, not me):
+```json
+{"root": ".agent-mail"}
+```
+
+Note: Agent identity (`me`) is set per-session via `amq session start --me <agent>`, not in `.amqrc`.
 
 ## Message Kinds
 
@@ -121,6 +121,9 @@ amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
 amq wake --me <agent> [--inject-cmd <cmd>] [--bell] [--debounce <duration>] [--preview-len <n>]
 amq upgrade
 amq env [--me <agent>] [--root <path>] [--shell sh|bash|zsh|fish] [--wake] [--json]
+amq session start --me <agent> [--root <path>] [--no-wake]
+amq session stop [--root <path>]
+amq session status [--root <path>] [--json]
 ```
 
 Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has its own flags and doesn't accept these.
@@ -227,34 +230,23 @@ Co-op mode enables real-time collaboration between Claude Code and Codex CLI ses
 
 ### Quick Start
 
-**Option 1: Using `.amqrc` (recommended)**
-
-Create `.amqrc` in your project root:
+Optionally create `.amqrc` in your project root for shared root config:
 ```json
-{"root": ".agent-mail", "me": "claude"}
+{"root": ".agent-mail"}
 ```
 
-Then start your session:
-```bash
-eval "$(amq env --wake)"
-claude
-```
-
-**Option 2: Manual exports**
-
+Then start a session in each terminal:
 ```bash
 # Terminal 1 - Claude Code
-export AM_ME=claude AM_ROOT=.agent-mail
-amq wake &
+amq session start --me claude
 claude
 
 # Terminal 2 - Codex CLI
-export AM_ME=codex AM_ROOT=.agent-mail
-amq wake &
+amq session start --me codex
 codex
 ```
 
-`amq wake` runs as a background job and attempts to inject notifications into your terminal when messages arrive (uses TIOCSTI, experimental).
+`amq session start` automatically starts `amq wake` in the background for notifications. Use `--no-wake` to disable.
 
 ### Message Priority Handling
 
