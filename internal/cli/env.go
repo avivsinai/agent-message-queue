@@ -148,10 +148,11 @@ func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 
 	// If we would have needed .amqrc values but it was invalid, report the error
 	// Only error if .amqrc was invalid AND no higher-precedence source provided root
+	// Note: Only flags and env vars are higher precedence than .amqrc; auto-detect is lower
 	if rcErr != nil {
-		// Check if .amqrc values would have been used
-		needsRcRoot := rootFlag == "" && envRootVal == "" && autoRoot == ""
-		if needsRcRoot {
+		// Check if a higher-precedence source (flags or env) provided root
+		hasHigherPrecedenceRoot := rootFlag != "" || envRootVal != ""
+		if !hasHigherPrecedenceRoot {
 			return "", "", rcErr
 		}
 		// Otherwise, warn but continue (higher-precedence source provided values)

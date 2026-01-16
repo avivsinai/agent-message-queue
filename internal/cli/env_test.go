@@ -501,6 +501,39 @@ func TestResolveEnvConfigInvalidAmqrcWithEnvOverride(t *testing.T) {
 	}
 }
 
+func TestResolveEnvConfigInvalidAmqrcWithAutoDetect(t *testing.T) {
+	root := t.TempDir()
+
+	// Write invalid .amqrc
+	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte("not json"), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	// Create .agent-mail directory (lower precedence than .amqrc)
+	if err := os.MkdirAll(filepath.Join(root, ".agent-mail"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	_ = os.Unsetenv("AM_ROOT")
+	_ = os.Unsetenv("AM_ME")
+
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// Auto-detect is LOWER precedence than .amqrc, so it should NOT override an invalid .amqrc
+	_, _, err := resolveEnvConfig("", "")
+	if err == nil {
+		t.Error("expected error for invalid .amqrc even with auto-detect available")
+	}
+	if !strings.Contains(err.Error(), "invalid .amqrc") {
+		t.Errorf("expected 'invalid .amqrc' in error, got: %v", err)
+	}
+}
+
 func TestResolveEnvConfigNoConfig(t *testing.T) {
 	root := t.TempDir()
 

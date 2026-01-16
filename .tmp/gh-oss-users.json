@@ -1,0 +1,2033 @@
+[
+  {
+    "login": "01101sam",
+    "followers": 21,
+    "public_repos": 31,
+    "type": "User",
+    "html_url": "https://github.com/01101sam",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "Arman2122",
+    "followers": 18,
+    "public_repos": 17,
+    "type": "User",
+    "html_url": "https://github.com/Arman2122",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "ByronScottJones",
+    "followers": 32,
+    "public_repos": 56,
+    "type": "User",
+    "html_url": "https://github.com/ByronScottJones",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/jenkins-cli"
+      ]
+    }
+  },
+  {
+    "login": "ConstantinHvber",
+    "followers": 0,
+    "public_repos": 11,
+    "type": "User",
+    "html_url": "https://github.com/ConstantinHvber",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "CookiesKush",
+    "followers": 50,
+    "public_repos": 28,
+    "type": "User",
+    "html_url": "https://github.com/CookiesKush",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "Disiok",
+    "followers": 187,
+    "public_repos": 33,
+    "type": "User",
+    "html_url": "https://github.com/Disiok",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "ElephOS2",
+    "followers": 0,
+    "public_repos": 0,
+    "type": "User",
+    "html_url": "https://github.com/ElephOS2",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/jenkins-cli"
+      ]
+    }
+  },
+  {
+    "login": "EthanBlackburn",
+    "followers": 57,
+    "public_repos": 45,
+    "type": "User",
+    "html_url": "https://github.com/EthanBlackburn",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "Git-Godssoldier",
+    "followers": 6,
+    "public_repos": 111,
+    "type": "User",
+    "html_url": "https://github.com/Git-Godssoldier",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "JohnShahawy",
+    "followers": 23,
+    "public_repos": 27,
+    "type": "User",
+    "html_url": "https://github.com/JohnShahawy",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "JonathanWorks",
+    "followers": 4,
+    "public_repos": 1,
+    "type": "User",
+    "html_url": "https://github.com/JonathanWorks",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/sabx"
+      ]
+    }
+  },
+  {
+    "login": "Laboratory",
+    "followers": 13,
+    "public_repos": 43,
+    "type": "User",
+    "html_url": "https://github.com/Laboratory",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/bootstrap-notify"
+      ]
+    }
+  },
+  {
+    "login": "Linchi1997yeh",
+    "followers": 1,
+    "public_repos": 9,
+    "type": "User",
+    "html_url": "https://github.com/Linchi1997yeh",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "LouisHaoSZER",
+    "followers": 12,
+    "public_repos": 28,
+    "type": "User",
+    "html_url": "https://github.com/LouisHaoSZER",
+    "signals": "fork_owner,stargazer",
+    "repos_count": 2,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ],
+      "fork_owner": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "MHProDev",
+    "followers": 312,
+    "public_repos": 3,
+    "type": "User",
+    "html_url": "https://github.com/MHProDev",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "MarcoWorms",
+    "followers": 443,
+    "public_repos": 228,
+    "type": "User",
+    "html_url": "https://github.com/MarcoWorms",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "MaxFokin",
+    "followers": 2,
+    "public_repos": 2,
+    "type": "User",
+    "html_url": "https://github.com/MaxFokin",
+    "signals": "stargazer,subscriber",
+    "repos_count": 3,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/agent-message-queue",
+        "avivsinai/langfuse-mcp"
+      ],
+      "subscriber": [
+        "avivsinai/agent-message-queue"
+      ]
+    }
+  },
+  {
+    "login": "MistApproach",
+    "followers": 2,
+    "public_repos": 13,
+    "type": "User",
+    "html_url": "https://github.com/MistApproach",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "MoIbz007",
+    "followers": 4,
+    "public_repos": 6,
+    "type": "User",
+    "html_url": "https://github.com/MoIbz007",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/agent-message-queue"
+      ]
+    }
+  },
+  {
+    "login": "MrBrain295",
+    "followers": 81,
+    "public_repos": 177,
+    "type": "User",
+    "html_url": "https://github.com/MrBrain295",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "Naberator",
+    "followers": 7,
+    "public_repos": 26,
+    "type": "User",
+    "html_url": "https://github.com/Naberator",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/agent-message-queue"
+      ]
+    }
+  },
+  {
+    "login": "OleksandrBlack",
+    "followers": 30,
+    "public_repos": 133,
+    "type": "User",
+    "html_url": "https://github.com/OleksandrBlack",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "OpulentiaAI",
+    "followers": 4,
+    "public_repos": 577,
+    "type": "Organization",
+    "html_url": "https://github.com/OpulentiaAI",
+    "signals": "fork_owner",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "fork_owner": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "PXEiYyMH8F",
+    "followers": 11,
+    "public_repos": 4,
+    "type": "User",
+    "html_url": "https://github.com/PXEiYyMH8F",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "PandaWhoCodes",
+    "followers": 171,
+    "public_repos": 140,
+    "type": "User",
+    "html_url": "https://github.com/PandaWhoCodes",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "Pranavchiku",
+    "followers": 130,
+    "public_repos": 66,
+    "type": "User",
+    "html_url": "https://github.com/Pranavchiku",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "Robert-Cunningham",
+    "followers": 17,
+    "public_repos": 61,
+    "type": "User",
+    "html_url": "https://github.com/Robert-Cunningham",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "SCSS18",
+    "followers": 0,
+    "public_repos": 77,
+    "type": "User",
+    "html_url": "https://github.com/SCSS18",
+    "signals": "fork_owner,stargazer",
+    "repos_count": 2,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ],
+      "fork_owner": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "Shiyao-Huang",
+    "followers": 5,
+    "public_repos": 24,
+    "type": "User",
+    "html_url": "https://github.com/Shiyao-Huang",
+    "signals": "fork_owner,stargazer",
+    "repos_count": 2,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ],
+      "fork_owner": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "SudoLite",
+    "followers": 209,
+    "public_repos": 9,
+    "type": "User",
+    "html_url": "https://github.com/SudoLite",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "TJZine",
+    "followers": 0,
+    "public_repos": 15,
+    "type": "User",
+    "html_url": "https://github.com/TJZine",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/agent-message-queue"
+      ]
+    }
+  },
+  {
+    "login": "ThomasRizzo",
+    "followers": 5,
+    "public_repos": 20,
+    "type": "User",
+    "html_url": "https://github.com/ThomasRizzo",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/bitbucket-cli"
+      ]
+    }
+  },
+  {
+    "login": "VivaLaPanda",
+    "followers": 25,
+    "public_repos": 102,
+    "type": "User",
+    "html_url": "https://github.com/VivaLaPanda",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "Zeyuzhao",
+    "followers": 38,
+    "public_repos": 73,
+    "type": "User",
+    "html_url": "https://github.com/Zeyuzhao",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "aapotapov",
+    "followers": 0,
+    "public_repos": 1,
+    "type": "User",
+    "html_url": "https://github.com/aapotapov",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "actions-user",
+    "followers": 3982,
+    "public_repos": 0,
+    "type": "User",
+    "html_url": "https://github.com/actions-user",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "adamcohenhillel",
+    "followers": 250,
+    "public_repos": 52,
+    "type": "User",
+    "html_url": "https://github.com/adamcohenhillel",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "ahmetkca",
+    "followers": 32,
+    "public_repos": 107,
+    "type": "User",
+    "html_url": "https://github.com/ahmetkca",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "alec-tschantz",
+    "followers": 82,
+    "public_repos": 49,
+    "type": "User",
+    "html_url": "https://github.com/alec-tschantz",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "aliyeysides",
+    "followers": 33,
+    "public_repos": 64,
+    "type": "User",
+    "html_url": "https://github.com/aliyeysides",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "amavlyanov",
+    "followers": 52,
+    "public_repos": 1,
+    "type": "User",
+    "html_url": "https://github.com/amavlyanov",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/jenkins-cli"
+      ]
+    }
+  },
+  {
+    "login": "anochuv",
+    "followers": 1,
+    "public_repos": 2,
+    "type": "User",
+    "html_url": "https://github.com/anochuv",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "antweiss",
+    "followers": 57,
+    "public_repos": 134,
+    "type": "User",
+    "html_url": "https://github.com/antweiss",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/jenkins-cli"
+      ]
+    }
+  },
+  {
+    "login": "arbal",
+    "followers": 118,
+    "public_repos": 433,
+    "type": "User",
+    "html_url": "https://github.com/arbal",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "aviadsTaboola",
+    "followers": 0,
+    "public_repos": 2,
+    "type": "User",
+    "html_url": "https://github.com/aviadsTaboola",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/jenkins-cli"
+      ]
+    }
+  },
+  {
+    "login": "aviadshiber",
+    "followers": 7,
+    "public_repos": 40,
+    "type": "User",
+    "html_url": "https://github.com/aviadshiber",
+    "signals": "contributor,fork_owner,stargazer,subscriber",
+    "repos_count": 6,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/agent-message-queue"
+      ],
+      "subscriber": [
+        "avivsinai/bitbucket-cli"
+      ],
+      "fork_owner": [
+        "avivsinai/bitbucket-cli",
+        "avivsinai/jenkins-cli"
+      ],
+      "contributor": [
+        "avivsinai/bitbucket-cli",
+        "avivsinai/jenkins-cli"
+      ]
+    }
+  },
+  {
+    "login": "avivsinai",
+    "followers": 21,
+    "public_repos": 13,
+    "type": "User",
+    "html_url": "https://github.com/avivsinai",
+    "signals": "contributor,stargazer,subscriber",
+    "repos_count": 21,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/agent-message-queue",
+        "avivsinai/bitbucket-cli",
+        "avivsinai/jenkins-cli",
+        "avivsinai/langfuse-mcp",
+        "avivsinai/sabx",
+        "avivsinai/skills-marketplace",
+        "avivsinai/telclaude"
+      ],
+      "contributor": [
+        "avivsinai/agent-message-queue",
+        "avivsinai/bitbucket-cli",
+        "avivsinai/bootstrap-notify",
+        "avivsinai/gkreader",
+        "avivsinai/jenkins-cli",
+        "avivsinai/jirameister",
+        "avivsinai/langfuse-mcp",
+        "avivsinai/sabx",
+        "avivsinai/skills-marketplace",
+        "avivsinai/telclaude"
+      ],
+      "subscriber": [
+        "avivsinai/bootstrap-notify",
+        "avivsinai/gkreader",
+        "avivsinai/jirameister",
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "b13kjack",
+    "followers": 5,
+    "public_repos": 47,
+    "type": "User",
+    "html_url": "https://github.com/b13kjack",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "bborn",
+    "followers": 105,
+    "public_repos": 152,
+    "type": "User",
+    "html_url": "https://github.com/bborn",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "billmetangmo",
+    "followers": 31,
+    "public_repos": 35,
+    "type": "User",
+    "html_url": "https://github.com/billmetangmo",
+    "signals": "fork_owner,stargazer",
+    "repos_count": 2,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ],
+      "fork_owner": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "bjwswang",
+    "followers": 202,
+    "public_repos": 56,
+    "type": "User",
+    "html_url": "https://github.com/bjwswang",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "boffti",
+    "followers": 21,
+    "public_repos": 86,
+    "type": "User",
+    "html_url": "https://github.com/boffti",
+    "signals": "fork_owner,stargazer",
+    "repos_count": 2,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ],
+      "fork_owner": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "burkostya",
+    "followers": 30,
+    "public_repos": 36,
+    "type": "User",
+    "html_url": "https://github.com/burkostya",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "cactig",
+    "followers": 1,
+    "public_repos": 7,
+    "type": "User",
+    "html_url": "https://github.com/cactig",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "calclavia",
+    "followers": 494,
+    "public_repos": 66,
+    "type": "User",
+    "html_url": "https://github.com/calclavia",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/mcp-atlassian"
+      ]
+    }
+  },
+  {
+    "login": "cclauss",
+    "followers": 5025,
+    "public_repos": 4604,
+    "type": "User",
+    "html_url": "https://github.com/cclauss",
+    "signals": "contributor",
+    "repos_count": 2,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS",
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "chai3",
+    "followers": 0,
+    "public_repos": 8,
+    "type": "User",
+    "html_url": "https://github.com/chai3",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "cnrpman",
+    "followers": 95,
+    "public_repos": 55,
+    "type": "User",
+    "html_url": "https://github.com/cnrpman",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "code-review-doctor",
+    "followers": 25,
+    "public_repos": 137,
+    "type": "User",
+    "html_url": "https://github.com/code-review-doctor",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "cry-stal-lee",
+    "followers": 62,
+    "public_repos": 6,
+    "type": "User",
+    "html_url": "https://github.com/cry-stal-lee",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "cwelton",
+    "followers": 16,
+    "public_repos": 21,
+    "type": "User",
+    "html_url": "https://github.com/cwelton",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "darkanubis0100",
+    "followers": 58,
+    "public_repos": 169,
+    "type": "User",
+    "html_url": "https://github.com/darkanubis0100",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "dave9123",
+    "followers": 59,
+    "public_repos": 78,
+    "type": "User",
+    "html_url": "https://github.com/dave9123",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "davidtsong",
+    "followers": 21,
+    "public_repos": 36,
+    "type": "User",
+    "html_url": "https://github.com/davidtsong",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "ddrling",
+    "followers": 0,
+    "public_repos": 1,
+    "type": "User",
+    "html_url": "https://github.com/ddrling",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "delorenj",
+    "followers": 52,
+    "public_repos": 358,
+    "type": "User",
+    "html_url": "https://github.com/delorenj",
+    "signals": "fork_owner",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "fork_owner": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "dependabot[bot]",
+    "followers": 0,
+    "public_repos": 0,
+    "type": "Bot",
+    "html_url": "https://github.com/apps/dependabot",
+    "signals": "contributor",
+    "repos_count": 3,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/bitbucket-cli",
+        "avivsinai/jenkins-cli",
+        "avivsinai/telclaude"
+      ]
+    }
+  },
+  {
+    "login": "eltociear",
+    "followers": 1348,
+    "public_repos": 78,
+    "type": "User",
+    "html_url": "https://github.com/eltociear",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "emptycrown",
+    "followers": 196,
+    "public_repos": 14,
+    "type": "User",
+    "html_url": "https://github.com/emptycrown",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "ephe-meral",
+    "followers": 78,
+    "public_repos": 45,
+    "type": "User",
+    "html_url": "https://github.com/ephe-meral",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "futumaster",
+    "followers": 0,
+    "public_repos": 9,
+    "type": "User",
+    "html_url": "https://github.com/futumaster",
+    "signals": "fork_owner",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "fork_owner": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "garyfeng",
+    "followers": 26,
+    "public_repos": 186,
+    "type": "User",
+    "html_url": "https://github.com/garyfeng",
+    "signals": "contributor,fork_owner,stargazer",
+    "repos_count": 3,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ],
+      "fork_owner": [
+        "avivsinai/langfuse-mcp"
+      ],
+      "contributor": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "geekybaiyi",
+    "followers": 4,
+    "public_repos": 10,
+    "type": "User",
+    "html_url": "https://github.com/geekybaiyi",
+    "signals": "fork_owner",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "fork_owner": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "gkitg",
+    "followers": 65,
+    "public_repos": 1,
+    "type": "User",
+    "html_url": "https://github.com/gkitg",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "gwpx",
+    "followers": 3,
+    "public_repos": 0,
+    "type": "User",
+    "html_url": "https://github.com/gwpx",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "haowjy",
+    "followers": 7,
+    "public_repos": 27,
+    "type": "User",
+    "html_url": "https://github.com/haowjy",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "hatm1998",
+    "followers": 3,
+    "public_repos": 5,
+    "type": "User",
+    "html_url": "https://github.com/hatm1998",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "hongyishi",
+    "followers": 11,
+    "public_repos": 14,
+    "type": "User",
+    "html_url": "https://github.com/hongyishi",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "hursh-desai",
+    "followers": 2,
+    "public_repos": 28,
+    "type": "User",
+    "html_url": "https://github.com/hursh-desai",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "hutchic",
+    "followers": 84,
+    "public_repos": 18,
+    "type": "User",
+    "html_url": "https://github.com/hutchic",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "hwchase17",
+    "followers": 9397,
+    "public_repos": 62,
+    "type": "User",
+    "html_url": "https://github.com/hwchase17",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "ihfazhillah",
+    "followers": 37,
+    "public_repos": 262,
+    "type": "User",
+    "html_url": "https://github.com/ihfazhillah",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "initdc",
+    "followers": 74,
+    "public_repos": 422,
+    "type": "User",
+    "html_url": "https://github.com/initdc",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/bitbucket-cli"
+      ]
+    }
+  },
+  {
+    "login": "ionut85",
+    "followers": 13,
+    "public_repos": 63,
+    "type": "User",
+    "html_url": "https://github.com/ionut85",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "itse4elhaam",
+    "followers": 21,
+    "public_repos": 57,
+    "type": "User",
+    "html_url": "https://github.com/itse4elhaam",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/bitbucket-cli"
+      ]
+    }
+  },
+  {
+    "login": "janmechtel",
+    "followers": 17,
+    "public_repos": 50,
+    "type": "User",
+    "html_url": "https://github.com/janmechtel",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "jerryjliu",
+    "followers": 4120,
+    "public_repos": 42,
+    "type": "User",
+    "html_url": "https://github.com/jerryjliu",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "kacperlukawski",
+    "followers": 96,
+    "public_repos": 55,
+    "type": "User",
+    "html_url": "https://github.com/kacperlukawski",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "kahkeng",
+    "followers": 30,
+    "public_repos": 19,
+    "type": "User",
+    "html_url": "https://github.com/kahkeng",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "kevinqz",
+    "followers": 15,
+    "public_repos": 42,
+    "type": "User",
+    "html_url": "https://github.com/kevinqz",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "kwhuo68",
+    "followers": 29,
+    "public_repos": 15,
+    "type": "User",
+    "html_url": "https://github.com/kwhuo68",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "l7wei",
+    "followers": 16,
+    "public_repos": 14,
+    "type": "User",
+    "html_url": "https://github.com/l7wei",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "lalitkapoor",
+    "followers": 116,
+    "public_repos": 140,
+    "type": "User",
+    "html_url": "https://github.com/lalitkapoor",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/bootstrap-notify"
+      ]
+    }
+  },
+  {
+    "login": "leixy76",
+    "followers": 89,
+    "public_repos": 636,
+    "type": "User",
+    "html_url": "https://github.com/leixy76",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/telclaude"
+      ]
+    }
+  },
+  {
+    "login": "lidarbtc",
+    "followers": 456,
+    "public_repos": 44,
+    "type": "User",
+    "html_url": "https://github.com/lidarbtc",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "lmazzon",
+    "followers": 33,
+    "public_repos": 9,
+    "type": "User",
+    "html_url": "https://github.com/lmazzon",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "manikanda-kumar",
+    "followers": 14,
+    "public_repos": 38,
+    "type": "User",
+    "html_url": "https://github.com/manikanda-kumar",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/bitbucket-cli"
+      ]
+    }
+  },
+  {
+    "login": "mattbarron",
+    "followers": 6,
+    "public_repos": 2,
+    "type": "User",
+    "html_url": "https://github.com/mattbarron",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "max-zak",
+    "followers": 2,
+    "public_repos": 15,
+    "type": "User",
+    "html_url": "https://github.com/max-zak",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "mcalvy09",
+    "followers": 1,
+    "public_repos": 5,
+    "type": "User",
+    "html_url": "https://github.com/mcalvy09",
+    "signals": "fork_owner",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "fork_owner": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "mcminis1",
+    "followers": 45,
+    "public_repos": 8,
+    "type": "User",
+    "html_url": "https://github.com/mcminis1",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "minosvasilias",
+    "followers": 74,
+    "public_repos": 22,
+    "type": "User",
+    "html_url": "https://github.com/minosvasilias",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "mmz-001",
+    "followers": 116,
+    "public_repos": 6,
+    "type": "User",
+    "html_url": "https://github.com/mmz-001",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "mrzt721010",
+    "followers": 96,
+    "public_repos": 10,
+    "type": "User",
+    "html_url": "https://github.com/mrzt721010",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "nijikokun",
+    "followers": 467,
+    "public_repos": 176,
+    "type": "User",
+    "html_url": "https://github.com/nijikokun",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/bootstrap-notify"
+      ]
+    }
+  },
+  {
+    "login": "nivzor",
+    "followers": 2,
+    "public_repos": 12,
+    "type": "User",
+    "html_url": "https://github.com/nivzor",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/jenkins-cli"
+      ]
+    }
+  },
+  {
+    "login": "nobilix",
+    "followers": 21,
+    "public_repos": 24,
+    "type": "User",
+    "html_url": "https://github.com/nobilix",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "omriariav",
+    "followers": 1,
+    "public_repos": 25,
+    "type": "User",
+    "html_url": "https://github.com/omriariav",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/bitbucket-cli"
+      ]
+    }
+  },
+  {
+    "login": "orgroman",
+    "followers": 0,
+    "public_repos": 9,
+    "type": "User",
+    "html_url": "https://github.com/orgroman",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "pavanyellow",
+    "followers": 2,
+    "public_repos": 26,
+    "type": "User",
+    "html_url": "https://github.com/pavanyellow",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "porthole-ascend-cinnamon",
+    "followers": 51,
+    "public_repos": 12,
+    "type": "User",
+    "html_url": "https://github.com/porthole-ascend-cinnamon",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "progsmile",
+    "followers": 26,
+    "public_repos": 19,
+    "type": "User",
+    "html_url": "https://github.com/progsmile",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "punkpeye",
+    "followers": 1595,
+    "public_repos": 4150,
+    "type": "User",
+    "html_url": "https://github.com/punkpeye",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/mcp-atlassian"
+      ]
+    }
+  },
+  {
+    "login": "quino0627",
+    "followers": 58,
+    "public_repos": 62,
+    "type": "User",
+    "html_url": "https://github.com/quino0627",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "ravi03071991",
+    "followers": 175,
+    "public_repos": 79,
+    "type": "User",
+    "html_url": "https://github.com/ravi03071991",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "reckless-huang",
+    "followers": 7,
+    "public_repos": 60,
+    "type": "User",
+    "html_url": "https://github.com/reckless-huang",
+    "signals": "fork_owner",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "fork_owner": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "reduxionist",
+    "followers": 238,
+    "public_repos": 0,
+    "type": "User",
+    "html_url": "https://github.com/reduxionist",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/bootstrap-notify"
+      ]
+    }
+  },
+  {
+    "login": "rkunnamp",
+    "followers": 6,
+    "public_repos": 297,
+    "type": "User",
+    "html_url": "https://github.com/rkunnamp",
+    "signals": "fork_owner,stargazer",
+    "repos_count": 2,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/agent-message-queue"
+      ],
+      "fork_owner": [
+        "avivsinai/agent-message-queue"
+      ]
+    }
+  },
+  {
+    "login": "rotem-ad",
+    "followers": 0,
+    "public_repos": 8,
+    "type": "User",
+    "html_url": "https://github.com/rotem-ad",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "rscheiwe",
+    "followers": 14,
+    "public_repos": 392,
+    "type": "User",
+    "html_url": "https://github.com/rscheiwe",
+    "signals": "stargazer",
+    "repos_count": 3,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/agent-message-queue",
+        "avivsinai/jenkins-cli",
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "rzaldana",
+    "followers": 9,
+    "public_repos": 46,
+    "type": "User",
+    "html_url": "https://github.com/rzaldana",
+    "signals": "stargazer",
+    "repos_count": 2,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/bitbucket-cli",
+        "avivsinai/jenkins-cli"
+      ]
+    }
+  },
+  {
+    "login": "rzaytsev",
+    "followers": 8,
+    "public_repos": 7,
+    "type": "User",
+    "html_url": "https://github.com/rzaytsev",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/jenkins-cli"
+      ]
+    }
+  },
+  {
+    "login": "s-dotb",
+    "followers": 19,
+    "public_repos": 3,
+    "type": "User",
+    "html_url": "https://github.com/s-dotb",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/jenkins-cli"
+      ]
+    }
+  },
+  {
+    "login": "shamsway",
+    "followers": 12,
+    "public_repos": 37,
+    "type": "User",
+    "html_url": "https://github.com/shamsway",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "shivmohith",
+    "followers": 7,
+    "public_repos": 23,
+    "type": "User",
+    "html_url": "https://github.com/shivmohith",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "solo0409",
+    "followers": 0,
+    "public_repos": 0,
+    "type": "User",
+    "html_url": "https://github.com/solo0409",
+    "signals": "stargazer",
+    "repos_count": 2,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/jenkins-cli",
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  },
+  {
+    "login": "sooperset",
+    "followers": 253,
+    "public_repos": 35,
+    "type": "User",
+    "html_url": "https://github.com/sooperset",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/mcp-atlassian"
+      ]
+    }
+  },
+  {
+    "login": "sopel",
+    "followers": 34,
+    "public_repos": 78,
+    "type": "User",
+    "html_url": "https://github.com/sopel",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/bitbucket-cli"
+      ]
+    }
+  },
+  {
+    "login": "stanislavpodolia",
+    "followers": 4,
+    "public_repos": 1,
+    "type": "User",
+    "html_url": "https://github.com/stanislavpodolia",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "stevenbaker",
+    "followers": 8,
+    "public_repos": 11,
+    "type": "User",
+    "html_url": "https://github.com/stevenbaker",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/jenkins-cli"
+      ]
+    }
+  },
+  {
+    "login": "talbizit",
+    "followers": 0,
+    "public_repos": 3,
+    "type": "User",
+    "html_url": "https://github.com/talbizit",
+    "signals": "stargazer",
+    "repos_count": 2,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/bitbucket-cli",
+        "avivsinai/jenkins-cli"
+      ]
+    }
+  },
+  {
+    "login": "teoh",
+    "followers": 20,
+    "public_repos": 22,
+    "type": "User",
+    "html_url": "https://github.com/teoh",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "terion-name",
+    "followers": 22,
+    "public_repos": 68,
+    "type": "User",
+    "html_url": "https://github.com/terion-name",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "tidharkl",
+    "followers": 0,
+    "public_repos": 0,
+    "type": "User",
+    "html_url": "https://github.com/tidharkl",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/jenkins-cli"
+      ]
+    }
+  },
+  {
+    "login": "tigsss",
+    "followers": 7,
+    "public_repos": 19,
+    "type": "User",
+    "html_url": "https://github.com/tigsss",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "tnauman",
+    "followers": 1,
+    "public_repos": 5,
+    "type": "User",
+    "html_url": "https://github.com/tnauman",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/agent-message-queue"
+      ]
+    }
+  },
+  {
+    "login": "ukrarome",
+    "followers": 3,
+    "public_repos": 5,
+    "type": "User",
+    "html_url": "https://github.com/ukrarome",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/MHDDoS"
+      ]
+    }
+  },
+  {
+    "login": "veered",
+    "followers": 46,
+    "public_repos": 57,
+    "type": "User",
+    "html_url": "https://github.com/veered",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "vguillet",
+    "followers": 35,
+    "public_repos": 50,
+    "type": "User",
+    "html_url": "https://github.com/vguillet",
+    "signals": "contributor",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "contributor": [
+        "avivsinai/gpt_index"
+      ]
+    }
+  },
+  {
+    "login": "yatsu",
+    "followers": 82,
+    "public_repos": 17,
+    "type": "User",
+    "html_url": "https://github.com/yatsu",
+    "signals": "stargazer",
+    "repos_count": 1,
+    "repos_by_signal": {
+      "stargazer": [
+        "avivsinai/langfuse-mcp"
+      ]
+    }
+  }
+]
