@@ -21,23 +21,18 @@ Verify: `amq --version`
 ## Quick Reference
 
 ```bash
-# Set once per session - commands work from any directory
-export AM_ROOT=.agent-mail AM_ME=claude   # or: AM_ME=codex
+# One-liner setup (run once per terminal session)
+eval "$(amq env --me claude --wake)"   # For Claude Code
+eval "$(amq env --me codex --wake)"    # For Codex CLI
 
+# Send and receive messages
 amq send --to codex --body "Message"           # Send
 amq drain --include-body                       # Receive (recommended)
 amq reply --id <msg_id> --body "Response"      # Reply
 amq watch --timeout 60s                        # Wait for messages
-amq list --new --priority urgent               # Filter messages
 ```
 
-**Note**: With env vars set, all commands work from any subdirectory.
-
-Optionally create `.amqrc` for project-level root config:
-```bash
-echo '{"root": ".agent-mail"}' > .amqrc
-```
-Then only `AM_ME` needs to be set per terminal.
+**Note**: After setup, all commands work from any subdirectory.
 
 ## Co-op Mode (Autonomous Multi-Agent)
 
