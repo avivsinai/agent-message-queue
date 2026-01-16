@@ -77,10 +77,10 @@ The `.amqrc` file is JSON (root only):
 
 Usage:
 ```bash
-eval "$(amq env --me claude)"        # Set up for Claude
-eval "$(amq env --me codex --wake)"  # Set up for Codex with wake
-amq env --shell fish                 # Fish shell syntax
-amq env --json                       # Machine-readable output
+eval "$(amq env --me claude --wake)"  # Set up for Claude
+eval "$(amq env --me codex --wake)"   # Set up for Codex
+amq env --shell fish                  # Fish shell syntax
+amq env --json                        # Machine-readable output
 ```
 
 ## Message Kinds
@@ -229,21 +229,13 @@ Co-op mode enables real-time collaboration between Claude Code and Codex CLI ses
 
 ```bash
 # Terminal 1 - Claude Code
-export AM_ME=claude AM_ROOT=.agent-mail
-amq wake &
+eval "$(amq env --me claude --wake)"
 claude
 
 # Terminal 2 - Codex CLI
-export AM_ME=codex AM_ROOT=.agent-mail
-amq wake &
+eval "$(amq env --me codex --wake)"
 codex
 ```
-
-Optionally create `.amqrc` in your project root for shared root config:
-```json
-{"root": ".agent-mail"}
-```
-Then only `AM_ME` needs to be set per terminal.
 
 `amq wake` runs as a background job and attempts to inject notifications into your terminal when messages arrive (uses TIOCSTI, experimental).
 
