@@ -2,13 +2,14 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestShellQuote(t *testing.T) {
+func TestShellQuotePosix(t *testing.T) {
 	tests := []struct {
 		input    string
 		expected string
@@ -17,15 +18,38 @@ func TestShellQuote(t *testing.T) {
 		{".agent-mail", ".agent-mail"},
 		{"path/to/dir", "path/to/dir"},
 		{"has space", "'has space'"},
-		{"has'quote", "'has'\"'\"'quote'"},
+		{"has'quote", "'has'\\''quote'"},
 		{"$VAR", "'$VAR'"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := shellQuote(tt.input)
+			got := shellQuotePosix(tt.input)
 			if got != tt.expected {
-				t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.expected)
+				t.Errorf("shellQuotePosix(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestShellQuoteFish(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"simple", "simple"},
+		{".agent-mail", ".agent-mail"},
+		{"path/to/dir", "path/to/dir"},
+		{"has space", "'has space'"},
+		{"has'quote", "'has\\'quote'"},
+		{"$VAR", "'$VAR'"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := shellQuoteFish(tt.input)
+			if got != tt.expected {
+				t.Errorf("shellQuoteFish(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
 	}
@@ -53,16 +77,23 @@ func TestFindAndLoadAmqrc(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 
-	rc, err := findAndLoadAmqrc()
+	result, err := findAndLoadAmqrc()
 	if err != nil {
 		t.Fatalf("findAndLoadAmqrc: %v", err)
 	}
 
-	if rc.Root != ".agent-mail" {
-		t.Errorf("expected root=.agent-mail, got %q", rc.Root)
+	if result.Config.Root != ".agent-mail" {
+		t.Errorf("expected root=.agent-mail, got %q", result.Config.Root)
 	}
-	if rc.Me != "claude" {
-		t.Errorf("expected me=claude, got %q", rc.Me)
+	if result.Config.Me != "claude" {
+		t.Errorf("expected me=claude, got %q", result.Config.Me)
+	}
+
+	// Verify Dir is set correctly (should be the root where .amqrc was found)
+	resolvedDir, _ := filepath.EvalSymlinks(result.Dir)
+	resolvedRoot, _ := filepath.EvalSymlinks(root)
+	if resolvedDir != resolvedRoot {
+		t.Errorf("expected Dir=%q, got %q", resolvedRoot, resolvedDir)
 	}
 }
 
@@ -78,8 +109,35 @@ func TestFindAndLoadAmqrcNotFound(t *testing.T) {
 	}
 
 	_, err := findAndLoadAmqrc()
+	if !errors.Is(err, errAmqrcNotFound) {
+		t.Errorf("expected errAmqrcNotFound, got %v", err)
+	}
+}
+
+func TestFindAndLoadAmqrcInvalidJSON(t *testing.T) {
+	root := t.TempDir()
+
+	// Write invalid .amqrc
+	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte("not json"), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	_, err := findAndLoadAmqrc()
 	if err == nil {
-		t.Error("expected error when .amqrc not found")
+		t.Error("expected error for invalid JSON")
+	}
+	if errors.Is(err, errAmqrcNotFound) {
+		t.Error("should not be errAmqrcNotFound for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "invalid .amqrc") {
+		t.Errorf("expected 'invalid .amqrc' in error, got: %v", err)
 	}
 }
 
@@ -166,11 +224,55 @@ func TestResolveEnvConfigFromAmqrc(t *testing.T) {
 		t.Fatalf("resolveEnvConfig: %v", err)
 	}
 
-	if rootVal != ".agent-mail" {
-		t.Errorf("expected root=.agent-mail, got %q", rootVal)
+	// Root should be resolved against .amqrc directory
+	expectedRoot := filepath.Join(root, ".agent-mail")
+	resolvedRoot, _ := filepath.EvalSymlinks(rootVal)
+	expectedResolved, _ := filepath.EvalSymlinks(expectedRoot)
+	if resolvedRoot != expectedResolved {
+		t.Errorf("expected root=%q, got %q", expectedResolved, resolvedRoot)
 	}
 	if meVal != "claude" {
 		t.Errorf("expected me=claude, got %q", meVal)
+	}
+}
+
+func TestResolveEnvConfigRelativeRootFromSubdir(t *testing.T) {
+	// This tests the fix for: relative root should be resolved against .amqrc location,
+	// not CWD
+	root := t.TempDir()
+	subdir := filepath.Join(root, "sub", "deep")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Write .amqrc in root with relative path
+	rcContent := `{"root": ".agent-mail", "me": "claude"}`
+	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	_ = os.Unsetenv("AM_ROOT")
+	_ = os.Unsetenv("AM_ME")
+
+	// Change to subdir (different from where .amqrc is)
+	if err := os.Chdir(subdir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	rootVal, _, err := resolveEnvConfig("", "")
+	if err != nil {
+		t.Fatalf("resolveEnvConfig: %v", err)
+	}
+
+	// Root should be resolved relative to .amqrc location (root dir), not subdir
+	expectedRoot := filepath.Join(root, ".agent-mail")
+	resolvedRoot, _ := filepath.EvalSymlinks(rootVal)
+	expectedResolved, _ := filepath.EvalSymlinks(expectedRoot)
+	if resolvedRoot != expectedResolved {
+		t.Errorf("expected root=%q (relative to .amqrc), got %q", expectedResolved, resolvedRoot)
 	}
 }
 
@@ -242,6 +344,42 @@ func TestResolveEnvConfigEnvOverride(t *testing.T) {
 	}
 }
 
+func TestResolveEnvConfigFlagOverridesEnv(t *testing.T) {
+	root := t.TempDir()
+
+	// Write .amqrc
+	rcContent := `{"root": ".agent-mail", "me": "claude"}`
+	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	// Set env vars
+	_ = os.Setenv("AM_ROOT", "/env/root")
+	_ = os.Setenv("AM_ME", "envagent")
+	defer func() { _ = os.Unsetenv("AM_ROOT") }()
+	defer func() { _ = os.Unsetenv("AM_ME") }()
+
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// Flags should override both env and .amqrc
+	rootVal, meVal, err := resolveEnvConfig("/flag/root", "flagagent")
+	if err != nil {
+		t.Fatalf("resolveEnvConfig: %v", err)
+	}
+
+	if rootVal != "/flag/root" {
+		t.Errorf("expected root=/flag/root (flag), got %q", rootVal)
+	}
+	if meVal != "flagagent" {
+		t.Errorf("expected me=flagagent (flag), got %q", meVal)
+	}
+}
+
 func TestResolveEnvConfigAutoDetect(t *testing.T) {
 	root := t.TempDir()
 
@@ -274,7 +412,35 @@ func TestResolveEnvConfigAutoDetect(t *testing.T) {
 	}
 }
 
-func TestResolveEnvConfigError(t *testing.T) {
+func TestResolveEnvConfigInvalidAmqrcError(t *testing.T) {
+	root := t.TempDir()
+
+	// Write invalid .amqrc
+	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte("not json"), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	_ = os.Unsetenv("AM_ROOT")
+	_ = os.Unsetenv("AM_ME")
+
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// Should return error, not silently fall back
+	_, _, err := resolveEnvConfig("", "")
+	if err == nil {
+		t.Error("expected error for invalid .amqrc")
+	}
+	if !strings.Contains(err.Error(), "invalid .amqrc") {
+		t.Errorf("expected 'invalid .amqrc' in error, got: %v", err)
+	}
+}
+
+func TestResolveEnvConfigNoConfig(t *testing.T) {
 	root := t.TempDir()
 
 	oldWd, _ := os.Getwd()
@@ -339,8 +505,12 @@ func TestRunEnvJSON(t *testing.T) {
 		t.Fatalf("unmarshal: %v, output was: %s", err, output)
 	}
 
-	if result.Root != ".agent-mail" {
-		t.Errorf("expected root=.agent-mail, got %q", result.Root)
+	// Root is now resolved to absolute path
+	expectedRoot := filepath.Join(root, ".agent-mail")
+	resolvedResult, _ := filepath.EvalSymlinks(result.Root)
+	resolvedExpected, _ := filepath.EvalSymlinks(expectedRoot)
+	if resolvedResult != resolvedExpected {
+		t.Errorf("expected root=%q, got %q", resolvedExpected, resolvedResult)
 	}
 	if result.Me != "claude" {
 		t.Errorf("expected me=claude, got %q", result.Me)
@@ -350,8 +520,8 @@ func TestRunEnvJSON(t *testing.T) {
 func TestRunEnvPosix(t *testing.T) {
 	root := t.TempDir()
 
-	// Write .amqrc
-	rcContent := `{"root": ".agent-mail", "me": "claude"}`
+	// Write .amqrc with absolute path to avoid resolution issues
+	rcContent := `{"root": "/tmp/test-root", "me": "claude"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}
@@ -384,7 +554,7 @@ func TestRunEnvPosix(t *testing.T) {
 	n, _ := r.Read(buf)
 	output := string(buf[:n])
 
-	if !strings.Contains(output, "export AM_ROOT=.agent-mail") {
+	if !strings.Contains(output, "export AM_ROOT=/tmp/test-root") {
 		t.Errorf("expected export AM_ROOT, got: %s", output)
 	}
 	if !strings.Contains(output, "export AM_ME=claude") {
@@ -395,8 +565,8 @@ func TestRunEnvPosix(t *testing.T) {
 func TestRunEnvFish(t *testing.T) {
 	root := t.TempDir()
 
-	// Write .amqrc
-	rcContent := `{"root": ".agent-mail", "me": "claude"}`
+	// Write .amqrc with absolute path
+	rcContent := `{"root": "/tmp/test-root", "me": "claude"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}
@@ -429,7 +599,7 @@ func TestRunEnvFish(t *testing.T) {
 	n, _ := r.Read(buf)
 	output := string(buf[:n])
 
-	if !strings.Contains(output, "set -gx AM_ROOT .agent-mail") {
+	if !strings.Contains(output, "set -gx AM_ROOT /tmp/test-root") {
 		t.Errorf("expected set -gx AM_ROOT, got: %s", output)
 	}
 	if !strings.Contains(output, "set -gx AM_ME claude") {
@@ -441,7 +611,7 @@ func TestRunEnvWake(t *testing.T) {
 	root := t.TempDir()
 
 	// Write .amqrc
-	rcContent := `{"root": ".agent-mail", "me": "claude"}`
+	rcContent := `{"root": "/tmp/test-root", "me": "claude"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}

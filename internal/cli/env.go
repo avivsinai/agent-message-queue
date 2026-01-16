@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -15,6 +16,12 @@ type amqrc struct {
 	Me   string `json:"me"`
 }
 
+// amqrcResult holds both the parsed config and the directory where it was found.
+type amqrcResult struct {
+	Config amqrc
+	Dir    string // Directory containing .amqrc (for resolving relative paths)
+}
+
 // envOutput is the JSON output format for amq env --json.
 type envOutput struct {
 	Root  string `json:"root,omitempty"`
@@ -22,6 +29,9 @@ type envOutput struct {
 	Shell string `json:"shell,omitempty"`
 	Wake  bool   `json:"wake,omitempty"`
 }
+
+// errAmqrcNotFound is returned when .amqrc is not found (non-fatal).
+var errAmqrcNotFound = errors.New(".amqrc not found")
 
 func runEnv(args []string) error {
 	fs := flag.NewFlagSet("env", flag.ContinueOnError)
@@ -82,11 +92,25 @@ func runEnv(args []string) error {
 // resolveEnvConfig resolves root and me with proper precedence.
 func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 	var root, me string
+	var rcDir string // Directory containing .amqrc (for resolving relative paths)
 
 	// 1. Try .amqrc file first (lowest precedence for values we'll override)
-	if rc, err := findAndLoadAmqrc(); err == nil {
-		root = rc.Root
-		me = rc.Me
+	rcResult, err := findAndLoadAmqrc()
+	if err != nil {
+		if !errors.Is(err, errAmqrcNotFound) {
+			// Invalid .amqrc is a fatal error - don't silently fall back
+			return "", "", err
+		}
+		// Not found is fine, continue with other sources
+	} else {
+		root = rcResult.Config.Root
+		me = rcResult.Config.Me
+		rcDir = rcResult.Dir
+
+		// Resolve relative root path against .amqrc directory
+		if root != "" && !filepath.IsAbs(root) {
+			root = filepath.Join(rcDir, root)
+		}
 	}
 
 	// 2. Auto-detect .agent-mail/ directory if root not set
@@ -130,31 +154,41 @@ func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 }
 
 // findAndLoadAmqrc searches for .amqrc in current and parent directories.
-func findAndLoadAmqrc() (amqrc, error) {
+// Returns errAmqrcNotFound if no .amqrc exists (non-fatal).
+// Returns other errors for invalid/unreadable .amqrc (fatal).
+func findAndLoadAmqrc() (amqrcResult, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return amqrc{}, err
+		return amqrcResult{}, err
 	}
 
 	dir := cwd
 	for {
 		rcPath := filepath.Join(dir, ".amqrc")
-		if data, err := os.ReadFile(rcPath); err == nil {
-			var rc amqrc
-			if err := json.Unmarshal(data, &rc); err != nil {
-				return amqrc{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, err)
+		data, err := os.ReadFile(rcPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Keep searching in parent directories
+				parent := filepath.Dir(dir)
+				if parent == dir {
+					break
+				}
+				dir = parent
+				continue
 			}
-			return rc, nil
+			// Other read errors (permissions, etc.) are fatal
+			return amqrcResult{}, fmt.Errorf("cannot read .amqrc at %s: %w", rcPath, err)
 		}
 
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
+		// File exists, try to parse it
+		var rc amqrc
+		if err := json.Unmarshal(data, &rc); err != nil {
+			return amqrcResult{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, err)
 		}
-		dir = parent
+		return amqrcResult{Config: rc, Dir: dir}, nil
 	}
 
-	return amqrc{}, fmt.Errorf(".amqrc not found")
+	return amqrcResult{}, errAmqrcNotFound
 }
 
 // detectAgentMailDir searches for .agent-mail/ in current and parent directories.
@@ -206,12 +240,12 @@ func writeShellEnv(root, me, shell string, wake bool) error {
 func writePosixEnv(root, me string, wake bool) error {
 	// Use proper shell quoting
 	if root != "" {
-		if err := writeStdout("export AM_ROOT=%s\n", shellQuote(root)); err != nil {
+		if err := writeStdout("export AM_ROOT=%s\n", shellQuotePosix(root)); err != nil {
 			return err
 		}
 	}
 	if me != "" {
-		if err := writeStdout("export AM_ME=%s\n", shellQuote(me)); err != nil {
+		if err := writeStdout("export AM_ME=%s\n", shellQuotePosix(me)); err != nil {
 			return err
 		}
 	}
@@ -225,12 +259,12 @@ func writePosixEnv(root, me string, wake bool) error {
 
 func writeFishEnv(root, me string, wake bool) error {
 	if root != "" {
-		if err := writeStdout("set -gx AM_ROOT %s\n", shellQuote(root)); err != nil {
+		if err := writeStdout("set -gx AM_ROOT %s\n", shellQuoteFish(root)); err != nil {
 			return err
 		}
 	}
 	if me != "" {
-		if err := writeStdout("set -gx AM_ME %s\n", shellQuote(me)); err != nil {
+		if err := writeStdout("set -gx AM_ME %s\n", shellQuoteFish(me)); err != nil {
 			return err
 		}
 	}
@@ -242,15 +276,28 @@ func writeFishEnv(root, me string, wake bool) error {
 	return nil
 }
 
-// shellQuote quotes a string for safe use in shell commands.
+// shellQuotePosix quotes a string for safe use in POSIX shell commands.
 // Uses single quotes with proper escaping.
-func shellQuote(s string) string {
+func shellQuotePosix(s string) string {
 	// If string contains no special characters, return as-is
 	if isSimpleString(s) {
 		return s
 	}
 	// Use single quotes, escaping any single quotes in the string
-	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+	// The pattern 'foo'\''bar' closes the quote, adds escaped quote, reopens
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// shellQuoteFish quotes a string for safe use in fish shell commands.
+// Fish uses different escaping rules than POSIX shells.
+func shellQuoteFish(s string) string {
+	// If string contains no special characters, return as-is
+	if isSimpleString(s) {
+		return s
+	}
+	// In fish, single quotes work but single quotes inside need escaping with backslash
+	// Unlike POSIX, fish allows \' inside single-quoted strings
+	return "'" + strings.ReplaceAll(s, "'", "\\'") + "'"
 }
 
 func isSimpleString(s string) bool {
