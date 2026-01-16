@@ -11,9 +11,10 @@ import (
 )
 
 // amqrc represents the .amqrc configuration file format.
+// Note: Only 'root' is used. Agent identity ('me') should be set per-terminal
+// via AM_ME env var or --me flag, since different terminals may use different agents.
 type amqrc struct {
 	Root string `json:"root"`
-	Me   string `json:"me"`
 }
 
 // amqrcResult holds both the parsed config and the directory where it was found.
@@ -35,7 +36,7 @@ var errAmqrcNotFound = errors.New(".amqrc not found")
 
 func runEnv(args []string) error {
 	fs := flag.NewFlagSet("env", flag.ContinueOnError)
-	meFlag := fs.String("me", "", "Agent handle (overrides .amqrc and AM_ME)")
+	meFlag := fs.String("me", "", "Agent handle (overrides AM_ME)")
 	rootFlag := fs.String("root", "", "Root directory (overrides .amqrc and AM_ROOT)")
 	shellFlag := fs.String("shell", "sh", "Shell format: sh, bash, zsh, fish")
 	wakeFlag := fs.Bool("wake", false, "Include amq wake & in output")
@@ -44,16 +45,18 @@ func runEnv(args []string) error {
 	usage := usageWithFlags(fs, "amq env [options]",
 		"Outputs shell commands to set AM_ROOT and AM_ME environment variables.",
 		"",
-		"Configuration is read from (highest to lowest precedence):",
-		"  1. Command-line flags (--root, --me)",
-		"  2. Environment variables (AM_ROOT, AM_ME)",
-		"  3. .amqrc file in current or parent directories",
-		"  4. Auto-detect .agent-mail/ directory",
+		"Configuration precedence (highest to lowest):",
+		"  Root: flags > env (AM_ROOT) > .amqrc > auto-detect (.agent-mail/)",
+		"  Me:   flags > env (AM_ME)",
+		"",
+		"Note: .amqrc only configures 'root'. Agent identity ('me') is set",
+		"per-terminal via --me or AM_ME, since different terminals may use",
+		"different agents on the same project.",
 		"",
 		"Usage:",
-		"  eval \"$(amq env)\"           # Load env vars",
-		"  eval \"$(amq env --wake)\"    # Load env vars and start wake",
-		"  amq env --json               # Machine-readable output",
+		"  eval \"$(amq env --me claude)\"        # Set up for Claude",
+		"  eval \"$(amq env --me codex --wake)\" # Set up for Codex with wake",
+		"  amq env --json                        # Machine-readable output",
 	)
 
 	if handled, err := parseFlags(fs, args, usage); err != nil {
@@ -90,15 +93,17 @@ func runEnv(args []string) error {
 }
 
 // resolveEnvConfig resolves root and me with proper precedence.
-// Precedence (highest to lowest): flags > env vars > .amqrc > auto-detect
+// Precedence:
+//   - Root: flags > env > .amqrc > auto-detect
+//   - Me:   flags > env (NOT from .amqrc)
 func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 	var root, me string
 
 	// Collect values from all sources, then apply precedence
 
-	// 1. Try .amqrc file (lowest precedence)
+	// 1. Try .amqrc file (for root only, lowest precedence)
 	var rcErr error
-	var rcRoot, rcMe, rcDir string
+	var rcRoot, rcDir string
 	rcResult, err := findAndLoadAmqrc()
 	if err != nil {
 		if !errors.Is(err, errAmqrcNotFound) {
@@ -108,8 +113,10 @@ func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 		// Not found is fine, continue with other sources
 	} else {
 		rcRoot = rcResult.Config.Root
-		rcMe = rcResult.Config.Me
 		rcDir = rcResult.Dir
+
+		// Note: 'me' is intentionally not read from .amqrc
+		// Different terminals on the same project may need different agent identities
 
 		// Resolve relative root path against .amqrc directory
 		if rcRoot != "" && !filepath.IsAbs(rcRoot) {
@@ -137,13 +144,11 @@ func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 		root = autoRoot
 	}
 
-	// Apply precedence for me: flags > env > .amqrc
+	// Apply precedence for me: flags > env (NOT from .amqrc)
 	if meFlag != "" {
 		me = meFlag
 	} else if envMeVal != "" {
 		me = envMeVal
-	} else if rcMe != "" {
-		me = rcMe
 	}
 
 	// If we would have needed .amqrc values but it was invalid, report the error

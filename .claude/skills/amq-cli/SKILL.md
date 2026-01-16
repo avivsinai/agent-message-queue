@@ -21,11 +21,7 @@ Verify: `amq --version`
 ## Quick Reference
 
 ```bash
-# Option 1: Using .amqrc (recommended)
-echo '{"root": ".agent-mail", "me": "claude"}' > .amqrc
-eval "$(amq env --wake)"
-
-# Option 2: Manual exports
+# Set once per session - commands work from any directory
 export AM_ROOT=.agent-mail AM_ME=claude   # or: AM_ME=codex
 
 amq send --to codex --body "Message"           # Send
@@ -36,6 +32,12 @@ amq list --new --priority urgent               # Filter messages
 ```
 
 **Note**: With env vars set, all commands work from any subdirectory.
+
+Optionally create `.amqrc` for project-level root config:
+```bash
+echo '{"root": ".agent-mail"}' > .amqrc
+```
+Then only `AM_ME` needs to be set per terminal.
 
 ## Co-op Mode (Autonomous Multi-Agent)
 
