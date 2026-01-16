@@ -65,22 +65,22 @@ internal/
 **Environment Variables**: `AM_ROOT` (default root dir), `AM_ME` (default agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
 **Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
-1. Command-line flags (`--root`, `--me`)
-2. Environment variables (`AM_ROOT`, `AM_ME`)
-3. `.amqrc` file in current or parent directories
-4. Auto-detect `.agent-mail/` directory
+- **Root**: flags > env (`AM_ROOT`) > `.amqrc` > auto-detect (`.agent-mail/`)
+- **Me**: flags > env (`AM_ME`)
 
-The `.amqrc` file is JSON:
+Note: `.amqrc` only configures `root`. Agent identity (`me`) is set per-terminal via `--me` or `AM_ME`, since different terminals may use different agents on the same project.
+
+The `.amqrc` file is JSON (root only):
 ```json
-{"root": ".agent-mail", "me": "claude"}
+{"root": ".agent-mail"}
 ```
 
 Usage:
 ```bash
-eval "$(amq env)"           # Load env vars
-eval "$(amq env --wake)"    # Load env vars and start wake
-amq env --shell fish        # Fish shell syntax
-amq env --json              # Machine-readable output
+eval "$(amq env --me claude)"        # Set up for Claude
+eval "$(amq env --me codex --wake)"  # Set up for Codex with wake
+amq env --shell fish                 # Fish shell syntax
+amq env --json                       # Machine-readable output
 ```
 
 ## Message Kinds
@@ -227,21 +227,6 @@ Co-op mode enables real-time collaboration between Claude Code and Codex CLI ses
 
 ### Quick Start
 
-**Option 1: Using `.amqrc` (recommended)**
-
-Create `.amqrc` in your project root:
-```json
-{"root": ".agent-mail", "me": "claude"}
-```
-
-Then start your session:
-```bash
-eval "$(amq env --wake)"
-claude
-```
-
-**Option 2: Manual exports**
-
 ```bash
 # Terminal 1 - Claude Code
 export AM_ME=claude AM_ROOT=.agent-mail
@@ -253,6 +238,12 @@ export AM_ME=codex AM_ROOT=.agent-mail
 amq wake &
 codex
 ```
+
+Optionally create `.amqrc` in your project root for shared root config:
+```json
+{"root": ".agent-mail"}
+```
+Then only `AM_ME` needs to be set per terminal.
 
 `amq wake` runs as a background job and attempts to inject notifications into your terminal when messages arrive (uses TIOCSTI, experimental).
 
