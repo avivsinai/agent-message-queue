@@ -430,13 +430,74 @@ func TestResolveEnvConfigInvalidAmqrcError(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 
-	// Should return error, not silently fall back
+	// Should return error when no override provided
 	_, _, err := resolveEnvConfig("", "")
 	if err == nil {
-		t.Error("expected error for invalid .amqrc")
+		t.Error("expected error for invalid .amqrc with no override")
 	}
 	if !strings.Contains(err.Error(), "invalid .amqrc") {
 		t.Errorf("expected 'invalid .amqrc' in error, got: %v", err)
+	}
+}
+
+func TestResolveEnvConfigInvalidAmqrcWithOverride(t *testing.T) {
+	root := t.TempDir()
+
+	// Write invalid .amqrc
+	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte("not json"), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	_ = os.Unsetenv("AM_ROOT")
+	_ = os.Unsetenv("AM_ME")
+
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// Should succeed when override provided (flag takes precedence over broken .amqrc)
+	rootVal, meVal, err := resolveEnvConfig("/override/root", "overrideagent")
+	if err != nil {
+		t.Fatalf("expected success with override, got error: %v", err)
+	}
+	if rootVal != "/override/root" {
+		t.Errorf("expected root=/override/root, got %q", rootVal)
+	}
+	if meVal != "overrideagent" {
+		t.Errorf("expected me=overrideagent, got %q", meVal)
+	}
+}
+
+func TestResolveEnvConfigInvalidAmqrcWithEnvOverride(t *testing.T) {
+	root := t.TempDir()
+
+	// Write invalid .amqrc
+	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte("not json"), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	// Set env var override
+	_ = os.Setenv("AM_ROOT", "/env/override")
+	defer func() { _ = os.Unsetenv("AM_ROOT") }()
+	_ = os.Unsetenv("AM_ME")
+
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// Should succeed when env override provided
+	rootVal, _, err := resolveEnvConfig("", "")
+	if err != nil {
+		t.Fatalf("expected success with env override, got error: %v", err)
+	}
+	if rootVal != "/env/override" {
+		t.Errorf("expected root=/env/override, got %q", rootVal)
 	}
 }
 

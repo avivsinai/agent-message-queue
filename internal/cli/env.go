@@ -90,50 +90,72 @@ func runEnv(args []string) error {
 }
 
 // resolveEnvConfig resolves root and me with proper precedence.
+// Precedence (highest to lowest): flags > env vars > .amqrc > auto-detect
 func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 	var root, me string
-	var rcDir string // Directory containing .amqrc (for resolving relative paths)
 
-	// 1. Try .amqrc file first (lowest precedence for values we'll override)
+	// Collect values from all sources, then apply precedence
+
+	// 1. Try .amqrc file (lowest precedence)
+	var rcErr error
+	var rcRoot, rcMe, rcDir string
 	rcResult, err := findAndLoadAmqrc()
 	if err != nil {
 		if !errors.Is(err, errAmqrcNotFound) {
-			// Invalid .amqrc is a fatal error - don't silently fall back
-			return "", "", err
+			// Save the error - we'll report it only if no higher-precedence source provides values
+			rcErr = err
 		}
 		// Not found is fine, continue with other sources
 	} else {
-		root = rcResult.Config.Root
-		me = rcResult.Config.Me
+		rcRoot = rcResult.Config.Root
+		rcMe = rcResult.Config.Me
 		rcDir = rcResult.Dir
 
 		// Resolve relative root path against .amqrc directory
-		if root != "" && !filepath.IsAbs(root) {
-			root = filepath.Join(rcDir, root)
+		if rcRoot != "" && !filepath.IsAbs(rcRoot) {
+			rcRoot = filepath.Join(rcDir, rcRoot)
 		}
 	}
 
-	// 2. Auto-detect .agent-mail/ directory if root not set
-	if root == "" {
-		if detected := detectAgentMailDir(); detected != "" {
-			root = detected
-		}
-	}
+	// 2. Auto-detect .agent-mail/ directory
+	autoRoot := detectAgentMailDir()
 
-	// 3. Environment variables override .amqrc
-	if envRoot := strings.TrimSpace(os.Getenv(envRoot)); envRoot != "" {
-		root = envRoot
-	}
-	if envMe := strings.TrimSpace(os.Getenv(envMe)); envMe != "" {
-		me = envMe
-	}
+	// 3. Environment variables
+	envRootVal := strings.TrimSpace(os.Getenv(envRoot))
+	envMeVal := strings.TrimSpace(os.Getenv(envMe))
 
-	// 4. Command-line flags have highest precedence
+	// 4. Command-line flags (already have rootFlag, meFlag)
+
+	// Now apply precedence for root: flags > env > .amqrc > auto-detect
 	if rootFlag != "" {
 		root = rootFlag
+	} else if envRootVal != "" {
+		root = envRootVal
+	} else if rcRoot != "" {
+		root = rcRoot
+	} else if autoRoot != "" {
+		root = autoRoot
 	}
+
+	// Apply precedence for me: flags > env > .amqrc
 	if meFlag != "" {
 		me = meFlag
+	} else if envMeVal != "" {
+		me = envMeVal
+	} else if rcMe != "" {
+		me = rcMe
+	}
+
+	// If we would have needed .amqrc values but it was invalid, report the error
+	// Only error if .amqrc was invalid AND no higher-precedence source provided root
+	if rcErr != nil {
+		// Check if .amqrc values would have been used
+		needsRcRoot := rootFlag == "" && envRootVal == "" && autoRoot == ""
+		if needsRcRoot {
+			return "", "", rcErr
+		}
+		// Otherwise, warn but continue (higher-precedence source provided values)
+		_ = writeStderr("warning: %v (using override from flags/env)\n", rcErr)
 	}
 
 	// Validate we have at least root
