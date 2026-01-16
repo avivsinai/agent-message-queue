@@ -482,7 +482,14 @@ func FetchLatestTag(ctx context.Context, client *http.Client) (string, error) {
 
 func DownloadReleaseAsset(ctx context.Context, client *http.Client, tag, assetName, destPath string) error {
 	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", RepoSlug, tag, assetName)
-	resp, err := doRequest(ctx, client, url)
+	// Use a simple GET request without API headers for binary downloads
+	// GitHub redirects to blob storage which doesn't need Accept: application/vnd.github+json
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", BinaryName+"/"+runtime.Version())
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -511,7 +518,13 @@ func DownloadReleaseAsset(ctx context.Context, client *http.Client, tag, assetNa
 
 func FetchChecksums(ctx context.Context, client *http.Client, tag string) (map[string]string, error) {
 	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", RepoSlug, tag, ChecksumsFilename)
-	resp, err := doRequest(ctx, client, url)
+	// Use a simple GET request without API headers for file downloads
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", BinaryName+"/"+runtime.Version())
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
