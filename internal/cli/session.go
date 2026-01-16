@@ -83,6 +83,11 @@ func runSessionStart(args []string) error {
 		return fmt.Errorf("cannot resolve absolute path for root: %w", err)
 	}
 
+	// Ensure root directory exists
+	if err := os.MkdirAll(absRoot, 0o700); err != nil {
+		return fmt.Errorf("cannot create root directory: %w", err)
+	}
+
 	// Check if session already exists
 	sessionPath := filepath.Join(absRoot, sessionFileName)
 	if _, err := os.Stat(sessionPath); err == nil {
@@ -290,6 +295,7 @@ func printSessionUsage() error {
 
 // resolveRootForSession resolves the root directory for session commands.
 // Checks: flag > env > .amqrc > auto-detect
+// Returns error if .amqrc is invalid (unless overridden by flag/env).
 func resolveRootForSession(rootFlag string) (string, error) {
 	if rootFlag != "" {
 		return rootFlag, nil
@@ -300,7 +306,8 @@ func resolveRootForSession(rootFlag string) (string, error) {
 	}
 
 	// Try .amqrc (only for root, not me)
-	if rcResult, err := findAndLoadAmqrc(); err == nil {
+	rcResult, rcErr := findAndLoadAmqrc()
+	if rcErr == nil {
 		root := rcResult.Config.Root
 		if root != "" {
 			if !filepath.IsAbs(root) {
@@ -308,9 +315,12 @@ func resolveRootForSession(rootFlag string) (string, error) {
 			}
 			return root, nil
 		}
+	} else if !errors.Is(rcErr, errAmqrcNotFound) {
+		// .amqrc exists but is invalid - error since no higher-precedence override
+		return "", rcErr
 	}
 
-	// Try auto-detect
+	// Try auto-detect (only if .amqrc not found, not if invalid)
 	if autoRoot := detectAgentMailDir(); autoRoot != "" {
 		return autoRoot, nil
 	}
@@ -383,10 +393,10 @@ func findSessionRoot() (string, error) {
 
 // startWakeProcess starts amq wake in the background and returns its PID.
 func startWakeProcess(root, me string) (int, error) {
-	// Find amq binary
-	amqPath, err := exec.LookPath("amq")
+	// Use the same binary that's currently running to avoid version mismatches
+	amqPath, err := os.Executable()
 	if err != nil {
-		return 0, fmt.Errorf("amq not found in PATH: %w", err)
+		return 0, fmt.Errorf("cannot determine executable path: %w", err)
 	}
 
 	cmd := exec.Command(amqPath, "wake", "--root", root, "--me", me)
