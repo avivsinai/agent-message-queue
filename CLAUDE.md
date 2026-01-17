@@ -98,6 +98,8 @@ amq env --json                        # Machine-readable output
 
 When `--kind` is set but `--priority` is not, priority defaults to `normal`.
 
+**Progress updates**: Use `status` kind to signal you've started working on a message (e.g., `amq reply --id <msg_id> --kind status --body "Started, eta ~20m"`). This helps when one agent is faster than another—the sender can check progress via `amq thread`.
+
 ## CLI Commands
 
 ```bash

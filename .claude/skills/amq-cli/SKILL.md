@@ -94,6 +94,26 @@ If notifications require manual Enter, try `--inject-mode=raw`.
 | `normal` | Add to TODOs, respond after current task |
 | `low` | Batch for session end |
 
+### Progress Updates
+
+When starting long work, send a status message so the sender knows you're working:
+
+```bash
+# Signal you've started (with optional ETA)
+amq reply --id <msg_id> --kind status --body "Started processing, eta ~20m"
+
+# If blocked, update status
+amq reply --id <msg_id> --kind status --body "Blocked: waiting for API clarification"
+
+# When done, send the final response (use appropriate kind: answer, review_response, etc.)
+amq reply --id <msg_id> --kind answer --body "Here's my response..."
+```
+
+The sender can check your progress via:
+```bash
+amq thread --id <thread_id> --include-body --limit 5
+```
+
 ## Commands
 
 ### Send

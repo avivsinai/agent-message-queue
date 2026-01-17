@@ -249,6 +249,38 @@ amq reply --me codex --id "msg_review_123" \
   --body @review-response.md
 ```
 
+## Progress Updates for Long-Running Work
+
+When starting work that may take a while, send a status message so the sender knows you're working on it:
+
+```bash
+# Signal you've started (optional ETA)
+amq reply --me codex --id "msg_review_123" \
+  --kind status \
+  --body "Started processing, eta ~20m"
+
+# If blocked, send another status
+amq reply --me codex --id "msg_review_123" \
+  --kind status \
+  --body "Blocked: waiting for API clarification"
+
+# When done, send the final response (use appropriate kind: answer, review_response, etc.)
+amq reply --me codex --id "msg_review_123" \
+  --kind answer \
+  --body "Here's my response..."
+```
+
+The sender can check progress via thread view:
+
+```bash
+amq thread --id <thread_id> --include-body --limit 5
+```
+
+This pattern helps when:
+- Claude is faster than Codex (or vice versa)
+- Long tasks where the sender might think you're not responding
+- You're blocked and need to communicate why
+
 ## Context Object Schema
 
 The `context` field accepts any JSON object. Recommended structure:
