@@ -75,7 +75,36 @@ func acquireWakeLock(root, me string) (cleanup func(), err error) {
 		absRoot = realRoot
 	}
 
-	// Check existing lock
+	// Migration: handle legacy .wake.lock from previous versions.
+	// Old versions used a single lock file; new versions use per-TTY locks.
+	// If a legacy wake is running on our TTY, kill it to prevent duplicates.
+	legacyLockPath := filepath.Join(agentBase, ".wake.lock")
+	if data, err := os.ReadFile(legacyLockPath); err == nil {
+		var legacy wakeLock
+		if json.Unmarshal(data, &legacy) == nil && processAlive(legacy.PID) {
+			// Legacy wake is running. Check if it's on our TTY.
+			legacyTTY := legacy.TTY
+			if strings.HasPrefix(legacyTTY, "/dev/") {
+				if real, err := filepath.EvalSymlinks(legacyTTY); err == nil {
+					legacyTTY = real
+				}
+			}
+			if currentTTY != "" && currentTTY == legacyTTY {
+				// Same TTY - kill the legacy process to prevent duplicate notifications
+				if proc, err := os.FindProcess(legacy.PID); err == nil {
+					_ = proc.Signal(syscall.SIGTERM)
+					time.Sleep(100 * time.Millisecond)
+					if processAlive(legacy.PID) {
+						_ = proc.Signal(syscall.SIGKILL)
+					}
+				}
+			}
+		}
+		// Always remove legacy lock (dead process, different TTY, or just killed)
+		_ = os.Remove(legacyLockPath)
+	}
+
+	// Check existing per-TTY lock
 	if data, err := os.ReadFile(lockPath); err == nil {
 		var existing wakeLock
 		if json.Unmarshal(data, &existing) == nil {
