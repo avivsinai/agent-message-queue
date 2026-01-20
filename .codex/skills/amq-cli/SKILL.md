@@ -9,6 +9,18 @@ metadata:
 
 File-based message queue for agent-to-agent coordination.
 
+## When to Use
+
+- Coordinating with another agent via AMQ (send, reply, drain, watch, wake).
+- Running Claude/Codex co-op in a shared repo.
+- Handling message queues, acknowledgments, or DLQ recovery.
+
+## When Not to Use
+
+- Tasks that do not involve AMQ or agent-to-agent messaging.
+- Manual edits to message files (always use the CLI).
+- One-off, single-agent work with no coordination needs.
+
 ## Prerequisites
 
 Requires `amq` binary in PATH. Install:
@@ -34,9 +46,32 @@ amq watch --timeout 60s                        # Wait for messages
 
 **Note**: After setup, all commands work from any subdirectory.
 
+## Examples
+
+- "message claude to review" → `amq send --to claude --kind review_request --body "..."`
+- "check for new messages" → `amq drain --include-body`
+- "wait for a reply" → `amq watch --timeout 60s` then `amq drain --include-body`
+
+## Default Behavior (Autonomous)
+
+When you see an AMQ notification or any mention of new messages:
+
+1. Run `amq drain --include-body`.
+2. Classify the message and act immediately if it is actionable.
+3. Reply to the sender with results (or send a `status` update for long work).
+4. Ask the user only for credentials, product decisions, or unclear requirements.
+
+Do **not** ask the user what to do with AMQ messages. Coordinate with the partner
+agent via AMQ and use the shared workspace to read changes directly.
+
+This skill must be **self-contained**. Do not assume repo-local docs are present
+for installed users; rely only on this `SKILL.md` and `references/`.
+
 ## Co-op Mode (Autonomous Multi-Agent)
 
 In co-op mode, agents work autonomously. **Message your partner, not the user.**
+
+If you need a structured loop for handling messages, follow `references/claw.md`.
 
 ### Shared Workspace
 
@@ -113,6 +148,11 @@ The sender can check your progress via:
 ```bash
 amq thread --id <thread_id> --include-body --limit 5
 ```
+
+### Work Splitting
+
+If a task should be divided between agents, follow `references/split.md` for a
+clean split protocol (scope, ownership, ETA, and definition of done).
 
 ## Commands
 
@@ -213,9 +253,28 @@ amq send --to codex --kind review_request \
 - Delivery: atomic Maildir (tmp -> new -> cur)
 - Never edit message files directly
 
+## Guidelines
+
+- Keep usage focused on AMQ coordination; avoid one-off or unrelated tasks.
+- Prefer `amq drain` for processing; use `amq list` only for a quick peek.
+- Use `amq reply` to preserve threading and refs.
+- Include `kind`, `priority`, paths, and commands in messages for clarity.
+- For long work, send a `status` update with ETA.
+- Load reference files on demand; avoid reading all of `references/` unless needed.
+- Keep `SKILL.md` focused; push deep detail into `references/` to minimize context.
+- Keep references one level deep (link directly from `SKILL.md`) to avoid partial reads.
+- Do not add or request secrets in skill assets/scripts; keep sensitive data out of skill files.
+
+## Version History
+
+- 2026-01-20: Added autonomous handling, new references (claw/split/edges), and best-practice structure.
+
 ## References
 
 Read these when you need deeper context:
 
 - `references/coop-mode.md` — Read when setting up or debugging co-op workflows between agents
 - `references/message-format.md` — Read when you need the full frontmatter schema (all fields, types, defaults)
+- `references/claw.md` — Message handling loop (drain → classify → act → reply)
+- `references/split.md` — Work splitting protocol for multi-agent tasks
+- `references/edges.md` — Edge cases and recovery checklist
