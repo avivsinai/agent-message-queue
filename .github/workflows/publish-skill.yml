@@ -19,11 +19,10 @@ jobs:
       - name: Install skild
         run: npm install -g skild
 
-      - name: Login to skild
+      - name: Configure skild auth
         run: |
-          npx skild login \
-            --handle-or-email "${{ secrets.SKILD_HANDLE }}" \
-            --password "${{ secrets.SKILD_PASSWORD }}"
+          mkdir -p ~/.skild
+          echo '${{ secrets.SKILD_AUTH_JSON }}' > ~/.skild/registry-auth.json
 
       - name: Get next version
         id: version
