@@ -52,7 +52,9 @@ amq watch --timeout 60s                        # Wait for messages
 - "check for new messages" → `amq drain --include-body`
 - "wait for a reply" → `amq watch --timeout 60s` then `amq drain --include-body`
 
-## Default Behavior (Autonomous)
+## Instructions
+
+### Default Behavior (Autonomous)
 
 When you see an AMQ notification or any mention of new messages:
 
@@ -67,13 +69,13 @@ agent via AMQ and use the shared workspace to read changes directly.
 This skill must be **self-contained**. Do not assume repo-local docs are present
 for installed users; rely only on this `SKILL.md` and `references/`.
 
-## Co-op Mode (Autonomous Multi-Agent)
+### Co-op Mode (Autonomous Multi-Agent)
 
 In co-op mode, agents work autonomously. **Message your partner, not the user.**
 
 If you need a structured loop for handling messages, follow `references/claw.md`.
 
-### Shared Workspace
+#### Shared Workspace
 
 **Both agents work in the same project folder.** Files are shared automatically:
 - If partner says "done with X" → check the files directly, don't ask for code
@@ -90,7 +92,7 @@ Only use messages for: coordination, questions, review requests, status updates.
 | Done | Signal completion |
 | Ask user only for | credentials, unclear requirements |
 
-### Setup
+#### Setup
 
 Run once per project:
 ```bash
@@ -98,7 +100,7 @@ curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/sc
 export AM_ROOT=.agent-mail AM_ME=claude   # or: codex
 ```
 
-### Wake Notifications (Experimental)
+#### Wake Notifications (Experimental)
 
 Start a background waker before your CLI to receive notifications when messages arrive:
 
@@ -121,7 +123,7 @@ Then run `amq drain --include-body` to read messages.
 
 If notifications require manual Enter, try `--inject-mode=raw`.
 
-### Priority Handling
+#### Priority Handling
 
 | Priority | Action |
 |----------|--------|
@@ -129,7 +131,7 @@ If notifications require manual Enter, try `--inject-mode=raw`.
 | `normal` | Add to TODOs, respond after current task |
 | `low` | Batch for session end |
 
-### Progress Updates
+#### Progress Updates
 
 When starting long work, send a status message so the sender knows you're working:
 
@@ -149,7 +151,7 @@ The sender can check your progress via:
 amq thread --id <thread_id> --include-body --limit 5
 ```
 
-### Work Splitting
+#### Work Splitting
 
 If a task should be divided between agents, follow `references/split.md` for a
 clean split protocol (scope, ownership, ETA, and definition of done).
