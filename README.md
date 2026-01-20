@@ -38,6 +38,12 @@ Review the script before running; it verifies release checksums when possible.
 
 ### 2. Install Skill
 
+**Via [skild.sh](https://skills.sh)** (cross-platform):
+```bash
+npx skild install amq-cli        # installs to detected platform
+npx skild install amq-cli --all  # installs to all platforms
+```
+
 **Claude Code** (via marketplace):
 ```
 /plugin marketplace add avivsinai/skills-marketplace
