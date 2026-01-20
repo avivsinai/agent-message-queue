@@ -27,11 +27,39 @@ type wakeLock struct {
 	Started string `json:"started"` // ISO8601 timestamp
 }
 
-// acquireWakeLock attempts to acquire the wake lock for an agent's inbox.
-// Returns cleanup function and error. If another wake is running, returns error.
+// sanitizeTTYForFilename converts a TTY path to a safe filename component.
+// e.g., "/dev/ttys001" -> "ttys001", "/dev/pts/1" -> "pts-1"
+func sanitizeTTYForFilename(tty string) string {
+	if tty == "" || tty == "unknown" {
+		return "unknown"
+	}
+	// Remove /dev/ prefix
+	name := strings.TrimPrefix(tty, "/dev/")
+	// Replace path separators with dashes
+	name = strings.ReplaceAll(name, "/", "-")
+	// Remove any other unsafe characters
+	name = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '-'
+	}, name)
+	if name == "" {
+		return "unknown"
+	}
+	return name
+}
+
+// acquireWakeLock attempts to acquire the wake lock for an agent's inbox on this TTY.
+// Returns cleanup function and error. If another wake is running on THIS TTY, returns error.
+// Different TTYs can run independent wake processes for the same agent.
 func acquireWakeLock(root, me string) (cleanup func(), err error) {
 	agentBase := fsq.AgentBase(root, me)
-	lockPath := filepath.Join(agentBase, ".wake.lock")
+
+	// Get current TTY early - needed for lock filename
+	currentTTY := getCurrentTTY()
+	ttySuffix := sanitizeTTYForFilename(currentTTY)
+	lockPath := filepath.Join(agentBase, fmt.Sprintf(".wake.%s.lock", ttySuffix))
 
 	// Ensure agent directory exists before attempting lock
 	if err := os.MkdirAll(agentBase, 0o700); err != nil {
@@ -78,7 +106,6 @@ func acquireWakeLock(root, me string) (cleanup func(), err error) {
 
 				// Check if existing wake is in a different session (orphaned from closed shell).
 				// Same TTY + different session = old wake is orphaned, safe to take over.
-				currentTTY := getCurrentTTY()
 				existingTTY := existing.TTY
 				if strings.HasPrefix(existingTTY, "/dev/") {
 					if real, err := filepath.EvalSymlinks(existingTTY); err == nil {
@@ -123,8 +150,8 @@ func acquireWakeLock(root, me string) (cleanup func(), err error) {
 	}
 
 createLock:
-	// Get TTY name - reuse getCurrentTTY for consistency
-	ttyName := getCurrentTTY()
+	// Use currentTTY obtained at function start (already normalized)
+	ttyName := currentTTY
 	if ttyName == "" {
 		ttyName = "unknown"
 	}
