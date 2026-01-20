@@ -220,3 +220,15 @@ id = "jwt-token"
 description = "JSON Web Token"
 regex = '''eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*'''
 tags = ["credentials", "jwt"]
+
+# Additional path exclusions for common false positive sources
+[[allowlists]]
+description = "Additional exclusions for docs, marketing, reports"
+paths = [
+  '''TESTING.*\.md$''',
+  '''marketing\/''',
+  '''ingestion\/output''',
+  '''playwright-report\/''',
+  '''\.json$''',
+  '''docs\/.*\.md$''',
+]
