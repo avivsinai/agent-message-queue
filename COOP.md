@@ -84,6 +84,42 @@ codex
 
 That's it. When messages arrive, `amq wake` attempts to inject a notification into your terminal (best-effort).
 
+### Multiple Pairs (Isolated Sessions)
+
+Need multiple agent pairs working on different features simultaneously? Use separate `--root` paths:
+
+```bash
+# Pair A: auth feature
+# Terminal 1
+export AM_ME=claude AM_ROOT=.agent-mail/auth
+amq wake &
+claude
+
+# Terminal 2
+export AM_ME=codex AM_ROOT=.agent-mail/auth
+amq wake &
+codex
+
+# Pair B: api refactor
+# Terminal 3
+export AM_ME=claude AM_ROOT=.agent-mail/api
+amq wake &
+claude
+
+# Terminal 4
+export AM_ME=codex AM_ROOT=.agent-mail/api
+amq wake &
+codex
+```
+
+Each pair has isolated inboxes, threads, and wake processes. Messages stay within their root—auth-Claude talks to auth-Codex, never api-Codex.
+
+Initialize each root once:
+```bash
+amq init --root .agent-mail/auth --agents claude,codex
+amq init --root .agent-mail/api --agents claude,codex
+```
+
 ### How It Works
 
 1. `amq wake` runs as a background job in the same terminal

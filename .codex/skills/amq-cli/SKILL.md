@@ -63,6 +63,20 @@ curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/sc
 export AM_ROOT=.agent-mail AM_ME=claude   # or: codex
 ```
 
+### Multiple Pairs (Isolated Sessions)
+
+Run multiple agent pairs on different features using separate `--root` paths:
+
+```bash
+# Pair A (auth feature): AM_ROOT=.agent-mail/auth
+# Pair B (api refactor): AM_ROOT=.agent-mail/api
+```
+
+Each root has isolated inboxes and wake processes. Initialize each once:
+```bash
+amq init --root .agent-mail/auth --agents claude,codex
+```
+
 ### Wake Notifications (Experimental)
 
 Start a background waker before your CLI to receive notifications when messages arrive:
