@@ -65,7 +65,7 @@ export AM_ROOT=.agent-mail AM_ME=claude   # or: codex
 
 ### Multiple Pairs (Isolated Sessions)
 
-Run multiple agent pairs on different features using separate `--root` paths:
+Run multiple agent pairs on different features using separate root paths (`AM_ROOT` or `--root`):
 
 ```bash
 # Pair A (auth feature): AM_ROOT=.agent-mail/auth
@@ -75,6 +75,7 @@ Run multiple agent pairs on different features using separate `--root` paths:
 Each root has isolated inboxes and wake processes. Initialize each once:
 ```bash
 amq init --root .agent-mail/auth --agents claude,codex
+amq init --root .agent-mail/api --agents claude,codex
 ```
 
 ### Wake Notifications (Experimental)
