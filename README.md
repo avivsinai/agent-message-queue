@@ -76,15 +76,15 @@ amq init --root .agent-mail --agents claude,codex
 
 **Terminal 1 — Claude Code:**
 ```bash
-export AM_ME=claude AM_ROOT=.agent-mail
-amq wake &
+eval "$(amq env --me claude)"
+amq wake &  # Optional: terminal notifications
 claude
 ```
 
 **Terminal 2 — Codex CLI:**
 ```bash
-export AM_ME=codex AM_ROOT=.agent-mail
-amq wake &
+eval "$(amq env --me codex)"
+amq wake &  # Optional: terminal notifications
 codex
 ```
 

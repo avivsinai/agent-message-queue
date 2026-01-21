@@ -34,6 +34,8 @@ amq watch --timeout 60s                        # Wait for messages
 
 **Note**: After setup, all commands work from any subdirectory.
 
+> **Important**: Don't hardcode `AM_ROOT=.agent-mail`. Use `amq env` which auto-detects the configured root from `.amqrc` or existing directories. Only set `AM_ROOT` explicitly when intentionally overriding (e.g., multi-pair isolation with `--root`).
+
 ## Co-op Mode (Autonomous Multi-Agent)
 
 In co-op mode, agents work autonomously. **Message your partner, not the user.**
@@ -60,7 +62,7 @@ Only use messages for: coordination, questions, review requests, status updates.
 Run once per project:
 ```bash
 curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/setup-coop.sh | bash
-export AM_ROOT=.agent-mail AM_ME=claude   # or: codex
+eval "$(amq env --me claude)"   # or: --me codex
 ```
 
 ### Multiple Pairs (Isolated Sessions)
