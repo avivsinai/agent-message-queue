@@ -70,15 +70,15 @@ This creates:
 
 **Terminal 1 - Claude Code:**
 ```bash
-export AM_ME=claude AM_ROOT=.agent-mail
-amq wake &
+eval "$(amq env --me claude)"
+amq wake &  # Optional: terminal notifications
 claude
 ```
 
 **Terminal 2 - Codex CLI:**
 ```bash
-export AM_ME=codex AM_ROOT=.agent-mail
-amq wake &
+eval "$(amq env --me codex)"
+amq wake &  # Optional: terminal notifications
 codex
 ```
 
@@ -91,23 +91,23 @@ Need multiple agent pairs working on different features simultaneously? Use sepa
 ```bash
 # Pair A: auth feature
 # Terminal 1
-export AM_ME=claude AM_ROOT=.agent-mail/auth
+eval "$(amq env --me claude --root .agent-mail/auth)"
 amq wake &
 claude
 
 # Terminal 2
-export AM_ME=codex AM_ROOT=.agent-mail/auth
+eval "$(amq env --me codex --root .agent-mail/auth)"
 amq wake &
 codex
 
 # Pair B: api refactor
 # Terminal 3
-export AM_ME=claude AM_ROOT=.agent-mail/api
+eval "$(amq env --me claude --root .agent-mail/api)"
 amq wake &
 claude
 
 # Terminal 4
-export AM_ME=codex AM_ROOT=.agent-mail/api
+eval "$(amq env --me codex --root .agent-mail/api)"
 amq wake &
 codex
 ```

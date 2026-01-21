@@ -19,6 +19,10 @@ NC='\033[0m' # No Color
 echo -e "${BLUE}=== AMQ Co-op Mode Setup ===${NC}"
 echo ""
 
+# Respect .amqrc if it exists (don't override user's configured root)
+if [ -z "${AM_ROOT:-}" ] && [ -f .amqrc ]; then
+    AM_ROOT=$(python3 -c "import json,sys; print(json.load(sys.stdin).get('root',''))" < .amqrc 2>/dev/null || echo "")
+fi
 AM_ROOT="${AM_ROOT:-.agent-mail}"
 AGENTS="${AGENTS:-claude,codex}"
 REPO="avivsinai/agent-message-queue"
@@ -124,8 +128,8 @@ echo ""
 echo -e "${BLUE}Next steps:${NC}"
 echo ""
 echo "1. Claude Code session:"
-echo "   export AM_ME=claude AM_ROOT=.agent-mail"
-echo "   # Start watcher (Task tool, haiku model): 'Run amq monitor --peek --timeout 0 --include-body --json'"
+echo "   eval \"\$(amq env --me claude)\""
+echo "   amq wake &  # Optional: terminal notifications"
 echo "   # After handling messages, drain: amq drain --include-body"
 echo "   # Optional (recommended): add SessionStart + Stop hooks in .claude/settings.local.json"
 echo "   #   cat > .claude/settings.local.json <<'JSON'"
@@ -142,8 +146,8 @@ echo "   #   }"
 echo "   #   JSON"
 echo ""
 echo "2. Codex CLI session:"
-echo "   export AM_ME=codex AM_ROOT=.agent-mail"
-echo "   amq wake &  # Primary: TTY injection"
+echo "   eval \"\$(amq env --me codex)\""
+echo "   amq wake &  # Optional: terminal notifications"
 echo "   codex"
 echo "   # Fallback (if TIOCSTI unavailable): add to ~/.codex/config.toml:"
 echo "   #   notify = [\"python3\", \"/path/to/repo/scripts/codex-amq-notify.py\"]"
