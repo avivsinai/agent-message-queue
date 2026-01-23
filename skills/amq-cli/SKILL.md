@@ -36,26 +36,66 @@ amq watch --timeout 60s                        # Wait for messages
 
 > **Important**: Don't hardcode `AM_ROOT=.agent-mail`. Use `amq env` which auto-detects the configured root from `.amqrc` or existing directories. Only set `AM_ROOT` explicitly when intentionally overriding (e.g., multi-pair isolation with `--root`).
 
-## Co-op Mode (Autonomous Multi-Agent)
+## Co-op Mode: Phased Parallel Work
 
-In co-op mode, agents work autonomously. **Message your partner, not the user.**
+Both agents work in parallel where safe, coordinate where risky. Different models = different training = different blind spots. Cross-model work catches errors that same-model review misses.
+
+### Roles
+
+- **Claude Code** = Leader + Worker (coordinates phases, merges, prepares commits, gets user approval)
+- **Codex** = Worker (executes phases, reports to leader, awaits next assignment)
+
+### Phased Flow
+
+| Phase | Mode | Description |
+|-------|------|-------------|
+| **Research** | Parallel | Both explore codebase, read docs, search. No conflicts. |
+| **Design** | Parallel → Merge | Both propose approaches. Leader merges/decides. |
+| **Code** | Split | Divide by file/module. Never edit same file. |
+| **Review** | Parallel | Both review each other's code. Leader decides disputes. |
+| **Test** | Parallel | Both run tests, report results to leader. |
+
+```
+Research (parallel) → sync findings
+    ↓
+Design (parallel) → leader merges approach
+    ↓
+Code (split: e.g., Claude=files A,B; Codex=files C,D)
+    ↓
+Review (parallel: each reviews other's code)
+    ↓
+Test (parallel: both run tests)
+    ↓
+Leader prepares commit → user approves → push
+```
+
+### Key Rules
+
+- **Never branch** — always work on same branch (joined work)
+- **Code phase = split** — divide files/modules to avoid conflicts
+- **File overlap** — if same file unavoidable, assign one owner; other reviews/proposes via message
+- **Coordinate between phases** — sync before moving to next phase
+- **Leader decides** — Claude Code makes final calls at merge points
+
+### Stay in Sync
+
+- After completing a phase, report to leader and await next assignment
+- While waiting, safe to do: review partner's work, run tests, read docs
+- If no assignment comes, ask leader (not user) for next task
 
 ### Shared Workspace
 
 **Both agents work in the same project folder.** Files are shared automatically:
 - If partner says "done with X" → check the files directly, don't ask for code
-- If partner says "see my changes" → read the files, they're already there
 - Don't send code snippets in messages → just reference file paths
 
-Only use messages for: coordination, questions, review requests, status updates.
+### When to Act
 
-| Situation | Action |
-|----------|--------|
-| Blocked | Message partner |
-| Need review | Send `kind: review_request` with file paths |
-| Partner done | Read files directly (they're local) |
-| Done | Signal completion |
-| Ask user only for | credentials, unclear requirements |
+| Agent | Action |
+|-------|--------|
+| Codex | Complete phase → report to leader → await next assignment |
+| Claude Code | Merge own work + codex's → ask user for commit approval |
+| Either | Ask user only for: credentials, unclear requirements |
 
 ### Setup
 
@@ -80,31 +120,6 @@ amq init --root .agent-mail/auth --agents claude,codex
 amq init --root .agent-mail/api --agents claude,codex
 ```
 
-### Wake Notifications (Optional, Interactive Terminals Only)
-
-> **AI agents**: Skip this section. Wake requires an interactive terminal with TTY access (TIOCSTI/ioctl). Non-interactive sessions (scripts, CI, headless) cannot use wake. Just use `amq drain` or `amq watch` to check for messages.
-
-For **human operators** running Claude Code or Codex CLI in an interactive terminal, wake provides background notifications when messages arrive:
-
-```bash
-amq wake &
-claude
-```
-
-When messages arrive, you'll see a notification injected into your terminal (best-effort):
-```
-AMQ: message from codex - Review complete. Run: amq drain --include-body
-```
-
-Then run `amq drain --include-body` to read messages.
-
-**Inject Modes**: The wake command auto-detects your CLI type:
-- `--inject-mode=auto` (default): Uses `raw` for Claude Code/Codex, `paste` for others
-- `--inject-mode=raw`: Plain text + CR (best for Ink-based CLIs like Claude Code)
-- `--inject-mode=paste`: Bracketed paste with delayed CR (best for crossterm CLIs)
-
-If notifications require manual Enter, try `--inject-mode=raw`.
-
 ### Priority Handling
 
 | Priority | Action |
@@ -115,23 +130,29 @@ If notifications require manual Enter, try `--inject-mode=raw`.
 
 ### Progress Updates
 
-When starting long work, send a status message so the sender knows you're working:
+When starting long work, send a status message:
 
 ```bash
-# Signal you've started (with optional ETA)
-amq reply --id <msg_id> --kind status --body "Started processing, eta ~20m"
-
-# If blocked, update status
-amq reply --id <msg_id> --kind status --body "Blocked: waiting for API clarification"
-
-# When done, send the final response (use appropriate kind: answer, review_response, etc.)
-amq reply --id <msg_id> --kind answer --body "Here's my response..."
+amq reply --id <msg_id> --kind status --body "Started, eta ~20m"
 ```
 
-The sender can check your progress via:
+### Optional: Wake Notifications
+
+> Co-op works without wake. This is an optional enhancement for interactive terminals.
+
+For human operators, wake provides background notifications:
+
 ```bash
-amq thread --id <thread_id> --include-body --limit 5
+amq wake &
+claude
 ```
+
+When messages arrive:
+```
+AMQ: message from codex - Review complete. Drain with: amq drain --include-body — then act on it
+```
+
+If notifications require manual Enter, try `--inject-mode=raw`.
 
 ## Commands
 
