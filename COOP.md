@@ -1,37 +1,59 @@
-# Co-op Mode: Inter-Agent Collaboration Protocol
+# Co-op Mode: Phased Parallel Work
 
-Co-op mode enables Claude Code and Codex CLI to collaborate as **review partners**, sharing context, requesting reviews, and coordinating work through the Agent Message Queue.
+Co-op mode enables Claude Code and Codex CLI to work **in parallel where safe, coordinate where risky**, leveraging cognitive diversity (different models = different training = different blind spots) to catch errors that same-model review would miss.
 
-## Autonomous Operation
+## Roles
 
-**Critical**: In co-op mode, agents operate autonomously until task completion. Do not ask the user for direction—that's what your partner agent is for.
+- **Claude Code** = Leader + Worker (coordinates phases, merges, prepares commits, gets user approval)
+- **Codex** = Worker (executes phases, reports to leader, awaits next assignment)
 
-### Core Principles
+## Phased Flow
 
-1. **Work autonomously** - Complete your assigned task without user prompts. If blocked, message your partner agent, not the user.
+| Phase | Mode | Description |
+|-------|------|-------------|
+| **Research** | Parallel | Both explore codebase, read docs, search. No conflicts. |
+| **Design** | Parallel → Merge | Both propose approaches. Leader merges/decides. |
+| **Code** | Split | Divide by file/module. Never edit same file. |
+| **Review** | Parallel | Both review each other's code. Leader decides disputes. |
+| **Test** | Parallel | Both run tests, report results to leader. |
 
-2. **Use extended thinking** - For complex decisions, use thinking tiers:
-   - `think` → routine tasks
-   - `think hard` → multi-step problems
-   - `think harder` → architectural decisions
-   - `ultrathink` → critical design choices, security-sensitive code
+```
+Research (parallel) → sync findings
+    ↓
+Design (parallel) → leader merges approach
+    ↓
+Code (split: e.g., Claude=files A,B; Codex=files C,D)
+    ↓
+Review (parallel: each reviews other's code)
+    ↓
+Test (parallel: both run tests)
+    ↓
+Leader prepares commit → user approves → push
+```
 
-3. **Multi-agent verification** - Instead of asking "is this right?", send a review request to your partner.
+## Core Principles
 
-4. **Completion signals** - When your task is done, signal completion clearly.
+1. **Parallel where safe** - Research, design, review, and test phases run in parallel.
 
-5. **Iteration over perfection** - Ship working code, request review, iterate based on feedback.
+2. **Split where risky** - Code phase divides files/modules to avoid conflicts. If same file unavoidable, assign one owner; other reviews/proposes via message.
 
-### When to Message Partner vs User
+3. **Never branch** - Always work on same branch (joined work). No feature branches.
 
-| Situation | Action |
-|-----------|--------|
-| Need code review | → Message partner |
-| Blocked on design decision | → Message partner (kind: `decision`) |
-| Found bug in partner's code | → Message partner (kind: `review_response`) |
-| Task complete, ready for next | → Message partner (kind: `status`) |
-| Need external credentials/access | → Ask user |
-| Unclear on original requirements | → Ask user |
+4. **Cognitive diversity** - Different models catch different bugs. Cross-model work > same-model self-review.
+
+5. **Leader coordinates** - Claude Code handles phase transitions, merges, and final decisions.
+
+6. **Coordinate between phases** - Sync findings/decisions before moving to next phase.
+
+## When to Act
+
+| Agent | Action |
+|-------|--------|
+| Codex | Complete phase → report to leader → await next assignment |
+| Claude Code | Receive reports → merge/decide → assign next phase work |
+| Either | Ask user only for: credentials, unclear requirements |
+
+**While waiting**: Safe to do light work — review partner's code, run tests, read docs. If no assignment comes, ask leader (not user) for next task.
 
 ## Quick Start
 
@@ -230,7 +252,9 @@ amq reply --me codex --id "msg_123" \
   --body "LGTM with minor suggestions..."
 ```
 
-## Wake Command (Experimental)
+## Wake Command (Optional)
+
+> Co-op works without wake. This is an optional enhancement for interactive terminals.
 
 `amq wake` uses TIOCSTI to inject notifications into your terminal:
 
@@ -255,8 +279,8 @@ claude
 If notifications appear but require manual Enter, use `--inject-mode=raw`.
 
 **Notification format:**
-- Single message: `AMQ: message from codex - Review complete. Run: amq drain --include-body`
-- Multiple: `AMQ: 3 messages - 2 from codex, 1 from claude. Run: amq drain --include-body`
+- Single message: `AMQ: message from codex - Review complete. Drain with: amq drain --include-body — then act on it`
+- Multiple: `AMQ: 3 messages - 2 from codex, 1 from claude. Drain with: amq drain --include-body — then act on it`
 
 **Platform support:**
 - macOS: Works

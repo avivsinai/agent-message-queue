@@ -185,7 +185,7 @@ func buildNotificationText(messages []wakeMsgInfo, senderCounts map[string]int, 
 			subject = "(no subject)"
 		}
 		subject = truncateSubject(subject, previewLen)
-		return fmt.Sprintf("AMQ: message from %s - %s. Run: amq drain --include-body", msg.from, subject)
+		return fmt.Sprintf("AMQ: message from %s - %s. Drain with: amq drain --include-body — then act on it", msg.from, subject)
 	}
 
 	// Multiple messages: show counts by sender
@@ -201,7 +201,7 @@ func buildNotificationText(messages []wakeMsgInfo, senderCounts map[string]int, 
 		parts = append(parts, fmt.Sprintf("%d from %s", c, sender))
 	}
 
-	return fmt.Sprintf("AMQ: %d messages - %s. Run: amq drain --include-body",
+	return fmt.Sprintf("AMQ: %d messages - %s. Drain with: amq drain --include-body — then act on it",
 		count, strings.Join(parts, ", "))
 }
 
