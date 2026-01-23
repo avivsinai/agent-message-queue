@@ -38,17 +38,15 @@ Review the script before running; it verifies release checksums when possible.
 
 ### 2. Install Skill
 
-**Claude Code** (via marketplace):
-```
-/plugin marketplace add avivsinai/skills-marketplace
-/plugin install amq-cli@avivsinai-marketplace
+**Via skild.sh** (registry-based):
+```bash
+npx skild install @avivsinai/amq-cli
 ```
 
-**Codex CLI** (Codex chat command; not a shell command):
+**Via skills.sh** (GitHub-based):
+```bash
+npx skills add avivsinai/agent-message-queue
 ```
-$skill-installer install https://github.com/avivsinai/agent-message-queue/tree/main/skills/amq-cli
-```
-Restart Codex after installing.
 
 For manual download, build from source, or troubleshooting, see [INSTALL.md](INSTALL.md).
 
