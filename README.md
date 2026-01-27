@@ -38,14 +38,20 @@ Review the script before running; it verifies release checksums when possible.
 
 ### 2. Install Skill
 
-**Via skild.sh** (registry-based):
+**Via skill.sh** (recommended):
 ```bash
-npx skild install @avivsinai/amq-cli
+npx skill.sh install avivsinai/agent-message-queue
 ```
 
-**Via skills.sh** (GitHub-based):
+If that fails, try these alternatives in order:
+
 ```bash
-npx skills add avivsinai/agent-message-queue
+# Via skills marketplace (Claude Code)
+/plugin marketplace add avivsinai/skills-marketplace
+/plugin install amq-cli@avivsinai-marketplace
+
+# Via skild.sh
+npx skild install @avivsinai/amq-cli
 ```
 
 For manual download, build from source, or troubleshooting, see [INSTALL.md](INSTALL.md).
@@ -67,23 +73,28 @@ export AMQ_NO_UPDATE_CHECK=1   # Global
 ### 1. Initialize Project
 
 ```bash
-amq init --root .agent-mail --agents claude,codex
+amq coop init
 ```
+
+This creates `.amqrc`, mailboxes for `claude` and `codex`, and updates `.gitignore`.
 
 ### 2. Start Agent Sessions
 
 **Terminal 1 — Claude Code:**
 ```bash
-eval "$(amq env --me claude)"
-amq wake &  # Optional: terminal notifications
+eval "$(amq coop shell --me claude)"
 claude
 ```
 
 **Terminal 2 — Codex CLI:**
 ```bash
-eval "$(amq env --me codex)"
-amq wake &  # Optional: terminal notifications
+eval "$(amq coop shell --me codex)"
 codex
+```
+
+For terminal notifications (optional), add `--wake`:
+```bash
+eval "$(amq coop shell --me claude --wake)"
 ```
 
 ### 3. Send & Receive

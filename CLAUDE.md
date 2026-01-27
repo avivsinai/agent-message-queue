@@ -24,7 +24,7 @@ Requires Go 1.25+ and optionally golangci-lint.
 ```
 cmd/amq/           → Entry point (delegates to cli.Run())
 internal/
-├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch, monitor, reply, dlq, wake)
+├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch, monitor, reply, dlq, wake, coop)
 ├── fsq/           → File system queue (Maildir delivery, atomic ops, scanning)
 ├── format/        → Message serialization (JSON frontmatter + Markdown body)
 ├── config/        → Config management (meta/config.json)
@@ -123,6 +123,8 @@ amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
 amq wake --me <agent> [--inject-cmd <cmd>] [--bell] [--debounce <duration>] [--preview-len <n>]
 amq upgrade
 amq env [--me <agent>] [--root <path>] [--shell sh|bash|zsh|fish] [--wake] [--json]
+amq coop init [--root <path>] [--agents <a,b,c>] [--force] [--json]
+amq coop shell --me <agent> [--root <path>] [--shell sh|bash|zsh|fish] [--wake] [--json]
 ```
 
 Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has its own flags and doesn't accept these.
@@ -230,13 +232,21 @@ Co-op mode enables real-time collaboration between Claude Code and Codex CLI ses
 ### Quick Start
 
 ```bash
+# One-time project setup
+amq coop init
+
 # Terminal 1 - Claude Code
-eval "$(amq env --me claude --wake)"
+eval "$(amq coop shell --me claude)"
 claude
 
 # Terminal 2 - Codex CLI
-eval "$(amq env --me codex --wake)"
+eval "$(amq coop shell --me codex)"
 codex
+```
+
+For terminal notifications (optional), add `--wake`:
+```bash
+eval "$(amq coop shell --me claude --wake)"
 ```
 
 `amq wake` runs as a background job and attempts to inject notifications into your terminal when messages arrive (uses TIOCSTI, experimental).

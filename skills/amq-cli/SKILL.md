@@ -23,9 +23,12 @@ Verify: `amq --version`
 ## Quick Reference
 
 ```bash
-# Required setup (run once per terminal session)
-eval "$(amq env --me claude)"    # For Claude Code
-eval "$(amq env --me codex)"     # For Codex CLI
+# One-time project setup
+amq coop init                         # Creates .amqrc, mailboxes, updates .gitignore
+
+# Per-terminal session setup
+eval "$(amq coop shell --me claude)"  # For Claude Code
+eval "$(amq coop shell --me codex)"   # For Codex CLI
 
 # Send and receive messages
 amq send --to codex --body "Message"           # Send
@@ -36,7 +39,7 @@ amq watch --timeout 60s                        # Wait for messages
 
 **Note**: After setup, all commands work from any subdirectory.
 
-> **Important**: Don't hardcode `AM_ROOT=.agent-mail`. Use `amq env` which auto-detects the configured root from `.amqrc` or existing directories. Only set `AM_ROOT` explicitly when intentionally overriding (e.g., multi-pair isolation with `--root`).
+> **Important**: Use `amq coop shell` which auto-detects the configured root from `.amqrc`. Don't hardcode `AM_ROOT` or `AM_ME` directly.
 
 ## Co-op Mode: Phased Parallel Work
 
@@ -103,8 +106,8 @@ Leader prepares commit → user approves → push
 
 Run once per project:
 ```bash
-curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/setup-coop.sh | bash
-eval "$(amq env --me claude)"   # or: --me codex
+amq coop init
+eval "$(amq coop shell --me claude)"   # or: --me codex
 ```
 
 ### Multiple Pairs (Isolated Sessions)

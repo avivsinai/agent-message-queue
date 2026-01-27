@@ -17,6 +17,16 @@ The installer verifies release checksums when possible.
 
 ### 2. Skill
 
+Install the skill to enable co-op mode guidance in Claude Code or Codex. Try methods in order until one works.
+
+#### Method 1: skill.sh (Recommended)
+
+```bash
+npx skill.sh install avivsinai/agent-message-queue
+```
+
+#### Method 2: Skills Marketplace
+
 **Claude Code:**
 ```
 /plugin marketplace add avivsinai/skills-marketplace
@@ -28,7 +38,33 @@ The installer verifies release checksums when possible.
 $skill-installer install https://github.com/avivsinai/agent-message-queue/tree/main/skills/amq-cli
 ```
 
-Restart Codex after installing.
+#### Method 3: skild.sh
+
+```bash
+npx skild install @avivsinai/amq-cli
+```
+
+#### Method 4: Manual (Last Resort)
+
+If npm tools fail (network issues, corporate firewalls, etc.):
+
+**Claude Code:**
+```bash
+git clone https://github.com/avivsinai/agent-message-queue.git /tmp/amq
+mkdir -p ~/.claude/skills
+cp -r /tmp/amq/.claude/skills/amq-cli ~/.claude/skills/
+rm -rf /tmp/amq
+```
+
+**Codex CLI:**
+```bash
+git clone https://github.com/avivsinai/agent-message-queue.git /tmp/amq
+mkdir -p ~/.codex/skills
+cp -r /tmp/amq/.codex/skills/amq-cli ~/.codex/skills/
+rm -rf /tmp/amq
+```
+
+Restart your agent after installing.
 
 ---
 
@@ -79,18 +115,6 @@ curl -fsSL .../install.sh | VERSION=v0.8.0 bash
 # Custom directory
 curl -fsSL .../install.sh | INSTALL_DIR=~/bin bash
 ```
-
-### Skill: Manual Install (Codex)
-
-If skill-installer isn't available:
-
-```bash
-mkdir -p ~/.codex/skills/amq-cli
-curl -o ~/.codex/skills/amq-cli/SKILL.md \
-  https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/skills/amq-cli/SKILL.md
-```
-
-Restart Codex after installing.
 
 ---
 

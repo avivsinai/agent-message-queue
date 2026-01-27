@@ -66,81 +66,86 @@ Leader prepares commit → user approves → push
 
 2. **Install amq-cli skill** for your agents:
 
-   **Claude Code** (via marketplace):
-   ```
-   /plugin marketplace add avivsinai/skills-marketplace
-   /plugin install amq-cli@avivsinai-marketplace
+   **Via skill.sh** (recommended):
+   ```bash
+   npx skill.sh install avivsinai/agent-message-queue
    ```
 
-   **Codex CLI** (Codex chat command):
+   **Alternatives** (if skill.sh fails):
+   ```bash
+   # Claude Code via marketplace
+   /plugin marketplace add avivsinai/skills-marketplace
+   /plugin install amq-cli@avivsinai-marketplace
+
+   # Via skild.sh
+   npx skild install @avivsinai/amq-cli
    ```
-   $skill-installer install https://github.com/avivsinai/agent-message-queue/tree/main/skills/amq-cli
-   ```
+
+   See [INSTALL.md](INSTALL.md) for manual installation if npm tools fail.
 
 ### Per-Project Setup
 
-Run the setup script in your project:
+Initialize your project for co-op mode:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/setup-coop.sh | bash
+amq coop init
 ```
 
 This creates:
-- `.agent-mail/` - Agent mailboxes (gitignored)
+- `.amqrc` - Configuration file
+- `.agent-mail/` - Agent mailboxes
+- Updates `.gitignore` (if present)
 
 ### Running Co-op Mode
 
 **Terminal 1 - Claude Code:**
 ```bash
-eval "$(amq env --me claude)"
-amq wake &  # Optional: terminal notifications
+eval "$(amq coop shell --me claude)"
 claude
 ```
 
 **Terminal 2 - Codex CLI:**
 ```bash
-eval "$(amq env --me codex)"
-amq wake &  # Optional: terminal notifications
+eval "$(amq coop shell --me codex)"
 codex
 ```
 
-That's it. When messages arrive, `amq wake` attempts to inject a notification into your terminal (best-effort).
+For terminal notifications (optional), add `--wake`:
+```bash
+eval "$(amq coop shell --me claude --wake)"
+```
+
+When messages arrive, `amq wake` attempts to inject a notification into your terminal (best-effort).
 
 ### Multiple Pairs (Isolated Sessions)
 
 Need multiple agent pairs working on different features simultaneously? Use separate `--root` paths:
 
 ```bash
+# Initialize isolated roots
+amq coop init --root .agent-mail/auth
+amq coop init --root .agent-mail/api
+
 # Pair A: auth feature
 # Terminal 1
-eval "$(amq env --me claude --root .agent-mail/auth)"
-amq wake &
+eval "$(amq coop shell --me claude --root .agent-mail/auth)"
 claude
 
 # Terminal 2
-eval "$(amq env --me codex --root .agent-mail/auth)"
-amq wake &
+eval "$(amq coop shell --me codex --root .agent-mail/auth)"
 codex
 
 # Pair B: api refactor
 # Terminal 3
-eval "$(amq env --me claude --root .agent-mail/api)"
-amq wake &
+eval "$(amq coop shell --me claude --root .agent-mail/api)"
 claude
 
 # Terminal 4
-eval "$(amq env --me codex --root .agent-mail/api)"
-amq wake &
+eval "$(amq coop shell --me codex --root .agent-mail/api)"
 codex
 ```
 
 Each pair has isolated inboxes, threads, and wake processes. Messages stay within their root—auth-Claude talks to auth-Codex, never api-Codex.
-
-Initialize each root once:
-```bash
-amq init --root .agent-mail/auth --agents claude,codex
-amq init --root .agent-mail/api --agents claude,codex
-```
 
 ### How It Works
 
