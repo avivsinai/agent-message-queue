@@ -232,28 +232,22 @@ Co-op mode enables real-time collaboration between Claude Code and Codex CLI ses
 ### Quick Start
 
 ```bash
-# One-time project setup
-amq coop init
-
 # Terminal 1 - Claude Code
-amq coop start claude
+amq coop start claude    # Initializes + starts wake, then run:
+claude                   # With any flags you need
 
 # Terminal 2 - Codex CLI
-amq coop start codex
-```
-
-Pass flags to the agent after `--`:
-```bash
-amq coop start claude -- --dangerously-skip-permissions
+amq coop start codex     # Initializes + starts wake, then run:
+codex                    # With any flags you need
 ```
 
 Use `--root` for isolated sessions:
 ```bash
 amq coop init --root .agent-mail/feature-a
-amq coop start --root .agent-mail/feature-a claude
+amq coop start --root .agent-mail/feature-a claude && claude
 ```
 
-For terminal notifications (optional), run `amq wake --me <agent> &` before starting.
+Use `--no-wake` to disable auto-wake (e.g., in CI or non-TTY environments).
 
 ### Message Priority Handling
 

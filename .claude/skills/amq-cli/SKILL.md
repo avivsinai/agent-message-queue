@@ -23,28 +23,31 @@ Verify: `amq --version`
 ## Quick Reference
 
 ```bash
-# One-time project setup
-amq coop init                         # Creates .amqrc, mailboxes, updates .gitignore
+# One-time project setup (run once per project)
+amq coop start claude    # Initializes if needed, then tells you to run: claude
+amq coop start codex     # Same for Codex
 
-# Start agent sessions
-amq coop start claude                 # Start Claude Code
-amq coop start codex                  # Start Codex CLI
-
-# Pass flags to agent
-amq coop start claude -- --dangerously-skip-permissions
-
-# Isolated sessions (multiple pairs)
-amq coop init --root .agent-mail/feature-a
-amq coop start --root .agent-mail/feature-a claude
-
-# Send and receive messages
-amq send --to codex --body "Message"           # Send
-amq drain --include-body                       # Receive (recommended)
-amq reply --id <msg_id> --body "Response"      # Reply
-amq watch --timeout 60s                        # Wait for messages
+# Or initialize manually
+amq coop init            # Creates .amqrc, mailboxes, updates .gitignore
 ```
 
-**Note**: After setup, all commands work from any subdirectory.
+**As Claude** (talking to Codex):
+```bash
+amq send --me claude --to codex --body "Message"
+amq drain --me claude --include-body
+amq reply --me claude --id <msg_id> --body "Response"
+amq watch --me claude --timeout 60s
+```
+
+**As Codex** (talking to Claude):
+```bash
+amq send --me codex --to claude --body "Message"
+amq drain --me codex --include-body
+amq reply --me codex --id <msg_id> --body "Response"
+amq watch --me codex --timeout 60s
+```
+
+**Note**: Root is auto-detected from `.amqrc`. Commands work from any subdirectory.
 
 ## Co-op Mode: Phased Parallel Work
 
@@ -111,8 +114,12 @@ Leader prepares commit → user approves → push
 
 Run once per project:
 ```bash
-amq coop init
-amq coop start claude   # or: codex
+amq coop start claude   # Initializes + tells you to run: claude
+```
+
+In a second terminal:
+```bash
+amq coop start codex    # Tells you to run: codex
 ```
 
 ### Multiple Pairs (Isolated Sessions)
@@ -120,13 +127,16 @@ amq coop start claude   # or: codex
 Run multiple agent pairs on different features using `--root`:
 
 ```bash
-# Initialize isolated roots
-amq coop init --root .agent-mail/auth
-amq coop init --root .agent-mail/api
+# Pair A: auth feature
+amq coop start --root .agent-mail/auth claude
+amq coop start --root .agent-mail/auth codex
 
-# Start agents with their root
-amq coop start --root .agent-mail/auth claude   # Pair A
-amq coop start --root .agent-mail/api claude    # Pair B
+# Pair B: api feature
+amq coop start --root .agent-mail/api claude
+amq coop start --root .agent-mail/api codex
+
+# Commands use --root to stay isolated
+amq send --me claude --to codex --root .agent-mail/auth --body "Auth review"
 ```
 
 Each root has isolated inboxes. Messages stay within their root.
@@ -144,7 +154,7 @@ Each root has isolated inboxes. Messages stay within their root.
 When starting long work, send a status message:
 
 ```bash
-amq reply --id <msg_id> --kind status --body "Started, eta ~20m"
+amq reply --me claude --id <msg_id> --kind status --body "Started, eta ~20m"
 ```
 
 ### Optional: Wake Notifications
@@ -154,80 +164,71 @@ amq reply --id <msg_id> --kind status --body "Started, eta ~20m"
 For human operators, wake provides background notifications:
 
 ```bash
-amq wake --me claude &
-amq coop start claude
+amq wake --me claude &   # Before starting claude
 ```
 
 When messages arrive:
 ```
-AMQ: message from codex - Review complete. Drain with: amq drain --include-body — then act on it
+AMQ: message from codex - Review complete. Drain with: amq drain --me claude --include-body
 ```
 
 If notifications require manual Enter, try `--inject-mode=raw`.
 
 ## Commands
 
+All examples show Claude's perspective. Codex swaps `--me codex` and `--to claude`.
+
 ### Send
 ```bash
-amq send --to codex --body "Quick message"
-amq send --to codex --subject "Review" --kind review_request --body @file.md
-amq send --to claude --priority urgent --kind question --body "Blocked on API"
-amq send --to codex --labels "bug,parser" --body "Found issue in parser"
-amq send --to codex --context '{"paths": ["internal/cli/"]}' --body "Review these"
+amq send --me claude --to codex --body "Quick message"
+amq send --me claude --to codex --subject "Review" --kind review_request --body @file.md
+amq send --me claude --to codex --priority urgent --kind question --body "Blocked on API"
+amq send --me claude --to codex --labels "bug,parser" --body "Found issue in parser"
+amq send --me claude --to codex --context '{"paths": ["internal/cli/"]}' --body "Review these"
 ```
 
 ### Receive
 ```bash
-amq drain --include-body         # One-shot, silent when empty
-amq watch --timeout 60s          # Block until message arrives
-amq list --new                   # Peek without side effects
+amq drain --me claude --include-body   # One-shot, silent when empty
+amq watch --me claude --timeout 60s    # Block until message arrives
+amq list --me claude --new             # Peek without side effects
 ```
 
 ### Filter Messages
 ```bash
-amq list --new --priority urgent              # By priority
-amq list --new --from codex                   # By sender
-amq list --new --kind review_request          # By kind
-amq list --new --label bug --label critical   # By labels (can repeat)
-amq list --new --from codex --priority urgent # Combine filters
+amq list --me claude --new --priority urgent              # By priority
+amq list --me claude --new --from codex                   # By sender
+amq list --me claude --new --kind review_request          # By kind
+amq list --me claude --new --label bug --label critical   # By labels (can repeat)
+amq list --me claude --new --from codex --priority urgent # Combine filters
 ```
 
 ### Reply
 ```bash
-amq reply --id <msg_id> --body "LGTM"
-amq reply --id <msg_id> --kind review_response --body "See comments..."
+amq reply --me claude --id <msg_id> --body "LGTM"
+amq reply --me claude --id <msg_id> --kind review_response --body "See comments..."
 ```
 
 ### Dead Letter Queue
 ```bash
-amq dlq list                        # List failed messages
-amq dlq read --id <dlq_id>          # Inspect failure details
-amq dlq retry --id <dlq_id>         # Retry (move back to inbox)
-amq dlq retry --all [--force]       # Retry all
-amq dlq purge --older-than 24h      # Clean old DLQ entries
+amq dlq list --me claude                  # List failed messages
+amq dlq read --me claude --id <dlq_id>    # Inspect failure details
+amq dlq retry --me claude --id <dlq_id>   # Retry (move back to inbox)
+amq dlq retry --me claude --all [--force] # Retry all
+amq dlq purge --me claude --older-than 24h # Clean old DLQ entries
 ```
 
 ### Upgrade
 ```bash
 amq upgrade                    # Self-update to latest release
 amq --no-update-check ...      # Disable update hint for this command
-export AMQ_NO_UPDATE_CHECK=1   # Disable update hints globally
-```
-
-### Environment Setup
-```bash
-amq env                      # Output shell exports (auto-detects .amqrc or .agent-mail/)
-amq env --me codex           # Override agent handle
-amq env --shell fish         # Fish shell syntax
-amq env --json               # Machine-readable output
-amq env --wake               # Include 'amq wake &' (interactive terminals only)
 ```
 
 ### Other
 ```bash
-amq thread --id p2p/claude__codex --include-body   # View thread
-amq presence set --status busy --note "reviewing"  # Set presence
-amq cleanup --tmp-older-than 36h                   # Clean stale tmp
+amq thread --id p2p/claude__codex --include-body        # View thread
+amq presence set --me claude --status busy --note "reviewing"  # Set presence
+amq cleanup --tmp-older-than 36h                        # Clean stale tmp
 ```
 
 ## Message Kinds

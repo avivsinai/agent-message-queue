@@ -66,6 +66,10 @@ func printCoopUsage() error {
 }
 
 func runCoopInit(args []string) error {
+	return runCoopInitInternal(args, true)
+}
+
+func runCoopInitInternal(args []string, printNextSteps bool) error {
 	fs := flag.NewFlagSet("coop init", flag.ContinueOnError)
 	rootFlag := fs.String("root", defaultCoopRoot, "Root directory for the queue")
 	agentsFlag := fs.String("agents", defaultCoopAgents, "Comma-separated agent handles")
@@ -219,18 +223,20 @@ func runCoopInit(args []string) error {
 			return err
 		}
 	}
-	if err := writeStdoutLine(""); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("Next steps:"); err != nil {
-		return err
-	}
-	if err := writeStdout("  Terminal 1: eval \"$(amq coop shell --me %s)\"\n", agents[0]); err != nil {
-		return err
-	}
-	if len(agents) > 1 {
-		if err := writeStdout("  Terminal 2: eval \"$(amq coop shell --me %s)\"\n", agents[1]); err != nil {
+	if printNextSteps {
+		if err := writeStdoutLine(""); err != nil {
 			return err
+		}
+		if err := writeStdoutLine("Next steps:"); err != nil {
+			return err
+		}
+		if err := writeStdout("  Terminal 1: eval \"$(amq coop shell --me %s)\"\n", agents[0]); err != nil {
+			return err
+		}
+		if len(agents) > 1 {
+			if err := writeStdout("  Terminal 2: eval \"$(amq coop shell --me %s)\"\n", agents[1]); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -285,49 +291,33 @@ func runCoopStart(args []string) error {
 	fs := flag.NewFlagSet("coop start", flag.ContinueOnError)
 	rootFlag := fs.String("root", "", "Root directory (override auto-detection)")
 	noInitFlag := fs.Bool("no-init", false, "Don't auto-initialize if .amqrc is missing")
+	noWakeFlag := fs.Bool("no-wake", false, "Don't start amq wake in background")
 	yesFlag := fs.Bool("y", false, "Skip confirmation prompts")
 
-	usage := usageWithFlags(fs, "amq coop start [options] <agent> [-- agent-flags...]",
-		"Start an agent with co-op environment configured.",
+	usage := usageWithFlags(fs, "amq coop start [options] <agent>",
+		"Set up co-op mode for an agent.",
 		"",
 		"Auto-initializes project if .amqrc is missing (use --no-init to disable).",
-		"Arguments after -- are passed directly to the agent.",
-		"",
-		"Note: Options must come BEFORE the agent name.",
+		"Starts amq wake in background for notifications (use --no-wake to disable).",
+		"Then run the agent yourself with any flags you need.",
 		"",
 		"Examples:",
-		"  amq coop start claude                              # Start Claude Code",
-		"  amq coop start codex                               # Start Codex CLI",
-		"  amq coop start claude -- --dangerously-skip-permissions",
-		"  amq coop start --no-init codex -- --full-auto",
+		"  amq coop start claude              # Set up + wake, then run: claude",
+		"  amq coop start --no-wake codex     # Set up without wake",
 	)
 
-	// Split at -- separator first
-	// Format: [options] <agent> [-- agent-flags...]
-	var agentArgs []string
-	flagArgs := args
-	for i, arg := range args {
-		if arg == "--" {
-			flagArgs = args[:i]
-			agentArgs = args[i+1:]
-			break
-		}
-	}
-
-	// Let flag.Parse handle options; it stops at first non-flag arg
-	if handled, err := parseFlags(fs, flagArgs, usage); err != nil {
+	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
 	}
 
-	// fs.Args() contains non-flag args: should be just the agent name
 	remaining := fs.Args()
 	if len(remaining) == 0 {
 		return UsageError("agent name required (e.g., 'claude' or 'codex')")
 	}
 	if len(remaining) > 1 {
-		return UsageError("unexpected arguments after agent name; use -- to pass flags to agent")
+		return UsageError("unexpected arguments: %s (pass flags directly to the agent after setup)", strings.Join(remaining[1:], " "))
 	}
 	agentName := strings.ToLower(remaining[0])
 
@@ -357,12 +347,12 @@ func runCoopStart(args []string) error {
 			}
 		}
 
-		// Run init
+		// Run init (without "Next steps" output since we'll print our own)
 		var initArgs []string
 		if root != "" {
 			initArgs = append(initArgs, "--root", root)
 		}
-		if err := runCoopInit(initArgs); err != nil {
+		if err := runCoopInitInternal(initArgs, false); err != nil {
 			return fmt.Errorf("init failed: %w", err)
 		}
 
@@ -386,33 +376,35 @@ func runCoopStart(args []string) error {
 		}
 	}
 
-	// Set environment variables
-	if err := os.Setenv("AM_ME", agentName); err != nil {
-		return fmt.Errorf("failed to set AM_ME: %w", err)
-	}
-	if err := os.Setenv("AM_ROOT", root); err != nil {
-		return fmt.Errorf("failed to set AM_ROOT: %w", err)
-	}
-
-	// Check if agent binary exists in PATH
-	binaryPath, err := exec.LookPath(agentName)
-	if err != nil {
-		return fmt.Errorf("%s binary not found in PATH; please install it first", agentName)
-	}
-
-	// Run agent with inherited stdio and environment
-	cmd := exec.Command(binaryPath, agentArgs...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
-
-	if err := cmd.Run(); err != nil {
-		// Propagate agent's exit code rather than treating it as an error
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
+	// Start amq wake in background (unless --no-wake)
+	if !*noWakeFlag {
+		amqBin, err := os.Executable()
+		if err != nil {
+			amqBin = "amq" // fallback to PATH lookup
 		}
-		return fmt.Errorf("failed to run %s: %w", agentName, err)
+
+		wakeCmd := exec.Command(amqBin, "wake", "--me", agentName, "--root", root)
+		wakeCmd.Stdin = os.Stdin
+		wakeCmd.Stdout = os.Stdout
+		wakeCmd.Stderr = os.Stderr
+
+		if err := wakeCmd.Start(); err != nil {
+			_ = writeStderr("warning: failed to start amq wake: %v\n", err)
+		} else {
+			// Don't wait - let wake run in background
+			// The process will be orphaned when we exit, which is fine
+			if err := writeStderr("Started amq wake (pid %d)\n", wakeCmd.Process.Pid); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Output instructions
+	if err := writeStdoutLine(""); err != nil {
+		return err
+	}
+	if err := writeStdout("Ready! Run: %s\n", agentName); err != nil {
+		return err
 	}
 
 	return nil

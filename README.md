@@ -82,17 +82,14 @@ This creates `.amqrc`, mailboxes for `claude` and `codex`, and updates `.gitigno
 
 **Terminal 1 — Claude Code:**
 ```bash
-amq coop start claude
+amq coop start claude   # Sets up + starts wake, then run:
+claude                  # With any flags you need
 ```
 
 **Terminal 2 — Codex CLI:**
 ```bash
-amq coop start codex
-```
-
-Pass flags to the agent after `--`:
-```bash
-amq coop start claude -- --dangerously-skip-permissions
+amq coop start codex    # Sets up + starts wake, then run:
+codex                   # With any flags you need
 ```
 
 Use `--root` for isolated sessions (multiple pairs):
