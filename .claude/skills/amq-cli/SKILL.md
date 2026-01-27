@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 1.0.1
+version: 1.0.2
 description: Coordinate agents via the AMQ CLI for file-based inter-agent messaging. Use when you need to send messages to another agent (Claude/Codex), receive messages from partner agents, set up co-op mode between Claude Code and Codex CLI, or manage agent-to-agent communication in any multi-agent workflow. Triggers include "message codex", "talk to claude", "collaborate with partner agent", "AMQ", "inter-agent messaging", or "agent coordination".
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
@@ -154,8 +154,8 @@ amq reply --id <msg_id> --kind status --body "Started, eta ~20m"
 For human operators, wake provides background notifications:
 
 ```bash
-amq wake &
-claude
+amq wake --me claude &
+amq coop start claude
 ```
 
 When messages arrive:

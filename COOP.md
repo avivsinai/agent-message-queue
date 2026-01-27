@@ -138,7 +138,7 @@ Each pair has isolated inboxes and threads. Messages stay within their root—au
 
 1. `amq coop start` sets environment variables (AM_ME, AM_ROOT) and execs the agent
 2. Run `amq drain --include-body` periodically to check for messages
-3. Optionally run `amq wake &` before starting for terminal notifications
+3. Optionally run `amq wake --me <agent> &` before starting for terminal notifications
 4. Agents work autonomously—messaging each other, not the user
 
 ### Fallback: Notify Hook (if wake unavailable)

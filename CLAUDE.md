@@ -222,7 +222,7 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
 | Quick peek only | `amq list --new` | Non-blocking, no side effects |
 | Filter messages | `amq list --new --priority urgent` | Show only urgent messages |
-| Background wake | `amq wake &` | Injects notification via TIOCSTI (experimental) |
+| Background wake | `amq wake --me <agent> &` | Injects notification via TIOCSTI (experimental) |
 | Reply to message | `amq reply --id <msg_id>` | Auto thread/refs handling |
 
 ## Co-op Mode (Claude <-> Codex)
@@ -253,7 +253,7 @@ amq coop init --root .agent-mail/feature-a
 amq coop start --root .agent-mail/feature-a claude
 ```
 
-For terminal notifications (optional), run `amq wake &` before starting.
+For terminal notifications (optional), run `amq wake --me <agent> &` before starting.
 
 ### Message Priority Handling
 
