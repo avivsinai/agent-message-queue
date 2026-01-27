@@ -135,9 +135,11 @@ AMQ messages can include metadata for smart agent handling:
 
 For real-time Claude Code + Codex CLI collaboration, see [COOP.md](COOP.md).
 
-**One-liner setup:**
+**Quick setup:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/setup-coop.sh | bash
+amq coop init                           # Initialize project
+eval "$(amq coop shell --me claude)"    # Terminal 1: Claude Code
+eval "$(amq coop shell --me codex)"     # Terminal 2: Codex CLI
 ```
 
 ## How It Works

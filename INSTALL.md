@@ -32,13 +32,18 @@ npx skills add avivsinai/agent-message-queue -g -y
 Using [skild registry](https://skild.sh):
 
 ```bash
+# For Claude Code
 npx skild install @avivsinai/amq-cli -t claude -y
+
+# For Codex CLI
+npx skild install @avivsinai/amq-cli -t codex -y
 ```
 
 Or directly from GitHub:
 
 ```bash
 npx skild install avivsinai/agent-message-queue -t claude -y
+npx skild install avivsinai/agent-message-queue -t codex -y
 ```
 
 #### Method 3: Skills Marketplace
