@@ -179,12 +179,8 @@ func runCoopInit(args []string) error {
 		amqrcWritten = true
 	}
 
-	// Update .gitignore if present (only for relative paths)
-	gitignorePath := ".gitignore"
-	gitignoreUpdated := false
-	if _, err := os.Stat(gitignorePath); err == nil {
-		gitignoreUpdated = updateGitignore(gitignorePath, root)
-	}
+	// Update .gitignore (creates if needed, only for relative paths)
+	gitignoreUpdated := ensureGitignore(root)
 
 	// Output
 	if *jsonFlag {
@@ -420,41 +416,4 @@ func runCoopStart(args []string) error {
 	}
 
 	return nil
-}
-
-// updateGitignore adds the root directory to .gitignore if not already present.
-// Returns true if the file was updated.
-// Skips absolute paths since they don't make sense in .gitignore.
-func updateGitignore(path, root string) bool {
-	// Skip absolute paths - they don't belong in .gitignore
-	if filepath.IsAbs(root) {
-		return false
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-
-	// Normalize root for gitignore (add trailing slash for directory)
-	pattern := root
-	if !strings.HasSuffix(pattern, "/") {
-		pattern += "/"
-	}
-
-	// Check if already present
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == root || trimmed == pattern || trimmed == "/"+root || trimmed == "/"+pattern {
-			return false // Already present
-		}
-	}
-
-	// Append to file
-	toAppend := "\n# Agent Message Queue\n" + pattern + "\n"
-	if err := os.WriteFile(path, append(data, []byte(toAppend)...), 0644); err != nil {
-		return false
-	}
-	return true
 }

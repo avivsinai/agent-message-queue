@@ -504,3 +504,54 @@ func parseContext(raw string) (map[string]any, error) {
 	}
 	return result, nil
 }
+
+// ensureGitignore adds the root directory to .gitignore, creating the file if needed.
+// Returns true if the file was created or updated.
+// Skips absolute paths since they don't make sense in .gitignore.
+func ensureGitignore(root string) bool {
+	// Skip absolute paths - they don't belong in .gitignore
+	if filepath.IsAbs(root) {
+		return false
+	}
+
+	gitignorePath := ".gitignore"
+
+	// Normalize root for gitignore (add trailing slash for directory)
+	pattern := root
+	if !strings.HasSuffix(pattern, "/") {
+		pattern += "/"
+	}
+
+	// Read existing content (may not exist)
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil && !os.IsNotExist(err) {
+		return false
+	}
+
+	// Check if already present
+	if len(data) > 0 {
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == root || trimmed == pattern || trimmed == "/"+root || trimmed == "/"+pattern {
+				return false // Already present
+			}
+		}
+	}
+
+	// Append to file (or create new)
+	toAppend := "# Agent Message Queue\n" + pattern + "\n"
+	if len(data) > 0 {
+		// Ensure we start on a new line
+		if !strings.HasSuffix(string(data), "\n") {
+			toAppend = "\n" + toAppend
+		} else {
+			toAppend = "\n" + toAppend
+		}
+	}
+
+	if err := os.WriteFile(gitignorePath, append(data, []byte(toAppend)...), 0644); err != nil {
+		return false
+	}
+	return true
+}

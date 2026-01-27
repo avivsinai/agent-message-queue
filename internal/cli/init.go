@@ -56,6 +56,9 @@ func runInit(args []string) error {
 		return err
 	}
 
+	// Update .gitignore (creates if needed)
+	ensureGitignore(root)
+
 	if err := writeStdout("Initialized AMQ root at %s\n", root); err != nil {
 		return err
 	}
