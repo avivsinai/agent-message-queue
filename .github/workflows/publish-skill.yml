@@ -24,20 +24,32 @@ jobs:
           mkdir -p ~/.skild
           echo '${{ secrets.SKILD_AUTH_JSON }}' > ~/.skild/registry-auth.json
 
-      - name: Get next version
+      - name: Get version from SKILL.md
         id: version
         run: |
-          CURRENT=$(grep -oP 'version:\s*\K[\d.]+' skills/amq-cli/SKILL.md)
-          MAJOR=$(echo $CURRENT | cut -d. -f1)
-          MINOR=$(echo $CURRENT | cut -d. -f2)
-          PATCH=$(echo $CURRENT | cut -d. -f3)
-          NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
-          echo "version=$NEXT" >> $GITHUB_OUTPUT
-          echo "Current: $CURRENT -> Next: $NEXT"
+          VERSION=$(grep -oP 'version:\s*\K[\d.]+' skills/amq-cli/SKILL.md)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Publishing version: $VERSION"
 
       - name: Publish skill
         run: |
-          npx skild publish \
+          # Try to publish - if version already exists, skip gracefully
+          OUTPUT=$(npx skild publish \
             --dir skills/amq-cli \
             --alias amq-cli \
-            --skill-version ${{ steps.version.outputs.version }}
+            --skill-version ${{ steps.version.outputs.version }} 2>&1) || true
+
+          echo "$OUTPUT"
+
+          if echo "$OUTPUT" | grep -q "Version already exists"; then
+            echo ""
+            echo "⚠ Version ${{ steps.version.outputs.version }} already published - skipping"
+            echo "  To publish updates, bump version in skills/amq-cli/SKILL.md"
+            exit 0
+          elif echo "$OUTPUT" | grep -q "✔\|Published\|success"; then
+            echo "✓ Published version ${{ steps.version.outputs.version }}"
+            exit 0
+          else
+            echo "✖ Publish failed"
+            exit 1
+          fi
