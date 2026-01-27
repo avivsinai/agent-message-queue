@@ -95,22 +95,24 @@ This creates:
 
 **Terminal 1 - Claude Code:**
 ```bash
-eval "$(amq coop shell --me claude)"
-claude
+amq coop start claude
 ```
 
 **Terminal 2 - Codex CLI:**
 ```bash
-eval "$(amq coop shell --me codex)"
-codex
+amq coop start codex
 ```
 
-For terminal notifications (optional), add `--wake`:
+Pass flags to the agent after `--`:
 ```bash
-eval "$(amq coop shell --me claude --wake)"
+amq coop start claude -- --dangerously-skip-permissions
 ```
 
-When messages arrive, `amq wake` attempts to inject a notification into your terminal (best-effort).
+For terminal notifications, run `amq wake &` before starting the agent:
+```bash
+amq wake --me claude &
+amq coop start claude
+```
 
 ### Multiple Pairs (Isolated Sessions)
 
@@ -122,33 +124,22 @@ amq coop init --root .agent-mail/auth
 amq coop init --root .agent-mail/api
 
 # Pair A: auth feature
-# Terminal 1
-eval "$(amq coop shell --me claude --root .agent-mail/auth)"
-claude
-
-# Terminal 2
-eval "$(amq coop shell --me codex --root .agent-mail/auth)"
-codex
+amq coop start --root .agent-mail/auth claude   # Terminal 1
+amq coop start --root .agent-mail/auth codex    # Terminal 2
 
 # Pair B: api refactor
-# Terminal 3
-eval "$(amq coop shell --me claude --root .agent-mail/api)"
-claude
-
-# Terminal 4
-eval "$(amq coop shell --me codex --root .agent-mail/api)"
-codex
+amq coop start --root .agent-mail/api claude    # Terminal 3
+amq coop start --root .agent-mail/api codex     # Terminal 4
 ```
 
-Each pair has isolated inboxes, threads, and wake processes. Messages stay within their root—auth-Claude talks to auth-Codex, never api-Codex.
+Each pair has isolated inboxes and threads. Messages stay within their root—auth-Claude talks to auth-Codex, never api-Codex.
 
 ### How It Works
 
-1. `amq wake` runs as a background job in the same terminal
-2. When a message arrives in your inbox, it uses TIOCSTI to inject text into your terminal
-3. The CLI reads the input at the next prompt (if busy, it queues)
-4. You run `amq drain --include-body` to read messages
-5. Agents work autonomously—messaging each other, not the user
+1. `amq coop start` sets environment variables (AM_ME, AM_ROOT) and execs the agent
+2. Run `amq drain --include-body` periodically to check for messages
+3. Optionally run `amq wake &` before starting for terminal notifications
+4. Agents work autonomously—messaging each other, not the user
 
 ### Fallback: Notify Hook (if wake unavailable)
 

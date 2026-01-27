@@ -26,9 +26,16 @@ Verify: `amq --version`
 # One-time project setup
 amq coop init                         # Creates .amqrc, mailboxes, updates .gitignore
 
-# Per-terminal session setup
-eval "$(amq coop shell --me claude)"  # For Claude Code
-eval "$(amq coop shell --me codex)"   # For Codex CLI
+# Start agent sessions
+amq coop start claude                 # Start Claude Code
+amq coop start codex                  # Start Codex CLI
+
+# Pass flags to agent
+amq coop start claude -- --dangerously-skip-permissions
+
+# Isolated sessions (multiple pairs)
+amq coop init --root .agent-mail/feature-a
+amq coop start --root .agent-mail/feature-a claude
 
 # Send and receive messages
 amq send --to codex --body "Message"           # Send
@@ -38,8 +45,6 @@ amq watch --timeout 60s                        # Wait for messages
 ```
 
 **Note**: After setup, all commands work from any subdirectory.
-
-> **Important**: Use `amq coop shell` which auto-detects the configured root from `.amqrc`. Don't hardcode `AM_ROOT` or `AM_ME` directly.
 
 ## Co-op Mode: Phased Parallel Work
 
@@ -107,23 +112,24 @@ Leader prepares commit → user approves → push
 Run once per project:
 ```bash
 amq coop init
-eval "$(amq coop shell --me claude)"   # or: --me codex
+amq coop start claude   # or: codex
 ```
 
 ### Multiple Pairs (Isolated Sessions)
 
-Run multiple agent pairs on different features using separate root paths (`AM_ROOT` or `--root`):
+Run multiple agent pairs on different features using `--root`:
 
 ```bash
-# Pair A (auth feature): AM_ROOT=.agent-mail/auth
-# Pair B (api refactor): AM_ROOT=.agent-mail/api
-```
-
-Each root has isolated inboxes and wake processes. Initialize each once:
-```bash
+# Initialize isolated roots
 amq coop init --root .agent-mail/auth
 amq coop init --root .agent-mail/api
+
+# Start agents with their root
+amq coop start --root .agent-mail/auth claude   # Pair A
+amq coop start --root .agent-mail/api claude    # Pair B
 ```
+
+Each root has isolated inboxes. Messages stay within their root.
 
 ### Priority Handling
 
