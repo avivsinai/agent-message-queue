@@ -38,20 +38,15 @@ Review the script before running; it verifies release checksums when possible.
 
 ### 2. Install Skill
 
-**Via skill.sh** (recommended):
+**Via skild** (recommended):
 ```bash
-npx skill.sh install avivsinai/agent-message-queue
+npx skild install @avivsinai/amq-cli
 ```
 
-If that fails, try these alternatives in order:
-
-```bash
-# Via skills marketplace (Claude Code)
+If that fails, try the skills marketplace (Claude Code):
+```
 /plugin marketplace add avivsinai/skills-marketplace
 /plugin install amq-cli@avivsinai-marketplace
-
-# Via skild.sh
-npx skild install @avivsinai/amq-cli
 ```
 
 For manual download, build from source, or troubleshooting, see [INSTALL.md](INSTALL.md).

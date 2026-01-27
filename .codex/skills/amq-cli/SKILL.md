@@ -121,8 +121,8 @@ Run multiple agent pairs on different features using separate root paths (`AM_RO
 
 Each root has isolated inboxes and wake processes. Initialize each once:
 ```bash
-amq init --root .agent-mail/auth --agents claude,codex
-amq init --root .agent-mail/api --agents claude,codex
+amq coop init --root .agent-mail/auth
+amq coop init --root .agent-mail/api
 ```
 
 ### Priority Handling

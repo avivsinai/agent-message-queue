@@ -19,10 +19,10 @@ The installer verifies release checksums when possible.
 
 Install the skill to enable co-op mode guidance in Claude Code or Codex. Try methods in order until one works.
 
-#### Method 1: skill.sh (Recommended)
+#### Method 1: skild (Recommended)
 
 ```bash
-npx skill.sh install avivsinai/agent-message-queue
+npx skild install @avivsinai/amq-cli
 ```
 
 #### Method 2: Skills Marketplace
@@ -33,18 +33,14 @@ npx skill.sh install avivsinai/agent-message-queue
 /plugin install amq-cli@avivsinai-marketplace
 ```
 
+> **Note**: If you get an SSH "Permission denied" error, this is a Claude Code bug when SSH keys aren't configured. Use Method 1 or Method 3 instead.
+
 **Codex CLI** (Codex chat command; not a shell command):
 ```
 $skill-installer install https://github.com/avivsinai/agent-message-queue/tree/main/skills/amq-cli
 ```
 
-#### Method 3: skild.sh
-
-```bash
-npx skild install @avivsinai/amq-cli
-```
-
-#### Method 4: Manual (Last Resort)
+#### Method 3: Manual (Fallback)
 
 If npm tools fail (network issues, corporate firewalls, etc.):
 
