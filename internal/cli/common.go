@@ -366,6 +366,24 @@ func confirmPrompt(prompt string) (bool, error) {
 	return line == "y" || line == "yes", nil
 }
 
+// confirmPromptYes is like confirmPrompt but defaults to Yes on empty input.
+func confirmPromptYes(prompt string) (bool, error) {
+	if err := writeStdout("%s [Y/n]: ", prompt); err != nil {
+		return false, err
+	}
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return true, nil // Default to yes
+		}
+		return false, err
+	}
+	line = strings.TrimSpace(strings.ToLower(line))
+	// Empty or "y"/"yes" means yes; anything else means no
+	return line == "" || line == "y" || line == "yes", nil
+}
+
 func ensureFilename(id string) (string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {

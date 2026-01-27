@@ -52,6 +52,8 @@ func Run(args []string, version string) error {
 		return runEnv(args[1:])
 	case "coop":
 		return runCoop(args[1:])
+	case "doctor":
+		return runDoctor(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
@@ -124,7 +126,10 @@ func printUsage() error {
 	if err := writeStdoutLine("  env       Output shell commands to set environment variables"); err != nil {
 		return err
 	}
-	if err := writeStdoutLine("  coop      Simplified co-op mode setup (init, shell)"); err != nil {
+	if err := writeStdoutLine("  coop      Simplified co-op mode setup (init, shell, start)"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  doctor    Verify installation and configuration"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine(""); err != nil {

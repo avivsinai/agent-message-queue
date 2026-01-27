@@ -8,14 +8,29 @@
 #   - ~/go/bin if exists
 #   - ~/.local/bin (created if needed)
 #
-# Options (set before piping to bash):
-#   curl ... | VERSION=v0.7.3 bash
-#   curl ... | INSTALL_DIR=~/bin bash
+# Options:
+#   curl ... | bash -s -- --skill        # Also install Claude Code/Codex skill
+#   curl ... | VERSION=v0.7.3 bash       # Specific version
+#   curl ... | INSTALL_DIR=~/bin bash    # Custom install dir
 
 set -e
 
 REPO="avivsinai/agent-message-queue"
 VERSION="${VERSION:-latest}"
+INSTALL_SKILL=false
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --skill)
+            INSTALL_SKILL=true
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
 
 # Determine install directory (user-local, no sudo needed)
 # Priority: explicit INSTALL_DIR > GOBIN > ~/.local/bin > ~/go/bin
@@ -171,4 +186,24 @@ else
 fi
 
 echo ""
-echo "Next: Initialize mailboxes with 'amq init --root .agent-mail --agents claude,codex'"
+
+# Install skill if requested
+if [ "$INSTALL_SKILL" = true ]; then
+    echo -e "${BLUE}Installing Claude Code / Codex skill...${NC}"
+    if command -v npx &> /dev/null; then
+        if npx skills add avivsinai/agent-message-queue -g -y; then
+            echo -e "${GREEN}Skill installed successfully!${NC}"
+        else
+            echo -e "${YELLOW}Warning: Skill installation failed. Try manually:${NC}"
+            echo "  npx skills add avivsinai/agent-message-queue -g -y"
+        fi
+    else
+        echo -e "${YELLOW}Warning: npx not found. Install Node.js, then run:${NC}"
+        echo "  npx skills add avivsinai/agent-message-queue -g -y"
+    fi
+    echo ""
+fi
+
+echo "Next steps:"
+echo "  1. Initialize: amq coop init"
+echo "  2. Start agent: amq coop start claude"
