@@ -344,7 +344,8 @@ func runCoopStart(args []string) error {
 	existing, existingErr := findAndLoadAmqrc()
 	root := *rootFlag
 
-	if existingErr == errAmqrcNotFound {
+	switch {
+	case existingErr == errAmqrcNotFound:
 		if *noInitFlag {
 			return fmt.Errorf("no .amqrc found; run 'amq coop init' first or remove --no-init")
 		}
@@ -361,7 +362,7 @@ func runCoopStart(args []string) error {
 		}
 
 		// Run init
-		initArgs := []string{}
+		var initArgs []string
 		if root != "" {
 			initArgs = append(initArgs, "--root", root)
 		}
@@ -371,23 +372,21 @@ func runCoopStart(args []string) error {
 
 		// Reload .amqrc after init
 		existing, existingErr = findAndLoadAmqrc()
-	}
+		if existingErr != nil {
+			return fmt.Errorf("failed to load .amqrc after init: %w", existingErr)
+		}
 
-	if existingErr != nil && existingErr != errAmqrcNotFound {
+	case existingErr != nil:
 		return fmt.Errorf("invalid .amqrc: %w", existingErr)
 	}
 
 	// Determine root from .amqrc if not explicitly set
 	if root == "" {
-		if existing.Dir != "" {
-			root = existing.Config.Root
-			// Make root absolute if .amqrc is in parent directory
-			cwd, _ := os.Getwd()
-			if existing.Dir != cwd {
-				root = filepath.Join(existing.Dir, root)
-			}
-		} else {
-			root = defaultCoopRoot
+		root = existing.Config.Root
+		// Make root absolute if .amqrc is in parent directory
+		cwd, _ := os.Getwd()
+		if existing.Dir != cwd {
+			root = filepath.Join(existing.Dir, root)
 		}
 	}
 
@@ -399,30 +398,25 @@ func runCoopStart(args []string) error {
 		return fmt.Errorf("failed to set AM_ROOT: %w", err)
 	}
 
-	// Agent binary name matches the agent name (claude or codex)
-	binaryName := agentName
-
-	// Check if binary exists
-	binaryPath, err := exec.LookPath(binaryName)
+	// Check if agent binary exists in PATH
+	binaryPath, err := exec.LookPath(agentName)
 	if err != nil {
-		return fmt.Errorf("%s binary not found in PATH; please install it first", binaryName)
+		return fmt.Errorf("%s binary not found in PATH; please install it first", agentName)
 	}
 
-	// Run agent
+	// Run agent with inherited stdio and environment
 	cmd := exec.Command(binaryPath, agentArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
-	// Copy current environment plus our additions
 	cmd.Env = os.Environ()
 
 	if err := cmd.Run(); err != nil {
-		// Don't treat exit codes as errors - the agent exited normally
+		// Propagate agent's exit code rather than treating it as an error
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
-		return fmt.Errorf("failed to run %s: %w", binaryName, err)
+		return fmt.Errorf("failed to run %s: %w", agentName, err)
 	}
 
 	return nil

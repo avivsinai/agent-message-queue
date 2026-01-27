@@ -100,20 +100,12 @@ func runDoctor(args []string) error {
 		return err
 	}
 
+	statusIcons := map[string]string{"ok": "✓", "warn": "⚠", "error": "✗"}
 	for _, check := range result.Checks {
-		var icon string
-		switch check.Status {
-		case "warn":
-			icon = "⚠"
-		case "error":
-			icon = "✗"
-		default:
-			icon = "✓"
-		}
-
+		icon := statusIcons[check.Status]
 		line := fmt.Sprintf("  %s %s", icon, check.Name)
 		if check.Message != "" {
-			line += fmt.Sprintf(": %s", check.Message)
+			line += ": " + check.Message
 		}
 		if err := writeStdoutLine(line); err != nil {
 			return err
@@ -284,32 +276,26 @@ func checkSkill(agent string) doctorCheck {
 
 	home, _ := os.UserHomeDir()
 	skillDir := filepath.Join(home, "."+agent, "skills", "amq-cli")
+	localSkillDir := filepath.Join("."+agent, "skills", "amq-cli")
 
-	// Check if skill directory exists
-	if _, err := os.Stat(skillDir); os.IsNotExist(err) {
-		// Also check project-local skills
-		localSkillDir := fmt.Sprintf(".%s/skills/amq-cli", agent)
-		if _, err := os.Stat(localSkillDir); err == nil {
-			check.Status = "ok"
-			check.Message = "installed (project-local)"
-			return check
-		}
+	// Check project-local skills first, then user-level
+	switch {
+	case fileExists(filepath.Join(localSkillDir, "SKILL.md")):
+		check.Status = "ok"
+		check.Message = "installed (project-local)"
 
-		check.Status = "warn"
-		installCmd := "npx skills add avivsinai/agent-message-queue -g -y"
-		check.Message = fmt.Sprintf("not installed (run: %s)", installCmd)
-		return check
-	}
+	case fileExists(filepath.Join(skillDir, "SKILL.md")):
+		check.Status = "ok"
+		check.Message = "installed"
 
-	// Verify SKILL.md exists
-	skillMd := filepath.Join(skillDir, "SKILL.md")
-	if _, err := os.Stat(skillMd); os.IsNotExist(err) {
+	case dirExists(skillDir):
 		check.Status = "warn"
 		check.Message = "skill directory exists but SKILL.md missing"
-		return check
+
+	default:
+		check.Status = "warn"
+		check.Message = "not installed (run: npx skills add avivsinai/agent-message-queue -g -y)"
 	}
 
-	check.Status = "ok"
-	check.Message = "installed"
 	return check
 }

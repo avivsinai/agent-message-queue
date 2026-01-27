@@ -67,6 +67,14 @@ func dirExists(path string) bool {
 	return info.IsDir()
 }
 
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
+}
+
 func absPath(path string) string {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -348,40 +356,37 @@ func writeFlagDefaults(fs *flag.FlagSet) error {
 }
 
 func confirmPrompt(prompt string) (bool, error) {
-	if err := writeStdout("%s", prompt); err != nil {
-		return false, err
-	}
-	if err := writeStdout(" [y/N]: "); err != nil {
-		return false, err
-	}
-	reader := bufio.NewReader(os.Stdin)
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return false, nil
-		}
-		return false, err
-	}
-	line = strings.TrimSpace(strings.ToLower(line))
-	return line == "y" || line == "yes", nil
+	return doConfirmPrompt(prompt, false)
 }
 
 // confirmPromptYes is like confirmPrompt but defaults to Yes on empty input.
 func confirmPromptYes(prompt string) (bool, error) {
-	if err := writeStdout("%s [Y/n]: ", prompt); err != nil {
+	return doConfirmPrompt(prompt, true)
+}
+
+func doConfirmPrompt(prompt string, defaultYes bool) (bool, error) {
+	hint := "[y/N]"
+	if defaultYes {
+		hint = "[Y/n]"
+	}
+	if err := writeStdout("%s %s: ", prompt, hint); err != nil {
 		return false, err
 	}
+
 	reader := bufio.NewReader(os.Stdin)
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			return true, nil // Default to yes
+			return defaultYes, nil
 		}
 		return false, err
 	}
+
 	line = strings.TrimSpace(strings.ToLower(line))
-	// Empty or "y"/"yes" means yes; anything else means no
-	return line == "" || line == "y" || line == "yes", nil
+	if line == "" {
+		return defaultYes, nil
+	}
+	return line == "y" || line == "yes", nil
 }
 
 func ensureFilename(id string) (string, error) {
