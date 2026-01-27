@@ -66,18 +66,17 @@ Leader prepares commit → user approves → push
 
 2. **Install amq-cli skill** for your agents:
 
-   **Via skild** (recommended):
+   **Via skills** (recommended):
    ```bash
-   npx skild install @avivsinai/amq-cli
+   npx skills add avivsinai/agent-message-queue -g -y
    ```
 
-   **Alternative** (Claude Code marketplace):
-   ```
-   /plugin marketplace add avivsinai/skills-marketplace
-   /plugin install amq-cli@avivsinai-marketplace
+   **Or via skild:**
+   ```bash
+   npx skild install @avivsinai/amq-cli -t claude -y
    ```
 
-   See [INSTALL.md](INSTALL.md) for manual installation if these fail.
+   See [INSTALL.md](INSTALL.md) for manual installation or troubleshooting.
 
 ### Per-Project Setup
 
