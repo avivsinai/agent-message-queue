@@ -34,6 +34,12 @@ curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/
 ```
 
 Installs to `~/.local/bin` or `~/go/bin` (no sudo required). Verify: `amq --version`
+
+**One-liner with skill:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash -s -- --skill
+```
+
 Review the script before running; it verifies release checksums when possible.
 
 ### 2. Install Skill

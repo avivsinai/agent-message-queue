@@ -33,7 +33,7 @@ func runDoctor(args []string) error {
 		"Verify AMQ installation and configuration.",
 		"",
 		"Checks:",
-		"  - Binary version and location",
+		"  - Binary location",
 		"  - .amqrc configuration",
 		"  - Mailbox directory permissions",
 		"  - Agent configuration (config.json)",
