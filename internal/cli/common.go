@@ -505,7 +505,7 @@ func parseContext(raw string) (map[string]any, error) {
 	return result, nil
 }
 
-// ensureGitignore adds the root directory to .gitignore, creating the file if needed.
+// ensureGitignore adds the root directory and .amqrc to .gitignore, creating the file if needed.
 // Returns true if the file was created or updated.
 // Skips absolute paths since they don't make sense in .gitignore.
 func ensureGitignore(root string) bool {
@@ -517,10 +517,13 @@ func ensureGitignore(root string) bool {
 	gitignorePath := ".gitignore"
 
 	// Normalize root for gitignore (add trailing slash for directory)
-	pattern := root
-	if !strings.HasSuffix(pattern, "/") {
-		pattern += "/"
+	rootPattern := root
+	if !strings.HasSuffix(rootPattern, "/") {
+		rootPattern += "/"
 	}
+
+	// Patterns to ensure are in .gitignore
+	patterns := []string{rootPattern, ".amqrc"}
 
 	// Read existing content (may not exist)
 	data, err := os.ReadFile(gitignorePath)
@@ -528,19 +531,30 @@ func ensureGitignore(root string) bool {
 		return false
 	}
 
-	// Check if already present
-	if len(data) > 0 {
-		lines := strings.Split(string(data), "\n")
+	// Check which patterns are missing
+	var missing []string
+	lines := strings.Split(string(data), "\n")
+	for _, pattern := range patterns {
+		found := false
 		for _, line := range lines {
 			trimmed := strings.TrimSpace(line)
-			if trimmed == root || trimmed == pattern || trimmed == "/"+root || trimmed == "/"+pattern {
-				return false // Already present
+			// Check various forms the pattern might appear
+			if trimmed == pattern || trimmed == "/"+pattern || trimmed == strings.TrimSuffix(pattern, "/") {
+				found = true
+				break
 			}
+		}
+		if !found {
+			missing = append(missing, pattern)
 		}
 	}
 
-	// Append to file (or create new)
-	toAppend := "# Agent Message Queue\n" + pattern + "\n"
+	if len(missing) == 0 {
+		return false // All patterns already present
+	}
+
+	// Append missing patterns to file (or create new)
+	toAppend := "# Agent Message Queue\n" + strings.Join(missing, "\n") + "\n"
 	if len(data) > 0 {
 		// Ensure we start on a new line
 		if !strings.HasSuffix(string(data), "\n") {
