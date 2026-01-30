@@ -1,11 +1,14 @@
 # Co-op Mode: Phased Parallel Work
 
-Co-op mode enables Claude Code and Codex CLI to work **in parallel where safe, coordinate where risky**, leveraging cognitive diversity (different models = different training = different blind spots) to catch errors that same-model review would miss.
+Co-op mode enables multiple agents (e.g., Claude Code and Codex CLI) to work **in parallel where safe, coordinate where risky**, leveraging cognitive diversity (different models = different training = different blind spots) to catch errors that same-model review would miss.
 
 ## Roles
 
-- **Claude Code** = Leader + Worker (coordinates phases, merges, prepares commits, gets user approval)
-- **Codex** = Worker (executes phases, reports to leader, awaits next assignment)
+- **Initiator** = whoever starts the task (agent or human). Owns decisions and receives all updates.
+- **Leader/Coordinator** = coordinates phases, merges, and final decisions (often the initiator).
+- **Worker** = executes assigned phases and reports back to the initiator.
+
+**Default pairing note**: Claude is often faster and more decisive, while Codex tends to be deeper but slower. That commonly makes Claude a natural coordinator and Codex a strong worker. This is a default, not a rule — roles are set per task by the initiator.
 
 ## Phased Flow
 
@@ -41,19 +44,43 @@ Leader prepares commit → user approves → push
 
 4. **Cognitive diversity** - Different models catch different bugs. Cross-model work > same-model self-review.
 
-5. **Leader coordinates** - Claude Code handles phase transitions, merges, and final decisions.
+5. **Leader coordinates** - The initiator or designated leader handles phase transitions, merges, and final decisions.
 
 6. **Coordinate between phases** - Sync findings/decisions before moving to next phase.
 
+## Initiator Rule
+
+- The **initiator** is whoever started the task (agent or human).
+- Always report progress and completion to the initiator.
+- Ask questions only to the initiator. Do not ask a third party.
+
+## Progress Protocol (Start / Heartbeat / Done)
+
+- **Start**: send `kind=status` with an ETA to the initiator as soon as you begin.
+- **Heartbeat**: update on phase boundaries (research/design/code/test) or every 10-15 minutes.
+- **Done**: send Summary / Changes / Tests / Notes to the initiator.
+- **Blocked**: send `kind=question` to the initiator with options and a recommendation.
+
+## Modes of Collaboration (Modus Operandi)
+
+Pick one mode per task; the initiator decides or delegates.
+
+- **Leader + Worker**: leader decides, worker executes; best default.
+- **Co-workers**: peers decide together; if no consensus, ask the initiator.
+- **Duplicate**: independent solutions or reviews; initiator merges results (good for high-risk tasks).
+- **Driver + Navigator**: pair-programming style; driver codes, navigator reviews/tests and can interrupt.
+- **Spec + Implementer**: one writes spec/tests, the other implements; good for API or behavior changes.
+- **Reviewer + Implementer**: one codes, the other focuses on review and risk detection.
+
 ## When to Act
 
-| Agent | Action |
-|-------|--------|
-| Codex | Complete phase → report to leader → await next assignment |
-| Claude Code | Receive reports → merge/decide → assign next phase work |
-| Either | Ask user only for: credentials, unclear requirements |
+| Role | Action |
+|------|--------|
+| Worker | Complete phase → report to initiator → await next assignment |
+| Leader/Initiator | Receive reports → merge/decide → assign next phase work |
+| Either | Ask the initiator for clarifications (if the initiator is the user, ask the user) |
 
-**While waiting**: Safe to do light work — review partner's code, run tests, read docs. If no assignment comes, ask leader (not user) for next task.
+**While waiting**: Safe to do light work — review partner's code, run tests, read docs. If no assignment comes, ask the initiator for next task.
 
 ## Quick Start
 
@@ -139,7 +166,7 @@ Each pair has isolated inboxes and threads. Messages stay within their root—au
 2. Run the agent yourself with any flags you need
 3. Use `amq drain --me <agent> --include-body` periodically to check for messages
 4. Optionally run `amq wake --me <agent> &` before starting for terminal notifications
-5. Agents work autonomously—messaging each other, not the user
+5. Agents work autonomously—messaging the initiator, not a bystander
 
 ### Fallback: Notify Hook (if wake unavailable)
 
@@ -185,7 +212,7 @@ Co-op mode extends the standard AMQ message format with optional fields:
 
 | Priority | Behavior | Use When |
 |----------|----------|----------|
-| `urgent` | Interrupt current work | Blocking issues, critical bugs, time-sensitive |
+| `urgent` | Interrupt current work (label `interrupt` enables wake Ctrl+C) | Blocking issues, critical bugs, time-sensitive |
 | `normal` | Add to TODO list | Code reviews, questions, standard requests |
 | `low` | Batch/digest later | Status updates, FYIs, non-blocking info |
 
@@ -261,6 +288,12 @@ claude
 - `--inject-cmd "..."` - Inject actual command instead of notification
 - `--debounce 250ms` - Batch rapid messages
 - `--preview-len 48` - Max subject preview length
+- `--interrupt` - Enable interrupt injection for urgent interrupt messages (default: true)
+- `--interrupt-label interrupt` - Label required to trigger interrupt
+- `--interrupt-priority urgent` - Priority required to trigger interrupt
+- `--interrupt-cmd ctrl-c|none` - Interrupt command to inject
+- `--interrupt-notice "..."` - Custom interrupt notice (default: auto)
+- `--interrupt-cooldown 7s` - Minimum time between interrupts
 
 **Inject Modes:**
 - `auto` (default) - Detects CLI type: uses `raw` for Claude Code/Codex, `paste` for others
@@ -268,6 +301,18 @@ claude
 - `paste` - Bracketed paste with delayed CR (best for crossterm-based CLIs)
 
 If notifications appear but require manual Enter, use `--inject-mode=raw`.
+
+**Interrupts:**
+
+Urgent messages tagged with label `interrupt` trigger a Ctrl+C injection followed by an interrupt notice.
+
+```bash
+amq send --me claude --to codex \
+  --priority urgent --labels interrupt --kind status \
+  --body "Interrupt needed: stop and drain."
+```
+
+Disable interrupts with `--interrupt=false`. Use `--interrupt-cmd none` for notice-only.
 
 **Notification format:**
 - Single message: `AMQ: message from codex - Review complete. Drain with: amq drain --include-body — then act on it`
@@ -302,7 +347,7 @@ amq reply --me codex --id "msg_review_123" \
 
 ## Progress Updates for Long-Running Work
 
-When starting work that may take a while, send a status message so the sender knows you're working on it:
+When starting work that may take a while, send a status message to the initiator so they know you're working on it:
 
 ```bash
 # Signal you've started (optional ETA)
@@ -318,7 +363,7 @@ amq reply --me codex --id "msg_review_123" \
 # When done, send the final response (use appropriate kind: answer, review_response, etc.)
 amq reply --me codex --id "msg_review_123" \
   --kind answer \
-  --body "Here's my response..."
+  --body "Summary:\n- ...\nChanges:\n- ...\nTests:\n- ...\nNotes:\n- ..."
 ```
 
 The sender can check progress via thread view:

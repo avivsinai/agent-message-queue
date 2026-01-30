@@ -13,20 +13,29 @@ import (
 )
 
 type wakeConfig struct {
-	me           string
-	root         string
-	injectCmd    string
-	bell         bool
-	debounce     time.Duration
-	previewLen   int
-	strict       bool
-	fallbackWarn bool
-	injectMode   string // auto, raw, paste
+	me                string
+	root              string
+	injectCmd         string
+	bell              bool
+	debounce          time.Duration
+	previewLen        int
+	strict            bool
+	fallbackWarn      bool
+	injectMode        string // auto, raw, paste
+	interrupt         bool
+	interruptLabel    string
+	interruptPriority string
+	interruptKey      string
+	interruptNotice   string
+	interruptCooldown time.Duration
+	lastInterrupt     time.Time
 }
 
 type wakeMsgInfo struct {
-	from    string
-	subject string
+	from     string
+	subject  string
+	priority string
+	labels   []string
 }
 
 func notifyNewMessages(cfg *wakeConfig) error {
@@ -42,6 +51,8 @@ func notifyNewMessages(cfg *wakeConfig) error {
 
 	var messages []wakeMsgInfo
 	senderCounts := make(map[string]int)
+	var interruptMessages []wakeMsgInfo
+	interruptCounts := make(map[string]int)
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -71,21 +82,42 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		subject := strings.TrimSpace(header.Subject)
 		subject = sanitizeForTTY(subject)
 		from = sanitizeForTTY(from)
+		priority := strings.TrimSpace(header.Priority)
 
-		messages = append(messages, wakeMsgInfo{
-			from:    from,
-			subject: subject,
-		})
+		info := wakeMsgInfo{
+			from:     from,
+			subject:  subject,
+			priority: priority,
+			labels:   header.Labels,
+		}
+
+		messages = append(messages, info)
 		senderCounts[from]++
+
+		if cfg.interrupt && isInterruptMessage(info, cfg) {
+			interruptMessages = append(interruptMessages, info)
+			interruptCounts[from]++
+		}
 	}
 
 	if len(messages) == 0 {
 		return nil
 	}
 
+	if cfg.interrupt && len(interruptMessages) > 0 {
+		interruptText := buildInterruptText(interruptMessages, interruptCounts, cfg.previewLen, cfg.interruptNotice)
+		now := time.Now()
+		if cfg.interruptKey != "" && shouldInterruptNow(cfg, now) {
+			if err := tiocsti.Inject(cfg.interruptKey); err == nil {
+				cfg.lastInterrupt = now
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+		return injectNotification(cfg, interruptText)
+	}
+
 	// Build notification text
 	var text string
-
 	if cfg.injectCmd != "" {
 		// Power user mode: inject actual command
 		text = "\n" + cfg.injectCmd + "\n"
@@ -94,13 +126,111 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		text = buildNotificationText(messages, senderCounts, cfg.previewLen)
 	}
 
-	// Keep plain text for stderr fallback
-	plainText := text
-	if cfg.bell {
-		plainText = "\a" + plainText
+	return injectNotification(cfg, text)
+}
+
+func buildNotificationText(messages []wakeMsgInfo, senderCounts map[string]int, previewLen int) string {
+	count := len(messages)
+
+	if count == 1 {
+		// Single message: show from + truncated subject
+		msg := messages[0]
+		subject := msg.subject
+		if subject == "" {
+			subject = "(no subject)"
+		}
+		subject = truncateSubject(subject, previewLen)
+		return fmt.Sprintf("AMQ: message from %s - %s. Drain with: amq drain --include-body — then act on it", msg.from, subject)
 	}
 
-	// Determine effective inject mode
+	// Multiple messages: show counts by sender
+	var parts []string
+	senders := make([]string, 0, len(senderCounts))
+	for s := range senderCounts {
+		senders = append(senders, s)
+	}
+	sort.Strings(senders)
+
+	for _, sender := range senders {
+		c := senderCounts[sender]
+		parts = append(parts, fmt.Sprintf("%d from %s", c, sender))
+	}
+
+	return fmt.Sprintf("AMQ: %d messages - %s. Drain with: amq drain --include-body — then act on it",
+		count, strings.Join(parts, ", "))
+}
+
+func buildInterruptText(messages []wakeMsgInfo, senderCounts map[string]int, previewLen int, custom string) string {
+	if custom != "" {
+		return custom
+	}
+
+	count := len(messages)
+	if count == 1 {
+		msg := messages[0]
+		subject := msg.subject
+		if subject == "" {
+			subject = "(no subject)"
+		}
+		subject = truncateSubject(subject, previewLen)
+		return fmt.Sprintf("AMQ interrupt: urgent message from %s - %s. Drain with: amq drain --include-body — then act on it",
+			msg.from, subject)
+	}
+
+	var parts []string
+	senders := make([]string, 0, len(senderCounts))
+	for s := range senderCounts {
+		senders = append(senders, s)
+	}
+	sort.Strings(senders)
+	for _, sender := range senders {
+		c := senderCounts[sender]
+		parts = append(parts, fmt.Sprintf("%d from %s", c, sender))
+	}
+	return fmt.Sprintf("AMQ interrupt: %d urgent messages - %s. Drain with: amq drain --include-body — then act on it",
+		count, strings.Join(parts, ", "))
+}
+
+func truncateSubject(subject string, previewLen int) string {
+	if previewLen <= 0 {
+		return ""
+	}
+	runes := []rune(subject)
+	if len(runes) <= previewLen {
+		return subject
+	}
+	if previewLen <= 3 {
+		return string(runes[:previewLen])
+	}
+	return string(runes[:previewLen-3]) + "..."
+}
+
+func isInterruptMessage(info wakeMsgInfo, cfg *wakeConfig) bool {
+	if !cfg.interrupt {
+		return false
+	}
+	if cfg.interruptPriority != "" && info.priority != cfg.interruptPriority {
+		return false
+	}
+	if cfg.interruptLabel == "" {
+		return false
+	}
+	for _, label := range info.labels {
+		if strings.TrimSpace(label) == cfg.interruptLabel {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldInterruptNow(cfg *wakeConfig, now time.Time) bool {
+	if cfg.interruptCooldown <= 0 {
+		return true
+	}
+	return now.Sub(cfg.lastInterrupt) >= cfg.interruptCooldown
+}
+
+func effectiveInjectMode(cfg *wakeConfig) string {
 	mode := cfg.injectMode
 	if mode == "" || mode == "auto" {
 		// Auto-detect: use raw mode for Claude Code and Codex to avoid bracketed-paste
@@ -114,8 +244,17 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			mode = "paste"
 		}
 	}
+	return mode
+}
 
-	// Build injection based on mode
+func injectNotification(cfg *wakeConfig, text string) error {
+	// Keep plain text for stderr fallback
+	plainText := text
+	if cfg.bell {
+		plainText = "\a" + plainText
+	}
+
+	mode := effectiveInjectMode(cfg)
 	var injectErr error
 	switch mode {
 	case "raw":
@@ -172,51 +311,6 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	}
 
 	return nil
-}
-
-func buildNotificationText(messages []wakeMsgInfo, senderCounts map[string]int, previewLen int) string {
-	count := len(messages)
-
-	if count == 1 {
-		// Single message: show from + truncated subject
-		msg := messages[0]
-		subject := msg.subject
-		if subject == "" {
-			subject = "(no subject)"
-		}
-		subject = truncateSubject(subject, previewLen)
-		return fmt.Sprintf("AMQ: message from %s - %s. Drain with: amq drain --include-body — then act on it", msg.from, subject)
-	}
-
-	// Multiple messages: show counts by sender
-	var parts []string
-	senders := make([]string, 0, len(senderCounts))
-	for s := range senderCounts {
-		senders = append(senders, s)
-	}
-	sort.Strings(senders)
-
-	for _, sender := range senders {
-		c := senderCounts[sender]
-		parts = append(parts, fmt.Sprintf("%d from %s", c, sender))
-	}
-
-	return fmt.Sprintf("AMQ: %d messages - %s. Drain with: amq drain --include-body — then act on it",
-		count, strings.Join(parts, ", "))
-}
-
-func truncateSubject(subject string, previewLen int) string {
-	if previewLen <= 0 {
-		return ""
-	}
-	runes := []rune(subject)
-	if len(runes) <= previewLen {
-		return subject
-	}
-	if previewLen <= 3 {
-		return string(runes[:previewLen])
-	}
-	return string(runes[:previewLen-3]) + "..."
 }
 
 func sanitizeForTTY(s string) string {

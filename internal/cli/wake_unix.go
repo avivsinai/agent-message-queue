@@ -210,6 +210,12 @@ func runWake(args []string) error {
 	debounceFlag := fs.Duration("debounce", 250*time.Millisecond, "Debounce window for batching messages")
 	previewLenFlag := fs.Int("preview-len", 48, "Max subject preview length")
 	injectModeFlag := fs.String("inject-mode", "auto", "Injection mode: auto, raw, paste (auto detects CLI type)")
+	interruptFlag := fs.Bool("interrupt", true, "Enable interrupt injection for urgent interrupt messages")
+	interruptLabelFlag := fs.String("interrupt-label", "interrupt", "Label required to trigger interrupt")
+	interruptPriorityFlag := fs.String("interrupt-priority", "urgent", "Priority required to trigger interrupt")
+	interruptCmdFlag := fs.String("interrupt-cmd", "ctrl-c", "Interrupt command to inject (ctrl-c or none)")
+	interruptNoticeFlag := fs.String("interrupt-notice", "", "Custom interrupt notice (default: auto)")
+	interruptCooldownFlag := fs.Duration("interrupt-cooldown", 7*time.Second, "Minimum time between interrupts")
 
 	usage := usageWithFlags(fs, "amq wake --me <agent> [options]",
 		"Background waker: injects terminal notification when messages arrive.",
@@ -219,6 +225,9 @@ func runWake(args []string) error {
 		"  auto  - Detect CLI type: raw for Claude Code/Codex, paste for others",
 		"  raw   - Plain text + CR, no bracketed paste (works with Ink-based CLIs)",
 		"  paste - Bracketed paste with delayed CR (works with crossterm-based CLIs)",
+		"",
+		"Interrupts (default on): urgent messages tagged with label \"interrupt\"",
+		"  trigger Ctrl+C injection + an interrupt notice.",
 		"",
 		"EXPERIMENTAL: Uses TIOCSTI ioctl (macOS/Linux). May not work on all systems.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
@@ -249,6 +258,19 @@ func runWake(args []string) error {
 		return errors.New("amq wake requires a real terminal (run in foreground or as background job in same terminal)")
 	}
 
+	interruptLabel := strings.TrimSpace(*interruptLabelFlag)
+	if *interruptFlag && interruptLabel == "" {
+		return errors.New("interrupt-label is required when interrupt is enabled")
+	}
+	interruptPriority := strings.TrimSpace(*interruptPriorityFlag)
+	if *interruptFlag && interruptPriority == "" {
+		return errors.New("interrupt-priority is required when interrupt is enabled")
+	}
+	interruptKey, err := parseInterruptKey(*interruptCmdFlag)
+	if err != nil {
+		return err
+	}
+
 	// Acquire lock to prevent duplicate wake processes
 	cleanup, err := acquireWakeLock(root, me)
 	if err != nil {
@@ -257,18 +279,39 @@ func runWake(args []string) error {
 	defer cleanup()
 
 	cfg := wakeConfig{
-		me:           me,
-		root:         root,
-		injectCmd:    *injectCmdFlag,
-		bell:         *bellFlag,
-		debounce:     *debounceFlag,
-		previewLen:   *previewLenFlag,
-		strict:       common.Strict,
-		fallbackWarn: true,
-		injectMode:   *injectModeFlag,
+		me:                me,
+		root:              root,
+		injectCmd:         *injectCmdFlag,
+		bell:              *bellFlag,
+		debounce:          *debounceFlag,
+		previewLen:        *previewLenFlag,
+		strict:            common.Strict,
+		fallbackWarn:      true,
+		injectMode:        *injectModeFlag,
+		interrupt:         *interruptFlag,
+		interruptLabel:    interruptLabel,
+		interruptPriority: interruptPriority,
+		interruptKey:      interruptKey,
+		interruptNotice:   strings.TrimSpace(*interruptNoticeFlag),
+		interruptCooldown: *interruptCooldownFlag,
 	}
 
 	return runWakeLoop(cfg)
+}
+
+func parseInterruptKey(raw string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
+		normalized = "ctrl-c"
+	}
+	switch normalized {
+	case "ctrl-c", "sigint":
+		return "\x03", nil
+	case "none", "off", "false":
+		return "", nil
+	default:
+		return "", fmt.Errorf("invalid interrupt-cmd %q (use ctrl-c or none)", raw)
+	}
 }
 
 func runWakeLoop(cfg wakeConfig) error {
