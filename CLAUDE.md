@@ -229,6 +229,14 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 
 Co-op mode enables real-time collaboration between Claude Code and Codex CLI sessions. See `COOP.md` for full documentation.
 
+**Initiator rule**: The initiator (agent or human) receives all updates and decisions. Always reply to the initiator and ask the initiator for clarifications. Do not ask a third party.
+
+**Default pairing note**: Claude is often faster and more decisive, while Codex tends to be deeper but slower. That commonly makes Claude a natural coordinator and Codex a strong worker. This is a default, not a rule — roles are set per task by the initiator.
+
+**Progress protocol**: Start with a `kind=status` + ETA, send heartbeats on phase boundaries or every 10-15 minutes, and finish with Summary / Changes / Tests / Notes.
+
+**Modes of collaboration**: Leader+Worker (default), Co-workers, Duplicate (independent solutions), Driver+Navigator, Spec+Implementer, Reviewer+Implementer. See `COOP.md` for details.
+
 ### Quick Start
 
 ```bash
@@ -252,7 +260,7 @@ Use `--no-wake` to disable auto-wake (e.g., in CI or non-TTY environments).
 ### Message Priority Handling
 
 When you see a notification, run `amq drain --include-body`:
-- **urgent** → Interrupt current work, respond immediately
+- **urgent** → Interrupt current work, respond immediately (label `interrupt` enables wake Ctrl+C)
 - **normal** → Add to TodoWrite, respond when current task done
 - **low** → Batch for end of session
 

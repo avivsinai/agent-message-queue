@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 1.0.4
+version: 1.0.5
 description: Coordinate agents via the AMQ CLI for file-based inter-agent messaging. Use when you need to send messages to another agent (Claude/Codex), receive messages from partner agents, set up co-op mode between Claude Code and Codex CLI, or manage agent-to-agent communication in any multi-agent workflow. Triggers include "message codex", "talk to claude", "collaborate with partner agent", "AMQ", "inter-agent messaging", or "agent coordination".
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
@@ -55,8 +55,11 @@ Both agents work in parallel where safe, coordinate where risky. Different model
 
 ### Roles
 
-- **Claude Code** = Leader + Worker (coordinates phases, merges, prepares commits, gets user approval)
-- **Codex** = Worker (executes phases, reports to leader, awaits next assignment)
+- **Initiator** = whoever starts the task (agent or human). Owns decisions and receives updates.
+- **Leader/Coordinator** = coordinates phases, merges, and final decisions (often the initiator).
+- **Worker** = executes assigned phases and reports back to the initiator.
+
+**Default pairing note**: Claude is often faster and more decisive, while Codex tends to be deeper but slower. That commonly makes Claude a natural coordinator and Codex a strong worker. This is a default, not a rule — roles are set per task by the initiator.
 
 ### Phased Flow
 
@@ -84,17 +87,36 @@ Leader prepares commit → user approves → push
 
 ### Key Rules
 
+- **Initiator rule** — reply to the initiator and ask the initiator for clarifications
 - **Never branch** — always work on same branch (joined work)
 - **Code phase = split** — divide files/modules to avoid conflicts
 - **File overlap** — if same file unavoidable, assign one owner; other reviews/proposes via message
 - **Coordinate between phases** — sync before moving to next phase
-- **Leader decides** — Claude Code makes final calls at merge points
+- **Leader decides** — initiator or designated leader makes final calls at merge points
 
 ### Stay in Sync
 
-- After completing a phase, report to leader and await next assignment
+- After completing a phase, report to the initiator and await next assignment
 - While waiting, safe to do: review partner's work, run tests, read docs
-- If no assignment comes, ask leader (not user) for next task
+- If no assignment comes, ask the initiator (not a third party) for next task
+
+### Progress Protocol (Start / Heartbeat / Done)
+
+- **Start**: send `kind=status` with an ETA to the initiator as soon as you begin.
+- **Heartbeat**: update on phase boundaries or every 10-15 minutes.
+- **Done**: send Summary / Changes / Tests / Notes to the initiator.
+- **Blocked**: send `kind=question` to the initiator with options and a recommendation.
+
+### Modes of Collaboration (Modus Operandi)
+
+Pick one mode per task; the initiator decides or delegates.
+
+- **Leader + Worker**: leader decides, worker executes; best default.
+- **Co-workers**: peers decide together; if no consensus, ask the initiator.
+- **Duplicate**: independent solutions or reviews; initiator merges results.
+- **Driver + Navigator**: driver codes, navigator reviews/tests and can interrupt.
+- **Spec + Implementer**: one writes spec/tests, the other implements.
+- **Reviewer + Implementer**: one codes, the other focuses on review and risk detection.
 
 ### Shared Workspace
 
@@ -104,11 +126,11 @@ Leader prepares commit → user approves → push
 
 ### When to Act
 
-| Agent | Action |
-|-------|--------|
-| Codex | Complete phase → report to leader → await next assignment |
-| Claude Code | Merge own work + codex's → ask user for commit approval |
-| Either | Ask user only for: credentials, unclear requirements |
+| Role | Action |
+|------|--------|
+| Worker | Complete phase → report to initiator → await next assignment |
+| Leader/Initiator | Merge results → decide next phase work |
+| Either | Ask the initiator for clarifications (ask the user only if the user initiated) |
 
 ### Setup
 
@@ -145,16 +167,18 @@ Each root has isolated inboxes. Messages stay within their root.
 
 | Priority | Action |
 |----------|--------|
-| `urgent` | Interrupt, respond now |
+| `urgent` | Interrupt, respond now (label `interrupt` enables wake Ctrl+C) |
 | `normal` | Add to TODOs, respond after current task |
 | `low` | Batch for session end |
 
 ### Progress Updates
 
-When starting long work, send a status message:
+Use Start / Heartbeat / Done with the initiator:
 
 ```bash
 amq reply --me claude --id <msg_id> --kind status --body "Started, eta ~20m"
+amq reply --me claude --id <msg_id> --kind status --body "Design done, coding now. ETA ~10m"
+amq reply --me claude --id <msg_id> --kind answer --body "Summary:\n- ...\nChanges:\n- ...\nTests:\n- ...\nNotes:\n- ..."
 ```
 
 ### Optional: Wake Notifications
@@ -173,6 +197,9 @@ AMQ: message from codex - Review complete. Drain with: amq drain --me claude --i
 ```
 
 If notifications require manual Enter, try `--inject-mode=raw`.
+
+**Interrupts**: urgent messages labeled `interrupt` trigger Ctrl+C injection + an interrupt notice.
+Disable with `--interrupt=false`. Use `--interrupt-cmd none` for notice-only.
 
 ## Commands
 
