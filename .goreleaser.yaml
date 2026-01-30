@@ -27,3 +27,15 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+
+brews:
+  - name: amq
+    repository:
+      owner: avivsinai
+      name: homebrew-tap
+    directory: Formula
+    homepage: "https://github.com/avivsinai/agent-message-queue"
+    description: "Agent Message Queue - file-based inter-agent messaging for Claude Code and Codex CLI"
+    license: "MIT"
+    test: |
+      system "#{bin}/amq", "--version"
