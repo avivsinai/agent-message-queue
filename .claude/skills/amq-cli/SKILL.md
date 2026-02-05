@@ -292,6 +292,49 @@ amq send --to codex --kind review_request \
 - Delivery: atomic Maildir (tmp -> new -> cur)
 - Never edit message files directly
 
+## Swarm Mode: Agent Teams Integration
+
+Enable Codex agents to participate in Claude Code Agent Teams.
+
+### Quick Start
+```bash
+amq swarm list                                          # Discover teams
+amq swarm join --team my-team --me codex                # Register in team
+amq swarm tasks --team my-team                          # View shared tasks
+amq swarm claim --team my-team --task t1 --me codex     # Claim work
+amq swarm complete --team my-team --task t1 --me codex  # Mark done
+amq swarm bridge --team my-team --me codex              # Run task→AMQ bridge
+```
+
+### How It Works
+
+Claude Code Agent Teams stores team config at `~/.claude/teams/{name}/config.json`
+and tasks at `~/.claude/tasks/{name}/`. AMQ reads/writes these files directly:
+
+- **join** registers a Codex agent in the team config so Claude Code teammates discover it
+- **tasks/claim/complete** interact with the shared task list (preserving unknown fields)
+- **bridge** polls the task list and delivers AMQ notifications when tasks change
+
+Communication is asymmetric: Claude Code teammates use the AMQ skill to `amq send`/`amq drain`.
+Codex uses AMQ natively. The bridge handles task-level notifications only.
+
+### Bridge
+
+Run alongside the Codex session:
+```bash
+amq swarm bridge --team my-team --me codex &
+```
+
+The bridge polls `~/.claude/tasks/{team}/` every 3s and delivers AMQ messages for:
+- New tasks (unassigned or assigned to this agent)
+- Task assignments
+- Task completions
+
+### Leave a Team
+```bash
+amq swarm leave --team my-team --agent-id ext_codex_20260205T120000
+```
+
 ## References
 
 Read these when you need deeper context:

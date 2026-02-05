@@ -33,9 +33,9 @@ type TeamConfig struct {
 
 // TeamSummary provides a brief overview of a team for listing.
 type TeamSummary struct {
-	Name       string `json:"name"`
-	MemberCount int   `json:"member_count"`
-	ConfigPath string `json:"config_path"`
+	Name        string `json:"name"`
+	MemberCount int    `json:"member_count"`
+	ConfigPath  string `json:"config_path"`
 }
 
 // DiscoverTeams lists all teams found in ~/.claude/teams/.

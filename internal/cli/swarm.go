@@ -115,11 +115,11 @@ func runSwarmList(args []string) error {
 // --- join ---
 
 type swarmJoinOutput struct {
-	Team     string `json:"team"`
-	Name     string `json:"name"`
-	AgentID  string `json:"agent_id"`
-	Type     string `json:"agent_type"`
-	Joined   bool   `json:"joined"`
+	Team    string `json:"team"`
+	Name    string `json:"name"`
+	AgentID string `json:"agent_id"`
+	Type    string `json:"agent_type"`
+	Joined  bool   `json:"joined"`
 }
 
 func runSwarmJoin(args []string) error {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -180,22 +179,14 @@ func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
 	filename := id + ".md"
 	recipients := []string{cfg.AgentHandle}
 
-	// Ensure agent dirs exist
+	// Ensure agent inbox exists
 	if err := fsq.EnsureAgentDirs(cfg.AMQRoot, cfg.AgentHandle); err != nil {
-		return err
-	}
-	// Also ensure swarm-bridge outbox
-	outboxDir := filepath.Join(cfg.AMQRoot, "agents", "swarm-bridge", "outbox", "sent")
-	if err := os.MkdirAll(outboxDir, 0o700); err != nil {
 		return err
 	}
 
 	if _, err := fsq.DeliverToInboxes(cfg.AMQRoot, recipients, filename, data); err != nil {
 		return err
 	}
-
-	// Best-effort outbox copy
-	_, _ = fsq.WriteFileAtomic(outboxDir, filename, data, 0o600)
 
 	return nil
 }

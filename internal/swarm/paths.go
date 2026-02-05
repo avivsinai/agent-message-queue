@@ -7,10 +7,10 @@ import (
 
 // Default Claude Code teams and tasks directories.
 const (
-	claudeConfigDir  = ".claude"
-	teamsSubdir      = "teams"
-	tasksSubdir      = "tasks"
-	teamConfigFile   = "config.json"
+	claudeConfigDir = ".claude"
+	teamsSubdir     = "teams"
+	tasksSubdir     = "tasks"
+	teamConfigFile  = "config.json"
 )
 
 // ClaudeTeamsDir returns the path to ~/.claude/teams/.

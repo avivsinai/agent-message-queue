@@ -17,6 +17,7 @@ const (
 )
 
 // Task represents a work item in the shared task list.
+// Used for reading; writes go through map[string]any to preserve unknown fields.
 type Task struct {
 	ID          string   `json:"id"`
 	Title       string   `json:"title"`
@@ -26,12 +27,6 @@ type Task struct {
 	DependsOn   []string `json:"depends_on,omitempty"`
 	CreatedAt   string   `json:"created_at,omitempty"`
 	UpdatedAt   string   `json:"updated_at,omitempty"`
-}
-
-// TaskList represents all tasks for a team, supporting both single-file and
-// directory-based storage formats.
-type TaskList struct {
-	Tasks []Task `json:"tasks"`
 }
 
 // ListTasks reads all tasks for a team.
@@ -44,11 +39,7 @@ func ListTasks(teamName string) ([]Task, error) {
 	// Try single-file format first
 	singleFile := filepath.Join(tasksDir, "tasks.json")
 	if data, err := os.ReadFile(singleFile); err == nil {
-		var tl TaskList
-		if err := json.Unmarshal(data, &tl); err != nil {
-			return nil, fmt.Errorf("parse tasks.json: %w", err)
-		}
-		return tl.Tasks, nil
+		return parseTasksFromList(data)
 	}
 
 	// Fall back to directory format (one JSON file per task)
@@ -82,68 +73,63 @@ func ListTasks(teamName string) ([]Task, error) {
 		}
 
 		// Try task list wrapper
-		var tl TaskList
-		if err := json.Unmarshal(data, &tl); err == nil && len(tl.Tasks) > 0 {
-			tasks = append(tasks, tl.Tasks...)
+		if parsed, err := parseTasksFromList(data); err == nil && len(parsed) > 0 {
+			tasks = append(tasks, parsed...)
 		}
 	}
 
 	return tasks, nil
 }
 
-// ClaimTask assigns a task to an agent. Uses file locking to prevent races.
+func parseTasksFromList(data []byte) ([]Task, error) {
+	var wrapper struct {
+		Tasks []Task `json:"tasks"`
+	}
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		return nil, fmt.Errorf("parse task list: %w", err)
+	}
+	return wrapper.Tasks, nil
+}
+
+// ClaimTask assigns a task to an agent.
 func ClaimTask(teamName, taskID, agentID string) error {
-	return updateTask(teamName, taskID, func(task *Task) error {
-		if task.Status == TaskStatusCompleted {
+	return updateTaskRaw(teamName, taskID, func(raw map[string]any) error {
+		status, _ := raw["status"].(string)
+		if status == TaskStatusCompleted {
 			return fmt.Errorf("task %q is already completed", taskID)
 		}
-		if task.AssignedTo != "" && task.AssignedTo != agentID {
-			return fmt.Errorf("task %q is already assigned to %q", taskID, task.AssignedTo)
+		assigned, _ := raw["assigned_to"].(string)
+		if assigned != "" && assigned != agentID {
+			return fmt.Errorf("task %q is already assigned to %q", taskID, assigned)
 		}
-		task.Status = TaskStatusInProgress
-		task.AssignedTo = agentID
-		task.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		raw["status"] = TaskStatusInProgress
+		raw["assigned_to"] = agentID
+		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339)
 		return nil
 	})
 }
 
 // CompleteTask marks a task as completed.
 func CompleteTask(teamName, taskID, agentID string) error {
-	return updateTask(teamName, taskID, func(task *Task) error {
-		if task.AssignedTo != "" && task.AssignedTo != agentID {
-			return fmt.Errorf("task %q is assigned to %q, not %q", taskID, task.AssignedTo, agentID)
+	return updateTaskRaw(teamName, taskID, func(raw map[string]any) error {
+		assigned, _ := raw["assigned_to"].(string)
+		if assigned != "" && assigned != agentID {
+			return fmt.Errorf("task %q is assigned to %q, not %q", taskID, assigned, agentID)
 		}
-		task.Status = TaskStatusCompleted
-		task.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		raw["status"] = TaskStatusCompleted
+		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339)
 		return nil
 	})
 }
 
-// updateTask finds a task by ID, applies a mutation, and writes back.
-func updateTask(teamName, taskID string, mutate func(*Task) error) error {
+// updateTaskRaw finds a task by ID using raw JSON maps so unknown fields are preserved.
+func updateTaskRaw(teamName, taskID string, mutate func(map[string]any) error) error {
 	tasksDir := TeamTasksDir(teamName)
 
 	// Try single-file format first
 	singleFile := filepath.Join(tasksDir, "tasks.json")
 	if data, err := os.ReadFile(singleFile); err == nil {
-		var tl TaskList
-		if err := json.Unmarshal(data, &tl); err != nil {
-			return fmt.Errorf("parse tasks.json: %w", err)
-		}
-		found := false
-		for i := range tl.Tasks {
-			if tl.Tasks[i].ID == taskID {
-				if err := mutate(&tl.Tasks[i]); err != nil {
-					return err
-				}
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("task %q not found in team %q", taskID, teamName)
-		}
-		return writeTaskList(singleFile, tl)
+		return updateTaskInList(singleFile, data, taskID, teamName, mutate)
 	}
 
 	// Try per-file format
@@ -162,52 +148,73 @@ func updateTask(teamName, taskID string, mutate func(*Task) error) error {
 			continue
 		}
 
-		var task Task
-		if err := json.Unmarshal(data, &task); err != nil || task.ID != taskID {
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			continue
+		}
+		id, _ := raw["id"].(string)
+		if id != taskID {
 			continue
 		}
 
-		if err := mutate(&task); err != nil {
+		if err := mutate(raw); err != nil {
 			return err
 		}
-		return writeTaskFile(path, task)
+		return atomicWriteJSON(path, raw)
 	}
 
 	return fmt.Errorf("task %q not found in team %q", taskID, teamName)
 }
 
-func writeTaskList(path string, tl TaskList) error {
-	data, err := json.MarshalIndent(tl, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal task list: %w", err)
+func updateTaskInList(path string, data []byte, taskID, teamName string, mutate func(map[string]any) error) error {
+	var wrapper map[string]any
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		return fmt.Errorf("parse tasks.json: %w", err)
 	}
-	data = append(data, '\n')
 
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
-		return fmt.Errorf("write task list: %w", err)
+	tasksRaw, ok := wrapper["tasks"].([]any)
+	if !ok {
+		return fmt.Errorf("tasks.json missing tasks array")
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename task list: %w", err)
+
+	found := false
+	for _, item := range tasksRaw {
+		task, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := task["id"].(string)
+		if id != taskID {
+			continue
+		}
+		if err := mutate(task); err != nil {
+			return err
+		}
+		found = true
+		break
 	}
-	return nil
+
+	if !found {
+		return fmt.Errorf("task %q not found in team %q", taskID, teamName)
+	}
+
+	return atomicWriteJSON(path, wrapper)
 }
 
-func writeTaskFile(path string, task Task) error {
-	data, err := json.MarshalIndent(task, "", "  ")
+func atomicWriteJSON(path string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal task: %w", err)
+		return fmt.Errorf("marshal json: %w", err)
 	}
 	data = append(data, '\n')
 
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
-		return fmt.Errorf("write task: %w", err)
+		return fmt.Errorf("write temp file: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename task: %w", err)
+		return fmt.Errorf("atomic rename: %w", err)
 	}
 	return nil
 }
