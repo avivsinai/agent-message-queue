@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -459,9 +460,7 @@ func runSwarmBridge(args []string) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		if err := writeStderr("\nBridge shutting down...\n"); err != nil {
-			return
-		}
+		_ = writeStderr("\nBridge shutting down...\n")
 		cancel()
 	}()
 
@@ -474,7 +473,7 @@ func runSwarmBridge(args []string) error {
 	}
 
 	err = swarm.RunBridge(ctx, cfg)
-	if err != nil && err != context.Canceled {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
 	return nil

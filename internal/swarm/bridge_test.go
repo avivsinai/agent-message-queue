@@ -167,7 +167,7 @@ func TestIsRelevantToAgent(t *testing.T) {
 		{"assigned to me", Task{AssignedTo: "codex"}, "codex", "ext_1", true},
 		{"assigned by id", Task{AssignedTo: "ext_1"}, "codex", "ext_1", true},
 		{"assigned to other", Task{AssignedTo: "claude"}, "codex", "ext_1", false},
-		{"contains handle", Task{AssignedTo: "codex-worker"}, "codex", "ext_1", true},
+		{"different handle", Task{AssignedTo: "codex-worker"}, "codex", "ext_1", false},
 	}
 
 	for _, tt := range tests {

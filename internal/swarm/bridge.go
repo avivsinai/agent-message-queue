@@ -42,7 +42,7 @@ func RunBridge(ctx context.Context, cfg BridgeConfig) error {
 
 	// Initial scan
 	tasks, err := ListTasks(cfg.TeamName)
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil {
 		return fmt.Errorf("initial task scan: %w", err)
 	}
 	for _, t := range tasks {
@@ -99,7 +99,7 @@ func pollForChanges(cfg BridgeConfig, lastStates map[string]string) ([]BridgeEve
 			// State changed
 			if isRelevantToAgent(task, cfg.AgentHandle, cfg.AgentID) {
 				eventType := "task_updated"
-				if task.Status == TaskStatusInProgress && strings.Contains(task.AssignedTo, cfg.AgentHandle) {
+				if task.Status == TaskStatusInProgress && strings.EqualFold(task.AssignedTo, cfg.AgentHandle) {
 					eventType = "task_assigned"
 				} else if task.Status == TaskStatusPending && !strings.Contains(prev, TaskStatusPending) {
 					eventType = "task_unblocked"
@@ -135,7 +135,7 @@ func isRelevantToAgent(task Task, handle, agentID string) bool {
 		return true
 	}
 	lower := strings.ToLower(task.AssignedTo)
-	return lower == handle || lower == agentID || strings.Contains(lower, handle)
+	return lower == handle || lower == agentID
 }
 
 func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
@@ -153,15 +153,16 @@ func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
 
 	msg := format.Message{
 		Header: format.Header{
-			Schema:  format.CurrentSchema,
-			ID:      id,
-			From:    "swarm-bridge",
-			To:      []string{cfg.AgentHandle},
-			Thread:  fmt.Sprintf("swarm/%s", cfg.TeamName),
-			Subject: subject,
-			Created: now.UTC().Format(time.RFC3339Nano),
-			Kind:    format.KindStatus,
-			Labels:  []string{"swarm", event.Type},
+			Schema:   format.CurrentSchema,
+			ID:       id,
+			From:     "swarm-bridge",
+			To:       []string{cfg.AgentHandle},
+			Thread:   fmt.Sprintf("swarm/%s", cfg.TeamName),
+			Subject:  subject,
+			Created:  now.UTC().Format(time.RFC3339Nano),
+			Priority: format.PriorityNormal,
+			Kind:     format.KindStatus,
+			Labels:   []string{"swarm", event.Type},
 			Context: map[string]any{
 				"team":    cfg.TeamName,
 				"task_id": event.TaskID,
