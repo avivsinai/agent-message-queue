@@ -294,12 +294,14 @@ func runSwarmClaim(args []string) error {
 	teamFlag := fs.String("team", "", "Team name (required)")
 	taskFlag := fs.String("task", "", "Task ID to claim (required)")
 	meFlag := fs.String("me", defaultMe(), "Agent handle")
+	agentIDFlag := fs.String("agent-id", "", "Agent ID to use as assigned_to (auto-detect from team config)")
 	jsonFlag := fs.Bool("json", false, "Emit JSON output")
 
 	usage := usageWithFlags(fs, "amq swarm claim --team <name> --task <id> --me <agent>",
 		"Claim a task from the shared task list.",
 		"",
-		"Sets the task status to in_progress and assigns it to the agent.")
+		"Sets the task status to in_progress and assigns it to the agent.",
+		"Uses agent_id from the team config as assigned_to for CC interop.")
 
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
@@ -321,7 +323,12 @@ func runSwarmClaim(args []string) error {
 		return err
 	}
 
-	if err := swarm.ClaimTask(*teamFlag, *taskFlag, me); err != nil {
+	assignee, err := resolveAgentID(*agentIDFlag, *teamFlag, me)
+	if err != nil {
+		return err
+	}
+
+	if err := swarm.ClaimTask(*teamFlag, *taskFlag, assignee); err != nil {
 		return err
 	}
 
@@ -329,13 +336,13 @@ func runSwarmClaim(args []string) error {
 		return writeJSON(os.Stdout, map[string]any{
 			"team":        *teamFlag,
 			"task":        *taskFlag,
-			"assigned_to": me,
+			"assigned_to": assignee,
 			"status":      swarm.TaskStatusInProgress,
 			"claimed":     true,
 		})
 	}
 
-	return writeStdout("Claimed task %q in team %q (assigned to %s)\n", *taskFlag, *teamFlag, me)
+	return writeStdout("Claimed task %q in team %q (assigned to %s)\n", *taskFlag, *teamFlag, assignee)
 }
 
 // --- complete ---
@@ -345,6 +352,7 @@ func runSwarmComplete(args []string) error {
 	teamFlag := fs.String("team", "", "Team name (required)")
 	taskFlag := fs.String("task", "", "Task ID to complete (required)")
 	meFlag := fs.String("me", defaultMe(), "Agent handle")
+	agentIDFlag := fs.String("agent-id", "", "Agent ID (auto-detect from team config)")
 	jsonFlag := fs.Bool("json", false, "Emit JSON output")
 
 	usage := usageWithFlags(fs, "amq swarm complete --team <name> --task <id> --me <agent>",
@@ -370,7 +378,12 @@ func runSwarmComplete(args []string) error {
 		return err
 	}
 
-	if err := swarm.CompleteTask(*teamFlag, *taskFlag, me); err != nil {
+	assignee, err := resolveAgentID(*agentIDFlag, *teamFlag, me)
+	if err != nil {
+		return err
+	}
+
+	if err := swarm.CompleteTask(*teamFlag, *taskFlag, assignee); err != nil {
 		return err
 	}
 
@@ -383,6 +396,26 @@ func runSwarmComplete(args []string) error {
 	}
 
 	return writeStdout("Completed task %q in team %q\n", *taskFlag, *teamFlag)
+}
+
+// resolveAgentID returns the explicit agent ID if provided, or looks up
+// the agent's ID from the team config by name. Falls back to the handle
+// if the team config lookup fails (team may not exist yet).
+func resolveAgentID(explicit, teamName, handle string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	cfg, err := swarm.LoadTeam(teamName)
+	if err != nil {
+		// Team config not readable — fall back to handle
+		return handle, nil
+	}
+	member := cfg.FindMemberByName(handle)
+	if member == nil {
+		// Agent not registered in team — fall back to handle
+		return handle, nil
+	}
+	return member.AgentID, nil
 }
 
 // --- bridge ---

@@ -242,17 +242,17 @@ func TestFindMemberByName(t *testing.T) {
 func TestRegisterMember_PreservesExistingFields(t *testing.T) {
 	home := setupTeamDir(t)
 
-	// Write config with an extra field that our struct doesn't know about
+	// Write config with extra fields that our struct doesn't know about
 	dir := filepath.Join(home, claudeConfigDir, teamsSubdir, "test-team")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	raw := `{"name":"test-team","lead":"cc-1","members":[{"name":"claude","agent_id":"cc-1","agent_type":"claude-code"}],"extra_field":"should_survive"}`
+	raw := `{"name":"test-team","lead":"cc-1","members":[{"name":"claude","agent_id":"cc-1","agent_type":"claude-code","extra_member_field":"member_value"}],"extra_field":"should_survive","settings":{"timeout":30}}`
 	if err := os.WriteFile(filepath.Join(dir, teamConfigFile), []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	// Register a new member
+	// Register a new member (triggers read-modify-write)
 	err := RegisterMember("test-team", Member{
 		Name: "codex", AgentID: "ext-1", AgentType: AgentTypeCodex,
 	})
@@ -260,7 +260,7 @@ func TestRegisterMember_PreservesExistingFields(t *testing.T) {
 		t.Fatalf("RegisterMember: %v", err)
 	}
 
-	// Read back raw JSON to check extra_field survived
+	// Read back raw JSON and verify unknown fields survived
 	data, err := os.ReadFile(filepath.Join(dir, teamConfigFile))
 	if err != nil {
 		t.Fatal(err)
@@ -269,7 +269,75 @@ func TestRegisterMember_PreservesExistingFields(t *testing.T) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		t.Fatal(err)
 	}
-	// Note: team.go uses a typed struct, so extra_field will be lost.
-	// This is a known limitation — team config format is well-defined.
-	// Tasks are where unknown-field preservation matters most.
+
+	// Top-level unknown fields preserved
+	if m["extra_field"] != "should_survive" {
+		t.Errorf("extra_field = %v, want %q", m["extra_field"], "should_survive")
+	}
+	settings, ok := m["settings"].(map[string]any)
+	if !ok {
+		t.Fatalf("settings not preserved, got %T: %v", m["settings"], m["settings"])
+	}
+	if settings["timeout"] != float64(30) {
+		t.Errorf("settings.timeout = %v, want 30", settings["timeout"])
+	}
+
+	// Existing member's unknown fields preserved
+	members, ok := m["members"].([]any)
+	if !ok || len(members) < 1 {
+		t.Fatalf("members not preserved")
+	}
+	firstMember, ok := members[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first member not a map")
+	}
+	if firstMember["extra_member_field"] != "member_value" {
+		t.Errorf("extra_member_field = %v, want %q", firstMember["extra_member_field"], "member_value")
+	}
+
+	// New member was added
+	if len(members) != 2 {
+		t.Fatalf("len(members) = %d, want 2", len(members))
+	}
+	secondMember, ok := members[1].(map[string]any)
+	if !ok {
+		t.Fatalf("second member not a map")
+	}
+	if secondMember["name"] != "codex" {
+		t.Errorf("second member name = %v, want %q", secondMember["name"], "codex")
+	}
+}
+
+func TestUnregisterMember_PreservesExistingFields(t *testing.T) {
+	home := setupTeamDir(t)
+
+	dir := filepath.Join(home, claudeConfigDir, teamsSubdir, "test-team")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"name":"test-team","extra":"preserve_me","members":[{"name":"claude","agent_id":"cc-1","agent_type":"claude-code"},{"name":"codex","agent_id":"ext-1","agent_type":"codex"}]}`
+	if err := os.WriteFile(filepath.Join(dir, teamConfigFile), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := UnregisterMember("test-team", "ext-1"); err != nil {
+		t.Fatalf("UnregisterMember: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, teamConfigFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+
+	if m["extra"] != "preserve_me" {
+		t.Errorf("extra = %v, want %q", m["extra"], "preserve_me")
+	}
+	members, ok := m["members"].([]any)
+	if !ok || len(members) != 1 {
+		t.Fatalf("members len = %v, want 1", len(members))
+	}
 }

@@ -98,10 +98,11 @@ func pollForChanges(cfg BridgeConfig, lastStates map[string]string) ([]BridgeEve
 		} else if state != prev {
 			// State changed
 			if isRelevantToAgent(task, cfg.AgentHandle, cfg.AgentID) {
+				prevStatus, _, _ := strings.Cut(prev, ":")
 				eventType := "task_updated"
 				if task.Status == TaskStatusInProgress && strings.EqualFold(task.AssignedTo, cfg.AgentHandle) {
 					eventType = "task_assigned"
-				} else if task.Status == TaskStatusPending && !strings.Contains(prev, TaskStatusPending) {
+				} else if task.Status == TaskStatusPending && prevStatus != TaskStatusPending {
 					eventType = "task_unblocked"
 				} else if task.Status == TaskStatusCompleted {
 					eventType = "task_completed"

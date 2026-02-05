@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -116,43 +115,68 @@ func (tc *TeamConfig) FindMemberByName(name string) *Member {
 
 // RegisterMember adds a new member to the team config and writes it back.
 // Returns an error if a member with the same agent_id already exists.
+// Uses raw JSON round-tripping to preserve unknown fields in CC's config.
 func RegisterMember(teamName string, member Member) error {
-	cfg, err := LoadTeam(teamName)
+	raw, err := readTeamConfigRaw(teamName)
 	if err != nil {
 		return err
 	}
 
+	members, _ := raw["members"].([]any)
+
 	// Check for duplicate
-	if existing := cfg.FindMember(member.AgentID); existing != nil {
-		return fmt.Errorf("member with agent_id %q already registered (name=%q)", member.AgentID, existing.Name)
+	for _, item := range members {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if id, _ := m["agent_id"].(string); id == member.AgentID {
+			name, _ := m["name"].(string)
+			return fmt.Errorf("member with agent_id %q already registered (name=%q)", member.AgentID, name)
+		}
 	}
 
-	cfg.Members = append(cfg.Members, member)
-	return writeTeamConfig(teamName, cfg)
+	// Append new member as raw map
+	newMember := map[string]any{
+		"name":       member.Name,
+		"agent_id":   member.AgentID,
+		"agent_type": member.AgentType,
+	}
+	raw["members"] = append(members, newMember)
+
+	return atomicWriteJSON(TeamConfigPath(teamName), raw)
 }
 
 // UnregisterMember removes a member by agent_id from the team config.
+// Uses raw JSON round-tripping to preserve unknown fields in CC's config.
 func UnregisterMember(teamName, agentID string) error {
-	cfg, err := LoadTeam(teamName)
+	raw, err := readTeamConfigRaw(teamName)
 	if err != nil {
 		return err
 	}
 
+	members, _ := raw["members"].([]any)
+
 	found := false
-	members := make([]Member, 0, len(cfg.Members))
-	for _, m := range cfg.Members {
-		if m.AgentID == agentID {
+	filtered := make([]any, 0, len(members))
+	for _, item := range members {
+		m, ok := item.(map[string]any)
+		if !ok {
+			filtered = append(filtered, item)
+			continue
+		}
+		if id, _ := m["agent_id"].(string); id == agentID {
 			found = true
 			continue
 		}
-		members = append(members, m)
+		filtered = append(filtered, item)
 	}
 	if !found {
 		return fmt.Errorf("member with agent_id %q not found in team %q", agentID, teamName)
 	}
 
-	cfg.Members = members
-	return writeTeamConfig(teamName, cfg)
+	raw["members"] = filtered
+	return atomicWriteJSON(TeamConfigPath(teamName), raw)
 }
 
 // NewExternalAgentID generates an agent ID for external (non-Claude-Code) agents.
@@ -162,27 +186,15 @@ func NewExternalAgentID(handle string) string {
 	return fmt.Sprintf("ext_%s_%s", handle, ts)
 }
 
-func writeTeamConfig(teamName string, cfg TeamConfig) error {
+func readTeamConfigRaw(teamName string) (map[string]any, error) {
 	configPath := TeamConfigPath(teamName)
-	dir := filepath.Dir(configPath)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create team directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return fmt.Errorf("marshal team config: %w", err)
+		return nil, fmt.Errorf("read team config: %w", err)
 	}
-	data = append(data, '\n')
-
-	// Write atomically via temp file
-	tmpPath := configPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
-		return fmt.Errorf("write team config: %w", err)
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse team config: %w", err)
 	}
-	if err := os.Rename(tmpPath, configPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename team config: %w", err)
-	}
-	return nil
+	return raw, nil
 }
