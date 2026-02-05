@@ -52,6 +52,8 @@ func Run(args []string, version string) error {
 		return runEnv(args[1:])
 	case "coop":
 		return runCoop(args[1:])
+	case "swarm":
+		return runSwarm(args[1:])
 	case "doctor":
 		return runDoctor(args[1:])
 	default:
@@ -127,6 +129,9 @@ func printUsage() error {
 		return err
 	}
 	if err := writeStdoutLine("  coop      Simplified co-op mode setup (init, shell, start)"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  swarm     Claude Code Agent Teams integration (join, tasks, bridge)"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine("  doctor    Verify installation and configuration"); err != nil {
