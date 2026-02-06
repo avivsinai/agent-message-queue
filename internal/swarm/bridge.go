@@ -37,6 +37,11 @@ func RunBridge(ctx context.Context, cfg BridgeConfig) error {
 		cfg.PollInterval = 3 * time.Second
 	}
 
+	// Ensure agent inbox exists once at startup, not per-message.
+	if err := fsq.EnsureAgentDirs(cfg.AMQRoot, cfg.AgentHandle); err != nil {
+		return fmt.Errorf("ensure agent dirs: %w", err)
+	}
+
 	// Track last known task states to detect changes
 	lastStates := make(map[string]string) // taskID → "status:assigned_to"
 
@@ -100,7 +105,7 @@ func pollForChanges(cfg BridgeConfig, lastStates map[string]string) ([]BridgeEve
 			if isRelevantToAgent(task, cfg.AgentHandle, cfg.AgentID) {
 				prevStatus, _, _ := strings.Cut(prev, ":")
 				eventType := "task_updated"
-				if task.Status == TaskStatusInProgress && strings.EqualFold(task.AssignedTo, cfg.AgentHandle) {
+				if task.Status == TaskStatusInProgress && isAssignedToMe(task.AssignedTo, cfg.AgentHandle, cfg.AgentID) {
 					eventType = "task_assigned"
 				} else if task.Status == TaskStatusPending && prevStatus != TaskStatusPending {
 					eventType = "task_unblocked"
@@ -135,8 +140,11 @@ func isRelevantToAgent(task Task, handle, agentID string) bool {
 	if task.AssignedTo == "" {
 		return true
 	}
-	lower := strings.ToLower(task.AssignedTo)
-	return lower == handle || lower == agentID
+	return isAssignedToMe(task.AssignedTo, handle, agentID)
+}
+
+func isAssignedToMe(assignedTo, handle, agentID string) bool {
+	return strings.EqualFold(assignedTo, handle) || strings.EqualFold(assignedTo, agentID)
 }
 
 func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
@@ -179,16 +187,6 @@ func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
 	}
 
 	filename := id + ".md"
-	recipients := []string{cfg.AgentHandle}
-
-	// Ensure agent inbox exists
-	if err := fsq.EnsureAgentDirs(cfg.AMQRoot, cfg.AgentHandle); err != nil {
-		return err
-	}
-
-	if _, err := fsq.DeliverToInboxes(cfg.AMQRoot, recipients, filename, data); err != nil {
-		return err
-	}
-
-	return nil
+	_, err = fsq.DeliverToInboxes(cfg.AMQRoot, msg.Header.To, filename, data)
+	return err
 }

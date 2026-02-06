@@ -38,8 +38,12 @@ func ListTasks(teamName string) ([]Task, error) {
 
 	// Try single-file format first
 	singleFile := filepath.Join(tasksDir, "tasks.json")
-	if data, err := os.ReadFile(singleFile); err == nil {
+	data, err := os.ReadFile(singleFile)
+	if err == nil {
 		return parseTasksFromList(data)
+	}
+	if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read tasks.json: %w", err)
 	}
 
 	// Fall back to directory format (one JSON file per task)
@@ -128,8 +132,12 @@ func updateTaskRaw(teamName, taskID string, mutate func(map[string]any) error) e
 
 	// Try single-file format first
 	singleFile := filepath.Join(tasksDir, "tasks.json")
-	if data, err := os.ReadFile(singleFile); err == nil {
+	data, err := os.ReadFile(singleFile)
+	if err == nil {
 		return updateTaskInList(singleFile, data, taskID, teamName, mutate)
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("read tasks.json: %w", err)
 	}
 
 	// Try per-file format

@@ -79,6 +79,32 @@ func TestPollForChanges_TaskAssigned(t *testing.T) {
 	}
 }
 
+func TestPollForChanges_TaskAssignedByAgentID(t *testing.T) {
+	_, dir := setupTasksDir(t, "bridge-team3b")
+	// Task assigned using agent_id, not handle
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Assigned by ID", "status": "in_progress", "assigned_to": "ext_codex_1"},
+	})
+
+	lastStates := map[string]string{"t1": "pending:"}
+	cfg := BridgeConfig{
+		TeamName:    "bridge-team3b",
+		AgentHandle: "codex",
+		AgentID:     "ext_codex_1",
+	}
+
+	events, err := pollForChanges(cfg, lastStates)
+	if err != nil {
+		t.Fatalf("pollForChanges: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
+	if events[0].Type != "task_assigned" {
+		t.Errorf("event type = %q, want %q", events[0].Type, "task_assigned")
+	}
+}
+
 func TestPollForChanges_TaskCompleted(t *testing.T) {
 	_, dir := setupTasksDir(t, "bridge-team4")
 	writeTasksJSON(t, dir, []map[string]any{
@@ -168,6 +194,8 @@ func TestIsRelevantToAgent(t *testing.T) {
 		{"assigned by id", Task{AssignedTo: "ext_1"}, "codex", "ext_1", true},
 		{"assigned to other", Task{AssignedTo: "claude"}, "codex", "ext_1", false},
 		{"different handle", Task{AssignedTo: "codex-worker"}, "codex", "ext_1", false},
+		{"case insensitive handle", Task{AssignedTo: "Codex"}, "codex", "ext_1", true},
+		{"case insensitive id", Task{AssignedTo: "EXT_1"}, "codex", "ext_1", true},
 	}
 
 	for _, tt := range tests {

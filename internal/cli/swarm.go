@@ -323,10 +323,7 @@ func runSwarmClaim(args []string) error {
 		return err
 	}
 
-	assignee, err := resolveAgentID(*agentIDFlag, *teamFlag, me)
-	if err != nil {
-		return err
-	}
+	assignee := resolveAgentID(*agentIDFlag, *teamFlag, me)
 
 	if err := swarm.ClaimTask(*teamFlag, *taskFlag, assignee); err != nil {
 		return err
@@ -378,10 +375,7 @@ func runSwarmComplete(args []string) error {
 		return err
 	}
 
-	assignee, err := resolveAgentID(*agentIDFlag, *teamFlag, me)
-	if err != nil {
-		return err
-	}
+	assignee := resolveAgentID(*agentIDFlag, *teamFlag, me)
 
 	if err := swarm.CompleteTask(*teamFlag, *taskFlag, assignee); err != nil {
 		return err
@@ -400,22 +394,20 @@ func runSwarmComplete(args []string) error {
 
 // resolveAgentID returns the explicit agent ID if provided, or looks up
 // the agent's ID from the team config by name. Falls back to the handle
-// if the team config lookup fails (team may not exist yet).
-func resolveAgentID(explicit, teamName, handle string) (string, error) {
+// if the team config isn't available or the agent isn't registered.
+func resolveAgentID(explicit, teamName, handle string) string {
 	if explicit != "" {
-		return explicit, nil
+		return explicit
 	}
 	cfg, err := swarm.LoadTeam(teamName)
 	if err != nil {
-		// Team config not readable — fall back to handle
-		return handle, nil
+		return handle
 	}
 	member := cfg.FindMemberByName(handle)
 	if member == nil {
-		// Agent not registered in team — fall back to handle
-		return handle, nil
+		return handle
 	}
-	return member.AgentID, nil
+	return member.AgentID
 }
 
 // --- bridge ---
