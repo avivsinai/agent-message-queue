@@ -417,7 +417,8 @@ func runSwarmBridge(args []string) error {
 	common := addCommonFlags(fs)
 	teamFlag := fs.String("team", "", "Team name (required)")
 	agentIDFlag := fs.String("agent-id", "", "Agent Teams agent_id (auto-detect from team config)")
-	pollFlag := fs.Duration("poll", 3*time.Second, "Poll interval for task changes")
+	pollFlag := fs.Bool("poll", false, "Use polling instead of fsnotify")
+	pollIntervalFlag := fs.Duration("poll-interval", 3*time.Second, "Poll interval for task changes (polling mode)")
 
 	usage := usageWithFlags(fs, "amq swarm bridge --team <name> --me <agent> [options]",
 		"Run the swarm bridge process.",
@@ -464,14 +465,28 @@ func runSwarmBridge(args []string) error {
 		agentID = member.AgentID
 	}
 
+	cfg := swarm.BridgeConfig{
+		TeamName:     *teamFlag,
+		AgentHandle:  me,
+		AgentID:      agentID,
+		AMQRoot:      root,
+		PollInterval: *pollIntervalFlag,
+		UsePoll:      *pollFlag,
+	}
+
 	if err := writeStdout("Starting swarm bridge for team %q (agent=%s, id=%s)\n", *teamFlag, me, agentID); err != nil {
 		return err
 	}
 	if err := writeStdout("AMQ root: %s\n", root); err != nil {
 		return err
 	}
-	if err := writeStdout("Poll interval: %s\n", *pollFlag); err != nil {
+	if err := writeStdout("Mode: %s\n", swarm.BridgeMode(cfg)); err != nil {
 		return err
+	}
+	if cfg.UsePoll {
+		if err := writeStdout("Poll interval: %s\n", cfg.PollInterval); err != nil {
+			return err
+		}
 	}
 	if err := writeStdoutLine("Press Ctrl+C to stop."); err != nil {
 		return err
@@ -488,14 +503,6 @@ func runSwarmBridge(args []string) error {
 		_ = writeStderr("\nBridge shutting down...\n")
 		cancel()
 	}()
-
-	cfg := swarm.BridgeConfig{
-		TeamName:     *teamFlag,
-		AgentHandle:  me,
-		AgentID:      agentID,
-		AMQRoot:      root,
-		PollInterval: *pollFlag,
-	}
 
 	err = swarm.RunBridge(ctx, cfg)
 	if err != nil && !errors.Is(err, context.Canceled) {

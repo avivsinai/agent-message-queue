@@ -96,7 +96,33 @@ func parseTasksFromList(data []byte) ([]Task, error) {
 }
 
 // ClaimTask assigns a task to an agent.
+// It checks dependency gating: all depends_on tasks must be completed first.
 func ClaimTask(teamName, taskID, agentID string) error {
+	// Check dependency gating before claiming.
+	tasks, err := ListTasks(teamName)
+	if err != nil {
+		return fmt.Errorf("check dependencies: %w", err)
+	}
+	statusMap := make(map[string]string, len(tasks))
+	var target *Task
+	for i := range tasks {
+		statusMap[tasks[i].ID] = tasks[i].Status
+		if tasks[i].ID == taskID {
+			target = &tasks[i]
+		}
+	}
+	if target != nil && len(target.DependsOn) > 0 {
+		var blocked []string
+		for _, dep := range target.DependsOn {
+			if statusMap[dep] != TaskStatusCompleted {
+				blocked = append(blocked, dep)
+			}
+		}
+		if len(blocked) > 0 {
+			return fmt.Errorf("task %q is blocked by incomplete dependencies: %v", taskID, blocked)
+		}
+	}
+
 	return updateTaskRaw(teamName, taskID, func(raw map[string]any) error {
 		status, _ := raw["status"].(string)
 		if status == TaskStatusCompleted {
@@ -161,14 +187,28 @@ func updateTaskRaw(teamName, taskID string, mutate func(map[string]any) error) e
 			continue
 		}
 		id, _ := raw["id"].(string)
-		if id != taskID {
-			continue
+		if id == taskID {
+			if err := mutate(raw); err != nil {
+				return err
+			}
+			return atomicWriteJSON(path, raw)
 		}
 
-		if err := mutate(raw); err != nil {
-			return err
+		// Try wrapper format: {"tasks": [...]}
+		if tasksRaw, ok := raw["tasks"].([]any); ok {
+			for _, item := range tasksRaw {
+				task, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				if tid, _ := task["id"].(string); tid == taskID {
+					if err := mutate(task); err != nil {
+						return err
+					}
+					return atomicWriteJSON(path, raw)
+				}
+			}
 		}
-		return atomicWriteJSON(path, raw)
 	}
 
 	return fmt.Errorf("task %q not found in team %q", taskID, teamName)

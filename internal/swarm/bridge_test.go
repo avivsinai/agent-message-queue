@@ -17,7 +17,7 @@ func TestPollForChanges_NewTask(t *testing.T) {
 		AgentID:     "ext_codex_1",
 	}
 
-	events, err := pollForChanges(cfg, lastStates)
+	events, err := pollForChanges(cfg, lastStates, make(map[string]bool))
 	if err != nil {
 		t.Fatalf("pollForChanges: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestPollForChanges_NoChange(t *testing.T) {
 		AgentID:     "ext_codex_1",
 	}
 
-	events, err := pollForChanges(cfg, lastStates)
+	events, err := pollForChanges(cfg, lastStates, make(map[string]bool))
 	if err != nil {
 		t.Fatalf("pollForChanges: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestPollForChanges_TaskAssigned(t *testing.T) {
 		AgentID:     "ext_codex_1",
 	}
 
-	events, err := pollForChanges(cfg, lastStates)
+	events, err := pollForChanges(cfg, lastStates, make(map[string]bool))
 	if err != nil {
 		t.Fatalf("pollForChanges: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestPollForChanges_TaskAssignedByAgentID(t *testing.T) {
 		AgentID:     "ext_codex_1",
 	}
 
-	events, err := pollForChanges(cfg, lastStates)
+	events, err := pollForChanges(cfg, lastStates, make(map[string]bool))
 	if err != nil {
 		t.Fatalf("pollForChanges: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestPollForChanges_TaskCompleted(t *testing.T) {
 		AgentID:     "ext_codex_1",
 	}
 
-	events, err := pollForChanges(cfg, lastStates)
+	events, err := pollForChanges(cfg, lastStates, make(map[string]bool))
 	if err != nil {
 		t.Fatalf("pollForChanges: %v", err)
 	}
@@ -144,12 +144,49 @@ func TestPollForChanges_IrrelevantTask(t *testing.T) {
 		AgentID:     "ext_codex_1",
 	}
 
-	events, err := pollForChanges(cfg, lastStates)
+	events, err := pollForChanges(cfg, lastStates, make(map[string]bool))
 	if err != nil {
 		t.Fatalf("pollForChanges: %v", err)
 	}
 	if len(events) != 0 {
 		t.Errorf("len(events) = %d, want 0 (task assigned to other agent)", len(events))
+	}
+}
+
+func TestPollForChanges_NewTaskWithSatisfiedDeps_NoDoubleEmit(t *testing.T) {
+	_, dir := setupTasksDir(t, "bridge-team-nodbl")
+	// Brand-new task with deps already satisfied — should emit task_added only, not task_unblocked
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Done", "status": "completed"},
+		{"id": "t2", "title": "New ready", "status": "pending", "depends_on": []any{"t1"}},
+	})
+
+	lastStates := make(map[string]string)
+	lastDepsSatisfied := make(map[string]bool)
+	cfg := BridgeConfig{
+		TeamName:    "bridge-team-nodbl",
+		AgentHandle: "codex",
+		AgentID:     "ext_codex_1",
+	}
+
+	events, err := pollForChanges(cfg, lastStates, lastDepsSatisfied)
+	if err != nil {
+		t.Fatalf("pollForChanges: %v", err)
+	}
+
+	var types []string
+	for _, e := range events {
+		types = append(types, e.Type)
+	}
+	// Should have task_added for both, but NOT task_unblocked for t2
+	for _, e := range events {
+		if e.Type == "task_unblocked" {
+			t.Errorf("unexpected task_unblocked for %s; new tasks should not emit unblocked (got events: %v)", e.TaskID, types)
+		}
+	}
+	// But lastDepsSatisfied should still be populated for next cycle
+	if !lastDepsSatisfied["t2"] {
+		t.Error("lastDepsSatisfied[t2] should be true (deps are satisfied)")
 	}
 }
 
@@ -169,7 +206,7 @@ func TestPollForChanges_RemovedTask(t *testing.T) {
 		AgentHandle: "codex",
 	}
 
-	_, err := pollForChanges(cfg, lastStates)
+	_, err := pollForChanges(cfg, lastStates, make(map[string]bool))
 	if err != nil {
 		t.Fatalf("pollForChanges: %v", err)
 	}
@@ -178,6 +215,97 @@ func TestPollForChanges_RemovedTask(t *testing.T) {
 	}
 	if _, ok := lastStates["t1"]; !ok {
 		t.Error("t1 should still be in lastStates")
+	}
+}
+
+func TestPollForChanges_TaskUnblockedByDependency(t *testing.T) {
+	_, dir := setupTasksDir(t, "bridge-unblock1")
+	// t1 is completed, t2 depends on t1 and is pending → deps satisfied
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Prereq", "status": "completed"},
+		{"id": "t2", "title": "Blocked", "status": "pending", "depends_on": []any{"t1"}},
+	})
+
+	lastStates := map[string]string{
+		"t1": "in_progress:", // was in_progress, now completed
+		"t2": "pending:",
+	}
+	// t2's deps were NOT satisfied previously
+	lastDepsSatisfied := map[string]bool{
+		"t1": true,
+		"t2": false,
+	}
+	cfg := BridgeConfig{
+		TeamName:    "bridge-unblock1",
+		AgentHandle: "codex",
+		AgentID:     "ext_codex_1",
+	}
+
+	events, err := pollForChanges(cfg, lastStates, lastDepsSatisfied)
+	if err != nil {
+		t.Fatalf("pollForChanges: %v", err)
+	}
+
+	// Should have task_completed for t1 and task_unblocked for t2
+	var hasCompleted, hasUnblocked bool
+	for _, e := range events {
+		if e.TaskID == "t1" && e.Type == "task_completed" {
+			hasCompleted = true
+		}
+		if e.TaskID == "t2" && e.Type == "task_unblocked" {
+			hasUnblocked = true
+		}
+	}
+	if !hasCompleted {
+		t.Error("expected task_completed event for t1")
+	}
+	if !hasUnblocked {
+		t.Error("expected task_unblocked event for t2")
+	}
+	// lastDepsSatisfied should now be true for t2
+	if !lastDepsSatisfied["t2"] {
+		t.Error("lastDepsSatisfied[t2] should be true after unblocking")
+	}
+}
+
+func TestPollForChanges_TaskStillBlocked(t *testing.T) {
+	_, dir := setupTasksDir(t, "bridge-unblock2")
+	// t2 depends on t1 and t3; t1 is completed but t3 is still pending
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Done", "status": "completed"},
+		{"id": "t2", "title": "Blocked", "status": "pending", "depends_on": []any{"t1", "t3"}},
+		{"id": "t3", "title": "Not done", "status": "in_progress"},
+	})
+
+	lastStates := map[string]string{
+		"t1": "completed:",
+		"t2": "pending:",
+		"t3": "in_progress:",
+	}
+	lastDepsSatisfied := map[string]bool{
+		"t1": true,
+		"t2": false,
+		"t3": true,
+	}
+	cfg := BridgeConfig{
+		TeamName:    "bridge-unblock2",
+		AgentHandle: "codex",
+		AgentID:     "ext_codex_1",
+	}
+
+	events, err := pollForChanges(cfg, lastStates, lastDepsSatisfied)
+	if err != nil {
+		t.Fatalf("pollForChanges: %v", err)
+	}
+
+	// No unblocked event — t3 is still not completed
+	for _, e := range events {
+		if e.Type == "task_unblocked" {
+			t.Errorf("unexpected task_unblocked event for %s", e.TaskID)
+		}
+	}
+	if lastDepsSatisfied["t2"] {
+		t.Error("lastDepsSatisfied[t2] should still be false")
 	}
 }
 

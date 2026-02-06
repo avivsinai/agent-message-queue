@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -147,6 +148,45 @@ func TestClaimTask_PerFile(t *testing.T) {
 	}
 }
 
+func TestClaimTask_PerFile_WrapperFormat(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-wrapper")
+	// Per-file JSON using wrapper format {"tasks": [...]}
+	writeTasksJSON(t, dir, nil) // remove tasks.json so per-file is used
+	_ = os.Remove(filepath.Join(dir, "tasks.json"))
+
+	// Write a per-file that uses wrapper format
+	wrapper := map[string]any{
+		"tasks": []any{
+			map[string]any{"id": "w1", "title": "Wrapped task", "status": "pending"},
+		},
+	}
+	data, err := json.MarshalIndent(wrapper, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "batch.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ClaimTask("team-wrapper", "w1", "codex"); err != nil {
+		t.Fatalf("ClaimTask: %v", err)
+	}
+
+	tasks, err := ListTasks("team-wrapper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("len = %d, want 1", len(tasks))
+	}
+	if tasks[0].Status != TaskStatusInProgress {
+		t.Errorf("status = %q, want %q", tasks[0].Status, TaskStatusInProgress)
+	}
+	if tasks[0].AssignedTo != "codex" {
+		t.Errorf("assigned_to = %q, want %q", tasks[0].AssignedTo, "codex")
+	}
+}
+
 func TestClaimTask_AlreadyAssigned(t *testing.T) {
 	_, dir := setupTasksDir(t, "team3")
 	writeTasksJSON(t, dir, []map[string]any{
@@ -180,6 +220,72 @@ func TestClaimTask_NotFound(t *testing.T) {
 	err := ClaimTask("team5", "nonexistent", "codex")
 	if err == nil {
 		t.Fatal("expected error for nonexistent task")
+	}
+}
+
+// --- ClaimTask dependency gating ---
+
+func TestClaimTask_BlockedByDependency(t *testing.T) {
+	_, dir := setupTasksDir(t, "dep-team1")
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Prereq", "status": "pending"},
+		{"id": "t2", "title": "Blocked", "status": "pending", "depends_on": []any{"t1"}},
+	})
+
+	err := ClaimTask("dep-team1", "t2", "codex")
+	if err == nil {
+		t.Fatal("expected error for blocked task")
+	}
+	if !strings.Contains(err.Error(), "blocked by incomplete dependencies") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "t1") {
+		t.Errorf("error should mention blocking task t1: %v", err)
+	}
+}
+
+func TestClaimTask_DependencySatisfied(t *testing.T) {
+	_, dir := setupTasksDir(t, "dep-team2")
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Prereq", "status": "completed"},
+		{"id": "t2", "title": "Ready", "status": "pending", "depends_on": []any{"t1"}},
+	})
+
+	if err := ClaimTask("dep-team2", "t2", "codex"); err != nil {
+		t.Fatalf("ClaimTask: %v", err)
+	}
+
+	tasks, err := ListTasks("dep-team2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range tasks {
+		if task.ID == "t2" {
+			if task.Status != TaskStatusInProgress {
+				t.Errorf("status = %q, want %q", task.Status, TaskStatusInProgress)
+			}
+			return
+		}
+	}
+	t.Fatal("task t2 not found")
+}
+
+func TestClaimTask_EmptyDependencies(t *testing.T) {
+	_, dir := setupTasksDir(t, "dep-team3")
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "No deps", "status": "pending", "depends_on": []any{}},
+	})
+
+	if err := ClaimTask("dep-team3", "t1", "codex"); err != nil {
+		t.Fatalf("ClaimTask: %v", err)
+	}
+
+	tasks, err := ListTasks("dep-team3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tasks[0].Status != TaskStatusInProgress {
+		t.Errorf("status = %q, want %q", tasks[0].Status, TaskStatusInProgress)
 	}
 }
 
