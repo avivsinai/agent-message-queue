@@ -24,11 +24,12 @@ Requires Go 1.25+ and optionally golangci-lint.
 ```
 cmd/amq/           → Entry point (delegates to cli.Run())
 internal/
-├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch, monitor, reply, dlq, wake, coop)
+├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch, monitor, reply, dlq, wake, coop, swarm, doctor)
 ├── fsq/           → File system queue (Maildir delivery, atomic ops, scanning)
 ├── format/        → Message serialization (JSON frontmatter + Markdown body)
 ├── config/        → Config management (meta/config.json)
 ├── ack/           → Acknowledgment tracking
+├── swarm/         → Claude Code Agent Teams interop (team config, tasks, bridge, paths)
 ├── thread/        → Thread collection across mailboxes
 └── presence/      → Agent presence metadata
 ```
@@ -125,9 +126,20 @@ amq upgrade
 amq env [--me <agent>] [--root <path>] [--shell sh|bash|zsh|fish] [--wake] [--json]
 amq coop init [--root <path>] [--agents <a,b,c>] [--force] [--json]
 amq coop shell --me <agent> [--root <path>] [--shell sh|bash|zsh|fish] [--wake] [--json]
+amq coop start [--root <path>] [--no-init] [--no-wake] [-y] <agent>
+amq swarm list [--json]
+amq swarm join --team <name> --me <agent> [--agent-id <id>] [--type codex|external] [--json]
+amq swarm leave --team <name> --agent-id <id> [--json]
+amq swarm tasks --team <name> [--status pending|in_progress|completed] [--json]
+amq swarm claim --team <name> --task <id> --me <agent> [--agent-id <id>] [--json]
+amq swarm complete --team <name> --task <id> --me <agent> [--agent-id <id>] [--json]
+amq swarm bridge --team <name> --me <agent> [--agent-id <id>] [--poll] [--poll-interval <duration>] [--root <path>] [--strict] [--json]
+amq doctor [--json]
 ```
 
 Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has its own flags and doesn't accept these.
+
+Swarm-specific flags: `--team`, `--task`, `--agent-id`, `--type`, `--status`, `--poll`, `--poll-interval`.
 
 Use `amq --version` to check the installed version.
 
@@ -284,6 +296,34 @@ amq send --me claude --to codex --subject "Review needed" \
 amq reply --me codex --id "msg_123" --kind review_response \
   --body "LGTM with minor comments..."
 ```
+
+## Swarm Mode (Claude Code Agent Teams)
+
+Swarm mode lets external agents (Codex, etc.) participate in Claude Code Agent Teams by reading/writing the team's local config and task list (under `~/.claude/teams/` and `~/.claude/tasks/`).
+See `.claude/skills/amq-cli/SKILL.md` for the agent-facing workflow.
+
+- **Task workflow**: `amq swarm join`, `amq swarm tasks`, `amq swarm claim`, `amq swarm complete`
+- **Notifications**: `amq swarm bridge` watches the shared task list and delivers AMQ messages labeled `swarm` into the agent's inbox
+
+**Wake compatibility**: bridge notifications are standard AMQ inbox messages, so `amq wake` will detect them automatically. If you want swarm notifications to trigger wake interrupts, configure wake to match the bridge label and priority:
+
+```bash
+amq wake --me codex --interrupt-label swarm --interrupt-priority normal &
+```
+
+**Direct messaging (A2A)**: the bridge only emits task lifecycle notifications.
+
+- **Claude Code teammate → external agent**: works directly (Claude Code uses the AMQ skill to `amq send` to the external agent's inbox).
+- **External agent → Claude Code teammate**: requires a relay. Claude Code teammates don't drain AMQ; they use internal team messaging. The team leader must `amq drain --include-body` and forward inbound messages to the intended teammate via Claude Code's internal SendMessage.
+
+Recommended convention for external agents (send to the leader's AMQ handle, include the intended teammate):
+```bash
+amq send --me codex --to claude --thread swarm/my-team --labels swarm \
+  --subject "To: builder - question about task t1" \
+  --body "..."
+```
+
+Leader loop options: periodic `amq drain --include-body`, tighter `amq monitor --include-body` (watch+drain), or `amq wake --me claude &` for terminal notifications.
 
 ## Testing
 

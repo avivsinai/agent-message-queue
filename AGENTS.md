@@ -19,6 +19,7 @@ See [`CLAUDE.md`](./CLAUDE.md) for complete instructions including:
 ```bash
 make ci              # Run before committing: vet, lint, test, smoke
 ./amq --version      # Check installed version
+./amq swarm --help   # Swarm mode: Claude Code Agent Teams integration
 ```
 
 ## Environment

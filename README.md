@@ -20,6 +20,7 @@ AMQ enables **autonomous multi-agent collaboration**: agents message each other 
 - **Human-readable** — JSON frontmatter + Markdown body. Inspect with `cat`, debug with `grep`, version with `git`.
 - **Real-time notifications** — `amq wake` injects terminal notifications when messages arrive (experimental).
 - **Built for agents** — Priority levels, message kinds, threading, acknowledgments—all the primitives agents need.
+- **Swarm mode** — Join Claude Code Agent Teams, claim tasks, and bridge task notifications into AMQ.
 
 
 [![Watch the demo](docs/assets/demo-thumbnail.png)](https://github.com/user-attachments/assets/55794884-9d62-4382-9cd9-197ddd5aaf70)
@@ -148,6 +149,24 @@ amq coop init              # Initialize project
 amq coop start claude      # Terminal 1: Claude Code
 amq coop start codex       # Terminal 2: Codex CLI
 ```
+
+## Swarm Mode (Claude Code Agent Teams)
+
+Swarm mode bridges Claude Code Agent Teams' shared task list into AMQ so external agents (Codex, etc.) can participate.
+
+Note: the swarm bridge only emits task lifecycle notifications. Direct messages from an external agent into the Claude Code team must be drained by the team leader and forwarded via Claude Code internal messaging.
+
+Quick start (6 commands):
+```bash
+amq swarm list
+amq swarm join --team my-team --me codex
+amq swarm tasks --team my-team
+amq swarm claim --team my-team --task t1 --me codex
+amq swarm complete --team my-team --task t1 --me codex
+amq swarm bridge --team my-team --me codex
+```
+
+For a full command reference, see [CLAUDE.md](CLAUDE.md).
 
 ## How It Works
 

@@ -2,6 +2,14 @@
 
 Co-op mode enables multiple agents (e.g., Claude Code and Codex CLI) to work **in parallel where safe, coordinate where risky**, leveraging cognitive diversity (different models = different training = different blind spots) to catch errors that same-model review would miss.
 
+## Swarm vs Co-op
+
+- **Co-op**: lightweight, peer-to-peer messaging between agents via AMQ threads (`p2p/...`).
+- **Swarm**: join Claude Code Agent Teams and coordinate via the shared task list (`amq swarm ...`).
+- **Messaging**: swarm bridge delivers task notifications only. Claude Code teammates can `amq send` to external agents, but external agents cannot DM a specific Claude Code teammate directly. External→team messages must go to the leader's AMQ inbox, then the leader drains and forwards via Claude Code internal messaging.
+
+For swarm command reference, see [CLAUDE.md](CLAUDE.md).
+
 ## Roles
 
 - **Initiator** = whoever starts the task (agent or human). Owns decisions and receives all updates.

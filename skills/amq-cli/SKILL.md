@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 1.0.5
+version: 1.0.7
 description: Coordinate agents via the AMQ CLI for file-based inter-agent messaging. Use when you need to send messages to another agent (Claude/Codex), receive messages from partner agents, set up co-op mode between Claude Code and Codex CLI, or manage agent-to-agent communication in any multi-agent workflow. Triggers include "message codex", "talk to claude", "collaborate with partner agent", "AMQ", "inter-agent messaging", or "agent coordination".
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
@@ -313,10 +313,33 @@ and tasks at `~/.claude/tasks/{name}/`. AMQ reads/writes these files directly:
 
 - **join** registers a Codex agent in the team config so Claude Code teammates discover it
 - **tasks/claim/complete** interact with the shared task list (preserving unknown fields)
-- **bridge** polls the task list and delivers AMQ notifications when tasks change
+- **bridge** watches the task list and delivers AMQ notifications when tasks change
 
-Communication is asymmetric: Claude Code teammates use the AMQ skill to `amq send`/`amq drain`.
-Codex uses AMQ natively. The bridge handles task-level notifications only.
+Communication is asymmetric:
+- Task notifications flow via `amq swarm bridge` (task lifecycle only).
+- Claude Code teammates can `amq send` to external agents.
+- External agents cannot DM a specific Claude Code teammate via AMQ alone. External→team messages must be relayed by the team leader (drain AMQ, then forward via Claude Code internal messaging).
+
+### Leader: Relay External → Teammate Messages
+
+**External agent (Codex)**: send to the leader's AMQ handle and include the intended teammate in the subject/body:
+```bash
+amq send --me codex --to claude --thread swarm/my-team --labels swarm \
+  --subject "To: builder - question about task t1" \
+  --body "..."
+```
+
+**Leader (Claude Code)**: drain and forward:
+```bash
+amq drain --me claude --include-body
+```
+
+Then forward the message to the intended teammate using Claude Code's internal SendMessage (include the AMQ message ID so it can be referenced later). Optionally reply back to Codex:
+```bash
+amq reply --me claude --id <msg_id> --kind status --body "Forwarded to builder via SendMessage."
+```
+
+For tighter loops, use `amq monitor --me claude --include-body` (watch+drain in one command) or run `amq wake --me claude &` for terminal notifications.
 
 ### Bridge
 
@@ -325,10 +348,19 @@ Run alongside the Codex session:
 amq swarm bridge --team my-team --me codex &
 ```
 
-The bridge polls `~/.claude/tasks/{team}/` every 3s and delivers AMQ messages for:
+The bridge watches `~/.claude/tasks/{team}/` via fsnotify by default (falls back to polling).
+Use `--poll` to force polling; `--poll-interval` controls the interval (default 3s).
+
+It delivers AMQ messages (labels include `swarm`) for:
 - New tasks (unassigned or assigned to this agent)
 - Task assignments
 - Task completions
+
+**Wake compatibility**: bridge notifications are standard AMQ inbox messages, so `amq wake` will detect them automatically.
+To treat swarm notifications as interrupts, configure wake to match the bridge label and priority:
+```bash
+amq wake --me codex --interrupt-label swarm --interrupt-priority normal &
+```
 
 ### Leave a Team
 ```bash
