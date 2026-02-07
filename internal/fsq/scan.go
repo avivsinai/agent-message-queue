@@ -71,8 +71,14 @@ func FindTmpFilesOlderThan(root string, cutoff time.Time) ([]string, error) {
 			return nil, err
 		}
 		agentDir := filepath.Join(root, "agents", agent)
-		_ = filepath.WalkDir(agentDir, func(path string, entry os.DirEntry, err error) error {
-			if err != nil || entry.IsDir() {
+		if err := filepath.WalkDir(agentDir, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				if os.IsNotExist(err) {
+					return nil
+				}
+				return err
+			}
+			if entry.IsDir() {
 				return nil
 			}
 			name := entry.Name()
@@ -87,7 +93,9 @@ func FindTmpFilesOlderThan(root string, cutoff time.Time) ([]string, error) {
 				addMatch(path)
 			}
 			return nil
-		})
+		}); err != nil {
+			return nil, err
+		}
 	}
 	return matches, nil
 }

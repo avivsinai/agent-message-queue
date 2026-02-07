@@ -67,50 +67,7 @@ func runDrain(args []string) error {
 	}
 
 	// Process each message: move to cur (or DLQ for parse errors), optionally ack
-	for i := range items {
-		item := &items[i]
-
-		// Move parse errors to DLQ instead of cur
-		if item.ParseError != "" {
-			reason := item.FailureReason
-			if reason == "" {
-				reason = "parse_error"
-			}
-			if _, err := fsq.MoveToDLQ(root, common.Me, item.Filename, item.ID, reason, item.ParseError); err != nil {
-				_ = writeStderr("warning: failed to move %s to DLQ: %v\n", item.Filename, err)
-			} else {
-				item.MovedToDLQ = true
-			}
-			continue
-		}
-
-		// Move new -> cur
-		if err := fsq.MoveNewToCur(root, common.Me, item.Filename); err != nil {
-			if os.IsNotExist(err) {
-				// Likely moved by another drain; check if it's already in cur.
-				curPath := filepath.Join(fsq.AgentInboxCur(root, common.Me), item.Filename)
-				if _, statErr := os.Stat(curPath); statErr == nil {
-					item.MovedToCur = true
-				} else if statErr != nil && !os.IsNotExist(statErr) {
-					_ = writeStderr("warning: failed to stat %s in cur: %v\n", item.Filename, statErr)
-				}
-			} else {
-				// Log warning but continue
-				_ = writeStderr("warning: failed to move %s to cur: %v\n", item.Filename, err)
-			}
-		} else {
-			item.MovedToCur = true
-		}
-
-		// Ack if required and --ack is set
-		if *ackFlag && item.AckRequired && item.ParseError == "" && item.MovedToCur {
-			if err := ackMessage(root, common.Me, item); err != nil {
-				_ = writeStderr("warning: failed to ack %s: %v\n", item.ID, err)
-			} else {
-				item.Acked = true
-			}
-		}
-	}
+	processInboxItems(root, common.Me, *ackFlag, items)
 
 	if common.JSON {
 		return writeJSON(os.Stdout, drainResult{Drained: items, Count: len(items)})

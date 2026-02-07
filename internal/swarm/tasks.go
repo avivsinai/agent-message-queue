@@ -68,6 +68,7 @@ func ListTasks(teamName string) ([]Task, error) {
 		path := filepath.Join(tasksDir, entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: cannot read task file %s: %v\n", entry.Name(), err)
 			continue
 		}
 
@@ -290,10 +291,27 @@ func atomicWriteJSON(path string, v any) error {
 	}
 	data = append(data, '\n')
 
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+	tmpPath := fmt.Sprintf("%s.tmp.%d", path, time.Now().UnixNano())
+
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write temp file: %w", err)
 	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("fsync temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close temp file: %w", err)
+	}
+
 	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("atomic rename: %w", err)

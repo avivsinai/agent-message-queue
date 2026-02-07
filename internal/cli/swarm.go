@@ -14,6 +14,25 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/swarm"
 )
 
+// validateTeamName checks that a team name is safe and well-formed.
+// Team names follow the same rules as agent handles: lowercase alphanumeric
+// plus hyphens and underscores, no path traversal.
+func validateTeamName(name string) error {
+	if name == "" {
+		return UsageError("--team is required")
+	}
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
+		return UsageError("invalid team name (path traversal not allowed): %s", name)
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return UsageError("invalid team name (allowed: a-z, 0-9, -, _): %s", name)
+	}
+	return nil
+}
+
 func runSwarm(args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
 		return printSwarmUsage()
@@ -143,8 +162,8 @@ func runSwarmJoin(args []string) error {
 		return nil
 	}
 
-	if *teamFlag == "" {
-		return UsageError("--team is required")
+	if err := validateTeamName(*teamFlag); err != nil {
+		return err
 	}
 	switch *typeFlag {
 	case swarm.AgentTypeExternal, swarm.AgentTypeCodex, swarm.AgentTypeClaudeCode:
@@ -208,8 +227,8 @@ func runSwarmLeave(args []string) error {
 		return nil
 	}
 
-	if *teamFlag == "" {
-		return UsageError("--team is required")
+	if err := validateTeamName(*teamFlag); err != nil {
+		return err
 	}
 	if *agentIDFlag == "" {
 		return UsageError("--agent-id is required")
@@ -249,8 +268,8 @@ func runSwarmTasks(args []string) error {
 		return nil
 	}
 
-	if *teamFlag == "" {
-		return UsageError("--team is required")
+	if err := validateTeamName(*teamFlag); err != nil {
+		return err
 	}
 
 	tasks, err := swarm.ListTasks(*teamFlag)
@@ -321,8 +340,8 @@ func runSwarmClaim(args []string) error {
 		return nil
 	}
 
-	if *teamFlag == "" {
-		return UsageError("--team is required")
+	if err := validateTeamName(*teamFlag); err != nil {
+		return err
 	}
 	if *taskFlag == "" {
 		return UsageError("--task is required")
@@ -373,8 +392,8 @@ func runSwarmComplete(args []string) error {
 		return nil
 	}
 
-	if *teamFlag == "" {
-		return UsageError("--team is required")
+	if err := validateTeamName(*teamFlag); err != nil {
+		return err
 	}
 	if *taskFlag == "" {
 		return UsageError("--task is required")
@@ -452,8 +471,8 @@ func runSwarmBridge(args []string) error {
 		return nil
 	}
 
-	if *teamFlag == "" {
-		return UsageError("--team is required")
+	if err := validateTeamName(*teamFlag); err != nil {
+		return err
 	}
 	if err := requireMe(common.Me); err != nil {
 		return err

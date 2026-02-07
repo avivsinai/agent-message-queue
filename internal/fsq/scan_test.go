@@ -3,6 +3,7 @@ package fsq
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -71,5 +72,33 @@ func TestFindTmpFilesOlderThan(t *testing.T) {
 		if _, ok := expected[match]; !ok {
 			t.Fatalf("unexpected match: %s", match)
 		}
+	}
+}
+
+func TestFindTmpFilesOlderThan_WalkDirError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod permissions are unreliable on Windows")
+	}
+	root := t.TempDir()
+	if err := EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	// Make the agent directory unreadable to cause a WalkDir error
+	agentDir := filepath.Join(root, "agents", "codex")
+	// Create a subdirectory and make it unreadable
+	subDir := filepath.Join(agentDir, "inbox")
+	if err := os.Chmod(subDir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer os.Chmod(subDir, 0o700) // restore for cleanup
+
+	cutoff := time.Now().Add(-1 * time.Hour)
+	_, err := FindTmpFilesOlderThan(root, cutoff)
+	if err == nil {
+		t.Fatal("expected error from WalkDir on unreadable directory")
 	}
 }

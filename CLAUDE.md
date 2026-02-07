@@ -372,13 +372,19 @@ This repo includes skills for Claude Code and Codex CLI, distributed via the [sk
 .claude-plugin/plugin.json     → Plugin manifest for marketplace
 .claude/skills/amq-cli/        → Claude Code skill (SOURCE OF TRUTH)
 ├── SKILL.md
-└── plugin.json
+└── references/
+    ├── coop-mode.md
+    └── message-format.md
 .codex/skills/amq-cli/         → Codex CLI skill (synced copy)
 ├── SKILL.md
-└── plugin.json
+└── references/
+    ├── coop-mode.md
+    └── message-format.md
 skills/amq-cli/                → Standalone skill (synced copy, for direct install)
 ├── SKILL.md
-└── plugin.json
+└── references/
+    ├── coop-mode.md
+    └── message-format.md
 ```
 
 ### Why Three Copies?
@@ -402,11 +408,10 @@ This lets you test skill changes locally before publishing.
 ### Editing Skills
 
 1. Edit files in `.claude/skills/amq-cli/` (source of truth)
-2. Sync to other locations: `make sync-skills`
-3. Test locally by running Claude Code or Codex in this repo
-4. Bump version in `.claude-plugin/plugin.json` and `.claude/skills/amq-cli/plugin.json`
-5. Run `make sync-skills` again to update all copies
-6. Commit and push (all three locations will be committed)
+2. If publishing: bump `version:` in `.claude/skills/amq-cli/SKILL.md`
+3. Sync to other locations: `make sync-skills`
+4. Test locally by running Claude Code or Codex in this repo
+5. Commit and push (all three locations will be committed)
 
 **Important**: Never edit `.codex/skills/` or `skills/` directly. Always edit `.claude/skills/` and sync.
 

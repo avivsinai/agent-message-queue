@@ -24,7 +24,7 @@ amq ack  --me claude --id <msg_id>
 ## Thread
 
 ```
-amq thread --me codex --id p2p/claude__codex --limit 50
+amq thread --id p2p/claude__codex --limit 50
 ```
 
 ## Presence (optional)

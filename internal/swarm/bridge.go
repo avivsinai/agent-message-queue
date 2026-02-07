@@ -325,7 +325,7 @@ func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
 		Header: format.Header{
 			Schema:   format.CurrentSchema,
 			ID:       id,
-			From:     "swarm-bridge",
+			From:     cfg.AgentHandle,
 			To:       []string{cfg.AgentHandle},
 			Thread:   fmt.Sprintf("swarm/%s", cfg.TeamName),
 			Subject:  subject,

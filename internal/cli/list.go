@@ -98,6 +98,11 @@ func runList(args []string) error {
 	if *kindFlag != "" && !format.IsValidKind(*kindFlag) {
 		return UsageError("--kind must be one of: brainstorm, review_request, review_response, question, answer, decision, status, todo")
 	}
+	if *fromFlag != "" {
+		if _, err := normalizeHandle(*fromFlag); err != nil {
+			return UsageError("--from: %v", err)
+		}
+	}
 
 	var dir string
 	if box == "new" {

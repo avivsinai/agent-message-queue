@@ -24,11 +24,11 @@ Verify: `amq --version`
 
 ```bash
 # One-time project setup (run once per project)
-amq coop start claude    # Initializes if needed, then tells you to run: claude
-amq coop start codex     # Same for Codex
-
-# Or initialize manually
 amq coop init            # Creates .amqrc, mailboxes, updates .gitignore
+
+# Per-session setup (run in each agent terminal)
+amq coop start claude    # Initializes if needed, starts wake, then tells you: Run: claude
+amq coop start codex     # Same for Codex
 ```
 
 **As Claude** (talking to Codex):
@@ -136,12 +136,17 @@ Pick one mode per task; the initiator decides or delegates.
 
 Run once per project:
 ```bash
-amq coop start claude   # Initializes + tells you to run: claude
+amq coop init            # Creates .amqrc, mailboxes, updates .gitignore
 ```
 
-In a second terminal:
+Terminal 1:
 ```bash
-amq coop start codex    # Tells you to run: codex
+amq coop start claude   # Starts wake + tells you: Run: claude
+```
+
+Terminal 2:
+```bash
+amq coop start codex    # Starts wake + tells you: Run: codex
 ```
 
 ### Multiple Pairs (Isolated Sessions)
@@ -242,7 +247,7 @@ amq dlq list --me claude                  # List failed messages
 amq dlq read --me claude --id <dlq_id>    # Inspect failure details
 amq dlq retry --me claude --id <dlq_id>   # Retry (move back to inbox)
 amq dlq retry --me claude --all [--force] # Retry all
-amq dlq purge --me claude --older-than 24h # Clean old DLQ entries
+amq dlq purge --me claude --older-than 24h --yes # Clean old DLQ entries
 ```
 
 ### Upgrade
@@ -255,7 +260,7 @@ amq --no-update-check ...      # Disable update hint for this command
 ```bash
 amq thread --id p2p/claude__codex --include-body        # View thread
 amq presence set --me claude --status busy --note "reviewing"  # Set presence
-amq cleanup --tmp-older-than 36h                        # Clean stale tmp
+amq cleanup --tmp-older-than 36h --yes                  # Clean stale tmp
 ```
 
 ## Message Kinds
@@ -372,4 +377,4 @@ amq swarm leave --team my-team --agent-id ext_codex_20260205T120000
 Read these when you need deeper context:
 
 - `references/coop-mode.md` — Read when setting up or debugging co-op workflows between agents
-- `references/message-format.md` — Read when you need the full frontmatter schema (all fields, types, defaults)
+- `references/message-format.md` — Frontmatter schema cheat sheet (fields, types, defaults)

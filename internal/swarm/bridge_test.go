@@ -377,8 +377,8 @@ func TestDeliverBridgeEvent_DeliversMessage(t *testing.T) {
 		t.Fatalf("ReadMessageFile: %v", err)
 	}
 
-	if msg.Header.From != "swarm-bridge" {
-		t.Errorf("Header.From = %q, want %q", msg.Header.From, "swarm-bridge")
+	if msg.Header.From != "codex" {
+		t.Errorf("Header.From = %q, want %q", msg.Header.From, "codex")
 	}
 	if len(msg.Header.To) != 1 || msg.Header.To[0] != "codex" {
 		t.Errorf("Header.To = %v, want [%q]", msg.Header.To, "codex")

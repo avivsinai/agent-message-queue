@@ -156,7 +156,9 @@ func runReply(args []string) error {
 			Subject:     subject,
 			Created:     now.UTC().Format(time.RFC3339Nano),
 			AckRequired: *ackFlag,
-			Refs:        append(originalMsg.Header.Refs, originalMsg.Header.ID),
+			// Refs grows with chain length (each reply appends the parent ID).
+		// This is acceptable for agent conversations which are short-lived.
+		Refs:        append(originalMsg.Header.Refs, originalMsg.Header.ID),
 			Priority:    priority,
 			Kind:        kind,
 			Labels:      labels,

@@ -321,7 +321,9 @@ func runCoopStart(args []string) error {
 	}
 	agentName := strings.ToLower(remaining[0])
 
-	// Validate agent name
+	// Validate agent name.
+	// Co-op mode is specifically designed for Claude Code + Codex CLI pairing.
+	// The wake, shell, and notification integrations are tailored to these two agents.
 	if agentName != "claude" && agentName != "codex" {
 		return UsageError("agent must be 'claude' or 'codex'")
 	}
