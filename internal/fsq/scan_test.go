@@ -94,7 +94,7 @@ func TestFindTmpFilesOlderThan_WalkDirError(t *testing.T) {
 	if err := os.Chmod(subDir, 0o000); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	defer os.Chmod(subDir, 0o700) // restore for cleanup
+	defer func() { _ = os.Chmod(subDir, 0o700) }() // restore for cleanup
 
 	cutoff := time.Now().Add(-1 * time.Hour)
 	_, err := FindTmpFilesOlderThan(root, cutoff)

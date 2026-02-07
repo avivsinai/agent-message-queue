@@ -273,10 +273,10 @@ func TestReadMessageFile_SizeLimit(t *testing.T) {
 	}
 	// Write MaxMessageSize + 1 bytes
 	if err := f.Truncate(MaxMessageSize + 1); err != nil {
-		f.Close()
+		_ = f.Close()
 		t.Fatalf("truncate: %v", err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	_, err = ReadMessageFile(path)
 	if !errors.Is(err, ErrMessageTooLarge) {
@@ -293,36 +293,6 @@ func TestSplitFrontmatter_SizeLimit(t *testing.T) {
 }
 
 func TestSortByTimestamp(t *testing.T) {
-	type item struct {
-		id      string
-		created string
-		raw     time.Time
-	}
-	items := []item{
-		{id: "c", created: "2025-01-03T00:00:00Z", raw: time.Date(2025, 1, 3, 0, 0, 0, 0, time.UTC)},
-		{id: "a", created: "2025-01-01T00:00:00Z", raw: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)},
-		{id: "b", created: "2025-01-02T00:00:00Z", raw: time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)},
-		{id: "d", created: "2025-01-02T00:00:00Z", raw: time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)}, // same time as b, should sort by ID
-	}
-
-	type tsItem struct {
-		item
-	}
-	wrappers := make([]tsItem, len(items))
-	for i, it := range items {
-		wrappers[i] = tsItem{it}
-	}
-
-	// Use a concrete type that implements Timestamped
-	type sortable struct {
-		id      string
-		created string
-		raw     time.Time
-	}
-	_ = sortable{} // just to verify type exists
-
-	// Since SortByTimestamp requires Timestamped interface, test via Header adapter
-	// We'll test the sort logic directly
 	headers := []testTimestamped{
 		{id: "c", created: "2025-01-03T00:00:00Z", raw: time.Date(2025, 1, 3, 0, 0, 0, 0, time.UTC)},
 		{id: "a", created: "2025-01-01T00:00:00Z", raw: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)},
