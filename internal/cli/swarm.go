@@ -127,7 +127,7 @@ func runSwarmJoin(args []string) error {
 	fs := flag.NewFlagSet("swarm join", flag.ContinueOnError)
 	teamFlag := fs.String("team", "", "Team name (required)")
 	meFlag := fs.String("me", defaultMe(), "Agent handle (e.g., codex)")
-	typeFlag := fs.String("type", swarm.AgentTypeCodex, "Agent type (codex, external)")
+	typeFlag := fs.String("type", swarm.AgentTypeExternal, "Agent type (external, codex)")
 	agentIDFlag := fs.String("agent-id", "", "Agent ID (auto-generated if empty)")
 	jsonFlag := fs.Bool("json", false, "Emit JSON output")
 
@@ -145,6 +145,12 @@ func runSwarmJoin(args []string) error {
 
 	if *teamFlag == "" {
 		return UsageError("--team is required")
+	}
+	switch *typeFlag {
+	case swarm.AgentTypeExternal, swarm.AgentTypeCodex, swarm.AgentTypeClaudeCode:
+		// valid
+	default:
+		return UsageError("invalid --type %q: must be external, codex, or claude-code", *typeFlag)
 	}
 	if err := requireMe(*meFlag); err != nil {
 		return err
@@ -255,6 +261,12 @@ func runSwarmTasks(args []string) error {
 	// Filter by status if specified
 	statusFilter := strings.TrimSpace(*statusFlag)
 	if statusFilter != "" {
+		switch statusFilter {
+		case swarm.TaskStatusPending, swarm.TaskStatusInProgress, swarm.TaskStatusCompleted:
+			// valid
+		default:
+			return UsageError("invalid --status %q: must be pending, in_progress, or completed", statusFilter)
+		}
 		filtered := make([]swarm.Task, 0, len(tasks))
 		for _, t := range tasks {
 			if t.Status == statusFilter {
@@ -401,10 +413,12 @@ func resolveAgentID(explicit, teamName, handle string) string {
 	}
 	cfg, err := swarm.LoadTeam(teamName)
 	if err != nil {
+		_ = writeStderr("warning: could not load team config for %q: %v; falling back to handle %q\n", teamName, err, handle)
 		return handle
 	}
 	member := cfg.FindMemberByName(handle)
 	if member == nil {
+		_ = writeStderr("warning: agent %q not found in team %q config; falling back to handle\n", handle, teamName)
 		return handle
 	}
 	return member.AgentID
@@ -450,6 +464,9 @@ func runSwarmBridge(args []string) error {
 	}
 
 	root := resolveRoot(common.Root)
+	if root == "" || !dirExists(root) {
+		return fmt.Errorf("AMQ root %q does not exist (run 'amq init' first)", root)
+	}
 
 	// Auto-detect agent_id from team config
 	agentID := *agentIDFlag

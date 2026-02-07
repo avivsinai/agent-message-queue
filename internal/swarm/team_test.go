@@ -2,9 +2,13 @@ package swarm
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
+	"time"
 )
 
 func setupTeamDir(t *testing.T) string {
@@ -339,5 +343,75 @@ func TestUnregisterMember_PreservesExistingFields(t *testing.T) {
 	members, ok := m["members"].([]any)
 	if !ok || len(members) != 1 {
 		t.Fatalf("members len = %v, want 1", len(members))
+	}
+}
+
+func TestRegisterMember_Concurrent(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("concurrency locking uses flock (darwin/linux)")
+	}
+
+	home := setupTeamDir(t)
+	writeTeamJSON(t, home, "test-team", TeamConfig{
+		Name:    "test-team",
+		Members: []Member{{Name: "claude", AgentID: "cc-1", AgentType: AgentTypeClaudeCode}},
+	})
+
+	const n = 25
+	start := make(chan struct{})
+	errCh := make(chan error, n)
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := RegisterMember("test-team", Member{
+				Name:      fmt.Sprintf("m%d", i),
+				AgentID:   fmt.Sprintf("ext_m%d", i),
+				AgentType: AgentTypeExternal,
+			}); err != nil {
+				errCh <- fmt.Errorf("RegisterMember(%d): %w", i, err)
+			}
+		}()
+	}
+	close(start)
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for concurrent RegisterMember calls")
+	}
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+	if t.Failed() {
+		return
+	}
+
+	got, err := LoadTeam("test-team")
+	if err != nil {
+		t.Fatalf("LoadTeam: %v", err)
+	}
+	if len(got.Members) != n+1 {
+		t.Fatalf("len(Members) = %d, want %d", len(got.Members), n+1)
+	}
+	ids := make(map[string]bool, len(got.Members))
+	for _, m := range got.Members {
+		ids[m.AgentID] = true
+	}
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("ext_m%d", i)
+		if !ids[id] {
+			t.Errorf("missing agent_id %q after concurrent registration", id)
+		}
 	}
 }

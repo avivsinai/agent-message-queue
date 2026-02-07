@@ -1,6 +1,7 @@
 package swarm
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -36,6 +37,9 @@ func TeamTasksDir(team string) string {
 func claudeHome() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
+		// Avoid silently writing to CWD — surface the error so callers
+		// notice they're getting a relative path.
+		_, _ = fmt.Fprintf(os.Stderr, "warning: unable to determine home directory: %v; using ./%s\n", err, claudeConfigDir)
 		return filepath.Join(".", claudeConfigDir)
 	}
 	return filepath.Join(home, claudeConfigDir)

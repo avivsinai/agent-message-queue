@@ -1,11 +1,16 @@
 package swarm
 
 import (
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 // AgentType constants for team member classification.
@@ -117,73 +122,96 @@ func (tc *TeamConfig) FindMemberByName(name string) *Member {
 // Returns an error if a member with the same agent_id already exists.
 // Uses raw JSON round-tripping to preserve unknown fields in CC's config.
 func RegisterMember(teamName string, member Member) error {
-	raw, err := readTeamConfigRaw(teamName)
-	if err != nil {
-		return err
-	}
-
-	members, _ := raw["members"].([]any)
-
-	// Check for duplicate
-	for _, item := range members {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
+	// Lock on a stable sidecar file; the config is updated via atomic rename.
+	lockPath := TeamConfigPath(teamName) + ".lock"
+	return lock.WithExclusiveFileLock(lockPath, func() error {
+		raw, err := readTeamConfigRaw(teamName)
+		if err != nil {
+			return err
 		}
-		if id, _ := m["agent_id"].(string); id == member.AgentID {
-			name, _ := m["name"].(string)
-			return fmt.Errorf("member with agent_id %q already registered (name=%q)", member.AgentID, name)
+
+		members, _ := raw["members"].([]any)
+
+		// Check for duplicate
+		for _, item := range members {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if id, _ := m["agent_id"].(string); id == member.AgentID {
+				name, _ := m["name"].(string)
+				return fmt.Errorf("member with agent_id %q already registered (name=%q)", member.AgentID, name)
+			}
 		}
-	}
 
-	// Append new member as raw map
-	newMember := map[string]any{
-		"name":       member.Name,
-		"agent_id":   member.AgentID,
-		"agent_type": member.AgentType,
-	}
-	raw["members"] = append(members, newMember)
+		// Append new member as raw map
+		newMember := map[string]any{
+			"name":       member.Name,
+			"agent_id":   member.AgentID,
+			"agent_type": member.AgentType,
+		}
+		raw["members"] = append(members, newMember)
 
-	return atomicWriteJSON(TeamConfigPath(teamName), raw)
+		return atomicWriteJSON(TeamConfigPath(teamName), raw)
+	})
 }
 
 // UnregisterMember removes a member by agent_id from the team config.
 // Uses raw JSON round-tripping to preserve unknown fields in CC's config.
 func UnregisterMember(teamName, agentID string) error {
-	raw, err := readTeamConfigRaw(teamName)
-	if err != nil {
-		return err
-	}
+	// Lock on a stable sidecar file; the config is updated via atomic rename.
+	lockPath := TeamConfigPath(teamName) + ".lock"
+	return lock.WithExclusiveFileLock(lockPath, func() error {
+		raw, err := readTeamConfigRaw(teamName)
+		if err != nil {
+			return err
+		}
 
-	members, _ := raw["members"].([]any)
+		members, _ := raw["members"].([]any)
 
-	found := false
-	filtered := make([]any, 0, len(members))
-	for _, item := range members {
-		m, ok := item.(map[string]any)
-		if !ok {
+		found := false
+		filtered := make([]any, 0, len(members))
+		for _, item := range members {
+			m, ok := item.(map[string]any)
+			if !ok {
+				filtered = append(filtered, item)
+				continue
+			}
+			if id, _ := m["agent_id"].(string); id == agentID {
+				found = true
+				continue
+			}
 			filtered = append(filtered, item)
-			continue
 		}
-		if id, _ := m["agent_id"].(string); id == agentID {
-			found = true
-			continue
+		if !found {
+			return fmt.Errorf("member with agent_id %q not found in team %q", agentID, teamName)
 		}
-		filtered = append(filtered, item)
-	}
-	if !found {
-		return fmt.Errorf("member with agent_id %q not found in team %q", agentID, teamName)
-	}
 
-	raw["members"] = filtered
-	return atomicWriteJSON(TeamConfigPath(teamName), raw)
+		raw["members"] = filtered
+		return atomicWriteJSON(TeamConfigPath(teamName), raw)
+	})
 }
 
 // NewExternalAgentID generates an agent ID for external (non-Claude-Code) agents.
-// Format: ext_{handle}_{timestamp}
+// Format: ext_{handle}_{timestamp}_{nanoseconds}_pid{pid}_{randhex}
 func NewExternalAgentID(handle string) string {
-	ts := time.Now().UTC().Format("20060102T150405")
-	return fmt.Sprintf("ext_%s_%s", handle, ts)
+	now := time.Now().UTC()
+	ts := now.Format("20060102T150405")
+
+	// Reduce collision risk if multiple agents join concurrently.
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fallback: still mix in time if the RNG fails for any reason.
+		binary.LittleEndian.PutUint32(b[:], uint32(now.UnixNano()))
+	}
+
+	return fmt.Sprintf("ext_%s_%s_%09d_pid%d_%s",
+		handle,
+		ts,
+		now.Nanosecond(),
+		os.Getpid(),
+		hex.EncodeToString(b[:]),
+	)
 }
 
 func readTeamConfigRaw(teamName string) (map[string]any, error) {

@@ -2,10 +2,14 @@ package swarm
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func setupTasksDir(t *testing.T, teamName string) (home string, tasksDir string) {
@@ -319,6 +323,120 @@ func TestCompleteTask_WrongAgent(t *testing.T) {
 	err := CompleteTask("team7", "t1", "codex")
 	if err == nil {
 		t.Fatal("expected error for wrong agent")
+	}
+}
+
+func TestCompleteTask_Pending(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-complete-pending")
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Not started", "status": "pending", "assigned_to": "codex"},
+	})
+
+	err := CompleteTask("team-complete-pending", "t1", "codex")
+	if err == nil {
+		t.Fatal("expected error for completing a pending task")
+	}
+	if !strings.Contains(err.Error(), "not in progress") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCompleteTask_AlreadyCompleted(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-complete-done")
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Done", "status": "completed", "assigned_to": "codex"},
+	})
+
+	err := CompleteTask("team-complete-done", "t1", "codex")
+	if err == nil {
+		t.Fatal("expected error for completing an already-completed task")
+	}
+	if !strings.Contains(err.Error(), "already completed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestClaimTask_NoDir_NotFound(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	err := ClaimTask("nonexistent", "t1", "codex")
+	if err == nil {
+		t.Fatal("expected error for missing tasks dir")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestClaimTask_Concurrent(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("concurrency locking uses flock (darwin/linux)")
+	}
+
+	_, dir := setupTasksDir(t, "team-concurrent-claims")
+
+	const n = 25
+	tasks := make([]map[string]any, 0, n)
+	for i := 0; i < n; i++ {
+		tasks = append(tasks, map[string]any{
+			"id":     fmt.Sprintf("t%d", i),
+			"title":  fmt.Sprintf("Task %d", i),
+			"status": TaskStatusPending,
+		})
+	}
+	writeTasksJSON(t, dir, tasks)
+
+	start := make(chan struct{})
+	errCh := make(chan error, n)
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			<-start
+			taskID := fmt.Sprintf("t%d", i)
+			if err := ClaimTask("team-concurrent-claims", taskID, "codex"); err != nil {
+				errCh <- fmt.Errorf("ClaimTask(%s): %w", taskID, err)
+			}
+		}()
+	}
+	close(start)
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for concurrent ClaimTask calls")
+	}
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+	if t.Failed() {
+		return
+	}
+
+	got, err := ListTasks("team-concurrent-claims")
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("len(tasks) = %d, want %d", len(got), n)
+	}
+	for _, task := range got {
+		if task.Status != TaskStatusInProgress {
+			t.Errorf("task %s status = %q, want %q", task.ID, task.Status, TaskStatusInProgress)
+		}
+		if task.AssignedTo != "codex" {
+			t.Errorf("task %s assigned_to = %q, want %q", task.ID, task.AssignedTo, "codex")
+		}
 	}
 }
 

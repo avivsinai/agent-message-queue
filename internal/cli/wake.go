@@ -22,6 +22,7 @@ type wakeConfig struct {
 	strict            bool
 	fallbackWarn      bool
 	injectMode        string // auto, raw, paste
+	debug             bool
 	interrupt         bool
 	interruptLabel    string
 	interruptPriority string
@@ -255,23 +256,57 @@ func injectNotification(cfg *wakeConfig, text string) error {
 	}
 
 	mode := effectiveInjectMode(cfg)
+	if cfg.debug {
+		_ = writeStderr("amq wake [debug]: mode=%s text_len=%d\n", mode, len(text))
+	}
 	var injectErr error
 	switch mode {
 	case "raw":
-		// Raw mode: inject text and CR separately to avoid paste detection
+		// Raw mode: inject text and CR separately to avoid paste detection.
 		// Ink treats multi-char input as paste, not keypresses. Sending text+CR
 		// as one chunk makes Ink see pasted text, not an Enter keypress.
 		// Solution: inject text, wait, then inject CR as separate single byte.
+		// Double-inject CR with a gap to increase reliability — a single CR
+		// can get swallowed by Ink's input buffer flush in newer versions.
 		injectedText := text
 		if cfg.bell {
 			injectedText = "\a" + injectedText
 		}
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: injecting %d bytes of text\n", len(injectedText))
+		}
 		if err := tiocsti.Inject(injectedText); err != nil {
+			if cfg.debug {
+				_ = writeStderr("amq wake [debug]: text inject failed: %v\n", err)
+			}
 			injectErr = err
 		} else {
-			// Delay so CR arrives in separate read cycle, detected as keypress
-			time.Sleep(30 * time.Millisecond)
-			injectErr = tiocsti.Inject("\r")
+			// Delay so CR arrives in separate read cycle, detected as keypress.
+			// 50ms allows Ink to finish processing the text bytes before CR lands.
+			if cfg.debug {
+				_ = writeStderr("amq wake [debug]: text injected OK, sleeping 50ms before CR\n")
+			}
+			time.Sleep(50 * time.Millisecond)
+			if err := tiocsti.Inject("\r"); err != nil {
+				if cfg.debug {
+					_ = writeStderr("amq wake [debug]: first CR inject failed: %v\n", err)
+				}
+				injectErr = err
+			} else {
+				if cfg.debug {
+					_ = writeStderr("amq wake [debug]: first CR injected OK, sleeping 20ms before second CR\n")
+				}
+				// Second CR after a short gap — belt-and-suspenders against
+				// Ink absorbing the first CR during buffer processing.
+				time.Sleep(20 * time.Millisecond)
+				if err := tiocsti.Inject("\r"); err != nil {
+					if cfg.debug {
+						_ = writeStderr("amq wake [debug]: second CR inject failed: %v\n", err)
+					}
+				} else if cfg.debug {
+					_ = writeStderr("amq wake [debug]: second CR injected OK (total inject time ~70ms + text)\n")
+				}
+			}
 		}
 
 	case "paste":

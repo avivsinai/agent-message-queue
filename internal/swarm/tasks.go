@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 // Task status constants matching Claude Code Agent Teams.
@@ -95,60 +97,89 @@ func parseTasksFromList(data []byte) ([]Task, error) {
 	return wrapper.Tasks, nil
 }
 
+func withTasksLock(teamName string, fn func() error) error {
+	// Lock on a stable sidecar file. Writes use atomic rename, so we can't lock
+	// the target file directly (flock is per-inode).
+	//
+	// Keep the lock in ~/.claude/tasks to avoid triggering fsnotify events on the
+	// team task directory itself.
+	lockPath := filepath.Join(ClaudeTasksDir(), fmt.Sprintf(".%s.amq.lock", teamName))
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		return fmt.Errorf("ensure tasks root dir: %w", err)
+	}
+	return lock.WithExclusiveFileLock(lockPath, fn)
+}
+
 // ClaimTask assigns a task to an agent.
 // It checks dependency gating: all depends_on tasks must be completed first.
 func ClaimTask(teamName, taskID, agentID string) error {
-	// Check dependency gating before claiming.
-	tasks, err := ListTasks(teamName)
-	if err != nil {
-		return fmt.Errorf("check dependencies: %w", err)
-	}
-	statusMap := make(map[string]string, len(tasks))
-	var target *Task
-	for i := range tasks {
-		statusMap[tasks[i].ID] = tasks[i].Status
-		if tasks[i].ID == taskID {
-			target = &tasks[i]
+	return withTasksLock(teamName, func() error {
+		// Check dependency gating before claiming.
+		tasks, err := ListTasks(teamName)
+		if err != nil {
+			return fmt.Errorf("check dependencies: %w", err)
 		}
-	}
-	if target != nil && len(target.DependsOn) > 0 {
-		var blocked []string
-		for _, dep := range target.DependsOn {
-			if statusMap[dep] != TaskStatusCompleted {
-				blocked = append(blocked, dep)
+		statusMap := make(map[string]string, len(tasks))
+		var target *Task
+		for i := range tasks {
+			statusMap[tasks[i].ID] = tasks[i].Status
+			if tasks[i].ID == taskID {
+				target = &tasks[i]
 			}
 		}
-		if len(blocked) > 0 {
-			return fmt.Errorf("task %q is blocked by incomplete dependencies: %v", taskID, blocked)
+		if target != nil && len(target.DependsOn) > 0 {
+			var blocked []string
+			for _, dep := range target.DependsOn {
+				if statusMap[dep] != TaskStatusCompleted {
+					blocked = append(blocked, dep)
+				}
+			}
+			if len(blocked) > 0 {
+				return fmt.Errorf("task %q is blocked by incomplete dependencies: %v", taskID, blocked)
+			}
 		}
-	}
 
-	return updateTaskRaw(teamName, taskID, func(raw map[string]any) error {
-		status, _ := raw["status"].(string)
-		if status == TaskStatusCompleted {
-			return fmt.Errorf("task %q is already completed", taskID)
-		}
-		assigned, _ := raw["assigned_to"].(string)
-		if assigned != "" && assigned != agentID {
-			return fmt.Errorf("task %q is already assigned to %q", taskID, assigned)
-		}
-		raw["status"] = TaskStatusInProgress
-		raw["assigned_to"] = agentID
-		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339)
-		return nil
+		return updateTaskRaw(teamName, taskID, func(raw map[string]any) error {
+			status, _ := raw["status"].(string)
+			if status == TaskStatusCompleted {
+				return fmt.Errorf("task %q is already completed", taskID)
+			}
+			assigned, _ := raw["assigned_to"].(string)
+			if assigned != "" && !strings.EqualFold(assigned, agentID) {
+				return fmt.Errorf("task %q is already assigned to %q", taskID, assigned)
+			}
+			raw["status"] = TaskStatusInProgress
+			raw["assigned_to"] = agentID
+			raw["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+			return nil
+		})
 	})
 }
 
 // CompleteTask marks a task as completed.
 func CompleteTask(teamName, taskID, agentID string) error {
-	return updateTaskRaw(teamName, taskID, func(raw map[string]any) error {
-		assigned, _ := raw["assigned_to"].(string)
-		if assigned != "" && assigned != agentID {
-			return fmt.Errorf("task %q is assigned to %q, not %q", taskID, assigned, agentID)
-		}
-		raw["status"] = TaskStatusCompleted
-		raw["updated_at"] = time.Now().UTC().Format(time.RFC3339)
-		return nil
+	return withTasksLock(teamName, func() error {
+		return updateTaskRaw(teamName, taskID, func(raw map[string]any) error {
+			status, _ := raw["status"].(string)
+			switch status {
+			case TaskStatusCompleted:
+				return fmt.Errorf("task %q is already completed", taskID)
+			case TaskStatusInProgress:
+				// ok
+			case TaskStatusPending:
+				return fmt.Errorf("task %q is not in progress (status=%q)", taskID, status)
+			default:
+				return fmt.Errorf("task %q has invalid status %q", taskID, status)
+			}
+
+			assigned, _ := raw["assigned_to"].(string)
+			if assigned != "" && !strings.EqualFold(assigned, agentID) {
+				return fmt.Errorf("task %q is assigned to %q, not %q", taskID, assigned, agentID)
+			}
+			raw["status"] = TaskStatusCompleted
+			raw["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+			return nil
+		})
 	})
 }
 
@@ -169,6 +200,9 @@ func updateTaskRaw(teamName, taskID string, mutate func(map[string]any) error) e
 	// Try per-file format
 	entries, err := os.ReadDir(tasksDir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("task %q not found in team %q", taskID, teamName)
+		}
 		return fmt.Errorf("read tasks directory: %w", err)
 	}
 

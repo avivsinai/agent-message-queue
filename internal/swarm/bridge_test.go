@@ -1,7 +1,12 @@
 package swarm
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func TestPollForChanges_NewTask(t *testing.T) {
@@ -333,5 +338,72 @@ func TestIsRelevantToAgent(t *testing.T) {
 				t.Errorf("isRelevantToAgent = %v, want %v", got, tt.relevant)
 			}
 		})
+	}
+}
+
+func TestDeliverBridgeEvent_DeliversMessage(t *testing.T) {
+	root := t.TempDir()
+	cfg := BridgeConfig{
+		TeamName:    "bridge-team-delivery",
+		AgentHandle: "codex",
+		AgentID:     "ext_codex_1",
+		AMQRoot:     root,
+	}
+
+	event := BridgeEvent{
+		Type:    "task_assigned",
+		TaskID:  "t1",
+		Title:   "Do the thing",
+		Status:  TaskStatusInProgress,
+		Details: "assigned_to=ext_codex_1",
+	}
+
+	if err := deliverBridgeEvent(cfg, event); err != nil {
+		t.Fatalf("deliverBridgeEvent: %v", err)
+	}
+
+	newDir := fsq.AgentInboxNew(root, "codex")
+	entries, err := os.ReadDir(newDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", newDir, err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+
+	msgPath := filepath.Join(newDir, entries[0].Name())
+	msg, err := format.ReadMessageFile(msgPath)
+	if err != nil {
+		t.Fatalf("ReadMessageFile: %v", err)
+	}
+
+	if msg.Header.From != "swarm-bridge" {
+		t.Errorf("Header.From = %q, want %q", msg.Header.From, "swarm-bridge")
+	}
+	if len(msg.Header.To) != 1 || msg.Header.To[0] != "codex" {
+		t.Errorf("Header.To = %v, want [%q]", msg.Header.To, "codex")
+	}
+	if msg.Header.Thread != "swarm/bridge-team-delivery" {
+		t.Errorf("Header.Thread = %q, want %q", msg.Header.Thread, "swarm/bridge-team-delivery")
+	}
+	if msg.Header.Kind != format.KindStatus {
+		t.Errorf("Header.Kind = %q, want %q", msg.Header.Kind, format.KindStatus)
+	}
+	if msg.Header.Priority != format.PriorityNormal {
+		t.Errorf("Header.Priority = %q, want %q", msg.Header.Priority, format.PriorityNormal)
+	}
+
+	if msg.Header.Context["team"] != "bridge-team-delivery" {
+		t.Errorf("Context.team = %v, want %q", msg.Header.Context["team"], "bridge-team-delivery")
+	}
+	if msg.Header.Context["task_id"] != "t1" {
+		t.Errorf("Context.task_id = %v, want %q", msg.Header.Context["task_id"], "t1")
+	}
+	if msg.Header.Context["event"] != "task_assigned" {
+		t.Errorf("Context.event = %v, want %q", msg.Header.Context["event"], "task_assigned")
+	}
+
+	if msg.Body == "" {
+		t.Fatal("expected non-empty body")
 	}
 }

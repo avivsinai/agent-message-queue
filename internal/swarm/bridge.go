@@ -25,7 +25,7 @@ type BridgeConfig struct {
 
 // BridgeEvent represents a task change detected by the bridge.
 type BridgeEvent struct {
-	Type    string `json:"type"` // "task_assigned", "task_unblocked", "task_completed"
+	Type    string `json:"type"` // "task_added", "task_updated", "task_assigned", "task_unblocked", "task_completed"
 	TaskID  string `json:"task_id"`
 	Title   string `json:"title"`
 	Status  string `json:"status"`
@@ -37,6 +37,19 @@ func BridgeMode(cfg BridgeConfig) string {
 	if cfg.UsePoll {
 		return "polling"
 	}
+
+	// Detect whether fsnotify is actually usable for this team on this host.
+	// This matches RunBridge's fallback behavior (fsnotify -> polling).
+	tasksDir := TeamTasksDir(cfg.TeamName)
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return "polling"
+	}
+	defer func() { _ = watcher.Close() }()
+	if err := watcher.Add(tasksDir); err != nil {
+		return "polling"
+	}
+
 	return "fsnotify"
 }
 
@@ -280,7 +293,11 @@ func allDepsCompleted(deps []string, statusMap map[string]string) bool {
 }
 
 func isRelevantToAgent(task Task, handle, agentID string) bool {
-	// Task is relevant if assigned to this agent or unassigned (claimable)
+	// Task is relevant if assigned to this agent. Unassigned tasks are also
+	// considered relevant so bridges can surface claimable work.
+	//
+	// Note: If multiple external agents run bridges for the same team, unassigned
+	// tasks will fan out to all of them.
 	if task.AssignedTo == "" {
 		return true
 	}
@@ -308,7 +325,7 @@ func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
 		Header: format.Header{
 			Schema:   format.CurrentSchema,
 			ID:       id,
-			From:     cfg.AgentHandle,
+			From:     "swarm-bridge",
 			To:       []string{cfg.AgentHandle},
 			Thread:   fmt.Sprintf("swarm/%s", cfg.TeamName),
 			Subject:  subject,
