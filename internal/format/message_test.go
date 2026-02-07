@@ -347,6 +347,6 @@ type testTimestamped struct {
 	raw     time.Time
 }
 
-func (t testTimestamped) GetCreated() string  { return t.created }
-func (t testTimestamped) GetID() string        { return t.id }
+func (t testTimestamped) GetCreated() string    { return t.created }
+func (t testTimestamped) GetID() string         { return t.id }
 func (t testTimestamped) GetRawTime() time.Time { return t.raw }
