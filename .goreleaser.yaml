@@ -33,6 +33,7 @@ brews:
     repository:
       owner: avivsinai
       name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Formula
     homepage: "https://github.com/avivsinai/agent-message-queue"
     description: "Agent Message Queue - file-based inter-agent messaging for Claude Code and Codex CLI"
