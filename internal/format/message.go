@@ -19,6 +19,9 @@ const (
 	CurrentVersion = 1
 )
 
+// MaxMessageSize is the maximum allowed message file size (10 MB).
+const MaxMessageSize = 10 * 1024 * 1024
+
 const (
 	frontmatterStartLine = "---json"
 	frontmatterStart     = frontmatterStartLine + "\n"
@@ -29,6 +32,7 @@ const (
 var (
 	ErrMissingFrontmatterStart = errors.New("missing frontmatter start")
 	ErrMissingFrontmatterEnd   = errors.New("missing frontmatter end")
+	ErrMessageTooLarge         = errors.New("message exceeds maximum size")
 )
 
 // Priority constants for co-op mode message handling.
@@ -159,6 +163,13 @@ func ParseHeader(data []byte) (Header, error) {
 }
 
 func ReadMessageFile(path string) (Message, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return Message{}, err
+	}
+	if info.Size() > MaxMessageSize {
+		return Message{}, fmt.Errorf("%w: %d bytes", ErrMessageTooLarge, info.Size())
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Message{}, err
@@ -176,7 +187,8 @@ func ReadHeaderFile(path string) (Header, error) {
 }
 
 func ReadHeader(r io.Reader) (Header, error) {
-	br := bufio.NewReader(r)
+	lr := io.LimitReader(r, MaxMessageSize)
+	br := bufio.NewReader(lr)
 	line, err := br.ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return Header{}, err
@@ -202,6 +214,9 @@ func ReadHeader(r io.Reader) (Header, error) {
 }
 
 func splitFrontmatter(data []byte) ([]byte, []byte, error) {
+	if len(data) > MaxMessageSize {
+		return nil, nil, fmt.Errorf("%w: %d bytes", ErrMessageTooLarge, len(data))
+	}
 	// Normalize CRLF to LF for cross-platform compatibility
 	// (handles files edited on Windows or by editors that normalize line endings)
 	data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))

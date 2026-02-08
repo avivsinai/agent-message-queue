@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 1.0.5
+version: 1.0.7
 description: Coordinate agents via the AMQ CLI for file-based inter-agent messaging. Use when you need to send messages to another agent (Claude/Codex), receive messages from partner agents, set up co-op mode between Claude Code and Codex CLI, or manage agent-to-agent communication in any multi-agent workflow. Triggers include "message codex", "talk to claude", "collaborate with partner agent", "AMQ", "inter-agent messaging", or "agent coordination".
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
@@ -24,11 +24,11 @@ Verify: `amq --version`
 
 ```bash
 # One-time project setup (run once per project)
-amq coop start claude    # Initializes if needed, then tells you to run: claude
-amq coop start codex     # Same for Codex
-
-# Or initialize manually
 amq coop init            # Creates .amqrc, mailboxes, updates .gitignore
+
+# Per-session setup (run in each agent terminal)
+amq coop start claude    # Initializes if needed, starts wake, then tells you: Run: claude
+amq coop start codex     # Same for Codex
 ```
 
 **As Claude** (talking to Codex):
@@ -136,12 +136,17 @@ Pick one mode per task; the initiator decides or delegates.
 
 Run once per project:
 ```bash
-amq coop start claude   # Initializes + tells you to run: claude
+amq coop init            # Creates .amqrc, mailboxes, updates .gitignore
 ```
 
-In a second terminal:
+Terminal 1:
 ```bash
-amq coop start codex    # Tells you to run: codex
+amq coop start claude   # Starts wake + tells you: Run: claude
+```
+
+Terminal 2:
+```bash
+amq coop start codex    # Starts wake + tells you: Run: codex
 ```
 
 ### Multiple Pairs (Isolated Sessions)
@@ -242,7 +247,7 @@ amq dlq list --me claude                  # List failed messages
 amq dlq read --me claude --id <dlq_id>    # Inspect failure details
 amq dlq retry --me claude --id <dlq_id>   # Retry (move back to inbox)
 amq dlq retry --me claude --all [--force] # Retry all
-amq dlq purge --me claude --older-than 24h # Clean old DLQ entries
+amq dlq purge --me claude --older-than 24h --yes # Clean old DLQ entries
 ```
 
 ### Upgrade
@@ -255,7 +260,7 @@ amq --no-update-check ...      # Disable update hint for this command
 ```bash
 amq thread --id p2p/claude__codex --include-body        # View thread
 amq presence set --me claude --status busy --note "reviewing"  # Set presence
-amq cleanup --tmp-older-than 36h                        # Clean stale tmp
+amq cleanup --tmp-older-than 36h --yes                  # Clean stale tmp
 ```
 
 ## Message Kinds
@@ -292,9 +297,84 @@ amq send --to codex --kind review_request \
 - Delivery: atomic Maildir (tmp -> new -> cur)
 - Never edit message files directly
 
+## Swarm Mode: Agent Teams Integration
+
+Enable Codex agents to participate in Claude Code Agent Teams.
+
+### Quick Start
+```bash
+amq swarm list                                          # Discover teams
+amq swarm join --team my-team --me codex                # Register in team
+amq swarm tasks --team my-team                          # View shared tasks
+amq swarm claim --team my-team --task t1 --me codex     # Claim work
+amq swarm complete --team my-team --task t1 --me codex  # Mark done
+amq swarm bridge --team my-team --me codex              # Run task→AMQ bridge
+```
+
+### How It Works
+
+Claude Code Agent Teams stores team config at `~/.claude/teams/{name}/config.json`
+and tasks at `~/.claude/tasks/{name}/`. AMQ reads/writes these files directly:
+
+- **join** registers a Codex agent in the team config so Claude Code teammates discover it
+- **tasks/claim/complete** interact with the shared task list (preserving unknown fields)
+- **bridge** watches the task list and delivers AMQ notifications when tasks change
+
+Communication is asymmetric:
+- Task notifications flow via `amq swarm bridge` (task lifecycle only).
+- Claude Code teammates can `amq send` to external agents.
+- External agents cannot DM a specific Claude Code teammate via AMQ alone. External→team messages must be relayed by the team leader (drain AMQ, then forward via Claude Code internal messaging).
+
+### Leader: Relay External → Teammate Messages
+
+**External agent (Codex)**: send to the leader's AMQ handle and include the intended teammate in the subject/body:
+```bash
+amq send --me codex --to claude --thread swarm/my-team --labels swarm \
+  --subject "To: builder - question about task t1" \
+  --body "..."
+```
+
+**Leader (Claude Code)**: drain and forward:
+```bash
+amq drain --me claude --include-body
+```
+
+Then forward the message to the intended teammate using Claude Code's internal SendMessage (include the AMQ message ID so it can be referenced later). Optionally reply back to Codex:
+```bash
+amq reply --me claude --id <msg_id> --kind status --body "Forwarded to builder via SendMessage."
+```
+
+For tighter loops, use `amq monitor --me claude --include-body` (watch+drain in one command) or run `amq wake --me claude &` for terminal notifications.
+
+### Bridge
+
+Run alongside the Codex session:
+```bash
+amq swarm bridge --team my-team --me codex &
+```
+
+The bridge watches `~/.claude/tasks/{team}/` via fsnotify by default (falls back to polling).
+Use `--poll` to force polling; `--poll-interval` controls the interval (default 3s).
+
+It delivers AMQ messages (labels include `swarm`) for:
+- New tasks (unassigned or assigned to this agent)
+- Task assignments
+- Task completions
+
+**Wake compatibility**: bridge notifications are standard AMQ inbox messages, so `amq wake` will detect them automatically.
+To treat swarm notifications as interrupts, configure wake to match the bridge label and priority:
+```bash
+amq wake --me codex --interrupt-label swarm --interrupt-priority normal &
+```
+
+### Leave a Team
+```bash
+amq swarm leave --team my-team --agent-id ext_codex_20260205T120000
+```
+
 ## References
 
 Read these when you need deeper context:
 
 - `references/coop-mode.md` — Read when setting up or debugging co-op workflows between agents
-- `references/message-format.md` — Read when you need the full frontmatter schema (all fields, types, defaults)
+- `references/message-format.md` — Frontmatter schema cheat sheet (fields, types, defaults)

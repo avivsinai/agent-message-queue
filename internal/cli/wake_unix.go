@@ -216,6 +216,7 @@ func runWake(args []string) error {
 	interruptCmdFlag := fs.String("interrupt-cmd", "ctrl-c", "Interrupt command to inject (ctrl-c or none)")
 	interruptNoticeFlag := fs.String("interrupt-notice", "", "Custom interrupt notice (default: auto)")
 	interruptCooldownFlag := fs.Duration("interrupt-cooldown", 7*time.Second, "Minimum time between interrupts")
+	debugFlag := fs.Bool("debug", false, "Log injection diagnostics to stderr")
 
 	usage := usageWithFlags(fs, "amq wake --me <agent> [options]",
 		"Background waker: injects terminal notification when messages arrive.",
@@ -288,6 +289,7 @@ func runWake(args []string) error {
 		strict:            common.Strict,
 		fallbackWarn:      true,
 		injectMode:        *injectModeFlag,
+		debug:             *debugFlag,
 		interrupt:         *interruptFlag,
 		interruptLabel:    interruptLabel,
 		interruptPriority: interruptPriority,

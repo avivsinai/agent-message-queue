@@ -14,7 +14,7 @@
       acks/
         received/
         sent/
-  threads/                (optional)
+  threads/                (not implemented; threads are reconstructed on-the-fly)
   meta/
     config.json
 

@@ -4,8 +4,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// handleRe matches valid agent handles: lowercase letters, digits, underscore, hyphen.
+var handleRe = regexp.MustCompile(`^[a-z0-9_-]+$`)
+
+// ValidateHandle returns an error if the agent handle contains path traversal
+// characters or does not match the allowed pattern.
+func ValidateHandle(agent string) error {
+	if agent == "" || strings.TrimSpace(agent) == "" {
+		return fmt.Errorf("agent handle is empty")
+	}
+	if strings.Contains(agent, "..") || strings.Contains(agent, "/") || strings.Contains(agent, string(filepath.Separator)) {
+		return fmt.Errorf("agent handle contains path traversal: %q", agent)
+	}
+	if !handleRe.MatchString(agent) {
+		return fmt.Errorf("agent handle must match [a-z0-9_-]+: %q", agent)
+	}
+	return nil
+}
 
 // Path helpers for standard mailbox directories.
 
@@ -63,8 +82,8 @@ func EnsureRootDirs(root string) error {
 }
 
 func EnsureAgentDirs(root, agent string) error {
-	if strings.TrimSpace(agent) == "" {
-		return fmt.Errorf("agent handle is empty")
+	if err := ValidateHandle(agent); err != nil {
+		return err
 	}
 	dirs := []string{
 		AgentInboxTmp(root, agent),

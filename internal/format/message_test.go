@@ -1,7 +1,12 @@
 package format
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestMessageRoundTrip(t *testing.T) {
@@ -134,3 +139,184 @@ func TestValidKind(t *testing.T) {
 		}
 	}
 }
+
+func TestParseMalformedFrontmatter_MissingStart(t *testing.T) {
+	data := []byte(`{"id":"test"}` + "\n---\nHello\n")
+	_, err := ParseMessage(data)
+	if !errors.Is(err, ErrMissingFrontmatterStart) {
+		t.Errorf("expected ErrMissingFrontmatterStart, got %v", err)
+	}
+}
+
+func TestParseMalformedFrontmatter_MissingEnd(t *testing.T) {
+	data := []byte("---json\n{\"id\":\"test\"}\nno closing delimiter\n")
+	_, err := ParseMessage(data)
+	if !errors.Is(err, ErrMissingFrontmatterEnd) {
+		t.Errorf("expected ErrMissingFrontmatterEnd, got %v", err)
+	}
+}
+
+func TestParseMalformedFrontmatter_CorruptJSON(t *testing.T) {
+	data := []byte("---json\n{not valid json}\n---\nHello\n")
+	_, err := ParseMessage(data)
+	if err == nil {
+		t.Fatal("expected error for corrupt JSON")
+	}
+	if !strings.Contains(err.Error(), "parse frontmatter") {
+		t.Errorf("expected parse frontmatter error, got %v", err)
+	}
+}
+
+func TestParseEmptyBody(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			Schema:  1,
+			ID:      "test-empty-body",
+			From:    "alice",
+			To:      []string{"bob"},
+			Created: "2025-01-01T00:00:00Z",
+		},
+		Body: "",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	parsed, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if parsed.Body != "" {
+		t.Errorf("expected empty body, got %q", parsed.Body)
+	}
+}
+
+func TestParseCRLFNormalization(t *testing.T) {
+	// Build a message with CRLF line endings
+	raw := "---json\r\n{\"schema\":1,\"id\":\"crlf-test\",\"from\":\"alice\",\"to\":[\"bob\"],\"created\":\"2025-01-01T00:00:00Z\"}\r\n---\r\nHello CRLF\r\n"
+	parsed, err := ParseMessage([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse CRLF message: %v", err)
+	}
+	if parsed.Header.ID != "crlf-test" {
+		t.Errorf("expected id crlf-test, got %s", parsed.Header.ID)
+	}
+	if !strings.Contains(parsed.Body, "Hello CRLF") {
+		t.Errorf("expected body to contain 'Hello CRLF', got %q", parsed.Body)
+	}
+}
+
+func TestReadHeader_Streaming(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			Schema:  1,
+			ID:      "stream-test",
+			From:    "alice",
+			To:      []string{"bob"},
+			Created: "2025-01-01T00:00:00Z",
+		},
+		Body: "Some body text\n",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	r := strings.NewReader(string(data))
+	header, err := ReadHeader(r)
+	if err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+	if header.ID != "stream-test" {
+		t.Errorf("expected id stream-test, got %s", header.ID)
+	}
+	if header.From != "alice" {
+		t.Errorf("expected from alice, got %s", header.From)
+	}
+}
+
+func TestReadHeaderFile(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			Schema:  1,
+			ID:      "file-test",
+			From:    "codex",
+			To:      []string{"claude"},
+			Created: "2025-01-01T00:00:00Z",
+		},
+		Body: "Body content\n",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.md")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	header, err := ReadHeaderFile(path)
+	if err != nil {
+		t.Fatalf("ReadHeaderFile: %v", err)
+	}
+	if header.ID != "file-test" {
+		t.Errorf("expected id file-test, got %s", header.ID)
+	}
+}
+
+func TestReadMessageFile_SizeLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.md")
+	// Create a file larger than MaxMessageSize
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Write MaxMessageSize + 1 bytes
+	if err := f.Truncate(MaxMessageSize + 1); err != nil {
+		_ = f.Close()
+		t.Fatalf("truncate: %v", err)
+	}
+	_ = f.Close()
+
+	_, err = ReadMessageFile(path)
+	if !errors.Is(err, ErrMessageTooLarge) {
+		t.Errorf("expected ErrMessageTooLarge, got %v", err)
+	}
+}
+
+func TestSplitFrontmatter_SizeLimit(t *testing.T) {
+	data := make([]byte, MaxMessageSize+1)
+	_, err := ParseMessage(data)
+	if !errors.Is(err, ErrMessageTooLarge) {
+		t.Errorf("expected ErrMessageTooLarge, got %v", err)
+	}
+}
+
+func TestSortByTimestamp(t *testing.T) {
+	headers := []testTimestamped{
+		{id: "c", created: "2025-01-03T00:00:00Z", raw: time.Date(2025, 1, 3, 0, 0, 0, 0, time.UTC)},
+		{id: "a", created: "2025-01-01T00:00:00Z", raw: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{id: "b", created: "2025-01-02T00:00:00Z", raw: time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)},
+		{id: "d", created: "2025-01-02T00:00:00Z", raw: time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)},
+	}
+
+	SortByTimestamp(headers)
+
+	expected := []string{"a", "b", "d", "c"}
+	for i, h := range headers {
+		if h.id != expected[i] {
+			t.Errorf("position %d: expected %s, got %s", i, expected[i], h.id)
+		}
+	}
+}
+
+// testTimestamped implements the Timestamped interface for testing.
+type testTimestamped struct {
+	id      string
+	created string
+	raw     time.Time
+}
+
+func (t testTimestamped) GetCreated() string    { return t.created }
+func (t testTimestamped) GetID() string         { return t.id }
+func (t testTimestamped) GetRawTime() time.Time { return t.raw }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -153,50 +152,7 @@ func runMonitor(args []string) error {
 }
 
 func drainMonitorItems(root, me string, doAck bool, items []monitorItem) {
-	// Process each message: move to cur (or DLQ for parse errors), optionally ack
-	for i := range items {
-		item := &items[i]
-
-		// Move parse errors to DLQ instead of cur
-		if item.ParseError != "" {
-			reason := item.FailureReason
-			if reason == "" {
-				reason = "parse_error"
-			}
-			if _, err := fsq.MoveToDLQ(root, me, item.Filename, item.ID, reason, item.ParseError); err != nil {
-				_ = writeStderr("warning: failed to move %s to DLQ: %v\n", item.Filename, err)
-			} else {
-				item.MovedToDLQ = true
-			}
-			continue
-		}
-
-		// Move new -> cur
-		if err := fsq.MoveNewToCur(root, me, item.Filename); err != nil {
-			if os.IsNotExist(err) {
-				// Likely moved by another drain; check if it's already in cur.
-				curPath := filepath.Join(fsq.AgentInboxCur(root, me), item.Filename)
-				if _, statErr := os.Stat(curPath); statErr == nil {
-					item.MovedToCur = true
-				} else if statErr != nil && !os.IsNotExist(statErr) {
-					_ = writeStderr("warning: failed to stat %s in cur: %v\n", item.Filename, statErr)
-				}
-			} else {
-				_ = writeStderr("warning: failed to move %s to cur: %v\n", item.Filename, err)
-			}
-		} else {
-			item.MovedToCur = true
-		}
-
-		// Ack if required and move succeeded (gate acking on successful move)
-		if doAck && item.AckRequired && item.ParseError == "" && item.MovedToCur {
-			if err := ackMessage(root, me, item); err != nil {
-				_ = writeStderr("warning: failed to ack %s: %v\n", item.ID, err)
-			} else {
-				item.Acked = true
-			}
-		}
-	}
+	processInboxItems(root, me, doAck, items)
 }
 
 func monitorWithFsnotify(ctx context.Context, inboxNew string) (string, error) {

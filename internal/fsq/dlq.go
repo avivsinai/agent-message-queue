@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,19 +175,21 @@ func RetryFromDLQ(root, agent, dlqFilename string, force bool) error {
 	updatedData, err := serializeDLQMessage(*envelope, originalContent)
 	if err != nil {
 		// Best effort: message is already in inbox
+		log.Printf("dlq: failed to serialize updated envelope for %s: %v", dlqFilename, err)
 		return nil
 	}
 
 	// Handle based on source location
 	curDir := AgentDLQCur(root, agent)
 	if err := os.MkdirAll(curDir, 0o700); err != nil {
+		log.Printf("dlq: failed to create cur dir for %s: %v", agent, err)
 		return nil
 	}
 
 	if box == BoxNew {
 		// Source is dlq/new: write to dlq/cur atomically, then remove from dlq/new
 		if _, err := WriteFileAtomic(curDir, dlqFilename, updatedData, 0o600); err != nil {
-			// Best effort
+			log.Printf("dlq: failed to write updated envelope to cur for %s: %v", dlqFilename, err)
 			return nil
 		}
 		_ = os.Remove(dlqPath)
@@ -194,7 +197,7 @@ func RetryFromDLQ(root, agent, dlqFilename string, force bool) error {
 	} else {
 		// Source is dlq/cur: update in place atomically (same location)
 		if _, err := WriteFileAtomic(curDir, dlqFilename, updatedData, 0o600); err != nil {
-			// Best effort
+			log.Printf("dlq: failed to update envelope in cur for %s: %v", dlqFilename, err)
 			return nil
 		}
 	}
