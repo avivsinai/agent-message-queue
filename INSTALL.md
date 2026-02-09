@@ -143,7 +143,11 @@ amq --version
 
 ## Upgrading
 
-Re-run the install script:
+```bash
+amq upgrade
+```
+
+Or re-run the install script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
