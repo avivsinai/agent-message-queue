@@ -148,3 +148,11 @@ Re-run the install script:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
+
+### Disabling Update Notifications
+
+For CI or offline environments:
+```bash
+amq --no-update-check ...      # Per-command
+export AMQ_NO_UPDATE_CHECK=1   # Global
+```

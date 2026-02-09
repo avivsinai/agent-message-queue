@@ -22,10 +22,6 @@ AMQ enables **autonomous multi-agent collaboration**: agents message each other 
 - **Built for agents** — Priority levels, message kinds, threading, acknowledgments—all the primitives agents need.
 - **Swarm mode** — Join Claude Code Agent Teams, claim tasks, and bridge task notifications into AMQ.
 
-
-[![Watch the demo](docs/assets/demo-thumbnail.png)](https://github.com/user-attachments/assets/55794884-9d62-4382-9cd9-197ddd5aaf70)
-
-
 ## Installation
 
 ### 1. Install Binary (macOS/Linux)
@@ -60,13 +56,7 @@ For manual installation or troubleshooting, see [INSTALL.md](INSTALL.md).
 ### Updating
 
 ```bash
-amq upgrade  # Self-updates to latest release
-```
-
-To disable update notifications (for CI/offline):
-```bash
-amq --no-update-check ...      # Per-command
-export AMQ_NO_UPDATE_CHECK=1   # Global
+amq upgrade
 ```
 
 ## Quick Start
@@ -121,50 +111,17 @@ amq reply --id <msg_id> --kind review_response --body "LGTM with comments"
 
 ## Message Kinds & Priority
 
-AMQ messages can include metadata for smart agent handling:
-
-| Kind | Reply Kind | Use Case |
-|------|------------|----------|
-| `review_request` | `review_response` | Code review requests |
-| `question` | `answer` | Questions needing answers |
-| `decision` | — | Design decisions |
-| `brainstorm` | — | Open-ended discussion |
-| `status` | — | FYI updates |
-| `todo` | — | Task assignments |
-
-| Priority | Agent Behavior |
-|----------|----------------|
-| `urgent` | Interrupt current work, respond immediately |
-| `normal` | Add to TODO list, respond after current task |
-| `low` | Batch for end of session |
+AMQ messages support kinds (`review_request`, `question`, `todo`, etc.) and priority levels (`urgent`, `normal`, `low`). See [COOP.md](COOP.md) for the full protocol.
 
 ## Co-op Mode
 
-For real-time Claude Code + Codex CLI collaboration, see [COOP.md](COOP.md).
-
-**Quick setup:**
-```bash
-amq coop exec claude       # Terminal 1: Claude Code
-amq coop exec codex        # Terminal 2: Codex CLI
-```
+For real-time Claude Code + Codex CLI collaboration patterns, roles, and phased workflows, see [COOP.md](COOP.md).
 
 ## Swarm Mode (Claude Code Agent Teams)
 
-Swarm mode bridges Claude Code Agent Teams' shared task list into AMQ so external agents (Codex, etc.) can participate.
+External agents (Codex, etc.) can join Claude Code Agent Teams via `amq swarm join`, claim tasks, and receive notifications through `amq swarm bridge`. Note: the bridge delivers task notifications only; direct messages require relay through the team leader.
 
-Note: the swarm bridge only emits task lifecycle notifications. Direct messages from an external agent into the Claude Code team must be drained by the team leader and forwarded via Claude Code internal messaging.
-
-Quick start (6 commands):
-```bash
-amq swarm list
-amq swarm join --team my-team --me codex
-amq swarm tasks --team my-team
-amq swarm claim --team my-team --task t1 --me codex
-amq swarm complete --team my-team --task t1 --me codex
-amq swarm bridge --team my-team --me codex
-```
-
-For a full command reference, see [CLAUDE.md](CLAUDE.md).
+For the full command reference, see [CLAUDE.md](CLAUDE.md).
 
 ## How It Works
 
@@ -175,20 +132,7 @@ AMQ uses the battle-tested [Maildir](https://cr.yp.to/proto/maildir.html) format
 3. **Deliver** — Atomic rename to `new/` (never partial)
 4. **Process** — Reader moves to `cur/` after reading
 
-This guarantees crash-safety: if the process dies mid-write, no corrupt message appears in the inbox.
-
-```
-.agent-mail/
-├── agents/
-│   ├── claude/
-│   │   ├── inbox/{tmp,new,cur}/   # Incoming messages
-│   │   ├── outbox/sent/           # Sent copies (audit trail)
-│   │   ├── acks/{received,sent}/  # Acknowledgments
-│   │   └── dlq/{tmp,new,cur}/     # Dead letter queue
-│   └── codex/
-│       └── ...
-└── meta/config.json               # Agent registry
-```
+This guarantees crash-safety: if the process dies mid-write, no corrupt message appears in the inbox. See [CLAUDE.md](CLAUDE.md) for the full directory layout.
 
 ## Documentation
 
@@ -220,17 +164,8 @@ The core queue works on Windows. The `amq wake` notification feature requires WS
 **Is this production-ready?**
 For local development workflows, yes. AMQ is intentionally simple—it's not trying to be a distributed message broker.
 
-**How does AMQ compare to MCP Agent Mail or Gas Town?**
-
-All three solve agent coordination, but for different use cases:
-
-- **[MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail)** is a server-based coordination stack with shared inboxes, file-reservation leases, Git-backed archives, and SQLite/FTS search. It also has a commercial iOS companion for remote oversight. Best when you want centralized coordination, search, and mobile monitoring.
-
-- **[Gas Town](https://github.com/steveyegge/gastown)** is a larger-scale orchestration system built around tmux and the Beads data plane, with multiple agent roles (Mayor, Witness, Refinery). Aimed at managing many parallel agents with richer orchestration primitives.
-
-- **AMQ** is intentionally minimal: a single binary, local file queue, Maildir-style atomic delivery, no server/database/daemon. Best for 2–3 agents on one machine when you want something you can understand and debug in minutes.
-
-Other multi-agent orchestration frameworks exist (e.g., [Claude-Flow](https://github.com/ruvnet/claude-flow), [ccswarm](https://github.com/nwiizo/ccswarm)) with broader automation and agent-pool features. AMQ stays intentionally small.
+**How does AMQ compare to other multi-agent tools?**
+Tools like [MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) (server-based coordination + SQLite), [Gas Town](https://github.com/steveyegge/gastown) (tmux-based orchestration), and others offer richer features. AMQ is intentionally minimal: single binary, no server, Maildir delivery. Best for 2-3 agents on one machine.
 
 ## License
 
