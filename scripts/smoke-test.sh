@@ -93,4 +93,25 @@ if ! printf '%s' "$exec_out" | grep -q "agent-mail"; then
 fi
 echo "coop exec ok"
 
+# --- coop exec --root with existing .amqrc (different root) ---
+ISODIR="$(mktemp -d)"
+iso_cleanup() {
+  rm -rf "$ISODIR"
+}
+trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup' EXIT
+
+# Set up default root + .amqrc
+ISODEFAULT="$ISODIR/agent-mail"
+"$BIN" init --root "$ISODEFAULT" --agents claude,codex
+printf '{"root": "agent-mail"}\n' > "$ISODIR/.amqrc"
+
+# Now exec with a different --root — should NOT conflict with .amqrc
+iso_out="$(cd "$ISODIR" && "$BIN" coop exec --root agent-mail/feature-x --no-wake -y bash -- -c 'echo $AM_ROOT:$AM_ME' 2>/dev/null)"
+if ! printf '%s' "$iso_out" | grep -q "feature-x"; then
+  echo "coop exec --root did not use isolated root"
+  echo "got: $iso_out"
+  exit 1
+fi
+echo "coop exec --root isolation ok"
+
 echo "smoke test ok"

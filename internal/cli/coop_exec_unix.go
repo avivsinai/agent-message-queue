@@ -92,32 +92,37 @@ func runCoopExec(args []string) error {
 			return fmt.Errorf("root %q does not exist; run 'amq coop init' first or remove --no-init", root)
 		}
 
-		if !*yesFlag {
-			ok, err := confirmPromptYes("No .amqrc found. Initialize co-op mode in current directory?")
-			if err != nil {
-				return err
-			}
-			if !ok {
-				return fmt.Errorf("initialization cancelled")
-			}
-		}
-
-		var initArgs []string
 		if *rootFlag != "" {
-			initArgs = append(initArgs, "--root", *rootFlag)
-		}
-		if err := runCoopInitInternal(initArgs, false); err != nil {
-			return fmt.Errorf("init failed: %w", err)
-		}
+			// Explicit --root: just create the directory + mailboxes.
+			// Don't touch .amqrc (it belongs to the default root).
+			if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
+				return fmt.Errorf("failed to create root %q: %w", root, err)
+			}
+		} else {
+			// No --root flag and no .amqrc found: run full coop init (writes .amqrc).
+			if !*yesFlag {
+				ok, err := confirmPromptYes("No .amqrc found. Initialize co-op mode in current directory?")
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return fmt.Errorf("initialization cancelled")
+				}
+			}
 
-		// Reload root after init.
-		existing, existingErr := findAndLoadAmqrc()
-		if existingErr != nil {
-			return fmt.Errorf("failed to load .amqrc after init: %w", existingErr)
-		}
-		root = existing.Config.Root
-		if root != "" && !filepath.IsAbs(root) {
-			root = filepath.Join(existing.Dir, root)
+			if err := runCoopInitInternal(nil, false); err != nil {
+				return fmt.Errorf("init failed: %w", err)
+			}
+
+			// Reload root after init.
+			existing, existingErr := findAndLoadAmqrc()
+			if existingErr != nil {
+				return fmt.Errorf("failed to load .amqrc after init: %w", existingErr)
+			}
+			root = existing.Config.Root
+			if root != "" && !filepath.IsAbs(root) {
+				root = filepath.Join(existing.Dir, root)
+			}
 		}
 	}
 
