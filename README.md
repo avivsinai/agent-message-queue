@@ -22,6 +22,8 @@ AMQ enables **autonomous multi-agent collaboration**: agents message each other 
 - **Built for agents** — Priority levels, message kinds, threading, acknowledgments—all the primitives agents need.
 - **Swarm mode** — Join Claude Code Agent Teams, claim tasks, and bridge task notifications into AMQ.
 
+![AMQ Demo — Claude and Codex collaborating via split-pane terminal](docs/assets/demo.gif)
+
 ## Installation
 
 ### 1. Install Binary (macOS/Linux)
