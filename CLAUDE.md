@@ -125,8 +125,7 @@ amq wake --me <agent> [--inject-cmd <cmd>] [--bell] [--debounce <duration>] [--p
 amq upgrade
 amq env [--me <agent>] [--root <path>] [--shell sh|bash|zsh|fish] [--wake] [--json]
 amq coop init [--root <path>] [--agents <a,b,c>] [--force] [--json]
-amq coop shell --me <agent> [--root <path>] [--shell sh|bash|zsh|fish] [--wake] [--json]
-amq coop start [--root <path>] [--no-init] [--no-wake] [-y] <agent>
+amq coop exec [--root <path>] [--me <handle>] [--no-init] [--no-wake] [-y] <command> [-- <command-flags>]
 amq swarm list [--json]
 amq swarm join --team <name> --me <agent> [--agent-id <id>] [--type codex|external] [--json]
 amq swarm leave --team <name> --agent-id <id> [--json]
@@ -253,21 +252,23 @@ Co-op mode enables real-time collaboration between Claude Code and Codex CLI ses
 
 ```bash
 # Terminal 1 - Claude Code
-amq coop start claude    # Initializes + starts wake, then run:
-claude                   # With any flags you need
+amq coop exec claude                              # Sets env, starts wake, execs into claude
 
 # Terminal 2 - Codex CLI
-amq coop start codex     # Initializes + starts wake, then run:
-codex                    # With any flags you need
+amq coop exec codex -- --dangerously-skip-permissions  # Same, with codex flags
 ```
 
 Use `--root` for isolated sessions:
 ```bash
-amq coop init --root .agent-mail/feature-a
-amq coop start --root .agent-mail/feature-a claude && claude
+amq coop exec --root .agent-mail/feature-a claude      # Isolated session
 ```
 
 Use `--no-wake` to disable auto-wake (e.g., in CI or non-TTY environments).
+
+**For scripts/CI** (non-interactive):
+```bash
+amq coop init && eval "$(amq env --me claude)"
+```
 
 ### Message Priority Handling
 

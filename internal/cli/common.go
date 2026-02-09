@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type commonFlags struct {
@@ -29,9 +30,39 @@ func addCommonFlags(fs *flag.FlagSet) *commonFlags {
 	return flags
 }
 
+// cachedAmqrcRoot returns the root from .amqrc, cached via sync.Once.
+// Returns "" on any error (best-effort for defaulting, not validation).
+var amqrcOnce sync.Once
+var amqrcCachedRoot string
+
+func cachedAmqrcRoot() string {
+	amqrcOnce.Do(func() {
+		result, err := findAndLoadAmqrc()
+		if err != nil {
+			return
+		}
+		root := result.Config.Root
+		if root != "" && !filepath.IsAbs(root) {
+			root = filepath.Join(result.Dir, root)
+		}
+		amqrcCachedRoot = root
+	})
+	return amqrcCachedRoot
+}
+
+// resetAmqrcCache resets the sync.Once for testing.
+// Test-only; not safe for parallel tests.
+func resetAmqrcCache() {
+	amqrcOnce = sync.Once{}
+	amqrcCachedRoot = ""
+}
+
 func defaultRoot() string {
 	if env := strings.TrimSpace(os.Getenv(envRoot)); env != "" {
 		return env
+	}
+	if root := cachedAmqrcRoot(); root != "" {
+		return root
 	}
 	return ".agent-mail"
 }
