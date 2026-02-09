@@ -176,7 +176,7 @@ func runSwarmJoin(args []string) error {
 	}
 	me, err := normalizeHandle(*meFlag)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 
 	agentID := *agentIDFlag
@@ -351,7 +351,7 @@ func runSwarmClaim(args []string) error {
 	}
 	me, err := normalizeHandle(*meFlag)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 
 	assignee := resolveAgentID(*agentIDFlag, *teamFlag, me)
@@ -403,7 +403,7 @@ func runSwarmComplete(args []string) error {
 	}
 	me, err := normalizeHandle(*meFlag)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 
 	assignee := resolveAgentID(*agentIDFlag, *teamFlag, me)
@@ -471,6 +471,16 @@ func runSwarmBridge(args []string) error {
 		return nil
 	}
 
+	// Validate interval early to avoid panics in polling fallback paths.
+	pollInterval := *pollIntervalFlag
+	if pollInterval < 0 {
+		return UsageError("--poll-interval must be >= 0")
+	}
+	// Treat 0 as "use default" for consistency with swarm.RunBridge.
+	if pollInterval == 0 {
+		pollInterval = 3 * time.Second
+	}
+
 	if err := validateTeamName(*teamFlag); err != nil {
 		return err
 	}
@@ -479,7 +489,7 @@ func runSwarmBridge(args []string) error {
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 
 	root := resolveRoot(common.Root)
@@ -506,7 +516,7 @@ func runSwarmBridge(args []string) error {
 		AgentHandle:  me,
 		AgentID:      agentID,
 		AMQRoot:      root,
-		PollInterval: *pollIntervalFlag,
+		PollInterval: pollInterval,
 		UsePoll:      *pollFlag,
 	}
 

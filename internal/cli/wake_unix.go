@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/sys/unix"
@@ -236,12 +237,46 @@ func runWake(args []string) error {
 	} else if handled {
 		return nil
 	}
+
+	if *previewLenFlag < 0 {
+		return UsageError("--preview-len must be >= 0")
+	}
+	if *debounceFlag < 0 {
+		return UsageError("--debounce must be >= 0")
+	}
+	if *interruptCooldownFlag < 0 {
+		return UsageError("--interrupt-cooldown must be >= 0")
+	}
+
+	injectMode := strings.ToLower(strings.TrimSpace(*injectModeFlag))
+	if injectMode == "" {
+		injectMode = "auto"
+	}
+	switch injectMode {
+	case "auto", "raw", "paste":
+		// ok
+	default:
+		return UsageError("invalid --inject-mode %q (supported: auto, raw, paste)", *injectModeFlag)
+	}
+
+	interruptLabel := strings.TrimSpace(*interruptLabelFlag)
+	interruptPriority := strings.ToLower(strings.TrimSpace(*interruptPriorityFlag))
+	if *interruptFlag && interruptLabel == "" {
+		return UsageError("interrupt-label is required when interrupt is enabled")
+	}
+	if *interruptFlag && interruptPriority == "" {
+		return UsageError("interrupt-priority is required when interrupt is enabled")
+	}
+	if *interruptFlag && !format.IsValidPriority(interruptPriority) {
+		return UsageError("--interrupt-priority must be one of: urgent, normal, low")
+	}
+
 	if err := requireMe(common.Me); err != nil {
 		return err
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 
 	root := resolveRoot(common.Root)
@@ -259,17 +294,9 @@ func runWake(args []string) error {
 		return errors.New("amq wake requires a real terminal (run in foreground or as background job in same terminal)")
 	}
 
-	interruptLabel := strings.TrimSpace(*interruptLabelFlag)
-	if *interruptFlag && interruptLabel == "" {
-		return errors.New("interrupt-label is required when interrupt is enabled")
-	}
-	interruptPriority := strings.TrimSpace(*interruptPriorityFlag)
-	if *interruptFlag && interruptPriority == "" {
-		return errors.New("interrupt-priority is required when interrupt is enabled")
-	}
 	interruptKey, err := parseInterruptKey(*interruptCmdFlag)
 	if err != nil {
-		return err
+		return UsageError("%v", err)
 	}
 
 	// Acquire lock to prevent duplicate wake processes
@@ -288,7 +315,7 @@ func runWake(args []string) error {
 		previewLen:        *previewLenFlag,
 		strict:            common.Strict,
 		fallbackWarn:      true,
-		injectMode:        *injectModeFlag,
+		injectMode:        injectMode,
 		debug:             *debugFlag,
 		interrupt:         *interruptFlag,
 		interruptLabel:    interruptLabel,

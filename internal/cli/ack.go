@@ -29,7 +29,7 @@ func runAck(args []string) error {
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 	common.Me = me
 	root := resolveRoot(common.Root)
@@ -41,7 +41,7 @@ func runAck(args []string) error {
 
 	filename, err := ensureFilename(*idFlag)
 	if err != nil {
-		return err
+		return UsageError("--id: %v", err)
 	}
 
 	path, _, err := fsq.FindMessage(root, common.Me, filename)

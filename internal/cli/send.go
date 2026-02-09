@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"flag"
 	"os"
 	"strings"
@@ -38,13 +37,16 @@ func runSend(args []string) error {
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 	common.Me = me
 	root := resolveRoot(common.Root)
 	recipients, err := splitRecipients(*toFlag)
 	if err != nil {
-		return err
+		if _, ok := err.(*ExitCodeError); ok {
+			return err
+		}
+		return UsageError("--to: %v", err)
 	}
 	recipients = dedupeStrings(recipients)
 
@@ -63,10 +65,10 @@ func runSend(args []string) error {
 	priority := strings.TrimSpace(*priorityFlag)
 	kind := strings.TrimSpace(*kindFlag)
 	if !format.IsValidPriority(priority) {
-		return errors.New("--priority must be one of: urgent, normal, low")
+		return UsageError("--priority must be one of: urgent, normal, low")
 	}
 	if !format.IsValidKind(kind) {
-		return errors.New("--kind must be one of: brainstorm, review_request, review_response, question, answer, decision, status, todo")
+		return UsageError("--kind must be one of: brainstorm, review_request, review_response, question, answer, decision, status, todo")
 	}
 	// Default priority to "normal" if kind is set but priority is not
 	if kind != "" && priority == "" {
@@ -89,7 +91,7 @@ func runSend(args []string) error {
 		if len(recipients) == 1 {
 			threadID = canonicalP2P(common.Me, recipients[0])
 		} else {
-			return errors.New("--thread is required when sending to multiple recipients")
+			return UsageError("--thread is required when sending to multiple recipients")
 		}
 	}
 

@@ -284,7 +284,7 @@ func splitRecipients(raw string) ([]string, error) {
 		return nil, err
 	}
 	if len(out) == 0 {
-		return nil, errors.New("--to is required")
+		return nil, UsageError("--to is required")
 	}
 	return out, nil
 }

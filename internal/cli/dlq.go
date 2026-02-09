@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -83,7 +82,7 @@ func runDLQList(args []string) error {
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 	common.Me = me
 	root := resolveRoot(common.Root)
@@ -93,7 +92,7 @@ func runDLQList(args []string) error {
 	}
 
 	if *newFlag && *curFlag {
-		return errors.New("use only one of --new or --cur")
+		return UsageError("use only one of --new or --cur")
 	}
 
 	var items []dlqListItem
@@ -205,11 +204,11 @@ func runDLQRead(args []string) error {
 		return err
 	}
 	if *idFlag == "" {
-		return errors.New("--id is required")
+		return UsageError("--id is required")
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 	common.Me = me
 	root := resolveRoot(common.Root)
@@ -220,7 +219,7 @@ func runDLQRead(args []string) error {
 
 	filename, err := ensureFilename(*idFlag)
 	if err != nil {
-		return err
+		return UsageError("--id: %v", err)
 	}
 
 	path, box, err := fsq.FindDLQMessage(root, me, filename)
@@ -307,14 +306,14 @@ func runDLQRetry(args []string) error {
 		return err
 	}
 	if *idFlag == "" && !*allFlag {
-		return errors.New("--id or --all is required")
+		return UsageError("--id or --all is required")
 	}
 	if *idFlag != "" && *allFlag {
-		return errors.New("use --id or --all, not both")
+		return UsageError("use --id or --all, not both")
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 	common.Me = me
 	root := resolveRoot(common.Root)
@@ -329,7 +328,7 @@ func runDLQRetry(args []string) error {
 
 	filename, err := ensureFilename(*idFlag)
 	if err != nil {
-		return err
+		return UsageError("--id: %v", err)
 	}
 
 	if err := fsq.RetryFromDLQ(root, me, filename, *forceFlag); err != nil {
@@ -404,7 +403,7 @@ func runDLQPurge(args []string) error {
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 	common.Me = me
 	root := resolveRoot(common.Root)
@@ -417,10 +416,10 @@ func runDLQPurge(args []string) error {
 	if *olderFlag != "" {
 		dur, err := time.ParseDuration(*olderFlag)
 		if err != nil {
-			return err
+			return UsageError("--older-than: %v", err)
 		}
 		if dur <= 0 {
-			return errors.New("--older-than must be > 0")
+			return UsageError("--older-than must be > 0")
 		}
 		cutoff = time.Now().Add(-dur)
 	}

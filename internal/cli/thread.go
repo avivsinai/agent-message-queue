@@ -28,16 +28,16 @@ func runThread(args []string) error {
 	}
 	threadID := strings.TrimSpace(*idFlag)
 	if threadID == "" {
-		return fmt.Errorf("--id is required")
+		return UsageError("--id is required")
 	}
 	if *limitFlag < 0 {
-		return fmt.Errorf("--limit must be >= 0")
+		return UsageError("--limit must be >= 0")
 	}
 	root := resolveRoot(common.Root)
 
 	agents, err := parseHandles(*agentsFlag)
 	if err != nil {
-		return err
+		return UsageError("--agents: %v", err)
 	}
 	if len(agents) == 0 {
 		if cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json")); err == nil {

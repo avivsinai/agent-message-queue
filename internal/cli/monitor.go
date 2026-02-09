@@ -43,12 +43,15 @@ func runMonitor(args []string) error {
 	if err := requireMe(common.Me); err != nil {
 		return err
 	}
+	if *timeoutFlag < 0 {
+		return UsageError("--timeout must be >= 0")
+	}
 	if *limitFlag < 0 {
-		return errors.New("--limit must be >= 0")
+		return UsageError("--limit must be >= 0")
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 	common.Me = me
 	root := resolveRoot(common.Root)

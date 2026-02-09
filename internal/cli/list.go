@@ -63,7 +63,7 @@ func runList(args []string) error {
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 	common.Me = me
 	root := resolveRoot(common.Root)

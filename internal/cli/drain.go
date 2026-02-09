@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -35,11 +34,11 @@ func runDrain(args []string) error {
 		return err
 	}
 	if *limitFlag < 0 {
-		return errors.New("--limit must be >= 0")
+		return UsageError("--limit must be >= 0")
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 	common.Me = me
 	root := resolveRoot(common.Root)

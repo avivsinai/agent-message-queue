@@ -39,23 +39,23 @@ func runReply(args []string) error {
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 	common.Me = me
 	root := resolveRoot(common.Root)
 
 	if *idFlag == "" {
-		return fmt.Errorf("--id is required")
+		return UsageError("--id is required")
 	}
 
 	// Validate co-op fields
 	priority := strings.TrimSpace(*priorityFlag)
 	kind := strings.TrimSpace(*kindFlag)
 	if !format.IsValidPriority(priority) {
-		return fmt.Errorf("--priority must be one of: urgent, normal, low")
+		return UsageError("--priority must be one of: urgent, normal, low")
 	}
 	if !format.IsValidKind(kind) {
-		return fmt.Errorf("--kind must be one of: brainstorm, review_request, review_response, question, answer, decision, status, todo")
+		return UsageError("--kind must be one of: brainstorm, review_request, review_response, question, answer, decision, status, todo")
 	}
 
 	labels := splitList(*labelsFlag)

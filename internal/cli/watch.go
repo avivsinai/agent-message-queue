@@ -45,12 +45,15 @@ func runWatch(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if *timeoutFlag < 0 {
+		return UsageError("--timeout must be >= 0")
+	}
 	if err := requireMe(common.Me); err != nil {
 		return err
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 	common.Me = me
 

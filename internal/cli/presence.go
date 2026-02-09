@@ -44,7 +44,7 @@ func runPresenceSet(args []string) error {
 	}
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
-		return err
+		return UsageError("--me: %v", err)
 	}
 	common.Me = me
 	root := resolveRoot(common.Root)
@@ -56,7 +56,7 @@ func runPresenceSet(args []string) error {
 
 	status := strings.TrimSpace(*statusFlag)
 	if status == "" {
-		return fmt.Errorf("--status is required")
+		return UsageError("--status is required")
 	}
 	p := presence.New(common.Me, status, strings.TrimSpace(*noteFlag), time.Now())
 	if err := presence.Write(root, p); err != nil {
