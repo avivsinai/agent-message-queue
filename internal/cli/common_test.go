@@ -87,6 +87,102 @@ func TestValidateKnownHandleCorruptConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultRootFromAmqrc(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "custom-root")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Write .amqrc
+	amqrcData, _ := json.Marshal(map[string]string{"root": "custom-root"})
+	if err := os.WriteFile(filepath.Join(base, ".amqrc"), amqrcData, 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+		resetAmqrcCache()
+		_ = os.Unsetenv("AM_ROOT")
+	})
+	_ = os.Unsetenv("AM_ROOT")
+	resetAmqrcCache()
+
+	if err := os.Chdir(base); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	got := defaultRoot()
+	want := filepath.Join(base, "custom-root")
+	gotEval, _ := filepath.EvalSymlinks(got)
+	wantEval, _ := filepath.EvalSymlinks(want)
+	if gotEval != wantEval {
+		t.Fatalf("defaultRoot() = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultRootEnvOverridesAmqrc(t *testing.T) {
+	base := t.TempDir()
+
+	// Write .amqrc with one root
+	amqrcData, _ := json.Marshal(map[string]string{"root": "amqrc-root"})
+	if err := os.WriteFile(filepath.Join(base, ".amqrc"), amqrcData, 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+		resetAmqrcCache()
+		_ = os.Unsetenv("AM_ROOT")
+	})
+	resetAmqrcCache()
+
+	if err := os.Chdir(base); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// Set AM_ROOT to a different value
+	t.Setenv("AM_ROOT", "/env/root")
+
+	got := defaultRoot()
+	if got != "/env/root" {
+		t.Fatalf("defaultRoot() = %q, want %q (env should override .amqrc)", got, "/env/root")
+	}
+}
+
+func TestDefaultRootFallbackNoAmqrc(t *testing.T) {
+	base := t.TempDir()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+		resetAmqrcCache()
+		_ = os.Unsetenv("AM_ROOT")
+	})
+	_ = os.Unsetenv("AM_ROOT")
+	resetAmqrcCache()
+
+	if err := os.Chdir(base); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	got := defaultRoot()
+	if got != ".agent-mail" {
+		t.Fatalf("defaultRoot() = %q, want %q (should fall back)", got, ".agent-mail")
+	}
+}
+
 func TestResolveRootFindsParent(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, ".agent-mail")

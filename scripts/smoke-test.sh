@@ -53,4 +53,44 @@ if [[ -f "$tmpfile" ]]; then
   exit 1
 fi
 
+# --- .amqrc root detection ---
+AMQRC_DIR="$(mktemp -d)"
+amqrc_cleanup() {
+  rm -rf "$AMQRC_DIR"
+}
+trap 'cleanup; amqrc_cleanup' EXIT
+
+AMQRC_ROOT="$AMQRC_DIR/custom-root"
+printf '{"root": "custom-root"}\n' > "$AMQRC_DIR/.amqrc"
+"$BIN" init --root "$AMQRC_ROOT" --agents alice,bob
+
+# Run list from the .amqrc dir — should pick up root automatically
+(cd "$AMQRC_DIR" && AM_ROOT= "$BIN" list --me alice --new >/dev/null 2>&1)
+echo ".amqrc detection ok"
+
+# --- coop exec bash ---
+EXEC_DIR="$(mktemp -d)"
+exec_cleanup() {
+  rm -rf "$EXEC_DIR"
+}
+trap 'cleanup; amqrc_cleanup; exec_cleanup' EXIT
+
+EXEC_ROOT="$EXEC_DIR/agent-mail"
+"$BIN" init --root "$EXEC_ROOT" --agents bash
+printf '{"root": "agent-mail"}\n' > "$EXEC_DIR/.amqrc"
+
+exec_out="$(cd "$EXEC_DIR" && "$BIN" coop exec --no-wake -y bash -- -c 'echo $AM_ROOT:$AM_ME' 2>/dev/null)"
+# The output should contain the resolved root and handle "bash"
+if ! printf '%s' "$exec_out" | grep -q "bash"; then
+  echo "coop exec did not set AM_ME=bash"
+  echo "got: $exec_out"
+  exit 1
+fi
+if ! printf '%s' "$exec_out" | grep -q "agent-mail"; then
+  echo "coop exec did not set AM_ROOT containing agent-mail"
+  echo "got: $exec_out"
+  exit 1
+fi
+echo "coop exec ok"
+
 echo "smoke test ok"

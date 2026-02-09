@@ -83,20 +83,19 @@ This creates `.amqrc`, mailboxes for `claude` and `codex`, and updates `.gitigno
 
 **Terminal 1 — Claude Code:**
 ```bash
-amq coop start claude   # Sets up + starts wake, then run:
-claude                  # With any flags you need
+amq coop exec claude
 ```
 
 **Terminal 2 — Codex CLI:**
 ```bash
-amq coop start codex    # Sets up + starts wake, then run:
-codex                   # With any flags you need
+amq coop exec codex -- --dangerously-skip-permissions
 ```
+
+`coop exec` auto-initializes if needed, sets `AM_ROOT`/`AM_ME`, starts wake, and execs into the agent.
 
 Use `--root` for isolated sessions (multiple pairs):
 ```bash
-amq coop init --root .agent-mail/feature-a
-amq coop start --root .agent-mail/feature-a claude
+amq coop exec --root .agent-mail/feature-a claude
 ```
 
 ### 3. Send & Receive
@@ -145,9 +144,8 @@ For real-time Claude Code + Codex CLI collaboration, see [COOP.md](COOP.md).
 
 **Quick setup:**
 ```bash
-amq coop init              # Initialize project
-amq coop start claude      # Terminal 1: Claude Code
-amq coop start codex       # Terminal 2: Codex CLI
+amq coop exec claude       # Terminal 1: Claude Code
+amq coop exec codex        # Terminal 2: Codex CLI
 ```
 
 ## Swarm Mode (Claude Code Agent Teams)

@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 1.0.7
+version: 1.1.0
 description: Coordinate agents via the AMQ CLI for file-based inter-agent messaging. Use when you need to send messages to another agent (Claude/Codex), receive messages from partner agents, set up co-op mode between Claude Code and Codex CLI, or manage agent-to-agent communication in any multi-agent workflow. Triggers include "message codex", "talk to claude", "collaborate with partner agent", "AMQ", "inter-agent messaging", or "agent coordination".
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
@@ -20,361 +20,141 @@ curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/
 
 Verify: `amq --version`
 
-## Quick Reference
+## Quick Start
 
 ```bash
-# One-time project setup (run once per project)
-amq coop init            # Creates .amqrc, mailboxes, updates .gitignore
+# One-time project setup
+amq coop init
 
-# Per-session setup (run in each agent terminal)
-amq coop start claude    # Initializes if needed, starts wake, then tells you: Run: claude
-amq coop start codex     # Same for Codex
+# Per-session (one command per terminal)
+amq coop exec claude                              # Terminal 1
+amq coop exec codex -- --dangerously-skip-permissions  # Terminal 2
 ```
 
-**As Claude** (talking to Codex):
-```bash
-amq send --me claude --to codex --body "Message"
-amq drain --me claude --include-body
-amq reply --me claude --id <msg_id> --body "Response"
-amq watch --me claude --timeout 60s
-```
+That's it. `coop exec` auto-initializes if needed, sets `AM_ROOT`/`AM_ME`, starts wake notifications, and execs into the agent.
 
-**As Codex** (talking to Claude):
-```bash
-amq send --me codex --to claude --body "Message"
-amq drain --me codex --include-body
-amq reply --me codex --id <msg_id> --body "Response"
-amq watch --me codex --timeout 60s
-```
-
-**Note**: Root is auto-detected from `.amqrc`. Commands work from any subdirectory.
-
-## Co-op Mode: Phased Parallel Work
-
-Both agents work in parallel where safe, coordinate where risky. Different models = different training = different blind spots. Cross-model work catches errors that same-model review misses.
-
-### Roles
-
-- **Initiator** = whoever starts the task (agent or human). Owns decisions and receives updates.
-- **Leader/Coordinator** = coordinates phases, merges, and final decisions (often the initiator).
-- **Worker** = executes assigned phases and reports back to the initiator.
-
-**Default pairing note**: Claude is often faster and more decisive, while Codex tends to be deeper but slower. That commonly makes Claude a natural coordinator and Codex a strong worker. This is a default, not a rule — roles are set per task by the initiator.
-
-### Phased Flow
-
-| Phase | Mode | Description |
-|-------|------|-------------|
-| **Research** | Parallel | Both explore codebase, read docs, search. No conflicts. |
-| **Design** | Parallel → Merge | Both propose approaches. Leader merges/decides. |
-| **Code** | Split | Divide by file/module. Never edit same file. |
-| **Review** | Parallel | Both review each other's code. Leader decides disputes. |
-| **Test** | Parallel | Both run tests, report results to leader. |
-
-```
-Research (parallel) → sync findings
-    ↓
-Design (parallel) → leader merges approach
-    ↓
-Code (split: e.g., Claude=files A,B; Codex=files C,D)
-    ↓
-Review (parallel: each reviews other's code)
-    ↓
-Test (parallel: both run tests)
-    ↓
-Leader prepares commit → user approves → push
-```
-
-### Key Rules
-
-- **Initiator rule** — reply to the initiator and ask the initiator for clarifications
-- **Never branch** — always work on same branch (joined work)
-- **Code phase = split** — divide files/modules to avoid conflicts
-- **File overlap** — if same file unavoidable, assign one owner; other reviews/proposes via message
-- **Coordinate between phases** — sync before moving to next phase
-- **Leader decides** — initiator or designated leader makes final calls at merge points
-
-### Stay in Sync
-
-- After completing a phase, report to the initiator and await next assignment
-- While waiting, safe to do: review partner's work, run tests, read docs
-- If no assignment comes, ask the initiator (not a third party) for next task
-
-### Progress Protocol (Start / Heartbeat / Done)
-
-- **Start**: send `kind=status` with an ETA to the initiator as soon as you begin.
-- **Heartbeat**: update on phase boundaries or every 10-15 minutes.
-- **Done**: send Summary / Changes / Tests / Notes to the initiator.
-- **Blocked**: send `kind=question` to the initiator with options and a recommendation.
-
-### Modes of Collaboration (Modus Operandi)
-
-Pick one mode per task; the initiator decides or delegates.
-
-- **Leader + Worker**: leader decides, worker executes; best default.
-- **Co-workers**: peers decide together; if no consensus, ask the initiator.
-- **Duplicate**: independent solutions or reviews; initiator merges results.
-- **Driver + Navigator**: driver codes, navigator reviews/tests and can interrupt.
-- **Spec + Implementer**: one writes spec/tests, the other implements.
-- **Reviewer + Implementer**: one codes, the other focuses on review and risk detection.
-
-### Shared Workspace
-
-**Both agents work in the same project folder.** Files are shared automatically:
-- If partner says "done with X" → check the files directly, don't ask for code
-- Don't send code snippets in messages → just reference file paths
-
-### When to Act
-
-| Role | Action |
-|------|--------|
-| Worker | Complete phase → report to initiator → await next assignment |
-| Leader/Initiator | Merge results → decide next phase work |
-| Either | Ask the initiator for clarifications (ask the user only if the user initiated) |
-
-### Setup
-
-Run once per project:
-```bash
-amq coop init            # Creates .amqrc, mailboxes, updates .gitignore
-```
-
-Terminal 1:
-```bash
-amq coop start claude   # Starts wake + tells you: Run: claude
-```
-
-Terminal 2:
-```bash
-amq coop start codex    # Starts wake + tells you: Run: codex
-```
-
-### Multiple Pairs (Isolated Sessions)
-
-Run multiple agent pairs on different features using `--root`:
+## Messaging
 
 ```bash
-# Pair A: auth feature
-amq coop start --root .agent-mail/auth claude
-amq coop start --root .agent-mail/auth codex
-
-# Pair B: api feature
-amq coop start --root .agent-mail/api claude
-amq coop start --root .agent-mail/api codex
-
-# Commands use --root to stay isolated
-amq send --me claude --to codex --root .agent-mail/auth --body "Auth review"
+amq send --to codex --body "Message"              # Send
+amq drain --include-body                          # Receive (one-shot, silent when empty)
+amq reply --id <msg_id> --body "Response"          # Reply in thread
+amq watch --timeout 60s                           # Block until message arrives
+amq list --new                                    # Peek without side effects
 ```
 
-Each root has isolated inboxes. Messages stay within their root.
+Root and agent handle are auto-detected from `.amqrc` and `AM_ME`. Commands work from any subdirectory.
+
+## Isolated Sessions (Multiple Pairs)
+
+```bash
+amq coop exec --root .agent-mail/auth claude      # Pair A
+amq coop exec --root .agent-mail/auth codex
+amq coop exec --root .agent-mail/api claude       # Pair B
+amq coop exec --root .agent-mail/api codex
+```
+
+Each `--root` has isolated inboxes. Messages stay within their root.
+
+## For Scripts/CI
+
+When you can't use `exec` (non-interactive environments):
+```bash
+amq coop init
+eval "$(amq env --me claude)"    # Set env vars manually
+```
+
+## Co-op Protocol
+
+### Core Rules
+
+1. **Initiator rule** — reply to the initiator; ask the initiator for clarifications
+2. **Never branch** — always work on same branch
+3. **Code phase = split** — divide files/modules to avoid conflicts
+4. **Shared workspace** — reference file paths, don't paste code in messages
 
 ### Priority Handling
 
 | Priority | Action |
 |----------|--------|
-| `urgent` | Interrupt, respond now (label `interrupt` enables wake Ctrl+C) |
+| `urgent` | Interrupt current work, respond now |
 | `normal` | Add to TODOs, respond after current task |
 | `low` | Batch for session end |
 
 ### Progress Updates
 
-Use Start / Heartbeat / Done with the initiator:
-
 ```bash
-amq reply --me claude --id <msg_id> --kind status --body "Started, eta ~20m"
-amq reply --me claude --id <msg_id> --kind status --body "Design done, coding now. ETA ~10m"
-amq reply --me claude --id <msg_id> --kind answer --body "Summary:\n- ...\nChanges:\n- ...\nTests:\n- ...\nNotes:\n- ..."
+amq reply --id <msg_id> --kind status --body "Started, eta ~20m"
+amq reply --id <msg_id> --kind answer --body "Summary: ..."
 ```
 
-### Optional: Wake Notifications
-
-> Co-op works without wake. This is an optional enhancement for interactive terminals.
-
-For human operators, wake provides background notifications:
-
-```bash
-amq wake --me claude &   # Before starting claude
-```
-
-When messages arrive:
-```
-AMQ: message from codex - Review complete. Drain with: amq drain --me claude --include-body
-```
-
-If notifications require manual Enter, try `--inject-mode=raw`.
-
-**Interrupts**: urgent messages labeled `interrupt` trigger Ctrl+C injection + an interrupt notice.
-Disable with `--interrupt=false`. Use `--interrupt-cmd none` for notice-only.
-
-## Commands
-
-All examples show Claude's perspective. Codex swaps `--me codex` and `--to claude`.
+## Commands Reference
 
 ### Send
 ```bash
-amq send --me claude --to codex --body "Quick message"
-amq send --me claude --to codex --subject "Review" --kind review_request --body @file.md
-amq send --me claude --to codex --priority urgent --kind question --body "Blocked on API"
-amq send --me claude --to codex --labels "bug,parser" --body "Found issue in parser"
-amq send --me claude --to codex --context '{"paths": ["internal/cli/"]}' --body "Review these"
+amq send --to codex --body "Quick message"
+amq send --to codex --subject "Review" --kind review_request --body @file.md
+amq send --to codex --priority urgent --kind question --body "Blocked on API"
+amq send --to codex --labels "bug,parser" --body "Found issue"
+amq send --to codex --context '{"paths": ["internal/cli/"]}' --body "Review these"
 ```
 
-### Receive
+### Filter
 ```bash
-amq drain --me claude --include-body   # One-shot, silent when empty
-amq watch --me claude --timeout 60s    # Block until message arrives
-amq list --me claude --new             # Peek without side effects
-```
-
-### Filter Messages
-```bash
-amq list --me claude --new --priority urgent              # By priority
-amq list --me claude --new --from codex                   # By sender
-amq list --me claude --new --kind review_request          # By kind
-amq list --me claude --new --label bug --label critical   # By labels (can repeat)
-amq list --me claude --new --from codex --priority urgent # Combine filters
+amq list --new --priority urgent
+amq list --new --from codex --kind review_request
+amq list --new --label bug --label critical
 ```
 
 ### Reply
 ```bash
-amq reply --me claude --id <msg_id> --body "LGTM"
-amq reply --me claude --id <msg_id> --kind review_response --body "See comments..."
+amq reply --id <msg_id> --body "LGTM"
+amq reply --id <msg_id> --kind review_response --body "See comments..."
 ```
 
 ### Dead Letter Queue
 ```bash
-amq dlq list --me claude                  # List failed messages
-amq dlq read --me claude --id <dlq_id>    # Inspect failure details
-amq dlq retry --me claude --id <dlq_id>   # Retry (move back to inbox)
-amq dlq retry --me claude --all [--force] # Retry all
-amq dlq purge --me claude --older-than 24h --yes # Clean old DLQ entries
-```
-
-### Upgrade
-```bash
-amq upgrade                    # Self-update to latest release
-amq --no-update-check ...      # Disable update hint for this command
+amq dlq list                                      # List failed messages
+amq dlq retry --id <dlq_id>                       # Retry one
+amq dlq retry --all                               # Retry all
+amq dlq purge --older-than 24h --yes              # Clean old entries
 ```
 
 ### Other
 ```bash
-amq thread --id p2p/claude__codex --include-body        # View thread
-amq presence set --me claude --status busy --note "reviewing"  # Set presence
-amq cleanup --tmp-older-than 36h --yes                  # Clean stale tmp
+amq thread --id p2p/claude__codex --include-body  # View thread
+amq presence set --status busy --note "reviewing" # Set presence
+amq cleanup --tmp-older-than 36h --yes            # Clean stale tmp
+amq upgrade                                       # Self-update
 ```
 
 ## Message Kinds
 
-| Kind | Reply Kind | Default Priority | Use |
-|------|------------|------------------|-----|
-| `review_request` | `review_response` | normal | Code review |
-| `review_response` | — | normal | Review feedback |
-| `question` | `answer` | normal | Questions |
-| `answer` | — | normal | Answers |
-| `decision` | — | normal | Design decisions |
-| `brainstorm` | — | low | Open discussion |
-| `status` | — | low | FYI updates |
-| `todo` | — | normal | Task assignments |
+| Kind | Reply Kind | Default Priority |
+|------|------------|------------------|
+| `review_request` | `review_response` | normal |
+| `question` | `answer` | normal |
+| `decision` | — | normal |
+| `todo` | — | normal |
+| `status` | — | low |
+| `brainstorm` | — | low |
 
-## Labels and Context
+## Swarm Mode: Agent Teams
 
-**Labels** tag messages for filtering:
+Enable external agents to participate in Claude Code Agent Teams.
+
 ```bash
-amq send --to codex --labels "bug,urgent" --body "Critical issue"
-```
-
-**Context** provides structured metadata:
-```bash
-amq send --to codex --kind review_request \
-  --context '{"paths": ["internal/cli/send.go"], "focus": "error handling"}' \
-  --body "Please review"
-```
-
-## Conventions
-
-- Handles: lowercase `[a-z0-9_-]+`
-- Threads: `p2p/<agentA>__<agentB>` (lexicographic)
-- Delivery: atomic Maildir (tmp -> new -> cur)
-- Never edit message files directly
-
-## Swarm Mode: Agent Teams Integration
-
-Enable Codex agents to participate in Claude Code Agent Teams.
-
-### Quick Start
-```bash
-amq swarm list                                          # Discover teams
-amq swarm join --team my-team --me codex                # Register in team
-amq swarm tasks --team my-team                          # View shared tasks
-amq swarm claim --team my-team --task t1 --me codex     # Claim work
+amq swarm list                                    # Discover teams
+amq swarm join --team my-team --me codex          # Join team
+amq swarm tasks --team my-team                    # View tasks
+amq swarm claim --team my-team --task t1 --me codex  # Claim work
 amq swarm complete --team my-team --task t1 --me codex  # Mark done
-amq swarm bridge --team my-team --me codex              # Run task→AMQ bridge
+amq swarm bridge --team my-team --me codex        # Run task notification bridge
 ```
 
-### How It Works
-
-Claude Code Agent Teams stores team config at `~/.claude/teams/{name}/config.json`
-and tasks at `~/.claude/tasks/{name}/`. AMQ reads/writes these files directly:
-
-- **join** registers a Codex agent in the team config so Claude Code teammates discover it
-- **tasks/claim/complete** interact with the shared task list (preserving unknown fields)
-- **bridge** watches the task list and delivers AMQ notifications when tasks change
-
-Communication is asymmetric:
-- Task notifications flow via `amq swarm bridge` (task lifecycle only).
-- Claude Code teammates can `amq send` to external agents.
-- External agents cannot DM a specific Claude Code teammate via AMQ alone. External→team messages must be relayed by the team leader (drain AMQ, then forward via Claude Code internal messaging).
-
-### Leader: Relay External → Teammate Messages
-
-**External agent (Codex)**: send to the leader's AMQ handle and include the intended teammate in the subject/body:
-```bash
-amq send --me codex --to claude --thread swarm/my-team --labels swarm \
-  --subject "To: builder - question about task t1" \
-  --body "..."
-```
-
-**Leader (Claude Code)**: drain and forward:
-```bash
-amq drain --me claude --include-body
-```
-
-Then forward the message to the intended teammate using Claude Code's internal SendMessage (include the AMQ message ID so it can be referenced later). Optionally reply back to Codex:
-```bash
-amq reply --me claude --id <msg_id> --kind status --body "Forwarded to builder via SendMessage."
-```
-
-For tighter loops, use `amq monitor --me claude --include-body` (watch+drain in one command) or run `amq wake --me claude &` for terminal notifications.
-
-### Bridge
-
-Run alongside the Codex session:
-```bash
-amq swarm bridge --team my-team --me codex &
-```
-
-The bridge watches `~/.claude/tasks/{team}/` via fsnotify by default (falls back to polling).
-Use `--poll` to force polling; `--poll-interval` controls the interval (default 3s).
-
-It delivers AMQ messages (labels include `swarm`) for:
-- New tasks (unassigned or assigned to this agent)
-- Task assignments
-- Task completions
-
-**Wake compatibility**: bridge notifications are standard AMQ inbox messages, so `amq wake` will detect them automatically.
-To treat swarm notifications as interrupts, configure wake to match the bridge label and priority:
-```bash
-amq wake --me codex --interrupt-label swarm --interrupt-priority normal &
-```
-
-### Leave a Team
-```bash
-amq swarm leave --team my-team --agent-id ext_codex_20260205T120000
-```
+Communication is asymmetric: bridge delivers task notifications only. Claude Code teammates can `amq send` to external agents. External agents relay messages to the team leader's inbox.
 
 ## References
 
-Read these when you need deeper context:
-
-- `references/coop-mode.md` — Read when setting up or debugging co-op workflows between agents
+- `references/coop-mode.md` — Phased workflow, collaboration modes, detailed coordination patterns
 - `references/message-format.md` — Frontmatter schema cheat sheet (fields, types, defaults)

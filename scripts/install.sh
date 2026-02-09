@@ -205,5 +205,4 @@ if [ "$INSTALL_SKILL" = true ]; then
 fi
 
 echo "Next steps:"
-echo "  1. Initialize: amq coop init"
-echo "  2. Start agent: amq coop start claude"
+echo "  1. Start agent: amq coop exec claude"

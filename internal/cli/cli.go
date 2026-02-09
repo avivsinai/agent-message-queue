@@ -128,7 +128,7 @@ func printUsage() error {
 	if err := writeStdoutLine("  env       Output shell commands to set environment variables"); err != nil {
 		return err
 	}
-	if err := writeStdoutLine("  coop      Simplified co-op mode setup (init, shell, start)"); err != nil {
+	if err := writeStdoutLine("  coop      Co-op mode setup (init, exec)"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine("  swarm     Claude Code Agent Teams integration (join, tasks, bridge)"); err != nil {

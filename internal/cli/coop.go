@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -29,31 +28,29 @@ func runCoop(args []string) error {
 	switch args[0] {
 	case "init":
 		return runCoopInit(args[1:])
-	case "shell":
-		return runCoopShell(args[1:])
-	case "start":
-		return runCoopStart(args[1:])
+	case "exec":
+		return runCoopExec(args[1:])
 	default:
-		return fmt.Errorf("unknown coop subcommand: %s", args[0])
+		return fmt.Errorf("unknown coop subcommand: %s\nRun 'amq coop --help' for usage", args[0])
 	}
 }
 
 func printCoopUsage() error {
 	lines := []string{
-		"amq coop - simplified co-op mode setup",
+		"amq coop - co-op mode for multi-agent collaboration",
 		"",
 		"Subcommands:",
 		"  init   Initialize project for co-op mode (creates .amqrc and mailboxes)",
-		"  shell  Output shell commands to configure terminal session",
-		"  start  Initialize (if needed) and start an agent with environment configured",
+		"  exec   Initialize, set env, start wake, and exec into agent (replaces process)",
 		"",
 		"Quick start:",
-		"  amq coop start claude                              # Start Claude Code",
-		"  amq coop start codex -- --dangerously-skip-permissions  # Start Codex with flags",
+		"  amq coop exec claude                              # Start Claude Code",
+		"  amq coop exec codex -- --dangerously-skip-permissions  # Start Codex with flags",
+		"  amq coop exec --root .agent-mail/auth claude      # Isolated session",
 		"",
-		"Manual setup:",
+		"Manual setup (for scripts/CI):",
 		"  amq coop init                       # Initialize with defaults (claude,codex)",
-		"  eval \"$(amq coop shell --me claude)\" # Configure terminal for Claude",
+		"  eval \"$(amq env --me claude)\"       # Configure terminal manually",
 		"",
 		"Run 'amq coop <subcommand> --help' for details.",
 	}
@@ -230,184 +227,14 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		if err := writeStdoutLine("Next steps:"); err != nil {
 			return err
 		}
-		if err := writeStdout("  Terminal 1: eval \"$(amq coop shell --me %s)\"\n", agents[0]); err != nil {
+		if err := writeStdout("  Terminal 1: amq coop exec %s\n", agents[0]); err != nil {
 			return err
 		}
 		if len(agents) > 1 {
-			if err := writeStdout("  Terminal 2: eval \"$(amq coop shell --me %s)\"\n", agents[1]); err != nil {
+			if err := writeStdout("  Terminal 2: amq coop exec %s\n", agents[1]); err != nil {
 				return err
 			}
 		}
 	}
-	return nil
-}
-
-func runCoopShell(args []string) error {
-	fs := flag.NewFlagSet("coop shell", flag.ContinueOnError)
-	meFlag := fs.String("me", "", "Agent handle (required)")
-	rootFlag := fs.String("root", "", "Root directory (override auto-detection)")
-	shellFlag := fs.String("shell", "sh", "Shell format: sh, bash, zsh, fish")
-	wakeFlag := fs.Bool("wake", false, "Include amq wake & in output (for interactive terminals)")
-	jsonFlag := fs.Bool("json", false, "Output as JSON")
-
-	usage := usageWithFlags(fs, "amq coop shell --me <agent> [options]",
-		"Output shell commands to configure a terminal session for co-op mode.",
-		"",
-		"Automatically detects root from .amqrc or .agent-mail/ directory.",
-		"Use --root to override for isolated multi-pair setups.",
-		"",
-		"Usage:",
-		"  eval \"$(amq coop shell --me claude)\"        # Configure for Claude",
-		"  eval \"$(amq coop shell --me codex --wake)\" # Configure for Codex with notifications",
-		"  eval \"$(amq coop shell --me claude --root .agent-mail/auth)\" # Isolated pair",
-	)
-
-	if handled, err := parseFlags(fs, args, usage); err != nil {
-		return err
-	} else if handled {
-		return nil
-	}
-
-	if *meFlag == "" {
-		return UsageError("--me is required")
-	}
-
-	// Delegate to amq env with the same flags
-	// This reuses the existing env logic for root detection
-	envArgs := []string{"--me", *meFlag, "--shell", *shellFlag}
-	if *rootFlag != "" {
-		envArgs = append(envArgs, "--root", *rootFlag)
-	}
-	if *wakeFlag {
-		envArgs = append(envArgs, "--wake")
-	}
-	if *jsonFlag {
-		envArgs = append(envArgs, "--json")
-	}
-	return runEnv(envArgs)
-}
-
-func runCoopStart(args []string) error {
-	fs := flag.NewFlagSet("coop start", flag.ContinueOnError)
-	rootFlag := fs.String("root", "", "Root directory (override auto-detection)")
-	noInitFlag := fs.Bool("no-init", false, "Don't auto-initialize if .amqrc is missing")
-	noWakeFlag := fs.Bool("no-wake", false, "Don't start amq wake in background")
-	yesFlag := fs.Bool("y", false, "Skip confirmation prompts")
-
-	usage := usageWithFlags(fs, "amq coop start [options] <agent>",
-		"Set up co-op mode for an agent.",
-		"",
-		"Auto-initializes project if .amqrc is missing (use --no-init to disable).",
-		"Starts amq wake in background for notifications (use --no-wake to disable).",
-		"Then run the agent yourself with any flags you need.",
-		"",
-		"Examples:",
-		"  amq coop start claude              # Set up + wake, then run: claude",
-		"  amq coop start --no-wake codex     # Set up without wake",
-	)
-
-	if handled, err := parseFlags(fs, args, usage); err != nil {
-		return err
-	} else if handled {
-		return nil
-	}
-
-	remaining := fs.Args()
-	if len(remaining) == 0 {
-		return UsageError("agent name required (e.g., 'claude' or 'codex')")
-	}
-	if len(remaining) > 1 {
-		return UsageError("unexpected arguments: %s (pass flags directly to the agent after setup)", strings.Join(remaining[1:], " "))
-	}
-	agentName := strings.ToLower(remaining[0])
-
-	// Validate agent name.
-	// Co-op mode is specifically designed for Claude Code + Codex CLI pairing.
-	// The wake, shell, and notification integrations are tailored to these two agents.
-	if agentName != "claude" && agentName != "codex" {
-		return UsageError("agent must be 'claude' or 'codex'")
-	}
-
-	// Check for existing .amqrc
-	existing, existingErr := findAndLoadAmqrc()
-	root := *rootFlag
-
-	switch {
-	case existingErr == errAmqrcNotFound:
-		if *noInitFlag {
-			return fmt.Errorf("no .amqrc found; run 'amq coop init' first or remove --no-init")
-		}
-
-		// Prompt for init unless -y
-		if !*yesFlag {
-			ok, err := confirmPromptYes("No .amqrc found. Initialize co-op mode in current directory?")
-			if err != nil {
-				return err
-			}
-			if !ok {
-				return fmt.Errorf("initialization cancelled")
-			}
-		}
-
-		// Run init (without "Next steps" output since we'll print our own)
-		var initArgs []string
-		if root != "" {
-			initArgs = append(initArgs, "--root", root)
-		}
-		if err := runCoopInitInternal(initArgs, false); err != nil {
-			return fmt.Errorf("init failed: %w", err)
-		}
-
-		// Reload .amqrc after init
-		existing, existingErr = findAndLoadAmqrc()
-		if existingErr != nil {
-			return fmt.Errorf("failed to load .amqrc after init: %w", existingErr)
-		}
-
-	case existingErr != nil:
-		return fmt.Errorf("invalid .amqrc: %w", existingErr)
-	}
-
-	// Determine root from .amqrc if not explicitly set
-	if root == "" {
-		root = existing.Config.Root
-		// Make root absolute if .amqrc is in parent directory
-		cwd, _ := os.Getwd()
-		if existing.Dir != cwd {
-			root = filepath.Join(existing.Dir, root)
-		}
-	}
-
-	// Start amq wake in background (unless --no-wake)
-	if !*noWakeFlag {
-		amqBin, err := os.Executable()
-		if err != nil {
-			amqBin = "amq" // fallback to PATH lookup
-		}
-
-		wakeCmd := exec.Command(amqBin, "wake", "--me", agentName, "--root", root)
-		wakeCmd.Stdin = os.Stdin
-		wakeCmd.Stdout = os.Stdout
-		wakeCmd.Stderr = os.Stderr
-
-		if err := wakeCmd.Start(); err != nil {
-			_ = writeStderr("warning: failed to start amq wake: %v\n", err)
-		} else {
-			// Don't wait - let wake run in background
-			// The process will be orphaned when we exit, which is fine
-			if err := writeStderr("Started amq wake (pid %d)\n", wakeCmd.Process.Pid); err != nil {
-				return err
-			}
-		}
-	}
-
-	// Output instructions
-	if err := writeStdoutLine(""); err != nil {
-		return err
-	}
-	if err := writeStdout("Ready! Run: %s\n", agentName); err != nil {
-		return err
-	}
-
 	return nil
 }
