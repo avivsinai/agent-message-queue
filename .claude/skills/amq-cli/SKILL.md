@@ -27,8 +27,8 @@ Verify: `amq --version`
 amq coop init
 
 # Per-session (one command per terminal)
-amq coop exec claude                              # Terminal 1
-amq coop exec codex -- --dangerously-skip-permissions  # Terminal 2
+amq coop exec claude -- --dangerously-skip-permissions  # Terminal 1
+amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Terminal 2
 ```
 
 That's it. `coop exec` auto-initializes if needed, sets `AM_ROOT`/`AM_ME`, starts wake notifications, and execs into the agent.

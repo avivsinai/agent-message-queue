@@ -37,12 +37,12 @@ For swarm command reference, see [CLAUDE.md](CLAUDE.md).
 
 **Terminal 1 - Claude Code:**
 ```bash
-amq coop exec claude
+amq coop exec claude -- --dangerously-skip-permissions
 ```
 
 **Terminal 2 - Codex CLI:**
 ```bash
-amq coop exec codex -- --dangerously-skip-permissions
+amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
 ```
 
 That's it. `coop exec` auto-initializes the project if needed, sets `AM_ROOT`/`AM_ME`, starts wake notifications, and execs into the agent.

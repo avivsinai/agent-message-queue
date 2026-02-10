@@ -252,10 +252,10 @@ Co-op mode enables real-time collaboration between Claude Code and Codex CLI ses
 
 ```bash
 # Terminal 1 - Claude Code
-amq coop exec claude                              # Sets env, starts wake, execs into claude
+amq coop exec claude -- --dangerously-skip-permissions  # Sets env, starts wake, execs into claude
 
 # Terminal 2 - Codex CLI
-amq coop exec codex -- --dangerously-skip-permissions  # Same, with codex flags
+amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Same, with codex flags
 ```
 
 Use `--root` for isolated sessions:

@@ -81,12 +81,12 @@ This creates `.amqrc`, mailboxes for `claude` and `codex`, and updates `.gitigno
 
 **Terminal 1 — Claude Code:**
 ```bash
-amq coop exec claude
+amq coop exec claude -- --dangerously-skip-permissions
 ```
 
 **Terminal 2 — Codex CLI:**
 ```bash
-amq coop exec codex -- --dangerously-skip-permissions
+amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
 ```
 
 `coop exec` auto-initializes if needed, sets `AM_ROOT`/`AM_ME`, starts wake, and execs into the agent.

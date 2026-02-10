@@ -35,7 +35,7 @@ func runCoopExec(args []string) error {
 		"",
 		"Examples:",
 		"  amq coop exec claude                              # Exec into Claude Code",
-		"  amq coop exec codex -- --dangerously-skip-permissions  # Codex with flags",
+		"  amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Codex with flags",
 		"  amq coop exec --root .agent-mail/auth claude      # Isolated session",
 		"  amq coop exec --me myagent bash                   # Debug shell with AMQ env",
 	)

@@ -45,7 +45,7 @@ func printCoopUsage() error {
 		"",
 		"Quick start:",
 		"  amq coop exec claude                              # Start Claude Code",
-		"  amq coop exec codex -- --dangerously-skip-permissions  # Start Codex with flags",
+		"  amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Start Codex with flags",
 		"  amq coop exec --root .agent-mail/auth claude      # Isolated session",
 		"",
 		"Manual setup (for scripts/CI):",
