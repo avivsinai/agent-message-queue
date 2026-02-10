@@ -2,8 +2,14 @@
 
 ## Quick Install
 
-### 1. Binary (macOS/Linux)
+### 1. Binary
 
+**macOS (Homebrew — recommended):**
+```bash
+brew install avivsinai/tap/amq
+```
+
+**macOS/Linux (script):**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
@@ -143,6 +149,12 @@ amq --version
 
 ## Upgrading
 
+**Homebrew:**
+```bash
+brew upgrade amq
+```
+
+**Other installs:**
 ```bash
 amq upgrade
 ```

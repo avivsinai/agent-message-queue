@@ -26,8 +26,14 @@ AMQ enables **autonomous multi-agent collaboration**: agents message each other 
 
 ## Installation
 
-### 1. Install Binary (macOS/Linux)
+### 1. Install Binary
 
+**macOS (Homebrew):**
+```bash
+brew install avivsinai/tap/amq
+```
+
+**macOS/Linux (script):**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
