@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 1.1.0
+version: 1.2.0
 description: Coordinate agents via the AMQ CLI for file-based inter-agent messaging. Use when you need to send messages to another agent (Claude/Codex), receive messages from partner agents, set up co-op mode between Claude Code and Codex CLI, or manage agent-to-agent communication in any multi-agent workflow. Triggers include "message codex", "talk to claude", "collaborate with partner agent", "AMQ", "inter-agent messaging", or "agent coordination".
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
@@ -33,28 +33,52 @@ amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Terminal 2
 
 That's it. `coop exec` auto-initializes if needed, sets `AM_ROOT`/`AM_ME`, starts wake notifications, and execs into the agent.
 
+## Session Scoping (IMPORTANT)
+
+**Always use `AM_ROOT` and `AM_ME` from your environment. Never override them.**
+
+When launched via `amq coop exec` (or the `amc`/`amx` aliases), your environment is pre-configured:
+- `AM_ROOT` — your session's message root (may be an isolated session like `.agent-mail/feature-x`)
+- `AM_ME` — your agent handle
+
+**Rules:**
+- **Never** pass explicit `--root` or `--me` flags to amq commands — rely on env vars
+- **Never** read `.amqrc` to override `AM_ROOT` — `.amqrc` points to the default root, but your session may be isolated
+- **Never** send messages to a different root than your own — the other agent won't see them
+- All `amq send`, `amq drain`, `amq list`, `amq reply` commands automatically use `AM_ROOT` and `AM_ME`
+
+This ensures agents in isolated sessions (e.g., `--session feature-x`) stay on the same channel.
+
 ## Messaging
 
 ```bash
-amq send --to codex --body "Message"              # Send
+amq send --to codex --body "Message"              # Send (uses AM_ROOT/AM_ME from env)
 amq drain --include-body                          # Receive (one-shot, silent when empty)
 amq reply --id <msg_id> --body "Response"          # Reply in thread
 amq watch --timeout 60s                           # Block until message arrives
 amq list --new                                    # Peek without side effects
 ```
 
-Root and agent handle are auto-detected from `.amqrc` and `AM_ME`. Commands work from any subdirectory.
+Root and agent handle come from `AM_ROOT` and `AM_ME` environment variables. Commands work from any subdirectory.
 
 ## Isolated Sessions (Multiple Pairs)
 
 ```bash
-amq coop exec --root .agent-mail/auth claude      # Pair A
-amq coop exec --root .agent-mail/auth codex
-amq coop exec --root .agent-mail/api claude       # Pair B
-amq coop exec --root .agent-mail/api codex
+amq coop exec --session auth claude               # Pair A
+amq coop exec --session auth codex
+amq coop exec --session api claude                # Pair B
+amq coop exec --session api codex
 ```
 
-Each `--root` has isolated inboxes. Messages stay within their root.
+Or with shell aliases (installed via `amq shell-setup --install`):
+```bash
+amc auth    # Claude in auth session
+amx auth    # Codex in auth session
+amc api     # Claude in api session
+amx api     # Codex in api session
+```
+
+Each session has isolated inboxes. Messages stay within their root. `--session <name>` is shorthand for `--root .agent-mail/<name>`.
 
 ## For Scripts/CI
 
