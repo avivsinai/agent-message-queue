@@ -40,10 +40,12 @@ That's it. `coop exec` auto-initializes if needed, sets `AM_ROOT`/`AM_ME`, start
 When launched via `amq coop exec` (or the `amc`/`amx` aliases), your environment is pre-configured:
 - `AM_ROOT` — your session's message root (may be an isolated session like `.agent-mail/feature-x`)
 - `AM_ME` — your agent handle
+- `AM_SESSION` — optional isolated session marker (set when launched with `--session`)
 
 **Rules:**
 - **Never** pass explicit `--root` or `--me` flags to amq commands — rely on env vars
 - **Never** read `.amqrc` to override `AM_ROOT` — `.amqrc` points to the default root, but your session may be isolated
+- If `AM_SESSION` is set, treat it as explicit confirmation that isolated session routing is intentional
 - **Never** send messages to a different root than your own — the other agent won't see them
 - All `amq send`, `amq drain`, `amq list`, `amq reply` commands automatically use `AM_ROOT` and `AM_ME`
 

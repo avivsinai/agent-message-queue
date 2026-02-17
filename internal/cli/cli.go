@@ -3,8 +3,9 @@ package cli
 import "fmt"
 
 const (
-	envRoot = "AM_ROOT"
-	envMe   = "AM_ME"
+	envRoot    = "AM_ROOT"
+	envMe      = "AM_ME"
+	envSession = "AM_SESSION"
 )
 
 func Run(args []string, version string) error {
@@ -161,6 +162,9 @@ func printUsage() error {
 		return err
 	}
 	if err := writeStdoutLine("  AM_ME     Default agent handle"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  AM_SESSION  Active isolated session name (set by coop exec --session)"); err != nil {
 		return err
 	}
 	return writeStdoutLine("  AMQ_NO_UPDATE_CHECK  Disable update check (1/true/yes/on)")

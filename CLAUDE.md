@@ -63,7 +63,13 @@ internal/
 
 **Thread Naming**: P2P threads use lexicographic ordering: `p2p/<lower_agent>__<higher_agent>`
 
-**Environment Variables**: `AM_ROOT` (default root dir), `AM_ME` (default agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
+**Environment Variables**: `AM_ROOT` (default root dir), `AM_ME` (default agent handle), `AM_SESSION` (isolated session name when using `coop exec --session`), `AMQ_NO_UPDATE_CHECK` (disable update check)
+
+**Session Scoping Rule (CRITICAL for agents)**:
+- If `AM_ROOT` is set, treat it as the active session root and **do not override it**.
+- Do **not** read `.amqrc` to replace `AM_ROOT` during a running co-op session.
+- `.amqrc` is the project default root, not necessarily the active isolated session.
+- For routine co-op commands, prefer no explicit `--root`/`--me` flags and rely on `AM_ROOT`/`AM_ME`.
 
 **Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
 - **Root**: flags > env (`AM_ROOT`) > `.amqrc` > auto-detect (`.agent-mail/`)
@@ -75,6 +81,8 @@ The `.amqrc` file is JSON (root only):
 ```json
 {"root": ".agent-mail"}
 ```
+
+**Session Override Rule (CRITICAL)**: When `AM_ROOT` is set in your environment (i.e., you were launched via `amq coop exec` or the `amc`/`amx` aliases), that value is **authoritative**. Do NOT read `.amqrc` to "verify" or override it — `.amqrc` always points to the default root, but your session may use an isolated root (e.g., `.agent-mail/feature-x`). If `AM_SESSION` is also set, you are in a named isolated session and `AM_ROOT` was explicitly configured. **Never pass explicit `--root` or `--me` flags** — all `amq` commands automatically use `AM_ROOT` and `AM_ME` from the environment.
 
 Usage:
 ```bash

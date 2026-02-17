@@ -29,7 +29,8 @@ func runCoopExec(args []string) error {
 	usage := usageWithFlags(fs, "amq coop exec [options] <command> [-- <command-flags>]",
 		"Set up co-op mode and exec into the agent (replaces this process).",
 		"",
-		"Sets AM_ROOT and AM_ME, starts amq wake in background, then",
+		"Sets AM_ROOT and AM_ME (and AM_SESSION when --session is used),",
+		"starts amq wake in background, then",
 		"replaces itself with the given command via exec.",
 		"",
 		"The agent handle is derived from the command basename unless --me is set.",
@@ -176,6 +177,9 @@ func runCoopExec(args []string) error {
 	// Build environment with AM_ROOT and AM_ME.
 	env := setEnvVar(os.Environ(), envRoot, root)
 	env = setEnvVar(env, envMe, agentHandle)
+	if *sessionFlag != "" {
+		env = setEnvVar(env, envSession, *sessionFlag)
+	}
 
 	// Build argv: command name + agent args.
 	argv := append([]string{cmdName}, agentArgs...)
