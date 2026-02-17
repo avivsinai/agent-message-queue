@@ -117,7 +117,17 @@ func runShellSetup(args []string) error {
 // promptShellSetup runs the interactive 3-step shell-setup flow.
 // Used by coop init and install.sh to offer alias setup inline.
 // Returns true if aliases were installed, false if user declined.
+// Skips the prompt entirely if aliases are already installed.
 func promptShellSetup() bool {
+	// Check if already installed in the user's rc file.
+	shell := detectShell()
+	rcPath := rcFilePath(shell)
+	if data, err := os.ReadFile(rcPath); err == nil {
+		if strings.Contains(string(data), shellSetupMarker) {
+			return false // Already installed, skip prompt
+		}
+	}
+
 	ok, err := confirmPrompt("Install shell aliases for AMQ co-op mode (quickly start Claude/Codex in shared or isolated sessions)?")
 	if err != nil || !ok {
 		return false
@@ -137,7 +147,6 @@ func promptShellSetup() bool {
 		return false
 	}
 
-	shell := detectShell()
 	snippet := shellSnippet(shell, claudeAlias, codexAlias)
 	if err := installToRCFile(shell, snippet, claudeAlias, codexAlias); err != nil {
 		_ = writeStderr("warning: shell-setup failed: %v\n", err)

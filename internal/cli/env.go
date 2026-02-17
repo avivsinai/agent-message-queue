@@ -82,6 +82,10 @@ func runEnv(args []string) error {
 		// Resolve base from .amqrc or default
 		base := resolveBaseRoot()
 		*rootFlag = filepath.Join(base, *sessionFlag)
+	} else if *rootFlag != "" {
+		// --root is treated as a base directory; append default session.
+		// This is consistent with coop exec --root behavior.
+		*rootFlag = filepath.Join(*rootFlag, defaultSessionName)
 	}
 
 	// Resolve configuration with precedence

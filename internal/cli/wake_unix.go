@@ -237,6 +237,9 @@ func runWake(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if err := common.validate(); err != nil {
+		return err
+	}
 
 	if *previewLenFlag < 0 {
 		return UsageError("--preview-len must be >= 0")

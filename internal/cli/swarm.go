@@ -470,6 +470,9 @@ func runSwarmBridge(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if err := common.validate(); err != nil {
+		return err
+	}
 
 	// Validate interval early to avoid panics in polling fallback paths.
 	pollInterval := *pollIntervalFlag

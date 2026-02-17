@@ -22,6 +22,9 @@ func runCleanup(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if err := common.validate(); err != nil {
+		return err
+	}
 	if *olderFlag == "" {
 		return errors.New("--tmp-older-than is required")
 	}

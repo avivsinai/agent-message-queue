@@ -57,21 +57,33 @@ def find_amq_binary() -> str:
     return ""
 
 
-def find_agent_mail_root(start: Path) -> Optional[str]:
-    """Walk upwards from start to locate .agent-mail with AMQ structure."""
+def read_amqrc(directory: Path) -> Optional[dict]:
+    """Read .amqrc JSON from the given directory. Returns None on failure."""
+    amqrc_path = directory / ".amqrc"
+    try:
+        data = json.loads(amqrc_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def find_amqrc(start: Path) -> Optional[tuple]:
+    """Walk upwards from start to find .amqrc. Returns (dir, config) or None."""
     try:
         start = start.resolve()
     except OSError:
         return None
     for parent in [start] + list(start.parents):
-        candidate = parent / ".agent-mail"
-        if (candidate / "agents").is_dir() or (candidate / "meta" / "config.json").is_file():
-            return str(candidate)
+        cfg = read_amqrc(parent)
+        if cfg is not None:
+            return parent, cfg
     return None
 
 
 def resolve_root(event: dict) -> str:
-    """Resolve AM_ROOT with env override and .agent-mail discovery."""
+    """Resolve AM_ROOT with env override, .amqrc, and .agent-mail discovery."""
     if env_root := os.environ.get("AM_ROOT"):
         return env_root
 
@@ -84,13 +96,32 @@ def resolve_root(event: dict) -> str:
     except FileNotFoundError:
         pass
 
+    # For each candidate, try .amqrc first then .agent-mail directory.
+    # This ensures payload cwd is fully resolved before falling back to process cwd.
     for candidate in candidates:
-        if root := find_agent_mail_root(candidate):
-            return root
+        # Try .amqrc resolution (base + default_session)
+        result = find_amqrc(candidate)
+        if result is not None:
+            rc_dir, cfg = result
+            base = cfg.get("root", "")
+            if base:
+                base_path = Path(base) if Path(base).is_absolute() else rc_dir / base
+                session = cfg.get("default_session", "team")
+                return str(base_path / session)
+
+        # Fallback: look for .agent-mail directory and append default session
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        for parent in [resolved] + list(resolved.parents):
+            agent_mail = parent / ".agent-mail"
+            if agent_mail.is_dir():
+                return str(agent_mail / "team")
 
     if isinstance(payload_cwd, str) and payload_cwd:
-        return os.path.join(payload_cwd, ".agent-mail")
-    return ".agent-mail"
+        return os.path.join(payload_cwd, ".agent-mail", "team")
+    return os.path.join(".agent-mail", "team")
 
 
 def inbox_has_messages(root: str, me: str) -> bool:

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Clear env vars that could interfere with explicit --root/--me flags.
+unset AM_ROOT AM_ME 2>/dev/null || true
+
 ROOT_DIR="$(mktemp -d)"
 cleanup() {
   rm -rf "$ROOT_DIR"
