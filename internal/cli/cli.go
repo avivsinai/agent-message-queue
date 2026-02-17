@@ -3,9 +3,8 @@ package cli
 import "fmt"
 
 const (
-	envRoot    = "AM_ROOT"
-	envMe      = "AM_ME"
-	envSession = "AM_SESSION"
+	envRoot = "AM_ROOT"
+	envMe   = "AM_ME"
 )
 
 func Run(args []string, version string) error {
@@ -158,13 +157,10 @@ func printUsage() error {
 	if err := writeStdoutLine("Environment:"); err != nil {
 		return err
 	}
-	if err := writeStdoutLine("  AM_ROOT   Default root directory for storage"); err != nil {
+	if err := writeStdoutLine("  AM_ROOT   Queue root directory (set by coop exec, always a session subdirectory)"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine("  AM_ME     Default agent handle"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  AM_SESSION  Active isolated session name (set by coop exec --session)"); err != nil {
 		return err
 	}
 	return writeStdoutLine("  AMQ_NO_UPDATE_CHECK  Disable update check (1/true/yes/on)")

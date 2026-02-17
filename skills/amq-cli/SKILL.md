@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 1.2.0
+version: 1.3.0
 description: Coordinate agents via the AMQ CLI for file-based inter-agent messaging. Use when you need to send messages to another agent (Claude/Codex), receive messages from partner agents, set up co-op mode between Claude Code and Codex CLI, or manage agent-to-agent communication in any multi-agent workflow. Triggers include "message codex", "talk to claude", "collaborate with partner agent", "AMQ", "inter-agent messaging", or "agent coordination".
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
@@ -33,23 +33,21 @@ amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Terminal 2
 
 That's it. `coop exec` auto-initializes if needed, sets `AM_ROOT`/`AM_ME`, starts wake notifications, and execs into the agent.
 
-## Session Scoping (IMPORTANT)
+## Session Layout
 
-**Always use `AM_ROOT` and `AM_ME` from your environment. Never override them.**
+The base directory (`.agent-mail/`) contains session subdirectories. Every session — including the default — is a subdirectory:
 
-When launched via `amq coop exec` (or the `amc`/`amx` aliases), your environment is pre-configured:
-- `AM_ROOT` — your session's message root (may be an isolated session like `.agent-mail/feature-x`)
-- `AM_ME` — your agent handle
-- `AM_SESSION` — optional isolated session marker (set when launched with `--session`)
+```
+.agent-mail/              ← base (configured in .amqrc, never used directly)
+.agent-mail/team/         ← default shared session
+.agent-mail/auth/         ← isolated session
+.agent-mail/api/          ← isolated session
+```
 
-**Rules:**
-- **Never** pass explicit `--root` or `--me` flags to amq commands — rely on env vars
-- **Never** read `.amqrc` to override `AM_ROOT` — `.amqrc` points to the default root, but your session may be isolated
-- If `AM_SESSION` is set, treat it as explicit confirmation that isolated session routing is intentional
-- **Never** send messages to a different root than your own — the other agent won't see them
-- All `amq send`, `amq drain`, `amq list`, `amq reply` commands automatically use `AM_ROOT` and `AM_ME`
+- `amq coop exec claude` → `AM_ROOT=.agent-mail/team`
+- `amq coop exec --session auth claude` → `AM_ROOT=.agent-mail/auth`
 
-This ensures agents in isolated sessions (e.g., `--session feature-x`) stay on the same channel.
+Only two env vars: `AM_ROOT` (where) + `AM_ME` (who). The CLI enforces correct routing — just run `amq` commands as-is.
 
 ## Messaging
 
@@ -80,7 +78,7 @@ amc api     # Claude in api session
 amx api     # Codex in api session
 ```
 
-Each session has isolated inboxes. Messages stay within their root. `--session <name>` is shorthand for `--root .agent-mail/<name>`.
+Each session has isolated inboxes. Messages stay within their root.
 
 ## For Scripts/CI
 

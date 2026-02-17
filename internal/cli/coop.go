@@ -134,20 +134,24 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		_ = writeStderr("warning: %v (overwriting with --force)\n", existingErr)
 	}
 
-	// Create root directories
-	if err := fsq.EnsureRootDirs(root); err != nil {
+	// The root in .amqrc is the base directory; actual queue root is base/session.
+	// Create the default session subdirectory (team).
+	queueRoot := filepath.Join(root, defaultSessionName)
+
+	// Create root directories under the session subdirectory
+	if err := fsq.EnsureRootDirs(queueRoot); err != nil {
 		return fmt.Errorf("failed to create root directories: %w", err)
 	}
 
-	// Create agent mailboxes
+	// Create agent mailboxes under the session subdirectory
 	for _, agent := range agents {
-		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+		if err := fsq.EnsureAgentDirs(queueRoot, agent); err != nil {
 			return fmt.Errorf("failed to create mailbox for %s: %w", agent, err)
 		}
 	}
 
 	// Write config.json only if it doesn't exist or --force is set
-	cfgPath := filepath.Join(root, "meta", "config.json")
+	cfgPath := filepath.Join(queueRoot, "meta", "config.json")
 	configExists := false
 	if _, err := os.Stat(cfgPath); err == nil {
 		configExists = true
@@ -169,7 +173,7 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 	// Write .amqrc only if it doesn't exist in cwd or --force is set
 	amqrcWritten := false
 	if !amqrcExistsInCwd || *forceFlag {
-		amqrcData := amqrc{Root: root}
+		amqrcData := amqrc{Root: root, DefaultSession: defaultSessionName}
 		amqrcJSON, err := json.MarshalIndent(amqrcData, "", "  ")
 		if err != nil {
 			return fmt.Errorf("failed to marshal .amqrc: %w", err)
@@ -187,12 +191,16 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 	if *jsonFlag {
 		out := struct {
 			Root             string   `json:"root"`
+			DefaultSession   string   `json:"default_session"`
+			QueueRoot        string   `json:"queue_root"`
 			Agents           []string `json:"agents"`
 			AmqrcWritten     bool     `json:"amqrc_written"`
 			ConfigWritten    bool     `json:"config_written"`
 			GitignoreUpdated bool     `json:"gitignore_updated"`
 		}{
 			Root:             root,
+			DefaultSession:   defaultSessionName,
+			QueueRoot:        queueRoot,
 			Agents:           agents,
 			AmqrcWritten:     amqrcWritten,
 			ConfigWritten:    configWritten,
@@ -204,7 +212,10 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 	if err := writeStdout("Initialized co-op mode:\n"); err != nil {
 		return err
 	}
-	if err := writeStdout("  Root: %s\n", root); err != nil {
+	if err := writeStdout("  Base: %s\n", root); err != nil {
+		return err
+	}
+	if err := writeStdout("  Default session: %s (queue root: %s)\n", defaultSessionName, queueRoot); err != nil {
 		return err
 	}
 	if err := writeStdout("  Agents: %s\n", strings.Join(agents, ", ")); err != nil {

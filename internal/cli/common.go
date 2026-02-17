@@ -30,7 +30,7 @@ func addCommonFlags(fs *flag.FlagSet) *commonFlags {
 	return flags
 }
 
-// cachedAmqrcRoot returns the root from .amqrc, cached via sync.Once.
+// cachedAmqrcRoot returns the resolved queue root from .amqrc (base/session), cached via sync.Once.
 // Returns "" on any error (best-effort for defaulting, not validation).
 var amqrcOnce sync.Once
 var amqrcCachedRoot string
@@ -41,11 +41,18 @@ func cachedAmqrcRoot() string {
 		if err != nil {
 			return
 		}
-		root := result.Config.Root
-		if root != "" && !filepath.IsAbs(root) {
-			root = filepath.Join(result.Dir, root)
+		base := result.Config.Root
+		if base == "" {
+			return
 		}
-		amqrcCachedRoot = root
+		if !filepath.IsAbs(base) {
+			base = filepath.Join(result.Dir, base)
+		}
+		session := result.Config.DefaultSession
+		if session == "" {
+			session = defaultSessionName
+		}
+		amqrcCachedRoot = filepath.Join(base, session)
 	})
 	return amqrcCachedRoot
 }
@@ -64,7 +71,7 @@ func defaultRoot() string {
 	if root := cachedAmqrcRoot(); root != "" {
 		return root
 	}
-	return ".agent-mail"
+	return filepath.Join(".agent-mail", defaultSessionName)
 }
 
 func resolveRoot(raw string) string {
@@ -88,6 +95,24 @@ func resolveRoot(raw string) string {
 		return found
 	}
 	return cleaned
+}
+
+// guardRootOverride checks whether the user is trying to override AM_ROOT
+// via --root flag. Returns an error if AM_ROOT is set in the env and the
+// resolved root differs. This prevents agents from accidentally using a
+// different root than their session.
+func guardRootOverride(flagRoot string) error {
+	envVal := strings.TrimSpace(os.Getenv(envRoot))
+	if envVal == "" || flagRoot == "" {
+		return nil // No conflict possible
+	}
+	// Compare resolved paths
+	envResolved := resolveRoot(envVal)
+	flagResolved := resolveRoot(flagRoot)
+	if envResolved == flagResolved {
+		return nil // Same path, no conflict
+	}
+	return fmt.Errorf("AM_ROOT is set to %q but --root specifies %q; remove --root to use the session root, or unset AM_ROOT to override", envVal, flagRoot)
 }
 
 func dirExists(path string) bool {

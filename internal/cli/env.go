@@ -11,11 +11,15 @@ import (
 )
 
 // amqrc represents the .amqrc configuration file format.
-// Note: Only 'root' is used. Agent identity ('me') should be set per-terminal
-// via AM_ME env var or --me flag, since different terminals may use different agents.
+// Root is the base directory for all sessions (e.g., ".agent-mail").
+// DefaultSession is the subdirectory used when no --session is specified (default: "team").
+// Agent identity ('me') should be set per-terminal via AM_ME env var or --me flag.
 type amqrc struct {
-	Root string `json:"root"`
+	Root           string `json:"root"`
+	DefaultSession string `json:"default_session,omitempty"`
 }
+
+const defaultSessionName = "team"
 
 // amqrcResult holds both the parsed config and the directory where it was found.
 type amqrcResult struct {
@@ -75,7 +79,9 @@ func runEnv(args []string) error {
 		if err := validateSessionName(*sessionFlag); err != nil {
 			return err
 		}
-		*rootFlag = filepath.Join(defaultCoopRoot, *sessionFlag)
+		// Resolve base from .amqrc or default
+		base := resolveBaseRoot()
+		*rootFlag = filepath.Join(base, *sessionFlag)
 	}
 
 	// Resolve configuration with precedence
@@ -116,7 +122,7 @@ func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 
 	// 1. Try .amqrc file (for root only, lowest precedence)
 	var rcErr error
-	var rcRoot, rcDir string
+	var rcRoot string
 	rcResult, err := findAndLoadAmqrc()
 	if err != nil {
 		if !errors.Is(err, errAmqrcNotFound) {
@@ -125,20 +131,31 @@ func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 		}
 		// Not found is fine, continue with other sources
 	} else {
-		rcRoot = rcResult.Config.Root
-		rcDir = rcResult.Dir
+		base := rcResult.Config.Root
 
 		// Note: 'me' is intentionally not read from .amqrc
 		// Different terminals on the same project may need different agent identities
 
-		// Resolve relative root path against .amqrc directory
-		if rcRoot != "" && !filepath.IsAbs(rcRoot) {
-			rcRoot = filepath.Join(rcDir, rcRoot)
+		// Resolve relative base path against .amqrc directory
+		if base != "" && !filepath.IsAbs(base) {
+			base = filepath.Join(rcResult.Dir, base)
+		}
+
+		// Resolve base + default_session into queue root
+		if base != "" {
+			session := rcResult.Config.DefaultSession
+			if session == "" {
+				session = defaultSessionName
+			}
+			rcRoot = filepath.Join(base, session)
 		}
 	}
 
-	// 2. Auto-detect .agent-mail/ directory
+	// 2. Auto-detect .agent-mail/ directory (append default session)
 	autoRoot := detectAgentMailDir()
+	if autoRoot != "" {
+		autoRoot = filepath.Join(autoRoot, defaultSessionName)
+	}
 
 	// 3. Environment variables
 	envRootVal := strings.TrimSpace(os.Getenv(envRoot))
@@ -192,6 +209,20 @@ func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 	}
 
 	return root, me, nil
+}
+
+// resolveBaseRoot returns the base root directory (without session suffix).
+// Tries .amqrc first, then falls back to defaultCoopRoot.
+func resolveBaseRoot() string {
+	result, err := findAndLoadAmqrc()
+	if err == nil && result.Config.Root != "" {
+		base := result.Config.Root
+		if !filepath.IsAbs(base) {
+			base = filepath.Join(result.Dir, base)
+		}
+		return base
+	}
+	return defaultCoopRoot
 }
 
 // findAndLoadAmqrc searches for .amqrc in current and parent directories.

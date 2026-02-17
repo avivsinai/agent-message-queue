@@ -63,26 +63,28 @@ internal/
 
 **Thread Naming**: P2P threads use lexicographic ordering: `p2p/<lower_agent>__<higher_agent>`
 
-**Environment Variables**: `AM_ROOT` (default root dir), `AM_ME` (default agent handle), `AM_SESSION` (isolated session name when using `coop exec --session`), `AMQ_NO_UPDATE_CHECK` (disable update check)
+**Environment Variables**: `AM_ROOT` (queue root — always a session subdirectory, e.g., `.agent-mail/team`), `AM_ME` (agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
-**Session Scoping Rule (CRITICAL for agents)**:
-- If `AM_ROOT` is set, treat it as the active session root and **do not override it**.
-- Do **not** read `.amqrc` to replace `AM_ROOT` during a running co-op session.
-- `.amqrc` is the project default root, not necessarily the active isolated session.
-- For routine co-op commands, prefer no explicit `--root`/`--me` flags and rely on `AM_ROOT`/`AM_ME`.
-
-**Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
-- **Root**: flags > env (`AM_ROOT`) > `.amqrc` > auto-detect (`.agent-mail/`)
-- **Me**: flags > env (`AM_ME`)
-
-Note: `.amqrc` only configures `root`. Agent identity (`me`) is set per-terminal via `--me` or `AM_ME`, since different terminals may use different agents on the same project.
-
-The `.amqrc` file is JSON (root only):
-```json
-{"root": ".agent-mail"}
+**Session Layout**: The base directory (`.agent-mail/`) contains session subdirectories. Every session is a subdirectory:
+```
+.agent-mail/              ← base (configured in .amqrc, never used directly)
+.agent-mail/team/         ← default shared session
+.agent-mail/auth/         ← isolated session
+.agent-mail/api/          ← isolated session
 ```
 
-**Session Override Rule (CRITICAL)**: When `AM_ROOT` is set in your environment (i.e., you were launched via `amq coop exec` or the `amc`/`amx` aliases), that value is **authoritative**. Do NOT read `.amqrc` to "verify" or override it — `.amqrc` always points to the default root, but your session may use an isolated root (e.g., `.agent-mail/feature-x`). If `AM_SESSION` is also set, you are in a named isolated session and `AM_ROOT` was explicitly configured. **Never pass explicit `--root` or `--me` flags** — all `amq` commands automatically use `AM_ROOT` and `AM_ME` from the environment.
+`AM_ROOT` always points to a session subdirectory (e.g., `.agent-mail/team`), never the base. The CLI enforces this — if `AM_ROOT` is set and `--root` conflicts, the command errors.
+
+**Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
+- **Root**: flags > env (`AM_ROOT`) > `.amqrc` (base + default_session) > auto-detect
+- **Me**: flags > env (`AM_ME`)
+
+Note: `.amqrc` configures the base directory and default session. Agent identity (`me`) is set per-terminal via `--me` or `AM_ME`.
+
+The `.amqrc` file is JSON:
+```json
+{"root": ".agent-mail", "default_session": "team"}
+```
 
 Usage:
 ```bash

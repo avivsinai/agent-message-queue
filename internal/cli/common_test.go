@@ -109,7 +109,7 @@ func TestDefaultRootFromAmqrc(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	// Write .amqrc
+	// Write .amqrc (base root only, default_session defaults to "team")
 	amqrcData, _ := json.Marshal(map[string]string{"root": "custom-root"})
 	if err := os.WriteFile(filepath.Join(base, ".amqrc"), amqrcData, 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
@@ -132,7 +132,8 @@ func TestDefaultRootFromAmqrc(t *testing.T) {
 	}
 
 	got := defaultRoot()
-	want := filepath.Join(base, "custom-root")
+	// Now resolves to base/default_session ("team")
+	want := filepath.Join(base, "custom-root", "team")
 	gotEval, _ := filepath.EvalSymlinks(got)
 	wantEval, _ := filepath.EvalSymlinks(want)
 	if gotEval != wantEval {
@@ -193,9 +194,42 @@ func TestDefaultRootFallbackNoAmqrc(t *testing.T) {
 	}
 
 	got := defaultRoot()
-	if got != ".agent-mail" {
-		t.Fatalf("defaultRoot() = %q, want %q (should fall back)", got, ".agent-mail")
+	// Fallback now includes default session
+	want := filepath.Join(".agent-mail", "team")
+	if got != want {
+		t.Fatalf("defaultRoot() = %q, want %q (should fall back to base/team)", got, want)
 	}
+}
+
+func TestGuardRootOverride(t *testing.T) {
+	t.Run("no conflict when AM_ROOT unset", func(t *testing.T) {
+		t.Setenv("AM_ROOT", "")
+		if err := guardRootOverride("/some/root"); err != nil {
+			t.Errorf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("no conflict when flag empty", func(t *testing.T) {
+		t.Setenv("AM_ROOT", "/env/root")
+		if err := guardRootOverride(""); err != nil {
+			t.Errorf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("no conflict when same path", func(t *testing.T) {
+		t.Setenv("AM_ROOT", "/some/root")
+		if err := guardRootOverride("/some/root"); err != nil {
+			t.Errorf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("error when different paths", func(t *testing.T) {
+		t.Setenv("AM_ROOT", "/env/root")
+		err := guardRootOverride("/different/root")
+		if err == nil {
+			t.Fatal("expected error for conflicting roots")
+		}
+	})
 }
 
 func TestResolveRootFindsParent(t *testing.T) {
