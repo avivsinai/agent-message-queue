@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - Unreleased
+
+### Added
+
+- Embed shell aliases natively (no external `shell-setup` step)
+
 ## [0.17.1] - 2026-02-11
 
 ### Fixed
@@ -74,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
+[0.18.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.15.0...v0.16.0

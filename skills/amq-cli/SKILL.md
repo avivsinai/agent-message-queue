@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 1.3.0
+version: 1.2.0
 description: Coordinate agents via the AMQ CLI for file-based inter-agent messaging. Use when you need to send messages to another agent (Claude/Codex), receive messages from partner agents, set up co-op mode between Claude Code and Codex CLI, or manage agent-to-agent communication in any multi-agent workflow. Triggers include "message codex", "talk to claude", "collaborate with partner agent", "AMQ", "inter-agent messaging", or "agent coordination".
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
@@ -48,6 +48,25 @@ The base directory (`.agent-mail/`) contains session subdirectories. Every sessi
 - `amq coop exec --session auth claude` → `AM_ROOT=.agent-mail/auth`
 
 Only two env vars: `AM_ROOT` (where) + `AM_ME` (who). The CLI enforces correct routing — just run `amq` commands as-is.
+
+## Environment Rules (IMPORTANT)
+
+When running inside `coop exec`, the environment is already configured. Follow these rules:
+
+- **Always use `amq` from PATH** — never `./amq`, `../amq`, or absolute paths to local binaries
+- **Never override `AM_ROOT` or `AM_ME`** — they are set by `coop exec` and point to the correct session. Do not prefix commands with `AM_ROOT=... amq ...`
+- **Never pass `--root` or `--me` flags** — the env vars handle routing automatically
+- **Just run commands as-is**: `amq send --to codex --body "hello"`
+
+Wrong:
+```bash
+AM_ROOT=.agent-mail AM_ME=claude ./amq send --to codex --body "hello"
+```
+
+Right:
+```bash
+amq send --to codex --body "hello"
+```
 
 ## Messaging
 
