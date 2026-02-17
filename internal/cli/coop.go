@@ -46,7 +46,7 @@ func printCoopUsage() error {
 		"Quick start:",
 		"  amq coop exec claude                              # Start Claude Code",
 		"  amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Start Codex with flags",
-		"  amq coop exec --root .agent-mail/auth claude      # Isolated session",
+		"  amq coop exec --session feature-x claude          # Isolated session",
 		"",
 		"Manual setup (for scripts/CI):",
 		"  amq coop init                       # Initialize with defaults (claude,codex)",
@@ -235,6 +235,12 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 				return err
 			}
 		}
+
+		// Offer to install shell aliases (3-step interactive prompt).
+		if err := writeStdoutLine(""); err != nil {
+			return err
+		}
+		promptShellSetup()
 	}
 	return nil
 }

@@ -95,9 +95,9 @@ amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
 
 `coop exec` auto-initializes if needed, sets `AM_ROOT`/`AM_ME`, starts wake, and execs into the agent.
 
-Use `--root` for isolated sessions (multiple pairs):
+Use `--session` for isolated sessions (multiple pairs):
 ```bash
-amq coop exec --root .agent-mail/feature-a claude
+amq coop exec --session feature-a claude
 ```
 
 ### 3. Send & Receive

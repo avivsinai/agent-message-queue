@@ -22,6 +22,21 @@ func TestNormalizeHandle(t *testing.T) {
 	}
 }
 
+func TestValidateSessionName(t *testing.T) {
+	valid := []string{"feature-x", "auth", "my_session", "abc123", "a-b-c"}
+	for _, name := range valid {
+		if err := validateSessionName(name); err != nil {
+			t.Errorf("validateSessionName(%q) unexpected error: %v", name, err)
+		}
+	}
+	invalid := []string{"", "Feature-X", "my/session", "has space", "a.b", "foo@bar"}
+	for _, name := range invalid {
+		if err := validateSessionName(name); err == nil {
+			t.Errorf("validateSessionName(%q) expected error, got nil", name)
+		}
+	}
+}
+
 func TestValidateKnownHandle(t *testing.T) {
 	root := t.TempDir()
 	metaDir := filepath.Join(root, "meta")

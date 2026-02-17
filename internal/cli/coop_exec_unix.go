@@ -20,6 +20,7 @@ func runCoopExec(args []string) error {
 
 	fs := flag.NewFlagSet("coop exec", flag.ContinueOnError)
 	rootFlag := fs.String("root", "", "Root directory (override auto-detection)")
+	sessionFlag := fs.String("session", "", "Session name (shorthand for --root .agent-mail/<name>)")
 	meFlag := fs.String("me", "", "Agent handle (override auto-derivation from command name)")
 	noInitFlag := fs.Bool("no-init", false, "Don't auto-initialize if .amqrc is missing")
 	noWakeFlag := fs.Bool("no-wake", false, "Don't start amq wake in background")
@@ -36,7 +37,8 @@ func runCoopExec(args []string) error {
 		"Examples:",
 		"  amq coop exec claude                              # Exec into Claude Code",
 		"  amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Codex with flags",
-		"  amq coop exec --root .agent-mail/auth claude      # Isolated session",
+		"  amq coop exec --session feature-x claude          # Isolated session",
+		"  amq coop exec --root .agent-mail/auth claude      # Isolated session (explicit root)",
 		"  amq coop exec --me myagent bash                   # Debug shell with AMQ env",
 	)
 
@@ -64,6 +66,17 @@ func runCoopExec(args []string) error {
 	agentHandle, err := normalizeHandle(agentHandle)
 	if err != nil {
 		return fmt.Errorf("cannot derive agent handle from %q: %w (use --me to override)", cmdName, err)
+	}
+
+	// Resolve --session into --root (mutually exclusive).
+	if *sessionFlag != "" {
+		if *rootFlag != "" {
+			return UsageError("--session and --root are mutually exclusive")
+		}
+		if err := validateSessionName(*sessionFlag); err != nil {
+			return err
+		}
+		*rootFlag = filepath.Join(defaultCoopRoot, *sessionFlag)
 	}
 
 	// Resolve root: --root flag > .amqrc > default.

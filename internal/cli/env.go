@@ -38,6 +38,7 @@ func runEnv(args []string) error {
 	fs := flag.NewFlagSet("env", flag.ContinueOnError)
 	meFlag := fs.String("me", "", "Agent handle (overrides AM_ME)")
 	rootFlag := fs.String("root", "", "Root directory (overrides .amqrc and AM_ROOT)")
+	sessionFlag := fs.String("session", "", "Session name (shorthand for --root .agent-mail/<name>)")
 	shellFlag := fs.String("shell", "sh", "Shell format: sh, bash, zsh, fish")
 	wakeFlag := fs.Bool("wake", false, "Include amq wake & in output")
 	jsonFlag := fs.Bool("json", false, "Output as JSON (for scripts)")
@@ -54,15 +55,27 @@ func runEnv(args []string) error {
 		"different agents on the same project.",
 		"",
 		"Usage:",
-		"  eval \"$(amq env --me claude)\"        # Set up for Claude",
-		"  eval \"$(amq env --me codex --wake)\" # Set up for Codex with wake",
-		"  amq env --json                        # Machine-readable output",
+		"  eval \"$(amq env --me claude)\"                # Set up for Claude",
+		"  eval \"$(amq env --me codex --wake)\"          # Set up for Codex with wake",
+		"  eval \"$(amq env --session feature-x --me claude)\"  # Isolated session",
+		"  amq env --json                                # Machine-readable output",
 	)
 
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
+	}
+
+	// Resolve --session into --root (mutually exclusive).
+	if *sessionFlag != "" {
+		if *rootFlag != "" {
+			return UsageError("--session and --root are mutually exclusive")
+		}
+		if err := validateSessionName(*sessionFlag); err != nil {
+			return err
+		}
+		*rootFlag = filepath.Join(defaultCoopRoot, *sessionFlag)
 	}
 
 	// Resolve configuration with precedence

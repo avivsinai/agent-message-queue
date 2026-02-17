@@ -54,19 +54,20 @@ amq coop exec --no-wake claude
 
 ### Multiple Pairs (Isolated Sessions)
 
-Run multiple agent pairs on different features using `--root`:
+Run multiple agent pairs on different features using `--session`:
 
 ```bash
 # Pair A: auth feature
-amq coop exec --root .agent-mail/auth claude      # Terminal 1
-amq coop exec --root .agent-mail/auth codex       # Terminal 2
+amq coop exec --session auth claude               # Terminal 1
+amq coop exec --session auth codex                # Terminal 2
 
 # Pair B: api refactor
-amq coop exec --root .agent-mail/api claude       # Terminal 3
-amq coop exec --root .agent-mail/api codex        # Terminal 4
+amq coop exec --session api claude                # Terminal 3
+amq coop exec --session api codex                 # Terminal 4
 ```
 
 Each pair has isolated inboxes and threads. Messages stay within their root.
+Equivalent explicit root form: `--root .agent-mail/<session>`.
 
 ### For Scripts/CI
 
@@ -88,6 +89,30 @@ If wake fails, configure the notify hook for desktop notifications:
 # ~/.codex/config.toml
 notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
 ```
+
+### Plan Mode Prompt Hook (Claude)
+
+When Claude is in plan mode, it cannot run shell tools directly. Use the
+`UserPromptSubmit` hook to inject AMQ context before prompt processing:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AMQ_PROMPT_HOOK_MODE=plan AMQ_PROMPT_HOOK_ACTION=list python3 $CLAUDE_PROJECT_DIR/scripts/claude-amq-user-prompt-submit.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Set `AMQ_PROMPT_HOOK_ACTION=drain` to auto-drain on submit (instead of list/peek).
 
 ## Roles
 

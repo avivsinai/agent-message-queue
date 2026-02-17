@@ -259,6 +259,22 @@ func normalizeHandle(raw string) (string, error) {
 	return handle, nil
 }
 
+// validateSessionName checks that a session name uses safe characters for
+// directory names. Allows lowercase letters, digits, hyphens, and underscores
+// (same charset as handles).
+func validateSessionName(name string) error {
+	if name == "" {
+		return UsageError("session name cannot be empty")
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return UsageError("invalid session name %q (allowed: a-z, 0-9, -, _)", name)
+	}
+	return nil
+}
+
 func parseHandles(raw string) ([]string, error) {
 	parts := strings.FieldsFunc(raw, func(r rune) bool {
 		return r == ',' || r == ' ' || r == '\t' || r == '\n'

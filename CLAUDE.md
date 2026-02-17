@@ -258,9 +258,9 @@ amq coop exec claude -- --dangerously-skip-permissions  # Sets env, starts wake,
 amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Same, with codex flags
 ```
 
-Use `--root` for isolated sessions:
+Use `--session` for isolated sessions:
 ```bash
-amq coop exec --root .agent-mail/feature-a claude      # Isolated session
+amq coop exec --session feature-a claude               # Isolated session
 ```
 
 Use `--no-wake` to disable auto-wake (e.g., in CI or non-TTY environments).
@@ -284,6 +284,30 @@ If `amq wake` fails (TIOCSTI unavailable on hardened Linux), use notify hook:
 # ~/.codex/config.toml
 notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
 ```
+
+### Plan Mode Prompt Hook (Claude)
+
+When Claude is in plan mode, shell tools are unavailable to the model. You can still
+surface AMQ inbox context by using a `UserPromptSubmit` hook:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AMQ_PROMPT_HOOK_MODE=plan AMQ_PROMPT_HOOK_ACTION=list python3 $CLAUDE_PROJECT_DIR/scripts/claude-amq-user-prompt-submit.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Set `AMQ_PROMPT_HOOK_ACTION=drain` if you want the hook to auto-drain on prompt submit.
 
 ### Co-op Commands
 

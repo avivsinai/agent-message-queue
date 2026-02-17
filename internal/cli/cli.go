@@ -56,6 +56,8 @@ func Run(args []string, version string) error {
 		return runSwarm(args[1:])
 	case "doctor":
 		return runDoctor(args[1:])
+	case "shell-setup":
+		return runShellSetup(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
@@ -135,6 +137,9 @@ func printUsage() error {
 		return err
 	}
 	if err := writeStdoutLine("  doctor    Verify installation and configuration"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  shell-setup  Output or install shell aliases (amc/amx)"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine(""); err != nil {
