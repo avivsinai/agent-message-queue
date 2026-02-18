@@ -85,20 +85,26 @@ amq list --new --label bug
 | `spec_review` | — | normal |
 | `spec_decision` | — | normal |
 
-## Workflow Protocols
+## Spec Workflow — STOP, READ, THEN ACT
 
-**MANDATORY**: Before starting any workflow below, you MUST read its reference file using the Read tool. These contain step-by-step protocols that must be followed exactly. Do NOT improvise or skip the read step.
+When the user asks to "spec", "design with", or "collaborate on a spec" with a partner agent, or when you receive a `spec_research` message:
 
-| Trigger | Action | Reference (MUST read first) |
-|---------|--------|---------------------------|
-| "spec", "design with partner", "collaborative spec", received `spec_research` message | Run `amq coop spec` protocol | Read [references/spec-workflow.md](references/spec-workflow.md) |
-| "swarm", "join team", "agent teams" | Run `amq swarm` protocol | Read [references/swarm-mode.md](references/swarm-mode.md) |
-| Co-op coordination questions (roles, phases, progress) | Follow co-op protocol | Read [references/coop-mode.md](references/coop-mode.md) |
-| Message format questions (fields, schema) | Reference format docs | Read [references/message-format.md](references/message-format.md) |
+**STOP. Do NOT explore the codebase first. Do NOT write a spec yourself. Do NOT send a spec to your partner.**
 
-## References
+Instead, follow this exact sequence:
 
-- [references/spec-workflow.md](references/spec-workflow.md) — Spec workflow: phases, parallel discipline, templates
-- [references/coop-mode.md](references/coop-mode.md) — Co-op protocol: roles, phased flow, collaboration modes
-- [references/swarm-mode.md](references/swarm-mode.md) — Swarm mode: agent teams, bridge, task workflow
-- [references/message-format.md](references/message-format.md) — Message format: frontmatter schema, field reference
+1. Read [references/spec-workflow.md](references/spec-workflow.md) with the Read tool — it contains the full protocol
+2. Run `amq coop spec start --topic <name> --partner <agent> --body "Problem..."` — this notifies partner
+3. THEN research the codebase independently
+4. Submit YOUR findings: `amq coop spec submit --topic <name> --phase research --body "..."`
+5. STOP and WAIT — check `amq coop spec status` until partner also submits and phase advances
+
+**If you skip step 1 or jump to drafting, you are violating the protocol.**
+
+## Other Workflows
+
+For these workflows, read the reference file FIRST, then follow its protocol:
+
+- **Swarm mode** (`amq swarm`): Read [references/swarm-mode.md](references/swarm-mode.md) first
+- **Co-op coordination** (roles, phases, progress): Read [references/coop-mode.md](references/coop-mode.md) first
+- **Message format** (fields, schema): Read [references/message-format.md](references/message-format.md) first
