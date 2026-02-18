@@ -204,7 +204,10 @@ func runCoopSpecStart(args []string) error {
 	if err := writeStdout("  Phase: %s\n", specPhaseResearch); err != nil {
 		return err
 	}
-	return writeStdout("  Sent research message to %s (%s)\n", partner, msgID)
+	if err := writeStdout("  Sent research message to %s (%s)\n", partner, msgID); err != nil {
+		return err
+	}
+	return printSpecNextSteps(me, partner, topic, specPhaseResearch, false)
 }
 
 func runCoopSpecStatus(args []string) error {
@@ -283,6 +286,23 @@ func runCoopSpecStatus(args []string) error {
 		if err := writeStdout("  Completed:  %s\n", state.Completed); err != nil {
 			return err
 		}
+	}
+
+	// Show next steps based on current phase and who has submitted
+	me := common.Me
+	if me == "" {
+		me = defaultMe()
+	}
+	if me != "" {
+		var partner string
+		for _, a := range state.Agents {
+			if a != me {
+				partner = a
+				break
+			}
+		}
+		mySubmitted := hasSubmittedPhase(&state, me)
+		return printSpecNextSteps(me, partner, state.Topic, state.Phase, mySubmitted)
 	}
 	return nil
 }
@@ -534,9 +554,30 @@ func runCoopSpecSubmit(args []string) error {
 		return err
 	}
 	if result.Advanced {
-		return writeStdout("  Phase advanced: %s → %s\n", result.OldPhase, result.Phase)
+		if err := writeStdout("  Phase advanced: %s → %s\n", result.OldPhase, result.Phase); err != nil {
+			return err
+		}
 	}
-	return nil
+
+	// Determine partner for next-step guidance
+	var partner string
+	err = withSpecLock(root, topic, func() error {
+		state, loadErr := loadSpecState(root, topic)
+		if loadErr != nil {
+			return loadErr
+		}
+		for _, a := range state.Agents {
+			if a != me {
+				partner = a
+				break
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil // Non-fatal: submission succeeded
+	}
+	return printSpecNextSteps(me, partner, topic, result.Phase, true)
 }
 
 func runCoopSpecPresent(args []string) error {
@@ -587,4 +628,97 @@ func runCoopSpecPresent(args []string) error {
 
 	_, err = os.Stdout.Write(data)
 	return err
+}
+
+// hasSubmittedPhase checks if agent has submitted for the given current phase.
+func hasSubmittedPhase(state *specState, agent string) bool {
+	subs, ok := state.Submissions[agent]
+	if !ok {
+		return false
+	}
+	phase := state.Phase
+	// Map current phase to what submission would be expected
+	switch phase {
+	case specPhaseResearch:
+		_, ok = subs[specPhaseResearch]
+	case specPhaseExchange, specPhaseDraft:
+		_, ok = subs[specPhaseDraft]
+	case specPhaseReview:
+		_, ok = subs[specPhaseReview]
+	case specPhaseConverge:
+		// Check if final submitted
+		_, ok = subs["final"]
+	default:
+		return false
+	}
+	return ok
+}
+
+// printSpecNextSteps prints contextual guidance based on current phase.
+// This output is critical for agent-guided workflows — agents read command
+// output and follow the printed next steps.
+func printSpecNextSteps(me, partner, topic, phase string, iSubmitted bool) error {
+	if err := writeStdout("\n"); err != nil {
+		return err
+	}
+	switch phase {
+	case specPhaseResearch:
+		if !iSubmitted {
+			return writeStdout(
+				"NEXT STEP: Research the codebase NOW, independently.\n"+
+					"  Do NOT read %s's findings. Do NOT wait for %s.\n"+
+					"  When done, run:\n"+
+					"    amq coop spec submit --topic %s --phase research --body \"Your findings...\"\n",
+				partner, partner, topic)
+		}
+		return writeStdout(
+			"WAITING: You already submitted research. %s has not yet.\n"+
+				"  Check progress:\n"+
+				"    amq coop spec status --topic %s\n"+
+				"  Phase advances automatically when %s also submits.\n",
+			partner, topic, partner)
+	case specPhaseExchange:
+		return writeStdout(
+			"NEXT STEP: Phase is now EXCHANGE.\n"+
+				"  1. Read %s's research (check the spec/%s thread or artifacts)\n"+
+				"  2. Discuss differences via: amq send --to %s --body \"...\" --thread spec/%s\n"+
+				"  3. When ready, submit your draft:\n"+
+				"    amq coop spec submit --topic %s --phase draft --body \"Your draft...\"\n",
+			partner, topic, partner, topic, topic)
+	case specPhaseDraft:
+		if !iSubmitted {
+			return writeStdout(
+				"NEXT STEP: Submit your spec draft.\n"+
+					"    amq coop spec submit --topic %s --phase draft --body \"Your draft...\"\n",
+				topic)
+		}
+		return writeStdout(
+			"WAITING: You already submitted a draft. %s has not yet.\n"+
+				"  Check progress:\n"+
+				"    amq coop spec status --topic %s\n",
+			partner, topic)
+	case specPhaseReview:
+		if !iSubmitted {
+			return writeStdout(
+				"NEXT STEP: Read %s's draft and submit your review.\n"+
+					"    amq coop spec submit --topic %s --phase review --body \"Your review...\"\n",
+				partner, topic)
+		}
+		return writeStdout(
+			"WAITING: You already submitted a review. %s has not yet.\n"+
+				"  Check progress:\n"+
+				"    amq coop spec status --topic %s\n",
+			partner, topic)
+	case specPhaseConverge:
+		return writeStdout(
+			"NEXT STEP: Synthesize both drafts and reviews into a final spec.\n"+
+				"    amq coop spec submit --topic %s --phase final --body @final-spec.md\n",
+			topic)
+	case specPhaseDone:
+		return writeStdout(
+			"DONE: Spec %q is complete.\n"+
+				"  View: amq coop spec present --topic %s\n",
+			topic, topic)
+	}
+	return nil
 }
