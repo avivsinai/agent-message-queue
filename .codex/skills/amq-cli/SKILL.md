@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 1.2.0
+version: 1.3.0
 description: Coordinate agents via the AMQ CLI for file-based inter-agent messaging. Use when you need to send messages to another agent (Claude/Codex), receive messages from partner agents, set up co-op mode between Claude Code and Codex CLI, or manage agent-to-agent communication in any multi-agent workflow. Triggers include "message codex", "talk to claude", "collaborate with partner agent", "AMQ", "inter-agent messaging", or "agent coordination".
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
@@ -18,7 +18,14 @@ Requires `amq` binary in PATH. Install:
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
 
-Verify: `amq --version`
+## Environment Rules (IMPORTANT)
+
+When running inside `coop exec`, the environment is already configured:
+
+- **Always use `amq` from PATH** — never `./amq`, `../amq`, or absolute paths
+- **Never override `AM_ROOT` or `AM_ME`** — they are set by `coop exec`
+- **Never pass `--root` or `--me` flags** — env vars handle routing
+- **Just run commands as-is**: `amq send --to codex --body "hello"`
 
 ## Quick Start
 
@@ -31,145 +38,37 @@ amq coop exec claude -- --dangerously-skip-permissions  # Terminal 1
 amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Terminal 2
 ```
 
-That's it. `coop exec` auto-initializes if needed, sets `AM_ROOT`/`AM_ME`, starts wake notifications, and execs into the agent.
-
-## Session Layout
-
-The base directory (`.agent-mail/`) contains session subdirectories. Every session — including the default — is a subdirectory:
-
-```
-.agent-mail/              ← base (configured in .amqrc, never used directly)
-.agent-mail/team/         ← default shared session
-.agent-mail/auth/         ← isolated session
-.agent-mail/api/          ← isolated session
-```
-
-- `amq coop exec claude` → `AM_ROOT=.agent-mail/team`
-- `amq coop exec --session auth claude` → `AM_ROOT=.agent-mail/auth`
-
-Only two env vars: `AM_ROOT` (where) + `AM_ME` (who). The CLI enforces correct routing — just run `amq` commands as-is.
-
-## Environment Rules (IMPORTANT)
-
-When running inside `coop exec`, the environment is already configured. Follow these rules:
-
-- **Always use `amq` from PATH** — never `./amq`, `../amq`, or absolute paths to local binaries
-- **Never override `AM_ROOT` or `AM_ME`** — they are set by `coop exec` and point to the correct session. Do not prefix commands with `AM_ROOT=... amq ...`
-- **Never pass `--root` or `--me` flags** — the env vars handle routing automatically
-- **Just run commands as-is**: `amq send --to codex --body "hello"`
-
-Wrong:
-```bash
-AM_ROOT=.agent-mail AM_ME=claude ./amq send --to codex --body "hello"
-```
-
-Right:
-```bash
-amq send --to codex --body "hello"
-```
-
 ## Messaging
 
 ```bash
-amq send --to codex --body "Message"              # Send (uses AM_ROOT/AM_ME from env)
+amq send --to codex --body "Message"              # Send
 amq drain --include-body                          # Receive (one-shot, silent when empty)
 amq reply --id <msg_id> --body "Response"          # Reply in thread
 amq watch --timeout 60s                           # Block until message arrives
 amq list --new                                    # Peek without side effects
 ```
 
-Root and agent handle come from `AM_ROOT` and `AM_ME` environment variables. Commands work from any subdirectory.
-
-## Isolated Sessions (Multiple Pairs)
-
+### Send with metadata
 ```bash
-amq coop exec --session auth claude               # Pair A
-amq coop exec --session auth codex
-amq coop exec --session api claude                # Pair B
-amq coop exec --session api codex
-```
-
-Or with shell aliases (installed via `amq shell-setup --install`):
-```bash
-amc auth    # Claude in auth session
-amx auth    # Codex in auth session
-amc api     # Claude in api session
-amx api     # Codex in api session
-```
-
-Each session has isolated inboxes. Messages stay within their root.
-
-## For Scripts/CI
-
-When you can't use `exec` (non-interactive environments):
-```bash
-amq coop init
-eval "$(amq env --me claude)"    # Set env vars manually
-```
-
-## Co-op Protocol
-
-### Core Rules
-
-1. **Initiator rule** — reply to the initiator; ask the initiator for clarifications
-2. **Never branch** — always work on same branch
-3. **Code phase = split** — divide files/modules to avoid conflicts
-4. **Shared workspace** — reference file paths, don't paste code in messages
-
-### Priority Handling
-
-| Priority | Action |
-|----------|--------|
-| `urgent` | Interrupt current work, respond now |
-| `normal` | Add to TODOs, respond after current task |
-| `low` | Batch for session end |
-
-### Progress Updates
-
-```bash
-amq reply --id <msg_id> --kind status --body "Started, eta ~20m"
-amq reply --id <msg_id> --kind answer --body "Summary: ..."
-```
-
-## Commands Reference
-
-### Send
-```bash
-amq send --to codex --body "Quick message"
 amq send --to codex --subject "Review" --kind review_request --body @file.md
 amq send --to codex --priority urgent --kind question --body "Blocked on API"
-amq send --to codex --labels "bug,parser" --body "Found issue"
-amq send --to codex --context '{"paths": ["internal/cli/"]}' --body "Review these"
+amq send --to codex --labels "bug,parser" --context '{"paths": ["src/"]}' --body "Found issue"
 ```
 
 ### Filter
 ```bash
 amq list --new --priority urgent
 amq list --new --from codex --kind review_request
-amq list --new --label bug --label critical
+amq list --new --label bug
 ```
 
-### Reply
-```bash
-amq reply --id <msg_id> --body "LGTM"
-amq reply --id <msg_id> --kind review_response --body "See comments..."
-```
+## Priority Handling
 
-### Dead Letter Queue
-```bash
-amq dlq list                                      # List failed messages
-amq dlq retry --id <dlq_id>                       # Retry one
-amq dlq retry --all                               # Retry all
-amq dlq purge --older-than 24h --yes              # Clean old entries
-```
-
-### Other
-```bash
-amq thread --id p2p/claude__codex --include-body  # View thread
-amq presence set --status busy --note "reviewing" # Set presence
-amq cleanup --tmp-older-than 36h --yes            # Clean stale tmp
-amq upgrade                                       # Self-update
-```
+| Priority | Action |
+|----------|--------|
+| `urgent` | Interrupt current work, respond now |
+| `normal` | Add to TODOs, respond after current task |
+| `low` | Batch for session end |
 
 ## Message Kinds
 
@@ -186,111 +85,14 @@ amq upgrade                                       # Self-update
 | `spec_review` | — | normal |
 | `spec_decision` | — | normal |
 
-## Spec Workflow
+## Workflows
 
-Structured collaborative specification workflow. Both agents research, exchange findings, draft specs, review, and converge — all via AMQ messaging.
-
-### Phases
-
-```
-research → exchange → draft → review → converge → done
-```
-
-| Phase | Advances when | Submit value |
-|-------|--------------|-------------|
-| `research` | All agents submitted | `research` |
-| `exchange` | First draft submitted | `draft` |
-| `draft` | All agents submitted | `draft` |
-| `review` | All agents submitted | `review` |
-| `converge` | Any agent submits final | `final` |
-
-### Quick Start
-
-```bash
-# Start a spec topic
-amq coop spec start --topic auth-redesign --partner codex --body "Problem description"
-
-# Submit research findings
-amq coop spec submit --topic auth-redesign --phase research --body "Findings..."
-
-# Check status
-amq coop spec status --topic auth-redesign
-
-# Submit draft after exchange discussion
-amq coop spec submit --topic auth-redesign --phase draft --body @draft.md
-
-# Submit review feedback
-amq coop spec submit --topic auth-redesign --phase review --body "Feedback..."
-
-# Submit final converged spec
-amq coop spec submit --topic auth-redesign --phase final --body @final-spec.md
-
-# View the final spec
-amq coop spec present --topic auth-redesign
-```
-
-### Research Summary Template
-
-```markdown
-## Problem Understanding
-<your interpretation of the problem>
-
-## Key Findings
-- Finding 1
-- Finding 2
-
-## Proposed Approach
-<high-level solution direction>
-
-## Open Questions
-- Question 1
-- Question 2
-
-## Risks
-- Risk 1
-```
-
-### Spec Draft Template
-
-```markdown
-## Problem Statement
-<clear problem definition>
-
-## Solution
-<proposed solution>
-
-## Architecture
-<system design / component interactions>
-
-## File Changes
-- `path/to/file.go` — description of change
-
-## Edge Cases
-- Case 1
-
-## Testing
-- Test strategy
-
-## Risks
-- Risk 1
-```
-
-## Swarm Mode: Agent Teams
-
-Enable external agents to participate in Claude Code Agent Teams.
-
-```bash
-amq swarm list                                    # Discover teams
-amq swarm join --team my-team --me codex          # Join team
-amq swarm tasks --team my-team                    # View tasks
-amq swarm claim --team my-team --task t1 --me codex  # Claim work
-amq swarm complete --team my-team --task t1 --me codex  # Mark done
-amq swarm bridge --team my-team --me codex        # Run task notification bridge
-```
-
-Communication is asymmetric: bridge delivers task notifications only. Claude Code teammates can `amq send` to external agents. External agents relay messages to the team leader's inbox.
+- **Spec workflow** (`amq coop spec`) — Collaborative specification with parallel research, exchange, drafting, review, and convergence. Read [references/spec-workflow.md](references/spec-workflow.md) for the full protocol, phase rules, and templates.
+- **Swarm mode** (`amq swarm`) — Join Claude Code Agent Teams as an external agent. Read [references/swarm-mode.md](references/swarm-mode.md) for commands and task workflow.
 
 ## References
 
-- `references/coop-mode.md` — Phased workflow, collaboration modes, detailed coordination patterns
-- `references/message-format.md` — Frontmatter schema cheat sheet (fields, types, defaults)
+- [references/coop-mode.md](references/coop-mode.md) — Co-op protocol: roles, phased flow, collaboration modes
+- [references/spec-workflow.md](references/spec-workflow.md) — Spec workflow: phases, parallel discipline, templates
+- [references/swarm-mode.md](references/swarm-mode.md) — Swarm mode: agent teams, bridge, task workflow
+- [references/message-format.md](references/message-format.md) — Message format: frontmatter schema, field reference
