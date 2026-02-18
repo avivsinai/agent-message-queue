@@ -85,14 +85,20 @@ amq list --new --label bug
 | `spec_review` | — | normal |
 | `spec_decision` | — | normal |
 
-## Workflows
+## Workflow Protocols
 
-- **Spec workflow** (`amq coop spec`) — Collaborative specification with parallel research, exchange, drafting, review, and convergence. Read [references/spec-workflow.md](references/spec-workflow.md) for the full protocol, phase rules, and templates.
-- **Swarm mode** (`amq swarm`) — Join Claude Code Agent Teams as an external agent. Read [references/swarm-mode.md](references/swarm-mode.md) for commands and task workflow.
+**MANDATORY**: Before starting any workflow below, you MUST read its reference file using the Read tool. These contain step-by-step protocols that must be followed exactly. Do NOT improvise or skip the read step.
+
+| Trigger | Action | Reference (MUST read first) |
+|---------|--------|---------------------------|
+| "spec", "design with partner", "collaborative spec", received `spec_research` message | Run `amq coop spec` protocol | Read [references/spec-workflow.md](references/spec-workflow.md) |
+| "swarm", "join team", "agent teams" | Run `amq swarm` protocol | Read [references/swarm-mode.md](references/swarm-mode.md) |
+| Co-op coordination questions (roles, phases, progress) | Follow co-op protocol | Read [references/coop-mode.md](references/coop-mode.md) |
+| Message format questions (fields, schema) | Reference format docs | Read [references/message-format.md](references/message-format.md) |
 
 ## References
 
-- [references/coop-mode.md](references/coop-mode.md) — Co-op protocol: roles, phased flow, collaboration modes
 - [references/spec-workflow.md](references/spec-workflow.md) — Spec workflow: phases, parallel discipline, templates
+- [references/coop-mode.md](references/coop-mode.md) — Co-op protocol: roles, phased flow, collaboration modes
 - [references/swarm-mode.md](references/swarm-mode.md) — Swarm mode: agent teams, bridge, task workflow
 - [references/message-format.md](references/message-format.md) — Message format: frontmatter schema, field reference
