@@ -106,6 +106,10 @@ amq env --json                        # Machine-readable output
 | `brainstorm` | — | low | Open-ended discussion |
 | `status` | — | low | Status update/FYI |
 | `todo` | — | normal | Task assignment |
+| `spec_research` | `spec_research` | normal | Spec research findings |
+| `spec_draft` | `spec_review` | normal | Spec draft submission |
+| `spec_review` | — | normal | Spec review feedback |
+| `spec_decision` | — | normal | Final spec decision |
 
 When `--kind` is set but `--priority` is not, priority defaults to `normal`.
 
@@ -136,6 +140,10 @@ amq upgrade
 amq env [--me <agent>] [--root <path>] [--shell sh|bash|zsh|fish] [--wake] [--json]
 amq coop init [--root <path>] [--agents <a,b,c>] [--force] [--json]
 amq coop exec [--root <path>] [--me <handle>] [--no-init] [--no-wake] [-y] <command> [-- <command-flags>]
+amq coop spec start --topic <name> --partner <agent> [--body <text>] [--json]
+amq coop spec status --topic <name> [--json]
+amq coop spec submit --topic <name> --phase <research|draft|review|final> [--body <text|@file>] [--json]
+amq coop spec present --topic <name> [--json]
 amq swarm list [--json]
 amq swarm join --team <name> --me <agent> [--agent-id <id>] [--type codex|external] [--json]
 amq swarm leave --team <name> --agent-id <id> [--json]

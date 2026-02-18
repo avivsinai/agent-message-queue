@@ -77,3 +77,21 @@ Leader prepares commit → user approves → push
 - `amq drain --include-body` — process incoming messages
 - `amq send --to <partner>` — send work/findings to partner
 - `amq reply --id <msg_id>` — reply in thread
+
+## Spec Workflow
+
+Structured pre-implementation specification workflow via `amq coop spec`.
+
+Phases: `research` → `exchange` → `draft` → `review` → `converge` → `done`
+
+```bash
+amq coop spec start --topic <name> --partner <agent> --body "Problem"
+amq coop spec submit --topic <name> --phase research --body "Findings"
+amq coop spec status --topic <name>
+amq coop spec submit --topic <name> --phase draft --body @draft.md
+amq coop spec submit --topic <name> --phase review --body "Feedback"
+amq coop spec submit --topic <name> --phase final --body @final.md
+amq coop spec present --topic <name>
+```
+
+See SKILL.md for templates and detailed phase transition rules.

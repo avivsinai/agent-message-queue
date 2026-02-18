@@ -181,6 +181,99 @@ amq upgrade                                       # Self-update
 | `todo` | — | normal |
 | `status` | — | low |
 | `brainstorm` | — | low |
+| `spec_research` | `spec_research` | normal |
+| `spec_draft` | `spec_review` | normal |
+| `spec_review` | — | normal |
+| `spec_decision` | — | normal |
+
+## Spec Workflow
+
+Structured collaborative specification workflow. Both agents research, exchange findings, draft specs, review, and converge — all via AMQ messaging.
+
+### Phases
+
+```
+research → exchange → draft → review → converge → done
+```
+
+| Phase | Advances when | Submit value |
+|-------|--------------|-------------|
+| `research` | All agents submitted | `research` |
+| `exchange` | First draft submitted | `draft` |
+| `draft` | All agents submitted | `draft` |
+| `review` | All agents submitted | `review` |
+| `converge` | Any agent submits final | `final` |
+
+### Quick Start
+
+```bash
+# Start a spec topic
+amq coop spec start --topic auth-redesign --partner codex --body "Problem description"
+
+# Submit research findings
+amq coop spec submit --topic auth-redesign --phase research --body "Findings..."
+
+# Check status
+amq coop spec status --topic auth-redesign
+
+# Submit draft after exchange discussion
+amq coop spec submit --topic auth-redesign --phase draft --body @draft.md
+
+# Submit review feedback
+amq coop spec submit --topic auth-redesign --phase review --body "Feedback..."
+
+# Submit final converged spec
+amq coop spec submit --topic auth-redesign --phase final --body @final-spec.md
+
+# View the final spec
+amq coop spec present --topic auth-redesign
+```
+
+### Research Summary Template
+
+```markdown
+## Problem Understanding
+<your interpretation of the problem>
+
+## Key Findings
+- Finding 1
+- Finding 2
+
+## Proposed Approach
+<high-level solution direction>
+
+## Open Questions
+- Question 1
+- Question 2
+
+## Risks
+- Risk 1
+```
+
+### Spec Draft Template
+
+```markdown
+## Problem Statement
+<clear problem definition>
+
+## Solution
+<proposed solution>
+
+## Architecture
+<system design / component interactions>
+
+## File Changes
+- `path/to/file.go` — description of change
+
+## Edge Cases
+- Case 1
+
+## Testing
+- Test strategy
+
+## Risks
+- Risk 1
+```
 
 ## Swarm Mode: Agent Teams
 

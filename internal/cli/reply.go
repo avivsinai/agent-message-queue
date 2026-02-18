@@ -58,7 +58,7 @@ func runReply(args []string) error {
 		return UsageError("--priority must be one of: urgent, normal, low")
 	}
 	if !format.IsValidKind(kind) {
-		return UsageError("--kind must be one of: brainstorm, review_request, review_response, question, answer, decision, status, todo")
+		return UsageError("--kind must be one of: %s", format.ValidKindsList())
 	}
 
 	labels := splitList(*labelsFlag)
@@ -132,6 +132,10 @@ func runReply(args []string) error {
 			kind = format.KindReviewResponse
 		case format.KindQuestion:
 			kind = format.KindAnswer
+		case format.KindSpecDraft:
+			kind = format.KindSpecReview
+		case format.KindSpecResearch:
+			kind = format.KindSpecResearch
 		default:
 			kind = originalMsg.Header.Kind // Keep same kind
 		}

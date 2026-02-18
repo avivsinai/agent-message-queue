@@ -30,6 +30,8 @@ func runCoop(args []string) error {
 		return runCoopInit(args[1:])
 	case "exec":
 		return runCoopExec(args[1:])
+	case "spec":
+		return runCoopSpec(args[1:])
 	default:
 		return fmt.Errorf("unknown coop subcommand: %s\nRun 'amq coop --help' for usage", args[0])
 	}
@@ -42,6 +44,7 @@ func printCoopUsage() error {
 		"Subcommands:",
 		"  init   Initialize project for co-op mode (creates .amqrc and mailboxes)",
 		"  exec   Initialize, set env, start wake, and exec into agent (replaces process)",
+		"  spec   Collaborative specification workflow",
 		"",
 		"Quick start:",
 		"  amq coop exec claude                              # Start Claude Code",

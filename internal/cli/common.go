@@ -15,12 +15,12 @@ import (
 )
 
 type commonFlags struct {
-	Root     string
-	Me       string
-	JSON     bool
-	Strict   bool
-	rootSet  bool // true when --root was explicitly provided
-	flagSet  *flag.FlagSet
+	Root    string
+	Me      string
+	JSON    bool
+	Strict  bool
+	rootSet bool // true when --root was explicitly provided
+	flagSet *flag.FlagSet
 }
 
 func addCommonFlags(fs *flag.FlagSet) *commonFlags {
