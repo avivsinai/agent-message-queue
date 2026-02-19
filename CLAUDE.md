@@ -65,6 +65,8 @@ internal/
 
 **Environment Variables**: `AM_ROOT` (queue root — always a session subdirectory, e.g., `.agent-mail/team`), `AM_ME` (agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
+**Deterministic Routing**: Message-routing commands (`send`, `list`, `read`, `reply`, `drain`, etc.) require `AM_ROOT` or `--root` to be set explicitly. The `.amqrc` fallback is only used by initialization commands (`env`, `init`, `coop init`, `coop exec`). This prevents silent misrouting when `.amqrc` changes between commands. Use `eval "$(amq env --me <agent>)"` or `amq coop exec` to pin `AM_ROOT` for your shell session.
+
 **Session Layout**: The base directory (`.agent-mail/`) contains session subdirectories. Every session is a subdirectory:
 ```
 .agent-mail/              ← base (configured in .amqrc, never used directly)

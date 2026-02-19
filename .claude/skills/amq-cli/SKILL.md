@@ -1,7 +1,16 @@
 ---
 name: amq-cli
 version: 1.4.0
-description: Coordinate agents via the AMQ CLI for file-based inter-agent messaging. Use when you need to send messages to another agent (Claude/Codex), receive messages from partner agents, set up co-op mode between Claude Code and Codex CLI, or manage agent-to-agent communication in any multi-agent workflow. Triggers include "message codex", "talk to claude", "collaborate with partner agent", "AMQ", "inter-agent messaging", "agent coordination", "spec", "design with", or "collaborative spec". For spec/design tasks: you MUST use `amq coop spec start` — do NOT use `amq send` to deliver specs.
+description: >-
+  Coordinate agents via the AMQ CLI for file-based inter-agent messaging.
+  Use when you need to send messages to another agent (Claude/Codex),
+  receive messages from partner agents, set up co-op mode between Claude
+  Code and Codex CLI, or manage agent-to-agent communication in any
+  multi-agent workflow. Triggers include "message codex", "talk to claude",
+  "collaborate with partner agent", "AMQ", "inter-agent messaging",
+  "agent coordination", "spec", "design with", or "collaborative spec".
+  For spec/design tasks you MUST use `amq coop spec start` — do NOT use
+  `amq send` to deliver specs.
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
   compatibility: claude-code, codex-cli
@@ -26,6 +35,16 @@ When running inside `coop exec`, the environment is already configured:
 - **Never override `AM_ROOT` or `AM_ME`** — they are set by `coop exec`
 - **Never pass `--root` or `--me` flags** — env vars handle routing
 - **Just run commands as-is**: `amq send --to codex --body "hello"`
+
+When running **outside** `coop exec` (e.g. new conversation, manual terminal):
+
+- You **must** set both `AM_ME` and `AM_ROOT` explicitly on every command
+- `amq` resolves the session from `.amqrc`'s `default_session` at call time — if `.amqrc` was changed mid-conversation, messages silently route to the new session
+- **Always use explicit `AM_ROOT`** to avoid routing to the wrong session:
+  ```bash
+  AM_ME=claude AM_ROOT=/path/to/project/.agent-mail/<session> amq send --to codex --body "hello"
+  ```
+- **Pitfall**: setting only `AM_ME` without `AM_ROOT` relies on `.amqrc` which may have changed. Messages will land in the wrong session's inbox with no error — the target agent won't see them.
 
 ## Task Routing — READ THIS FIRST
 

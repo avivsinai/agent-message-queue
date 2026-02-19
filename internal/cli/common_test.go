@@ -2,8 +2,10 @@ package cli
 
 import (
 	"encoding/json"
+	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -303,5 +305,58 @@ func TestResolveRootCurrentDir(t *testing.T) {
 	}
 	if gotEval != wantEval {
 		t.Fatalf("resolveRoot cwd = %q, want %q", got, want)
+	}
+}
+
+func TestValidate_ExplicitRouting_WithEnvVar(t *testing.T) {
+	t.Setenv("AM_ROOT", "/some/session/root")
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cf := addCommonFlags(fs)
+	_ = fs.Parse([]string{}) // no --root flag
+	if err := cf.validate(); err != nil {
+		t.Fatalf("expected no error when AM_ROOT set, got: %v", err)
+	}
+}
+
+func TestValidate_ExplicitRouting_WithRootFlag(t *testing.T) {
+	t.Setenv("AM_ROOT", "") // unset
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cf := addCommonFlags(fs)
+	_ = fs.Parse([]string{"--root", "/explicit/root"})
+	// --root is set, so validate() calls guardRootOverride (AM_ROOT is empty → no conflict)
+	if err := cf.validate(); err != nil {
+		t.Fatalf("expected no error when --root flag set, got: %v", err)
+	}
+}
+
+func TestValidate_ExplicitRouting_Neither(t *testing.T) {
+	t.Setenv("AM_ROOT", "") // unset
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cf := addCommonFlags(fs)
+	_ = fs.Parse([]string{}) // no --root flag
+	err := cf.validate()
+	if err == nil {
+		t.Fatal("expected error when neither AM_ROOT nor --root is set")
+	}
+	if !strings.Contains(err.Error(), "AM_ROOT is not set") {
+		t.Fatalf("error should mention AM_ROOT, got: %v", err)
+	}
+}
+
+func TestSessionName(t *testing.T) {
+	tests := []struct {
+		root string
+		want string
+	}{
+		{"/path/to/.agent-mail/team", "team"},
+		{"/path/to/.agent-mail/auth", "auth"},
+		{".agent-mail/team", "team"},
+		{"/single", "single"},
+	}
+	for _, tt := range tests {
+		got := sessionName(tt.root)
+		if got != tt.want {
+			t.Errorf("sessionName(%q) = %q, want %q", tt.root, got, tt.want)
+		}
 	}
 }
