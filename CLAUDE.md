@@ -63,27 +63,26 @@ internal/
 
 **Thread Naming**: P2P threads use lexicographic ordering: `p2p/<lower_agent>__<higher_agent>`
 
-**Environment Variables**: `AM_ROOT` (queue root — always a session subdirectory, e.g., `.agent-mail/team`), `AM_ME` (agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
+**Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail`), `AM_ME` (agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
-**Session Layout**: The base directory (`.agent-mail/`) contains session subdirectories. Every session is a subdirectory:
+**Session Layout**: The root directory (`.agent-mail/`) is the default queue root. Use `--session` to create isolated subdirectories:
 ```
-.agent-mail/              ← base (configured in .amqrc, never used directly)
-.agent-mail/team/         ← default shared session
-.agent-mail/auth/         ← isolated session
-.agent-mail/api/          ← isolated session
+.agent-mail/              ← default root (configured in .amqrc)
+.agent-mail/auth/         ← isolated session (via --session auth)
+.agent-mail/api/          ← isolated session (via --session api)
 ```
 
-`AM_ROOT` always points to a session subdirectory (e.g., `.agent-mail/team`), never the base. The CLI enforces this — if `AM_ROOT` is set and `--root` conflicts, the command errors.
+`AM_ROOT` points to the queue root. If `AM_ROOT` is set and `--root` conflicts, the command errors.
 
 **Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
-- **Root**: flags > env (`AM_ROOT`) > `.amqrc` (base + default_session) > auto-detect
+- **Root**: flags > env (`AM_ROOT`) > `.amqrc` > auto-detect
 - **Me**: flags > env (`AM_ME`)
 
-Note: `.amqrc` configures the base directory and default session. Agent identity (`me`) is set per-terminal via `--me` or `AM_ME`.
+Note: `.amqrc` configures the root directory. Agent identity (`me`) is set per-terminal via `--me` or `AM_ME`.
 
 The `.amqrc` file is JSON:
 ```json
-{"root": ".agent-mail", "default_session": "team"}
+{"root": ".agent-mail"}
 ```
 
 Usage:

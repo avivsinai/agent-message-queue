@@ -206,12 +206,5 @@ fi
 
 echo "Next steps:"
 echo "  1. Start agent: amq coop exec claude"
+echo "  Tip: eval \"\$(amq shell-setup)\" to add co-op aliases to your shell"
 echo ""
-
-# Offer shell aliases setup (interactive 3-step prompt handled by amq binary).
-AMQ_BIN="${INSTALL_DIR}/amq"
-if [ -x "$AMQ_BIN" ] || command -v amq &> /dev/null; then
-    AMQ_CMD="${AMQ_BIN}"
-    command -v amq &> /dev/null && AMQ_CMD="amq"
-    "$AMQ_CMD" shell-setup --install < /dev/tty 2>/dev/null || true
-fi

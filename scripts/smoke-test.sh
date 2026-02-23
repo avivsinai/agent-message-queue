@@ -56,43 +56,43 @@ if [[ -f "$tmpfile" ]]; then
   exit 1
 fi
 
-# --- .amqrc root detection (base + default session) ---
+# --- .amqrc root detection (literal root, no default_session) ---
 AMQRC_DIR="$(mktemp -d)"
 amqrc_cleanup() {
   rm -rf "$AMQRC_DIR"
 }
 trap 'cleanup; amqrc_cleanup' EXIT
 
-# .amqrc points to base; init the queue root at base/team
-AMQRC_ROOT="$AMQRC_DIR/custom-root/team"
-printf '{"root": "custom-root", "default_session": "team"}\n' > "$AMQRC_DIR/.amqrc"
+# .amqrc root is literal — init queue at custom-root directly
+AMQRC_ROOT="$AMQRC_DIR/custom-root"
+printf '{"root": "custom-root"}\n' > "$AMQRC_DIR/.amqrc"
 "$BIN" init --root "$AMQRC_ROOT" --agents alice,bob
 
-# Run list from the .amqrc dir — should resolve to custom-root/team automatically
+# Run list from the .amqrc dir — should resolve to custom-root literally
 (cd "$AMQRC_DIR" && AM_ROOT= "$BIN" list --me alice --new >/dev/null 2>&1)
 echo ".amqrc detection ok"
 
-# --- coop exec bash (resolves base + default session) ---
+# --- coop exec bash (literal root from .amqrc) ---
 EXEC_DIR="$(mktemp -d)"
 exec_cleanup() {
   rm -rf "$EXEC_DIR"
 }
 trap 'cleanup; amqrc_cleanup; exec_cleanup' EXIT
 
-# Init the queue root at agent-mail/team (base + default session)
-EXEC_ROOT="$EXEC_DIR/agent-mail/team"
+# Init at literal root agent-mail
+EXEC_ROOT="$EXEC_DIR/agent-mail"
 "$BIN" init --root "$EXEC_ROOT" --agents bash
-printf '{"root": "agent-mail", "default_session": "team"}\n' > "$EXEC_DIR/.amqrc"
+printf '{"root": "agent-mail"}\n' > "$EXEC_DIR/.amqrc"
 
 exec_out="$(cd "$EXEC_DIR" && "$BIN" coop exec --no-wake -y bash -- -c 'echo $AM_ROOT:$AM_ME' 2>/dev/null)"
-# The output should contain the resolved root (with /team) and handle "bash"
+# The output should contain the literal root and handle "bash"
 if ! printf '%s' "$exec_out" | grep -q "bash"; then
   echo "coop exec did not set AM_ME=bash"
   echo "got: $exec_out"
   exit 1
 fi
-if ! printf '%s' "$exec_out" | grep -q "agent-mail/team"; then
-  echo "coop exec did not set AM_ROOT containing agent-mail/team"
+if ! printf '%s' "$exec_out" | grep -q "agent-mail"; then
+  echo "coop exec did not set AM_ROOT containing agent-mail"
   echo "got: $exec_out"
   exit 1
 fi
@@ -105,10 +105,10 @@ iso_cleanup() {
 }
 trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup' EXIT
 
-# Set up default root + .amqrc
-ISODEFAULT="$ISODIR/agent-mail/team"
+# Set up literal root + .amqrc
+ISODEFAULT="$ISODIR/agent-mail"
 "$BIN" init --root "$ISODEFAULT" --agents claude,codex
-printf '{"root": "agent-mail", "default_session": "team"}\n' > "$ISODIR/.amqrc"
+printf '{"root": "agent-mail"}\n' > "$ISODIR/.amqrc"
 
 # Now exec with --session feature-x — should create isolated session under base
 iso_out="$(cd "$ISODIR" && "$BIN" coop exec --session feature-x --no-wake -y bash -- -c 'echo $AM_ROOT:$AM_ME' 2>/dev/null)"

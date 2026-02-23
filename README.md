@@ -79,7 +79,12 @@ amq upgrade
 amq coop init
 ```
 
-Creates `.amqrc`, mailboxes for `claude` and `codex`, updates `.gitignore`, and offers to install shell aliases (you choose the names — defaults: `amc` for Claude, `amx` for Codex).
+Creates `.amqrc`, mailboxes for `claude` and `codex`, and updates `.gitignore`.
+
+Optionally add shell aliases (`amc` for Claude, `amx` for Codex):
+```bash
+eval "$(amq shell-setup)"
+```
 
 ### 2. Start Agent Sessions
 

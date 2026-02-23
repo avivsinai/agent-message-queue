@@ -15,12 +15,12 @@ import (
 )
 
 type commonFlags struct {
-	Root     string
-	Me       string
-	JSON     bool
-	Strict   bool
-	rootSet  bool // true when --root was explicitly provided
-	flagSet  *flag.FlagSet
+	Root    string
+	Me      string
+	JSON    bool
+	Strict  bool
+	rootSet bool // true when --root was explicitly provided
+	flagSet *flag.FlagSet
 }
 
 func addCommonFlags(fs *flag.FlagSet) *commonFlags {
@@ -50,7 +50,7 @@ func (f *commonFlags) validate() error {
 	return guardRootOverride(f.Root)
 }
 
-// cachedAmqrcRoot returns the resolved queue root from .amqrc (base/session), cached via sync.Once.
+// cachedAmqrcRoot returns the literal root from .amqrc, cached via sync.Once.
 // Returns "" on any error (best-effort for defaulting, not validation).
 var amqrcOnce sync.Once
 var amqrcCachedRoot string
@@ -61,36 +61,16 @@ func cachedAmqrcRoot() string {
 		if err != nil {
 			return
 		}
-		base := result.Config.Root
-		if base == "" {
+		root := result.Config.Root
+		if root == "" {
 			return
 		}
-		if !filepath.IsAbs(base) {
-			base = filepath.Join(result.Dir, base)
+		if !filepath.IsAbs(root) {
+			root = filepath.Join(result.Dir, root)
 		}
-		session := result.Config.DefaultSession
-		if session == "" {
-			session = defaultSessionName
-		}
-		root := filepath.Join(base, session)
-		warnLegacyLayout(base, root)
 		amqrcCachedRoot = root
 	})
 	return amqrcCachedRoot
-}
-
-// warnLegacyLayout checks if the base directory has a legacy flat layout
-// (agents/ directly under base instead of under a session subdirectory).
-// Prints a warning to stderr if detected.
-func warnLegacyLayout(base, sessionRoot string) {
-	if dirExists(sessionRoot) {
-		return // Session root exists, nothing to warn about
-	}
-	// Check if base has agents/ directly (legacy flat layout)
-	if dirExists(filepath.Join(base, "agents")) {
-		_ = writeStderr("warning: legacy layout detected — %s has agents/ directly instead of under %s\n", base, filepath.Base(sessionRoot))
-		_ = writeStderr("  Run 'amq coop init --force' to create the new session layout, then move your data.\n")
-	}
 }
 
 // resetAmqrcCache resets the sync.Once for testing.
@@ -107,10 +87,7 @@ func defaultRoot() string {
 	if root := cachedAmqrcRoot(); root != "" {
 		return root
 	}
-	fallback := filepath.Join(".agent-mail", defaultSessionName)
-	// Warn if legacy flat layout exists without .amqrc
-	warnLegacyLayout(".agent-mail", fallback)
-	return fallback
+	return ".agent-mail"
 }
 
 func resolveRoot(raw string) string {

@@ -35,16 +35,15 @@ That's it. `coop exec` auto-initializes if needed, sets `AM_ROOT`/`AM_ME`, start
 
 ## Session Layout
 
-The base directory (`.agent-mail/`) contains session subdirectories. Every session — including the default — is a subdirectory:
+By default, `.amqrc` points to a literal root (e.g., `.agent-mail`). Use `--session` to create isolated subdirectories:
 
 ```
-.agent-mail/              ← base (configured in .amqrc, never used directly)
-.agent-mail/team/         ← default shared session
-.agent-mail/auth/         ← isolated session
-.agent-mail/api/          ← isolated session
+.agent-mail/              ← default root (configured in .amqrc)
+.agent-mail/auth/         ← isolated session (via --session auth)
+.agent-mail/api/          ← isolated session (via --session api)
 ```
 
-- `amq coop exec claude` → `AM_ROOT=.agent-mail/team`
+- `amq coop exec claude` → `AM_ROOT=.agent-mail`
 - `amq coop exec --session auth claude` → `AM_ROOT=.agent-mail/auth`
 
 Only two env vars: `AM_ROOT` (where) + `AM_ME` (who). The CLI enforces correct routing — just run `amq` commands as-is.
@@ -89,7 +88,7 @@ amq coop exec --session api claude                # Pair B
 amq coop exec --session api codex
 ```
 
-Or with shell aliases (installed via `amq shell-setup --install`):
+Or with shell aliases (via `eval "$(amq shell-setup)"`):
 ```bash
 amc auth    # Claude in auth session
 amx auth    # Codex in auth session
