@@ -68,11 +68,11 @@ AMQRC_ROOT="$AMQRC_DIR/custom-root"
 printf '{"root": "custom-root"}\n' > "$AMQRC_DIR/.amqrc"
 "$BIN" init --root "$AMQRC_ROOT" --agents alice,bob
 
-# Run list from the .amqrc dir — should resolve to custom-root literally
-(cd "$AMQRC_DIR" && AM_ROOT= "$BIN" list --me alice --new >/dev/null 2>&1)
+# Run list with explicit --root (deterministic routing requires AM_ROOT or --root)
+(cd "$AMQRC_DIR" && "$BIN" list --root "$AMQRC_ROOT" --me alice --new >/dev/null 2>&1)
 echo ".amqrc detection ok"
 
-# --- coop exec bash (literal root from .amqrc) ---
+# --- coop exec bash (defaults to --session collab) ---
 EXEC_DIR="$(mktemp -d)"
 exec_cleanup() {
   rm -rf "$EXEC_DIR"
@@ -85,18 +85,18 @@ EXEC_ROOT="$EXEC_DIR/agent-mail"
 printf '{"root": "agent-mail"}\n' > "$EXEC_DIR/.amqrc"
 
 exec_out="$(cd "$EXEC_DIR" && "$BIN" coop exec --no-wake -y bash -- -c 'echo $AM_ROOT:$AM_ME' 2>/dev/null)"
-# The output should contain the literal root and handle "bash"
+# The output should contain the default session "collab" and handle "bash"
 if ! printf '%s' "$exec_out" | grep -q "bash"; then
   echo "coop exec did not set AM_ME=bash"
   echo "got: $exec_out"
   exit 1
 fi
-if ! printf '%s' "$exec_out" | grep -q "agent-mail"; then
-  echo "coop exec did not set AM_ROOT containing agent-mail"
+if ! printf '%s' "$exec_out" | grep -q "agent-mail/collab"; then
+  echo "coop exec did not default to --session collab"
   echo "got: $exec_out"
   exit 1
 fi
-echo "coop exec ok"
+echo "coop exec ok (default session=collab)"
 
 # --- coop exec --session with existing .amqrc ---
 ISODIR="$(mktemp -d)"

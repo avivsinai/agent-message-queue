@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	defaultCoopRoot   = ".agent-mail"
-	defaultCoopAgents = "claude,codex"
+	defaultCoopRoot    = ".agent-mail"
+	defaultCoopAgents  = "claude,codex"
+	defaultSessionName = "collab"
 )
 
 func runCoop(args []string) error {
@@ -47,7 +48,7 @@ func printCoopUsage() error {
 		"  spec   Collaborative specification workflow",
 		"",
 		"Quick start:",
-		"  amq coop exec claude                              # Start Claude Code",
+		"  amq coop exec claude                              # Start Claude Code (session=collab)",
 		"  amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Start Codex with flags",
 		"  amq coop exec --session feature-x claude          # Isolated session",
 		"",

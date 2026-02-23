@@ -65,10 +65,12 @@ The `amq coop spec` commands print explicit **NEXT STEP** instructions after eve
 # One-time project setup
 amq coop init
 
-# Per-session (one command per terminal)
+# Per-session (one command per terminal — defaults to --session collab)
 amq coop exec claude -- --dangerously-skip-permissions  # Terminal 1
 amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Terminal 2
 ```
+
+Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
 
 ## Messaging
 
