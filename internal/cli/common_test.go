@@ -134,8 +134,8 @@ func TestDefaultRootFromAmqrc(t *testing.T) {
 	}
 
 	got := defaultRoot()
-	// Now resolves to base/default_session ("team")
-	want := filepath.Join(base, "custom-root", "team")
+	// Resolves to the literal .amqrc root
+	want := filepath.Join(base, "custom-root")
 	gotEval, _ := filepath.EvalSymlinks(got)
 	wantEval, _ := filepath.EvalSymlinks(want)
 	if gotEval != wantEval {
@@ -196,10 +196,9 @@ func TestDefaultRootFallbackNoAmqrc(t *testing.T) {
 	}
 
 	got := defaultRoot()
-	// Fallback now includes default session
-	want := filepath.Join(".agent-mail", "team")
+	want := ".agent-mail"
 	if got != want {
-		t.Fatalf("defaultRoot() = %q, want %q (should fall back to base/team)", got, want)
+		t.Fatalf("defaultRoot() = %q, want %q (should fall back to .agent-mail)", got, want)
 	}
 }
 

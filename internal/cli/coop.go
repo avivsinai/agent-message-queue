@@ -137,11 +137,10 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		_ = writeStderr("warning: %v (overwriting with --force)\n", existingErr)
 	}
 
-	// The root in .amqrc is the base directory; actual queue root is base/session.
-	// Create the default session subdirectory (team).
-	queueRoot := filepath.Join(root, defaultSessionName)
+	// The root in .amqrc is the literal queue root.
+	queueRoot := root
 
-	// Create root directories under the session subdirectory
+	// Create root directories
 	if err := fsq.EnsureRootDirs(queueRoot); err != nil {
 		return fmt.Errorf("failed to create root directories: %w", err)
 	}
@@ -176,7 +175,7 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 	// Write .amqrc only if it doesn't exist in cwd or --force is set
 	amqrcWritten := false
 	if !amqrcExistsInCwd || *forceFlag {
-		amqrcData := amqrc{Root: root, DefaultSession: defaultSessionName}
+		amqrcData := amqrc{Root: root}
 		amqrcJSON, err := json.MarshalIndent(amqrcData, "", "  ")
 		if err != nil {
 			return fmt.Errorf("failed to marshal .amqrc: %w", err)
@@ -194,16 +193,12 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 	if *jsonFlag {
 		out := struct {
 			Root             string   `json:"root"`
-			DefaultSession   string   `json:"default_session"`
-			QueueRoot        string   `json:"queue_root"`
 			Agents           []string `json:"agents"`
 			AmqrcWritten     bool     `json:"amqrc_written"`
 			ConfigWritten    bool     `json:"config_written"`
 			GitignoreUpdated bool     `json:"gitignore_updated"`
 		}{
 			Root:             root,
-			DefaultSession:   defaultSessionName,
-			QueueRoot:        queueRoot,
 			Agents:           agents,
 			AmqrcWritten:     amqrcWritten,
 			ConfigWritten:    configWritten,
@@ -215,10 +210,7 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 	if err := writeStdout("Initialized co-op mode:\n"); err != nil {
 		return err
 	}
-	if err := writeStdout("  Base: %s\n", root); err != nil {
-		return err
-	}
-	if err := writeStdout("  Default session: %s (queue root: %s)\n", defaultSessionName, queueRoot); err != nil {
+	if err := writeStdout("  Root: %s\n", root); err != nil {
 		return err
 	}
 	if err := writeStdout("  Agents: %s\n", strings.Join(agents, ", ")); err != nil {
@@ -249,12 +241,12 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 				return err
 			}
 		}
-
-		// Offer to install shell aliases (3-step interactive prompt).
 		if err := writeStdoutLine(""); err != nil {
 			return err
 		}
-		promptShellSetup()
+		if err := writeStdoutLine("Tip: eval \"$(amq shell-setup)\" to add co-op aliases to your shell"); err != nil {
+			return err
+		}
 	}
 	return nil
 }

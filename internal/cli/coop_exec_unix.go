@@ -69,48 +69,33 @@ func runCoopExec(args []string) error {
 		return fmt.Errorf("cannot derive agent handle from %q: %w (use --me to override)", cmdName, err)
 	}
 
-	// Resolve --session name (defaults to "team" if omitted).
-	sessionName := *sessionFlag
-	if sessionName != "" {
+	// Resolve --session (pure sugar for --root <base>/<session>).
+	if *sessionFlag != "" {
 		if *rootFlag != "" {
 			return UsageError("--session and --root are mutually exclusive")
 		}
-		if err := validateSessionName(sessionName); err != nil {
+		if err := validateSessionName(*sessionFlag); err != nil {
 			return err
 		}
+		base := resolveBaseRoot()
+		*rootFlag = filepath.Join(base, *sessionFlag)
 	}
 
-	// Resolve base root: --root flag > .amqrc > default.
-	// Then combine with session to get the queue root.
-	base := *rootFlag
-	if base == "" {
+	// Resolve root: --root flag (or --session-derived) > .amqrc > default.
+	root := *rootFlag
+	if root == "" {
 		existing, existingErr := findAndLoadAmqrc()
 		switch existingErr {
 		case nil:
-			base = existing.Config.Root
-			if base != "" && !filepath.IsAbs(base) {
-				base = filepath.Join(existing.Dir, base)
-			}
-			// Use default_session from .amqrc if no --session specified
-			if sessionName == "" {
-				sessionName = existing.Config.DefaultSession
+			root = existing.Config.Root
+			if root != "" && !filepath.IsAbs(root) {
+				root = filepath.Join(existing.Dir, root)
 			}
 		case errAmqrcNotFound:
 			// Will auto-init below.
 		default:
 			return fmt.Errorf("invalid .amqrc: %w", existingErr)
 		}
-	}
-
-	// Default session name if still unset
-	if sessionName == "" {
-		sessionName = defaultSessionName
-	}
-
-	// Combine base + session into the queue root
-	root := base
-	if root != "" {
-		root = filepath.Join(base, sessionName)
 	}
 
 	// Auto-init if needed.
@@ -122,9 +107,8 @@ func runCoopExec(args []string) error {
 			return fmt.Errorf("root %q does not exist; run 'amq coop init' first or remove --no-init", root)
 		}
 
-		if *rootFlag != "" || base != "" {
-			// We have a base (from --root or .amqrc) — just create the session subdirectory.
-			// Don't touch .amqrc (it already exists or wasn't needed).
+		if root != "" {
+			// We have a root (from --root, --session, or .amqrc) — just create dirs.
 			if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
 				return fmt.Errorf("failed to create root %q: %w", root, err)
 			}
@@ -144,16 +128,15 @@ func runCoopExec(args []string) error {
 				return fmt.Errorf("init failed: %w", err)
 			}
 
-			// Reload base after init and combine with session.
+			// Reload root after init.
 			existing, existingErr := findAndLoadAmqrc()
 			if existingErr != nil {
 				return fmt.Errorf("failed to load .amqrc after init: %w", existingErr)
 			}
-			base = existing.Config.Root
-			if base != "" && !filepath.IsAbs(base) {
-				base = filepath.Join(existing.Dir, base)
+			root = existing.Config.Root
+			if root != "" && !filepath.IsAbs(root) {
+				root = filepath.Join(existing.Dir, root)
 			}
-			root = filepath.Join(base, sessionName)
 		}
 	}
 

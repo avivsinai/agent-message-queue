@@ -163,15 +163,13 @@ func checkAmqrc() (doctorCheck, string) {
 		return check, ""
 	}
 
-	session := existing.Config.DefaultSession
-	if session == "" {
-		session = defaultSessionName
+	queueRoot := existing.Config.Root
+	if queueRoot != "" && !filepath.IsAbs(queueRoot) {
+		queueRoot = filepath.Join(existing.Dir, queueRoot)
 	}
-	base := filepath.Join(existing.Dir, existing.Config.Root)
-	queueRoot := filepath.Join(base, session)
 
 	check.Status = "ok"
-	check.Message = fmt.Sprintf("base=%s, session=%s, queue root=%s (in %s)", existing.Config.Root, session, queueRoot, existing.Dir)
+	check.Message = fmt.Sprintf("root=%s, queue root=%s (in %s)", existing.Config.Root, queueRoot, existing.Dir)
 	return check, queueRoot
 }
 

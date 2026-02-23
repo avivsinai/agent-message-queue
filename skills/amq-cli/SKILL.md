@@ -39,7 +39,7 @@ When running inside `coop exec`, the environment is already configured:
 When running **outside** `coop exec` (e.g. new conversation, manual terminal):
 
 - You **must** set both `AM_ME` and `AM_ROOT` explicitly on every command
-- `amq` resolves the session from `.amqrc`'s `default_session` at call time — if `.amqrc` was changed mid-conversation, messages silently route to the new session
+- `amq` resolves the root from `.amqrc` at call time — if `.amqrc` was changed mid-conversation, messages silently route to the new root
 - **Always use explicit `AM_ROOT`** to avoid routing to the wrong session:
   ```bash
   AM_ME=claude AM_ROOT=/path/to/project/.agent-mail/<session> amq send --to codex --body "hello"

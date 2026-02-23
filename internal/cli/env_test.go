@@ -222,8 +222,8 @@ func TestResolveEnvConfigFromAmqrc(t *testing.T) {
 		t.Fatalf("resolveEnvConfig: %v", err)
 	}
 
-	// Root should be resolved to base/default_session ("team")
-	expectedRoot := filepath.Join(root, ".agent-mail", "team")
+	// Root should be the literal .amqrc root
+	expectedRoot := filepath.Join(root, ".agent-mail")
 	resolvedRoot, _ := filepath.EvalSymlinks(rootVal)
 	expectedResolved, _ := filepath.EvalSymlinks(expectedRoot)
 	if resolvedRoot != expectedResolved {
@@ -266,45 +266,12 @@ func TestResolveEnvConfigRelativeRootFromSubdir(t *testing.T) {
 		t.Fatalf("resolveEnvConfig: %v", err)
 	}
 
-	// Root should be resolved relative to .amqrc location + default session
-	expectedRoot := filepath.Join(root, ".agent-mail", "team")
+	// Root should be resolved relative to .amqrc location (literal)
+	expectedRoot := filepath.Join(root, ".agent-mail")
 	resolvedRoot, _ := filepath.EvalSymlinks(rootVal)
 	expectedResolved, _ := filepath.EvalSymlinks(expectedRoot)
 	if resolvedRoot != expectedResolved {
-		t.Errorf("expected root=%q (relative to .amqrc + team), got %q", expectedResolved, resolvedRoot)
-	}
-}
-
-func TestResolveEnvConfigCustomDefaultSession(t *testing.T) {
-	root := t.TempDir()
-
-	// Write .amqrc with custom default_session
-	rcContent := `{"root": ".agent-mail", "default_session": "main"}`
-	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
-		t.Fatalf("write .amqrc: %v", err)
-	}
-
-	oldWd, _ := os.Getwd()
-	defer func() { _ = os.Chdir(oldWd) }()
-
-	_ = os.Unsetenv("AM_ROOT")
-	_ = os.Unsetenv("AM_ME")
-
-	if err := os.Chdir(root); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	rootVal, _, err := resolveEnvConfig("", "")
-	if err != nil {
-		t.Fatalf("resolveEnvConfig: %v", err)
-	}
-
-	// Root should use custom default_session "main" instead of "team"
-	expectedRoot := filepath.Join(root, ".agent-mail", "main")
-	resolvedRoot, _ := filepath.EvalSymlinks(rootVal)
-	expectedResolved, _ := filepath.EvalSymlinks(expectedRoot)
-	if resolvedRoot != expectedResolved {
-		t.Errorf("expected root=%q (custom session), got %q", expectedResolved, resolvedRoot)
+		t.Errorf("expected root=%q (relative to .amqrc), got %q", expectedResolved, resolvedRoot)
 	}
 }
 
@@ -436,10 +403,9 @@ func TestResolveEnvConfigAutoDetect(t *testing.T) {
 		t.Fatalf("resolveEnvConfig: %v", err)
 	}
 
-	// Auto-detect finds .agent-mail but now appends default session
-	expectedRoot := filepath.Join(".agent-mail", "team")
-	if rootVal != expectedRoot {
-		t.Errorf("expected root=%s, got %q", expectedRoot, rootVal)
+	// Auto-detect finds .agent-mail (literal, no session appended)
+	if rootVal != ".agent-mail" {
+		t.Errorf("expected root=.agent-mail, got %q", rootVal)
 	}
 	if meVal != "" {
 		t.Errorf("expected me=empty (not in .amqrc), got %q", meVal)
@@ -633,8 +599,8 @@ func TestRunEnvJSON(t *testing.T) {
 		t.Fatalf("unmarshal: %v, output was: %s", err, output)
 	}
 
-	// Root is now resolved to base/default_session
-	expectedRoot := filepath.Join(root, ".agent-mail", "team")
+	// Root is the literal .amqrc root
+	expectedRoot := filepath.Join(root, ".agent-mail")
 	resolvedResult, _ := filepath.EvalSymlinks(result.Root)
 	resolvedExpected, _ := filepath.EvalSymlinks(expectedRoot)
 	if resolvedResult != resolvedExpected {
@@ -683,8 +649,8 @@ func TestRunEnvPosix(t *testing.T) {
 	n, _ := r.Read(buf)
 	output := string(buf[:n])
 
-	if !strings.Contains(output, "export AM_ROOT=/tmp/test-root/team") {
-		t.Errorf("expected export AM_ROOT with /team suffix, got: %s", output)
+	if !strings.Contains(output, "export AM_ROOT=/tmp/test-root\n") {
+		t.Errorf("expected export AM_ROOT=/tmp/test-root, got: %s", output)
 	}
 	// AM_ME is not set from .amqrc (use env var or --me flag)
 	if strings.Contains(output, "export AM_ME") {
@@ -729,8 +695,8 @@ func TestRunEnvFish(t *testing.T) {
 	n, _ := r.Read(buf)
 	output := string(buf[:n])
 
-	if !strings.Contains(output, "set -gx AM_ROOT /tmp/test-root/team") {
-		t.Errorf("expected set -gx AM_ROOT with /team suffix, got: %s", output)
+	if !strings.Contains(output, "set -gx AM_ROOT /tmp/test-root\n") {
+		t.Errorf("expected set -gx AM_ROOT /tmp/test-root, got: %s", output)
 	}
 	// AM_ME is not set from .amqrc (use env var or --me flag)
 	if strings.Contains(output, "set -gx AM_ME") {
