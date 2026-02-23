@@ -65,9 +65,10 @@ internal/
 
 **Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail`), `AM_ME` (agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
-**Session Layout**: The root directory (`.agent-mail/`) is the default queue root. Use `--session` to create isolated subdirectories:
+**Session Layout**: The base root directory (`.agent-mail/`) is configured in `.amqrc`. `coop exec` defaults to `--session collab`, so agents get session isolation without explicit flags. Use `--session` to override:
 ```
-.agent-mail/              ← default root (configured in .amqrc)
+.agent-mail/              ← base root (configured in .amqrc)
+.agent-mail/collab/       ← default session (coop exec without --session or --root)
 .agent-mail/auth/         ← isolated session (via --session auth)
 .agent-mail/api/          ← isolated session (via --session api)
 ```
@@ -261,13 +262,15 @@ Co-op mode enables real-time collaboration between Claude Code and Codex CLI ses
 
 ```bash
 # Terminal 1 - Claude Code
-amq coop exec claude -- --dangerously-skip-permissions  # Sets env, starts wake, execs into claude
+amq coop exec claude -- --dangerously-skip-permissions  # session=collab by default
 
 # Terminal 2 - Codex CLI
 amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Same, with codex flags
 ```
 
-Use `--session` for isolated sessions:
+Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
+
+Use `--session` for a different isolated session:
 ```bash
 amq coop exec --session feature-a claude               # Isolated session
 ```

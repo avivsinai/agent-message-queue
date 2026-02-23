@@ -33,13 +33,14 @@ func runCoopExec(args []string) error {
 		"starts amq wake in background, then",
 		"replaces itself with the given command via exec.",
 		"",
+		"If neither --session nor --root is given, defaults to --session collab.",
 		"The agent handle is derived from the command basename unless --me is set.",
 		"",
 		"Examples:",
-		"  amq coop exec claude                              # Exec into Claude Code",
+		"  amq coop exec claude                              # Exec into Claude Code (session=collab)",
 		"  amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Codex with flags",
 		"  amq coop exec --session feature-x claude          # Isolated session",
-		"  amq coop exec --root .agent-mail/auth claude      # Isolated session (explicit root)",
+		"  amq coop exec --root .agent-mail/auth claude      # Explicit root (no session default)",
 		"  amq coop exec --me myagent bash                   # Debug shell with AMQ env",
 	)
 
@@ -70,6 +71,10 @@ func runCoopExec(args []string) error {
 	}
 
 	// Resolve --session (pure sugar for --root <base>/<session>).
+	// Default to --session collab when neither --session nor --root is specified.
+	if *sessionFlag == "" && *rootFlag == "" {
+		*sessionFlag = defaultSessionName
+	}
 	if *sessionFlag != "" {
 		if *rootFlag != "" {
 			return UsageError("--session and --root are mutually exclusive")

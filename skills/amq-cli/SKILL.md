@@ -26,10 +26,12 @@ Verify: `amq --version`
 # One-time project setup
 amq coop init
 
-# Per-session (one command per terminal)
+# Per-session (one command per terminal — defaults to --session collab)
 amq coop exec claude -- --dangerously-skip-permissions  # Terminal 1
 amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Terminal 2
 ```
+
+Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
 
 That's it. `coop exec` auto-initializes if needed, sets `AM_ROOT`/`AM_ME`, starts wake notifications, and execs into the agent.
 

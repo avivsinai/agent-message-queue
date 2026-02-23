@@ -45,7 +45,7 @@ amq coop exec claude -- --dangerously-skip-permissions
 amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
 ```
 
-That's it. `coop exec` auto-initializes the project if needed, sets `AM_ROOT`/`AM_ME`, starts wake notifications, and execs into the agent.
+That's it. `coop exec` auto-initializes the project if needed, sets `AM_ROOT`/`AM_ME`, starts wake notifications, and execs into the agent. Without `--session` or `--root`, it defaults to `--session collab` (i.e., `AM_ROOT=.agent-mail/collab`).
 
 To disable auto-wake (e.g., in CI or non-TTY environments):
 ```bash
