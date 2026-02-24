@@ -5,7 +5,6 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -307,38 +306,23 @@ func TestResolveRootCurrentDir(t *testing.T) {
 	}
 }
 
-func TestValidate_ExplicitRouting_WithEnvVar(t *testing.T) {
-	t.Setenv("AM_ROOT", "/some/session/root")
+func TestValidate_NoConflictWithoutFlag(t *testing.T) {
+	t.Setenv("AM_ROOT", "")
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cf := addCommonFlags(fs)
 	_ = fs.Parse([]string{}) // no --root flag
 	if err := cf.validate(); err != nil {
-		t.Fatalf("expected no error when AM_ROOT set, got: %v", err)
+		t.Fatalf("expected no error when --root not set, got: %v", err)
 	}
 }
 
-func TestValidate_ExplicitRouting_WithRootFlag(t *testing.T) {
+func TestValidate_NoConflictWithRootFlag(t *testing.T) {
 	t.Setenv("AM_ROOT", "") // unset
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	cf := addCommonFlags(fs)
 	_ = fs.Parse([]string{"--root", "/explicit/root"})
-	// --root is set, so validate() calls guardRootOverride (AM_ROOT is empty → no conflict)
 	if err := cf.validate(); err != nil {
 		t.Fatalf("expected no error when --root flag set, got: %v", err)
-	}
-}
-
-func TestValidate_ExplicitRouting_Neither(t *testing.T) {
-	t.Setenv("AM_ROOT", "") // unset
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	cf := addCommonFlags(fs)
-	_ = fs.Parse([]string{}) // no --root flag
-	err := cf.validate()
-	if err == nil {
-		t.Fatal("expected error when neither AM_ROOT nor --root is set")
-	}
-	if !strings.Contains(err.Error(), "AM_ROOT is not set") {
-		t.Fatalf("error should mention AM_ROOT, got: %v", err)
 	}
 }
 

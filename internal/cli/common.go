@@ -32,11 +32,8 @@ func addCommonFlags(fs *flag.FlagSet) *commonFlags {
 	return flags
 }
 
-// validate checks routing safety for commands that use commonFlags.
-//  1. If --root was explicitly provided, guards against AM_ROOT conflicts.
-//  2. If --root was NOT provided, requires AM_ROOT to be set — falling back
-//     to .amqrc alone is ambiguous because .amqrc can change between commands.
-//
+// validate checks that the resolved --root flag does not conflict with AM_ROOT.
+// Only fires when --root was explicitly provided (not defaulted from AM_ROOT).
 // Call after flag parsing in every command that uses commonFlags.
 func (f *commonFlags) validate() error {
 	// Check if --root was explicitly set by the user.
@@ -48,23 +45,7 @@ func (f *commonFlags) validate() error {
 		})
 	}
 	if !f.rootSet {
-		// root was defaulted (not from --root flag).
-		// Require AM_ROOT to be set — .amqrc fallback is ambiguous.
-		if os.Getenv(envRoot) == "" {
-			me := defaultMe()
-			hint := "<agent>"
-			if me != "" {
-				hint = me
-			}
-			return fmt.Errorf(
-				"AM_ROOT is not set — session routing is ambiguous\n\n"+
-					"  .amqrc can change between commands, causing silent misrouting.\n"+
-					"  Fix: initialize your session first:\n\n"+
-					"    eval \"$(amq env --me %s)\"     # pin AM_ROOT for this shell\n"+
-					"    amq coop exec %s               # full co-op setup\n"+
-					"    amq send --root <path> ...      # explicit per-command", hint, hint)
-		}
-		return nil // AM_ROOT is set, no conflict possible
+		return nil // Default value, no conflict possible
 	}
 	return guardRootOverride(f.Root)
 }
