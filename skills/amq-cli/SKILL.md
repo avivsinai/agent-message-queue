@@ -45,7 +45,7 @@ By default, `.amqrc` points to a literal root (e.g., `.agent-mail`). Use `--sess
 .agent-mail/api/          ← isolated session (via --session api)
 ```
 
-- `amq coop exec claude` → `AM_ROOT=.agent-mail`
+- `amq coop exec claude` → `AM_ROOT=.agent-mail/collab` (default session)
 - `amq coop exec --session auth claude` → `AM_ROOT=.agent-mail/auth`
 
 Only two env vars: `AM_ROOT` (where) + `AM_ME` (who). The CLI enforces correct routing — just run `amq` commands as-is.
