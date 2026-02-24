@@ -117,94 +117,110 @@ func runCoopSpecStart(args []string) error {
 		return err
 	}
 
-	// Check if spec already exists
-	statePath := specStatePath(root, topic)
-	if _, err := os.Stat(statePath); err == nil {
-		return fmt.Errorf("spec %q already exists; use 'amq coop spec status --topic %s' to check progress", topic, topic)
+	var startResult struct {
+		threadID string
+		agents   []string
+		msgID    string
+		started  string
 	}
 
-	// Create spec directory
-	if err := fsq.EnsureSpecDirs(root, topic); err != nil {
-		return fmt.Errorf("create spec directory: %w", err)
-	}
+	err = withSpecLock(root, topic, func() error {
+		// Check if spec already exists (inside lock to prevent TOCTOU race)
+		statePath := specStatePath(root, topic)
+		if _, err := os.Stat(statePath); err == nil {
+			return fmt.Errorf("spec %q already exists; use 'amq coop spec status --topic %s' to check progress", topic, topic)
+		}
 
-	agents := []string{me, partner}
-	threadID := "spec/" + topic
-	now := time.Now().UTC()
+		// Create spec directory
+		if err := fsq.EnsureSpecDirs(root, topic); err != nil {
+			return fmt.Errorf("create spec directory: %w", err)
+		}
 
-	state := specState{
-		Topic:       topic,
-		Phase:       specPhaseResearch,
-		Started:     now.Format(time.RFC3339Nano),
-		StartedBy:   me,
-		Agents:      agents,
-		Thread:      threadID,
-		Submissions: make(map[string]map[string]specSub),
-	}
+		startResult.agents = []string{me, partner}
+		startResult.threadID = "spec/" + topic
+		now := time.Now().UTC()
 
-	if err := saveSpecState(root, topic, state); err != nil {
-		return err
-	}
+		state := specState{
+			Topic:       topic,
+			Phase:       specPhaseResearch,
+			Started:     now.Format(time.RFC3339Nano),
+			StartedBy:   me,
+			Agents:      startResult.agents,
+			Thread:      startResult.threadID,
+			Submissions: make(map[string]map[string]specSub),
+		}
+		startResult.started = state.Started
 
-	// Send research message to partner
-	msgID, err := format.NewMessageID(now)
+		if err := saveSpecState(root, topic, state); err != nil {
+			return err
+		}
+
+		// Send research message to partner
+		msgID, err := format.NewMessageID(now)
+		if err != nil {
+			return err
+		}
+		startResult.msgID = msgID
+
+		subject := fmt.Sprintf("Spec: %s — research phase", topic)
+		if body == "" {
+			body = fmt.Sprintf("Starting collaborative spec for topic %q. Please research and submit your findings with:\n  amq coop spec submit --topic %s --phase research --body \"Your findings...\"", topic, topic)
+		}
+
+		msg := format.Message{
+			Header: format.Header{
+				Schema:   format.CurrentSchema,
+				ID:       msgID,
+				From:     me,
+				To:       []string{partner},
+				Thread:   startResult.threadID,
+				Subject:  subject,
+				Created:  now.Format(time.RFC3339Nano),
+				Priority: format.PriorityNormal,
+				Kind:     format.KindSpecResearch,
+				Labels:   []string{"spec"},
+			},
+			Body: body,
+		}
+
+		data, err := msg.Marshal()
+		if err != nil {
+			return err
+		}
+
+		filename := msgID + ".md"
+		if _, err := fsq.DeliverToInboxes(root, []string{partner}, filename, data); err != nil {
+			return err
+		}
+
+		// Copy to sender outbox
+		outboxDir := fsq.AgentOutboxSent(root, me)
+		_, _ = fsq.WriteFileAtomic(outboxDir, filename, data, 0o600)
+
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-
-	subject := fmt.Sprintf("Spec: %s — research phase", topic)
-	if body == "" {
-		body = fmt.Sprintf("Starting collaborative spec for topic %q. Please research and submit your findings with:\n  amq coop spec submit --topic %s --phase research --body \"Your findings...\"", topic, topic)
-	}
-
-	msg := format.Message{
-		Header: format.Header{
-			Schema:   format.CurrentSchema,
-			ID:       msgID,
-			From:     me,
-			To:       []string{partner},
-			Thread:   threadID,
-			Subject:  subject,
-			Created:  now.Format(time.RFC3339Nano),
-			Priority: format.PriorityNormal,
-			Kind:     format.KindSpecResearch,
-			Labels:   []string{"spec"},
-		},
-		Body: body,
-	}
-
-	data, err := msg.Marshal()
-	if err != nil {
-		return err
-	}
-
-	filename := msgID + ".md"
-	if _, err := fsq.DeliverToInboxes(root, []string{partner}, filename, data); err != nil {
-		return err
-	}
-
-	// Copy to sender outbox
-	outboxDir := fsq.AgentOutboxSent(root, me)
-	_, _ = fsq.WriteFileAtomic(outboxDir, filename, data, 0o600)
 
 	if common.JSON {
 		return writeJSON(os.Stdout, map[string]any{
 			"topic":   topic,
 			"phase":   specPhaseResearch,
-			"thread":  threadID,
-			"agents":  agents,
-			"msg_id":  msgID,
-			"started": state.Started,
+			"thread":  startResult.threadID,
+			"agents":  startResult.agents,
+			"msg_id":  startResult.msgID,
+			"started": startResult.started,
 		})
 	}
 
-	if err := writeStdout("Started spec %q (thread: %s)\n", topic, threadID); err != nil {
+	if err := writeStdout("Started spec %q (thread: %s)\n", topic, startResult.threadID); err != nil {
 		return err
 	}
 	if err := writeStdout("  Phase: %s\n", specPhaseResearch); err != nil {
 		return err
 	}
-	if err := writeStdout("  Sent research message to %s (%s)\n", partner, msgID); err != nil {
+	if err := writeStdout("  Sent research message to %s (%s)\n", partner, startResult.msgID); err != nil {
 		return err
 	}
 	return printSpecNextSteps(me, partner, topic, specPhaseResearch, false)
@@ -230,6 +246,9 @@ func runCoopSpecStatus(args []string) error {
 	topic := strings.TrimSpace(*topicFlag)
 	if topic == "" {
 		return UsageError("--topic is required")
+	}
+	if err := fsq.ValidateTopicName(topic); err != nil {
+		return UsageError("--topic: %v", err)
 	}
 
 	state, err := loadSpecState(root, topic)
@@ -338,6 +357,9 @@ func runCoopSpecSubmit(args []string) error {
 	topic := strings.TrimSpace(*topicFlag)
 	if topic == "" {
 		return UsageError("--topic is required")
+	}
+	if err := fsq.ValidateTopicName(topic); err != nil {
+		return UsageError("--topic: %v", err)
 	}
 
 	submitPhase := strings.TrimSpace(*phaseFlag)
@@ -600,6 +622,9 @@ func runCoopSpecPresent(args []string) error {
 	topic := strings.TrimSpace(*topicFlag)
 	if topic == "" {
 		return UsageError("--topic is required")
+	}
+	if err := fsq.ValidateTopicName(topic); err != nil {
+		return UsageError("--topic: %v", err)
 	}
 
 	state, err := loadSpecState(root, topic)
