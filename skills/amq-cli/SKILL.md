@@ -72,10 +72,44 @@ amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Terminal 2
 
 Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
 
+## Session Layout
+
+By default, `.amqrc` points to a literal root (e.g., `.agent-mail`). Use `--session` to create isolated subdirectories:
+
+```
+.agent-mail/              ← default root (configured in .amqrc)
+.agent-mail/auth/         ← isolated session (via --session auth)
+.agent-mail/api/          ← isolated session (via --session api)
+```
+
+- `amq coop exec claude` → `AM_ROOT=.agent-mail/collab` (default session)
+- `amq coop exec --session auth claude` → `AM_ROOT=.agent-mail/auth`
+
+Only two env vars: `AM_ROOT` (where) + `AM_ME` (who). The CLI enforces correct routing — just run `amq` commands as-is.
+
+## Environment Rules (IMPORTANT)
+
+When running inside `coop exec`, the environment is already configured. Follow these rules:
+
+- **Always use `amq` from PATH** — never `./amq`, `../amq`, or absolute paths to local binaries
+- **Never override `AM_ROOT` or `AM_ME`** — they are set by `coop exec` and point to the correct session. Do not prefix commands with `AM_ROOT=... amq ...`
+- **Never pass `--root` or `--me` flags** — the env vars handle routing automatically
+- **Just run commands as-is**: `amq send --to codex --body "hello"`
+
+Wrong:
+```bash
+AM_ROOT=.agent-mail AM_ME=claude ./amq send --to codex --body "hello"
+```
+
+Right:
+```bash
+amq send --to codex --body "hello"
+```
+
 ## Messaging
 
 ```bash
-amq send --to codex --body "Message"              # Send
+amq send --to codex --body "Message"              # Send (uses AM_ROOT/AM_ME from env)
 amq drain --include-body                          # Receive (one-shot, silent when empty)
 amq reply --id <msg_id> --body "Response"          # Reply in thread
 amq watch --timeout 60s                           # Block until message arrives

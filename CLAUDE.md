@@ -65,8 +65,6 @@ internal/
 
 **Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail`), `AM_ME` (agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
-**Deterministic Routing**: Message-routing commands (`send`, `list`, `read`, `reply`, `drain`, etc.) require `AM_ROOT` or `--root` to be set explicitly. The `.amqrc` fallback is only used by initialization commands (`env`, `init`, `coop init`, `coop exec`). This prevents silent misrouting when `.amqrc` changes between commands. Use `eval "$(amq env --me <agent>)"` or `amq coop exec` to pin `AM_ROOT` for your shell session.
-
 **Session Layout**: The base root directory (`.agent-mail/`) is configured in `.amqrc`. `coop exec` defaults to `--session collab`, so agents get session isolation without explicit flags. Use `--session` to override:
 ```
 .agent-mail/              ← base root (configured in .amqrc)
@@ -140,7 +138,7 @@ amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
 amq wake --me <agent> [--inject-cmd <cmd>] [--bell] [--debounce <duration>] [--preview-len <n>]
 amq upgrade
 amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--json]
-amq shell-setup [--install] [--shell sh|bash|zsh|fish]
+amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>]
 amq coop init [--root <path>] [--agents <a,b,c>] [--force] [--json]
 amq coop exec [--root <path>] [--session <name>] [--me <handle>] [--no-init] [--no-wake] [-y] <command> [-- <command-flags>]
 amq coop spec start --topic <name> --partner <agent> [--body <text>] [--json]
