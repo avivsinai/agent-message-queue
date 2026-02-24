@@ -56,6 +56,8 @@ func Run(args []string, version string) error {
 		return runSwarm(args[1:])
 	case "doctor":
 		return runDoctor(args[1:])
+	case "shell-setup":
+		return runShellSetup(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
@@ -137,6 +139,9 @@ func printUsage() error {
 	if err := writeStdoutLine("  doctor    Verify installation and configuration"); err != nil {
 		return err
 	}
+	if err := writeStdoutLine("  shell-setup  Output or install shell aliases (amc/amx)"); err != nil {
+		return err
+	}
 	if err := writeStdoutLine(""); err != nil {
 		return err
 	}
@@ -152,7 +157,7 @@ func printUsage() error {
 	if err := writeStdoutLine("Environment:"); err != nil {
 		return err
 	}
-	if err := writeStdoutLine("  AM_ROOT   Default root directory for storage"); err != nil {
+	if err := writeStdoutLine("  AM_ROOT   Queue root directory (set by coop exec, always a session subdirectory)"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine("  AM_ME     Default agent handle"); err != nil {

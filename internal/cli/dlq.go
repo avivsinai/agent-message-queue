@@ -77,6 +77,9 @@ func runDLQList(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if err := common.validate(); err != nil {
+		return err
+	}
 	if err := requireMe(common.Me); err != nil {
 		return err
 	}
@@ -200,6 +203,9 @@ func runDLQRead(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if err := common.validate(); err != nil {
+		return err
+	}
 	if err := requireMe(common.Me); err != nil {
 		return err
 	}
@@ -302,6 +308,9 @@ func runDLQRetry(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if err := common.validate(); err != nil {
+		return err
+	}
 	if err := requireMe(common.Me); err != nil {
 		return err
 	}
@@ -397,6 +406,9 @@ func runDLQPurge(args []string) error {
 		return err
 	} else if handled {
 		return nil
+	}
+	if err := common.validate(); err != nil {
+		return err
 	}
 	if err := requireMe(common.Me); err != nil {
 		return err

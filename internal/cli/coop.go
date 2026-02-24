@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	defaultCoopRoot   = ".agent-mail"
-	defaultCoopAgents = "claude,codex"
+	defaultCoopRoot    = ".agent-mail"
+	defaultCoopAgents  = "claude,codex"
+	defaultSessionName = "collab"
 )
 
 func runCoop(args []string) error {
@@ -44,9 +45,9 @@ func printCoopUsage() error {
 		"  exec   Initialize, set env, start wake, and exec into agent (replaces process)",
 		"",
 		"Quick start:",
-		"  amq coop exec claude                              # Start Claude Code",
+		"  amq coop exec claude                              # Start Claude Code (session=collab)",
 		"  amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Start Codex with flags",
-		"  amq coop exec --root .agent-mail/auth claude      # Isolated session",
+		"  amq coop exec --session feature-x claude          # Isolated session",
 		"",
 		"Manual setup (for scripts/CI):",
 		"  amq coop init                       # Initialize with defaults (claude,codex)",
@@ -134,20 +135,23 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		_ = writeStderr("warning: %v (overwriting with --force)\n", existingErr)
 	}
 
+	// The root in .amqrc is the literal queue root.
+	queueRoot := root
+
 	// Create root directories
-	if err := fsq.EnsureRootDirs(root); err != nil {
+	if err := fsq.EnsureRootDirs(queueRoot); err != nil {
 		return fmt.Errorf("failed to create root directories: %w", err)
 	}
 
-	// Create agent mailboxes
+	// Create agent mailboxes under the session subdirectory
 	for _, agent := range agents {
-		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+		if err := fsq.EnsureAgentDirs(queueRoot, agent); err != nil {
 			return fmt.Errorf("failed to create mailbox for %s: %w", agent, err)
 		}
 	}
 
 	// Write config.json only if it doesn't exist or --force is set
-	cfgPath := filepath.Join(root, "meta", "config.json")
+	cfgPath := filepath.Join(queueRoot, "meta", "config.json")
 	configExists := false
 	if _, err := os.Stat(cfgPath); err == nil {
 		configExists = true
@@ -234,6 +238,12 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 			if err := writeStdout("  Terminal 2: amq coop exec %s\n", agents[1]); err != nil {
 				return err
 			}
+		}
+		if err := writeStdoutLine(""); err != nil {
+			return err
+		}
+		if err := writeStdoutLine("Tip: eval \"$(amq shell-setup)\" to add co-op aliases to your shell"); err != nil {
+			return err
 		}
 	}
 	return nil

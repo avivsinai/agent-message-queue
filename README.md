@@ -79,25 +79,34 @@ amq upgrade
 amq coop init
 ```
 
-This creates `.amqrc`, mailboxes for `claude` and `codex`, and updates `.gitignore`.
+Creates `.amqrc`, mailboxes for `claude` and `codex`, and updates `.gitignore`.
+
+Optionally add shell aliases (`amc` for Claude, `amx` for Codex):
+```bash
+eval "$(amq shell-setup)"
+```
 
 ### 2. Start Agent Sessions
 
-**Terminal 1 — Claude Code:**
+```bash
+# Terminal 1 — Claude Code
+amc
+
+# Terminal 2 — Codex CLI
+amx
+```
+
+Each alias sets up the environment, starts wake notifications, and launches the agent. For isolated sessions (multiple pairs working on different features):
+
+```bash
+amc feature-a          # Claude in feature-a session
+amx feature-a          # Codex in feature-a session
+```
+
+Without aliases, use `amq coop exec` directly:
 ```bash
 amq coop exec claude -- --dangerously-skip-permissions
-```
-
-**Terminal 2 — Codex CLI:**
-```bash
-amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
-```
-
-`coop exec` auto-initializes if needed, sets `AM_ROOT`/`AM_ME`, starts wake, and execs into the agent.
-
-Use `--root` for isolated sessions (multiple pairs):
-```bash
-amq coop exec --root .agent-mail/feature-a claude
+amq coop exec --session feature-a codex
 ```
 
 ### 3. Send & Receive

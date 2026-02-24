@@ -222,7 +222,7 @@ func TestResolveEnvConfigFromAmqrc(t *testing.T) {
 		t.Fatalf("resolveEnvConfig: %v", err)
 	}
 
-	// Root should be resolved against .amqrc directory
+	// Root should be the literal .amqrc root
 	expectedRoot := filepath.Join(root, ".agent-mail")
 	resolvedRoot, _ := filepath.EvalSymlinks(rootVal)
 	expectedResolved, _ := filepath.EvalSymlinks(expectedRoot)
@@ -266,7 +266,7 @@ func TestResolveEnvConfigRelativeRootFromSubdir(t *testing.T) {
 		t.Fatalf("resolveEnvConfig: %v", err)
 	}
 
-	// Root should be resolved relative to .amqrc location (root dir), not subdir
+	// Root should be resolved relative to .amqrc location (literal)
 	expectedRoot := filepath.Join(root, ".agent-mail")
 	resolvedRoot, _ := filepath.EvalSymlinks(rootVal)
 	expectedResolved, _ := filepath.EvalSymlinks(expectedRoot)
@@ -403,6 +403,7 @@ func TestResolveEnvConfigAutoDetect(t *testing.T) {
 		t.Fatalf("resolveEnvConfig: %v", err)
 	}
 
+	// Auto-detect finds .agent-mail (literal, no session appended)
 	if rootVal != ".agent-mail" {
 		t.Errorf("expected root=.agent-mail, got %q", rootVal)
 	}
@@ -598,7 +599,7 @@ func TestRunEnvJSON(t *testing.T) {
 		t.Fatalf("unmarshal: %v, output was: %s", err, output)
 	}
 
-	// Root is now resolved to absolute path
+	// Root is the literal .amqrc root
 	expectedRoot := filepath.Join(root, ".agent-mail")
 	resolvedResult, _ := filepath.EvalSymlinks(result.Root)
 	resolvedExpected, _ := filepath.EvalSymlinks(expectedRoot)
@@ -648,8 +649,8 @@ func TestRunEnvPosix(t *testing.T) {
 	n, _ := r.Read(buf)
 	output := string(buf[:n])
 
-	if !strings.Contains(output, "export AM_ROOT=/tmp/test-root") {
-		t.Errorf("expected export AM_ROOT, got: %s", output)
+	if !strings.Contains(output, "export AM_ROOT=/tmp/test-root\n") {
+		t.Errorf("expected export AM_ROOT=/tmp/test-root, got: %s", output)
 	}
 	// AM_ME is not set from .amqrc (use env var or --me flag)
 	if strings.Contains(output, "export AM_ME") {
@@ -694,8 +695,8 @@ func TestRunEnvFish(t *testing.T) {
 	n, _ := r.Read(buf)
 	output := string(buf[:n])
 
-	if !strings.Contains(output, "set -gx AM_ROOT /tmp/test-root") {
-		t.Errorf("expected set -gx AM_ROOT, got: %s", output)
+	if !strings.Contains(output, "set -gx AM_ROOT /tmp/test-root\n") {
+		t.Errorf("expected set -gx AM_ROOT /tmp/test-root, got: %s", output)
 	}
 	// AM_ME is not set from .amqrc (use env var or --me flag)
 	if strings.Contains(output, "set -gx AM_ME") {
@@ -706,7 +707,7 @@ func TestRunEnvFish(t *testing.T) {
 func TestRunEnvWake(t *testing.T) {
 	root := t.TempDir()
 
-	// Write .amqrc
+	// Write .amqrc (wake test doesn't check root value, just wake output)
 	rcContent := `{"root": "/tmp/test-root"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)

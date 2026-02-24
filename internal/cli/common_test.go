@@ -22,6 +22,21 @@ func TestNormalizeHandle(t *testing.T) {
 	}
 }
 
+func TestValidateSessionName(t *testing.T) {
+	valid := []string{"feature-x", "auth", "my_session", "abc123", "a-b-c"}
+	for _, name := range valid {
+		if err := validateSessionName(name); err != nil {
+			t.Errorf("validateSessionName(%q) unexpected error: %v", name, err)
+		}
+	}
+	invalid := []string{"", "Feature-X", "my/session", "has space", "a.b", "foo@bar"}
+	for _, name := range invalid {
+		if err := validateSessionName(name); err == nil {
+			t.Errorf("validateSessionName(%q) expected error, got nil", name)
+		}
+	}
+}
+
 func TestValidateKnownHandle(t *testing.T) {
 	root := t.TempDir()
 	metaDir := filepath.Join(root, "meta")
@@ -94,7 +109,7 @@ func TestDefaultRootFromAmqrc(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	// Write .amqrc
+	// Write .amqrc (base root only, coop exec defaults to session "collab")
 	amqrcData, _ := json.Marshal(map[string]string{"root": "custom-root"})
 	if err := os.WriteFile(filepath.Join(base, ".amqrc"), amqrcData, 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
@@ -117,6 +132,7 @@ func TestDefaultRootFromAmqrc(t *testing.T) {
 	}
 
 	got := defaultRoot()
+	// Resolves to the literal .amqrc root
 	want := filepath.Join(base, "custom-root")
 	gotEval, _ := filepath.EvalSymlinks(got)
 	wantEval, _ := filepath.EvalSymlinks(want)
@@ -178,9 +194,41 @@ func TestDefaultRootFallbackNoAmqrc(t *testing.T) {
 	}
 
 	got := defaultRoot()
-	if got != ".agent-mail" {
-		t.Fatalf("defaultRoot() = %q, want %q (should fall back)", got, ".agent-mail")
+	want := ".agent-mail"
+	if got != want {
+		t.Fatalf("defaultRoot() = %q, want %q (should fall back to .agent-mail)", got, want)
 	}
+}
+
+func TestGuardRootOverride(t *testing.T) {
+	t.Run("no conflict when AM_ROOT unset", func(t *testing.T) {
+		t.Setenv("AM_ROOT", "")
+		if err := guardRootOverride("/some/root"); err != nil {
+			t.Errorf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("no conflict when flag empty", func(t *testing.T) {
+		t.Setenv("AM_ROOT", "/env/root")
+		if err := guardRootOverride(""); err != nil {
+			t.Errorf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("no conflict when same path", func(t *testing.T) {
+		t.Setenv("AM_ROOT", "/some/root")
+		if err := guardRootOverride("/some/root"); err != nil {
+			t.Errorf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("error when different paths", func(t *testing.T) {
+		t.Setenv("AM_ROOT", "/env/root")
+		err := guardRootOverride("/different/root")
+		if err == nil {
+			t.Fatal("expected error for conflicting roots")
+		}
+	})
 }
 
 func TestResolveRootFindsParent(t *testing.T) {

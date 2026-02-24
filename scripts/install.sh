@@ -206,3 +206,5 @@ fi
 
 echo "Next steps:"
 echo "  1. Start agent: amq coop exec claude"
+echo "  Tip: eval \"\$(amq shell-setup)\" to add co-op aliases to your shell"
+echo ""

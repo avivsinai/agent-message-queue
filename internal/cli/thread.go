@@ -26,6 +26,9 @@ func runThread(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if err := common.validate(); err != nil {
+		return err
+	}
 	threadID := strings.TrimSpace(*idFlag)
 	if threadID == "" {
 		return UsageError("--id is required")

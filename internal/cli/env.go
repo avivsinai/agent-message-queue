@@ -11,8 +11,8 @@ import (
 )
 
 // amqrc represents the .amqrc configuration file format.
-// Note: Only 'root' is used. Agent identity ('me') should be set per-terminal
-// via AM_ME env var or --me flag, since different terminals may use different agents.
+// Root is the literal queue root directory (e.g., ".agent-mail").
+// Agent identity ('me') should be set per-terminal via AM_ME env var or --me flag.
 type amqrc struct {
 	Root string `json:"root"`
 }
@@ -38,6 +38,7 @@ func runEnv(args []string) error {
 	fs := flag.NewFlagSet("env", flag.ContinueOnError)
 	meFlag := fs.String("me", "", "Agent handle (overrides AM_ME)")
 	rootFlag := fs.String("root", "", "Root directory (overrides .amqrc and AM_ROOT)")
+	sessionFlag := fs.String("session", "", "Session name (shorthand for --root .agent-mail/<name>)")
 	shellFlag := fs.String("shell", "sh", "Shell format: sh, bash, zsh, fish")
 	wakeFlag := fs.Bool("wake", false, "Include amq wake & in output")
 	jsonFlag := fs.Bool("json", false, "Output as JSON (for scripts)")
@@ -54,15 +55,29 @@ func runEnv(args []string) error {
 		"different agents on the same project.",
 		"",
 		"Usage:",
-		"  eval \"$(amq env --me claude)\"        # Set up for Claude",
-		"  eval \"$(amq env --me codex --wake)\" # Set up for Codex with wake",
-		"  amq env --json                        # Machine-readable output",
+		"  eval \"$(amq env --me claude)\"                # Set up for Claude",
+		"  eval \"$(amq env --me codex --wake)\"          # Set up for Codex with wake",
+		"  eval \"$(amq env --session feature-x --me claude)\"  # Isolated session",
+		"  amq env --json                                # Machine-readable output",
 	)
 
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
+	}
+
+	// Resolve --session into --root (mutually exclusive).
+	if *sessionFlag != "" {
+		if *rootFlag != "" {
+			return UsageError("--session and --root are mutually exclusive")
+		}
+		if err := validateSessionName(*sessionFlag); err != nil {
+			return err
+		}
+		// Resolve base from .amqrc or default
+		base := resolveBaseRoot()
+		*rootFlag = filepath.Join(base, *sessionFlag)
 	}
 
 	// Resolve configuration with precedence
@@ -103,7 +118,7 @@ func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 
 	// 1. Try .amqrc file (for root only, lowest precedence)
 	var rcErr error
-	var rcRoot, rcDir string
+	var rcRoot string
 	rcResult, err := findAndLoadAmqrc()
 	if err != nil {
 		if !errors.Is(err, errAmqrcNotFound) {
@@ -113,14 +128,13 @@ func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 		// Not found is fine, continue with other sources
 	} else {
 		rcRoot = rcResult.Config.Root
-		rcDir = rcResult.Dir
 
 		// Note: 'me' is intentionally not read from .amqrc
 		// Different terminals on the same project may need different agent identities
 
-		// Resolve relative root path against .amqrc directory
+		// Resolve relative path against .amqrc directory
 		if rcRoot != "" && !filepath.IsAbs(rcRoot) {
-			rcRoot = filepath.Join(rcDir, rcRoot)
+			rcRoot = filepath.Join(rcResult.Dir, rcRoot)
 		}
 	}
 
@@ -179,6 +193,20 @@ func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 	}
 
 	return root, me, nil
+}
+
+// resolveBaseRoot returns the base root directory (without session suffix).
+// Tries .amqrc first, then falls back to defaultCoopRoot.
+func resolveBaseRoot() string {
+	result, err := findAndLoadAmqrc()
+	if err == nil && result.Config.Root != "" {
+		base := result.Config.Root
+		if !filepath.IsAbs(base) {
+			base = filepath.Join(result.Dir, base)
+		}
+		return base
+	}
+	return defaultCoopRoot
 }
 
 // findAndLoadAmqrc searches for .amqrc in current and parent directories.

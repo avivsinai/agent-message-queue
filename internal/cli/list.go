@@ -58,6 +58,9 @@ func runList(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if err := common.validate(); err != nil {
+		return err
+	}
 	if err := requireMe(common.Me); err != nil {
 		return err
 	}

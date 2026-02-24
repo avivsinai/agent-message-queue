@@ -15,14 +15,16 @@ import (
 )
 
 type commonFlags struct {
-	Root   string
-	Me     string
-	JSON   bool
-	Strict bool
+	Root    string
+	Me      string
+	JSON    bool
+	Strict  bool
+	rootSet bool // true when --root was explicitly provided
+	flagSet *flag.FlagSet
 }
 
 func addCommonFlags(fs *flag.FlagSet) *commonFlags {
-	flags := &commonFlags{}
+	flags := &commonFlags{flagSet: fs}
 	fs.StringVar(&flags.Root, "root", defaultRoot(), "Root directory for the queue")
 	fs.StringVar(&flags.Me, "me", defaultMe(), "Agent handle (or AM_ME)")
 	fs.BoolVar(&flags.JSON, "json", false, "Emit JSON output")
@@ -30,7 +32,25 @@ func addCommonFlags(fs *flag.FlagSet) *commonFlags {
 	return flags
 }
 
-// cachedAmqrcRoot returns the root from .amqrc, cached via sync.Once.
+// validate checks that the resolved --root flag does not conflict with AM_ROOT.
+// Only fires when --root was explicitly provided (not defaulted from AM_ROOT).
+// Call after flag parsing in every command that uses commonFlags.
+func (f *commonFlags) validate() error {
+	// Check if --root was explicitly set by the user.
+	if f.flagSet != nil {
+		f.flagSet.Visit(func(fl *flag.Flag) {
+			if fl.Name == "root" {
+				f.rootSet = true
+			}
+		})
+	}
+	if !f.rootSet {
+		return nil // Default value, no conflict possible
+	}
+	return guardRootOverride(f.Root)
+}
+
+// cachedAmqrcRoot returns the literal root from .amqrc, cached via sync.Once.
 // Returns "" on any error (best-effort for defaulting, not validation).
 var amqrcOnce sync.Once
 var amqrcCachedRoot string
@@ -42,7 +62,10 @@ func cachedAmqrcRoot() string {
 			return
 		}
 		root := result.Config.Root
-		if root != "" && !filepath.IsAbs(root) {
+		if root == "" {
+			return
+		}
+		if !filepath.IsAbs(root) {
 			root = filepath.Join(result.Dir, root)
 		}
 		amqrcCachedRoot = root
@@ -88,6 +111,24 @@ func resolveRoot(raw string) string {
 		return found
 	}
 	return cleaned
+}
+
+// guardRootOverride checks whether the user is trying to override AM_ROOT
+// via --root flag. Returns an error if AM_ROOT is set in the env and the
+// resolved root differs. This prevents agents from accidentally using a
+// different root than their session.
+func guardRootOverride(flagRoot string) error {
+	envVal := strings.TrimSpace(os.Getenv(envRoot))
+	if envVal == "" || flagRoot == "" {
+		return nil // No conflict possible
+	}
+	// Compare resolved paths
+	envResolved := resolveRoot(envVal)
+	flagResolved := resolveRoot(flagRoot)
+	if envResolved == flagResolved {
+		return nil // Same path, no conflict
+	}
+	return fmt.Errorf("AM_ROOT is set to %q but --root specifies %q; remove --root to use the session root, or unset AM_ROOT to override", envVal, flagRoot)
 }
 
 func dirExists(path string) bool {
@@ -257,6 +298,22 @@ func normalizeHandle(raw string) (string, error) {
 		return "", fmt.Errorf("invalid handle (allowed: a-z, 0-9, -, _): %s", handle)
 	}
 	return handle, nil
+}
+
+// validateSessionName checks that a session name uses safe characters for
+// directory names. Allows lowercase letters, digits, hyphens, and underscores
+// (same charset as handles).
+func validateSessionName(name string) error {
+	if name == "" {
+		return UsageError("session name cannot be empty")
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return UsageError("invalid session name %q (allowed: a-z, 0-9, -, _)", name)
+	}
+	return nil
 }
 
 func parseHandles(raw string) ([]string, error) {

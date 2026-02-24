@@ -144,6 +144,13 @@ func checkBinary() doctorCheck {
 func checkAmqrc() (doctorCheck, string) {
 	check := doctorCheck{Name: ".amqrc"}
 
+	// If AM_ROOT is set, use it directly (session already resolved)
+	if envVal := os.Getenv(envRoot); envVal != "" {
+		check.Status = "ok"
+		check.Message = fmt.Sprintf("queue root=%s (from AM_ROOT)", envVal)
+		return check, envVal
+	}
+
 	existing, err := findAndLoadAmqrc()
 	if err == errAmqrcNotFound {
 		check.Status = "warn"
@@ -156,9 +163,14 @@ func checkAmqrc() (doctorCheck, string) {
 		return check, ""
 	}
 
+	queueRoot := existing.Config.Root
+	if queueRoot != "" && !filepath.IsAbs(queueRoot) {
+		queueRoot = filepath.Join(existing.Dir, queueRoot)
+	}
+
 	check.Status = "ok"
-	check.Message = fmt.Sprintf("root=%s (in %s)", existing.Config.Root, existing.Dir)
-	return check, filepath.Join(existing.Dir, existing.Config.Root)
+	check.Message = fmt.Sprintf("root=%s, queue root=%s (in %s)", existing.Config.Root, queueRoot, existing.Dir)
+	return check, queueRoot
 }
 
 func checkRootDir(root string) doctorCheck {

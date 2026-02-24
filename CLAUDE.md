@@ -63,15 +63,25 @@ internal/
 
 **Thread Naming**: P2P threads use lexicographic ordering: `p2p/<lower_agent>__<higher_agent>`
 
-**Environment Variables**: `AM_ROOT` (default root dir), `AM_ME` (default agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
+**Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail`), `AM_ME` (agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
+
+**Session Layout**: The base root directory (`.agent-mail/`) is configured in `.amqrc`. `coop exec` defaults to `--session collab`, so agents get session isolation without explicit flags. Use `--session` to override:
+```
+.agent-mail/              ← base root (configured in .amqrc)
+.agent-mail/collab/       ← default session (coop exec without --session or --root)
+.agent-mail/auth/         ← isolated session (via --session auth)
+.agent-mail/api/          ← isolated session (via --session api)
+```
+
+`AM_ROOT` points to the queue root. If `AM_ROOT` is set and `--root` conflicts, the command errors.
 
 **Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
-- **Root**: flags > env (`AM_ROOT`) > `.amqrc` > auto-detect (`.agent-mail/`)
+- **Root**: flags > env (`AM_ROOT`) > `.amqrc` > auto-detect
 - **Me**: flags > env (`AM_ME`)
 
-Note: `.amqrc` only configures `root`. Agent identity (`me`) is set per-terminal via `--me` or `AM_ME`, since different terminals may use different agents on the same project.
+Note: `.amqrc` configures the root directory. Agent identity (`me`) is set per-terminal via `--me` or `AM_ME`.
 
-The `.amqrc` file is JSON (root only):
+The `.amqrc` file is JSON:
 ```json
 {"root": ".agent-mail"}
 ```
@@ -123,9 +133,14 @@ amq dlq retry --me <agent> --id <dlq_id> [--all] [--force]
 amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
 amq wake --me <agent> [--inject-cmd <cmd>] [--bell] [--debounce <duration>] [--preview-len <n>]
 amq upgrade
-amq env [--me <agent>] [--root <path>] [--shell sh|bash|zsh|fish] [--wake] [--json]
+amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--json]
+amq shell-setup [--install] [--shell sh|bash|zsh|fish]
 amq coop init [--root <path>] [--agents <a,b,c>] [--force] [--json]
-amq coop exec [--root <path>] [--me <handle>] [--no-init] [--no-wake] [-y] <command> [-- <command-flags>]
+amq coop exec [--root <path>] [--session <name>] [--me <handle>] [--no-init] [--no-wake] [-y] <command> [-- <command-flags>]
+amq coop spec start --topic <name> --partner <agent> [--body <text>] [--json]
+amq coop spec status --topic <name> [--json]
+amq coop spec submit --topic <name> --phase <research|draft|review|final> [--body <text|@file>] [--json]
+amq coop spec present --topic <name> [--json]
 amq swarm list [--json]
 amq swarm join --team <name> --me <agent> [--agent-id <id>] [--type codex|external] [--json]
 amq swarm leave --team <name> --agent-id <id> [--json]
@@ -252,15 +267,17 @@ Co-op mode enables real-time collaboration between Claude Code and Codex CLI ses
 
 ```bash
 # Terminal 1 - Claude Code
-amq coop exec claude -- --dangerously-skip-permissions  # Sets env, starts wake, execs into claude
+amq coop exec claude -- --dangerously-skip-permissions  # session=collab by default
 
 # Terminal 2 - Codex CLI
 amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Same, with codex flags
 ```
 
-Use `--root` for isolated sessions:
+Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
+
+Use `--session` for a different isolated session:
 ```bash
-amq coop exec --root .agent-mail/feature-a claude      # Isolated session
+amq coop exec --session feature-a claude               # Isolated session
 ```
 
 Use `--no-wake` to disable auto-wake (e.g., in CI or non-TTY environments).
@@ -284,6 +301,30 @@ If `amq wake` fails (TIOCSTI unavailable on hardened Linux), use notify hook:
 # ~/.codex/config.toml
 notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
 ```
+
+### Plan Mode Prompt Hook (Claude)
+
+When Claude is in plan mode, shell tools are unavailable to the model. You can still
+surface AMQ inbox context by using a `UserPromptSubmit` hook:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AMQ_PROMPT_HOOK_MODE=plan AMQ_PROMPT_HOOK_ACTION=list python3 $CLAUDE_PROJECT_DIR/scripts/claude-amq-user-prompt-submit.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Set `AMQ_PROMPT_HOOK_ACTION=drain` if you want the hook to auto-drain on prompt submit.
 
 ### Co-op Commands
 

@@ -105,6 +105,26 @@ func TestCoopExecUsageError(t *testing.T) {
 	}
 }
 
+func TestCoopExecSessionRootMutuallyExclusive(t *testing.T) {
+	err := runCoopExec([]string{"--session", "feat", "--root", "/tmp/q", "claude"})
+	if err == nil {
+		t.Fatal("expected error for --session + --root")
+	}
+	if !containsStr(err.Error(), "mutually exclusive") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestCoopExecSessionInvalidName(t *testing.T) {
+	err := runCoopExec([]string{"--session", "Bad/Name", "claude"})
+	if err == nil {
+		t.Fatal("expected error for invalid session name")
+	}
+	if !containsStr(err.Error(), "invalid session name") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
 func sliceEq(a, b []string) bool {
 	if a == nil && b == nil {
 		return true

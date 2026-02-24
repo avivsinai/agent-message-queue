@@ -39,6 +39,9 @@ func runPresenceSet(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if err := common.validate(); err != nil {
+		return err
+	}
 	if err := requireMe(common.Me); err != nil {
 		return err
 	}
@@ -79,6 +82,9 @@ func runPresenceList(args []string) error {
 		return err
 	} else if handled {
 		return nil
+	}
+	if err := common.validate(); err != nil {
+		return err
 	}
 	root := resolveRoot(common.Root)
 
