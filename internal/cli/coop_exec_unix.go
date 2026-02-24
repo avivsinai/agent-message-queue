@@ -70,11 +70,7 @@ func runCoopExec(args []string) error {
 		return fmt.Errorf("cannot derive agent handle from %q: %w (use --me to override)", cmdName, err)
 	}
 
-	// Resolve --session (pure sugar for --root <base>/<session>).
-	// Default to --session collab when neither --session nor --root is specified.
-	if *sessionFlag == "" && *rootFlag == "" {
-		*sessionFlag = defaultSessionName
-	}
+	// Resolve explicit --session (pure sugar for --root <base>/<session>).
 	if *sessionFlag != "" {
 		if *rootFlag != "" {
 			return UsageError("--session and --root are mutually exclusive")
@@ -103,7 +99,7 @@ func runCoopExec(args []string) error {
 		}
 	}
 
-	// Auto-init if needed.
+	// Auto-init if needed (before session defaulting so full init fires on fresh projects).
 	if root == "" || !dirExists(root) {
 		if *noInitFlag {
 			if root == "" {
@@ -113,9 +109,12 @@ func runCoopExec(args []string) error {
 		}
 
 		if root != "" {
-			// We have a root (from --root, --session, or .amqrc) — just create dirs.
-			if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
+			// We have a root (from --root, --session, or .amqrc) — create root + agent dirs.
+			if err := fsq.EnsureRootDirs(root); err != nil {
 				return fmt.Errorf("failed to create root %q: %w", root, err)
+			}
+			if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
+				return fmt.Errorf("failed to create mailbox for %s at %q: %w", agentHandle, root, err)
 			}
 		} else {
 			// No --root flag and no .amqrc found: run full coop init (writes .amqrc).
@@ -145,6 +144,20 @@ func runCoopExec(args []string) error {
 		}
 	}
 
+	// Default to --session collab when neither --session nor --root was specified.
+	// This runs after auto-init so .amqrc exists and resolveBaseRoot() works.
+	if *sessionFlag == "" && *rootFlag == "" {
+		base := root // root is the literal .amqrc root (e.g., .agent-mail)
+		root = filepath.Join(base, defaultSessionName)
+		// Ensure session root + agent dirs exist.
+		if err := fsq.EnsureRootDirs(root); err != nil {
+			return fmt.Errorf("failed to create session root %q: %w", root, err)
+		}
+		if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
+			return fmt.Errorf("failed to create mailbox for %s at %q: %w", agentHandle, root, err)
+		}
+	}
+
 	// Ensure agent mailbox exists.
 	if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
 		return fmt.Errorf("failed to ensure mailbox for %s: %w", agentHandle, err)
@@ -167,6 +180,9 @@ func runCoopExec(args []string) error {
 		}
 
 		wakeCmd := exec.Command(amqBin, "wake", "--me", agentHandle, "--root", root)
+		// Set AM_ROOT in wake's env so guardRootOverride doesn't conflict
+		// with a stale AM_ROOT inherited from the parent process.
+		wakeCmd.Env = setEnvVar(os.Environ(), envRoot, root)
 		wakeCmd.Stdin = os.Stdin
 		wakeCmd.Stdout = os.Stdout
 		wakeCmd.Stderr = os.Stderr

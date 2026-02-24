@@ -98,16 +98,17 @@ def resolve_root(event: dict) -> str:
 
     # For each candidate, try .amqrc first then .agent-mail directory.
     # This ensures payload cwd is fully resolved before falling back to process cwd.
+    default_session = "collab"
+
     for candidate in candidates:
-        # Try .amqrc resolution (base + default_session)
+        # Try .amqrc resolution (base root + default session)
         result = find_amqrc(candidate)
         if result is not None:
             rc_dir, cfg = result
             base = cfg.get("root", "")
             if base:
                 base_path = Path(base) if Path(base).is_absolute() else rc_dir / base
-                session = cfg.get("default_session", "team")
-                return str(base_path / session)
+                return str(base_path / default_session)
 
         # Fallback: look for .agent-mail directory and append default session
         try:
@@ -117,11 +118,11 @@ def resolve_root(event: dict) -> str:
         for parent in [resolved] + list(resolved.parents):
             agent_mail = parent / ".agent-mail"
             if agent_mail.is_dir():
-                return str(agent_mail / "team")
+                return str(agent_mail / default_session)
 
     if isinstance(payload_cwd, str) and payload_cwd:
-        return os.path.join(payload_cwd, ".agent-mail", "team")
-    return os.path.join(".agent-mail", "team")
+        return os.path.join(payload_cwd, ".agent-mail", default_session)
+    return os.path.join(".agent-mail", default_session)
 
 
 def inbox_has_messages(root: str, me: str) -> bool:

@@ -14,6 +14,7 @@ import (
 )
 
 func TestRunDrainEmpty(t *testing.T) {
+	t.Setenv("AM_ROOT", "") // Clear to avoid guardRootOverride conflict with --root
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)

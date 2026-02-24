@@ -109,7 +109,7 @@ func TestDefaultRootFromAmqrc(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	// Write .amqrc (base root only, default_session defaults to "team")
+	// Write .amqrc (base root only, coop exec defaults to session "collab")
 	amqrcData, _ := json.Marshal(map[string]string{"root": "custom-root"})
 	if err := os.WriteFile(filepath.Join(base, ".amqrc"), amqrcData, 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
