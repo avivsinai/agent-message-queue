@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"flag"
 	"os"
 	"path/filepath"
 	"testing"
@@ -302,5 +303,43 @@ func TestResolveRootCurrentDir(t *testing.T) {
 	}
 	if gotEval != wantEval {
 		t.Fatalf("resolveRoot cwd = %q, want %q", got, want)
+	}
+}
+
+func TestValidate_NoConflictWithoutFlag(t *testing.T) {
+	t.Setenv("AM_ROOT", "")
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cf := addCommonFlags(fs)
+	_ = fs.Parse([]string{}) // no --root flag
+	if err := cf.validate(); err != nil {
+		t.Fatalf("expected no error when --root not set, got: %v", err)
+	}
+}
+
+func TestValidate_NoConflictWithRootFlag(t *testing.T) {
+	t.Setenv("AM_ROOT", "") // unset
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cf := addCommonFlags(fs)
+	_ = fs.Parse([]string{"--root", "/explicit/root"})
+	if err := cf.validate(); err != nil {
+		t.Fatalf("expected no error when --root flag set, got: %v", err)
+	}
+}
+
+func TestSessionName(t *testing.T) {
+	tests := []struct {
+		root string
+		want string
+	}{
+		{"/path/to/.agent-mail/team", "team"},
+		{"/path/to/.agent-mail/auth", "auth"},
+		{".agent-mail/team", "team"},
+		{"/single", "single"},
+	}
+	for _, tt := range tests {
+		got := sessionName(tt.root)
+		if got != tt.want {
+			t.Errorf("sessionName(%q) = %q, want %q", tt.root, got, tt.want)
+		}
 	}
 }

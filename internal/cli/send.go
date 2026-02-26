@@ -71,7 +71,7 @@ func runSend(args []string) error {
 		return UsageError("--priority must be one of: urgent, normal, low")
 	}
 	if !format.IsValidKind(kind) {
-		return UsageError("--kind must be one of: brainstorm, review_request, review_response, question, answer, decision, status, todo")
+		return UsageError("--kind must be one of: %s", format.ValidKindsList())
 	}
 	// Default priority to "normal" if kind is set but priority is not
 	if kind != "" && priority == "" {
@@ -141,12 +141,15 @@ func runSend(args []string) error {
 		outboxErr = err
 	}
 
+	session := sessionName(root)
 	if common.JSON {
 		return writeJSON(os.Stdout, map[string]any{
 			"id":      id,
 			"thread":  threadID,
 			"to":      recipients,
 			"subject": msg.Header.Subject,
+			"session": session,
+			"root":    root,
 			"outbox": map[string]any{
 				"written": outboxErr == nil,
 				"error":   errString(outboxErr),
@@ -158,7 +161,7 @@ func runSend(args []string) error {
 			return err
 		}
 	}
-	if err := writeStdout("Sent %s to %s\n", id, strings.Join(recipients, ",")); err != nil {
+	if err := writeStdout("Sent %s to %s (session: %s, root: %s)\n", id, strings.Join(recipients, ","), session, root); err != nil {
 		return err
 	}
 	return nil

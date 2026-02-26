@@ -77,3 +77,4 @@ Leader prepares commit → user approves → push
 - `amq drain --include-body` — process incoming messages
 - `amq send --to <partner>` — send work/findings to partner
 - `amq reply --id <msg_id>` — reply in thread
+

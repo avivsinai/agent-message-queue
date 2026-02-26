@@ -237,7 +237,6 @@ amq reply --id "msg_123" --kind review_response --body "LGTM with minor suggesti
 | `todo` | — | normal |
 | `status` | — | low |
 | `brainstorm` | — | low |
-
 ## Context Object Schema
 
 ```json

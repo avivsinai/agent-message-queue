@@ -89,6 +89,11 @@ func ValidKinds() []string {
 	return []string{KindBrainstorm, KindReviewRequest, KindReviewResponse, KindQuestion, KindAnswer, KindDecision, KindStatus, KindTodo}
 }
 
+// ValidKindsList returns a comma-joined string of valid kind values for usage messages.
+func ValidKindsList() string {
+	return strings.Join(ValidKinds(), ", ")
+}
+
 // IsValidPriority returns true if the priority is valid or empty.
 func IsValidPriority(p string) bool {
 	if p == "" {

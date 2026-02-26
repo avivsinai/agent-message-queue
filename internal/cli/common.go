@@ -50,6 +50,9 @@ func (f *commonFlags) validate() error {
 	return guardRootOverride(f.Root)
 }
 
+// sessionName extracts the session name (last path component) from a resolved root path.
+func sessionName(root string) string { return filepath.Base(root) }
+
 // cachedAmqrcRoot returns the literal root from .amqrc, cached via sync.Once.
 // Returns "" on any error (best-effort for defaulting, not validation).
 var amqrcOnce sync.Once

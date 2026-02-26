@@ -58,7 +58,7 @@ func runReply(args []string) error {
 		return UsageError("--priority must be one of: urgent, normal, low")
 	}
 	if !format.IsValidKind(kind) {
-		return UsageError("--kind must be one of: brainstorm, review_request, review_response, question, answer, decision, status, todo")
+		return UsageError("--kind must be one of: %s", format.ValidKindsList())
 	}
 
 	labels := splitList(*labelsFlag)
@@ -189,12 +189,15 @@ func runReply(args []string) error {
 		outboxErr = err
 	}
 
+	session := sessionName(root)
 	if common.JSON {
 		return writeJSON(os.Stdout, map[string]any{
 			"id":           id,
 			"thread":       msg.Header.Thread,
 			"to":           []string{recipient},
 			"subject":      subject,
+			"session":      session,
+			"root":         root,
 			"in_reply_to":  originalMsg.Header.ID,
 			"original_box": filepath.Base(filepath.Dir(originalPath)),
 			"outbox": map[string]any{
@@ -207,7 +210,7 @@ func runReply(args []string) error {
 	if outboxErr != nil {
 		_ = writeStderr("warning: outbox write failed: %v\n", outboxErr)
 	}
-	return writeStdout("Replied %s to %s (thread: %s)\n", id, recipient, msg.Header.Thread)
+	return writeStdout("Replied %s to %s (session: %s, root: %s)\n", id, recipient, session, root)
 }
 
 // findMessage searches for a message by ID in the agent's inbox (new and cur).
