@@ -1,7 +1,16 @@
 ---
 name: amq-cli
-version: 1.2.0
-description: Coordinate agents via the AMQ CLI for file-based inter-agent messaging. Use when you need to send messages to another agent (Claude/Codex), receive messages from partner agents, set up co-op mode between Claude Code and Codex CLI, or manage agent-to-agent communication in any multi-agent workflow. Triggers include "message codex", "talk to claude", "collaborate with partner agent", "AMQ", "inter-agent messaging", or "agent coordination".
+version: 1.4.0
+description: >-
+  Coordinate agents via the AMQ CLI for file-based inter-agent messaging.
+  Use when you need to send messages to another agent (Claude/Codex),
+  receive messages from partner agents, set up co-op mode between Claude
+  Code and Codex CLI, or manage agent-to-agent communication in any
+  multi-agent workflow. Triggers include "message codex", "talk to claude",
+  "collaborate with partner agent", "AMQ", "inter-agent messaging",
+  "agent coordination", "spec", "design with", or "collaborative spec".
+  For spec/design tasks you MUST use `amq coop spec start` — do NOT use
+  `amq send` to deliver specs.
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
   compatibility: claude-code, codex-cli
@@ -19,6 +28,19 @@ curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/
 ```
 
 Verify: `amq --version`
+
+## Task Routing — READ THIS FIRST
+
+**Before doing anything**, match your task to the right workflow:
+
+| Your task | What to do | DO NOT |
+|-----------|-----------|--------|
+| **"spec", "design with", "collaborative spec"** | Run `amq coop spec start --topic <name> --partner <agent> --body "Problem..."` — then follow the printed NEXT STEP instructions | Do NOT explore the codebase first. Do NOT draft a spec. Do NOT use `amq send`. |
+| **Send a message, review request, question** | Use `amq send` (see Messaging below) | — |
+| **Swarm / agent teams** | Read [references/swarm-mode.md](references/swarm-mode.md), then use `amq swarm` | — |
+| **Received a `spec_research` message** | Run `amq coop spec status --topic <name>` — then follow the printed NEXT STEP instructions | Do NOT read the sender's research before submitting your own. |
+
+The `amq coop spec` commands print explicit **NEXT STEP** instructions after every command. Follow them.
 
 ## Quick Start
 
@@ -182,6 +204,10 @@ amq upgrade                                       # Self-update
 | `todo` | — | normal |
 | `status` | — | low |
 | `brainstorm` | — | low |
+| `spec_research` | `spec_research` | normal |
+| `spec_draft` | `spec_review` | normal |
+| `spec_review` | — | normal |
+| `spec_decision` | — | normal |
 
 ## Swarm Mode: Agent Teams
 
@@ -200,5 +226,9 @@ Communication is asymmetric: bridge delivers task notifications only. Claude Cod
 
 ## References
 
-- `references/coop-mode.md` — Phased workflow, collaboration modes, detailed coordination patterns
-- `references/message-format.md` — Frontmatter schema cheat sheet (fields, types, defaults)
+For detailed protocols, read the reference file FIRST, then follow its instructions:
+
+- [references/spec-workflow.md](references/spec-workflow.md) — Spec workflow: phases, parallel discipline, templates
+- [references/coop-mode.md](references/coop-mode.md) — Co-op protocol: roles, phased flow, collaboration modes
+- [references/swarm-mode.md](references/swarm-mode.md) — Swarm mode: agent teams, bridge, task workflow
+- [references/message-format.md](references/message-format.md) — Message format: frontmatter schema, field reference

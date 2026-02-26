@@ -81,6 +81,40 @@ func EnsureRootDirs(root string) error {
 	return nil
 }
 
+// ValidateTopicName returns an error if the topic name is invalid.
+// Topic names follow the same rules as agent handles: [a-z0-9_-]+.
+func ValidateTopicName(topic string) error {
+	if topic == "" || strings.TrimSpace(topic) == "" {
+		return fmt.Errorf("topic name is empty")
+	}
+	if strings.Contains(topic, "..") || strings.Contains(topic, "/") || strings.Contains(topic, string(filepath.Separator)) {
+		return fmt.Errorf("topic name contains path traversal: %q", topic)
+	}
+	if !handleRe.MatchString(topic) {
+		return fmt.Errorf("topic name must match [a-z0-9_-]+: %q", topic)
+	}
+	return nil
+}
+
+// SpecsDir returns the specs directory path: <root>/specs.
+func SpecsDir(root string) string {
+	return filepath.Join(root, "specs")
+}
+
+// SpecTopicDir returns the spec topic directory path: <root>/specs/<topic>.
+func SpecTopicDir(root, topic string) string {
+	return filepath.Join(root, "specs", topic)
+}
+
+// EnsureSpecDirs creates the specs directory tree for a given topic.
+func EnsureSpecDirs(root, topic string) error {
+	if err := ValidateTopicName(topic); err != nil {
+		return err
+	}
+	dir := SpecTopicDir(root, topic)
+	return os.MkdirAll(dir, 0o700)
+}
+
 func EnsureAgentDirs(root, agent string) error {
 	if err := ValidateHandle(agent); err != nil {
 		return err

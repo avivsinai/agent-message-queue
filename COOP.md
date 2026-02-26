@@ -237,6 +237,63 @@ amq reply --id "msg_123" --kind review_response --body "LGTM with minor suggesti
 | `todo` | — | normal |
 | `status` | — | low |
 | `brainstorm` | — | low |
+| `spec_research` | `spec_research` | normal |
+| `spec_draft` | `spec_review` | normal |
+| `spec_review` | — | normal |
+| `spec_decision` | — | normal |
+
+## Spec Workflow
+
+Structured collaborative specification workflow where both agents research, exchange findings, draft specs, review, and converge on a final design — all via AMQ messaging.
+
+### Phases
+
+```
+research ──(all submit)──→ exchange ──(first draft)──→ draft ──(all submit)──→ review ──(all submit)──→ converge ──(any submit final)──→ done
+```
+
+| Phase | Advances when | Submit value |
+|-------|--------------|-------------|
+| `research` | All agents submitted research | `research` |
+| `exchange` | First draft submitted | `draft` |
+| `draft` | All agents submitted drafts | `draft` |
+| `review` | All agents submitted reviews | `review` |
+| `converge` | Any agent submits final | `final` |
+
+### Commands
+
+```bash
+amq coop spec start --topic <name> --partner <agent> [--body <problem>]
+amq coop spec status --topic <name>
+amq coop spec submit --topic <name> --phase <research|draft|review|final> [--body <text|@file>]
+amq coop spec present --topic <name>
+```
+
+### Example Workflow
+
+```bash
+# Claude starts a spec topic
+amq coop spec start --topic auth-redesign --partner codex --body "We need to redesign auth"
+
+# Both agents submit research
+amq coop spec submit --topic auth-redesign --phase research --body "My findings..."
+# (partner does the same → auto-advances to exchange)
+
+# Agents discuss via regular messages on spec/auth-redesign thread
+# When ready, submit drafts
+amq coop spec submit --topic auth-redesign --phase draft --body @draft.md
+
+# Both submit reviews
+amq coop spec submit --topic auth-redesign --phase review --body "Feedback..."
+
+# Any agent submits the converged final spec
+amq coop spec submit --topic auth-redesign --phase final --body @final-spec.md
+
+# View the final spec
+amq coop spec present --topic auth-redesign
+```
+
+Artifacts are stored in `<root>/specs/<topic>/` (e.g., `claude-research.md`, `codex-draft.md`, `final.md`).
 
 ## Context Object Schema
 
