@@ -52,10 +52,6 @@ const (
 	KindDecision       = "decision"
 	KindStatus         = "status"
 	KindTodo           = "todo"
-	KindSpecResearch   = "spec_research"
-	KindSpecDraft      = "spec_draft"
-	KindSpecReview     = "spec_review"
-	KindSpecDecision   = "spec_decision"
 )
 
 // Header is the JSON frontmatter stored at the top of each message file.
@@ -90,7 +86,7 @@ func ValidPriorities() []string {
 
 // ValidKinds returns the list of valid kind values.
 func ValidKinds() []string {
-	return []string{KindBrainstorm, KindReviewRequest, KindReviewResponse, KindQuestion, KindAnswer, KindDecision, KindStatus, KindTodo, KindSpecResearch, KindSpecDraft, KindSpecReview, KindSpecDecision}
+	return []string{KindBrainstorm, KindReviewRequest, KindReviewResponse, KindQuestion, KindAnswer, KindDecision, KindStatus, KindTodo}
 }
 
 // ValidKindsList returns a comma-joined string of valid kind values for usage messages.
