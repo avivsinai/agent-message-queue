@@ -858,6 +858,47 @@ func TestCoopSpecSubmit_FullWorkflow(t *testing.T) {
 	}
 }
 
+// Regression test: when codex's draft advances phase to review, the NEXT STEP
+// output should prompt codex to submit a review, not say "WAITING: You already
+// submitted a review". See PR #28 comment from @avivsinai.
+func TestCoopSpecSubmit_DraftToReviewNextStep(t *testing.T) {
+	root := setupSpecRoot(t, []string{"claude", "codex"})
+
+	// Start + both research
+	_, _ = captureStdout(t, func() error {
+		return runCoopSpec([]string{"start", "--topic", "ns", "--partner", "codex", "--me", "claude", "--root", root, "--body", "p"})
+	})
+	for _, agent := range []string{"claude", "codex"} {
+		_, _ = captureStdout(t, func() error {
+			return runCoopSpec([]string{"submit", "--topic", "ns", "--phase", "research", "--me", agent, "--root", root, "--body", "r"})
+		})
+	}
+
+	// Claude submits draft
+	_, _ = captureStdout(t, func() error {
+		return runCoopSpec([]string{"submit", "--topic", "ns", "--phase", "draft", "--me", "claude", "--root", root, "--body", "d1"})
+	})
+
+	// Codex submits draft → advances to review
+	output, err := captureStdout(t, func() error {
+		return runCoopSpec([]string{"submit", "--topic", "ns", "--phase", "draft", "--me", "codex", "--root", root, "--body", "d2"})
+	})
+	if err != nil {
+		t.Fatalf("codex draft submit: %v", err)
+	}
+
+	// Should prompt to submit review, not say "WAITING: You already submitted a review"
+	if strings.Contains(output, "WAITING") {
+		t.Errorf("after draft→review advance, output should not say WAITING:\n%s", output)
+	}
+	if !strings.Contains(output, "NEXT STEP") {
+		t.Errorf("after draft→review advance, output should contain NEXT STEP:\n%s", output)
+	}
+	if !strings.Contains(output, "review") {
+		t.Errorf("after draft→review advance, output should mention review:\n%s", output)
+	}
+}
+
 func TestCoopSpecSubmit_EmptyBody(t *testing.T) {
 	root := setupSpecRoot(t, []string{"claude", "codex"})
 

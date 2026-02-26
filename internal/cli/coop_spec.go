@@ -581,8 +581,9 @@ func runCoopSpecSubmit(args []string) error {
 		}
 	}
 
-	// Determine partner for next-step guidance
+	// Determine partner and submission state for next-step guidance
 	var partner string
+	var mySubmitted bool
 	err = withSpecLock(root, topic, func() error {
 		state, loadErr := loadSpecState(root, topic)
 		if loadErr != nil {
@@ -594,12 +595,13 @@ func runCoopSpecSubmit(args []string) error {
 				break
 			}
 		}
+		mySubmitted = hasSubmittedPhase(&state, me)
 		return nil
 	})
 	if err != nil {
 		return nil // Non-fatal: submission succeeded
 	}
-	return printSpecNextSteps(me, partner, topic, result.Phase, true)
+	return printSpecNextSteps(me, partner, topic, result.Phase, mySubmitted)
 }
 
 func runCoopSpecPresent(args []string) error {
