@@ -81,19 +81,8 @@ Leader prepares commit → user approves → push
 
 ## Spec Workflow
 
-Structured pre-implementation specification workflow via `amq coop spec`.
+The spec workflow is a skill-managed protocol using standard AMQ messaging primitives. See [spec-workflow.md](spec-workflow.md) for the full protocol.
 
 Phases: `research` → `exchange` → `draft` → `review` → `converge` → `done`
 
-```bash
-amq coop spec start --topic <name> --partner <agent> --body "Problem"
-amq coop spec submit --topic <name> --phase research --body "Findings"
-amq coop spec status --topic <name>
-amq coop spec submit --topic <name> --phase draft --body @draft.md
-amq coop spec submit --topic <name> --phase review --body "Feedback"
-amq coop spec submit --topic <name> --phase final --body @final.md
-amq coop spec present --topic <name>
-```
-
-See SKILL.md for templates and detailed phase transition rules.
->>>>>>> b34e270 (feat: add collaborative spec workflow (amq coop spec))
+All spec messages use thread `spec/<topic>` and the spec message kinds (`spec_research`, `spec_draft`, `spec_review`, `spec_decision`).

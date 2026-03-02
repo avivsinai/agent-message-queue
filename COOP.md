@@ -244,58 +244,30 @@ amq reply --id "msg_123" --kind review_response --body "LGTM with minor suggesti
 
 ## Spec Workflow
 
-Structured collaborative specification workflow where both agents research, exchange findings, draft specs, review, and converge on a final design — all via AMQ messaging.
+The spec workflow is a **skill-managed protocol** — agents follow the instructions in the AMQ CLI skill's `references/spec-workflow.md` using standard AMQ messaging primitives (`amq send`, `amq drain`, `amq thread`).
 
-### Phases
+All spec messages use thread `spec/<topic>` and the spec message kinds (`spec_research`, `spec_draft`, `spec_review`, `spec_decision`). See the skill reference for the full protocol.
 
-```
-research ──(all submit)──→ exchange ──(first draft)──→ draft ──(all submit)──→ review ──(all submit)──→ converge ──(any submit final)──→ done
-```
-
-| Phase | Advances when | Submit value |
-|-------|--------------|-------------|
-| `research` | All agents submitted research | `research` |
-| `exchange` | First draft submitted | `draft` |
-| `draft` | All agents submitted drafts | `draft` |
-| `review` | All agents submitted reviews | `review` |
-| `converge` | Any agent submits final | `final` |
-
-### Commands
+### Example
 
 ```bash
-amq coop spec start --topic <name> --partner <agent> [--body <problem>]
-amq coop spec status --topic <name>
-amq coop spec submit --topic <name> --phase <research|draft|review|final> [--body <text|@file>]
-amq coop spec present --topic <name>
+# Claude sends research request to codex
+amq send --to codex --kind spec_research --thread spec/auth-redesign \
+  --subject "Spec: auth-redesign" --body "We need to redesign auth..."
+
+# Both agents independently research and submit findings
+amq send --to codex --kind spec_research --thread spec/auth-redesign \
+  --subject "Research: auth-redesign" --body "My findings..."
+
+# After both submit, read the thread to see each other's research
+amq thread --id spec/auth-redesign --include-body
+
+# Submit drafts, reviews, and final spec using the same pattern
+amq send --to codex --kind spec_draft --thread spec/auth-redesign --body @draft.md
+amq send --to codex --kind spec_review --thread spec/auth-redesign --body "Feedback..."
+amq send --to codex --kind spec_decision --thread spec/auth-redesign --body @final.md
 ```
 
-### Example Workflow
-
-```bash
-# Claude starts a spec topic
-amq coop spec start --topic auth-redesign --partner codex --body "We need to redesign auth"
-
-# Both agents submit research
-amq coop spec submit --topic auth-redesign --phase research --body "My findings..."
-# (partner does the same → auto-advances to exchange)
-
-# Agents discuss via regular messages on spec/auth-redesign thread
-# When ready, submit drafts
-amq coop spec submit --topic auth-redesign --phase draft --body @draft.md
-
-# Both submit reviews
-amq coop spec submit --topic auth-redesign --phase review --body "Feedback..."
-
-# Any agent submits the converged final spec
-amq coop spec submit --topic auth-redesign --phase final --body @final-spec.md
-
-# View the final spec
-amq coop spec present --topic auth-redesign
-```
-
-Artifacts are stored in `<root>/specs/<topic>/` (e.g., `claude-research.md`, `codex-draft.md`, `final.md`).
-
->>>>>>> b34e270 (feat: add collaborative spec workflow (amq coop spec))
 ## Context Object Schema
 
 ```json

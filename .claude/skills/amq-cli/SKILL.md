@@ -9,8 +9,8 @@ description: >-
   multi-agent workflow. Triggers include "message codex", "talk to claude",
   "collaborate with partner agent", "AMQ", "inter-agent messaging",
   "agent coordination", "spec", "design with", or "collaborative spec".
-  For spec/design tasks you MUST use `amq coop spec start` — do NOT use
-  `amq send` to deliver specs.
+  For spec/design tasks, read references/spec-workflow.md and follow the
+  skill-managed protocol using `amq send` with spec kinds and threads.
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
   compatibility: claude-code, codex-cli
@@ -52,12 +52,10 @@ When running **outside** `coop exec` (e.g. new conversation, manual terminal):
 
 | Your task | What to do | DO NOT |
 |-----------|-----------|--------|
-| **"spec", "design with", "collaborative spec"** | Run `amq coop spec start --topic <name> --partner <agent> --body "Problem..."` — then follow the printed NEXT STEP instructions | Do NOT explore the codebase first. Do NOT draft a spec. Do NOT use `amq send`. |
+| **"spec", "design with", "collaborative spec"** | Read [references/spec-workflow.md](references/spec-workflow.md) and follow the protocol using `amq send` with `--kind spec_research` and `--thread spec/<topic>` | Do NOT explore the codebase first. Do NOT draft a spec before research. |
 | **Send a message, review request, question** | Use `amq send` (see Messaging below) | — |
 | **Swarm / agent teams** | Read [references/swarm-mode.md](references/swarm-mode.md), then use `amq swarm` | — |
-| **Received a `spec_research` message** | Run `amq coop spec status --topic <name>` — then follow the printed NEXT STEP instructions | Do NOT read the sender's research before submitting your own. |
-
-The `amq coop spec` commands print explicit **NEXT STEP** instructions after every command. Follow them.
+| **Received a `spec_research` message** | Do your OWN independent research first, submit it, THEN read partner's research from the thread | Do NOT read the sender's research before submitting your own. |
 
 ## Quick Start
 
@@ -157,7 +155,7 @@ amq list --new --label bug
 
 For detailed protocols, read the reference file FIRST, then follow its instructions:
 
-- [references/spec-workflow.md](references/spec-workflow.md) — Spec workflow: phases, parallel discipline, templates
+- [references/spec-workflow.md](references/spec-workflow.md) — Spec workflow: phases, parallel discipline, templates (uses `amq send` primitives)
 - [references/coop-mode.md](references/coop-mode.md) — Co-op protocol: roles, phased flow, collaboration modes
 - [references/swarm-mode.md](references/swarm-mode.md) — Swarm mode: agent teams, bridge, task workflow
 - [references/message-format.md](references/message-format.md) — Message format: frontmatter schema, field reference
