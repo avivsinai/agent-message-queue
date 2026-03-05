@@ -40,9 +40,9 @@ When running **outside** `coop exec` (e.g. new conversation, manual terminal):
   ```bash
   eval "$(amq env --me claude)"          # sets AM_ME + AM_ROOT from .amqrc
   ```
-- Or resolve and pin explicitly per command:
+- Or resolve and pin explicitly per command (never hardcode the root — read it from `.amqrc`):
   ```bash
-  AM_ME=claude AM_ROOT=.agent-mail amq send --to codex --body "hello"
+  AM_ME=claude AM_ROOT=$(amq env --json | jq -r .root) amq send --to codex --body "hello"
   ```
 - **Do NOT append a session name** (e.g. `/collab`) unless you intentionally want an isolated session. Outside `coop exec`, the base root from `.amqrc` is where agents live.
 - **Pitfall**: `coop exec` defaults to `--session collab` (i.e. `.agent-mail/collab`). If you manually use `.agent-mail/collab` outside `coop exec`, messages go to a different mailbox tree than `.agent-mail`. Only use a session path if the target agent is also in that session.
