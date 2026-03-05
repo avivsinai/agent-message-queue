@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 1.3.0
+version: 1.4.0
 description: >-
   Coordinate agents via the AMQ CLI for file-based inter-agent messaging.
   Use when you need to send messages to another agent (Claude/Codex),
@@ -8,7 +8,8 @@ description: >-
   Code and Codex CLI, or manage agent-to-agent communication in any
   multi-agent workflow. Triggers include "message codex", "talk to claude",
   "collaborate with partner agent", "AMQ", "inter-agent messaging",
-  or "agent coordination".
+  "agent coordination". For spec/design tasks use the /spec command
+  instead.
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
   compatibility: claude-code, codex-cli
@@ -55,6 +56,17 @@ When running **outside** `coop exec` (e.g. new conversation, manual terminal):
 | Outside `coop exec`, isolated session | `amq env --session auth --me claude` | `.agent-mail/auth` |
 | Inside `coop exec` (no flags) | automatic | `.agent-mail/collab` (default session) |
 | Inside `coop exec --session X` | automatic | `.agent-mail/X` |
+
+## Task Routing — READ THIS FIRST
+
+**Before doing anything**, match your task to the right workflow:
+
+| Your task | What to do | DO NOT |
+|-----------|-----------|--------|
+| **"spec", "design with", "collaborative spec"** | Use the `/spec` command instead. It provides structured phase-by-phase guidance. | Do NOT handle spec tasks from this skill. |
+| **Send a message, review request, question** | Use `amq send` (see Messaging below) | — |
+| **Swarm / agent teams** | Read [references/swarm-mode.md](references/swarm-mode.md), then use `amq swarm` | — |
+| **Received a `spec_research` message** | Do your OWN independent research first (explore codebase, read files), submit findings as `spec_research`, THEN read partner's research from the thread. | Do NOT read the sender's research body before submitting your own. Do NOT skip straight to implementation. |
 
 ## Quick Start
 
@@ -126,6 +138,10 @@ amq list --new --label bug
 | `todo` | — | normal |
 | `status` | — | low |
 | `brainstorm` | — | low |
+| `spec_research` | `spec_research` | normal |
+| `spec_draft` | `spec_review` | normal |
+| `spec_review` | — | normal |
+| `spec_decision` | — | normal |
 
 ## References
 

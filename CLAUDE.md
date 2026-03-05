@@ -106,6 +106,10 @@ amq env --json                        # Machine-readable output
 | `brainstorm` | — | low | Open-ended discussion |
 | `status` | — | low | Status update/FYI |
 | `todo` | — | normal | Task assignment |
+| `spec_research` | `spec_research` | normal | Spec research findings |
+| `spec_draft` | `spec_review` | normal | Spec draft submission |
+| `spec_review` | — | normal | Spec review feedback |
+| `spec_decision` | — | normal | Final spec decision |
 
 When `--kind` is set but `--priority` is not, priority defaults to `normal`.
 

@@ -78,3 +78,11 @@ Leader prepares commit → user approves → push
 - `amq send --to <partner>` — send work/findings to partner
 - `amq reply --id <msg_id>` — reply in thread
 
+
+## Spec Workflow
+
+The spec workflow is a skill-managed protocol using standard AMQ messaging primitives. See [spec-workflow.md](spec-workflow.md) for the full protocol.
+
+Phases: `research` → `exchange` → `draft` → `review` → `converge` → `done`
+
+All spec messages use thread `spec/<topic>` and the spec message kinds (`spec_research`, `spec_draft`, `spec_review`, `spec_decision`).

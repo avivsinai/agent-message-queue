@@ -237,6 +237,37 @@ amq reply --id "msg_123" --kind review_response --body "LGTM with minor suggesti
 | `todo` | — | normal |
 | `status` | — | low |
 | `brainstorm` | — | low |
+| `spec_research` | `spec_research` | normal |
+| `spec_draft` | `spec_review` | normal |
+| `spec_review` | — | normal |
+| `spec_decision` | — | normal |
+
+## Spec Workflow
+
+The spec workflow is a **skill-managed protocol** — agents follow the instructions in the AMQ CLI skill's `references/spec-workflow.md` using standard AMQ messaging primitives (`amq send`, `amq drain`, `amq thread`).
+
+All spec messages use thread `spec/<topic>` and the spec message kinds (`spec_research`, `spec_draft`, `spec_review`, `spec_decision`). See the skill reference for the full protocol.
+
+### Example
+
+```bash
+# Claude sends research request to codex
+amq send --to codex --kind spec_research --thread spec/auth-redesign \
+  --subject "Spec: auth-redesign" --body "We need to redesign auth..."
+
+# Both agents independently research and submit findings
+amq send --to codex --kind spec_research --thread spec/auth-redesign \
+  --subject "Research: auth-redesign" --body "My findings..."
+
+# After both submit, read the thread to see each other's research
+amq thread --id spec/auth-redesign --include-body
+
+# Submit drafts, reviews, and final spec using the same pattern
+amq send --to codex --kind spec_draft --thread spec/auth-redesign --body @draft.md
+amq send --to codex --kind spec_review --thread spec/auth-redesign --body "Feedback..."
+amq send --to codex --kind spec_decision --thread spec/auth-redesign --body @final.md
+```
+
 ## Context Object Schema
 
 ```json

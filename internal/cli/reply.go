@@ -132,6 +132,10 @@ func runReply(args []string) error {
 			kind = format.KindReviewResponse
 		case format.KindQuestion:
 			kind = format.KindAnswer
+		case format.KindSpecDraft:
+			kind = format.KindSpecReview
+		case format.KindSpecResearch:
+			kind = format.KindSpecResearch
 		default:
 			kind = originalMsg.Header.Kind // Keep same kind
 		}
