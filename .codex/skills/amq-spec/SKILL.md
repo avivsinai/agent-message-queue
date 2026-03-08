@@ -37,6 +37,21 @@ If topic/problem are unclear, ask for clarification.
 2. Verify co-op is initialized (`.amqrc`), otherwise run: `amq coop init`
 3. Use thread name: `spec/<topic>`
 
+## STEP 1: Send problem to partner IMMEDIATELY
+
+**CRITICAL: Do this FIRST, before ANY research, exploration, or code reading.**
+The entire point of the spec workflow is parallel research. Every second you
+spend researching before sending is a second your partner sits idle.
+
+```bash
+amq send --to <partner> --kind question \
+  --labels workflow:spec,phase:request \
+  --thread spec/<topic> --subject "Spec: <topic>" --body "<problem>"
+```
+
+Send the user's problem description verbatim. Do NOT include your own analysis.
+Do NOT pre-research "to give better context". Send it NOW, then research.
+
 ## Label Convention (MANDATORY)
 
 Use existing AMQ kinds plus labels to express spec workflow semantics:
@@ -96,6 +111,7 @@ If you receive a message labeled `workflow:spec`:
 
 ## Non-Negotiable Rules
 
+- **NEVER** research before sending the problem to your partner. Send FIRST, research SECOND.
 - **NEVER** skip phases or collapse directly to a finished spec.
 - **NEVER** read partner research before submitting your own research.
 - **NEVER** enter plan mode during research if it blocks tool usage.
