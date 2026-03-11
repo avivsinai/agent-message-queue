@@ -91,10 +91,11 @@ amq send --to <partner> --kind brainstorm \
 amq watch --timeout 120s
 ```
 
-**Receiving agent (got a message labeled `workflow:spec`):**
+**Receiving agent (got the kickoff request):**
 ```bash
 # 1) Do your own independent research FIRST
-#    - Do not read sender research body yet
+#    - Read the kickoff problem statement
+#    - Do not read partner research from the thread yet
 
 # 2) Submit your findings
 amq send --to <partner> --kind brainstorm \

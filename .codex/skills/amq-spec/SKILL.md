@@ -37,7 +37,7 @@ If topic/problem are unclear, ask for clarification.
 2. Verify co-op is initialized (`.amqrc`), otherwise run: `amq coop init`
 3. Use thread name: `spec/<topic>`
 
-## STEP 1: Send problem to partner IMMEDIATELY
+## First Action: Send problem to partner IMMEDIATELY
 
 **CRITICAL: Do this FIRST, before ANY research, exploration, or code reading.**
 The entire point of the spec workflow is parallel research. Every second you
@@ -106,7 +106,7 @@ If you receive a message labeled `workflow:spec`, your action depends on the pha
 
 | Label | Your action |
 |---|---|
-| `phase:request` | Do your **own independent research first**, then submit findings as `brainstorm` + `phase:research` |
+| `phase:request` | Read the problem statement, do your **own independent research first**, then submit findings as `brainstorm` + `phase:research` |
 | `phase:research` | Read thread, start discussion as `brainstorm` + `phase:discuss` |
 | `phase:discuss` | Reply with your analysis, continue discussion until aligned |
 | `phase:draft` | **REVIEW the plan and send feedback** as `review_response` + `phase:review`. Do NOT implement. |

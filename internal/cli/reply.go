@@ -22,7 +22,7 @@ func runReply(args []string) error {
 
 	// Co-op mode flags
 	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low")
-	kindFlag := fs.String("kind", "", "Message kind (default: same as original, review_response for review_request, answer for question)")
+	kindFlag := fs.String("kind", "", fmt.Sprintf("Message kind: %s (default: same as original, review_response for review_request, answer for question)", format.ValidKindsList()))
 	labelsFlag := fs.String("labels", "", "Comma-separated labels/tags")
 	contextFlag := fs.String("context", "", "JSON context object or @file.json")
 

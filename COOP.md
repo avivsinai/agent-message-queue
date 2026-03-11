@@ -6,7 +6,7 @@ Co-op mode enables multiple agents (e.g., Claude Code and Codex CLI) to work **i
 
 - **Co-op**: lightweight, peer-to-peer messaging between agents via AMQ threads (`p2p/...`).
 - **Swarm**: join Claude Code Agent Teams and coordinate via the shared task list (`amq swarm ...`).
-- **Messaging**: swarm bridge delivers task notifications only. Claude Code teammates can `amq send` to external agents, but external agents cannot DM a specific Claude Code teammate directly. External→team messages must go to the leader's AMQ inbox, then the leader drains and forwards via Claude Code internal messaging.
+- **Messaging**: swarm bridge delivers task notifications only. Claude Code teammates can `amq send` to external agents, but external agents cannot DM a specific Claude Code teammate directly. External -> team messages must go to the leader's AMQ inbox, then the leader drains and forwards via Claude Code internal messaging.
 
 For swarm command reference, see [CLAUDE.md](CLAUDE.md).
 
@@ -127,7 +127,7 @@ Set `AMQ_PROMPT_HOOK_ACTION=drain` to auto-drain on submit (instead of list/peek
 | Phase | Mode | Description |
 |-------|------|-------------|
 | **Research** | Parallel | Both explore codebase, read docs, search. No conflicts. |
-| **Design** | Parallel → Merge | Both propose approaches. Leader merges/decides. |
+| **Design** | Parallel -> Merge | Both propose approaches. Leader merges/decides. |
 | **Code** | Split | Divide by file/module. Never edit same file. |
 | **Review** | Parallel | Both review each other's code. Leader decides disputes. |
 | **Test** | Parallel | Both run tests, report results to leader. |
@@ -242,7 +242,7 @@ amq reply --id "msg_123" --kind review_response --body "LGTM with minor suggesti
 
 The spec workflow is a **skill-managed protocol** — agents follow the instructions in the amq-spec skill's `spec-workflow.md` using standard AMQ messaging primitives (`amq send`, `amq drain`, `amq thread`) with existing generic kinds and `workflow:spec` labels.
 
-Phases: **Research → Discuss → Draft → Review → Present → Execute**
+Phases: **Research -> Discuss -> Draft -> Review -> Present -> Execute**
 
 All spec messages use thread `spec/<topic>` and labels `workflow:spec,phase:<name>`. See the amq-spec skill's `spec-workflow.md` for the full protocol.
 
