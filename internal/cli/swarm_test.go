@@ -199,7 +199,13 @@ func TestRunSwarm_ListJoinLeaveTasksClaimComplete_JSON(t *testing.T) {
 		}
 
 		out, err = captureStdout(t, func() error {
-			return runSwarmComplete([]string{"--team", team, "--task", "t1", "--me", "codex", "--json"})
+			return runSwarmComplete([]string{
+				"--team", team,
+				"--task", "t1",
+				"--me", "codex",
+				"--evidence", `{"ci_status":"green","tests_passed":true}`,
+				"--json",
+			})
 		})
 		if err != nil {
 			t.Fatalf("runSwarmComplete: %v", err)
@@ -210,6 +216,13 @@ func TestRunSwarm_ListJoinLeaveTasksClaimComplete_JSON(t *testing.T) {
 		}
 		if complete["status"] != swarm.TaskStatusCompleted {
 			t.Fatalf("status = %v, want %q", complete["status"], swarm.TaskStatusCompleted)
+		}
+		evidence, ok := complete["evidence"].(map[string]any)
+		if !ok {
+			t.Fatalf("evidence = %T, want object", complete["evidence"])
+		}
+		if evidence["ci_status"] != "green" {
+			t.Fatalf("evidence.ci_status = %v, want %q", evidence["ci_status"], "green")
 		}
 	})
 
@@ -272,6 +285,73 @@ func TestRunSwarmClaim_DependencyGating_ReturnsError(t *testing.T) {
 			t.Fatalf("t2 assigned_to = %q, want empty", tt.AssignedTo)
 		}
 	}
+}
+
+func TestRunSwarmFailAndBlock_JSON(t *testing.T) {
+	home := setupClaudeHome(t)
+	team := "status-team"
+
+	writeTeamConfig(t, home, team, map[string]any{
+		"name": team,
+		"members": []any{
+			map[string]any{"name": "codex", "agent_id": "ext_codex_1", "agent_type": swarm.AgentTypeCodex},
+		},
+	})
+
+	writeTasksList(t, home, team, []map[string]any{
+		{"id": "t1", "title": "Fail me", "status": swarm.TaskStatusInProgress, "assigned_to": "ext_codex_1"},
+		{"id": "t2", "title": "Block me", "status": swarm.TaskStatusInProgress, "assigned_to": "ext_codex_1"},
+	})
+
+	t.Run("fail", func(t *testing.T) {
+		out, err := captureStdout(t, func() error {
+			return runSwarmFail([]string{
+				"--team", team,
+				"--task", "t1",
+				"--me", "codex",
+				"--reason", "tests are red",
+				"--json",
+			})
+		})
+		if err != nil {
+			t.Fatalf("runSwarmFail: %v", err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("unmarshal fail: %v (output: %s)", err, out)
+		}
+		if got["status"] != swarm.TaskStatusFailed {
+			t.Fatalf("status = %v, want %q", got["status"], swarm.TaskStatusFailed)
+		}
+		if got["reason"] != "tests are red" {
+			t.Fatalf("reason = %v, want %q", got["reason"], "tests are red")
+		}
+	})
+
+	t.Run("block", func(t *testing.T) {
+		out, err := captureStdout(t, func() error {
+			return runSwarmBlock([]string{
+				"--team", team,
+				"--task", "t2",
+				"--me", "codex",
+				"--reason", "waiting on API",
+				"--json",
+			})
+		})
+		if err != nil {
+			t.Fatalf("runSwarmBlock: %v", err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("unmarshal block: %v (output: %s)", err, out)
+		}
+		if got["status"] != swarm.TaskStatusBlocked {
+			t.Fatalf("status = %v, want %q", got["status"], swarm.TaskStatusBlocked)
+		}
+		if got["reason"] != "waiting on API" {
+			t.Fatalf("reason = %v, want %q", got["reason"], "waiting on API")
+		}
+	})
 }
 
 // --- Error-path tests ---

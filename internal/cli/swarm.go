@@ -51,6 +51,10 @@ func runSwarm(args []string) error {
 		return runSwarmClaim(args[1:])
 	case "complete":
 		return runSwarmComplete(args[1:])
+	case "fail":
+		return runSwarmFail(args[1:])
+	case "block":
+		return runSwarmBlock(args[1:])
 	case "bridge":
 		return runSwarmBridge(args[1:])
 	default:
@@ -72,6 +76,8 @@ func printSwarmUsage() error {
 		"  tasks     List tasks from the shared task list",
 		"  claim     Claim a task",
 		"  complete  Mark a task as completed",
+		"  fail      Mark a task as failed",
+		"  block     Mark a task as blocked",
 		"  bridge    Run bridge process (sync tasks → AMQ notifications)",
 		"",
 		"Quick start:",
@@ -254,7 +260,7 @@ func runSwarmLeave(args []string) error {
 func runSwarmTasks(args []string) error {
 	fs := flag.NewFlagSet("swarm tasks", flag.ContinueOnError)
 	teamFlag := fs.String("team", "", "Team name (required)")
-	statusFlag := fs.String("status", "", "Filter by status: pending, in_progress, completed")
+	statusFlag := fs.String("status", "", "Filter by status: pending, in_progress, completed, failed, blocked")
 	jsonFlag := fs.Bool("json", false, "Emit JSON output")
 
 	usage := usageWithFlags(fs, "amq swarm tasks --team <name> [options]",
@@ -281,10 +287,10 @@ func runSwarmTasks(args []string) error {
 	statusFilter := strings.TrimSpace(*statusFlag)
 	if statusFilter != "" {
 		switch statusFilter {
-		case swarm.TaskStatusPending, swarm.TaskStatusInProgress, swarm.TaskStatusCompleted:
+		case swarm.TaskStatusPending, swarm.TaskStatusInProgress, swarm.TaskStatusCompleted, swarm.TaskStatusFailed, swarm.TaskStatusBlocked:
 			// valid
 		default:
-			return UsageError("invalid --status %q: must be pending, in_progress, or completed", statusFilter)
+			return UsageError("invalid --status %q: must be pending, in_progress, completed, failed, or blocked", statusFilter)
 		}
 		filtered := make([]swarm.Task, 0, len(tasks))
 		for _, t := range tasks {
@@ -381,10 +387,72 @@ func runSwarmComplete(args []string) error {
 	taskFlag := fs.String("task", "", "Task ID to complete (required)")
 	meFlag := fs.String("me", defaultMe(), "Agent handle")
 	agentIDFlag := fs.String("agent-id", "", "Agent ID (auto-detect from team config)")
+	evidenceFlag := fs.String("evidence", "", "Evidence JSON object or @file.json")
 	jsonFlag := fs.Bool("json", false, "Emit JSON output")
 
 	usage := usageWithFlags(fs, "amq swarm complete --team <name> --task <id> --me <agent>",
-		"Mark a task as completed in the shared task list.")
+		"Mark a task as completed in the shared task list.",
+		"",
+		"Optionally attach structured proof-of-work via --evidence.")
+
+	if handled, err := parseFlags(fs, args, usage); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+
+	if err := validateTeamName(*teamFlag); err != nil {
+		return err
+	}
+	if *taskFlag == "" {
+		return UsageError("--task is required")
+	}
+	if err := requireMe(*meFlag); err != nil {
+		return err
+	}
+	me, err := normalizeHandle(*meFlag)
+	if err != nil {
+		return UsageError("--me: %v", err)
+	}
+
+	assignee := resolveAgentID(*agentIDFlag, *teamFlag, me)
+	evidence, err := parseContext(*evidenceFlag)
+	if err != nil {
+		return fmt.Errorf("--evidence: %w", err)
+	}
+
+	if err := swarm.CompleteTask(*teamFlag, *taskFlag, me, assignee, evidence); err != nil {
+		return err
+	}
+
+	if *jsonFlag {
+		out := map[string]any{
+			"team":   *teamFlag,
+			"task":   *taskFlag,
+			"status": swarm.TaskStatusCompleted,
+		}
+		if evidence != nil {
+			out["evidence"] = evidence
+		}
+		return writeJSON(os.Stdout, out)
+	}
+
+	return writeStdout("Completed task %q in team %q\n", *taskFlag, *teamFlag)
+}
+
+func runSwarmFail(args []string) error {
+	fs := flag.NewFlagSet("swarm fail", flag.ContinueOnError)
+	teamFlag := fs.String("team", "", "Team name (required)")
+	taskFlag := fs.String("task", "", "Task ID to fail (required)")
+	meFlag := fs.String("me", defaultMe(), "Agent handle")
+	agentIDFlag := fs.String("agent-id", "", "Agent ID (auto-detect from team config)")
+	reasonFlag := fs.String("reason", "", "Failure reason")
+	jsonFlag := fs.Bool("json", false, "Emit JSON output")
+
+	usage := usageWithFlags(fs, "amq swarm fail --team <name> --task <id> --me <agent> [options]",
+		"Mark a task as failed in the shared task list.",
+		"",
+		"Only the current assignee can fail an in-progress task.")
 
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
@@ -408,19 +476,78 @@ func runSwarmComplete(args []string) error {
 
 	assignee := resolveAgentID(*agentIDFlag, *teamFlag, me)
 
-	if err := swarm.CompleteTask(*teamFlag, *taskFlag, assignee); err != nil {
+	if err := swarm.FailTask(*teamFlag, *taskFlag, me, assignee, *reasonFlag); err != nil {
 		return err
 	}
 
 	if *jsonFlag {
-		return writeJSON(os.Stdout, map[string]any{
+		out := map[string]any{
 			"team":   *teamFlag,
 			"task":   *taskFlag,
-			"status": swarm.TaskStatusCompleted,
-		})
+			"status": swarm.TaskStatusFailed,
+		}
+		if reason := strings.TrimSpace(*reasonFlag); reason != "" {
+			out["reason"] = reason
+		}
+		return writeJSON(os.Stdout, out)
 	}
 
-	return writeStdout("Completed task %q in team %q\n", *taskFlag, *teamFlag)
+	return writeStdout("Failed task %q in team %q\n", *taskFlag, *teamFlag)
+}
+
+func runSwarmBlock(args []string) error {
+	fs := flag.NewFlagSet("swarm block", flag.ContinueOnError)
+	teamFlag := fs.String("team", "", "Team name (required)")
+	taskFlag := fs.String("task", "", "Task ID to block (required)")
+	meFlag := fs.String("me", defaultMe(), "Agent handle")
+	agentIDFlag := fs.String("agent-id", "", "Agent ID (auto-detect from team config)")
+	reasonFlag := fs.String("reason", "", "Blocking reason")
+	jsonFlag := fs.Bool("json", false, "Emit JSON output")
+
+	usage := usageWithFlags(fs, "amq swarm block --team <name> --task <id> --me <agent> [options]",
+		"Mark a task as blocked in the shared task list.",
+		"",
+		"Only the current assignee can block an in-progress task.")
+
+	if handled, err := parseFlags(fs, args, usage); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+
+	if err := validateTeamName(*teamFlag); err != nil {
+		return err
+	}
+	if *taskFlag == "" {
+		return UsageError("--task is required")
+	}
+	if err := requireMe(*meFlag); err != nil {
+		return err
+	}
+	me, err := normalizeHandle(*meFlag)
+	if err != nil {
+		return UsageError("--me: %v", err)
+	}
+
+	assignee := resolveAgentID(*agentIDFlag, *teamFlag, me)
+
+	if err := swarm.BlockTask(*teamFlag, *taskFlag, me, assignee, *reasonFlag); err != nil {
+		return err
+	}
+
+	if *jsonFlag {
+		out := map[string]any{
+			"team":   *teamFlag,
+			"task":   *taskFlag,
+			"status": swarm.TaskStatusBlocked,
+		}
+		if reason := strings.TrimSpace(*reasonFlag); reason != "" {
+			out["reason"] = reason
+		}
+		return writeJSON(os.Stdout, out)
+	}
+
+	return writeStdout("Blocked task %q in team %q\n", *taskFlag, *teamFlag)
 }
 
 // resolveAgentID returns the explicit agent ID if provided, or looks up

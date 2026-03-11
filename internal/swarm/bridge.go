@@ -2,6 +2,7 @@ package swarm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -25,11 +26,13 @@ type BridgeConfig struct {
 
 // BridgeEvent represents a task change detected by the bridge.
 type BridgeEvent struct {
-	Type    string `json:"type"` // "task_added", "task_updated", "task_assigned", "task_unblocked", "task_completed"
-	TaskID  string `json:"task_id"`
-	Title   string `json:"title"`
-	Status  string `json:"status"`
-	Details string `json:"details,omitempty"`
+	Type     string         `json:"type"` // "task_added", "task_updated", "task_assigned", "task_unblocked", "task_completed", "task_failed", "task_blocked"
+	TaskID   string         `json:"task_id"`
+	Title    string         `json:"title"`
+	Status   string         `json:"status"`
+	Details  string         `json:"details,omitempty"`
+	Reason   string         `json:"reason,omitempty"`
+	Evidence map[string]any `json:"evidence,omitempty"`
 }
 
 // BridgeMode returns "fsnotify" or "polling" based on cfg.UsePoll.
@@ -228,17 +231,28 @@ func pollForChanges(cfg BridgeConfig, lastStates map[string]string, lastDepsSati
 			// State changed
 			if isRelevantToAgent(task, cfg.AgentHandle, cfg.AgentID) {
 				eventType := "task_updated"
+				reason := ""
+				var evidence map[string]any
 				if task.Status == TaskStatusInProgress && isAssignedToMe(task.AssignedTo, cfg.AgentHandle, cfg.AgentID) {
 					eventType = "task_assigned"
 				} else if task.Status == TaskStatusCompleted {
 					eventType = "task_completed"
+					evidence = task.Evidence
+				} else if task.Status == TaskStatusFailed {
+					eventType = "task_failed"
+					reason = task.FailureReason
+				} else if task.Status == TaskStatusBlocked {
+					eventType = "task_blocked"
+					reason = task.BlockReason
 				}
 				events = append(events, BridgeEvent{
-					Type:    eventType,
-					TaskID:  task.ID,
-					Title:   task.Title,
-					Status:  task.Status,
-					Details: fmt.Sprintf("assigned_to=%s", task.AssignedTo),
+					Type:     eventType,
+					TaskID:   task.ID,
+					Title:    task.Title,
+					Status:   task.Status,
+					Details:  fmt.Sprintf("assigned_to=%s", task.AssignedTo),
+					Reason:   reason,
+					Evidence: evidence,
 				})
 			}
 		}
@@ -320,6 +334,27 @@ func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
 	if event.Details != "" {
 		body += fmt.Sprintf("Details: %s\n", event.Details)
 	}
+	if event.Reason != "" {
+		body += fmt.Sprintf("Reason: %s\n", event.Reason)
+	}
+	if event.Evidence != nil {
+		if data, err := json.MarshalIndent(event.Evidence, "", "  "); err == nil {
+			body += fmt.Sprintf("Evidence:\n%s\n", data)
+		}
+	}
+
+	context := map[string]any{
+		"team":    cfg.TeamName,
+		"task_id": event.TaskID,
+		"event":   event.Type,
+		"source":  "swarm-bridge",
+	}
+	if event.Reason != "" {
+		context["reason"] = event.Reason
+	}
+	if event.Evidence != nil {
+		context["evidence"] = event.Evidence
+	}
 
 	msg := format.Message{
 		Header: format.Header{
@@ -333,12 +368,7 @@ func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
 			Priority: format.PriorityNormal,
 			Kind:     format.KindStatus,
 			Labels:   []string{"swarm", event.Type},
-			Context: map[string]any{
-				"team":    cfg.TeamName,
-				"task_id": event.TaskID,
-				"event":   event.Type,
-				"source":  "swarm-bridge",
-			},
+			Context:  context,
 		},
 		Body: body,
 	}

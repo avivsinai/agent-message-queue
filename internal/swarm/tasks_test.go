@@ -301,7 +301,7 @@ func TestCompleteTask(t *testing.T) {
 		{"id": "t1", "title": "WIP", "status": "in_progress", "assigned_to": "codex"},
 	})
 
-	if err := CompleteTask("team6", "t1", "codex"); err != nil {
+	if err := CompleteTask("team6", "t1", "codex", "codex", nil); err != nil {
 		t.Fatalf("CompleteTask: %v", err)
 	}
 
@@ -320,7 +320,7 @@ func TestCompleteTask_WrongAgent(t *testing.T) {
 		{"id": "t1", "title": "WIP", "status": "in_progress", "assigned_to": "claude"},
 	})
 
-	err := CompleteTask("team7", "t1", "codex")
+	err := CompleteTask("team7", "t1", "codex", "codex", nil)
 	if err == nil {
 		t.Fatal("expected error for wrong agent")
 	}
@@ -332,7 +332,7 @@ func TestCompleteTask_Pending(t *testing.T) {
 		{"id": "t1", "title": "Not started", "status": "pending", "assigned_to": "codex"},
 	})
 
-	err := CompleteTask("team-complete-pending", "t1", "codex")
+	err := CompleteTask("team-complete-pending", "t1", "codex", "codex", nil)
 	if err == nil {
 		t.Fatal("expected error for completing a pending task")
 	}
@@ -347,12 +347,218 @@ func TestCompleteTask_AlreadyCompleted(t *testing.T) {
 		{"id": "t1", "title": "Done", "status": "completed", "assigned_to": "codex"},
 	})
 
-	err := CompleteTask("team-complete-done", "t1", "codex")
+	err := CompleteTask("team-complete-done", "t1", "codex", "codex", nil)
 	if err == nil {
 		t.Fatal("expected error for completing an already-completed task")
 	}
 	if !strings.Contains(err.Error(), "already completed") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCompleteTask_WithEvidence(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-complete-evidence")
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "WIP", "status": "in_progress", "assigned_to": "codex"},
+	})
+
+	evidence := map[string]any{
+		"tests_passed":  true,
+		"ci_status":     "green",
+		"files_changed": []any{"internal/cli/swarm.go"},
+	}
+
+	if err := CompleteTask("team-complete-evidence", "t1", "codex", "codex", evidence); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrapper map[string]any
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		t.Fatal(err)
+	}
+
+	tasksRaw, ok := wrapper["tasks"].([]any)
+	if !ok || len(tasksRaw) != 1 {
+		t.Fatalf("unexpected tasks wrapper: %v", wrapper["tasks"])
+	}
+	task, ok := tasksRaw[0].(map[string]any)
+	if !ok {
+		t.Fatalf("task is not a map: %T", tasksRaw[0])
+	}
+	storedEvidence, ok := task["evidence"].(map[string]any)
+	if !ok {
+		t.Fatalf("evidence not stored as object: %T", task["evidence"])
+	}
+	if storedEvidence["ci_status"] != "green" {
+		t.Errorf("ci_status = %v, want %q", storedEvidence["ci_status"], "green")
+	}
+	filesChanged, ok := storedEvidence["files_changed"].([]any)
+	if !ok || len(filesChanged) != 1 || filesChanged[0] != "internal/cli/swarm.go" {
+		t.Errorf("files_changed = %v, want single swarm.go path", storedEvidence["files_changed"])
+	}
+}
+
+func TestFailTask(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-fail")
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Broken", "status": "in_progress", "assigned_to": "codex"},
+	})
+
+	if err := FailTask("team-fail", "t1", "codex", "ext_codex_1", "tests are red"); err != nil {
+		t.Fatalf("FailTask: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrapper map[string]any
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		t.Fatal(err)
+	}
+	tasksRaw := wrapper["tasks"].([]any)
+	task := tasksRaw[0].(map[string]any)
+	if task["status"] != TaskStatusFailed {
+		t.Errorf("status = %v, want %q", task["status"], TaskStatusFailed)
+	}
+	if task["failure_reason"] != "tests are red" {
+		t.Errorf("failure_reason = %v, want %q", task["failure_reason"], "tests are red")
+	}
+}
+
+func TestBlockTask(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-block")
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Waiting", "status": "in_progress", "assigned_to": "codex"},
+	})
+
+	if err := BlockTask("team-block", "t1", "codex", "ext_codex_1", "waiting on API access"); err != nil {
+		t.Fatalf("BlockTask: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrapper map[string]any
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		t.Fatal(err)
+	}
+	tasksRaw := wrapper["tasks"].([]any)
+	task := tasksRaw[0].(map[string]any)
+	if task["status"] != TaskStatusBlocked {
+		t.Errorf("status = %v, want %q", task["status"], TaskStatusBlocked)
+	}
+	if task["block_reason"] != "waiting on API access" {
+		t.Errorf("block_reason = %v, want %q", task["block_reason"], "waiting on API access")
+	}
+}
+
+func TestFailTask_OnlyAssigneeCanFail(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-fail-owner")
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Broken", "status": "in_progress", "assigned_to": "claude"},
+	})
+
+	err := FailTask("team-fail-owner", "t1", "codex", "ext_codex_1", "not mine")
+	if err == nil {
+		t.Fatal("expected error for wrong agent")
+	}
+
+	tasks, listErr := ListTasks("team-fail-owner")
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if tasks[0].Status != TaskStatusInProgress {
+		t.Errorf("status = %q, want %q", tasks[0].Status, TaskStatusInProgress)
+	}
+}
+
+func TestBlockTask_OnlyAssigneeCanBlock(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-block-owner")
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Waiting", "status": "in_progress", "assigned_to": "claude"},
+	})
+
+	err := BlockTask("team-block-owner", "t1", "codex", "ext_codex_1", "not mine")
+	if err == nil {
+		t.Fatal("expected error for wrong agent")
+	}
+
+	tasks, listErr := ListTasks("team-block-owner")
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if tasks[0].Status != TaskStatusInProgress {
+		t.Errorf("status = %q, want %q", tasks[0].Status, TaskStatusInProgress)
+	}
+}
+
+func TestFailTask_RequiresInProgress(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+	}{
+		{name: "pending", status: TaskStatusPending},
+		{name: "completed", status: TaskStatusCompleted},
+		{name: "failed", status: TaskStatusFailed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, dir := setupTasksDir(t, "team-fail-"+tt.name)
+			writeTasksJSON(t, dir, []map[string]any{
+				{"id": "t1", "title": "Stateful", "status": tt.status, "assigned_to": "codex"},
+			})
+
+			err := FailTask("team-fail-"+tt.name, "t1", "codex", "codex", "broken")
+			if err == nil {
+				t.Fatalf("expected error for status %q", tt.status)
+			}
+			want := "not in progress"
+			if tt.status == TaskStatusFailed {
+				want = "already failed"
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestBlockTask_RequiresInProgress(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+	}{
+		{name: "pending", status: TaskStatusPending},
+		{name: "completed", status: TaskStatusCompleted},
+		{name: "blocked", status: TaskStatusBlocked},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, dir := setupTasksDir(t, "team-block-"+tt.name)
+			writeTasksJSON(t, dir, []map[string]any{
+				{"id": "t1", "title": "Stateful", "status": tt.status, "assigned_to": "codex"},
+			})
+
+			err := BlockTask("team-block-"+tt.name, "t1", "codex", "codex", "blocked")
+			if err == nil {
+				t.Fatalf("expected error for status %q", tt.status)
+			}
+			want := "not in progress"
+			if tt.status == TaskStatusBlocked {
+				want = "already blocked"
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 
@@ -516,7 +722,7 @@ func TestCompleteTask_PerFile_PreservesUnknownFields(t *testing.T) {
 		"extra":       []any{"a", "b", "c"},
 	})
 
-	if err := CompleteTask("team9", "x1", "codex"); err != nil {
+	if err := CompleteTask("team9", "x1", "codex", "codex", nil); err != nil {
 		t.Fatalf("CompleteTask: %v", err)
 	}
 

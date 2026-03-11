@@ -3,6 +3,7 @@ package swarm
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
@@ -113,7 +114,15 @@ func TestPollForChanges_TaskAssignedByAgentID(t *testing.T) {
 func TestPollForChanges_TaskCompleted(t *testing.T) {
 	_, dir := setupTasksDir(t, "bridge-team4")
 	writeTasksJSON(t, dir, []map[string]any{
-		{"id": "t1", "title": "Done", "status": "completed", "assigned_to": "codex"},
+		{
+			"id":          "t1",
+			"title":       "Done",
+			"status":      "completed",
+			"assigned_to": "codex",
+			"evidence": map[string]any{
+				"ci_status": "green",
+			},
+		},
 	})
 
 	lastStates := map[string]string{"t1": "in_progress:codex"}
@@ -132,6 +141,77 @@ func TestPollForChanges_TaskCompleted(t *testing.T) {
 	}
 	if events[0].Type != "task_completed" {
 		t.Errorf("event type = %q, want %q", events[0].Type, "task_completed")
+	}
+	if events[0].Evidence["ci_status"] != "green" {
+		t.Errorf("evidence.ci_status = %v, want %q", events[0].Evidence["ci_status"], "green")
+	}
+}
+
+func TestPollForChanges_TaskFailed(t *testing.T) {
+	_, dir := setupTasksDir(t, "bridge-team-failed")
+	writeTasksJSON(t, dir, []map[string]any{
+		{
+			"id":             "t1",
+			"title":          "Failed run",
+			"status":         "failed",
+			"assigned_to":    "codex",
+			"failure_reason": "tests are red",
+		},
+	})
+
+	lastStates := map[string]string{"t1": "in_progress:codex"}
+	cfg := BridgeConfig{
+		TeamName:    "bridge-team-failed",
+		AgentHandle: "codex",
+		AgentID:     "ext_codex_1",
+	}
+
+	events, err := pollForChanges(cfg, lastStates, make(map[string]bool))
+	if err != nil {
+		t.Fatalf("pollForChanges: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
+	if events[0].Type != "task_failed" {
+		t.Errorf("event type = %q, want %q", events[0].Type, "task_failed")
+	}
+	if events[0].Reason != "tests are red" {
+		t.Errorf("reason = %q, want %q", events[0].Reason, "tests are red")
+	}
+}
+
+func TestPollForChanges_TaskBlocked(t *testing.T) {
+	_, dir := setupTasksDir(t, "bridge-team-blocked")
+	writeTasksJSON(t, dir, []map[string]any{
+		{
+			"id":           "t1",
+			"title":        "Blocked run",
+			"status":       "blocked",
+			"assigned_to":  "codex",
+			"block_reason": "waiting on API",
+		},
+	})
+
+	lastStates := map[string]string{"t1": "in_progress:codex"}
+	cfg := BridgeConfig{
+		TeamName:    "bridge-team-blocked",
+		AgentHandle: "codex",
+		AgentID:     "ext_codex_1",
+	}
+
+	events, err := pollForChanges(cfg, lastStates, make(map[string]bool))
+	if err != nil {
+		t.Fatalf("pollForChanges: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
+	if events[0].Type != "task_blocked" {
+		t.Errorf("event type = %q, want %q", events[0].Type, "task_blocked")
+	}
+	if events[0].Reason != "waiting on API" {
+		t.Errorf("reason = %q, want %q", events[0].Reason, "waiting on API")
 	}
 }
 
@@ -405,5 +485,103 @@ func TestDeliverBridgeEvent_DeliversMessage(t *testing.T) {
 
 	if msg.Body == "" {
 		t.Fatal("expected non-empty body")
+	}
+}
+
+func TestDeliverBridgeEvent_CompletionIncludesEvidence(t *testing.T) {
+	root := t.TempDir()
+	cfg := BridgeConfig{
+		TeamName:    "bridge-team-evidence",
+		AgentHandle: "codex",
+		AgentID:     "ext_codex_1",
+		AMQRoot:     root,
+	}
+
+	event := BridgeEvent{
+		Type:   "task_completed",
+		TaskID: "t2",
+		Title:  "Ship it",
+		Status: TaskStatusCompleted,
+		Evidence: map[string]any{
+			"tests_passed": true,
+			"ci_status":    "green",
+		},
+	}
+
+	if err := deliverBridgeEvent(cfg, event); err != nil {
+		t.Fatalf("deliverBridgeEvent: %v", err)
+	}
+
+	newDir := fsq.AgentInboxNew(root, "codex")
+	entries, err := os.ReadDir(newDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", newDir, err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+
+	msgPath := filepath.Join(newDir, entries[0].Name())
+	msg, err := format.ReadMessageFile(msgPath)
+	if err != nil {
+		t.Fatalf("ReadMessageFile: %v", err)
+	}
+
+	evidence, ok := msg.Header.Context["evidence"].(map[string]any)
+	if !ok {
+		t.Fatalf("context evidence missing or wrong type: %T", msg.Header.Context["evidence"])
+	}
+	if evidence["ci_status"] != "green" {
+		t.Errorf("context evidence ci_status = %v, want %q", evidence["ci_status"], "green")
+	}
+	if !strings.Contains(msg.Body, "Evidence:") {
+		t.Fatalf("expected evidence block in body, got %q", msg.Body)
+	}
+	if !strings.Contains(msg.Body, "\"ci_status\": \"green\"") {
+		t.Fatalf("expected serialized evidence in body, got %q", msg.Body)
+	}
+}
+
+func TestDeliverBridgeEvent_BlockIncludesReason(t *testing.T) {
+	root := t.TempDir()
+	cfg := BridgeConfig{
+		TeamName:    "bridge-team-block-reason",
+		AgentHandle: "codex",
+		AgentID:     "ext_codex_1",
+		AMQRoot:     root,
+	}
+
+	event := BridgeEvent{
+		Type:   "task_blocked",
+		TaskID: "t3",
+		Title:  "Waiting",
+		Status: TaskStatusBlocked,
+		Reason: "awaiting review",
+	}
+
+	if err := deliverBridgeEvent(cfg, event); err != nil {
+		t.Fatalf("deliverBridgeEvent: %v", err)
+	}
+
+	newDir := fsq.AgentInboxNew(root, "codex")
+	entries, err := os.ReadDir(newDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", newDir, err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+
+	msgPath := filepath.Join(newDir, entries[0].Name())
+	msg, err := format.ReadMessageFile(msgPath)
+	if err != nil {
+		t.Fatalf("ReadMessageFile: %v", err)
+	}
+
+	if msg.Header.Context["reason"] != "awaiting review" {
+		t.Fatalf("context reason = %v, want %q", msg.Header.Context["reason"], "awaiting review")
+	}
+	if !strings.Contains(msg.Body, "Reason: awaiting review") {
+		t.Fatalf("expected reason in body, got %q", msg.Body)
 	}
 }

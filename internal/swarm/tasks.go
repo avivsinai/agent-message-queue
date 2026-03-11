@@ -16,19 +16,24 @@ const (
 	TaskStatusPending    = "pending"
 	TaskStatusInProgress = "in_progress"
 	TaskStatusCompleted  = "completed"
+	TaskStatusFailed     = "failed"
+	TaskStatusBlocked    = "blocked"
 )
 
 // Task represents a work item in the shared task list.
 // Used for reading; writes go through map[string]any to preserve unknown fields.
 type Task struct {
-	ID          string   `json:"id"`
-	Title       string   `json:"title"`
-	Description string   `json:"description,omitempty"`
-	Status      string   `json:"status"`
-	AssignedTo  string   `json:"assigned_to,omitempty"`
-	DependsOn   []string `json:"depends_on,omitempty"`
-	CreatedAt   string   `json:"created_at,omitempty"`
-	UpdatedAt   string   `json:"updated_at,omitempty"`
+	ID            string         `json:"id"`
+	Title         string         `json:"title"`
+	Description   string         `json:"description,omitempty"`
+	Status        string         `json:"status"`
+	AssignedTo    string         `json:"assigned_to,omitempty"`
+	DependsOn     []string       `json:"depends_on,omitempty"`
+	CreatedAt     string         `json:"created_at,omitempty"`
+	UpdatedAt     string         `json:"updated_at,omitempty"`
+	Evidence      map[string]any `json:"evidence,omitempty"`
+	FailureReason string         `json:"failure_reason,omitempty"`
+	BlockReason   string         `json:"block_reason,omitempty"`
 }
 
 // ListTasks reads all tasks for a team.
@@ -157,31 +162,107 @@ func ClaimTask(teamName, taskID, agentID string) error {
 	})
 }
 
-// CompleteTask marks a task as completed.
-func CompleteTask(teamName, taskID, agentID string) error {
+// CompleteTask marks a task as completed, optionally attaching proof-of-work evidence.
+func CompleteTask(teamName, taskID, agentHandle, agentID string, evidence map[string]any) error {
 	return withTasksLock(teamName, func() error {
 		return updateTaskRaw(teamName, taskID, func(raw map[string]any) error {
 			status, _ := raw["status"].(string)
-			switch status {
-			case TaskStatusCompleted:
-				return fmt.Errorf("task %q is already completed", taskID)
-			case TaskStatusInProgress:
-				// ok
-			case TaskStatusPending:
-				return fmt.Errorf("task %q is not in progress (status=%q)", taskID, status)
-			default:
-				return fmt.Errorf("task %q has invalid status %q", taskID, status)
+			if err := requireInProgress(taskID, status, TaskStatusCompleted); err != nil {
+				return err
 			}
-
-			assigned, _ := raw["assigned_to"].(string)
-			if assigned != "" && !strings.EqualFold(assigned, agentID) {
-				return fmt.Errorf("task %q is assigned to %q, not %q", taskID, assigned, agentID)
+			if err := requireTaskAssignee(taskID, raw, agentHandle, agentID); err != nil {
+				return err
 			}
 			raw["status"] = TaskStatusCompleted
+			delete(raw, "failure_reason")
+			delete(raw, "block_reason")
+			setOptionalObject(raw, "evidence", evidence)
 			raw["updated_at"] = time.Now().UTC().Format(time.RFC3339)
 			return nil
 		})
 	})
+}
+
+// FailTask marks an in-progress task as failed and records the failure reason.
+func FailTask(teamName, taskID, agentHandle, agentID, reason string) error {
+	return withTasksLock(teamName, func() error {
+		return updateTaskRaw(teamName, taskID, func(raw map[string]any) error {
+			status, _ := raw["status"].(string)
+			if err := requireInProgress(taskID, status, TaskStatusFailed); err != nil {
+				return err
+			}
+			if err := requireTaskAssignee(taskID, raw, agentHandle, agentID); err != nil {
+				return err
+			}
+			raw["status"] = TaskStatusFailed
+			delete(raw, "block_reason")
+			setOptionalString(raw, "failure_reason", reason)
+			raw["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+			return nil
+		})
+	})
+}
+
+// BlockTask marks an in-progress task as blocked and records the blocking reason.
+func BlockTask(teamName, taskID, agentHandle, agentID, reason string) error {
+	return withTasksLock(teamName, func() error {
+		return updateTaskRaw(teamName, taskID, func(raw map[string]any) error {
+			status, _ := raw["status"].(string)
+			if err := requireInProgress(taskID, status, TaskStatusBlocked); err != nil {
+				return err
+			}
+			if err := requireTaskAssignee(taskID, raw, agentHandle, agentID); err != nil {
+				return err
+			}
+			raw["status"] = TaskStatusBlocked
+			delete(raw, "failure_reason")
+			setOptionalString(raw, "block_reason", reason)
+			raw["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+			return nil
+		})
+	})
+}
+
+func requireInProgress(taskID, status, targetStatus string) error {
+	switch status {
+	case targetStatus:
+		return fmt.Errorf("task %q is already %s", taskID, targetStatus)
+	case TaskStatusInProgress:
+		return nil
+	case TaskStatusPending, TaskStatusCompleted, TaskStatusFailed, TaskStatusBlocked:
+		return fmt.Errorf("task %q is not in progress (status=%q)", taskID, status)
+	default:
+		return fmt.Errorf("task %q has invalid status %q", taskID, status)
+	}
+}
+
+func requireTaskAssignee(taskID string, raw map[string]any, agentHandle, agentID string) error {
+	assigned, _ := raw["assigned_to"].(string)
+	if assigned == "" || isAssignedToMe(assigned, agentHandle, agentID) {
+		return nil
+	}
+	target := agentID
+	if target == "" {
+		target = agentHandle
+	}
+	return fmt.Errorf("task %q is assigned to %q, not %q", taskID, assigned, target)
+}
+
+func setOptionalObject(raw map[string]any, key string, value map[string]any) {
+	if value == nil {
+		delete(raw, key)
+		return
+	}
+	raw[key] = value
+}
+
+func setOptionalString(raw map[string]any, key, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		delete(raw, key)
+		return
+	}
+	raw[key] = value
 }
 
 // updateTaskRaw finds a task by ID using raw JSON maps so unknown fields are preserved.
