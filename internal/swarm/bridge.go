@@ -338,22 +338,25 @@ func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
 		body += fmt.Sprintf("Reason: %s\n", event.Reason)
 	}
 	if event.Evidence != nil {
-		if data, err := json.MarshalIndent(event.Evidence, "", "  "); err == nil {
+		if data, err := json.MarshalIndent(event.Evidence, "", "  "); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "bridge: failed to serialize evidence for task %s: %v\n", event.TaskID, err)
+			body += fmt.Sprintf("Evidence: (serialization error: %v)\n", err)
+		} else {
 			body += fmt.Sprintf("Evidence:\n%s\n", data)
 		}
 	}
 
-	context := map[string]any{
+	msgContext := map[string]any{
 		"team":    cfg.TeamName,
 		"task_id": event.TaskID,
 		"event":   event.Type,
 		"source":  "swarm-bridge",
 	}
 	if event.Reason != "" {
-		context["reason"] = event.Reason
+		msgContext["reason"] = event.Reason
 	}
 	if event.Evidence != nil {
-		context["evidence"] = event.Evidence
+		msgContext["evidence"] = event.Evidence
 	}
 
 	msg := format.Message{
@@ -368,7 +371,7 @@ func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
 			Priority: format.PriorityNormal,
 			Kind:     format.KindStatus,
 			Labels:   []string{"swarm", event.Type},
-			Context:  context,
+			Context:  msgContext,
 		},
 		Body: body,
 	}

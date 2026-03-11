@@ -11,7 +11,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
-// Task status constants matching Claude Code Agent Teams.
+// Task status constants. pending/in_progress/completed match Claude Code Agent Teams;
+// failed and blocked are AMQ extensions for richer lifecycle tracking.
 const (
 	TaskStatusPending    = "pending"
 	TaskStatusInProgress = "in_progress"
@@ -117,7 +118,8 @@ func withTasksLock(teamName string, fn func() error) error {
 }
 
 // ClaimTask assigns a task to an agent.
-// It checks dependency gating: all depends_on tasks must be completed first.
+// It checks dependency gating: all depends_on tasks must have status "completed".
+// Tasks with failed or blocked dependencies remain unclaimable.
 func ClaimTask(teamName, taskID, agentID string) error {
 	return withTasksLock(teamName, func() error {
 		// Check dependency gating before claiming.
@@ -156,6 +158,9 @@ func ClaimTask(teamName, taskID, agentID string) error {
 			}
 			raw["status"] = TaskStatusInProgress
 			raw["assigned_to"] = agentID
+			delete(raw, "failure_reason")
+			delete(raw, "block_reason")
+			delete(raw, "evidence")
 			raw["updated_at"] = time.Now().UTC().Format(time.RFC3339)
 			return nil
 		})

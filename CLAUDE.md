@@ -140,16 +140,18 @@ amq coop exec [--root <path>] [--session <name>] [--me <handle>] [--no-init] [--
 amq swarm list [--json]
 amq swarm join --team <name> --me <agent> [--agent-id <id>] [--type codex|external] [--json]
 amq swarm leave --team <name> --agent-id <id> [--json]
-amq swarm tasks --team <name> [--status pending|in_progress|completed] [--json]
+amq swarm tasks --team <name> [--status pending|in_progress|completed|failed|blocked] [--json]
 amq swarm claim --team <name> --task <id> --me <agent> [--agent-id <id>] [--json]
-amq swarm complete --team <name> --task <id> --me <agent> [--agent-id <id>] [--json]
+amq swarm complete --team <name> --task <id> --me <agent> [--agent-id <id>] [--evidence <json|@file>] [--json]
+amq swarm fail --team <name> --task <id> --me <agent> [--agent-id <id>] [--reason <str>] [--json]
+amq swarm block --team <name> --task <id> --me <agent> [--agent-id <id>] [--reason <str>] [--json]
 amq swarm bridge --team <name> --me <agent> [--agent-id <id>] [--poll] [--poll-interval <duration>] [--root <path>] [--strict] [--json]
 amq doctor [--json]
 ```
 
 Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has its own flags and doesn't accept these.
 
-Swarm-specific flags: `--team`, `--task`, `--agent-id`, `--type`, `--status`, `--poll`, `--poll-interval`.
+Swarm-specific flags: `--team`, `--task`, `--agent-id`, `--type`, `--status`, `--poll`, `--poll-interval`, `--reason`, `--evidence`.
 
 Use `amq --version` to check the installed version.
 
@@ -340,7 +342,7 @@ amq reply --me codex --id "msg_123" --kind review_response \
 Swarm mode lets external agents (Codex, etc.) participate in Claude Code Agent Teams by reading/writing the team's local config and task list (under `~/.claude/teams/` and `~/.claude/tasks/`).
 See `.claude/skills/amq-cli/SKILL.md` for the agent-facing workflow.
 
-- **Task workflow**: `amq swarm join`, `amq swarm tasks`, `amq swarm claim`, `amq swarm complete`
+- **Task workflow**: `amq swarm join`, `amq swarm tasks`, `amq swarm claim`, `amq swarm complete`, `amq swarm fail`, `amq swarm block`
 - **Notifications**: `amq swarm bridge` watches the shared task list and delivers AMQ messages labeled `swarm` into the agent's inbox
 
 **Wake compatibility**: bridge notifications are standard AMQ inbox messages, so `amq wake` will detect them automatically. If you want swarm notifications to trigger wake interrupts, configure wake to match the bridge label and priority:
