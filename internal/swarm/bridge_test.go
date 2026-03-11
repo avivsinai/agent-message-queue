@@ -585,3 +585,47 @@ func TestDeliverBridgeEvent_BlockIncludesReason(t *testing.T) {
 		t.Fatalf("expected reason in body, got %q", msg.Body)
 	}
 }
+
+func TestDeliverBridgeEvent_FailedIncludesReason(t *testing.T) {
+	root := t.TempDir()
+	cfg := BridgeConfig{
+		TeamName:    "bridge-team-fail-reason",
+		AgentHandle: "codex",
+		AgentID:     "ext_codex_1",
+		AMQRoot:     root,
+	}
+
+	event := BridgeEvent{
+		Type:   "task_failed",
+		TaskID: "t4",
+		Title:  "Broken",
+		Status: TaskStatusFailed,
+		Reason: "tests are red",
+	}
+
+	if err := deliverBridgeEvent(cfg, event); err != nil {
+		t.Fatalf("deliverBridgeEvent: %v", err)
+	}
+
+	newDir := fsq.AgentInboxNew(root, "codex")
+	entries, err := os.ReadDir(newDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", newDir, err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+
+	msgPath := filepath.Join(newDir, entries[0].Name())
+	msg, err := format.ReadMessageFile(msgPath)
+	if err != nil {
+		t.Fatalf("ReadMessageFile: %v", err)
+	}
+
+	if msg.Header.Context["reason"] != "tests are red" {
+		t.Fatalf("context reason = %v, want %q", msg.Header.Context["reason"], "tests are red")
+	}
+	if !strings.Contains(msg.Body, "Reason: tests are red") {
+		t.Fatalf("expected reason in body, got %q", msg.Body)
+	}
+}

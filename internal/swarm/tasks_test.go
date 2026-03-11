@@ -562,6 +562,134 @@ func TestBlockTask_RequiresInProgress(t *testing.T) {
 	}
 }
 
+func TestClaimTask_ReclaimClearsTerminalFields_Failed(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-reclaim-failed")
+	writeTasksJSON(t, dir, []map[string]any{
+		{
+			"id":             "t1",
+			"title":          "Retry me",
+			"status":         TaskStatusFailed,
+			"assigned_to":    "codex",
+			"failure_reason": "boom",
+			"evidence":       map[string]any{"ci_status": "red"},
+		},
+	})
+
+	if err := ClaimTask("team-reclaim-failed", "t1", "codex"); err != nil {
+		t.Fatalf("ClaimTask: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrapper map[string]any
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		t.Fatal(err)
+	}
+	task := wrapper["tasks"].([]any)[0].(map[string]any)
+	if task["status"] != TaskStatusInProgress {
+		t.Errorf("status = %v, want %q", task["status"], TaskStatusInProgress)
+	}
+	if _, ok := task["failure_reason"]; ok {
+		t.Errorf("failure_reason should be cleared, got %v", task["failure_reason"])
+	}
+	if _, ok := task["block_reason"]; ok {
+		t.Errorf("block_reason should be absent, got %v", task["block_reason"])
+	}
+	if _, ok := task["evidence"]; ok {
+		t.Errorf("evidence should be cleared, got %v", task["evidence"])
+	}
+}
+
+func TestClaimTask_ReclaimClearsTerminalFields_Blocked(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-reclaim-blocked")
+	writeTasksJSON(t, dir, []map[string]any{
+		{
+			"id":           "t1",
+			"title":        "Retry me",
+			"status":       TaskStatusBlocked,
+			"assigned_to":  "codex",
+			"block_reason": "waiting on API",
+			"evidence":     map[string]any{"ci_status": "yellow"},
+		},
+	})
+
+	if err := ClaimTask("team-reclaim-blocked", "t1", "codex"); err != nil {
+		t.Fatalf("ClaimTask: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrapper map[string]any
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		t.Fatal(err)
+	}
+	task := wrapper["tasks"].([]any)[0].(map[string]any)
+	if task["status"] != TaskStatusInProgress {
+		t.Errorf("status = %v, want %q", task["status"], TaskStatusInProgress)
+	}
+	if _, ok := task["failure_reason"]; ok {
+		t.Errorf("failure_reason should be absent, got %v", task["failure_reason"])
+	}
+	if _, ok := task["block_reason"]; ok {
+		t.Errorf("block_reason should be cleared, got %v", task["block_reason"])
+	}
+	if _, ok := task["evidence"]; ok {
+		t.Errorf("evidence should be cleared, got %v", task["evidence"])
+	}
+}
+
+func TestFailTask_EmptyReasonOmitsField(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-fail-empty-reason")
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Broken", "status": "in_progress", "assigned_to": "codex"},
+	})
+
+	if err := FailTask("team-fail-empty-reason", "t1", "codex", "codex", ""); err != nil {
+		t.Fatalf("FailTask: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrapper map[string]any
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		t.Fatal(err)
+	}
+	task := wrapper["tasks"].([]any)[0].(map[string]any)
+	if _, ok := task["failure_reason"]; ok {
+		t.Errorf("failure_reason should be omitted, got %v", task["failure_reason"])
+	}
+}
+
+func TestBlockTask_EmptyReasonOmitsField(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-block-empty-reason")
+	writeTasksJSON(t, dir, []map[string]any{
+		{"id": "t1", "title": "Blocked", "status": "in_progress", "assigned_to": "codex"},
+	})
+
+	if err := BlockTask("team-block-empty-reason", "t1", "codex", "codex", ""); err != nil {
+		t.Fatalf("BlockTask: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrapper map[string]any
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		t.Fatal(err)
+	}
+	task := wrapper["tasks"].([]any)[0].(map[string]any)
+	if _, ok := task["block_reason"]; ok {
+		t.Errorf("block_reason should be omitted, got %v", task["block_reason"])
+	}
+}
+
 func TestClaimTask_NoDir_NotFound(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -741,5 +869,42 @@ func TestCompleteTask_PerFile_PreservesUnknownFields(t *testing.T) {
 	extra, ok := raw["extra"].([]any)
 	if !ok || len(extra) != 3 {
 		t.Errorf("extra not preserved: %v", raw["extra"])
+	}
+}
+
+func TestCompleteTask_NilEvidenceClearsExistingEvidence(t *testing.T) {
+	_, dir := setupTasksDir(t, "team-complete-clear-evidence")
+	writeTasksJSON(t, dir, []map[string]any{
+		{
+			"id":             "t1",
+			"title":          "Retry complete",
+			"status":         TaskStatusFailed,
+			"assigned_to":    "codex",
+			"failure_reason": "boom",
+			"evidence":       map[string]any{"ci_status": "green"},
+		},
+	})
+
+	if err := ClaimTask("team-complete-clear-evidence", "t1", "codex"); err != nil {
+		t.Fatalf("ClaimTask: %v", err)
+	}
+	if err := CompleteTask("team-complete-clear-evidence", "t1", "codex", "codex", nil); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrapper map[string]any
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		t.Fatal(err)
+	}
+	task := wrapper["tasks"].([]any)[0].(map[string]any)
+	if task["status"] != TaskStatusCompleted {
+		t.Errorf("status = %v, want %q", task["status"], TaskStatusCompleted)
+	}
+	if _, ok := task["evidence"]; ok {
+		t.Errorf("evidence should be absent after nil evidence complete, got %v", task["evidence"])
 	}
 }

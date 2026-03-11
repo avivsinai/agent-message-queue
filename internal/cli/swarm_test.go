@@ -461,6 +461,38 @@ func TestRunSwarmComplete_MissingFlags(t *testing.T) {
 	}
 }
 
+func TestRunSwarmFail_MissingFlags(t *testing.T) {
+	_ = setupClaudeHome(t)
+	_, err := captureStdout(t, func() error {
+		return runSwarmFail([]string{"--me", "codex"})
+	})
+	if err == nil {
+		t.Fatal("expected error for missing --team")
+	}
+	_, err = captureStdout(t, func() error {
+		return runSwarmFail([]string{"--team", "t", "--me", "codex"})
+	})
+	if err == nil {
+		t.Fatal("expected error for missing --task")
+	}
+}
+
+func TestRunSwarmBlock_MissingFlags(t *testing.T) {
+	_ = setupClaudeHome(t)
+	_, err := captureStdout(t, func() error {
+		return runSwarmBlock([]string{"--me", "codex"})
+	})
+	if err == nil {
+		t.Fatal("expected error for missing --team")
+	}
+	_, err = captureStdout(t, func() error {
+		return runSwarmBlock([]string{"--team", "t", "--me", "codex"})
+	})
+	if err == nil {
+		t.Fatal("expected error for missing --task")
+	}
+}
+
 func TestRunSwarmBridge_MissingTeam(t *testing.T) {
 	_ = setupClaudeHome(t)
 	_, err := captureStdout(t, func() error {
