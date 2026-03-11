@@ -8,5 +8,5 @@
   "repository": "https://github.com/avivsinai/agent-message-queue",
   "license": "MIT",
   "skills": "./skills/",
-  "keywords": ["messaging", "agents", "maildir", "queue", "inter-agent", "coop"]
+  "keywords": ["messaging", "agents", "maildir", "queue", "inter-agent", "coop", "spec"]
 }

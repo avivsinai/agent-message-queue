@@ -123,6 +123,7 @@ func TestReply_Basic(t *testing.T) {
 }
 
 func TestReply_ReviewRequest(t *testing.T) {
+	t.Setenv("AM_ROOT", "") // Clear to avoid guardRootOverride conflict with --root
 	root := t.TempDir()
 	alice := "alice"
 	bob := "bob"
@@ -179,7 +180,9 @@ func TestReply_ReviewRequest(t *testing.T) {
 	n, _ := r.Read(buf[:])
 
 	var result map[string]any
-	_ = json.Unmarshal(buf[:n], &result)
+	if err := json.Unmarshal(buf[:n], &result); err != nil {
+		t.Fatalf("parse output: %v", err)
+	}
 
 	// Verify Bob received the reply
 	bobInbox := fsq.AgentInboxNew(root, bob)
@@ -189,7 +192,10 @@ func TestReply_ReviewRequest(t *testing.T) {
 	}
 
 	replyPath := filepath.Join(bobInbox, entries[0].Name())
-	replyMsg, _ := format.ReadMessageFile(replyPath)
+	replyMsg, err := format.ReadMessageFile(replyPath)
+	if err != nil {
+		t.Fatalf("read reply: %v", err)
+	}
 
 	// Kind should be auto-set to review_response
 	if replyMsg.Header.Kind != format.KindReviewResponse {
@@ -254,7 +260,9 @@ func TestReply_BrainstormPassthrough(t *testing.T) {
 	n, _ := r.Read(buf[:])
 
 	var result map[string]any
-	_ = json.Unmarshal(buf[:n], &result)
+	if err := json.Unmarshal(buf[:n], &result); err != nil {
+		t.Fatalf("parse output: %v", err)
+	}
 
 	// Verify Bob received the reply
 	bobInbox := fsq.AgentInboxNew(root, bob)
@@ -264,7 +272,10 @@ func TestReply_BrainstormPassthrough(t *testing.T) {
 	}
 
 	replyPath := filepath.Join(bobInbox, entries[0].Name())
-	replyMsg, _ := format.ReadMessageFile(replyPath)
+	replyMsg, err := format.ReadMessageFile(replyPath)
+	if err != nil {
+		t.Fatalf("read reply: %v", err)
+	}
 
 	// Kind should be preserved as brainstorm (default passthrough)
 	if replyMsg.Header.Kind != format.KindBrainstorm {
@@ -273,6 +284,7 @@ func TestReply_BrainstormPassthrough(t *testing.T) {
 }
 
 func TestReply_PreservesThread(t *testing.T) {
+	t.Setenv("AM_ROOT", "") // Clear to avoid guardRootOverride conflict with --root
 	root := t.TempDir()
 	alice := "alice"
 	bob := "bob"

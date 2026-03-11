@@ -29,24 +29,28 @@ jobs:
           FAILED=0
 
           for SKILL in amq-cli amq-spec; do
-            VERSION=$(grep -oP 'version:\s*\K[\d.]+' "skills/$SKILL/SKILL.md")
+            VERSION=$(grep -oP 'version:\s*\K[\d.]+' "skills/$SKILL/SKILL.md") || true
+            if [ -z "$VERSION" ]; then
+              echo "ERROR: Could not extract version from skills/$SKILL/SKILL.md"
+              FAILED=1
+              continue
+            fi
             echo "Publishing $SKILL version: $VERSION"
 
-            OUTPUT=$(npx skild publish \
+            if OUTPUT=$(npx skild publish \
               --dir "skills/$SKILL" \
               --alias "$SKILL" \
-              --skill-version "$VERSION" 2>&1) || true
-
-            echo "$OUTPUT"
-
-            if echo "$OUTPUT" | grep -q "Version already exists"; then
+              --skill-version "$VERSION" 2>&1); then
+              echo "$OUTPUT"
+              echo "✓ Published $SKILL version $VERSION"
+            elif echo "$OUTPUT" | grep -q "Version already exists"; then
+              echo "$OUTPUT"
               echo ""
               echo "⚠ $SKILL version $VERSION already published - skipping"
               echo "  To publish updates, bump version in skills/$SKILL/SKILL.md"
-            elif echo "$OUTPUT" | grep -q "✔\|Published\|success"; then
-              echo "✓ Published $SKILL version $VERSION"
             else
               echo "✖ Publish failed for $SKILL"
+              echo "$OUTPUT"
               FAILED=1
             fi
           done

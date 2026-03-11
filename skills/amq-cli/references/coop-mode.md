@@ -13,22 +13,22 @@
 | Phase | Mode | Description |
 |-------|------|-------------|
 | **Research** | Parallel | Both explore codebase, read docs, search. No conflicts. |
-| **Design** | Parallel → Merge | Both propose approaches. Leader merges/decides. |
+| **Design** | Parallel -> Merge | Both propose approaches. Leader merges/decides. |
 | **Code** | Split | Divide by file/module. Never edit same file. |
 | **Review** | Parallel | Both review each other's code. Leader decides disputes. |
 | **Test** | Parallel | Both run tests, report results to leader. |
 
 ```
 Research (parallel) -> sync findings
-    ↓
+    v
 Design (parallel) -> leader merges approach
-    ↓
+    v
 Code (split: divide files/modules)
-    ↓
+    v
 Review (parallel: each reviews other's code)
-    ↓
+    v
 Test (parallel: both run tests)
-    ↓
+    v
 Leader prepares commit -> user approves -> push
 ```
 

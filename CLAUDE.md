@@ -412,7 +412,8 @@ This repo includes skills for Claude Code and Codex CLI, distributed via the [sk
 ├── SKILL.md
 └── references/
     ├── coop-mode.md
-    └── message-format.md
+    ├── message-format.md
+    └── swarm-mode.md
 .claude/skills/amq-spec/       → Spec workflow skill (SOURCE OF TRUTH)
 ├── SKILL.md
 └── references/
