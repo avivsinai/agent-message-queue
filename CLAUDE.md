@@ -413,16 +413,14 @@ This repo includes skills for Claude Code and Codex CLI, distributed via the [sk
 └── references/
     ├── coop-mode.md
     └── message-format.md
+.claude/skills/amq-spec/       → Spec workflow skill (SOURCE OF TRUTH)
+├── SKILL.md
+└── references/
+    └── spec-workflow.md
 .codex/skills/amq-cli/         → Codex CLI skill (synced copy)
-├── SKILL.md
-└── references/
-    ├── coop-mode.md
-    └── message-format.md
+.codex/skills/amq-spec/        → Spec workflow skill (synced copy)
 skills/amq-cli/                → Standalone skill (synced copy, for direct install)
-├── SKILL.md
-└── references/
-    ├── coop-mode.md
-    └── message-format.md
+skills/amq-spec/               → Standalone skill (synced copy, for direct install)
 ```
 
 ### Why Three Copies?
@@ -439,14 +437,16 @@ Each marketplace/installer requires the files to be present (symlinks not univer
 When working in this repo, **project-level skills take precedence** over user-level installed skills:
 
 - `.claude/skills/amq-cli/` loads instead of `~/.claude/skills/amq-cli/`
+- `.claude/skills/amq-spec/` loads instead of `~/.claude/skills/amq-spec/`
 - `.codex/skills/amq-cli/` loads instead of `~/.codex/skills/amq-cli/`
+- `.codex/skills/amq-spec/` loads instead of `~/.codex/skills/amq-spec/`
 
 This lets you test skill changes locally before publishing.
 
 ### Editing Skills
 
-1. Edit files in `.claude/skills/amq-cli/` (source of truth)
-2. If publishing: bump `version:` in `.claude/skills/amq-cli/SKILL.md`
+1. Edit files in `.claude/skills/<skill-name>/` (source of truth)
+2. If publishing: bump `version:` in the skill's `SKILL.md`
 3. Sync to other locations: `make sync-skills`
 4. Test locally by running Claude Code or Codex in this repo
 5. Commit and push (all three locations will be committed)

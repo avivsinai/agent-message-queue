@@ -140,6 +140,36 @@ func TestValidKind(t *testing.T) {
 	}
 }
 
+func TestValidKinds_ExactSet(t *testing.T) {
+	expected := map[string]bool{
+		"brainstorm":      true,
+		"review_request":  true,
+		"review_response": true,
+		"question":        true,
+		"answer":          true,
+		"decision":        true,
+		"status":          true,
+		"todo":            true,
+	}
+
+	kinds := ValidKinds()
+	if len(kinds) != len(expected) {
+		t.Fatalf("expected %d kinds, got %d: %v", len(expected), len(kinds), kinds)
+	}
+	for _, k := range kinds {
+		if !expected[k] {
+			t.Errorf("unexpected kind in ValidKinds(): %q", k)
+		}
+	}
+
+	// Spec kinds must NOT be valid (removed from core)
+	for _, removed := range []string{"spec_research", "spec_draft", "spec_review", "spec_decision"} {
+		if IsValidKind(removed) {
+			t.Errorf("spec kind %q should not be valid after removal", removed)
+		}
+	}
+}
+
 func TestParseMalformedFrontmatter_MissingStart(t *testing.T) {
 	data := []byte(`{"id":"test"}` + "\n---\nHello\n")
 	_, err := ParseMessage(data)

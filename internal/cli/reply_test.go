@@ -197,6 +197,81 @@ func TestReply_ReviewRequest(t *testing.T) {
 	}
 }
 
+func TestReply_BrainstormPassthrough(t *testing.T) {
+	t.Setenv("AM_ROOT", "") // Clear to avoid guardRootOverride conflict with --root
+	root := t.TempDir()
+	alice := "alice"
+	bob := "bob"
+
+	for _, agent := range []string{alice, bob} {
+		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+			t.Fatalf("EnsureAgentDirs: %v", err)
+		}
+	}
+
+	// Create a brainstorm message from Bob to Alice
+	now := time.Now()
+	originalID, _ := format.NewMessageID(now)
+	originalMsg := format.Message{
+		Header: format.Header{
+			Schema:   format.CurrentSchema,
+			ID:       originalID,
+			From:     bob,
+			To:       []string{alice},
+			Thread:   "spec/auth-redesign",
+			Subject:  "Research: auth-redesign",
+			Created:  now.UTC().Format(time.RFC3339Nano),
+			Priority: format.PriorityNormal,
+			Kind:     format.KindBrainstorm,
+			Labels:   []string{"workflow:spec", "phase:research"},
+		},
+		Body: "My research findings...",
+	}
+	data, _ := originalMsg.Marshal()
+	_, _ = fsq.DeliverToInboxes(root, []string{alice}, originalID+".md", data)
+
+	// Alice replies without explicit kind
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runReply([]string{
+		"--me", alice,
+		"--root", root,
+		"--id", originalID,
+		"--body", "Interesting findings, here are mine...",
+		"--json",
+	})
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("runReply: %v", err)
+	}
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+
+	var result map[string]any
+	_ = json.Unmarshal(buf[:n], &result)
+
+	// Verify Bob received the reply
+	bobInbox := fsq.AgentInboxNew(root, bob)
+	entries, _ := os.ReadDir(bobInbox)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 message in Bob's inbox, got %d", len(entries))
+	}
+
+	replyPath := filepath.Join(bobInbox, entries[0].Name())
+	replyMsg, _ := format.ReadMessageFile(replyPath)
+
+	// Kind should be preserved as brainstorm (default passthrough)
+	if replyMsg.Header.Kind != format.KindBrainstorm {
+		t.Errorf("expected kind=brainstorm (passthrough), got %s", replyMsg.Header.Kind)
+	}
+}
+
 func TestReply_PreservesThread(t *testing.T) {
 	root := t.TempDir()
 	alice := "alice"

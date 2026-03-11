@@ -29,16 +29,22 @@ ci: check-skills fmt-check vet lint test smoke
 
 sync-skills:
 	@echo "Syncing skills from .claude/skills/ to .codex/skills/ and skills/..."
-	@mkdir -p .codex/skills/amq-cli skills/amq-cli
+	@mkdir -p .codex/skills/amq-cli skills/amq-cli .codex/skills/amq-spec skills/amq-spec
 	@if command -v rsync >/dev/null 2>&1; then \
 		rsync -a --delete .claude/skills/amq-cli/ .codex/skills/amq-cli/; \
 		rsync -a --delete .claude/skills/amq-cli/ skills/amq-cli/; \
+		rsync -a --delete .claude/skills/amq-spec/ .codex/skills/amq-spec/; \
+		rsync -a --delete .claude/skills/amq-spec/ skills/amq-spec/; \
 	else \
 		cp -R .claude/skills/amq-cli/. .codex/skills/amq-cli/; \
 		cp -R .claude/skills/amq-cli/. skills/amq-cli/; \
+		cp -R .claude/skills/amq-spec/. .codex/skills/amq-spec/; \
+		cp -R .claude/skills/amq-spec/. skills/amq-spec/; \
 	fi
 	@echo "Done."
 
 check-skills:
 	@diff -ru .claude/skills/amq-cli .codex/skills/amq-cli
 	@diff -ru .claude/skills/amq-cli skills/amq-cli
+	@diff -ru .claude/skills/amq-spec .codex/skills/amq-spec
+	@diff -ru .claude/skills/amq-spec skills/amq-spec
