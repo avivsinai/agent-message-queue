@@ -139,15 +139,18 @@ func runSend(args []string) error {
 		}
 	}
 
-	// Fix 4: Cross-session sends require explicit --thread.
-	// P2P thread IDs (p2p/claude__codex) are not unique across sessions.
+	// Thread ID: auto-generated for P2P, session-qualified for cross-session.
 	threadID := strings.TrimSpace(*threadFlag)
 	if threadID == "" {
-		if targetSession != "" {
-			return UsageError("--thread is required for cross-session sends (p2p thread IDs are not unique across sessions)")
-		}
 		if len(recipients) == 1 {
-			threadID = canonicalP2P(common.Me, recipients[0])
+			if targetSession != "" {
+				// Cross-session: include session names to avoid collisions.
+				// p2p/auth:claude__api:codex is unique across sessions.
+				senderSession := sessionName(root)
+				threadID = "p2p/" + senderSession + ":" + common.Me + "__" + targetSession + ":" + recipients[0]
+			} else {
+				threadID = canonicalP2P(common.Me, recipients[0])
+			}
 		} else {
 			return UsageError("--thread is required when sending to multiple recipients")
 		}
