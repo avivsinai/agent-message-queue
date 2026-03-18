@@ -45,8 +45,8 @@ func (v *headerValidator) validate(header format.Header) error {
 
 func (v *headerValidator) validateHeaderBasic(header format.Header) error {
 	// Schema check only in strict mode - allows interop with older/newer clients
-	if v.strict && header.Schema != format.CurrentSchema {
-		return fmt.Errorf("unsupported schema: %d (expected %d)", header.Schema, format.CurrentSchema)
+	if v.strict && !format.IsSupportedSchema(header.Schema) {
+		return fmt.Errorf("unsupported schema: %d (expected %d-%d)", header.Schema, format.MinSchema, format.CurrentSchema)
 	}
 	return validateHeaderFields(header)
 }

@@ -340,6 +340,187 @@ func TestSortByTimestamp(t *testing.T) {
 	}
 }
 
+func TestMessageRoundTrip_Schema2(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			From:    "claude",
+			To:      []string{"codex"},
+			Thread:  "p2p/claude__codex",
+			Subject: "Cross-session test",
+			Origin: &Origin{
+				Project:   "my-app",
+				ProjectID: "abc123",
+				Session:   "auth",
+				Agent:     "claude",
+				ReplyTo:   "claude@my-app:auth",
+			},
+			Delivery: &Delivery{
+				RequestedTo: []string{"codex@api"},
+				ResolvedTo:  []string{"codex@my-app:api"},
+				Scope:       "cross-session",
+			},
+		},
+		Body: "Hello from auth session",
+	}
+
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseMessage(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Header.Schema != CurrentSchema {
+		t.Errorf("schema = %d, want %d", parsed.Header.Schema, CurrentSchema)
+	}
+	if parsed.Header.Origin == nil {
+		t.Fatal("origin should not be nil")
+	}
+	if parsed.Header.Origin.Project != "my-app" {
+		t.Errorf("origin.project = %q", parsed.Header.Origin.Project)
+	}
+	if parsed.Header.Origin.ReplyTo != "claude@my-app:auth" {
+		t.Errorf("origin.reply_to = %q", parsed.Header.Origin.ReplyTo)
+	}
+	if parsed.Header.Delivery == nil {
+		t.Fatal("delivery should not be nil")
+	}
+	if parsed.Header.Delivery.Scope != "cross-session" {
+		t.Errorf("delivery.scope = %q", parsed.Header.Delivery.Scope)
+	}
+}
+
+func TestMessageRoundTrip_Schema2_AckTo(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			From:   "claude",
+			To:     []string{"codex"},
+			Thread: "p2p/claude__codex",
+			Origin: &Origin{
+				Project: "my-app",
+				Session: "auth",
+				Agent:   "claude",
+				ReplyTo: "claude@my-app:auth",
+				AckTo:   "claude@my-app:auth",
+			},
+		},
+		Body: "Ack routing test",
+	}
+
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseMessage(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Header.Origin == nil {
+		t.Fatal("origin should not be nil")
+	}
+	if parsed.Header.Origin.AckTo != "claude@my-app:auth" {
+		t.Errorf("origin.ack_to = %q, want %q", parsed.Header.Origin.AckTo, "claude@my-app:auth")
+	}
+}
+
+func TestParseMessage_Schema1_BackwardCompat(t *testing.T) {
+	// Schema 1 messages should still parse fine with nil origin/delivery
+	raw := "---json\n{\"schema\":1,\"id\":\"test\",\"from\":\"codex\",\"to\":[\"claude\"],\"thread\":\"t\",\"created\":\"2026-01-01T00:00:00Z\"}\n---\nHello"
+	msg, err := ParseMessage([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Header.Origin != nil {
+		t.Error("schema 1 should have nil origin")
+	}
+	if msg.Header.Delivery != nil {
+		t.Error("schema 1 should have nil delivery")
+	}
+}
+
+func TestSchema2_OmitsEmptyOriginDelivery(t *testing.T) {
+	// When Origin and Delivery are nil, they should be omitted from JSON
+	msg := Message{
+		Header: Header{
+			Schema:  2,
+			ID:      "test-no-federation",
+			From:    "alice",
+			To:      []string{"bob"},
+			Thread:  "p2p/alice__bob",
+			Created: "2026-01-01T00:00:00Z",
+		},
+		Body: "No federation fields",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if strings.Contains(s, "origin") {
+		t.Error("nil origin should be omitted from JSON")
+	}
+	if strings.Contains(s, "delivery") {
+		t.Error("nil delivery should be omitted from JSON")
+	}
+}
+
+func TestSchema2_DeliveryFanout(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			From:   "claude",
+			To:     []string{"codex"},
+			Thread: "channel/events",
+			Delivery: &Delivery{
+				Channel:     "events",
+				FanoutIndex: 2,
+				FanoutTotal: 5,
+				Scope:       "cross-session",
+			},
+		},
+		Body: "Fan-out message",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseMessage(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Header.Delivery == nil {
+		t.Fatal("delivery should not be nil")
+	}
+	if parsed.Header.Delivery.Channel != "events" {
+		t.Errorf("delivery.channel = %q", parsed.Header.Delivery.Channel)
+	}
+	if parsed.Header.Delivery.FanoutIndex != 2 {
+		t.Errorf("delivery.fanout_index = %d, want 2", parsed.Header.Delivery.FanoutIndex)
+	}
+	if parsed.Header.Delivery.FanoutTotal != 5 {
+		t.Errorf("delivery.fanout_total = %d, want 5", parsed.Header.Delivery.FanoutTotal)
+	}
+}
+
+func TestIsSupportedSchema(t *testing.T) {
+	tests := []struct {
+		schema    int
+		supported bool
+	}{
+		{0, false},
+		{1, true},
+		{2, true},
+		{3, false},
+		{-1, false},
+	}
+	for _, tc := range tests {
+		got := IsSupportedSchema(tc.schema)
+		if got != tc.supported {
+			t.Errorf("IsSupportedSchema(%d) = %v, want %v", tc.schema, got, tc.supported)
+		}
+	}
+}
+
 // testTimestamped implements the Timestamped interface for testing.
 type testTimestamped struct {
 	id      string

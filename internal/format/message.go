@@ -15,9 +15,16 @@ import (
 
 // Schema and version constants.
 const (
-	CurrentSchema  = 1
+	CurrentSchema  = 2
+	MinSchema      = 1
 	CurrentVersion = 1
 )
+
+// IsSupportedSchema returns true if the schema version is within the
+// supported range [MinSchema, CurrentSchema].
+func IsSupportedSchema(v int) bool {
+	return v >= MinSchema && v <= CurrentSchema
+}
 
 // MaxMessageSize is the maximum allowed message file size (10 MB).
 const MaxMessageSize = 10 * 1024 * 1024
@@ -54,6 +61,26 @@ const (
 	KindTodo           = "todo"
 )
 
+// Origin identifies the source of a cross-session or cross-project message.
+type Origin struct {
+	Project   string `json:"project,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+	Session   string `json:"session,omitempty"`
+	Agent     string `json:"agent,omitempty"`
+	ReplyTo   string `json:"reply_to,omitempty"`
+	AckTo     string `json:"ack_to,omitempty"`
+}
+
+// Delivery records how the message was routed.
+type Delivery struct {
+	RequestedTo []string `json:"requested_to,omitempty"`
+	ResolvedTo  []string `json:"resolved_to,omitempty"`
+	Scope       string   `json:"scope,omitempty"` // "local", "cross-session", "cross-project"
+	Channel     string   `json:"channel,omitempty"`
+	FanoutIndex int      `json:"fanout_index,omitempty"`
+	FanoutTotal int      `json:"fanout_total,omitempty"`
+}
+
 // Header is the JSON frontmatter stored at the top of each message file.
 type Header struct {
 	Schema      int      `json:"schema"`
@@ -71,6 +98,10 @@ type Header struct {
 	Kind     string         `json:"kind,omitempty"`     // message kind (see ValidKinds())
 	Labels   []string       `json:"labels,omitempty"`   // free-form tags
 	Context  map[string]any `json:"context,omitempty"`  // structured context (paths, symbols, etc.)
+
+	// Federation fields (schema 2, optional for backward compatibility)
+	Origin   *Origin   `json:"origin,omitempty"`
+	Delivery *Delivery `json:"delivery,omitempty"`
 }
 
 // Message is the in-memory representation of a message file.
