@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/discover"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/resolve"
@@ -294,18 +295,7 @@ func runSendFederated(common *commonFlags, root, rawTo, subject, thread,
 	}
 
 	// Build origin: identifies where this message came from.
-	origin := &format.Origin{
-		Agent:   me,
-		Session: sessionName(root),
-		ReplyTo: me + "@" + sessionName(root),
-	}
-	if proj := strings.TrimSpace(os.Getenv(envProject)); proj != "" {
-		origin.Project = proj
-		origin.ReplyTo = me + "@" + proj + ":" + sessionName(root)
-	}
-	if ackRequired {
-		origin.AckTo = origin.ReplyTo
-	}
+	origin := buildOrigin(me, root, projectDir, ackRequired)
 
 	// Build delivery metadata.
 	delivery := &format.Delivery{
@@ -475,6 +465,44 @@ func formatResolvedTarget(t resolve.Target) string {
 		return t.Agent + "@" + t.Session
 	}
 	return t.Agent
+}
+
+// buildOrigin constructs an Origin for a federated message.
+// It resolves the project slug with the following precedence:
+//  1. AM_PROJECT env var (fastest, set by coop exec)
+//  2. discover.DiscoverProject(projectDir) using the .amqrc Slug/ProjectID
+//
+// If neither yields a project, the Origin omits the project qualifier.
+func buildOrigin(me, root, projectDir string, ackRequired bool) *format.Origin {
+	session := sessionName(root)
+	origin := &format.Origin{
+		Agent:   me,
+		Session: session,
+		ReplyTo: me + "@" + session,
+	}
+
+	// Try AM_PROJECT first (set by coop exec).
+	proj := strings.TrimSpace(os.Getenv(envProject))
+
+	// Fallback: discover project from the working directory.
+	if proj == "" && projectDir != "" {
+		if discovered, err := discover.DiscoverProject(projectDir); err == nil && discovered.Slug != "" {
+			proj = discovered.Slug
+			if discovered.ProjectID != "" {
+				origin.ProjectID = discovered.ProjectID
+			}
+		}
+	}
+
+	if proj != "" {
+		origin.Project = proj
+		origin.ReplyTo = me + "@" + proj + ":" + session
+	}
+
+	if ackRequired {
+		origin.AckTo = origin.ReplyTo
+	}
+	return origin
 }
 
 func canonicalP2P(a, b string) string {

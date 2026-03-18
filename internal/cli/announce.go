@@ -2,6 +2,7 @@ package cli
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,39 +119,75 @@ func runAnnounce(args []string) error {
 	}
 	recipients = dedupeStrings(recipients)
 
+	// Compute delivery scope.
+	scope := computeDeliveryScope(root, targets)
+
+	// Build resolved-to addresses for delivery metadata.
+	resolvedToAddrs := make([]string, 0, len(targets))
+	for _, t := range targets {
+		resolvedToAddrs = append(resolvedToAddrs, formatResolvedTarget(t))
+	}
+
+	// Build origin (same pattern as send.go federation path).
+	origin := buildOrigin(me, root, projectDir, false)
+
+	// Build delivery metadata.
+	channelAddr := "#" + channelName
+	delivery := &format.Delivery{
+		RequestedTo: []string{channelAddr},
+		ResolvedTo:  resolvedToAddrs,
+		Scope:       scope,
+		Channel:     channelAddr,
+	}
+
 	msg := format.Message{
 		Header: format.Header{
-			Schema:  format.CurrentSchema,
-			ID:      id,
-			From:    me,
-			To:      recipients,
-			Thread:  "channel/" + channelName,
-			Subject: strings.TrimSpace(*subjectFlag),
-			Created: now.UTC().Format(time.RFC3339Nano),
+			Schema:   format.CurrentSchema,
+			ID:       id,
+			From:     me,
+			To:       recipients,
+			Thread:   "channel/" + channelName,
+			Subject:  strings.TrimSpace(*subjectFlag),
+			Created:  now.UTC().Format(time.RFC3339Nano),
 			Priority: priority,
 			Kind:     kind,
 			Labels:   labels,
+			Origin:   origin,
+			Delivery: delivery,
 		},
 		Body: body,
 	}
 
-	data, err := msg.Marshal()
-	if err != nil {
-		return err
-	}
-
 	filename := id + ".md"
 
-	// Deliver to each target individually (may span sessions)
+	// Deliver to each target individually (may span sessions).
 	deliveries := make([]announceDelivery, 0, len(targets))
 	var deliveredCount int
 
-	for _, target := range targets {
+	for i, target := range targets {
+		// Set per-target fanout index in delivery metadata.
+		msg.Header.Delivery.FanoutIndex = i + 1
+		msg.Header.Delivery.FanoutTotal = len(targets)
+
+		data, marshalErr := msg.Marshal()
+		if marshalErr != nil {
+			return marshalErr
+		}
+
 		d := announceDelivery{
 			Agent:   target.Agent,
 			Session: target.Session,
 		}
-		_, deliverErr := fsq.DeliverToInbox(target.SessionRoot, target.Agent, filename, data)
+
+		// Choose delivery method: DeliverToExistingInbox for foreign targets,
+		// DeliverToInbox for local targets in the current session root.
+		var deliverErr error
+		if target.SessionRoot == root {
+			_, deliverErr = fsq.DeliverToInbox(root, target.Agent, filename, data)
+		} else {
+			_, deliverErr = fsq.DeliverToExistingInbox(target.SessionRoot, target.Agent, filename, data)
+		}
+
 		if deliverErr != nil {
 			d.Status = "failed"
 			d.Error = deliverErr.Error()
@@ -161,7 +198,8 @@ func runAnnounce(args []string) error {
 		deliveries = append(deliveries, d)
 	}
 
-	// Copy to sender outbox
+	// Copy to sender outbox (use last marshaled data for audit).
+	data, _ := msg.Marshal()
 	outboxDir := fsq.AgentOutboxSent(root, me)
 	outboxErr := error(nil)
 	if _, err := fsq.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
@@ -169,24 +207,26 @@ func runAnnounce(args []string) error {
 	}
 
 	if common.JSON {
-		return writeJSON(os.Stdout, map[string]any{
+		result := map[string]any{
 			"id":         id,
 			"channel":    channelName,
 			"thread":     "channel/" + channelName,
 			"targets":    len(targets),
 			"delivered":  deliveredCount,
+			"scope":      scope,
 			"deliveries": deliveries,
 			"outbox": map[string]any{
 				"written": outboxErr == nil,
 				"error":   errString(outboxErr),
 			},
-		})
+		}
+		return writeJSON(os.Stdout, result)
 	}
 
 	if outboxErr != nil {
 		_ = writeStderr("warning: outbox write failed: %v\n", outboxErr)
 	}
-	if err := writeStdout("Announced %s to #%s (%d/%d delivered)\n", id, channelName, deliveredCount, len(targets)); err != nil {
+	if err := writeStdout("Announced %s to #%s (%d/%d delivered, scope: %s)\n", id, channelName, deliveredCount, len(targets), scope); err != nil {
 		return err
 	}
 	for _, d := range deliveries {
@@ -197,6 +237,10 @@ func runAnnounce(args []string) error {
 		if err := writeStdout("  %s@%s: %s\n", d.Agent, d.Session, status); err != nil {
 			return err
 		}
+	}
+
+	if deliveredCount == 0 && len(targets) > 0 {
+		return fmt.Errorf("all deliveries failed")
 	}
 	return nil
 }

@@ -258,19 +258,8 @@ func runReplyFederated(common *commonFlags, root, me string,
 		return err
 	}
 
-	// Build origin for the reply.
-	origin := &format.Origin{
-		Agent:   me,
-		Session: sessionName(root),
-		ReplyTo: me + "@" + sessionName(root),
-	}
-	if proj := strings.TrimSpace(os.Getenv(envProject)); proj != "" {
-		origin.Project = proj
-		origin.ReplyTo = me + "@" + proj + ":" + sessionName(root)
-	}
-	if ackRequired {
-		origin.AckTo = origin.ReplyTo
-	}
+	// Build origin for the reply (reuses projectDir from resolver setup above).
+	origin := buildOrigin(me, root, projectDir, ackRequired)
 
 	// Determine scope.
 	scope := "local"

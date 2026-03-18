@@ -9,6 +9,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/metadata"
 	"github.com/avivsinai/agent-message-queue/internal/resolve"
 )
 
@@ -53,6 +54,15 @@ func TestFederation_CrossSessionSend(t *testing.T) {
 	t.Setenv("AM_BASE_ROOT", baseRoot)
 	t.Setenv("AM_ME", "alice")
 	t.Setenv("AM_PROJECT", "")
+
+	// Chdir to baseRoot (no .amqrc) so DiscoverProject won't find the
+	// repo's .amqrc and inject an unwanted project qualifier.
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(baseRoot); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+	resetAmqrcCache()
 
 	// Capture stdout.
 	oldStdout := os.Stdout
@@ -536,6 +546,417 @@ func TestFederation_HasQualifiedRecipient(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("hasQualifiedRecipient(%q) = %v, want %v", tt.input, got, tt.want)
 		}
+	}
+}
+
+// setupCrossProjectEnv creates two separate project directories, each with its
+// own .amqrc and session directories. Returns (workspace, projectA dir, sessionA root,
+// projectB dir, sessionB root).
+func setupCrossProjectEnv(t *testing.T) (string, string, string, string, string) {
+	t.Helper()
+
+	workspace := t.TempDir()
+
+	// Project A: slug "proj-alpha"
+	projADir := filepath.Join(workspace, "proj-alpha")
+	projABaseRoot := filepath.Join(projADir, ".agent-mail")
+	projASession := filepath.Join(projABaseRoot, "collab")
+	if err := os.MkdirAll(projADir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projADir, ".amqrc"),
+		[]byte(`{"root":".agent-mail","project":"proj-alpha"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureRootDirs(projASession); err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range []string{"alice", "bob"} {
+		if err := fsq.EnsureAgentDirs(projASession, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Project B: slug "proj-beta"
+	projBDir := filepath.Join(workspace, "proj-beta")
+	projBBaseRoot := filepath.Join(projBDir, ".agent-mail")
+	projBSession := filepath.Join(projBBaseRoot, "collab")
+	if err := os.MkdirAll(projBDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projBDir, ".amqrc"),
+		[]byte(`{"root":".agent-mail","project":"proj-beta"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureRootDirs(projBSession); err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range []string{"charlie", "dave"} {
+		if err := fsq.EnsureAgentDirs(projBSession, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	return workspace, projADir, projASession, projBDir, projBSession
+}
+
+func TestFederation_CrossProjectOriginFromDiscovery(t *testing.T) {
+	// Test that Origin.Project is populated from discovery even when
+	// AM_PROJECT is NOT set (the primary bug this fix addresses).
+	_, projADir, projASession, _, projBSession := setupCrossProjectEnv(t)
+
+	// Critical: AM_PROJECT is empty. The code should discover "proj-alpha"
+	// from the .amqrc in projADir.
+	t.Setenv("AM_PROJECT", "")
+	t.Setenv("AM_ROOT", projASession)
+	t.Setenv("AM_BASE_ROOT", filepath.Dir(projASession))
+
+	// Chdir to projADir so DiscoverProject finds the .amqrc.
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(projADir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	// Reset the cached .amqrc so it picks up the test's .amqrc.
+	resetAmqrcCache()
+
+	// Alice in proj-alpha sends to charlie in proj-beta using cross-project address.
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runSend([]string{
+		"--me", "alice",
+		"--root", projASession,
+		"--to", "charlie@proj-beta:collab",
+		"--subject", "Cross-project test",
+		"--body", "Hello from proj-alpha!",
+		"--thread", "test/cross-proj",
+		"--json",
+	})
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("runSend (cross-project): %v", err)
+	}
+
+	// Parse JSON output.
+	var buf [8192]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("parse output: %v\nraw: %s", err, output)
+	}
+
+	if result["scope"] != "cross-project" {
+		t.Errorf("expected scope=cross-project, got %v", result["scope"])
+	}
+
+	// Verify message arrived in proj-beta's charlie inbox.
+	charlieInbox := fsq.AgentInboxNew(projBSession, "charlie")
+	entries, err := os.ReadDir(charlieInbox)
+	if err != nil {
+		t.Fatalf("read charlie inbox: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 message in charlie inbox, got %d", len(entries))
+	}
+
+	// Parse the delivered message and verify Origin.Project was populated from discovery.
+	msgPath := filepath.Join(charlieInbox, entries[0].Name())
+	msg, err := format.ReadMessageFile(msgPath)
+	if err != nil {
+		t.Fatalf("read delivered message: %v", err)
+	}
+
+	if msg.Header.Origin == nil {
+		t.Fatal("expected Origin to be populated")
+	}
+	if msg.Header.Origin.Agent != "alice" {
+		t.Errorf("expected origin.agent=alice, got %s", msg.Header.Origin.Agent)
+	}
+	if msg.Header.Origin.Session != "collab" {
+		t.Errorf("expected origin.session=collab, got %s", msg.Header.Origin.Session)
+	}
+	// This is the key assertion: project should be populated from discovery,
+	// NOT from AM_PROJECT (which is empty).
+	if msg.Header.Origin.Project != "proj-alpha" {
+		t.Errorf("expected origin.project=proj-alpha (from discovery), got %q", msg.Header.Origin.Project)
+	}
+	// reply_to should include the project qualifier.
+	expectedReplyTo := "alice@proj-alpha:collab"
+	if msg.Header.Origin.ReplyTo != expectedReplyTo {
+		t.Errorf("expected origin.reply_to=%q, got %q", expectedReplyTo, msg.Header.Origin.ReplyTo)
+	}
+}
+
+func TestFederation_AnnounceStampsOriginDelivery(t *testing.T) {
+	// Verify that announce stamps Origin and Delivery on messages and uses
+	// DeliverToExistingInbox for foreign targets.
+	baseRoot, sessionA, sessionB := setupFederationEnv(t)
+
+	t.Setenv("AM_ROOT", sessionA)
+	t.Setenv("AM_BASE_ROOT", baseRoot)
+	t.Setenv("AM_PROJECT", "")
+
+	// Create a project directory with .amqrc pointing to our test base root,
+	// then chdir into it so announce's DiscoverProject finds the right base.
+	projDir := filepath.Join(t.TempDir(), "testproj")
+	if err := os.MkdirAll(projDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	amqrc := map[string]string{"root": baseRoot}
+	amqrcData, _ := json.Marshal(amqrc)
+	if err := os.WriteFile(filepath.Join(projDir, ".amqrc"), amqrcData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(projDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+	resetAmqrcCache()
+
+	// Subscribe alice@alpha and charlie@beta to channel "updates"
+	// by writing agent.json files.
+	aliceAgentJSON := filepath.Join(sessionA, "agents", "alice", "agent.json")
+	if err := metadata.WriteAgentMeta(aliceAgentJSON, metadata.AgentMeta{
+		Agent:    "alice",
+		Channels: []string{"updates"},
+	}); err != nil {
+		t.Fatalf("write alice agent.json: %v", err)
+	}
+	charlieAgentJSON := filepath.Join(sessionB, "agents", "charlie", "agent.json")
+	if err := metadata.WriteAgentMeta(charlieAgentJSON, metadata.AgentMeta{
+		Agent:    "charlie",
+		Channels: []string{"updates"},
+	}); err != nil {
+		t.Fatalf("write charlie agent.json: %v", err)
+	}
+
+	// Bob in session alpha announces to #updates.
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runAnnounce([]string{
+		"--me", "bob",
+		"--root", sessionA,
+		"--channel", "updates",
+		"--subject", "Announce test",
+		"--body", "Hello channel!",
+		"--json",
+	})
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("runAnnounce: %v", err)
+	}
+
+	// Parse JSON output.
+	var buf [16384]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("parse output: %v\nraw: %s", err, output)
+	}
+
+	// Verify delivery count.
+	deliveredCount, _ := result["delivered"].(float64)
+	if deliveredCount < 1 {
+		t.Fatalf("expected at least 1 delivery, got %v", deliveredCount)
+	}
+
+	// Verify scope is present.
+	if _, hasScope := result["scope"]; !hasScope {
+		t.Errorf("announce JSON output missing 'scope' field")
+	}
+
+	// Verify message delivered to alice@alpha has Origin and Delivery.
+	aliceInbox := fsq.AgentInboxNew(sessionA, "alice")
+	entries, err := os.ReadDir(aliceInbox)
+	if err != nil {
+		t.Fatalf("read alice inbox: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 message in alice@alpha inbox, got %d", len(entries))
+	}
+
+	msgPath := filepath.Join(aliceInbox, entries[0].Name())
+	msg, err := format.ReadMessageFile(msgPath)
+	if err != nil {
+		t.Fatalf("read alice message: %v", err)
+	}
+
+	// Verify Origin is stamped.
+	if msg.Header.Origin == nil {
+		t.Fatal("expected Origin on announce message")
+	}
+	if msg.Header.Origin.Agent != "bob" {
+		t.Errorf("expected origin.agent=bob, got %s", msg.Header.Origin.Agent)
+	}
+	if msg.Header.Origin.Session != "alpha" {
+		t.Errorf("expected origin.session=alpha, got %s", msg.Header.Origin.Session)
+	}
+
+	// Verify Delivery is stamped.
+	if msg.Header.Delivery == nil {
+		t.Fatal("expected Delivery on announce message")
+	}
+	if msg.Header.Delivery.Channel != "#updates" {
+		t.Errorf("expected delivery.channel=#updates, got %s", msg.Header.Delivery.Channel)
+	}
+	if len(msg.Header.Delivery.RequestedTo) != 1 || msg.Header.Delivery.RequestedTo[0] != "#updates" {
+		t.Errorf("expected delivery.requested_to=[#updates], got %v", msg.Header.Delivery.RequestedTo)
+	}
+	if msg.Header.Delivery.FanoutIndex < 1 {
+		t.Errorf("expected delivery.fanout_index >= 1, got %d", msg.Header.Delivery.FanoutIndex)
+	}
+	if msg.Header.Delivery.FanoutTotal < 1 {
+		t.Errorf("expected delivery.fanout_total >= 1, got %d", msg.Header.Delivery.FanoutTotal)
+	}
+
+	// If charlie@beta received the message, verify DeliverToExistingInbox was
+	// used (the message should be present since the inbox already exists, but
+	// no new directories should have been created in sessionB that weren't
+	// already there from setupFederationEnv).
+	charlieInbox := fsq.AgentInboxNew(sessionB, "charlie")
+	charlieEntries, err := os.ReadDir(charlieInbox)
+	if err != nil {
+		t.Fatalf("read charlie inbox: %v", err)
+	}
+	if len(charlieEntries) == 1 {
+		cMsgPath := filepath.Join(charlieInbox, charlieEntries[0].Name())
+		cMsg, err := format.ReadMessageFile(cMsgPath)
+		if err != nil {
+			t.Fatalf("read charlie message: %v", err)
+		}
+		if cMsg.Header.Origin == nil {
+			t.Error("expected Origin on announce message to charlie@beta")
+		}
+		if cMsg.Header.Delivery == nil {
+			t.Error("expected Delivery on announce message to charlie@beta")
+		}
+		if cMsg.Header.Delivery != nil && cMsg.Header.Delivery.Scope == "" {
+			t.Error("expected delivery.scope to be set")
+		}
+	}
+}
+
+func TestFederation_AnnounceRejectsNonExistentForeignInbox(t *testing.T) {
+	// Verify that announce uses DeliverToExistingInbox for foreign targets,
+	// which means it does NOT create mailboxes that don't exist.
+	baseRoot := t.TempDir()
+	sessionA := filepath.Join(baseRoot, "alpha")
+	sessionB := filepath.Join(baseRoot, "beta")
+
+	// Only set up sessionA fully.
+	if err := fsq.EnsureRootDirs(sessionA); err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range []string{"alice", "bob"} {
+		if err := fsq.EnsureAgentDirs(sessionA, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Set up sessionB with root dirs and charlie's inbox directory (enough for
+	// the resolver to discover charlie), but NOT the inbox subdirectories
+	// (tmp/new) so DeliverToExistingInbox will fail.
+	if err := fsq.EnsureRootDirs(sessionB); err != nil {
+		t.Fatal(err)
+	}
+	// Create charlie's inbox directory (for resolver discovery) but NOT tmp/new.
+	charlieInboxDir := filepath.Join(sessionB, "agents", "charlie", "inbox")
+	if err := os.MkdirAll(charlieInboxDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("AM_ROOT", sessionA)
+	t.Setenv("AM_BASE_ROOT", baseRoot)
+	t.Setenv("AM_PROJECT", "")
+
+	// Create a project directory with .amqrc pointing to our test base root,
+	// then chdir so announce's DiscoverProject uses the correct base root.
+	projDir := filepath.Join(t.TempDir(), "testproj")
+	if err := os.MkdirAll(projDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	amqrc := map[string]string{"root": baseRoot}
+	amqrcData, _ := json.Marshal(amqrc)
+	if err := os.WriteFile(filepath.Join(projDir, ".amqrc"), amqrcData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(projDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+	resetAmqrcCache()
+
+	// Subscribe alice and bob to "builds" in sessionA, and charlie in sessionB.
+	for _, agent := range []string{"alice", "bob"} {
+		metaPath := filepath.Join(sessionA, "agents", agent, "agent.json")
+		if err := metadata.WriteAgentMeta(metaPath, metadata.AgentMeta{
+			Agent:    agent,
+			Channels: []string{"builds"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	charlieMetaPath := filepath.Join(sessionB, "agents", "charlie", "agent.json")
+	if err := metadata.WriteAgentMeta(charlieMetaPath, metadata.AgentMeta{
+		Agent:    "charlie",
+		Channels: []string{"builds"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bob announces to #builds - alice should get it, charlie should fail
+	// (inbox/tmp and inbox/new don't exist in sessionB).
+	oldStdout := os.Stdout
+	_, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runAnnounce([]string{
+		"--me", "bob",
+		"--root", sessionA,
+		"--channel", "builds",
+		"--body", "Build complete",
+		"--json",
+	})
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	// The announce should succeed (partial delivery is OK).
+	if err != nil {
+		t.Fatalf("runAnnounce: %v", err)
+	}
+
+	// Verify alice got the message.
+	aliceInbox := fsq.AgentInboxNew(sessionA, "alice")
+	entries, err := os.ReadDir(aliceInbox)
+	if err != nil {
+		t.Fatalf("read alice inbox: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("expected 1 message in alice inbox, got %d", len(entries))
+	}
+
+	// Verify charlie's inbox was NOT created.
+	charlieInboxNew := filepath.Join(sessionB, "agents", "charlie", "inbox", "new")
+	if _, err := os.Stat(charlieInboxNew); err == nil {
+		t.Errorf("DeliverToExistingInbox should NOT have created charlie's inbox/new directory")
 	}
 }
 
