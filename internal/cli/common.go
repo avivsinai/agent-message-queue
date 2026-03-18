@@ -414,24 +414,50 @@ func parseFlags(fs *flag.FlagSet, args []string, usage func()) (bool, error) {
 		if errors.Is(err, flag.ErrHelp) {
 			return true, nil
 		}
-		return false, err
+		return false, UsageError("%v", err)
 	}
 	return false, nil
 }
 
 func usageWithFlags(fs *flag.FlagSet, usage string, notes ...string) func() {
 	return func() {
-		_ = writeStdoutLine("Usage:")
-		_ = writeStdoutLine("  " + usage)
-		if len(notes) > 0 {
-			_ = writeStdoutLine("")
-			for _, note := range notes {
-				_ = writeStdoutLine(note)
-			}
+		writeUsageTo(os.Stdout, fs, usage, notes...)
+	}
+}
+
+// writeUsageTo renders usage text to the given writer.
+func writeUsageTo(w io.Writer, fs *flag.FlagSet, usage string, notes ...string) {
+	_, _ = fmt.Fprintln(w, "Usage:")
+	_, _ = fmt.Fprintln(w, "  "+usage)
+	if len(notes) > 0 {
+		_, _ = fmt.Fprintln(w)
+		for _, note := range notes {
+			_, _ = fmt.Fprintln(w, note)
 		}
-		_ = writeStdoutLine("")
-		_ = writeStdoutLine("Options:")
-		_ = writeFlagDefaults(fs)
+	}
+	_, _ = fmt.Fprintln(w)
+	// Only print Options header if there are visible flags.
+	if hasFlagDefaults(fs) {
+		_, _ = fmt.Fprintln(w, "Options:")
+		writeFlagDefaultsTo(w, fs)
+	}
+}
+
+func hasFlagDefaults(fs *flag.FlagSet) bool {
+	var buf bytes.Buffer
+	fs.SetOutput(&buf)
+	fs.PrintDefaults()
+	fs.SetOutput(io.Discard)
+	return buf.Len() > 0
+}
+
+func writeFlagDefaultsTo(w io.Writer, fs *flag.FlagSet) {
+	var buf bytes.Buffer
+	fs.SetOutput(&buf)
+	fs.PrintDefaults()
+	fs.SetOutput(io.Discard)
+	if buf.Len() > 0 {
+		_, _ = fmt.Fprint(w, buf.String())
 	}
 }
 

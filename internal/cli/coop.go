@@ -32,7 +32,7 @@ func runCoop(args []string) error {
 	case "exec":
 		return runCoopExec(args[1:])
 	default:
-		return fmt.Errorf("unknown coop subcommand: %s\nRun 'amq coop --help' for usage", args[0])
+		return formatUnknownSubcommand("coop", args[0])
 	}
 }
 

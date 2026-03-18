@@ -26,7 +26,7 @@ func runDLQ(args []string) error {
 	case "purge":
 		return runDLQPurge(args[1:])
 	default:
-		return fmt.Errorf("unknown dlq subcommand: %s", args[0])
+		return formatUnknownSubcommand("dlq", args[0])
 	}
 }
 
@@ -34,14 +34,13 @@ func printDLQUsage() error {
 	lines := []string{
 		"amq dlq - dead letter queue management",
 		"",
-		"Usage:",
-		"  amq dlq <command> [options]",
-		"",
-		"Commands:",
+		"Subcommands:",
 		"  list   List dead-lettered messages",
 		"  read   Read a DLQ message with failure info",
 		"  retry  Retry a DLQ message (move back to inbox)",
 		"  purge  Permanently remove DLQ messages",
+		"",
+		"Run 'amq dlq <subcommand> --help' for details.",
 	}
 	for _, line := range lines {
 		if err := writeStdoutLine(line); err != nil {

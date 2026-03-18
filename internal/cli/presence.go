@@ -2,7 +2,6 @@ package cli
 
 import (
 	"flag"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,8 +14,7 @@ import (
 
 func runPresence(args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
-		printPresenceUsage()
-		return nil
+		return printPresenceUsage()
 	}
 	switch args[0] {
 	case "set":
@@ -24,7 +22,7 @@ func runPresence(args []string) error {
 	case "list":
 		return runPresenceList(args[1:])
 	default:
-		return fmt.Errorf("unknown presence command: %s", args[0])
+		return formatUnknownSubcommand("presence", args[0])
 	}
 }
 
@@ -140,10 +138,20 @@ func runPresenceList(args []string) error {
 	return nil
 }
 
-func printPresenceUsage() {
-	_ = writeStdoutLine("amq presence <command> [options]")
-	_ = writeStdoutLine("")
-	_ = writeStdoutLine("Commands:")
-	_ = writeStdoutLine("  set   Update presence")
-	_ = writeStdoutLine("  list  List presence")
+func printPresenceUsage() error {
+	lines := []string{
+		"amq presence - agent presence management",
+		"",
+		"Subcommands:",
+		"  set   Update agent presence status",
+		"  list  List all agent presence",
+		"",
+		"Run 'amq presence <subcommand> --help' for details.",
+	}
+	for _, line := range lines {
+		if err := writeStdoutLine(line); err != nil {
+			return err
+		}
+	}
+	return nil
 }
