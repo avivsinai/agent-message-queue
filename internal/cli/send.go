@@ -73,7 +73,7 @@ func runSend(args []string) error {
 		targetSession = normalized
 
 		// Resolve the target session root from the base root.
-		baseRoot := resolveBaseRootForSend(root)
+		baseRoot := resolveBaseRootForSend(root, targetSession)
 		deliveryRoot = filepath.Join(baseRoot, targetSession)
 
 		// Verify the target session exists (never auto-create foreign mailboxes).
@@ -232,23 +232,29 @@ func runSend(args []string) error {
 }
 
 // resolveBaseRootForSend derives the base root (parent of sessions) from the
-// current root. It checks AM_BASE_ROOT first, then tries two heuristics:
-// 1. If root itself contains session-like subdirs (agents/ dirs), root IS a session → parent is base
-// 2. Otherwise, root might BE the base root → use it directly
-func resolveBaseRootForSend(root string) string {
+// current root. It checks AM_BASE_ROOT first, then tries both interpretations:
+// root-as-base and root-as-session. The caller provides the target session name
+// to disambiguate — if the session exists as a child of root, root is the base.
+// If it exists as a sibling (child of parent), root is a session.
+func resolveBaseRootForSend(root, targetSession string) string {
 	// Check env var first (set by coop exec).
 	if base := strings.TrimSpace(os.Getenv(envBaseRoot)); base != "" {
 		return base
 	}
 
-	// Heuristic: if root has an "agents/" dir, it's a session root.
-	// The base root is its parent.
-	if dirExists(filepath.Join(root, "agents")) {
-		return filepath.Dir(root)
+	// Try root as the base root: does <root>/<session>/agents/ exist?
+	if targetSession != "" && dirExists(filepath.Join(root, targetSession, "agents")) {
+		return root
 	}
 
-	// Otherwise root might be the base root itself.
-	return root
+	// Try root as a session root: does <parent>/<session>/agents/ exist?
+	parent := filepath.Dir(root)
+	if targetSession != "" && dirExists(filepath.Join(parent, targetSession, "agents")) {
+		return parent
+	}
+
+	// Fallback: assume root is a session root, parent is base.
+	return parent
 }
 
 func canonicalP2P(a, b string) string {

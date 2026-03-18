@@ -28,7 +28,7 @@ func runWho(args []string) error {
 	root := resolveRoot(common.Root)
 
 	// Determine base root (parent of sessions).
-	baseRoot := resolveBaseRootForSend(root)
+	baseRoot := resolveBaseRootForSend(root, "")
 
 	// Enumerate sessions by scanning subdirectories.
 	entries, err := os.ReadDir(baseRoot)

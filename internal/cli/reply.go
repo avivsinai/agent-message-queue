@@ -105,7 +105,7 @@ func runReply(args []string) error {
 			}
 			recipient = recipientNorm
 			targetSession = sessionNorm
-			baseRoot := resolveBaseRootForSend(root)
+			baseRoot := resolveBaseRootForSend(root, sessionNorm)
 			deliveryRoot = filepath.Join(baseRoot, targetSession)
 			if !dirExists(deliveryRoot) {
 				return fmt.Errorf("reply_to session %q not found at %s", targetSession, deliveryRoot)
