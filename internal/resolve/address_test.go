@@ -143,6 +143,7 @@ func TestEndpoint_String(t *testing.T) {
 		{"claude@infra-lib:auth", "claude@infra-lib:auth"},
 		{"#events", "#events"},
 		{"#all@infra-lib", "#all@infra-lib"},
+		{"#session/auth", "#session/auth"},
 	}
 	for _, c := range cases {
 		ep, err := ParseAddress(c.input)

@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// nameRe matches valid session and agent names: lowercase letters, digits, underscore, hyphen.
+var nameRe = regexp.MustCompile(`^[a-z0-9_-]+$`)
 
 // skipDirs are directories never scanned during discovery.
 var skipDirs = map[string]bool{
@@ -107,6 +111,10 @@ func discoverSessions(baseRoot string) ([]Session, error) {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), "_") || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
+		// Skip entries with invalid names (e.g., path traversal, uppercase, spaces).
+		if !nameRe.MatchString(e.Name()) {
+			continue
+		}
 		sessDir := filepath.Join(baseRoot, e.Name())
 		agentsDir := filepath.Join(sessDir, "agents")
 		if _, err := os.Stat(agentsDir); err != nil {
@@ -130,6 +138,10 @@ func discoverAgents(agentsDir string) ([]string, error) {
 	var agents []string
 	for _, e := range entries {
 		if !e.IsDir() {
+			continue
+		}
+		// Skip entries with invalid names (e.g., path traversal, uppercase, spaces).
+		if !nameRe.MatchString(e.Name()) {
 			continue
 		}
 		// Verify inbox exists

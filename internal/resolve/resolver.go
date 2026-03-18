@@ -5,11 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"syscall"
 
 	"github.com/avivsinai/agent-message-queue/internal/discover"
 	"github.com/avivsinai/agent-message-queue/internal/metadata"
 )
+
+// nameRe matches valid session and agent names.
+var nameRe = regexp.MustCompile(`^[a-z0-9_-]+$`)
 
 // Target represents a resolved delivery target.
 type Target struct {
@@ -391,6 +395,10 @@ func scanSessionsRaw(baseRoot string) ([]discover.Session, error) {
 		if !e.IsDir() {
 			continue
 		}
+		// Skip entries with invalid names to prevent path traversal.
+		if !nameRe.MatchString(e.Name()) {
+			continue
+		}
 		agentsDir := filepath.Join(baseRoot, e.Name(), "agents")
 		agentEntries, err := os.ReadDir(agentsDir)
 		if err != nil {
@@ -398,7 +406,7 @@ func scanSessionsRaw(baseRoot string) ([]discover.Session, error) {
 		}
 		var agents []string
 		for _, ae := range agentEntries {
-			if ae.IsDir() {
+			if ae.IsDir() && nameRe.MatchString(ae.Name()) {
 				agents = append(agents, ae.Name())
 			}
 		}

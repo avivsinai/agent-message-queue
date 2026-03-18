@@ -3,9 +3,7 @@ package cli
 import (
 	"flag"
 	"os"
-	"path/filepath"
 
-	"github.com/avivsinai/agent-message-queue/internal/discover"
 	"github.com/avivsinai/agent-message-queue/internal/resolve"
 )
 
@@ -82,17 +80,9 @@ func runResolve(args []string) error {
 		IsCrossS: ep.IsCrossSession(),
 	}
 
-	// Build resolver context
-	baseRoot := filepath.Dir(root) // session root's parent is usually the base root
-	projectDir := ""
-	cwd, cwdErr := os.Getwd()
-	if cwdErr == nil {
-		proj, projErr := discover.DiscoverProject(cwd)
-		if projErr == nil {
-			baseRoot = proj.BaseRoot
-			projectDir = proj.Dir
-		}
-	}
+	// Build resolver context using the same resolution helpers as send.go.
+	baseRoot := resolveBaseRootForFederation(root)
+	projectDir := resolveProjectDir()
 
 	resolver := resolve.NewResolver(root, baseRoot, projectDir)
 

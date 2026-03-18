@@ -269,22 +269,30 @@ func runSendFederated(common *commonFlags, root, rawTo, subject, thread,
 	}
 	scope := computeDeliveryScope(root, justTargets)
 
-	// Build the To header: bare agent handles of resolved targets.
-	toHandles := make([]string, 0, len(allTargets))
+	// Build the To header using qualified resolved addresses (not bare handles),
+	// because multiple distinct qualified targets may share the same bare handle
+	// (e.g., codex@auth and codex@collab both have agent="codex"). Deduplication
+	// is by target path and already handled by the resolver; we do not re-deduplicate
+	// by bare handle here.
 	resolvedToAddrs := make([]string, 0, len(allTargets))
+	toQualified := make([]string, 0, len(allTargets))
 	for _, rt := range allTargets {
-		toHandles = append(toHandles, rt.target.Agent)
-		resolvedToAddrs = append(resolvedToAddrs, formatResolvedTarget(rt.target))
+		addr := formatResolvedTarget(rt.target)
+		resolvedToAddrs = append(resolvedToAddrs, addr)
+		toQualified = append(toQualified, addr)
 	}
-	toHandles = dedupeStrings(toHandles)
 
 	// Determine thread ID.
 	threadID := strings.TrimSpace(thread)
 	if threadID == "" {
-		if len(toHandles) == 1 {
-			threadID = canonicalP2P(me, toHandles[0])
+		if len(allTargets) == 1 {
+			// P2P: use canonical form with the bare agent handle.
+			threadID = canonicalP2P(me, allTargets[0].target.Agent)
 		} else {
-			return UsageError("--thread is required when sending to multiple recipients")
+			// Multi-target: generate a federation/<msg-id> thread since bare handle
+			// deduplication is not safe across sessions/projects.
+			// We need the message ID first; generate it below and back-fill.
+			threadID = "" // will be set after id is generated
 		}
 	}
 
@@ -292,6 +300,11 @@ func runSendFederated(common *commonFlags, root, rawTo, subject, thread,
 	id, err := format.NewMessageID(now)
 	if err != nil {
 		return err
+	}
+
+	// Back-fill thread ID for multi-target sends where no --thread was given.
+	if threadID == "" {
+		threadID = "federation/" + id
 	}
 
 	// Build origin: identifies where this message came from.
@@ -316,7 +329,7 @@ func runSendFederated(common *commonFlags, root, rawTo, subject, thread,
 			Schema:      format.CurrentSchema,
 			ID:          id,
 			From:        me,
-			To:          toHandles,
+			To:          toQualified,
 			Thread:      threadID,
 			Subject:     strings.TrimSpace(subject),
 			Created:     now.UTC().Format(time.RFC3339Nano),
@@ -373,6 +386,10 @@ func runSendFederated(common *commonFlags, root, rawTo, subject, thread,
 		outboxErr = err
 	}
 
+	// Aggregate errors and determine exit condition BEFORE emitting any output.
+	allFailed := len(delivered) == 0 && len(deliveryErrors) > 0
+	partialFailed := len(deliveryErrors) > 0 && !allFailed
+
 	session := sessionName(root)
 	if common.JSON {
 		result := map[string]any{
@@ -395,7 +412,16 @@ func runSendFederated(common *commonFlags, root, rawTo, subject, thread,
 		if len(deliveryErrors) > 0 {
 			result["errors"] = deliveryErrors
 		}
-		return writeJSON(os.Stdout, result)
+		if err := writeJSON(os.Stdout, result); err != nil {
+			return err
+		}
+		if allFailed {
+			return fmt.Errorf("all deliveries failed")
+		}
+		if partialFailed {
+			return &ExitCodeError{Code: 1, Err: fmt.Errorf("%d of %d deliveries failed", len(deliveryErrors), len(allTargets))}
+		}
+		return nil
 	}
 
 	if outboxErr != nil {
@@ -405,14 +431,14 @@ func runSendFederated(common *commonFlags, root, rawTo, subject, thread,
 		_ = writeStderr("warning: delivery failed: %s\n", e)
 	}
 
-	if len(delivered) == 0 && len(deliveryErrors) > 0 {
+	if allFailed {
 		return fmt.Errorf("all deliveries failed")
 	}
 
 	_ = writeStdout("Sent %s to %s (session: %s, scope: %s)\n",
 		id, strings.Join(delivered, ","), session, scope)
 
-	if len(deliveryErrors) > 0 {
+	if partialFailed {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("%d of %d deliveries failed", len(deliveryErrors), len(allTargets))}
 	}
 	return nil
@@ -434,8 +460,37 @@ func resolveBaseRootForFederation(sessionRoot string) string {
 }
 
 // resolveProjectDir returns the current project directory for federation.
-// It checks AM_PROJECT env to find the project, then falls back to cwd.
+// It walks up from the resolved AMQ root to find the directory containing
+// .amqrc, then returns that directory. Falls back to cwd if no .amqrc found.
 func resolveProjectDir() string {
+	// Walk up from AM_BASE_ROOT (or derive from AM_ROOT) to find .amqrc.
+	startDir := strings.TrimSpace(os.Getenv(envBaseRoot))
+	if startDir == "" {
+		startDir = strings.TrimSpace(os.Getenv(envRoot))
+	}
+	if startDir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		startDir = cwd
+	}
+
+	// Walk up the directory tree looking for .amqrc.
+	dir := startDir
+	for {
+		rcPath := filepath.Join(dir, ".amqrc")
+		if _, err := os.Stat(rcPath); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	// No .amqrc found: fall back to cwd.
 	cwd, err := os.Getwd()
 	if err != nil {
 		return ""

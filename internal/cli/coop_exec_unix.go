@@ -309,11 +309,28 @@ func writeSessionMetadata(sessionRoot, session, topic, claimCSV string) {
 }
 
 // writeAgentMetadata writes agent.json to the agent's directory.
+// If --channel was provided, the new channel list is used (declarative override).
+// If --channel was not provided, any existing channels in agent.json are preserved.
 // Best-effort: failures are logged as warnings but do not abort exec.
 func writeAgentMetadata(root, agent, channelCSV string) {
+	path := fsq.AgentJSON(root, agent)
+
+	// Read existing metadata to preserve channels when --channel is not set.
+	existing, err := metadata.ReadAgentMeta(path)
+	if err != nil {
+		// File doesn't exist or is unreadable — start fresh.
+		existing = metadata.AgentMeta{
+			Agent: agent,
+		}
+	}
+
 	var channels []string
 	if channelCSV != "" {
+		// --channel was provided: use the new value (declarative override).
 		channels = splitList(channelCSV)
+	} else {
+		// --channel was not provided: preserve existing channels.
+		channels = existing.Channels
 	}
 
 	am := metadata.AgentMeta{
@@ -322,7 +339,6 @@ func writeAgentMetadata(root, agent, channelCSV string) {
 		Channels: channels,
 	}
 
-	path := fsq.AgentJSON(root, agent)
 	if err := metadata.WriteAgentMeta(path, am); err != nil {
 		_ = writeStderr("warning: failed to write agent.json: %v\n", err)
 	}

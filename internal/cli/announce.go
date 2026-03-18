@@ -4,11 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/discover"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/resolve"
@@ -80,17 +78,10 @@ func runAnnounce(args []string) error {
 		return err
 	}
 
-	// Build resolver to resolve the channel address
-	baseRoot := filepath.Dir(root)
-	projectDir := ""
-	cwd, cwdErr := os.Getwd()
-	if cwdErr == nil {
-		proj, projErr := discover.DiscoverProject(cwd)
-		if projErr == nil {
-			baseRoot = proj.BaseRoot
-			projectDir = proj.Dir
-		}
-	}
+	// Build resolver to resolve the channel address.
+	// Use the same resolution helpers as send.go to respect AM_BASE_ROOT.
+	baseRoot := resolveBaseRootForFederation(root)
+	projectDir := resolveProjectDir()
 
 	resolver := resolve.NewResolver(root, baseRoot, projectDir)
 
@@ -206,6 +197,9 @@ func runAnnounce(args []string) error {
 		outboxErr = err
 	}
 
+	// Aggregate errors and determine exit condition BEFORE emitting any output.
+	allFailed := deliveredCount == 0 && len(targets) > 0
+
 	if common.JSON {
 		result := map[string]any{
 			"id":         id,
@@ -220,7 +214,13 @@ func runAnnounce(args []string) error {
 				"error":   errString(outboxErr),
 			},
 		}
-		return writeJSON(os.Stdout, result)
+		if err := writeJSON(os.Stdout, result); err != nil {
+			return err
+		}
+		if allFailed {
+			return fmt.Errorf("all deliveries failed")
+		}
+		return nil
 	}
 
 	if outboxErr != nil {
@@ -239,7 +239,7 @@ func runAnnounce(args []string) error {
 		}
 	}
 
-	if deliveredCount == 0 && len(targets) > 0 {
+	if allFailed {
 		return fmt.Errorf("all deliveries failed")
 	}
 	return nil

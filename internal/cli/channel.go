@@ -66,6 +66,10 @@ func runChannelJoin(args []string) error {
 	if channelName == "" {
 		return UsageError("channel name cannot be empty")
 	}
+	// "session" and "all" are reserved by the federation resolver for special fanout semantics.
+	if channelName == "session" || channelName == "all" {
+		return UsageError("channel name %q is reserved; use a different name", channelName)
+	}
 
 	root := resolveRoot(common.Root)
 	agentJSONPath := fsq.AgentJSON(root, me)

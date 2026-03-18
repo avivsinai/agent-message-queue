@@ -45,27 +45,39 @@ func runWho(args []string) error {
 
 	root := resolveRoot(common.Root)
 
-	// Find the base root by looking for .amqrc
-	baseRoot := root
-	cwd, err := os.Getwd()
-	if err == nil {
-		proj, projErr := discover.DiscoverProject(cwd)
-		if projErr == nil {
-			baseRoot = proj.BaseRoot
+	// Find the base root with the following precedence:
+	// 1. AM_BASE_ROOT env var (set by coop exec)
+	// 2. .amqrc discovery from cwd
+	// 3. Heuristic: walk up from root if it looks like a session dir
+	var baseRoot string
+	if envBase := strings.TrimSpace(os.Getenv(envBaseRoot)); envBase != "" {
+		baseRoot = envBase
+	}
+
+	if baseRoot == "" {
+		cwd, err := os.Getwd()
+		if err == nil {
+			proj, projErr := discover.DiscoverProject(cwd)
+			if projErr == nil {
+				baseRoot = proj.BaseRoot
+			}
 		}
 	}
 
-	// If root looks like a session dir (has agents/ subdir), try going up one level
-	if dirExists(filepath.Join(root, "agents")) {
-		parentCandidate := filepath.Dir(root)
-		if parentCandidate != root {
-			// Check if the parent has multiple session dirs
-			entries, err := os.ReadDir(parentCandidate)
-			if err == nil {
-				for _, e := range entries {
-					if e.IsDir() && dirExists(filepath.Join(parentCandidate, e.Name(), "agents")) {
-						baseRoot = parentCandidate
-						break
+	if baseRoot == "" {
+		baseRoot = root
+		// If root looks like a session dir (has agents/ subdir), try going up one level.
+		if dirExists(filepath.Join(root, "agents")) {
+			parentCandidate := filepath.Dir(root)
+			if parentCandidate != root {
+				// Check if the parent has multiple session dirs
+				entries, err := os.ReadDir(parentCandidate)
+				if err == nil {
+					for _, e := range entries {
+						if e.IsDir() && dirExists(filepath.Join(parentCandidate, e.Name(), "agents")) {
+							baseRoot = parentCandidate
+							break
+						}
 					}
 				}
 			}

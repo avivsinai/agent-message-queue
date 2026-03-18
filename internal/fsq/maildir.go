@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -107,6 +108,22 @@ func cleanupStagedTmp(stages []stagedDelivery, primary error) error {
 // for cross-session and cross-project (federated) delivery where the sender
 // must not auto-create mailboxes in foreign session roots.
 func DeliverToExistingInbox(sessionRoot, agent, filename string, data []byte) (string, error) {
+	// Validate agent handle to prevent path traversal.
+	if err := ValidateHandle(agent); err != nil {
+		return "", fmt.Errorf("federated delivery: invalid agent handle: %w", err)
+	}
+
+	// Validate filename: must be a clean basename, no path separators, no .., not empty.
+	if filename == "" {
+		return "", fmt.Errorf("federated delivery: filename is empty")
+	}
+	if strings.Contains(filename, "/") || strings.Contains(filename, string(filepath.Separator)) || strings.Contains(filename, "..") {
+		return "", fmt.Errorf("federated delivery: filename contains path traversal: %q", filename)
+	}
+	if filepath.Base(filename) != filename {
+		return "", fmt.Errorf("federated delivery: filename is not a clean basename: %q", filename)
+	}
+
 	tmpDir := AgentInboxTmp(sessionRoot, agent)
 	newDir := AgentInboxNew(sessionRoot, agent)
 
