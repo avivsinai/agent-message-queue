@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 1.6.0
+version: 1.7.0
 description: >-
   Coordinate agents via the AMQ CLI for file-based inter-agent messaging.
   Use when you need to send messages to another agent (Claude/Codex),
@@ -138,6 +138,53 @@ amq list --new --label bug
 | `todo` | — | normal |
 | `status` | — | low |
 | `brainstorm` | — | low |
+
+## Federation (Cross-Session & Cross-Project)
+
+Federation enables messaging across session and project boundaries using qualified addresses.
+
+### Qualified Addresses
+
+```bash
+amq send --to codex@auth --body "..."              # Agent in another session
+amq send --to claude@infra-lib:collab --body "..."  # Agent in another project
+amq send --to '#session/auth' --body "..."          # All agents in a session
+amq announce --channel events --body "..."          # Channel broadcast
+```
+
+| Address | Meaning |
+|---|---|
+| `codex` | Local agent (current session) |
+| `codex@auth` | Agent in session "auth" |
+| `claude@infra-lib:collab` | Agent in project "infra-lib", session "collab" |
+| `#events` | Channel "events" (all subscribed agents) |
+| `#all@infra-lib` | All agents in project "infra-lib" |
+
+### Federation Commands
+
+```bash
+amq discover                    # Find sibling AMQ projects
+amq who                         # List sessions, agents, channels
+amq resolve codex@auth          # Debug address resolution
+amq channel join --name events  # Subscribe to a channel
+amq channel list                # List subscriptions
+amq announce --channel events --body "CI green"  # Broadcast
+```
+
+### Metadata (coop exec flags)
+
+```bash
+amq coop exec --topic "Auth rewrite" --claim "internal/auth/" --channel ci claude
+```
+
+Writes `session.json` (topic, branch, claims) and `agent.json` (channels, last_seen) for federation discovery.
+
+### Key Notes
+
+- Replies to federated messages auto-route via `Origin.ReplyTo` in the message header.
+- Channel membership is advisory (for fan-out discovery), not authorization.
+- Cross-project delivery requires same-user ownership (UID check).
+- Schema 2 messages include `origin` and `delivery` objects; schema 1 is still fully supported.
 
 ## References
 

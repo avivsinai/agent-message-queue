@@ -78,6 +78,36 @@ Leader prepares commit -> user approves -> push
 - `amq send --to <partner>` — send work/findings to partner
 - `amq reply --id <msg_id>` — reply in thread
 
+## Cross-Session & Cross-Project Messaging
+
+When running multiple sessions on the same project, agents can communicate across session boundaries:
+
+```bash
+# Send to an agent in another session
+amq send --to codex@auth --body "Auth middleware ready"
+
+# Broadcast to a channel (all subscribed agents across sessions)
+amq announce --channel ci --kind status --body "CI green on main"
+
+# See who is working where
+amq who
+```
+
+Use `--topic` and `--claim` flags on `coop exec` to declare what each session is working on:
+```bash
+amq coop exec --session auth --topic "Auth rewrite" --claim "internal/auth/" claude
+```
+
+Channel membership is advisory metadata for fan-out discovery, not authorization. Join channels with:
+```bash
+amq channel join --name ci
+```
+
+For cross-project messaging (sibling projects on disk), use project-qualified addresses:
+```bash
+amq send --to claude@infra-lib:collab --body "Need updated types"
+```
+
 ## Spec Workflow
 
 The spec workflow is a skill-managed protocol that uses standard AMQ kinds plus labels (`workflow:spec`, `phase:*`) on thread `spec/<topic>`.

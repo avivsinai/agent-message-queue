@@ -69,6 +69,77 @@ amq coop exec --session api codex                 # Terminal 4
 Each pair has isolated inboxes and threads. Messages stay within their root.
 Equivalent explicit root form: `--root .agent-mail/<session>`.
 
+### Cross-Session Communication (Federation)
+
+Isolated sessions can now communicate with each other. Agents in one session can send messages to agents in another session within the same project using qualified addresses.
+
+**Cross-session messaging:**
+```bash
+# From the auth session, send to an agent in the api session
+amq send --to codex@api --body "Auth middleware ready for integration"
+
+# From the api session, reply goes back automatically via Origin.ReplyTo
+amq reply --id <msg_id> --body "Integrated, tests passing"
+```
+
+**See who is working where:**
+```bash
+amq who                     # List all sessions, agents, topics, and claims
+```
+
+Example output:
+```
+Session: auth  (Auth rewrite)
+  Branch: feature/auth
+  Claims: internal/auth/, internal/middleware/
+  claude        active  2026-03-18T10:05:00Z
+  codex         active  2026-03-18T10:03:00Z
+
+Session: api  (API refactor)
+  Branch: feature/api
+  claude        active  2026-03-18T10:04:00Z
+  codex         stale   2026-03-18T09:30:00Z
+```
+
+**Channel-based coordination:**
+
+Channels enable broadcast messaging across sessions. Use cases include merge announcements, CI status, and coordination signals.
+
+```bash
+# Subscribe agents to channels (via coop exec flags)
+amq coop exec --session auth --channel ci,merge-notify claude
+amq coop exec --session api --channel ci,merge-notify codex
+
+# Or join a channel at runtime
+amq channel join --name ci
+
+# Announce to all subscribed agents across all sessions
+amq announce --channel ci --kind status --body "CI green on main"
+amq announce --channel merge-notify --kind status --body "PR #42 merged, rebase needed"
+```
+
+**Session metadata (--topic, --claim):**
+
+`coop exec` now writes session.json with optional topic and claims, making it easy to understand what each session is working on:
+
+```bash
+amq coop exec --session auth --topic "Auth rewrite" --claim "internal/auth/,internal/middleware/" claude
+```
+
+**Cross-project coordination:**
+
+When multiple projects are siblings on disk (e.g., `~/projects/my-api/` and `~/projects/infra-lib/`), agents can send messages across project boundaries:
+
+```bash
+# Discover other AMQ projects
+amq discover
+
+# Send to an agent in another project
+amq send --to claude@infra-lib:collab --body "Need updated API types"
+```
+
+Cross-project delivery requires same-user ownership on both project directories. Use `amq resolve <address>` to debug routing.
+
 ### For Scripts/CI
 
 When you can't use `exec` (non-interactive environments):
@@ -205,6 +276,7 @@ amq reply --id "msg_123" --kind review_response --body "LGTM with minor suggesti
 
 ## Message Format
 
+Local messages (schema 1, still supported):
 ```json
 {
   "schema": 1,
@@ -216,6 +288,30 @@ amq reply --id "msg_123" --kind review_response --body "LGTM with minor suggesti
   "kind": "review_request",
   "labels": ["parser"],
   "context": {"paths": ["internal/cli/drain.go"], "focus": "sorting"}
+}
+```
+
+Federated messages (schema 2, includes origin and delivery):
+```json
+{
+  "schema": 2,
+  "from": "codex",
+  "to": ["claude"],
+  "thread": "p2p/claude__codex",
+  "subject": "Auth integration ready",
+  "priority": "normal",
+  "kind": "status",
+  "origin": {
+    "project": "my-api",
+    "session": "auth",
+    "agent": "codex",
+    "reply_to": "codex@my-api:auth"
+  },
+  "delivery": {
+    "requested_to": ["claude@api"],
+    "resolved_to": ["claude@api"],
+    "scope": "cross-session"
+  }
 }
 ```
 
