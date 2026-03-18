@@ -290,4 +290,3 @@ func childNames(cmd *CommandInfo) []string {
 	}
 	return names
 }
-

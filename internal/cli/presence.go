@@ -137,4 +137,3 @@ func runPresenceList(args []string) error {
 	}
 	return nil
 }
-
