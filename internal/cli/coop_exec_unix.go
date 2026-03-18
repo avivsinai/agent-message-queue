@@ -163,7 +163,8 @@ func runCoopExec(args []string) error {
 	}
 
 	// Compute base root (before session suffix) for AM_BASE_ROOT.
-	baseRoot := root
+	// Assigned in the session-defaulting branches below.
+	var baseRoot string
 
 	// Default to --session collab when neither --session nor --root was specified.
 	// This runs after auto-init so .amqrc exists and resolveBaseRoot() works.

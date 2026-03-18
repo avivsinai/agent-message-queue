@@ -58,7 +58,9 @@ func TestAgentMeta_TouchLastSeen(t *testing.T) {
 	path := filepath.Join(dir, "agent.json")
 
 	a := AgentMeta{Schema: 1, Agent: "claude", LastSeen: time.Now().Add(-time.Hour).UTC()}
-	WriteAgentMeta(path, a)
+	if err := WriteAgentMeta(path, a); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := TouchLastSeen(path); err != nil {
 		t.Fatal(err)
