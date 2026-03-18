@@ -195,10 +195,15 @@ func runCoopExec(args []string) error {
 		}
 	}
 
-	// Build environment with AM_ROOT and AM_ME.
+	// Derive base root for AM_BASE_ROOT (parent of the session directory).
+	baseRoot := filepath.Dir(root)
+
+	// Build environment with AM_ROOT, AM_ME, and AM_BASE_ROOT.
 	// AM_ROOT always points to the session queue root (base/session), never the base.
+	// AM_BASE_ROOT points to the base root (parent of sessions) for cross-session resolution.
 	env := setEnvVar(os.Environ(), envRoot, root)
 	env = setEnvVar(env, envMe, agentHandle)
+	env = setEnvVar(env, envBaseRoot, baseRoot)
 
 	// Build argv: command name + agent args.
 	argv := append([]string{cmdName}, agentArgs...)

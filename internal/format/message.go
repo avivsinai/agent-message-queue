@@ -71,6 +71,10 @@ type Header struct {
 	Kind     string         `json:"kind,omitempty"`     // message kind (see ValidKinds())
 	Labels   []string       `json:"labels,omitempty"`   // free-form tags
 	Context  map[string]any `json:"context,omitempty"`  // structured context (paths, symbols, etc.)
+
+	// Cross-session reply routing (optional). Set automatically when sending
+	// via --session. Allows replies to route back to the sender's session.
+	ReplyTo string `json:"reply_to,omitempty"` // e.g., "claude@auth"
 }
 
 // Message is the in-memory representation of a message file.

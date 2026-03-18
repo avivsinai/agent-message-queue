@@ -2,7 +2,9 @@ package cli
 
 import (
 	"flag"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,7 +17,7 @@ func runSend(args []string) error {
 	common := addCommonFlags(fs)
 	toFlag := fs.String("to", "", "Receiver handle (comma-separated)")
 	subjectFlag := fs.String("subject", "", "Message subject")
-	threadFlag := fs.String("thread", "", "Thread id (optional; default p2p/<a>__<b>)")
+	threadFlag := fs.String("thread", "", "Thread id (required for cross-session sends; default p2p/<a>__<b> for local)")
 	bodyFlag := fs.String("body", "", "Body string, @file, or empty to read stdin")
 	ackFlag := fs.Bool("ack", false, "Request ack")
 	refsFlag := fs.String("refs", "", "Comma-separated related message ids")
@@ -26,7 +28,14 @@ func runSend(args []string) error {
 	labelsFlag := fs.String("labels", "", "Comma-separated labels/tags")
 	contextFlag := fs.String("context", "", "JSON context object or @file.json")
 
-	usage := usageWithFlags(fs, "amq send --me <agent> --to <recipients> [options]")
+	// Cross-session flag
+	sessionFlag := fs.String("session", "", "Target session (delivers to a different session's inbox)")
+
+	usage := usageWithFlags(fs, "amq send --me <agent> --to <recipients> [--session <name>] [options]",
+		"",
+		"Cross-session example:",
+		"  amq send --to codex --session auth --thread xsession/auth-review --body \"...\"",
+	)
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -53,10 +62,52 @@ func runSend(args []string) error {
 	}
 	recipients = dedupeStrings(recipients)
 
-	// Validate handles against config.json
-	allHandles := append([]string{me}, recipients...)
-	if err := validateKnownHandles(root, common.Strict, allHandles...); err != nil {
-		return err
+	// Determine delivery root: current session or a target session.
+	deliveryRoot := root
+	targetSession := strings.TrimSpace(*sessionFlag)
+	if targetSession != "" {
+		normalized, err := normalizeHandle(targetSession)
+		if err != nil {
+			return UsageError("--session: %v", err)
+		}
+		targetSession = normalized
+
+		// Cross-session requires AM_BASE_ROOT to be set (by coop exec) or
+		// the root must be a session root (has a parent with sibling sessions).
+		// This eliminates the base-root ambiguity: --session only works from
+		// a session context, never from the base root directly.
+		baseRoot := classifyRoot(root)
+		if baseRoot == "" {
+			return fmt.Errorf("--session requires a session context: run from inside 'amq coop exec --session <name>'")
+		}
+
+		deliveryRoot = filepath.Join(baseRoot, targetSession)
+
+		// Verify the target session and agent inboxes exist.
+		if !dirExists(deliveryRoot) {
+			return fmt.Errorf("session %q not found at %s", targetSession, deliveryRoot)
+		}
+		for _, r := range recipients {
+			inbox := filepath.Join(deliveryRoot, "agents", r, "inbox")
+			if !dirExists(inbox) {
+				return fmt.Errorf("agent %q not found in session %q", r, targetSession)
+			}
+		}
+	}
+
+	// Fix 5: Validate sender in source root, recipients in target root. Always.
+	if targetSession != "" {
+		if err := validateKnownHandles(root, common.Strict, me); err != nil {
+			return err
+		}
+		if err := validateKnownHandles(deliveryRoot, common.Strict, recipients...); err != nil {
+			return err
+		}
+	} else {
+		allHandles := append([]string{me}, recipients...)
+		if err := validateKnownHandles(root, common.Strict, allHandles...); err != nil {
+			return err
+		}
 	}
 
 	body, err := readBody(*bodyFlag)
@@ -73,7 +124,6 @@ func runSend(args []string) error {
 	if !format.IsValidKind(kind) {
 		return UsageError("--kind must be one of: %s", format.ValidKindsList())
 	}
-	// Default priority to "normal" if kind is set but priority is not
 	if kind != "" && priority == "" {
 		priority = format.PriorityNormal
 	}
@@ -89,10 +139,18 @@ func runSend(args []string) error {
 		}
 	}
 
+	// Thread ID: auto-generated for P2P, session-qualified for cross-session.
 	threadID := strings.TrimSpace(*threadFlag)
 	if threadID == "" {
 		if len(recipients) == 1 {
-			threadID = canonicalP2P(common.Me, recipients[0])
+			if targetSession != "" {
+				// Cross-session: include session names to avoid collisions.
+				// p2p/auth:claude__api:codex is unique across sessions.
+				senderSession := sessionName(root)
+				threadID = "p2p/" + senderSession + ":" + common.Me + "__" + targetSession + ":" + recipients[0]
+			} else {
+				threadID = canonicalP2P(common.Me, recipients[0])
+			}
 		} else {
 			return UsageError("--thread is required when sending to multiple recipients")
 		}
@@ -102,6 +160,13 @@ func runSend(args []string) error {
 	id, err := format.NewMessageID(now)
 	if err != nil {
 		return err
+	}
+
+	// Build reply_to for cross-session sends.
+	// Since --session requires a session context, sessionName(root) is always valid here.
+	replyTo := ""
+	if targetSession != "" {
+		replyTo = common.Me + "@" + sessionName(root)
 	}
 
 	msg := format.Message{
@@ -119,6 +184,7 @@ func runSend(args []string) error {
 			Kind:        kind,
 			Labels:      labels,
 			Context:     context,
+			ReplyTo:     replyTo,
 		},
 		Body: body,
 	}
@@ -129,12 +195,11 @@ func runSend(args []string) error {
 	}
 
 	filename := id + ".md"
-	// Deliver to each recipient.
-	if _, err := fsq.DeliverToInboxes(root, recipients, filename, data); err != nil {
+	if _, err := fsq.DeliverToInboxes(deliveryRoot, recipients, filename, data); err != nil {
 		return err
 	}
 
-	// Copy to sender outbox/sent for audit.
+	// Copy to sender outbox/sent for audit (always in sender's root).
 	outboxDir := fsq.AgentOutboxSent(root, common.Me)
 	outboxErr := error(nil)
 	if _, err := fsq.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
@@ -142,29 +207,67 @@ func runSend(args []string) error {
 	}
 
 	session := sessionName(root)
+	targetDisplay := session
+	if targetSession != "" {
+		targetDisplay = targetSession
+	}
 	if common.JSON {
-		return writeJSON(os.Stdout, map[string]any{
+		out := map[string]any{
 			"id":      id,
 			"thread":  threadID,
 			"to":      recipients,
 			"subject": msg.Header.Subject,
-			"session": session,
-			"root":    root,
+			"session": targetDisplay,
+			"root":    deliveryRoot,
 			"outbox": map[string]any{
 				"written": outboxErr == nil,
 				"error":   errString(outboxErr),
 			},
-		})
+		}
+		if targetSession != "" {
+			out["cross_session"] = true
+			out["source_session"] = session
+			out["target_session"] = targetSession
+		}
+		return writeJSON(os.Stdout, out)
 	}
 	if outboxErr != nil {
 		if err := writeStderr("warning: outbox write failed: %v\n", outboxErr); err != nil {
 			return err
 		}
 	}
-	if err := writeStdout("Sent %s to %s (session: %s, root: %s)\n", id, strings.Join(recipients, ","), session, root); err != nil {
+	if err := writeStdout("Sent %s to %s (session: %s, root: %s)\n", id, strings.Join(recipients, ","), targetDisplay, deliveryRoot); err != nil {
 		return err
 	}
 	return nil
+}
+
+// classifyRoot returns the base root for the given root, or "" if it cannot
+// be determined. This is the single authoritative function for root classification.
+//
+// Resolution order:
+//  1. AM_BASE_ROOT env var (set by coop exec — always authoritative)
+//  2. If root is a session root (parent contains sibling session dirs), return parent
+//  3. Otherwise, return "" (unknown — caller must handle)
+func classifyRoot(root string) string {
+	if base := strings.TrimSpace(os.Getenv(envBaseRoot)); base != "" {
+		return base
+	}
+	// Check if root looks like a session: parent has sibling dirs with agents/.
+	parent := filepath.Dir(root)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == filepath.Base(root) {
+			continue
+		}
+		if dirExists(filepath.Join(parent, e.Name(), "agents")) {
+			return parent // Found a sibling session — root is a session, parent is base.
+		}
+	}
+	return ""
 }
 
 func canonicalP2P(a, b string) string {

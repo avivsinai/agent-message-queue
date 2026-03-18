@@ -3,8 +3,9 @@ package cli
 import "fmt"
 
 const (
-	envRoot = "AM_ROOT"
-	envMe   = "AM_ME"
+	envRoot     = "AM_ROOT"
+	envMe       = "AM_ME"
+	envBaseRoot = "AM_BASE_ROOT"
 )
 
 func Run(args []string, version string) error {
@@ -54,6 +55,8 @@ func Run(args []string, version string) error {
 		return runCoop(args[1:])
 	case "swarm":
 		return runSwarm(args[1:])
+	case "who":
+		return runWho(args[1:])
 	case "doctor":
 		return runDoctor(args[1:])
 	case "shell-setup":
@@ -134,6 +137,9 @@ func printUsage() error {
 		return err
 	}
 	if err := writeStdoutLine("  swarm     Claude Code Agent Teams integration (join, tasks, bridge)"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  who       Show sessions and agents in current project"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine("  doctor    Verify installation and configuration"); err != nil {
