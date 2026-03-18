@@ -27,12 +27,12 @@ func runWho(args []string) error {
 	}
 	root := resolveRoot(common.Root)
 
-	// Determine base root (parent of sessions).
-	// Check env var first, then try root itself (does it contain session dirs?),
-	// then fall back to parent of root.
-	baseRoot := strings.TrimSpace(os.Getenv(envBaseRoot))
+	// Determine base root using the centralized classifier.
+	// Falls back to checking if root itself contains session subdirs.
+	baseRoot := classifyRoot(root)
 	if baseRoot == "" {
-		// Check if root contains session-like subdirs (dirs that contain agents/).
+		// classifyRoot couldn't determine from env or sibling sessions.
+		// Check if root IS the base root (contains session subdirs).
 		if hasSessionSubdirs(root) {
 			baseRoot = root
 		} else {

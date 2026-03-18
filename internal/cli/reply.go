@@ -28,7 +28,9 @@ func runReply(args []string) error {
 
 	usage := usageWithFlags(fs, "amq reply --me <agent> --id <msg_id> [options]",
 		"Reply to a message with automatic thread/refs handling.",
-		"Finds the original message, sets to/thread/refs automatically.")
+		"Finds the original message, sets to/thread/refs automatically.",
+		"Cross-session replies are routed via reply_to header.",
+		"To follow up on a sent cross-session message, use amq send --session instead.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -78,46 +80,57 @@ func runReply(args []string) error {
 		return err
 	}
 
-	// Read the body for the reply
+	// Fix 3: Disallow reply on sent cross-session messages.
+	// If the message was found in outbox/sent and has a reply_to, the user
+	// is trying to follow up on their own cross-session send. This is
+	// under-specified (no target-session metadata in outbox copy).
+	// Use "amq send --session" for follow-ups instead.
+	originalBox := filepath.Base(filepath.Dir(originalPath))
+	if originalBox == "sent" && originalMsg.Header.ReplyTo != "" {
+		return fmt.Errorf("cannot reply to a sent cross-session message (reply_to points back to you); use amq send --session for follow-ups")
+	}
+
 	body, err := readBody(*bodyFlag)
 	if err != nil {
 		return err
 	}
 
 	// Determine recipient and delivery root.
-	// If the original message has reply_to (cross-session), parse it to get
-	// the target session. Otherwise, reply locally to the sender.
 	var recipient string
 	var deliveryRoot string
 	var targetSession string
 
 	if originalMsg.Header.ReplyTo != "" {
-		// Cross-session reply: parse "agent@session" from reply_to.
+		// Fix 2: Strict reply_to parsing. Must be exactly "handle@session".
+		// No fallback to local on malformed values — present means parse-or-error.
 		parts := strings.SplitN(originalMsg.Header.ReplyTo, "@", 2)
-		if len(parts) == 2 {
-			recipientNorm, err := normalizeHandle(parts[0])
-			if err != nil {
-				return fmt.Errorf("invalid handle in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
-			}
-			sessionNorm, err := normalizeHandle(parts[1])
-			if err != nil {
-				return fmt.Errorf("invalid session in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
-			}
-			recipient = recipientNorm
-			targetSession = sessionNorm
-			baseRoot := resolveBaseRootForSend(root, sessionNorm)
-			deliveryRoot = filepath.Join(baseRoot, targetSession)
-			if !dirExists(deliveryRoot) {
-				return fmt.Errorf("reply_to session %q not found at %s", targetSession, deliveryRoot)
-			}
-		} else {
-			// Malformed reply_to (no @), validate and fall back to local.
-			recipientNorm, err := normalizeHandle(parts[0])
-			if err != nil {
-				return fmt.Errorf("invalid handle in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
-			}
-			recipient = recipientNorm
-			deliveryRoot = root
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("malformed reply_to %q: expected handle@session", originalMsg.Header.ReplyTo)
+		}
+		recipientNorm, err := normalizeHandle(parts[0])
+		if err != nil {
+			return fmt.Errorf("invalid handle in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
+		}
+		sessionNorm, err := normalizeHandle(parts[1])
+		if err != nil {
+			return fmt.Errorf("invalid session in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
+		}
+		recipient = recipientNorm
+		targetSession = sessionNorm
+
+		// Use classifyRoot for consistent root resolution.
+		baseRoot := classifyRoot(root)
+		if baseRoot == "" {
+			return fmt.Errorf("cannot route cross-session reply: unable to determine base root (set AM_BASE_ROOT or run from a coop exec session)")
+		}
+		deliveryRoot = filepath.Join(baseRoot, targetSession)
+		if !dirExists(deliveryRoot) {
+			return fmt.Errorf("reply_to session %q not found at %s", targetSession, deliveryRoot)
+		}
+		// Verify recipient inbox exists in target session.
+		inbox := filepath.Join(deliveryRoot, "agents", recipient, "inbox")
+		if !dirExists(inbox) {
+			return fmt.Errorf("agent %q not found in session %q", recipient, targetSession)
 		}
 	} else {
 		// Local reply: send to original sender in current session.
@@ -139,16 +152,14 @@ func runReply(args []string) error {
 		recipient = recipientNorm
 		deliveryRoot = root
 
-		// Verify the recipient's inbox exists locally. This prevents reply
-		// from silently creating mailboxes for agents that aren't in this
-		// session (e.g., when the original sender was at the base root).
+		// Verify the recipient's inbox exists locally.
 		inbox := filepath.Join(deliveryRoot, "agents", recipient, "inbox")
 		if !dirExists(inbox) {
 			return fmt.Errorf("agent %q not found in current session (no reply_to in original message — sender may not be in a session)", recipient)
 		}
 	}
 
-	// Validate handles exist in config (if strict mode)
+	// Validate recipient in delivery root.
 	if err := validateKnownHandles(deliveryRoot, common.Strict, recipient); err != nil {
 		return err
 	}
@@ -168,23 +179,19 @@ func runReply(args []string) error {
 
 	// Determine kind for reply
 	if kind == "" {
-		// Auto-set kind based on original
 		switch originalMsg.Header.Kind {
 		case format.KindReviewRequest:
 			kind = format.KindReviewResponse
 		case format.KindQuestion:
 			kind = format.KindAnswer
 		default:
-			kind = originalMsg.Header.Kind // Keep same kind
+			kind = originalMsg.Header.Kind
 		}
 	}
-
-	// Default priority to normal if kind is set
 	if kind != "" && priority == "" {
 		priority = format.PriorityNormal
 	}
 
-	// Create the reply message
 	now := time.Now()
 	id, err := format.NewMessageID(now)
 	if err != nil {
@@ -201,21 +208,17 @@ func runReply(args []string) error {
 			Subject:     subject,
 			Created:     now.UTC().Format(time.RFC3339Nano),
 			AckRequired: *ackFlag,
-			// Refs grows with chain length (each reply appends the parent ID).
-			// This is acceptable for agent conversations which are short-lived.
-			Refs:     append(originalMsg.Header.Refs, originalMsg.Header.ID),
-			Priority: priority,
-			Kind:     kind,
-			Labels:   labels,
-			Context:  context,
-			// Stamp ReplyTo so the recipient can reply back to us.
-			// This keeps the conversation alive across session hops.
+			Refs:        append(originalMsg.Header.Refs, originalMsg.Header.ID),
+			Priority:    priority,
+			Kind:        kind,
+			Labels:      labels,
+			Context:     context,
+			// Restamp ReplyTo so the recipient can reply back.
 			ReplyTo: func() string {
 				if targetSession != "" {
-					// We're replying cross-session; tell them how to reach us.
 					return me + "@" + sessionName(root)
 				}
-				return "" // local reply, no ReplyTo needed
+				return ""
 			}(),
 		},
 		Body: body,
@@ -227,64 +230,68 @@ func runReply(args []string) error {
 	}
 
 	filename := id + ".md"
-
-	// Deliver to recipient (in delivery root, which may be a different session).
 	if _, err := fsq.DeliverToInboxes(deliveryRoot, []string{recipient}, filename, data); err != nil {
 		return err
 	}
 
-	// Copy to sender outbox/sent
 	outboxDir := fsq.AgentOutboxSent(root, me)
 	outboxErr := error(nil)
 	if _, err := fsq.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
 		outboxErr = err
 	}
 
+	// Fix 5: Report target session in reply output (consistent with send).
 	session := sessionName(root)
+	targetDisplay := session
+	if targetSession != "" {
+		targetDisplay = targetSession
+	}
 	if common.JSON {
-		return writeJSON(os.Stdout, map[string]any{
+		out := map[string]any{
 			"id":           id,
 			"thread":       msg.Header.Thread,
 			"to":           []string{recipient},
 			"subject":      subject,
-			"session":      session,
-			"root":         root,
+			"session":      targetDisplay,
+			"root":         deliveryRoot,
 			"in_reply_to":  originalMsg.Header.ID,
-			"original_box": filepath.Base(filepath.Dir(originalPath)),
+			"original_box": originalBox,
 			"outbox": map[string]any{
 				"written": outboxErr == nil,
 				"error":   errString(outboxErr),
 			},
-		})
+		}
+		if targetSession != "" {
+			out["cross_session"] = true
+			out["source_session"] = session
+			out["target_session"] = targetSession
+		}
+		return writeJSON(os.Stdout, out)
 	}
 
 	if outboxErr != nil {
 		_ = writeStderr("warning: outbox write failed: %v\n", outboxErr)
 	}
-	return writeStdout("Replied %s to %s (session: %s, root: %s)\n", id, recipient, session, root)
+	return writeStdout("Replied %s to %s (session: %s, root: %s)\n", id, recipient, targetDisplay, deliveryRoot)
 }
 
 // findMessage searches for a message by ID in the agent's inbox (new and cur).
 func findMessage(root, me, msgID string) (format.Message, string, error) {
-	// Normalize the message ID
 	filename, err := ensureFilename(msgID)
 	if err != nil {
 		return format.Message{}, "", err
 	}
 
-	// Try inbox/new first
 	newPath := filepath.Join(fsq.AgentInboxNew(root, me), filename)
 	if msg, err := format.ReadMessageFile(newPath); err == nil {
 		return msg, newPath, nil
 	}
 
-	// Try inbox/cur
 	curPath := filepath.Join(fsq.AgentInboxCur(root, me), filename)
 	if msg, err := format.ReadMessageFile(curPath); err == nil {
 		return msg, curPath, nil
 	}
 
-	// Try outbox/sent (for replying to our own messages)
 	sentPath := filepath.Join(fsq.AgentOutboxSent(root, me), filename)
 	if msg, err := format.ReadMessageFile(sentPath); err == nil {
 		return msg, sentPath, nil
