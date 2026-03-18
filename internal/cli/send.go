@@ -232,15 +232,23 @@ func runSend(args []string) error {
 }
 
 // resolveBaseRootForSend derives the base root (parent of sessions) from the
-// current session root. It checks AM_BASE_ROOT first, then walks up to find
-// the directory that contains sibling session directories.
-func resolveBaseRootForSend(sessionRoot string) string {
+// current root. It checks AM_BASE_ROOT first, then tries two heuristics:
+// 1. If root itself contains session-like subdirs (agents/ dirs), root IS a session → parent is base
+// 2. Otherwise, root might BE the base root → use it directly
+func resolveBaseRootForSend(root string) string {
 	// Check env var first (set by coop exec).
 	if base := strings.TrimSpace(os.Getenv(envBaseRoot)); base != "" {
 		return base
 	}
-	// Default: parent of session root (e.g., .agent-mail/collab -> .agent-mail).
-	return filepath.Dir(sessionRoot)
+
+	// Heuristic: if root has an "agents/" dir, it's a session root.
+	// The base root is its parent.
+	if dirExists(filepath.Join(root, "agents")) {
+		return filepath.Dir(root)
+	}
+
+	// Otherwise root might be the base root itself.
+	return root
 }
 
 func canonicalP2P(a, b string) string {

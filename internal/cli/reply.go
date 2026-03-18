@@ -111,8 +111,12 @@ func runReply(args []string) error {
 				return fmt.Errorf("reply_to session %q not found at %s", targetSession, deliveryRoot)
 			}
 		} else {
-			// Malformed reply_to, fall back to local.
-			recipient = parts[0]
+			// Malformed reply_to (no @), validate and fall back to local.
+			recipientNorm, err := normalizeHandle(parts[0])
+			if err != nil {
+				return fmt.Errorf("invalid handle in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
+			}
+			recipient = recipientNorm
 			deliveryRoot = root
 		}
 	} else {
@@ -196,6 +200,15 @@ func runReply(args []string) error {
 			Kind:     kind,
 			Labels:   labels,
 			Context:  context,
+			// Stamp ReplyTo so the recipient can reply back to us.
+			// This keeps the conversation alive across session hops.
+			ReplyTo: func() string {
+				if targetSession != "" {
+					// We're replying cross-session; tell them how to reach us.
+					return me + "@" + sessionName(root)
+				}
+				return "" // local reply, no ReplyTo needed
+			}(),
 		},
 		Body: body,
 	}
