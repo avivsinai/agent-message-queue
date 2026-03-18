@@ -138,6 +138,14 @@ func runReply(args []string) error {
 		}
 		recipient = recipientNorm
 		deliveryRoot = root
+
+		// Verify the recipient's inbox exists locally. This prevents reply
+		// from silently creating mailboxes for agents that aren't in this
+		// session (e.g., when the original sender was at the base root).
+		inbox := filepath.Join(deliveryRoot, "agents", recipient, "inbox")
+		if !dirExists(inbox) {
+			return fmt.Errorf("agent %q not found in current session (no reply_to in original message — sender may not be in a session)", recipient)
+		}
 	}
 
 	// Validate handles exist in config (if strict mode)
