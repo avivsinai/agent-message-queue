@@ -101,6 +101,47 @@ func cleanupStagedTmp(stages []stagedDelivery, primary error) error {
 	return fmt.Errorf("%w (cleanup: %v)", primary, cleanupErr)
 }
 
+// DeliverToExistingInbox writes a message to a pre-existing inbox using
+// Maildir semantics (tmp -> new). Unlike DeliverToInbox, it does NOT call
+// MkdirAll; the tmp and new directories must already exist. This is used
+// for cross-session and cross-project (federated) delivery where the sender
+// must not auto-create mailboxes in foreign session roots.
+func DeliverToExistingInbox(sessionRoot, agent, filename string, data []byte) (string, error) {
+	tmpDir := AgentInboxTmp(sessionRoot, agent)
+	newDir := AgentInboxNew(sessionRoot, agent)
+
+	// Verify directories exist (refuse to create them)
+	if _, err := os.Stat(tmpDir); err != nil {
+		return "", fmt.Errorf("federated delivery: inbox tmp dir missing for %s: %w", agent, err)
+	}
+	if _, err := os.Stat(newDir); err != nil {
+		return "", fmt.Errorf("federated delivery: inbox new dir missing for %s: %w", agent, err)
+	}
+
+	tmpPath := filepath.Join(tmpDir, filename)
+	newPath := filepath.Join(newDir, filename)
+
+	if err := writeAndSync(tmpPath, data, 0o600); err != nil {
+		return "", err
+	}
+	if err := SyncDir(tmpDir); err != nil {
+		return "", cleanupTemp(tmpPath, err)
+	}
+
+	if err := os.Rename(tmpPath, newPath); err != nil {
+		if errors.Is(err, syscall.EXDEV) {
+			err = fmt.Errorf("rename tmp->new for %s: different filesystems: %w", agent, err)
+		}
+		return "", cleanupTemp(tmpPath, err)
+	}
+	if err := SyncDir(newDir); err != nil {
+		return "", fmt.Errorf("sync new dir for %s: %w", agent, err)
+	}
+	_ = SyncDir(tmpDir) // best-effort
+
+	return newPath, nil
+}
+
 func rollbackDeliveries(committed, pending []stagedDelivery, primary error) error {
 	var cleanupErr error
 	for _, stage := range committed {
