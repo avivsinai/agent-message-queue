@@ -25,6 +25,10 @@ func Run(args []string, version string) error {
 	if args[0] == "upgrade" {
 		return runUpgrade(args[1:], version)
 	}
+	// completion has nil Handler in registry (init cycle), dispatch directly.
+	if args[0] == "completion" {
+		return runCompletion(args[1:])
+	}
 
 	cmd := findCommand(args[0])
 	if cmd == nil {
@@ -37,6 +41,14 @@ func Run(args []string, version string) error {
 func routeHelp(path []string) error {
 	if len(path) == 0 {
 		return printUsageRegistry()
+	}
+
+	// Special-case completion (nil Handler in registry due to init cycle).
+	if path[0] == "completion" {
+		if len(path) > 1 {
+			return UsageError("command %q has no subcommands. Run 'amq completion --help' for details", path[0])
+		}
+		return runCompletion([]string{"--help"})
 	}
 
 	// Special-case upgrade (needs version, not in standard dispatch).
