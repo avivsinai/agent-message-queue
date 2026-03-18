@@ -461,17 +461,6 @@ func writeFlagDefaultsTo(w io.Writer, fs *flag.FlagSet) {
 	}
 }
 
-func writeFlagDefaults(fs *flag.FlagSet) error {
-	var buf bytes.Buffer
-	fs.SetOutput(&buf)
-	fs.PrintDefaults()
-	fs.SetOutput(io.Discard)
-	if buf.Len() == 0 {
-		return nil
-	}
-	return writeStdout("%s", buf.String())
-}
-
 func confirmPrompt(prompt string) (bool, error) {
 	return doConfirmPrompt(prompt, false)
 }
