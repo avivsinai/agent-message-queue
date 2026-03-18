@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/avivsinai/agent-message-queue/internal/discover"
+	"github.com/avivsinai/agent-message-queue/internal/metadata"
 )
 
 // Target represents a resolved delivery target.
@@ -242,6 +243,9 @@ func (r *Resolver) expandChannel(sessions []discover.Session, ep Endpoint, proje
 	var targets []Target
 	seen := make(map[string]bool) // dedup by inbox path
 
+	// Custom channels (not "all", not "session") require agent.json membership check.
+	isCustomChannel := ep.Channel != "all" && ep.Channel != "session"
+
 	for _, sess := range sessions {
 		// #session/X: only agents in that session
 		if ep.Channel == "session" && ep.Session != "" {
@@ -254,6 +258,18 @@ func (r *Resolver) expandChannel(sessions []discover.Session, ep Endpoint, proje
 			inbox := filepath.Join(sess.Root, "agents", agent, "inbox")
 			if err := verifyMailbox(inbox); err != nil {
 				continue // skip agents without valid mailboxes
+			}
+
+			// For custom channels, check agent.json channel membership
+			if isCustomChannel {
+				agentJSONPath := filepath.Join(sess.Root, "agents", agent, "agent.json")
+				meta, err := metadata.ReadAgentMeta(agentJSONPath)
+				if err != nil {
+					continue // no agent.json or unreadable → not subscribed
+				}
+				if !hasChannel(meta.Channels, ep.Channel) {
+					continue // agent not subscribed to this channel
+				}
 			}
 
 			// Dedup by canonical inbox path to prevent double-delivery
@@ -281,12 +297,41 @@ func (r *Resolver) expandChannel(sessions []discover.Session, ep Endpoint, proje
 	return targets, nil
 }
 
+// hasChannel checks if a channel name is in the given list.
+func hasChannel(channels []string, name string) bool {
+	for _, ch := range channels {
+		if ch == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Resolver) findProject(slug string) (discover.Project, error) {
 	// Try discovery cache first
 	cachePath := discover.DefaultCachePath()
 	cache, _ := discover.LoadCache(cachePath)
-	if entry, ok := cache.FindBySlug(slug); ok && entry.Validate() {
-		proj, err := discover.DiscoverProject(entry.Dir)
+
+	// Check cache for duplicates before using cached result
+	cacheMatches := cache.FindAllBySlug(slug)
+	validCacheMatches := make([]discover.CacheEntry, 0, len(cacheMatches))
+	for _, e := range cacheMatches {
+		if e.Validate() {
+			validCacheMatches = append(validCacheMatches, e)
+		}
+	}
+	if len(validCacheMatches) > 1 {
+		paths := make([]string, len(validCacheMatches))
+		for i, e := range validCacheMatches {
+			paths[i] = e.Dir
+		}
+		return discover.Project{}, fmt.Errorf(
+			"ambiguous slug %q: multiple projects share this name (%v); use project_id in .amqrc to disambiguate",
+			slug, paths,
+		)
+	}
+	if len(validCacheMatches) == 1 {
+		proj, err := discover.DiscoverProject(validCacheMatches[0].Dir)
 		if err == nil {
 			return proj, nil
 		}
@@ -310,14 +355,29 @@ func (r *Resolver) findProject(slug string) (discover.Project, error) {
 	}
 	_ = discover.SaveCache(cachePath, cache)
 
-	// Find by slug
+	// Find by slug, detecting duplicates
+	var matches []discover.Project
 	for _, p := range projects {
 		if p.Slug == slug {
-			return p, nil
+			matches = append(matches, p)
 		}
 	}
 
-	return discover.Project{}, fmt.Errorf("not found")
+	switch len(matches) {
+	case 0:
+		return discover.Project{}, fmt.Errorf("not found")
+	case 1:
+		return matches[0], nil
+	default:
+		paths := make([]string, len(matches))
+		for i, m := range matches {
+			paths[i] = m.Dir
+		}
+		return discover.Project{}, fmt.Errorf(
+			"ambiguous slug %q: multiple projects share this name (%v); use project_id in .amqrc to disambiguate",
+			slug, paths,
+		)
+	}
 }
 
 // scanSessionsRaw scans a base root for sessions without loading a full project.

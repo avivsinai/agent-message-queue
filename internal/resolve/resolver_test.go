@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/metadata"
 )
 
 func setupTestProject(t *testing.T, base, name string, sessions map[string][]string) string {
@@ -547,5 +549,198 @@ func TestResolve_UnknownKind(t *testing.T) {
 	_, err := r.Resolve(Endpoint{Kind: "bogus"})
 	if err == nil {
 		t.Fatal("expected error for unknown endpoint kind")
+	}
+}
+
+// --- Fix 1: Duplicate project slugs must hard-error ---
+
+func TestFindProject_DuplicateSlugErrors(t *testing.T) {
+	// Two projects with the same slug under the same discovery root must cause
+	// a hard error instead of silently returning the first match.
+	base := t.TempDir()
+	setupTestProject(t, base, "infra-lib-1", map[string][]string{
+		"collab": {"claude"},
+	})
+	setupTestProject(t, base, "infra-lib-2", map[string][]string{
+		"collab": {"codex"},
+	})
+
+	// Override slugs so both projects have slug "infra-lib"
+	for _, dir := range []string{"infra-lib-1", "infra-lib-2"} {
+		rcPath := filepath.Join(base, dir, ".amqrc")
+		amqrc := map[string]string{"root": ".agent-mail", "project": "infra-lib"}
+		data, _ := json.Marshal(amqrc)
+		if err := os.WriteFile(rcPath, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := NewResolver(
+		filepath.Join(base, "infra-lib-1", ".agent-mail", "collab"),
+		filepath.Join(base, "infra-lib-1", ".agent-mail"),
+		filepath.Join(base, "infra-lib-1"),
+	)
+	r.DiscoveryRoots = []string{base}
+
+	_, err := r.Resolve(Endpoint{Kind: KindAgent, Agent: "codex", Project: "infra-lib"})
+	if err == nil {
+		t.Fatal("expected error for duplicate project slugs")
+	}
+	if !strings.Contains(err.Error(), "ambiguous slug") {
+		t.Errorf("error should mention ambiguous slug: %s", err)
+	}
+	if !strings.Contains(err.Error(), "infra-lib-1") || !strings.Contains(err.Error(), "infra-lib-2") {
+		t.Errorf("error should list both project paths: %s", err)
+	}
+}
+
+func TestFindProject_UniqueSlugResolves(t *testing.T) {
+	// A unique slug should resolve successfully.
+	base := t.TempDir()
+	setupTestProject(t, base, "my-app", map[string][]string{
+		"collab": {"claude"},
+	})
+	setupTestProject(t, base, "infra-lib", map[string][]string{
+		"collab": {"claude", "codex"},
+	})
+
+	r := NewResolver(
+		filepath.Join(base, "my-app", ".agent-mail", "collab"),
+		filepath.Join(base, "my-app", ".agent-mail"),
+		filepath.Join(base, "my-app"),
+	)
+	r.DiscoveryRoots = []string{base}
+
+	targets, err := r.Resolve(Endpoint{Kind: KindAgent, Agent: "codex", Project: "infra-lib"})
+	if err != nil {
+		t.Fatalf("unique slug should resolve: %v", err)
+	}
+	if len(targets) != 1 || targets[0].Agent != "codex" {
+		t.Fatalf("unexpected targets: %+v", targets)
+	}
+	if targets[0].Project != "infra-lib" {
+		t.Errorf("want project 'infra-lib', got %q", targets[0].Project)
+	}
+}
+
+// --- Fix 2: Custom channels must check agent.json membership ---
+
+// writeAgentMeta is a test helper that writes an agent.json file for an agent.
+func writeAgentMeta(t *testing.T, sessionRoot, agent string, channels []string) {
+	t.Helper()
+	agentDir := filepath.Join(sessionRoot, "agents", agent)
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	meta := metadata.AgentMeta{
+		Schema:   1,
+		Agent:    agent,
+		Channels: channels,
+	}
+	path := filepath.Join(agentDir, "agent.json")
+	if err := metadata.WriteAgentMeta(path, meta); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResolveChannel_CustomChannelFiltersByMembership(t *testing.T) {
+	// #events should only fan out to agents whose agent.json lists "events"
+	base := t.TempDir()
+	proj := setupTestProject(t, base, "my-app", map[string][]string{
+		"collab": {"alice", "bob", "charlie"},
+	})
+	sessRoot := filepath.Join(proj, ".agent-mail", "collab")
+
+	// alice subscribes to events, bob does not, charlie subscribes to events+triage
+	writeAgentMeta(t, sessRoot, "alice", []string{"events"})
+	writeAgentMeta(t, sessRoot, "bob", []string{"triage"})
+	writeAgentMeta(t, sessRoot, "charlie", []string{"events", "triage"})
+
+	r := NewResolver(sessRoot, filepath.Join(proj, ".agent-mail"), proj)
+	targets, err := r.Resolve(Endpoint{Kind: KindChannel, Channel: "events"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 2 {
+		t.Fatalf("want 2 targets for #events, got %d: %+v", len(targets), targets)
+	}
+	agents := map[string]bool{}
+	for _, tgt := range targets {
+		agents[tgt.Agent] = true
+	}
+	if !agents["alice"] || !agents["charlie"] {
+		t.Errorf("expected alice and charlie, got: %v", agents)
+	}
+	if agents["bob"] {
+		t.Errorf("bob should not be in #events (subscribed to triage only)")
+	}
+}
+
+func TestResolveChannel_CustomChannelExcludesNoAgentJSON(t *testing.T) {
+	// Agents without agent.json should be excluded from custom channel fan-out
+	base := t.TempDir()
+	proj := setupTestProject(t, base, "my-app", map[string][]string{
+		"collab": {"alice", "bob"},
+	})
+	sessRoot := filepath.Join(proj, ".agent-mail", "collab")
+
+	// Only alice has agent.json with "events"
+	writeAgentMeta(t, sessRoot, "alice", []string{"events"})
+	// bob has no agent.json at all
+
+	r := NewResolver(sessRoot, filepath.Join(proj, ".agent-mail"), proj)
+	targets, err := r.Resolve(Endpoint{Kind: KindChannel, Channel: "events"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target for #events, got %d: %+v", len(targets), targets)
+	}
+	if targets[0].Agent != "alice" {
+		t.Errorf("expected alice, got %q", targets[0].Agent)
+	}
+}
+
+func TestResolveChannel_AllIgnoresAgentJSON(t *testing.T) {
+	// #all should include ALL agents regardless of agent.json channel membership
+	base := t.TempDir()
+	proj := setupTestProject(t, base, "my-app", map[string][]string{
+		"collab": {"alice", "bob", "charlie"},
+	})
+	sessRoot := filepath.Join(proj, ".agent-mail", "collab")
+
+	// Only alice has agent.json
+	writeAgentMeta(t, sessRoot, "alice", []string{"events"})
+	// bob and charlie have no agent.json
+
+	r := NewResolver(sessRoot, filepath.Join(proj, ".agent-mail"), proj)
+	targets, err := r.Resolve(Endpoint{Kind: KindChannel, Channel: "all"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 3 {
+		t.Fatalf("want 3 targets for #all, got %d: %+v", len(targets), targets)
+	}
+}
+
+func TestResolveChannel_CustomChannelZeroSubscribers(t *testing.T) {
+	// Custom channel with no subscribers should return error
+	base := t.TempDir()
+	proj := setupTestProject(t, base, "my-app", map[string][]string{
+		"collab": {"alice", "bob"},
+	})
+	sessRoot := filepath.Join(proj, ".agent-mail", "collab")
+
+	// Neither subscribes to "alerts"
+	writeAgentMeta(t, sessRoot, "alice", []string{"events"})
+	writeAgentMeta(t, sessRoot, "bob", []string{"triage"})
+
+	r := NewResolver(sessRoot, filepath.Join(proj, ".agent-mail"), proj)
+	_, err := r.Resolve(Endpoint{Kind: KindChannel, Channel: "alerts"})
+	if err == nil {
+		t.Fatal("expected error for channel with zero subscribers")
+	}
+	if !strings.Contains(err.Error(), "zero targets") {
+		t.Errorf("error should mention zero targets: %s", err)
 	}
 }

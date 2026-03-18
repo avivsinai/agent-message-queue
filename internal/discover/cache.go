@@ -84,6 +84,17 @@ func (c Cache) FindBySlug(slug string) (CacheEntry, bool) {
 	return CacheEntry{}, false
 }
 
+// FindAllBySlug returns all cache entries matching the given slug.
+func (c Cache) FindAllBySlug(slug string) []CacheEntry {
+	var matches []CacheEntry
+	for _, e := range c.Entries {
+		if e.Slug == slug {
+			matches = append(matches, e)
+		}
+	}
+	return matches
+}
+
 // Update adds or refreshes a cache entry for a discovered project.
 func (c *Cache) Update(proj Project) {
 	data, _ := os.ReadFile(proj.AmqrcPath)
