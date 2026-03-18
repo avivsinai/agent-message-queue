@@ -5,6 +5,92 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-03-18
+
+### Added
+
+- Shell completions: `amq completion bash|zsh|fish` generates tab-completion scripts
+- Routed help: `amq help <command> [subcommand]` dispatches to command-specific help
+- Command registry: centralized command metadata drives help, routing, and completions
+
+### Fixed
+
+- `amq init` and `amq cleanup` now exit with code 2 (not 1) on missing required flags
+- Flag parse errors (`amq send --bogus`) now exit with code 2
+- Unknown command/subcommand errors include help hints consistently
+- `amq completion --help` shows usage instead of erroring
+- `amq env --help` no longer shows duplicate "Usage:" header
+
+### Changed
+
+- Top-level and subcommand group help auto-generated from registry (single source of truth)
+- Presence help enriched to match dlq/swarm/coop format
+- Empty "Options:" section suppressed when command has no flags
+
+## [0.22.0] - 2026-03-18
+
+### Added
+
+- Cross-session messaging via `amq send --session <name>` with reply routing between sessions
+- `amq who` command to list sessions and agents with active/stale presence status
+
+### Changed
+
+- Cross-session peer-to-peer threads are now session-qualified to avoid collisions
+- `coop exec` now sets `AM_BASE_ROOT` for cross-session resolution
+
+### Fixed
+
+- Tightened cross-session validation around `reply_to`, session context detection, and foreign inbox checks
+
+## [0.21.0] - 2026-03-11
+
+### Added
+
+- `amq swarm fail` and `amq swarm block` for richer task lifecycle tracking
+- `amq swarm complete --evidence <json|@file>` for attaching structured proof-of-work
+
+### Changed
+
+- Swarm tasks now support `failed` and `blocked` statuses in listings and bridge events
+
+### Fixed
+
+- Reclaiming failed or blocked tasks now clears stale failure, block, and evidence metadata
+
+## [0.20.0] - 2026-03-11
+
+### Added
+
+- `/amq-spec` slash command for the collaborative specification workflow
+
+### Changed
+
+- Moved the spec workflow out of the core CLI and into the `amq-spec` skill
+- Replaced spec-specific core message kinds with generic kinds plus labels
+
+### Fixed
+
+- Tightened spec workflow follow-ups and corrected `NEXT STEP` phase guidance
+- Enforced send-first-research-second and prevented partner implementation during spec review
+- Bumped Go to 1.25.8 for `govulncheck` advisories `GO-2026-4602` and `GO-2026-4601`
+
+## [0.19.0] - 2026-03-05
+
+### Added
+
+- `amq coop spec` collaborative specification workflow with guided `NEXT STEP` output
+
+### Changed
+
+- `coop exec` now defaults to `--session collab` when neither `--session` nor `--root` is provided
+- Message-routing commands now require an explicit AMQ root context instead of inferring one implicitly
+
+### Fixed
+
+- Suppressed duplicate update checks in the `coop exec` wake subprocess
+- Corrected `AM_ROOT` guidance in the AMQ skill for usage outside `coop exec`
+
 ## [0.18.0] - 2026-02-24
 
 ### Added
@@ -93,6 +179,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
+[0.22.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.20.0...v0.21.0
+[0.20.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.19.0...v0.20.0
+[0.19.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.16.0...v0.17.0
