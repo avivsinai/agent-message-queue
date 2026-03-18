@@ -61,6 +61,16 @@ func Run(args []string, version string) error {
 		return runDoctor(args[1:])
 	case "shell-setup":
 		return runShellSetup(args[1:])
+	case "discover":
+		return runDiscover(args[1:])
+	case "who":
+		return runWho(args[1:])
+	case "resolve":
+		return runResolve(args[1:])
+	case "channel":
+		return runChannel(args[1:])
+	case "announce":
+		return runAnnounce(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
@@ -143,6 +153,21 @@ func printUsage() error {
 		return err
 	}
 	if err := writeStdoutLine("  shell-setup  Output or install shell aliases (amc/amx)"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  discover  Scan for AMQ projects"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  who       Show presence across sessions"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  resolve   Debug: parse and resolve an address"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  channel   Manage channel memberships (join, leave, list)"); err != nil {
+		return err
+	}
+	if err := writeStdoutLine("  announce  Send to a channel (fan-out delivery)"); err != nil {
 		return err
 	}
 	if err := writeStdoutLine(""); err != nil {
