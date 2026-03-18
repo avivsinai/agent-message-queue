@@ -31,6 +31,7 @@ func TestCommandNames(t *testing.T) {
 		"who",
 		"doctor",
 		"shell-setup",
+		"completion",
 	}
 
 	if got := commandNames(); !reflect.DeepEqual(got, want) {
