@@ -14,7 +14,7 @@ import (
 
 func runDLQ(args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
-		return printDLQUsage()
+		return printGroupUsage(findCommand("dlq"))
 	}
 	switch args[0] {
 	case "list":
@@ -28,26 +28,6 @@ func runDLQ(args []string) error {
 	default:
 		return formatUnknownSubcommand("dlq", args[0])
 	}
-}
-
-func printDLQUsage() error {
-	lines := []string{
-		"amq dlq - dead letter queue management",
-		"",
-		"Subcommands:",
-		"  list   List dead-lettered messages",
-		"  read   Read a DLQ message with failure info",
-		"  retry  Retry a DLQ message (move back to inbox)",
-		"  purge  Permanently remove DLQ messages",
-		"",
-		"Run 'amq dlq <subcommand> --help' for details.",
-	}
-	for _, line := range lines {
-		if err := writeStdoutLine(line); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // dlqListItem represents a DLQ message for listing.

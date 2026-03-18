@@ -23,7 +23,7 @@ const (
 
 func runCoop(args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
-		return printCoopUsage()
+		return printGroupUsage(findCommand("coop"))
 	}
 
 	switch args[0] {
@@ -34,33 +34,6 @@ func runCoop(args []string) error {
 	default:
 		return formatUnknownSubcommand("coop", args[0])
 	}
-}
-
-func printCoopUsage() error {
-	lines := []string{
-		"amq coop - co-op mode for multi-agent collaboration",
-		"",
-		"Subcommands:",
-		"  init   Initialize project for co-op mode (creates .amqrc and mailboxes)",
-		"  exec   Initialize, set env, start wake, and exec into agent (replaces process)",
-		"",
-		"Quick start:",
-		"  amq coop exec claude                              # Start Claude Code (session=collab)",
-		"  amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Start Codex with flags",
-		"  amq coop exec --session feature-x claude          # Isolated session",
-		"",
-		"Manual setup (for scripts/CI):",
-		"  amq coop init                       # Initialize with defaults (claude,codex)",
-		"  eval \"$(amq env --me claude)\"       # Configure terminal manually",
-		"",
-		"Run 'amq coop <subcommand> --help' for details.",
-	}
-	for _, line := range lines {
-		if err := writeStdoutLine(line); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func runCoopInit(args []string) error {
