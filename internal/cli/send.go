@@ -151,10 +151,17 @@ func runSend(args []string) error {
 	}
 
 	// Build reply_to for cross-session sends so replies route back.
+	// Only set if the sender is in a named session (not at the base root).
 	replyTo := ""
 	if targetSession != "" {
 		senderSession := sessionName(root)
-		replyTo = common.Me + "@" + senderSession
+		// Only stamp reply_to if we're actually in a session (not the base root).
+		// A session name like ".agent-mail" or a bare directory name that equals
+		// the base root means we're not in a session — skip reply_to.
+		baseRoot := resolveBaseRootForSend(root, targetSession)
+		if root != baseRoot {
+			replyTo = common.Me + "@" + senderSession
+		}
 	}
 
 	msg := format.Message{

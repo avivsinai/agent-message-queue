@@ -28,7 +28,17 @@ func runWho(args []string) error {
 	root := resolveRoot(common.Root)
 
 	// Determine base root (parent of sessions).
-	baseRoot := resolveBaseRootForSend(root, "")
+	// Check env var first, then try root itself (does it contain session dirs?),
+	// then fall back to parent of root.
+	baseRoot := strings.TrimSpace(os.Getenv(envBaseRoot))
+	if baseRoot == "" {
+		// Check if root contains session-like subdirs (dirs that contain agents/).
+		if hasSessionSubdirs(root) {
+			baseRoot = root
+		} else {
+			baseRoot = filepath.Dir(root)
+		}
+	}
 
 	// Enumerate sessions by scanning subdirectories.
 	entries, err := os.ReadDir(baseRoot)
@@ -120,4 +130,22 @@ func runWho(args []string) error {
 		}
 	}
 	return nil
+}
+
+// hasSessionSubdirs returns true if dir contains at least one subdirectory
+// that itself contains an agents/ directory (i.e., dir is a base root).
+func hasSessionSubdirs(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || strings.HasPrefix(e.Name(), "_") {
+			continue
+		}
+		if dirExists(filepath.Join(dir, e.Name(), "agents")) {
+			return true
+		}
+	}
+	return false
 }
