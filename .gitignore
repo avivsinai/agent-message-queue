@@ -9,3 +9,4 @@
 *.prof
 .amqrc
 __pycache__/
+.claude/worktrees/
