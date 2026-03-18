@@ -119,9 +119,36 @@ func TestCompletionFish(t *testing.T) {
 }
 
 func TestCompletionNoArgs(t *testing.T) {
-	err := runCompletion([]string{})
+	// No args should show help (exit 0), not error.
+	output, err := captureCompletionStdout(t, func() error {
+		return runCompletion([]string{})
+	})
+	if err != nil {
+		t.Fatalf("runCompletion(no args) returned error: %v", err)
+	}
+	if !strings.Contains(output, "amq completion") {
+		t.Fatalf("expected usage text, got: %s", output)
+	}
+}
+
+func TestCompletionHelp(t *testing.T) {
+	// --help should show usage (exit 0).
+	output, err := captureCompletionStdout(t, func() error {
+		return runCompletion([]string{"--help"})
+	})
+	if err != nil {
+		t.Fatalf("runCompletion(--help) returned error: %v", err)
+	}
+	if !strings.Contains(output, "amq completion") {
+		t.Fatalf("expected usage text, got: %s", output)
+	}
+}
+
+func TestCompletionExtraArgs(t *testing.T) {
+	// Extra positional args should error (exit 2).
+	err := runCompletion([]string{"bash", "extra"})
 	if err == nil {
-		t.Fatal("runCompletion(no args) expected error, got nil")
+		t.Fatal("runCompletion(bash extra) expected error, got nil")
 	}
 	var exitErr *ExitCodeError
 	if !errors.As(err, &exitErr) {

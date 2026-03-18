@@ -7,8 +7,11 @@ import (
 )
 
 func runCompletion(args []string) error {
-	if len(args) == 0 {
-		return UsageError("usage: amq completion <bash|zsh|fish>")
+	if len(args) == 0 || isHelp(args[0]) {
+		return writeStdoutLine("Usage:\n  amq completion <bash|zsh|fish>\n\nGenerate shell completion scripts.\n\nExamples:\n  eval \"$(amq completion bash)\"\n  amq completion zsh > \"${fpath[1]}/_amq\"\n  amq completion fish > ~/.config/fish/completions/amq.fish")
+	}
+	if len(args) > 1 {
+		return UsageError("unexpected argument: %s. Usage: amq completion <bash|zsh|fish>", args[1])
 	}
 	shell := args[0]
 	switch shell {
