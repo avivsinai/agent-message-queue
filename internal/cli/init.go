@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"flag"
 	"path/filepath"
 	"sort"
@@ -30,7 +29,7 @@ func runInit(args []string) error {
 		return err
 	}
 	if len(agents) == 0 {
-		return errors.New("--agents is required")
+		return UsageError("--agents is required")
 	}
 	agents = dedupeStrings(agents)
 	sort.Strings(agents)

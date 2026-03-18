@@ -1,6 +1,6 @@
 package cli
 
-import "fmt"
+// cli.go defines the top-level command dispatcher and usage text.
 
 const (
 	envRoot     = "AM_ROOT"
@@ -8,168 +8,147 @@ const (
 	envBaseRoot = "AM_BASE_ROOT"
 )
 
+// commandHandler maps a command name to its handler function.
+// Used by Run() and routeHelp() to dispatch commands.
+var commandHandlers = map[string]func([]string) error{
+	"init":        runInit,
+	"send":        runSend,
+	"list":        runList,
+	"read":        runRead,
+	"ack":         runAck,
+	"thread":      runThread,
+	"presence":    runPresence,
+	"cleanup":     runCleanup,
+	"watch":       runWatch,
+	"drain":       runDrain,
+	"monitor":     runMonitor,
+	"reply":       runReply,
+	"dlq":         runDLQ,
+	"wake":        runWake,
+	"env":         runEnv,
+	"coop":        runCoop,
+	"swarm":       runSwarm,
+	"who":         runWho,
+	"doctor":      runDoctor,
+	"shell-setup": runShellSetup,
+}
+
 func Run(args []string, version string) error {
 	args, noUpdate := stripNoUpdateCheckArgs(args)
-	if len(args) == 0 || isHelp(args[0]) {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		return printUsage()
+	}
+	if args[0] == "help" {
+		return routeHelp(args[1:])
 	}
 	if isVersionArg(args[0]) {
 		return printVersion(version)
 	}
 	startUpdateNotifier(args[0], version, noUpdate)
 
-	switch args[0] {
-	case "init":
-		return runInit(args[1:])
-	case "send":
-		return runSend(args[1:])
-	case "list":
-		return runList(args[1:])
-	case "read":
-		return runRead(args[1:])
-	case "ack":
-		return runAck(args[1:])
-	case "thread":
-		return runThread(args[1:])
-	case "presence":
-		return runPresence(args[1:])
-	case "cleanup":
-		return runCleanup(args[1:])
-	case "watch":
-		return runWatch(args[1:])
-	case "drain":
-		return runDrain(args[1:])
-	case "monitor":
-		return runMonitor(args[1:])
-	case "reply":
-		return runReply(args[1:])
-	case "dlq":
-		return runDLQ(args[1:])
-	case "wake":
-		return runWake(args[1:])
-	case "upgrade":
+	// upgrade needs version, handle separately.
+	if args[0] == "upgrade" {
 		return runUpgrade(args[1:], version)
-	case "env":
-		return runEnv(args[1:])
-	case "coop":
-		return runCoop(args[1:])
-	case "swarm":
-		return runSwarm(args[1:])
-	case "who":
-		return runWho(args[1:])
-	case "doctor":
-		return runDoctor(args[1:])
-	case "shell-setup":
-		return runShellSetup(args[1:])
-	default:
-		return fmt.Errorf("unknown command: %s", args[0])
 	}
+
+	handler, ok := commandHandlers[args[0]]
+	if !ok {
+		return UsageError("unknown command: %s. Run 'amq --help' for available commands", args[0])
+	}
+	return handler(args[1:])
+}
+
+// subcommandGroups lists commands that have subcommands.
+// Used by routeHelp to validate help paths.
+var subcommandGroups = map[string]bool{
+	"dlq":      true,
+	"coop":     true,
+	"swarm":    true,
+	"presence": true,
+}
+
+// routeHelp dispatches "amq help [path...]" to the appropriate command's --help.
+func routeHelp(path []string) error {
+	if len(path) == 0 {
+		return printUsage()
+	}
+
+	// Special-case upgrade (needs version, not in commandHandlers).
+	if path[0] == "upgrade" {
+		if len(path) > 1 {
+			return UsageError("unknown upgrade subcommand: %s. Run 'amq upgrade --help' for details", path[1])
+		}
+		return runUpgrade([]string{"--help"}, "")
+	}
+
+	handler, ok := commandHandlers[path[0]]
+	if !ok {
+		return UsageError("unknown command: %s. Run 'amq --help' for available commands", path[0])
+	}
+
+	if len(path) == 1 {
+		return handler([]string{"--help"})
+	}
+
+	// Only subcommand groups accept a second path segment.
+	if !subcommandGroups[path[0]] {
+		return UsageError("command %q has no subcommands. Run 'amq %s --help' for details", path[0], path[0])
+	}
+
+	if len(path) > 2 {
+		return UsageError("too many arguments. Run 'amq %s %s --help' for details", path[0], path[1])
+	}
+
+	// Pass "subcommand --help" to the group handler.
+	return handler([]string{path[1], "--help"})
 }
 
 func printUsage() error {
-	if err := writeStdoutLine("amq - agent message queue"); err != nil {
-		return err
+	lines := []string{
+		"amq - agent message queue",
+		"",
+		"Usage:",
+		"  amq <command> [options]",
+		"",
+		"Commands:",
+		"  init        Initialize the queue root and agent mailboxes",
+		"  send        Send a message",
+		"  list        List inbox messages",
+		"  read        Read a message by id",
+		"  ack         Acknowledge a message",
+		"  thread      View a thread",
+		"  presence    Set or list agent presence",
+		"  cleanup     Remove stale tmp files",
+		"  watch       Wait for new messages (uses fsnotify)",
+		"  drain       Drain new messages (read, move to cur, ack)",
+		"  monitor     Combined watch+drain for co-op mode",
+		"  reply       Reply to a message (auto thread/refs)",
+		"  dlq         Dead letter queue management",
+		"  wake        Background waker (TIOCSTI injection, experimental)",
+		"  upgrade     Upgrade amq to the latest release",
+		"  env         Output shell commands to set environment variables",
+		"  coop        Co-op mode setup (init, exec)",
+		"  swarm       Claude Code Agent Teams integration (join, tasks, bridge)",
+		"  who         Show sessions and agents in current project",
+		"  doctor      Verify installation and configuration",
+		"  shell-setup Output or install shell aliases (amc/amx)",
+		"",
+		"Global options:",
+		"  --no-update-check  Disable update check",
+		"",
+		"Environment:",
+		"  AM_ROOT              Queue root directory (set by coop exec, always a session subdirectory)",
+		"  AM_ME                Default agent handle",
+		"  AMQ_NO_UPDATE_CHECK  Disable update check (1/true/yes/on)",
+		"",
+		"Use \"amq <command> --help\" for more information about a command.",
 	}
-	if err := writeStdoutLine(""); err != nil {
-		return err
+	for _, line := range lines {
+		if err := writeStdoutLine(line); err != nil {
+			return err
+		}
 	}
-	if err := writeStdoutLine("Usage:"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  amq <command> [options]"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine(""); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("Commands:"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  init      Initialize the queue root and agent mailboxes"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  send      Send a message"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  list      List inbox messages"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  read      Read a message by id"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  ack       Acknowledge a message"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  thread    View a thread"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  presence  Set or list presence"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  cleanup   Remove stale tmp files"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  watch     Wait for new messages (uses fsnotify)"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  drain     Drain new messages (read, move to cur, ack)"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  monitor   Combined watch+drain for co-op mode"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  reply     Reply to a message (auto thread/refs)"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  dlq       Dead letter queue management"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  wake      Background waker (TIOCSTI injection, experimental)"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  upgrade   Upgrade amq to the latest release"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  env       Output shell commands to set environment variables"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  coop      Co-op mode setup (init, exec)"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  swarm     Claude Code Agent Teams integration (join, tasks, bridge)"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  who       Show sessions and agents in current project"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  doctor    Verify installation and configuration"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  shell-setup  Output or install shell aliases (amc/amx)"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine(""); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("Global options:"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  --no-update-check  Disable update check"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine(""); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("Environment:"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  AM_ROOT   Queue root directory (set by coop exec, always a session subdirectory)"); err != nil {
-		return err
-	}
-	if err := writeStdoutLine("  AM_ME     Default agent handle"); err != nil {
-		return err
-	}
-	return writeStdoutLine("  AMQ_NO_UPDATE_CHECK  Disable update check (1/true/yes/on)")
+	return nil
 }
 
 func isVersionArg(arg string) bool {
@@ -183,4 +162,9 @@ func isVersionArg(arg string) bool {
 
 func printVersion(version string) error {
 	return writeStdoutLine(version)
+}
+
+// formatUnknownSubcommand returns a consistent error for unknown subcommands.
+func formatUnknownSubcommand(group, sub string) error {
+	return UsageError("unknown %s subcommand: %s. Run 'amq %s --help' for available subcommands", group, sub, group)
 }

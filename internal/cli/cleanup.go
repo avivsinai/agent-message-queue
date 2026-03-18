@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -26,14 +25,14 @@ func runCleanup(args []string) error {
 		return err
 	}
 	if *olderFlag == "" {
-		return errors.New("--tmp-older-than is required")
+		return UsageError("--tmp-older-than is required")
 	}
 	dur, err := time.ParseDuration(*olderFlag)
 	if err != nil {
-		return err
+		return UsageError("--tmp-older-than: %v", err)
 	}
 	if dur <= 0 {
-		return errors.New("--tmp-older-than must be > 0")
+		return UsageError("--tmp-older-than must be > 0")
 	}
 	root := resolveRoot(common.Root)
 	cutoff := time.Now().Add(-dur)

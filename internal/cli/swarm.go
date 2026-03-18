@@ -58,7 +58,7 @@ func runSwarm(args []string) error {
 	case "bridge":
 		return runSwarmBridge(args[1:])
 	default:
-		return fmt.Errorf("unknown swarm subcommand: %s", args[0])
+		return formatUnknownSubcommand("swarm", args[0])
 	}
 }
 

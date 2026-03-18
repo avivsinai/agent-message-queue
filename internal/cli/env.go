@@ -54,7 +54,7 @@ func runEnv(args []string) error {
 		"per-terminal via --me or AM_ME, since different terminals may use",
 		"different agents on the same project.",
 		"",
-		"Usage:",
+		"Examples:",
 		"  eval \"$(amq env --me claude)\"                # Set up for Claude",
 		"  eval \"$(amq env --me codex --wake)\"          # Set up for Codex with wake",
 		"  eval \"$(amq env --session feature-x --me claude)\"  # Isolated session",
