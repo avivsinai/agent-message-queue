@@ -14,7 +14,9 @@ import (
 // Root is the literal queue root directory (e.g., ".agent-mail").
 // Agent identity ('me') should be set per-terminal via AM_ME env var or --me flag.
 type amqrc struct {
-	Root string `json:"root"`
+	Root      string `json:"root"`
+	Project   string `json:"project,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
 }
 
 // amqrcResult holds both the parsed config and the directory where it was found.

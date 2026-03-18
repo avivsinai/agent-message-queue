@@ -3,8 +3,11 @@ package cli
 import "fmt"
 
 const (
-	envRoot = "AM_ROOT"
-	envMe   = "AM_ME"
+	envRoot     = "AM_ROOT"
+	envMe       = "AM_ME"
+	envProject  = "AM_PROJECT"
+	envSession  = "AM_SESSION"
+	envBaseRoot = "AM_BASE_ROOT"
 )
 
 func Run(args []string, version string) error {
