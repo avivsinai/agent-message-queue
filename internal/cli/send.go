@@ -2,7 +2,9 @@ package cli
 
 import (
 	"flag"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,7 +28,14 @@ func runSend(args []string) error {
 	labelsFlag := fs.String("labels", "", "Comma-separated labels/tags")
 	contextFlag := fs.String("context", "", "JSON context object or @file.json")
 
-	usage := usageWithFlags(fs, "amq send --me <agent> --to <recipients> [options]")
+	// Cross-session flag
+	sessionFlag := fs.String("session", "", "Target session (delivers to a different session's inbox)")
+
+	usage := usageWithFlags(fs, "amq send --me <agent> --to <recipients> [--session <name>] [options]",
+		"",
+		"Cross-session example:",
+		"  amq send --to codex --session auth --body \"Heads up, auth module changed\"",
+	)
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -53,10 +62,47 @@ func runSend(args []string) error {
 	}
 	recipients = dedupeStrings(recipients)
 
-	// Validate handles against config.json
+	// Determine delivery root: current session or a target session.
+	deliveryRoot := root
+	targetSession := strings.TrimSpace(*sessionFlag)
+	if targetSession != "" {
+		normalized, err := normalizeHandle(targetSession)
+		if err != nil {
+			return UsageError("--session: %v", err)
+		}
+		targetSession = normalized
+
+		// Resolve the target session root from the base root.
+		baseRoot := resolveBaseRootForSend(root)
+		deliveryRoot = filepath.Join(baseRoot, targetSession)
+
+		// Verify the target session exists (never auto-create foreign mailboxes).
+		if !dirExists(deliveryRoot) {
+			return fmt.Errorf("session %q not found at %s", targetSession, deliveryRoot)
+		}
+		for _, r := range recipients {
+			inbox := filepath.Join(deliveryRoot, "agents", r, "inbox")
+			if !dirExists(inbox) {
+				return fmt.Errorf("agent %q not found in session %q", r, targetSession)
+			}
+		}
+	}
+
+	// Validate handles against config.json in the DELIVERY root.
 	allHandles := append([]string{me}, recipients...)
-	if err := validateKnownHandles(root, common.Strict, allHandles...); err != nil {
-		return err
+	if err := validateKnownHandles(deliveryRoot, common.Strict, allHandles...); err != nil {
+		// For cross-session, also try validating sender against the source root.
+		if targetSession != "" {
+			if err2 := validateKnownHandles(root, common.Strict, me); err2 != nil {
+				return err
+			}
+			// Sender is known in source; recipients validated in target.
+			if err3 := validateKnownHandles(deliveryRoot, common.Strict, recipients...); err3 != nil {
+				return err3
+			}
+		} else {
+			return err
+		}
 	}
 
 	body, err := readBody(*bodyFlag)
@@ -104,6 +150,13 @@ func runSend(args []string) error {
 		return err
 	}
 
+	// Build reply_to for cross-session sends so replies route back.
+	replyTo := ""
+	if targetSession != "" {
+		senderSession := sessionName(root)
+		replyTo = common.Me + "@" + senderSession
+	}
+
 	msg := format.Message{
 		Header: format.Header{
 			Schema:      format.CurrentSchema,
@@ -119,6 +172,7 @@ func runSend(args []string) error {
 			Kind:        kind,
 			Labels:      labels,
 			Context:     context,
+			ReplyTo:     replyTo,
 		},
 		Body: body,
 	}
@@ -129,12 +183,12 @@ func runSend(args []string) error {
 	}
 
 	filename := id + ".md"
-	// Deliver to each recipient.
-	if _, err := fsq.DeliverToInboxes(root, recipients, filename, data); err != nil {
+	// Deliver to each recipient in the delivery root.
+	if _, err := fsq.DeliverToInboxes(deliveryRoot, recipients, filename, data); err != nil {
 		return err
 	}
 
-	// Copy to sender outbox/sent for audit.
+	// Copy to sender outbox/sent for audit (always in sender's root).
 	outboxDir := fsq.AgentOutboxSent(root, common.Me)
 	outboxErr := error(nil)
 	if _, err := fsq.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
@@ -142,29 +196,51 @@ func runSend(args []string) error {
 	}
 
 	session := sessionName(root)
+	targetDisplay := session
+	if targetSession != "" {
+		targetDisplay = targetSession
+	}
 	if common.JSON {
-		return writeJSON(os.Stdout, map[string]any{
+		out := map[string]any{
 			"id":      id,
 			"thread":  threadID,
 			"to":      recipients,
 			"subject": msg.Header.Subject,
-			"session": session,
-			"root":    root,
+			"session": targetDisplay,
+			"root":    deliveryRoot,
 			"outbox": map[string]any{
 				"written": outboxErr == nil,
 				"error":   errString(outboxErr),
 			},
-		})
+		}
+		if targetSession != "" {
+			out["cross_session"] = true
+			out["source_session"] = session
+			out["target_session"] = targetSession
+		}
+		return writeJSON(os.Stdout, out)
 	}
 	if outboxErr != nil {
 		if err := writeStderr("warning: outbox write failed: %v\n", outboxErr); err != nil {
 			return err
 		}
 	}
-	if err := writeStdout("Sent %s to %s (session: %s, root: %s)\n", id, strings.Join(recipients, ","), session, root); err != nil {
+	if err := writeStdout("Sent %s to %s (session: %s, root: %s)\n", id, strings.Join(recipients, ","), targetDisplay, deliveryRoot); err != nil {
 		return err
 	}
 	return nil
+}
+
+// resolveBaseRootForSend derives the base root (parent of sessions) from the
+// current session root. It checks AM_BASE_ROOT first, then walks up to find
+// the directory that contains sibling session directories.
+func resolveBaseRootForSend(sessionRoot string) string {
+	// Check env var first (set by coop exec).
+	if base := strings.TrimSpace(os.Getenv(envBaseRoot)); base != "" {
+		return base
+	}
+	// Default: parent of session root (e.g., .agent-mail/collab -> .agent-mail).
+	return filepath.Dir(sessionRoot)
 }
 
 func canonicalP2P(a, b string) string {

@@ -84,30 +84,60 @@ func runReply(args []string) error {
 		return err
 	}
 
-	// Determine recipient (original sender) with path-safety validation
-	rawRecipient := originalMsg.Header.From
-	if rawRecipient == me {
-		// Replying to our own message - use the original recipient
-		if len(originalMsg.Header.To) > 0 {
-			rawRecipient = originalMsg.Header.To[0]
-		} else {
-			return fmt.Errorf("cannot determine recipient for reply")
-		}
-	}
+	// Determine recipient and delivery root.
+	// If the original message has reply_to (cross-session), parse it to get
+	// the target session. Otherwise, reply locally to the sender.
+	var recipient string
+	var deliveryRoot string
+	var targetSession string
 
-	// Normalize and validate recipient handle to prevent path traversal
-	// This is critical: untrusted header values must not become filesystem paths
-	recipientNorm, err := normalizeHandle(rawRecipient)
-	if err != nil {
-		return fmt.Errorf("invalid recipient handle in original message: %q", rawRecipient)
+	if originalMsg.Header.ReplyTo != "" {
+		// Cross-session reply: parse "agent@session" from reply_to.
+		parts := strings.SplitN(originalMsg.Header.ReplyTo, "@", 2)
+		if len(parts) == 2 {
+			recipientNorm, err := normalizeHandle(parts[0])
+			if err != nil {
+				return fmt.Errorf("invalid handle in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
+			}
+			sessionNorm, err := normalizeHandle(parts[1])
+			if err != nil {
+				return fmt.Errorf("invalid session in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
+			}
+			recipient = recipientNorm
+			targetSession = sessionNorm
+			baseRoot := resolveBaseRootForSend(root)
+			deliveryRoot = filepath.Join(baseRoot, targetSession)
+			if !dirExists(deliveryRoot) {
+				return fmt.Errorf("reply_to session %q not found at %s", targetSession, deliveryRoot)
+			}
+		} else {
+			// Malformed reply_to, fall back to local.
+			recipient = parts[0]
+			deliveryRoot = root
+		}
+	} else {
+		// Local reply: send to original sender in current session.
+		rawRecipient := originalMsg.Header.From
+		if rawRecipient == me {
+			if len(originalMsg.Header.To) > 0 {
+				rawRecipient = originalMsg.Header.To[0]
+			} else {
+				return fmt.Errorf("cannot determine recipient for reply")
+			}
+		}
+		recipientNorm, err := normalizeHandle(rawRecipient)
+		if err != nil {
+			return fmt.Errorf("invalid recipient handle in original message: %q", rawRecipient)
+		}
+		if recipientNorm != rawRecipient {
+			return fmt.Errorf("invalid recipient handle in original message: %q (normalized to %q)", rawRecipient, recipientNorm)
+		}
+		recipient = recipientNorm
+		deliveryRoot = root
 	}
-	if recipientNorm != rawRecipient {
-		return fmt.Errorf("invalid recipient handle in original message: %q (normalized to %q)", rawRecipient, recipientNorm)
-	}
-	recipient := recipientNorm
 
 	// Validate handles exist in config (if strict mode)
-	if err := validateKnownHandles(root, common.Strict, me, recipient); err != nil {
+	if err := validateKnownHandles(deliveryRoot, common.Strict, recipient); err != nil {
 		return err
 	}
 
@@ -177,8 +207,8 @@ func runReply(args []string) error {
 
 	filename := id + ".md"
 
-	// Deliver to recipient
-	if _, err := fsq.DeliverToInboxes(root, []string{recipient}, filename, data); err != nil {
+	// Deliver to recipient (in delivery root, which may be a different session).
+	if _, err := fsq.DeliverToInboxes(deliveryRoot, []string{recipient}, filename, data); err != nil {
 		return err
 	}
 
