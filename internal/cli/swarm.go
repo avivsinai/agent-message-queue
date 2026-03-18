@@ -35,7 +35,7 @@ func validateTeamName(name string) error {
 
 func runSwarm(args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
-		return printSwarmUsage()
+		return printGroupUsage(findCommand("swarm"))
 	}
 
 	switch args[0] {
@@ -60,41 +60,6 @@ func runSwarm(args []string) error {
 	default:
 		return formatUnknownSubcommand("swarm", args[0])
 	}
-}
-
-func printSwarmUsage() error {
-	lines := []string{
-		"amq swarm - Claude Code Agent Teams integration",
-		"",
-		"Register external agents (Codex, etc.) in Claude Code Agent Teams",
-		"and interact with the shared task list.",
-		"",
-		"Subcommands:",
-		"  list      List discovered Agent Teams",
-		"  join      Register an external agent in a team",
-		"  leave     Deregister an agent from a team",
-		"  tasks     List tasks from the shared task list",
-		"  claim     Claim a task",
-		"  complete  Mark a task as completed",
-		"  fail      Mark a task as failed",
-		"  block     Mark a task as blocked",
-		"  bridge    Run bridge process (sync tasks → AMQ notifications)",
-		"",
-		"Quick start:",
-		"  amq swarm list                                        # Discover teams",
-		"  amq swarm join --team my-team --me codex              # Join a team",
-		"  amq swarm tasks --team my-team                        # View tasks",
-		"  amq swarm claim --team my-team --task t1 --me codex   # Claim work",
-		"  amq swarm bridge --team my-team --me codex            # Run bridge",
-		"",
-		"Run 'amq swarm <subcommand> --help' for details.",
-	}
-	for _, line := range lines {
-		if err := writeStdoutLine(line); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // --- list ---

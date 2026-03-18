@@ -14,7 +14,7 @@ import (
 
 func runPresence(args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
-		return printPresenceUsage()
+		return printGroupUsage(findCommand("presence"))
 	}
 	switch args[0] {
 	case "set":
@@ -138,20 +138,3 @@ func runPresenceList(args []string) error {
 	return nil
 }
 
-func printPresenceUsage() error {
-	lines := []string{
-		"amq presence - agent presence management",
-		"",
-		"Subcommands:",
-		"  set   Update agent presence status",
-		"  list  List all agent presence",
-		"",
-		"Run 'amq presence <subcommand> --help' for details.",
-	}
-	for _, line := range lines {
-		if err := writeStdoutLine(line); err != nil {
-			return err
-		}
-	}
-	return nil
-}
