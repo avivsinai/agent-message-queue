@@ -68,6 +68,16 @@ func AgentDLQCur(root, agent string) string {
 	return filepath.Join(root, "agents", agent, "dlq", "cur")
 }
 
+// SessionJSON returns the path to the session metadata file.
+func SessionJSON(sessionRoot string) string {
+	return filepath.Join(sessionRoot, "session.json")
+}
+
+// AgentJSON returns the path to the agent metadata file.
+func AgentJSON(root, agent string) string {
+	return filepath.Join(root, "agents", agent, "agent.json")
+}
+
 func EnsureRootDirs(root string) error {
 	for _, dir := range []string{
 		filepath.Join(root, "agents"),
