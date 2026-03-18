@@ -78,7 +78,7 @@ func runSend(args []string) error {
 		// a session context, never from the base root directly.
 		baseRoot := classifyRoot(root)
 		if baseRoot == "" {
-			return fmt.Errorf("--session requires a session context: run from inside 'amq coop exec --session <name>' or set AM_BASE_ROOT")
+			return fmt.Errorf("--session requires a session context: run from inside 'amq coop exec --session <name>'")
 		}
 
 		deliveryRoot = filepath.Join(baseRoot, targetSession)

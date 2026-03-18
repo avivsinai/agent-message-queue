@@ -121,7 +121,7 @@ func runReply(args []string) error {
 		// Use classifyRoot for consistent root resolution.
 		baseRoot := classifyRoot(root)
 		if baseRoot == "" {
-			return fmt.Errorf("cannot route cross-session reply: unable to determine base root (set AM_BASE_ROOT or run from a coop exec session)")
+			return fmt.Errorf("cannot route cross-session reply: run from inside 'amq coop exec --session <name>'")
 		}
 		deliveryRoot = filepath.Join(baseRoot, targetSession)
 		if !dirExists(deliveryRoot) {
