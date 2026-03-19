@@ -338,7 +338,10 @@ func runSend(args []string) error {
 		outboxErr = err
 	}
 
-	session := sessionName(root)
+	session := ""
+	if senderInSession {
+		session = sessionName(root)
+	}
 	targetDisplay := session
 	if targetSession != "" {
 		targetDisplay = targetSession
