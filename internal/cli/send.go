@@ -118,12 +118,17 @@ func runSend(args []string) error {
 			baseRoot := classifyRoot(root)
 			if baseRoot == "" {
 				// classifyRoot failed (no AM_BASE_ROOT, no siblings).
-				// Check if root is under the .amqrc base root.
-				amqrcBase := resolveBaseRoot()
-				absRoot, _ := filepath.Abs(root)
-				absBase, _ := filepath.Abs(amqrcBase)
-				if absBase != "" && absRoot != absBase && strings.HasPrefix(absRoot, absBase+string(filepath.Separator)) {
-					baseRoot = absBase
+				// Check if root is under the .amqrc base root using root-aware lookup.
+				if result, err := findAmqrcForRoot(root); err == nil && result.Config.Root != "" {
+					amqrcBase := result.Config.Root
+					if !filepath.IsAbs(amqrcBase) {
+						amqrcBase = filepath.Join(result.Dir, amqrcBase)
+					}
+					absRoot, _ := filepath.Abs(root)
+					absBase, _ := filepath.Abs(amqrcBase)
+					if absBase != "" && absRoot != absBase && strings.HasPrefix(absRoot, absBase+string(filepath.Separator)) {
+						baseRoot = absBase
+					}
 				}
 			}
 			if baseRoot != "" {

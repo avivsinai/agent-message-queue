@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -154,6 +155,59 @@ func TestResolvePeerFromRoot(t *testing.T) {
 	}
 	if resolved != peerRoot {
 		t.Errorf("resolved = %q, want %q", resolved, peerRoot)
+	}
+}
+
+func TestFindAmqrcForRootSessionDetection(t *testing.T) {
+	// Verify that findAmqrcForRoot can locate .amqrc from a session root
+	// when cwd is outside the project tree. This is the key fix for the
+	// single-session cross-project edge case.
+	projectDir := filepath.Join(t.TempDir(), "my-project")
+	sessionRoot := filepath.Join(projectDir, ".agent-mail", "collab")
+	if err := os.MkdirAll(sessionRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	rc := map[string]any{
+		"root":    ".agent-mail",
+		"project": "my-project",
+	}
+	rcData, _ := json.Marshal(rc)
+	if err := os.WriteFile(filepath.Join(projectDir, ".amqrc"), rcData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// chdir outside the project tree.
+	outsideDir := t.TempDir()
+	oldDir, _ := os.Getwd()
+	if err := os.Chdir(outsideDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldDir) }()
+	resetAmqrcCache()
+	defer resetAmqrcCache()
+
+	// findAmqrcForRoot should find .amqrc by walking up from the session root.
+	result, err := findAmqrcForRoot(sessionRoot)
+	if err != nil {
+		t.Fatalf("findAmqrcForRoot: %v", err)
+	}
+	if result.Config.Root != ".agent-mail" {
+		t.Errorf("root = %q, want %q", result.Config.Root, ".agent-mail")
+	}
+	if result.Config.Project != "my-project" {
+		t.Errorf("project = %q, want %q", result.Config.Project, "my-project")
+	}
+
+	// Verify session detection: absRoot should be under absBase.
+	absBase := filepath.Join(result.Dir, result.Config.Root)
+	absRoot, _ := filepath.Abs(sessionRoot)
+	absBaseAbs, _ := filepath.Abs(absBase)
+	if absRoot == absBaseAbs {
+		t.Error("session root should not equal base root")
+	}
+	if !strings.HasPrefix(absRoot, absBaseAbs+string(filepath.Separator)) {
+		t.Errorf("session root %q should be under base %q", absRoot, absBaseAbs)
 	}
 }
 
