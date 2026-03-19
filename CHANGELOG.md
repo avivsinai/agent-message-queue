@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - 2026-03-19
+
+### Added
+
+- Cross-project messaging: send messages between agents in different projects on the same machine
+- `.amqrc` extended with `project` (self-identity) and `peers` (name→path registry) fields
+- `--project` flag for `amq send` to target a peer project's inbox
+- Inline `agent@project:session` addressing syntax for terser cross-project sends
+- `reply_project` header field for automatic cross-project reply routing
+- `DeliverToExistingInbox`: atomic Maildir delivery that never creates directories in peer projects
+- `findAmqrcForRoot`: root-aware `.amqrc` lookup (works when cwd differs from project dir)
+- Decision threads protocol: decentralized cross-project decisions using existing AMQ primitives
+- Skill docs: Cross-Project Routing and Decision Threads sections (v1.7.0)
+- New reference doc: `references/cross-project.md`
+
+### Changed
+
+- `findAmqrcForRoot` prioritizes root-based lookup over cwd when root is provided
+- Session detection uses `.amqrc` base root comparison as fallback when `classifyRoot` fails
+- `--json` output omits misleading `source_session` when sender is at base root
+
 ## [0.23.0] - 2026-03-18
 
 ### Added
@@ -179,6 +200,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
+[0.24.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.23.0...v0.24.0
+[0.23.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.19.0...v0.20.0
