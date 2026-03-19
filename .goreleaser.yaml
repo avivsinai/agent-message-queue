@@ -28,6 +28,30 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+changelog:
+  use: github
+  format: "{{ .SHA }}: {{ .Message }}{{ if .Logins }} ({{ .Logins | englishJoin }}){{ end }}"
+  sort: asc
+  filters:
+    exclude:
+      - "^chore(\\([[:word:]-]+\\))?!?:"
+      - "^style(\\([[:word:]-]+\\))?!?:"
+      - "^test(\\([[:word:]-]+\\))?!?:"
+      - "^ci(\\([[:word:]-]+\\))?!?:"
+      - "^Merge "
+  groups:
+    - title: "New Features"
+      regexp: "^.*?feat(\\([[:word:]-]+\\))?!?:.+$"
+      order: 100
+    - title: "Bug Fixes"
+      regexp: "^.*?fix(\\([[:word:]-]+\\))?!?:.+$"
+      order: 200
+    - title: "Documentation"
+      regexp: "^.*?docs(\\([[:word:]-]+\\))?!?:.+$"
+      order: 300
+    - title: "Other"
+      order: 9999
+
 brews:
   - name: amq
     repository:
