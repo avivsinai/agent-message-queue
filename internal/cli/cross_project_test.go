@@ -112,6 +112,51 @@ func TestResolveProject(t *testing.T) {
 	}
 }
 
+func TestResolvePeerFromRoot(t *testing.T) {
+	// Fix 3: resolvePeer should work when cwd is outside project tree,
+	// by falling back to searching from the root path.
+	projectDir := filepath.Join(t.TempDir(), "my-project")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	peerRoot := filepath.Join(t.TempDir(), "peer-project", ".agent-mail")
+	if err := os.MkdirAll(peerRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	rc := map[string]any{
+		"root":    ".agent-mail",
+		"project": "my-project",
+		"peers": map[string]string{
+			"peer-project": peerRoot,
+		},
+	}
+	rcData, _ := json.Marshal(rc)
+	if err := os.WriteFile(filepath.Join(projectDir, ".amqrc"), rcData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// chdir to some unrelated directory (simulate running from outside project).
+	outsideDir := t.TempDir()
+	oldDir, _ := os.Getwd()
+	if err := os.Chdir(outsideDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldDir) }()
+	resetAmqrcCache()
+	defer resetAmqrcCache()
+
+	// Pass root that is under the project directory.
+	root := filepath.Join(projectDir, ".agent-mail")
+	resolved, err := resolvePeer(root, "peer-project")
+	if err != nil {
+		t.Fatalf("resolvePeer from root: %v", err)
+	}
+	if resolved != peerRoot {
+		t.Errorf("resolved = %q, want %q", resolved, peerRoot)
+	}
+}
+
 func TestResolveProjectFallbackToBasename(t *testing.T) {
 	// No project field in .amqrc — should fall back to directory basename.
 	projectDir := filepath.Join(t.TempDir(), "my-project")

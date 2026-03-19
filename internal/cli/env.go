@@ -377,11 +377,48 @@ func isSimpleString(s string) bool {
 	return true
 }
 
+// findAmqrcForRoot tries to locate the .amqrc for the given root.
+// First tries the standard cwd-based search (findAndLoadAmqrc), then falls
+// back to walking up from the root path. This allows cross-project commands
+// to work even when invoked from outside the project tree.
+func findAmqrcForRoot(root string) (amqrcResult, error) {
+	result, err := findAndLoadAmqrc()
+	if err == nil {
+		return result, nil
+	}
+	if root == "" {
+		return amqrcResult{}, err
+	}
+	// Fallback: walk up from root's directory to find .amqrc.
+	absRoot, absErr := filepath.Abs(root)
+	if absErr != nil {
+		return amqrcResult{}, err // return original error
+	}
+	dir := absRoot
+	for {
+		rcPath := filepath.Join(dir, ".amqrc")
+		data, readErr := os.ReadFile(rcPath)
+		if readErr == nil {
+			var rc amqrc
+			if jsonErr := json.Unmarshal(data, &rc); jsonErr != nil {
+				return amqrcResult{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, jsonErr)
+			}
+			return amqrcResult{Config: rc, Dir: dir}, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return amqrcResult{}, err // return original cwd-based error
+}
+
 // resolvePeer looks up a peer project name in the .amqrc peers map and returns
 // the absolute base root path for that peer. Returns an error if .amqrc is not
 // found, has no peers, or the peer name is not registered.
 func resolvePeer(root, project string) (string, error) {
-	result, err := findAndLoadAmqrc()
+	result, err := findAmqrcForRoot(root)
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve peer %q: %w", project, err)
 	}
@@ -410,7 +447,7 @@ func resolvePeer(root, project string) (string, error) {
 // Uses the explicit "project" field if set, otherwise falls back to the
 // basename of the directory containing .amqrc.
 func resolveProject(root string) string {
-	result, err := findAndLoadAmqrc()
+	result, err := findAmqrcForRoot(root)
 	if err != nil {
 		return ""
 	}

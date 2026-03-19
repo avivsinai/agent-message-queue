@@ -60,7 +60,21 @@ func runSend(args []string) error {
 	}
 	common.Me = me
 	root := resolveRoot(common.Root)
-	recipients, err := splitRecipients(*toFlag)
+
+	// Parse inline agent@project:session syntax from --to BEFORE handle validation,
+	// since normalizeHandle rejects '@' and ':'.
+	targetProject := strings.TrimSpace(*projectFlag)
+	inlineSession := ""
+	rawTo := strings.TrimSpace(*toFlag)
+	if targetProject == "" && rawTo != "" && strings.Contains(rawTo, "@") {
+		if handle, proj, sess, ok := parseInlineRecipient(rawTo); ok {
+			rawTo = handle
+			targetProject = proj
+			inlineSession = sess
+		}
+	}
+
+	recipients, err := splitRecipients(rawTo)
 	if err != nil {
 		if _, ok := err.(*ExitCodeError); ok {
 			return err
@@ -68,17 +82,6 @@ func runSend(args []string) error {
 		return UsageError("--to: %v", err)
 	}
 	recipients = dedupeStrings(recipients)
-
-	// Parse inline agent@project:session syntax from --to (if no explicit --project flag).
-	targetProject := strings.TrimSpace(*projectFlag)
-	inlineSession := ""
-	if targetProject == "" && len(recipients) == 1 {
-		if handle, proj, sess, ok := parseInlineRecipient(recipients[0]); ok {
-			recipients[0] = handle
-			targetProject = proj
-			inlineSession = sess
-		}
-	}
 
 	// Determine delivery root: local, cross-session, or cross-project.
 	deliveryRoot := root
@@ -100,7 +103,7 @@ func runSend(args []string) error {
 		}
 
 		if targetSession != "" {
-			// Cross-project + cross-session.
+			// Cross-project + explicit session.
 			normalized, err := normalizeHandle(targetSession)
 			if err != nil {
 				return UsageError("--session: %v", err)
@@ -108,18 +111,33 @@ func runSend(args []string) error {
 			targetSession = normalized
 			deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
 		} else {
-			// Cross-project, same session name as source.
-			deliveryRoot = filepath.Join(peerBaseRoot, sessionName(root))
-			targetSession = sessionName(root)
+			// Cross-project, no explicit session.
+			// If we're inside a session context, use the same session name in the peer.
+			// If we're at the base root (outside coop exec), deliver to peer's base root.
+			baseRoot := classifyRoot(root)
+			if baseRoot != "" {
+				// Inside a session — use same session name in peer.
+				targetSession = sessionName(root)
+				deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
+			} else {
+				// At base root — deliver to peer's base root directly.
+				deliveryRoot = peerBaseRoot
+			}
 		}
 
 		if !dirExists(deliveryRoot) {
-			return fmt.Errorf("session %q not found in peer %q at %s", targetSession, targetProject, deliveryRoot)
+			if targetSession != "" {
+				return fmt.Errorf("session %q not found in peer %q at %s", targetSession, targetProject, deliveryRoot)
+			}
+			return fmt.Errorf("peer %q root does not exist at %s", targetProject, deliveryRoot)
 		}
 		for _, r := range recipients {
 			inbox := filepath.Join(deliveryRoot, "agents", r, "inbox")
 			if !dirExists(inbox) {
-				return fmt.Errorf("agent %q not found in peer %q session %q", r, targetProject, targetSession)
+				if targetSession != "" {
+					return fmt.Errorf("agent %q not found in peer %q session %q", r, targetProject, targetSession)
+				}
+				return fmt.Errorf("agent %q not found in peer %q", r, targetProject)
 			}
 		}
 		replyProject = resolveProject(root)
@@ -202,10 +220,14 @@ func runSend(args []string) error {
 	if threadID == "" {
 		if len(recipients) == 1 {
 			if targetProject != "" {
-				// Cross-project: include project and session names.
+				// Cross-project: include project names (and session names if in a session).
 				srcProject := resolveProject(root)
-				srcSession := sessionName(root)
-				threadID = "p2p/" + srcProject + ":" + srcSession + ":" + common.Me + "__" + targetProject + ":" + targetSession + ":" + recipients[0]
+				if targetSession != "" {
+					srcSession := sessionName(root)
+					threadID = "p2p/" + srcProject + ":" + srcSession + ":" + common.Me + "__" + targetProject + ":" + targetSession + ":" + recipients[0]
+				} else {
+					threadID = "p2p/" + srcProject + ":" + common.Me + "__" + targetProject + ":" + recipients[0]
+				}
 			} else if targetSession != "" {
 				// Cross-session: include session names to avoid collisions.
 				senderSession := sessionName(root)
@@ -226,8 +248,13 @@ func runSend(args []string) error {
 
 	// Build reply_to for cross-session/cross-project sends.
 	replyTo := ""
-	if targetProject != "" || targetSession != "" {
+	if targetSession != "" {
+		// Cross-session (or cross-project with session): stamp handle@session.
 		replyTo = common.Me + "@" + sessionName(root)
+	} else if targetProject != "" {
+		// Cross-project at base root (no session): stamp just handle.
+		// Reply routing will use reply_project to find the peer, deliver to base root.
+		replyTo = common.Me
 	}
 
 	msg := format.Message{

@@ -103,32 +103,45 @@ func runReply(args []string) error {
 	if originalMsg.Header.ReplyProject != "" && originalMsg.Header.ReplyTo != "" {
 		// Cross-project reply: route via peer lookup.
 		targetProject = originalMsg.Header.ReplyProject
+
+		// reply_to is either "handle@session" (cross-project+session) or "handle" (base root).
 		parts := strings.SplitN(originalMsg.Header.ReplyTo, "@", 2)
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			return fmt.Errorf("malformed reply_to %q: expected handle@session", originalMsg.Header.ReplyTo)
-		}
 		recipientNorm, err := normalizeHandle(parts[0])
 		if err != nil {
 			return fmt.Errorf("invalid handle in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
 		}
-		sessionNorm, err := normalizeHandle(parts[1])
-		if err != nil {
-			return fmt.Errorf("invalid session in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
-		}
 		recipient = recipientNorm
-		targetSession = sessionNorm
 
 		peerBaseRoot, err := resolvePeer(root, targetProject)
 		if err != nil {
 			return err
 		}
-		deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
+
+		if len(parts) == 2 && parts[1] != "" {
+			// Cross-project + session: deliver to peer's session.
+			sessionNorm, err := normalizeHandle(parts[1])
+			if err != nil {
+				return fmt.Errorf("invalid session in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
+			}
+			targetSession = sessionNorm
+			deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
+		} else {
+			// Cross-project, base root: deliver to peer's base root.
+			deliveryRoot = peerBaseRoot
+		}
+
 		if !dirExists(deliveryRoot) {
-			return fmt.Errorf("session %q not found in peer %q at %s", targetSession, targetProject, deliveryRoot)
+			if targetSession != "" {
+				return fmt.Errorf("session %q not found in peer %q at %s", targetSession, targetProject, deliveryRoot)
+			}
+			return fmt.Errorf("peer %q root does not exist at %s", targetProject, deliveryRoot)
 		}
 		inbox := filepath.Join(deliveryRoot, "agents", recipient, "inbox")
 		if !dirExists(inbox) {
-			return fmt.Errorf("agent %q not found in peer %q session %q", recipient, targetProject, targetSession)
+			if targetSession != "" {
+				return fmt.Errorf("agent %q not found in peer %q session %q", recipient, targetProject, targetSession)
+			}
+			return fmt.Errorf("agent %q not found in peer %q", recipient, targetProject)
 		}
 	} else if originalMsg.Header.ReplyTo != "" {
 		// Cross-session reply (no cross-project). Strict reply_to parsing.
@@ -244,8 +257,11 @@ func runReply(args []string) error {
 			Context:     context,
 			// Restamp ReplyTo/ReplyProject so the recipient can reply back.
 			ReplyTo: func() string {
-				if targetProject != "" || targetSession != "" {
+				if targetSession != "" {
 					return me + "@" + sessionName(root)
+				}
+				if targetProject != "" {
+					return me // base-root cross-project: just handle
 				}
 				return ""
 			}(),
