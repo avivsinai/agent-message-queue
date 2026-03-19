@@ -231,16 +231,35 @@ func runSend(args []string) error {
 		}
 	}
 
+	// Detect whether sender is inside a session (needed for reply_to and thread IDs).
+	senderInSession := classifyRoot(root) != ""
+	if !senderInSession && root != "" {
+		if result, err := findAmqrcForRoot(root); err == nil && result.Config.Root != "" {
+			amqrcBase := result.Config.Root
+			if !filepath.IsAbs(amqrcBase) {
+				amqrcBase = filepath.Join(result.Dir, amqrcBase)
+			}
+			absRoot, _ := filepath.Abs(root)
+			absBase, _ := filepath.Abs(amqrcBase)
+			if absBase != "" && absRoot != absBase && strings.HasPrefix(absRoot, absBase+string(filepath.Separator)) {
+				senderInSession = true
+			}
+		}
+	}
+
 	// Thread ID: auto-generated for P2P, qualified for cross-session/cross-project.
 	threadID := strings.TrimSpace(*threadFlag)
 	if threadID == "" {
 		if len(recipients) == 1 {
 			if targetProject != "" {
-				// Cross-project: include project names (and session names if in a session).
+				// Cross-project: include project names (and session names when applicable).
 				srcProject := resolveProject(root)
-				if targetSession != "" {
+				if targetSession != "" && senderInSession {
 					srcSession := sessionName(root)
 					threadID = "p2p/" + srcProject + ":" + srcSession + ":" + common.Me + "__" + targetProject + ":" + targetSession + ":" + recipients[0]
+				} else if targetSession != "" {
+					// Sender at base root targeting a session.
+					threadID = "p2p/" + srcProject + ":" + common.Me + "__" + targetProject + ":" + targetSession + ":" + recipients[0]
 				} else {
 					threadID = "p2p/" + srcProject + ":" + common.Me + "__" + targetProject + ":" + recipients[0]
 				}
@@ -264,12 +283,11 @@ func runSend(args []string) error {
 
 	// Build reply_to for cross-session/cross-project sends.
 	replyTo := ""
-	if targetSession != "" {
-		// Cross-session (or cross-project with session): stamp handle@session.
+	if senderInSession {
+		// Sender is in a session — stamp handle@session for reply routing.
 		replyTo = common.Me + "@" + sessionName(root)
 	} else if targetProject != "" {
-		// Cross-project at base root (no session): stamp just handle.
-		// Reply routing will use reply_project to find the peer, deliver to base root.
+		// Sender at base root, cross-project — stamp just handle.
 		replyTo = common.Me
 	}
 

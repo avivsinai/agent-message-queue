@@ -19,6 +19,8 @@ Each project's `.amqrc` maps peer names to their base root paths:
 - `project`: explicit self-identity (defaults to directory basename if absent)
 - `peers`: name → absolute path to peer's base root
 
+**Critical naming rule**: Peer keys must match the remote project's declared `project` name (or its directory basename if `project` is absent). Reply routing uses `reply_project` which is set to the sender's project identity — the receiver must have a peer entry with that exact name. If project A calls its peer `backend` but that project identifies as `api-server`, replies from `api-server` will fail because A has no peer named `api-server`.
+
 Both projects must register each other as peers for round-trip messaging.
 
 ## Addressing

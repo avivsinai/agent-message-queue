@@ -377,41 +377,41 @@ func isSimpleString(s string) bool {
 	return true
 }
 
-// findAmqrcForRoot tries to locate the .amqrc for the given root.
-// First tries the standard cwd-based search (findAndLoadAmqrc), then falls
-// back to walking up from the root path. This allows cross-project commands
-// to work even when invoked from outside the project tree.
+// findAmqrcForRoot locates the .amqrc for the given root.
+// When root is provided (non-empty), root-based lookup takes priority over
+// cwd-based search. This ensures --root / AM_ROOT fully determines which
+// project config is used, even when cwd is inside a different project.
 func findAmqrcForRoot(root string) (amqrcResult, error) {
-	result, err := findAndLoadAmqrc()
-	if err == nil {
-		return result, nil
-	}
-	if root == "" {
-		return amqrcResult{}, err
-	}
-	// Fallback: walk up from root's directory to find .amqrc.
-	absRoot, absErr := filepath.Abs(root)
-	if absErr != nil {
-		return amqrcResult{}, err // return original error
-	}
-	dir := absRoot
-	for {
-		rcPath := filepath.Join(dir, ".amqrc")
-		data, readErr := os.ReadFile(rcPath)
-		if readErr == nil {
-			var rc amqrc
-			if jsonErr := json.Unmarshal(data, &rc); jsonErr != nil {
-				return amqrcResult{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, jsonErr)
+	// When root is provided, search from root first (authoritative).
+	if root != "" {
+		absRoot, absErr := filepath.Abs(root)
+		if absErr == nil {
+			dir := absRoot
+			for {
+				rcPath := filepath.Join(dir, ".amqrc")
+				data, readErr := os.ReadFile(rcPath)
+				if readErr == nil {
+					var rc amqrc
+					if jsonErr := json.Unmarshal(data, &rc); jsonErr != nil {
+						return amqrcResult{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, jsonErr)
+					}
+					return amqrcResult{Config: rc, Dir: dir}, nil
+				}
+				if !os.IsNotExist(readErr) {
+					// Permission or I/O error — report it, don't mask it.
+					return amqrcResult{}, fmt.Errorf("cannot read .amqrc at %s: %w", rcPath, readErr)
+				}
+				parent := filepath.Dir(dir)
+				if parent == dir {
+					break
+				}
+				dir = parent
 			}
-			return amqrcResult{Config: rc, Dir: dir}, nil
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
 	}
-	return amqrcResult{}, err // return original cwd-based error
+	// Fall back to cwd-based search (standard behavior when root is empty
+	// or root-based search found nothing).
+	return findAndLoadAmqrc()
 }
 
 // resolvePeer looks up a peer project name in the .amqrc peers map and returns
