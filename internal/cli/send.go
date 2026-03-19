@@ -31,10 +31,17 @@ func runSend(args []string) error {
 	// Cross-session flag
 	sessionFlag := fs.String("session", "", "Target session (delivers to a different session's inbox)")
 
-	usage := usageWithFlags(fs, "amq send --me <agent> --to <recipients> [--session <name>] [options]",
+	// Cross-project flag
+	projectFlag := fs.String("project", "", "Target peer project name (delivers to a peer project's inbox)")
+
+	usage := usageWithFlags(fs, "amq send --me <agent> --to <recipients> [--project <name>] [--session <name>] [options]",
 		"",
 		"Cross-session example:",
 		"  amq send --to codex --session auth --thread xsession/auth-review --body \"...\"",
+		"",
+		"Cross-project examples:",
+		"  amq send --to codex --project infra-lib --body \"hello from here\"",
+		"  amq send --to codex@infra-lib:collab --body \"inline syntax\"",
 	)
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
@@ -53,7 +60,21 @@ func runSend(args []string) error {
 	}
 	common.Me = me
 	root := resolveRoot(common.Root)
-	recipients, err := splitRecipients(*toFlag)
+
+	// Parse inline agent@project:session syntax from --to BEFORE handle validation,
+	// since normalizeHandle rejects '@' and ':'.
+	targetProject := strings.TrimSpace(*projectFlag)
+	inlineSession := ""
+	rawTo := strings.TrimSpace(*toFlag)
+	if targetProject == "" && rawTo != "" && strings.Contains(rawTo, "@") {
+		if handle, proj, sess, ok := parseInlineRecipient(rawTo); ok {
+			rawTo = handle
+			targetProject = proj
+			inlineSession = sess
+		}
+	}
+
+	recipients, err := splitRecipients(rawTo)
 	if err != nil {
 		if _, ok := err.(*ExitCodeError); ok {
 			return err
@@ -62,10 +83,81 @@ func runSend(args []string) error {
 	}
 	recipients = dedupeStrings(recipients)
 
-	// Determine delivery root: current session or a target session.
+	// Determine delivery root: local, cross-session, or cross-project.
 	deliveryRoot := root
 	targetSession := strings.TrimSpace(*sessionFlag)
-	if targetSession != "" {
+	// Inline session from @project:session takes effect only when not overridden.
+	if targetSession == "" && inlineSession != "" {
+		targetSession = inlineSession
+	}
+	var replyProject string
+
+	if targetProject != "" {
+		// Cross-project delivery.
+		peerBaseRoot, err := resolvePeer(root, targetProject)
+		if err != nil {
+			return err
+		}
+		if !dirExists(peerBaseRoot) {
+			return fmt.Errorf("peer root for %q does not exist: %s", targetProject, peerBaseRoot)
+		}
+
+		if targetSession != "" {
+			// Cross-project + explicit session.
+			normalized, err := normalizeHandle(targetSession)
+			if err != nil {
+				return UsageError("--session: %v", err)
+			}
+			targetSession = normalized
+			deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
+		} else {
+			// Cross-project, no explicit session.
+			// Detect whether root is a session root or the base root itself.
+			// Try classifyRoot first (works with AM_BASE_ROOT or siblings),
+			// then fall back to .amqrc base root comparison.
+			baseRoot := classifyRoot(root)
+			if baseRoot == "" {
+				// classifyRoot failed (no AM_BASE_ROOT, no siblings).
+				// Check if root is under the .amqrc base root using root-aware lookup.
+				if result, err := findAmqrcForRoot(root); err == nil && result.Config.Root != "" {
+					amqrcBase := result.Config.Root
+					if !filepath.IsAbs(amqrcBase) {
+						amqrcBase = filepath.Join(result.Dir, amqrcBase)
+					}
+					absRoot, _ := filepath.Abs(root)
+					absBase, _ := filepath.Abs(amqrcBase)
+					if absBase != "" && absRoot != absBase && strings.HasPrefix(absRoot, absBase+string(filepath.Separator)) {
+						baseRoot = absBase
+					}
+				}
+			}
+			if baseRoot != "" {
+				// Inside a session — use same session name in peer.
+				targetSession = sessionName(root)
+				deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
+			} else {
+				// At base root — deliver to peer's base root directly.
+				deliveryRoot = peerBaseRoot
+			}
+		}
+
+		if !dirExists(deliveryRoot) {
+			if targetSession != "" {
+				return fmt.Errorf("session %q not found in peer %q at %s", targetSession, targetProject, deliveryRoot)
+			}
+			return fmt.Errorf("peer %q root does not exist at %s", targetProject, deliveryRoot)
+		}
+		for _, r := range recipients {
+			inbox := filepath.Join(deliveryRoot, "agents", r, "inbox")
+			if !dirExists(inbox) {
+				if targetSession != "" {
+					return fmt.Errorf("agent %q not found in peer %q session %q", r, targetProject, targetSession)
+				}
+				return fmt.Errorf("agent %q not found in peer %q", r, targetProject)
+			}
+		}
+		replyProject = resolveProject(root)
+	} else if targetSession != "" {
 		normalized, err := normalizeHandle(targetSession)
 		if err != nil {
 			return UsageError("--session: %v", err)
@@ -95,8 +187,8 @@ func runSend(args []string) error {
 		}
 	}
 
-	// Fix 5: Validate sender in source root, recipients in target root. Always.
-	if targetSession != "" {
+	// Validate sender in source root, recipients in target root. Always.
+	if targetProject != "" || targetSession != "" {
 		if err := validateKnownHandles(root, common.Strict, me); err != nil {
 			return err
 		}
@@ -139,13 +231,40 @@ func runSend(args []string) error {
 		}
 	}
 
-	// Thread ID: auto-generated for P2P, session-qualified for cross-session.
+	// Detect whether sender is inside a session (needed for reply_to and thread IDs).
+	senderInSession := classifyRoot(root) != ""
+	if !senderInSession && root != "" {
+		if result, err := findAmqrcForRoot(root); err == nil && result.Config.Root != "" {
+			amqrcBase := result.Config.Root
+			if !filepath.IsAbs(amqrcBase) {
+				amqrcBase = filepath.Join(result.Dir, amqrcBase)
+			}
+			absRoot, _ := filepath.Abs(root)
+			absBase, _ := filepath.Abs(amqrcBase)
+			if absBase != "" && absRoot != absBase && strings.HasPrefix(absRoot, absBase+string(filepath.Separator)) {
+				senderInSession = true
+			}
+		}
+	}
+
+	// Thread ID: auto-generated for P2P, qualified for cross-session/cross-project.
 	threadID := strings.TrimSpace(*threadFlag)
 	if threadID == "" {
 		if len(recipients) == 1 {
-			if targetSession != "" {
+			if targetProject != "" {
+				// Cross-project: include project names (and session names when applicable).
+				srcProject := resolveProject(root)
+				if targetSession != "" && senderInSession {
+					srcSession := sessionName(root)
+					threadID = "p2p/" + srcProject + ":" + srcSession + ":" + common.Me + "__" + targetProject + ":" + targetSession + ":" + recipients[0]
+				} else if targetSession != "" {
+					// Sender at base root targeting a session.
+					threadID = "p2p/" + srcProject + ":" + common.Me + "__" + targetProject + ":" + targetSession + ":" + recipients[0]
+				} else {
+					threadID = "p2p/" + srcProject + ":" + common.Me + "__" + targetProject + ":" + recipients[0]
+				}
+			} else if targetSession != "" {
 				// Cross-session: include session names to avoid collisions.
-				// p2p/auth:claude__api:codex is unique across sessions.
 				senderSession := sessionName(root)
 				threadID = "p2p/" + senderSession + ":" + common.Me + "__" + targetSession + ":" + recipients[0]
 			} else {
@@ -162,29 +281,33 @@ func runSend(args []string) error {
 		return err
 	}
 
-	// Build reply_to for cross-session sends.
-	// Since --session requires a session context, sessionName(root) is always valid here.
+	// Build reply_to for cross-session/cross-project sends.
 	replyTo := ""
-	if targetSession != "" {
+	if senderInSession {
+		// Sender is in a session — stamp handle@session for reply routing.
 		replyTo = common.Me + "@" + sessionName(root)
+	} else if targetProject != "" {
+		// Sender at base root, cross-project — stamp just handle.
+		replyTo = common.Me
 	}
 
 	msg := format.Message{
 		Header: format.Header{
-			Schema:      format.CurrentSchema,
-			ID:          id,
-			From:        common.Me,
-			To:          recipients,
-			Thread:      threadID,
-			Subject:     strings.TrimSpace(*subjectFlag),
-			Created:     now.UTC().Format(time.RFC3339Nano),
-			AckRequired: *ackFlag,
-			Refs:        splitList(*refsFlag),
-			Priority:    priority,
-			Kind:        kind,
-			Labels:      labels,
-			Context:     context,
-			ReplyTo:     replyTo,
+			Schema:       format.CurrentSchema,
+			ID:           id,
+			From:         common.Me,
+			To:           recipients,
+			Thread:       threadID,
+			Subject:      strings.TrimSpace(*subjectFlag),
+			Created:      now.UTC().Format(time.RFC3339Nano),
+			AckRequired:  *ackFlag,
+			Refs:         splitList(*refsFlag),
+			Priority:     priority,
+			Kind:         kind,
+			Labels:       labels,
+			Context:      context,
+			ReplyTo:      replyTo,
+			ReplyProject: replyProject,
 		},
 		Body: body,
 	}
@@ -195,8 +318,17 @@ func runSend(args []string) error {
 	}
 
 	filename := id + ".md"
-	if _, err := fsq.DeliverToInboxes(deliveryRoot, recipients, filename, data); err != nil {
-		return err
+	if targetProject != "" {
+		// Cross-project: use DeliverToExistingInbox (never creates dirs in peer).
+		for _, r := range recipients {
+			if _, err := fsq.DeliverToExistingInbox(deliveryRoot, r, filename, data); err != nil {
+				return err
+			}
+		}
+	} else {
+		if _, err := fsq.DeliverToInboxes(deliveryRoot, recipients, filename, data); err != nil {
+			return err
+		}
 	}
 
 	// Copy to sender outbox/sent for audit (always in sender's root).
@@ -206,7 +338,10 @@ func runSend(args []string) error {
 		outboxErr = err
 	}
 
-	session := sessionName(root)
+	session := ""
+	if senderInSession {
+		session = sessionName(root)
+	}
 	targetDisplay := session
 	if targetSession != "" {
 		targetDisplay = targetSession
@@ -223,6 +358,11 @@ func runSend(args []string) error {
 				"written": outboxErr == nil,
 				"error":   errString(outboxErr),
 			},
+		}
+		if targetProject != "" {
+			out["cross_project"] = true
+			out["source_project"] = replyProject
+			out["target_project"] = targetProject
 		}
 		if targetSession != "" {
 			out["cross_session"] = true
@@ -268,6 +408,28 @@ func classifyRoot(root string) string {
 		}
 	}
 	return ""
+}
+
+// parseInlineRecipient parses "agent@project:session" or "agent@project" syntax.
+// Returns the parsed components and true if the inline syntax was detected.
+// Returns the original string unchanged and false if no @ is present.
+func parseInlineRecipient(raw string) (handle, project, session string, ok bool) {
+	atIdx := strings.Index(raw, "@")
+	if atIdx < 0 {
+		return raw, "", "", false
+	}
+	handle = raw[:atIdx]
+	qualifier := raw[atIdx+1:]
+	if qualifier == "" {
+		return raw, "", "", false
+	}
+	if colonIdx := strings.Index(qualifier, ":"); colonIdx >= 0 {
+		project = qualifier[:colonIdx]
+		session = qualifier[colonIdx+1:]
+	} else {
+		project = qualifier
+	}
+	return handle, project, session, true
 }
 
 func canonicalP2P(a, b string) string {

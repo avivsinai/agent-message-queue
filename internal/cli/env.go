@@ -14,7 +14,9 @@ import (
 // Root is the literal queue root directory (e.g., ".agent-mail").
 // Agent identity ('me') should be set per-terminal via AM_ME env var or --me flag.
 type amqrc struct {
-	Root string `json:"root"`
+	Root    string            `json:"root"`
+	Project string            `json:"project,omitempty"` // explicit project name (defaults to directory basename)
+	Peers   map[string]string `json:"peers,omitempty"`   // peer name → peer's base root path
 }
 
 // amqrcResult holds both the parsed config and the directory where it was found.
@@ -373,4 +375,84 @@ func isSimpleString(s string) bool {
 		return false
 	}
 	return true
+}
+
+// findAmqrcForRoot locates the .amqrc for the given root.
+// When root is provided (non-empty), root-based lookup takes priority over
+// cwd-based search. This ensures --root / AM_ROOT fully determines which
+// project config is used, even when cwd is inside a different project.
+func findAmqrcForRoot(root string) (amqrcResult, error) {
+	// When root is provided, search from root first (authoritative).
+	if root != "" {
+		absRoot, absErr := filepath.Abs(root)
+		if absErr == nil {
+			dir := absRoot
+			for {
+				rcPath := filepath.Join(dir, ".amqrc")
+				data, readErr := os.ReadFile(rcPath)
+				if readErr == nil {
+					var rc amqrc
+					if jsonErr := json.Unmarshal(data, &rc); jsonErr != nil {
+						return amqrcResult{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, jsonErr)
+					}
+					return amqrcResult{Config: rc, Dir: dir}, nil
+				}
+				if !os.IsNotExist(readErr) {
+					// Permission or I/O error — report it, don't mask it.
+					return amqrcResult{}, fmt.Errorf("cannot read .amqrc at %s: %w", rcPath, readErr)
+				}
+				parent := filepath.Dir(dir)
+				if parent == dir {
+					break
+				}
+				dir = parent
+			}
+		}
+	}
+	// Fall back to cwd-based search (standard behavior when root is empty
+	// or root-based search found nothing).
+	return findAndLoadAmqrc()
+}
+
+// resolvePeer looks up a peer project name in the .amqrc peers map and returns
+// the absolute base root path for that peer. Returns an error if .amqrc is not
+// found, has no peers, or the peer name is not registered.
+func resolvePeer(root, project string) (string, error) {
+	result, err := findAmqrcForRoot(root)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve peer %q: %w", project, err)
+	}
+	if len(result.Config.Peers) == 0 {
+		return "", fmt.Errorf("no peers configured in .amqrc (looking for %q)", project)
+	}
+	peerPath, ok := result.Config.Peers[project]
+	if !ok {
+		known := make([]string, 0, len(result.Config.Peers))
+		for k := range result.Config.Peers {
+			known = append(known, k)
+		}
+		return "", fmt.Errorf("peer %q not found in .amqrc (known: %v)", project, known)
+	}
+	if !filepath.IsAbs(peerPath) {
+		peerPath = filepath.Join(result.Dir, peerPath)
+	}
+	abs, err := filepath.Abs(peerPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve peer path for %q: %w", project, err)
+	}
+	return abs, nil
+}
+
+// resolveProject returns the project name for the current .amqrc.
+// Uses the explicit "project" field if set, otherwise falls back to the
+// basename of the directory containing .amqrc.
+func resolveProject(root string) string {
+	result, err := findAmqrcForRoot(root)
+	if err != nil {
+		return ""
+	}
+	if result.Config.Project != "" {
+		return result.Config.Project
+	}
+	return filepath.Base(result.Dir)
 }

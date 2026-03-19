@@ -60,6 +60,52 @@ func TestMoveNewToCur(t *testing.T) {
 	}
 }
 
+func TestDeliverToExistingInbox(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	data := []byte("cross-project message")
+	filename := "xproj.md"
+	path, err := DeliverToExistingInbox(root, "codex", filename, data)
+	if err != nil {
+		t.Fatalf("DeliverToExistingInbox: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected message in new: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Fatalf("content mismatch: got %q, want %q", got, data)
+	}
+
+	// tmp should be empty after delivery
+	tmpDir := AgentInboxTmp(root, "codex")
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir tmp: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected tmp empty, got %d", len(entries))
+	}
+}
+
+func TestDeliverToExistingInboxNoDir(t *testing.T) {
+	root := t.TempDir()
+	// Do NOT create agent dirs — inbox doesn't exist.
+	_, err := DeliverToExistingInbox(root, "ghost", "test.md", []byte("nope"))
+	if err == nil {
+		t.Fatal("expected error for non-existent inbox")
+	}
+}
+
 func TestDeliverToInboxesRollback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("chmod permissions are unreliable on Windows")

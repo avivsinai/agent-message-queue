@@ -18,7 +18,10 @@ AMQ messages are Markdown files with a JSON frontmatter header:
   "priority": "normal",
   "kind": "question",
   "labels": ["bug", "parser"],
-  "context": {"paths": ["internal/cli/send.go"], "focus": "error handling"}
+  "context": {"paths": ["internal/cli/send.go"], "focus": "error handling"},
+
+  "reply_to": "claude@collab",
+  "reply_project": "my-project"
 }
 ---
 <markdown body>
@@ -39,6 +42,11 @@ Field notes:
 - `labels`: optional list of tags for filtering.
 - `context`: optional JSON object for structured metadata.
 
+Routing fields (set automatically by CLI — do not hand-craft):
+- `reply_to`: optional sender identity for routing replies (e.g., `claude@collab`). Set on cross-session and cross-project sends.
+- `reply_project`: optional sender project name for cross-project reply routing (e.g., `my-project`). Present only on cross-project messages.
+
 Notes:
 - Don’t edit message files directly; use the CLI.
 - The CLI auto-fills `id`, `created`, and a default `thread` when not provided.
+- `reply_to` and `reply_project` are transport metadata stamped by the CLI.

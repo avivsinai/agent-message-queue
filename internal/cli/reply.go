@@ -80,14 +80,13 @@ func runReply(args []string) error {
 		return err
 	}
 
-	// Fix 3: Disallow reply on sent cross-session messages.
+	// Disallow reply on sent cross-session/cross-project messages.
 	// If the message was found in outbox/sent and has a reply_to, the user
-	// is trying to follow up on their own cross-session send. This is
-	// under-specified (no target-session metadata in outbox copy).
-	// Use "amq send --session" for follow-ups instead.
+	// is trying to follow up on their own send. This is under-specified
+	// (no target metadata in outbox copy).
 	originalBox := filepath.Base(filepath.Dir(originalPath))
 	if originalBox == "sent" && originalMsg.Header.ReplyTo != "" {
-		return fmt.Errorf("cannot reply to a sent cross-session message (reply_to points back to you); use amq send --session for follow-ups")
+		return fmt.Errorf("cannot reply to a sent cross-session/cross-project message (reply_to points back to you); use amq send --session/--project for follow-ups")
 	}
 
 	body, err := readBody(*bodyFlag)
@@ -99,10 +98,53 @@ func runReply(args []string) error {
 	var recipient string
 	var deliveryRoot string
 	var targetSession string
+	var targetProject string
 
-	if originalMsg.Header.ReplyTo != "" {
-		// Fix 2: Strict reply_to parsing. Must be exactly "handle@session".
-		// No fallback to local on malformed values — present means parse-or-error.
+	if originalMsg.Header.ReplyProject != "" && originalMsg.Header.ReplyTo != "" {
+		// Cross-project reply: route via peer lookup.
+		targetProject = originalMsg.Header.ReplyProject
+
+		// reply_to is either "handle@session" (cross-project+session) or "handle" (base root).
+		parts := strings.SplitN(originalMsg.Header.ReplyTo, "@", 2)
+		recipientNorm, err := normalizeHandle(parts[0])
+		if err != nil {
+			return fmt.Errorf("invalid handle in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
+		}
+		recipient = recipientNorm
+
+		peerBaseRoot, err := resolvePeer(root, targetProject)
+		if err != nil {
+			return err
+		}
+
+		if len(parts) == 2 && parts[1] != "" {
+			// Cross-project + session: deliver to peer's session.
+			sessionNorm, err := normalizeHandle(parts[1])
+			if err != nil {
+				return fmt.Errorf("invalid session in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
+			}
+			targetSession = sessionNorm
+			deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
+		} else {
+			// Cross-project, base root: deliver to peer's base root.
+			deliveryRoot = peerBaseRoot
+		}
+
+		if !dirExists(deliveryRoot) {
+			if targetSession != "" {
+				return fmt.Errorf("session %q not found in peer %q at %s", targetSession, targetProject, deliveryRoot)
+			}
+			return fmt.Errorf("peer %q root does not exist at %s", targetProject, deliveryRoot)
+		}
+		inbox := filepath.Join(deliveryRoot, "agents", recipient, "inbox")
+		if !dirExists(inbox) {
+			if targetSession != "" {
+				return fmt.Errorf("agent %q not found in peer %q session %q", recipient, targetProject, targetSession)
+			}
+			return fmt.Errorf("agent %q not found in peer %q", recipient, targetProject)
+		}
+	} else if originalMsg.Header.ReplyTo != "" {
+		// Cross-session reply (no cross-project). Strict reply_to parsing.
 		parts := strings.SplitN(originalMsg.Header.ReplyTo, "@", 2)
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			return fmt.Errorf("malformed reply_to %q: expected handle@session", originalMsg.Header.ReplyTo)
@@ -213,10 +255,19 @@ func runReply(args []string) error {
 			Kind:        kind,
 			Labels:      labels,
 			Context:     context,
-			// Restamp ReplyTo so the recipient can reply back.
+			// Restamp ReplyTo/ReplyProject so the recipient can reply back.
 			ReplyTo: func() string {
 				if targetSession != "" {
 					return me + "@" + sessionName(root)
+				}
+				if targetProject != "" {
+					return me // base-root cross-project: just handle
+				}
+				return ""
+			}(),
+			ReplyProject: func() string {
+				if targetProject != "" {
+					return resolveProject(root)
 				}
 				return ""
 			}(),
@@ -230,8 +281,15 @@ func runReply(args []string) error {
 	}
 
 	filename := id + ".md"
-	if _, err := fsq.DeliverToInboxes(deliveryRoot, []string{recipient}, filename, data); err != nil {
-		return err
+	if targetProject != "" {
+		// Cross-project: use DeliverToExistingInbox (never creates dirs in peer).
+		if _, err := fsq.DeliverToExistingInbox(deliveryRoot, recipient, filename, data); err != nil {
+			return err
+		}
+	} else {
+		if _, err := fsq.DeliverToInboxes(deliveryRoot, []string{recipient}, filename, data); err != nil {
+			return err
+		}
 	}
 
 	outboxDir := fsq.AgentOutboxSent(root, me)
@@ -260,6 +318,11 @@ func runReply(args []string) error {
 				"written": outboxErr == nil,
 				"error":   errString(outboxErr),
 			},
+		}
+		if targetProject != "" {
+			out["cross_project"] = true
+			out["source_project"] = resolveProject(root)
+			out["target_project"] = targetProject
 		}
 		if targetSession != "" {
 			out["cross_session"] = true
