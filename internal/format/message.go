@@ -75,6 +75,11 @@ type Header struct {
 	// Cross-session reply routing (optional). Set automatically when sending
 	// via --session. Allows replies to route back to the sender's session.
 	ReplyTo string `json:"reply_to,omitempty"` // e.g., "claude@auth"
+
+	// Cross-project reply routing (optional). Set automatically when sending
+	// via --project. Contains the sender's project name so replies can route
+	// back to the correct project via peer lookup.
+	ReplyProject string `json:"reply_project,omitempty"` // e.g., "amq-core"
 }
 
 // Message is the in-memory representation of a message file.

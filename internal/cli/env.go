@@ -14,7 +14,9 @@ import (
 // Root is the literal queue root directory (e.g., ".agent-mail").
 // Agent identity ('me') should be set per-terminal via AM_ME env var or --me flag.
 type amqrc struct {
-	Root string `json:"root"`
+	Root    string            `json:"root"`
+	Project string            `json:"project,omitempty"` // explicit project name (defaults to directory basename)
+	Peers   map[string]string `json:"peers,omitempty"`   // peer name → peer's base root path
 }
 
 // amqrcResult holds both the parsed config and the directory where it was found.
@@ -373,4 +375,47 @@ func isSimpleString(s string) bool {
 		return false
 	}
 	return true
+}
+
+// resolvePeer looks up a peer project name in the .amqrc peers map and returns
+// the absolute base root path for that peer. Returns an error if .amqrc is not
+// found, has no peers, or the peer name is not registered.
+func resolvePeer(root, project string) (string, error) {
+	result, err := findAndLoadAmqrc()
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve peer %q: %w", project, err)
+	}
+	if len(result.Config.Peers) == 0 {
+		return "", fmt.Errorf("no peers configured in .amqrc (looking for %q)", project)
+	}
+	peerPath, ok := result.Config.Peers[project]
+	if !ok {
+		known := make([]string, 0, len(result.Config.Peers))
+		for k := range result.Config.Peers {
+			known = append(known, k)
+		}
+		return "", fmt.Errorf("peer %q not found in .amqrc (known: %v)", project, known)
+	}
+	if !filepath.IsAbs(peerPath) {
+		peerPath = filepath.Join(result.Dir, peerPath)
+	}
+	abs, err := filepath.Abs(peerPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve peer path for %q: %w", project, err)
+	}
+	return abs, nil
+}
+
+// resolveProject returns the project name for the current .amqrc.
+// Uses the explicit "project" field if set, otherwise falls back to the
+// basename of the directory containing .amqrc.
+func resolveProject(root string) string {
+	result, err := findAndLoadAmqrc()
+	if err != nil {
+		return ""
+	}
+	if result.Config.Project != "" {
+		return result.Config.Project
+	}
+	return filepath.Base(result.Dir)
 }

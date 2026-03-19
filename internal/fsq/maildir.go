@@ -85,6 +85,46 @@ func DeliverToInboxes(root string, recipients []string, filename string, data []
 	return paths, nil
 }
 
+// DeliverToExistingInbox delivers a message to a foreign root's inbox using
+// Maildir semantics (tmp -> new). Unlike DeliverToInboxes, it never creates
+// directories — the target inbox must already exist. This prevents a sender
+// from accidentally scaffolding structure in a peer project.
+func DeliverToExistingInbox(root, agent, filename string, data []byte) (string, error) {
+	tmpDir := AgentInboxTmp(root, agent)
+	newDir := AgentInboxNew(root, agent)
+
+	// Verify directories exist (never create in foreign roots).
+	if !dirExists(tmpDir) {
+		return "", fmt.Errorf("peer inbox tmp dir does not exist: %s", tmpDir)
+	}
+	if !dirExists(newDir) {
+		return "", fmt.Errorf("peer inbox new dir does not exist: %s", newDir)
+	}
+
+	tmpPath := filepath.Join(tmpDir, filename)
+	newPath := filepath.Join(newDir, filename)
+
+	if err := writeAndSync(tmpPath, data, 0o600); err != nil {
+		return "", err
+	}
+	if err := SyncDir(tmpDir); err != nil {
+		return "", cleanupTemp(tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, newPath); err != nil {
+		return "", cleanupTemp(tmpPath, fmt.Errorf("rename tmp->new for %s: %w", agent, err))
+	}
+	if err := SyncDir(newDir); err != nil {
+		return "", fmt.Errorf("sync new dir for %s: %w", agent, err)
+	}
+	_ = SyncDir(tmpDir) // best-effort
+	return newPath, nil
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 func cleanupStagedTmp(stages []stagedDelivery, primary error) error {
 	var cleanupErr error
 	for _, stage := range stages {

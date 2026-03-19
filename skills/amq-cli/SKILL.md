@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 1.6.0
+version: 1.7.0
 description: >-
   Coordinate agents via the AMQ CLI for file-based inter-agent messaging.
   Use when you need to send messages to another agent (Claude/Codex),
@@ -96,6 +96,74 @@ By default, `.amqrc` points to a literal root (e.g., `.agent-mail`). Use `--sess
 
 Only two env vars: `AM_ROOT` (where) + `AM_ME` (who). The CLI enforces correct routing — just run `amq` commands as-is.
 
+## Cross-Project Routing
+
+Send messages to agents in other projects via `--project` or inline `@project:session` syntax. Requires peer configuration in `.amqrc`.
+
+**When to use `--session` vs `--project`**: `--session` = same project, different session. `--project` = different project. Change one dimension at a time.
+
+### Peer setup
+
+Add `project` and `peers` to your `.amqrc`:
+```json
+{
+  "root": ".agent-mail",
+  "project": "my-project",
+  "peers": {
+    "infra-lib": "/Users/me/projects/infra-lib/.agent-mail"
+  }
+}
+```
+
+Both projects must register each other as peers for round-trip messaging.
+
+### Sending cross-project
+
+```bash
+# Flag syntax
+amq send --to codex --project infra-lib --body "hello from here"
+
+# Inline syntax (terser)
+amq send --to codex@infra-lib:collab --body "inline syntax"
+
+# Same session name as source (default when --session omitted)
+amq send --to codex --project infra-lib --body "delivers to same session"
+```
+
+### Replies route automatically
+
+When you receive a cross-project message, `reply_project` is set in the header. `amq reply` routes back automatically — no `--project` flag needed:
+```bash
+amq reply --id <msg_id> --body "got it"  # routes back via reply_project
+```
+
+### Thread naming
+
+- **Same project P2P**: `p2p/claude__codex`
+- **Cross-project P2P**: `p2p/projA:collab:claude__projB:collab:codex`
+- **Topical** (cross-project): use same thread ID across projects, e.g., `decision/release-v0.24`
+
+For full details, see [references/cross-project.md](references/cross-project.md).
+
+## Decision Threads
+
+Decentralized decision protocol using existing AMQ primitives (no new CLI commands).
+
+- **Thread**: `decision/<topic>`
+- **Kind**: `decision` for all messages
+- **Labels**: `decision:proposal`, `decision:objection`, `decision:support`, `decision:final`; plus `project:<name>` for cross-project decisions
+- **Context** on proposals: `{"proposal_id": "...", "question": "...", "options": [...], "required_projects": [...], "deadline": "..."}`
+
+**Process**: Propose → Review/Object → Resolve objections → Close when all required projects responded and no unresolved blocking objections.
+
+```bash
+amq send --to codex --project infra-lib --kind decision \
+  --labels "decision:proposal,project:my-project,project:infra-lib" \
+  --thread "decision/api-v2" \
+  --context '{"proposal_id":"api-v2","question":"Adopt new API?","required_projects":["my-project","infra-lib"]}' \
+  --body "Proposal: migrate to API v2. All tests green."
+```
+
 ## Messaging
 
 ```bash
@@ -146,3 +214,4 @@ For detailed protocols, read the reference file FIRST, then follow its instructi
 - [references/coop-mode.md](references/coop-mode.md) — Co-op protocol: roles, phased flow, collaboration modes
 - [references/swarm-mode.md](references/swarm-mode.md) — Swarm mode: agent teams, bridge, task workflow
 - [references/message-format.md](references/message-format.md) — Message format: frontmatter schema, field reference
+- [references/cross-project.md](references/cross-project.md) — Cross-project routing: peer config, addressing, decision threads

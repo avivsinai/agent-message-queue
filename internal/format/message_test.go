@@ -340,6 +340,56 @@ func TestSortByTimestamp(t *testing.T) {
 	}
 }
 
+func TestReplyProjectRoundTrip(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			Schema:       1,
+			ID:           "xproj-test",
+			From:         "claude",
+			To:           []string{"codex"},
+			Thread:       "p2p/proj-a:collab:claude__proj-b:collab:codex",
+			Created:      "2026-03-19T00:00:00Z",
+			ReplyTo:      "claude@collab",
+			ReplyProject: "proj-a",
+		},
+		Body: "Cross-project hello\n",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	parsed, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if parsed.Header.ReplyProject != "proj-a" {
+		t.Errorf("reply_project mismatch: got %q, want %q", parsed.Header.ReplyProject, "proj-a")
+	}
+	if parsed.Header.ReplyTo != "claude@collab" {
+		t.Errorf("reply_to mismatch: got %q, want %q", parsed.Header.ReplyTo, "claude@collab")
+	}
+}
+
+func TestReplyProjectOmittedWhenEmpty(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			Schema:  1,
+			ID:      "no-xproj",
+			From:    "claude",
+			To:      []string{"codex"},
+			Created: "2026-03-19T00:00:00Z",
+		},
+		Body: "Local message\n",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "reply_project") {
+		t.Error("expected reply_project to be omitted when empty")
+	}
+}
+
 // testTimestamped implements the Timestamped interface for testing.
 type testTimestamped struct {
 	id      string
