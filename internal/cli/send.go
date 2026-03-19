@@ -112,9 +112,20 @@ func runSend(args []string) error {
 			deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
 		} else {
 			// Cross-project, no explicit session.
-			// If we're inside a session context, use the same session name in the peer.
-			// If we're at the base root (outside coop exec), deliver to peer's base root.
+			// Detect whether root is a session root or the base root itself.
+			// Try classifyRoot first (works with AM_BASE_ROOT or siblings),
+			// then fall back to .amqrc base root comparison.
 			baseRoot := classifyRoot(root)
+			if baseRoot == "" {
+				// classifyRoot failed (no AM_BASE_ROOT, no siblings).
+				// Check if root is under the .amqrc base root.
+				amqrcBase := resolveBaseRoot()
+				absRoot, _ := filepath.Abs(root)
+				absBase, _ := filepath.Abs(amqrcBase)
+				if absBase != "" && absRoot != absBase && strings.HasPrefix(absRoot, absBase+string(filepath.Separator)) {
+					baseRoot = absBase
+				}
+			}
 			if baseRoot != "" {
 				// Inside a session — use same session name in peer.
 				targetSession = sessionName(root)
