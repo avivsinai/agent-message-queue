@@ -10,6 +10,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
 func runReply(args []string) error {
@@ -291,6 +292,9 @@ func runReply(args []string) error {
 			return err
 		}
 	}
+
+	// Best-effort presence touch.
+	_ = presence.Touch(root, me)
 
 	outboxDir := fsq.AgentOutboxSent(root, me)
 	outboxErr := error(nil)
