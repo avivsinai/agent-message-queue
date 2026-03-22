@@ -39,6 +39,23 @@ func Write(root string, p Presence) error {
 	return err
 }
 
+// Touch updates the LastSeen timestamp for an agent's presence.
+// If presence already exists, it preserves Status and Note.
+// If no presence exists, it creates one with status "active".
+func Touch(root, handle string) error {
+	p, err := Read(root, handle)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		// No existing presence — create a default.
+		p = New(handle, "active", "", time.Now())
+	} else {
+		p.LastSeen = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	return Write(root, p)
+}
+
 func Read(root, handle string) (Presence, error) {
 	path := filepath.Join(root, "agents", handle, "presence.json")
 	data, err := os.ReadFile(path)

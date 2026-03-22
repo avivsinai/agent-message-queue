@@ -10,6 +10,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
 func runSend(args []string) error {
@@ -330,6 +331,9 @@ func runSend(args []string) error {
 			return err
 		}
 	}
+
+	// Best-effort presence touch.
+	_ = presence.Touch(root, common.Me)
 
 	// Copy to sender outbox/sent for audit (always in sender's root).
 	outboxDir := fsq.AgentOutboxSent(root, common.Me)

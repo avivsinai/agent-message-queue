@@ -8,6 +8,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/ack"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
 type drainResult struct {
@@ -67,6 +68,9 @@ func runDrain(args []string) error {
 		// Silent for text mode when empty (hook-friendly)
 		return nil
 	}
+
+	// Best-effort presence touch.
+	_ = presence.Touch(root, common.Me)
 
 	// Process each message: move to cur (or DLQ for parse errors), optionally ack
 	processInboxItems(root, common.Me, *ackFlag, items)
