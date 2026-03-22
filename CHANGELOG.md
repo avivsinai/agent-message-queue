@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.1] - 2026-03-22
+
+### Fixed
+
+- `amq who` always showed agents as "stale" because presence was only updated by explicit `amq presence set` calls
+- Presence `LastSeen` is now auto-updated (best-effort) on `send`, `drain`, and `reply`
+- `presence.Touch` only creates a default record on missing file — corrupt presence files are no longer silently overwritten
+
+### Added
+
+- `presence.Touch(root, handle)` function for lightweight presence refresh
+
 ## [0.24.0] - 2026-03-19
 
 ### Added

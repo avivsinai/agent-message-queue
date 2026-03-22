@@ -146,6 +146,7 @@ amq swarm complete --team <name> --task <id> --me <agent> [--agent-id <id>] [--e
 amq swarm fail --team <name> --task <id> --me <agent> [--agent-id <id>] [--reason <str>] [--json]
 amq swarm block --team <name> --task <id> --me <agent> [--agent-id <id>] [--reason <str>] [--json]
 amq swarm bridge --team <name> --me <agent> [--agent-id <id>] [--poll] [--poll-interval <duration>] [--root <path>] [--strict] [--json]
+amq who [--json]
 amq doctor [--json]
 ```
 
