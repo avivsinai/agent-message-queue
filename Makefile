@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint ci smoke sync-skills check-skills
+.PHONY: build test fmt fmt-check vet lint ci smoke check-skills
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -27,24 +27,15 @@ smoke:
 
 ci: check-skills fmt-check vet lint test smoke
 
-sync-skills:
-	@echo "Syncing skills from .claude/skills/ to .codex/skills/ and skills/..."
-	@mkdir -p .codex/skills/amq-cli skills/amq-cli .codex/skills/amq-spec skills/amq-spec
-	@if command -v rsync >/dev/null 2>&1; then \
-		rsync -a --delete .claude/skills/amq-cli/ .codex/skills/amq-cli/; \
-		rsync -a --delete .claude/skills/amq-cli/ skills/amq-cli/; \
-		rsync -a --delete .claude/skills/amq-spec/ .codex/skills/amq-spec/; \
-		rsync -a --delete .claude/skills/amq-spec/ skills/amq-spec/; \
-	else \
-		cp -R .claude/skills/amq-cli/. .codex/skills/amq-cli/; \
-		cp -R .claude/skills/amq-cli/. skills/amq-cli/; \
-		cp -R .claude/skills/amq-spec/. .codex/skills/amq-spec/; \
-		cp -R .claude/skills/amq-spec/. skills/amq-spec/; \
-	fi
-	@echo "Done."
-
+# Skill integrity: skills/ is canonical, .claude/skills/ and .agents/skills/ are symlinks
 check-skills:
-	@diff -ru .claude/skills/amq-cli .codex/skills/amq-cli
-	@diff -ru .claude/skills/amq-cli skills/amq-cli
-	@diff -ru .claude/skills/amq-spec .codex/skills/amq-spec
-	@diff -ru .claude/skills/amq-spec skills/amq-spec
+	@echo "Checking skill symlinks..."
+	@for skill in amq-cli amq-spec; do \
+		test -L .claude/skills/$$skill || (echo "❌ .claude/skills/$$skill is not a symlink" && exit 1); \
+		test -L .agents/skills/$$skill || (echo "❌ .agents/skills/$$skill is not a symlink" && exit 1); \
+		test "$$(readlink .claude/skills/$$skill)" = "../../skills/$$skill" || (echo "❌ .claude/skills/$$skill target wrong" && exit 1); \
+		test "$$(readlink .agents/skills/$$skill)" = "../../skills/$$skill" || (echo "❌ .agents/skills/$$skill target wrong" && exit 1); \
+	done
+	@diff -rq skills/amq-cli .claude/skills/amq-cli || (echo "❌ amq-cli content mismatch" && exit 1)
+	@diff -rq skills/amq-spec .claude/skills/amq-spec || (echo "❌ amq-spec content mismatch" && exit 1)
+	@echo "✓ Skill symlinks valid"
