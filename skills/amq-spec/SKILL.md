@@ -1,5 +1,5 @@
 ---
-name: spec
+name: amq-spec
 version: 1.2.0
 description: >-
   Collaborative spec workflow between two agents. Use when the user says
