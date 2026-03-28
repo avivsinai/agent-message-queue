@@ -191,35 +191,25 @@ func checkBinary() doctorCheck {
 }
 
 func checkAmqrc() (doctorCheck, string) {
-	check := doctorCheck{Name: ".amqrc"}
+	check := doctorCheck{Name: "Root config"}
 
-	// If AM_ROOT is set, use it directly (session already resolved)
-	if envVal := os.Getenv(envRoot); envVal != "" {
-		check.Status = "ok"
-		check.Message = fmt.Sprintf("queue root=%s (from AM_ROOT)", envVal)
-		return check, envVal
-	}
-
-	existing, err := findAndLoadAmqrc()
-	if err == errAmqrcNotFound {
-		check.Status = "warn"
-		check.Message = "not found (run 'amq coop init')"
-		return check, ""
-	}
+	// Use the full resolution chain including global fallback
+	root, source, _, err := resolveEnvConfigWithSource("", "")
 	if err != nil {
-		check.Status = "error"
-		check.Message = fmt.Sprintf("invalid: %v", err)
+		// If AM_ROOT is set, use it directly (session already resolved)
+		if envVal := os.Getenv(envRoot); envVal != "" {
+			check.Status = "ok"
+			check.Message = fmt.Sprintf("queue root=%s (from AM_ROOT)", envVal)
+			return check, envVal
+		}
+		check.Status = "warn"
+		check.Message = "no root found (run 'amq coop init' or create ~/.amqrc)"
 		return check, ""
-	}
-
-	queueRoot := existing.Config.Root
-	if queueRoot != "" && !filepath.IsAbs(queueRoot) {
-		queueRoot = filepath.Join(existing.Dir, queueRoot)
 	}
 
 	check.Status = "ok"
-	check.Message = fmt.Sprintf("root=%s, queue root=%s (in %s)", existing.Config.Root, queueRoot, existing.Dir)
-	return check, queueRoot
+	check.Message = fmt.Sprintf("queue root=%s (source: %s)", root, source)
+	return check, root
 }
 
 func checkRootDir(root string) doctorCheck {

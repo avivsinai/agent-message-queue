@@ -240,8 +240,9 @@ func loadGlobalAmqrc() (amqrcResult, error) {
 }
 
 // resolveBaseRoot returns the base root directory (without session suffix).
-// Tries .amqrc first, then falls back to defaultCoopRoot.
+// Tries project .amqrc first, then AMQ_GLOBAL_ROOT, then ~/.amqrc, then defaultCoopRoot.
 func resolveBaseRoot() string {
+	// 1. Project .amqrc
 	result, err := findAndLoadAmqrc()
 	if err == nil && result.Config.Root != "" {
 		base := result.Config.Root
@@ -250,6 +251,22 @@ func resolveBaseRoot() string {
 		}
 		return base
 	}
+
+	// 2. AMQ_GLOBAL_ROOT env var
+	if globalEnv := strings.TrimSpace(os.Getenv(envGlobalRoot)); globalEnv != "" {
+		return globalEnv
+	}
+
+	// 3. Global ~/.amqrc
+	globalResult, err := loadGlobalAmqrc()
+	if err == nil && globalResult.Config.Root != "" {
+		base := globalResult.Config.Root
+		if !filepath.IsAbs(base) {
+			base = filepath.Join(globalResult.Dir, base)
+		}
+		return base
+	}
+
 	return defaultCoopRoot
 }
 
