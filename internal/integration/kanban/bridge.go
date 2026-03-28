@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 type BridgeConfig struct {

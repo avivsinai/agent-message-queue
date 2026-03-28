@@ -12,7 +12,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 func TestRunBridgeDeliversWebsocketEvents(t *testing.T) {

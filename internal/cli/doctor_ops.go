@@ -224,7 +224,7 @@ func checkKanbanHint() []opsHint {
 	if err != nil {
 		return nil // Kanban not running, no hint needed
 	}
-	conn.Close()
+	_ = conn.Close()
 	return []opsHint{{
 		Code:    "kanban_detected",
 		Status:  "warn",
