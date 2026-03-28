@@ -80,6 +80,11 @@ type Header struct {
 	// via --project. Contains the sender's project name so replies can route
 	// back to the correct project via peer lookup.
 	ReplyProject string `json:"reply_project,omitempty"` // e.g., "amq-core"
+
+	// Sender's project name (optional). Set automatically on cross-project
+	// sends so receivers can distinguish same-handle senders from different
+	// projects (e.g., "claude" in project A vs "claude" in project B).
+	FromProject string `json:"from_project,omitempty"` // e.g., "homelab-ai"
 }
 
 // Message is the in-memory representation of a message file.

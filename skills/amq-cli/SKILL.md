@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 1.7.0
+version: 1.8.0
 description: >-
   Coordinate agents via the AMQ CLI for file-based inter-agent messaging.
   Use when you need to send messages to another agent (Claude/Codex),
@@ -144,6 +144,14 @@ amq reply --id <msg_id> --body "got it"  # routes back via reply_project
 - **Topical** (cross-project): use same thread ID across projects, e.g., `decision/release-v0.24`
 
 For full details, see [references/cross-project.md](references/cross-project.md).
+
+### Cross-project identity (IMPORTANT)
+
+When you receive a message where `from` matches your own handle (e.g., `from: "claude"` and you are claude), check `from_project` and `reply_project`. If either is present and names a different project, this is **NOT an echo** — it is a legitimate cross-project message from a different agent instance with the same handle. Process it normally.
+
+### AM_ROOT scoping after cross-project sends
+
+After sending a cross-project message (via `--project`), your `AM_ROOT` still points to YOUR project. To send to your own partner (same project), use plain `amq send --to codex` — do NOT use `--project`. The `--project` flag is ONLY for sending to agents in OTHER projects.
 
 ## Decision Threads
 

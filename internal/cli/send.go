@@ -292,6 +292,13 @@ func runSend(args []string) error {
 		replyTo = common.Me
 	}
 
+	// Set from_project on cross-project sends so receivers can distinguish
+	// same-handle senders from different projects.
+	fromProject := ""
+	if targetProject != "" {
+		fromProject = replyProject
+	}
+
 	msg := format.Message{
 		Header: format.Header{
 			Schema:       format.CurrentSchema,
@@ -309,6 +316,7 @@ func runSend(args []string) error {
 			Context:      context,
 			ReplyTo:      replyTo,
 			ReplyProject: replyProject,
+			FromProject:  fromProject,
 		},
 		Body: body,
 	}

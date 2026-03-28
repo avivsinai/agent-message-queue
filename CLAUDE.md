@@ -24,14 +24,16 @@ Requires Go 1.25+ and optionally golangci-lint.
 ```
 cmd/amq/           → Entry point (delegates to cli.Run())
 internal/
-├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch, monitor, reply, dlq, wake, coop, swarm, doctor)
+├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch, monitor, reply, dlq, wake, coop, swarm, doctor, who, env, shell-setup, completion, upgrade)
 ├── fsq/           → File system queue (Maildir delivery, atomic ops, scanning)
 ├── format/        → Message serialization (JSON frontmatter + Markdown body)
 ├── config/        → Config management (meta/config.json)
 ├── ack/           → Acknowledgment tracking
 ├── swarm/         → Claude Code Agent Teams interop (team config, tasks, bridge, paths)
 ├── thread/        → Thread collection across mailboxes
-└── presence/      → Agent presence metadata
+├── presence/      → Agent presence metadata
+├── lock/          → File locking (wake process deduplication)
+└── update/        → Version update checking
 ```
 
 **Mailbox Layout**:
@@ -60,10 +62,13 @@ internal/
 - `kind` — Message type (see Message Kinds below)
 - `labels` — Arbitrary tags for filtering
 - `context` — JSON object with additional context (paths, focus, etc.)
+- `reply_to` — Cross-session/project reply routing (e.g., `claude@collab`), set automatically
+- `reply_project` — Sender's project name for cross-project reply routing, set automatically
+- `from_project` — Sender's project name for identity disambiguation on cross-project sends
 
 **Thread Naming**: P2P threads use lexicographic ordering: `p2p/<lower_agent>__<higher_agent>`
 
-**Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail`), `AM_ME` (agent handle), `AMQ_NO_UPDATE_CHECK` (disable update check)
+**Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail`), `AM_ME` (agent handle), `AM_BASE_ROOT` (base root, set by `coop exec` for cross-session resolution), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
 **Session Layout**: The base root directory (`.agent-mail/`) is configured in `.amqrc`. `coop exec` defaults to `--session collab`, so agents get session isolation without explicit flags. Use `--session` to override:
 ```
@@ -83,8 +88,10 @@ Note: `.amqrc` configures the root directory. Agent identity (`me`) is set per-t
 
 The `.amqrc` file is JSON:
 ```json
-{"root": ".agent-mail"}
+{"root": ".agent-mail", "project": "my-project", "peers": {"other-project": "/path/to/other/.agent-mail"}}
 ```
+
+Only `root` is required. `project` names the project for cross-project identity (defaults to directory basename). `peers` maps peer project names to their base root paths for cross-project messaging.
 
 Usage:
 ```bash
@@ -115,23 +122,23 @@ When `--kind` is set but `--priority` is not, priority defaults to `normal`.
 
 ```bash
 amq init --root <path> --agents a,b,c [--force]
-amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--ack] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>]
+amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--ack] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--project <name>] [--session <name>]
 amq list --me <agent> [--new | --cur] [--priority <p>] [--from <h>] [--kind <k>] [--label <l>...] [--limit N] [--offset N] [--json]
 amq read --me <agent> --id <msg_id> [--json]
 amq ack --me <agent> --id <msg_id>
 amq drain --me <agent> [--limit N] [--include-body] [--ack] [--json]
-amq thread --id <thread_id> [--limit N] [--include-body] [--json]
+amq thread --id <thread_id> [--agents <handles>] [--limit N] [--include-body] [--json]
 amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
 amq presence list [--json]
 amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
 amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
-amq monitor --me <agent> [--timeout <duration>] [--poll] [--include-body] [--peek] [--json]
-amq reply --me <agent> --id <msg_id> [--body <str|@file|stdin>] [--priority <p>] [--kind <k>]
+amq monitor --me <agent> [--timeout <duration>] [--poll] [--include-body] [--peek] [--ack] [--limit N] [--json]
+amq reply --me <agent> --id <msg_id> [--body <str|@file|stdin>] [--subject <str>] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--ack]
 amq dlq list --me <agent> [--new | --cur] [--json]
 amq dlq read --me <agent> --id <dlq_id> [--json]
 amq dlq retry --me <agent> --id <dlq_id> [--all] [--force]
 amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
-amq wake --me <agent> [--inject-cmd <cmd>] [--bell] [--debounce <duration>] [--preview-len <n>]
+amq wake --me <agent> [--inject-cmd <cmd>] [--inject-mode auto|raw|paste] [--bell] [--debounce <duration>] [--preview-len <n>] [--interrupt] [--interrupt-label <label>] [--interrupt-priority <p>]
 amq upgrade
 amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--json]
 amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>]
@@ -148,6 +155,7 @@ amq swarm block --team <name> --task <id> --me <agent> [--agent-id <id>] [--reas
 amq swarm bridge --team <name> --me <agent> [--agent-id <id>] [--poll] [--poll-interval <duration>] [--root <path>] [--strict] [--json]
 amq who [--json]
 amq doctor [--json]
+amq completion <bash|zsh|fish>
 ```
 
 Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has its own flags and doesn't accept these.
@@ -411,51 +419,50 @@ This repo includes skills for Claude Code and Codex CLI, distributed via the [sk
 
 ```
 .claude-plugin/plugin.json     → Plugin manifest for marketplace
-.claude/skills/amq-cli/        → Claude Code skill (SOURCE OF TRUTH)
+skills/amq-cli/                → Canonical skill source
 ├── SKILL.md
 └── references/
     ├── coop-mode.md
+    ├── cross-project.md
     ├── message-format.md
     └── swarm-mode.md
-.claude/skills/amq-spec/       → Spec workflow skill (SOURCE OF TRUTH)
+skills/amq-spec/               → Canonical spec workflow skill source
 ├── SKILL.md
 └── references/
     └── spec-workflow.md
-.codex/skills/amq-cli/         → Codex CLI skill (synced copy)
-.codex/skills/amq-spec/        → Spec workflow skill (synced copy)
-skills/amq-cli/                → Standalone skill (synced copy, for direct install)
-skills/amq-spec/               → Standalone skill (synced copy, for direct install)
+.claude/skills/amq-cli/        → Symlink → ../../skills/amq-cli
+.claude/skills/amq-spec/       → Symlink → ../../skills/amq-spec
+.agents/skills/amq-cli/        → Symlink → ../../skills/amq-cli
+.agents/skills/amq-spec/       → Symlink → ../../skills/amq-spec
 ```
 
-### Why Three Copies?
+### Why Multiple Locations?
 
 The skill is distributed through multiple channels:
 1. **Claude Code marketplace** — reads from `.claude/skills/`
-2. **Codex CLI installer** — reads from `skills/` (standalone) or `.codex/skills/`
-3. **Project-local development** — both `.claude/` and `.codex/` override user-installed skills
+2. **Codex/agent CLI installer** — reads from `skills/` (standalone) or `.agents/skills/`
+3. **Project-local development** — `.claude/` and `.agents/` override user-installed skills
 
-Each marketplace/installer requires the files to be present (symlinks not universally supported). The `make sync-skills` command keeps all copies identical.
+The canonical source is `skills/`. `.claude/skills/` and `.agents/skills/` are symlinks to `skills/`. Run `make check-skills` to verify symlink integrity.
 
 ### Dev vs Installed Skills
 
 When working in this repo, **project-level skills take precedence** over user-level installed skills:
 
-- `.claude/skills/amq-cli/` loads instead of `~/.claude/skills/amq-cli/`
-- `.claude/skills/amq-spec/` loads instead of `~/.claude/skills/amq-spec/`
-- `.codex/skills/amq-cli/` loads instead of `~/.codex/skills/amq-cli/`
-- `.codex/skills/amq-spec/` loads instead of `~/.codex/skills/amq-spec/`
+- `.claude/skills/amq-cli/` (symlink) loads instead of `~/.claude/skills/amq-cli/`
+- `.claude/skills/amq-spec/` (symlink) loads instead of `~/.claude/skills/amq-spec/`
+- `.agents/skills/amq-cli/` (symlink) loads instead of `~/.agents/skills/amq-cli/`
+- `.agents/skills/amq-spec/` (symlink) loads instead of `~/.agents/skills/amq-spec/`
 
 This lets you test skill changes locally before publishing.
 
 ### Editing Skills
 
-1. Edit files in `.claude/skills/<skill-name>/` (source of truth)
+1. Edit files in `skills/<skill-name>/` (canonical source; symlinked from `.claude/skills/` and `.agents/skills/`)
 2. If publishing: bump `version:` in the skill's `SKILL.md`
-3. Sync to other locations: `make sync-skills`
+3. Verify symlinks: `make check-skills`
 4. Test locally by running Claude Code or Codex in this repo
-5. Commit and push (all three locations will be committed)
-
-**Important**: Never edit `.codex/skills/` or `skills/` directly. Always edit `.claude/skills/` and sync.
+5. Commit and push
 
 ### Installing Skills
 

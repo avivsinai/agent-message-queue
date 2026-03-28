@@ -1,6 +1,7 @@
 package format
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -367,6 +368,58 @@ func TestReplyProjectRoundTrip(t *testing.T) {
 	}
 	if parsed.Header.ReplyTo != "claude@collab" {
 		t.Errorf("reply_to mismatch: got %q, want %q", parsed.Header.ReplyTo, "claude@collab")
+	}
+}
+
+func TestFromProjectRoundTrip(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			Schema:       1,
+			ID:           "from-proj-test",
+			From:         "claude",
+			To:           []string{"claude"},
+			Thread:       "p2p/homelab:s1:claude__yoetz:s1:claude",
+			Created:      "2026-03-28T00:00:00Z",
+			ReplyTo:      "claude@stream1",
+			ReplyProject: "homelab-ai",
+			FromProject:  "homelab-ai",
+		},
+		Body: "Cross-project same-handle message\n",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	parsed, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if parsed.Header.FromProject != "homelab-ai" {
+		t.Errorf("from_project mismatch: got %q, want %q", parsed.Header.FromProject, "homelab-ai")
+	}
+	if parsed.Header.ReplyProject != "homelab-ai" {
+		t.Errorf("reply_project mismatch: got %q, want %q", parsed.Header.ReplyProject, "homelab-ai")
+	}
+}
+
+func TestFromProjectOmittedWhenEmpty(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			Schema:  1,
+			ID:      "no-from-proj",
+			From:    "claude",
+			To:      []string{"codex"},
+			Thread:  "p2p/claude__codex",
+			Created: "2026-03-28T00:00:00Z",
+		},
+		Body: "Local message\n",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(data, []byte("from_project")) {
+		t.Error("from_project should be omitted when empty")
 	}
 }
 
