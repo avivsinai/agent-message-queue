@@ -166,6 +166,54 @@ Prompt.
 	}
 }
 
+func TestInit_RefreshesStaleManagedFragmentWithoutForce(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestWorkflow(t, dir, `---
+hooks:
+  after_create: echo original
+---
+
+Prompt.
+`)
+
+	_, err := Init(InitOptions{
+		WorkflowPath: path,
+		Me:           "codex",
+		Root:         "/tmp/root-a",
+	})
+	if err != nil {
+		t.Fatalf("first Init: %v", err)
+	}
+
+	result, err := Init(InitOptions{
+		WorkflowPath: path,
+		Me:           "codex",
+		Root:         "/tmp/root-b",
+	})
+	if err != nil {
+		t.Fatalf("second Init: %v", err)
+	}
+
+	if !result.Updated {
+		t.Fatal("expected Updated=true when managed fragment changed")
+	}
+	if result.AlreadyOK {
+		t.Fatal("expected AlreadyOK=false when managed fragment was stale")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "/tmp/root-b") {
+		t.Fatal("expected new root in rewritten hook fragment")
+	}
+	if strings.Contains(content, "/tmp/root-a") {
+		t.Fatal("expected stale root to be replaced")
+	}
+}
+
 func TestInit_CheckMode(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTestWorkflow(t, dir, `---
@@ -297,6 +345,13 @@ func TestInit_NoRootPin(t *testing.T) {
 	// Should NOT contain --root flag
 	if strings.Contains(string(data), "--root") {
 		t.Error("expected no --root when root is empty")
+	}
+}
+
+func TestGenerateHookLine_QuotesRootWithSpaces(t *testing.T) {
+	line := generateHookLine("after_run", "codex", "/tmp/root with spaces")
+	if !strings.Contains(line, "--root '/tmp/root with spaces'") {
+		t.Fatalf("expected shell-quoted root, got %q", line)
 	}
 }
 

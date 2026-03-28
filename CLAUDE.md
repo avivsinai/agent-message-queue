@@ -4,7 +4,7 @@ This is the **master agent instruction file** for this repository. Both Claude C
 
 ## Project Overview
 
-Agent Message Queue (AMQ) is a lightweight, file-based message delivery system for local inter-agent communication. It uses Maildir-style atomic delivery (tmp→new→cur) for crash-safe messaging between coding agents on the same machine. No daemon, database, or server required. It also supports cross-project federation and orchestrator integrations such as Symphony hooks and the Cline Kanban bridge.
+Agent Message Queue (AMQ) is a lightweight, file-based message delivery system for local inter-agent communication. It uses Maildir-style atomic delivery (tmp→new→cur) for crash-safe messaging between coding agents on the same machine. No daemon, database, or server required. Conceptually, it is a local interoperability bus for agent sessions: messages first, optional adapters second.
 
 ## Build & Development Commands
 
@@ -227,6 +227,13 @@ Recommended context schema:
 
 All integration metadata lives under `context.orchestrator`.
 
+The formal contract lives in [docs/adapter-contract.md](docs/adapter-contract.md). The short version is:
+
+- AMQ transports messages
+- Adapters convert external lifecycle or task events into AMQ messages
+- Symphony is a lightweight hook adapter
+- Kanban is experimental and depends on a preview WebSocket surface
+
 Canonical fields:
 
 ```json
@@ -235,14 +242,14 @@ Canonical fields:
     "version": 1,
     "name": "symphony",
     "transport": "hook",
-    "event": "after_run",
+    "event": "before_run",
     "workspace": {
       "path": "/abs/path/to/workspace",
       "key": "workspace-name"
     },
     "task": {
       "id": "workspace-name",
-      "state": "completed"
+      "state": "running"
     }
   }
 }

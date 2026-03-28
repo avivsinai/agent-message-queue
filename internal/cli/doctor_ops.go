@@ -194,7 +194,7 @@ func checkKanbanHint() []opsHint {
 	return []opsHint{{
 		Code:    "kanban_detected",
 		Status:  "warn",
-		Message: "Cline Kanban appears to be running on 127.0.0.1:3484. Use 'amq integration kanban bridge' to connect.",
+		Message: "Cline Kanban appears to be running on 127.0.0.1:3484. Use the experimental 'amq integration kanban bridge' adapter to connect.",
 	}}
 }
 

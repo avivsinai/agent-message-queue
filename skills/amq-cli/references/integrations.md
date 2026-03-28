@@ -2,6 +2,8 @@
 
 Use these commands when AMQ is the messaging layer underneath an external orchestrator.
 
+AMQ's core transport is still the **message**. These adapters are intentionally narrow: they translate external lifecycle or task events into ordinary AMQ messages.
+
 ## Root Resolution
 
 For orchestrator-spawned agents, make the queue discoverable even when the process starts outside the repo root:
@@ -24,6 +26,8 @@ flags > AM_ROOT > project .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
 
 ## Symphony
 
+Lightweight optional hook adapter.
+
 Patch `WORKFLOW.md` once:
 
 ```bash
@@ -40,9 +44,11 @@ amq integration symphony emit --event after_run --me codex
 amq integration symphony emit --event before_remove --me codex
 ```
 
+Known limitation: `init` rewrites `WORKFLOW.md` through structured YAML/Markdown parsing, so frontmatter comments and formatting may be normalized.
+
 ## Cline Kanban
 
-Run the websocket bridge:
+Experimental bridge. Run it only if you are comfortable depending on a fast-moving preview WebSocket surface:
 
 ```bash
 amq integration kanban bridge --me codex
@@ -98,3 +104,5 @@ Common labels:
 - `task-state:<state>`
 - `handoff`
 - `blocking`
+
+For the formal envelope and stability notes, see [`docs/adapter-contract.md`](../../../docs/adapter-contract.md).

@@ -289,6 +289,45 @@ func TestEmit_ContextJSON(t *testing.T) {
 	}
 }
 
+func TestEmit_AfterRunDoesNotClaimCompletionState(t *testing.T) {
+	root := setupAMQRoot(t, "codex")
+
+	result, err := Emit(EmitOptions{
+		Event:      "after_run",
+		Me:         "codex",
+		Root:       root,
+		Workspace:  "/tmp/ws",
+		Identifier: "test-id",
+	})
+	if err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	msg, err := format.ReadMessageFile(result.MessagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, label := range msg.Header.Labels {
+		if strings.HasPrefix(label, "task-state:") {
+			t.Fatalf("did not expect a task-state label for after_run, got %q", label)
+		}
+	}
+
+	orchRaw := msg.Header.Context["orchestrator"]
+	orch, ok := orchRaw.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected orchestrator map, got %T", orchRaw)
+	}
+	task, ok := orch["task"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected task map, got %T", orch["task"])
+	}
+	if _, ok := task["state"]; ok {
+		t.Fatalf("did not expect task.state for after_run, got %v", task["state"])
+	}
+}
+
 func TestEmit_MessageInInbox(t *testing.T) {
 	root := setupAMQRoot(t, "codex")
 
@@ -363,7 +402,7 @@ func TestEventToTaskState(t *testing.T) {
 	}{
 		{"after_create", "created"},
 		{"before_run", "running"},
-		{"after_run", "completed"},
+		{"after_run", ""},
 		{"before_remove", "removing"},
 		{"unknown", ""},
 	}

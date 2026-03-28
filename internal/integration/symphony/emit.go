@@ -86,11 +86,7 @@ func Emit(opts EmitOptions) (*EmitResult, error) {
 	)
 
 	// Build labels per spec
-	var extraLabels []string
-	if taskState == "awaiting_review" {
-		extraLabels = append(extraLabels, "handoff")
-	}
-	labels := common.BuildOrchestratorLabels("symphony", taskState, extraLabels...)
+	labels := common.BuildOrchestratorLabels("symphony", taskState)
 
 	// Build message content
 	subject := fmt.Sprintf("[symphony] %s: %s", opts.Event, identifier)
@@ -148,8 +144,6 @@ func eventToTaskState(event string) string {
 		return "created"
 	case "before_run":
 		return "running"
-	case "after_run":
-		return "completed"
 	case "before_remove":
 		return "removing"
 	default:

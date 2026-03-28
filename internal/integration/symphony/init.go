@@ -3,6 +3,7 @@ package symphony
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -55,25 +56,35 @@ func Init(opts InitOptions) (*InitResult, error) {
 		CheckOnly:    opts.Check,
 	}
 
-	// Check current state
+	fragments := map[string]string{}
+	for _, event := range HookEvents {
+		fragments[event] = managedFragment(generateHookLine(event, opts.Me, opts.Root))
+	}
+
+	// Check current state. "HooksFound" means the markers exist. "AlreadyOK"
+	// means the managed fragment exactly matches the requested me/root.
 	result.HooksFound = hasManagedFragment(hooks.AfterCreate) &&
 		hasManagedFragment(hooks.BeforeRun) &&
 		hasManagedFragment(hooks.AfterRun) &&
 		hasManagedFragment(hooks.BeforeRemove)
+	fragmentsMatch := managedFragmentMatches(hooks.AfterCreate, fragments["after_create"]) &&
+		managedFragmentMatches(hooks.BeforeRun, fragments["before_run"]) &&
+		managedFragmentMatches(hooks.AfterRun, fragments["after_run"]) &&
+		managedFragmentMatches(hooks.BeforeRemove, fragments["before_remove"])
 
 	if opts.Check {
+		result.AlreadyOK = result.HooksFound && fragmentsMatch
 		return result, nil
 	}
 
-	if result.HooksFound && !opts.Force {
+	if result.HooksFound && fragmentsMatch && !opts.Force {
 		result.AlreadyOK = true
 		return result, nil
 	}
 
 	// Generate and inject managed fragments
 	for _, event := range HookEvents {
-		line := generateHookLine(event, opts.Me, opts.Root)
-		fragment := managedFragment(line)
+		fragment := fragments[event]
 
 		switch event {
 		case "after_create":
@@ -94,7 +105,11 @@ func Init(opts InitOptions) (*InitResult, error) {
 		return nil, fmt.Errorf("marshal workflow: %w", err)
 	}
 
-	if err := os.WriteFile(opts.WorkflowPath, []byte(content), 0o644); err != nil {
+	info, err := os.Stat(opts.WorkflowPath)
+	if err != nil {
+		return nil, fmt.Errorf("stat workflow: %w", err)
+	}
+	if err := writeFileAtomic(opts.WorkflowPath, []byte(content), info.Mode().Perm()); err != nil {
 		return nil, fmt.Errorf("write workflow: %w", err)
 	}
 
@@ -110,10 +125,10 @@ func Init(opts InitOptions) (*InitResult, error) {
 func generateHookLine(event, me, root string) string {
 	var parts []string
 	parts = append(parts, "amq integration symphony emit")
-	parts = append(parts, "--event", event)
-	parts = append(parts, "--me", me)
+	parts = append(parts, "--event", shellQuote(event))
+	parts = append(parts, "--me", shellQuote(me))
 	if root != "" {
-		parts = append(parts, "--root", root)
+		parts = append(parts, "--root", shellQuote(root))
 	}
 	return strings.Join(parts, " ") + " || true"
 }
@@ -126,6 +141,27 @@ func managedFragment(line string) string {
 // hasManagedFragment returns true if the hook content contains the AMQ managed markers.
 func hasManagedFragment(hookContent string) bool {
 	return strings.Contains(hookContent, ManagedBegin) && strings.Contains(hookContent, ManagedEnd)
+}
+
+func managedFragmentMatches(hookContent, fragment string) bool {
+	existing, ok := extractManagedFragment(hookContent)
+	if !ok {
+		return false
+	}
+	return existing == fragment
+}
+
+func extractManagedFragment(hookContent string) (string, bool) {
+	beginIdx := strings.Index(hookContent, ManagedBegin)
+	if beginIdx == -1 {
+		return "", false
+	}
+	endIdx := strings.Index(hookContent[beginIdx:], ManagedEnd)
+	if endIdx == -1 {
+		return "", false
+	}
+	endIdx += beginIdx + len(ManagedEnd)
+	return hookContent[beginIdx:endIdx], true
 }
 
 // injectFragment inserts or replaces the AMQ managed fragment in the hook content.
@@ -150,4 +186,56 @@ func injectFragment(existing, fragment string) string {
 	// No existing fragment: append after existing content
 	content := strings.TrimRight(existing, "\n")
 	return content + "\n" + fragment + "\n"
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.IndexFunc(value, func(r rune) bool {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return false
+		case r >= 'A' && r <= 'Z':
+			return false
+		case r >= '0' && r <= '9':
+			return false
+		case r == '/' || r == '.' || r == '_' || r == '-' || r == ':':
+			return false
+		default:
+			return true
+		}
+	}) == -1 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".workflow-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
+
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }

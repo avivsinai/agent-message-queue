@@ -26,10 +26,13 @@ func runIntegrationKanban(args []string) error {
 
 func printKanbanUsage() error {
 	lines := []string{
-		"amq integration kanban - Cline Kanban integration",
+		"amq integration kanban - Experimental Cline Kanban bridge",
 		"",
 		"Subcommands:",
 		"  bridge  Run websocket bridge (Kanban runtime -> AMQ messages)",
+		"",
+		"Warning:",
+		"  Experimental adapter. Depends on a preview WebSocket surface that may change.",
 		"",
 		"Examples:",
 		"  amq integration kanban bridge --me codex",
@@ -54,6 +57,9 @@ func runKanbanBridge(args []string) error {
 		"",
 		"Runs a long-lived websocket bridge from the Kanban runtime state stream",
 		"to AMQ integration messages.",
+		"",
+		"Experimental: depends on a preview WebSocket surface and may need updates",
+		"if the upstream runtime changes.",
 		"",
 		"The bridge emits lifecycle/handoff notifications for task session changes.",
 	)

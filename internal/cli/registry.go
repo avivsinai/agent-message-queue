@@ -109,11 +109,11 @@ func init() {
 		},
 		{
 			Name:        "integration",
-			Summary:     "Cross-orchestrator integrations (Symphony, Kanban)",
-			Description: "Connect AMQ to external orchestrators",
+			Summary:     "Optional interoperability adapters",
+			Description: "Connect AMQ to external orchestrators through lightweight adapters",
 			LongDescription: []string{
-				"Bridge AMQ messaging with orchestration tools like OpenAI Symphony and Cline Kanban.",
-				"Agents spawned by these orchestrators can communicate via AMQ.",
+				"AMQ transports messages; adapters convert external lifecycle or task events into AMQ messages.",
+				"Symphony is a lightweight hook adapter. Kanban is experimental.",
 			},
 			Examples: []string{
 				"amq integration symphony init --me claude",
@@ -124,7 +124,7 @@ func init() {
 			Children: []CommandInfo{
 				{
 					Name:    "symphony",
-					Summary: "OpenAI Symphony integration",
+					Summary: "Lightweight Symphony hook adapter",
 					Handler: runIntegrationSymphony,
 					Children: []CommandInfo{
 						{Name: "init", Summary: "Install AMQ hooks into WORKFLOW.md", Handler: runSymphonyInit},
@@ -133,10 +133,10 @@ func init() {
 				},
 				{
 					Name:    "kanban",
-					Summary: "Cline Kanban integration",
+					Summary: "Experimental Cline Kanban bridge",
 					Handler: runIntegrationKanban,
 					Children: []CommandInfo{
-						{Name: "bridge", Summary: "Run bridge (Kanban events -> AMQ messages)", Handler: runKanbanBridge},
+						{Name: "bridge", Summary: "Run experimental bridge (Kanban events -> AMQ messages)", Handler: runKanbanBridge},
 					},
 				},
 			},

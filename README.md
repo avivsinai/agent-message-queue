@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/avivsinai/agent-message-queue)](https://github.com/avivsinai/agent-message-queue/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**The missing coordination layer for multi-agent development.**
+**A local, file-based interoperability bus for agent sessions and adapters.**
 
 When you're running Claude Code and Codex CLI in parallel—reviewing each other's work, dividing tasks, iterating on implementations—how do they talk to each other? AMQ solves this.
 
@@ -15,7 +15,7 @@ Modern AI-assisted development often involves multiple agents working on the sam
 - Reviews require human intermediation
 - Context switching kills productivity
 
-AMQ enables **autonomous multi-agent collaboration**: agents message each other directly, request reviews, share status, and coordinate work—all without a server, daemon, or database.
+AMQ gives agents a **local interoperability bus**: they can send messages, reply in threads, share status, and optionally consume adapter-emitted events through the same queue primitives. The core product is still intentionally small: file-based messages first, lightweight adapters second.
 
 ### Key Features
 
@@ -26,7 +26,7 @@ AMQ enables **autonomous multi-agent collaboration**: agents message each other 
 - **Built for agents** — Priority levels, message kinds, threading, acknowledgments—all the primitives agents need.
 - **Cross-project federation** — Route messages across peer repos, preserve reply routing, and run decision threads that span projects.
 - **Swarm mode** — Join Claude Code Agent Teams, claim tasks, and bridge task notifications into AMQ.
-- **Orchestrator integrations** — Patch Symphony hooks or bridge Cline Kanban runtime events into AMQ with structured metadata.
+- **Optional adapters** — Lightweight Symphony hooks and an experimental Kanban bridge can emit normal AMQ messages with structured metadata.
 - **Operational diagnostics** — `amq doctor --ops` shows queue depth, DLQ state, presence freshness, pending acks, and integration hints.
 
 ![AMQ Demo — Claude and Codex collaborating via split-pane terminal](docs/assets/demo.gif)
@@ -204,11 +204,11 @@ This same chain is used by `amq env`, `amq doctor`, and the integration commands
 
 ## Integrations
 
-AMQ can act as the messaging substrate underneath external orchestrators. Integration messages are self-delivered (`from=<me>`, `to=<me>`) so an agent monitoring its own inbox can react to lifecycle changes without polling another tool directly.
+AMQ transports **messages**, not remote task state. The integration layer is intentionally narrow: optional adapters convert external lifecycle or task events into normal AMQ messages. Integration messages are self-delivered (`from=<me>`, `to=<me>`) so an agent monitoring its own inbox can react without polling another tool directly.
 
 ### Symphony
 
-Use Symphony integration when Codex workspaces are orchestrated through `WORKFLOW.md` hooks:
+Symphony support is a lightweight hook recipe for Codex workspaces orchestrated through `WORKFLOW.md`:
 
 ```bash
 amq integration symphony init --me codex
@@ -216,11 +216,11 @@ amq integration symphony init --me codex --check
 amq integration symphony emit --event after_run --me codex
 ```
 
-`init` patches an AMQ-managed fragment into `WORKFLOW.md`. `emit` is hook-friendly and supports `after_create`, `before_run`, `after_run`, and `before_remove`.
+`init` patches an AMQ-managed fragment into `WORKFLOW.md`. `emit` is hook-friendly and supports `after_create`, `before_run`, `after_run`, and `before_remove`. This stays intentionally small: AMQ does not try to become a Symphony control plane. Current limitation: because `WORKFLOW.md` is parsed and rewritten as structured YAML/Markdown, comments and formatting inside the frontmatter may be normalized.
 
 ### Cline Kanban Bridge
 
-Use the Kanban bridge to mirror runtime session state transitions and review handoffs into AMQ:
+The Kanban bridge is **experimental**. Use it when you want runtime session transitions and review handoffs mirrored into AMQ, with the understanding that it depends on a fast-moving preview WebSocket surface:
 
 ```bash
 amq integration kanban bridge --me codex
@@ -231,7 +231,9 @@ The bridge connects to `ws://127.0.0.1:3484/api/runtime/ws` by default, bootstra
 
 ### Integration Metadata
 
-Integration messages carry structured metadata under `context.orchestrator` and standard labels such as:
+The built-in adapters share a versioned contract under `context.orchestrator`. See [docs/adapter-contract.md](docs/adapter-contract.md) for the formal v1 envelope and stability expectations.
+
+Integration messages also carry standard labels such as:
 
 - `orchestrator`
 - `orchestrator:symphony` or `orchestrator:kanban`
@@ -268,6 +270,7 @@ This guarantees crash-safety: if the process dies mid-write, no corrupt message 
 ## Documentation
 
 - [INSTALL.md](INSTALL.md) — Alternative installation methods
+- [docs/adapter-contract.md](docs/adapter-contract.md) — Formal v1 adapter contract for integration messages
 - [COOP.md](COOP.md) — Co-op mode protocol & best practices
 - [CLAUDE.md](CLAUDE.md) — Agent instructions, CLI reference, architecture
 

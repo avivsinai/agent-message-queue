@@ -29,11 +29,14 @@ func runIntegration(args []string) error {
 
 func printIntegrationUsage() error {
 	lines := []string{
-		"amq integration - Orchestrator integrations",
+		"amq integration - Optional interoperability adapters",
 		"",
 		"Subcommands:",
-		"  symphony  Symphony (Codex orchestrator) integration",
-		"  kanban    Cline Kanban integration",
+		"  symphony  Lightweight Symphony hook adapter",
+		"  kanban    Experimental Cline Kanban bridge",
+		"",
+		"AMQ's core transport is still the message. These adapters convert",
+		"external lifecycle or task events into ordinary AMQ messages.",
 		"",
 		`Use "amq integration <subcommand> --help" for details.`,
 	}
@@ -57,7 +60,7 @@ func runIntegrationSymphony(args []string) error {
 
 func printSymphonyUsage() error {
 	lines := []string{
-		"amq integration symphony - Symphony (Codex orchestrator) integration",
+		"amq integration symphony - Lightweight Symphony hook adapter",
 		"",
 		"Subcommands:",
 		"  init  Patch WORKFLOW.md hooks with AMQ-managed fragment",
@@ -87,6 +90,7 @@ func runSymphonyInit(args []string) error {
 	usage := usageWithFlags(fs, "amq integration symphony init [--workflow <path>] --me <agent> [options]",
 		"",
 		"Patches WORKFLOW.md hooks section with AMQ-managed hook fragments.",
+		"Use this as a small optional adapter, not a workflow control plane.",
 		"",
 		"The managed fragment is marked with comments:",
 		"  # BEGIN AMQ MANAGED",
