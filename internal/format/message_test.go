@@ -1,6 +1,7 @@
 package format
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
