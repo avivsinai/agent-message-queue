@@ -107,6 +107,40 @@ func init() {
 				{Name: "bridge", Summary: "Run bridge process (sync tasks -> AMQ notifications)", Handler: runSwarmBridge},
 			},
 		},
+		{
+			Name:        "integration",
+			Summary:     "Cross-orchestrator integrations (Symphony, Kanban)",
+			Description: "Connect AMQ to external orchestrators",
+			LongDescription: []string{
+				"Bridge AMQ messaging with orchestration tools like OpenAI Symphony and Cline Kanban.",
+				"Agents spawned by these orchestrators can communicate via AMQ.",
+			},
+			Examples: []string{
+				"amq integration symphony init --me claude",
+				"amq integration symphony emit --event after_run --me claude",
+				"amq integration kanban bridge --me claude",
+			},
+			Handler: runIntegration,
+			Children: []CommandInfo{
+				{
+					Name:    "symphony",
+					Summary: "OpenAI Symphony integration",
+					Handler: runIntegrationSymphony,
+					Children: []CommandInfo{
+						{Name: "init", Summary: "Install AMQ hooks into WORKFLOW.md", Handler: runSymphonyInit},
+						{Name: "emit", Summary: "Emit a lifecycle event as an AMQ message", Handler: runSymphonyEmit},
+					},
+				},
+				{
+					Name:    "kanban",
+					Summary: "Cline Kanban integration",
+					Handler: runIntegrationKanban,
+					Children: []CommandInfo{
+						{Name: "bridge", Summary: "Run bridge (Kanban events -> AMQ messages)", Handler: runKanbanBridge},
+					},
+				},
+			},
+		},
 		{Name: "who", Summary: "Show sessions and agents in current project", Handler: runWho},
 		{Name: "doctor", Summary: "Verify installation and configuration", Handler: runDoctor},
 		{Name: "shell-setup", Summary: "Output shell aliases (amc/amx)", Handler: runShellSetup},

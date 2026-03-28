@@ -109,55 +109,85 @@ func runEnv(args []string) error {
 	return writeShellEnv(root, me, shell, *wakeFlag)
 }
 
+// rootSource describes which configuration source provided the resolved root.
+type rootSource string
+
+const (
+	rootSourceFlag       rootSource = "flag"
+	rootSourceEnv        rootSource = "env"
+	rootSourceProjectRC  rootSource = "project_amqrc"
+	rootSourceGlobalEnv  rootSource = "global_env"
+	rootSourceGlobalRC   rootSource = "global_amqrc"
+	rootSourceAutoDetect rootSource = "auto_detect"
+)
+
 // resolveEnvConfig resolves root and me with proper precedence.
 // Precedence:
-//   - Root: flags > env > .amqrc > auto-detect
+//   - Root: flags > env > .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
 //   - Me:   flags > env (NOT from .amqrc)
 func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
+	root, _, me, err := resolveEnvConfigWithSource(rootFlag, meFlag)
+	return root, me, err
+}
+
+// resolveEnvConfigWithSource resolves root and me, returning the winning source for root.
+func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, string, error) {
 	var root, me string
+	var source rootSource
 
 	// Collect values from all sources, then apply precedence
 
-	// 1. Try .amqrc file (for root only, lowest precedence)
+	// 1. Try project .amqrc file (for root only)
 	var rcErr error
 	var rcRoot string
 	rcResult, err := findAndLoadAmqrc()
 	if err != nil {
 		if !errors.Is(err, errAmqrcNotFound) {
-			// Save the error - we'll report it only if no higher-precedence source provides values
 			rcErr = err
 		}
-		// Not found is fine, continue with other sources
 	} else {
 		rcRoot = rcResult.Config.Root
-
-		// Note: 'me' is intentionally not read from .amqrc
-		// Different terminals on the same project may need different agent identities
-
-		// Resolve relative path against .amqrc directory
 		if rcRoot != "" && !filepath.IsAbs(rcRoot) {
 			rcRoot = filepath.Join(rcResult.Dir, rcRoot)
 		}
 	}
 
-	// 2. Auto-detect .agent-mail/ directory
+	// 2. Try global root fallback (AMQ_GLOBAL_ROOT env var)
+	globalEnvRoot := strings.TrimSpace(os.Getenv(envGlobalRoot))
+
+	// 3. Try global ~/.amqrc
+	var globalRCRoot string
+	globalResult, err := loadGlobalAmqrc()
+	if err == nil && globalResult.Config.Root != "" {
+		globalRCRoot = globalResult.Config.Root
+		if !filepath.IsAbs(globalRCRoot) {
+			globalRCRoot = filepath.Join(globalResult.Dir, globalRCRoot)
+		}
+	}
+
+	// 4. Auto-detect .agent-mail/ directory
 	autoRoot := detectAgentMailDir()
 
-	// 3. Environment variables
+	// 5. Environment variables
 	envRootVal := strings.TrimSpace(os.Getenv(envRoot))
 	envMeVal := strings.TrimSpace(os.Getenv(envMe))
 
-	// 4. Command-line flags (already have rootFlag, meFlag)
+	// 6. Command-line flags (already have rootFlag, meFlag)
 
-	// Now apply precedence for root: flags > env > .amqrc > auto-detect
-	if rootFlag != "" {
-		root = rootFlag
-	} else if envRootVal != "" {
-		root = envRootVal
-	} else if rcRoot != "" {
-		root = rcRoot
-	} else if autoRoot != "" {
-		root = autoRoot
+	// Apply precedence: flags > env > project .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
+	switch {
+	case rootFlag != "":
+		root, source = rootFlag, rootSourceFlag
+	case envRootVal != "":
+		root, source = envRootVal, rootSourceEnv
+	case rcRoot != "":
+		root, source = rcRoot, rootSourceProjectRC
+	case globalEnvRoot != "":
+		root, source = globalEnvRoot, rootSourceGlobalEnv
+	case globalRCRoot != "":
+		root, source = globalRCRoot, rootSourceGlobalRC
+	case autoRoot != "":
+		root, source = autoRoot, rootSourceAutoDetect
 	}
 
 	// Apply precedence for me: flags > env (NOT from .amqrc)
@@ -167,34 +197,46 @@ func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 		me = envMeVal
 	}
 
-	// If we would have needed .amqrc values but it was invalid, report the error
-	// Only error if .amqrc was invalid AND no higher-precedence source provided root
-	// Note: Only flags and env vars are higher precedence than .amqrc; auto-detect is lower
+	// Report .amqrc errors only if no higher-precedence source provided root
 	if rcErr != nil {
-		// Check if a higher-precedence source (flags or env) provided root
 		hasHigherPrecedenceRoot := rootFlag != "" || envRootVal != ""
 		if !hasHigherPrecedenceRoot {
-			return "", "", rcErr
+			return "", "", "", rcErr
 		}
-		// Otherwise, warn but continue (higher-precedence source provided values)
 		_ = writeStderr("warning: %v (using override from flags/env)\n", rcErr)
 	}
 
-	// Validate we have at least root
 	if root == "" {
-		return "", "", fmt.Errorf("cannot determine root: no .amqrc found, no .agent-mail/ directory, and AM_ROOT not set")
+		return "", "", "", fmt.Errorf("cannot determine root: no .amqrc found, no .agent-mail/ directory, AM_ROOT not set, and no global config (~/.amqrc or AMQ_GLOBAL_ROOT)")
 	}
 
-	// Normalize and validate me if provided
 	if me != "" {
 		normalized, err := normalizeHandle(me)
 		if err != nil {
-			return "", "", fmt.Errorf("invalid agent handle: %w", err)
+			return "", "", "", fmt.Errorf("invalid agent handle: %w", err)
 		}
 		me = normalized
 	}
 
-	return root, me, nil
+	return root, source, me, nil
+}
+
+// loadGlobalAmqrc loads ~/.amqrc if it exists.
+func loadGlobalAmqrc() (amqrcResult, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return amqrcResult{}, errAmqrcNotFound
+	}
+	path := filepath.Join(home, ".amqrc")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return amqrcResult{}, errAmqrcNotFound
+	}
+	var cfg amqrc
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return amqrcResult{}, fmt.Errorf("invalid ~/.amqrc: %w", err)
+	}
+	return amqrcResult{Config: cfg, Dir: home}, nil
 }
 
 // resolveBaseRoot returns the base root directory (without session suffix).

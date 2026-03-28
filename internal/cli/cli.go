@@ -3,9 +3,10 @@ package cli
 // cli.go defines the top-level command dispatcher and usage text.
 
 const (
-	envRoot     = "AM_ROOT"
-	envMe       = "AM_ME"
-	envBaseRoot = "AM_BASE_ROOT"
+	envRoot       = "AM_ROOT"
+	envMe         = "AM_ME"
+	envBaseRoot   = "AM_BASE_ROOT"
+	envGlobalRoot = "AMQ_GLOBAL_ROOT"
 )
 
 func Run(args []string, version string) error {

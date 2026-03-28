@@ -23,11 +23,13 @@ type doctorResult struct {
 		Warn  int `json:"warn"`
 		Error int `json:"error"`
 	} `json:"summary"`
+	Ops *doctorOpsResult `json:"ops,omitempty"`
 }
 
 func runDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "Output as JSON")
+	opsFlag := fs.Bool("ops", false, "Include runtime operational checks")
 
 	usage := usageWithFlags(fs, "amq doctor [options]",
 		"Verify AMQ installation and configuration.",
@@ -38,6 +40,13 @@ func runDoctor(args []string) error {
 		"  - Mailbox directory permissions",
 		"  - Agent configuration (config.json)",
 		"  - Skill installation (Claude Code / Codex)",
+		"",
+		"With --ops, also checks runtime health:",
+		"  - Queue depth and oldest unread per agent",
+		"  - DLQ count and age",
+		"  - Presence freshness",
+		"  - Ack latency",
+		"  - Integration hints (Kanban, Symphony)",
 	)
 
 	if handled, err := parseFlags(fs, args, usage); err != nil {
@@ -75,6 +84,11 @@ func runDoctor(args []string) error {
 
 	// Check 7: Codex skill
 	result.Checks = append(result.Checks, checkSkill("codex"))
+
+	// Ops checks (runtime health)
+	if *opsFlag && root != "" {
+		result.Ops = runOpsChecks(root)
+	}
 
 	// Calculate summary
 	for _, check := range result.Checks {
@@ -123,7 +137,40 @@ func runDoctor(args []string) error {
 	if result.Summary.Error > 0 {
 		summary += fmt.Sprintf(", %d errors", result.Summary.Error)
 	}
-	return writeStdoutLine(summary)
+	if err := writeStdoutLine(summary); err != nil {
+		return err
+	}
+
+	// Pretty-print ops if present
+	if result.Ops != nil {
+		if err := writeStdoutLine(""); err != nil {
+			return err
+		}
+		if err := writeStdoutLine("Ops:"); err != nil {
+			return err
+		}
+		if err := writeStdoutLine(fmt.Sprintf("  Root: %s (source: %s)", result.Ops.Root.Path, result.Ops.Root.Source)); err != nil {
+			return err
+		}
+		for _, a := range result.Ops.Agents {
+			line := fmt.Sprintf("  %s: %d unread", a.Handle, a.UnreadCount)
+			if a.DLQCount > 0 {
+				line += fmt.Sprintf(", %d DLQ", a.DLQCount)
+			}
+			line += fmt.Sprintf(", presence %s (%.0fs ago)", a.PresenceStatus, a.PresenceAgeSeconds)
+			if err := writeStdoutLine(line); err != nil {
+				return err
+			}
+		}
+		for _, h := range result.Ops.Hints {
+			icon := statusIcons[h.Status]
+			if err := writeStdoutLine(fmt.Sprintf("  %s %s", icon, h.Message)); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func checkBinary() doctorCheck {
