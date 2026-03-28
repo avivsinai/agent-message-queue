@@ -21,16 +21,18 @@ type watchResult struct {
 }
 
 type msgInfo struct {
-	ID         string   `json:"id"`
-	From       string   `json:"from"`
-	Subject    string   `json:"subject"`
-	Thread     string   `json:"thread"`
-	Created    string   `json:"created"`
-	Path       string   `json:"path"`
-	Priority   string   `json:"priority,omitempty"`
-	Kind       string   `json:"kind,omitempty"`
-	Labels     []string `json:"labels,omitempty"`
-	ParseError string   `json:"parse_error,omitempty"`
+	ID           string   `json:"id"`
+	From         string   `json:"from"`
+	Subject      string   `json:"subject"`
+	Thread       string   `json:"thread"`
+	Created      string   `json:"created"`
+	Path         string   `json:"path"`
+	Priority     string   `json:"priority,omitempty"`
+	Kind         string   `json:"kind,omitempty"`
+	Labels       []string `json:"labels,omitempty"`
+	FromProject  string   `json:"from_project,omitempty"`
+	ReplyProject string   `json:"reply_project,omitempty"`
+	ParseError   string   `json:"parse_error,omitempty"`
 }
 
 func runWatch(args []string) error {
@@ -241,15 +243,17 @@ func listNewMessages(inboxNew string, validator *headerValidator) ([]msgInfo, er
 		}
 
 		messages = append(messages, msgInfo{
-			ID:       header.ID,
-			From:     header.From,
-			Subject:  header.Subject,
-			Thread:   header.Thread,
-			Created:  header.Created,
-			Path:     path,
-			Priority: header.Priority,
-			Kind:     header.Kind,
-			Labels:   header.Labels,
+			ID:           header.ID,
+			From:         header.From,
+			Subject:      header.Subject,
+			Thread:       header.Thread,
+			Created:      header.Created,
+			Path:         path,
+			Priority:     header.Priority,
+			Kind:         header.Kind,
+			Labels:       header.Labels,
+			FromProject:  header.FromProject,
+			ReplyProject: header.ReplyProject,
 		})
 	}
 
@@ -289,7 +293,11 @@ func outputWatchResult(jsonOutput bool, event string, messages []msgInfo) error 
 		if subject == "" {
 			subject = "(no subject)"
 		}
-		if err := writeStdout("  %s  %s  %s  %s\n", msg.Created, msg.From, msg.ID, subject); err != nil {
+		fromDisplay := msg.From
+		if msg.FromProject != "" {
+			fromDisplay = msg.From + " (project: " + msg.FromProject + ")"
+		}
+		if err := writeStdout("  %s  %s  %s  %s\n", msg.Created, fromDisplay, msg.ID, subject); err != nil {
 			return err
 		}
 	}
