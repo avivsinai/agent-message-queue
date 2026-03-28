@@ -45,8 +45,9 @@ Field notes:
 Routing fields (set automatically by CLI — do not hand-craft):
 - `reply_to`: optional sender identity for routing replies (e.g., `claude@collab`). Set on cross-session and cross-project sends.
 - `reply_project`: optional sender project name for cross-project reply routing (e.g., `my-project`). Present only on cross-project messages.
+- `from_project`: optional sender project name for identity disambiguation. Present only on cross-project messages. When you see `from: "claude"` and `from_project: "homelab-ai"`, this is a different Claude instance — not an echo from yourself.
 
 Notes:
 - Don’t edit message files directly; use the CLI.
 - The CLI auto-fills `id`, `created`, and a default `thread` when not provided.
-- `reply_to` and `reply_project` are transport metadata stamped by the CLI.
+- `reply_to`, `reply_project`, and `from_project` are transport metadata stamped by the CLI.

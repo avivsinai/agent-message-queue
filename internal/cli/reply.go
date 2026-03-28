@@ -272,6 +272,12 @@ func runReply(args []string) error {
 				}
 				return ""
 			}(),
+			FromProject: func() string {
+				if targetProject != "" {
+					return resolveProject(root)
+				}
+				return ""
+			}(),
 		},
 		Body: body,
 	}
