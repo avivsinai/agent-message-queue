@@ -87,7 +87,9 @@ func runDoctor(args []string) error {
 
 	// Ops checks (runtime health)
 	if *opsFlag && root != "" {
-		result.Ops = runOpsChecks(root)
+		// Resolve root source once here; avoids re-resolving with empty flags in runOpsChecks.
+		_, source, _, _ := resolveEnvConfigWithSource("", "")
+		result.Ops = runOpsChecks(root, string(source))
 	}
 
 	// Calculate summary

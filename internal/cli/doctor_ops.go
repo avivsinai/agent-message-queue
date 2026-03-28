@@ -6,9 +6,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/ack"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
@@ -50,19 +50,17 @@ type opsHint struct {
 	Message string `json:"message"`
 }
 
-func runOpsChecks(root string) *doctorOpsResult {
+func runOpsChecks(root string, rootSource string) *doctorOpsResult {
 	result := &doctorOpsResult{}
 	now := time.Now()
 
-	// Root source
-	_, source, _, _ := resolveEnvConfigWithSource("", "")
 	result.Root = opsRoot{
 		Path:   root,
-		Source: string(source),
+		Source: rootSource,
 	}
 
 	// Load config for agent list
-	cfg, err := config.LoadConfig(root)
+	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
 	if err != nil {
 		result.Hints = append(result.Hints, opsHint{
 			Code:    "config_error",
@@ -141,39 +139,7 @@ func runOpsChecks(root string) *doctorOpsResult {
 			}
 		}
 
-		// Compute ack latency from received acks
-		ackRecvDir := fsq.AgentAcksReceived(root, handle)
-		ackRecvEntries, err := os.ReadDir(ackRecvDir)
-		if err == nil && len(ackRecvEntries) > 0 {
-			var totalLatency float64
-			var count int
-			// Sample up to 10 most recent acks
-			start := 0
-			if len(ackRecvEntries) > 10 {
-				start = len(ackRecvEntries) - 10
-			}
-			for _, e := range ackRecvEntries[start:] {
-				ackPath := filepath.Join(ackRecvDir, e.Name())
-				a, err := ack.Read(ackPath)
-				if err == nil && a.Received != "" {
-					recvTime, err := time.Parse(time.RFC3339Nano, a.Received)
-					if err == nil {
-						info, err := e.Info()
-						if err == nil {
-							latency := recvTime.Sub(info.ModTime()).Seconds() * 1000
-							if latency >= 0 {
-								totalLatency += latency
-								count++
-							}
-						}
-					}
-				}
-			}
-			if count > 0 {
-				avg := totalLatency / float64(count)
-				result.Acks.RecentLatencyMs = &avg
-			}
-		}
+		// Ack latency deferred to v2: requires correlating ack msg_id to original message created timestamp
 
 		// Round to reasonable precision
 		agent.OldestUnreadAgeSeconds = math.Round(agent.OldestUnreadAgeSeconds)
@@ -243,7 +209,7 @@ func checkSymphonyHint() []opsHint {
 		return nil // No WORKFLOW.md
 	}
 	content := string(data)
-	if contains(content, "BEGIN AMQ MANAGED") {
+	if strings.Contains(content, "BEGIN AMQ MANAGED") {
 		return []opsHint{{
 			Code:    "symphony_hooks_installed",
 			Status:  "ok",
@@ -255,17 +221,4 @@ func checkSymphonyHint() []opsHint {
 		Status:  "warn",
 		Message: "WORKFLOW.md found but no AMQ hooks. Use 'amq integration symphony init' to install.",
 	}}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstr(s, substr))
-}
-
-func containsSubstr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

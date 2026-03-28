@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"flag"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -33,6 +34,7 @@ func printKanbanUsage() error {
 		"Examples:",
 		"  amq integration kanban bridge --me codex",
 		"  amq integration kanban bridge --me codex --url ws://127.0.0.1:3484/api/runtime/ws",
+		"  amq integration kanban bridge --me codex --workspace-id my-workspace",
 		"",
 		`Use "amq integration kanban <subcommand> --help" for details.`,
 	}
@@ -44,6 +46,7 @@ func runKanbanBridge(args []string) error {
 	rootFlag := fs.String("root", defaultRoot(), "Root directory for the queue")
 	meFlag := fs.String("me", defaultMe(), "Agent handle (or AM_ME)")
 	urlFlag := fs.String("url", "ws://127.0.0.1:3484/api/runtime/ws", "Kanban runtime websocket URL")
+	workspaceIDFlag := fs.String("workspace-id", "", "Workspace ID (appended as ?workspaceId=<id> query param)")
 	reconnectFlag := fs.Duration("reconnect", 3*time.Second, "Reconnect delay after websocket disconnect")
 	jsonFlag := fs.Bool("json", false, "Emit JSON startup info")
 
@@ -85,10 +88,23 @@ func runKanbanBridge(args []string) error {
 		return UsageError("AMQ root %q does not exist (run 'amq init' first)", root)
 	}
 
+	// Append workspace ID as query parameter if provided
+	wsURL := *urlFlag
+	if *workspaceIDFlag != "" {
+		parsed, parseErr := url.Parse(wsURL)
+		if parseErr != nil {
+			return UsageError("invalid --url: %v", parseErr)
+		}
+		q := parsed.Query()
+		q.Set("workspaceId", *workspaceIDFlag)
+		parsed.RawQuery = q.Encode()
+		wsURL = parsed.String()
+	}
+
 	cfg := kanban.BridgeConfig{
 		AgentHandle:    me,
 		AMQRoot:        root,
-		URL:            *urlFlag,
+		URL:            wsURL,
 		ReconnectDelay: *reconnectFlag,
 	}
 

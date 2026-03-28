@@ -49,7 +49,7 @@ func runEnv(args []string) error {
 		"Outputs shell commands to set AM_ROOT and AM_ME environment variables.",
 		"",
 		"Configuration precedence (highest to lowest):",
-		"  Root: flags > env (AM_ROOT) > .amqrc > auto-detect (.agent-mail/)",
+		"  Root: flags > env (AM_ROOT) > .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect",
 		"  Me:   flags > env (AM_ME)",
 		"",
 		"Note: .amqrc only configures 'root'. Agent identity ('me') is set",

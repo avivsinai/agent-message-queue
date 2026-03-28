@@ -157,6 +157,7 @@ var usageGlobalOptions = []string{
 var usageEnvironment = []string{
 	"  AM_ROOT   Queue root directory (set by coop exec, always a session subdirectory)",
 	"  AM_ME     Default agent handle",
+	"  AMQ_GLOBAL_ROOT     Global root fallback (for agents spawned by external orchestrators)",
 	"  AMQ_NO_UPDATE_CHECK  Disable update check (1/true/yes/on)",
 }
 
