@@ -77,6 +77,27 @@ amq coop init
 eval "$(amq env --me claude)"
 ```
 
+`amq env` resolves the root with the full precedence chain:
+
+```text
+flags > AM_ROOT > project .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
+```
+
+That matters when agents are launched by external orchestrators from outside the project root.
+
+## External Orchestrators
+
+Co-op mode and orchestrator integrations use the same queue primitives. If you are wiring AMQ into Symphony or Cline Kanban, make the queue root discoverable globally so spawned agents land in the same mailbox tree:
+
+```bash
+export AMQ_GLOBAL_ROOT="$HOME/.agent-mail"
+amq integration symphony init --me codex
+amq integration kanban bridge --me codex
+amq doctor --ops
+```
+
+Integration messages are self-delivered and carry `context.orchestrator` plus labels such as `orchestrator:*`, `task-state:*`, `handoff`, and `blocking`, so they fit naturally into the same `amq drain` / `amq reply` workflow used for co-op.
+
 ### Fallback: Notify Hook (if wake unavailable)
 
 `amq wake` uses TIOCSTI which may be unavailable on:

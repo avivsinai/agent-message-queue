@@ -28,6 +28,7 @@ func TestCommandNames(t *testing.T) {
 		"env",
 		"coop",
 		"swarm",
+		"integration",
 		"who",
 		"doctor",
 		"shell-setup",

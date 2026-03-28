@@ -107,6 +107,40 @@ func init() {
 				{Name: "bridge", Summary: "Run bridge process (sync tasks -> AMQ notifications)", Handler: runSwarmBridge},
 			},
 		},
+		{
+			Name:        "integration",
+			Summary:     "Optional interoperability adapters",
+			Description: "Connect AMQ to external orchestrators through lightweight adapters",
+			LongDescription: []string{
+				"AMQ transports messages; adapters convert external lifecycle or task events into AMQ messages.",
+				"Symphony is a lightweight hook adapter. Kanban is experimental.",
+			},
+			Examples: []string{
+				"amq integration symphony init --me claude",
+				"amq integration symphony emit --event after_run --me claude",
+				"amq integration kanban bridge --me claude",
+			},
+			Handler: runIntegration,
+			Children: []CommandInfo{
+				{
+					Name:    "symphony",
+					Summary: "Lightweight Symphony hook adapter",
+					Handler: runIntegrationSymphony,
+					Children: []CommandInfo{
+						{Name: "init", Summary: "Install AMQ hooks into WORKFLOW.md", Handler: runSymphonyInit},
+						{Name: "emit", Summary: "Emit a lifecycle event as an AMQ message", Handler: runSymphonyEmit},
+					},
+				},
+				{
+					Name:    "kanban",
+					Summary: "Experimental Cline Kanban bridge",
+					Handler: runIntegrationKanban,
+					Children: []CommandInfo{
+						{Name: "bridge", Summary: "Run experimental bridge (Kanban events -> AMQ messages)", Handler: runKanbanBridge},
+					},
+				},
+			},
+		},
 		{Name: "who", Summary: "Show sessions and agents in current project", Handler: runWho},
 		{Name: "doctor", Summary: "Verify installation and configuration", Handler: runDoctor},
 		{Name: "shell-setup", Summary: "Output shell aliases (amc/amx)", Handler: runShellSetup},
@@ -123,6 +157,7 @@ var usageGlobalOptions = []string{
 var usageEnvironment = []string{
 	"  AM_ROOT   Queue root directory (set by coop exec, always a session subdirectory)",
 	"  AM_ME     Default agent handle",
+	"  AMQ_GLOBAL_ROOT     Global root fallback (for agents spawned by external orchestrators)",
 	"  AMQ_NO_UPDATE_CHECK  Disable update check (1/true/yes/on)",
 }
 

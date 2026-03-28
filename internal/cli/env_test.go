@@ -761,3 +761,170 @@ func TestIsValidShell(t *testing.T) {
 		}
 	}
 }
+
+// --- Global root resolution tests ---
+
+func TestLoadGlobalAmqrc(t *testing.T) {
+	// Create a fake HOME with ~/.amqrc
+	fakeHome := t.TempDir()
+	rcContent := `{"root": "/global/agent-mail"}`
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), []byte(rcContent), 0o644); err != nil {
+		t.Fatalf("write ~/.amqrc: %v", err)
+	}
+
+	// Override HOME so loadGlobalAmqrc finds it
+	t.Setenv("HOME", fakeHome)
+
+	result, err := loadGlobalAmqrc()
+	if err != nil {
+		t.Fatalf("loadGlobalAmqrc: %v", err)
+	}
+	if result.Config.Root != "/global/agent-mail" {
+		t.Errorf("expected root=/global/agent-mail, got %q", result.Config.Root)
+	}
+	resolvedDir, _ := filepath.EvalSymlinks(result.Dir)
+	resolvedHome, _ := filepath.EvalSymlinks(fakeHome)
+	if resolvedDir != resolvedHome {
+		t.Errorf("expected Dir=%q, got %q", resolvedHome, resolvedDir)
+	}
+}
+
+func TestLoadGlobalAmqrcNotFound(t *testing.T) {
+	// Create a fake HOME without ~/.amqrc
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	_, err := loadGlobalAmqrc()
+	if !errors.Is(err, errAmqrcNotFound) {
+		t.Errorf("expected errAmqrcNotFound, got %v", err)
+	}
+}
+
+func TestLoadGlobalAmqrcInvalidJSON(t *testing.T) {
+	fakeHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), []byte("not json"), 0o644); err != nil {
+		t.Fatalf("write ~/.amqrc: %v", err)
+	}
+	t.Setenv("HOME", fakeHome)
+
+	_, err := loadGlobalAmqrc()
+	if err == nil {
+		t.Error("expected error for invalid JSON in ~/.amqrc")
+	}
+	if errors.Is(err, errAmqrcNotFound) {
+		t.Error("should not be errAmqrcNotFound for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "invalid ~/.amqrc") {
+		t.Errorf("expected 'invalid ~/.amqrc' in error, got: %v", err)
+	}
+}
+
+func TestGlobalAmqrcFallbackWhenProjectAbsent(t *testing.T) {
+	// No project .amqrc, but global ~/.amqrc exists -> global wins
+	projectDir := t.TempDir()
+	fakeHome := t.TempDir()
+
+	rcContent := `{"root": "/global/root"}`
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), []byte(rcContent), 0o644); err != nil {
+		t.Fatalf("write ~/.amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	t.Setenv("HOME", fakeHome)
+	_ = os.Unsetenv("AM_ROOT")
+	_ = os.Unsetenv("AM_ME")
+	_ = os.Unsetenv("AMQ_GLOBAL_ROOT")
+
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	root, source, _, err := resolveEnvConfigWithSource("", "")
+	if err != nil {
+		t.Fatalf("resolveEnvConfigWithSource: %v", err)
+	}
+	if root != "/global/root" {
+		t.Errorf("expected root=/global/root, got %q", root)
+	}
+	if source != rootSourceGlobalRC {
+		t.Errorf("expected source=global_amqrc, got %q", source)
+	}
+}
+
+func TestProjectAmqrcWinsOverGlobalAmqrc(t *testing.T) {
+	// Both project .amqrc and global ~/.amqrc exist -> project wins
+	projectDir := t.TempDir()
+	fakeHome := t.TempDir()
+
+	// Write project .amqrc
+	projRC := `{"root": "/project/root"}`
+	if err := os.WriteFile(filepath.Join(projectDir, ".amqrc"), []byte(projRC), 0o644); err != nil {
+		t.Fatalf("write project .amqrc: %v", err)
+	}
+
+	// Write global ~/.amqrc
+	globalRC := `{"root": "/global/root"}`
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), []byte(globalRC), 0o644); err != nil {
+		t.Fatalf("write ~/.amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	t.Setenv("HOME", fakeHome)
+	_ = os.Unsetenv("AM_ROOT")
+	_ = os.Unsetenv("AM_ME")
+	_ = os.Unsetenv("AMQ_GLOBAL_ROOT")
+
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	root, source, _, err := resolveEnvConfigWithSource("", "")
+	if err != nil {
+		t.Fatalf("resolveEnvConfigWithSource: %v", err)
+	}
+	if root != "/project/root" {
+		t.Errorf("expected root=/project/root, got %q", root)
+	}
+	if source != rootSourceProjectRC {
+		t.Errorf("expected source=project_amqrc, got %q", source)
+	}
+}
+
+func TestAMQGlobalRootEnvWinsOverGlobalAmqrc(t *testing.T) {
+	// AMQ_GLOBAL_ROOT env var takes precedence over ~/.amqrc
+	projectDir := t.TempDir()
+	fakeHome := t.TempDir()
+
+	// Write global ~/.amqrc (lower precedence)
+	globalRC := `{"root": "/global-rc/root"}`
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), []byte(globalRC), 0o644); err != nil {
+		t.Fatalf("write ~/.amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("AMQ_GLOBAL_ROOT", "/global-env/root")
+	_ = os.Unsetenv("AM_ROOT")
+	_ = os.Unsetenv("AM_ME")
+
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	root, source, _, err := resolveEnvConfigWithSource("", "")
+	if err != nil {
+		t.Fatalf("resolveEnvConfigWithSource: %v", err)
+	}
+	if root != "/global-env/root" {
+		t.Errorf("expected root=/global-env/root, got %q", root)
+	}
+	if source != rootSourceGlobalEnv {
+		t.Errorf("expected source=global_env, got %q", source)
+	}
+}
