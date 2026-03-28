@@ -129,6 +129,8 @@ func collectInboxItems(root, me string, includeBody bool, limit int, validator *
 			item.Kind = header.Kind
 			item.Labels = header.Labels
 			item.Context = header.Context
+			item.FromProject = header.FromProject
+			item.ReplyProject = header.ReplyProject
 			if includeBody {
 				item.Body = body
 			}

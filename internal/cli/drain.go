@@ -106,8 +106,12 @@ func runDrain(args []string) error {
 		if kind == "" {
 			kind = "-"
 		}
+		fromDisplay := item.From
+		if item.FromProject != "" {
+			fromDisplay = item.From + " (project: " + item.FromProject + ")"
+		}
 		if err := writeStdout("- From: %s\n  Thread: %s\n  ID: %s\n  Subject: %s\n  Priority: %s\n  Kind: %s\n  Created: %s\n",
-			item.From, item.Thread, item.ID, subject, priority, kind, item.Created); err != nil {
+			fromDisplay, item.Thread, item.ID, subject, priority, kind, item.Created); err != nil {
 			return err
 		}
 		if *includeBodyFlag && item.Body != "" {

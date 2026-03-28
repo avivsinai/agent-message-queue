@@ -15,6 +15,8 @@ type inboxItem struct {
 	Kind          string         `json:"kind,omitempty"`
 	Labels        []string       `json:"labels,omitempty"`
 	Context       map[string]any `json:"context,omitempty"`
+	FromProject   string         `json:"from_project,omitempty"`
+	ReplyProject  string         `json:"reply_project,omitempty"`
 	MovedToCur    bool           `json:"moved_to_cur"`
 	MovedToDLQ    bool           `json:"moved_to_dlq,omitempty"`
 	Acked         bool           `json:"acked"`
