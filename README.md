@@ -24,7 +24,10 @@ AMQ enables **autonomous multi-agent collaboration**: agents message each other 
 - **Human-readable** — JSON frontmatter + Markdown body. Inspect with `cat`, debug with `grep`, version with `git`.
 - **Real-time notifications** — `amq wake` injects terminal notifications when messages arrive (experimental).
 - **Built for agents** — Priority levels, message kinds, threading, acknowledgments—all the primitives agents need.
+- **Cross-project federation** — Route messages across peer repos, preserve reply routing, and run decision threads that span projects.
 - **Swarm mode** — Join Claude Code Agent Teams, claim tasks, and bridge task notifications into AMQ.
+- **Orchestrator integrations** — Patch Symphony hooks or bridge Cline Kanban runtime events into AMQ with structured metadata.
+- **Operational diagnostics** — `amq doctor --ops` shows queue depth, DLQ state, presence freshness, pending acks, and integration hints.
 
 ![AMQ Demo — Claude and Codex collaborating via split-pane terminal](docs/assets/demo.gif)
 
@@ -130,6 +133,14 @@ amq drain --include-body
 amq reply --id <msg_id> --kind review_response --body "LGTM with comments"
 ```
 
+### 4. Inspect Health
+
+```bash
+amq doctor
+amq doctor --ops
+amq doctor --ops --json
+```
+
 ## Message Kinds & Priority
 
 AMQ messages support kinds (`review_request`, `question`, `todo`, etc.) and priority levels (`urgent`, `normal`, `low`). See [COOP.md](COOP.md) for the full protocol.
@@ -138,11 +149,110 @@ AMQ messages support kinds (`review_request`, `question`, `todo`, etc.) and prio
 
 For real-time Claude Code + Codex CLI collaboration patterns, roles, and phased workflows, see [COOP.md](COOP.md).
 
+## Cross-Project Federation
+
+AMQ can route messages across repositories, not just across agents in one checkout. Add a project name plus peer roots to `.amqrc`:
+
+```json
+{
+  "root": ".agent-mail",
+  "project": "app",
+  "peers": {
+    "infra-lib": "/Users/me/src/infra-lib/.agent-mail"
+  }
+}
+```
+
+Then send directly to another project:
+
+```bash
+amq send --to codex --project infra-lib --body "Can you review the shared API change?"
+amq send --to codex@infra-lib:collab --thread decision/release-v0.24 --kind decision \
+  --labels "decision:proposal,project:app,project:infra-lib" \
+  --body "Proposal: align both repos on v0.24"
+```
+
+Replies route back automatically with the stamped `reply_project` metadata. This shipped in v0.22.0 and is the recommended way to coordinate multi-repo agent work without adding a broker.
+
 ## Swarm Mode (Claude Code Agent Teams)
 
 External agents (Codex, etc.) can join Claude Code Agent Teams via `amq swarm join`, claim tasks, and receive notifications through `amq swarm bridge`. Note: the bridge delivers task notifications only; direct messages require relay through the team leader.
 
 For the full command reference, see [CLAUDE.md](CLAUDE.md).
+
+## Global Root Fallback
+
+Most AMQ commands resolve the queue root from the project `.amqrc`. For agents launched outside the repo root by external orchestrators, you can configure a global fallback instead:
+
+```bash
+export AMQ_GLOBAL_ROOT="$HOME/.agent-mail"
+```
+
+Or create `~/.amqrc`:
+
+```json
+{"root": ".agent-mail"}
+```
+
+Root resolution precedence is:
+
+```text
+flags > AM_ROOT > project .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
+```
+
+This same chain is used by `amq env`, `amq doctor`, and the integration commands, so Symphony and Kanban-launched agents can find the correct queue even when they are not started from the project directory.
+
+## Integrations
+
+AMQ can act as the messaging substrate underneath external orchestrators. Integration messages are self-delivered (`from=<me>`, `to=<me>`) so an agent monitoring its own inbox can react to lifecycle changes without polling another tool directly.
+
+### Symphony
+
+Use Symphony integration when Codex workspaces are orchestrated through `WORKFLOW.md` hooks:
+
+```bash
+amq integration symphony init --me codex
+amq integration symphony init --me codex --check
+amq integration symphony emit --event after_run --me codex
+```
+
+`init` patches an AMQ-managed fragment into `WORKFLOW.md`. `emit` is hook-friendly and supports `after_create`, `before_run`, `after_run`, and `before_remove`.
+
+### Cline Kanban Bridge
+
+Use the Kanban bridge to mirror runtime session state transitions and review handoffs into AMQ:
+
+```bash
+amq integration kanban bridge --me codex
+amq integration kanban bridge --me codex --workspace-id my-workspace
+```
+
+The bridge connects to `ws://127.0.0.1:3484/api/runtime/ws` by default, bootstraps from `snapshot`, refreshes from `workspace_state_updated`, and emits notifications only for task session transitions plus `task_ready_for_review`.
+
+### Integration Metadata
+
+Integration messages carry structured metadata under `context.orchestrator` and standard labels such as:
+
+- `orchestrator`
+- `orchestrator:symphony` or `orchestrator:kanban`
+- `task-state:<state>`
+- `handoff` for review-ready transitions
+- `blocking` for failed or interrupted work
+
+That makes integration traffic filterable with existing AMQ primitives such as `amq list --label orchestrator --label handoff`.
+
+## Command Reference
+
+Common command groups:
+
+| Area | Commands |
+|------|----------|
+| Core messaging | `init`, `send`, `list`, `read`, `drain`, `reply`, `thread`, `ack`, `watch`, `monitor` |
+| Collaboration | `coop init`, `coop exec`, `swarm list`, `swarm join`, `swarm tasks`, `swarm bridge` |
+| Integrations | `integration symphony init`, `integration symphony emit`, `integration kanban bridge` |
+| Operations | `presence set`, `presence list`, `who`, `doctor`, `doctor --ops`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |
+
+For the full CLI syntax, examples, and message schema, see [CLAUDE.md](CLAUDE.md).
 
 ## How It Works
 

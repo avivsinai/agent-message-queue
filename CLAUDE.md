@@ -4,7 +4,7 @@ This is the **master agent instruction file** for this repository. Both Claude C
 
 ## Project Overview
 
-Agent Message Queue (AMQ) is a lightweight, file-based message delivery system for local inter-agent communication. It uses Maildir-style atomic delivery (tmp→new→cur) for crash-safe messaging between coding agents on the same machine. No daemon, database, or server required.
+Agent Message Queue (AMQ) is a lightweight, file-based message delivery system for local inter-agent communication. It uses Maildir-style atomic delivery (tmp→new→cur) for crash-safe messaging between coding agents on the same machine. No daemon, database, or server required. It also supports cross-project federation and orchestrator integrations such as Symphony hooks and the Cline Kanban bridge.
 
 ## Build & Development Commands
 
@@ -24,16 +24,15 @@ Requires Go 1.25+ and optionally golangci-lint.
 ```
 cmd/amq/           → Entry point (delegates to cli.Run())
 internal/
-├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch, monitor, reply, dlq, wake, coop, swarm, doctor, who, env, shell-setup, completion, upgrade)
+├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch, monitor, reply, dlq, wake, coop, swarm, integration, doctor)
 ├── fsq/           → File system queue (Maildir delivery, atomic ops, scanning)
 ├── format/        → Message serialization (JSON frontmatter + Markdown body)
 ├── config/        → Config management (meta/config.json)
 ├── ack/           → Acknowledgment tracking
+├── integration/   → Shared integration helpers plus Symphony and Kanban adapters
 ├── swarm/         → Claude Code Agent Teams interop (team config, tasks, bridge, paths)
 ├── thread/        → Thread collection across mailboxes
-├── presence/      → Agent presence metadata
-├── lock/          → File locking (wake process deduplication)
-└── update/        → Version update checking
+└── presence/      → Agent presence metadata
 ```
 
 **Mailbox Layout**:
@@ -62,13 +61,10 @@ internal/
 - `kind` — Message type (see Message Kinds below)
 - `labels` — Arbitrary tags for filtering
 - `context` — JSON object with additional context (paths, focus, etc.)
-- `reply_to` — Cross-session/project reply routing (e.g., `claude@collab`), set automatically
-- `reply_project` — Sender's project name for cross-project reply routing, set automatically
-- `from_project` — Sender's project name for identity disambiguation on cross-project sends
 
 **Thread Naming**: P2P threads use lexicographic ordering: `p2p/<lower_agent>__<higher_agent>`
 
-**Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail`), `AM_ME` (agent handle), `AM_BASE_ROOT` (base root, set by `coop exec` for cross-session resolution), `AMQ_NO_UPDATE_CHECK` (disable update check)
+**Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail/collab`), `AM_ME` (agent handle), `AMQ_GLOBAL_ROOT` (global root fallback for orchestrator-spawned agents), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
 **Session Layout**: The base root directory (`.agent-mail/`) is configured in `.amqrc`. `coop exec` defaults to `--session collab`, so agents get session isolation without explicit flags. Use `--session` to override:
 ```
@@ -81,17 +77,26 @@ internal/
 `AM_ROOT` points to the queue root. If `AM_ROOT` is set and `--root` conflicts, the command errors.
 
 **Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
-- **Root**: flags > env (`AM_ROOT`) > `.amqrc` > auto-detect
+- **Root**: flags > env (`AM_ROOT`) > project `.amqrc` > `AMQ_GLOBAL_ROOT` > `~/.amqrc` > auto-detect
 - **Me**: flags > env (`AM_ME`)
 
 Note: `.amqrc` configures the root directory. Agent identity (`me`) is set per-terminal via `--me` or `AM_ME`.
 
 The `.amqrc` file is JSON:
 ```json
-{"root": ".agent-mail", "project": "my-project", "peers": {"other-project": "/path/to/other/.agent-mail"}}
+{"root": ".agent-mail"}
 ```
 
-Only `root` is required. `project` names the project for cross-project identity (defaults to directory basename). `peers` maps peer project names to their base root paths for cross-project messaging.
+For cross-project federation, `.amqrc` can also include `project` and `peers`:
+```json
+{
+  "root": ".agent-mail",
+  "project": "app",
+  "peers": {
+    "infra-lib": "/Users/me/src/infra-lib/.agent-mail"
+  }
+}
+```
 
 Usage:
 ```bash
@@ -122,23 +127,23 @@ When `--kind` is set but `--priority` is not, priority defaults to `normal`.
 
 ```bash
 amq init --root <path> --agents a,b,c [--force]
-amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--ack] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--project <name>] [--session <name>]
+amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--ack] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>]
 amq list --me <agent> [--new | --cur] [--priority <p>] [--from <h>] [--kind <k>] [--label <l>...] [--limit N] [--offset N] [--json]
 amq read --me <agent> --id <msg_id> [--json]
 amq ack --me <agent> --id <msg_id>
 amq drain --me <agent> [--limit N] [--include-body] [--ack] [--json]
-amq thread --id <thread_id> [--agents <handles>] [--limit N] [--include-body] [--json]
+amq thread --id <thread_id> [--limit N] [--include-body] [--json]
 amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
 amq presence list [--json]
 amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
 amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
-amq monitor --me <agent> [--timeout <duration>] [--poll] [--include-body] [--peek] [--ack] [--limit N] [--json]
-amq reply --me <agent> --id <msg_id> [--body <str|@file|stdin>] [--subject <str>] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--ack]
+amq monitor --me <agent> [--timeout <duration>] [--poll] [--include-body] [--peek] [--json]
+amq reply --me <agent> --id <msg_id> [--body <str|@file|stdin>] [--priority <p>] [--kind <k>]
 amq dlq list --me <agent> [--new | --cur] [--json]
 amq dlq read --me <agent> --id <dlq_id> [--json]
 amq dlq retry --me <agent> --id <dlq_id> [--all] [--force]
 amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
-amq wake --me <agent> [--inject-cmd <cmd>] [--inject-mode auto|raw|paste] [--bell] [--debounce <duration>] [--preview-len <n>] [--interrupt] [--interrupt-label <label>] [--interrupt-priority <p>]
+amq wake --me <agent> [--inject-cmd <cmd>] [--bell] [--debounce <duration>] [--preview-len <n>]
 amq upgrade
 amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--json]
 amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>]
@@ -153,9 +158,11 @@ amq swarm complete --team <name> --task <id> --me <agent> [--agent-id <id>] [--e
 amq swarm fail --team <name> --task <id> --me <agent> [--agent-id <id>] [--reason <str>] [--json]
 amq swarm block --team <name> --task <id> --me <agent> [--agent-id <id>] [--reason <str>] [--json]
 amq swarm bridge --team <name> --me <agent> [--agent-id <id>] [--poll] [--poll-interval <duration>] [--root <path>] [--strict] [--json]
+amq integration symphony init [--workflow <path>] --me <agent> [--root <path>] [--check] [--force] [--json]
+amq integration symphony emit --event <after_create|before_run|after_run|before_remove> --me <agent> [--root <path>] [--workspace <path>] [--identifier <key>] [--json]
+amq integration kanban bridge --me <agent> [--root <path>] [--url <ws://...>] [--workspace-id <id>] [--reconnect <duration>] [--json]
 amq who [--json]
-amq doctor [--json]
-amq completion <bash|zsh|fish>
+amq doctor [--ops] [--json]
 ```
 
 Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has its own flags and doesn't accept these.
@@ -216,6 +223,42 @@ Recommended context schema:
 }
 ```
 
+### Orchestrator Integration Metadata
+
+All integration metadata lives under `context.orchestrator`.
+
+Canonical fields:
+
+```json
+{
+  "orchestrator": {
+    "version": 1,
+    "name": "symphony",
+    "transport": "hook",
+    "event": "after_run",
+    "workspace": {
+      "path": "/abs/path/to/workspace",
+      "key": "workspace-name"
+    },
+    "task": {
+      "id": "workspace-name",
+      "state": "completed"
+    }
+  }
+}
+```
+
+Kanban uses the same top-level object with `name: "kanban"` and `transport: "bridge"`, but its task payload may additionally include `prompt`, `column`, `review_reason`, and `agent_id`. Kanban workspace metadata may include `id`/`path`; Symphony uses `path`/`key`.
+
+Standard label conventions for integration messages:
+
+- Always: `orchestrator`, `orchestrator:<name>`
+- When task state is known: `task-state:<state>`
+- Handoff / review-ready events: add `handoff`
+- Failed / interrupted / blocked events: add `blocking`
+
+These labels are intentionally generic so `amq list --label orchestrator --label handoff` works across integrations.
+
 ## Dead Letter Queue (DLQ)
 
 Messages that fail to parse during `drain` or `monitor` are automatically moved to the Dead Letter Queue instead of `cur/`. This prevents corrupt messages from blocking processing while preserving them for inspection.
@@ -238,6 +281,20 @@ Messages that fail to parse during `drain` or `monitor` are automatically moved 
 - `amq dlq purge` - Permanently remove DLQ messages
 
 Use `--force` with retry to override the max retry limit.
+
+## Doctor / Ops
+
+`amq doctor` verifies installation, root configuration, permissions, config, and skill setup.
+
+`amq doctor --ops` adds runtime checks:
+
+- Queue depth and oldest unread per agent
+- DLQ count and oldest age
+- Presence freshness
+- Pending acknowledgment count and age
+- Integration hints for Kanban and Symphony
+
+Use `amq doctor --ops --json` for machine-readable health output.
 
 ## Multi-Agent Coordination
 
@@ -419,50 +476,51 @@ This repo includes skills for Claude Code and Codex CLI, distributed via the [sk
 
 ```
 .claude-plugin/plugin.json     → Plugin manifest for marketplace
-skills/amq-cli/                → Canonical skill source
+.claude/skills/amq-cli/        → Claude Code skill (SOURCE OF TRUTH)
 ├── SKILL.md
 └── references/
     ├── coop-mode.md
-    ├── cross-project.md
     ├── message-format.md
     └── swarm-mode.md
-skills/amq-spec/               → Canonical spec workflow skill source
+.claude/skills/amq-spec/       → Spec workflow skill (SOURCE OF TRUTH)
 ├── SKILL.md
 └── references/
     └── spec-workflow.md
-.claude/skills/amq-cli/        → Symlink → ../../skills/amq-cli
-.claude/skills/amq-spec/       → Symlink → ../../skills/amq-spec
-.agents/skills/amq-cli/        → Symlink → ../../skills/amq-cli
-.agents/skills/amq-spec/       → Symlink → ../../skills/amq-spec
+.codex/skills/amq-cli/         → Codex CLI skill (synced copy)
+.codex/skills/amq-spec/        → Spec workflow skill (synced copy)
+skills/amq-cli/                → Standalone skill (synced copy, for direct install)
+skills/amq-spec/               → Standalone skill (synced copy, for direct install)
 ```
 
-### Why Multiple Locations?
+### Why Three Copies?
 
 The skill is distributed through multiple channels:
 1. **Claude Code marketplace** — reads from `.claude/skills/`
-2. **Codex/agent CLI installer** — reads from `skills/` (standalone) or `.agents/skills/`
-3. **Project-local development** — `.claude/` and `.agents/` override user-installed skills
+2. **Codex CLI installer** — reads from `skills/` (standalone) or `.codex/skills/`
+3. **Project-local development** — both `.claude/` and `.codex/` override user-installed skills
 
-The canonical source is `skills/`. `.claude/skills/` and `.agents/skills/` are symlinks to `skills/`. Run `make check-skills` to verify symlink integrity.
+Each marketplace/installer requires the files to be present (symlinks not universally supported). The `make sync-skills` command keeps all copies identical.
 
 ### Dev vs Installed Skills
 
 When working in this repo, **project-level skills take precedence** over user-level installed skills:
 
-- `.claude/skills/amq-cli/` (symlink) loads instead of `~/.claude/skills/amq-cli/`
-- `.claude/skills/amq-spec/` (symlink) loads instead of `~/.claude/skills/amq-spec/`
-- `.agents/skills/amq-cli/` (symlink) loads instead of `~/.agents/skills/amq-cli/`
-- `.agents/skills/amq-spec/` (symlink) loads instead of `~/.agents/skills/amq-spec/`
+- `.claude/skills/amq-cli/` loads instead of `~/.claude/skills/amq-cli/`
+- `.claude/skills/amq-spec/` loads instead of `~/.claude/skills/amq-spec/`
+- `.codex/skills/amq-cli/` loads instead of `~/.codex/skills/amq-cli/`
+- `.codex/skills/amq-spec/` loads instead of `~/.codex/skills/amq-spec/`
 
 This lets you test skill changes locally before publishing.
 
 ### Editing Skills
 
-1. Edit files in `skills/<skill-name>/` (canonical source; symlinked from `.claude/skills/` and `.agents/skills/`)
+1. Edit files in `.claude/skills/<skill-name>/` (source of truth)
 2. If publishing: bump `version:` in the skill's `SKILL.md`
-3. Verify symlinks: `make check-skills`
+3. Sync to other locations: `make sync-skills`
 4. Test locally by running Claude Code or Codex in this repo
-5. Commit and push
+5. Commit and push (all three locations will be committed)
+
+**Important**: Never edit `.codex/skills/` or `skills/` directly. Always edit `.claude/skills/` and sync.
 
 ### Installing Skills
 

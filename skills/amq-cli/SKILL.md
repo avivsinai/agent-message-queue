@@ -37,23 +37,25 @@ When running inside `coop exec`, the environment is already configured:
 
 When running **outside** `coop exec` (e.g. new conversation, manual terminal):
 
-- **Use `amq env` to resolve the root** — it reads `.amqrc` and returns the base root:
+- **Use `amq env` to resolve the root** — it reads the full chain (project `.amqrc`, `AMQ_GLOBAL_ROOT`, `~/.amqrc`) and returns the resolved root:
   ```bash
-  eval "$(amq env --me claude)"          # sets AM_ME + AM_ROOT from .amqrc
+  eval "$(amq env --me claude)"          # sets AM_ME + AM_ROOT from resolved config
   ```
-- Or resolve and pin explicitly per command (never hardcode the root — read it from `.amqrc`):
+- Or resolve and pin explicitly per command (never hardcode the root — read it from `amq env`):
   ```bash
   AM_ME=claude AM_ROOT=$(amq env --json | jq -r .root) amq send --to codex --body "hello"
   ```
 - **Do NOT append a session name** (e.g. `/collab`) unless you intentionally want an isolated session. Outside `coop exec`, the base root from `.amqrc` is where agents live.
 - **Pitfall**: `coop exec` defaults to `--session collab` (i.e. `.agent-mail/collab`). If you manually use `.agent-mail/collab` outside `coop exec`, messages go to a different mailbox tree than `.agent-mail`. Only use a session path if the target agent is also in that session.
+- **Global fallback**: external orchestrators often start outside the repo root. In that case, set `AMQ_GLOBAL_ROOT` or `~/.amqrc` so `amq env`, `amq doctor`, and integration commands resolve the same queue.
 
 ### Root Resolution Truth-Table
 
 | Context | Command | AM_ROOT resolves to |
 |---------|---------|---------------------|
-| Outside `coop exec` | `amq env --me claude` | base root from `.amqrc` (e.g. `.agent-mail`) |
-| Outside `coop exec`, isolated session | `amq env --session auth --me claude` | `.agent-mail/auth` |
+| Outside `coop exec` | `amq env --me claude` | resolved base root from project `.amqrc`, `AMQ_GLOBAL_ROOT`, or `~/.amqrc` |
+| Outside `coop exec`, no project `.amqrc` | `amq env --me claude` | `AMQ_GLOBAL_ROOT` or `~/.amqrc` |
+| Outside `coop exec`, isolated session | `amq env --session auth --me claude` | `<resolved-base-root>/auth` |
 | Inside `coop exec` (no flags) | automatic | `.agent-mail/collab` (default session) |
 | Inside `coop exec --session X` | automatic | `.agent-mail/X` |
 
@@ -80,6 +82,25 @@ amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Terminal 2
 ```
 
 Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
+
+## Integration & Ops Quick Reference
+
+```bash
+# Global fallback for orchestrator-spawned agents
+export AMQ_GLOBAL_ROOT="$HOME/.agent-mail"
+
+# Symphony hooks
+amq integration symphony init --me codex
+amq integration symphony emit --event after_run --me codex
+
+# Cline Kanban bridge
+amq integration kanban bridge --me codex
+amq integration kanban bridge --me codex --workspace-id my-workspace
+
+# Runtime diagnostics
+amq doctor --ops
+amq doctor --ops --json
+```
 
 ## Session Layout
 
@@ -221,5 +242,6 @@ For detailed protocols, read the reference file FIRST, then follow its instructi
 
 - [references/coop-mode.md](references/coop-mode.md) — Co-op protocol: roles, phased flow, collaboration modes
 - [references/swarm-mode.md](references/swarm-mode.md) — Swarm mode: agent teams, bridge, task workflow
+- [references/integrations.md](references/integrations.md) — Symphony + Kanban integration commands, global root fallback, ops checks
 - [references/message-format.md](references/message-format.md) — Message format: frontmatter schema, field reference
 - [references/cross-project.md](references/cross-project.md) — Cross-project routing: peer config, addressing, decision threads
