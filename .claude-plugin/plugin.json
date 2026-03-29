@@ -1,6 +1,7 @@
 {
   "name": "amq-cli",
-  "description": "Agent Message Queue - atomic Maildir-style message delivery for inter-agent communication with co-op mode",
+  "version": "0.25.1",
+  "description": "Agent Message Queue - file-based inter-agent messaging with co-op mode, cross-project federation, and orchestrator integrations",
   "author": {
     "name": "Aviv Sinai",
     "url": "https://github.com/avivsinai"
@@ -8,5 +9,5 @@
   "repository": "https://github.com/avivsinai/agent-message-queue",
   "license": "MIT",
   "skills": "./skills/",
-  "keywords": ["messaging", "agents", "maildir", "queue", "inter-agent", "coop", "spec"]
+  "keywords": ["messaging", "agents", "maildir", "queue", "inter-agent", "coop", "federation", "integration", "spec"]
 }

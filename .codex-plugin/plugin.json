@@ -16,11 +16,13 @@
     "queue",
     "inter-agent",
     "coop",
-    "amq-spec"
+    "federation",
+    "integration",
+    "spec"
   ],
   "interface": {
     "displayName": "Agent Message Queue",
-    "shortDescription": "Atomic Maildir-style message delivery for inter-agent communication with co-op mode",
+    "shortDescription": "File-based inter-agent messaging with co-op mode, federation, and orchestrator integrations",
     "category": "Developer Tools"
   }
 }
