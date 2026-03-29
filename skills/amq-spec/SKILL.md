@@ -2,10 +2,14 @@
 name: amq-spec
 version: 1.2.0
 description: >-
-  Collaborative spec workflow between two agents. Use when the user says
-  "spec", "design with", "collaborative spec", "spec with codex",
-  "spec with claude", or any variation of "let's design X with Y".
-  This is a structured multi-phase protocol — do NOT shortcut it.
+  Parallel-research-then-converge design workflow between two agents.
+  TRIGGER when: "spec X with codex/claude", "design X together",
+  "both agents think through X", "brainstorm architecture together",
+  "parallel research then joint proposal", "think through separately
+  then align", "careful thought from both sides before coding".
+  DO NOT TRIGGER: splitting implementation work between agents,
+  sending messages or reviews (see /amq-cli), implementing completed
+  designs, or creating document templates.
 argument-hint: "<description of what to design> [with <partner>]"
 metadata:
   short-description: Multi-agent collaborative spec workflow

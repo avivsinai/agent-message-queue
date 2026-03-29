@@ -27,10 +27,12 @@ type amqrcResult struct {
 
 // envOutput is the JSON output format for amq env --json.
 type envOutput struct {
-	Root  string `json:"root,omitempty"`
-	Me    string `json:"me,omitempty"`
-	Shell string `json:"shell,omitempty"`
-	Wake  bool   `json:"wake,omitempty"`
+	Root    string            `json:"root,omitempty"`
+	Me      string            `json:"me,omitempty"`
+	Shell   string            `json:"shell,omitempty"`
+	Wake    bool              `json:"wake,omitempty"`
+	Project string            `json:"project,omitempty"`
+	Peers   map[string]string `json:"peers,omitempty"`
 }
 
 // errAmqrcNotFound is returned when .amqrc is not found (non-fatal).
@@ -101,6 +103,24 @@ func runEnv(args []string) error {
 			Me:    me,
 			Shell: shell,
 			Wake:  *wakeFlag,
+		}
+		// Include project identity and peer config from .amqrc
+		// so agents can discover cross-project routing without
+		// reading .amqrc directly.
+		if rcResult, rcErr := findAmqrcForRoot(root); rcErr == nil {
+			out.Project = rcResult.Config.Project
+			if out.Project == "" {
+				// Only infer project from directory basename for
+				// project-local .amqrc, not global ~/.amqrc (which
+				// is a queue locator, not a project identity).
+				home, _ := os.UserHomeDir()
+				if home == "" || rcResult.Dir != home {
+					out.Project = filepath.Base(rcResult.Dir)
+				}
+			}
+			if len(rcResult.Config.Peers) > 0 {
+				out.Peers = rcResult.Config.Peers
+			}
 		}
 		return writeJSON(os.Stdout, out)
 	}

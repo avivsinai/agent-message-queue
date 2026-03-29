@@ -2,16 +2,14 @@
 name: amq-cli
 version: 1.8.0
 description: >-
-  Coordinate agents via the AMQ CLI for file-based inter-agent messaging.
-  AMQ is a local interoperability bus for agent sessions and adapters: it
-  handles conversation, routing, and thread continuity, while task boards,
-  swarms, and autonomous pipelines keep owning orchestration. Use when you
-  need to send messages to another agent (Claude/Codex), receive messages
-  from partner agents, set up co-op mode between Claude Code and Codex CLI,
-  or manage agent-to-agent communication in any multi-agent workflow.
-  Triggers include "message codex", "talk to claude", "collaborate with
-  partner agent", "AMQ", "inter-agent messaging", "agent coordination".
-  For spec/design tasks use the /spec command instead.
+  Send and receive messages between coding agents via AMQ CLI.
+  TRIGGER when: "message codex/claude", "send to partner agent",
+  "check inbox", "drain messages", "co-op mode", "AMQ",
+  "cross-project peers", "agent coordination", "wake agent",
+  "swarm join", "diagnose delivery".
+  DO NOT TRIGGER: RabbitMQ/Kafka design, Kubernetes networking,
+  CI/CD pipelines, Slack bots, or single-agent tasks with no partner.
+  For collaborative spec/design, consider /spec.
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
   compatibility: claude-code, codex-cli

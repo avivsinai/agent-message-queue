@@ -610,6 +610,132 @@ func TestRunEnvJSON(t *testing.T) {
 	if result.Me != "" {
 		t.Errorf("expected me=empty, got %q", result.Me)
 	}
+	// Project defaults to directory basename when not set explicitly
+	expectedProject := filepath.Base(root)
+	if result.Project != expectedProject {
+		t.Errorf("expected project=%q, got %q", expectedProject, result.Project)
+	}
+	// No peers configured
+	if result.Peers != nil {
+		t.Errorf("expected peers=nil, got %v", result.Peers)
+	}
+}
+
+func TestRunEnvJSONWithPeers(t *testing.T) {
+	root := t.TempDir()
+
+	// Write .amqrc with project + peers
+	rcContent := `{"root": ".agent-mail", "project": "my-app", "peers": {"infra": "/tmp/infra/.agent-mail", "api": "/tmp/api/.agent-mail"}}`
+	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	_ = os.Unsetenv("AM_ROOT")
+	_ = os.Unsetenv("AM_ME")
+
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// Capture stdout
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runEnv([]string{"--json", "--me", "claude"})
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("runEnv: %v", err)
+	}
+
+	buf := make([]byte, 2048)
+	n, _ := r.Read(buf)
+	output := string(buf[:n])
+
+	var result envOutput
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal: %v, output was: %s", err, output)
+	}
+
+	if result.Project != "my-app" {
+		t.Errorf("expected project=%q, got %q", "my-app", result.Project)
+	}
+	if len(result.Peers) != 2 {
+		t.Fatalf("expected 2 peers, got %d", len(result.Peers))
+	}
+	if result.Peers["infra"] != "/tmp/infra/.agent-mail" {
+		t.Errorf("expected peer infra=%q, got %q", "/tmp/infra/.agent-mail", result.Peers["infra"])
+	}
+	if result.Peers["api"] != "/tmp/api/.agent-mail" {
+		t.Errorf("expected peer api=%q, got %q", "/tmp/api/.agent-mail", result.Peers["api"])
+	}
+}
+
+func TestRunEnvJSONGlobalAmqrcNoProject(t *testing.T) {
+	// Regression: global ~/.amqrc should not infer project from home dir basename.
+	fakeHome := t.TempDir()
+
+	// Write ~/.amqrc (global, no project field)
+	rcContent := `{"root": ".agent-mail"}`
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), []byte(rcContent), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	// Create the .agent-mail dir so root resolves
+	if err := os.MkdirAll(filepath.Join(fakeHome, ".agent-mail"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Use an unrelated cwd with no project .amqrc
+	cwd := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	oldHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", oldHome) }()
+
+	_ = os.Unsetenv("AM_ROOT")
+	_ = os.Unsetenv("AM_ME")
+	_ = os.Unsetenv("AMQ_GLOBAL_ROOT")
+	_ = os.Setenv("HOME", fakeHome)
+
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runEnv([]string{"--json"})
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("runEnv: %v", err)
+	}
+
+	buf := make([]byte, 1024)
+	n, _ := r.Read(buf)
+	output := string(buf[:n])
+
+	var result envOutput
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal: %v, output was: %s", err, output)
+	}
+
+	// Project should be empty — global ~/.amqrc is a queue locator, not a project identity
+	if result.Project != "" {
+		t.Errorf("expected project=empty for global ~/.amqrc, got %q", result.Project)
+	}
 }
 
 func TestRunEnvPosix(t *testing.T) {
