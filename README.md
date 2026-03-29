@@ -6,7 +6,7 @@
 
 **A local, file-based interoperability bus for agent sessions and adapters.**
 
-When you're running Claude Code and Codex CLI in parallel—reviewing each other's work, dividing tasks, iterating on implementations—how do they talk to each other? AMQ solves this.
+AMQ manages the conversation: agent-to-agent messaging, thread continuity, cross-session and cross-project routing, handoff state, and operational visibility. It does not try to own task decomposition, worktree management, dependency scheduling, or scheduler execution; Claude Code teams, Codex, Kanban, Symphony, and similar orchestrators stay one layer above it.
 
 ## Why AMQ?
 
@@ -15,7 +15,7 @@ Modern AI-assisted development often involves multiple agents working on the sam
 - Reviews require human intermediation
 - Context switching kills productivity
 
-AMQ gives agents a **local interoperability bus**: they can send messages, reply in threads, share status, and optionally consume adapter-emitted events through the same queue primitives. The core product is still intentionally small: file-based messages first, lightweight adapters second.
+AMQ gives agents a **local interoperability bus**: they can send messages, reply in threads, share status, and optionally consume adapter-emitted events through the same queue primitives. The core product stays intentionally small: file-based messages first, lightweight adapters second.
 
 ### Key Features
 
@@ -172,7 +172,7 @@ amq send --to codex@infra-lib:collab --thread decision/release-v0.24 --kind deci
   --body "Proposal: align both repos on v0.24"
 ```
 
-Replies route back automatically with the stamped `reply_project` metadata. This shipped in v0.22.0 and is the recommended way to coordinate multi-repo agent work without adding a broker.
+Replies route back automatically with the stamped `reply_project` metadata. When `from` matches your own handle, inspect `from_project` before treating the message as an echo; the same handle in a different project is a legitimate cross-project sender. This shipped in v0.22.0 and is the recommended way to coordinate multi-repo agent work without adding a broker.
 
 ## Swarm Mode (Claude Code Agent Teams)
 

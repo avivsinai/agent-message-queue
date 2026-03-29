@@ -2,6 +2,8 @@
 
 Co-op mode enables multiple agents (e.g., Claude Code and Codex CLI) to work **in parallel where safe, coordinate where risky**, leveraging cognitive diversity (different models = different training = different blind spots) to catch errors that same-model review would miss.
 
+AMQ is the communication layer in this setup, not the coordinator. The initiator, the pair, or an external orchestrator still owns the task plan; AMQ keeps the conversation, handoffs, and thread continuity intact.
+
 ## Swarm vs Co-op
 
 - **Co-op**: lightweight, peer-to-peer messaging between agents via AMQ threads (`p2p/...`).

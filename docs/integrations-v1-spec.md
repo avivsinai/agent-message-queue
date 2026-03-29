@@ -1,5 +1,7 @@
 # AMQ Integrations v1 — Frozen Spec
 
+AMQ stays one layer below the orchestrator. Adapters convert external lifecycle and handoff events into ordinary AMQ messages; they do not turn AMQ into a task board, pipeline runner, scheduler, or control plane.
+
 ## Scope
 
 Ship in one PR:

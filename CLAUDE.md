@@ -4,7 +4,9 @@ This is the **master agent instruction file** for this repository. Both Claude C
 
 ## Project Overview
 
-Agent Message Queue (AMQ) is a lightweight, file-based message delivery system for local inter-agent communication. It uses Maildir-style atomic delivery (tmp→new→cur) for crash-safe messaging between coding agents on the same machine. No daemon, database, or server required. Conceptually, it is a local interoperability bus for agent sessions: messages first, optional adapters second.
+Agent Message Queue (AMQ) is a lightweight, file-based message delivery system for local inter-agent communication. It uses Maildir-style atomic delivery (tmp→new→cur) for crash-safe messaging between coding agents on the same machine. No daemon, database, or server required. Conceptually, it is a local interoperability bus for agent sessions: AMQ manages the conversation, while orchestrators such as Claude Code teams, Codex workflows, Kanban, and Symphony keep owning the task.
+
+AMQ owns agent-to-agent messaging, thread continuity, cross-project/session routing, handoff state, and `doctor --ops`. It does not own task decomposition, worktree management, dependency scheduling, PR landing, or cron/scheduler execution.
 
 ## Build & Development Commands
 
