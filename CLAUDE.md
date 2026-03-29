@@ -477,6 +477,13 @@ The pre-push hook runs `make ci` (vet, lint, test, smoke) before allowing pushes
 - Do not edit message files in place; always use the CLI
 - Cleanup is explicit (`amq cleanup`), never automatic
 
+## Documentation Policy
+
+- Keep `docs/` evergreen. It should contain durable reference material such as architecture notes, protocol contracts, and operational guidance.
+- Do not commit frozen specs, design drafts, or implementation plans into `docs/`.
+- Do not merge spec documents to `main`, and do not keep them in feature branches intended for PRs either.
+- Spec work belongs in the AMQ spec workflow, PR descriptions, issues, or other ephemeral collaboration artifacts rather than committed repository docs.
+
 ## Skill Development
 
 This repo includes skills for Claude Code and Codex CLI, distributed via the [skills-marketplace](https://github.com/avivsinai/skills-marketplace).
