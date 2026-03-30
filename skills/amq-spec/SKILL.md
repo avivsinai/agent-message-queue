@@ -62,9 +62,9 @@ Send the user's problem description verbatim — your own analysis goes in the
 research phase, not the kickoff. If you pre-analyze, you bias the partner's
 independent research, which defeats the purpose of having two perspectives.
 
-## Label Convention (MANDATORY)
+## Label Convention
 
-Use existing AMQ kinds plus labels to express spec workflow semantics:
+Labels are how both agents and the receiver-side protocol table know which phase the conversation is in. Use existing AMQ kinds plus labels to express spec workflow semantics:
 
 | Phase | Kind | Labels |
 |---|---|---|

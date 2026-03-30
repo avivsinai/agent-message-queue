@@ -47,8 +47,13 @@ The reason: `coop exec` sets `AM_ROOT` and `AM_ME` precisely for the session. Pa
 **Outside `coop exec`** — resolve the root from config, don't hardcode it:
 ```bash
 eval "$(amq env --me claude)"          # reads .amqrc chain, sets both vars
+
+# Or pin per-command without polluting the shell (useful in scripts):
+AM_ME=claude AM_ROOT=$(amq env --json | jq -r .root) amq send --to codex --body "hello"
 ```
 Why not hardcode? The root path depends on the config chain (project `.amqrc` → `AMQ_GLOBAL_ROOT` → `~/.amqrc`). Hardcoding skips this and breaks when the project moves or config changes.
+
+**Global fallback**: Orchestrator-spawned agents often start outside the repo root where no project `.amqrc` exists. Set `AMQ_GLOBAL_ROOT` or `~/.amqrc` so `amq env` and `amq doctor` still resolve the correct queue.
 
 **Session pitfall**: `coop exec` defaults to `--session collab` (i.e., `.agent-mail/collab`). Outside `coop exec`, the base root is `.agent-mail` (no session suffix). These are different mailbox trees — don't mix them up.
 
