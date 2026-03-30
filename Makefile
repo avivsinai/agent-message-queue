@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint ci smoke check-skills
+.PHONY: build test fmt fmt-check vet lint ci smoke check-skills release-skills
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -39,3 +39,7 @@ check-skills:
 	@diff -rq skills/amq-cli .claude/skills/amq-cli || (echo "❌ amq-cli content mismatch" && exit 1)
 	@diff -rq skills/amq-spec .claude/skills/amq-spec || (echo "❌ amq-spec content mismatch" && exit 1)
 	@echo "✓ Skill symlinks valid"
+
+release-skills:
+	@test -n "$(VERSION)" || (echo "usage: make release-skills VERSION=0.28.0" && exit 1)
+	./scripts/release-skills.sh "$(VERSION)"

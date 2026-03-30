@@ -1,10 +1,10 @@
-name: Publish Skill
+name: Publish Skills
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'skills/**'
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -26,33 +26,32 @@ jobs:
 
       - name: Publish skills
         run: |
+          # Extract version from tag (v0.28.0 -> 0.28.0) or fall back to SKILL.md
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+
           FAILED=0
 
-          for SKILL in amq-cli amq-spec; do
-            VERSION=$(grep -oP 'version:\s*\K[\d.]+' "skills/$SKILL/SKILL.md") || true
-            if [ -z "$VERSION" ]; then
-              echo "ERROR: Could not extract version from skills/$SKILL/SKILL.md"
-              FAILED=1
-              continue
-            fi
-            echo "Publishing $SKILL version: $VERSION"
+          for dir in skills/*/; do
+            [ -f "$dir/SKILL.md" ] || continue
+            SKILL=$(basename "$dir")
+            VERSION="${TAG_VERSION}"
+
+            echo "Publishing $SKILL version $VERSION"
 
             if OUTPUT=$(npx skild publish \
-              --dir "skills/$SKILL" \
+              --dir "$dir" \
               --alias "$SKILL" \
               --skill-version "$VERSION" 2>&1); then
               echo "$OUTPUT"
               echo "✓ Published $SKILL version $VERSION"
             elif echo "$OUTPUT" | grep -q "Version already exists"; then
               echo "$OUTPUT"
-              echo ""
-              echo "⚠ $SKILL version $VERSION already published - skipping"
-              echo "  To publish updates, bump version in skills/$SKILL/SKILL.md"
+              echo "⚠ $SKILL version $VERSION already published — skipping"
             elif echo "$OUTPUT" | grep -q "Alias already in use"; then
               echo "$OUTPUT"
               echo "⚠ Alias '$SKILL' taken — retrying without alias..."
               if OUTPUT2=$(npx skild publish \
-                --dir "skills/$SKILL" \
+                --dir "$dir" \
                 --skill-version "$VERSION" 2>&1); then
                 echo "$OUTPUT2"
                 echo "✓ Published $SKILL version $VERSION (without alias)"
