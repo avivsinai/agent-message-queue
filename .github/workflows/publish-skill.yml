@@ -48,6 +48,19 @@ jobs:
               echo ""
               echo "⚠ $SKILL version $VERSION already published - skipping"
               echo "  To publish updates, bump version in skills/$SKILL/SKILL.md"
+            elif echo "$OUTPUT" | grep -q "Alias already in use"; then
+              echo "$OUTPUT"
+              echo "⚠ Alias '$SKILL' taken — retrying without alias..."
+              if OUTPUT2=$(npx skild publish \
+                --dir "skills/$SKILL" \
+                --skill-version "$VERSION" 2>&1); then
+                echo "$OUTPUT2"
+                echo "✓ Published $SKILL version $VERSION (without alias)"
+              else
+                echo "✖ Publish failed for $SKILL (even without alias)"
+                echo "$OUTPUT2"
+                FAILED=1
+              fi
             else
               echo "✖ Publish failed for $SKILL"
               echo "$OUTPUT"
