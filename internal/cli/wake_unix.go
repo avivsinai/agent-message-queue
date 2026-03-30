@@ -16,6 +16,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/sys/unix"
 )
@@ -386,6 +387,9 @@ func runWakeLoop(cfg wakeConfig) error {
 	healthTicker := time.NewTicker(30 * time.Second)
 	defer healthTicker.Stop()
 
+	// Touch presence immediately so `amq who` shows agent as active
+	_ = presence.Touch(cfg.root, cfg.me)
+
 	// Notify if messages already exist
 	if err := notifyNewMessages(&cfg); err != nil {
 		_ = writeStderr("amq wake: notify error: %v\n", err)
@@ -447,6 +451,9 @@ func runWakeLoop(cfg wakeConfig) error {
 			}
 
 		case <-healthTicker.C:
+			// Keep presence alive so `amq who` reports the agent as active
+			_ = presence.Touch(cfg.root, cfg.me)
+
 			// Verify TTY is still valid by checking if we can open /dev/tty
 			if !ttyAvailable() {
 				return errors.New("TTY no longer available")

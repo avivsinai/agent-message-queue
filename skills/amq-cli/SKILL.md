@@ -91,6 +91,23 @@ amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Terminal 2
 
 Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
 
+## Statusline (Claude Code)
+
+To show the current AMQ session in your Claude Code status bar, add this snippet to your statusline script (e.g., `~/.claude/statusline.sh`):
+
+```bash
+# AMQ session segment — only shows inside a coop session
+amq_session=""
+if [ -n "$AM_ROOT" ] && [ -n "$AM_BASE_ROOT" ] && [ "$AM_ROOT" != "$AM_BASE_ROOT" ]; then
+    amq_session=$(basename "$AM_ROOT")
+fi
+
+# Append to your output variable (yellow text):
+if [ -n "$amq_session" ]; then
+    output+=$(printf " | \033[33mamq:%s\033[0m" "$amq_session")
+fi
+```
+
 ## Integration & Ops Quick Reference
 
 ```bash
@@ -200,6 +217,36 @@ amq send --to codex --project infra-lib --kind decision \
   --context '{"proposal_id":"api-v2","question":"Adopt new API?","required_projects":["my-project","infra-lib"]}' \
   --body "Proposal: migrate to API v2. All tests green."
 ```
+
+## Session-Aware Routing
+
+Users refer to sessions using many words: "session", "stream", "squad", "team", "workspace", "channel", or just a bare name. When the user mentions sending to or talking to an agent in a named context (e.g., "ask codex on stream1", "send to the auth team", "talk to codex in squad-api"), you must discover sessions before routing.
+
+**Important**: Do not confuse sessions with projects. "Project" in AMQ means a different repo/codebase (cross-project routing via `--project`). Sessions are isolated mailbox trees within the same project (via `--session`). If the user says "the infra project", that likely means `--project infra`, not `--session infra`.
+
+```bash
+# Step 1: Discover active sessions and agents
+amq who --json
+# Returns: [{"name":"collab","agents":[...]},{"name":"stream1","agents":[...]},{"name":"auth","agents":[...]}]
+
+# Step 2: Match the user's name against session names in the output, then send
+amq send --to codex --session stream1 --body "Message for stream1"
+```
+
+**Recognition patterns** — any of these mean "route to a specific session":
+- Explicit: "on stream1", "via auth", "in the api session", "the infra squad"
+- Bare name: user just says "stream1" or "auth" — could be a session or an agent handle
+- Colloquial: "team", "squad", "stream", "workspace", "channel" followed by a name
+
+Note: The `agent@name` inline syntax (e.g., `codex@infra`) is for cross-project routing, not cross-session. For same-project session routing, always use `--session <name>` explicitly.
+
+**Rules**:
+1. When the user names something that could be a session, **always run `amq who --json` first** to check if it matches a known session name
+2. If the name matches a session, use `--session <name>` on the send command
+3. If it matches both a session and an agent handle, prefer the session interpretation when the user's phrasing implies a group/context ("on X", "in X", "the X team"), and the agent interpretation when it implies a person ("ask X", "tell X")
+4. If the target session differs from your current session (`$AM_ROOT` basename), use `--session <name>`
+5. Never guess — if the name doesn't appear in `amq who --json` output, tell the user (it may need `coop exec --session <name>` to initialize)
+6. For cross-project routing (different repo), use `--project` instead — see Cross-Project Routing section
 
 ## Messaging
 
