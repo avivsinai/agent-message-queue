@@ -96,14 +96,19 @@ Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
 To show the current AMQ session in your Claude Code status bar, add this snippet to your statusline script (e.g., `~/.claude/statusline.sh`):
 
 ```bash
-# AMQ session segment — prints session name when inside a coop session, empty otherwise
-amq_session=$(amq env --session-name 2>/dev/null)
+# AMQ session segment — try CLI first, fall back to env vars for older amq versions
+amq_session=""
+if _amq_out=$(amq env --session-name 2>/dev/null) && [ -n "$_amq_out" ]; then
+    amq_session="$_amq_out"
+elif [ -n "$AM_ROOT" ] && [ -n "$AM_BASE_ROOT" ] && [ "$AM_ROOT" != "$AM_BASE_ROOT" ]; then
+    amq_session=$(basename "$AM_ROOT")
+fi
 if [ -n "$amq_session" ]; then
     output+=$(printf " | \033[33mamq:%s\033[0m" "$amq_session")
 fi
 ```
 
-`amq env --session-name` prints the session name and exits 0 (empty output when not in a session). `amq env --json` also includes `session_name` for scripting.
+`amq env --session-name` (v0.27+) prints the session name and exits 0 (empty when not in a session). The env-var fallback covers older versions. `amq env --json` also includes `session_name`.
 
 ## Integration & Ops Quick Reference
 
