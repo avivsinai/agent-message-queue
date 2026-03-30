@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 0.28.0)'
+        required: true
+        type: string
 
 jobs:
   publish:
@@ -26,8 +31,18 @@ jobs:
 
       - name: Publish skills
         run: |
-          # Extract version from tag (v0.28.0 -> 0.28.0) or fall back to SKILL.md
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          # Extract version from tag or workflow_dispatch input
+          if [ -n "${{ inputs.version }}" ]; then
+            TAG_VERSION="${{ inputs.version }}"
+          else
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+
+          # Validate semver
+          echo "$TAG_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' || {
+            echo "ERROR: version '$TAG_VERSION' is not semver"
+            exit 1
+          }
 
           FAILED=0
 
@@ -35,6 +50,15 @@ jobs:
             [ -f "$dir/SKILL.md" ] || continue
             SKILL=$(basename "$dir")
             VERSION="${TAG_VERSION}"
+
+            # Verify SKILL.md version matches tag
+            SKILL_VERSION=$(grep -oP 'version:\s*\K[\d.]+' "$dir/SKILL.md" || true)
+            if [ -n "$SKILL_VERSION" ] && [ "$SKILL_VERSION" != "$VERSION" ]; then
+              echo "ERROR: $SKILL SKILL.md version ($SKILL_VERSION) != tag version ($VERSION)"
+              echo "  Run scripts/release-skills.sh $VERSION first"
+              FAILED=1
+              continue
+            fi
 
             echo "Publishing $SKILL version $VERSION"
 
