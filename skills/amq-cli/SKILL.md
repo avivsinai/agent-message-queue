@@ -1,15 +1,19 @@
 ---
 name: amq-cli
-version: 1.8.0
+version: 1.9.0
 description: >-
-  Send and receive messages between coding agents via AMQ CLI.
-  TRIGGER when: "message codex/claude", "send to partner agent",
-  "check inbox", "drain messages", "co-op mode", "AMQ",
-  "cross-project peers", "agent coordination", "wake agent",
-  "swarm join", "diagnose delivery".
-  DO NOT TRIGGER: RabbitMQ/Kafka design, Kubernetes networking,
-  CI/CD pipelines, Slack bots, or single-agent tasks with no partner.
-  For collaborative spec/design, consider /spec.
+  Coordinate agents via the AMQ CLI for file-based inter-agent messaging. Use
+  this skill whenever you need to send messages to another agent (codex, claude,
+  or any named handle), check your inbox, drain queued messages, set up co-op
+  mode between agents, join a swarm team, route messages across projects, or
+  diagnose delivery issues. Also use it when you receive a message and need to
+  know how to reply, ack, or handle priority. Covers any multi-agent
+  coordination task where agents need to talk to each other — review requests,
+  questions, status updates, decision threads, wake notifications, and
+  orchestrator integration (Symphony, Kanban). For collaborative spec/design
+  workflows specifically, prefer the /amq-spec skill which provides structured
+  phase-by-phase guidance. Not intended for distributed systems design
+  (RabbitMQ, Kafka), CI/CD pipelines, or single-agent tasks with no partner.
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
   compatibility: claude-code, codex-cli
@@ -28,28 +32,30 @@ Requires `amq` binary in PATH. Install:
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
 
-## Environment Rules (IMPORTANT)
+## Environment Rules
 
-When running inside `coop exec`, the environment is already configured:
+AMQ uses two env vars for routing: `AM_ROOT` (which mailbox tree) and `AM_ME` (which agent). Getting these wrong means messages go to the wrong place or silently disappear, so it matters to let the CLI handle them rather than guessing.
 
-- **Always use `amq` from PATH** — never `./amq`, `../amq`, or absolute paths
-- **Never override `AM_ROOT` or `AM_ME`** — they are set by `coop exec`
-- **Never pass `--root` or `--me` flags** — env vars handle routing
-- **Just run commands as-is**: `amq send --to codex --body "hello"`
+**Inside `coop exec`** — everything is pre-configured. Just run bare commands:
+```bash
+amq send --to codex --body "hello"     # correct
+amq send --me claude --to codex ...    # wrong — --me overrides the env
+./amq send ...                         # wrong — use amq from PATH
+```
+The reason: `coop exec` sets `AM_ROOT` and `AM_ME` precisely for the session. Passing `--root` or `--me` overrides that and can route to the wrong mailbox.
 
-When running **outside** `coop exec` (e.g. new conversation, manual terminal):
+**Outside `coop exec`** — resolve the root from config, don't hardcode it:
+```bash
+eval "$(amq env --me claude)"          # reads .amqrc chain, sets both vars
 
-- **Use `amq env` to resolve the root** — it reads the full chain (project `.amqrc`, `AMQ_GLOBAL_ROOT`, `~/.amqrc`) and returns the resolved root:
-  ```bash
-  eval "$(amq env --me claude)"          # sets AM_ME + AM_ROOT from resolved config
-  ```
-- Or resolve and pin explicitly per command (never hardcode the root — read it from `amq env`):
-  ```bash
-  AM_ME=claude AM_ROOT=$(amq env --json | jq -r .root) amq send --to codex --body "hello"
-  ```
-- **Do NOT append a session name** (e.g. `/collab`) unless you intentionally want an isolated session. Outside `coop exec`, the base root from `.amqrc` is where agents live.
-- **Pitfall**: `coop exec` defaults to `--session collab` (i.e. `.agent-mail/collab`). If you manually use `.agent-mail/collab` outside `coop exec`, messages go to a different mailbox tree than `.agent-mail`. Only use a session path if the target agent is also in that session.
-- **Global fallback**: external orchestrators often start outside the repo root. In that case, set `AMQ_GLOBAL_ROOT` or `~/.amqrc` so `amq env`, `amq doctor`, and integration commands resolve the same queue.
+# Or pin per-command without polluting the shell (useful in scripts):
+AM_ME=claude AM_ROOT=$(amq env --json | jq -r .root) amq send --to codex --body "hello"
+```
+Why not hardcode? The root path depends on the config chain (project `.amqrc` → `AMQ_GLOBAL_ROOT` → `~/.amqrc`). Hardcoding skips this and breaks when the project moves or config changes.
+
+**Global fallback**: Orchestrator-spawned agents often start outside the repo root where no project `.amqrc` exists. Set `AMQ_GLOBAL_ROOT` or `~/.amqrc` so `amq env` and `amq doctor` still resolve the correct queue.
+
+**Session pitfall**: `coop exec` defaults to `--session collab` (i.e., `.agent-mail/collab`). Outside `coop exec`, the base root is `.agent-mail` (no session suffix). These are different mailbox trees — don't mix them up.
 
 ### Root Resolution Truth-Table
 
@@ -61,16 +67,16 @@ When running **outside** `coop exec` (e.g. new conversation, manual terminal):
 | Inside `coop exec` (no flags) | automatic | `.agent-mail/collab` (default session) |
 | Inside `coop exec --session X` | automatic | `.agent-mail/X` |
 
-## Task Routing — READ THIS FIRST
+## Task Routing
 
-**Before doing anything**, match your task to the right workflow:
+Before diving in, match the task to the right workflow — this avoids wasted effort:
 
-| Your task | What to do | DO NOT |
-|-----------|-----------|--------|
-| **"spec", "design with", "collaborative spec"** | Use the `/spec` command instead. It provides structured phase-by-phase guidance. | Do NOT handle spec tasks from this skill. |
-| **Send a message, review request, question** | Use `amq send` (see Messaging below) | — |
-| **Swarm / agent teams** | Read [references/swarm-mode.md](references/swarm-mode.md), then use `amq swarm` | — |
-| **Received message with labels `workflow:spec`** | Follow the spec skill protocol: do independent research first, then engage on the `spec/<topic>` thread. | Do NOT skip straight to implementation. |
+| Your task | What to do |
+|-----------|-----------|
+| **"spec", "design with", "collaborative spec"** | Use `/amq-spec` instead — it has structured phase-by-phase guidance for parallel-research workflows. |
+| **Send a message, review request, question** | Use `amq send` (see Messaging below) |
+| **Swarm / agent teams** | Read [references/swarm-mode.md](references/swarm-mode.md), then use `amq swarm` |
+| **Received message with labels `workflow:spec`** | Follow the spec skill protocol: do independent research first, then engage on the `spec/<topic>` thread — don't skip straight to implementation. |
 
 ## Quick Start
 
