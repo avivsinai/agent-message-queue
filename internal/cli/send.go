@@ -394,34 +394,6 @@ func runSend(args []string) error {
 	return nil
 }
 
-// classifyRoot returns the base root for the given root, or "" if it cannot
-// be determined. This is the single authoritative function for root classification.
-//
-// Resolution order:
-//  1. AM_BASE_ROOT env var (set by coop exec — always authoritative)
-//  2. If root is a session root (parent contains sibling session dirs), return parent
-//  3. Otherwise, return "" (unknown — caller must handle)
-func classifyRoot(root string) string {
-	if base := strings.TrimSpace(os.Getenv(envBaseRoot)); base != "" {
-		return base
-	}
-	// Check if root looks like a session: parent has sibling dirs with agents/.
-	parent := filepath.Dir(root)
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		return ""
-	}
-	for _, e := range entries {
-		if !e.IsDir() || e.Name() == filepath.Base(root) {
-			continue
-		}
-		if dirExists(filepath.Join(parent, e.Name(), "agents")) {
-			return parent // Found a sibling session — root is a session, parent is base.
-		}
-	}
-	return ""
-}
-
 // parseInlineRecipient parses "agent@project:session" or "agent@project" syntax.
 // Returns the parsed components and true if the inline syntax was detected.
 // Returns the original string unchanged and false if no @ is present.

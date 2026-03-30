@@ -53,6 +53,48 @@ func (f *commonFlags) validate() error {
 // sessionName extracts the session name (last path component) from a resolved root path.
 func sessionName(root string) string { return filepath.Base(root) }
 
+// classifyRoot returns the base root for the given root, or "" if it cannot
+// be determined. This is the single authoritative function for root classification.
+//
+// Resolution order:
+//  1. AM_BASE_ROOT env var (set by coop exec — always authoritative)
+//  2. If root is a session root (parent contains sibling session dirs), return parent
+//  3. Otherwise, return "" (unknown — caller must handle)
+func classifyRoot(root string) string {
+	if base := strings.TrimSpace(os.Getenv(envBaseRoot)); base != "" {
+		return base
+	}
+	// Check if root looks like a session: parent has sibling dirs with agents/.
+	parent := filepath.Dir(root)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == filepath.Base(root) {
+			continue
+		}
+		if dirExists(filepath.Join(parent, e.Name(), "agents")) {
+			return parent // Found a sibling session — root is a session, parent is base.
+		}
+	}
+	return ""
+}
+
+// resolveSessionName returns the session name for the given root, or "" if
+// the root is not inside a session. Uses classifyRoot to detect session context.
+func resolveSessionName(root string) string {
+	base := classifyRoot(root)
+	if base == "" {
+		return ""
+	}
+	// Ensure root actually differs from base (not just base root itself)
+	if root == base {
+		return ""
+	}
+	return sessionName(root)
+}
+
 // cachedAmqrcRoot returns the literal root from .amqrc, cached via sync.Once.
 // Returns "" on any error (best-effort for defaulting, not validation).
 var amqrcOnce sync.Once

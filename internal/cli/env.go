@@ -27,12 +27,13 @@ type amqrcResult struct {
 
 // envOutput is the JSON output format for amq env --json.
 type envOutput struct {
-	Root    string            `json:"root,omitempty"`
-	Me      string            `json:"me,omitempty"`
-	Shell   string            `json:"shell,omitempty"`
-	Wake    bool              `json:"wake,omitempty"`
-	Project string            `json:"project,omitempty"`
-	Peers   map[string]string `json:"peers,omitempty"`
+	Root        string            `json:"root,omitempty"`
+	Me          string            `json:"me,omitempty"`
+	Shell       string            `json:"shell,omitempty"`
+	Wake        bool              `json:"wake,omitempty"`
+	Project     string            `json:"project,omitempty"`
+	Peers       map[string]string `json:"peers,omitempty"`
+	SessionName string            `json:"session_name,omitempty"`
 }
 
 // errAmqrcNotFound is returned when .amqrc is not found (non-fatal).
@@ -46,6 +47,7 @@ func runEnv(args []string) error {
 	shellFlag := fs.String("shell", "sh", "Shell format: sh, bash, zsh, fish")
 	wakeFlag := fs.Bool("wake", false, "Include amq wake & in output")
 	jsonFlag := fs.Bool("json", false, "Output as JSON (for scripts)")
+	sessionNameFlag := fs.Bool("session-name", false, "Print current session name (for statusline integration)")
 
 	usage := usageWithFlags(fs, "amq env [options]",
 		"Outputs shell commands to set AM_ROOT and AM_ME environment variables.",
@@ -63,12 +65,18 @@ func runEnv(args []string) error {
 		"  eval \"$(amq env --me codex --wake)\"          # Set up for Codex with wake",
 		"  eval \"$(amq env --session feature-x --me claude)\"  # Isolated session",
 		"  amq env --json                                # Machine-readable output",
+		"  amq env --session-name                         # Print session name (for statusline)",
 	)
 
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
+	}
+
+	// --session-name and --json are mutually exclusive output modes.
+	if *sessionNameFlag && *jsonFlag {
+		return UsageError("--session-name and --json are mutually exclusive")
 	}
 
 	// Resolve --session into --root (mutually exclusive).
@@ -96,13 +104,22 @@ func runEnv(args []string) error {
 		return UsageError("invalid shell %q (supported: sh, bash, zsh, fish)", shell)
 	}
 
+	// --session-name output mode: print session name and exit
+	if *sessionNameFlag {
+		if name := resolveSessionName(root); name != "" {
+			return writeStdout("%s\n", name)
+		}
+		return nil // Not in a session — empty output, exit 0
+	}
+
 	// JSON output mode
 	if *jsonFlag {
 		out := envOutput{
-			Root:  root,
-			Me:    me,
-			Shell: shell,
-			Wake:  *wakeFlag,
+			Root:        root,
+			Me:          me,
+			Shell:       shell,
+			Wake:        *wakeFlag,
+			SessionName: resolveSessionName(root),
 		}
 		// Include project identity and peer config from .amqrc
 		// so agents can discover cross-project routing without
