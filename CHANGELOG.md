@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] - 2026-03-30
+
+### Added
+
+- `amq env --session-name` flag: prints current session name for statusline embedding (empty + exit 0 when not in a session)
+- `session_name` field in `amq env --json` output
+- Session-aware routing instructions in amq-cli skill: Claude now discovers sessions via `amq who --json` before cross-session sends
+- Statusline snippet documentation in SKILL.md for showing AMQ session in Claude Code status bar
+- Wake presence heartbeat: `amq wake` touches presence on startup and every 30s, so `amq who` reports agents as active while working
+
+### Changed
+
+- Moved `classifyRoot` from `send.go` to `common.go` (shared by send, reply, who, env)
+- Added `resolveSessionName` helper combining `classifyRoot` + `sessionName`
+
 ## [0.24.1] - 2026-03-22
 
 ### Fixed
