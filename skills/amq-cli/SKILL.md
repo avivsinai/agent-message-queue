@@ -110,6 +110,16 @@ fi
 
 `amq env --session-name` (v0.27+) prints the session name and exits 0 (empty when not in a session). The env-var fallback covers older versions. `amq env --json` also includes `session_name`.
 
+To also set the terminal tab title (works in Ghostty, iTerm2, Terminal.app):
+
+```bash
+# Set tab title to "repo | amq:session" — re-asserts on each statusline refresh.
+# Manual titles (e.g. Ghostty's prompt_tab_title) take priority and won't be overwritten.
+tab_title="$repo_name"
+[ -n "$amq_session" ] && tab_title+=" | amq:${amq_session}"
+printf '\033]0;%s\007' "$tab_title" > /dev/tty 2>/dev/null
+```
+
 ## Integration & Ops Quick Reference
 
 ```bash
