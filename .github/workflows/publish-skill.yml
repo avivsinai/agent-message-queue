@@ -72,18 +72,10 @@ jobs:
               echo "$OUTPUT"
               echo "⚠ $SKILL version $VERSION already published — skipping"
             elif echo "$OUTPUT" | grep -q "Alias already in use"; then
+              # Alias failed but the package itself was already published by skild.
+              # Don't retry — that would 409 on duplicate version.
               echo "$OUTPUT"
-              echo "⚠ Alias '$SKILL' taken — retrying without alias..."
-              if OUTPUT2=$(npx skild publish \
-                --dir "$dir" \
-                --skill-version "$VERSION" 2>&1); then
-                echo "$OUTPUT2"
-                echo "✓ Published $SKILL version $VERSION (without alias)"
-              else
-                echo "✖ Publish failed for $SKILL (even without alias)"
-                echo "$OUTPUT2"
-                FAILED=1
-              fi
+              echo "⚠ $SKILL published but alias '$SKILL' is taken — package available as @avivsinai/$SKILL"
             else
               echo "✖ Publish failed for $SKILL"
               echo "$OUTPUT"
