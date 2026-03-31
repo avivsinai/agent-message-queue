@@ -15,6 +15,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.MARKETPLACE_DISPATCH_TOKEN }}
         shell: bash
         run: |
+          # Keep the marketplace pin aligned with this repo's latest default-branch HEAD.
           payload=$(printf '{"event_type":"plugin-update","client_payload":{"repo":"%s"}}' "$GITHUB_REPOSITORY")
           curl --fail --silent --show-error \
             -X POST \
