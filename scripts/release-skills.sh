@@ -8,13 +8,11 @@ set -euo pipefail
 version="${1:?usage: ./scripts/release-skills.sh X.Y.Z}"
 tag="v${version}"
 
-# Validate semver
 printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$' || {
   echo "error: version must be X.Y.Z or X.Y.Z-rc.1, got: $version" >&2
   exit 1
 }
 
-# Check clean worktree
 git diff --quiet --ignore-submodules HEAD -- || {
   echo "error: worktree is dirty; commit or stash first" >&2
   exit 1
@@ -24,14 +22,12 @@ git diff --cached --quiet --ignore-submodules -- || {
   exit 1
 }
 
-# Check tag doesn't exist
 git fetch --tags --quiet origin 2>/dev/null || true
 if git rev-parse "$tag" >/dev/null 2>&1; then
   echo "error: tag $tag already exists" >&2
   exit 1
 fi
 
-# Bump versions in SKILL.md files and plugin manifests
 python3 - "$version" <<'PY'
 import json, pathlib, re, sys
 version = sys.argv[1]
@@ -67,10 +63,10 @@ if not changed:
     print("  (no files needed bumping)")
 PY
 
-# Stage and commit
-git add skills/*/SKILL.md .claude-plugin/plugin.json .codex-plugin/plugin.json 2>/dev/null || true
-
 ./scripts/check-release-version.sh "$version"
+
+git add skills/*/SKILL.md .claude-plugin/plugin.json
+[ -f .codex-plugin/plugin.json ] && git add .codex-plugin/plugin.json
 
 if git diff --cached --quiet; then
   echo "No version changes needed — tagging current HEAD"
