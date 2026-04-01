@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.28.1] - 2026-04-01
+
+### Fixed
+
+- Avoided retrying skill publishes after an alias failure when the package version had already been uploaded successfully.
+- Hardened release metadata validation so skill and plugin manifest versions must match the release tag before publishing.
+
+### Changed
+
+- Added a default-branch marketplace dispatch workflow so plugin updates are announced after merges to `main`.
+- Documented the marketplace dispatch behavior and generalized release helper usage from fixed examples to `X.Y.Z`.
+
+## [0.28.0] - 2026-03-30
+
+### Added
+
+- Tag-based skill publishing via `scripts/release-skills.sh`.
+- Tab-title statusline guidance in the AMQ skill documentation.
+
+### Fixed
+
+- Addressed release workflow issues around dispatch input handling, version validation, and variable name collisions.
+
 ## [0.27.0] - 2026-03-30
 
 ### Added
