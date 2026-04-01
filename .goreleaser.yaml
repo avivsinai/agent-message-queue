@@ -17,6 +17,9 @@ builds:
     goarch:
       - amd64
       - arm64
+    hooks:
+      post:
+        - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
 
 archives:
   - formats: [tar.gz]

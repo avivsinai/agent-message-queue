@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.2] - 2026-04-01
+
+### Fixed
+
+- Ad-hoc signed macOS release binaries with the stable identifier `io.github.avivsinai.amq` so Keychain approvals survive Homebrew upgrades.
+
+### Changed
+
+- Moved the release workflow onto `macos-latest` so signed darwin artifacts are produced in CI before Homebrew updates.
+
 ## [0.28.1] - 2026-04-01
 
 ### Fixed
