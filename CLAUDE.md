@@ -1,12 +1,24 @@
 # CLAUDE.md
 
-This is the **master agent instruction file** for this repository. Both Claude Code and Codex should follow these guidelines. See also `AGENTS.md` which references this file.
+This is the master agent instruction file for this repository. Both Claude Code and Codex should follow these guidelines. `AGENTS.md` exists only as a Codex compatibility shim and should contain only Codex-specific notes.
 
 ## Project Overview
 
 Agent Message Queue (AMQ) is a lightweight, file-based message delivery system for local inter-agent communication. It uses Maildir-style atomic delivery (tmp→new→cur) for crash-safe messaging between coding agents on the same machine. No daemon, database, or server required. Conceptually, it is a local interoperability bus for agent sessions: AMQ manages the conversation, while orchestrators such as Claude Code teams, Codex workflows, Kanban, and Symphony keep owning the task.
 
 AMQ owns agent-to-agent messaging, thread continuity, cross-project/session routing, handoff state, and `doctor --ops`. It does not own task decomposition, worktree management, dependency scheduling, PR landing, or cron/scheduler execution.
+
+## Release Contract
+
+- Release from `main` only; do not create manual GitHub releases.
+- A push to `main` updates the AvivSinai marketplace immediately for `amq-cli` and `amq-spec`.
+- For a versioned release, keep `CHANGELOG.md` and skill/plugin metadata on one version, then push the tag and let CI publish GitHub and Homebrew artifacts.
+
+## Operational Constraints
+
+- Handles must be lowercase and match `[a-z0-9_-]+`.
+- Never edit queue files directly; use the CLI for all mailbox operations.
+- Cleanup is explicit via `amq cleanup`; do not add automatic deletion behavior.
 
 ## Build & Development Commands
 

@@ -1,37 +1,7 @@
 # AGENTS.md
 
-This file provides guidance for Codex and other AI coding agents. **The authoritative source is `CLAUDE.md`** - this file exists for compatibility with agents that look for `AGENTS.md`.
+This file exists for Codex compatibility. [`CLAUDE.md`](./CLAUDE.md) is the single source of truth for repository instructions.
 
-## Quick Reference
+## Codex Notes
 
-See [`CLAUDE.md`](./CLAUDE.md) for complete instructions including:
-
-- Project overview and architecture
-- Build commands (`make build`, `make test`, `make ci`)
-- CLI usage and common flags
-- Multi-agent coordination patterns
-- Security practices (0700/0600 permissions, `--strict` flag)
-- Contributing guidelines and commit conventions
-- Skill development workflow (dev vs installed precedence, `make sync-skills`)
-
-## Essential Commands
-
-```bash
-make ci              # Run before committing: vet, lint, test, smoke
-./amq --version      # Check installed version
-./amq swarm --help   # Swarm mode: Claude Code Agent Teams integration
-```
-
-## Environment
-
-```bash
-export AM_ROOT=.agent-mail
-export AM_ME=<your-agent-handle>
-```
-
-## Key Constraints
-
-- Go 1.25+ required
-- Handles must be lowercase: `[a-z0-9_-]+`
-- Never edit message files directly; use the CLI
-- Cleanup is explicit (`amq cleanup`), never automatic
+- No repository-specific Codex-only rules are defined here; follow `CLAUDE.md`.
