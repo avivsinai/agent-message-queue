@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.8] - 2026-04-02
 ### Fixed
 
 - Passed the temp release-notes path directly to GoReleaser so GitHub Actions preserves the `--release-notes` argument during publishing.
@@ -14,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Wrote generated GitHub release notes to the runner temp directory so GoReleaser can publish without dirtying the checked-out tree.
+
 
 ## [0.28.7] - 2026-04-02
 ### Fixed
