@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.7] - 2026-04-02
 ### Fixed
 
 - Let release verification honor an explicit `VERSION` override so CI checks the tagged binary instead of a `git describe` snapshot.
+
 
 ## [0.28.6] - 2026-04-02
 ### Changed
