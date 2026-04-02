@@ -62,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Tag-based skill publishing via `scripts/release-skills.sh`.
+- Tag-based skill publishing aligned with versioned releases.
 - Tab-title statusline guidance in the AMQ skill documentation.
 
 ### Fixed
