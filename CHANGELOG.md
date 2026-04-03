@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Consolidated skill publishing into `release.yml` so it runs directly after the release job instead of relying on a tag-triggered workflow (tags pushed with `GITHUB_TOKEN` do not trigger other workflows).
+
+### Changed
+
+- SHA-pinned all remaining GitHub Actions across every workflow.
+- Added concurrency groups and timeouts to all workflows.
+- Scoped `release.yml` permissions per job instead of top-level `contents: write`.
+- Reduced `publish-skill.yml` to a manual `workflow_dispatch` fallback (no longer triggered by tag push).
+- Added `skip-skill-publish` dispatch input to `release.yml` for manual reruns.
+- Updated `release.sh` PR body to reflect the consolidated release flow.
+
 ## [0.28.8] - 2026-04-02
 ### Fixed
 
