@@ -13,7 +13,6 @@ import (
 )
 
 func TestReply_Basic(t *testing.T) {
-	t.Setenv("AM_ROOT", "") // Clear to avoid guardRootOverride conflict with --root
 	root := t.TempDir()
 	alice := "alice"
 	bob := "bob"
@@ -123,7 +122,6 @@ func TestReply_Basic(t *testing.T) {
 }
 
 func TestReply_ReviewRequest(t *testing.T) {
-	t.Setenv("AM_ROOT", "") // Clear to avoid guardRootOverride conflict with --root
 	root := t.TempDir()
 	alice := "alice"
 	bob := "bob"
@@ -204,7 +202,6 @@ func TestReply_ReviewRequest(t *testing.T) {
 }
 
 func TestReply_BrainstormPassthrough(t *testing.T) {
-	t.Setenv("AM_ROOT", "") // Clear to avoid guardRootOverride conflict with --root
 	root := t.TempDir()
 	alice := "alice"
 	bob := "bob"
@@ -284,7 +281,6 @@ func TestReply_BrainstormPassthrough(t *testing.T) {
 }
 
 func TestReply_PreservesThread(t *testing.T) {
-	t.Setenv("AM_ROOT", "") // Clear to avoid guardRootOverride conflict with --root
 	root := t.TempDir()
 	alice := "alice"
 	bob := "bob"

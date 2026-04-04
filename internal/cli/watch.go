@@ -47,9 +47,6 @@ func runWatch(args []string) error {
 	} else if handled {
 		return nil
 	}
-	if err := common.validate(); err != nil {
-		return err
-	}
 	if *timeoutFlag < 0 {
 		return UsageError("--timeout must be >= 0")
 	}

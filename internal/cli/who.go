@@ -22,9 +22,6 @@ func runWho(args []string) error {
 	} else if handled {
 		return nil
 	}
-	if err := common.validate(); err != nil {
-		return err
-	}
 	root := resolveRoot(common.Root)
 
 	// Determine base root using the centralized classifier.

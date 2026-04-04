@@ -2,7 +2,6 @@ package cli
 
 import (
 	"encoding/json"
-	"flag"
 	"os"
 	"path/filepath"
 	"testing"
@@ -201,37 +200,6 @@ func TestDefaultRootFallbackNoAmqrc(t *testing.T) {
 	}
 }
 
-func TestGuardRootOverride(t *testing.T) {
-	t.Run("no conflict when AM_ROOT unset", func(t *testing.T) {
-		t.Setenv("AM_ROOT", "")
-		if err := guardRootOverride("/some/root"); err != nil {
-			t.Errorf("expected no error, got: %v", err)
-		}
-	})
-
-	t.Run("no conflict when flag empty", func(t *testing.T) {
-		t.Setenv("AM_ROOT", "/env/root")
-		if err := guardRootOverride(""); err != nil {
-			t.Errorf("expected no error, got: %v", err)
-		}
-	})
-
-	t.Run("no conflict when same path", func(t *testing.T) {
-		t.Setenv("AM_ROOT", "/some/root")
-		if err := guardRootOverride("/some/root"); err != nil {
-			t.Errorf("expected no error, got: %v", err)
-		}
-	})
-
-	t.Run("error when different paths", func(t *testing.T) {
-		t.Setenv("AM_ROOT", "/env/root")
-		err := guardRootOverride("/different/root")
-		if err == nil {
-			t.Fatal("expected error for conflicting roots")
-		}
-	})
-}
-
 func TestResolveRootFindsParent(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, ".agent-mail")
@@ -306,23 +274,35 @@ func TestResolveRootCurrentDir(t *testing.T) {
 	}
 }
 
-func TestValidate_NoConflictWithoutFlag(t *testing.T) {
-	t.Setenv("AM_ROOT", "")
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	cf := addCommonFlags(fs)
-	_ = fs.Parse([]string{}) // no --root flag
-	if err := cf.validate(); err != nil {
-		t.Fatalf("expected no error when --root not set, got: %v", err)
-	}
-}
+func TestClassifyRootIgnoresStaleEnvBaseRootAndUsesAmqrc(t *testing.T) {
+	t.Setenv("AM_BASE_ROOT", filepath.Join(t.TempDir(), "stale-base"))
 
-func TestValidate_NoConflictWithRootFlag(t *testing.T) {
-	t.Setenv("AM_ROOT", "") // unset
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	cf := addCommonFlags(fs)
-	_ = fs.Parse([]string{"--root", "/explicit/root"})
-	if err := cf.validate(); err != nil {
-		t.Fatalf("expected no error when --root flag set, got: %v", err)
+	projectDir := t.TempDir()
+	baseRoot := filepath.Join(projectDir, ".agent-mail")
+	sessionRoot := filepath.Join(baseRoot, "collab")
+	if err := os.MkdirAll(sessionRoot, 0o700); err != nil {
+		t.Fatalf("mkdir session root: %v", err)
+	}
+
+	rc := map[string]any{"root": ".agent-mail"}
+	rcData, _ := json.Marshal(rc)
+	if err := os.WriteFile(filepath.Join(projectDir, ".amqrc"), rcData, 0o600); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+	})
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	if got := classifyRoot(sessionRoot); got != baseRoot {
+		t.Fatalf("classifyRoot(%q) = %q, want %q", sessionRoot, got, baseRoot)
 	}
 }
 
