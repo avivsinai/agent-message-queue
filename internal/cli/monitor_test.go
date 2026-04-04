@@ -12,7 +12,6 @@ import (
 )
 
 func TestMonitor_ExistingMessages(t *testing.T) {
-	t.Setenv("AM_ROOT", "") // Clear to avoid guardRootOverride conflict with --root
 	root := t.TempDir()
 	agent := "alice"
 

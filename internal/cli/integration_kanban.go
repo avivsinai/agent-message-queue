@@ -69,18 +69,6 @@ func runKanbanBridge(args []string) error {
 		return nil
 	}
 
-	rootSet := false
-	fs.Visit(func(fl *flag.Flag) {
-		if fl.Name == "root" {
-			rootSet = true
-		}
-	})
-	if rootSet {
-		if err := guardRootOverride(*rootFlag); err != nil {
-			return err
-		}
-	}
-
 	if err := requireMe(*meFlag); err != nil {
 		return err
 	}

@@ -37,9 +37,6 @@ func runReply(args []string) error {
 	} else if handled {
 		return nil
 	}
-	if err := common.validate(); err != nil {
-		return err
-	}
 	if err := requireMe(common.Me); err != nil {
 		return err
 	}
@@ -48,6 +45,7 @@ func runReply(args []string) error {
 		return UsageError("--me: %v", err)
 	}
 	common.Me = me
+	common.warnRootOverride()
 	root := resolveRoot(common.Root)
 
 	if *idFlag == "" {

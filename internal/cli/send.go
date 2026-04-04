@@ -49,9 +49,6 @@ func runSend(args []string) error {
 	} else if handled {
 		return nil
 	}
-	if err := common.validate(); err != nil {
-		return err
-	}
 	if err := requireMe(common.Me); err != nil {
 		return err
 	}
@@ -60,6 +57,7 @@ func runSend(args []string) error {
 		return UsageError("--me: %v", err)
 	}
 	common.Me = me
+	common.warnRootOverride()
 	root := resolveRoot(common.Root)
 
 	// Parse inline agent@project:session syntax from --to BEFORE handle validation,
@@ -112,27 +110,9 @@ func runSend(args []string) error {
 			targetSession = normalized
 			deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
 		} else {
-			// Cross-project, no explicit session.
-			// Detect whether root is a session root or the base root itself.
-			// Try classifyRoot first (works with AM_BASE_ROOT or siblings),
-			// then fall back to .amqrc base root comparison.
-			baseRoot := classifyRoot(root)
-			if baseRoot == "" {
-				// classifyRoot failed (no AM_BASE_ROOT, no siblings).
-				// Check if root is under the .amqrc base root using root-aware lookup.
-				if result, err := findAmqrcForRoot(root); err == nil && result.Config.Root != "" {
-					amqrcBase := result.Config.Root
-					if !filepath.IsAbs(amqrcBase) {
-						amqrcBase = filepath.Join(result.Dir, amqrcBase)
-					}
-					absRoot, _ := filepath.Abs(root)
-					absBase, _ := filepath.Abs(amqrcBase)
-					if absBase != "" && absRoot != absBase && strings.HasPrefix(absRoot, absBase+string(filepath.Separator)) {
-						baseRoot = absBase
-					}
-				}
-			}
-			if baseRoot != "" {
+			// Cross-project, no explicit session. Mirror the sender's session when
+			// the source root is itself a session root.
+			if classifyRoot(root) != "" {
 				// Inside a session — use same session name in peer.
 				targetSession = sessionName(root)
 				deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
@@ -234,19 +214,6 @@ func runSend(args []string) error {
 
 	// Detect whether sender is inside a session (needed for reply_to and thread IDs).
 	senderInSession := classifyRoot(root) != ""
-	if !senderInSession && root != "" {
-		if result, err := findAmqrcForRoot(root); err == nil && result.Config.Root != "" {
-			amqrcBase := result.Config.Root
-			if !filepath.IsAbs(amqrcBase) {
-				amqrcBase = filepath.Join(result.Dir, amqrcBase)
-			}
-			absRoot, _ := filepath.Abs(root)
-			absBase, _ := filepath.Abs(amqrcBase)
-			if absBase != "" && absRoot != absBase && strings.HasPrefix(absRoot, absBase+string(filepath.Separator)) {
-				senderInSession = true
-			}
-		}
-	}
 
 	// Thread ID: auto-generated for P2P, qualified for cross-session/cross-project.
 	threadID := strings.TrimSpace(*threadFlag)

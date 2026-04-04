@@ -180,8 +180,8 @@ func runCoopExec(args []string) error {
 		}
 
 		wakeCmd := exec.Command(amqBin, "--no-update-check", "wake", "--me", agentHandle, "--root", root)
-		// Set AM_ROOT in wake's env so guardRootOverride doesn't conflict
-		// with a stale AM_ROOT inherited from the parent process.
+		// Set AM_ROOT in wake's env so the helper process resolves the same
+		// session root even if the parent shell inherited a different value.
 		wakeCmd.Env = setEnvVar(os.Environ(), envRoot, root)
 		wakeCmd.Stdin = os.Stdin
 		wakeCmd.Stdout = os.Stdout

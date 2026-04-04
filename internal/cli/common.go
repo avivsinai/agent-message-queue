@@ -19,7 +19,6 @@ type commonFlags struct {
 	Me      string
 	JSON    bool
 	Strict  bool
-	rootSet bool // true when --root was explicitly provided
 	flagSet *flag.FlagSet
 }
 
@@ -32,22 +31,29 @@ func addCommonFlags(fs *flag.FlagSet) *commonFlags {
 	return flags
 }
 
-// validate checks that the resolved --root flag does not conflict with AM_ROOT.
-// Only fires when --root was explicitly provided (not defaulted from AM_ROOT).
-// Call after flag parsing in every command that uses commonFlags.
-func (f *commonFlags) validate() error {
-	// Check if --root was explicitly set by the user.
-	if f.flagSet != nil {
-		f.flagSet.Visit(func(fl *flag.Flag) {
-			if fl.Name == "root" {
-				f.rootSet = true
-			}
-		})
+// warnRootOverride emits a diagnostic note to stderr when --root was explicitly
+// provided and differs from AM_ROOT. This helps users notice when a command
+// operates on a different root than their session. Not an error — --root wins.
+func (f *commonFlags) warnRootOverride() {
+	if f.flagSet == nil {
+		return
 	}
-	if !f.rootSet {
-		return nil // Default value, no conflict possible
+	rootExplicit := false
+	f.flagSet.Visit(func(fl *flag.Flag) {
+		if fl.Name == "root" {
+			rootExplicit = true
+		}
+	})
+	if !rootExplicit {
+		return
 	}
-	return guardRootOverride(f.Root)
+	envVal := strings.TrimSpace(os.Getenv(envRoot))
+	if envVal == "" {
+		return
+	}
+	if resolveRoot(envVal) != resolveRoot(f.Root) {
+		_ = writeStderr("note: --root %q overrides AM_ROOT=%q\n", f.Root, envVal)
+	}
 }
 
 // sessionName extracts the session name (last path component) from a resolved root path.
@@ -57,18 +63,23 @@ func sessionName(root string) string { return filepath.Base(root) }
 // be determined. This is the single authoritative function for root classification.
 //
 // Resolution order:
-//  1. AM_BASE_ROOT env var (set by coop exec — always authoritative)
+//  1. AM_BASE_ROOT, but only when the supplied root is still under that base
 //  2. If root is a session root (parent contains sibling session dirs), return parent
-//  3. Otherwise, return "" (unknown — caller must handle)
+//  3. If the parent directory is the default root name (.agent-mail), return parent
+//  4. Root-aware .amqrc lookup (works for explicit --root outside the cwd project)
+//  5. Otherwise, return "" (unknown — caller must handle)
 func classifyRoot(root string) string {
 	if base := strings.TrimSpace(os.Getenv(envBaseRoot)); base != "" {
-		return base
+		base = resolveRoot(base)
+		if isSessionRootUnderBase(root, base) {
+			return base
+		}
 	}
 	// Check if root looks like a session: parent has sibling dirs with agents/.
 	parent := filepath.Dir(root)
 	entries, err := os.ReadDir(parent)
 	if err != nil {
-		return ""
+		return configuredBaseRoot(root)
 	}
 	for _, e := range entries {
 		if !e.IsDir() || e.Name() == filepath.Base(root) {
@@ -78,7 +89,10 @@ func classifyRoot(root string) string {
 			return parent // Found a sibling session — root is a session, parent is base.
 		}
 	}
-	return ""
+	if filepath.Base(parent) == defaultCoopRoot {
+		return parent
+	}
+	return configuredBaseRoot(root)
 }
 
 // resolveSessionName returns the session name for the given root, or "" if
@@ -158,22 +172,38 @@ func resolveRoot(raw string) string {
 	return cleaned
 }
 
-// guardRootOverride checks whether the user is trying to override AM_ROOT
-// via --root flag. Returns an error if AM_ROOT is set in the env and the
-// resolved root differs. This prevents agents from accidentally using a
-// different root than their session.
-func guardRootOverride(flagRoot string) error {
-	envVal := strings.TrimSpace(os.Getenv(envRoot))
-	if envVal == "" || flagRoot == "" {
-		return nil // No conflict possible
+func configuredBaseRoot(root string) string {
+	result, err := findAmqrcForRoot(root)
+	if err != nil {
+		if !errors.Is(err, errAmqrcNotFound) {
+			_ = writeStderr("warning: reading .amqrc for root %q: %v\n", root, err)
+		}
+		return ""
 	}
-	// Compare resolved paths
-	envResolved := resolveRoot(envVal)
-	flagResolved := resolveRoot(flagRoot)
-	if envResolved == flagResolved {
-		return nil // Same path, no conflict
+	if result.Config.Root == "" {
+		return ""
 	}
-	return fmt.Errorf("AM_ROOT is set to %q but --root specifies %q; remove --root to use the session root, or unset AM_ROOT to override", envVal, flagRoot)
+	base := result.Config.Root
+	if !filepath.IsAbs(base) {
+		base = filepath.Join(result.Dir, base)
+	}
+	base = absPath(base)
+	if isSessionRootUnderBase(root, base) {
+		return base
+	}
+	return ""
+}
+
+// isSessionRootUnderBase returns true when root is a direct child of base
+// (i.e., root is a session directory like .agent-mail/collab under .agent-mail).
+// Returns false when root == base (the base root itself is not a session).
+func isSessionRootUnderBase(root, base string) bool {
+	root = absPath(resolveRoot(root))
+	base = absPath(resolveRoot(base))
+	if root == "" || base == "" || root == base {
+		return false
+	}
+	return filepath.Dir(root) == base
 }
 
 func dirExists(path string) bool {
