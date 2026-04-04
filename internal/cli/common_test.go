@@ -306,6 +306,34 @@ func TestClassifyRootIgnoresStaleEnvBaseRootAndUsesAmqrc(t *testing.T) {
 	}
 }
 
+func TestClassifyRootDefaultLayoutConvention(t *testing.T) {
+	t.Setenv("AM_BASE_ROOT", "")
+
+	baseRoot := filepath.Join(t.TempDir(), defaultCoopRoot)
+	sessionRoot := filepath.Join(baseRoot, "collab")
+	if err := os.MkdirAll(sessionRoot, 0o700); err != nil {
+		t.Fatalf("mkdir session root: %v", err)
+	}
+
+	if got := classifyRoot(sessionRoot); got != baseRoot {
+		t.Fatalf("classifyRoot(%q) = %q, want %q", sessionRoot, got, baseRoot)
+	}
+}
+
+func TestClassifyRootCustomRootDoesNotMatchDefaultLayoutConvention(t *testing.T) {
+	t.Setenv("AM_BASE_ROOT", "")
+
+	baseRoot := filepath.Join(t.TempDir(), "my-queue")
+	sessionRoot := filepath.Join(baseRoot, "collab")
+	if err := os.MkdirAll(sessionRoot, 0o700); err != nil {
+		t.Fatalf("mkdir session root: %v", err)
+	}
+
+	if got := classifyRoot(sessionRoot); got != "" {
+		t.Fatalf("classifyRoot(%q) = %q, want empty", sessionRoot, got)
+	}
+}
+
 func TestSessionName(t *testing.T) {
 	tests := []struct {
 		root string
