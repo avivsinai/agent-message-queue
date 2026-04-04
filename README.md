@@ -182,7 +182,7 @@ For the full command reference, see [CLAUDE.md](CLAUDE.md).
 
 ## Global Root Fallback
 
-Most AMQ commands resolve the queue root from the project `.amqrc`. For agents launched outside the repo root by external orchestrators, you can configure a global fallback instead:
+Most AMQ commands resolve the queue root from the project `.amqrc` or the default `.agent-mail` layout in the current tree. For agents launched outside the repo root by external orchestrators, you can configure a global fallback instead:
 
 ```bash
 export AMQ_GLOBAL_ROOT="$HOME/.agent-mail"
@@ -200,6 +200,7 @@ Root resolution precedence is:
 flags > AM_ROOT > project .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
 ```
 
+Auto-detect covers the default `.agent-mail` layout, including `.agent-mail/<session>` session roots without `.amqrc`. Custom root names and peer config still require `.amqrc` or explicit flags/env.
 This same chain is used by `amq env`, `amq doctor`, and the integration commands, so Symphony and Kanban-launched agents can find the correct queue even when they are not started from the project directory.
 
 ## Integrations

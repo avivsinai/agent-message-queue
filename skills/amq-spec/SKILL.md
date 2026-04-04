@@ -41,7 +41,7 @@ If topic/problem are unclear, ask for clarification.
 ## Pre-flight
 
 1. Verify AMQ is available: `which amq`
-2. Verify co-op is initialized (`.amqrc`), otherwise run: `amq coop init`
+2. Verify the AMQ root is discoverable (`.amqrc`, AMQ env vars, or the default `.agent-mail` layout); otherwise run: `amq coop init`
 3. Use thread name: `spec/<topic>`
 
 ## First Action: Send problem to partner IMMEDIATELY

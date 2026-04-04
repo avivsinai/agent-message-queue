@@ -78,23 +78,24 @@ internal/
 
 **Thread Naming**: P2P threads use lexicographic ordering: `p2p/<lower_agent>__<higher_agent>`
 
-**Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail/collab`), `AM_ME` (agent handle), `AMQ_GLOBAL_ROOT` (global root fallback for orchestrator-spawned agents), `AMQ_NO_UPDATE_CHECK` (disable update check)
+**Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail/collab`), `AM_ME` (agent handle), `AM_BASE_ROOT` (base root set by `coop exec` for cross-session resolution; only trusted when the current root still lives under it), `AMQ_GLOBAL_ROOT` (global root fallback for orchestrator-spawned agents), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
-**Session Layout**: The base root directory (`.agent-mail/`) is configured in `.amqrc`. `coop exec` defaults to `--session collab`, so agents get session isolation without explicit flags. Use `--session` to override:
+**Session Layout**: The default base root directory is `.agent-mail/`. `.amqrc` can configure that root explicitly, but the default `.agent-mail/<session>` layout is also recognized without `.amqrc`. `coop exec` defaults to `--session collab`, so agents get session isolation without explicit flags. Use `--session` to override:
 ```
-.agent-mail/              ← base root (configured in .amqrc)
+.agent-mail/              ← default base root (configurable in `.amqrc`)
 .agent-mail/collab/       ← default session (coop exec without --session or --root)
 .agent-mail/auth/         ← isolated session (via --session auth)
 .agent-mail/api/          ← isolated session (via --session api)
 ```
 
-`AM_ROOT` points to the queue root. When `--root` is explicitly provided, it takes precedence over `AM_ROOT`.
+`AM_ROOT` points to the queue root. When `--root` is explicitly provided, it takes precedence over `AM_ROOT`. `send` and `reply` emit a `note:` on stderr when an explicit `--root` overrides `AM_ROOT`.
 
 **Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
 - **Root**: flags > env (`AM_ROOT`) > project `.amqrc` > `AMQ_GLOBAL_ROOT` > `~/.amqrc` > auto-detect
 - **Me**: flags > env (`AM_ME`)
 
 Note: `.amqrc` configures the root directory. Agent identity (`me`) is set per-terminal via `--me` or `AM_ME`.
+Auto-detect covers the default `.agent-mail` layout in the current tree; `.amqrc` is still required for custom root names and peer configuration.
 
 The `.amqrc` file is JSON:
 ```json

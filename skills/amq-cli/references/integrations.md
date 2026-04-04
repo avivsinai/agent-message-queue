@@ -24,6 +24,8 @@ Root precedence:
 flags > AM_ROOT > project .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
 ```
 
+`auto-detect` covers the default `.agent-mail` layout in the current tree, including `.agent-mail/<session>` session roots without `.amqrc`. Custom root names still need `.amqrc`, explicit flags, or env vars.
+
 ## Symphony
 
 Lightweight optional hook adapter.

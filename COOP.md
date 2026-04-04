@@ -47,7 +47,7 @@ amq coop exec claude -- --dangerously-skip-permissions
 amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
 ```
 
-That's it. `coop exec` auto-initializes the project if needed, sets `AM_ROOT`/`AM_ME`, starts wake notifications, and execs into the agent. Without `--session` or `--root`, it defaults to `--session collab` (i.e., `AM_ROOT=.agent-mail/collab`).
+That's it. `coop exec` auto-initializes the project if needed, sets `AM_ROOT`/`AM_ME` (and `AM_BASE_ROOT` for cross-session resolution), starts wake notifications, and execs into the agent. Without `--session` or `--root`, it defaults to `--session collab` (i.e., `AM_ROOT=.agent-mail/collab`).
 
 To disable auto-wake (e.g., in CI or non-TTY environments):
 ```bash
@@ -85,6 +85,7 @@ eval "$(amq env --me claude)"
 flags > AM_ROOT > project .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
 ```
 
+Auto-detect covers the default `.agent-mail` layout in the current tree, including `.agent-mail/<session>` session roots without `.amqrc`. Custom root names still need `.amqrc`, explicit flags, or env vars.
 That matters when agents are launched by external orchestrators from outside the project root.
 
 ## External Orchestrators
