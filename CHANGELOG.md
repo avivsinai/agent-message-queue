@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-04-04
 ### Fixed
 
 - `--root` flag now overrides `AM_ROOT` when explicitly provided, fixing cross-session and cross-project sends from within active coop sessions.
@@ -26,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduced `publish-skill.yml` to a manual `workflow_dispatch` fallback (no longer triggered by tag push).
 - Added `skip-skill-publish` dispatch input to `release.yml` for manual reruns.
 - Updated `release.sh` PR body to reflect the consolidated release flow.
+
 
 ## [0.28.8] - 2026-04-02
 ### Fixed
