@@ -9,9 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `--root` flag now overrides `AM_ROOT` when explicitly provided, fixing cross-session and cross-project sends from within active coop sessions.
+- `classifyRoot()` no longer blindly trusts stale `AM_BASE_ROOT`; validates the supplied root is actually under the base before using it.
 - Consolidated skill publishing into `release.yml` so it runs directly after the release job instead of relying on a tag-triggered workflow (tags pushed with `GITHUB_TOKEN` do not trigger other workflows).
 
 ### Changed
+
+- `classifyRoot()` recognizes the default `.agent-mail` directory convention, enabling session detection in projects without `.amqrc`.
+- Removed `guardRootOverride()` and dead `validate()` call sites across all command handlers (-140 lines).
+- `send` and `reply` emit a `note:` to stderr when `--root` overrides `AM_ROOT` for visibility.
+- `configuredBaseRoot()` now logs `.amqrc` parse/permission errors to stderr instead of swallowing them silently.
 
 - SHA-pinned all remaining GitHub Actions across every workflow.
 - Added concurrency groups and timeouts to all workflows.
