@@ -15,19 +15,45 @@ import (
 )
 
 type commonFlags struct {
-	Root   string
-	Me     string
-	JSON   bool
-	Strict bool
+	Root    string
+	Me      string
+	JSON    bool
+	Strict  bool
+	flagSet *flag.FlagSet
 }
 
 func addCommonFlags(fs *flag.FlagSet) *commonFlags {
-	flags := &commonFlags{}
+	flags := &commonFlags{flagSet: fs}
 	fs.StringVar(&flags.Root, "root", defaultRoot(), "Root directory for the queue")
 	fs.StringVar(&flags.Me, "me", defaultMe(), "Agent handle (or AM_ME)")
 	fs.BoolVar(&flags.JSON, "json", false, "Emit JSON output")
 	fs.BoolVar(&flags.Strict, "strict", false, "Error on unknown handles (default: warn)")
 	return flags
+}
+
+// warnRootOverride emits a diagnostic note to stderr when --root was explicitly
+// provided and differs from AM_ROOT. This helps users notice when a command
+// operates on a different root than their session. Not an error — --root wins.
+func (f *commonFlags) warnRootOverride() {
+	if f.flagSet == nil {
+		return
+	}
+	rootExplicit := false
+	f.flagSet.Visit(func(fl *flag.Flag) {
+		if fl.Name == "root" {
+			rootExplicit = true
+		}
+	})
+	if !rootExplicit {
+		return
+	}
+	envVal := strings.TrimSpace(os.Getenv(envRoot))
+	if envVal == "" {
+		return
+	}
+	if resolveRoot(envVal) != resolveRoot(f.Root) {
+		_ = writeStderr("note: --root %q overrides AM_ROOT=%q\n", f.Root, envVal)
+	}
 }
 
 // sessionName extracts the session name (last path component) from a resolved root path.
@@ -144,7 +170,13 @@ func resolveRoot(raw string) string {
 
 func configuredBaseRoot(root string) string {
 	result, err := findAmqrcForRoot(root)
-	if err != nil || result.Config.Root == "" {
+	if err != nil {
+		if !errors.Is(err, errAmqrcNotFound) {
+			_ = writeStderr("warning: reading .amqrc for root %q: %v\n", root, err)
+		}
+		return ""
+	}
+	if result.Config.Root == "" {
 		return ""
 	}
 	base := result.Config.Root
@@ -158,6 +190,9 @@ func configuredBaseRoot(root string) string {
 	return ""
 }
 
+// isSessionRootUnderBase returns true when root is a direct child of base
+// (i.e., root is a session directory like .agent-mail/collab under .agent-mail).
+// Returns false when root == base (the base root itself is not a session).
 func isSessionRootUnderBase(root, base string) bool {
 	root = absPath(resolveRoot(root))
 	base = absPath(resolveRoot(base))

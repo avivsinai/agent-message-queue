@@ -88,7 +88,7 @@ internal/
 .agent-mail/api/          ← isolated session (via --session api)
 ```
 
-`AM_ROOT` points to the queue root. If `AM_ROOT` is set and `--root` conflicts, the command errors.
+`AM_ROOT` points to the queue root. When `--root` is explicitly provided, it takes precedence over `AM_ROOT`.
 
 **Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
 - **Root**: flags > env (`AM_ROOT`) > project `.amqrc` > `AMQ_GLOBAL_ROOT` > `~/.amqrc` > auto-detect

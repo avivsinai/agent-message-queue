@@ -45,6 +45,7 @@ func runReply(args []string) error {
 		return UsageError("--me: %v", err)
 	}
 	common.Me = me
+	common.warnRootOverride()
 	root := resolveRoot(common.Root)
 
 	if *idFlag == "" {
