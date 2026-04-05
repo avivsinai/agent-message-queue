@@ -1,6 +1,6 @@
 ---
 name: amq-spec
-version: 0.30.0
+version: 0.30.1
 description: >-
   Parallel-research-then-converge design workflow between two agents. Use this
   skill when the user wants two agents to independently think through a design
