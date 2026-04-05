@@ -491,6 +491,16 @@ func parseFlags(fs *flag.FlagSet, args []string, usage func()) (bool, error) {
 	return false, nil
 }
 
+// rejectPositionalArgs returns a UsageError if the flag set has any remaining
+// positional arguments after parsing. Commands that don't accept positional
+// args should call this immediately after parseFlags to prevent silent drops.
+func rejectPositionalArgs(fs *flag.FlagSet, cmdName string) error {
+	if remaining := fs.Args(); len(remaining) > 0 {
+		return UsageError("%s does not accept positional arguments (got %q); use --body to pass message text", cmdName, strings.Join(remaining, " "))
+	}
+	return nil
+}
+
 func usageWithFlags(fs *flag.FlagSet, usage string, notes ...string) func() {
 	return func() {
 		writeUsageTo(os.Stdout, fs, usage, notes...)
