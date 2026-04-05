@@ -147,17 +147,27 @@ def _resolve_root(event: dict[str, Any]) -> str:
 def _resolve_session_name(root: str) -> str:
     """Derive session name from root path.
 
-    Returns the last path component when the root looks like a session
-    directory (parent contains sibling dirs with agents/ subdirectories,
-    or parent is named .agent-mail). Returns "" otherwise.
+    Mirrors the Go classifyRoot logic: checks AM_BASE_ROOT, sibling
+    sessions, default .agent-mail parent, and .amqrc-derived base roots.
+    Returns the last path component when root is a session directory,
+    or "" otherwise.
     """
     root_path = Path(root).resolve()
     parent = root_path.parent
     name = root_path.name
 
+    # 1. AM_BASE_ROOT: if set and root is a direct child, it's a session
+    base_root = os.environ.get("AM_BASE_ROOT", "").strip()
+    if base_root:
+        base_path = Path(base_root).resolve()
+        if parent == base_path and root_path != base_path:
+            return name
+
+    # 2. Check if parent is the default co-op root name
     if parent.name == ".agent-mail":
         return name
 
+    # 3. Check if parent contains sibling session directories (dirs with agents/)
     try:
         for entry in parent.iterdir():
             if entry.is_dir() and entry.name != name:
@@ -165,6 +175,20 @@ def _resolve_session_name(root: str) -> str:
                     return name
     except OSError:
         pass
+
+    # 4. .amqrc-derived base root
+    result = _find_amqrc(parent)
+    if result is not None:
+        rc_dir, cfg = result
+        rc_base = cfg.get("root", "")
+        if rc_base:
+            base_path = Path(rc_base) if Path(rc_base).is_absolute() else rc_dir / rc_base
+            try:
+                base_resolved = base_path.resolve()
+            except OSError:
+                base_resolved = base_path
+            if parent == base_resolved and root_path != base_resolved:
+                return name
 
     return ""
 
