@@ -309,6 +309,7 @@ func runWake(args []string) error {
 	cfg := wakeConfig{
 		me:                me,
 		root:              root,
+		session:           resolveSessionName(root),
 		injectCmd:         *injectCmdFlag,
 		bell:              *bellFlag,
 		debounce:          *debounceFlag,

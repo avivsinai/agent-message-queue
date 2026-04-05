@@ -125,6 +125,33 @@ def resolve_root(event: dict) -> str:
     return os.path.join(".agent-mail", default_session)
 
 
+def resolve_session_name(root: str) -> str:
+    """Derive session name from root path.
+
+    Returns the last path component when the root looks like a session
+    directory (parent contains sibling dirs with agents/ subdirectories,
+    or parent is named .agent-mail). Returns "" otherwise.
+    """
+    root_path = Path(root).resolve()
+    parent = root_path.parent
+    name = root_path.name
+
+    # Check if parent is the default co-op root name
+    if parent.name == ".agent-mail":
+        return name
+
+    # Check if parent contains sibling session directories (dirs with agents/)
+    try:
+        for entry in parent.iterdir():
+            if entry.is_dir() and entry.name != name:
+                if (entry / "agents").is_dir():
+                    return name
+    except OSError:
+        pass
+
+    return ""
+
+
 def inbox_has_messages(root: str, me: str) -> bool:
     """Fast path: check for .md files in inbox/new without invoking amq."""
     inbox_new = Path(root) / "agents" / me / "inbox" / "new"
@@ -310,7 +337,9 @@ def main():
     low = result["count"] - urgent - normal
 
     # Send notification
-    title = f"AMQ: {result['count']} message(s)"
+    session = resolve_session_name(root)
+    session_tag = f" [{session}]" if session else ""
+    title = f"AMQ{session_tag}: {result['count']} message(s)"
     parts = []
     if urgent:
         parts.append(f"{urgent} urgent")
@@ -323,7 +352,7 @@ def main():
     send_notification(title, message)
 
     # Also print to stdout for Codex to see
-    print(f"[AMQ] {result['count']} pending message(s): {message}")
+    print(f"[AMQ{session_tag}] {result['count']} pending message(s): {message}")
     for msg in result["messages"][:3]:  # Show first 3
         priority = msg.get("priority", "-")
         subject = msg.get("subject", "(no subject)")

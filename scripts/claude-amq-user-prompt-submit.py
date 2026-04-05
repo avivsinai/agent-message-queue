@@ -144,6 +144,31 @@ def _resolve_root(event: dict[str, Any]) -> str:
     return str(Path(".agent-mail") / default_session)
 
 
+def _resolve_session_name(root: str) -> str:
+    """Derive session name from root path.
+
+    Returns the last path component when the root looks like a session
+    directory (parent contains sibling dirs with agents/ subdirectories,
+    or parent is named .agent-mail). Returns "" otherwise.
+    """
+    root_path = Path(root).resolve()
+    parent = root_path.parent
+    name = root_path.name
+
+    if parent.name == ".agent-mail":
+        return name
+
+    try:
+        for entry in parent.iterdir():
+            if entry.is_dir() and entry.name != name:
+                if (entry / "agents").is_dir():
+                    return name
+    except OSError:
+        pass
+
+    return ""
+
+
 def _inbox_has_new_messages(root: str, me: str) -> bool:
     inbox_new = Path(root) / "agents" / me / "inbox" / "new"
     try:
@@ -256,10 +281,12 @@ def _build_context(
     action: str,
     body_chars: int,
     max_chars: int,
+    session: str = "",
 ) -> str:
     mode_text = "drained" if action == "drain" else "found"
+    session_tag = f" [{session}]" if session else ""
     lines: list[str] = [
-        f"AMQ hook {mode_text} {len(rows)} message(s) for {me} in {root}.",
+        f"AMQ{session_tag} hook {mode_text} {len(rows)} message(s) for {me} in {root}.",
     ]
     if action == "list":
         lines.append("Run `amq drain --include-body` to ingest full message bodies.")
@@ -328,7 +355,8 @@ def main() -> None:
     if not rows:
         return
 
-    context = _build_context(rows, has_more, root, me, action, body_chars, max_chars)
+    session = _resolve_session_name(root)
+    context = _build_context(rows, has_more, root, me, action, body_chars, max_chars, session)
     if context:
         _emit_context(context)
 
