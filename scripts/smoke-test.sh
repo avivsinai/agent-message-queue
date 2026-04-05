@@ -119,4 +119,12 @@ if ! printf '%s' "$iso_out" | grep -q "feature-x"; then
 fi
 echo "coop exec --session isolation ok"
 
+# --- Python hook session-name tests ---
+if command -v python3 >/dev/null 2>&1; then
+  # Clear env to avoid interference with session detection tests
+  unset AM_BASE_ROOT 2>/dev/null || true
+  python3 scripts/test_session_name.py
+  echo "python session-name tests ok"
+fi
+
 echo "smoke test ok"

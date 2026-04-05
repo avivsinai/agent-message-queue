@@ -263,6 +263,135 @@ func TestMonitor_Timeout(t *testing.T) {
 	}
 }
 
+func TestMonitor_SessionInJSON(t *testing.T) {
+	// Create a session-like layout: base/.agent-mail/mysession/agents/alice/...
+	base := t.TempDir()
+	baseRoot := filepath.Join(base, ".agent-mail")
+	sessionRoot := filepath.Join(baseRoot, "mysession")
+	agent := "alice"
+
+	// Create the session root with agent dirs
+	if err := fsq.EnsureAgentDirs(sessionRoot, agent); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	// Create a sibling session so classifyRoot detects the session layout
+	siblingSession := filepath.Join(baseRoot, "othersession")
+	if err := fsq.EnsureAgentDirs(siblingSession, "bob"); err != nil {
+		t.Fatalf("EnsureAgentDirs sibling: %v", err)
+	}
+
+	// Deliver a message
+	now := time.Now()
+	id, _ := format.NewMessageID(now)
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  format.CurrentSchema,
+			ID:      id,
+			From:    "bob",
+			To:      []string{agent},
+			Subject: "Session test",
+			Created: now.UTC().Format(time.RFC3339Nano),
+		},
+		Body: "Test message in session.",
+	}
+	data, _ := msg.Marshal()
+	if _, err := fsq.DeliverToInboxes(sessionRoot, []string{agent}, id+".md", data); err != nil {
+		t.Fatalf("DeliverToInboxes: %v", err)
+	}
+
+	// Capture output
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runMonitor([]string{
+		"--me", agent,
+		"--root", sessionRoot,
+		"--json",
+		"--timeout", "1s",
+	})
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("runMonitor: %v", err)
+	}
+
+	var buf [8192]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+
+	var result monitorResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("parse output: %v\noutput: %s", err, output)
+	}
+
+	if result.Session != "mysession" {
+		t.Errorf("expected session=mysession, got %q", result.Session)
+	}
+}
+
+func TestMonitor_NoSessionForPlainRoot(t *testing.T) {
+	// A plain root (not under .agent-mail or any session layout) should have empty session
+	root := t.TempDir()
+	agent := "alice"
+
+	if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	now := time.Now()
+	id, _ := format.NewMessageID(now)
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  format.CurrentSchema,
+			ID:      id,
+			From:    "bob",
+			To:      []string{agent},
+			Subject: "No session",
+			Created: now.UTC().Format(time.RFC3339Nano),
+		},
+		Body: "Test.",
+	}
+	data, _ := msg.Marshal()
+	if _, err := fsq.DeliverToInboxes(root, []string{agent}, id+".md", data); err != nil {
+		t.Fatalf("DeliverToInboxes: %v", err)
+	}
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runMonitor([]string{
+		"--me", agent,
+		"--root", root,
+		"--json",
+		"--timeout", "1s",
+	})
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("runMonitor: %v", err)
+	}
+
+	var buf [8192]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+
+	var result monitorResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("parse output: %v\noutput: %s", err, output)
+	}
+
+	if result.Session != "" {
+		t.Errorf("expected empty session for plain root, got %q", result.Session)
+	}
+}
+
 func TestMonitor_PriorityInOutput(t *testing.T) {
 	root := t.TempDir()
 	agent := "alice"
