@@ -49,6 +49,9 @@ func runSend(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if err := rejectPositionalArgs(fs, "send"); err != nil {
+		return err
+	}
 	if err := requireMe(common.Me); err != nil {
 		return err
 	}
