@@ -144,6 +144,55 @@ def _resolve_root(event: dict[str, Any]) -> str:
     return str(Path(".agent-mail") / default_session)
 
 
+def _resolve_session_name(root: str) -> str:
+    """Derive session name from root path.
+
+    Mirrors the Go classifyRoot logic: checks AM_BASE_ROOT, sibling
+    sessions, default .agent-mail parent, and .amqrc-derived base roots.
+    Returns the last path component when root is a session directory,
+    or "" otherwise.
+    """
+    root_path = Path(root).resolve()
+    parent = root_path.parent
+    name = root_path.name
+
+    # 1. AM_BASE_ROOT: if set and root is a direct child, it's a session
+    base_root = os.environ.get("AM_BASE_ROOT", "").strip()
+    if base_root:
+        base_path = Path(base_root).resolve()
+        if parent == base_path and root_path != base_path:
+            return name
+
+    # 2. Check if parent is the default co-op root name
+    if parent.name == ".agent-mail":
+        return name
+
+    # 3. Check if parent contains sibling session directories (dirs with agents/)
+    try:
+        for entry in parent.iterdir():
+            if entry.is_dir() and entry.name != name:
+                if (entry / "agents").is_dir():
+                    return name
+    except OSError:
+        pass
+
+    # 4. .amqrc-derived base root
+    result = _find_amqrc(parent)
+    if result is not None:
+        rc_dir, cfg = result
+        rc_base = cfg.get("root", "")
+        if rc_base:
+            base_path = Path(rc_base) if Path(rc_base).is_absolute() else rc_dir / rc_base
+            try:
+                base_resolved = base_path.resolve()
+            except OSError:
+                base_resolved = base_path
+            if parent == base_resolved and root_path != base_resolved:
+                return name
+
+    return ""
+
+
 def _inbox_has_new_messages(root: str, me: str) -> bool:
     inbox_new = Path(root) / "agents" / me / "inbox" / "new"
     try:
@@ -256,10 +305,12 @@ def _build_context(
     action: str,
     body_chars: int,
     max_chars: int,
+    session: str = "",
 ) -> str:
     mode_text = "drained" if action == "drain" else "found"
+    session_tag = f" [{session}]" if session else ""
     lines: list[str] = [
-        f"AMQ hook {mode_text} {len(rows)} message(s) for {me} in {root}.",
+        f"AMQ{session_tag} hook {mode_text} {len(rows)} message(s) for {me} in {root}.",
     ]
     if action == "list":
         lines.append("Run `amq drain --include-body` to ingest full message bodies.")
@@ -328,7 +379,8 @@ def main() -> None:
     if not rows:
         return
 
-    context = _build_context(rows, has_more, root, me, action, body_chars, max_chars)
+    session = _resolve_session_name(root)
+    context = _build_context(rows, has_more, root, me, action, body_chars, max_chars, session)
     if context:
         _emit_context(context)
 

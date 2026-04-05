@@ -125,6 +125,55 @@ def resolve_root(event: dict) -> str:
     return os.path.join(".agent-mail", default_session)
 
 
+def resolve_session_name(root: str) -> str:
+    """Derive session name from root path.
+
+    Mirrors the Go classifyRoot logic: checks AM_BASE_ROOT, sibling
+    sessions, default .agent-mail parent, and .amqrc-derived base roots.
+    Returns the last path component when root is a session directory,
+    or "" otherwise.
+    """
+    root_path = Path(root).resolve()
+    parent = root_path.parent
+    name = root_path.name
+
+    # 1. AM_BASE_ROOT: if set and root is a direct child, it's a session
+    base_root = os.environ.get("AM_BASE_ROOT", "").strip()
+    if base_root:
+        base_path = Path(base_root).resolve()
+        if parent == base_path and root_path != base_path:
+            return name
+
+    # 2. Check if parent is the default co-op root name
+    if parent.name == ".agent-mail":
+        return name
+
+    # 3. Check if parent contains sibling session directories (dirs with agents/)
+    try:
+        for entry in parent.iterdir():
+            if entry.is_dir() and entry.name != name:
+                if (entry / "agents").is_dir():
+                    return name
+    except OSError:
+        pass
+
+    # 4. .amqrc-derived base root
+    result = find_amqrc(parent)
+    if result is not None:
+        rc_dir, cfg = result
+        rc_base = cfg.get("root", "")
+        if rc_base:
+            base_path = Path(rc_base) if Path(rc_base).is_absolute() else rc_dir / rc_base
+            try:
+                base_resolved = base_path.resolve()
+            except OSError:
+                base_resolved = base_path
+            if parent == base_resolved and root_path != base_resolved:
+                return name
+
+    return ""
+
+
 def inbox_has_messages(root: str, me: str) -> bool:
     """Fast path: check for .md files in inbox/new without invoking amq."""
     inbox_new = Path(root) / "agents" / me / "inbox" / "new"
@@ -310,7 +359,9 @@ def main():
     low = result["count"] - urgent - normal
 
     # Send notification
-    title = f"AMQ: {result['count']} message(s)"
+    session = resolve_session_name(root)
+    session_tag = f" [{session}]" if session else ""
+    title = f"AMQ{session_tag}: {result['count']} message(s)"
     parts = []
     if urgent:
         parts.append(f"{urgent} urgent")
@@ -323,7 +374,7 @@ def main():
     send_notification(title, message)
 
     # Also print to stdout for Codex to see
-    print(f"[AMQ] {result['count']} pending message(s): {message}")
+    print(f"[AMQ{session_tag}] {result['count']} pending message(s): {message}")
     for msg in result["messages"][:3]:  # Show first 3
         priority = msg.get("priority", "-")
         subject = msg.get("subject", "(no subject)")

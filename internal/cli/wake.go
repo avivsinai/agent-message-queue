@@ -15,6 +15,7 @@ import (
 type wakeConfig struct {
 	me                string
 	root              string
+	session           string
 	injectCmd         string
 	bell              bool
 	debounce          time.Duration
@@ -106,7 +107,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	}
 
 	if cfg.interrupt && len(interruptMessages) > 0 {
-		interruptText := buildInterruptText(interruptMessages, interruptCounts, cfg.previewLen, cfg.interruptNotice)
+		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.previewLen, cfg.interruptNotice)
 		now := time.Now()
 		if cfg.interruptKey != "" && shouldInterruptNow(cfg, now) {
 			if err := tiocsti.Inject(cfg.interruptKey); err == nil {
@@ -124,14 +125,15 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		text = "\n" + cfg.injectCmd + "\n"
 	} else {
 		// Default: informational notice
-		text = buildNotificationText(messages, senderCounts, cfg.previewLen)
+		text = buildNotificationText(cfg.session, messages, senderCounts, cfg.previewLen)
 	}
 
 	return injectNotification(cfg, text)
 }
 
-func buildNotificationText(messages []wakeMsgInfo, senderCounts map[string]int, previewLen int) string {
+func buildNotificationText(session string, messages []wakeMsgInfo, senderCounts map[string]int, previewLen int) string {
 	count := len(messages)
+	prefix := notificationPrefix("AMQ", session)
 
 	if count == 1 {
 		// Single message: show from + truncated subject
@@ -141,7 +143,7 @@ func buildNotificationText(messages []wakeMsgInfo, senderCounts map[string]int, 
 			subject = "(no subject)"
 		}
 		subject = truncateSubject(subject, previewLen)
-		return fmt.Sprintf("AMQ: message from %s - %s. Drain with: amq drain --include-body — then act on it", msg.from, subject)
+		return fmt.Sprintf("%s: message from %s - %s. Drain with: amq drain --include-body — then act on it", prefix, msg.from, subject)
 	}
 
 	// Multiple messages: show counts by sender
@@ -157,16 +159,18 @@ func buildNotificationText(messages []wakeMsgInfo, senderCounts map[string]int, 
 		parts = append(parts, fmt.Sprintf("%d from %s", c, sender))
 	}
 
-	return fmt.Sprintf("AMQ: %d messages - %s. Drain with: amq drain --include-body — then act on it",
-		count, strings.Join(parts, ", "))
+	return fmt.Sprintf("%s: %d messages - %s. Drain with: amq drain --include-body — then act on it",
+		prefix, count, strings.Join(parts, ", "))
 }
 
-func buildInterruptText(messages []wakeMsgInfo, senderCounts map[string]int, previewLen int, custom string) string {
+func buildInterruptText(session string, messages []wakeMsgInfo, senderCounts map[string]int, previewLen int, custom string) string {
 	if custom != "" {
 		return custom
 	}
 
 	count := len(messages)
+	prefix := notificationPrefix("AMQ interrupt", session)
+
 	if count == 1 {
 		msg := messages[0]
 		subject := msg.subject
@@ -174,8 +178,8 @@ func buildInterruptText(messages []wakeMsgInfo, senderCounts map[string]int, pre
 			subject = "(no subject)"
 		}
 		subject = truncateSubject(subject, previewLen)
-		return fmt.Sprintf("AMQ interrupt: urgent message from %s - %s. Drain with: amq drain --include-body — then act on it",
-			msg.from, subject)
+		return fmt.Sprintf("%s: urgent message from %s - %s. Drain with: amq drain --include-body — then act on it",
+			prefix, msg.from, subject)
 	}
 
 	var parts []string
@@ -188,8 +192,16 @@ func buildInterruptText(messages []wakeMsgInfo, senderCounts map[string]int, pre
 		c := senderCounts[sender]
 		parts = append(parts, fmt.Sprintf("%d from %s", c, sender))
 	}
-	return fmt.Sprintf("AMQ interrupt: %d urgent messages - %s. Drain with: amq drain --include-body — then act on it",
-		count, strings.Join(parts, ", "))
+	return fmt.Sprintf("%s: %d urgent messages - %s. Drain with: amq drain --include-body — then act on it",
+		prefix, count, strings.Join(parts, ", "))
+}
+
+// notificationPrefix builds "AMQ [session]" or just "AMQ" when session is empty.
+func notificationPrefix(base, session string) string {
+	if session == "" {
+		return base
+	}
+	return fmt.Sprintf("%s [%s]", base, session)
 }
 
 func truncateSubject(subject string, previewLen int) string {

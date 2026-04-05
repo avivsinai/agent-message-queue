@@ -16,6 +16,7 @@ type monitorResult struct {
 	Event      string        `json:"event"`                 // "messages", "timeout", "empty"
 	WatchEvent string        `json:"watch_event,omitempty"` // "existing", "new_message", ""
 	Mode       string        `json:"mode,omitempty"`        // "drain", "peek"
+	Session    string        `json:"session,omitempty"`     // session name, if inside a session
 	Me         string        `json:"me"`
 	Count      int           `json:"count"`
 	Drained    []monitorItem `json:"drained"`
@@ -69,6 +70,8 @@ func runMonitor(args []string) error {
 		return err
 	}
 
+	session := resolveSessionName(root)
+
 	mode := "drain"
 	doAck := *ackFlag
 	if *peekFlag {
@@ -90,6 +93,7 @@ func runMonitor(args []string) error {
 			Event:      "messages",
 			WatchEvent: "existing",
 			Mode:       mode,
+			Session:    session,
 			Me:         common.Me,
 			Count:      len(items),
 			Drained:    items,
@@ -118,6 +122,7 @@ func runMonitor(args []string) error {
 			if err := outputMonitorResult(common.JSON, monitorResult{
 				Event:   "timeout",
 				Mode:    mode,
+				Session: session,
 				Me:      common.Me,
 				Count:   0,
 				Drained: []monitorItem{},
@@ -142,6 +147,7 @@ func runMonitor(args []string) error {
 		Event:      "messages",
 		WatchEvent: watchEvent,
 		Mode:       mode,
+		Session:    session,
 		Me:         common.Me,
 		Count:      len(items),
 		Drained:    items,
@@ -273,9 +279,10 @@ func outputMonitorResult(jsonOutput bool, result monitorResult) error {
 		}
 		return writeStdoutLine("No messages to drain")
 	case "messages":
-		header := "[AMQ] %d message(s) for %s:\n\n"
+		prefix := notificationPrefix("[AMQ]", result.Session)
+		header := prefix + " %d message(s) for %s:\n\n"
 		if mode == "peek" {
-			header = "[AMQ] %d message(s) available for %s (peek):\n\n"
+			header = prefix + " %d message(s) available for %s (peek):\n\n"
 		}
 		if err := writeStdout(header, result.Count, result.Me); err != nil {
 			return err
