@@ -32,9 +32,8 @@ printf '%s' "$read_out" | grep -q "hello"
 
 "$BIN" list --root "$QUEUE_ROOT" --me claude --cur | grep -q "$msg_id"
 
-"$BIN" ack --root "$QUEUE_ROOT" --me claude --id "$msg_id"
-test -f "$QUEUE_ROOT/agents/claude/acks/sent/${msg_id}.json"
-test -f "$QUEUE_ROOT/agents/codex/acks/received/${msg_id}.json"
+# read already moved the message to cur, which emits a drained receipt
+test -f "$QUEUE_ROOT/agents/claude/receipts/${msg_id}__claude__drained.json"
 
 thread_json="$("$BIN" thread --root "$QUEUE_ROOT" --id "$thread_id" --json)"
 thread_msg="$(printf '%s\n' "$thread_json" | awk -F'"' '/"id":/ {print $4; exit}')"
