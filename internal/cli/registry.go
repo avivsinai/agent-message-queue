@@ -28,7 +28,6 @@ func init() {
 		{Name: "send", Summary: "Send a message", Handler: runSend},
 		{Name: "list", Summary: "List inbox messages", Handler: runList},
 		{Name: "read", Summary: "Read a message by id", Handler: runRead},
-		{Name: "ack", Summary: "Acknowledge a message", Handler: runAck},
 		{Name: "thread", Summary: "View a thread", Handler: runThread},
 		{
 			Name:        "presence",
@@ -139,6 +138,20 @@ func init() {
 						{Name: "bridge", Summary: "Run experimental bridge (Kanban events -> AMQ messages)", Handler: runKanbanBridge},
 					},
 				},
+			},
+		},
+		{
+			Name:        "receipts",
+			Summary:     "Message delivery receipts",
+			Description: "Query and wait for message lifecycle receipts",
+			Examples: []string{
+				"amq receipts list --me claude --msg-id msg_001",
+				"amq receipts wait --me claude --msg-id msg_001 --stage drained --timeout 60s",
+			},
+			Handler: runReceipts,
+			Children: []CommandInfo{
+				{Name: "list", Summary: "List receipts (optionally filtered)", Handler: runReceiptsList},
+				{Name: "wait", Summary: "Wait for a receipt to appear", Handler: runReceiptsWait},
 			},
 		},
 		{Name: "who", Summary: "Show sessions and agents in current project", Handler: runWho},

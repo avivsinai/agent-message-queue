@@ -204,7 +204,7 @@ func TestCleanupMissingFlag_ExitCode(t *testing.T) {
 func TestCommandHelp_ExitZero(t *testing.T) {
 	// Every command should support --help and exit 0
 	commands := []string{
-		"init", "send", "list", "read", "ack", "thread",
+		"init", "send", "list", "read", "thread",
 		"cleanup", "watch", "drain", "monitor", "reply",
 		"upgrade", "env", "who", "doctor", "shell-setup",
 	}

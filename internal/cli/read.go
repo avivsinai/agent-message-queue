@@ -8,6 +8,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
 func runRead(args []string) error {
@@ -56,6 +57,9 @@ func runRead(args []string) error {
 		if box == fsq.BoxNew {
 			if _, dlqErr := fsq.MoveToDLQ(root, common.Me, filename, *idFlag, "parse_error", err.Error()); dlqErr != nil {
 				_ = writeStderr("warning: failed to move corrupt message to DLQ: %v\n", dlqErr)
+			} else {
+				r := receipt.New(*idFlag, "", "", common.Me, receipt.StageDLQ, err.Error())
+				_ = receipt.Emit(root, common.Me, r)
 			}
 		}
 		return fmt.Errorf("failed to parse message %s: %w", *idFlag, err)
@@ -66,6 +70,9 @@ func runRead(args []string) error {
 		if err := fsq.MoveNewToCur(root, common.Me, filename); err != nil {
 			return err
 		}
+		sender, _ := normalizeHandle(msg.Header.From)
+		r := receipt.New(msg.Header.ID, msg.Header.Thread, sender, common.Me, receipt.StageDrained, "")
+		_ = receipt.Emit(root, common.Me, r)
 	}
 
 	if common.JSON {

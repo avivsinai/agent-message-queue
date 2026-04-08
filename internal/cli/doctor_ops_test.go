@@ -104,10 +104,6 @@ func TestRunOpsChecks_BasicAgentStats(t *testing.T) {
 		t.Errorf("bob presence = %q, want %q", bob.PresenceStatus, "unknown")
 	}
 
-	// Ack latency should always be nil (deferred to v2)
-	if result.Acks.RecentLatencyMs != nil {
-		t.Errorf("ack latency should be nil (deferred to v2), got %v", *result.Acks.RecentLatencyMs)
-	}
 }
 
 func TestRunOpsChecks_NoConfig(t *testing.T) {

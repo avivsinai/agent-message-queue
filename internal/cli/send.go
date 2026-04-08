@@ -20,7 +20,6 @@ func runSend(args []string) error {
 	subjectFlag := fs.String("subject", "", "Message subject")
 	threadFlag := fs.String("thread", "", "Thread id (required for cross-session sends; default p2p/<a>__<b> for local)")
 	bodyFlag := fs.String("body", "", "Body string, @file, or empty to read stdin")
-	ackFlag := fs.Bool("ack", false, "Request ack")
 	refsFlag := fs.String("refs", "", "Comma-separated related message ids")
 
 	// Co-op mode flags
@@ -278,7 +277,6 @@ func runSend(args []string) error {
 			Thread:       threadID,
 			Subject:      strings.TrimSpace(*subjectFlag),
 			Created:      now.UTC().Format(time.RFC3339Nano),
-			AckRequired:  *ackFlag,
 			Refs:         splitList(*refsFlag),
 			Priority:     priority,
 			Kind:         kind,

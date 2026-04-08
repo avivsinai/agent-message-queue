@@ -48,14 +48,6 @@ func AgentOutboxSent(root, agent string) string {
 	return filepath.Join(root, "agents", agent, "outbox", "sent")
 }
 
-func AgentAcksReceived(root, agent string) string {
-	return filepath.Join(root, "agents", agent, "acks", "received")
-}
-
-func AgentAcksSent(root, agent string) string {
-	return filepath.Join(root, "agents", agent, "acks", "sent")
-}
-
 func AgentDLQTmp(root, agent string) string {
 	return filepath.Join(root, "agents", agent, "dlq", "tmp")
 }
@@ -66,6 +58,10 @@ func AgentDLQNew(root, agent string) string {
 
 func AgentDLQCur(root, agent string) string {
 	return filepath.Join(root, "agents", agent, "dlq", "cur")
+}
+
+func AgentReceipts(root, agent string) string {
+	return filepath.Join(root, "agents", agent, "receipts")
 }
 
 func EnsureRootDirs(root string) error {
@@ -90,11 +86,10 @@ func EnsureAgentDirs(root, agent string) error {
 		AgentInboxNew(root, agent),
 		AgentInboxCur(root, agent),
 		AgentOutboxSent(root, agent),
-		AgentAcksReceived(root, agent),
-		AgentAcksSent(root, agent),
 		AgentDLQTmp(root, agent),
 		AgentDLQNew(root, agent),
 		AgentDLQCur(root, agent),
+		AgentReceipts(root, agent),
 	}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
