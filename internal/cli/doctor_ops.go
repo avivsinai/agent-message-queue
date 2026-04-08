@@ -26,13 +26,13 @@ type opsRoot struct {
 }
 
 type opsAgent struct {
-	Handle                     string  `json:"handle"`
-	UnreadCount                int     `json:"unread_count"`
-	OldestUnreadAgeSeconds     float64 `json:"oldest_unread_age_seconds"`
-	DLQCount                   int     `json:"dlq_count"`
-	OldestDLQAgeSeconds        float64 `json:"oldest_dlq_age_seconds"`
-	PresenceStatus             string  `json:"presence_status"`
-	PresenceAgeSeconds         float64 `json:"presence_age_seconds"`
+	Handle                 string  `json:"handle"`
+	UnreadCount            int     `json:"unread_count"`
+	OldestUnreadAgeSeconds float64 `json:"oldest_unread_age_seconds"`
+	DLQCount               int     `json:"dlq_count"`
+	OldestDLQAgeSeconds    float64 `json:"oldest_dlq_age_seconds"`
+	PresenceStatus         string  `json:"presence_status"`
+	PresenceAgeSeconds     float64 `json:"presence_age_seconds"`
 }
 
 type opsHint struct {
@@ -60,7 +60,6 @@ func runOpsChecks(root string, rootSource string) *doctorOpsResult {
 		})
 		return result
 	}
-
 
 	for _, handle := range cfg.Agents {
 		agent := opsAgent{Handle: handle}
@@ -115,7 +114,6 @@ func runOpsChecks(root string, rootSource string) *doctorOpsResult {
 
 		result.Agents = append(result.Agents, agent)
 	}
-
 
 	// Integration hints
 	result.Hints = append(result.Hints, checkGlobalRootHint()...)

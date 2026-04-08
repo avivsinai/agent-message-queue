@@ -20,7 +20,6 @@ func runReply(args []string) error {
 	bodyFlag := fs.String("body", "", "Body string, @file, or empty to read stdin")
 	subjectFlag := fs.String("subject", "", "Override subject (default: Re: <original>)")
 
-
 	// Co-op mode flags
 	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low")
 	kindFlag := fs.String("kind", "", fmt.Sprintf("Message kind: %s (default: same as original, review_response for review_request, answer for question)", format.ValidKindsList()))
@@ -244,18 +243,18 @@ func runReply(args []string) error {
 
 	msg := format.Message{
 		Header: format.Header{
-			Schema:      format.CurrentSchema,
-			ID:          id,
-			From:        me,
-			To:          []string{recipient},
-			Thread:      originalMsg.Header.Thread,
-			Subject:     subject,
-			Created:     now.UTC().Format(time.RFC3339Nano),
-			Refs:        append(originalMsg.Header.Refs, originalMsg.Header.ID),
-			Priority:    priority,
-			Kind:        kind,
-			Labels:      labels,
-			Context:     context,
+			Schema:   format.CurrentSchema,
+			ID:       id,
+			From:     me,
+			To:       []string{recipient},
+			Thread:   originalMsg.Header.Thread,
+			Subject:  subject,
+			Created:  now.UTC().Format(time.RFC3339Nano),
+			Refs:     append(originalMsg.Header.Refs, originalMsg.Header.ID),
+			Priority: priority,
+			Kind:     kind,
+			Labels:   labels,
+			Context:  context,
 			// Restamp ReplyTo/ReplyProject so the recipient can reply back.
 			ReplyTo: func() string {
 				if targetSession != "" {
