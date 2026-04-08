@@ -204,16 +204,16 @@ func captureOutput(t *testing.T, fn func() error) (string, string) {
 
 	err := fn()
 
-	wOut.Close()
-	wErr.Close()
+	_ = wOut.Close()
+	_ = wErr.Close()
 	os.Stdout = oldStdout
 	os.Stderr = oldStderr
 
 	outBytes, _ := io.ReadAll(rOut)
-	rOut.Close()
+	_ = rOut.Close()
 
 	errBytes, _ := io.ReadAll(rErr)
-	rErr.Close()
+	_ = rErr.Close()
 
 	if err != nil {
 		t.Logf("function returned error: %v", err)
