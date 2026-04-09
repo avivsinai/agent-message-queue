@@ -99,6 +99,9 @@ func runSend(args []string) error {
 		if *waitTimeoutFlag < 0 {
 			return UsageError("--wait-timeout must be >= 0")
 		}
+		if targetProject != "" {
+			return UsageError("--wait-for is not supported for cross-project sends")
+		}
 	}
 
 	// Determine delivery root: local, cross-session, or cross-project.
