@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -87,7 +88,7 @@ func runSend(args []string) error {
 	}
 	recipients = dedupeStrings(recipients)
 
-	// Validate --wait-for
+	// Validate --wait-for (basic checks; cross-root check deferred until routing is resolved)
 	waitFor := strings.TrimSpace(*waitForFlag)
 	if waitFor != "" {
 		if err := validateStage(waitFor); err != nil {
@@ -98,9 +99,6 @@ func runSend(args []string) error {
 		}
 		if *waitTimeoutFlag < 0 {
 			return UsageError("--wait-timeout must be >= 0")
-		}
-		if targetProject != "" {
-			return UsageError("--wait-for is not supported for cross-project sends")
 		}
 	}
 
@@ -188,6 +186,15 @@ func runSend(args []string) error {
 				return fmt.Errorf("agent %q not found in session %q", r, targetSession)
 			}
 		}
+	}
+
+	// Block --wait-for when delivery goes to a different root.
+	// Receipt mirroring only works within a single root — the consumer
+	// emits the receipt in deliveryRoot, and mirror writes to the sender's
+	// namespace in the same root. If deliveryRoot != root, the sender's
+	// receipts/ dir won't see the mirror.
+	if waitFor != "" && deliveryRoot != root {
+		return UsageError("--wait-for is not supported for cross-session or cross-project sends (delivery root differs from sender root)")
 	}
 
 	// Validate sender in source root, recipients in target root. Always.
@@ -349,13 +356,16 @@ func runSend(args []string) error {
 
 	// Wait for receipt if requested (single-recipient only, validated above).
 	var waitResult *waitForResult
+	var waitErr error
 	if waitFor != "" {
 		consumer := recipients[0]
 		r, err := receipt.WaitFor(root, common.Me, id, consumer, waitFor, *waitTimeoutFlag, 1*time.Second)
-		if err == os.ErrDeadlineExceeded {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
 			waitResult = &waitForResult{Event: "timeout", Stage: waitFor, Timeout: waitTimeoutFlag.String()}
+			waitErr = TimeoutError("send --wait-for %s timed out after %s", waitFor, *waitTimeoutFlag)
 		} else if err != nil {
 			waitResult = &waitForResult{Event: "error", Stage: waitFor, Detail: err.Error()}
+			waitErr = fmt.Errorf("send --wait-for: %w", err)
 		} else {
 			waitResult = &waitForResult{Event: "matched", Stage: waitFor, Receipt: &r}
 		}
@@ -390,10 +400,7 @@ func runSend(args []string) error {
 		if err := writeJSON(os.Stdout, out); err != nil {
 			return err
 		}
-		if waitResult != nil && waitResult.Event == "timeout" {
-			return TimeoutError("send --wait-for %s timed out after %s", waitFor, *waitTimeoutFlag)
-		}
-		return nil
+		return waitErr
 	}
 	if outboxErr != nil {
 		if err := writeStderr("warning: outbox write failed: %v\n", outboxErr); err != nil {
@@ -410,12 +417,12 @@ func runSend(args []string) error {
 			if err := writeStdout("Sent %s to %s; timed out waiting %s for %s receipt\n", id, recipients[0], *waitTimeoutFlag, waitFor); err != nil {
 				return err
 			}
-			return TimeoutError("send --wait-for %s timed out after %s", waitFor, *waitTimeoutFlag)
 		default:
 			if err := writeStdout("Sent %s to %s; wait error: %s\n", id, recipients[0], waitResult.Detail); err != nil {
 				return err
 			}
 		}
+		return waitErr
 	} else {
 		if err := writeStdout("Sent %s to %s (session: %s, root: %s)\n", id, strings.Join(recipients, ","), targetDisplay, deliveryRoot); err != nil {
 			return err
