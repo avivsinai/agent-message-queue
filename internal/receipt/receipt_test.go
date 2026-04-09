@@ -23,7 +23,7 @@ func TestEmitAndRead(t *testing.T) {
 	root := setupTestRoot(t)
 
 	r := New("msg_001", "p2p/claude__codex", "claude", "codex", StageDrained, "")
-	if err := Emit(root, "codex", r); err != nil {
+	if err := Emit(root, r); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 
@@ -54,7 +54,7 @@ func TestEmitSelfSend(t *testing.T) {
 
 	// When sender == consumer, no mirroring needed.
 	r := New("msg_002", "", "claude", "claude", StageDLQ, "")
-	if err := Emit(root, "claude", r); err != nil {
+	if err := Emit(root, r); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 
@@ -80,7 +80,7 @@ func TestListFilter(t *testing.T) {
 		{"msg_012", StageDLQ},
 	} {
 		r := New(tc.msgID, "p2p/claude__codex", "claude", "codex", tc.stage, "")
-		if err := Emit(root, "codex", r); err != nil {
+		if err := Emit(root, r); err != nil {
 			t.Fatalf("Emit %s/%s: %v", tc.msgID, tc.stage, err)
 		}
 	}
@@ -140,7 +140,7 @@ func TestMirrorBestEffort(t *testing.T) {
 
 	// Emit to a consumer whose sender doesn't exist as an agent dir.
 	r := New("msg_020", "", "unknown-sender", "codex", StageDrained, "")
-	if err := Emit(root, "codex", r); err != nil {
+	if err := Emit(root, r); err != nil {
 		t.Fatalf("Emit should not fail even if sender dir doesn't exist: %v", err)
 	}
 
@@ -155,7 +155,7 @@ func TestDLQReceiptDetail(t *testing.T) {
 	root := setupTestRoot(t)
 
 	r := New("msg_030", "", "claude", "codex", StageDLQ, "parse_error: invalid JSON header")
-	if err := Emit(root, "codex", r); err != nil {
+	if err := Emit(root, r); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 

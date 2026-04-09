@@ -60,7 +60,7 @@ func emitReceipt(root, consumer string, item *inboxItem, stage, detail string) {
 	}
 
 	r := receipt.New(item.ID, item.Thread, sender, consumer, stage, detail)
-	if err := receipt.Emit(root, consumer, r); err != nil {
+	if err := receipt.Emit(root, r); err != nil {
 		_ = writeStderr("warning: failed to emit %s receipt for %s: %v\n", stage, item.ID, err)
 	}
 }

@@ -59,7 +59,7 @@ func runRead(args []string) error {
 				_ = writeStderr("warning: failed to move corrupt message to DLQ: %v\n", dlqErr)
 			} else {
 				r := receipt.New(*idFlag, "", "", common.Me, receipt.StageDLQ, err.Error())
-				_ = receipt.Emit(root, common.Me, r)
+				_ = receipt.Emit(root, r)
 			}
 		}
 		return fmt.Errorf("failed to parse message %s: %w", *idFlag, err)
@@ -70,9 +70,13 @@ func runRead(args []string) error {
 		if err := fsq.MoveNewToCur(root, common.Me, filename); err != nil {
 			return err
 		}
-		sender, _ := normalizeHandle(msg.Header.From)
-		r := receipt.New(msg.Header.ID, msg.Header.Thread, sender, common.Me, receipt.StageDrained, "")
-		_ = receipt.Emit(root, common.Me, r)
+		// Validate header fields before using them in receipt filenames
+		safeID, err := ensureSafeBaseName(msg.Header.ID)
+		if err == nil {
+			sender, _ := normalizeHandle(msg.Header.From)
+			r := receipt.New(safeID, msg.Header.Thread, sender, common.Me, receipt.StageDrained, "")
+			_ = receipt.Emit(root, r)
+		}
 	}
 
 	if common.JSON {

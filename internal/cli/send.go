@@ -11,6 +11,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
+	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
 func runSend(args []string) error {
@@ -21,6 +22,8 @@ func runSend(args []string) error {
 	threadFlag := fs.String("thread", "", "Thread id (required for cross-session sends; default p2p/<a>__<b> for local)")
 	bodyFlag := fs.String("body", "", "Body string, @file, or empty to read stdin")
 	refsFlag := fs.String("refs", "", "Comma-separated related message ids")
+	waitForFlag := fs.String("wait-for", "", "Wait for receipt stage after send (drained, dlq)")
+	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for (0 = wait forever)")
 
 	// Co-op mode flags
 	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low (default: normal if kind set)")
@@ -83,6 +86,20 @@ func runSend(args []string) error {
 		return UsageError("--to: %v", err)
 	}
 	recipients = dedupeStrings(recipients)
+
+	// Validate --wait-for
+	waitFor := strings.TrimSpace(*waitForFlag)
+	if waitFor != "" {
+		if err := validateStage(waitFor); err != nil {
+			return UsageError("--wait-for: %v", err)
+		}
+		if len(recipients) != 1 {
+			return UsageError("--wait-for requires exactly one recipient (got %d)", len(recipients))
+		}
+		if *waitTimeoutFlag < 0 {
+			return UsageError("--wait-timeout must be >= 0")
+		}
+	}
 
 	// Determine delivery root: local, cross-session, or cross-project.
 	deliveryRoot := root
@@ -326,6 +343,21 @@ func runSend(args []string) error {
 	if targetSession != "" {
 		targetDisplay = targetSession
 	}
+
+	// Wait for receipt if requested (single-recipient only, validated above).
+	var waitResult *waitForResult
+	if waitFor != "" {
+		consumer := recipients[0]
+		r, err := receipt.WaitFor(root, common.Me, id, consumer, waitFor, *waitTimeoutFlag, 1*time.Second)
+		if err == os.ErrDeadlineExceeded {
+			waitResult = &waitForResult{Event: "timeout", Stage: waitFor, Timeout: waitTimeoutFlag.String()}
+		} else if err != nil {
+			waitResult = &waitForResult{Event: "error", Stage: waitFor, Detail: err.Error()}
+		} else {
+			waitResult = &waitForResult{Event: "matched", Stage: waitFor, Receipt: &r}
+		}
+	}
+
 	if common.JSON {
 		out := map[string]any{
 			"id":      id,
@@ -349,17 +381,52 @@ func runSend(args []string) error {
 			out["source_session"] = session
 			out["target_session"] = targetSession
 		}
-		return writeJSON(os.Stdout, out)
+		if waitResult != nil {
+			out["wait"] = waitResult
+		}
+		if err := writeJSON(os.Stdout, out); err != nil {
+			return err
+		}
+		if waitResult != nil && waitResult.Event == "timeout" {
+			return TimeoutError("send --wait-for %s timed out after %s", waitFor, *waitTimeoutFlag)
+		}
+		return nil
 	}
 	if outboxErr != nil {
 		if err := writeStderr("warning: outbox write failed: %v\n", outboxErr); err != nil {
 			return err
 		}
 	}
-	if err := writeStdout("Sent %s to %s (session: %s, root: %s)\n", id, strings.Join(recipients, ","), targetDisplay, deliveryRoot); err != nil {
-		return err
+	if waitResult != nil {
+		switch waitResult.Event {
+		case "matched":
+			if err := writeStdout("Sent %s to %s; %s by %s at %s\n", id, recipients[0], waitFor, recipients[0], waitResult.Receipt.EmittedAt); err != nil {
+				return err
+			}
+		case "timeout":
+			if err := writeStdout("Sent %s to %s; timed out waiting %s for %s receipt\n", id, recipients[0], *waitTimeoutFlag, waitFor); err != nil {
+				return err
+			}
+			return TimeoutError("send --wait-for %s timed out after %s", waitFor, *waitTimeoutFlag)
+		default:
+			if err := writeStdout("Sent %s to %s; wait error: %s\n", id, recipients[0], waitResult.Detail); err != nil {
+				return err
+			}
+		}
+	} else {
+		if err := writeStdout("Sent %s to %s (session: %s, root: %s)\n", id, strings.Join(recipients, ","), targetDisplay, deliveryRoot); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+type waitForResult struct {
+	Event   string           `json:"event"`
+	Stage   string           `json:"stage"`
+	Timeout string           `json:"timeout,omitempty"`
+	Detail  string           `json:"detail,omitempty"`
+	Receipt *receipt.Receipt `json:"receipt,omitempty"`
 }
 
 // parseInlineRecipient parses "agent@project:session" or "agent@project" syntax.

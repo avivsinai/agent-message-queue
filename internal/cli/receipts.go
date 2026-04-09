@@ -2,11 +2,27 @@ package cli
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
+
+var validStages = map[string]bool{
+	receipt.StageDrained: true,
+	receipt.StageDLQ:     true,
+}
+
+func validateStage(stage string) error {
+	if stage == "" {
+		return nil
+	}
+	if !validStages[stage] {
+		return fmt.Errorf("invalid stage %q (valid: drained, dlq)", stage)
+	}
+	return nil
+}
 
 func runReceipts(args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
@@ -22,7 +38,6 @@ func runReceipts(args []string) error {
 	}
 }
 
-// receiptsListResult is the JSON output for receipts list.
 type receiptsListResult struct {
 	Count    int               `json:"count"`
 	Receipts []receipt.Receipt `json:"receipts"`
@@ -46,6 +61,9 @@ func runReceiptsList(args []string) error {
 	me, err := normalizeHandle(common.Me)
 	if err != nil {
 		return UsageError("--me: %v", err)
+	}
+	if err := validateStage(*stage); err != nil {
+		return UsageError("--stage: %v", err)
 	}
 	root := resolveRoot(common.Root)
 
@@ -82,9 +100,8 @@ func runReceiptsList(args []string) error {
 	return nil
 }
 
-// receiptsWaitResult is the JSON output for receipts wait.
 type receiptsWaitResult struct {
-	Event   string           `json:"event"` // "matched" or "timeout"
+	Event   string           `json:"event"`
 	Receipt *receipt.Receipt `json:"receipt,omitempty"`
 }
 
@@ -112,8 +129,14 @@ func runReceiptsWait(args []string) error {
 	if *msgID == "" {
 		return UsageError("--msg-id is required")
 	}
+	if err := validateStage(*stage); err != nil {
+		return UsageError("--stage: %v", err)
+	}
 	if *timeoutFlag < 0 {
 		return UsageError("--timeout must be >= 0")
+	}
+	if *pollInterval <= 0 {
+		return UsageError("--poll-interval must be > 0")
 	}
 	root := resolveRoot(common.Root)
 
@@ -138,14 +161,20 @@ func runReceiptsWait(args []string) error {
 					Receipt: &r,
 				})
 			}
-			return writeStdout("Receipt: %s %s from %s at %s\n", r.Stage, r.MsgID, r.Consumer, r.EmittedAt)
+			return writeStdout("Receipt: %s %s by %s at %s\n", r.Stage, r.MsgID, r.Consumer, r.EmittedAt)
 		}
 
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			if common.JSON {
-				return writeJSON(os.Stdout, receiptsWaitResult{Event: "timeout"})
+				if err := writeJSON(os.Stdout, receiptsWaitResult{Event: "timeout"}); err != nil {
+					return err
+				}
+			} else {
+				if err := writeStdout("No %s receipt for %s (timeout)\n", *stage, *msgID); err != nil {
+					return err
+				}
 			}
-			return writeStdout("No %s receipt for %s (timeout)\n", *stage, *msgID)
+			return TimeoutError("receipts wait timed out")
 		}
 
 		time.Sleep(*pollInterval)

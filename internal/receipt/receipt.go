@@ -57,24 +57,49 @@ func (r Receipt) Marshal() ([]byte, error) {
 // Emit writes a receipt to the consumer's receipts directory and
 // best-effort mirrors it to the sender's receipts directory.
 // The consumer-local write is canonical; mirroring never causes Emit to fail.
-func Emit(root, consumer string, r Receipt) error {
+func Emit(root string, r Receipt) error {
 	data, err := r.Marshal()
 	if err != nil {
 		return fmt.Errorf("receipt marshal: %w", err)
 	}
 
-	consumerDir := fsq.AgentReceipts(root, consumer)
+	consumerDir := fsq.AgentReceipts(root, r.Consumer)
 	if _, err := fsq.WriteFileAtomic(consumerDir, r.filename(), data, 0o600); err != nil {
-		return fmt.Errorf("receipt write (consumer %s): %w", consumer, err)
+		return fmt.Errorf("receipt write (consumer %s): %w", r.Consumer, err)
 	}
 
-	// Best-effort mirror to sender's namespace.
-	if r.Sender != "" && r.Sender != consumer {
+	if r.Sender != "" && r.Sender != r.Consumer {
 		senderDir := fsq.AgentReceipts(root, r.Sender)
 		_, _ = fsq.WriteFileAtomic(senderDir, r.filename(), data, 0o600)
 	}
 
 	return nil
+}
+
+// WaitFor polls for a specific receipt by deterministic filename.
+// Returns the receipt on match, or an error on timeout.
+func WaitFor(root, agent, msgID, consumer, stage string, timeout, pollInterval time.Duration) (Receipt, error) {
+	name := fmt.Sprintf("%s__%s__%s.json", msgID, consumer, stage)
+	path := filepath.Join(fsq.AgentReceipts(root, agent), name)
+
+	deadline := time.Time{}
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
+
+	for {
+		r, err := Read(path)
+		if err == nil {
+			return r, nil
+		}
+		if !os.IsNotExist(err) {
+			return Receipt{}, err
+		}
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return Receipt{}, os.ErrDeadlineExceeded
+		}
+		time.Sleep(pollInterval)
+	}
 }
 
 func Read(path string) (Receipt, error) {

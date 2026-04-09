@@ -97,7 +97,7 @@ func TestReceiptsListFilterByStage(t *testing.T) {
 	// Emit receipts directly for testing filters.
 	for _, stage := range []string{receipt.StageDrained, receipt.StageDLQ} {
 		r := receipt.New("msg-f-001", "p2p/alice__bob", "bob", "alice", stage, "")
-		if err := receipt.Emit(root, "alice", r); err != nil {
+		if err := receipt.Emit(root, r); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -120,7 +120,7 @@ func TestReceiptsWaitImmediate(t *testing.T) {
 
 	// Pre-emit a receipt so wait finds it immediately.
 	r := receipt.New("msg-w-001", "", "bob", "alice", receipt.StageDrained, "")
-	if err := receipt.Emit(root, "alice", r); err != nil {
+	if err := receipt.Emit(root, r); err != nil {
 		t.Fatal(err)
 	}
 
@@ -171,7 +171,7 @@ func TestReceiptsWaitDelayed(t *testing.T) {
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		r := receipt.New("msg-d-001", "", "bob", "alice", receipt.StageDrained, "")
-		_ = receipt.Emit(root, "alice", r)
+		_ = receipt.Emit(root, r)
 	}()
 
 	stdout, _ := captureOutput(t, func() error {
