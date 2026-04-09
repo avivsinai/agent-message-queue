@@ -14,7 +14,6 @@ func TestCommandNames(t *testing.T) {
 		"send",
 		"list",
 		"read",
-		"ack",
 		"thread",
 		"presence",
 		"cleanup",
@@ -29,6 +28,7 @@ func TestCommandNames(t *testing.T) {
 		"coop",
 		"swarm",
 		"integration",
+		"receipts",
 		"who",
 		"doctor",
 		"shell-setup",
@@ -85,6 +85,7 @@ func TestChildNames(t *testing.T) {
 		{name: "dlq", want: []string{"list", "read", "retry", "purge"}},
 		{name: "coop", want: []string{"init", "exec"}},
 		{name: "swarm", want: []string{"list", "join", "leave", "tasks", "claim", "complete", "fail", "block", "bridge"}},
+		{name: "receipts", want: []string{"list", "wait"}},
 	}
 
 	for _, tt := range tests {

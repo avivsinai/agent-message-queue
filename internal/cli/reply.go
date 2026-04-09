@@ -19,7 +19,6 @@ func runReply(args []string) error {
 	idFlag := fs.String("id", "", "Message ID to reply to")
 	bodyFlag := fs.String("body", "", "Body string, @file, or empty to read stdin")
 	subjectFlag := fs.String("subject", "", "Override subject (default: Re: <original>)")
-	ackFlag := fs.Bool("ack", false, "Request ack for the reply")
 
 	// Co-op mode flags
 	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low")
@@ -244,19 +243,18 @@ func runReply(args []string) error {
 
 	msg := format.Message{
 		Header: format.Header{
-			Schema:      format.CurrentSchema,
-			ID:          id,
-			From:        me,
-			To:          []string{recipient},
-			Thread:      originalMsg.Header.Thread,
-			Subject:     subject,
-			Created:     now.UTC().Format(time.RFC3339Nano),
-			AckRequired: *ackFlag,
-			Refs:        append(originalMsg.Header.Refs, originalMsg.Header.ID),
-			Priority:    priority,
-			Kind:        kind,
-			Labels:      labels,
-			Context:     context,
+			Schema:   format.CurrentSchema,
+			ID:       id,
+			From:     me,
+			To:       []string{recipient},
+			Thread:   originalMsg.Header.Thread,
+			Subject:  subject,
+			Created:  now.UTC().Format(time.RFC3339Nano),
+			Refs:     append(originalMsg.Header.Refs, originalMsg.Header.ID),
+			Priority: priority,
+			Kind:     kind,
+			Labels:   labels,
+			Context:  context,
 			// Restamp ReplyTo/ReplyProject so the recipient can reply back.
 			ReplyTo: func() string {
 				if targetSession != "" {

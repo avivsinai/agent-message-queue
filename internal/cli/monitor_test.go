@@ -9,6 +9,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
 func TestMonitor_ExistingMessages(t *testing.T) {
@@ -109,6 +110,17 @@ func TestMonitor_ExistingMessages(t *testing.T) {
 	if _, err := os.Stat(curPath); os.IsNotExist(err) {
 		t.Error("message not moved to cur")
 	}
+
+	receipts, err := receipt.List(root, agent, receipt.ListFilter{
+		MsgID: id,
+		Stage: receipt.StageDrained,
+	})
+	if err != nil {
+		t.Fatalf("receipt.List: %v", err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("expected 1 drained receipt, got %d", len(receipts))
+	}
 }
 
 func TestMonitor_PeekDoesNotDrain(t *testing.T) {
@@ -120,7 +132,7 @@ func TestMonitor_PeekDoesNotDrain(t *testing.T) {
 		t.Fatalf("EnsureAgentDirs: %v", err)
 	}
 
-	// Create a test message that requires ack
+	// Create a test message
 	now := time.Now()
 	id, _ := format.NewMessageID(now)
 	msg := format.Message{
@@ -187,10 +199,6 @@ func TestMonitor_PeekDoesNotDrain(t *testing.T) {
 	if item.MovedToCur {
 		t.Errorf("expected moved_to_cur=false in peek mode")
 	}
-	if item.Acked {
-		t.Errorf("expected acked=false in peek mode")
-	}
-
 	// Verify message still in new
 	newPath := filepath.Join(fsq.AgentInboxNew(root, agent), filename)
 	if _, err := os.Stat(newPath); os.IsNotExist(err) {
@@ -203,10 +211,12 @@ func TestMonitor_PeekDoesNotDrain(t *testing.T) {
 		t.Error("message should not be moved to cur in peek mode")
 	}
 
-	// Verify ack not written
-	ackPath := filepath.Join(fsq.AgentAcksSent(root, agent), id+".json")
-	if _, err := os.Stat(ackPath); err == nil {
-		t.Error("ack should not be written in peek mode")
+	receipts, err := receipt.List(root, agent, receipt.ListFilter{MsgID: id})
+	if err != nil {
+		t.Fatalf("receipt.List: %v", err)
+	}
+	if len(receipts) != 0 {
+		t.Fatalf("expected no receipts in peek mode, got %d", len(receipts))
 	}
 }
 

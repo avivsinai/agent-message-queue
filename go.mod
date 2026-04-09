@@ -1,6 +1,6 @@
 module github.com/avivsinai/agent-message-queue
 
-go 1.25.8
+go 1.25.9
 
 require (
 	github.com/coder/websocket v1.8.14

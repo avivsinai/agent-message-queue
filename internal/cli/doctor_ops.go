@@ -17,7 +17,6 @@ import (
 type doctorOpsResult struct {
 	Root   opsRoot    `json:"root"`
 	Agents []opsAgent `json:"agents"`
-	Acks   opsAcks    `json:"acks"`
 	Hints  []opsHint  `json:"hints"`
 }
 
@@ -27,21 +26,13 @@ type opsRoot struct {
 }
 
 type opsAgent struct {
-	Handle                     string  `json:"handle"`
-	UnreadCount                int     `json:"unread_count"`
-	OldestUnreadAgeSeconds     float64 `json:"oldest_unread_age_seconds"`
-	DLQCount                   int     `json:"dlq_count"`
-	OldestDLQAgeSeconds        float64 `json:"oldest_dlq_age_seconds"`
-	PresenceStatus             string  `json:"presence_status"`
-	PresenceAgeSeconds         float64 `json:"presence_age_seconds"`
-	PendingAckCount            int     `json:"pending_ack_count"`
-	OldestPendingAckAgeSeconds float64 `json:"oldest_pending_ack_age_seconds"`
-}
-
-type opsAcks struct {
-	PendingCount            int      `json:"pending_count"`
-	OldestPendingAgeSeconds float64  `json:"oldest_pending_age_seconds"`
-	RecentLatencyMs         *float64 `json:"recent_latency_ms"`
+	Handle                 string  `json:"handle"`
+	UnreadCount            int     `json:"unread_count"`
+	OldestUnreadAgeSeconds float64 `json:"oldest_unread_age_seconds"`
+	DLQCount               int     `json:"dlq_count"`
+	OldestDLQAgeSeconds    float64 `json:"oldest_dlq_age_seconds"`
+	PresenceStatus         string  `json:"presence_status"`
+	PresenceAgeSeconds     float64 `json:"presence_age_seconds"`
 }
 
 type opsHint struct {
@@ -69,9 +60,6 @@ func runOpsChecks(root string, rootSource string) *doctorOpsResult {
 		})
 		return result
 	}
-
-	var totalPendingAcks int
-	var oldestPendingAck float64
 
 	for _, handle := range cfg.Agents {
 		agent := opsAgent{Handle: handle}
@@ -119,39 +107,13 @@ func runOpsChecks(root string, rootSource string) *doctorOpsResult {
 			agent.PresenceStatus = "unknown"
 		}
 
-		// Pending acks (sent messages not yet acked)
-		ackSentDir := fsq.AgentAcksSent(root, handle)
-		ackEntries, err := os.ReadDir(ackSentDir)
-		if err == nil {
-			agent.PendingAckCount = len(ackEntries)
-			for _, e := range ackEntries {
-				info, err := e.Info()
-				if err == nil {
-					age := now.Sub(info.ModTime()).Seconds()
-					if age > agent.OldestPendingAckAgeSeconds {
-						agent.OldestPendingAckAgeSeconds = age
-					}
-				}
-			}
-			totalPendingAcks += agent.PendingAckCount
-			if agent.OldestPendingAckAgeSeconds > oldestPendingAck {
-				oldestPendingAck = agent.OldestPendingAckAgeSeconds
-			}
-		}
-
-		// Ack latency deferred to v2: requires correlating ack msg_id to original message created timestamp
-
 		// Round to reasonable precision
 		agent.OldestUnreadAgeSeconds = math.Round(agent.OldestUnreadAgeSeconds)
 		agent.OldestDLQAgeSeconds = math.Round(agent.OldestDLQAgeSeconds)
 		agent.PresenceAgeSeconds = math.Round(agent.PresenceAgeSeconds)
-		agent.OldestPendingAckAgeSeconds = math.Round(agent.OldestPendingAckAgeSeconds)
 
 		result.Agents = append(result.Agents, agent)
 	}
-
-	result.Acks.PendingCount = totalPendingAcks
-	result.Acks.OldestPendingAgeSeconds = math.Round(oldestPendingAck)
 
 	// Integration hints
 	result.Hints = append(result.Hints, checkGlobalRootHint()...)

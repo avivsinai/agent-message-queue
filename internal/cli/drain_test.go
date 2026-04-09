@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/avivsinai/agent-message-queue/internal/ack"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
 func TestRunDrainEmpty(t *testing.T) {
@@ -100,6 +100,20 @@ func TestRunDrainMovesToCur(t *testing.T) {
 		t.Errorf("message should NOT be in new anymore")
 	}
 
+	receipts, err := receipt.List(root, "alice", receipt.ListFilter{
+		MsgID: "test-msg-1",
+		Stage: receipt.StageDrained,
+	})
+	if err != nil {
+		t.Fatalf("receipt.List: %v", err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("expected 1 drained receipt, got %d", len(receipts))
+	}
+	if receipts[0].Sender != "bob" || receipts[0].Consumer != "alice" {
+		t.Errorf("unexpected drained receipt: %+v", receipts[0])
+	}
+
 	// Second drain should return empty
 	result2 := runDrainJSON(t, root, "alice", 0, false, true)
 	if result2.Count != 0 {
@@ -178,142 +192,6 @@ func TestRunDrainWithBody(t *testing.T) {
 			t.Errorf("expected body, got %q", result.Drained[0].Body)
 		}
 	})
-}
-
-func TestRunDrainWithAck(t *testing.T) {
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "bob"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-
-	// Message that requires ack
-	msg := format.Message{
-		Header: format.Header{
-			Schema:      1,
-			ID:          "ack-test",
-			From:        "bob",
-			To:          []string{"alice"},
-			Thread:      "p2p/alice__bob",
-			Subject:     "Please ack",
-			Created:     "2025-12-24T12:00:00Z",
-			AckRequired: true,
-		},
-		Body: "Ack me!",
-	}
-	data, _ := msg.Marshal()
-	if _, err := fsq.DeliverToInbox(root, "alice", "ack-test.md", data); err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
-
-	result := runDrainJSON(t, root, "alice", 0, false, true)
-	if !result.Drained[0].AckRequired {
-		t.Errorf("expected AckRequired=true")
-	}
-	if !result.Drained[0].Acked {
-		t.Errorf("expected Acked=true")
-	}
-
-	// Check ack file was created
-	ackPath := filepath.Join(fsq.AgentAcksSent(root, "alice"), "ack-test.json")
-	if _, err := os.Stat(ackPath); err != nil {
-		t.Errorf("ack file should exist: %v", err)
-	}
-}
-
-func TestRunDrainWithoutAck(t *testing.T) {
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "bob"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-
-	msg := format.Message{
-		Header: format.Header{
-			Schema:      1,
-			ID:          "no-ack-test",
-			From:        "bob",
-			To:          []string{"alice"},
-			Thread:      "p2p/alice__bob",
-			Subject:     "No ack",
-			Created:     "2025-12-24T12:30:00Z",
-			AckRequired: true,
-		},
-		Body: "No ack please",
-	}
-	data, _ := msg.Marshal()
-	if _, err := fsq.DeliverToInbox(root, "alice", "no-ack-test.md", data); err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
-
-	result := runDrainJSON(t, root, "alice", 0, false, false)
-	if !result.Drained[0].AckRequired {
-		t.Errorf("expected AckRequired=true")
-	}
-	if result.Drained[0].Acked {
-		t.Errorf("expected Acked=false")
-	}
-
-	ackPath := filepath.Join(fsq.AgentAcksSent(root, "alice"), "no-ack-test.json")
-	if _, err := os.Stat(ackPath); !os.IsNotExist(err) {
-		t.Errorf("ack file should not exist")
-	}
-}
-
-func TestRunDrainCorruptAckRewritten(t *testing.T) {
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "bob"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-
-	msg := format.Message{
-		Header: format.Header{
-			Schema:      1,
-			ID:          "corrupt-ack-test",
-			From:        "bob",
-			To:          []string{"alice"},
-			Thread:      "p2p/alice__bob",
-			Created:     "2025-12-24T12:40:00Z",
-			AckRequired: true,
-		},
-		Body: "Ack me",
-	}
-	data, _ := msg.Marshal()
-	if _, err := fsq.DeliverToInbox(root, "alice", "corrupt-ack-test.md", data); err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
-
-	ackPath := filepath.Join(fsq.AgentAcksSent(root, "alice"), "corrupt-ack-test.json")
-	if err := os.WriteFile(ackPath, []byte("{not-json"), 0o600); err != nil {
-		t.Fatalf("write corrupt ack: %v", err)
-	}
-
-	result := runDrainJSON(t, root, "alice", 0, false, true)
-	if !result.Drained[0].Acked {
-		t.Errorf("expected Acked=true")
-	}
-	if _, err := os.Stat(ackPath); err != nil {
-		t.Fatalf("ack file should exist: %v", err)
-	}
-	if _, err := ack.Read(ackPath); err != nil {
-		t.Fatalf("ack file should be valid json: %v", err)
-	}
 }
 
 func TestRunDrainLimit(t *testing.T) {
@@ -408,6 +286,20 @@ func TestRunDrainCorruptMessage(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Errorf("expected 1 DLQ message, got %d", len(entries))
+	}
+
+	receipts, err := receipt.List(root, "alice", receipt.ListFilter{
+		MsgID: "corrupt",
+		Stage: receipt.StageDLQ,
+	})
+	if err != nil {
+		t.Fatalf("receipt.List: %v", err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("expected 1 dlq receipt, got %d", len(receipts))
+	}
+	if receipts[0].Detail == "" {
+		t.Errorf("expected dlq receipt detail to be populated")
 	}
 }
 

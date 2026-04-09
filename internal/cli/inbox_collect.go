@@ -8,11 +8,12 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
 // processInboxItems moves collected inbox items to cur (or DLQ for parse errors)
-// and optionally sends acknowledgments. Used by both drain and monitor commands.
-func processInboxItems(root, me string, doAck bool, items []inboxItem) {
+// and emits receipts. Used by both drain and monitor commands.
+func processInboxItems(root, me string, items []inboxItem) {
 	for i := range items {
 		item := &items[i]
 
@@ -26,6 +27,7 @@ func processInboxItems(root, me string, doAck bool, items []inboxItem) {
 				_ = writeStderr("warning: failed to move %s to DLQ: %v\n", item.Filename, err)
 			} else {
 				item.MovedToDLQ = true
+				emitReceipt(root, me, item, receipt.StageDLQ, item.ParseError)
 			}
 			continue
 		}
@@ -45,16 +47,21 @@ func processInboxItems(root, me string, doAck bool, items []inboxItem) {
 			}
 		} else {
 			item.MovedToCur = true
+			emitReceipt(root, me, item, receipt.StageDrained, "")
 		}
+	}
+}
 
-		// Ack if required and move succeeded
-		if doAck && item.AckRequired && item.ParseError == "" && item.MovedToCur {
-			if err := ackMessage(root, me, item); err != nil {
-				_ = writeStderr("warning: failed to ack %s: %v\n", item.ID, err)
-			} else {
-				item.Acked = true
-			}
-		}
+func emitReceipt(root, consumer string, item *inboxItem, stage, detail string) {
+	sender, err := normalizeHandle(item.From)
+	if err != nil {
+		sender = ""
+		_ = writeStderr("warning: receipt sender normalization failed for %q: %v\n", item.From, err)
+	}
+
+	r := receipt.New(item.ID, item.Thread, sender, consumer, stage, detail)
+	if err := receipt.Emit(root, r); err != nil {
+		_ = writeStderr("warning: failed to emit %s receipt for %s: %v\n", stage, item.ID, err)
 	}
 }
 
@@ -112,6 +119,8 @@ func collectInboxItems(root, me string, includeBody bool, limit int, validator *
 			item.FailureReason = "parse_error"
 			// Still move corrupt message to DLQ to avoid reprocessing
 		} else if err := validator.validate(header); err != nil {
+			item.From = header.From
+			item.Thread = header.Thread
 			item.ParseError = "invalid header: " + err.Error()
 			item.FailureReason = "invalid_header"
 			if safeID, ok := safeHeaderID(header.ID); ok {
@@ -124,7 +133,6 @@ func collectInboxItems(root, me string, includeBody bool, limit int, validator *
 			item.Thread = header.Thread
 			item.Subject = header.Subject
 			item.Created = header.Created
-			item.AckRequired = header.AckRequired
 			item.Priority = header.Priority
 			item.Kind = header.Kind
 			item.Labels = header.Labels

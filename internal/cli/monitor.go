@@ -28,9 +28,8 @@ func runMonitor(args []string) error {
 	timeoutFlag := fs.Duration("timeout", 60*time.Second, "Max time to wait for messages (0 = wait forever)")
 	pollFlag := fs.Bool("poll", false, "Use polling fallback instead of fsnotify")
 	includeBodyFlag := fs.Bool("include-body", false, "Include message body in output")
-	ackFlag := fs.Bool("ack", true, "Acknowledge messages that require ack")
 	limitFlag := fs.Int("limit", 20, "Max messages to drain (0 = no limit)")
-	peekFlag := fs.Bool("peek", false, "Peek without moving messages to cur (no ack)")
+	peekFlag := fs.Bool("peek", false, "Peek without moving messages to cur")
 
 	usage := usageWithFlags(fs, "amq monitor --me <agent> [options]",
 		"Combined watch+drain: waits for messages, drains them, outputs structured payload.",
@@ -73,10 +72,8 @@ func runMonitor(args []string) error {
 	session := resolveSessionName(root)
 
 	mode := "drain"
-	doAck := *ackFlag
 	if *peekFlag {
 		mode = "peek"
-		doAck = false
 	}
 
 	// First, try to drain existing messages
@@ -87,7 +84,7 @@ func runMonitor(args []string) error {
 
 	if len(items) > 0 {
 		if mode == "drain" {
-			drainMonitorItems(root, common.Me, doAck, items)
+			drainMonitorItems(root, common.Me, items)
 		}
 		return outputMonitorResult(common.JSON, monitorResult{
 			Event:      "messages",
@@ -140,7 +137,7 @@ func runMonitor(args []string) error {
 		return err
 	}
 	if mode == "drain" {
-		drainMonitorItems(root, common.Me, doAck, items)
+		drainMonitorItems(root, common.Me, items)
 	}
 
 	result := monitorResult{
@@ -160,8 +157,8 @@ func runMonitor(args []string) error {
 	return outputMonitorResult(common.JSON, result)
 }
 
-func drainMonitorItems(root, me string, doAck bool, items []monitorItem) {
-	processInboxItems(root, me, doAck, items)
+func drainMonitorItems(root, me string, items []monitorItem) {
+	processInboxItems(root, me, items)
 }
 
 func monitorWithFsnotify(ctx context.Context, inboxNew string) (string, error) {

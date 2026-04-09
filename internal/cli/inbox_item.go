@@ -10,7 +10,6 @@ type inboxItem struct {
 	Subject       string         `json:"subject"`
 	Created       string         `json:"created"`
 	Body          string         `json:"body,omitempty"`
-	AckRequired   bool           `json:"ack_required"`
 	Priority      string         `json:"priority,omitempty"`
 	Kind          string         `json:"kind,omitempty"`
 	Labels        []string       `json:"labels,omitempty"`
@@ -19,7 +18,6 @@ type inboxItem struct {
 	ReplyProject  string         `json:"reply_project,omitempty"`
 	MovedToCur    bool           `json:"moved_to_cur"`
 	MovedToDLQ    bool           `json:"moved_to_dlq,omitempty"`
-	Acked         bool           `json:"acked"`
 	ParseError    string         `json:"parse_error,omitempty"`
 	FailureReason string         `json:"-"`
 	Filename      string         `json:"-"` // actual filename on disk

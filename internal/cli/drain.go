@@ -3,11 +3,7 @@ package cli
 import (
 	"flag"
 	"os"
-	"path/filepath"
-	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/ack"
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
@@ -21,10 +17,9 @@ func runDrain(args []string) error {
 	common := addCommonFlags(fs)
 	limitFlag := fs.Int("limit", 20, "Max messages to drain (0 = no limit)")
 	includeBodyFlag := fs.Bool("include-body", false, "Include message body in output")
-	ackFlag := fs.Bool("ack", true, "Acknowledge messages that require ack")
 
 	usage := usageWithFlags(fs, "amq drain --me <agent> [options]",
-		"Drains new messages: reads, moves to cur, optionally acks.",
+		"Drains new messages: reads, moves to cur, emits receipts.",
 		"Designed for hook/script integration. Quiet when empty.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
@@ -69,8 +64,7 @@ func runDrain(args []string) error {
 	// Best-effort presence touch.
 	_ = presence.Touch(root, common.Me)
 
-	// Process each message: move to cur (or DLQ for parse errors), optionally ack
-	processInboxItems(root, common.Me, *ackFlag, items)
+	processInboxItems(root, common.Me, items)
 
 	if common.JSON {
 		return writeJSON(os.Stdout, drainResult{Drained: items, Count: len(items)})
@@ -120,56 +114,5 @@ func runDrain(args []string) error {
 			return err
 		}
 	}
-	return nil
-}
-
-func ackMessage(root, me string, item *drainItem) error {
-	sender, err := normalizeHandle(item.From)
-	if err != nil {
-		return err
-	}
-	msgID, err := ensureSafeBaseName(item.ID)
-	if err != nil {
-		return err
-	}
-
-	ackPayload := ack.New(item.ID, item.Thread, me, sender, time.Now())
-
-	// Write to receiver's sent acks
-	receiverDir := fsq.AgentAcksSent(root, me)
-	receiverPath := filepath.Join(receiverDir, msgID+".json")
-	needsReceiverWrite := true
-	if existing, err := ack.Read(receiverPath); err == nil {
-		ackPayload = existing
-		needsReceiverWrite = false
-	} else if !os.IsNotExist(err) {
-		// Corrupt ack file - warn and rewrite
-		_ = writeStderr("warning: corrupt ack file, rewriting: %v\n", err)
-	}
-
-	data, err := ackPayload.Marshal()
-	if err != nil {
-		return err
-	}
-
-	if needsReceiverWrite {
-		if _, err := fsq.WriteFileAtomic(receiverDir, msgID+".json", data, 0o600); err != nil {
-			return err
-		}
-	}
-
-	// Best-effort write to sender's received acks
-	senderDir := fsq.AgentAcksReceived(root, sender)
-	senderPath := filepath.Join(senderDir, msgID+".json")
-	if _, err := os.Stat(senderPath); err == nil {
-		// Already recorded.
-	} else if os.IsNotExist(err) {
-		if _, err := fsq.WriteFileAtomic(senderDir, msgID+".json", data, 0o600); err != nil {
-			_ = writeStderr("warning: unable to write sender ack: %v\n", err)
-		}
-	} else if err != nil {
-		return err
-	}
-
 	return nil
 }
