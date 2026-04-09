@@ -188,15 +188,6 @@ func runSend(args []string) error {
 		}
 	}
 
-	// Block --wait-for when delivery goes to a different root.
-	// Receipt mirroring only works within a single root — the consumer
-	// emits the receipt in deliveryRoot, and mirror writes to the sender's
-	// namespace in the same root. If deliveryRoot != root, the sender's
-	// receipts/ dir won't see the mirror.
-	if waitFor != "" && deliveryRoot != root {
-		return UsageError("--wait-for is not supported for cross-session or cross-project sends (delivery root differs from sender root)")
-	}
-
 	// Validate sender in source root, recipients in target root. Always.
 	if targetProject != "" || targetSession != "" {
 		if err := validateKnownHandles(root, common.Strict, me); err != nil {
@@ -359,7 +350,7 @@ func runSend(args []string) error {
 	var waitErr error
 	if waitFor != "" {
 		consumer := recipients[0]
-		r, err := receipt.WaitFor(root, common.Me, id, consumer, waitFor, *waitTimeoutFlag, 1*time.Second)
+		r, err := receipt.WaitFor(deliveryRoot, consumer, id, consumer, waitFor, *waitTimeoutFlag, 1*time.Second)
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			waitResult = &waitForResult{Event: "timeout", Stage: waitFor, Timeout: waitTimeoutFlag.String()}
 			waitErr = TimeoutError("send --wait-for %s timed out after %s", waitFor, *waitTimeoutFlag)

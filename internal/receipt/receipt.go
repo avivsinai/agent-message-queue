@@ -54,9 +54,9 @@ func (r Receipt) Marshal() ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
-// Emit writes a receipt to the consumer's receipts directory and
-// best-effort mirrors it to the sender's receipts directory.
-// The consumer-local write is canonical; mirroring never causes Emit to fail.
+// Emit writes a receipt to the consumer's receipts directory.
+// Receipts live only in the consumer namespace; callers that need to observe
+// them must read from the delivery root where the consumer emitted them.
 func Emit(root string, r Receipt) error {
 	data, err := r.Marshal()
 	if err != nil {
@@ -66,11 +66,6 @@ func Emit(root string, r Receipt) error {
 	consumerDir := fsq.AgentReceipts(root, r.Consumer)
 	if _, err := fsq.WriteFileAtomic(consumerDir, r.filename(), data, 0o600); err != nil {
 		return fmt.Errorf("receipt write (consumer %s): %w", r.Consumer, err)
-	}
-
-	if r.Sender != "" && r.Sender != r.Consumer {
-		senderDir := fsq.AgentReceipts(root, r.Sender)
-		_, _ = fsq.WriteFileAtomic(senderDir, r.filename(), data, 0o600)
 	}
 
 	return nil

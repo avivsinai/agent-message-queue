@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -33,12 +34,6 @@ func TestEmitAndRead(t *testing.T) {
 		t.Fatalf("consumer receipt missing: %v", err)
 	}
 
-	// Mirror to sender should exist.
-	senderPath := filepath.Join(root, "agents", "claude", "receipts", r.filename())
-	if _, err := os.Stat(senderPath); err != nil {
-		t.Fatalf("sender mirror missing: %v", err)
-	}
-
 	// Read back and verify.
 	got, err := Read(consumerPath)
 	if err != nil {
@@ -52,7 +47,6 @@ func TestEmitAndRead(t *testing.T) {
 func TestEmitSelfSend(t *testing.T) {
 	root := setupTestRoot(t)
 
-	// When sender == consumer, no mirroring needed.
 	r := New("msg_002", "", "claude", "claude", StageDLQ, "")
 	if err := Emit(root, r); err != nil {
 		t.Fatalf("Emit: %v", err)
@@ -135,22 +129,6 @@ func TestListEmptyDir(t *testing.T) {
 	}
 }
 
-func TestMirrorBestEffort(t *testing.T) {
-	root := setupTestRoot(t)
-
-	// Emit to a consumer whose sender doesn't exist as an agent dir.
-	r := New("msg_020", "", "unknown-sender", "codex", StageDrained, "")
-	if err := Emit(root, r); err != nil {
-		t.Fatalf("Emit should not fail even if sender dir doesn't exist: %v", err)
-	}
-
-	// Consumer receipt should exist.
-	consumerPath := filepath.Join(root, "agents", "codex", "receipts", r.filename())
-	if _, err := os.Stat(consumerPath); err != nil {
-		t.Fatalf("consumer receipt missing: %v", err)
-	}
-}
-
 func TestDLQReceiptDetail(t *testing.T) {
 	root := setupTestRoot(t)
 
@@ -165,5 +143,36 @@ func TestDLQReceiptDetail(t *testing.T) {
 	}
 	if got.Detail != "parse_error: invalid JSON header" {
 		t.Errorf("expected detail, got %q", got.Detail)
+	}
+}
+
+func TestWaitForCrossRoot(t *testing.T) {
+	sourceRoot := t.TempDir()
+	deliveryRoot := setupTestRoot(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(100 * time.Millisecond)
+		r := New("msg_cross_root", "p2p/claude__codex", "claude", "codex", StageDrained, "")
+		_ = Emit(deliveryRoot, r)
+	}()
+
+	got, err := WaitFor(deliveryRoot, "codex", "msg_cross_root", "codex", StageDrained, 2*time.Second, 25*time.Millisecond)
+	if err != nil {
+		t.Fatalf("WaitFor(deliveryRoot): %v", err)
+	}
+	if got.Consumer != "codex" || got.MsgID != "msg_cross_root" {
+		t.Fatalf("unexpected receipt: %+v", got)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("emit goroutine did not finish")
+	}
+
+	if _, err := WaitFor(sourceRoot, "claude", "msg_cross_root", "codex", StageDrained, 150*time.Millisecond, 25*time.Millisecond); !os.IsTimeout(err) && err != os.ErrDeadlineExceeded {
+		t.Fatalf("WaitFor(sourceRoot) error = %v, want deadline exceeded", err)
 	}
 }
