@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## [0.31.0] - 2026-04-09
+### Added
+
+- Added delivery receipts with `drained` and `dlq` stages, plus the new `amq receipts list` and `amq receipts wait` commands for querying receipt history and waiting on receipt arrival.
+- Added `amq send --wait-for <stage>` so senders can block for delivery confirmation on single-recipient handoffs.
+- Added `receipt.WaitFor()` for targeted receipt polling by message id, consumer, and stage.
+
+### Changed
+
+- Replaced the old ack model with a receipt ledger stored under agent `receipts/` directories.
+- Simplified receipt emission to consumer-local writes, with send-side waits reading from the actual delivery root instead of relying on mirrored receipt files.
+- Bumped the Go toolchain to 1.25.9.
+
+### Removed
+
+- Removed the `amq ack` command, `--ack` flags, `ack_required` header field, and `acks/` directories from the active protocol and docs.
+
+### Fixed
+
+- Validated `header.ID` in `amq read` before emitting receipts, closing a path-manipulation risk on malformed message headers.
 
 ## [0.30.1] - 2026-04-05
 ### Added
