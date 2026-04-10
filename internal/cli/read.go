@@ -75,13 +75,11 @@ func runRead(args []string) error {
 		if err := fsq.MoveNewToCur(root, common.Me, filename); err != nil {
 			return err
 		}
-		// Validate header fields before using them in receipt filenames
-		safeID, err := ensureSafeBaseName(msg.Header.ID)
-		if err == nil {
-			sender, _ := normalizeHandle(msg.Header.From)
-			r := receipt.New(safeID, msg.Header.Thread, sender, common.Me, receipt.StageDrained, "")
-			_ = receipt.Emit(root, r)
-		}
+		emitReceipt(root, common.Me, &inboxItem{
+			ID:     msg.Header.ID,
+			From:   msg.Header.From,
+			Thread: msg.Header.Thread,
+		}, receipt.StageDrained, "")
 	}
 
 	if common.JSON {
