@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,11 +43,8 @@ func TestBuildPreamble_Basic(t *testing.T) {
 	}
 	got := buildPreamble("claude", "collab", "myproject", peers, 0)
 
-	if !strings.Contains(got, "AMQ coop active: me=claude") {
-		t.Fatalf("preamble missing identity: %s", got)
-	}
-	if !strings.Contains(got, "session=collab") {
-		t.Fatalf("preamble missing session: %s", got)
+	if !strings.Contains(got, "AMQ coop active: me=claude session=collab") {
+		t.Fatalf("preamble missing coop identity: %s", got)
 	}
 	if !strings.Contains(got, "project=myproject") {
 		t.Fatalf("preamble missing project: %s", got)
@@ -61,6 +57,20 @@ func TestBuildPreamble_Basic(t *testing.T) {
 	}
 	if strings.Contains(got, "Inbox:") {
 		t.Fatalf("preamble should not mention inbox when 0 messages: %s", got)
+	}
+}
+
+func TestBuildPreamble_NoSession(t *testing.T) {
+	got := buildPreamble("claude", "", "myproject", nil, 0)
+
+	if !strings.Contains(got, "AMQ available: me=claude") {
+		t.Fatalf("preamble should say 'available' without session: %s", got)
+	}
+	if strings.Contains(got, "coop active") {
+		t.Fatalf("preamble should not say 'coop active' without session: %s", got)
+	}
+	if strings.Contains(got, "session=") {
+		t.Fatalf("preamble should not contain session= when empty: %s", got)
 	}
 }
 
@@ -174,49 +184,55 @@ func TestCountNewMessages_IgnoresNonMd(t *testing.T) {
 	}
 }
 
-func TestMarshalClaudeHookOutput(t *testing.T) {
-	data, err := marshalClaudeHookOutput("test preamble", "AMQ: 1 peer")
-	if err != nil {
-		t.Fatalf("marshalClaudeHookOutput: %v", err)
-	}
-
-	var parsed map[string]any
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-
-	hso, ok := parsed["hookSpecificOutput"].(map[string]any)
-	if !ok {
-		t.Fatal("missing hookSpecificOutput")
-	}
-	if hso["additionalContext"] != "test preamble" {
-		t.Fatalf("additionalContext = %v, want %q", hso["additionalContext"], "test preamble")
-	}
-	if parsed["systemMessage"] != "AMQ: 1 peer" {
-		t.Fatalf("systemMessage = %v, want %q", parsed["systemMessage"], "AMQ: 1 peer")
-	}
-}
-
-func TestMarshalClaudeHookOutput_NoBanner(t *testing.T) {
-	data, err := marshalClaudeHookOutput("preamble only", "")
-	if err != nil {
-		t.Fatalf("marshalClaudeHookOutput: %v", err)
-	}
-
-	var parsed map[string]any
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-
-	if _, exists := parsed["systemMessage"]; exists {
-		t.Fatal("systemMessage should not be present when banner is empty")
-	}
-}
-
 func TestRunClaudeContext_Help(t *testing.T) {
 	err := runClaudeContext([]string{"--help"})
 	if err != nil {
 		t.Fatalf("--help returned error: %v", err)
+	}
+}
+
+func TestRunClaudeContext_NoAgentsDir(t *testing.T) {
+	// Root exists but has no agents/ — should fail with NotFound
+	tmpDir := t.TempDir()
+	err := runClaudeContext([]string{"--root", tmpDir})
+	if err == nil {
+		t.Fatal("expected error for root without agents/")
+	}
+	exitErr, ok := err.(*ExitCodeError)
+	if !ok || exitErr.Code != ExitNotFound {
+		t.Fatalf("expected ExitNotFound error, got: %v", err)
+	}
+}
+
+func TestRunClaudeContext_InvalidHandle(t *testing.T) {
+	err := runClaudeContext([]string{"--root", t.TempDir(), "--me", "Claude"})
+	if err == nil {
+		t.Fatal("expected error for uppercase handle")
+	}
+	exitErr, ok := err.(*ExitCodeError)
+	if !ok || exitErr.Code != ExitUsage {
+		t.Fatalf("expected ExitUsage error, got: %v", err)
+	}
+}
+
+func TestRunClaudeContext_JSONOutput(t *testing.T) {
+	sessDir := setupCoopFixture(t, "collab", []string{"claude", "codex"}, map[string][]string{
+		"claude": {"msg_001.md"},
+	})
+
+	output := captureRegistryStdout(t, func() error {
+		return runClaudeContext([]string{"--root", sessDir, "--me", "claude", "--json"})
+	})
+
+	// Verify it's valid JSON with expected fields
+	if !strings.Contains(output, `"me": "claude"`) {
+		t.Fatalf("JSON output missing me field: %s", output)
+	}
+	if !strings.Contains(output, `"preamble"`) {
+		t.Fatalf("JSON output missing preamble field: %s", output)
+	}
+	if !strings.Contains(output, `"new": 1`) {
+		t.Fatalf("JSON output missing inbox count: %s", output)
 	}
 }
 
@@ -236,4 +252,3 @@ func TestRunIntegrationClaude_UnknownSubcommand(t *testing.T) {
 		t.Fatalf("error should mention unknown: %v", err)
 	}
 }
-

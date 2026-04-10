@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -93,6 +92,18 @@ func runClaudeContext(args []string) error {
 	me := common.Me
 	if me == "" {
 		me = "claude" // sensible default for this integration
+	} else {
+		normalized, err := normalizeHandle(me)
+		if err != nil {
+			return UsageError("--me: %v", err)
+		}
+		me = normalized
+	}
+
+	// Verify root points to a real session or base root with agents.
+	// If the agents dir doesn't exist, this root isn't an active coop session.
+	if !dirExists(filepath.Join(root, "agents")) {
+		return NotFoundError("no agents directory at %s — is this an active coop session?", root)
 	}
 
 	// Resolve session name
@@ -177,9 +188,10 @@ func buildPreamble(me, session, project string, peers []claudePeerInfo, newMessa
 	var b strings.Builder
 
 	// Line 1: identity + session
-	b.WriteString(fmt.Sprintf("AMQ coop active: me=%s", me))
 	if session != "" {
-		b.WriteString(fmt.Sprintf(" session=%s", session))
+		b.WriteString(fmt.Sprintf("AMQ coop active: me=%s session=%s", me, session))
+	} else {
+		b.WriteString(fmt.Sprintf("AMQ available: me=%s", me))
 	}
 	if project != "" {
 		b.WriteString(fmt.Sprintf(" project=%s", project))
@@ -210,16 +222,3 @@ func buildPreamble(me, session, project string, peers []claudePeerInfo, newMessa
 	return b.String()
 }
 
-// marshalClaudeHookOutput produces the JSON payload for Claude Code's
-// hookSpecificOutput format, suitable for SessionStart hooks.
-func marshalClaudeHookOutput(preamble string, bannerLine string) ([]byte, error) {
-	payload := map[string]any{
-		"hookSpecificOutput": map[string]any{
-			"additionalContext": preamble,
-		},
-	}
-	if bannerLine != "" {
-		payload["systemMessage"] = bannerLine
-	}
-	return json.Marshal(payload)
-}
