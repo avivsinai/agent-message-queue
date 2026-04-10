@@ -7,7 +7,7 @@ description: >-
   or any named handle), check your inbox, drain queued messages, set up co-op
   mode between agents, join a swarm team, route messages across projects, or
   diagnose delivery issues. Also use it when you receive a message and need to
-  know how to reply, ack, or handle priority. Covers any multi-agent
+  know how to reply, inspect receipts, or handle priority. Covers any multi-agent
   coordination task where agents need to talk to each other — review requests,
   questions, status updates, decision threads, wake notifications, and
   orchestrator integration (Symphony, Kanban). For collaborative spec/design
@@ -138,6 +138,26 @@ amq integration kanban bridge --me codex --workspace-id my-workspace
 amq doctor --ops
 amq doctor --ops --json
 ```
+
+## Delivery Receipts
+
+AMQ records delivery outcomes in consumer-local receipt files. The main stages are:
+
+- `drained` — a consumer successfully ingested the message
+- `dlq` — the message was moved to the dead letter queue during ingest
+
+Use these when you need confirmation rather than just fire-and-forget messaging:
+
+```bash
+# Block on delivery for a single-recipient send
+amq send --to codex --body "please review" --wait-for drained --wait-timeout 60s
+
+# Query receipt history later
+amq receipts list --me codex --msg-id <msg_id>
+amq receipts wait --me codex --msg-id <msg_id> --stage drained --timeout 60s
+```
+
+`amq read`, `amq drain`, and `amq monitor` all apply the same strict header validation. Messages in `inbox/new` that are corrupt or have malformed headers are moved to DLQ and produce a `dlq` receipt.
 
 ## Session Layout
 

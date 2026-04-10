@@ -137,14 +137,13 @@ func TestMonitor_PeekDoesNotDrain(t *testing.T) {
 	id, _ := format.NewMessageID(now)
 	msg := format.Message{
 		Header: format.Header{
-			Schema:      format.CurrentSchema,
-			ID:          id,
-			From:        "bob",
-			To:          []string{agent},
-			Thread:      "p2p/alice__bob",
-			Subject:     "Peek test",
-			Created:     now.UTC().Format(time.RFC3339Nano),
-			AckRequired: true,
+			Schema:  format.CurrentSchema,
+			ID:      id,
+			From:    "bob",
+			To:      []string{agent},
+			Thread:  "p2p/alice__bob",
+			Subject: "Peek test",
+			Created: now.UTC().Format(time.RFC3339Nano),
 		},
 		Body: "Peek only.",
 	}

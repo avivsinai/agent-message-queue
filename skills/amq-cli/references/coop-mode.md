@@ -76,7 +76,12 @@ Leader prepares commit -> user approves -> push
 
 - `amq drain --include-body` — process incoming messages
 - `amq send --to <partner>` — send work/findings to partner
+- `amq send --to <partner> --wait-for drained --wait-timeout 60s` — block on a single-recipient handoff
+- `amq receipts list --me <agent> --msg-id <msg_id>` — inspect delivery history
+- `amq receipts wait --me <agent> --msg-id <msg_id> --stage drained` — wait for receipt arrival
 - `amq reply --id <msg_id>` — reply in thread
+
+`amq read`, `amq drain`, and `amq monitor` all strict-validate headers before treating a message as successfully ingested. If a message in `inbox/new` is corrupt or malformed, AMQ moves it to DLQ and emits a `dlq` receipt instead of leaving it in place.
 
 ## Spec Workflow
 

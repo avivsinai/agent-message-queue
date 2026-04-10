@@ -23,7 +23,7 @@ func TestRunDrainEmpty(t *testing.T) {
 	}
 
 	t.Run("empty inbox returns empty JSON", func(t *testing.T) {
-		result := runDrainJSON(t, root, "alice", 0, false, true)
+		result := runDrainJSON(t, root, "alice", 0, false)
 		if result.Count != 0 {
 			t.Errorf("expected count 0, got %d", result.Count)
 		}
@@ -33,7 +33,7 @@ func TestRunDrainEmpty(t *testing.T) {
 	})
 
 	t.Run("empty inbox silent in text mode", func(t *testing.T) {
-		output := runDrainText(t, root, "alice", 0, false, true)
+		output := runDrainText(t, root, "alice", 0, false)
 		if output != "" {
 			t.Errorf("expected empty output, got %q", output)
 		}
@@ -80,7 +80,7 @@ func TestRunDrainMovesToCur(t *testing.T) {
 	}
 
 	// Drain
-	result := runDrainJSON(t, root, "alice", 0, false, true)
+	result := runDrainJSON(t, root, "alice", 0, false)
 	if result.Count != 1 {
 		t.Fatalf("expected count 1, got %d", result.Count)
 	}
@@ -115,7 +115,7 @@ func TestRunDrainMovesToCur(t *testing.T) {
 	}
 
 	// Second drain should return empty
-	result2 := runDrainJSON(t, root, "alice", 0, false, true)
+	result2 := runDrainJSON(t, root, "alice", 0, false)
 	if result2.Count != 0 {
 		t.Errorf("second drain should be empty, got %d", result2.Count)
 	}
@@ -166,7 +166,7 @@ func TestRunDrainWithBody(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		result := runDrainJSON(t, root, "alice", 0, false, true)
+		result := runDrainJSON(t, root, "alice", 0, false)
 		if result.Drained[0].Body != "" {
 			t.Errorf("expected empty body, got %q", result.Drained[0].Body)
 		}
@@ -187,7 +187,7 @@ func TestRunDrainWithBody(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		result := runDrainJSON(t, root, "alice", 0, true, true)
+		result := runDrainJSON(t, root, "alice", 0, true)
 		if result.Drained[0].Body != "This is the message body.\n" {
 			t.Errorf("expected body, got %q", result.Drained[0].Body)
 		}
@@ -227,7 +227,7 @@ func TestRunDrainLimit(t *testing.T) {
 	}
 
 	// Drain with limit 2
-	result := runDrainJSON(t, root, "alice", 2, false, true)
+	result := runDrainJSON(t, root, "alice", 2, false)
 	if result.Count != 2 {
 		t.Errorf("expected count 2, got %d", result.Count)
 	}
@@ -261,7 +261,7 @@ func TestRunDrainCorruptMessage(t *testing.T) {
 		t.Fatalf("write corrupt: %v", err)
 	}
 
-	result := runDrainJSON(t, root, "alice", 0, false, true)
+	result := runDrainJSON(t, root, "alice", 0, false)
 	if result.Count != 1 {
 		t.Fatalf("expected count 1, got %d", result.Count)
 	}
@@ -339,7 +339,7 @@ func TestRunDrainSorting(t *testing.T) {
 		}
 	}
 
-	result := runDrainJSON(t, root, "alice", 0, false, true)
+	result := runDrainJSON(t, root, "alice", 0, false)
 	if result.Count != 3 {
 		t.Fatalf("expected 3, got %d", result.Count)
 	}
@@ -353,7 +353,7 @@ func TestRunDrainSorting(t *testing.T) {
 	}
 }
 
-func runDrainJSON(t *testing.T, root, agent string, limit int, includeBody, ack bool) drainResult {
+func runDrainJSON(t *testing.T, root, agent string, limit int, includeBody bool) drainResult {
 	t.Helper()
 	args := []string{"--root", root, "--me", agent, "--json"}
 	if limit > 0 {
@@ -362,10 +362,6 @@ func runDrainJSON(t *testing.T, root, agent string, limit int, includeBody, ack 
 	if includeBody {
 		args = append(args, "--include-body")
 	}
-	if !ack {
-		args = append(args, "--ack=false")
-	}
-
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
@@ -389,7 +385,7 @@ func runDrainJSON(t *testing.T, root, agent string, limit int, includeBody, ack 
 	return result
 }
 
-func runDrainText(t *testing.T, root, agent string, limit int, includeBody, ack bool) string {
+func runDrainText(t *testing.T, root, agent string, limit int, includeBody bool) string {
 	t.Helper()
 	args := []string{"--root", root, "--me", agent}
 	if limit > 0 {
@@ -398,10 +394,6 @@ func runDrainText(t *testing.T, root, agent string, limit int, includeBody, ack 
 	if includeBody {
 		args = append(args, "--include-body")
 	}
-	if !ack {
-		args = append(args, "--ack=false")
-	}
-
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w

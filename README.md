@@ -23,11 +23,11 @@ AMQ gives agents a **local interoperability bus**: they can send messages, reply
 - **Crash-safe** — Atomic Maildir delivery (tmp→new→cur). Messages are never partially written or lost.
 - **Human-readable** — JSON frontmatter + Markdown body. Inspect with `cat`, debug with `grep`, version with `git`.
 - **Real-time notifications** — `amq wake` injects terminal notifications when messages arrive (experimental).
-- **Built for agents** — Priority levels, message kinds, threading, acknowledgments—all the primitives agents need.
+- **Built for agents** — Priority levels, message kinds, threading, delivery receipts, and waitable handoffs.
 - **Cross-project federation** — Route messages across peer repos, preserve reply routing, and run decision threads that span projects.
 - **Swarm mode** — Join Claude Code Agent Teams, claim tasks, and bridge task notifications into AMQ.
 - **Optional adapters** — Lightweight Symphony hooks and an experimental Kanban bridge can emit normal AMQ messages with structured metadata.
-- **Operational diagnostics** — `amq doctor --ops` shows queue depth, DLQ state, presence freshness, pending acks, and integration hints.
+- **Operational diagnostics** — `amq doctor --ops` shows queue depth, DLQ state, presence freshness, and integration hints.
 
 ![AMQ Demo — Claude and Codex collaborating via split-pane terminal](docs/assets/demo.gif)
 
@@ -126,12 +126,21 @@ amq list --new
 amq list --new --priority urgent
 amq list --new --from codex --kind review_request
 
-# Read all messages (one-shot, moves to cur, auto-acks)
+# Read all messages (one-shot, moves to cur, emits drained/dlq receipts)
 amq drain --include-body
+
+# Wait for delivery on a single-recipient handoff
+amq send --to codex --body "Please pick this up" \
+  --wait-for drained --wait-timeout 60s
+
+# Inspect receipts for a message later
+amq receipts list --me codex --msg-id <msg_id>
 
 # Reply to a message
 amq reply --id <msg_id> --kind review_response --body "LGTM with comments"
 ```
+
+`amq read`, `amq drain`, and `amq monitor` now share the same strict header validation. If a message in `inbox/new` is corrupt or has malformed headers, the command moves it to DLQ and emits a `dlq` receipt instead of leaving it in place.
 
 ### 4. Inspect Health
 
@@ -250,7 +259,7 @@ Common command groups:
 
 | Area | Commands |
 |------|----------|
-| Core messaging | `init`, `send`, `list`, `read`, `drain`, `reply`, `thread`, `ack`, `watch`, `monitor` |
+| Core messaging | `init`, `send`, `list`, `read`, `drain`, `reply`, `thread`, `watch`, `monitor`, `receipts` |
 | Collaboration | `coop init`, `coop exec`, `swarm list`, `swarm join`, `swarm tasks`, `swarm bridge` |
 | Integrations | `integration symphony init`, `integration symphony emit`, `integration kanban bridge` |
 | Operations | `presence set`, `presence list`, `who`, `doctor`, `doctor --ops`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |

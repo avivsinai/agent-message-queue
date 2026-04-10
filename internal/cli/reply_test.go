@@ -29,16 +29,15 @@ func TestReply_Basic(t *testing.T) {
 	originalID, _ := format.NewMessageID(now)
 	originalMsg := format.Message{
 		Header: format.Header{
-			Schema:      format.CurrentSchema,
-			ID:          originalID,
-			From:        bob,
-			To:          []string{alice},
-			Thread:      "p2p/alice__bob",
-			Subject:     "Question about code",
-			Created:     now.UTC().Format(time.RFC3339Nano),
-			AckRequired: true,
-			Priority:    format.PriorityNormal,
-			Kind:        format.KindQuestion,
+			Schema:   format.CurrentSchema,
+			ID:       originalID,
+			From:     bob,
+			To:       []string{alice},
+			Thread:   "p2p/alice__bob",
+			Subject:  "Question about code",
+			Created:  now.UTC().Format(time.RFC3339Nano),
+			Priority: format.PriorityNormal,
+			Kind:     format.KindQuestion,
 		},
 		Body: "How does the parser work?",
 	}

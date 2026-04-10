@@ -56,15 +56,14 @@ const (
 
 // Header is the JSON frontmatter stored at the top of each message file.
 type Header struct {
-	Schema      int      `json:"schema"`
-	ID          string   `json:"id"`
-	From        string   `json:"from"`
-	To          []string `json:"to"`
-	Thread      string   `json:"thread"`
-	Subject     string   `json:"subject,omitempty"`
-	Created     string   `json:"created"`
-	AckRequired bool     `json:"ack_required"`
-	Refs        []string `json:"refs,omitempty"`
+	Schema  int      `json:"schema"`
+	ID      string   `json:"id"`
+	From    string   `json:"from"`
+	To      []string `json:"to"`
+	Thread  string   `json:"thread"`
+	Subject string   `json:"subject,omitempty"`
+	Created string   `json:"created"`
+	Refs    []string `json:"refs,omitempty"`
 
 	// Co-op mode fields (optional, for inter-agent communication)
 	Priority string         `json:"priority,omitempty"` // urgent, normal, low
