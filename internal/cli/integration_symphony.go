@@ -22,6 +22,8 @@ func runIntegration(args []string) error {
 		return runIntegrationSymphony(args[1:])
 	case "kanban":
 		return runIntegrationKanban(args[1:])
+	case "claude":
+		return runIntegrationClaude(args[1:])
 	default:
 		return formatUnknownSubcommand("integration", args[0])
 	}
@@ -32,6 +34,7 @@ func printIntegrationUsage() error {
 		"amq integration - Optional interoperability adapters",
 		"",
 		"Subcommands:",
+		"  claude    Claude Code session awareness (context re-injection)",
 		"  symphony  Lightweight Symphony hook adapter",
 		"  kanban    Experimental Cline Kanban bridge",
 		"",

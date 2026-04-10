@@ -122,6 +122,14 @@ func init() {
 			Handler: runIntegration,
 			Children: []CommandInfo{
 				{
+					Name:    "claude",
+					Summary: "Claude Code session awareness (context re-injection)",
+					Handler: runIntegrationClaude,
+					Children: []CommandInfo{
+						{Name: "context", Summary: "Emit coop session preamble for context re-injection", Handler: runClaudeContext},
+					},
+				},
+				{
 					Name:    "symphony",
 					Summary: "Lightweight Symphony hook adapter",
 					Handler: runIntegrationSymphony,
