@@ -158,7 +158,7 @@ func TestWaitForCrossRoot(t *testing.T) {
 		_ = Emit(deliveryRoot, r)
 	}()
 
-	got, err := WaitFor(deliveryRoot, "codex", "msg_cross_root", "codex", StageDrained, 2*time.Second, 25*time.Millisecond)
+	got, err := WaitFor(deliveryRoot, "msg_cross_root", "codex", StageDrained, 2*time.Second, 25*time.Millisecond)
 	if err != nil {
 		t.Fatalf("WaitFor(deliveryRoot): %v", err)
 	}
@@ -172,7 +172,7 @@ func TestWaitForCrossRoot(t *testing.T) {
 		t.Fatal("emit goroutine did not finish")
 	}
 
-	if _, err := WaitFor(sourceRoot, "claude", "msg_cross_root", "codex", StageDrained, 150*time.Millisecond, 25*time.Millisecond); !os.IsTimeout(err) && err != os.ErrDeadlineExceeded {
+	if _, err := WaitFor(sourceRoot, "msg_cross_root", "codex", StageDrained, 150*time.Millisecond, 25*time.Millisecond); !os.IsTimeout(err) && err != os.ErrDeadlineExceeded {
 		t.Fatalf("WaitFor(sourceRoot) error = %v, want deadline exceeded", err)
 	}
 }

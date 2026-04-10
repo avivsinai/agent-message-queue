@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -140,43 +141,29 @@ func runReceiptsWait(args []string) error {
 	}
 	root := resolveRoot(common.Root)
 
-	deadline := time.Time{}
-	if *timeoutFlag > 0 {
-		deadline = time.Now().Add(*timeoutFlag)
+	r, err := receipt.WaitFor(root, *msgID, me, *stage, *timeoutFlag, *pollInterval)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		if common.JSON {
+			if err := writeJSON(os.Stdout, receiptsWaitResult{Event: "timeout"}); err != nil {
+				return err
+			}
+		} else {
+			if err := writeStdout("No %s receipt for %s (timeout)\n", *stage, *msgID); err != nil {
+				return err
+			}
+		}
+		return TimeoutError("receipts wait timed out")
+	}
+	if err != nil {
+		return err
 	}
 
-	for {
-		receipts, err := receipt.List(root, me, receipt.ListFilter{
-			MsgID: *msgID,
-			Stage: *stage,
+	if common.JSON {
+		return writeJSON(os.Stdout, receiptsWaitResult{
+			Event:   "matched",
+			Receipt: &r,
 		})
-		if err != nil {
-			return err
-		}
-		if len(receipts) > 0 {
-			r := receipts[0]
-			if common.JSON {
-				return writeJSON(os.Stdout, receiptsWaitResult{
-					Event:   "matched",
-					Receipt: &r,
-				})
-			}
-			return writeStdout("Receipt: %s %s by %s at %s\n", r.Stage, r.MsgID, r.Consumer, r.EmittedAt)
-		}
-
-		if !deadline.IsZero() && time.Now().After(deadline) {
-			if common.JSON {
-				if err := writeJSON(os.Stdout, receiptsWaitResult{Event: "timeout"}); err != nil {
-					return err
-				}
-			} else {
-				if err := writeStdout("No %s receipt for %s (timeout)\n", *stage, *msgID); err != nil {
-					return err
-				}
-			}
-			return TimeoutError("receipts wait timed out")
-		}
-
-		time.Sleep(*pollInterval)
 	}
+
+	return writeStdout("Receipt: %s %s by %s at %s\n", r.Stage, r.MsgID, r.Consumer, r.EmittedAt)
 }
