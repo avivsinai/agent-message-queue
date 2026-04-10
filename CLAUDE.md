@@ -178,6 +178,7 @@ amq swarm complete --team <name> --task <id> --me <agent> [--agent-id <id>] [--e
 amq swarm fail --team <name> --task <id> --me <agent> [--agent-id <id>] [--reason <str>] [--json]
 amq swarm block --team <name> --task <id> --me <agent> [--agent-id <id>] [--reason <str>] [--json]
 amq swarm bridge --team <name> --me <agent> [--agent-id <id>] [--poll] [--poll-interval <duration>] [--root <path>] [--strict] [--json]
+amq integration claude context [--event <session-start|clear|compaction>] [--me <agent>] [--root <path>] [--json]
 amq integration symphony init [--workflow <path>] --me <agent> [--root <path>] [--check] [--force] [--json]
 amq integration symphony emit --event <after_create|before_run|after_run|before_remove> --me <agent> [--root <path>] [--workspace <path>] [--identifier <key>] [--json]
 amq integration kanban bridge --me <agent> [--root <path>] [--url <ws://...>] [--workspace-id <id>] [--reconnect <duration>] [--json]
