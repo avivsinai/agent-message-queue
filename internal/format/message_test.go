@@ -13,15 +13,14 @@ import (
 func TestMessageRoundTrip(t *testing.T) {
 	msg := Message{
 		Header: Header{
-			Schema:      1,
-			ID:          "2025-12-24T15-02-33.123Z_pid1234_abcd",
-			From:        "codex",
-			To:          []string{"claude"},
-			Thread:      "p2p/claude__codex",
-			Subject:     "Hello",
-			Created:     "2025-12-24T15:02:33.123Z",
-			AckRequired: true,
-			Refs:        []string{"ref1"},
+			Schema:  1,
+			ID:      "2025-12-24T15-02-33.123Z_pid1234_abcd",
+			From:    "codex",
+			To:      []string{"claude"},
+			Thread:  "p2p/claude__codex",
+			Subject: "Hello",
+			Created: "2025-12-24T15:02:33.123Z",
+			Refs:    []string{"ref1"},
 		},
 		Body: "Line one\nLine two\n",
 	}
@@ -44,17 +43,16 @@ func TestMessageRoundTrip(t *testing.T) {
 func TestMessageRoundTrip_CoopFields(t *testing.T) {
 	msg := Message{
 		Header: Header{
-			Schema:      1,
-			ID:          "2025-12-27T10-00-00.000Z_pid5678_efgh",
-			From:        "codex",
-			To:          []string{"claude"},
-			Thread:      "p2p/claude__codex",
-			Subject:     "Review request",
-			Created:     "2025-12-27T10:00:00.000Z",
-			AckRequired: true,
-			Priority:    PriorityUrgent,
-			Kind:        KindReviewRequest,
-			Labels:      []string{"parser", "refactor"},
+			Schema:   1,
+			ID:       "2025-12-27T10-00-00.000Z_pid5678_efgh",
+			From:     "codex",
+			To:       []string{"claude"},
+			Thread:   "p2p/claude__codex",
+			Subject:  "Review request",
+			Created:  "2025-12-27T10:00:00.000Z",
+			Priority: PriorityUrgent,
+			Kind:     KindReviewRequest,
+			Labels:   []string{"parser", "refactor"},
 			Context: map[string]any{
 				"paths": []any{"internal/format/message.go"},
 				"focus": "error handling",
