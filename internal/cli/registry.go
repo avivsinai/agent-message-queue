@@ -48,7 +48,7 @@ func init() {
 		},
 		{Name: "cleanup", Summary: "Remove stale tmp files", Handler: runCleanup},
 		{Name: "watch", Summary: "Wait for new messages (uses fsnotify)", Handler: runWatch},
-		{Name: "drain", Summary: "Drain new messages (read, move to cur, ack)", Handler: runDrain},
+		{Name: "drain", Summary: "Drain new messages (read, move to cur, emit receipts)", Handler: runDrain},
 		{Name: "monitor", Summary: "Combined watch+drain for co-op mode", Handler: runMonitor},
 		{Name: "reply", Summary: "Reply to a message (auto thread/refs)", Handler: runReply},
 		{
@@ -168,8 +168,8 @@ var usageGlobalOptions = []string{
 }
 
 var usageEnvironment = []string{
-	"  AM_ROOT   Queue root directory (set by coop exec, always a session subdirectory)",
-	"  AM_ME     Default agent handle",
+	"  AM_ROOT             Queue root directory (from flags, env, config, or coop exec session setup)",
+	"  AM_ME               Default agent handle",
 	"  AMQ_GLOBAL_ROOT     Global root fallback (for agents spawned by external orchestrators)",
 	"  AMQ_NO_UPDATE_CHECK  Disable update check (1/true/yes/on)",
 }

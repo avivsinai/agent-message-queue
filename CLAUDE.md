@@ -38,11 +38,11 @@ Requires Go 1.25+ and optionally golangci-lint.
 ```
 cmd/amq/           → Entry point (delegates to cli.Run())
 internal/
-├── cli/           → Command handlers (send, list, read, ack, drain, thread, presence, cleanup, init, watch, monitor, reply, dlq, wake, coop, swarm, integration, doctor)
+├── cli/           → Command handlers (send, list, read, drain, thread, presence, cleanup, init, watch, monitor, reply, dlq, wake, coop, swarm, integration, receipts, doctor)
 ├── fsq/           → File system queue (Maildir delivery, atomic ops, scanning)
 ├── format/        → Message serialization (JSON frontmatter + Markdown body)
 ├── config/        → Config management (meta/config.json)
-├── ack/           → Acknowledgment tracking
+├── receipt/       → Delivery receipt ledger (`drained`, `dlq`)
 ├── integration/   → Shared integration helpers plus Symphony and Kanban adapters
 ├── swarm/         → Claude Code Agent Teams interop (team config, tasks, bridge, paths)
 ├── thread/        → Thread collection across mailboxes
@@ -53,7 +53,7 @@ internal/
 ```
 <root>/agents/<agent>/inbox/{tmp,new,cur}/  → Incoming messages
 <root>/agents/<agent>/outbox/sent/          → Sent copies
-<root>/agents/<agent>/acks/{received,sent}/ → Acknowledgments
+<root>/agents/<agent>/receipts/             → Consumer-local delivery receipts
 <root>/agents/<agent>/dlq/{tmp,new,cur}/    → Dead letter queue
 ```
 
@@ -69,14 +69,18 @@ internal/
 - `thread` — Thread ID (auto-generated for P2P: `p2p/<a>__<b>`)
 - `subject` — Message subject
 - `created` — RFC3339Nano timestamp
-- `ack_required` — Whether sender expects acknowledgment
 - `refs` — Related message IDs
 - `priority` — `urgent`, `normal`, or `low`
 - `kind` — Message type (see Message Kinds below)
 - `labels` — Arbitrary tags for filtering
 - `context` — JSON object with additional context (paths, focus, etc.)
+- `reply_to` — Cross-session/cross-project reply routing hint
+- `reply_project` — Sender project for cross-project replies
+- `from_project` — Sender project for cross-project identity
 
 **Thread Naming**: P2P threads use lexicographic ordering: `p2p/<lower_agent>__<higher_agent>`
+
+**Receipt Ledger**: Delivery outcomes are recorded as consumer-local receipts under `agents/<consumer>/receipts/`. Stages are `drained` and `dlq`. Use `amq receipts list`, `amq receipts wait`, or `amq send --wait-for <stage>` to query or block on them.
 
 **Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail/collab`), `AM_ME` (agent handle), `AM_BASE_ROOT` (base root set by `coop exec` for cross-session resolution; only trusted when the current root still lives under it), `AMQ_GLOBAL_ROOT` (global root fallback for orchestrator-spawned agents), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
@@ -142,12 +146,13 @@ When `--kind` is set but `--priority` is not, priority defaults to `normal`.
 
 ```bash
 amq init --root <path> --agents a,b,c [--force]
-amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--ack] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>]
+amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--wait-for <stage>] [--wait-timeout <duration>]
 amq list --me <agent> [--new | --cur] [--priority <p>] [--from <h>] [--kind <k>] [--label <l>...] [--limit N] [--offset N] [--json]
 amq read --me <agent> --id <msg_id> [--json]
-amq ack --me <agent> --id <msg_id>
-amq drain --me <agent> [--limit N] [--include-body] [--ack] [--json]
+amq drain --me <agent> [--limit N] [--include-body] [--json]
 amq thread --id <thread_id> [--limit N] [--include-body] [--json]
+amq receipts list --me <agent> [--msg-id <id>] [--stage <stage>] [--json]
+amq receipts wait --me <agent> --msg-id <id> [--stage <stage>] [--timeout <duration>] [--poll-interval <duration>] [--json]
 amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
 amq presence list [--json]
 amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
@@ -304,6 +309,8 @@ Messages that fail to parse during `drain` or `monitor` are automatically moved 
 
 Use `--force` with retry to override the max retry limit.
 
+`amq read`, `amq drain`, and `amq monitor` now share the same strict header validation. If a message in `inbox/new` is corrupt or has malformed headers, the command moves it to DLQ and emits a `dlq` receipt instead of leaving it in place.
+
 ## Doctor / Ops
 
 `amq doctor` verifies installation, root configuration, permissions, config, and skill setup.
@@ -313,7 +320,6 @@ Use `--force` with retry to override the max retry limit.
 - Queue depth and oldest unread per agent
 - DLQ count and oldest age
 - Presence freshness
-- Pending acknowledgment count and age
 - Integration hints for Kanban and Symphony
 
 Use `amq doctor --ops --json` for machine-readable health output.
@@ -322,7 +328,7 @@ Use `amq doctor --ops --json` for machine-readable health output.
 
 Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 
-**Preferred: Use `drain`** - One-shot ingestion that reads, moves to cur, and optionally acks (with `--ack`, which defaults to true). Silent when empty (hook-friendly).
+**Preferred: Use `drain`** - One-shot ingestion that reads, moves to cur, and emits `drained` or `dlq` receipts. Silent when empty (hook-friendly).
 
 **During active work**: Use `amq drain --include-body` to ingest messages between steps.
 
@@ -330,7 +336,9 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 
 | Situation | Command | Behavior |
 |-----------|---------|----------|
-| Ingest messages | `amq drain --include-body` | One-shot: read+move+ack |
+| Ingest messages | `amq drain --include-body` | One-shot: read+move+receipt |
+| Wait for delivery | `amq send --to codex --wait-for drained --wait-timeout 60s ...` | Send then block for `drained`/`dlq` |
+| Inspect delivery | `amq receipts list --me codex --msg-id <msg_id>` | Show receipt history for one message |
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
 | Quick peek only | `amq list --new` | Non-blocking, no side effects |
 | Filter messages | `amq list --new --priority urgent` | Show only urgent messages |
@@ -485,7 +493,7 @@ The pre-push hook runs `make ci` (vet, lint, test, smoke) before allowing pushes
 
 ## Commit Conventions
 
-- Use descriptive commit messages (e.g., `fix: handle corrupt ack files gracefully`)
+- Use descriptive commit messages (e.g., `fix: handle corrupt receipt files gracefully`)
 - Run `make ci` before committing
 - Do not edit message files in place; always use the CLI
 - Cleanup is explicit (`amq cleanup`), never automatic
@@ -505,30 +513,23 @@ This repo includes skills for Claude Code and Codex CLI, distributed via the [sk
 
 ```
 .claude-plugin/plugin.json     → Plugin manifest for marketplace
-.claude/skills/amq-cli/        → Claude Code skill (SOURCE OF TRUTH)
+skills/amq-cli/                → Canonical skill contents
 ├── SKILL.md
 └── references/
     ├── coop-mode.md
+    ├── integrations.md
     ├── message-format.md
     └── swarm-mode.md
-.claude/skills/amq-spec/       → Spec workflow skill (SOURCE OF TRUTH)
-├── SKILL.md
-└── references/
-    └── spec-workflow.md
-.codex/skills/amq-cli/         → Codex CLI skill (synced copy)
-.codex/skills/amq-spec/        → Spec workflow skill (synced copy)
-skills/amq-cli/                → Standalone skill (synced copy, for direct install)
-skills/amq-spec/               → Standalone skill (synced copy, for direct install)
+skills/amq-spec/               → Canonical spec skill contents
+.claude/skills/amq-cli/        → Symlink to ../../skills/amq-cli
+.claude/skills/amq-spec/       → Symlink to ../../skills/amq-spec
+.agents/skills/amq-cli/        → Symlink to ../../skills/amq-cli
+.agents/skills/amq-spec/       → Symlink to ../../skills/amq-spec
 ```
 
-### Why Three Copies?
+### Current Skill Layout
 
-The skill is distributed through multiple channels:
-1. **Claude Code marketplace** — reads from `.claude/skills/`
-2. **Codex CLI installer** — reads from `skills/` (standalone) or `.codex/skills/`
-3. **Project-local development** — both `.claude/` and `.codex/` override user-installed skills
-
-Each marketplace/installer requires the files to be present (symlinks not universally supported). The `make sync-skills` command keeps all copies identical.
+`skills/` holds the canonical contents in this repo. The project-local `.claude/skills/` and `.agents/skills/` entries are symlinks to those same directories so local agent runs pick up in-repo changes immediately.
 
 ### Dev vs Installed Skills
 
@@ -536,20 +537,20 @@ When working in this repo, **project-level skills take precedence** over user-le
 
 - `.claude/skills/amq-cli/` loads instead of `~/.claude/skills/amq-cli/`
 - `.claude/skills/amq-spec/` loads instead of `~/.claude/skills/amq-spec/`
-- `.codex/skills/amq-cli/` loads instead of `~/.codex/skills/amq-cli/`
-- `.codex/skills/amq-spec/` loads instead of `~/.codex/skills/amq-spec/`
+- `.agents/skills/amq-cli/` loads the same in-repo contents via symlink
+- `.agents/skills/amq-spec/` loads the same in-repo contents via symlink
 
 This lets you test skill changes locally before publishing.
 
 ### Editing Skills
 
-1. Edit files in `.claude/skills/<skill-name>/` (source of truth)
+1. Edit files in `skills/<skill-name>/` (or the equivalent `.claude/skills/<skill-name>/` symlink)
 2. If publishing: bump `version:` in the skill's `SKILL.md`
-3. Sync to other locations: `make sync-skills`
+3. Verify the symlinked views still match: `make check-skills`
 4. Test locally by running Claude Code or Codex in this repo
-5. Commit and push (all three locations will be committed)
+5. Commit and push the canonical `skills/` changes
 
-**Important**: Never edit `.codex/skills/` or `skills/` directly. Always edit `.claude/skills/` and sync.
+**Important**: Do not create divergent copies. The symlinked paths should always reflect the same `skills/` content.
 
 ### Installing Skills
 

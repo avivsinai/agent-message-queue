@@ -16,7 +16,12 @@ func runRead(args []string) error {
 	common := addCommonFlags(fs)
 	idFlag := fs.String("id", "", "Message id")
 
-	usage := usageWithFlags(fs, "amq read --me <agent> --id <msg_id> [options]")
+	usage := usageWithFlags(fs, "amq read --me <agent> --id <msg_id> [options]",
+		"Read a message by id.",
+		"",
+		"If the message is in inbox/new, AMQ only moves it to inbox/cur after parse and header validation succeed.",
+		"If the message in inbox/new is corrupt or malformed, AMQ moves it to DLQ and emits a dlq receipt.",
+	)
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {

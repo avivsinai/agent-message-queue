@@ -70,7 +70,7 @@ amq doctor --ops
 amq doctor --ops --json
 ```
 
-`doctor --ops` adds queue depth, DLQ state, presence freshness, pending acks, and integration hints on top of the base `doctor` checks.
+`doctor --ops` adds queue depth, oldest unread age, DLQ state, presence freshness, and integration hints on top of the base `doctor` checks.
 
 ## Message Shape
 
