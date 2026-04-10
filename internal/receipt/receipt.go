@@ -71,11 +71,11 @@ func Emit(root string, r Receipt) error {
 	return nil
 }
 
-// WaitFor polls for a specific receipt by deterministic filename.
+// WaitFor polls for a specific consumer-local receipt by deterministic filename.
 // Returns the receipt on match, or an error on timeout.
-func WaitFor(root, agent, msgID, consumer, stage string, timeout, pollInterval time.Duration) (Receipt, error) {
+func WaitFor(root, msgID, consumer, stage string, timeout, pollInterval time.Duration) (Receipt, error) {
 	name := fmt.Sprintf("%s__%s__%s.json", msgID, consumer, stage)
-	path := filepath.Join(fsq.AgentReceipts(root, agent), name)
+	path := filepath.Join(fsq.AgentReceipts(root, consumer), name)
 
 	deadline := time.Time{}
 	if timeout > 0 {

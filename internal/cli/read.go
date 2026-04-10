@@ -36,6 +36,10 @@ func runRead(args []string) error {
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
 	}
+	validator, err := newHeaderValidator(root, common.Strict)
+	if err != nil {
+		return err
+	}
 
 	filename, err := ensureFilename(*idFlag)
 	if err != nil {
@@ -55,14 +59,15 @@ func runRead(args []string) error {
 	if err != nil {
 		// If message is corrupt and in new, move to DLQ
 		if box == fsq.BoxNew {
-			if _, dlqErr := fsq.MoveToDLQ(root, common.Me, filename, *idFlag, "parse_error", err.Error()); dlqErr != nil {
-				_ = writeStderr("warning: failed to move corrupt message to DLQ: %v\n", dlqErr)
-			} else {
-				r := receipt.New(*idFlag, "", "", common.Me, receipt.StageDLQ, err.Error())
-				_ = receipt.Emit(root, r)
-			}
+			moveReadFailureToDLQ(root, common.Me, filename, *idFlag, "parse_error", err.Error(), nil)
 		}
 		return fmt.Errorf("failed to parse message %s: %w", *idFlag, err)
+	}
+	if err := validator.validate(msg.Header); err != nil {
+		if box == fsq.BoxNew {
+			moveReadFailureToDLQ(root, common.Me, filename, *idFlag, "invalid_header", "invalid header: "+err.Error(), &msg.Header)
+		}
+		return fmt.Errorf("invalid message header %s: %w", *idFlag, err)
 	}
 
 	// Move to cur only after successful parse
@@ -70,13 +75,11 @@ func runRead(args []string) error {
 		if err := fsq.MoveNewToCur(root, common.Me, filename); err != nil {
 			return err
 		}
-		// Validate header fields before using them in receipt filenames
-		safeID, err := ensureSafeBaseName(msg.Header.ID)
-		if err == nil {
-			sender, _ := normalizeHandle(msg.Header.From)
-			r := receipt.New(safeID, msg.Header.Thread, sender, common.Me, receipt.StageDrained, "")
-			_ = receipt.Emit(root, r)
-		}
+		emitReceipt(root, common.Me, &inboxItem{
+			ID:     msg.Header.ID,
+			From:   msg.Header.From,
+			Thread: msg.Header.Thread,
+		}, receipt.StageDrained, "")
 	}
 
 	if common.JSON {
@@ -90,4 +93,21 @@ func runRead(args []string) error {
 		return err
 	}
 	return nil
+}
+
+func moveReadFailureToDLQ(root, me, filename, fallbackID, reason, detail string, header *format.Header) {
+	if _, err := fsq.MoveToDLQ(root, me, filename, fallbackID, reason, detail); err != nil {
+		_ = writeStderr("warning: failed to move invalid message to DLQ: %v\n", err)
+		return
+	}
+
+	item := &inboxItem{ID: fallbackID}
+	if header != nil {
+		if safeID, ok := safeHeaderID(header.ID); ok {
+			item.ID = safeID
+		}
+		item.From = header.From
+		item.Thread = header.Thread
+	}
+	emitReceipt(root, me, item, receipt.StageDLQ, detail)
 }

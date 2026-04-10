@@ -350,7 +350,7 @@ func runSend(args []string) error {
 	var waitErr error
 	if waitFor != "" {
 		consumer := recipients[0]
-		r, err := receipt.WaitFor(deliveryRoot, consumer, id, consumer, waitFor, *waitTimeoutFlag, 1*time.Second)
+		r, err := receipt.WaitFor(deliveryRoot, id, consumer, waitFor, *waitTimeoutFlag, 1*time.Second)
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			waitResult = &waitForResult{Event: "timeout", Stage: waitFor, Timeout: waitTimeoutFlag.String()}
 			waitErr = TimeoutError("send --wait-for %s timed out after %s", waitFor, *waitTimeoutFlag)
