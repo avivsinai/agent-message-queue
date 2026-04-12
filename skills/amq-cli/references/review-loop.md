@@ -14,7 +14,7 @@ When a `review_request` may take multiple rounds, do not keep the whole loop in 
 - It waits for replies with `amq drain --include-body`.
 - If the reviewer finds issues, it applies fixes and re-sends for review.
 - It stops when the reviewer says the change is green or a max round count is hit.
-- It returns one line to the main context, for example: `codex signed off after 3 rounds, 5 findings fixed`.
+- It returns one line to the main context, for example: `reviewer signed off after 3 rounds, 5 findings fixed`.
 
 ## Why
 
@@ -36,7 +36,7 @@ Agent({
     - apply the requested fixes
     - amq send --to codex --kind review_request --body "Updated: src/foo.go"
     Return one line only:
-    "codex signed off after 3 rounds, 5 findings fixed"
+    "reviewer signed off after 3 rounds, 5 findings fixed"
   `
 })
 ```
@@ -48,7 +48,7 @@ Start a background worker/subagent for the AMQ review loop
 - amq drain --include-body
 - apply fixes and re-send until green or max rounds
 Return one line only:
-"codex signed off after 3 rounds, 5 findings fixed"
+"reviewer signed off after 3 rounds, 5 findings fixed"
 ```
 
 This is behavioral guidance for agents using AMQ, not a CLI feature or protocol change.
