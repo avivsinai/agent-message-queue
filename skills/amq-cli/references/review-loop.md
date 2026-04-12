@@ -1,6 +1,12 @@
 # Token-Efficient Review Loops
 
-When a `review_request` may take multiple rounds, do not keep the whole loop in the main conversation. Spawn a background agent to own the AMQ exchange and return only the final verdict.
+When a `review_request` may take multiple rounds, do not keep the whole loop in the main conversation. Use your host's background worker or subagent primitive so the AMQ exchange runs in isolated context and only the final verdict returns.
+
+## Host Mapping
+
+- Claude Code: use a subagent or background agent.
+- Codex-based agents: use a spawned/background Codex worker or task.
+- Tool names vary by host. The invariant is the same: intermediate AMQ rounds stay off the main thread.
 
 ## Pattern
 
@@ -16,9 +22,10 @@ When a `review_request` may take multiple rounds, do not keep the whole loop in 
 - Repeated diffs, logs, and review notes do not accumulate as stale history.
 - The main conversation keeps only the durable outcome.
 
-## Example
+## Examples
 
 ```text
+Claude Code:
 Agent({
   run_in_background: true,
   task: `
@@ -32,6 +39,16 @@ Agent({
     "codex signed off after 3 rounds, 5 findings fixed"
   `
 })
+```
+
+```text
+Codex-style host:
+Start a background worker/subagent for the AMQ review loop
+- amq send --to codex --kind review_request --body "Please review: src/foo.go"
+- amq drain --include-body
+- apply fixes and re-send until green or max rounds
+Return one line only:
+"codex signed off after 3 rounds, 5 findings fixed"
 ```
 
 This is behavioral guidance for agents using AMQ, not a CLI feature or protocol change.
