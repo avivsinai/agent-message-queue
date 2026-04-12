@@ -298,6 +298,8 @@ amq send --to codex --priority urgent --kind question --body "Blocked on API"
 amq send --to codex --labels "bug,parser" --context '{"paths": ["src/"]}' --body "Found issue"
 ```
 
+**Send file paths, not file contents.** When attaching source code, configs, or large text for review, send the file path in the message body, not the contents inline. The receiver can open the file with their local tools. If the receiver cannot access that worktree, send a short diff instead of the full source.
+
 ### Filter
 ```bash
 amq list --new --priority urgent
@@ -333,3 +335,4 @@ For detailed protocols, read the reference file FIRST, then follow its instructi
 - [references/integrations.md](references/integrations.md) — Symphony + Kanban integration commands, global root fallback, ops checks
 - [references/message-format.md](references/message-format.md) — Message format: frontmatter schema, field reference
 - [references/cross-project.md](references/cross-project.md) — Cross-project routing: peer config, addressing, decision threads
+- [references/review-loop.md](references/review-loop.md) — Token-efficient review cycles: delegate multi-round reviews to background agents
