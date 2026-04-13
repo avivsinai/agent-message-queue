@@ -205,6 +205,72 @@ print("  hook /clear scenario: JSON assertions passed")
 PYEOF
 fi
 
+# Quoted-root scenario: phase 1 must round-trip shell-escaped AM_ROOT correctly.
+HOOK_QUOTED_DIR="$HOOK_TMPDIR/quoted-project"
+mkdir -p "$HOOK_QUOTED_DIR"
+HOOK_QUOTED_ROOT="$HOOK_QUOTED_DIR/agent-mail'quoted/collab"
+"$BIN" init --root "$HOOK_QUOTED_ROOT" --agents claude,codex
+"$BIN" presence set --root "$HOOK_QUOTED_ROOT" --me codex --status active
+"$BIN" send --root "$HOOK_QUOTED_ROOT" --me codex --to claude --body "quoted msg" >/dev/null 2>&1
+printf '{"root": "%s"}\n' "agent-mail'quoted" > "$HOOK_QUOTED_DIR/.amqrc"
+
+HOOK_OUTPUT3=$(
+  CLAUDE_ENV_FILE="$HOOK_QUOTED_DIR/claude-env" \
+  CLAUDE_PROJECT_DIR="$HOOK_QUOTED_DIR" \
+  AM_ROOT="$HOOK_QUOTED_ROOT" \
+  AM_ME="claude" \
+  PATH="$(dirname "$BIN"):$PATH" \
+  bash scripts/claude-session-start.sh 2>/dev/null
+)
+
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$HOOK_OUTPUT3" <<'PYEOF'
+import json, sys
+
+data = json.loads(sys.argv[1])
+hso = data["hookSpecificOutput"]
+assert hso["hookEventName"] == "SessionStart", f"hookEventName={hso.get('hookEventName')}"
+ctx = hso["additionalContext"]
+assert "codex(" in ctx, f"missing peer in: {ctx}"
+assert "1 unread message(s)" in ctx, f"missing unread count in: {ctx}"
+print("  hook quoted-root scenario: JSON assertions passed")
+PYEOF
+fi
+
+# /clear with env-file-only AM_ME: phase 2 must reuse the persisted handle.
+HOOK_ALT_ME_DIR="$HOOK_TMPDIR/nondefault-me-project"
+mkdir -p "$HOOK_ALT_ME_DIR"
+HOOK_ALT_ME_ROOT="$HOOK_ALT_ME_DIR/agent-mail/collab"
+"$BIN" init --root "$HOOK_ALT_ME_ROOT" --agents alice,codex
+"$BIN" presence set --root "$HOOK_ALT_ME_ROOT" --me codex --status active
+"$BIN" send --root "$HOOK_ALT_ME_ROOT" --me codex --to alice --body "msg one" >/dev/null 2>&1
+"$BIN" send --root "$HOOK_ALT_ME_ROOT" --me codex --to alice --body "msg two" >/dev/null 2>&1
+printf '{"root": "agent-mail"}\n' > "$HOOK_ALT_ME_DIR/.amqrc"
+HOOK_ALT_ME_ENV_FILE="$HOOK_ALT_ME_DIR/claude-env"
+printf "export AM_ROOT='%s'\nexport AM_ME=alice\n" "$HOOK_ALT_ME_ROOT" > "$HOOK_ALT_ME_ENV_FILE"
+
+HOOK_OUTPUT4=$(
+  CLAUDE_ENV_FILE="$HOOK_ALT_ME_ENV_FILE" \
+  CLAUDE_PROJECT_DIR="$HOOK_ALT_ME_DIR" \
+  PATH="$(dirname "$BIN"):$PATH" \
+  bash scripts/claude-session-start.sh 2>/dev/null
+)
+
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$HOOK_OUTPUT4" <<'PYEOF'
+import json, sys
+
+data = json.loads(sys.argv[1])
+hso = data["hookSpecificOutput"]
+assert hso["hookEventName"] == "SessionStart", f"hookEventName={hso.get('hookEventName')}"
+ctx = hso["additionalContext"]
+assert "me=alice" in ctx, f"missing me=alice in: {ctx}"
+assert "2 unread message(s)" in ctx, f"missing unread count in: {ctx}"
+assert "amq drain --me alice" in ctx, f"missing alice drain hint in: {ctx}"
+print("  hook /clear env-file AM_ME scenario: JSON assertions passed")
+PYEOF
+fi
+
 echo "claude-session-start.sh hook test ok"
 
 echo "smoke test ok"
