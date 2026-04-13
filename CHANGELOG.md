@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- `scripts/claude-session-start.sh` phase 2: SessionStart hook now re-injects coop context (session, project, peers, unread count) as `additionalContext` after `/clear` or context compaction, restoring the awareness Claude Code loses when its context is reset (#84, fixes #71). Composes existing CLI primitives — no new Go surface.
+- Smoke test coverage for the SessionStart hook: phase 1 env-file write, phase 2 JSON shape, `/clear` recovery, quoted-root path round-trip, and `/clear` with env-file-only `AM_ME=<non-default>`.
+
+### Fixed
+
+- SessionStart hook is now safe under stock macOS `/bin/bash` 3.2 + `set -u`; replaced empty-array expansion (`"${ROOT_FLAGS[@]}"`) with explicit rooted/non-rooted command branches.
+- SessionStart hook correctly round-trips POSIX single-quote-escaped roots (e.g. paths containing `'`); replaced fragile `sed` decoding with isolated `/bin/sh` eval of the matched `export` line.
+- SessionStart hook `/clear` recovery now reloads `AM_ME` from the env file symmetrically to `AM_ROOT`, so phase 2 targets the correct handle when only the env file carries identity.
 
 ## [0.31.3] - 2026-04-12
 ### Changed
