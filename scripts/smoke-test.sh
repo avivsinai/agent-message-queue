@@ -126,4 +126,85 @@ if command -v python3 >/dev/null 2>&1; then
   echo "python session-name tests ok"
 fi
 
+# --- SessionStart hook test (claude-session-start.sh) ---
+HOOK_TMPDIR="$(mktemp -d)"
+hook_tmpdir_cleanup() {
+  rm -rf "$HOOK_TMPDIR"
+}
+trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup; hook_tmpdir_cleanup' EXIT
+
+# Fixture: 1 peer (codex, active presence) + 2 unread messages for claude
+HOOK_ROOT="$HOOK_TMPDIR/agent-mail/collab"
+"$BIN" init --root "$HOOK_ROOT" --agents claude,codex
+"$BIN" presence set --root "$HOOK_ROOT" --me codex --status active
+"$BIN" send --root "$HOOK_ROOT" --me codex --to claude --body "msg one" >/dev/null 2>&1
+"$BIN" send --root "$HOOK_ROOT" --me codex --to claude --body "msg two" >/dev/null 2>&1
+
+# Write .amqrc so amq env can resolve project/session
+printf '{"root": "agent-mail"}\n' > "$HOOK_TMPDIR/.amqrc"
+
+HOOK_ENV_FILE="$HOOK_TMPDIR/claude-env"
+
+HOOK_OUTPUT=$(
+  CLAUDE_ENV_FILE="$HOOK_ENV_FILE" \
+  CLAUDE_PROJECT_DIR="$HOOK_TMPDIR" \
+  AM_ROOT="$HOOK_ROOT" \
+  AM_ME="claude" \
+  PATH="$(dirname "$BIN"):$PATH" \
+  bash scripts/claude-session-start.sh 2>/dev/null
+)
+
+# Phase 1: env file should contain AM_ROOT export
+grep -q '^export AM_ROOT=' "$HOOK_ENV_FILE"
+echo "  hook phase 1: AM_ROOT in env file ok"
+
+# Phase 2: stdout should be valid JSON with required fields
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$HOOK_OUTPUT" <<'PYEOF'
+import json, sys
+
+data = json.loads(sys.argv[1])
+hso = data["hookSpecificOutput"]
+assert hso["hookEventName"] == "SessionStart", f"hookEventName={hso.get('hookEventName')}"
+ctx = hso["additionalContext"]
+assert ctx, "additionalContext is empty"
+assert "me=claude" in ctx, f"missing me=claude in: {ctx}"
+assert "codex" in ctx, f"missing peer codex in: {ctx}"
+sm = data["systemMessage"]
+assert "peer" in sm.lower(), f"systemMessage missing peer mention: {sm}"
+assert "2 unread" in sm, f"systemMessage missing unread count: {sm}"
+print("  hook phase 2: JSON assertions passed")
+PYEOF
+else
+  echo "  hook phase 2: python3 not available, skipping JSON assertions"
+fi
+
+# Test /clear scenario: env file already has AM_ROOT, but AM_ROOT not in parent env.
+# Phase 1 must read RESOLVED_ROOT from existing env file for phase 2 to work.
+printf "export AM_ROOT='%s'\n" "$HOOK_ROOT" > "$HOOK_ENV_FILE"
+
+HOOK_OUTPUT2=$(
+  CLAUDE_ENV_FILE="$HOOK_ENV_FILE" \
+  CLAUDE_PROJECT_DIR="$HOOK_TMPDIR" \
+  AM_ME="claude" \
+  PATH="$(dirname "$BIN"):$PATH" \
+  bash scripts/claude-session-start.sh 2>/dev/null
+)
+
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$HOOK_OUTPUT2" <<'PYEOF'
+import json, sys
+
+data = json.loads(sys.argv[1])
+hso = data["hookSpecificOutput"]
+assert hso["hookEventName"] == "SessionStart", f"hookEventName={hso.get('hookEventName')}"
+ctx = hso["additionalContext"]
+assert ctx, "additionalContext is empty"
+assert "me=claude" in ctx, f"missing me=claude in: {ctx}"
+print("  hook /clear scenario: JSON assertions passed")
+PYEOF
+fi
+
+echo "claude-session-start.sh hook test ok"
+
 echo "smoke test ok"

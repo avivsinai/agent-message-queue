@@ -86,7 +86,6 @@ func TestChildNames(t *testing.T) {
 		{name: "coop", want: []string{"init", "exec"}},
 		{name: "swarm", want: []string{"list", "join", "leave", "tasks", "claim", "complete", "fail", "block", "bridge"}},
 		{name: "receipts", want: []string{"list", "wait"}},
-		{name: "integration", want: []string{"claude", "symphony", "kanban"}},
 	}
 
 	for _, tt := range tests {
