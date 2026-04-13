@@ -10,6 +10,7 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
 ME="${AM_ME:-claude}"
 RESOLVED_ROOT="${AM_ROOT:-}"
 HOOK_LOG="${TMPDIR:-/tmp}/amq-hook-${USER:-unknown}.log"
+HOOK_LOG_MAX_BYTES=$((1024 * 1024))
 
 first_export_line() {
     local var_name="$1"
@@ -31,6 +32,32 @@ decode_export_line() {
             return 0
             ;;
     esac
+}
+
+rotate_hook_log() {
+    local log_path="${1:-}"
+    local max_bytes="${2:-}"
+    local log_size=""
+
+    [ -n "$log_path" ] || return 0
+    [ -f "$log_path" ] || return 0
+
+    case "$max_bytes" in
+        ''|*[!0-9]*)
+            return 0
+            ;;
+    esac
+
+    log_size=$(wc -c < "$log_path" 2>/dev/null | tr -d '[:space:]') || log_size=""
+    case "$log_size" in
+        ''|*[!0-9]*)
+            return 0
+            ;;
+    esac
+
+    [ "$log_size" -lt "$max_bytes" ] && return 0
+
+    mv -f "$log_path" "$log_path.1" 2>/dev/null || : > "$log_path" 2>/dev/null || true
 }
 
 # --- Phase 1: Environment injection (existing behavior) ---
@@ -83,6 +110,8 @@ fi
 # --- Phase 2: Context re-injection ---
 # Compose existing CLI primitives to build a coop preamble that restores
 # session awareness after /clear or compaction (see issue #71).
+
+rotate_hook_log "$HOOK_LOG" "$HOOK_LOG_MAX_BYTES"
 
 if command -v amq &> /dev/null; then
     if [ -n "$RESOLVED_ROOT" ]; then

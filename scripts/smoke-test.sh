@@ -271,6 +271,55 @@ print("  hook /clear env-file AM_ME scenario: JSON assertions passed")
 PYEOF
 fi
 
+# HOOK_LOG rotation: oversized logs should rotate to .1; smaller logs should stay in place.
+HOOK_LOG_ROTATE_DIR="$(mktemp -d)"
+hook_log_rotate_cleanup() {
+  rm -rf "$HOOK_LOG_ROTATE_DIR"
+}
+trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup; hook_tmpdir_cleanup; hook_log_rotate_cleanup' EXIT
+
+HOOK_LOG_PATH="$HOOK_LOG_ROTATE_DIR/amq-hook-hooklogtest.log"
+HOOK_LOG_BACKUP="$HOOK_LOG_PATH.1"
+dd if=/dev/zero of="$HOOK_LOG_PATH" bs=1024 count=1025 >/dev/null 2>&1
+
+CLAUDE_ENV_FILE="$HOOK_LOG_ROTATE_DIR/env" \
+CLAUDE_PROJECT_DIR="$HOOK_LOG_ROTATE_DIR" \
+TMPDIR="$HOOK_LOG_ROTATE_DIR" \
+USER="hooklogtest" \
+PATH="$(dirname "$BIN"):$PATH" \
+bash scripts/claude-session-start.sh >/dev/null 2>/dev/null
+
+test -f "$HOOK_LOG_BACKUP"
+test -f "$HOOK_LOG_PATH"
+ROTATED_SIZE="$(wc -c < "$HOOK_LOG_BACKUP" | tr -d '[:space:]')"
+CURRENT_SIZE="$(wc -c < "$HOOK_LOG_PATH" | tr -d '[:space:]')"
+if [[ "$ROTATED_SIZE" -lt 1048576 ]]; then
+  echo "hook log rotation backup size too small: $ROTATED_SIZE"
+  exit 1
+fi
+if [[ "$CURRENT_SIZE" -ge 1048576 ]]; then
+  echo "hook log rotation did not cap current log: $CURRENT_SIZE"
+  exit 1
+fi
+echo "  hook log rotation: oversized log rotated"
+
+rm -f "$HOOK_LOG_BACKUP"
+printf 'small-log\n' > "$HOOK_LOG_PATH"
+
+CLAUDE_ENV_FILE="$HOOK_LOG_ROTATE_DIR/env2" \
+CLAUDE_PROJECT_DIR="$HOOK_LOG_ROTATE_DIR" \
+TMPDIR="$HOOK_LOG_ROTATE_DIR" \
+USER="hooklogtest" \
+PATH="$(dirname "$BIN"):$PATH" \
+bash scripts/claude-session-start.sh >/dev/null 2>/dev/null
+
+if [[ -f "$HOOK_LOG_BACKUP" ]]; then
+  echo "hook log rotation unexpectedly rotated small log"
+  exit 1
+fi
+grep -q '^small-log$' "$HOOK_LOG_PATH"
+echo "  hook log rotation: small log left in place"
+
 echo "claude-session-start.sh hook test ok"
 
 echo "smoke test ok"
