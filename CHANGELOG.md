@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.1] - 2026-04-13
 ### Fixed
 
 - `scripts/claude-session-start.sh` now rotates oversized `$HOOK_LOG` files opportunistically at hook start, keeping stderr logging bounded without affecting hook output or exit behavior.
+
 
 ## [0.32.0] - 2026-04-13
 ### Added
