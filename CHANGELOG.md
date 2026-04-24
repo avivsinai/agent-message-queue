@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- `amq wake` now has an enabled-by-default, best-effort input-activity deferral gate before non-interrupt TIOCSTI injection. The gate only runs after a wake notification is pending, samples the controlling terminal for unread input and recent reads, and is bounded by `--input-poll-interval`, `--input-quiet-for`, and `--input-max-hold`. This does not prove the foreground app's prompt buffer is empty; a paused in-progress prompt can still be injected into and submitted.
 
 ## [0.32.1] - 2026-04-13
 ### Fixed

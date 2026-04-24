@@ -4,6 +4,7 @@ package cli
 
 import (
 	"os"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -66,4 +67,100 @@ func ioctlTIOCSTI(fd uintptr, ch byte) error {
 		}
 		return errno
 	}
+}
+
+func waitForTTYInputQuiet(cfg *wakeConfig) {
+	if cfg.inputMaxHold <= 0 {
+		return
+	}
+
+	fd, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY, 0)
+	if err != nil {
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: input deferral unavailable: open /dev/tty: %v\n", err)
+		}
+		return
+	}
+	defer func() { _ = unix.Close(fd) }()
+
+	deadline := time.Now().Add(cfg.inputMaxHold)
+	for {
+		now := time.Now()
+		state, err := sampleTTYInputState(uintptr(fd))
+		if err != nil {
+			if cfg.debug {
+				_ = writeStderr("amq wake [debug]: input deferral unavailable: %v\n", err)
+			}
+			return
+		}
+
+		active, reason := state.active(now, cfg.inputQuietFor)
+		if !active {
+			return
+		}
+		if !now.Before(deadline) {
+			if cfg.debug {
+				_ = writeStderr("amq wake [debug]: input deferral max hold reached (%s)\n", reason)
+			}
+			return
+		}
+
+		delay := inputDeferralDelay(state, now, deadline, cfg.inputQuietFor, cfg.inputPollInterval)
+		if delay <= 0 {
+			return
+		}
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: deferring injection for %s (%s, pending_bytes=%d)\n", delay, reason, state.pendingBytes)
+		}
+		time.Sleep(delay)
+	}
+}
+
+func sampleTTYInputState(fd uintptr) (ttyInputState, error) {
+	// TIOCINQ/FIONREAD only sees bytes still buffered by the kernel. Raw-mode
+	// TUIs usually consume keystrokes quickly, so recent tty reads are the more
+	// useful signal for active composition.
+	pending, err := ttyInputPendingBytes(fd)
+	if err != nil {
+		return ttyInputState{}, err
+	}
+
+	readAt, ok, err := ttyLastReadTime(fd)
+	if err != nil {
+		return ttyInputState{}, err
+	}
+	return ttyInputState{
+		pendingBytes: pending,
+		lastRead:     readAt,
+		hasLastRead:  ok,
+	}, nil
+}
+
+func ttyInputPendingBytes(fd uintptr) (int, error) {
+	var n int32
+	for {
+		//nolint:staticcheck // unix.SYS_IOCTL is used for terminal ioctls without wrappers.
+		_, _, errno := unix.Syscall(unix.SYS_IOCTL, fd, uintptr(ttyInputQueueRequest), uintptr(unsafe.Pointer(&n)))
+		if errno == 0 {
+			if n < 0 {
+				return 0, nil
+			}
+			return int(n), nil
+		}
+		if errno == unix.EINTR {
+			continue
+		}
+		return 0, errno
+	}
+}
+
+func ttyLastReadTime(fd uintptr) (time.Time, bool, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(int(fd), &st); err != nil {
+		return time.Time{}, false, err
+	}
+	if st.Atim.Sec == 0 && st.Atim.Nsec == 0 {
+		return time.Time{}, false, nil
+	}
+	return time.Unix(st.Atim.Sec, st.Atim.Nsec), true, nil
 }
