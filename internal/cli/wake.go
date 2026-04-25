@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -17,6 +18,7 @@ type wakeConfig struct {
 	root              string
 	session           string
 	injectCmd         string
+	injectVia         string // external command for injection (replaces TIOCSTI)
 	bell              bool
 	debounce          time.Duration
 	previewLen        int
@@ -110,7 +112,12 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.previewLen, cfg.interruptNotice)
 		now := time.Now()
 		if cfg.interruptKey != "" && shouldInterruptNow(cfg, now) {
-			if err := tiocsti.Inject(cfg.interruptKey); err == nil {
+			if cfg.injectVia != "" {
+				if err := injectVia(cfg, cfg.interruptKey); err == nil {
+					cfg.lastInterrupt = now
+					time.Sleep(50 * time.Millisecond)
+				}
+			} else if err := tiocsti.Inject(cfg.interruptKey); err == nil {
 				cfg.lastInterrupt = now
 				time.Sleep(50 * time.Millisecond)
 			}
@@ -267,6 +274,15 @@ func injectNotification(cfg *wakeConfig, text string) error {
 		plainText = "\a" + plainText
 	}
 
+	// External injection: delegate to user-specified command instead of TIOCSTI.
+	// The command receives the notification text as its last argument.
+	if cfg.injectVia != "" {
+		if err := injectVia(cfg, text); err != nil {
+			_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
+		}
+		return nil
+	}
+
 	mode := effectiveInjectMode(cfg)
 	if cfg.debug {
 		_ = writeStderr("amq wake [debug]: mode=%s text_len=%d\n", mode, len(text))
@@ -355,6 +371,28 @@ func injectNotification(cfg *wakeConfig, text string) error {
 		// Fallback: print plain text to stderr (no escape sequences)
 		_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
 		return nil
+	}
+
+	return nil
+}
+
+func injectVia(cfg *wakeConfig, text string) error {
+	if cfg.debug {
+		_ = writeStderr("amq wake [debug]: inject-via mode, running: %s <text>\n", cfg.injectVia)
+	}
+
+	parts := strings.Fields(cfg.injectVia)
+	if len(parts) == 0 {
+		return fmt.Errorf("inject-via command is blank")
+	}
+
+	args := append(parts[1:], text)
+	cmd := exec.Command(parts[0], args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: inject-via failed: %v (%s)\n", err, string(out))
+		}
+		return err
 	}
 
 	return nil
