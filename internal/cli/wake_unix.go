@@ -208,6 +208,7 @@ func runWake(args []string) error {
 	fs := flag.NewFlagSet("wake", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	injectCmdFlag := fs.String("inject-cmd", "", "Command to inject (power user mode)")
+	injectViaFlag := fs.String("inject-via", "", "External command for injection (text appended as last arg, bypasses TTY requirement)")
 	bellFlag := fs.Bool("bell", false, "Ring terminal bell on new messages")
 	debounceFlag := fs.Duration("debounce", 250*time.Millisecond, "Debounce window for batching messages")
 	previewLenFlag := fs.Int("preview-len", 48, "Max subject preview length")
@@ -284,14 +285,22 @@ func runWake(args []string) error {
 		return err
 	}
 
-	// Verify TIOCSTI is available
-	if !tiocsti.Available() {
-		return errors.New("TIOCSTI not available on this platform; use tmux send-keys or terminal-specific injection")
+	// Validate --inject-via: reject whitespace-only values that would panic on strings.Fields
+	injectVia := strings.TrimSpace(*injectViaFlag)
+	if *injectViaFlag != "" && injectVia == "" {
+		return UsageError("--inject-via must not be blank")
 	}
 
-	// Verify we have a real TTY
-	if !tiocsti.IsTTY() {
-		return errors.New("amq wake requires a real terminal (run in foreground or as background job in same terminal)")
+	// Verify TIOCSTI is available (skip in inject-via mode — uses external command instead)
+	if injectVia == "" {
+		if !tiocsti.Available() {
+			return errors.New("TIOCSTI not available on this platform; use tmux send-keys or terminal-specific injection")
+		}
+
+		// Verify we have a real TTY
+		if !tiocsti.IsTTY() {
+			return errors.New("amq wake requires a real terminal (run in foreground or as background job in same terminal, or use --inject-via for external injection)")
+		}
 	}
 
 	interruptKey, err := parseInterruptKey(*interruptCmdFlag)
@@ -311,6 +320,7 @@ func runWake(args []string) error {
 		root:              root,
 		session:           resolveSessionName(root),
 		injectCmd:         *injectCmdFlag,
+		injectVia:         injectVia,
 		bell:              *bellFlag,
 		debounce:          *debounceFlag,
 		previewLen:        *previewLenFlag,
@@ -451,8 +461,8 @@ func runWakeLoop(cfg wakeConfig) error {
 			// Keep presence alive so `amq who` reports the agent as active
 			_ = presence.Touch(cfg.root, cfg.me)
 
-			// Verify TTY is still valid by checking if we can open /dev/tty
-			if !ttyAvailable() {
+			// Verify TTY is still valid (skip in inject-via mode — no local TTY needed)
+			if cfg.injectVia == "" && !ttyAvailable() {
 				return errors.New("TTY no longer available")
 			}
 		}
