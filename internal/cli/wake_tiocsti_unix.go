@@ -74,19 +74,34 @@ func waitForTTYInputQuiet(cfg *wakeConfig) {
 		return
 	}
 
-	fd, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY, 0)
+	queueFD, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY, 0)
 	if err != nil {
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: input deferral unavailable: open /dev/tty: %v\n", err)
 		}
 		return
 	}
-	defer func() { _ = unix.Close(fd) }()
+	defer func() { _ = unix.Close(queueFD) }()
+
+	// Atime via /dev/tty is unreliable: on macOS the alias inode does not track
+	// reads on the underlying ttysNNN, and on Linux a freshly opened /dev/tty fd
+	// may not be in the tty's open-file list when tty_update_time runs. Stdin
+	// (when a TTY) was inherited from the launching shell and tracks reads on
+	// both platforms, so prefer it for atime sampling.
+	atimeFD := uintptr(queueFD)
+	atimeSource := "/dev/tty"
+	if stdinFD := os.Stdin.Fd(); term.IsTerminal(int(stdinFD)) {
+		atimeFD = stdinFD
+		atimeSource = "stdin"
+	}
+	if cfg.debug {
+		_ = writeStderr("amq wake [debug]: input deferral atime_source=%s\n", atimeSource)
+	}
 
 	deadline := time.Now().Add(cfg.inputMaxHold)
 	for {
 		now := time.Now()
-		state, err := sampleTTYInputState(uintptr(fd))
+		state, err := sampleTTYInputState(uintptr(queueFD), atimeFD)
 		if err != nil {
 			if cfg.debug {
 				_ = writeStderr("amq wake [debug]: input deferral unavailable: %v\n", err)
@@ -116,16 +131,16 @@ func waitForTTYInputQuiet(cfg *wakeConfig) {
 	}
 }
 
-func sampleTTYInputState(fd uintptr) (ttyInputState, error) {
+func sampleTTYInputState(queueFD, atimeFD uintptr) (ttyInputState, error) {
 	// TIOCINQ/FIONREAD only sees bytes still buffered by the kernel. Raw-mode
 	// TUIs usually consume keystrokes quickly, so recent tty reads are the more
 	// useful signal for active composition.
-	pending, err := ttyInputPendingBytes(fd)
+	pending, err := ttyInputPendingBytes(queueFD)
 	if err != nil {
 		return ttyInputState{}, err
 	}
 
-	readAt, ok, err := ttyLastReadTime(fd)
+	readAt, ok, err := ttyLastReadTime(atimeFD)
 	if err != nil {
 		return ttyInputState{}, err
 	}

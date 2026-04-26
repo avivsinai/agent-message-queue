@@ -213,7 +213,7 @@ func runWake(args []string) error {
 	previewLenFlag := fs.Int("preview-len", 48, "Max subject preview length")
 	injectModeFlag := fs.String("inject-mode", "auto", "Injection mode: auto, raw, paste (auto detects CLI type)")
 	deferWhileInputFlag := fs.Bool("defer-while-input", true, "Best-effort: defer non-interrupt injection while terminal input appears active")
-	inputQuietForFlag := fs.Duration("input-quiet-for", 1200*time.Millisecond, "Quiet window before deferred injection")
+	inputQuietForFlag := fs.Duration("input-quiet-for", 1200*time.Millisecond, "Quiet window before deferred injection (best-effort; Linux tty atime granularity is ~8s)")
 	inputPollIntervalFlag := fs.Duration("input-poll-interval", 200*time.Millisecond, "Polling interval while waiting for quiet terminal input")
 	inputMaxHoldFlag := fs.Duration("input-max-hold", 15*time.Second, "Maximum time to defer one wake injection (0 = no hold)")
 	interruptFlag := fs.Bool("interrupt", true, "Enable interrupt injection for urgent interrupt messages")
@@ -237,6 +237,9 @@ func runWake(args []string) error {
 		"  a message is pending, then injects after a short quiet window.",
 		"  Best-effort only: a pause longer than --input-quiet-for can still",
 		"  inject while a prompt is being composed. Interrupt messages bypass it.",
+		"  Atime sampling uses stdin (when a TTY) for cross-platform fidelity;",
+		"  Linux tty atime is updated at ~8s granularity, so quiet windows",
+		"  shorter than that are advisory.",
 		"",
 		"Interrupts (default on): urgent messages tagged with label \"interrupt\"",
 		"  trigger Ctrl+C injection + an interrupt notice.",
