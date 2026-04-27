@@ -212,6 +212,25 @@ flags > AM_ROOT > project .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
 Auto-detect covers the default `.agent-mail` layout, including `.agent-mail/<session>` session roots without `.amqrc`. Custom root names and peer config still require `.amqrc` or explicit flags/env.
 This same chain is used by `amq env`, `amq doctor`, and the integration commands, so Symphony and Kanban-launched agents can find the correct queue even when they are not started from the project directory.
 
+## Extension Metadata
+
+Higher-level layers can store launch records, role metadata, restore state, and indexes without writing into AMQ-owned mailbox directories. AMQ reserves these extension namespaces:
+
+```text
+<AM_ROOT>/extensions/<layer>/
+<AM_ROOT>/agents/<handle>/extensions/<layer>/
+```
+
+Layer names use lowercase ASCII letters, digits, hyphen, underscore, and dot; reverse-DNS names such as `io.github.omriariav.amq-squad` are supported. AMQ does not create files inside layer-owned directories, and `amq cleanup` leaves extension directories alone unless a future command explicitly targets extension metadata.
+
+Layers may publish a passive manifest at:
+
+```text
+<AM_ROOT>/extensions/<layer>/manifest.json
+```
+
+`amq doctor --json` reports valid manifests under `extension_manifests` and malformed metadata under `extension_diagnostics`. Manifests are diagnostics-only: AMQ does not execute extension code, load callbacks, or invoke hooks from them. See [docs/adr-layer-extensions.md](docs/adr-layer-extensions.md) for the full contract.
+
 ## Integrations
 
 AMQ transports **messages**, not remote task state. The integration layer is intentionally narrow: optional adapters convert external lifecycle or task events into normal AMQ messages. Integration messages are self-delivered (`from=<me>`, `to=<me>`) so an agent monitoring its own inbox can react without polling another tool directly.

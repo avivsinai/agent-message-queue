@@ -82,6 +82,13 @@ internal/
 
 **Receipt Ledger**: Delivery outcomes are recorded as consumer-local receipts under `agents/<consumer>/receipts/`. Stages are `drained` and `dlq`. Use `amq receipts list`, `amq receipts wait`, or `amq send --wait-for <stage>` to query or block on them.
 
+**Extension Metadata Namespaces**: Higher-level layers may store their own metadata under reserved extension directories:
+```
+<AM_ROOT>/extensions/<layer>/
+<AM_ROOT>/agents/<handle>/extensions/<layer>/
+```
+Layer names must use lowercase ASCII letters, digits, hyphen, underscore, and dot (for example `io.github.omriariav.amq-squad`). AMQ will not create files inside layer-owned directories, and `amq cleanup` does not remove extension directories unless a future command explicitly targets extension metadata. Layers may publish a passive root manifest at `<AM_ROOT>/extensions/<layer>/manifest.json`; `amq doctor --json` may report it, but AMQ must not execute extension code or invoke hooks from manifests.
+
 **Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail/collab`), `AM_ME` (agent handle), `AM_BASE_ROOT` (base root set by `coop exec` for cross-session resolution; only trusted when the current root still lives under it), `AMQ_GLOBAL_ROOT` (global root fallback for orchestrator-spawned agents), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
 **Session Layout**: The default base root directory is `.agent-mail/`. `.amqrc` can configure that root explicitly, but the default `.agent-mail/<session>` layout is also recognized without `.amqrc`. `coop exec` defaults to `--session collab`, so agents get session isolation without explicit flags. Use `--session` to override:
