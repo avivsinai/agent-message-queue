@@ -64,6 +64,7 @@ func expectSamePath(t *testing.T, got, want string) {
 func setCLIVersionForTest(t *testing.T, version string) {
 	t.Helper()
 
+	// This mutates package state; do not use from parallel tests.
 	oldVersion := cliVersion
 	cliVersion = version
 	t.Cleanup(func() { cliVersion = oldVersion })
@@ -794,6 +795,60 @@ func TestRunEnvJSONV1SessionFlag(t *testing.T) {
 	}
 	if result.RootSource != string(rootSourceFlag) {
 		t.Errorf("expected root_source=%q, got %q", rootSourceFlag, result.RootSource)
+	}
+}
+
+func TestRunEnvJSONV1FieldsAlwaysPresent(t *testing.T) {
+	cwd := t.TempDir()
+	fakeHome := t.TempDir()
+	root := filepath.Join(cwd, "explicit-root")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("AM_ROOT", "")
+	t.Setenv("AM_ME", "")
+	t.Setenv("AMQ_GLOBAL_ROOT", "")
+
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	output, err := captureEnvStdout(t, func() error {
+		return runEnv([]string{"--json", "--root", root})
+	})
+	if err != nil {
+		t.Fatalf("runEnv: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(output), &raw); err != nil {
+		t.Fatalf("unmarshal raw output: %v, output was: %s", err, output)
+	}
+
+	required := []string{
+		"schema_version",
+		"amq_version",
+		"root",
+		"base_root",
+		"session_name",
+		"in_session",
+		"me",
+		"project",
+		"root_source",
+		"peers",
+	}
+	for _, key := range required {
+		if _, ok := raw[key]; !ok {
+			t.Errorf("expected v1 field %q to be present in JSON output", key)
+		}
+	}
+	if got := string(raw["peers"]); got != "{}" {
+		t.Errorf("expected peers to serialize as {}, got %s", got)
 	}
 }
 
