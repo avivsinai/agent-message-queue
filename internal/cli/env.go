@@ -27,13 +27,18 @@ type amqrcResult struct {
 
 // envOutput is the JSON output format for amq env --json.
 type envOutput struct {
-	Root        string            `json:"root,omitempty"`
-	Me          string            `json:"me,omitempty"`
-	Shell       string            `json:"shell,omitempty"`
-	Wake        bool              `json:"wake,omitempty"`
-	Project     string            `json:"project,omitempty"`
-	Peers       map[string]string `json:"peers,omitempty"`
-	SessionName string            `json:"session_name,omitempty"`
+	SchemaVersion int               `json:"schema_version"`
+	AMQVersion    string            `json:"amq_version"`
+	Root          string            `json:"root"`
+	BaseRoot      string            `json:"base_root"`
+	SessionName   string            `json:"session_name"`
+	InSession     bool              `json:"in_session"`
+	Me            string            `json:"me"`
+	Project       string            `json:"project"`
+	RootSource    string            `json:"root_source"`
+	Peers         map[string]string `json:"peers"`
+	Shell         string            `json:"shell,omitempty"`
+	Wake          bool              `json:"wake,omitempty"`
 }
 
 // errAmqrcNotFound is returned when .amqrc is not found (non-fatal).
@@ -93,7 +98,7 @@ func runEnv(args []string) error {
 	}
 
 	// Resolve configuration with precedence
-	root, me, err := resolveEnvConfig(*rootFlag, *meFlag)
+	root, source, me, err := resolveEnvConfigWithSource(*rootFlag, *meFlag)
 	if err != nil {
 		return err
 	}
@@ -114,36 +119,60 @@ func runEnv(args []string) error {
 
 	// JSON output mode
 	if *jsonFlag {
+		baseRoot, sessionName, inSession := classifyEnvRoot(root)
+		project, peers := envProjectAndPeers(root)
 		out := envOutput{
-			Root:        root,
-			Me:          me,
-			Shell:       shell,
-			Wake:        *wakeFlag,
-			SessionName: resolveSessionName(root),
-		}
-		// Include project identity and peer config from .amqrc
-		// so agents can discover cross-project routing without
-		// reading .amqrc directly.
-		if rcResult, rcErr := findAmqrcForRoot(root); rcErr == nil {
-			out.Project = rcResult.Config.Project
-			if out.Project == "" {
-				// Only infer project from directory basename for
-				// project-local .amqrc, not global ~/.amqrc (which
-				// is a queue locator, not a project identity).
-				home, _ := os.UserHomeDir()
-				if home == "" || rcResult.Dir != home {
-					out.Project = filepath.Base(rcResult.Dir)
-				}
-			}
-			if len(rcResult.Config.Peers) > 0 {
-				out.Peers = rcResult.Config.Peers
-			}
+			SchemaVersion: 1,
+			AMQVersion:    cliVersion,
+			Root:          root,
+			BaseRoot:      baseRoot,
+			SessionName:   sessionName,
+			InSession:     inSession,
+			Me:            me,
+			Project:       project,
+			RootSource:    string(source),
+			Peers:         peers,
+			Shell:         shell,
+			Wake:          *wakeFlag,
 		}
 		return writeJSON(os.Stdout, out)
 	}
 
 	// Generate shell commands
 	return writeShellEnv(root, me, shell, *wakeFlag)
+}
+
+func classifyEnvRoot(root string) (baseRoot, sessionNameOut string, inSession bool) {
+	base := classifyRoot(root)
+	if base != "" && absPath(resolveRoot(root)) != absPath(resolveRoot(base)) {
+		return base, sessionName(root), true
+	}
+	return root, "", false
+}
+
+func envProjectAndPeers(root string) (string, map[string]string) {
+	peers := map[string]string{}
+
+	// Include project identity and peer config from .amqrc so agents can
+	// discover cross-project routing without reading .amqrc directly.
+	rcResult, rcErr := findAmqrcForRoot(root)
+	if rcErr != nil {
+		return "", peers
+	}
+
+	project := rcResult.Config.Project
+	if project == "" {
+		// Only infer project from directory basename for project-local .amqrc,
+		// not global ~/.amqrc (which is a queue locator, not a project identity).
+		home, _ := os.UserHomeDir()
+		if home == "" || rcResult.Dir != home {
+			project = filepath.Base(rcResult.Dir)
+		}
+	}
+	for name, path := range rcResult.Config.Peers {
+		peers[name] = path
+	}
+	return project, peers
 }
 
 // rootSource describes which configuration source provided the resolved root.

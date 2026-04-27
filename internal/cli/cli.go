@@ -9,7 +9,14 @@ const (
 	envGlobalRoot = "AMQ_GLOBAL_ROOT"
 )
 
+var cliVersion = "dev"
+
 func Run(args []string, version string) error {
+	if version == "" {
+		version = "dev"
+	}
+	cliVersion = version
+
 	args, noUpdate := stripNoUpdateCheckArgs(args)
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		return printUsageRegistry()
