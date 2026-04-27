@@ -133,6 +133,10 @@ amq drain --include-body
 amq send --to codex --body "Please pick this up" \
   --wait-for drained --wait-timeout 60s
 
+# Send between known sessions before entering coop exec
+amq send --root .agent-mail --from-session feature-a --me claude \
+  --to codex --session feature-b --body "Please review the setup"
+
 # Inspect receipts for a message later
 amq receipts list --me codex --msg-id <msg_id>
 

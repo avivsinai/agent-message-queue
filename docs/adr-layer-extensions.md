@@ -271,7 +271,7 @@ Layer guidance:
 
 ## Pre-Boot `--from-session` Sends
 
-AMQ will support explicit source-session stamping from setup terminals:
+AMQ supports explicit source-session stamping from setup terminals:
 
 ```bash
 amq send \

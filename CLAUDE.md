@@ -153,7 +153,7 @@ When `--kind` is set but `--priority` is not, priority defaults to `normal`.
 
 ```bash
 amq init --root <path> --agents a,b,c [--force]
-amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--wait-for <stage>] [--wait-timeout <duration>]
+amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--session <target-session>] [--from-session <source-session>] [--project <project>] [--wait-for <stage>] [--wait-timeout <duration>]
 amq list --me <agent> [--new | --cur] [--priority <p>] [--from <h>] [--kind <k>] [--label <l>...] [--limit N] [--offset N] [--json]
 amq read --me <agent> --id <msg_id> [--json]
 amq drain --me <agent> [--limit N] [--include-body] [--json]
