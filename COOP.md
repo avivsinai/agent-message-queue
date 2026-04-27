@@ -220,7 +220,13 @@ amq reply --id "msg_123" --kind review_response --body "LGTM with minor suggesti
 - `--inject-mode auto|raw|paste` - Injection strategy
 - `--bell` - Ring terminal bell on new messages
 - `--debounce 250ms` - Batch rapid messages
+- `--defer-while-input` / `--defer-while-input=false` - Best-effort quiet-window gate before non-interrupt injection
+- `--input-quiet-for 1200ms` - Required quiet window before deferred injection
+- `--input-poll-interval 200ms` - Poll interval while waiting for terminal input to quiet
+- `--input-max-hold 15s` - Maximum hold time for one deferred wake injection
 - `--interrupt` / `--interrupt=false` - Enable/disable Ctrl+C for urgent messages
+
+Input deferral is a heuristic, not a prompt-buffer guarantee. It only samples terminal state while a wake notification is already pending: unread bytes in the TTY input queue plus recent reads from the controlling terminal. If the foreground app has already consumed a partially typed prompt into its own editor buffer and the user pauses longer than `--input-quiet-for`, wake can still inject and submit. Explicit urgent interrupt messages bypass this deferral.
 
 **Platform support:**
 - macOS: Works

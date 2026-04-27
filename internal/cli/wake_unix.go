@@ -212,6 +212,10 @@ func runWake(args []string) error {
 	debounceFlag := fs.Duration("debounce", 250*time.Millisecond, "Debounce window for batching messages")
 	previewLenFlag := fs.Int("preview-len", 48, "Max subject preview length")
 	injectModeFlag := fs.String("inject-mode", "auto", "Injection mode: auto, raw, paste (auto detects CLI type)")
+	deferWhileInputFlag := fs.Bool("defer-while-input", true, "Best-effort: defer non-interrupt injection while terminal input appears active")
+	inputQuietForFlag := fs.Duration("input-quiet-for", 1200*time.Millisecond, "Quiet window before deferred injection (best-effort; Linux tty atime granularity is ~8s)")
+	inputPollIntervalFlag := fs.Duration("input-poll-interval", 200*time.Millisecond, "Polling interval while waiting for quiet terminal input")
+	inputMaxHoldFlag := fs.Duration("input-max-hold", 15*time.Second, "Maximum time to defer one wake injection (0 = no hold)")
 	interruptFlag := fs.Bool("interrupt", true, "Enable interrupt injection for urgent interrupt messages")
 	interruptLabelFlag := fs.String("interrupt-label", "interrupt", "Label required to trigger interrupt")
 	interruptPriorityFlag := fs.String("interrupt-priority", "urgent", "Priority required to trigger interrupt")
@@ -228,6 +232,14 @@ func runWake(args []string) error {
 		"  auto  - Detect CLI type: raw for Claude Code/Codex, paste for others",
 		"  raw   - Plain text + CR, no bracketed paste (works with Ink-based CLIs)",
 		"  paste - Bracketed paste with delayed CR (works with crossterm-based CLIs)",
+		"",
+		"Input deferral (default on): wake samples terminal input only after",
+		"  a message is pending, then injects after a short quiet window.",
+		"  Best-effort only: a pause longer than --input-quiet-for can still",
+		"  inject while a prompt is being composed. Interrupt messages bypass it.",
+		"  Atime sampling uses stdin (when a TTY) for cross-platform fidelity;",
+		"  Linux tty atime is updated at ~8s granularity, so quiet windows",
+		"  shorter than that are advisory.",
 		"",
 		"Interrupts (default on): urgent messages tagged with label \"interrupt\"",
 		"  trigger Ctrl+C injection + an interrupt notice.",
@@ -246,6 +258,15 @@ func runWake(args []string) error {
 	}
 	if *interruptCooldownFlag < 0 {
 		return UsageError("--interrupt-cooldown must be >= 0")
+	}
+	if *inputQuietForFlag < 0 {
+		return UsageError("--input-quiet-for must be >= 0")
+	}
+	if *inputPollIntervalFlag <= 0 {
+		return UsageError("--input-poll-interval must be > 0")
+	}
+	if *inputMaxHoldFlag < 0 {
+		return UsageError("--input-max-hold must be >= 0")
 	}
 
 	injectMode := strings.ToLower(strings.TrimSpace(*injectModeFlag))
@@ -318,6 +339,10 @@ func runWake(args []string) error {
 		fallbackWarn:      true,
 		injectMode:        injectMode,
 		debug:             *debugFlag,
+		deferWhileInput:   *deferWhileInputFlag,
+		inputQuietFor:     *inputQuietForFlag,
+		inputPollInterval: *inputPollIntervalFlag,
+		inputMaxHold:      *inputMaxHoldFlag,
 		interrupt:         *interruptFlag,
 		interruptLabel:    interruptLabel,
 		interruptPriority: interruptPriority,
