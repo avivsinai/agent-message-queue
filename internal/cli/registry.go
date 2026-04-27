@@ -155,6 +155,19 @@ func init() {
 			},
 		},
 		{Name: "who", Summary: "Show sessions and agents in current project", Handler: runWho},
+		{
+			Name:        "route",
+			Summary:     "Explain canonical routing",
+			Description: "Explain AMQ route resolution without sending a message",
+			Examples: []string{
+				"amq route explain --to codex --json",
+				"amq route explain --to qa --project project-b --session qa --json",
+			},
+			Handler: runRoute,
+			Children: []CommandInfo{
+				{Name: "explain", Summary: "Explain a send route as canonical JSON", Handler: runRouteExplain},
+			},
+		},
 		{Name: "doctor", Summary: "Verify installation and configuration", Handler: runDoctor},
 		{Name: "shell-setup", Summary: "Output shell aliases (amc/amx)", Handler: runShellSetup},
 		// Handler is nil to avoid an init cycle (runCompletion references commands).
