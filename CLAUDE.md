@@ -162,6 +162,7 @@ amq receipts list --me <agent> [--msg-id <id>] [--stage <stage>] [--json]
 amq receipts wait --me <agent> --msg-id <id> [--stage <stage>] [--timeout <duration>] [--poll-interval <duration>] [--json]
 amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
 amq presence list [--json]
+amq route explain --to <handle> [--project <project>] [--session <session>] [--from-root <path>] [--from-cwd <path>] [--me <handle>] --json
 amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
 amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
 amq monitor --me <agent> [--timeout <duration>] [--poll] [--include-body] [--peek] [--json]

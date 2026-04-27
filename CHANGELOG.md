@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `amq env --json` now emits the documented v1 machine-readable contract with `schema_version`, `amq_version`, `base_root`, `in_session`, `root_source`, always-present string fields, and `{}` for unconfigured `peers` (#101).
 - Reserved extension metadata namespaces under `<AM_ROOT>/extensions/<layer>/` and `<AM_ROOT>/agents/<handle>/extensions/<layer>/`; `amq doctor --json` now reports passive root extension manifests and malformed extension metadata diagnostics without executing extension code (#102).
+- `amq route explain --json` now reports canonical route resolution with routability, structured `argv`, display command, source/delivery roots, project, and session metadata for same-session, cross-session, and cross-project sends (#103).
 
 ## [0.32.2] - 2026-04-27
 ### Added
