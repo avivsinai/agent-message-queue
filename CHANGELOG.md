@@ -432,6 +432,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
+[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.33.0...HEAD
+[0.33.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.32.2...v0.33.0
+[0.32.2]: https://github.com/avivsinai/agent-message-queue/compare/v0.32.1...v0.32.2
+[0.32.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.32.0...v0.32.1
+[0.32.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.31.3...v0.32.0
+[0.31.3]: https://github.com/avivsinai/agent-message-queue/compare/v0.31.2...v0.31.3
+[0.31.2]: https://github.com/avivsinai/agent-message-queue/compare/v0.31.1...v0.31.2
+[0.31.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.31.0...v0.31.1
+[0.31.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.30.1...v0.31.0
+[0.30.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.30.0...v0.30.1
+[0.30.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.29.1...v0.30.0
+[0.29.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.29.0...v0.29.1
+[0.29.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.8...v0.29.0
+[0.28.8]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.7...v0.28.8
+[0.28.7]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.5...v0.28.7
+[0.28.5]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.4...v0.28.5
+[0.28.4]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.3...v0.28.4
+[0.28.3]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.2...v0.28.3
+[0.28.2]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.1...v0.28.2
+[0.28.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.0...v0.28.1
+[0.28.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.27.0...v0.28.0
+[0.27.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.26.0...v0.27.0
+[0.26.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.25.1...v0.26.0
+[0.25.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.25.0...v0.25.1
+[0.25.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.24.1...v0.25.0
+[0.24.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.21.0...v0.22.0

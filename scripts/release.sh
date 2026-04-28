@@ -143,39 +143,15 @@ fi
 
 git switch -c "$branch"
 
-python3 - "$version" "$release_date" "$allow_empty" <<'PY'
+python3 scripts/release_changelog.py "$version" "$release_date" "$allow_empty"
+
+python3 - "$version" <<'PY'
 import json
 import pathlib
 import re
 import sys
 
-version, release_date, allow_empty = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
-
-changelog = pathlib.Path("CHANGELOG.md")
-text = changelog.read_text()
-marker = "## [Unreleased]"
-if marker not in text:
-    raise SystemExit("error: CHANGELOG.md is missing the Unreleased section")
-
-start = text.index(marker)
-after_marker = start + len(marker)
-rest = text[after_marker:]
-match = re.search(r"(?m)^## \[", rest)
-if match:
-    unreleased_body = rest[:match.start()]
-    suffix = rest[match.start():]
-else:
-    unreleased_body = rest
-    suffix = ""
-
-if not unreleased_body.strip() and not allow_empty:
-    raise SystemExit("error: CHANGELOG.md Unreleased section is empty; add release notes first or pass --allow-empty")
-
-release_header = f"\n\n## [{version}] - {release_date}\n"
-new_text = text[:start] + marker + release_header + unreleased_body.lstrip("\n")
-if suffix:
-    new_text += suffix if suffix.startswith("\n") else "\n" + suffix
-changelog.write_text(new_text)
+version = sys.argv[1]
 
 changed = ["CHANGELOG.md"]
 
