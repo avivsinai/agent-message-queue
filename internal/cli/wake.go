@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +20,8 @@ type wakeConfig struct {
 	session           string
 	injectCmd         string
 	injectVia         string // external command for injection (replaces TIOCSTI)
+	injectArgs        []string
+	injectTimeout     time.Duration
 	bell              bool
 	debounce          time.Duration
 	previewLen        int
@@ -38,6 +41,8 @@ type wakeConfig struct {
 	interruptCooldown time.Duration
 	lastInterrupt     time.Time
 }
+
+const defaultInjectTimeout = 5 * time.Second
 
 type wakeMsgInfo struct {
 	from     string
@@ -89,7 +94,7 @@ func inputDeferralDelay(state ttyInputState, now, deadline time.Time, quietFor, 
 }
 
 func shouldDeferBeforeInject(cfg *wakeConfig, deferForInput bool) bool {
-	return deferForInput && cfg.deferWhileInput
+	return deferForInput && cfg.deferWhileInput && cfg.injectVia == ""
 }
 
 func notifyNewMessages(cfg *wakeConfig) error {
@@ -432,17 +437,32 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 
 func injectVia(cfg *wakeConfig, text string) error {
 	if cfg.debug {
-		_ = writeStderr("amq wake [debug]: inject-via mode, running: %s <text>\n", cfg.injectVia)
+		_ = writeStderr("amq wake [debug]: inject-via mode, running: %s %s <text>\n", cfg.injectVia, strings.Join(cfg.injectArgs, " "))
 	}
 
-	parts := strings.Fields(cfg.injectVia)
-	if len(parts) == 0 {
+	executable := strings.TrimSpace(cfg.injectVia)
+	if executable == "" {
 		return fmt.Errorf("inject-via command is blank")
 	}
 
-	args := append(parts[1:], text)
-	cmd := exec.Command(parts[0], args...)
+	timeout := cfg.injectTimeout
+	if timeout <= 0 {
+		timeout = defaultInjectTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	args := append([]string{}, cfg.injectArgs...)
+	args = append(args, text)
+	cmd := exec.CommandContext(ctx, executable, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			if cfg.debug {
+				_ = writeStderr("amq wake [debug]: inject-via timed out after %s (%s)\n", timeout, string(out))
+			}
+			return fmt.Errorf("inject-via timed out after %s", timeout)
+		}
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: inject-via failed: %v (%s)\n", err, string(out))
 		}

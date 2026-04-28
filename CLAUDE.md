@@ -171,7 +171,7 @@ amq dlq list --me <agent> [--new | --cur] [--json]
 amq dlq read --me <agent> --id <dlq_id> [--json]
 amq dlq retry --me <agent> --id <dlq_id> [--all] [--force]
 amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
-amq wake --me <agent> [--inject-cmd <cmd>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>]
+amq wake --me <agent> [--inject-cmd <cmd>] [--inject-via <executable>] [--inject-arg <arg>...] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>]
 amq upgrade
 amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--json]
 amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>]
@@ -350,7 +350,7 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
 | Quick peek only | `amq list --new` | Non-blocking, no side effects |
 | Filter messages | `amq list --new --priority urgent` | Show only urgent messages |
-| Background wake | `amq wake --me <agent> &` | Injects notification via TIOCSTI with best-effort input deferral (experimental) |
+| Background wake | `amq wake --me <agent> &` | Injects notification via TIOCSTI with best-effort input deferral, or via explicit external transport (experimental) |
 | Reply to message | `amq reply --id <msg_id>` | Auto thread/refs handling |
 
 ## Co-op Mode (Claude <-> Codex)
@@ -403,6 +403,22 @@ If `amq wake` fails (TIOCSTI unavailable on hardened Linux), use notify hook:
 # ~/.codex/config.toml
 notify = ["python3", "/path/to/repo/scripts/codex-amq-notify.py"]
 ```
+
+For a local terminal transport that can receive notifications without a
+controlling TTY, run wake with an explicit external injector:
+```bash
+amq wake --me orchestrator \
+  --inject-via ghostty-bridge \
+  --inject-arg exec \
+  --inject-arg "$TERMINAL_ID"
+```
+
+`--inject-via` is an executable path, not a shell command line. Repeat
+`--inject-arg` for fixed argv entries; AMQ appends the sanitized notification
+payload as the final argument and bounds each invocation with
+`--inject-timeout` (default `5s`). This executes local code for each
+notification, and the payload can include sanitized but message-derived sender
+and subject header content.
 
 ### Plan Mode Prompt Hook (Claude)
 

@@ -154,21 +154,26 @@ func TestInjectNotification_InjectVia_MultiWordCommand(t *testing.T) {
 	tmp.Close()
 	defer os.Remove(tmpPath)
 
-	script, err := os.CreateTemp("", "wake-inject-via-multi-*.sh")
-	if err != nil {
-		t.Fatal(err)
+	scriptDir := filepath.Join(t.TempDir(), "inject dir")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir script dir: %v", err)
 	}
-	scriptPath := script.Name()
+	scriptPath := filepath.Join(scriptDir, "inject script.sh")
+	script, err := os.OpenFile(scriptPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		t.Fatalf("create script: %v", err)
+	}
 	// $1 = "exec", $2 = "TERMID", $3 = the notification text
-	script.WriteString("#!/bin/sh\nprintf '%s %s %s' \"$1\" \"$2\" \"$3\" > " + tmpPath + "\n")
-	script.Close()
-	os.Chmod(scriptPath, 0o755)
-	defer os.Remove(scriptPath)
+	script.WriteString("#!/bin/sh\nprintf '%s\\n%s\\n%s' \"$1\" \"$2\" \"$3\" > " + tmpPath + "\n")
+	if err := script.Close(); err != nil {
+		t.Fatalf("close script: %v", err)
+	}
 
-	// Simulates: ghostty-bridge exec ABC123 <text>
+	// Simulates: ghostty-bridge exec "Team Alpha" <text>.
 	cfg := &wakeConfig{
-		injectVia: scriptPath + " exec ABC123",
-		debug:     false,
+		injectVia:  scriptPath,
+		injectArgs: []string{"exec", "Team Alpha"},
+		debug:      false,
 	}
 
 	text := "AMQ [collab]: test message"
@@ -180,9 +185,29 @@ func TestInjectNotification_InjectVia_MultiWordCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read output: %v", err)
 	}
-	expected := "exec ABC123 " + text
+	expected := "exec\nTeam Alpha\n" + text
 	if string(got) != expected {
 		t.Fatalf("expected %q, got %q", expected, string(got))
+	}
+}
+
+func TestInjectViaTimeout(t *testing.T) {
+	scriptPath := filepath.Join(t.TempDir(), "sleep.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nsleep 2\n"), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	cfg := &wakeConfig{
+		injectVia:     scriptPath,
+		injectTimeout: 10 * time.Millisecond,
+	}
+
+	err := injectVia(cfg, "test")
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected timeout error, got %v", err)
 	}
 }
 
@@ -280,6 +305,114 @@ func TestNotifyNewMessages_InjectViaInterruptInjectsKeyAndHonorsCooldown(t *test
 	}
 }
 
+func TestNotifyNewMessages_InjectViaInjectCmdPayload(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	logPath := filepath.Join(root, "inject.log")
+	scriptPath := filepath.Join(root, "inject.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nprintf '%s' \"$1\" > "+logPath+"\n"), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "msg-normal",
+			From:    "codex",
+			To:      []string{"alice"},
+			Thread:  "p2p/alice__codex",
+			Subject: "normal",
+			Created: "2026-04-25T10:00:00Z",
+		},
+		Body: "normal body",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := fsq.DeliverToInbox(root, "alice", "msg-normal.md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	cfg := &wakeConfig{
+		me:         "alice",
+		root:       root,
+		injectVia:  scriptPath,
+		injectCmd:  "amq drain --include-body",
+		previewLen: 48,
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notifyNewMessages: %v", err)
+	}
+
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	expected := "\namq drain --include-body\n"
+	if string(got) != expected {
+		t.Fatalf("expected inject-cmd payload %q, got %q", expected, string(got))
+	}
+}
+
+func TestNotifyNewMessages_InjectViaInterruptFailureDoesNotUpdateCooldown(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	msg := format.Message{
+		Header: format.Header{
+			Schema:   1,
+			ID:       "msg-urgent",
+			From:     "codex",
+			To:       []string{"alice"},
+			Thread:   "p2p/alice__codex",
+			Subject:  "help needed",
+			Created:  "2026-04-25T10:00:00Z",
+			Priority: "urgent",
+			Labels:   []string{"interrupt"},
+		},
+		Body: "urgent body",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := fsq.DeliverToInbox(root, "alice", "msg-urgent.md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	cfg := &wakeConfig{
+		me:                "alice",
+		root:              root,
+		injectVia:         filepath.Join(root, "missing-injector"),
+		previewLen:        48,
+		interrupt:         true,
+		interruptKey:      "\x03",
+		interruptLabel:    "interrupt",
+		interruptPriority: "urgent",
+		interruptCooldown: 7 * time.Second,
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notifyNewMessages: %v", err)
+	}
+	if !cfg.lastInterrupt.IsZero() {
+		t.Fatalf("expected failed interrupt transport to leave cooldown unchanged, got %s", cfg.lastInterrupt)
+	}
+}
+
 func TestTTYInputStateActive(t *testing.T) {
 	now := time.Date(2026, 4, 24, 7, 0, 0, 0, time.UTC)
 	quietFor := 1200 * time.Millisecond
@@ -350,5 +483,11 @@ func TestShouldDeferBeforeInject(t *testing.T) {
 	cfg.deferWhileInput = false
 	if shouldDeferBeforeInject(cfg, true) {
 		t.Fatalf("expected disabled input deferral to inject immediately")
+	}
+
+	cfg.deferWhileInput = true
+	cfg.injectVia = "external-injector"
+	if shouldDeferBeforeInject(cfg, true) {
+		t.Fatalf("expected external injection to bypass local TTY input deferral")
 	}
 }

@@ -214,10 +214,28 @@ amq reply --id "msg_123" --kind review_response --body "LGTM with minor suggesti
 
 > Co-op works without wake. `coop exec` starts it automatically.
 
-`amq wake` uses TIOCSTI to inject notifications into your terminal.
+`amq wake` uses TIOCSTI to inject notifications into your terminal by default.
+For orchestrators or hardened environments without a controlling TTY, use an
+explicit external transport:
+
+```bash
+amq wake --me orchestrator \
+  --inject-via ghostty-bridge \
+  --inject-arg exec \
+  --inject-arg "$TERMINAL_ID"
+```
+
+`--inject-via` is an executable path, not a shell command line. Repeat
+`--inject-arg` for fixed arguments; AMQ appends the sanitized notification text
+as the final argv element. This executes a local process for each notification,
+and the payload can include sanitized but message-derived header content such as
+sender and subject.
 
 **Options:**
 - `--inject-mode auto|raw|paste` - Injection strategy
+- `--inject-via <executable>` - External transport executable; bypasses TIOCSTI and local TTY startup checks
+- `--inject-arg <arg>` - Fixed argument before the payload; repeat for multiple arguments
+- `--inject-timeout 5s` - Maximum runtime for one external injection command
 - `--bell` - Ring terminal bell on new messages
 - `--debounce 250ms` - Batch rapid messages
 - `--defer-while-input` / `--defer-while-input=false` - Best-effort quiet-window gate before non-interrupt injection
