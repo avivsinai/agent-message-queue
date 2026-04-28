@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.34.0] - 2026-04-28
 ### Added
 
 - `amq wake` now supports an explicit external injection transport via `--inject-via <executable>`, repeatable `--inject-arg <arg>`, and bounded `--inject-timeout` (default `5s`), letting orchestrators and no-controlling-TTY environments receive wake notifications without TIOCSTI. AMQ appends the sanitized notification payload as the final argv element and does not run the command through a shell. `--bell` is honored on the inject-via path, and a one-time fallback warning is emitted before writing to stderr when the external injector fails (#99, closes #98).
@@ -13,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Release tooling preserves CHANGELOG compare links when preparing release PRs (#116).
+
 
 
 ## [0.33.0] - 2026-04-28
@@ -440,7 +443,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
-[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.33.0...HEAD
+[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.34.0...HEAD
+[0.34.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.32.2...v0.33.0
 [0.32.2]: https://github.com/avivsinai/agent-message-queue/compare/v0.32.1...v0.32.2
 [0.32.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.32.0...v0.32.1
