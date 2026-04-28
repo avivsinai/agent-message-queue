@@ -336,7 +336,12 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	// External injection: delegate to user-specified command instead of TIOCSTI.
 	// The command receives the notification text as its last argument.
 	if cfg.injectVia != "" {
-		if err := injectVia(cfg, text); err != nil {
+		if err := injectVia(cfg, plainText); err != nil {
+			if cfg.fallbackWarn {
+				_ = writeStderr("amq wake: --inject-via failed: %v\n", err)
+				_ = writeStderr("amq wake: falling back to stderr notification\n")
+				cfg.fallbackWarn = false
+			}
 			_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
 		}
 		return nil

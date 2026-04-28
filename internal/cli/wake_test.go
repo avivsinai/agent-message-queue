@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,18 +114,26 @@ func TestInjectNotification_InjectVia(t *testing.T) {
 		t.Fatal(err)
 	}
 	tmpPath := tmp.Name()
-	tmp.Close()
-	defer os.Remove(tmpPath)
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("close temp output: %v", err)
+	}
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	script, err := os.CreateTemp("", "wake-inject-via-*.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	scriptPath := script.Name()
-	script.WriteString("#!/bin/sh\nprintf '%s' \"$1\" > " + tmpPath + "\n")
-	script.Close()
-	os.Chmod(scriptPath, 0o755)
-	defer os.Remove(scriptPath)
+	if _, err := script.WriteString("#!/bin/sh\nprintf '%s' \"$1\" > " + tmpPath + "\n"); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	if err := script.Close(); err != nil {
+		t.Fatalf("close script: %v", err)
+	}
+	if err := os.Chmod(scriptPath, 0o755); err != nil {
+		t.Fatalf("chmod script: %v", err)
+	}
+	defer func() { _ = os.Remove(scriptPath) }()
 
 	cfg := &wakeConfig{
 		injectVia: scriptPath,
@@ -151,8 +160,10 @@ func TestInjectNotification_InjectVia_MultiWordCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	tmpPath := tmp.Name()
-	tmp.Close()
-	defer os.Remove(tmpPath)
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("close temp output: %v", err)
+	}
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	scriptDir := filepath.Join(t.TempDir(), "inject dir")
 	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
@@ -164,7 +175,9 @@ func TestInjectNotification_InjectVia_MultiWordCommand(t *testing.T) {
 		t.Fatalf("create script: %v", err)
 	}
 	// $1 = "exec", $2 = "TERMID", $3 = the notification text
-	script.WriteString("#!/bin/sh\nprintf '%s\\n%s\\n%s' \"$1\" \"$2\" \"$3\" > " + tmpPath + "\n")
+	if _, err := script.WriteString("#!/bin/sh\nprintf '%s\\n%s\\n%s' \"$1\" \"$2\" \"$3\" > " + tmpPath + "\n"); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
 	if err := script.Close(); err != nil {
 		t.Fatalf("close script: %v", err)
 	}
@@ -186,6 +199,53 @@ func TestInjectNotification_InjectVia_MultiWordCommand(t *testing.T) {
 		t.Fatalf("failed to read output: %v", err)
 	}
 	expected := "exec\nTeam Alpha\n" + text
+	if string(got) != expected {
+		t.Fatalf("expected %q, got %q", expected, string(got))
+	}
+}
+
+func TestInjectNotification_InjectVia_Bell(t *testing.T) {
+	tmp, err := os.CreateTemp("", "wake-inject-via-bell-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("close temp output: %v", err)
+	}
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	script, err := os.CreateTemp("", "wake-inject-via-bell-*.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := script.Name()
+	if _, err := script.WriteString("#!/bin/sh\nprintf '%s' \"$1\" > " + tmpPath + "\n"); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	if err := script.Close(); err != nil {
+		t.Fatalf("close script: %v", err)
+	}
+	if err := os.Chmod(scriptPath, 0o755); err != nil {
+		t.Fatalf("chmod script: %v", err)
+	}
+	defer func() { _ = os.Remove(scriptPath) }()
+
+	cfg := &wakeConfig{
+		injectVia: scriptPath,
+		bell:      true,
+	}
+
+	text := "AMQ [collab]: message from codex - hello"
+	if err := injectNotification(cfg, text, true); err != nil {
+		t.Fatalf("injectNotification failed: %v", err)
+	}
+
+	got, err := os.ReadFile(tmpPath)
+	if err != nil {
+		t.Fatalf("failed to read output: %v", err)
+	}
+	expected := "\a" + text
 	if string(got) != expected {
 		t.Fatalf("expected %q, got %q", expected, string(got))
 	}
@@ -221,6 +281,61 @@ func TestInjectNotification_InjectVia_Failure(t *testing.T) {
 	if err := injectNotification(cfg, "test", true); err != nil {
 		t.Fatalf("expected graceful fallback, got error: %v", err)
 	}
+}
+
+func TestInjectNotification_InjectVia_FailureWarnsOnce(t *testing.T) {
+	cfg := &wakeConfig{
+		injectVia:    "/nonexistent/command",
+		fallbackWarn: true,
+	}
+
+	text := "fallback notice"
+	stderr := captureWakeStderr(t, func() {
+		if err := injectNotification(cfg, text, true); err != nil {
+			t.Fatalf("first injectNotification: %v", err)
+		}
+		if err := injectNotification(cfg, text, true); err != nil {
+			t.Fatalf("second injectNotification: %v", err)
+		}
+	})
+
+	if got := strings.Count(stderr, "amq wake: --inject-via failed:"); got != 1 {
+		t.Fatalf("expected one inject-via failure warning, got %d in %q", got, stderr)
+	}
+	if got := strings.Count(stderr, "amq wake: falling back to stderr notification\n"); got != 1 {
+		t.Fatalf("expected one fallback warning, got %d in %q", got, stderr)
+	}
+	if got := strings.Count(stderr, text+"\n"); got != 2 {
+		t.Fatalf("expected fallback text twice, got %d in %q", got, stderr)
+	}
+}
+
+func captureWakeStderr(t *testing.T, fn func()) string {
+	t.Helper()
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() {
+		os.Stderr = oldStderr
+	}()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stderr writer: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close stderr reader: %v", err)
+	}
+	return string(out)
 }
 
 func TestNotifyNewMessages_InjectViaInterruptInjectsKeyAndHonorsCooldown(t *testing.T) {
