@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `amq route explain --json` now reports canonical route resolution with routability, structured `argv`, display command, source/delivery roots, project, and session metadata for same-session, cross-session, and cross-project sends (#103).
 - `amq send --from-session <source-session>` supports setup-terminal cross-session sends from a base root, writing the sender outbox in the source session and stamping `reply_to` for replies back to that session (#104).
 
+### Fixed
+
+- Explicit `--root`/`--from-root` project lookups no longer fall back to the current working directory's `.amqrc`, and global `~/.amqrc` no longer infers project identity from the home directory basename.
+- `amq env --json` now emits `.amqrc` peer paths as resolved absolute paths so consumers do not need to reimplement AMQ's peer path resolution.
+- Extension layer names now reject `..` substrings, and `amq doctor --json` only reads passive extension manifests that are regular files below the size cap.
+
 ## [0.32.2] - 2026-04-27
 ### Added
 

@@ -113,6 +113,97 @@ func TestSendFromSessionRequiresExistingSourceSession(t *testing.T) {
 	}
 }
 
+func TestSendFromSessionRejectsSessionRootAsRoot(t *testing.T) {
+	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
+	sourceRoot := filepath.Join(baseRoot, "cto")
+	ensureSendSessionAgent(t, sourceRoot, "alice")
+	ensureSendSessionAgent(t, filepath.Join(baseRoot, "qa"), "bob")
+
+	err := runSend([]string{
+		"--me", "alice",
+		"--root", sourceRoot,
+		"--from-session", "cto",
+		"--to", "bob",
+		"--session", "qa",
+		"--body", "wrong root",
+	})
+	if err == nil {
+		t.Fatal("expected session root --root to fail")
+	}
+	if !strings.Contains(err.Error(), "--from-session requires --root to be the base root") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSendFromSessionRequiresSenderInSourceSession(t *testing.T) {
+	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
+	ensureSendSessionAgent(t, baseRoot, "alice")
+	if err := fsq.EnsureRootDirs(filepath.Join(baseRoot, "cto")); err != nil {
+		t.Fatalf("EnsureRootDirs(source): %v", err)
+	}
+	ensureSendSessionAgent(t, filepath.Join(baseRoot, "qa"), "bob")
+
+	err := runSend([]string{
+		"--me", "alice",
+		"--root", baseRoot,
+		"--from-session", "cto",
+		"--to", "bob",
+		"--session", "qa",
+		"--body", "sender only exists at base",
+	})
+	if err == nil {
+		t.Fatal("expected sender missing from source session to fail")
+	}
+	if !strings.Contains(err.Error(), `agent "alice" not found in source session "cto"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSendFromSessionRequiresRecipientInTargetSession(t *testing.T) {
+	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
+	sourceRoot := filepath.Join(baseRoot, "cto")
+	targetRoot := filepath.Join(baseRoot, "qa")
+	ensureSendSessionAgent(t, sourceRoot, "alice")
+	if err := fsq.EnsureRootDirs(targetRoot); err != nil {
+		t.Fatalf("EnsureRootDirs(target): %v", err)
+	}
+	ensureSendSessionAgent(t, sourceRoot, "bob")
+
+	err := runSend([]string{
+		"--me", "alice",
+		"--root", baseRoot,
+		"--from-session", "cto",
+		"--to", "bob",
+		"--session", "qa",
+		"--body", "recipient only exists in source",
+	})
+	if err == nil {
+		t.Fatal("expected recipient missing from target session to fail")
+	}
+	if !strings.Contains(err.Error(), `agent "bob" not found in session "qa"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSendFromSessionRequiresTargetSessionFlag(t *testing.T) {
+	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
+	ensureSendSessionAgent(t, filepath.Join(baseRoot, "cto"), "alice")
+
+	err := runSend([]string{
+		"--me", "alice",
+		"--root", baseRoot,
+		"--from-session", "cto",
+		"--to", "bob",
+		"--body", "missing target session",
+	})
+	if err == nil {
+		t.Fatal("expected missing --session to fail")
+	}
+	if !strings.Contains(err.Error(), "--from-session requires --session") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestSendCrossSessionWithExplicitRootOverride(t *testing.T) {
 	staleBase := filepath.Join(t.TempDir(), "stale-base")
 	t.Setenv("AM_ROOT", filepath.Join(staleBase, "session1"))

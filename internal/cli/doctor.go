@@ -41,6 +41,7 @@ func runDoctor(args []string) error {
 		"  - .amqrc configuration",
 		"  - Mailbox directory permissions",
 		"  - Agent configuration (config.json)",
+		"  - Extension metadata manifests and diagnostics",
 		"  - Skill installation (Claude Code / Codex)",
 		"",
 		"With --ops, also checks runtime health:",

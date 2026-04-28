@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,6 +159,50 @@ func TestResolvePeerFromRoot(t *testing.T) {
 	}
 }
 
+func TestFindAmqrcForRootDoesNotFallBackToCwd(t *testing.T) {
+	projectDir := filepath.Join(t.TempDir(), "project-a")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rc := map[string]any{
+		"root":    ".agent-mail",
+		"project": "project-a",
+		"peers": map[string]string{
+			"infra": filepath.Join(t.TempDir(), "infra", ".agent-mail"),
+		},
+	}
+	rcData, _ := json.Marshal(rc)
+	if err := os.WriteFile(filepath.Join(projectDir, ".amqrc"), rcData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	orphanRoot := filepath.Join(t.TempDir(), "orphan", ".agent-mail")
+	if err := os.MkdirAll(orphanRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	oldDir, _ := os.Getwd()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldDir) }()
+	resetAmqrcCache()
+	defer resetAmqrcCache()
+
+	_, err := findAmqrcForRoot(orphanRoot)
+	if !errors.Is(err, errAmqrcNotFound) {
+		t.Fatalf("findAmqrcForRoot(orphan) error = %v, want errAmqrcNotFound", err)
+	}
+
+	_, err = resolvePeer(orphanRoot, "infra")
+	if err == nil {
+		t.Fatal("expected resolvePeer from orphan root to fail")
+	}
+	if !strings.Contains(err.Error(), ".amqrc not found") {
+		t.Fatalf("resolvePeer error = %v, want .amqrc not found", err)
+	}
+}
+
 func TestFindAmqrcForRootSessionDetection(t *testing.T) {
 	// Verify that findAmqrcForRoot can locate .amqrc from a session root
 	// when cwd is outside the project tree. This is the key fix for the
@@ -236,6 +281,30 @@ func TestResolveProjectFallbackToBasename(t *testing.T) {
 	name := resolveProject("")
 	if name != "my-project" {
 		t.Errorf("resolveProject = %q, want %q", name, "my-project")
+	}
+}
+
+func TestResolveProjectGlobalAmqrcWithoutProjectIsEmpty(t *testing.T) {
+	fakeHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), []byte(`{"root": ".agent-mail"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outsideDir := t.TempDir()
+	oldDir, _ := os.Getwd()
+	if err := os.Chdir(outsideDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldDir) }()
+
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("AM_ROOT", "")
+	t.Setenv("AMQ_GLOBAL_ROOT", "")
+	resetAmqrcCache()
+	defer resetAmqrcCache()
+
+	if got := resolveProject(""); got != "" {
+		t.Fatalf("resolveProject with global ~/.amqrc and no project = %q, want empty", got)
 	}
 }
 

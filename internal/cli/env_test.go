@@ -678,7 +678,7 @@ func TestRunEnvJSONWithPeers(t *testing.T) {
 	root := t.TempDir()
 
 	// Write .amqrc with project + peers
-	rcContent := `{"root": ".agent-mail", "project": "my-app", "peers": {"infra": "/tmp/infra/.agent-mail", "api": "/tmp/api/.agent-mail"}}`
+	rcContent := `{"root": ".agent-mail", "project": "my-app", "peers": {"infra": "/tmp/infra/.agent-mail", "api": "/tmp/api/.agent-mail", "shared": "../shared/.agent-mail"}}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}
@@ -701,8 +701,8 @@ func TestRunEnvJSONWithPeers(t *testing.T) {
 	if result.Me != "claude" {
 		t.Errorf("expected me=%q, got %q", "claude", result.Me)
 	}
-	if len(result.Peers) != 2 {
-		t.Fatalf("expected 2 peers, got %d", len(result.Peers))
+	if len(result.Peers) != 3 {
+		t.Fatalf("expected 3 peers, got %d", len(result.Peers))
 	}
 	if result.Peers["infra"] != "/tmp/infra/.agent-mail" {
 		t.Errorf("expected peer infra=%q, got %q", "/tmp/infra/.agent-mail", result.Peers["infra"])
@@ -710,6 +710,11 @@ func TestRunEnvJSONWithPeers(t *testing.T) {
 	if result.Peers["api"] != "/tmp/api/.agent-mail" {
 		t.Errorf("expected peer api=%q, got %q", "/tmp/api/.agent-mail", result.Peers["api"])
 	}
+	expectedShared, err := filepath.Abs(filepath.Join(root, "../shared/.agent-mail"))
+	if err != nil {
+		t.Fatalf("abs shared peer: %v", err)
+	}
+	expectSamePath(t, result.Peers["shared"], expectedShared)
 }
 
 func TestRunEnvJSONGlobalAmqrcNoProject(t *testing.T) {
@@ -756,6 +761,39 @@ func TestRunEnvJSONGlobalAmqrcNoProject(t *testing.T) {
 	}
 	if len(result.Peers) != 0 {
 		t.Errorf("expected peers={}, got %v", result.Peers)
+	}
+}
+
+func TestRunEnvInvalidGlobalAmqrcBeatsAutoDetect(t *testing.T) {
+	cwd := t.TempDir()
+	fakeHome := t.TempDir()
+	if err := os.Mkdir(filepath.Join(cwd, ".agent-mail"), 0o755); err != nil {
+		t.Fatalf("mkdir .agent-mail: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), []byte("{"), 0o600); err != nil {
+		t.Fatalf("write invalid ~/.amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("AM_ROOT", "")
+	t.Setenv("AM_ME", "")
+	t.Setenv("AMQ_GLOBAL_ROOT", "")
+
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	_, err := captureEnvStdout(t, func() error {
+		return runEnv([]string{"--json"})
+	})
+	if err == nil {
+		t.Fatal("expected invalid global ~/.amqrc to fail before auto-detect")
+	}
+	if !strings.Contains(err.Error(), "invalid ~/.amqrc") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

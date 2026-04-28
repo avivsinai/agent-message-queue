@@ -67,7 +67,7 @@ The v1 output includes:
 | `me` | string | Resolved and validated sender handle. |
 | `project` | string | Project identity from `.amqrc`, or its documented fallback when available. |
 | `root_source` | string | Source used to resolve `root`, for diagnostics. |
-| `peers` | object | Peer project map from `.amqrc`, when configured. |
+| `peers` | object | Peer project map from `.amqrc`, when configured. Values are resolved absolute base-root paths. |
 
 Allowed `root_source` values are:
 
@@ -103,6 +103,8 @@ Layer guidance:
   rules.
 - Use `base_root`, `session_name`, and `in_session` instead of inferring session
   state from path shape.
+- Use `peers` directly; relative peer paths from `.amqrc` are resolved against
+  the `.amqrc` directory before they appear in this response.
 
 ## Extension Metadata Directories
 
