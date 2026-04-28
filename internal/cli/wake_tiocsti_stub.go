@@ -23,3 +23,5 @@ func (t tiocstiFuncs) IsTTY() bool {
 func (t tiocstiFuncs) Inject(text string) error {
 	return errors.New("TIOCSTI not available on this platform")
 }
+
+func waitForTTYInputQuiet(cfg *wakeConfig) {}

@@ -132,7 +132,7 @@ func TestInjectNotification_InjectVia(t *testing.T) {
 	}
 
 	text := "AMQ [collab]: message from codex - hello"
-	if err := injectNotification(cfg, text); err != nil {
+	if err := injectNotification(cfg, text, true); err != nil {
 		t.Fatalf("injectNotification failed: %v", err)
 	}
 
@@ -172,7 +172,7 @@ func TestInjectNotification_InjectVia_MultiWordCommand(t *testing.T) {
 	}
 
 	text := "AMQ [collab]: test message"
-	if err := injectNotification(cfg, text); err != nil {
+	if err := injectNotification(cfg, text, true); err != nil {
 		t.Fatalf("injectNotification failed: %v", err)
 	}
 
@@ -193,7 +193,7 @@ func TestInjectNotification_InjectVia_Failure(t *testing.T) {
 	}
 
 	// Should not return error — falls back to stderr
-	if err := injectNotification(cfg, "test"); err != nil {
+	if err := injectNotification(cfg, "test", true); err != nil {
 		t.Fatalf("expected graceful fallback, got error: %v", err)
 	}
 }
@@ -277,5 +277,78 @@ func TestNotifyNewMessages_InjectViaInterruptInjectsKeyAndHonorsCooldown(t *test
 	}
 	if string(got) != expected {
 		t.Fatalf("expected inject-via log %q, got %q", expected, string(got))
+	}
+}
+
+func TestTTYInputStateActive(t *testing.T) {
+	now := time.Date(2026, 4, 24, 7, 0, 0, 0, time.UTC)
+	quietFor := 1200 * time.Millisecond
+
+	if active, reason := (ttyInputState{pendingBytes: 1}).active(now, quietFor); !active || reason != "pending terminal input" {
+		t.Fatalf("expected pending bytes to defer, active=%v reason=%q", active, reason)
+	}
+	if active, reason := (ttyInputState{
+		lastRead:    now.Add(-500 * time.Millisecond),
+		hasLastRead: true,
+	}).active(now, quietFor); !active || reason != "recent terminal input" {
+		t.Fatalf("expected recent read to defer, active=%v reason=%q", active, reason)
+	}
+	if active, reason := (ttyInputState{
+		lastRead:    now.Add(-2 * time.Second),
+		hasLastRead: true,
+	}).active(now, quietFor); active || reason != "" {
+		t.Fatalf("expected stale read to be inactive, active=%v reason=%q", active, reason)
+	}
+	if active, reason := (ttyInputState{}).active(now, quietFor); active || reason != "" {
+		t.Fatalf("expected missing read time to be inactive, active=%v reason=%q", active, reason)
+	}
+}
+
+func TestTTYInputStateActiveTreatsFutureReadAsActive(t *testing.T) {
+	now := time.Date(2026, 4, 24, 7, 0, 0, 0, time.UTC)
+	active, reason := (ttyInputState{
+		lastRead:    now.Add(100 * time.Millisecond),
+		hasLastRead: true,
+	}).active(now, time.Second)
+	if !active || reason != "recent terminal input" {
+		t.Fatalf("expected future read time to defer, active=%v reason=%q", active, reason)
+	}
+}
+
+func TestInputDeferralDelay(t *testing.T) {
+	now := time.Date(2026, 4, 24, 7, 0, 0, 0, time.UTC)
+	deadline := now.Add(30 * time.Second)
+	state := ttyInputState{
+		lastRead:    now.Add(-1100 * time.Millisecond),
+		hasLastRead: true,
+	}
+
+	got := inputDeferralDelay(state, now, deadline, 1200*time.Millisecond, 200*time.Millisecond)
+	if got != 100*time.Millisecond {
+		t.Fatalf("expected delay to stop at quiet boundary, got %s", got)
+	}
+}
+
+func TestInputDeferralDelayBoundsByDeadline(t *testing.T) {
+	now := time.Date(2026, 4, 24, 7, 0, 0, 0, time.UTC)
+	deadline := now.Add(50 * time.Millisecond)
+	got := inputDeferralDelay(ttyInputState{pendingBytes: 1}, now, deadline, time.Second, 200*time.Millisecond)
+	if got != 50*time.Millisecond {
+		t.Fatalf("expected delay bounded by deadline, got %s", got)
+	}
+}
+
+func TestShouldDeferBeforeInject(t *testing.T) {
+	cfg := &wakeConfig{deferWhileInput: true}
+	if !shouldDeferBeforeInject(cfg, true) {
+		t.Fatalf("expected normal wake injection to use input deferral")
+	}
+	if shouldDeferBeforeInject(cfg, false) {
+		t.Fatalf("expected interrupt wake injection to bypass input deferral")
+	}
+
+	cfg.deferWhileInput = false
+	if shouldDeferBeforeInject(cfg, true) {
+		t.Fatalf("expected disabled input deferral to inject immediately")
 	}
 }

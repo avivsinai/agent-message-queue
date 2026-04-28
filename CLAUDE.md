@@ -82,6 +82,13 @@ internal/
 
 **Receipt Ledger**: Delivery outcomes are recorded as consumer-local receipts under `agents/<consumer>/receipts/`. Stages are `drained` and `dlq`. Use `amq receipts list`, `amq receipts wait`, or `amq send --wait-for <stage>` to query or block on them.
 
+**Extension Metadata Namespaces**: Higher-level layers may store their own metadata under reserved extension directories:
+```
+<AM_ROOT>/extensions/<layer>/
+<AM_ROOT>/agents/<handle>/extensions/<layer>/
+```
+Layer names must use lowercase ASCII letters, digits, hyphen, underscore, and dot (for example `io.github.omriariav.amq-squad`). AMQ will not create files inside layer-owned directories, and `amq cleanup` does not remove extension directories unless a future command explicitly targets extension metadata. Layers may publish a passive root manifest at `<AM_ROOT>/extensions/<layer>/manifest.json`; `amq doctor --json` may report it, but AMQ must not execute extension code or invoke hooks from manifests.
+
 **Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail/collab`), `AM_ME` (agent handle), `AM_BASE_ROOT` (base root set by `coop exec` for cross-session resolution; only trusted when the current root still lives under it), `AMQ_GLOBAL_ROOT` (global root fallback for orchestrator-spawned agents), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
 **Session Layout**: The default base root directory is `.agent-mail/`. `.amqrc` can configure that root explicitly, but the default `.agent-mail/<session>` layout is also recognized without `.amqrc`. `coop exec` defaults to `--session collab`, so agents get session isolation without explicit flags. Use `--session` to override:
@@ -146,7 +153,7 @@ When `--kind` is set but `--priority` is not, priority defaults to `normal`.
 
 ```bash
 amq init --root <path> --agents a,b,c [--force]
-amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--wait-for <stage>] [--wait-timeout <duration>]
+amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--session <target-session>] [--from-session <source-session>] [--project <project>] [--wait-for <stage>] [--wait-timeout <duration>]
 amq list --me <agent> [--new | --cur] [--priority <p>] [--from <h>] [--kind <k>] [--label <l>...] [--limit N] [--offset N] [--json]
 amq read --me <agent> --id <msg_id> [--json]
 amq drain --me <agent> [--limit N] [--include-body] [--json]
@@ -155,6 +162,7 @@ amq receipts list --me <agent> [--msg-id <id>] [--stage <stage>] [--json]
 amq receipts wait --me <agent> --msg-id <id> [--stage <stage>] [--timeout <duration>] [--poll-interval <duration>] [--json]
 amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
 amq presence list [--json]
+amq route explain --to <handle> [--project <project>] [--session <session>] [--from-root <path>] [--from-cwd <path>] [--me <handle>] --json
 amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
 amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
 amq monitor --me <agent> [--timeout <duration>] [--poll] [--include-body] [--peek] [--json]
@@ -163,7 +171,7 @@ amq dlq list --me <agent> [--new | --cur] [--json]
 amq dlq read --me <agent> --id <dlq_id> [--json]
 amq dlq retry --me <agent> --id <dlq_id> [--all] [--force]
 amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
-amq wake --me <agent> [--inject-cmd <cmd>] [--bell] [--debounce <duration>] [--preview-len <n>]
+amq wake --me <agent> [--inject-cmd <cmd>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>]
 amq upgrade
 amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--json]
 amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>]
@@ -342,7 +350,7 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
 | Quick peek only | `amq list --new` | Non-blocking, no side effects |
 | Filter messages | `amq list --new --priority urgent` | Show only urgent messages |
-| Background wake | `amq wake --me <agent> &` | Injects notification via TIOCSTI (experimental) |
+| Background wake | `amq wake --me <agent> &` | Injects notification via TIOCSTI with best-effort input deferral (experimental) |
 | Reply to message | `amq reply --id <msg_id>` | Auto thread/refs handling |
 
 ## Co-op Mode (Claude <-> Codex)

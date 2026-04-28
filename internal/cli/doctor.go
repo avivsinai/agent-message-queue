@@ -17,8 +17,10 @@ type doctorCheck struct {
 }
 
 type doctorResult struct {
-	Checks  []doctorCheck `json:"checks"`
-	Summary struct {
+	Checks               []doctorCheck               `json:"checks"`
+	ExtensionManifests   []doctorExtensionManifest   `json:"extension_manifests,omitempty"`
+	ExtensionDiagnostics []doctorExtensionDiagnostic `json:"extension_diagnostics,omitempty"`
+	Summary              struct {
 		OK    int `json:"ok"`
 		Warn  int `json:"warn"`
 		Error int `json:"error"`
@@ -39,6 +41,7 @@ func runDoctor(args []string) error {
 		"  - .amqrc configuration",
 		"  - Mailbox directory permissions",
 		"  - Agent configuration (config.json)",
+		"  - Extension metadata manifests and diagnostics",
 		"  - Skill installation (Claude Code / Codex)",
 		"",
 		"With --ops, also checks runtime health:",
@@ -78,10 +81,18 @@ func runDoctor(args []string) error {
 		result.Checks = append(result.Checks, checkMailboxes(root))
 	}
 
-	// Check 6: Claude Code skill
+	// Check 6: Extension metadata
+	if root != "" {
+		manifests, diagnostics := scanExtensionMetadata(root)
+		result.ExtensionManifests = manifests
+		result.ExtensionDiagnostics = diagnostics
+		result.Checks = append(result.Checks, checkExtensions(manifests, diagnostics))
+	}
+
+	// Check 7: Claude Code skill
 	result.Checks = append(result.Checks, checkSkill("claude"))
 
-	// Check 7: Codex skill
+	// Check 8: Codex skill
 	result.Checks = append(result.Checks, checkSkill("codex"))
 
 	// Ops checks (runtime health)

@@ -26,6 +26,10 @@ type wakeConfig struct {
 	fallbackWarn      bool
 	injectMode        string // auto, raw, paste
 	debug             bool
+	deferWhileInput   bool
+	inputQuietFor     time.Duration
+	inputPollInterval time.Duration
+	inputMaxHold      time.Duration
 	interrupt         bool
 	interruptLabel    string
 	interruptPriority string
@@ -40,6 +44,52 @@ type wakeMsgInfo struct {
 	subject  string
 	priority string
 	labels   []string
+}
+
+type ttyInputState struct {
+	pendingBytes int
+	lastRead     time.Time
+	hasLastRead  bool
+}
+
+func (s ttyInputState) active(now time.Time, quietFor time.Duration) (bool, string) {
+	if s.pendingBytes > 0 {
+		return true, "pending terminal input"
+	}
+	if quietFor <= 0 || !s.hasLastRead {
+		return false, ""
+	}
+	age := now.Sub(s.lastRead)
+	if age < 0 || age < quietFor {
+		return true, "recent terminal input"
+	}
+	return false, ""
+}
+
+func inputDeferralDelay(state ttyInputState, now, deadline time.Time, quietFor, pollInterval time.Duration) time.Duration {
+	delay := pollInterval
+	if delay <= 0 {
+		delay = 200 * time.Millisecond
+	}
+
+	if state.pendingBytes == 0 && state.hasLastRead && quietFor > 0 {
+		untilQuiet := state.lastRead.Add(quietFor).Sub(now)
+		if untilQuiet > 0 && untilQuiet < delay {
+			delay = untilQuiet
+		}
+	}
+
+	if remaining := deadline.Sub(now); remaining > 0 && remaining < delay {
+		delay = remaining
+	}
+	if delay <= 0 {
+		return 0
+	}
+	return delay
+}
+
+func shouldDeferBeforeInject(cfg *wakeConfig, deferForInput bool) bool {
+	return deferForInput && cfg.deferWhileInput
 }
 
 func notifyNewMessages(cfg *wakeConfig) error {
@@ -122,7 +172,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 				time.Sleep(50 * time.Millisecond)
 			}
 		}
-		return injectNotification(cfg, interruptText)
+		return injectNotification(cfg, interruptText, false)
 	}
 
 	// Build notification text
@@ -135,7 +185,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		text = buildNotificationText(cfg.session, messages, senderCounts, cfg.previewLen)
 	}
 
-	return injectNotification(cfg, text)
+	return injectNotification(cfg, text, true)
 }
 
 func buildNotificationText(session string, messages []wakeMsgInfo, senderCounts map[string]int, previewLen int) string {
@@ -267,11 +317,15 @@ func effectiveInjectMode(cfg *wakeConfig) string {
 	return mode
 }
 
-func injectNotification(cfg *wakeConfig, text string) error {
+func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error {
 	// Keep plain text for stderr fallback
 	plainText := text
 	if cfg.bell {
 		plainText = "\a" + plainText
+	}
+
+	if shouldDeferBeforeInject(cfg, deferForInput) {
+		waitForTTYInputQuiet(cfg)
 	}
 
 	// External injection: delegate to user-specified command instead of TIOCSTI.

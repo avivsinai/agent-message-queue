@@ -27,13 +27,18 @@ type amqrcResult struct {
 
 // envOutput is the JSON output format for amq env --json.
 type envOutput struct {
-	Root        string            `json:"root,omitempty"`
-	Me          string            `json:"me,omitempty"`
-	Shell       string            `json:"shell,omitempty"`
-	Wake        bool              `json:"wake,omitempty"`
-	Project     string            `json:"project,omitempty"`
-	Peers       map[string]string `json:"peers,omitempty"`
-	SessionName string            `json:"session_name,omitempty"`
+	SchemaVersion int               `json:"schema_version"`
+	AMQVersion    string            `json:"amq_version"`
+	Root          string            `json:"root"`
+	BaseRoot      string            `json:"base_root"`
+	SessionName   string            `json:"session_name"`
+	InSession     bool              `json:"in_session"`
+	Me            string            `json:"me"`
+	Project       string            `json:"project"`
+	RootSource    string            `json:"root_source"`
+	Peers         map[string]string `json:"peers"`
+	Shell         string            `json:"shell,omitempty"`
+	Wake          bool              `json:"wake,omitempty"`
 }
 
 // errAmqrcNotFound is returned when .amqrc is not found (non-fatal).
@@ -93,7 +98,7 @@ func runEnv(args []string) error {
 	}
 
 	// Resolve configuration with precedence
-	root, me, err := resolveEnvConfig(*rootFlag, *meFlag)
+	root, source, me, err := resolveEnvConfigWithSource(*rootFlag, *meFlag)
 	if err != nil {
 		return err
 	}
@@ -114,36 +119,57 @@ func runEnv(args []string) error {
 
 	// JSON output mode
 	if *jsonFlag {
+		baseRoot, sessionName, inSession := classifyEnvRoot(root)
+		project, peers := envProjectAndPeers(root)
 		out := envOutput{
-			Root:        root,
-			Me:          me,
-			Shell:       shell,
-			Wake:        *wakeFlag,
-			SessionName: resolveSessionName(root),
-		}
-		// Include project identity and peer config from .amqrc
-		// so agents can discover cross-project routing without
-		// reading .amqrc directly.
-		if rcResult, rcErr := findAmqrcForRoot(root); rcErr == nil {
-			out.Project = rcResult.Config.Project
-			if out.Project == "" {
-				// Only infer project from directory basename for
-				// project-local .amqrc, not global ~/.amqrc (which
-				// is a queue locator, not a project identity).
-				home, _ := os.UserHomeDir()
-				if home == "" || rcResult.Dir != home {
-					out.Project = filepath.Base(rcResult.Dir)
-				}
-			}
-			if len(rcResult.Config.Peers) > 0 {
-				out.Peers = rcResult.Config.Peers
-			}
+			SchemaVersion: 1,
+			AMQVersion:    cliVersion,
+			Root:          root,
+			BaseRoot:      baseRoot,
+			SessionName:   sessionName,
+			InSession:     inSession,
+			Me:            me,
+			Project:       project,
+			RootSource:    string(source),
+			Peers:         peers,
+			Shell:         shell,
+			Wake:          *wakeFlag,
 		}
 		return writeJSON(os.Stdout, out)
 	}
 
 	// Generate shell commands
 	return writeShellEnv(root, me, shell, *wakeFlag)
+}
+
+func classifyEnvRoot(root string) (baseRoot, sessionNameOut string, inSession bool) {
+	base := classifyRoot(root)
+	if base != "" && absPath(resolveRoot(root)) != absPath(resolveRoot(base)) {
+		return base, sessionName(root), true
+	}
+	return root, "", false
+}
+
+func envProjectAndPeers(root string) (string, map[string]string) {
+	peers := map[string]string{}
+
+	// Include project identity and peer config from .amqrc so agents can
+	// discover cross-project routing without reading .amqrc directly.
+	rcResult, rcErr := findAmqrcForRoot(root)
+	if rcErr != nil {
+		return "", peers
+	}
+
+	project := projectFromAmqrcResult(rcResult)
+	for name, path := range rcResult.Config.Peers {
+		resolved, err := resolvePeerPath(rcResult, path)
+		if err != nil {
+			peers[name] = path
+			continue
+		}
+		peers[name] = resolved
+	}
+	return project, peers
 }
 
 // rootSource describes which configuration source provided the resolved root.
@@ -194,12 +220,15 @@ func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, st
 
 	// 3. Try global ~/.amqrc
 	var globalRCRoot string
+	var globalRCErr error
 	globalResult, err := loadGlobalAmqrc()
 	if err == nil && globalResult.Config.Root != "" {
 		globalRCRoot = globalResult.Config.Root
 		if !filepath.IsAbs(globalRCRoot) {
 			globalRCRoot = filepath.Join(globalResult.Dir, globalRCRoot)
 		}
+	} else if err != nil && !errors.Is(err, errAmqrcNotFound) {
+		globalRCErr = err
 	}
 
 	// 4. Auto-detect .agent-mail/ directory
@@ -241,6 +270,13 @@ func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, st
 			return "", "", "", rcErr
 		}
 		_ = writeStderr("warning: %v (using override from flags/env)\n", rcErr)
+	}
+	if globalRCErr != nil {
+		hasHigherPrecedenceRoot := rootFlag != "" || envRootVal != "" || rcRoot != "" || globalEnvRoot != ""
+		if !hasHigherPrecedenceRoot {
+			return "", "", "", globalRCErr
+		}
+		_ = writeStderr("warning: %v (using higher-precedence root)\n", globalRCErr)
 	}
 
 	if root == "" {
@@ -474,39 +510,38 @@ func isSimpleString(s string) bool {
 }
 
 // findAmqrcForRoot locates the .amqrc for the given root.
-// When root is provided (non-empty), root-based lookup takes priority over
-// cwd-based search. This ensures --root / AM_ROOT fully determines which
-// project config is used, even when cwd is inside a different project.
+// When root is provided (non-empty), lookup is scoped to root's ancestors only.
+// This ensures --root / AM_ROOT fully determines which project config is used,
+// even when cwd is inside a different project.
 func findAmqrcForRoot(root string) (amqrcResult, error) {
-	// When root is provided, search from root first (authoritative).
 	if root != "" {
 		absRoot, absErr := filepath.Abs(root)
-		if absErr == nil {
-			dir := absRoot
-			for {
-				rcPath := filepath.Join(dir, ".amqrc")
-				data, readErr := os.ReadFile(rcPath)
-				if readErr == nil {
-					var rc amqrc
-					if jsonErr := json.Unmarshal(data, &rc); jsonErr != nil {
-						return amqrcResult{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, jsonErr)
-					}
-					return amqrcResult{Config: rc, Dir: dir}, nil
-				}
-				if !os.IsNotExist(readErr) {
-					// Permission or I/O error — report it, don't mask it.
-					return amqrcResult{}, fmt.Errorf("cannot read .amqrc at %s: %w", rcPath, readErr)
-				}
-				parent := filepath.Dir(dir)
-				if parent == dir {
-					break
-				}
-				dir = parent
-			}
+		if absErr != nil {
+			return amqrcResult{}, absErr
 		}
+		dir := absRoot
+		for {
+			rcPath := filepath.Join(dir, ".amqrc")
+			data, readErr := os.ReadFile(rcPath)
+			if readErr == nil {
+				var rc amqrc
+				if jsonErr := json.Unmarshal(data, &rc); jsonErr != nil {
+					return amqrcResult{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, jsonErr)
+				}
+				return amqrcResult{Config: rc, Dir: dir}, nil
+			}
+			if !os.IsNotExist(readErr) {
+				// Permission or I/O error — report it, don't mask it.
+				return amqrcResult{}, fmt.Errorf("cannot read .amqrc at %s: %w", rcPath, readErr)
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+		return amqrcResult{}, errAmqrcNotFound
 	}
-	// Fall back to cwd-based search (standard behavior when root is empty
-	// or root-based search found nothing).
 	return findAndLoadAmqrc()
 }
 
@@ -529,14 +564,31 @@ func resolvePeer(root, project string) (string, error) {
 		}
 		return "", fmt.Errorf("peer %q not found in .amqrc (known: %v)", project, known)
 	}
-	if !filepath.IsAbs(peerPath) {
-		peerPath = filepath.Join(result.Dir, peerPath)
-	}
-	abs, err := filepath.Abs(peerPath)
+	abs, err := resolvePeerPath(result, peerPath)
 	if err != nil {
 		return "", fmt.Errorf("resolve peer path for %q: %w", project, err)
 	}
 	return abs, nil
+}
+
+func resolvePeerPath(result amqrcResult, peerPath string) (string, error) {
+	if !filepath.IsAbs(peerPath) {
+		peerPath = filepath.Join(result.Dir, peerPath)
+	}
+	return filepath.Abs(peerPath)
+}
+
+func projectFromAmqrcResult(result amqrcResult) string {
+	if result.Config.Project != "" {
+		return result.Config.Project
+	}
+	// Only infer project from directory basename for project-local .amqrc,
+	// not global ~/.amqrc (which is a queue locator, not a project identity).
+	home, _ := os.UserHomeDir()
+	if home != "" && result.Dir == home {
+		return ""
+	}
+	return filepath.Base(result.Dir)
 }
 
 // resolveProject returns the project name for the current .amqrc.
@@ -547,8 +599,5 @@ func resolveProject(root string) string {
 	if err != nil {
 		return ""
 	}
-	if result.Config.Project != "" {
-		return result.Config.Project
-	}
-	return filepath.Base(result.Dir)
+	return projectFromAmqrcResult(result)
 }
