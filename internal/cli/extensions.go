@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+const maxPassiveExtensionManifestBytes int64 = 64 * 1024
 
 type doctorExtensionManifest struct {
 	Scope         string   `json:"scope"`
@@ -34,6 +37,9 @@ type passiveExtensionManifest struct {
 
 func isValidExtensionLayerName(name string) bool {
 	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.Contains(name, "..") {
 		return false
 	}
 	for i := 0; i < len(name); i++ {
@@ -163,10 +169,39 @@ func scanAgentExtensions(root string, diagnostics *[]doctorExtensionDiagnostic) 
 }
 
 func readPassiveExtensionManifest(root, layer, manifestPath string) (doctorExtensionManifest, *doctorExtensionDiagnostic, bool) {
-	data, err := os.ReadFile(manifestPath)
+	info, err := os.Lstat(manifestPath)
 	if os.IsNotExist(err) {
 		return doctorExtensionManifest{}, nil, false
 	}
+	if err != nil {
+		return doctorExtensionManifest{}, &doctorExtensionDiagnostic{
+			Scope:   "root",
+			Layer:   layer,
+			Path:    rootRelativePath(root, manifestPath),
+			Status:  "warn",
+			Message: fmt.Sprintf("cannot read manifest: %v", err),
+		}, false
+	}
+	if !info.Mode().IsRegular() {
+		return doctorExtensionManifest{}, &doctorExtensionDiagnostic{
+			Scope:   "root",
+			Layer:   layer,
+			Path:    rootRelativePath(root, manifestPath),
+			Status:  "warn",
+			Message: "manifest is not a regular file",
+		}, false
+	}
+	if info.Size() > maxPassiveExtensionManifestBytes {
+		return doctorExtensionManifest{}, &doctorExtensionDiagnostic{
+			Scope:   "root",
+			Layer:   layer,
+			Path:    rootRelativePath(root, manifestPath),
+			Status:  "warn",
+			Message: fmt.Sprintf("manifest is too large: %d bytes (max %d)", info.Size(), maxPassiveExtensionManifestBytes),
+		}, false
+	}
+
+	data, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return doctorExtensionManifest{}, &doctorExtensionDiagnostic{
 			Scope:   "root",

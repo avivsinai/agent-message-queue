@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
@@ -20,6 +21,9 @@ func TestIsValidExtensionLayerName(t *testing.T) {
 		{"", false},
 		{".", false},
 		{"..", false},
+		{"a..b", false},
+		{"..layer", false},
+		{"layer..", false},
 		{"Upper", false},
 		{"has space", false},
 		{"slash/name", false},
@@ -141,6 +145,52 @@ func TestRunDoctorJSONReportsExtensionManifestsAndDiagnostics(t *testing.T) {
 	}
 	if !hasExtensionDiagnostic(result.ExtensionDiagnostics, "root", "", "bad-json", "malformed manifest") {
 		t.Fatalf("expected malformed manifest diagnostic, got %+v", result.ExtensionDiagnostics)
+	}
+}
+
+func TestReadPassiveExtensionManifestRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	layer := "symlink-manifest"
+	layerDir := filepath.Join(root, "extensions", layer)
+	if err := os.MkdirAll(layerDir, 0o700); err != nil {
+		t.Fatalf("mkdir layer dir: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "manifest.json")
+	if err := os.WriteFile(target, []byte(`{"schema_version":1,"layer":"symlink-manifest"}`), 0o600); err != nil {
+		t.Fatalf("write target manifest: %v", err)
+	}
+	manifestPath := filepath.Join(layerDir, "manifest.json")
+	if err := os.Symlink(target, manifestPath); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	_, diag, ok := readPassiveExtensionManifest(root, layer, manifestPath)
+	if ok {
+		t.Fatal("expected symlink manifest to be rejected")
+	}
+	if diag == nil || !strings.Contains(diag.Message, "not a regular file") {
+		t.Fatalf("diagnostic = %+v, want not a regular file", diag)
+	}
+}
+
+func TestReadPassiveExtensionManifestRejectsOversizedFile(t *testing.T) {
+	root := t.TempDir()
+	layer := "oversized-manifest"
+	layerDir := filepath.Join(root, "extensions", layer)
+	if err := os.MkdirAll(layerDir, 0o700); err != nil {
+		t.Fatalf("mkdir layer dir: %v", err)
+	}
+	manifestPath := filepath.Join(layerDir, "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte(strings.Repeat("x", 300*1024)), 0o600); err != nil {
+		t.Fatalf("write oversized manifest: %v", err)
+	}
+
+	_, diag, ok := readPassiveExtensionManifest(root, layer, manifestPath)
+	if ok {
+		t.Fatal("expected oversized manifest to be rejected")
+	}
+	if diag == nil || !strings.Contains(diag.Message, "manifest is too large") {
+		t.Fatalf("diagnostic = %+v, want manifest is too large", diag)
 	}
 }
 

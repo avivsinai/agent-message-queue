@@ -135,6 +135,9 @@ func runSend(args []string) error {
 		if !dirExists(sourceRoot) {
 			return fmt.Errorf("source session %q not found at %s", fromSession, sourceRoot)
 		}
+		if !dirExists(filepath.Join(sourceRoot, "agents", me)) {
+			return fmt.Errorf("agent %q not found in source session %q", me, fromSession)
+		}
 		sourceSession = fromSession
 	}
 
