@@ -204,10 +204,20 @@ func processAlive(pid int) bool {
 	return false // ESRCH or other error => treat as dead
 }
 
+type wakeLoopFunc func(wakeConfig) error
+
 func runWake(args []string) error {
+	return runWakeWithLoop(args, runWakeLoop)
+}
+
+func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	fs := flag.NewFlagSet("wake", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	injectCmdFlag := fs.String("inject-cmd", "", "Command to inject (power user mode)")
+	injectViaFlag := fs.String("inject-via", "", "External executable for injection (payload appended as last arg, bypasses TTY requirement)")
+	var injectArgFlags multiStringFlag
+	fs.Var(&injectArgFlags, "inject-arg", "Argument for --inject-via before the payload (repeatable)")
+	injectTimeoutFlag := fs.Duration("inject-timeout", defaultInjectTimeout, "Timeout for one --inject-via command")
 	bellFlag := fs.Bool("bell", false, "Ring terminal bell on new messages")
 	debounceFlag := fs.Duration("debounce", 250*time.Millisecond, "Debounce window for batching messages")
 	previewLenFlag := fs.Int("preview-len", 48, "Max subject preview length")
@@ -232,6 +242,16 @@ func runWake(args []string) error {
 		"  auto  - Detect CLI type: raw for Claude Code/Codex, paste for others",
 		"  raw   - Plain text + CR, no bracketed paste (works with Ink-based CLIs)",
 		"  paste - Bracketed paste with delayed CR (works with crossterm-based CLIs)",
+		"",
+		"External injection:",
+		"  --inject-via runs a local executable for each notification, bypassing",
+		"  the TIOCSTI/stdin-TTY startup requirement. Fixed arguments use repeatable",
+		"  --inject-arg; AMQ appends the sanitized notification payload as the",
+		"  final argv element. The command is not run through a shell.",
+		"  Example: amq wake --me orchestrator --inject-via ghostty-bridge \\",
+		"    --inject-arg exec --inject-arg \"$TERMINAL_ID\"",
+		"  Trust boundary: --inject-via executes local code, and the payload can",
+		"  contain sanitized but message-derived header content.",
 		"",
 		"Input deferral (default on): wake samples terminal input only after",
 		"  a message is pending, then injects after a short quiet window.",
@@ -267,6 +287,9 @@ func runWake(args []string) error {
 	}
 	if *inputMaxHoldFlag < 0 {
 		return UsageError("--input-max-hold must be >= 0")
+	}
+	if *injectTimeoutFlag <= 0 {
+		return UsageError("--inject-timeout must be > 0")
 	}
 
 	injectMode := strings.ToLower(strings.TrimSpace(*injectModeFlag))
@@ -305,14 +328,25 @@ func runWake(args []string) error {
 		return err
 	}
 
-	// Verify TIOCSTI is available
-	if !tiocsti.Available() {
-		return errors.New("TIOCSTI not available on this platform; use tmux send-keys or terminal-specific injection")
+	// Validate --inject-via: it is an executable path, not a shell command line.
+	injectVia := strings.TrimSpace(*injectViaFlag)
+	if *injectViaFlag != "" && injectVia == "" {
+		return UsageError("--inject-via must not be blank")
+	}
+	if injectVia == "" && len(injectArgFlags) > 0 {
+		return UsageError("--inject-arg requires --inject-via")
 	}
 
-	// Verify we have a real TTY
-	if !tiocsti.IsTTY() {
-		return errors.New("amq wake requires a real terminal (run in foreground or as background job in same terminal)")
+	// Verify TIOCSTI is available (skip in inject-via mode — uses external command instead)
+	if injectVia == "" {
+		if !tiocsti.Available() {
+			return errors.New("TIOCSTI not available on this platform; use tmux send-keys or terminal-specific injection")
+		}
+
+		// Verify we have a real TTY
+		if !tiocsti.IsTTY() {
+			return errors.New("amq wake requires a real terminal (run in foreground or as background job in same terminal, or use --inject-via for external injection)")
+		}
 	}
 
 	interruptKey, err := parseInterruptKey(*interruptCmdFlag)
@@ -332,6 +366,9 @@ func runWake(args []string) error {
 		root:              root,
 		session:           resolveSessionName(root),
 		injectCmd:         *injectCmdFlag,
+		injectVia:         injectVia,
+		injectArgs:        []string(injectArgFlags),
+		injectTimeout:     *injectTimeoutFlag,
 		bell:              *bellFlag,
 		debounce:          *debounceFlag,
 		previewLen:        *previewLenFlag,
@@ -351,7 +388,7 @@ func runWake(args []string) error {
 		interruptCooldown: *interruptCooldownFlag,
 	}
 
-	return runWakeLoop(cfg)
+	return loop(cfg)
 }
 
 func parseInterruptKey(raw string) (string, error) {
@@ -476,12 +513,21 @@ func runWakeLoop(cfg wakeConfig) error {
 			// Keep presence alive so `amq who` reports the agent as active
 			_ = presence.Touch(cfg.root, cfg.me)
 
-			// Verify TTY is still valid by checking if we can open /dev/tty
-			if !ttyAvailable() {
-				return errors.New("TTY no longer available")
+			if err := wakeHealthCheck(cfg, ttyAvailable); err != nil {
+				return err
 			}
 		}
 	}
+}
+
+func wakeHealthCheck(cfg wakeConfig, ttyAvailableFn func() bool) error {
+	if cfg.injectVia != "" {
+		return nil
+	}
+	if !ttyAvailableFn() {
+		return errors.New("TTY no longer available")
+	}
+	return nil
 }
 
 func ttyAvailable() bool {
