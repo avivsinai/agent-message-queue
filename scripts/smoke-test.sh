@@ -124,6 +124,7 @@ if command -v python3 >/dev/null 2>&1; then
   unset AM_BASE_ROOT 2>/dev/null || true
   python3 scripts/test_session_name.py
   echo "python session-name tests ok"
+  python3 scripts/test_release_changelog.py
 fi
 
 # --- SessionStart hook test (claude-session-start.sh) ---
