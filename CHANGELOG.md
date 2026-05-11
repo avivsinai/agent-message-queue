@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- `amq coop exec --require-wake` now refuses to launch the agent command unless
+  the background wake process starts and confirms it acquired the wake lock,
+  giving managed launchers a safe mode for wake health enforcement (#120).
+
+### Changed
+
+- Bumped the Go toolchain directive to 1.25.10 so CI and release checks use the
+  standard-library vulnerability fixes required by `govulncheck`.
 
 ## [0.34.0] - 2026-04-28
 ### Added
