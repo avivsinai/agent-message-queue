@@ -232,6 +232,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	interruptCmdFlag := fs.String("interrupt-cmd", "ctrl-c", "Interrupt command to inject (ctrl-c or none)")
 	interruptNoticeFlag := fs.String("interrupt-notice", "", "Custom interrupt notice (default: auto)")
 	interruptCooldownFlag := fs.Duration("interrupt-cooldown", 7*time.Second, "Minimum time between interrupts")
+	readyFileFlag := fs.String("ready-file", "", "Internal: write this file after wake lock acquisition")
 	debugFlag := fs.Bool("debug", false, "Log injection diagnostics to stderr")
 
 	usage := usageWithFlags(fs, "amq wake --me <agent> [options]",
@@ -336,6 +337,10 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	if injectVia == "" && len(injectArgFlags) > 0 {
 		return UsageError("--inject-arg requires --inject-via")
 	}
+	readyFile := strings.TrimSpace(*readyFileFlag)
+	if *readyFileFlag != "" && readyFile == "" {
+		return UsageError("--ready-file must not be blank")
+	}
 
 	// Verify TIOCSTI is available (skip in inject-via mode — uses external command instead)
 	if injectVia == "" {
@@ -388,7 +393,21 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		interruptCooldown: *interruptCooldownFlag,
 	}
 
+	if err := writeWakeReadyFile(readyFile); err != nil {
+		return err
+	}
+
 	return loop(cfg)
+}
+
+func writeWakeReadyFile(path string) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte("ready\n"), 0o600); err != nil {
+		return fmt.Errorf("write wake ready file: %w", err)
+	}
+	return nil
 }
 
 func parseInterruptKey(raw string) (string, error) {
