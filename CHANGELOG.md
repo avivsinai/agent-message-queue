@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.34.1] - 2026-05-11
 ### Added
 
 - `amq coop exec --require-wake` now refuses to launch the agent command unless
@@ -16,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bumped the Go toolchain directive to 1.25.10 so CI and release checks use the
   standard-library vulnerability fixes required by `govulncheck`.
+
 
 ## [0.34.0] - 2026-04-28
 ### Added
@@ -453,7 +456,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
-[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.34.0...HEAD
+[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.34.1...HEAD
+[0.34.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.34.0...v0.34.1
 [0.34.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.32.2...v0.33.0
 [0.32.2]: https://github.com/avivsinai/agent-message-queue/compare/v0.32.1...v0.32.2
