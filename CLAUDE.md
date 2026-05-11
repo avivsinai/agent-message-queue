@@ -176,7 +176,7 @@ amq upgrade
 amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--json]
 amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>]
 amq coop init [--root <path>] [--agents <a,b,c>] [--force] [--json]
-amq coop exec [--root <path>] [--session <name>] [--me <handle>] [--no-init] [--no-wake] [-y] <command> [-- <command-flags>]
+amq coop exec [--root <path>] [--session <name>] [--me <handle>] [--no-init] [--no-wake] [--require-wake] [-y] <command> [-- <command-flags>]
 amq swarm list [--json]
 amq swarm join --team <name> --me <agent> [--agent-id <id>] [--type codex|external] [--json]
 amq swarm leave --team <name> --agent-id <id> [--json]
@@ -382,7 +382,7 @@ Use `--session` for a different isolated session:
 amq coop exec --session feature-a claude               # Isolated session
 ```
 
-Use `--no-wake` to disable auto-wake (e.g., in CI or non-TTY environments).
+Use `--no-wake` to disable auto-wake (e.g., in CI or non-TTY environments). Use `--require-wake` in managed launchers that should refuse to start an agent unless the wake process starts and acquires its lock.
 
 **For scripts/CI** (non-interactive):
 ```bash

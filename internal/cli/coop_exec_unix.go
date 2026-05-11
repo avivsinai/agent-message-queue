@@ -10,9 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
+
+const wakeReadyTimeout = 2 * time.Second
 
 func runCoopExec(args []string) error {
 	// Split at "--" before flag parsing so agent flags aren't consumed.
@@ -24,6 +27,7 @@ func runCoopExec(args []string) error {
 	meFlag := fs.String("me", "", "Agent handle (override auto-derivation from command name)")
 	noInitFlag := fs.Bool("no-init", false, "Don't auto-initialize if .amqrc is missing")
 	noWakeFlag := fs.Bool("no-wake", false, "Don't start amq wake in background")
+	requireWakeFlag := fs.Bool("require-wake", false, "Fail if amq wake cannot start and acquire its lock")
 	yesFlag := fs.Bool("y", false, "Skip confirmation prompts")
 
 	usage := usageWithFlags(fs, "amq coop exec [options] <command> [-- <command-flags>]",
@@ -48,6 +52,9 @@ func runCoopExec(args []string) error {
 		return err
 	} else if handled {
 		return nil
+	}
+	if *noWakeFlag && *requireWakeFlag {
+		return UsageError("--require-wake cannot be used with --no-wake")
 	}
 
 	remaining := fs.Args()
@@ -180,6 +187,17 @@ func runCoopExec(args []string) error {
 		}
 
 		wakeCmd := exec.Command(amqBin, "--no-update-check", "wake", "--me", agentHandle, "--root", root)
+		var readyPath string
+		var cleanupReady func()
+		if *requireWakeFlag {
+			var readyErr error
+			readyPath, cleanupReady, readyErr = newWakeReadyFile()
+			if readyErr != nil {
+				return fmt.Errorf("create wake readiness file: %w", readyErr)
+			}
+			defer cleanupReady()
+			wakeCmd.Args = append(wakeCmd.Args, "--ready-file", readyPath)
+		}
 		// Set AM_ROOT in wake's env so the helper process resolves the same
 		// session root even if the parent shell inherited a different value.
 		wakeCmd.Env = setEnvVar(os.Environ(), envRoot, root)
@@ -188,9 +206,18 @@ func runCoopExec(args []string) error {
 		wakeCmd.Stderr = os.Stderr
 
 		if err := wakeCmd.Start(); err != nil {
+			if *requireWakeFlag {
+				return fmt.Errorf("start required amq wake: %w", err)
+			}
 			_ = writeStderr("warning: failed to start amq wake: %v\n", err)
 		} else {
 			wakeProc = wakeCmd.Process
+			if *requireWakeFlag {
+				if err := waitForWakeReady(wakeProc, readyPath, wakeReadyTimeout); err != nil {
+					_ = wakeProc.Kill()
+					return err
+				}
+			}
 			_ = writeStderr("Started amq wake (pid %d)\n", wakeProc.Pid)
 		}
 	}
@@ -215,6 +242,49 @@ func runCoopExec(args []string) error {
 		_ = wakeProc.Kill()
 	}
 	return execErr
+}
+
+func newWakeReadyFile() (string, func(), error) {
+	dir, err := os.MkdirTemp("", "amq-wake-ready-")
+	if err != nil {
+		return "", nil, err
+	}
+	return filepath.Join(dir, "ready"), func() { _ = os.RemoveAll(dir) }, nil
+}
+
+func waitForWakeReady(proc *os.Process, readyPath string, timeout time.Duration) error {
+	if proc == nil {
+		return fmt.Errorf("amq wake process missing")
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := proc.Wait()
+		done <- err
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if _, err := os.Stat(readyPath); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("check wake readiness file: %w", err)
+		}
+
+		select {
+		case err := <-done:
+			if err != nil {
+				return fmt.Errorf("amq wake exited before becoming ready: %w", err)
+			}
+			return fmt.Errorf("amq wake exited before becoming ready")
+		case <-timer.C:
+			return fmt.Errorf("amq wake did not become ready within %s", timeout)
+		case <-ticker.C:
+		}
+	}
 }
 
 // splitDashDash splits args at the first "--" separator.
