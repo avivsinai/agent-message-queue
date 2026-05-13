@@ -115,6 +115,16 @@ func TestCoopExecSessionRootMutuallyExclusive(t *testing.T) {
 	}
 }
 
+func TestCoopExecRequireWakeRejectsNoWake(t *testing.T) {
+	err := runCoopExec([]string{"--require-wake", "--no-wake", "claude"})
+	if err == nil {
+		t.Fatal("expected error for --require-wake + --no-wake")
+	}
+	if !containsStr(err.Error(), "--require-wake cannot be used with --no-wake") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
 func TestCoopExecSessionInvalidName(t *testing.T) {
 	err := runCoopExec([]string{"--session", "Bad/Name", "claude"})
 	if err == nil {
