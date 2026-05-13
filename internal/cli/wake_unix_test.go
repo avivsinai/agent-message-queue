@@ -4,6 +4,9 @@ package cli
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +47,99 @@ func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
 	}
 	if got.injectTimeout != 250*time.Millisecond {
 		t.Fatalf("expected inject timeout 250ms, got %s", got.injectTimeout)
+	}
+}
+
+func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	errDone := errors.New("done")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", "/tmp/injector",
+		"--ready-file", readyPath,
+	}, func(cfg wakeConfig) error {
+		if _, statErr := os.Stat(readyPath); statErr != nil {
+			t.Fatalf("expected ready file before wake loop: %v", statErr)
+		}
+		return errDone
+	})
+	if !errors.Is(err, errDone) {
+		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
+func TestRunWakeWithLoopDoesNotWriteReadyFileWhenLockBlocked(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	cleanup, err := acquireWakeLock(root, "orchestrator")
+	if err != nil {
+		t.Fatalf("acquireWakeLock: %v", err)
+	}
+	defer cleanup()
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err = runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", "/tmp/injector",
+		"--ready-file", readyPath,
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with an existing live wake lock: %#v", cfg)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected existing wake lock error")
+	}
+	if !strings.Contains(err.Error(), "wake already running") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+		t.Fatalf("ready file should not exist, statErr=%v", statErr)
+	}
+}
+
+func TestWaitForWakeReadyReturnsWhenReadyFileAppears(t *testing.T) {
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	cmd := exec.Command("sh", "-c", `sleep 0.05; : > "$1"; sleep 1`, "sh", readyPath)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+	})
+
+	if err := waitForWakeReady(cmd.Process, readyPath, time.Second); err != nil {
+		t.Fatalf("waitForWakeReady: %v", err)
+	}
+}
+
+func TestWaitForWakeReadyFailsWhenWakeExitsBeforeReady(t *testing.T) {
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	cmd := exec.Command("sh", "-c", "exit 7")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper: %v", err)
+	}
+
+	err := waitForWakeReady(cmd.Process, readyPath, time.Second)
+	if err == nil {
+		t.Fatal("expected readiness failure")
+	}
+	if !strings.Contains(err.Error(), "amq wake exited before becoming ready") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
