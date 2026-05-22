@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  pull-requests: read
   contents: read
   security-events: write  # For uploading SARIF results
   actions: read
