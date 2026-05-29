@@ -125,7 +125,9 @@ Root or session metadata:
 
 The `<layer>` name must be identifier-like: lowercase ASCII letters, digits,
 hyphen, underscore, and dot. Reverse-DNS names are allowed, for example
-`io.github.omriariav.amq-squad`.
+`io.github.omriariav.amq-squad` — the namespace used by
+[amq-squad](https://github.com/omriariav/amq-squad), a role-aware agent team
+launcher built on AMQ and a live implementation of this extension contract.
 
 AMQ guarantees:
 
