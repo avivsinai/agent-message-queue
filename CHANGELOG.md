@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+
+- Bumped the Go toolchain directive to 1.25.11 so CI and release checks pick up
+  the standard-library fixes for GO-2026-5039 (`net/textproto`) and GO-2026-5037
+  (`crypto/x509`) that `govulncheck` now flags.
 
 ## [0.34.1] - 2026-05-11
 ### Added
