@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+
+- `amq send` now refuses an explicit `--root` that targets a different base tree
+  than the caller's active session (`AM_ROOT`/`AM_BASE_ROOT`) when no routing
+  dimension (`--project`/`--session`/`--from-session`) is given. A direct `--root`
+  is root selection, not federation routing: such a message carried no
+  sender-origin metadata, so the recipient could not reply and a naive reply
+  looped back into their own tree. Replyable cross-tree messaging must use
+  `--project`/`--session`. Bare-root sends with no session env set are
+  unaffected (#144).
+- `amq send` no longer stamps `reply_to` on ordinary same-session sends; it is
+  stamped only for actual cross-session/cross-project routes. The stray
+  same-session `reply_to` is what made a direct cross-root send look replyable
+  while looping into the replier's own tree (#144).
 
 ## [0.35.0] - 2026-06-13
 ### Added

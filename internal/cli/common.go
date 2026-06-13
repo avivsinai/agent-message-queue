@@ -31,20 +31,27 @@ func addCommonFlags(fs *flag.FlagSet) *commonFlags {
 	return flags
 }
 
+// rootExplicit reports whether --root was passed on the command line (as opposed
+// to defaulted from env/.amqrc). Used to distinguish a deliberate root override
+// from the resolved default.
+func (f *commonFlags) rootExplicit() bool {
+	if f.flagSet == nil {
+		return false
+	}
+	explicit := false
+	f.flagSet.Visit(func(fl *flag.Flag) {
+		if fl.Name == "root" {
+			explicit = true
+		}
+	})
+	return explicit
+}
+
 // warnRootOverride emits a diagnostic note to stderr when --root was explicitly
 // provided and differs from AM_ROOT. This helps users notice when a command
 // operates on a different root than their session. Not an error — --root wins.
 func (f *commonFlags) warnRootOverride() {
-	if f.flagSet == nil {
-		return
-	}
-	rootExplicit := false
-	f.flagSet.Visit(func(fl *flag.Flag) {
-		if fl.Name == "root" {
-			rootExplicit = true
-		}
-	})
-	if !rootExplicit {
+	if !f.rootExplicit() {
 		return
 	}
 	envVal := strings.TrimSpace(os.Getenv(envRoot))
@@ -204,6 +211,66 @@ func isSessionRootUnderBase(root, base string) bool {
 		return false
 	}
 	return filepath.Dir(root) == base
+}
+
+// baseRootOf returns the base root for a queue root: the derived/configured base
+// when root is a session directory, or root itself otherwise.
+func baseRootOf(root string) string {
+	if base := classifyRoot(root); base != "" {
+		return resolveRoot(base)
+	}
+	return resolveRoot(root)
+}
+
+// sameBaseTree reports whether two roots belong to the same base tree — the same
+// project/base root, including any of its session subdirectories. This is the
+// boundary used to decide whether an explicit --root crosses into a different
+// AMQ tree than the caller's own.
+func sameBaseTree(a, b string) bool {
+	a, b = resolveRoot(a), resolveRoot(b)
+	if a == "" || b == "" {
+		return false
+	}
+	return baseRootOf(a) == baseRootOf(b)
+}
+
+// conflictingSourceRoot returns an established "home" root for the caller that
+// belongs to a DIFFERENT base tree than target, when one is evident. Evidence is
+// taken only from the caller's active session env — AM_ROOT and AM_BASE_ROOT,
+// which coop exec / `amq env` set — never invented. It returns ok=false when
+// there is no such evidence (bare-root scripts, CI, and tests passing --root to
+// a temp dir), so those keep working untouched.
+//
+// This backs the cross-tree send guard (issue #144): a direct --root that
+// crosses into another tree carries no sender-origin metadata, so the recipient
+// cannot reply. Replyable cross-tree messaging must use --project/--session.
+//
+// Note: cwd-based project .amqrc is deliberately NOT consulted here. It would
+// flag any `amq send --root X` run from inside a project directory, breaking
+// hermetic scripts/harnesses for marginal coverage — the env signals already
+// cover the coop-session case that motivated the guard. A direct --root send
+// with no session env set folds into the documented residual.
+func conflictingSourceRoot(target string) (string, bool) {
+	target = resolveRoot(target)
+	if target == "" {
+		return "", false
+	}
+	for _, raw := range []string{
+		strings.TrimSpace(os.Getenv(envRoot)),
+		strings.TrimSpace(os.Getenv(envBaseRoot)),
+	} {
+		if raw == "" {
+			continue
+		}
+		src := resolveRoot(raw)
+		if src == "" || src == target {
+			continue
+		}
+		if !sameBaseTree(src, target) {
+			return src, true
+		}
+	}
+	return "", false
 }
 
 func dirExists(path string) bool {

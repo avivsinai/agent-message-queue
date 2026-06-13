@@ -118,6 +118,24 @@ func runSend(args []string) error {
 	sourceRoot := root
 	sourceSession := ""
 	fromSession := strings.TrimSpace(*fromSessionFlag)
+
+	// Cross-tree guard (issue #144): a direct, unqualified --root that crosses
+	// into a different AMQ tree carries no sender-origin metadata, so the
+	// recipient cannot reply — and a naive reply would loop back into the
+	// replier's own tree. Refuse with guidance instead of minting an
+	// unreplyable message. Replyable cross-tree messaging must declare a routing
+	// dimension (--project / --session), which stamps the routing headers.
+	// Fires only on positive evidence of a different home root (AM_ROOT /
+	// AM_BASE_ROOT); bare-root sends with no session env set are unaffected.
+	routed := targetProject != "" || targetSession != "" || fromSession != ""
+	if common.rootExplicit() && !routed {
+		if src, ok := conflictingSourceRoot(root); ok {
+			return UsageError("refusing send: --root %s targets a different AMQ tree than your own (%s), "+
+				"but no routing dimension was given, so the recipient could not reply.\n"+
+				"Use --project <peer> or --session <name> for replyable cross-tree routing, "+
+				"or set the target as AM_ROOT if this send is genuinely local.", root, src)
+		}
+	}
 	var replyProject string
 	if fromSession != "" {
 		if targetProject != "" {
@@ -303,13 +321,17 @@ func runSend(args []string) error {
 		return err
 	}
 
-	// Build reply_to for cross-session/cross-project sends.
+	// Build reply_to only for sends that actually cross a session or project
+	// boundary. Ordinary same-session sends reply locally and need no hint —
+	// stamping handle@session for them is what made a direct cross-root send
+	// look replyable while looping into the replier's own tree (issue #144).
 	replyTo := ""
-	if senderInSession {
-		// Sender is in a session — stamp handle@session for reply routing.
+	switch {
+	case senderInSession && (targetProject != "" || targetSession != ""):
+		// Cross-session or cross-project from a session — stamp handle@session.
 		replyTo = common.Me + "@" + sourceSessionName(root, sourceSession)
-	} else if targetProject != "" {
-		// Sender at base root, cross-project — stamp just handle.
+	case targetProject != "":
+		// Cross-project from a base root — stamp just the handle.
 		replyTo = common.Me
 	}
 
