@@ -449,13 +449,32 @@ func splitList(raw string) []string {
 	return out
 }
 
-func readBody(bodyFlag string) (string, error) {
-	if bodyFlag == "" || bodyFlag == "@-" {
-		data, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return "", err
-		}
-		return string(data), nil
+// readBody resolves a message body from the --body flag value.
+//
+// Sources:
+//   - "", "-", "@-"   → read from stdin (standard CLI convention)
+//   - "@<path>"       → read the named file
+//   - anything else   → the literal string
+//
+// A send that loses its body should fail visibly, not deliver silently. When
+// the resolved body is empty after trimming, readBody returns an error unless
+// allowEmpty is set, so a dropped or mistyped body never ships as a blank
+// message. The lone "-" footgun (previously delivered as a literal hyphen) is
+// now treated as stdin and caught by the same empty check.
+func readBody(bodyFlag string, allowEmpty bool) (string, error) {
+	body, err := resolveBody(bodyFlag)
+	if err != nil {
+		return "", err
+	}
+	if !allowEmpty && strings.TrimSpace(body) == "" {
+		return "", UsageError("empty body; pass --body \"text\", --body @file, pipe stdin, or --allow-empty to send a blank body")
+	}
+	return body, nil
+}
+
+func resolveBody(bodyFlag string) (string, error) {
+	if bodyFlag == "" || bodyFlag == "-" || bodyFlag == "@-" {
+		return readStdinBody()
 	}
 	if strings.HasPrefix(bodyFlag, "@") {
 		path := strings.TrimPrefix(bodyFlag, "@")
@@ -466,6 +485,21 @@ func readBody(bodyFlag string) (string, error) {
 		return string(data), nil
 	}
 	return bodyFlag, nil
+}
+
+// readStdinBody reads the body from stdin. If stdin is an interactive terminal
+// there is nothing piped in, so it returns an empty string immediately rather
+// than blocking on a read that would never see EOF; the caller's empty-body
+// check then decides whether that is an error.
+func readStdinBody() (string, error) {
+	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		return "", nil
+	}
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func isHelp(arg string) bool {
