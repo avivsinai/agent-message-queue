@@ -6,11 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.35.0] - 2026-06-13
+### Added
+
+- `amq send` and `amq reply` accept `--allow-empty` to deliver an intentionally
+  blank body (for example when the subject carries the full message) (#143).
+
 ### Changed
 
+- `amq send` and `amq reply` now treat `--body -` (and `--body @-` or an omitted
+  `--body`) as stdin per the standard CLI convention, and **fail closed** when the
+  resolved body is empty or whitespace-only instead of silently delivering a
+  blank message. Previously `--body -` shipped a literal hyphen, so a dropped or
+  mistyped body could reach the recipient blank with no warning. Pass
+  `--allow-empty` to send a blank body deliberately (#143).
 - Bumped the Go toolchain directive to 1.25.11 so CI and release checks pick up
   the standard-library fixes for GO-2026-5039 (`net/textproto`) and GO-2026-5037
   (`crypto/x509`) that `govulncheck` now flags.
+
 
 ## [0.34.1] - 2026-05-11
 ### Added
@@ -461,7 +475,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
-[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.34.1...HEAD
+[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.35.0...HEAD
+[0.35.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.34.1...v0.35.0
 [0.34.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.34.0...v0.34.1
 [0.34.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.32.2...v0.33.0
