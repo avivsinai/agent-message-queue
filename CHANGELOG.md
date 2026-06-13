@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.36.0] - 2026-06-13
 ### Changed
 
 - `amq send` now refuses an explicit `--root` that targets a different base tree
@@ -20,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stamped only for actual cross-session/cross-project routes. The stray
   same-session `reply_to` is what made a direct cross-root send look replyable
   while looping into the replier's own tree (#144).
+
 
 ## [0.35.0] - 2026-06-13
 ### Added
@@ -489,7 +492,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
-[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.35.0...HEAD
+[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.36.0...HEAD
+[0.36.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.34.1...v0.35.0
 [0.34.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.34.0...v0.34.1
 [0.34.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.33.0...v0.34.0
