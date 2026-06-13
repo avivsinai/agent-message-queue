@@ -101,6 +101,8 @@ Layer names must use lowercase ASCII letters, digits, hyphen, underscore, and do
 
 `AM_ROOT` points to the queue root. When `--root` is explicitly provided, it takes precedence over `AM_ROOT`. `send` and `reply` emit a `note:` on stderr when an explicit `--root` overrides `AM_ROOT`.
 
+**Cross-tree send guard**: A direct `--root` is root *selection*, not federation routing. `send` refuses an explicit `--root` that targets a different base tree than the caller's own active session (`AM_ROOT`/`AM_BASE_ROOT`) when no routing dimension (`--project`/`--session`/`--from-session`) is given — such a message carries no sender-origin metadata, so the recipient could not reply and a naive reply would loop into their own tree. Replyable cross-tree messaging must use `--project`/`--session`, which stamp the routing headers. With no session env set (bare-root scripts/CI), the guard does not fire; a direct `--root` cross-tree send in that case can still produce an unreplyable message — the documented cost of keeping bare-root sends working.
+
 **Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
 - **Root**: flags > env (`AM_ROOT`) > project `.amqrc` > `AMQ_GLOBAL_ROOT` > `~/.amqrc` > auto-detect
 - **Me**: flags > env (`AM_ME`)
