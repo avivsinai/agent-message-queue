@@ -153,7 +153,7 @@ When `--kind` is set but `--priority` is not, priority defaults to `normal`.
 
 ```bash
 amq init --root <path> --agents a,b,c [--force]
-amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|stdin>] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--session <target-session>] [--from-session <source-session>] [--project <project>] [--wait-for <stage>] [--wait-timeout <duration>]
+amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|-|stdin>] [--allow-empty] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--session <target-session>] [--from-session <source-session>] [--project <project>] [--wait-for <stage>] [--wait-timeout <duration>]
 amq list --me <agent> [--new | --cur] [--priority <p>] [--from <h>] [--kind <k>] [--label <l>...] [--limit N] [--offset N] [--json]
 amq read --me <agent> --id <msg_id> [--json]
 amq drain --me <agent> [--limit N] [--include-body] [--json]
@@ -166,7 +166,7 @@ amq route explain --to <handle> [--project <project>] [--session <session>] [--f
 amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
 amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
 amq monitor --me <agent> [--timeout <duration>] [--poll] [--include-body] [--peek] [--json]
-amq reply --me <agent> --id <msg_id> [--body <str|@file|stdin>] [--priority <p>] [--kind <k>]
+amq reply --me <agent> --id <msg_id> [--body <str|@file|-|stdin>] [--allow-empty] [--priority <p>] [--kind <k>]
 amq dlq list --me <agent> [--new | --cur] [--json]
 amq dlq read --me <agent> --id <dlq_id> [--json]
 amq dlq retry --me <agent> --id <dlq_id> [--all] [--force]
@@ -194,6 +194,8 @@ amq doctor [--ops] [--json]
 ```
 
 Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has its own flags and doesn't accept these.
+
+**Body resolution (`send`/`reply`)**: `--body` resolves from `@file`, a literal string, or stdin. A bare `--body -`, `--body @-`, or an omitted `--body` reads stdin (standard CLI convention). A send whose resolved body is empty or whitespace-only **fails closed** with a usage error rather than delivering a blank message — pass `--allow-empty` to send a blank body intentionally. This prevents a dropped or mistyped body (e.g. `--body -` with nothing piped) from silently shipping an empty message.
 
 Swarm-specific flags: `--team`, `--task`, `--agent-id`, `--type`, `--status`, `--poll`, `--poll-interval`, `--reason`, `--evidence`.
 

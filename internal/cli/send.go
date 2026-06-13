@@ -21,7 +21,8 @@ func runSend(args []string) error {
 	toFlag := fs.String("to", "", "Receiver handle (comma-separated)")
 	subjectFlag := fs.String("subject", "", "Message subject")
 	threadFlag := fs.String("thread", "", "Thread id (required for multiple recipients; default p2p/<a>__<b> for single-recipient sends)")
-	bodyFlag := fs.String("body", "", "Body string, @file, or empty to read stdin")
+	bodyFlag := fs.String("body", "", "Body string, @file, or - / empty to read stdin")
+	allowEmptyFlag := fs.Bool("allow-empty", false, "Allow sending a blank body (otherwise an empty body is rejected)")
 	refsFlag := fs.String("refs", "", "Comma-separated related message ids")
 	waitForFlag := fs.String("wait-for", "", "Wait for receipt stage after send (drained, dlq)")
 	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for (0 = wait forever)")
@@ -236,7 +237,7 @@ func runSend(args []string) error {
 		}
 	}
 
-	body, err := readBody(*bodyFlag)
+	body, err := readBody(*bodyFlag, *allowEmptyFlag)
 	if err != nil {
 		return err
 	}

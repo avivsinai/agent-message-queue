@@ -296,7 +296,10 @@ amq list --new                                    # Peek without side effects
 amq send --to codex --subject "Review" --kind review_request --body @file.md
 amq send --to codex --priority urgent --kind question --body "Blocked on API"
 amq send --to codex --labels "bug,parser" --context '{"paths": ["src/"]}' --body "Found issue"
+echo "evidence: tests green" | amq send --to codex --subject "done" --body -   # - reads stdin
 ```
+
+**Body is fail-closed.** `--body -` (or `--body @-`, or omitting `--body`) reads stdin; a literal string or `@file` is used as-is. A send whose resolved body is empty/whitespace is **rejected** with a usage error instead of delivering a blank message — so `--body -` with nothing piped fails loudly rather than shipping an empty body. Pass `--allow-empty` only when you truly want a blank body (subject carries everything).
 
 **Send file paths, not file contents.** When attaching source code, configs, or large text for review, send the file path in the message body, not the contents inline. The receiver can open the file with their local tools. If the receiver cannot access that worktree, send a short diff instead of the full source.
 

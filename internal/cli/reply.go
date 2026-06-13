@@ -17,7 +17,8 @@ func runReply(args []string) error {
 	fs := flag.NewFlagSet("reply", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	idFlag := fs.String("id", "", "Message ID to reply to")
-	bodyFlag := fs.String("body", "", "Body string, @file, or empty to read stdin")
+	bodyFlag := fs.String("body", "", "Body string, @file, or - / empty to read stdin")
+	allowEmptyFlag := fs.Bool("allow-empty", false, "Allow sending a blank body (otherwise an empty body is rejected)")
 	subjectFlag := fs.String("subject", "", "Override subject (default: Re: <original>)")
 
 	// Co-op mode flags
@@ -90,7 +91,7 @@ func runReply(args []string) error {
 		return fmt.Errorf("cannot reply to a sent cross-session/cross-project message (reply_to points back to you); use amq send --session/--project for follow-ups")
 	}
 
-	body, err := readBody(*bodyFlag)
+	body, err := readBody(*bodyFlag, *allowEmptyFlag)
 	if err != nil {
 		return err
 	}
