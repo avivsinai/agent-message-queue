@@ -154,6 +154,7 @@ amq reply --id <msg_id> --kind review_response --body "LGTM with comments"
 amq doctor
 amq doctor --ops
 amq doctor --ops --json
+amq doctor --ops --fix-wake-locks
 ```
 
 ## Message Kinds & Priority

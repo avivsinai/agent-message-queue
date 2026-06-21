@@ -32,6 +32,7 @@ func runDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "Output as JSON")
 	opsFlag := fs.Bool("ops", false, "Include runtime operational checks")
+	fixWakeLocksFlag := fs.Bool("fix-wake-locks", false, "With --ops, remove stale wake lock files")
 
 	usage := usageWithFlags(fs, "amq doctor [options]",
 		"Verify AMQ installation and configuration.",
@@ -48,6 +49,7 @@ func runDoctor(args []string) error {
 		"  - Queue depth and oldest unread per agent",
 		"  - DLQ count and age",
 		"  - Presence freshness",
+		"  - Wake lock health",
 		"  - Integration hints (Kanban, Symphony)",
 	)
 
@@ -55,6 +57,9 @@ func runDoctor(args []string) error {
 		return err
 	} else if handled {
 		return nil
+	}
+	if *fixWakeLocksFlag && !*opsFlag {
+		return UsageError("--fix-wake-locks requires --ops")
 	}
 
 	result := doctorResult{}
@@ -99,7 +104,7 @@ func runDoctor(args []string) error {
 	if *opsFlag && root != "" {
 		// Resolve root source once here; avoids re-resolving with empty flags in runOpsChecks.
 		_, source, _, _ := resolveEnvConfigWithSource("", "")
-		result.Ops = runOpsChecks(root, string(source))
+		result.Ops = runOpsChecks(root, string(source), *fixWakeLocksFlag)
 	}
 
 	// Calculate summary
@@ -170,6 +175,31 @@ func runDoctor(args []string) error {
 				line += fmt.Sprintf(", %d DLQ", a.DLQCount)
 			}
 			line += fmt.Sprintf(", presence %s (%.0fs ago)", a.PresenceStatus, a.PresenceAgeSeconds)
+			if err := writeStdoutLine(line); err != nil {
+				return err
+			}
+		}
+		for _, wl := range result.Ops.WakeLocks {
+			if wl.Status == string(wakeLockValid) {
+				continue
+			}
+			icon := statusIcons["warn"]
+			if wl.Status == "fixed" {
+				icon = statusIcons["ok"]
+			} else if wl.Status == "error" {
+				icon = statusIcons["error"]
+			}
+			line := fmt.Sprintf("  %s wake lock: %s agent=%s root=%s lock=%s",
+				icon, wl.Status, wl.Agent, wl.Root, wl.Lock)
+			if wl.PID != 0 {
+				line += fmt.Sprintf(" pid=%d", wl.PID)
+			}
+			if wl.Reason != "" {
+				line += " reason=" + wl.Reason
+			}
+			if wl.Fix != "" && wl.Status == string(wakeLockStale) {
+				line += " fix=" + wl.Fix
+			}
 			if err := writeStdoutLine(line); err != nil {
 				return err
 			}
