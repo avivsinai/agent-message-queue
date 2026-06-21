@@ -113,6 +113,9 @@ amq coop exec --session feature-a codex
 ```
 
 Managed launchers can add `--require-wake` to fail instead of launching the agent when the wake watcher cannot start.
+Launchers that use an external injector can add `--wake-inject-via /absolute/path/to/injector`
+and repeated `--wake-inject-arg` values. That stores a repair target so
+`amq wake repair` can restart wake later without restarting the agent TUI.
 
 ### 3. Send & Receive
 
@@ -155,7 +158,27 @@ amq doctor
 amq doctor --ops
 amq doctor --ops --json
 amq doctor --ops --fix-wake-locks
+amq wake repair --me codex
 ```
+
+Wake locks reported by `doctor --ops` can be `stale`, `unverified`, or, in JSON
+output, any current lock state. With `--fix-wake-locks`, fixed and error states
+can also appear. `stale` means AMQ proved the recorded owner is gone or is not
+the same wake process, so `--fix-wake-locks` can remove the lock after a fresh
+re-check. `unverified` means AMQ could not prove ownership either way, such as a
+legacy lock with a live PID but no process-start token, a hostname mismatch, or
+an unsupported platform. AMQ leaves `unverified` locks in place; inspect the PID
+and remove the named `.wake.lock` manually only after confirming no matching
+`amq wake` still owns that agent/root.
+
+`amq wake repair` is an explicit live-session repair path. It only runs when
+the lock is proven `stale`, the lock was created for `--inject-via`, and the
+agent has a saved `agents/<agent>/.wake.target` whose digest matches the lock's
+repair metadata. It refuses raw terminal wake targets, leftover targets from old
+locks, and `unverified` locks to avoid double-injecting into an active session
+or injecting into the wrong terminal. Repaired wake output goes to
+`agents/<agent>/.wake.repair.log`; `doctor --ops` can report whether repair is
+available, but it never starts a wake process.
 
 ## Message Kinds & Priority
 
@@ -288,7 +311,7 @@ Common command groups:
 | Core messaging | `init`, `send`, `list`, `read`, `drain`, `reply`, `thread`, `watch`, `monitor`, `receipts` |
 | Collaboration | `coop init`, `coop exec`, `swarm list`, `swarm join`, `swarm tasks`, `swarm bridge` |
 | Integrations | `integration symphony init`, `integration symphony emit`, `integration kanban bridge` |
-| Operations | `presence set`, `presence list`, `route explain`, `who`, `doctor`, `doctor --ops`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |
+| Operations | `presence set`, `presence list`, `route explain`, `who`, `doctor`, `doctor --ops`, `wake repair`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |
 
 For the full CLI syntax, examples, and message schema, see [CLAUDE.md](CLAUDE.md).
 
@@ -338,7 +361,7 @@ Files are universal, debuggable, and work everywhere. No connection strings, no 
 Those require infrastructure. AMQ is for local inter-process communication where agents share a filesystem. No server to configure or keep running.
 
 **What about Windows?**
-The core queue works on Windows. The `amq wake` notification feature requires WSL.
+The core queue works on Windows. The `amq wake` notification feature requires WSL. `doctor --ops` can still report wake lock files on unsupported platforms, but it cannot verify live wake process identity there and will not auto-fix `unverified` locks.
 
 **Is this production-ready?**
 For local development workflows, yes. AMQ is intentionally simple—it's not trying to be a distributed message broker.

@@ -201,6 +201,15 @@ func runDoctor(args []string) error {
 			if wl.Fix != "" && wl.Status == string(wakeLockStale) {
 				line += " fix=" + wl.Fix
 			}
+			if wl.TargetPresent {
+				line += " target=" + wl.Target
+			}
+			if wl.TargetReason != "" {
+				line += " target_reason=" + wl.TargetReason
+			}
+			if wl.RepairAvailable && wl.Status == string(wakeLockStale) {
+				line += " repair=" + wl.Repair
+			}
 			if err := writeStdoutLine(line); err != nil {
 				return err
 			}

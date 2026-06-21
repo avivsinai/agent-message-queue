@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -22,79 +23,43 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// wakeLock represents the lock file content for wake process deduplication.
-type wakeLock struct {
-	PID          int      `json:"pid"`
-	TTY          string   `json:"tty"`
-	Root         string   `json:"root"`                    // Absolute path to disambiguate relative AM_ROOT
-	Agent        string   `json:"agent,omitempty"`         // Agent handle that owns this lock
-	Hostname     string   `json:"hostname,omitempty"`      // Host that created the lock
-	Started      string   `json:"started"`                 // Wall-clock diagnostic timestamp
-	ProcessStart string   `json:"process_start,omitempty"` // Kernel process start token, guards PID reuse
-	BootID       string   `json:"boot_id,omitempty"`       // Boot identity paired with ProcessStart when available
-	Executable   string   `json:"executable,omitempty"`    // Diagnostic process executable basename/path
-	Args         []string `json:"args,omitempty"`          // Diagnostic argv when available
-}
-
-type wakeProcessInfo struct {
-	PID          int
-	Running      bool
-	StartToken   string
-	BootID       string
-	Executable   string
-	Args         []string
-	InspectError error
-}
-
-type wakeLockStatus string
-
-const (
-	wakeLockMissing    wakeLockStatus = "missing"
-	wakeLockValid      wakeLockStatus = "valid"
-	wakeLockStale      wakeLockStatus = "stale"
-	wakeLockCreating   wakeLockStatus = "creating"
-	wakeLockUnverified wakeLockStatus = "unverified"
-)
-
-type wakeLockInspection struct {
-	Exists            bool
-	Status            wakeLockStatus
-	Reason            string
-	Root              string
-	Agent             string
-	LockPath          string
-	PID               int
-	Lock              wakeLock
-	Process           wakeProcessInfo
-	IdentityConfirmed bool
-	raw               []byte
-}
-
 var (
-	inspectWakeProcess = inspectWakeProcessPlatform
+	signalWakeProcess = func(pid int, sig os.Signal) error {
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			return err
+		}
+		return proc.Signal(sig)
+	}
+	wakeTerminateGrace = 100 * time.Millisecond
 	getWakeCurrentTTY  = getCurrentTTY
 	getWakeProcessSID  = unix.Getsid
 )
 
+type wakeRepairResult struct {
+	Status          string `json:"status"`
+	Agent           string `json:"agent"`
+	Root            string `json:"root"`
+	Lock            string `json:"lock"`
+	Target          string `json:"target,omitempty"`
+	PID             int    `json:"pid,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	RepairAvailable bool   `json:"repair_available,omitempty"`
+}
+
+type wakeRepairStarter func(root, me string, target wakeTarget) (int, error)
+
 type wakeLockAcquireOptions struct {
 	acceptExistingValid bool
+	target              *wakeTarget
 }
 
-type wakeAlreadyRunningError struct {
-	Agent      string
-	Inspection wakeLockInspection
-}
-
-func (e *wakeAlreadyRunningError) Error() string {
-	lock := e.Inspection.Lock
-	return fmt.Sprintf("wake already running for %s (pid %d on %s since %s)",
-		e.Agent, lock.PID, lock.TTY, lock.Started)
-}
+var startWakeFromTarget = startWakeFromTargetDefault
 
 // acquireWakeLock attempts to acquire the wake lock for an agent's inbox.
 // Returns cleanup function and error. If another wake is running, returns error.
-func acquireWakeLock(root, me string) (cleanup func(), err error) {
-	return acquireWakeLockWithOptions(root, me, wakeLockAcquireOptions{})
+func acquireWakeLock(root, me string, target *wakeTarget) (cleanup func(), err error) {
+	return acquireWakeLockWithOptions(root, me, wakeLockAcquireOptions{target: target})
 }
 
 func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions) (cleanup func(), err error) {
@@ -123,7 +88,11 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 				}
 				return nil, wakeLockAlreadyRunningError(me, inspection)
 			}
-			if shouldReplaceOrphanedWakeLock(inspection) {
+			replace, replaceErr := shouldReplaceOrphanedWakeLock(inspection)
+			if replaceErr != nil {
+				return nil, replaceErr
+			}
+			if replace {
 				goto createLock
 			}
 			return nil, wakeLockAlreadyRunningError(me, inspection)
@@ -147,6 +116,10 @@ createLock:
 		Root:    canonicalWakeRoot(root),
 		Agent:   me,
 		Started: time.Now().UTC().Format(time.RFC3339),
+	}
+	if options.target != nil {
+		lock.WakeMode = wakeTargetInjectVia
+		lock.TargetDigest = wakeTargetDigest(*options.target)
 	}
 	if hostname, err := os.Hostname(); err == nil {
 		lock.Hostname = hostname
@@ -202,152 +175,9 @@ createLock:
 	return cleanup, nil
 }
 
-func inspectWakeLock(root, me string) wakeLockInspection {
-	lockPath := filepath.Join(fsq.AgentBase(root, me), ".wake.lock")
-	inspection := wakeLockInspection{
-		Status:   wakeLockMissing,
-		Root:     canonicalWakeRoot(root),
-		Agent:    me,
-		LockPath: lockPath,
-	}
-
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return inspection
-		}
-		inspection.Exists = true
-		inspection.Status = wakeLockUnverified
-		inspection.Reason = fmt.Sprintf("cannot read lock: %v", err)
-		return inspection
-	}
-
-	inspection.Exists = true
-	inspection.raw = data
-	var existing wakeLock
-	if err := json.Unmarshal(data, &existing); err != nil {
-		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) < 2*time.Second {
-			inspection.Status = wakeLockCreating
-			inspection.Reason = "lock is being created"
-			return inspection
-		}
-		inspection.Status = wakeLockStale
-		inspection.Reason = "invalid lock json"
-		return inspection
-	}
-
-	inspection.Lock = existing
-	inspection.PID = existing.PID
-	inspection.Process = inspectWakeProcess(existing.PID)
-	classifyWakeLock(root, me, &inspection)
-	return inspection
-}
-
-func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
-	lock := inspection.Lock
-	if lock.PID <= 0 {
-		inspection.Status = wakeLockStale
-		inspection.Reason = "invalid pid"
-		return
-	}
-	if strings.TrimSpace(lock.Root) == "" {
-		inspection.Status = wakeLockStale
-		inspection.Reason = "lock root missing"
-		return
-	}
-	if canonicalWakeRoot(lock.Root) != canonicalWakeRoot(root) {
-		inspection.Status = wakeLockStale
-		inspection.Reason = "root mismatch"
-		return
-	}
-	if lock.Agent != "" && lock.Agent != me {
-		inspection.Status = wakeLockStale
-		inspection.Reason = "agent mismatch"
-		return
-	}
-	if lock.Hostname != "" {
-		if hostname, err := os.Hostname(); err == nil && hostname != "" && lock.Hostname != hostname {
-			inspection.Status = wakeLockUnverified
-			inspection.Reason = "hostname mismatch"
-			return
-		}
-	}
-
-	proc := inspection.Process
-	if !proc.Running {
-		inspection.Status = wakeLockStale
-		inspection.Reason = "pid not running"
-		return
-	}
-	if lock.ProcessStart != "" {
-		if proc.StartToken == "" {
-			inspection.Status = wakeLockUnverified
-			inspection.Reason = inspectionReason("process start time unavailable", proc.InspectError)
-			return
-		}
-		if lock.BootID != "" && proc.BootID != "" && lock.BootID != proc.BootID {
-			inspection.Status = wakeLockStale
-			inspection.Reason = "boot id mismatch"
-			return
-		}
-		if lock.ProcessStart != proc.StartToken {
-			inspection.Status = wakeLockStale
-			inspection.Reason = "process start time mismatch"
-			return
-		}
-	}
-	if proc.Executable == "" {
-		inspection.Status = wakeLockUnverified
-		inspection.Reason = inspectionReason("process identity unavailable", proc.InspectError)
-		return
-	}
-	if !processLooksLikeAMQ(proc) {
-		inspection.Status = wakeLockStale
-		inspection.Reason = "pid is not amq"
-		return
-	}
-	if len(proc.Args) > 0 && !processArgsLookLikeWake(proc.Args) {
-		inspection.Status = wakeLockStale
-		inspection.Reason = "pid is not amq wake"
-		return
-	}
-
-	if lock.ProcessStart != "" {
-		inspection.IdentityConfirmed = true
-		inspection.Status = wakeLockValid
-		return
-	}
-
-	if wakeArgsMatchRootAgent(proc.Args, root, me) {
-		inspection.IdentityConfirmed = true
-		inspection.Status = wakeLockValid
-		return
-	}
-
-	inspection.Status = wakeLockUnverified
-	inspection.Reason = "legacy lock lacks process start metadata"
-}
-
-func removeWakeLockIfUnchanged(inspection wakeLockInspection) error {
-	current, err := os.ReadFile(inspection.LockPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("re-read wake lock before removal: %w", err)
-	}
-	if !bytes.Equal(current, inspection.raw) {
-		return fmt.Errorf("wake lock changed while cleaning stale lock; retry")
-	}
-	if err := os.Remove(inspection.LockPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove stale wake lock: %w", err)
-	}
-	return nil
-}
-
-func shouldReplaceOrphanedWakeLock(inspection wakeLockInspection) bool {
+func shouldReplaceOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
 	if !wakeLockNeedsReplacement(inspection) {
-		return false
+		return false, nil
 	}
 	return replaceConfirmedOrphanedWakeLock(inspection)
 }
@@ -394,131 +224,64 @@ func requireWakeLockUsable(inspection wakeLockInspection) error {
 	return nil
 }
 
-func replaceConfirmedOrphanedWakeLock(inspection wakeLockInspection) bool {
-	if !terminateWakeProcessIfStillConfirmed(inspection) {
-		return false
-	}
-	return removeWakeLockIfUnchanged(inspection) == nil
+func replaceConfirmedOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
+	return terminateAndRemoveOrphanedWakeLock(inspection)
 }
 
-func terminateWakeProcessIfStillConfirmed(inspection wakeLockInspection) bool {
-	if !sameConfirmedWakeLock(inspection) {
+func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
+	recheck := inspectWakeLock(inspection.Root, inspection.Agent)
+	if !sameWakeLockInspection(inspection, recheck) || !recheck.IdentityConfirmed {
+		return false, nil
+	}
+	if err := terminateWakeProcess(recheck); err != nil {
+		return false, err
+	}
+	if err := removeWakeLockIfUnchanged(recheck); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func sameWakeLockInspection(first, second wakeLockInspection) bool {
+	if !second.Exists || second.Status != wakeLockValid {
 		return false
 	}
-	pid := inspection.PID
-	if proc, err := os.FindProcess(pid); err == nil {
-		_ = proc.Signal(syscall.SIGTERM)
-		time.Sleep(100 * time.Millisecond)
-		if processAlive(pid) {
-			if !sameConfirmedWakeLock(inspection) {
-				return false
-			}
-			_ = proc.Signal(syscall.SIGKILL)
-		}
+	if first.PID != second.PID || first.Root != second.Root || first.Agent != second.Agent {
+		return false
 	}
-	return true
+	return bytes.Equal(first.raw, second.raw)
+}
+
+func terminateWakeProcess(inspection wakeLockInspection) error {
+	if !sameConfirmedWakeLock(inspection) {
+		return fmt.Errorf("wake process identity changed before SIGTERM")
+	}
+	if err := signalWakeProcess(inspection.PID, syscall.SIGTERM); err != nil {
+		return fmt.Errorf("signal wake process SIGTERM: %w", err)
+	}
+	time.Sleep(wakeTerminateGrace)
+	if !wakeProcessStillMatches(inspection) {
+		return nil
+	}
+	if !sameConfirmedWakeLock(inspection) {
+		return fmt.Errorf("wake process identity changed before SIGKILL")
+	}
+	if err := signalWakeProcess(inspection.PID, syscall.SIGKILL); err != nil {
+		return fmt.Errorf("signal wake process SIGKILL: %w", err)
+	}
+	deadline := time.Now().Add(wakeTerminateGrace)
+	for wakeProcessStillMatches(inspection) {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("wake process still alive after SIGKILL")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return nil
 }
 
 func sameConfirmedWakeLock(inspection wakeLockInspection) bool {
 	recheck := inspectWakeLock(inspection.Root, inspection.Agent)
-	return recheck.Exists &&
-		recheck.Status == wakeLockValid &&
-		recheck.IdentityConfirmed &&
-		recheck.PID == inspection.PID &&
-		bytes.Equal(recheck.raw, inspection.raw)
-}
-
-func currentWakeLockMatches(lock wakeLock) bool {
-	if lock.PID != os.Getpid() {
-		return false
-	}
-	if lock.ProcessStart == "" {
-		return true
-	}
-	proc := inspectWakeProcess(os.Getpid())
-	if !proc.Running || proc.StartToken == "" {
-		return false
-	}
-	if lock.BootID != "" && proc.BootID != "" && lock.BootID != proc.BootID {
-		return false
-	}
-	return lock.ProcessStart == proc.StartToken
-}
-
-func canonicalWakeRoot(root string) string {
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		absRoot = root
-	}
-	if realRoot, err := filepath.EvalSymlinks(absRoot); err == nil {
-		absRoot = realRoot
-	}
-	return filepath.Clean(absRoot)
-}
-
-func wakeLockAlreadyRunningError(me string, inspection wakeLockInspection) error {
-	return &wakeAlreadyRunningError{
-		Agent:      me,
-		Inspection: inspection,
-	}
-}
-
-func inspectionReason(base string, err error) string {
-	if err == nil {
-		return base
-	}
-	return fmt.Sprintf("%s: %v", base, err)
-}
-
-func processLooksLikeAMQ(proc wakeProcessInfo) bool {
-	if isAMQExecutable(proc.Executable) {
-		return true
-	}
-	if len(proc.Args) > 0 && isAMQExecutable(proc.Args[0]) {
-		return true
-	}
-	return false
-}
-
-func processArgsLookLikeWake(args []string) bool {
-	if len(args) < 2 {
-		return false
-	}
-	for _, arg := range args[1:] {
-		if arg == "wake" {
-			return true
-		}
-	}
-	return false
-}
-
-func wakeArgsMatchRootAgent(args []string, root, me string) bool {
-	if !processArgsLookLikeWake(args) {
-		return false
-	}
-	rootMatch := false
-	meMatch := false
-	for i := 1; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "--root" && i+1 < len(args):
-			rootMatch = canonicalWakeRoot(args[i+1]) == canonicalWakeRoot(root)
-			i++
-		case strings.HasPrefix(arg, "--root="):
-			rootMatch = canonicalWakeRoot(strings.TrimPrefix(arg, "--root=")) == canonicalWakeRoot(root)
-		case arg == "--me" && i+1 < len(args):
-			meMatch = args[i+1] == me
-			i++
-		case strings.HasPrefix(arg, "--me="):
-			meMatch = strings.TrimPrefix(arg, "--me=") == me
-		}
-	}
-	return rootMatch && meMatch
-}
-
-func isAMQExecutable(value string) bool {
-	base := filepath.Base(strings.Trim(value, `"'`))
-	return base == "amq"
+	return sameWakeLockInspection(inspection, recheck) && recheck.IdentityConfirmed
 }
 
 // processAlive checks if a process with given PID is running.
@@ -548,7 +311,204 @@ func processAlive(pid int) bool {
 type wakeLoopFunc func(wakeConfig) error
 
 func runWake(args []string) error {
+	if len(args) > 0 && args[0] == "repair" {
+		return runWakeRepair(args[1:])
+	}
 	return runWakeWithLoop(args, runWakeLoop)
+}
+
+func runWakeRepair(args []string) error {
+	fs := flag.NewFlagSet("wake repair", flag.ContinueOnError)
+	common := addCommonFlags(fs)
+	usage := usageWithFlags(fs, "amq wake repair --me <agent> [options]",
+		"Repair a proven-stale wake by restarting it from a saved inject-via target.",
+		"",
+		"Refuses unverified locks and raw terminal wake targets. This command only",
+		"uses .wake.target files created for --inject-via wake processes.")
+	if handled, err := parseFlags(fs, args, usage); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+	if err := requireMe(common.Me); err != nil {
+		return err
+	}
+	me, err := normalizeHandle(common.Me)
+	if err != nil {
+		return UsageError("--me: %v", err)
+	}
+	root := resolveRoot(common.Root)
+	if err := validateKnownHandles(root, common.Strict, me); err != nil {
+		return err
+	}
+	result, repairErr := repairWake(root, me)
+	if common.JSON {
+		if err := writeJSON(os.Stdout, result); err != nil {
+			return err
+		}
+		return repairErr
+	}
+	line := fmt.Sprintf("wake repair: %s agent=%s root=%s", result.Status, result.Agent, result.Root)
+	if result.PID != 0 {
+		line += fmt.Sprintf(" pid=%d", result.PID)
+	}
+	if result.Reason != "" {
+		line += " reason=" + result.Reason
+	}
+	if err := writeStdoutLine(line); err != nil {
+		return err
+	}
+	return repairErr
+}
+
+func repairWake(root, me string) (wakeRepairResult, error) {
+	result := wakeRepairResult{
+		Status: "unknown",
+		Agent:  me,
+		Root:   canonicalWakeRoot(root),
+		Lock:   filepath.Join(fsq.AgentBase(root, me), ".wake.lock"),
+		Target: wakeTargetPath(root, me),
+	}
+	inspection := inspectWakeLock(root, me)
+	if !inspection.Exists {
+		result.Status = "refused"
+		result.Reason = "no wake lock present; start wake normally"
+		return result, errors.New(result.Reason)
+	}
+	switch inspection.Status {
+	case wakeLockValid:
+		result.Status = "already-running"
+		result.PID = inspection.PID
+		return result, nil
+	case wakeLockStale:
+		// ok; continue after target validation
+	case wakeLockCreating:
+		result.Status = "refused"
+		result.Reason = "wake lock is being created; retry shortly"
+		return result, errors.New(result.Reason)
+	case wakeLockUnverified:
+		result.Status = "refused"
+		result.PID = inspection.PID
+		result.Reason = "wake lock is unverified; refusing to start a second injector"
+		return result, fmt.Errorf("%s: %s", result.Reason, inspection.Reason)
+	default:
+		result.Status = "refused"
+		result.Reason = fmt.Sprintf("wake lock status %q is not repairable", inspection.Status)
+		return result, errors.New(result.Reason)
+	}
+
+	target, exists, err := readWakeTarget(root, me)
+	if err != nil {
+		result.Status = "refused"
+		result.Reason = err.Error()
+		return result, err
+	}
+	if !exists {
+		result.Status = "refused"
+		result.Reason = "no inject-via wake target; restart wake manually"
+		return result, errors.New(result.Reason)
+	}
+	if err := validateWakeTarget(target, root, me); err != nil {
+		result.Status = "refused"
+		result.Reason = err.Error()
+		return result, err
+	}
+	if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
+		result.Status = "refused"
+		result.Reason = err.Error()
+		return result, err
+	}
+	result.RepairAvailable = true
+
+	recheck := inspectWakeLock(root, me)
+	if recheck.Status != wakeLockStale {
+		result.Status = "refused"
+		result.PID = recheck.PID
+		result.Reason = "wake lock changed before repair"
+		return result, errors.New(result.Reason)
+	}
+	if !bytes.Equal(inspection.raw, recheck.raw) {
+		result.Status = "refused"
+		result.PID = recheck.PID
+		result.Reason = "wake lock changed before repair"
+		return result, errors.New(result.Reason)
+	}
+	if err := validateWakeTargetMatchesLock(recheck.Lock, target); err != nil {
+		result.Status = "refused"
+		result.Reason = err.Error()
+		return result, err
+	}
+	if err := removeWakeLockIfUnchanged(recheck); err != nil {
+		result.Status = "error"
+		result.Reason = err.Error()
+		return result, err
+	}
+	pid, err := startWakeFromTarget(root, me, target)
+	if err != nil {
+		result.Status = "error"
+		result.Reason = err.Error()
+		return result, err
+	}
+	result.Status = "repaired"
+	result.PID = pid
+	return result, nil
+}
+
+func startWakeFromTargetDefault(root, me string, target wakeTarget) (int, error) {
+	amqBin, err := os.Executable()
+	if err != nil {
+		amqBin = "amq"
+	}
+	readyPath, cleanupReady, err := newWakeReadyFile()
+	if err != nil {
+		return 0, fmt.Errorf("create wake readiness file: %w", err)
+	}
+	defer cleanupReady()
+	args := buildRepairWakeArgs(root, me, target, readyPath)
+	cmd := exec.Command(amqBin, args...)
+	cmd.Env = setEnvVar(os.Environ(), envRoot, root)
+	output, err := openWakeRepairOutput(root, me)
+	if err != nil {
+		return 0, err
+	}
+	defer output.Close()
+	configureRepairWakeCommand(cmd, output)
+	if err := cmd.Start(); err != nil {
+		return 0, fmt.Errorf("start repaired amq wake: %w", err)
+	}
+	if err := waitForWakeReady(cmd.Process, readyPath, wakeReadyTimeout); err != nil {
+		_ = cmd.Process.Kill()
+		return 0, err
+	}
+	return cmd.Process.Pid, nil
+}
+
+func openWakeRepairOutput(root, me string) (*os.File, error) {
+	agentBase := fsq.AgentBase(root, me)
+	if err := os.MkdirAll(agentBase, 0o700); err != nil {
+		return nil, fmt.Errorf("create repair wake log directory: %w", err)
+	}
+	path := filepath.Join(agentBase, ".wake.repair.log")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open repair wake log: %w", err)
+	}
+	return file, nil
+}
+
+func configureRepairWakeCommand(cmd *exec.Cmd, output *os.File) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdin = nil
+	cmd.Stdout = output
+	cmd.Stderr = output
+}
+
+func buildRepairWakeArgs(root, me string, target wakeTarget, readyPath string) []string {
+	args := []string{"--no-update-check", "wake", "--me", me, "--root", root, "--inject-via", target.InjectVia}
+	for _, arg := range target.InjectArgs {
+		args = append(args, "--inject-arg", arg)
+	}
+	return append(args, "--ready-file", readyPath)
 }
 
 func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
@@ -591,7 +551,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		"  the TIOCSTI/stdin-TTY startup requirement. Fixed arguments use repeatable",
 		"  --inject-arg; AMQ appends the sanitized notification payload as the",
 		"  final argv element. The command is not run through a shell.",
-		"  Example: amq wake --me orchestrator --inject-via ghostty-bridge \\",
+		"  Example: amq wake --me orchestrator --inject-via /path/to/ghostty-bridge \\",
 		"    --inject-arg exec --inject-arg \"$TERMINAL_ID\"",
 		"  Trust boundary: --inject-via executes local code, and the payload can",
 		"  contain sanitized but message-derived header content.",
@@ -671,7 +631,6 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		return err
 	}
 
-	// Validate --inject-via: it is an executable path, not a shell command line.
 	injectVia := strings.TrimSpace(*injectViaFlag)
 	if *injectViaFlag != "" && injectVia == "" {
 		return UsageError("--inject-via must not be blank")
@@ -701,10 +660,17 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		return UsageError("%v", err)
 	}
 
+	var target *wakeTarget
+	if injectVia != "" {
+		value := newWakeTarget(root, me, injectVia, []string(injectArgFlags))
+		target = &value
+	}
+
 	// Acquire lock to prevent duplicate wake processes
 	acceptExistingWake := readyFile != "" && *acceptExistingWakeFlag
 	cleanup, err := acquireWakeLockWithOptions(root, me, wakeLockAcquireOptions{
 		acceptExistingValid: acceptExistingWake,
+		target:              target,
 	})
 	if err != nil {
 		var alreadyRunning *wakeAlreadyRunningError
@@ -714,6 +680,17 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		return err
 	}
 	defer cleanup()
+
+	if injectVia != "" {
+		if err := writeWakeTarget(root, me, *target); err != nil {
+			_ = writeStderr("warning: wake target not persisted; live repair disabled: %v\n", err)
+			if removeErr := removeWakeTarget(root, me); removeErr != nil {
+				return fmt.Errorf("clear stale wake target after persist failure: %w", removeErr)
+			}
+		}
+	} else if err := removeWakeTarget(root, me); err != nil {
+		return err
+	}
 
 	cfg := wakeConfig{
 		me:                me,

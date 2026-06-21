@@ -173,12 +173,13 @@ amq dlq list --me <agent> [--new | --cur] [--json]
 amq dlq read --me <agent> --id <dlq_id> [--json]
 amq dlq retry --me <agent> --id <dlq_id> [--all] [--force]
 amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
-amq wake --me <agent> [--inject-cmd <cmd>] [--inject-via <executable>] [--inject-arg <arg>...] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>]
+amq wake --me <agent> [--inject-cmd <cmd>] [--inject-via <absolute-executable>] [--inject-arg <arg>...] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>]
+amq wake repair --me <agent> [--root <path>] [--json]
 amq upgrade
 amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--json]
 amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>]
 amq coop init [--root <path>] [--agents <a,b,c>] [--force] [--json]
-amq coop exec [--root <path>] [--session <name>] [--me <handle>] [--no-init] [--no-wake] [--require-wake] [-y] <command> [-- <command-flags>]
+amq coop exec [--root <path>] [--session <name>] [--me <handle>] [--no-init] [--no-wake] [--require-wake] [--wake-inject-via <absolute-executable>] [--wake-inject-arg <arg>...] [-y] <command> [-- <command-flags>]
 amq swarm list [--json]
 amq swarm join --team <name> --me <agent> [--agent-id <id>] [--type codex|external] [--json]
 amq swarm leave --team <name> --agent-id <id> [--json]
@@ -335,6 +336,23 @@ Use `--force` with retry to override the max retry limit.
 - Wake lock health (`--fix-wake-locks` removes stale locks)
 - Integration hints for Kanban and Symphony
 
+Wake lock states are intentionally conservative:
+
+- `stale`: AMQ proved the recorded PID is gone, mismatched, or not the same `amq wake`; `amq doctor --ops --fix-wake-locks` re-inspects and removes only these locks.
+- `unverified`: AMQ could not prove either ownership or staleness, so startup fails closed and doctor leaves the lock in place. Confirm the PID/root/agent manually before removing the `.wake.lock`.
+
+Live wake repair is explicit: `amq wake repair --me <agent>` may remove a
+proven-stale lock and start a fresh wake only when the stale lock was created
+for `--inject-via`, and `agents/<agent>/.wake.target` exists with a digest that
+matches the lock's repair metadata. `.wake.target` is mode `0600`, contains only
+`mode:"inject-via"`, an absolute executable path, and fixed argv. Raw TTY wake
+has no repair target; repair must refuse raw locks, leftover targets from old
+locks, and `unverified` locks. Repaired wake stdout/stderr goes to
+`agents/<agent>/.wake.repair.log`; repair itself must not keep stdout/stderr
+pipes open after its JSON/text output exits. `doctor --ops` may report
+`target_present` and `repair_available`, but must remain diagnostic-only and
+never spawn a wake process.
+
 Use `amq doctor --ops --json` for machine-readable health output.
 
 ## Multi-Agent Coordination
@@ -388,6 +406,9 @@ amq coop exec --session feature-a claude               # Isolated session
 ```
 
 Use `--no-wake` to disable auto-wake (e.g., in CI or non-TTY environments). Use `--require-wake` in managed launchers that should refuse to start an agent unless the wake process starts and acquires its lock.
+Use `--wake-inject-via /absolute/path/to/injector` plus repeated
+`--wake-inject-arg` values when a launcher has a terminal-specific injector and
+wants later `amq wake repair` to work without restarting the agent TUI.
 
 **For scripts/CI** (non-interactive):
 ```bash
@@ -413,7 +434,7 @@ For a local terminal transport that can receive notifications without a
 controlling TTY, run wake with an explicit external injector:
 ```bash
 amq wake --me orchestrator \
-  --inject-via ghostty-bridge \
+  --inject-via /absolute/path/to/ghostty-bridge \
   --inject-arg exec \
   --inject-arg "$TERMINAL_ID"
 ```

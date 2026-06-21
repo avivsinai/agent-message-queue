@@ -43,14 +43,19 @@ type opsHint struct {
 }
 
 type opsWakeLock struct {
-	Status  string `json:"status"`
-	Agent   string `json:"agent"`
-	Root    string `json:"root"`
-	Lock    string `json:"lock"`
-	PID     int    `json:"pid,omitempty"`
-	Reason  string `json:"reason,omitempty"`
-	Fix     string `json:"fix,omitempty"`
-	Removed bool   `json:"removed,omitempty"`
+	Status          string `json:"status"`
+	Agent           string `json:"agent"`
+	Root            string `json:"root"`
+	Lock            string `json:"lock"`
+	PID             int    `json:"pid,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	Fix             string `json:"fix,omitempty"`
+	Removed         bool   `json:"removed,omitempty"`
+	Target          string `json:"target,omitempty"`
+	TargetPresent   bool   `json:"target_present,omitempty"`
+	TargetReason    string `json:"target_reason,omitempty"`
+	Repair          string `json:"repair,omitempty"`
+	RepairAvailable bool   `json:"repair_available,omitempty"`
 }
 
 const fixWakeLocksCommand = "amq doctor --ops --fix-wake-locks"
@@ -184,25 +189,74 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 			PID:    inspection.PID,
 			Reason: inspection.Reason,
 		}
+		target, exists, targetErr := readWakeTarget(root, agent)
+		if exists {
+			lock.Target = wakeTargetPath(root, agent)
+			lock.TargetPresent = true
+			if targetErr != nil {
+				lock.TargetReason = targetErr.Error()
+			} else if err := validateWakeTarget(target, root, agent); err != nil {
+				lock.TargetReason = err.Error()
+			} else if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
+				lock.TargetReason = err.Error()
+			}
+		}
 		if inspection.Status == wakeLockStale {
 			lock.Fix = fixWakeLocksCommand
+			if lock.TargetPresent && lock.TargetReason == "" {
+				lock.RepairAvailable = true
+				lock.Repair = wakeRepairCommand(root, agent)
+			}
 			if fix {
 				recheck := inspectWakeLock(root, agent)
 				if recheck.Status != wakeLockStale {
 					lock.Status = string(recheck.Status)
 					lock.Reason = "wake lock changed before fix"
+					lock.RepairAvailable = false
+					lock.Repair = ""
 				} else if err := removeWakeLockIfUnchanged(recheck); err != nil {
 					lock.Status = "error"
 					lock.Reason = err.Error()
+					lock.RepairAvailable = false
+					lock.Repair = ""
 				} else {
 					lock.Status = "fixed"
 					lock.Removed = true
+					lock.RepairAvailable = false
+					lock.Repair = ""
 				}
 			}
 		}
 		locks = append(locks, lock)
 	}
 	return locks
+}
+
+func wakeRepairCommand(root, agent string) string {
+	return fmt.Sprintf("amq wake repair --root %s --me %s", shellQuoteArg(root), shellQuoteArg(agent))
+}
+
+func shellQuoteArg(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.IndexFunc(value, func(r rune) bool {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return false
+		case r >= 'A' && r <= 'Z':
+			return false
+		case r >= '0' && r <= '9':
+			return false
+		case strings.ContainsRune("@%_+=:,./-", r):
+			return false
+		default:
+			return true
+		}
+	}) == -1 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func checkGlobalRootHint() []opsHint {
