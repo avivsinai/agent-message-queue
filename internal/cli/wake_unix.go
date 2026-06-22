@@ -487,18 +487,6 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 	return result, nil
 }
 
-func validateWakeLockRepairable(inspection wakeLockInspection) error {
-	if inspection.Status != wakeLockStale {
-		return fmt.Errorf("wake lock status %q is not repairable", inspection.Status)
-	}
-	switch inspection.Reason {
-	case "pid not running", "pid is not amq", "pid is not amq wake":
-		return nil
-	default:
-		return fmt.Errorf("wake lock stale reason %q is not repairable", inspection.Reason)
-	}
-}
-
 func startWakeFromTargetDefault(root, me string, target wakeTarget) (int, error) {
 	amqBin, err := os.Executable()
 	if err != nil {
