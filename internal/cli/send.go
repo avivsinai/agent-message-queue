@@ -400,6 +400,9 @@ func runSend(args []string) error {
 	if targetSession != "" {
 		targetDisplay = targetSession
 	}
+	if targetDisplay == "" && common.rootExplicit() && targetProject == "" && targetSession == "" && fromSession == "" {
+		targetDisplay = sessionName(deliveryRoot)
+	}
 
 	// Wait for receipt if requested (single-recipient only, validated above).
 	var waitResult *waitForResult

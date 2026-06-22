@@ -76,6 +76,9 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 	if inspection.Exists {
 		switch inspection.Status {
 		case wakeLockStale:
+			if err := validateWakeLockStaleRemoval(inspection); err != nil {
+				return nil, err
+			}
 			if err := removeWakeLockIfUnchanged(inspection); err != nil {
 				return nil, err
 			}
@@ -446,38 +449,47 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		return result, err
 	}
 	result.RepairAvailable = true
+	clearRepairAvailable := func() {
+		result.RepairAvailable = false
+	}
 
 	recheck := inspectWakeLock(root, me)
 	if recheck.Status != wakeLockStale {
+		clearRepairAvailable()
 		result.Status = "refused"
 		result.PID = recheck.PID
 		result.Reason = "wake lock changed before repair"
 		return result, errors.New(result.Reason)
 	}
 	if err := validateWakeLockRepairable(recheck); err != nil {
+		clearRepairAvailable()
 		result.Status = "refused"
 		result.PID = recheck.PID
 		result.Reason = "wake lock changed before repair"
 		return result, errors.New(result.Reason)
 	}
 	if !bytes.Equal(inspection.raw, recheck.raw) {
+		clearRepairAvailable()
 		result.Status = "refused"
 		result.PID = recheck.PID
 		result.Reason = "wake lock changed before repair"
 		return result, errors.New(result.Reason)
 	}
 	if err := validateWakeTargetMatchesLock(recheck.Lock, target); err != nil {
+		clearRepairAvailable()
 		result.Status = "refused"
 		result.Reason = err.Error()
 		return result, err
 	}
 	if err := removeWakeLockIfUnchanged(recheck); err != nil {
+		clearRepairAvailable()
 		result.Status = "error"
 		result.Reason = err.Error()
 		return result, err
 	}
 	pid, err := startWakeFromTarget(root, me, target)
 	if err != nil {
+		clearRepairAvailable()
 		result.Status = "error"
 		result.Reason = err.Error()
 		return result, err
