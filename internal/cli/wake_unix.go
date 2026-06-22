@@ -471,7 +471,7 @@ func startWakeFromTargetDefault(root, me string, target wakeTarget) (int, error)
 	if err != nil {
 		return 0, err
 	}
-	defer output.Close()
+	defer func() { _ = output.Close() }()
 	configureRepairWakeCommand(cmd, output)
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("start repaired amq wake: %w", err)

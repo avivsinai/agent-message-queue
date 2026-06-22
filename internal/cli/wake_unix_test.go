@@ -919,7 +919,7 @@ func TestConfigureRepairWakeCommandDetachesOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open output: %v", err)
 	}
-	defer output.Close()
+	defer func() { _ = output.Close() }()
 
 	cmd := exec.Command("amq")
 	configureRepairWakeCommand(cmd, output)
