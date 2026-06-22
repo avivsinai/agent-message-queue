@@ -241,6 +241,17 @@ Root resolution precedence is:
 flags > AM_ROOT > project .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
 ```
 
+For an external orchestrator or plain shell that should stay pinned to one
+session, opt in explicitly:
+
+```sh
+eval "$(amq env --session auth --me claude --export)"
+```
+
+That exports `AM_ROOT`, `AM_ME`, and, for session roots, `AM_BASE_ROOT`, and
+prints a stderr note that the terminal is pinned. Treat this as one terminal,
+one session.
+
 Auto-detect covers the default `.agent-mail` layout, including `.agent-mail/<session>` session roots without `.amqrc`. Custom root names and peer config still require `.amqrc` or explicit flags/env.
 This same chain is used by `amq env`, `amq doctor`, and the integration commands, so Symphony and Kanban-launched agents can find the correct queue even when they are not started from the project directory.
 

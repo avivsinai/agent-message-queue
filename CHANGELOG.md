@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `amq env --export` now prints eval-safe shell exports for opt-in terminal
+  pinning, including `AM_BASE_ROOT` only when the resolved root is a session
+  root (#149).
+
 ### Fixed
 
 - `amq who`, `amq presence list`, and `amq doctor --ops` now present the

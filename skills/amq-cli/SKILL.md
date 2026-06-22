@@ -47,11 +47,13 @@ The reason: `coop exec` sets `AM_ROOT` and `AM_ME` precisely for the session. Pa
 **Outside `coop exec`** — resolve the root from config, don't hardcode it:
 ```bash
 eval "$(amq env --me claude)"          # reads .amqrc chain, sets both vars
+eval "$(amq env --session auth --me claude --export)"  # pin this terminal to one session
 
 # Or pin per-command without polluting the shell (useful in scripts):
 AM_ME=claude AM_ROOT=$(amq env --json | jq -r .root) amq send --to codex --body "hello"
 ```
 Why not hardcode? The root path depends on the config chain (project `.amqrc` → `AMQ_GLOBAL_ROOT` → `~/.amqrc`). Hardcoding skips this and breaks when the project moves or config changes.
+Use `--export` only when the whole terminal should stay pinned; it exports `AM_BASE_ROOT` for session roots and prints a stderr note. Treat it as one terminal, one session.
 
 **Global fallback**: Orchestrator-spawned agents often start outside the repo root where no project `.amqrc` exists. Set `AMQ_GLOBAL_ROOT` or `~/.amqrc` so `amq env` and `amq doctor` still resolve the correct queue.
 
