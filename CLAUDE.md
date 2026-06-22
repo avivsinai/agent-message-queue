@@ -344,10 +344,11 @@ Wake lock states are intentionally conservative:
 Live wake repair is explicit: `amq wake repair --me <agent>` may remove a
 proven-stale lock and start a fresh wake only when the stale lock was created
 for `--inject-via`, and `agents/<agent>/.wake.target` exists with a digest that
-matches the lock's repair metadata. `.wake.target` is mode `0600`, contains only
-`mode:"inject-via"`, an absolute executable path, and fixed argv. Raw TTY wake
-has no repair target; repair must refuse raw locks, leftover targets from old
-locks, and `unverified` locks. Repaired wake stdout/stderr goes to
+matches the lock's repair metadata. `.wake.target` is mode `0600` and stores
+schema metadata, root, agent, creation time, `mode:"inject-via"`, an absolute
+executable path, and fixed argv. Raw TTY wake has no repair target; repair must
+refuse raw locks, leftover targets from old locks, and `unverified` locks.
+Repaired wake stdout/stderr goes to
 `agents/<agent>/.wake.repair.log`; repair itself must not keep stdout/stderr
 pipes open after its JSON/text output exits. `doctor --ops` may report
 `target_present` and `repair_available`, but must remain diagnostic-only and
@@ -408,7 +409,9 @@ amq coop exec --session feature-a claude               # Isolated session
 Use `--no-wake` to disable auto-wake (e.g., in CI or non-TTY environments). Use `--require-wake` in managed launchers that should refuse to start an agent unless the wake process starts and acquires its lock.
 Use `--wake-inject-via /absolute/path/to/injector` plus repeated
 `--wake-inject-arg` values when a launcher has a terminal-specific injector and
-wants later `amq wake repair` to work without restarting the agent TUI.
+wants later `amq wake repair` to work without restarting the agent TUI. Repair
+metadata is written only when this invocation starts a new wake; a reused
+existing wake must already have repair metadata to be repairable.
 
 **For scripts/CI** (non-interactive):
 ```bash

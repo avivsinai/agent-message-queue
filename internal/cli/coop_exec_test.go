@@ -3,6 +3,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -122,6 +124,47 @@ func TestCoopExecRequireWakeRejectsNoWake(t *testing.T) {
 	}
 	if !containsStr(err.Error(), "--require-wake cannot be used with --no-wake") {
 		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestCoopExecWakeInjectViaValidation(t *testing.T) {
+	nonExecutable := filepath.Join(secureTempDirForTest(t), "injector")
+	if err := os.WriteFile(nonExecutable, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+		t.Fatalf("write injector: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "blank inject via",
+			args:    []string{"--wake-inject-via", "   ", "claude"},
+			wantErr: "--wake-inject-via must not be blank",
+		},
+		{
+			name:    "inject arg without inject via",
+			args:    []string{"--wake-inject-arg", "exec", "claude"},
+			wantErr: "--wake-inject-arg requires --wake-inject-via",
+		},
+		{
+			name:    "non executable injector",
+			args:    []string{"--wake-inject-via", nonExecutable, "claude"},
+			wantErr: "not executable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := runCoopExec(tt.args)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !containsStr(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 

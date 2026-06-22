@@ -114,8 +114,10 @@ amq coop exec --session feature-a codex
 
 Managed launchers can add `--require-wake` to fail instead of launching the agent when the wake watcher cannot start.
 Launchers that use an external injector can add `--wake-inject-via /absolute/path/to/injector`
-and repeated `--wake-inject-arg` values. That stores a repair target so
-`amq wake repair` can restart wake later without restarting the agent TUI.
+and repeated `--wake-inject-arg` values. When that invocation starts a new wake,
+the wake stores a repair target so `amq wake repair` can restart wake later
+without restarting the agent TUI. If `--require-wake` reuses an existing wake,
+that wake must already have repair metadata to be repairable.
 
 ### 3. Send & Receive
 
