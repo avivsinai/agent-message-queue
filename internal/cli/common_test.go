@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/format"
 )
 
 func TestNormalizeHandle(t *testing.T) {
@@ -70,12 +73,100 @@ func TestValidateKnownHandle(t *testing.T) {
 	}
 }
 
+func TestValidateKnownHandlesAllowsReservedUserWithConfig(t *testing.T) {
+	root := t.TempDir()
+	writeKnownAgentsConfig(t, root, []string{"alice", "bob"})
+
+	if err := validateKnownHandles(root, true, "user"); err != nil {
+		t.Fatalf("reserved user handle should pass strict validation: %v", err)
+	}
+	if err := validateKnownHandles(root, true, "alice", "user"); err != nil {
+		t.Fatalf("mixed configured and reserved handles should pass: %v", err)
+	}
+	if err := validateKnownHandles(root, true, "unknown"); err == nil {
+		t.Fatal("unknown handle should still fail strict validation")
+	}
+}
+
+func TestLoadKnownAgentsDoesNotReserveUserWithoutConfiguredAgents(t *testing.T) {
+	root := t.TempDir()
+
+	agents, err := loadKnownAgents(root, true)
+	if err != nil {
+		t.Fatalf("loadKnownAgents without config: %v", err)
+	}
+	if agents != nil {
+		t.Fatalf("no config should return nil agents, got %#v", agents)
+	}
+	known, err := loadKnownAgentSet(root, true)
+	if err != nil {
+		t.Fatalf("loadKnownAgentSet without config: %v", err)
+	}
+	if known != nil {
+		t.Fatalf("no config should return nil known set, got %#v", known)
+	}
+
+	writeKnownAgentsConfig(t, root, []string{})
+	agents, err = loadKnownAgents(root, true)
+	if err != nil {
+		t.Fatalf("loadKnownAgents with empty config: %v", err)
+	}
+	if len(agents) != 0 {
+		t.Fatalf("empty configured agents should not synthesize user, got %#v", agents)
+	}
+}
+
+func TestHeaderValidatorAllowsReservedUserUnderStrict(t *testing.T) {
+	root := t.TempDir()
+	writeKnownAgentsConfig(t, root, []string{"claude", "codex"})
+
+	validator, err := newHeaderValidator(root, true)
+	if err != nil {
+		t.Fatalf("newHeaderValidator: %v", err)
+	}
+	header := format.Header{
+		Schema:  format.CurrentSchema,
+		ID:      "operator-gate",
+		From:    "claude",
+		To:      []string{"user"},
+		Thread:  "p2p/claude__user",
+		Created: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := validator.validate(header); err != nil {
+		t.Fatalf("strict validator should accept reserved user recipient: %v", err)
+	}
+
+	header.To = []string{"unknown"}
+	if err := validator.validate(header); err == nil {
+		t.Fatal("strict validator should still reject unknown recipients")
+	}
+}
+
 func TestValidateKnownHandleNoConfig(t *testing.T) {
 	root := t.TempDir()
 
 	// No config file - should pass any handle
 	if err := validateKnownHandles(root, true, "anyhandle"); err != nil {
 		t.Errorf("no config should pass any handle: %v", err)
+	}
+}
+
+func writeKnownAgentsConfig(t *testing.T, root string, agents []string) {
+	t.Helper()
+	metaDir := filepath.Join(root, "meta")
+	if err := os.MkdirAll(metaDir, 0o700); err != nil {
+		t.Fatalf("mkdir meta: %v", err)
+	}
+	cfg := map[string]any{
+		"version": 1,
+		"agents":  agents,
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metaDir, "config.json"), data, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
 }
 

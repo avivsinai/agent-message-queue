@@ -22,6 +22,8 @@ type commonFlags struct {
 	flagSet *flag.FlagSet
 }
 
+const reservedHumanHandle = "user"
+
 func addCommonFlags(fs *flag.FlagSet) *commonFlags {
 	flags := &commonFlags{flagSet: fs}
 	fs.StringVar(&flags.Root, "root", defaultRoot(), "Root directory for the queue")
@@ -359,7 +361,22 @@ func loadKnownAgents(root string, strict bool) ([]string, error) {
 		return nil, nil
 	}
 
-	return cfg.Agents, nil
+	return withReservedHumanHandle(cfg.Agents), nil
+}
+
+func withReservedHumanHandle(agents []string) []string {
+	if len(agents) == 0 {
+		return agents
+	}
+	for _, agent := range agents {
+		if agent == reservedHumanHandle {
+			return agents
+		}
+	}
+	out := make([]string, 0, len(agents)+1)
+	out = append(out, agents...)
+	out = append(out, reservedHumanHandle)
+	return out
 }
 
 func loadKnownAgentSet(root string, strict bool) (map[string]struct{}, error) {

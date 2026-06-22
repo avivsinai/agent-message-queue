@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The human operator handle `user` is now reserved for configured projects, and
+  `amq coop init` seeds `claude,codex,user` by default so strict operator gates
+  no longer require custom coop setup (#139).
 - Release publishing now detects release commits inside normally merged release
   PRs while ordinary feature merge commits no-op before tag, artifact, or skill
   publishing jobs (#163).

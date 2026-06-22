@@ -17,7 +17,7 @@ import (
 
 const (
 	defaultCoopRoot    = ".agent-mail"
-	defaultCoopAgents  = "claude,codex"
+	defaultCoopAgents  = "claude,codex,user"
 	defaultSessionName = "collab"
 )
 

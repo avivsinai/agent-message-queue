@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -118,6 +119,72 @@ func TestRunDrainMovesToCur(t *testing.T) {
 	result2 := runDrainJSON(t, root, "alice", 0, false)
 	if result2.Count != 0 {
 		t.Errorf("second drain should be empty, got %d", result2.Count)
+	}
+}
+
+func TestRunDrainStrictAllowsReservedUserInbox(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	for _, agent := range []string{"claude", "codex", "user"} {
+		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+			t.Fatalf("EnsureAgentDirs(%s): %v", agent, err)
+		}
+	}
+	writeKnownAgentsConfig(t, root, []string{"claude", "codex"})
+
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  format.CurrentSchema,
+			ID:      "operator-gate",
+			From:    "claude",
+			To:      []string{"user"},
+			Thread:  "p2p/claude__user",
+			Subject: "Need operator",
+			Created: time.Now().UTC().Format(time.RFC3339Nano),
+		},
+		Body: "Please decide.",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := fsq.DeliverToInbox(root, "user", "operator-gate.md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	result := runDrainJSONStrict(t, root, "user")
+	if result.Count != 1 {
+		t.Fatalf("expected count 1, got %d", result.Count)
+	}
+	item := result.Drained[0]
+	if item.ID != "operator-gate" || item.ParseError != "" || !item.MovedToCur || item.MovedToDLQ {
+		t.Fatalf("unexpected drain item: %+v", item)
+	}
+	if _, err := os.Stat(filepath.Join(fsq.AgentInboxCur(root, "user"), "operator-gate.md")); err != nil {
+		t.Fatalf("message should move to user cur: %v", err)
+	}
+	dlqEntries, err := os.ReadDir(fsq.AgentDLQNew(root, "user"))
+	if err != nil {
+		t.Fatalf("read user dlq: %v", err)
+	}
+	if len(dlqEntries) != 0 {
+		t.Fatalf("expected no user DLQ entries, got %d", len(dlqEntries))
+	}
+
+	receipts, err := receipt.List(root, "user", receipt.ListFilter{
+		MsgID: "operator-gate",
+		Stage: receipt.StageDrained,
+	})
+	if err != nil {
+		t.Fatalf("receipt.List: %v", err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("expected 1 drained receipt, got %d", len(receipts))
+	}
+	if receipts[0].Sender != "claude" || receipts[0].Consumer != "user" {
+		t.Fatalf("unexpected drained receipt: %+v", receipts[0])
 	}
 }
 
@@ -367,6 +434,31 @@ func runDrainJSON(t *testing.T, root, agent string, limit int, includeBody bool)
 	os.Stdout = w
 
 	err := runDrain(args)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("runDrain: %v", err)
+	}
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	var result drainResult
+	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v (output: %s)", err, buf.String())
+	}
+	return result
+}
+
+func runDrainJSONStrict(t *testing.T, root, agent string) drainResult {
+	t.Helper()
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runDrain([]string{"--root", root, "--me", agent, "--strict", "--json"})
 
 	_ = w.Close()
 	os.Stdout = oldStdout
