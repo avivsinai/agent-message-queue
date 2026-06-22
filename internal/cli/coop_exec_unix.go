@@ -196,7 +196,7 @@ func runCoopExec(args []string) error {
 				return fmt.Errorf("create wake readiness file: %w", readyErr)
 			}
 			defer cleanupReady()
-			wakeCmd.Args = append(wakeCmd.Args, "--ready-file", readyPath)
+			wakeCmd.Args = append(wakeCmd.Args, "--ready-file", readyPath, "--accept-existing-wake")
 		}
 		// Set AM_ROOT in wake's env so the helper process resolves the same
 		// session root even if the parent shell inherited a different value.
@@ -218,7 +218,7 @@ func runCoopExec(args []string) error {
 					return err
 				}
 			}
-			_ = writeStderr("Started amq wake (pid %d)\n", wakeProc.Pid)
+			_ = writeStderr("%s\n", wakeReadyMessage(root, agentHandle, wakeProc.Pid))
 		}
 	}
 
@@ -276,6 +276,11 @@ func waitForWakeReady(proc *os.Process, readyPath string, timeout time.Duration)
 
 		select {
 		case err := <-done:
+			if _, statErr := os.Stat(readyPath); statErr == nil {
+				return nil
+			} else if !os.IsNotExist(statErr) {
+				return fmt.Errorf("check wake readiness file: %w", statErr)
+			}
 			if err != nil {
 				return fmt.Errorf("amq wake exited before becoming ready: %w", err)
 			}
@@ -285,6 +290,13 @@ func waitForWakeReady(proc *os.Process, readyPath string, timeout time.Duration)
 		case <-ticker.C:
 		}
 	}
+}
+
+func wakeReadyMessage(root, agentHandle string, startedPID int) string {
+	if inspection := inspectWakeLock(root, agentHandle); inspection.Status == wakeLockValid && inspection.PID != 0 && inspection.PID != startedPID {
+		return fmt.Sprintf("Using existing amq wake (pid %d)", inspection.PID)
+	}
+	return fmt.Sprintf("Started amq wake (pid %d)", startedPID)
 }
 
 // splitDashDash splits args at the first "--" separator.

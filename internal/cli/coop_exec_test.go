@@ -135,6 +135,64 @@ func TestCoopExecSessionInvalidName(t *testing.T) {
 	}
 }
 
+func TestWakeReadyMessageReportsExistingWake(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "start-1",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "codex"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	root := t.TempDir()
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+
+	got := wakeReadyMessage(root, "codex", 1000)
+	if got != "Using existing amq wake (pid 4242)" {
+		t.Fatalf("message = %q", got)
+	}
+}
+
+func TestWakeReadyMessageReportsStartedWake(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "start-1",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "codex"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	root := t.TempDir()
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+
+	got := wakeReadyMessage(root, "codex", wakePID)
+	if got != "Started amq wake (pid 4242)" {
+		t.Fatalf("message = %q", got)
+	}
+}
+
 func sliceEq(a, b []string) bool {
 	if a == nil && b == nil {
 		return true

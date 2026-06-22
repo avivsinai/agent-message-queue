@@ -24,6 +24,24 @@ func stubInspectWakeProcess(t *testing.T, fn func(pid int) wakeProcessInfo) {
 	})
 }
 
+func stubWakeCurrentTTY(t *testing.T, fn func() string) {
+	t.Helper()
+	old := getWakeCurrentTTY
+	getWakeCurrentTTY = fn
+	t.Cleanup(func() {
+		getWakeCurrentTTY = old
+	})
+}
+
+func stubWakeProcessSID(t *testing.T, fn func(pid int) (int, error)) {
+	t.Helper()
+	old := getWakeProcessSID
+	getWakeProcessSID = fn
+	t.Cleanup(func() {
+		getWakeProcessSID = old
+	})
+}
+
 func writeWakeLockForTest(t *testing.T, root, agent string, lock wakeLock) string {
 	t.Helper()
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -152,6 +170,205 @@ func TestRunWakeWithLoopDoesNotWriteReadyFileWhenLockBlocked(t *testing.T) {
 		t.Fatal("expected existing wake lock error")
 	}
 	if !strings.Contains(err.Error(), "wake already running") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+		t.Fatalf("ready file should not exist, statErr=%v", statErr)
+	}
+}
+
+func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "start-1",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	root := t.TempDir()
+	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+		PID:          wakePID,
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", "/tmp/injector",
+		"--ready-file", readyPath,
+		"--accept-existing-wake",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with an existing live wake lock: %#v", cfg)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected existing usable wake to satisfy ready file, got %v", err)
+	}
+	if _, statErr := os.Stat(readyPath); statErr != nil {
+		t.Fatalf("ready file should exist, statErr=%v", statErr)
+	}
+}
+
+func TestRunWakeWithLoopAcceptExistingWakeRejectsMissingTTY(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "start-1",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	root := t.TempDir()
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+		PID:          wakePID,
+		TTY:          "/dev/amq-missing-tty",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", "/tmp/injector",
+		"--ready-file", readyPath,
+		"--accept-existing-wake",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with an unusable existing wake lock: %#v", cfg)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected unusable wake lock error")
+	}
+	if !strings.Contains(err.Error(), "not usable for --require-wake") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+		t.Fatalf("ready file should not exist, statErr=%v", statErr)
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("existing lock should remain, statErr=%v", statErr)
+	}
+}
+
+func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *testing.T) {
+	const wakePID = 4242
+	ttyPath := filepath.Join(t.TempDir(), "amq-test-tty")
+	if err := os.WriteFile(ttyPath, []byte{}, 0o600); err != nil {
+		t.Fatalf("write fake tty path: %v", err)
+	}
+	stubWakeCurrentTTY(t, func() string { return ttyPath })
+	sidCalls := 0
+	stubWakeProcessSID(t, func(pid int) (int, error) {
+		sidCalls++
+		if pid == wakePID {
+			return 100, nil
+		}
+		return 200, nil
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "start-1",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	root := t.TempDir()
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+		PID:          wakePID,
+		TTY:          ttyPath,
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", "/tmp/injector",
+		"--ready-file", readyPath,
+		"--accept-existing-wake",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with an unusable existing wake lock: %#v", cfg)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected unusable wake lock error")
+	}
+	if !strings.Contains(err.Error(), "not usable for --require-wake") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+		t.Fatalf("ready file should not exist, statErr=%v", statErr)
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("existing lock should remain, statErr=%v", statErr)
+	}
+	if sidCalls < 2 {
+		t.Fatalf("expected same-TTY branch to inspect wake and current SIDs, got %d calls", sidCalls)
+	}
+}
+
+func TestRunWakeWithLoopAcceptExistingWakeRejectsUnverifiedWake(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	root := t.TempDir()
+	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+		PID:          wakePID,
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", "/tmp/injector",
+		"--ready-file", readyPath,
+		"--accept-existing-wake",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with an unverified wake lock: %#v", cfg)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected unverified wake lock error")
+	}
+	if !strings.Contains(err.Error(), "unverified") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
@@ -483,6 +700,18 @@ func TestWaitForWakeReadyFailsWhenWakeExitsBeforeReady(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "amq wake exited before becoming ready") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWaitForWakeReadyAcceptsReadyFileWrittenBeforeExit(t *testing.T) {
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	cmd := exec.Command("sh", "-c", `: > "$1"; exit 0`, "sh", readyPath)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper: %v", err)
+	}
+
+	if err := waitForWakeReady(cmd.Process, readyPath, time.Second); err != nil {
+		t.Fatalf("waitForWakeReady should accept ready file written before exit: %v", err)
 	}
 }
 
