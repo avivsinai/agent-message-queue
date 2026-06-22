@@ -303,6 +303,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Moved `classifyRoot` from `send.go` to `common.go` (shared by send, reply, who, env)
 - Added `resolveSessionName` helper combining `classifyRoot` + `sessionName`
 
+## [0.26.0] - 2026-03-29
+
+### Added
+
+- Embedded the AMQ design philosophy in the project docs.
+
+### Changed
+
+- Added the main-branch documentation policy and removed frozen implementation
+  specs from the docs tree.
+- Aligned plugin manifests and metadata for the 0.26.0 release.
+
+## [0.25.1] - 2026-03-28
+
+### Changed
+
+- Bumped the Codex plugin manifest version to 0.25.1.
+
+## [0.25.0] - 2026-03-28
+
+### Added
+
+- Added cross-orchestrator integration surfaces for Symphony, Kanban, and
+  `doctor --ops` (#47).
+- Added Codex interface metadata to the plugin manifest.
+
+### Fixed
+
+- Corrected cross-project sender identity by preserving `from_project` (#48).
+
+### Changed
+
+- Renamed the spec skill to `amq-spec` to avoid naming collisions.
+- Eliminated duplicated skill packaging.
+
 ## [0.24.1] - 2026-03-22
 
 ### Fixed
@@ -529,7 +564,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.29.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.29.0...v0.29.1
 [0.29.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.8...v0.29.0
 [0.28.8]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.7...v0.28.8
-[0.28.7]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.5...v0.28.7
+[0.28.7]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.6...v0.28.7
+[0.28.6]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.5...v0.28.6
 [0.28.5]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.4...v0.28.5
 [0.28.4]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.3...v0.28.4
 [0.28.3]: https://github.com/avivsinai/agent-message-queue/compare/v0.28.2...v0.28.3
