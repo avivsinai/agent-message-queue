@@ -214,6 +214,11 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 					lock.Reason = "wake lock changed before fix"
 					lock.RepairAvailable = false
 					lock.Repair = ""
+				} else if err := validateWakeLockStaleRemoval(recheck); err != nil {
+					lock.Status = "error"
+					lock.Reason = err.Error()
+					lock.RepairAvailable = false
+					lock.Repair = ""
 				} else if err := removeWakeLockIfUnchanged(recheck); err != nil {
 					lock.Status = "error"
 					lock.Reason = err.Error()

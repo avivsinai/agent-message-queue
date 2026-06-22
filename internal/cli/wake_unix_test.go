@@ -769,43 +769,78 @@ func TestAcquireWakeLockSelfHealsPIDReusedByNonAMQ(t *testing.T) {
 	}
 }
 
-func TestAcquireWakeLockSelfHealsPIDReusedByDifferentAMQStart(t *testing.T) {
-	const reusedPID = 4242
-	root := secureTempDirForTest(t)
-	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
-		PID:          reusedPID,
-		ProcessStart: "old-start",
-		BootID:       "boot-1",
-		Executable:   "/opt/homebrew/bin/amq",
-	})
-	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		if pid == reusedPID {
-			return wakeProcessInfo{
-				PID:        pid,
+func TestAcquireWakeLockRefusesLiveWakeIdentityMismatch(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		lock       wakeLock
+		process    wakeProcessInfo
+		wantReason string
+	}{
+		{
+			name: "boot id mismatch",
+			lock: wakeLock{
+				PID:          4242,
+				ProcessStart: "start-1",
+				BootID:       "recorded-boot",
+				Executable:   "/opt/homebrew/bin/amq",
+			},
+			process: wakeProcessInfo{
+				Running:    true,
+				StartToken: "start-1",
+				BootID:     "actual-boot",
+				Executable: "/opt/homebrew/bin/amq",
+			},
+			wantReason: "boot id mismatch",
+		},
+		{
+			name: "process start mismatch",
+			lock: wakeLock{
+				PID:          4242,
+				ProcessStart: "old-start",
+				BootID:       "boot-1",
+				Executable:   "/opt/homebrew/bin/amq",
+			},
+			process: wakeProcessInfo{
 				Running:    true,
 				StartToken: "new-start",
 				BootID:     "boot-1",
 				Executable: "/opt/homebrew/bin/amq",
-				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root},
-			}
-		}
-		if pid == os.Getpid() {
-			return wakeProcessInfo{PID: pid, Running: true, StartToken: "self-start", BootID: "boot-1", Executable: "/opt/homebrew/bin/amq"}
-		}
-		return wakeProcessInfo{PID: pid}
-	})
+			},
+			wantReason: "process start time mismatch",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const reusedPID = 4242
+			root := secureTempDirForTest(t)
+			lockPath := writeWakeLockForTest(t, root, "orchestrator", tc.lock)
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				if pid == reusedPID {
+					proc := tc.process
+					proc.PID = pid
+					proc.Args = []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root}
+					return proc
+				}
+				return wakeProcessInfo{PID: pid}
+			})
 
-	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
-	if err != nil {
-		t.Fatalf("acquireWakeLock should replace mismatched start-token lock: %v", err)
+			cleanup, err := acquireWakeLock(root, "orchestrator", nil)
+			if cleanup != nil {
+				defer cleanup()
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantReason) || !strings.Contains(err.Error(), "not removable") {
+				t.Fatalf("expected identity-mismatch removal refusal, got %v", err)
+			}
+			if _, statErr := os.Stat(lockPath); statErr != nil {
+				t.Fatalf("identity-mismatch lock should remain, stat=%v", statErr)
+			}
+		})
 	}
-	defer cleanup()
 }
 
-func TestAcquireWakeLockSelfHealsStartMismatchWhenExecutableUnavailable(t *testing.T) {
+func TestAcquireWakeLockRefusesStartMismatchWhenExecutableUnavailable(t *testing.T) {
 	const reusedPID = 4242
 	root := secureTempDirForTest(t)
-	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          reusedPID,
 		ProcessStart: "old-start",
 		BootID:       "boot-1",
@@ -821,17 +856,19 @@ func TestAcquireWakeLockSelfHealsStartMismatchWhenExecutableUnavailable(t *testi
 				InspectError: errors.New("executable unavailable"),
 			}
 		}
-		if pid == os.Getpid() {
-			return wakeProcessInfo{PID: pid, Running: true, StartToken: "self-start", BootID: "boot-1", Executable: "/opt/homebrew/bin/amq"}
-		}
 		return wakeProcessInfo{PID: pid}
 	})
 
 	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
-	if err != nil {
-		t.Fatalf("acquireWakeLock should replace start-token mismatch even without executable: %v", err)
+	if cleanup != nil {
+		defer cleanup()
 	}
-	defer cleanup()
+	if err == nil || !strings.Contains(err.Error(), "process start time mismatch") || !strings.Contains(err.Error(), "not removable") {
+		t.Fatalf("expected start-token mismatch refusal without executable identity, got %v", err)
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("lock should remain when executable identity is unavailable, stat=%v", statErr)
+	}
 }
 
 func TestAcquireWakeLockStartReadFailureIsUnverifiedNotMismatch(t *testing.T) {

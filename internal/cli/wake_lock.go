@@ -255,6 +255,39 @@ func validateWakeLockRepairable(inspection wakeLockInspection) error {
 	}
 }
 
+func validateWakeLockStaleRemoval(inspection wakeLockInspection) error {
+	if err := validateWakeLockRepairable(inspection); err == nil {
+		return nil
+	} else if inspection.Status != wakeLockStale {
+		return err
+	}
+	// Identity-token mismatches are removable only when process inspection proves
+	// the live PID is not an amq wake. Other stale reasons keep the historical
+	// self-heal behavior for corrupt or structurally stale lock files.
+	switch inspection.Reason {
+	case "boot id mismatch", "process start time mismatch":
+		if wakeProcessProvenNotWake(inspection.Process) {
+			return nil
+		}
+		return fmt.Errorf("wake lock stale reason %q is not removable while pid %d may still be amq wake", inspection.Reason, inspection.PID)
+	default:
+		return nil
+	}
+}
+
+func wakeProcessProvenNotWake(proc wakeProcessInfo) bool {
+	if !proc.Running {
+		return true
+	}
+	if proc.Executable == "" && len(proc.Args) == 0 {
+		return false
+	}
+	if !processLooksLikeAMQ(proc) {
+		return true
+	}
+	return len(proc.Args) > 0 && !processArgsLookLikeWake(proc.Args)
+}
+
 func removeWakeLockIfUnchanged(inspection wakeLockInspection) error {
 	current, err := readWakeLockFile(inspection.LockPath)
 	if err != nil {

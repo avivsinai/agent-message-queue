@@ -4,6 +4,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -850,6 +851,43 @@ func TestRunWakeRepairCLIRepairsStaleWakeWithJSON(t *testing.T) {
 	}
 	if result.Status != "repaired" || result.PID != 9876 || !result.RepairAvailable {
 		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestRunWakeRepairClearsRepairAvailableAfterStartFailure(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+		PID:        4242,
+		Executable: "/opt/homebrew/bin/amq",
+	}, target))
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatalf("writeWakeTarget: %v", err)
+	}
+	stubStartWakeFromTarget(t, func(gotRoot, gotMe string, target wakeTarget) (int, error) {
+		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+			t.Fatalf("lock should be removed before start, stat=%v", err)
+		}
+		return 0, errors.New("start failed")
+	})
+
+	stdout, _, runErr := captureWakeRepairOutput(t, func() error {
+		return runWakeRepair([]string{"--root", root, "--me", "codex", "--json"})
+	})
+	if runErr == nil || !strings.Contains(runErr.Error(), "start failed") {
+		t.Fatalf("runWakeRepair error = %v, want start failure", runErr)
+	}
+
+	var result wakeRepairResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("unmarshal output: %v\nstdout: %s", err, stdout)
+	}
+	if result.Status != "error" || result.RepairAvailable {
+		t.Fatalf("repair_available should be cleared after start failure: %#v", result)
 	}
 }
 

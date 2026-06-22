@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,45 @@ func TestSend_RejectsPositionalArgs(t *testing.T) {
 				t.Fatalf("expected bob inbox to remain empty, got %d message(s)", len(entries))
 			}
 		})
+	}
+}
+
+func TestSendRootOnlyConfirmationUsesRootBasename(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "custom-root", "clitest")
+	for _, agent := range []string{"lead", "qa"} {
+		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+			t.Fatalf("EnsureAgentDirs: %v", err)
+		}
+	}
+
+	output, err := captureEnvStdout(t, func() error {
+		return runSend([]string{"--root", root, "--me", "lead", "--to", "qa", "--subject", "x", "--body", "y"})
+	})
+	if err != nil {
+		t.Fatalf("runSend: %v", err)
+	}
+	if !strings.Contains(output, "session: clitest") {
+		t.Fatalf("confirmation should include root basename as session label, got %q", output)
+	}
+	if strings.Contains(output, "session: ,") {
+		t.Fatalf("confirmation should not contain a blank session label, got %q", output)
+	}
+}
+
+func TestSendRootOnlyJSONUsesRootBasenameAsSession(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "custom-root", "clitest")
+	for _, agent := range []string{"lead", "qa"} {
+		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+			t.Fatalf("EnsureAgentDirs: %v", err)
+		}
+	}
+
+	output := runSendJSONForTest(t, "--root", root, "--me", "lead", "--to", "qa", "--subject", "x", "--body", "y", "--json")
+	if got := output["session"]; got != "clitest" {
+		t.Fatalf("session = %v, want clitest", got)
+	}
+	if got := output["root"]; got != root {
+		t.Fatalf("root = %v, want %s", got, root)
 	}
 }
 

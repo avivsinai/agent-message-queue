@@ -221,3 +221,81 @@ func TestRunOpsChecksDoesNotAdvertiseRepairForLiveIdentityMismatchLock(t *testin
 		})
 	}
 }
+
+func TestRunOpsChecksFixRefusesLiveIdentityMismatchLock(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		lock       wakeLock
+		process    wakeProcessInfo
+		wantReason string
+	}{
+		{
+			name: "boot id mismatch",
+			lock: wakeLock{
+				PID:          4242,
+				ProcessStart: "start-token",
+				BootID:       "recorded-boot",
+				Executable:   "/opt/homebrew/bin/amq",
+			},
+			process: wakeProcessInfo{
+				PID:        4242,
+				Running:    true,
+				StartToken: "start-token",
+				BootID:     "actual-boot",
+				Executable: "/opt/homebrew/bin/amq",
+			},
+			wantReason: "boot id mismatch",
+		},
+		{
+			name: "process start mismatch",
+			lock: wakeLock{
+				PID:          4242,
+				ProcessStart: "recorded-start",
+				BootID:       "same-boot",
+				Executable:   "/opt/homebrew/bin/amq",
+			},
+			process: wakeProcessInfo{
+				PID:        4242,
+				Running:    true,
+				StartToken: "actual-start",
+				BootID:     "same-boot",
+				Executable: "/opt/homebrew/bin/amq",
+			},
+			wantReason: "process start time mismatch",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			injector := writeExecutableForTest(t, "injector")
+			target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+			if err := writeWakeTarget(root, "codex", target); err != nil {
+				t.Fatalf("write wake target: %v", err)
+			}
+			lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(tc.lock, target))
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				proc := tc.process
+				proc.PID = pid
+				proc.Args = []string{"amq", "wake", "--root", root, "--me", "codex"}
+				return proc
+			})
+
+			result := runOpsChecks(root, "test", true)
+			if len(result.WakeLocks) != 1 {
+				t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+			}
+			got := result.WakeLocks[0]
+			if got.Status != "error" || !strings.Contains(got.Reason, tc.wantReason) || !strings.Contains(got.Reason, "not removable") {
+				t.Fatalf("unexpected wake lock fix result: %#v", got)
+			}
+			if got.Removed {
+				t.Fatalf("identity-mismatch lock should not be marked removed: %#v", got)
+			}
+			if got.RepairAvailable || got.Repair != "" {
+				t.Fatalf("repair should be cleared after refused fix: %#v", got)
+			}
+			if _, statErr := os.Stat(lockPath); statErr != nil {
+				t.Fatalf("identity-mismatch lock should remain after fix refusal: %v", statErr)
+			}
+		})
+	}
+}
