@@ -217,11 +217,32 @@ func requireWakeLockUsable(inspection wakeLockInspection) error {
 	if !inspection.Exists || inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
 		return fmt.Errorf("existing wake lock for %s is not a confirmed valid wake", inspection.Agent)
 	}
+	if !wakeLockHasTTYOrExternalInjector(inspection) {
+		return fmt.Errorf("existing wake lock for %s is not usable for --require-wake (pid %d on %s since %s)",
+			inspection.Agent, inspection.Lock.PID, inspection.Lock.TTY, inspection.Lock.Started)
+	}
 	if wakeLockNeedsReplacement(inspection) {
 		return fmt.Errorf("existing wake lock for %s is not usable for --require-wake (pid %d on %s since %s)",
 			inspection.Agent, inspection.Lock.PID, inspection.Lock.TTY, inspection.Lock.Started)
 	}
 	return nil
+}
+
+func wakeLockHasTTYOrExternalInjector(inspection wakeLockInspection) bool {
+	if inspection.Lock.WakeMode == wakeTargetInjectVia || wakeArgsUseInjectVia(inspection.Process.Args) {
+		return true
+	}
+	tty := strings.TrimSpace(inspection.Lock.TTY)
+	return tty != "" && tty != "unknown"
+}
+
+func wakeArgsUseInjectVia(args []string) bool {
+	for _, arg := range args {
+		if arg == "--inject-via" || strings.HasPrefix(arg, "--inject-via=") {
+			return true
+		}
+	}
+	return false
 }
 
 func replaceConfirmedOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
@@ -377,9 +398,10 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 	}
 	switch inspection.Status {
 	case wakeLockValid:
-		result.Status = "already-running"
+		result.Status = "refused"
 		result.PID = inspection.PID
-		return result, nil
+		result.Reason = "wake lock is already valid; refusing repair"
+		return result, errors.New(result.Reason)
 	case wakeLockStale:
 		// ok; continue after target validation
 	case wakeLockCreating:

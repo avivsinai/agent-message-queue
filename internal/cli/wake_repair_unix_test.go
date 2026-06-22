@@ -592,7 +592,7 @@ func TestRunDispatchWakeRepairCLIRefusesMissingLockWithJSON(t *testing.T) {
 	}
 }
 
-func TestRunWakeRepairCLIReportsAlreadyRunning(t *testing.T) {
+func TestRunWakeRepairCLIRefusesValidLock(t *testing.T) {
 	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "codex", wakeLock{
 		PID:          4242,
@@ -615,11 +615,13 @@ func TestRunWakeRepairCLIReportsAlreadyRunning(t *testing.T) {
 	stdout, _, runErr := captureWakeRepairOutput(t, func() error {
 		return runWakeRepair([]string{"--root", root, "--me", "codex"})
 	})
-	if runErr != nil {
-		t.Fatalf("runWakeRepair: %v", runErr)
+	if runErr == nil || !strings.Contains(runErr.Error(), "already valid") {
+		t.Fatalf("runWakeRepair error = %v, want valid-lock refusal", runErr)
 	}
 
-	if !strings.Contains(stdout, "wake repair: already-running") || !strings.Contains(stdout, "pid=4242") {
+	if !strings.Contains(stdout, "wake repair: refused") ||
+		!strings.Contains(stdout, "pid=4242") ||
+		!strings.Contains(stdout, "already valid") {
 		t.Fatalf("unexpected stdout: %q", stdout)
 	}
 }
