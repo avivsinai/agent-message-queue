@@ -179,6 +179,15 @@ func runDoctor(args []string) error {
 				return err
 			}
 		}
+		if result.Ops.OperatorGate != nil {
+			line := fmt.Sprintf("  operator gate: %d open", result.Ops.OperatorGate.OpenCount)
+			if result.Ops.OperatorGate.OldestGateAgeSeconds > 0 {
+				line += fmt.Sprintf(", oldest %.0fs", result.Ops.OperatorGate.OldestGateAgeSeconds)
+			}
+			if err := writeStdoutLine(line); err != nil {
+				return err
+			}
+		}
 		for _, wl := range result.Ops.WakeLocks {
 			if wl.Status == string(wakeLockValid) {
 				continue
