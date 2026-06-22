@@ -243,6 +243,18 @@ func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
 	inspection.Reason = "legacy lock lacks process start metadata"
 }
 
+func validateWakeLockRepairable(inspection wakeLockInspection) error {
+	if inspection.Status != wakeLockStale {
+		return fmt.Errorf("wake lock status %q is not repairable", inspection.Status)
+	}
+	switch inspection.Reason {
+	case "pid not running", "pid is not amq", "pid is not amq wake":
+		return nil
+	default:
+		return fmt.Errorf("wake lock stale reason %q is not repairable", inspection.Reason)
+	}
+}
+
 func removeWakeLockIfUnchanged(inspection wakeLockInspection) error {
 	current, err := readWakeLockFile(inspection.LockPath)
 	if err != nil {

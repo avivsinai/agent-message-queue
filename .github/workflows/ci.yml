@@ -29,6 +29,10 @@ jobs:
         run: make fmt-check
       - name: Vet
         run: go vet ./...
+      - name: Cross-platform build
+        run: |
+          GOOS=windows go build ./...
+          GOOS=freebsd go build ./...
       - name: Govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
