@@ -15,10 +15,11 @@ import (
 )
 
 type doctorOpsResult struct {
-	Root      opsRoot       `json:"root"`
-	Agents    []opsAgent    `json:"agents"`
-	WakeLocks []opsWakeLock `json:"wake_locks,omitempty"`
-	Hints     []opsHint     `json:"hints"`
+	Root         opsRoot          `json:"root"`
+	Agents       []opsAgent       `json:"agents"`
+	OperatorGate *opsOperatorGate `json:"operator_gate,omitempty"`
+	WakeLocks    []opsWakeLock    `json:"wake_locks,omitempty"`
+	Hints        []opsHint        `json:"hints"`
 }
 
 type opsRoot struct {
@@ -34,6 +35,11 @@ type opsAgent struct {
 	OldestDLQAgeSeconds    float64 `json:"oldest_dlq_age_seconds"`
 	PresenceStatus         string  `json:"presence_status"`
 	PresenceAgeSeconds     float64 `json:"presence_age_seconds"`
+}
+
+type opsOperatorGate struct {
+	OpenCount            int     `json:"open_count"`
+	OldestGateAgeSeconds float64 `json:"oldest_gate_age_seconds"`
 }
 
 type opsHint struct {
@@ -68,6 +74,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 		Path:   root,
 		Source: rootSource,
 	}
+	result.OperatorGate = checkOperatorGate(root, now)
 
 	// Load config for agent list
 	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
@@ -143,6 +150,31 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 	result.Hints = append(result.Hints, checkSymphonyHint()...)
 
 	return result
+}
+
+func checkOperatorGate(root string, now time.Time) *opsOperatorGate {
+	inboxNew := fsq.AgentInboxNew(root, reservedHumanHandle)
+	entries, err := os.ReadDir(inboxNew)
+	if err != nil {
+		return nil
+	}
+	gate := &opsOperatorGate{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		gate.OpenCount++
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		age := now.Sub(info.ModTime()).Seconds()
+		if age > gate.OldestGateAgeSeconds {
+			gate.OldestGateAgeSeconds = age
+		}
+	}
+	gate.OldestGateAgeSeconds = math.Round(gate.OldestGateAgeSeconds)
+	return gate
 }
 
 func discoveredWakeLockAgents(root string, configured []string) []string {

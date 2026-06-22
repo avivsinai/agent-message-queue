@@ -3,14 +3,22 @@ package cli
 import (
 	"flag"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
+
+type presenceListItem struct {
+	Schema             int    `json:"schema,omitempty"`
+	Handle             string `json:"handle"`
+	Status             string `json:"status"`
+	LastSeen           string `json:"last_seen,omitempty"`
+	Note               string `json:"note,omitempty"`
+	Kind               string `json:"kind"`
+	PresenceApplicable bool   `json:"presence_applicable"`
+}
 
 func runPresence(args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
@@ -80,10 +88,11 @@ func runPresenceList(args []string) error {
 	}
 	root := resolveRoot(common.Root)
 
-	var agents []string
-	if cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json")); err == nil {
-		agents = cfg.Agents
-	} else {
+	agents, err := loadKnownAgents(root, false)
+	if err != nil {
+		return err
+	}
+	if agents == nil {
 		var listErr error
 		agents, listErr = fsq.ListAgents(root)
 		if listErr != nil && !os.IsNotExist(listErr) {
@@ -91,7 +100,7 @@ func runPresenceList(args []string) error {
 		}
 	}
 
-	items := make([]presence.Presence, 0, len(agents))
+	items := make([]presenceListItem, 0, len(agents))
 	for _, raw := range agents {
 		agent, err := normalizeHandle(raw)
 		if err != nil {
@@ -100,6 +109,25 @@ func runPresenceList(args []string) error {
 			}
 			continue
 		}
+
+		if agent == reservedHumanHandle {
+			p, err := presence.Read(root, agent)
+			if err != nil {
+				if os.IsNotExist(err) {
+					items = append(items, presenceListItem{
+						Handle:             reservedHumanHandle,
+						Status:             "human",
+						Kind:               "human",
+						PresenceApplicable: false,
+					})
+					continue
+				}
+				return err
+			}
+			items = append(items, presenceListItemFromPresence(p, "human", false))
+			continue
+		}
+
 		p, err := presence.Read(root, agent)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -107,7 +135,7 @@ func runPresenceList(args []string) error {
 			}
 			return err
 		}
-		items = append(items, p)
+		items = append(items, presenceListItemFromPresence(p, "agent", true))
 	}
 
 	if common.JSON {
@@ -120,6 +148,17 @@ func runPresenceList(args []string) error {
 		return nil
 	}
 	for _, item := range items {
+		if !item.PresenceApplicable {
+			if err := writeStdout("%s  human\n", item.Handle); err != nil {
+				return err
+			}
+			if item.Note != "" {
+				if err := writeStdout("  %s\n", item.Note); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		if err := writeStdout("%s  %s  %s\n", item.Handle, item.Status, item.LastSeen); err != nil {
 			return err
 		}
@@ -130,4 +169,20 @@ func runPresenceList(args []string) error {
 		}
 	}
 	return nil
+}
+
+func presenceListItemFromPresence(p presence.Presence, kind string, presenceApplicable bool) presenceListItem {
+	status := p.Status
+	if status == "" && kind == "human" {
+		status = "human"
+	}
+	return presenceListItem{
+		Schema:             p.Schema,
+		Handle:             p.Handle,
+		Status:             status,
+		LastSeen:           p.LastSeen,
+		Note:               p.Note,
+		Kind:               kind,
+		PresenceApplicable: presenceApplicable,
+	}
 }

@@ -44,9 +44,11 @@ func runWho(args []string) error {
 	}
 
 	type agentInfo struct {
-		Handle string `json:"handle"`
-		Active bool   `json:"active"`
-		Note   string `json:"note,omitempty"`
+		Handle             string `json:"handle"`
+		Kind               string `json:"kind"`
+		PresenceApplicable bool   `json:"presence_applicable"`
+		Active             bool   `json:"active"`
+		Note               string `json:"note,omitempty"`
 	}
 	type sessionInfo struct {
 		Name   string      `json:"name"`
@@ -77,7 +79,21 @@ func runWho(args []string) error {
 				continue
 			}
 
-			ai := agentInfo{Handle: ae.Name()}
+			ai := agentInfo{
+				Handle:             ae.Name(),
+				Kind:               "agent",
+				PresenceApplicable: true,
+			}
+			if ai.Handle == reservedHumanHandle {
+				ai.Kind = "human"
+				ai.PresenceApplicable = false
+				if p, err := presence.Read(sessDir, ae.Name()); err == nil {
+					ai.Note = p.Note
+				}
+				agents = append(agents, ai)
+				continue
+			}
+
 			// Check presence for activity status.
 			if p, err := presence.Read(sessDir, ae.Name()); err == nil {
 				if t, err := time.Parse(time.RFC3339Nano, p.LastSeen); err == nil {
@@ -114,7 +130,9 @@ func runWho(args []string) error {
 		}
 		for _, a := range s.Agents {
 			status := "stale"
-			if a.Active {
+			if !a.PresenceApplicable {
+				status = "human"
+			} else if a.Active {
 				status = "active"
 			}
 			note := ""

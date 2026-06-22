@@ -136,6 +136,123 @@ func TestRunOpsChecks_NoConfig(t *testing.T) {
 	}
 }
 
+func TestRunOpsChecks_OperatorGateReportsWithoutConfig(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root dirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, reservedHumanHandle); err != nil {
+		t.Fatalf("ensure user dirs: %v", err)
+	}
+	gatePath := filepath.Join(fsq.AgentInboxNew(root, reservedHumanHandle), "gate.md")
+	if err := os.WriteFile(gatePath, []byte("gate"), 0o600); err != nil {
+		t.Fatalf("write gate: %v", err)
+	}
+	if err := os.Chtimes(gatePath, time.Now().Add(-44*time.Second), time.Now().Add(-44*time.Second)); err != nil {
+		t.Fatalf("chtimes gate: %v", err)
+	}
+
+	result := runOpsChecks(root, "env", false)
+	if result.OperatorGate == nil {
+		t.Fatal("operator_gate is nil, want populated")
+	}
+	if result.OperatorGate.OpenCount != 1 {
+		t.Fatalf("open_count = %d, want 1", result.OperatorGate.OpenCount)
+	}
+	if result.OperatorGate.OldestGateAgeSeconds < 43 || result.OperatorGate.OldestGateAgeSeconds > 45 {
+		t.Fatalf("oldest_gate_age_seconds = %v, want about 44", result.OperatorGate.OldestGateAgeSeconds)
+	}
+}
+
+func TestRunOpsChecks_OperatorGateOmittedWhenUserInboxMissing(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root dirs: %v", err)
+	}
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := config.WriteConfig(cfgPath, config.Config{
+		Version: 1,
+		Agents:  []string{"claude"},
+	}, true); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	result := runOpsChecks(root, "test_source", false)
+	if result.OperatorGate != nil {
+		t.Fatalf("operator_gate = %#v, want nil", result.OperatorGate)
+	}
+}
+
+func TestRunOpsChecks_OperatorGateReportsEmptyUserInbox(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root dirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, reservedHumanHandle); err != nil {
+		t.Fatalf("ensure user dirs: %v", err)
+	}
+
+	result := runOpsChecks(root, "test_source", false)
+	if result.OperatorGate == nil {
+		t.Fatal("operator_gate is nil, want populated")
+	}
+	if result.OperatorGate.OpenCount != 0 {
+		t.Fatalf("open_count = %d, want 0", result.OperatorGate.OpenCount)
+	}
+	if result.OperatorGate.OldestGateAgeSeconds != 0 {
+		t.Fatalf("oldest_gate_age_seconds = %v, want 0", result.OperatorGate.OldestGateAgeSeconds)
+	}
+}
+
+func TestRunOpsChecks_OperatorGateReportsUserInboxConfigIndependently(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root dirs: %v", err)
+	}
+	for _, agent := range []string{"claude", reservedHumanHandle} {
+		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+			t.Fatalf("ensure agent dirs for %s: %v", agent, err)
+		}
+	}
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := config.WriteConfig(cfgPath, config.Config{
+		Version: 1,
+		Agents:  []string{"claude"},
+	}, true); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	now := time.Now()
+	young := filepath.Join(fsq.AgentInboxNew(root, reservedHumanHandle), "young.md")
+	old := filepath.Join(fsq.AgentInboxNew(root, reservedHumanHandle), "old.md")
+	if err := os.WriteFile(young, []byte("young"), 0o600); err != nil {
+		t.Fatalf("write young gate: %v", err)
+	}
+	if err := os.WriteFile(old, []byte("old"), 0o600); err != nil {
+		t.Fatalf("write old gate: %v", err)
+	}
+	if err := os.Chtimes(young, now.Add(-15*time.Second), now.Add(-15*time.Second)); err != nil {
+		t.Fatalf("chtimes young gate: %v", err)
+	}
+	if err := os.Chtimes(old, now.Add(-125*time.Second), now.Add(-125*time.Second)); err != nil {
+		t.Fatalf("chtimes old gate: %v", err)
+	}
+
+	result := runOpsChecks(root, "test_source", false)
+	if result.OperatorGate == nil {
+		t.Fatal("operator_gate is nil, want populated")
+	}
+	if result.OperatorGate.OpenCount != 2 {
+		t.Fatalf("open_count = %d, want 2", result.OperatorGate.OpenCount)
+	}
+	if result.OperatorGate.OldestGateAgeSeconds < 124 || result.OperatorGate.OldestGateAgeSeconds > 126 {
+		t.Fatalf("oldest_gate_age_seconds = %v, want about 125", result.OperatorGate.OldestGateAgeSeconds)
+	}
+	if len(result.Agents) != 1 || result.Agents[0].Handle != "claude" {
+		t.Fatalf("operator gate should not inject user into per-agent ops: %#v", result.Agents)
+	}
+}
+
 func TestRunOpsChecks_ReportsAndFixesStaleWakeLockWithoutConfig(t *testing.T) {
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "alice", wakeLock{

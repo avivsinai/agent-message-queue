@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `amq who`, `amq presence list`, and `amq doctor --ops` now present the
+  reserved `user` mailbox as a human operator gate instead of a stale agent
+  process (#139).
 - The human operator handle `user` is now reserved for configured projects, and
   `amq coop init` seeds `claude,codex,user` by default so strict operator gates
   no longer require custom coop setup (#139).
