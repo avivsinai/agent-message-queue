@@ -184,9 +184,10 @@ func runDoctor(args []string) error {
 				continue
 			}
 			icon := statusIcons["warn"]
-			if wl.Status == "fixed" {
+			switch wl.Status {
+			case "fixed":
 				icon = statusIcons["ok"]
-			} else if wl.Status == "error" {
+			case "error":
 				icon = statusIcons["error"]
 			}
 			line := fmt.Sprintf("  %s wake lock: %s agent=%s root=%s lock=%s",

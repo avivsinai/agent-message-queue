@@ -72,6 +72,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 			Status:  "error",
 			Message: fmt.Sprintf("Cannot load config: %v", err),
 		})
+		result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, nil), fixWakeLocks)
 		return result
 	}
 
@@ -129,7 +130,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 		result.Agents = append(result.Agents, agent)
 	}
 
-	result.WakeLocks = checkWakeLocks(root, cfg.Agents, fixWakeLocks)
+	result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, cfg.Agents), fixWakeLocks)
 
 	// Integration hints
 	result.Hints = append(result.Hints, checkGlobalRootHint()...)
@@ -137,6 +138,34 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 	result.Hints = append(result.Hints, checkSymphonyHint()...)
 
 	return result
+}
+
+func discoveredWakeLockAgents(root string, configured []string) []string {
+	seen := make(map[string]struct{}, len(configured))
+	agents := make([]string, 0, len(configured))
+	for _, agent := range configured {
+		if _, ok := seen[agent]; ok {
+			continue
+		}
+		seen[agent] = struct{}{}
+		agents = append(agents, agent)
+	}
+
+	discovered, err := fsq.ListAgents(root)
+	if err != nil {
+		return agents
+	}
+	for _, agent := range discovered {
+		if _, ok := seen[agent]; ok {
+			continue
+		}
+		if err := fsq.ValidateHandle(agent); err != nil {
+			continue
+		}
+		seen[agent] = struct{}{}
+		agents = append(agents, agent)
+	}
+	return agents
 }
 
 func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {

@@ -135,6 +135,57 @@ func TestRunOpsChecks_NoConfig(t *testing.T) {
 	}
 }
 
+func TestRunOpsChecks_ReportsAndFixesStaleWakeLockWithoutConfig(t *testing.T) {
+	root := t.TempDir()
+	lockPath := writeWakeLockForTest(t, root, "alice", wakeLock{
+		PID:        999999999,
+		Executable: "/opt/homebrew/bin/amq",
+	})
+
+	result := runOpsChecks(root, "test_source", false)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != string(wakeLockStale) {
+		t.Fatalf("status = %q, want stale", got.Status)
+	}
+	if got.Agent != "alice" {
+		t.Fatalf("agent = %q, want alice", got.Agent)
+	}
+	if got.Fix != fixWakeLocksCommand {
+		t.Fatalf("fix = %q, want %q", got.Fix, fixWakeLocksCommand)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("lock should not be removed without fix flag: %v", err)
+	}
+
+	fixed := runOpsChecks(root, "test_source", true)
+	if len(fixed.WakeLocks) != 1 {
+		t.Fatalf("fixed wake lock count = %d, want 1", len(fixed.WakeLocks))
+	}
+	if fixed.WakeLocks[0].Status != "fixed" {
+		t.Fatalf("fixed status = %q, want fixed", fixed.WakeLocks[0].Status)
+	}
+	if !fixed.WakeLocks[0].Removed {
+		t.Fatal("expected Removed=true")
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("lock should be removed with fix flag, stat err=%v", err)
+	}
+
+	foundConfigError := false
+	for _, h := range result.Hints {
+		if h.Code == "config_error" && h.Status == "error" {
+			foundConfigError = true
+			break
+		}
+	}
+	if !foundConfigError {
+		t.Fatalf("expected config_error hint, got: %+v", result.Hints)
+	}
+}
+
 func TestRunOpsChecks_RootSourceThreaded(t *testing.T) {
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {
