@@ -323,9 +323,7 @@ func shouldReplaceOrphanedWakeLock(inspection wakeLockInspection) bool {
 	// that orphan before taking over; never signal an unconfirmed PID.
 	if strings.HasPrefix(existing.TTY, "/dev/") {
 		if _, statErr := os.Stat(existing.TTY); os.IsNotExist(statErr) {
-			terminateWakeProcess(existing.PID)
-			_ = removeWakeLockIfUnchanged(inspection)
-			return true
+			return replaceConfirmedOrphanedWakeLock(inspection)
 		}
 	}
 
@@ -340,22 +338,44 @@ func shouldReplaceOrphanedWakeLock(inspection wakeLockInspection) bool {
 		existingSid, sidErr := unix.Getsid(existing.PID)
 		currentSid, _ := unix.Getsid(0)
 		if sidErr == nil && existingSid != currentSid {
-			terminateWakeProcess(existing.PID)
-			_ = removeWakeLockIfUnchanged(inspection)
-			return true
+			return replaceConfirmedOrphanedWakeLock(inspection)
 		}
 	}
 	return false
 }
 
-func terminateWakeProcess(pid int) {
+func replaceConfirmedOrphanedWakeLock(inspection wakeLockInspection) bool {
+	if !terminateWakeProcessIfStillConfirmed(inspection) {
+		return false
+	}
+	return removeWakeLockIfUnchanged(inspection) == nil
+}
+
+func terminateWakeProcessIfStillConfirmed(inspection wakeLockInspection) bool {
+	if !sameConfirmedWakeLock(inspection) {
+		return false
+	}
+	pid := inspection.PID
 	if proc, err := os.FindProcess(pid); err == nil {
 		_ = proc.Signal(syscall.SIGTERM)
 		time.Sleep(100 * time.Millisecond)
 		if processAlive(pid) {
+			if !sameConfirmedWakeLock(inspection) {
+				return false
+			}
 			_ = proc.Signal(syscall.SIGKILL)
 		}
 	}
+	return true
+}
+
+func sameConfirmedWakeLock(inspection wakeLockInspection) bool {
+	recheck := inspectWakeLock(inspection.Root, inspection.Agent)
+	return recheck.Exists &&
+		recheck.Status == wakeLockValid &&
+		recheck.IdentityConfirmed &&
+		recheck.PID == inspection.PID &&
+		bytes.Equal(recheck.raw, inspection.raw)
 }
 
 func currentWakeLockMatches(lock wakeLock) bool {

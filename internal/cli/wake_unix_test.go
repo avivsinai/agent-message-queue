@@ -374,6 +374,58 @@ func TestRemoveWakeLockIfUnchangedRefusesChangedLock(t *testing.T) {
 	}
 }
 
+func TestShouldReplaceOrphanedWakeLockReverifiesBeforeSignal(t *testing.T) {
+	const pid = 4242
+	root := t.TempDir()
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+		PID:          pid,
+		TTY:          "/dev/amq-missing-tty",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+
+	inspections := 0
+	stubInspectWakeProcess(t, func(gotPID int) wakeProcessInfo {
+		if gotPID == pid {
+			inspections++
+			if inspections == 1 {
+				return wakeProcessInfo{
+					PID:        gotPID,
+					Running:    true,
+					StartToken: "start-1",
+					BootID:     "boot-1",
+					Executable: "/opt/homebrew/bin/amq",
+					Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root},
+				}
+			}
+			return wakeProcessInfo{
+				PID:        gotPID,
+				Running:    true,
+				StartToken: "start-2",
+				BootID:     "boot-1",
+				Executable: "/bin/sleep",
+				Args:       []string{"/bin/sleep", "100"},
+			}
+		}
+		return wakeProcessInfo{PID: gotPID}
+	})
+
+	inspection := inspectWakeLock(root, "orchestrator")
+	if inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
+		t.Fatalf("expected initial valid confirmed lock, got status=%s confirmed=%v", inspection.Status, inspection.IdentityConfirmed)
+	}
+	if shouldReplaceOrphanedWakeLock(inspection) {
+		t.Fatal("should not replace when recheck no longer confirms the same wake lock")
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("lock should remain after failed recheck: %v", err)
+	}
+	if inspections < 2 {
+		t.Fatalf("expected re-inspection before replacement, got %d inspection(s)", inspections)
+	}
+}
+
 func TestRunWakeWithLoopRejectsRecentlyCorruptLock(t *testing.T) {
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {
