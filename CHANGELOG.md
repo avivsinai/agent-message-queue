@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Release publishing now detects release commits inside normally merged release
+  PRs while ordinary feature merge commits no-op before tag, artifact, or skill
+  publishing jobs (#163).
+
 ## [0.37.1] - 2026-06-22
 
 ### Fixed
