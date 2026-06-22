@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   approval gates (#136).
 - Report and optionally fix identity-verified stale `.wake.lock` files from
   `amq doctor --ops`, including roots whose config is missing or corrupt (#151).
+- Add `amq wake repair` plus `coop exec --wake-inject-via` support so managed
+  launchers can restart a dead external-injector wake for a still-running agent
+  session from a digest-bound, private saved target (#154).
 
 ### Fixed
 

@@ -63,7 +63,14 @@ func init() {
 				{Name: "purge", Summary: "Permanently remove DLQ messages", Handler: runDLQPurge},
 			},
 		},
-		{Name: "wake", Summary: "Background waker (TIOCSTI injection, experimental)", Handler: runWake},
+		{
+			Name:    "wake",
+			Summary: "Background waker (TIOCSTI injection, experimental)",
+			Handler: runWake,
+			Children: []CommandInfo{
+				{Name: "repair", Summary: "Restart a proven-stale wake from a saved inject-via target", Handler: runWake},
+			},
+		},
 		{Name: "upgrade", Summary: "Upgrade amq to the latest release", Handler: runUpgradeRegistry},
 		{Name: "env", Summary: "Output shell commands to set environment variables", Handler: runEnv},
 		{

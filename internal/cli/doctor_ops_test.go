@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 )
 
 func TestRunOpsChecks_BasicAgentStats(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 
 	// Set up agent dirs and config
 	agents := []string{"alice", "bob"}
@@ -107,7 +108,7 @@ func TestRunOpsChecks_BasicAgentStats(t *testing.T) {
 }
 
 func TestRunOpsChecks_NoConfig(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("ensure root dirs: %v", err)
 	}
@@ -136,7 +137,7 @@ func TestRunOpsChecks_NoConfig(t *testing.T) {
 }
 
 func TestRunOpsChecks_ReportsAndFixesStaleWakeLockWithoutConfig(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "alice", wakeLock{
 		PID:        999999999,
 		Executable: "/opt/homebrew/bin/amq",
@@ -187,7 +188,7 @@ func TestRunOpsChecks_ReportsAndFixesStaleWakeLockWithoutConfig(t *testing.T) {
 }
 
 func TestRunOpsChecks_RootSourceThreaded(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("ensure root dirs: %v", err)
 	}
@@ -208,7 +209,7 @@ func TestRunOpsChecks_RootSourceThreaded(t *testing.T) {
 }
 
 func TestRunOpsChecks_ReportsStaleWakeLock(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("ensure root dirs: %v", err)
 	}
@@ -251,7 +252,7 @@ func TestRunOpsChecks_ReportsStaleWakeLock(t *testing.T) {
 }
 
 func TestRunOpsChecks_FixesStaleWakeLock(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("ensure root dirs: %v", err)
 	}
@@ -282,8 +283,172 @@ func TestRunOpsChecks_FixesStaleWakeLock(t *testing.T) {
 	if !got.Removed {
 		t.Fatal("expected Removed=true")
 	}
+	if got.RepairAvailable || got.Repair != "" {
+		t.Fatalf("repair should be cleared after fix: %#v", got)
+	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("lock should be removed, stat err=%v", err)
+	}
+}
+
+func TestRunOpsChecks_ReportsWakeRepairAvailabilityWithoutSpawning(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root dirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("ensure alice dirs: %v", err)
+	}
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := config.WriteConfig(cfgPath, config.Config{
+		Version: 1,
+		Agents:  []string{"alice"},
+	}, true); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	injector := filepath.Join(secureTempDirForTest(t), "injector")
+	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write injector: %v", err)
+	}
+	target := mustNewWakeTargetForTest(t, root, "alice", injector, []string{"exec"})
+	lockPath := writeWakeLockForTest(t, root, "alice", bindWakeLockToTarget(wakeLock{
+		PID:        999999999,
+		Executable: "/opt/homebrew/bin/amq",
+	}, target))
+	if err := writeWakeTarget(root, "alice", target); err != nil {
+		t.Fatalf("write wake target: %v", err)
+	}
+
+	result := runOpsChecks(root, "test_source", false)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != string(wakeLockStale) {
+		t.Fatalf("status = %q, want stale", got.Status)
+	}
+	if !got.TargetPresent {
+		t.Fatalf("target_present = false, want true")
+	}
+	if got.TargetReason != "" {
+		t.Fatalf("target_reason = %q, want empty", got.TargetReason)
+	}
+	if !got.RepairAvailable {
+		t.Fatal("repair_available = false, want true")
+	}
+	if got.Repair != wakeRepairCommand(root, "alice") {
+		t.Fatalf("repair = %q, want %q", got.Repair, wakeRepairCommand(root, "alice"))
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("doctor report should not remove lock: %v", err)
+	}
+}
+
+func TestRunOpsChecks_StaleRawLockWithLeftoverTargetHasNoRepair(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root dirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("ensure alice dirs: %v", err)
+	}
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := config.WriteConfig(cfgPath, config.Config{
+		Version: 1,
+		Agents:  []string{"alice"},
+	}, true); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	writeWakeLockForTest(t, root, "alice", wakeLock{
+		PID:        999999999,
+		Executable: "/opt/homebrew/bin/amq",
+	})
+	injector := filepath.Join(secureTempDirForTest(t), "injector")
+	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write injector: %v", err)
+	}
+	if err := writeWakeTarget(root, "alice", mustNewWakeTargetForTest(t, root, "alice", injector, []string{"exec"})); err != nil {
+		t.Fatalf("write wake target: %v", err)
+	}
+
+	result := runOpsChecks(root, "test_source", false)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != string(wakeLockStale) {
+		t.Fatalf("status = %q, want stale", got.Status)
+	}
+	if got.RepairAvailable || got.Repair != "" {
+		t.Fatalf("repair should not be available for unbound target: %#v", got)
+	}
+	if !strings.Contains(got.TargetReason, "not created for an inject-via repair target") {
+		t.Fatalf("target_reason = %q, want unbound target reason", got.TargetReason)
+	}
+}
+
+func TestRunOpsChecks_UnverifiedWakeLockHasTargetButNoRepair(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root dirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("ensure alice dirs: %v", err)
+	}
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := config.WriteConfig(cfgPath, config.Config{
+		Version: 1,
+		Agents:  []string{"alice"},
+	}, true); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	const pid = 4242
+	writeWakeLockForTest(t, root, "alice", wakeLock{
+		PID:        pid,
+		Executable: "/opt/homebrew/bin/amq",
+	})
+	stubInspectWakeProcess(t, func(gotPID int) wakeProcessInfo {
+		if gotPID == pid {
+			return wakeProcessInfo{
+				PID:        gotPID,
+				Running:    true,
+				Executable: "/opt/homebrew/bin/amq",
+			}
+		}
+		return wakeProcessInfo{PID: gotPID}
+	})
+	injector := filepath.Join(secureTempDirForTest(t), "injector")
+	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write injector: %v", err)
+	}
+	if err := writeWakeTarget(root, "alice", mustNewWakeTargetForTest(t, root, "alice", injector, nil)); err != nil {
+		t.Fatalf("write wake target: %v", err)
+	}
+
+	result := runOpsChecks(root, "test_source", false)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != string(wakeLockUnverified) {
+		t.Fatalf("status = %q, want unverified", got.Status)
+	}
+	if !got.TargetPresent {
+		t.Fatal("target_present = false, want true")
+	}
+	if got.RepairAvailable || got.Repair != "" {
+		t.Fatalf("repair should not be available for unverified lock: %#v", got)
+	}
+}
+
+func TestWakeRepairCommandQuotesRoot(t *testing.T) {
+	got := wakeRepairCommand("/tmp/amq root/it's", "alice")
+	want := "amq wake repair --root '/tmp/amq root/it'\"'\"'s' --me alice"
+	if got != want {
+		t.Fatalf("wakeRepairCommand = %q, want %q", got, want)
 	}
 }
 

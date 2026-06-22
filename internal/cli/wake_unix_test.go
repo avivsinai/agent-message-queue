@@ -9,18 +9,22 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-func stubInspectWakeProcess(t *testing.T, fn func(pid int) wakeProcessInfo) {
+func stubSignalWakeProcess(t *testing.T, fn func(pid int, sig os.Signal) error) {
 	t.Helper()
-	old := inspectWakeProcess
-	inspectWakeProcess = fn
+	oldSignal := signalWakeProcess
+	oldGrace := wakeTerminateGrace
+	signalWakeProcess = fn
+	wakeTerminateGrace = 0
 	t.Cleanup(func() {
-		inspectWakeProcess = old
+		signalWakeProcess = oldSignal
+		wakeTerminateGrace = oldGrace
 	})
 }
 
@@ -42,36 +46,17 @@ func stubWakeProcessSID(t *testing.T, fn func(pid int) (int, error)) {
 	})
 }
 
-func writeWakeLockForTest(t *testing.T, root, agent string, lock wakeLock) string {
+func writeExecutableForTest(t *testing.T, name string) string {
 	t.Helper()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
+	path := filepath.Join(secureTempDirForTest(t), name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
 	}
-	if err := fsq.EnsureAgentDirs(root, agent); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	if lock.Root == "" {
-		lock.Root = canonicalWakeRoot(root)
-	}
-	if lock.Agent == "" {
-		lock.Agent = agent
-	}
-	if lock.Started == "" {
-		lock.Started = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
-	}
-	data, err := json.Marshal(lock)
-	if err != nil {
-		t.Fatalf("marshal wake lock: %v", err)
-	}
-	lockPath := filepath.Join(fsq.AgentBase(root, agent), ".wake.lock")
-	if err := os.WriteFile(lockPath, data, 0o600); err != nil {
-		t.Fatalf("write wake lock: %v", err)
-	}
-	return lockPath
+	return path
 }
 
 func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
@@ -81,10 +66,11 @@ func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
 
 	var got wakeConfig
 	errDone := errors.New("done")
+	injector := writeExecutableForTest(t, "inject tool")
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
-		"--inject-via", "/tmp/inject tool",
+		"--inject-via", injector,
 		"--inject-arg", "exec",
 		"--inject-arg", "Team Alpha",
 		"--inject-timeout", "250ms",
@@ -95,7 +81,7 @@ func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
 	if !errors.Is(err, errDone) {
 		t.Fatalf("expected loop sentinel error, got %v", err)
 	}
-	if got.injectVia != "/tmp/inject tool" {
+	if got.injectVia != injector {
 		t.Fatalf("expected inject executable with spaces, got %q", got.injectVia)
 	}
 	if strings.Join(got.injectArgs, "|") != "exec|Team Alpha" {
@@ -107,7 +93,7 @@ func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
 }
 
 func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
@@ -116,11 +102,12 @@ func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
 	}
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	injector := writeExecutableForTest(t, "injector")
 	errDone := errors.New("done")
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
-		"--inject-via", "/tmp/injector",
+		"--inject-via", injector,
 		"--ready-file", readyPath,
 	}, func(cfg wakeConfig) error {
 		if _, statErr := os.Stat(readyPath); statErr != nil {
@@ -130,6 +117,244 @@ func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
 	})
 	if !errors.Is(err, errDone) {
 		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
+func TestRunWakeWithLoopWritesInjectViaWakeTarget(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	injector := writeExecutableForTest(t, "injector")
+	errDone := errors.New("done")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", injector,
+		"--inject-arg", "exec",
+	}, func(cfg wakeConfig) error {
+		target, exists, targetErr := readWakeTarget(root, "orchestrator")
+		if targetErr != nil {
+			t.Fatalf("readWakeTarget: %v", targetErr)
+		}
+		if !exists {
+			t.Fatal("expected wake target to be written")
+		}
+		if target.InjectVia != injector || strings.Join(target.InjectArgs, "|") != "exec" {
+			t.Fatalf("unexpected target: %#v", target)
+		}
+		return errDone
+	})
+	if !errors.Is(err, errDone) {
+		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
+func TestRunWakeWithLoopExecutesResolvedInjectViaPath(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	base := secureTempDirForTest(t)
+	realDir := filepath.Join(base, "real-bin")
+	if err := os.MkdirAll(realDir, 0o700); err != nil {
+		t.Fatalf("mkdir real bin: %v", err)
+	}
+	injector := filepath.Join(realDir, "injector")
+	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write injector: %v", err)
+	}
+	linkDir := filepath.Join(base, "link-bin")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatalf("symlink bin: %v", err)
+	}
+
+	errDone := errors.New("done")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", filepath.Join(linkDir, "injector"),
+	}, func(cfg wakeConfig) error {
+		if cfg.injectVia != injector {
+			t.Fatalf("cfg.injectVia = %q, want resolved %q", cfg.injectVia, injector)
+		}
+		return errDone
+	})
+	if !errors.Is(err, errDone) {
+		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
+func TestRunWakeWithLoopRejectsUnsafeInjectViaBeforeLoop(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	injector := writeExecutableForTest(t, "injector")
+	if err := os.Chmod(injector, 0o777); err != nil {
+		t.Fatalf("chmod injector: %v", err)
+	}
+	var runErr error
+	_ = captureWakeStderr(t, func() {
+		runErr = runWakeWithLoop([]string{
+			"--root", root,
+			"--me", "orchestrator",
+			"--inject-via", injector,
+			"--inject-arg", "exec",
+		}, func(cfg wakeConfig) error {
+			t.Fatalf("loop should not run with unsafe inject_via: %#v", cfg)
+			return nil
+		})
+	})
+	if runErr == nil || !strings.Contains(runErr.Error(), "group/world-writable") {
+		t.Fatalf("expected unsafe inject_via rejection, got %v", runErr)
+	}
+	if _, exists, targetErr := readWakeTarget(root, "orchestrator"); targetErr != nil || exists {
+		t.Fatalf("wake target exists=%v err=%v, want absent with no read error", exists, targetErr)
+	}
+}
+
+func TestInjectViaRevalidatesExecutableBeforeExec(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mutate   func(t *testing.T, path string)
+		wantText string
+	}{
+		{
+			name: "symlink",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				target := writeExecutableForTest(t, "target-injector")
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove injector: %v", err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatalf("symlink injector: %v", err)
+				}
+			},
+			wantText: "must not be a symlink",
+		},
+		{
+			name: "nonregular",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove injector: %v", err)
+				}
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatalf("mkdir injector path: %v", err)
+				}
+			},
+			wantText: "must be a regular file",
+		},
+		{
+			name: "world_writable",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Chmod(path, 0o777); err != nil {
+					t.Fatalf("chmod injector: %v", err)
+				}
+			},
+			wantText: "group/world-writable",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			injector := writeExecutableForTest(t, "injector-"+tc.name)
+			cfg := &wakeConfig{
+				injectVia:     injector,
+				injectTimeout: time.Second,
+			}
+			tc.mutate(t, injector)
+
+			err := injectVia(cfg, "payload")
+			if err == nil || !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("expected %q rejection, got %v", tc.wantText, err)
+			}
+		})
+	}
+}
+
+func TestRunWakeWithLoopKeepsOldWakeTargetWhenNewTargetIsUnsafe(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	oldInjector := writeExecutableForTest(t, "old-injector")
+	if err := writeWakeTarget(root, "orchestrator", mustNewWakeTargetForTest(t, root, "orchestrator", oldInjector, []string{"old"})); err != nil {
+		t.Fatalf("write old wake target: %v", err)
+	}
+	newInjector := writeExecutableForTest(t, "new-injector")
+	if err := os.Chmod(newInjector, 0o777); err != nil {
+		t.Fatalf("chmod injector: %v", err)
+	}
+	var runErr error
+	_ = captureWakeStderr(t, func() {
+		runErr = runWakeWithLoop([]string{
+			"--root", root,
+			"--me", "orchestrator",
+			"--inject-via", newInjector,
+		}, func(cfg wakeConfig) error {
+			t.Fatalf("loop should not run with unsafe inject_via: %#v", cfg)
+			return nil
+		})
+	})
+	if runErr == nil || !strings.Contains(runErr.Error(), "group/world-writable") {
+		t.Fatalf("expected unsafe inject_via rejection, got %v", runErr)
+	}
+	target, exists, err := readWakeTarget(root, "orchestrator")
+	if err != nil || !exists {
+		t.Fatalf("wake target exists=%v err=%v, want old target retained", exists, err)
+	}
+	if target.InjectVia != oldInjector {
+		t.Fatalf("wake target inject_via = %q, want old target %q", target.InjectVia, oldInjector)
+	}
+}
+
+func TestRunWakeWithLoopRejectsInjectorSwappedAfterTargetWrite(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	injector := writeExecutableForTest(t, "injector")
+	if err := writeWakeTarget(root, "orchestrator", mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"exec"})); err != nil {
+		t.Fatalf("write wake target: %v", err)
+	}
+	if err := os.Remove(injector); err != nil {
+		t.Fatalf("remove injector: %v", err)
+	}
+	if err := os.Symlink("/bin/sh", injector); err != nil {
+		t.Fatalf("swap injector to symlink: %v", err)
+	}
+
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", injector,
+		"--inject-arg", "exec",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run after injector swap: %#v", cfg)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("expected swapped injector rejection, got %v", err)
 	}
 }
 
@@ -148,19 +373,21 @@ func TestRunWakeWithLoopDoesNotWriteReadyFileWhenLockBlocked(t *testing.T) {
 		}
 		return wakeProcessInfo{PID: pid}
 	})
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
+		TTY:          "tty",
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
 	})
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	injector := writeExecutableForTest(t, "injector")
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
-		"--inject-via", "/tmp/injector",
+		"--inject-via", injector,
 		"--ready-file", readyPath,
 	}, func(cfg wakeConfig) error {
 		t.Fatalf("loop should not run with an existing live wake lock: %#v", cfg)
@@ -192,19 +419,21 @@ func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
 		}
 		return wakeProcessInfo{PID: pid}
 	})
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
+		TTY:          "tty",
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
 	})
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	injector := writeExecutableForTest(t, "injector")
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
-		"--inject-via", "/tmp/injector",
+		"--inject-via", injector,
 		"--ready-file", readyPath,
 		"--accept-existing-wake",
 	}, func(cfg wakeConfig) error {
@@ -234,7 +463,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsMissingTTY(t *testing.T) {
 		}
 		return wakeProcessInfo{PID: pid}
 	})
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
 		TTY:          "/dev/amq-missing-tty",
@@ -244,10 +473,11 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsMissingTTY(t *testing.T) {
 	})
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	injector := writeExecutableForTest(t, "injector")
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
-		"--inject-via", "/tmp/injector",
+		"--inject-via", injector,
 		"--ready-file", readyPath,
 		"--accept-existing-wake",
 	}, func(cfg wakeConfig) error {
@@ -265,6 +495,111 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsMissingTTY(t *testing.T) {
 	}
 	if _, statErr := os.Stat(lockPath); statErr != nil {
 		t.Fatalf("existing lock should remain, statErr=%v", statErr)
+	}
+}
+
+func TestRunWakeWithLoopAcceptExistingWakeRejectsBlankOrUnknownTTY(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tty  string
+	}{
+		{name: "blank", tty: ""},
+		{name: "unknown", tty: "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const wakePID = 4242
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				if pid == wakePID {
+					return wakeProcessInfo{
+						PID:        pid,
+						Running:    true,
+						StartToken: "start-1",
+						BootID:     "boot-1",
+						Executable: "/opt/homebrew/bin/amq",
+						Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+					}
+				}
+				return wakeProcessInfo{PID: pid}
+			})
+			root := secureTempDirForTest(t)
+			lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+				PID:          wakePID,
+				TTY:          tc.tty,
+				ProcessStart: "start-1",
+				BootID:       "boot-1",
+				Executable:   "/opt/homebrew/bin/amq",
+			})
+
+			readyPath := filepath.Join(t.TempDir(), "wake.ready")
+			injector := writeExecutableForTest(t, "injector")
+			err := runWakeWithLoop([]string{
+				"--root", root,
+				"--me", "orchestrator",
+				"--inject-via", injector,
+				"--ready-file", readyPath,
+				"--accept-existing-wake",
+			}, func(cfg wakeConfig) error {
+				t.Fatalf("loop should not run with an unusable existing wake lock: %#v", cfg)
+				return nil
+			})
+			if err == nil {
+				t.Fatal("expected unusable wake lock error")
+			}
+			if !strings.Contains(err.Error(), "not usable for --require-wake") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+				t.Fatalf("ready file should not exist, statErr=%v", statErr)
+			}
+			if _, statErr := os.Stat(lockPath); statErr != nil {
+				t.Fatalf("existing lock should remain, statErr=%v", statErr)
+			}
+		})
+	}
+}
+
+func TestRunWakeWithLoopAcceptExistingWakeAcceptsInjectViaUnknownTTY(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"exec"})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "start-1",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-via", injector},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
+		PID:          wakePID,
+		TTY:          "unknown",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	}, target))
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", injector,
+		"--ready-file", readyPath,
+		"--accept-existing-wake",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with an existing live wake lock: %#v", cfg)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected inject-via wake to satisfy ready file despite unknown tty, got %v", err)
+	}
+	if _, statErr := os.Stat(readyPath); statErr != nil {
+		t.Fatalf("ready file should exist, statErr=%v", statErr)
 	}
 }
 
@@ -296,7 +631,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *test
 		}
 		return wakeProcessInfo{PID: pid}
 	})
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
 		TTY:          ttyPath,
@@ -306,10 +641,11 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *test
 	})
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	injector := writeExecutableForTest(t, "injector")
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
-		"--inject-via", "/tmp/injector",
+		"--inject-via", injector,
 		"--ready-file", readyPath,
 		"--accept-existing-wake",
 	}, func(cfg wakeConfig) error {
@@ -346,19 +682,21 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsUnverifiedWake(t *testing.T) {
 		}
 		return wakeProcessInfo{PID: pid}
 	})
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
+		TTY:          "test-tty",
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
 	})
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	injector := writeExecutableForTest(t, "injector")
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
-		"--inject-via", "/tmp/injector",
+		"--inject-via", injector,
 		"--ready-file", readyPath,
 		"--accept-existing-wake",
 	}, func(cfg wakeConfig) error {
@@ -378,7 +716,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsUnverifiedWake(t *testing.T) {
 
 func TestAcquireWakeLockSelfHealsPIDReusedByNonAMQ(t *testing.T) {
 	const reusedPID = 4242
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          reusedPID,
 		ProcessStart: "old-start",
@@ -409,7 +747,7 @@ func TestAcquireWakeLockSelfHealsPIDReusedByNonAMQ(t *testing.T) {
 		return wakeProcessInfo{PID: pid}
 	})
 
-	cleanup, err := acquireWakeLock(root, "orchestrator")
+	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
 	if err != nil {
 		t.Fatalf("acquireWakeLock should replace stale PID-reuse lock: %v", err)
 	}
@@ -433,7 +771,7 @@ func TestAcquireWakeLockSelfHealsPIDReusedByNonAMQ(t *testing.T) {
 
 func TestAcquireWakeLockSelfHealsPIDReusedByDifferentAMQStart(t *testing.T) {
 	const reusedPID = 4242
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          reusedPID,
 		ProcessStart: "old-start",
@@ -457,7 +795,7 @@ func TestAcquireWakeLockSelfHealsPIDReusedByDifferentAMQStart(t *testing.T) {
 		return wakeProcessInfo{PID: pid}
 	})
 
-	cleanup, err := acquireWakeLock(root, "orchestrator")
+	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
 	if err != nil {
 		t.Fatalf("acquireWakeLock should replace mismatched start-token lock: %v", err)
 	}
@@ -466,7 +804,7 @@ func TestAcquireWakeLockSelfHealsPIDReusedByDifferentAMQStart(t *testing.T) {
 
 func TestAcquireWakeLockSelfHealsStartMismatchWhenExecutableUnavailable(t *testing.T) {
 	const reusedPID = 4242
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          reusedPID,
 		ProcessStart: "old-start",
@@ -489,7 +827,7 @@ func TestAcquireWakeLockSelfHealsStartMismatchWhenExecutableUnavailable(t *testi
 		return wakeProcessInfo{PID: pid}
 	})
 
-	cleanup, err := acquireWakeLock(root, "orchestrator")
+	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
 	if err != nil {
 		t.Fatalf("acquireWakeLock should replace start-token mismatch even without executable: %v", err)
 	}
@@ -498,7 +836,7 @@ func TestAcquireWakeLockSelfHealsStartMismatchWhenExecutableUnavailable(t *testi
 
 func TestAcquireWakeLockStartReadFailureIsUnverifiedNotMismatch(t *testing.T) {
 	const pid = 4242
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          pid,
 		ProcessStart: "old-start",
@@ -516,7 +854,7 @@ func TestAcquireWakeLockStartReadFailureIsUnverifiedNotMismatch(t *testing.T) {
 		return wakeProcessInfo{PID: gotPID}
 	})
 
-	cleanup, err := acquireWakeLock(root, "orchestrator")
+	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -533,7 +871,7 @@ func TestAcquireWakeLockStartReadFailureIsUnverifiedNotMismatch(t *testing.T) {
 
 func TestAcquireWakeLockLegacyLiveLockDoesNotAutoDelete(t *testing.T) {
 	const pid = 4242
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:        pid,
 		Executable: "/opt/homebrew/bin/amq",
@@ -549,7 +887,7 @@ func TestAcquireWakeLockLegacyLiveLockDoesNotAutoDelete(t *testing.T) {
 		return wakeProcessInfo{PID: gotPID}
 	})
 
-	cleanup, err := acquireWakeLock(root, "orchestrator")
+	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -565,7 +903,7 @@ func TestAcquireWakeLockLegacyLiveLockDoesNotAutoDelete(t *testing.T) {
 }
 
 func TestRemoveWakeLockIfUnchangedRefusesChangedLock(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{PID: 4242})
 	inspection := inspectWakeLock(root, "orchestrator")
 	if !inspection.Exists {
@@ -591,24 +929,175 @@ func TestRemoveWakeLockIfUnchangedRefusesChangedLock(t *testing.T) {
 	}
 }
 
-func TestShouldReplaceOrphanedWakeLockReverifiesBeforeSignal(t *testing.T) {
-	const pid = 4242
-	root := t.TempDir()
+func TestInspectWakeLockRejectsSymlinkAndFIFO(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		setup     func(t *testing.T, path string)
+		wantError string
+	}{
+		{
+			name: "symlink",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				target := filepath.Join(t.TempDir(), "lock.json")
+				if err := os.WriteFile(target, []byte(`{"pid":4242}`), 0o600); err != nil {
+					t.Fatalf("write target lock: %v", err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatalf("symlink lock: %v", err)
+				}
+			},
+			wantError: "must not be a symlink",
+		},
+		{
+			name: "fifo",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatalf("mkfifo lock: %v", err)
+				}
+			},
+			wantError: "must be a regular file",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			agentBase := fsq.AgentBase(root, "orchestrator")
+			if err := os.MkdirAll(agentBase, 0o700); err != nil {
+				t.Fatalf("mkdir agent base: %v", err)
+			}
+			tc.setup(t, filepath.Join(agentBase, ".wake.lock"))
+
+			done := make(chan wakeLockInspection, 1)
+			go func() {
+				done <- inspectWakeLock(root, "orchestrator")
+			}()
+
+			select {
+			case inspection := <-done:
+				if !inspection.Exists || inspection.Status != wakeLockUnverified ||
+					!strings.Contains(inspection.Reason, tc.wantError) {
+					t.Fatalf("unexpected inspection: %#v", inspection)
+				}
+			case <-time.After(250 * time.Millisecond):
+				t.Fatal("inspectWakeLock blocked")
+			}
+		})
+	}
+}
+
+func TestShouldReplaceOrphanedWakeLockSignalsOnlyAfterRevalidation(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
-		PID:          pid,
+		PID:          wakePID,
 		TTY:          "/dev/amq-missing-tty",
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
 	})
+	killed := false
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			if killed {
+				return wakeProcessInfo{PID: pid, Running: false}
+			}
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "start-1",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	signals := []os.Signal{}
+	stubSignalWakeProcess(t, func(pid int, sig os.Signal) error {
+		if pid != wakePID {
+			t.Fatalf("signal pid = %d, want %d", pid, wakePID)
+		}
+		signals = append(signals, sig)
+		if sig == os.Kill {
+			killed = true
+		}
+		return nil
+	})
 
-	inspections := 0
-	stubInspectWakeProcess(t, func(gotPID int) wakeProcessInfo {
-		if gotPID == pid {
-			inspections++
-			if inspections == 1 {
+	inspection := inspectWakeLock(root, "orchestrator")
+	replaced, err := shouldReplaceOrphanedWakeLock(inspection)
+	if err != nil {
+		t.Fatalf("shouldReplaceOrphanedWakeLock: %v", err)
+	}
+	if !replaced {
+		t.Fatal("expected confirmed orphan to be replaced")
+	}
+	if len(signals) != 2 {
+		t.Fatalf("signals = %d, want SIGTERM and SIGKILL", len(signals))
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("lock should be removed after confirmed orphan replacement, stat=%v", err)
+	}
+}
+
+func TestShouldReplaceOrphanedWakeLockKeepsLockWhenKillDoesNotTerminate(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+		PID:          wakePID,
+		TTY:          "/dev/amq-missing-tty",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "start-1",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	stubSignalWakeProcess(t, func(pid int, sig os.Signal) error {
+		return nil
+	})
+
+	inspection := inspectWakeLock(root, "orchestrator")
+	replaced, err := shouldReplaceOrphanedWakeLock(inspection)
+	if err == nil || !strings.Contains(err.Error(), "still alive after SIGKILL") {
+		t.Fatalf("expected still-alive error, got %v", err)
+	}
+	if replaced {
+		t.Fatal("should not replace lock when old wake remains alive")
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("lock should remain after failed kill, stat=%v", statErr)
+	}
+}
+
+func TestShouldReplaceOrphanedWakeLockRevalidatesBeforeSignal(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+		PID:          wakePID,
+		TTY:          "/dev/amq-missing-tty",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+	inspectCalls := 0
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			inspectCalls++
+			if inspectCalls <= 2 {
 				return wakeProcessInfo{
-					PID:        gotPID,
+					PID:        pid,
 					Running:    true,
 					StartToken: "start-1",
 					BootID:     "boot-1",
@@ -617,34 +1106,36 @@ func TestShouldReplaceOrphanedWakeLockReverifiesBeforeSignal(t *testing.T) {
 				}
 			}
 			return wakeProcessInfo{
-				PID:        gotPID,
+				PID:        pid,
 				Running:    true,
-				StartToken: "start-2",
+				StartToken: "reused-start",
 				BootID:     "boot-1",
 				Executable: "/bin/sleep",
 				Args:       []string{"/bin/sleep", "100"},
 			}
 		}
-		return wakeProcessInfo{PID: gotPID}
+		return wakeProcessInfo{PID: pid}
+	})
+	stubSignalWakeProcess(t, func(pid int, sig os.Signal) error {
+		t.Fatalf("must not signal after process identity changes, got pid=%d sig=%v", pid, sig)
+		return nil
 	})
 
 	inspection := inspectWakeLock(root, "orchestrator")
-	if inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
-		t.Fatalf("expected initial valid confirmed lock, got status=%s confirmed=%v", inspection.Status, inspection.IdentityConfirmed)
+	replaced, err := shouldReplaceOrphanedWakeLock(inspection)
+	if err == nil {
+		t.Fatal("expected identity-changed error")
 	}
-	if shouldReplaceOrphanedWakeLock(inspection) {
-		t.Fatal("should not replace when recheck no longer confirms the same wake lock")
+	if replaced {
+		t.Fatal("should not replace lock when process identity changes before signal")
 	}
-	if _, err := os.Stat(lockPath); err != nil {
-		t.Fatalf("lock should remain after failed recheck: %v", err)
-	}
-	if inspections < 2 {
-		t.Fatalf("expected re-inspection before replacement, got %d inspection(s)", inspections)
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("lock should remain after aborted signal, stat=%v", statErr)
 	}
 }
 
 func TestRunWakeWithLoopRejectsRecentlyCorruptLock(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
@@ -659,7 +1150,7 @@ func TestRunWakeWithLoopRejectsRecentlyCorruptLock(t *testing.T) {
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
-		"--inject-via", "/tmp/injector",
+		"--inject-via", writeExecutableForTest(t, "injector"),
 	}, func(cfg wakeConfig) error {
 		t.Fatalf("loop should not run with recent corrupt lock: %#v", cfg)
 		return nil
@@ -715,6 +1206,132 @@ func TestWaitForWakeReadyAcceptsReadyFileWrittenBeforeExit(t *testing.T) {
 	}
 }
 
+func TestConfigureRepairWakeCommandDetachesOutput(t *testing.T) {
+	output, err := os.OpenFile(filepath.Join(t.TempDir(), "repair.log"), os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open output: %v", err)
+	}
+	defer func() { _ = output.Close() }()
+
+	cmd := exec.Command("amq")
+	configureRepairWakeCommand(cmd, output)
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Fatalf("repair wake command should start in a new session: %#v", cmd.SysProcAttr)
+	}
+	if cmd.Stdout != output || cmd.Stderr != output {
+		t.Fatalf("repair wake command should redirect stdout/stderr to repair log")
+	}
+	if cmd.Stdout == os.Stdout || cmd.Stderr == os.Stderr {
+		t.Fatalf("repair wake command must not inherit parent stdout/stderr")
+	}
+}
+
+func TestOpenWakeRepairOutputCreatesPrivateLog(t *testing.T) {
+	root := secureTempDirForTest(t)
+	output, err := openWakeRepairOutput(root, "orchestrator")
+	if err != nil {
+		t.Fatalf("openWakeRepairOutput: %v", err)
+	}
+	path := output.Name()
+	if err := output.Close(); err != nil {
+		t.Fatalf("close output: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat repair output: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("repair output mode = %o, want 0600", got)
+	}
+}
+
+func TestOpenWakeRepairOutputRejectsSymlinkLog(t *testing.T) {
+	root := secureTempDirForTest(t)
+	agentBase := fsq.AgentBase(root, "orchestrator")
+	if err := os.MkdirAll(agentBase, 0o700); err != nil {
+		t.Fatalf("mkdir agent base: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "repair.log")
+	if err := os.WriteFile(target, []byte("old\n"), 0o600); err != nil {
+		t.Fatalf("write target log: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(agentBase, ".wake.repair.log")); err != nil {
+		t.Fatalf("symlink repair log: %v", err)
+	}
+
+	output, err := openWakeRepairOutput(root, "orchestrator")
+	if err == nil {
+		_ = output.Close()
+		t.Fatal("expected symlink repair log rejection")
+	}
+	if !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+}
+
+func TestOpenWakeRepairOutputRejectsFIFOWithoutBlocking(t *testing.T) {
+	root := secureTempDirForTest(t)
+	agentBase := fsq.AgentBase(root, "orchestrator")
+	if err := os.MkdirAll(agentBase, 0o700); err != nil {
+		t.Fatalf("mkdir agent base: %v", err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(agentBase, ".wake.repair.log"), 0o600); err != nil {
+		t.Fatalf("mkfifo repair log: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		output, err := openWakeRepairOutput(root, "orchestrator")
+		if output != nil {
+			_ = output.Close()
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "must be a regular file") {
+			t.Fatalf("expected FIFO rejection, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("openWakeRepairOutput blocked on FIFO")
+	}
+}
+
+func TestRunWakeRepairJSONRejectsFIFOLogWithoutBlocking(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"exec"})
+	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
+		PID:        4242,
+		Executable: "/opt/homebrew/bin/amq",
+	}, target))
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
+		t.Fatalf("writeWakeTarget: %v", err)
+	}
+	agentBase := fsq.AgentBase(root, "orchestrator")
+	if err := syscall.Mkfifo(filepath.Join(agentBase, ".wake.repair.log"), 0o600); err != nil {
+		t.Fatalf("mkfifo repair log: %v", err)
+	}
+
+	stdout, _, runErr := captureWakeRepairOutput(t, func() error {
+		return runWakeRepair([]string{"--root", root, "--me", "orchestrator", "--json"})
+	})
+	if runErr == nil || !strings.Contains(runErr.Error(), "regular file") {
+		t.Fatalf("runWakeRepair error = %v, want regular-file refusal", runErr)
+	}
+	var result wakeRepairResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("unmarshal output: %v\nstdout: %s", err, stdout)
+	}
+	if result.Status != "error" || !strings.Contains(result.Reason, "regular file") {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
 func TestRunWakeWithLoopRejectsInjectArgWithoutInjectVia(t *testing.T) {
 	err := runWakeWithLoop([]string{
 		"--root", t.TempDir(),
@@ -736,7 +1353,7 @@ func TestRunWakeWithLoopRejectsNonPositiveInjectTimeout(t *testing.T) {
 	err := runWakeWithLoop([]string{
 		"--root", t.TempDir(),
 		"--me", "orchestrator",
-		"--inject-via", "/tmp/injector",
+		"--inject-via", writeExecutableForTest(t, "injector"),
 		"--inject-timeout", "0",
 	}, func(cfg wakeConfig) error {
 		t.Fatalf("loop should not run with invalid timeout: %#v", cfg)
