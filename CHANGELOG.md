@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-06-22
 ### Added
 
 - `amq env --export` now prints eval-safe shell exports for opt-in terminal
@@ -24,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release publishing now detects release commits inside normally merged release
   PRs while ordinary feature merge commits no-op before tag, artifact, or skill
   publishing jobs (#163).
+
 
 ## [0.37.1] - 2026-06-22
 
@@ -575,7 +577,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
-[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.37.1...HEAD
+[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.38.0...HEAD
+[0.38.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.37.1...v0.38.0
 [0.37.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.37.0...v0.37.1
 [0.37.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.35.0...v0.36.0
