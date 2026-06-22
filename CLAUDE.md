@@ -332,6 +332,7 @@ Use `--force` with retry to override the max retry limit.
 - Queue depth and oldest unread per agent
 - DLQ count and oldest age
 - Presence freshness
+- Wake lock health (`--fix-wake-locks` removes stale locks)
 - Integration hints for Kanban and Symphony
 
 Use `amq doctor --ops --json` for machine-readable health output.

@@ -55,7 +55,7 @@ func TestRunOpsChecks_BasicAgentStats(t *testing.T) {
 		t.Fatalf("write presence: %v", err)
 	}
 
-	result := runOpsChecks(root, "test_source")
+	result := runOpsChecks(root, "test_source", false)
 
 	// Check root
 	if result.Root.Path != root {
@@ -113,7 +113,7 @@ func TestRunOpsChecks_NoConfig(t *testing.T) {
 	}
 	// No config.json written
 
-	result := runOpsChecks(root, "env")
+	result := runOpsChecks(root, "env", false)
 
 	// Should return config_error hint
 	if len(result.Hints) == 0 {
@@ -135,6 +135,57 @@ func TestRunOpsChecks_NoConfig(t *testing.T) {
 	}
 }
 
+func TestRunOpsChecks_ReportsAndFixesStaleWakeLockWithoutConfig(t *testing.T) {
+	root := t.TempDir()
+	lockPath := writeWakeLockForTest(t, root, "alice", wakeLock{
+		PID:        999999999,
+		Executable: "/opt/homebrew/bin/amq",
+	})
+
+	result := runOpsChecks(root, "test_source", false)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != string(wakeLockStale) {
+		t.Fatalf("status = %q, want stale", got.Status)
+	}
+	if got.Agent != "alice" {
+		t.Fatalf("agent = %q, want alice", got.Agent)
+	}
+	if got.Fix != fixWakeLocksCommand {
+		t.Fatalf("fix = %q, want %q", got.Fix, fixWakeLocksCommand)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("lock should not be removed without fix flag: %v", err)
+	}
+
+	fixed := runOpsChecks(root, "test_source", true)
+	if len(fixed.WakeLocks) != 1 {
+		t.Fatalf("fixed wake lock count = %d, want 1", len(fixed.WakeLocks))
+	}
+	if fixed.WakeLocks[0].Status != "fixed" {
+		t.Fatalf("fixed status = %q, want fixed", fixed.WakeLocks[0].Status)
+	}
+	if !fixed.WakeLocks[0].Removed {
+		t.Fatal("expected Removed=true")
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("lock should be removed with fix flag, stat err=%v", err)
+	}
+
+	foundConfigError := false
+	for _, h := range result.Hints {
+		if h.Code == "config_error" && h.Status == "error" {
+			foundConfigError = true
+			break
+		}
+	}
+	if !foundConfigError {
+		t.Fatalf("expected config_error hint, got: %+v", result.Hints)
+	}
+}
+
 func TestRunOpsChecks_RootSourceThreaded(t *testing.T) {
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -149,10 +200,90 @@ func TestRunOpsChecks_RootSourceThreaded(t *testing.T) {
 	}
 
 	for _, src := range []string{"flag", "env", "project_amqrc", "global_amqrc"} {
-		result := runOpsChecks(root, src)
+		result := runOpsChecks(root, src, false)
 		if result.Root.Source != src {
 			t.Errorf("runOpsChecks(_, %q).Root.Source = %q", src, result.Root.Source)
 		}
+	}
+}
+
+func TestRunOpsChecks_ReportsStaleWakeLock(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root dirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("ensure alice dirs: %v", err)
+	}
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := config.WriteConfig(cfgPath, config.Config{
+		Version: 1,
+		Agents:  []string{"alice"},
+	}, true); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	lockPath := writeWakeLockForTest(t, root, "alice", wakeLock{
+		PID:        999999999,
+		Executable: "/opt/homebrew/bin/amq",
+	})
+
+	result := runOpsChecks(root, "test_source", false)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != string(wakeLockStale) {
+		t.Fatalf("status = %q, want stale", got.Status)
+	}
+	if got.Agent != "alice" {
+		t.Fatalf("agent = %q, want alice", got.Agent)
+	}
+	if got.Reason != "pid not running" {
+		t.Fatalf("reason = %q, want pid not running", got.Reason)
+	}
+	if got.Fix != fixWakeLocksCommand {
+		t.Fatalf("fix = %q, want %q", got.Fix, fixWakeLocksCommand)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("lock should not be removed without fix flag: %v", err)
+	}
+}
+
+func TestRunOpsChecks_FixesStaleWakeLock(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root dirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("ensure alice dirs: %v", err)
+	}
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := config.WriteConfig(cfgPath, config.Config{
+		Version: 1,
+		Agents:  []string{"alice"},
+	}, true); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	lockPath := writeWakeLockForTest(t, root, "alice", wakeLock{
+		PID:        999999999,
+		Executable: "/opt/homebrew/bin/amq",
+	})
+
+	result := runOpsChecks(root, "test_source", true)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != "fixed" {
+		t.Fatalf("status = %q, want fixed", got.Status)
+	}
+	if !got.Removed {
+		t.Fatal("expected Removed=true")
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("lock should be removed, stat err=%v", err)
 	}
 }
 

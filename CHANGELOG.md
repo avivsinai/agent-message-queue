@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document operator-gate conventions in the `amq-cli` and `amq-spec` skills,
   covering structural human handoffs, initialized human handles, and spec
   approval gates (#136).
+- Report and optionally fix identity-verified stale `.wake.lock` files from
+  `amq doctor --ops`, including roots whose config is missing or corrupt (#151).
 
 ## [0.36.0] - 2026-06-13
 ### Changed

@@ -15,9 +15,10 @@ import (
 )
 
 type doctorOpsResult struct {
-	Root   opsRoot    `json:"root"`
-	Agents []opsAgent `json:"agents"`
-	Hints  []opsHint  `json:"hints"`
+	Root      opsRoot       `json:"root"`
+	Agents    []opsAgent    `json:"agents"`
+	WakeLocks []opsWakeLock `json:"wake_locks,omitempty"`
+	Hints     []opsHint     `json:"hints"`
 }
 
 type opsRoot struct {
@@ -41,7 +42,20 @@ type opsHint struct {
 	Message string `json:"message"`
 }
 
-func runOpsChecks(root string, rootSource string) *doctorOpsResult {
+type opsWakeLock struct {
+	Status  string `json:"status"`
+	Agent   string `json:"agent"`
+	Root    string `json:"root"`
+	Lock    string `json:"lock"`
+	PID     int    `json:"pid,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Fix     string `json:"fix,omitempty"`
+	Removed bool   `json:"removed,omitempty"`
+}
+
+const fixWakeLocksCommand = "amq doctor --ops --fix-wake-locks"
+
+func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsResult {
 	result := &doctorOpsResult{}
 	now := time.Now()
 
@@ -58,6 +72,7 @@ func runOpsChecks(root string, rootSource string) *doctorOpsResult {
 			Status:  "error",
 			Message: fmt.Sprintf("Cannot load config: %v", err),
 		})
+		result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, nil), fixWakeLocks)
 		return result
 	}
 
@@ -115,12 +130,79 @@ func runOpsChecks(root string, rootSource string) *doctorOpsResult {
 		result.Agents = append(result.Agents, agent)
 	}
 
+	result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, cfg.Agents), fixWakeLocks)
+
 	// Integration hints
 	result.Hints = append(result.Hints, checkGlobalRootHint()...)
 	result.Hints = append(result.Hints, checkKanbanHint()...)
 	result.Hints = append(result.Hints, checkSymphonyHint()...)
 
 	return result
+}
+
+func discoveredWakeLockAgents(root string, configured []string) []string {
+	seen := make(map[string]struct{}, len(configured))
+	agents := make([]string, 0, len(configured))
+	for _, agent := range configured {
+		if _, ok := seen[agent]; ok {
+			continue
+		}
+		seen[agent] = struct{}{}
+		agents = append(agents, agent)
+	}
+
+	discovered, err := fsq.ListAgents(root)
+	if err != nil {
+		return agents
+	}
+	for _, agent := range discovered {
+		if _, ok := seen[agent]; ok {
+			continue
+		}
+		if err := fsq.ValidateHandle(agent); err != nil {
+			continue
+		}
+		seen[agent] = struct{}{}
+		agents = append(agents, agent)
+	}
+	return agents
+}
+
+func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
+	var locks []opsWakeLock
+	for _, agent := range agents {
+		inspection := inspectWakeLock(root, agent)
+		if !inspection.Exists {
+			continue
+		}
+
+		lock := opsWakeLock{
+			Status: string(inspection.Status),
+			Agent:  agent,
+			Root:   inspection.Root,
+			Lock:   inspection.LockPath,
+			PID:    inspection.PID,
+			Reason: inspection.Reason,
+		}
+		if inspection.Status == wakeLockStale {
+			lock.Fix = fixWakeLocksCommand
+			if fix {
+				recheck := inspectWakeLock(root, agent)
+				if recheck.Status != wakeLockStale {
+					lock.Status = string(recheck.Status)
+					lock.Reason = "wake lock changed before fix"
+				} else if err := removeWakeLockIfUnchanged(recheck); err != nil {
+					lock.Status = "error"
+					lock.Reason = err.Error()
+				} else {
+					lock.Status = "fixed"
+					lock.Removed = true
+				}
+			}
+		}
+		locks = append(locks, lock)
+	}
+	return locks
 }
 
 func checkGlobalRootHint() []opsHint {
