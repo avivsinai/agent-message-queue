@@ -33,6 +33,44 @@ func captureEnvStdout(t *testing.T, fn func() error) (string, error) {
 	return buf.String(), runErr
 }
 
+func captureEnvOutput(t *testing.T, fn func() error) (stdout, stderr string, runErr error) {
+	t.Helper()
+
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	rOut, wOut, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = wOut
+	os.Stderr = wErr
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+		os.Stderr = oldStderr
+	})
+
+	runErr = fn()
+
+	_ = wOut.Close()
+	_ = wErr.Close()
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
+
+	var outBuf bytes.Buffer
+	_, _ = outBuf.ReadFrom(rOut)
+	_ = rOut.Close()
+
+	var errBuf bytes.Buffer
+	_, _ = errBuf.ReadFrom(rErr)
+	_ = rErr.Close()
+
+	return outBuf.String(), errBuf.String(), runErr
+}
+
 func runEnvJSONForTest(t *testing.T, args ...string) envOutput {
 	t.Helper()
 
@@ -833,6 +871,314 @@ func TestRunEnvJSONV1SessionFlag(t *testing.T) {
 	}
 	if result.RootSource != string(rootSourceFlag) {
 		t.Errorf("expected root_source=%q, got %q", rootSourceFlag, result.RootSource)
+	}
+}
+
+func TestRunEnvNonExportSessionOutputStaysRootAndMeOnly(t *testing.T) {
+	root := t.TempDir()
+	rcContent := `{"root": ".agent-mail"}`
+	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	t.Setenv("AM_ROOT", "")
+	t.Setenv("AM_BASE_ROOT", "")
+	t.Setenv("AM_ME", "")
+	t.Setenv("AMQ_GLOBAL_ROOT", "")
+
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	projectRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	stdout, stderr, err := captureEnvOutput(t, func() error {
+		return runEnv([]string{"--session", "feature-x", "--me", "codex"})
+	})
+	if err != nil {
+		t.Fatalf("runEnv: %v", err)
+	}
+
+	expectedRoot := filepath.Join(projectRoot, ".agent-mail", "feature-x")
+	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
+		"export AM_ME=codex\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+	if strings.Contains(stdout, "AM_BASE_ROOT") {
+		t.Fatalf("non-export output should not include AM_BASE_ROOT: %q", stdout)
+	}
+}
+
+func TestRunEnvExportSessionEmitsBaseRootAndPinNote(t *testing.T) {
+	root := t.TempDir()
+	rcContent := `{"root": ".agent-mail"}`
+	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	t.Setenv("AM_ROOT", "")
+	t.Setenv("AM_BASE_ROOT", "")
+	t.Setenv("AM_ME", "")
+	t.Setenv("AMQ_GLOBAL_ROOT", "")
+
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	projectRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	stdout, stderr, err := captureEnvOutput(t, func() error {
+		return runEnv([]string{"--session", "feature-x", "--me", "codex", "--export"})
+	})
+	if err != nil {
+		t.Fatalf("runEnv: %v", err)
+	}
+
+	expectedBase := filepath.Join(projectRoot, ".agent-mail")
+	expectedRoot := filepath.Join(expectedBase, "feature-x")
+	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
+		"export AM_BASE_ROOT=" + shellQuotePosix(expectedBase) + "\n" +
+		"export AM_ME=codex\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+	if !strings.Contains(stderr, "pinned to AMQ session feature-x") {
+		t.Fatalf("stderr should contain session pin note, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "one terminal, one session") {
+		t.Fatalf("stderr should mention one terminal, one session, got %q", stderr)
+	}
+}
+
+func TestRunEnvExportNonSessionOmitsBaseRoot(t *testing.T) {
+	root := t.TempDir()
+	rcContent := `{"root": ".agent-mail"}`
+	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	t.Setenv("AM_ROOT", "")
+	t.Setenv("AM_BASE_ROOT", "")
+	t.Setenv("AM_ME", "")
+	t.Setenv("AMQ_GLOBAL_ROOT", "")
+
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	projectRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	stdout, stderr, err := captureEnvOutput(t, func() error {
+		return runEnv([]string{"--me", "codex", "--export"})
+	})
+	if err != nil {
+		t.Fatalf("runEnv: %v", err)
+	}
+
+	expectedRoot := filepath.Join(projectRoot, ".agent-mail")
+	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
+		"export AM_ME=codex\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+	if strings.Contains(stdout, "AM_BASE_ROOT") {
+		t.Fatalf("non-session export should not include AM_BASE_ROOT: %q", stdout)
+	}
+	if !strings.Contains(stderr, "pinned to AMQ root") {
+		t.Fatalf("stderr should contain root pin note, got %q", stderr)
+	}
+}
+
+func TestRunEnvExportFishSessionEmitsBaseRoot(t *testing.T) {
+	root := t.TempDir()
+	rcContent := `{"root": ".agent-mail"}`
+	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	t.Setenv("AM_ROOT", "")
+	t.Setenv("AM_BASE_ROOT", "")
+	t.Setenv("AM_ME", "")
+	t.Setenv("AMQ_GLOBAL_ROOT", "")
+
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	projectRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runEnv([]string{"--session", "feature-x", "--me", "codex", "--export", "--shell", "fish"})
+	})
+	if err != nil {
+		t.Fatalf("runEnv: %v", err)
+	}
+
+	expectedBase := filepath.Join(projectRoot, ".agent-mail")
+	expectedRoot := filepath.Join(expectedBase, "feature-x")
+	want := "set -gx AM_ROOT " + shellQuoteFish(expectedRoot) + "\n" +
+		"set -gx AM_BASE_ROOT " + shellQuoteFish(expectedBase) + "\n" +
+		"set -gx AM_ME codex\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestRunEnvExportSessionFromGlobalRootEmitsBaseRoot(t *testing.T) {
+	cwd := t.TempDir()
+	globalRoot := filepath.Join(t.TempDir(), "custom-root")
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	t.Setenv("AM_ROOT", "")
+	t.Setenv("AM_BASE_ROOT", "")
+	t.Setenv("AM_ME", "")
+	t.Setenv("AMQ_GLOBAL_ROOT", globalRoot)
+
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	stdout, stderr, err := captureEnvOutput(t, func() error {
+		return runEnv([]string{"--session", "feature-x", "--me", "codex", "--export"})
+	})
+	if err != nil {
+		t.Fatalf("runEnv: %v", err)
+	}
+
+	expectedRoot := filepath.Join(globalRoot, "feature-x")
+	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
+		"export AM_BASE_ROOT=" + shellQuotePosix(globalRoot) + "\n" +
+		"export AM_ME=codex\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+	if !strings.Contains(stderr, "pinned to AMQ session feature-x") {
+		t.Fatalf("stderr should contain session pin note, got %q", stderr)
+	}
+}
+
+func TestRunEnvExportSessionIgnoresStaleAmbientBaseRoot(t *testing.T) {
+	root := t.TempDir()
+	rcContent := `{"root": ".agent-mail"}`
+	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	t.Setenv("AM_ROOT", "")
+	t.Setenv("AM_BASE_ROOT", filepath.Join(t.TempDir(), "stale-root"))
+	t.Setenv("AM_ME", "")
+	t.Setenv("AMQ_GLOBAL_ROOT", "")
+
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	projectRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runEnv([]string{"--session", "feature-x", "--me", "codex", "--export"})
+	})
+	if err != nil {
+		t.Fatalf("runEnv: %v", err)
+	}
+
+	expectedBase := filepath.Join(projectRoot, ".agent-mail")
+	expectedRoot := filepath.Join(expectedBase, "feature-x")
+	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
+		"export AM_BASE_ROOT=" + shellQuotePosix(expectedBase) + "\n" +
+		"export AM_ME=codex\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+	if strings.Contains(stdout, "stale-root") {
+		t.Fatalf("stdout should not contain stale AM_BASE_ROOT: %q", stdout)
+	}
+}
+
+func TestRunEnvExportExplicitBaseRootOmitsBaseRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".agent-mail")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runEnv([]string{"--root", root, "--me", "codex", "--export"})
+	})
+	if err != nil {
+		t.Fatalf("runEnv: %v", err)
+	}
+
+	want := "export AM_ROOT=" + shellQuotePosix(root) + "\n" +
+		"export AM_ME=codex\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+	if strings.Contains(stdout, "AM_BASE_ROOT") {
+		t.Fatalf("explicit base-root export should not include AM_BASE_ROOT: %q", stdout)
+	}
+}
+
+func TestRunEnvExportMutuallyExclusiveOutputModes(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "json",
+			args: []string{"--export", "--json"},
+			want: "--export and --json are mutually exclusive",
+		},
+		{
+			name: "session-name",
+			args: []string{"--export", "--session-name"},
+			want: "--export and --session-name are mutually exclusive",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := captureEnvOutput(t, func() error {
+				return runEnv(tt.args)
+			})
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 
