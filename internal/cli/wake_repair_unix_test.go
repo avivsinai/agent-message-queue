@@ -23,7 +23,7 @@ func stubStartWakeFromTarget(t *testing.T, fn wakeRepairStarter) {
 func TestWakeTargetWriteReadRoundTripAndPermissions(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
-	target := newWakeTarget(root, "codex", injector, []string{"exec", "target"})
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec", "target"})
 
 	if err := writeWakeTarget(root, "codex", target); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
@@ -109,7 +109,7 @@ func TestWakeTargetAllowsSymlinkedParentWhenResolvedPathIsSafe(t *testing.T) {
 		t.Fatalf("symlink root: %v", err)
 	}
 	injector := writeExecutableForTest(t, "injector")
-	target := newWakeTarget(linkRoot, "codex", injector, nil)
+	target := mustNewWakeTargetForTest(t, linkRoot, "codex", injector, nil)
 
 	if err := writeWakeTarget(linkRoot, "codex", target); err != nil {
 		t.Fatalf("writeWakeTarget through symlinked root: %v", err)
@@ -134,7 +134,7 @@ func TestWakeTargetResolvesSymlinkedInjectViaParent(t *testing.T) {
 		t.Fatalf("symlink bin: %v", err)
 	}
 
-	target := newWakeTarget(base, "codex", filepath.Join(linkDir, "injector"), nil)
+	target := mustNewWakeTargetForTest(t, base, "codex", filepath.Join(linkDir, "injector"), nil)
 	if target.InjectVia != injector {
 		t.Fatalf("target inject_via = %q, want resolved %q", target.InjectVia, injector)
 	}
@@ -151,12 +151,22 @@ func TestWakeTargetKeepsSymlinkInjectViaForValidationRejection(t *testing.T) {
 		t.Fatalf("symlink injector: %v", err)
 	}
 
-	target := newWakeTarget(base, "codex", link, nil)
+	target := mustNewWakeTargetForTest(t, base, "codex", link, nil)
 	if target.InjectVia != link {
 		t.Fatalf("target inject_via = %q, want unresolved symlink %q", target.InjectVia, link)
 	}
 	if err := validateWakeTarget(target, base, "codex"); err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
 		t.Fatalf("expected symlink validation rejection, got %v", err)
+	}
+}
+
+func TestWakeTargetCreationRejectsMissingInjectVia(t *testing.T) {
+	root := secureTempDirForTest(t)
+	missing := filepath.Join(root, "missing-injector")
+
+	_, err := newWakeTarget(root, "codex", missing, nil)
+	if err == nil || !strings.Contains(err.Error(), "stat inject_via") {
+		t.Fatalf("expected inject_via stat failure, got %v", err)
 	}
 }
 
@@ -215,7 +225,7 @@ func TestReadWakeTargetRejectsNonRegularFile(t *testing.T) {
 func TestReadWakeTargetRejectsUnsafeFileMode(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
-	target := newWakeTarget(root, "codex", injector, nil)
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, nil)
 	if err := writeWakeTarget(root, "codex", target); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
 	}
@@ -235,7 +245,7 @@ func TestReadWakeTargetRejectsUnsafeFileMode(t *testing.T) {
 func TestReadWakeTargetRejectsNonOwnedFile(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
-	if err := writeWakeTarget(root, "codex", newWakeTarget(root, "codex", injector, nil)); err != nil {
+	if err := writeWakeTarget(root, "codex", mustNewWakeTargetForTest(t, root, "codex", injector, nil)); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
 	}
 
@@ -260,7 +270,7 @@ func TestReadWakeTargetRejectsNonOwnedFile(t *testing.T) {
 func TestReadWakeTargetRejectsSymlink(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
-	if err := writeWakeTarget(root, "codex", newWakeTarget(root, "codex", injector, nil)); err != nil {
+	if err := writeWakeTarget(root, "codex", mustNewWakeTargetForTest(t, root, "codex", injector, nil)); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
 	}
 	targetPath := wakeTargetPath(root, "codex")
@@ -316,7 +326,7 @@ func TestReadWakeTargetRejectsWorldWritableParent(t *testing.T) {
 func TestRepairWakeRefusesTamperedTargetDigest(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
-	target := newWakeTarget(root, "codex", injector, []string{"exec"})
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
 	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
 		PID:        4242,
 		Executable: "/opt/homebrew/bin/amq",
@@ -389,7 +399,7 @@ func TestRepairWakeRefusesUnverifiedLock(t *testing.T) {
 		}
 		return wakeProcessInfo{PID: pid}
 	})
-	if err := writeWakeTarget(root, "codex", newWakeTarget(root, "codex", writeExecutableForTest(t, "injector"), nil)); err != nil {
+	if err := writeWakeTarget(root, "codex", mustNewWakeTargetForTest(t, root, "codex", writeExecutableForTest(t, "injector"), nil)); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
 	}
 	stubStartWakeFromTarget(t, func(root, me string, target wakeTarget) (int, error) {
@@ -439,7 +449,7 @@ func TestRepairWakeRefusesCreatingLock(t *testing.T) {
 func TestRepairWakeRefusesLockChangedBeforeRemoval(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
-	target := newWakeTarget(root, "codex", injector, []string{"exec"})
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
 	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
 		PID:        4242,
 		Executable: "/opt/homebrew/bin/amq",
@@ -478,7 +488,7 @@ func TestRepairWakeRefusesLockChangedBeforeRemoval(t *testing.T) {
 func TestRepairWakeRemovesProvenStaleAndStartsFromTarget(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
-	target := newWakeTarget(root, "codex", injector, []string{"exec"})
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
 	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
 		PID:        4242,
 		Executable: "/opt/homebrew/bin/amq",
@@ -521,7 +531,7 @@ func TestRepairWakeRefusesStaleRawLockWithLeftoverTarget(t *testing.T) {
 		return wakeProcessInfo{PID: pid, Running: false}
 	})
 	injector := writeExecutableForTest(t, "injector")
-	if err := writeWakeTarget(root, "codex", newWakeTarget(root, "codex", injector, []string{"exec"})); err != nil {
+	if err := writeWakeTarget(root, "codex", mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
 	}
 	stubStartWakeFromTarget(t, func(root, me string, target wakeTarget) (int, error) {
@@ -617,7 +627,7 @@ func TestRunWakeRepairCLIReportsAlreadyRunning(t *testing.T) {
 func TestRunWakeRepairCLIRepairsStaleWakeWithJSON(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
-	target := newWakeTarget(root, "codex", injector, []string{"exec"})
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
 	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
 		PID:        4242,
 		Executable: "/opt/homebrew/bin/amq",

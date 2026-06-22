@@ -311,7 +311,7 @@ func TestRunOpsChecks_ReportsWakeRepairAvailabilityWithoutSpawning(t *testing.T)
 	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write injector: %v", err)
 	}
-	target := newWakeTarget(root, "alice", injector, []string{"exec"})
+	target := mustNewWakeTargetForTest(t, root, "alice", injector, []string{"exec"})
 	lockPath := writeWakeLockForTest(t, root, "alice", bindWakeLockToTarget(wakeLock{
 		PID:        999999999,
 		Executable: "/opt/homebrew/bin/amq",
@@ -369,7 +369,7 @@ func TestRunOpsChecks_StaleRawLockWithLeftoverTargetHasNoRepair(t *testing.T) {
 	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write injector: %v", err)
 	}
-	if err := writeWakeTarget(root, "alice", newWakeTarget(root, "alice", injector, []string{"exec"})); err != nil {
+	if err := writeWakeTarget(root, "alice", mustNewWakeTargetForTest(t, root, "alice", injector, []string{"exec"})); err != nil {
 		t.Fatalf("write wake target: %v", err)
 	}
 
@@ -424,7 +424,7 @@ func TestRunOpsChecks_UnverifiedWakeLockHasTargetButNoRepair(t *testing.T) {
 	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write injector: %v", err)
 	}
-	if err := writeWakeTarget(root, "alice", newWakeTarget(root, "alice", injector, nil)); err != nil {
+	if err := writeWakeTarget(root, "alice", mustNewWakeTargetForTest(t, root, "alice", injector, nil)); err != nil {
 		t.Fatalf("write wake target: %v", err)
 	}
 

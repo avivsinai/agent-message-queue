@@ -154,7 +154,45 @@ func TestRunWakeWithLoopWritesInjectViaWakeTarget(t *testing.T) {
 	}
 }
 
-func TestRunWakeWithLoopStartsWhenInjectViaTargetIsNotPersistable(t *testing.T) {
+func TestRunWakeWithLoopExecutesResolvedInjectViaPath(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	base := secureTempDirForTest(t)
+	realDir := filepath.Join(base, "real-bin")
+	if err := os.MkdirAll(realDir, 0o700); err != nil {
+		t.Fatalf("mkdir real bin: %v", err)
+	}
+	injector := filepath.Join(realDir, "injector")
+	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write injector: %v", err)
+	}
+	linkDir := filepath.Join(base, "link-bin")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatalf("symlink bin: %v", err)
+	}
+
+	errDone := errors.New("done")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", filepath.Join(linkDir, "injector"),
+	}, func(cfg wakeConfig) error {
+		if cfg.injectVia != injector {
+			t.Fatalf("cfg.injectVia = %q, want resolved %q", cfg.injectVia, injector)
+		}
+		return errDone
+	})
+	if !errors.Is(err, errDone) {
+		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
+func TestRunWakeWithLoopRejectsUnsafeInjectViaBeforeLoop(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
@@ -167,34 +205,87 @@ func TestRunWakeWithLoopStartsWhenInjectViaTargetIsNotPersistable(t *testing.T) 
 	if err := os.Chmod(injector, 0o777); err != nil {
 		t.Fatalf("chmod injector: %v", err)
 	}
-	errDone := errors.New("done")
 	var runErr error
-	stderr := captureWakeStderr(t, func() {
+	_ = captureWakeStderr(t, func() {
 		runErr = runWakeWithLoop([]string{
 			"--root", root,
 			"--me", "orchestrator",
 			"--inject-via", injector,
 			"--inject-arg", "exec",
 		}, func(cfg wakeConfig) error {
-			if cfg.injectVia != injector {
-				t.Fatalf("injectVia = %q, want %q", cfg.injectVia, injector)
-			}
-			if _, exists, targetErr := readWakeTarget(root, "orchestrator"); targetErr != nil || exists {
-				t.Fatalf("wake target exists=%v err=%v, want absent with no read error", exists, targetErr)
-			}
-			return errDone
+			t.Fatalf("loop should not run with unsafe inject_via: %#v", cfg)
+			return nil
 		})
 	})
-	if !errors.Is(runErr, errDone) {
-		t.Fatalf("expected loop sentinel error, got %v", runErr)
+	if runErr == nil || !strings.Contains(runErr.Error(), "group/world-writable") {
+		t.Fatalf("expected unsafe inject_via rejection, got %v", runErr)
 	}
-	if !strings.Contains(stderr, "warning: wake target not persisted; live repair disabled:") ||
-		!strings.Contains(stderr, "group/world-writable") {
-		t.Fatalf("expected non-fatal target warning, got %q", stderr)
+	if _, exists, targetErr := readWakeTarget(root, "orchestrator"); targetErr != nil || exists {
+		t.Fatalf("wake target exists=%v err=%v, want absent with no read error", exists, targetErr)
 	}
 }
 
-func TestRunWakeWithLoopClearsOldWakeTargetWhenNewTargetIsNotPersistable(t *testing.T) {
+func TestInjectViaRevalidatesExecutableBeforeExec(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mutate   func(t *testing.T, path string)
+		wantText string
+	}{
+		{
+			name: "symlink",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				target := writeExecutableForTest(t, "target-injector")
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove injector: %v", err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatalf("symlink injector: %v", err)
+				}
+			},
+			wantText: "must not be a symlink",
+		},
+		{
+			name: "nonregular",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove injector: %v", err)
+				}
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatalf("mkdir injector path: %v", err)
+				}
+			},
+			wantText: "must be a regular file",
+		},
+		{
+			name: "world_writable",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Chmod(path, 0o777); err != nil {
+					t.Fatalf("chmod injector: %v", err)
+				}
+			},
+			wantText: "group/world-writable",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			injector := writeExecutableForTest(t, "injector-"+tc.name)
+			cfg := &wakeConfig{
+				injectVia:     injector,
+				injectTimeout: time.Second,
+			}
+			tc.mutate(t, injector)
+
+			err := injectVia(cfg, "payload")
+			if err == nil || !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("expected %q rejection, got %v", tc.wantText, err)
+			}
+		})
+	}
+}
+
+func TestRunWakeWithLoopKeepsOldWakeTargetWhenNewTargetIsUnsafe(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
@@ -204,35 +295,66 @@ func TestRunWakeWithLoopClearsOldWakeTargetWhenNewTargetIsNotPersistable(t *test
 	}
 
 	oldInjector := writeExecutableForTest(t, "old-injector")
-	if err := writeWakeTarget(root, "orchestrator", newWakeTarget(root, "orchestrator", oldInjector, []string{"old"})); err != nil {
+	if err := writeWakeTarget(root, "orchestrator", mustNewWakeTargetForTest(t, root, "orchestrator", oldInjector, []string{"old"})); err != nil {
 		t.Fatalf("write old wake target: %v", err)
 	}
 	newInjector := writeExecutableForTest(t, "new-injector")
 	if err := os.Chmod(newInjector, 0o777); err != nil {
 		t.Fatalf("chmod injector: %v", err)
 	}
-	errDone := errors.New("done")
 	var runErr error
-	stderr := captureWakeStderr(t, func() {
+	_ = captureWakeStderr(t, func() {
 		runErr = runWakeWithLoop([]string{
 			"--root", root,
 			"--me", "orchestrator",
 			"--inject-via", newInjector,
 		}, func(cfg wakeConfig) error {
-			if _, exists, targetErr := readWakeTarget(root, "orchestrator"); targetErr != nil || exists {
-				t.Fatalf("wake target exists=%v err=%v, want old target cleared", exists, targetErr)
-			}
-			return errDone
+			t.Fatalf("loop should not run with unsafe inject_via: %#v", cfg)
+			return nil
 		})
 	})
-	if !errors.Is(runErr, errDone) {
-		t.Fatalf("expected loop sentinel error, got %v", runErr)
+	if runErr == nil || !strings.Contains(runErr.Error(), "group/world-writable") {
+		t.Fatalf("expected unsafe inject_via rejection, got %v", runErr)
 	}
-	if !strings.Contains(stderr, "warning: wake target not persisted; live repair disabled:") {
-		t.Fatalf("expected target warning, got %q", stderr)
+	target, exists, err := readWakeTarget(root, "orchestrator")
+	if err != nil || !exists {
+		t.Fatalf("wake target exists=%v err=%v, want old target retained", exists, err)
 	}
-	if _, exists, err := readWakeTarget(root, "orchestrator"); err != nil || exists {
-		t.Fatalf("wake target exists=%v err=%v after loop, want cleared", exists, err)
+	if target.InjectVia != oldInjector {
+		t.Fatalf("wake target inject_via = %q, want old target %q", target.InjectVia, oldInjector)
+	}
+}
+
+func TestRunWakeWithLoopRejectsInjectorSwappedAfterTargetWrite(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	injector := writeExecutableForTest(t, "injector")
+	if err := writeWakeTarget(root, "orchestrator", mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"exec"})); err != nil {
+		t.Fatalf("write wake target: %v", err)
+	}
+	if err := os.Remove(injector); err != nil {
+		t.Fatalf("remove injector: %v", err)
+	}
+	if err := os.Symlink("/bin/sh", injector); err != nil {
+		t.Fatalf("swap injector to symlink: %v", err)
+	}
+
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", injector,
+		"--inject-arg", "exec",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run after injector swap: %#v", cfg)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("expected swapped injector rejection, got %v", err)
 	}
 }
 
@@ -1014,7 +1136,7 @@ func TestOpenWakeRepairOutputRejectsFIFOWithoutBlocking(t *testing.T) {
 func TestRunWakeRepairJSONRejectsFIFOLogWithoutBlocking(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
-	target := newWakeTarget(root, "orchestrator", injector, []string{"exec"})
+	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"exec"})
 	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
 		PID:        4242,
 		Executable: "/opt/homebrew/bin/amq",

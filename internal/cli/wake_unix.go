@@ -679,7 +679,14 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 
 	var target *wakeTarget
 	if injectVia != "" {
-		value := newWakeTarget(root, me, injectVia, []string(injectArgFlags))
+		value, err := newWakeTarget(root, me, injectVia, []string(injectArgFlags))
+		if err != nil {
+			return err
+		}
+		if err := validateWakeTarget(value, root, me); err != nil {
+			return err
+		}
+		injectVia = value.InjectVia
 		target = &value
 	}
 
@@ -704,6 +711,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 			if removeErr := removeWakeTarget(root, me); removeErr != nil {
 				return fmt.Errorf("clear stale wake target after persist failure: %w", removeErr)
 			}
+		}
+		if err := validateWakeInjectViaPath(injectVia); err != nil {
+			return err
 		}
 	} else if err := removeWakeTarget(root, me); err != nil {
 		return err

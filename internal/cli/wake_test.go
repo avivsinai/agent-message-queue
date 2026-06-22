@@ -119,7 +119,7 @@ func TestInjectNotification_InjectVia(t *testing.T) {
 	}
 	defer func() { _ = os.Remove(tmpPath) }()
 
-	script, err := os.CreateTemp("", "wake-inject-via-*.sh")
+	script, err := os.CreateTemp(secureTempDirForTest(t), "wake-inject-via-*.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestInjectNotification_InjectVia_MultiWordCommand(t *testing.T) {
 	}
 	defer func() { _ = os.Remove(tmpPath) }()
 
-	scriptDir := filepath.Join(t.TempDir(), "inject dir")
+	scriptDir := filepath.Join(secureTempDirForTest(t), "inject dir")
 	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
 		t.Fatalf("mkdir script dir: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestInjectNotification_InjectVia_Bell(t *testing.T) {
 	}
 	defer func() { _ = os.Remove(tmpPath) }()
 
-	script, err := os.CreateTemp("", "wake-inject-via-bell-*.sh")
+	script, err := os.CreateTemp(secureTempDirForTest(t), "wake-inject-via-bell-*.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestInjectNotification_InjectVia_Bell(t *testing.T) {
 }
 
 func TestInjectViaTimeout(t *testing.T) {
-	scriptPath := filepath.Join(t.TempDir(), "sleep.sh")
+	scriptPath := filepath.Join(secureTempDirForTest(t), "sleep.sh")
 	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nsleep 2\n"), 0o755); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
@@ -339,7 +339,7 @@ func captureWakeStderr(t *testing.T, fn func()) string {
 }
 
 func TestNotifyNewMessages_InjectViaInterruptInjectsKeyAndHonorsCooldown(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestNotifyNewMessages_InjectViaInterruptInjectsKeyAndHonorsCooldown(t *test
 }
 
 func TestNotifyNewMessages_InjectViaInjectCmdPayload(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
@@ -478,7 +478,7 @@ func TestNotifyNewMessages_InjectViaInjectCmdPayload(t *testing.T) {
 }
 
 func TestNotifyNewMessages_InjectViaInterruptFailureDoesNotUpdateCooldown(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}

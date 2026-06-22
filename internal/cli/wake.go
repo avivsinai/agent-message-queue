@@ -449,6 +449,9 @@ func injectVia(cfg *wakeConfig, text string) error {
 	if executable == "" {
 		return fmt.Errorf("inject-via command is blank")
 	}
+	if err := validateWakeInjectViaPath(executable); err != nil {
+		return err
+	}
 
 	timeout := cfg.injectTimeout
 	if timeout <= 0 {

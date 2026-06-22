@@ -33,28 +33,36 @@ func wakeTargetPath(root, me string) string {
 	return filepath.Join(fsq.AgentBase(root, me), wakeTargetFileName)
 }
 
-func newWakeTarget(root, me, injectVia string, injectArgs []string) wakeTarget {
+func newWakeTarget(root, me, injectVia string, injectArgs []string) (wakeTarget, error) {
+	resolvedInjectVia, err := wakeTargetInjectViaPath(injectVia)
+	if err != nil {
+		return wakeTarget{}, err
+	}
 	return wakeTarget{
 		Schema:     wakeTargetSchema,
 		Mode:       wakeTargetInjectVia,
 		Root:       canonicalWakeRoot(root),
 		Agent:      me,
 		Created:    time.Now().UTC().Format(time.RFC3339),
-		InjectVia:  wakeTargetInjectViaPath(injectVia),
+		InjectVia:  resolvedInjectVia,
 		InjectArgs: append([]string{}, injectArgs...),
-	}
+	}, nil
 }
 
-func wakeTargetInjectViaPath(path string) string {
+func wakeTargetInjectViaPath(path string) (string, error) {
 	trimmed := strings.TrimSpace(path)
 	info, err := os.Lstat(trimmed)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 {
-		return trimmed
+	if err != nil {
+		return "", fmt.Errorf("stat inject_via: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return trimmed, nil
 	}
 	if resolved, err := filepath.EvalSymlinks(trimmed); err == nil {
-		return resolved
+		return resolved, nil
+	} else {
+		return "", fmt.Errorf("resolve inject_via: %w", err)
 	}
-	return trimmed
 }
 
 func wakeTargetDigest(target wakeTarget) string {

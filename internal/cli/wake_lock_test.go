@@ -32,6 +32,15 @@ func secureTempDirForTest(t *testing.T) string {
 	return t.TempDir()
 }
 
+func mustNewWakeTargetForTest(t *testing.T, root, me, injectVia string, injectArgs []string) wakeTarget {
+	t.Helper()
+	target, err := newWakeTarget(root, me, injectVia, injectArgs)
+	if err != nil {
+		t.Fatalf("newWakeTarget: %v", err)
+	}
+	return target
+}
+
 func writeWakeLockForTest(t *testing.T, root, agent string, lock wakeLock) string {
 	t.Helper()
 	if err := fsq.EnsureRootDirs(root); err != nil {
