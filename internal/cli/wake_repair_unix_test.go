@@ -4,11 +4,14 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func stubStartWakeFromTarget(t *testing.T, fn wakeRepairStarter) {
@@ -222,6 +225,36 @@ func TestReadWakeTargetRejectsNonRegularFile(t *testing.T) {
 	}
 }
 
+func TestReadWakeTargetRejectsFIFOWithoutBlocking(t *testing.T) {
+	root := secureTempDirForTest(t)
+	agentBase := filepath.Dir(wakeTargetPath(root, "codex"))
+	if err := os.MkdirAll(agentBase, 0o700); err != nil {
+		t.Fatalf("mkdir agent base: %v", err)
+	}
+	if err := syscall.Mkfifo(wakeTargetPath(root, "codex"), 0o600); err != nil {
+		t.Fatalf("mkfifo wake target: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, exists, err := readWakeTarget(root, "codex")
+		if !exists {
+			done <- fmt.Errorf("expected FIFO target to be reported present")
+			return
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "must be a regular file") {
+			t.Fatalf("expected FIFO rejection, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("readWakeTarget blocked on FIFO")
+	}
+}
+
 func TestReadWakeTargetRejectsUnsafeFileMode(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
@@ -354,6 +387,80 @@ func TestRepairWakeRefusesTamperedTargetDigest(t *testing.T) {
 	}
 	if _, statErr := os.Stat(lockPath); statErr != nil {
 		t.Fatalf("lock should remain on refused tampered target: %v", statErr)
+	}
+}
+
+func TestRepairWakeRefusesStructurallyTamperedStaleLock(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatalf("writeWakeTarget: %v", err)
+	}
+	stubStartWakeFromTarget(t, func(root, me string, target wakeTarget) (int, error) {
+		t.Fatalf("startWakeFromTarget should not run for structurally tampered lock")
+		return 0, nil
+	})
+
+	for _, tc := range []struct {
+		name       string
+		lock       wakeLock
+		wantReason string
+	}{
+		{
+			name: "invalid pid",
+			lock: bindWakeLockToTarget(wakeLock{
+				PID:   -1,
+				Root:  canonicalWakeRoot(root),
+				Agent: "codex",
+			}, target),
+			wantReason: "invalid pid",
+		},
+		{
+			name: "missing root",
+			lock: bindWakeLockToTarget(wakeLock{
+				PID:   4242,
+				Agent: "codex",
+			}, target),
+			wantReason: "lock root missing",
+		},
+		{
+			name: "root mismatch",
+			lock: bindWakeLockToTarget(wakeLock{
+				PID:   4242,
+				Root:  filepath.Join(root, "other-root"),
+				Agent: "codex",
+			}, target),
+			wantReason: "root mismatch",
+		},
+		{
+			name: "agent mismatch",
+			lock: bindWakeLockToTarget(wakeLock{
+				PID:   4242,
+				Root:  canonicalWakeRoot(root),
+				Agent: "other",
+			}, target),
+			wantReason: "agent mismatch",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lockPath := writeWakeLockExactForTest(t, root, "codex", tc.lock)
+
+			result, err := repairWake(root, "codex")
+			if err == nil {
+				t.Fatal("expected repair refusal")
+			}
+			if result.Status != "refused" || !strings.Contains(result.Reason, tc.wantReason) ||
+				!strings.Contains(result.Reason, "not repairable") {
+				t.Fatalf("unexpected result: %#v err=%v", result, err)
+			}
+			if _, statErr := os.Stat(lockPath); statErr != nil {
+				t.Fatalf("tampered lock should remain: %v", statErr)
+			}
+		})
 	}
 }
 

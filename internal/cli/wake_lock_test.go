@@ -43,17 +43,22 @@ func mustNewWakeTargetForTest(t *testing.T, root, me, injectVia string, injectAr
 
 func writeWakeLockForTest(t *testing.T, root, agent string, lock wakeLock) string {
 	t.Helper()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, agent); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
 	if lock.Root == "" {
 		lock.Root = canonicalWakeRoot(root)
 	}
 	if lock.Agent == "" {
 		lock.Agent = agent
+	}
+	return writeWakeLockExactForTest(t, root, agent, lock)
+}
+
+func writeWakeLockExactForTest(t *testing.T, root, agent string, lock wakeLock) string {
+	t.Helper()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
 	}
 	if lock.Started == "" {
 		lock.Started = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)

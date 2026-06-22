@@ -84,7 +84,7 @@ func inspectWakeLock(root, me string) wakeLockInspection {
 		LockPath: lockPath,
 	}
 
-	data, err := os.ReadFile(lockPath)
+	data, err := readWakeLockFile(lockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return inspection
@@ -114,6 +114,42 @@ func inspectWakeLock(root, me string) wakeLockInspection {
 	inspection.Process = inspectWakeProcess(existing.PID)
 	classifyWakeLock(root, me, &inspection)
 	return inspection
+}
+
+func readWakeLockFile(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateWakeLockFile(path, info); err != nil {
+		return nil, err
+	}
+	file, err := openWakeMetadataFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat wake lock: %w", err)
+	}
+	if err := validateWakeLockFile(path, openedInfo); err != nil {
+		return nil, err
+	}
+	return readWakeMetadata(file, "wake lock", path)
+}
+
+func validateWakeLockFile(path string, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("wake lock %s must not be a symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("wake lock %s must be a regular file", path)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		return fmt.Errorf("wake lock %s mode is %o, want 0600", path, got)
+	}
+	return validateWakeTargetPathOwnership("wake lock", path, info)
 }
 
 func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
@@ -208,7 +244,7 @@ func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
 }
 
 func removeWakeLockIfUnchanged(inspection wakeLockInspection) error {
-	current, err := os.ReadFile(inspection.LockPath)
+	current, err := readWakeLockFile(inspection.LockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil

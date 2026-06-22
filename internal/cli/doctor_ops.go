@@ -203,7 +203,7 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 		}
 		if inspection.Status == wakeLockStale {
 			lock.Fix = fixWakeLocksCommand
-			if lock.TargetPresent && lock.TargetReason == "" {
+			if lock.TargetPresent && lock.TargetReason == "" && validateWakeLockRepairable(inspection) == nil {
 				lock.RepairAvailable = true
 				lock.Repair = wakeRepairCommand(root, agent)
 			}

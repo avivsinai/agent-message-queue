@@ -929,6 +929,63 @@ func TestRemoveWakeLockIfUnchangedRefusesChangedLock(t *testing.T) {
 	}
 }
 
+func TestInspectWakeLockRejectsSymlinkAndFIFO(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		setup     func(t *testing.T, path string)
+		wantError string
+	}{
+		{
+			name: "symlink",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				target := filepath.Join(t.TempDir(), "lock.json")
+				if err := os.WriteFile(target, []byte(`{"pid":4242}`), 0o600); err != nil {
+					t.Fatalf("write target lock: %v", err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatalf("symlink lock: %v", err)
+				}
+			},
+			wantError: "must not be a symlink",
+		},
+		{
+			name: "fifo",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatalf("mkfifo lock: %v", err)
+				}
+			},
+			wantError: "must be a regular file",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			agentBase := fsq.AgentBase(root, "orchestrator")
+			if err := os.MkdirAll(agentBase, 0o700); err != nil {
+				t.Fatalf("mkdir agent base: %v", err)
+			}
+			tc.setup(t, filepath.Join(agentBase, ".wake.lock"))
+
+			done := make(chan wakeLockInspection, 1)
+			go func() {
+				done <- inspectWakeLock(root, "orchestrator")
+			}()
+
+			select {
+			case inspection := <-done:
+				if !inspection.Exists || inspection.Status != wakeLockUnverified ||
+					!strings.Contains(inspection.Reason, tc.wantError) {
+					t.Fatalf("unexpected inspection: %#v", inspection)
+				}
+			case <-time.After(250 * time.Millisecond):
+				t.Fatal("inspectWakeLock blocked")
+			}
+		})
+	}
+}
+
 func TestShouldReplaceOrphanedWakeLockSignalsOnlyAfterRevalidation(t *testing.T) {
 	const wakePID = 4242
 	root := secureTempDirForTest(t)

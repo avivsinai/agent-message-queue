@@ -75,6 +75,12 @@ func validateWakeTargetMatchesLock(lock wakeLock, target wakeTarget) error {
 	if lock.WakeMode != wakeTargetInjectVia || lock.TargetDigest == "" {
 		return fmt.Errorf("wake lock was not created for an inject-via repair target")
 	}
+	if strings.TrimSpace(lock.Root) == "" || canonicalWakeRoot(lock.Root) != canonicalWakeRoot(target.Root) {
+		return fmt.Errorf("wake lock root mismatch")
+	}
+	if lock.Agent != target.Agent {
+		return fmt.Errorf("wake lock agent mismatch")
+	}
 	if got := wakeTargetDigest(target); got != lock.TargetDigest {
 		return fmt.Errorf("wake target does not match wake lock")
 	}
@@ -93,12 +99,24 @@ func readWakeTarget(root, me string) (wakeTarget, bool, error) {
 	if err := validateWakeTargetFile(path, info); err != nil {
 		return wakeTarget{}, true, err
 	}
-	data, err := os.ReadFile(path)
+	file, err := openWakeMetadataFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return wakeTarget{}, false, nil
 		}
-		return wakeTarget{}, true, fmt.Errorf("read wake target: %w", err)
+		return wakeTarget{}, true, fmt.Errorf("open wake target: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return wakeTarget{}, true, fmt.Errorf("stat wake target: %w", err)
+	}
+	if err := validateWakeTargetFile(path, openedInfo); err != nil {
+		return wakeTarget{}, true, err
+	}
+	data, err := readWakeMetadata(file, "wake target", path)
+	if err != nil {
+		return wakeTarget{}, true, err
 	}
 	var target wakeTarget
 	if err := json.Unmarshal(data, &target); err != nil {

@@ -403,7 +403,12 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		result.Reason = "wake lock is already valid; refusing repair"
 		return result, errors.New(result.Reason)
 	case wakeLockStale:
-		// ok; continue after target validation
+		if err := validateWakeLockRepairable(inspection); err != nil {
+			result.Status = "refused"
+			result.PID = inspection.PID
+			result.Reason = err.Error()
+			return result, err
+		}
 	case wakeLockCreating:
 		result.Status = "refused"
 		result.Reason = "wake lock is being created; retry shortly"
@@ -449,6 +454,12 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		result.Reason = "wake lock changed before repair"
 		return result, errors.New(result.Reason)
 	}
+	if err := validateWakeLockRepairable(recheck); err != nil {
+		result.Status = "refused"
+		result.PID = recheck.PID
+		result.Reason = "wake lock changed before repair"
+		return result, errors.New(result.Reason)
+	}
 	if !bytes.Equal(inspection.raw, recheck.raw) {
 		result.Status = "refused"
 		result.PID = recheck.PID
@@ -474,6 +485,18 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 	result.Status = "repaired"
 	result.PID = pid
 	return result, nil
+}
+
+func validateWakeLockRepairable(inspection wakeLockInspection) error {
+	if inspection.Status != wakeLockStale {
+		return fmt.Errorf("wake lock status %q is not repairable", inspection.Status)
+	}
+	switch inspection.Reason {
+	case "pid not running", "boot id mismatch", "process start time mismatch", "pid is not amq", "pid is not amq wake":
+		return nil
+	default:
+		return fmt.Errorf("wake lock stale reason %q is not repairable", inspection.Reason)
+	}
 }
 
 func startWakeFromTargetDefault(root, me string, target wakeTarget) (int, error) {
