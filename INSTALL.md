@@ -83,7 +83,7 @@ rm -rf /tmp/amq
 ```bash
 git clone https://github.com/avivsinai/agent-message-queue.git /tmp/amq
 mkdir -p ~/.codex/skills
-cp -r /tmp/amq/.codex/skills/amq-cli ~/.codex/skills/
+cp -r /tmp/amq/.agents/skills/amq-cli ~/.codex/skills/
 rm -rf /tmp/amq
 ```
 

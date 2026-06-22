@@ -14,7 +14,13 @@ make fmt
 make test
 make vet
 make lint
+make ci
 ```
+
+Run `make ci` before opening a PR; it is the canonical local gate and includes
+format, vet, lint, test, and smoke-test coverage. Install local hooks with
+`scripts/install-hooks.sh` when working in this repo, and use
+`scripts/release.sh` for release PRs.
 
 ## Pull requests
 

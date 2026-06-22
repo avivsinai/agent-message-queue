@@ -283,8 +283,11 @@ Input deferral is a heuristic, not a prompt-buffer guarantee. It only samples te
 | `question` | `answer` | normal |
 | `decision` | — | normal |
 | `todo` | — | normal |
-| `status` | — | low |
-| `brainstorm` | — | low |
+| `status` | — | normal |
+| `brainstorm` | — | normal |
+
+When `--kind` is set but `--priority` is omitted, the CLI defaults priority to
+`normal`.
 
 ## Spec Workflow
 

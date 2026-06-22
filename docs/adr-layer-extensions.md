@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Implementation is split across follow-up issues.
+Accepted (implemented).
 
 ## Date
 
@@ -34,7 +34,7 @@ The current implicit integration points are too fragile for external layers:
 
 ## Decision
 
-AMQ will add four small, additive surfaces for layer interoperability:
+AMQ provides four small, additive surfaces for layer interoperability:
 
 1. A versioned `amq env --json` v1 contract.
 2. Reserved extension metadata directories plus a passive manifest convention.
@@ -355,13 +355,12 @@ evolve the mailbox.
 - `amq doctor --json` can report passive extension metadata without executing
   layer code.
 
-## Follow-Up Issues
+## Implementation
 
-Implementation should be tracked as separate issues:
+Implemented across #101-#104:
 
-- Add `amq env --json` v1 fields and stability documentation.
-- Reserve extension metadata directories and support passive manifests in
+- #101 added the `amq env --json` v1 fields and stability documentation.
+- #102 reserved extension metadata directories and reports passive manifests in
   diagnostics.
-- Add `amq route explain --json` with canonical `argv` output.
-- Add `amq send --from-session` for pre-boot cross-session sends and link it to
-  the existing cross-session bootstrap issue.
+- #103 added `amq route explain --json` with canonical `argv` output.
+- #104 added `amq send --from-session` for pre-boot cross-session sends.
