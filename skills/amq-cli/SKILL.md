@@ -318,9 +318,9 @@ Almost all coordination is agent-to-agent. Occasionally the **next required acto
 
 The single invariant AMQ relies on here is **recipient-as-next-actor**: a message addressed to the human handle means a human is who must act next. Everything else below (the `gate/<topic>` thread name and the `APPROVAL:` / `DONE:` subject prefixes) is a **naming convention** that downstream tools like amq-noc watch for. AMQ routing and message classification do **not** special-case thread names or subject text; those are plain strings, useful only because humans and tooling agree to read them. They are conventions, not core AMQ semantics.
 
-### The human handle is `user`, and it must be initialized
+### The human handle is `user`
 
-By convention the human/operator mailbox is `user`. It must be an initialized handle before you use gates. In current releases before the #139 follow-up, the default agent set may still be `claude,codex`, so sends addressed with `--to user` can warn about an unknown handle and **fail under `--strict`** unless the project initialized `user`. Initialize the handle before using gates:
+By convention the human/operator mailbox is `user`. AMQ reserves this handle for validation in configured projects, so `--to user` is accepted wherever the project has a configured agent list. New co-op projects include `user` in the default agent set. For explicit `amq init --agents ...` projects or older roots, initialize the mailbox layout before relying on human drain/receipt/DLQ ergonomics:
 
 ```bash
 # Seed the human mailbox alongside the agents (one-time, per project)
@@ -329,7 +329,7 @@ amq init --root .agent-mail --agents claude,codex,user
 amq coop init --agents claude,codex,user
 ```
 
-Throughout this section, `user` means "the conventional human handle **in a project that has initialized it**." If your project has not added the handle, every `--to user` send can warn (and fail under `--strict`) until you do.
+Throughout this section, `user` means "the conventional human handle." In configured projects it is warning-free for strict handle validation; in older or explicitly seeded roots, make sure the `agents/user/` mailbox exists before expecting a human to drain and reply from it.
 
 ### Raising a gate
 

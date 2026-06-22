@@ -3,9 +3,13 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/config"
 )
 
 func TestSplitDashDash(t *testing.T) {
@@ -175,6 +179,72 @@ func TestCoopExecSessionInvalidName(t *testing.T) {
 	}
 	if !containsStr(err.Error(), "invalid session name") {
 		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestCoopInitDefaultIncludesUser(t *testing.T) {
+	projectDir := t.TempDir()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	output, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--json"}, false)
+	})
+	if err != nil {
+		t.Fatalf("runCoopInitInternal: %v", err)
+	}
+	var result struct {
+		Agents []string `json:"agents"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal output: %v (output: %s)", err, output)
+	}
+	want := []string{"claude", "codex", "user"}
+	if !reflect.DeepEqual(result.Agents, want) {
+		t.Fatalf("agents = %#v, want %#v", result.Agents, want)
+	}
+
+	cfg, err := config.LoadConfig(filepath.Join(projectDir, defaultCoopRoot, "meta", "config.json"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Agents, want) {
+		t.Fatalf("config agents = %#v, want %#v", cfg.Agents, want)
+	}
+	if _, err := os.Stat(filepath.Join(projectDir, defaultCoopRoot, "agents", "user", "inbox", "new")); err != nil {
+		t.Fatalf("user inbox should be created: %v", err)
+	}
+}
+
+func TestInitExplicitAgentsDoesNotInjectUser(t *testing.T) {
+	root := t.TempDir()
+	_, err := captureEnvStdout(t, func() error {
+		return runInit([]string{"--root", root, "--agents", "claude,codex"})
+	})
+	if err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	want := []string{"claude", "codex"}
+	if !reflect.DeepEqual(cfg.Agents, want) {
+		t.Fatalf("config agents = %#v, want %#v", cfg.Agents, want)
+	}
+	if _, err := os.Stat(filepath.Join(root, "agents", "user")); !os.IsNotExist(err) {
+		t.Fatalf("user mailbox should not be created by explicit init, stat err=%v", err)
 	}
 }
 
