@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -47,7 +48,7 @@ func stubWakeProcessSID(t *testing.T, fn func(pid int) (int, error)) {
 
 func writeExecutableForTest(t *testing.T, name string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), name)
+	path := filepath.Join(secureTempDirForTest(t), name)
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write executable: %v", err)
 	}
@@ -55,7 +56,7 @@ func writeExecutableForTest(t *testing.T, name string) string {
 }
 
 func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
@@ -92,7 +93,7 @@ func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
 }
 
 func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
 }
 
 func TestRunWakeWithLoopWritesInjectViaWakeTarget(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
@@ -154,7 +155,7 @@ func TestRunWakeWithLoopWritesInjectViaWakeTarget(t *testing.T) {
 }
 
 func TestRunWakeWithLoopStartsWhenInjectViaTargetIsNotPersistable(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
@@ -194,7 +195,7 @@ func TestRunWakeWithLoopStartsWhenInjectViaTargetIsNotPersistable(t *testing.T) 
 }
 
 func TestRunWakeWithLoopClearsOldWakeTargetWhenNewTargetIsNotPersistable(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
@@ -250,7 +251,7 @@ func TestRunWakeWithLoopDoesNotWriteReadyFileWhenLockBlocked(t *testing.T) {
 		}
 		return wakeProcessInfo{PID: pid}
 	})
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
 		ProcessStart: "start-1",
@@ -295,7 +296,7 @@ func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
 		}
 		return wakeProcessInfo{PID: pid}
 	})
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
 		ProcessStart: "start-1",
@@ -304,10 +305,11 @@ func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
 	})
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	injector := writeExecutableForTest(t, "injector")
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
-		"--inject-via", "/tmp/injector",
+		"--inject-via", injector,
 		"--ready-file", readyPath,
 		"--accept-existing-wake",
 	}, func(cfg wakeConfig) error {
@@ -337,7 +339,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsMissingTTY(t *testing.T) {
 		}
 		return wakeProcessInfo{PID: pid}
 	})
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
 		TTY:          "/dev/amq-missing-tty",
@@ -347,10 +349,11 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsMissingTTY(t *testing.T) {
 	})
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	injector := writeExecutableForTest(t, "injector")
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
-		"--inject-via", "/tmp/injector",
+		"--inject-via", injector,
 		"--ready-file", readyPath,
 		"--accept-existing-wake",
 	}, func(cfg wakeConfig) error {
@@ -399,7 +402,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *test
 		}
 		return wakeProcessInfo{PID: pid}
 	})
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
 		TTY:          ttyPath,
@@ -409,10 +412,11 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *test
 	})
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	injector := writeExecutableForTest(t, "injector")
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
-		"--inject-via", "/tmp/injector",
+		"--inject-via", injector,
 		"--ready-file", readyPath,
 		"--accept-existing-wake",
 	}, func(cfg wakeConfig) error {
@@ -449,7 +453,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsUnverifiedWake(t *testing.T) {
 		}
 		return wakeProcessInfo{PID: pid}
 	})
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
 		ProcessStart: "start-1",
@@ -458,10 +462,11 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsUnverifiedWake(t *testing.T) {
 	})
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	injector := writeExecutableForTest(t, "injector")
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
-		"--inject-via", "/tmp/injector",
+		"--inject-via", injector,
 		"--ready-file", readyPath,
 		"--accept-existing-wake",
 	}, func(cfg wakeConfig) error {
@@ -481,7 +486,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsUnverifiedWake(t *testing.T) {
 
 func TestAcquireWakeLockSelfHealsPIDReusedByNonAMQ(t *testing.T) {
 	const reusedPID = 4242
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          reusedPID,
 		ProcessStart: "old-start",
@@ -536,7 +541,7 @@ func TestAcquireWakeLockSelfHealsPIDReusedByNonAMQ(t *testing.T) {
 
 func TestAcquireWakeLockSelfHealsPIDReusedByDifferentAMQStart(t *testing.T) {
 	const reusedPID = 4242
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          reusedPID,
 		ProcessStart: "old-start",
@@ -569,7 +574,7 @@ func TestAcquireWakeLockSelfHealsPIDReusedByDifferentAMQStart(t *testing.T) {
 
 func TestAcquireWakeLockSelfHealsStartMismatchWhenExecutableUnavailable(t *testing.T) {
 	const reusedPID = 4242
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          reusedPID,
 		ProcessStart: "old-start",
@@ -601,7 +606,7 @@ func TestAcquireWakeLockSelfHealsStartMismatchWhenExecutableUnavailable(t *testi
 
 func TestAcquireWakeLockStartReadFailureIsUnverifiedNotMismatch(t *testing.T) {
 	const pid = 4242
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          pid,
 		ProcessStart: "old-start",
@@ -636,7 +641,7 @@ func TestAcquireWakeLockStartReadFailureIsUnverifiedNotMismatch(t *testing.T) {
 
 func TestAcquireWakeLockLegacyLiveLockDoesNotAutoDelete(t *testing.T) {
 	const pid = 4242
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:        pid,
 		Executable: "/opt/homebrew/bin/amq",
@@ -668,7 +673,7 @@ func TestAcquireWakeLockLegacyLiveLockDoesNotAutoDelete(t *testing.T) {
 }
 
 func TestRemoveWakeLockIfUnchangedRefusesChangedLock(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{PID: 4242})
 	inspection := inspectWakeLock(root, "orchestrator")
 	if !inspection.Exists {
@@ -696,7 +701,7 @@ func TestRemoveWakeLockIfUnchangedRefusesChangedLock(t *testing.T) {
 
 func TestShouldReplaceOrphanedWakeLockSignalsOnlyAfterRevalidation(t *testing.T) {
 	const wakePID = 4242
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
 		TTY:          "/dev/amq-missing-tty",
@@ -751,7 +756,7 @@ func TestShouldReplaceOrphanedWakeLockSignalsOnlyAfterRevalidation(t *testing.T)
 
 func TestShouldReplaceOrphanedWakeLockKeepsLockWhenKillDoesNotTerminate(t *testing.T) {
 	const wakePID = 4242
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
 		TTY:          "/dev/amq-missing-tty",
@@ -791,7 +796,7 @@ func TestShouldReplaceOrphanedWakeLockKeepsLockWhenKillDoesNotTerminate(t *testi
 
 func TestShouldReplaceOrphanedWakeLockRevalidatesBeforeSignal(t *testing.T) {
 	const wakePID = 4242
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
 		TTY:          "/dev/amq-missing-tty",
@@ -843,7 +848,7 @@ func TestShouldReplaceOrphanedWakeLockRevalidatesBeforeSignal(t *testing.T) {
 }
 
 func TestRunWakeWithLoopRejectsRecentlyCorruptLock(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
@@ -935,7 +940,7 @@ func TestConfigureRepairWakeCommandDetachesOutput(t *testing.T) {
 }
 
 func TestOpenWakeRepairOutputCreatesPrivateLog(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	output, err := openWakeRepairOutput(root, "orchestrator")
 	if err != nil {
 		t.Fatalf("openWakeRepairOutput: %v", err)
@@ -950,6 +955,93 @@ func TestOpenWakeRepairOutputCreatesPrivateLog(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("repair output mode = %o, want 0600", got)
+	}
+}
+
+func TestOpenWakeRepairOutputRejectsSymlinkLog(t *testing.T) {
+	root := secureTempDirForTest(t)
+	agentBase := fsq.AgentBase(root, "orchestrator")
+	if err := os.MkdirAll(agentBase, 0o700); err != nil {
+		t.Fatalf("mkdir agent base: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "repair.log")
+	if err := os.WriteFile(target, []byte("old\n"), 0o600); err != nil {
+		t.Fatalf("write target log: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(agentBase, ".wake.repair.log")); err != nil {
+		t.Fatalf("symlink repair log: %v", err)
+	}
+
+	output, err := openWakeRepairOutput(root, "orchestrator")
+	if err == nil {
+		_ = output.Close()
+		t.Fatal("expected symlink repair log rejection")
+	}
+	if !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+}
+
+func TestOpenWakeRepairOutputRejectsFIFOWithoutBlocking(t *testing.T) {
+	root := secureTempDirForTest(t)
+	agentBase := fsq.AgentBase(root, "orchestrator")
+	if err := os.MkdirAll(agentBase, 0o700); err != nil {
+		t.Fatalf("mkdir agent base: %v", err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(agentBase, ".wake.repair.log"), 0o600); err != nil {
+		t.Fatalf("mkfifo repair log: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		output, err := openWakeRepairOutput(root, "orchestrator")
+		if output != nil {
+			_ = output.Close()
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "must be a regular file") {
+			t.Fatalf("expected FIFO rejection, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("openWakeRepairOutput blocked on FIFO")
+	}
+}
+
+func TestRunWakeRepairJSONRejectsFIFOLogWithoutBlocking(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	target := newWakeTarget(root, "orchestrator", injector, []string{"exec"})
+	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
+		PID:        4242,
+		Executable: "/opt/homebrew/bin/amq",
+	}, target))
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
+		t.Fatalf("writeWakeTarget: %v", err)
+	}
+	agentBase := fsq.AgentBase(root, "orchestrator")
+	if err := syscall.Mkfifo(filepath.Join(agentBase, ".wake.repair.log"), 0o600); err != nil {
+		t.Fatalf("mkfifo repair log: %v", err)
+	}
+
+	stdout, _, runErr := captureWakeRepairOutput(t, func() error {
+		return runWakeRepair([]string{"--root", root, "--me", "orchestrator", "--json"})
+	})
+	if runErr == nil || !strings.Contains(runErr.Error(), "regular file") {
+		t.Fatalf("runWakeRepair error = %v, want regular-file refusal", runErr)
+	}
+	var result wakeRepairResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("unmarshal output: %v\nstdout: %s", err, stdout)
+	}
+	if result.Status != "error" || !strings.Contains(result.Reason, "regular file") {
+		t.Fatalf("unexpected result: %#v", result)
 	}
 }
 

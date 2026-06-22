@@ -19,6 +19,19 @@ func stubInspectWakeProcess(t *testing.T, fn func(pid int) wakeProcessInfo) {
 	})
 }
 
+func secureTempDirForTest(t *testing.T) string {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err == nil {
+		dir, mkErr := os.MkdirTemp(cwd, ".amq-secure-test-")
+		if mkErr == nil {
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			return dir
+		}
+	}
+	return t.TempDir()
+}
+
 func writeWakeLockForTest(t *testing.T, root, agent string, lock wakeLock) string {
 	t.Helper()
 	if err := fsq.EnsureRootDirs(root); err != nil {

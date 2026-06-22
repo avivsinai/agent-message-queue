@@ -14,7 +14,7 @@ import (
 )
 
 func TestRunOpsChecks_BasicAgentStats(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 
 	// Set up agent dirs and config
 	agents := []string{"alice", "bob"}
@@ -108,7 +108,7 @@ func TestRunOpsChecks_BasicAgentStats(t *testing.T) {
 }
 
 func TestRunOpsChecks_NoConfig(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("ensure root dirs: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestRunOpsChecks_NoConfig(t *testing.T) {
 }
 
 func TestRunOpsChecks_ReportsAndFixesStaleWakeLockWithoutConfig(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "alice", wakeLock{
 		PID:        999999999,
 		Executable: "/opt/homebrew/bin/amq",
@@ -188,7 +188,7 @@ func TestRunOpsChecks_ReportsAndFixesStaleWakeLockWithoutConfig(t *testing.T) {
 }
 
 func TestRunOpsChecks_RootSourceThreaded(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("ensure root dirs: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestRunOpsChecks_RootSourceThreaded(t *testing.T) {
 }
 
 func TestRunOpsChecks_ReportsStaleWakeLock(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("ensure root dirs: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestRunOpsChecks_ReportsStaleWakeLock(t *testing.T) {
 }
 
 func TestRunOpsChecks_FixesStaleWakeLock(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("ensure root dirs: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestRunOpsChecks_FixesStaleWakeLock(t *testing.T) {
 }
 
 func TestRunOpsChecks_ReportsWakeRepairAvailabilityWithoutSpawning(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("ensure root dirs: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestRunOpsChecks_ReportsWakeRepairAvailabilityWithoutSpawning(t *testing.T)
 		t.Fatalf("write config: %v", err)
 	}
 
-	injector := filepath.Join(t.TempDir(), "injector")
+	injector := filepath.Join(secureTempDirForTest(t), "injector")
 	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write injector: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestRunOpsChecks_ReportsWakeRepairAvailabilityWithoutSpawning(t *testing.T)
 }
 
 func TestRunOpsChecks_StaleRawLockWithLeftoverTargetHasNoRepair(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("ensure root dirs: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestRunOpsChecks_StaleRawLockWithLeftoverTargetHasNoRepair(t *testing.T) {
 		PID:        999999999,
 		Executable: "/opt/homebrew/bin/amq",
 	})
-	injector := filepath.Join(t.TempDir(), "injector")
+	injector := filepath.Join(secureTempDirForTest(t), "injector")
 	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write injector: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestRunOpsChecks_StaleRawLockWithLeftoverTargetHasNoRepair(t *testing.T) {
 }
 
 func TestRunOpsChecks_UnverifiedWakeLockHasTargetButNoRepair(t *testing.T) {
-	root := t.TempDir()
+	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("ensure root dirs: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestRunOpsChecks_UnverifiedWakeLockHasTargetButNoRepair(t *testing.T) {
 		}
 		return wakeProcessInfo{PID: gotPID}
 	})
-	injector := filepath.Join(t.TempDir(), "injector")
+	injector := filepath.Join(secureTempDirForTest(t), "injector")
 	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write injector: %v", err)
 	}

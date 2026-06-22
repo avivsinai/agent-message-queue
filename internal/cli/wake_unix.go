@@ -489,9 +489,26 @@ func openWakeRepairOutput(root, me string) (*os.File, error) {
 		return nil, fmt.Errorf("create repair wake log directory: %w", err)
 	}
 	path := filepath.Join(agentBase, ".wake.repair.log")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("repair wake log %s must not be a symlink", path)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("repair wake log %s must be a regular file", path)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("stat repair wake log: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open repair wake log: %w", err)
+	}
+	if info, err := file.Stat(); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("stat repair wake log: %w", err)
+	} else if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, fmt.Errorf("repair wake log %s must be a regular file", path)
 	}
 	return file, nil
 }

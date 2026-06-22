@@ -40,9 +40,21 @@ func newWakeTarget(root, me, injectVia string, injectArgs []string) wakeTarget {
 		Root:       canonicalWakeRoot(root),
 		Agent:      me,
 		Created:    time.Now().UTC().Format(time.RFC3339),
-		InjectVia:  strings.TrimSpace(injectVia),
+		InjectVia:  wakeTargetInjectViaPath(injectVia),
 		InjectArgs: append([]string{}, injectArgs...),
 	}
+}
+
+func wakeTargetInjectViaPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	info, err := os.Lstat(trimmed)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		return trimmed
+	}
+	if resolved, err := filepath.EvalSymlinks(trimmed); err == nil {
+		return resolved
+	}
+	return trimmed
 }
 
 func wakeTargetDigest(target wakeTarget) string {
@@ -97,7 +109,14 @@ func validateWakeTargetFile(path string, info os.FileInfo) error {
 	if got := info.Mode().Perm(); got != 0o600 {
 		return fmt.Errorf("wake target %s mode is %o, want 0600", path, got)
 	}
-	return validateWakeTargetPathOwnership("wake target", path, info)
+	if err := validateWakeTargetPathOwnership("wake target", path, info); err != nil {
+		return err
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolve wake target: %w", err)
+	}
+	return validateWakeTargetParentDirs("wake target", resolvedPath)
 }
 
 func writeWakeTarget(root, me string, target wakeTarget) error {
@@ -172,12 +191,15 @@ func validateWakeInjectViaPath(path string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("inject_via must be an absolute path")
 	}
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("stat inject_via: %w", err)
 	}
-	if info.IsDir() {
-		return fmt.Errorf("inject_via must be a file, not a directory")
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("inject_via must not be a symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("inject_via must be a regular file")
 	}
 	if info.Mode().Perm()&0o111 == 0 {
 		return fmt.Errorf("inject_via is not executable")
@@ -185,12 +207,11 @@ func validateWakeInjectViaPath(path string) error {
 	if err := validateWakeTargetPathOwnership("inject_via", path, info); err != nil {
 		return err
 	}
-	parent := filepath.Dir(path)
-	parentInfo, err := os.Stat(parent)
+	resolvedPath, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return fmt.Errorf("stat inject_via parent: %w", err)
+		return fmt.Errorf("resolve inject_via: %w", err)
 	}
-	if err := validateWakeTargetPathOwnership("inject_via parent", parent, parentInfo); err != nil {
+	if err := validateWakeTargetParentDirs("inject_via", resolvedPath); err != nil {
 		return err
 	}
 	return nil
@@ -206,4 +227,28 @@ func validateWakeTargetPathOwnership(label, path string, info os.FileInfo) error
 		return fmt.Errorf("%s %s is owned by uid %d, want current uid %d", label, path, ownerUID, currentUID)
 	}
 	return nil
+}
+
+func validateWakeTargetParentDirs(label, path string) error {
+	cleanParent := filepath.Dir(filepath.Clean(path))
+	start, err := filepath.EvalSymlinks(cleanParent)
+	if err != nil {
+		return fmt.Errorf("resolve %s parent %s: %w", label, cleanParent, err)
+	}
+	for dir := start; ; dir = filepath.Dir(dir) {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return fmt.Errorf("stat %s parent %s: %w", label, dir, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s parent %s must be a directory", label, dir)
+		}
+		if info.Mode().Perm()&0o022 != 0 {
+			return fmt.Errorf("%s parent %s is group/world-writable", label, dir)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+	}
 }
