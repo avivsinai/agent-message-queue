@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Report and optionally fix identity-verified stale `.wake.lock` files from
   `amq doctor --ops`, including roots whose config is missing or corrupt (#151).
 
+### Fixed
+
+- `amq coop exec --require-wake` can reuse an existing usable wake process, while
+  still failing closed when the existing wake cannot safely inject (#153).
+
 ## [0.36.0] - 2026-06-13
 ### Changed
 

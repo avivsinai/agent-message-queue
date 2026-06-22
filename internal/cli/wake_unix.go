@@ -70,11 +70,34 @@ type wakeLockInspection struct {
 	raw               []byte
 }
 
-var inspectWakeProcess = inspectWakeProcessPlatform
+var (
+	inspectWakeProcess = inspectWakeProcessPlatform
+	getWakeCurrentTTY  = getCurrentTTY
+	getWakeProcessSID  = unix.Getsid
+)
+
+type wakeLockAcquireOptions struct {
+	acceptExistingValid bool
+}
+
+type wakeAlreadyRunningError struct {
+	Agent      string
+	Inspection wakeLockInspection
+}
+
+func (e *wakeAlreadyRunningError) Error() string {
+	lock := e.Inspection.Lock
+	return fmt.Sprintf("wake already running for %s (pid %d on %s since %s)",
+		e.Agent, lock.PID, lock.TTY, lock.Started)
+}
 
 // acquireWakeLock attempts to acquire the wake lock for an agent's inbox.
 // Returns cleanup function and error. If another wake is running, returns error.
 func acquireWakeLock(root, me string) (cleanup func(), err error) {
+	return acquireWakeLockWithOptions(root, me, wakeLockAcquireOptions{})
+}
+
+func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions) (cleanup func(), err error) {
 	agentBase := fsq.AgentBase(root, me)
 	lockPath := filepath.Join(agentBase, ".wake.lock")
 
@@ -94,10 +117,16 @@ func acquireWakeLock(root, me string) (cleanup func(), err error) {
 		case wakeLockCreating:
 			return nil, fmt.Errorf("wake lock is being created (retry shortly)")
 		case wakeLockValid:
+			if options.acceptExistingValid {
+				if err := requireWakeLockUsable(inspection); err != nil {
+					return nil, err
+				}
+				return nil, wakeLockAlreadyRunningError(me, inspection)
+			}
 			if shouldReplaceOrphanedWakeLock(inspection) {
 				goto createLock
 			}
-			return nil, wakeLockAlreadyRunningError(me, inspection.Lock)
+			return nil, wakeLockAlreadyRunningError(me, inspection)
 		case wakeLockUnverified:
 			return nil, fmt.Errorf("wake lock for %s is unverified (pid %d on %s since %s): %s; run 'amq doctor --ops' for details",
 				me, inspection.Lock.PID, inspection.Lock.TTY, inspection.Lock.Started, inspection.Reason)
@@ -134,13 +163,16 @@ createLock:
 	f, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if os.IsExist(err) {
-			// Another process won the race - re-read to get its info
-			if data, readErr := os.ReadFile(lockPath); readErr == nil {
-				var winner wakeLock
-				if json.Unmarshal(data, &winner) == nil {
-					return nil, fmt.Errorf("wake already running for %s (pid %d on %s since %s)",
-						me, winner.PID, winner.TTY, winner.Started)
+			// Another process won the race; reuse only if the shared
+			// classifier proves it is the matching wake.
+			winner := inspectWakeLock(root, me)
+			if winner.Status == wakeLockValid {
+				if options.acceptExistingValid {
+					if usableErr := requireWakeLockUsable(winner); usableErr != nil {
+						return nil, usableErr
+					}
 				}
+				return nil, wakeLockAlreadyRunningError(me, winner)
 			}
 			return nil, fmt.Errorf("wake lock exists for %s (concurrent start)", me)
 		}
@@ -314,6 +346,13 @@ func removeWakeLockIfUnchanged(inspection wakeLockInspection) error {
 }
 
 func shouldReplaceOrphanedWakeLock(inspection wakeLockInspection) bool {
+	if !wakeLockNeedsReplacement(inspection) {
+		return false
+	}
+	return replaceConfirmedOrphanedWakeLock(inspection)
+}
+
+func wakeLockNeedsReplacement(inspection wakeLockInspection) bool {
 	if !inspection.IdentityConfirmed {
 		return false
 	}
@@ -323,11 +362,11 @@ func shouldReplaceOrphanedWakeLock(inspection wakeLockInspection) bool {
 	// that orphan before taking over; never signal an unconfirmed PID.
 	if strings.HasPrefix(existing.TTY, "/dev/") {
 		if _, statErr := os.Stat(existing.TTY); os.IsNotExist(statErr) {
-			return replaceConfirmedOrphanedWakeLock(inspection)
+			return true
 		}
 	}
 
-	currentTTY := getCurrentTTY()
+	currentTTY := getWakeCurrentTTY()
 	existingTTY := existing.TTY
 	if strings.HasPrefix(existingTTY, "/dev/") {
 		if real, err := filepath.EvalSymlinks(existingTTY); err == nil {
@@ -335,13 +374,24 @@ func shouldReplaceOrphanedWakeLock(inspection wakeLockInspection) bool {
 		}
 	}
 	if currentTTY != "" && currentTTY == existingTTY {
-		existingSid, sidErr := unix.Getsid(existing.PID)
-		currentSid, _ := unix.Getsid(0)
+		existingSid, sidErr := getWakeProcessSID(existing.PID)
+		currentSid, _ := getWakeProcessSID(0)
 		if sidErr == nil && existingSid != currentSid {
-			return replaceConfirmedOrphanedWakeLock(inspection)
+			return true
 		}
 	}
 	return false
+}
+
+func requireWakeLockUsable(inspection wakeLockInspection) error {
+	if !inspection.Exists || inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
+		return fmt.Errorf("existing wake lock for %s is not a confirmed valid wake", inspection.Agent)
+	}
+	if wakeLockNeedsReplacement(inspection) {
+		return fmt.Errorf("existing wake lock for %s is not usable for --require-wake (pid %d on %s since %s)",
+			inspection.Agent, inspection.Lock.PID, inspection.Lock.TTY, inspection.Lock.Started)
+	}
+	return nil
 }
 
 func replaceConfirmedOrphanedWakeLock(inspection wakeLockInspection) bool {
@@ -406,9 +456,11 @@ func canonicalWakeRoot(root string) string {
 	return filepath.Clean(absRoot)
 }
 
-func wakeLockAlreadyRunningError(me string, lock wakeLock) error {
-	return fmt.Errorf("wake already running for %s (pid %d on %s since %s)",
-		me, lock.PID, lock.TTY, lock.Started)
+func wakeLockAlreadyRunningError(me string, inspection wakeLockInspection) error {
+	return &wakeAlreadyRunningError{
+		Agent:      me,
+		Inspection: inspection,
+	}
 }
 
 func inspectionReason(base string, err error) string {
@@ -523,6 +575,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	interruptCooldownFlag := fs.Duration("interrupt-cooldown", 7*time.Second, "Minimum time between interrupts")
 	readyFileFlag := fs.String("ready-file", "", "Internal: write this file after wake lock acquisition")
 	debugFlag := fs.Bool("debug", false, "Log injection diagnostics to stderr")
+	acceptExistingWakeFlag := fs.Bool("accept-existing-wake", false, "Internal: allow a usable existing wake to satisfy readiness")
 
 	usage := usageWithFlags(fs, "amq wake --me <agent> [options]",
 		"Background waker: injects terminal notification when messages arrive.",
@@ -649,8 +702,15 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	}
 
 	// Acquire lock to prevent duplicate wake processes
-	cleanup, err := acquireWakeLock(root, me)
+	acceptExistingWake := readyFile != "" && *acceptExistingWakeFlag
+	cleanup, err := acquireWakeLockWithOptions(root, me, wakeLockAcquireOptions{
+		acceptExistingValid: acceptExistingWake,
+	})
 	if err != nil {
+		var alreadyRunning *wakeAlreadyRunningError
+		if acceptExistingWake && errors.As(err, &alreadyRunning) {
+			return writeWakeReadyFile(readyFile)
+		}
 		return err
 	}
 	defer cleanup()
