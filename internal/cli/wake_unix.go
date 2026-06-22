@@ -492,7 +492,7 @@ func validateWakeLockRepairable(inspection wakeLockInspection) error {
 		return fmt.Errorf("wake lock status %q is not repairable", inspection.Status)
 	}
 	switch inspection.Reason {
-	case "pid not running", "boot id mismatch", "process start time mismatch", "pid is not amq", "pid is not amq wake":
+	case "pid not running", "pid is not amq", "pid is not amq wake":
 		return nil
 	default:
 		return fmt.Errorf("wake lock stale reason %q is not repairable", inspection.Reason)

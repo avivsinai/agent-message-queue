@@ -658,6 +658,83 @@ func TestRepairWakeRefusesStaleRawLockWithLeftoverTarget(t *testing.T) {
 	}
 }
 
+func TestRepairWakeRefusesLiveIdentityMismatchLock(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		lock       wakeLock
+		process    wakeProcessInfo
+		wantReason string
+	}{
+		{
+			name: "boot id mismatch",
+			lock: wakeLock{
+				PID:          4242,
+				ProcessStart: "start-token",
+				BootID:       "recorded-boot",
+				Executable:   "/opt/homebrew/bin/amq",
+			},
+			process: wakeProcessInfo{
+				PID:        4242,
+				Running:    true,
+				StartToken: "start-token",
+				BootID:     "actual-boot",
+				Executable: "/opt/homebrew/bin/amq",
+			},
+			wantReason: "boot id mismatch",
+		},
+		{
+			name: "process start mismatch",
+			lock: wakeLock{
+				PID:          4242,
+				ProcessStart: "recorded-start",
+				BootID:       "same-boot",
+				Executable:   "/opt/homebrew/bin/amq",
+			},
+			process: wakeProcessInfo{
+				PID:        4242,
+				Running:    true,
+				StartToken: "actual-start",
+				BootID:     "same-boot",
+				Executable: "/opt/homebrew/bin/amq",
+			},
+			wantReason: "process start time mismatch",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			injector := writeExecutableForTest(t, "injector")
+			target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+			lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(tc.lock, target))
+			if err := writeWakeTarget(root, "codex", target); err != nil {
+				t.Fatalf("writeWakeTarget: %v", err)
+			}
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				proc := tc.process
+				proc.PID = pid
+				proc.Args = []string{"amq", "wake", "--root", root, "--me", "codex"}
+				return proc
+			})
+			stubStartWakeFromTarget(t, func(root, me string, target wakeTarget) (int, error) {
+				t.Fatalf("startWakeFromTarget should not run for live identity mismatch")
+				return 0, nil
+			})
+
+			result, err := repairWake(root, "codex")
+			if err == nil {
+				t.Fatal("expected repair refusal")
+			}
+			if result.Status != "refused" ||
+				!strings.Contains(result.Reason, tc.wantReason) ||
+				!strings.Contains(result.Reason, "not repairable") {
+				t.Fatalf("unexpected result: %#v err=%v", result, err)
+			}
+			if _, statErr := os.Stat(lockPath); statErr != nil {
+				t.Fatalf("lock should remain on refused live identity mismatch: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestRunWakeRepairCLIRefusesMissingLockWithJSON(t *testing.T) {
 	root := secureTempDirForTest(t)
 
