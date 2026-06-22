@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.1] - 2026-06-22
+
+### Fixed
+
+- Hardened general stale `.wake.lock` cleanup paths so `amq wake` acquisition
+  and `doctor --ops --fix-wake-locks` refuse to remove locks whose live wake PID
+  only appears stale because boot-id or process-start metadata was tampered or
+  mismatched (#156).
+- `amq send --root <path>` now shows the root basename as the session label for
+  root-only local sends that are not routed by project, session, or
+  from-session flags (#150).
+
 ## [0.37.0] - 2026-06-22
 ### Added
 
@@ -545,7 +557,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
-[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.37.0...HEAD
+[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.37.1...HEAD
+[0.37.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.37.0...v0.37.1
 [0.37.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.34.1...v0.35.0
