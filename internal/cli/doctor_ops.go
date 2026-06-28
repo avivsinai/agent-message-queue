@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net"
@@ -43,19 +44,29 @@ type opsHint struct {
 }
 
 type opsWakeLock struct {
-	Status  string `json:"status"`
-	Agent   string `json:"agent"`
-	Root    string `json:"root"`
-	Lock    string `json:"lock"`
-	PID     int    `json:"pid,omitempty"`
-	Reason  string `json:"reason,omitempty"`
-	Fix     string `json:"fix,omitempty"`
-	Removed bool   `json:"removed,omitempty"`
+	Status        string `json:"status"`
+	Agent         string `json:"agent"`
+	Root          string `json:"root"`
+	Lock          string `json:"lock"`
+	PID           int    `json:"pid,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+	Fix           string `json:"fix,omitempty"`
+	Removed       bool   `json:"removed,omitempty"`
+	Target        string `json:"target,omitempty"`
+	TargetPresent bool   `json:"target_present,omitempty"`
+	TargetStatus  string `json:"target_status,omitempty"`
+	TargetReason  string `json:"target_reason,omitempty"`
+	TargetRemoved bool   `json:"target_removed,omitempty"`
 }
 
 const fixWakeLocksCommand = "amq doctor --ops --fix-wake-locks"
+const fixWakeTargetsCommand = "amq doctor --ops --fix-wake-targets"
 
-func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsResult {
+var probeWakeGhosttyTarget = func(ctx context.Context, terminalID string) error {
+	return probeGhosttyTerminalID(ctx, terminalID)
+}
+
+func runOpsChecks(root string, rootSource string, fixWakeLocks bool, fixWakeTargets bool) *doctorOpsResult {
 	result := &doctorOpsResult{}
 	now := time.Now()
 
@@ -72,7 +83,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 			Status:  "error",
 			Message: fmt.Sprintf("Cannot load config: %v", err),
 		})
-		result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, nil), fixWakeLocks)
+		result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, nil), fixWakeLocks, fixWakeTargets)
 		return result
 	}
 
@@ -130,7 +141,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 		result.Agents = append(result.Agents, agent)
 	}
 
-	result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, cfg.Agents), fixWakeLocks)
+	result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, cfg.Agents), fixWakeLocks, fixWakeTargets)
 
 	// Integration hints
 	result.Hints = append(result.Hints, checkGlobalRootHint()...)
@@ -168,11 +179,14 @@ func discoveredWakeLockAgents(root string, configured []string) []string {
 	return agents
 }
 
-func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
+func checkWakeLocks(root string, agents []string, fixLocks bool, fixTargets bool) []opsWakeLock {
 	var locks []opsWakeLock
 	for _, agent := range agents {
 		inspection := inspectWakeLock(root, agent)
 		if !inspection.Exists {
+			if targetLock, ok := inspectOrphanedWakeTarget(root, agent, fixTargets); ok {
+				locks = append(locks, targetLock)
+			}
 			continue
 		}
 
@@ -184,9 +198,10 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 			PID:    inspection.PID,
 			Reason: inspection.Reason,
 		}
+		applyWakeTargetHealth(root, agent, inspection, &lock)
 		if inspection.Status == wakeLockStale {
 			lock.Fix = fixWakeLocksCommand
-			if fix {
+			if fixLocks {
 				recheck := inspectWakeLock(root, agent)
 				if recheck.Status != wakeLockStale {
 					lock.Status = string(recheck.Status)
@@ -197,12 +212,109 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 				} else {
 					lock.Status = "fixed"
 					lock.Removed = true
+					if fixTargets && lock.TargetPresent && lock.TargetStatus == "bound" {
+						if err := removeWakeTarget(root, agent); err != nil {
+							lock.Status = "error"
+							lock.Reason = err.Error()
+						} else {
+							lock.TargetRemoved = true
+							lock.TargetStatus = "fixed"
+						}
+					}
 				}
 			}
 		}
 		locks = append(locks, lock)
 	}
 	return locks
+}
+
+func inspectOrphanedWakeTarget(root, agent string, fix bool) (opsWakeLock, bool) {
+	lock := opsWakeLock{
+		Status: string(wakeLockMissing),
+		Agent:  agent,
+		Root:   canonicalWakeRoot(root),
+		Lock:   filepath.Join(fsq.AgentBase(root, agent), ".wake.lock"),
+	}
+	target, exists, targetErr := readWakeTarget(root, agent)
+	if !exists {
+		return opsWakeLock{}, false
+	}
+	lock.Target = wakeTargetPath(root, agent)
+	lock.TargetPresent = true
+	if targetErr != nil {
+		lock.TargetStatus = "invalid"
+		lock.TargetReason = targetErr.Error()
+	} else if err := validateWakeTarget(target, root, agent); err != nil {
+		lock.TargetStatus = "invalid"
+		lock.TargetReason = err.Error()
+	} else {
+		lock.TargetStatus = "orphaned"
+		lock.TargetReason = "wake target has no wake lock"
+	}
+	lock.Fix = fixWakeTargetsCommand
+	if fix {
+		if err := removeWakeTarget(root, agent); err != nil {
+			lock.Status = "error"
+			lock.TargetReason = err.Error()
+		} else {
+			lock.Status = "fixed"
+			lock.TargetRemoved = true
+			lock.TargetStatus = "fixed"
+			lock.TargetReason = ""
+		}
+	}
+	return lock, true
+}
+
+func applyWakeTargetHealth(root, agent string, inspection wakeLockInspection, lock *opsWakeLock) {
+	target, exists, targetErr := readWakeTarget(root, agent)
+	if !exists {
+		return
+	}
+	lock.Target = wakeTargetPath(root, agent)
+	lock.TargetPresent = true
+	if targetErr != nil {
+		lock.TargetStatus = "invalid"
+		lock.TargetReason = targetErr.Error()
+		return
+	}
+	if err := validateWakeTarget(target, root, agent); err != nil {
+		lock.TargetStatus = "invalid"
+		lock.TargetReason = err.Error()
+		return
+	}
+	if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
+		lock.TargetStatus = "mismatched"
+		lock.TargetReason = err.Error()
+		return
+	}
+	if status, reason := ghosttyWakeTargetStatus(target); status != "" {
+		lock.TargetStatus = status
+		lock.TargetReason = reason
+		return
+	}
+	lock.TargetStatus = "bound"
+}
+
+func ghosttyWakeTargetStatus(target wakeTarget) (status, reason string) {
+	if target.Mode != wakeTargetGhostty {
+		return "", ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultInjectTimeout)
+	defer cancel()
+	if err := probeWakeGhosttyTarget(ctx, target.GhosttyTerminalID); err != nil {
+		msg := err.Error()
+		switch {
+		case strings.Contains(msg, "no Ghostty terminal with id"):
+			return "missing-terminal", msg
+		case strings.Contains(msg, "ambiguous Ghostty terminal id"):
+			return "ambiguous-terminal", msg
+		default:
+			return "invalid", msg
+		}
+	}
+	return "", ""
 }
 
 func checkGlobalRootHint() []opsHint {

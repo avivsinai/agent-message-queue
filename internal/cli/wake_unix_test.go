@@ -70,6 +70,12 @@ func writeWakeLockForTest(t *testing.T, root, agent string, lock wakeLock) strin
 	return lockPath
 }
 
+func bindWakeLockToTarget(lock wakeLock, target wakeTarget) wakeLock {
+	lock.WakeMode = target.Mode
+	lock.TargetDigest = wakeTargetDigest(target)
+	return lock
+}
+
 func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -131,6 +137,42 @@ func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
 	if !errors.Is(err, errDone) {
 		t.Fatalf("expected loop sentinel error, got %v", err)
 	}
+	if _, exists, targetErr := readWakeTarget(root, "orchestrator"); targetErr != nil || exists {
+		t.Fatalf("wake target exists=%v err=%v after clean exit, want removed", exists, targetErr)
+	}
+}
+
+func TestRunWakeWithLoopWritesInjectViaWakeTarget(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	errDone := errors.New("done")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", "/tmp/injector",
+		"--inject-arg", "exec",
+	}, func(cfg wakeConfig) error {
+		target, exists, targetErr := readWakeTarget(root, "orchestrator")
+		if targetErr != nil {
+			t.Fatalf("readWakeTarget: %v", targetErr)
+		}
+		if !exists {
+			t.Fatal("expected wake target to be written")
+		}
+		if target.Mode != wakeTargetInjectVia || target.InjectVia != "/tmp/injector" || strings.Join(target.InjectArgs, "|") != "exec" {
+			t.Fatalf("unexpected target: %#v", target)
+		}
+		return errDone
+	})
+	if !errors.Is(err, errDone) {
+		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
 }
 
 func TestRunWakeWithLoopDoesNotWriteReadyFileWhenLockBlocked(t *testing.T) {
@@ -149,12 +191,13 @@ func TestRunWakeWithLoopDoesNotWriteReadyFileWhenLockBlocked(t *testing.T) {
 		return wakeProcessInfo{PID: pid}
 	})
 	root := t.TempDir()
-	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+	target := newInjectViaWakeTarget(root, "orchestrator", "/tmp/injector", nil)
+	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
 		PID:          wakePID,
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
-	})
+	}, target))
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
 	err := runWakeWithLoop([]string{
@@ -193,12 +236,13 @@ func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
 		return wakeProcessInfo{PID: pid}
 	})
 	root := t.TempDir()
-	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+	target := newInjectViaWakeTarget(root, "orchestrator", "/tmp/injector", nil)
+	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
 		PID:          wakePID,
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
-	})
+	}, target))
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
 	err := runWakeWithLoop([]string{
@@ -219,6 +263,52 @@ func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
 	}
 }
 
+func TestRunWakeWithLoopAcceptExistingWakeRejectsDifferentTarget(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "start-1",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	root := t.TempDir()
+	oldTarget := newInjectViaWakeTarget(root, "orchestrator", "/tmp/old-injector", nil)
+	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
+		PID:          wakePID,
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	}, oldTarget))
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", "/tmp/new-injector",
+		"--ready-file", readyPath,
+		"--accept-existing-wake",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with a different target: %#v", cfg)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected target mismatch error")
+	}
+	if !strings.Contains(err.Error(), "different inject-via target") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+		t.Fatalf("ready file should not exist, statErr=%v", statErr)
+	}
+}
+
 func TestRunWakeWithLoopAcceptExistingWakeRejectsMissingTTY(t *testing.T) {
 	const wakePID = 4242
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
@@ -235,13 +325,14 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsMissingTTY(t *testing.T) {
 		return wakeProcessInfo{PID: pid}
 	})
 	root := t.TempDir()
-	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+	target := newInjectViaWakeTarget(root, "orchestrator", "/tmp/injector", nil)
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
 		PID:          wakePID,
 		TTY:          "/dev/amq-missing-tty",
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
-	})
+	}, target))
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
 	err := runWakeWithLoop([]string{
@@ -297,13 +388,14 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *test
 		return wakeProcessInfo{PID: pid}
 	})
 	root := t.TempDir()
-	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+	target := newInjectViaWakeTarget(root, "orchestrator", "/tmp/injector", nil)
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
 		PID:          wakePID,
 		TTY:          ttyPath,
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
-	})
+	}, target))
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
 	err := runWakeWithLoop([]string{
@@ -732,6 +824,23 @@ func TestRunWakeWithLoopRejectsInjectArgWithoutInjectVia(t *testing.T) {
 	}
 }
 
+func TestRunWakeWithLoopRejectsGhosttyTerminalIDWithoutGhostty(t *testing.T) {
+	err := runWakeWithLoop([]string{
+		"--root", t.TempDir(),
+		"--me", "orchestrator",
+		"--inject-ghostty-terminal-id", "terminal-1",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with invalid flags: %#v", cfg)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected usage error")
+	}
+	if !strings.Contains(err.Error(), "--inject-ghostty-terminal-id requires --inject-ghostty") {
+		t.Fatalf("expected ghostty usage error, got %v", err)
+	}
+}
+
 func TestRunWakeWithLoopRejectsNonPositiveInjectTimeout(t *testing.T) {
 	err := runWakeWithLoop([]string{
 		"--root", t.TempDir(),
@@ -756,6 +865,15 @@ func TestWakeHealthCheckSkipsTTYForInjectVia(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("expected external injection health check to skip TTY, got %v", err)
+	}
+}
+
+func TestWakeHealthCheckSkipsTTYForGhostty(t *testing.T) {
+	err := wakeHealthCheck(wakeConfig{ghosttyTerminalID: "terminal-1"}, func() bool {
+		return false
+	})
+	if err != nil {
+		t.Fatalf("expected Ghostty injection health check to skip TTY, got %v", err)
 	}
 }
 

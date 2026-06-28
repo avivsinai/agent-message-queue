@@ -173,12 +173,12 @@ amq dlq list --me <agent> [--new | --cur] [--json]
 amq dlq read --me <agent> --id <dlq_id> [--json]
 amq dlq retry --me <agent> --id <dlq_id> [--all] [--force]
 amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
-amq wake --me <agent> [--inject-cmd <cmd>] [--inject-via <executable>] [--inject-arg <arg>...] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>]
+amq wake --me <agent> [--inject-cmd <cmd>] [--inject-via <executable>] [--inject-arg <arg>...] [--inject-ghostty] [--inject-ghostty-terminal-id <id>] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>]
 amq upgrade
 amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--json]
 amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>]
 amq coop init [--root <path>] [--agents <a,b,c>] [--force] [--json]
-amq coop exec [--root <path>] [--session <name>] [--me <handle>] [--no-init] [--no-wake] [--require-wake] [-y] <command> [-- <command-flags>]
+amq coop exec [--root <path>] [--session <name>] [--me <handle>] [--no-init] [--no-wake] [--require-wake] [--wake-inject-ghostty] [--wake-inject-ghostty-terminal-id <id>] [-y] <command> [-- <command-flags>]
 amq swarm list [--json]
 amq swarm join --team <name> --me <agent> [--agent-id <id>] [--type codex|external] [--json]
 amq swarm leave --team <name> --agent-id <id> [--json]
@@ -332,7 +332,7 @@ Use `--force` with retry to override the max retry limit.
 - Queue depth and oldest unread per agent
 - DLQ count and oldest age
 - Presence freshness
-- Wake lock health (`--fix-wake-locks` removes stale locks)
+- Wake lock and wake target health (`--fix-wake-locks` removes stale locks; `--fix-wake-targets` removes orphaned target metadata)
 - Integration hints for Kanban and Symphony
 
 Use `amq doctor --ops --json` for machine-readable health output.
@@ -424,6 +424,17 @@ payload as the final argument and bounds each invocation with
 `--inject-timeout` (default `5s`). This executes local code for each
 notification, and the payload can include sanitized but message-derived sender
 and subject header content.
+
+On macOS Ghostty, prefer native terminal-id injection:
+
+```bash
+amq coop exec --wake-inject-ghostty codex
+amq wake --me codex --inject-ghostty
+```
+
+AMQ stores the Ghostty terminal id beside the wake lock and rejects reuse when a
+live wake is bound to a different target. This keeps routing by AMQ root/agent
+while making the terminal injection destination stable.
 
 ### Plan Mode Prompt Hook (Claude)
 

@@ -155,6 +155,14 @@ amq doctor
 amq doctor --ops
 amq doctor --ops --json
 amq doctor --ops --fix-wake-locks
+amq doctor --ops --fix-wake-targets
+```
+
+On macOS Ghostty, launchers can bind wake notifications to the terminal id
+instead of relying on terminal titles:
+
+```bash
+amq coop exec --wake-inject-ghostty codex
 ```
 
 ## Message Kinds & Priority

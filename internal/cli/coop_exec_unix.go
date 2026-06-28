@@ -28,6 +28,8 @@ func runCoopExec(args []string) error {
 	noInitFlag := fs.Bool("no-init", false, "Don't auto-initialize if .amqrc is missing")
 	noWakeFlag := fs.Bool("no-wake", false, "Don't start amq wake in background")
 	requireWakeFlag := fs.Bool("require-wake", false, "Fail if amq wake cannot start and acquire its lock")
+	wakeInjectGhosttyFlag := fs.Bool("wake-inject-ghostty", false, "Start wake with native Ghostty terminal-id injection")
+	wakeInjectGhosttyTerminalIDFlag := fs.String("wake-inject-ghostty-terminal-id", "", "Ghostty terminal id for --wake-inject-ghostty")
 	yesFlag := fs.Bool("y", false, "Skip confirmation prompts")
 
 	usage := usageWithFlags(fs, "amq coop exec [options] <command> [-- <command-flags>]",
@@ -45,6 +47,7 @@ func runCoopExec(args []string) error {
 		"  amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Codex with flags",
 		"  amq coop exec --session feature-x claude          # Isolated session",
 		"  amq coop exec --root .agent-mail/auth claude      # Explicit root (no session default)",
+		"  amq coop exec --wake-inject-ghostty codex         # Wake the current Ghostty terminal by id",
 		"  amq coop exec --me myagent bash                   # Debug shell with AMQ env",
 	)
 
@@ -55,6 +58,17 @@ func runCoopExec(args []string) error {
 	}
 	if *noWakeFlag && *requireWakeFlag {
 		return UsageError("--require-wake cannot be used with --no-wake")
+	}
+	if strings.TrimSpace(*wakeInjectGhosttyTerminalIDFlag) != "" && !*wakeInjectGhosttyFlag {
+		return UsageError("--wake-inject-ghostty-terminal-id requires --wake-inject-ghostty")
+	}
+	wakeInjectGhosttyTerminalID := ""
+	if *wakeInjectGhosttyFlag && strings.TrimSpace(*wakeInjectGhosttyTerminalIDFlag) != "" {
+		var normalizeErr error
+		wakeInjectGhosttyTerminalID, normalizeErr = normalizeGhosttyTerminalID(*wakeInjectGhosttyTerminalIDFlag)
+		if normalizeErr != nil {
+			return UsageError("--wake-inject-ghostty-terminal-id: %v", normalizeErr)
+		}
 	}
 
 	remaining := fs.Args()
@@ -186,7 +200,7 @@ func runCoopExec(args []string) error {
 			amqBin = "amq"
 		}
 
-		wakeCmd := exec.Command(amqBin, "--no-update-check", "wake", "--me", agentHandle, "--root", root)
+		wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(agentHandle, root, *wakeInjectGhosttyFlag, wakeInjectGhosttyTerminalID)...)
 		var readyPath string
 		var cleanupReady func()
 		if *requireWakeFlag {
@@ -242,6 +256,17 @@ func runCoopExec(args []string) error {
 		_ = wakeProc.Kill()
 	}
 	return execErr
+}
+
+func buildCoopWakeArgs(agentHandle, root string, injectGhostty bool, ghosttyTerminalID string) []string {
+	args := []string{"--no-update-check", "wake", "--me", agentHandle, "--root", root}
+	if injectGhostty {
+		args = append(args, "--inject-ghostty")
+		if ghosttyTerminalID != "" {
+			args = append(args, "--inject-ghostty-terminal-id", ghosttyTerminalID)
+		}
+	}
+	return args
 }
 
 func newWakeReadyFile() (string, func(), error) {

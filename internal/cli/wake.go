@@ -21,6 +21,7 @@ type wakeConfig struct {
 	injectCmd         string
 	injectVia         string // external command for injection (replaces TIOCSTI)
 	injectArgs        []string
+	ghosttyTerminalID string
 	injectTimeout     time.Duration
 	bell              bool
 	debounce          time.Duration
@@ -94,7 +95,7 @@ func inputDeferralDelay(state ttyInputState, now, deadline time.Time, quietFor, 
 }
 
 func shouldDeferBeforeInject(cfg *wakeConfig, deferForInput bool) bool {
-	return deferForInput && cfg.deferWhileInput && cfg.injectVia == ""
+	return deferForInput && cfg.deferWhileInput && !cfg.hasExternalWakeTarget()
 }
 
 func notifyNewMessages(cfg *wakeConfig) error {
@@ -167,8 +168,8 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.previewLen, cfg.interruptNotice)
 		now := time.Now()
 		if cfg.interruptKey != "" && shouldInterruptNow(cfg, now) {
-			if cfg.injectVia != "" {
-				if err := injectVia(cfg, cfg.interruptKey); err == nil {
+			if cfg.hasExternalWakeTarget() {
+				if err := injectExternal(cfg, cfg.interruptKey); err == nil {
 					cfg.lastInterrupt = now
 					time.Sleep(50 * time.Millisecond)
 				}
@@ -333,12 +334,12 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 		waitForTTYInputQuiet(cfg)
 	}
 
-	// External injection: delegate to user-specified command instead of TIOCSTI.
-	// The command receives the notification text as its last argument.
-	if cfg.injectVia != "" {
-		if err := injectVia(cfg, plainText); err != nil {
+	// External injection: delegate to a user-specified command or Ghostty
+	// terminal-id target instead of TIOCSTI.
+	if cfg.hasExternalWakeTarget() {
+		if err := injectExternal(cfg, plainText); err != nil {
 			if cfg.fallbackWarn {
-				_ = writeStderr("amq wake: --inject-via failed: %v\n", err)
+				_ = writeStderr("amq wake: %s failed: %v\n", externalWakeTargetLabel(cfg), err)
 				_ = writeStderr("amq wake: falling back to stderr notification\n")
 				cfg.fallbackWarn = false
 			}
@@ -440,6 +441,27 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	return nil
 }
 
+func externalWakeTargetLabel(cfg *wakeConfig) string {
+	if cfg.injectVia != "" {
+		return "--inject-via"
+	}
+	if cfg.ghosttyTerminalID != "" {
+		return "--inject-ghostty"
+	}
+	return "external injection"
+}
+
+func (cfg *wakeConfig) hasExternalWakeTarget() bool {
+	return cfg.injectVia != "" || cfg.ghosttyTerminalID != ""
+}
+
+func injectExternal(cfg *wakeConfig, text string) error {
+	if cfg.ghosttyTerminalID != "" {
+		return injectGhosttyWithTimeout(cfg, text)
+	}
+	return injectVia(cfg, text)
+}
+
 func injectVia(cfg *wakeConfig, text string) error {
 	if cfg.debug {
 		_ = writeStderr("amq wake [debug]: inject-via mode, running: %s %s <text>\n", cfg.injectVia, strings.Join(cfg.injectArgs, " "))
@@ -475,6 +497,23 @@ func injectVia(cfg *wakeConfig, text string) error {
 	}
 
 	return nil
+}
+
+func injectGhosttyWithTimeout(cfg *wakeConfig, text string) error {
+	if cfg.debug {
+		_ = writeStderr("amq wake [debug]: ghostty mode, target=%s\n", ghosttyTargetString(cfg.ghosttyTerminalID))
+	}
+	timeout := cfg.injectTimeout
+	if timeout <= 0 {
+		timeout = defaultInjectTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	err := injectGhostty(ctx, cfg.ghosttyTerminalID, text)
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("ghostty injection timed out after %s", timeout)
+	}
+	return err
 }
 
 func sanitizeForTTY(s string) string {

@@ -125,6 +125,34 @@ func TestCoopExecRequireWakeRejectsNoWake(t *testing.T) {
 	}
 }
 
+func TestCoopExecWakeGhosttyTerminalIDRequiresGhostty(t *testing.T) {
+	err := runCoopExec([]string{"--wake-inject-ghostty-terminal-id", "terminal-1", "claude"})
+	if err == nil {
+		t.Fatal("expected error for terminal id without --wake-inject-ghostty")
+	}
+	if !containsStr(err.Error(), "--wake-inject-ghostty-terminal-id requires --wake-inject-ghostty") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestBuildCoopWakeArgsGhostty(t *testing.T) {
+	got := buildCoopWakeArgs("codex", "/tmp/q", true, "terminal-1")
+	want := []string{
+		"--no-update-check",
+		"wake",
+		"--me",
+		"codex",
+		"--root",
+		"/tmp/q",
+		"--inject-ghostty",
+		"--inject-ghostty-terminal-id",
+		"terminal-1",
+	}
+	if !sliceEq(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
 func TestCoopExecSessionInvalidName(t *testing.T) {
 	err := runCoopExec([]string{"--session", "Bad/Name", "claude"})
 	if err == nil {

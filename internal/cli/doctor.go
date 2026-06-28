@@ -33,6 +33,7 @@ func runDoctor(args []string) error {
 	jsonFlag := fs.Bool("json", false, "Output as JSON")
 	opsFlag := fs.Bool("ops", false, "Include runtime operational checks")
 	fixWakeLocksFlag := fs.Bool("fix-wake-locks", false, "With --ops, remove stale wake lock files")
+	fixWakeTargetsFlag := fs.Bool("fix-wake-targets", false, "With --ops, remove orphaned wake target files")
 
 	usage := usageWithFlags(fs, "amq doctor [options]",
 		"Verify AMQ installation and configuration.",
@@ -49,7 +50,7 @@ func runDoctor(args []string) error {
 		"  - Queue depth and oldest unread per agent",
 		"  - DLQ count and age",
 		"  - Presence freshness",
-		"  - Wake lock health",
+		"  - Wake lock and wake target health",
 		"  - Integration hints (Kanban, Symphony)",
 	)
 
@@ -60,6 +61,9 @@ func runDoctor(args []string) error {
 	}
 	if *fixWakeLocksFlag && !*opsFlag {
 		return UsageError("--fix-wake-locks requires --ops")
+	}
+	if *fixWakeTargetsFlag && !*opsFlag {
+		return UsageError("--fix-wake-targets requires --ops")
 	}
 
 	result := doctorResult{}
@@ -104,7 +108,7 @@ func runDoctor(args []string) error {
 	if *opsFlag && root != "" {
 		// Resolve root source once here; avoids re-resolving with empty flags in runOpsChecks.
 		_, source, _, _ := resolveEnvConfigWithSource("", "")
-		result.Ops = runOpsChecks(root, string(source), *fixWakeLocksFlag)
+		result.Ops = runOpsChecks(root, string(source), *fixWakeLocksFlag, *fixWakeTargetsFlag)
 	}
 
 	// Calculate summary
@@ -198,7 +202,13 @@ func runDoctor(args []string) error {
 			if wl.Reason != "" {
 				line += " reason=" + wl.Reason
 			}
-			if wl.Fix != "" && wl.Status == string(wakeLockStale) {
+			if wl.TargetPresent {
+				line += fmt.Sprintf(" target=%s", wl.TargetStatus)
+				if wl.TargetReason != "" {
+					line += " target_reason=" + wl.TargetReason
+				}
+			}
+			if wl.Fix != "" {
 				line += " fix=" + wl.Fix
 			}
 			if err := writeStdoutLine(line); err != nil {

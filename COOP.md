@@ -215,6 +215,19 @@ amq reply --id "msg_123" --kind review_response --body "LGTM with minor suggesti
 > Co-op works without wake. `coop exec` starts it automatically.
 
 `amq wake` uses TIOCSTI to inject notifications into your terminal by default.
+On macOS Ghostty, prefer native terminal-id injection so notifications target
+the exact terminal instead of a title:
+
+```bash
+amq coop exec --wake-inject-ghostty codex
+amq wake --me codex --inject-ghostty
+```
+
+If `--inject-ghostty-terminal-id` is omitted, AMQ discovers the focused Ghostty
+terminal when wake starts, stores the target beside the wake lock, and refuses to
+reuse a live wake that points at a different target. Use
+`amq doctor --ops --fix-wake-targets` to remove orphaned target metadata.
+
 For orchestrators or hardened environments without a controlling TTY, use an
 explicit external transport:
 
@@ -235,6 +248,8 @@ sender and subject.
 - `--inject-mode auto|raw|paste` - Injection strategy
 - `--inject-via <executable>` - External transport executable; bypasses TIOCSTI and local TTY startup checks
 - `--inject-arg <arg>` - Fixed argument before the payload; repeat for multiple arguments
+- `--inject-ghostty` - Native macOS Ghostty terminal-id injection
+- `--inject-ghostty-terminal-id <id>` - Explicit Ghostty terminal id; defaults to the focused terminal
 - `--inject-timeout 5s` - Maximum runtime for one external injection command
 - `--bell` - Ring terminal bell on new messages
 - `--debounce 250ms` - Batch rapid messages

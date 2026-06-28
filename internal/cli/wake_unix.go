@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -34,6 +35,8 @@ type wakeLock struct {
 	BootID       string   `json:"boot_id,omitempty"`       // Boot identity paired with ProcessStart when available
 	Executable   string   `json:"executable,omitempty"`    // Diagnostic process executable basename/path
 	Args         []string `json:"args,omitempty"`          // Diagnostic argv when available
+	WakeMode     string   `json:"wake_mode,omitempty"`     // Injection mode that created target metadata
+	TargetDigest string   `json:"target_digest,omitempty"` // Binds .wake.target to this lock instance
 }
 
 type wakeProcessInfo struct {
@@ -78,6 +81,7 @@ var (
 
 type wakeLockAcquireOptions struct {
 	acceptExistingValid bool
+	replaceExistingWake bool
 }
 
 type wakeAlreadyRunningError struct {
@@ -94,10 +98,10 @@ func (e *wakeAlreadyRunningError) Error() string {
 // acquireWakeLock attempts to acquire the wake lock for an agent's inbox.
 // Returns cleanup function and error. If another wake is running, returns error.
 func acquireWakeLock(root, me string) (cleanup func(), err error) {
-	return acquireWakeLockWithOptions(root, me, wakeLockAcquireOptions{})
+	return acquireWakeLockWithOptions(root, me, nil, wakeLockAcquireOptions{})
 }
 
-func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions) (cleanup func(), err error) {
+func acquireWakeLockWithOptions(root, me string, target *wakeTarget, options wakeLockAcquireOptions) (cleanup func(), err error) {
 	agentBase := fsq.AgentBase(root, me)
 	lockPath := filepath.Join(agentBase, ".wake.lock")
 
@@ -117,11 +121,26 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 		case wakeLockCreating:
 			return nil, fmt.Errorf("wake lock is being created (retry shortly)")
 		case wakeLockValid:
+			if err := validateExistingWakeTarget(inspection, target); err != nil {
+				if options.replaceExistingWake {
+					if !replaceConfirmedExistingWakeLock(inspection) {
+						return nil, fmt.Errorf("wake lock for %s could not be safely replaced", me)
+					}
+					goto createLock
+				}
+				return nil, err
+			}
 			if options.acceptExistingValid {
 				if err := requireWakeLockUsable(inspection); err != nil {
 					return nil, err
 				}
 				return nil, wakeLockAlreadyRunningError(me, inspection)
+			}
+			if options.replaceExistingWake {
+				if !replaceConfirmedExistingWakeLock(inspection) {
+					return nil, fmt.Errorf("wake lock for %s could not be safely replaced", me)
+				}
+				goto createLock
 			}
 			if shouldReplaceOrphanedWakeLock(inspection) {
 				goto createLock
@@ -157,6 +176,10 @@ createLock:
 		lock.Executable = proc.Executable
 		lock.Args = proc.Args
 	}
+	if target != nil {
+		lock.WakeMode = target.Mode
+		lock.TargetDigest = wakeTargetDigest(*target)
+	}
 	lockData, _ := json.Marshal(lock)
 
 	// Use O_EXCL for atomic creation - fails if file exists (race protection)
@@ -167,6 +190,9 @@ createLock:
 			// classifier proves it is the matching wake.
 			winner := inspectWakeLock(root, me)
 			if winner.Status == wakeLockValid {
+				if err := validateExistingWakeTarget(winner, target); err != nil {
+					return nil, err
+				}
 				if options.acceptExistingValid {
 					if usableErr := requireWakeLockUsable(winner); usableErr != nil {
 						return nil, usableErr
@@ -200,6 +226,36 @@ createLock:
 	}
 
 	return cleanup, nil
+}
+
+func validateExistingWakeTarget(inspection wakeLockInspection, target *wakeTarget) error {
+	lock := inspection.Lock
+	if target == nil {
+		if lock.WakeMode == "" && lock.TargetDigest == "" {
+			return nil
+		}
+		return fmt.Errorf("wake already running for %s with target mode %q; requested raw terminal wake", inspection.Agent, lock.WakeMode)
+	}
+	if lock.WakeMode == "" || lock.TargetDigest == "" {
+		return fmt.Errorf("wake already running for %s without a persisted target; requested %s target %s",
+			inspection.Agent, target.Mode, wakeTargetDescription(*target))
+	}
+	if lock.WakeMode != target.Mode {
+		return fmt.Errorf("wake already running for %s with target mode %q; requested %s target %s",
+			inspection.Agent, lock.WakeMode, target.Mode, wakeTargetDescription(*target))
+	}
+	if got := wakeTargetDigest(*target); got != lock.TargetDigest {
+		return fmt.Errorf("wake already running for %s with a different %s target; use --replace-existing-wake to retarget",
+			inspection.Agent, target.Mode)
+	}
+	return nil
+}
+
+func replaceConfirmedExistingWakeLock(inspection wakeLockInspection) bool {
+	if !inspection.IdentityConfirmed {
+		return false
+	}
+	return replaceConfirmedOrphanedWakeLock(inspection)
 }
 
 func inspectWakeLock(root, me string) wakeLockInspection {
@@ -558,6 +614,8 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	injectViaFlag := fs.String("inject-via", "", "External executable for injection (payload appended as last arg, bypasses TTY requirement)")
 	var injectArgFlags multiStringFlag
 	fs.Var(&injectArgFlags, "inject-arg", "Argument for --inject-via before the payload (repeatable)")
+	injectGhosttyFlag := fs.Bool("inject-ghostty", false, "Use Ghostty's native macOS terminal-id injection")
+	injectGhosttyTerminalIDFlag := fs.String("inject-ghostty-terminal-id", "", "Ghostty terminal id for --inject-ghostty (default: focused terminal)")
 	injectTimeoutFlag := fs.Duration("inject-timeout", defaultInjectTimeout, "Timeout for one --inject-via command")
 	bellFlag := fs.Bool("bell", false, "Ring terminal bell on new messages")
 	debounceFlag := fs.Duration("debounce", 250*time.Millisecond, "Debounce window for batching messages")
@@ -576,6 +634,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	readyFileFlag := fs.String("ready-file", "", "Internal: write this file after wake lock acquisition")
 	debugFlag := fs.Bool("debug", false, "Log injection diagnostics to stderr")
 	acceptExistingWakeFlag := fs.Bool("accept-existing-wake", false, "Internal: allow a usable existing wake to satisfy readiness")
+	replaceExistingWakeFlag := fs.Bool("replace-existing-wake", false, "Replace a confirmed existing wake when its target differs")
 
 	usage := usageWithFlags(fs, "amq wake --me <agent> [options]",
 		"Background waker: injects terminal notification when messages arrive.",
@@ -595,6 +654,12 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		"    --inject-arg exec --inject-arg \"$TERMINAL_ID\"",
 		"  Trust boundary: --inject-via executes local code, and the payload can",
 		"  contain sanitized but message-derived header content.",
+		"",
+		"Ghostty injection:",
+		"  --inject-ghostty targets Ghostty by terminal id via macOS AppleScript.",
+		"  If --inject-ghostty-terminal-id is omitted, AMQ uses the focused",
+		"  terminal in the selected tab of the front Ghostty window. Existing wake",
+		"  reuse is target-aware; use --replace-existing-wake to retarget.",
 		"",
 		"Input deferral (default on): wake samples terminal input only after",
 		"  a message is pending, then injects after a short quiet window.",
@@ -676,16 +741,44 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	if *injectViaFlag != "" && injectVia == "" {
 		return UsageError("--inject-via must not be blank")
 	}
+	if injectVia != "" && *injectGhosttyFlag {
+		return UsageError("--inject-via and --inject-ghostty are mutually exclusive")
+	}
 	if injectVia == "" && len(injectArgFlags) > 0 {
 		return UsageError("--inject-arg requires --inject-via")
+	}
+	if strings.TrimSpace(*injectGhosttyTerminalIDFlag) != "" && !*injectGhosttyFlag {
+		return UsageError("--inject-ghostty-terminal-id requires --inject-ghostty")
 	}
 	readyFile := strings.TrimSpace(*readyFileFlag)
 	if *readyFileFlag != "" && readyFile == "" {
 		return UsageError("--ready-file must not be blank")
 	}
 
-	// Verify TIOCSTI is available (skip in inject-via mode — uses external command instead)
-	if injectVia == "" {
+	var ghosttyTerminalID string
+	if *injectGhosttyFlag {
+		ctx, cancel := context.WithTimeout(context.Background(), *injectTimeoutFlag)
+		defer cancel()
+		if explicit := strings.TrimSpace(*injectGhosttyTerminalIDFlag); explicit != "" {
+			var normalizeErr error
+			ghosttyTerminalID, normalizeErr = normalizeGhosttyTerminalID(explicit)
+			if normalizeErr != nil {
+				return UsageError("--inject-ghostty-terminal-id: %v", normalizeErr)
+			}
+		} else {
+			var discoverErr error
+			ghosttyTerminalID, discoverErr = discoverGhosttyTerminalID(ctx)
+			if discoverErr != nil {
+				return discoverErr
+			}
+		}
+		if err := probeGhosttyTerminalID(ctx, ghosttyTerminalID); err != nil {
+			return err
+		}
+	}
+
+	// Verify TIOCSTI is available (skip in external injection modes).
+	if injectVia == "" && ghosttyTerminalID == "" {
 		if !tiocsti.Available() {
 			return errors.New("TIOCSTI not available on this platform; use tmux send-keys or terminal-specific injection")
 		}
@@ -701,10 +794,20 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		return UsageError("%v", err)
 	}
 
+	var target *wakeTarget
+	if injectVia != "" {
+		value := newInjectViaWakeTarget(root, me, injectVia, []string(injectArgFlags))
+		target = &value
+	} else if ghosttyTerminalID != "" {
+		value := newGhosttyWakeTarget(root, me, ghosttyTerminalID)
+		target = &value
+	}
+
 	// Acquire lock to prevent duplicate wake processes
 	acceptExistingWake := readyFile != "" && *acceptExistingWakeFlag
-	cleanup, err := acquireWakeLockWithOptions(root, me, wakeLockAcquireOptions{
+	cleanup, err := acquireWakeLockWithOptions(root, me, target, wakeLockAcquireOptions{
 		acceptExistingValid: acceptExistingWake,
+		replaceExistingWake: *replaceExistingWakeFlag,
 	})
 	if err != nil {
 		var alreadyRunning *wakeAlreadyRunningError
@@ -714,6 +817,24 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		return err
 	}
 	defer cleanup()
+	if target != nil {
+		defer func() {
+			if err := removeWakeTarget(root, me); err != nil && *debugFlag {
+				_ = writeStderr("amq wake [debug]: remove wake target on exit failed: %v\n", err)
+			}
+		}()
+	}
+
+	if target != nil {
+		if err := writeWakeTarget(root, me, *target); err != nil {
+			_ = writeStderr("warning: wake target not persisted: %v\n", err)
+			if removeErr := removeWakeTarget(root, me); removeErr != nil {
+				return fmt.Errorf("clear stale wake target after persist failure: %w", removeErr)
+			}
+		}
+	} else if err := removeWakeTarget(root, me); err != nil {
+		return err
+	}
 
 	cfg := wakeConfig{
 		me:                me,
@@ -722,6 +843,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		injectCmd:         *injectCmdFlag,
 		injectVia:         injectVia,
 		injectArgs:        []string(injectArgFlags),
+		ghosttyTerminalID: ghosttyTerminalID,
 		injectTimeout:     *injectTimeoutFlag,
 		bell:              *bellFlag,
 		debounce:          *debounceFlag,
@@ -889,7 +1011,7 @@ func runWakeLoop(cfg wakeConfig) error {
 }
 
 func wakeHealthCheck(cfg wakeConfig, ttyAvailableFn func() bool) error {
-	if cfg.injectVia != "" {
+	if cfg.hasExternalWakeTarget() {
 		return nil
 	}
 	if !ttyAvailableFn() {

@@ -13,11 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   approval gates (#136).
 - Report and optionally fix identity-verified stale `.wake.lock` files from
   `amq doctor --ops`, including roots whose config is missing or corrupt (#151).
+- Add native macOS Ghostty wake injection by terminal id via
+  `amq wake --inject-ghostty` and `amq coop exec --wake-inject-ghostty`.
+- Track wake injection targets beside wake locks and expose orphaned target
+  cleanup through `amq doctor --ops --fix-wake-targets`.
 
 ### Fixed
 
 - `amq coop exec --require-wake` can reuse an existing usable wake process, while
   still failing closed when the existing wake cannot safely inject (#153).
+- Wake reuse is now target-aware, so a live wake bound to a different Ghostty or
+  external injection target is not silently reused.
 
 ## [0.36.0] - 2026-06-13
 ### Changed
