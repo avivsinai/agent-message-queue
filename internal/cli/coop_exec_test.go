@@ -226,6 +226,41 @@ func TestCoopInitDefaultIncludesUser(t *testing.T) {
 	}
 }
 
+func TestCoopInitNoGitignore(t *testing.T) {
+	projectDir := t.TempDir()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	output, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--json", "--no-gitignore"}, false)
+	})
+	if err != nil {
+		t.Fatalf("runCoopInitInternal: %v", err)
+	}
+	var result struct {
+		GitignoreUpdated bool `json:"gitignore_updated"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal output: %v (output: %s)", err, output)
+	}
+	if result.GitignoreUpdated {
+		t.Fatalf("gitignore_updated = true, want false with --no-gitignore")
+	}
+	if _, err := os.Stat(filepath.Join(projectDir, ".gitignore")); !os.IsNotExist(err) {
+		t.Fatalf(".gitignore should not be created with --no-gitignore (stat err: %v)", err)
+	}
+}
+
 func TestInitExplicitAgentsDoesNotInjectUser(t *testing.T) {
 	root := t.TempDir()
 	_, err := captureEnvStdout(t, func() error {
