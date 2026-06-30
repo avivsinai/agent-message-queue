@@ -93,6 +93,9 @@ func runSend(args []string) error {
 		return UsageError("--to: %v", err)
 	}
 	recipients = dedupeStrings(recipients)
+	if targetProject != "" && len(recipients) > 1 {
+		return UsageError("--project supports exactly one recipient; got %d. Send one message per recipient.", len(recipients))
+	}
 
 	// Validate --wait-for (basic checks; cross-root check deferred until routing is resolved)
 	waitFor := strings.TrimSpace(*waitForFlag)
