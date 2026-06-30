@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Queue artifact reads now reject symlinks and non-regular files before parsing
+  messages, DLQ envelopes, or receipts (#181).
 - Inbox and DLQ queue operations now share canonical `.md` filename validation
   at fsq boundaries to reject malformed or tampered names (#181).
 - Atomic queue file writes now return `io.ErrShortWrite` when a partial write
