@@ -63,6 +63,43 @@ func TestMoveToDLQ(t *testing.T) {
 	}
 }
 
+func TestMoveToDLQClaimsBeforeDLQDelivery(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	filename := "claim_before_dlq.md"
+	content := []byte("not valid frontmatter")
+	if err := os.WriteFile(filepath.Join(AgentInboxNew(root, "alice"), filename), content, 0o600); err != nil {
+		t.Fatalf("write corrupt: %v", err)
+	}
+
+	dlqTmp := AgentDLQTmp(root, "alice")
+	if err := os.RemoveAll(dlqTmp); err != nil {
+		t.Fatalf("remove dlq tmp: %v", err)
+	}
+	if err := os.WriteFile(dlqTmp, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("block dlq tmp: %v", err)
+	}
+
+	_, err := MoveToDLQ(root, "alice", filename, "claim_before_dlq", "parse_error", "missing frontmatter")
+	if err == nil {
+		t.Fatal("expected MoveToDLQ to fail when DLQ delivery cannot create tmp dir")
+	}
+
+	if _, err := os.Stat(filepath.Join(AgentInboxNew(root, "alice"), filename)); !os.IsNotExist(err) {
+		t.Fatalf("source should be claimed out of inbox/new before DLQ delivery, stat err: %v", err)
+	}
+	claimedContent, err := os.ReadFile(filepath.Join(AgentInboxCur(root, "alice"), filename))
+	if err != nil {
+		t.Fatalf("claimed source should remain in inbox/cur: %v", err)
+	}
+	if string(claimedContent) != string(content) {
+		t.Fatalf("claimed content mismatch: got %q", claimedContent)
+	}
+}
+
 func TestMoveCurToDLQ(t *testing.T) {
 	root := t.TempDir()
 	if err := EnsureAgentDirs(root, "alice"); err != nil {
@@ -151,6 +188,98 @@ func TestRetryFromDLQ(t *testing.T) {
 	}
 }
 
+func TestRetryFromDLQRejectsTraversalOriginalFile(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	dlqPath := createDLQMessage(t, root, "alice", "safe_msg.md", []byte("test content"))
+	env, body, err := ReadDLQEnvelope(dlqPath)
+	if err != nil {
+		t.Fatalf("ReadDLQEnvelope: %v", err)
+	}
+	env.OriginalFile = "../escape.md"
+	data, err := serializeDLQMessage(*env, body)
+	if err != nil {
+		t.Fatalf("serialize tampered envelope: %v", err)
+	}
+	if err := os.WriteFile(dlqPath, data, 0o600); err != nil {
+		t.Fatalf("write tampered envelope: %v", err)
+	}
+
+	err = RetryFromDLQ(root, "alice", filepath.Base(dlqPath), false)
+	if err == nil {
+		t.Fatal("expected traversal original_file to be rejected")
+	}
+	if !strings.Contains(err.Error(), "invalid original_file") {
+		t.Fatalf("expected invalid original_file error, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "agents", "alice", "inbox", "escape.md")); !os.IsNotExist(err) {
+		t.Fatalf("retry should not create escaped inbox file, stat err: %v", err)
+	}
+}
+
+func TestRetryFromDLQEnvelopeUpdateFailureReturnsErrorBeforeRedelivery(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	dlqPath := createDLQMessage(t, root, "alice", "update_failure.md", []byte("test content"))
+	dlqCur := AgentDLQCur(root, "alice")
+	if err := os.RemoveAll(dlqCur); err != nil {
+		t.Fatalf("remove dlq cur: %v", err)
+	}
+	if err := os.WriteFile(dlqCur, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("block dlq cur: %v", err)
+	}
+
+	err := RetryFromDLQ(root, "alice", filepath.Base(dlqPath), false)
+	if err == nil {
+		t.Fatal("expected RetryFromDLQ to return envelope update error")
+	}
+	if !strings.Contains(err.Error(), "dlq envelope") {
+		t.Fatalf("expected dlq envelope error, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(AgentInboxNew(root, "alice"), "update_failure.md")); !os.IsNotExist(err) {
+		t.Fatalf("retry should not redeliver before envelope update succeeds, stat err: %v", err)
+	}
+}
+
+func TestRetryFromDLQRedeliveryFailureReturnsError(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	dlqPath := createDLQMessage(t, root, "alice", "redelivery_failure.md", []byte("test content"))
+	inboxTmp := AgentInboxTmp(root, "alice")
+	if err := os.RemoveAll(inboxTmp); err != nil {
+		t.Fatalf("remove inbox tmp: %v", err)
+	}
+	if err := os.WriteFile(inboxTmp, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("block inbox tmp: %v", err)
+	}
+
+	err := RetryFromDLQ(root, "alice", filepath.Base(dlqPath), false)
+	if err == nil {
+		t.Fatal("expected RetryFromDLQ to return redelivery error")
+	}
+	if !strings.Contains(err.Error(), "redeliver to inbox") {
+		t.Fatalf("expected redelivery error, got: %v", err)
+	}
+
+	curPath := filepath.Join(AgentDLQCur(root, "alice"), filepath.Base(dlqPath))
+	env, _, err := ReadDLQEnvelope(curPath)
+	if err != nil {
+		t.Fatalf("expected updated DLQ envelope in cur: %v", err)
+	}
+	if env.RetryCount != 1 {
+		t.Fatalf("expected retry_count 1 after state transition, got %d", env.RetryCount)
+	}
+}
+
 func TestRetryFromDLQMaxRetries(t *testing.T) {
 	root := t.TempDir()
 	if err := EnsureAgentDirs(root, "alice"); err != nil {
@@ -193,6 +322,18 @@ func TestRetryFromDLQMaxRetries(t *testing.T) {
 	if err := RetryFromDLQ(root, "alice", dlqFilename, true); err != nil {
 		t.Fatalf("RetryFromDLQ with force: %v", err)
 	}
+}
+
+func createDLQMessage(t *testing.T, root, agent, filename string, content []byte) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(AgentInboxNew(root, agent), filename), content, 0o600); err != nil {
+		t.Fatalf("write source message: %v", err)
+	}
+	dlqPath, err := MoveToDLQ(root, agent, filename, strings.TrimSuffix(filename, ".md"), "test_failure", "test detail")
+	if err != nil {
+		t.Fatalf("MoveToDLQ: %v", err)
+	}
+	return dlqPath
 }
 
 func TestFindDLQMessage(t *testing.T) {
