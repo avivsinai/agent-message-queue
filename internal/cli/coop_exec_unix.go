@@ -202,6 +202,10 @@ func runCoopExec(args []string) error {
 			amqBin = "amq"
 		}
 
+		var wakeOwner *wakeOwner
+		if wakeInjectVia != "" {
+			wakeOwner = currentWakeOwner()
+		}
 		wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(agentHandle, root, wakeInjectVia, []string(wakeInjectArgFlags))...)
 		var readyPath string
 		var cleanupReady func()
@@ -216,7 +220,11 @@ func runCoopExec(args []string) error {
 		}
 		// Set AM_ROOT in wake's env so the helper process resolves the same
 		// session root even if the parent shell inherited a different value.
-		wakeCmd.Env = setEnvVar(os.Environ(), envRoot, root)
+		wakeEnv, wakeEnvErr := wakeCommandEnv(os.Environ(), root, wakeOwner)
+		if wakeEnvErr != nil {
+			return wakeEnvErr
+		}
+		wakeCmd.Env = wakeEnv
 		wakeCmd.Stdin = os.Stdin
 		wakeCmd.Stdout = os.Stdout
 		wakeCmd.Stderr = os.Stderr

@@ -21,6 +21,7 @@ type wakeConfig struct {
 	injectCmd         string
 	injectVia         string // external command for injection (replaces TIOCSTI)
 	injectArgs        []string
+	wakeOwner         *wakeOwner
 	injectTimeout     time.Duration
 	bell              bool
 	debounce          time.Duration

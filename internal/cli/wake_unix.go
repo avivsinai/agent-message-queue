@@ -180,7 +180,10 @@ createLock:
 
 func shouldReplaceOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
 	if !wakeLockNeedsReplacement(inspection) {
-		return false, nil
+		replace, err := wakeLockNeedsOwnerReplacement(inspection)
+		if err != nil || !replace {
+			return replace, err
+		}
 	}
 	return replaceConfirmedOrphanedWakeLock(inspection)
 }
@@ -214,6 +217,23 @@ func wakeLockNeedsReplacement(inspection wakeLockInspection) bool {
 		}
 	}
 	return false
+}
+
+func wakeLockNeedsOwnerReplacement(inspection wakeLockInspection) (bool, error) {
+	if !inspection.IdentityConfirmed || inspection.Lock.WakeMode != wakeTargetInjectVia || inspection.Lock.TargetDigest == "" {
+		return false, nil
+	}
+	target, exists, err := readWakeTarget(inspection.Root, inspection.Agent)
+	if err != nil || !exists {
+		return false, nil
+	}
+	if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
+		return false, nil
+	}
+	if target.Owner == nil {
+		return false, nil
+	}
+	return wakeOwnerHealthCheck(*target.Owner) != nil, nil
 }
 
 func requireWakeLockUsable(inspection wakeLockInspection) error {
@@ -511,7 +531,11 @@ func startWakeFromTargetDefault(root, me string, target wakeTarget) (int, error)
 	defer cleanupReady()
 	args := buildRepairWakeArgs(root, me, target, readyPath)
 	cmd := exec.Command(amqBin, args...)
-	cmd.Env = setEnvVar(os.Environ(), envRoot, root)
+	env, err := wakeCommandEnv(os.Environ(), root, target.Owner)
+	if err != nil {
+		return 0, err
+	}
+	cmd.Env = env
 	output, err := openWakeRepairOutput(root, me)
 	if err != nil {
 		return 0, err
@@ -724,10 +748,15 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 
 	var target *wakeTarget
 	if injectVia != "" {
+		owner, err := wakeOwnerFromEnv()
+		if err != nil {
+			return err
+		}
 		value, err := newWakeTarget(root, me, injectVia, []string(injectArgFlags))
 		if err != nil {
 			return err
 		}
+		value.Owner = owner
 		if err := validateWakeTarget(value, root, me); err != nil {
 			return err
 		}
@@ -771,6 +800,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		injectCmd:         *injectCmdFlag,
 		injectVia:         injectVia,
 		injectArgs:        []string(injectArgFlags),
+		wakeOwner:         targetOwner(target),
 		injectTimeout:     *injectTimeoutFlag,
 		bell:              *bellFlag,
 		debounce:          *debounceFlag,
@@ -939,10 +969,88 @@ func runWakeLoop(cfg wakeConfig) error {
 
 func wakeHealthCheck(cfg wakeConfig, ttyAvailableFn func() bool) error {
 	if cfg.injectVia != "" {
+		if cfg.wakeOwner != nil {
+			return wakeOwnerHealthCheck(*cfg.wakeOwner)
+		}
 		return nil
 	}
 	if !ttyAvailableFn() {
 		return errors.New("TTY no longer available")
+	}
+	return nil
+}
+
+func targetOwner(target *wakeTarget) *wakeOwner {
+	if target == nil || target.Owner == nil {
+		return nil
+	}
+	owner := *target.Owner
+	return &owner
+}
+
+func currentWakeOwner() *wakeOwner {
+	owner := wakeOwner{PID: os.Getpid()}
+	if proc := inspectWakeProcess(owner.PID); proc.Running {
+		owner.ProcessStart = proc.StartToken
+		owner.BootID = proc.BootID
+	}
+	if sid, err := getWakeProcessSID(owner.PID); err == nil {
+		owner.SessionID = sid
+	}
+	return &owner
+}
+
+func wakeCommandEnv(base []string, root string, owner *wakeOwner) ([]string, error) {
+	env := setEnvVar(base, envRoot, root)
+	env = unsetEnvVar(env, envWakeOwner)
+	if owner == nil {
+		return env, nil
+	}
+	encoded, err := encodeWakeOwnerEnv(*owner)
+	if err != nil {
+		return nil, err
+	}
+	return setEnvVar(env, envWakeOwner, encoded), nil
+}
+
+func unsetEnvVar(env []string, key string) []string {
+	prefix := key + "="
+	out := env[:0]
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func wakeOwnerHealthCheck(owner wakeOwner) error {
+	if err := validateWakeOwner(owner); err != nil {
+		return err
+	}
+	proc := inspectWakeProcess(owner.PID)
+	if !proc.Running {
+		return fmt.Errorf("inject-via wake owner pid %d is not running", owner.PID)
+	}
+	if owner.ProcessStart != "" {
+		if proc.StartToken == "" {
+			return fmt.Errorf("inject-via wake owner process start unavailable for pid %d: %v", owner.PID, proc.InspectError)
+		}
+		if proc.StartToken != owner.ProcessStart {
+			return fmt.Errorf("inject-via wake owner process start changed for pid %d", owner.PID)
+		}
+	}
+	if owner.BootID != "" && proc.BootID != "" && proc.BootID != owner.BootID {
+		return fmt.Errorf("inject-via wake owner boot id changed for pid %d", owner.PID)
+	}
+	if owner.SessionID != 0 {
+		sid, err := getWakeProcessSID(owner.PID)
+		if err != nil {
+			return fmt.Errorf("inject-via wake owner session unavailable for pid %d: %w", owner.PID, err)
+		}
+		if sid != owner.SessionID {
+			return fmt.Errorf("inject-via wake owner session changed for pid %d", owner.PID)
+		}
 	}
 	return nil
 }
