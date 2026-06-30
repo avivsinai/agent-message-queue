@@ -39,9 +39,21 @@ func GenerateDLQID() string {
 }
 
 // MoveToDLQ moves a failed message from inbox/new to dlq/new with envelope.
-// Uses atomic rename when possible to prevent duplicates on cleanup failure.
 func MoveToDLQ(root, agent, filename, originalID, failureReason, failureDetail string) (string, error) {
-	srcPath := filepath.Join(AgentInboxNew(root, agent), filename)
+	return moveInboxMessageToDLQ(root, agent, BoxNew, filename, originalID, failureReason, failureDetail)
+}
+
+// MoveCurToDLQ moves an already-claimed inbox/cur message to dlq/new.
+func MoveCurToDLQ(root, agent, filename, originalID, failureReason, failureDetail string) (string, error) {
+	return moveInboxMessageToDLQ(root, agent, BoxCur, filename, originalID, failureReason, failureDetail)
+}
+
+func moveInboxMessageToDLQ(root, agent, sourceDir, filename, originalID, failureReason, failureDetail string) (string, error) {
+	srcDir, err := inboxSourceDir(root, agent, sourceDir)
+	if err != nil {
+		return "", err
+	}
+	srcPath := filepath.Join(srcDir, filename)
 
 	// Read original content
 	content, err := os.ReadFile(srcPath)
@@ -59,7 +71,7 @@ func MoveToDLQ(root, agent, filename, originalID, failureReason, failureDetail s
 		FailureDetail: failureDetail,
 		FailureTime:   time.Now().UTC().Format(time.RFC3339),
 		RetryCount:    0,
-		SourceDir:     "new",
+		SourceDir:     sourceDir,
 	}
 
 	// Serialize envelope + original content
@@ -75,23 +87,43 @@ func MoveToDLQ(root, agent, filename, originalID, failureReason, failureDetail s
 		return "", fmt.Errorf("deliver to dlq: %w", err)
 	}
 
-	// Remove from inbox/new - if this fails, the message is duplicated
-	// but the DLQ ID is unique so re-draining will create a new DLQ entry.
-	// To prevent this, we use rename to cur first (atomic), then remove from cur.
-	inboxCurPath := filepath.Join(AgentInboxCur(root, agent), filename)
-	if err := os.Rename(srcPath, inboxCurPath); err != nil {
-		// Fallback: try direct remove (may fail and leave duplicate)
-		if rmErr := os.Remove(srcPath); rmErr != nil && !os.IsNotExist(rmErr) {
-			return dlqPath, fmt.Errorf("remove original (dlq written): %w", rmErr)
+	if sourceDir == BoxNew {
+		// Remove from inbox/new - if this fails, the message is duplicated
+		// but the DLQ ID is unique so re-draining will create a new DLQ entry.
+		// To prevent this, we use rename to cur first (atomic), then remove from cur.
+		inboxCurPath := filepath.Join(AgentInboxCur(root, agent), filename)
+		if err := os.MkdirAll(filepath.Dir(inboxCurPath), 0o700); err != nil {
+			return dlqPath, fmt.Errorf("create inbox cur: %w", err)
+		}
+		if err := os.Rename(srcPath, inboxCurPath); err != nil {
+			// Fallback: try direct remove (may fail and leave duplicate)
+			if rmErr := os.Remove(srcPath); rmErr != nil && !os.IsNotExist(rmErr) {
+				return dlqPath, fmt.Errorf("remove original (dlq written): %w", rmErr)
+			}
+		} else {
+			// Successfully moved to cur, now remove from cur
+			_ = os.Remove(inboxCurPath)
+			_ = SyncDir(AgentInboxCur(root, agent))
 		}
 	} else {
-		// Successfully moved to cur, now remove from cur
-		_ = os.Remove(inboxCurPath)
-		_ = SyncDir(AgentInboxCur(root, agent))
+		if err := os.Remove(srcPath); err != nil && !os.IsNotExist(err) {
+			return dlqPath, fmt.Errorf("remove original (dlq written): %w", err)
+		}
 	}
-	_ = SyncDir(filepath.Dir(srcPath))
+	_ = SyncDir(srcDir)
 
 	return dlqPath, nil
+}
+
+func inboxSourceDir(root, agent, sourceDir string) (string, error) {
+	switch sourceDir {
+	case BoxNew:
+		return AgentInboxNew(root, agent), nil
+	case BoxCur:
+		return AgentInboxCur(root, agent), nil
+	default:
+		return "", fmt.Errorf("unsupported inbox source dir %q", sourceDir)
+	}
 }
 
 // deliverToDLQ writes a DLQ message using Maildir semantics (tmp -> new).

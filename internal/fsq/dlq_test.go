@@ -63,6 +63,45 @@ func TestMoveToDLQ(t *testing.T) {
 	}
 }
 
+func TestMoveCurToDLQ(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	filename := "claimed_corrupt.md"
+	content := []byte("not valid frontmatter after claim")
+	if err := os.WriteFile(filepath.Join(AgentInboxNew(root, "alice"), filename), content, 0o600); err != nil {
+		t.Fatalf("write corrupt: %v", err)
+	}
+	if err := MoveNewToCur(root, "alice", filename); err != nil {
+		t.Fatalf("MoveNewToCur: %v", err)
+	}
+
+	dlqPath, err := MoveCurToDLQ(root, "alice", filename, "claimed_corrupt", "parse_error", "missing frontmatter")
+	if err != nil {
+		t.Fatalf("MoveCurToDLQ: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(AgentInboxCur(root, "alice"), filename)); !os.IsNotExist(err) {
+		t.Fatalf("claimed original should be removed from inbox/cur")
+	}
+
+	env, body, err := ReadDLQEnvelope(dlqPath)
+	if err != nil {
+		t.Fatalf("ReadDLQEnvelope: %v", err)
+	}
+	if env.SourceDir != BoxCur {
+		t.Fatalf("expected source_dir %q, got %q", BoxCur, env.SourceDir)
+	}
+	if env.OriginalFile != filename {
+		t.Fatalf("expected original_file %q, got %q", filename, env.OriginalFile)
+	}
+	if string(body) != string(content) {
+		t.Fatalf("body mismatch: expected %q, got %q", content, body)
+	}
+}
+
 func TestRetryFromDLQ(t *testing.T) {
 	root := t.TempDir()
 	if err := EnsureAgentDirs(root, "alice"); err != nil {

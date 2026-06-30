@@ -77,15 +77,12 @@ func runMonitor(args []string) error {
 	}
 
 	// First, try to drain existing messages
-	items, err := collectInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator)
+	items, err := monitorInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator, mode)
 	if err != nil {
 		return err
 	}
 
 	if len(items) > 0 {
-		if mode == "drain" {
-			drainMonitorItems(root, common.Me, items)
-		}
 		return outputMonitorResult(common.JSON, monitorResult{
 			Event:      "messages",
 			WatchEvent: "existing",
@@ -132,12 +129,9 @@ func runMonitor(args []string) error {
 	}
 
 	// New message arrived - drain it
-	items, err = collectInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator)
+	items, err = monitorInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator, mode)
 	if err != nil {
 		return err
-	}
-	if mode == "drain" {
-		drainMonitorItems(root, common.Me, items)
 	}
 
 	result := monitorResult{
@@ -157,8 +151,11 @@ func runMonitor(args []string) error {
 	return outputMonitorResult(common.JSON, result)
 }
 
-func drainMonitorItems(root, me string, items []monitorItem) {
-	processInboxItems(root, me, items)
+func monitorInboxItems(root, me string, includeBody bool, limit int, validator *headerValidator, mode string) ([]monitorItem, error) {
+	if mode == "peek" {
+		return collectInboxItems(root, me, includeBody, limit, validator)
+	}
+	return drainInboxItems(root, me, includeBody, limit, validator)
 }
 
 func monitorWithFsnotify(ctx context.Context, inboxNew string) (string, error) {

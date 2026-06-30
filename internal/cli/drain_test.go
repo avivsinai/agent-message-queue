@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -309,6 +310,94 @@ func TestRunDrainLimit(t *testing.T) {
 	newEntries, _ := os.ReadDir(fsq.AgentInboxNew(root, "alice"))
 	if len(newEntries) != 3 {
 		t.Errorf("expected 3 in new, got %d", len(newEntries))
+	}
+}
+
+func TestDrainInboxItemsConcurrentClaimsSingleWinner(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "bob"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  format.CurrentSchema,
+			ID:      "claim-once",
+			From:    "bob",
+			To:      []string{"alice"},
+			Thread:  "p2p/alice__bob",
+			Subject: "Claim once",
+			Created: "2025-12-24T10:00:00Z",
+		},
+		Body: "Only one drain may consume this.",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := fsq.DeliverToInbox(root, "alice", "claim-once.md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	const workers = 2
+	start := make(chan struct{})
+	results := make(chan []inboxItem, workers)
+	errs := make(chan error, workers)
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			items, err := drainInboxItems(root, "alice", false, 0, &headerValidator{})
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- items
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("drainInboxItems: %v", err)
+	}
+
+	total := 0
+	for items := range results {
+		total += len(items)
+		for _, item := range items {
+			if item.ID != "claim-once" {
+				t.Fatalf("unexpected drained item: %+v", item)
+			}
+			if !item.MovedToCur || item.MovedToDLQ {
+				t.Fatalf("expected a single cur claim, got %+v", item)
+			}
+		}
+	}
+	if total != 1 {
+		t.Fatalf("expected exactly one drained item across concurrent drains, got %d", total)
+	}
+
+	receipts, err := receipt.List(root, "alice", receipt.ListFilter{
+		MsgID: "claim-once",
+		Stage: receipt.StageDrained,
+	})
+	if err != nil {
+		t.Fatalf("receipt.List: %v", err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("expected exactly one drained receipt, got %d", len(receipts))
 	}
 }
 
