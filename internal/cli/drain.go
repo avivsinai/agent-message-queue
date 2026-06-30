@@ -47,7 +47,7 @@ func runDrain(args []string) error {
 		return err
 	}
 
-	items, err := collectInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator)
+	items, err := drainInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator)
 	if err != nil {
 		return err
 	}
@@ -63,8 +63,6 @@ func runDrain(args []string) error {
 
 	// Best-effort presence touch.
 	_ = presence.Touch(root, common.Me)
-
-	processInboxItems(root, common.Me, items)
 
 	if common.JSON {
 		return writeJSON(os.Stdout, drainResult{Drained: items, Count: len(items)})
