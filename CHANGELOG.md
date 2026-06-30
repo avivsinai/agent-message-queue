@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- `amq coop init --no-gitignore` skips updating `.gitignore`, for setups that manage ignores globally or elsewhere (closes #172)
+
+### Changed
+
+- Bump `github.com/coder/websocket` from 1.8.14 to 1.8.15
+- Bump `actions/checkout` from 6.0.3 to 7.0.0
 
 ## [0.39.0] - 2026-06-30
 ### Fixed
