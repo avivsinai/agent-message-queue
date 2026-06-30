@@ -625,8 +625,18 @@ func usageWithFlags(fs *flag.FlagSet, usage string, notes ...string) func() {
 	}
 }
 
+func usageWithHiddenFlags(fs *flag.FlagSet, usage string, hiddenFlags []string, notes ...string) func() {
+	return func() {
+		writeUsageToWithHiddenFlags(os.Stdout, fs, usage, hiddenFlags, notes...)
+	}
+}
+
 // writeUsageTo renders usage text to the given writer.
 func writeUsageTo(w io.Writer, fs *flag.FlagSet, usage string, notes ...string) {
+	writeUsageToWithHiddenFlags(w, fs, usage, nil, notes...)
+}
+
+func writeUsageToWithHiddenFlags(w io.Writer, fs *flag.FlagSet, usage string, hiddenFlags []string, notes ...string) {
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  "+usage)
 	if len(notes) > 0 {
@@ -637,28 +647,56 @@ func writeUsageTo(w io.Writer, fs *flag.FlagSet, usage string, notes ...string) 
 	}
 	_, _ = fmt.Fprintln(w)
 	// Only print Options header if there are visible flags.
-	if hasFlagDefaults(fs) {
+	flagDefaults := visibleFlagDefaults(fs, hiddenFlags)
+	if flagDefaults != "" {
 		_, _ = fmt.Fprintln(w, "Options:")
-		writeFlagDefaultsTo(w, fs)
+		_, _ = fmt.Fprint(w, flagDefaults)
 	}
 }
 
-func hasFlagDefaults(fs *flag.FlagSet) bool {
+func visibleFlagDefaults(fs *flag.FlagSet, hiddenFlags []string) string {
 	var buf bytes.Buffer
 	fs.SetOutput(&buf)
 	fs.PrintDefaults()
 	fs.SetOutput(io.Discard)
-	return buf.Len() > 0
+	return filterHiddenFlagDefaults(buf.String(), hiddenFlags)
 }
 
-func writeFlagDefaultsTo(w io.Writer, fs *flag.FlagSet) {
-	var buf bytes.Buffer
-	fs.SetOutput(&buf)
-	fs.PrintDefaults()
-	fs.SetOutput(io.Discard)
-	if buf.Len() > 0 {
-		_, _ = fmt.Fprint(w, buf.String())
+func filterHiddenFlagDefaults(defaults string, hiddenFlags []string) string {
+	if defaults == "" || len(hiddenFlags) == 0 {
+		return defaults
 	}
+	hidden := make(map[string]struct{}, len(hiddenFlags))
+	for _, name := range hiddenFlags {
+		hidden[name] = struct{}{}
+	}
+	var out strings.Builder
+	skip := false
+	for _, line := range strings.SplitAfter(defaults, "\n") {
+		trimmed := strings.TrimSuffix(line, "\n")
+		if name, ok := printedFlagName(trimmed); ok {
+			_, skip = hidden[name]
+		}
+		if !skip {
+			out.WriteString(line)
+		}
+	}
+	return out.String()
+}
+
+func printedFlagName(line string) (string, bool) {
+	trimmed := strings.TrimLeft(line, " \t")
+	if !strings.HasPrefix(trimmed, "-") || strings.HasPrefix(trimmed, "--") {
+		return "", false
+	}
+	name := strings.TrimPrefix(trimmed, "-")
+	if name == "" {
+		return "", false
+	}
+	if idx := strings.IndexAny(name, " \t"); idx >= 0 {
+		name = name[:idx]
+	}
+	return name, true
 }
 
 func confirmPrompt(prompt string) (bool, error) {

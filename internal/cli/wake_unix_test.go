@@ -120,6 +120,23 @@ func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
 	}
 }
 
+func TestRunWakeHelpHidesInternalReadyFlags(t *testing.T) {
+	stdout, _, err := captureWakeRepairOutput(t, func() error {
+		return runWake([]string{"--help"})
+	})
+	if err != nil {
+		t.Fatalf("runWake --help: %v", err)
+	}
+	for _, hidden := range []string{"ready-file", "accept-existing-wake"} {
+		if strings.Contains(stdout, hidden) {
+			t.Fatalf("wake help should hide %s:\n%s", hidden, stdout)
+		}
+	}
+	if !strings.Contains(stdout, "inject-cmd") {
+		t.Fatalf("wake help should keep --inject-cmd visible:\n%s", stdout)
+	}
+}
+
 func TestRunWakeWithLoopWritesInjectViaWakeTarget(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
