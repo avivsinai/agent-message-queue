@@ -413,3 +413,27 @@ func TestCrossProjectSendFromOutsideTree(t *testing.T) {
 		t.Errorf("expected 1 message in peer inbox, got %d", len(entries))
 	}
 }
+
+func TestCrossProjectSendRejectsMultipleRecipients(t *testing.T) {
+	t.Setenv("AM_ROOT", "")
+	t.Setenv("AM_BASE_ROOT", "")
+	resetAmqrcCache()
+	defer resetAmqrcCache()
+
+	err := runSend([]string{
+		"--root", t.TempDir(),
+		"--me", "alice",
+		"--to", "bob,carol",
+		"--project", "peer-project",
+		"--body", "hello",
+	})
+	if err == nil {
+		t.Fatal("expected cross-project multi-recipient send to fail")
+	}
+	if code := GetExitCode(err); code != ExitUsage {
+		t.Fatalf("exit code = %d, want %d", code, ExitUsage)
+	}
+	if !strings.Contains(err.Error(), "--project supports exactly one recipient") {
+		t.Fatalf("error = %q, want explicit cross-project multi-recipient rejection", err)
+	}
+}

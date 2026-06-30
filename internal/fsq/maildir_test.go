@@ -1,6 +1,7 @@
 package fsq
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -120,24 +121,55 @@ func TestDeliverToInboxesRollback(t *testing.T) {
 	if err := EnsureAgentDirs(root, "claude"); err != nil {
 		t.Fatalf("EnsureAgentDirs claude: %v", err)
 	}
+	if err := EnsureAgentDirs(root, "ada"); err != nil {
+		t.Fatalf("EnsureAgentDirs ada: %v", err)
+	}
 
 	cloudNew := AgentInboxNew(root, "claude")
 	if err := os.Chmod(cloudNew, 0o555); err != nil {
 		t.Fatalf("chmod claude new: %v", err)
 	}
+	defer func() { _ = os.Chmod(cloudNew, 0o700) }()
 
 	filename := "multi.md"
-	if _, err := DeliverToInboxes(root, []string{"codex", "claude"}, filename, []byte("hello")); err == nil {
+	_, err := DeliverToInboxes(root, []string{"codex", "claude", "ada"}, filename, []byte("hello"))
+	if err == nil {
 		t.Fatalf("expected delivery error")
+	}
+	var partial *PartialDeliveryError
+	if !errors.As(err, &partial) {
+		t.Fatalf("expected PartialDeliveryError, got %T: %v", err, err)
+	}
+	if partial.Failed != "claude" {
+		t.Fatalf("failed recipient = %q, want claude", partial.Failed)
+	}
+	if len(partial.Pending) != 1 || partial.Pending[0] != "ada" {
+		t.Fatalf("pending recipients = %#v, want [ada]", partial.Pending)
 	}
 
 	codexNew := filepath.Join(AgentInboxNew(root, "codex"), filename)
-	if _, err := os.Stat(codexNew); !os.IsNotExist(err) {
-		t.Fatalf("expected rollback to remove %s", codexNew)
+	if got := partial.Delivered["codex"]; got != codexNew {
+		t.Fatalf("delivered[codex] = %q, want %q", got, codexNew)
+	}
+	got, err := os.ReadFile(codexNew)
+	if err != nil {
+		t.Fatalf("expected committed delivery to remain at %s: %v", codexNew, err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("committed delivery content = %q, want hello", got)
 	}
 
 	cloudTmp := filepath.Join(AgentInboxTmp(root, "claude"), filename)
 	if _, err := os.Stat(cloudTmp); !os.IsNotExist(err) {
-		t.Fatalf("expected rollback to remove %s", cloudTmp)
+		t.Fatalf("expected failed tmp to be removed from %s", cloudTmp)
+	}
+
+	adaTmp := filepath.Join(AgentInboxTmp(root, "ada"), filename)
+	if _, err := os.Stat(adaTmp); !os.IsNotExist(err) {
+		t.Fatalf("expected pending tmp to be removed from %s", adaTmp)
+	}
+	adaNew := filepath.Join(AgentInboxNew(root, "ada"), filename)
+	if _, err := os.Stat(adaNew); !os.IsNotExist(err) {
+		t.Fatalf("expected pending recipient to have no new delivery at %s", adaNew)
 	}
 }

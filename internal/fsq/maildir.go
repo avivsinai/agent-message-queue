@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"syscall"
 )
 
@@ -26,8 +28,49 @@ type stagedDelivery struct {
 	newPath   string
 }
 
+// PartialDeliveryError reports the delivery state after a multi-recipient
+// delivery fails during the tmp -> new commit phase.
+type PartialDeliveryError struct {
+	Delivered map[string]string
+	Failed    string
+	Pending   []string
+	Err       error
+}
+
+func (e *PartialDeliveryError) Error() string {
+	delivered := "none"
+	if len(e.Delivered) > 0 {
+		recipients := make([]string, 0, len(e.Delivered))
+		for recipient := range e.Delivered {
+			recipients = append(recipients, recipient)
+		}
+		sort.Strings(recipients)
+		delivered = strings.Join(recipients, ", ")
+	}
+
+	failed := e.Failed
+	if failed == "" {
+		failed = "unknown"
+	}
+
+	pending := "none"
+	if len(e.Pending) > 0 {
+		pending = strings.Join(e.Pending, ", ")
+	}
+
+	if e.Err == nil {
+		return fmt.Sprintf("partial delivery: delivered to %s; failed for %s; pending %s", delivered, failed, pending)
+	}
+	return fmt.Sprintf("partial delivery: delivered to %s; failed for %s; pending %s: %v", delivered, failed, pending, e.Err)
+}
+
+func (e *PartialDeliveryError) Unwrap() error {
+	return e.Err
+}
+
 // DeliverToInboxes writes a message to multiple inboxes.
-// On failure, it attempts to roll back any prior deliveries.
+// On partial failure, committed deliveries remain in new/ and undelivered tmp
+// files are removed.
 func DeliverToInboxes(root string, recipients []string, filename string, data []byte) (map[string]string, error) {
 	if len(recipients) == 0 {
 		return nil, fmt.Errorf("no recipients provided")
@@ -66,13 +109,13 @@ func DeliverToInboxes(root string, recipients []string, filename string, data []
 			} else {
 				err = fmt.Errorf("rename tmp->new for %s: %w", stage.recipient, err)
 			}
-			return nil, rollbackDeliveries(stages[:i], stages[i:], err)
+			return nil, partialDeliveryError(stages[:i], stage, stages[i+1:], err)
 		}
 		// Sync both directories after rename for fully durable delivery:
 		// - newDir: new entry is visible
 		// - tmpDir: old entry removal is durable
 		if err := SyncDir(stage.newDir); err != nil {
-			return nil, rollbackDeliveries(stages[:i+1], stages[i+1:], fmt.Errorf("sync new dir for %s: %w", stage.recipient, err))
+			return nil, partialDeliveryError(stages[:i+1], stage, stages[i+1:], fmt.Errorf("sync new dir for %s: %w", stage.recipient, err))
 		}
 		// Best-effort sync of tmpDir (non-fatal: message is already delivered)
 		_ = SyncDir(stage.tmpDir)
@@ -126,6 +169,40 @@ func dirExists(path string) bool {
 }
 
 func cleanupStagedTmp(stages []stagedDelivery, primary error) error {
+	cleanupErr := cleanupTmpStages(stages)
+	if cleanupErr == nil {
+		return primary
+	}
+	return fmt.Errorf("%w (cleanup: %v)", primary, cleanupErr)
+}
+
+func partialDeliveryError(committed []stagedDelivery, failed stagedDelivery, pending []stagedDelivery, primary error) error {
+	delivered := make(map[string]string, len(committed))
+	for _, stage := range committed {
+		delivered[stage.recipient] = stage.newPath
+	}
+
+	pendingRecipients := make([]string, 0, len(pending))
+	for _, stage := range pending {
+		pendingRecipients = append(pendingRecipients, stage.recipient)
+	}
+
+	undelivered := make([]stagedDelivery, 0, 1+len(pending))
+	undelivered = append(undelivered, failed)
+	undelivered = append(undelivered, pending...)
+	if cleanupErr := cleanupTmpStages(undelivered); cleanupErr != nil {
+		primary = fmt.Errorf("%w (cleanup: %v)", primary, cleanupErr)
+	}
+
+	return &PartialDeliveryError{
+		Delivered: delivered,
+		Failed:    failed.recipient,
+		Pending:   pendingRecipients,
+		Err:       primary,
+	}
+}
+
+func cleanupTmpStages(stages []stagedDelivery) error {
 	var cleanupErr error
 	for _, stage := range stages {
 		if err := os.Remove(stage.tmpPath); err != nil && !os.IsNotExist(err) {
@@ -135,32 +212,5 @@ func cleanupStagedTmp(stages []stagedDelivery, primary error) error {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("sync tmp dir %s: %w", stage.tmpDir, err))
 		}
 	}
-	if cleanupErr == nil {
-		return primary
-	}
-	return fmt.Errorf("%w (cleanup: %v)", primary, cleanupErr)
-}
-
-func rollbackDeliveries(committed, pending []stagedDelivery, primary error) error {
-	var cleanupErr error
-	for _, stage := range committed {
-		if err := os.Remove(stage.newPath); err != nil && !os.IsNotExist(err) {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("rollback new %s: %w", stage.newPath, err))
-		}
-		if err := SyncDir(stage.newDir); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("sync new dir %s: %w", stage.newDir, err))
-		}
-	}
-	for _, stage := range pending {
-		if err := os.Remove(stage.tmpPath); err != nil && !os.IsNotExist(err) {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup tmp %s: %w", stage.tmpPath, err))
-		}
-		if err := SyncDir(stage.tmpDir); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("sync tmp dir %s: %w", stage.tmpDir, err))
-		}
-	}
-	if cleanupErr == nil {
-		return primary
-	}
-	return fmt.Errorf("%w (rollback: %v)", primary, cleanupErr)
+	return cleanupErr
 }

@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parsing them, preventing duplicate consumption under concurrent drains.
 - DLQ moves and retries now claim or update queue state before redelivery, and
   reject tampered original filenames before restoring messages.
+- Multi-recipient delivery now preserves already committed inbox messages when
+  a later recipient fails, and `amq send --project` now rejects multiple
+  recipients instead of applying undefined cross-project partial semantics.
 
 ## [0.38.0] - 2026-06-22
 ### Added
