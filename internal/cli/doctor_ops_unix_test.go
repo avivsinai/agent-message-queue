@@ -209,7 +209,7 @@ func TestRunOpsChecksDoesNotAdvertiseRepairForLiveIdentityMismatchLock(t *testin
 				t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
 			}
 			got := result.WakeLocks[0]
-			if got.Status != string(wakeLockStale) || got.Reason != tc.wantReason {
+			if got.Status != string(wakeLockUnverified) || got.Reason != tc.wantReason {
 				t.Fatalf("unexpected wake lock: %#v", got)
 			}
 			if !got.TargetPresent || got.TargetReason != "" {
@@ -284,7 +284,7 @@ func TestRunOpsChecksFixRefusesLiveIdentityMismatchLock(t *testing.T) {
 				t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
 			}
 			got := result.WakeLocks[0]
-			if got.Status != "error" || !strings.Contains(got.Reason, tc.wantReason) || !strings.Contains(got.Reason, "not removable") {
+			if got.Status != string(wakeLockUnverified) || got.Reason != tc.wantReason {
 				t.Fatalf("unexpected wake lock fix result: %#v", got)
 			}
 			if got.Removed {

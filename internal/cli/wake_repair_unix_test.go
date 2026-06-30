@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func stubStartWakeFromTarget(t *testing.T, fn wakeRepairStarter) {
@@ -51,6 +53,64 @@ func TestWakeTargetWriteReadRoundTripAndPermissions(t *testing.T) {
 	}
 	if strings.Join(got.InjectArgs, "|") != "exec|target" {
 		t.Fatalf("inject args = %#v", got.InjectArgs)
+	}
+}
+
+func TestWriteWakeTargetRejectsSymlink(t *testing.T) {
+	root := secureTempDirForTest(t)
+	agentBase := fsq.AgentBase(root, "codex")
+	if err := os.MkdirAll(agentBase, 0o700); err != nil {
+		t.Fatalf("mkdir agent base: %v", err)
+	}
+	targetPath := filepath.Join(t.TempDir(), "target.json")
+	if err := os.WriteFile(targetPath, []byte("old\n"), 0o600); err != nil {
+		t.Fatalf("write symlink target: %v", err)
+	}
+	if err := os.Symlink(targetPath, wakeTargetPath(root, "codex")); err != nil {
+		t.Fatalf("symlink wake target: %v", err)
+	}
+
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	err := writeWakeTarget(root, "codex", target)
+	if err == nil {
+		t.Fatal("expected wake target symlink rejection")
+	}
+	if got, readErr := os.ReadFile(targetPath); readErr != nil || string(got) != "old\n" {
+		t.Fatalf("symlink target changed: data=%q err=%v", got, readErr)
+	}
+}
+
+func TestWriteWakeTargetSurvivesConcurrentCreate(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	start := make(chan struct{})
+	errs := make(chan error, 8)
+
+	for i := 0; i < cap(errs); i++ {
+		i := i
+		go func() {
+			<-start
+			target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{fmt.Sprintf("exec-%d", i)})
+			errs <- writeWakeTarget(root, "codex", target)
+		}()
+	}
+	close(start)
+	for i := 0; i < cap(errs); i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("writeWakeTarget concurrent writer %d: %v", i, err)
+		}
+	}
+
+	if _, exists, err := readWakeTarget(root, "codex"); err != nil || !exists {
+		t.Fatalf("readWakeTarget after concurrent writes: exists=%v err=%v", exists, err)
+	}
+	tmpMatches, err := filepath.Glob(filepath.Join(fsq.AgentBase(root, "codex"), ".wake.target.tmp.*"))
+	if err != nil {
+		t.Fatalf("glob temp files: %v", err)
+	}
+	if len(tmpMatches) != 0 {
+		t.Fatalf("temporary wake target files remain: %v", tmpMatches)
 	}
 }
 
@@ -725,8 +785,8 @@ func TestRepairWakeRefusesLiveIdentityMismatchLock(t *testing.T) {
 				t.Fatal("expected repair refusal")
 			}
 			if result.Status != "refused" ||
-				!strings.Contains(result.Reason, tc.wantReason) ||
-				!strings.Contains(result.Reason, "not repairable") {
+				!strings.Contains(result.Reason, "unverified") ||
+				!strings.Contains(err.Error(), tc.wantReason) {
 				t.Fatalf("unexpected result: %#v err=%v", result, err)
 			}
 			if _, statErr := os.Stat(lockPath); statErr != nil {

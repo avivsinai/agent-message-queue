@@ -823,7 +823,7 @@ func TestAcquireWakeLockSelfHealsPIDReusedByNonAMQ(t *testing.T) {
 	}
 }
 
-func TestAcquireWakeLockRefusesLiveWakeIdentityMismatch(t *testing.T) {
+func TestAcquireWakeLockTreatsLiveWakeIdentityMismatchAsUnverified(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		lock       wakeLock
@@ -881,8 +881,8 @@ func TestAcquireWakeLockRefusesLiveWakeIdentityMismatch(t *testing.T) {
 			if cleanup != nil {
 				defer cleanup()
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantReason) || !strings.Contains(err.Error(), "not removable") {
-				t.Fatalf("expected identity-mismatch removal refusal, got %v", err)
+			if err == nil || !strings.Contains(err.Error(), tc.wantReason) || !strings.Contains(err.Error(), "unverified") {
+				t.Fatalf("expected identity-mismatch unverified refusal, got %v", err)
 			}
 			if _, statErr := os.Stat(lockPath); statErr != nil {
 				t.Fatalf("identity-mismatch lock should remain, stat=%v", statErr)
@@ -917,8 +917,8 @@ func TestAcquireWakeLockRefusesStartMismatchWhenExecutableUnavailable(t *testing
 	if cleanup != nil {
 		defer cleanup()
 	}
-	if err == nil || !strings.Contains(err.Error(), "process start time mismatch") || !strings.Contains(err.Error(), "not removable") {
-		t.Fatalf("expected start-token mismatch refusal without executable identity, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "process start time mismatch") || !strings.Contains(err.Error(), "unverified") {
+		t.Fatalf("expected start-token mismatch to be unverified without executable identity, got %v", err)
 	}
 	if _, statErr := os.Stat(lockPath); statErr != nil {
 		t.Fatalf("lock should remain when executable identity is unavailable, stat=%v", statErr)
@@ -1416,6 +1416,26 @@ func TestWaitForWakeReadyAcceptsReadyFileWrittenBeforeExit(t *testing.T) {
 
 	if err := waitForWakeReady(cmd.Process, readyPath, time.Second); err != nil {
 		t.Fatalf("waitForWakeReady should accept ready file written before exit: %v", err)
+	}
+}
+
+func TestWriteWakeReadyFileRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.ready")
+	if err := os.WriteFile(target, []byte("old\n"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	readyPath := filepath.Join(dir, "wake.ready")
+	if err := os.Symlink(target, readyPath); err != nil {
+		t.Fatalf("symlink ready file: %v", err)
+	}
+
+	err := writeWakeReadyFile(readyPath)
+	if err == nil {
+		t.Fatal("expected wake ready symlink rejection")
+	}
+	if got, readErr := os.ReadFile(target); readErr != nil || string(got) != "old\n" {
+		t.Fatalf("symlink target changed: data=%q err=%v", got, readErr)
 	}
 }
 

@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Wake metadata and readiness writes now reject symlink destinations and use
+  fsynced atomic installs, while live wake identity mismatches stay
+  `unverified` unless the PID is proven not to be `amq wake` (#181).
 - Queue artifact reads now reject symlinks and non-regular files before parsing
   messages, DLQ envelopes, or receipts (#181).
 - Inbox and DLQ queue operations now share canonical `.md` filename validation
