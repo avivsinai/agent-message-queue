@@ -107,45 +107,72 @@ func TestNotificationPrefix(t *testing.T) {
 	}
 }
 
+const injectViaHelperEnv = "AMQ_TEST_INJECT_VIA_HELPER"
+
+func injectViaCaptureConfig(t *testing.T, fixedArgs ...string) (*wakeConfig, string) {
+	t.Helper()
+
+	t.Setenv(injectViaHelperEnv, "1")
+	outputPath := filepath.Join(secureTempDirForTest(t), "inject output.txt")
+	args := []string{"-test.run=^TestInjectViaHelperProcess$", "--", outputPath}
+	args = append(args, fixedArgs...)
+
+	return &wakeConfig{
+		injectVia:     copyTestBinaryForInjectVia(t),
+		injectArgs:    args,
+		injectTimeout: 60 * time.Second,
+		debug:         false,
+	}, outputPath
+}
+
+func copyTestBinaryForInjectVia(t *testing.T) string {
+	t.Helper()
+
+	data, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatalf("read test binary: %v", err)
+	}
+	path := filepath.Join(secureTempDirForTest(t), "inject-via-helper")
+	if err := os.WriteFile(path, data, 0o700); err != nil {
+		t.Fatalf("write inject-via helper: %v", err)
+	}
+	return path
+}
+
+func TestInjectViaHelperProcess(t *testing.T) {
+	if os.Getenv(injectViaHelperEnv) != "1" {
+		return
+	}
+
+	separator := -1
+	for i, arg := range os.Args {
+		if arg == "--" {
+			separator = i
+			break
+		}
+	}
+	if separator < 0 || separator+1 >= len(os.Args) {
+		_, _ = os.Stderr.WriteString("missing inject-via helper output path\n")
+		os.Exit(2)
+	}
+	outputPath := os.Args[separator+1]
+	payload := strings.Join(os.Args[separator+2:], "\n")
+	if err := os.WriteFile(outputPath, []byte(payload), 0o600); err != nil {
+		_, _ = os.Stderr.WriteString("write inject-via helper output: " + err.Error() + "\n")
+		os.Exit(3)
+	}
+	os.Exit(0)
+}
+
 func TestInjectNotification_InjectVia(t *testing.T) {
-	// Use a shell script that writes the injected text to a temp file
-	tmp, err := os.CreateTemp("", "wake-inject-via-*.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpPath := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		t.Fatalf("close temp output: %v", err)
-	}
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	script, err := os.CreateTemp(secureTempDirForTest(t), "wake-inject-via-*.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	scriptPath := script.Name()
-	if _, err := script.WriteString("#!/bin/sh\nprintf '%s' \"$1\" > " + tmpPath + "\n"); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-	if err := script.Close(); err != nil {
-		t.Fatalf("close script: %v", err)
-	}
-	if err := os.Chmod(scriptPath, 0o755); err != nil {
-		t.Fatalf("chmod script: %v", err)
-	}
-	defer func() { _ = os.Remove(scriptPath) }()
-
-	cfg := &wakeConfig{
-		injectVia: scriptPath,
-		debug:     false,
-	}
+	cfg, outputPath := injectViaCaptureConfig(t)
 
 	text := "AMQ [collab]: message from codex - hello"
 	if err := injectNotification(cfg, text, true); err != nil {
 		t.Fatalf("injectNotification failed: %v", err)
 	}
 
-	got, err := os.ReadFile(tmpPath)
+	got, err := os.ReadFile(outputPath)
 	if err != nil {
 		t.Fatalf("failed to read output: %v", err)
 	}
@@ -155,46 +182,15 @@ func TestInjectNotification_InjectVia(t *testing.T) {
 }
 
 func TestInjectNotification_InjectVia_MultiWordCommand(t *testing.T) {
-	tmp, err := os.CreateTemp("", "wake-inject-via-multi-*.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpPath := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		t.Fatalf("close temp output: %v", err)
-	}
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	scriptDir := filepath.Join(secureTempDirForTest(t), "inject dir")
-	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
-		t.Fatalf("mkdir script dir: %v", err)
-	}
-	scriptPath := filepath.Join(scriptDir, "inject script.sh")
-	script, err := os.OpenFile(scriptPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		t.Fatalf("create script: %v", err)
-	}
-	// $1 = "exec", $2 = "TERMID", $3 = the notification text
-	if _, err := script.WriteString("#!/bin/sh\nprintf '%s\\n%s\\n%s' \"$1\" \"$2\" \"$3\" > " + tmpPath + "\n"); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-	if err := script.Close(); err != nil {
-		t.Fatalf("close script: %v", err)
-	}
-
 	// Simulates: ghostty-bridge exec "Team Alpha" <text>.
-	cfg := &wakeConfig{
-		injectVia:  scriptPath,
-		injectArgs: []string{"exec", "Team Alpha"},
-		debug:      false,
-	}
+	cfg, outputPath := injectViaCaptureConfig(t, "exec", "Team Alpha")
 
 	text := "AMQ [collab]: test message"
 	if err := injectNotification(cfg, text, true); err != nil {
 		t.Fatalf("injectNotification failed: %v", err)
 	}
 
-	got, err := os.ReadFile(tmpPath)
+	got, err := os.ReadFile(outputPath)
 	if err != nil {
 		t.Fatalf("failed to read output: %v", err)
 	}
@@ -205,43 +201,15 @@ func TestInjectNotification_InjectVia_MultiWordCommand(t *testing.T) {
 }
 
 func TestInjectNotification_InjectVia_Bell(t *testing.T) {
-	tmp, err := os.CreateTemp("", "wake-inject-via-bell-*.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpPath := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		t.Fatalf("close temp output: %v", err)
-	}
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	script, err := os.CreateTemp(secureTempDirForTest(t), "wake-inject-via-bell-*.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	scriptPath := script.Name()
-	if _, err := script.WriteString("#!/bin/sh\nprintf '%s' \"$1\" > " + tmpPath + "\n"); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-	if err := script.Close(); err != nil {
-		t.Fatalf("close script: %v", err)
-	}
-	if err := os.Chmod(scriptPath, 0o755); err != nil {
-		t.Fatalf("chmod script: %v", err)
-	}
-	defer func() { _ = os.Remove(scriptPath) }()
-
-	cfg := &wakeConfig{
-		injectVia: scriptPath,
-		bell:      true,
-	}
+	cfg, outputPath := injectViaCaptureConfig(t)
+	cfg.bell = true
 
 	text := "AMQ [collab]: message from codex - hello"
 	if err := injectNotification(cfg, text, true); err != nil {
 		t.Fatalf("injectNotification failed: %v", err)
 	}
 
-	got, err := os.ReadFile(tmpPath)
+	got, err := os.ReadFile(outputPath)
 	if err != nil {
 		t.Fatalf("failed to read output: %v", err)
 	}

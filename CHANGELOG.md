@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump `github.com/coder/websocket` from 1.8.14 to 1.8.15
 - Bump `actions/checkout` from 6.0.3 to 7.0.0
 
+### Fixed
+
+- De-flaked inject-via wake notification tests by replacing shell-redirection
+  capture with a deterministic helper process (#181).
+
 ## [0.39.0] - 2026-06-30
 ### Fixed
 
