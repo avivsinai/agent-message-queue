@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- CI now requires pull requests to add a `CHANGELOG.md` Unreleased entry unless
+  explicitly skipped by Dependabot, release branch, or `no-changelog`/`docs`/`chore`
+  labels (#181).
 - `amq coop init --no-gitignore` skips updating `.gitignore`, for setups that manage ignores globally or elsewhere (closes #172)
 
 ### Changed
