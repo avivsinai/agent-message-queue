@@ -623,7 +623,8 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	debugFlag := fs.Bool("debug", false, "Log injection diagnostics to stderr")
 	acceptExistingWakeFlag := fs.Bool("accept-existing-wake", false, "Internal: allow a usable existing wake to satisfy readiness")
 
-	usage := usageWithFlags(fs, "amq wake --me <agent> [options]",
+	usage := usageWithHiddenFlags(fs, "amq wake --me <agent> [options]",
+		[]string{"ready-file", "accept-existing-wake"},
 		"Background waker: injects terminal notification when messages arrive.",
 		"Run as background job before starting CLI: amq wake --me claude &",
 		"",
