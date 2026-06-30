@@ -832,10 +832,7 @@ func writeWakeReadyFile(path string) error {
 	if path == "" {
 		return nil
 	}
-	if err := os.WriteFile(path, []byte("ready\n"), 0o600); err != nil {
-		return fmt.Errorf("write wake ready file: %w", err)
-	}
-	return nil
+	return writeWakeMetadataFile(path, []byte("ready\n"), "wake ready file")
 }
 
 func parseInterruptKey(raw string) (string, error) {

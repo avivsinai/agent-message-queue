@@ -201,12 +201,18 @@ func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
 			return
 		}
 		if lock.BootID != "" && proc.BootID != "" && lock.BootID != proc.BootID {
-			inspection.Status = wakeLockStale
+			inspection.Status = wakeLockUnverified
+			if wakeProcessProvenNotWake(proc) {
+				inspection.Status = wakeLockStale
+			}
 			inspection.Reason = "boot id mismatch"
 			return
 		}
 		if lock.ProcessStart != proc.StartToken {
-			inspection.Status = wakeLockStale
+			inspection.Status = wakeLockUnverified
+			if wakeProcessProvenNotWake(proc) {
+				inspection.Status = wakeLockStale
+			}
 			inspection.Reason = "process start time mismatch"
 			return
 		}

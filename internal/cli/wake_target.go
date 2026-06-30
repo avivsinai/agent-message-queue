@@ -167,22 +167,7 @@ func writeWakeTarget(root, me string, target wakeTarget) error {
 		return fmt.Errorf("marshal wake target: %w", err)
 	}
 	data = append(data, '\n')
-	tmp := filepath.Join(agentBase, fmt.Sprintf(".wake.target.tmp.%d", os.Getpid()))
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write wake target temp file: %w", err)
-	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("chmod wake target temp file: %w", err)
-	}
-	if err := os.Rename(tmp, wakeTargetPath(root, me)); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("install wake target: %w", err)
-	}
-	if err := os.Chmod(wakeTargetPath(root, me), 0o600); err != nil {
-		return fmt.Errorf("chmod wake target: %w", err)
-	}
-	return nil
+	return writeWakeMetadataFile(wakeTargetPath(root, me), data, "wake target")
 }
 
 func removeWakeTarget(root, me string) error {
