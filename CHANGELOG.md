@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Atomic queue file writes now return `io.ErrShortWrite` when a partial write
+  reports success before syncing (#181).
 - De-flaked inject-via wake notification tests by replacing shell-redirection
   capture with a deterministic helper process (#181).
 
