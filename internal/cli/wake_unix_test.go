@@ -147,6 +147,60 @@ func TestRunWakeWithLoopWritesInjectViaWakeTarget(t *testing.T) {
 		if target.InjectVia != injector || strings.Join(target.InjectArgs, "|") != "exec" {
 			t.Fatalf("unexpected target: %#v", target)
 		}
+		if target.Owner != nil {
+			t.Fatalf("generic inject-via wake target should not record owner: %#v", target.Owner)
+		}
+		if cfg.wakeOwner != nil {
+			t.Fatalf("generic inject-via wake config should not record owner: %#v", cfg.wakeOwner)
+		}
+		return errDone
+	})
+	if !errors.Is(err, errDone) {
+		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
+func TestRunWakeWithLoopPersistsInjectViaWakeOwnerFromEnv(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	owner := wakeOwner{
+		PID:          4242,
+		ProcessStart: "owner-start",
+		BootID:       "boot-1",
+		SessionID:    99,
+	}
+	ownerEnv, err := encodeWakeOwnerEnv(owner)
+	if err != nil {
+		t.Fatalf("encodeWakeOwnerEnv: %v", err)
+	}
+	t.Setenv(envWakeOwner, ownerEnv)
+
+	injector := writeExecutableForTest(t, "injector")
+	errDone := errors.New("done")
+	err = runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", injector,
+	}, func(cfg wakeConfig) error {
+		if cfg.wakeOwner == nil || *cfg.wakeOwner != owner {
+			t.Fatalf("cfg.wakeOwner = %#v, want %#v", cfg.wakeOwner, owner)
+		}
+		target, exists, targetErr := readWakeTarget(root, "orchestrator")
+		if targetErr != nil {
+			t.Fatalf("readWakeTarget: %v", targetErr)
+		}
+		if !exists {
+			t.Fatal("expected wake target to be written")
+		}
+		if target.Owner == nil || *target.Owner != owner {
+			t.Fatalf("target.Owner = %#v, want %#v", target.Owner, owner)
+		}
 		return errDone
 	})
 	if !errors.Is(err, errDone) {
@@ -1171,6 +1225,128 @@ func TestShouldReplaceOrphanedWakeLockRevalidatesBeforeSignal(t *testing.T) {
 	}
 }
 
+func TestShouldReplaceOrphanedWakeLockReplacesInjectViaWhenOwnerGone(t *testing.T) {
+	const wakePID = 4242
+	const ownerPID = 7777
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	owner := wakeOwner{PID: ownerPID, ProcessStart: "owner-start", BootID: "boot-1"}
+	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"exec"})
+	target.Owner = &owner
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
+		PID:          wakePID,
+		TTY:          "unknown",
+		ProcessStart: "wake-start",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	}, target))
+	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
+		t.Fatalf("writeWakeTarget: %v", err)
+	}
+
+	killed := false
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		switch pid {
+		case wakePID:
+			if killed {
+				return wakeProcessInfo{PID: pid, Running: false}
+			}
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "wake-start",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root, "--inject-via", injector},
+			}
+		case ownerPID:
+			return wakeProcessInfo{PID: pid, Running: false}
+		default:
+			return wakeProcessInfo{PID: pid}
+		}
+	})
+	stubSignalWakeProcess(t, func(pid int, sig os.Signal) error {
+		if pid != wakePID {
+			t.Fatalf("signal pid = %d, want %d", pid, wakePID)
+		}
+		if sig == os.Kill {
+			killed = true
+		}
+		return nil
+	})
+
+	inspection := inspectWakeLock(root, "orchestrator")
+	replaced, err := shouldReplaceOrphanedWakeLock(inspection)
+	if err != nil {
+		t.Fatalf("shouldReplaceOrphanedWakeLock: %v", err)
+	}
+	if !replaced {
+		t.Fatal("expected owner-dead inject-via wake to be replaced")
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("lock should be removed after owner-dead replacement, stat=%v", err)
+	}
+}
+
+func TestShouldReplaceOrphanedWakeLockKeepsInjectViaWhenOwnerMatches(t *testing.T) {
+	const wakePID = 4242
+	const ownerPID = 7777
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	owner := wakeOwner{PID: ownerPID, ProcessStart: "owner-start", BootID: "boot-1"}
+	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"exec"})
+	target.Owner = &owner
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
+		PID:          wakePID,
+		TTY:          "unknown",
+		ProcessStart: "wake-start",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	}, target))
+	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
+		t.Fatalf("writeWakeTarget: %v", err)
+	}
+
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		switch pid {
+		case wakePID:
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "wake-start",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root, "--inject-via", injector},
+			}
+		case ownerPID:
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "owner-start",
+				BootID:     "boot-1",
+			}
+		default:
+			return wakeProcessInfo{PID: pid}
+		}
+	})
+	stubSignalWakeProcess(t, func(pid int, sig os.Signal) error {
+		t.Fatalf("must not signal owner-matched inject-via wake, got pid=%d sig=%v", pid, sig)
+		return nil
+	})
+
+	inspection := inspectWakeLock(root, "orchestrator")
+	replaced, err := shouldReplaceOrphanedWakeLock(inspection)
+	if err != nil {
+		t.Fatalf("shouldReplaceOrphanedWakeLock: %v", err)
+	}
+	if replaced {
+		t.Fatal("owner-matched inject-via wake should not be replaced")
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("lock should remain for owner-matched wake, stat=%v", statErr)
+	}
+}
+
 func TestRunWakeWithLoopRejectsRecentlyCorruptLock(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -1413,6 +1589,126 @@ func TestWakeHealthCheckSkipsTTYForInjectVia(t *testing.T) {
 	}
 }
 
+func TestWakeHealthCheckExitsWhenInjectViaOwnerGone(t *testing.T) {
+	owner := wakeOwner{PID: 4242, ProcessStart: "owner-start", BootID: "boot-1"}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+
+	err := wakeHealthCheck(wakeConfig{injectVia: "/tmp/injector", wakeOwner: &owner}, func() bool {
+		return false
+	})
+	if err == nil {
+		t.Fatal("expected owner liveness failure")
+	}
+	if !strings.Contains(err.Error(), "owner pid 4242 is not running") {
+		t.Fatalf("unexpected owner liveness error: %v", err)
+	}
+}
+
+func TestWakeHealthCheckExitsWhenInjectViaOwnerIdentityChanges(t *testing.T) {
+	owner := wakeOwner{PID: 4242, ProcessStart: "owner-start", BootID: "boot-1", SessionID: 99}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "other-start",
+			BootID:     "boot-1",
+		}
+	})
+
+	err := wakeHealthCheck(wakeConfig{injectVia: "/tmp/injector", wakeOwner: &owner}, func() bool {
+		return false
+	})
+	if err == nil {
+		t.Fatal("expected owner identity failure")
+	}
+	if !strings.Contains(err.Error(), "owner process start changed") {
+		t.Fatalf("unexpected owner identity error: %v", err)
+	}
+}
+
+func TestWakeHealthCheckKeepsInjectViaWhenOwnerMatches(t *testing.T) {
+	owner := wakeOwner{PID: 4242, ProcessStart: "owner-start", BootID: "boot-1"}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "owner-start",
+			BootID:     "boot-1",
+		}
+	})
+
+	err := wakeHealthCheck(wakeConfig{injectVia: "/tmp/injector", wakeOwner: &owner}, func() bool {
+		return false
+	})
+	if err != nil {
+		t.Fatalf("expected owner-matched inject-via health check to pass, got %v", err)
+	}
+}
+
+func TestCurrentWakeOwnerIncludesProcessIdentityWhenAvailable(t *testing.T) {
+	self := os.Getpid()
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid != self {
+			return wakeProcessInfo{PID: pid}
+		}
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "self-start",
+			BootID:     "boot-1",
+		}
+	})
+	stubWakeProcessSID(t, func(pid int) (int, error) {
+		if pid != self {
+			t.Fatalf("unexpected sid lookup pid %d", pid)
+		}
+		return 99, nil
+	})
+
+	owner := currentWakeOwner()
+	if owner == nil {
+		t.Fatal("expected owner")
+	}
+	if owner.PID != self || owner.ProcessStart != "self-start" || owner.BootID != "boot-1" || owner.SessionID != 99 {
+		t.Fatalf("owner = %#v, want pid=%d start/self boot/session", owner, self)
+	}
+}
+
+func TestWakeCommandEnvCarriesOwnerToken(t *testing.T) {
+	owner := wakeOwner{PID: 4242, ProcessStart: "owner-start", BootID: "boot-1", SessionID: 99}
+	env, err := wakeCommandEnv([]string{
+		"PATH=/bin",
+		envRoot + "=/old/root",
+		envWakeOwner + `={"pid":111}`,
+	}, "/new/root", &owner)
+	if err != nil {
+		t.Fatalf("wakeCommandEnv: %v", err)
+	}
+	if got := testEnvValue(env, envRoot); got != "/new/root" {
+		t.Fatalf("%s = %q, want /new/root", envRoot, got)
+	}
+	var decoded wakeOwner
+	if err := json.Unmarshal([]byte(testEnvValue(env, envWakeOwner)), &decoded); err != nil {
+		t.Fatalf("decode %s: %v", envWakeOwner, err)
+	}
+	if decoded != owner {
+		t.Fatalf("decoded owner = %#v, want %#v", decoded, owner)
+	}
+
+	env, err = wakeCommandEnv(env, "/raw/root", nil)
+	if err != nil {
+		t.Fatalf("wakeCommandEnv without owner: %v", err)
+	}
+	if got := testEnvValue(env, envRoot); got != "/raw/root" {
+		t.Fatalf("%s = %q, want /raw/root", envRoot, got)
+	}
+	if got := testEnvValue(env, envWakeOwner); got != "" {
+		t.Fatalf("%s should be cleared without owner, got %q", envWakeOwner, got)
+	}
+}
+
 func TestWakeHealthCheckRequiresTTYForTIOCSTI(t *testing.T) {
 	err := wakeHealthCheck(wakeConfig{}, func() bool {
 		return false
@@ -1423,4 +1719,14 @@ func TestWakeHealthCheckRequiresTTYForTIOCSTI(t *testing.T) {
 	if err.Error() != "TTY no longer available" {
 		t.Fatalf("expected TTY health error, got %v", err)
 	}
+}
+
+func testEnvValue(env []string, key string) string {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
 }

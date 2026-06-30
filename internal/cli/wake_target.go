@@ -17,16 +17,25 @@ const (
 	wakeTargetSchema    = 1
 	wakeTargetFileName  = ".wake.target"
 	wakeTargetInjectVia = "inject-via"
+	envWakeOwner        = "AMQ_WAKE_OWNER"
 )
 
+type wakeOwner struct {
+	PID          int    `json:"pid"`
+	ProcessStart string `json:"process_start,omitempty"`
+	BootID       string `json:"boot_id,omitempty"`
+	SessionID    int    `json:"session_id,omitempty"`
+}
+
 type wakeTarget struct {
-	Schema     int      `json:"schema"`
-	Mode       string   `json:"mode"`
-	Root       string   `json:"root"`
-	Agent      string   `json:"agent"`
-	Created    string   `json:"created"`
-	InjectVia  string   `json:"inject_via"`
-	InjectArgs []string `json:"inject_args,omitempty"`
+	Schema     int        `json:"schema"`
+	Mode       string     `json:"mode"`
+	Root       string     `json:"root"`
+	Agent      string     `json:"agent"`
+	Created    string     `json:"created"`
+	InjectVia  string     `json:"inject_via"`
+	InjectArgs []string   `json:"inject_args,omitempty"`
+	Owner      *wakeOwner `json:"owner,omitempty"`
 }
 
 func wakeTargetPath(root, me string) string {
@@ -203,6 +212,53 @@ func validateWakeTarget(target wakeTarget, root, me string) error {
 		if strings.ContainsRune(arg, 0) {
 			return fmt.Errorf("wake target inject arg contains NUL")
 		}
+	}
+	if target.Owner != nil {
+		if err := validateWakeOwner(*target.Owner); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func encodeWakeOwnerEnv(owner wakeOwner) (string, error) {
+	if err := validateWakeOwner(owner); err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(owner)
+	if err != nil {
+		return "", fmt.Errorf("marshal wake owner: %w", err)
+	}
+	return string(data), nil
+}
+
+func wakeOwnerFromEnv() (*wakeOwner, error) {
+	raw := strings.TrimSpace(os.Getenv(envWakeOwner))
+	if raw == "" {
+		return nil, nil
+	}
+	var owner wakeOwner
+	if err := json.Unmarshal([]byte(raw), &owner); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", envWakeOwner, err)
+	}
+	if err := validateWakeOwner(owner); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", envWakeOwner, err)
+	}
+	return &owner, nil
+}
+
+func validateWakeOwner(owner wakeOwner) error {
+	if owner.PID <= 0 {
+		return fmt.Errorf("wake owner pid must be > 0")
+	}
+	if strings.ContainsRune(owner.ProcessStart, 0) {
+		return fmt.Errorf("wake owner process start contains NUL")
+	}
+	if strings.ContainsRune(owner.BootID, 0) {
+		return fmt.Errorf("wake owner boot id contains NUL")
+	}
+	if owner.SessionID < 0 {
+		return fmt.Errorf("wake owner session id must be >= 0")
 	}
 	return nil
 }

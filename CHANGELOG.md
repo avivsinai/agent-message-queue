@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-recipient delivery now preserves already committed inbox messages when
   a later recipient fails, and `amq send --project` now rejects multiple
   recipients instead of applying undefined cross-project partial semantics.
+- AMQ-owned `--inject-via` wake processes started by `coop exec` or
+  `wake repair` now exit when their recorded owner process is gone or no
+  longer matches, preventing stale terminal injectors from blocking session
+  reopen recovery.
 
 ## [0.38.0] - 2026-06-22
 ### Added
