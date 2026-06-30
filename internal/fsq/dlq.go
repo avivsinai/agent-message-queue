@@ -51,6 +51,9 @@ func MoveCurToDLQ(root, agent, filename, originalID, failureReason, failureDetai
 }
 
 func moveInboxMessageToDLQ(root, agent, readDir, envelopeSourceDir, filename, originalID, failureReason, failureDetail string) (string, error) {
+	if err := ValidateMessageFilename(filename); err != nil {
+		return "", err
+	}
 	srcDir, err := inboxSourceDir(root, agent, readDir)
 	if err != nil {
 		return "", err
@@ -172,7 +175,7 @@ func RetryFromDLQ(root, agent, dlqFilename string, force bool) error {
 	if envelope.RetryCount >= MaxRetries && !force {
 		return fmt.Errorf("max retries (%d) exceeded; use --force to override", MaxRetries)
 	}
-	if err := validateInboxFilename(envelope.OriginalFile); err != nil {
+	if err := ValidateMessageFilename(envelope.OriginalFile); err != nil {
 		return fmt.Errorf("invalid original_file %q: %w", envelope.OriginalFile, err)
 	}
 
@@ -230,33 +233,11 @@ func updateRetriedDLQEnvelope(root, agent, dlqFilename, dlqPath, box string, upd
 	return SyncDir(curDir)
 }
 
-func validateInboxFilename(filename string) error {
-	if filename == "" {
-		return fmt.Errorf("empty filename")
-	}
-	if strings.HasPrefix(filename, ".") {
-		return fmt.Errorf("dotfile names are not allowed")
-	}
-	if filepath.IsAbs(filename) {
-		return fmt.Errorf("absolute path is not allowed")
-	}
-	if strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
-		return fmt.Errorf("path separators are not allowed")
-	}
-	if strings.Contains(filename, "\x00") {
-		return fmt.Errorf("NUL byte is not allowed")
-	}
-	if filename == "." || filename == ".." {
-		return fmt.Errorf("path traversal is not allowed")
-	}
-	if !strings.HasSuffix(filename, ".md") {
-		return fmt.Errorf("filename must end with .md")
-	}
-	return nil
-}
-
 // FindDLQMessage locates a DLQ message in dlq/new or dlq/cur.
 func FindDLQMessage(root, agent, filename string) (string, string, error) {
+	if err := ValidateMessageFilename(filename); err != nil {
+		return "", "", err
+	}
 	newPath := filepath.Join(AgentDLQNew(root, agent), filename)
 	if _, err := os.Stat(newPath); err == nil {
 		return newPath, BoxNew, nil
@@ -274,6 +255,9 @@ func FindDLQMessage(root, agent, filename string) (string, string, error) {
 
 // MoveDLQNewToCur moves a DLQ message from new to cur (marks as inspected).
 func MoveDLQNewToCur(root, agent, filename string) error {
+	if err := ValidateMessageFilename(filename); err != nil {
+		return err
+	}
 	newPath := filepath.Join(AgentDLQNew(root, agent), filename)
 	curDir := AgentDLQCur(root, agent)
 	curPath := filepath.Join(curDir, filename)
