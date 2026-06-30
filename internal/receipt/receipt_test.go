@@ -44,6 +44,25 @@ func TestEmitAndRead(t *testing.T) {
 	}
 }
 
+func TestReadRejectsSymlink(t *testing.T) {
+	root := setupTestRoot(t)
+
+	r := New("msg_symlink", "p2p/claude__codex", "claude", "codex", StageDrained, "")
+	if err := Emit(root, r); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	target := filepath.Join(root, "agents", "codex", "receipts", r.filename())
+	link := filepath.Join(root, "agents", "codex", "receipts", "linked.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := Read(link)
+	if err == nil {
+		t.Fatal("expected symlink receipt to be rejected")
+	}
+}
+
 func TestEmitSelfSend(t *testing.T) {
 	root := setupTestRoot(t)
 

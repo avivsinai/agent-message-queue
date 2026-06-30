@@ -61,7 +61,7 @@ func moveInboxMessageToDLQ(root, agent, readDir, envelopeSourceDir, filename, or
 	srcPath := filepath.Join(srcDir, filename)
 
 	// Read original content
-	content, err := os.ReadFile(srcPath)
+	content, err := ReadRegularNoFollow(srcPath)
 	if err != nil {
 		return "", fmt.Errorf("read original: %w", err)
 	}
@@ -145,7 +145,7 @@ func deliverToDLQ(root, agent, filename string, data []byte) (string, error) {
 
 // ReadDLQEnvelope reads and parses a DLQ message.
 func ReadDLQEnvelope(path string) (*DLQEnvelope, []byte, error) {
-	data, err := os.ReadFile(path)
+	data, err := ReadRegularNoFollow(path)
 	if err != nil {
 		return nil, nil, err
 	}

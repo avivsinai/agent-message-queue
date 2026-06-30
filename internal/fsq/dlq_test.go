@@ -188,6 +188,46 @@ func TestRetryFromDLQ(t *testing.T) {
 	}
 }
 
+func TestReadDLQEnvelopeRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	dlqPath := createDLQMessage(t, root, "alice", "symlink_source.md", []byte("test content"))
+	link := filepath.Join(AgentDLQNew(root, "alice"), "symlink_dlq.md")
+	if err := os.Symlink(dlqPath, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, _, err := ReadDLQEnvelope(link)
+	if err == nil {
+		t.Fatal("expected symlink DLQ envelope to be rejected")
+	}
+}
+
+func TestMoveCurToDLQRejectsSymlinkSource(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "target.md")
+	if err := os.WriteFile(target, []byte("target content"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	link := filepath.Join(AgentInboxCur(root, "alice"), "symlink_source.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := MoveCurToDLQ(root, "alice", "symlink_source.md", "symlink_source", "parse_error", "test")
+	if err == nil {
+		t.Fatal("expected symlink inbox source to be rejected")
+	}
+	if _, statErr := os.Stat(target); statErr != nil {
+		t.Fatalf("target should remain untouched: %v", statErr)
+	}
+}
+
 func TestRetryFromDLQRejectsTraversalOriginalFile(t *testing.T) {
 	root := t.TempDir()
 	if err := EnsureAgentDirs(root, "alice"); err != nil {

@@ -98,7 +98,7 @@ func WaitFor(root, msgID, consumer, stage string, timeout, pollInterval time.Dur
 }
 
 func Read(path string) (Receipt, error) {
-	data, err := os.ReadFile(path)
+	data, err := fsq.ReadRegularNoFollow(path)
 	if err != nil {
 		return Receipt{}, err
 	}

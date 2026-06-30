@@ -7,10 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 // Schema and version constants.
@@ -181,14 +182,15 @@ func ParseHeader(data []byte) (Header, error) {
 }
 
 func ReadMessageFile(path string) (Message, error) {
-	info, err := os.Stat(path)
+	file, info, err := fsq.OpenRegularNoFollow(path)
 	if err != nil {
 		return Message{}, err
 	}
+	defer func() { _ = file.Close() }()
 	if info.Size() > MaxMessageSize {
 		return Message{}, fmt.Errorf("%w: %d bytes", ErrMessageTooLarge, info.Size())
 	}
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(file, MaxMessageSize+1))
 	if err != nil {
 		return Message{}, err
 	}
@@ -196,7 +198,7 @@ func ReadMessageFile(path string) (Message, error) {
 }
 
 func ReadHeaderFile(path string) (Header, error) {
-	file, err := os.Open(path)
+	file, _, err := fsq.OpenRegularNoFollow(path)
 	if err != nil {
 		return Header{}, err
 	}

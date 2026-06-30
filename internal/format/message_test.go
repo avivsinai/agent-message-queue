@@ -292,6 +292,97 @@ func TestReadHeaderFile(t *testing.T) {
 	}
 }
 
+func TestReadMessageFile(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			Schema:  1,
+			ID:      "message-file-test",
+			From:    "codex",
+			To:      []string{"claude"},
+			Created: "2025-01-01T00:00:00Z",
+		},
+		Body: "Body content\n",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.md")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := ReadMessageFile(path)
+	if err != nil {
+		t.Fatalf("ReadMessageFile: %v", err)
+	}
+	if got.Header.ID != "message-file-test" || got.Body != "Body content\n" {
+		t.Fatalf("unexpected message: %+v", got)
+	}
+}
+
+func TestReadMessageFileRejectsSymlink(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			Schema:  1,
+			ID:      "symlink-message",
+			From:    "codex",
+			To:      []string{"claude"},
+			Created: "2025-01-01T00:00:00Z",
+		},
+		Body: "Body content\n",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.md")
+	if err := os.WriteFile(target, data, 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	link := filepath.Join(dir, "link.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err = ReadMessageFile(link)
+	if err == nil {
+		t.Fatal("expected symlink message file to be rejected")
+	}
+}
+
+func TestReadHeaderFileRejectsSymlink(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			Schema:  1,
+			ID:      "symlink-header",
+			From:    "codex",
+			To:      []string{"claude"},
+			Created: "2025-01-01T00:00:00Z",
+		},
+		Body: "Body content\n",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.md")
+	if err := os.WriteFile(target, data, 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	link := filepath.Join(dir, "link.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err = ReadHeaderFile(link)
+	if err == nil {
+		t.Fatal("expected symlink header file to be rejected")
+	}
+}
+
 func TestReadMessageFile_SizeLimit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "huge.md")
