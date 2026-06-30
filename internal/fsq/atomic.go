@@ -23,19 +23,8 @@ func WriteFileAtomic(dir, filename string, data []byte, perm os.FileMode) (strin
 	if err := SyncDir(dir); err != nil {
 		return "", cleanupTemp(tmpPath, err)
 	}
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		// On Windows, rename to existing file may return access denied instead of ErrExist.
-		// Check if destination exists and retry after removal.
-		if _, statErr := os.Stat(finalPath); statErr == nil {
-			if removeErr := os.Remove(finalPath); removeErr != nil && !os.IsNotExist(removeErr) {
-				return "", cleanupTemp(tmpPath, err)
-			}
-			if err := os.Rename(tmpPath, finalPath); err != nil {
-				return "", cleanupTemp(tmpPath, err)
-			}
-		} else {
-			return "", cleanupTemp(tmpPath, err)
-		}
+	if err := replaceFile(tmpPath, finalPath); err != nil {
+		return "", cleanupTemp(tmpPath, err)
 	}
 	if err := SyncDir(dir); err != nil {
 		return "", err

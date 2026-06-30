@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Windows `WriteFileAtomic` replacement now uses an atomic replace operation
+  instead of deleting the destination before retrying the rename (#181).
 - Wake metadata and readiness writes now reject symlink destinations and use
   fsynced atomic installs, while live wake identity mismatches stay
   `unverified` unless the PID is proven not to be `amq wake` (#181).
