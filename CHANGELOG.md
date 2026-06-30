@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.39.0] - 2026-06-30
 ### Fixed
 
 - `amq drain` and drain-mode `amq monitor` now claim inbox messages before
@@ -19,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `wake repair` now exit when their recorded owner process is gone or no
   longer matches, preventing stale terminal injectors from blocking session
   reopen recovery.
+
 
 ## [0.38.0] - 2026-06-22
 ### Added
@@ -590,7 +593,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
-[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.38.0...HEAD
+[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.39.0...HEAD
+[0.39.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.37.1...v0.38.0
 [0.37.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.37.0...v0.37.1
 [0.37.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.36.0...v0.37.0
