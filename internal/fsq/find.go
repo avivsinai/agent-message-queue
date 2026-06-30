@@ -11,6 +11,9 @@ const (
 )
 
 func FindMessage(root, agent, filename string) (string, string, error) {
+	if err := ValidateMessageFilename(filename); err != nil {
+		return "", "", err
+	}
 	newPath := filepath.Join(root, "agents", agent, "inbox", "new", filename)
 	if _, err := os.Stat(newPath); err == nil {
 		return newPath, BoxNew, nil
@@ -27,6 +30,9 @@ func FindMessage(root, agent, filename string) (string, string, error) {
 }
 
 func MoveNewToCur(root, agent, filename string) error {
+	if err := ValidateMessageFilename(filename); err != nil {
+		return err
+	}
 	newPath := filepath.Join(root, "agents", agent, "inbox", "new", filename)
 	curDir := filepath.Join(root, "agents", agent, "inbox", "cur")
 	curPath := filepath.Join(curDir, filename)
