@@ -2,6 +2,7 @@ package fsq
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -55,8 +56,24 @@ func writeAndSync(path string, data []byte, perm os.FileMode) (err error) {
 			_ = os.Remove(path)
 		}
 	}()
-	if _, err = file.Write(data); err != nil {
+	if err = writeAllAndSync(file, data); err != nil {
 		return err
+	}
+	return nil
+}
+
+type writeSyncer interface {
+	Write([]byte) (int, error)
+	Sync() error
+}
+
+func writeAllAndSync(file writeSyncer, data []byte) error {
+	n, err := file.Write(data)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return io.ErrShortWrite
 	}
 	return file.Sync()
 }
