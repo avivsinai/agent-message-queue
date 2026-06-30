@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,16 +39,19 @@ func GenerateDLQID() string {
 
 // MoveToDLQ moves a failed message from inbox/new to dlq/new with envelope.
 func MoveToDLQ(root, agent, filename, originalID, failureReason, failureDetail string) (string, error) {
-	return moveInboxMessageToDLQ(root, agent, BoxNew, filename, originalID, failureReason, failureDetail)
+	if err := MoveNewToCur(root, agent, filename); err != nil {
+		return "", fmt.Errorf("claim original: %w", err)
+	}
+	return moveInboxMessageToDLQ(root, agent, BoxCur, BoxNew, filename, originalID, failureReason, failureDetail)
 }
 
 // MoveCurToDLQ moves an already-claimed inbox/cur message to dlq/new.
 func MoveCurToDLQ(root, agent, filename, originalID, failureReason, failureDetail string) (string, error) {
-	return moveInboxMessageToDLQ(root, agent, BoxCur, filename, originalID, failureReason, failureDetail)
+	return moveInboxMessageToDLQ(root, agent, BoxCur, BoxCur, filename, originalID, failureReason, failureDetail)
 }
 
-func moveInboxMessageToDLQ(root, agent, sourceDir, filename, originalID, failureReason, failureDetail string) (string, error) {
-	srcDir, err := inboxSourceDir(root, agent, sourceDir)
+func moveInboxMessageToDLQ(root, agent, readDir, envelopeSourceDir, filename, originalID, failureReason, failureDetail string) (string, error) {
+	srcDir, err := inboxSourceDir(root, agent, readDir)
 	if err != nil {
 		return "", err
 	}
@@ -71,7 +73,7 @@ func moveInboxMessageToDLQ(root, agent, sourceDir, filename, originalID, failure
 		FailureDetail: failureDetail,
 		FailureTime:   time.Now().UTC().Format(time.RFC3339),
 		RetryCount:    0,
-		SourceDir:     sourceDir,
+		SourceDir:     envelopeSourceDir,
 	}
 
 	// Serialize envelope + original content
@@ -87,28 +89,8 @@ func moveInboxMessageToDLQ(root, agent, sourceDir, filename, originalID, failure
 		return "", fmt.Errorf("deliver to dlq: %w", err)
 	}
 
-	if sourceDir == BoxNew {
-		// Remove from inbox/new - if this fails, the message is duplicated
-		// but the DLQ ID is unique so re-draining will create a new DLQ entry.
-		// To prevent this, we use rename to cur first (atomic), then remove from cur.
-		inboxCurPath := filepath.Join(AgentInboxCur(root, agent), filename)
-		if err := os.MkdirAll(filepath.Dir(inboxCurPath), 0o700); err != nil {
-			return dlqPath, fmt.Errorf("create inbox cur: %w", err)
-		}
-		if err := os.Rename(srcPath, inboxCurPath); err != nil {
-			// Fallback: try direct remove (may fail and leave duplicate)
-			if rmErr := os.Remove(srcPath); rmErr != nil && !os.IsNotExist(rmErr) {
-				return dlqPath, fmt.Errorf("remove original (dlq written): %w", rmErr)
-			}
-		} else {
-			// Successfully moved to cur, now remove from cur
-			_ = os.Remove(inboxCurPath)
-			_ = SyncDir(AgentInboxCur(root, agent))
-		}
-	} else {
-		if err := os.Remove(srcPath); err != nil && !os.IsNotExist(err) {
-			return dlqPath, fmt.Errorf("remove original (dlq written): %w", err)
-		}
+	if err := os.Remove(srcPath); err != nil && !os.IsNotExist(err) {
+		return dlqPath, fmt.Errorf("remove original (dlq written): %w", err)
 	}
 	_ = SyncDir(srcDir)
 
@@ -190,51 +172,86 @@ func RetryFromDLQ(root, agent, dlqFilename string, force bool) error {
 	if envelope.RetryCount >= MaxRetries && !force {
 		return fmt.Errorf("max retries (%d) exceeded; use --force to override", MaxRetries)
 	}
+	if err := validateInboxFilename(envelope.OriginalFile); err != nil {
+		return fmt.Errorf("invalid original_file %q: %w", envelope.OriginalFile, err)
+	}
 
 	// Check if original file already exists in inbox/new (avoid overwrite)
 	inboxNewPath := filepath.Join(AgentInboxNew(root, agent), envelope.OriginalFile)
 	if _, err := os.Stat(inboxNewPath); err == nil {
 		return fmt.Errorf("original file already exists in inbox/new: %s", envelope.OriginalFile)
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("stat inbox/new original: %w", err)
 	}
 
-	// Deliver original content back to inbox
+	envelope.RetryCount++
+	updatedData, err := serializeDLQMessage(*envelope, originalContent)
+	if err != nil {
+		return fmt.Errorf("serialize updated dlq envelope: %w", err)
+	}
+
+	if err := updateRetriedDLQEnvelope(root, agent, dlqFilename, dlqPath, box, updatedData); err != nil {
+		return err
+	}
+
+	// Deliver original content back to inbox only after the DLQ state transition
+	// succeeds, so metadata failures cannot duplicate retry delivery.
 	if _, err := DeliverToInbox(root, agent, envelope.OriginalFile, originalContent); err != nil {
 		return fmt.Errorf("redeliver to inbox: %w", err)
 	}
 
-	// Update envelope with incremented retry count
-	envelope.RetryCount++
-	updatedData, err := serializeDLQMessage(*envelope, originalContent)
-	if err != nil {
-		// Best effort: message is already in inbox
-		log.Printf("dlq: failed to serialize updated envelope for %s: %v", dlqFilename, err)
-		return nil
-	}
+	return nil
+}
 
-	// Handle based on source location
+func updateRetriedDLQEnvelope(root, agent, dlqFilename, dlqPath, box string, updatedData []byte) error {
 	curDir := AgentDLQCur(root, agent)
 	if err := os.MkdirAll(curDir, 0o700); err != nil {
-		log.Printf("dlq: failed to create cur dir for %s: %v", agent, err)
-		return nil
+		return fmt.Errorf("prepare dlq envelope cur dir: %w", err)
 	}
 
 	if box == BoxNew {
 		// Source is dlq/new: write to dlq/cur atomically, then remove from dlq/new
 		if _, err := WriteFileAtomic(curDir, dlqFilename, updatedData, 0o600); err != nil {
-			log.Printf("dlq: failed to write updated envelope to cur for %s: %v", dlqFilename, err)
-			return nil
+			return fmt.Errorf("write updated dlq envelope to cur: %w", err)
 		}
-		_ = os.Remove(dlqPath)
-		_ = SyncDir(filepath.Dir(dlqPath))
-	} else {
-		// Source is dlq/cur: update in place atomically (same location)
-		if _, err := WriteFileAtomic(curDir, dlqFilename, updatedData, 0o600); err != nil {
-			log.Printf("dlq: failed to update envelope in cur for %s: %v", dlqFilename, err)
-			return nil
+		if err := os.Remove(dlqPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove old dlq envelope from new: %w", err)
 		}
+		if err := SyncDir(filepath.Dir(dlqPath)); err != nil {
+			return fmt.Errorf("sync old dlq envelope dir: %w", err)
+		}
+		return SyncDir(curDir)
 	}
-	_ = SyncDir(curDir)
 
+	// Source is dlq/cur: update in place atomically (same location)
+	if _, err := WriteFileAtomic(curDir, dlqFilename, updatedData, 0o600); err != nil {
+		return fmt.Errorf("update dlq envelope in cur: %w", err)
+	}
+	return SyncDir(curDir)
+}
+
+func validateInboxFilename(filename string) error {
+	if filename == "" {
+		return fmt.Errorf("empty filename")
+	}
+	if strings.HasPrefix(filename, ".") {
+		return fmt.Errorf("dotfile names are not allowed")
+	}
+	if filepath.IsAbs(filename) {
+		return fmt.Errorf("absolute path is not allowed")
+	}
+	if strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
+		return fmt.Errorf("path separators are not allowed")
+	}
+	if strings.Contains(filename, "\x00") {
+		return fmt.Errorf("NUL byte is not allowed")
+	}
+	if filename == "." || filename == ".." {
+		return fmt.Errorf("path traversal is not allowed")
+	}
+	if !strings.HasSuffix(filename, ".md") {
+		return fmt.Errorf("filename must end with .md")
+	}
 	return nil
 }
 

@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `amq drain` and drain-mode `amq monitor` now claim inbox messages before
   parsing them, preventing duplicate consumption under concurrent drains.
+- DLQ moves and retries now claim or update queue state before redelivery, and
+  reject tampered original filenames before restoring messages.
 
 ## [0.38.0] - 2026-06-22
 ### Added
