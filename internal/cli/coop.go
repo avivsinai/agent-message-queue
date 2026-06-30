@@ -46,6 +46,7 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 	agentsFlag := fs.String("agents", defaultCoopAgents, "Comma-separated agent handles")
 	forceFlag := fs.Bool("force", false, "Overwrite existing config if present")
 	jsonFlag := fs.Bool("json", false, "Output as JSON")
+	noGitignoreFlag := fs.Bool("no-gitignore", false, "Do not modify .gitignore")
 
 	usage := usageWithFlags(fs, "amq coop init [options]",
 		"Initialize a project for co-op mode with sensible defaults.",
@@ -53,7 +54,7 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		"Creates:",
 		"  - .amqrc file with root configuration",
 		"  - Mailbox directories for each agent",
-		"  - Updates .gitignore (if present)",
+		"  - Updates .gitignore (unless --no-gitignore)",
 		"",
 		"Defaults:",
 		fmt.Sprintf("  --root=%s  --agents=%s", defaultCoopRoot, defaultCoopAgents),
@@ -157,8 +158,11 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		amqrcWritten = true
 	}
 
-	// Update .gitignore (creates if needed, only for relative paths)
-	gitignoreUpdated := ensureGitignore(root)
+	// Update .gitignore (creates if needed, only for relative paths) unless opted out
+	gitignoreUpdated := false
+	if !*noGitignoreFlag {
+		gitignoreUpdated = ensureGitignore(root)
+	}
 
 	// Output
 	if *jsonFlag {
