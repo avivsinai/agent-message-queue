@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.40.0] - 2026-07-05
 ### Added
 
 - `amq coop init --no-gitignore` now leaves `.gitignore` unchanged, for users
@@ -58,6 +60,7 @@ rejected; queue roots reached through symlinked parent directories — for
 example a symlinked checkout or home layout — are unaffected. Files created by
 the AMQ CLI are always regular files, so only hand-placed symlinks inside queue
 directories are impacted.
+
 
 ## [0.39.0] - 2026-06-30
 ### Fixed
@@ -645,7 +648,8 @@ directories are impacted.
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
-[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.39.0...HEAD
+[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.40.0...HEAD
+[0.40.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.39.0...v0.40.0
 [0.39.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.37.1...v0.38.0
 [0.37.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.37.0...v0.37.1
