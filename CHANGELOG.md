@@ -8,39 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
-- CI now requires pull requests to add a `CHANGELOG.md` Unreleased entry unless
-  explicitly skipped by Dependabot, release branch, or `no-changelog`/`docs`/`chore`
-  labels (#181).
-- `amq coop init --no-gitignore` skips updating `.gitignore`, for setups that manage ignores globally or elsewhere (closes #172)
-- `amq coop exec --no-gitignore` forwards the gitignore opt-out to auto-init, so the common entry point can skip `.gitignore` changes (closes #179)
+- `amq coop init --no-gitignore` now leaves `.gitignore` unchanged, for users
+  who manage ignore rules globally or manually (#173, closes #172).
+- `amq coop exec --no-gitignore` passes the gitignore opt-out through auto-init,
+  so `coop exec` can start a session without modifying `.gitignore` (#192,
+  closes #179).
+- Contributor workflow: pull requests now require a `CHANGELOG.md` Unreleased
+  entry unless skipped by Dependabot, release branches, or the `no-changelog`,
+  `docs`, or `chore` labels (#182).
 
 ### Changed
 
-- `amq wake --help` now hides internal readiness coordination flags while
-  continuing to parse them for managed wake startup flows (#181).
-- Bump `github.com/coder/websocket` from 1.8.14 to 1.8.15
-- Bump `actions/checkout` from 6.0.3 to 7.0.0
+- `amq wake --help` no longer lists internal readiness-coordination flags;
+  managed wake startup flows can still pass them (#189).
+- Bump `github.com/coder/websocket` from 1.8.14 to 1.8.15 (#169)
+- Bump `actions/checkout` from 6.0.3 to 7.0.0 (#170)
 
 ### Fixed
 
-- Wake tests now create secure sandboxes under the physical repository path, so
-  symlink-spelled checkouts no longer fail loop/inject-via assertions (closes #193).
-- Smoke-test git sandboxes now ignore hook-provided repository environment, so
-  pre-push checks no longer write synthetic release refs into the caller repo
-  (closes #195).
-- Windows `WriteFileAtomic` replacement now uses an atomic replace operation
-  instead of deleting the destination before retrying the rename (#181).
-- Wake metadata and readiness writes now reject symlink destinations and use
-  fsynced atomic installs, while live wake identity mismatches stay
-  `unverified` unless the PID is proven not to be `amq wake` (#181).
-- Queue artifact reads now reject symlinks and non-regular files before parsing
-  messages, DLQ envelopes, or receipts (#181).
-- Inbox and DLQ queue operations now share canonical `.md` filename validation
-  at fsq boundaries to reject malformed or tampered names (#181).
-- Atomic queue file writes now return `io.ErrShortWrite` when a partial write
-  reports success before syncing (#181).
-- De-flaked inject-via wake notification tests by replacing shell-redirection
-  capture with a deterministic helper process (#181).
+- Hardened message, DLQ-envelope, and receipt parsing by rejecting queue files
+  that are themselves symlinks or non-regular files before reading them (#186).
+- Inbox and DLQ operations now reject malformed or non-canonical `.md` queue
+  filenames at queue boundaries (#185).
+- Wake metadata and readiness writes now refuse symlinked destination files and
+  install atomically with fsync (#187).
+- Wake identity mismatches now stay `unverified` unless AMQ can prove the
+  recorded PID is not an `amq wake` process (#187).
+- On Windows, atomic file writes now replace existing files atomically instead
+  of temporarily deleting the destination during rename retries (#188).
+- Atomic queue-file writes now fail with `io.ErrShortWrite` if the filesystem
+  reports success after writing only part of the file (#184).
+- Contributor workflow: pre-push smoke tests no longer write synthetic release
+  refs into the caller repository when run from a git hook (#196, closes #195).
+- Test-only: wake tests now create their sandboxes under the physical
+  repository path, so symlink-spelled checkouts no longer fail loop/inject-via
+  assertions (#194, closes #193).
+- Test-only: made inject-via wake notification tests deterministic by replacing
+  shell-redirection capture with a helper process (#183).
+
+### Compatibility
+
+The stricter queue validation above applies to queue files themselves, not to
+how their directories are reached. A message, receipt, DLQ envelope, or wake
+metadata file that is itself a symlink (or any non-regular file) is now
+rejected; queue roots reached through symlinked parent directories — for
+example a symlinked checkout or home layout — are unaffected. Files created by
+the AMQ CLI are always regular files, so only hand-placed symlinks inside queue
+directories are impacted.
 
 ## [0.39.0] - 2026-06-30
 ### Fixed
