@@ -27,7 +27,12 @@ BASE_CHANGELOG = """# Changelog
 
 
 def run_git(repo: pathlib.Path, *args: str) -> str:
-    return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+    return subprocess.check_output(
+        ["git", *args],
+        cwd=repo,
+        env=check_pr_changelog.git_env(),
+        text=True,
+    ).strip()
 
 
 def commit(repo: pathlib.Path, message: str) -> str:
