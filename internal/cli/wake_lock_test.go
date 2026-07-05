@@ -23,13 +23,20 @@ func secureTempDirForTest(t *testing.T) string {
 	t.Helper()
 	cwd, err := os.Getwd()
 	if err == nil {
+		if resolved, resolveErr := filepath.EvalSymlinks(cwd); resolveErr == nil {
+			cwd = resolved
+		}
 		dir, mkErr := os.MkdirTemp(cwd, ".amq-secure-test-")
 		if mkErr == nil {
 			t.Cleanup(func() { _ = os.RemoveAll(dir) })
 			return dir
 		}
 	}
-	return t.TempDir()
+	dir := t.TempDir()
+	if resolved, resolveErr := filepath.EvalSymlinks(dir); resolveErr == nil {
+		return resolved
+	}
+	return dir
 }
 
 func mustNewWakeTargetForTest(t *testing.T, root, me, injectVia string, injectArgs []string) wakeTarget {
