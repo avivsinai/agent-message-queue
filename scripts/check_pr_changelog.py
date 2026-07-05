@@ -15,6 +15,15 @@ import sys
 CHANGELOG_PATH = "CHANGELOG.md"
 SKIP_LABELS = {"no-changelog", "docs", "chore"}
 DEPENDABOT_ACTORS = {"dependabot", "dependabot[bot]"}
+GIT_REPOSITORY_ENV_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+)
 
 
 class PRMetadata:
@@ -39,6 +48,13 @@ def load_event(path: pathlib.Path) -> dict:
         return {}
     with path.open() as f:
         return json.load(f)
+
+
+def git_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in GIT_REPOSITORY_ENV_VARS:
+        env.pop(name, None)
+    return env
 
 
 def metadata_from_event(event: dict, actor: str = "") -> PRMetadata:
@@ -82,6 +98,7 @@ def git_show(repo: pathlib.Path, ref: str, path: str) -> str:
     return subprocess.check_output(
         ["git", "show", f"{ref}:{path}"],
         cwd=repo,
+        env=git_env(),
         stderr=subprocess.STDOUT,
         text=True,
     )

@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Wake tests now create secure sandboxes under the physical repository path, so
   symlink-spelled checkouts no longer fail loop/inject-via assertions (closes #193).
+- Smoke-test git sandboxes now ignore hook-provided repository environment, so
+  pre-push checks no longer write synthetic release refs into the caller repo
+  (closes #195).
 - Windows `WriteFileAtomic` replacement now uses an atomic replace operation
   instead of deleting the destination before retrying the rename (#181).
 - Wake metadata and readiness writes now reject symlink destinations and use

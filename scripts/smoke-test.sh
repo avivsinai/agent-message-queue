@@ -6,6 +6,8 @@ set -euo pipefail
 # caller's home root, so an ambient coop session would otherwise make explicit
 # --root sends to the temp queue look like a refused cross-tree send.
 unset AM_ROOT AM_ME AM_BASE_ROOT AMQ_GLOBAL_ROOT 2>/dev/null || true
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE 2>/dev/null || true
 
 ROOT_DIR="$(mktemp -d)"
 cleanup() {
@@ -130,6 +132,7 @@ if command -v python3 >/dev/null 2>&1; then
   python3 scripts/test_release_changelog.py
   python3 scripts/test_check_pr_changelog.py
   bash scripts/test_release_metadata.sh
+  bash scripts/test_git_env_sanitization.sh
 fi
 
 # --- SessionStart hook test (claude-session-start.sh) ---
