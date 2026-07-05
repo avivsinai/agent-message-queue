@@ -59,19 +59,7 @@ func newWakeTarget(root, me, injectVia string, injectArgs []string) (wakeTarget,
 }
 
 func wakeTargetInjectViaPath(path string) (string, error) {
-	trimmed := strings.TrimSpace(path)
-	info, err := os.Lstat(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("stat inject_via: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return trimmed, nil
-	}
-	if resolved, err := filepath.EvalSymlinks(trimmed); err == nil {
-		return resolved, nil
-	} else {
-		return "", fmt.Errorf("resolve inject_via: %w", err)
-	}
+	return validateWakeInjectViaPath(path)
 }
 
 func wakeTargetDigest(target wakeTarget) string {
@@ -190,7 +178,7 @@ func validateWakeTarget(target wakeTarget, root, me string) error {
 	if target.Agent != me {
 		return fmt.Errorf("wake target agent mismatch")
 	}
-	if err := validateWakeInjectViaPath(target.InjectVia); err != nil {
+	if err := validateResolvedWakeInjectViaPath(target.InjectVia); err != nil {
 		return err
 	}
 	for _, arg := range target.InjectArgs {
@@ -248,22 +236,39 @@ func validateWakeOwner(owner wakeOwner) error {
 	return nil
 }
 
-func validateWakeInjectViaPath(path string) error {
-	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("inject_via must not be blank")
+func validateWakeInjectViaPath(path string) (string, error) {
+	resolvedPath, err := resolveWakeInjectViaPath(path)
+	if err != nil {
+		return "", err
+	}
+	if err := validateResolvedWakeInjectViaTarget(resolvedPath); err != nil {
+		return "", err
+	}
+	return resolvedPath, nil
+}
+
+func resolveWakeInjectViaPath(path string) (string, error) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return "", fmt.Errorf("inject_via must not be blank")
 	}
 	if strings.ContainsRune(path, 0) {
-		return fmt.Errorf("inject_via contains NUL")
+		return "", fmt.Errorf("inject_via contains NUL")
 	}
-	if !filepath.IsAbs(path) {
-		return fmt.Errorf("inject_via must be an absolute path")
+	if !filepath.IsAbs(trimmed) {
+		return "", fmt.Errorf("inject_via must be an absolute path")
 	}
-	info, err := os.Lstat(path)
+	resolvedPath, err := filepath.EvalSymlinks(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("resolve inject_via: %w", err)
+	}
+	return resolvedPath, nil
+}
+
+func validateResolvedWakeInjectViaTarget(resolvedPath string) error {
+	info, err := os.Stat(resolvedPath)
 	if err != nil {
 		return fmt.Errorf("stat inject_via: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("inject_via must not be a symlink")
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("inject_via must be a regular file")
@@ -271,14 +276,24 @@ func validateWakeInjectViaPath(path string) error {
 	if info.Mode().Perm()&0o111 == 0 {
 		return fmt.Errorf("inject_via is not executable")
 	}
-	if err := validateWakeTargetPathOwnership("inject_via", path, info); err != nil {
+	if err := validateWakeTargetPathOwnership("inject_via", resolvedPath, info); err != nil {
 		return err
 	}
-	resolvedPath, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return fmt.Errorf("resolve inject_via: %w", err)
-	}
 	if err := validateWakeTargetParentDirs("inject_via", resolvedPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateResolvedWakeInjectViaPath(path string) error {
+	resolvedPath, err := resolveWakeInjectViaPath(path)
+	if err != nil {
+		return err
+	}
+	if resolvedPath != strings.TrimSpace(path) {
+		return fmt.Errorf("inject_via must be a resolved path")
+	}
+	if err := validateResolvedWakeInjectViaTarget(resolvedPath); err != nil {
 		return err
 	}
 	return nil

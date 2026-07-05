@@ -119,7 +119,7 @@ func TestWakeTargetRejectsWorldWritableInjectVia(t *testing.T) {
 	if err := os.Chmod(injector, 0o777); err != nil {
 		t.Fatalf("chmod injector: %v", err)
 	}
-	err := validateWakeInjectViaPath(injector)
+	_, err := validateWakeInjectViaPath(injector)
 	if err == nil || !strings.Contains(err.Error(), "group/world-writable") {
 		t.Fatalf("expected world-writable rejection, got %v", err)
 	}
@@ -143,22 +143,26 @@ func TestWakeTargetRejectsWorldWritableInjectViaAncestor(t *testing.T) {
 		t.Fatalf("write injector: %v", err)
 	}
 
-	err := validateWakeInjectViaPath(injector)
+	_, err := validateWakeInjectViaPath(injector)
 	if err == nil || !strings.Contains(err.Error(), "group/world-writable") {
 		t.Fatalf("expected writable ancestor rejection, got %v", err)
 	}
 }
 
-func TestWakeTargetRejectsSymlinkInjectVia(t *testing.T) {
+func TestWakeTargetResolvesLeafSymlinkInjectVia(t *testing.T) {
+	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
 	link := filepath.Join(t.TempDir(), "injector-link")
 	if err := os.Symlink(injector, link); err != nil {
 		t.Fatalf("symlink injector: %v", err)
 	}
 
-	err := validateWakeInjectViaPath(link)
-	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
-		t.Fatalf("expected symlink rejection, got %v", err)
+	target := mustNewWakeTargetForTest(t, root, "codex", link, nil)
+	if target.InjectVia != injector {
+		t.Fatalf("target inject_via = %q, want resolved %q", target.InjectVia, injector)
+	}
+	if err := validateWakeTarget(target, root, "codex"); err != nil {
+		t.Fatalf("validateWakeTarget: %v", err)
 	}
 }
 
@@ -207,7 +211,7 @@ func TestWakeTargetResolvesSymlinkedInjectViaParent(t *testing.T) {
 	}
 }
 
-func TestWakeTargetKeepsSymlinkInjectViaForValidationRejection(t *testing.T) {
+func TestWakeTargetResolvesLeafSymlinkInjectViaForValidation(t *testing.T) {
 	base := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
 	link := filepath.Join(base, "injector-link")
@@ -216,11 +220,64 @@ func TestWakeTargetKeepsSymlinkInjectViaForValidationRejection(t *testing.T) {
 	}
 
 	target := mustNewWakeTargetForTest(t, base, "codex", link, nil)
-	if target.InjectVia != link {
-		t.Fatalf("target inject_via = %q, want unresolved symlink %q", target.InjectVia, link)
+	if target.InjectVia != injector {
+		t.Fatalf("target inject_via = %q, want resolved %q", target.InjectVia, injector)
 	}
-	if err := validateWakeTarget(target, base, "codex"); err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
-		t.Fatalf("expected symlink validation rejection, got %v", err)
+	if err := validateWakeTarget(target, base, "codex"); err != nil {
+		t.Fatalf("validateWakeTarget: %v", err)
+	}
+}
+
+func TestWakeTargetRejectsDanglingSymlinkInjectVia(t *testing.T) {
+	root := secureTempDirForTest(t)
+	link := filepath.Join(root, "injector-link")
+	if err := os.Symlink(filepath.Join(root, "missing-injector"), link); err != nil {
+		t.Fatalf("symlink injector: %v", err)
+	}
+
+	_, err := newWakeTarget(root, "codex", link, nil)
+	if err == nil || !strings.Contains(err.Error(), "resolve inject_via") {
+		t.Fatalf("expected dangling symlink rejection, got %v", err)
+	}
+}
+
+func TestWakeTargetRejectsSymlinkToNonExecutableInjectVia(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := filepath.Join(root, "injector")
+	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+		t.Fatalf("write injector: %v", err)
+	}
+	link := filepath.Join(root, "injector-link")
+	if err := os.Symlink(injector, link); err != nil {
+		t.Fatalf("symlink injector: %v", err)
+	}
+
+	_, err := newWakeTarget(root, "codex", link, nil)
+	if err == nil || !strings.Contains(err.Error(), "not executable") {
+		t.Fatalf("expected non-executable resolved target rejection, got %v", err)
+	}
+}
+
+func TestWakeTargetRejectsSymlinkToNonOwnedInjectVia(t *testing.T) {
+	oldCurrent := wakeTargetCurrentUID
+	oldOwner := wakeTargetFileOwnerUID
+	wakeTargetCurrentUID = func() (int, bool) { return 1000, true }
+	wakeTargetFileOwnerUID = func(info os.FileInfo) (int, bool) { return 2000, true }
+	t.Cleanup(func() {
+		wakeTargetCurrentUID = oldCurrent
+		wakeTargetFileOwnerUID = oldOwner
+	})
+
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	link := filepath.Join(root, "injector-link")
+	if err := os.Symlink(injector, link); err != nil {
+		t.Fatalf("symlink injector: %v", err)
+	}
+
+	_, err := newWakeTarget(root, "codex", link, nil)
+	if err == nil || !strings.Contains(err.Error(), "owned by uid 2000") {
+		t.Fatalf("expected owner rejection, got %v", err)
 	}
 }
 
@@ -229,8 +286,8 @@ func TestWakeTargetCreationRejectsMissingInjectVia(t *testing.T) {
 	missing := filepath.Join(root, "missing-injector")
 
 	_, err := newWakeTarget(root, "codex", missing, nil)
-	if err == nil || !strings.Contains(err.Error(), "stat inject_via") {
-		t.Fatalf("expected inject_via stat failure, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "resolve inject_via") {
+		t.Fatalf("expected inject_via resolve failure, got %v", err)
 	}
 }
 
@@ -239,7 +296,7 @@ func TestWakeTargetRejectsGroupWritableInjectVia(t *testing.T) {
 	if err := os.Chmod(injector, 0o775); err != nil {
 		t.Fatalf("chmod injector: %v", err)
 	}
-	err := validateWakeInjectViaPath(injector)
+	_, err := validateWakeInjectViaPath(injector)
 	if err == nil || !strings.Contains(err.Error(), "group/world-writable") {
 		t.Fatalf("expected group-writable rejection, got %v", err)
 	}
@@ -248,7 +305,7 @@ func TestWakeTargetRejectsGroupWritableInjectVia(t *testing.T) {
 func TestWakeTargetRejectsNonRegularInjectVia(t *testing.T) {
 	path := t.TempDir()
 
-	err := validateWakeInjectViaPath(path)
+	_, err := validateWakeInjectViaPath(path)
 	if err == nil || !strings.Contains(err.Error(), "must be a regular file") {
 		t.Fatalf("expected non-regular rejection, got %v", err)
 	}
@@ -265,7 +322,7 @@ func TestWakeTargetRejectsNonOwnedInjectVia(t *testing.T) {
 	})
 
 	injector := writeExecutableForTest(t, "injector")
-	err := validateWakeInjectViaPath(injector)
+	_, err := validateWakeInjectViaPath(injector)
 	if err == nil || !strings.Contains(err.Error(), "owned by uid 2000") {
 		t.Fatalf("expected owner rejection, got %v", err)
 	}

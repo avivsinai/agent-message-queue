@@ -450,7 +450,7 @@ func injectVia(cfg *wakeConfig, text string) error {
 	if executable == "" {
 		return fmt.Errorf("inject-via command is blank")
 	}
-	if err := validateWakeInjectViaPath(executable); err != nil {
+	if err := validateResolvedWakeInjectViaPath(executable); err != nil {
 		return err
 	}
 
