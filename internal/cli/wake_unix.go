@@ -787,7 +787,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 				return fmt.Errorf("clear stale wake target after persist failure: %w", removeErr)
 			}
 		}
-		if err := validateWakeInjectViaPath(injectVia); err != nil {
+		if err := validateResolvedWakeInjectViaPath(injectVia); err != nil {
 			return err
 		}
 	} else if err := removeWakeTarget(root, me); err != nil {

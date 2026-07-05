@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   install atomically with fsync (#187).
 - Wake identity mismatches now stay `unverified` unless AMQ can prove the
   recorded PID is not an `amq wake` process (#187).
+- `amq wake --inject-via` now accepts symlinked executables, such as
+  Homebrew-installed injectors, by resolving them before validation; validation,
+  persistence, and execution all use the resolved physical path (closes #197).
 - On Windows, atomic file writes now replace existing files atomically instead
   of temporarily deleting the destination during rename retries (#188).
 - Atomic queue-file writes now fail with `io.ErrShortWrite` if the filesystem

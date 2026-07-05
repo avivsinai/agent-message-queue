@@ -69,9 +69,11 @@ func runCoopExec(args []string) error {
 		return UsageError("--wake-inject-arg requires --wake-inject-via")
 	}
 	if wakeInjectVia != "" {
-		if err := validateWakeInjectViaPath(wakeInjectVia); err != nil {
+		resolvedWakeInjectVia, err := validateWakeInjectViaPath(wakeInjectVia)
+		if err != nil {
 			return UsageError("--wake-inject-via: %v", err)
 		}
+		wakeInjectVia = resolvedWakeInjectVia
 	}
 
 	remaining := fs.Args()

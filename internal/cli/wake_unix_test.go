@@ -263,6 +263,55 @@ func TestRunWakeWithLoopExecutesResolvedInjectViaPath(t *testing.T) {
 	}
 }
 
+func TestRunWakeWithLoopPersistsResolvedLeafSymlinkInjectViaPath(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	base := secureTempDirForTest(t)
+	cellarDir := filepath.Join(base, "Cellar", "injector", "1.0.0", "bin")
+	if err := os.MkdirAll(cellarDir, 0o700); err != nil {
+		t.Fatalf("mkdir cellar bin: %v", err)
+	}
+	injector := filepath.Join(cellarDir, "injector")
+	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write injector: %v", err)
+	}
+	binDir := filepath.Join(base, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	link := filepath.Join(binDir, "injector")
+	if err := os.Symlink(injector, link); err != nil {
+		t.Fatalf("symlink injector: %v", err)
+	}
+
+	errDone := errors.New("done")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", link,
+	}, func(cfg wakeConfig) error {
+		if cfg.injectVia != injector {
+			t.Fatalf("cfg.injectVia = %q, want resolved %q", cfg.injectVia, injector)
+		}
+		target, exists, err := readWakeTarget(root, "orchestrator")
+		if err != nil || !exists {
+			t.Fatalf("readWakeTarget exists=%v err=%v", exists, err)
+		}
+		if target.InjectVia != injector {
+			t.Fatalf("target inject_via = %q, want resolved %q", target.InjectVia, injector)
+		}
+		return errDone
+	})
+	if !errors.Is(err, errDone) {
+		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
 func TestRunWakeWithLoopRejectsUnsafeInjectViaBeforeLoop(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -314,7 +363,7 @@ func TestInjectViaRevalidatesExecutableBeforeExec(t *testing.T) {
 					t.Fatalf("symlink injector: %v", err)
 				}
 			},
-			wantText: "must not be a symlink",
+			wantText: "must be a resolved path",
 		},
 		{
 			name: "nonregular",
@@ -411,7 +460,11 @@ func TestRunWakeWithLoopRejectsInjectorSwappedAfterTargetWrite(t *testing.T) {
 	if err := os.Remove(injector); err != nil {
 		t.Fatalf("remove injector: %v", err)
 	}
-	if err := os.Symlink("/bin/sh", injector); err != nil {
+	nonExecutable := filepath.Join(secureTempDirForTest(t), "non-executable-injector")
+	if err := os.WriteFile(nonExecutable, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+		t.Fatalf("write non-executable injector: %v", err)
+	}
+	if err := os.Symlink(nonExecutable, injector); err != nil {
 		t.Fatalf("swap injector to symlink: %v", err)
 	}
 
@@ -424,7 +477,7 @@ func TestRunWakeWithLoopRejectsInjectorSwappedAfterTargetWrite(t *testing.T) {
 		t.Fatalf("loop should not run after injector swap: %#v", cfg)
 		return nil
 	})
-	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
+	if err == nil || !strings.Contains(err.Error(), "not executable") {
 		t.Fatalf("expected swapped injector rejection, got %v", err)
 	}
 }
