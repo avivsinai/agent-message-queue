@@ -26,6 +26,7 @@ func runCoopExec(args []string) error {
 	sessionFlag := fs.String("session", "", "Session name (shorthand for --root .agent-mail/<name>)")
 	meFlag := fs.String("me", "", "Agent handle (override auto-derivation from command name)")
 	noInitFlag := fs.Bool("no-init", false, "Don't auto-initialize if .amqrc is missing")
+	noGitignoreFlag := fs.Bool("no-gitignore", false, "When auto-initializing, do not modify .gitignore")
 	noWakeFlag := fs.Bool("no-wake", false, "Don't start amq wake in background")
 	requireWakeFlag := fs.Bool("require-wake", false, "Fail if amq wake cannot start and acquire its lock")
 	wakeInjectViaFlag := fs.String("wake-inject-via", "", "Start wake with this absolute --inject-via executable, enabling later amq wake repair")
@@ -151,7 +152,11 @@ func runCoopExec(args []string) error {
 				}
 			}
 
-			if err := runCoopInitInternal(nil, false); err != nil {
+			var initArgs []string
+			if *noGitignoreFlag {
+				initArgs = []string{"--no-gitignore"}
+			}
+			if err := runCoopInitInternal(initArgs, false); err != nil {
 				return fmt.Errorf("init failed: %w", err)
 			}
 

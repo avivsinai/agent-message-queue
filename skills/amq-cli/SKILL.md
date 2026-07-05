@@ -93,6 +93,8 @@ amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Terminal 2
 
 Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
 
+Add `--no-gitignore` when `coop exec` should auto-initialize the project without changing `.gitignore`.
+
 ## Statusline (Claude Code)
 
 To show the current AMQ session in your Claude Code status bar, add this snippet to your statusline script (e.g., `~/.claude/statusline.sh`):

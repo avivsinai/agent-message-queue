@@ -261,6 +261,44 @@ func TestCoopInitNoGitignore(t *testing.T) {
 	}
 }
 
+func TestCoopExecAutoInitNoGitignore(t *testing.T) {
+	projectDir := t.TempDir()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	const gitignoreBefore = "# keep me\n"
+	if err := os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte(gitignoreBefore), 0o644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+
+	err = runCoopExec([]string{"--no-gitignore", "--no-wake", "-y", "definitely-missing-amq-test-binary"})
+	if err == nil {
+		t.Fatal("expected command lookup error")
+	}
+	if !containsStr(err.Error(), "command not found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(projectDir, ".amqrc")); err != nil {
+		t.Fatalf(".amqrc should be created by coop exec auto-init: %v", err)
+	}
+	gitignoreAfter, err := os.ReadFile(filepath.Join(projectDir, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .gitignore: %v", err)
+	}
+	if string(gitignoreAfter) != gitignoreBefore {
+		t.Fatalf(".gitignore changed with coop exec --no-gitignore:\n%s", gitignoreAfter)
+	}
+}
+
 func TestInitExplicitAgentsDoesNotInjectUser(t *testing.T) {
 	root := t.TempDir()
 	_, err := captureEnvStdout(t, func() error {

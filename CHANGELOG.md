@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly skipped by Dependabot, release branch, or `no-changelog`/`docs`/`chore`
   labels (#181).
 - `amq coop init --no-gitignore` skips updating `.gitignore`, for setups that manage ignores globally or elsewhere (closes #172)
+- `amq coop exec --no-gitignore` forwards the gitignore opt-out to auto-init, so the common entry point can skip `.gitignore` changes (closes #179)
 
 ### Changed
 
