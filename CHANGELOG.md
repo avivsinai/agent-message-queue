@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- `amq reply --wait-for <stage> --wait-timeout <duration>` blocks on the
+  recipient's delivery receipt, mirroring `amq send --wait-for`, so reply
+  delivery can be confirmed instead of assumed.
+- `amq who` text output now prints a `Base root:` header naming the tree it is
+  reading, so per-root `active`/`stale` presence is not mistaken for global
+  liveness when the same session name exists in another root (JSON output is
+  unchanged).
+
+### Fixed
+
+- `amq coop exec` now pins the session root to an absolute path before
+  starting wake and exporting `AM_ROOT`/`AM_BASE_ROOT`. A relative root
+  (e.g. from the `.agent-mail` default) re-resolved against every future cwd
+  of the agent process, silently splitting one session name into
+  per-directory mailbox trees across git worktrees — peers on the "same"
+  session could not see each other and sends queued where nobody was reading.
+- `amq env` shell output (plain and `--export`) now emits absolute
+  `AM_ROOT`/`AM_BASE_ROOT` values for the same reason: these exports exist to
+  pin a terminal to one mailbox, and a relative export re-splits per cwd
+  (JSON output is unchanged).
 
 ## [0.40.0] - 2026-07-05
 ### Added

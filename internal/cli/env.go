@@ -158,6 +158,14 @@ func runEnv(args []string) error {
 		return writeJSON(os.Stdout, out)
 	}
 
+	// Shell output pins this terminal to the resolved root, so emit it as an
+	// absolute path: a relative export would re-resolve against every future
+	// cwd, silently splitting one session name across per-directory trees.
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolve absolute root for shell output: %w", err)
+	}
+
 	// Generate shell commands
 	if *exportFlag {
 		baseRoot, sessionName, inSession := classifyEnvRoot(root)
@@ -165,6 +173,11 @@ func runEnv(args []string) error {
 			baseRoot = sessionBaseRoot
 			sessionName = sessionNameOverride
 			inSession = true
+		}
+		if baseRoot != "" {
+			if baseRoot, err = filepath.Abs(baseRoot); err != nil {
+				return fmt.Errorf("resolve absolute base root for shell output: %w", err)
+			}
 		}
 		if err := writeShellExportEnv(root, baseRoot, me, shell, *wakeFlag, inSession); err != nil {
 			return err

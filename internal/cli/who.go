@@ -116,6 +116,17 @@ func runWho(args []string) error {
 		return writeJSON(os.Stdout, sessions)
 	}
 
+	// Presence in this output is scoped to one base root. Show which tree is
+	// being read so "active/stale" is never mistaken for global liveness when
+	// the same session name exists in another root.
+	displayBase := baseRoot
+	if abs, err := filepath.Abs(baseRoot); err == nil {
+		displayBase = abs
+	}
+	if err := writeStdout("Base root: %s\n", displayBase); err != nil {
+		return err
+	}
+
 	if len(sessions) == 0 {
 		return writeStdoutLine("No sessions found.")
 	}
