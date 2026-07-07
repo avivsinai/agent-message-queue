@@ -8,6 +8,7 @@
 *.test
 *.prof
 .amqrc
+.golangci-cache/
 __pycache__/
 
 # AI agent configuration (track only skills for distribution)
