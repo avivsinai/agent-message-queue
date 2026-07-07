@@ -2,6 +2,7 @@
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+GOLANGCI_LINT_CACHE ?= $(CURDIR)/.golangci-cache
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" -o amq ./cmd/amq
@@ -20,7 +21,7 @@ vet:
 
 lint:
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed. Install from https://golangci-lint.run/usage/install/"; exit 1; }
-	golangci-lint run
+	GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" golangci-lint run
 
 smoke:
 	./scripts/smoke-test.sh

@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `make lint` now uses a checkout-local golangci-lint cache, preventing stale
+  analyzer results from deleted git worktrees from leaking into future lint runs
+  and failing pre-push checks (#199).
 - `amq coop exec` now pins the session root to an absolute path before
   starting wake and exporting `AM_ROOT`/`AM_BASE_ROOT`. A relative root
   (e.g. from the `.agent-mail` default) re-resolved against every future cwd
