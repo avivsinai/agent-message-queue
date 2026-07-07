@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
+	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
 func runReply(args []string) error {
@@ -26,12 +28,16 @@ func runReply(args []string) error {
 	kindFlag := fs.String("kind", "", fmt.Sprintf("Message kind: %s (default: same as original, review_response for review_request, answer for question)", format.ValidKindsList()))
 	labelsFlag := fs.String("labels", "", "Comma-separated labels/tags")
 	contextFlag := fs.String("context", "", "JSON context object or @file.json")
+	waitForFlag := fs.String("wait-for", "", "Wait for receipt stage after reply (e.g., drained)")
+	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for")
 
 	usage := usageWithFlags(fs, "amq reply --me <agent> --id <msg_id> [options]",
 		"Reply to a message with automatic thread/refs handling.",
 		"Finds the original message, sets to/thread/refs automatically.",
 		"Cross-session replies are routed via reply_to header.",
-		"To follow up on a sent cross-session message, use amq send --session instead.")
+		"To follow up on a sent cross-session message, use amq send --session instead.",
+		"Use --wait-for drained to block until the recipient ingests the reply,",
+		"mirroring amq send --wait-for.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -63,6 +69,13 @@ func runReply(args []string) error {
 	}
 	if !format.IsValidKind(kind) {
 		return UsageError("--kind must be one of: %s", format.ValidKindsList())
+	}
+
+	waitFor := strings.TrimSpace(*waitForFlag)
+	if waitFor != "" {
+		if err := validateStage(waitFor); err != nil {
+			return UsageError("--wait-for: %v", err)
+		}
 	}
 
 	labels := splitList(*labelsFlag)
@@ -308,6 +321,22 @@ func runReply(args []string) error {
 		outboxErr = err
 	}
 
+	// Wait for receipt if requested (mirrors amq send --wait-for).
+	var waitResult *waitForResult
+	var waitErr error
+	if waitFor != "" {
+		r, err := receipt.WaitFor(deliveryRoot, id, recipient, waitFor, *waitTimeoutFlag, 1*time.Second)
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			waitResult = &waitForResult{Event: "timeout", Stage: waitFor, Timeout: waitTimeoutFlag.String()}
+			waitErr = TimeoutError("reply --wait-for %s timed out after %s", waitFor, *waitTimeoutFlag)
+		} else if err != nil {
+			waitResult = &waitForResult{Event: "error", Stage: waitFor, Detail: err.Error()}
+			waitErr = fmt.Errorf("reply --wait-for: %w", err)
+		} else {
+			waitResult = &waitForResult{Event: "matched", Stage: waitFor, Receipt: &r}
+		}
+	}
+
 	// Fix 5: Report target session in reply output (consistent with send).
 	session := sessionName(root)
 	targetDisplay := session
@@ -339,11 +368,34 @@ func runReply(args []string) error {
 			out["source_session"] = session
 			out["target_session"] = targetSession
 		}
-		return writeJSON(os.Stdout, out)
+		if waitResult != nil {
+			out["wait"] = waitResult
+		}
+		if err := writeJSON(os.Stdout, out); err != nil {
+			return err
+		}
+		return waitErr
 	}
 
 	if outboxErr != nil {
 		_ = writeStderr("warning: outbox write failed: %v\n", outboxErr)
+	}
+	if waitResult != nil {
+		switch waitResult.Event {
+		case "matched":
+			if err := writeStdout("Replied %s to %s; %s by %s at %s\n", id, recipient, waitFor, recipient, waitResult.Receipt.EmittedAt); err != nil {
+				return err
+			}
+		case "timeout":
+			if err := writeStdout("Replied %s to %s; timed out waiting %s for %s receipt\n", id, recipient, *waitTimeoutFlag, waitFor); err != nil {
+				return err
+			}
+		default:
+			if err := writeStdout("Replied %s to %s; wait error: %s\n", id, recipient, waitResult.Detail); err != nil {
+				return err
+			}
+		}
+		return waitErr
 	}
 	return writeStdout("Replied %s to %s (session: %s, root: %s)\n", id, recipient, targetDisplay, deliveryRoot)
 }

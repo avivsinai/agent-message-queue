@@ -188,6 +188,16 @@ func runCoopExec(args []string) error {
 		}
 	}
 
+	// Pin the session root to an absolute path before it reaches the wake
+	// process and the exported AM_ROOT/AM_BASE_ROOT. A relative root
+	// re-resolves against every future cwd of the agent process, silently
+	// splitting one session name into per-directory mailbox trees
+	// (messages land where no peer is reading).
+	root, err = absoluteSessionRoot(root)
+	if err != nil {
+		return fmt.Errorf("resolve absolute session root: %w", err)
+	}
+
 	// Ensure agent mailbox exists.
 	if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
 		return fmt.Errorf("failed to ensure mailbox for %s: %w", agentHandle, err)
@@ -273,6 +283,14 @@ func runCoopExec(args []string) error {
 		_ = wakeProc.Kill()
 	}
 	return execErr
+}
+
+// absoluteSessionRoot resolves root against the current working directory at
+// session start. This is the single point where a coop session's mailbox
+// identity is frozen; everything downstream (wake, AM_ROOT, AM_BASE_ROOT)
+// must see an absolute path.
+func absoluteSessionRoot(root string) (string, error) {
+	return filepath.Abs(root)
 }
 
 func buildCoopWakeArgs(agentHandle, root, injectVia string, injectArgs []string) []string {

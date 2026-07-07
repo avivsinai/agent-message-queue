@@ -481,6 +481,11 @@ func TestResolveEnvConfigFlagOverridesEnv(t *testing.T) {
 func TestResolveEnvConfigAutoDetect(t *testing.T) {
 	root := t.TempDir()
 
+	// Isolate from the developer's real global config: a ~/.amqrc or
+	// AMQ_GLOBAL_ROOT on the machine would win over auto-detect.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AMQ_GLOBAL_ROOT", "")
+
 	// Create .agent-mail directory (no .amqrc)
 	agentMailDir := filepath.Join(root, ".agent-mail")
 	if err := os.MkdirAll(agentMailDir, 0o755); err != nil {
@@ -635,6 +640,11 @@ func TestResolveEnvConfigInvalidAmqrcWithAutoDetect(t *testing.T) {
 
 func TestResolveEnvConfigNoConfig(t *testing.T) {
 	root := t.TempDir()
+
+	// Isolate from the developer's real global config: a ~/.amqrc or
+	// AMQ_GLOBAL_ROOT on the machine would make resolution succeed.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AMQ_GLOBAL_ROOT", "")
 
 	oldWd, _ := os.Getwd()
 	defer func() { _ = os.Chdir(oldWd) }()
