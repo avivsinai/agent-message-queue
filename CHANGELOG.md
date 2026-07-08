@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `amq wake` raw TIOCSTI injection now waits for the terminal input queue to
+  drain after writing notification text, then injects a single carriage return,
+  preventing Ghostty/Claude Code from intermittently receiving text and Enter
+  in one paste-shaped stdin chunk.
 - `make lint` now uses a checkout-local golangci-lint cache, preventing stale
   analyzer results from deleted git worktrees from leaking into future lint runs
   and failing pre-push checks (#199).

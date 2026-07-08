@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -306,6 +307,104 @@ func captureWakeStderr(t *testing.T, fn func()) string {
 	return string(out)
 }
 
+func stubTIOCSTIInject(t *testing.T, fn func(string) error) {
+	t.Helper()
+	old := tiocstiInject
+	tiocstiInject = fn
+	t.Cleanup(func() {
+		tiocstiInject = old
+	})
+}
+
+func stubRawInputDrained(t *testing.T, fn func(time.Duration, time.Duration) (time.Duration, bool, error)) {
+	t.Helper()
+	old := waitForRawInputDrained
+	waitForRawInputDrained = fn
+	t.Cleanup(func() {
+		waitForRawInputDrained = old
+	})
+}
+
+func TestInjectNotificationRawWaitsForInputDrainThenInjectsSingleCR(t *testing.T) {
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+
+	var gotTimeout, gotPoll time.Duration
+	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+		gotTimeout = timeout
+		gotPoll = pollInterval
+		return 30 * time.Millisecond, true, nil
+	})
+
+	cfg := &wakeConfig{injectMode: "raw"}
+	if err := injectNotification(cfg, "AMQ wake", true); err != nil {
+		t.Fatalf("injectNotification: %v", err)
+	}
+
+	if got := strings.Join(injected, "|"); got != "AMQ wake|\r" {
+		t.Fatalf("raw injection sequence = %q, want text then one CR", got)
+	}
+	if gotTimeout != rawInjectDrainTimeout {
+		t.Fatalf("drain timeout = %s, want %s", gotTimeout, rawInjectDrainTimeout)
+	}
+	if gotPoll != rawInjectDrainPollInterval {
+		t.Fatalf("drain poll interval = %s, want %s", gotPoll, rawInjectDrainPollInterval)
+	}
+}
+
+func TestInjectNotificationRawInjectsSingleCROnDrainTimeout(t *testing.T) {
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+		return timeout, false, nil
+	})
+
+	cfg := &wakeConfig{injectMode: "raw", debug: true}
+	stderr := captureWakeStderr(t, func() {
+		if err := injectNotification(cfg, "AMQ wake", true); err != nil {
+			t.Fatalf("injectNotification: %v", err)
+		}
+	})
+
+	if got := strings.Join(injected, "|"); got != "AMQ wake|\r" {
+		t.Fatalf("raw injection sequence = %q, want text then one CR", got)
+	}
+	if !strings.Contains(stderr, "input drain timeout") {
+		t.Fatalf("expected drain timeout debug log, got %q", stderr)
+	}
+}
+
+func TestInjectNotificationRawInjectsSingleCROnDrainError(t *testing.T) {
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+		return 15 * time.Millisecond, false, errors.New("open /dev/tty: permission denied")
+	})
+
+	cfg := &wakeConfig{injectMode: "raw", debug: true}
+	stderr := captureWakeStderr(t, func() {
+		if err := injectNotification(cfg, "AMQ wake", true); err != nil {
+			t.Fatalf("injectNotification: %v", err)
+		}
+	})
+
+	if got := strings.Join(injected, "|"); got != "AMQ wake|\r" {
+		t.Fatalf("raw injection sequence = %q, want text then one CR", got)
+	}
+	if !strings.Contains(stderr, "input drain wait unavailable") {
+		t.Fatalf("expected drain unavailable debug log, got %q", stderr)
+	}
+}
+
 func TestNotifyNewMessages_InjectViaInterruptInjectsKeyAndHonorsCooldown(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -493,6 +592,88 @@ func TestNotifyNewMessages_InjectViaInterruptFailureDoesNotUpdateCooldown(t *tes
 	}
 	if !cfg.lastInterrupt.IsZero() {
 		t.Fatalf("expected failed interrupt transport to leave cooldown unchanged, got %s", cfg.lastInterrupt)
+	}
+}
+
+func TestWaitForInputQueueDrainReturnsWhenQueueClears(t *testing.T) {
+	samples := []int{3, 1, 0}
+	sampleIndex := 0
+	now := time.Unix(0, 0)
+	var sleeps []time.Duration
+
+	waited, drained, err := waitForInputQueueDrain(
+		func() (int, error) {
+			if sampleIndex >= len(samples) {
+				t.Fatalf("sample called too many times")
+				return 0, nil
+			}
+			pending := samples[sampleIndex]
+			sampleIndex++
+			return pending, nil
+		},
+		func() time.Time {
+			return now
+		},
+		func(delay time.Duration) {
+			sleeps = append(sleeps, delay)
+			now = now.Add(delay)
+		},
+		100*time.Millisecond,
+		10*time.Millisecond,
+	)
+
+	if err != nil {
+		t.Fatalf("waitForInputQueueDrain: %v", err)
+	}
+	if !drained {
+		t.Fatal("expected queue to drain")
+	}
+	if waited != 20*time.Millisecond {
+		t.Fatalf("waited = %s, want 20ms", waited)
+	}
+	if sampleIndex != 3 {
+		t.Fatalf("sample calls = %d, want 3", sampleIndex)
+	}
+	if len(sleeps) != 2 || sleeps[0] != 10*time.Millisecond || sleeps[1] != 10*time.Millisecond {
+		t.Fatalf("sleeps = %v, want [10ms 10ms]", sleeps)
+	}
+}
+
+func TestWaitForInputQueueDrainBoundsSleepByTimeout(t *testing.T) {
+	now := time.Unix(0, 0)
+	sampleCalls := 0
+	var sleeps []time.Duration
+
+	waited, drained, err := waitForInputQueueDrain(
+		func() (int, error) {
+			sampleCalls++
+			return 1, nil
+		},
+		func() time.Time {
+			return now
+		},
+		func(delay time.Duration) {
+			sleeps = append(sleeps, delay)
+			now = now.Add(delay)
+		},
+		25*time.Millisecond,
+		10*time.Millisecond,
+	)
+
+	if err != nil {
+		t.Fatalf("waitForInputQueueDrain: %v", err)
+	}
+	if drained {
+		t.Fatal("expected drain timeout")
+	}
+	if waited != 25*time.Millisecond {
+		t.Fatalf("waited = %s, want 25ms", waited)
+	}
+	if sampleCalls != 4 {
+		t.Fatalf("sample calls = %d, want 4", sampleCalls)
+	}
+	if len(sleeps) != 3 || sleeps[0] != 10*time.Millisecond || sleeps[1] != 10*time.Millisecond || sleeps[2] != 5*time.Millisecond {
+		t.Fatalf("sleeps = %v, want [10ms 10ms 5ms]", sleeps)
 	}
 }
 

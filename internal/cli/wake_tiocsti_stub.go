@@ -2,7 +2,10 @@
 
 package cli
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // tiocsti provides a stub for non-Unix systems.
 var tiocsti = tiocstiFuncs{}
@@ -25,3 +28,7 @@ func (t tiocstiFuncs) Inject(text string) error {
 }
 
 func waitForTTYInputQuiet(cfg *wakeConfig) {}
+
+func waitForTTYInputDrain(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+	return 0, false, errors.New("TTY input drain unavailable on this platform")
+}

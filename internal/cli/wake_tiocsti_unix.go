@@ -131,6 +131,18 @@ func waitForTTYInputQuiet(cfg *wakeConfig) {
 	}
 }
 
+func waitForTTYInputDrain(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+	queueFD, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY, 0)
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = unix.Close(queueFD) }()
+
+	return waitForInputQueueDrain(func() (int, error) {
+		return ttyInputPendingBytes(uintptr(queueFD))
+	}, time.Now, time.Sleep, timeout, pollInterval)
+}
+
 func sampleTTYInputState(queueFD, atimeFD uintptr) (ttyInputState, error) {
 	// TIOCINQ/FIONREAD only sees bytes still buffered by the kernel. Raw-mode
 	// TUIs usually consume keystrokes quickly, so recent tty reads are the more
