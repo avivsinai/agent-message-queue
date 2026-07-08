@@ -44,6 +44,15 @@ type wakeConfig struct {
 }
 
 const defaultInjectTimeout = 5 * time.Second
+const (
+	rawInjectDrainTimeout      = 2 * time.Second
+	rawInjectDrainPollInterval = 10 * time.Millisecond
+)
+
+var (
+	tiocstiInject          = func(text string) error { return tiocsti.Inject(text) }
+	waitForRawInputDrained = waitForTTYInputDrain
+)
 
 type wakeMsgInfo struct {
 	from     string
@@ -358,49 +367,11 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 		// Raw mode: inject text and CR separately to avoid paste detection.
 		// Ink treats multi-char input as paste, not keypresses. Sending text+CR
 		// as one chunk makes Ink see pasted text, not an Enter keypress.
-		// Solution: inject text, wait, then inject CR as separate single byte.
-		// Double-inject CR with a gap to increase reliability — a single CR
-		// can get swallowed by Ink's input buffer flush in newer versions.
 		injectedText := text
 		if cfg.bell {
 			injectedText = "\a" + injectedText
 		}
-		if cfg.debug {
-			_ = writeStderr("amq wake [debug]: injecting %d bytes of text\n", len(injectedText))
-		}
-		if err := tiocsti.Inject(injectedText); err != nil {
-			if cfg.debug {
-				_ = writeStderr("amq wake [debug]: text inject failed: %v\n", err)
-			}
-			injectErr = err
-		} else {
-			// Delay so CR arrives in separate read cycle, detected as keypress.
-			// 50ms allows Ink to finish processing the text bytes before CR lands.
-			if cfg.debug {
-				_ = writeStderr("amq wake [debug]: text injected OK, sleeping 50ms before CR\n")
-			}
-			time.Sleep(50 * time.Millisecond)
-			if err := tiocsti.Inject("\r"); err != nil {
-				if cfg.debug {
-					_ = writeStderr("amq wake [debug]: first CR inject failed: %v\n", err)
-				}
-				injectErr = err
-			} else {
-				if cfg.debug {
-					_ = writeStderr("amq wake [debug]: first CR injected OK, sleeping 20ms before second CR\n")
-				}
-				// Second CR after a short gap — belt-and-suspenders against
-				// Ink absorbing the first CR during buffer processing.
-				time.Sleep(20 * time.Millisecond)
-				if err := tiocsti.Inject("\r"); err != nil {
-					if cfg.debug {
-						_ = writeStderr("amq wake [debug]: second CR inject failed: %v\n", err)
-					}
-				} else if cfg.debug {
-					_ = writeStderr("amq wake [debug]: second CR injected OK (total inject time ~70ms + text)\n")
-				}
-			}
-		}
+		injectErr = injectRawNotification(cfg, injectedText)
 
 	case "paste":
 		// Paste mode: bracketed paste with delayed CR
@@ -410,12 +381,12 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 		if cfg.bell {
 			pasteText = "\a" + pasteText
 		}
-		if err := tiocsti.Inject(pasteText); err != nil {
+		if err := tiocstiInject(pasteText); err != nil {
 			injectErr = err
 		} else {
 			// Small delay to ensure CR lands in separate read cycle
 			time.Sleep(25 * time.Millisecond)
-			injectErr = tiocsti.Inject("\r")
+			injectErr = tiocstiInject("\r")
 		}
 
 	default:
@@ -424,7 +395,7 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 		if cfg.bell {
 			injectedText = "\a" + injectedText
 		}
-		injectErr = tiocsti.Inject(injectedText)
+		injectErr = tiocstiInject(injectedText)
 	}
 
 	if injectErr != nil {
@@ -439,6 +410,82 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	}
 
 	return nil
+}
+
+func injectRawNotification(cfg *wakeConfig, injectedText string) error {
+	if cfg.debug {
+		_ = writeStderr("amq wake [debug]: injecting %d bytes of text\n", len(injectedText))
+	}
+	if err := tiocstiInject(injectedText); err != nil {
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: text inject failed: %v\n", err)
+		}
+		return err
+	}
+
+	// The submit CR must arrive in its own read() chunk; otherwise Ink can
+	// treat text+CR as pasted input instead of key.return. Waiting for the
+	// text bytes to drain makes a single later CR safe even if the reader stalls.
+	waited, drained, err := waitForRawInputDrained(rawInjectDrainTimeout, rawInjectDrainPollInterval)
+	if cfg.debug {
+		switch {
+		case err != nil:
+			_ = writeStderr("amq wake [debug]: input drain wait unavailable after %s: %v; injecting CR fallback\n", waited, err)
+		case drained:
+			_ = writeStderr("amq wake [debug]: input queue drained after %s; injecting CR\n", waited)
+		default:
+			_ = writeStderr("amq wake [debug]: input drain timeout after %s; injecting CR fallback\n", waited)
+		}
+	}
+
+	if err := tiocstiInject("\r"); err != nil {
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: CR inject failed: %v\n", err)
+		}
+		return err
+	}
+	if cfg.debug {
+		_ = writeStderr("amq wake [debug]: CR injected OK\n")
+	}
+	return nil
+}
+
+func waitForInputQueueDrain(
+	samplePending func() (int, error),
+	now func() time.Time,
+	sleep func(time.Duration),
+	timeout time.Duration,
+	pollInterval time.Duration,
+) (time.Duration, bool, error) {
+	if pollInterval <= 0 {
+		pollInterval = rawInjectDrainPollInterval
+	}
+
+	start := now()
+	deadline := start.Add(timeout)
+	for {
+		pending, err := samplePending()
+		current := now()
+		elapsed := current.Sub(start)
+		if err != nil {
+			return elapsed, false, err
+		}
+		if pending <= 0 {
+			return elapsed, true, nil
+		}
+		if timeout <= 0 || !current.Before(deadline) {
+			return elapsed, false, nil
+		}
+
+		delay := pollInterval
+		if remaining := deadline.Sub(current); remaining > 0 && remaining < delay {
+			delay = remaining
+		}
+		if delay <= 0 {
+			return elapsed, false, nil
+		}
+		sleep(delay)
+	}
 }
 
 func injectVia(cfg *wakeConfig, text string) error {
