@@ -387,6 +387,55 @@ func TestInjectNotificationRawDrainsSettlesThenInjectsCRWithRescue(t *testing.T)
 }
 
 func TestInjectNotificationRawSkipsRescueCRWhenFirstCRStillQueued(t *testing.T) {
+	// Models the stated skip branch precisely: the notification text drains
+	// normally, then the first CR is still queued at the CR-drain deadline.
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	var drainCalls [][2]time.Duration
+	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+		drainCalls = append(drainCalls, [2]time.Duration{timeout, pollInterval})
+		if len(drainCalls) == 1 {
+			return 5 * time.Millisecond, true, nil // text consumed by the TUI
+		}
+		return timeout, false, nil // first CR still in the kernel queue
+	})
+	slept := stubRawInjectSleep(t)
+
+	cfg := &wakeConfig{injectMode: "raw", debug: true}
+	stderr := captureWakeStderr(t, func() {
+		if err := injectNotification(cfg, "AMQ wake", true); err != nil {
+			t.Fatalf("injectNotification: %v", err)
+		}
+	})
+
+	if got := strings.Join(injected, "|"); got != "AMQ wake|\r" {
+		t.Fatalf("raw injection sequence = %q, want text then one CR", got)
+	}
+	wantDrains := [][2]time.Duration{
+		{rawInjectDrainTimeout, rawInjectDrainPollInterval},
+		{rawInjectCRDrainTimeout, rawInjectDrainPollInterval},
+	}
+	if len(drainCalls) != len(wantDrains) || drainCalls[0] != wantDrains[0] || drainCalls[1] != wantDrains[1] {
+		t.Fatalf("drain calls = %v, want %v", drainCalls, wantDrains)
+	}
+	if !strings.Contains(stderr, "input queue drained") {
+		t.Fatalf("expected text drain debug log, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "skipping second CR") {
+		t.Fatalf("expected rescue skip debug log, got %q", stderr)
+	}
+	if len(*slept) != 1 || (*slept)[0] != rawInjectSettleDelay {
+		t.Fatalf("settle sleeps = %v, want one of %s", *slept, rawInjectSettleDelay)
+	}
+}
+
+func TestInjectNotificationRawSkipsRescueCROnTotalReaderStall(t *testing.T) {
+	// Degraded branch: the reader is fully stalled — the text drain times out,
+	// the CR is injected anyway, and the rescue is skipped because the CR is
+	// provably still queued behind the unread text.
 	var injected []string
 	stubTIOCSTIInject(t, func(text string) error {
 		injected = append(injected, text)
