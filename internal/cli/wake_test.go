@@ -352,6 +352,51 @@ func TestRawInjectSettleDelayClearsCodexEnterSuppressWindow(t *testing.T) {
 	}
 }
 
+func TestRawSubmitKeyPicksEncodingByTarget(t *testing.T) {
+	cases := []struct {
+		me   string
+		want string
+	}{
+		{"codex", kittyEnterSequence},
+		{"codex-test", kittyEnterSequence},
+		{"my-codex-2", kittyEnterSequence},
+		{"claude", "\r"},
+		{"claude-test", "\r"},
+		{"", "\r"},
+	}
+	for _, c := range cases {
+		if got := rawSubmitKey(c.me); got != c.want {
+			t.Fatalf("rawSubmitKey(%q) = %q, want %q", c.me, got, c.want)
+		}
+	}
+}
+
+func TestInjectNotificationRawUsesKittyEnterForCodex(t *testing.T) {
+	// codex-tui never submits on a raw \r once it negotiates kitty keyboard
+	// enhancement with the terminal (Ghostty); the CSI-u Enter encoding is
+	// parsed as Enter by its crossterm parser in both legacy and enhanced
+	// modes, so codex targets get CSI-u for the primary and rescue submit.
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+		return time.Millisecond, true, nil
+	})
+	stubRawInjectSleep(t)
+
+	cfg := &wakeConfig{injectMode: "raw", me: "codex"}
+	if err := injectNotification(cfg, "AMQ wake", true); err != nil {
+		t.Fatalf("injectNotification: %v", err)
+	}
+
+	want := "AMQ wake|" + kittyEnterSequence + "|" + kittyEnterSequence
+	if got := strings.Join(injected, "|"); got != want {
+		t.Fatalf("raw injection sequence = %q, want %q", got, want)
+	}
+}
+
 func TestInjectNotificationRawDrainsSettlesThenInjectsCRWithRescue(t *testing.T) {
 	var injected []string
 	stubTIOCSTIInject(t, func(text string) error {
@@ -424,7 +469,7 @@ func TestInjectNotificationRawSkipsRescueCRWhenFirstCRStillQueued(t *testing.T) 
 	if !strings.Contains(stderr, "input queue drained") {
 		t.Fatalf("expected text drain debug log, got %q", stderr)
 	}
-	if !strings.Contains(stderr, "skipping second CR") {
+	if !strings.Contains(stderr, "skipping rescue submit") {
 		t.Fatalf("expected rescue skip debug log, got %q", stderr)
 	}
 	if len(*slept) != 1 || (*slept)[0] != rawInjectSettleDelay {
@@ -459,7 +504,7 @@ func TestInjectNotificationRawSkipsRescueCROnTotalReaderStall(t *testing.T) {
 	if !strings.Contains(stderr, "input drain timeout") {
 		t.Fatalf("expected drain timeout debug log, got %q", stderr)
 	}
-	if !strings.Contains(stderr, "skipping second CR") {
+	if !strings.Contains(stderr, "skipping rescue submit") {
 		t.Fatalf("expected rescue skip debug log, got %q", stderr)
 	}
 	if len(*slept) != 1 || (*slept)[0] != rawInjectSettleDelay {

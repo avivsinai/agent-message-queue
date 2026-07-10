@@ -12,10 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Claude Code): the v0.41.0 drain-wait completes within microseconds when the
   TUI is actively reading, so the submit CR landed inside the TUI's paste-burst
   window and was inserted as a pasted newline instead of pressing Enter. The
-  injector now holds the CR for a 150ms settle delay after the text drains
-  (clearing codex-tui's 120ms Enter-suppress window) and restores the second
-  rescue CR on the same spacing (a no-op when the first CR already submitted),
-  skipping the rescue only when the first CR is provably still queued.
+  injector now holds the submit key for a 150ms settle delay after the text
+  drains (clearing codex-tui's 120ms Enter-suppress window) and restores the
+  second rescue submit on the same spacing (a no-op when the first already
+  submitted), skipping the rescue only when the first is provably still queued.
+- `amq wake` submits with the kitty CSI-u Enter encoding (`ESC[13u`) for codex
+  targets: once codex-tui negotiates kitty keyboard enhancement with the
+  terminal (e.g. Ghostty), an injected raw `\r` never submits regardless of
+  delay, while the CSI-u encoding is parsed as Enter by its crossterm parser in
+  both legacy and enhanced modes. Verified end-to-end in Ghostty (enhanced and
+  enhancement-disabled) and tmux, idle and mid-turn; Claude Code targets keep
+  the plain `\r` submit.
 
 ### Security
 
