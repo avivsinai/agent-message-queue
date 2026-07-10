@@ -4,8 +4,18 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"golang.org/x/sys/unix"
+)
+
+var (
+	readDarwinBootSessionUUID = func() (string, error) {
+		return unix.Sysctl("kern.bootsessionuuid")
+	}
+	readDarwinBootTime = func() (*unix.Timeval, error) {
+		return unix.SysctlTimeval("kern.boottime")
+	}
 )
 
 func inspectWakeProcessPlatform(pid int) wakeProcessInfo {
@@ -29,12 +39,27 @@ func inspectWakeProcessPlatform(pid int) wakeProcessInfo {
 	info.StartToken = fmt.Sprintf("%d.%09d", sec, nsec)
 	info.Executable = nulTerminatedString(kp.Proc.P_comm[:])
 
-	if boot, err := unix.SysctlTimeval("kern.boottime"); err == nil && boot != nil {
-		bsec, bnsec := boot.Unix()
-		info.BootID = fmt.Sprintf("%d.%09d", bsec, bnsec)
-	}
+	info.BootID, info.LegacyBootID = darwinBootIdentity()
 
 	return info
+}
+
+func darwinBootIdentity() (bootID, legacyBootID string) {
+	if boot, err := readDarwinBootTime(); err == nil && boot != nil {
+		sec, nsec := boot.Unix()
+		legacyBootID = fmt.Sprintf("%d.%09d", sec, nsec)
+	}
+
+	if sessionUUID, err := readDarwinBootSessionUUID(); err == nil {
+		sessionUUID = strings.TrimSpace(sessionUUID)
+		if sessionUUID != "" && !strings.ContainsRune(sessionUUID, 0) {
+			return sessionUUID, legacyBootID
+		}
+	}
+
+	// kern.boottime was AMQ's Darwin boot identity before v0.42. Keep it as a
+	// best-effort fallback for macOS versions where bootsessionuuid is absent.
+	return legacyBootID, ""
 }
 
 func nulTerminatedString(raw []byte) string {

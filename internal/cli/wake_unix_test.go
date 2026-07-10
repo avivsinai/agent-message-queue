@@ -561,7 +561,7 @@ func TestRunWakeWithLoopDoesNotWriteReadyFileWhenLockBlocked(t *testing.T) {
 	}
 }
 
-func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
+func TestRunWakeWithLoopRejectsRawExistingWakeWhenInjectViaRequested(t *testing.T) {
 	const wakePID = 4242
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid == wakePID {
@@ -591,17 +591,18 @@ func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
 		"--root", root,
 		"--me", "orchestrator",
 		"--inject-via", injector,
+		"--inject-arg", "exec",
 		"--ready-file", readyPath,
 		"--accept-existing-wake",
 	}, func(cfg wakeConfig) error {
 		t.Fatalf("loop should not run with an existing live wake lock: %#v", cfg)
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("expected existing usable wake to satisfy ready file, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "raw terminal injection") {
+		t.Fatalf("expected raw wake target mismatch, got %v", err)
 	}
-	if _, statErr := os.Stat(readyPath); statErr != nil {
-		t.Fatalf("ready file should exist, statErr=%v", statErr)
+	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+		t.Fatalf("ready file should not exist, statErr=%v", statErr)
 	}
 }
 
@@ -827,12 +828,16 @@ func TestRunWakeWithLoopAcceptExistingWakeAcceptsInjectViaUnknownTTY(t *testing.
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
 	}, target))
+	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
+		t.Fatalf("write wake target: %v", err)
+	}
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
 		"--inject-via", injector,
+		"--inject-arg", "exec",
 		"--ready-file", readyPath,
 		"--accept-existing-wake",
 	}, func(cfg wakeConfig) error {
@@ -844,6 +849,160 @@ func TestRunWakeWithLoopAcceptExistingWakeAcceptsInjectViaUnknownTTY(t *testing.
 	}
 	if _, statErr := os.Stat(readyPath); statErr != nil {
 		t.Fatalf("ready file should exist, statErr=%v", statErr)
+	}
+}
+
+func TestExistingWakeTargetMatchIgnoresCreatedAndOwner(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	existing := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"inject", "cmux", "surface-29"})
+	existing.Created = "2026-07-10T13:50:00Z"
+	existing.Owner = &wakeOwner{PID: 100, ProcessStart: "owner-old", BootID: "boot-old", SessionID: 10}
+	if err := writeWakeTarget(root, "orchestrator", existing); err != nil {
+		t.Fatalf("write wake target: %v", err)
+	}
+
+	requested := existing
+	requested.Created = "2026-07-11T09:00:00Z"
+	requested.Owner = &wakeOwner{PID: 200, ProcessStart: "owner-new", BootID: "boot-new", SessionID: 20}
+	inspection := wakeLockInspection{
+		Root:  canonicalWakeRoot(root),
+		Agent: "orchestrator",
+		Lock: bindWakeLockToTarget(wakeLock{
+			Root:  canonicalWakeRoot(root),
+			Agent: "orchestrator",
+		}, existing),
+	}
+
+	if err := requireExistingWakeTargetMatches(inspection, requested); err != nil {
+		t.Fatalf("same semantic target should match despite Created/Owner changes: %v", err)
+	}
+}
+
+func TestRunWakeWithLoopAcceptExistingWakeRejectsDifferentInjectViaTarget(t *testing.T) {
+	tests := []struct {
+		name          string
+		existingArgs  []string
+		requestedArgs []string
+		differentPath bool
+	}{
+		{
+			name:          "inject via path",
+			existingArgs:  []string{"inject", "ghostty", "terminal-1"},
+			requestedArgs: []string{"inject", "ghostty", "terminal-1"},
+			differentPath: true,
+		},
+		{
+			name:          "ordered inject args",
+			existingArgs:  []string{"inject", "ghostty", "terminal-1"},
+			requestedArgs: []string{"terminal-1", "ghostty", "inject"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			const wakePID = 4242
+			root := secureTempDirForTest(t)
+			existingInjector := writeExecutableForTest(t, "existing-injector")
+			requestedInjector := existingInjector
+			if tc.differentPath {
+				requestedInjector = writeExecutableForTest(t, "requested-injector")
+			}
+			existingTarget := mustNewWakeTargetForTest(t, root, "orchestrator", existingInjector, tc.existingArgs)
+			if err := writeWakeTarget(root, "orchestrator", existingTarget); err != nil {
+				t.Fatalf("write wake target: %v", err)
+			}
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				if pid == wakePID {
+					return wakeProcessInfo{
+						PID:        pid,
+						Running:    true,
+						StartToken: "start-1",
+						BootID:     "boot-1",
+						Executable: "/opt/homebrew/bin/amq",
+						Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-via", existingInjector},
+					}
+				}
+				return wakeProcessInfo{PID: pid}
+			})
+			writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
+				PID:          wakePID,
+				TTY:          "unknown",
+				ProcessStart: "start-1",
+				BootID:       "boot-1",
+				Executable:   "/opt/homebrew/bin/amq",
+			}, existingTarget))
+
+			readyPath := filepath.Join(t.TempDir(), "wake.ready")
+			args := []string{
+				"--root", root,
+				"--me", "orchestrator",
+				"--inject-via", requestedInjector,
+				"--ready-file", readyPath,
+				"--accept-existing-wake",
+			}
+			for _, arg := range tc.requestedArgs {
+				args = append(args, "--inject-arg", arg)
+			}
+			err := runWakeWithLoop(args, func(cfg wakeConfig) error {
+				t.Fatalf("loop should not run with a mismatched existing wake: %#v", cfg)
+				return nil
+			})
+			if err == nil || !strings.Contains(err.Error(), "does not match requested") {
+				t.Fatalf("expected target mismatch, got %v", err)
+			}
+			if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+				t.Fatalf("ready file should not exist, statErr=%v", statErr)
+			}
+		})
+	}
+}
+
+func TestRunWakeWithLoopAcceptExistingWakeRejectsMissingPersistedTarget(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"inject", "cmux", "surface-29"})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "start-1",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-via", injector},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
+		PID:          wakePID,
+		TTY:          "unknown",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	}, target))
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", injector,
+		"--inject-arg", "inject",
+		"--inject-arg", "cmux",
+		"--inject-arg", "surface-29",
+		"--ready-file", readyPath,
+		"--accept-existing-wake",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run without a persisted existing target: %#v", cfg)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "wake target is missing") {
+		t.Fatalf("expected missing target refusal, got %v", err)
+	}
+	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+		t.Fatalf("ready file should not exist, statErr=%v", statErr)
 	}
 }
 
@@ -1534,6 +1693,262 @@ func TestShouldReplaceOrphanedWakeLockKeepsInjectViaWhenOwnerMatches(t *testing.
 	}
 	if _, statErr := os.Stat(lockPath); statErr != nil {
 		t.Fatalf("lock should remain for owner-matched wake, stat=%v", statErr)
+	}
+}
+
+func TestAcquireWakeLockAcceptExistingReplacesInjectViaWhenOwnerGone(t *testing.T) {
+	const wakePID = 424242
+	const ownerPID = 777777
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	existing := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"inject", "cmux", "surface-old"})
+	existing.Owner = &wakeOwner{PID: ownerPID, ProcessStart: "owner-start", BootID: "boot-1"}
+	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
+		PID:          wakePID,
+		TTY:          "unknown",
+		ProcessStart: "wake-start",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	}, existing))
+	if err := writeWakeTarget(root, "orchestrator", existing); err != nil {
+		t.Fatalf("writeWakeTarget: %v", err)
+	}
+
+	requested := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"inject", "cmux", "surface-new"})
+	killed := false
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		switch pid {
+		case wakePID:
+			if killed {
+				return wakeProcessInfo{PID: pid, Running: false}
+			}
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "wake-start",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root, "--inject-via", injector},
+			}
+		case ownerPID:
+			return wakeProcessInfo{PID: pid, Running: false}
+		case os.Getpid():
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "new-wake-start",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root, "--inject-via", injector},
+			}
+		default:
+			return wakeProcessInfo{PID: pid}
+		}
+	})
+	stubSignalWakeProcess(t, func(pid int, sig os.Signal) error {
+		if pid != wakePID {
+			t.Fatalf("signal pid = %d, want %d", pid, wakePID)
+		}
+		killed = true
+		return nil
+	})
+
+	cleanup, err := acquireWakeLockWithOptions(root, "orchestrator", wakeLockAcquireOptions{
+		acceptExistingValid: true,
+		target:              &requested,
+	})
+	if err != nil {
+		t.Fatalf("owner-orphaned wake should be replaced, not accepted as ready: %v", err)
+	}
+	if cleanup == nil {
+		t.Fatal("replacement wake should acquire a new lock")
+	}
+	defer cleanup()
+	if !killed {
+		t.Fatal("owner-orphaned wake was not terminated")
+	}
+
+	data, err := os.ReadFile(filepath.Join(fsq.AgentBase(root, "orchestrator"), ".wake.lock"))
+	if err != nil {
+		t.Fatalf("read replacement lock: %v", err)
+	}
+	var lock wakeLock
+	if err := json.Unmarshal(data, &lock); err != nil {
+		t.Fatalf("unmarshal replacement lock: %v", err)
+	}
+	if lock.PID != os.Getpid() || lock.TargetDigest != wakeTargetDigest(requested) {
+		t.Fatalf("replacement lock = pid %d target %q", lock.PID, lock.TargetDigest)
+	}
+}
+
+func TestAcquireWakeLockAcceptExistingRejectsExternalWithoutRequestedTarget(t *testing.T) {
+	const wakePID = 424242
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"inject", "cmux", "surface-29"})
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
+		PID:          wakePID,
+		TTY:          "unknown",
+		ProcessStart: "wake-start",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	}, target))
+	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
+		t.Fatalf("writeWakeTarget: %v", err)
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "wake-start",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root, "--inject-via", injector},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	stubSignalWakeProcess(t, func(pid int, sig os.Signal) error {
+		t.Fatalf("matching live external wake must not be signaled, got pid=%d sig=%v", pid, sig)
+		return nil
+	})
+
+	cleanup, err := acquireWakeLockWithOptions(root, "orchestrator", wakeLockAcquireOptions{
+		acceptExistingValid: true,
+		target:              nil,
+	})
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), "does not match the requested raw terminal target") {
+		t.Fatalf("expected unspecified external target refusal, got %v", err)
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("existing external lock should remain, stat=%v", statErr)
+	}
+}
+
+func TestAcquireWakeLockAcceptExistingReinspectsChangedOwnerReplacement(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		winnerViaOEXCL bool
+	}{
+		{name: "initial inspection", winnerViaOEXCL: false},
+		{name: "o_excl winner", winnerViaOEXCL: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const oldWakePID = 900001
+			const newWakePID = 900002
+			const ownerPID = 900003
+			root := secureTempDirForTest(t)
+			injector := writeExecutableForTest(t, "injector")
+
+			oldTarget := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"inject", "cmux", "surface-old"})
+			oldTarget.Owner = &wakeOwner{PID: ownerPID, ProcessStart: "owner-start", BootID: "boot-1"}
+			newTarget := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"inject", "cmux", "surface-new"})
+			writeLock := func(pid int, start string, target wakeTarget) {
+				writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
+					PID:          pid,
+					TTY:          "unknown",
+					ProcessStart: start,
+					BootID:       "boot-1",
+					Executable:   "/opt/homebrew/bin/amq",
+				}, target))
+			}
+
+			winnerCreated := !tc.winnerViaOEXCL
+			if winnerCreated {
+				writeLock(oldWakePID, "old-wake-start", oldTarget)
+			}
+			if err := writeWakeTarget(root, "orchestrator", oldTarget); err != nil {
+				t.Fatalf("write old wake target: %v", err)
+			}
+
+			lockChanged := false
+			newWakeInspections := 0
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				switch pid {
+				case os.Getpid():
+					if tc.winnerViaOEXCL && !winnerCreated {
+						writeLock(oldWakePID, "old-wake-start", oldTarget)
+						winnerCreated = true
+					}
+					return wakeProcessInfo{
+						PID:        pid,
+						Running:    true,
+						StartToken: "candidate-start",
+						BootID:     "boot-1",
+						Executable: "/opt/homebrew/bin/amq",
+						Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root, "--inject-via", injector},
+					}
+				case oldWakePID:
+					return wakeProcessInfo{
+						PID:        pid,
+						Running:    true,
+						StartToken: "old-wake-start",
+						BootID:     "boot-1",
+						Executable: "/opt/homebrew/bin/amq",
+						Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root, "--inject-via", injector},
+					}
+				case newWakePID:
+					newWakeInspections++
+					return wakeProcessInfo{
+						PID:        pid,
+						Running:    true,
+						StartToken: "new-wake-start",
+						BootID:     "boot-1",
+						Executable: "/opt/homebrew/bin/amq",
+						Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root, "--inject-via", injector},
+					}
+				case ownerPID:
+					if !lockChanged {
+						// Model a concurrent winner publishing its lock before it
+						// replaces the prior target file.
+						writeLock(newWakePID, "new-wake-start", newTarget)
+						lockChanged = true
+					}
+					return wakeProcessInfo{PID: pid, Running: false}
+				default:
+					return wakeProcessInfo{PID: pid}
+				}
+			})
+			stubSignalWakeProcess(t, func(pid int, sig os.Signal) error {
+				t.Fatalf("changed wake lock must be re-inspected before signaling, got pid=%d sig=%v", pid, sig)
+				return nil
+			})
+
+			cleanup, err := acquireWakeLockWithOptions(root, "orchestrator", wakeLockAcquireOptions{
+				acceptExistingValid: true,
+				target:              &oldTarget,
+			})
+			if cleanup != nil {
+				defer cleanup()
+			}
+			var alreadyRunning *wakeAlreadyRunningError
+			if err == nil || errors.As(err, &alreadyRunning) || !strings.Contains(err.Error(), "wake target does not match wake lock") {
+				t.Fatalf("changed winner must fail closed after reinspection, got %v", err)
+			}
+			if !winnerCreated || !lockChanged || newWakeInspections < 2 {
+				t.Fatalf("sequence not exercised: winner=%v changed=%v new inspections=%d", winnerCreated, lockChanged, newWakeInspections)
+			}
+
+			data, readErr := os.ReadFile(filepath.Join(fsq.AgentBase(root, "orchestrator"), ".wake.lock"))
+			if readErr != nil {
+				t.Fatalf("read winner lock: %v", readErr)
+			}
+			var lock wakeLock
+			if unmarshalErr := json.Unmarshal(data, &lock); unmarshalErr != nil {
+				t.Fatalf("unmarshal winner lock: %v", unmarshalErr)
+			}
+			if lock.PID != newWakePID {
+				t.Fatalf("winner lock pid = %d, want %d", lock.PID, newWakePID)
+			}
+			persisted, exists, targetErr := readWakeTarget(root, "orchestrator")
+			if targetErr != nil || !exists || wakeTargetDigest(persisted) != wakeTargetDigest(oldTarget) {
+				t.Fatalf("old target window not preserved: exists=%v err=%v target=%#v", exists, targetErr, persisted)
+			}
+		})
 	}
 }
 

@@ -53,6 +53,16 @@ editing the release PR.
   documented Dependabot-detection pattern, which stays `dependabot[bot]`
   regardless of who updates the branch.
 
+### Fixed
+
+- Darwin wake identity now uses the stable `kern.bootsessionuuid` instead of
+  the wall-clock-derived `kern.boottime`, while retaining a bounded legacy
+  compatibility path and a safe `kern.boottime` fallback for older macOS.
+- Accept-existing wake startup now verifies that an existing wake's injection
+  mode and, for external wakes, persisted injector path and ordered arguments
+  match the requested target; mismatched, owner-orphaned, or concurrently
+  replaced terminal targets do not report readiness.
+
 ## [0.41.1] - 2026-07-10
 ### Fixed
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ type wakeProcessInfo struct {
 	Running      bool
 	StartToken   string
 	BootID       string
+	LegacyBootID string
 	Executable   string
 	Args         []string
 	InspectError error
@@ -200,7 +202,7 @@ func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
 			inspection.Reason = inspectionReason("process start time unavailable", proc.InspectError)
 			return
 		}
-		if lock.BootID != "" && proc.BootID != "" && lock.BootID != proc.BootID {
+		if wakeBootIDMismatch(lock.BootID, proc) {
 			inspection.Status = wakeLockUnverified
 			if wakeProcessProvenNotWake(proc) {
 				inspection.Status = wakeLockStale
@@ -322,7 +324,7 @@ func currentWakeLockMatches(lock wakeLock) bool {
 	if !proc.Running || proc.StartToken == "" {
 		return false
 	}
-	if lock.BootID != "" && proc.BootID != "" && lock.BootID != proc.BootID {
+	if wakeBootIDMismatch(lock.BootID, proc) {
 		return false
 	}
 	return lock.ProcessStart == proc.StartToken
@@ -413,7 +415,7 @@ func wakeProcessStillMatches(inspection wakeLockInspection) bool {
 		if proc.StartToken == "" || inspection.Lock.ProcessStart != proc.StartToken {
 			return false
 		}
-		if inspection.Lock.BootID != "" && proc.BootID != "" && inspection.Lock.BootID != proc.BootID {
+		if wakeBootIDMismatch(inspection.Lock.BootID, proc) {
 			return false
 		}
 	}
@@ -427,4 +429,51 @@ func wakeProcessStillMatches(inspection wakeLockInspection) bool {
 		return false
 	}
 	return true
+}
+
+func wakeBootIDMismatch(recorded string, proc wakeProcessInfo) bool {
+	if recorded == "" || proc.BootID == "" {
+		return false
+	}
+	if recorded == proc.BootID || recorded == proc.LegacyBootID {
+		return false
+	}
+	for _, current := range []string{proc.BootID, proc.LegacyBootID} {
+		if legacyDarwinBootIDsMatch(recorded, current) {
+			return false
+		}
+	}
+	return true
+}
+
+// Legacy Darwin boot IDs came from kern.boottime, which can move slightly as
+// macOS corrects wall-clock time. A one-second migration tolerance preserves
+// old live wake locks without making two realistically distinct boots equal.
+func legacyDarwinBootIDsMatch(first, second string) bool {
+	firstTime, firstOK := parseLegacyDarwinBootID(first)
+	secondTime, secondOK := parseLegacyDarwinBootID(second)
+	if !firstOK || !secondOK {
+		return false
+	}
+	delta := firstTime.Sub(secondTime)
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= time.Second
+}
+
+func parseLegacyDarwinBootID(value string) (time.Time, bool) {
+	seconds, nanos, ok := strings.Cut(value, ".")
+	if !ok || seconds == "" || len(nanos) != 9 || strings.Contains(nanos, ".") {
+		return time.Time{}, false
+	}
+	sec, err := strconv.ParseInt(seconds, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	nsec, err := strconv.ParseInt(nanos, 10, 64)
+	if err != nil || nsec < 0 || nsec >= int64(time.Second) {
+		return time.Time{}, false
+	}
+	return time.Unix(sec, nsec), true
 }
