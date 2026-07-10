@@ -372,10 +372,10 @@ func TestRawSubmitKeyPicksEncodingByTarget(t *testing.T) {
 }
 
 func TestInjectNotificationRawUsesKittyEnterForCodex(t *testing.T) {
-	// codex-tui never submits on a raw \r once it negotiates kitty keyboard
-	// enhancement with the terminal (Ghostty); the CSI-u Enter encoding is
-	// parsed as Enter by its crossterm parser in both legacy and enhanced
-	// modes, so codex targets get CSI-u for the primary and rescue submit.
+	// In the reproduced Ghostty + kitty-enhanced codex-tui wake path a raw \r
+	// did not submit while CSI-u did; CSI-u is parsed as Enter by codex's
+	// crossterm parser in both legacy and enhanced modes, so codex targets get
+	// CSI-u for the primary and rescue submit.
 	var injected []string
 	stubTIOCSTIInject(t, func(text string) error {
 		injected = append(injected, text)

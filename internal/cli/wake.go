@@ -435,13 +435,18 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 // kittyEnterSequence is the kitty CSI-u encoding of the Enter key. codex-tui's
 // crossterm parser maps it to KeyCode::Enter unconditionally (parse.rs routes
 // any numbered CSI ending in 'u' to parse_csi_u_encoded_key_code regardless of
-// pushed enhancement flags), so it submits in both legacy and kitty-enhanced
-// terminal modes. Empirically a raw \r never submits once codex-tui negotiates
-// kitty keyboard enhancement with the terminal (Ghostty), while CSI-u does.
+// pushed enhancement flags), so it is accepted in both legacy and
+// kitty-enhanced terminal modes. In the reproduced Ghostty + kitty-enhanced
+// codex-tui wake path, an injected raw \r did not submit at any tested delay
+// while CSI-u did; crossterm parses both encodings as Enter and Ghostty still
+// emits a physical Enter as \r under codex's flags (1|2|4), so the lower-layer
+// cause is event/timing behavior in the enhanced path, not parser
+// classification.
 const kittyEnterSequence = "\x1b[13u"
 
 // rawSubmitKey picks the submit keypress encoding per target TUI. codex-tui
-// gets the kitty CSI-u Enter (works in both of its input modes); Claude Code's
+// gets the kitty CSI-u Enter (accepted in both of its input modes, and the
+// encoding that passed enhanced/legacy Ghostty and tmux e2e); Claude Code's
 // Ink fork keeps plain \r — it parses \r as Enter at any delay, and an
 // unrecognized CSI sequence could render as literal text in its composer.
 func rawSubmitKey(me string) string {

@@ -17,12 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second rescue submit on the same spacing (a no-op when the first already
   submitted), skipping the rescue only when the first is provably still queued.
 - `amq wake` submits with the kitty CSI-u Enter encoding (`ESC[13u`) for codex
-  targets: once codex-tui negotiates kitty keyboard enhancement with the
-  terminal (e.g. Ghostty), an injected raw `\r` never submits regardless of
-  delay, while the CSI-u encoding is parsed as Enter by its crossterm parser in
-  both legacy and enhanced modes. Verified end-to-end in Ghostty (enhanced and
-  enhancement-disabled) and tmux, idle and mid-turn; Claude Code targets keep
-  the plain `\r` submit.
+  targets: in the reproduced Ghostty wake path with codex-tui's kitty keyboard
+  enhancement active, an injected raw `\r` did not submit at any tested delay,
+  while CSI-u — parsed as Enter by codex's crossterm in both legacy and
+  enhanced modes — passed enhanced Ghostty, enhancement-disabled Ghostty, and
+  tmux end-to-end, idle and mid-turn. (Both encodings map to Enter in the
+  parser and Ghostty emits a physical Enter as `\r` under codex's flags, so the
+  lower-layer cause is event/timing behavior in the enhanced path, not parser
+  classification.) Claude Code targets keep the plain `\r` submit.
 
 ### Security
 
