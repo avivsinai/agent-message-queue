@@ -54,8 +54,14 @@ const (
 	// drained. A drained queue only proves the TUI read the bytes, not that its
 	// paste-burst window expired: fast readers (codex-tui) consume injected
 	// bytes within microseconds, and a CR landing inside the burst window is
-	// inserted as a pasted newline instead of submitting.
-	rawInjectSettleDelay = 50 * time.Millisecond
+	// inserted as a pasted newline instead of submitting. codex-tui suppresses
+	// Enter for PASTE_ENTER_SUPPRESS_WINDOW = 120ms after the last burst char
+	// (codex-rs/tui/src/bottom_pane/paste_burst.rs, rust-v0.144.1 and main),
+	// and a suppressed Enter RE-EXTENDS the window by another 120ms, so both
+	// the settle and the rescue spacing must exceed 120ms. Claude Code's Ink
+	// fork has no timing heuristic (bracketed-paste markers only) and accepts
+	// any delay. Re-check the upstream constant if codex-tui changes.
+	rawInjectSettleDelay = 150 * time.Millisecond
 )
 
 var (
@@ -465,9 +471,12 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 
 	// Rescue CR: if the first CR was swallowed anyway (input buffer flush or a
 	// burst-window race), a repeat Enter submits the composer; if the first CR
-	// already submitted, Enter on an empty composer is a no-op. Skip the rescue
-	// only when the first CR is provably still queued — a second CR would
-	// coalesce with it into a pasted "\r\r" chunk and both would be swallowed.
+	// already submitted, Enter on an empty composer is a no-op. The rescue must
+	// be spaced a full settle delay after the first CR: a swallowed Enter
+	// re-extends codex-tui's 120ms suppress window, so a faster rescue would be
+	// swallowed too. Skip the rescue only when the first CR is provably still
+	// queued — a second CR would coalesce with it into a pasted "\r\r" chunk
+	// and both would be swallowed.
 	crWaited, crDrained, crErr := waitForRawInputDrained(rawInjectCRDrainTimeout, rawInjectDrainPollInterval)
 	if crErr == nil && !crDrained {
 		if cfg.debug {

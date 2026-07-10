@@ -12,8 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Claude Code): the v0.41.0 drain-wait completes within microseconds when the
   TUI is actively reading, so the submit CR landed inside the TUI's paste-burst
   window and was inserted as a pasted newline instead of pressing Enter. The
-  injector now holds the CR for a 50ms settle delay after the text drains and
-  restores the second rescue CR (a no-op when the first CR already submitted),
+  injector now holds the CR for a 150ms settle delay after the text drains
+  (clearing codex-tui's 120ms Enter-suppress window) and restores the second
+  rescue CR on the same spacing (a no-op when the first CR already submitted),
   skipping the rescue only when the first CR is provably still queued.
 
 ## [0.41.0] - 2026-07-08
