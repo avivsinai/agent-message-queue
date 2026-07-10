@@ -338,6 +338,20 @@ func stubRawInjectSleep(t *testing.T) *[]time.Duration {
 	return &slept
 }
 
+func TestRawInjectSettleDelayClearsCodexEnterSuppressWindow(t *testing.T) {
+	// Regression guard for the v0.41.0 Enter swallow: the settle (and rescue
+	// spacing, which reuses it) must exceed codex-tui's Enter-suppress window,
+	// or injected CRs are inserted as pasted newlines instead of submitting.
+	// A revert to the old 50ms floor must fail this test, not just review.
+	if rawInjectSettleDelay <= codexTUIEnterSuppressWindow {
+		t.Fatalf("rawInjectSettleDelay = %s, must exceed codex-tui Enter-suppress window %s",
+			rawInjectSettleDelay, codexTUIEnterSuppressWindow)
+	}
+	if margin := rawInjectSettleDelay - codexTUIEnterSuppressWindow; margin < 20*time.Millisecond {
+		t.Fatalf("settle margin over suppress window = %s, want >= 20ms for scheduler jitter", margin)
+	}
+}
+
 func TestInjectNotificationRawDrainsSettlesThenInjectsCRWithRescue(t *testing.T) {
 	var injected []string
 	stubTIOCSTIInject(t, func(text string) error {

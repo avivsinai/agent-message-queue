@@ -50,18 +50,22 @@ const (
 	// rawInjectCRDrainTimeout bounds the wait for the submit CR itself to be
 	// consumed before deciding whether the second rescue CR is safe to send.
 	rawInjectCRDrainTimeout = 1 * time.Second
+	// codexTUIEnterSuppressWindow mirrors codex-tui's
+	// PASTE_ENTER_SUPPRESS_WINDOW (codex-rs/tui/src/bottom_pane/paste_burst.rs,
+	// verified at rust-v0.144.1 and main): an Enter arriving within this window
+	// after the last rapid-input char is inserted as a pasted newline instead
+	// of submitting, and RE-EXTENDS the window by the same amount. Re-pin this
+	// value if upstream codex-tui changes.
+	codexTUIEnterSuppressWindow = 120 * time.Millisecond
 	// rawInjectSettleDelay holds the submit CR after the notification text has
 	// drained. A drained queue only proves the TUI read the bytes, not that its
 	// paste-burst window expired: fast readers (codex-tui) consume injected
-	// bytes within microseconds, and a CR landing inside the burst window is
-	// inserted as a pasted newline instead of submitting. codex-tui suppresses
-	// Enter for PASTE_ENTER_SUPPRESS_WINDOW = 120ms after the last burst char
-	// (codex-rs/tui/src/bottom_pane/paste_burst.rs, rust-v0.144.1 and main),
-	// and a suppressed Enter RE-EXTENDS the window by another 120ms, so both
-	// the settle and the rescue spacing must exceed 120ms. Claude Code's Ink
-	// fork has no timing heuristic (bracketed-paste markers only) and accepts
-	// any delay. Re-check the upstream constant if codex-tui changes.
-	rawInjectSettleDelay = 150 * time.Millisecond
+	// bytes within microseconds, and a CR landing inside the suppress window is
+	// swallowed. The settle must clear the window with margin for scheduler and
+	// timer jitter; the rescue CR uses the same spacing because a swallowed
+	// Enter re-extends the window. Claude Code's Ink fork has no timing
+	// heuristic (bracketed-paste markers only) and accepts any delay.
+	rawInjectSettleDelay = codexTUIEnterSuppressWindow + 30*time.Millisecond
 )
 
 var (
