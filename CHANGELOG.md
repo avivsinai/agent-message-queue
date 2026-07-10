@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.41.1] - 2026-07-10
 ### Fixed
 
 - `amq wake` raw injection submits again in fast-reading TUIs (codex-tui, busy
@@ -31,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bumped the Go toolchain to 1.25.12 to pick up the GO-2026-5856 fix
   (Encrypted Client Hello privacy leak in crypto/tls).
+
 
 ## [0.41.0] - 2026-07-08
 ### Added
@@ -705,7 +708,8 @@ directories are impacted.
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
-[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.41.0...HEAD
+[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.41.1...HEAD
+[0.41.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.41.0...v0.41.1
 [0.41.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.39.0...v0.40.0
 [0.39.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.38.0...v0.39.0
