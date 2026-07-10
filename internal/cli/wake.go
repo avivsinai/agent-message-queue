@@ -432,28 +432,24 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	return nil
 }
 
-// kittyEnterSequence is the kitty CSI-u encoding of the Enter key. codex-tui's
-// crossterm parser maps it to KeyCode::Enter unconditionally (parse.rs routes
-// any numbered CSI ending in 'u' to parse_csi_u_encoded_key_code regardless of
-// pushed enhancement flags), so it is accepted in both legacy and
-// kitty-enhanced terminal modes. In the reproduced Ghostty + kitty-enhanced
-// codex-tui wake path, an injected raw \r did not submit at any tested delay
-// while CSI-u did; crossterm parses both encodings as Enter and Ghostty still
-// emits a physical Enter as \r under codex's flags (1|2|4), so the lower-layer
-// cause is event/timing behavior in the enhanced path, not parser
-// classification.
-const kittyEnterSequence = "\x1b[13u"
-
-// rawSubmitKey picks the submit keypress encoding per target TUI. codex-tui
-// gets the kitty CSI-u Enter (accepted in both of its input modes, and the
-// encoding that passed enhanced/legacy Ghostty and tmux e2e); Claude Code's
-// Ink fork keeps plain \r — it parses \r as Enter at any delay, and an
-// unrecognized CSI sequence could render as literal text in its composer.
-func rawSubmitKey(me string) string {
+// rawSubmitPrelude returns the bytes injected between the drained notification
+// text and the settle delay. codex targets get a single LF: codex-tui maps a
+// raw 0x0A to Ctrl-J, whose editor binding routes through handle_input_basic,
+// which flushes and clears any active paste-burst state before inserting a
+// newline (trailing whitespace is trimmed from the submitted payload). In the
+// reproduced Ghostty + kitty-enhanced codex-tui wake path a raw \r alone did
+// not submit at any tested delay; the LF prelude unlocks the later \r submit.
+//
+// Everything injected here must stay single-byte control characters. TIOCSTI
+// delivers one byte per ioctl, so a multi-byte escape sequence (e.g. the kitty
+// CSI-u Enter ESC[13u) can be split by reader scheduling — and a reader that
+// sees a lone ESC parses the Escape key, which cancels an active codex turn
+// and leaves the sequence tail as literal composer text.
+func rawSubmitPrelude(me string) string {
 	if strings.Contains(strings.ToLower(me), "codex") {
-		return kittyEnterSequence
+		return "\n"
 	}
-	return "\r"
+	return ""
 }
 
 func injectRawNotification(cfg *wakeConfig, injectedText string) error {
@@ -466,7 +462,7 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 		}
 		return err
 	}
-	submitKey := rawSubmitKey(cfg.me)
+	prelude := rawSubmitPrelude(cfg.me)
 
 	// The submit key must arrive in its own read() chunk; otherwise the TUI can
 	// treat text+Enter as pasted input instead of a keypress. Waiting for the
@@ -484,20 +480,33 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 		}
 	}
 
-	// Hold the submit key past the TUI's paste-burst window (see
+	// Prelude (codex: a lone LF) clears the TUI's paste-burst state while the
+	// injected text is fresh; its newline is trimmed from the submitted payload.
+	if prelude != "" {
+		if err := tiocstiInject(prelude); err != nil {
+			if cfg.debug {
+				_ = writeStderr("amq wake [debug]: prelude inject failed: %v\n", err)
+			}
+			return err
+		}
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: prelude injected OK (%q)\n", prelude)
+		}
+	}
+
+	// Hold the submit CR past the TUI's paste-burst window (see
 	// rawInjectSettleDelay) so it is classified as a real Enter keypress, not a
-	// pasted newline. The suppress window applies regardless of the Enter
-	// encoding — CSI-u Enter inside the window is swallowed too.
+	// pasted newline.
 	rawInjectSleep(rawInjectSettleDelay)
 
-	if err := tiocstiInject(submitKey); err != nil {
+	if err := tiocstiInject("\r"); err != nil {
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: submit key inject failed: %v\n", err)
 		}
 		return err
 	}
 	if cfg.debug {
-		_ = writeStderr("amq wake [debug]: submit key injected OK (%q)\n", submitKey)
+		_ = writeStderr("amq wake [debug]: submit key injected OK\n")
 	}
 
 	// Rescue submit: if the first Enter was swallowed anyway (input buffer
@@ -516,7 +525,7 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 		return nil
 	}
 	rawInjectSleep(rawInjectSettleDelay)
-	if err := tiocstiInject(submitKey); err != nil {
+	if err := tiocstiInject("\r"); err != nil {
 		// The text and first submit key were already delivered; the rescue is
 		// best-effort.
 		if cfg.debug {

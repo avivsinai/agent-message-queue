@@ -16,15 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drains (clearing codex-tui's 120ms Enter-suppress window) and restores the
   second rescue submit on the same spacing (a no-op when the first already
   submitted), skipping the rescue only when the first is provably still queued.
-- `amq wake` submits with the kitty CSI-u Enter encoding (`ESC[13u`) for codex
+- `amq wake` injects a single LF prelude before the submit CR for codex
   targets: in the reproduced Ghostty wake path with codex-tui's kitty keyboard
-  enhancement active, an injected raw `\r` did not submit at any tested delay,
-  while CSI-u — parsed as Enter by codex's crossterm in both legacy and
-  enhanced modes — passed enhanced Ghostty, enhancement-disabled Ghostty, and
-  tmux end-to-end, idle and mid-turn. (Both encodings map to Enter in the
-  parser and Ghostty emits a physical Enter as `\r` under codex's flags, so the
-  lower-layer cause is event/timing behavior in the enhanced path, not parser
-  classification.) Claude Code targets keep the plain `\r` submit.
+  enhancement active, a bare `\r` did not submit at any tested delay; the LF
+  routes through codex-tui's Ctrl-J binding, which flushes and clears
+  paste-burst state before the CR lands (the prelude newline is trimmed from
+  the submitted payload). Raw-mode injection deliberately stays single-byte —
+  TIOCSTI delivers one byte per ioctl, so a multi-byte escape sequence (such as
+  the kitty CSI-u Enter) can be split by reader scheduling into a lone ESC,
+  which a TUI parses as the Escape key and cancels an active turn. Claude Code
+  targets keep the plain `\r` submit with no prelude.
 
 ### Security
 

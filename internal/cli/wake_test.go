@@ -352,30 +352,30 @@ func TestRawInjectSettleDelayClearsCodexEnterSuppressWindow(t *testing.T) {
 	}
 }
 
-func TestRawSubmitKeyPicksEncodingByTarget(t *testing.T) {
+func TestRawSubmitPreludePicksByTarget(t *testing.T) {
 	cases := []struct {
 		me   string
 		want string
 	}{
-		{"codex", kittyEnterSequence},
-		{"codex-test", kittyEnterSequence},
-		{"my-codex-2", kittyEnterSequence},
-		{"claude", "\r"},
-		{"claude-test", "\r"},
-		{"", "\r"},
+		{"codex", "\n"},
+		{"codex-test", "\n"},
+		{"my-codex-2", "\n"},
+		{"claude", ""},
+		{"claude-test", ""},
+		{"", ""},
 	}
 	for _, c := range cases {
-		if got := rawSubmitKey(c.me); got != c.want {
-			t.Fatalf("rawSubmitKey(%q) = %q, want %q", c.me, got, c.want)
+		if got := rawSubmitPrelude(c.me); got != c.want {
+			t.Fatalf("rawSubmitPrelude(%q) = %q, want %q", c.me, got, c.want)
 		}
 	}
 }
 
-func TestInjectNotificationRawUsesKittyEnterForCodex(t *testing.T) {
-	// In the reproduced Ghostty + kitty-enhanced codex-tui wake path a raw \r
-	// did not submit while CSI-u did; CSI-u is parsed as Enter by codex's
-	// crossterm parser in both legacy and enhanced modes, so codex targets get
-	// CSI-u for the primary and rescue submit.
+func TestInjectNotificationRawInjectsLFPreludeForCodex(t *testing.T) {
+	// codex targets get a lone LF between the drained text and the settle: it
+	// routes through codex-tui's Ctrl-J binding, which flushes and clears
+	// paste-burst state before the \r submit. In the reproduced Ghostty +
+	// kitty-enhanced path a bare \r did not submit without it.
 	var injected []string
 	stubTIOCSTIInject(t, func(text string) error {
 		injected = append(injected, text)
@@ -384,16 +384,46 @@ func TestInjectNotificationRawUsesKittyEnterForCodex(t *testing.T) {
 	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
 		return time.Millisecond, true, nil
 	})
-	stubRawInjectSleep(t)
+	slept := stubRawInjectSleep(t)
 
 	cfg := &wakeConfig{injectMode: "raw", me: "codex"}
 	if err := injectNotification(cfg, "AMQ wake", true); err != nil {
 		t.Fatalf("injectNotification: %v", err)
 	}
 
-	want := "AMQ wake|" + kittyEnterSequence + "|" + kittyEnterSequence
-	if got := strings.Join(injected, "|"); got != want {
-		t.Fatalf("raw injection sequence = %q, want %q", got, want)
+	if got := strings.Join(injected, "|"); got != "AMQ wake|\n|\r|\r" {
+		t.Fatalf("raw injection sequence = %q, want text, LF prelude, CR, rescue CR", got)
+	}
+	if len(*slept) != 2 {
+		t.Fatalf("settle sleeps = %v, want two settle delays", *slept)
+	}
+}
+
+func TestInjectNotificationRawNeverInjectsEscapeBytes(t *testing.T) {
+	// TIOCSTI delivers one byte per ioctl, so a multi-byte escape sequence can
+	// be split by reader scheduling: a reader that sees a lone ESC parses the
+	// Escape key, which cancels an active codex turn. Raw-mode injection must
+	// therefore never contain ESC for any target.
+	for _, me := range []string{"", "claude", "codex", "codex-test"} {
+		var injected []string
+		stubTIOCSTIInject(t, func(text string) error {
+			injected = append(injected, text)
+			return nil
+		})
+		stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+			return time.Millisecond, true, nil
+		})
+		stubRawInjectSleep(t)
+
+		cfg := &wakeConfig{injectMode: "raw", me: me}
+		if err := injectNotification(cfg, "AMQ wake", true); err != nil {
+			t.Fatalf("injectNotification(me=%q): %v", me, err)
+		}
+		for _, chunk := range injected {
+			if strings.Contains(chunk, "\x1b") {
+				t.Fatalf("me=%q injected chunk %q contains ESC", me, chunk)
+			}
+		}
 	}
 }
 
