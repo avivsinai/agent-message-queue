@@ -9,7 +9,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// SZOMB from <sys/proc.h>: the process has exited and is waiting for its
+// parent to reap it. kill(pid, 0) still succeeds for this state.
+const darwinProcessStateZombie int8 = 5
+
 var (
+	readDarwinKinfoProc       = unix.SysctlKinfoProc
 	readDarwinBootSessionUUID = func() (string, error) {
 		return unix.Sysctl("kern.bootsessionuuid")
 	}
@@ -25,12 +30,16 @@ func inspectWakeProcessPlatform(pid int) wakeProcessInfo {
 	}
 	info.Running = true
 
-	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	kp, err := readDarwinKinfoProc("kern.proc.pid", pid)
 	if err != nil {
 		info.InspectError = err
 		return info
 	}
 	if kp == nil {
+		info.Running = false
+		return info
+	}
+	if kp.Proc.P_stat == darwinProcessStateZombie {
 		info.Running = false
 		return info
 	}
