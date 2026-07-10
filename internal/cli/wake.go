@@ -47,11 +47,31 @@ const defaultInjectTimeout = 5 * time.Second
 const (
 	rawInjectDrainTimeout      = 2 * time.Second
 	rawInjectDrainPollInterval = 10 * time.Millisecond
+	// rawInjectCRDrainTimeout bounds the wait for the submit CR itself to be
+	// consumed before deciding whether the second rescue CR is safe to send.
+	rawInjectCRDrainTimeout = 1 * time.Second
+	// codexTUIEnterSuppressWindow mirrors codex-tui's
+	// PASTE_ENTER_SUPPRESS_WINDOW (codex-rs/tui/src/bottom_pane/paste_burst.rs,
+	// verified at rust-v0.144.1 and main): an Enter arriving within this window
+	// after the last rapid-input char is inserted as a pasted newline instead
+	// of submitting, and RE-EXTENDS the window by the same amount. Re-pin this
+	// value if upstream codex-tui changes.
+	codexTUIEnterSuppressWindow = 120 * time.Millisecond
+	// rawInjectSettleDelay holds the submit CR after the notification text has
+	// drained. A drained queue only proves the TUI read the bytes, not that its
+	// paste-burst window expired: fast readers (codex-tui) consume injected
+	// bytes within microseconds, and a CR landing inside the suppress window is
+	// swallowed. The settle must clear the window with margin for scheduler and
+	// timer jitter; the rescue CR uses the same spacing because a swallowed
+	// Enter re-extends the window. Claude Code's Ink fork has no timing
+	// heuristic (bracketed-paste markers only) and accepts any delay.
+	rawInjectSettleDelay = codexTUIEnterSuppressWindow + 30*time.Millisecond
 )
 
 var (
 	tiocstiInject          = func(text string) error { return tiocsti.Inject(text) }
 	waitForRawInputDrained = waitForTTYInputDrain
+	rawInjectSleep         = time.Sleep
 )
 
 type wakeMsgInfo struct {
@@ -412,6 +432,26 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	return nil
 }
 
+// rawSubmitPrelude returns the bytes injected between the drained notification
+// text and the settle delay. codex targets get a single LF: codex-tui maps a
+// raw 0x0A to Ctrl-J, whose editor binding routes through handle_input_basic,
+// which flushes and clears any active paste-burst state before inserting a
+// newline (trailing whitespace is trimmed from the submitted payload). In the
+// reproduced Ghostty + kitty-enhanced codex-tui wake path a raw \r alone did
+// not submit at any tested delay; the LF prelude unlocks the later \r submit.
+//
+// Everything injected here must stay single-byte control characters. TIOCSTI
+// delivers one byte per ioctl, so a multi-byte escape sequence (e.g. the kitty
+// CSI-u Enter ESC[13u) can be split by reader scheduling — and a reader that
+// sees a lone ESC parses the Escape key, which cancels an active codex turn
+// and leaves the sequence tail as literal composer text.
+func rawSubmitPrelude(me string) string {
+	if strings.Contains(strings.ToLower(me), "codex") {
+		return "\n"
+	}
+	return ""
+}
+
 func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 	if cfg.debug {
 		_ = writeStderr("amq wake [debug]: injecting %d bytes of text\n", len(injectedText))
@@ -422,30 +462,79 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 		}
 		return err
 	}
+	prelude := rawSubmitPrelude(cfg.me)
 
-	// The submit CR must arrive in its own read() chunk; otherwise Ink can
-	// treat text+CR as pasted input instead of key.return. Waiting for the
-	// text bytes to drain makes a single later CR safe even if the reader stalls.
+	// The submit key must arrive in its own read() chunk; otherwise the TUI can
+	// treat text+Enter as pasted input instead of a keypress. Waiting for the
+	// text bytes to drain keeps the submit key out of a paste-shaped chunk even
+	// when the reader stalls (#208).
 	waited, drained, err := waitForRawInputDrained(rawInjectDrainTimeout, rawInjectDrainPollInterval)
 	if cfg.debug {
 		switch {
 		case err != nil:
-			_ = writeStderr("amq wake [debug]: input drain wait unavailable after %s: %v; injecting CR fallback\n", waited, err)
+			_ = writeStderr("amq wake [debug]: input drain wait unavailable after %s: %v; continuing on timing alone\n", waited, err)
 		case drained:
-			_ = writeStderr("amq wake [debug]: input queue drained after %s; injecting CR\n", waited)
+			_ = writeStderr("amq wake [debug]: input queue drained after %s\n", waited)
 		default:
-			_ = writeStderr("amq wake [debug]: input drain timeout after %s; injecting CR fallback\n", waited)
+			_ = writeStderr("amq wake [debug]: input drain timeout after %s; injecting submit key anyway\n", waited)
 		}
 	}
 
+	// Prelude (codex: a lone LF) clears the TUI's paste-burst state while the
+	// injected text is fresh; its newline is trimmed from the submitted payload.
+	if prelude != "" {
+		if err := tiocstiInject(prelude); err != nil {
+			if cfg.debug {
+				_ = writeStderr("amq wake [debug]: prelude inject failed: %v\n", err)
+			}
+			return err
+		}
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: prelude injected OK (%q)\n", prelude)
+		}
+	}
+
+	// Hold the submit CR past the TUI's paste-burst window (see
+	// rawInjectSettleDelay) so it is classified as a real Enter keypress, not a
+	// pasted newline.
+	rawInjectSleep(rawInjectSettleDelay)
+
 	if err := tiocstiInject("\r"); err != nil {
 		if cfg.debug {
-			_ = writeStderr("amq wake [debug]: CR inject failed: %v\n", err)
+			_ = writeStderr("amq wake [debug]: submit key inject failed: %v\n", err)
 		}
 		return err
 	}
 	if cfg.debug {
-		_ = writeStderr("amq wake [debug]: CR injected OK\n")
+		_ = writeStderr("amq wake [debug]: submit key injected OK\n")
+	}
+
+	// Rescue submit: if the first Enter was swallowed anyway (input buffer
+	// flush or a burst-window race), a repeat Enter submits the composer; if
+	// the first already submitted, Enter on an empty composer is a no-op. The
+	// rescue must be spaced a full settle delay after the first: a swallowed
+	// Enter re-extends codex-tui's 120ms suppress window, so a faster rescue
+	// would be swallowed too. Skip the rescue only when the first submit key is
+	// provably still queued — a second would coalesce with it into one
+	// paste-shaped chunk and both would be swallowed.
+	crWaited, crDrained, crErr := waitForRawInputDrained(rawInjectCRDrainTimeout, rawInjectDrainPollInterval)
+	if crErr == nil && !crDrained {
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: submit key still queued after %s; skipping rescue submit\n", crWaited)
+		}
+		return nil
+	}
+	rawInjectSleep(rawInjectSettleDelay)
+	if err := tiocstiInject("\r"); err != nil {
+		// The text and first submit key were already delivered; the rescue is
+		// best-effort.
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: rescue submit inject failed: %v\n", err)
+		}
+		return nil
+	}
+	if cfg.debug {
+		_ = writeStderr("amq wake [debug]: rescue submit injected OK\n")
 	}
 	return nil
 }
