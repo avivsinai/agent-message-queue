@@ -47,11 +47,21 @@ const defaultInjectTimeout = 5 * time.Second
 const (
 	rawInjectDrainTimeout      = 2 * time.Second
 	rawInjectDrainPollInterval = 10 * time.Millisecond
+	// rawInjectCRDrainTimeout bounds the wait for the submit CR itself to be
+	// consumed before deciding whether the second rescue CR is safe to send.
+	rawInjectCRDrainTimeout = 1 * time.Second
+	// rawInjectSettleDelay holds the submit CR after the notification text has
+	// drained. A drained queue only proves the TUI read the bytes, not that its
+	// paste-burst window expired: fast readers (codex-tui) consume injected
+	// bytes within microseconds, and a CR landing inside the burst window is
+	// inserted as a pasted newline instead of submitting.
+	rawInjectSettleDelay = 50 * time.Millisecond
 )
 
 var (
 	tiocstiInject          = func(text string) error { return tiocsti.Inject(text) }
 	waitForRawInputDrained = waitForTTYInputDrain
+	rawInjectSleep         = time.Sleep
 )
 
 type wakeMsgInfo struct {
@@ -425,18 +435,23 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 
 	// The submit CR must arrive in its own read() chunk; otherwise Ink can
 	// treat text+CR as pasted input instead of key.return. Waiting for the
-	// text bytes to drain makes a single later CR safe even if the reader stalls.
+	// text bytes to drain keeps the CR out of a paste-shaped chunk even when
+	// the reader stalls (#208).
 	waited, drained, err := waitForRawInputDrained(rawInjectDrainTimeout, rawInjectDrainPollInterval)
 	if cfg.debug {
 		switch {
 		case err != nil:
-			_ = writeStderr("amq wake [debug]: input drain wait unavailable after %s: %v; injecting CR fallback\n", waited, err)
+			_ = writeStderr("amq wake [debug]: input drain wait unavailable after %s: %v; continuing on timing alone\n", waited, err)
 		case drained:
-			_ = writeStderr("amq wake [debug]: input queue drained after %s; injecting CR\n", waited)
+			_ = writeStderr("amq wake [debug]: input queue drained after %s\n", waited)
 		default:
-			_ = writeStderr("amq wake [debug]: input drain timeout after %s; injecting CR fallback\n", waited)
+			_ = writeStderr("amq wake [debug]: input drain timeout after %s; injecting CR anyway\n", waited)
 		}
 	}
+
+	// Hold the CR past the TUI's paste-burst window (see rawInjectSettleDelay)
+	// so it is classified as a real Enter keypress, not a pasted newline.
+	rawInjectSleep(rawInjectSettleDelay)
 
 	if err := tiocstiInject("\r"); err != nil {
 		if cfg.debug {
@@ -446,6 +461,30 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 	}
 	if cfg.debug {
 		_ = writeStderr("amq wake [debug]: CR injected OK\n")
+	}
+
+	// Rescue CR: if the first CR was swallowed anyway (input buffer flush or a
+	// burst-window race), a repeat Enter submits the composer; if the first CR
+	// already submitted, Enter on an empty composer is a no-op. Skip the rescue
+	// only when the first CR is provably still queued — a second CR would
+	// coalesce with it into a pasted "\r\r" chunk and both would be swallowed.
+	crWaited, crDrained, crErr := waitForRawInputDrained(rawInjectCRDrainTimeout, rawInjectDrainPollInterval)
+	if crErr == nil && !crDrained {
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: CR still queued after %s; skipping second CR\n", crWaited)
+		}
+		return nil
+	}
+	rawInjectSleep(rawInjectSettleDelay)
+	if err := tiocstiInject("\r"); err != nil {
+		// The text and first CR were already delivered; the rescue is best-effort.
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: second CR inject failed: %v\n", err)
+		}
+		return nil
+	}
+	if cfg.debug {
+		_ = writeStderr("amq wake [debug]: second CR injected OK\n")
 	}
 	return nil
 }
