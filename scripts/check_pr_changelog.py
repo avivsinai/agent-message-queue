@@ -31,12 +31,14 @@ class PRMetadata:
         self,
         *,
         actor: str,
+        author: str,
         head_ref: str,
         base_sha: str,
         head_sha: str,
         labels: list[str],
     ) -> None:
         self.actor = actor
+        self.author = author
         self.head_ref = head_ref
         self.base_sha = base_sha
         self.head_sha = head_sha
@@ -60,6 +62,7 @@ def git_env() -> dict[str, str]:
 def metadata_from_event(event: dict, actor: str = "") -> PRMetadata:
     pr = event.get("pull_request") or {}
     sender = event.get("sender") or {}
+    author = pr.get("user") or {}
     head = pr.get("head") or {}
     base = pr.get("base") or {}
     labels = pr.get("labels") or []
@@ -75,6 +78,7 @@ def metadata_from_event(event: dict, actor: str = "") -> PRMetadata:
 
     return PRMetadata(
         actor=(actor or str(sender.get("login") or "")).strip(),
+        author=str(author.get("login") or "").strip(),
         head_ref=str(head.get("ref") or "").strip(),
         base_sha=str(base.get("sha") or "").strip(),
         head_sha=str(head.get("sha") or "").strip(),
@@ -82,9 +86,13 @@ def metadata_from_event(event: dict, actor: str = "") -> PRMetadata:
     )
 
 
-def skip_reason(*, actor: str, head_ref: str, labels: list[str]) -> str | None:
+def skip_reason(*, actor: str, head_ref: str, labels: list[str], author: str = "") -> str | None:
     if actor.strip().lower() in DEPENDABOT_ACTORS:
         return "dependabot actor"
+    # A maintainer updating the branch becomes the synchronize-event actor;
+    # the PR author stays dependabot[bot].
+    if author.strip().lower() in DEPENDABOT_ACTORS:
+        return "dependabot author"
     if head_ref.strip().startswith("release/"):
         return "release branch"
     normalized_labels = {label.strip().lower() for label in labels}
@@ -155,7 +163,12 @@ def main(argv: list[str]) -> int:
     event = load_event(pathlib.Path(args.event_path)) if args.event_path else {}
     metadata = metadata_from_event(event, actor=args.actor)
 
-    reason = skip_reason(actor=metadata.actor, head_ref=metadata.head_ref, labels=metadata.labels)
+    reason = skip_reason(
+        actor=metadata.actor,
+        author=metadata.author,
+        head_ref=metadata.head_ref,
+        labels=metadata.labels,
+    )
     if reason:
         print(f"CHANGELOG.md check skipped: {reason}")
         return 0
