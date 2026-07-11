@@ -20,7 +20,19 @@ const (
 
 	// ExitTimeout indicates a timeout occurred (watch, monitor commands).
 	ExitTimeout = 4
+
+	// ExitContextMismatch indicates a valid command was blocked because its
+	// resolved mailbox root conflicts with the pinned AMQ session context.
+	ExitContextMismatch = 5
 )
+
+// SessionContextError identifies an unsafe or incoherent mailbox context.
+// It is distinct from a usage error: the command syntax was valid.
+type SessionContextError struct {
+	Message string
+}
+
+func (e *SessionContextError) Error() string { return e.Message }
 
 // ExitCodeError wraps an error with a specific exit code.
 type ExitCodeError struct {
@@ -82,5 +94,13 @@ func TimeoutError(format string, args ...any) error {
 	return &ExitCodeError{
 		Code: ExitTimeout,
 		Err:  fmt.Errorf(format, args...),
+	}
+}
+
+// ContextMismatchError creates an error with ExitContextMismatch code.
+func ContextMismatchError(format string, args ...any) error {
+	return &ExitCodeError{
+		Code: ExitContextMismatch,
+		Err:  &SessionContextError{Message: fmt.Sprintf(format, args...)},
 	}
 }

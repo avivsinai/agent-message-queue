@@ -76,8 +76,9 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 	}
 	result.OperatorGate = checkOperatorGate(root, now)
 
-	// Load config for agent list
-	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
+	// Load the active root's config, falling back to the base config for normal
+	// session layouts where coop init owns the single config.json.
+	agents, err := loadOpsAgents(root)
 	if err != nil {
 		result.Hints = append(result.Hints, opsHint{
 			Code:    "config_error",
@@ -88,7 +89,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 		return result
 	}
 
-	for _, handle := range cfg.Agents {
+	for _, handle := range agents {
 		agent := opsAgent{Handle: handle}
 
 		// Unread count + oldest
@@ -142,14 +143,50 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 		result.Agents = append(result.Agents, agent)
 	}
 
-	result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, cfg.Agents), fixWakeLocks)
+	result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, agents), fixWakeLocks)
 
-	// Integration hints
+	// Operational and integration hints
+	result.Hints = append(result.Hints, checkSiblingBacklogHints(root, agents)...)
 	result.Hints = append(result.Hints, checkGlobalRootHint()...)
 	result.Hints = append(result.Hints, checkKanbanHint()...)
 	result.Hints = append(result.Hints, checkSymphonyHint()...)
 
 	return result
+}
+
+func loadOpsAgents(root string) ([]string, error) {
+	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
+	if err == nil {
+		return cfg.Agents, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	base := baseRootOf(root)
+	if absPath(resolveRoot(base)) == absPath(resolveRoot(root)) {
+		return nil, err
+	}
+	baseCfg, baseErr := config.LoadConfig(filepath.Join(base, "meta", "config.json"))
+	if baseErr != nil {
+		return nil, baseErr
+	}
+	return baseCfg.Agents, nil
+}
+
+func checkSiblingBacklogHints(root string, agents []string) []opsHint {
+	current := siblingContext(root)
+	var hints []opsHint
+	for _, agent := range agents {
+		for _, backlog := range findSiblingBacklogs(root, agent) {
+			hints = append(hints, opsHint{
+				Code:    "sibling_backlog",
+				Status:  "warn",
+				Message: formatSiblingBacklogHint(backlog, agent, current),
+			})
+		}
+	}
+	return hints
 }
 
 func checkOperatorGate(root string, now time.Time) *opsOperatorGate {

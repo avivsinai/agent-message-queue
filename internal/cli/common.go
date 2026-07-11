@@ -37,16 +37,7 @@ func addCommonFlags(fs *flag.FlagSet) *commonFlags {
 // to defaulted from env/.amqrc). Used to distinguish a deliberate root override
 // from the resolved default.
 func (f *commonFlags) rootExplicit() bool {
-	if f.flagSet == nil {
-		return false
-	}
-	explicit := false
-	f.flagSet.Visit(func(fl *flag.Flag) {
-		if fl.Name == "root" {
-			explicit = true
-		}
-	})
-	return explicit
+	return flagWasVisited(f.flagSet, "root")
 }
 
 // warnRootOverride emits a diagnostic note to stderr when --root was explicitly
@@ -606,7 +597,25 @@ func parseFlags(fs *flag.FlagSet, args []string, usage func()) (bool, error) {
 		}
 		return false, UsageError("%v", err)
 	}
+	for _, name := range []string{"root", "session"} {
+		if fl := fs.Lookup(name); fl != nil && flagWasVisited(fs, name) && strings.TrimSpace(fl.Value.String()) == "" {
+			return false, UsageError("--%s cannot be empty", name)
+		}
+	}
 	return false, nil
+}
+
+func flagWasVisited(fs *flag.FlagSet, name string) bool {
+	if fs == nil {
+		return false
+	}
+	visited := false
+	fs.Visit(func(fl *flag.Flag) {
+		if fl.Name == name {
+			visited = true
+		}
+	})
+	return visited
 }
 
 // rejectPositionalArgs returns a UsageError if the flag set has any remaining

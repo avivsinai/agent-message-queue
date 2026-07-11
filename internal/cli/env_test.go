@@ -141,6 +141,8 @@ func TestShellQuoteFish(t *testing.T) {
 		{"path/to/dir", "path/to/dir"},
 		{"has space", "'has space'"},
 		{"has'quote", "'has\\'quote'"},
+		{"trailing\\", "'trailing\\\\'"},
+		{"two\\\\slashes", "'two\\\\\\\\slashes'"},
 		{"$VAR", "'$VAR'"},
 	}
 
@@ -884,7 +886,7 @@ func TestRunEnvJSONV1SessionFlag(t *testing.T) {
 	}
 }
 
-func TestRunEnvNonExportSessionOutputStaysRootAndMeOnly(t *testing.T) {
+func TestRunEnvNonExportSessionEmitsFullContext(t *testing.T) {
 	root := t.TempDir()
 	rcContent := `{"root": ".agent-mail"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
@@ -914,17 +916,17 @@ func TestRunEnvNonExportSessionOutputStaysRootAndMeOnly(t *testing.T) {
 		t.Fatalf("runEnv: %v", err)
 	}
 
-	expectedRoot := filepath.Join(projectRoot, ".agent-mail", "feature-x")
+	expectedBase := filepath.Join(projectRoot, ".agent-mail")
+	expectedRoot := filepath.Join(expectedBase, "feature-x")
 	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
+		"export AM_BASE_ROOT=" + shellQuotePosix(expectedBase) + "\n" +
+		"export AM_SESSION=feature-x\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
 	if stderr != "" {
 		t.Fatalf("stderr = %q, want empty", stderr)
-	}
-	if strings.Contains(stdout, "AM_BASE_ROOT") {
-		t.Fatalf("non-export output should not include AM_BASE_ROOT: %q", stdout)
 	}
 }
 
@@ -962,6 +964,7 @@ func TestRunEnvExportSessionEmitsBaseRootAndPinNote(t *testing.T) {
 	expectedRoot := filepath.Join(expectedBase, "feature-x")
 	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
 		"export AM_BASE_ROOT=" + shellQuotePosix(expectedBase) + "\n" +
+		"export AM_SESSION=feature-x\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
@@ -974,7 +977,7 @@ func TestRunEnvExportSessionEmitsBaseRootAndPinNote(t *testing.T) {
 	}
 }
 
-func TestRunEnvExportNonSessionOmitsBaseRoot(t *testing.T) {
+func TestRunEnvExportNonSessionPinsExactBaseRoot(t *testing.T) {
 	root := t.TempDir()
 	rcContent := `{"root": ".agent-mail"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
@@ -1006,12 +1009,14 @@ func TestRunEnvExportNonSessionOmitsBaseRoot(t *testing.T) {
 
 	expectedRoot := filepath.Join(projectRoot, ".agent-mail")
 	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
+		"export AM_BASE_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
+		"export AM_SESSION=\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
-	if strings.Contains(stdout, "AM_BASE_ROOT") {
-		t.Fatalf("non-session export should not include AM_BASE_ROOT: %q", stdout)
+	if !strings.Contains(stdout, "export AM_BASE_ROOT="+shellQuotePosix(expectedRoot)) {
+		t.Fatalf("non-session export should pin exact AM_BASE_ROOT: %q", stdout)
 	}
 	if !strings.Contains(stderr, "pinned to AMQ root") {
 		t.Fatalf("stderr should contain root pin note, got %q", stderr)
@@ -1052,6 +1057,7 @@ func TestRunEnvExportFishSessionEmitsBaseRoot(t *testing.T) {
 	expectedRoot := filepath.Join(expectedBase, "feature-x")
 	want := "set -gx AM_ROOT " + shellQuoteFish(expectedRoot) + "\n" +
 		"set -gx AM_BASE_ROOT " + shellQuoteFish(expectedBase) + "\n" +
+		"set -gx AM_SESSION feature-x\n" +
 		"set -gx AM_ME codex\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
@@ -1084,6 +1090,7 @@ func TestRunEnvExportSessionFromGlobalRootEmitsBaseRoot(t *testing.T) {
 	expectedRoot := filepath.Join(globalRoot, "feature-x")
 	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
 		"export AM_BASE_ROOT=" + shellQuotePosix(globalRoot) + "\n" +
+		"export AM_SESSION=feature-x\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
@@ -1127,6 +1134,7 @@ func TestRunEnvExportSessionIgnoresStaleAmbientBaseRoot(t *testing.T) {
 	expectedRoot := filepath.Join(expectedBase, "feature-x")
 	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
 		"export AM_BASE_ROOT=" + shellQuotePosix(expectedBase) + "\n" +
+		"export AM_SESSION=feature-x\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
@@ -1136,7 +1144,7 @@ func TestRunEnvExportSessionIgnoresStaleAmbientBaseRoot(t *testing.T) {
 	}
 }
 
-func TestRunEnvExportExplicitBaseRootOmitsBaseRoot(t *testing.T) {
+func TestRunEnvExportExplicitBaseRootPinsExactBaseRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), ".agent-mail")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("mkdir root: %v", err)
@@ -1150,12 +1158,14 @@ func TestRunEnvExportExplicitBaseRootOmitsBaseRoot(t *testing.T) {
 	}
 
 	want := "export AM_ROOT=" + shellQuotePosix(root) + "\n" +
+		"export AM_BASE_ROOT=" + shellQuotePosix(root) + "\n" +
+		"export AM_SESSION=\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
-	if strings.Contains(stdout, "AM_BASE_ROOT") {
-		t.Fatalf("explicit base-root export should not include AM_BASE_ROOT: %q", stdout)
+	if !strings.Contains(stdout, "export AM_BASE_ROOT="+shellQuotePosix(root)) {
+		t.Fatalf("explicit base-root export should pin exact AM_BASE_ROOT: %q", stdout)
 	}
 }
 
@@ -1431,9 +1441,9 @@ func TestRunEnvPosix(t *testing.T) {
 	if !strings.Contains(output, "export AM_ROOT=/tmp/test-root\n") {
 		t.Errorf("expected export AM_ROOT=/tmp/test-root, got: %s", output)
 	}
-	// AM_ME is not set from .amqrc (use env var or --me flag)
-	if strings.Contains(output, "export AM_ME") {
-		t.Errorf("unexpected AM_ME in output (not from .amqrc): %s", output)
+	// A missing identity clears any stale terminal identity.
+	if !strings.Contains(output, "unset AM_ME\n") {
+		t.Errorf("expected stale AM_ME to be cleared, got: %s", output)
 	}
 }
 
@@ -1477,9 +1487,9 @@ func TestRunEnvFish(t *testing.T) {
 	if !strings.Contains(output, "set -gx AM_ROOT /tmp/test-root\n") {
 		t.Errorf("expected set -gx AM_ROOT /tmp/test-root, got: %s", output)
 	}
-	// AM_ME is not set from .amqrc (use env var or --me flag)
-	if strings.Contains(output, "set -gx AM_ME") {
-		t.Errorf("unexpected AM_ME in output (not from .amqrc): %s", output)
+	// A missing identity clears any stale terminal identity.
+	if !strings.Contains(output, "set -e AM_ME\n") {
+		t.Errorf("expected stale AM_ME to be cleared, got: %s", output)
 	}
 }
 

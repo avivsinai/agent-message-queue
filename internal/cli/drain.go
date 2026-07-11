@@ -17,8 +17,10 @@ func runDrain(args []string) error {
 	common := addCommonFlags(fs)
 	limitFlag := fs.Int("limit", 20, "Max messages to drain (0 = no limit)")
 	includeBodyFlag := fs.Bool("include-body", false, "Include message body in output")
+	sessionFlag := fs.String("session", "", "Target session under the resolved base root")
+	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, ignore a conflicting AM_SESSION pin")
 
-	usage := usageWithFlags(fs, "amq drain --me <agent> [options]",
+	usage := usageWithFlags(fs, "amq drain --me <agent> [--session <name>] [options]",
 		"Drains new messages: reads, moves to cur, emits receipts.",
 		"Designed for hook/script integration. Quiet when empty.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
@@ -37,7 +39,20 @@ func runDrain(args []string) error {
 		return UsageError("--me: %v", err)
 	}
 	common.Me = me
-	root := resolveRoot(common.Root)
+	root, routed, err := resolveMailboxRoot(common, *sessionFlag)
+	if err != nil {
+		return err
+	}
+	if err := validatePinOverride(common, *ignoreSessionPinFlag, routed); err != nil {
+		return err
+	}
+	if err := guardMailboxContext("drain", root, routed, *ignoreSessionPinFlag); err != nil {
+		return err
+	}
+	if err := requireMailbox(root, me); err != nil {
+		emitSiblingBacklogHintsIfInboxEmpty(root, me)
+		return err
+	}
 
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
@@ -49,11 +64,15 @@ func runDrain(args []string) error {
 
 	items, err := drainInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return NotFoundError("mailbox for %q disappeared while draining root %s", common.Me, root)
+		}
 		return err
 	}
 
 	// Nothing to drain
 	if len(items) == 0 {
+		emitSiblingBacklogHintsIfInboxEmpty(root, common.Me)
 		if common.JSON {
 			return writeJSON(os.Stdout, drainResult{Drained: []drainItem{}, Count: 0})
 		}

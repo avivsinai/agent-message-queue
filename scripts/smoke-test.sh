@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Clear env vars that could interfere with explicit --root/--me flags. AM_BASE_ROOT
-# matters too: the cross-tree send guard treats AM_ROOT/AM_BASE_ROOT as the
-# caller's home root, so an ambient coop session would otherwise make explicit
-# --root sends to the temp queue look like a refused cross-tree send.
-unset AM_ROOT AM_ME AM_BASE_ROOT AMQ_GLOBAL_ROOT 2>/dev/null || true
+# Clear env vars that could interfere with explicit --root/--me flags. The
+# session guards treat AM_BASE_ROOT/AM_SESSION as positive caller context, so an
+# ambient coop session would otherwise make the temp queue look foreign.
+unset AM_ROOT AM_ME AM_BASE_ROOT AM_SESSION AMQ_GLOBAL_ROOT 2>/dev/null || true
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE 2>/dev/null || true
 

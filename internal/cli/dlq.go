@@ -172,8 +172,10 @@ func runDLQRead(args []string) error {
 	fs := flag.NewFlagSet("dlq read", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	idFlag := fs.String("id", "", "DLQ message ID to read")
+	sessionFlag := fs.String("session", "", "Target session under the resolved base root")
+	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, ignore a conflicting AM_SESSION pin")
 
-	usage := usageWithFlags(fs, "amq dlq read --me <agent> --id <dlq_id> [options]")
+	usage := usageWithFlags(fs, "amq dlq read --me <agent> --id <dlq_id> [--session <name>] [options]")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -190,7 +192,19 @@ func runDLQRead(args []string) error {
 		return UsageError("--me: %v", err)
 	}
 	common.Me = me
-	root := resolveRoot(common.Root)
+	root, routed, err := resolveMailboxRoot(common, *sessionFlag)
+	if err != nil {
+		return err
+	}
+	if err := validatePinOverride(common, *ignoreSessionPinFlag, routed); err != nil {
+		return err
+	}
+	if err := guardMailboxContext("dlq read", root, routed, *ignoreSessionPinFlag); err != nil {
+		return err
+	}
+	if err := requireMailbox(root, me); err != nil {
+		return err
+	}
 
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
@@ -273,9 +287,11 @@ func runDLQRetry(args []string) error {
 	idFlag := fs.String("id", "", "DLQ message ID to retry")
 	allFlag := fs.Bool("all", false, "Retry all DLQ messages")
 	forceFlag := fs.Bool("force", false, "Force retry even if max retries exceeded")
+	sessionFlag := fs.String("session", "", "Target session under the resolved base root")
+	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, ignore a conflicting AM_SESSION pin")
 
-	usage := usageWithFlags(fs, "amq dlq retry --me <agent> --id <dlq_id> [--force] [options]",
-		"Or: amq dlq retry --me <agent> --all [--force]")
+	usage := usageWithFlags(fs, "amq dlq retry --me <agent> --id <dlq_id> [--session <name>] [--force] [options]",
+		"Or: amq dlq retry --me <agent> --all [--session <name>] [--force]")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -295,7 +311,19 @@ func runDLQRetry(args []string) error {
 		return UsageError("--me: %v", err)
 	}
 	common.Me = me
-	root := resolveRoot(common.Root)
+	root, routed, err := resolveMailboxRoot(common, *sessionFlag)
+	if err != nil {
+		return err
+	}
+	if err := validatePinOverride(common, *ignoreSessionPinFlag, routed); err != nil {
+		return err
+	}
+	if err := guardMailboxContext("dlq retry", root, routed, *ignoreSessionPinFlag); err != nil {
+		return err
+	}
+	if err := requireMailbox(root, me); err != nil {
+		return err
+	}
 
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
@@ -370,8 +398,10 @@ func runDLQPurge(args []string) error {
 	olderFlag := fs.String("older-than", "", "Duration (e.g. 24h) - only purge messages older than this")
 	dryRunFlag := fs.Bool("dry-run", false, "Show what would be removed without deleting")
 	yesFlag := fs.Bool("yes", false, "Skip confirmation prompt")
+	sessionFlag := fs.String("session", "", "Target session under the resolved base root")
+	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, ignore a conflicting AM_SESSION pin")
 
-	usage := usageWithFlags(fs, "amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes] [options]")
+	usage := usageWithFlags(fs, "amq dlq purge --me <agent> [--session <name>] [--older-than <duration>] [--dry-run] [--yes] [options]")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -385,7 +415,19 @@ func runDLQPurge(args []string) error {
 		return UsageError("--me: %v", err)
 	}
 	common.Me = me
-	root := resolveRoot(common.Root)
+	root, routed, err := resolveMailboxRoot(common, *sessionFlag)
+	if err != nil {
+		return err
+	}
+	if err := validatePinOverride(common, *ignoreSessionPinFlag, routed); err != nil {
+		return err
+	}
+	if err := guardMailboxContext("dlq purge", root, routed, *ignoreSessionPinFlag); err != nil {
+		return err
+	}
+	if err := requireMailbox(root, me); err != nil {
+		return err
+	}
 
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err

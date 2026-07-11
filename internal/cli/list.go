@@ -44,6 +44,7 @@ func runList(args []string) error {
 	curFlag := fs.Bool("cur", false, "List messages in inbox/cur")
 	limitFlag := fs.Int("limit", 0, "Limit number of messages (0 = no limit)")
 	offsetFlag := fs.Int("offset", 0, "Offset into sorted results (0 = start)")
+	sessionFlag := fs.String("session", "", "Target session under the resolved base root")
 
 	// Filter flags
 	priorityFlag := fs.String("priority", "", "Filter by priority (urgent, normal, low)")
@@ -52,7 +53,7 @@ func runList(args []string) error {
 	var labelFlags multiStringFlag
 	fs.Var(&labelFlags, "label", "Filter by label (can be repeated)")
 
-	usage := usageWithFlags(fs, "amq list --me <agent> [--new | --cur] [options]")
+	usage := usageWithFlags(fs, "amq list --me <agent> [--session <name>] [--new | --cur] [options]")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -66,7 +67,21 @@ func runList(args []string) error {
 		return UsageError("--me: %v", err)
 	}
 	common.Me = me
-	root := resolveRoot(common.Root)
+	root, routed, err := resolveMailboxRoot(common, *sessionFlag)
+	if err != nil {
+		return err
+	}
+	if !routed {
+		if mismatch, checkErr := sessionPinMismatch(root); checkErr != nil {
+			_ = writeStderr("warning: %v\n", checkErr)
+		} else if mismatch != nil {
+			_ = writeStderr("warning: %s\n", mismatch.Error())
+		}
+	}
+	if err := requireMailbox(root, me); err != nil {
+		emitSiblingBacklogHintsIfInboxEmpty(root, me)
+		return err
+	}
 
 	// Validate handle against config.json
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
@@ -113,13 +128,7 @@ func runList(args []string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if common.JSON {
-				return writeJSON(os.Stdout, []listItem{})
-			}
-			if err := writeStdoutLine("No messages."); err != nil {
-				return err
-			}
-			return nil
+			return NotFoundError("mailbox for %q disappeared while listing %s", common.Me, dir)
 		}
 		return err
 	}
@@ -187,6 +196,9 @@ func runList(args []string) error {
 		items = items[:*limitFlag]
 	}
 
+	if len(items) == 0 && box == "new" {
+		emitSiblingBacklogHintsIfInboxEmpty(root, common.Me)
+	}
 	if common.JSON {
 		return writeJSON(os.Stdout, items)
 	}

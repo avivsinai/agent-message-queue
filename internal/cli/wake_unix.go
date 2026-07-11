@@ -1034,17 +1034,6 @@ func wakeCommandEnv(base []string, root string, owner *wakeOwner) ([]string, err
 	return setEnvVar(env, envWakeOwner, encoded), nil
 }
 
-func unsetEnvVar(env []string, key string) []string {
-	prefix := key + "="
-	out := env[:0]
-	for _, entry := range env {
-		if !strings.HasPrefix(entry, prefix) {
-			out = append(out, entry)
-		}
-	}
-	return out
-}
-
 func wakeOwnerHealthCheck(owner wakeOwner) error {
 	if err := validateWakeOwner(owner); err != nil {
 		return err

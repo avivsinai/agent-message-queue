@@ -1,0 +1,57 @@
+package cli
+
+import (
+	"path/filepath"
+	"strings"
+)
+
+// absoluteSessionRoot resolves root against the current working directory at
+// session start. This is the single point where a coop session's mailbox
+// identity is frozen; everything downstream must see an absolute path.
+func absoluteSessionRoot(root string) (string, error) {
+	return filepath.Abs(root)
+}
+
+func coopSessionIdentity(root, requestedSession, requestedRoot string) string {
+	if requestedSession != "" {
+		return requestedSession
+	}
+	if requestedRoot == "" {
+		return defaultSessionName
+	}
+	return inferredSessionIdentity(root)
+}
+
+func buildCoopExecEnvironment(base []string, root, me, session string) []string {
+	env := setEnvVar(base, envRoot, root)
+	env = setEnvVar(env, envMe, me)
+	baseRoot := root
+	if session != "" {
+		baseRoot = filepath.Dir(root)
+	}
+	env = setEnvVar(env, envBaseRoot, baseRoot)
+	return setEnvVar(env, envSession, session)
+}
+
+// setEnvVar sets or replaces an environment variable in a slice.
+func setEnvVar(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
+}
+
+func unsetEnvVar(env []string, key string) []string {
+	prefix := key + "="
+	out := env[:0]
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}

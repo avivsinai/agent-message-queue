@@ -34,7 +34,11 @@ curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/
 
 ## Environment Rules
 
-AMQ primarily uses two env vars for routing: `AM_ROOT` (which mailbox tree) and `AM_ME` (which agent). Getting these wrong means messages go to the wrong place or silently disappear, so it matters to let the CLI handle them rather than guessing.
+AMQ primarily uses `AM_ROOT` (which mailbox tree) and `AM_ME` (which agent).
+Pinned terminals also carry `AM_BASE_ROOT` plus an independent `AM_SESSION`
+identity; sessionless pins use the exact root as `AM_BASE_ROOT` and an empty
+`AM_SESSION`. Getting these wrong means messages go to the wrong place or
+silently disappear, so let the CLI handle them rather than guessing.
 
 **Inside `coop exec`** — everything is pre-configured. Just run bare commands:
 ```bash
@@ -42,18 +46,26 @@ amq send --to codex --body "hello"     # correct
 amq send --me claude --to codex ...    # wrong — --me overrides the env
 ./amq send ...                         # wrong — use amq from PATH
 ```
-The reason: `coop exec` sets `AM_ROOT` and `AM_ME` precisely for the session. Passing `--me` overrides the env, and passing `--root` intentionally overrides the current root (the CLI will note that on stderr if it differs from `AM_ROOT`). Prefer bare commands unless you mean to target a different root.
+The reason: `coop exec` sets `AM_ROOT`, `AM_ME`, `AM_BASE_ROOT`, and
+`AM_SESSION` precisely for the session. Passing `--me` overrides the identity;
+for read-side sibling access, use `--session <name>` instead of overriding the
+raw root.
 
 **Outside `coop exec`** — resolve the root from config, don't hardcode it:
 ```bash
-eval "$(amq env --me claude)"          # reads .amqrc chain, sets both vars
+eval "$(amq env --me claude)"          # reads .amqrc chain, replaces the full context
 eval "$(amq env --session auth --me claude --export)"  # pin this terminal to one session
 
 # Or pin per-command without polluting the shell (useful in scripts):
 AM_ME=claude AM_ROOT=$(amq env --json | jq -r .root) amq send --to codex --body "hello"
 ```
 Why not hardcode? The root path depends on the config chain (project `.amqrc` → `AMQ_GLOBAL_ROOT` → `~/.amqrc`). Hardcoding skips this and breaks when the project moves or config changes.
-Use `--export` only when the whole terminal should stay pinned; it exports `AM_BASE_ROOT` for session roots and prints a stderr note. Treat it as one terminal, one session.
+Every shell-mode `amq env` invocation replaces the complete context. It emits
+`AM_SESSION` unconditionally (empty for a sessionless root), exports
+`AM_BASE_ROOT` as the authorized parent for named sessions or the exact root for
+a sessionless context.
+`--export` additionally prints a stderr pin note. Treat the evaluated output as
+one terminal, one session.
 
 **Global fallback**: Orchestrator-spawned agents often start outside the repo root where no project `.amqrc` exists. Set `AMQ_GLOBAL_ROOT` or `~/.amqrc` so `amq env` and `amq doctor` still resolve the correct queue.
 
@@ -163,6 +175,20 @@ amq receipts wait --me codex --msg-id <msg_id> --stage drained --timeout 60s
 
 `amq read`, `amq drain`, and `amq monitor` all apply the same strict header validation. Messages in `inbox/new` that are corrupt or have malformed headers are moved to DLQ and produce a `dlq` receipt.
 
+Those consuming commands, `watch`, and mutating DLQ commands refuse a raw
+target that conflicts with a complete `AM_BASE_ROOT`/`AM_SESSION` pin before
+touching mailbox state. `send` and `reply` apply the same check to their source
+context. Use `--session <name>` for deliberate sibling access. The raw-root
+escape hatch, `--ignore-session-pin`, requires a non-empty explicit `--root`;
+it never blesses an inherited `AM_ROOT`. `list` warns and remains available for
+non-destructive inspection. With no session/tree evidence, scripts and CI
+remain fail-open. A missing mailbox is an error, not an empty inbox. Empty
+`drain` and `list --new` results may print a stderr note when the same handle
+has pending messages in a sibling session; follow the exact `amq list --session
+<name> --me <handle> --new` command in that note.
+This is an operational safety check, not an authorization boundary; a local
+process can deliberately repin or override it.
+
 ## Session Layout
 
 By default, the root is `.agent-mail` (from `.amqrc` or auto-detect). Use `--session` to create isolated subdirectories:
@@ -176,7 +202,11 @@ By default, the root is `.agent-mail` (from `.amqrc` or auto-detect). Use `--ses
 - `amq coop exec claude` → `AM_ROOT=.agent-mail/collab` (default session)
 - `amq coop exec --session auth claude` → `AM_ROOT=.agent-mail/auth`
 
-The main env vars are `AM_ROOT` (where) + `AM_ME` (who). `coop exec` may also set `AM_BASE_ROOT` for cross-session resolution. The CLI enforces correct routing — just run `amq` commands as-is.
+The main env vars are `AM_ROOT` (where) + `AM_ME` (who). `coop exec` also sets
+`AM_BASE_ROOT` for cross-session resolution and `AM_SESSION` as the independent
+session identity used by consuming-command guards. The CLI enforces correct
+routing — run bare commands for the current session or use `--session` for a
+named sibling.
 Default `.agent-mail/<session>` layouts are recognized even without `.amqrc`; custom root names still need config or explicit flags/env.
 
 ## Cross-Project Routing
@@ -292,6 +322,7 @@ Note: The `agent@name` inline syntax (e.g., `codex@infra`) is for cross-project 
 ```bash
 amq send --to codex --body "Message"              # Send (uses AM_ROOT/AM_ME from env)
 amq drain --include-body                          # Receive (one-shot, silent when empty)
+amq drain --session auth --include-body           # Deliberate sibling-session receive
 amq reply --id <msg_id> --body "Response"          # Reply in thread
 amq watch --timeout 60s                           # Block until message arrives
 amq list --new                                    # Peek without side effects

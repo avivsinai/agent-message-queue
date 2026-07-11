@@ -27,7 +27,7 @@ AMQ gives agents a **local interoperability bus**: they can send messages, reply
 - **Cross-project federation** — Route messages across peer repos, preserve reply routing, and run decision threads that span projects.
 - **Swarm mode** — Join Claude Code Agent Teams, claim tasks, and bridge task notifications into AMQ.
 - **Optional adapters** — Lightweight Symphony hooks and an experimental Kanban bridge can emit normal AMQ messages with structured metadata.
-- **Operational diagnostics** — `amq doctor --ops` shows queue depth, DLQ state, presence freshness, and integration hints.
+- **Operational diagnostics** — `amq doctor --ops` shows queue depth, sibling-session backlogs, DLQ state, presence freshness, and integration hints.
 
 ![AMQ Demo — Claude and Codex collaborating via split-pane terminal](docs/assets/demo.gif)
 
@@ -154,6 +154,26 @@ amq reply --id <msg_id> --kind review_response --body "LGTM with comments"
 
 `amq read`, `amq drain`, and `amq monitor` now share the same strict header validation. If a message in `inbox/new` is corrupt or has malformed headers, the command moves it to DLQ and emits a `dlq` receipt instead of leaving it in place.
 
+`coop exec` and every shell-mode `amq env` invocation pin the terminal's exact
+root context with `AM_BASE_ROOT` plus `AM_SESSION`. For named sessions,
+`AM_BASE_ROOT` is the authorized parent; for sessionless contexts, it is the
+exact root and `AM_SESSION` is empty. `read`, `drain`, `monitor`, `watch`,
+`reply`, and mutating DLQ commands refuse a raw root that conflicts with that
+pin before reading or moving mailbox state. Use `--session <name>` to target a
+sibling deliberately. For deliberate raw-root access, `--ignore-session-pin`
+is accepted only together with a non-empty explicit `--root`; blank `--root`
+and `--session` values are usage errors. `list` remains a non-destructive
+inspection path: it warns on a pin mismatch but still lists the resolved
+mailbox. Unpinned scripts and CI retain the existing fail-open behavior.
+
+A missing mailbox is an error, not an empty inbox. When `drain` or `list --new`
+finds an actually empty inbox, it prints a stderr-only note if the same handle
+has pending messages in a sibling session, including an exact non-destructive
+`amq list --session <name> --me <handle> --new` command. `doctor --ops` reports
+the same condition as a `sibling_backlog` warning. The pin is an operational
+safety check, not access control: a local process can still repin the
+environment or use the explicit override.
+
 ### 4. Inspect Health
 
 ```bash
@@ -249,9 +269,12 @@ session, opt in explicitly:
 eval "$(amq env --session auth --me claude --export)"
 ```
 
-That exports `AM_ROOT`, `AM_ME`, and, for session roots, `AM_BASE_ROOT`, and
-prints a stderr note that the terminal is pinned. Treat this as one terminal,
-one session.
+Every shell-mode `amq env` output replaces the complete context: `AM_ROOT`,
+`AM_ME`, `AM_BASE_ROOT`, and `AM_SESSION`. Sessionless output sets
+`AM_BASE_ROOT` to the exact root and writes an empty `AM_SESSION`, so changing
+to another sessionless root is detectable. `--export` additionally prints a
+stderr note that the terminal is pinned. Treat this as one terminal, one
+session.
 
 Auto-detect covers the default `.agent-mail` layout, including `.agent-mail/<session>` session roots without `.amqrc`. Custom root names and peer config still require `.amqrc` or explicit flags/env.
 This same chain is used by `amq env`, `amq doctor`, and the integration commands, so Symphony and Kanban-launched agents can find the correct queue even when they are not started from the project directory.
