@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.41.1] - 2026-07-10
 ### Fixed
 
+- CI changelog gate no longer fails Dependabot PRs after a maintainer updates
+  the branch: a manual `gh pr update-branch` makes the maintainer the
+  synchronize-event actor, so the actor-based skip stopped applying. The gate
+  now also skips on the PR author (`pull_request.user.login`), GitHub's
+  documented Dependabot-detection pattern, which stays `dependabot[bot]`
+  regardless of who updates the branch.
+
 - `amq wake` raw injection submits again in fast-reading TUIs (codex-tui, busy
   Claude Code): the v0.41.0 drain-wait completes within microseconds when the
   TUI is actively reading, so the submit CR landed inside the TUI's paste-burst
