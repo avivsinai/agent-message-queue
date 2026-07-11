@@ -1009,7 +1009,7 @@ func TestRunWakeRepairClearsRepairAvailableAfterStartFailure(t *testing.T) {
 }
 
 func TestBuildCoopWakeArgsIncludesInjectViaTarget(t *testing.T) {
-	args := buildCoopWakeArgs("codex", "/tmp/root", "/abs/injector", []string{"exec", "target"})
+	args := buildCoopWakeArgs("codex", "/tmp/root", wakeInjectModeAuto, "/abs/injector", []string{"exec", "target"})
 	got := strings.Join(args, "|")
 	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target"
 	if got != want {

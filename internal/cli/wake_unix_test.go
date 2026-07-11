@@ -120,6 +120,36 @@ func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
 	}
 }
 
+func TestRunWakeWithLoopNoneSkipsTTYAndWritesReadyFile(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	errDone := errors.New("done")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-mode", "none",
+		"--ready-file", readyPath,
+	}, func(cfg wakeConfig) error {
+		if cfg.injectMode != wakeInjectModeNone {
+			t.Fatalf("injectMode = %q, want none", cfg.injectMode)
+		}
+		if _, statErr := os.Stat(readyPath); statErr != nil {
+			t.Fatalf("expected ready file before wake loop: %v", statErr)
+		}
+		return errDone
+	})
+	if !errors.Is(err, errDone) {
+		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
 func TestRunWakeHelpHidesInternalReadyFlags(t *testing.T) {
 	stdout, _, err := captureWakeRepairOutput(t, func() error {
 		return runWake([]string{"--help"})
@@ -134,6 +164,9 @@ func TestRunWakeHelpHidesInternalReadyFlags(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "inject-cmd") {
 		t.Fatalf("wake help should keep --inject-cmd visible:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "none") || !strings.Contains(stdout, "zero terminal input") {
+		t.Fatalf("wake help should document none as zero-input mode:\n%s", stdout)
 	}
 }
 
@@ -566,6 +599,93 @@ func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("expected existing usable wake to satisfy ready file, got %v", err)
+	}
+	if _, statErr := os.Stat(readyPath); statErr != nil {
+		t.Fatalf("ready file should exist, statErr=%v", statErr)
+	}
+}
+
+func TestRunWakeWithLoopNoneRejectsExistingInputWake(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "start-1",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-mode", "auto"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+		PID:          wakePID,
+		TTY:          "test-tty",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-mode", "none",
+		"--ready-file", readyPath,
+		"--accept-existing-wake",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with an existing input wake: %#v", cfg)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "requested --inject-mode none") {
+		t.Fatalf("error = %v, want zero-input existing-wake refusal", err)
+	}
+	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+		t.Fatalf("ready file should not exist, statErr=%v", statErr)
+	}
+}
+
+func TestRunWakeWithLoopNoneAcceptsExistingNoneWake(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "start-1",
+				BootID:     "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-mode", "none"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+		PID:          wakePID,
+		TTY:          "unknown",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+		WakeMode:     wakeInjectModeNone,
+	})
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-mode", "none",
+		"--ready-file", readyPath,
+		"--accept-existing-wake",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with an existing none wake: %#v", cfg)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected existing none wake to satisfy readiness, got %v", err)
 	}
 	if _, statErr := os.Stat(readyPath); statErr != nil {
 		t.Fatalf("ready file should exist, statErr=%v", statErr)
@@ -1652,6 +1772,33 @@ func TestRunWakeWithLoopRejectsInjectArgWithoutInjectVia(t *testing.T) {
 	}
 }
 
+func TestRunWakeWithLoopRejectsNoneWithInputTransports(t *testing.T) {
+	injector := writeExecutableForTest(t, "injector")
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "inject via", args: []string{"--inject-via", injector}, want: "--inject-via"},
+		{name: "inject arg", args: []string{"--inject-arg", "exec"}, want: "--inject-arg"},
+		{name: "inject cmd", args: []string{"--inject-cmd", "amq drain"}, want: "--inject-cmd"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := []string{"--root", t.TempDir(), "--me", "orchestrator", "--inject-mode", "none"}
+			args = append(args, tt.args...)
+			err := runWakeWithLoop(args, func(cfg wakeConfig) error {
+				t.Fatalf("loop should not run with invalid flags: %#v", cfg)
+				return nil
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "none") {
+				t.Fatalf("error = %v, want none-mode conflict mentioning %s", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestRunWakeWithLoopRejectsNonPositiveInjectTimeout(t *testing.T) {
 	err := runWakeWithLoop([]string{
 		"--root", t.TempDir(),
@@ -1676,6 +1823,15 @@ func TestWakeHealthCheckSkipsTTYForInjectVia(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("expected external injection health check to skip TTY, got %v", err)
+	}
+}
+
+func TestWakeHealthCheckSkipsTTYForNoneMode(t *testing.T) {
+	err := wakeHealthCheck(wakeConfig{injectMode: wakeInjectModeNone}, func() bool {
+		return false
+	})
+	if err != nil {
+		t.Fatalf("expected none mode health check to skip TTY, got %v", err)
 	}
 }
 

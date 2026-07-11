@@ -29,6 +29,7 @@ func runCoopExec(args []string) error {
 	noGitignoreFlag := fs.Bool("no-gitignore", false, "When auto-initializing, do not modify .gitignore")
 	noWakeFlag := fs.Bool("no-wake", false, "Don't start amq wake in background")
 	requireWakeFlag := fs.Bool("require-wake", false, "Fail if amq wake cannot start and acquire its lock")
+	wakeInjectModeFlag := fs.String("wake-inject-mode", wakeInjectModeAuto, "Wake injection mode: auto, raw, paste, none")
 	wakeInjectViaFlag := fs.String("wake-inject-via", "", "Start wake with this absolute --inject-via executable, enabling later amq wake repair")
 	var wakeInjectArgFlags multiStringFlag
 	fs.Var(&wakeInjectArgFlags, "wake-inject-arg", "Fixed argument for wake --inject-via before the payload (repeatable)")
@@ -49,8 +50,14 @@ func runCoopExec(args []string) error {
 		"  amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Codex with flags",
 		"  amq coop exec --session feature-x claude          # Isolated session",
 		"  amq coop exec --root .agent-mail/auth claude      # Explicit root (no session default)",
+		"  amq coop exec --require-wake --wake-inject-mode none claude  # Zero-input wake",
 		"  amq coop exec --wake-inject-via /path/to/injector codex",
 		"  amq coop exec --me myagent bash                   # Debug shell with AMQ env",
+		"",
+		"Zero-input readiness:",
+		"  --wake-inject-mode none never reuses an existing wake unless its lock",
+		"  proves it was also started in none mode; stop an older wake and retry.",
+		"  A default request remains transport-agnostic and may reuse a none wake.",
 	)
 
 	if handled, err := parseFlags(fs, amqArgs, usage); err != nil {
@@ -62,8 +69,18 @@ func runCoopExec(args []string) error {
 		return UsageError("--require-wake cannot be used with --no-wake")
 	}
 	wakeInjectVia := strings.TrimSpace(*wakeInjectViaFlag)
+	wakeInjectMode, err := normalizeWakeInjectMode(*wakeInjectModeFlag)
+	if err != nil {
+		return UsageError("--wake-inject-mode: %v", err)
+	}
 	if *wakeInjectViaFlag != "" && wakeInjectVia == "" {
 		return UsageError("--wake-inject-via must not be blank")
+	}
+	if wakeInjectMode == wakeInjectModeNone && wakeInjectVia != "" {
+		return UsageError("--wake-inject-via cannot be used with --wake-inject-mode none")
+	}
+	if wakeInjectMode == wakeInjectModeNone && len(wakeInjectArgFlags) > 0 {
+		return UsageError("--wake-inject-arg cannot be used with --wake-inject-mode none")
 	}
 	if wakeInjectVia == "" && len(wakeInjectArgFlags) > 0 {
 		return UsageError("--wake-inject-arg requires --wake-inject-via")
@@ -91,7 +108,7 @@ func runCoopExec(args []string) error {
 	if agentHandle == "" {
 		agentHandle = strings.ToLower(filepath.Base(cmdName))
 	}
-	agentHandle, err := normalizeHandle(agentHandle)
+	agentHandle, err = normalizeHandle(agentHandle)
 	if err != nil {
 		return fmt.Errorf("cannot derive agent handle from %q: %w (use --me to override)", cmdName, err)
 	}
@@ -223,7 +240,7 @@ func runCoopExec(args []string) error {
 		if wakeInjectVia != "" {
 			wakeOwner = currentWakeOwner()
 		}
-		wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(agentHandle, root, wakeInjectVia, []string(wakeInjectArgFlags))...)
+		wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(agentHandle, root, wakeInjectMode, wakeInjectVia, []string(wakeInjectArgFlags))...)
 		var readyPath string
 		var cleanupReady func()
 		if *requireWakeFlag {
@@ -293,8 +310,11 @@ func absoluteSessionRoot(root string) (string, error) {
 	return filepath.Abs(root)
 }
 
-func buildCoopWakeArgs(agentHandle, root, injectVia string, injectArgs []string) []string {
+func buildCoopWakeArgs(agentHandle, root, injectMode, injectVia string, injectArgs []string) []string {
 	args := []string{"--no-update-check", "wake", "--me", agentHandle, "--root", root}
+	if injectMode != "" && injectMode != wakeInjectModeAuto {
+		args = append(args, "--inject-mode", injectMode)
+	}
 	if injectVia != "" {
 		args = append(args, "--inject-via", injectVia)
 		for _, arg := range injectArgs {

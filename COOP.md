@@ -231,8 +231,25 @@ as the final argv element. This executes a local process for each notification,
 and the payload can include sanitized but message-derived header content such as
 sender and subject.
 
+For permission-prompt workflows, use AMQ's fail-closed zero-input mode:
+
+```bash
+amq wake --me claude --inject-mode none --bell &
+
+# Or let coop exec start it and prove readiness before launching the agent.
+amq coop exec --require-wake --wake-inject-mode none claude
+```
+
+`none` writes notification text (and the optional bell) to wake's stderr and
+never writes terminal input. Urgent interrupt messages degrade to one bell plus
+the stderr notice instead of Ctrl+C. Because `--inject-via` is arbitrary local
+code and may itself inject terminal input, `none` rejects `--inject-via`,
+`--inject-arg`, and `--inject-cmd`. Stderr output shares the TUI terminal by
+default and may remain visible until the TUI redraws.
+
 **Options:**
-- `--inject-mode auto|raw|paste` - Injection strategy
+- `--inject-mode auto|raw|paste|none` - Injection strategy; `none` enforces zero terminal input
+- `--wake-inject-mode auto|raw|paste|none` - `coop exec` pass-through for its managed wake
 - `--inject-via <executable>` - External transport executable; bypasses TIOCSTI and local TTY startup checks
 - `--inject-arg <arg>` - Fixed argument before the payload; repeat for multiple arguments
 - `--inject-timeout 5s` - Maximum runtime for one external injection command
@@ -244,7 +261,19 @@ sender and subject.
 - `--input-max-hold 15s` - Maximum hold time for one deferred wake injection
 - `--interrupt` / `--interrupt=false` - Enable/disable Ctrl+C for urgent messages
 
-Input deferral is a heuristic, not a prompt-buffer guarantee. It only samples terminal state while a wake notification is already pending: unread bytes in the TTY input queue plus recent reads from the controlling terminal. If the foreground app has already consumed a partially typed prompt into its own editor buffer and the user pauses longer than `--input-quiet-for`, wake can still inject and submit. Explicit urgent interrupt messages bypass this deferral.
+Every input-injecting mode can activate a focused permission or approval dialog:
+raw and paste payload bytes, `--inject-cmd`, external injectors, and urgent Ctrl+C
+all carry this hazard. Single-key dialog shortcuts mean that removing Enter or
+sanitizing the payload is not a safety boundary.
+
+Input deferral is collision reduction, not modal detection or a prompt-buffer
+guarantee. It samples unread TTY input bytes and recent terminal reads only
+after a wake notification is pending. An idle approval dialog is
+indistinguishable from an idle composer. If the foreground app has already
+consumed a partially typed prompt and the user pauses longer than
+`--input-quiet-for`, wake can still inject and submit. Explicit urgent interrupt
+messages bypass this deferral. Use `none` when AMQ must guarantee zero synthetic
+input.
 
 **Platform support:**
 - macOS: Works

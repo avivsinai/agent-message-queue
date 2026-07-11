@@ -45,6 +45,11 @@ type wakeConfig struct {
 
 const defaultInjectTimeout = 5 * time.Second
 const (
+	wakeInjectModeAuto  = "auto"
+	wakeInjectModeRaw   = "raw"
+	wakeInjectModePaste = "paste"
+	wakeInjectModeNone  = "none"
+
 	rawInjectDrainTimeout      = 2 * time.Second
 	rawInjectDrainPollInterval = 10 * time.Millisecond
 	// rawInjectCRDrainTimeout bounds the wait for the submit CR itself to be
@@ -124,7 +129,7 @@ func inputDeferralDelay(state ttyInputState, now, deadline time.Time, quietFor, 
 }
 
 func shouldDeferBeforeInject(cfg *wakeConfig, deferForInput bool) bool {
-	return deferForInput && cfg.deferWhileInput && cfg.injectVia == ""
+	return deferForInput && cfg.deferWhileInput && cfg.injectVia == "" && cfg.injectMode != wakeInjectModeNone
 }
 
 func notifyNewMessages(cfg *wakeConfig) error {
@@ -195,6 +200,10 @@ func notifyNewMessages(cfg *wakeConfig) error {
 
 	if cfg.interrupt && len(interruptMessages) > 0 {
 		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.previewLen, cfg.interruptNotice)
+		if cfg.injectMode == wakeInjectModeNone {
+			writeWakeOutput(interruptText, true)
+			return nil
+		}
 		now := time.Now()
 		if cfg.interruptKey != "" && shouldInterruptNow(cfg, now) {
 			if cfg.injectVia != "" {
@@ -337,22 +346,47 @@ func shouldInterruptNow(cfg *wakeConfig, now time.Time) bool {
 
 func effectiveInjectMode(cfg *wakeConfig) string {
 	mode := cfg.injectMode
-	if mode == "" || mode == "auto" {
+	if mode == "" || mode == wakeInjectModeAuto {
 		// Auto-detect: use raw mode for Claude Code and Codex to avoid bracketed-paste
 		// Enter swallowing in some CLIs. Paste mode remains available via flag.
 		// Claude Code's Ink framework has buggy bracketed paste handling where CR gets
 		// coalesced with the paste-end sequence and swallowed by the input parser.
 		meLower := strings.ToLower(cfg.me)
 		if strings.Contains(meLower, "claude") || strings.Contains(meLower, "codex") {
-			mode = "raw"
+			mode = wakeInjectModeRaw
 		} else {
-			mode = "paste"
+			mode = wakeInjectModePaste
 		}
 	}
 	return mode
 }
 
+func normalizeWakeInjectMode(raw string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	if mode == "" {
+		mode = wakeInjectModeAuto
+	}
+	switch mode {
+	case wakeInjectModeAuto, wakeInjectModeRaw, wakeInjectModePaste, wakeInjectModeNone:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid injection mode %q (supported: auto, raw, paste, none)", raw)
+	}
+}
+
+func writeWakeOutput(text string, bell bool) {
+	if bell {
+		text = "\a" + text
+	}
+	_, _ = fmt.Fprint(os.Stderr, text+"\n")
+}
+
 func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error {
+	if cfg.injectMode == wakeInjectModeNone {
+		writeWakeOutput(text, cfg.bell)
+		return nil
+	}
+
 	// Keep plain text for stderr fallback
 	plainText := text
 	if cfg.bell {
@@ -383,7 +417,7 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	}
 	var injectErr error
 	switch mode {
-	case "raw":
+	case wakeInjectModeRaw:
 		// Raw mode: inject text and CR separately to avoid paste detection.
 		// Ink treats multi-char input as paste, not keypresses. Sending text+CR
 		// as one chunk makes Ink see pasted text, not an Enter keypress.
@@ -393,7 +427,7 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 		}
 		injectErr = injectRawNotification(cfg, injectedText)
 
-	case "paste":
+	case wakeInjectModePaste:
 		// Paste mode: bracketed paste with delayed CR
 		// Works with crossterm/ratatui apps
 		// Send paste content first, then CR after short delay to avoid coalescing

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
@@ -169,6 +170,52 @@ func TestCoopExecWakeInjectViaValidation(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestCoopExecWakeInjectModeValidation(t *testing.T) {
+	injector := filepath.Join(secureTempDirForTest(t), "injector")
+	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write injector: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "unknown mode",
+			args:    []string{"--wake-inject-mode", "silent", "claude"},
+			wantErr: "supported: auto, raw, paste, none",
+		},
+		{
+			name:    "none with inject via",
+			args:    []string{"--wake-inject-mode", "none", "--wake-inject-via", injector, "claude"},
+			wantErr: "--wake-inject-via cannot be used with --wake-inject-mode none",
+		},
+		{
+			name:    "none with inject arg",
+			args:    []string{"--wake-inject-mode", "none", "--wake-inject-arg", "exec", "claude"},
+			wantErr: "--wake-inject-arg cannot be used with --wake-inject-mode none",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := runCoopExec(tt.args)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestBuildCoopWakeArgsIncludesNoneMode(t *testing.T) {
+	got := buildCoopWakeArgs("codex", "/tmp/root", "none", "", nil)
+	want := []string{"--no-update-check", "wake", "--me", "codex", "--root", "/tmp/root", "--inject-mode", "none"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("buildCoopWakeArgs() = %#v, want %#v", got, want)
 	}
 }
 

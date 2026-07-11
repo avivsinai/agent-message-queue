@@ -71,6 +71,15 @@ Leader prepares commit -> user approves -> push
 ## Interrupts
 
 - Urgent messages labeled `interrupt` trigger wake Ctrl+C injection + an interrupt notice (when wake is running).
+- Input injection can activate a focused permission or approval dialog. Payload
+  text alone may match single-key shortcuts, so removing Enter is not safe.
+- `--defer-while-input` reduces collisions with recent typing but cannot detect
+  modal state; an idle dialog looks like an idle composer.
+- For an AMQ-enforced zero-input watcher, run `amq wake --inject-mode none` or
+  `amq coop exec --require-wake --wake-inject-mode none <agent>`. This mode
+  writes notices to wake stderr, turns urgent interrupts into one bell plus the
+  output notice, and rejects `--inject-via`, `--inject-arg`, and `--inject-cmd`.
+  Stderr shares the TUI terminal by default and may remain visible until redraw.
 
 ## Message Handling
 

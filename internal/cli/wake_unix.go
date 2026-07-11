@@ -52,6 +52,7 @@ type wakeRepairStarter func(root, me string, target wakeTarget) (int, error)
 type wakeLockAcquireOptions struct {
 	acceptExistingValid bool
 	target              *wakeTarget
+	wakeMode            string
 }
 
 var startWakeFromTarget = startWakeFromTargetDefault
@@ -86,7 +87,7 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 			return nil, fmt.Errorf("wake lock is being created (retry shortly)")
 		case wakeLockValid:
 			if options.acceptExistingValid {
-				if err := requireWakeLockUsable(inspection); err != nil {
+				if err := requireWakeLockUsable(inspection, options.wakeMode); err != nil {
 					return nil, err
 				}
 				return nil, wakeLockAlreadyRunningError(me, inspection)
@@ -123,6 +124,8 @@ createLock:
 	if options.target != nil {
 		lock.WakeMode = wakeTargetInjectVia
 		lock.TargetDigest = wakeTargetDigest(*options.target)
+	} else if options.wakeMode == wakeInjectModeNone {
+		lock.WakeMode = wakeInjectModeNone
 	}
 	if hostname, err := os.Hostname(); err == nil {
 		lock.Hostname = hostname
@@ -144,7 +147,7 @@ createLock:
 			winner := inspectWakeLock(root, me)
 			if winner.Status == wakeLockValid {
 				if options.acceptExistingValid {
-					if usableErr := requireWakeLockUsable(winner); usableErr != nil {
+					if usableErr := requireWakeLockUsable(winner, options.wakeMode); usableErr != nil {
 						return nil, usableErr
 					}
 				}
@@ -236,11 +239,14 @@ func wakeLockNeedsOwnerReplacement(inspection wakeLockInspection) (bool, error) 
 	return wakeOwnerHealthCheck(*target.Owner) != nil, nil
 }
 
-func requireWakeLockUsable(inspection wakeLockInspection) error {
+func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string) error {
 	if !inspection.Exists || inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
 		return fmt.Errorf("existing wake lock for %s is not a confirmed valid wake", inspection.Agent)
 	}
-	if !wakeLockHasTTYOrExternalInjector(inspection) {
+	if requiredMode == wakeInjectModeNone && inspection.Lock.WakeMode != wakeInjectModeNone {
+		return fmt.Errorf("existing wake for %s cannot satisfy requested --inject-mode none; stop the existing wake and retry", inspection.Agent)
+	}
+	if !wakeLockHasUsableNotificationPath(inspection) {
 		return fmt.Errorf("existing wake lock for %s is not usable for --require-wake (pid %d on %s since %s)",
 			inspection.Agent, inspection.Lock.PID, inspection.Lock.TTY, inspection.Lock.Started)
 	}
@@ -251,7 +257,10 @@ func requireWakeLockUsable(inspection wakeLockInspection) error {
 	return nil
 }
 
-func wakeLockHasTTYOrExternalInjector(inspection wakeLockInspection) bool {
+func wakeLockHasUsableNotificationPath(inspection wakeLockInspection) bool {
+	if inspection.Lock.WakeMode == wakeInjectModeNone {
+		return true
+	}
 	if inspection.Lock.WakeMode == wakeTargetInjectVia || wakeArgsUseInjectVia(inspection.Process.Args) {
 		return true
 	}
@@ -608,7 +617,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	bellFlag := fs.Bool("bell", false, "Ring terminal bell on new messages")
 	debounceFlag := fs.Duration("debounce", 250*time.Millisecond, "Debounce window for batching messages")
 	previewLenFlag := fs.Int("preview-len", 48, "Max subject preview length")
-	injectModeFlag := fs.String("inject-mode", "auto", "Injection mode: auto, raw, paste (auto detects CLI type)")
+	injectModeFlag := fs.String("inject-mode", wakeInjectModeAuto, "Injection mode: auto, raw, paste, none (auto detects CLI type)")
 	deferWhileInputFlag := fs.Bool("defer-while-input", true, "Best-effort: defer non-interrupt injection while terminal input appears active")
 	inputQuietForFlag := fs.Duration("input-quiet-for", 1200*time.Millisecond, "Quiet window before deferred injection (best-effort; Linux tty atime granularity is ~8s)")
 	inputPollIntervalFlag := fs.Duration("input-poll-interval", 200*time.Millisecond, "Polling interval while waiting for quiet terminal input")
@@ -632,6 +641,8 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		"  auto  - Detect CLI type: raw for Claude Code/Codex, paste for others",
 		"  raw   - Plain text + CR, no bracketed paste (works with Ink-based CLIs)",
 		"  paste - Bracketed paste with delayed CR (works with crossterm-based CLIs)",
+		"  none  - Output notice on wake stderr; zero terminal input injection",
+		"          (urgent interrupts degrade to one bell + output notice)",
 		"",
 		"External injection:",
 		"  --inject-via runs a local executable for each notification, bypassing",
@@ -645,14 +656,19 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		"",
 		"Input deferral (default on): wake samples terminal input only after",
 		"  a message is pending, then injects after a short quiet window.",
-		"  Best-effort only: a pause longer than --input-quiet-for can still",
-		"  inject while a prompt is being composed. Interrupt messages bypass it.",
+		"  Collision reduction only: it cannot detect permission/approval dialogs.",
+		"  A pause longer than --input-quiet-for can still inject while a prompt",
+		"  is being composed. Interrupt messages bypass it.",
 		"  Atime sampling uses stdin (when a TTY) for cross-platform fidelity;",
 		"  Linux tty atime is updated at ~8s granularity, so quiet windows",
 		"  shorter than that are advisory.",
 		"",
 		"Interrupts (default on): urgent messages tagged with label \"interrupt\"",
-		"  trigger Ctrl+C injection + an interrupt notice.",
+		"  trigger Ctrl+C injection + an interrupt notice except in none mode.",
+		"",
+		"Safety: raw, paste, --inject-cmd, --inject-via, and interrupt Ctrl+C",
+		"  can activate a focused permission/approval dialog. Use none when AMQ",
+		"  must enforce zero synthetic input; stderr output may scribble until redraw.",
 		"",
 		"EXPERIMENTAL: Uses TIOCSTI ioctl (macOS/Linux). May not work on all systems.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
@@ -682,15 +698,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		return UsageError("--inject-timeout must be > 0")
 	}
 
-	injectMode := strings.ToLower(strings.TrimSpace(*injectModeFlag))
-	if injectMode == "" {
-		injectMode = "auto"
-	}
-	switch injectMode {
-	case "auto", "raw", "paste":
-		// ok
-	default:
-		return UsageError("invalid --inject-mode %q (supported: auto, raw, paste)", *injectModeFlag)
+	injectMode, err := normalizeWakeInjectMode(*injectModeFlag)
+	if err != nil {
+		return UsageError("%v", err)
 	}
 
 	interruptLabel := strings.TrimSpace(*interruptLabelFlag)
@@ -722,6 +732,15 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	if *injectViaFlag != "" && injectVia == "" {
 		return UsageError("--inject-via must not be blank")
 	}
+	if injectMode == wakeInjectModeNone && injectVia != "" {
+		return UsageError("--inject-via cannot be used with --inject-mode none")
+	}
+	if injectMode == wakeInjectModeNone && len(injectArgFlags) > 0 {
+		return UsageError("--inject-arg cannot be used with --inject-mode none")
+	}
+	if injectMode == wakeInjectModeNone && *injectCmdFlag != "" {
+		return UsageError("--inject-cmd cannot be used with --inject-mode none")
+	}
 	if injectVia == "" && len(injectArgFlags) > 0 {
 		return UsageError("--inject-arg requires --inject-via")
 	}
@@ -731,7 +750,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	}
 
 	// Verify TIOCSTI is available (skip in inject-via mode — uses external command instead)
-	if injectVia == "" {
+	if injectVia == "" && injectMode != wakeInjectModeNone {
 		if !tiocsti.Available() {
 			return errors.New("TIOCSTI not available on this platform; use tmux send-keys or terminal-specific injection")
 		}
@@ -770,6 +789,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	cleanup, err := acquireWakeLockWithOptions(root, me, wakeLockAcquireOptions{
 		acceptExistingValid: acceptExistingWake,
 		target:              target,
+		wakeMode:            injectMode,
 	})
 	if err != nil {
 		var alreadyRunning *wakeAlreadyRunningError
@@ -966,6 +986,9 @@ func runWakeLoop(cfg wakeConfig) error {
 }
 
 func wakeHealthCheck(cfg wakeConfig, ttyAvailableFn func() bool) error {
+	if cfg.injectMode == wakeInjectModeNone {
+		return nil
+	}
 	if cfg.injectVia != "" {
 		if cfg.wakeOwner != nil {
 			return wakeOwnerHealthCheck(*cfg.wakeOwner)

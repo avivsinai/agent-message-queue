@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- `amq wake --inject-mode none` now provides an AMQ-enforced zero-input mode
+  for permission-prompt workflows: normal notices go to wake stderr, urgent
+  interrupts emit one bell plus the stderr notice instead of Ctrl+C, and the
+  mode needs neither TIOCSTI nor a controlling TTY. It fails closed when
+  combined with `--inject-via`, `--inject-arg`, or `--inject-cmd`; `coop exec`
+  exposes the mode through `--wake-inject-mode` and refuses to satisfy an
+  explicit `none` request by reusing a wake whose zero-input mode cannot be
+  proven. Documentation now warns that every input-injecting mode can activate
+  a focused permission/approval dialog and that input deferral cannot detect
+  modal state (closes #216).
+
 ### Fixed
 
 - CI changelog gate no longer fails Dependabot PRs after a maintainer updates
