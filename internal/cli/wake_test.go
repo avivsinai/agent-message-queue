@@ -325,37 +325,192 @@ func stubRawInputDrained(t *testing.T, fn func(time.Duration, time.Duration) (ti
 	})
 }
 
-func TestInjectNotificationRawWaitsForInputDrainThenInjectsSingleCR(t *testing.T) {
+func stubRawInjectSleep(t *testing.T) *[]time.Duration {
+	t.Helper()
+	var slept []time.Duration
+	old := rawInjectSleep
+	rawInjectSleep = func(d time.Duration) {
+		slept = append(slept, d)
+	}
+	t.Cleanup(func() {
+		rawInjectSleep = old
+	})
+	return &slept
+}
+
+func TestRawInjectSettleDelayClearsCodexEnterSuppressWindow(t *testing.T) {
+	// Regression guard for the v0.41.0 Enter swallow: the settle (and rescue
+	// spacing, which reuses it) must exceed codex-tui's Enter-suppress window,
+	// or injected CRs are inserted as pasted newlines instead of submitting.
+	// A revert to the old 50ms floor must fail this test, not just review.
+	if rawInjectSettleDelay <= codexTUIEnterSuppressWindow {
+		t.Fatalf("rawInjectSettleDelay = %s, must exceed codex-tui Enter-suppress window %s",
+			rawInjectSettleDelay, codexTUIEnterSuppressWindow)
+	}
+	if margin := rawInjectSettleDelay - codexTUIEnterSuppressWindow; margin < 20*time.Millisecond {
+		t.Fatalf("settle margin over suppress window = %s, want >= 20ms for scheduler jitter", margin)
+	}
+}
+
+func TestRawSubmitPreludePicksByTarget(t *testing.T) {
+	cases := []struct {
+		me   string
+		want string
+	}{
+		{"codex", "\n"},
+		{"codex-test", "\n"},
+		{"my-codex-2", "\n"},
+		{"claude", ""},
+		{"claude-test", ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := rawSubmitPrelude(c.me); got != c.want {
+			t.Fatalf("rawSubmitPrelude(%q) = %q, want %q", c.me, got, c.want)
+		}
+	}
+}
+
+func TestInjectNotificationRawInjectsLFPreludeForCodex(t *testing.T) {
+	// codex targets get a lone LF between the drained text and the settle: it
+	// routes through codex-tui's Ctrl-J binding, which flushes and clears
+	// paste-burst state before the \r submit. In the reproduced Ghostty +
+	// kitty-enhanced path a bare \r did not submit without it.
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+		return time.Millisecond, true, nil
+	})
+	slept := stubRawInjectSleep(t)
+
+	cfg := &wakeConfig{injectMode: "raw", me: "codex"}
+	if err := injectNotification(cfg, "AMQ wake", true); err != nil {
+		t.Fatalf("injectNotification: %v", err)
+	}
+
+	if got := strings.Join(injected, "|"); got != "AMQ wake|\n|\r|\r" {
+		t.Fatalf("raw injection sequence = %q, want text, LF prelude, CR, rescue CR", got)
+	}
+	if len(*slept) != 2 {
+		t.Fatalf("settle sleeps = %v, want two settle delays", *slept)
+	}
+}
+
+func TestInjectNotificationRawNeverInjectsEscapeBytes(t *testing.T) {
+	// TIOCSTI delivers one byte per ioctl, so a multi-byte escape sequence can
+	// be split by reader scheduling: a reader that sees a lone ESC parses the
+	// Escape key, which cancels an active codex turn. Raw-mode injection must
+	// therefore never contain ESC for any target.
+	for _, me := range []string{"", "claude", "codex", "codex-test"} {
+		var injected []string
+		stubTIOCSTIInject(t, func(text string) error {
+			injected = append(injected, text)
+			return nil
+		})
+		stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+			return time.Millisecond, true, nil
+		})
+		stubRawInjectSleep(t)
+
+		cfg := &wakeConfig{injectMode: "raw", me: me}
+		if err := injectNotification(cfg, "AMQ wake", true); err != nil {
+			t.Fatalf("injectNotification(me=%q): %v", me, err)
+		}
+		for _, chunk := range injected {
+			if strings.Contains(chunk, "\x1b") {
+				t.Fatalf("me=%q injected chunk %q contains ESC", me, chunk)
+			}
+		}
+	}
+}
+
+func TestInjectNotificationRawDrainsSettlesThenInjectsCRWithRescue(t *testing.T) {
 	var injected []string
 	stubTIOCSTIInject(t, func(text string) error {
 		injected = append(injected, text)
 		return nil
 	})
 
-	var gotTimeout, gotPoll time.Duration
+	var drainCalls [][2]time.Duration
 	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
-		gotTimeout = timeout
-		gotPoll = pollInterval
+		drainCalls = append(drainCalls, [2]time.Duration{timeout, pollInterval})
 		return 30 * time.Millisecond, true, nil
 	})
+	slept := stubRawInjectSleep(t)
 
 	cfg := &wakeConfig{injectMode: "raw"}
 	if err := injectNotification(cfg, "AMQ wake", true); err != nil {
 		t.Fatalf("injectNotification: %v", err)
 	}
 
-	if got := strings.Join(injected, "|"); got != "AMQ wake|\r" {
-		t.Fatalf("raw injection sequence = %q, want text then one CR", got)
+	if got := strings.Join(injected, "|"); got != "AMQ wake|\r|\r" {
+		t.Fatalf("raw injection sequence = %q, want text then CR then rescue CR", got)
 	}
-	if gotTimeout != rawInjectDrainTimeout {
-		t.Fatalf("drain timeout = %s, want %s", gotTimeout, rawInjectDrainTimeout)
+	wantDrains := [][2]time.Duration{
+		{rawInjectDrainTimeout, rawInjectDrainPollInterval},
+		{rawInjectCRDrainTimeout, rawInjectDrainPollInterval},
 	}
-	if gotPoll != rawInjectDrainPollInterval {
-		t.Fatalf("drain poll interval = %s, want %s", gotPoll, rawInjectDrainPollInterval)
+	if len(drainCalls) != len(wantDrains) || drainCalls[0] != wantDrains[0] || drainCalls[1] != wantDrains[1] {
+		t.Fatalf("drain calls = %v, want %v", drainCalls, wantDrains)
+	}
+	if len(*slept) != 2 || (*slept)[0] != rawInjectSettleDelay || (*slept)[1] != rawInjectSettleDelay {
+		t.Fatalf("settle sleeps = %v, want two of %s", *slept, rawInjectSettleDelay)
 	}
 }
 
-func TestInjectNotificationRawInjectsSingleCROnDrainTimeout(t *testing.T) {
+func TestInjectNotificationRawSkipsRescueCRWhenFirstCRStillQueued(t *testing.T) {
+	// Models the stated skip branch precisely: the notification text drains
+	// normally, then the first CR is still queued at the CR-drain deadline.
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	var drainCalls [][2]time.Duration
+	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+		drainCalls = append(drainCalls, [2]time.Duration{timeout, pollInterval})
+		if len(drainCalls) == 1 {
+			return 5 * time.Millisecond, true, nil // text consumed by the TUI
+		}
+		return timeout, false, nil // first CR still in the kernel queue
+	})
+	slept := stubRawInjectSleep(t)
+
+	cfg := &wakeConfig{injectMode: "raw", debug: true}
+	stderr := captureWakeStderr(t, func() {
+		if err := injectNotification(cfg, "AMQ wake", true); err != nil {
+			t.Fatalf("injectNotification: %v", err)
+		}
+	})
+
+	if got := strings.Join(injected, "|"); got != "AMQ wake|\r" {
+		t.Fatalf("raw injection sequence = %q, want text then one CR", got)
+	}
+	wantDrains := [][2]time.Duration{
+		{rawInjectDrainTimeout, rawInjectDrainPollInterval},
+		{rawInjectCRDrainTimeout, rawInjectDrainPollInterval},
+	}
+	if len(drainCalls) != len(wantDrains) || drainCalls[0] != wantDrains[0] || drainCalls[1] != wantDrains[1] {
+		t.Fatalf("drain calls = %v, want %v", drainCalls, wantDrains)
+	}
+	if !strings.Contains(stderr, "input queue drained") {
+		t.Fatalf("expected text drain debug log, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "skipping rescue submit") {
+		t.Fatalf("expected rescue skip debug log, got %q", stderr)
+	}
+	if len(*slept) != 1 || (*slept)[0] != rawInjectSettleDelay {
+		t.Fatalf("settle sleeps = %v, want one of %s", *slept, rawInjectSettleDelay)
+	}
+}
+
+func TestInjectNotificationRawSkipsRescueCROnTotalReaderStall(t *testing.T) {
+	// Degraded branch: the reader is fully stalled — the text drain times out,
+	// the CR is injected anyway, and the rescue is skipped because the CR is
+	// provably still queued behind the unread text.
 	var injected []string
 	stubTIOCSTIInject(t, func(text string) error {
 		injected = append(injected, text)
@@ -364,6 +519,7 @@ func TestInjectNotificationRawInjectsSingleCROnDrainTimeout(t *testing.T) {
 	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
 		return timeout, false, nil
 	})
+	slept := stubRawInjectSleep(t)
 
 	cfg := &wakeConfig{injectMode: "raw", debug: true}
 	stderr := captureWakeStderr(t, func() {
@@ -378,9 +534,15 @@ func TestInjectNotificationRawInjectsSingleCROnDrainTimeout(t *testing.T) {
 	if !strings.Contains(stderr, "input drain timeout") {
 		t.Fatalf("expected drain timeout debug log, got %q", stderr)
 	}
+	if !strings.Contains(stderr, "skipping rescue submit") {
+		t.Fatalf("expected rescue skip debug log, got %q", stderr)
+	}
+	if len(*slept) != 1 || (*slept)[0] != rawInjectSettleDelay {
+		t.Fatalf("settle sleeps = %v, want one of %s", *slept, rawInjectSettleDelay)
+	}
 }
 
-func TestInjectNotificationRawInjectsSingleCROnDrainError(t *testing.T) {
+func TestInjectNotificationRawInjectsBothCRsOnDrainError(t *testing.T) {
 	var injected []string
 	stubTIOCSTIInject(t, func(text string) error {
 		injected = append(injected, text)
@@ -389,6 +551,7 @@ func TestInjectNotificationRawInjectsSingleCROnDrainError(t *testing.T) {
 	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
 		return 15 * time.Millisecond, false, errors.New("open /dev/tty: permission denied")
 	})
+	slept := stubRawInjectSleep(t)
 
 	cfg := &wakeConfig{injectMode: "raw", debug: true}
 	stderr := captureWakeStderr(t, func() {
@@ -397,11 +560,16 @@ func TestInjectNotificationRawInjectsSingleCROnDrainError(t *testing.T) {
 		}
 	})
 
-	if got := strings.Join(injected, "|"); got != "AMQ wake|\r" {
-		t.Fatalf("raw injection sequence = %q, want text then one CR", got)
+	// With the queue unobservable, fall back to timing alone: both CRs are sent
+	// on the settle cadence, mirroring the pre-drain-wait behavior.
+	if got := strings.Join(injected, "|"); got != "AMQ wake|\r|\r" {
+		t.Fatalf("raw injection sequence = %q, want text then CR then rescue CR", got)
 	}
 	if !strings.Contains(stderr, "input drain wait unavailable") {
 		t.Fatalf("expected drain unavailable debug log, got %q", stderr)
+	}
+	if len(*slept) != 2 {
+		t.Fatalf("settle sleeps = %v, want two settle delays", *slept)
 	}
 }
 
