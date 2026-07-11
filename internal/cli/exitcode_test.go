@@ -16,6 +16,7 @@ func TestGetExitCode(t *testing.T) {
 		{"usage error", UsageError("bad flag"), ExitUsage},
 		{"not found error", NotFoundError("msg not found"), ExitNotFound},
 		{"timeout error", TimeoutError("timed out"), ExitTimeout},
+		{"context mismatch", ContextMismatchError("unsafe context"), ExitContextMismatch},
 		{"wrapped exit code", WithExitCode(ExitNotFound, errors.New("custom")), ExitNotFound},
 	}
 

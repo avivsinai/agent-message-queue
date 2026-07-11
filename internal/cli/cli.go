@@ -6,6 +6,7 @@ const (
 	envRoot       = "AM_ROOT"
 	envMe         = "AM_ME"
 	envBaseRoot   = "AM_BASE_ROOT"
+	envSession    = "AM_SESSION"
 	envGlobalRoot = "AMQ_GLOBAL_ROOT"
 )
 

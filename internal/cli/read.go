@@ -15,8 +15,10 @@ func runRead(args []string) error {
 	fs := flag.NewFlagSet("read", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	idFlag := fs.String("id", "", "Message id")
+	sessionFlag := fs.String("session", "", "Target session under the resolved base root")
+	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, ignore a conflicting AM_SESSION pin")
 
-	usage := usageWithFlags(fs, "amq read --me <agent> --id <msg_id> [options]",
+	usage := usageWithFlags(fs, "amq read --me <agent> --id <msg_id> [--session <name>] [options]",
 		"Read a message by id.",
 		"",
 		"If the message is in inbox/new, AMQ only moves it to inbox/cur after parse and header validation succeed.",
@@ -35,7 +37,19 @@ func runRead(args []string) error {
 		return UsageError("--me: %v", err)
 	}
 	common.Me = me
-	root := resolveRoot(common.Root)
+	root, routed, err := resolveMailboxRoot(common, *sessionFlag)
+	if err != nil {
+		return err
+	}
+	if err := validatePinOverride(common, *ignoreSessionPinFlag, routed); err != nil {
+		return err
+	}
+	if err := guardMailboxContext("read", root, routed, *ignoreSessionPinFlag); err != nil {
+		return err
+	}
+	if err := requireMailbox(root, me); err != nil {
+		return err
+	}
 
 	// Validate handle against config.json
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {

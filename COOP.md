@@ -47,7 +47,13 @@ amq coop exec claude -- --dangerously-skip-permissions
 amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
 ```
 
-That's it. `coop exec` auto-initializes the project if needed, sets `AM_ROOT`/`AM_ME` (and `AM_BASE_ROOT` for cross-session resolution), starts wake notifications, and execs into the agent. Without `--session` or `--root`, it defaults to `--session collab` (i.e., `AM_ROOT=.agent-mail/collab`).
+That's it. `coop exec` auto-initializes the project if needed, sets
+`AM_ROOT`/`AM_ME`, `AM_BASE_ROOT`, and the independent `AM_SESSION` identity,
+starts wake notifications, and execs into the agent. Without `--session` or
+`--root`, it defaults to `--session collab` (i.e.,
+`AM_ROOT=.agent-mail/collab`, `AM_SESSION=collab`). A session-shaped explicit
+root such as `.agent-mail/auth` pins the inferred session; a custom sessionless
+root clears `AM_SESSION`.
 
 To disable auto-wake (e.g., in CI or non-TTY environments):
 ```bash
@@ -71,6 +77,20 @@ amq coop exec --session api codex                 # Terminal 4
 Each pair has isolated inboxes and threads. Messages stay within their root.
 Equivalent explicit root form: `--root .agent-mail/<session>`.
 
+For read-side access, prefer the named route:
+
+```bash
+amq list --session auth --new
+amq drain --session auth --include-body
+```
+
+When a terminal has an `AM_SESSION` pin, `read`, `drain`, and `monitor` refuse a
+conflicting raw `AM_ROOT`/`--root` before inspecting or moving messages. Use
+`--session <name>` for sibling routing. For deliberate raw-root access,
+`--ignore-session-pin` requires an explicit `--root`; it never blesses an
+inherited `AM_ROOT`. `list` warns on a mismatch but remains available for
+non-destructive inspection. A missing mailbox is an error, not an empty inbox.
+
 ### For Scripts/CI
 
 When you can't use `exec` (non-interactive environments):
@@ -78,6 +98,10 @@ When you can't use `exec` (non-interactive environments):
 amq coop init
 eval "$(amq env --me claude)"
 ```
+
+All shell-mode `amq env` output replaces `AM_ROOT`, `AM_ME`, `AM_BASE_ROOT`,
+and `AM_SESSION` as one context. For a base/sessionless root it unsets
+`AM_BASE_ROOT` and sets `AM_SESSION` to the empty string.
 
 `amq env` resolves the root with the full precedence chain:
 

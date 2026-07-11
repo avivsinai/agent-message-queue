@@ -36,6 +36,7 @@ func runSend(args []string) error {
 	// Cross-session flag
 	sessionFlag := fs.String("session", "", "Target session (delivers to a different session's inbox)")
 	fromSessionFlag := fs.String("from-session", "", "Source session for setup-terminal cross-session sends")
+	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, ignore a conflicting AM_SESSION source pin")
 
 	// Cross-project flag
 	projectFlag := fs.String("project", "", "Target peer project name (delivers to a peer project's inbox)")
@@ -121,6 +122,12 @@ func runSend(args []string) error {
 	sourceRoot := root
 	sourceSession := ""
 	fromSession := strings.TrimSpace(*fromSessionFlag)
+	if *ignoreSessionPinFlag && !common.rootExplicit() {
+		return UsageError("--ignore-session-pin requires an explicit --root")
+	}
+	if *ignoreSessionPinFlag && fromSession != "" {
+		return UsageError("--ignore-session-pin cannot be used with --from-session")
+	}
 
 	// Cross-tree guard (issue #144): a direct, unqualified --root that crosses
 	// into a different AMQ tree carries no sender-origin metadata, so the
@@ -161,6 +168,11 @@ func runSend(args []string) error {
 			return fmt.Errorf("agent %q not found in source session %q", me, fromSession)
 		}
 		sourceSession = fromSession
+	}
+	if fromSession == "" {
+		if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
+			return err
+		}
 	}
 
 	if targetProject != "" {

@@ -280,15 +280,10 @@ func runCoopExec(args []string) error {
 		}
 	}
 
-	// Derive base root for AM_BASE_ROOT (parent of the session directory).
-	baseRoot := filepath.Dir(root)
-
-	// Build environment with AM_ROOT, AM_ME, and AM_BASE_ROOT.
-	// AM_ROOT always points to the session queue root (base/session), never the base.
-	// AM_BASE_ROOT points to the base root (parent of sessions) for cross-session resolution.
-	env := setEnvVar(os.Environ(), envRoot, root)
-	env = setEnvVar(env, envMe, agentHandle)
-	env = setEnvVar(env, envBaseRoot, baseRoot)
+	// A named/default or session-shaped explicit root pins an identity
+	// independent of AM_ROOT. A custom sessionless --root clears inherited pins.
+	sessionIdentity := coopSessionIdentity(root, *sessionFlag, *rootFlag)
+	env := buildCoopExecEnvironment(os.Environ(), root, agentHandle, sessionIdentity)
 
 	// Build argv: command name + agent args.
 	argv := append([]string{cmdName}, agentArgs...)
@@ -300,14 +295,6 @@ func runCoopExec(args []string) error {
 		_ = wakeProc.Kill()
 	}
 	return execErr
-}
-
-// absoluteSessionRoot resolves root against the current working directory at
-// session start. This is the single point where a coop session's mailbox
-// identity is frozen; everything downstream (wake, AM_ROOT, AM_BASE_ROOT)
-// must see an absolute path.
-func absoluteSessionRoot(root string) (string, error) {
-	return filepath.Abs(root)
 }
 
 func buildCoopWakeArgs(agentHandle, root, injectMode, injectVia string, injectArgs []string) []string {
@@ -388,16 +375,4 @@ func splitDashDash(args []string) ([]string, []string) {
 		}
 	}
 	return args, nil
-}
-
-// setEnvVar sets or replaces an environment variable in a slice.
-func setEnvVar(env []string, key, value string) []string {
-	prefix := key + "="
-	for i, v := range env {
-		if strings.HasPrefix(v, prefix) {
-			env[i] = prefix + value
-			return env
-		}
-	}
-	return append(env, prefix+value)
 }

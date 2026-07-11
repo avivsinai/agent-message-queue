@@ -1,0 +1,196 @@
+package cli
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+)
+
+type sessionPin struct {
+	Present      bool
+	Session      string
+	BaseRoot     string
+	ExpectedRoot string
+}
+
+// loadSessionPin distinguishes an absent legacy pin from an explicitly empty
+// base-root pin. New shell writers always replace the complete context set.
+func loadSessionPin() (sessionPin, error) {
+	rawSession, present := os.LookupEnv(envSession)
+	if !present {
+		return sessionPin{}, nil
+	}
+
+	pin := sessionPin{Present: true, Session: strings.TrimSpace(rawSession)}
+	if pin.Session != "" {
+		if err := validateSessionName(pin.Session); err != nil {
+			return sessionPin{}, ContextMismatchError("invalid %s=%q: %v", envSession, rawSession, err)
+		}
+	}
+
+	base := strings.TrimSpace(os.Getenv(envBaseRoot))
+	if base != "" {
+		if !filepath.IsAbs(base) {
+			return sessionPin{}, ContextMismatchError("invalid %s=%q: pinned base root must be absolute", envBaseRoot, base)
+		}
+		pin.BaseRoot = absPath(filepath.Clean(base))
+	}
+
+	if pin.Session != "" {
+		if pin.BaseRoot == "" {
+			return sessionPin{}, ContextMismatchError("incomplete AMQ session pin: %s=%q requires %s", envSession, pin.Session, envBaseRoot)
+		}
+		pin.ExpectedRoot = filepath.Join(pin.BaseRoot, pin.Session)
+	} else if pin.BaseRoot != "" {
+		// Tolerate a stale base variable long enough for an explicit env repin
+		// to clear it; it still provides positive evidence for guard checks.
+		pin.ExpectedRoot = pin.BaseRoot
+	}
+	return pin, nil
+}
+
+func sessionPinMismatch(target string) (*SessionContextError, error) {
+	target = absPath(resolveRoot(target))
+	pin, err := loadSessionPin()
+	if err != nil {
+		return nil, err
+	}
+	if pin.Present {
+		matches := false
+		expected := pin.ExpectedRoot
+		if expected != "" {
+			matches = target == expected
+		} else {
+			matches = resolveSessionName(target) == ""
+			expected = "an explicitly pinned base-root context"
+		}
+		if matches {
+			return nil, nil
+		}
+		return &SessionContextError{Message: fmt.Sprintf(
+			"session context mismatch: target root %s differs from pinned root %s (AM_SESSION=%q)",
+			target, expected, pin.Session,
+		)}, nil
+	}
+
+	if source, ok := conflictingSourceRoot(target); ok {
+		return &SessionContextError{Message: fmt.Sprintf(
+			"session context mismatch: target root %s belongs to a different AMQ tree than established root %s",
+			target, source,
+		)}, nil
+	}
+	return nil, nil
+}
+
+// resolveMailboxRoot makes --session a routing operation. With a pin, the
+// target is always constructed from the authorized base rather than ambient
+// AM_ROOT. Without a pin, an explicit session remains deliberate legacy input.
+func resolveMailboxRoot(common *commonFlags, rawSession string) (root string, routed bool, err error) {
+	root = absPath(resolveRoot(common.Root))
+	session := strings.TrimSpace(rawSession)
+	if session == "" {
+		return root, false, nil
+	}
+	if common.rootExplicit() {
+		return "", false, UsageError("--session and --root are mutually exclusive")
+	}
+	if err := validateSessionName(session); err != nil {
+		return "", false, UsageError("--session: %v", err)
+	}
+
+	pin, err := loadSessionPin()
+	if err != nil {
+		return "", false, err
+	}
+	base := ""
+	switch {
+	case pin.Present && pin.BaseRoot != "":
+		base = pin.BaseRoot
+	case pin.Present:
+		if mismatch, checkErr := sessionPinMismatch(root); checkErr != nil {
+			return "", false, checkErr
+		} else if mismatch != nil {
+			return "", false, ContextMismatchError("cannot route --session %q: %s", session, mismatch.Error())
+		}
+		base = root
+	default:
+		base = baseRootOf(root)
+	}
+
+	target := absPath(filepath.Join(base, session))
+	if !dirExists(target) {
+		return "", false, NotFoundError("session %q not found at %s", session, target)
+	}
+	return target, true, nil
+}
+
+func guardMailboxContext(command, target string, routed, ignorePin bool) error {
+	if routed || ignorePin {
+		return nil
+	}
+	mismatch, err := sessionPinMismatch(target)
+	if err != nil {
+		return err
+	}
+	if mismatch == nil {
+		return nil
+	}
+	return ContextMismatchError("refusing %s: %s. Use --session <name> to route deliberately, or explicit --root with --ignore-session-pin", command, mismatch.Error())
+}
+
+func guardPinnedSourceContext(command, target string, ignorePin bool) error {
+	if ignorePin {
+		return nil
+	}
+	pin, err := loadSessionPin()
+	if err != nil {
+		return err
+	}
+	if !pin.Present {
+		return nil
+	}
+	mismatch, err := sessionPinMismatch(target)
+	if err != nil {
+		return err
+	}
+	if mismatch == nil {
+		return nil
+	}
+	return ContextMismatchError("refusing %s: %s. Target routing does not authorize a mismatched source; use --from-session or explicit --root with --ignore-session-pin", command, mismatch.Error())
+}
+
+func validatePinOverride(common *commonFlags, ignorePin bool, routed bool) error {
+	if !ignorePin {
+		return nil
+	}
+	if routed {
+		return UsageError("--ignore-session-pin cannot be used with --session")
+	}
+	if !common.rootExplicit() {
+		return UsageError("--ignore-session-pin requires an explicit --root")
+	}
+	return nil
+}
+
+func requireMailbox(root, me string) error {
+	for _, dir := range []string{
+		fsq.AgentInboxNew(root, me),
+		fsq.AgentInboxCur(root, me),
+		fsq.AgentDLQNew(root, me),
+	} {
+		info, err := os.Stat(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return NotFoundError("mailbox for %q is missing at root %s (missing %s); check AM_ROOT or use --session <name>", me, root, dir)
+			}
+			return err
+		}
+		if !info.IsDir() {
+			return NotFoundError("mailbox path for %q is not a directory: %s", me, dir)
+		}
+	}
+	return nil
+}

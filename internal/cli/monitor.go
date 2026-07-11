@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,8 +31,10 @@ func runMonitor(args []string) error {
 	includeBodyFlag := fs.Bool("include-body", false, "Include message body in output")
 	limitFlag := fs.Int("limit", 20, "Max messages to drain (0 = no limit)")
 	peekFlag := fs.Bool("peek", false, "Peek without moving messages to cur")
+	sessionFlag := fs.String("session", "", "Target session under the resolved base root")
+	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, ignore a conflicting AM_SESSION pin")
 
-	usage := usageWithFlags(fs, "amq monitor --me <agent> [options]",
+	usage := usageWithFlags(fs, "amq monitor --me <agent> [--session <name>] [options]",
 		"Combined watch+drain: waits for messages, drains them, outputs structured payload.",
 		"Use --peek to watch without moving messages to cur (no ack).",
 		"Ideal for co-op mode background watchers in Claude Code or Codex.")
@@ -54,7 +57,19 @@ func runMonitor(args []string) error {
 		return UsageError("--me: %v", err)
 	}
 	common.Me = me
-	root := resolveRoot(common.Root)
+	root, routed, err := resolveMailboxRoot(common, *sessionFlag)
+	if err != nil {
+		return err
+	}
+	if err := validatePinOverride(common, *ignoreSessionPinFlag, routed); err != nil {
+		return err
+	}
+	if err := guardMailboxContext("monitor", root, routed, *ignoreSessionPinFlag); err != nil {
+		return err
+	}
+	if err := requireMailbox(root, me); err != nil {
+		return err
+	}
 
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
@@ -65,9 +80,6 @@ func runMonitor(args []string) error {
 	}
 
 	inboxNew := fsq.AgentInboxNew(root, common.Me)
-	if err := os.MkdirAll(inboxNew, 0o700); err != nil {
-		return err
-	}
 
 	session := resolveSessionName(root)
 
@@ -79,6 +91,9 @@ func runMonitor(args []string) error {
 	// First, try to drain existing messages
 	items, err := monitorInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator, mode)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return NotFoundError("mailbox for %q disappeared while monitoring root %s", common.Me, root)
+		}
 		return err
 	}
 
@@ -112,6 +127,9 @@ func runMonitor(args []string) error {
 	}
 
 	if watchErr != nil {
+		if os.IsNotExist(watchErr) {
+			return NotFoundError("mailbox for %q disappeared while monitoring %s", common.Me, inboxNew)
+		}
 		if errors.Is(watchErr, context.DeadlineExceeded) {
 			if err := outputMonitorResult(common.JSON, monitorResult{
 				Event:   "timeout",
@@ -129,8 +147,17 @@ func runMonitor(args []string) error {
 	}
 
 	// New message arrived - drain it
+	if err := guardMailboxContext("monitor", root, routed, *ignoreSessionPinFlag); err != nil {
+		return err
+	}
+	if err := requireMailbox(root, me); err != nil {
+		return err
+	}
 	items, err = monitorInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator, mode)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return NotFoundError("mailbox for %q disappeared while monitoring root %s", common.Me, root)
+		}
 		return err
 	}
 
@@ -187,6 +214,10 @@ func monitorWithFsnotify(ctx context.Context, inboxNew string) (string, error) {
 			if !ok {
 				return "", errors.New("watcher closed")
 			}
+			if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 &&
+				filepath.Clean(event.Name) == filepath.Clean(inboxNew) {
+				return "", os.ErrNotExist
+			}
 			if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
 				time.Sleep(10 * time.Millisecond)
 				return "new_message", nil
@@ -233,9 +264,6 @@ func monitorWithPolling(ctx context.Context, inboxNew string) (string, error) {
 func hasMessageFiles(dir string) (bool, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
 		return false, err
 	}
 	for _, entry := range entries {

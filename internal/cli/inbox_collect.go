@@ -106,9 +106,6 @@ func collectInboxFilenames(root, me string) ([]string, error) {
 	newDir := fsq.AgentInboxNew(root, me)
 	entries, err := os.ReadDir(newDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return []string{}, nil
-		}
 		return nil, err
 	}
 

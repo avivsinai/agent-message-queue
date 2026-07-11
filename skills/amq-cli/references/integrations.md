@@ -70,7 +70,10 @@ amq doctor --ops
 amq doctor --ops --json
 ```
 
-`doctor --ops` adds queue depth, oldest unread age, DLQ state, presence freshness, and integration hints on top of the base `doctor` checks.
+`doctor --ops` adds queue depth, sibling-session backlog hints, oldest unread
+age, DLQ state, presence freshness, and integration hints on top of the base
+`doctor` checks. A `sibling_backlog` hint includes an exact non-destructive
+`amq list --session <name> --me <handle> --new` inspection command.
 
 ## Message Shape
 

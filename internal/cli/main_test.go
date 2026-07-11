@@ -12,7 +12,7 @@ import (
 // dir look like refused cross-tree sends. Tests that need these signals set them
 // explicitly via t.Setenv, which overrides and restores around this clean baseline.
 func TestMain(m *testing.M) {
-	for _, k := range []string{"AM_ROOT", "AM_BASE_ROOT", "AMQ_GLOBAL_ROOT"} {
+	for _, k := range []string{"AM_ROOT", "AM_BASE_ROOT", "AM_SESSION", "AMQ_GLOBAL_ROOT"} {
 		_ = os.Unsetenv(k)
 	}
 	os.Exit(m.Run())
