@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.42.0](https://github.com/avivsinai/agent-message-queue/compare/v0.41.1...v0.42.0) (2026-07-11)
+
+
+### Features
+
+* **wake:** add zero-input notification mode ([#221](https://github.com/avivsinai/agent-message-queue/issues/221)) ([3d3376f](https://github.com/avivsinai/agent-message-queue/commit/3d3376faa603829580418bec044a79064e36af81))
+
+
+### Bug Fixes
+
+* skip changelog gate on Dependabot PR author, not only event actor ([#219](https://github.com/avivsinai/agent-message-queue/issues/219)) ([fc87a86](https://github.com/avivsinai/agent-message-queue/commit/fc87a861e92b9df041cd10158657c424a87139cd))
+
 ## [0.41.1] - 2026-07-10
 ### Fixed
 
