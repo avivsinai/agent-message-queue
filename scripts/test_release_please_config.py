@@ -50,6 +50,29 @@ def test_release_please_workflow_is_pr_only_and_staged() -> None:
     assert "python3 scripts/release_changelog_section.py" not in release_workflow
 
 
+def test_release_workflow_marks_published_release_pr_as_tagged() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text()
+
+    release_job = workflow[workflow.index("  release:\n") : workflow.index("  skill-publish:\n")]
+    assert "pull-requests: write" in release_job
+
+    publish = release_job.index("      - name: Release\n")
+    mark_tagged = release_job.index(
+        "      - name: Mark release pull request as tagged\n"
+    )
+    attest = release_job.index("      - name: Collect attestation subjects\n")
+    assert publish < attest < mark_tagged
+
+    mark_step = release_job[mark_tagged:]
+    assert "if: github.event_name == 'push'" in mark_step
+    assert "RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}" in mark_step
+    assert "VERSION: ${{ needs.prepare.outputs.version }}" in mark_step
+    assert 'commits/${RELEASE_SHA}/pulls' in mark_step
+    assert 'chore(release): v${VERSION}' in mark_step
+    assert "autorelease: pending" in mark_step
+    assert "autorelease: tagged" in mark_step
+
+
 def test_version_files_and_replacement_gates() -> None:
     version = json.loads((ROOT / ".release-please-manifest.json").read_text())["."]
     for path in ["skills/amq-cli/SKILL.md", "skills/amq-spec/SKILL.md"]:
@@ -76,5 +99,6 @@ def test_version_files_and_replacement_gates() -> None:
 if __name__ == "__main__":
     test_release_please_config()
     test_release_please_workflow_is_pr_only_and_staged()
+    test_release_workflow_marks_published_release_pr_as_tagged()
     test_version_files_and_replacement_gates()
     print("release-please config tests ok")
