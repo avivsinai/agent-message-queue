@@ -49,6 +49,7 @@ func runDoctor(args []string) error {
 		"  - Queue depth and oldest unread per agent",
 		"  - DLQ count and age",
 		"  - Presence freshness",
+		"  - Git worktree mailbox divergence",
 		"  - Wake lock health",
 		"  - Integration hints (Kanban, Symphony)",
 	)

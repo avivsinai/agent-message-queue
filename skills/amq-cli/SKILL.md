@@ -81,6 +81,19 @@ one terminal, one session.
 | Inside `coop exec` (no flags) | automatic | `.agent-mail/collab` (default session) |
 | Inside `coop exec --session X` | automatic | `.agent-mail/X` |
 
+### Git worktrees
+
+A relative project root such as `{"root":".agent-mail"}` and auto-detected
+roots are intentionally per-worktree. Two terminals in different git
+worktrees can therefore use the same session name while reading different
+mailboxes. If a delivery receipt times out, run `amq doctor --ops`; it can warn
+when a peer has fresher presence in the same session under another worktree.
+
+To share one mailbox across worktrees, use the same absolute root in each
+worktree's machine-local `.amqrc`, or remove the project-relative `.amqrc` and
+set `AMQ_GLOBAL_ROOT` to one absolute base. Keep the relative default when
+per-worktree isolation is intended.
+
 ## Task Routing
 
 Before diving in, match the task to the right workflow — this avoids wasted effort:

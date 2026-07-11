@@ -345,6 +345,7 @@ Use `--force` with retry to override the max retry limit.
 
 - Queue depth and oldest unread per agent
 - Sibling-session backlogs for the same handles
+- Same-session mailbox divergence across git worktrees (diagnostic-only)
 - DLQ count and oldest age
 - Presence freshness
 - Wake lock health (`--fix-wake-locks` removes stale locks)
@@ -367,6 +368,14 @@ Repaired wake stdout/stderr goes to
 pipes open after its JSON/text output exits. `doctor --ops` may report
 `target_present` and `repair_available`, but must remain diagnostic-only and
 never spawn a wake process.
+
+Git worktree diagnostics stay in `doctor --ops`, never in the send routing
+path. Relative project roots and auto-detected roots are per-worktree; sharing
+requires the same absolute `.amqrc` root or `AMQ_GLOBAL_ROOT`. The deep check is
+best-effort and warns only when the same session exists under another worktree
+root with fresher peer presence. `send --wait-for` timeout text may name the
+already-resolved delivery root/session and recommend `doctor --ops`, but must
+not scan git worktrees itself.
 
 Use `amq doctor --ops --json` for machine-readable health output.
 

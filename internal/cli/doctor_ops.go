@@ -75,6 +75,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 		Source: rootSource,
 	}
 	result.OperatorGate = checkOperatorGate(root, now)
+	result.Hints = append(result.Hints, checkLinkedWorktreeLocalHint(root, rootSource)...)
 
 	// Load the active root's config, falling back to the base config for normal
 	// session layouts where coop init owns the single config.json.
@@ -147,6 +148,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 
 	// Operational and integration hints
 	result.Hints = append(result.Hints, checkSiblingBacklogHints(root, agents)...)
+	result.Hints = append(result.Hints, checkWorktreeDivergenceHints(root, agents)...)
 	result.Hints = append(result.Hints, checkGlobalRootHint()...)
 	result.Hints = append(result.Hints, checkKanbanHint()...)
 	result.Hints = append(result.Hints, checkSymphonyHint()...)

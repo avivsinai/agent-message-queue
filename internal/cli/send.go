@@ -427,7 +427,7 @@ func runSend(args []string) error {
 		r, err := receipt.WaitFor(deliveryRoot, id, consumer, waitFor, *waitTimeoutFlag, 1*time.Second)
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			waitResult = &waitForResult{Event: "timeout", Stage: waitFor, Timeout: waitTimeoutFlag.String()}
-			waitErr = TimeoutError("send --wait-for %s timed out after %s", waitFor, *waitTimeoutFlag)
+			waitErr = TimeoutError("send --wait-for %s timed out after %s (delivery session %s, root %s); run 'amq doctor --ops' to diagnose mailbox divergence", waitFor, *waitTimeoutFlag, targetDisplay, deliveryRoot)
 		} else if err != nil {
 			waitResult = &waitForResult{Event: "error", Stage: waitFor, Detail: err.Error()}
 			waitErr = fmt.Errorf("send --wait-for: %w", err)

@@ -100,6 +100,37 @@ func TestSendRootOnlyJSONUsesRootBasenameAsSession(t *testing.T) {
 	}
 }
 
+func TestSendWaitTimeoutNamesDeliveryContextAndDoctor(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".agent-mail", "collab")
+	for _, agent := range []string{"alice", "bob"} {
+		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+			t.Fatalf("EnsureAgentDirs: %v", err)
+		}
+	}
+	for _, key := range []string{envRoot, envBaseRoot, envSession} {
+		setOptionalEnv(t, key, "", false)
+	}
+
+	_, _, err := captureEnvOutput(t, func() error {
+		return runSend([]string{
+			"--root", root,
+			"--me", "alice",
+			"--to", "bob",
+			"--body", "timeout hint",
+			"--wait-for", "drained",
+			"--wait-timeout", "1ms",
+		})
+	})
+	if err == nil || GetExitCode(err) != ExitTimeout {
+		t.Fatalf("send wait should time out, got %v", err)
+	}
+	for _, want := range []string{root, "collab", "amq doctor --ops"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("timeout hint missing %q: %v", want, err)
+		}
+	}
+}
+
 func TestReply_RejectsPositionalArgs(t *testing.T) {
 	root := t.TempDir()
 	for _, agent := range []string{"alice", "bob"} {

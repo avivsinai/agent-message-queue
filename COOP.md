@@ -77,6 +77,14 @@ amq coop exec --session api codex                 # Terminal 4
 Each pair has isolated inboxes and threads. Messages stay within their root.
 Equivalent explicit root form: `--root .agent-mail/<session>`.
 
+That isolation also applies across git worktrees. A relative project root such
+as `{"root":".agent-mail"}` resolves separately inside every worktree, even when
+the session names match. To share a mailbox intentionally, configure the same
+absolute `.amqrc` root in each worktree, or remove the relative project config
+and set `AMQ_GLOBAL_ROOT` to one absolute base. Use `amq doctor --ops` when a
+delivery receipt times out; it can name divergent same-session roots when a
+peer has fresher presence in another worktree.
+
 For read-side access, prefer the named route:
 
 ```bash
