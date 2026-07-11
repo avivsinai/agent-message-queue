@@ -111,6 +111,9 @@ def test_explicit_skip_reasons() -> None:
     assert check_pr_changelog.skip_reason(
         actor="avivsinai", head_ref="feature/x", labels=["no-changelog"]
     ) == "label no-changelog"
+    assert check_pr_changelog.skip_reason(
+        actor="avivsinai", author="dependabot[bot]", head_ref="dependabot/go_modules/x", labels=[]
+    ) == "dependabot author"
 
 
 def test_title_like_branch_does_not_skip_without_label() -> None:
@@ -122,6 +125,7 @@ def test_event_metadata_prefers_pull_request_fields() -> None:
     event = {
         "sender": {"login": "ignored"},
         "pull_request": {
+            "user": {"login": "dependabot[bot]"},
             "head": {"ref": "feature/changelog", "sha": "head-sha"},
             "base": {"sha": "base-sha"},
             "labels": [{"name": "no-changelog"}],
@@ -129,6 +133,7 @@ def test_event_metadata_prefers_pull_request_fields() -> None:
     }
     metadata = check_pr_changelog.metadata_from_event(event, actor="avivsinai")
     assert metadata.actor == "avivsinai"
+    assert metadata.author == "dependabot[bot]"
     assert metadata.head_ref == "feature/changelog"
     assert metadata.base_sha == "base-sha"
     assert metadata.head_sha == "head-sha"
