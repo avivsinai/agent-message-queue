@@ -31,7 +31,14 @@ func drainInboxItems(root, me string, includeBody bool, limit int, validator *he
 		}
 		if err := fsq.MoveNewToCur(root, me, filename); err != nil {
 			if os.IsNotExist(err) {
-				continue
+				exists, checkErr := claimMailboxDirsExist(root, me)
+				if checkErr != nil {
+					return nil, checkErr
+				}
+				if exists {
+					continue
+				}
+				return nil, NotFoundError("mailbox for %q disappeared while claiming %s at root %s", me, filename, root)
 			}
 			_ = writeStderr("warning: failed to claim %s: %v\n", filename, err)
 			continue
@@ -62,6 +69,22 @@ func drainInboxItems(root, me string, includeBody bool, limit int, validator *he
 
 	format.SortByTimestamp(items)
 	return items, nil
+}
+
+func claimMailboxDirsExist(root, me string) (bool, error) {
+	for _, dir := range []string{fsq.AgentInboxNew(root, me), fsq.AgentInboxCur(root, me)} {
+		info, err := os.Stat(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		if !info.IsDir() {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func emitReceipt(root, consumer string, item *inboxItem, stage, detail string) {

@@ -141,6 +141,8 @@ func TestShellQuoteFish(t *testing.T) {
 		{"path/to/dir", "path/to/dir"},
 		{"has space", "'has space'"},
 		{"has'quote", "'has\\'quote'"},
+		{"trailing\\", "'trailing\\\\'"},
+		{"two\\\\slashes", "'two\\\\\\\\slashes'"},
 		{"$VAR", "'$VAR'"},
 	}
 
@@ -975,7 +977,7 @@ func TestRunEnvExportSessionEmitsBaseRootAndPinNote(t *testing.T) {
 	}
 }
 
-func TestRunEnvExportNonSessionOmitsBaseRoot(t *testing.T) {
+func TestRunEnvExportNonSessionPinsExactBaseRoot(t *testing.T) {
 	root := t.TempDir()
 	rcContent := `{"root": ".agent-mail"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {
@@ -1007,14 +1009,14 @@ func TestRunEnvExportNonSessionOmitsBaseRoot(t *testing.T) {
 
 	expectedRoot := filepath.Join(projectRoot, ".agent-mail")
 	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
-		"unset AM_BASE_ROOT\n" +
+		"export AM_BASE_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
 		"export AM_SESSION=\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
-	if !strings.Contains(stdout, "unset AM_BASE_ROOT") {
-		t.Fatalf("non-session export should clear AM_BASE_ROOT: %q", stdout)
+	if !strings.Contains(stdout, "export AM_BASE_ROOT="+shellQuotePosix(expectedRoot)) {
+		t.Fatalf("non-session export should pin exact AM_BASE_ROOT: %q", stdout)
 	}
 	if !strings.Contains(stderr, "pinned to AMQ root") {
 		t.Fatalf("stderr should contain root pin note, got %q", stderr)
@@ -1142,7 +1144,7 @@ func TestRunEnvExportSessionIgnoresStaleAmbientBaseRoot(t *testing.T) {
 	}
 }
 
-func TestRunEnvExportExplicitBaseRootOmitsBaseRoot(t *testing.T) {
+func TestRunEnvExportExplicitBaseRootPinsExactBaseRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), ".agent-mail")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("mkdir root: %v", err)
@@ -1156,14 +1158,14 @@ func TestRunEnvExportExplicitBaseRootOmitsBaseRoot(t *testing.T) {
 	}
 
 	want := "export AM_ROOT=" + shellQuotePosix(root) + "\n" +
-		"unset AM_BASE_ROOT\n" +
+		"export AM_BASE_ROOT=" + shellQuotePosix(root) + "\n" +
 		"export AM_SESSION=\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
-	if !strings.Contains(stdout, "unset AM_BASE_ROOT") {
-		t.Fatalf("explicit base-root export should clear AM_BASE_ROOT: %q", stdout)
+	if !strings.Contains(stdout, "export AM_BASE_ROOT="+shellQuotePosix(root)) {
+		t.Fatalf("explicit base-root export should pin exact AM_BASE_ROOT: %q", stdout)
 	}
 }
 

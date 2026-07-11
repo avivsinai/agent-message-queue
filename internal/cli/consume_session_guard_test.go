@@ -369,11 +369,12 @@ func TestDrainAllowsBareRootWithoutSessionIdentity(t *testing.T) {
 
 func TestDrainTreatsPresentEmptySessionPinAsBaseContext(t *testing.T) {
 	parent := t.TempDir()
+	baseRoot := filepath.Join(parent, ".agent-mail")
 	targetRoot := sessionRoot(t, parent, "session2", "alice")
 	deliverGuardMessage(t, targetRoot, "alice", "base-pin-mismatch")
 
 	t.Setenv("AM_ROOT", targetRoot)
-	t.Setenv("AM_BASE_ROOT", "")
+	t.Setenv("AM_BASE_ROOT", baseRoot)
 	t.Setenv("AM_SESSION", "")
 
 	err := runDrain([]string{"--me", "alice"})
@@ -399,7 +400,10 @@ func TestEnvExportPinsAndClearsAMSession(t *testing.T) {
 
 	t.Setenv("AM_ROOT", "")
 	t.Setenv("AM_BASE_ROOT", "")
-	t.Setenv("AM_SESSION", "stale")
+	t.Setenv("AM_SESSION", "temporary")
+	if err := os.Unsetenv("AM_SESSION"); err != nil {
+		t.Fatalf("unset AM_SESSION: %v", err)
+	}
 	t.Setenv("AM_ME", "")
 	t.Setenv("AMQ_GLOBAL_ROOT", "")
 
@@ -417,6 +421,8 @@ func TestEnvExportPinsAndClearsAMSession(t *testing.T) {
 	if err := os.MkdirAll(baseRoot, 0o700); err != nil {
 		t.Fatalf("mkdir base root: %v", err)
 	}
+	t.Setenv("AM_BASE_ROOT", filepath.Join(project, "stale-base"))
+	t.Setenv("AM_SESSION", "stale")
 	stdout, _, err = captureEnvOutput(t, func() error {
 		return runEnv([]string{"--root", baseRoot, "--me", "codex", "--export"})
 	})
@@ -499,8 +505,8 @@ func TestEnvExplicitRepinReplacesFullContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("explicit base repin: %v", err)
 	}
-	if !strings.Contains(stdout, "unset AM_BASE_ROOT\n") || !strings.Contains(stdout, "export AM_SESSION=\n") {
-		t.Fatalf("base repin did not clear session context: %q", stdout)
+	if !strings.Contains(stdout, "export AM_BASE_ROOT="+baseRoot+"\n") || !strings.Contains(stdout, "export AM_SESSION=\n") {
+		t.Fatalf("base repin did not replace session context: %q", stdout)
 	}
 
 	stdout, _, err = captureEnvOutput(t, func() error {
@@ -509,8 +515,8 @@ func TestEnvExplicitRepinReplacesFullContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("explicit fish base repin: %v", err)
 	}
-	if !strings.Contains(stdout, "set -e AM_BASE_ROOT\n") || !strings.Contains(stdout, "set -gx AM_SESSION ''\n") {
-		t.Fatalf("fish base repin did not clear session context: %q", stdout)
+	if !strings.Contains(stdout, "set -gx AM_BASE_ROOT "+baseRoot+"\n") || !strings.Contains(stdout, "set -gx AM_SESSION ''\n") {
+		t.Fatalf("fish base repin did not replace session context: %q", stdout)
 	}
 }
 
@@ -542,8 +548,11 @@ func TestBuildCoopExecEnvironmentPinsSessionIdentity(t *testing.T) {
 	if got := envValue(env, "AM_SESSION"); got != "" {
 		t.Fatalf("custom sessionless --root should clear AM_SESSION, got %q", got)
 	}
-	if envHasKey(env, "AM_BASE_ROOT") {
-		t.Fatalf("custom sessionless --root should remove AM_BASE_ROOT: %#v", env)
+	if !envHasKey(env, "AM_BASE_ROOT") {
+		t.Fatalf("custom sessionless --root should include AM_BASE_ROOT: %#v", env)
+	}
+	if got := envValue(env, "AM_BASE_ROOT"); got != customRoot {
+		t.Fatalf("custom sessionless --root should pin exact AM_BASE_ROOT, got %q", got)
 	}
 }
 

@@ -19,17 +19,17 @@ func coopSessionIdentity(root, requestedSession, requestedRoot string) string {
 	if requestedRoot == "" {
 		return defaultSessionName
 	}
-	return resolveSessionName(root)
+	return inferredSessionIdentity(root)
 }
 
 func buildCoopExecEnvironment(base []string, root, me, session string) []string {
 	env := setEnvVar(base, envRoot, root)
 	env = setEnvVar(env, envMe, me)
+	baseRoot := root
 	if session != "" {
-		env = setEnvVar(env, envBaseRoot, filepath.Dir(root))
-	} else {
-		env = unsetEnvVar(env, envBaseRoot)
+		baseRoot = filepath.Dir(root)
 	}
+	env = setEnvVar(env, envBaseRoot, baseRoot)
 	return setEnvVar(env, envSession, session)
 }
 

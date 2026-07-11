@@ -39,14 +39,12 @@ func loadSessionPin() (sessionPin, error) {
 		pin.BaseRoot = absPath(filepath.Clean(base))
 	}
 
+	if pin.BaseRoot == "" {
+		return sessionPin{}, ContextMismatchError("incomplete AMQ session pin: %s=%q requires an exact %s", envSession, pin.Session, envBaseRoot)
+	}
 	if pin.Session != "" {
-		if pin.BaseRoot == "" {
-			return sessionPin{}, ContextMismatchError("incomplete AMQ session pin: %s=%q requires %s", envSession, pin.Session, envBaseRoot)
-		}
 		pin.ExpectedRoot = filepath.Join(pin.BaseRoot, pin.Session)
-	} else if pin.BaseRoot != "" {
-		// Tolerate a stale base variable long enough for an explicit env repin
-		// to clear it; it still provides positive evidence for guard checks.
+	} else {
 		pin.ExpectedRoot = pin.BaseRoot
 	}
 	return pin, nil
@@ -59,15 +57,8 @@ func sessionPinMismatch(target string) (*SessionContextError, error) {
 		return nil, err
 	}
 	if pin.Present {
-		matches := false
 		expected := pin.ExpectedRoot
-		if expected != "" {
-			matches = target == expected
-		} else {
-			matches = resolveSessionName(target) == ""
-			expected = "an explicitly pinned base-root context"
-		}
-		if matches {
+		if target == expected {
 			return nil, nil
 		}
 		return &SessionContextError{Message: fmt.Sprintf(
@@ -107,15 +98,8 @@ func resolveMailboxRoot(common *commonFlags, rawSession string) (root string, ro
 	}
 	base := ""
 	switch {
-	case pin.Present && pin.BaseRoot != "":
-		base = pin.BaseRoot
 	case pin.Present:
-		if mismatch, checkErr := sessionPinMismatch(root); checkErr != nil {
-			return "", false, checkErr
-		} else if mismatch != nil {
-			return "", false, ContextMismatchError("cannot route --session %q: %s", session, mismatch.Error())
-		}
-		base = root
+		base = pin.BaseRoot
 	default:
 		base = baseRootOf(root)
 	}
@@ -145,13 +129,6 @@ func guardPinnedSourceContext(command, target string, ignorePin bool) error {
 	if ignorePin {
 		return nil
 	}
-	pin, err := loadSessionPin()
-	if err != nil {
-		return err
-	}
-	if !pin.Present {
-		return nil
-	}
 	mismatch, err := sessionPinMismatch(target)
 	if err != nil {
 		return err
@@ -159,7 +136,7 @@ func guardPinnedSourceContext(command, target string, ignorePin bool) error {
 	if mismatch == nil {
 		return nil
 	}
-	return ContextMismatchError("refusing %s: %s. Target routing does not authorize a mismatched source; use --from-session or explicit --root with --ignore-session-pin", command, mismatch.Error())
+	return ContextMismatchError("refusing %s: %s. Target routing does not authorize a mismatched source; use an explicit source route, or explicit --root with --ignore-session-pin", command, mismatch.Error())
 }
 
 func validatePinOverride(common *commonFlags, ignorePin bool, routed bool) error {

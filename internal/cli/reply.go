@@ -30,6 +30,7 @@ func runReply(args []string) error {
 	contextFlag := fs.String("context", "", "JSON context object or @file.json")
 	waitForFlag := fs.String("wait-for", "", "Wait for receipt stage after reply (e.g., drained)")
 	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for")
+	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, ignore a conflicting AM_SESSION source pin")
 
 	usage := usageWithFlags(fs, "amq reply --me <agent> --id <msg_id> [options]",
 		"Reply to a message with automatic thread/refs handling.",
@@ -56,6 +57,12 @@ func runReply(args []string) error {
 	common.Me = me
 	common.warnRootOverride()
 	root := resolveRoot(common.Root)
+	if err := validatePinOverride(common, *ignoreSessionPinFlag, false); err != nil {
+		return err
+	}
+	if err := guardPinnedSourceContext("reply", root, *ignoreSessionPinFlag); err != nil {
+		return err
+	}
 
 	if *idFlag == "" {
 		return UsageError("--id is required")

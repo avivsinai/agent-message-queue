@@ -98,7 +98,7 @@ internal/
 ```
 Layer names must use lowercase ASCII letters, digits, hyphen, underscore, and dot (for example `io.github.omriariav.amq-squad`). AMQ will not create files inside layer-owned directories, and `amq cleanup` does not remove extension directories unless a future command explicitly targets extension metadata. Layers may publish a passive root manifest at `<AM_ROOT>/extensions/<layer>/manifest.json`; `amq doctor --json` may report it, but AMQ must not execute extension code or invoke hooks from manifests.
 
-**Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail/collab`), `AM_ME` (agent handle), `AM_BASE_ROOT` (base root set for cross-session resolution), `AM_SESSION` (independent session identity set by `coop exec` and every shell-mode `amq env`, empty for sessionless roots), `AMQ_GLOBAL_ROOT` (global root fallback for orchestrator-spawned agents), `AMQ_NO_UPDATE_CHECK` (disable update check)
+**Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail/collab`), `AM_ME` (agent handle), `AM_BASE_ROOT` (authorized parent for named-session routing, or the exact root for a sessionless pin), `AM_SESSION` (independent session identity set by `coop exec` and every shell-mode `amq env`, empty for sessionless roots), `AMQ_GLOBAL_ROOT` (global root fallback for orchestrator-spawned agents), `AMQ_NO_UPDATE_CHECK` (disable update check)
 
 **Session Layout**: The default base root directory is `.agent-mail/`. `.amqrc` can configure that root explicitly, but the default `.agent-mail/<session>` layout is also recognized without `.amqrc`. `coop exec` defaults to `--session collab`, so agents get session isolation without explicit flags. Use `--session` to override:
 ```
@@ -112,9 +112,9 @@ Layer names must use lowercase ASCII letters, digits, hyphen, underscore, and do
 
 **Cross-tree send guard**: A direct `--root` is root *selection*, not federation routing. `send` refuses an explicit `--root` that targets a different base tree than the caller's own active session (`AM_ROOT`/`AM_BASE_ROOT`) when no routing dimension (`--project`/`--session`/`--from-session`) is given — such a message carries no sender-origin metadata, so the recipient could not reply and a naive reply would loop into their own tree. Replyable cross-tree messaging must use `--project`/`--session`, which stamp the routing headers. With no session env set (bare-root scripts/CI), the guard does not fire; a direct `--root` cross-tree send in that case can still produce an unreplyable message — the documented cost of keeping bare-root sends working.
 
-**Session-root guard**: `read`, `drain`, and `monitor` compare their resolved target against the session identity pinned by `AM_SESSION` (and the full expected path from `AM_BASE_ROOT` when available) before inspecting or moving inbox messages. A mismatch exits with code 5; use `--session <name>` as the deliberate routing dimension. The raw-root escape hatch is `--ignore-session-pin`, which requires an explicit `--root`. `send` applies the same pin check to its local source; target routing never authorizes a mismatched source. `list` warns instead of refusing so it remains a non-destructive inspection path. With no positive session/tree evidence, scripts and CI remain fail-open. A missing mailbox is a not-found error. Empty `drain` and `list --new` results perform a shallow sibling-session scan and write exact `amq list --session <name> --me <handle> --new` inspection commands to stderr; `doctor --ops` reports the same condition as `sibling_backlog` hints.
+**Session-root guard**: `read`, `drain`, `monitor`, `watch`, and mutating DLQ commands compare their resolved target against the exact context pinned by `AM_BASE_ROOT`/`AM_SESSION` before inspecting or moving mailbox state; `send` and `reply` apply the same check to their local source. For named sessions `AM_BASE_ROOT` is the authorized parent; for sessionless contexts it is the exact root and `AM_SESSION` is empty. A mismatch exits with code 5; use `--session <name>` as the deliberate routing dimension. The raw-root escape hatch is `--ignore-session-pin`, which requires a non-empty explicit `--root`; explicitly blank `--root`/`--session` values are usage errors. Target routing never authorizes a mismatched source. `list` warns instead of refusing so it remains a non-destructive inspection path. With no positive session/tree evidence, scripts and CI remain fail-open. A missing mailbox is a not-found error. Empty `drain` and `list --new` results perform a shallow sibling-session scan and write exact `amq list --session <name> --me <handle> --new` inspection commands to stderr; `doctor --ops` reports the same condition as `sibling_backlog` hints. Known limitation: `send --from-session` remains a double-explicit legacy route from its supplied raw base; callers must ensure that base is intentional until the follow-up resolver work lands.
 
-**Environment context replacement**: Every shell-mode `amq env` output replaces `AM_ROOT`, `AM_ME`, `AM_BASE_ROOT`, and `AM_SESSION` as one context. Sessionless output unsets `AM_BASE_ROOT` and emits an empty `AM_SESSION`; `--export` additionally prints a pin note. An ambient root that conflicts with an existing pin is rejected unless `--root` or `--session` explicitly repins it.
+**Environment context replacement**: Every shell-mode `amq env` output replaces `AM_ROOT`, `AM_ME`, `AM_BASE_ROOT`, and `AM_SESSION` as one context. Sessionless output pins `AM_BASE_ROOT` to the exact root and emits an empty `AM_SESSION`; `--export` additionally prints a pin note. An ambient root that conflicts with an existing pin is rejected unless a non-empty `--root` or `--session` explicitly repins it. `amq env --session` routes from a valid existing pin base before consulting cwd configuration.
 
 **Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
 - **Root**: flags > env (`AM_ROOT`) > project `.amqrc` > `AMQ_GLOBAL_ROOT` > `~/.amqrc` > auto-detect
@@ -179,13 +179,13 @@ amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
 amq presence list [--json]
 amq route explain --to <handle> [--project <project>] [--session <session>] [--from-root <path>] [--from-cwd <path>] [--me <handle>] --json
 amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
-amq watch --me <agent> [--timeout <duration>] [--poll] [--json]
+amq watch --me <agent> [--session <name>] [--ignore-session-pin] [--timeout <duration>] [--poll] [--json]
 amq monitor --me <agent> [--session <name>] [--ignore-session-pin] [--timeout <duration>] [--poll] [--include-body] [--peek] [--json]
-amq reply --me <agent> --id <msg_id> [--body <str|@file|-|stdin>] [--allow-empty] [--priority <p>] [--kind <k>]
+amq reply --me <agent> --id <msg_id> [--ignore-session-pin] [--body <str|@file|-|stdin>] [--allow-empty] [--priority <p>] [--kind <k>]
 amq dlq list --me <agent> [--new | --cur] [--json]
-amq dlq read --me <agent> --id <dlq_id> [--json]
-amq dlq retry --me <agent> --id <dlq_id> [--all] [--force]
-amq dlq purge --me <agent> [--older-than <duration>] [--dry-run] [--yes]
+amq dlq read --me <agent> --id <dlq_id> [--session <name>] [--ignore-session-pin] [--json]
+amq dlq retry --me <agent> --id <dlq_id> [--session <name>] [--ignore-session-pin] [--all] [--force]
+amq dlq purge --me <agent> [--session <name>] [--ignore-session-pin] [--older-than <duration>] [--dry-run] [--yes]
 amq wake --me <agent> [--inject-cmd <cmd>] [--inject-via <absolute-executable>] [--inject-arg <arg>...] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>]
 amq wake repair --me <agent> [--root <path>] [--json]
 amq upgrade

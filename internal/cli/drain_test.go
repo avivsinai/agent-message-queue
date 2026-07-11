@@ -401,6 +401,24 @@ func TestDrainInboxItemsConcurrentClaimsSingleWinner(t *testing.T) {
 	}
 }
 
+func TestClaimMailboxDirsExistRejectsMissingCur(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	if err := os.RemoveAll(fsq.AgentInboxCur(root, "alice")); err != nil {
+		t.Fatalf("remove inbox/cur: %v", err)
+	}
+
+	exists, err := claimMailboxDirsExist(root, "alice")
+	if err != nil {
+		t.Fatalf("claimMailboxDirsExist: %v", err)
+	}
+	if exists {
+		t.Fatal("missing inbox/cur must not be classified as a concurrent message claim")
+	}
+}
+
 func TestRunDrainCorruptMessage(t *testing.T) {
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {

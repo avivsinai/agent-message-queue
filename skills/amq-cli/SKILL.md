@@ -35,9 +35,10 @@ curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/
 ## Environment Rules
 
 AMQ primarily uses `AM_ROOT` (which mailbox tree) and `AM_ME` (which agent).
-Session-launched terminals also carry `AM_BASE_ROOT` plus an independent
-`AM_SESSION` identity. Getting these wrong means messages go to the wrong place
-or silently disappear, so let the CLI handle them rather than guessing.
+Pinned terminals also carry `AM_BASE_ROOT` plus an independent `AM_SESSION`
+identity; sessionless pins use the exact root as `AM_BASE_ROOT` and an empty
+`AM_SESSION`. Getting these wrong means messages go to the wrong place or
+silently disappear, so let the CLI handle them rather than guessing.
 
 **Inside `coop exec`** — everything is pre-configured. Just run bare commands:
 ```bash
@@ -61,7 +62,8 @@ AM_ME=claude AM_ROOT=$(amq env --json | jq -r .root) amq send --to codex --body 
 Why not hardcode? The root path depends on the config chain (project `.amqrc` → `AMQ_GLOBAL_ROOT` → `~/.amqrc`). Hardcoding skips this and breaks when the project moves or config changes.
 Every shell-mode `amq env` invocation replaces the complete context. It emits
 `AM_SESSION` unconditionally (empty for a sessionless root), exports
-`AM_BASE_ROOT` for session roots, and unsets `AM_BASE_ROOT` otherwise.
+`AM_BASE_ROOT` as the authorized parent for named sessions or the exact root for
+a sessionless context.
 `--export` additionally prints a stderr pin note. Treat the evaluated output as
 one terminal, one session.
 
@@ -173,17 +175,17 @@ amq receipts wait --me codex --msg-id <msg_id> --stage drained --timeout 60s
 
 `amq read`, `amq drain`, and `amq monitor` all apply the same strict header validation. Messages in `inbox/new` that are corrupt or have malformed headers are moved to DLQ and produce a `dlq` receipt.
 
-Those consuming commands also refuse a raw target that conflicts with a
-positive `AM_SESSION` pin before touching inbox state. Use `--session <name>`
-for deliberate sibling access. The raw-root escape hatch,
-`--ignore-session-pin`, requires an explicit `--root`; it never blesses an
-inherited `AM_ROOT`. `send` applies the same check to its source context, while
-`list` warns and remains available for non-destructive inspection. With no
-session/tree evidence, scripts and CI remain fail-open. A missing mailbox is an
-error, not an empty inbox. Empty `drain` and `list --new` results may print a
-stderr note when the same handle has pending messages in a sibling session;
-follow the exact `amq list --session <name> --me <handle> --new` command in that
-note.
+Those consuming commands, `watch`, and mutating DLQ commands refuse a raw
+target that conflicts with a complete `AM_BASE_ROOT`/`AM_SESSION` pin before
+touching mailbox state. `send` and `reply` apply the same check to their source
+context. Use `--session <name>` for deliberate sibling access. The raw-root
+escape hatch, `--ignore-session-pin`, requires a non-empty explicit `--root`;
+it never blesses an inherited `AM_ROOT`. `list` warns and remains available for
+non-destructive inspection. With no session/tree evidence, scripts and CI
+remain fail-open. A missing mailbox is an error, not an empty inbox. Empty
+`drain` and `list --new` results may print a stderr note when the same handle
+has pending messages in a sibling session; follow the exact `amq list --session
+<name> --me <handle> --new` command in that note.
 This is an operational safety check, not an authorization boundary; a local
 process can deliberately repin or override it.
 

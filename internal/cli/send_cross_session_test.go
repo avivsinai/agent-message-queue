@@ -236,6 +236,7 @@ func TestSendCrossSessionWithExplicitRootOverride(t *testing.T) {
 	err = runSend([]string{
 		"--me", "claude",
 		"--root", sourceRoot,
+		"--ignore-session-pin",
 		"--to", "codex",
 		"--session", "session3",
 		"--body", "hello across sessions",
@@ -332,6 +333,7 @@ func TestSendCrossSessionWaitForUsesDeliveryRoot(t *testing.T) {
 	err = runSend([]string{
 		"--me", "claude",
 		"--root", sourceRoot,
+		"--ignore-session-pin",
 		"--to", "codex",
 		"--session", "session3",
 		"--body", "hello across sessions",

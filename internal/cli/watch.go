@@ -40,8 +40,10 @@ func runWatch(args []string) error {
 	common := addCommonFlags(fs)
 	timeoutFlag := fs.Duration("timeout", 60*time.Second, "Maximum time to wait for messages (0 = wait forever)")
 	pollFlag := fs.Bool("poll", false, "Use polling fallback instead of fsnotify (for network filesystems)")
+	sessionFlag := fs.String("session", "", "Target session under the resolved base root")
+	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, ignore a conflicting AM_SESSION pin")
 
-	usage := usageWithFlags(fs, "amq watch --me <agent> [options]")
+	usage := usageWithFlags(fs, "amq watch --me <agent> [--session <name>] [options]")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -59,7 +61,19 @@ func runWatch(args []string) error {
 	}
 	common.Me = me
 
-	root := resolveRoot(common.Root)
+	root, routed, err := resolveMailboxRoot(common, *sessionFlag)
+	if err != nil {
+		return err
+	}
+	if err := validatePinOverride(common, *ignoreSessionPinFlag, routed); err != nil {
+		return err
+	}
+	if err := guardMailboxContext("watch", root, routed, *ignoreSessionPinFlag); err != nil {
+		return err
+	}
+	if err := requireMailbox(root, me); err != nil {
+		return err
+	}
 
 	// Validate handle against config.json
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
@@ -71,11 +85,6 @@ func runWatch(args []string) error {
 	}
 
 	inboxNew := fsq.AgentInboxNew(root, common.Me)
-
-	// Ensure inbox directory exists
-	if err := os.MkdirAll(inboxNew, 0o700); err != nil {
-		return err
-	}
 
 	// Set up context with timeout
 	ctx := context.Background()
@@ -97,7 +106,13 @@ func runWatch(args []string) error {
 	}
 
 	if watchErr != nil {
+		if os.IsNotExist(watchErr) {
+			return NotFoundError("mailbox for %q disappeared while watching %s", common.Me, inboxNew)
+		}
 		if errors.Is(watchErr, context.DeadlineExceeded) {
+			if err := requireMailbox(root, me); err != nil {
+				return err
+			}
 			// Output timeout result but return a timeout exit code
 			if err := outputWatchResult(common.JSON, "timeout", nil); err != nil {
 				return err
@@ -139,6 +154,10 @@ func watchWithFsnotify(ctx context.Context, inboxNew string, validator *headerVa
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return nil, "", errors.New("watcher closed")
+			}
+			if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 &&
+				filepath.Clean(event.Name) == filepath.Clean(inboxNew) {
+				return nil, "", os.ErrNotExist
 			}
 			// Only care about new files (Create or Rename into directory)
 			if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
@@ -193,9 +212,6 @@ func watchWithPolling(ctx context.Context, inboxNew string, validator *headerVal
 func listNewMessages(inboxNew string, validator *headerValidator) ([]msgInfo, error) {
 	entries, err := os.ReadDir(inboxNew)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
 	}
 

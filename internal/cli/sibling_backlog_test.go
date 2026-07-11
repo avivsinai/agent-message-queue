@@ -71,7 +71,7 @@ func TestListEmptyBaseRootHintsSiblingBacklog(t *testing.T) {
 	deliverGuardMessage(t, siblingRoot, "alice", "waiting")
 
 	t.Setenv("AM_ROOT", baseRoot)
-	t.Setenv("AM_BASE_ROOT", "")
+	t.Setenv("AM_BASE_ROOT", baseRoot)
 	t.Setenv("AM_SESSION", "")
 
 	stdout, stderr, err := captureEnvOutput(t, func() error {
@@ -163,7 +163,7 @@ func TestListSessionFlagTargetsSiblingFromBaseRoot(t *testing.T) {
 	deliverGuardMessage(t, siblingRoot, "alice", "targeted")
 
 	t.Setenv("AM_ROOT", baseRoot)
-	t.Setenv("AM_BASE_ROOT", "")
+	t.Setenv("AM_BASE_ROOT", baseRoot)
 	t.Setenv("AM_SESSION", "")
 
 	stdout, _, err := captureEnvOutput(t, func() error {

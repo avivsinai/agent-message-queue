@@ -84,11 +84,12 @@ amq list --session auth --new
 amq drain --session auth --include-body
 ```
 
-When a terminal has an `AM_SESSION` pin, `read`, `drain`, and `monitor` refuse a
-conflicting raw `AM_ROOT`/`--root` before inspecting or moving messages. Use
-`--session <name>` for sibling routing. For deliberate raw-root access,
-`--ignore-session-pin` requires an explicit `--root`; it never blesses an
-inherited `AM_ROOT`. `list` warns on a mismatch but remains available for
+When a terminal has a complete `AM_BASE_ROOT`/`AM_SESSION` pin, `read`, `drain`,
+`monitor`, `watch`, `reply`, and mutating DLQ commands refuse a conflicting raw
+`AM_ROOT`/`--root` before inspecting or moving mailbox state. Use `--session
+<name>` for sibling routing. For deliberate raw-root access,
+`--ignore-session-pin` requires a non-empty explicit `--root`; it never blesses
+an inherited `AM_ROOT`. `list` warns on a mismatch but remains available for
 non-destructive inspection. A missing mailbox is an error, not an empty inbox.
 
 ### For Scripts/CI
@@ -100,8 +101,8 @@ eval "$(amq env --me claude)"
 ```
 
 All shell-mode `amq env` output replaces `AM_ROOT`, `AM_ME`, `AM_BASE_ROOT`,
-and `AM_SESSION` as one context. For a base/sessionless root it unsets
-`AM_BASE_ROOT` and sets `AM_SESSION` to the empty string.
+and `AM_SESSION` as one context. For a base/sessionless root it sets
+`AM_BASE_ROOT` to that exact root and `AM_SESSION` to the empty string.
 
 `amq env` resolves the root with the full precedence chain:
 

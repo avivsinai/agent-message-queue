@@ -91,7 +91,7 @@ func runEnv(args []string) error {
 	if *exportFlag && *sessionNameFlag {
 		return UsageError("--export and --session-name are mutually exclusive")
 	}
-	contextExplicit := strings.TrimSpace(*rootFlag) != "" || strings.TrimSpace(*sessionFlag) != ""
+	contextExplicit := flagWasVisited(fs, "root") || flagWasVisited(fs, "session")
 
 	// Resolve --session into --root (mutually exclusive).
 	sessionBaseRoot := ""
@@ -103,11 +103,23 @@ func runEnv(args []string) error {
 		if err := validateSessionName(*sessionFlag); err != nil {
 			return err
 		}
-		// Resolve base from .amqrc or default
-		base := resolveBaseRoot()
-		sessionBaseRoot = base
+		pin, err := loadSessionPin()
+		if err != nil {
+			return err
+		}
+		base := ""
+		if pin.Present {
+			base = pin.BaseRoot
+		} else {
+			resolved, _, _, err := resolveEnvConfigWithSource("", *meFlag)
+			if err != nil {
+				return err
+			}
+			base = baseRootOf(absPath(resolveRoot(resolved)))
+		}
+		sessionBaseRoot = absPath(resolveRoot(base))
 		sessionNameOverride = *sessionFlag
-		*rootFlag = filepath.Join(base, *sessionFlag)
+		*rootFlag = filepath.Join(sessionBaseRoot, *sessionFlag)
 	}
 
 	// Resolve configuration with precedence
@@ -134,7 +146,7 @@ func runEnv(args []string) error {
 		if sessionNameOverride != "" {
 			return writeStdout("%s\n", sessionNameOverride)
 		}
-		if name := resolveSessionName(root); name != "" {
+		if name := inferredSessionIdentity(root); name != "" {
 			return writeStdout("%s\n", name)
 		}
 		return nil // Not in a session — empty output, exit 0
@@ -185,7 +197,7 @@ func runEnv(args []string) error {
 			return fmt.Errorf("resolve absolute base root for shell output: %w", err)
 		}
 	}
-	if err := writeShellEnv(root, baseRoot, sessionName, me, shell, *wakeFlag, inSession); err != nil {
+	if err := writeShellEnv(root, baseRoot, sessionName, me, shell, *wakeFlag); err != nil {
 		return err
 	}
 	if *exportFlag {
@@ -197,9 +209,19 @@ func runEnv(args []string) error {
 func classifyEnvRoot(root string) (baseRoot, sessionNameOut string, inSession bool) {
 	base := classifyRoot(root)
 	if base != "" && absPath(resolveRoot(root)) != absPath(resolveRoot(base)) {
-		return base, sessionName(root), true
+		if session := inferredSessionIdentity(root); session != "" {
+			return base, session, true
+		}
 	}
 	return root, "", false
+}
+
+func inferredSessionIdentity(root string) string {
+	session := resolveSessionName(root)
+	if session == "" || validateSessionName(session) != nil {
+		return ""
+	}
+	return session
 }
 
 func envProjectAndPeers(root string) (string, map[string]string) {
@@ -470,26 +492,25 @@ func isValidShell(shell string) bool {
 	}
 }
 
-func writeShellEnv(root, baseRoot, session, me, shell string, wake bool, includeBaseRoot bool) error {
+func writeShellEnv(root, baseRoot, session, me, shell string, wake bool) error {
 	switch shell {
 	case "fish":
-		return writeFishEnv(root, baseRoot, session, me, wake, includeBaseRoot)
+		return writeFishEnv(root, baseRoot, session, me, wake)
 	default:
-		return writePosixEnv(root, baseRoot, session, me, wake, includeBaseRoot)
+		return writePosixEnv(root, baseRoot, session, me, wake)
 	}
 }
 
-func writePosixEnv(root, baseRoot, session, me string, wake bool, includeBaseRoot bool) error {
+func writePosixEnv(root, baseRoot, session, me string, wake bool) error {
 	if root != "" {
 		if err := writeStdout("export AM_ROOT=%s\n", shellQuotePosix(root)); err != nil {
 			return err
 		}
 	}
-	if includeBaseRoot && baseRoot != "" {
-		if err := writeStdout("export AM_BASE_ROOT=%s\n", shellQuotePosix(baseRoot)); err != nil {
-			return err
-		}
-	} else if err := writeStdoutLine("unset AM_BASE_ROOT"); err != nil {
+	if baseRoot == "" {
+		return fmt.Errorf("cannot emit AMQ context without an exact AM_BASE_ROOT")
+	}
+	if err := writeStdout("export AM_BASE_ROOT=%s\n", shellQuotePosix(baseRoot)); err != nil {
 		return err
 	}
 	if err := writeStdout("export AM_SESSION=%s\n", shellQuotePosix(session)); err != nil {
@@ -510,17 +531,16 @@ func writePosixEnv(root, baseRoot, session, me string, wake bool, includeBaseRoo
 	return nil
 }
 
-func writeFishEnv(root, baseRoot, session, me string, wake bool, includeBaseRoot bool) error {
+func writeFishEnv(root, baseRoot, session, me string, wake bool) error {
 	if root != "" {
 		if err := writeStdout("set -gx AM_ROOT %s\n", shellQuoteFish(root)); err != nil {
 			return err
 		}
 	}
-	if includeBaseRoot && baseRoot != "" {
-		if err := writeStdout("set -gx AM_BASE_ROOT %s\n", shellQuoteFish(baseRoot)); err != nil {
-			return err
-		}
-	} else if err := writeStdoutLine("set -e AM_BASE_ROOT"); err != nil {
+	if baseRoot == "" {
+		return fmt.Errorf("cannot emit AMQ context without an exact AM_BASE_ROOT")
+	}
+	if err := writeStdout("set -gx AM_BASE_ROOT %s\n", shellQuoteFish(baseRoot)); err != nil {
 		return err
 	}
 	if session == "" {
@@ -573,7 +593,9 @@ func shellQuoteFish(s string) string {
 	}
 	// In fish, single quotes work but single quotes inside need escaping with backslash
 	// Unlike POSIX, fish allows \' inside single-quoted strings
-	return "'" + strings.ReplaceAll(s, "'", "\\'") + "'"
+	escaped := strings.ReplaceAll(s, "\\", "\\\\")
+	escaped = strings.ReplaceAll(escaped, "'", "\\'")
+	return "'" + escaped + "'"
 }
 
 func isSimpleString(s string) bool {
