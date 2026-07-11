@@ -147,6 +147,27 @@ def test_event_file_loader() -> None:
         assert check_pr_changelog.load_event(path)["pull_request"]["labels"][0]["name"] == "docs"
 
 
+def test_main_skips_dependabot_author_on_maintainer_synchronize() -> None:
+    # A maintainer's `gh pr update-branch` on a Dependabot PR: the actor is the
+    # maintainer, only the PR author identifies Dependabot. No git repo is
+    # provided, so anything short of the author-based skip would fail.
+    event = {
+        "sender": {"login": "avivsinai"},
+        "pull_request": {
+            "user": {"login": "dependabot[bot]"},
+            "head": {"ref": "dependabot/go_modules/x", "sha": "head-sha"},
+            "base": {"sha": "base-sha"},
+            "labels": [],
+        },
+    }
+    with tempfile.TemporaryDirectory() as temp:
+        path = pathlib.Path(temp) / "event.json"
+        path.write_text(json.dumps(event))
+        assert (
+            check_pr_changelog.main(["--event-path", str(path), "--actor", "avivsinai"]) == 0
+        )
+
+
 def main() -> int:
     test_added_unreleased_bullet_passes()
     test_missing_unreleased_bullet_fails()
@@ -155,6 +176,7 @@ def main() -> int:
     test_title_like_branch_does_not_skip_without_label()
     test_event_metadata_prefers_pull_request_fields()
     test_event_file_loader()
+    test_main_skips_dependabot_author_on_maintainer_synchronize()
     print("check PR changelog tests ok")
     return 0
 

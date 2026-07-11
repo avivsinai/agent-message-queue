@@ -6,8 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-
-## [0.41.1] - 2026-07-10
 ### Fixed
 
 - CI changelog gate no longer fails Dependabot PRs after a maintainer updates
@@ -16,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now also skips on the PR author (`pull_request.user.login`), GitHub's
   documented Dependabot-detection pattern, which stays `dependabot[bot]`
   regardless of who updates the branch.
+
+## [0.41.1] - 2026-07-10
+### Fixed
 
 - `amq wake` raw injection submits again in fast-reading TUIs (codex-tui, busy
   Claude Code): the v0.41.0 drain-wait completes within microseconds when the
