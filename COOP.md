@@ -280,6 +280,56 @@ code and may itself inject terminal input, `none` rejects `--inject-via`,
 `--inject-arg`, and `--inject-cmd`. Stderr output shares the TUI terminal by
 default and may remain visible until the TUI redraws.
 
+### Supervisor recipes
+
+AMQ remains daemon-free. If `wake` or `monitor` must stay attached across
+terminal restarts, let the operating system supervise the CLI process. Keep
+notification and consumption separate: `wake` only scans and notifies;
+`monitor` is the path that drains messages and emits receipts.
+
+For systemd, use separate services with an absolute root. A notifier unit can
+use:
+
+```ini
+[Service]
+Environment=AM_ROOT=/absolute/path/to/shared/.agent-mail/collab
+ExecStart=/usr/local/bin/amq wake --me claude --inject-mode none --bell
+Restart=always
+RestartSec=2
+```
+
+A consumer unit uses the same environment but a different `ExecStart`; it
+restarts after each emitted batch:
+
+```ini
+[Service]
+Environment=AM_ROOT=/absolute/path/to/shared/.agent-mail/collab
+ExecStart=/usr/local/bin/amq monitor --me claude --timeout 0 --include-body --json
+Restart=always
+RestartSec=2
+```
+
+For launchd, put the equivalent absolute arguments in `ProgramArguments` and
+enable `KeepAlive`. Use one plist for `wake` and another for `monitor`:
+
+```xml
+<key>ProgramArguments</key>
+<array>
+  <string>/usr/local/bin/amq</string>
+  <string>wake</string>
+  <string>--root</string><string>/absolute/path/to/shared/.agent-mail/collab</string>
+  <string>--me</string><string>claude</string>
+  <string>--inject-mode</string><string>none</string>
+</array>
+<key>KeepAlive</key><true/>
+<key>ThrottleInterval</key><integer>2</integer>
+```
+
+For the consumer plist, replace the command arguments after the executable with
+`monitor --root <absolute-root> --me claude --timeout 0 --include-body --json`.
+Route stdout/stderr to supervisor-managed logs and secure the unit/plist for the
+local user who owns the mailbox.
+
 **Options:**
 - `--inject-mode auto|raw|paste|none` - Injection strategy; `none` enforces zero terminal input
 - `--wake-inject-mode auto|raw|paste|none` - `coop exec` pass-through for its managed wake

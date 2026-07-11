@@ -217,6 +217,18 @@ or injecting into the wrong terminal. Repaired wake output goes to
 `agents/<agent>/.wake.repair.log`; `doctor --ops` can report whether repair is
 available, but it never starts a wake process.
 
+`amq who` and `amq doctor --ops` distinguish two activity sources:
+
+- `notifier_live` means AMQ verified the process identity behind a valid
+  `amq wake` lock. It proves prompt notification is attached; it does **not**
+  prove messages are consumed.
+- `recent_activity` means `last_seen` was refreshed in the last 10 minutes,
+  without a verified live notifier.
+
+Consumption remains the job of `drain` or `monitor` and is evidenced by
+receipts. For long-running `wake` and `monitor` examples under systemd or
+launchd, see [Supervisor recipes](COOP.md#supervisor-recipes).
+
 ## Message Kinds & Priority
 
 AMQ messages support kinds (`review_request`, `question`, `todo`, etc.) and priority levels (`urgent`, `normal`, `low`). See [COOP.md](COOP.md) for the full protocol.

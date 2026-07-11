@@ -369,6 +369,14 @@ pipes open after its JSON/text output exits. `doctor --ops` may report
 `target_present` and `repair_available`, but must remain diagnostic-only and
 never spawn a wake process.
 
+`who` and `doctor --ops` presence sources have narrow semantics:
+`notifier_live` requires a valid wake lock with process identity confirmed by
+the existing wake-lock inspector; it proves prompt notification only, never
+consumption. `recent_activity` means a fresh `last_seen` without that proof.
+Do not introduce `consumer_live` wording without a separate monitor heartbeat
+or lock. Long-running wake/monitor supervision belongs to launchd, systemd, or
+another layer above daemon-free AMQ.
+
 Git worktree diagnostics stay in `doctor --ops`, never in the send routing
 path. Relative project roots and auto-detected roots are per-worktree; sharing
 requires the same absolute `.amqrc` root or `AMQ_GLOBAL_ROOT`. The deep check is

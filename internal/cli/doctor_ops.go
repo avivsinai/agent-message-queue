@@ -35,6 +35,7 @@ type opsAgent struct {
 	OldestDLQAgeSeconds    float64 `json:"oldest_dlq_age_seconds"`
 	PresenceStatus         string  `json:"presence_status"`
 	PresenceAgeSeconds     float64 `json:"presence_age_seconds"`
+	PresenceSource         string  `json:"presence_source,omitempty"`
 }
 
 type opsOperatorGate struct {
@@ -126,15 +127,18 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 		}
 
 		// Presence
+		recentActivity := false
 		p, err := presence.Read(root, handle)
 		if err == nil {
 			agent.PresenceStatus = p.Status
 			if t, err := time.Parse(time.RFC3339Nano, p.LastSeen); err == nil {
 				agent.PresenceAgeSeconds = now.Sub(t).Seconds()
+				recentActivity = agent.PresenceAgeSeconds < (10 * time.Minute).Seconds()
 			}
 		} else {
 			agent.PresenceStatus = "unknown"
 		}
+		agent.PresenceSource = resolvePresenceSource(root, handle, recentActivity)
 
 		// Round to reasonable precision
 		agent.OldestUnreadAgeSeconds = math.Round(agent.OldestUnreadAgeSeconds)
