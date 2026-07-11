@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.42.1](https://github.com/avivsinai/agent-message-queue/compare/v0.42.0...v0.42.1) (2026-07-11)
+
+
+### Bug Fixes
+
+* **session:** refuse cross-session mailbox access and surface sibling backlogs ([#224](https://github.com/avivsinai/agent-message-queue/issues/224)) ([#225](https://github.com/avivsinai/agent-message-queue/issues/225)) ([57a296e](https://github.com/avivsinai/agent-message-queue/commit/57a296e0ecd77bf8b73a5c065f2a151260ef0a06))
+
 ## [0.42.0](https://github.com/avivsinai/agent-message-queue/compare/v0.41.1...v0.42.0) (2026-07-11)
 
 
