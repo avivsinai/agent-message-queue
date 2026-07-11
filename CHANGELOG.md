@@ -15,10 +15,28 @@ editing the release PR.
 
 * **wake:** add zero-input notification mode ([#221](https://github.com/avivsinai/agent-message-queue/issues/221)) ([3d3376f](https://github.com/avivsinai/agent-message-queue/commit/3d3376faa603829580418bec044a79064e36af81))
 
+  `amq wake --inject-mode none` now provides an AMQ-enforced zero-input mode
+  for permission-prompt workflows: normal notices go to wake stderr, urgent
+  interrupts emit one bell plus the stderr notice instead of Ctrl+C, and the
+  mode needs neither TIOCSTI nor a controlling TTY. It fails closed when
+  combined with `--inject-via`, `--inject-arg`, or `--inject-cmd`; `coop exec`
+  exposes the mode through `--wake-inject-mode` and refuses to satisfy an
+  explicit `none` request by reusing a wake whose zero-input mode cannot be
+  proven. Documentation now warns that every input-injecting mode can activate
+  a focused permission/approval dialog and that input deferral cannot detect
+  modal state (closes [#216](https://github.com/avivsinai/agent-message-queue/issues/216)).
+
 
 ### Bug Fixes
 
 * skip changelog gate on Dependabot PR author, not only event actor ([#219](https://github.com/avivsinai/agent-message-queue/issues/219)) ([fc87a86](https://github.com/avivsinai/agent-message-queue/commit/fc87a861e92b9df041cd10158657c424a87139cd))
+
+  CI changelog gate no longer fails Dependabot PRs after a maintainer updates
+  the branch: a manual `gh pr update-branch` makes the maintainer the
+  synchronize-event actor, so the actor-based skip stopped applying. The gate
+  now also skips on the PR author (`pull_request.user.login`), GitHub's
+  documented Dependabot-detection pattern, which stays `dependabot[bot]`
+  regardless of who updates the branch.
 
 ## [0.41.1] - 2026-07-10
 ### Fixed
