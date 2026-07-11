@@ -4,29 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-### Added
-
-- `amq wake --inject-mode none` now provides an AMQ-enforced zero-input mode
-  for permission-prompt workflows: normal notices go to wake stderr, urgent
-  interrupts emit one bell plus the stderr notice instead of Ctrl+C, and the
-  mode needs neither TIOCSTI nor a controlling TTY. It fails closed when
-  combined with `--inject-via`, `--inject-arg`, or `--inject-cmd`; `coop exec`
-  exposes the mode through `--wake-inject-mode` and refuses to satisfy an
-  explicit `none` request by reusing a wake whose zero-input mode cannot be
-  proven. Documentation now warns that every input-injecting mode can activate
-  a focused permission/approval dialog and that input deferral cannot detect
-  modal state (closes #216).
-
-### Fixed
-
-- CI changelog gate no longer fails Dependabot PRs after a maintainer updates
-  the branch: a manual `gh pr update-branch` makes the maintainer the
-  synchronize-event actor, so the actor-based skip stopped applying. The gate
-  now also skips on the PR author (`pull_request.user.login`), GitHub's
-  documented Dependabot-detection pattern, which stays `dependabot[bot]`
-  regardless of who updates the branch.
+Release Please generates new entries from conventional squash commits on
+`main`; richer or multi-entry notes can be added through commit overrides or by
+editing the release PR.
 
 ## [0.41.1] - 2026-07-10
 ### Fixed
@@ -729,7 +709,6 @@ directories are impacted.
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
-[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.41.1...HEAD
 [0.41.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.41.0...v0.41.1
 [0.41.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.39.0...v0.40.0
