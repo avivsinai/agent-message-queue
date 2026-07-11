@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.1] - 2026-07-10
+### Fixed
+
+- `amq wake` raw injection submits again in fast-reading TUIs (codex-tui, busy
+  Claude Code): the v0.41.0 drain-wait completes within microseconds when the
+  TUI is actively reading, so the submit CR landed inside the TUI's paste-burst
+  window and was inserted as a pasted newline instead of pressing Enter. The
+  injector now holds the submit key for a 150ms settle delay after the text
+  drains (clearing codex-tui's 120ms Enter-suppress window) and restores the
+  second rescue submit on the same spacing (a no-op when the first already
+  submitted), skipping the rescue only when the first is provably still queued.
+- `amq wake` injects a single LF prelude before the submit CR for codex
+  targets: in the reproduced Ghostty wake path with codex-tui's kitty keyboard
+  enhancement active, a bare `\r` did not submit at any tested delay; the LF
+  routes through codex-tui's Ctrl-J binding, which flushes and clears
+  paste-burst state before the CR lands (the prelude newline is trimmed from
+  the submitted payload). Raw-mode injection deliberately stays single-byte —
+  TIOCSTI delivers one byte per ioctl, so a multi-byte escape sequence (such as
+  the kitty CSI-u Enter) can be split by reader scheduling into a lone ESC,
+  which a TUI parses as the Escape key and cancels an active turn. Claude Code
+  targets keep the plain `\r` submit with no prelude.
+
+### Security
+
+- Bumped the Go toolchain to 1.25.12 to pick up the GO-2026-5856 fix
+  (Encrypted Client Hello privacy leak in crypto/tls).
+
+
 ## [0.41.0] - 2026-07-08
 ### Added
 
@@ -680,7 +708,8 @@ directories are impacted.
 
 - Auto-create `.gitignore` with `agent-mail` directory entry
 
-[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.41.0...HEAD
+[Unreleased]: https://github.com/avivsinai/agent-message-queue/compare/v0.41.1...HEAD
+[0.41.1]: https://github.com/avivsinai/agent-message-queue/compare/v0.41.0...v0.41.1
 [0.41.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.39.0...v0.40.0
 [0.39.0]: https://github.com/avivsinai/agent-message-queue/compare/v0.38.0...v0.39.0
