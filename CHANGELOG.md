@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.43.0](https://github.com/avivsinai/agent-message-queue/compare/v0.42.1...v0.43.0) (2026-07-11)
+
+
+### Features
+
+* **doctor:** detect mailbox divergence across worktrees ([#228](https://github.com/avivsinai/agent-message-queue/issues/228)) ([db99e78](https://github.com/avivsinai/agent-message-queue/commit/db99e78f7fccd414dccc5199fde8ac3685ae9a58)), closes [#207](https://github.com/avivsinai/agent-message-queue/issues/207)
+* **presence:** distinguish notifier liveness from activity ([#230](https://github.com/avivsinai/agent-message-queue/issues/230)) ([a8d9b8f](https://github.com/avivsinai/agent-message-queue/commit/a8d9b8fd5a9cace05252fe5882e2a092cb0d15f8)), closes [#206](https://github.com/avivsinai/agent-message-queue/issues/206)
+
 ## [0.42.1](https://github.com/avivsinai/agent-message-queue/compare/v0.42.0...v0.42.1) (2026-07-11)
 
 
