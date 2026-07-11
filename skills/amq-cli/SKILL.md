@@ -188,6 +188,13 @@ amq receipts wait --me codex --msg-id <msg_id> --stage drained --timeout 60s
 
 `amq read`, `amq drain`, and `amq monitor` all apply the same strict header validation. Messages in `inbox/new` that are corrupt or have malformed headers are moved to DLQ and produce a `dlq` receipt.
 
+`amq who` and `amq doctor --ops` report `notifier_live` only when the wake-lock
+inspector verifies a live `amq wake` process identity. That proves prompt
+notification, not message consumption. `recent_activity` means only that
+`last_seen` is fresh. Use `drain` or `monitor` when consumption is required;
+run long-lived wake/monitor commands under launchd, systemd, or another
+supervisor rather than treating AMQ itself as a daemon.
+
 Those consuming commands, `watch`, and mutating DLQ commands refuse a raw
 target that conflicts with a complete `AM_BASE_ROOT`/`AM_SESSION` pin before
 touching mailbox state. `send` and `reply` apply the same check to their source

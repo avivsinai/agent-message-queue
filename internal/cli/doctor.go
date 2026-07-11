@@ -176,6 +176,9 @@ func runDoctor(args []string) error {
 				line += fmt.Sprintf(", %d DLQ", a.DLQCount)
 			}
 			line += fmt.Sprintf(", presence %s (%.0fs ago)", a.PresenceStatus, a.PresenceAgeSeconds)
+			if a.PresenceSource != "" {
+				line += ", source " + a.PresenceSource
+			}
 			if err := writeStdoutLine(line); err != nil {
 				return err
 			}

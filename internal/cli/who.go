@@ -16,7 +16,7 @@ func runWho(args []string) error {
 
 	usage := usageWithFlags(fs, "amq who [options]",
 		"List sessions and agents in the current project.",
-		"Shows active/stale status based on presence data.")
+		"Shows active/stale status and whether activity comes from a verified notifier or recent commands.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -48,6 +48,7 @@ func runWho(args []string) error {
 		Kind               string `json:"kind"`
 		PresenceApplicable bool   `json:"presence_applicable"`
 		Active             bool   `json:"active"`
+		PresenceSource     string `json:"presence_source,omitempty"`
 		Note               string `json:"note,omitempty"`
 	}
 	type sessionInfo struct {
@@ -94,13 +95,17 @@ func runWho(args []string) error {
 				continue
 			}
 
-			// Check presence for activity status.
+			// Recent presence proves activity only; a verified wake lock separately
+			// proves that a prompt notifier is currently attached.
+			recentActivity := false
 			if p, err := presence.Read(sessDir, ae.Name()); err == nil {
 				if t, err := time.Parse(time.RFC3339Nano, p.LastSeen); err == nil {
-					ai.Active = time.Since(t) < 10*time.Minute
+					recentActivity = time.Since(t) < 10*time.Minute
 				}
 				ai.Note = p.Note
 			}
+			ai.PresenceSource = resolvePresenceSource(sessDir, ae.Name(), recentActivity)
+			ai.Active = recentActivity || ai.PresenceSource == presenceSourceNotifierLive
 			agents = append(agents, ai)
 		}
 
@@ -145,6 +150,9 @@ func runWho(args []string) error {
 				status = "human"
 			} else if a.Active {
 				status = "active"
+				if a.PresenceSource != "" {
+					status += " (" + a.PresenceSource + ")"
+				}
 			}
 			note := ""
 			if a.Note != "" {
