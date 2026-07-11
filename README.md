@@ -174,6 +174,20 @@ the same condition as a `sibling_backlog` warning. The pin is an operational
 safety check, not access control: a local process can still repin the
 environment or use the explicit override.
 
+Git worktrees are isolated by default when the project root is relative (for
+example `{"root":".agent-mail"}`): the same session name resolves beneath each
+worktree, so two agents can appear to share `collab` while reading different
+mailboxes. `amq doctor --ops` warns when a linked worktree uses this local
+layout and when a peer has fresher presence in the same session under another
+worktree root. A `send --wait-for` timeout names its delivery root/session and
+points to that diagnostic.
+
+If agents in several worktrees should share one mailbox, give all of them the
+same absolute base root. Use an absolute, machine-local `.amqrc` value such as
+`{"root":"/absolute/path/to/shared/.agent-mail"}`, or remove the project-relative
+`.amqrc` and export `AMQ_GLOBAL_ROOT=/absolute/path/to/shared/.agent-mail`.
+Per-worktree isolation remains the default when sharing is not intended.
+
 ### 4. Inspect Health
 
 ```bash
