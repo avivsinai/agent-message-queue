@@ -10,9 +10,18 @@ AMQ owns agent-to-agent messaging, thread continuity, cross-project/session rout
 
 ## Release Contract
 
-- Release from `main` only through `./scripts/release.sh X.Y.Z` and the resulting release PR; do not create manual tags or GitHub releases.
+- Release Please maintains the release PR from conventional squash commits on
+  `main`. Do not create manual release branches, tags, or GitHub releases.
 - A push to `main` updates the AvivSinai marketplace immediately for `amq-cli` and `amq-spec`.
-- Keep one version across `CHANGELOG.md`, skill/plugin metadata, and the release commit; after the release PR merges, CI validates the merged commit, creates the matching tag, publishes GitHub/Homebrew artifacts from that exact SHA, and uses the committed changelog entry as the GitHub release notes.
+- Keep one version across `CHANGELOG.md`, the release-please manifest,
+  skill/plugin metadata, and the release commit. Release Please opens PRs only;
+  after a release PR merges, `release.yml` validates that exact commit, creates
+  the matching tag, publishes GitHub/Homebrew artifacts, and uses the committed
+  changelog entry as the GitHub release notes.
+- PR titles must follow `type(scope): description`; the repository uses
+  squash-only merges so the title becomes the conventional commit on `main`.
+  Use `BEGIN_COMMIT_OVERRIDE` in a merged PR body or edit the release PR when a
+  change needs multiple or richer release-note entries.
 
 ## Operational Constraints
 

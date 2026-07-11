@@ -17,14 +17,14 @@ mkdir -p "$REPO/scripts" "$REPO/skills/amq-cli" "$REPO/skills/amq-spec" \
 
 cp "$ROOT/scripts/resolve-release-metadata.sh" "$REPO/scripts/"
 cp "$ROOT/scripts/check-release-version.sh" "$REPO/scripts/"
-chmod +x "$REPO/scripts/resolve-release-metadata.sh" "$REPO/scripts/check-release-version.sh"
+cp "$ROOT/scripts/release_changelog_section.py" "$REPO/scripts/"
+chmod +x "$REPO/scripts/resolve-release-metadata.sh" "$REPO/scripts/check-release-version.sh" \
+  "$REPO/scripts/release_changelog_section.py"
 
 cat >"$REPO/CHANGELOG.md" <<'EOF'
 # Changelog
 
-## [Unreleased]
-
-## [9.9.9] - 2026-06-22
+## [9.9.9](https://example.test/compare/v9.9.8...v9.9.9) (2026-06-22)
 
 ### Fixed
 
@@ -35,7 +35,7 @@ for skill in amq-cli amq-spec; do
   cat >"$REPO/skills/$skill/SKILL.md" <<'EOF'
 ---
 name: test
-version: 9.9.9
+version: 9.9.9 # x-release-please-version
 ---
 
 # Test
@@ -44,6 +44,13 @@ done
 
 printf '{"version":"9.9.9"}\n' >"$REPO/.claude-plugin/plugin.json"
 printf '{"version":"9.9.9"}\n' >"$REPO/.codex-plugin/plugin.json"
+
+(
+  cd "$REPO"
+  python3 scripts/release_changelog_section.py 9.9.9 "$TMPDIR/release-notes.md"
+)
+grep -F "## [9.9.9](https://example.test/compare/v9.9.8...v9.9.9) (2026-06-22)" \
+  "$TMPDIR/release-notes.md" >/dev/null
 
 git -C "$REPO" init -q -b main
 git -C "$REPO" config user.email test@example.com

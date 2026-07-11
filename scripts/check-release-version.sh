@@ -22,7 +22,11 @@ for path in sorted(pathlib.Path("skills").glob("*/SKILL.md")):
         mismatches.append((str(path), "<missing frontmatter>"))
         continue
     frontmatter = match.group(1)
-    version_match = re.search(r"(?m)^version:\s*([0-9A-Za-z.+-]+)\s*$", frontmatter)
+    version_match = re.search(
+        r"(?m)^version:\s*([0-9A-Za-z.+-]+)"
+        r"(?:\s+#\s*x-release-please-version)?\s*$",
+        frontmatter,
+    )
     if not version_match:
         mismatches.append((str(path), "<missing version>"))
         continue
@@ -38,20 +42,13 @@ for path in [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"]:
     if actual != version:
         mismatches.append((path, actual))
 
-changelog = pathlib.Path("CHANGELOG.md")
-if not changelog.exists():
-    mismatches.append(("CHANGELOG.md", "<missing>"))
-else:
-    text = changelog.read_text()
-    pattern = rf"(?m)^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$"
-    if not re.search(pattern, text):
-        mismatches.append(("CHANGELOG.md", "<missing release heading>"))
-
 if mismatches:
     print(f"release metadata version mismatch for {version}:")
     for path, actual in mismatches:
         print(f"  - {path}: {actual!r}")
     raise SystemExit(1)
 
-print(f"release metadata matches {version}")
 PY
+
+python3 scripts/release_changelog_section.py "$version" >/dev/null
+echo "release metadata matches $version"

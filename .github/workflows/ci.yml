@@ -4,6 +4,7 @@ on:
   push:
     branches: ["**"]
   pull_request:
+    types: [opened, edited, synchronize, reopened]
 
 permissions:
   contents: read
@@ -21,9 +22,11 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-      - name: Check PR changelog
+      - name: Check PR title
         if: github.event_name == 'pull_request'
-        run: python3 scripts/check_pr_changelog.py --base-ref "${{ github.event.pull_request.base.sha }}" --head-ref HEAD
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python3 scripts/check_pr_title.py "$PR_TITLE"
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:

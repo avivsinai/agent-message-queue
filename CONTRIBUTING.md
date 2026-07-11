@@ -19,12 +19,14 @@ make ci
 
 Run `make ci` before opening a PR; it is the canonical local gate and includes
 format, vet, lint, test, and smoke-test coverage. Install local hooks with
-`scripts/install-hooks.sh` when working in this repo, and use
-`scripts/release.sh` for release PRs.
+`scripts/install-hooks.sh` when working in this repo. Release Please opens and
+updates release PRs from conventional squash commits on `main`.
 
 ## Pull requests
 
 - Include a clear description of the change and why it matters.
+- Use a conventional title such as `feat: add routing` or
+  `fix(wake): preserve input` so the squash commit drives release notes.
 - Add or update tests when behavior changes.
 - Avoid reformatting unrelated code.
 

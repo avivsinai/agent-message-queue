@@ -53,10 +53,4 @@ release_before="$(git -C "$release_victim" rev-parse HEAD)"
 GIT_DIR="$release_victim/.git" bash "$ROOT/scripts/test_release_metadata.sh" >/dev/null
 assert_victim_unchanged "$release_victim" "$release_before" "test_release_metadata.sh"
 
-changelog_victim="$TMPDIR/changelog-victim"
-new_victim_repo "$changelog_victim"
-changelog_before="$(git -C "$changelog_victim" rev-parse HEAD)"
-GIT_DIR="$changelog_victim/.git" python3 "$ROOT/scripts/test_check_pr_changelog.py" >/dev/null
-assert_victim_unchanged "$changelog_victim" "$changelog_before" "test_check_pr_changelog.py"
-
 printf 'git env sanitization tests ok\n'

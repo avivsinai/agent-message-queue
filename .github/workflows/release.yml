@@ -130,6 +130,8 @@ jobs:
           RELEASE_NOTES_PATH: ${{ runner.temp }}/RELEASE_NOTES.md
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
+          # Keep this self-contained: workflow_dispatch may check out an older
+          # tag that predates scripts/release_changelog_section.py.
           python3 - "$VERSION" "$RELEASE_NOTES_PATH" <<'PY'
           import pathlib
           import re
@@ -138,13 +140,19 @@ jobs:
           version = sys.argv[1]
           output_path = pathlib.Path(sys.argv[2])
           text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
-          pattern = re.compile(
-              rf"(?ms)^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}\n.*?(?=^## \[|\Z)"
+          date = r"\d{4}-\d{2}-\d{2}"
+          heading = re.compile(
+              rf"(?m)^## \[{re.escape(version)}\](?:\([^\n)]+\))? "
+              rf"(?:\({date}\)|- {date})$"
           )
-          match = pattern.search(text)
+          match = heading.search(text)
           if not match:
               raise SystemExit(f"missing changelog section for {version}")
-          output_path.write_text(match.group(0).strip() + "\n", encoding="utf-8")
+          next_heading = re.search(r"(?m)^## \[", text[match.end():])
+          end = match.end() + next_heading.start() if next_heading else len(text)
+          output_path.write_text(
+              text[match.start():end].strip() + "\n", encoding="utf-8"
+          )
           PY
       - name: Release
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
