@@ -411,6 +411,30 @@ func TestClassifyRootDefaultLayoutConvention(t *testing.T) {
 	}
 }
 
+func TestClassifyRootDefaultBaseIgnoresPoisonSiblingAgentsDirectory(t *testing.T) {
+	t.Setenv("AM_BASE_ROOT", "")
+
+	home := t.TempDir()
+	baseRoot := filepath.Join(home, defaultCoopRoot)
+	sessionRoot := filepath.Join(baseRoot, "dashboard")
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "agents"), 0o700); err != nil {
+		t.Fatalf("mkdir poison sibling: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(sessionRoot, "agents"), 0o700); err != nil {
+		t.Fatalf("mkdir session root: %v", err)
+	}
+
+	if got := classifyRoot(baseRoot); got != "" {
+		t.Fatalf("classifyRoot(base) = %q, want empty for a base root", got)
+	}
+	if got := baseRootOf(baseRoot); got != baseRoot {
+		t.Fatalf("baseRootOf(base) = %q, want %q", got, baseRoot)
+	}
+	if !sameBaseTree(baseRoot, sessionRoot) {
+		t.Fatalf("sameBaseTree(base, session) = false, want true")
+	}
+}
+
 func TestClassifyRootCustomRootDoesNotMatchDefaultLayoutConvention(t *testing.T) {
 	t.Setenv("AM_BASE_ROOT", "")
 

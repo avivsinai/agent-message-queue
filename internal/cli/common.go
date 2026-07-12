@@ -64,16 +64,20 @@ func sessionName(root string) string { return filepath.Base(root) }
 //
 // Resolution order:
 //  1. AM_BASE_ROOT, but only when the supplied root is still under that base
-//  2. If root is a session root (parent contains sibling session dirs), return parent
-//  3. If the parent directory is the default root name (.agent-mail), return parent
-//  4. Root-aware .amqrc lookup (works for explicit --root outside the cwd project)
-//  5. Otherwise, return "" (unknown — caller must handle)
+//  2. If root itself is the default base (.agent-mail), return "" (it is not a session)
+//  3. If root is a session root (parent contains sibling session dirs), return parent
+//  4. If the parent directory is the default root name (.agent-mail), return parent
+//  5. Root-aware .amqrc lookup (works for explicit --root outside the cwd project)
+//  6. Otherwise, return "" (unknown — caller must handle)
 func classifyRoot(root string) string {
 	if base := strings.TrimSpace(os.Getenv(envBaseRoot)); base != "" {
 		base = resolveRoot(base)
 		if isSessionRootUnderBase(root, base) {
 			return base
 		}
+	}
+	if filepath.Base(filepath.Clean(root)) == defaultCoopRoot {
+		return ""
 	}
 	// Check if root looks like a session: parent has sibling dirs with agents/.
 	parent := filepath.Dir(root)
