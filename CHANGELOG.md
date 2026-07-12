@@ -64,6 +64,10 @@ editing the release PR.
   mode and, for external wakes, persisted injector path and ordered arguments
   match the requested target; mismatched, owner-orphaned, or concurrently
   replaced terminal targets do not report readiness.
+- Add `amq wake retire` for identity-verified managed shutdown of an exact
+  inject-via wake while preserving its mailbox and saved target. The command
+  refuses target mismatches, unverified locks, and process/lock replacement
+  races before signaling.
 
 ## [0.41.1] - 2026-07-10
 ### Fixed

@@ -196,6 +196,8 @@ amq doctor --ops
 amq doctor --ops --json
 amq doctor --ops --fix-wake-locks
 amq wake repair --me codex
+amq wake retire --me codex --inject-via /absolute/injector \
+  --inject-arg inject --inject-arg cmux --inject-arg cmux:surface:<uuid>
 ```
 
 Wake locks reported by `doctor --ops` can be `stale`, `unverified`, or, in JSON
@@ -216,6 +218,13 @@ locks, and `unverified` locks to avoid double-injecting into an active session
 or injecting into the wrong terminal. Repaired wake output goes to
 `agents/<agent>/.wake.repair.log`; `doctor --ops` can report whether repair is
 available, but it never starts a wake process.
+
+`amq wake retire` is the symmetric managed-shutdown path. It stops a wake only
+when the live process identity, unchanged lock contents, and saved inject-via
+executable plus ordered arguments all match the caller's exact expectation.
+PID reuse, unverified locks, different terminal targets, and concurrent lock
+replacement fail closed. Retirement removes only the wake lock; the AMQ
+mailbox and saved target remain available for a fresh agent pair to reuse.
 
 `amq who` and `amq doctor --ops` distinguish two activity sources:
 

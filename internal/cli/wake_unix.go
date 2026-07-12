@@ -52,6 +52,16 @@ type wakeRepairResult struct {
 	RepairAvailable bool   `json:"repair_available,omitempty"`
 }
 
+type wakeRetireResult struct {
+	Status string `json:"status"`
+	Agent  string `json:"agent"`
+	Root   string `json:"root"`
+	Lock   string `json:"lock"`
+	Target string `json:"target,omitempty"`
+	PID    int    `json:"pid,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
 type wakeRepairStarter func(root, me string, target wakeTarget) (int, error)
 
 type wakeLockAcquireOptions struct {
@@ -450,10 +460,149 @@ func processAlive(pid int) bool {
 type wakeLoopFunc func(wakeConfig) error
 
 func runWake(args []string) error {
-	if len(args) > 0 && args[0] == "repair" {
-		return runWakeRepair(args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case "repair":
+			return runWakeRepair(args[1:])
+		case "retire":
+			return runWakeRetire(args[1:])
+		}
 	}
 	return runWakeWithLoop(args, runWakeLoop)
+}
+
+func runWakeRetire(args []string) error {
+	fs := flag.NewFlagSet("wake retire", flag.ContinueOnError)
+	common := addCommonFlags(fs)
+	injectViaFlag := fs.String("inject-via", "", "Expected external injection executable")
+	var injectArgFlags multiStringFlag
+	fs.Var(&injectArgFlags, "inject-arg", "Expected fixed injection argument (repeatable)")
+	usage := usageWithFlags(fs, "amq wake retire --me <agent> --inject-via <path> [options]",
+		"Retire an identity-confirmed wake only when its saved inject-via target exactly matches.",
+		"",
+		"The command revalidates the wake process identity, lock contents, and saved",
+		"inject-via target before signaling. It preserves the mailbox and saved target.")
+	if handled, err := parseFlags(fs, args, usage); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+	if err := requireMe(common.Me); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*injectViaFlag) == "" {
+		return UsageError("--inject-via is required")
+	}
+	me, err := normalizeHandle(common.Me)
+	if err != nil {
+		return UsageError("--me: %v", err)
+	}
+	root := resolveRoot(common.Root)
+	if err := validateKnownHandles(root, common.Strict, me); err != nil {
+		return err
+	}
+	requested, err := newWakeTarget(root, me, *injectViaFlag, []string(injectArgFlags))
+	if err != nil {
+		return UsageError("--inject-via: %v", err)
+	}
+	result, retireErr := retireWake(root, me, requested)
+	if common.JSON {
+		if err := writeJSON(os.Stdout, result); err != nil {
+			return err
+		}
+		return retireErr
+	}
+	line := fmt.Sprintf("wake retire: %s agent=%s root=%s", result.Status, result.Agent, result.Root)
+	if result.PID != 0 {
+		line += fmt.Sprintf(" pid=%d", result.PID)
+	}
+	if result.Reason != "" {
+		line += " reason=" + result.Reason
+	}
+	if err := writeStdoutLine(line); err != nil {
+		return err
+	}
+	return retireErr
+}
+
+func retireWake(root, me string, requested wakeTarget) (wakeRetireResult, error) {
+	result := wakeRetireResult{
+		Status: "unknown",
+		Agent:  me,
+		Root:   canonicalWakeRoot(root),
+		Lock:   filepath.Join(fsq.AgentBase(root, me), ".wake.lock"),
+		Target: wakeTargetPath(root, me),
+	}
+	inspection := inspectWakeLock(root, me)
+	if !inspection.Exists {
+		result.Status = "refused"
+		result.Reason = "no wake lock present; wake process absence cannot be proven"
+		return result, errors.New(result.Reason)
+	}
+	result.PID = inspection.PID
+	refuse := func(reason string) (wakeRetireResult, error) {
+		result.Status = "refused"
+		result.Reason = reason
+		return result, errors.New(reason)
+	}
+
+	switch inspection.Status {
+	case wakeLockValid:
+		if !inspection.IdentityConfirmed {
+			return refuse("wake process identity is not confirmed")
+		}
+		if err := requireExistingWakeTargetMatches(inspection, requested); err != nil {
+			return refuse(err.Error())
+		}
+		recheck := inspectWakeLock(root, me)
+		if !sameWakeLockInspection(inspection, recheck) || !recheck.IdentityConfirmed {
+			return refuse("wake lock changed before retirement")
+		}
+		if err := requireExistingWakeTargetMatches(recheck, requested); err != nil {
+			return refuse("wake target changed before retirement: " + err.Error())
+		}
+		if err := terminateWakeProcess(recheck); err != nil {
+			result.Status = "error"
+			result.Reason = err.Error()
+			return result, err
+		}
+		if err := removeWakeLockIfUnchanged(recheck); err != nil {
+			result.Status = "error"
+			result.Reason = err.Error()
+			return result, err
+		}
+	case wakeLockStale:
+		if err := validateWakeLockStaleRemoval(inspection); err != nil {
+			return refuse(err.Error())
+		}
+		if err := requireExistingWakeTargetMatches(inspection, requested); err != nil {
+			return refuse(err.Error())
+		}
+		recheck := inspectWakeLock(root, me)
+		if !recheck.Exists || recheck.Status != wakeLockStale ||
+			recheck.Root != inspection.Root || recheck.Agent != inspection.Agent ||
+			!bytes.Equal(recheck.raw, inspection.raw) {
+			return refuse("wake lock changed before retirement")
+		}
+		if err := requireExistingWakeTargetMatches(recheck, requested); err != nil {
+			return refuse("wake target changed before retirement: " + err.Error())
+		}
+		if err := removeWakeLockIfUnchanged(recheck); err != nil {
+			result.Status = "error"
+			result.Reason = err.Error()
+			return result, err
+		}
+	case wakeLockCreating:
+		return refuse("wake lock is being created; retry shortly")
+	case wakeLockUnverified:
+		return refuse("wake lock is unverified; refusing retirement: " + inspection.Reason)
+	default:
+		return refuse(fmt.Sprintf("wake lock status %q cannot be retired", inspection.Status))
+	}
+
+	result.Status = "retired"
+	result.Reason = "wake stopped; mailbox and saved target preserved"
+	return result, nil
 }
 
 func runWakeRepair(args []string) error {
