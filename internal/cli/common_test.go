@@ -411,6 +411,29 @@ func TestClassifyRootDefaultLayoutConvention(t *testing.T) {
 	}
 }
 
+func TestBaseRootOfExactEnvBaseWinsOverUnrelatedSibling(t *testing.T) {
+	parent := t.TempDir()
+	baseRoot := filepath.Join(parent, defaultCoopRoot)
+	sessionRoot := filepath.Join(baseRoot, "collab")
+	if err := os.MkdirAll(sessionRoot, 0o700); err != nil {
+		t.Fatalf("mkdir session root: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(parent, ".claude", "agents"), 0o700); err != nil {
+		t.Fatalf("mkdir unrelated agents dir: %v", err)
+	}
+	t.Setenv("AM_BASE_ROOT", baseRoot)
+
+	if got := classifyRoot(baseRoot); got != "" {
+		t.Fatalf("classifyRoot(%q) = %q, want empty for a base root", baseRoot, got)
+	}
+	if got := baseRootOf(baseRoot); got != baseRoot {
+		t.Fatalf("baseRootOf(%q) = %q, want exact env base %q", baseRoot, got, baseRoot)
+	}
+	if !sameBaseTree(baseRoot, sessionRoot) {
+		t.Fatalf("sameBaseTree(%q, %q) = false, want true", baseRoot, sessionRoot)
+	}
+}
+
 func TestClassifyRootCustomRootDoesNotMatchDefaultLayoutConvention(t *testing.T) {
 	t.Setenv("AM_BASE_ROOT", "")
 

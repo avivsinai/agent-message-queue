@@ -115,6 +115,9 @@ func TestSend_AllowsBareRootWithoutIdentity(t *testing.T) {
 // the caller's own tree is not a crossing and must be allowed.
 func TestSend_AllowsRedundantSameTreeRoot(t *testing.T) {
 	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, ".claude", "agents"), 0o700); err != nil {
+		t.Fatalf("mkdir unrelated agents dir: %v", err)
+	}
 	root := sessionRoot(t, tmp, "collab", "claude", "codex")
 	t.Setenv("AM_ROOT", root)
 	t.Setenv("AM_BASE_ROOT", filepath.Join(tmp, ".agent-mail"))

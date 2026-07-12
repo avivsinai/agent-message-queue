@@ -849,6 +849,9 @@ func TestRunEnvInvalidGlobalAmqrcBeatsAutoDetect(t *testing.T) {
 
 func TestRunEnvJSONV1SessionFlag(t *testing.T) {
 	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".claude", "agents"), 0o700); err != nil {
+		t.Fatalf("mkdir unrelated agents dir: %v", err)
+	}
 
 	rcContent := `{"root": ".agent-mail"}`
 	if err := os.WriteFile(filepath.Join(root, ".amqrc"), []byte(rcContent), 0o644); err != nil {

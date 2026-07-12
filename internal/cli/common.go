@@ -63,26 +63,39 @@ func sessionName(root string) string { return filepath.Base(root) }
 // be determined. This is the single authoritative function for root classification.
 //
 // Resolution order:
-//  1. AM_BASE_ROOT, but only when the supplied root is still under that base
-//  2. If root is a session root (parent contains sibling session dirs), return parent
-//  3. If the parent directory is the default root name (.agent-mail), return parent
-//  4. Root-aware .amqrc lookup (works for explicit --root outside the cwd project)
-//  5. Otherwise, return "" (unknown — caller must handle)
+//  1. AM_BASE_ROOT, when root is a direct session below it
+//  2. Root-aware .amqrc, when root is a direct session below its configured base
+//  3. If root is a session root (parent contains sibling session dirs), return parent
+//  4. If the parent directory is the default root name (.agent-mail), return parent
+//  5. Otherwise, return "" (base or unknown — caller must handle)
 func classifyRoot(root string) string {
+	resolvedRoot := absPath(resolveRoot(root))
 	if base := strings.TrimSpace(os.Getenv(envBaseRoot)); base != "" {
-		base = resolveRoot(base)
-		if isSessionRootUnderBase(root, base) {
+		base = absPath(resolveRoot(base))
+		if resolvedRoot == base {
+			return ""
+		}
+		if isSessionRootUnderBase(resolvedRoot, base) {
 			return base
 		}
 	}
+	if base := configuredBaseRoot(root); base != "" {
+		if resolvedRoot == base {
+			return ""
+		}
+		return base
+	}
+	if filepath.Base(resolvedRoot) == defaultCoopRoot {
+		return ""
+	}
 	// Check if root looks like a session: parent has sibling dirs with agents/.
-	parent := filepath.Dir(root)
+	parent := filepath.Dir(resolvedRoot)
 	entries, err := os.ReadDir(parent)
 	if err != nil {
-		return configuredBaseRoot(root)
+		return ""
 	}
 	for _, e := range entries {
-		if !e.IsDir() || e.Name() == filepath.Base(root) {
+		if !e.IsDir() || e.Name() == filepath.Base(resolvedRoot) {
 			continue
 		}
 		if dirExists(filepath.Join(parent, e.Name(), "agents")) {
@@ -92,7 +105,7 @@ func classifyRoot(root string) string {
 	if filepath.Base(parent) == defaultCoopRoot {
 		return parent
 	}
-	return configuredBaseRoot(root)
+	return ""
 }
 
 // resolveSessionName returns the session name for the given root, or "" if
@@ -103,7 +116,7 @@ func resolveSessionName(root string) string {
 		return ""
 	}
 	// Ensure root actually differs from base (not just base root itself)
-	if root == base {
+	if absPath(resolveRoot(root)) == absPath(resolveRoot(base)) {
 		return ""
 	}
 	return sessionName(root)
@@ -188,10 +201,21 @@ func configuredBaseRoot(root string) string {
 		base = filepath.Join(result.Dir, base)
 	}
 	base = absPath(base)
-	if isSessionRootUnderBase(root, base) {
+	if isBaseOrSessionRoot(root, base) {
 		return base
 	}
 	return ""
+}
+
+// isBaseOrSessionRoot returns true when root is either the base itself or a
+// direct child session below it.
+func isBaseOrSessionRoot(root, base string) bool {
+	root = absPath(resolveRoot(root))
+	base = absPath(resolveRoot(base))
+	if root == "" || base == "" {
+		return false
+	}
+	return root == base || filepath.Dir(root) == base
 }
 
 // isSessionRootUnderBase returns true when root is a direct child of base
@@ -209,10 +233,23 @@ func isSessionRootUnderBase(root, base string) bool {
 // baseRootOf returns the base root for a queue root: the derived/configured base
 // when root is a session directory, or root itself otherwise.
 func baseRootOf(root string) string {
+	resolvedRoot := resolveRoot(root)
+	if base := strings.TrimSpace(os.Getenv(envBaseRoot)); base != "" {
+		base = resolveRoot(base)
+		if isBaseOrSessionRoot(resolvedRoot, base) {
+			return base
+		}
+	}
+	if base := configuredBaseRoot(resolvedRoot); base != "" {
+		return base
+	}
+	if filepath.Base(resolvedRoot) == defaultCoopRoot {
+		return resolvedRoot
+	}
 	if base := classifyRoot(root); base != "" {
 		return resolveRoot(base)
 	}
-	return resolveRoot(root)
+	return resolvedRoot
 }
 
 // sameBaseTree reports whether two roots belong to the same base tree — the same
