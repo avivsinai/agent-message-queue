@@ -9,6 +9,16 @@ Thanks for your interest in AMQ!
 
 ## Development
 
+Install the pinned contributor toolchain with mise:
+
+```bash
+mise install
+mise run ci
+```
+
+Mise delegates to the repository's canonical Make targets, which can also be
+run directly:
+
 ```bash
 make fmt
 make test

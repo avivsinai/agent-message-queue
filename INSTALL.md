@@ -93,6 +93,18 @@ Restart your agent after installing.
 
 ## Alternative Methods
 
+### Binary: mise
+
+Install and pin the latest released binary in your global
+[mise](https://mise.jdx.dev/) configuration:
+
+```bash
+mise use --global github:avivsinai/agent-message-queue@latest
+amq --version
+```
+
+This installs the release artifact directly; Go is not required.
+
 ### Binary: Manual Download
 
 Download from [Releases](https://github.com/avivsinai/agent-message-queue/releases):
@@ -128,6 +140,17 @@ make build
 mkdir -p ~/.local/bin
 mv amq ~/.local/bin/
 ```
+
+Contributors using mise can install the repository's pinned Go, lint, test,
+and vulnerability toolchain and run the same Make targets through mise tasks:
+
+```bash
+mise install
+mise run build
+mise run ci
+```
+
+The committed `mise.lock` records resolved downloads for reproducible setup.
 
 ### Binary: Install Script Options
 

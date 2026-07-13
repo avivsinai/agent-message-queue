@@ -1,0 +1,45 @@
+[tools]
+go = "1.25.12"
+golangci-lint = "2.12.2"
+python = "3.13.14"
+"go:golang.org/x/vuln/cmd/govulncheck" = "1.6.0"
+
+[tasks.build]
+description = "Build the AMQ CLI"
+run = "make build"
+
+[tasks.test]
+description = "Run the Go test suite"
+run = "make test"
+
+[tasks.fmt]
+description = "Format Go sources"
+run = "make fmt"
+
+[tasks.fmt-check]
+description = "Check Go formatting"
+run = "make fmt-check"
+
+[tasks.vet]
+description = "Run go vet"
+run = "make vet"
+
+[tasks.lint]
+description = "Run golangci-lint"
+run = "make lint"
+
+[tasks.smoke]
+description = "Exercise the CLI end to end"
+run = "make smoke"
+
+[tasks.ci]
+description = "Run the canonical local validation suite"
+run = "make ci"
+
+[tasks.vuln]
+description = "Scan Go dependencies for known vulnerabilities"
+run = "govulncheck ./..."
+
+[tasks.hooks]
+description = "Install the repository pre-push hook"
+run = "./scripts/install-hooks.sh"

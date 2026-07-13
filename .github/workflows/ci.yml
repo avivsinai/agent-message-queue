@@ -27,29 +27,17 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: python3 scripts/check_pr_title.py "$PR_TITLE"
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - name: Set up mise toolchain
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
         with:
-          go-version-file: go.mod
-      - name: Check skills sync
-        run: make check-skills
-      - name: Format check
-        run: make fmt-check
-      - name: Vet
-        run: go vet ./...
+          version: 2026.7.5
+      - name: Validate mise tasks
+        run: mise tasks validate --errors-only
+      - name: Run local CI gate
+        run: mise run ci
       - name: Cross-platform build
         run: |
           GOOS=windows go build ./...
           GOOS=freebsd go build ./...
       - name: Govulncheck
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
-      - name: Test
-        run: go test ./...
-      - name: Smoke test
-        run: make smoke
-      - name: Lint
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        with:
-          version: latest
+        run: mise run vuln
