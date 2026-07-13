@@ -27,10 +27,11 @@ make lint
 make ci
 ```
 
-Run `make ci` before opening a PR; it is the canonical local gate and includes
-format, vet, lint, test, and smoke-test coverage. Install local hooks with
-`scripts/install-hooks.sh` when working in this repo. Release Please opens and
-updates release PRs from conventional squash commits on `main`.
+Run `make ci` before opening a PR; it is the canonical local gate defined by
+the Makefile. When changing the Go version, update `go.mod`, `mise.toml`, and
+`mise.lock` together; the local gate rejects version drift. Install local hooks
+with `scripts/install-hooks.sh` when working in this repo. Release Please opens
+and updates release PRs from conventional squash commits on `main`.
 
 ## Pull requests
 

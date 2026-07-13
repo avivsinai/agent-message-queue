@@ -422,7 +422,7 @@ git clone https://github.com/avivsinai/agent-message-queue.git
 cd agent-message-queue
 make build   # Build binary
 make test    # Run tests
-make ci      # Full CI: vet + lint + test + smoke
+make ci      # Run the repository-defined local CI gate
 ```
 
 ## FAQ

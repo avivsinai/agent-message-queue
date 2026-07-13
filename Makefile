@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint ci smoke check-skills
+.PHONY: build test fmt fmt-check vet lint ci smoke check-toolchain check-skills vuln hooks
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -26,7 +26,15 @@ lint:
 smoke:
 	./scripts/smoke-test.sh
 
-ci: check-skills fmt-check vet lint test smoke
+ci: check-toolchain check-skills fmt-check vet lint test smoke
+
+check-toolchain:
+	@go_version="$$(awk '$$1 == "go" { print $$2; exit }' go.mod)"; \
+		mise_version="$$(awk -F'"' '$$1 ~ /^go = / { print $$2; exit }' mise.toml)"; \
+		test "$$go_version" = "$$mise_version" || { \
+			echo "Go version mismatch: go.mod=$$go_version mise.toml=$$mise_version"; \
+			exit 1; \
+		}
 
 # Skill integrity: skills/ is canonical, .claude/skills/ and .agents/skills/ are symlinks
 check-skills:
@@ -40,3 +48,9 @@ check-skills:
 	@diff -rq skills/amq-cli .claude/skills/amq-cli || (echo "❌ amq-cli content mismatch" && exit 1)
 	@diff -rq skills/amq-spec .claude/skills/amq-spec || (echo "❌ amq-spec content mismatch" && exit 1)
 	@echo "✓ Skill symlinks valid"
+
+vuln:
+	govulncheck ./...
+
+hooks:
+	./scripts/install-hooks.sh

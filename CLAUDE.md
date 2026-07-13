@@ -37,7 +37,7 @@ make test           # Run tests: go test ./...
 make fmt            # Format code: gofmt -w
 make vet            # Run go vet
 make lint           # Run golangci-lint
-make ci             # Full CI: fmt-check → vet → lint → test
+make ci             # Full CI gate defined by Makefile dependencies
 ```
 
 Requires Go 1.25+ and optionally golangci-lint.
@@ -573,7 +573,8 @@ Install git hooks to enforce checks before push:
 ./scripts/install-hooks.sh
 ```
 
-The pre-push hook runs `make ci` (vet, lint, test, smoke) before allowing pushes.
+The pre-push hook runs the repository-defined `make ci` gate before allowing
+pushes.
 
 ## Commit Conventions
 

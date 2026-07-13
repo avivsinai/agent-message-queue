@@ -38,8 +38,8 @@ run = "make ci"
 
 [tasks.vuln]
 description = "Scan Go dependencies for known vulnerabilities"
-run = "govulncheck ./..."
+run = "make vuln"
 
 [tasks.hooks]
 description = "Install the repository pre-push hook"
-run = "./scripts/install-hooks.sh"
+run = "make hooks"

@@ -99,7 +99,7 @@ Install and pin the latest released binary in your global
 [mise](https://mise.jdx.dev/) configuration:
 
 ```bash
-mise use --global github:avivsinai/agent-message-queue@latest
+mise use --global --pin github:avivsinai/agent-message-queue@latest
 amq --version
 ```
 
@@ -141,8 +141,9 @@ mkdir -p ~/.local/bin
 mv amq ~/.local/bin/
 ```
 
-Contributors using mise can install the repository's pinned Go, lint, test,
-and vulnerability toolchain and run the same Make targets through mise tasks:
+Contributors using mise can install the repository's pinned Go, Python, linter,
+and vulnerability-scanner toolchain and run the same Make targets through mise
+tasks:
 
 ```bash
 mise install
