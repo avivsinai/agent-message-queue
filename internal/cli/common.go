@@ -59,40 +59,71 @@ func (f *commonFlags) warnRootOverride() {
 // sessionName extracts the session name (last path component) from a resolved root path.
 func sessionName(root string) string { return filepath.Base(root) }
 
+// isDefaultCoopRoot recognizes the default root by filesystem identity when a
+// case-insensitive volume presents an alternate spelling.
+func isDefaultCoopRoot(path string) bool {
+	if filepath.Base(path) == defaultCoopRoot {
+		return true
+	}
+	exact := filepath.Join(filepath.Dir(path), defaultCoopRoot)
+	got, gotErr := os.Lstat(path)
+	want, wantErr := os.Lstat(exact)
+	return gotErr == nil && wantErr == nil && os.SameFile(got, want)
+}
+
 // classifyRoot returns the base root for the given root, or "" if it cannot
 // be determined. This is the single authoritative function for root classification.
 //
 // Resolution order:
-//  1. AM_BASE_ROOT, but only when the supplied root is still under that base
-//  2. If root is a session root (parent contains sibling session dirs), return parent
-//  3. If the parent directory is the default root name (.agent-mail), return parent
-//  4. Root-aware .amqrc lookup (works for explicit --root outside the cwd project)
-//  5. Otherwise, return "" (unknown — caller must handle)
+//  1. AM_BASE_ROOT, when root is a direct session below it
+//  2. If root's parent is the default root (.agent-mail), return that parent
+//  3. The nearest root-aware .amqrc, when root is the configured base or a direct session below it
+//  4. If root itself is the default root name (.agent-mail), return "" (known base)
+//  5. If root is a session root (parent contains sibling session dirs), return parent
+//  6. Otherwise, return "" (base or unknown — caller must handle)
 func classifyRoot(root string) string {
+	if strings.TrimSpace(root) == "" {
+		return ""
+	}
+	resolvedRoot := absPath(resolveRoot(root))
 	if base := strings.TrimSpace(os.Getenv(envBaseRoot)); base != "" {
-		base = resolveRoot(base)
-		if isSessionRootUnderBase(root, base) {
+		base = absPath(resolveRoot(base))
+		if resolvedRoot == base {
+			return ""
+		}
+		if isSessionRootUnderBase(resolvedRoot, base) {
 			return base
 		}
 	}
+	parent := filepath.Dir(resolvedRoot)
+	// A direct child of .agent-mail is always a session; this structural rule
+	// deliberately outranks root-local .amqrc and must not be rebased.
+	if isDefaultCoopRoot(parent) {
+		return parent
+	}
+	if base := configuredBaseRoot(resolvedRoot); base != "" {
+		if resolvedRoot == base {
+			return ""
+		}
+		return base
+	}
+	if isDefaultCoopRoot(resolvedRoot) {
+		return ""
+	}
 	// Check if root looks like a session: parent has sibling dirs with agents/.
-	parent := filepath.Dir(root)
 	entries, err := os.ReadDir(parent)
 	if err != nil {
-		return configuredBaseRoot(root)
+		return ""
 	}
 	for _, e := range entries {
-		if !e.IsDir() || e.Name() == filepath.Base(root) {
+		if !e.IsDir() || e.Name() == filepath.Base(resolvedRoot) {
 			continue
 		}
 		if dirExists(filepath.Join(parent, e.Name(), "agents")) {
 			return parent // Found a sibling session — root is a session, parent is base.
 		}
 	}
-	if filepath.Base(parent) == defaultCoopRoot {
-		return parent
-	}
-	return configuredBaseRoot(root)
+	return ""
 }
 
 // resolveSessionName returns the session name for the given root, or "" if
@@ -103,7 +134,7 @@ func resolveSessionName(root string) string {
 		return ""
 	}
 	// Ensure root actually differs from base (not just base root itself)
-	if root == base {
+	if absPath(resolveRoot(root)) == absPath(resolveRoot(base)) {
 		return ""
 	}
 	return sessionName(root)
@@ -173,6 +204,10 @@ func resolveRoot(raw string) string {
 }
 
 func configuredBaseRoot(root string) string {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return ""
+	}
 	result, err := findAmqrcForRoot(root)
 	if err != nil {
 		if !errors.Is(err, errAmqrcNotFound) {
@@ -188,19 +223,37 @@ func configuredBaseRoot(root string) string {
 		base = filepath.Join(result.Dir, base)
 	}
 	base = absPath(base)
-	if isSessionRootUnderBase(root, base) {
+	if isBaseOrSessionRoot(root, base) {
 		return base
 	}
 	return ""
+}
+
+// isBaseOrSessionRoot returns true when root is either the base itself or a
+// direct child session below it.
+func isBaseOrSessionRoot(root, base string) bool {
+	root = strings.TrimSpace(root)
+	base = strings.TrimSpace(base)
+	if root == "" || base == "" {
+		return false
+	}
+	root = absPath(resolveRoot(root))
+	base = absPath(resolveRoot(base))
+	return root == base || filepath.Dir(root) == base
 }
 
 // isSessionRootUnderBase returns true when root is a direct child of base
 // (i.e., root is a session directory like .agent-mail/collab under .agent-mail).
 // Returns false when root == base (the base root itself is not a session).
 func isSessionRootUnderBase(root, base string) bool {
+	root = strings.TrimSpace(root)
+	base = strings.TrimSpace(base)
+	if root == "" || base == "" {
+		return false
+	}
 	root = absPath(resolveRoot(root))
 	base = absPath(resolveRoot(base))
-	if root == "" || base == "" || root == base {
+	if root == base {
 		return false
 	}
 	return filepath.Dir(root) == base
