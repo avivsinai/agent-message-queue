@@ -148,6 +148,26 @@ func TestWorktreeDiagnosticsFailOpenOutsideGitRepository(t *testing.T) {
 	}
 }
 
+func TestCreateGitWorktreeFixtureIgnoresGlobalCommitSigning(t *testing.T) {
+	// Given
+	globalConfig := filepath.Join(t.TempDir(), "global.gitconfig")
+	contents := "[commit]\n\tgpgsign = true\n[gpg]\n\tformat = ssh\n[user]\n\tsigningkey = missing-signing-key\n"
+	if err := os.WriteFile(globalConfig, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write global git config: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+
+	// When
+	primary, linked := createGitWorktreeFixture(t)
+
+	// Then
+	for _, dir := range []string{primary, linked} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("stat worktree %s: %v", dir, err)
+		}
+	}
+}
+
 func createGitWorktreeFixture(t *testing.T) (primary, linked string) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
@@ -175,7 +195,7 @@ func createGitWorktreeFixture(t *testing.T) (primary, linked string) {
 func runGitForTest(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1")
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
