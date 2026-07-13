@@ -31,8 +31,13 @@ ci: check-toolchain check-skills fmt-check vet lint test smoke
 check-toolchain:
 	@go_version="$$(awk '$$1 == "go" { print $$2; exit }' go.mod)"; \
 		mise_version="$$(awk -F'"' '$$1 ~ /^go = / { print $$2; exit }' mise.toml)"; \
-		test "$$go_version" = "$$mise_version" || { \
-			echo "Go version mismatch: go.mod=$$go_version mise.toml=$$mise_version"; \
+		lock_version="$$(awk '/^\[\[tools\.go\]\]$$/ { in_go = 1; next } in_go && $$1 == "version" { gsub(/"/, "", $$3); print $$3; exit }' mise.lock)"; \
+		if test -z "$$go_version" || test -z "$$mise_version" || test -z "$$lock_version"; then \
+			echo "Unable to read Go versions: go.mod=$$go_version mise.toml=$$mise_version mise.lock=$$lock_version"; \
+			exit 1; \
+		fi; \
+		test "$$go_version" = "$$mise_version" && test "$$go_version" = "$$lock_version" || { \
+			echo "Go version mismatch: go.mod=$$go_version mise.toml=$$mise_version mise.lock=$$lock_version"; \
 			exit 1; \
 		}
 
