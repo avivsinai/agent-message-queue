@@ -59,6 +59,18 @@ func (f *commonFlags) warnRootOverride() {
 // sessionName extracts the session name (last path component) from a resolved root path.
 func sessionName(root string) string { return filepath.Base(root) }
 
+// isDefaultCoopRoot recognizes the default root by filesystem identity when a
+// case-insensitive volume presents an alternate spelling.
+func isDefaultCoopRoot(path string) bool {
+	if filepath.Base(path) == defaultCoopRoot {
+		return true
+	}
+	exact := filepath.Join(filepath.Dir(path), defaultCoopRoot)
+	got, gotErr := os.Lstat(path)
+	want, wantErr := os.Lstat(exact)
+	return gotErr == nil && wantErr == nil && os.SameFile(got, want)
+}
+
 // classifyRoot returns the base root for the given root, or "" if it cannot
 // be determined. This is the single authoritative function for root classification.
 //
@@ -84,9 +96,9 @@ func classifyRoot(root string) string {
 		}
 	}
 	parent := filepath.Dir(resolvedRoot)
-	// The default layout convention is structural and deliberately outranks
-	// root-local .amqrc, which must not rebase a session into its own base.
-	if filepath.Base(parent) == defaultCoopRoot {
+	// A direct child of .agent-mail is always a session; this structural rule
+	// deliberately outranks root-local .amqrc and must not be rebased.
+	if isDefaultCoopRoot(parent) {
 		return parent
 	}
 	if base := configuredBaseRoot(resolvedRoot); base != "" {
@@ -95,7 +107,7 @@ func classifyRoot(root string) string {
 		}
 		return base
 	}
-	if filepath.Base(resolvedRoot) == defaultCoopRoot {
+	if isDefaultCoopRoot(resolvedRoot) {
 		return ""
 	}
 	// Check if root looks like a session: parent has sibling dirs with agents/.

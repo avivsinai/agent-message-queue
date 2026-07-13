@@ -85,6 +85,59 @@ func TestBypassRootLocalAmqrcDoesNotRebaseDefaultSession(t *testing.T) {
 	}
 }
 
+func TestCaseInsensitiveDefaultRootSpellingStillRefusesBothEscapes(t *testing.T) {
+	p := t.TempDir()
+	if !caseInsensitiveFS(t, p) {
+		t.Skip("case-sensitive filesystem")
+	}
+	for _, tc := range []struct {
+		name        string
+		sessionName string
+		writeRoot   bool
+	}{
+		{name: "nested default-name session", sessionName: ".agent-mail"},
+		{name: "root-local amqrc", sessionName: "collab", writeRoot: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			foreign := t.TempDir()
+			base := filepath.Join(p, ".agent-mail")
+			session := filepath.Join(base, tc.sessionName)
+			if err := fsq.EnsureAgentDirs(session, "alice"); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(foreign, "bob"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.writeRoot {
+				if err := os.WriteFile(filepath.Join(session, ".amqrc"), []byte(`{"root":"."}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			upperBase := filepath.Join(p, ".AGENT-MAIL")
+			source := filepath.Join(upperBase, tc.sessionName)
+			target := filepath.Join(source, "escape")
+			if err := os.Symlink(foreign, target); err != nil {
+				t.Skipf("symlink unsupported: %v", err)
+			}
+			assertCrossTreeEscapeRefused(t, source, target, foreign)
+		})
+	}
+}
+
+func caseInsensitiveFS(t *testing.T, dir string) bool {
+	t.Helper()
+	lower := filepath.Join(dir, ".probe-case")
+	if err := os.MkdirAll(lower, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Stat(lower)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Stat(filepath.Join(dir, ".PROBE-CASE"))
+	return err == nil && os.SameFile(want, got)
+}
+
 func TestRootLocalAmqrcCanDeclareLegitimateCustomBase(t *testing.T) {
 	t.Setenv("AM_BASE_ROOT", "")
 
@@ -162,6 +215,40 @@ func TestIsBaseOrSessionRootRejectsEmptyInput(t *testing.T) {
 				t.Fatalf("isBaseOrSessionRoot(%q, %q) = true, want false", tc.root, tc.base)
 			}
 		})
+	}
+}
+
+func TestSameBaseTreeAllowsNonexistentSameTreeTarget(t *testing.T) {
+	p := t.TempDir()
+	base := filepath.Join(p, ".agent-mail")
+	source := filepath.Join(base, "collab")
+	target := filepath.Join(base, "newsession")
+	if err := os.MkdirAll(filepath.Join(source, "agents", "alice"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !sameBaseTree(source, target) {
+		t.Fatal("same-tree target that delivery will create was treated as cross-tree")
+	}
+}
+
+func TestSameBaseTreeAllowsSymlinkedCustomBase(t *testing.T) {
+	realData := t.TempDir()
+	repoParent := t.TempDir()
+	repoQueue := filepath.Join(repoParent, "queue")
+	if err := os.Symlink(realData, repoQueue); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	source := filepath.Join(repoQueue, "collab")
+	target := filepath.Join(repoQueue, "auth")
+	for _, root := range []string{source, target} {
+		if err := os.MkdirAll(filepath.Join(root, "agents", "alice"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("AM_BASE_ROOT", repoQueue)
+	t.Setenv("AM_SESSION", "")
+	if !sameBaseTree(source, target) {
+		t.Fatal("custom base reached through a symlinked ancestor was treated as cross-tree")
 	}
 }
 
