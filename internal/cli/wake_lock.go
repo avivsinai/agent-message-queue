@@ -202,20 +202,20 @@ func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
 			inspection.Reason = inspectionReason("process start time unavailable", proc.InspectError)
 			return
 		}
-		if compareWakeBootID(lock.BootID, proc) != bootIDMatch {
-			inspection.Status = wakeLockUnverified
-			if wakeProcessProvenNotWake(proc) {
-				inspection.Status = wakeLockStale
-			}
-			inspection.Reason = "boot id mismatch"
-			return
-		}
 		if lock.ProcessStart != proc.StartToken {
 			inspection.Status = wakeLockUnverified
 			if wakeProcessProvenNotWake(proc) {
 				inspection.Status = wakeLockStale
 			}
 			inspection.Reason = "process start time mismatch"
+			return
+		}
+		if compareWakeBootID(lock.BootID, proc) != bootIDMatch {
+			inspection.Status = wakeLockUnverified
+			if wakeProcessProvenNotWake(proc) {
+				inspection.Status = wakeLockStale
+			}
+			inspection.Reason = "boot id mismatch"
 			return
 		}
 	}
@@ -443,13 +443,13 @@ func compareWakeBootID(recorded string, proc wakeProcessInfo) bootIDComparison {
 	if recorded == "" {
 		return bootIDMatch
 	}
-	if proc.BootID == "" && proc.LegacyBootID == "" {
-		return bootIDUnknown
-	}
-	if recorded == proc.BootID || recorded == proc.LegacyBootID {
-		return bootIDMatch
-	}
 	for _, current := range []string{proc.BootID, proc.LegacyBootID} {
+		if current == "" {
+			continue
+		}
+		if strings.EqualFold(recorded, current) {
+			return bootIDMatch
+		}
 		if legacyDarwinBootIDsMatch(recorded, current) {
 			return bootIDMatch
 		}
@@ -458,11 +458,6 @@ func compareWakeBootID(recorded string, proc wakeProcessInfo) bootIDComparison {
 	// A UUID cannot be disproved by a readable boottime, and vice versa.
 	if isDarwinBootUUID(recorded) && isDarwinBootUUID(proc.BootID) {
 		return bootIDMismatch
-	}
-	if _, ok := parseLegacyDarwinBootID(recorded); ok {
-		if _, ok := parseLegacyDarwinBootID(proc.LegacyBootID); ok {
-			return bootIDMismatch
-		}
 	}
 	return bootIDUnknown
 }
@@ -498,11 +493,11 @@ func legacyDarwinBootIDsMatch(first, second string) bool {
 	if !firstOK || !secondOK {
 		return false
 	}
-	delta := firstTime.Sub(secondTime)
-	if delta < 0 {
-		delta = -delta
+	secDelta := firstTime.Unix() - secondTime.Unix()
+	if secDelta < -1 || secDelta > 1 {
+		return false
 	}
-	return delta <= time.Second
+	return firstTime.Sub(secondTime) <= time.Second && secondTime.Sub(firstTime) <= time.Second
 }
 
 func parseLegacyDarwinBootID(value string) (time.Time, bool) {

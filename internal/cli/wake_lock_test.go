@@ -119,13 +119,18 @@ func TestWakeBootIDMismatchAcceptsDarwinLegacyMigration(t *testing.T) {
 				BootID:       "9C0682F4-901B-4243-8B5C-287FAFB9AD0E",
 				LegacyBootID: "1783327535.407566000",
 			},
-			mismatch: true,
+			mismatch: false,
 		},
 		{
 			name:     "different boot session uuid",
 			recorded: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
 			process:  wakeProcessInfo{BootID: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"},
 			mismatch: true,
+		},
+		{
+			name:     "same boot session uuid different case",
+			recorded: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+			process:  wakeProcessInfo{BootID: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"},
 		},
 		{
 			name:     "recorded boot with unavailable current identity",
