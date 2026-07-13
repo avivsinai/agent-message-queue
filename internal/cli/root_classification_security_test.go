@@ -86,10 +86,6 @@ func TestBypassRootLocalAmqrcDoesNotRebaseDefaultSession(t *testing.T) {
 }
 
 func TestCaseInsensitiveDefaultRootSpellingStillRefusesBothEscapes(t *testing.T) {
-	p := t.TempDir()
-	if !caseInsensitiveFS(t, p) {
-		t.Skip("case-sensitive filesystem")
-	}
 	for _, tc := range []struct {
 		name        string
 		sessionName string
@@ -99,6 +95,10 @@ func TestCaseInsensitiveDefaultRootSpellingStillRefusesBothEscapes(t *testing.T)
 		{name: "root-local amqrc", sessionName: "collab", writeRoot: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			p := t.TempDir()
+			if !caseInsensitiveFS(t, p) {
+				t.Skip("case-sensitive filesystem")
+			}
 			foreign := t.TempDir()
 			base := filepath.Join(p, ".agent-mail")
 			session := filepath.Join(base, tc.sessionName)
@@ -113,6 +113,14 @@ func TestCaseInsensitiveDefaultRootSpellingStillRefusesBothEscapes(t *testing.T)
 					t.Fatal(err)
 				}
 			}
+			if tc.sessionName == ".agent-mail" {
+				if err := os.MkdirAll(filepath.Join(p, "poison", "agents"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if got := classifyRoot(filepath.Join(p, ".AGENT-MAIL")); got != "" {
+					t.Fatalf("case-insensitive default base with poison sibling classified as %q, want base", got)
+				}
+			}
 			upperBase := filepath.Join(p, ".AGENT-MAIL")
 			source := filepath.Join(upperBase, tc.sessionName)
 			target := filepath.Join(source, "escape")
@@ -121,6 +129,32 @@ func TestCaseInsensitiveDefaultRootSpellingStillRefusesBothEscapes(t *testing.T)
 			}
 			assertCrossTreeEscapeRefused(t, source, target, foreign)
 		})
+	}
+}
+
+func TestIsDefaultCoopRootDoesNotFoldCaseOnCaseSensitiveFS(t *testing.T) {
+	p := t.TempDir()
+	lower := filepath.Join(p, defaultCoopRoot)
+	upper := filepath.Join(p, ".AGENT-MAIL")
+	if err := os.MkdirAll(lower, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(upper, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lowerInfo, err := os.Lstat(lower)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upperInfo, err := os.Lstat(upper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(lowerInfo, upperInfo) {
+		t.Skip("case-insensitive filesystem")
+	}
+	if isDefaultCoopRoot(upper) {
+		t.Fatal("isDefaultCoopRoot folded distinct case-sensitive directory names")
 	}
 }
 
