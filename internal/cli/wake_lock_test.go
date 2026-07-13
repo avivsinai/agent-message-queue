@@ -86,3 +86,117 @@ func bindWakeLockToTarget(lock wakeLock, target wakeTarget) wakeLock {
 	lock.TargetDigest = wakeTargetDigest(target)
 	return lock
 }
+
+func TestWakeBootIDMismatchAcceptsDarwinLegacyMigration(t *testing.T) {
+	tests := []struct {
+		name     string
+		recorded string
+		process  wakeProcessInfo
+		mismatch bool
+	}{
+		{
+			name:     "current boot session uuid",
+			recorded: "9C0682F4-901B-4243-8B5C-287FAFB9AD0E",
+			process:  wakeProcessInfo{BootID: "9C0682F4-901B-4243-8B5C-287FAFB9AD0E"},
+		},
+		{
+			name:     "legacy boot time with macOS clock correction",
+			recorded: "1783327533.465308000",
+			process: wakeProcessInfo{
+				BootID:       "9C0682F4-901B-4243-8B5C-287FAFB9AD0E",
+				LegacyBootID: "1783327533.407566000",
+			},
+		},
+		{
+			name:     "boot time fallback with macOS clock correction",
+			recorded: "1783327533.465308000",
+			process:  wakeProcessInfo{BootID: "1783327533.407566000"},
+		},
+		{
+			name:     "different legacy boot",
+			recorded: "1783327533.465308000",
+			process: wakeProcessInfo{
+				BootID:       "9C0682F4-901B-4243-8B5C-287FAFB9AD0E",
+				LegacyBootID: "1783327535.407566000",
+			},
+			mismatch: true,
+		},
+		{
+			name:     "different boot session uuid",
+			recorded: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+			process:  wakeProcessInfo{BootID: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"},
+			mismatch: true,
+		},
+		{
+			name:     "recorded boot with unavailable current identity",
+			recorded: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+			process:  wakeProcessInfo{},
+			mismatch: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wakeBootIDMismatch(tc.recorded, tc.process); got != tc.mismatch {
+				t.Fatalf("wakeBootIDMismatch() = %v, want %v", got, tc.mismatch)
+			}
+		})
+	}
+}
+
+func TestInspectWakeLockAcceptsLegacyDarwinBootIDForProvenWake(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		TTY:          "tty",
+		ProcessStart: "start-1",
+		BootID:       "1783327533.465308000",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:          pid,
+				Running:      true,
+				StartToken:   "start-1",
+				BootID:       "9C0682F4-901B-4243-8B5C-287FAFB9AD0E",
+				LegacyBootID: "1783327533.407566000",
+				Executable:   "/opt/homebrew/bin/amq",
+				Args:         []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+
+	inspection := inspectWakeLock(root, "codex")
+	if inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
+		t.Fatalf("inspection = status %q reason %q confirmed %v", inspection.Status, inspection.Reason, inspection.IdentityConfirmed)
+	}
+}
+
+func TestInspectWakeLockTreatsUnavailableCurrentBootIdentityAsUnverified(t *testing.T) {
+	const wakePID = 4343
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		TTY:          "tty",
+		ProcessStart: "start-1",
+		BootID:       "recorded-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "start-1",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+
+	inspection := inspectWakeLock(root, "codex")
+	if inspection.Status != wakeLockUnverified {
+		t.Fatalf("inspection status = %q, want unverified (reason %q)", inspection.Status, inspection.Reason)
+	}
+}
