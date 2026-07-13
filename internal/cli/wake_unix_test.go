@@ -1362,6 +1362,34 @@ func TestShouldReplaceOrphanedWakeLockKeepsLockWhenKillDoesNotTerminate(t *testi
 	}
 }
 
+func TestTerminateWakeProcessPreservesLiveWakeOnUnknownBootAfterSignal(t *testing.T) {
+	const wakePID = 4343
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{PID: wakePID, TTY: "tty", ProcessStart: "start-1", BootID: "boot-1", Executable: "/opt/homebrew/bin/amq"})
+	calls := 0
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		calls++
+		info := wakeProcessInfo{PID: pid, Running: true, StartToken: "start-1", Executable: "/opt/homebrew/bin/amq", Args: []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex"}}
+		if calls >= 3 { // after SIGTERM: still live, but boot identity is unavailable
+			return info
+		}
+		info.BootID = "boot-1"
+		return info
+	})
+	var signals []os.Signal
+	stubSignalWakeProcess(t, func(pid int, sig os.Signal) error { signals = append(signals, sig); return nil })
+	inspection := inspectWakeLock(root, "codex")
+	if err := terminateWakeProcess(inspection); err == nil {
+		t.Fatal("terminateWakeProcess unexpectedly declared success for live wake with unknown boot")
+	}
+	if len(signals) != 1 || signals[0] != syscall.SIGTERM {
+		t.Fatalf("signals = %v, want only SIGTERM", signals)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("lock was removed or became unreadable: %v", err)
+	}
+}
+
 func TestShouldReplaceOrphanedWakeLockRevalidatesBeforeSignal(t *testing.T) {
 	const wakePID = 4242
 	root := secureTempDirForTest(t)
