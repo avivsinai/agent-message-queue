@@ -131,7 +131,7 @@ func TestWakeBootIDMismatchAcceptsDarwinLegacyMigration(t *testing.T) {
 			name:     "recorded boot with unavailable current identity",
 			recorded: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
 			process:  wakeProcessInfo{},
-			mismatch: true,
+			mismatch: false,
 		},
 	}
 

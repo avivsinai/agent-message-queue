@@ -202,7 +202,7 @@ func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
 			inspection.Reason = inspectionReason("process start time unavailable", proc.InspectError)
 			return
 		}
-		if wakeBootIDMismatch(lock.BootID, proc) {
+		if compareWakeBootID(lock.BootID, proc) != bootIDMatch {
 			inspection.Status = wakeLockUnverified
 			if wakeProcessProvenNotWake(proc) {
 				inspection.Status = wakeLockStale
@@ -324,7 +324,7 @@ func currentWakeLockMatches(lock wakeLock) bool {
 	if !proc.Running || proc.StartToken == "" {
 		return false
 	}
-	if wakeBootIDMismatch(lock.BootID, proc) {
+	if compareWakeBootID(lock.BootID, proc) != bootIDMatch {
 		return false
 	}
 	return lock.ProcessStart == proc.StartToken
@@ -415,7 +415,7 @@ func wakeProcessStillMatches(inspection wakeLockInspection) bool {
 		if proc.StartToken == "" || inspection.Lock.ProcessStart != proc.StartToken {
 			return false
 		}
-		if wakeBootIDMismatch(inspection.Lock.BootID, proc) {
+		if compareWakeBootID(inspection.Lock.BootID, proc) == bootIDMismatch {
 			return false
 		}
 	}
@@ -431,20 +431,58 @@ func wakeProcessStillMatches(inspection wakeLockInspection) bool {
 	return true
 }
 
-func wakeBootIDMismatch(recorded string, proc wakeProcessInfo) bool {
+type bootIDComparison int
+
+const (
+	bootIDMatch bootIDComparison = iota
+	bootIDMismatch
+	bootIDUnknown
+)
+
+func compareWakeBootID(recorded string, proc wakeProcessInfo) bootIDComparison {
 	if recorded == "" {
-		return false
+		return bootIDMatch
 	}
-	// A recorded boot identity with no readable current identity is unknown,
-	// not a match. Callers treat this as unverified and fail closed.
 	if proc.BootID == "" && proc.LegacyBootID == "" {
-		return true
+		return bootIDUnknown
 	}
 	if recorded == proc.BootID || recorded == proc.LegacyBootID {
-		return false
+		return bootIDMatch
 	}
 	for _, current := range []string{proc.BootID, proc.LegacyBootID} {
 		if legacyDarwinBootIDsMatch(recorded, current) {
+			return bootIDMatch
+		}
+	}
+	// Only unlike boots of the same identity representation are conclusive.
+	// A UUID cannot be disproved by a readable boottime, and vice versa.
+	if isDarwinBootUUID(recorded) && isDarwinBootUUID(proc.BootID) {
+		return bootIDMismatch
+	}
+	if _, ok := parseLegacyDarwinBootID(recorded); ok {
+		if _, ok := parseLegacyDarwinBootID(proc.LegacyBootID); ok {
+			return bootIDMismatch
+		}
+	}
+	return bootIDUnknown
+}
+
+func wakeBootIDMismatch(recorded string, proc wakeProcessInfo) bool {
+	return compareWakeBootID(recorded, proc) == bootIDMismatch
+}
+
+func isDarwinBootUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i, r := range value {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if r != '-' {
+				return false
+			}
+			continue
+		}
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
 			return false
 		}
 	}
