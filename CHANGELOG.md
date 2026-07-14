@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.43.1](https://github.com/avivsinai/agent-message-queue/compare/v0.43.0...v0.43.1) (2026-07-14)
+
+
+### Bug Fixes
+
+* **cli:** close cross-tree guard bypass in root classification ([#231](https://github.com/avivsinai/agent-message-queue/issues/231)) ([774f568](https://github.com/avivsinai/agent-message-queue/commit/774f568efc656a3c57ed7c4c48ee5022f4e415d9))
+* **wake:** harden Darwin boot identity and zombie detection ([#236](https://github.com/avivsinai/agent-message-queue/issues/236)) ([ae776b8](https://github.com/avivsinai/agent-message-queue/commit/ae776b8210292b92b10658221455176a3c46cf4e))
+
 ## [0.43.0](https://github.com/avivsinai/agent-message-queue/compare/v0.42.1...v0.43.0) (2026-07-11)
 
 
