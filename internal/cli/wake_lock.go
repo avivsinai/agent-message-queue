@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ type wakeProcessInfo struct {
 	Running      bool
 	StartToken   string
 	BootID       string
+	LegacyBootID string
 	Executable   string
 	Args         []string
 	InspectError error
@@ -200,20 +202,20 @@ func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
 			inspection.Reason = inspectionReason("process start time unavailable", proc.InspectError)
 			return
 		}
-		if lock.BootID != "" && proc.BootID != "" && lock.BootID != proc.BootID {
-			inspection.Status = wakeLockUnverified
-			if wakeProcessProvenNotWake(proc) {
-				inspection.Status = wakeLockStale
-			}
-			inspection.Reason = "boot id mismatch"
-			return
-		}
 		if lock.ProcessStart != proc.StartToken {
 			inspection.Status = wakeLockUnverified
 			if wakeProcessProvenNotWake(proc) {
 				inspection.Status = wakeLockStale
 			}
 			inspection.Reason = "process start time mismatch"
+			return
+		}
+		if compareWakeBootID(lock.BootID, proc) != bootIDMatch {
+			inspection.Status = wakeLockUnverified
+			if wakeProcessProvenNotWake(proc) {
+				inspection.Status = wakeLockStale
+			}
+			inspection.Reason = "boot id mismatch"
 			return
 		}
 	}
@@ -322,7 +324,7 @@ func currentWakeLockMatches(lock wakeLock) bool {
 	if !proc.Running || proc.StartToken == "" {
 		return false
 	}
-	if lock.BootID != "" && proc.BootID != "" && lock.BootID != proc.BootID {
+	if compareWakeBootID(lock.BootID, proc) != bootIDMatch {
 		return false
 	}
 	return lock.ProcessStart == proc.StartToken
@@ -413,7 +415,7 @@ func wakeProcessStillMatches(inspection wakeLockInspection) bool {
 		if proc.StartToken == "" || inspection.Lock.ProcessStart != proc.StartToken {
 			return false
 		}
-		if inspection.Lock.BootID != "" && proc.BootID != "" && inspection.Lock.BootID != proc.BootID {
+		if compareWakeBootID(inspection.Lock.BootID, proc) == bootIDMismatch {
 			return false
 		}
 	}
@@ -427,4 +429,89 @@ func wakeProcessStillMatches(inspection wakeLockInspection) bool {
 		return false
 	}
 	return true
+}
+
+type bootIDComparison int
+
+const (
+	bootIDMatch bootIDComparison = iota
+	bootIDMismatch
+	bootIDUnknown
+)
+
+func compareWakeBootID(recorded string, proc wakeProcessInfo) bootIDComparison {
+	if recorded == "" {
+		return bootIDMatch
+	}
+	for _, current := range []string{proc.BootID, proc.LegacyBootID} {
+		if current == "" {
+			continue
+		}
+		if strings.EqualFold(recorded, current) {
+			return bootIDMatch
+		}
+		if legacyDarwinBootIDsMatch(recorded, current) {
+			return bootIDMatch
+		}
+	}
+	// Only unlike boots of the same identity representation are conclusive.
+	// A UUID cannot be disproved by a readable boottime, and vice versa.
+	if isDarwinBootUUID(recorded) && isDarwinBootUUID(proc.BootID) {
+		return bootIDMismatch
+	}
+	return bootIDUnknown
+}
+
+func wakeBootIDMismatch(recorded string, proc wakeProcessInfo) bool {
+	return compareWakeBootID(recorded, proc) == bootIDMismatch
+}
+
+func isDarwinBootUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i, r := range value {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if r != '-' {
+				return false
+			}
+			continue
+		}
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// Legacy Darwin boot IDs came from kern.boottime, which can move slightly as
+// macOS corrects wall-clock time. A one-second migration tolerance preserves
+// old live wake locks without making two realistically distinct boots equal.
+func legacyDarwinBootIDsMatch(first, second string) bool {
+	firstTime, firstOK := parseLegacyDarwinBootID(first)
+	secondTime, secondOK := parseLegacyDarwinBootID(second)
+	if !firstOK || !secondOK {
+		return false
+	}
+	secDelta := firstTime.Unix() - secondTime.Unix()
+	if secDelta < -1 || secDelta > 1 {
+		return false
+	}
+	return firstTime.Sub(secondTime) <= time.Second && secondTime.Sub(firstTime) <= time.Second
+}
+
+func parseLegacyDarwinBootID(value string) (time.Time, bool) {
+	seconds, nanos, ok := strings.Cut(value, ".")
+	if !ok || seconds == "" || len(nanos) != 9 || strings.Contains(nanos, ".") {
+		return time.Time{}, false
+	}
+	sec, err := strconv.ParseInt(seconds, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	nsec, err := strconv.ParseInt(nanos, 10, 64)
+	if err != nil || nsec < 0 || nsec >= int64(time.Second) {
+		return time.Time{}, false
+	}
+	return time.Unix(sec, nsec), true
 }
