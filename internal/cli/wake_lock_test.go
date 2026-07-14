@@ -122,6 +122,15 @@ func TestWakeBootIDMismatchAcceptsDarwinLegacyMigration(t *testing.T) {
 			mismatch: false,
 		},
 		{
+			name:     "differing legacy with current UUID is unknown",
+			recorded: "100.000000000",
+			process: wakeProcessInfo{
+				BootID:       "9C0682F4-901B-4243-8B5C-287FAFB9AD0E",
+				LegacyBootID: "200.000000000",
+			},
+			mismatch: false,
+		},
+		{
 			name:     "different boot session uuid",
 			recorded: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
 			process:  wakeProcessInfo{BootID: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"},
