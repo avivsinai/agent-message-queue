@@ -211,13 +211,15 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		if err := writeStdoutLine("Next steps:"); err != nil {
 			return err
 		}
-		if err := writeStdout("  Terminal 1: amq coop exec %s\n", agents[0]); err != nil {
-			return err
-		}
-		if len(agents) > 1 {
-			if err := writeStdout("  Terminal 2: amq coop exec %s\n", agents[1]); err != nil {
+		terminalNum := 1
+		for _, agent := range agents {
+			if agent == reservedHumanHandle {
+				continue
+			}
+			if err := writeStdout("  Terminal %d: amq coop exec %s\n", terminalNum, agent); err != nil {
 				return err
 			}
+			terminalNum++
 		}
 		if err := writeStdoutLine(""); err != nil {
 			return err

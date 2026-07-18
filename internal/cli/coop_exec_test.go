@@ -273,6 +273,79 @@ func TestCoopInitDefaultIncludesUser(t *testing.T) {
 	}
 }
 
+func TestCoopInitNextStepsDefaultAgentsSkipsUser(t *testing.T) {
+	projectDir := t.TempDir()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	output, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal(nil, true)
+	})
+	if err != nil {
+		t.Fatalf("runCoopInitInternal: %v", err)
+	}
+
+	if !containsStr(output, "Terminal 1: amq coop exec claude") {
+		t.Fatalf("missing Terminal 1 line for claude, output:\n%s", output)
+	}
+	if !containsStr(output, "Terminal 2: amq coop exec codex") {
+		t.Fatalf("missing Terminal 2 line for codex, output:\n%s", output)
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "Terminal") && strings.Contains(line, "user") {
+			t.Fatalf("unexpected Terminal line mentioning reserved handle %q, output:\n%s", "user", output)
+		}
+	}
+}
+
+func TestCoopInitNextStepsThreeEngineAgentsSkipsUserKeepsContiguousNumbers(t *testing.T) {
+	projectDir := t.TempDir()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	output, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--agents", "claude,codex,grok,user"}, true)
+	})
+	if err != nil {
+		t.Fatalf("runCoopInitInternal: %v", err)
+	}
+
+	if !containsStr(output, "Terminal 1: amq coop exec claude") {
+		t.Fatalf("missing Terminal 1 line for claude, output:\n%s", output)
+	}
+	if !containsStr(output, "Terminal 2: amq coop exec codex") {
+		t.Fatalf("missing Terminal 2 line for codex, output:\n%s", output)
+	}
+	if !containsStr(output, "Terminal 3: amq coop exec grok") {
+		t.Fatalf("missing Terminal 3 line for grok, output:\n%s", output)
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "Terminal") && strings.Contains(line, "user") {
+			t.Fatalf("unexpected Terminal line mentioning reserved handle %q, output:\n%s", "user", output)
+		}
+	}
+}
+
 func TestCoopInitNoGitignore(t *testing.T) {
 	projectDir := t.TempDir()
 	oldDir, err := os.Getwd()
