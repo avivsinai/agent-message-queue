@@ -112,7 +112,7 @@ func TestTopLevelUsageLines(t *testing.T) {
 	if !containsLine(lines, "Commands:") {
 		t.Fatal("topLevelUsageLines missing Commands header")
 	}
-	if !containsLine(lines, "shell-setup  Output shell aliases (amc/amx)") {
+	if !containsLine(lines, "shell-setup  Output shell aliases (amc/amx/amg)") {
 		t.Fatal("topLevelUsageLines missing shell-setup summary")
 	}
 	if !containsLine(lines, "--no-update-check") {

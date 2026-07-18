@@ -58,6 +58,9 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		"",
 		"Defaults:",
 		fmt.Sprintf("  --root=%s  --agents=%s", defaultCoopRoot, defaultCoopAgents),
+		"",
+		"Explicit three-engine example (not a default):",
+		"  --agents claude,codex,grok,user",
 	)
 
 	if handled, err := parseFlags(fs, args, usage); err != nil {

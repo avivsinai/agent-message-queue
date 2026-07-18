@@ -87,6 +87,15 @@ cp -r /tmp/amq/.agents/skills/amq-cli ~/.codex/skills/
 rm -rf /tmp/amq
 ```
 
+**Grok CLI** (optional peer; same skill contents, Grok's own discovery path):
+```bash
+git clone https://github.com/avivsinai/agent-message-queue.git /tmp/amq
+mkdir -p ~/.grok/skills
+cp -r /tmp/amq/.agents/skills/amq-cli ~/.grok/skills/
+rm -rf /tmp/amq
+```
+A project-local copy under `.grok/skills/amq-cli` in the repo works the same way if you prefer per-project installs. See [COOP.md](COOP.md) for the full list of paths Grok CLI checks.
+
 Restart your agent after installing.
 
 ---

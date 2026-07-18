@@ -368,6 +368,30 @@ func TestInitExplicitAgentsDoesNotInjectUser(t *testing.T) {
 	}
 }
 
+func TestCoopInitExplicitThreeEngineAgentsParses(t *testing.T) {
+	root := t.TempDir()
+	_, err := captureEnvStdout(t, func() error {
+		return runInit([]string{"--root", root, "--agents", "claude,codex,grok,user"})
+	})
+	if err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	want := []string{"claude", "codex", "grok", "user"}
+	if !reflect.DeepEqual(cfg.Agents, want) {
+		t.Fatalf("config agents = %#v, want %#v", cfg.Agents, want)
+	}
+	for _, agent := range want {
+		if _, err := os.Stat(filepath.Join(root, "agents", agent, "inbox", "new")); err != nil {
+			t.Fatalf("%s inbox should be created: %v", agent, err)
+		}
+	}
+}
+
 func TestWakeReadyMessageReportsExistingWake(t *testing.T) {
 	const wakePID = 4242
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
