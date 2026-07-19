@@ -36,10 +36,14 @@ For swarm command reference, see [CLAUDE.md](CLAUDE.md).
    See [INSTALL.md](INSTALL.md) for manual installation or troubleshooting.
 
    If pairing with Grok CLI as an optional peer, Grok discovers skills the
-   same general way Claude Code and Codex CLI do: from a project-local
-   `.grok/skills` directory, a user-level `~/.grok/skills` directory,
-   installed plugin skills, and any explicitly configured skill paths. See
-   [INSTALL.md](INSTALL.md) for the manual `~/.grok/skills` copy example.
+   same general way Claude Code and Codex CLI do. Native locations include a
+   project-local `.grok/skills` directory, a user-level `~/.grok/skills`
+   directory, installed plugin skills, and explicitly configured skill paths;
+   Grok also reads Claude-compatible skill locations plus the user-level
+   `~/.agents/skills` directory — see the
+   [xAI skill discovery docs](https://docs.x.ai/build/features/skills-plugins-marketplaces)
+   for the authoritative list. See [INSTALL.md](INSTALL.md) for the manual
+   `~/.grok/skills` copy example.
 
 ### Running Co-op Mode
 
