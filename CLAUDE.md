@@ -168,11 +168,11 @@ When `--kind` is set but `--priority` is not, priority defaults to `normal`.
 
 ```bash
 amq init --root <path> --agents a,b,c [--force]
-amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--body <str|@file|-|stdin>] [--allow-empty] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--session <target-session>] [--from-session <source-session>] [--project <project>] [--ignore-session-pin] [--wait-for <stage>] [--wait-timeout <duration>]
+amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--refs <ids>] [--body <str|@file|-|stdin>] [--allow-empty] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--session <target-session>] [--from-session <source-session>] [--project <project>] [--ignore-session-pin] [--wait-for <stage>] [--wait-timeout <duration>]
 amq list --me <agent> [--session <name>] [--new | --cur] [--priority <p>] [--from <h>] [--kind <k>] [--label <l>...] [--limit N] [--offset N] [--json]
 amq read --me <agent> --id <msg_id> [--session <name>] [--ignore-session-pin] [--json]
 amq drain --me <agent> [--session <name>] [--ignore-session-pin] [--limit N] [--include-body] [--json]
-amq thread --id <thread_id> [--limit N] [--include-body] [--json]
+amq thread --id <thread_id> [--agents <a,b,c>] [--limit N] [--include-body] [--json]
 amq receipts list --me <agent> [--msg-id <id>] [--stage <stage>] [--json]
 amq receipts wait --me <agent> --msg-id <id> [--stage <stage>] [--timeout <duration>] [--poll-interval <duration>] [--json]
 amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
@@ -180,21 +180,21 @@ amq presence list [--json]
 amq route explain --to <handle> [--project <project>] [--session <session>] [--from-root <path>] [--from-cwd <path>] [--me <handle>] --json
 amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
 amq watch --me <agent> [--session <name>] [--ignore-session-pin] [--timeout <duration>] [--poll] [--json]
-amq monitor --me <agent> [--session <name>] [--ignore-session-pin] [--timeout <duration>] [--poll] [--include-body] [--peek] [--json]
-amq reply --me <agent> --id <msg_id> [--ignore-session-pin] [--body <str|@file|-|stdin>] [--allow-empty] [--priority <p>] [--kind <k>]
+amq monitor --me <agent> [--session <name>] [--ignore-session-pin] [--timeout <duration>] [--poll] [--limit N] [--include-body] [--peek] [--json]
+amq reply --me <agent> --id <msg_id> [--ignore-session-pin] [--subject <str>] [--body <str|@file|-|stdin>] [--allow-empty] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--wait-for <stage>] [--wait-timeout <duration>]
 amq dlq list --me <agent> [--new | --cur] [--json]
 amq dlq read --me <agent> --id <dlq_id> [--session <name>] [--ignore-session-pin] [--json]
 amq dlq retry --me <agent> --id <dlq_id> [--session <name>] [--ignore-session-pin] [--all] [--force]
 amq dlq purge --me <agent> [--session <name>] [--ignore-session-pin] [--older-than <duration>] [--dry-run] [--yes]
-amq wake --me <agent> [--inject-cmd <cmd>] [--inject-via <absolute-executable>] [--inject-arg <arg>...] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>]
+amq wake --me <agent> [--inject-cmd <cmd>] [--inject-mode <auto|raw|paste|none>] [--inject-via <absolute-executable>] [--inject-arg <arg>...] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>] [--interrupt] [--interrupt-label <label>] [--interrupt-priority <p>] [--interrupt-cmd <ctrl-c|none>] [--interrupt-notice <str>] [--interrupt-cooldown <duration>] [--debug]
 amq wake repair --me <agent> [--root <path>] [--json]
 amq upgrade
-amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--json]
+amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--export] [--session-name] [--json]
 amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>] [--grok-alias <name>]
-amq coop init [--root <path>] [--agents <a,b,c>] [--force] [--json]
-amq coop exec [--root <path>] [--session <name>] [--me <handle>] [--no-init] [--no-gitignore] [--no-wake] [--require-wake] [--wake-inject-via <absolute-executable>] [--wake-inject-arg <arg>...] [-y] <command> [-- <command-flags>]
+amq coop init [--root <path>] [--agents <a,b,c>] [--no-gitignore] [--force] [--json]
+amq coop exec [--root <path>] [--session <name>] [--me <handle>] [--no-init] [--no-gitignore] [--no-wake] [--require-wake] [--wake-inject-mode <auto|raw|paste|none>] [--wake-inject-via <absolute-executable>] [--wake-inject-arg <arg>...] [-y] <command> [-- <command-flags>]
 amq swarm list [--json]
-amq swarm join --team <name> --me <agent> [--agent-id <id>] [--type codex|external] [--json]
+amq swarm join --team <name> --me <agent> [--agent-id <id>] [--type codex|external|claude-code] [--json]
 amq swarm leave --team <name> --agent-id <id> [--json]
 amq swarm tasks --team <name> [--status pending|in_progress|completed|failed|blocked] [--json]
 amq swarm claim --team <name> --task <id> --me <agent> [--agent-id <id>] [--json]
@@ -206,7 +206,7 @@ amq integration symphony init [--workflow <path>] --me <agent> [--root <path>] [
 amq integration symphony emit --event <after_create|before_run|after_run|before_remove> --me <agent> [--root <path>] [--workspace <path>] [--identifier <key>] [--json]
 amq integration kanban bridge --me <agent> [--root <path>] [--url <ws://...>] [--workspace-id <id>] [--reconnect <duration>] [--json]
 amq who [--json]
-amq doctor [--ops] [--json]
+amq doctor [--ops] [--fix-wake-locks] [--json]
 ```
 
 Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has its own flags and doesn't accept these.
@@ -408,13 +408,13 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 | Background wake | `amq wake --me <agent> &` | Injects notification via TIOCSTI with best-effort input deferral, or via explicit external transport (experimental) |
 | Reply to message | `amq reply --id <msg_id>` | Auto thread/refs handling |
 
-## Co-op Mode (Claude <-> Codex)
+## Co-op Mode (Claude <-> Codex, optional peers)
 
-Co-op mode enables real-time collaboration between Claude Code and Codex CLI sessions. See `COOP.md` for full documentation.
+Co-op mode enables real-time collaboration between multiple agent sessions (e.g., Claude Code and Codex CLI, with Grok CLI as an optional peer). See `COOP.md` for full documentation.
 
 **Initiator rule**: The initiator (agent or human) receives all updates and decisions. Always reply to the initiator and ask the initiator for clarifications. Do not ask a third party.
 
-**Default pairing note**: Claude is often faster and more decisive, while Codex tends to be deeper but slower. That commonly makes Claude a natural coordinator and Codex a strong worker. This is a default, not a rule — roles are set per task by the initiator.
+**Default pairing note**: Claude is often faster and more decisive, while Codex tends to be deeper but slower. That commonly makes Claude a natural coordinator and Codex a strong worker. This is a default, not a rule — roles are set per task by the initiator. Grok CLI can join as an additional optional peer/worker (e.g. a third `amq coop exec grok` in a three-way session) without changing this default two-engine pairing note.
 
 **Progress protocol**: Start with a `kind=status` + ETA, send heartbeats on phase boundaries or every 10-15 minutes, and finish with Summary / Changes / Tests / Notes.
 
@@ -428,6 +428,9 @@ amq coop exec claude -- --dangerously-skip-permissions  # session=collab by defa
 
 # Terminal 2 - Codex CLI
 amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Same, with codex flags
+
+# Terminal 3 - Grok CLI (optional peer)
+amq coop exec grok  # Caller flags forwarded unchanged, no baked-in bypass
 ```
 
 Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
