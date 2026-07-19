@@ -117,12 +117,12 @@ func runSwarmJoin(args []string) error {
 	fs := flag.NewFlagSet("swarm join", flag.ContinueOnError)
 	teamFlag := fs.String("team", "", "Team name (required)")
 	meFlag := fs.String("me", defaultMe(), "Agent handle (e.g., codex)")
-	typeFlag := fs.String("type", swarm.AgentTypeExternal, "Agent type (external, codex)")
+	typeFlag := fs.String("type", swarm.AgentTypeExternal, "Agent type (external, codex, claude-code)")
 	agentIDFlag := fs.String("agent-id", "", "Agent ID (auto-generated if empty)")
 	jsonFlag := fs.Bool("json", false, "Emit JSON output")
 
 	usage := usageWithFlags(fs, "amq swarm join --team <name> --me <agent> [options]",
-		"Register an external agent in a Claude Code Agent Team.",
+		"Register an agent in a Claude Code Agent Team.",
 		"",
 		"The agent is added to the team's config.json with the specified type.",
 		"This makes the agent discoverable by the team lead and other teammates.")
