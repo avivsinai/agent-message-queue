@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -333,10 +332,10 @@ func (s *Store) withLock(fn func() error) error {
 	if err := lock.Chmod(0o600); err != nil {
 		return err
 	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	if err := flockExclusive(lock); err != nil {
 		return err
 	}
-	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+	defer flockRelease(lock)
 
 	return fn()
 }
