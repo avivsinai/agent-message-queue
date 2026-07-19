@@ -583,6 +583,7 @@ func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
+		WakeMode:     wakeTargetInjectVia,
 	})
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
@@ -692,6 +693,35 @@ func TestRunWakeWithLoopNoneAcceptsExistingNoneWake(t *testing.T) {
 	}
 }
 
+func TestRequireWakeLockUsableRejectsNoneForNonNone(t *testing.T) {
+	inspection := wakeLockInspection{
+		Exists:            true,
+		Status:            wakeLockValid,
+		IdentityConfirmed: true,
+		Agent:             "codex",
+		Lock:              wakeLock{WakeMode: wakeInjectModeNone, TTY: "test-tty"},
+	}
+	if err := requireWakeLockUsable(inspection, wakeInjectModeRaw); err == nil {
+		t.Fatal("expected a none wake to be rejected for raw mode")
+	}
+}
+
+func TestRequireWakeLockUsableRawVsPaste(t *testing.T) {
+	inspection := wakeLockInspection{
+		Exists:            true,
+		Status:            wakeLockValid,
+		IdentityConfirmed: true,
+		Agent:             "codex",
+		Lock:              wakeLock{WakeMode: wakeInjectModeRaw, TTY: "test-tty"},
+	}
+	if err := requireWakeLockUsable(inspection, wakeInjectModePaste); err == nil {
+		t.Fatal("expected raw and paste wakes to be incompatible")
+	}
+	if err := requireWakeLockUsable(inspection, wakeInjectModeRaw); err != nil {
+		t.Fatalf("expected matching raw wake to be usable: %v", err)
+	}
+}
+
 func TestRunWakeWithLoopAcceptExistingWakeRejectsMissingTTY(t *testing.T) {
 	const wakePID = 4242
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
@@ -714,6 +744,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsMissingTTY(t *testing.T) {
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
+		WakeMode:     wakeTargetInjectVia,
 	})
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
@@ -772,6 +803,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsBlankOrUnknownTTY(t *testing.T)
 				ProcessStart: "start-1",
 				BootID:       "boot-1",
 				Executable:   "/opt/homebrew/bin/amq",
+				WakeMode:     wakeTargetInjectVia,
 			})
 
 			readyPath := filepath.Join(t.TempDir(), "wake.ready")
@@ -882,6 +914,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *test
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
+		WakeMode:     wakeTargetInjectVia,
 	})
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
