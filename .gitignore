@@ -1,5 +1,6 @@
 .DS_Store
 /amq
+/amq-keepalive
 /.agent-mail/
 /bin/
 /dist/

@@ -354,6 +354,23 @@ For the consumer plist, replace the command arguments after the executable with
 Route stdout/stderr to supervisor-managed logs and secure the unit/plist for the
 local user who owns the mailbox.
 
+On macOS, `amq-keepalive` (built from `cmd/amq-keepalive`) packages this recipe
+for wake delivery that must follow a specific terminal session rather than a
+fixed plist. It keeps a private registry of explicitly attached terminal
+targets (Ghostty and cmux adapters), reattaches `wake` after reboot or sleep
+through a user LaunchAgent (`install-launchd`), and can register SessionStart
+reattach hooks for Claude Code and Codex (`install-hook`). It stays inside the
+daemon-free contract: the OS supervises it, it never parses AMQ mailbox, lock,
+presence, or target files, and it talks to AMQ only through the public `amq`
+CLI (target-aware `amq wake`, `amq env --json`).
+
+```bash
+go build ./cmd/amq-keepalive
+./amq-keepalive attach --adapter ghostty --me claude
+./amq-keepalive install-launchd
+./amq-keepalive doctor
+```
+
 **Options:**
 - `--inject-mode auto|raw|paste|none` - Injection strategy; `none` enforces zero terminal input
 - `--wake-inject-mode auto|raw|paste|none` - `coop exec` pass-through for its managed wake
