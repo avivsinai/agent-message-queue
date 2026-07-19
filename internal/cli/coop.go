@@ -221,6 +221,9 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 			}
 			terminalNum++
 		}
+		if err := writeStdoutLine("  (handle = command basename; custom handle: amq coop exec --me <handle> <command>)"); err != nil {
+			return err
+		}
 		if err := writeStdoutLine(""); err != nil {
 			return err
 		}

@@ -190,7 +190,7 @@ amq wake --me <agent> [--inject-cmd <cmd>] [--inject-via <absolute-executable>] 
 amq wake repair --me <agent> [--root <path>] [--json]
 amq upgrade
 amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--json]
-amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>]
+amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>] [--grok-alias <name>]
 amq coop init [--root <path>] [--agents <a,b,c>] [--force] [--json]
 amq coop exec [--root <path>] [--session <name>] [--me <handle>] [--no-init] [--no-gitignore] [--no-wake] [--require-wake] [--wake-inject-via <absolute-executable>] [--wake-inject-arg <arg>...] [-y] <command> [-- <command-flags>]
 amq swarm list [--json]
