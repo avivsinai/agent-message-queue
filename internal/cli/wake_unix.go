@@ -124,8 +124,8 @@ createLock:
 	if options.target != nil {
 		lock.WakeMode = wakeTargetInjectVia
 		lock.TargetDigest = wakeTargetDigest(*options.target)
-	} else if options.wakeMode == wakeInjectModeNone {
-		lock.WakeMode = wakeInjectModeNone
+	} else {
+		lock.WakeMode = options.wakeMode
 	}
 	if hostname, err := os.Hostname(); err == nil {
 		lock.Hostname = hostname
@@ -243,8 +243,11 @@ func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string) e
 	if !inspection.Exists || inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
 		return fmt.Errorf("existing wake lock for %s is not a confirmed valid wake", inspection.Agent)
 	}
-	if requiredMode == wakeInjectModeNone && inspection.Lock.WakeMode != wakeInjectModeNone {
-		return fmt.Errorf("existing wake for %s cannot satisfy requested --inject-mode none; stop the existing wake and retry", inspection.Agent)
+	if inspection.Lock.WakeMode != requiredMode {
+		if requiredMode == wakeInjectModeNone {
+			return fmt.Errorf("existing wake for %s cannot satisfy requested --inject-mode none; stop the existing wake and retry", inspection.Agent)
+		}
+		return fmt.Errorf("existing wake for %s cannot satisfy requested wake mode %q (existing %q); stop the existing wake and retry", inspection.Agent, requiredMode, inspection.Lock.WakeMode)
 	}
 	if !wakeLockHasUsableNotificationPath(inspection) {
 		return fmt.Errorf("existing wake lock for %s is not usable for --require-wake (pid %d on %s since %s)",
@@ -261,7 +264,7 @@ func wakeLockHasUsableNotificationPath(inspection wakeLockInspection) bool {
 	if inspection.Lock.WakeMode == wakeInjectModeNone {
 		return true
 	}
-	if inspection.Lock.WakeMode == wakeTargetInjectVia || wakeArgsUseInjectVia(inspection.Process.Args) {
+	if (inspection.Lock.WakeMode == wakeTargetInjectVia && inspection.Lock.TargetDigest != "") || wakeArgsUseInjectVia(inspection.Process.Args) {
 		return true
 	}
 	tty := strings.TrimSpace(inspection.Lock.TTY)
@@ -786,10 +789,16 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 
 	// Acquire lock to prevent duplicate wake processes
 	acceptExistingWake := readyFile != "" && *acceptExistingWakeFlag
+	lockWakeMode := injectMode
+	if target != nil {
+		lockWakeMode = wakeTargetInjectVia
+	} else if lockWakeMode != wakeInjectModeNone {
+		lockWakeMode = effectiveInjectMode(&wakeConfig{me: me, injectMode: lockWakeMode})
+	}
 	cleanup, err := acquireWakeLockWithOptions(root, me, wakeLockAcquireOptions{
 		acceptExistingValid: acceptExistingWake,
 		target:              target,
-		wakeMode:            injectMode,
+		wakeMode:            lockWakeMode,
 	})
 	if err != nil {
 		var alreadyRunning *wakeAlreadyRunningError
