@@ -176,7 +176,7 @@ func init() {
 			},
 		},
 		{Name: "doctor", Summary: "Verify installation and configuration", Handler: runDoctor},
-		{Name: "shell-setup", Summary: "Output shell aliases (amc/amx)", Handler: runShellSetup},
+		{Name: "shell-setup", Summary: "Output shell aliases (amc/amx/amg)", Handler: runShellSetup},
 		// Handler is nil to avoid an init cycle (runCompletion references commands).
 		// Dispatch is handled by commandHandlers in cli.go.
 		{Name: "completion", Summary: "Generate shell completions (bash, zsh, fish)"},

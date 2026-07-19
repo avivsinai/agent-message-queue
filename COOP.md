@@ -35,6 +35,12 @@ For swarm command reference, see [CLAUDE.md](CLAUDE.md).
 
    See [INSTALL.md](INSTALL.md) for manual installation or troubleshooting.
 
+   If pairing with Grok CLI as an optional peer, Grok discovers skills the
+   same general way Claude Code and Codex CLI do: from a project-local
+   `.grok/skills` directory, a user-level `~/.grok/skills` directory,
+   installed plugin skills, and any explicitly configured skill paths. See
+   [INSTALL.md](INSTALL.md) for the manual `~/.grok/skills` copy example.
+
 ### Running Co-op Mode
 
 **Terminal 1 - Claude Code:**
@@ -45,6 +51,20 @@ amq coop exec claude -- --dangerously-skip-permissions
 **Terminal 2 - Codex CLI:**
 ```bash
 amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
+```
+
+**Terminal 3 - Grok CLI (optional third peer):**
+```bash
+amq coop exec grok
+```
+
+Grok is a normal handle like any other — `coop exec` forwards caller flags to
+it unchanged (no baked-in permission bypass, unlike the Codex example above).
+The default `coop init`/`coop exec` agent set stays `claude,codex,user`; adding
+Grok is opt-in. To provision mailboxes for all three engines explicitly:
+
+```bash
+amq coop init --agents claude,codex,grok,user
 ```
 
 That's it. `coop exec` auto-initializes the project if needed, sets
