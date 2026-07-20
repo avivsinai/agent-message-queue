@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -36,6 +37,12 @@ type wakeTarget struct {
 	InjectVia  string     `json:"inject_via"`
 	InjectArgs []string   `json:"inject_args,omitempty"`
 	Owner      *wakeOwner `json:"owner,omitempty"`
+}
+
+// sameWakeInjectorIdentity compares the behavior fixed at launch. Created and
+// owner metadata describe an instance, not the injector semantics it provides.
+func sameWakeInjectorIdentity(first, second wakeTarget) bool {
+	return first.InjectVia == second.InjectVia && slices.Equal(first.InjectArgs, second.InjectArgs)
 }
 
 func wakeTargetPath(root, me string) string {

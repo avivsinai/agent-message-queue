@@ -87,6 +87,31 @@ func bindWakeLockToTarget(lock wakeLock, target wakeTarget) wakeLock {
 	return lock
 }
 
+func TestSameWakeInjectorIdentityUsesOnlyPathAndOrderedArgs(t *testing.T) {
+	first := wakeTarget{
+		InjectVia:  "/opt/amq/injector",
+		InjectArgs: []string{"exec", "target"},
+		Created:    "2026-01-01T00:00:00Z",
+		Owner:      &wakeOwner{PID: 101, ProcessStart: "first"},
+	}
+	second := first
+	second.Created = "2026-07-20T00:00:00Z"
+	second.Owner = &wakeOwner{PID: 202, ProcessStart: "second"}
+	if !sameWakeInjectorIdentity(first, second) {
+		t.Fatal("Created/owner metadata changed semantic injector identity")
+	}
+
+	second.InjectArgs = []string{"target", "exec"}
+	if sameWakeInjectorIdentity(first, second) {
+		t.Fatal("ordered fixed arguments were treated as interchangeable")
+	}
+	second = first
+	second.InjectVia = "/opt/amq/other-injector"
+	if sameWakeInjectorIdentity(first, second) {
+		t.Fatal("different injector paths were treated as the same identity")
+	}
+}
+
 func TestWakeBootIDMismatchAcceptsDarwinLegacyMigration(t *testing.T) {
 	tests := []struct {
 		name     string

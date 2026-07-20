@@ -89,7 +89,7 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 			return nil, fmt.Errorf("wake lock is being created (retry shortly)")
 		case wakeLockValid:
 			if options.acceptExistingValid {
-				if err := requireWakeLockUsable(inspection, options.wakeMode); err != nil {
+				if err := requireWakeLockUsable(inspection, options.wakeMode, options.target); err != nil {
 					return nil, err
 				}
 				return nil, wakeLockAlreadyRunningError(me, inspection)
@@ -149,7 +149,7 @@ createLock:
 			winner := inspectWakeLock(root, me)
 			if winner.Status == wakeLockValid {
 				if options.acceptExistingValid {
-					if usableErr := requireWakeLockUsable(winner, options.wakeMode); usableErr != nil {
+					if usableErr := requireWakeLockUsable(winner, options.wakeMode, options.target); usableErr != nil {
 						return nil, usableErr
 					}
 				}
@@ -241,7 +241,7 @@ func wakeLockNeedsOwnerReplacement(inspection wakeLockInspection) (bool, error) 
 	return wakeOwnerHealthCheck(*target.Owner) != nil, nil
 }
 
-func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string) error {
+func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, requestedTarget *wakeTarget) error {
 	if !inspection.Exists || inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
 		return fmt.Errorf("existing wake lock for %s is not a confirmed valid wake", inspection.Agent)
 	}
@@ -263,6 +263,27 @@ func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string) e
 	if wakeLockNeedsReplacement(inspection) {
 		return fmt.Errorf("existing wake lock for %s is not usable for --require-wake (pid %d on %s since %s)",
 			inspection.Agent, inspection.Lock.PID, inspection.Lock.TTY, inspection.Lock.Started)
+	}
+	if requiredMode == wakeTargetInjectVia {
+		if requestedTarget == nil {
+			return fmt.Errorf("existing inject-via wake for %s cannot be reused without a requested wake target", inspection.Agent)
+		}
+		persistedTarget, exists, err := readWakeTarget(inspection.Root, inspection.Agent)
+		if err != nil {
+			return fmt.Errorf("existing inject-via wake target for %s is not usable: %w", inspection.Agent, err)
+		}
+		if !exists {
+			return fmt.Errorf("existing inject-via wake for %s has no persisted wake target", inspection.Agent)
+		}
+		if err := validateWakeTargetMatchesLock(inspection.Lock, persistedTarget); err != nil {
+			return fmt.Errorf("existing inject-via wake target for %s is not bound to its lock: %w", inspection.Agent, err)
+		}
+		if err := validateWakeTarget(persistedTarget, inspection.Root, inspection.Agent); err != nil {
+			return fmt.Errorf("existing inject-via wake target for %s is invalid: %w", inspection.Agent, err)
+		}
+		if !sameWakeInjectorIdentity(persistedTarget, *requestedTarget) {
+			return fmt.Errorf("existing inject-via wake for %s uses a different injector path or fixed arguments", inspection.Agent)
+		}
 	}
 	return nil
 }
