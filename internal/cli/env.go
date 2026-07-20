@@ -469,11 +469,11 @@ func findAndLoadAmqrc() (amqrcResult, error) {
 			if err := validateAmqrcInfo(rcPath, info); err != nil {
 				return amqrcResult{}, err
 			}
+			if err := validateAmqrcFile(rcPath); err != nil {
+				return amqrcResult{}, err
+			}
 		} else if !os.IsNotExist(statErr) {
 			return amqrcResult{}, fmt.Errorf("cannot inspect .amqrc at %s: %w", rcPath, statErr)
-			if validateErr := validateAmqrcFile(rcPath); validateErr != nil {
-				return amqrcResult{}, validateErr
-			}
 		}
 		data, err := os.ReadFile(rcPath)
 		if err != nil {
@@ -735,7 +735,10 @@ func findAmqrcForRoot(root string) (amqrcResult, error) {
 		dir := absRoot
 		for {
 			rcPath := filepath.Join(dir, ".amqrc")
-			if _, statErr := os.Stat(rcPath); statErr == nil {
+			if info, statErr := os.Lstat(rcPath); statErr == nil {
+				if err := validateAmqrcInfo(rcPath, info); err != nil {
+					return amqrcResult{}, err
+				}
 				if validateErr := validateAmqrcFile(rcPath); validateErr != nil {
 					return amqrcResult{}, validateErr
 				}

@@ -163,7 +163,7 @@ func runSend(args []string) error {
 	}
 	// Preserve the original lexical source guard after the advisory check. An
 	// identity pin was already validated above; lexical pins still need refusal.
-	if fromSession == "" && !(pin.Present && pin.IdentityPin) {
+	if fromSession == "" && (!pin.Present || !pin.IdentityPin) {
 		if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
 			return err
 		}
