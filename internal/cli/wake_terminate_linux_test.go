@@ -186,15 +186,20 @@ func TestTerminateOpensPidfdBeforeIdentityInspectionAndReleasesGuardBeforeWait(t
 		events = append(events, event)
 	}
 	inspectCalls := 0
+	releasePoll := make(chan struct{})
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		inspectCalls++
 		if inspectCalls > 1 {
 			record("inspect")
 		}
-		return matchingLinuxWakeProcess(pid, root)
+		select {
+		case <-releasePoll:
+			return wakeProcessInfo{PID: pid, Running: false}
+		default:
+			return matchingLinuxWakeProcess(pid, root)
+		}
 	})
 	pollEntered := make(chan struct{})
-	releasePoll := make(chan struct{})
 	stubLinuxPidfd(t,
 		func(pid, flags int) (int, error) { record("open"); return 99, nil },
 		func(fd int, sig unix.Signal, info *unix.Siginfo, flags int) error { return nil },
