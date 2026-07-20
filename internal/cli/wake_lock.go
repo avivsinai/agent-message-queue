@@ -282,7 +282,7 @@ func removeWakeLockIfUnchangedGuarded(inspection wakeLockInspection) error {
 	if !bytes.Equal(current, inspection.raw) {
 		return fmt.Errorf("wake lock changed while cleaning stale lock; retry")
 	}
-	if inspection.fileInfo == nil || currentInfo == nil || !os.SameFile(inspection.fileInfo, currentInfo) {
+	if inspection.fileInfo == nil || currentInfo == nil || !sameWakeFileIdentity(inspection.fileInfo, currentInfo) {
 		return fmt.Errorf("wake lock generation changed while cleaning stale lock; retry")
 	}
 	if err := os.Remove(inspection.LockPath); err != nil && !os.IsNotExist(err) {
@@ -295,7 +295,7 @@ func sameWakeLockGeneration(first, second wakeLockInspection) bool {
 	if !first.Exists || !second.Exists || first.fileInfo == nil || second.fileInfo == nil {
 		return false
 	}
-	if !os.SameFile(first.fileInfo, second.fileInfo) || !bytes.Equal(first.raw, second.raw) {
+	if !sameWakeFileIdentity(first.fileInfo, second.fileInfo) || !bytes.Equal(first.raw, second.raw) {
 		return false
 	}
 	if first.Lock.Generation != "" || second.Lock.Generation != "" {
