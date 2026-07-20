@@ -92,6 +92,16 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 	}
 
 	for _, handle := range agents {
+		// Configured handles are untrusted input. Validate before deriving any
+		// mailbox/presence paths so traversal-like values cannot escape root.
+		if err := fsq.ValidateHandle(handle); err != nil {
+			result.Hints = append(result.Hints, opsHint{
+				Code:    "config_error",
+				Status:  "error",
+				Message: fmt.Sprintf("Ignoring invalid configured agent handle %q: %v", handle, err),
+			})
+			continue
+		}
 		agent := opsAgent{Handle: handle}
 
 		// Unread count + oldest
