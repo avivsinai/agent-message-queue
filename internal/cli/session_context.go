@@ -192,11 +192,14 @@ func resolveSessionRoot(base, session string) (string, error) {
 	}
 	target := absPath(filepath.Join(base, session))
 	entry, err := os.Lstat(target)
-	if err != nil || !entry.IsDir() || entry.Mode()&os.ModeSymlink != 0 {
-		return "", ContextMismatchError("session %q is not a direct directory under base", session)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", NotFoundError("session %q not found at %s", session, target)
+		}
+		return "", ContextMismatchError("cannot inspect session %q: %v", session, err)
 	}
-	if !dirExists(target) {
-		return "", NotFoundError("session %q not found at %s", session, target)
+	if !entry.IsDir() || entry.Mode()&os.ModeSymlink != 0 {
+		return "", ContextMismatchError("session %q is not a direct directory under base", session)
 	}
 	canonBase, err := filepath.EvalSymlinks(base)
 	if err != nil {
