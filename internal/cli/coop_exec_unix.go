@@ -272,7 +272,7 @@ func runCoopExec(args []string) error {
 		} else {
 			wakeProc = wakeCmd.Process
 			if *requireWakeFlag {
-				if err := waitForWakeReady(wakeProc, readyPath, wakeReadyTimeout); err != nil {
+				if err := waitForWakeReady(wakeProc, readyPath, root, agentHandle, wakeReadyTimeout); err != nil {
 					_ = wakeProc.Kill()
 					return err
 				}
@@ -320,7 +320,7 @@ func newWakeReadyFile() (string, func(), error) {
 	return filepath.Join(dir, "ready"), func() { _ = os.RemoveAll(dir) }, nil
 }
 
-func waitForWakeReady(proc *os.Process, readyPath string, timeout time.Duration) error {
+func waitForWakeReady(proc *os.Process, readyPath, root, me string, timeout time.Duration) error {
 	if proc == nil {
 		return fmt.Errorf("amq wake process missing")
 	}
@@ -336,18 +336,18 @@ func waitForWakeReady(proc *os.Process, readyPath string, timeout time.Duration)
 	defer ticker.Stop()
 
 	for {
-		if _, err := os.Stat(readyPath); err == nil {
+		if ready, err := validateWakeReadyFileAgainstCurrent(root, me, readyPath); err != nil {
+			return fmt.Errorf("validate wake readiness: %w", err)
+		} else if ready {
 			return nil
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("check wake readiness file: %w", err)
 		}
 
 		select {
 		case err := <-done:
-			if _, statErr := os.Stat(readyPath); statErr == nil {
+			if ready, readyErr := validateWakeReadyFileAgainstCurrent(root, me, readyPath); readyErr != nil {
+				return fmt.Errorf("validate wake readiness: %w", readyErr)
+			} else if ready {
 				return nil
-			} else if !os.IsNotExist(statErr) {
-				return fmt.Errorf("check wake readiness file: %w", statErr)
 			}
 			if err != nil {
 				return fmt.Errorf("amq wake exited before becoming ready: %w", err)

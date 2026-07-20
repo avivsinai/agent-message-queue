@@ -27,6 +27,7 @@ type wakeLock struct {
 	Args         []string `json:"args,omitempty"`          // Diagnostic argv when available
 	WakeMode     string   `json:"wake_mode,omitempty"`     // none, raw, paste, or inject-via; empty means a legacy pre-v0.44 lock
 	TargetDigest string   `json:"target_digest,omitempty"` // Binds .wake.target to this lock instance
+	Generation   string   `json:"generation,omitempty"`    // Random nonce binding readiness and exact cleanup to this instance
 }
 
 type wakeProcessInfo struct {
@@ -81,6 +82,7 @@ type wakeLockInspection struct {
 	Process           wakeProcessInfo
 	IdentityConfirmed bool
 	raw               []byte
+	fileInfo          os.FileInfo
 }
 
 var inspectWakeProcess = inspectWakeProcessPlatform
@@ -105,7 +107,7 @@ func inspectWakeLock(root, me string) wakeLockInspection {
 		LockPath: lockPath,
 	}
 
-	data, err := readWakeLockFile(lockPath)
+	data, fileInfo, err := readWakeLockFileWithInfo(lockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return inspection
@@ -118,6 +120,7 @@ func inspectWakeLock(root, me string) wakeLockInspection {
 
 	inspection.Exists = true
 	inspection.raw = data
+	inspection.fileInfo = fileInfo
 	var existing wakeLock
 	if err := json.Unmarshal(data, &existing); err != nil {
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) < 2*time.Second {
@@ -137,27 +140,31 @@ func inspectWakeLock(root, me string) wakeLockInspection {
 	return inspection
 }
 
-func readWakeLockFile(path string) ([]byte, error) {
+func readWakeLockFileWithInfo(path string) ([]byte, os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := validateWakeLockFile(path, info); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	file, err := openWakeMetadataFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { _ = file.Close() }()
 	openedInfo, err := file.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("stat wake lock: %w", err)
+		return nil, nil, fmt.Errorf("stat wake lock: %w", err)
 	}
 	if err := validateWakeLockFile(path, openedInfo); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return readWakeMetadata(file, "wake lock", path)
+	if !os.SameFile(info, openedInfo) {
+		return nil, nil, fmt.Errorf("wake lock %s changed while opening", path)
+	}
+	data, err := readWakeMetadata(file, "wake lock", path)
+	return data, openedInfo, err
 }
 
 func validateWakeLockFile(path string, info os.FileInfo) error {
@@ -259,7 +266,13 @@ func wakeProcessProvenNotWake(proc wakeProcessInfo) bool {
 }
 
 func removeWakeLockIfUnchanged(inspection wakeLockInspection) error {
-	current, err := readWakeLockFile(inspection.LockPath)
+	return withWakeLifecycleGuard(inspection.Root, inspection.Agent, func() error {
+		return removeWakeLockIfUnchangedGuarded(inspection)
+	})
+}
+
+func removeWakeLockIfUnchangedGuarded(inspection wakeLockInspection) error {
+	current, currentInfo, err := readWakeLockFileWithInfo(inspection.LockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -269,10 +282,26 @@ func removeWakeLockIfUnchanged(inspection wakeLockInspection) error {
 	if !bytes.Equal(current, inspection.raw) {
 		return fmt.Errorf("wake lock changed while cleaning stale lock; retry")
 	}
+	if inspection.fileInfo == nil || currentInfo == nil || !sameWakeFileIdentity(inspection.fileInfo, currentInfo) {
+		return fmt.Errorf("wake lock generation changed while cleaning stale lock; retry")
+	}
 	if err := os.Remove(inspection.LockPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale wake lock: %w", err)
 	}
 	return nil
+}
+
+func sameWakeLockGeneration(first, second wakeLockInspection) bool {
+	if !first.Exists || !second.Exists || first.fileInfo == nil || second.fileInfo == nil {
+		return false
+	}
+	if !sameWakeFileIdentity(first.fileInfo, second.fileInfo) || !bytes.Equal(first.raw, second.raw) {
+		return false
+	}
+	if first.Lock.Generation != "" || second.Lock.Generation != "" {
+		return first.Lock.Generation != "" && first.Lock.Generation == second.Lock.Generation
+	}
+	return true
 }
 
 func currentWakeLockMatches(lock wakeLock) bool {

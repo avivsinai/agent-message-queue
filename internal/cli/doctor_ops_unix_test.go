@@ -266,6 +266,49 @@ func TestRunOpsChecksFixRefusesUnknownBootIdentity(t *testing.T) {
 	}
 }
 
+func TestDoctorFixWaitsForWakeLifecycleGuard(t *testing.T) {
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID: 4242, Executable: "/opt/homebrew/bin/amq", Generation: "stale-generation",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- withWakeLifecycleGuard(root, "codex", func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	fixed := make(chan []opsWakeLock, 1)
+	go func() { fixed <- checkWakeLocks(root, []string{"codex"}, true) }()
+	time.Sleep(25 * time.Millisecond)
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("doctor fix removed lock before lifecycle guard release: %v", err)
+	}
+	close(release)
+	if err := <-holderDone; err != nil {
+		t.Fatalf("guard holder: %v", err)
+	}
+	locks := <-fixed
+	if len(locks) != 1 || locks[0].Status != "fixed" || !locks[0].Removed {
+		t.Fatalf("unexpected doctor fix result: %#v", locks)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("doctor fix did not remove stale generation: %v", err)
+	}
+	if _, err := os.Stat(wakeLifecycleGuardPath(root, "codex")); err != nil {
+		t.Fatalf("doctor fix removed permanent lifecycle guard: %v", err)
+	}
+}
+
 func TestRunOpsChecksReportsProvenStartMismatchAsStale(t *testing.T) {
 	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "codex", wakeLock{
