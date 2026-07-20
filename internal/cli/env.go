@@ -23,6 +23,7 @@ type amqrc struct {
 type amqrcResult struct {
 	Config amqrc
 	Dir    string // Directory containing .amqrc (for resolving relative paths)
+	Path   string // Canonical path of the config file (shared provenance)
 }
 
 // envOutput is the JSON output format for amq env --json.
@@ -408,11 +409,14 @@ func loadGlobalAmqrc() (amqrcResult, error) {
 	if err != nil {
 		return amqrcResult{}, errAmqrcNotFound
 	}
+	if err := validateAmqrcFile(path); err != nil {
+		return amqrcResult{}, err
+	}
 	var cfg amqrc
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return amqrcResult{}, fmt.Errorf("invalid ~/.amqrc: %w", err)
 	}
-	return amqrcResult{Config: cfg, Dir: home}, nil
+	return amqrcResult{Config: cfg, Dir: home, Path: path}, nil
 }
 
 // resolveBaseRoot returns the base root directory (without session suffix).
@@ -467,6 +471,9 @@ func findAndLoadAmqrc() (amqrcResult, error) {
 			}
 		} else if !os.IsNotExist(statErr) {
 			return amqrcResult{}, fmt.Errorf("cannot inspect .amqrc at %s: %w", rcPath, statErr)
+			if validateErr := validateAmqrcFile(rcPath); validateErr != nil {
+				return amqrcResult{}, validateErr
+			}
 		}
 		data, err := os.ReadFile(rcPath)
 		if err != nil {
@@ -488,7 +495,7 @@ func findAndLoadAmqrc() (amqrcResult, error) {
 		if err := json.Unmarshal(data, &rc); err != nil {
 			return amqrcResult{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, err)
 		}
-		return amqrcResult{Config: rc, Dir: dir}, nil
+		return amqrcResult{Config: rc, Dir: dir, Path: rcPath}, nil
 	}
 
 	return amqrcResult{}, errAmqrcNotFound
@@ -728,13 +735,18 @@ func findAmqrcForRoot(root string) (amqrcResult, error) {
 		dir := absRoot
 		for {
 			rcPath := filepath.Join(dir, ".amqrc")
+			if _, statErr := os.Stat(rcPath); statErr == nil {
+				if validateErr := validateAmqrcFile(rcPath); validateErr != nil {
+					return amqrcResult{}, validateErr
+				}
+			}
 			data, readErr := os.ReadFile(rcPath)
 			if readErr == nil {
 				var rc amqrc
 				if jsonErr := json.Unmarshal(data, &rc); jsonErr != nil {
 					return amqrcResult{}, fmt.Errorf("invalid .amqrc at %s: %w", rcPath, jsonErr)
 				}
-				return amqrcResult{Config: rc, Dir: dir}, nil
+				return amqrcResult{Config: rc, Dir: dir, Path: rcPath}, nil
 			}
 			if !os.IsNotExist(readErr) {
 				// Permission or I/O error — report it, don't mask it.
