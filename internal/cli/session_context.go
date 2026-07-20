@@ -81,9 +81,7 @@ func verifyRootUnderBase(base, baseID, session, root, rootID string) error {
 	base = absPath(resolveRoot(base))
 	root = absPath(resolveRoot(root))
 	if session == "" {
-		baseInfo, baseErr := os.Stat(base)
-		rootInfo, rootErr := os.Stat(root)
-		if baseErr != nil || rootErr != nil || !os.SameFile(baseInfo, rootInfo) {
+		if !sameTreeIdentity(base, root) {
 			return ContextMismatchError("root is not the pinned base root")
 		}
 	} else {
@@ -92,9 +90,7 @@ func verifyRootUnderBase(base, baseID, session, root, rootID string) error {
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return ContextMismatchError("pinned session %q is not a direct directory under base", session)
 		}
-		entryInfo, entryErr := os.Stat(entry)
-		rootInfo, rootErr := os.Stat(root)
-		if entryErr != nil || rootErr != nil || !os.SameFile(entryInfo, rootInfo) {
+		if !sameTreeIdentity(entry, root) {
 			return ContextMismatchError("root is not the pinned session directory")
 		}
 	}

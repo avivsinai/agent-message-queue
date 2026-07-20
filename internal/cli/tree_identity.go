@@ -96,6 +96,12 @@ func verifyTreeIdentityToken(path, token string) TreeRelation {
 	return TreeRelationDifferent
 }
 
+func sameTreeIdentity(a, b string) bool {
+	left, le := resolveTreeIdentity(a)
+	right, re := resolveTreeIdentity(b)
+	return le == nil && re == nil && left.token == right.token
+}
+
 func validTreeIdentityToken(token string) bool {
 	return validPlatformTreeIdentityToken(token)
 }

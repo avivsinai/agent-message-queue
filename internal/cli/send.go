@@ -184,7 +184,7 @@ func runSend(args []string) error {
 		}
 		sourceRoot, err = resolveSessionRoot(root, fromSession)
 		if err != nil {
-			return err
+			return fmt.Errorf("source session %q not found: %w", fromSession, err)
 		}
 		if !dirExists(filepath.Join(sourceRoot, "agents", me)) {
 			return fmt.Errorf("agent %q not found in source session %q", me, fromSession)
@@ -208,14 +208,20 @@ func runSend(args []string) error {
 				return UsageError("--session: %v", err)
 			}
 			targetSession = normalized
-			deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
+			deliveryRoot, err = resolveSessionRoot(peerBaseRoot, targetSession)
+			if err != nil {
+				return err
+			}
 		} else {
 			// Cross-project, no explicit session. Mirror the sender's session when
 			// the source root is itself a session root.
 			if classifyRoot(root) != "" {
 				// Inside a session — use same session name in peer.
 				targetSession = sessionName(root)
-				deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
+				deliveryRoot, err = resolveSessionRoot(peerBaseRoot, targetSession)
+				if err != nil {
+					return err
+				}
 			} else {
 				// At base root — deliver to peer's base root directly.
 				deliveryRoot = peerBaseRoot
