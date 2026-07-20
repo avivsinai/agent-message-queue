@@ -19,6 +19,8 @@ type amqrc struct {
 	Peers   map[string]string `json:"peers,omitempty"`   // peer name → peer's base root path
 }
 
+var amqrcLstat = os.Lstat
+
 // amqrcResult holds both the parsed config and the directory where it was found.
 type amqrcResult struct {
 	Config amqrc
@@ -465,7 +467,7 @@ func findAndLoadAmqrc() (amqrcResult, error) {
 		// Refuse configuration whose provenance cannot be established. In
 		// particular, symlinks and group/world-writable files are attacker
 		// controlled in common shared-directory setups.
-		if info, statErr := os.Lstat(rcPath); statErr == nil {
+		if info, statErr := amqrcLstat(rcPath); statErr == nil {
 			if err := validateAmqrcInfo(rcPath, info); err != nil {
 				return amqrcResult{}, err
 			}
@@ -732,7 +734,7 @@ func findAmqrcForRoot(root string) (amqrcResult, error) {
 		dir := absRoot
 		for {
 			rcPath := filepath.Join(dir, ".amqrc")
-			if info, statErr := os.Lstat(rcPath); statErr == nil {
+			if info, statErr := amqrcLstat(rcPath); statErr == nil {
 				if err := validateAmqrcInfo(rcPath, info); err != nil {
 					return amqrcResult{}, err
 				}
