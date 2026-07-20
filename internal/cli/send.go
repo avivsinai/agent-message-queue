@@ -142,12 +142,15 @@ func runSend(args []string) error {
 	// malformed pins must fail closed with the context-mismatch exit status.
 	var pin sessionPin
 	var pinErr error
-	if fromSession == "" {
-		pin, pinErr = loadSessionPin()
-		if pinErr != nil {
-			return pinErr
+	pin, pinErr = loadSessionPin()
+	if pinErr != nil {
+		return pinErr
+	}
+	if pin.Present && pin.IdentityPin {
+		if verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID) != TreeRelationSame {
+			return ContextMismatchError("pinned base root identity is not current")
 		}
-		if pin.Present && pin.IdentityPin {
+		if fromSession == "" {
 			if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
 				return err
 			}
