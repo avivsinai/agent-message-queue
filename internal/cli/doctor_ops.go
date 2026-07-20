@@ -80,7 +80,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 
 	// Load the active root's config, falling back to the base config for normal
 	// session layouts where coop init owns the single config.json.
-	agents, err := loadOpsAgents(root)
+	agents, err := loadOpsAgents(root, fixWakeLocks)
 	if err != nil {
 		result.Hints = append(result.Hints, opsHint{
 			Code:    "config_error",
@@ -170,7 +170,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 	return result
 }
 
-func loadOpsAgents(root string) ([]string, error) {
+func loadOpsAgents(root string, fixWakeLocks bool) ([]string, error) {
 	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
 	if err == nil {
 		return cfg.Agents, nil
@@ -179,6 +179,9 @@ func loadOpsAgents(root string) ([]string, error) {
 		return nil, err
 	}
 
+	if fixWakeLocks {
+		return nil, err
+	}
 	base := baseRootOfForDisplay(root)
 	if absPath(resolveRoot(base)) == absPath(resolveRoot(root)) {
 		return nil, err
