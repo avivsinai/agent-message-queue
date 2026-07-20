@@ -191,6 +191,10 @@ func resolveSessionRoot(base, session string) (string, error) {
 		return "", NotFoundError("base root not found at %s", base)
 	}
 	target := absPath(filepath.Join(base, session))
+	entry, err := os.Lstat(target)
+	if err != nil || !entry.IsDir() || entry.Mode()&os.ModeSymlink != 0 {
+		return "", ContextMismatchError("session %q is not a direct directory under base", session)
+	}
 	if !dirExists(target) {
 		return "", NotFoundError("session %q not found at %s", session, target)
 	}

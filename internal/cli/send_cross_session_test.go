@@ -83,6 +83,20 @@ func TestSendCrossProjectSessionSymlinkToForeignRefused(t *testing.T) {
 	}
 }
 
+func TestResolveSessionRootRejectsInBaseSymlink(t *testing.T) {
+	base := t.TempDir()
+	prod := filepath.Join(base, "prod")
+	if err := os.Mkdir(prod, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(prod, filepath.Join(base, "qa")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveSessionRoot(base, "qa"); err == nil {
+		t.Fatal("expected in-base session symlink refusal")
+	}
+}
+
 func TestSendFromSessionRetargetedStrongBasePinRefused(t *testing.T) {
 	baseA := filepath.Join(t.TempDir(), ".agent-mail")
 	baseB := filepath.Join(t.TempDir(), ".agent-mail")
