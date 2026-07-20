@@ -74,7 +74,9 @@ func relateTrees(a, b string) TreeRelation {
 	if leftErr != nil || rightErr != nil {
 		return TreeRelationUnknown
 	}
-	if os.SameFile(left.info, right.info) {
+	// Authority decisions must use the platform token, not os.SameFile's
+	// potentially lossy FileInfo comparison (notably on Windows/ReFS).
+	if left.token == right.token {
 		return TreeRelationSame
 	}
 	return TreeRelationDifferent
