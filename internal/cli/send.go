@@ -140,9 +140,17 @@ func runSend(args []string) error {
 	routed := targetProject != "" || targetSession != "" || fromSession != ""
 	// Validate explicit session evidence before advisory cross-tree classification;
 	// malformed pins must fail closed with the context-mismatch exit status.
+	var pin sessionPin
+	var pinErr error
 	if fromSession == "" {
-		if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
-			return err
+		pin, pinErr = loadSessionPin()
+		if pinErr != nil {
+			return pinErr
+		}
+		if pin.Present && pin.IdentityPin {
+			if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
+				return err
+			}
 		}
 	}
 	if common.rootExplicit() && !routed {
@@ -151,6 +159,13 @@ func runSend(args []string) error {
 				"but no routing dimension was given, so the recipient could not reply.\n"+
 				"Use --project <peer> or --session <name> for replyable cross-tree routing, "+
 				"or set the target as AM_ROOT if this send is genuinely local.", root, src)
+		}
+	}
+	// Preserve the original lexical source guard after the advisory check. An
+	// identity pin was already validated above; lexical pins still need refusal.
+	if fromSession == "" && !(pin.Present && pin.IdentityPin) {
+		if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
+			return err
 		}
 	}
 	var replyProject string

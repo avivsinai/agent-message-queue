@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -32,22 +33,34 @@ func platformTreeIdentityToken(path string, _ os.FileInfo) (string, error) {
 	}
 	defer windows.CloseHandle(handle)
 
-	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+	// FILE_ID_INFO is required for ReFS: the legacy 64-bit file index can
+	// collide. Unsupported/partial filesystems remain unverifiable.
+	type fileIDInfo struct {
+		VolumeSerialNumber uint64
+		FileID             [16]byte
+	}
+	var info fileIDInfo
+	if err := windows.GetFileInformationByHandleEx(handle, windows.FileIdInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("v1:windows:%x:%x:%x", info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow), nil
+	return fmt.Sprintf("v1:windows:%x:%x", info.VolumeSerialNumber, info.FileID), nil
 }
 
 func validPlatformTreeIdentityToken(token string) bool {
 	parts := strings.Split(token, ":")
-	if len(parts) != 5 || parts[0] != "v1" || parts[1] != treeIdentityPlatform {
+	if len(parts) != 4 || parts[0] != "v1" || parts[1] != treeIdentityPlatform {
 		return false
 	}
-	for _, part := range parts[2:] {
-		if _, err := strconv.ParseUint(part, 16, 32); err != nil {
-			return false
-		}
+	if _, err := strconv.ParseUint(parts[2], 16, 64); err != nil {
+		return false
 	}
-	return true
+	if len(parts[3]) != 32 {
+		return false
+	}
+	_, err := strconv.ParseUint(parts[3][:16], 16, 64)
+	if err != nil {
+		return false
+	}
+	_, err = strconv.ParseUint(parts[3][16:], 16, 64)
+	return err == nil
 }
