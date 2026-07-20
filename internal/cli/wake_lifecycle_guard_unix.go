@@ -53,7 +53,7 @@ func withWakeLifecycleGuard(root, me string, fn func() error) error {
 	if err := validateWakeLifecycleGuard(path, pathInfo); err != nil {
 		return err
 	}
-	if !os.SameFile(info, pathInfo) {
+	if !sameWakeFileIdentity(info, pathInfo) {
 		return fmt.Errorf("wake lifecycle guard %s changed while acquiring", path)
 	}
 	return fn()
