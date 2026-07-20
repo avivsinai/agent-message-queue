@@ -139,7 +139,10 @@ func TestListSessionDoesNotExistReturnsNotFound(t *testing.T) {
 	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
 		t.Fatal(err)
 	}
-	err := runList([]string{"--root", root, "--me", "alice", "--session", "missing", "--new"})
+	t.Setenv(envRoot, root)
+	t.Setenv(envBaseRoot, root)
+	t.Setenv(envSession, "")
+	err := runList([]string{"--me", "alice", "--session", "missing", "--new"})
 	if GetExitCode(err) != ExitNotFound {
 		t.Fatalf("exit = %d, want %d (err=%v)", GetExitCode(err), ExitNotFound, err)
 	}
