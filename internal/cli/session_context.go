@@ -179,11 +179,40 @@ func resolveMailboxRoot(common *commonFlags, rawSession string) (root string, ro
 		base = baseRootOf(root)
 	}
 
-	target := absPath(filepath.Join(base, session))
-	if !dirExists(target) {
-		return "", false, NotFoundError("session %q not found at %s", session, target)
+	target, err := resolveSessionRoot(base, session)
+	if err != nil {
+		return "", false, err
 	}
 	return target, true, nil
+}
+
+// resolveSessionRoot resolves a session beneath base using canonical paths. This
+// prevents a symlinked session (or base) from bypassing tree/session identity
+// checks performed by callers.
+func resolveSessionRoot(base, session string) (string, error) {
+	base = absPath(resolveRoot(base))
+	if !dirExists(base) {
+		return "", NotFoundError("base root not found at %s", base)
+	}
+	target := absPath(filepath.Join(base, session))
+	if !dirExists(target) {
+		return "", NotFoundError("session %q not found at %s", session, target)
+	}
+	canonBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", err
+	}
+	canonTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(canonBase, canonTarget)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", ContextMismatchError("session %q resolves outside base root", session)
+	}
+	// Preserve the caller's lexical root for mailbox layout and diagnostics;
+	// canonical paths above are used only for containment validation.
+	return target, nil
 }
 
 func guardMailboxContext(command, target string, routed, ignorePin bool) error {

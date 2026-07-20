@@ -182,9 +182,9 @@ func runSend(args []string) error {
 		if classifyRoot(root) != "" {
 			return UsageError("--from-session requires --root to be the base root, not a session root")
 		}
-		sourceRoot = filepath.Join(root, fromSession)
-		if !dirExists(sourceRoot) {
-			return fmt.Errorf("source session %q not found at %s", fromSession, sourceRoot)
+		sourceRoot, err = resolveSessionRoot(root, fromSession)
+		if err != nil {
+			return err
 		}
 		if !dirExists(filepath.Join(sourceRoot, "agents", me)) {
 			return fmt.Errorf("agent %q not found in source session %q", me, fromSession)
@@ -257,12 +257,12 @@ func runSend(args []string) error {
 			return fmt.Errorf("--session requires a session context: run from inside 'amq coop exec --session <name>'")
 		}
 
-		deliveryRoot = filepath.Join(baseRoot, targetSession)
+		deliveryRoot, err = resolveSessionRoot(baseRoot, targetSession)
+		if err != nil {
+			return err
+		}
 
 		// Verify the target session and agent inboxes exist.
-		if !dirExists(deliveryRoot) {
-			return fmt.Errorf("session %q not found at %s", targetSession, deliveryRoot)
-		}
 		for _, r := range recipients {
 			inbox := filepath.Join(deliveryRoot, "agents", r, "inbox")
 			if !dirExists(inbox) {

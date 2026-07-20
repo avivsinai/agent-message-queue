@@ -76,7 +76,7 @@ func runList(args []string) error {
 	}
 	if !routed {
 		if mismatch, checkErr := sessionPinMismatch(root); checkErr != nil {
-			_ = writeStderr("warning: %v\n", checkErr)
+			return checkErr
 		} else if mismatch != nil {
 			_ = writeStderr("warning: %s\n", mismatch.Error())
 		}
