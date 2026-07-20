@@ -1697,6 +1697,7 @@ func TestInspectWakeLockRejectsSymlinkAndFIFO(t *testing.T) {
 }
 
 func TestShouldReplaceOrphanedWakeLockSignalsOnlyAfterRevalidation(t *testing.T) {
+	requireBarePIDWakeTermination(t)
 	const wakePID = 4242
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
@@ -1752,6 +1753,7 @@ func TestShouldReplaceOrphanedWakeLockSignalsOnlyAfterRevalidation(t *testing.T)
 }
 
 func TestShouldReplaceOrphanedWakeLockKeepsLockWhenKillDoesNotTerminate(t *testing.T) {
+	requireBarePIDWakeTermination(t)
 	const wakePID = 4242
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
@@ -1792,6 +1794,7 @@ func TestShouldReplaceOrphanedWakeLockKeepsLockWhenKillDoesNotTerminate(t *testi
 }
 
 func TestTerminateWakeProcessPreservesLiveWakeOnUnknownBootAfterSignal(t *testing.T) {
+	requireBarePIDWakeTermination(t)
 	const wakePID = 4343
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{PID: wakePID, TTY: "tty", ProcessStart: "start-1", BootID: "boot-1", Executable: "/opt/homebrew/bin/amq"})
@@ -1820,6 +1823,7 @@ func TestTerminateWakeProcessPreservesLiveWakeOnUnknownBootAfterSignal(t *testin
 }
 
 func TestTerminatePreservesLockOnUnknownInspectionAfterSIGTERM(t *testing.T) {
+	requireBarePIDWakeTermination(t)
 	const wakePID = 4350
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{PID: wakePID, TTY: "tty", ProcessStart: "start-1", BootID: "boot-1", Executable: "/opt/homebrew/bin/amq"})
@@ -1851,6 +1855,7 @@ func TestTerminatePreservesLockOnUnknownInspectionAfterSIGTERM(t *testing.T) {
 }
 
 func TestTerminatePreservesLockOnUnknownInspectionAfterSIGKILL(t *testing.T) {
+	requireBarePIDWakeTermination(t)
 	const wakePID = 4351
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{PID: wakePID, TTY: "tty", ProcessStart: "start-1", BootID: "boot-1", Executable: "/opt/homebrew/bin/amq"})
@@ -1882,6 +1887,7 @@ func TestTerminatePreservesLockOnUnknownInspectionAfterSIGKILL(t *testing.T) {
 }
 
 func TestTerminateWakeProcessPreservesLiveWakeOnShiftedBootClock(t *testing.T) {
+	requireBarePIDWakeTermination(t)
 	const wakePID = 4344
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{PID: wakePID, TTY: "tty", ProcessStart: "start-1", BootID: "100.000000000", Executable: "/opt/homebrew/bin/amq"})
@@ -1909,6 +1915,7 @@ func TestTerminateWakeProcessPreservesLiveWakeOnShiftedBootClock(t *testing.T) {
 }
 
 func TestTerminateWakeProcessPreservesLiveWakeOnShiftedLegacyBootInLegacyField(t *testing.T) {
+	requireBarePIDWakeTermination(t)
 	const wakePID = 4345
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{PID: wakePID, TTY: "tty", ProcessStart: "start-1", BootID: "100.000000000", Executable: "/opt/homebrew/bin/amq"})
@@ -1935,6 +1942,7 @@ func TestTerminateWakeProcessPreservesLiveWakeOnShiftedLegacyBootInLegacyField(t
 }
 
 func TestShouldReplaceOrphanedWakeLockRevalidatesBeforeSignal(t *testing.T) {
+	requireBarePIDWakeTermination(t)
 	const wakePID = 4242
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
@@ -1988,6 +1996,7 @@ func TestShouldReplaceOrphanedWakeLockRevalidatesBeforeSignal(t *testing.T) {
 }
 
 func TestShouldReplaceOrphanedWakeLockReplacesInjectViaWhenOwnerGone(t *testing.T) {
+	requireBarePIDWakeTermination(t)
 	const wakePID = 4242
 	const ownerPID = 7777
 	root := secureTempDirForTest(t)
