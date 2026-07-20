@@ -18,7 +18,7 @@ func platformTreeIdentityToken(_ string, info os.FileInfo) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("filesystem identity unavailable on %s", runtime.GOOS)
 	}
-	return fmt.Sprintf("v1:%s:%x:%x", treeIdentityPlatform, stat.Dev, stat.Ino), nil
+	return fmt.Sprintf("v1:%s:%x:%x", treeIdentityPlatform, uint64(stat.Dev), uint64(stat.Ino)), nil
 }
 
 func validPlatformTreeIdentityToken(token string) bool {

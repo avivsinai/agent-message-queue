@@ -138,6 +138,13 @@ func runSend(args []string) error {
 	// Fires only on positive evidence of a different home root (AM_ROOT /
 	// AM_BASE_ROOT); bare-root sends with no session env set are unaffected.
 	routed := targetProject != "" || targetSession != "" || fromSession != ""
+	// Validate explicit session evidence before advisory cross-tree classification;
+	// malformed pins must fail closed with the context-mismatch exit status.
+	if fromSession == "" {
+		if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
+			return err
+		}
+	}
 	if common.rootExplicit() && !routed {
 		if src, ok := conflictingSourceRoot(root); ok {
 			return UsageError("refusing send: --root %s targets a different AMQ tree than your own (%s), "+
@@ -169,12 +176,6 @@ func runSend(args []string) error {
 		}
 		sourceSession = fromSession
 	}
-	if fromSession == "" {
-		if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
-			return err
-		}
-	}
-
 	if targetProject != "" {
 		// Cross-project delivery.
 		peerBaseRoot, err := resolvePeer(root, targetProject)

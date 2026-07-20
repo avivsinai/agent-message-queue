@@ -115,6 +115,11 @@ func runEnv(args []string) error {
 				if relation := verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID); relation != TreeRelationSame {
 					return ContextMismatchError("refusing env session route: pinned base root identity is %s for %s", relation, pin.BaseRoot)
 				}
+				entry := filepath.Join(pin.BaseRoot, *sessionFlag)
+				info, statErr := os.Lstat(entry)
+				if statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+					return ContextMismatchError("refusing env session route: %q is not a direct directory under pinned base", *sessionFlag)
+				}
 			}
 			base = pin.BaseRoot
 		} else {
@@ -386,6 +391,12 @@ func loadGlobalAmqrc() (amqrcResult, error) {
 		return amqrcResult{}, errAmqrcNotFound
 	}
 	path := filepath.Join(home, ".amqrc")
+	if err := validateAmqrcProvenance(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return amqrcResult{}, errAmqrcNotFound
+		}
+		return amqrcResult{}, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return amqrcResult{}, errAmqrcNotFound
@@ -440,6 +451,16 @@ func findAndLoadAmqrc() (amqrcResult, error) {
 	dir := cwd
 	for {
 		rcPath := filepath.Join(dir, ".amqrc")
+		// Refuse configuration whose provenance cannot be established. In
+		// particular, symlinks and group/world-writable files are attacker
+		// controlled in common shared-directory setups.
+		if info, statErr := os.Lstat(rcPath); statErr == nil {
+			if err := validateAmqrcInfo(rcPath, info); err != nil {
+				return amqrcResult{}, err
+			}
+		} else if !os.IsNotExist(statErr) {
+			return amqrcResult{}, fmt.Errorf("cannot inspect .amqrc at %s: %w", rcPath, statErr)
+		}
 		data, err := os.ReadFile(rcPath)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -464,6 +485,27 @@ func findAndLoadAmqrc() (amqrcResult, error) {
 	}
 
 	return amqrcResult{}, errAmqrcNotFound
+}
+
+func validateAmqrcProvenance(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	return validateAmqrcInfo(path, info)
+}
+
+func validateAmqrcInfo(path string, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing untrusted .amqrc at %s: symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing untrusted .amqrc at %s: not a regular file", path)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("refusing untrusted .amqrc at %s: group/world-writable mode %o", path, info.Mode().Perm())
+	}
+	return nil
 }
 
 // detectAgentMailDir searches for .agent-mail/ in current and parent directories.

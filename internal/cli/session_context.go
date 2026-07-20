@@ -23,7 +23,9 @@ type sessionPin struct {
 // base-root pin. New shell writers always replace the complete context set.
 func loadSessionPin() (sessionPin, error) {
 	rawSession, present := os.LookupEnv(envSession)
-	if !present {
+	_, rootIDPresent := os.LookupEnv(envRootID)
+	_, baseRootIDPresent := os.LookupEnv(envBaseRootID)
+	if !present && !rootIDPresent && !baseRootIDPresent {
 		return sessionPin{}, nil
 	}
 
@@ -70,6 +72,34 @@ func loadSessionPin() (sessionPin, error) {
 	return pin, nil
 }
 
+// verifyRootUnderBase authenticates the base and proves that session is a
+// direct, non-symlink child of it before authenticating the resulting root.
+func verifyRootUnderBase(base, baseID, session, root, rootID string) error {
+	if verifyTreeIdentityToken(base, baseID) != TreeRelationSame {
+		return ContextMismatchError("pinned base root identity is not current: %s", base)
+	}
+	base = absPath(resolveRoot(base))
+	root = absPath(resolveRoot(root))
+	if session == "" {
+		if root != base {
+			return ContextMismatchError("root is not the pinned base root")
+		}
+	} else {
+		entry := filepath.Join(base, session)
+		info, err := os.Lstat(entry)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return ContextMismatchError("pinned session %q is not a direct directory under base", session)
+		}
+		if root != absPath(entry) {
+			return ContextMismatchError("root is not the pinned session directory")
+		}
+	}
+	if verifyTreeIdentityToken(root, rootID) != TreeRelationSame {
+		return ContextMismatchError("target root identity is not current: %s", root)
+	}
+	return nil
+}
+
 func sessionPinMismatch(target string) (*SessionContextError, error) {
 	target = absPath(resolveRoot(target))
 	pin, err := loadSessionPin()
@@ -78,17 +108,8 @@ func sessionPinMismatch(target string) (*SessionContextError, error) {
 	}
 	if pin.Present {
 		if pin.IdentityPin {
-			if relation := verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID); relation != TreeRelationSame {
-				return &SessionContextError{Message: fmt.Sprintf(
-					"session context mismatch: pinned base root identity is %s for %s",
-					relation, pin.BaseRoot,
-				)}, nil
-			}
-			if relation := verifyTreeIdentityToken(target, pin.RootID); relation != TreeRelationSame {
-				return &SessionContextError{Message: fmt.Sprintf(
-					"session context mismatch: target root identity is %s for %s",
-					relation, target,
-				)}, nil
+			if err := verifyRootUnderBase(pin.BaseRoot, pin.BaseRootID, pin.Session, target, pin.RootID); err != nil {
+				return &SessionContextError{Message: err.Error()}, nil
 			}
 			return nil, nil
 		}
@@ -135,8 +156,15 @@ func resolveMailboxRoot(common *commonFlags, rawSession string) (root string, ro
 	switch {
 	case pin.Present:
 		if pin.IdentityPin {
-			if relation := verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID); relation != TreeRelationSame {
-				return "", false, ContextMismatchError("refusing routed session: pinned base root identity is %s for %s", relation, pin.BaseRoot)
+			// The requested session must be a direct, non-symlink child of the
+			// authenticated base; do not route through an attacker-controlled alias.
+			if verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID) != TreeRelationSame {
+				return "", false, ContextMismatchError("refusing routed session: pinned base root identity is not current")
+			}
+			entry := filepath.Join(pin.BaseRoot, session)
+			info, e := os.Lstat(entry)
+			if e != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return "", false, ContextMismatchError("refusing routed session: %q is not a direct directory under pinned base", session)
 			}
 		}
 		base = pin.BaseRoot
