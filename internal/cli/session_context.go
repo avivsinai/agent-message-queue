@@ -160,6 +160,9 @@ func resolveMailboxRoot(common *commonFlags, rawSession string) (root string, ro
 	switch {
 	case pin.Present:
 		if pin.IdentityPin {
+			if err := verifyRootUnderBase(pin.BaseRoot, pin.BaseRootID, pin.Session, root, pin.RootID); err != nil {
+				return "", false, err
+			}
 			// The requested session must be a direct, non-symlink child of the
 			// authenticated base; do not route through an attacker-controlled alias.
 			if verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID) != TreeRelationSame {

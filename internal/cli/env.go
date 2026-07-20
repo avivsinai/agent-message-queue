@@ -112,6 +112,13 @@ func runEnv(args []string) error {
 		base := ""
 		if pin.Present {
 			if pin.IdentityPin {
+				ambient := strings.TrimSpace(os.Getenv(envRoot))
+				if ambient == "" {
+					ambient = pin.ExpectedRoot
+				}
+				if err := verifyRootUnderBase(pin.BaseRoot, pin.BaseRootID, pin.Session, ambient, pin.RootID); err != nil {
+					return err
+				}
 				if relation := verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID); relation != TreeRelationSame {
 					return ContextMismatchError("refusing env session route: pinned base root identity is %s for %s", relation, pin.BaseRoot)
 				}
