@@ -26,5 +26,8 @@ func validateAmqrcFile(path string) error {
 	if uint32(st.Uid) != uint32(os.Geteuid()) {
 		return fmt.Errorf(".amqrc at %s is owned by uid %d, want euid %d", path, st.Uid, os.Geteuid())
 	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf(".amqrc at %s is group/world-writable", path)
+	}
 	return nil
 }

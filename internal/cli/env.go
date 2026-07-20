@@ -516,9 +516,6 @@ func validateAmqrcInfo(path string, info os.FileInfo) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("refusing untrusted .amqrc at %s: not a regular file", path)
 	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("refusing untrusted .amqrc at %s: group/world-writable mode %o", path, info.Mode().Perm())
-	}
 	return nil
 }
 

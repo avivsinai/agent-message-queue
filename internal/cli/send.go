@@ -150,6 +150,9 @@ func runSend(args []string) error {
 		if verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID) != TreeRelationSame {
 			return ContextMismatchError("pinned base root identity is not current")
 		}
+		if fromSession != "" && verifyTreeIdentityToken(root, pin.RootID) != TreeRelationSame {
+			return ContextMismatchError("pinned root identity is not current")
+		}
 		if fromSession == "" {
 			if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
 				return err
