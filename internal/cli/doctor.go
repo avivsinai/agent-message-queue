@@ -75,7 +75,10 @@ func runDoctor(args []string) error {
 	// Check 3: Root directory
 	if root != "" {
 		result.Checks = append(result.Checks, checkRootDir(root))
-		if _, pinPresent := os.LookupEnv(envSession); pinPresent {
+		_, sessionPresent := os.LookupEnv(envSession)
+		_, rootIDPresent := os.LookupEnv(envRootID)
+		_, baseIDPresent := os.LookupEnv(envBaseRootID)
+		if sessionPresent || rootIDPresent || baseIDPresent {
 			result.Checks = append(result.Checks, checkSessionPinIdentity(root))
 		}
 	}
