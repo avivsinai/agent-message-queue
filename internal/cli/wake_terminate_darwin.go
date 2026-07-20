@@ -28,9 +28,14 @@ func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, er
 	if !sameWakeLockInspection(inspection, recheck) || !recheck.IdentityConfirmed {
 		return false, nil
 	}
+	if recheck.Process.Running && recheck.Lock.WakeMode != wakeTargetInjectVia {
+		return false, fmt.Errorf("live raw wake orphan for %s (pid %d, start %s); stop the owning terminal/launchd supervisor; manual kill is non-identity-safe — recheck before running; see doctor --ops", recheck.Agent, recheck.PID, recheck.Lock.ProcessStart)
+	}
 	// Process termination can wait. It must happen after releasing the guard.
-	if err := terminateWakeProcess(recheck); err != nil {
-		return false, err
+	if recheck.Process.Running {
+		if err := terminateWakeProcess(recheck); err != nil {
+			return false, err
+		}
 	}
 	removed := false
 	err := withWakeLifecycleGuard(inspection.Root, inspection.Agent, func() error {
