@@ -99,6 +99,19 @@ func (e *wakeAlreadyRunningError) Error() string {
 }
 
 func inspectWakeLock(root, me string) wakeLockInspection {
+	inspection := readWakeLockMetadata(root, me)
+	if !inspection.Exists || inspection.Status != wakeLockMissing {
+		return inspection
+	}
+	inspection.Process = inspectWakeProcess(inspection.Lock.PID)
+	classifyWakeLock(root, me, &inspection)
+	return inspection
+}
+
+// readWakeLockMetadata reads one exact lock generation without consulting the
+// process table. Linux orphan retirement uses this to acquire a pidfd before
+// the first PID-based identity inspection of the locked generation.
+func readWakeLockMetadata(root, me string) wakeLockInspection {
 	lockPath := filepath.Join(fsq.AgentBase(root, me), ".wake.lock")
 	inspection := wakeLockInspection{
 		Status:   wakeLockMissing,
@@ -135,8 +148,6 @@ func inspectWakeLock(root, me string) wakeLockInspection {
 
 	inspection.Lock = existing
 	inspection.PID = existing.PID
-	inspection.Process = inspectWakeProcess(existing.PID)
-	classifyWakeLock(root, me, &inspection)
 	return inspection
 }
 
