@@ -283,27 +283,28 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 				lock.Repair = wakeRepairCommand(root, agent)
 			}
 			if fix {
-				recheck := inspectWakeLock(root, agent)
-				if recheck.Status != wakeLockStale {
-					lock.Status = string(recheck.Status)
-					lock.Reason = "wake lock changed before fix"
-					lock.RepairAvailable = false
-					lock.Repair = ""
-				} else if err := validateWakeLockStaleRemoval(recheck); err != nil {
-					lock.Status = "error"
-					lock.Reason = err.Error()
-					lock.RepairAvailable = false
-					lock.Repair = ""
-				} else if err := removeWakeLockIfUnchanged(recheck); err != nil {
-					lock.Status = "error"
-					lock.Reason = err.Error()
-					lock.RepairAvailable = false
-					lock.Repair = ""
-				} else {
+				guardErr := withWakeLifecycleGuard(root, agent, func() error {
+					recheck := inspectWakeLock(root, agent)
+					if !sameWakeLockGeneration(inspection, recheck) || recheck.Status != wakeLockStale {
+						lock.Status = string(recheck.Status)
+						lock.Reason = "wake lock changed before fix"
+						return nil
+					}
+					if err := validateWakeLockStaleRemoval(recheck); err != nil {
+						return err
+					}
+					if err := removeWakeLockIfUnchangedGuarded(recheck); err != nil {
+						return err
+					}
 					lock.Status = "fixed"
 					lock.Removed = true
-					lock.RepairAvailable = false
-					lock.Repair = ""
+					return nil
+				})
+				lock.RepairAvailable = false
+				lock.Repair = ""
+				if guardErr != nil {
+					lock.Status = "error"
+					lock.Reason = guardErr.Error()
 				}
 			}
 		}
