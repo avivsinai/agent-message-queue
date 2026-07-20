@@ -4,8 +4,10 @@ package cli
 
 const (
 	envRoot       = "AM_ROOT"
+	envRootID     = "AM_ROOT_ID"
 	envMe         = "AM_ME"
 	envBaseRoot   = "AM_BASE_ROOT"
+	envBaseRootID = "AM_BASE_ROOT_ID"
 	envSession    = "AM_SESSION"
 	envGlobalRoot = "AMQ_GLOBAL_ROOT"
 )

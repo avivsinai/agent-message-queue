@@ -73,7 +73,7 @@ func checkWorktreeDivergenceHints(root string, agents []string) []opsHint {
 	if session == "" {
 		return nil
 	}
-	base := canonicalDiagnosticPath(baseRootOf(root))
+	base := canonicalDiagnosticPath(baseRootOfForDisplay(root))
 	relBase, err := filepath.Rel(top, base)
 	if err != nil || relBase == ".." || strings.HasPrefix(relBase, ".."+string(filepath.Separator)) || filepath.IsAbs(relBase) {
 		return nil
@@ -107,7 +107,7 @@ func checkWorktreeDivergenceHints(root string, agents []string) []opsHint {
 }
 
 func validSessionNameForRoot(root string) string {
-	session := resolveSessionName(absPath(resolveRoot(root)))
+	session := resolveSessionNameForDisplay(absPath(resolveRoot(root)))
 	if session == "" || validateSessionName(session) != nil {
 		return ""
 	}

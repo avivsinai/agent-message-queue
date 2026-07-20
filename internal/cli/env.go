@@ -30,7 +30,9 @@ type envOutput struct {
 	SchemaVersion int               `json:"schema_version"`
 	AMQVersion    string            `json:"amq_version"`
 	Root          string            `json:"root"`
+	RootID        string            `json:"root_id,omitempty"`
 	BaseRoot      string            `json:"base_root"`
+	BaseRootID    string            `json:"base_root_id,omitempty"`
 	SessionName   string            `json:"session_name"`
 	InSession     bool              `json:"in_session"`
 	Me            string            `json:"me"`
@@ -109,6 +111,11 @@ func runEnv(args []string) error {
 		}
 		base := ""
 		if pin.Present {
+			if pin.IdentityPin {
+				if relation := verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID); relation != TreeRelationSame {
+					return ContextMismatchError("refusing env session route: pinned base root identity is %s for %s", relation, pin.BaseRoot)
+				}
+			}
 			base = pin.BaseRoot
 		} else {
 			resolved, _, _, err := resolveEnvConfigWithSource("", *meFlag)
@@ -161,11 +168,14 @@ func runEnv(args []string) error {
 			inSession = true
 		}
 		project, peers := envProjectAndPeers(root)
+		rootID, baseRootID := treeIdentityTokens(root, baseRoot)
 		out := envOutput{
 			SchemaVersion: 1,
 			AMQVersion:    cliVersion,
 			Root:          root,
+			RootID:        rootID,
 			BaseRoot:      baseRoot,
+			BaseRootID:    baseRootID,
 			SessionName:   sessionName,
 			InSession:     inSession,
 			Me:            me,
@@ -197,7 +207,8 @@ func runEnv(args []string) error {
 			return fmt.Errorf("resolve absolute base root for shell output: %w", err)
 		}
 	}
-	if err := writeShellEnv(root, baseRoot, sessionName, me, shell, *wakeFlag); err != nil {
+	rootID, baseRootID := treeIdentityTokens(root, baseRoot)
+	if err := writeShellEnv(root, baseRoot, rootID, baseRootID, sessionName, me, shell, *wakeFlag); err != nil {
 		return err
 	}
 	if *exportFlag {
@@ -492,16 +503,26 @@ func isValidShell(shell string) bool {
 	}
 }
 
-func writeShellEnv(root, baseRoot, session, me, shell string, wake bool) error {
+func treeIdentityTokens(root, baseRoot string) (rootID, baseRootID string) {
+	var rootErr, baseRootErr error
+	rootID, rootErr = resolveTreeIdentityToken(root)
+	baseRootID, baseRootErr = resolveTreeIdentityToken(baseRoot)
+	if rootErr != nil || baseRootErr != nil {
+		return "", ""
+	}
+	return rootID, baseRootID
+}
+
+func writeShellEnv(root, baseRoot, rootID, baseRootID, session, me, shell string, wake bool) error {
 	switch shell {
 	case "fish":
-		return writeFishEnv(root, baseRoot, session, me, wake)
+		return writeFishEnv(root, baseRoot, rootID, baseRootID, session, me, wake)
 	default:
-		return writePosixEnv(root, baseRoot, session, me, wake)
+		return writePosixEnv(root, baseRoot, rootID, baseRootID, session, me, wake)
 	}
 }
 
-func writePosixEnv(root, baseRoot, session, me string, wake bool) error {
+func writePosixEnv(root, baseRoot, rootID, baseRootID, session, me string, wake bool) error {
 	if root != "" {
 		if err := writeStdout("export AM_ROOT=%s\n", shellQuotePosix(root)); err != nil {
 			return err
@@ -511,6 +532,20 @@ func writePosixEnv(root, baseRoot, session, me string, wake bool) error {
 		return fmt.Errorf("cannot emit AMQ context without an exact AM_BASE_ROOT")
 	}
 	if err := writeStdout("export AM_BASE_ROOT=%s\n", shellQuotePosix(baseRoot)); err != nil {
+		return err
+	}
+	if rootID != "" {
+		if err := writeStdout("export AM_ROOT_ID=%s\n", shellQuotePosix(rootID)); err != nil {
+			return err
+		}
+	} else if err := writeStdoutLine("unset AM_ROOT_ID"); err != nil {
+		return err
+	}
+	if baseRootID != "" {
+		if err := writeStdout("export AM_BASE_ROOT_ID=%s\n", shellQuotePosix(baseRootID)); err != nil {
+			return err
+		}
+	} else if err := writeStdoutLine("unset AM_BASE_ROOT_ID"); err != nil {
 		return err
 	}
 	if err := writeStdout("export AM_SESSION=%s\n", shellQuotePosix(session)); err != nil {
@@ -531,7 +566,7 @@ func writePosixEnv(root, baseRoot, session, me string, wake bool) error {
 	return nil
 }
 
-func writeFishEnv(root, baseRoot, session, me string, wake bool) error {
+func writeFishEnv(root, baseRoot, rootID, baseRootID, session, me string, wake bool) error {
 	if root != "" {
 		if err := writeStdout("set -gx AM_ROOT %s\n", shellQuoteFish(root)); err != nil {
 			return err
@@ -541,6 +576,20 @@ func writeFishEnv(root, baseRoot, session, me string, wake bool) error {
 		return fmt.Errorf("cannot emit AMQ context without an exact AM_BASE_ROOT")
 	}
 	if err := writeStdout("set -gx AM_BASE_ROOT %s\n", shellQuoteFish(baseRoot)); err != nil {
+		return err
+	}
+	if rootID != "" {
+		if err := writeStdout("set -gx AM_ROOT_ID %s\n", shellQuoteFish(rootID)); err != nil {
+			return err
+		}
+	} else if err := writeStdoutLine("set -e AM_ROOT_ID"); err != nil {
+		return err
+	}
+	if baseRootID != "" {
+		if err := writeStdout("set -gx AM_BASE_ROOT_ID %s\n", shellQuoteFish(baseRootID)); err != nil {
+			return err
+		}
+	} else if err := writeStdoutLine("set -e AM_BASE_ROOT_ID"); err != nil {
 		return err
 	}
 	if session == "" {

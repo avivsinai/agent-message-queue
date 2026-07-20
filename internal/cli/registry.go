@@ -189,8 +189,10 @@ var usageGlobalOptions = []string{
 
 var usageEnvironment = []string{
 	"  AM_ROOT             Queue root directory (from flags, env, config, or coop exec session setup)",
+	"  AM_ROOT_ID          Opaque physical identity token for AM_ROOT when available",
 	"  AM_ME               Default agent handle",
 	"  AM_BASE_ROOT        Authorized session base, or exact root for a sessionless pin",
+	"  AM_BASE_ROOT_ID     Opaque physical identity token for AM_BASE_ROOT when available",
 	"  AM_SESSION          Pinned session identity (empty means exact-root context)",
 	"  AMQ_GLOBAL_ROOT     Global root fallback (for agents spawned by external orchestrators)",
 	"  AMQ_NO_UPDATE_CHECK  Disable update check (1/true/yes/on)",

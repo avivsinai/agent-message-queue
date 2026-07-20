@@ -169,7 +169,7 @@ func loadOpsAgents(root string) ([]string, error) {
 		return nil, err
 	}
 
-	base := baseRootOf(root)
+	base := baseRootOfForDisplay(root)
 	if absPath(resolveRoot(base)) == absPath(resolveRoot(root)) {
 		return nil, err
 	}

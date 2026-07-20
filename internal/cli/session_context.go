@@ -14,6 +14,9 @@ type sessionPin struct {
 	Session      string
 	BaseRoot     string
 	ExpectedRoot string
+	BaseRootID   string
+	RootID       string
+	IdentityPin  bool
 }
 
 // loadSessionPin distinguishes an absent legacy pin from an explicitly empty
@@ -47,6 +50,23 @@ func loadSessionPin() (sessionPin, error) {
 	} else {
 		pin.ExpectedRoot = pin.BaseRoot
 	}
+
+	rootID, rootIDPresent := os.LookupEnv(envRootID)
+	baseRootID, baseRootIDPresent := os.LookupEnv(envBaseRootID)
+	if !rootIDPresent && !baseRootIDPresent {
+		return pin, nil
+	}
+	rootID = strings.TrimSpace(rootID)
+	baseRootID = strings.TrimSpace(baseRootID)
+	if !rootIDPresent || !baseRootIDPresent || rootID == "" || baseRootID == "" {
+		return sessionPin{}, ContextMismatchError("incomplete AMQ identity pin: %s and %s must both be present and non-empty", envRootID, envBaseRootID)
+	}
+	if !validTreeIdentityToken(rootID) || !validTreeIdentityToken(baseRootID) {
+		return sessionPin{}, ContextMismatchError("unverifiable AMQ identity pin: unsupported or malformed %s/%s", envRootID, envBaseRootID)
+	}
+	pin.RootID = rootID
+	pin.BaseRootID = baseRootID
+	pin.IdentityPin = true
 	return pin, nil
 }
 
@@ -57,6 +77,21 @@ func sessionPinMismatch(target string) (*SessionContextError, error) {
 		return nil, err
 	}
 	if pin.Present {
+		if pin.IdentityPin {
+			if relation := verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID); relation != TreeRelationSame {
+				return &SessionContextError{Message: fmt.Sprintf(
+					"session context mismatch: pinned base root identity is %s for %s",
+					relation, pin.BaseRoot,
+				)}, nil
+			}
+			if relation := verifyTreeIdentityToken(target, pin.RootID); relation != TreeRelationSame {
+				return &SessionContextError{Message: fmt.Sprintf(
+					"session context mismatch: target root identity is %s for %s",
+					relation, target,
+				)}, nil
+			}
+			return nil, nil
+		}
 		expected := pin.ExpectedRoot
 		if target == expected {
 			return nil, nil
@@ -99,6 +134,11 @@ func resolveMailboxRoot(common *commonFlags, rawSession string) (root string, ro
 	base := ""
 	switch {
 	case pin.Present:
+		if pin.IdentityPin {
+			if relation := verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID); relation != TreeRelationSame {
+				return "", false, ContextMismatchError("refusing routed session: pinned base root identity is %s for %s", relation, pin.BaseRoot)
+			}
+		}
 		base = pin.BaseRoot
 	default:
 		base = baseRootOf(root)

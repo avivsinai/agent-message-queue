@@ -286,6 +286,244 @@ func TestSameBaseTreeAllowsSymlinkedCustomBase(t *testing.T) {
 	}
 }
 
+func TestEnvDoesNotLaunderSiblingHintIntoBaseRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "queue")
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(parent, "other", "agents"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envRoot, "")
+	t.Setenv(envBaseRoot, "")
+	setOptionalEnv(t, envSession, "", false)
+
+	if got := classifyRoot(root); got != "" {
+		t.Fatalf("authority classification laundered sibling hint into base %q", got)
+	}
+	if got := classifyRootForDisplay(root); got != parent {
+		t.Fatalf("display classification = %q, want sibling hint %q", got, parent)
+	}
+	result := runEnvJSONForTest(t, "--root", root, "--me", "alice")
+	expectSamePath(t, result.BaseRoot, root)
+	if result.InSession || result.SessionName != "" {
+		t.Fatalf("heuristic root became session authority: %+v", result)
+	}
+}
+
+func TestConflictingSourceRootStaleAMRootValidBase(t *testing.T) {
+	base := filepath.Join(t.TempDir(), defaultCoopRoot)
+	target := filepath.Join(base, "target")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envRoot, filepath.Join(t.TempDir(), "stale", "session"))
+	t.Setenv(envBaseRoot, base)
+	setOptionalEnv(t, envSession, "", false)
+
+	if source, refused := conflictingSourceRoot(target); refused {
+		t.Fatalf("stale AM_ROOT overrode valid same-tree AM_BASE_ROOT evidence: %q", source)
+	}
+}
+
+func TestPinnedRootCanonicalAlias(t *testing.T) {
+	realRoot := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(realRoot, alias); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	token, err := resolveTreeIdentityToken(realRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envRoot, alias)
+	t.Setenv(envBaseRoot, alias)
+	t.Setenv(envSession, "")
+	t.Setenv(envRootID, token)
+	t.Setenv(envBaseRootID, token)
+
+	mismatch, err := sessionPinMismatch(realRoot)
+	if err != nil {
+		t.Fatalf("canonical alias verification failed: %v", err)
+	}
+	if mismatch != nil {
+		t.Fatalf("canonical alias rejected: %v", mismatch)
+	}
+}
+
+func TestPinnedRootRetargetedAlias(t *testing.T) {
+	realRoot := t.TempDir()
+	replacement := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(realRoot, alias); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	token, err := resolveTreeIdentityToken(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(replacement, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envRoot, alias)
+	t.Setenv(envBaseRoot, alias)
+	t.Setenv(envSession, "")
+	t.Setenv(envRootID, token)
+	t.Setenv(envBaseRootID, token)
+
+	mismatch, err := sessionPinMismatch(alias)
+	if err != nil {
+		t.Fatalf("retargeted alias check: %v", err)
+	}
+	if mismatch == nil {
+		t.Fatal("retargeted alias was accepted by an identity-bound pin")
+	}
+}
+
+func TestRoutedSessionRefusesRetargetedBaseIdentity(t *testing.T) {
+	baseOne := t.TempDir()
+	baseTwo := t.TempDir()
+	for _, base := range []string{baseOne, baseTwo} {
+		for _, session := range []string{"session1", "session2"} {
+			if err := fsq.EnsureAgentDirs(filepath.Join(base, session), "alice"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	alias := filepath.Join(t.TempDir(), "base")
+	if err := os.Symlink(baseOne, alias); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	baseToken, err := resolveTreeIdentityToken(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootToken, err := resolveTreeIdentityToken(filepath.Join(alias, "session1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(baseTwo, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envRoot, filepath.Join(alias, "session1"))
+	t.Setenv(envBaseRoot, alias)
+	t.Setenv(envSession, "session1")
+	t.Setenv(envRootID, rootToken)
+	t.Setenv(envBaseRootID, baseToken)
+
+	err = runDrain([]string{"--me", "alice", "--session", "session2"})
+	if err == nil || GetExitCode(err) != ExitContextMismatch {
+		t.Fatalf("routed session accepted retargeted base identity: %v", err)
+	}
+}
+
+func TestEnvEmitsAuthoritativeIdentityTokens(t *testing.T) {
+	root := t.TempDir()
+	result := runEnvJSONForTest(t, "--root", root, "--me", "alice")
+	if result.RootID == "" || result.BaseRootID == "" {
+		t.Fatalf("env omitted authoritative identities: %+v", result)
+	}
+	if verifyTreeIdentityToken(root, result.RootID) != TreeRelationSame ||
+		verifyTreeIdentityToken(root, result.BaseRootID) != TreeRelationSame {
+		t.Fatalf("env emitted unverifiable identities: %+v", result)
+	}
+}
+
+func TestPinnedRootIdentityTokenStates(t *testing.T) {
+	root := t.TempDir()
+	other := t.TempDir()
+	rootToken, err := resolveTreeIdentityToken(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherToken, err := resolveTreeIdentityToken(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("absent retains legacy semantics", func(t *testing.T) {
+		t.Setenv(envRoot, root)
+		t.Setenv(envBaseRoot, root)
+		t.Setenv(envSession, "")
+		setOptionalEnv(t, envRootID, "", false)
+		setOptionalEnv(t, envBaseRootID, "", false)
+		mismatch, err := sessionPinMismatch(root)
+		if err != nil || mismatch != nil {
+			t.Fatalf("legacy pin rejected: mismatch=%v err=%v", mismatch, err)
+		}
+	})
+
+	t.Run("mismatch refuses", func(t *testing.T) {
+		t.Setenv(envRoot, root)
+		t.Setenv(envBaseRoot, root)
+		t.Setenv(envSession, "")
+		t.Setenv(envRootID, otherToken)
+		t.Setenv(envBaseRootID, otherToken)
+		mismatch, err := sessionPinMismatch(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mismatch == nil {
+			t.Fatal("mismatched tokens were accepted")
+		}
+	})
+
+	t.Run("unknown version refuses", func(t *testing.T) {
+		t.Setenv(envRoot, root)
+		t.Setenv(envBaseRoot, root)
+		t.Setenv(envSession, "")
+		t.Setenv(envRootID, strings.Replace(rootToken, "v1:", "v999:", 1))
+		t.Setenv(envBaseRootID, strings.Replace(rootToken, "v1:", "v999:", 1))
+		mismatch, err := sessionPinMismatch(root)
+		if mismatch == nil && err == nil {
+			t.Fatal("unknown token version was accepted")
+		}
+	})
+}
+
+func TestListWarnsOnUnverifiableIdentityToken(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envRoot, root)
+	t.Setenv(envBaseRoot, root)
+	t.Setenv(envSession, "")
+	t.Setenv(envRootID, "v999:test:opaque")
+	t.Setenv(envBaseRootID, "v999:test:opaque")
+
+	_, stderr, err := captureEnvOutput(t, func() error {
+		return runList([]string{"--me", "alice", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("advisory list rejected unverifiable token: %v", err)
+	}
+	if !strings.Contains(stderr, "warning:") || !strings.Contains(stderr, "unverifiable AMQ identity pin") {
+		t.Fatalf("list warning = %q", stderr)
+	}
+}
+
+func TestDoctorWarnsOnUnverifiableIdentityToken(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(envRoot, root)
+	t.Setenv(envBaseRoot, root)
+	t.Setenv(envSession, "")
+	t.Setenv(envRootID, "v999:test:opaque")
+	t.Setenv(envBaseRootID, "v999:test:opaque")
+
+	check := checkSessionPinIdentity(root)
+	if check.Status != "warn" || !strings.Contains(check.Message, "unverifiable AMQ identity pin") {
+		t.Fatalf("doctor identity check = %+v, want warning", check)
+	}
+}
+
 func TestSendRefusesCrossTreeEscapeFromMisclassifiedRoot(t *testing.T) {
 	t.Run("nested default-name session", func(t *testing.T) {
 		p := t.TempDir()
