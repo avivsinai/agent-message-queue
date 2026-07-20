@@ -130,3 +130,17 @@ func runListJSON(t *testing.T, root, agent string, limit, offset int) []listItem
 	}
 	return items
 }
+
+func TestListSessionDoesNotExistReturnsNotFound(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	err := runList([]string{"--root", root, "--me", "alice", "--session", "missing", "--new"})
+	if GetExitCode(err) != ExitNotFound {
+		t.Fatalf("exit = %d, want %d (err=%v)", GetExitCode(err), ExitNotFound, err)
+	}
+}

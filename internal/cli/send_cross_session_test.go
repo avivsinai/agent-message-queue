@@ -72,6 +72,17 @@ func TestSendFromSessionPreBootCrossSession(t *testing.T) {
 	}
 }
 
+func TestSendCrossProjectSessionSymlinkToForeignRefused(t *testing.T) {
+	peer := t.TempDir()
+	foreign := t.TempDir()
+	if err := os.Symlink(foreign, filepath.Join(peer, "evil")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveSessionRoot(peer, "evil"); err == nil {
+		t.Fatal("expected symlinked peer session to be refused")
+	}
+}
+
 func TestSendFromSessionRejectsProject(t *testing.T) {
 	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
 	ensureSendSessionAgent(t, filepath.Join(baseRoot, "cto"), "alice")
