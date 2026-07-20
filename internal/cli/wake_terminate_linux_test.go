@@ -56,9 +56,9 @@ func TestTerminateWakePidfdKillsValidatedChildAndCannotSignalAfterExit(t *testin
 	if err := terminateWakePidfd(pidfd); err != nil {
 		t.Fatalf("terminate child via pidfd: %v", err)
 	}
-	if _, err := cmd.Process.Wait(); err == nil {
-		t.Fatal("child wait unexpectedly succeeded after signal termination")
-	}
+	// Wait may report a normal exit when the child handles SIGTERM; pidfd
+	// ESRCH below is the authoritative proof that the process is gone.
+	_, _ = cmd.Process.Wait()
 	if err := linuxPidfdSendSignal(pidfd, unix.SIGTERM, nil, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("signal retained pidfd after exit = %v, want ESRCH", err)
 	}
@@ -109,7 +109,10 @@ func TestTerminateFailsClosedWhenPidfdOpenIsUnsupported(t *testing.T) {
 	inspectCalls := 0
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		inspectCalls++
-		return matchingLinuxWakeProcess(pid, root)
+		p := matchingLinuxWakeProcess(pid, root)
+		p.Executable = "/usr/bin/not-amq"
+		p.Args = []string{"not-amq"}
+		return p
 	})
 	stubLinuxPidfd(t,
 		func(pid, flags int) (int, error) { return -1, syscall.ENOSYS },
