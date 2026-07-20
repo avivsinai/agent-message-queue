@@ -742,6 +742,9 @@ func findAmqrcForRoot(root string) (amqrcResult, error) {
 				if validateErr := validateAmqrcFile(rcPath); validateErr != nil {
 					return amqrcResult{}, validateErr
 				}
+			} else if !os.IsNotExist(statErr) {
+				// Do not walk past an unreadable or otherwise unverifiable config.
+				return amqrcResult{}, fmt.Errorf("cannot inspect .amqrc at %s: %w", rcPath, statErr)
 			}
 			data, readErr := os.ReadFile(rcPath)
 			if readErr == nil {

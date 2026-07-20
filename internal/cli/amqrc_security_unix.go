@@ -12,13 +12,19 @@ import (
 // invoking user. Permission bits are intentionally not enforced here: older
 // configs commonly use 0644 and the file contains no secrets.
 func validateAmqrcFile(path string) error {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf(".amqrc at %s is a symlink", path)
+	}
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if ok && uint32(st.Uid) != uint32(os.Getuid()) {
-		return fmt.Errorf(".amqrc at %s is owned by uid %d, want uid %d", path, st.Uid, os.Getuid())
+	if !ok {
+		return fmt.Errorf(".amqrc at %s has unavailable ownership metadata", path)
+	}
+	if uint32(st.Uid) != uint32(os.Geteuid()) {
+		return fmt.Errorf(".amqrc at %s is owned by uid %d, want euid %d", path, st.Uid, os.Geteuid())
 	}
 	return nil
 }
