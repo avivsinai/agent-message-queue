@@ -150,12 +150,18 @@ func validateWakeTargetFile(path string, info os.FileInfo) error {
 }
 
 func writeWakeTarget(root, me string, target wakeTarget) error {
-	if err := validateWakeTarget(target, root, me); err != nil {
-		return err
-	}
 	agentBase := fsq.AgentBase(root, me)
 	if err := os.MkdirAll(agentBase, 0o700); err != nil {
 		return fmt.Errorf("create wake target directory: %w", err)
+	}
+	return withWakeLifecycleGuard(root, me, func() error {
+		return writeWakeTargetGuarded(root, me, target)
+	})
+}
+
+func writeWakeTargetGuarded(root, me string, target wakeTarget) error {
+	if err := validateWakeTarget(target, root, me); err != nil {
+		return err
 	}
 	data, err := json.MarshalIndent(target, "", "  ")
 	if err != nil {
@@ -165,7 +171,7 @@ func writeWakeTarget(root, me string, target wakeTarget) error {
 	return writeWakeMetadataFile(wakeTargetPath(root, me), data, "wake target")
 }
 
-func removeWakeTarget(root, me string) error {
+func removeWakeTargetGuarded(root, me string) error {
 	if err := os.Remove(wakeTargetPath(root, me)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove wake target: %w", err)
 	}
