@@ -147,7 +147,7 @@ func TestRunOpsChecksDoesNotAdvertiseRepairForTamperedStaleLock(t *testing.T) {
 	}
 }
 
-func TestRunOpsChecksDoesNotAdvertiseRepairForLiveIdentityMismatchLock(t *testing.T) {
+func TestRunOpsChecksDoesNotAdvertiseRepairForUnknownBootIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		lock       wakeLock
@@ -170,23 +170,6 @@ func TestRunOpsChecksDoesNotAdvertiseRepairForLiveIdentityMismatchLock(t *testin
 				Executable: "/opt/homebrew/bin/amq",
 			},
 			wantReason: "boot id mismatch",
-		},
-		{
-			name: "process start mismatch",
-			lock: wakeLock{
-				PID:          4242,
-				ProcessStart: "recorded-start",
-				BootID:       "same-boot",
-				Executable:   "/opt/homebrew/bin/amq",
-			},
-			process: wakeProcessInfo{
-				PID:        4242,
-				Running:    true,
-				StartToken: "actual-start",
-				BootID:     "same-boot",
-				Executable: "/opt/homebrew/bin/amq",
-			},
-			wantReason: "process start time mismatch",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -222,7 +205,7 @@ func TestRunOpsChecksDoesNotAdvertiseRepairForLiveIdentityMismatchLock(t *testin
 	}
 }
 
-func TestRunOpsChecksFixRefusesLiveIdentityMismatchLock(t *testing.T) {
+func TestRunOpsChecksFixRefusesUnknownBootIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		lock       wakeLock
@@ -245,23 +228,6 @@ func TestRunOpsChecksFixRefusesLiveIdentityMismatchLock(t *testing.T) {
 				Executable: "/opt/homebrew/bin/amq",
 			},
 			wantReason: "boot id mismatch",
-		},
-		{
-			name: "process start mismatch",
-			lock: wakeLock{
-				PID:          4242,
-				ProcessStart: "recorded-start",
-				BootID:       "same-boot",
-				Executable:   "/opt/homebrew/bin/amq",
-			},
-			process: wakeProcessInfo{
-				PID:        4242,
-				Running:    true,
-				StartToken: "actual-start",
-				BootID:     "same-boot",
-				Executable: "/opt/homebrew/bin/amq",
-			},
-			wantReason: "process start time mismatch",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -297,5 +263,66 @@ func TestRunOpsChecksFixRefusesLiveIdentityMismatchLock(t *testing.T) {
 				t.Fatalf("identity-mismatch lock should remain after fix refusal: %v", statErr)
 			}
 		})
+	}
+}
+
+func TestRunOpsChecksReportsProvenStartMismatchAsStale(t *testing.T) {
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		ProcessStart: "recorded-start",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "actual-start",
+			BootID:     "same-boot",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+
+	result := runOpsChecks(root, "test", false)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != string(wakeLockStale) || got.Reason != "process start time mismatch" {
+		t.Fatalf("unexpected wake lock: %#v", got)
+	}
+}
+
+func TestRunOpsChecksFixRemovesProvenStartMismatch(t *testing.T) {
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		ProcessStart: "recorded-start",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "actual-start",
+			BootID:     "same-boot",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+
+	result := runOpsChecks(root, "test", true)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != "fixed" || !got.Removed {
+		t.Fatalf("unexpected wake lock fix result: %#v", got)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("proven stale lock still exists: %v", err)
 	}
 }

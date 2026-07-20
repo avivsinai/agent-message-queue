@@ -50,6 +50,25 @@ const (
 	wakeLockUnverified wakeLockStatus = "unverified"
 )
 
+type wakeIdentityState uint8
+
+const (
+	wakeIdentityUnknown wakeIdentityState = iota
+	wakeIdentitySame
+	wakeIdentityGoneOrDifferent
+)
+
+func (state wakeIdentityState) String() string {
+	switch state {
+	case wakeIdentitySame:
+		return "same"
+	case wakeIdentityGoneOrDifferent:
+		return "gone or different"
+	default:
+		return "unknown"
+	}
+}
+
 type wakeLockInspection struct {
 	Exists            bool
 	Status            wakeLockStatus
@@ -190,65 +209,17 @@ func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
 		}
 	}
 
-	proc := inspection.Process
-	if !proc.Running {
+	state, reason := classifyWakeIdentity(*inspection, inspection.Process)
+	inspection.Reason = reason
+	switch state {
+	case wakeIdentitySame:
+		inspection.IdentityConfirmed = true
+		inspection.Status = wakeLockValid
+	case wakeIdentityGoneOrDifferent:
 		inspection.Status = wakeLockStale
-		inspection.Reason = "pid not running"
-		return
-	}
-	if lock.ProcessStart != "" {
-		if proc.StartToken == "" {
-			inspection.Status = wakeLockUnverified
-			inspection.Reason = inspectionReason("process start time unavailable", proc.InspectError)
-			return
-		}
-		if lock.ProcessStart != proc.StartToken {
-			inspection.Status = wakeLockUnverified
-			if wakeProcessProvenNotWake(proc) {
-				inspection.Status = wakeLockStale
-			}
-			inspection.Reason = "process start time mismatch"
-			return
-		}
-		if compareWakeBootID(lock.BootID, proc) != bootIDMatch {
-			inspection.Status = wakeLockUnverified
-			if wakeProcessProvenNotWake(proc) {
-				inspection.Status = wakeLockStale
-			}
-			inspection.Reason = "boot id mismatch"
-			return
-		}
-	}
-	if proc.Executable == "" {
+	default:
 		inspection.Status = wakeLockUnverified
-		inspection.Reason = inspectionReason("process identity unavailable", proc.InspectError)
-		return
 	}
-	if !processLooksLikeAMQ(proc) {
-		inspection.Status = wakeLockStale
-		inspection.Reason = "pid is not amq"
-		return
-	}
-	if len(proc.Args) > 0 && !processArgsLookLikeWake(proc.Args) {
-		inspection.Status = wakeLockStale
-		inspection.Reason = "pid is not amq wake"
-		return
-	}
-
-	if lock.ProcessStart != "" {
-		inspection.IdentityConfirmed = true
-		inspection.Status = wakeLockValid
-		return
-	}
-
-	if wakeArgsMatchRootAgent(proc.Args, root, me) {
-		inspection.IdentityConfirmed = true
-		inspection.Status = wakeLockValid
-		return
-	}
-
-	inspection.Status = wakeLockUnverified
-	inspection.Reason = "legacy lock lacks process start metadata"
 }
 
 func validateWakeLockRepairable(inspection wakeLockInspection) error {
@@ -269,18 +240,9 @@ func validateWakeLockStaleRemoval(inspection wakeLockInspection) error {
 	} else if inspection.Status != wakeLockStale {
 		return err
 	}
-	// Identity-token mismatches are removable only when process inspection proves
-	// the live PID is not an amq wake. Other stale reasons keep the historical
-	// self-heal behavior for corrupt or structurally stale lock files.
-	switch inspection.Reason {
-	case "boot id mismatch", "process start time mismatch":
-		if wakeProcessProvenNotWake(inspection.Process) {
-			return nil
-		}
-		return fmt.Errorf("wake lock stale reason %q is not removable while pid %d may still be amq wake", inspection.Reason, inspection.PID)
-	default:
-		return nil
-	}
+	// Identity mismatches reach stale only when the tri-state classifier has
+	// affirmative proof that the recorded generation is gone or different.
+	return nil
 }
 
 func wakeProcessProvenNotWake(proc wakeProcessInfo) bool {
@@ -406,29 +368,59 @@ func isAMQExecutable(value string) bool {
 	return base == "amq"
 }
 
-func wakeProcessStillMatches(inspection wakeLockInspection) bool {
-	proc := inspectWakeProcess(inspection.PID)
+func inspectWakeIdentity(inspection wakeLockInspection) wakeIdentityState {
+	state, _ := classifyWakeIdentity(inspection, inspectWakeProcess(inspection.PID))
+	return state
+}
+
+func classifyWakeIdentity(inspection wakeLockInspection, proc wakeProcessInfo) (wakeIdentityState, string) {
+	lock := inspection.Lock
 	if !proc.Running {
-		return false
+		return wakeIdentityGoneOrDifferent, "pid not running"
 	}
-	if inspection.Lock.ProcessStart != "" {
-		if proc.StartToken == "" || inspection.Lock.ProcessStart != proc.StartToken {
-			return false
+	if lock.ProcessStart != "" {
+		if proc.StartToken == "" {
+			return wakeIdentityUnknown, inspectionReason("process start time unavailable", proc.InspectError)
 		}
-		if compareWakeBootID(inspection.Lock.BootID, proc) == bootIDMismatch {
-			return false
+		bootComparison := compareWakeBootID(lock.BootID, proc)
+		switch bootComparison {
+		case bootIDMismatch:
+			return wakeIdentityGoneOrDifferent, "boot id mismatch"
+		case bootIDUnknown:
+			if wakeProcessProvenNotWake(proc) {
+				return wakeIdentityGoneOrDifferent, "boot id mismatch"
+			}
+			return wakeIdentityUnknown, "boot id mismatch"
+		}
+		if lock.ProcessStart != proc.StartToken {
+			if lock.BootID == "" {
+				if wakeProcessProvenNotWake(proc) {
+					return wakeIdentityGoneOrDifferent, "process start time mismatch"
+				}
+				return wakeIdentityUnknown, "process start time mismatch"
+			}
+			return wakeIdentityGoneOrDifferent, "process start time mismatch"
 		}
 	}
 	if proc.Executable == "" || !processLooksLikeAMQ(proc) {
-		return false
+		if proc.Executable == "" {
+			return wakeIdentityUnknown, inspectionReason("process identity unavailable", proc.InspectError)
+		}
+		return wakeIdentityGoneOrDifferent, "pid is not amq"
 	}
 	if len(proc.Args) > 0 && !processArgsLookLikeWake(proc.Args) {
-		return false
+		return wakeIdentityGoneOrDifferent, "pid is not amq wake"
 	}
-	if inspection.Lock.ProcessStart == "" && !wakeArgsMatchRootAgent(proc.Args, inspection.Root, inspection.Agent) {
-		return false
+	if lock.ProcessStart != "" {
+		return wakeIdentitySame, ""
 	}
-	return true
+	if lock.BootID != "" {
+		return wakeIdentityUnknown, "boot id requires process start metadata"
+	}
+	if wakeArgsMatchRootAgent(proc.Args, inspection.Root, inspection.Agent) {
+		return wakeIdentitySame, ""
+	}
+	return wakeIdentityUnknown, "legacy lock lacks process start metadata"
 }
 
 type bootIDComparison int
