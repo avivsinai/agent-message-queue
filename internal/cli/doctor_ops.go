@@ -80,7 +80,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 
 	// Load the active root's config, falling back to the base config for normal
 	// session layouts where coop init owns the single config.json.
-	agents, err := loadOpsAgents(root)
+	agents, err := loadOpsAgents(root, fixWakeLocks)
 	if err != nil {
 		result.Hints = append(result.Hints, opsHint{
 			Code:    "config_error",
@@ -91,7 +91,23 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 		return result
 	}
 
+	validatedAgents := make([]string, 0, len(agents))
 	for _, handle := range agents {
+		// Configured handles are untrusted input. Validate before deriving any
+		// mailbox/presence paths so traversal-like values cannot escape root.
+		if err := fsq.ValidateHandle(handle); err != nil {
+			result.Hints = append(result.Hints, opsHint{
+				Code:    "config_error",
+				Status:  "error",
+				Message: fmt.Sprintf("Ignoring invalid configured agent handle %q: %v", handle, err),
+			})
+			continue
+		}
+		if err := validateWakeLockAgent(root, handle); err != nil {
+			result.Hints = append(result.Hints, opsHint{Code: "config_error", Status: "error", Message: fmt.Sprintf("Ignoring unsafe configured agent handle %q: %v", handle, err)})
+			continue
+		}
+		validatedAgents = append(validatedAgents, handle)
 		agent := opsAgent{Handle: handle}
 
 		// Unread count + oldest
@@ -148,7 +164,11 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 		result.Agents = append(result.Agents, agent)
 	}
 
-	result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, agents), fixWakeLocks)
+	// Only handles which passed validation while traversing the config are
+	// eligible for diagnostic wake-lock inspection.  Discovery performs the
+	// same check for handles found on disk; checkWakeLocks repeats it at its
+	// boundary as a defense against future callers passing untrusted input.
+	result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, validatedAgents), fixWakeLocks)
 
 	// Operational and integration hints
 	result.Hints = append(result.Hints, checkSiblingBacklogHints(root, agents)...)
@@ -160,7 +180,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 	return result
 }
 
-func loadOpsAgents(root string) ([]string, error) {
+func loadOpsAgents(root string, fixWakeLocks bool) ([]string, error) {
 	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
 	if err == nil {
 		return cfg.Agents, nil
@@ -169,7 +189,10 @@ func loadOpsAgents(root string) ([]string, error) {
 		return nil, err
 	}
 
-	base := baseRootOf(root)
+	if fixWakeLocks {
+		return nil, err
+	}
+	base := baseRootOfForDisplay(root)
 	if absPath(resolveRoot(base)) == absPath(resolveRoot(root)) {
 		return nil, err
 	}
@@ -224,6 +247,9 @@ func discoveredWakeLockAgents(root string, configured []string) []string {
 	seen := make(map[string]struct{}, len(configured))
 	agents := make([]string, 0, len(configured))
 	for _, agent := range configured {
+		if validateWakeLockAgent(root, agent) != nil {
+			continue
+		}
 		if _, ok := seen[agent]; ok {
 			continue
 		}
@@ -239,7 +265,7 @@ func discoveredWakeLockAgents(root string, configured []string) []string {
 		if _, ok := seen[agent]; ok {
 			continue
 		}
-		if err := fsq.ValidateHandle(agent); err != nil {
+		if err := validateWakeLockAgent(root, agent); err != nil {
 			continue
 		}
 		seen[agent] = struct{}{}
@@ -251,6 +277,9 @@ func discoveredWakeLockAgents(root string, configured []string) []string {
 func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 	var locks []opsWakeLock
 	for _, agent := range agents {
+		if validateWakeLockAgent(root, agent) != nil {
+			continue
+		}
 		inspection := inspectWakeLock(root, agent)
 		if !inspection.Exists {
 			continue
@@ -311,6 +340,31 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 		locks = append(locks, lock)
 	}
 	return locks
+}
+
+// validateWakeLockAgent ensures diagnostics cannot follow an agent directory
+// symlink (including one pointing outside this AMQ root). Missing directories
+// remain valid for configured agents: inspectWakeLock will simply report no
+// lock, preserving diagnostics for partially initialized roots.
+func validateWakeLockAgent(root, agent string) error {
+	if err := fsq.ValidateHandle(agent); err != nil {
+		return err
+	}
+	path := fsq.AgentBase(root, agent)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("agent directory is a symlink")
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("agent path is not a directory")
+	}
+	return nil
 }
 
 func wakeRepairCommand(root, agent string) string {

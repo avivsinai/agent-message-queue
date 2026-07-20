@@ -4,11 +4,48 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func expectedPosixIdentityLines(t *testing.T, root, baseRoot string) string {
+	t.Helper()
+	rootID, rootErr := resolveTreeIdentityToken(root)
+	baseRootID, baseErr := resolveTreeIdentityToken(baseRoot)
+	var out strings.Builder
+	if rootErr == nil {
+		fmt.Fprintf(&out, "export AM_ROOT_ID=%s\n", shellQuotePosix(rootID))
+	} else {
+		out.WriteString("unset AM_ROOT_ID\n")
+	}
+	if baseErr == nil {
+		fmt.Fprintf(&out, "export AM_BASE_ROOT_ID=%s\n", shellQuotePosix(baseRootID))
+	} else {
+		out.WriteString("unset AM_BASE_ROOT_ID\n")
+	}
+	return out.String()
+}
+
+func expectedFishIdentityLines(t *testing.T, root, baseRoot string) string {
+	t.Helper()
+	rootID, rootErr := resolveTreeIdentityToken(root)
+	baseRootID, baseErr := resolveTreeIdentityToken(baseRoot)
+	var out strings.Builder
+	if rootErr == nil {
+		fmt.Fprintf(&out, "set -gx AM_ROOT_ID %s\n", shellQuoteFish(rootID))
+	} else {
+		out.WriteString("set -e AM_ROOT_ID\n")
+	}
+	if baseErr == nil {
+		fmt.Fprintf(&out, "set -gx AM_BASE_ROOT_ID %s\n", shellQuoteFish(baseRootID))
+	} else {
+		out.WriteString("set -e AM_BASE_ROOT_ID\n")
+	}
+	return out.String()
+}
 
 func captureEnvStdout(t *testing.T, fn func() error) (string, error) {
 	t.Helper()
@@ -923,6 +960,7 @@ func TestRunEnvNonExportSessionEmitsFullContext(t *testing.T) {
 	expectedRoot := filepath.Join(expectedBase, "feature-x")
 	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
 		"export AM_BASE_ROOT=" + shellQuotePosix(expectedBase) + "\n" +
+		expectedPosixIdentityLines(t, expectedRoot, expectedBase) +
 		"export AM_SESSION=feature-x\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
@@ -967,6 +1005,7 @@ func TestRunEnvExportSessionEmitsBaseRootAndPinNote(t *testing.T) {
 	expectedRoot := filepath.Join(expectedBase, "feature-x")
 	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
 		"export AM_BASE_ROOT=" + shellQuotePosix(expectedBase) + "\n" +
+		expectedPosixIdentityLines(t, expectedRoot, expectedBase) +
 		"export AM_SESSION=feature-x\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
@@ -1013,6 +1052,7 @@ func TestRunEnvExportNonSessionPinsExactBaseRoot(t *testing.T) {
 	expectedRoot := filepath.Join(projectRoot, ".agent-mail")
 	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
 		"export AM_BASE_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
+		expectedPosixIdentityLines(t, expectedRoot, expectedRoot) +
 		"export AM_SESSION=\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
@@ -1060,6 +1100,7 @@ func TestRunEnvExportFishSessionEmitsBaseRoot(t *testing.T) {
 	expectedRoot := filepath.Join(expectedBase, "feature-x")
 	want := "set -gx AM_ROOT " + shellQuoteFish(expectedRoot) + "\n" +
 		"set -gx AM_BASE_ROOT " + shellQuoteFish(expectedBase) + "\n" +
+		expectedFishIdentityLines(t, expectedRoot, expectedBase) +
 		"set -gx AM_SESSION feature-x\n" +
 		"set -gx AM_ME codex\n"
 	if stdout != want {
@@ -1093,6 +1134,7 @@ func TestRunEnvExportSessionFromGlobalRootEmitsBaseRoot(t *testing.T) {
 	expectedRoot := filepath.Join(globalRoot, "feature-x")
 	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
 		"export AM_BASE_ROOT=" + shellQuotePosix(globalRoot) + "\n" +
+		expectedPosixIdentityLines(t, expectedRoot, globalRoot) +
 		"export AM_SESSION=feature-x\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
@@ -1137,6 +1179,7 @@ func TestRunEnvExportSessionIgnoresStaleAmbientBaseRoot(t *testing.T) {
 	expectedRoot := filepath.Join(expectedBase, "feature-x")
 	want := "export AM_ROOT=" + shellQuotePosix(expectedRoot) + "\n" +
 		"export AM_BASE_ROOT=" + shellQuotePosix(expectedBase) + "\n" +
+		expectedPosixIdentityLines(t, expectedRoot, expectedBase) +
 		"export AM_SESSION=feature-x\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
@@ -1162,6 +1205,7 @@ func TestRunEnvExportExplicitBaseRootPinsExactBaseRoot(t *testing.T) {
 
 	want := "export AM_ROOT=" + shellQuotePosix(root) + "\n" +
 		"export AM_BASE_ROOT=" + shellQuotePosix(root) + "\n" +
+		expectedPosixIdentityLines(t, root, root) +
 		"export AM_SESSION=\n" +
 		"export AM_ME=codex\n"
 	if stdout != want {
@@ -1578,6 +1622,40 @@ func TestLoadGlobalAmqrc(t *testing.T) {
 	resolvedHome, _ := filepath.EvalSymlinks(fakeHome)
 	if resolvedDir != resolvedHome {
 		t.Errorf("expected Dir=%q, got %q", resolvedHome, resolvedDir)
+	}
+}
+
+func TestFindAndLoadAmqrcRejectsUntrustedProvenance(t *testing.T) {
+	root := t.TempDir()
+	old, _ := os.Getwd()
+	defer func() { _ = os.Chdir(old) }()
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(root, ".amqrc")
+	if err := os.WriteFile(path, []byte(`{"root":".agent-mail"}`), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findAndLoadAmqrc(); err == nil || !strings.Contains(err.Error(), "group/world-writable") {
+		t.Fatalf("expected writable .amqrc rejection, got %v", err)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "real.amqrc")
+	if err := os.WriteFile(target, []byte(`{"root":".agent-mail"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findAndLoadAmqrc(); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected symlink rejection, got %v", err)
 	}
 }
 

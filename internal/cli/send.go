@@ -138,12 +138,40 @@ func runSend(args []string) error {
 	// Fires only on positive evidence of a different home root (AM_ROOT /
 	// AM_BASE_ROOT); bare-root sends with no session env set are unaffected.
 	routed := targetProject != "" || targetSession != "" || fromSession != ""
+	// Validate explicit session evidence before advisory cross-tree classification;
+	// malformed pins must fail closed with the context-mismatch exit status.
+	var pin sessionPin
+	var pinErr error
+	pin, pinErr = loadSessionPin()
+	if pinErr != nil {
+		return pinErr
+	}
+	if pin.Present && pin.IdentityPin {
+		if verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID) != TreeRelationSame {
+			return ContextMismatchError("pinned base root identity is not current")
+		}
+		if fromSession != "" && verifyTreeIdentityToken(root, pin.RootID) != TreeRelationSame {
+			return ContextMismatchError("pinned root identity is not current")
+		}
+		if fromSession == "" {
+			if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
+				return err
+			}
+		}
+	}
 	if common.rootExplicit() && !routed {
 		if src, ok := conflictingSourceRoot(root); ok {
 			return UsageError("refusing send: --root %s targets a different AMQ tree than your own (%s), "+
 				"but no routing dimension was given, so the recipient could not reply.\n"+
 				"Use --project <peer> or --session <name> for replyable cross-tree routing, "+
 				"or set the target as AM_ROOT if this send is genuinely local.", root, src)
+		}
+	}
+	// Preserve the original lexical source guard after the advisory check. An
+	// identity pin was already validated above; lexical pins still need refusal.
+	if fromSession == "" && (!pin.Present || !pin.IdentityPin) {
+		if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
+			return err
 		}
 	}
 	var replyProject string
@@ -160,21 +188,15 @@ func runSend(args []string) error {
 		if classifyRoot(root) != "" {
 			return UsageError("--from-session requires --root to be the base root, not a session root")
 		}
-		sourceRoot = filepath.Join(root, fromSession)
-		if !dirExists(sourceRoot) {
-			return fmt.Errorf("source session %q not found at %s", fromSession, sourceRoot)
+		sourceRoot, err = resolveSessionRoot(root, fromSession)
+		if err != nil {
+			return fmt.Errorf("source session %q not found: %w", fromSession, err)
 		}
 		if !dirExists(filepath.Join(sourceRoot, "agents", me)) {
 			return fmt.Errorf("agent %q not found in source session %q", me, fromSession)
 		}
 		sourceSession = fromSession
 	}
-	if fromSession == "" {
-		if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
-			return err
-		}
-	}
-
 	if targetProject != "" {
 		// Cross-project delivery.
 		peerBaseRoot, err := resolvePeer(root, targetProject)
@@ -192,14 +214,20 @@ func runSend(args []string) error {
 				return UsageError("--session: %v", err)
 			}
 			targetSession = normalized
-			deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
+			deliveryRoot, err = resolveSessionRoot(peerBaseRoot, targetSession)
+			if err != nil {
+				return err
+			}
 		} else {
 			// Cross-project, no explicit session. Mirror the sender's session when
 			// the source root is itself a session root.
 			if classifyRoot(root) != "" {
 				// Inside a session — use same session name in peer.
 				targetSession = sessionName(root)
-				deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
+				deliveryRoot, err = resolveSessionRoot(peerBaseRoot, targetSession)
+				if err != nil {
+					return err
+				}
 			} else {
 				// At base root — deliver to peer's base root directly.
 				deliveryRoot = peerBaseRoot
@@ -241,12 +269,12 @@ func runSend(args []string) error {
 			return fmt.Errorf("--session requires a session context: run from inside 'amq coop exec --session <name>'")
 		}
 
-		deliveryRoot = filepath.Join(baseRoot, targetSession)
+		deliveryRoot, err = resolveSessionRoot(baseRoot, targetSession)
+		if err != nil {
+			return err
+		}
 
 		// Verify the target session and agent inboxes exist.
-		if !dirExists(deliveryRoot) {
-			return fmt.Errorf("session %q not found at %s", targetSession, deliveryRoot)
-		}
 		for _, r := range recipients {
 			inbox := filepath.Join(deliveryRoot, "agents", r, "inbox")
 			if !dirExists(inbox) {

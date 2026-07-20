@@ -524,7 +524,9 @@ func TestBuildCoopExecEnvironmentPinsSessionIdentity(t *testing.T) {
 	base := []string{
 		"PATH=/bin",
 		"AM_ROOT=/stale/root",
+		"AM_ROOT_ID=v1:stale:root",
 		"AM_BASE_ROOT=/stale/base",
+		"AM_BASE_ROOT_ID=v1:stale:base",
 		"AM_SESSION=stale",
 	}
 	root := filepath.Join(t.TempDir(), ".agent-mail", "session1")
@@ -541,6 +543,28 @@ func TestBuildCoopExecEnvironmentPinsSessionIdentity(t *testing.T) {
 	}
 	if got := envValue(env, "AM_ME"); got != "codex" {
 		t.Fatalf("AM_ME = %q, want codex", got)
+	}
+	if envHasKey(env, envRootID) || envHasKey(env, envBaseRootID) {
+		t.Fatalf("unresolvable coop roots retained stale identity tokens: %#v", env)
+	}
+
+	liveBase := filepath.Join(t.TempDir(), ".agent-mail")
+	liveRoot := filepath.Join(liveBase, "session1")
+	if err := os.MkdirAll(liveRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env = buildCoopExecEnvironment(base, liveRoot, "codex", "session1")
+	for _, tc := range []struct {
+		key  string
+		path string
+	}{
+		{key: envRootID, path: liveRoot},
+		{key: envBaseRootID, path: liveBase},
+	} {
+		token, present := lookupEnvSlice(env, tc.key)
+		if !present || verifyTreeIdentityToken(tc.path, token) != TreeRelationSame {
+			t.Fatalf("%s = %q, want authoritative identity for %s", tc.key, token, tc.path)
+		}
 	}
 
 	customRoot := filepath.Join(t.TempDir(), "custom-root")

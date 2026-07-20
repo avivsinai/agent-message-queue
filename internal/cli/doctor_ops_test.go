@@ -136,6 +136,34 @@ func TestRunOpsChecks_NoConfig(t *testing.T) {
 	}
 }
 
+func TestRunOpsChecks_RejectsInvalidConfiguredHandleBeforePaths(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteConfig(filepath.Join(root, "meta", "config.json"), config.Config{
+		Version: 1,
+		Agents:  []string{"../escape", "good"},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	result := runOpsChecks(root, "test", false)
+	for _, agent := range result.Agents {
+		if agent.Handle == "../escape" {
+			t.Fatal("invalid configured handle was used")
+		}
+	}
+	found := false
+	for _, hint := range result.Hints {
+		if hint.Code == "config_error" && strings.Contains(hint.Message, "../escape") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected config_error hint for invalid configured handle")
+	}
+}
+
 func TestRunOpsChecks_OperatorGateReportsWithoutConfig(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
