@@ -11,6 +11,11 @@ import (
 // advisory or authority-bearing instead of accidentally collapsing failures.
 type TreeRelation uint8
 
+// Identity tokens are a pathname snapshot. ABA reuse (delete/recreate of a
+// directory with the same file ID beneath an untrusted ancestor) remains an
+// accepted single-user residual; a durable-handle capability is deferred to W2
+// if multi-tenant deployments make this material.
+
 const (
 	TreeRelationUnknown TreeRelation = iota
 	TreeRelationSame

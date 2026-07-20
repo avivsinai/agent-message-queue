@@ -69,7 +69,10 @@ func runList(args []string) error {
 	common.Me = me
 	root, routed, err := resolveMailboxRoot(common, *sessionFlag)
 	if err != nil {
-		return err
+		// list is diagnostic/read-only: preserve visibility even when pin
+		// verification is stale or malformed, but make the failure explicit.
+		_ = writeStderr("warning: %v\n", err)
+		root, routed = absPath(resolveRoot(common.Root)), false
 	}
 	if !routed {
 		if mismatch, checkErr := sessionPinMismatch(root); checkErr != nil {
