@@ -26,6 +26,22 @@ func TestInspectWakeProcessPlatformTreatsDarwinZombieAsNotRunning(t *testing.T) 
 	}
 }
 
+func TestInspectWakeProcessPlatformPreservesAliveStateWhenKinfoFails(t *testing.T) {
+	old := readDarwinKinfoProc
+	readDarwinKinfoProc = func(name string, args ...int) (*unix.KinfoProc, error) {
+		if name != "kern.proc.pid" || len(args) != 1 || args[0] != os.Getpid() {
+			t.Fatalf("unexpected sysctl request: name=%q args=%v", name, args)
+		}
+		return nil, errors.New("sysctl kinfo failed")
+	}
+	t.Cleanup(func() { readDarwinKinfoProc = old })
+
+	info := inspectWakeProcessPlatform(os.Getpid())
+	if !info.Running || info.InspectError == nil {
+		t.Fatalf("inspection = %#v; want running with inspection error", info)
+	}
+}
+
 func stubDarwinBootIdentityReaders(
 	t *testing.T,
 	session func() (string, error),

@@ -1136,7 +1136,7 @@ func TestAcquireWakeLockSelfHealsPIDReusedByNonAMQ(t *testing.T) {
 	}
 }
 
-func TestAcquireWakeLockTreatsLiveWakeIdentityMismatchAsUnverified(t *testing.T) {
+func TestAcquireWakeLockTreatsUnknownBootIdentityAsUnverified(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		lock       wakeLock
@@ -1158,22 +1158,6 @@ func TestAcquireWakeLockTreatsLiveWakeIdentityMismatchAsUnverified(t *testing.T)
 				Executable: "/opt/homebrew/bin/amq",
 			},
 			wantReason: "boot id mismatch",
-		},
-		{
-			name: "process start mismatch",
-			lock: wakeLock{
-				PID:          4242,
-				ProcessStart: "old-start",
-				BootID:       "boot-1",
-				Executable:   "/opt/homebrew/bin/amq",
-			},
-			process: wakeProcessInfo{
-				Running:    true,
-				StartToken: "new-start",
-				BootID:     "boot-1",
-				Executable: "/opt/homebrew/bin/amq",
-			},
-			wantReason: "process start time mismatch",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1204,7 +1188,7 @@ func TestAcquireWakeLockTreatsLiveWakeIdentityMismatchAsUnverified(t *testing.T)
 	}
 }
 
-func TestAcquireWakeLockRefusesStartMismatchWhenExecutableUnavailable(t *testing.T) {
+func TestAcquireWakeLockReplacesProvenStartMismatchWhenBootMatches(t *testing.T) {
 	const reusedPID = 4242
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
@@ -1227,14 +1211,89 @@ func TestAcquireWakeLockRefusesStartMismatchWhenExecutableUnavailable(t *testing
 	})
 
 	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
+	if err != nil {
+		t.Fatalf("acquireWakeLock: %v", err)
+	}
+	defer cleanup()
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read replacement lock: %v", err)
+	}
+	var got wakeLock
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal replacement lock: %v", err)
+	}
+	if got.PID != os.Getpid() {
+		t.Fatalf("replacement pid = %d, want %d", got.PID, os.Getpid())
+	}
+}
+
+func TestAcquireWakeLockPreservesStartMismatchWhenBootIsUnknown(t *testing.T) {
+	const reusedPID = 4242
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+		PID:          reusedPID,
+		ProcessStart: "old-start",
+		BootID:       "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == reusedPID {
+			return wakeProcessInfo{
+				PID:          pid,
+				Running:      true,
+				StartToken:   "new-start",
+				BootID:       "100.000000000",
+				Executable:   "/opt/homebrew/bin/amq",
+				Args:         []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root},
+				InspectError: errors.New("boot representations are not comparable"),
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+
+	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), "boot id mismatch") || !strings.Contains(err.Error(), "unverified") {
+		t.Fatalf("expected unknown-boot refusal, got %v", err)
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("lock should remain when boot identity is unknown, stat=%v", statErr)
+	}
+}
+
+func TestAcquireWakeLockPreservesStartMismatchWithoutBootIdentity(t *testing.T) {
+	const reusedPID = 4242
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+		PID:          reusedPID,
+		ProcessStart: "old-start",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == reusedPID {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "new-start",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--root", root},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+
+	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
 	if cleanup != nil {
 		defer cleanup()
 	}
 	if err == nil || !strings.Contains(err.Error(), "process start time mismatch") || !strings.Contains(err.Error(), "unverified") {
-		t.Fatalf("expected start-token mismatch to be unverified without executable identity, got %v", err)
+		t.Fatalf("expected missing-boot refusal, got %v", err)
 	}
 	if _, statErr := os.Stat(lockPath); statErr != nil {
-		t.Fatalf("lock should remain when executable identity is unavailable, stat=%v", statErr)
+		t.Fatalf("lock should remain without comparable boot identity, stat=%v", statErr)
 	}
 }
 
@@ -1507,6 +1566,68 @@ func TestTerminateWakeProcessPreservesLiveWakeOnUnknownBootAfterSignal(t *testin
 	}
 	if len(signals) != 1 || signals[0] != syscall.SIGTERM {
 		t.Fatalf("signals = %v, want only SIGTERM", signals)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("lock was removed or became unreadable: %v", err)
+	}
+}
+
+func TestTerminatePreservesLockOnUnknownInspectionAfterSIGTERM(t *testing.T) {
+	const wakePID = 4350
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{PID: wakePID, TTY: "tty", ProcessStart: "start-1", BootID: "boot-1", Executable: "/opt/homebrew/bin/amq"})
+	calls := 0
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		calls++
+		if calls >= 3 {
+			return wakeProcessInfo{PID: pid, Running: true, InspectError: errors.New("sysctl kinfo failed")}
+		}
+		return wakeProcessInfo{PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1", Executable: "/opt/homebrew/bin/amq", Args: []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex"}}
+	})
+	var signals []os.Signal
+	stubSignalWakeProcess(t, func(pid int, sig os.Signal) error {
+		signals = append(signals, sig)
+		return nil
+	})
+
+	inspection := inspectWakeLock(root, "codex")
+	err := terminateWakeProcess(inspection)
+	if err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("terminateWakeProcess error = %v, want unknown-inspection error", err)
+	}
+	if len(signals) != 1 || signals[0] != syscall.SIGTERM {
+		t.Fatalf("signals = %v, want only SIGTERM", signals)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("lock was removed or became unreadable: %v", err)
+	}
+}
+
+func TestTerminatePreservesLockOnUnknownInspectionAfterSIGKILL(t *testing.T) {
+	const wakePID = 4351
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{PID: wakePID, TTY: "tty", ProcessStart: "start-1", BootID: "boot-1", Executable: "/opt/homebrew/bin/amq"})
+	calls := 0
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		calls++
+		if calls >= 5 {
+			return wakeProcessInfo{PID: pid, Running: true, InspectError: errors.New("sysctl kinfo failed")}
+		}
+		return wakeProcessInfo{PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1", Executable: "/opt/homebrew/bin/amq", Args: []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex"}}
+	})
+	var signals []os.Signal
+	stubSignalWakeProcess(t, func(pid int, sig os.Signal) error {
+		signals = append(signals, sig)
+		return nil
+	})
+
+	inspection := inspectWakeLock(root, "codex")
+	err := terminateWakeProcess(inspection)
+	if err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("terminateWakeProcess error = %v, want unknown-inspection error", err)
+	}
+	if len(signals) != 2 || signals[0] != syscall.SIGTERM || signals[1] != syscall.SIGKILL {
+		t.Fatalf("signals = %v, want SIGTERM then SIGKILL", signals)
 	}
 	if _, err := os.Stat(lockPath); err != nil {
 		t.Fatalf("lock was removed or became unreadable: %v", err)

@@ -323,8 +323,11 @@ func terminateWakeProcess(inspection wakeLockInspection) error {
 		return fmt.Errorf("signal wake process SIGTERM: %w", err)
 	}
 	time.Sleep(wakeTerminateGrace)
-	if !wakeProcessStillMatches(inspection) {
+	switch state := inspectWakeIdentity(inspection); state {
+	case wakeIdentityGoneOrDifferent:
 		return nil
+	case wakeIdentityUnknown:
+		return fmt.Errorf("wake process identity is unknown after SIGTERM; preserving wake lock")
 	}
 	if !sameConfirmedWakeLock(inspection) {
 		return fmt.Errorf("wake process identity changed before SIGKILL")
@@ -333,13 +336,18 @@ func terminateWakeProcess(inspection wakeLockInspection) error {
 		return fmt.Errorf("signal wake process SIGKILL: %w", err)
 	}
 	deadline := time.Now().Add(wakeTerminateGrace)
-	for wakeProcessStillMatches(inspection) {
+	for {
+		switch state := inspectWakeIdentity(inspection); state {
+		case wakeIdentityGoneOrDifferent:
+			return nil
+		case wakeIdentityUnknown:
+			return fmt.Errorf("wake process identity is unknown after SIGKILL; preserving wake lock")
+		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("wake process still alive after SIGKILL")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	return nil
 }
 
 func sameConfirmedWakeLock(inspection wakeLockInspection) bool {

@@ -776,7 +776,7 @@ func TestRepairWakeRefusesStaleRawLockWithLeftoverTarget(t *testing.T) {
 	}
 }
 
-func TestRepairWakeRefusesLiveIdentityMismatchLock(t *testing.T) {
+func TestRepairWakeRefusesUnknownBootIdentityLock(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		lock       wakeLock
@@ -799,23 +799,6 @@ func TestRepairWakeRefusesLiveIdentityMismatchLock(t *testing.T) {
 				Executable: "/opt/homebrew/bin/amq",
 			},
 			wantReason: "boot id mismatch",
-		},
-		{
-			name: "process start mismatch",
-			lock: wakeLock{
-				PID:          4242,
-				ProcessStart: "recorded-start",
-				BootID:       "same-boot",
-				Executable:   "/opt/homebrew/bin/amq",
-			},
-			process: wakeProcessInfo{
-				PID:        4242,
-				Running:    true,
-				StartToken: "actual-start",
-				BootID:     "same-boot",
-				Executable: "/opt/homebrew/bin/amq",
-			},
-			wantReason: "process start time mismatch",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -850,6 +833,46 @@ func TestRepairWakeRefusesLiveIdentityMismatchLock(t *testing.T) {
 				t.Fatalf("lock should remain on refused live identity mismatch: %v", statErr)
 			}
 		})
+	}
+}
+
+func TestRepairWakeRefusesProvenStartMismatchAsNonRepairable(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+		PID:          4242,
+		ProcessStart: "recorded-start",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+	}, target))
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatalf("writeWakeTarget: %v", err)
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "actual-start",
+			BootID:     "same-boot",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+	stubStartWakeFromTarget(t, func(root, me string, target wakeTarget) (int, error) {
+		t.Fatalf("startWakeFromTarget should not run for a non-repairable stale reason")
+		return 0, nil
+	})
+
+	result, err := repairWake(root, "codex")
+	if err == nil || !strings.Contains(err.Error(), `stale reason "process start time mismatch" is not repairable`) {
+		t.Fatalf("unexpected result: %#v err=%v", result, err)
+	}
+	if result.Status != "refused" {
+		t.Fatalf("status = %q, want refused", result.Status)
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("lock should remain after refused repair: %v", statErr)
 	}
 }
 

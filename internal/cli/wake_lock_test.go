@@ -214,3 +214,31 @@ func TestInspectWakeLockTreatsUnavailableCurrentBootIdentityAsUnverified(t *test
 		t.Fatalf("inspection status = %q, want unverified (reason %q)", inspection.Status, inspection.Reason)
 	}
 }
+
+func TestInspectWakeLockRejectsBootIDWithoutProcessStart(t *testing.T) {
+	const wakePID = 4444
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:        wakePID,
+		TTY:        "tty",
+		BootID:     "recorded-boot",
+		Executable: "/opt/homebrew/bin/amq",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+
+	inspection := inspectWakeLock(root, "codex")
+	if inspection.Status != wakeLockUnverified || inspection.IdentityConfirmed {
+		t.Fatalf("inspection = status %q reason %q confirmed %v; want unverified and unconfirmed",
+			inspection.Status, inspection.Reason, inspection.IdentityConfirmed)
+	}
+	if inspection.Reason != "boot id requires process start metadata" {
+		t.Fatalf("inspection reason = %q", inspection.Reason)
+	}
+}
