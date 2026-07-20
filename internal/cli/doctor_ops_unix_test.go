@@ -76,6 +76,32 @@ func TestRunOpsChecksRejectsSymlinkAndFIFOWakeLocks(t *testing.T) {
 	}
 }
 
+func TestRunOpsChecksLeavesForeignAgentSymlinkWakeLockUntouched(t *testing.T) {
+	root := secureTempDirForTest(t)
+	foreign := secureTempDirForTest(t)
+	foreignAgent := fsq.AgentBase(foreign, "codex")
+	if err := os.MkdirAll(foreignAgent, 0o700); err != nil {
+		t.Fatalf("mkdir foreign agent: %v", err)
+	}
+	lockPath := filepath.Join(foreignAgent, ".wake.lock")
+	if err := os.WriteFile(lockPath, []byte(`{"pid":4242}`), 0o600); err != nil {
+		t.Fatalf("write foreign lock: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(fsq.AgentBase(root, "codex")), 0o700); err != nil {
+		t.Fatalf("mkdir agents root: %v", err)
+	}
+	if err := os.Symlink(foreignAgent, fsq.AgentBase(root, "codex")); err != nil {
+		t.Fatalf("symlink foreign agent: %v", err)
+	}
+	result := runOpsChecks(root, "test", true)
+	if len(result.WakeLocks) != 0 {
+		t.Fatalf("foreign agent symlink should not be inspected: %#v", result.WakeLocks)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("foreign wake lock was touched: %v", err)
+	}
+}
+
 func TestRunOpsChecksRejectsFIFOWakeTargetWithoutBlocking(t *testing.T) {
 	root := secureTempDirForTest(t)
 	agentBase := fsq.AgentBase(root, "codex")
