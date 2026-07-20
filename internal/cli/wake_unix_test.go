@@ -46,6 +46,18 @@ func stubWakeProcessSID(t *testing.T, fn func(pid int) (int, error)) {
 	})
 }
 
+func stubWakeTTYSupport(t *testing.T) {
+	t.Helper()
+	oldAvailable := wakeTIOCSTIAvailable
+	oldIsTTY := wakeInputIsTTY
+	wakeTIOCSTIAvailable = func() bool { return true }
+	wakeInputIsTTY = func() bool { return true }
+	t.Cleanup(func() {
+		wakeTIOCSTIAvailable = oldAvailable
+		wakeInputIsTTY = oldIsTTY
+	})
+}
+
 func writeExecutableForTest(t *testing.T, name string) string {
 	t.Helper()
 	path := filepath.Join(secureTempDirForTest(t), name)
@@ -147,6 +159,53 @@ func TestRunWakeWithLoopNoneSkipsTTYAndWritesReadyFile(t *testing.T) {
 	})
 	if !errors.Is(err, errDone) {
 		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
+func TestRunWakeWithLoopPersistsEffectiveAutoMode(t *testing.T) {
+	stubWakeTTYSupport(t)
+
+	for _, tc := range []struct {
+		name string
+		me   string
+		want string
+	}{
+		{name: "claude uses raw", me: "claude", want: wakeInjectModeRaw},
+		{name: "other handles use paste", me: "grok", want: wakeInjectModePaste},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatalf("EnsureRootDirs: %v", err)
+			}
+			if err := fsq.EnsureAgentDirs(root, tc.me); err != nil {
+				t.Fatalf("EnsureAgentDirs: %v", err)
+			}
+
+			errDone := errors.New("done")
+			err := runWakeWithLoop([]string{
+				"--root", root,
+				"--me", tc.me,
+				"--inject-mode", "auto",
+			}, func(cfg wakeConfig) error {
+				lockPath := filepath.Join(fsq.AgentBase(root, tc.me), ".wake.lock")
+				data, readErr := os.ReadFile(lockPath)
+				if readErr != nil {
+					t.Fatalf("read wake lock: %v", readErr)
+				}
+				var lock wakeLock
+				if unmarshalErr := json.Unmarshal(data, &lock); unmarshalErr != nil {
+					t.Fatalf("unmarshal wake lock: %v", unmarshalErr)
+				}
+				if lock.WakeMode != tc.want {
+					t.Fatalf("WakeMode = %q, want %q", lock.WakeMode, tc.want)
+				}
+				return errDone
+			})
+			if !errors.Is(err, errDone) {
+				t.Fatalf("expected loop sentinel error, got %v", err)
+			}
+		})
 	}
 }
 
@@ -719,6 +778,37 @@ func TestRequireWakeLockUsableRawVsPaste(t *testing.T) {
 	}
 	if err := requireWakeLockUsable(inspection, wakeInjectModeRaw); err != nil {
 		t.Fatalf("expected matching raw wake to be usable: %v", err)
+	}
+}
+
+func TestRequireWakeLockUsableLegacyModeCompatibility(t *testing.T) {
+	inspection := wakeLockInspection{
+		Exists:            true,
+		Status:            wakeLockValid,
+		IdentityConfirmed: true,
+		Agent:             "codex",
+		Lock:              wakeLock{TTY: "test-tty"},
+	}
+
+	for _, tc := range []struct {
+		name         string
+		requiredMode string
+		wantErr      bool
+	}{
+		{name: "raw accepted", requiredMode: wakeInjectModeRaw},
+		{name: "paste accepted", requiredMode: wakeInjectModePaste},
+		{name: "none rejected", requiredMode: wakeInjectModeNone, wantErr: true},
+		{name: "inject-via rejected", requiredMode: wakeTargetInjectVia, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := requireWakeLockUsable(inspection, tc.requiredMode)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected legacy wake to reject %q", tc.requiredMode)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected legacy wake to accept %q: %v", tc.requiredMode, err)
+			}
+		})
 	}
 }
 

@@ -25,7 +25,7 @@ type wakeLock struct {
 	BootID       string   `json:"boot_id,omitempty"`       // Boot identity paired with ProcessStart when available
 	Executable   string   `json:"executable,omitempty"`    // Diagnostic process executable basename/path
 	Args         []string `json:"args,omitempty"`          // Diagnostic argv when available
-	WakeMode     string   `json:"wake_mode,omitempty"`     // Proven wake transport/mode (inject-via or none)
+	WakeMode     string   `json:"wake_mode,omitempty"`     // none, raw, paste, or inject-via; empty means a legacy pre-v0.44 lock
 	TargetDigest string   `json:"target_digest,omitempty"` // Binds .wake.target to this lock instance
 }
 

@@ -31,9 +31,11 @@ var (
 		}
 		return proc.Signal(sig)
 	}
-	wakeTerminateGrace = 100 * time.Millisecond
-	getWakeCurrentTTY  = getCurrentTTY
-	getWakeProcessSID  = unix.Getsid
+	wakeTerminateGrace   = 100 * time.Millisecond
+	getWakeCurrentTTY    = getCurrentTTY
+	getWakeProcessSID    = unix.Getsid
+	wakeTIOCSTIAvailable = func() bool { return tiocsti.Available() }
+	wakeInputIsTTY       = func() bool { return tiocsti.IsTTY() }
 )
 
 type wakeRepairResult struct {
@@ -247,7 +249,12 @@ func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string) e
 		if requiredMode == wakeInjectModeNone {
 			return fmt.Errorf("existing wake for %s cannot satisfy requested --inject-mode none; stop the existing wake and retry", inspection.Agent)
 		}
-		return fmt.Errorf("existing wake for %s cannot satisfy requested wake mode %q (existing %q); stop the existing wake and retry", inspection.Agent, requiredMode, inspection.Lock.WakeMode)
+		// Legacy locks recorded WakeMode only for none and inject-via.
+		legacyTTYWake := inspection.Lock.WakeMode == "" &&
+			(requiredMode == wakeInjectModeRaw || requiredMode == wakeInjectModePaste)
+		if !legacyTTYWake {
+			return fmt.Errorf("existing wake for %s cannot satisfy requested wake mode %q (existing %q); stop the existing wake and retry", inspection.Agent, requiredMode, inspection.Lock.WakeMode)
+		}
 	}
 	if !wakeLockHasUsableNotificationPath(inspection) {
 		return fmt.Errorf("existing wake lock for %s is not usable for --require-wake (pid %d on %s since %s)",
@@ -754,12 +761,12 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 
 	// Verify TIOCSTI is available (skip in inject-via mode — uses external command instead)
 	if injectVia == "" && injectMode != wakeInjectModeNone {
-		if !tiocsti.Available() {
+		if !wakeTIOCSTIAvailable() {
 			return errors.New("TIOCSTI not available on this platform; use tmux send-keys or terminal-specific injection")
 		}
 
 		// Verify we have a real TTY
-		if !tiocsti.IsTTY() {
+		if !wakeInputIsTTY() {
 			return errors.New("amq wake requires a real terminal (run in foreground or as background job in same terminal, or use --inject-via for external injection)")
 		}
 	}
