@@ -2,7 +2,26 @@
 
 package cli
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
+
+func TestWindowsIdentityPinningOutOfScope(t *testing.T) {
+	if _, err := platformTreeIdentityToken("C:\\", nil); err == nil {
+		t.Fatal("expected no Windows identity token")
+	}
+}
+
+func TestWindowsWritableAmqrcAvailability(t *testing.T) {
+	p := t.TempDir() + "\\.amqrc"
+	if err := os.WriteFile(p, []byte(`{"root":".agent-mail"}`), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAmqrcFile(p); err != nil {
+		t.Fatalf("writable Windows config rejected: %v", err)
+	}
+}
 
 func TestInvalidWindowsIdentityRejectsSentinels(t *testing.T) {
 	var zero, ff [16]byte

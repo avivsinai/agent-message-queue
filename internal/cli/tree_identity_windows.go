@@ -13,39 +13,6 @@ const treeIdentityPlatform = "windows"
 
 func platformTreeIdentityToken(path string, _ os.FileInfo) (string, error) {
 	return "", fmt.Errorf("Windows identity pinning is out of scope")
-	/*
-		pathPtr, err := windows.UTF16PtrFromString(path)
-		if err != nil {
-			return "", err
-		}
-		handle, err := windows.CreateFile(
-			pathPtr,
-			windows.FILE_READ_ATTRIBUTES,
-			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-			nil,
-			windows.OPEN_EXISTING,
-			windows.FILE_FLAG_BACKUP_SEMANTICS,
-			0,
-		)
-		if err != nil {
-			return "", err
-		}
-		defer windows.CloseHandle(handle)
-
-		// FILE_ID_INFO is required for ReFS: the legacy 64-bit file index can
-		// collide. Unsupported/partial filesystems remain unverifiable.
-		type fileIDInfo struct {
-			VolumeSerialNumber uint64
-			FileID             [16]byte
-		}
-		var info fileIDInfo
-		if err := windows.GetFileInformationByHandleEx(handle, windows.FileIdInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
-			return "", err
-		}
-		if invalidWindowsIdentity(info.VolumeSerialNumber, info.FileID) {
-			return "", fmt.Errorf("filesystem returned sentinel file identity")
-		}
-		return fmt.Sprintf("v1:windows:%x:%x", info.VolumeSerialNumber, info.FileID), nil */
 }
 
 func invalidWindowsIdentity(volume uint64, id [16]byte) bool {
