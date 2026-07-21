@@ -1739,17 +1739,17 @@ func TestShouldReplaceOrphanedWakeLockSignalsOnlyAfterRevalidation(t *testing.T)
 
 	inspection := inspectWakeLock(root, "orchestrator")
 	replaced, err := shouldReplaceOrphanedWakeLock(inspection)
-	if err != nil {
-		t.Fatalf("shouldReplaceOrphanedWakeLock: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "no cooperative control endpoint") {
+		t.Fatalf("expected missing-control refusal, got %v", err)
 	}
-	if !replaced {
-		t.Fatal("expected confirmed orphan to be replaced")
+	if replaced {
+		t.Fatal("legacy inject-via orphan must not be replaced by PID")
 	}
-	if len(signals) != 2 {
-		t.Fatalf("signals = %d, want SIGTERM and SIGKILL", len(signals))
+	if len(signals) != 0 {
+		t.Fatalf("signals = %d, want none", len(signals))
 	}
-	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Fatalf("lock should be removed after confirmed orphan replacement, stat=%v", err)
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("lock should remain after refusal, stat=%v", err)
 	}
 }
 
@@ -2049,14 +2049,14 @@ func TestShouldReplaceOrphanedWakeLockReplacesInjectViaWhenOwnerGone(t *testing.
 
 	inspection := inspectWakeLock(root, "orchestrator")
 	replaced, err := shouldReplaceOrphanedWakeLock(inspection)
-	if err != nil {
-		t.Fatalf("shouldReplaceOrphanedWakeLock: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "no cooperative control endpoint") {
+		t.Fatalf("expected missing-control refusal, got %v", err)
 	}
-	if !replaced {
-		t.Fatal("expected owner-dead inject-via wake to be replaced")
+	if replaced || killed {
+		t.Fatal("legacy inject-via wake must not be terminated by PID")
 	}
-	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Fatalf("lock should be removed after owner-dead replacement, stat=%v", err)
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("lock should remain after refusal, stat=%v", err)
 	}
 }
 

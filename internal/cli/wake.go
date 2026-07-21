@@ -41,6 +41,7 @@ type wakeConfig struct {
 	interruptNotice   string
 	interruptCooldown time.Duration
 	lastInterrupt     time.Time
+	controlStop       <-chan struct{}
 }
 
 const defaultInjectTimeout = 5 * time.Second

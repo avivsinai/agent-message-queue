@@ -31,8 +31,9 @@ func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, er
 	if recheck.Process.Running && recheck.Lock.WakeMode != wakeTargetInjectVia {
 		return false, fmt.Errorf("live raw wake orphan for %s (pid %d, start %s); stop the owning terminal/launchd supervisor; manual kill is non-identity-safe — recheck before running; see doctor --ops", recheck.Agent, recheck.PID, recheck.Lock.ProcessStart)
 	}
-	// W5a intentionally leaves live inject-via orphans on the legacy PID path;
-	// W5b replaces this with the nonce-bound control socket.
+	if recheck.Process.Running && recheck.Lock.WakeMode == wakeTargetInjectVia {
+		return cooperativeStopInjectVia(recheck)
+	}
 	// Process termination can wait. It must happen after releasing the guard.
 	if recheck.Process.Running {
 		if err := terminateWakeProcess(recheck); err != nil {

@@ -186,6 +186,7 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 	if options.target != nil {
 		lock.WakeMode = wakeTargetInjectVia
 		lock.TargetDigest = wakeTargetDigest(*options.target)
+		lock.ControlSocket = wakeControlSocketPath(root, me, lock.Generation)
 	}
 	if hostname, err := os.Hostname(); err == nil {
 		lock.Hostname = hostname
@@ -827,6 +828,17 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		return err
 	}
 	defer cleanup()
+	var controlStop <-chan struct{}
+	if injectVia != "" {
+		current := inspectWakeLock(root, me)
+		controlCleanup, stop, markStopped, controlErr := startWakeControlListener(root, me, current.Lock)
+		if controlErr != nil {
+			return controlErr
+		}
+		defer controlCleanup()
+		defer markStopped()
+		controlStop = stop
+	}
 
 	if injectVia != "" {
 		if err := validateResolvedWakeInjectViaPath(injectVia); err != nil {
@@ -860,6 +872,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		interruptKey:      interruptKey,
 		interruptNotice:   strings.TrimSpace(*interruptNoticeFlag),
 		interruptCooldown: *interruptCooldownFlag,
+		controlStop:       controlStop,
 	}
 
 	if err := writeWakeReadyFile(root, me, readyFile, inspectWakeLock(root, me)); err != nil {
@@ -939,6 +952,8 @@ func runWakeLoop(cfg wakeConfig) error {
 		}
 
 		select {
+		case <-cfg.controlStop:
+			return nil
 		case <-sigCh:
 			// Clean exit on SIGHUP/SIGTERM
 			return nil
