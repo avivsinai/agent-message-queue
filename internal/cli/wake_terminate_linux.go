@@ -5,9 +5,12 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/sys/unix"
 )
 
@@ -17,6 +20,16 @@ var (
 	linuxPidfdClose      = unix.Close
 	linuxPidfdPoll       = pollLinuxPidfd
 )
+
+// readWakeLockMetadata reads one exact lock generation without consulting the
+// process table. Linux orphan retirement uses this to acquire a pidfd before
+// the first PID-based identity inspection of the locked generation.
+func readWakeLockMetadata(root, me string) wakeLockInspection {
+	lockPath := filepath.Join(fsq.AgentBase(root, me), ".wake.lock")
+	return readWakeLockMetadataWithReader(root, me, lockPath, func() ([]byte, os.FileInfo, error) {
+		return readWakeLockFileWithInfo(lockPath)
+	})
+}
 
 func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
 	var locked wakeLockInspection
