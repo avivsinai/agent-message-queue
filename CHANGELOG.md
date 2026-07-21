@@ -8,6 +8,31 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.44.0](https://github.com/avivsinai/agent-message-queue/compare/v0.43.1...v0.44.0) (2026-07-21)
+
+
+### Features
+
+* **cli:** add Grok coop support ([#240](https://github.com/avivsinai/agent-message-queue/issues/240)) ([fb024f2](https://github.com/avivsinai/agent-message-queue/commit/fb024f2c5aec3fe6dad4d53779125af21d1faa59)), closes [#218](https://github.com/avivsinai/agent-message-queue/issues/218)
+* **cli:** tri-state tree identity, physical pins, and authority de-laundering ([#252](https://github.com/avivsinai/agent-message-queue/issues/252)) ([6ef0e6d](https://github.com/avivsinai/agent-message-queue/commit/6ef0e6df1177ccf6009a04bf9359f723ea9ea0d3))
+* **wake:** Linux pidfd wake termination capability ([#251](https://github.com/avivsinai/agent-message-queue/issues/251)) ([e528d76](https://github.com/avivsinai/agent-message-queue/commit/e528d766e375c084df832fa1164209633f5c7e3f))
+* **wake:** refuse live raw Darwin wake orphans instead of bare-PID kill ([#253](https://github.com/avivsinai/agent-message-queue/issues/253)) ([77ac2e5](https://github.com/avivsinai/agent-message-queue/commit/77ac2e51d995f9dfef998bdf969431fbd5858c1d))
+* **wake:** serialize wake lifecycle under permanent guard with generation-bound readiness ([#250](https://github.com/avivsinai/agent-message-queue/issues/250)) ([ca4cdb4](https://github.com/avivsinai/agent-message-queue/commit/ca4cdb420dac98c499563061f2bdffdd50739acc))
+
+
+### Bug Fixes
+
+* **cli:** advertise claude-code swarm type in help and sync CLI docs ([#243](https://github.com/avivsinai/agent-message-queue/issues/243)) ([927d825](https://github.com/avivsinai/agent-message-queue/commit/927d825094eb0aeb73b5b35532f26abc557fac8d))
+* **cli:** clarify Grok skill discovery docs and coop next-steps hint ([#242](https://github.com/avivsinai/agent-message-queue/issues/242)) ([07eee13](https://github.com/avivsinai/agent-message-queue/commit/07eee133cb7e290c673180586fdde7a4a7d90818))
+* **wake:** adopt tri-state identity classification for wake locks ([#247](https://github.com/avivsinai/agent-message-queue/issues/247)) ([c28bb2a](https://github.com/avivsinai/agent-message-queue/commit/c28bb2ab220f86250b79d7a531907cc05ffb74ad))
+* **wake:** enforce exact wake-mode compatibility ([#246](https://github.com/avivsinai/agent-message-queue/issues/246)) ([8153b8a](https://github.com/avivsinai/agent-message-queue/commit/8153b8af39eccfedd36994058bd1ba2523bceb5f))
+* **wake:** require exact injector identity for inject-via wake reuse ([#248](https://github.com/avivsinai/agent-message-queue/issues/248)) ([4871088](https://github.com/avivsinai/agent-message-queue/commit/4871088a944d7f2f2cac0ee13b8c3838b1ef01a5))
+
+
+### Dependencies
+
+* bump golang.org/x/term from 0.44.0 to 0.45.0 ([#239](https://github.com/avivsinai/agent-message-queue/issues/239)) ([9ff9c1d](https://github.com/avivsinai/agent-message-queue/commit/9ff9c1daa4e84109399102fb81d320c26b87e9fc))
+
 ## [0.43.1](https://github.com/avivsinai/agent-message-queue/compare/v0.43.0...v0.43.1) (2026-07-14)
 
 
