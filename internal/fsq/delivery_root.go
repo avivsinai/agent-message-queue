@@ -177,10 +177,14 @@ func (r *DeliveryRoot) WriteFileAtomic(dir, filename string, data []byte, perm o
 	if err := r.root.Rename(tmpPath, finalPath); err != nil {
 		return "", r.cleanupTemp(tmpPath, err)
 	}
+	committedPath := r.displayPath(finalPath)
 	if err := r.syncDir(dir); err != nil {
-		return "", err
+		return committedPath, &CommittedDurabilityError{
+			FinalPath: committedPath,
+			Err:       err,
+		}
 	}
-	return r.displayPath(finalPath), nil
+	return committedPath, nil
 }
 
 // ReadFile reads a root-relative file through the pinned capability.

@@ -448,12 +448,12 @@ func runSend(args []string) error {
 		// Cross-project: use DeliverToExistingInbox (never creates dirs in peer).
 		for _, r := range recipients {
 			if _, err := fsq.DeliverToExistingInbox(deliveryFS, r, filename, data); err != nil {
-				return err
+				return reportDeliveryError(id, err)
 			}
 		}
 	} else {
 		if _, err := fsq.DeliverToInboxes(deliveryFS, recipients, filename, data); err != nil {
-			return err
+			return reportDeliveryError(id, err)
 		}
 	}
 
@@ -505,10 +505,7 @@ func runSend(args []string) error {
 			"session":     targetDisplay,
 			"root":        deliveryRoot,
 			"source_root": sourceRoot,
-			"outbox": map[string]any{
-				"written": outboxErr == nil,
-				"error":   errString(outboxErr),
-			},
+			"outbox":      outboxResult(outboxErr),
 		}
 		if targetProject != "" {
 			out["cross_project"] = true
@@ -529,7 +526,7 @@ func runSend(args []string) error {
 		return waitErr
 	}
 	if outboxErr != nil {
-		if err := writeStderr("warning: outbox write failed: %v\n", outboxErr); err != nil {
+		if err := reportOutboxError(outboxErr); err != nil {
 			return err
 		}
 	}

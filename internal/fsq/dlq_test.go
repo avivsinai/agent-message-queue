@@ -1,6 +1,7 @@
 package fsq
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,6 +137,47 @@ func TestMoveCurToDLQ(t *testing.T) {
 	}
 	if string(body) != string(content) {
 		t.Fatalf("body mismatch: expected %q, got %q", content, body)
+	}
+}
+
+func TestMoveCurToDLQPostRenameSyncFailureReportsRetainedTransition(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	filename := "indeterminate_dlq.md"
+	sourcePath := filepath.Join(AgentInboxCur(root, "alice"), filename)
+	if err := os.WriteFile(sourcePath, []byte("corrupt"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	deliveryRoot := openDeliveryRootForTest(t, root)
+	dlqNewDir := filepath.Join("agents", "alice", "dlq", "new")
+	deliveryRoot.syncDirForTest = func(dir string) error {
+		if dir == dlqNewDir {
+			return errors.New("injected post-rename sync failure")
+		}
+		return deliveryRoot.syncDirPlatform(dir)
+	}
+
+	dlqPath, err := MoveCurToDLQ(deliveryRoot, "alice", filename, "indeterminate_dlq", "parse_error", "bad data")
+	if err == nil {
+		t.Fatal("MoveCurToDLQ error = nil, want partial transition")
+	}
+	if dlqPath == "" {
+		t.Fatal("MoveCurToDLQ discarded the committed envelope path")
+	}
+	var transition *DLQTransitionError
+	if !errors.As(err, &transition) {
+		t.Fatalf("error = %T %v, want typed DLQ transition", err, err)
+	}
+	if transition.EnvelopePath != dlqPath || transition.SourcePath != sourcePath || !transition.SourceRetained {
+		t.Fatalf("transition = (%q,%q,%v), want (%q,%q,true)", transition.EnvelopePath, transition.SourcePath, transition.SourceRetained, dlqPath, sourcePath)
+	}
+	if _, statErr := os.Stat(dlqPath); statErr != nil {
+		t.Fatalf("committed DLQ envelope missing: %v", statErr)
+	}
+	if _, statErr := os.Stat(sourcePath); statErr != nil {
+		t.Fatalf("source was not retained: %v", statErr)
 	}
 }
 

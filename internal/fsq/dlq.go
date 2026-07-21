@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -89,6 +90,16 @@ func moveInboxMessageToDLQ(root *DeliveryRoot, agent, readDir, envelopeSourceDir
 	dlqFilename := envelope.ID + ".md"
 	dlqPath, err := deliverToDLQ(root, agent, dlqFilename, data)
 	if err != nil {
+		var committed *CommittedDurabilityError
+		if errors.As(err, &committed) {
+			sourcePath := root.displayPath(srcPath)
+			return dlqPath, &DLQTransitionError{
+				EnvelopePath:   dlqPath,
+				SourcePath:     sourcePath,
+				SourceRetained: true,
+				Err:            err,
+			}
+		}
 		return "", fmt.Errorf("deliver to dlq: %w", err)
 	}
 
@@ -138,12 +149,17 @@ func deliverToDLQ(root *DeliveryRoot, agent, filename string, data []byte) (stri
 	if err := root.root.Rename(tmpPath, newPath); err != nil {
 		return "", root.cleanupTemp(tmpPath, err)
 	}
+	committedPath := root.displayPath(newPath)
 	if err := root.syncDir(newDir); err != nil {
-		return "", err
+		return committedPath, &CommittedDurabilityError{
+			FinalPath: committedPath,
+			Recipient: agent,
+			Err:       fmt.Errorf("sync dlq new dir: %w", err),
+		}
 	}
 	_ = root.syncDir(tmpDir)
 
-	return root.displayPath(newPath), nil
+	return committedPath, nil
 }
 
 // ReadDLQEnvelope reads and parses a DLQ message.
