@@ -118,16 +118,6 @@ func inspectWakeLockWithReader(root, me, lockPath string, read wakeLockFileReade
 	return inspection
 }
 
-// readWakeLockMetadata reads one exact lock generation without consulting the
-// process table. Linux orphan retirement uses this to acquire a pidfd before
-// the first PID-based identity inspection of the locked generation.
-func readWakeLockMetadata(root, me string) wakeLockInspection {
-	lockPath := filepath.Join(fsq.AgentBase(root, me), ".wake.lock")
-	return readWakeLockMetadataWithReader(root, me, lockPath, func() ([]byte, os.FileInfo, error) {
-		return readWakeLockFileWithInfo(lockPath)
-	})
-}
-
 func readWakeLockMetadataWithReader(root, me, lockPath string, read wakeLockFileReader) wakeLockInspection {
 	inspection := wakeLockInspection{
 		Status:   wakeLockMissing,
