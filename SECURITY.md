@@ -30,6 +30,28 @@ already opened root, including privileged bind mounts, or against writing to
 pre-existing device files. Those cases require separate mount and file-type
 hardening and remain outside the rooted-delivery guarantee.
 
+### Threat model and accepted residuals
+
+AMQ is a **personal, single-user, on-machine** tool: each engineer runs it under
+their own account on their own machine. The security bar reflects that. An
+attacker who already has the ability to run code as your user, or to swap
+symlinks in your home/ancestor directories mid-command, has full control of your
+environment; defending the message queue against them would not meaningfully
+improve your posture. Accordingly, the following are **accepted residuals**, not
+defended against:
+
+- **Untrusted-ancestor / TOCTOU alias swaps.** A different-euid local attacker
+  who can retarget an ancestor symlink between commands (cross-command alias
+  retarget for `--project`/`--session` routes; ABA swaps of config or message
+  files) is out of scope. Legitimate in-tree symlinks continue to work.
+- **Bind mounts and device files below an opened root** (as noted above).
+
+What AMQ **does** defend correctness for, because these bite without any
+attacker: no duplicate message injection or delivery, no cross-tree leakage from
+ordinary misconfiguration, owner-only `0700`/`0600` permissions, and handle/ID
+validation. Bugs and reliability are the priority; same-machine security
+hardening beyond the above is intentionally out of scope.
+
 ### Known Risks
 
 #### TIOCSTI Terminal Injection (`amq wake`)
