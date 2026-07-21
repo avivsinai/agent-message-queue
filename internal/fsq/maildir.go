@@ -12,7 +12,7 @@ import (
 
 // DeliverToInbox writes a message using Maildir semantics (tmp -> new).
 // It returns the final path in inbox/new.
-func DeliverToInbox(root, agent, filename string, data []byte) (string, error) {
+func DeliverToInbox(root *DeliveryRoot, agent, filename string, data []byte) (string, error) {
 	paths, err := DeliverToInboxes(root, []string{agent}, filename, data)
 	if err != nil {
 		return "", err
@@ -50,7 +50,7 @@ func (e *PartialDeliveryError) Error() string {
 
 	failed := e.Failed
 	if failed == "" {
-		failed = "unknown"
+		failed = "none"
 	}
 
 	pending := "none"
@@ -71,27 +71,30 @@ func (e *PartialDeliveryError) Unwrap() error {
 // DeliverToInboxes writes a message to multiple inboxes.
 // On partial failure, committed deliveries remain in new/ and undelivered tmp
 // files are removed.
-func DeliverToInboxes(root string, recipients []string, filename string, data []byte) (map[string]string, error) {
+func DeliverToInboxes(root *DeliveryRoot, recipients []string, filename string, data []byte) (map[string]string, error) {
 	if len(recipients) == 0 {
 		return nil, fmt.Errorf("no recipients provided")
 	}
+	if err := root.VerifyBase(); err != nil {
+		return nil, err
+	}
 	stages := make([]stagedDelivery, 0, len(recipients))
 	for _, recipient := range recipients {
-		tmpDir := AgentInboxTmp(root, recipient)
-		newDir := AgentInboxNew(root, recipient)
-		if err := os.MkdirAll(tmpDir, 0o700); err != nil {
-			return nil, cleanupStagedTmp(stages, err)
+		tmpDir := filepath.Join("agents", recipient, "inbox", "tmp")
+		newDir := filepath.Join("agents", recipient, "inbox", "new")
+		if err := root.root.MkdirAll(tmpDir, 0o700); err != nil {
+			return nil, cleanupStagedTmp(root, stages, err)
 		}
-		if err := os.MkdirAll(newDir, 0o700); err != nil {
-			return nil, cleanupStagedTmp(stages, err)
+		if err := root.root.MkdirAll(newDir, 0o700); err != nil {
+			return nil, cleanupStagedTmp(root, stages, err)
 		}
 		tmpPath := filepath.Join(tmpDir, filename)
 		newPath := filepath.Join(newDir, filename)
-		if err := writeAndSync(tmpPath, data, 0o600); err != nil {
-			return nil, cleanupStagedTmp(stages, err)
+		if err := root.writeAndSync(tmpPath, data, 0o600); err != nil {
+			return nil, cleanupStagedTmp(root, stages, err)
 		}
-		if err := SyncDir(tmpDir); err != nil {
-			return nil, cleanupStagedTmp(stages, cleanupTemp(tmpPath, err))
+		if err := root.syncDir(tmpDir); err != nil {
+			return nil, cleanupStagedTmp(root, stages, root.cleanupTemp(tmpPath, err))
 		}
 		stages = append(stages, stagedDelivery{
 			recipient: recipient,
@@ -103,27 +106,27 @@ func DeliverToInboxes(root string, recipients []string, filename string, data []
 	}
 
 	for i, stage := range stages {
-		if err := os.Rename(stage.tmpPath, stage.newPath); err != nil {
+		if err := root.root.Rename(stage.tmpPath, stage.newPath); err != nil {
 			if errors.Is(err, syscall.EXDEV) {
 				err = fmt.Errorf("rename tmp->new for %s: different filesystems: %w", stage.recipient, err)
 			} else {
 				err = fmt.Errorf("rename tmp->new for %s: %w", stage.recipient, err)
 			}
-			return nil, partialDeliveryError(stages[:i], stage, stages[i+1:], err)
+			return nil, partialDeliveryError(root, stages[:i], stage, stages[i+1:], err)
 		}
 		// Sync both directories after rename for fully durable delivery:
 		// - newDir: new entry is visible
 		// - tmpDir: old entry removal is durable
-		if err := SyncDir(stage.newDir); err != nil {
-			return nil, partialDeliveryError(stages[:i+1], stage, stages[i+1:], fmt.Errorf("sync new dir for %s: %w", stage.recipient, err))
+		if err := root.syncDir(stage.newDir); err != nil {
+			return nil, committedDeliveryError(root, stages[:i+1], stages[i+1:], fmt.Errorf("sync new dir for %s: %w", stage.recipient, err))
 		}
 		// Best-effort sync of tmpDir (non-fatal: message is already delivered)
-		_ = SyncDir(stage.tmpDir)
+		_ = root.syncDir(stage.tmpDir)
 	}
 
 	paths := make(map[string]string, len(stages))
 	for _, stage := range stages {
-		paths[stage.recipient] = stage.newPath
+		paths[stage.recipient] = root.displayPath(stage.newPath)
 	}
 	return paths, nil
 }
@@ -132,54 +135,52 @@ func DeliverToInboxes(root string, recipients []string, filename string, data []
 // Maildir semantics (tmp -> new). Unlike DeliverToInboxes, it never creates
 // directories — the target inbox must already exist. This prevents a sender
 // from accidentally scaffolding structure in a peer project.
-func DeliverToExistingInbox(root, agent, filename string, data []byte) (string, error) {
-	tmpDir := AgentInboxTmp(root, agent)
-	newDir := AgentInboxNew(root, agent)
+func DeliverToExistingInbox(root *DeliveryRoot, agent, filename string, data []byte) (string, error) {
+	if err := root.VerifyBase(); err != nil {
+		return "", err
+	}
+	tmpDir := filepath.Join("agents", agent, "inbox", "tmp")
+	newDir := filepath.Join("agents", agent, "inbox", "new")
 
 	// Verify directories exist (never create in foreign roots).
-	if !dirExists(tmpDir) {
-		return "", fmt.Errorf("peer inbox tmp dir does not exist: %s", tmpDir)
+	if !root.dirExists(tmpDir) {
+		return "", fmt.Errorf("peer inbox tmp dir does not exist: %s", root.displayPath(tmpDir))
 	}
-	if !dirExists(newDir) {
-		return "", fmt.Errorf("peer inbox new dir does not exist: %s", newDir)
+	if !root.dirExists(newDir) {
+		return "", fmt.Errorf("peer inbox new dir does not exist: %s", root.displayPath(newDir))
 	}
 
 	tmpPath := filepath.Join(tmpDir, filename)
 	newPath := filepath.Join(newDir, filename)
 
-	if err := writeAndSync(tmpPath, data, 0o600); err != nil {
+	if err := root.writeAndSync(tmpPath, data, 0o600); err != nil {
 		return "", err
 	}
-	if err := SyncDir(tmpDir); err != nil {
-		return "", cleanupTemp(tmpPath, err)
+	if err := root.syncDir(tmpDir); err != nil {
+		return "", root.cleanupTemp(tmpPath, err)
 	}
-	if err := os.Rename(tmpPath, newPath); err != nil {
-		return "", cleanupTemp(tmpPath, fmt.Errorf("rename tmp->new for %s: %w", agent, err))
+	if err := root.root.Rename(tmpPath, newPath); err != nil {
+		return "", root.cleanupTemp(tmpPath, fmt.Errorf("rename tmp->new for %s: %w", agent, err))
 	}
-	if err := SyncDir(newDir); err != nil {
+	if err := root.syncDir(newDir); err != nil {
 		return "", fmt.Errorf("sync new dir for %s: %w", agent, err)
 	}
-	_ = SyncDir(tmpDir) // best-effort
-	return newPath, nil
+	_ = root.syncDir(tmpDir) // best-effort
+	return root.displayPath(newPath), nil
 }
 
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
-}
-
-func cleanupStagedTmp(stages []stagedDelivery, primary error) error {
-	cleanupErr := cleanupTmpStages(stages)
+func cleanupStagedTmp(root *DeliveryRoot, stages []stagedDelivery, primary error) error {
+	cleanupErr := cleanupTmpStages(root, stages)
 	if cleanupErr == nil {
 		return primary
 	}
 	return fmt.Errorf("%w (cleanup: %v)", primary, cleanupErr)
 }
 
-func partialDeliveryError(committed []stagedDelivery, failed stagedDelivery, pending []stagedDelivery, primary error) error {
+func partialDeliveryError(root *DeliveryRoot, committed []stagedDelivery, failed stagedDelivery, pending []stagedDelivery, primary error) error {
 	delivered := make(map[string]string, len(committed))
 	for _, stage := range committed {
-		delivered[stage.recipient] = stage.newPath
+		delivered[stage.recipient] = root.displayPath(stage.newPath)
 	}
 
 	pendingRecipients := make([]string, 0, len(pending))
@@ -190,7 +191,7 @@ func partialDeliveryError(committed []stagedDelivery, failed stagedDelivery, pen
 	undelivered := make([]stagedDelivery, 0, 1+len(pending))
 	undelivered = append(undelivered, failed)
 	undelivered = append(undelivered, pending...)
-	if cleanupErr := cleanupTmpStages(undelivered); cleanupErr != nil {
+	if cleanupErr := cleanupTmpStages(root, undelivered); cleanupErr != nil {
 		primary = fmt.Errorf("%w (cleanup: %v)", primary, cleanupErr)
 	}
 
@@ -202,13 +203,32 @@ func partialDeliveryError(committed []stagedDelivery, failed stagedDelivery, pen
 	}
 }
 
-func cleanupTmpStages(stages []stagedDelivery) error {
+func committedDeliveryError(root *DeliveryRoot, committed, pending []stagedDelivery, primary error) error {
+	delivered := make(map[string]string, len(committed))
+	for _, stage := range committed {
+		delivered[stage.recipient] = root.displayPath(stage.newPath)
+	}
+	pendingRecipients := make([]string, 0, len(pending))
+	for _, stage := range pending {
+		pendingRecipients = append(pendingRecipients, stage.recipient)
+	}
+	if cleanupErr := cleanupTmpStages(root, pending); cleanupErr != nil {
+		primary = fmt.Errorf("%w (cleanup: %v)", primary, cleanupErr)
+	}
+	return &PartialDeliveryError{
+		Delivered: delivered,
+		Pending:   pendingRecipients,
+		Err:       primary,
+	}
+}
+
+func cleanupTmpStages(root *DeliveryRoot, stages []stagedDelivery) error {
 	var cleanupErr error
 	for _, stage := range stages {
-		if err := os.Remove(stage.tmpPath); err != nil && !os.IsNotExist(err) {
+		if err := root.root.Remove(stage.tmpPath); err != nil && !os.IsNotExist(err) {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup tmp %s: %w", stage.tmpPath, err))
 		}
-		if err := SyncDir(stage.tmpDir); err != nil {
+		if err := root.syncDir(stage.tmpDir); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("sync tmp dir %s: %w", stage.tmpDir, err))
 		}
 	}

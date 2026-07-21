@@ -71,6 +71,19 @@ func Emit(root string, r Receipt) error {
 	return nil
 }
 
+// EmitDeliveryRoot writes a receipt through an already authorized root.
+func EmitDeliveryRoot(root *fsq.DeliveryRoot, r Receipt) error {
+	data, err := r.Marshal()
+	if err != nil {
+		return fmt.Errorf("receipt marshal: %w", err)
+	}
+	dir := filepath.Join("agents", r.Consumer, "receipts")
+	if _, err := root.WriteFileAtomic(dir, r.filename(), data, 0o600); err != nil {
+		return fmt.Errorf("receipt write (consumer %s): %w", r.Consumer, err)
+	}
+	return nil
+}
+
 // WaitFor polls for a specific consumer-local receipt by deterministic filename.
 // Returns the receipt on match, or an error on timeout.
 func WaitFor(root, msgID, consumer, stage string, timeout, pollInterval time.Duration) (Receipt, error) {
@@ -97,11 +110,39 @@ func WaitFor(root, msgID, consumer, stage string, timeout, pollInterval time.Dur
 	}
 }
 
+// WaitForDeliveryRoot polls through the same capability used for delivery so a
+// renamed root cannot redirect receipt observation to another tree.
+func WaitForDeliveryRoot(root *fsq.DeliveryRoot, msgID, consumer, stage string, timeout, pollInterval time.Duration) (Receipt, error) {
+	name := fmt.Sprintf("%s__%s__%s.json", msgID, consumer, stage)
+	path := filepath.Join("agents", consumer, "receipts", name)
+	deadline := time.Time{}
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
+	for {
+		data, err := root.ReadRegularNoFollow(path)
+		if err == nil {
+			return parseReceipt(data)
+		}
+		if !os.IsNotExist(err) {
+			return Receipt{}, err
+		}
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return Receipt{}, os.ErrDeadlineExceeded
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
 func Read(path string) (Receipt, error) {
 	data, err := fsq.ReadRegularNoFollow(path)
 	if err != nil {
 		return Receipt{}, err
 	}
+	return parseReceipt(data)
+}
+
+func parseReceipt(data []byte) (Receipt, error) {
 	var r Receipt
 	if err := json.Unmarshal(data, &r); err != nil {
 		return Receipt{}, err

@@ -16,6 +16,20 @@ AMQ does **not** protect against:
 - **Malicious agents with same-user access**: If an attacker has shell access as the same user, they can read/write queue files directly
 - **Multi-user scenarios**: AMQ is not designed for use across user accounts
 
+### Rooted Delivery Boundary
+
+After `send` or `reply` authorizes a source and destination tree, AMQ opens each
+tree once with Go's `os.Root` and performs mailbox delivery, directory sync,
+presence touch, and outbox writes relative to that pinned directory capability.
+Replacing the authorized path or one of its ancestors with a symlink cannot
+redirect those writes outside the opened tree. Relative symlinks that remain
+inside the tree continue to work; symlinks that escape it are refused.
+
+This boundary does not defend against filesystem namespace changes below an
+already opened root, including privileged bind mounts, or against writing to
+pre-existing device files. Those cases require separate mount and file-type
+hardening and remain outside the rooted-delivery guarantee.
+
 ### Known Risks
 
 #### TIOCSTI Terminal Injection (`amq wake`)

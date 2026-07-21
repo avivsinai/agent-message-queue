@@ -14,7 +14,7 @@ import (
 
 // drainInboxItems claims inbox/new messages before parsing them, then emits
 // output items and receipts only for messages this process actually claimed.
-func drainInboxItems(root, me string, includeBody bool, limit int, validator *headerValidator) ([]inboxItem, error) {
+func drainInboxItems(deliveryRoot *fsq.DeliveryRoot, root, me string, includeBody bool, limit int, validator *headerValidator) ([]inboxItem, error) {
 	filenames, err := collectInboxFilenames(root, me)
 	if err != nil {
 		return nil, err
@@ -29,9 +29,9 @@ func drainInboxItems(root, me string, includeBody bool, limit int, validator *he
 		if limit > 0 && len(items) >= limit {
 			break
 		}
-		if err := fsq.MoveNewToCur(root, me, filename); err != nil {
+		if err := fsq.MoveNewToCur(deliveryRoot, me, filename); err != nil {
 			if os.IsNotExist(err) {
-				exists, checkErr := claimMailboxDirsExist(root, me)
+				exists, checkErr := claimMailboxDirsExist(deliveryRoot, me)
 				if checkErr != nil {
 					return nil, checkErr
 				}
@@ -52,18 +52,18 @@ func drainInboxItems(root, me string, includeBody bool, limit int, validator *he
 			if reason == "" {
 				reason = "parse_error"
 			}
-			if _, err := fsq.MoveCurToDLQ(root, me, item.Filename, item.ID, reason, item.ParseError); err != nil {
+			if _, err := fsq.MoveCurToDLQ(deliveryRoot, me, item.Filename, item.ID, reason, item.ParseError); err != nil {
 				_ = writeStderr("warning: failed to move %s to DLQ: %v\n", item.Filename, err)
 			} else {
 				item.MovedToDLQ = true
-				emitReceipt(root, me, &item, receipt.StageDLQ, item.ParseError)
+				emitReceipt(deliveryRoot, me, &item, receipt.StageDLQ, item.ParseError)
 			}
 			items = append(items, item)
 			continue
 		}
 
 		item.MovedToCur = true
-		emitReceipt(root, me, &item, receipt.StageDrained, "")
+		emitReceipt(deliveryRoot, me, &item, receipt.StageDrained, "")
 		items = append(items, item)
 	}
 
@@ -71,9 +71,9 @@ func drainInboxItems(root, me string, includeBody bool, limit int, validator *he
 	return items, nil
 }
 
-func claimMailboxDirsExist(root, me string) (bool, error) {
-	for _, dir := range []string{fsq.AgentInboxNew(root, me), fsq.AgentInboxCur(root, me)} {
-		info, err := os.Stat(dir)
+func claimMailboxDirsExist(root *fsq.DeliveryRoot, me string) (bool, error) {
+	for _, dir := range []string{filepath.Join("agents", me, "inbox", "new"), filepath.Join("agents", me, "inbox", "cur")} {
+		info, err := root.Stat(dir)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return false, nil
@@ -87,7 +87,7 @@ func claimMailboxDirsExist(root, me string) (bool, error) {
 	return true, nil
 }
 
-func emitReceipt(root, consumer string, item *inboxItem, stage, detail string) {
+func emitReceipt(root *fsq.DeliveryRoot, consumer string, item *inboxItem, stage, detail string) {
 	sender, err := normalizeHandle(item.From)
 	if err != nil {
 		sender = ""
@@ -95,7 +95,7 @@ func emitReceipt(root, consumer string, item *inboxItem, stage, detail string) {
 	}
 
 	r := receipt.New(item.ID, item.Thread, sender, consumer, stage, detail)
-	if err := receipt.Emit(root, r); err != nil {
+	if err := receipt.EmitDeliveryRoot(root, r); err != nil {
 		_ = writeStderr("warning: failed to emit %s receipt for %s: %v\n", stage, item.ID, err)
 	}
 }

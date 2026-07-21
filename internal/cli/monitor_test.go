@@ -41,7 +41,7 @@ func TestMonitor_ExistingMessages(t *testing.T) {
 	}
 	data, _ := msg.Marshal()
 	filename := id + ".md"
-	if _, err := fsq.DeliverToInboxes(root, []string{agent}, filename, data); err != nil {
+	if _, err := deliverToInboxesForTest(t, root, []string{agent}, filename, data); err != nil {
 		t.Fatalf("DeliverToInboxes: %v", err)
 	}
 
@@ -149,7 +149,7 @@ func TestMonitor_PeekDoesNotDrain(t *testing.T) {
 	}
 	data, _ := msg.Marshal()
 	filename := id + ".md"
-	if _, err := fsq.DeliverToInboxes(root, []string{agent}, filename, data); err != nil {
+	if _, err := deliverToInboxesForTest(t, root, []string{agent}, filename, data); err != nil {
 		t.Fatalf("DeliverToInboxes: %v", err)
 	}
 
@@ -305,7 +305,7 @@ func TestMonitor_SessionInJSON(t *testing.T) {
 		Body: "Test message in session.",
 	}
 	data, _ := msg.Marshal()
-	if _, err := fsq.DeliverToInboxes(sessionRoot, []string{agent}, id+".md", data); err != nil {
+	if _, err := deliverToInboxesForTest(t, sessionRoot, []string{agent}, id+".md", data); err != nil {
 		t.Fatalf("DeliverToInboxes: %v", err)
 	}
 
@@ -365,7 +365,7 @@ func TestMonitor_NoSessionForPlainRoot(t *testing.T) {
 		Body: "Test.",
 	}
 	data, _ := msg.Marshal()
-	if _, err := fsq.DeliverToInboxes(root, []string{agent}, id+".md", data); err != nil {
+	if _, err := deliverToInboxesForTest(t, root, []string{agent}, id+".md", data); err != nil {
 		t.Fatalf("DeliverToInboxes: %v", err)
 	}
 
@@ -428,7 +428,7 @@ func TestMonitor_PriorityInOutput(t *testing.T) {
 			Body: "Test",
 		}
 		data, _ := msg.Marshal()
-		_, _ = fsq.DeliverToInboxes(root, []string{agent}, id+".md", data)
+		_, _ = deliverToInboxesForTest(t, root, []string{agent}, id+".md", data)
 	}
 
 	// Capture output

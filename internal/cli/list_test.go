@@ -41,7 +41,7 @@ func TestRunListPagination(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal msg %d: %v", i, err)
 		}
-		if _, err := fsq.DeliverToInbox(root, "alice", "msg-"+string(rune('a'+i))+".md", data); err != nil {
+		if _, err := deliverToInboxForTest(t, root, "alice", "msg-"+string(rune('a'+i))+".md", data); err != nil {
 			t.Fatalf("deliver msg %d: %v", i, err)
 		}
 	}

@@ -18,7 +18,7 @@ func TestDeliverToInbox(t *testing.T) {
 	}
 	data := []byte("hello")
 	filename := "test.md"
-	path, err := DeliverToInbox(root, "codex", filename, data)
+	path, err := DeliverToInbox(openDeliveryRootForTest(t, root), "codex", filename, data)
 	if err != nil {
 		t.Fatalf("DeliverToInbox: %v", err)
 	}
@@ -45,10 +45,10 @@ func TestMoveNewToCur(t *testing.T) {
 	}
 	data := []byte("hello")
 	filename := "move.md"
-	if _, err := DeliverToInbox(root, "codex", filename, data); err != nil {
+	if _, err := DeliverToInbox(openDeliveryRootForTest(t, root), "codex", filename, data); err != nil {
 		t.Fatalf("DeliverToInbox: %v", err)
 	}
-	if err := MoveNewToCur(root, "codex", filename); err != nil {
+	if err := MoveNewToCur(openDeliveryRootForTest(t, root), "codex", filename); err != nil {
 		t.Fatalf("MoveNewToCur: %v", err)
 	}
 	newPath := filepath.Join(root, "agents", "codex", "inbox", "new", filename)
@@ -72,7 +72,7 @@ func TestDeliverToExistingInbox(t *testing.T) {
 
 	data := []byte("cross-project message")
 	filename := "xproj.md"
-	path, err := DeliverToExistingInbox(root, "codex", filename, data)
+	path, err := DeliverToExistingInbox(openDeliveryRootForTest(t, root), "codex", filename, data)
 	if err != nil {
 		t.Fatalf("DeliverToExistingInbox: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestDeliverToExistingInbox(t *testing.T) {
 func TestDeliverToExistingInboxNoDir(t *testing.T) {
 	root := t.TempDir()
 	// Do NOT create agent dirs — inbox doesn't exist.
-	_, err := DeliverToExistingInbox(root, "ghost", "test.md", []byte("nope"))
+	_, err := DeliverToExistingInbox(openDeliveryRootForTest(t, root), "ghost", "test.md", []byte("nope"))
 	if err == nil {
 		t.Fatal("expected error for non-existent inbox")
 	}
@@ -132,7 +132,7 @@ func TestDeliverToInboxesRollback(t *testing.T) {
 	defer func() { _ = os.Chmod(cloudNew, 0o700) }()
 
 	filename := "multi.md"
-	_, err := DeliverToInboxes(root, []string{"codex", "claude", "ada"}, filename, []byte("hello"))
+	_, err := DeliverToInboxes(openDeliveryRootForTest(t, root), []string{"codex", "claude", "ada"}, filename, []byte("hello"))
 	if err == nil {
 		t.Fatalf("expected delivery error")
 	}
@@ -172,4 +172,60 @@ func TestDeliverToInboxesRollback(t *testing.T) {
 	if _, err := os.Stat(adaNew); !os.IsNotExist(err) {
 		t.Fatalf("expected pending recipient to have no new delivery at %s", adaNew)
 	}
+}
+
+func TestDeliverToInboxesSyncFailureCountsRenamedStageOnlyAsDelivered(t *testing.T) {
+	root := t.TempDir()
+	for _, agent := range []string{"codex", "claude"} {
+		if err := EnsureAgentDirs(root, agent); err != nil {
+			t.Fatalf("EnsureAgentDirs(%s): %v", agent, err)
+		}
+	}
+	deliveryRoot := openDeliveryRootForTest(t, root)
+	failingDir := filepath.Join("agents", "codex", "inbox", "new")
+	deliveryRoot.syncDirForTest = func(dir string) error {
+		if dir == failingDir {
+			return errors.New("injected post-rename sync failure")
+		}
+		return deliveryRoot.syncDirPlatform(dir)
+	}
+
+	filename := "sync-failure.md"
+	_, err := DeliverToInboxes(deliveryRoot, []string{"codex", "claude"}, filename, []byte("hello"))
+	var partial *PartialDeliveryError
+	if !errors.As(err, &partial) {
+		t.Fatalf("DeliverToInboxes error = %T %v, want PartialDeliveryError", err, err)
+	}
+	if partial.Failed != "" {
+		t.Fatalf("Failed = %q, want empty after successful rename", partial.Failed)
+	}
+	if got := partial.Delivered["codex"]; got != filepath.Join(AgentInboxNew(root, "codex"), filename) {
+		t.Fatalf("Delivered[codex] = %q", got)
+	}
+	if len(partial.Pending) != 1 || partial.Pending[0] != "claude" {
+		t.Fatalf("Pending = %#v, want [claude]", partial.Pending)
+	}
+	if _, err := os.Stat(filepath.Join(AgentInboxNew(root, "codex"), filename)); err != nil {
+		t.Fatalf("committed delivery missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(AgentInboxTmp(root, "codex"), filename)); !os.IsNotExist(err) {
+		t.Fatalf("renamed tmp still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(AgentInboxTmp(root, "claude"), filename)); !os.IsNotExist(err) {
+		t.Fatalf("pending tmp still exists: %v", err)
+	}
+}
+
+func openDeliveryRootForTest(t testing.TB, base string) *DeliveryRoot {
+	t.Helper()
+	identity, err := SnapshotDeliveryRoot(base)
+	if err != nil {
+		t.Fatalf("SnapshotDeliveryRoot(%s): %v", base, err)
+	}
+	root, err := OpenDeliveryRoot(base, identity)
+	if err != nil {
+		t.Fatalf("OpenDeliveryRoot(%s): %v", base, err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
 }

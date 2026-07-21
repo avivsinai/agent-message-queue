@@ -111,11 +111,6 @@ func runReply(args []string) error {
 		return fmt.Errorf("cannot reply to a sent cross-session/cross-project message (reply_to points back to you); use amq send --session/--project for follow-ups")
 	}
 
-	body, err := readBody(*bodyFlag, *allowEmptyFlag)
-	if err != nil {
-		return err
-	}
-
 	// Determine recipient and delivery root.
 	var recipient string
 	var deliveryRoot string
@@ -223,8 +218,46 @@ func runReply(args []string) error {
 		}
 	}
 
+	deliveryIdentity, err := fsq.SnapshotDeliveryRoot(deliveryRoot)
+	if err != nil {
+		return err
+	}
+	sourceIdentity := deliveryIdentity
+	if filepath.Clean(root) != filepath.Clean(deliveryRoot) {
+		sourceIdentity, err = fsq.SnapshotDeliveryRoot(root)
+		if err != nil {
+			return err
+		}
+	}
+	pin, err := loadSessionPin()
+	if err != nil {
+		return err
+	}
+	if pin.IdentityPin && !*ignoreSessionPinFlag &&
+		verifyTreeIdentityInfo(sourceIdentity.FileInfo(), pin.RootID) != TreeRelationSame {
+		return ContextMismatchError("authorized source root identity changed before capability open")
+	}
+
 	// Validate recipient in delivery root.
 	if err := validateKnownHandles(deliveryRoot, common.Strict, recipient); err != nil {
+		return err
+	}
+	deliveryFS, err := fsq.OpenDeliveryRoot(deliveryRoot, deliveryIdentity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = deliveryFS.Close() }()
+	sourceFS := deliveryFS
+	if filepath.Clean(root) != filepath.Clean(deliveryRoot) {
+		sourceFS, err = fsq.OpenDeliveryRoot(root, sourceIdentity)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = sourceFS.Close() }()
+	}
+
+	body, err := readBody(*bodyFlag, *allowEmptyFlag)
+	if err != nil {
 		return err
 	}
 
@@ -310,21 +343,21 @@ func runReply(args []string) error {
 	filename := id + ".md"
 	if targetProject != "" {
 		// Cross-project: use DeliverToExistingInbox (never creates dirs in peer).
-		if _, err := fsq.DeliverToExistingInbox(deliveryRoot, recipient, filename, data); err != nil {
+		if _, err := fsq.DeliverToExistingInbox(deliveryFS, recipient, filename, data); err != nil {
 			return err
 		}
 	} else {
-		if _, err := fsq.DeliverToInboxes(deliveryRoot, []string{recipient}, filename, data); err != nil {
+		if _, err := fsq.DeliverToInboxes(deliveryFS, []string{recipient}, filename, data); err != nil {
 			return err
 		}
 	}
 
 	// Best-effort presence touch.
-	_ = presence.Touch(root, me)
+	_ = presence.TouchDeliveryRoot(sourceFS, me)
 
-	outboxDir := fsq.AgentOutboxSent(root, me)
+	outboxDir := filepath.Join("agents", me, "outbox", "sent")
 	outboxErr := error(nil)
-	if _, err := fsq.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
+	if _, err := sourceFS.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
 		outboxErr = err
 	}
 
@@ -332,7 +365,7 @@ func runReply(args []string) error {
 	var waitResult *waitForResult
 	var waitErr error
 	if waitFor != "" {
-		r, err := receipt.WaitFor(deliveryRoot, id, recipient, waitFor, *waitTimeoutFlag, 1*time.Second)
+		r, err := receipt.WaitForDeliveryRoot(deliveryFS, id, recipient, waitFor, *waitTimeoutFlag, 1*time.Second)
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			waitResult = &waitForResult{Event: "timeout", Stage: waitFor, Timeout: waitTimeoutFlag.String()}
 			waitErr = TimeoutError("reply --wait-for %s timed out after %s", waitFor, *waitTimeoutFlag)

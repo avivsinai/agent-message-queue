@@ -382,6 +382,15 @@ func deliverBridgeEvent(cfg BridgeConfig, event BridgeEvent) error {
 	}
 
 	filename := id + ".md"
-	_, err = fsq.DeliverToInboxes(cfg.AMQRoot, msg.Header.To, filename, data)
+	identity, err := fsq.SnapshotDeliveryRoot(cfg.AMQRoot)
+	if err != nil {
+		return err
+	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(cfg.AMQRoot, identity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = deliveryRoot.Close() }()
+	_, err = fsq.DeliverToInboxes(deliveryRoot, msg.Header.To, filename, data)
 	return err
 }

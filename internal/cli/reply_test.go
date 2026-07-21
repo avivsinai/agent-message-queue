@@ -43,7 +43,7 @@ func TestReply_Basic(t *testing.T) {
 	}
 	data, _ := originalMsg.Marshal()
 	filename := originalID + ".md"
-	if _, err := fsq.DeliverToInboxes(root, []string{alice}, filename, data); err != nil {
+	if _, err := deliverToInboxesForTest(t, root, []string{alice}, filename, data); err != nil {
 		t.Fatalf("DeliverToInboxes: %v", err)
 	}
 
@@ -150,7 +150,7 @@ func TestReply_ReviewRequest(t *testing.T) {
 		Body: "Please review this feature.",
 	}
 	data, _ := originalMsg.Marshal()
-	_, _ = fsq.DeliverToInboxes(root, []string{alice}, originalID+".md", data)
+	_, _ = deliverToInboxesForTest(t, root, []string{alice}, originalID+".md", data)
 
 	// Alice replies with explicit kind
 	oldStdout := os.Stdout
@@ -230,7 +230,7 @@ func TestReply_BrainstormPassthrough(t *testing.T) {
 		Body: "My research findings...",
 	}
 	data, _ := originalMsg.Marshal()
-	_, _ = fsq.DeliverToInboxes(root, []string{alice}, originalID+".md", data)
+	_, _ = deliverToInboxesForTest(t, root, []string{alice}, originalID+".md", data)
 
 	// Alice replies without explicit kind
 	oldStdout := os.Stdout
@@ -304,7 +304,7 @@ func TestReply_PreservesThread(t *testing.T) {
 		Body: "Let's discuss.",
 	}
 	data, _ := originalMsg.Marshal()
-	_, _ = fsq.DeliverToInboxes(root, []string{alice}, originalID+".md", data)
+	_, _ = deliverToInboxesForTest(t, root, []string{alice}, originalID+".md", data)
 
 	// Reply
 	oldStdout := os.Stdout

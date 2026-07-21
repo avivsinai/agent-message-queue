@@ -283,6 +283,24 @@ func runSend(args []string) error {
 		}
 	}
 
+	// Snapshot the physical roots at the authorization boundary. Opening the
+	// capabilities below must prove it got these exact directories.
+	deliveryIdentity, err := fsq.SnapshotDeliveryRoot(deliveryRoot)
+	if err != nil {
+		return err
+	}
+	sourceIdentity := deliveryIdentity
+	if filepath.Clean(sourceRoot) != filepath.Clean(deliveryRoot) {
+		sourceIdentity, err = fsq.SnapshotDeliveryRoot(sourceRoot)
+		if err != nil {
+			return err
+		}
+	}
+	if pin.IdentityPin && !*ignoreSessionPinFlag && fromSession == "" &&
+		verifyTreeIdentityInfo(sourceIdentity.FileInfo(), pin.RootID) != TreeRelationSame {
+		return ContextMismatchError("authorized source root identity changed before capability open")
+	}
+
 	// Validate sender in source root, recipients in target root. Always.
 	if targetProject != "" || targetSession != "" {
 		if err := validateKnownHandles(sourceRoot, common.Strict, me); err != nil {
@@ -296,6 +314,20 @@ func runSend(args []string) error {
 		if err := validateKnownHandles(root, common.Strict, allHandles...); err != nil {
 			return err
 		}
+	}
+
+	deliveryFS, err := fsq.OpenDeliveryRoot(deliveryRoot, deliveryIdentity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = deliveryFS.Close() }()
+	sourceFS := deliveryFS
+	if filepath.Clean(sourceRoot) != filepath.Clean(deliveryRoot) {
+		sourceFS, err = fsq.OpenDeliveryRoot(sourceRoot, sourceIdentity)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = sourceFS.Close() }()
 	}
 
 	body, err := readBody(*bodyFlag, *allowEmptyFlag)
@@ -415,23 +447,23 @@ func runSend(args []string) error {
 	if targetProject != "" {
 		// Cross-project: use DeliverToExistingInbox (never creates dirs in peer).
 		for _, r := range recipients {
-			if _, err := fsq.DeliverToExistingInbox(deliveryRoot, r, filename, data); err != nil {
+			if _, err := fsq.DeliverToExistingInbox(deliveryFS, r, filename, data); err != nil {
 				return err
 			}
 		}
 	} else {
-		if _, err := fsq.DeliverToInboxes(deliveryRoot, recipients, filename, data); err != nil {
+		if _, err := fsq.DeliverToInboxes(deliveryFS, recipients, filename, data); err != nil {
 			return err
 		}
 	}
 
 	// Best-effort presence touch.
-	_ = presence.Touch(sourceRoot, common.Me)
+	_ = presence.TouchDeliveryRoot(sourceFS, common.Me)
 
 	// Copy to sender outbox/sent for audit (always in sender's root).
-	outboxDir := fsq.AgentOutboxSent(sourceRoot, common.Me)
+	outboxDir := filepath.Join("agents", common.Me, "outbox", "sent")
 	outboxErr := error(nil)
-	if _, err := fsq.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
+	if _, err := sourceFS.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
 		outboxErr = err
 	}
 
@@ -452,7 +484,7 @@ func runSend(args []string) error {
 	var waitErr error
 	if waitFor != "" {
 		consumer := recipients[0]
-		r, err := receipt.WaitFor(deliveryRoot, id, consumer, waitFor, *waitTimeoutFlag, 1*time.Second)
+		r, err := receipt.WaitForDeliveryRoot(deliveryFS, id, consumer, waitFor, *waitTimeoutFlag, 1*time.Second)
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			waitResult = &waitForResult{Event: "timeout", Stage: waitFor, Timeout: waitTimeoutFlag.String()}
 			waitErr = TimeoutError("send --wait-for %s timed out after %s (delivery session %s, root %s); run 'amq doctor --ops' to diagnose mailbox divergence", waitFor, *waitTimeoutFlag, targetDisplay, deliveryRoot)

@@ -103,7 +103,7 @@ func runDLQList(args []string) error {
 				continue
 			}
 			path := filepath.Join(dir, entry.Name())
-			env, _, err := fsq.ReadDLQEnvelope(path)
+			env, _, err := fsq.ReadDLQEnvelopePath(path)
 			if err != nil {
 				_ = writeStderr("warning: skipping corrupt DLQ message %s: %v\n", entry.Name(), err)
 				continue
@@ -202,6 +202,10 @@ func runDLQRead(args []string) error {
 	if err := guardMailboxContext("dlq read", root, routed, *ignoreSessionPinFlag); err != nil {
 		return err
 	}
+	deliveryIdentity, err := snapshotMailboxDeliveryRoot(root, routed, *ignoreSessionPinFlag)
+	if err != nil {
+		return err
+	}
 	if err := requireMailbox(root, me); err != nil {
 		return err
 	}
@@ -209,13 +213,18 @@ func runDLQRead(args []string) error {
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
 	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, deliveryIdentity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = deliveryRoot.Close() }()
 
 	filename, err := ensureFilename(*idFlag)
 	if err != nil {
 		return UsageError("--id: %v", err)
 	}
 
-	path, box, err := fsq.FindDLQMessage(root, me, filename)
+	path, box, err := fsq.FindDLQMessage(deliveryRoot, me, filename)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("DLQ message not found: %s", *idFlag)
@@ -223,14 +232,14 @@ func runDLQRead(args []string) error {
 		return err
 	}
 
-	env, originalContent, err := fsq.ReadDLQEnvelope(path)
+	env, originalContent, err := fsq.ReadDLQEnvelope(deliveryRoot, path)
 	if err != nil {
 		return fmt.Errorf("read DLQ message: %w", err)
 	}
 
 	// Move to cur if in new
 	if box == fsq.BoxNew {
-		if err := fsq.MoveDLQNewToCur(root, me, filename); err != nil {
+		if err := fsq.MoveDLQNewToCur(deliveryRoot, me, filename); err != nil {
 			_ = writeStderr("warning: failed to move DLQ message to cur: %v\n", err)
 		}
 	}
@@ -321,6 +330,10 @@ func runDLQRetry(args []string) error {
 	if err := guardMailboxContext("dlq retry", root, routed, *ignoreSessionPinFlag); err != nil {
 		return err
 	}
+	deliveryIdentity, err := snapshotMailboxDeliveryRoot(root, routed, *ignoreSessionPinFlag)
+	if err != nil {
+		return err
+	}
 	if err := requireMailbox(root, me); err != nil {
 		return err
 	}
@@ -328,9 +341,14 @@ func runDLQRetry(args []string) error {
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
 	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, deliveryIdentity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = deliveryRoot.Close() }()
 
 	if *allFlag {
-		return retryAllDLQ(root, me, *forceFlag, common.JSON)
+		return retryAllDLQ(deliveryRoot, me, *forceFlag, common.JSON)
 	}
 
 	filename, err := ensureFilename(*idFlag)
@@ -338,7 +356,7 @@ func runDLQRetry(args []string) error {
 		return UsageError("--id: %v", err)
 	}
 
-	if err := fsq.RetryFromDLQ(root, me, filename, *forceFlag); err != nil {
+	if err := fsq.RetryFromDLQ(deliveryRoot, me, filename, *forceFlag); err != nil {
 		return err
 	}
 
@@ -350,9 +368,9 @@ func runDLQRetry(args []string) error {
 	return writeStdout("Retried: %s\n", *idFlag)
 }
 
-func retryAllDLQ(root, me string, force, jsonOutput bool) error {
-	dir := fsq.AgentDLQNew(root, me)
-	entries, err := os.ReadDir(dir)
+func retryAllDLQ(root *fsq.DeliveryRoot, me string, force, jsonOutput bool) error {
+	dir := filepath.Join("agents", me, "dlq", "new")
+	entries, err := root.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if jsonOutput {
@@ -425,6 +443,10 @@ func runDLQPurge(args []string) error {
 	if err := guardMailboxContext("dlq purge", root, routed, *ignoreSessionPinFlag); err != nil {
 		return err
 	}
+	deliveryIdentity, err := snapshotMailboxDeliveryRoot(root, routed, *ignoreSessionPinFlag)
+	if err != nil {
+		return err
+	}
 	if err := requireMailbox(root, me); err != nil {
 		return err
 	}
@@ -432,6 +454,11 @@ func runDLQPurge(args []string) error {
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
 	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, deliveryIdentity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = deliveryRoot.Close() }()
 
 	var cutoff time.Time
 	if *olderFlag != "" {
@@ -450,11 +477,11 @@ func runDLQPurge(args []string) error {
 	for _, box := range []string{"new", "cur"} {
 		var dir string
 		if box == "new" {
-			dir = fsq.AgentDLQNew(root, me)
+			dir = filepath.Join("agents", me, "dlq", "new")
 		} else {
-			dir = fsq.AgentDLQCur(root, me)
+			dir = filepath.Join("agents", me, "dlq", "cur")
 		}
-		entries, err := os.ReadDir(dir)
+		entries, err := deliveryRoot.ReadDir(dir)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
@@ -467,7 +494,7 @@ func runDLQPurge(args []string) error {
 			}
 			path := filepath.Join(dir, entry.Name())
 			if !cutoff.IsZero() {
-				env, _, err := fsq.ReadDLQEnvelope(path)
+				env, _, err := fsq.ReadDLQEnvelope(deliveryRoot, path)
 				if err != nil {
 					// Can't parse, include anyway
 					candidates = append(candidates, path)
@@ -491,13 +518,17 @@ func runDLQPurge(args []string) error {
 
 	if *dryRunFlag {
 		if common.JSON {
-			return writeJSON(os.Stdout, map[string]any{"candidates": candidates, "count": len(candidates)})
+			displayCandidates := make([]string, len(candidates))
+			for i, path := range candidates {
+				displayCandidates[i] = deliveryRoot.DisplayPath(path)
+			}
+			return writeJSON(os.Stdout, map[string]any{"candidates": displayCandidates, "count": len(candidates)})
 		}
 		if err := writeStdout("Would remove %d DLQ message(s):\n", len(candidates)); err != nil {
 			return err
 		}
 		for _, path := range candidates {
-			if err := writeStdout("  %s\n", path); err != nil {
+			if err := writeStdout("  %s\n", deliveryRoot.DisplayPath(path)); err != nil {
 				return err
 			}
 		}
@@ -516,13 +547,18 @@ func runDLQPurge(args []string) error {
 
 	removed := 0
 	for _, path := range candidates {
-		if err := os.Remove(path); err != nil {
+		if err := deliveryRoot.Remove(path); err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
 			_ = writeStderr("warning: failed to remove %s: %v\n", path, err)
 		} else {
 			removed++
+		}
+	}
+	for _, dir := range []string{filepath.Join("agents", me, "dlq", "new"), filepath.Join("agents", me, "dlq", "cur")} {
+		if err := deliveryRoot.SyncDir(dir); err != nil && !os.IsNotExist(err) {
+			return err
 		}
 	}
 

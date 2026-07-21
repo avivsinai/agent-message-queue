@@ -38,7 +38,7 @@ func GenerateDLQID() string {
 }
 
 // MoveToDLQ moves a failed message from inbox/new to dlq/new with envelope.
-func MoveToDLQ(root, agent, filename, originalID, failureReason, failureDetail string) (string, error) {
+func MoveToDLQ(root *DeliveryRoot, agent, filename, originalID, failureReason, failureDetail string) (string, error) {
 	if err := MoveNewToCur(root, agent, filename); err != nil {
 		return "", fmt.Errorf("claim original: %w", err)
 	}
@@ -46,22 +46,22 @@ func MoveToDLQ(root, agent, filename, originalID, failureReason, failureDetail s
 }
 
 // MoveCurToDLQ moves an already-claimed inbox/cur message to dlq/new.
-func MoveCurToDLQ(root, agent, filename, originalID, failureReason, failureDetail string) (string, error) {
+func MoveCurToDLQ(root *DeliveryRoot, agent, filename, originalID, failureReason, failureDetail string) (string, error) {
 	return moveInboxMessageToDLQ(root, agent, BoxCur, BoxCur, filename, originalID, failureReason, failureDetail)
 }
 
-func moveInboxMessageToDLQ(root, agent, readDir, envelopeSourceDir, filename, originalID, failureReason, failureDetail string) (string, error) {
+func moveInboxMessageToDLQ(root *DeliveryRoot, agent, readDir, envelopeSourceDir, filename, originalID, failureReason, failureDetail string) (string, error) {
 	if err := ValidateMessageFilename(filename); err != nil {
 		return "", err
 	}
-	srcDir, err := inboxSourceDir(root, agent, readDir)
+	srcDir, err := inboxSourceDir(agent, readDir)
 	if err != nil {
 		return "", err
 	}
 	srcPath := filepath.Join(srcDir, filename)
 
 	// Read original content
-	content, err := ReadRegularNoFollow(srcPath)
+	content, err := root.ReadRegularNoFollow(srcPath)
 	if err != nil {
 		return "", fmt.Errorf("read original: %w", err)
 	}
@@ -92,60 +92,63 @@ func moveInboxMessageToDLQ(root, agent, readDir, envelopeSourceDir, filename, or
 		return "", fmt.Errorf("deliver to dlq: %w", err)
 	}
 
-	if err := os.Remove(srcPath); err != nil && !os.IsNotExist(err) {
+	if err := root.root.Remove(srcPath); err != nil && !os.IsNotExist(err) {
 		return dlqPath, fmt.Errorf("remove original (dlq written): %w", err)
 	}
-	_ = SyncDir(srcDir)
+	_ = root.syncDir(srcDir)
 
 	return dlqPath, nil
 }
 
-func inboxSourceDir(root, agent, sourceDir string) (string, error) {
+func inboxSourceDir(agent, sourceDir string) (string, error) {
 	switch sourceDir {
 	case BoxNew:
-		return AgentInboxNew(root, agent), nil
+		return filepath.Join("agents", agent, "inbox", "new"), nil
 	case BoxCur:
-		return AgentInboxCur(root, agent), nil
+		return filepath.Join("agents", agent, "inbox", "cur"), nil
 	default:
 		return "", fmt.Errorf("unsupported inbox source dir %q", sourceDir)
 	}
 }
 
 // deliverToDLQ writes a DLQ message using Maildir semantics (tmp -> new).
-func deliverToDLQ(root, agent, filename string, data []byte) (string, error) {
-	tmpDir := AgentDLQTmp(root, agent)
-	newDir := AgentDLQNew(root, agent)
-
-	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+func deliverToDLQ(root *DeliveryRoot, agent, filename string, data []byte) (string, error) {
+	if err := root.VerifyBase(); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(newDir, 0o700); err != nil {
+	tmpDir := filepath.Join("agents", agent, "dlq", "tmp")
+	newDir := filepath.Join("agents", agent, "dlq", "new")
+
+	if err := root.root.MkdirAll(tmpDir, 0o700); err != nil {
+		return "", err
+	}
+	if err := root.root.MkdirAll(newDir, 0o700); err != nil {
 		return "", err
 	}
 
 	tmpPath := filepath.Join(tmpDir, filename)
 	newPath := filepath.Join(newDir, filename)
 
-	if err := writeAndSync(tmpPath, data, 0o600); err != nil {
+	if err := root.writeAndSync(tmpPath, data, 0o600); err != nil {
 		return "", err
 	}
-	if err := SyncDir(tmpDir); err != nil {
-		return "", cleanupTemp(tmpPath, err)
+	if err := root.syncDir(tmpDir); err != nil {
+		return "", root.cleanupTemp(tmpPath, err)
 	}
-	if err := os.Rename(tmpPath, newPath); err != nil {
-		return "", cleanupTemp(tmpPath, err)
+	if err := root.root.Rename(tmpPath, newPath); err != nil {
+		return "", root.cleanupTemp(tmpPath, err)
 	}
-	if err := SyncDir(newDir); err != nil {
+	if err := root.syncDir(newDir); err != nil {
 		return "", err
 	}
-	_ = SyncDir(tmpDir)
+	_ = root.syncDir(tmpDir)
 
-	return newPath, nil
+	return root.displayPath(newPath), nil
 }
 
 // ReadDLQEnvelope reads and parses a DLQ message.
-func ReadDLQEnvelope(path string) (*DLQEnvelope, []byte, error) {
-	data, err := ReadRegularNoFollow(path)
+func ReadDLQEnvelope(root *DeliveryRoot, path string) (*DLQEnvelope, []byte, error) {
+	data, err := root.ReadRegularNoFollow(path)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -158,16 +161,26 @@ func ReadDLQEnvelope(path string) (*DLQEnvelope, []byte, error) {
 	return envelope, body, nil
 }
 
+// ReadDLQEnvelopePath is the legacy pathname reader used only by non-mutating
+// listing code. Mutating DLQ flows must use ReadDLQEnvelope with a capability.
+func ReadDLQEnvelopePath(path string) (*DLQEnvelope, []byte, error) {
+	data, err := ReadRegularNoFollow(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return parseDLQMessage(data)
+}
+
 // RetryFromDLQ moves a message from DLQ back to inbox/new for reprocessing.
 // Returns error if retry_count >= MaxRetries and force is false.
-func RetryFromDLQ(root, agent, dlqFilename string, force bool) error {
+func RetryFromDLQ(root *DeliveryRoot, agent, dlqFilename string, force bool) error {
 	// Find in dlq/new or dlq/cur
 	dlqPath, box, err := FindDLQMessage(root, agent, dlqFilename)
 	if err != nil {
 		return err
 	}
 
-	envelope, originalContent, err := ReadDLQEnvelope(dlqPath)
+	envelope, originalContent, err := ReadDLQEnvelope(root, dlqPath)
 	if err != nil {
 		return fmt.Errorf("read dlq envelope: %w", err)
 	}
@@ -180,8 +193,8 @@ func RetryFromDLQ(root, agent, dlqFilename string, force bool) error {
 	}
 
 	// Check if original file already exists in inbox/new (avoid overwrite)
-	inboxNewPath := filepath.Join(AgentInboxNew(root, agent), envelope.OriginalFile)
-	if _, err := os.Stat(inboxNewPath); err == nil {
+	inboxNewPath := filepath.Join("agents", agent, "inbox", "new", envelope.OriginalFile)
+	if _, err := root.Stat(inboxNewPath); err == nil {
 		return fmt.Errorf("original file already exists in inbox/new: %s", envelope.OriginalFile)
 	} else if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("stat inbox/new original: %w", err)
@@ -206,46 +219,46 @@ func RetryFromDLQ(root, agent, dlqFilename string, force bool) error {
 	return nil
 }
 
-func updateRetriedDLQEnvelope(root, agent, dlqFilename, dlqPath, box string, updatedData []byte) error {
-	curDir := AgentDLQCur(root, agent)
-	if err := os.MkdirAll(curDir, 0o700); err != nil {
+func updateRetriedDLQEnvelope(root *DeliveryRoot, agent, dlqFilename, dlqPath, box string, updatedData []byte) error {
+	curDir := filepath.Join("agents", agent, "dlq", "cur")
+	if err := root.root.MkdirAll(curDir, 0o700); err != nil {
 		return fmt.Errorf("prepare dlq envelope cur dir: %w", err)
 	}
 
 	if box == BoxNew {
 		// Source is dlq/new: write to dlq/cur atomically, then remove from dlq/new
-		if _, err := WriteFileAtomic(curDir, dlqFilename, updatedData, 0o600); err != nil {
+		if _, err := root.WriteFileAtomic(curDir, dlqFilename, updatedData, 0o600); err != nil {
 			return fmt.Errorf("write updated dlq envelope to cur: %w", err)
 		}
-		if err := os.Remove(dlqPath); err != nil && !os.IsNotExist(err) {
+		if err := root.root.Remove(dlqPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove old dlq envelope from new: %w", err)
 		}
-		if err := SyncDir(filepath.Dir(dlqPath)); err != nil {
+		if err := root.syncDir(filepath.Dir(dlqPath)); err != nil {
 			return fmt.Errorf("sync old dlq envelope dir: %w", err)
 		}
-		return SyncDir(curDir)
+		return root.syncDir(curDir)
 	}
 
 	// Source is dlq/cur: update in place atomically (same location)
-	if _, err := WriteFileAtomic(curDir, dlqFilename, updatedData, 0o600); err != nil {
+	if _, err := root.WriteFileAtomic(curDir, dlqFilename, updatedData, 0o600); err != nil {
 		return fmt.Errorf("update dlq envelope in cur: %w", err)
 	}
-	return SyncDir(curDir)
+	return root.syncDir(curDir)
 }
 
 // FindDLQMessage locates a DLQ message in dlq/new or dlq/cur.
-func FindDLQMessage(root, agent, filename string) (string, string, error) {
+func FindDLQMessage(root *DeliveryRoot, agent, filename string) (string, string, error) {
 	if err := ValidateMessageFilename(filename); err != nil {
 		return "", "", err
 	}
-	newPath := filepath.Join(AgentDLQNew(root, agent), filename)
-	if _, err := os.Stat(newPath); err == nil {
+	newPath := filepath.Join("agents", agent, "dlq", "new", filename)
+	if _, err := root.Stat(newPath); err == nil {
 		return newPath, BoxNew, nil
 	} else if err != nil && !os.IsNotExist(err) {
 		return "", "", err
 	}
-	curPath := filepath.Join(AgentDLQCur(root, agent), filename)
-	if _, err := os.Stat(curPath); err == nil {
+	curPath := filepath.Join("agents", agent, "dlq", "cur", filename)
+	if _, err := root.Stat(curPath); err == nil {
 		return curPath, BoxCur, nil
 	} else if err != nil && !os.IsNotExist(err) {
 		return "", "", err
@@ -254,23 +267,23 @@ func FindDLQMessage(root, agent, filename string) (string, string, error) {
 }
 
 // MoveDLQNewToCur moves a DLQ message from new to cur (marks as inspected).
-func MoveDLQNewToCur(root, agent, filename string) error {
+func MoveDLQNewToCur(root *DeliveryRoot, agent, filename string) error {
 	if err := ValidateMessageFilename(filename); err != nil {
 		return err
 	}
-	newPath := filepath.Join(AgentDLQNew(root, agent), filename)
-	curDir := AgentDLQCur(root, agent)
+	newPath := filepath.Join("agents", agent, "dlq", "new", filename)
+	curDir := filepath.Join("agents", agent, "dlq", "cur")
 	curPath := filepath.Join(curDir, filename)
-	if err := os.MkdirAll(curDir, 0o700); err != nil {
+	if err := root.root.MkdirAll(curDir, 0o700); err != nil {
 		return err
 	}
-	if err := os.Rename(newPath, curPath); err != nil {
+	if err := root.root.Rename(newPath, curPath); err != nil {
 		return err
 	}
-	if err := SyncDir(filepath.Dir(newPath)); err != nil {
+	if err := root.syncDir(filepath.Dir(newPath)); err != nil {
 		return err
 	}
-	return SyncDir(curDir)
+	return root.syncDir(curDir)
 }
 
 // serializeDLQMessage creates a DLQ file with JSON frontmatter and original content.

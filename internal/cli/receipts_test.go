@@ -41,7 +41,7 @@ func deliverTestMsg(t *testing.T, root, from, to, msgID string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fsq.DeliverToInbox(root, to, msgID+".md", data); err != nil {
+	if _, err := deliverToInboxForTest(t, root, to, msgID+".md", data); err != nil {
 		t.Fatal(err)
 	}
 }

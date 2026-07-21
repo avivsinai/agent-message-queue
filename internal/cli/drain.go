@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
@@ -49,6 +50,10 @@ func runDrain(args []string) error {
 	if err := guardMailboxContext("drain", root, routed, *ignoreSessionPinFlag); err != nil {
 		return err
 	}
+	deliveryIdentity, err := snapshotMailboxDeliveryRoot(root, routed, *ignoreSessionPinFlag)
+	if err != nil {
+		return err
+	}
 	if err := requireMailbox(root, me); err != nil {
 		emitSiblingBacklogHintsIfInboxEmpty(root, me)
 		return err
@@ -61,8 +66,13 @@ func runDrain(args []string) error {
 	if err != nil {
 		return err
 	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, deliveryIdentity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = deliveryRoot.Close() }()
 
-	items, err := drainInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator)
+	items, err := drainInboxItems(deliveryRoot, root, common.Me, *includeBodyFlag, *limitFlag, validator)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return NotFoundError("mailbox for %q disappeared while draining root %s", common.Me, root)
@@ -81,7 +91,7 @@ func runDrain(args []string) error {
 	}
 
 	// Best-effort presence touch.
-	_ = presence.Touch(root, common.Me)
+	_ = presence.TouchDeliveryRoot(deliveryRoot, common.Me)
 
 	if common.JSON {
 		return writeJSON(os.Stdout, drainResult{Drained: items, Count: len(items)})
