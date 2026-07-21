@@ -118,7 +118,12 @@ func DeliverToInboxes(root *DeliveryRoot, recipients []string, filename string, 
 		// - newDir: new entry is visible
 		// - tmpDir: old entry removal is durable
 		if err := root.syncDir(stage.newDir); err != nil {
-			return nil, committedDeliveryError(root, stages[:i+1], stages[i+1:], fmt.Errorf("sync new dir for %s: %w", stage.recipient, err))
+			commitErr := &CommittedDurabilityError{
+				FinalPath: root.displayPath(stage.newPath),
+				Recipient: stage.recipient,
+				Err:       fmt.Errorf("sync new dir: %w", err),
+			}
+			return nil, committedDeliveryError(root, stages[:i+1], stages[i+1:], commitErr)
 		}
 		// Best-effort sync of tmpDir (non-fatal: message is already delivered)
 		_ = root.syncDir(stage.tmpDir)
@@ -162,11 +167,16 @@ func DeliverToExistingInbox(root *DeliveryRoot, agent, filename string, data []b
 	if err := root.root.Rename(tmpPath, newPath); err != nil {
 		return "", root.cleanupTemp(tmpPath, fmt.Errorf("rename tmp->new for %s: %w", agent, err))
 	}
+	committedPath := root.displayPath(newPath)
 	if err := root.syncDir(newDir); err != nil {
-		return "", fmt.Errorf("sync new dir for %s: %w", agent, err)
+		return committedPath, &CommittedDurabilityError{
+			FinalPath: committedPath,
+			Recipient: agent,
+			Err:       fmt.Errorf("sync new dir: %w", err),
+		}
 	}
 	_ = root.syncDir(tmpDir) // best-effort
-	return root.displayPath(newPath), nil
+	return committedPath, nil
 }
 
 func cleanupStagedTmp(root *DeliveryRoot, stages []stagedDelivery, primary error) error {

@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 type commonFlags struct {
@@ -425,7 +427,19 @@ func requireMe(handle string) error {
 // If strict=true, returns an error for unreadable/corrupt config; otherwise warns to stderr.
 func loadKnownAgents(root string, strict bool) ([]string, error) {
 	configPath := filepath.Join(root, "meta", "config.json")
-	data, err := os.ReadFile(configPath)
+	return loadKnownAgentsWithRead(strict, func() ([]byte, error) {
+		return os.ReadFile(configPath)
+	})
+}
+
+func loadKnownAgentsDeliveryRoot(root *fsq.DeliveryRoot, strict bool) ([]string, error) {
+	return loadKnownAgentsWithRead(strict, func() ([]byte, error) {
+		return root.ReadRegularNoFollow(filepath.Join("meta", "config.json"))
+	})
+}
+
+func loadKnownAgentsWithRead(strict bool, read func() ([]byte, error)) ([]string, error) {
+	data, err := read()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil // No config, no validation
@@ -482,14 +496,35 @@ func loadKnownAgentSet(root string, strict bool) (map[string]struct{}, error) {
 	return known, nil
 }
 
+func loadKnownAgentSetDeliveryRoot(root *fsq.DeliveryRoot, strict bool) (map[string]struct{}, error) {
+	agents, err := loadKnownAgentsDeliveryRoot(root, strict)
+	if err != nil || len(agents) == 0 {
+		return nil, err
+	}
+	known := make(map[string]struct{}, len(agents))
+	for _, agent := range agents {
+		known[agent] = struct{}{}
+	}
+	return known, nil
+}
+
 // validateKnownHandles validates handles against config.json.
 // Accepts variadic handles for convenience (single or multiple).
 // Returns nil if config doesn't exist or all handles are known.
 // If strict=true, returns an error for unknown handles or unreadable/corrupt config; otherwise warns to stderr.
 func validateKnownHandles(root string, strict bool, handles ...string) error {
 	agents, err := loadKnownAgents(root, strict)
-	if err != nil {
-		return err
+	return validateKnownHandlesFromAgents(agents, err, strict, handles...)
+}
+
+func validateKnownHandlesDeliveryRoot(root *fsq.DeliveryRoot, strict bool, handles ...string) error {
+	agents, err := loadKnownAgentsDeliveryRoot(root, strict)
+	return validateKnownHandlesFromAgents(agents, err, strict, handles...)
+}
+
+func validateKnownHandlesFromAgents(agents []string, loadErr error, strict bool, handles ...string) error {
+	if loadErr != nil {
+		return loadErr
 	}
 	if agents == nil {
 		return nil // No config, no validation

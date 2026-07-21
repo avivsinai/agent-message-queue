@@ -192,9 +192,6 @@ func runSend(args []string) error {
 		if err != nil {
 			return fmt.Errorf("source session %q not found: %w", fromSession, err)
 		}
-		if !dirExists(filepath.Join(sourceRoot, "agents", me)) {
-			return fmt.Errorf("agent %q not found in source session %q", me, fromSession)
-		}
 		sourceSession = fromSession
 	}
 	if targetProject != "" {
@@ -202,9 +199,6 @@ func runSend(args []string) error {
 		peerBaseRoot, err := resolvePeer(root, targetProject)
 		if err != nil {
 			return err
-		}
-		if !dirExists(peerBaseRoot) {
-			return fmt.Errorf("peer root for %q does not exist: %s", targetProject, peerBaseRoot)
 		}
 
 		if targetSession != "" {
@@ -234,21 +228,6 @@ func runSend(args []string) error {
 			}
 		}
 
-		if !dirExists(deliveryRoot) {
-			if targetSession != "" {
-				return fmt.Errorf("session %q not found in peer %q at %s", targetSession, targetProject, deliveryRoot)
-			}
-			return fmt.Errorf("peer %q root does not exist at %s", targetProject, deliveryRoot)
-		}
-		for _, r := range recipients {
-			inbox := filepath.Join(deliveryRoot, "agents", r, "inbox")
-			if !dirExists(inbox) {
-				if targetSession != "" {
-					return fmt.Errorf("agent %q not found in peer %q session %q", r, targetProject, targetSession)
-				}
-				return fmt.Errorf("agent %q not found in peer %q", r, targetProject)
-			}
-		}
 		replyProject = resolveProject(root)
 	} else if targetSession != "" {
 		normalized, err := normalizeHandle(targetSession)
@@ -274,13 +253,6 @@ func runSend(args []string) error {
 			return err
 		}
 
-		// Verify the target session and agent inboxes exist.
-		for _, r := range recipients {
-			inbox := filepath.Join(deliveryRoot, "agents", r, "inbox")
-			if !dirExists(inbox) {
-				return fmt.Errorf("agent %q not found in session %q", r, targetSession)
-			}
-		}
 	}
 
 	// Snapshot the physical roots at the authorization boundary. Opening the
@@ -301,21 +273,6 @@ func runSend(args []string) error {
 		return ContextMismatchError("authorized source root identity changed before capability open")
 	}
 
-	// Validate sender in source root, recipients in target root. Always.
-	if targetProject != "" || targetSession != "" {
-		if err := validateKnownHandles(sourceRoot, common.Strict, me); err != nil {
-			return err
-		}
-		if err := validateKnownHandles(deliveryRoot, common.Strict, recipients...); err != nil {
-			return err
-		}
-	} else {
-		allHandles := append([]string{me}, recipients...)
-		if err := validateKnownHandles(root, common.Strict, allHandles...); err != nil {
-			return err
-		}
-	}
-
 	deliveryFS, err := fsq.OpenDeliveryRoot(deliveryRoot, deliveryIdentity)
 	if err != nil {
 		return err
@@ -328,6 +285,39 @@ func runSend(args []string) error {
 			return err
 		}
 		defer func() { _ = sourceFS.Close() }()
+	}
+
+	if fromSession != "" && !deliveryAgentExists(sourceFS, me) {
+		return fmt.Errorf("agent %q not found in source session %q", me, fromSession)
+	}
+	for _, recipient := range recipients {
+		if deliveryInboxExists(deliveryFS, recipient) {
+			continue
+		}
+		switch {
+		case targetProject != "" && targetSession != "":
+			return fmt.Errorf("agent %q not found in peer %q session %q", recipient, targetProject, targetSession)
+		case targetProject != "":
+			return fmt.Errorf("agent %q not found in peer %q", recipient, targetProject)
+		case targetSession != "":
+			return fmt.Errorf("agent %q not found in session %q", recipient, targetSession)
+		}
+	}
+
+	// Validate sender in source root and recipients in target root through the
+	// same capabilities that will perform delivery.
+	if targetProject != "" || targetSession != "" {
+		if err := validateKnownHandlesDeliveryRoot(sourceFS, common.Strict, me); err != nil {
+			return err
+		}
+		if err := validateKnownHandlesDeliveryRoot(deliveryFS, common.Strict, recipients...); err != nil {
+			return err
+		}
+	} else {
+		allHandles := append([]string{me}, recipients...)
+		if err := validateKnownHandlesDeliveryRoot(deliveryFS, common.Strict, allHandles...); err != nil {
+			return err
+		}
 	}
 
 	body, err := readBody(*bodyFlag, *allowEmptyFlag)
@@ -448,12 +438,12 @@ func runSend(args []string) error {
 		// Cross-project: use DeliverToExistingInbox (never creates dirs in peer).
 		for _, r := range recipients {
 			if _, err := fsq.DeliverToExistingInbox(deliveryFS, r, filename, data); err != nil {
-				return err
+				return reportDeliveryError(id, err)
 			}
 		}
 	} else {
 		if _, err := fsq.DeliverToInboxes(deliveryFS, recipients, filename, data); err != nil {
-			return err
+			return reportDeliveryError(id, err)
 		}
 	}
 
@@ -505,10 +495,7 @@ func runSend(args []string) error {
 			"session":     targetDisplay,
 			"root":        deliveryRoot,
 			"source_root": sourceRoot,
-			"outbox": map[string]any{
-				"written": outboxErr == nil,
-				"error":   errString(outboxErr),
-			},
+			"outbox":      outboxResult(outboxErr),
 		}
 		if targetProject != "" {
 			out["cross_project"] = true
@@ -529,7 +516,7 @@ func runSend(args []string) error {
 		return waitErr
 	}
 	if outboxErr != nil {
-		if err := writeStderr("warning: outbox write failed: %v\n", outboxErr); err != nil {
+		if err := reportOutboxError(outboxErr); err != nil {
 			return err
 		}
 	}

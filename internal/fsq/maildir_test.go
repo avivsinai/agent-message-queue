@@ -107,6 +107,75 @@ func TestDeliverToExistingInboxNoDir(t *testing.T) {
 	}
 }
 
+func TestDeliverToExistingInboxPostRenameSyncFailureReportsCommittedResult(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	deliveryRoot := openDeliveryRootForTest(t, root)
+	newDir := filepath.Join("agents", "codex", "inbox", "new")
+	deliveryRoot.syncDirForTest = func(dir string) error {
+		if dir == newDir {
+			return errors.New("injected post-rename sync failure")
+		}
+		return deliveryRoot.syncDirPlatform(dir)
+	}
+
+	filename := "indeterminate.md"
+	path, err := DeliverToExistingInbox(deliveryRoot, "codex", filename, []byte("committed"))
+	if err == nil {
+		t.Fatal("DeliverToExistingInbox error = nil, want indeterminate durability")
+	}
+	wantPath := filepath.Join(AgentInboxNew(root, "codex"), filename)
+	if path != wantPath {
+		t.Fatalf("path = %q, want committed path %q", path, wantPath)
+	}
+	var committed *CommittedDurabilityError
+	if !errors.As(err, &committed) {
+		t.Fatalf("error = %T %v, want typed committed result", err, err)
+	}
+	if committed.FinalPath != wantPath || committed.Recipient != "codex" {
+		t.Fatalf("committed result = (%q,%q), want (%q,codex)", committed.FinalPath, committed.Recipient, wantPath)
+	}
+	if _, statErr := os.Stat(wantPath); statErr != nil {
+		t.Fatalf("committed message missing: %v", statErr)
+	}
+}
+
+func TestDeliveryRootWriteFileAtomicPostRenameSyncFailureReportsCommittedResult(t *testing.T) {
+	root := openDeliveryRootForTest(t, t.TempDir())
+	const dir = "meta"
+	syncCalls := 0
+	root.syncDirForTest = func(got string) error {
+		if got == dir {
+			syncCalls++
+			if syncCalls == 2 {
+				return errors.New("injected post-rename sync failure")
+			}
+		}
+		return root.syncDirPlatform(got)
+	}
+
+	path, err := root.WriteFileAtomic(dir, "state.json", []byte("committed"), 0o600)
+	if err == nil {
+		t.Fatal("WriteFileAtomic error = nil, want indeterminate durability")
+	}
+	wantPath := filepath.Join(root.Base(), dir, "state.json")
+	if path != wantPath {
+		t.Fatalf("path = %q, want committed path %q", path, wantPath)
+	}
+	var committed *CommittedDurabilityError
+	if !errors.As(err, &committed) {
+		t.Fatalf("error = %T %v, want typed committed result", err, err)
+	}
+	if committed.FinalPath != wantPath || committed.Recipient != "" {
+		t.Fatalf("committed result = (%q,%q), want (%q,empty)", committed.FinalPath, committed.Recipient, wantPath)
+	}
+	if data, readErr := os.ReadFile(wantPath); readErr != nil || string(data) != "committed" {
+		t.Fatalf("committed file = %q, err=%v", data, readErr)
+	}
+}
+
 func TestDeliverToInboxesRollback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("chmod permissions are unreliable on Windows")

@@ -51,30 +51,30 @@ func runRead(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := requireMailbox(root, me); err != nil {
-		return err
-	}
-
-	// Validate handle against config.json
-	if err := validateKnownHandles(root, common.Strict, me); err != nil {
-		return err
-	}
-	validator, err := newHeaderValidator(root, common.Strict)
-	if err != nil {
-		return err
-	}
 	deliveryRoot, err := fsq.OpenDeliveryRoot(root, deliveryIdentity)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = deliveryRoot.Close() }()
+	if err := requireMailboxDeliveryRoot(deliveryRoot, root, me); err != nil {
+		return err
+	}
+
+	// Validate handle against config.json
+	if err := validateKnownHandlesDeliveryRoot(deliveryRoot, common.Strict, me); err != nil {
+		return err
+	}
+	validator, err := newHeaderValidatorDeliveryRoot(deliveryRoot, common.Strict)
+	if err != nil {
+		return err
+	}
 
 	filename, err := ensureFilename(*idFlag)
 	if err != nil {
 		return UsageError("--id: %v", err)
 	}
 
-	path, box, err := fsq.FindMessage(root, common.Me, filename)
+	path, box, err := findMessageDeliveryRoot(deliveryRoot, common.Me, filename, false)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return NotFoundError("message not found: %s", *idFlag)
@@ -83,7 +83,7 @@ func runRead(args []string) error {
 	}
 
 	// Parse first before moving to avoid stuck corrupt messages in cur
-	msg, err := format.ReadMessageFile(path)
+	msg, err := readMessageDeliveryRoot(deliveryRoot, path)
 	if err != nil {
 		// If message is corrupt and in new, move to DLQ
 		if box == fsq.BoxNew {
