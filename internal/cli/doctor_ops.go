@@ -264,6 +264,10 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 			PID:    inspection.PID,
 			Reason: inspection.Reason,
 		}
+		if isLiveRawOrphan(inspection) {
+			lock.Status = "live-raw-orphan"
+			lock.Reason = "live raw wake orphan; stop the owning terminal or launchd supervisor"
+		}
 		target, exists, targetErr := readWakeTarget(root, agent)
 		if exists {
 			lock.Target = wakeTargetPath(root, agent)
