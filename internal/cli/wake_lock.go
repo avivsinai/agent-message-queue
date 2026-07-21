@@ -88,6 +88,8 @@ type wakeLockInspection struct {
 
 var inspectWakeProcess = inspectWakeProcessPlatform
 
+type wakeLockFileReader func() ([]byte, os.FileInfo, error)
+
 type wakeAlreadyRunningError struct {
 	Agent      string
 	Inspection wakeLockInspection
@@ -100,7 +102,14 @@ func (e *wakeAlreadyRunningError) Error() string {
 }
 
 func inspectWakeLock(root, me string) wakeLockInspection {
-	inspection := readWakeLockMetadata(root, me)
+	lockPath := filepath.Join(fsq.AgentBase(root, me), ".wake.lock")
+	return inspectWakeLockWithReader(root, me, lockPath, func() ([]byte, os.FileInfo, error) {
+		return readWakeLockFileWithInfo(lockPath)
+	})
+}
+
+func inspectWakeLockWithReader(root, me, lockPath string, read wakeLockFileReader) wakeLockInspection {
+	inspection := readWakeLockMetadataWithReader(root, me, lockPath, read)
 	if !inspection.Exists || inspection.Status != wakeLockMissing {
 		return inspection
 	}
@@ -114,6 +123,12 @@ func inspectWakeLock(root, me string) wakeLockInspection {
 // the first PID-based identity inspection of the locked generation.
 func readWakeLockMetadata(root, me string) wakeLockInspection {
 	lockPath := filepath.Join(fsq.AgentBase(root, me), ".wake.lock")
+	return readWakeLockMetadataWithReader(root, me, lockPath, func() ([]byte, os.FileInfo, error) {
+		return readWakeLockFileWithInfo(lockPath)
+	})
+}
+
+func readWakeLockMetadataWithReader(root, me, lockPath string, read wakeLockFileReader) wakeLockInspection {
 	inspection := wakeLockInspection{
 		Status:   wakeLockMissing,
 		Root:     canonicalWakeRoot(root),
@@ -121,7 +136,7 @@ func readWakeLockMetadata(root, me string) wakeLockInspection {
 		LockPath: lockPath,
 	}
 
-	data, fileInfo, err := readWakeLockFileWithInfo(lockPath)
+	data, fileInfo, err := read()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return inspection
@@ -137,7 +152,7 @@ func readWakeLockMetadata(root, me string) wakeLockInspection {
 	inspection.fileInfo = fileInfo
 	var existing wakeLock
 	if err := json.Unmarshal(data, &existing); err != nil {
-		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) < 2*time.Second {
+		if fileInfo != nil && time.Since(fileInfo.ModTime()) < 2*time.Second {
 			inspection.Status = wakeLockCreating
 			inspection.Reason = "lock is being created"
 			return inspection
@@ -284,7 +299,15 @@ func removeWakeLockIfUnchanged(inspection wakeLockInspection) error {
 }
 
 func removeWakeLockIfUnchangedGuarded(inspection wakeLockInspection) error {
-	current, currentInfo, err := readWakeLockFileWithInfo(inspection.LockPath)
+	return removeWakeLockIfUnchangedGuardedWithIO(
+		inspection,
+		func() ([]byte, os.FileInfo, error) { return readWakeLockFileWithInfo(inspection.LockPath) },
+		func() error { return os.Remove(inspection.LockPath) },
+	)
+}
+
+func removeWakeLockIfUnchangedGuardedWithIO(inspection wakeLockInspection, read wakeLockFileReader, remove func() error) error {
+	current, currentInfo, err := read()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -297,7 +320,7 @@ func removeWakeLockIfUnchangedGuarded(inspection wakeLockInspection) error {
 	if inspection.fileInfo == nil || currentInfo == nil || !sameWakeFileIdentity(inspection.fileInfo, currentInfo) {
 		return fmt.Errorf("wake lock generation changed while cleaning stale lock; retry")
 	}
-	if err := os.Remove(inspection.LockPath); err != nil && !os.IsNotExist(err) {
+	if err := remove(); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale wake lock: %w", err)
 	}
 	return nil
