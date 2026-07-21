@@ -188,6 +188,7 @@ amq dlq retry --me <agent> --id <dlq_id> [--session <name>] [--ignore-session-pi
 amq dlq purge --me <agent> [--session <name>] [--ignore-session-pin] [--older-than <duration>] [--dry-run] [--yes]
 amq wake --me <agent> [--inject-cmd <cmd>] [--inject-mode <auto|raw|paste|none>] [--inject-via <absolute-executable>] [--inject-arg <arg>...] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>] [--interrupt] [--interrupt-label <label>] [--interrupt-priority <p>] [--interrupt-cmd <ctrl-c|none>] [--interrupt-notice <str>] [--interrupt-cooldown <duration>] [--debug]
 amq wake repair --me <agent> [--root <path>] [--json]
+amq wake retire --me <agent> --inject-via <absolute-executable> [--inject-arg <arg>...] [--root <path>] [--json]
 amq upgrade
 amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--export] [--session-name] [--json]
 amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>] [--grok-alias <name>]
@@ -368,6 +369,17 @@ Repaired wake stdout/stderr goes to
 pipes open after its JSON/text output exits. `doctor --ops` may report
 `target_present` and `repair_available`, but must remain diagnostic-only and
 never spawn a wake process.
+
+`amq wake retire` requires the expected inject-via executable and ordered fixed
+arguments. It stops only an identity-confirmed live inject-via wake with an
+unchanged, exactly matching saved target, using Linux pidfd signaling or the
+Darwin cooperative control socket; it may also remove an exactly-bound
+proven-stale lock. It preserves the mailbox and saved target. The lifecycle
+boundaries are: repair = replace a proven-stale inject-via wake; `doctor --ops
+--fix-wake-locks` = remove a proven-stale lock; retire = stop an
+identity-confirmed live inject-via wake; launchd, systemd, or the owning shell =
+stop a raw wake. Retire neither unloads supervisors nor promises that they will
+not restart a wake.
 
 `who` and `doctor --ops` presence sources have narrow semantics:
 `notifier_live` requires a valid wake lock with process identity confirmed by

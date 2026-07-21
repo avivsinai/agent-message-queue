@@ -176,6 +176,24 @@ func TestGroupUsageLinesPresence(t *testing.T) {
 	}
 }
 
+func TestGroupUsageLinesWakeIncludesRetire(t *testing.T) {
+	wake := findCommand("wake")
+	if wake == nil {
+		t.Fatal("findCommand(wake) = nil")
+	}
+
+	lines, err := groupUsageLines(wake)
+	if err != nil {
+		t.Fatalf("groupUsageLines(wake): %v", err)
+	}
+	if !containsLine(lines, "repair  Restart a proven-stale wake from a saved inject-via target") {
+		t.Fatal("groupUsageLines(wake) missing repair subcommand")
+	}
+	if !containsLine(lines, "retire  Stop an exact managed inject-via wake") {
+		t.Fatal("groupUsageLines(wake) missing retire subcommand")
+	}
+}
+
 func TestPrintUsageRegistry(t *testing.T) {
 	output := captureRegistryStdout(t, func() error {
 		return printUsageRegistry()
