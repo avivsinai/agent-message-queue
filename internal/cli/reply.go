@@ -96,17 +96,45 @@ func runReply(args []string) error {
 		}
 	}
 
-	// Find the original message
-	originalMsg, originalPath, err := findMessage(root, me, *idFlag)
+	// Pin the source tree before reading the original. Its contents determine
+	// the reply recipient and routing destination.
+	sourceIdentity, err := fsq.SnapshotDeliveryRoot(root)
 	if err != nil {
 		return err
+	}
+	pin, err := loadSessionPin()
+	if err != nil {
+		return err
+	}
+	if pin.IdentityPin && !*ignoreSessionPinFlag &&
+		verifyTreeIdentityInfo(sourceIdentity.FileInfo(), pin.RootID) != TreeRelationSame {
+		return ContextMismatchError("authorized source root identity changed before capability open")
+	}
+	sourceFS, err := fsq.OpenDeliveryRoot(root, sourceIdentity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = sourceFS.Close() }()
+	originalFilename, err := ensureFilename(*idFlag)
+	if err != nil {
+		return UsageError("--id: %v", err)
+	}
+	originalPath, originalBox, err := findMessageDeliveryRoot(sourceFS, me, originalFilename, true)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return NotFoundError("message not found: %s", *idFlag)
+		}
+		return err
+	}
+	originalMsg, err := readMessageDeliveryRoot(sourceFS, originalPath)
+	if err != nil {
+		return fmt.Errorf("read message %s: %w", *idFlag, err)
 	}
 
 	// Disallow reply on sent cross-session/cross-project messages.
 	// If the message was found in outbox/sent and has a reply_to, the user
 	// is trying to follow up on their own send. This is under-specified
 	// (no target metadata in outbox copy).
-	originalBox := filepath.Base(filepath.Dir(originalPath))
 	if originalBox == "sent" && originalMsg.Header.ReplyTo != "" {
 		return fmt.Errorf("cannot reply to a sent cross-session/cross-project message (reply_to points back to you); use amq send --session/--project for follow-ups")
 	}
@@ -147,19 +175,6 @@ func runReply(args []string) error {
 			deliveryRoot = peerBaseRoot
 		}
 
-		if !dirExists(deliveryRoot) {
-			if targetSession != "" {
-				return fmt.Errorf("session %q not found in peer %q at %s", targetSession, targetProject, deliveryRoot)
-			}
-			return fmt.Errorf("peer %q root does not exist at %s", targetProject, deliveryRoot)
-		}
-		inbox := filepath.Join(deliveryRoot, "agents", recipient, "inbox")
-		if !dirExists(inbox) {
-			if targetSession != "" {
-				return fmt.Errorf("agent %q not found in peer %q session %q", recipient, targetProject, targetSession)
-			}
-			return fmt.Errorf("agent %q not found in peer %q", recipient, targetProject)
-		}
 	} else if originalMsg.Header.ReplyTo != "" {
 		// Cross-session reply (no cross-project). Strict reply_to parsing.
 		parts := strings.SplitN(originalMsg.Header.ReplyTo, "@", 2)
@@ -183,14 +198,6 @@ func runReply(args []string) error {
 			return fmt.Errorf("cannot route cross-session reply: run from inside 'amq coop exec --session <name>'")
 		}
 		deliveryRoot = filepath.Join(baseRoot, targetSession)
-		if !dirExists(deliveryRoot) {
-			return fmt.Errorf("reply_to session %q not found at %s", targetSession, deliveryRoot)
-		}
-		// Verify recipient inbox exists in target session.
-		inbox := filepath.Join(deliveryRoot, "agents", recipient, "inbox")
-		if !dirExists(inbox) {
-			return fmt.Errorf("agent %q not found in session %q", recipient, targetSession)
-		}
 	} else {
 		// Local reply: send to original sender in current session.
 		rawRecipient := originalMsg.Header.From
@@ -211,49 +218,36 @@ func runReply(args []string) error {
 		recipient = recipientNorm
 		deliveryRoot = root
 
-		// Verify the recipient's inbox exists locally.
-		inbox := filepath.Join(deliveryRoot, "agents", recipient, "inbox")
-		if !dirExists(inbox) {
+	}
+
+	deliveryFS := sourceFS
+	if filepath.Clean(root) != filepath.Clean(deliveryRoot) {
+		deliveryIdentity, err := fsq.SnapshotDeliveryRoot(deliveryRoot)
+		if err != nil {
+			return err
+		}
+		deliveryFS, err = fsq.OpenDeliveryRoot(deliveryRoot, deliveryIdentity)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = deliveryFS.Close() }()
+	}
+	if !deliveryInboxExists(deliveryFS, recipient) {
+		switch {
+		case targetProject != "" && targetSession != "":
+			return fmt.Errorf("agent %q not found in peer %q session %q", recipient, targetProject, targetSession)
+		case targetProject != "":
+			return fmt.Errorf("agent %q not found in peer %q", recipient, targetProject)
+		case targetSession != "":
+			return fmt.Errorf("agent %q not found in session %q", recipient, targetSession)
+		default:
 			return fmt.Errorf("agent %q not found in current session (no reply_to in original message — sender may not be in a session)", recipient)
 		}
 	}
 
-	deliveryIdentity, err := fsq.SnapshotDeliveryRoot(deliveryRoot)
-	if err != nil {
+	// Validate recipient through the same capability used for delivery.
+	if err := validateKnownHandlesDeliveryRoot(deliveryFS, common.Strict, recipient); err != nil {
 		return err
-	}
-	sourceIdentity := deliveryIdentity
-	if filepath.Clean(root) != filepath.Clean(deliveryRoot) {
-		sourceIdentity, err = fsq.SnapshotDeliveryRoot(root)
-		if err != nil {
-			return err
-		}
-	}
-	pin, err := loadSessionPin()
-	if err != nil {
-		return err
-	}
-	if pin.IdentityPin && !*ignoreSessionPinFlag &&
-		verifyTreeIdentityInfo(sourceIdentity.FileInfo(), pin.RootID) != TreeRelationSame {
-		return ContextMismatchError("authorized source root identity changed before capability open")
-	}
-
-	// Validate recipient in delivery root.
-	if err := validateKnownHandles(deliveryRoot, common.Strict, recipient); err != nil {
-		return err
-	}
-	deliveryFS, err := fsq.OpenDeliveryRoot(deliveryRoot, deliveryIdentity)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = deliveryFS.Close() }()
-	sourceFS := deliveryFS
-	if filepath.Clean(root) != filepath.Clean(deliveryRoot) {
-		sourceFS, err = fsq.OpenDeliveryRoot(root, sourceIdentity)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = sourceFS.Close() }()
 	}
 
 	body, err := readBody(*bodyFlag, *allowEmptyFlag)
@@ -435,29 +429,4 @@ func runReply(args []string) error {
 		return waitErr
 	}
 	return writeStdout("Replied %s to %s (session: %s, root: %s)\n", id, recipient, targetDisplay, deliveryRoot)
-}
-
-// findMessage searches for a message by ID in the agent's inbox (new and cur).
-func findMessage(root, me, msgID string) (format.Message, string, error) {
-	filename, err := ensureFilename(msgID)
-	if err != nil {
-		return format.Message{}, "", err
-	}
-
-	newPath := filepath.Join(fsq.AgentInboxNew(root, me), filename)
-	if msg, err := format.ReadMessageFile(newPath); err == nil {
-		return msg, newPath, nil
-	}
-
-	curPath := filepath.Join(fsq.AgentInboxCur(root, me), filename)
-	if msg, err := format.ReadMessageFile(curPath); err == nil {
-		return msg, curPath, nil
-	}
-
-	sentPath := filepath.Join(fsq.AgentOutboxSent(root, me), filename)
-	if msg, err := format.ReadMessageFile(sentPath); err == nil {
-		return msg, sentPath, nil
-	}
-
-	return format.Message{}, "", fmt.Errorf("message not found: %s", msgID)
 }
