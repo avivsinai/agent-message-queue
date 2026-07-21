@@ -357,10 +357,11 @@ local user who owns the mailbox.
 If you prefer a supervisor that follows explicitly registered terminal sessions
 instead of fixed plists, [amq-keepalive](https://github.com/ohade/amq-keepalive)
 is a standalone companion tool that implements this recipe for macOS: it keeps a
-registry of attached terminal targets (Ghostty, cmux), reattaches `wake` after
-reboot or sleep through a user LaunchAgent, and can install SessionStart
-reattach hooks for Claude Code and Codex. It follows the same daemon-free
-contract and talks to AMQ only through the public `amq` CLI.
+registry of attached terminal targets (Ghostty, cmux), keeps registered wakes
+supervised through sleep with a user LaunchAgent, and can install SessionStart
+hooks for Claude Code and Codex to reattach recreated sessions after reboot. It
+follows the same daemon-free contract and talks to AMQ only through the public
+`amq` CLI.
 
 **Options:**
 - `--inject-mode auto|raw|paste|none` - Injection strategy; `none` enforces zero terminal input
