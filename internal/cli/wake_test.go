@@ -650,7 +650,7 @@ func TestNotifyNewMessages_InjectViaInterruptInjectsKeyAndHonorsCooldown(t *test
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if _, err := fsq.DeliverToInbox(root, "alice", "msg-urgent.md", data); err != nil {
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-urgent.md", data); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 
@@ -723,7 +723,7 @@ func TestNotifyNewMessagesNoneUrgentUsesOutputBellWithoutInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if _, err := fsq.DeliverToInbox(root, "alice", "msg-urgent-none.md", data); err != nil {
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-urgent-none.md", data); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 
@@ -822,7 +822,7 @@ func TestNotifyNewMessages_InjectViaInjectCmdPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if _, err := fsq.DeliverToInbox(root, "alice", "msg-normal.md", data); err != nil {
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-normal.md", data); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 
@@ -875,7 +875,7 @@ func TestNotifyNewMessages_InjectViaInterruptFailureDoesNotUpdateCooldown(t *tes
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if _, err := fsq.DeliverToInbox(root, "alice", "msg-urgent.md", data); err != nil {
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-urgent.md", data); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 

@@ -623,7 +623,16 @@ func deliverGuardMessageError(root, agent, id string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := fsq.DeliverToInbox(root, agent, id+".md", data); err != nil {
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		return err
+	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = deliveryRoot.Close() }()
+	if _, err := fsq.DeliverToInbox(deliveryRoot, agent, id+".md", data); err != nil {
 		return err
 	}
 	return nil

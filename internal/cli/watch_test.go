@@ -41,7 +41,7 @@ func TestRunWatchExistingMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if _, err := fsq.DeliverToInbox(root, "alice", "msg-existing.md", data); err != nil {
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-existing.md", data); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 
@@ -171,7 +171,7 @@ func TestRunWatchNewMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if _, err := fsq.DeliverToInbox(root, "alice", "msg-new.md", data); err != nil {
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-new.md", data); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 

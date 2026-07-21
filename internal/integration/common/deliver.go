@@ -53,7 +53,16 @@ func DeliverIntegrationMessage(root, from, to, subject, body string, ctx map[str
 	}
 
 	filename := id + ".md"
-	paths, err := fsq.DeliverToInboxes(root, msg.Header.To, filename, data)
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		return "", fmt.Errorf("authorize delivery root: %w", err)
+	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		return "", fmt.Errorf("open delivery root: %w", err)
+	}
+	defer func() { _ = deliveryRoot.Close() }()
+	paths, err := fsq.DeliverToInboxes(deliveryRoot, msg.Header.To, filename, data)
 	if err != nil {
 		return "", fmt.Errorf("deliver message: %w", err)
 	}

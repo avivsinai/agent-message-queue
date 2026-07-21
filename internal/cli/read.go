@@ -47,6 +47,10 @@ func runRead(args []string) error {
 	if err := guardMailboxContext("read", root, routed, *ignoreSessionPinFlag); err != nil {
 		return err
 	}
+	deliveryIdentity, err := snapshotMailboxDeliveryRoot(root, routed, *ignoreSessionPinFlag)
+	if err != nil {
+		return err
+	}
 	if err := requireMailbox(root, me); err != nil {
 		return err
 	}
@@ -59,6 +63,11 @@ func runRead(args []string) error {
 	if err != nil {
 		return err
 	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, deliveryIdentity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = deliveryRoot.Close() }()
 
 	filename, err := ensureFilename(*idFlag)
 	if err != nil {
@@ -78,23 +87,23 @@ func runRead(args []string) error {
 	if err != nil {
 		// If message is corrupt and in new, move to DLQ
 		if box == fsq.BoxNew {
-			moveReadFailureToDLQ(root, common.Me, filename, *idFlag, "parse_error", err.Error(), nil)
+			moveReadFailureToDLQ(deliveryRoot, common.Me, filename, *idFlag, "parse_error", err.Error(), nil)
 		}
 		return fmt.Errorf("failed to parse message %s: %w", *idFlag, err)
 	}
 	if err := validator.validate(msg.Header); err != nil {
 		if box == fsq.BoxNew {
-			moveReadFailureToDLQ(root, common.Me, filename, *idFlag, "invalid_header", "invalid header: "+err.Error(), &msg.Header)
+			moveReadFailureToDLQ(deliveryRoot, common.Me, filename, *idFlag, "invalid_header", "invalid header: "+err.Error(), &msg.Header)
 		}
 		return fmt.Errorf("invalid message header %s: %w", *idFlag, err)
 	}
 
 	// Move to cur only after successful parse
 	if box == fsq.BoxNew {
-		if err := fsq.MoveNewToCur(root, common.Me, filename); err != nil {
+		if err := fsq.MoveNewToCur(deliveryRoot, common.Me, filename); err != nil {
 			return err
 		}
-		emitReceipt(root, common.Me, &inboxItem{
+		emitReceipt(deliveryRoot, common.Me, &inboxItem{
 			ID:     msg.Header.ID,
 			From:   msg.Header.From,
 			Thread: msg.Header.Thread,
@@ -114,7 +123,7 @@ func runRead(args []string) error {
 	return nil
 }
 
-func moveReadFailureToDLQ(root, me, filename, fallbackID, reason, detail string, header *format.Header) {
+func moveReadFailureToDLQ(root *fsq.DeliveryRoot, me, filename, fallbackID, reason, detail string, header *format.Header) {
 	if _, err := fsq.MoveToDLQ(root, me, filename, fallbackID, reason, detail); err != nil {
 		_ = writeStderr("warning: failed to move invalid message to DLQ: %v\n", err)
 		return

@@ -36,7 +36,7 @@ func TestRunReadInvalidHeaderMovesToDLQ(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	if _, err := fsq.DeliverToInbox(root, "alice", "msg-read-001.md", data); err != nil {
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-read-001.md", data); err != nil {
 		t.Fatalf("DeliverToInbox: %v", err)
 	}
 

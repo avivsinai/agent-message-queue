@@ -57,10 +57,19 @@ func TestCollectThread(t *testing.T) {
 		t.Fatalf("marshal msg2: %v", err)
 	}
 
-	if _, err := fsq.DeliverToInbox(root, "claude", "msg-1.md", data1); err != nil {
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		t.Fatalf("SnapshotDeliveryRoot: %v", err)
+	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		t.Fatalf("OpenDeliveryRoot: %v", err)
+	}
+	defer func() { _ = deliveryRoot.Close() }()
+	if _, err := fsq.DeliverToInbox(deliveryRoot, "claude", "msg-1.md", data1); err != nil {
 		t.Fatalf("deliver msg1: %v", err)
 	}
-	if _, err := fsq.DeliverToInbox(root, "codex", "msg-2.md", data2); err != nil {
+	if _, err := fsq.DeliverToInbox(deliveryRoot, "codex", "msg-2.md", data2); err != nil {
 		t.Fatalf("deliver msg2: %v", err)
 	}
 
