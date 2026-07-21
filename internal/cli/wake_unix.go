@@ -367,8 +367,13 @@ func processAlive(pid int) bool {
 type wakeLoopFunc func(wakeConfig) error
 
 func runWake(args []string) error {
-	if len(args) > 0 && args[0] == "repair" {
-		return runWakeRepair(args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case "repair":
+			return runWakeRepair(args[1:])
+		case "retire":
+			return runWakeRetire(args[1:])
+		}
 	}
 	return runWakeWithLoop(args, runWakeLoop)
 }

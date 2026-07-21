@@ -69,6 +69,7 @@ func init() {
 			Handler: runWake,
 			Children: []CommandInfo{
 				{Name: "repair", Summary: "Restart a proven-stale wake from a saved inject-via target", Handler: runWake},
+				{Name: "retire", Summary: "Stop an exact managed inject-via wake", Handler: runWake},
 			},
 		},
 		{Name: "upgrade", Summary: "Upgrade amq to the latest release", Handler: runUpgradeRegistry},
