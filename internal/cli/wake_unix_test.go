@@ -1706,6 +1706,7 @@ func TestShouldReplaceOrphanedWakeLockSignalsOnlyAfterRevalidation(t *testing.T)
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
+		WakeMode:     wakeTargetInjectVia,
 	})
 	killed := false
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
@@ -1782,8 +1783,8 @@ func TestShouldReplaceOrphanedWakeLockKeepsLockWhenKillDoesNotTerminate(t *testi
 
 	inspection := inspectWakeLock(root, "orchestrator")
 	replaced, err := shouldReplaceOrphanedWakeLock(inspection)
-	if err == nil || !strings.Contains(err.Error(), "still alive after SIGKILL") {
-		t.Fatalf("expected still-alive error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "live raw wake orphan") {
+		t.Fatalf("expected live raw orphan refusal, got %v", err)
 	}
 	if replaced {
 		t.Fatal("should not replace lock when old wake remains alive")
