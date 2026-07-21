@@ -80,6 +80,10 @@ Leader prepares commit -> user approves -> push
   writes notices to wake stderr, turns urgent interrupts into one bell plus the
   output notice, and rejects `--inject-via`, `--inject-arg`, and `--inject-cmd`.
   Stderr shares the TUI terminal by default and may remain visible until redraw.
+- When attaching wake after the agent owns its terminal, pass
+  `amq wake --baseline-existing ...`. Existing `inbox/new` messages remain
+  unread and emit no receipts; only later arrivals trigger that wake. `coop
+  exec` and `wake repair` add this baseline automatically.
 
 ## Message Handling
 

@@ -299,7 +299,7 @@ func runCoopExec(args []string) error {
 }
 
 func buildCoopWakeArgs(agentHandle, root, injectMode, injectVia string, injectArgs []string) []string {
-	args := []string{"--no-update-check", "wake", "--me", agentHandle, "--root", root}
+	args := []string{"--no-update-check", "wake", "--me", agentHandle, "--root", root, "--baseline-existing"}
 	if injectMode != "" && injectMode != wakeInjectModeAuto {
 		args = append(args, "--inject-mode", injectMode)
 	}

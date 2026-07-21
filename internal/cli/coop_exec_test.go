@@ -213,7 +213,7 @@ func TestCoopExecWakeInjectModeValidation(t *testing.T) {
 
 func TestBuildCoopWakeArgsIncludesNoneMode(t *testing.T) {
 	got := buildCoopWakeArgs("codex", "/tmp/root", "none", "", nil)
-	want := []string{"--no-update-check", "wake", "--me", "codex", "--root", "/tmp/root", "--inject-mode", "none"}
+	want := []string{"--no-update-check", "wake", "--me", "codex", "--root", "/tmp/root", "--baseline-existing", "--inject-mode", "none"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("buildCoopWakeArgs() = %#v, want %#v", got, want)
 	}

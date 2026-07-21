@@ -133,6 +133,48 @@ func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
 	}
 }
 
+func TestRunWakeWithLoopBaselinesBeforeReadiness(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	inboxNew := fsq.AgentInboxNew(root, "orchestrator")
+	if err := os.WriteFile(filepath.Join(inboxNew, "stale.md"), []byte("stale"), 0o600); err != nil {
+		t.Fatalf("write stale message: %v", err)
+	}
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	injector := writeExecutableForTest(t, "injector")
+	errDone := errors.New("done")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", injector,
+		"--baseline-existing",
+		"--ready-file", readyPath,
+	}, func(cfg wakeConfig) error {
+		if _, ok := cfg.baselineExisting["stale.md"]; !ok {
+			t.Fatal("stale message missing from startup baseline")
+		}
+		if _, statErr := os.Stat(readyPath); statErr != nil {
+			t.Fatalf("expected ready file after baseline snapshot: %v", statErr)
+		}
+		if err := os.WriteFile(filepath.Join(inboxNew, "fresh.md"), []byte("fresh"), 0o600); err != nil {
+			t.Fatalf("write fresh message: %v", err)
+		}
+		if _, ok := cfg.baselineExisting["fresh.md"]; ok {
+			t.Fatal("message arriving after readiness was incorrectly baselined")
+		}
+		return errDone
+	})
+	if !errors.Is(err, errDone) {
+		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
 func TestRunWakeWithLoopNoneSkipsTTYAndWritesReadyFile(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -224,6 +266,9 @@ func TestRunWakeHelpHidesInternalReadyFlags(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "inject-cmd") {
 		t.Fatalf("wake help should keep --inject-cmd visible:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "baseline-existing") {
+		t.Fatalf("wake help should keep --baseline-existing visible:\n%s", stdout)
 	}
 	if !strings.Contains(stdout, "none") || !strings.Contains(stdout, "zero terminal input") {
 		t.Fatalf("wake help should document none as zero-input mode:\n%s", stdout)

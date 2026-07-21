@@ -116,6 +116,10 @@ amq coop exec grok     # Grok CLI as an optional peer; caller flags forwarded un
 
 Add `--no-gitignore` when `coop exec` should auto-initialize the project without changing `.gitignore`.
 Managed launchers can add `--require-wake` to fail instead of launching the agent when the wake watcher cannot start.
+`coop exec` baselines messages that were already waiting before its wake starts,
+so an old unread message cannot inject text or an interrupt into the newly
+launched terminal. The messages remain unread and no delivery receipt is
+created; only messages arriving after the baseline trigger that wake.
 Launchers that use an external injector can add `--wake-inject-via /absolute/path/to/injector`
 and repeated `--wake-inject-arg` values. When that invocation starts a new wake,
 the wake stores a repair target so `amq wake repair` can restart wake later

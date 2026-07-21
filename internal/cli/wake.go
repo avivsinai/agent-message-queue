@@ -42,6 +42,7 @@ type wakeConfig struct {
 	interruptCooldown time.Duration
 	lastInterrupt     time.Time
 	controlStop       <-chan struct{}
+	baselineExisting  map[string]struct{}
 }
 
 const defaultInjectTimeout = 5 * time.Second
@@ -155,6 +156,9 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		}
 		name := entry.Name()
 		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		if _, ignored := cfg.baselineExisting[name]; ignored {
 			continue
 		}
 

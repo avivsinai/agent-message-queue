@@ -627,7 +627,7 @@ func configureRepairWakeCommand(cmd *exec.Cmd, output *os.File) {
 }
 
 func buildRepairWakeArgs(root, me string, target wakeTarget, readyPath string) []string {
-	args := []string{"--no-update-check", "wake", "--me", me, "--root", root, "--inject-via", target.InjectVia}
+	args := []string{"--no-update-check", "wake", "--me", me, "--root", root, "--baseline-existing", "--inject-via", target.InjectVia}
 	for _, arg := range target.InjectArgs {
 		args = append(args, "--inject-arg", arg)
 	}
@@ -659,6 +659,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	readyFileFlag := fs.String("ready-file", "", "Internal: write this file after wake lock acquisition")
 	debugFlag := fs.Bool("debug", false, "Log injection diagnostics to stderr")
 	acceptExistingWakeFlag := fs.Bool("accept-existing-wake", false, "Internal: allow a usable existing wake to satisfy readiness")
+	baselineExistingFlag := fs.Bool("baseline-existing", false, "Ignore messages already waiting when this wake starts")
 
 	usage := usageWithHiddenFlags(fs, "amq wake --me <agent> [options]",
 		[]string{"ready-file", "accept-existing-wake"},
@@ -879,12 +880,38 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		interruptCooldown: *interruptCooldownFlag,
 		controlStop:       controlStop,
 	}
+	if *baselineExistingFlag {
+		baseline, err := snapshotWakeExistingMessages(root, me)
+		if err != nil {
+			return fmt.Errorf("snapshot existing wake messages: %w", err)
+		}
+		cfg.baselineExisting = baseline
+	}
 
 	if err := writeWakeReadyFile(root, me, readyFile, inspectWakeLock(root, me)); err != nil {
 		return err
 	}
 
 	return loop(cfg)
+}
+
+func snapshotWakeExistingMessages(root, me string) (map[string]struct{}, error) {
+	entries, err := os.ReadDir(fsq.AgentInboxNew(root, me))
+	if err != nil {
+		return nil, err
+	}
+	baseline := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		baseline[name] = struct{}{}
+	}
+	return baseline, nil
 }
 
 func parseInterruptKey(raw string) (string, error) {
