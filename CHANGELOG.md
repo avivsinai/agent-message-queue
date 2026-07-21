@@ -8,6 +8,21 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.45.0](https://github.com/avivsinai/agent-message-queue/compare/v0.44.0...v0.45.0) (2026-07-21)
+
+
+### Features
+
+* **fsq:** fd-confined message delivery via os.Root capability ([#257](https://github.com/avivsinai/agent-message-queue/issues/257)) ([059a076](https://github.com/avivsinai/agent-message-queue/commit/059a0763b66b8b9f848a10fc46352376fa43ecf0))
+* **wake:** add amq wake retire for identity-safe inject-via stop ([#256](https://github.com/avivsinai/agent-message-queue/issues/256)) ([a57dba9](https://github.com/avivsinai/agent-message-queue/commit/a57dba96f44ef05794275ea5abfc28f5d1c78ebc))
+* **wake:** Darwin cooperative unix-socket shutdown for inject-via wakes ([#254](https://github.com/avivsinai/agent-message-queue/issues/254)) ([6d66a20](https://github.com/avivsinai/agent-message-queue/commit/6d66a205236ef205e6a8dc76117ee736fc021ba3))
+
+
+### Bug Fixes
+
+* **delivery:** report indeterminate-durability commits + capability-relative reads ([#261](https://github.com/avivsinai/agent-message-queue/issues/261)) ([63cc42f](https://github.com/avivsinai/agent-message-queue/commit/63cc42f2652c709aae33c75c286d82407fd74b6c))
+* **wake:** close cooperative-stop duplicate-injection window and harden Darwin lifecycle ([#260](https://github.com/avivsinai/agent-message-queue/issues/260)) ([8d6e6f4](https://github.com/avivsinai/agent-message-queue/commit/8d6e6f46a646228f18e4507bf3db95aaad6c34e1))
+
 ## [0.44.0](https://github.com/avivsinai/agent-message-queue/compare/v0.43.1...v0.44.0) (2026-07-21)
 
 
