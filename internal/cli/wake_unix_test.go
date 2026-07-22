@@ -14,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/fsnotify/fsnotify"
 )
 
 func stubSignalWakeProcess(t *testing.T, fn func(pid int, sig os.Signal) error) {
@@ -45,6 +47,14 @@ func stubWakeProcessSID(t *testing.T, fn func(pid int) (int, error)) {
 	t.Cleanup(func() {
 		getWakeProcessSID = old
 	})
+}
+
+func writeWakePreparedForTest(t *testing.T, root, me string) {
+	t.Helper()
+	inspection := inspectWakeLock(root, me)
+	if err := writeWakePreparedFile(root, me, inspection); err != nil {
+		t.Fatalf("writeWakePreparedFile: %v", err)
+	}
 }
 
 func stubWakeTTYSupport(t *testing.T) {
@@ -123,13 +133,247 @@ func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
 		"--inject-via", injector,
 		"--ready-file", readyPath,
 	}, func(cfg wakeConfig) error {
+		if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+			t.Fatalf("ready file published before wake preparation: %v", statErr)
+		}
+		if err := cfg.onPrepared(); err != nil {
+			t.Fatalf("publish readiness: %v", err)
+		}
 		if _, statErr := os.Stat(readyPath); statErr != nil {
-			t.Fatalf("expected ready file before wake loop: %v", statErr)
+			t.Fatalf("expected ready file after wake preparation: %v", statErr)
 		}
 		return errDone
 	})
 	if !errors.Is(err, errDone) {
 		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
+func TestRunWakeWithLoopBaselinesBeforeReadiness(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	inboxNew := fsq.AgentInboxNew(root, "orchestrator")
+	if err := os.WriteFile(filepath.Join(inboxNew, "stale.md"), []byte("stale"), 0o600); err != nil {
+		t.Fatalf("write stale message: %v", err)
+	}
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	injector := writeExecutableForTest(t, "injector")
+	errDone := errors.New("done")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", injector,
+		"--baseline-existing",
+		"--ready-file", readyPath,
+	}, func(cfg wakeConfig) error {
+		if !cfg.baselineRequested {
+			t.Fatal("baseline request was not carried into the owned wake loop")
+		}
+		if cfg.baselineExisting != nil {
+			t.Fatal("baseline was captured before watcher setup and wake ownership")
+		}
+		watcher, watcherErr := fsnotify.NewWatcher()
+		if watcherErr != nil {
+			t.Fatalf("NewWatcher: %v", watcherErr)
+		}
+		defer func() { _ = watcher.Close() }()
+		if watcherErr := watcher.Add(inboxNew); watcherErr != nil {
+			t.Fatalf("watch inbox: %v", watcherErr)
+		}
+		if prepErr := prepareWakeBaseline(&cfg, watcher, inboxNew); prepErr != nil {
+			t.Fatalf("prepareWakeBaseline: %v", prepErr)
+		}
+		if _, ok := cfg.baselineExisting["stale.md"]; !ok {
+			t.Fatal("stale message missing from watcher-armed startup baseline")
+		}
+		if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+			t.Fatalf("ready file published before baseline preparation: %v", statErr)
+		}
+		if err := cfg.onPrepared(); err != nil {
+			t.Fatalf("publish readiness: %v", err)
+		}
+		if _, statErr := os.Stat(readyPath); statErr != nil {
+			t.Fatalf("expected ready file after baseline snapshot: %v", statErr)
+		}
+		if _, exists, preparedErr := readWakeGenerationFile(wakePreparedPath(root, "orchestrator"), "wake prepared marker"); preparedErr != nil || !exists {
+			t.Fatalf("generation-bound prepared marker missing: exists=%v err=%v", exists, preparedErr)
+		}
+		if err := os.WriteFile(filepath.Join(inboxNew, "fresh.md"), []byte("fresh"), 0o600); err != nil {
+			t.Fatalf("write fresh message: %v", err)
+		}
+		if _, ok := cfg.baselineExisting["fresh.md"]; ok {
+			t.Fatal("message arriving after readiness was incorrectly baselined")
+		}
+		return errDone
+	})
+	if !errors.Is(err, errDone) {
+		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
+func TestBaselineFreshMailboxStillStarts(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+
+	baseline, err := snapshotWakeExistingMessages(root, "fresh-agent")
+	if err != nil {
+		t.Fatalf("missing inbox/new should be treated as an empty baseline: %v", err)
+	}
+	if len(baseline) != 0 {
+		t.Fatalf("baseline = %#v, want empty", baseline)
+	}
+}
+
+func TestPrepareWakeBaselineInvalidatesSameNameReplacementDuringSnapshot(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	inboxNew := fsq.AgentInboxNew(root, "alice")
+	samePath := filepath.Join(inboxNew, "same.md")
+	if err := os.WriteFile(samePath, []byte("old"), 0o600); err != nil {
+		t.Fatalf("write old message: %v", err)
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer func() { _ = watcher.Close() }()
+	if err := watcher.Add(inboxNew); err != nil {
+		t.Fatalf("watch inbox: %v", err)
+	}
+
+	originalInfo := snapshotWakeDirEntryInfo
+	replaced := false
+	snapshotWakeDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {
+		if entry.Name() == "same.md" && !replaced {
+			replaced = true
+			if err := os.Rename(samePath, filepath.Join(inboxNew, "old.md")); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(samePath, []byte("replacement"), 0o600); err != nil {
+				return nil, err
+			}
+		}
+		return entry.Info()
+	}
+	t.Cleanup(func() { snapshotWakeDirEntryInfo = originalInfo })
+
+	cfg := wakeConfig{root: root, me: "alice", baselineRequested: true}
+	if err := prepareWakeBaseline(&cfg, watcher, inboxNew); err != nil {
+		t.Fatalf("prepareWakeBaseline: %v", err)
+	}
+	if !replaced {
+		t.Fatal("same-name replacement hook did not run")
+	}
+	if _, ignored := cfg.baselineExisting["same.md"]; ignored {
+		t.Fatal("same-name replacement created during snapshot remained baselined")
+	}
+}
+
+func TestFailWakeOnWatcherErrorClearsBaselineAndExits(t *testing.T) {
+	cfg := wakeConfig{baselineExisting: map[string]wakeFileIdentity{"stale.md": {}}}
+	cause := errors.New("overflow")
+	err := failWakeOnWatcherError(&cfg, "watcher error", cause)
+	if err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("watcher failure = %v", err)
+	}
+	if cfg.baselineExisting != nil {
+		t.Fatalf("watcher error retained baseline tombstones: %#v", cfg.baselineExisting)
+	}
+}
+
+func TestRunWakeLoopStopsBeforePublishingPreparedMarker(t *testing.T) {
+	stop := make(chan struct{})
+	close(stop)
+	prepared := false
+	err := runWakeLoop(wakeConfig{
+		root:        secureTempDirForTest(t),
+		me:          "orchestrator",
+		controlStop: stop,
+		onPrepared: func() error {
+			prepared = true
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("runWakeLoop: %v", err)
+	}
+	if prepared {
+		t.Fatal("prepared marker was published after cooperative stop was already pending")
+	}
+}
+
+func TestBaselineDLQRetryWithSameFilenameRemainsNotifyEligible(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	msg := format.Message{
+		Header: format.Header{
+			Schema: 1, ID: "stale", From: "codex", To: []string{"alice"},
+			Thread: "p2p/alice__codex", Subject: "stale", Created: "2026-07-22T00:00:00Z",
+		},
+		Body: "body",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fsq.AgentInboxNew(root, "alice"), "same.md"), data, 0o600); err != nil {
+		t.Fatalf("write message: %v", err)
+	}
+
+	cfg, outputPath := injectViaCaptureConfig(t)
+	cfg.me = "alice"
+	cfg.root = root
+	cfg.previewLen = 48
+	baseline, err := snapshotWakeExistingMessages(root, "alice")
+	if err != nil {
+		t.Fatalf("snapshot baseline: %v", err)
+	}
+	cfg.baselineExisting = baseline
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify stale baseline: %v", err)
+	}
+
+	rootIdentity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		t.Fatalf("snapshot delivery root: %v", err)
+	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, rootIdentity)
+	if err != nil {
+		t.Fatalf("open delivery root: %v", err)
+	}
+	defer func() { _ = deliveryRoot.Close() }()
+	dlqPath, err := fsq.MoveToDLQ(deliveryRoot, "alice", "same.md", "stale", "test", "retry identity")
+	if err != nil {
+		t.Fatalf("move baseline message to DLQ: %v", err)
+	}
+	if err := fsq.RetryFromDLQ(deliveryRoot, "alice", filepath.Base(dlqPath), false); err != nil {
+		t.Fatalf("retry baseline message from DLQ: %v", err)
+	}
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify DLQ retry: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || len(got) == 0 {
+		t.Fatalf("same-name DLQ retry did not notify: bytes=%d err=%v", len(got), err)
 	}
 }
 
@@ -153,8 +397,11 @@ func TestRunWakeWithLoopNoneSkipsTTYAndWritesReadyFile(t *testing.T) {
 		if cfg.injectMode != wakeInjectModeNone {
 			t.Fatalf("injectMode = %q, want none", cfg.injectMode)
 		}
+		if err := cfg.onPrepared(); err != nil {
+			t.Fatalf("publish readiness: %v", err)
+		}
 		if _, statErr := os.Stat(readyPath); statErr != nil {
-			t.Fatalf("expected ready file before wake loop: %v", statErr)
+			t.Fatalf("expected ready file after wake preparation: %v", statErr)
 		}
 		return errDone
 	})
@@ -224,6 +471,9 @@ func TestRunWakeHelpHidesInternalReadyFlags(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "inject-cmd") {
 		t.Fatalf("wake help should keep --inject-cmd visible:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "baseline-existing") {
+		t.Fatalf("wake help should keep --baseline-existing visible:\n%s", stdout)
 	}
 	if !strings.Contains(stdout, "none") || !strings.Contains(stdout, "zero terminal input") {
 		t.Fatalf("wake help should document none as zero-input mode:\n%s", stdout)
@@ -621,7 +871,7 @@ func TestRunWakeWithLoopDoesNotWriteReadyFileWhenLockBlocked(t *testing.T) {
 	}
 }
 
-func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
+func TestRunWakeWithLoopWaitsForCurrentPreparedMarkerPastStaleGeneration(t *testing.T) {
 	const wakePID = 4242
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid == wakePID {
@@ -652,21 +902,136 @@ func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
 	}
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
-	err := runWakeWithLoop([]string{
-		"--root", root,
-		"--me", "orchestrator",
-		"--inject-via", injector,
-		"--ready-file", readyPath,
-		"--accept-existing-wake",
-	}, func(cfg wakeConfig) error {
-		t.Fatalf("loop should not run with an existing live wake lock: %#v", cfg)
-		return nil
-	})
-	if err != nil {
+	run := func() error {
+		return runWakeWithLoop([]string{
+			"--root", root,
+			"--me", "orchestrator",
+			"--inject-via", injector,
+			"--ready-file", readyPath,
+			"--accept-existing-wake",
+		}, func(cfg wakeConfig) error {
+			t.Fatalf("loop should not run with an existing live wake lock: %#v", cfg)
+			return nil
+		})
+	}
+
+	if err := writeWakeGenerationFile(wakePreparedPath(root, "orchestrator"), "wake prepared marker", wakeReady{
+		Schema:       wakeReadySchema,
+		Generation:   "previous-generation",
+		TargetDigest: wakeTargetDigest(target),
+	}); err != nil {
+		t.Fatalf("write previous-generation prepared marker: %v", err)
+	}
+	inspection := inspectWakeLock(root, "orchestrator")
+	if err := writeWakeReadyFileForPreparedWake(root, "orchestrator", readyPath, inspection, time.Now().Add(40*time.Millisecond)); err == nil || !strings.Contains(err.Error(), "deadline") {
+		t.Fatalf("stale prepared marker deadline error = %v", err)
+	}
+
+	retryEntered := make(chan struct{}, 1)
+	originalRetry := waitForWakePreparedRetry
+	waitForWakePreparedRetry = func(deadline time.Time) bool {
+		select {
+		case retryEntered <- struct{}{}:
+		default:
+		}
+		return originalRetry(deadline)
+	}
+	t.Cleanup(func() { waitForWakePreparedRetry = originalRetry })
+	done := make(chan error, 1)
+	go func() { done <- run() }()
+	select {
+	case <-retryEntered:
+	case err := <-done:
+		t.Fatalf("existing wake returned instead of polling past the stale marker: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("existing wake never entered prepared-marker polling")
+	}
+	writeWakePreparedForTest(t, root, "orchestrator")
+	if err := <-done; err != nil {
 		t.Fatalf("expected existing usable wake to satisfy ready file, got %v", err)
 	}
 	if _, statErr := os.Stat(readyPath); statErr != nil {
 		t.Fatalf("ready file should exist, statErr=%v", statErr)
+	}
+	current := inspectWakeLock(root, "orchestrator")
+	if err := writeWakeGenerationFile(wakePreparedPath(root, "orchestrator"), "wake prepared marker", wakeReady{
+		Schema:       wakeReadySchema,
+		Generation:   current.Lock.Generation,
+		TargetDigest: "same-generation-wrong-target",
+	}); err != nil {
+		t.Fatalf("write same-generation invalid marker: %v", err)
+	}
+	if _, err := validateWakePreparedFileAgainstInspection(root, "orchestrator", current); err == nil || !strings.Contains(err.Error(), "target") {
+		t.Fatalf("same-generation target mismatch was not rejected: %v", err)
+	}
+}
+
+func TestRunWakeWithLoopRetriesCreatingWakeUntilPrepared(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	lockPath := filepath.Join(fsq.AgentBase(root, "orchestrator"), ".wake.lock")
+	if err := os.WriteFile(lockPath, []byte("{"), 0o600); err != nil {
+		t.Fatalf("write creating lock: %v", err)
+	}
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, nil)
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	retryEntered := make(chan struct{}, 1)
+	originalRetry := waitForWakePreparedRetry
+	waitForWakePreparedRetry = func(deadline time.Time) bool {
+		select {
+		case retryEntered <- struct{}{}:
+		default:
+		}
+		return originalRetry(deadline)
+	}
+	t.Cleanup(func() { waitForWakePreparedRetry = originalRetry })
+	done := make(chan error, 1)
+	go func() {
+		done <- runWakeWithLoop([]string{
+			"--root", root,
+			"--me", "orchestrator",
+			"--inject-via", injector,
+			"--ready-file", readyPath,
+			"--accept-existing-wake",
+		}, func(cfg wakeConfig) error {
+			t.Errorf("loop should not run with an existing wake: %#v", cfg)
+			return nil
+		})
+	}()
+	select {
+	case <-retryEntered:
+	case err := <-done:
+		t.Fatalf("helper returned instead of retrying transient lock creation: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("helper never retried transient lock creation")
+	}
+	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
+		t.Fatalf("writeWakeTarget: %v", err)
+	}
+	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
+		PID: wakePID, TTY: "tty", ProcessStart: "start-1", BootID: "boot-1",
+		Executable: "/opt/homebrew/bin/amq", Generation: "generation-1",
+	}, target))
+	writeWakePreparedForTest(t, root, "orchestrator")
+	if err := <-done; err != nil {
+		t.Fatalf("creating wake did not become reusable: %v", err)
+	}
+	if _, err := os.Stat(readyPath); err != nil {
+		t.Fatalf("ready file missing: %v", err)
 	}
 }
 
@@ -738,23 +1103,38 @@ func TestRunWakeWithLoopNoneAcceptsExistingNoneWake(t *testing.T) {
 		WakeMode:     wakeInjectModeNone,
 		Generation:   "generation-1",
 	})
+	writeWakePreparedForTest(t, root, "orchestrator")
+	stalePath := filepath.Join(fsq.AgentInboxNew(root, "orchestrator"), "stale.md")
+	if err := os.WriteFile(stalePath, []byte("stale"), 0o600); err != nil {
+		t.Fatalf("write stale message: %v", err)
+	}
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
-	err := runWakeWithLoop([]string{
-		"--root", root,
-		"--me", "orchestrator",
-		"--inject-mode", "none",
-		"--ready-file", readyPath,
-		"--accept-existing-wake",
-	}, func(cfg wakeConfig) error {
-		t.Fatalf("loop should not run with an existing none wake: %#v", cfg)
-		return nil
+	var err error
+	stderr := captureWakeStderr(t, func() {
+		err = runWakeWithLoop([]string{
+			"--root", root,
+			"--me", "orchestrator",
+			"--inject-mode", "none",
+			"--baseline-existing",
+			"--ready-file", readyPath,
+			"--accept-existing-wake",
+		}, func(cfg wakeConfig) error {
+			t.Fatalf("loop should not run with an existing none wake: %#v", cfg)
+			return nil
+		})
 	})
 	if err != nil {
 		t.Fatalf("expected existing none wake to satisfy readiness, got %v", err)
 	}
 	if _, statErr := os.Stat(readyPath); statErr != nil {
 		t.Fatalf("ready file should exist, statErr=%v", statErr)
+	}
+	if !strings.Contains(stderr, "this launch did not re-baseline it, so pending backlog may still notify") {
+		t.Fatalf("reuse warning missing from stderr: %q", stderr)
+	}
+	if _, statErr := os.Stat(stalePath); statErr != nil {
+		t.Fatalf("reused wake moved or removed stale backlog: %v", statErr)
 	}
 }
 
@@ -1018,6 +1398,7 @@ func TestRunWakeWithLoopAcceptExistingWakeAcceptsInjectViaUnknownTTY(t *testing.
 	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
 	}
+	writeWakePreparedForTest(t, root, "orchestrator")
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
 	err := runWakeWithLoop([]string{
@@ -2267,6 +2648,128 @@ func TestAcceptExistingReadinessNotPublishedOnReplacement(t *testing.T) {
 	}
 	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
 		t.Fatalf("replacement readiness must not be published, statErr=%v", statErr)
+	}
+}
+
+func TestCleanupTerminatedWakeLockRemovesOnlyCapturedStaleGeneration(t *testing.T) {
+	const wakePID = 4242
+	running := true
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid != wakePID {
+			return wakeProcessInfo{PID: pid}
+		}
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    running,
+			StartToken: "start-1",
+			BootID:     "boot-1",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+		}
+	})
+
+	t.Run("captured generation", func(t *testing.T) {
+		root := secureTempDirForTest(t)
+		lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+			PID: wakePID, ProcessStart: "start-1", BootID: "boot-1",
+			Executable: "/opt/homebrew/bin/amq", Generation: "generation-1",
+		})
+		expected := inspectWakeLock(root, "orchestrator")
+		running = false
+		if err := cleanupTerminatedWakeLock(expected); err != nil {
+			t.Fatalf("cleanupTerminatedWakeLock: %v", err)
+		}
+		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+			t.Fatalf("captured stale lock was not removed, statErr=%v", err)
+		}
+	})
+
+	t.Run("replacement generation", func(t *testing.T) {
+		running = true
+		root := secureTempDirForTest(t)
+		lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+			PID: wakePID, ProcessStart: "start-1", BootID: "boot-1",
+			Executable: "/opt/homebrew/bin/amq", Generation: "generation-1",
+		})
+		expected := inspectWakeLock(root, "orchestrator")
+		if err := os.Remove(lockPath); err != nil {
+			t.Fatalf("remove captured lock: %v", err)
+		}
+		writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+			PID: wakePID, ProcessStart: "start-1", BootID: "boot-1",
+			Executable: "/opt/homebrew/bin/amq", Generation: "generation-2",
+		})
+		running = false
+		if err := cleanupTerminatedWakeLock(expected); err != nil {
+			t.Fatalf("cleanup replacement: %v", err)
+		}
+		if _, err := os.Stat(lockPath); err != nil {
+			t.Fatalf("replacement generation was removed: %v", err)
+		}
+	})
+}
+
+func TestTerminateWakeHelperProcessKillsWaitsAndRemovesCapturedLock(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "sleep 30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	wakePID := cmd.Process.Pid
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid != wakePID {
+			return wakeProcessInfo{PID: pid}
+		}
+		running := syscall.Kill(pid, 0) == nil
+		return wakeProcessInfo{
+			PID: pid, Running: running, StartToken: "start-1", BootID: "boot-1",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+		}
+	})
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+		PID: wakePID, ProcessStart: "start-1", BootID: "boot-1",
+		Executable: "/opt/homebrew/bin/amq", Generation: "generation-1",
+	})
+	waiter := newWakeProcessWaiter(cmd.Process)
+	if err := terminateWakeHelperProcess(cmd.Process, waiter, root, "orchestrator"); err != nil {
+		t.Fatalf("terminateWakeHelperProcess: %v", err)
+	}
+	if waiter.state == nil {
+		t.Fatalf("wake helper was not waited: state=%v", waiter.state)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("terminated helper lock was not removed, statErr=%v", err)
+	}
+}
+
+func TestTerminateWakeHelperProcessRemovesLockCommittedAfterFirstInspection(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "sleep 30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	root := secureTempDirForTest(t)
+	lockPath := filepath.Join(fsq.AgentBase(root, "orchestrator"), ".wake.lock")
+	originalKill := killWakeHelperProcess
+	killWakeHelperProcess = func(proc *os.Process) error {
+		writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+			PID: proc.Pid, Generation: "generation-after-first-inspection",
+		})
+		return originalKill(proc)
+	}
+	t.Cleanup(func() { killWakeHelperProcess = originalKill })
+
+	waiter := newWakeProcessWaiter(cmd.Process)
+	if err := terminateWakeHelperProcess(cmd.Process, waiter, root, "orchestrator"); err != nil {
+		t.Fatalf("terminateWakeHelperProcess: %v", err)
+	}
+	if waiter.state == nil {
+		t.Fatal("wake helper was not waited")
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("post-inspection child lock was not removed, statErr=%v", err)
 	}
 }
 

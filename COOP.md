@@ -272,6 +272,13 @@ amq reply --id "msg_123" --kind review_response --body "LGTM with minor suggesti
 > Co-op works without wake. `coop exec` starts it automatically.
 
 `amq wake` uses TIOCSTI to inject notifications into your terminal by default.
+Pass `--baseline-existing` when starting a new wake after the agent already
+owns its terminal. Messages already present in `inbox/new` remain unread and do
+not trigger that fresh wake; later arrivals do. `coop exec` and `wake repair`
+add the flag to wakes they start. Reuse requires generation-bound proof that
+the live wake completed watcher preparation. It does not retroactively baseline
+that wake, so pending backlog can still notify; SessionStart draining mitigates
+that residual.
 For orchestrators or hardened environments without a controlling TTY, use an
 explicit external transport:
 

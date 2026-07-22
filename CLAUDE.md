@@ -186,7 +186,7 @@ amq dlq list --me <agent> [--new | --cur] [--json]
 amq dlq read --me <agent> --id <dlq_id> [--session <name>] [--ignore-session-pin] [--json]
 amq dlq retry --me <agent> --id <dlq_id> [--session <name>] [--ignore-session-pin] [--all] [--force]
 amq dlq purge --me <agent> [--session <name>] [--ignore-session-pin] [--older-than <duration>] [--dry-run] [--yes]
-amq wake --me <agent> [--inject-cmd <cmd>] [--inject-mode <auto|raw|paste|none>] [--inject-via <absolute-executable>] [--inject-arg <arg>...] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>] [--interrupt] [--interrupt-label <label>] [--interrupt-priority <p>] [--interrupt-cmd <ctrl-c|none>] [--interrupt-notice <str>] [--interrupt-cooldown <duration>] [--debug]
+amq wake --me <agent> [--baseline-existing] [--inject-cmd <cmd>] [--inject-mode <auto|raw|paste|none>] [--inject-via <absolute-executable>] [--inject-arg <arg>...] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>] [--interrupt] [--interrupt-label <label>] [--interrupt-priority <p>] [--interrupt-cmd <ctrl-c|none>] [--interrupt-notice <str>] [--interrupt-cooldown <duration>] [--debug]
 amq wake repair --me <agent> [--root <path>] [--json]
 amq wake retire --me <agent> --inject-via <absolute-executable> [--inject-arg <arg>...] [--root <path>] [--json]
 amq upgrade
