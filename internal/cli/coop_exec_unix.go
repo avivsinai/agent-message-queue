@@ -17,6 +17,8 @@ import (
 
 const wakeReadyTimeout = 2 * time.Second
 
+var coopExecProcess = syscall.Exec
+
 func runCoopExec(args []string) error {
 	// Split at "--" before flag parsing so agent flags aren't consumed.
 	amqArgs, agentArgs := splitDashDash(args)
@@ -28,6 +30,7 @@ func runCoopExec(args []string) error {
 	noInitFlag := fs.Bool("no-init", false, "Don't auto-initialize if .amqrc is missing")
 	noGitignoreFlag := fs.Bool("no-gitignore", false, "When auto-initializing, do not modify .gitignore")
 	noWakeFlag := fs.Bool("no-wake", false, "Don't start amq wake in background")
+	deferWakeFlag := fs.Bool("defer-wake", false, "Capture the unread floor for a SessionStart hook instead of starting wake before exec")
 	requireWakeFlag := fs.Bool("require-wake", false, "Fail if amq wake cannot start and acquire its lock")
 	wakeInjectModeFlag := fs.String("wake-inject-mode", wakeInjectModeAuto, "Wake injection mode: auto, raw, paste, none")
 	wakeInjectViaFlag := fs.String("wake-inject-via", "", "Start wake with this absolute --inject-via executable, enabling later amq wake repair")
@@ -51,6 +54,7 @@ func runCoopExec(args []string) error {
 		"  amq coop exec grok                                # Grok CLI, caller flags forwarded as-is",
 		"  amq coop exec --session feature-x claude          # Isolated session",
 		"  amq coop exec --root .agent-mail/auth claude      # Explicit root (no session default)",
+		"  amq coop exec --defer-wake claude                  # SessionStart attaches wake from a pre-launch floor",
 		"  amq coop exec --require-wake --wake-inject-mode none claude  # Zero-input wake",
 		"  amq coop exec --wake-inject-via /path/to/injector codex",
 		"  amq coop exec --me myagent bash                   # Debug shell with AMQ env",
@@ -68,6 +72,18 @@ func runCoopExec(args []string) error {
 	}
 	if *noWakeFlag && *requireWakeFlag {
 		return UsageError("--require-wake cannot be used with --no-wake")
+	}
+	if *deferWakeFlag {
+		var conflicts []string
+		fs.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "no-wake", "require-wake", "wake-inject-mode", "wake-inject-via", "wake-inject-arg":
+				conflicts = append(conflicts, "--"+f.Name)
+			}
+		})
+		if len(conflicts) > 0 {
+			return UsageError("--defer-wake cannot be combined with active wake option(s): %s", strings.Join(conflicts, ", "))
+		}
 	}
 	wakeInjectVia := strings.TrimSpace(*wakeInjectViaFlag)
 	wakeInjectMode, err := normalizeWakeInjectMode(*wakeInjectModeFlag)
@@ -227,11 +243,24 @@ func runCoopExec(args []string) error {
 		return fmt.Errorf("command not found: %s", cmdName)
 	}
 
+	var deferredBaseline wakeBaseline
+	var baselineCaptured bool
+	var baselineCaptureFailed bool
+	if *deferWakeFlag {
+		deferredBaseline, err = captureWakeBaseline(root, agentHandle)
+		if err != nil {
+			baselineCaptureFailed = true
+			_ = writeStderr("warning: could not capture the AMQ wake baseline; wake attachment must fail closed after startup: %v\n", err)
+		} else {
+			baselineCaptured = true
+		}
+	}
+
 	// Start amq wake in background (unless --no-wake).
 	// On successful Exec, wake is orphaned (reparented to init/launchd) — intended.
 	// On failed Exec, deferred kill cleans up the wake process.
 	var wakeProc *os.Process
-	if !*noWakeFlag {
+	if !*noWakeFlag && !*deferWakeFlag {
 		amqBin, binErr := os.Executable()
 		if binErr != nil {
 			amqBin = "amq"
@@ -285,21 +314,34 @@ func runCoopExec(args []string) error {
 	// independent of AM_ROOT. A custom sessionless --root clears inherited pins.
 	sessionIdentity := coopSessionIdentity(root, *sessionFlag, *rootFlag)
 	env := buildCoopExecEnvironment(os.Environ(), root, agentHandle, sessionIdentity)
+	if baselineCaptured {
+		env = setEnvVar(env, envWakeBaselineFile, deferredBaseline.Path)
+		env = unsetEnvVar(env, envWakeBaselineError)
+	} else if baselineCaptureFailed {
+		env = unsetEnvVar(env, envWakeBaselineFile)
+		env = setEnvVar(env, envWakeBaselineError, wakeBaselineCaptureError)
+	} else {
+		env = unsetEnvVar(env, envWakeBaselineFile)
+		env = unsetEnvVar(env, envWakeBaselineError)
+	}
 
 	// Build argv: command name + agent args.
 	argv := append([]string{cmdName}, agentArgs...)
 
 	// Replace process. On success, this never returns.
 	// On failure, clean up the wake process.
-	execErr := syscall.Exec(binaryPath, argv, env)
+	execErr := coopExecProcess(binaryPath, argv, env)
 	if wakeProc != nil {
 		_ = wakeProc.Kill()
+	}
+	if baselineCaptured {
+		removeWakeBaselineIfUnreferenced(root, agentHandle, deferredBaseline.Path)
 	}
 	return execErr
 }
 
 func buildCoopWakeArgs(agentHandle, root, injectMode, injectVia string, injectArgs []string) []string {
-	args := []string{"--no-update-check", "wake", "--me", agentHandle, "--root", root}
+	args := []string{"--no-update-check", "wake", "--me", agentHandle, "--root", root, "--baseline-existing"}
 	if injectMode != "" && injectMode != wakeInjectModeAuto {
 		args = append(args, "--inject-mode", injectMode)
 	}

@@ -6,9 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-const wakeReadySchema = 1
+const (
+	wakeReadySchema              = 1
+	wakeCatchupReadyFileName     = ".wake.catchup-ready"
+	wakeCatchupReadyPollInterval = 20 * time.Millisecond
+)
 
 type wakeReady struct {
 	Schema       int    `json:"schema"`
@@ -145,4 +153,78 @@ func validateWakeReadyFileAgainstCurrent(root, me, path string) (bool, error) {
 		return nil
 	})
 	return ready, err
+}
+
+func wakeCatchupReadyPath(root, me string) string {
+	return filepath.Join(fsq.AgentBase(root, me), wakeCatchupReadyFileName)
+}
+
+func writeWakeCatchupReadyFile(root, me string, expected wakeLockInspection) error {
+	return writeWakeReadyFile(root, me, wakeCatchupReadyPath(root, me), expected)
+}
+
+func wakeCatchupReadyMatches(root, me string, expected wakeLockInspection) (bool, error) {
+	ready := false
+	err := withWakeLifecycleGuard(root, me, func() error {
+		current := inspectWakeLock(root, me)
+		if !sameWakeLockGeneration(expected, current) {
+			return fmt.Errorf("wake lock generation changed while waiting for catch-up readiness")
+		}
+		path := wakeCatchupReadyPath(root, me)
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := validateWakeReadyFile(path, info); err != nil {
+			return err
+		}
+		published, exists, err := readWakeReadyFile(path)
+		if err != nil || !exists {
+			// A securely located but partial/corrupt stale marker is never
+			// trusted. The active generation may replace it before the timeout.
+			return nil
+		}
+		// A previous generation's securely written attestation is harmless and
+		// remains not-ready until the current generation replaces it.
+		if published.Generation != current.Lock.Generation || published.TargetDigest != current.Lock.TargetDigest {
+			return nil
+		}
+		if err := validateWakeReadyLockAndTarget(root, me, current, published); err != nil {
+			return err
+		}
+		ready = true
+		return nil
+	})
+	return ready, err
+}
+
+func existingWakeCatchupTimeout(injectTimeout time.Duration) time.Duration {
+	timeout := 2*injectTimeout + time.Second
+	if timeout < wakeReadyTimeout {
+		return wakeReadyTimeout
+	}
+	if timeout > 30*time.Second {
+		return 30 * time.Second
+	}
+	return timeout
+}
+
+func waitForWakeCatchupReady(root, me string, expected wakeLockInspection, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		ready, err := wakeCatchupReadyMatches(root, me, expected)
+		if err != nil {
+			return err
+		}
+		if ready {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("existing wake for %s did not attest initial catch-up readiness", me)
+		}
+		time.Sleep(wakeCatchupReadyPollInterval)
+	}
 }

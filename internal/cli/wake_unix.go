@@ -46,12 +46,15 @@ type wakeRepairResult struct {
 type wakeRepairStarter func(root, me string, target wakeTarget) (int, error)
 
 type wakeLockAcquireOptions struct {
-	acceptExistingValid bool
-	target              *wakeTarget
-	wakeMode            string
+	acceptExistingValid       bool
+	replaceExistingBaseline   bool
+	materializeLegacyBaseline bool
+	target                    *wakeTarget
+	wakeMode                  string
 }
 
 var startWakeFromTarget = startWakeFromTargetDefault
+var replaceExistingWakeLock = terminateAndRemoveOrphanedWakeLock
 
 // acquireWakeLock attempts to acquire the wake lock for an agent's inbox.
 // Returns cleanup function and error. If another wake is running, returns error.
@@ -86,10 +89,34 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 					return fmt.Errorf("wake lock is being created (retry shortly)")
 				case wakeLockValid:
 					if options.acceptExistingValid {
-						if err := requireWakeLockUsable(inspection, options.wakeMode, options.target); err != nil {
-							return err
+						usableErr := requireWakeLockUsable(inspection, options.wakeMode, options.target)
+						if usableErr == nil {
+							return wakeLockAlreadyRunningError(me, inspection)
 						}
-						return wakeLockAlreadyRunningError(me, inspection)
+						if options.materializeLegacyBaseline {
+							reuse, migrate, err := wakeBaselineExistingTransition(inspection, options)
+							if err != nil {
+								return err
+							}
+							if reuse {
+								return wakeLockAlreadyRunningError(me, inspection)
+							}
+							if migrate {
+								replace = inspection
+								return nil
+							}
+						}
+						if options.replaceExistingBaseline {
+							eligible, err := wakeBaselineRotationEligible(inspection, options)
+							if err != nil {
+								return err
+							}
+							if eligible {
+								replace = inspection
+								return nil
+							}
+						}
+						return usableErr
 					}
 					replaceNeeded, replaceErr := wakeLockReplacementNeeded(inspection)
 					if replaceErr != nil {
@@ -146,7 +173,7 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 			return nil, err
 		}
 		if replace.Exists {
-			if _, err := terminateAndRemoveOrphanedWakeLock(replace); err != nil {
+			if _, err := replaceExistingWakeLock(replace); err != nil {
 				return nil, err
 			}
 			continue
@@ -163,6 +190,137 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 		}
 		return cleanup, nil
 	}
+}
+
+func wakeBaselineRotationEligible(inspection wakeLockInspection, options wakeLockAcquireOptions) (bool, error) {
+	if inspection.Status != wakeLockValid || !inspection.IdentityConfirmed ||
+		options.wakeMode != wakeTargetInjectVia || options.target == nil ||
+		options.target.BaselineFile == "" || options.target.BaselineDigest == "" {
+		return false, nil
+	}
+	persisted, exists, err := readWakeTarget(inspection.Root, inspection.Agent)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+	if err := validateWakeTarget(persisted, inspection.Root, inspection.Agent); err != nil {
+		return false, err
+	}
+	if err := validateWakeTargetMatchesLock(inspection.Lock, persisted); err != nil {
+		return false, err
+	}
+	requested := *options.target
+	if !sameWakeInjectorTransport(persisted, requested) || !sameWakeOwner(persisted.Owner, requested.Owner) {
+		return false, nil
+	}
+	return persisted.BaselineFile != requested.BaselineFile || persisted.BaselineDigest != requested.BaselineDigest, nil
+}
+
+// wakeBaselineExistingTransition resolves the race between independent
+// --baseline-existing starters. Once one exact floor wins, later starters
+// reuse it. Only a same-transport legacy target with no floor is migrated.
+func wakeBaselineExistingTransition(inspection wakeLockInspection, options wakeLockAcquireOptions) (reuse, migrate bool, err error) {
+	if inspection.Status != wakeLockValid || !inspection.IdentityConfirmed ||
+		options.wakeMode != wakeTargetInjectVia || options.target == nil ||
+		options.target.BaselineFile == "" || options.target.BaselineDigest == "" {
+		return false, false, nil
+	}
+	persisted, exists, err := readWakeTarget(inspection.Root, inspection.Agent)
+	if err != nil {
+		return false, false, err
+	}
+	if !exists {
+		return false, false, nil
+	}
+	if err := validateWakeTarget(persisted, inspection.Root, inspection.Agent); err != nil {
+		return false, false, err
+	}
+	if err := validateWakeTargetMatchesLock(inspection.Lock, persisted); err != nil {
+		return false, false, err
+	}
+	requested := *options.target
+	if !sameWakeInjectorTransport(persisted, requested) || !sameWakeOwner(persisted.Owner, requested.Owner) {
+		return false, false, nil
+	}
+	if persisted.BaselineFile != "" && persisted.BaselineDigest != "" {
+		return true, false, nil
+	}
+	return false, true, nil
+}
+
+// reusableExistingWake handles --baseline-existing without taking a new
+// snapshot on every supervisor pass. A confirmed existing generation keeps
+// the exact floor already bound to its persisted target.
+func reusableExistingWake(root, me string, requested wakeTarget) (wakeLockInspection, bool, error) {
+	var inspection wakeLockInspection
+	reusable := false
+	err := withWakeLifecycleGuard(root, me, func() error {
+		inspection = inspectWakeLock(root, me)
+		if inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
+			return nil
+		}
+		persisted, exists, err := readWakeTarget(root, me)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("existing inject-via wake for %s has no persisted wake target", me)
+		}
+		if err := validateWakeTarget(persisted, root, me); err != nil {
+			return err
+		}
+		if err := validateWakeTargetMatchesLock(inspection.Lock, persisted); err != nil {
+			return err
+		}
+		if !sameWakeInjectorTransport(persisted, requested) || !sameWakeOwner(persisted.Owner, requested.Owner) {
+			return fmt.Errorf("existing inject-via wake for %s uses a different injector path, fixed arguments, or owner", me)
+		}
+		if persisted.BaselineFile == "" || persisted.BaselineDigest == "" {
+			return nil
+		}
+		if err := requireWakeLockUsable(inspection, wakeTargetInjectVia, &persisted); err != nil {
+			return err
+		}
+		reusable = true
+		return nil
+	})
+	return inspection, reusable, err
+}
+
+// persistedExactWakeBaseline preserves the original notification floor across
+// wake downtime. A compatible saved target is repair state, not a fresh-launch
+// hint: corrupt or missing floor data fails closed instead of resnapshotting.
+func persistedExactWakeBaseline(root, me string, requested wakeTarget) (wakeBaseline, bool, error) {
+	var baseline wakeBaseline
+	found := false
+	err := withWakeLifecycleGuard(root, me, func() error {
+		persisted, exists, err := readWakeTarget(root, me)
+		if err != nil || !exists {
+			return err
+		}
+		if !sameWakeInjectorTransport(persisted, requested) || !sameWakeOwner(persisted.Owner, requested.Owner) {
+			return nil
+		}
+		if persisted.BaselineFile == "" && persisted.BaselineDigest == "" {
+			return nil
+		}
+		if err := validateWakeTarget(persisted, root, me); err != nil {
+			return fmt.Errorf("persisted exact wake floor is unusable: %w", err)
+		}
+		loaded, err := readWakeBaseline(persisted.BaselineFile, root, me)
+		if err != nil {
+			return fmt.Errorf("persisted exact wake floor is unusable: %w", err)
+		}
+		if loaded.Digest != persisted.BaselineDigest {
+			return fmt.Errorf("persisted exact wake floor digest changed")
+		}
+		baseline = loaded
+		found = true
+		return nil
+	})
+	return baseline, found, err
 }
 
 func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, error) {
@@ -282,7 +440,9 @@ func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, r
 		return fmt.Errorf("existing wake lock for %s is not usable for --require-wake (pid %d on %s since %s)",
 			inspection.Agent, inspection.Lock.PID, inspection.Lock.TTY, inspection.Lock.Started)
 	}
-	if wakeLockNeedsReplacement(inspection) {
+	if replace, err := wakeLockReplacementNeeded(inspection); err != nil {
+		return fmt.Errorf("existing wake lock for %s could not be health-checked: %w", inspection.Agent, err)
+	} else if replace {
 		return fmt.Errorf("existing wake lock for %s is not usable for --require-wake (pid %d on %s since %s)",
 			inspection.Agent, inspection.Lock.PID, inspection.Lock.TTY, inspection.Lock.Started)
 	}
@@ -303,8 +463,8 @@ func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, r
 		if err := validateWakeTarget(persistedTarget, inspection.Root, inspection.Agent); err != nil {
 			return fmt.Errorf("existing inject-via wake target for %s is invalid: %w", inspection.Agent, err)
 		}
-		if !sameWakeInjectorIdentity(persistedTarget, *requestedTarget) {
-			return fmt.Errorf("existing inject-via wake for %s uses a different injector path or fixed arguments", inspection.Agent)
+		if !sameWakeInjectorIdentity(persistedTarget, *requestedTarget) || !sameWakeOwner(persistedTarget.Owner, requestedTarget.Owner) {
+			return fmt.Errorf("existing inject-via wake for %s uses a different injector path, fixed arguments, owner, or baseline floor", inspection.Agent)
 		}
 	}
 	return nil
@@ -628,6 +788,9 @@ func configureRepairWakeCommand(cmd *exec.Cmd, output *os.File) {
 
 func buildRepairWakeArgs(root, me string, target wakeTarget, readyPath string) []string {
 	args := []string{"--no-update-check", "wake", "--me", me, "--root", root, "--inject-via", target.InjectVia}
+	if target.BaselineFile != "" {
+		args = append(args, "--baseline-file", target.BaselineFile)
+	}
 	for _, arg := range target.InjectArgs {
 		args = append(args, "--inject-arg", arg)
 	}
@@ -659,9 +822,12 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	readyFileFlag := fs.String("ready-file", "", "Internal: write this file after wake lock acquisition")
 	debugFlag := fs.Bool("debug", false, "Log injection diagnostics to stderr")
 	acceptExistingWakeFlag := fs.Bool("accept-existing-wake", false, "Internal: allow a usable existing wake to satisfy readiness")
+	replaceExistingBaselineFlag := fs.Bool("replace-existing-baseline", false, "Internal: rotate an exact inject-via wake to a new baseline floor")
+	baselineExistingFlag := fs.Bool("baseline-existing", false, "Ignore messages already waiting when this wake starts")
+	baselineFileFlag := fs.String("baseline-file", "", "Pre-launch unread-floor manifest produced by coop exec --defer-wake")
 
 	usage := usageWithHiddenFlags(fs, "amq wake --me <agent> [options]",
-		[]string{"ready-file", "accept-existing-wake"},
+		[]string{"ready-file", "accept-existing-wake", "replace-existing-baseline"},
 		"Background waker: injects terminal notification when messages arrive.",
 		"Run as background job before starting CLI: amq wake --me claude &",
 		"",
@@ -755,6 +921,21 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	if err := validateKnownHandles(root, common.Strict, me); err != nil {
 		return err
 	}
+	baselineFile := strings.TrimSpace(*baselineFileFlag)
+	if *baselineFileFlag != "" && baselineFile == "" {
+		return UsageError("--baseline-file must not be blank")
+	}
+	if *baselineExistingFlag && baselineFile != "" {
+		return UsageError("--baseline-file and --baseline-existing are mutually exclusive")
+	}
+	var baseline *wakeBaseline
+	if baselineFile != "" {
+		loaded, err := readWakeBaseline(baselineFile, root, me)
+		if err != nil {
+			return fmt.Errorf("load wake baseline: %w", err)
+		}
+		baseline = &loaded
+	}
 
 	injectVia := strings.TrimSpace(*injectViaFlag)
 	if *injectViaFlag != "" && injectVia == "" {
@@ -776,6 +957,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	if *readyFileFlag != "" && readyFile == "" {
 		return UsageError("--ready-file must not be blank")
 	}
+	if *replaceExistingBaselineFlag && (!*acceptExistingWakeFlag || readyFile == "" || baselineFile == "" || injectVia == "") {
+		return UsageError("--replace-existing-baseline requires --accept-existing-wake, --ready-file, --baseline-file, and --inject-via")
+	}
 
 	// Verify TIOCSTI is available (skip in inject-via mode — uses external command instead)
 	if injectVia == "" && injectMode != wakeInjectModeNone {
@@ -794,6 +978,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		return UsageError("%v", err)
 	}
 
+	acceptExistingWake := readyFile != "" && *acceptExistingWakeFlag
 	var target *wakeTarget
 	if injectVia != "" {
 		owner, err := wakeOwnerFromEnv()
@@ -805,15 +990,55 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 			return err
 		}
 		value.Owner = owner
+		if *baselineExistingFlag {
+			persistedFloor := false
+			if acceptExistingWake {
+				inspection, reusable, err := reusableExistingWake(root, me, value)
+				if err != nil {
+					return err
+				}
+				if reusable {
+					if err := waitForWakeCatchupReady(root, me, inspection, existingWakeCatchupTimeout(*injectTimeoutFlag)); err != nil {
+						return err
+					}
+					return writeWakeReadyFile(root, me, readyFile, inspection)
+				}
+				loaded, found, err := persistedExactWakeBaseline(root, me, value)
+				if err != nil {
+					return err
+				}
+				if found {
+					baseline = &loaded
+					persistedFloor = true
+				}
+			}
+			if !persistedFloor {
+				loaded, err := captureWakeBaseline(root, me)
+				if err != nil {
+					return fmt.Errorf("capture existing wake baseline: %w", err)
+				}
+				baseline = &loaded
+				defer removeWakeBaselineIfUnreferenced(root, me, loaded.Path)
+			}
+		}
+		if baseline != nil && baseline.Path != "" {
+			value.BaselineFile = baseline.Path
+			value.BaselineDigest = baseline.Digest
+		}
 		if err := validateWakeTarget(value, root, me); err != nil {
 			return err
 		}
 		injectVia = value.InjectVia
 		target = &value
+	} else if *baselineExistingFlag {
+		loaded, err := snapshotWakeExistingMessages(root, me)
+		if err != nil {
+			return fmt.Errorf("snapshot existing wake messages: %w", err)
+		}
+		baseline = &loaded
 	}
 
 	// Acquire lock to prevent duplicate wake processes
-	acceptExistingWake := readyFile != "" && *acceptExistingWakeFlag
 	lockWakeMode := injectMode
 	if target != nil {
 		lockWakeMode = wakeTargetInjectVia
@@ -821,13 +1046,18 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		lockWakeMode = effectiveInjectMode(&wakeConfig{me: me, injectMode: lockWakeMode})
 	}
 	cleanup, err := acquireWakeLockWithOptions(root, me, wakeLockAcquireOptions{
-		acceptExistingValid: acceptExistingWake,
-		target:              target,
-		wakeMode:            lockWakeMode,
+		acceptExistingValid:       acceptExistingWake,
+		replaceExistingBaseline:   *replaceExistingBaselineFlag,
+		materializeLegacyBaseline: *baselineExistingFlag && target != nil && target.BaselineFile != "",
+		target:                    target,
+		wakeMode:                  lockWakeMode,
 	})
 	if err != nil {
 		var alreadyRunning *wakeAlreadyRunningError
 		if acceptExistingWake && errors.As(err, &alreadyRunning) {
+			if err := waitForWakeCatchupReady(root, me, alreadyRunning.Inspection, existingWakeCatchupTimeout(*injectTimeoutFlag)); err != nil {
+				return err
+			}
 			return writeWakeReadyFile(root, me, readyFile, alreadyRunning.Inspection)
 		}
 		return err
@@ -878,13 +1108,41 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		interruptNotice:   strings.TrimSpace(*interruptNoticeFlag),
 		interruptCooldown: *interruptCooldownFlag,
 		controlStop:       controlStop,
-	}
-
-	if err := writeWakeReadyFile(root, me, readyFile, inspectWakeLock(root, me)); err != nil {
-		return err
+		baseline:          baseline,
+		seen:              make(map[string]struct{}),
+		readyFile:         readyFile,
+		readyInspection:   inspectWakeLock(root, me),
 	}
 
 	return loop(cfg)
+}
+
+func snapshotWakeExistingMessages(root, me string) (wakeBaseline, error) {
+	entries, err := os.ReadDir(fsq.AgentInboxNew(root, me))
+	if err != nil {
+		return wakeBaseline{}, err
+	}
+	baseline := wakeBaseline{IDs: make(map[string]struct{}), Files: make(map[string]struct{})}
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		name := entry.Name()
+		baseline.Files[name] = struct{}{}
+		if header, readErr := format.ReadHeaderFile(filepath.Join(fsq.AgentInboxNew(root, me), name)); readErr == nil {
+			if id := strings.TrimSpace(header.ID); id != "" {
+				baseline.IDs[id] = struct{}{}
+			}
+		}
+	}
+	return baseline, nil
+}
+
+func publishWakeReady(cfg wakeConfig) error {
+	if err := writeWakeCatchupReadyFile(cfg.root, cfg.me, cfg.readyInspection); err != nil {
+		return err
+	}
+	return writeWakeReadyFile(cfg.root, cfg.me, cfg.readyFile, cfg.readyInspection)
 }
 
 func parseInterruptKey(raw string) (string, error) {
@@ -945,9 +1203,13 @@ func runWakeLoop(cfg wakeConfig) error {
 	// Touch presence immediately so `amq who` shows agent as active
 	_ = presence.Touch(cfg.root, cfg.me)
 
-	// Notify if messages already exist
+	// The watcher is installed before this catch-up scan, so messages arriving
+	// after the floor snapshot cannot fall into a scan/watch gap.
 	if err := notifyNewMessages(&cfg); err != nil {
-		_ = writeStderr("amq wake: notify error: %v\n", err)
+		return fmt.Errorf("initial wake catch-up: %w", err)
+	}
+	if err := publishWakeReady(cfg); err != nil {
+		return err
 	}
 
 	for {

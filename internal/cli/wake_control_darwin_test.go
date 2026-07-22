@@ -44,6 +44,43 @@ func TestDarwinCooperativeStopACKAfterLockRemoval(t *testing.T) {
 	}
 }
 
+func TestDarwinControlRootAliasSupportsStartAndCooperativeStop(t *testing.T) {
+	realRoot := filepath.Join(secureTempDirForTest(t), "real-root")
+	if err := fsq.EnsureAgentDirs(realRoot, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(secureTempDirForTest(t), "root-alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("root symlinks unsupported: %v", err)
+	}
+	lock := wakeLock{
+		PID:        os.Getpid(),
+		Root:       canonicalWakeRoot(aliasRoot),
+		Agent:      "codex",
+		WakeMode:   wakeTargetInjectVia,
+		Generation: "0123456789abcdef0123456789abcdef",
+	}
+	lock.ControlSocket = wakeControlSocketPath(aliasRoot, "codex", lock.Generation)
+	if got, want := filepath.Dir(lock.ControlSocket), fsq.AgentBase(realRoot, "codex"); got != want {
+		t.Fatalf("control socket directory = %q, want canonical agent directory %q", got, want)
+	}
+	writeWakeLockExactForTest(t, aliasRoot, "codex", lock)
+
+	cleanup, stopped, markStopped, err := startWakeControlListener(aliasRoot, "codex", lock)
+	if err != nil {
+		t.Fatalf("start through root alias: %v", err)
+	}
+	defer cleanup()
+	go func() { <-stopped; markStopped() }()
+	replaced, err := cooperativeStopInjectVia(inspectWakeLock(aliasRoot, "codex"))
+	if err != nil || !replaced {
+		t.Fatalf("stop through root alias=(%v,%v)", replaced, err)
+	}
+	if current := inspectWakeLock(realRoot, "codex"); current.Exists {
+		t.Fatal("canonical generation remained after cooperative stop")
+	}
+}
+
 func TestDarwinCooperativeStopACKWaitsForLoopExit(t *testing.T) {
 	root, agent, lock := testDarwinControlLock(t)
 	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock)

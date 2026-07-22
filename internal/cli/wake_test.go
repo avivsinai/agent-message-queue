@@ -287,9 +287,10 @@ func TestInjectNotification_InjectVia_Failure(t *testing.T) {
 		debug:     false,
 	}
 
-	// Should not return error — falls back to stderr
-	if err := injectNotification(cfg, "test", true); err != nil {
-		t.Fatalf("expected graceful fallback, got error: %v", err)
+	// Stderr remains diagnostic output, but the failed external injector must
+	// not acknowledge delivery or make the message ineligible for retry.
+	if err := injectNotification(cfg, "test", true); err == nil {
+		t.Fatal("expected failed external injection to remain retryable")
 	}
 }
 
@@ -301,11 +302,11 @@ func TestInjectNotification_InjectVia_FailureWarnsOnce(t *testing.T) {
 
 	text := "fallback notice"
 	stderr := captureWakeStderr(t, func() {
-		if err := injectNotification(cfg, text, true); err != nil {
-			t.Fatalf("first injectNotification: %v", err)
+		if err := injectNotification(cfg, text, true); err == nil {
+			t.Fatal("first injectNotification unexpectedly succeeded")
 		}
-		if err := injectNotification(cfg, text, true); err != nil {
-			t.Fatalf("second injectNotification: %v", err)
+		if err := injectNotification(cfg, text, true); err == nil {
+			t.Fatal("second injectNotification unexpectedly succeeded")
 		}
 	})
 
@@ -685,7 +686,7 @@ func TestNotifyNewMessages_InjectViaInterruptInjectsKeyAndHonorsCooldown(t *test
 		48,
 		"",
 	)
-	expected := "\x03\n" + expectedText + "\n" + expectedText + "\n"
+	expected := "\x03\n" + expectedText + "\n"
 
 	got, err := os.ReadFile(logPath)
 	if err != nil {
@@ -891,8 +892,8 @@ func TestNotifyNewMessages_InjectViaInterruptFailureDoesNotUpdateCooldown(t *tes
 		interruptCooldown: 7 * time.Second,
 	}
 
-	if err := notifyNewMessages(cfg); err != nil {
-		t.Fatalf("notifyNewMessages: %v", err)
+	if err := notifyNewMessages(cfg); err == nil {
+		t.Fatal("notifyNewMessages unexpectedly acknowledged failed external injection")
 	}
 	if !cfg.lastInterrupt.IsZero() {
 		t.Fatalf("expected failed interrupt transport to leave cooldown unchanged, got %s", cfg.lastInterrupt)

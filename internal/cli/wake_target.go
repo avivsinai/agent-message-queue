@@ -29,20 +29,39 @@ type wakeOwner struct {
 }
 
 type wakeTarget struct {
-	Schema     int        `json:"schema"`
-	Mode       string     `json:"mode"`
-	Root       string     `json:"root"`
-	Agent      string     `json:"agent"`
-	Created    string     `json:"created"`
-	InjectVia  string     `json:"inject_via"`
-	InjectArgs []string   `json:"inject_args,omitempty"`
-	Owner      *wakeOwner `json:"owner,omitempty"`
+	Schema         int        `json:"schema"`
+	Mode           string     `json:"mode"`
+	Root           string     `json:"root"`
+	Agent          string     `json:"agent"`
+	Created        string     `json:"created"`
+	InjectVia      string     `json:"inject_via"`
+	InjectArgs     []string   `json:"inject_args,omitempty"`
+	Owner          *wakeOwner `json:"owner,omitempty"`
+	BaselineFile   string     `json:"baseline_file,omitempty"`
+	BaselineDigest string     `json:"baseline_digest,omitempty"`
 }
 
-// sameWakeInjectorIdentity compares the behavior fixed at launch. Created and
-// owner metadata describe an instance, not the injector semantics it provides.
+// sameWakeInjectorTransport compares the executable behavior fixed at launch.
+// Owner and baseline metadata are checked separately by callers because they
+// have different lifecycle semantics.
+func sameWakeInjectorTransport(first, second wakeTarget) bool {
+	return first.InjectVia == second.InjectVia &&
+		slices.Equal(first.InjectArgs, second.InjectArgs)
+}
+
+// sameWakeInjectorIdentity requires the exact notification floor as well as
+// the executable transport. Created and owner metadata describe an instance.
 func sameWakeInjectorIdentity(first, second wakeTarget) bool {
-	return first.InjectVia == second.InjectVia && slices.Equal(first.InjectArgs, second.InjectArgs)
+	return sameWakeInjectorTransport(first, second) &&
+		first.BaselineFile == second.BaselineFile &&
+		first.BaselineDigest == second.BaselineDigest
+}
+
+func sameWakeOwner(first, second *wakeOwner) bool {
+	if first == nil || second == nil {
+		return first == nil && second == nil
+	}
+	return *first == *second
 }
 
 func wakeTargetPath(root, me string) string {
@@ -202,6 +221,18 @@ func validateWakeTarget(target wakeTarget, root, me string) error {
 	if target.Owner != nil {
 		if err := validateWakeOwner(*target.Owner); err != nil {
 			return err
+		}
+	}
+	if (target.BaselineFile == "") != (target.BaselineDigest == "") {
+		return fmt.Errorf("wake target baseline file and digest must be set together")
+	}
+	if target.BaselineFile != "" {
+		baseline, err := readWakeBaseline(target.BaselineFile, root, me)
+		if err != nil {
+			return fmt.Errorf("validate wake target baseline: %w", err)
+		}
+		if baseline.Digest != target.BaselineDigest {
+			return fmt.Errorf("wake target baseline digest mismatch")
 		}
 	}
 	return nil

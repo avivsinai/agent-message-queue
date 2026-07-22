@@ -112,6 +112,48 @@ func TestRetireWakeRemovesExactlyBoundProvenStaleLock(t *testing.T) {
 	}
 }
 
+func TestRetireWakeMatchesTransportWhenPersistedTargetHasBaseline(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := captureWakeBaseline(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	injector := writeExecutableForTest(t, "injector")
+	persisted := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec", "terminal-a"})
+	persisted.BaselineFile = baseline.Path
+	persisted.BaselineDigest = baseline.Digest
+	if err := writeWakeTarget(root, "codex", persisted); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+		PID: wakePID, TTY: "unknown", ProcessStart: "wake-start", BootID: "boot-1",
+		Executable: "/opt/homebrew/bin/amq", Generation: "0123456789abcdef0123456789abcdef",
+	}, persisted))
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+	requested := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec", "terminal-a"})
+
+	result, err := retireWake(root, "codex", requested)
+	if err != nil || result.Status != "retired" {
+		t.Fatalf("baseline-bound retire result=%#v err=%v", result, err)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("baseline-bound stale lock still exists: %v", err)
+	}
+	target, exists, err := readWakeTarget(root, "codex")
+	if err != nil || !exists || target.BaselineFile != baseline.Path {
+		t.Fatalf("retire did not preserve exact target: exists=%v target=%#v err=%v", exists, target, err)
+	}
+}
+
 func TestRetireWakeRefusesMissingSavedTarget(t *testing.T) {
 	const wakePID = 4242
 	root := secureTempDirForTest(t)

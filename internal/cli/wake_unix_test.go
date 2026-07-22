@@ -123,8 +123,14 @@ func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
 		"--inject-via", injector,
 		"--ready-file", readyPath,
 	}, func(cfg wakeConfig) error {
+		if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+			t.Fatalf("ready file existed before loop catch-up: %v", statErr)
+		}
+		if readyErr := publishWakeReady(cfg); readyErr != nil {
+			t.Fatalf("publishWakeReady: %v", readyErr)
+		}
 		if _, statErr := os.Stat(readyPath); statErr != nil {
-			t.Fatalf("expected ready file before wake loop: %v", statErr)
+			t.Fatalf("expected ready file after catch-up acknowledgement: %v", statErr)
 		}
 		return errDone
 	})
@@ -153,8 +159,14 @@ func TestRunWakeWithLoopNoneSkipsTTYAndWritesReadyFile(t *testing.T) {
 		if cfg.injectMode != wakeInjectModeNone {
 			t.Fatalf("injectMode = %q, want none", cfg.injectMode)
 		}
+		if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+			t.Fatalf("ready file existed before loop catch-up: %v", statErr)
+		}
+		if readyErr := publishWakeReady(cfg); readyErr != nil {
+			t.Fatalf("publishWakeReady: %v", readyErr)
+		}
 		if _, statErr := os.Stat(readyPath); statErr != nil {
-			t.Fatalf("expected ready file before wake loop: %v", statErr)
+			t.Fatalf("expected ready file after catch-up acknowledgement: %v", statErr)
 		}
 		return errDone
 	})
@@ -650,6 +662,9 @@ func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
 	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
 	}
+	if err := writeWakeCatchupReadyFile(root, "orchestrator", inspectWakeLock(root, "orchestrator")); err != nil {
+		t.Fatalf("writeWakeCatchupReadyFile: %v", err)
+	}
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
 	err := runWakeWithLoop([]string{
@@ -738,6 +753,9 @@ func TestRunWakeWithLoopNoneAcceptsExistingNoneWake(t *testing.T) {
 		WakeMode:     wakeInjectModeNone,
 		Generation:   "generation-1",
 	})
+	if err := writeWakeCatchupReadyFile(root, "orchestrator", inspectWakeLock(root, "orchestrator")); err != nil {
+		t.Fatalf("writeWakeCatchupReadyFile: %v", err)
+	}
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
 	err := runWakeWithLoop([]string{
@@ -1017,6 +1035,9 @@ func TestRunWakeWithLoopAcceptExistingWakeAcceptsInjectViaUnknownTTY(t *testing.
 	}, target))
 	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
+	}
+	if err := writeWakeCatchupReadyFile(root, "orchestrator", inspectWakeLock(root, "orchestrator")); err != nil {
+		t.Fatalf("writeWakeCatchupReadyFile: %v", err)
 	}
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")

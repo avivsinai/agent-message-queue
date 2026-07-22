@@ -122,6 +122,18 @@ the wake stores a repair target so `amq wake repair` can restart wake later
 without restarting the agent TUI. If `--require-wake` reuses an existing wake,
 that wake must already have repair metadata to be repairable.
 
+SessionStart-managed launchers can use `amq coop exec --defer-wake ...` to start
+the TUI before attaching wake. AMQ captures the pre-launch unread floor in a
+private manifest and exports its path as `AMQ_WAKE_BASELINE_FILE`; the hook must
+start `amq wake --baseline-file "$AMQ_WAKE_BASELINE_FILE"` and require its
+generation-bound readiness acknowledgement. Messages arriving between capture
+and hook attachment remain eligible for notification. Baseline capture failure
+does not block the TUI: AMQ exports the sanitized `AMQ_WAKE_BASELINE_ERROR`, and
+the hook should show a visible “wake unavailable; messages remain queued”
+warning. Installing that SessionStart hook is a hard prerequisite: without it,
+`--defer-wake` intentionally starts the TUI but cannot attach wake or show the
+hook-owned warning. Wake never drains messages or emits consumption receipts.
+
 ### 3. Send & Receive
 
 ```bash
@@ -221,6 +233,11 @@ or injecting into the wrong terminal. Repaired wake output goes to
 `agents/<agent>/.wake.repair.log`; `doctor --ops` can report whether repair is
 available, but it never starts a wake process.
 
+Repairable `--baseline-existing` inject-via wakes materialize and persist their
+original floor once. A restart reuses that exact manifest, so messages that
+arrived during notifier downtime are not accidentally suppressed by a fresh
+snapshot. A missing or changed persisted floor fails closed.
+
 `amq wake retire` is the exact managed-shutdown path. It requires the caller's
 expected `--inject-via` executable and ordered `--inject-arg` values. A live
 wake is retired only when its process identity, unchanged lock generation, and
@@ -228,6 +245,9 @@ saved target all match: Linux signals through its pidfd capability and macOS
 uses the generation-bound cooperative control socket. An exactly-bound
 proven-stale lock may be removed without signaling. The mailbox and saved
 target are preserved in either case; raw and unverified wakes fail closed.
+The requested retire target need not repeat persisted baseline metadata: process
+signaling is bound to the unchanged lock generation and exact injector transport,
+while the saved floor remains part of the lock-bound target validation.
 
 The lifecycle boundaries are:
 

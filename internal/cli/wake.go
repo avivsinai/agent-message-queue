@@ -12,6 +12,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
 type wakeConfig struct {
@@ -42,6 +43,10 @@ type wakeConfig struct {
 	interruptCooldown time.Duration
 	lastInterrupt     time.Time
 	controlStop       <-chan struct{}
+	baseline          *wakeBaseline
+	seen              map[string]struct{}
+	readyFile         string
+	readyInspection   wakeLockInspection
 }
 
 const defaultInjectTimeout = 5 * time.Second
@@ -81,6 +86,8 @@ var (
 )
 
 type wakeMsgInfo struct {
+	id       string
+	filename string
 	from     string
 	subject  string
 	priority string
@@ -144,8 +151,8 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		return err
 	}
 
-	var messages []wakeMsgInfo
-	senderCounts := make(map[string]int)
+	var normalMessages []wakeMsgInfo
+	normalCounts := make(map[string]int)
 	var interruptMessages []wakeMsgInfo
 	interruptCounts := make(map[string]int)
 
@@ -157,7 +164,9 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
 			continue
 		}
-
+		if wakeMessageSeen(cfg, "", name) {
+			continue
+		}
 		path := filepath.Join(inboxNew, name)
 		header, err := format.ReadHeaderFile(path)
 		if err != nil {
@@ -165,8 +174,12 @@ func notifyNewMessages(cfg *wakeConfig) error {
 				continue
 			}
 			// Count corrupt messages too
-			messages = append(messages, wakeMsgInfo{from: "unknown", subject: "(parse error)"})
-			senderCounts["unknown"]++
+			normalMessages = append(normalMessages, wakeMsgInfo{filename: name, from: "unknown", subject: "(parse error)"})
+			normalCounts["unknown"]++
+			continue
+		}
+		id := strings.TrimSpace(header.ID)
+		if wakeMessageSeen(cfg, id, name) || hasValidDrainedReceipt(cfg.root, cfg.me, id) {
 			continue
 		}
 
@@ -180,22 +193,24 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		priority := strings.TrimSpace(header.Priority)
 
 		info := wakeMsgInfo{
+			id:       id,
+			filename: name,
 			from:     from,
 			subject:  subject,
 			priority: priority,
 			labels:   header.Labels,
 		}
 
-		messages = append(messages, info)
-		senderCounts[from]++
-
 		if cfg.interrupt && isInterruptMessage(info, cfg) {
 			interruptMessages = append(interruptMessages, info)
 			interruptCounts[from]++
+		} else {
+			normalMessages = append(normalMessages, info)
+			normalCounts[from]++
 		}
 	}
 
-	if len(messages) == 0 {
+	if len(normalMessages) == 0 && len(interruptMessages) == 0 {
 		return nil
 	}
 
@@ -203,21 +218,29 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.previewLen, cfg.interruptNotice)
 		if cfg.injectMode == wakeInjectModeNone {
 			writeWakeOutput(interruptText, true)
-			return nil
-		}
-		now := time.Now()
-		if cfg.interruptKey != "" && shouldInterruptNow(cfg, now) {
-			if cfg.injectVia != "" {
-				if err := injectVia(cfg, cfg.interruptKey); err == nil {
+			markWakeMessagesSeen(cfg, interruptMessages)
+		} else {
+			now := time.Now()
+			if cfg.interruptKey != "" && shouldInterruptNow(cfg, now) {
+				if cfg.injectVia != "" {
+					if err := injectVia(cfg, cfg.interruptKey); err == nil {
+						cfg.lastInterrupt = now
+						time.Sleep(50 * time.Millisecond)
+					}
+				} else if err := tiocsti.Inject(cfg.interruptKey); err == nil {
 					cfg.lastInterrupt = now
 					time.Sleep(50 * time.Millisecond)
 				}
-			} else if err := tiocsti.Inject(cfg.interruptKey); err == nil {
-				cfg.lastInterrupt = now
-				time.Sleep(50 * time.Millisecond)
 			}
+			if err := injectNotification(cfg, interruptText, false); err != nil {
+				return err
+			}
+			markWakeMessagesSeen(cfg, interruptMessages)
 		}
-		return injectNotification(cfg, interruptText, false)
+	}
+
+	if len(normalMessages) == 0 {
+		return nil
 	}
 
 	// Build notification text
@@ -227,10 +250,60 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		text = "\n" + cfg.injectCmd + "\n"
 	} else {
 		// Default: informational notice
-		text = buildNotificationText(cfg.session, messages, senderCounts, cfg.previewLen)
+		text = buildNotificationText(cfg.session, normalMessages, normalCounts, cfg.previewLen)
 	}
 
-	return injectNotification(cfg, text, true)
+	if err := injectNotification(cfg, text, true); err != nil {
+		return err
+	}
+	markWakeMessagesSeen(cfg, normalMessages)
+	return nil
+}
+
+func wakeMessageSeen(cfg *wakeConfig, id, filename string) bool {
+	if sameWakeBaselineMessage(cfg.baseline, id, filename) {
+		return true
+	}
+	if cfg.seen == nil {
+		return false
+	}
+	if id != "" {
+		if _, ok := cfg.seen["id:"+id]; ok {
+			return true
+		}
+	}
+	_, ok := cfg.seen["file:"+filename]
+	return ok
+}
+
+func markWakeMessagesSeen(cfg *wakeConfig, messages []wakeMsgInfo) {
+	if cfg.seen == nil {
+		cfg.seen = make(map[string]struct{})
+	}
+	for _, message := range messages {
+		if message.id != "" {
+			cfg.seen["id:"+message.id] = struct{}{}
+		}
+		if message.filename != "" {
+			cfg.seen["file:"+message.filename] = struct{}{}
+		}
+	}
+}
+
+func hasValidDrainedReceipt(root, me, id string) bool {
+	if id == "" {
+		return false
+	}
+	receipts, err := receipt.List(root, me, receipt.ListFilter{MsgID: id, Consumer: me, Stage: receipt.StageDrained})
+	if err != nil {
+		return false
+	}
+	for _, item := range receipts {
+		if item.Schema == format.CurrentSchema && item.MsgID == id && item.Consumer == me && item.Stage == receipt.StageDrained {
+			return true
+		}
+	}
+	return false
 }
 
 func buildNotificationText(session string, messages []wakeMsgInfo, senderCounts map[string]int, previewLen int) string {
@@ -408,6 +481,10 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 				cfg.fallbackWarn = false
 			}
 			_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
+			// An external injector is commonly the only path back into a TUI.
+			// Stderr may be detached or hidden, so it is a diagnostic fallback,
+			// not a delivery acknowledgement. Keep the message retryable.
+			return err
 		}
 		return nil
 	}

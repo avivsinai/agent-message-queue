@@ -4,6 +4,8 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func TestSplitDashDash(t *testing.T) {
@@ -132,6 +135,87 @@ func TestCoopExecRequireWakeRejectsNoWake(t *testing.T) {
 	}
 }
 
+func TestCoopExecDeferWakeRejectsActiveWakeOptions(t *testing.T) {
+	for _, args := range [][]string{
+		{"--defer-wake", "--no-wake", "claude"},
+		{"--defer-wake", "--require-wake", "claude"},
+		{"--defer-wake", "--wake-inject-mode", "none", "claude"},
+		{"--defer-wake", "--wake-inject-via", "/tmp/injector", "claude"},
+		{"--defer-wake", "--wake-inject-arg", "exec", "claude"},
+	} {
+		err := runCoopExec(args)
+		if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+			t.Fatalf("runCoopExec(%v) error = %v, want defer-wake conflict", args, err)
+		}
+	}
+}
+
+func TestCoopExecDeferWakeExportsManifestBeforeExec(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeTestMessage(t, root, "codex", "stale.md", "stale-id", "private subject", "private body")
+
+	oldExec := coopExecProcess
+	defer func() { coopExecProcess = oldExec }()
+	sentinel := errors.New("exec intercepted")
+	coopExecProcess = func(_ string, _ []string, env []string) error {
+		path := envValue(env, envWakeBaselineFile)
+		if path == "" || envValue(env, envWakeBaselineError) != "" {
+			t.Fatalf("deferred env missing manifest or contains error: %#v", env)
+		}
+		baseline, err := readWakeBaseline(path, root, "codex")
+		if err != nil {
+			t.Fatalf("readWakeBaseline before exec: %v", err)
+		}
+		if _, ok := baseline.IDs["stale-id"]; !ok {
+			t.Fatalf("baseline ids = %#v", baseline.IDs)
+		}
+		return sentinel
+	}
+	err := runCoopExec([]string{"--defer-wake", "--no-init", "--root", root, "--me", "codex", "true"})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("runCoopExec error = %v", err)
+	}
+}
+
+func TestCoopExecDeferWakeCaptureFailureStillExecsWithSanitizedError(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= maxWakeBaselineMessages; i++ {
+		name := fmt.Sprintf("stale-%04d.md", i)
+		if err := os.WriteFile(filepath.Join(fsq.AgentInboxNew(root, "codex"), name), []byte("invalid"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	oldExec := coopExecProcess
+	defer func() { coopExecProcess = oldExec }()
+	sentinel := errors.New("exec intercepted")
+	coopExecProcess = func(_ string, _ []string, env []string) error {
+		if got := envValue(env, envWakeBaselineFile); got != "" {
+			t.Fatalf("baseline file = %q, want empty", got)
+		}
+		if got := envValue(env, envWakeBaselineError); got != wakeBaselineCaptureError {
+			t.Fatalf("baseline error = %q, want sanitized code", got)
+		}
+		return sentinel
+	}
+	err := runCoopExec([]string{"--defer-wake", "--no-init", "--root", root, "--me", "codex", "true"})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("runCoopExec error = %v", err)
+	}
+}
+
 func TestCoopExecWakeInjectViaValidation(t *testing.T) {
 	nonExecutable := filepath.Join(secureTempDirForTest(t), "injector")
 	if err := os.WriteFile(nonExecutable, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
@@ -213,7 +297,7 @@ func TestCoopExecWakeInjectModeValidation(t *testing.T) {
 
 func TestBuildCoopWakeArgsIncludesNoneMode(t *testing.T) {
 	got := buildCoopWakeArgs("codex", "/tmp/root", "none", "", nil)
-	want := []string{"--no-update-check", "wake", "--me", "codex", "--root", "/tmp/root", "--inject-mode", "none"}
+	want := []string{"--no-update-check", "wake", "--me", "codex", "--root", "/tmp/root", "--baseline-existing", "--inject-mode", "none"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("buildCoopWakeArgs() = %#v, want %#v", got, want)
 	}

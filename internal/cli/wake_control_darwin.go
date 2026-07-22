@@ -23,8 +23,9 @@ import (
 var darwinSocketCWDMu sync.Mutex
 
 func wakeControlSocketPath(root, me, generation string) string {
-	sum := sha256.Sum256([]byte(canonicalWakeRoot(root) + "\x00" + me + "\x00" + generation))
-	return filepath.Join(fsq.AgentBase(root, me), ".w."+hex.EncodeToString(sum[:8]))
+	canonicalRoot := canonicalWakeRoot(root)
+	sum := sha256.Sum256([]byte(canonicalRoot + "\x00" + me + "\x00" + generation))
+	return filepath.Join(fsq.AgentBase(canonicalRoot, me), ".w."+hex.EncodeToString(sum[:8]))
 }
 
 func withDarwinSocketDirFD(dirfd int, fn func() error) error {
@@ -260,7 +261,7 @@ func startWakeControlListener(root, me string, lock wakeLock) (func(), <-chan st
 	if path == "" {
 		return func() {}, nil, func() {}, nil
 	}
-	agentDir, err := openWakeAgentDir(root, me)
+	agentDir, err := openWakeAgentDir(canonicalWakeRoot(root), me)
 	if err != nil {
 		return nil, nil, nil, err
 	}

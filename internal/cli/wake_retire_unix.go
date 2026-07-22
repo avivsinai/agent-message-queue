@@ -185,7 +185,7 @@ func requireExistingWakeTargetMatches(inspection wakeLockInspection, requested w
 	if err := validateWakeTargetMatchesLock(inspection.Lock, persisted); err != nil {
 		return err
 	}
-	if !sameWakeInjectorIdentity(persisted, requested) {
+	if !sameWakeInjectorTransport(persisted, requested) {
 		return errors.New("saved wake target uses a different injector path or fixed arguments")
 	}
 	return nil
