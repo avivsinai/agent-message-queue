@@ -14,7 +14,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-func TestWakeUpgradeRaceRepairAcceptsConcurrentCurrentAcquire(t *testing.T) {
+func TestWakeUpgradeRaceRepairRejectsConcurrentCurrentAcquire(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
 	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec", "terminal-a"})
@@ -84,11 +84,11 @@ func TestWakeUpgradeRaceRepairAcceptsConcurrentCurrentAcquire(t *testing.T) {
 
 	close(releaseRepair)
 	got := <-repaired
-	if got.err != nil {
-		t.Fatalf("repair rejected exact concurrent winner: result=%#v err=%v", got.result, got.err)
+	if got.err == nil || !strings.Contains(got.err.Error(), "lost start race") {
+		t.Fatalf("repair accepted a winner that did not install its baseline: result=%#v err=%v", got.result, got.err)
 	}
-	if got.result.Status != "repaired" || got.result.PID != os.Getpid() {
-		t.Fatalf("repair result = %#v, want current acquire as repaired winner", got.result)
+	if got.result.Status != "error" {
+		t.Fatalf("repair result = %#v, want rejected concurrent winner", got.result)
 	}
 	persisted, exists, err := readWakeTarget(root, "codex")
 	if err != nil || !exists || !sameWakeInjectorIdentity(persisted, target) {
