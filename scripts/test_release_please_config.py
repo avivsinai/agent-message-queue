@@ -45,6 +45,16 @@ def test_release_please_workflow_is_pr_only_and_staged() -> None:
     assert "if: ${{ env.RELEASE_PLEASE_TOKEN != '' }}" in workflow
     assert "if: ${{ env.RELEASE_PLEASE_TOKEN == '' }}" in workflow
 
+    release_commit_guard = """\
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        !startsWith(github.event.head_commit.message, 'chore(release): v')
+      }}
+"""
+    release_job = workflow[workflow.index("  release-please:\n") :]
+    assert release_commit_guard in release_job
+
     release_workflow = (ROOT / ".github/workflows/release.yml").read_text()
     assert "predates scripts/release_changelog_section.py" in release_workflow
     assert "python3 scripts/release_changelog_section.py" not in release_workflow
