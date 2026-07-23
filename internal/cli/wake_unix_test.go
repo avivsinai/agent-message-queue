@@ -2258,6 +2258,9 @@ func TestWaitForWakeReadyFailsWhenWakeExitsBeforeReady(t *testing.T) {
 	if !strings.Contains(err.Error(), "amq wake exited before becoming ready") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if !strings.Contains(err.Error(), "exit code 7") {
+		t.Fatalf("readiness error lost child exit status: %v", err)
+	}
 }
 
 func TestWaitForWakeReadyAcceptsReadyFileWrittenBeforeExit(t *testing.T) {

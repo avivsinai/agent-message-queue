@@ -240,6 +240,11 @@ func authorizeOwnerBoundWakeTransition(inspection wakeLockInspection, requested 
 	if err := validateWakeTarget(persisted, inspection.Root, inspection.Agent); err != nil {
 		return fmt.Errorf("persisted wake ownership for %s is invalid; refusing automatic takeover: %w", inspection.Agent, err)
 	}
+	if inspection.Exists {
+		if err := validateWakeTargetMatchesLock(inspection.Lock, persisted); err != nil {
+			return fmt.Errorf("persisted wake ownership for %s is not bound to the existing wake lock; refusing automatic takeover: %w", inspection.Agent, err)
+		}
+	}
 	if persisted.Owner == nil {
 		return fmt.Errorf("persisted wake ownership for %s is legacy and has no owner identity; refusing automatic takeover", inspection.Agent)
 	}

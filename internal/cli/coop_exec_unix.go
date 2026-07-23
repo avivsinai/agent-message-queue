@@ -387,10 +387,14 @@ func waitForWakeReady(proc *os.Process, readyPath, root, me string, timeout time
 	if proc == nil {
 		return fmt.Errorf("amq wake process missing")
 	}
-	done := make(chan error, 1)
+	type waitResult struct {
+		state *os.ProcessState
+		err   error
+	}
+	done := make(chan waitResult, 1)
 	go func() {
-		_, err := proc.Wait()
-		done <- err
+		state, err := proc.Wait()
+		done <- waitResult{state: state, err: err}
 	}()
 
 	timer := time.NewTimer(timeout)
@@ -406,14 +410,17 @@ func waitForWakeReady(proc *os.Process, readyPath, root, me string, timeout time
 		}
 
 		select {
-		case err := <-done:
+		case result := <-done:
 			if ready, readyErr := validateWakeReadyFileAgainstCurrent(root, me, readyPath); readyErr != nil {
 				return fmt.Errorf("validate wake readiness: %w", readyErr)
 			} else if ready {
 				return nil
 			}
-			if err != nil {
-				return fmt.Errorf("amq wake exited before becoming ready: %w", err)
+			if result.err != nil {
+				return fmt.Errorf("amq wake exited before becoming ready: %w", result.err)
+			}
+			if result.state != nil && result.state.ExitCode() != 0 {
+				return fmt.Errorf("amq wake exited before becoming ready with exit code %d", result.state.ExitCode())
 			}
 			return fmt.Errorf("amq wake exited before becoming ready")
 		case <-timer.C:

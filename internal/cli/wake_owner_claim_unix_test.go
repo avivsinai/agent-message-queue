@@ -325,6 +325,62 @@ func TestOwnerBoundClaimPreservesStaleLockWhenTargetOwnerIsLive(t *testing.T) {
 	}
 }
 
+func TestOwnerBoundClaimRefusesStaleLockTargetBindingMismatch(t *testing.T) {
+	root, injector := setupOwnerClaimTest(t)
+	targetA := ownerClaimTarget(t, root, injector, wakeOwner{
+		PID: 4551, ProcessStart: "owner-a", BootID: "boot-1",
+	})
+	if err := writeWakeTarget(root, "codex", targetA); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+		PID:          4559,
+		TTY:          "unknown",
+		ProcessStart: "old-wake",
+		BootID:       "boot-1",
+		Generation:   "stale-generation",
+	}, targetA))
+
+	targetB := ownerClaimTarget(t, root, injector, wakeOwner{
+		PID: 4552, ProcessStart: "owner-b-dead", BootID: "boot-1",
+	})
+	targetB.InjectArgs = []string{"exec", "replacement"}
+	if err := writeWakeTarget(root, "codex", targetB); err != nil {
+		t.Fatal(err)
+	}
+	targetPath := wakeTargetPath(root, "codex")
+	lockBefore, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetBefore, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requestedOwner := wakeOwner{PID: 4553, ProcessStart: "requester", BootID: "boot-1"}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == requestedOwner.PID {
+			return ownerClaimProcess(pid, requestedOwner.ProcessStart, requestedOwner.BootID)
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	requested := ownerClaimTarget(t, root, injector, requestedOwner)
+
+	_, err = acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+		target: &requested, wakeMode: wakeTargetInjectVia,
+	})
+	if err == nil || !strings.Contains(err.Error(), "not bound to the existing wake lock") {
+		t.Fatalf("acquire error = %v, want target-binding refusal", err)
+	}
+	lockAfter, lockErr := os.ReadFile(lockPath)
+	targetAfter, targetErr := os.ReadFile(targetPath)
+	if lockErr != nil || targetErr != nil ||
+		string(lockAfter) != string(lockBefore) || string(targetAfter) != string(targetBefore) {
+		t.Fatalf("binding mismatch mutated state: lockErr=%v targetErr=%v", lockErr, targetErr)
+	}
+}
+
 func TestOwnerBoundClaimFailsClosedWhenLockHasNoTarget(t *testing.T) {
 	root, injector := setupOwnerClaimTest(t)
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
