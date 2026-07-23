@@ -6,11 +6,95 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
+
+type ownerTransitionTreeEntry struct {
+	Mode os.FileMode
+	Data string
+}
+
+func seedOwnerTransitionSentinels(t *testing.T, root string) {
+	t.Helper()
+	write := func(path, data string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(root, "root.sentinel"), "root")
+	for _, handle := range []string{"codex", "claude", "unrelated"} {
+		if err := fsq.EnsureAgentDirs(root, handle); err != nil {
+			t.Fatal(err)
+		}
+		write(filepath.Join(fsq.AgentInboxNew(root, handle), "preserve.md"), "mailbox:"+handle)
+	}
+	write(filepath.Join(fsq.AgentBase(root, "claude"), ".wake.lock"), "sibling-wake-lock")
+	write(filepath.Join(fsq.AgentBase(root, "unrelated"), ".wake.target"), "unrelated-wake-target")
+}
+
+func snapshotOwnerTransitionTree(t *testing.T, root string) map[string]ownerTransitionTreeEntry {
+	t.Helper()
+	snapshot := make(map[string]ownerTransitionTreeEntry)
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		entry := ownerTransitionTreeEntry{Mode: info.Mode()}
+		if info.Mode().IsRegular() {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			entry.Data = string(data)
+		}
+		snapshot[filepath.ToSlash(rel)] = entry
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func assertOwnerTransitionTreeChangesOnly(
+	t *testing.T,
+	before, after map[string]ownerTransitionTreeEntry,
+	allowed ...string,
+) map[string]bool {
+	t.Helper()
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, path := range allowed {
+		allowedSet[filepath.ToSlash(path)] = true
+	}
+	changed := make(map[string]bool)
+	for path, beforeEntry := range before {
+		afterEntry, exists := after[path]
+		if !exists || !reflect.DeepEqual(beforeEntry, afterEntry) {
+			changed[path] = true
+		}
+	}
+	for path := range after {
+		if _, existed := before[path]; !existed {
+			changed[path] = true
+		}
+	}
+	for path := range changed {
+		if !allowedSet[path] {
+			t.Fatalf("owner transition changed unrelated path %q", path)
+		}
+	}
+	return changed
+}
 
 func setupOwnerClaimTest(t *testing.T) (string, string) {
 	t.Helper()
@@ -348,11 +432,13 @@ func TestOwnerBoundClaimRefusesStaleLockTargetBindingMismatch(t *testing.T) {
 	if err := writeWakeTarget(root, "codex", targetB); err != nil {
 		t.Fatal(err)
 	}
+	seedOwnerTransitionSentinels(t, root)
 	targetPath := wakeTargetPath(root, "codex")
 	lockBefore, err := os.ReadFile(lockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	treeBefore := snapshotOwnerTransitionTree(t, root)
 	targetBefore, err := os.ReadFile(targetPath)
 	if err != nil {
 		t.Fatal(err)
@@ -378,6 +464,60 @@ func TestOwnerBoundClaimRefusesStaleLockTargetBindingMismatch(t *testing.T) {
 	if lockErr != nil || targetErr != nil ||
 		string(lockAfter) != string(lockBefore) || string(targetAfter) != string(targetBefore) {
 		t.Fatalf("binding mismatch mutated state: lockErr=%v targetErr=%v", lockErr, targetErr)
+	}
+	treeAfter := snapshotOwnerTransitionTree(t, root)
+	if changed := assertOwnerTransitionTreeChangesOnly(t, treeBefore, treeAfter); len(changed) != 0 {
+		t.Fatalf("refused transition changed paths: %#v", changed)
+	}
+}
+
+func TestOwnerBoundClaimSuccessfulReclaimPreservesUnrelatedTree(t *testing.T) {
+	root, injector := setupOwnerClaimTest(t)
+	persistedOwner := wakeOwner{PID: 4571, ProcessStart: "dead-owner", BootID: "boot-1"}
+	persisted := ownerClaimTarget(t, root, injector, persistedOwner)
+	if err := writeWakeTarget(root, "codex", persisted); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+		PID:          4579,
+		TTY:          "unknown",
+		ProcessStart: "old-wake",
+		BootID:       "boot-1",
+		Generation:   "stale-generation",
+	}, persisted))
+	seedOwnerTransitionSentinels(t, root)
+	before := snapshotOwnerTransitionTree(t, root)
+
+	requestedOwner := wakeOwner{PID: 4572, ProcessStart: "requester", BootID: "boot-1"}
+	self := os.Getpid()
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		switch pid {
+		case requestedOwner.PID:
+			return ownerClaimProcess(pid, requestedOwner.ProcessStart, requestedOwner.BootID)
+		case self:
+			return ownerClaimProcess(pid, "wake-self", "boot-1")
+		default:
+			return wakeProcessInfo{PID: pid}
+		}
+	})
+	requested := ownerClaimTarget(t, root, injector, requestedOwner)
+	cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+		target: &requested, wakeMode: wakeTargetInjectVia,
+	})
+	if err != nil {
+		t.Fatalf("successful reclaim: %v", err)
+	}
+	defer cleanup()
+
+	after := snapshotOwnerTransitionTree(t, root)
+	changed := assertOwnerTransitionTreeChangesOnly(t, before, after,
+		"agents/codex/.wake.lock",
+		"agents/codex/.wake.target",
+	)
+	for _, path := range []string{"agents/codex/.wake.lock", "agents/codex/.wake.target"} {
+		if !changed[path] {
+			t.Fatalf("successful reclaim did not change intended metadata %q: %#v", path, changed)
+		}
 	}
 }
 
@@ -544,35 +684,65 @@ func TestConcurrentDifferentHandleOwnerClaimsBothSucceed(t *testing.T) {
 		}
 	})
 
-	type result struct {
-		handle  string
+	codexGuardEntered := make(chan struct{})
+	releaseCodexGuard := make(chan struct{})
+	codexGuardDone := make(chan error, 1)
+	go func() {
+		codexGuardDone <- withWakeLifecycleGuard(root, "codex", func() error {
+			close(codexGuardEntered)
+			<-releaseCodexGuard
+			return nil
+		})
+	}()
+	<-codexGuardEntered
+
+	type claimResult struct {
 		cleanup func()
 		err     error
 	}
-	start := make(chan struct{})
-	results := make(chan result, len(targets))
-	for handle, target := range targets {
-		handle, target := handle, target
-		go func() {
-			<-start
-			cleanup, err := acquireWakeLockWithOptions(root, handle, wakeLockAcquireOptions{
-				target: &target, wakeMode: wakeTargetInjectVia,
-			})
-			results <- result{handle: handle, cleanup: cleanup, err: err}
-		}()
-	}
-	close(start)
+	claudeResult := make(chan claimResult, 1)
+	go func() {
+		target := targets["claude"]
+		cleanup, err := acquireWakeLockWithOptions(root, "claude", wakeLockAcquireOptions{
+			target: &target, wakeMode: wakeTargetInjectVia,
+		})
+		claudeResult <- claimResult{cleanup: cleanup, err: err}
+	}()
 
-	for range targets {
-		got := <-results
-		if got.err != nil {
-			t.Fatalf("%s claim failed: %v", got.handle, got.err)
-		}
-		defer got.cleanup()
-		persisted, exists, err := readWakeTarget(root, got.handle)
-		wantOwner := owners[got.handle]
+	var claudeClaim claimResult
+	select {
+	case claudeClaim = <-claudeResult:
+		// The Claude claim entered and completed while Codex still held its
+		// lifecycle guard, proving the guard is per handle rather than per root.
+	case <-time.After(2 * time.Second):
+		close(releaseCodexGuard)
+		<-codexGuardDone
+		t.Fatal("claude claim could not progress while codex lifecycle guard was held")
+	}
+	if claudeClaim.err != nil {
+		close(releaseCodexGuard)
+		<-codexGuardDone
+		t.Fatalf("claude claim failed: %v", claudeClaim.err)
+	}
+	defer claudeClaim.cleanup()
+
+	close(releaseCodexGuard)
+	if err := <-codexGuardDone; err != nil {
+		t.Fatalf("release codex lifecycle guard: %v", err)
+	}
+	codexTarget := targets["codex"]
+	codexCleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+		target: &codexTarget, wakeMode: wakeTargetInjectVia,
+	})
+	if err != nil {
+		t.Fatalf("codex claim after guard release: %v", err)
+	}
+	defer codexCleanup()
+
+	for handle, wantOwner := range owners {
+		persisted, exists, err := readWakeTarget(root, handle)
 		if err != nil || !exists || !sameWakeOwner(persisted.Owner, &wantOwner) {
-			t.Fatalf("%s target=%#v exists=%v err=%v, want only %#v", got.handle, persisted.Owner, exists, err, wantOwner)
+			t.Fatalf("%s target=%#v exists=%v err=%v, want only %#v", handle, persisted.Owner, exists, err, wantOwner)
 		}
 	}
 }
