@@ -26,6 +26,8 @@ import (
 
 var (
 	wakeTerminateGrace   = 100 * time.Millisecond
+	wakeBaselineTimeout  = 5 * time.Second
+	wakeBaselineSettle   = 50 * time.Millisecond
 	getWakeCurrentTTY    = getCurrentTTY
 	getWakeProcessSID    = unix.Getsid
 	wakeTIOCSTIAvailable = func() bool { return tiocsti.Available() }
@@ -51,6 +53,12 @@ type wakeLockAcquireOptions struct {
 	materializeLegacyBaseline bool
 	target                    *wakeTarget
 	wakeMode                  string
+}
+
+type wakeLockCreatingError struct{}
+
+func (err *wakeLockCreatingError) Error() string {
+	return "wake lock is being created (retry shortly)"
 }
 
 var startWakeFromTarget = startWakeFromTargetDefault
@@ -89,7 +97,7 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 						return err
 					}
 				case wakeLockCreating:
-					return fmt.Errorf("wake lock is being created (retry shortly)")
+					return &wakeLockCreatingError{}
 				case wakeLockValid:
 					if options.acceptExistingValid {
 						if modeErr := requireWakeLockModeCompatible(inspection, options.wakeMode); modeErr != nil {
@@ -777,7 +785,13 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 
 	// Spawning and readiness waiting happen without the lifecycle guard.
 	startedPID, startErr := startWakeFromTarget(root, me, target)
-	winner, winnerErr := validateRepairWakeWinner(root, me, target)
+	if startErr != nil {
+		result.RepairAvailable = false
+		result.Status = "error"
+		result.Reason = startErr.Error()
+		return result, startErr
+	}
+	winner, winnerErr := validateRepairWakeWinner(root, me, target, startedPID)
 	if winnerErr == nil {
 		result.Status = "repaired"
 		result.PID = winner.PID
@@ -785,21 +799,20 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 	}
 	result.RepairAvailable = false
 	result.Status = "error"
-	if startErr != nil {
-		result.Reason = startErr.Error()
-		return result, startErr
-	}
 	result.PID = startedPID
 	result.Reason = fmt.Sprintf("repaired wake failed exact readiness validation: %v", winnerErr)
 	return result, errors.New(result.Reason)
 }
 
-func validateRepairWakeWinner(root, me string, expected wakeTarget) (wakeLockInspection, error) {
+func validateRepairWakeWinner(root, me string, expected wakeTarget, startedPID int) (wakeLockInspection, error) {
 	var winner wakeLockInspection
 	err := withWakeLifecycleGuard(root, me, func() error {
 		winner = inspectWakeLock(root, me)
 		if winner.Status != wakeLockValid || !winner.IdentityConfirmed || winner.Lock.Generation == "" {
 			return fmt.Errorf("no confirmed generation-bound wake is ready")
+		}
+		if winner.PID != startedPID {
+			return fmt.Errorf("ready wake pid %d does not match started pid %d", winner.PID, startedPID)
 		}
 		persisted, exists, err := readWakeTarget(root, me)
 		if err != nil {
@@ -848,8 +861,11 @@ func startWakeFromTargetDefault(root, me string, target wakeTarget) (int, error)
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("start repaired amq wake: %w", err)
 	}
-	if err := waitForWakeReady(cmd.Process, readyPath, root, me, wakeReadyTimeout); err != nil {
-		_ = cmd.Process.Kill()
+	waiter := newWakeProcessWaiter(cmd.Process)
+	if err := waitForWakeReadyWithWaiter(waiter, readyPath, root, me, wakeReadyTimeout); err != nil {
+		if cleanupErr := terminateWakeHelperProcess(cmd.Process, waiter, root, me); cleanupErr != nil {
+			return 0, fmt.Errorf("%w (cleanup: %v)", err, cleanupErr)
+		}
 		return 0, err
 	}
 	return cmd.Process.Pid, nil
@@ -893,10 +909,13 @@ func configureRepairWakeCommand(cmd *exec.Cmd, output *os.File) {
 }
 
 func buildRepairWakeArgs(root, me string, target wakeTarget, readyPath string) []string {
-	args := []string{"--no-update-check", "wake", "--me", me, "--root", root, "--inject-via", target.InjectVia}
+	args := []string{"--no-update-check", "wake", "--me", me, "--root", root}
 	if target.BaselineFile != "" {
 		args = append(args, "--baseline-file", target.BaselineFile)
+	} else {
+		args = append(args, "--baseline-existing")
 	}
+	args = append(args, "--inject-via", target.InjectVia)
 	for _, arg := range target.InjectArgs {
 		args = append(args, "--inject-arg", arg)
 	}
@@ -1136,12 +1155,6 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		}
 		injectVia = value.InjectVia
 		target = &value
-	} else if *baselineExistingFlag {
-		loaded, err := snapshotWakeExistingMessages(root, me)
-		if err != nil {
-			return fmt.Errorf("snapshot existing wake messages: %w", err)
-		}
-		baseline = &loaded
 	}
 
 	// Acquire lock to prevent duplicate wake processes
@@ -1151,20 +1164,41 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	} else if lockWakeMode != wakeInjectModeNone {
 		lockWakeMode = effectiveInjectMode(&wakeConfig{me: me, injectMode: lockWakeMode})
 	}
-	cleanup, err := acquireWakeLockWithOptions(root, me, wakeLockAcquireOptions{
-		acceptExistingValid:       acceptExistingWake,
-		replaceExistingBaseline:   *replaceExistingBaselineFlag,
-		materializeLegacyBaseline: *baselineExistingFlag && target != nil && target.BaselineFile != "",
-		target:                    target,
-		wakeMode:                  lockWakeMode,
-	})
-	if err != nil {
+	acceptExistingDeadline := time.Now().Add(wakeReadyTimeout)
+	var cleanup func()
+	for {
+		cleanup, err = acquireWakeLockWithOptions(root, me, wakeLockAcquireOptions{
+			acceptExistingValid:       acceptExistingWake,
+			replaceExistingBaseline:   *replaceExistingBaselineFlag,
+			materializeLegacyBaseline: *baselineExistingFlag && target != nil && target.BaselineFile != "",
+			target:                    target,
+			wakeMode:                  lockWakeMode,
+		})
+		if err == nil {
+			break
+		}
+		var creating *wakeLockCreatingError
+		if acceptExistingWake && errors.As(err, &creating) {
+			if !waitForWakePreparedRetry(acceptExistingDeadline) {
+				return fmt.Errorf("wake lock did not finish creation within %s", wakeReadyTimeout)
+			}
+			continue
+		}
 		var alreadyRunning *wakeAlreadyRunningError
 		if acceptExistingWake && errors.As(err, &alreadyRunning) {
-			if err := waitForWakeCatchupReady(root, me, alreadyRunning.Inspection, existingWakeCatchupTimeout(*injectTimeoutFlag)); err != nil {
+			if baseline != nil && target != nil && target.BaselineFile != "" {
+				if err := waitForWakeCatchupReady(root, me, alreadyRunning.Inspection, existingWakeCatchupTimeout(*injectTimeoutFlag)); err != nil {
+					return err
+				}
+				return writeWakeReadyFile(root, me, readyFile, alreadyRunning.Inspection)
+			}
+			if err := writeWakeReadyFileForPreparedWake(root, me, readyFile, alreadyRunning.Inspection, acceptExistingDeadline); err != nil {
 				return err
 			}
-			return writeWakeReadyFile(root, me, readyFile, alreadyRunning.Inspection)
+			if *baselineExistingFlag {
+				_ = writeStderr("warning: reusing existing amq wake; this launch did not re-baseline it, so pending backlog may still notify\n")
+			}
+			return nil
 		}
 		return err
 	}
@@ -1187,6 +1221,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		}
 	}
 
+	currentWake := inspectWakeLock(root, me)
 	cfg := wakeConfig{
 		me:                me,
 		root:              root,
@@ -1217,38 +1252,158 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		baseline:          baseline,
 		seen:              make(map[string]struct{}),
 		readyFile:         readyFile,
-		readyInspection:   inspectWakeLock(root, me),
+		readyInspection:   currentWake,
+		baselineRequested: *baselineExistingFlag && baseline == nil,
+		onPrepared: func() error {
+			return publishWakeReadyInspection(root, me, readyFile, currentWake)
+		},
 	}
 
 	return loop(cfg)
 }
 
-func snapshotWakeExistingMessages(root, me string) (wakeBaseline, error) {
+var snapshotWakeDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {
+	return entry.Info()
+}
+
+func snapshotWakeExistingMessages(root, me string) (map[string]wakeFileIdentity, error) {
 	entries, err := os.ReadDir(fsq.AgentInboxNew(root, me))
 	if err != nil {
-		return wakeBaseline{}, err
+		if os.IsNotExist(err) {
+			return map[string]wakeFileIdentity{}, nil
+		}
+		return nil, err
 	}
-	baseline := wakeBaseline{IDs: make(map[string]struct{}), Files: make(map[string]struct{})}
+	baseline := make(map[string]wakeFileIdentity, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".md") {
+		if entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
-		baseline.Files[name] = struct{}{}
-		if header, readErr := format.ReadHeaderFile(filepath.Join(fsq.AgentInboxNew(root, me), name)); readErr == nil {
-			if id := strings.TrimSpace(header.ID); id != "" {
-				baseline.IDs[id] = struct{}{}
-			}
+		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
+			continue
 		}
+		info, err := snapshotWakeDirEntryInfo(entry)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		identity, ok := captureWakeFileIdentity(info)
+		if !ok {
+			return nil, fmt.Errorf("capture identity for %s", name)
+		}
+		baseline[name] = identity
 	}
 	return baseline, nil
 }
 
 func publishWakeReady(cfg wakeConfig) error {
-	if err := writeWakeCatchupReadyFile(cfg.root, cfg.me, cfg.readyInspection); err != nil {
+	return publishWakeReadyInspection(cfg.root, cfg.me, cfg.readyFile, cfg.readyInspection)
+}
+
+func publishWakeReadyInspection(root, me, readyFile string, inspection wakeLockInspection) error {
+	if err := writeWakePreparedFile(root, me, inspection); err != nil {
 		return err
 	}
-	return writeWakeReadyFile(cfg.root, cfg.me, cfg.readyFile, cfg.readyInspection)
+	if err := writeWakeCatchupReadyFile(root, me, inspection); err != nil {
+		return err
+	}
+	return writeWakeReadyFile(root, me, readyFile, inspection)
+}
+
+func invalidateWakeBaselineEvent(cfg *wakeConfig, event fsnotify.Event) {
+	if event.Op&(fsnotify.Create|fsnotify.Rename|fsnotify.Write|fsnotify.Remove) == 0 {
+		return
+	}
+	name := filepath.Base(event.Name)
+	if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
+		return
+	}
+	delete(cfg.baselineExisting, name)
+}
+
+// prepareWakeBaseline classifies startup backlog after the watcher is armed.
+// Linux/inotify provides an ordered marker fence; Darwin/kqueue uses the marker
+// plus a quiescence window, with watcher errors handled fail-closed.
+func prepareWakeBaseline(cfg *wakeConfig, watcher *fsnotify.Watcher, inboxNew string) error {
+	if !cfg.baselineRequested {
+		return nil
+	}
+	// Individual local-filesystem calls are intentionally not cancellable. Coop
+	// has an outer readiness timeout; standalone wake can wait on a stuck scan.
+	baseline, err := snapshotWakeExistingMessages(cfg.root, cfg.me)
+	if err != nil {
+		return fmt.Errorf("snapshot existing wake messages: %w", err)
+	}
+	cfg.baselineExisting = baseline
+
+	marker, err := os.CreateTemp(inboxNew, ".wake-baseline-barrier-")
+	if err != nil {
+		return fmt.Errorf("create wake baseline barrier: %w", err)
+	}
+	markerPath := marker.Name()
+	if err := marker.Close(); err != nil {
+		_ = os.Remove(markerPath)
+		return fmt.Errorf("close wake baseline barrier: %w", err)
+	}
+	// A crash can leave this hidden marker behind; message scans ignore it.
+	defer func() { _ = os.Remove(markerPath) }()
+
+	timer := time.NewTimer(wakeBaselineTimeout)
+	defer timer.Stop()
+	var settleTimer *time.Timer
+	var settleC <-chan time.Time
+	defer func() {
+		if settleTimer != nil {
+			settleTimer.Stop()
+		}
+	}()
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return failWakeOnWatcherError(cfg, "watcher closed while preparing wake baseline", nil)
+			}
+			invalidateWakeBaselineEvent(cfg, event)
+			if filepath.Clean(event.Name) == filepath.Clean(markerPath) && event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
+				if settleTimer == nil {
+					settleTimer = time.NewTimer(wakeBaselineSettle)
+				} else {
+					settleTimer.Reset(wakeBaselineSettle)
+				}
+				settleC = settleTimer.C
+			} else if settleTimer != nil {
+				if !settleTimer.Stop() {
+					select {
+					case <-settleTimer.C:
+					default:
+					}
+				}
+				settleTimer.Reset(wakeBaselineSettle)
+			}
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return failWakeOnWatcherError(cfg, "watcher closed while preparing wake baseline", nil)
+			}
+			return failWakeOnWatcherError(cfg, "watcher error while preparing wake baseline", err)
+		case <-timer.C:
+			return fmt.Errorf("wake baseline barrier was not observed within %s", wakeBaselineTimeout)
+		case <-settleC:
+			return nil
+		}
+	}
+}
+
+func failWakeOnWatcherError(cfg *wakeConfig, context string, cause error) error {
+	// Once event history is uncertain, retaining baseline tombstones could
+	// suppress a real arrival. Exit with them cleared so any restart scans all.
+	cfg.baselineExisting = nil
+	if cause == nil {
+		return errors.New(context)
+	}
+	return fmt.Errorf("%s: %w", context, cause)
 }
 
 func parseInterruptKey(raw string) (string, error) {
@@ -1284,6 +1439,18 @@ func runWakeLoop(cfg wakeConfig) error {
 	if err := watcher.Add(inboxNew); err != nil {
 		return fmt.Errorf("failed to watch inbox: %w", err)
 	}
+	// The startup boundary is watcher installation, not lock acquisition;
+	// messages delivered in between are intentionally treated as startup backlog.
+	if err := prepareWakeBaseline(&cfg, watcher, inboxNew); err != nil {
+		return err
+	}
+	// This closes the already-pending stop case only; a stop or process death can
+	// still race immediately after readiness publication.
+	select {
+	case <-cfg.controlStop:
+		return nil
+	default:
+	}
 
 	// Ignore job control signals so background job can operate freely.
 	// Note: This also affects foreground mode (Ctrl+Z won't suspend), but wake
@@ -1314,7 +1481,11 @@ func runWakeLoop(cfg wakeConfig) error {
 	if err := notifyNewMessages(&cfg); err != nil {
 		return fmt.Errorf("initial wake catch-up: %w", err)
 	}
-	if err := publishWakeReady(cfg); err != nil {
+	if cfg.onPrepared != nil {
+		if err := cfg.onPrepared(); err != nil {
+			return err
+		}
+	} else if err := publishWakeReady(cfg); err != nil {
 		return err
 	}
 
@@ -1333,10 +1504,11 @@ func runWakeLoop(cfg wakeConfig) error {
 
 		case event, ok := <-watcher.Events:
 			if !ok {
-				return errors.New("watcher closed")
+				return failWakeOnWatcherError(&cfg, "watcher closed", nil)
 			}
+			invalidateWakeBaselineEvent(&cfg, event)
 			// Only care about new files
-			if event.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
+			if event.Op&(fsnotify.Create|fsnotify.Rename|fsnotify.Write) == 0 {
 				continue
 			}
 			// Skip non-.md files
@@ -1360,9 +1532,9 @@ func runWakeLoop(cfg wakeConfig) error {
 
 		case err, ok := <-watcher.Errors:
 			if !ok {
-				return errors.New("watcher closed")
+				return failWakeOnWatcherError(&cfg, "watcher closed", nil)
 			}
-			_ = writeStderr("amq wake: watcher error: %v\n", err)
+			return failWakeOnWatcherError(&cfg, "amq wake: watcher error", err)
 
 		case <-debounceC:
 			if !pendingNotify {

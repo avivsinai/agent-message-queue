@@ -849,6 +849,83 @@ func TestNotifyNewMessages_InjectViaInjectCmdPayload(t *testing.T) {
 	}
 }
 
+func TestNotifyNewMessagesSkipsBaselineWithoutDraining(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	writeMessage := func(filename, id, subject string) {
+		t.Helper()
+		msg := format.Message{
+			Header: format.Header{
+				Schema:  1,
+				ID:      id,
+				From:    "codex",
+				To:      []string{"alice"},
+				Thread:  "p2p/alice__codex",
+				Subject: subject,
+				Created: "2026-07-22T00:00:00Z",
+			},
+			Body: "body",
+		}
+		data, err := msg.Marshal()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", id, err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "alice", filename, data); err != nil {
+			t.Fatalf("deliver %s: %v", id, err)
+		}
+	}
+
+	writeMessage("stale.md", "stale", "stale subject")
+	cfg, outputPath := injectViaCaptureConfig(t)
+	cfg.me = "alice"
+	cfg.root = root
+	cfg.previewLen = 48
+	staleInfo, err := os.Stat(filepath.Join(fsq.AgentInboxNew(root, "alice"), "stale.md"))
+	if err != nil {
+		t.Fatalf("stat stale baseline message: %v", err)
+	}
+	staleIdentity, ok := captureWakeFileIdentity(staleInfo)
+	if !ok {
+		t.Fatal("capture stale baseline identity")
+	}
+	cfg.baselineExisting = map[string]wakeFileIdentity{"stale.md": staleIdentity}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify stale baseline: %v", err)
+	}
+	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
+		t.Fatalf("baseline message triggered injection; output stat error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fsq.AgentInboxNew(root, "alice"), "stale.md")); err != nil {
+		t.Fatalf("baseline message was moved or removed: %v", err)
+	}
+	receipts, err := os.ReadDir(fsq.AgentReceipts(root, "alice"))
+	if err != nil {
+		t.Fatalf("read receipts: %v", err)
+	}
+	if len(receipts) != 0 {
+		t.Fatalf("wake created receipts for an unread baseline: %v", receipts)
+	}
+
+	writeMessage("fresh.md", "fresh", "fresh subject")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify fresh message: %v", err)
+	}
+	got, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read injection output: %v", err)
+	}
+	if !strings.Contains(string(got), "fresh subject") || strings.Contains(string(got), "stale subject") {
+		t.Fatalf("injected payload = %q, want fresh message only", string(got))
+	}
+}
+
 func TestNotifyNewMessages_InjectViaInterruptFailureDoesNotUpdateCooldown(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {

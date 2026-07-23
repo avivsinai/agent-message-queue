@@ -831,7 +831,7 @@ func TestRepairWakeRemovesProvenStaleAndStartsFromTarget(t *testing.T) {
 	}
 }
 
-func TestRepairWakeAcceptsConcurrentWinnerForExactTarget(t *testing.T) {
+func TestRepairWakeRejectsConcurrentWinnerForExactTarget(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
 	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
@@ -859,10 +859,10 @@ func TestRepairWakeAcceptsConcurrentWinnerForExactTarget(t *testing.T) {
 	})
 
 	result, err := repairWake(root, "codex")
-	if err != nil {
-		t.Fatalf("exact concurrent winner should satisfy repair: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "lost start race") {
+		t.Fatalf("exact concurrent winner should not satisfy baseline-aware repair: result=%#v err=%v", result, err)
 	}
-	if result.Status != "repaired" || result.PID != 9876 {
+	if result.Status != "error" {
 		t.Fatalf("unexpected repair result: %#v", result)
 	}
 }
@@ -1209,9 +1209,9 @@ func TestRunWakeRepairClearsRepairAvailableAfterStartFailure(t *testing.T) {
 }
 
 func TestBuildCoopWakeArgsIncludesInjectViaTarget(t *testing.T) {
-	args := buildCoopWakeArgs("codex", "/tmp/root", wakeInjectModeAuto, "/abs/injector", []string{"exec", "target"})
+	args := buildCoopWakeArgs("codex", "/tmp/root", wakeInjectModeAuto, "/abs/injector", []string{"exec", "target"}, "/tmp/ready")
 	got := strings.Join(args, "|")
-	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--baseline-existing|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target"
+	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--baseline-existing|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready|--accept-existing-wake"
 	if got != want {
 		t.Fatalf("args = %q, want %q", got, want)
 	}
@@ -1257,7 +1257,7 @@ func TestBuildRepairWakeArgsIncludesReadyFileAndTarget(t *testing.T) {
 	}
 	args := buildRepairWakeArgs("/tmp/root", "codex", target, "/tmp/ready")
 	got := strings.Join(args, "|")
-	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready"
+	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--baseline-existing|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready"
 	if got != want {
 		t.Fatalf("args = %q, want %q", got, want)
 	}

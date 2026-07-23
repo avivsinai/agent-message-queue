@@ -911,7 +911,7 @@ func TestRepairArgsReusePersistedBaselineFile(t *testing.T) {
 	}
 	args := buildRepairWakeArgs("/tmp/root", "codex", target, "/tmp/ready")
 	got := strings.Join(args, "|")
-	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--inject-via|/abs/injector|--baseline-file|/private/baseline.json|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready"
+	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--baseline-file|/private/baseline.json|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready"
 	if got != want {
 		t.Fatalf("repair args = %q, want %q", got, want)
 	}

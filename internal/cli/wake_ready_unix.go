@@ -40,69 +40,77 @@ func writeWakeReadyFile(root, me, path string, expected wakeLockInspection) erro
 		}); err != nil {
 			return err
 		}
-		data, err := json.Marshal(wakeReady{
+		return writeWakeGenerationFile(path, "wake ready file", wakeReady{
 			Schema:       wakeReadySchema,
 			Generation:   current.Lock.Generation,
 			TargetDigest: current.Lock.TargetDigest,
 		})
-		if err != nil {
-			return fmt.Errorf("marshal wake readiness: %w", err)
-		}
-		return writeWakeMetadataFile(path, append(data, '\n'), "wake ready file")
 	})
 }
 
+func writeWakeGenerationFile(path, label string, marker wakeReady) error {
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", label, err)
+	}
+	return writeWakeMetadataFile(path, append(data, '\n'), label)
+}
+
 func readWakeReadyFile(path string) (wakeReady, bool, error) {
+	return readWakeGenerationFile(path, "wake ready file")
+}
+
+func readWakeGenerationFile(path, label string) (wakeReady, bool, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return wakeReady{}, false, nil
 		}
-		return wakeReady{}, false, fmt.Errorf("stat wake ready file: %w", err)
+		return wakeReady{}, false, fmt.Errorf("stat %s: %w", label, err)
 	}
-	if err := validateWakeReadyFile(path, info); err != nil {
+	if err := validateWakeGenerationFile(path, label, info); err != nil {
 		return wakeReady{}, true, err
 	}
 	file, err := openWakeMetadataFile(path)
 	if err != nil {
-		return wakeReady{}, true, fmt.Errorf("open wake ready file: %w", err)
+		return wakeReady{}, true, fmt.Errorf("open %s: %w", label, err)
 	}
 	defer func() { _ = file.Close() }()
 	openedInfo, err := file.Stat()
 	if err != nil {
-		return wakeReady{}, true, fmt.Errorf("stat opened wake ready file: %w", err)
+		return wakeReady{}, true, fmt.Errorf("stat opened %s: %w", label, err)
 	}
-	if err := validateWakeReadyFile(path, openedInfo); err != nil {
+	if err := validateWakeGenerationFile(path, label, openedInfo); err != nil {
 		return wakeReady{}, true, err
 	}
 	if !os.SameFile(info, openedInfo) {
-		return wakeReady{}, true, fmt.Errorf("wake ready file %s changed while opening", path)
+		return wakeReady{}, true, fmt.Errorf("%s %s changed while opening", label, path)
 	}
-	data, err := readWakeMetadata(file, "wake ready file", path)
+	data, err := readWakeMetadata(file, label, path)
 	if err != nil {
 		return wakeReady{}, true, err
 	}
 	var ready wakeReady
 	if err := json.Unmarshal(data, &ready); err != nil {
-		return wakeReady{}, true, fmt.Errorf("legacy wake ready file refused")
+		return wakeReady{}, true, fmt.Errorf("legacy %s refused", label)
 	}
 	if ready.Schema != wakeReadySchema || ready.Generation == "" {
-		return wakeReady{}, true, fmt.Errorf("legacy wake ready file refused")
+		return wakeReady{}, true, fmt.Errorf("legacy %s refused", label)
 	}
 	return ready, true, nil
 }
 
-func validateWakeReadyFile(path string, info os.FileInfo) error {
+func validateWakeGenerationFile(path, label string, info os.FileInfo) error {
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("wake ready file %s must not be a symlink", path)
+		return fmt.Errorf("%s %s must not be a symlink", label, path)
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("wake ready file %s must be a regular file", path)
+		return fmt.Errorf("%s %s must be a regular file", label, path)
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
-		return fmt.Errorf("wake ready file %s mode is %o, want 0600", path, got)
+		return fmt.Errorf("%s %s mode is %o, want 0600", label, path, got)
 	}
-	return validateWakeTargetPathOwnership("wake ready file", path, info)
+	return validateWakeTargetPathOwnership(label, path, info)
 }
 
 func validateWakeReadyLockAndTarget(root, me string, current wakeLockInspection, ready wakeReady) error {
@@ -140,6 +148,8 @@ func validateWakeReadyLockAndTarget(root, me string, current wakeLockInspection,
 }
 
 func validateWakeReadyFileAgainstCurrent(root, me, path string) (bool, error) {
+	// A wake can still die immediately after this guarded validation; the local
+	// process notifier has no durable liveness lease beyond the lock generation.
 	ready := false
 	err := withWakeLifecycleGuard(root, me, func() error {
 		published, exists, err := readWakeReadyFile(path)
@@ -178,7 +188,7 @@ func wakeCatchupReadyMatches(root, me string, expected wakeLockInspection) (bool
 		if err != nil {
 			return err
 		}
-		if err := validateWakeReadyFile(path, info); err != nil {
+		if err := validateWakeGenerationFile(path, "wake catch-up ready file", info); err != nil {
 			return err
 		}
 		published, exists, err := readWakeReadyFile(path)
