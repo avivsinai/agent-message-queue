@@ -371,6 +371,26 @@ func TestOwnerBoundClaimRequiresRequestedOwnerForPersistedOwnerState(t *testing.
 	}
 }
 
+func TestOwnerBoundClaimOwnerlessWakeCannotErasePersistedTarget(t *testing.T) {
+	root, injector := setupOwnerClaimTest(t)
+	persistedOwner := wakeOwner{PID: 4671, ProcessStart: "owner-a", BootID: "boot-1"}
+	persisted := ownerClaimTarget(t, root, injector, persistedOwner)
+	if err := writeWakeTarget(root, "codex", persisted); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+		wakeMode: wakeInjectModeNone,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requested wake ownership") {
+		t.Fatalf("ownerless acquire error = %v, want persisted-target refusal", err)
+	}
+	got, exists, readErr := readWakeTarget(root, "codex")
+	if readErr != nil || !exists || !sameWakeOwner(got.Owner, persisted.Owner) {
+		t.Fatalf("ownerless wake changed target: target=%#v exists=%v err=%v", got, exists, readErr)
+	}
+}
+
 func TestConcurrentOwnerBoundClaimsHaveOneWinner(t *testing.T) {
 	root, injector := setupOwnerClaimTest(t)
 	owners := []wakeOwner{

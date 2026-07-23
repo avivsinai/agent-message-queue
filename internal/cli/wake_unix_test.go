@@ -68,6 +68,26 @@ func writeExecutableForTest(t *testing.T, name string) string {
 	return path
 }
 
+func setExactWakeOwnerEnvForTest(t *testing.T) wakeOwner {
+	t.Helper()
+	owner, err := exactCurrentWakeOwner()
+	if err != nil {
+		t.Fatalf("exactCurrentWakeOwner: %v", err)
+	}
+	encoded, err := encodeWakeOwnerEnv(owner)
+	if err != nil {
+		t.Fatalf("encodeWakeOwnerEnv: %v", err)
+	}
+	t.Setenv(envWakeOwner, encoded)
+	return owner
+}
+
+func wakeProcessInfoForOwnerTest(owner wakeOwner) wakeProcessInfo {
+	return wakeProcessInfo{
+		PID: owner.PID, Running: true, StartToken: owner.ProcessStart, BootID: owner.BootID,
+	}
+}
+
 func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -648,8 +668,10 @@ func TestRunWakeWithLoopDoesNotWriteReadyFileWhenLockBlocked(t *testing.T) {
 
 func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
 	const wakePID = 4242
+	owner := setExactWakeOwnerEnvForTest(t)
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		if pid == wakePID {
+		switch pid {
+		case wakePID:
 			return wakeProcessInfo{
 				PID:        pid,
 				Running:    true,
@@ -658,12 +680,16 @@ func TestRunWakeWithLoopWritesReadyFileForExistingUsableWake(t *testing.T) {
 				Executable: "/opt/homebrew/bin/amq",
 				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
 			}
+		case owner.PID:
+			return wakeProcessInfoForOwnerTest(owner)
+		default:
+			return wakeProcessInfo{PID: pid}
 		}
-		return wakeProcessInfo{PID: pid}
 	})
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
 	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, nil)
+	target.Owner = &owner
 	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
 		PID:          wakePID,
 		TTY:          "tty",
@@ -1024,9 +1050,12 @@ func TestRunWakeWithLoopAcceptExistingWakeAcceptsInjectViaUnknownTTY(t *testing.
 	const wakePID = 4242
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
+	owner := setExactWakeOwnerEnvForTest(t)
 	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"exec"})
+	target.Owner = &owner
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		if pid == wakePID {
+		switch pid {
+		case wakePID:
 			return wakeProcessInfo{
 				PID:        pid,
 				Running:    true,
@@ -1035,8 +1064,11 @@ func TestRunWakeWithLoopAcceptExistingWakeAcceptsInjectViaUnknownTTY(t *testing.
 				Executable: "/opt/homebrew/bin/amq",
 				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-via", injector},
 			}
+		case owner.PID:
+			return wakeProcessInfoForOwnerTest(owner)
+		default:
+			return wakeProcessInfo{PID: pid}
 		}
-		return wakeProcessInfo{PID: pid}
 	})
 	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
 		PID:          wakePID,
@@ -1078,9 +1110,12 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsDifferentInjector(t *testing.T)
 	root := secureTempDirForTest(t)
 	existingInjector := writeExecutableForTest(t, "existing-injector")
 	requestedInjector := writeExecutableForTest(t, "requested-injector")
+	owner := setExactWakeOwnerEnvForTest(t)
 	existingTarget := mustNewWakeTargetForTest(t, root, "orchestrator", existingInjector, []string{"exec", "fixed"})
+	existingTarget.Owner = &owner
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		if pid == wakePID {
+		switch pid {
+		case wakePID:
 			return wakeProcessInfo{
 				PID:        pid,
 				Running:    true,
@@ -1089,8 +1124,11 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsDifferentInjector(t *testing.T)
 				Executable: "/opt/homebrew/bin/amq",
 				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-via", existingInjector},
 			}
+		case owner.PID:
+			return wakeProcessInfoForOwnerTest(owner)
+		default:
+			return wakeProcessInfo{PID: pid}
 		}
-		return wakeProcessInfo{PID: pid}
 	})
 	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
 		PID:          wakePID,

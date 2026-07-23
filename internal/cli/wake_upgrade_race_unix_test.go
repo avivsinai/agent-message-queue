@@ -18,6 +18,8 @@ func TestWakeUpgradeRaceRepairAcceptsConcurrentCurrentAcquire(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
 	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec", "terminal-a"})
+	owner := wakeOwner{PID: 4343, ProcessStart: "owner-start", BootID: "boot-1"}
+	target.Owner = &owner
 	legacyGeneration := "legacy-without-control-metadata"
 	writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
 		PID:        4242,
@@ -29,7 +31,8 @@ func TestWakeUpgradeRaceRepairAcceptsConcurrentCurrentAcquire(t *testing.T) {
 	}
 
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		if pid == os.Getpid() {
+		switch pid {
+		case os.Getpid():
 			return wakeProcessInfo{
 				PID:        pid,
 				Running:    true,
@@ -38,8 +41,11 @@ func TestWakeUpgradeRaceRepairAcceptsConcurrentCurrentAcquire(t *testing.T) {
 				Executable: "/opt/homebrew/bin/amq",
 				Args:       []string{"amq", "wake", "--root", root, "--me", "codex", "--inject-via", injector},
 			}
+		case owner.PID:
+			return wakeProcessInfoForOwnerTest(owner)
+		default:
+			return wakeProcessInfo{PID: pid, Running: false}
 		}
-		return wakeProcessInfo{PID: pid, Running: false}
 	})
 	repairStarted := make(chan struct{})
 	releaseRepair := make(chan struct{})

@@ -209,17 +209,13 @@ func (e *wakeOwnerAlreadyOwnedError) Error() string {
 // only for a truly fresh handle with no lock; persisted legacy or ambiguous
 // ownership is never overwritten automatically.
 func authorizeOwnerBoundWakeTransition(inspection wakeLockInspection, requested *wakeTarget) error {
-	if requested == nil {
-		return nil
-	}
-
 	persisted, exists, err := readWakeTarget(inspection.Root, inspection.Agent)
 	if err != nil {
 		return fmt.Errorf("persisted wake ownership for %s is unverified: %w", inspection.Agent, err)
 	}
-	if requested.Owner == nil {
-		if exists && persisted.Owner != nil {
-			return fmt.Errorf("requested wake ownership for %s is missing while persisted owner-bound state exists; refusing automatic takeover", inspection.Agent)
+	if requested == nil || requested.Owner == nil {
+		if exists {
+			return fmt.Errorf("requested wake ownership for %s is missing while persisted wake state exists; refusing automatic takeover", inspection.Agent)
 		}
 		return nil
 	}

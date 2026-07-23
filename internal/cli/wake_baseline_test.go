@@ -487,18 +487,24 @@ func TestAcceptExistingWakeRequiresExactBaselineFloor(t *testing.T) {
 		t.Fatal(err)
 	}
 	injector := writeExecutableForTest(t, "injector")
+	owner := setExactWakeOwnerEnvForTest(t)
 	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"exec"})
+	target.Owner = &owner
 	target.BaselineFile = first.Path
 	target.BaselineDigest = first.Digest
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		if pid == wakePID {
+		switch pid {
+		case wakePID:
 			return wakeProcessInfo{
 				PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1",
 				Executable: "/opt/homebrew/bin/amq",
 				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-via", injector, "--baseline-file", first.Path},
 			}
+		case owner.PID:
+			return wakeProcessInfoForOwnerTest(owner)
+		default:
+			return wakeProcessInfo{PID: pid}
 		}
-		return wakeProcessInfo{PID: pid}
 	})
 	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
 		PID: wakePID, TTY: "unknown", ProcessStart: "start-1", BootID: "boot-1",
@@ -573,8 +579,10 @@ func TestWakeBaselineRotationAndConcurrentExistingSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	injector := writeExecutableForTest(t, "injector")
+	owner := setExactWakeOwnerEnvForTest(t)
 	withBaseline := func(baseline wakeBaseline, args ...string) wakeTarget {
 		target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, args)
+		target.Owner = &owner
 		target.BaselineFile = baseline.Path
 		target.BaselineDigest = baseline.Digest
 		return target
@@ -590,14 +598,18 @@ func TestWakeBaselineRotationAndConcurrentExistingSemantics(t *testing.T) {
 		}
 	}
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		if pid == wakePID {
+		switch pid {
+		case wakePID:
 			return wakeProcessInfo{
 				PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1",
 				Executable: "/opt/homebrew/bin/amq",
 				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-via", injector},
 			}
+		case owner.PID:
+			return wakeProcessInfoForOwnerTest(owner)
+		default:
+			return wakeProcessInfo{PID: pid}
 		}
-		return wakeProcessInfo{PID: pid}
 	})
 	installExisting := func(target wakeTarget) {
 		_ = os.Remove(filepath.Join(fsq.AgentBase(root, "orchestrator"), ".wake.lock"))
@@ -643,6 +655,7 @@ func TestWakeBaselineRotationAndConcurrentExistingSemantics(t *testing.T) {
 
 	t.Run("legacy target without floor migrates once", func(t *testing.T) {
 		legacy := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"exec"})
+		legacy.Owner = &owner
 		installExisting(legacy)
 		replacementCalls = 0
 		cleanup, err := acquireWakeLockWithOptions(root, "orchestrator", wakeLockAcquireOptions{
@@ -699,6 +712,7 @@ func TestWakeBaselineRotationAndConcurrentExistingSemantics(t *testing.T) {
 		replacementCalls = 0
 		otherInjector := writeExecutableForTest(t, "other-injector")
 		different := mustNewWakeTargetForTest(t, root, "orchestrator", otherInjector, []string{"exec"})
+		different.Owner = &owner
 		different.BaselineFile = second.Path
 		different.BaselineDigest = second.Digest
 		_, err := acquireWakeLockWithOptions(root, "orchestrator", wakeLockAcquireOptions{
@@ -748,13 +762,17 @@ func TestWakeBaselineRotationAndConcurrentExistingSemantics(t *testing.T) {
 
 	t.Run("explicit replacement refuses unverified identity", func(t *testing.T) {
 		stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-			if pid == wakePID {
+			switch pid {
+			case wakePID:
 				return wakeProcessInfo{
 					PID: pid, Running: true, Executable: "/opt/homebrew/bin/amq",
 					Args: []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
 				}
+			case owner.PID:
+				return wakeProcessInfoForOwnerTest(owner)
+			default:
+				return wakeProcessInfo{PID: pid}
 			}
-			return wakeProcessInfo{PID: pid}
 		})
 		_ = os.Remove(filepath.Join(fsq.AgentBase(root, "orchestrator"), ".wake.lock"))
 		if err := writeWakeTarget(root, "orchestrator", firstTarget); err != nil {
@@ -820,6 +838,7 @@ func TestBaselineExistingRestartReusesPersistedFloorAcrossDowntime(t *testing.T)
 	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
 		t.Fatal(err)
 	}
+	setExactWakeOwnerEnvForTest(t)
 	writeWakeTestMessage(t, root, "codex", "before.md", "msg-before", "before first start", "body")
 	toolDir := secureTempDirForTest(t)
 	outputPath := filepath.Join(toolDir, "injections.log")
