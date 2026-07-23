@@ -218,6 +218,64 @@ func TestNotifyNewMessagesSkipsCorruptPrelaunchBaselineByFilename(t *testing.T) 
 	}
 }
 
+func startWakeLoopCatchupTest(
+	t *testing.T,
+	root string,
+	baseline wakeBaseline,
+	interrupt bool,
+) (wakeConfig, string, func()) {
+	t.Helper()
+	toolDir := secureTempDirForTest(t)
+	outputPath := filepath.Join(toolDir, "injections.log")
+	injector := filepath.Join(toolDir, "injector")
+	if err := os.WriteFile(injector, []byte("#!/bin/sh\nprintf '%s\\n' \"$2\" >> \"$1\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{outputPath})
+	target.BaselineFile = baseline.Path
+	target.BaselineDigest = baseline.Digest
+	cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+		target: &target, wakeMode: wakeTargetInjectVia,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	readyPath := filepath.Join(secureTempDirForTest(t), "wake.ready")
+	stop := make(chan struct{})
+	cfg := wakeConfig{
+		me: "codex", root: root, session: "catchup-test", injectVia: injector, injectArgs: []string{outputPath},
+		injectTimeout: time.Second, previewLen: 200, interrupt: interrupt, interruptLabel: "interrupt",
+		interruptPriority: "urgent", baseline: &baseline, seen: make(map[string]struct{}), readyFile: readyPath,
+		readyInspection: inspectWakeLock(root, "codex"), controlStop: stop,
+	}
+	done := make(chan error, 1)
+	go func() { done <- runWakeLoop(cfg) }()
+	stopped := false
+	stopLoop := func() {
+		if stopped {
+			return
+		}
+		close(stop)
+		stopped = true
+		if err := <-done; err != nil {
+			t.Fatalf("runWakeLoop: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		if !stopped {
+			close(stop)
+			<-done
+		}
+		cleanup()
+	})
+	waitForTestCondition(t, 3*time.Second, func() bool {
+		_, statErr := os.Stat(readyPath)
+		return statErr == nil
+	}, "wake readiness after catch-up")
+	return cfg, outputPath, stopLoop
+}
+
 func TestWakeLoopClosesPrelaunchGapBeforePublishingReadiness(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -235,50 +293,7 @@ func TestWakeLoopClosesPrelaunchGapBeforePublishingReadiness(t *testing.T) {
 	// installed its watcher.
 	writeWakeTestMessage(t, root, "codex", "gap.md", "msg-gap", "launch gap", "body")
 
-	toolDir := secureTempDirForTest(t)
-	outputPath := filepath.Join(toolDir, "injections.log")
-	injector := filepath.Join(toolDir, "injector")
-	if err := os.WriteFile(injector, []byte("#!/bin/sh\nprintf '%s\\n' \"$2\" >> \"$1\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{outputPath})
-	target.BaselineFile = baseline.Path
-	target.BaselineDigest = baseline.Digest
-	cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{target: &target, wakeMode: wakeTargetInjectVia})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-
-	readyPath := filepath.Join(secureTempDirForTest(t), "wake.ready")
-	stop := make(chan struct{})
-	cfg := wakeConfig{
-		me:              "codex",
-		root:            root,
-		session:         "gap-test",
-		injectVia:       injector,
-		injectArgs:      []string{outputPath},
-		injectTimeout:   time.Second,
-		previewLen:      200,
-		baseline:        &baseline,
-		seen:            make(map[string]struct{}),
-		readyFile:       readyPath,
-		readyInspection: inspectWakeLock(root, "codex"),
-		controlStop:     stop,
-	}
-	done := make(chan error, 1)
-	go func() { done <- runWakeLoop(cfg) }()
-	stopped := false
-	defer func() {
-		if !stopped {
-			close(stop)
-			<-done
-		}
-	}()
-	waitForTestCondition(t, 3*time.Second, func() bool {
-		_, statErr := os.Stat(readyPath)
-		return statErr == nil
-	}, "wake readiness after launch-gap catch-up")
+	_, outputPath, stopLoop := startWakeLoopCatchupTest(t, root, baseline, false)
 	data, err := os.ReadFile(outputPath)
 	if err != nil {
 		t.Fatal(err)
@@ -292,11 +307,7 @@ func TestWakeLoopClosesPrelaunchGapBeforePublishingReadiness(t *testing.T) {
 		data, readErr := os.ReadFile(outputPath)
 		return readErr == nil && strings.Contains(string(data), "post ready")
 	}, "post-ready watcher notification")
-	close(stop)
-	stopped = true
-	if err := <-done; err != nil {
-		t.Fatalf("runWakeLoop: %v", err)
-	}
+	stopLoop()
 	data, err = os.ReadFile(outputPath)
 	if err != nil {
 		t.Fatal(err)
@@ -393,42 +404,7 @@ func TestWakeLoopMixedUrgentAndNormalCatchupCompletesBeforeReady(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	toolDir := secureTempDirForTest(t)
-	outputPath := filepath.Join(toolDir, "injections.log")
-	injector := filepath.Join(toolDir, "injector")
-	if err := os.WriteFile(injector, []byte("#!/bin/sh\nprintf '%s\\n' \"$2\" >> \"$1\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{outputPath})
-	target.BaselineFile = baseline.Path
-	target.BaselineDigest = baseline.Digest
-	cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{target: &target, wakeMode: wakeTargetInjectVia})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-
-	readyPath := filepath.Join(secureTempDirForTest(t), "wake.ready")
-	stop := make(chan struct{})
-	cfg := wakeConfig{
-		me: "codex", root: root, session: "mixed", injectVia: injector, injectArgs: []string{outputPath},
-		injectTimeout: time.Second, previewLen: 200, interrupt: true, interruptLabel: "interrupt",
-		interruptPriority: "urgent", baseline: &baseline, seen: make(map[string]struct{}), readyFile: readyPath,
-		readyInspection: inspectWakeLock(root, "codex"), controlStop: stop,
-	}
-	done := make(chan error, 1)
-	go func() { done <- runWakeLoop(cfg) }()
-	stopped := false
-	defer func() {
-		if !stopped {
-			close(stop)
-			<-done
-		}
-	}()
-	waitForTestCondition(t, 3*time.Second, func() bool {
-		_, statErr := os.Stat(readyPath)
-		return statErr == nil
-	}, "mixed catch-up readiness")
+	cfg, outputPath, stopLoop := startWakeLoopCatchupTest(t, root, baseline, true)
 	output, err := os.ReadFile(outputPath)
 	if err != nil {
 		t.Fatal(err)
@@ -439,11 +415,7 @@ func TestWakeLoopMixedUrgentAndNormalCatchupCompletesBeforeReady(t *testing.T) {
 	if ready, err := wakeCatchupReadyMatches(root, "codex", cfg.readyInspection); err != nil || !ready {
 		t.Fatalf("persistent catch-up readiness = %v, err=%v", ready, err)
 	}
-	close(stop)
-	stopped = true
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
+	stopLoop()
 }
 
 func TestNotifyNewMessagesIgnoresValidDrainedDuplicate(t *testing.T) {
@@ -899,21 +871,6 @@ func TestBaselineExistingRestartReusesPersistedFloorAcrossDowntime(t *testing.T)
 	})
 	if err == nil || !strings.Contains(err.Error(), "persisted exact wake floor is unusable") {
 		t.Fatalf("missing persisted floor error = %v", err)
-	}
-}
-
-func TestRepairArgsReusePersistedBaselineFile(t *testing.T) {
-	target := wakeTarget{
-		InjectVia:      "/abs/injector",
-		InjectArgs:     []string{"exec", "target"},
-		BaselineFile:   "/private/baseline.json",
-		BaselineDigest: "sha256:abc",
-	}
-	args := buildRepairWakeArgs("/tmp/root", "codex", target, "/tmp/ready")
-	got := strings.Join(args, "|")
-	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--baseline-file|/private/baseline.json|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready"
-	if got != want {
-		t.Fatalf("repair args = %q, want %q", got, want)
 	}
 }
 

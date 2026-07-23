@@ -12,9 +12,19 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-func installRetireWakeFixture(t *testing.T, root, me, injector string, args []string, pid int) (wakeTarget, string) {
+func installRetireWakeFixture(
+	t *testing.T,
+	root, me, injector string,
+	args []string,
+	pid int,
+	baselines ...*wakeBaseline,
+) (wakeTarget, string) {
 	t.Helper()
 	target := mustNewWakeTargetForTest(t, root, me, injector, args)
+	if len(baselines) != 0 && baselines[0] != nil {
+		target.BaselineFile = baselines[0].Path
+		target.BaselineDigest = baselines[0].Digest
+	}
 	if err := writeWakeTarget(root, me, target); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
 	}
@@ -73,7 +83,7 @@ func TestRetireWakeRefusesDifferentInjectTarget(t *testing.T) {
 	const wakePID = 4242
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
-	_, lockPath := installRetireWakeFixture(t, root, "codex", injector, []string{"exec", "terminal-a"}, wakePID)
+	_, lockPath := installRetireWakeFixture(t, root, "codex", injector, []string{"exec", "terminal-a"}, wakePID, nil)
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return matchingRetireWakeProcess(pid, root, "codex", injector)
 	})
@@ -89,68 +99,52 @@ func TestRetireWakeRefusesDifferentInjectTarget(t *testing.T) {
 }
 
 func TestRetireWakeRemovesExactlyBoundProvenStaleLock(t *testing.T) {
-	const wakePID = 4242
-	root := secureTempDirForTest(t)
-	injector := writeExecutableForTest(t, "injector")
-	requested, lockPath := installRetireWakeFixture(t, root, "codex", injector, []string{"exec", "terminal-a"}, wakePID)
-	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		return wakeProcessInfo{PID: pid, Running: false}
-	})
+	for _, withBaseline := range []bool{false, true} {
+		name := "without baseline"
+		if withBaseline {
+			name = "with persisted baseline"
+		}
+		t.Run(name, func(t *testing.T) {
+			const wakePID = 4242
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			var baseline *wakeBaseline
+			if withBaseline {
+				captured, err := captureWakeBaseline(root, "codex")
+				if err != nil {
+					t.Fatal(err)
+				}
+				baseline = &captured
+			}
+			injector := writeExecutableForTest(t, "injector")
+			persisted, lockPath := installRetireWakeFixture(
+				t, root, "codex", injector, []string{"exec", "terminal-a"}, wakePID, baseline,
+			)
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				return wakeProcessInfo{PID: pid, Running: false}
+			})
+			requested := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec", "terminal-a"})
 
-	result, err := retireWake(root, "codex", requested)
-	if err != nil || result.Status != "retired" || !strings.Contains(result.Reason, "proven-stale") {
-		t.Fatalf("result=%#v err=%v", result, err)
-	}
-	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Fatalf("stale lock still exists: %v", err)
-	}
-	if _, err := os.Stat(wakeTargetPath(root, "codex")); err != nil {
-		t.Fatalf("saved target was not preserved: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(fsq.AgentBase(root, "codex"), "inbox")); err != nil {
-		t.Fatalf("mailbox was not preserved: %v", err)
-	}
-}
-
-func TestRetireWakeMatchesTransportWhenPersistedTargetHasBaseline(t *testing.T) {
-	const wakePID = 4242
-	root := secureTempDirForTest(t)
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
-		t.Fatal(err)
-	}
-	baseline, err := captureWakeBaseline(root, "codex")
-	if err != nil {
-		t.Fatal(err)
-	}
-	injector := writeExecutableForTest(t, "injector")
-	persisted := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec", "terminal-a"})
-	persisted.BaselineFile = baseline.Path
-	persisted.BaselineDigest = baseline.Digest
-	if err := writeWakeTarget(root, "codex", persisted); err != nil {
-		t.Fatal(err)
-	}
-	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
-		PID: wakePID, TTY: "unknown", ProcessStart: "wake-start", BootID: "boot-1",
-		Executable: "/opt/homebrew/bin/amq", Generation: "0123456789abcdef0123456789abcdef",
-	}, persisted))
-	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		return wakeProcessInfo{PID: pid, Running: false}
-	})
-	requested := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec", "terminal-a"})
-
-	result, err := retireWake(root, "codex", requested)
-	if err != nil || result.Status != "retired" {
-		t.Fatalf("baseline-bound retire result=%#v err=%v", result, err)
-	}
-	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Fatalf("baseline-bound stale lock still exists: %v", err)
-	}
-	target, exists, err := readWakeTarget(root, "codex")
-	if err != nil || !exists || target.BaselineFile != baseline.Path {
-		t.Fatalf("retire did not preserve exact target: exists=%v target=%#v err=%v", exists, target, err)
+			result, err := retireWake(root, "codex", requested)
+			if err != nil || result.Status != "retired" || !strings.Contains(result.Reason, "proven-stale") {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+				t.Fatalf("stale lock still exists: %v", err)
+			}
+			target, exists, err := readWakeTarget(root, "codex")
+			if err != nil || !exists || target.BaselineFile != persisted.BaselineFile {
+				t.Fatalf("retire did not preserve exact target: exists=%v target=%#v err=%v", exists, target, err)
+			}
+			if _, err := os.Stat(filepath.Join(fsq.AgentBase(root, "codex"), "inbox")); err != nil {
+				t.Fatalf("mailbox was not preserved: %v", err)
+			}
+		})
 	}
 }
 

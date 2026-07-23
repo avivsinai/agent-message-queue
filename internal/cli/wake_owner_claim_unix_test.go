@@ -127,153 +127,112 @@ func ownerClaimProcess(pid int, start, boot string) wakeProcessInfo {
 	}
 }
 
-func TestOwnerBoundClaimRefusesLiveOwnerWithoutWakeLock(t *testing.T) {
-	root, injector := setupOwnerClaimTest(t)
-	persistedOwner := wakeOwner{PID: 4101, ProcessStart: "owner-a", BootID: "boot-1"}
-	requestedOwner := wakeOwner{PID: 4102, ProcessStart: "owner-b", BootID: "boot-1"}
-	persisted := ownerClaimTarget(t, root, injector, persistedOwner)
-	if err := writeWakeTarget(root, "codex", persisted); err != nil {
-		t.Fatal(err)
+func TestOwnerBoundClaimOwnerLivenessMatrix(t *testing.T) {
+	ownerA := wakeOwner{PID: 4101, ProcessStart: "owner-a", BootID: "boot-1"}
+	ownerB := wakeOwner{PID: 4102, ProcessStart: "owner-b", BootID: "boot-1"}
+	reusedOld := wakeOwner{PID: 4301, ProcessStart: "old-start", BootID: "boot-1"}
+	reusedNew := wakeOwner{PID: 4301, ProcessStart: "new-start", BootID: "boot-1"}
+	tests := []struct {
+		name          string
+		persisted     wakeOwner
+		requested     wakeOwner
+		live          map[int]wakeOwner
+		wantOwned     bool
+		wantErrorText []string
+	}{
+		{
+			name:      "refuses live different owner",
+			persisted: ownerA,
+			requested: ownerB,
+			live:      map[int]wakeOwner{ownerA.PID: ownerA, ownerB.PID: ownerB},
+			wantOwned: true,
+		},
+		{
+			name:      "reclaims dead different owner",
+			persisted: ownerA,
+			requested: ownerB,
+			live:      map[int]wakeOwner{ownerB.PID: ownerB},
+		},
+		{
+			name:      "repairs same live owner",
+			persisted: ownerA,
+			requested: ownerA,
+			live:      map[int]wakeOwner{ownerA.PID: ownerA},
+		},
+		{
+			name:          "rejects replayed dead owner",
+			persisted:     ownerA,
+			requested:     ownerA,
+			wantErrorText: []string{"requested wake owner", "not live"},
+		},
+		{
+			name:      "treats reused PID as dead persisted owner",
+			persisted: reusedOld,
+			requested: reusedNew,
+			live:      map[int]wakeOwner{reusedNew.PID: reusedNew},
+		},
 	}
-	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		switch pid {
-		case persistedOwner.PID:
-			return ownerClaimProcess(pid, persistedOwner.ProcessStart, persistedOwner.BootID)
-		case requestedOwner.PID:
-			return ownerClaimProcess(pid, requestedOwner.ProcessStart, requestedOwner.BootID)
-		default:
-			return wakeProcessInfo{PID: pid}
-		}
-	})
 
-	_, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
-		target:   ptrWakeTarget(ownerClaimTarget(t, root, injector, requestedOwner)),
-		wakeMode: wakeTargetInjectVia,
-	})
-	var owned *wakeOwnerAlreadyOwnedError
-	if !errors.As(err, &owned) {
-		t.Fatalf("acquire error = %v, want visible already-owned error", err)
-	}
-	if _, statErr := os.Stat(filepath.Join(fsq.AgentBase(root, "codex"), ".wake.lock")); !os.IsNotExist(statErr) {
-		t.Fatalf("wake lock was created or unreadable: %v", statErr)
-	}
-	got, exists, readErr := readWakeTarget(root, "codex")
-	if readErr != nil || !exists || !sameWakeOwner(got.Owner, persisted.Owner) {
-		t.Fatalf("persisted owner changed: target=%#v exists=%v err=%v", got, exists, readErr)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, injector := setupOwnerClaimTest(t)
+			persisted := ownerClaimTarget(t, root, injector, tt.persisted)
+			if err := writeWakeTarget(root, "codex", persisted); err != nil {
+				t.Fatal(err)
+			}
+			self := os.Getpid()
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				if owner, ok := tt.live[pid]; ok {
+					return ownerClaimProcess(pid, owner.ProcessStart, owner.BootID)
+				}
+				if pid == self {
+					return ownerClaimProcess(pid, "wake-self", "boot-1")
+				}
+				return wakeProcessInfo{PID: pid}
+			})
 
-func TestOwnerBoundClaimReclaimsDeadOwnerWithoutWakeLock(t *testing.T) {
-	root, injector := setupOwnerClaimTest(t)
-	persistedOwner := wakeOwner{PID: 4201, ProcessStart: "owner-a", BootID: "boot-1"}
-	requestedOwner := wakeOwner{PID: 4202, ProcessStart: "owner-b", BootID: "boot-1"}
-	if err := writeWakeTarget(root, "codex", ownerClaimTarget(t, root, injector, persistedOwner)); err != nil {
-		t.Fatal(err)
-	}
-	self := os.Getpid()
-	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		switch pid {
-		case persistedOwner.PID:
-			return wakeProcessInfo{PID: pid}
-		case requestedOwner.PID:
-			return ownerClaimProcess(pid, requestedOwner.ProcessStart, requestedOwner.BootID)
-		case self:
-			return ownerClaimProcess(pid, "wake-self", "boot-1")
-		default:
-			return wakeProcessInfo{PID: pid}
-		}
-	})
+			requested := ownerClaimTarget(t, root, injector, tt.requested)
+			cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+				target: &requested, wakeMode: wakeTargetInjectVia,
+			})
+			if cleanup != nil {
+				defer cleanup()
+			}
 
-	requested := ownerClaimTarget(t, root, injector, requestedOwner)
-	cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
-		target: &requested, wakeMode: wakeTargetInjectVia,
-	})
-	if err != nil {
-		t.Fatalf("reclaim dead owner: %v", err)
-	}
-	defer cleanup()
-	got, exists, readErr := readWakeTarget(root, "codex")
-	if readErr != nil || !exists || !sameWakeOwner(got.Owner, &requestedOwner) {
-		t.Fatalf("reclaimed target=%#v exists=%v err=%v", got, exists, readErr)
-	}
-}
+			if tt.wantOwned {
+				var owned *wakeOwnerAlreadyOwnedError
+				if !errors.As(err, &owned) {
+					t.Fatalf("acquire error = %v, want visible already-owned error", err)
+				}
+			} else if len(tt.wantErrorText) != 0 {
+				if err == nil {
+					t.Fatal("acquire succeeded, want refusal")
+				}
+				for _, text := range tt.wantErrorText {
+					if !strings.Contains(err.Error(), text) {
+						t.Fatalf("acquire error = %v, want %q", err, text)
+					}
+				}
+			} else if err != nil {
+				t.Fatalf("acquire: %v", err)
+			}
 
-func TestOwnerBoundClaimRepairsSameOwnerWithoutWakeLock(t *testing.T) {
-	root, injector := setupOwnerClaimTest(t)
-	owner := wakeOwner{PID: 4251, ProcessStart: "owner-a", BootID: "boot-1"}
-	persisted := ownerClaimTarget(t, root, injector, owner)
-	if err := writeWakeTarget(root, "codex", persisted); err != nil {
-		t.Fatal(err)
+			got, exists, readErr := readWakeTarget(root, "codex")
+			if readErr != nil || !exists {
+				t.Fatalf("read persisted target: target=%#v exists=%v err=%v", got, exists, readErr)
+			}
+			wantOwner := &tt.requested
+			if err != nil {
+				wantOwner = &tt.persisted
+				if _, statErr := os.Stat(filepath.Join(fsq.AgentBase(root, "codex"), ".wake.lock")); !os.IsNotExist(statErr) {
+					t.Fatalf("refused claim created or obscured wake lock: %v", statErr)
+				}
+			}
+			if !sameWakeOwner(got.Owner, wantOwner) {
+				t.Fatalf("persisted owner = %#v, want %#v", got.Owner, wantOwner)
+			}
+		})
 	}
-	self := os.Getpid()
-	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		switch pid {
-		case owner.PID:
-			return ownerClaimProcess(pid, owner.ProcessStart, owner.BootID)
-		case self:
-			return ownerClaimProcess(pid, "wake-self", "boot-1")
-		default:
-			return wakeProcessInfo{PID: pid}
-		}
-	})
-
-	requested := ownerClaimTarget(t, root, injector, owner)
-	cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
-		target: &requested, wakeMode: wakeTargetInjectVia,
-	})
-	if err != nil {
-		t.Fatalf("repair same owner: %v", err)
-	}
-	cleanup()
-}
-
-func TestOwnerBoundClaimRejectsReplayedDeadOwner(t *testing.T) {
-	root, injector := setupOwnerClaimTest(t)
-	owner := wakeOwner{PID: 4271, ProcessStart: "owner-a", BootID: "boot-1"}
-	if err := writeWakeTarget(root, "codex", ownerClaimTarget(t, root, injector, owner)); err != nil {
-		t.Fatal(err)
-	}
-	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		return wakeProcessInfo{PID: pid}
-	})
-	requested := ownerClaimTarget(t, root, injector, owner)
-
-	_, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
-		target: &requested, wakeMode: wakeTargetInjectVia,
-	})
-	if err == nil || !strings.Contains(err.Error(), "requested wake owner") || !strings.Contains(err.Error(), "not live") {
-		t.Fatalf("acquire error = %v, want dead requested-owner refusal", err)
-	}
-}
-
-func TestOwnerBoundClaimTreatsPIDReuseAsDeadOwner(t *testing.T) {
-	root, injector := setupOwnerClaimTest(t)
-	const reusedPID = 4301
-	persistedOwner := wakeOwner{PID: reusedPID, ProcessStart: "old-start", BootID: "boot-1"}
-	requestedOwner := wakeOwner{PID: reusedPID, ProcessStart: "new-start", BootID: "boot-1"}
-	if err := writeWakeTarget(root, "codex", ownerClaimTarget(t, root, injector, persistedOwner)); err != nil {
-		t.Fatal(err)
-	}
-	self := os.Getpid()
-	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		switch pid {
-		case reusedPID:
-			return ownerClaimProcess(pid, requestedOwner.ProcessStart, requestedOwner.BootID)
-		case self:
-			return ownerClaimProcess(pid, "wake-self", "boot-1")
-		default:
-			return wakeProcessInfo{PID: pid}
-		}
-	})
-
-	requested := ownerClaimTarget(t, root, injector, requestedOwner)
-	cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
-		target: &requested, wakeMode: wakeTargetInjectVia,
-	})
-	if err != nil {
-		t.Fatalf("PID-reuse reclaim: %v", err)
-	}
-	cleanup()
 }
 
 func TestOwnerBoundClaimFailsClosedOnUnknownOrLegacyOwner(t *testing.T) {
@@ -628,37 +587,7 @@ func TestAcceptExistingValidConvergesDeadOwnerWithoutMaskingModeMismatch(t *test
 	}
 }
 
-func TestOwnerBoundClaimFailsClosedWhenLockHasNoTarget(t *testing.T) {
-	root, injector := setupOwnerClaimTest(t)
-	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
-		PID:          4601,
-		TTY:          "unknown",
-		ProcessStart: "old-wake",
-		BootID:       "boot-1",
-		Generation:   "stale-generation",
-	})
-	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		if pid == 4602 {
-			return ownerClaimProcess(pid, "owner-b", "boot-1")
-		}
-		return wakeProcessInfo{PID: pid}
-	})
-	requested := ownerClaimTarget(t, root, injector, wakeOwner{
-		PID: 4602, ProcessStart: "owner-b", BootID: "boot-1",
-	})
-
-	_, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
-		target: &requested, wakeMode: wakeTargetInjectVia,
-	})
-	if err == nil || !strings.Contains(err.Error(), "missing while a wake lock exists") {
-		t.Fatalf("acquire error = %v, want missing-target refusal", err)
-	}
-	if _, statErr := os.Stat(lockPath); statErr != nil {
-		t.Fatalf("stale lock was removed before ownership proof: %v", statErr)
-	}
-}
-
-func TestOwnerlessClaimFailsClosedWhenLockHasNoTarget(t *testing.T) {
+func TestOwnerClaimFailsClosedWhenLockHasNoTarget(t *testing.T) {
 	tests := []struct {
 		name    string
 		options func(t *testing.T, root, injector string) wakeLockAcquireOptions
@@ -673,6 +602,15 @@ func TestOwnerlessClaimFailsClosedWhenLockHasNoTarget(t *testing.T) {
 			name: "ownerless inject-via target",
 			options: func(t *testing.T, root, injector string) wakeLockAcquireOptions {
 				target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+				return wakeLockAcquireOptions{target: &target, wakeMode: wakeTargetInjectVia}
+			},
+		},
+		{
+			name: "owner-bound inject-via target",
+			options: func(t *testing.T, root, injector string) wakeLockAcquireOptions {
+				target := ownerClaimTarget(t, root, injector, wakeOwner{
+					PID: 4602, ProcessStart: "owner-b", BootID: "boot-1",
+				})
 				return wakeLockAcquireOptions{target: &target, wakeMode: wakeTargetInjectVia}
 			},
 		},
@@ -694,6 +632,9 @@ func TestOwnerlessClaimFailsClosedWhenLockHasNoTarget(t *testing.T) {
 			}
 			before := snapshotOwnerTransitionTree(t, root)
 			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				if pid == 4602 {
+					return ownerClaimProcess(pid, "owner-b", "boot-1")
+				}
 				return wakeProcessInfo{PID: pid}
 			})
 
@@ -704,45 +645,50 @@ func TestOwnerlessClaimFailsClosedWhenLockHasNoTarget(t *testing.T) {
 
 			after := snapshotOwnerTransitionTree(t, root)
 			if changed := assertOwnerTransitionTreeChangesOnly(t, before, after); len(changed) != 0 {
-				t.Fatalf("refused ownerless claim changed tree: %#v", changed)
+				t.Fatalf("refused claim changed tree: %#v", changed)
 			}
 		})
 	}
 }
 
-func TestOwnerBoundClaimRequiresRequestedOwnerForPersistedOwnerState(t *testing.T) {
-	root, injector := setupOwnerClaimTest(t)
-	persistedOwner := wakeOwner{PID: 4651, ProcessStart: "owner-a", BootID: "boot-1"}
-	if err := writeWakeTarget(root, "codex", ownerClaimTarget(t, root, injector, persistedOwner)); err != nil {
-		t.Fatal(err)
-	}
-	requested := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
-
-	_, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
-		target: &requested, wakeMode: wakeTargetInjectVia,
-	})
-	if err == nil || !strings.Contains(err.Error(), "requested wake ownership") {
-		t.Fatalf("acquire error = %v, want missing requested-owner refusal", err)
-	}
-}
-
-func TestOwnerBoundClaimOwnerlessWakeCannotErasePersistedTarget(t *testing.T) {
-	root, injector := setupOwnerClaimTest(t)
-	persistedOwner := wakeOwner{PID: 4671, ProcessStart: "owner-a", BootID: "boot-1"}
-	persisted := ownerClaimTarget(t, root, injector, persistedOwner)
-	if err := writeWakeTarget(root, "codex", persisted); err != nil {
-		t.Fatal(err)
+func TestOwnerClaimRequiresRequestedOwnerForPersistedState(t *testing.T) {
+	tests := []struct {
+		name    string
+		options func(t *testing.T, root, injector string) wakeLockAcquireOptions
+	}{
+		{
+			name: "inject-via target omits owner",
+			options: func(t *testing.T, root, injector string) wakeLockAcquireOptions {
+				target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+				return wakeLockAcquireOptions{target: &target, wakeMode: wakeTargetInjectVia}
+			},
+		},
+		{
+			name: "raw ownerless wake",
+			options: func(_ *testing.T, _, _ string) wakeLockAcquireOptions {
+				return wakeLockAcquireOptions{wakeMode: wakeInjectModeNone}
+			},
+		},
 	}
 
-	_, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
-		wakeMode: wakeInjectModeNone,
-	})
-	if err == nil || !strings.Contains(err.Error(), "requested wake ownership") {
-		t.Fatalf("ownerless acquire error = %v, want persisted-target refusal", err)
-	}
-	got, exists, readErr := readWakeTarget(root, "codex")
-	if readErr != nil || !exists || !sameWakeOwner(got.Owner, persisted.Owner) {
-		t.Fatalf("ownerless wake changed target: target=%#v exists=%v err=%v", got, exists, readErr)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, injector := setupOwnerClaimTest(t)
+			persistedOwner := wakeOwner{PID: 4651, ProcessStart: "owner-a", BootID: "boot-1"}
+			persisted := ownerClaimTarget(t, root, injector, persistedOwner)
+			if err := writeWakeTarget(root, "codex", persisted); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := acquireWakeLockWithOptions(root, "codex", tt.options(t, root, injector))
+			if err == nil || !strings.Contains(err.Error(), "requested wake ownership") {
+				t.Fatalf("acquire error = %v, want missing requested-owner refusal", err)
+			}
+			got, exists, readErr := readWakeTarget(root, "codex")
+			if readErr != nil || !exists || !sameWakeOwner(got.Owner, persisted.Owner) {
+				t.Fatalf("refused claim changed target: target=%#v exists=%v err=%v", got, exists, readErr)
+			}
+		})
 	}
 }
 
@@ -904,8 +850,4 @@ func TestConcurrentDifferentHandleOwnerClaimsBothSucceed(t *testing.T) {
 			t.Fatalf("%s target=%#v exists=%v err=%v, want only %#v", handle, persisted.Owner, exists, err, wantOwner)
 		}
 	}
-}
-
-func ptrWakeTarget(target wakeTarget) *wakeTarget {
-	return &target
 }

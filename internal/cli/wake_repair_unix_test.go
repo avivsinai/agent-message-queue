@@ -1251,14 +1251,33 @@ func captureWakeRepairOutput(t *testing.T, fn func() error) (stdout, stderr stri
 }
 
 func TestBuildRepairWakeArgsIncludesReadyFileAndTarget(t *testing.T) {
-	target := wakeTarget{
-		InjectVia:  "/abs/injector",
-		InjectArgs: []string{"exec", "target"},
+	tests := []struct {
+		name     string
+		baseline string
+		want     string
+	}{
+		{
+			name: "legacy target captures existing floor",
+			want: "--no-update-check|wake|--me|codex|--root|/tmp/root|--baseline-existing|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready",
+		},
+		{
+			name:     "persisted target reuses exact floor",
+			baseline: "/private/baseline.json",
+			want:     "--no-update-check|wake|--me|codex|--root|/tmp/root|--baseline-file|/private/baseline.json|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready",
+		},
 	}
-	args := buildRepairWakeArgs("/tmp/root", "codex", target, "/tmp/ready")
-	got := strings.Join(args, "|")
-	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--baseline-existing|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready"
-	if got != want {
-		t.Fatalf("args = %q, want %q", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target := wakeTarget{
+				InjectVia:      "/abs/injector",
+				InjectArgs:     []string{"exec", "target"},
+				BaselineFile:   tt.baseline,
+				BaselineDigest: "sha256:abc",
+			}
+			got := strings.Join(buildRepairWakeArgs("/tmp/root", "codex", target, "/tmp/ready"), "|")
+			if got != tt.want {
+				t.Fatalf("args = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
