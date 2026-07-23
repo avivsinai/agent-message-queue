@@ -92,6 +92,17 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 					return fmt.Errorf("wake lock is being created (retry shortly)")
 				case wakeLockValid:
 					if options.acceptExistingValid {
+						if modeErr := requireWakeLockModeCompatible(inspection, options.wakeMode); modeErr != nil {
+							return modeErr
+						}
+						replaceNeeded, replaceErr := wakeLockReplacementNeeded(inspection)
+						if replaceErr != nil {
+							return replaceErr
+						}
+						if replaceNeeded {
+							replace = inspection
+							return nil
+						}
 						usableErr := requireWakeLockUsable(inspection, options.wakeMode, options.target)
 						if usableErr == nil {
 							return wakeLockAlreadyRunningError(me, inspection)
@@ -507,16 +518,8 @@ func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, r
 	if !inspection.Exists || inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
 		return fmt.Errorf("existing wake lock for %s is not a confirmed valid wake", inspection.Agent)
 	}
-	if inspection.Lock.WakeMode != requiredMode {
-		if requiredMode == wakeInjectModeNone {
-			return fmt.Errorf("existing wake for %s cannot satisfy requested --inject-mode none; stop the existing wake and retry", inspection.Agent)
-		}
-		// Legacy locks recorded WakeMode only for none and inject-via.
-		legacyTTYWake := inspection.Lock.WakeMode == "" &&
-			(requiredMode == wakeInjectModeRaw || requiredMode == wakeInjectModePaste)
-		if !legacyTTYWake {
-			return fmt.Errorf("existing wake for %s cannot satisfy requested wake mode %q (existing %q); stop the existing wake and retry", inspection.Agent, requiredMode, inspection.Lock.WakeMode)
-		}
+	if err := requireWakeLockModeCompatible(inspection, requiredMode); err != nil {
+		return err
 	}
 	if !wakeLockHasUsableNotificationPath(inspection) {
 		return fmt.Errorf("existing wake lock for %s is not usable for --require-wake (pid %d on %s since %s)",
@@ -547,6 +550,21 @@ func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, r
 		}
 		if !sameWakeInjectorIdentity(persistedTarget, *requestedTarget) || !sameWakeOwner(persistedTarget.Owner, requestedTarget.Owner) {
 			return fmt.Errorf("existing inject-via wake for %s uses a different injector path, fixed arguments, owner, or baseline floor", inspection.Agent)
+		}
+	}
+	return nil
+}
+
+func requireWakeLockModeCompatible(inspection wakeLockInspection, requiredMode string) error {
+	if inspection.Lock.WakeMode != requiredMode {
+		if requiredMode == wakeInjectModeNone {
+			return fmt.Errorf("existing wake for %s cannot satisfy requested --inject-mode none; stop the existing wake and retry", inspection.Agent)
+		}
+		// Legacy locks recorded WakeMode only for none and inject-via.
+		legacyTTYWake := inspection.Lock.WakeMode == "" &&
+			(requiredMode == wakeInjectModeRaw || requiredMode == wakeInjectModePaste)
+		if !legacyTTYWake {
+			return fmt.Errorf("existing wake for %s cannot satisfy requested wake mode %q (existing %q); stop the existing wake and retry", inspection.Agent, requiredMode, inspection.Lock.WakeMode)
 		}
 	}
 	return nil
@@ -734,6 +752,12 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		}
 		if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
 			result.Status = "refused"
+			result.Reason = err.Error()
+			return err
+		}
+		if err := authorizeOwnerBoundWakeTransition(inspection, &target); err != nil {
+			result.Status = "refused"
+			result.PID = inspection.PID
 			result.Reason = err.Error()
 			return err
 		}

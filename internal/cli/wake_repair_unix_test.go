@@ -26,6 +26,12 @@ func stubStartWakeFromTarget(t *testing.T, fn wakeRepairStarter) {
 	})
 }
 
+func bindExactRepairOwner(target *wakeTarget) wakeOwner {
+	owner := wakeOwner{PID: 8765, ProcessStart: "repair-owner", BootID: "boot-1"}
+	target.Owner = &owner
+	return owner
+}
+
 func TestWakeTargetWriteReadRoundTripAndPermissions(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
@@ -608,6 +614,71 @@ func TestRepairWakeRefusesRawTTYWithoutInjectTarget(t *testing.T) {
 	}
 }
 
+func TestRepairWakeRefusesUnownedOrUnverifiedTargetWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name        string
+		owner       *wakeOwner
+		writeTarget bool
+		wantReason  string
+	}{
+		{name: "missing target", writeTarget: false, wantReason: "no inject-via wake target"},
+		{name: "legacy ownerless target", writeTarget: true, wantReason: "requested wake ownership"},
+		{
+			name:        "dead owner",
+			owner:       &wakeOwner{PID: 4801, ProcessStart: "dead-owner", BootID: "boot-1"},
+			writeTarget: true,
+			wantReason:  "not live",
+		},
+		{
+			name:        "unknown owner",
+			owner:       &wakeOwner{PID: 4802, ProcessStart: "unknown-owner", BootID: "boot-1"},
+			writeTarget: true,
+			wantReason:  "unverified",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			injector := writeExecutableForTest(t, "injector")
+			target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+			target.Owner = tt.owner
+			writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+				PID: 4242, Executable: "/opt/homebrew/bin/amq", Generation: "stale-generation",
+			}, target))
+			if tt.writeTarget {
+				if err := writeWakeTarget(root, "codex", target); err != nil {
+					t.Fatal(err)
+				}
+			}
+			seedOwnerTransitionSentinels(t, root)
+			if err := withWakeLifecycleGuard(root, "codex", func() error { return nil }); err != nil {
+				t.Fatalf("seed lifecycle guard: %v", err)
+			}
+			before := snapshotOwnerTransitionTree(t, root)
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				if tt.owner != nil && pid == tt.owner.PID && tt.name == "unknown owner" {
+					return wakeProcessInfo{PID: pid, Running: true, BootID: tt.owner.BootID}
+				}
+				return wakeProcessInfo{PID: pid, Running: false}
+			})
+			stubStartWakeFromTarget(t, func(root, me string, target wakeTarget) (int, error) {
+				t.Fatalf("startWakeFromTarget should not run after ownership refusal")
+				return 0, nil
+			})
+
+			result, err := repairWake(root, "codex")
+			if err == nil || result.Status != "refused" || !strings.Contains(result.Reason, tt.wantReason) {
+				t.Fatalf("repair result=%#v err=%v, want refusal containing %q", result, err, tt.wantReason)
+			}
+			after := snapshotOwnerTransitionTree(t, root)
+			if changed := assertOwnerTransitionTreeChangesOnly(t, before, after); len(changed) != 0 {
+				t.Fatalf("refused repair changed tree: %#v", changed)
+			}
+		})
+	}
+}
+
 func TestRepairWakeRefusesUnverifiedLock(t *testing.T) {
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
@@ -675,12 +746,16 @@ func TestRepairWakeRefusesLockChangedBeforeRemoval(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
 	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	owner := bindExactRepairOwner(&target)
 	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
 		PID:        4242,
 		Executable: "/opt/homebrew/bin/amq",
 	}, target))
 	calls := 0
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == owner.PID {
+			return wakeProcessInfoForOwnerTest(owner)
+		}
 		calls++
 		if calls == 1 {
 			writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
@@ -714,6 +789,7 @@ func TestRepairWakeRemovesProvenStaleAndStartsFromTarget(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
 	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	owner := bindExactRepairOwner(&target)
 	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
 		PID:        4242,
 		Executable: "/opt/homebrew/bin/amq",
@@ -721,6 +797,9 @@ func TestRepairWakeRemovesProvenStaleAndStartsFromTarget(t *testing.T) {
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid == 9876 {
 			return wakeProcessInfo{PID: pid, Running: true, StartToken: "new-start", Executable: "/opt/homebrew/bin/amq", Args: []string{"amq", "wake", "--root", root, "--me", "codex"}}
+		}
+		if pid == owner.PID {
+			return wakeProcessInfoForOwnerTest(owner)
 		}
 		return wakeProcessInfo{PID: pid, Running: false}
 	})
@@ -756,6 +835,7 @@ func TestRepairWakeAcceptsConcurrentWinnerForExactTarget(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
 	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	owner := bindExactRepairOwner(&target)
 	writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
 		PID: 4242, Executable: "/opt/homebrew/bin/amq", Generation: "stale-generation",
 	}, target))
@@ -765,6 +845,9 @@ func TestRepairWakeAcceptsConcurrentWinnerForExactTarget(t *testing.T) {
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid == 9876 {
 			return wakeProcessInfo{PID: pid, Running: true, StartToken: "winner-start", Executable: "/opt/homebrew/bin/amq", Args: []string{"amq", "wake", "--root", root, "--me", "codex"}}
+		}
+		if pid == owner.PID {
+			return wakeProcessInfoForOwnerTest(owner)
 		}
 		return wakeProcessInfo{PID: pid, Running: false}
 	})
@@ -788,6 +871,7 @@ func TestRepairWakeRefusesConcurrentWinnerForDifferentTarget(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
 	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	owner := bindExactRepairOwner(&target)
 	writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
 		PID: 4242, Executable: "/opt/homebrew/bin/amq", Generation: "stale-generation",
 	}, target))
@@ -797,6 +881,9 @@ func TestRepairWakeRefusesConcurrentWinnerForDifferentTarget(t *testing.T) {
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid == 9876 {
 			return wakeProcessInfo{PID: pid, Running: true, StartToken: "winner-start", Executable: "/opt/homebrew/bin/amq", Args: []string{"amq", "wake", "--root", root, "--me", "codex"}}
+		}
+		if pid == owner.PID {
+			return wakeProcessInfoForOwnerTest(owner)
 		}
 		return wakeProcessInfo{PID: pid, Running: false}
 	})
@@ -1031,6 +1118,7 @@ func TestRunWakeRepairCLIRepairsStaleWakeWithJSON(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
 	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	owner := bindExactRepairOwner(&target)
 	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
 		PID:        4242,
 		Executable: "/opt/homebrew/bin/amq",
@@ -1038,6 +1126,9 @@ func TestRunWakeRepairCLIRepairsStaleWakeWithJSON(t *testing.T) {
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid == 9876 {
 			return wakeProcessInfo{PID: pid, Running: true, StartToken: "new-start", Executable: "/opt/homebrew/bin/amq", Args: []string{"amq", "wake", "--root", root, "--me", "codex"}}
+		}
+		if pid == owner.PID {
+			return wakeProcessInfoForOwnerTest(owner)
 		}
 		return wakeProcessInfo{PID: pid, Running: false}
 	})
@@ -1080,11 +1171,15 @@ func TestRunWakeRepairClearsRepairAvailableAfterStartFailure(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
 	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	owner := bindExactRepairOwner(&target)
 	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
 		PID:        4242,
 		Executable: "/opt/homebrew/bin/amq",
 	}, target))
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == owner.PID {
+			return wakeProcessInfoForOwnerTest(owner)
+		}
 		return wakeProcessInfo{PID: pid, Running: false}
 	})
 	if err := writeWakeTarget(root, "codex", target); err != nil {

@@ -4,6 +4,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -518,6 +519,112 @@ func TestOwnerBoundClaimSuccessfulReclaimPreservesUnrelatedTree(t *testing.T) {
 		if !changed[path] {
 			t.Fatalf("successful reclaim did not change intended metadata %q: %#v", path, changed)
 		}
+	}
+}
+
+func TestAcceptExistingValidConvergesDeadOwnerWithoutMaskingModeMismatch(t *testing.T) {
+	tests := []struct {
+		name            string
+		wakeMode        string
+		wantReplacement bool
+		wantError       string
+	}{
+		{name: "matching mode replaces live orphan", wakeMode: wakeTargetInjectVia, wantReplacement: true},
+		{name: "mode mismatch refuses before replacement", wakeMode: wakeInjectModeNone, wantError: "inject-mode none"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, injector := setupOwnerClaimTest(t)
+			const oldWakePID = 4581
+			persistedOwner := wakeOwner{PID: 4582, ProcessStart: "dead-owner", BootID: "boot-1"}
+			requestedOwner := wakeOwner{PID: 4583, ProcessStart: "requester", BootID: "boot-1"}
+			persisted := ownerClaimTarget(t, root, injector, persistedOwner)
+			requested := ownerClaimTarget(t, root, injector, requestedOwner)
+			if err := writeWakeTarget(root, "codex", persisted); err != nil {
+				t.Fatal(err)
+			}
+			lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+				PID:          oldWakePID,
+				TTY:          "unknown",
+				ProcessStart: "old-wake",
+				BootID:       "boot-1",
+				Executable:   "/opt/homebrew/bin/amq",
+				Generation:   "old-generation",
+			}, persisted))
+			before, err := os.ReadFile(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			self := os.Getpid()
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				switch pid {
+				case oldWakePID:
+					return wakeProcessInfo{
+						PID: pid, Running: true, StartToken: "old-wake", BootID: "boot-1",
+						Executable: "/opt/homebrew/bin/amq",
+						Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+					}
+				case requestedOwner.PID:
+					return ownerClaimProcess(pid, requestedOwner.ProcessStart, requestedOwner.BootID)
+				case self:
+					return wakeProcessInfo{
+						PID: pid, Running: true, StartToken: "new-wake", BootID: "boot-1",
+						Executable: "/opt/homebrew/bin/amq",
+						Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+					}
+				default:
+					return wakeProcessInfo{PID: pid}
+				}
+			})
+
+			oldReplace := replaceExistingWakeLock
+			replacementCalls := 0
+			replaceExistingWakeLock = func(inspection wakeLockInspection) (bool, error) {
+				replacementCalls++
+				if inspection.PID != oldWakePID {
+					return false, fmt.Errorf("unexpected replacement pid %d", inspection.PID)
+				}
+				if err := os.Remove(inspection.LockPath); err != nil {
+					return false, err
+				}
+				return true, nil
+			}
+			t.Cleanup(func() { replaceExistingWakeLock = oldReplace })
+
+			cleanup, acquireErr := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+				acceptExistingValid: true,
+				target:              &requested,
+				wakeMode:            tt.wakeMode,
+			})
+			if cleanup != nil {
+				defer cleanup()
+			}
+			if tt.wantError != "" {
+				if acquireErr == nil || !strings.Contains(acquireErr.Error(), tt.wantError) {
+					t.Fatalf("acquire error = %v, want %q", acquireErr, tt.wantError)
+				}
+				if replacementCalls != 0 {
+					t.Fatalf("mode mismatch replaced wake %d times", replacementCalls)
+				}
+				after, readErr := os.ReadFile(lockPath)
+				if readErr != nil || string(after) != string(before) {
+					t.Fatalf("mode mismatch changed existing lock: err=%v", readErr)
+				}
+				return
+			}
+			if acquireErr != nil {
+				t.Fatalf("converge live orphan: %v", acquireErr)
+			}
+			if replacementCalls != 1 {
+				t.Fatalf("replacement calls = %d, want 1", replacementCalls)
+			}
+			got, exists, readErr := readWakeTarget(root, "codex")
+			if readErr != nil || !exists || !sameWakeOwner(got.Owner, requested.Owner) {
+				t.Fatalf("replacement target = %#v exists=%v err=%v", got, exists, readErr)
+			}
+		})
 	}
 }
 

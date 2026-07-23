@@ -974,7 +974,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsMissingTTY(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected unusable wake lock error")
 	}
-	if !strings.Contains(err.Error(), "not usable for --require-wake") {
+	if !strings.Contains(err.Error(), "no cooperative control endpoint") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
@@ -1215,7 +1215,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *test
 	if err == nil {
 		t.Fatal("expected unusable wake lock error")
 	}
-	if !strings.Contains(err.Error(), "not usable for --require-wake") {
+	if !strings.Contains(err.Error(), "no cooperative control endpoint") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
@@ -2555,11 +2555,15 @@ func TestRunWakeRepairJSONRejectsFIFOLogWithoutBlocking(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
 	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"exec"})
+	owner := bindExactRepairOwner(&target)
 	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
 		PID:        4242,
 		Executable: "/opt/homebrew/bin/amq",
 	}, target))
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == owner.PID {
+			return wakeProcessInfoForOwnerTest(owner)
+		}
 		return wakeProcessInfo{PID: pid, Running: false}
 	})
 	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
