@@ -13,10 +13,13 @@ import (
 func runWho(args []string) error {
 	fs := flag.NewFlagSet("who", flag.ContinueOnError)
 	common := addCommonFlags(fs)
+	allFlag := fs.Bool("all", false, "Include sessions whose owner-bound agent processes are all conclusively dead")
 
 	usage := usageWithFlags(fs, "amq who [options]",
 		"List sessions and agents in the current project.",
-		"Shows active/stale status and whether activity comes from a verified notifier or recent commands.")
+		"Shows active/stale status and whether activity comes from a verified notifier or recent commands.",
+		"Sessions whose owner-bound agent processes are all conclusively dead are hidden unless --all is used.",
+		"Legacy or unverified ownership remains visible.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -71,6 +74,8 @@ func runWho(args []string) error {
 		}
 
 		var agents []agentInfo
+		agentCount := 0
+		conclusivelyDeadCount := 0
 		for _, ae := range agentEntries {
 			if !ae.IsDir() {
 				continue
@@ -95,6 +100,8 @@ func runWho(args []string) error {
 				continue
 			}
 
+			agentCount++
+			ownerState := classifyPersistedWakeTargetOwner(sessDir, ae.Name())
 			// Recent presence proves activity only; a verified wake lock separately
 			// proves that a prompt notifier is currently attached.
 			recentActivity := false
@@ -106,10 +113,20 @@ func runWho(args []string) error {
 			}
 			ai.PresenceSource = resolvePresenceSource(sessDir, ae.Name(), recentActivity)
 			ai.Active = recentActivity || ai.PresenceSource == presenceSourceNotifierLive
+			if ownerState == wakeIdentityGoneOrDifferent {
+				// Exact owner metadata overrides stale presence and an orphaned
+				// notifier. No files are changed by discovery.
+				ai.Active = false
+				ai.PresenceSource = ""
+				conclusivelyDeadCount++
+			}
 			agents = append(agents, ai)
 		}
 
 		if len(agents) > 0 {
+			if !*allFlag && agentCount > 0 && conclusivelyDeadCount == agentCount {
+				continue
+			}
 			sessions = append(sessions, sessionInfo{
 				Name:   e.Name(),
 				Agents: agents,
@@ -164,6 +181,21 @@ func runWho(args []string) error {
 		}
 	}
 	return nil
+}
+
+// classifyPersistedWakeTargetOwner is intentionally read-only. Missing,
+// legacy, corrupt, or inspection-ambiguous metadata stays unknown so discovery
+// cannot hide a session without conclusive process identity evidence.
+func classifyPersistedWakeTargetOwner(root, me string) wakeIdentityState {
+	target, exists, err := readWakeTarget(root, me)
+	if err != nil || !exists || target.Owner == nil {
+		return wakeIdentityUnknown
+	}
+	if err := validateWakeTarget(target, root, me); err != nil {
+		return wakeIdentityUnknown
+	}
+	state, _ := classifyWakeOwnerIdentity(*target.Owner)
+	return state
 }
 
 // hasSessionSubdirs returns true if dir contains at least one subdirectory

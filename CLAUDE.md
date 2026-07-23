@@ -206,7 +206,7 @@ amq swarm bridge --team <name> --me <agent> [--agent-id <id>] [--poll] [--poll-i
 amq integration symphony init [--workflow <path>] --me <agent> [--root <path>] [--check] [--force] [--json]
 amq integration symphony emit --event <after_create|before_run|after_run|before_remove> --me <agent> [--root <path>] [--workspace <path>] [--identifier <key>] [--json]
 amq integration kanban bridge --me <agent> [--root <path>] [--url <ws://...>] [--workspace-id <id>] [--reconnect <duration>] [--json]
-amq who [--json]
+amq who [--all] [--json]
 amq doctor [--ops] [--fix-wake-locks] [--json]
 ```
 
