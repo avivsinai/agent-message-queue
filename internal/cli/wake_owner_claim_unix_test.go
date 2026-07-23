@@ -551,6 +551,58 @@ func TestOwnerBoundClaimFailsClosedWhenLockHasNoTarget(t *testing.T) {
 	}
 }
 
+func TestOwnerlessClaimFailsClosedWhenLockHasNoTarget(t *testing.T) {
+	tests := []struct {
+		name    string
+		options func(t *testing.T, root, injector string) wakeLockAcquireOptions
+	}{
+		{
+			name: "raw ownerless wake",
+			options: func(_ *testing.T, _, _ string) wakeLockAcquireOptions {
+				return wakeLockAcquireOptions{wakeMode: wakeInjectModeNone}
+			},
+		},
+		{
+			name: "ownerless inject-via target",
+			options: func(t *testing.T, root, injector string) wakeLockAcquireOptions {
+				target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+				return wakeLockAcquireOptions{target: &target, wakeMode: wakeTargetInjectVia}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, injector := setupOwnerClaimTest(t)
+			writeWakeLockForTest(t, root, "codex", wakeLock{
+				PID:          4611,
+				TTY:          "unknown",
+				ProcessStart: "old-wake",
+				BootID:       "boot-1",
+				Generation:   "stale-generation",
+			})
+			seedOwnerTransitionSentinels(t, root)
+			if err := withWakeLifecycleGuard(root, "codex", func() error { return nil }); err != nil {
+				t.Fatalf("seed lifecycle guard: %v", err)
+			}
+			before := snapshotOwnerTransitionTree(t, root)
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				return wakeProcessInfo{PID: pid}
+			})
+
+			_, err := acquireWakeLockWithOptions(root, "codex", tt.options(t, root, injector))
+			if err == nil || !strings.Contains(err.Error(), "missing while a wake lock exists") {
+				t.Fatalf("acquire error = %v, want missing-target refusal", err)
+			}
+
+			after := snapshotOwnerTransitionTree(t, root)
+			if changed := assertOwnerTransitionTreeChangesOnly(t, before, after); len(changed) != 0 {
+				t.Fatalf("refused ownerless claim changed tree: %#v", changed)
+			}
+		})
+	}
+}
+
 func TestOwnerBoundClaimRequiresRequestedOwnerForPersistedOwnerState(t *testing.T) {
 	root, injector := setupOwnerClaimTest(t)
 	persistedOwner := wakeOwner{PID: 4651, ProcessStart: "owner-a", BootID: "boot-1"}

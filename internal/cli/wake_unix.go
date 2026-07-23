@@ -213,6 +213,9 @@ func authorizeOwnerBoundWakeTransition(inspection wakeLockInspection, requested 
 	if err != nil {
 		return fmt.Errorf("persisted wake ownership for %s is unverified: %w", inspection.Agent, err)
 	}
+	if !exists && inspection.Exists && inspection.Status == wakeLockStale {
+		return fmt.Errorf("persisted wake ownership for %s is missing while a wake lock exists; refusing automatic takeover", inspection.Agent)
+	}
 	if requested == nil || requested.Owner == nil {
 		if exists {
 			return fmt.Errorf("requested wake ownership for %s is missing while persisted wake state exists; refusing automatic takeover", inspection.Agent)
@@ -232,9 +235,6 @@ func authorizeOwnerBoundWakeTransition(inspection wakeLockInspection, requested 
 		return fmt.Errorf("requested wake owner for %s is unverified (%s); refusing automatic takeover", inspection.Agent, requestedReason)
 	}
 	if !exists {
-		if inspection.Exists {
-			return fmt.Errorf("persisted wake ownership for %s is missing while a wake lock exists; refusing automatic takeover", inspection.Agent)
-		}
 		return nil
 	}
 	if err := validateWakeTarget(persisted, inspection.Root, inspection.Agent); err != nil {

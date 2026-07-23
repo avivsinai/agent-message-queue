@@ -1274,7 +1274,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsUnverifiedWake(t *testing.T) {
 	}
 }
 
-func TestAcquireWakeLockSelfHealsPIDReusedByNonAMQ(t *testing.T) {
+func TestAcquireWakeLockPreservesPIDReusedLockWithoutOwnership(t *testing.T) {
 	const reusedPID = 4242
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
@@ -1306,26 +1306,21 @@ func TestAcquireWakeLockSelfHealsPIDReusedByNonAMQ(t *testing.T) {
 		}
 		return wakeProcessInfo{PID: pid}
 	})
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
-	if err != nil {
-		t.Fatalf("acquireWakeLock should replace stale PID-reuse lock: %v", err)
+	if cleanup != nil {
+		defer cleanup()
 	}
-	defer cleanup()
-
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		t.Fatalf("read replacement lock: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "missing while a wake lock exists") {
+		t.Fatalf("acquire error = %v, want missing ownership refusal", err)
 	}
-	var got wakeLock
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("unmarshal replacement lock: %v", err)
-	}
-	if got.PID != os.Getpid() {
-		t.Fatalf("replacement pid = %d, want %d", got.PID, os.Getpid())
-	}
-	if got.ProcessStart != "self-start" {
-		t.Fatalf("replacement process_start = %q, want self-start", got.ProcessStart)
+	after, readErr := os.ReadFile(lockPath)
+	if readErr != nil || string(after) != string(before) {
+		t.Fatalf("ownerless acquire changed PID-reuse lock: err=%v", readErr)
 	}
 }
 
@@ -1381,7 +1376,7 @@ func TestAcquireWakeLockTreatsUnknownBootIdentityAsUnverified(t *testing.T) {
 	}
 }
 
-func TestAcquireWakeLockReplacesProvenStartMismatchWhenBootMatches(t *testing.T) {
+func TestAcquireWakeLockPreservesProvenStartMismatchWithoutOwnership(t *testing.T) {
 	const reusedPID = 4242
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
@@ -1402,22 +1397,21 @@ func TestAcquireWakeLockReplacesProvenStartMismatchWhenBootMatches(t *testing.T)
 		}
 		return wakeProcessInfo{PID: pid}
 	})
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
-	if err != nil {
-		t.Fatalf("acquireWakeLock: %v", err)
+	if cleanup != nil {
+		defer cleanup()
 	}
-	defer cleanup()
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		t.Fatalf("read replacement lock: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "missing while a wake lock exists") {
+		t.Fatalf("acquire error = %v, want missing ownership refusal", err)
 	}
-	var got wakeLock
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("unmarshal replacement lock: %v", err)
-	}
-	if got.PID != os.Getpid() {
-		t.Fatalf("replacement pid = %d, want %d", got.PID, os.Getpid())
+	after, readErr := os.ReadFile(lockPath)
+	if readErr != nil || string(after) != string(before) {
+		t.Fatalf("ownerless acquire changed start-mismatch lock: err=%v", readErr)
 	}
 }
 
