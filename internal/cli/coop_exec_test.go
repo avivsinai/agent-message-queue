@@ -159,6 +159,25 @@ func TestCoopExecDeferWakeExportsManifestBeforeExec(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeWakeTestMessage(t, root, "codex", "stale.md", "stale-id", "private subject", "private body")
+	self := os.Getpid()
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid != self {
+			return wakeProcessInfo{PID: pid}
+		}
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "exec-start",
+			BootID:     "exec-boot",
+		}
+	})
+	stubWakeProcessSID(t, func(pid int) (int, error) {
+		if pid != self {
+			return 0, fmt.Errorf("unexpected pid %d", pid)
+		}
+		return 77, nil
+	})
+	t.Setenv(envWakeOwner, `{"pid":999,"process_start":"inherited","boot_id":"old-boot"}`)
 
 	oldExec := coopExecProcess
 	defer func() { coopExecProcess = oldExec }()
@@ -175,11 +194,48 @@ func TestCoopExecDeferWakeExportsManifestBeforeExec(t *testing.T) {
 		if _, ok := baseline.IDs["stale-id"]; !ok {
 			t.Fatalf("baseline ids = %#v", baseline.IDs)
 		}
+		var owner wakeOwner
+		if err := json.Unmarshal([]byte(envValue(env, envWakeOwner)), &owner); err != nil {
+			t.Fatalf("decode deferred owner: %v", err)
+		}
+		if owner.PID != self || owner.ProcessStart != "exec-start" || owner.BootID != "exec-boot" || owner.SessionID != 77 {
+			t.Fatalf("deferred owner = %#v, want exact exec identity", owner)
+		}
 		return sentinel
 	}
 	err := runCoopExec([]string{"--defer-wake", "--no-init", "--root", root, "--me", "codex", "true"})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("runCoopExec error = %v", err)
+	}
+}
+
+func TestCoopExecDeferWakeFailsBeforeExecWithoutExactOwner(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	self := os.Getpid()
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: pid == self, StartToken: "exec-start"}
+	})
+
+	oldExec := coopExecProcess
+	defer func() { coopExecProcess = oldExec }()
+	called := false
+	coopExecProcess = func(_ string, _ []string, _ []string) error {
+		called = true
+		return nil
+	}
+
+	err := runCoopExec([]string{"--defer-wake", "--no-init", "--root", root, "--me", "codex", "true"})
+	if err == nil || !strings.Contains(err.Error(), "wake owner boot id is required") {
+		t.Fatalf("runCoopExec error = %v, want missing exact boot identity", err)
+	}
+	if called {
+		t.Fatal("exec ran without an exact deferred owner")
 	}
 }
 

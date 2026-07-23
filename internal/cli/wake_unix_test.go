@@ -302,6 +302,19 @@ func TestRunWakeWithLoopPersistsInjectViaWakeOwnerFromEnv(t *testing.T) {
 		t.Fatalf("encodeWakeOwnerEnv: %v", err)
 	}
 	t.Setenv(envWakeOwner, ownerEnv)
+	self := os.Getpid()
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		switch pid {
+		case owner.PID:
+			return wakeProcessInfo{
+				PID: pid, Running: true, StartToken: owner.ProcessStart, BootID: owner.BootID,
+			}
+		case self:
+			return ownerClaimProcess(pid, "wake-self", owner.BootID)
+		default:
+			return wakeProcessInfo{PID: pid}
+		}
+	})
 
 	injector := writeExecutableForTest(t, "injector")
 	errDone := errors.New("done")

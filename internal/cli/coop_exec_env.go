@@ -23,7 +23,11 @@ func coopSessionIdentity(root, requestedSession, requestedRoot string) string {
 }
 
 func buildCoopExecEnvironment(base []string, root, me, session string) []string {
-	env := setEnvVar(base, envRoot, root)
+	// AMQ_WAKE_OWNER is internal process-identity metadata. Never pass an
+	// ambient token into a new coop process; deferred launch replaces it with
+	// the exact identity captured immediately before exec.
+	env := unsetEnvVar(base, envWakeOwner)
+	env = setEnvVar(env, envRoot, root)
 	env = setEnvVar(env, envMe, me)
 	baseRoot := root
 	if session != "" {

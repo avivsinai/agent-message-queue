@@ -76,6 +76,9 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 		var created wakeLockInspection
 		err := withWakeLifecycleGuard(root, me, func() error {
 			inspection := inspectWakeLock(root, me)
+			if err := authorizeOwnerBoundWakeTransition(inspection, options.target); err != nil {
+				return err
+			}
 			if inspection.Exists {
 				switch inspection.Status {
 				case wakeLockStale:
@@ -189,6 +192,76 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 			})
 		}
 		return cleanup, nil
+	}
+}
+
+type wakeOwnerAlreadyOwnedError struct {
+	Agent string
+	Owner wakeOwner
+}
+
+func (e *wakeOwnerAlreadyOwnedError) Error() string {
+	return fmt.Sprintf("wake handle %s is already owned by live process pid %d", e.Agent, e.Owner.PID)
+}
+
+// authorizeOwnerBoundWakeTransition runs while the handle lifecycle guard is
+// held, before stale-lock cleanup or target staging. A missing target is safe
+// only for a truly fresh handle with no lock; persisted legacy or ambiguous
+// ownership is never overwritten automatically.
+func authorizeOwnerBoundWakeTransition(inspection wakeLockInspection, requested *wakeTarget) error {
+	if requested == nil {
+		return nil
+	}
+
+	persisted, exists, err := readWakeTarget(inspection.Root, inspection.Agent)
+	if err != nil {
+		return fmt.Errorf("persisted wake ownership for %s is unverified: %w", inspection.Agent, err)
+	}
+	if requested.Owner == nil {
+		if exists && persisted.Owner != nil {
+			return fmt.Errorf("requested wake ownership for %s is missing while persisted owner-bound state exists; refusing automatic takeover", inspection.Agent)
+		}
+		return nil
+	}
+	if err := validateExactWakeOwner(*requested.Owner); err != nil {
+		return fmt.Errorf("requested wake owner is not exact: %w", err)
+	}
+	requestedState, requestedReason := classifyWakeOwnerIdentity(*requested.Owner)
+	switch requestedState {
+	case wakeIdentitySame:
+		// Continue to compare against persisted ownership.
+	case wakeIdentityGoneOrDifferent:
+		return fmt.Errorf("requested wake owner for %s is not live (%s); refusing automatic takeover", inspection.Agent, requestedReason)
+	default:
+		return fmt.Errorf("requested wake owner for %s is unverified (%s); refusing automatic takeover", inspection.Agent, requestedReason)
+	}
+	if !exists {
+		if inspection.Exists {
+			return fmt.Errorf("persisted wake ownership for %s is missing while a wake lock exists; refusing automatic takeover", inspection.Agent)
+		}
+		return nil
+	}
+	if err := validateWakeTarget(persisted, inspection.Root, inspection.Agent); err != nil {
+		return fmt.Errorf("persisted wake ownership for %s is invalid; refusing automatic takeover: %w", inspection.Agent, err)
+	}
+	if persisted.Owner == nil {
+		return fmt.Errorf("persisted wake ownership for %s is legacy and has no owner identity; refusing automatic takeover", inspection.Agent)
+	}
+	if err := validateExactWakeOwner(*persisted.Owner); err != nil {
+		return fmt.Errorf("persisted wake ownership for %s is legacy or incomplete; refusing automatic takeover: %w", inspection.Agent, err)
+	}
+	if sameWakeOwner(persisted.Owner, requested.Owner) {
+		return nil
+	}
+
+	state, reason := classifyWakeOwnerIdentity(*persisted.Owner)
+	switch state {
+	case wakeIdentitySame:
+		return &wakeOwnerAlreadyOwnedError{Agent: inspection.Agent, Owner: *persisted.Owner}
+	case wakeIdentityGoneOrDifferent:
+		return nil
+	default:
+		return fmt.Errorf("persisted wake ownership for %s is unverified (%s); refusing automatic takeover", inspection.Agent, reason)
 	}
 }
 
@@ -418,7 +491,15 @@ func wakeLockNeedsOwnerReplacement(inspection wakeLockInspection) (bool, error) 
 	if target.Owner == nil {
 		return false, nil
 	}
-	return wakeOwnerHealthCheck(*target.Owner) != nil, nil
+	state, reason := classifyWakeOwnerIdentity(*target.Owner)
+	switch state {
+	case wakeIdentitySame:
+		return false, nil
+	case wakeIdentityGoneOrDifferent:
+		return true, nil
+	default:
+		return false, fmt.Errorf("wake owner identity is unverified: %s", reason)
+	}
 }
 
 func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, requestedTarget *wakeTarget) error {
@@ -1314,6 +1395,23 @@ func currentWakeOwner() *wakeOwner {
 		owner.SessionID = sid
 	}
 	return &owner
+}
+
+func exactCurrentWakeOwner() (wakeOwner, error) {
+	owner := wakeOwner{PID: os.Getpid()}
+	proc := inspectWakeProcess(owner.PID)
+	if !proc.Running {
+		return wakeOwner{}, fmt.Errorf("current process pid %d is not running", owner.PID)
+	}
+	owner.ProcessStart = proc.StartToken
+	owner.BootID = proc.BootID
+	if err := validateExactWakeOwner(owner); err != nil {
+		return wakeOwner{}, fmt.Errorf("capture current wake owner: %w", err)
+	}
+	if sid, err := getWakeProcessSID(owner.PID); err == nil {
+		owner.SessionID = sid
+	}
+	return owner, nil
 }
 
 func wakeCommandEnv(base []string, root string, owner *wakeOwner) ([]string, error) {

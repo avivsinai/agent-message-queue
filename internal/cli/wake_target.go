@@ -280,6 +280,23 @@ func validateWakeOwner(owner wakeOwner) error {
 	return nil
 }
 
+// validateExactWakeOwner requires the process identity fields needed to
+// distinguish a live owner from PID reuse. Older targets without these fields
+// remain readable, but they are legacy state and must not be reclaimed
+// automatically.
+func validateExactWakeOwner(owner wakeOwner) error {
+	if err := validateWakeOwner(owner); err != nil {
+		return err
+	}
+	if strings.TrimSpace(owner.ProcessStart) == "" {
+		return fmt.Errorf("wake owner process start is required")
+	}
+	if strings.TrimSpace(owner.BootID) == "" {
+		return fmt.Errorf("wake owner boot id is required")
+	}
+	return nil
+}
+
 func validateWakeInjectViaPath(path string) (string, error) {
 	resolvedPath, err := resolveWakeInjectViaPath(path)
 	if err != nil {

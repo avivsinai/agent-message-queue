@@ -477,6 +477,33 @@ func classifyWakeIdentity(inspection wakeLockInspection, proc wakeProcessInfo) (
 	return wakeIdentityUnknown, "legacy lock lacks process start metadata"
 }
 
+// classifyWakeOwnerIdentity classifies an owner-bound agent process. Unlike a
+// wake lock, an owner is not required to look like an AMQ process: it is the
+// long-lived TUI process that the injector serves. Exact process-start and boot
+// identities make PID reuse conclusive while inspection gaps remain unknown.
+func classifyWakeOwnerIdentity(owner wakeOwner) (wakeIdentityState, string) {
+	if err := validateExactWakeOwner(owner); err != nil {
+		return wakeIdentityUnknown, err.Error()
+	}
+	proc := inspectWakeProcess(owner.PID)
+	if !proc.Running {
+		return wakeIdentityGoneOrDifferent, "owner pid not running"
+	}
+	if proc.StartToken == "" {
+		return wakeIdentityUnknown, inspectionReason("owner process start unavailable", proc.InspectError)
+	}
+	switch compareWakeBootID(owner.BootID, proc) {
+	case bootIDMismatch:
+		return wakeIdentityGoneOrDifferent, "owner boot id mismatch"
+	case bootIDUnknown:
+		return wakeIdentityUnknown, "owner boot id unavailable or incomparable"
+	}
+	if proc.StartToken != owner.ProcessStart {
+		return wakeIdentityGoneOrDifferent, "owner process start changed"
+	}
+	return wakeIdentitySame, ""
+}
+
 type bootIDComparison int
 
 const (

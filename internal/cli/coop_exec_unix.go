@@ -328,6 +328,27 @@ func runCoopExec(args []string) error {
 	// Build argv: command name + agent args.
 	argv := append([]string{cmdName}, agentArgs...)
 
+	// Capture the identity after all launch preparation and immediately before
+	// exec. syscall.Exec preserves this PID/process-start/boot tuple, so the
+	// SessionStart wake can prove which TUI owns this handle.
+	if *deferWakeFlag {
+		owner, ownerErr := exactCurrentWakeOwner()
+		if ownerErr != nil {
+			if baselineCaptured {
+				removeWakeBaselineIfUnreferenced(root, agentHandle, deferredBaseline.Path)
+			}
+			return ownerErr
+		}
+		encodedOwner, ownerErr := encodeWakeOwnerEnv(owner)
+		if ownerErr != nil {
+			if baselineCaptured {
+				removeWakeBaselineIfUnreferenced(root, agentHandle, deferredBaseline.Path)
+			}
+			return fmt.Errorf("encode deferred wake owner: %w", ownerErr)
+		}
+		env = setEnvVar(env, envWakeOwner, encodedOwner)
+	}
+
 	// Replace process. On success, this never returns.
 	// On failure, clean up the wake process.
 	execErr := coopExecProcess(binaryPath, argv, env)
