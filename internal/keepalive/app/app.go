@@ -26,7 +26,13 @@ type App struct {
 	Stderr io.Writer
 }
 
-var errIdentitySafeWakeRetireUnavailable = errors.New("destructive AMQ wake retirement is disabled until AMQ exposes a positively verifiable identity-safe-retire capability from #235")
+// wakeRetirer stops an identity-confirmed live inject-via wake (or removes its
+// exactly-bound proven-stale lock) whose saved target matches exactly. The
+// concrete implementation is amq.CLI; the interface keeps the app callers
+// testable with the same fake amq executables used across this package.
+type wakeRetirer interface {
+	RetireWake(ctx context.Context, req amq.RetireWakeRequest) (amq.RetireWakeResult, error)
+}
 
 func (a App) Run(ctx context.Context, args []string) int {
 	if a.Stdout == nil {
@@ -126,7 +132,7 @@ func (a App) register(ctx context.Context, args []string, replace bool) error {
 	self := fs.String("self", executablePath(), "amq-keepalive executable path for --inject-via")
 	wakeTimeout := fs.Duration("wake-ready-timeout", 10*time.Second, "maximum time to wait for amq wake readiness")
 	noStart := fs.Bool("no-start", false, "register without starting/reconciling wake")
-	retireDetached := fs.Bool("retire-detached", false, "attempt non-destructive exact-target convergence; retirement remains disabled until AMQ #235")
+	retireDetached := fs.Bool("retire-detached", false, "on a recreated terminal, retire the proven-absent previous wake via amq wake retire before converging on the exact new target")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -249,7 +255,7 @@ func (a App) registerWithOptions(ctx context.Context, opts registerOptions) erro
 			if !opts.NoStart {
 				if opts.RetireDetached {
 					var recoverErr error
-					next, wakeReady, recoverErr = recoverDetachedRegistration(ctx, removed, adapters, reconciler, next)
+					next, wakeReady, recoverErr = recoverDetachedRegistration(ctx, removed, adapters, reconciler, envCLI, next)
 					if recoverErr != nil {
 						return resolveRegistrationReadinessFailure(store, entry, next, removed, recoverErr)
 					}
@@ -391,13 +397,16 @@ func checkPhysicalTargetAvailable(
 // target must be independently proven absent. It first asks AMQ's atomic wake
 // start path to converge on the new exact target, which handles an already
 // absent lock without requiring retirement. If a live old wake blocks that
-// start, this release fails closed: destructive wake retirement remains gated
-// until AMQ can positively attest the #235 identity-safe-retire capability.
+// start, it asks AMQ to retire that exact previous inject-via identity and then
+// retries the start once. AMQ retires only an identity-confirmed live wake (or
+// removes its exactly-bound proven-stale lock); if it refuses, this path fails
+// without touching the live wake and the previous registry row is restored.
 func recoverDetachedRegistration(
 	ctx context.Context,
 	previousEntries []registry.Entry,
 	adapters adapter.Registry,
 	reconciler supervisor.Reconciler,
+	retirer wakeRetirer,
 	next registry.Entry,
 ) (registry.Entry, bool, error) {
 	matches := make([]registry.Entry, 0, 1)
@@ -442,9 +451,34 @@ func recoverDetachedRegistration(
 		return updated, false, fmt.Errorf("recover detached %s wake has uncertain readiness: %w", previous.Agent, initialStart.Error)
 	}
 
+	// The previous adapter target is proven absent, but a wake still bound to it
+	// may hold the lock and block the exact-target start. Ask AMQ to retire that
+	// exact previous inject-via identity. AMQ retires only an identity-confirmed
+	// live wake with an unchanged matching saved target, or removes its
+	// exactly-bound proven-stale lock; it refuses anything else.
+	if _, retireErr := retirer.RetireWake(ctx, amq.RetireWakeRequest{
+		Root:      next.Root,
+		Me:        next.Agent,
+		InjectVia: reconciler.InjectVia,
+		Adapter:   previous.Adapter,
+		Target:    previous.Target,
+	}); retireErr != nil {
+		return next, false, fmt.Errorf(
+			"recover detached %s wake: exact-target start failed (%v) and retiring the previous wake was not confirmed: %w",
+			previous.Agent, initialStart.Error, retireErr,
+		)
+	}
+
+	retried, retryStart := reconciler.StartFresh(ctx, next)
+	if retryStart.Error == nil {
+		return retried, true, nil
+	}
+	if errors.Is(retryStart.Error, amq.ErrWakeReadinessUncertain) {
+		return retried, false, fmt.Errorf("recover detached %s wake has uncertain readiness after retiring the previous wake: %w", previous.Agent, retryStart.Error)
+	}
 	return next, false, fmt.Errorf(
-		"recover detached %s wake: exact-target start failed: %v; %w",
-		previous.Agent, initialStart.Error, errIdentitySafeWakeRetireUnavailable,
+		"recover detached %s wake: exact-target start still failed after retiring the previous wake: %w",
+		previous.Agent, retryStart.Error,
 	)
 }
 
@@ -794,26 +828,26 @@ type gcResult struct {
 	Entries        []gcEntryResult `json:"entries"`
 }
 
-// gc is a read-only classifier. Destructive apply remains hard-gated until AMQ
-// exposes a positive identity-safe-retire capability from #235.
+// gc classifies proven-detached registry entries. With --apply it retires each
+// candidate's exact previous inject-via wake via amq wake retire and forgets
+// only the entries AMQ positively confirmed retired; any refusal leaves the
+// entry in place for the next pass and surfaces an error.
 func (a App) gc(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	registryPath := fs.String("registry", mustDefaultRegistryPath(), "registry file path")
-	fs.String("amq", "amq", "reserved for identity-safe apply after AMQ #235")
-	fs.String("self", executablePath(), "reserved for identity-safe apply after AMQ #235")
+	amqPath := fs.String("amq", "amq", "amq executable path for --apply retirement")
+	self := fs.String("self", executablePath(), "amq-keepalive executable path expected as the wake's --inject-via")
 	minDetachedAge := fs.Duration("min-detached-age", 24*time.Hour, "minimum proven-detached age before cleanup")
-	apply := fs.Bool("apply", false, "reserved; currently disabled until AMQ identity-safe retirement #235")
+	apply := fs.Bool("apply", false, "retire proven-detached candidates via amq wake retire and forget confirmed entries")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *minDetachedAge < 0 {
 		return errors.New("--min-detached-age must not be negative")
 	}
-	if *apply {
-		return fmt.Errorf("gc --apply: %w", errIdentitySafeWakeRetireUnavailable)
-	}
 
+	var retirer wakeRetirer = amq.NewCLI(*amqPath)
 	store := registry.New(*registryPath)
 	file, err := store.Load()
 	if err != nil {
@@ -825,6 +859,7 @@ func (a App) gc(ctx context.Context, args []string) error {
 	mergeOwnershipConflicts(conflicts, physicalOwnershipConflicts(ctx, file, probes))
 	now := time.Now().UTC()
 	result := gcResult{Applied: *apply, MinDetachedAge: minDetachedAge.String()}
+	var applyErrs []error
 	for _, entry := range file.Entries {
 		item := gcEntryResult{
 			ID: entry.ID, Root: entry.Root, Agent: entry.Agent, Adapter: entry.Adapter,
@@ -876,8 +911,44 @@ func (a App) gc(ctx context.Context, args []string) error {
 			continue
 		}
 		result.Entries[index].Status = "candidate"
+		if !*apply {
+			continue
+		}
+		// Retire the exact previous inject-via identity. AMQ acts only on an
+		// identity-confirmed live wake with this saved target (or its
+		// exactly-bound proven-stale lock); any refusal leaves the entry.
+		if _, retireErr := retirer.RetireWake(ctx, amq.RetireWakeRequest{
+			Root:      entry.Root,
+			Me:        entry.Agent,
+			InjectVia: *self,
+			Adapter:   entry.Adapter,
+			Target:    target,
+		}); retireErr != nil {
+			result.Entries[index].Status = "error"
+			result.Entries[index].Reason = retireErr.Error()
+			applyErrs = append(applyErrs, fmt.Errorf("retire %s@%s wake: %w", entry.Agent, entry.Root, retireErr))
+			continue
+		}
+		removed, forgetErr := store.ForgetIfUnchanged(entry)
+		switch {
+		case forgetErr != nil:
+			result.Entries[index].Status = "error"
+			result.Entries[index].Reason = "wake retired but registry forget failed: " + forgetErr.Error()
+			applyErrs = append(applyErrs, fmt.Errorf("forget %s@%s registry entry after retire: %w", entry.Agent, entry.Root, forgetErr))
+		case !removed:
+			result.Entries[index].Status = "retired"
+			result.Entries[index].Reason = "wake retired; registry entry changed concurrently and was left in place"
+		default:
+			result.Entries[index].Status = "retired"
+		}
 	}
-	return printJSON(a.Stdout, result)
+	if err := printJSON(a.Stdout, result); err != nil {
+		return err
+	}
+	if len(applyErrs) > 0 {
+		return errors.Join(applyErrs...)
+	}
+	return nil
 }
 
 func normalizedTarget(selected adapter.Adapter, target string) (string, error) {
@@ -922,8 +993,8 @@ func (a App) retireSession(ctx context.Context, args []string) error {
 	rootFlag := fs.String("root", "", "exact AMQ session root")
 	adapterName := fs.String("adapter", "cmux", "adapter name")
 	agentsFlag := fs.String("agents", "codex,claude", "comma-separated required agent handles")
-	fs.String("amq", "amq", "reserved until AMQ identity-safe retirement #235")
-	fs.String("self", executablePath(), "reserved until AMQ identity-safe retirement #235")
+	amqPath := fs.String("amq", "amq", "amq executable path for retirement")
+	self := fs.String("self", executablePath(), "amq-keepalive executable path expected as each wake's --inject-via")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -968,24 +1039,53 @@ func (a App) retireSession(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
+		// Precondition: every target must be independently proven absent before
+		// any wake is retired. entries keep their original stored form so the
+		// post-retire forget matches exactly; normalized targets feed the probe
+		// and the retire identity.
+		targets := make([]string, len(entries))
 		for i := range entries {
-			entry := &entries[i]
+			target := entries[i].Target
 			if normalizer, ok := selected.(adapter.TargetNormalizer); ok {
-				normalized, normalizeErr := normalizer.NormalizeTarget(entry.Target)
+				normalized, normalizeErr := normalizer.NormalizeTarget(target)
 				if normalizeErr != nil {
-					return fmt.Errorf("normalize target for %s: %w", entry.Agent, normalizeErr)
+					return fmt.Errorf("normalize target for %s: %w", entries[i].Agent, normalizeErr)
 				}
-				entry.Target = normalized
+				target = normalized
 			}
-			probeErr := selected.Probe(ctx, entry.Target)
+			probeErr := selected.Probe(ctx, target)
 			if probeErr == nil {
-				return fmt.Errorf("refusing to retire %s wake: adapter target %s still exists", entry.Agent, entry.Target)
+				return fmt.Errorf("refusing to retire %s wake: adapter target %s still exists", entries[i].Agent, target)
 			}
 			if !errors.Is(probeErr, adapter.ErrTargetNotFound) {
-				return fmt.Errorf("refusing to retire %s wake because target absence is not proven: %w", entry.Agent, probeErr)
+				return fmt.Errorf("refusing to retire %s wake because target absence is not proven: %w", entries[i].Agent, probeErr)
+			}
+			targets[i] = target
+		}
+
+		// Retire each identity-confirmed wake and forget only the rows AMQ
+		// confirmed retired. A refusal leaves that row for the next pass.
+		var retirer wakeRetirer = amq.NewCLI(*amqPath)
+		var retireErrs []error
+		for i := range entries {
+			if _, retireErr := retirer.RetireWake(ctx, amq.RetireWakeRequest{
+				Root:      entries[i].Root,
+				Me:        entries[i].Agent,
+				InjectVia: *self,
+				Adapter:   entries[i].Adapter,
+				Target:    targets[i],
+			}); retireErr != nil {
+				retireErrs = append(retireErrs, fmt.Errorf("retire %s wake: %w", entries[i].Agent, retireErr))
+				continue
+			}
+			if _, forgetErr := store.ForgetIfUnchanged(entries[i]); forgetErr != nil {
+				retireErrs = append(retireErrs, fmt.Errorf("forget %s registry entry after retire: %w", entries[i].Agent, forgetErr))
 			}
 		}
-		return errIdentitySafeWakeRetireUnavailable
+		if len(retireErrs) > 0 {
+			return errors.Join(retireErrs...)
+		}
+		return nil
 	})
 }
 

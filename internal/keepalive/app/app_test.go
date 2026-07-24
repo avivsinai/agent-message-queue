@@ -442,7 +442,7 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 	}
 }
 
-func TestReattachRetireDetachedHardGatesRetirementAndRestoresOldRow(t *testing.T) {
+func TestReattachRetireDetachedRetiresPreviousWakeThenStarts(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("cmux adapter requires macOS")
 	}
@@ -507,23 +507,26 @@ done
 		"--self", fakeKeepalive,
 		"--retire-detached",
 	})
-	if code != 1 || !strings.Contains(stderr.String(), "identity-safe-retire") || !strings.Contains(stderr.String(), "#235") {
-		t.Fatalf("code=%d stderr=%s, want retirement capability gate", code, stderr.String())
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s, want retire-then-start success", code, stderr.String())
 	}
 	loaded, err := store.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(loaded.Entries) != 1 || loaded.Entries[0].Target != oldTarget {
-		t.Fatalf("entries = %#v, want old row restored", loaded.Entries)
+	if len(loaded.Entries) != 1 || loaded.Entries[0].Target != newTarget || loaded.Entries[0].State != registry.StateActive {
+		t.Fatalf("entries = %#v, want new target active after retiring the previous wake", loaded.Entries)
 	}
 	data, err := os.ReadFile(argsLog)
 	if err != nil {
 		t.Fatalf("read args log: %v", err)
 	}
 	log := string(data)
-	if strings.Count(log, "CALL wake -root") != 1 || strings.Contains(log, "wake retire") || !strings.Contains(log, newTarget) {
-		t.Fatalf("retirement gate must make one non-destructive start attempt and no retire call:\n%s", log)
+	if starts := strings.Count(log, "CALL wake -root"); starts != 2 {
+		t.Fatalf("wake starts = %d, want one failed start then one post-retire start:\n%s", starts, log)
+	}
+	if !strings.Contains(log, "wake retire") || !strings.Contains(log, oldTarget) {
+		t.Fatalf("retire path must retire the previous (old) target before restarting:\n%s", log)
 	}
 }
 
@@ -604,7 +607,7 @@ done
 	}
 }
 
-func TestReattachRetireDetachedDoesNotRetryThroughUnsafeRetirement(t *testing.T) {
+func TestReattachRetireDetachedLeavesOldRowWhenRetireRefused(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("cmux adapter requires macOS")
 	}
@@ -669,8 +672,8 @@ done
 		"--self", fakeKeepalive,
 		"--retire-detached",
 	})
-	if code != 1 || !strings.Contains(stderr.String(), "identity-safe-retire") {
-		t.Fatalf("code=%d stderr=%s, want retirement capability gate", code, stderr.String())
+	if code != 1 || !strings.Contains(stderr.String(), "was not confirmed") {
+		t.Fatalf("code=%d stderr=%s, want unconfirmed-retire failure", code, stderr.String())
 	}
 	loaded, err := store.Load()
 	if err != nil {
@@ -685,10 +688,10 @@ done
 	}
 	log := string(data)
 	if starts := strings.Count(log, "CALL wake -root"); starts != 1 {
-		t.Fatalf("wake starts = %d, want one non-destructive attempt:\n%s", starts, log)
+		t.Fatalf("wake starts = %d, want one attempt with no retry after the refusal:\n%s", starts, log)
 	}
-	if strings.Contains(log, "wake retire") {
-		t.Fatalf("unsafe wake retire was invoked:\n%s", log)
+	if retires := strings.Count(log, "wake retire"); retires != 1 {
+		t.Fatalf("wake retire calls = %d, want exactly one refused attempt:\n%s", retires, log)
 	}
 }
 
@@ -751,7 +754,7 @@ func TestNormalizeAMQPathsUsesAbsoluteBaseSessionRoot(t *testing.T) {
 	}
 }
 
-func TestRetireSessionHardGatePreservesAllEntriesAndInvokesNoAMQ(t *testing.T) {
+func TestRetireSessionRetiresConfirmedWakesAndRemovesRows(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("cmux adapter requires macOS")
 	}
@@ -782,14 +785,8 @@ func TestRetireSessionHardGatePreservesAllEntriesAndInvokesNoAMQ(t *testing.T) {
 	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
 	fakeAMQ := filepath.Join(dir, "amq")
 	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
-printf '%s\n' "$@" >> "$AMQ_KEEPALIVE_ARGS_LOG"
-agent=""
-previous=""
-for arg in "$@"; do
-  if [ "$previous" = "-me" ]; then agent="$arg"; fi
-  previous="$arg"
-done
-printf '{"status":"retired","agent":"%s","pid":4242}\n' "$agent"
+printf 'RETIRE %s\n' "$*" >> "$AMQ_KEEPALIVE_ARGS_LOG"
+printf '{"status":"retired","pid":4242}\n'
 `), 0o700); err != nil {
 		t.Fatalf("write fake AMQ: %v", err)
 	}
@@ -809,20 +806,27 @@ printf '{"status":"retired","agent":"%s","pid":4242}\n' "$agent"
 		"--amq", fakeAMQ,
 		"--self", fakeKeepalive,
 	})
-	if code != 1 || !strings.Contains(stderr.String(), "identity-safe-retire") || !strings.Contains(stderr.String(), "#235") {
+	if code != 0 {
 		t.Fatalf("retire-session code=%d\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
 	loaded, err := store.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(loaded.Entries) != 3 {
-		t.Fatalf("entries after gated retirement = %#v, want all preserved", loaded.Entries)
+	if len(loaded.Entries) != 1 || loaded.Entries[0].Agent != "observer" {
+		t.Fatalf("entries after retirement = %#v, want only the non-cmux observer row preserved", loaded.Entries)
 	}
-	if data, err := os.ReadFile(argsLog); err == nil && len(data) > 0 {
-		t.Fatalf("gated retire-session invoked AMQ: %s", data)
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("inspect AMQ log: %v", err)
+	data, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("read AMQ log: %v", err)
+	}
+	if retires := strings.Count(string(data), "wake retire"); retires != 2 {
+		t.Fatalf("wake retire calls = %d, want one per confirmed cmux agent:\n%s", retires, data)
+	}
+	for _, agent := range []string{"codex", "claude"} {
+		if !strings.Contains(string(data), "--me "+agent) {
+			t.Fatalf("retire log missing agent %q:\n%s", agent, data)
+		}
 	}
 }
 
@@ -867,7 +871,7 @@ func TestRetireSessionRefusesWhenTargetStillExists(t *testing.T) {
 	}
 }
 
-func TestRetireSessionGatePreventsPartialRetirement(t *testing.T) {
+func TestRetireSessionRemovesRetiredAndLeavesRefused(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("cmux adapter requires macOS")
 	}
@@ -895,11 +899,11 @@ func TestRetireSessionGatePreventsPartialRetirement(t *testing.T) {
 	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
 	fakeAMQ := filepath.Join(dir, "amq")
 	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
-printf '%s\n' "$@" >> "$AMQ_KEEPALIVE_ARGS_LOG"
+printf 'RETIRE %s\n' "$*" >> "$AMQ_KEEPALIVE_ARGS_LOG"
 agent=""
 previous=""
 for arg in "$@"; do
-  if [ "$previous" = "-me" ]; then agent="$arg"; fi
+  if [ "$previous" = "--me" ]; then agent="$arg"; fi
   previous="$arg"
 done
 if [ "$agent" = "claude" ]; then
@@ -919,17 +923,22 @@ printf '%s\n' '{"status":"retired","agent":"codex","pid":4242}'
 		"retire-session", "--registry", registryPath, "--root", root,
 		"--amq", fakeAMQ, "--self", fakeKeepalive,
 	})
-	if code != 1 || !strings.Contains(stderr.String(), "identity-safe-retire") {
-		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	if code != 1 || !strings.Contains(stderr.String(), "claude") || !strings.Contains(stderr.String(), "was not confirmed") {
+		t.Fatalf("code=%d stderr=%s, want claude retire failure surfaced", code, stderr.String())
 	}
 	loaded, err := store.Load()
-	if err != nil || len(loaded.Entries) != 2 {
-		t.Fatalf("retirement gate changed registry: entries=%#v err=%v", loaded.Entries, err)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
 	}
-	if data, err := os.ReadFile(argsLog); err == nil && len(data) > 0 {
-		t.Fatalf("retirement gate invoked AMQ: %s", data)
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("inspect AMQ log: %v", err)
+	if len(loaded.Entries) != 1 || loaded.Entries[0].Agent != "claude" {
+		t.Fatalf("entries = %#v, want retired codex removed and refused claude left", loaded.Entries)
+	}
+	data, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("read AMQ log: %v", err)
+	}
+	if retires := strings.Count(string(data), "wake retire"); retires != 2 {
+		t.Fatalf("wake retire calls = %d, want an attempt per agent:\n%s", retires, data)
 	}
 }
 
@@ -1201,7 +1210,7 @@ func TestContinuousSuperviseDoesNotEmitPerPassJSON(t *testing.T) {
 	}
 }
 
-func TestGCDryRunIsNonMutatingAndApplyIsIdentitySafetyGated(t *testing.T) {
+func TestGCDryRunIsNonMutatingAndApplyRetiresCandidates(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("cmux adapter requires macOS")
 	}
@@ -1250,21 +1259,19 @@ printf '%s\n' '{"status":"retired","agent":"codex","pid":4242}'
 		"gc", "--registry", registryPath, "--min-detached-age", "0", "--apply",
 		"--amq", fakeAMQ, "--self", "/bin/amq-keepalive",
 	})
-	if code != 1 || applied.Len() != 0 || !strings.Contains(applyErr.String(), "identity-safe-retire") || !strings.Contains(applyErr.String(), "#235") {
+	if code != 0 || !strings.Contains(applied.String(), `"status": "retired"`) {
 		t.Fatalf("apply code=%d stdout=%s stderr=%s", code, applied.String(), applyErr.String())
 	}
 	loaded, err = store.Load()
-	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].ID != entry.ID {
-		t.Fatalf("apply registry entries=%#v err=%v", loaded.Entries, err)
+	if err != nil || len(loaded.Entries) != 0 {
+		t.Fatalf("apply did not forget the retired entry: entries=%#v err=%v", loaded.Entries, err)
 	}
-	if data, err := os.ReadFile(amqCalls); err == nil && len(data) > 0 {
-		t.Fatalf("gated gc apply invoked AMQ: %s", data)
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("inspect AMQ log: %v", err)
+	if data, err := os.ReadFile(amqCalls); err != nil || !strings.Contains(string(data), "wake retire") {
+		t.Fatalf("gc apply did not invoke amq wake retire: data=%q err=%v", string(data), err)
 	}
 	data, err := os.ReadFile(calls)
-	if err != nil || strings.Count(strings.TrimSpace(string(data)), "system.tree") != 1 {
-		t.Fatalf("cmux inventory calls = %q err=%v, want dry-run only", data, err)
+	if err != nil || strings.Count(strings.TrimSpace(string(data)), "system.tree") != 2 {
+		t.Fatalf("cmux inventory calls = %q err=%v, want one probe per gc invocation", data, err)
 	}
 }
 
@@ -1302,28 +1309,54 @@ func TestGCDryRunExcludesPhysicalTTYOwnershipCollisions(t *testing.T) {
 	}
 }
 
-func TestGCApplyGateRunsBeforeAMQInvocation(t *testing.T) {
+func TestGCApplyLeavesCandidateWhenRetireRefused(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("cmux adapter requires macOS")
+	}
 	dir := t.TempDir()
 	registryPath := filepath.Join(dir, "registry.json")
-	called := filepath.Join(dir, "amq-called")
-	t.Setenv("AMQ_KEEPALIVE_CALLED", called)
+	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
+	store := registry.New(registryPath)
+	entry, err := store.Upsert(registry.Entry{
+		Root: "/tmp/old-session", Agent: "codex", Adapter: "cmux", Target: target,
+		State: registry.StateDetached, DetachedSince: time.Now().Add(-48 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	fakeCmux := filepath.Join(dir, "cmux")
+	if err := os.WriteFile(fakeCmux, []byte("#!/bin/sh\nprintf '%s\\n' '{\"windows\":[]}'\n"), 0o700); err != nil {
+		t.Fatalf("write fake cmux: %v", err)
+	}
+	t.Setenv("CMUX_BUNDLED_CLI_PATH", fakeCmux)
+	amqCalls := filepath.Join(dir, "amq-calls.log")
+	t.Setenv("AMQ_KEEPALIVE_AMQ_CALLS", amqCalls)
 	fakeAMQ := filepath.Join(dir, "amq")
 	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
-: > "$AMQ_KEEPALIVE_CALLED"
-exit 99
+printf '%s\n' "$*" >> "$AMQ_KEEPALIVE_AMQ_CALLS"
+printf '%s\n' '{"status":"refused","reason":"owner-bound wake claims require recover-owner"}'
+exit 1
 `), 0o700); err != nil {
 		t.Fatalf("write fake amq: %v", err)
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{
-		"gc", "--registry", registryPath, "--min-detached-age", "0", "--apply", "--amq", fakeAMQ,
+		"gc", "--registry", registryPath, "--min-detached-age", "0", "--apply",
+		"--amq", fakeAMQ, "--self", "/bin/amq-keepalive",
 	})
-	if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "identity-safe-retire") {
-		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	if code != 1 || !strings.Contains(stdout.String(), `"status": "error"`) {
+		t.Fatalf("code=%d stdout=%s stderr=%s, want per-entry retire error", code, stdout.String(), stderr.String())
 	}
-	if _, err := os.Stat(called); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("gated gc apply invoked AMQ: stat=%v", err)
+	if !strings.Contains(stderr.String(), "was not confirmed") {
+		t.Fatalf("stderr=%s, want surfaced not-confirmed error", stderr.String())
+	}
+	loaded, err := store.Load()
+	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].ID != entry.ID {
+		t.Fatalf("refused retire must leave the entry: entries=%#v err=%v", loaded.Entries, err)
+	}
+	if data, err := os.ReadFile(amqCalls); err != nil || !strings.Contains(string(data), "wake retire") {
+		t.Fatalf("gc apply did not attempt amq wake retire: data=%q err=%v", string(data), err)
 	}
 }
 

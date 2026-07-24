@@ -42,6 +42,44 @@ type StartWakeRequest struct {
 	Timeout   time.Duration
 }
 
+// RetireWakeRequest names the exact inject-via identity that AMQ must match
+// before it stops a wake. Root, Me, Adapter, and Target reproduce the fixed
+// argv the wake was started with (inject <adapter> <target>), so AMQ retires
+// only a wake whose saved target is identical.
+type RetireWakeRequest struct {
+	Root      string
+	Me        string
+	InjectVia string
+	Adapter   string
+	Target    string
+}
+
+// RetireWakeResult mirrors `amq wake retire -json`. Only Status == "retired"
+// is a positive confirmation; every other status ("refused", "error",
+// "unknown") means the wake was not stopped and its registry entry must be
+// preserved.
+type RetireWakeResult struct {
+	Status string `json:"status"`
+	Agent  string `json:"agent"`
+	Root   string `json:"root"`
+	Lock   string `json:"lock"`
+	Target string `json:"target"`
+	PID    int    `json:"pid"`
+	Reason string `json:"reason"`
+}
+
+// Retired reports whether AMQ positively confirmed the wake was stopped (or its
+// exactly-bound proven-stale lock removed).
+func (r RetireWakeResult) Retired() bool {
+	return r.Status == "retired"
+}
+
+// ErrWakeRetireNotConfirmed wraps every non-retired outcome so callers can log
+// it loudly and leave the registry entry for the next pass. A wake that AMQ
+// refused, could not identify, or exited non-zero on is never treated as
+// retired.
+var ErrWakeRetireNotConfirmed = errors.New("amq wake retirement was not confirmed")
+
 type CLI struct {
 	Path string
 }
@@ -154,6 +192,74 @@ func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 	// fsync, but the marker itself is no longer needed after acknowledgement.
 	_ = os.Remove(readyFile)
 	return nil
+}
+
+// RetireWake asks AMQ to stop an identity-confirmed live inject-via wake (or
+// remove its exactly-bound proven-stale lock) whose saved target matches the
+// requested adapter/target exactly. It returns nil only when AMQ reports
+// status "retired"; any other outcome — a refusal (including owner-bound
+// claims), an unparseable or empty JSON body, or a non-zero exit — returns a
+// descriptive error wrapping ErrWakeRetireNotConfirmed so the caller never
+// forgets the registry entry.
+func (c CLI) RetireWake(ctx context.Context, req RetireWakeRequest) (RetireWakeResult, error) {
+	if req.Me == "" {
+		return RetireWakeResult{}, errors.New("me is required")
+	}
+	if req.InjectVia == "" {
+		return RetireWakeResult{}, errors.New("inject-via executable is required")
+	}
+	if req.Adapter == "" {
+		return RetireWakeResult{}, errors.New("adapter is required")
+	}
+	if req.Target == "" {
+		return RetireWakeResult{}, errors.New("target is required")
+	}
+
+	args := []string{"wake", "retire", "--me", req.Me}
+	if req.Root != "" {
+		args = append(args, "--root", req.Root)
+	}
+	args = append(args,
+		"--inject-via", req.InjectVia,
+		"--inject-arg", "inject",
+		"--inject-arg", req.Adapter,
+		"--inject-arg", req.Target,
+		"-json",
+	)
+
+	stdout, stderr, runErr := c.run(ctx, args...)
+	var result RetireWakeResult
+	trimmed := bytes.TrimSpace(stdout)
+	if len(trimmed) > 0 {
+		if err := json.Unmarshal(trimmed, &result); err != nil {
+			return RetireWakeResult{}, fmt.Errorf(
+				"%w: parse amq wake retire output: %v: stdout=%q stderr=%q",
+				ErrWakeRetireNotConfirmed, err, strings.TrimSpace(string(stdout)), strings.TrimSpace(stderr),
+			)
+		}
+	}
+
+	if result.Retired() {
+		return result, nil
+	}
+
+	// Not retired. Never mutate the registry on any of these branches.
+	switch {
+	case result.Status != "":
+		msg := fmt.Sprintf("amq wake retire returned status %q", result.Status)
+		if reason := strings.TrimSpace(result.Reason); reason != "" {
+			msg += ": " + reason
+		}
+		return result, fmt.Errorf("%w: %s", ErrWakeRetireNotConfirmed, msg)
+	case runErr != nil:
+		detail := strings.TrimSpace(stderr)
+		if detail == "" {
+			detail = runErr.Error()
+		}
+		return result, fmt.Errorf("%w: amq wake retire failed: %v: %s", ErrWakeRetireNotConfirmed, runErr, detail)
+	default:
+		return result, fmt.Errorf("%w: amq wake retire produced no status", ErrWakeRetireNotConfirmed)
+	}
 }
 
 func newWakeReadyPath() (string, string, error) {

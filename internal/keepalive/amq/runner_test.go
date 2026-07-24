@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -294,6 +295,134 @@ func TestNewWakeReadyPathScavengesOnlyStaleMarkers(t *testing.T) {
 	}
 	if _, err := os.Stat(recentMarker); err != nil {
 		t.Fatalf("recent marker was scavenged: %v", err)
+	}
+}
+
+func TestRetireWakeEmitsExactArgvAndParsesRetired(t *testing.T) {
+	dir := t.TempDir()
+	argsLog := filepath.Join(dir, "args.log")
+	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
+	fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
+printf '%s\n' "$@" > "$AMQ_KEEPALIVE_ARGS_LOG"
+printf '%s\n' '{"status":"retired","agent":"codex","pid":4242}'
+`)
+
+	result, err := NewCLI(fakeAMQ).RetireWake(context.Background(), RetireWakeRequest{
+		Root:      "/tmp/amq-root",
+		Me:        "codex",
+		InjectVia: "/tmp/amq-keepalive",
+		Adapter:   "cmux",
+		Target:    "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3",
+	})
+	if err != nil {
+		t.Fatalf("RetireWake() error = %v", err)
+	}
+	if !result.Retired() || result.Status != "retired" || result.PID != 4242 {
+		t.Fatalf("result = %+v, want retired pid=4242", result)
+	}
+
+	data, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("read args log: %v", err)
+	}
+	got := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	want := []string{
+		"wake", "retire",
+		"--me", "codex",
+		"--root", "/tmp/amq-root",
+		"--inject-via", "/tmp/amq-keepalive",
+		"--inject-arg", "inject",
+		"--inject-arg", "cmux",
+		"--inject-arg", "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3",
+		"-json",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v\nwant %#v", got, want)
+	}
+}
+
+func TestRetireWakeOutcomeMapping(t *testing.T) {
+	cases := []struct {
+		name            string
+		script          string
+		wantRetired     bool
+		wantStatus      string
+		wantErrContains string
+	}{
+		{
+			name:        "retired",
+			script:      `printf '%s\n' '{"status":"retired","agent":"codex","pid":7}'`,
+			wantRetired: true,
+			wantStatus:  "retired",
+		},
+		{
+			name: "refused",
+			script: `printf '%s\n' '{"status":"refused","reason":"owner-bound wake claims require recover-owner"}'
+exit 1`,
+			wantStatus:      "refused",
+			wantErrContains: "owner-bound",
+		},
+		{
+			name:            "invalid-json",
+			script:          `printf '%s\n' 'not json at all'`,
+			wantErrContains: "parse amq wake retire output",
+		},
+		{
+			name: "non-zero-exit",
+			script: `echo boom >&2
+exit 7`,
+			wantErrContains: "amq wake retire failed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), "#!/bin/sh\n"+tc.script+"\n")
+			result, err := NewCLI(fakeAMQ).RetireWake(context.Background(), RetireWakeRequest{
+				Root: "/tmp/root", Me: "codex", InjectVia: "/tmp/keepalive",
+				Adapter: "cmux", Target: "cmux:surface:ABC",
+			})
+			if tc.wantRetired {
+				if err != nil {
+					t.Fatalf("RetireWake() error = %v, want nil", err)
+				}
+				if !result.Retired() || result.Status != tc.wantStatus {
+					t.Fatalf("result = %+v, want retired", result)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("RetireWake() error = nil, want not-confirmed; result = %+v", result)
+			}
+			if !errors.Is(err, ErrWakeRetireNotConfirmed) {
+				t.Fatalf("error = %v, want wrapped ErrWakeRetireNotConfirmed", err)
+			}
+			if result.Retired() {
+				t.Fatalf("result marked retired on failure: %+v", result)
+			}
+			if tc.wantStatus != "" && result.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", result.Status, tc.wantStatus)
+			}
+			if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
+				t.Fatalf("error = %v, want contains %q", err, tc.wantErrContains)
+			}
+		})
+	}
+}
+
+func TestRetireWakeValidatesRequiredFields(t *testing.T) {
+	cases := map[string]RetireWakeRequest{
+		"missing me":         {InjectVia: "/x", Adapter: "cmux", Target: "t"},
+		"missing inject-via": {Me: "codex", Adapter: "cmux", Target: "t"},
+		"missing adapter":    {Me: "codex", InjectVia: "/x", Target: "t"},
+		"missing target":     {Me: "codex", InjectVia: "/x", Adapter: "cmux"},
+	}
+	for name, req := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewCLI("/does/not/matter").RetireWake(context.Background(), req); err == nil {
+				t.Fatalf("RetireWake(%+v) error = nil, want validation error", req)
+			}
+		})
 	}
 }
 
