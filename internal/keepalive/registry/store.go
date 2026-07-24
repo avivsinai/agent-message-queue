@@ -21,7 +21,6 @@ const (
 	StateAttached State = "attached"
 	StateActive   State = "active"
 	StateDetached State = "detached"
-	StateStale    State = "stale"
 )
 
 type State string

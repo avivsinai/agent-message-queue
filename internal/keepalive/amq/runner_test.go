@@ -50,6 +50,7 @@ printf ready > "$ready"
 		"wake\n",
 		"-root\n/tmp/amq-root\n",
 		"-me\ncodex\n",
+		"--baseline-existing\n",
 		"-inject-via\n/tmp/amq-keepalive\n",
 		"-inject-arg\ninject\n",
 		"-inject-arg\nghostty\n",
@@ -60,6 +61,12 @@ printf ready > "$ready"
 		if !strings.Contains(args, want) {
 			t.Fatalf("args log missing %q:\n%s", want, args)
 		}
+	}
+	// --baseline-existing must precede -inject-via so a restarted wake ignores
+	// backlog already waiting, matching buildCoopWakeArgs/buildRepairWakeArgs
+	// on main.
+	if idx1, idx2 := strings.Index(args, "--baseline-existing\n"), strings.Index(args, "-inject-via\n"); idx1 < 0 || idx2 < 0 || idx1 > idx2 {
+		t.Fatalf("args log has wrong ordering, want --baseline-existing before -inject-via:\n%s", args)
 	}
 }
 

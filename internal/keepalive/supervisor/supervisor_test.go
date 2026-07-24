@@ -19,11 +19,6 @@ type fakeWake struct {
 	startErr    error
 }
 
-func (f *fakeWake) RepairWake(ctx context.Context, root, me string) (amq.WakeRepairResult, error) {
-	f.repairCalls++
-	return amq.WakeRepairResult{Status: "repaired", Reason: "would restore persisted target"}, nil
-}
-
 func (f *fakeWake) StartWake(ctx context.Context, req amq.StartWakeRequest) error {
 	f.starts = append(f.starts, req)
 	return f.startErr

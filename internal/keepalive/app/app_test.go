@@ -960,10 +960,6 @@ func TestInstallHookCommandWritesRequestedConfig(t *testing.T) {
 
 type appFailingWake struct{}
 
-func (appFailingWake) RepairWake(context.Context, string, string) (amq.WakeRepairResult, error) {
-	return amq.WakeRepairResult{Status: "refused", Reason: "unverified wake lock; refusing repair"}, errors.New("exit status 1")
-}
-
 func (appFailingWake) StartWake(context.Context, amq.StartWakeRequest) error {
 	return errors.New("unverified wake lock; refusing second injector")
 }
