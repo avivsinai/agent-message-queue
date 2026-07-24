@@ -3,10 +3,12 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	keepaliveadapter "github.com/avivsinai/agent-message-queue/internal/keepalive/adapter"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/amq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 )
@@ -58,6 +60,9 @@ func TestReconcileEnsuresRegistryTarget(t *testing.T) {
 	}
 	if updated.FailureCount != 0 || !updated.BackoffUntil.IsZero() || updated.LastError != "" {
 		t.Fatalf("active entry retained failure data: %+v", updated)
+	}
+	if got, want := updated.NextHealthCheck, now.Add(defaultActiveCheckInterval); !got.Equal(want) {
+		t.Fatalf("NextHealthCheck = %v, want %v", got, want)
 	}
 }
 
@@ -181,7 +186,8 @@ func TestDetachedTargetDoesNotTouchAMQ(t *testing.T) {
 	now := fixedNow()
 	wake := &fakeWake{}
 
-	updated, result := testReconciler(wake, probeAdapter{err: errors.New("target gone")}, now).Reconcile(context.Background(), testEntry())
+	missing := fmt.Errorf("%w: target gone", keepaliveadapter.ErrTargetNotFound)
+	updated, result := testReconciler(wake, probeAdapter{err: missing}, now).Reconcile(context.Background(), testEntry())
 
 	if result.Action != ActionDetached {
 		t.Fatalf("action = %q, want %q", result.Action, ActionDetached)
@@ -195,9 +201,32 @@ func TestDetachedTargetDoesNotTouchAMQ(t *testing.T) {
 	if updated.State != registry.StateDetached {
 		t.Fatalf("state = %q, want %q", updated.State, registry.StateDetached)
 	}
+	if !updated.DetachedSince.Equal(now) {
+		t.Fatalf("DetachedSince = %v, want %v", updated.DetachedSince, now)
+	}
+	if got, want := updated.BackoffUntil.Sub(now), defaultDetachedBackoffBase; got != want {
+		t.Fatalf("detached backoff = %v, want %v", got, want)
+	}
 }
 
-func TestRepeatedReconcileUsesTargetAwareEnsure(t *testing.T) {
+func TestAmbiguousProbeFailureBacksOffWithoutDetachingOrTouchingAMQ(t *testing.T) {
+	now := fixedNow()
+	wake := &fakeWake{}
+
+	updated, result := testReconciler(wake, probeAdapter{err: errors.New("cmux internal_error")}, now).Reconcile(context.Background(), testEntry())
+
+	if result.Action != ActionBackoff || result.AMQTouched {
+		t.Fatalf("result = %+v, want local backoff without AMQ", result)
+	}
+	if updated.State != registry.StateAttached || !updated.DetachedSince.IsZero() {
+		t.Fatalf("ambiguous probe marked detached: %+v", updated)
+	}
+	if len(wake.starts) != 0 {
+		t.Fatalf("starts = %d, want 0", len(wake.starts))
+	}
+}
+
+func TestRepeatedActiveReconcileDefersUntilHealthDeadline(t *testing.T) {
 	now := fixedNow()
 	wake := &fakeWake{}
 	reconciler := testReconciler(wake, probeAdapter{}, now)
@@ -208,17 +237,29 @@ func TestRepeatedReconcileUsesTargetAwareEnsure(t *testing.T) {
 	}
 	updated, result = reconciler.Reconcile(context.Background(), updated)
 
-	if result.Action != ActionEnsured {
-		t.Fatalf("second action = %q, want %q", result.Action, ActionEnsured)
+	if result.Action != ActionDeferred {
+		t.Fatalf("second action = %q, want %q", result.Action, ActionDeferred)
 	}
-	if len(wake.starts) != 2 {
-		t.Fatalf("wake assertions = %d, want one exact-target ensure per pass", len(wake.starts))
-	}
-	if wake.starts[0].Target != wake.starts[1].Target || wake.starts[0].Adapter != wake.starts[1].Adapter {
-		t.Fatalf("ensure requests drifted: %#v", wake.starts)
+	if len(wake.starts) != 1 {
+		t.Fatalf("wake assertions = %d, want one before health deadline", len(wake.starts))
 	}
 	if updated.State != registry.StateActive {
 		t.Fatalf("state = %q, want %q", updated.State, registry.StateActive)
+	}
+}
+
+func TestActiveReconcileRunsAgainAtHealthDeadline(t *testing.T) {
+	now := fixedNow()
+	wake := &fakeWake{}
+	reconciler := testReconciler(wake, probeAdapter{}, now)
+	reconciler.Now = func() time.Time { return now }
+
+	first, _ := reconciler.Reconcile(context.Background(), testEntry())
+	now = now.Add(defaultActiveCheckInterval)
+	_, result := reconciler.Reconcile(context.Background(), first)
+
+	if result.Action != ActionEnsured || len(wake.starts) != 2 {
+		t.Fatalf("result=%+v starts=%d, want second ensure at deadline", result, len(wake.starts))
 	}
 }
 

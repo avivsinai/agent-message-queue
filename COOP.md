@@ -354,15 +354,26 @@ For the consumer plist, replace the command arguments after the executable with
 Route stdout/stderr to supervisor-managed logs and secure the unit/plist for the
 local user who owns the mailbox.
 
-On macOS, `amq-keepalive` (built from `cmd/amq-keepalive`) packages this recipe
-for wake delivery that must follow a specific terminal session rather than a
-fixed plist. It keeps a private registry of explicitly attached terminal
-targets (Ghostty and cmux adapters), reattaches `wake` after reboot or sleep
-through a user LaunchAgent (`install-launchd`), and can register SessionStart
-reattach hooks for Claude Code and Codex (`install-hook`). It stays inside the
-daemon-free contract: the OS supervises it, it never parses AMQ mailbox, lock,
-presence, or target files, and it talks to AMQ only through the public `amq`
+On macOS, the separate `amq-keepalive` companion executable (built from
+`cmd/amq-keepalive`) packages this recipe for wake delivery that must follow a
+specific terminal session rather than a fixed plist. It keeps a private
+registry of explicitly attached terminal targets (Ghostty and cmux adapters),
+reattaches `wake` after reboot or sleep through a user LaunchAgent
+(`install-launchd`), and can register SessionStart reattach hooks for Claude
+Code and Codex (`install-hook`). It does not add keepalive behavior to the core
+`amq` command: the OS supervises the companion, it never parses AMQ mailbox,
+lock, presence, or target files, and it talks to AMQ only through the public
 CLI (target-aware `amq wake`, `amq env --json`).
+
+The supervisor inventories cmux once per due pass, checks active targets every
+five minutes, and exponentially backs detached targets off from five minutes
+to one hour. It fails closed if multiple live cmux surface UUIDs alias the same
+TTY and repeats that check immediately before injection. Reattach persists a
+recoverable inactive reservation before starting a wake, while spawned wakes
+run in a separate Unix session and are never killed when the helper's readiness
+wait is canceled. Destructive retirement is disabled until AMQ exposes the
+positive identity-safe-retire capability tracked by #235: `retire-session` and
+`gc --apply` do not signal wakes or remove registry rows in this release.
 
 ```bash
 go build ./cmd/amq-keepalive

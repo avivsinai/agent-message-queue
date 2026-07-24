@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
@@ -27,6 +28,36 @@ type Cmux struct {
 	IsExecutable func(string) bool
 	Sleep        func(context.Context, time.Duration) error
 	SettleDelay  time.Duration
+}
+
+type cmuxSystemTree struct {
+	Windows *[]cmuxWindow `json:"windows"`
+}
+
+type cmuxWindow struct {
+	Workspaces *[]cmuxWorkspace `json:"workspaces"`
+}
+
+type cmuxWorkspace struct {
+	Panes *[]cmuxPane `json:"panes"`
+}
+
+type cmuxPane struct {
+	Surfaces *[]cmuxSurface `json:"surfaces"`
+}
+
+type cmuxSurface struct {
+	ID  string `json:"id"`
+	TTY string `json:"tty"`
+}
+
+type cmuxSurfaceIdentity struct {
+	TTY string
+}
+
+type cmuxTargetInventory struct {
+	surfaces  map[string]cmuxSurfaceIdentity
+	ttyOwners map[string][]string
 }
 
 func (Cmux) Name() string {
@@ -53,33 +84,133 @@ func (Cmux) NormalizeTarget(target string) (string, error) {
 }
 
 func (c Cmux) Probe(ctx context.Context, target string) error {
+	inventory, err := c.Inventory(ctx)
+	if err != nil {
+		return err
+	}
+	return inventory.Probe(target)
+}
+
+func (c Cmux) Inventory(ctx context.Context) (TargetInventory, error) {
 	if err := requireCmuxPlatform(); err != nil {
-		return err
-	}
-	id, err := parseCmuxSurfaceTarget(target)
-	if err != nil {
-		return err
-	}
-	params, err := json.Marshal(map[string]any{
-		"lines":      1,
-		"surface_id": id,
-	})
-	if err != nil {
-		return fmt.Errorf("encode cmux probe parameters: %w", err)
+		return nil, err
 	}
 	path, err := c.executable()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	out, err := c.runner().Run(ctx, path, "rpc", "surface.read_text", string(params))
+	out, err := c.runner().Run(ctx, path, "rpc", "system.tree", "{}")
 	if err != nil {
-		message := strings.TrimSpace(string(out))
-		if strings.Contains(message, "not_found:") && strings.Contains(message, "Workspace not found") {
-			return fmt.Errorf("%w: probe cmux target %q: %v: %s", ErrTargetNotFound, target, err, message)
-		}
-		return fmt.Errorf("probe cmux target %q: %w: %s", target, err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("inventory cmux surfaces: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	var tree cmuxSystemTree
+	if err := json.Unmarshal(out, &tree); err != nil {
+		return nil, fmt.Errorf("parse cmux system.tree: %w", err)
+	}
+	if tree.Windows == nil {
+		return nil, errors.New("parse cmux system.tree: required windows field is missing or null")
+	}
+	inventory := cmuxTargetInventory{
+		surfaces:  map[string]cmuxSurfaceIdentity{},
+		ttyOwners: map[string][]string{},
+	}
+	for _, window := range *tree.Windows {
+		if window.Workspaces == nil {
+			return nil, errors.New("parse cmux system.tree: window workspaces field is missing or null")
+		}
+		for _, workspace := range *window.Workspaces {
+			if workspace.Panes == nil {
+				return nil, errors.New("parse cmux system.tree: workspace panes field is missing or null")
+			}
+			for _, pane := range *workspace.Panes {
+				if pane.Surfaces == nil {
+					return nil, errors.New("parse cmux system.tree: pane surfaces field is missing or null")
+				}
+				for _, surface := range *pane.Surfaces {
+					id, err := normalizeCmuxSurfaceID(surface.ID)
+					if err != nil {
+						return nil, fmt.Errorf("parse cmux system.tree surface id: %w", err)
+					}
+					id = strings.ToUpper(id)
+					identity := cmuxSurfaceIdentity{TTY: strings.TrimSpace(surface.TTY)}
+					if previous, exists := inventory.surfaces[id]; exists && !sameCmuxSurfaceIdentity(previous, identity) {
+						return nil, fmt.Errorf("parse cmux system.tree: surface %q has conflicting tty identities %q and %q", id, previous.TTY, identity.TTY)
+					}
+					inventory.surfaces[id] = identity
+				}
+			}
+		}
+	}
+	for id, surface := range inventory.surfaces {
+		tty, ttyErr := canonicalCmuxTTY(surface.TTY)
+		if ttyErr != nil {
+			continue
+		}
+		inventory.ttyOwners[tty] = append(inventory.ttyOwners[tty], id)
+	}
+	for tty := range inventory.ttyOwners {
+		sort.Strings(inventory.ttyOwners[tty])
+	}
+	return inventory, nil
+}
+
+func (i cmuxTargetInventory) Probe(target string) error {
+	_, err := i.OwnershipKey(target)
+	return err
+}
+
+func (i cmuxTargetInventory) OwnershipKey(target string) (string, error) {
+	_, surface, err := i.lookup(target)
+	if err != nil {
+		return "", err
+	}
+	tty, err := canonicalCmuxTTY(surface.TTY)
+	if err != nil {
+		return "", fmt.Errorf("cmux target %q physical identity is ambiguous: %w", target, err)
+	}
+	owners := i.ttyOwners[tty]
+	if len(owners) != 1 {
+		return "", fmt.Errorf(
+			"cmux target %q physical identity is ambiguous: tty %q has %d live surface aliases: %s; inspect cmux aliases and existing wakes manually",
+			target, tty, len(owners), strings.Join(owners, ", "),
+		)
+	}
+	return "tty:" + tty, nil
+}
+
+func canonicalCmuxTTY(value string) (string, error) {
+	tty := strings.TrimSpace(value)
+	if tty == "" {
+		return "", errors.New("system.tree surface tty is missing or blank")
+	}
+	if !filepath.IsAbs(tty) {
+		if filepath.Base(tty) != tty {
+			return "", fmt.Errorf("relative tty %q is not a device basename", value)
+		}
+		tty = filepath.Join("/dev", tty)
+	}
+	return filepath.Clean(tty), nil
+}
+
+func sameCmuxSurfaceIdentity(left, right cmuxSurfaceIdentity) bool {
+	if left == right {
+		return true
+	}
+	leftTTY, leftErr := canonicalCmuxTTY(left.TTY)
+	rightTTY, rightErr := canonicalCmuxTTY(right.TTY)
+	return leftErr == nil && rightErr == nil && leftTTY == rightTTY
+}
+
+func (i cmuxTargetInventory) lookup(target string) (string, cmuxSurfaceIdentity, error) {
+	id, err := parseCmuxSurfaceTarget(target)
+	if err != nil {
+		return "", cmuxSurfaceIdentity{}, err
+	}
+	surface, ok := i.surfaces[id]
+	if !ok {
+		return "", cmuxSurfaceIdentity{}, fmt.Errorf("%w: cmux target %q is absent from system.tree", ErrTargetNotFound, target)
+	}
+	return id, surface, nil
 }
 
 func (c Cmux) Inject(ctx context.Context, target string, payload string) error {
@@ -89,6 +220,13 @@ func (c Cmux) Inject(ctx context.Context, target string, payload string) error {
 	id, err := parseCmuxSurfaceTarget(target)
 	if err != nil {
 		return err
+	}
+	inventory, err := c.Inventory(ctx)
+	if err != nil {
+		return fmt.Errorf("verify cmux target before injection: %w", err)
+	}
+	if err := inventory.Probe(target); err != nil {
+		return fmt.Errorf("verify cmux target before injection: %w", err)
 	}
 	path, err := c.executable()
 	if err != nil {
@@ -265,7 +403,7 @@ func normalizeCmuxSurfaceID(id string) (string, error) {
 			}
 			continue
 		}
-		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
 			return "", fmt.Errorf("cmux surface id %q is not a UUID", id)
 		}
 	}

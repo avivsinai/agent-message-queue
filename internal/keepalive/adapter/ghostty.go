@@ -29,6 +29,14 @@ func (Ghostty) Name() string {
 	return "ghostty"
 }
 
+func (Ghostty) NormalizeTarget(target string) (string, error) {
+	id, err := parseGhosttyTerminalTarget(target)
+	if err != nil {
+		return "", err
+	}
+	return ghosttyTerminalTargetPrefix + id, nil
+}
+
 func (g Ghostty) Discover(ctx context.Context) (string, error) {
 	if err := requireDarwin(); err != nil {
 		return "", err
@@ -54,6 +62,9 @@ func (g Ghostty) Probe(ctx context.Context, target string) error {
 	}
 	out, err := g.runner().Run(ctx, "osascript", "-e", ghosttyProbeScript, id)
 	if err != nil {
+		if strings.Contains(string(out), "no Ghostty terminal with id:") {
+			return fmt.Errorf("%w: probe Ghostty target %q: %v: %s", ErrTargetNotFound, target, err, strings.TrimSpace(string(out)))
+		}
 		return fmt.Errorf("probe Ghostty target %q: %w: %s", target, err, strings.TrimSpace(string(out)))
 	}
 	return nil

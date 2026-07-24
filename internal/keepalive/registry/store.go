@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -37,6 +39,8 @@ type Entry struct {
 	LastSeenBySupervisor   time.Time `json:"last_seen_by_supervisor,omitempty"`
 	FailureCount           int       `json:"failure_count,omitempty"`
 	BackoffUntil           time.Time `json:"backoff_until,omitempty"`
+	NextHealthCheck        time.Time `json:"next_health_check,omitempty"`
+	DetachedSince          time.Time `json:"detached_since,omitempty"`
 	LastError              string    `json:"last_error,omitempty"`
 	LastSupervisorDecision string    `json:"last_supervisor_decision,omitempty"`
 }
@@ -52,8 +56,30 @@ type Store struct {
 }
 
 var ErrCorrupt = errors.New("registry file is corrupt")
+var ErrTargetOwned = errors.New("adapter target is already owned")
+
+type EntryUpdate struct {
+	Before Entry
+	After  Entry
+}
+
+type UpdateResult struct {
+	Updated int
+	Skipped int
+}
 
 var processLocks sync.Map
+var registrationLocks sync.Map
+
+type registrationSemaphore struct {
+	token chan struct{}
+}
+
+func newRegistrationSemaphore() *registrationSemaphore {
+	semaphore := &registrationSemaphore{token: make(chan struct{}, 1)}
+	semaphore.token <- struct{}{}
+	return semaphore
+}
 
 func New(path string) *Store {
 	return &Store{Path: path, Now: time.Now}
@@ -83,6 +109,69 @@ func (s *Store) Load() (File, error) {
 		return err
 	})
 	return file, err
+}
+
+// WithRegistrationLock serializes the complete attach/reattach transaction
+// across processes without blocking ordinary registry readers. Callers hold
+// this lease from their fresh target inventory and ownership preflight through
+// wake readiness and the final registry commit, so a racing claimant cannot
+// start a wake before discovering the winner.
+func (s *Store) WithRegistrationLock(fn func() error) error {
+	return s.WithRegistrationLockContext(context.Background(), fn)
+}
+
+func (s *Store) WithRegistrationLockContext(ctx context.Context, fn func() error) error {
+	if s.Path == "" {
+		return errors.New("registry path is required")
+	}
+	if fn == nil {
+		return errors.New("registration transaction is required")
+	}
+	path, err := filepath.Abs(s.Path + ".registration.lock")
+	if err != nil {
+		return err
+	}
+	semaphoreValue, _ := registrationLocks.LoadOrStore(path, newRegistrationSemaphore())
+	semaphore := semaphoreValue.(*registrationSemaphore)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-semaphore.token:
+	}
+	defer func() { semaphore.token <- struct{}{} }()
+
+	if err := ensureRegistryDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := lock.Chmod(0o600); err != nil {
+		return err
+	}
+	for {
+		acquired, err := flockTryExclusive(lock)
+		if err != nil {
+			return err
+		}
+		if acquired {
+			break
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	defer flockRelease(lock)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return fn()
 }
 
 func (s *Store) loadUnlocked() (File, error) {
@@ -126,20 +215,20 @@ func (s *Store) saveUnlocked(file File) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
+	defer os.Remove(tmpName)
 
 	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
+		tmp.Close()
 		return err
 	}
 	enc := json.NewEncoder(tmp)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(file); err != nil {
-		_ = tmp.Close()
+		tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
+		tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -164,6 +253,9 @@ func (s *Store) Upsert(entry Entry) (Entry, error) {
 		file, err := s.loadUnlocked()
 		if err != nil {
 			return err
+		}
+		if owner, ok := conflictingTargetOwner(file.Entries, prepared, false); ok {
+			return targetOwnedError(prepared, owner)
 		}
 		replaced := false
 		for i := range file.Entries {
@@ -193,6 +285,9 @@ func (s *Store) ReplaceSessionAdapter(entry Entry) (Entry, []Entry, error) {
 		if err != nil {
 			return err
 		}
+		if owner, ok := conflictingTargetOwner(file.Entries, prepared, true); ok {
+			return targetOwnedError(prepared, owner)
+		}
 		next := make([]Entry, 0, len(file.Entries)+1)
 		for _, existing := range file.Entries {
 			// AMQ permits one wake process per root and agent. Reattach therefore
@@ -208,6 +303,69 @@ func (s *Store) ReplaceSessionAdapter(entry Entry) (Entry, []Entry, error) {
 		return s.saveUnlocked(file)
 	})
 	return prepared, removed, err
+}
+
+// RestoreSessionAdapterIfUnchanged rolls back a pre-wake reattach reservation
+// only while that exact inactive row is still authoritative. It restores the
+// complete prior root/agent set atomically; a concurrent change wins and keeps
+// the recoverable reservation instead of being overwritten.
+func (s *Store) RestoreSessionAdapterIfUnchanged(expected Entry, previous []Entry) (bool, error) {
+	if expected.ID == "" {
+		return false, errors.New("expected reservation id is required")
+	}
+	restored := false
+	err := s.withLock(func() error {
+		file, err := s.loadUnlocked()
+		if err != nil {
+			return err
+		}
+		index := -1
+		for i, entry := range file.Entries {
+			if entry.Root == expected.Root && entry.Agent == expected.Agent && entry.ID != expected.ID {
+				return nil
+			}
+			if entry.ID == expected.ID {
+				if entry != expected {
+					return nil
+				}
+				index = i
+			}
+		}
+		if index < 0 {
+			return nil
+		}
+		next := make([]Entry, 0, len(file.Entries)-1+len(previous))
+		next = append(next, file.Entries[:index]...)
+		next = append(next, file.Entries[index+1:]...)
+		next = append(next, previous...)
+		file.Entries = next
+		if err := s.saveUnlocked(file); err != nil {
+			return err
+		}
+		restored = true
+		return nil
+	})
+	return restored, err
+}
+
+// CheckTargetAvailable is the read-only preflight used before a reattach
+// touches AMQ. ReplaceSessionAdapter repeats the check under its write lock, so
+// a racing owner still fails closed before registry mutation.
+func (s *Store) CheckTargetAvailable(entry Entry, ignoreSameRootAgent bool) error {
+	prepared, err := s.prepareEntry(entry)
+	if err != nil {
+		return err
+	}
+	return s.withLock(func() error {
+		file, err := s.loadUnlocked()
+		if err != nil {
+			return err
+		}
+		if owner, ok := conflictingTargetOwner(file.Entries, prepared, ignoreSameRootAgent); ok {
+			return targetOwnedError(prepared, owner)
+		}
+		return nil
+	})
 }
 
 func (s *Store) prepareEntry(entry Entry) (Entry, error) {
@@ -252,9 +410,90 @@ func (s *Store) UpdateEntry(entry Entry) error {
 	})
 }
 
+// UpdateEntries applies a supervisor pass under one lock and one atomic save.
+// Each update is an optimistic compare-and-swap: a concurrent attach,
+// reattach, forget, or supervisor pass wins over a stale snapshot instead of
+// being overwritten or resurrected.
+func (s *Store) UpdateEntries(updates []EntryUpdate) (UpdateResult, error) {
+	var result UpdateResult
+	seen := make(map[string]struct{}, len(updates))
+	for _, update := range updates {
+		if update.Before.ID == "" || update.After.ID == "" {
+			return result, errors.New("batch update entry id is required")
+		}
+		if update.Before.ID != update.After.ID {
+			return result, fmt.Errorf("batch update changes entry id from %q to %q", update.Before.ID, update.After.ID)
+		}
+		if _, ok := seen[update.Before.ID]; ok {
+			return result, fmt.Errorf("batch update contains duplicate entry %q", update.Before.ID)
+		}
+		seen[update.Before.ID] = struct{}{}
+	}
+	if len(updates) == 0 {
+		return result, nil
+	}
+
+	err := s.withLock(func() error {
+		file, err := s.loadUnlocked()
+		if err != nil {
+			return err
+		}
+		byID := make(map[string]int, len(file.Entries))
+		for i := range file.Entries {
+			byID[file.Entries[i].ID] = i
+		}
+		for _, update := range updates {
+			i, ok := byID[update.Before.ID]
+			if !ok || file.Entries[i] != update.Before {
+				result.Skipped++
+				continue
+			}
+			if update.Before == update.After {
+				continue
+			}
+			file.Entries[i] = update.After
+			result.Updated++
+		}
+		if result.Updated == 0 {
+			return nil
+		}
+		return s.saveUnlocked(file)
+	})
+	return result, err
+}
+
 func (s *Store) Forget(id string) (bool, error) {
 	removed, err := s.ForgetMany([]string{id})
 	return removed == 1, err
+}
+
+// ForgetIfUnchanged removes exactly the entry that was inspected. A concurrent
+// reattach or supervisor update causes a safe skip instead of deleting newer
+// state.
+func (s *Store) ForgetIfUnchanged(expected Entry) (bool, error) {
+	if expected.ID == "" {
+		return false, errors.New("expected entry id is required")
+	}
+	removed := false
+	err := s.withLock(func() error {
+		file, err := s.loadUnlocked()
+		if err != nil {
+			return err
+		}
+		for i, entry := range file.Entries {
+			if entry.ID != expected.ID {
+				continue
+			}
+			if entry != expected {
+				return nil
+			}
+			file.Entries = append(file.Entries[:i], file.Entries[i+1:]...)
+			removed = true
+			return s.saveUnlocked(file)
+		}
+		return nil
+	})
+	return removed, err
 }
 
 func (s *Store) ForgetMany(ids []string) (int, error) {
@@ -306,6 +545,46 @@ func sortEntries(entries []Entry) {
 	})
 }
 
+func conflictingTargetOwner(entries []Entry, candidate Entry, ignoreSameRootAgent bool) (Entry, bool) {
+	candidateTarget := canonicalStoredTarget(candidate.Adapter, candidate.Target)
+	for _, existing := range entries {
+		if existing.ID == candidate.ID {
+			continue
+		}
+		if ignoreSameRootAgent && existing.Root == candidate.Root && existing.Agent == candidate.Agent {
+			continue
+		}
+		if existing.Adapter == candidate.Adapter && canonicalStoredTarget(existing.Adapter, existing.Target) == candidateTarget {
+			return existing, true
+		}
+	}
+	return Entry{}, false
+}
+
+func canonicalStoredTarget(adapterName, target string) string {
+	target = strings.TrimSpace(target)
+	if adapterName == "cmux" {
+		// UUIDs are case-insensitive. This also protects new canonical writers
+		// from legacy registry rows which persisted lower-case cmux targets.
+		return strings.ToLower(target)
+	}
+	return target
+}
+
+func targetOwnedError(candidate, owner Entry) error {
+	return fmt.Errorf(
+		"%w: adapter=%q target=%q requested_by=%s@%s existing_owner=%s@%s existing_id=%s",
+		ErrTargetOwned,
+		candidate.Adapter,
+		candidate.Target,
+		candidate.Agent,
+		candidate.Root,
+		owner.Agent,
+		owner.Root,
+		owner.ID,
+	)
+}
+
 func (s *Store) withLock(fn func() error) error {
 	if s.Path == "" {
 		return errors.New("registry path is required")
@@ -328,7 +607,7 @@ func (s *Store) withLock(fn func() error) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = lock.Close() }()
+	defer lock.Close()
 	if err := lock.Chmod(0o600); err != nil {
 		return err
 	}
@@ -359,6 +638,6 @@ func syncDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = file.Close() }()
+	defer file.Close()
 	return file.Sync()
 }

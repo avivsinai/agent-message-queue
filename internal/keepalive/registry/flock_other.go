@@ -1,15 +1,22 @@
-//go:build !unix
+//go:build !(darwin || dragonfly || freebsd || linux || netbsd || openbsd)
 
 package registry
 
-import "os"
+import (
+	"errors"
+	"os"
+)
 
-// flockExclusive is a compile-only fallback for platforms without flock
-// (e.g. Windows). Cross-process locking is not supported there; the
-// in-process mutex in withLock still serializes access within one process.
+var errCrossProcessLockUnsupported = errors.New("cross-process registry locking is unsupported on this platform")
+
+// These fail-closed fallbacks keep unsupported platforms compilable without
+// silently weakening the registry's cross-process ownership guarantees.
 func flockExclusive(_ *os.File) error {
-	return nil
+	return errCrossProcessLockUnsupported
 }
 
-// flockRelease matches the Unix implementation's signature.
+func flockTryExclusive(_ *os.File) (bool, error) {
+	return false, errCrossProcessLockUnsupported
+}
+
 func flockRelease(_ *os.File) {}

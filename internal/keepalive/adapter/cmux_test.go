@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -64,9 +65,9 @@ func TestCmuxNormalizeTargetCanonicalizesUUIDCase(t *testing.T) {
 	}
 }
 
-func TestCmuxProbeUsesRawRPCForExactSurface(t *testing.T) {
+func TestCmuxProbeUsesGlobalSystemTreeForExactSurface(t *testing.T) {
 	skipCmuxNonDarwin(t)
-	runner := &fakeCommandRunner{output: []byte(`{"ok":true}`)}
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaces(testCmuxSurfaceID)}
 	err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Probe(context.Background(), "cmux:surface:"+testCmuxSurfaceID)
 	if err != nil {
 		t.Fatalf("Probe() error = %v", err)
@@ -75,27 +76,94 @@ func TestCmuxProbeUsesRawRPCForExactSurface(t *testing.T) {
 		t.Fatalf("calls = %d, want 1", len(runner.calls))
 	}
 	call := runner.calls[0]
-	if call.name != "/fake/cmux" || len(call.args) != 3 || call.args[0] != "rpc" || call.args[1] != "surface.read_text" {
-		t.Fatalf("call = %#v, want raw surface.read_text RPC", call)
-	}
-	var params map[string]any
-	if err := json.Unmarshal([]byte(call.args[2]), &params); err != nil {
-		t.Fatalf("probe params are not JSON: %v", err)
-	}
-	if params["surface_id"] != testCmuxSurfaceID || params["lines"] != float64(1) {
-		t.Fatalf("probe params = %#v, want exact surface and one line", params)
+	if call.name != "/fake/cmux" || len(call.args) != 3 || call.args[0] != "rpc" || call.args[1] != "system.tree" || call.args[2] != "{}" {
+		t.Fatalf("call = %#v, want raw global system.tree RPC", call)
 	}
 }
 
-func TestCmuxProbeClassifiesMissingWorkspace(t *testing.T) {
+func TestCmuxProbeClassifiesSurfaceAbsentFromGlobalTree(t *testing.T) {
 	skipCmuxNonDarwin(t)
-	runner := &fakeCommandRunner{
-		output: []byte("Error: not_found: Workspace not found"),
-		err:    errors.New("exit status 1"),
-	}
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaces("B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2")}
 	err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Probe(context.Background(), "cmux:surface:"+testCmuxSurfaceID)
 	if !errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("Probe() error = %v, want ErrTargetNotFound", err)
+	}
+}
+
+func TestCmuxInventoryAnswersManyTargetsFromOneChildProcess(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	second := "B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaces(testCmuxSurfaceID, second)}
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory() error = %v", err)
+	}
+	for _, target := range []string{"cmux:surface:" + testCmuxSurfaceID, "cmux:surface:" + second} {
+		if err := inventory.Probe(target); err != nil {
+			t.Fatalf("inventory Probe(%q) error = %v", target, err)
+		}
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls = %d, want one system.tree inventory", len(runner.calls))
+	}
+}
+
+func TestCmuxInventoryRejectsMultipleLiveAliasesForPhysicalTTY(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	second := "B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "/dev/ttys011"},
+		map[string]string{"id": second, "tty": " ttys011 "},
+	)}
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory() error = %v", err)
+	}
+	for _, target := range []string{"cmux:surface:" + testCmuxSurfaceID, "cmux:surface:" + second} {
+		if _, err := inventory.OwnershipKey(target); err == nil || !strings.Contains(err.Error(), "2 live surface aliases") {
+			t.Fatalf("OwnershipKey(%q) error = %v, want alias ambiguity", target, err)
+		}
+	}
+}
+
+func TestCmuxInventoryCanonicalizesBareTTYDeviceName(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": " ttys011 "},
+	)}
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory() error = %v", err)
+	}
+	key, err := inventory.OwnershipKey("cmux:surface:" + testCmuxSurfaceID)
+	if err != nil || key != "tty:/dev/ttys011" {
+		t.Fatalf("OwnershipKey() = %q, %v, want canonical /dev tty", key, err)
+	}
+}
+
+func TestCmuxInventoryRejectsBlankTTYInsteadOfAssumingUUIDOwnership(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "  "},
+	)}
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory() error = %v", err)
+	}
+	if err := inventory.Probe("cmux:surface:" + testCmuxSurfaceID); err == nil || errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("Probe() error = %v, want ambiguous missing-tty failure", err)
+	}
+}
+
+func TestCmuxInventoryRejectsDuplicateSurfaceIDWithDifferentTTYs(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+		map[string]string{"id": strings.ToLower(testCmuxSurfaceID), "tty": "ttys012"},
+	)}
+	_, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background())
+	if err == nil || errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("Inventory() error = %v, want ambiguous duplicate identity failure", err)
 	}
 }
 
@@ -108,9 +176,31 @@ func TestCmuxProbeDoesNotClassifyGenericFailureAsMissing(t *testing.T) {
 	}
 }
 
+func TestCmuxInventoryRejectsMalformedTreeInsteadOfInferringAbsence(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaces("not-a-uuid")}
+	_, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background())
+	if err == nil || errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("Inventory() error = %v, want ambiguous parse failure", err)
+	}
+}
+
+func TestCmuxInventoryRejectsMissingWindowsSchemaInsteadOfDetachingEverything(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	runner := &fakeCommandRunner{output: []byte(`{"ok":true}`)}
+	_, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background())
+	if err == nil || errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("Inventory() error = %v, want ambiguous schema failure", err)
+	}
+}
+
 func TestCmuxInjectUsesRawRPCThenSettlesAndSendsEnter(t *testing.T) {
 	skipCmuxNonDarwin(t)
-	runner := &fakeCommandRunner{}
+	runner := &fakeCommandRunner{results: []fakeCommandResult{
+		{output: cmuxTreeWithSurfaces(testCmuxSurfaceID)},
+		{},
+		{},
+	}}
 	var delays []time.Duration
 	adapter := Cmux{
 		Runner: runner,
@@ -124,10 +214,13 @@ func TestCmuxInjectUsesRawRPCThenSettlesAndSendsEnter(t *testing.T) {
 	if err := adapter.Inject(context.Background(), "cmux:surface:"+testCmuxSurfaceID, payload); err != nil {
 		t.Fatalf("Inject() error = %v", err)
 	}
-	if len(runner.calls) != 2 {
-		t.Fatalf("calls = %d, want 2", len(runner.calls))
+	if len(runner.calls) != 3 {
+		t.Fatalf("calls = %d, want inventory plus text and key", len(runner.calls))
 	}
-	textCall := runner.calls[0]
+	if treeCall := runner.calls[0]; len(treeCall.args) < 2 || treeCall.args[1] != "system.tree" {
+		t.Fatalf("first call = %#v, want target inventory", treeCall)
+	}
+	textCall := runner.calls[1]
 	if textCall.name != "/fake/cmux" || textCall.args[0] != "rpc" || textCall.args[1] != "surface.send_text" {
 		t.Fatalf("text call = %#v, want raw surface.send_text RPC", textCall)
 	}
@@ -144,7 +237,7 @@ func TestCmuxInjectUsesRawRPCThenSettlesAndSendsEnter(t *testing.T) {
 	if len(delays) != 1 || delays[0] != defaultCmuxSettleDelay {
 		t.Fatalf("delays = %v, want [%s]", delays, defaultCmuxSettleDelay)
 	}
-	keyCall := runner.calls[1]
+	keyCall := runner.calls[2]
 	if keyCall.args[0] != "rpc" || keyCall.args[1] != "surface.send_key" {
 		t.Fatalf("key call = %#v, want raw surface.send_key RPC", keyCall)
 	}
@@ -159,14 +252,35 @@ func TestCmuxInjectUsesRawRPCThenSettlesAndSendsEnter(t *testing.T) {
 
 func TestCmuxInjectDoesNotSendEnterWhenTextFails(t *testing.T) {
 	skipCmuxNonDarwin(t)
-	runner := &fakeCommandRunner{output: []byte("surface unavailable"), err: errors.New("exit status 1")}
+	runner := &fakeCommandRunner{results: []fakeCommandResult{
+		{output: cmuxTreeWithSurfaces(testCmuxSurfaceID)},
+		{output: []byte("surface unavailable"), err: errors.New("exit status 1")},
+	}}
 	adapter := Cmux{Runner: runner, Path: "/fake/cmux"}
 	err := adapter.Inject(context.Background(), "cmux:surface:"+testCmuxSurfaceID, "payload")
 	if err == nil || !strings.Contains(err.Error(), "surface unavailable") {
 		t.Fatalf("Inject() error = %v, want command output", err)
 	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("calls = %d, want failed text call only", len(runner.calls))
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %d, want inventory and failed text call only", len(runner.calls))
+	}
+}
+
+func TestCmuxInjectRejectsDuplicateTTYAliasesBeforeSendingText(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	second := "B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+		map[string]string{"id": second, "tty": "/dev/ttys011"},
+	)}
+	err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inject(
+		context.Background(), "cmux:surface:"+testCmuxSurfaceID, "payload",
+	)
+	if err == nil || !strings.Contains(err.Error(), "2 live surface aliases") {
+		t.Fatalf("Inject() error = %v, want alias ambiguity", err)
+	}
+	if len(runner.calls) != 1 || runner.calls[0].args[1] != "system.tree" {
+		t.Fatalf("calls = %#v, want inventory only", runner.calls)
 	}
 }
 
@@ -227,4 +341,27 @@ func skipCmuxNonDarwin(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("cmux adapter requires macOS")
 	}
+}
+
+func cmuxTreeWithSurfaces(ids ...string) []byte {
+	surfaces := make([]map[string]string, 0, len(ids))
+	for index, id := range ids {
+		surfaces = append(surfaces, map[string]string{"id": id, "tty": fmt.Sprintf("ttys%03d", index+1)})
+	}
+	return cmuxTreeWithSurfaceRecords(surfaces...)
+}
+
+func cmuxTreeWithSurfaceRecords(surfaces ...map[string]string) []byte {
+	tree := map[string]any{
+		"windows": []any{map[string]any{
+			"workspaces": []any{map[string]any{
+				"panes": []any{map[string]any{"surfaces": surfaces}},
+			}},
+		}},
+	}
+	data, err := json.Marshal(tree)
+	if err != nil {
+		panic(err)
+	}
+	return data
 }

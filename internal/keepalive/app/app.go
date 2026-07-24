@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/adapter"
@@ -24,6 +25,8 @@ type App struct {
 	Stdout io.Writer
 	Stderr io.Writer
 }
+
+var errIdentitySafeWakeRetireUnavailable = errors.New("destructive AMQ wake retirement is disabled until AMQ exposes a positively verifiable identity-safe-retire capability from #235")
 
 func (a App) Run(ctx context.Context, args []string) int {
 	if a.Stdout == nil {
@@ -52,10 +55,12 @@ func (a App) Run(ctx context.Context, args []string) int {
 		err = a.inject(ctx, args[1:])
 	case "doctor":
 		err = a.doctor(args[1:])
+	case "gc":
+		err = a.gc(ctx, args[1:])
 	case "retire-session":
 		err = a.retireSession(ctx, args[1:])
 	case "forget":
-		err = a.forget(args[1:])
+		err = a.forget(ctx, args[1:])
 	case "install-launchd":
 		err = a.installLaunchd(ctx, args[1:])
 	case "install-hook":
@@ -63,30 +68,31 @@ func (a App) Run(ctx context.Context, args []string) int {
 	case "uninstall":
 		err = a.uninstallLaunchd(ctx, args[1:])
 	default:
-		_, _ = fmt.Fprintf(a.Stderr, "unknown command %q\n", args[0])
+		fmt.Fprintf(a.Stderr, "unknown command %q\n", args[0])
 		a.usage(a.Stderr)
 		return 2
 	}
 	if err != nil {
-		_, _ = fmt.Fprintln(a.Stderr, err)
+		fmt.Fprintln(a.Stderr, err)
 		return 1
 	}
 	return 0
 }
 
 type registerOptions struct {
-	RegistryPath string
-	AdapterName  string
-	Target       string
-	Root         string
-	BaseRoot     string
-	SessionName  string
-	Me           string
-	AMQPath      string
-	Self         string
-	WakeTimeout  time.Duration
-	NoStart      bool
-	Replace      bool
+	RegistryPath   string
+	AdapterName    string
+	Target         string
+	Root           string
+	BaseRoot       string
+	SessionName    string
+	Me             string
+	AMQPath        string
+	Self           string
+	WakeTimeout    time.Duration
+	NoStart        bool
+	Replace        bool
+	RetireDetached bool
 }
 
 type registerResult struct {
@@ -120,22 +126,24 @@ func (a App) register(ctx context.Context, args []string, replace bool) error {
 	self := fs.String("self", executablePath(), "amq-keepalive executable path for --inject-via")
 	wakeTimeout := fs.Duration("wake-ready-timeout", 10*time.Second, "maximum time to wait for amq wake readiness")
 	noStart := fs.Bool("no-start", false, "register without starting/reconciling wake")
+	retireDetached := fs.Bool("retire-detached", false, "attempt non-destructive exact-target convergence; retirement remains disabled until AMQ #235")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	return a.registerWithOptions(ctx, registerOptions{
-		RegistryPath: *registryPath,
-		AdapterName:  *adapterName,
-		Target:       *target,
-		Root:         *root,
-		BaseRoot:     *baseRoot,
-		SessionName:  *sessionName,
-		Me:           *me,
-		AMQPath:      *amqPath,
-		Self:         *self,
-		WakeTimeout:  *wakeTimeout,
-		NoStart:      *noStart,
-		Replace:      replace,
+		RegistryPath:   *registryPath,
+		AdapterName:    *adapterName,
+		Target:         *target,
+		Root:           *root,
+		BaseRoot:       *baseRoot,
+		SessionName:    *sessionName,
+		Me:             *me,
+		AMQPath:        *amqPath,
+		Self:           *self,
+		WakeTimeout:    *wakeTimeout,
+		NoStart:        *noStart,
+		Replace:        replace,
+		RetireDetached: *retireDetached,
 	})
 }
 
@@ -184,12 +192,9 @@ func (a App) registerWithOptions(ctx context.Context, opts registerOptions) erro
 		}
 		opts.Target = normalized
 	}
-	if err := selected.Probe(ctx, opts.Target); err != nil {
-		return err
-	}
-
 	store := registry.New(opts.RegistryPath)
 	next := registry.Entry{
+		ID:          registry.EntryID(opts.Root, opts.Me, opts.AdapterName, opts.Target),
 		Root:        opts.Root,
 		BaseRoot:    opts.BaseRoot,
 		SessionName: opts.SessionName,
@@ -205,26 +210,69 @@ func (a App) registerWithOptions(ctx context.Context, opts registerOptions) erro
 		WakeTimeout: opts.WakeTimeout,
 	}
 
-	if opts.Replace {
-		if !opts.NoStart {
-			updated, result := reconciler.StartFresh(ctx, next)
-			if result.Error != nil {
-				return result.Error
-			}
-			next = updated
-		}
-		entry, removed, err := store.ReplaceSessionAdapter(next)
+	var entry registry.Entry
+	var removed []registry.Entry
+	err = store.WithRegistrationLockContext(ctx, func() error {
+		// Refresh existence and physical ownership only after acquiring the
+		// cross-process registration lease. The lease remains held through wake
+		// readiness and registry commit, so a racing claimant observes this
+		// transaction's committed owner before it can touch AMQ.
+		inventory, err := registrationTargetInventory(ctx, selected, next.Target)
 		if err != nil {
 			return err
 		}
-		return printJSON(a.Stdout, registerResult{Entry: entry, RemovedEntries: removed})
-	}
+		file, err := store.Load()
+		if err != nil {
+			return err
+		}
+		if inventory != nil {
+			if err := checkPhysicalTargetAvailable(file, selected, inventory, next, opts.Replace); err != nil {
+				return err
+			}
+			reconciler.Adapter = targetInventoryProbe{inventory: inventory}
+		}
 
-	entry, err := store.Upsert(next)
-	if err != nil {
-		return err
-	}
-	if !opts.NoStart {
+		if opts.Replace {
+			if err := store.CheckTargetAvailable(next, true); err != nil {
+				return err
+			}
+			// Persist an inactive reservation before touching AMQ. If this process
+			// crashes after readiness, the supervisor can recover the registered
+			// candidate; there is no post-readiness commit window which could leave
+			// a live wake unregistered.
+			entry, removed, err = store.ReplaceSessionAdapter(next)
+			if err != nil || opts.NoStart {
+				return err
+			}
+			next = entry
+			wakeReady := false
+			if !opts.NoStart {
+				if opts.RetireDetached {
+					var recoverErr error
+					next, wakeReady, recoverErr = recoverDetachedRegistration(ctx, removed, adapters, reconciler, next)
+					if recoverErr != nil {
+						return resolveRegistrationReadinessFailure(store, entry, next, removed, recoverErr)
+					}
+				}
+				if !wakeReady {
+					updated, result := reconciler.StartFresh(ctx, next)
+					if result.Error != nil {
+						return resolveRegistrationReadinessFailure(store, entry, updated, removed, result.Error)
+					}
+					next = updated
+				}
+			}
+			if err := store.UpdateEntry(next); err != nil {
+				return fmt.Errorf("wake is ready and its attached registry reservation remains recoverable, but marking it active failed: %w", err)
+			}
+			entry = next
+			return nil
+		}
+
+		entry, err = store.Upsert(next)
+		if err != nil || opts.NoStart {
+			return err
+		}
 		updated, result := reconciler.Reconcile(ctx, entry)
 		if updateErr := store.UpdateEntry(updated); updateErr != nil {
 			return updateErr
@@ -233,8 +281,171 @@ func (a App) registerWithOptions(ctx context.Context, opts registerOptions) erro
 		if result.Error != nil && result.Action != supervisor.ActionDetached {
 			return result.Error
 		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if opts.Replace {
+		return printJSON(a.Stdout, registerResult{Entry: entry, RemovedEntries: removed})
 	}
 	return printJSON(a.Stdout, entry)
+}
+
+func resolveRegistrationReadinessFailure(
+	store *registry.Store,
+	reservation registry.Entry,
+	candidate registry.Entry,
+	removed []registry.Entry,
+	readinessErr error,
+) error {
+	if errors.Is(readinessErr, amq.ErrWakeReadinessUncertain) {
+		if candidate != reservation {
+			if updateErr := store.UpdateEntry(candidate); updateErr != nil {
+				return errors.Join(
+					readinessErr,
+					fmt.Errorf("wake readiness is uncertain and the attached reservation remains, but recording its retry state failed: %w", updateErr),
+				)
+			}
+		}
+		return fmt.Errorf("wake readiness is uncertain; the attached registry reservation was preserved for supervisor convergence: %w", readinessErr)
+	}
+	restored, restoreErr := store.RestoreSessionAdapterIfUnchanged(reservation, removed)
+	if restoreErr != nil {
+		return errors.Join(readinessErr, fmt.Errorf("restore previous registry entries after wake readiness failure: %w", restoreErr))
+	}
+	if !restored {
+		return errors.Join(readinessErr, errors.New("registry reservation changed before previous entries could be restored; the attached reservation was preserved for supervisor recovery"))
+	}
+	return readinessErr
+}
+
+type targetInventoryProbe struct {
+	inventory adapter.TargetInventory
+}
+
+func (p targetInventoryProbe) Probe(_ context.Context, target string) error {
+	return p.inventory.Probe(target)
+}
+
+func registrationTargetInventory(ctx context.Context, selected adapter.Adapter, target string) (adapter.TargetInventory, error) {
+	provider, ok := selected.(adapter.InventoryProvider)
+	if !ok {
+		return nil, selected.Probe(ctx, target)
+	}
+	inventory, err := provider.Inventory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if inventory == nil {
+		return nil, errors.New("adapter returned a nil target inventory")
+	}
+	if err := inventory.Probe(target); err != nil {
+		return nil, err
+	}
+	return inventory, nil
+}
+
+func checkPhysicalTargetAvailable(
+	file registry.File,
+	selected adapter.Adapter,
+	inventory adapter.TargetInventory,
+	candidate registry.Entry,
+	ignoreSameRootAgent bool,
+) error {
+	candidateKey, err := inventory.OwnershipKey(candidate.Target)
+	if err != nil {
+		return fmt.Errorf("resolve requested physical target ownership: %w", err)
+	}
+	for _, existing := range file.Entries {
+		if existing.Adapter != candidate.Adapter || existing.ID == candidate.ID {
+			continue
+		}
+		if ignoreSameRootAgent && existing.Root == candidate.Root && existing.Agent == candidate.Agent {
+			continue
+		}
+		target, err := normalizedTarget(selected, existing.Target)
+		if err != nil {
+			return fmt.Errorf("resolve registered target ownership for %s@%s: %w", existing.Agent, existing.Root, err)
+		}
+		existingKey, err := inventory.OwnershipKey(target)
+		if errors.Is(err, adapter.ErrTargetNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("resolve registered physical target ownership for %s@%s: %w", existing.Agent, existing.Root, err)
+		}
+		if existingKey == candidateKey {
+			return fmt.Errorf(
+				"%w: adapter=%q physical_identity=%q requested_target=%q requested_by=%s@%s existing_target=%q existing_owner=%s@%s existing_id=%s",
+				registry.ErrTargetOwned, candidate.Adapter, candidateKey, candidate.Target, candidate.Agent, candidate.Root,
+				existing.Target, existing.Agent, existing.Root, existing.ID,
+			)
+		}
+	}
+	return nil
+}
+
+// recoverDetachedRegistration is the narrow recovery path for a recreated
+// terminal. It never retargets a live wake: the previously registered adapter
+// target must be independently proven absent. It first asks AMQ's atomic wake
+// start path to converge on the new exact target, which handles an already
+// absent lock without requiring retirement. If a live old wake blocks that
+// start, this release fails closed: destructive wake retirement remains gated
+// until AMQ can positively attest the #235 identity-safe-retire capability.
+func recoverDetachedRegistration(
+	ctx context.Context,
+	previousEntries []registry.Entry,
+	adapters adapter.Registry,
+	reconciler supervisor.Reconciler,
+	next registry.Entry,
+) (registry.Entry, bool, error) {
+	matches := make([]registry.Entry, 0, 1)
+	for _, entry := range previousEntries {
+		if entry.Root == next.Root && entry.Agent == next.Agent {
+			matches = append(matches, entry)
+		}
+	}
+	if len(matches) == 0 {
+		return next, false, nil
+	}
+	if len(matches) != 1 {
+		return next, false, fmt.Errorf("refusing detached wake recovery for %s at %s: expected one registry entry, found %d", next.Agent, next.Root, len(matches))
+	}
+	previous := matches[0]
+	if previous.Adapter == next.Adapter && previous.Target == next.Target {
+		return next, false, nil
+	}
+	previousAdapter, err := adapters.Get(previous.Adapter)
+	if err != nil {
+		return next, false, fmt.Errorf("load previous adapter %s: %w", previous.Adapter, err)
+	}
+	if normalizer, ok := previousAdapter.(adapter.TargetNormalizer); ok {
+		previous.Target, err = normalizer.NormalizeTarget(previous.Target)
+		if err != nil {
+			return next, false, fmt.Errorf("normalize previous target for %s: %w", previous.Agent, err)
+		}
+	}
+	probeErr := previousAdapter.Probe(ctx, previous.Target)
+	if probeErr == nil {
+		return next, false, nil
+	}
+	if !errors.Is(probeErr, adapter.ErrTargetNotFound) {
+		return next, false, fmt.Errorf("refusing detached wake recovery for %s because target absence is not proven: %w", previous.Agent, probeErr)
+	}
+
+	updated, initialStart := reconciler.StartFresh(ctx, next)
+	if initialStart.Error == nil {
+		return updated, true, nil
+	}
+	if errors.Is(initialStart.Error, amq.ErrWakeReadinessUncertain) {
+		return updated, false, fmt.Errorf("recover detached %s wake has uncertain readiness: %w", previous.Agent, initialStart.Error)
+	}
+
+	return next, false, fmt.Errorf(
+		"recover detached %s wake: exact-target start failed: %v; %w",
+		previous.Agent, initialStart.Error, errIdentitySafeWakeRetireUnavailable,
+	)
 }
 
 func (a App) supervise(ctx context.Context, args []string) error {
@@ -244,100 +455,298 @@ func (a App) supervise(ctx context.Context, args []string) error {
 	amqPath := fs.String("amq", "amq", "amq executable path")
 	self := fs.String("self", executablePath(), "amq-keepalive executable path for --inject-via")
 	once := fs.Bool("once", false, "run one supervisor pass")
-	interval := fs.Duration("interval", 10*time.Second, "supervisor interval")
+	interval := fs.Duration("interval", time.Minute, "supervisor interval")
 	wakeTimeout := fs.Duration("wake-ready-timeout", 10*time.Second, "maximum time to wait for amq wake readiness")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if *interval <= 0 {
+		return errors.New("--interval must be greater than zero")
+	}
 
-	runOnce := func() error {
-		return a.superviseOnce(ctx, *registryPath, amq.NewCLI(*amqPath), *self, *wakeTimeout)
+	runOnce := func(emitJSON bool) error {
+		results, err := a.superviseOnce(ctx, *registryPath, amq.NewCLI(*amqPath), *self, *wakeTimeout)
+		if err != nil {
+			return err
+		}
+		if emitJSON {
+			return printJSON(a.Stdout, results)
+		}
+		return nil
 	}
 	if *once {
-		return runOnce()
+		return runOnce(true)
 	}
 	for {
-		if err := runOnce(); err != nil {
-			_, _ = fmt.Fprintln(a.Stderr, err)
+		if err := runOnce(false); err != nil {
+			fmt.Fprintln(a.Stderr, err)
 		}
 		timer := time.NewTimer(*interval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return nil
 		case <-timer.C:
 		}
 	}
 }
 
-func (a App) superviseOnce(ctx context.Context, registryPath string, wake supervisor.WakeRunner, self string, wakeTimeout time.Duration) error {
+func (a App) superviseOnce(ctx context.Context, registryPath string, wake supervisor.WakeRunner, self string, wakeTimeout time.Duration) ([]supervisor.Result, error) {
 	store := registry.New(registryPath)
-	file, err := store.Load()
-	if err != nil {
-		return err
-	}
-	adapters := adapter.DefaultRegistry()
-	results := make([]supervisor.Result, 0, len(file.Entries))
-	for _, entry := range file.Entries {
-		previous := entry
-		selected, err := adapters.Get(entry.Adapter)
+	var results []supervisor.Result
+	err := store.WithRegistrationLockContext(ctx, func() error {
+		file, err := store.Load()
 		if err != nil {
-			entry.LastError = err.Error()
-			entry.LastSupervisorDecision = supervisor.ActionBackoff
-			entry.State = registry.StateAttached
-			if updateErr := store.UpdateEntry(entry); updateErr != nil {
-				return updateErr
-			}
-			result := supervisor.Result{Action: supervisor.ActionBackoff, Error: err}
-			a.warnReconcileFailure(previous, entry, result)
-			results = append(results, result)
-			continue
-		}
-		reconciler := supervisor.Reconciler{
-			Wake:        wake,
-			Adapter:     selected,
-			InjectVia:   self,
-			WakeTimeout: wakeTimeout,
-		}
-		updated, result := reconciler.Reconcile(ctx, entry)
-		if err := store.UpdateEntry(updated); err != nil {
 			return err
 		}
-		a.warnReconcileFailure(previous, updated, result)
-		results = append(results, result)
-	}
-	return printJSON(a.Stdout, results)
+		adapters := adapter.DefaultRegistry()
+		probes := passProbes(file.Entries, adapters)
+		conflicts := targetOwnershipConflicts(file, adapters)
+		if anyEntryDue(file.Entries, time.Now().UTC()) {
+			mergeOwnershipConflicts(conflicts, physicalOwnershipConflicts(ctx, file, probes))
+		}
+		results = make([]supervisor.Result, 0, len(file.Entries))
+		updates := make([]registry.EntryUpdate, 0, len(file.Entries))
+		for _, entry := range file.Entries {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				results = append(results, supervisor.Result{Action: supervisor.ActionDeferred, Error: ctxErr})
+				continue
+			}
+			previous := entry
+			probe := probes[entry.Adapter]
+			if conflictErr, ok := conflicts[entry.ID]; ok {
+				probe = fixedProbeError{err: conflictErr}
+			}
+			reconciler := supervisor.Reconciler{
+				Wake:        wake,
+				Adapter:     probe,
+				InjectVia:   self,
+				WakeTimeout: wakeTimeout,
+			}
+			updated, result := reconciler.Reconcile(ctx, entry)
+			if previous != updated {
+				updates = append(updates, registry.EntryUpdate{Before: previous, After: updated})
+			}
+			a.logReconcileTransition(previous, updated, result)
+			results = append(results, result)
+		}
+		_, err = store.UpdateEntries(updates)
+		return err
+	})
+	return results, err
 }
 
-func (a App) warnReconcileFailure(previous, updated registry.Entry, result supervisor.Result) {
-	if result.Error == nil {
-		return
-	}
-	switch result.Action {
-	case supervisor.ActionBackoff, supervisor.ActionDetached, supervisor.ActionStartFailed:
-	default:
-		return
-	}
+func (a App) logReconcileTransition(previous, updated registry.Entry, result supervisor.Result) {
 	if previous.State == updated.State &&
 		previous.LastError == updated.LastError &&
-		previous.LastSupervisorDecision == updated.LastSupervisorDecision &&
-		previous.FailureCount == updated.FailureCount {
+		previous.LastSupervisorDecision == updated.LastSupervisorDecision {
 		return
 	}
 	w := a.Stderr
 	if w == nil {
 		w = os.Stderr
 	}
-	_, _ = fmt.Fprintf(w,
-		"amq-keepalive reconcile warning: action=%s root=%q agent=%q adapter=%q target=%q failure_count=%d error=%q\n",
-		result.Action,
-		updated.Root,
-		updated.Agent,
-		updated.Adapter,
-		updated.Target,
-		updated.FailureCount,
-		result.Error.Error(),
-	)
+	if result.Error != nil {
+		fmt.Fprintf(w,
+			"amq-keepalive reconcile warning: action=%s root=%q agent=%q adapter=%q target=%q failure_count=%d error=%q\n",
+			result.Action,
+			updated.Root,
+			updated.Agent,
+			updated.Adapter,
+			updated.Target,
+			updated.FailureCount,
+			result.Error.Error(),
+		)
+		return
+	}
+	if updated.State == registry.StateActive {
+		fmt.Fprintf(w,
+			"amq-keepalive reconcile recovered: action=%s root=%q agent=%q adapter=%q target=%q\n",
+			result.Action,
+			updated.Root,
+			updated.Agent,
+			updated.Adapter,
+			updated.Target,
+		)
+	}
+}
+
+type fixedProbeError struct {
+	err error
+}
+
+func (p fixedProbeError) Probe(context.Context, string) error {
+	return p.err
+}
+
+type passProbe struct {
+	selected  adapter.Adapter
+	once      sync.Once
+	inventory adapter.TargetInventory
+	err       error
+}
+
+type ownershipProbe interface {
+	supervisor.Adapter
+	OwnershipKey(ctx context.Context, target string) (string, error)
+}
+
+func newPassProbe(selected adapter.Adapter) supervisor.Adapter {
+	if _, ok := selected.(adapter.InventoryProvider); !ok {
+		return selected
+	}
+	return &passProbe{selected: selected}
+}
+
+func passProbes(entries []registry.Entry, adapters adapter.Registry) map[string]supervisor.Adapter {
+	probes := make(map[string]supervisor.Adapter)
+	for _, entry := range entries {
+		if _, ok := probes[entry.Adapter]; ok {
+			continue
+		}
+		selected, err := adapters.Get(entry.Adapter)
+		if err != nil {
+			probes[entry.Adapter] = fixedProbeError{err: err}
+			continue
+		}
+		probes[entry.Adapter] = newPassProbe(selected)
+	}
+	return probes
+}
+
+func (p *passProbe) Probe(ctx context.Context, target string) error {
+	inventory, err := p.loadInventory(ctx)
+	if err != nil {
+		return err
+	}
+	return inventory.Probe(target)
+}
+
+func (p *passProbe) OwnershipKey(ctx context.Context, target string) (string, error) {
+	inventory, err := p.loadInventory(ctx)
+	if err != nil {
+		return "", err
+	}
+	return inventory.OwnershipKey(target)
+}
+
+func (p *passProbe) loadInventory(ctx context.Context) (adapter.TargetInventory, error) {
+	provider := p.selected.(adapter.InventoryProvider)
+	p.once.Do(func() {
+		p.inventory, p.err = provider.Inventory(ctx)
+		if p.err == nil && p.inventory == nil {
+			p.err = errors.New("adapter returned a nil target inventory")
+		}
+	})
+	if p.err != nil {
+		return nil, p.err
+	}
+	return p.inventory, nil
+}
+
+type targetOwnerKey struct {
+	adapter string
+	target  string
+}
+
+func targetOwnershipConflicts(file registry.File, adapters adapter.Registry) map[string]error {
+	groups := make(map[targetOwnerKey][]registry.Entry)
+	for _, entry := range file.Entries {
+		selected, err := adapters.Get(entry.Adapter)
+		if err != nil {
+			continue
+		}
+		target := strings.TrimSpace(entry.Target)
+		if normalizer, ok := selected.(adapter.TargetNormalizer); ok {
+			target, err = normalizer.NormalizeTarget(target)
+			if err != nil {
+				continue
+			}
+		}
+		key := targetOwnerKey{adapter: selected.Name(), target: target}
+		groups[key] = append(groups[key], entry)
+	}
+
+	conflicts := make(map[string]error)
+	for key, owners := range groups {
+		if len(owners) < 2 {
+			continue
+		}
+		labels := make([]string, 0, len(owners))
+		for _, owner := range owners {
+			labels = append(labels, fmt.Sprintf("%s@%s (%s)", owner.Agent, owner.Root, owner.ID))
+		}
+		err := fmt.Errorf("adapter target ownership collision: adapter=%q target=%q owners=%s", key.adapter, key.target, strings.Join(labels, ", "))
+		for _, owner := range owners {
+			conflicts[owner.ID] = err
+		}
+	}
+	return conflicts
+}
+
+type physicalTargetOwnerKey struct {
+	adapter string
+	key     string
+}
+
+func physicalOwnershipConflicts(ctx context.Context, file registry.File, probes map[string]supervisor.Adapter) map[string]error {
+	groups := make(map[physicalTargetOwnerKey][]registry.Entry)
+	conflicts := make(map[string]error)
+	for _, entry := range file.Entries {
+		probe, ok := probes[entry.Adapter].(ownershipProbe)
+		if !ok {
+			continue
+		}
+		key, err := probe.OwnershipKey(ctx, entry.Target)
+		if errors.Is(err, adapter.ErrTargetNotFound) {
+			continue
+		}
+		if err != nil {
+			conflicts[entry.ID] = fmt.Errorf("resolve physical target ownership for adapter=%q target=%q: %w", entry.Adapter, entry.Target, err)
+			continue
+		}
+		groups[physicalTargetOwnerKey{adapter: entry.Adapter, key: key}] = append(
+			groups[physicalTargetOwnerKey{adapter: entry.Adapter, key: key}], entry,
+		)
+	}
+	for key, owners := range groups {
+		if len(owners) < 2 {
+			continue
+		}
+		labels := make([]string, 0, len(owners))
+		for _, owner := range owners {
+			labels = append(labels, fmt.Sprintf("%s@%s (%s, target=%s)", owner.Agent, owner.Root, owner.ID, owner.Target))
+		}
+		err := fmt.Errorf(
+			"physical target ownership collision: adapter=%q identity=%q owners=%s; existing wakes are not retired automatically",
+			key.adapter, key.key, strings.Join(labels, ", "),
+		)
+		for _, owner := range owners {
+			conflicts[owner.ID] = err
+		}
+	}
+	return conflicts
+}
+
+func mergeOwnershipConflicts(destination, source map[string]error) {
+	for id, err := range source {
+		if _, exists := destination[id]; !exists {
+			destination[id] = err
+		}
+	}
+}
+
+func anyEntryDue(entries []registry.Entry, now time.Time) bool {
+	for _, entry := range entries {
+		if !entry.NextHealthCheck.IsZero() && now.Before(entry.NextHealthCheck) {
+			continue
+		}
+		if !entry.BackoffUntil.IsZero() && now.Before(entry.BackoffUntil) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func (a App) inject(ctx context.Context, args []string) error {
@@ -367,7 +776,122 @@ func (a App) doctor(args []string) error {
 	return printJSON(a.Stdout, file)
 }
 
-func (a App) forget(args []string) error {
+type gcEntryResult struct {
+	ID            string    `json:"id"`
+	Root          string    `json:"root"`
+	Agent         string    `json:"agent"`
+	Adapter       string    `json:"adapter"`
+	Target        string    `json:"target"`
+	DetachedSince time.Time `json:"detached_since,omitempty"`
+	Status        string    `json:"status"`
+	Reason        string    `json:"reason,omitempty"`
+	PID           int       `json:"pid,omitempty"`
+}
+
+type gcResult struct {
+	Applied        bool            `json:"applied"`
+	MinDetachedAge string          `json:"min_detached_age"`
+	Entries        []gcEntryResult `json:"entries"`
+}
+
+// gc is a read-only classifier. Destructive apply remains hard-gated until AMQ
+// exposes a positive identity-safe-retire capability from #235.
+func (a App) gc(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
+	fs.SetOutput(a.Stderr)
+	registryPath := fs.String("registry", mustDefaultRegistryPath(), "registry file path")
+	fs.String("amq", "amq", "reserved for identity-safe apply after AMQ #235")
+	fs.String("self", executablePath(), "reserved for identity-safe apply after AMQ #235")
+	minDetachedAge := fs.Duration("min-detached-age", 24*time.Hour, "minimum proven-detached age before cleanup")
+	apply := fs.Bool("apply", false, "reserved; currently disabled until AMQ identity-safe retirement #235")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *minDetachedAge < 0 {
+		return errors.New("--min-detached-age must not be negative")
+	}
+	if *apply {
+		return fmt.Errorf("gc --apply: %w", errIdentitySafeWakeRetireUnavailable)
+	}
+
+	store := registry.New(*registryPath)
+	file, err := store.Load()
+	if err != nil {
+		return err
+	}
+	adapters := adapter.DefaultRegistry()
+	probes := passProbes(file.Entries, adapters)
+	conflicts := targetOwnershipConflicts(file, adapters)
+	mergeOwnershipConflicts(conflicts, physicalOwnershipConflicts(ctx, file, probes))
+	now := time.Now().UTC()
+	result := gcResult{Applied: *apply, MinDetachedAge: minDetachedAge.String()}
+	for _, entry := range file.Entries {
+		item := gcEntryResult{
+			ID: entry.ID, Root: entry.Root, Agent: entry.Agent, Adapter: entry.Adapter,
+			Target: entry.Target, DetachedSince: entry.DetachedSince,
+		}
+		result.Entries = append(result.Entries, item)
+		index := len(result.Entries) - 1
+		if entry.State != registry.StateDetached {
+			result.Entries[index].Status = "skipped"
+			result.Entries[index].Reason = "entry is not detached"
+			continue
+		}
+		if entry.DetachedSince.IsZero() {
+			result.Entries[index].Status = "skipped"
+			result.Entries[index].Reason = "detached_since is not yet established by the fixed supervisor"
+			continue
+		}
+		if age := now.Sub(entry.DetachedSince); age < *minDetachedAge {
+			result.Entries[index].Status = "skipped"
+			result.Entries[index].Reason = fmt.Sprintf("detached for %s; minimum is %s", age.Round(time.Second), minDetachedAge.String())
+			continue
+		}
+		if conflictErr, ok := conflicts[entry.ID]; ok {
+			result.Entries[index].Status = "skipped"
+			result.Entries[index].Reason = conflictErr.Error()
+			continue
+		}
+		selected, selectErr := adapters.Get(entry.Adapter)
+		if selectErr != nil {
+			result.Entries[index].Status = "skipped"
+			result.Entries[index].Reason = selectErr.Error()
+			continue
+		}
+		target, normalizeErr := normalizedTarget(selected, entry.Target)
+		if normalizeErr != nil {
+			result.Entries[index].Status = "skipped"
+			result.Entries[index].Reason = normalizeErr.Error()
+			continue
+		}
+		probeErr := probes[entry.Adapter].Probe(ctx, target)
+		if probeErr == nil {
+			result.Entries[index].Status = "skipped"
+			result.Entries[index].Reason = "adapter target currently exists"
+			continue
+		}
+		if !errors.Is(probeErr, adapter.ErrTargetNotFound) {
+			result.Entries[index].Status = "skipped"
+			result.Entries[index].Reason = "target absence is ambiguous: " + probeErr.Error()
+			continue
+		}
+		result.Entries[index].Status = "candidate"
+	}
+	return printJSON(a.Stdout, result)
+}
+
+func normalizedTarget(selected adapter.Adapter, target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if normalizer, ok := selected.(adapter.TargetNormalizer); ok {
+		return normalizer.NormalizeTarget(target)
+	}
+	if target == "" {
+		return "", errors.New("adapter target is empty")
+	}
+	return target, nil
+}
+
+func (a App) forget(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("forget", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	registryPath := fs.String("registry", mustDefaultRegistryPath(), "registry file path")
@@ -379,25 +903,16 @@ func (a App) forget(args []string) error {
 		return errors.New("--id is required")
 	}
 	store := registry.New(*registryPath)
-	removed, err := store.Forget(*id)
+	removed := false
+	err := store.WithRegistrationLockContext(ctx, func() error {
+		var err error
+		removed, err = store.Forget(*id)
+		return err
+	})
 	if err != nil {
 		return err
 	}
 	return printJSON(a.Stdout, map[string]any{"removed": removed})
-}
-
-type retiredSessionEntry struct {
-	ID     string `json:"id"`
-	Agent  string `json:"agent"`
-	Target string `json:"target"`
-	Status string `json:"status"`
-	PID    int    `json:"pid,omitempty"`
-}
-
-type retireSessionResult struct {
-	Root    string                `json:"root"`
-	Adapter string                `json:"adapter"`
-	Entries []retiredSessionEntry `json:"entries"`
 }
 
 func (a App) retireSession(ctx context.Context, args []string) error {
@@ -407,8 +922,8 @@ func (a App) retireSession(ctx context.Context, args []string) error {
 	rootFlag := fs.String("root", "", "exact AMQ session root")
 	adapterName := fs.String("adapter", "cmux", "adapter name")
 	agentsFlag := fs.String("agents", "codex,claude", "comma-separated required agent handles")
-	amqPath := fs.String("amq", "amq", "amq executable path")
-	self := fs.String("self", executablePath(), "amq-keepalive executable path used by the wake")
+	fs.String("amq", "amq", "reserved until AMQ identity-safe retirement #235")
+	fs.String("self", executablePath(), "reserved until AMQ identity-safe retirement #235")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -425,98 +940,53 @@ func (a App) retireSession(ctx context.Context, args []string) error {
 	}
 
 	store := registry.New(*registryPath)
-	file, err := store.Load()
-	if err != nil {
-		return err
-	}
-	entries := make([]registry.Entry, 0, len(agents))
-	for _, agent := range agents {
-		matches := make([]registry.Entry, 0, 1)
-		for _, entry := range file.Entries {
-			entryRoot, pathErr := canonicalExistingPath(entry.Root)
-			if pathErr != nil {
-				continue
-			}
-			if entryRoot == root && entry.Adapter == *adapterName && entry.Agent == agent {
-				matches = append(matches, entry)
-			}
+	return store.WithRegistrationLockContext(ctx, func() error {
+		file, err := store.Load()
+		if err != nil {
+			return err
 		}
-		if len(matches) != 1 {
-			return fmt.Errorf("expected exactly one %s registry entry for agent %s at %s, found %d", *adapterName, agent, root, len(matches))
+		entries := make([]registry.Entry, 0, len(agents))
+		for _, agent := range agents {
+			matches := make([]registry.Entry, 0, 1)
+			for _, entry := range file.Entries {
+				entryRoot, pathErr := canonicalExistingPath(entry.Root)
+				if pathErr != nil {
+					continue
+				}
+				if entryRoot == root && entry.Adapter == *adapterName && entry.Agent == agent {
+					matches = append(matches, entry)
+				}
+			}
+			if len(matches) != 1 {
+				return fmt.Errorf("expected exactly one %s registry entry for agent %s at %s, found %d", *adapterName, agent, root, len(matches))
+			}
+			entries = append(entries, matches[0])
 		}
-		entries = append(entries, matches[0])
-	}
 
-	adapters := adapter.DefaultRegistry()
-	selected, err := adapters.Get(*adapterName)
-	if err != nil {
-		return err
-	}
-	for i := range entries {
-		entry := &entries[i]
-		if normalizer, ok := selected.(adapter.TargetNormalizer); ok {
-			normalized, normalizeErr := normalizer.NormalizeTarget(entry.Target)
-			if normalizeErr != nil {
-				return fmt.Errorf("normalize target for %s: %w", entry.Agent, normalizeErr)
+		adapters := adapter.DefaultRegistry()
+		selected, err := adapters.Get(*adapterName)
+		if err != nil {
+			return err
+		}
+		for i := range entries {
+			entry := &entries[i]
+			if normalizer, ok := selected.(adapter.TargetNormalizer); ok {
+				normalized, normalizeErr := normalizer.NormalizeTarget(entry.Target)
+				if normalizeErr != nil {
+					return fmt.Errorf("normalize target for %s: %w", entry.Agent, normalizeErr)
+				}
+				entry.Target = normalized
 			}
-			entry.Target = normalized
-		}
-		probeErr := selected.Probe(ctx, entry.Target)
-		if probeErr == nil {
-			return fmt.Errorf("refusing to retire %s wake: adapter target %s still exists", entry.Agent, entry.Target)
-		}
-		if !errors.Is(probeErr, adapter.ErrTargetNotFound) {
-			return fmt.Errorf("refusing to retire %s wake because target absence is not proven: %w", entry.Agent, probeErr)
-		}
-	}
-
-	cli := amq.NewCLI(*amqPath)
-	result := retireSessionResult{Root: root, Adapter: *adapterName}
-	forgetRetired := func() error {
-		ids := make([]string, 0, len(result.Entries))
-		for _, entry := range result.Entries {
-			ids = append(ids, entry.ID)
-		}
-		if len(ids) == 0 {
-			return nil
-		}
-		removed, forgetErr := store.ForgetMany(ids)
-		if forgetErr != nil {
-			return forgetErr
-		}
-		if removed != len(ids) {
-			return fmt.Errorf("removed %d, want %d", removed, len(ids))
-		}
-		return nil
-	}
-	for _, entry := range entries {
-		retired, retireErr := cli.RetireWake(ctx, amq.RetireWakeRequest{
-			Root:      root,
-			Me:        entry.Agent,
-			InjectVia: *self,
-			Adapter:   entry.Adapter,
-			Target:    entry.Target,
-		})
-		if retireErr != nil {
-			if forgetErr := forgetRetired(); forgetErr != nil {
-				return fmt.Errorf("retire %s wake: %v; also failed to forget already-retired entries: %w", entry.Agent, retireErr, forgetErr)
+			probeErr := selected.Probe(ctx, entry.Target)
+			if probeErr == nil {
+				return fmt.Errorf("refusing to retire %s wake: adapter target %s still exists", entry.Agent, entry.Target)
 			}
-			return fmt.Errorf("retire %s wake: %w", entry.Agent, retireErr)
-		}
-		if retired.Status != "retired" {
-			if forgetErr := forgetRetired(); forgetErr != nil {
-				return fmt.Errorf("retire %s wake returned unexpected status %q; also failed to forget already-retired entries: %w", entry.Agent, retired.Status, forgetErr)
+			if !errors.Is(probeErr, adapter.ErrTargetNotFound) {
+				return fmt.Errorf("refusing to retire %s wake because target absence is not proven: %w", entry.Agent, probeErr)
 			}
-			return fmt.Errorf("retire %s wake returned unexpected status %q", entry.Agent, retired.Status)
 		}
-		result.Entries = append(result.Entries, retiredSessionEntry{
-			ID: entry.ID, Agent: entry.Agent, Target: entry.Target, Status: retired.Status, PID: retired.PID,
-		})
-	}
-	if err := forgetRetired(); err != nil {
-		return fmt.Errorf("forget retired session registry entries: %w", err)
-	}
-	return printJSON(a.Stdout, result)
+		return errIdentitySafeWakeRetireUnavailable
+	})
 }
 
 func canonicalExistingPath(path string) (string, error) {
@@ -559,7 +1029,7 @@ func (a App) installLaunchd(ctx context.Context, args []string) error {
 	registryPath := fs.String("registry", mustDefaultRegistryPath(), "registry file path")
 	amqPath := fs.String("amq", "amq", "amq executable path")
 	self := fs.String("self", executablePath(), "amq-keepalive executable path")
-	interval := fs.Duration("interval", 10*time.Second, "supervisor interval")
+	interval := fs.Duration("interval", time.Minute, "supervisor interval")
 	noLoad := fs.Bool("no-load", false, "write plist without loading it")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -632,7 +1102,7 @@ func (a App) uninstallLaunchd(ctx context.Context, args []string) error {
 }
 
 func (a App) usage(writer io.Writer) {
-	_, _ = fmt.Fprintln(writer, "usage: amq-keepalive <attach|reattach|supervise|inject|doctor|retire-session|forget|install-launchd|install-hook|uninstall> [options]")
+	fmt.Fprintln(writer, "usage: amq-keepalive <attach|reattach|supervise|inject|doctor|gc|retire-session|forget|install-launchd|install-hook|uninstall> [options]")
 }
 
 func mustDefaultRegistryPath() string {

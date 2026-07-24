@@ -106,7 +106,7 @@ func NormalizeOptions(opts Options) (Options, error) {
 		opts.RegistryPath = abs
 	}
 	if opts.Interval <= 0 {
-		opts.Interval = 10 * time.Second
+		opts.Interval = time.Minute
 	}
 	if opts.PlistPath == "" {
 		path, err := DefaultPlistPath(opts.Label)
@@ -218,17 +218,17 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
+	defer os.Remove(tmpName)
 	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
+		tmp.Close()
 		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
+		tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
+		tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -282,19 +282,19 @@ func serviceTarget(label string) string {
 
 func writeKeyString(buf *bytes.Buffer, key string, value string) {
 	buf.WriteString("\t<key>")
-	_ = xml.EscapeText(buf, []byte(key))
+	xml.EscapeText(buf, []byte(key))
 	buf.WriteString("</key>\n\t<string>")
-	_ = xml.EscapeText(buf, []byte(value))
+	xml.EscapeText(buf, []byte(value))
 	buf.WriteString("</string>\n")
 }
 
 func writeKeyArray(buf *bytes.Buffer, key string, values []string) {
 	buf.WriteString("\t<key>")
-	_ = xml.EscapeText(buf, []byte(key))
+	xml.EscapeText(buf, []byte(key))
 	buf.WriteString("</key>\n\t<array>\n")
 	for _, value := range values {
 		buf.WriteString("\t\t<string>")
-		_ = xml.EscapeText(buf, []byte(value))
+		xml.EscapeText(buf, []byte(value))
 		buf.WriteString("</string>\n")
 	}
 	buf.WriteString("\t</array>\n")
@@ -302,7 +302,7 @@ func writeKeyArray(buf *bytes.Buffer, key string, values []string) {
 
 func writeKeyBool(buf *bytes.Buffer, key string, value bool) {
 	buf.WriteString("\t<key>")
-	_ = xml.EscapeText(buf, []byte(key))
+	xml.EscapeText(buf, []byte(key))
 	if value {
 		buf.WriteString("</key>\n\t<true/>\n")
 		return
@@ -312,7 +312,7 @@ func writeKeyBool(buf *bytes.Buffer, key string, value bool) {
 
 func writeKeyDict(buf *bytes.Buffer, key string, values map[string]string) {
 	buf.WriteString("\t<key>")
-	_ = xml.EscapeText(buf, []byte(key))
+	xml.EscapeText(buf, []byte(key))
 	buf.WriteString("</key>\n\t<dict>\n")
 	keys := make([]string, 0, len(values))
 	for dictKey := range values {
@@ -322,9 +322,9 @@ func writeKeyDict(buf *bytes.Buffer, key string, values map[string]string) {
 	for _, dictKey := range keys {
 		value := values[dictKey]
 		buf.WriteString("\t\t<key>")
-		_ = xml.EscapeText(buf, []byte(dictKey))
+		xml.EscapeText(buf, []byte(dictKey))
 		buf.WriteString("</key>\n\t\t<string>")
-		_ = xml.EscapeText(buf, []byte(value))
+		xml.EscapeText(buf, []byte(value))
 		buf.WriteString("</string>\n")
 	}
 	buf.WriteString("\t</dict>\n")

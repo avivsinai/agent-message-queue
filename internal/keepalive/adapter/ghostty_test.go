@@ -9,9 +9,15 @@ import (
 )
 
 type fakeCommandRunner struct {
+	output  []byte
+	err     error
+	calls   []commandCall
+	results []fakeCommandResult
+}
+
+type fakeCommandResult struct {
 	output []byte
 	err    error
-	calls  []commandCall
 }
 
 type commandCall struct {
@@ -21,6 +27,9 @@ type commandCall struct {
 
 func (f *fakeCommandRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, commandCall{name: name, args: append([]string{}, args...)})
+	if index := len(f.calls) - 1; index < len(f.results) {
+		return f.results[index].output, f.results[index].err
+	}
 	return f.output, f.err
 }
 
@@ -46,6 +55,16 @@ func TestParseGhosttyTerminalTarget(t *testing.T) {
 	}
 	if id != "terminal-1" {
 		t.Fatalf("id = %q, want terminal-1", id)
+	}
+}
+
+func TestGhosttyNormalizeTargetTrimsTerminalID(t *testing.T) {
+	target, err := (Ghostty{}).NormalizeTarget(" ghostty:terminal:terminal-1 ")
+	if err != nil {
+		t.Fatalf("NormalizeTarget() error = %v", err)
+	}
+	if target != "ghostty:terminal:terminal-1" {
+		t.Fatalf("target = %q, want canonical terminal target", target)
 	}
 }
 
@@ -150,6 +169,21 @@ func TestGhosttyErrorsIncludeCommandOutput(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "accessibility denied") {
 		t.Fatalf("error = %v, want command output", err)
+	}
+}
+
+func TestGhosttyProbeClassifiesOnlyExplicitMissingTerminal(t *testing.T) {
+	skipNonDarwin(t)
+	missing := &fakeCommandRunner{output: []byte("execution error: no Ghostty terminal with id: terminal-1"), err: errors.New("exit status 1")}
+	err := (Ghostty{Runner: missing}).Probe(context.Background(), "ghostty:terminal:terminal-1")
+	if !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("missing Probe() error = %v, want ErrTargetNotFound", err)
+	}
+
+	ambiguous := &fakeCommandRunner{output: []byte("accessibility denied"), err: errors.New("exit status 1")}
+	err = (Ghostty{Runner: ambiguous}).Probe(context.Background(), "ghostty:terminal:terminal-1")
+	if err == nil || errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("ambiguous Probe() error = %v, want non-missing failure", err)
 	}
 }
 

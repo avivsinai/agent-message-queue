@@ -22,6 +22,20 @@ type TargetNormalizer interface {
 	NormalizeTarget(target string) (string, error)
 }
 
+// TargetInventory is a point-in-time existence snapshot. Implementations must
+// return ErrTargetNotFound only when absence is proven by the snapshot; parse,
+// transport, and permission failures remain ambiguous errors.
+type TargetInventory interface {
+	Probe(target string) error
+	OwnershipKey(target string) (string, error)
+}
+
+// InventoryProvider lets the supervisor inventory an adapter once per pass
+// instead of spawning one probe process for every registry entry.
+type InventoryProvider interface {
+	Inventory(ctx context.Context) (TargetInventory, error)
+}
+
 type Registry struct {
 	adapters map[string]Adapter
 }

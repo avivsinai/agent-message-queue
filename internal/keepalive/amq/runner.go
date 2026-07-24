@@ -14,8 +14,10 @@ import (
 )
 
 var ErrAlreadyRunning = errors.New("amq wake already running")
+var ErrWakeReadinessUncertain = errors.New("amq wake readiness is uncertain; child was left unsignaled")
 
 const defaultWakeReadyTimeout = 10 * time.Second
+const staleWakeReadyMarkerAge = 24 * time.Hour
 
 type Env struct {
 	SchemaVersion int               `json:"schema_version"`
@@ -38,15 +40,6 @@ type WakeRepairResult struct {
 	Error   string `json:"error,omitempty"`
 }
 
-type WakeRetireResult struct {
-	Status string `json:"status"`
-	Reason string `json:"reason,omitempty"`
-	Agent  string `json:"agent,omitempty"`
-	Root   string `json:"root,omitempty"`
-	PID    int    `json:"pid,omitempty"`
-	Error  string `json:"error,omitempty"`
-}
-
 func (r WakeRepairResult) Text() string {
 	return strings.TrimSpace(strings.Join([]string{r.Status, r.Reason, r.Message, r.Error}, " "))
 }
@@ -58,14 +51,6 @@ type StartWakeRequest struct {
 	Adapter   string
 	Target    string
 	Timeout   time.Duration
-}
-
-type RetireWakeRequest struct {
-	Root      string
-	Me        string
-	InjectVia string
-	Adapter   string
-	Target    string
 }
 
 type CLI struct {
@@ -116,47 +101,6 @@ func (c CLI) RepairWake(ctx context.Context, root, me string) (WakeRepairResult,
 	return result, err
 }
 
-func (c CLI) RetireWake(ctx context.Context, req RetireWakeRequest) (WakeRetireResult, error) {
-	if req.InjectVia == "" {
-		return WakeRetireResult{}, errors.New("inject-via executable is required")
-	}
-	if req.Adapter == "" {
-		return WakeRetireResult{}, errors.New("adapter is required")
-	}
-	if req.Target == "" {
-		return WakeRetireResult{}, errors.New("target is required")
-	}
-	args := []string{"wake", "retire", "-json"}
-	if req.Root != "" {
-		args = append(args, "-root", req.Root)
-	}
-	if req.Me != "" {
-		args = append(args, "-me", req.Me)
-	}
-	args = append(args,
-		"-inject-via", req.InjectVia,
-		"-inject-arg", "inject",
-		"-inject-arg", req.Adapter,
-		"-inject-arg", req.Target,
-	)
-	stdout, stderr, err := c.run(ctx, args...)
-	var result WakeRetireResult
-	if parseErr := json.Unmarshal(stdout, &result); parseErr != nil {
-		if err != nil {
-			return WakeRetireResult{Status: "error", Error: strings.TrimSpace(stderr)},
-				fmt.Errorf("amq wake retire failed: %w: %s", err, strings.TrimSpace(stderr))
-		}
-		return WakeRetireResult{}, fmt.Errorf("parse amq wake retire: %w", parseErr)
-	}
-	if result.Error == "" && len(stderr) > 0 {
-		result.Error = strings.TrimSpace(stderr)
-	}
-	if err != nil {
-		return result, fmt.Errorf("amq wake retire failed: %w: %s", err, strings.TrimSpace(stderr))
-	}
-	return result, nil
-}
-
 func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 	if req.InjectVia == "" {
 		return errors.New("inject-via executable is required")
@@ -169,12 +113,10 @@ func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 	}
 
 	args := []string{"wake"}
-	readyDir, err := os.MkdirTemp("", "amq-keepalive-wake-*")
+	_, readyFile, err := newWakeReadyPath()
 	if err != nil {
-		return fmt.Errorf("create wake readiness directory: %w", err)
+		return err
 	}
-	defer func() { _ = os.RemoveAll(readyDir) }()
-	readyFile := filepath.Join(readyDir, "ready")
 
 	if req.Root != "" {
 		args = append(args, "-root", req.Root)
@@ -191,27 +133,123 @@ func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 		"-ready-file", readyFile,
 	)
 
-	cmd := exec.CommandContext(ctx, c.Path, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// The wake process is intentionally longer-lived than this invocation (and
+	// than the supervisor which launched it). Do not use exec.CommandContext:
+	// its cancellation goroutine would kill an already-ready wake when the
+	// supervisor receives SIGTERM. After spawning, cancellation never signals
+	// the child; a durable registry reservation lets a later pass converge.
+	cmd := exec.Command(c.Path, args...)
+	configureWakeProcess(cmd)
+	if err := ctx.Err(); err != nil {
+		_ = os.Remove(readyFile)
+		return err
+	}
 	if err := cmd.Start(); err != nil {
+		_ = os.Remove(readyFile)
 		if strings.Contains(strings.ToLower(err.Error()), "already") {
 			return ErrAlreadyRunning
 		}
 		return err
 	}
-	done := make(chan error, 1)
+	done := make(chan wakeProcessResult, 1)
 	go func() {
-		done <- cmd.Wait()
+		err := cmd.Wait()
+		ready := wakeReadyFileExists(readyFile)
+		_ = os.Remove(readyFile)
+		done <- wakeProcessResult{Err: err, Ready: ready}
 	}()
 	if processDone, err := waitForWakeReady(ctx, done, readyFile, req.Timeout); err != nil {
-		if !processDone && cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			<-done
+		// Readiness wins a cancellation/timeout race. Once AMQ has published the
+		// ready file, ownership of the long-lived process has transferred to AMQ
+		// and this caller must never kill it.
+		if wakeReadyFileExists(readyFile) {
+			_ = os.Remove(readyFile)
+			return nil
+		}
+		if !processDone {
+			select {
+			case result := <-done:
+				processDone = true
+				if result.Ready {
+					return nil
+				}
+			default:
+			}
+		}
+		if !processDone {
+			// Never signal a spawned wake from helper cancellation. It may be
+			// between lock acquisition and atomic ready-file publication; killing
+			// here could terminate an established or accepted wake. The durable
+			// registry reservation lets a later supervisor pass converge safely.
+			return fmt.Errorf("%w: %w", ErrWakeReadinessUncertain, err)
 		}
 		return err
 	}
+	// The shared readiness directory must survive AMQ's post-rename directory
+	// fsync, but the marker itself is no longer needed after acknowledgement.
+	_ = os.Remove(readyFile)
 	return nil
+}
+
+func newWakeReadyPath() (string, string, error) {
+	cacheDir := strings.TrimSpace(os.Getenv("AMQ_KEEPALIVE_CACHE_DIR"))
+	if cacheDir == "" {
+		var err error
+		cacheDir, err = os.UserCacheDir()
+		if err != nil {
+			return "", "", fmt.Errorf("resolve user cache directory for wake readiness: %w", err)
+		}
+	}
+	dir := filepath.Join(cacheDir, "amq-keepalive", "readiness")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", "", fmt.Errorf("create wake readiness directory: %w", err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", "", fmt.Errorf("inspect wake readiness directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", "", fmt.Errorf("wake readiness path %q must be a real directory", dir)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", "", fmt.Errorf("secure wake readiness directory: %w", err)
+	}
+	scavengeStaleWakeReadyMarkers(dir, time.Now())
+	placeholder, err := os.CreateTemp(dir, "wake-*")
+	if err != nil {
+		return "", "", fmt.Errorf("reserve wake readiness path: %w", err)
+	}
+	path := placeholder.Name()
+	if err := placeholder.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", "", fmt.Errorf("close wake readiness placeholder: %w", err)
+	}
+	if err := os.Remove(path); err != nil {
+		return "", "", fmt.Errorf("prepare wake readiness destination: %w", err)
+	}
+	return dir, path, nil
+}
+
+func scavengeStaleWakeReadyMarkers(dir string, now time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "wake-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || now.Sub(info.ModTime()) < staleWakeReadyMarkerAge {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
+}
+
+type wakeProcessResult struct {
+	Err   error
+	Ready bool
 }
 
 func (c CLI) run(ctx context.Context, args ...string) ([]byte, string, error) {
@@ -243,7 +281,7 @@ func parseWakeRepair(data []byte) (WakeRepairResult, error) {
 	return result, nil
 }
 
-func waitForWakeReady(ctx context.Context, done <-chan error, readyFile string, timeout time.Duration) (bool, error) {
+func waitForWakeReady(ctx context.Context, done <-chan wakeProcessResult, readyFile string, timeout time.Duration) (bool, error) {
 	if timeout <= 0 {
 		timeout = defaultWakeReadyTimeout
 	}
@@ -257,17 +295,17 @@ func waitForWakeReady(ctx context.Context, done <-chan error, readyFile string, 
 			return false, nil
 		}
 		select {
-		case err := <-done:
-			if wakeReadyFileExists(readyFile) {
+		case result := <-done:
+			if result.Ready || wakeReadyFileExists(readyFile) {
 				return true, nil
 			}
-			if err == nil {
+			if result.Err == nil {
 				return true, errors.New("amq wake exited before becoming ready")
 			}
-			if strings.Contains(strings.ToLower(err.Error()), "already") {
+			if strings.Contains(strings.ToLower(result.Err.Error()), "already") {
 				return true, ErrAlreadyRunning
 			}
-			return true, fmt.Errorf("amq wake exited before becoming ready: %w", err)
+			return true, fmt.Errorf("amq wake exited before becoming ready: %w", result.Err)
 		case <-ctx.Done():
 			return false, ctx.Err()
 		case <-timer.C:

@@ -7,15 +7,23 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/keepalive/adapter"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/amq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 )
 
 const (
 	ActionBackoff     = "backoff"
+	ActionDeferred    = "deferred"
 	ActionDetached    = "detached"
 	ActionEnsured     = "ensured"
 	ActionStartFailed = "start_failed"
+
+	defaultActiveCheckInterval = 5 * time.Minute
+	defaultDetachedBackoffBase = 5 * time.Minute
+	defaultDetachedBackoffMax  = time.Hour
+	defaultFailureBackoffBase  = time.Minute
+	defaultFailureBackoffMax   = 15 * time.Minute
 )
 
 type Adapter interface {
@@ -27,14 +35,17 @@ type WakeRunner interface {
 }
 
 type Reconciler struct {
-	Wake        WakeRunner
-	Adapter     Adapter
-	Now         func() time.Time
-	BackoffBase time.Duration
-	BackoffMax  time.Duration
-	Jitter      func(time.Duration) time.Duration
-	InjectVia   string
-	WakeTimeout time.Duration
+	Wake                WakeRunner
+	Adapter             Adapter
+	Now                 func() time.Time
+	BackoffBase         time.Duration
+	BackoffMax          time.Duration
+	Jitter              func(time.Duration) time.Duration
+	InjectVia           string
+	WakeTimeout         time.Duration
+	ActiveCheckInterval time.Duration
+	DetachedBackoffBase time.Duration
+	DetachedBackoffMax  time.Duration
 }
 
 type Result struct {
@@ -45,7 +56,6 @@ type Result struct {
 
 func (r Reconciler) Reconcile(ctx context.Context, entry registry.Entry) (registry.Entry, Result) {
 	now := r.now()
-	entry.LastSeenBySupervisor = now
 
 	if blocked, result, ok := r.checkLocalReadiness(ctx, entry, now); ok {
 		return blocked, result
@@ -60,7 +70,6 @@ func (r Reconciler) Reconcile(ctx context.Context, entry registry.Entry) (regist
 
 func (r Reconciler) StartFresh(ctx context.Context, entry registry.Entry) (registry.Entry, Result) {
 	now := r.now()
-	entry.LastSeenBySupervisor = now
 
 	if blocked, result, ok := r.checkLocalReadiness(ctx, entry, now); ok {
 		return blocked, result
@@ -70,20 +79,31 @@ func (r Reconciler) StartFresh(ctx context.Context, entry registry.Entry) (regis
 }
 
 func (r Reconciler) checkLocalReadiness(ctx context.Context, entry registry.Entry, now time.Time) (registry.Entry, Result, bool) {
-	if !entry.BackoffUntil.IsZero() && now.Before(entry.BackoffUntil) {
-		entry.LastSupervisorDecision = ActionBackoff
-		return entry, Result{Action: ActionBackoff}, true
+	if err := ctx.Err(); err != nil {
+		return entry, Result{Action: ActionDeferred, Error: err}, true
 	}
+	if !entry.NextHealthCheck.IsZero() && now.Before(entry.NextHealthCheck) {
+		return entry, Result{Action: ActionDeferred}, true
+	}
+	if !entry.BackoffUntil.IsZero() && now.Before(entry.BackoffUntil) {
+		return entry, Result{Action: ActionDeferred}, true
+	}
+	entry.LastSeenBySupervisor = now
 
 	if r.Adapter == nil {
 		updated, result := r.markBackoff(entry, now, errors.New("adapter is not configured"), ActionBackoff, false)
 		return updated, result, true
 	}
 	if err := r.Adapter.Probe(ctx, entry.Target); err != nil {
-		entry.State = registry.StateDetached
-		entry.LastError = err.Error()
-		entry.LastSupervisorDecision = ActionDetached
-		return entry, Result{Action: ActionDetached, Error: err}, true
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return entry, Result{Action: ActionDeferred, Error: ctxErr}, true
+		}
+		if errors.Is(err, adapter.ErrTargetNotFound) {
+			updated, result := r.markDetached(entry, now, err)
+			return updated, result, true
+		}
+		updated, result := r.markBackoff(entry, now, err, ActionBackoff, false)
+		return updated, result, true
 	}
 
 	if r.Wake == nil {
@@ -103,7 +123,10 @@ func (r Reconciler) ensureWake(ctx context.Context, entry registry.Entry, now ti
 		Timeout:   r.WakeTimeout,
 	})
 	if err == nil {
-		return markActive(entry, now, ActionEnsured), Result{Action: ActionEnsured, AMQTouched: true}
+		return r.markActive(entry, now, ActionEnsured), Result{Action: ActionEnsured, AMQTouched: true}
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return entry, Result{Action: ActionDeferred, AMQTouched: true, Error: errors.Join(ctxErr, err)}
 	}
 	return r.markBackoff(entry, now, err, ActionStartFailed, true)
 }
@@ -112,6 +135,8 @@ func (r Reconciler) markBackoff(entry registry.Entry, now time.Time, err error, 
 	entry.State = registry.StateAttached
 	entry.FailureCount++
 	entry.BackoffUntil = now.Add(r.backoff(entry.FailureCount))
+	entry.NextHealthCheck = time.Time{}
+	entry.DetachedSince = time.Time{}
 	entry.LastSupervisorDecision = action
 	if err != nil {
 		entry.LastError = err.Error()
@@ -119,11 +144,26 @@ func (r Reconciler) markBackoff(entry registry.Entry, now time.Time, err error, 
 	return entry, Result{Action: action, AMQTouched: amqTouched, Error: err}
 }
 
-func markActive(entry registry.Entry, now time.Time, action string) registry.Entry {
+func (r Reconciler) markDetached(entry registry.Entry, now time.Time, err error) (registry.Entry, Result) {
+	entry.State = registry.StateDetached
+	entry.FailureCount++
+	entry.BackoffUntil = now.Add(r.detachedBackoff(entry.FailureCount))
+	entry.NextHealthCheck = time.Time{}
+	if entry.DetachedSince.IsZero() {
+		entry.DetachedSince = now
+	}
+	entry.LastError = err.Error()
+	entry.LastSupervisorDecision = ActionDetached
+	return entry, Result{Action: ActionDetached, Error: err}
+}
+
+func (r Reconciler) markActive(entry registry.Entry, now time.Time, action string) registry.Entry {
 	entry.State = registry.StateActive
 	entry.LastSeenBySupervisor = now
 	entry.FailureCount = 0
 	entry.BackoffUntil = time.Time{}
+	entry.DetachedSince = time.Time{}
+	entry.NextHealthCheck = now.Add(r.activeCheckInterval())
 	entry.LastError = ""
 	entry.LastSupervisorDecision = action
 	return entry
@@ -139,12 +179,28 @@ func (r Reconciler) now() time.Time {
 func (r Reconciler) backoff(failureCount int) time.Duration {
 	base := r.BackoffBase
 	if base <= 0 {
-		base = time.Second
+		base = defaultFailureBackoffBase
 	}
 	maxDelay := r.BackoffMax
 	if maxDelay <= 0 {
-		maxDelay = time.Minute
+		maxDelay = defaultFailureBackoffMax
 	}
+	return r.exponentialBackoff(failureCount, base, maxDelay)
+}
+
+func (r Reconciler) detachedBackoff(failureCount int) time.Duration {
+	base := r.DetachedBackoffBase
+	if base <= 0 {
+		base = defaultDetachedBackoffBase
+	}
+	maxDelay := r.DetachedBackoffMax
+	if maxDelay <= 0 {
+		maxDelay = defaultDetachedBackoffMax
+	}
+	return r.exponentialBackoff(failureCount, base, maxDelay)
+}
+
+func (r Reconciler) exponentialBackoff(failureCount int, base, maxDelay time.Duration) time.Duration {
 	if failureCount < 1 {
 		failureCount = 1
 	}
@@ -159,6 +215,13 @@ func (r Reconciler) backoff(failureCount int) time.Duration {
 		return maxDelay
 	}
 	return r.jitter(delay, maxDelay)
+}
+
+func (r Reconciler) activeCheckInterval() time.Duration {
+	if r.ActiveCheckInterval > 0 {
+		return r.ActiveCheckInterval
+	}
+	return defaultActiveCheckInterval
 }
 
 func (r Reconciler) jitter(delay time.Duration, maxDelay time.Duration) time.Duration {
