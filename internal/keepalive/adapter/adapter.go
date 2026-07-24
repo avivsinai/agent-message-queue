@@ -6,7 +6,13 @@ import (
 	"fmt"
 )
 
-var ErrTargetNotFound = errors.New("adapter target not found")
+var (
+	ErrTargetNotFound = errors.New("adapter target not found")
+	// ErrTargetDegraded means an adapter could not safely establish physical
+	// ownership. Supervisors must retry without mutating durable registry
+	// bookkeeping because the uncertainty may be transient.
+	ErrTargetDegraded = errors.New("adapter target ownership degraded")
+)
 
 type Adapter interface {
 	Name() string
@@ -30,10 +36,24 @@ type TargetInventory interface {
 	OwnershipKey(target string) (string, error)
 }
 
+// OwnershipContext carries optional trust the caller has already established
+// about a candidate target. Only the registration preflight may populate it:
+// the target it is registering was discovered from the live local surface, so
+// it is live by construction and can break an otherwise-ambiguous physical
+// ownership tie. Supervisor and inject passes pass the zero value, which trusts
+// nothing.
+type OwnershipContext struct {
+	// TrustedTarget is the adapter-native target string (e.g. a cmux surface
+	// target) the caller has proven live. Empty means no trusted candidate.
+	TrustedTarget string
+}
+
 // InventoryProvider lets the supervisor inventory an adapter once per pass
-// instead of spawning one probe process for every registry entry.
+// instead of spawning one probe process for every registry entry. The
+// OwnershipContext lets the registration preflight pass a trusted-live
+// candidate; other callers pass the zero value.
 type InventoryProvider interface {
-	Inventory(ctx context.Context) (TargetInventory, error)
+	Inventory(ctx context.Context, own OwnershipContext) (TargetInventory, error)
 }
 
 type Registry struct {
@@ -50,6 +70,13 @@ func NewRegistry(adapters ...Adapter) Registry {
 
 func DefaultRegistry() Registry {
 	return NewRegistry(File{}, Ghostty{}, Cmux{})
+}
+
+// DefaultRegistryWithLogf returns the production adapter set with non-fatal
+// adapter diagnostics wired to logf. Callers that do not own a diagnostic
+// stream can continue using DefaultRegistry.
+func DefaultRegistryWithLogf(logf func(format string, args ...any)) Registry {
+	return NewRegistry(File{}, Ghostty{}, Cmux{Logf: logf})
 }
 
 func (r Registry) Get(name string) (Adapter, error) {

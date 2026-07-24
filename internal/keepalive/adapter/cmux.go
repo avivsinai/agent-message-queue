@@ -17,7 +17,18 @@ import (
 const (
 	cmuxSurfaceTargetPrefix = "cmux:surface:"
 	defaultCmuxSettleDelay  = 150 * time.Millisecond
+
+	// cmuxEvictedTTYName is the sentinel tty_name written to a corpse surface
+	// via surface.report_tty to retract its stale PTY alias. report_tty rejects
+	// an empty tty_name, so retraction needs a non-empty value; this basename
+	// canonicalizes to /dev/amq-evicted-corpse, which can never collide with a
+	// real macOS PTY (those are /dev/ttysNNN). Keepalive treats any surface
+	// carrying this tty as retired (a non-claimant, absent from ownership).
+	cmuxEvictedTTYName = "amq-evicted-corpse"
 )
+
+// cmuxEvictedTTY is the canonical device path form of the eviction sentinel.
+var cmuxEvictedTTY = filepath.Join("/dev", cmuxEvictedTTYName)
 
 type Cmux struct {
 	Runner       CommandRunner
@@ -28,6 +39,14 @@ type Cmux struct {
 	IsExecutable func(string) bool
 	Sleep        func(context.Context, time.Duration) error
 	SettleDelay  time.Duration
+	// LiveTTYOwnerCount reports how many live (non-zombie) processes hold the
+	// device at devPath as their controlling terminal. Defaults to the darwin
+	// sysctl implementation; tests inject a fake so they never run a real
+	// sysctl against fixture tty names.
+	LiveTTYOwnerCount func(devPath string) (int, error)
+	// Logf receives non-fatal diagnostics (evictions, degraded fail-closed
+	// ttys). Nil is a no-op.
+	Logf func(format string, args ...any)
 }
 
 type cmuxSystemTree struct {
@@ -39,6 +58,7 @@ type cmuxWindow struct {
 }
 
 type cmuxWorkspace struct {
+	ID    string      `json:"id"`
 	Panes *[]cmuxPane `json:"panes"`
 }
 
@@ -49,15 +69,35 @@ type cmuxPane struct {
 type cmuxSurface struct {
 	ID  string `json:"id"`
 	TTY string `json:"tty"`
+	// ProcessAlive is forward-compat: a future cmux may report per-surface
+	// process liveness directly. Absent (nil) means unknown -> no effect.
+	// Explicit false marks the surface a corpse (a non-claimant, evictable).
+	ProcessAlive *bool `json:"process_alive"`
 }
 
 type cmuxSurfaceIdentity struct {
-	TTY string
+	TTY          string
+	WorkspaceID  string
+	ProcessAlive *bool
 }
 
+// cmuxTargetInventory is a post-resolution snapshot. Physical ownership is
+// resolved once during the inventory build (liveness probes, corpse eviction,
+// and a single tree rebuild all happen there); OwnershipKey only reads the
+// resolved state below.
 type cmuxTargetInventory struct {
-	surfaces  map[string]cmuxSurfaceIdentity
-	ttyOwners map[string][]string
+	surfaces map[string]cmuxSurfaceIdentity
+	// claimants maps a canonical tty to its non-sentinel claimant surface ids
+	// after resolution (sorted). Used for ownership and for ambiguity messages.
+	claimants map[string][]string
+	// owner maps a canonical tty to its single resolved live owner surface id.
+	owner map[string]string
+	// degraded marks a canonical tty as fail-closed: liveness was unavailable
+	// or ownership stayed ambiguous, so OwnershipKey refuses to pick an owner.
+	degraded map[string]bool
+	// notFound marks a canonical tty proven to have zero live owners; its
+	// surfaces resolve to ErrTargetNotFound.
+	notFound map[string]bool
 }
 
 func (Cmux) Name() string {
@@ -84,14 +124,14 @@ func (Cmux) NormalizeTarget(target string) (string, error) {
 }
 
 func (c Cmux) Probe(ctx context.Context, target string) error {
-	inventory, err := c.Inventory(ctx)
+	inventory, err := c.Inventory(ctx, OwnershipContext{})
 	if err != nil {
 		return err
 	}
 	return inventory.Probe(target)
 }
 
-func (c Cmux) Inventory(ctx context.Context) (TargetInventory, error) {
+func (c Cmux) Inventory(ctx context.Context, own OwnershipContext) (TargetInventory, error) {
 	if err := requireCmuxPlatform(); err != nil {
 		return nil, err
 	}
@@ -99,6 +139,63 @@ func (c Cmux) Inventory(ctx context.Context) (TargetInventory, error) {
 	if err != nil {
 		return nil, err
 	}
+	inventory, err := c.buildInventory(ctx, path, own)
+	if err != nil {
+		return nil, err
+	}
+	return inventory, nil
+}
+
+// buildInventory owns all physical-ownership resolution. It parses the tree,
+// resolves owners (probing tty liveness and eviting provable corpses for
+// contested ttys), and on any successful eviction rebuilds the tree exactly
+// once so the returned snapshot reflects the retracted aliases.
+func (c Cmux) buildInventory(ctx context.Context, path string, own OwnershipContext) (cmuxTargetInventory, error) {
+	surfaces, err := c.fetchSurfaces(ctx, path)
+	if err != nil {
+		return cmuxTargetInventory{}, err
+	}
+	trusted := trustedCmuxSurfaceID(own)
+	res := c.resolveOwners(surfaces, trusted, true)
+	if len(res.evictions) == 0 {
+		return newCmuxInventory(surfaces, res), nil
+	}
+
+	failedTTYs, evicted := c.evict(ctx, path, res.evictions)
+	if !evicted {
+		// No eviction landed. Keep the pre-eviction fail-closed state: every
+		// tty we intended to clean stays ambiguous/degraded, and we do not
+		// rebuild (nothing changed). Retry naturally on the next pass.
+		for tty := range failedTTYs {
+			res.forceDegraded(tty)
+		}
+		return newCmuxInventory(surfaces, res), nil
+	}
+
+	// At least one alias was retracted; rebuild once so the snapshot reflects
+	// the current tree. The rebuild does not probe or evict again: cleaned
+	// corpses now carry the sentinel tty (excluded), so a previously contested
+	// tty collapses to its single live owner. A tty whose eviction failed is
+	// still contested in the rebuilt tree, so it stays degraded here too.
+	rebuilt, err := c.fetchSurfaces(ctx, path)
+	if err != nil {
+		return cmuxTargetInventory{}, err
+	}
+	res2 := c.resolveOwners(rebuilt, trusted, false)
+	for tty := range res2.degraded {
+		c.logf("WARN cmux tty ownership remained ambiguous after corpse eviction, degraded to fail-closed: tty=%s", tty)
+	}
+	for tty := range failedTTYs {
+		res2.forceDegraded(tty)
+		c.logf("WARN cmux eviction incomplete, degraded to fail-closed: tty=%s", tty)
+	}
+	return newCmuxInventory(rebuilt, res2), nil
+}
+
+// fetchSurfaces runs one system.tree RPC and parses it into a surface identity
+// map. It fails ambiguously (never ErrTargetNotFound) on transport or schema
+// errors so absence is only ever inferred from a well-formed tree.
+func (c Cmux) fetchSurfaces(ctx context.Context, path string) (map[string]cmuxSurfaceIdentity, error) {
 	out, err := c.runner().Run(ctx, path, "rpc", "system.tree", "{}")
 	if err != nil {
 		return nil, fmt.Errorf("inventory cmux surfaces: %w: %s", err, strings.TrimSpace(string(out)))
@@ -110,10 +207,7 @@ func (c Cmux) Inventory(ctx context.Context) (TargetInventory, error) {
 	if tree.Windows == nil {
 		return nil, errors.New("parse cmux system.tree: required windows field is missing or null")
 	}
-	inventory := cmuxTargetInventory{
-		surfaces:  map[string]cmuxSurfaceIdentity{},
-		ttyOwners: map[string][]string{},
-	}
+	surfaces := map[string]cmuxSurfaceIdentity{}
 	for _, window := range *tree.Windows {
 		if window.Workspaces == nil {
 			return nil, errors.New("parse cmux system.tree: window workspaces field is missing or null")
@@ -132,26 +226,131 @@ func (c Cmux) Inventory(ctx context.Context) (TargetInventory, error) {
 						return nil, fmt.Errorf("parse cmux system.tree surface id: %w", err)
 					}
 					id = strings.ToUpper(id)
-					identity := cmuxSurfaceIdentity{TTY: strings.TrimSpace(surface.TTY)}
-					if previous, exists := inventory.surfaces[id]; exists && !sameCmuxSurfaceIdentity(previous, identity) {
+					identity := cmuxSurfaceIdentity{
+						TTY:          strings.TrimSpace(surface.TTY),
+						WorkspaceID:  strings.TrimSpace(workspace.ID),
+						ProcessAlive: surface.ProcessAlive,
+					}
+					if previous, exists := surfaces[id]; exists && !sameCmuxSurfaceIdentity(previous, identity) {
 						return nil, fmt.Errorf("parse cmux system.tree: surface %q has conflicting tty identities %q and %q", id, previous.TTY, identity.TTY)
 					}
-					inventory.surfaces[id] = identity
+					surfaces[id] = identity
 				}
 			}
 		}
 	}
-	for id, surface := range inventory.surfaces {
+	return surfaces, nil
+}
+
+// cmuxEviction is one corpse alias to retract via surface.report_tty.
+type cmuxEviction struct {
+	surfaceID   string
+	workspaceID string
+	tty         string // canonical tty the corpse claimed (for fail-closed fallback)
+}
+
+// cmuxResolution is the outcome of resolving physical ownership over one tree.
+type cmuxResolution struct {
+	claimants map[string][]string
+	owner     map[string]string
+	degraded  map[string]bool
+	notFound  map[string]bool
+	evictions []cmuxEviction
+}
+
+func (r cmuxResolution) forceDegraded(tty string) {
+	r.degraded[tty] = true
+	delete(r.owner, tty)
+	delete(r.notFound, tty)
+}
+
+// resolveOwners groups surfaces by canonical tty and decides ownership. When
+// probe is true it may run the liveness seam and record evictions for contested
+// ttys; when false (the post-eviction rebuild) it only reads the tree and marks
+// any still-contested tty degraded.
+func (c Cmux) resolveOwners(surfaces map[string]cmuxSurfaceIdentity, trusted string, probe bool) cmuxResolution {
+	res := cmuxResolution{
+		claimants: map[string][]string{},
+		owner:     map[string]string{},
+		degraded:  map[string]bool{},
+		notFound:  map[string]bool{},
+	}
+	// Group live claimants per canonical tty, excluding sentinel-tty surfaces
+	// (already retired) and explicit process_alive:false corpses. A corpse is
+	// evictable regardless of contention.
+	grouped := map[string][]string{}
+	workspaceOf := map[string]string{}
+	for id, surface := range surfaces {
+		workspaceOf[id] = surface.WorkspaceID
 		tty, ttyErr := canonicalCmuxTTY(surface.TTY)
 		if ttyErr != nil {
 			continue
 		}
-		inventory.ttyOwners[tty] = append(inventory.ttyOwners[tty], id)
+		if tty == cmuxEvictedTTY {
+			continue
+		}
+		if surface.ProcessAlive != nil && !*surface.ProcessAlive {
+			if probe {
+				res.evictions = append(res.evictions, cmuxEviction{surfaceID: id, workspaceID: surface.WorkspaceID, tty: tty})
+			}
+			continue
+		}
+		grouped[tty] = append(grouped[tty], id)
 	}
-	for tty := range inventory.ttyOwners {
-		sort.Strings(inventory.ttyOwners[tty])
+
+	for tty, ids := range grouped {
+		sort.Strings(ids)
+		res.claimants[tty] = ids
+		switch {
+		case len(ids) == 1:
+			res.owner[tty] = ids[0]
+		case !probe:
+			// Rebuild pass: a tty still contested after eviction cannot be
+			// resolved without another probe round, which we do not do.
+			res.degraded[tty] = true
+		default:
+			c.resolveContestedTTY(&res, tty, ids, trusted, workspaceOf)
+		}
 	}
-	return inventory, nil
+	return res
+}
+
+// resolveContestedTTY applies the binding resolution semantics to a canonical
+// tty with two or more live claimants.
+func (c Cmux) resolveContestedTTY(res *cmuxResolution, tty string, ids []string, trusted string, workspaceOf map[string]string) {
+	// A registration candidate is trusted only after it independently matches
+	// the current CMUX_SURFACE_ID. It is live by construction and therefore
+	// wins without depending on a best-effort kernel liveness probe.
+	if trusted != "" && containsString(ids, trusted) {
+		res.owner[tty] = trusted
+		for _, id := range ids {
+			if id == trusted {
+				continue
+			}
+			res.evictions = append(res.evictions, cmuxEviction{surfaceID: id, workspaceID: workspaceOf[id], tty: tty})
+		}
+		return
+	}
+	count, err := c.liveTTYOwnerCount(tty)
+	if err != nil {
+		res.degraded[tty] = true
+		c.logf("WARN cmux tty-liveness unavailable, degraded to fail-closed: tty=%s reason=%v", tty, err)
+		return
+	}
+	if count == 0 {
+		// Zero live kernel owners: every claimant is a corpse.
+		res.notFound[tty] = true
+		for _, id := range ids {
+			res.evictions = append(res.evictions, cmuxEviction{surfaceID: id, workspaceID: workspaceOf[id], tty: tty})
+		}
+		return
+	}
+	res.degraded[tty] = true
+	c.logf(
+		"WARN cmux tty ownership ambiguous, degraded to fail-closed: tty=%s claimants=%s; inspect cmux aliases and existing wakes manually",
+		tty,
+		strings.Join(ids, ","),
+	)
 }
 
 func (i cmuxTargetInventory) Probe(target string) error {
@@ -160,22 +359,36 @@ func (i cmuxTargetInventory) Probe(target string) error {
 }
 
 func (i cmuxTargetInventory) OwnershipKey(target string) (string, error) {
-	_, surface, err := i.lookup(target)
+	id, surface, err := i.lookup(target)
 	if err != nil {
 		return "", err
 	}
 	tty, err := canonicalCmuxTTY(surface.TTY)
 	if err != nil {
-		return "", fmt.Errorf("cmux target %q physical identity is ambiguous: %w", target, err)
+		return "", fmt.Errorf("%w: cmux target %q physical identity is ambiguous: %v", ErrTargetDegraded, target, err)
 	}
-	owners := i.ttyOwners[tty]
-	if len(owners) != 1 {
-		return "", fmt.Errorf(
-			"cmux target %q physical identity is ambiguous: tty %q has %d live surface aliases: %s; inspect cmux aliases and existing wakes manually",
-			target, tty, len(owners), strings.Join(owners, ", "),
-		)
+	if tty == cmuxEvictedTTY {
+		return "", fmt.Errorf("%w: cmux target %q was retired as a stale tty alias", ErrTargetNotFound, target)
+	}
+	if i.notFound[tty] {
+		return "", fmt.Errorf("%w: cmux target %q tty %q has no live surface owner", ErrTargetNotFound, target, tty)
+	}
+	if i.degraded[tty] {
+		return "", i.ambiguityError(target, tty)
+	}
+	if owner, ok := i.owner[tty]; !ok || owner != id {
+		return "", i.ambiguityError(target, tty)
 	}
 	return "tty:" + tty, nil
+}
+
+func (i cmuxTargetInventory) ambiguityError(target, tty string) error {
+	owners := i.claimants[tty]
+	return fmt.Errorf(
+		"%w: cmux target %q physical identity is ambiguous: tty %q has %d live surface aliases: %s; inspect cmux aliases and existing wakes manually",
+		ErrTargetDegraded,
+		target, tty, len(owners), strings.Join(owners, ", "),
+	)
 }
 
 func canonicalCmuxTTY(value string) (string, error) {
@@ -193,12 +406,22 @@ func canonicalCmuxTTY(value string) (string, error) {
 }
 
 func sameCmuxSurfaceIdentity(left, right cmuxSurfaceIdentity) bool {
-	if left == right {
-		return true
+	if left.WorkspaceID != right.WorkspaceID || !sameOptionalBool(left.ProcessAlive, right.ProcessAlive) {
+		return false
 	}
 	leftTTY, leftErr := canonicalCmuxTTY(left.TTY)
 	rightTTY, rightErr := canonicalCmuxTTY(right.TTY)
-	return leftErr == nil && rightErr == nil && leftTTY == rightTTY
+	if leftErr == nil && rightErr == nil {
+		return leftTTY == rightTTY
+	}
+	return strings.TrimSpace(left.TTY) == strings.TrimSpace(right.TTY)
+}
+
+func sameOptionalBool(left, right *bool) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func (i cmuxTargetInventory) lookup(target string) (string, cmuxSurfaceIdentity, error) {
@@ -221,7 +444,7 @@ func (c Cmux) Inject(ctx context.Context, target string, payload string) error {
 	if err != nil {
 		return err
 	}
-	inventory, err := c.Inventory(ctx)
+	inventory, err := c.Inventory(ctx, OwnershipContext{})
 	if err != nil {
 		return fmt.Errorf("verify cmux target before injection: %w", err)
 	}
@@ -260,6 +483,87 @@ func (c Cmux) Inject(ctx context.Context, target string, payload string) error {
 		return fmt.Errorf("submit cmux target %q: %w: %s", target, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func newCmuxInventory(surfaces map[string]cmuxSurfaceIdentity, res cmuxResolution) cmuxTargetInventory {
+	return cmuxTargetInventory{
+		surfaces:  surfaces,
+		claimants: res.claimants,
+		owner:     res.owner,
+		degraded:  res.degraded,
+		notFound:  res.notFound,
+	}
+}
+
+// evict retracts each corpse alias via surface.report_tty, writing the sentinel
+// tty name. It returns the set of canonical ttys whose eviction did not land and
+// whether at least one eviction succeeded. A failed report_tty never crashes the
+// pass and never mutates the registry; the affected tty keeps its fail-closed
+// state and is retried on the next pass.
+func (c Cmux) evict(ctx context.Context, path string, evictions []cmuxEviction) (map[string]bool, bool) {
+	failed := map[string]bool{}
+	succeeded := 0
+	for _, ev := range evictions {
+		if ev.workspaceID == "" {
+			failed[ev.tty] = true
+			c.logf("WARN cmux eviction failed: tty=%s surface=%s reason=%v", ev.tty, ev.surfaceID, errors.New("missing workspace id"))
+			continue
+		}
+		params, err := json.Marshal(map[string]string{
+			"workspace_id": ev.workspaceID,
+			"surface_id":   ev.surfaceID,
+			"tty_name":     cmuxEvictedTTYName,
+		})
+		if err != nil {
+			failed[ev.tty] = true
+			c.logf("WARN cmux eviction failed: tty=%s surface=%s reason=%v", ev.tty, ev.surfaceID, err)
+			continue
+		}
+		if out, err := c.runner().Run(ctx, path, "rpc", "surface.report_tty", string(params)); err != nil {
+			failed[ev.tty] = true
+			c.logf("WARN cmux eviction failed: tty=%s surface=%s reason=%v output=%s", ev.tty, ev.surfaceID, err, strings.TrimSpace(string(out)))
+			continue
+		}
+		succeeded++
+	}
+	if succeeded > 0 {
+		c.logf("INFO cmux evicted %d corpse alias(es)", succeeded)
+	}
+	return failed, succeeded > 0
+}
+
+func trustedCmuxSurfaceID(own OwnershipContext) string {
+	target := strings.TrimSpace(own.TrustedTarget)
+	if target == "" {
+		return ""
+	}
+	id, err := parseCmuxSurfaceTarget(target)
+	if err != nil {
+		return ""
+	}
+	return id
+}
+
+func containsString(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (c Cmux) liveTTYOwnerCount(devPath string) (int, error) {
+	if c.LiveTTYOwnerCount != nil {
+		return c.LiveTTYOwnerCount(devPath)
+	}
+	return ttyLiveOwnerCount(devPath)
+}
+
+func (c Cmux) logf(format string, args ...any) {
+	if c.Logf != nil {
+		c.Logf(format, args...)
+	}
 }
 
 func (c Cmux) runner() CommandRunner {

@@ -79,6 +79,7 @@ func (r Reconciler) StartFresh(ctx context.Context, entry registry.Entry) (regis
 }
 
 func (r Reconciler) checkLocalReadiness(ctx context.Context, entry registry.Entry, now time.Time) (registry.Entry, Result, bool) {
+	original := entry
 	if err := ctx.Err(); err != nil {
 		return entry, Result{Action: ActionDeferred, Error: err}, true
 	}
@@ -101,6 +102,9 @@ func (r Reconciler) checkLocalReadiness(ctx context.Context, entry registry.Entr
 		if errors.Is(err, adapter.ErrTargetNotFound) {
 			updated, result := r.markDetached(entry, now, err)
 			return updated, result, true
+		}
+		if errors.Is(err, adapter.ErrTargetDegraded) {
+			return original, Result{Action: ActionDeferred, Error: err}, true
 		}
 		updated, result := r.markBackoff(entry, now, err, ActionBackoff, false)
 		return updated, result, true

@@ -22,8 +22,18 @@ import (
 )
 
 type App struct {
-	Stdout io.Writer
-	Stderr io.Writer
+	Stdout   io.Writer
+	Stderr   io.Writer
+	Adapters *adapter.Registry
+
+	adapterLogState *adapterLogState
+}
+
+const adapterLogInterval = 5 * time.Minute
+
+type adapterLogState struct {
+	mu   sync.Mutex
+	last map[string]time.Time
 }
 
 // wakeRetirer stops an identity-confirmed live inject-via wake (or removes its
@@ -40,6 +50,9 @@ func (a App) Run(ctx context.Context, args []string) int {
 	}
 	if a.Stderr == nil {
 		a.Stderr = os.Stderr
+	}
+	if a.adapterLogState == nil {
+		a.adapterLogState = &adapterLogState{last: map[string]time.Time{}}
 	}
 	if len(args) == 0 {
 		a.usage(a.Stderr)
@@ -175,7 +188,7 @@ func (a App) registerWithOptions(ctx context.Context, opts registerOptions) erro
 	}
 	opts.Root, opts.BaseRoot = normalizeAMQPaths(opts.Root, opts.BaseRoot, opts.SessionName)
 
-	adapters := adapter.DefaultRegistry()
+	adapters := a.adapterRegistry()
 	selected, err := adapters.Get(opts.AdapterName)
 	if err != nil {
 		return err
@@ -198,6 +211,7 @@ func (a App) registerWithOptions(ctx context.Context, opts registerOptions) erro
 		}
 		opts.Target = normalized
 	}
+	ownershipContext := registrationOwnershipContext(ctx, selected, opts.Target)
 	store := registry.New(opts.RegistryPath)
 	next := registry.Entry{
 		ID:          registry.EntryID(opts.Root, opts.Me, opts.AdapterName, opts.Target),
@@ -223,7 +237,7 @@ func (a App) registerWithOptions(ctx context.Context, opts registerOptions) erro
 		// cross-process registration lease. The lease remains held through wake
 		// readiness and registry commit, so a racing claimant observes this
 		// transaction's committed owner before it can touch AMQ.
-		inventory, err := registrationTargetInventory(ctx, selected, next.Target)
+		inventory, err := registrationTargetInventory(ctx, selected, next.Target, ownershipContext)
 		if err != nil {
 			return err
 		}
@@ -334,12 +348,44 @@ func (p targetInventoryProbe) Probe(_ context.Context, target string) error {
 	return p.inventory.Probe(target)
 }
 
-func registrationTargetInventory(ctx context.Context, selected adapter.Adapter, target string) (adapter.TargetInventory, error) {
+func registrationOwnershipContext(ctx context.Context, selected adapter.Adapter, target string) adapter.OwnershipContext {
+	if selected.Name() != "cmux" {
+		return adapter.OwnershipContext{}
+	}
+	discoverer, ok := selected.(adapter.Discoverer)
+	if !ok {
+		return adapter.OwnershipContext{}
+	}
+	discovered, err := discoverer.Discover(ctx)
+	if err != nil {
+		return adapter.OwnershipContext{}
+	}
+	if normalizer, ok := selected.(adapter.TargetNormalizer); ok {
+		discovered, err = normalizer.NormalizeTarget(discovered)
+		if err != nil {
+			return adapter.OwnershipContext{}
+		}
+	}
+	if discovered != target {
+		return adapter.OwnershipContext{}
+	}
+	return adapter.OwnershipContext{TrustedTarget: target}
+}
+
+func registrationTargetInventory(
+	ctx context.Context,
+	selected adapter.Adapter,
+	target string,
+	ownershipContext adapter.OwnershipContext,
+) (adapter.TargetInventory, error) {
 	provider, ok := selected.(adapter.InventoryProvider)
 	if !ok {
 		return nil, selected.Probe(ctx, target)
 	}
-	inventory, err := provider.Inventory(ctx)
+	// Only a target independently matched to the current CMUX_SURFACE_ID is
+	// live by construction. An explicit --target without that match receives
+	// the zero context and remains fail-closed when aliases are ambiguous.
+	inventory, err := provider.Inventory(ctx, ownershipContext)
 	if err != nil {
 		return nil, err
 	}
@@ -533,7 +579,7 @@ func (a App) superviseOnce(ctx context.Context, registryPath string, wake superv
 		if err != nil {
 			return err
 		}
-		adapters := adapter.DefaultRegistry()
+		adapters := a.adapterRegistry()
 		probes := passProbes(file.Entries, adapters)
 		conflicts := targetOwnershipConflicts(file, adapters)
 		if anyEntryDue(file.Entries, time.Now().UTC()) {
@@ -605,6 +651,40 @@ func (a App) logReconcileTransition(previous, updated registry.Entry, result sup
 	}
 }
 
+func (a App) adapterRegistry() adapter.Registry {
+	if a.Adapters != nil {
+		return *a.Adapters
+	}
+	state := a.adapterLogState
+	if state == nil {
+		state = &adapterLogState{last: map[string]time.Time{}}
+	}
+	return adapter.DefaultRegistryWithLogf(a.rateLimitedAdapterLogf(state))
+}
+
+func (a App) rateLimitedAdapterLogf(state *adapterLogState) func(string, ...any) {
+	return func(format string, args ...any) {
+		message := fmt.Sprintf(format, args...)
+		now := time.Now()
+		state.mu.Lock()
+		if state.last == nil {
+			state.last = map[string]time.Time{}
+		}
+		if previous, ok := state.last[message]; ok && now.Sub(previous) < adapterLogInterval {
+			state.mu.Unlock()
+			return
+		}
+		state.last[message] = now
+		state.mu.Unlock()
+
+		w := a.Stderr
+		if w == nil {
+			w = os.Stderr
+		}
+		fmt.Fprintf(w, "amq-keepalive adapter: %s\n", message)
+	}
+}
+
 type fixedProbeError struct {
 	err error
 }
@@ -667,7 +747,9 @@ func (p *passProbe) OwnershipKey(ctx context.Context, target string) (string, er
 func (p *passProbe) loadInventory(ctx context.Context) (adapter.TargetInventory, error) {
 	provider := p.selected.(adapter.InventoryProvider)
 	p.once.Do(func() {
-		p.inventory, p.err = provider.Inventory(ctx)
+		// Supervisor pass: no trusted candidate. The pass may auto-resolve only
+		// provably-dead ttys; any other contested tty stays fail-closed.
+		p.inventory, p.err = provider.Inventory(ctx, adapter.OwnershipContext{})
 		if p.err == nil && p.inventory == nil {
 			p.err = errors.New("adapter returned a nil target inventory")
 		}
@@ -787,7 +869,7 @@ func (a App) inject(ctx context.Context, args []string) error {
 	if len(args) != 3 {
 		return errors.New("usage: amq-keepalive inject <adapter> <target> <payload>")
 	}
-	adapters := adapter.DefaultRegistry()
+	adapters := a.adapterRegistry()
 	selected, err := adapters.Get(args[0])
 	if err != nil {
 		return err
@@ -853,7 +935,7 @@ func (a App) gc(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	adapters := adapter.DefaultRegistry()
+	adapters := a.adapterRegistry()
 	probes := passProbes(file.Entries, adapters)
 	conflicts := targetOwnershipConflicts(file, adapters)
 	mergeOwnershipConflicts(conflicts, physicalOwnershipConflicts(ctx, file, probes))
@@ -1034,7 +1116,7 @@ func (a App) retireSession(ctx context.Context, args []string) error {
 			entries = append(entries, matches[0])
 		}
 
-		adapters := adapter.DefaultRegistry()
+		adapters := a.adapterRegistry()
 		selected, err := adapters.Get(*adapterName)
 		if err != nil {
 			return err

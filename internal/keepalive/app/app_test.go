@@ -13,9 +13,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/keepalive/adapter"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/amq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 )
+
+type appCommandRunnerFunc func(context.Context, string, ...string) ([]byte, error)
+
+func (f appCommandRunnerFunc) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return f(ctx, name, args...)
+}
 
 func TestHelpWritesUsageToStdoutAndExitsZero(t *testing.T) {
 	var stdout bytes.Buffer
@@ -29,6 +36,61 @@ func TestHelpWritesUsageToStdoutAndExitsZero(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestAdapterDiagnosticsAreRateLimited(t *testing.T) {
+	var stderr bytes.Buffer
+	app := App{Stderr: &stderr}
+	state := &adapterLogState{last: map[string]time.Time{}}
+	logf := app.rateLimitedAdapterLogf(state)
+	logf("WARN repeated")
+	logf("WARN repeated")
+	logf("INFO distinct")
+	if got := strings.Count(stderr.String(), "WARN repeated"); got != 1 {
+		t.Fatalf("repeated warning count = %d, want 1:\n%s", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "INFO distinct") {
+		t.Fatalf("distinct diagnostic missing:\n%s", stderr.String())
+	}
+}
+
+func TestNewPassProbeLeavesGhosttyOnDirectProbePath(t *testing.T) {
+	probe := newPassProbe(adapter.Ghostty{})
+	if _, ok := probe.(*passProbe); ok {
+		t.Fatal("Ghostty unexpectedly wrapped as an inventory provider")
+	}
+	if _, ok := probe.(adapter.Ghostty); !ok {
+		t.Fatalf("probe type = %T, want adapter.Ghostty", probe)
+	}
+}
+
+func TestRegistrationTargetInventoryUsesGhosttyDirectProbe(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Ghostty adapter requires macOS")
+	}
+	calls := 0
+	selected := adapter.Ghostty{Runner: appCommandRunnerFunc(func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls++
+		if name != "osascript" || len(args) < 3 || args[len(args)-1] != "terminal-1" {
+			t.Fatalf("Probe call = %q %#v, want osascript terminal-1", name, args)
+		}
+		return nil, nil
+	})}
+	inventory, err := registrationTargetInventory(
+		context.Background(),
+		selected,
+		"ghostty:terminal:terminal-1",
+		adapter.OwnershipContext{},
+	)
+	if err != nil {
+		t.Fatalf("registrationTargetInventory() error = %v", err)
+	}
+	if inventory != nil {
+		t.Fatalf("inventory = %T, want nil for direct-probe adapter", inventory)
+	}
+	if calls != 1 {
+		t.Fatalf("Probe calls = %d, want 1", calls)
 	}
 }
 
@@ -126,13 +188,24 @@ func TestReattachRejectsDifferentSurfaceAliasOnOwnedPhysicalTTY(t *testing.T) {
 	if _, err := store.Upsert(registry.Entry{Root: "/tmp/first", Agent: "codex", Adapter: "cmux", Target: firstTarget}); err != nil {
 		t.Fatalf("Upsert first owner: %v", err)
 	}
-	fakeCmux := filepath.Join(dir, "cmux")
-	if err := os.WriteFile(fakeCmux, []byte("#!/bin/sh\nprintf '%s\\n' '{\"windows\":[{\"workspaces\":[{\"panes\":[{\"surfaces\":[{\"id\":\"F901D722-6789-4BBB-9818-C4E97F20BEB3\",\"tty\":\"/dev/ttys011\"},{\"id\":\"B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2\",\"tty\":\"ttys011\"}]}]}]}]}'\n"), 0o700); err != nil {
-		t.Fatalf("write fake cmux: %v", err)
-	}
-	t.Setenv("CMUX_BUNDLED_CLI_PATH", fakeCmux)
+	runner := appCommandRunnerFunc(func(context.Context, string, ...string) ([]byte, error) {
+		return []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"/dev/ttys011"},{"id":"B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2","tty":"ttys011"}]}]}]}]}`), nil
+	})
+	adapters := adapter.NewRegistry(adapter.Cmux{
+		Runner: runner,
+		Path:   "/fake/cmux",
+		Getenv: func(key string) string {
+			if key == "CMUX_SURFACE_ID" {
+				return strings.TrimPrefix(firstTarget, "cmux:surface:")
+			}
+			return ""
+		},
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
+		},
+	})
 	var stderr bytes.Buffer
-	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Run(context.Background(), []string{
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
 		"reattach", "--registry", registryPath, "--adapter", "cmux", "--target", secondTarget,
 		"--root", "/tmp/second", "--base-root", "/tmp", "--session", "second", "--me", "claude", "--no-start",
 	})
@@ -142,6 +215,75 @@ func TestReattachRejectsDifferentSurfaceAliasOnOwnedPhysicalTTY(t *testing.T) {
 	loaded, err := store.Load()
 	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Target != firstTarget {
 		t.Fatalf("physical collision changed registry: entries=%#v err=%v", loaded.Entries, err)
+	}
+}
+
+func TestReattachTrustsOnlyCurrentCmuxSurfaceAndEvictsCorpseAlias(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("cmux adapter requires macOS")
+	}
+	dir := t.TempDir()
+	registryPath := filepath.Join(dir, "registry.json")
+	corpseID := "F901D722-6789-4BBB-9818-C4E97F20BEB3"
+	liveID := "B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
+	corpseTarget := "cmux:surface:" + corpseID
+	liveTarget := "cmux:surface:" + liveID
+	store := registry.New(registryPath)
+	if _, err := store.Upsert(registry.Entry{Root: "/tmp/first", Agent: "codex", Adapter: "cmux", Target: corpseTarget}); err != nil {
+		t.Fatalf("Upsert corpse owner: %v", err)
+	}
+
+	initialTree := []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"ttys011"},{"id":"B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2","tty":"ttys011"}]}]}]}]}`)
+	rebuiltTree := []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"amq-evicted-corpse"},{"id":"B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2","tty":"ttys011"}]}]}]}]}`)
+	var calls [][]string
+	runner := appCommandRunnerFunc(func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{}, args...))
+		switch len(calls) {
+		case 1:
+			return initialTree, nil
+		case 2:
+			if len(args) < 2 || args[1] != "surface.report_tty" {
+				t.Fatalf("call 2 args = %#v, want surface.report_tty", args)
+			}
+			return []byte(`{"ok":true}`), nil
+		case 3:
+			return rebuiltTree, nil
+		default:
+			t.Fatalf("unexpected cmux call %d: %#v", len(calls), args)
+			return nil, nil
+		}
+	})
+	adapters := adapter.NewRegistry(adapter.Cmux{
+		Runner: runner,
+		Path:   "/fake/cmux",
+		Getenv: func(key string) string {
+			if key == "CMUX_SURFACE_ID" {
+				return liveID
+			}
+			return ""
+		},
+		LiveTTYOwnerCount: func(string) (int, error) {
+			t.Fatal("trusted registration candidate must not depend on kernel liveness")
+			return 0, errors.New("unreachable")
+		},
+	})
+	var stderr bytes.Buffer
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
+		"reattach", "--registry", registryPath, "--adapter", "cmux", "--target", liveTarget,
+		"--root", "/tmp/second", "--base-root", "/tmp", "--session", "second", "--me", "claude", "--no-start",
+	})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s, want trusted registration success", code, stderr.String())
+	}
+	if len(calls) != 3 {
+		t.Fatalf("cmux calls=%d, want tree, eviction, rebuilt tree", len(calls))
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load registry: %v", err)
+	}
+	if len(loaded.Entries) != 2 {
+		t.Fatalf("entries=%#v, want preserved corpse row plus new live row", loaded.Entries)
 	}
 }
 
@@ -1130,19 +1272,28 @@ func TestSuperviseFailsClosedWhenOneRegisteredSurfaceHasLiveTTYAlias(t *testing.
 	}); err != nil {
 		t.Fatalf("Upsert registered owner: %v", err)
 	}
-	calls := filepath.Join(dir, "cmux-calls.log")
-	t.Setenv("AMQ_KEEPALIVE_CMUX_CALLS", calls)
-	fakeCmux := filepath.Join(dir, "cmux")
-	if err := os.WriteFile(fakeCmux, []byte(`#!/bin/sh
-printf '%s\n' "$*" >> "$AMQ_KEEPALIVE_CMUX_CALLS"
-printf '%s\n' '{"windows":[{"workspaces":[{"panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"/dev/ttys011"},{"id":"B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2","tty":"ttys011"}]}]}]}]}'
-`), 0o700); err != nil {
-		t.Fatalf("write fake cmux: %v", err)
+	before, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load before supervisor: %v", err)
 	}
-	t.Setenv("CMUX_BUNDLED_CLI_PATH", fakeCmux)
-	wake := &appCountingWake{}
+	calls := 0
+	runner := appCommandRunnerFunc(func(context.Context, string, ...string) ([]byte, error) {
+		calls++
+		return []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"/dev/ttys011"},{"id":"B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2","tty":"ttys011"}]}]}]}]}`), nil
+	})
 	var stderr bytes.Buffer
-	results, err := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).superviseOnce(
+	adapters := adapter.NewRegistry(adapter.Cmux{
+		Runner: runner,
+		Path:   "/fake/cmux",
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
+		},
+		Logf: func(format string, args ...any) {
+			fmt.Fprintf(&stderr, format+"\n", args...)
+		},
+	})
+	wake := &appCountingWake{}
+	results, err := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).superviseOnce(
 		context.Background(), registryPath, wake, "/bin/amq-keepalive", time.Second,
 	)
 	if err != nil || len(results) != 1 {
@@ -1152,15 +1303,25 @@ printf '%s\n' '{"windows":[{"workspaces":[{"panes":[{"surfaces":[{"id":"F901D722
 		t.Fatalf("physical collision touched AMQ %d times, want 0", len(wake.starts))
 	}
 	result := results[0]
-	if result.Action != "backoff" || result.Error == nil || !strings.Contains(result.Error.Error(), "2 live surface aliases") {
-		t.Fatalf("alias ambiguity result=%+v, want fail-closed backoff", result)
+	if result.Action != "deferred" || result.Error == nil || !errors.Is(result.Error, adapter.ErrTargetDegraded) ||
+		!strings.Contains(result.Error.Error(), "2 live surface aliases") {
+		t.Fatalf("alias ambiguity result=%+v, want unchanged fail-closed deferral", result)
 	}
 	if !strings.Contains(stderr.String(), "inspect cmux aliases and existing wakes manually") {
 		t.Fatalf("operator warning missing manual-action guidance:\n%s", stderr.String())
 	}
-	data, err := os.ReadFile(calls)
-	if err != nil || strings.Count(string(data), "system.tree") != 1 {
-		t.Fatalf("system.tree calls=%q err=%v, want one shared inventory", data, err)
+	if calls != 1 {
+		t.Fatalf("system.tree calls=%d, want one shared inventory", calls)
+	}
+	after, err := store.Load()
+	if err != nil || !reflect.DeepEqual(after, before) {
+		t.Fatalf("degraded ownership mutated registry: before=%#v after=%#v err=%v", before, after, err)
+	}
+	results, err = (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).superviseOnce(
+		context.Background(), registryPath, wake, "/bin/amq-keepalive", time.Second,
+	)
+	if err != nil || len(results) != 1 || results[0].Action != "deferred" || calls != 2 {
+		t.Fatalf("retry results=%#v calls=%d err=%v, want immediate next-pass retry", results, calls, err)
 	}
 }
 
@@ -1294,13 +1455,18 @@ func TestGCDryRunExcludesPhysicalTTYOwnershipCollisions(t *testing.T) {
 			t.Fatalf("Upsert collision row: %v", err)
 		}
 	}
-	fakeCmux := filepath.Join(dir, "cmux")
-	if err := os.WriteFile(fakeCmux, []byte("#!/bin/sh\nprintf '%s\\n' '{\"windows\":[{\"workspaces\":[{\"panes\":[{\"surfaces\":[{\"id\":\"F901D722-6789-4BBB-9818-C4E97F20BEB3\",\"tty\":\"ttys011\"},{\"id\":\"B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2\",\"tty\":\"/dev/ttys011\"}]}]}]}]}'\n"), 0o700); err != nil {
-		t.Fatalf("write fake cmux: %v", err)
-	}
-	t.Setenv("CMUX_BUNDLED_CLI_PATH", fakeCmux)
+	runner := appCommandRunnerFunc(func(context.Context, string, ...string) ([]byte, error) {
+		return []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"ttys011"},{"id":"B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2","tty":"/dev/ttys011"}]}]}]}]}`), nil
+	})
+	adapters := adapter.NewRegistry(adapter.Cmux{
+		Runner: runner,
+		Path:   "/fake/cmux",
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
+		},
+	})
 	var stdout bytes.Buffer
-	code := (App{Stdout: &stdout, Stderr: &bytes.Buffer{}}).Run(context.Background(), []string{
+	code := (App{Stdout: &stdout, Stderr: &bytes.Buffer{}, Adapters: &adapters}).Run(context.Background(), []string{
 		"gc", "--registry", registryPath, "--min-detached-age", "0",
 	})
 	if code != 0 || strings.Count(stdout.String(), `"status": "skipped"`) != 2 ||
