@@ -146,7 +146,7 @@ func (s *Store) WithRegistrationLockContext(ctx context.Context, fn func() error
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := lock.Chmod(0o600); err != nil {
 		return err
 	}
@@ -214,20 +214,20 @@ func (s *Store) saveUnlocked(file File) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	enc := json.NewEncoder(tmp)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(file); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -606,7 +606,7 @@ func (s *Store) withLock(fn func() error) error {
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := lock.Chmod(0o600); err != nil {
 		return err
 	}
@@ -637,6 +637,6 @@ func syncDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	return file.Sync()
 }

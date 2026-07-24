@@ -87,12 +87,12 @@ func (a App) Run(ctx context.Context, args []string) int {
 	case "uninstall":
 		err = a.uninstallLaunchd(ctx, args[1:])
 	default:
-		fmt.Fprintf(a.Stderr, "unknown command %q\n", args[0])
+		_, _ = fmt.Fprintf(a.Stderr, "unknown command %q\n", args[0])
 		a.usage(a.Stderr)
 		return 2
 	}
 	if err != nil {
-		fmt.Fprintln(a.Stderr, err)
+		_, _ = fmt.Fprintln(a.Stderr, err)
 		return 1
 	}
 	return 0
@@ -559,7 +559,7 @@ func (a App) supervise(ctx context.Context, args []string) error {
 	}
 	for {
 		if err := runOnce(false); err != nil {
-			fmt.Fprintln(a.Stderr, err)
+			_, _ = fmt.Fprintln(a.Stderr, err)
 		}
 		timer := time.NewTimer(*interval)
 		select {
@@ -627,7 +627,7 @@ func (a App) logReconcileTransition(previous, updated registry.Entry, result sup
 		w = os.Stderr
 	}
 	if result.Error != nil {
-		fmt.Fprintf(w,
+		_, _ = fmt.Fprintf(w,
 			"amq-keepalive reconcile warning: action=%s root=%q agent=%q adapter=%q target=%q failure_count=%d error=%q\n",
 			result.Action,
 			updated.Root,
@@ -640,7 +640,7 @@ func (a App) logReconcileTransition(previous, updated registry.Entry, result sup
 		return
 	}
 	if updated.State == registry.StateActive {
-		fmt.Fprintf(w,
+		_, _ = fmt.Fprintf(w,
 			"amq-keepalive reconcile recovered: action=%s root=%q agent=%q adapter=%q target=%q\n",
 			result.Action,
 			updated.Root,
@@ -681,7 +681,7 @@ func (a App) rateLimitedAdapterLogf(state *adapterLogState) func(string, ...any)
 		if w == nil {
 			w = os.Stderr
 		}
-		fmt.Fprintf(w, "amq-keepalive adapter: %s\n", message)
+		_, _ = fmt.Fprintf(w, "amq-keepalive adapter: %s\n", message)
 	}
 }
 
@@ -1284,7 +1284,7 @@ func (a App) uninstallLaunchd(ctx context.Context, args []string) error {
 }
 
 func (a App) usage(writer io.Writer) {
-	fmt.Fprintln(writer, "usage: amq-keepalive <attach|reattach|supervise|inject|doctor|gc|retire-session|forget|install-launchd|install-hook|uninstall> [options]")
+	_, _ = fmt.Fprintln(writer, "usage: amq-keepalive <attach|reattach|supervise|inject|doctor|gc|retire-session|forget|install-launchd|install-hook|uninstall> [options]")
 }
 
 func mustDefaultRegistryPath() string {

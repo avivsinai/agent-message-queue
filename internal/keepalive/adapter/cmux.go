@@ -707,7 +707,7 @@ func normalizeCmuxSurfaceID(id string) (string, error) {
 			}
 			continue
 		}
-		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
 			return "", fmt.Errorf("cmux surface id %q is not a UUID", id)
 		}
 	}
