@@ -4,8 +4,10 @@ package cli
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -24,6 +26,162 @@ func testDarwinControlLock(t *testing.T) (string, string, wakeLock) {
 	lock.ControlSocket = wakeControlSocketPath(root, agent, lock.Generation)
 	writeWakeLockForTest(t, root, agent, lock)
 	return root, agent, lock
+}
+
+func testDarwinOwnerControlLock(
+	t *testing.T,
+) (string, string, wakeOwner, wakeLock, *wakeOwnerIdentityState, *int) {
+	t.Helper()
+	root := secureTempDirForTest(t)
+	const agent = "codex"
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+		t.Fatal(err)
+	}
+	injector := writeExecutableForTest(t, "darwin-owner-control-injector")
+	owner := wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	target := mustNewWakeTargetForTest(t, root, agent, injector, nil)
+	target.Owner = &owner
+	lock := bindWakeLockToTarget(wakeLock{
+		PID:          os.Getpid(),
+		TTY:          "unknown",
+		Root:         canonicalWakeRoot(root),
+		Agent:        agent,
+		Started:      "2026-07-23T00:00:00Z",
+		ProcessStart: "67890",
+		BootID:       owner.BootID,
+		Executable:   "/usr/local/bin/amq",
+		Args:         []string{"amq", "wake", "--root", root, "--me", agent, "--inject-via", injector},
+		Generation:   "0123456789abcdef0123456789abcdef",
+		OwnerSchema:  wakeOwnerLockSchema,
+		Owner:        &owner,
+	}, target)
+	lock.WakeMode = wakeOwnerWakeMode
+	lock.ControlSocket = wakeControlSocketPath(root, agent, lock.Generation)
+	agentDir, err := openWakeAgentDir(root, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		return publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, agent, target, lock)
+	}); err != nil {
+		_ = agentDir.Close()
+		t.Fatal(err)
+	}
+	_ = agentDir.Close()
+
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid != lock.PID {
+			return wakeProcessInfo{PID: pid}
+		}
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: lock.ProcessStart,
+			BootID:     lock.BootID,
+			Executable: lock.Executable,
+			Args:       lock.Args,
+		}
+	})
+	ownerState := wakeOwnerSame
+	oldObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
+		if got != owner {
+			t.Fatalf("observed owner = %#v, want %#v", got, owner)
+		}
+		return wakeOwnerObservation{State: ownerState, Reason: "test owner evidence"}, nil
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
+	peerSession := owner.SessionID
+	stubWakeProcessSID(t, func(pid int) (int, error) {
+		if pid != os.Getpid() {
+			t.Fatalf("peer session pid = %d, want %d", pid, os.Getpid())
+		}
+		return peerSession, nil
+	})
+	return root, agent, owner, lock, &ownerState, &peerSession
+}
+
+func TestDarwinStableOwnerStopTreatsDifferentLivePIDOccupantAsAbsent(t *testing.T) {
+	root, agent, _, lock, _, _ := testDarwinOwnerControlLock(t)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid != lock.PID {
+			return wakeProcessInfo{PID: pid}
+		}
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "78901",
+			BootID:     lock.BootID,
+			Executable: lock.Executable,
+			Args:       lock.Args,
+		}
+	})
+
+	agentDir, err := openWakeAgentDir(root, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		expected := inspectWakeLockAt(dirfd, agentDir, root, agent)
+		if expected.Status != wakeLockStale {
+			t.Fatalf("reused wake PID status = %s, want stale", expected.Status)
+		}
+		capability, err := prepareAuthoritativeWakeStopPlatform(dirfd, agentDir, expected)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = capability.Close() }()
+		if !capability.Absent {
+			t.Fatal("different live PID occupant was treated as the recorded wake")
+		}
+		return capability.Stop(wakeOwnerReleaseAuthorization{})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sendDarwinOwnerControlRequest(
+	t *testing.T,
+	root string,
+	agent string,
+	lock wakeLock,
+	request wakeControlOwnerRequest,
+) string {
+	t.Helper()
+	agentDir, err := openWakeAgentDir(root, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	name, err := darwinControlSocketName(agentDir, lock.ControlSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dialDarwinUnixAt(agentDir, name, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	data, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Write(append(data, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	line, _ := bufio.NewReader(conn).ReadString('\n')
+	return strings.TrimSpace(line)
 }
 
 func TestDarwinCooperativeStopACKAfterLockRemoval(t *testing.T) {
@@ -209,6 +367,191 @@ func TestDarwinControlTokenMismatchRefused(t *testing.T) {
 	}
 	if !inspectWakeLock(root, agent).Exists {
 		t.Fatal("mismatched token removed lock")
+	}
+}
+
+func TestDarwinOwnerControlRefusesGenerationOnlyAndWrongSessionBeforeQuiesce(t *testing.T) {
+	t.Run("generation only", func(t *testing.T) {
+		root, agent, _, lock, _, _ := testDarwinOwnerControlLock(t)
+		cleanup, stopped, _, err := startWakeControlListener(root, agent, lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		if got := sendDarwinOwnerControlRequest(t, root, agent, lock, wakeControlOwnerRequest{
+			Generation: lock.Generation,
+		}); got == "ACK" {
+			t.Fatal("generation-only owner request was acknowledged")
+		}
+		select {
+		case <-stopped:
+			t.Fatal("generation-only owner request quiesced notification work")
+		default:
+		}
+		if !inspectWakeLock(root, agent).Exists {
+			t.Fatal("generation-only owner request removed claim")
+		}
+	})
+
+	t.Run("wrong peer session", func(t *testing.T) {
+		root, agent, owner, lock, _, peerSession := testDarwinOwnerControlLock(t)
+		*peerSession = owner.SessionID + 1
+		cleanup, stopped, _, err := startWakeControlListener(root, agent, lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		if got := sendDarwinOwnerControlRequest(t, root, agent, lock, wakeControlOwnerRequest{
+			Generation: lock.Generation,
+			Owner:      &owner,
+		}); got == "ACK" {
+			t.Fatal("wrong-session owner request was acknowledged")
+		}
+		select {
+		case <-stopped:
+			t.Fatal("wrong-session owner request quiesced notification work")
+		default:
+		}
+		if !inspectWakeLock(root, agent).Exists {
+			t.Fatal("wrong-session owner request removed claim")
+		}
+	})
+}
+
+func TestDarwinOwnerControlAuthenticatedReleaseACKsAfterExactClaimRemoval(t *testing.T) {
+	root, agent, owner, lock, _, _ := testDarwinOwnerControlLock(t)
+	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	result := make(chan string, 1)
+	go func() {
+		result <- sendDarwinOwnerControlRequest(t, root, agent, lock, wakeControlOwnerRequest{
+			Generation: lock.Generation,
+			Owner:      &owner,
+		})
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("authenticated owner request did not quiesce notification work")
+	}
+	if !inspectWakeLock(root, agent).Exists {
+		t.Fatal("owner claim was removed before notification work quiesced")
+	}
+
+	markStopped()
+	select {
+	case got := <-result:
+		if got != "ACK" {
+			t.Fatalf("authenticated owner release response = %q, want ACK", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("authenticated owner release did not acknowledge")
+	}
+	if inspectWakeLock(root, agent).Exists {
+		t.Fatal("authenticated owner release left the lock")
+	}
+	if _, exists, err := readWakeTarget(root, agent); err != nil || exists {
+		t.Fatalf("authenticated owner release target exists=%v err=%v", exists, err)
+	}
+}
+
+func TestDarwinOwnerControlReauthorizesAfterQuiesce(t *testing.T) {
+	root, agent, owner, lock, ownerState, _ := testDarwinOwnerControlLock(t)
+	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	result := make(chan string, 1)
+	go func() {
+		result <- sendDarwinOwnerControlRequest(t, root, agent, lock, wakeControlOwnerRequest{
+			Generation: lock.Generation,
+			Owner:      &owner,
+		})
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("authorized owner request did not quiesce notification work")
+	}
+	if !inspectWakeLock(root, agent).Exists {
+		t.Fatal("owner claim was removed before loop quiesced")
+	}
+	*ownerState = wakeOwnerUnknown
+	markStopped()
+	select {
+	case got := <-result:
+		if got == "ACK" {
+			t.Fatal("pre-quiesce authorization survived changed post-quiesce owner evidence")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner control request did not finish after post-quiesce refusal")
+	}
+	if !inspectWakeLock(root, agent).Exists {
+		t.Fatal("post-quiesce reauthorization failure removed owner claim")
+	}
+}
+
+func TestDarwinOwnerWakeChildStopsThroughInheritedPrivateFD(t *testing.T) {
+	cmd := exec.Command("sh", "-c", `eval "dd bs=1 count=1 <&$AMQ_WAKE_PRIVATE_STOP_FD >/dev/null 2>&1"`)
+	cmd.Env = os.Environ()
+	capability, err := configureAuthoritativeWakeChild(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		_ = capability.Close()
+		t.Fatal(err)
+	}
+	if err := capability.Bind(cmd.Process); err != nil {
+		_ = capability.Close()
+		t.Fatal(err)
+	}
+	waiter := newWakeProcessWaiter(cmd.Process)
+	if err := capability.Stop(); err != nil {
+		_ = capability.Close()
+		t.Fatal(err)
+	}
+	if err := waiter.waitForExit(2 * time.Second); err != nil {
+		_ = capability.Close()
+		t.Fatalf("private-stop child did not exit: %v", err)
+	}
+	if err := capability.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDarwinOwnerWakeChildAlreadyExitedStillClosesStableCapability(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 0")
+	cmd.Env = os.Environ()
+	capability, err := configureAuthoritativeWakeChild(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		_ = capability.Close()
+		t.Fatal(err)
+	}
+	if err := capability.Bind(cmd.Process); err != nil {
+		_ = capability.Close()
+		t.Fatal(err)
+	}
+	waiter := newWakeProcessWaiter(cmd.Process)
+	if err := waiter.waitForExit(2 * time.Second); err != nil {
+		_ = capability.Close()
+		t.Fatal(err)
+	}
+	if err := capability.Stop(); err != nil {
+		_ = capability.Close()
+		t.Fatalf("already-exited child stop: %v", err)
+	}
+	if err := capability.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

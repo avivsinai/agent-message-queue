@@ -101,6 +101,9 @@ func retireWake(root, me string, requested wakeTarget) (wakeRetireResult, error)
 		return refuse("no wake lock present; wake process absence cannot be proven")
 	}
 	result.PID = inspection.PID
+	if wakeLockHasOwnerMarkers(inspection) {
+		return refuse(fmt.Sprintf("owner-bound wake claims require 'amq wake recover-owner --me %s'", me))
+	}
 
 	switch inspection.Status {
 	case wakeLockValid:
@@ -178,6 +181,9 @@ func requireExistingWakeTargetMatches(inspection wakeLockInspection, requested w
 	}
 	if !exists {
 		return errors.New("no saved inject-via wake target; refusing retirement")
+	}
+	if persisted.Owner != nil {
+		return fmt.Errorf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", inspection.Agent)
 	}
 	if err := validateWakeTarget(persisted, inspection.Root, inspection.Agent); err != nil {
 		return err

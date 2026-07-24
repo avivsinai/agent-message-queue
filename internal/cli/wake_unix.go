@@ -68,6 +68,10 @@ func acquireWakeLock(root, me string, target *wakeTarget) (cleanup func(), err e
 }
 
 func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions) (cleanup func(), err error) {
+	if options.target != nil && options.target.Owner != nil {
+		return acquireAuthoritativeWakeLockWithOptions(root, me, options)
+	}
+
 	agentBase := fsq.AgentBase(root, me)
 	lockPath := filepath.Join(agentBase, ".wake.lock")
 
@@ -81,6 +85,18 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 		var created wakeLockInspection
 		err := withWakeLifecycleGuard(root, me, func() error {
 			inspection := inspectWakeLock(root, me)
+			if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestAcquire); err != nil {
+				return err
+			}
+			if inspection.Exists && inspection.Lock.TargetDigest != "" {
+				persisted, exists, readErr := readWakeTarget(root, me)
+				if readErr != nil {
+					return fmt.Errorf("persisted wake target for %s is unverified: %w", me, readErr)
+				}
+				if exists && persisted.Owner != nil {
+					return fmt.Errorf("wake handle %s has legacy owner-bearing state; run 'amq wake recover-owner --me %s'", me, me)
+				}
+			}
 			if inspection.Exists {
 				switch inspection.Status {
 				case wakeLockStale:
@@ -115,6 +131,11 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 			}
 			if replace.Exists {
 				return nil
+			}
+			if orphan, exists, readErr := readWakeTarget(root, me); readErr != nil {
+				return fmt.Errorf("wake target for %s is unverified: %w", me, readErr)
+			} else if exists && orphan.Owner != nil {
+				return fmt.Errorf("wake handle %s has an owner-bearing orphan target; run 'amq wake recover-owner --me %s'", me, me)
 			}
 
 			// Stage target metadata first. The lock is the transaction commit point.
@@ -192,9 +213,19 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 		WakeMode:   options.wakeMode,
 	}
 	if options.target != nil {
+		targetDigest, err := wakeTargetDigest(*options.target)
+		if err != nil {
+			return wakeLock{}, err
+		}
 		lock.WakeMode = wakeTargetInjectVia
-		lock.TargetDigest = wakeTargetDigest(*options.target)
+		lock.TargetDigest = targetDigest
 		lock.ControlSocket = wakeControlSocketPath(root, me, lock.Generation)
+		if options.target.Owner != nil {
+			owner := *options.target.Owner
+			lock.WakeMode = wakeOwnerWakeMode
+			lock.OwnerSchema = wakeOwnerLockSchema
+			lock.Owner = &owner
+		}
 	}
 	if hostname, err := os.Hostname(); err == nil {
 		lock.Hostname = hostname
@@ -217,10 +248,26 @@ func shouldReplaceOrphanedWakeLock(inspection wakeLockInspection) (bool, error) 
 }
 
 func wakeLockReplacementNeeded(inspection wakeLockInspection) (bool, error) {
-	if wakeLockNeedsReplacement(inspection) {
-		return true, nil
+	if err := validateWakeLockOwnerlessMutation(inspection); err != nil {
+		return false, err
 	}
-	return wakeLockNeedsOwnerReplacement(inspection)
+	return wakeLockNeedsReplacement(inspection), nil
+}
+
+func validateWakeLockOwnerlessMutation(inspection wakeLockInspection) error {
+	if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestMutate); err != nil {
+		return err
+	}
+	if inspection.Lock.TargetDigest != "" {
+		target, exists, err := readWakeTarget(inspection.Root, inspection.Agent)
+		if err != nil {
+			return fmt.Errorf("wake target is unverified before ownerless mutation: %w", err)
+		}
+		if exists && target.Owner != nil {
+			return fmt.Errorf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", inspection.Agent)
+		}
+	}
+	return nil
 }
 
 func wakeLockNeedsReplacement(inspection wakeLockInspection) bool {
@@ -252,23 +299,6 @@ func wakeLockNeedsReplacement(inspection wakeLockInspection) bool {
 		}
 	}
 	return false
-}
-
-func wakeLockNeedsOwnerReplacement(inspection wakeLockInspection) (bool, error) {
-	if !inspection.IdentityConfirmed || inspection.Lock.WakeMode != wakeTargetInjectVia || inspection.Lock.TargetDigest == "" {
-		return false, nil
-	}
-	target, exists, err := readWakeTarget(inspection.Root, inspection.Agent)
-	if err != nil || !exists {
-		return false, nil
-	}
-	if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
-		return false, nil
-	}
-	if target.Owner == nil {
-		return false, nil
-	}
-	return wakeOwnerHealthCheck(*target.Owner) != nil, nil
 }
 
 func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, requestedTarget *wakeTarget) error {
@@ -322,7 +352,8 @@ func wakeLockHasUsableNotificationPath(inspection wakeLockInspection) bool {
 	if inspection.Lock.WakeMode == wakeInjectModeNone {
 		return true
 	}
-	if (inspection.Lock.WakeMode == wakeTargetInjectVia && inspection.Lock.TargetDigest != "") || wakeArgsUseInjectVia(inspection.Process.Args) {
+	if ((inspection.Lock.WakeMode == wakeTargetInjectVia || inspection.Lock.WakeMode == wakeOwnerWakeMode) &&
+		inspection.Lock.TargetDigest != "") || wakeArgsUseInjectVia(inspection.Process.Args) {
 		return true
 	}
 	tty := strings.TrimSpace(inspection.Lock.TTY)
@@ -381,6 +412,8 @@ func runWake(args []string) error {
 			return runWakeRepair(args[1:])
 		case "retire":
 			return runWakeRetire(args[1:])
+		case "recover-owner":
+			return runWakeRecoverOwner(args[1:])
 		}
 	}
 	return runWakeWithLoop(args, runWakeLoop)
@@ -497,6 +530,12 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 			result.Status = "refused"
 			result.Reason = err.Error()
 			return err
+		}
+		if target.Owner != nil {
+			result.Status = "refused"
+			result.PID = inspection.PID
+			result.Reason = fmt.Sprintf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", me)
+			return errors.New(result.Reason)
 		}
 		if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
 			result.Status = "refused"
@@ -651,6 +690,12 @@ func buildRepairWakeArgs(root, me string, target wakeTarget, readyPath string) [
 }
 
 func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
+	privateStop, cleanupPrivateStop, err := authoritativeWakePrivateStopFromEnv()
+	if err != nil {
+		return err
+	}
+	defer cleanupPrivateStop()
+
 	fs := flag.NewFlagSet("wake", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	injectCmdFlag := fs.String("inject-cmd", "", "Command to inject (power user mode)")
@@ -878,6 +923,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		defer markStopped()
 		controlStop = stop
 	}
+	controlStop = mergeWakeStopChannels(controlStop, privateStop)
 
 	if injectVia != "" {
 		if err := validateResolvedWakeInjectViaPath(injectVia); err != nil {
@@ -1225,18 +1271,6 @@ func targetOwner(target *wakeTarget) *wakeOwner {
 		return nil
 	}
 	owner := *target.Owner
-	return &owner
-}
-
-func currentWakeOwner() *wakeOwner {
-	owner := wakeOwner{PID: os.Getpid()}
-	if proc := inspectWakeProcess(owner.PID); proc.Running {
-		owner.ProcessStart = proc.StartToken
-		owner.BootID = proc.BootID
-	}
-	if sid, err := getWakeProcessSID(owner.PID); err == nil {
-		owner.SessionID = sid
-	}
 	return &owner
 }
 

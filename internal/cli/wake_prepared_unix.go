@@ -21,8 +21,13 @@ func wakePreparedPath(root, me string) string {
 }
 
 func writeWakePreparedFile(root, me string, expected wakeLockInspection) error {
-	return withWakeLifecycleGuard(root, me, func() error {
-		current := inspectWakeLock(root, me)
+	agentDir, err := openWakeAgentDir(root, me)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = agentDir.Close() }()
+	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !sameWakeLockGeneration(expected, current) {
 			return fmt.Errorf("wake lock generation changed before preparation publication")
 		}
@@ -31,11 +36,14 @@ func writeWakePreparedFile(root, me string, expected wakeLockInspection) error {
 			Generation:   current.Lock.Generation,
 			TargetDigest: current.Lock.TargetDigest,
 		}
-		if err := validateWakeReadyLockAndTarget(root, me, current, marker); err != nil {
+		if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, marker); err != nil {
 			return err
 		}
 		// The marker intentionally persists after exit; its generation binding
 		// makes stale files unusable by later wake instances.
+		if current.Lock.WakeMode == wakeOwnerWakeMode {
+			return writeWakeGenerationFileAt(dirfd, wakePreparedFileName, "wake prepared marker", marker)
+		}
 		return writeWakeGenerationFile(wakePreparedPath(root, me), "wake prepared marker", marker)
 	})
 }
@@ -59,18 +67,48 @@ func validateWakePreparedFileAgainstInspection(root, me string, current wakeLock
 	return true, nil
 }
 
+func validateWakePreparedFileAgainstInspectionAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	current wakeLockInspection,
+) (bool, error) {
+	marker, exists, err := readWakeGenerationFileAt(
+		dirfd,
+		agentDir,
+		wakePreparedFileName,
+		"wake prepared marker",
+	)
+	if err != nil {
+		return false, err
+	}
+	if !exists || marker.Generation != current.Lock.Generation {
+		return false, nil
+	}
+	if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, marker); err != nil {
+		return false, fmt.Errorf("existing amq wake prepared marker is not valid: %w", err)
+	}
+	return true, nil
+}
+
 func writeWakeReadyFileForPreparedWake(root, me, path string, expected wakeLockInspection, deadline time.Time) error {
+	agentDir, err := openWakeAgentDir(root, me)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = agentDir.Close() }()
 	for {
 		prepared := false
-		err := withWakeLifecycleGuard(root, me, func() error {
-			current := inspectWakeLock(root, me)
+		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+			current := inspectWakeLockAt(dirfd, agentDir, root, me)
 			if !sameWakeLockGeneration(expected, current) {
 				return fmt.Errorf("wake lock generation changed before existing-wake readiness publication")
 			}
 			if !confirmedLiveWake(current) {
 				return fmt.Errorf("existing amq wake stopped before preparation completed")
 			}
-			if err := validateWakeReadyLockAndTarget(root, me, current, wakeReady{
+			if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, wakeReady{
 				Schema:       wakeReadySchema,
 				Generation:   current.Lock.Generation,
 				TargetDigest: current.Lock.TargetDigest,
@@ -78,7 +116,17 @@ func writeWakeReadyFileForPreparedWake(root, me, path string, expected wakeLockI
 				return fmt.Errorf("existing amq wake became incompatible before preparation completed: %w", err)
 			}
 			var err error
-			prepared, err = validateWakePreparedFileAgainstInspection(root, me, current)
+			if current.Lock.WakeMode == wakeOwnerWakeMode {
+				prepared, err = validateWakePreparedFileAgainstInspectionAt(
+					dirfd,
+					agentDir,
+					root,
+					me,
+					current,
+				)
+			} else {
+				prepared, err = validateWakePreparedFileAgainstInspection(root, me, current)
+			}
 			if err != nil || !prepared {
 				return err
 			}

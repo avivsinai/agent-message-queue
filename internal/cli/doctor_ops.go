@@ -293,6 +293,10 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 			PID:    inspection.PID,
 			Reason: inspection.Reason,
 		}
+		ownerBound := classifyWakeClaimForGenericTransition(inspection) == wakeClaimAuthoritative
+		if ownerBound {
+			lock.Fix = wakeRecoverOwnerCommand(root, agent)
+		}
 		if isLiveRawOrphan(inspection) {
 			lock.Status = "live-raw-orphan"
 			lock.Reason = "live raw wake orphan; stop the owning terminal or launchd supervisor"
@@ -310,6 +314,10 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 			}
 		}
 		if inspection.Status == wakeLockStale {
+			if ownerBound {
+				locks = append(locks, lock)
+				continue
+			}
 			lock.Fix = fixWakeLocksCommand
 			if lock.TargetPresent && lock.TargetReason == "" && validateWakeLockRepairable(inspection) == nil {
 				lock.RepairAvailable = true
@@ -373,6 +381,10 @@ func validateWakeLockAgent(root, agent string) error {
 
 func wakeRepairCommand(root, agent string) string {
 	return fmt.Sprintf("amq wake repair --root %s --me %s", shellQuoteArg(root), shellQuoteArg(agent))
+}
+
+func wakeRecoverOwnerCommand(root, agent string) string {
+	return fmt.Sprintf("amq wake recover-owner --root %s --me %s", shellQuoteArg(root), shellQuoteArg(agent))
 }
 
 func shellQuoteArg(value string) string {

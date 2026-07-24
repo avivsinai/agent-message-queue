@@ -40,6 +40,9 @@ func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, er
 		if !sameWakeLockGeneration(inspection, locked) {
 			return nil
 		}
+		if err := validateWakeLockOwnerlessMutation(locked); err != nil {
+			return err
+		}
 
 		// Acquire the stable process capability before any PID-based identity
 		// inspection of this locked generation. From here onward, signaling and

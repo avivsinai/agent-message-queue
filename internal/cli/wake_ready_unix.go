@@ -20,23 +20,25 @@ func writeWakeReadyFile(root, me, path string, expected wakeLockInspection) erro
 	if path == "" {
 		return nil
 	}
-	return withWakeLifecycleGuard(root, me, func() error {
-		current := inspectWakeLock(root, me)
+	agentDir, err := openWakeAgentDir(root, me)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = agentDir.Close() }()
+	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !sameWakeLockGeneration(expected, current) {
 			return fmt.Errorf("wake lock generation changed before readiness publication")
 		}
-		if err := validateWakeReadyLockAndTarget(root, me, current, wakeReady{
+		ready := wakeReady{
 			Schema:       wakeReadySchema,
 			Generation:   current.Lock.Generation,
 			TargetDigest: current.Lock.TargetDigest,
-		}); err != nil {
+		}
+		if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, ready); err != nil {
 			return err
 		}
-		return writeWakeGenerationFile(path, "wake ready file", wakeReady{
-			Schema:       wakeReadySchema,
-			Generation:   current.Lock.Generation,
-			TargetDigest: current.Lock.TargetDigest,
-		})
+		return writeWakeGenerationFile(path, "wake ready file", ready)
 	})
 }
 
@@ -106,15 +108,8 @@ func validateWakeGenerationFile(path, label string, info os.FileInfo) error {
 }
 
 func validateWakeReadyLockAndTarget(root, me string, current wakeLockInspection, ready wakeReady) error {
-	confirmed := current.Status == wakeLockValid && current.IdentityConfirmed
-	if !confirmed && !currentWakeLockMatches(current.Lock) {
-		return fmt.Errorf("wake lock is not a confirmed valid wake during readiness validation")
-	}
-	if current.Lock.Generation == "" || ready.Generation != current.Lock.Generation {
-		return fmt.Errorf("wake readiness generation does not match current wake lock")
-	}
-	if ready.TargetDigest != current.Lock.TargetDigest {
-		return fmt.Errorf("wake readiness target does not match current wake lock")
+	if err := validateWakeReadyAgainstLock(current, ready); err != nil {
+		return err
 	}
 	if current.Lock.TargetDigest == "" {
 		_, exists, err := readWakeTarget(root, me)
@@ -133,23 +128,94 @@ func validateWakeReadyLockAndTarget(root, me string, current wakeLockInspection,
 	if !exists {
 		return fmt.Errorf("wake readiness target is missing")
 	}
-	if err := validateWakeTarget(target, root, me); err != nil {
-		return err
-	}
-	return validateWakeTargetMatchesLock(current.Lock, target)
+	return validateWakeReadyTargetAndOwner(current, target)
 }
 
-func validateWakeReadyFileAgainstCurrent(root, me, path string) (bool, error) {
+func validateWakeReadyLockAndTargetAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	current wakeLockInspection,
+	ready wakeReady,
+) error {
+	if err := validateWakeReadyAgainstLock(current, ready); err != nil {
+		return err
+	}
+	target, exists, err := readWakeTargetAt(dirfd, agentDir, root, me)
+	if err != nil {
+		return err
+	}
+	if current.Lock.TargetDigest == "" {
+		if exists {
+			return fmt.Errorf("wake readiness target does not match current wake lock")
+		}
+		return nil
+	}
+	if !exists {
+		return fmt.Errorf("wake readiness target is missing")
+	}
+	return validateWakeReadyTargetAndOwner(current, target)
+}
+
+func validateWakeReadyAgainstLock(current wakeLockInspection, ready wakeReady) error {
+	confirmed := current.Status == wakeLockValid && current.IdentityConfirmed
+	if !confirmed && !currentWakeLockMatches(current.Lock) {
+		return fmt.Errorf("wake lock is not a confirmed valid wake during readiness validation")
+	}
+	if current.Lock.Generation == "" || ready.Generation != current.Lock.Generation {
+		return fmt.Errorf("wake readiness generation does not match current wake lock")
+	}
+	if ready.TargetDigest != current.Lock.TargetDigest {
+		return fmt.Errorf("wake readiness target does not match current wake lock")
+	}
+	return nil
+}
+
+func validateWakeReadyTargetAndOwner(current wakeLockInspection, target wakeTarget) error {
+	if err := validateWakeTargetMatchesLock(current.Lock, target); err != nil {
+		return err
+	}
+	if current.Lock.WakeMode == wakeOwnerWakeMode {
+		observation, err := observeAuthoritativeWakeOwner(*current.Lock.Owner)
+		defer func() { _ = observation.Close() }()
+		if err != nil {
+			return fmt.Errorf("inspect wake owner during readiness validation: %w", err)
+		}
+		if observation.State != wakeOwnerSame {
+			return fmt.Errorf("wake owner is %s during readiness validation: %s", observation.State, observation.Reason)
+		}
+	}
+	return nil
+}
+
+func validateWakeReadyFileAgainstOwner(
+	root string,
+	me string,
+	path string,
+	requestedOwner *wakeOwner,
+) (bool, error) {
 	// A wake can still die immediately after this guarded validation; the local
 	// process notifier has no durable liveness lease beyond the lock generation.
 	ready := false
-	err := withWakeLifecycleGuard(root, me, func() error {
+	agentDir, err := openWakeAgentDir(root, me)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = agentDir.Close() }()
+	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		published, exists, err := readWakeReadyFile(path)
 		if err != nil || !exists {
 			return err
 		}
-		if err := validateWakeReadyLockAndTarget(root, me, inspectWakeLock(root, me), published); err != nil {
+		current := inspectWakeLockAt(dirfd, agentDir, root, me)
+		if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, published); err != nil {
 			return err
+		}
+		if requestedOwner != nil &&
+			current.Lock.WakeMode == wakeOwnerWakeMode &&
+			!sameWakeOwner(current.Lock.Owner, requestedOwner) {
+			return fmt.Errorf("wake readiness owner does not match the requested owner")
 		}
 		ready = true
 		return nil
