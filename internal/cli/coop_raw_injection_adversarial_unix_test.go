@@ -461,13 +461,86 @@ func assertPublicWakeCleaned(t *testing.T, root, me string, wakePID int) {
 	for time.Now().Before(deadline) {
 		inspection := inspectWakeLock(root, me)
 		process := inspectWakeProcess(wakePID)
-		if !inspection.Exists && !process.Running {
+		residue, err := publicWakeLifecycleResidue(root, me)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !inspection.Exists && !process.Running && len(residue) == 0 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("public coop wake survived owner exit: lock=%#v process=%#v",
-		inspectWakeLock(root, me), inspectWakeProcess(wakePID))
+	residue, residueErr := publicWakeLifecycleResidue(root, me)
+	t.Fatalf("public coop wake survived owner exit: lock=%#v process=%#v residue=%q residue_error=%v",
+		inspectWakeLock(root, me), inspectWakeProcess(wakePID), residue, residueErr)
+}
+
+func publicWakeLifecycleResidue(root, me string) ([]string, error) {
+	agentBase := fsq.AgentBase(root, me)
+	paths := []string{
+		wakeTargetPath(root, me),
+		wakePreparedPath(root, me),
+		wakeRepairFloorPath(root, me),
+	}
+	var residue []string
+	for _, path := range paths {
+		if _, err := os.Lstat(path); err == nil {
+			residue = append(residue, path)
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("inspect public wake lifecycle residue %s: %w", path, err)
+		}
+	}
+	tempPaths, err := filepath.Glob(filepath.Join(agentBase, ".wake*.tmp.*"))
+	if err != nil {
+		return nil, fmt.Errorf("inspect public wake lifecycle temp residue: %w", err)
+	}
+	controlPaths, err := filepath.Glob(filepath.Join(agentBase, ".w.*"))
+	if err != nil {
+		return nil, fmt.Errorf("inspect public wake control socket residue: %w", err)
+	}
+	quarantinePaths, err := filepath.Glob(filepath.Join(
+		agentBase,
+		wakeRepairFloorQuarantinePrefix+"*",
+	))
+	if err != nil {
+		return nil, fmt.Errorf("inspect public wake repair-floor quarantine residue: %w", err)
+	}
+	residue = append(residue, tempPaths...)
+	residue = append(residue, controlPaths...)
+	return append(residue, quarantinePaths...), nil
+}
+
+func TestPublicWakeLifecycleResidueIncludesControlAndQuarantineArtifacts(t *testing.T) {
+	root := secureTempDirForTest(t)
+	const me = "codex"
+	ensureAdversarialCoopMailbox(t, root, me)
+	agentBase := fsq.AgentBase(root, me)
+	paths := []string{
+		filepath.Join(agentBase, ".w.regression"),
+		filepath.Join(agentBase, wakeRepairFloorQuarantinePrefix+"regression"),
+	}
+	for _, path := range paths {
+		if err := os.WriteFile(path, []byte("residue"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	residue, err := publicWakeLifecycleResidue(root, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range paths {
+		found := false
+		for _, got := range residue {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("public wake residue = %q, want %q", residue, want)
+		}
+	}
 }
 
 func waitForAdversarialPath(t *testing.T, path string, timeout time.Duration) {

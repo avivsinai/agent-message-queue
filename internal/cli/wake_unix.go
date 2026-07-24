@@ -298,33 +298,117 @@ func acquireWakeLockWithOptionsInDir(
 		}
 
 		cleanup = func() {
-			_ = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-				current := inspectWakeLockAt(dirfd, agentDir, root, me)
-				if !sameWakeLockGeneration(created, current) || !currentWakeLockMatches(current.Lock) {
-					return nil
-				}
-				if err := removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, current); err != nil {
-					return err
-				}
-				if options.repairLineage != nil {
-					if options.repairFloorAuthority == nil {
-						return fmt.Errorf("wake repair floor cleanup authority is missing")
-					}
-					return removeWakeRepairFloorIfGenerationGuardedAt(
-						dirfd,
-						agentDir,
-						*options.repairFloorAuthority,
-					)
-				}
-				floor, exists, err := readWakeRepairFloorAt(dirfd, agentDir)
-				if err != nil || !exists || floor.Generation != created.Lock.Generation {
-					return err
-				}
-				return removeWakeRepairFloorGuardedAt(dirfd, agentDir)
-			})
+			if cleanupErr := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+				return cleanupGenericWakeGenerationAt(
+					dirfd,
+					agentDir,
+					root,
+					me,
+					created,
+					options,
+				)
+			}); cleanupErr != nil {
+				_ = writeStderr("amq wake: cleanup failed: %v\n", cleanupErr)
+			}
 		}
 		return cleanup, nil
 	}
+}
+
+func cleanupGenericWakeGenerationAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	created wakeLockInspection,
+	options wakeLockAcquireOptions,
+) error {
+	current := inspectWakeLockAt(dirfd, agentDir, root, me)
+	if !sameWakeLockGeneration(created, current) || !currentWakeLockMatches(current.Lock) {
+		return nil
+	}
+
+	preparedSnapshot, preparedSnapshotErr := freezeGenericWakePreparedCleanupAt(
+		dirfd,
+		agentDir,
+		root,
+		me,
+		current,
+	)
+	if err := removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, current); err != nil {
+		return errors.Join(
+			preparedSnapshotErr,
+			fmt.Errorf("remove exact generic wake lock: %w", err),
+		)
+	}
+	var lockSyncErr error
+	if err := syncWakeOwnerDirFD(dirfd); err != nil {
+		lockSyncErr = fmt.Errorf("sync exact generic wake lock removal: %w", err)
+	}
+
+	interleaveErr := afterGenericWakeLockRemoval(dirfd, agentDir)
+	replacement := inspectWakeLockAt(dirfd, agentDir, root, me)
+	var replacementErr error
+	if replacement.Exists {
+		replacementErr = fmt.Errorf(
+			"replacement wake lock appeared during generic wake cleanup; preserving prepared marker",
+		)
+	}
+
+	var preparedCleanupErr error
+	if !replacement.Exists && preparedSnapshot != nil {
+		_, preparedCleanupErr = removeWakeGenerationFileIfSnapshotMatchesAt(
+			dirfd,
+			agentDir,
+			wakePreparedFileName,
+			"wake prepared marker",
+			*preparedSnapshot,
+		)
+		if preparedCleanupErr != nil {
+			preparedCleanupErr = fmt.Errorf(
+				"remove exact generic wake prepared marker: %w",
+				preparedCleanupErr,
+			)
+		}
+	}
+
+	floorCleanupErr := cleanupGenericWakeRepairFloorAt(
+		dirfd,
+		agentDir,
+		created,
+		options,
+	)
+	return errors.Join(
+		preparedSnapshotErr,
+		lockSyncErr,
+		interleaveErr,
+		replacementErr,
+		preparedCleanupErr,
+		floorCleanupErr,
+	)
+}
+
+func cleanupGenericWakeRepairFloorAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	created wakeLockInspection,
+	options wakeLockAcquireOptions,
+) error {
+	if options.repairLineage != nil {
+		if options.repairFloorAuthority == nil {
+			return fmt.Errorf("wake repair floor cleanup authority is missing")
+		}
+		return removeWakeRepairFloorIfGenerationGuardedAt(
+			dirfd,
+			agentDir,
+			*options.repairFloorAuthority,
+		)
+	}
+	floor, exists, err := readWakeRepairFloorAt(dirfd, agentDir)
+	if err != nil || !exists || floor.Generation != created.Lock.Generation {
+		return err
+	}
+	return removeWakeRepairFloorGuardedAt(dirfd, agentDir)
 }
 
 func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, error) {
