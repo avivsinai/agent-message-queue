@@ -26,6 +26,17 @@ func writeWakePreparedFile(root, me string, expected wakeLockInspection) error {
 		return err
 	}
 	defer func() { _ = agentDir.Close() }()
+	return writeWakePreparedFileInDir(agentDir, root, me, expected)
+}
+
+func writeWakePreparedFileInDir(
+	agentDir *wakeAgentDir,
+	root, me string,
+	expected wakeLockInspection,
+) error {
+	if agentDir == nil {
+		return fmt.Errorf("wake agent directory capability is missing")
+	}
 	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !sameWakeLockGeneration(expected, current) {
@@ -41,10 +52,7 @@ func writeWakePreparedFile(root, me string, expected wakeLockInspection) error {
 		}
 		// The marker intentionally persists after exit; its generation binding
 		// makes stale files unusable by later wake instances.
-		if current.Lock.WakeMode == wakeOwnerWakeMode {
-			return writeWakeGenerationFileAt(dirfd, wakePreparedFileName, "wake prepared marker", marker)
-		}
-		return writeWakeGenerationFile(wakePreparedPath(root, me), "wake prepared marker", marker)
+		return writeWakeGenerationFileAt(dirfd, wakePreparedFileName, "wake prepared marker", marker)
 	})
 }
 

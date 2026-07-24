@@ -63,6 +63,7 @@ type opsWakeLock struct {
 	TargetReason    string `json:"target_reason,omitempty"`
 	Repair          string `json:"repair,omitempty"`
 	RepairAvailable bool   `json:"repair_available,omitempty"`
+	RepairReason    string `json:"repair_reason,omitempty"`
 }
 
 const fixWakeLocksCommand = "amq doctor --ops --fix-wake-locks"
@@ -320,8 +321,12 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 			}
 			lock.Fix = fixWakeLocksCommand
 			if lock.TargetPresent && lock.TargetReason == "" && validateWakeLockRepairable(inspection) == nil {
-				lock.RepairAvailable = true
-				lock.Repair = wakeRepairCommand(root, agent)
+				if err := validateWakeRepairFloorAvailable(root, agent, inspection, target); err != nil {
+					lock.RepairReason = err.Error()
+				} else {
+					lock.RepairAvailable = true
+					lock.Repair = wakeRepairCommand(root, agent)
+				}
 			}
 			if fix {
 				guardErr := withWakeLifecycleGuard(root, agent, func() error {
@@ -343,6 +348,7 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 				})
 				lock.RepairAvailable = false
 				lock.Repair = ""
+				lock.RepairReason = ""
 				if guardErr != nil {
 					lock.Status = "error"
 					lock.Reason = guardErr.Error()

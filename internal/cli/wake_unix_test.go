@@ -136,7 +136,7 @@ func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
 		if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
 			t.Fatalf("ready file published before wake preparation: %v", statErr)
 		}
-		if err := cfg.onPrepared(); err != nil {
+		if err := cfg.onPrepared(nil); err != nil {
 			t.Fatalf("publish readiness: %v", err)
 		}
 		if _, statErr := os.Stat(readyPath); statErr != nil {
@@ -195,7 +195,7 @@ func TestRunWakeWithLoopBaselinesBeforeReadiness(t *testing.T) {
 		if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
 			t.Fatalf("ready file published before baseline preparation: %v", statErr)
 		}
-		if err := cfg.onPrepared(); err != nil {
+		if err := cfg.onPrepared(nil); err != nil {
 			t.Fatalf("publish readiness: %v", err)
 		}
 		if _, statErr := os.Stat(readyPath); statErr != nil {
@@ -303,7 +303,7 @@ func TestRunWakeLoopStopsBeforePublishingPreparedMarker(t *testing.T) {
 		root:        secureTempDirForTest(t),
 		me:          "orchestrator",
 		controlStop: stop,
-		onPrepared: func() error {
+		onPrepared: func(wakeAdmissionWatcher) error {
 			prepared = true
 			return nil
 		},
@@ -348,9 +348,30 @@ func TestBaselineDLQRetryWithSameFilenameRemainsNotifyEligible(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot baseline: %v", err)
 	}
-	cfg.baselineExisting = baseline
+	target := mustNewWakeTargetForTest(t, root, "alice", cfg.injectVia, cfg.injectArgs)
+	lock := bindWakeLockToTarget(wakeLock{
+		Root:       canonicalWakeRoot(root),
+		Agent:      "alice",
+		Generation: "dlq-retry-generation",
+		BootID:     wakeRepairTestBootID,
+	}, target)
+	floor, err := newWakeRepairFloor(root, "alice", lock, target, baseline)
+	if err != nil {
+		t.Fatalf("new wake repair floor: %v", err)
+	}
+	if err := writeWakeRepairFloor(root, "alice", floor); err != nil {
+		t.Fatalf("write wake repair floor: %v", err)
+	}
+	persisted, exists, err := readWakeRepairFloor(root, "alice")
+	if err != nil || !exists {
+		t.Fatalf("read wake repair floor: exists=%v err=%v", exists, err)
+	}
+	cfg.baselineExisting = persisted.Existing
 	if err := notifyNewMessages(cfg); err != nil {
 		t.Fatalf("notify stale baseline: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err == nil || !os.IsNotExist(err) || len(got) != 0 {
+		t.Fatalf("baseline message notified before DLQ retry: bytes=%d err=%v", len(got), err)
 	}
 
 	rootIdentity, err := fsq.SnapshotDeliveryRoot(root)
@@ -397,7 +418,7 @@ func TestRunWakeWithLoopNoneSkipsTTYAndWritesReadyFile(t *testing.T) {
 		if cfg.injectMode != wakeInjectModeNone {
 			t.Fatalf("injectMode = %q, want none", cfg.injectMode)
 		}
-		if err := cfg.onPrepared(); err != nil {
+		if err := cfg.onPrepared(nil); err != nil {
 			t.Fatalf("publish readiness: %v", err)
 		}
 		if _, statErr := os.Stat(readyPath); statErr != nil {
@@ -464,7 +485,7 @@ func TestRunWakeHelpHidesInternalReadyFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runWake --help: %v", err)
 	}
-	for _, hidden := range []string{"ready-file", "accept-existing-wake"} {
+	for _, hidden := range []string{"ready-file", "accept-existing-wake", "repair-lineage"} {
 		if strings.Contains(stdout, hidden) {
 			t.Fatalf("wake help should hide %s:\n%s", hidden, stdout)
 		}
@@ -2923,7 +2944,7 @@ func TestConfigureRepairWakeCommandDetachesOutput(t *testing.T) {
 
 func TestOpenWakeRepairOutputCreatesPrivateLog(t *testing.T) {
 	root := secureTempDirForTest(t)
-	output, err := openWakeRepairOutput(root, "orchestrator")
+	output, err := openWakeRepairOutputForTest(root, "orchestrator")
 	if err != nil {
 		t.Fatalf("openWakeRepairOutput: %v", err)
 	}
@@ -2954,7 +2975,7 @@ func TestOpenWakeRepairOutputRejectsSymlinkLog(t *testing.T) {
 		t.Fatalf("symlink repair log: %v", err)
 	}
 
-	output, err := openWakeRepairOutput(root, "orchestrator")
+	output, err := openWakeRepairOutputForTest(root, "orchestrator")
 	if err == nil {
 		_ = output.Close()
 		t.Fatal("expected symlink repair log rejection")
@@ -2976,7 +2997,7 @@ func TestOpenWakeRepairOutputRejectsFIFOWithoutBlocking(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		output, err := openWakeRepairOutput(root, "orchestrator")
+		output, err := openWakeRepairOutputForTest(root, "orchestrator")
 		if output != nil {
 			_ = output.Close()
 		}
@@ -2993,6 +3014,15 @@ func TestOpenWakeRepairOutputRejectsFIFOWithoutBlocking(t *testing.T) {
 	}
 }
 
+func openWakeRepairOutputForTest(root, me string) (*os.File, error) {
+	agentDir, err := openWakeAgentDir(root, me)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = agentDir.Close() }()
+	return openWakeRepairOutputInDir(agentDir)
+}
+
 func TestRunWakeRepairJSONRejectsFIFOLogWithoutBlocking(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
@@ -3007,6 +3037,7 @@ func TestRunWakeRepairJSONRejectsFIFOLogWithoutBlocking(t *testing.T) {
 	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
 	}
+	writeWakeRepairFloorForTest(t, root, "orchestrator", target, nil)
 	agentBase := fsq.AgentBase(root, "orchestrator")
 	if err := syscall.Mkfifo(filepath.Join(agentBase, ".wake.repair.log"), 0o600); err != nil {
 		t.Fatalf("mkfifo repair log: %v", err)
@@ -3041,6 +3072,60 @@ func TestRunWakeWithLoopRejectsInjectArgWithoutInjectVia(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--inject-arg requires --inject-via") {
 		t.Fatalf("expected inject-arg usage error, got %v", err)
+	}
+}
+
+func TestRunWakeWithLoopRejectsInvalidRepairLineageFlags(t *testing.T) {
+	injector := writeExecutableForTest(t, "injector")
+	tests := []struct {
+		name     string
+		args     []string
+		ownerEnv string
+		want     string
+	}{
+		{
+			name: "blank lineage",
+			args: []string{"--repair-lineage= "},
+			want: "--repair-lineage must not be blank",
+		},
+		{
+			name: "requires inject via",
+			args: []string{"--repair-lineage", "dead-generation"},
+			want: "--repair-lineage requires --inject-via",
+		},
+		{
+			name: "conflicts with baseline existing",
+			args: []string{
+				"--repair-lineage", "dead-generation",
+				"--inject-via", injector,
+				"--baseline-existing",
+			},
+			want: "--repair-lineage cannot be combined with --baseline-existing",
+		},
+		{
+			name: "requires private handoff before owner inspection",
+			args: []string{
+				"--repair-lineage", "dead-generation",
+				"--inject-via", injector,
+			},
+			ownerEnv: `{"pid":4242}`,
+			want:     "wake repair requires a private source/admission handoff",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envWakeOwner, tc.ownerEnv)
+			args := []string{"--root", secureTempDirForTest(t), "--me", "orchestrator"}
+			args = append(args, tc.args...)
+			err := runWakeWithLoop(args, func(cfg wakeConfig) error {
+				t.Fatalf("loop should not run with invalid repair lineage: %#v", cfg)
+				return nil
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
