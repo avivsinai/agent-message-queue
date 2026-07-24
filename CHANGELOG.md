@@ -8,6 +8,20 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.47.1](https://github.com/avivsinai/agent-message-queue/compare/v0.47.0...v0.47.1) (2026-07-24)
+
+
+### Bug Fixes
+
+* **wake:** make repair continuity fail closed ([327f474](https://github.com/avivsinai/agent-message-queue/commit/327f47469ef7008c7d3c0d8d133d2a3778d9ae86))
+
+
+### Dependencies
+
+* bump actions/attest from 4.1.1 to 4.2.0 ([#274](https://github.com/avivsinai/agent-message-queue/issues/274)) ([d1332d4](https://github.com/avivsinai/agent-message-queue/commit/d1332d41e97458c96f9b6842761c4e6c980bd264))
+* bump actions/setup-go from 6.5.0 to 7.0.0 ([#275](https://github.com/avivsinai/agent-message-queue/issues/275)) ([7309635](https://github.com/avivsinai/agent-message-queue/commit/7309635cf802dd79b129a7593149990563c01685))
+* bump actions/setup-node from 6.4.0 to 7.0.0 ([#276](https://github.com/avivsinai/agent-message-queue/issues/276)) ([29bd9a6](https://github.com/avivsinai/agent-message-queue/commit/29bd9a624dce1ea80a29ad5f0beae1329fa6a31e))
+
 ## [0.47.0](https://github.com/avivsinai/agent-message-queue/compare/v0.46.0...v0.47.0) (2026-07-24)
 
 
