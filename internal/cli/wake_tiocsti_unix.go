@@ -40,8 +40,12 @@ func (t tiocstiFuncs) Inject(text string) error {
 	}
 	defer func() { _ = tty.Close() }()
 
-	fd := tty.Fd()
+	return t.InjectFD(tty.Fd(), text)
+}
 
+// InjectFD injects text through an already-retained controlling-terminal
+// descriptor. Callers own the descriptor and its lifecycle.
+func (t tiocstiFuncs) InjectFD(fd uintptr, text string) error {
 	// Inject each character using TIOCSTI
 	for _, ch := range []byte(text) {
 		if err := ioctlTIOCSTI(fd, ch); err != nil {

@@ -17,6 +17,16 @@ type wakeReady struct {
 }
 
 func writeWakeReadyFile(root, me, path string, expected wakeLockInspection) error {
+	return writeWakeReadyFileAgainstOwner(root, me, path, expected, nil)
+}
+
+func writeWakeReadyFileAgainstOwner(
+	root string,
+	me string,
+	path string,
+	expected wakeLockInspection,
+	requestedOwner *wakeOwner,
+) error {
 	if path == "" {
 		return nil
 	}
@@ -36,6 +46,9 @@ func writeWakeReadyFile(root, me, path string, expected wakeLockInspection) erro
 			TargetDigest: current.Lock.TargetDigest,
 		}
 		if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, ready); err != nil {
+			return err
+		}
+		if err := validateRequestedWakeOwnerForReadiness(current, requestedOwner); err != nil {
 			return err
 		}
 		return writeWakeGenerationFile(path, "wake ready file", ready)
@@ -177,14 +190,40 @@ func validateWakeReadyTargetAndOwner(current wakeLockInspection, target wakeTarg
 		return err
 	}
 	if current.Lock.WakeMode == wakeOwnerWakeMode {
-		observation, err := observeAuthoritativeWakeOwner(*current.Lock.Owner)
-		defer func() { _ = observation.Close() }()
+		observation, err := observeLiveWakeOwner(
+			*current.Lock.Owner,
+			"inspect persisted wake owner during readiness validation",
+		)
 		if err != nil {
-			return fmt.Errorf("inspect wake owner during readiness validation: %w", err)
+			return err
 		}
-		if observation.State != wakeOwnerSame {
-			return fmt.Errorf("wake owner is %s during readiness validation: %s", observation.State, observation.Reason)
+		if closeErr := observation.Close(); closeErr != nil {
+			return fmt.Errorf("close persisted wake owner readiness observation: %w", closeErr)
 		}
+	}
+	return nil
+}
+
+func validateRequestedWakeOwnerForReadiness(
+	current wakeLockInspection,
+	requestedOwner *wakeOwner,
+) error {
+	if requestedOwner == nil {
+		return nil
+	}
+	if current.Lock.WakeMode == wakeOwnerWakeMode &&
+		!sameWakeOwner(current.Lock.Owner, requestedOwner) {
+		return fmt.Errorf("wake readiness owner does not match the requested owner")
+	}
+	observation, err := observeLiveWakeOwner(
+		*requestedOwner,
+		"inspect requested wake owner immediately before readiness",
+	)
+	if err != nil {
+		return err
+	}
+	if closeErr := observation.Close(); closeErr != nil {
+		return fmt.Errorf("close requested wake owner readiness observation: %w", closeErr)
 	}
 	return nil
 }
@@ -212,10 +251,8 @@ func validateWakeReadyFileAgainstOwner(
 		if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, published); err != nil {
 			return err
 		}
-		if requestedOwner != nil &&
-			current.Lock.WakeMode == wakeOwnerWakeMode &&
-			!sameWakeOwner(current.Lock.Owner, requestedOwner) {
-			return fmt.Errorf("wake readiness owner does not match the requested owner")
+		if err := validateRequestedWakeOwnerForReadiness(current, requestedOwner); err != nil {
+			return err
 		}
 		ready = true
 		return nil

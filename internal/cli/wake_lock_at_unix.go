@@ -182,12 +182,18 @@ func removeWakeLockIfUnchangedGuardedAt(
 	)
 }
 
-func readWakeGenerationFileAt(
+type wakeGenerationFileSnapshot struct {
+	Marker   wakeReady
+	Raw      []byte
+	FileInfo os.FileInfo
+}
+
+func readWakeGenerationFileSnapshotAt(
 	dirfd int,
 	agentDir *wakeAgentDir,
 	name string,
 	label string,
-) (wakeReady, bool, error) {
+) (wakeGenerationFileSnapshot, bool, error) {
 	path := filepath.Join(agentDir.path, name)
 	open := func() (*os.File, error) {
 		fd, err := unix.Openat(dirfd, name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -199,45 +205,112 @@ func readWakeGenerationFileAt(
 	file, err := open()
 	if err != nil {
 		if err == unix.ENOENT {
-			return wakeReady{}, false, nil
+			return wakeGenerationFileSnapshot{}, false, nil
 		}
-		return wakeReady{}, true, err
+		return wakeGenerationFileSnapshot{}, true, err
 	}
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
-		return wakeReady{}, true, err
+		return wakeGenerationFileSnapshot{}, true, err
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		return wakeReady{}, true, fmt.Errorf("%s must be a regular 0600 file", label)
+		return wakeGenerationFileSnapshot{}, true, fmt.Errorf("%s must be a regular 0600 file", label)
 	}
 	if err := validateWakeTargetPathOwnership(label, path, info); err != nil {
-		return wakeReady{}, true, err
+		return wakeGenerationFileSnapshot{}, true, err
 	}
 	data, err := readWakeMetadata(file, label, path)
 	if err != nil {
-		return wakeReady{}, true, err
+		return wakeGenerationFileSnapshot{}, true, err
 	}
 	pathFile, err := open()
 	if err != nil {
-		return wakeReady{}, true, err
+		return wakeGenerationFileSnapshot{}, true, err
 	}
 	pathInfo, statErr := pathFile.Stat()
 	_ = pathFile.Close()
 	if statErr != nil {
-		return wakeReady{}, true, statErr
+		return wakeGenerationFileSnapshot{}, true, statErr
+	}
+	if !pathInfo.Mode().IsRegular() || pathInfo.Mode().Perm() != 0o600 {
+		return wakeGenerationFileSnapshot{}, true, fmt.Errorf("%s must be a regular 0600 file", label)
+	}
+	if err := validateWakeTargetPathOwnership(label, path, pathInfo); err != nil {
+		return wakeGenerationFileSnapshot{}, true, err
 	}
 	if !sameWakeFileIdentity(info, pathInfo) {
-		return wakeReady{}, true, fmt.Errorf("%s changed while opening", label)
+		return wakeGenerationFileSnapshot{}, true, fmt.Errorf("%s changed while opening", label)
 	}
 	var marker wakeReady
 	if err := json.Unmarshal(data, &marker); err != nil {
-		return wakeReady{}, true, err
+		return wakeGenerationFileSnapshot{}, true, err
 	}
 	if marker.Schema != wakeReadySchema || marker.Generation == "" {
-		return wakeReady{}, true, fmt.Errorf("%s schema is unsupported", label)
+		return wakeGenerationFileSnapshot{}, true, fmt.Errorf("%s schema is unsupported", label)
 	}
-	return marker, true, nil
+	return wakeGenerationFileSnapshot{
+		Marker:   marker,
+		Raw:      bytes.Clone(data),
+		FileInfo: info,
+	}, true, nil
+}
+
+func readWakeGenerationFileAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	name string,
+	label string,
+) (wakeReady, bool, error) {
+	snapshot, exists, err := readWakeGenerationFileSnapshotAt(
+		dirfd,
+		agentDir,
+		name,
+		label,
+	)
+	return snapshot.Marker, exists, err
+}
+
+func removeWakeGenerationFileIfSnapshotMatchesAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	name string,
+	label string,
+	expected wakeGenerationFileSnapshot,
+) (bool, error) {
+	current, exists, err := readWakeGenerationFileSnapshotAt(
+		dirfd,
+		agentDir,
+		name,
+		label,
+	)
+	if err != nil {
+		return false, fmt.Errorf("re-read %s before removal: %w", label, err)
+	}
+	if !exists {
+		return false, nil
+	}
+	if expected.FileInfo == nil ||
+		current.FileInfo == nil ||
+		!sameWakeFileIdentity(expected.FileInfo, current.FileInfo) ||
+		!bytes.Equal(expected.Raw, current.Raw) {
+		return false, fmt.Errorf("%s changed before removal; preserving it", label)
+	}
+	if expected.Marker.Schema != current.Marker.Schema ||
+		expected.Marker.Generation != current.Marker.Generation ||
+		expected.Marker.TargetDigest != current.Marker.TargetDigest {
+		return false, fmt.Errorf("%s semantics changed before removal; preserving it", label)
+	}
+	if err := unix.Unlinkat(dirfd, name, 0); err != nil {
+		if err == unix.ENOENT {
+			return false, nil
+		}
+		return false, fmt.Errorf("remove %s: %w", label, err)
+	}
+	if err := syncWakeOwnerDirFD(dirfd); err != nil {
+		return true, fmt.Errorf("sync %s removal: %w", label, err)
+	}
+	return true, nil
 }
 
 func writeWakeGenerationFileAt(

@@ -261,6 +261,127 @@ func TestInjectNotificationNoneDoesNotInvokeInjectVia(t *testing.T) {
 	}
 }
 
+func TestOwnerBoundNotificationUsesFixedDoorbellAndGuardsEveryChunk(t *testing.T) {
+	oldWait := waitForRawInputDrained
+	oldSleep := rawInjectSleep
+	waitForRawInputDrained = func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	}
+	rawInjectSleep = func(time.Duration) {}
+	t.Cleanup(func() {
+		waitForRawInputDrained = oldWait
+		rawInjectSleep = oldSleep
+	})
+
+	tests := []struct {
+		mode string
+		want []string
+	}{
+		{
+			mode: wakeInjectModeRaw,
+			want: []string{coopWakeDoorbell, "\n", "\r", "\r"},
+		},
+		{
+			mode: wakeInjectModePaste,
+			want: []string{coopWakeDoorbell, "\r"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.mode, func(t *testing.T) {
+			stop := make(chan struct{})
+			var writes []string
+			guardCalls := 0
+			cfg := &wakeConfig{
+				me:          "codex",
+				injectMode:  tc.mode,
+				controlStop: stop,
+				bell:        true,
+				beforeTerminalWrite: func() error {
+					guardCalls++
+					return nil
+				},
+				terminalWrite: func(chunk string) error {
+					writes = append(writes, chunk)
+					return nil
+				},
+			}
+
+			dynamic := "session=$(touch /tmp/pwned) subject=\x1b[31m body=untrusted"
+			if err := injectNotification(cfg, dynamic, false); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(writes, "|") != strings.Join(tc.want, "|") {
+				t.Fatalf("owner-bound chunks = %#v, want %#v", writes, tc.want)
+			}
+			if guardCalls != len(tc.want) {
+				t.Fatalf("guard calls = %d, want %d", guardCalls, len(tc.want))
+			}
+		})
+	}
+}
+
+func TestOwnerBoundNotificationAuthorityRefusalStopsLaterChunks(t *testing.T) {
+	oldWait := waitForRawInputDrained
+	oldSleep := rawInjectSleep
+	waitForRawInputDrained = func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	}
+	rawInjectSleep = func(time.Duration) {}
+	t.Cleanup(func() {
+		waitForRawInputDrained = oldWait
+		rawInjectSleep = oldSleep
+	})
+
+	authorityErr := errors.New("terminal authority changed")
+	stop := make(chan struct{})
+	guardCalls := 0
+	var writes []string
+	cfg := &wakeConfig{
+		me:          "codex",
+		injectMode:  wakeInjectModeRaw,
+		controlStop: stop,
+		beforeTerminalWrite: func() error {
+			guardCalls++
+			if guardCalls == 2 {
+				return authorityErr
+			}
+			return nil
+		},
+		terminalWrite: func(chunk string) error {
+			writes = append(writes, chunk)
+			return nil
+		},
+	}
+
+	err := injectNotification(cfg, "dynamic", false)
+	if !errors.Is(err, authorityErr) {
+		t.Fatalf("authority error = %v, want %v", err, authorityErr)
+	}
+	if len(writes) != 1 || writes[0] != coopWakeDoorbell {
+		t.Fatalf("writes after authority refusal = %#v", writes)
+	}
+}
+
+func TestStandaloneNotificationPreservesDynamicLegacyPayload(t *testing.T) {
+	var writes []string
+	cfg := &wakeConfig{
+		injectMode: wakeInjectModePaste,
+		terminalWrite: func(chunk string) error {
+			writes = append(writes, chunk)
+			return nil
+		},
+	}
+
+	const dynamic = "legacy dynamic notice"
+	if err := injectNotification(cfg, dynamic, false); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"\x1b[200~" + dynamic + "\x1b[201~", "\r"}
+	if strings.Join(writes, "|") != strings.Join(want, "|") {
+		t.Fatalf("standalone chunks = %#v, want %#v", writes, want)
+	}
+}
+
 func TestInjectViaTimeout(t *testing.T) {
 	scriptPath := filepath.Join(secureTempDirForTest(t), "sleep.sh")
 	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nsleep 2\n"), 0o755); err != nil {

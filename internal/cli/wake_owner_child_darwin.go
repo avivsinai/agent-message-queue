@@ -31,20 +31,13 @@ func prepareAuthoritativeWakeChildPlatform(cmd *exec.Cmd) (*authoritativeWakeChi
 			if process == nil || process.Pid <= 0 {
 				return fmt.Errorf("authoritative wake child process is missing")
 			}
-			bound = true
+			if err := validateDarwinWakeOwnerStartupRollbackFD(writeEnd); err != nil {
+				return err
+			}
 			if err := readEnd.Close(); err != nil {
 				return err
 			}
-			// Keep the owner-side stop capability across the later TUI exec,
-			// but only after the wake child has spawned so the child cannot
-			// inherit its own writer and defeat EOF-based owner-exit cleanup.
-			flags, err := unix.FcntlInt(writeEnd.Fd(), unix.F_GETFD, 0)
-			if err != nil {
-				return fmt.Errorf("inspect authoritative wake owner stop fd: %w", err)
-			}
-			if _, err := unix.FcntlInt(writeEnd.Fd(), unix.F_SETFD, flags&^unix.FD_CLOEXEC); err != nil {
-				return fmt.Errorf("retain authoritative wake owner stop fd across exec: %w", err)
-			}
+			bound = true
 			return nil
 		},
 		stop: func() error {
@@ -72,10 +65,24 @@ func prepareAuthoritativeWakeChildPlatform(cmd *exec.Cmd) (*authoritativeWakeChi
 	}, nil
 }
 
+func validateDarwinWakeOwnerStartupRollbackFD(writeEnd *os.File) error {
+	flags, err := unix.FcntlInt(writeEnd.Fd(), unix.F_GETFD, 0)
+	if err != nil {
+		return fmt.Errorf("inspect authoritative wake owner startup rollback fd: %w", err)
+	}
+	if flags&unix.FD_CLOEXEC == 0 {
+		return fmt.Errorf("authoritative wake owner startup rollback fd is not close-on-exec")
+	}
+	return nil
+}
+
 func authoritativeWakePrivateStopFromEnv() (<-chan struct{}, func(), error) {
 	raw := strings.TrimSpace(os.Getenv(envWakePrivateStopFD))
 	if raw == "" {
 		return nil, func() {}, nil
+	}
+	if err := os.Unsetenv(envWakePrivateStopFD); err != nil {
+		return nil, nil, fmt.Errorf("clear %s after ingestion: %w", envWakePrivateStopFD, err)
 	}
 	fd, err := strconv.Atoi(raw)
 	if err != nil || fd < 3 {
@@ -85,11 +92,54 @@ func authoritativeWakePrivateStopFromEnv() (<-chan struct{}, func(), error) {
 	if file == nil {
 		return nil, nil, fmt.Errorf("%s fd is unavailable", envWakePrivateStopFD)
 	}
+	if err := sealDarwinWakePrivateStopFD(file); err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	stop, cleanup := watchAuthoritativeWakePrivateStop(file)
+	return stop, cleanup, nil
+}
+
+func sealDarwinWakePrivateStopFD(file *os.File) error {
+	if file == nil {
+		return fmt.Errorf("%s fd is unavailable", envWakePrivateStopFD)
+	}
+	fd := file.Fd()
+	flags, err := unix.FcntlInt(fd, unix.F_GETFD, 0)
+	if err != nil {
+		return fmt.Errorf("inspect %s fd flags: %w", envWakePrivateStopFD, err)
+	}
+	if flags&unix.FD_CLOEXEC == 0 {
+		if _, err := unix.FcntlInt(fd, unix.F_SETFD, flags|unix.FD_CLOEXEC); err != nil {
+			return fmt.Errorf("seal %s fd across exec: %w", envWakePrivateStopFD, err)
+		}
+	}
+	flags, err = unix.FcntlInt(fd, unix.F_GETFD, 0)
+	if err != nil {
+		return fmt.Errorf("verify %s fd flags: %w", envWakePrivateStopFD, err)
+	}
+	if flags&unix.FD_CLOEXEC == 0 {
+		return fmt.Errorf("%s fd is not close-on-exec", envWakePrivateStopFD)
+	}
+	return nil
+}
+
+func watchAuthoritativeWakePrivateStop(file *os.File) (<-chan struct{}, func()) {
 	stop := make(chan struct{})
+	finished := make(chan struct{})
 	go func() {
+		defer close(finished)
+		defer func() { _ = file.Close() }()
 		var one [1]byte
-		_, _ = file.Read(one[:])
-		close(stop)
+		if count, _ := file.Read(one[:]); count == 1 {
+			close(stop)
+		}
 	}()
-	return stop, func() { _ = file.Close() }, nil
+	var cleanupOnce sync.Once
+	return stop, func() {
+		cleanupOnce.Do(func() {
+			_ = file.Close()
+			<-finished
+		})
+	}
 }

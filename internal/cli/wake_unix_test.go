@@ -69,6 +69,18 @@ func stubWakeTTYSupport(t *testing.T) {
 	})
 }
 
+func liveWakeOwnerObservationForTest() wakeOwnerObservation {
+	var monitor *wakeOwnerObservationMonitor
+	monitor = newWakeOwnerObservationMonitor(func() error {
+		monitor.finish(nil)
+		return nil
+	})
+	return wakeOwnerObservation{
+		State:   wakeOwnerSame,
+		monitor: monitor,
+	}
+}
+
 func writeExecutableForTest(t *testing.T, name string) string {
 	t.Helper()
 	path := filepath.Join(secureTempDirForTest(t), name)
@@ -566,7 +578,7 @@ func TestRunWakeWithLoopPersistsInjectViaWakeOwnerFromEnv(t *testing.T) {
 		if got != owner {
 			t.Fatalf("observed owner = %#v, want %#v", got, owner)
 		}
-		return wakeOwnerObservation{State: wakeOwnerSame}, nil
+		return liveWakeOwnerObservationForTest(), nil
 	}
 	t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
 
@@ -594,6 +606,162 @@ func TestRunWakeWithLoopPersistsInjectViaWakeOwnerFromEnv(t *testing.T) {
 	})
 	if !errors.Is(err, errDone) {
 		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
+func TestRunWakeWithLoopSupervisesOwnerBeforeGenericLockAndMergesDone(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatal(err)
+	}
+	owner := wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	encoded, err := encodeWakeOwnerEnv(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envWakeOwner, encoded)
+	ownerDone := make(chan struct{})
+	oldObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
+		if got != owner {
+			t.Fatalf("observed owner = %#v, want %#v", got, owner)
+		}
+		if inspection := inspectWakeLock(root, "orchestrator"); inspection.Exists {
+			t.Fatalf("owner observation happened after lock publication: %#v", inspection)
+		}
+		return wakeOwnerObservation{
+			State: wakeOwnerSame,
+			done:  ownerDone,
+		}, nil
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
+
+	errDone := errors.New("done")
+	err = runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-mode", wakeInjectModeNone,
+	}, func(cfg wakeConfig) error {
+		if cfg.wakeOwner == nil || *cfg.wakeOwner != owner {
+			t.Fatalf("cfg.wakeOwner = %#v, want %#v", cfg.wakeOwner, owner)
+		}
+		if cfg.controlStop == nil {
+			t.Fatal("owner observation Done was not merged into controlStop")
+		}
+		close(ownerDone)
+		select {
+		case <-cfg.controlStop:
+		case <-time.After(time.Second):
+			t.Fatal("owner exit did not stop the generic wake")
+		}
+		return errDone
+	})
+	if !errors.Is(err, errDone) {
+		t.Fatalf("wake result = %v, want loop sentinel", err)
+	}
+}
+
+func TestRunWakeWithLoopRejectsSameOwnerWithoutLifetimeSignalBeforeLock(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatal(err)
+	}
+	owner := wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	encoded, err := encodeWakeOwnerEnv(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envWakeOwner, encoded)
+	oldObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(wakeOwner) (wakeOwnerObservation, error) {
+		return wakeOwnerObservation{State: wakeOwnerSame}, nil
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
+
+	loopCalled := false
+	err = runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-mode", wakeInjectModeNone,
+	}, func(wakeConfig) error {
+		loopCalled = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "lifetime signal") {
+		t.Fatalf("wake result = %v, want missing-lifetime refusal", err)
+	}
+	if loopCalled {
+		t.Fatal("missing owner lifetime signal reached wake loop")
+	}
+	if inspection := inspectWakeLock(root, "orchestrator"); inspection.Exists {
+		t.Fatalf("missing owner lifetime signal published lock: %#v", inspection)
+	}
+}
+
+func TestValidateWakeReadyFileAgainstOwnerReobservesGenericOwner(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatal(err)
+	}
+	cleanup, err := acquireWakeLockWithOptions(root, "orchestrator", wakeLockAcquireOptions{
+		wakeMode: wakeInjectModeNone,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	inspection := inspectWakeLock(root, "orchestrator")
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	if err := writeWakeReadyFile(root, "orchestrator", readyPath, inspection); err != nil {
+		t.Fatal(err)
+	}
+	owner := wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	observations := 0
+	oldObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
+		observations++
+		if got != owner {
+			t.Fatalf("observed owner = %#v, want %#v", got, owner)
+		}
+		return liveWakeOwnerObservationForTest(), nil
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
+
+	ready, err := validateWakeReadyFileAgainstOwner(
+		root,
+		"orchestrator",
+		readyPath,
+		&owner,
+	)
+	if err != nil || !ready {
+		t.Fatalf("generic owner readiness = %v, err=%v", ready, err)
+	}
+	if observations != 1 {
+		t.Fatalf("generic readiness owner observations = %d, want 1", observations)
 	}
 }
 
@@ -1326,7 +1494,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsMissingTTY(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected unusable wake lock error")
 	}
-	if !strings.Contains(err.Error(), "not usable for --require-wake") {
+	if !strings.Contains(err.Error(), "not usable for requested wake readiness") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
@@ -1385,7 +1553,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsBlankOrUnknownTTY(t *testing.T)
 			if err == nil {
 				t.Fatal("expected unusable wake lock error")
 			}
-			if !strings.Contains(err.Error(), "not usable for --require-wake") {
+			if !strings.Contains(err.Error(), "not usable for requested wake readiness") {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
@@ -1553,7 +1721,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *test
 	if err == nil {
 		t.Fatal("expected unusable wake lock error")
 	}
-	if !strings.Contains(err.Error(), "not usable for --require-wake") {
+	if !strings.Contains(err.Error(), "not usable for requested wake readiness") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {

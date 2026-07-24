@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,40 +16,44 @@ import (
 )
 
 type wakeConfig struct {
-	me                string
-	root              string
-	session           string
-	injectCmd         string
-	injectVia         string // external command for injection (replaces TIOCSTI)
-	injectArgs        []string
-	wakeOwner         *wakeOwner
-	injectTimeout     time.Duration
-	bell              bool
-	debounce          time.Duration
-	previewLen        int
-	strict            bool
-	fallbackWarn      bool
-	injectMode        string // auto, raw, paste
-	debug             bool
-	deferWhileInput   bool
-	inputQuietFor     time.Duration
-	inputPollInterval time.Duration
-	inputMaxHold      time.Duration
-	interrupt         bool
-	interruptLabel    string
-	interruptPriority string
-	interruptKey      string
-	interruptNotice   string
-	interruptCooldown time.Duration
-	lastInterrupt     time.Time
-	controlStop       <-chan struct{}
-	baselineRequested bool
-	baselineInherited bool
-	baselineExisting  map[string]wakeFileIdentity
-	onBaselineReady   func(map[string]wakeFileIdentity) error
-	onPrepared        func(wakeAdmissionWatcher) error
-	retainedInbox     wakeInboxReader
-	touchPresence     func() error
+	me                  string
+	root                string
+	session             string
+	injectCmd           string
+	injectVia           string // external command for injection (replaces TIOCSTI)
+	injectArgs          []string
+	wakeOwner           *wakeOwner
+	injectTimeout       time.Duration
+	bell                bool
+	debounce            time.Duration
+	previewLen          int
+	strict              bool
+	fallbackWarn        bool
+	injectMode          string // auto, raw, paste
+	debug               bool
+	deferWhileInput     bool
+	inputQuietFor       time.Duration
+	inputPollInterval   time.Duration
+	inputMaxHold        time.Duration
+	interrupt           bool
+	interruptLabel      string
+	interruptPriority   string
+	interruptKey        string
+	interruptNotice     string
+	interruptCooldown   time.Duration
+	lastInterrupt       time.Time
+	controlStop         <-chan struct{}
+	beforeTerminalWrite func() error
+	terminalWrite       func(string) error
+	terminalGeneration  string
+	terminalTTY         string
+	baselineRequested   bool
+	baselineInherited   bool
+	baselineExisting    map[string]wakeFileIdentity
+	onBaselineReady     func(map[string]wakeFileIdentity) error
+	onPrepared          func(wakeAdmissionWatcher) error
+	retainedInbox       wakeInboxReader
+	touchPresence       func() error
 }
 
 type wakeAdmissionWatcher interface {
@@ -66,6 +71,8 @@ const (
 	wakeInjectModeRaw   = "raw"
 	wakeInjectModePaste = "paste"
 	wakeInjectModeNone  = "none"
+
+	coopWakeDoorbell = ": AMQ doorbell run amq drain --include-body then act on it"
 
 	rawInjectDrainTimeout      = 2 * time.Second
 	rawInjectDrainPollInterval = 10 * time.Millisecond
@@ -232,6 +239,13 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		return nil
 	}
 
+	// A supervised/co-op wake is only a fixed doorbell. Message headers,
+	// session names, custom notices, commands, and urgency never become
+	// terminal input.
+	if usesCoopDoorbell(cfg) {
+		return injectNotification(cfg, coopWakeDoorbell, len(interruptMessages) == 0)
+	}
+
 	if cfg.interrupt && len(interruptMessages) > 0 {
 		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.previewLen, cfg.interruptNotice)
 		if cfg.injectMode == wakeInjectModeNone {
@@ -241,13 +255,28 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		now := time.Now()
 		if cfg.interruptKey != "" && shouldInterruptNow(cfg, now) {
 			if cfg.injectVia != "" {
-				if err := injectVia(cfg, cfg.interruptKey); err == nil {
+				allowed, guardErr := authorizeTerminalWrite(cfg)
+				if guardErr != nil {
+					return guardErr
+				}
+				if allowed {
+					if err := injectVia(cfg, cfg.interruptKey); err == nil {
+						cfg.lastInterrupt = now
+						time.Sleep(50 * time.Millisecond)
+					}
+				}
+			} else {
+				wrote, writeErr := writeTerminalChunk(cfg, cfg.interruptKey)
+				if writeErr != nil {
+					var authorityErr *wakeTerminalAuthorityError
+					if errors.As(writeErr, &authorityErr) {
+						return writeErr
+					}
+				}
+				if writeErr == nil && wrote {
 					cfg.lastInterrupt = now
 					time.Sleep(50 * time.Millisecond)
 				}
-			} else if err := tiocsti.Inject(cfg.interruptKey); err == nil {
-				cfg.lastInterrupt = now
-				time.Sleep(50 * time.Millisecond)
 			}
 		}
 		return injectNotification(cfg, interruptText, false)
@@ -416,14 +445,18 @@ func writeWakeOutput(text string, bell bool) {
 }
 
 func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error {
+	ownerBound := usesCoopDoorbell(cfg)
+	if ownerBound {
+		text = coopWakeDoorbell
+	}
 	if cfg.injectMode == wakeInjectModeNone {
-		writeWakeOutput(text, cfg.bell)
+		writeWakeOutput(text, cfg.bell && !ownerBound)
 		return nil
 	}
 
 	// Keep plain text for stderr fallback
 	plainText := text
-	if cfg.bell {
+	if cfg.bell && !ownerBound {
 		plainText = "\a" + plainText
 	}
 
@@ -434,6 +467,13 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	// External injection: delegate to user-specified command instead of TIOCSTI.
 	// The command receives the notification text as its last argument.
 	if cfg.injectVia != "" {
+		allowed, guardErr := authorizeTerminalWrite(cfg)
+		if guardErr != nil {
+			return guardErr
+		}
+		if !allowed {
+			return nil
+		}
 		if err := injectVia(cfg, plainText); err != nil {
 			if cfg.fallbackWarn {
 				_ = writeStderr("amq wake: --inject-via failed: %v\n", err)
@@ -456,7 +496,7 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 		// Ink treats multi-char input as paste, not keypresses. Sending text+CR
 		// as one chunk makes Ink see pasted text, not an Enter keypress.
 		injectedText := text
-		if cfg.bell {
+		if cfg.bell && !ownerBound {
 			injectedText = "\a" + injectedText
 		}
 		injectErr = injectRawNotification(cfg, injectedText)
@@ -465,28 +505,45 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 		// Paste mode: bracketed paste with delayed CR
 		// Works with crossterm/ratatui apps
 		// Send paste content first, then CR after short delay to avoid coalescing
-		pasteText := "\x1b[200~" + text + "\x1b[201~"
-		if cfg.bell {
+		pasteText := text
+		if !ownerBound {
+			pasteText = "\x1b[200~" + text + "\x1b[201~"
+		}
+		if cfg.bell && !ownerBound {
 			pasteText = "\a" + pasteText
 		}
-		if err := tiocstiInject(pasteText); err != nil {
+		wrote, err := writeTerminalChunk(cfg, pasteText)
+		if err != nil {
 			injectErr = err
-		} else {
+		} else if wrote {
 			// Small delay to ensure CR lands in separate read cycle
 			time.Sleep(25 * time.Millisecond)
-			injectErr = tiocstiInject("\r")
+			_, injectErr = writeTerminalChunk(cfg, "\r")
 		}
 
 	default:
 		// Unknown mode, fall back to raw
-		injectedText := text + "\r"
-		if cfg.bell {
-			injectedText = "\a" + injectedText
+		if ownerBound {
+			wrote, err := writeTerminalChunk(cfg, text)
+			if err != nil {
+				injectErr = err
+			} else if wrote {
+				_, injectErr = writeTerminalChunk(cfg, "\r")
+			}
+		} else {
+			injectedText := text + "\r"
+			if cfg.bell {
+				injectedText = "\a" + injectedText
+			}
+			_, injectErr = writeTerminalChunk(cfg, injectedText)
 		}
-		injectErr = tiocstiInject(injectedText)
 	}
 
 	if injectErr != nil {
+		var authorityErr *wakeTerminalAuthorityError
+		if errors.As(injectErr, &authorityErr) {
+			return injectErr
+		}
 		if cfg.fallbackWarn {
 			_ = writeStderr("amq wake: TIOCSTI injection failed: %v\n", injectErr)
 			_ = writeStderr("amq wake: falling back to stderr notification\n")
@@ -498,6 +555,79 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	}
 
 	return nil
+}
+
+func usesCoopDoorbell(cfg *wakeConfig) bool {
+	if cfg.wakeOwner != nil {
+		return true
+	}
+	if cfg.controlStop == nil {
+		return false
+	}
+	// Direct guarded-write tests and injected terminal authorities do not need
+	// to synthesize a complete process owner merely to exercise the doorbell.
+	// A normal ownerless repair has a rooted control channel but no retained
+	// terminal writer and must keep its legacy notification payload.
+	return cfg.root == "" ||
+		cfg.beforeTerminalWrite != nil ||
+		cfg.terminalWrite != nil
+}
+
+type wakeTerminalAuthorityError struct {
+	err error
+}
+
+func (err *wakeTerminalAuthorityError) Error() string {
+	return err.err.Error()
+}
+
+func (err *wakeTerminalAuthorityError) Unwrap() error {
+	return err.err
+}
+
+func authorizeTerminalWrite(cfg *wakeConfig) (bool, error) {
+	if cfg.controlStop != nil {
+		select {
+		case <-cfg.controlStop:
+			return false, nil
+		default:
+		}
+	}
+	if cfg.controlStop != nil &&
+		cfg.beforeTerminalWrite == nil &&
+		cfg.terminalWrite == nil &&
+		cfg.root != "" &&
+		cfg.me != "" {
+		if !authorizeTerminalWritePlatform(cfg) {
+			return false, nil
+		}
+	}
+	if cfg.beforeTerminalWrite != nil {
+		if err := cfg.beforeTerminalWrite(); err != nil {
+			if isWakeTerminalControlStopped(err) {
+				return false, nil
+			}
+			return false, &wakeTerminalAuthorityError{err: err}
+		}
+	}
+	return true, nil
+}
+
+func writeTerminalChunk(cfg *wakeConfig, chunk string) (bool, error) {
+	allowed, err := authorizeTerminalWrite(cfg)
+	if err != nil || !allowed {
+		return false, err
+	}
+	if cfg.terminalWrite != nil {
+		if err := cfg.terminalWrite(chunk); err != nil {
+			if isWakeTerminalControlStopped(err) {
+				return false, nil
+			}
+			return true, &wakeTerminalAuthorityError{err: err}
+		}
+		return true, nil
+	}
+	return true, tiocstiInject(chunk)
 }
 
 // rawSubmitPrelude returns the bytes injected between the drained notification
@@ -524,11 +654,15 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 	if cfg.debug {
 		_ = writeStderr("amq wake [debug]: injecting %d bytes of text\n", len(injectedText))
 	}
-	if err := tiocstiInject(injectedText); err != nil {
+	wrote, err := writeTerminalChunk(cfg, injectedText)
+	if err != nil {
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: text inject failed: %v\n", err)
 		}
 		return err
+	}
+	if !wrote {
+		return nil
 	}
 	prelude := rawSubmitPrelude(cfg.me)
 
@@ -551,11 +685,15 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 	// Prelude (codex: a lone LF) clears the TUI's paste-burst state while the
 	// injected text is fresh; its newline is trimmed from the submitted payload.
 	if prelude != "" {
-		if err := tiocstiInject(prelude); err != nil {
+		wrote, err := writeTerminalChunk(cfg, prelude)
+		if err != nil {
 			if cfg.debug {
 				_ = writeStderr("amq wake [debug]: prelude inject failed: %v\n", err)
 			}
 			return err
+		}
+		if !wrote {
+			return nil
 		}
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: prelude injected OK (%q)\n", prelude)
@@ -567,11 +705,15 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 	// pasted newline.
 	rawInjectSleep(rawInjectSettleDelay)
 
-	if err := tiocstiInject("\r"); err != nil {
+	wrote, err = writeTerminalChunk(cfg, "\r")
+	if err != nil {
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: submit key inject failed: %v\n", err)
 		}
 		return err
+	}
+	if !wrote {
+		return nil
 	}
 	if cfg.debug {
 		_ = writeStderr("amq wake [debug]: submit key injected OK\n")
@@ -593,12 +735,20 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 		return nil
 	}
 	rawInjectSleep(rawInjectSettleDelay)
-	if err := tiocstiInject("\r"); err != nil {
+	wrote, err = writeTerminalChunk(cfg, "\r")
+	if err != nil {
 		// The text and first submit key were already delivered; the rescue is
-		// best-effort.
+		// best-effort unless exact terminal authority was lost.
+		var authorityErr *wakeTerminalAuthorityError
+		if errors.As(err, &authorityErr) {
+			return err
+		}
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: rescue submit inject failed: %v\n", err)
 		}
+		return nil
+	}
+	if !wrote {
 		return nil
 	}
 	if cfg.debug {

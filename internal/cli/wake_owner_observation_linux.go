@@ -7,16 +7,15 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 func observeAuthoritativeWakeOwnerPlatform(owner wakeOwner) (wakeOwnerObservation, error) {
 	pidfd, err := linuxPidfdOpen(owner.PID, 0)
 	if err != nil {
 		if errors.Is(err, syscall.ESRCH) {
-			return wakeOwnerObservation{
-				State:  wakeOwnerDead,
-				Reason: "owner process is not running",
-			}, nil
+			return deadWakeOwnerObservation("owner process is not running"), nil
 		}
 		unsupported := wakeOwnerCapabilityUnsupported(err)
 		return wakeOwnerObservation{
@@ -25,51 +24,147 @@ func observeAuthoritativeWakeOwnerPlatform(owner wakeOwner) (wakeOwnerObservatio
 			CapabilityUnsupported: unsupported,
 		}, fmt.Errorf("pidfd_open owner process %d: %w", owner.PID, err)
 	}
-	observation := wakeOwnerObservation{
-		State: wakeOwnerUnknown,
-		close: func() error { return linuxPidfdClose(pidfd) },
-	}
 	exited, err := linuxPidfdPoll(pidfd, 0)
 	if err != nil {
-		_ = observation.Close()
-		return wakeOwnerObservation{}, fmt.Errorf("poll owner pidfd before inspection: %w", err)
+		return closeLinuxOwnerObservationPidfd(
+			pidfd,
+			wakeOwnerObservation{},
+			fmt.Errorf("poll owner pidfd before inspection: %w", err),
+		)
 	}
 	if exited {
-		observation.State = wakeOwnerDead
-		observation.Reason = "owner process is not running"
-		return observation, nil
+		return closeLinuxOwnerObservationPidfd(
+			pidfd,
+			deadWakeOwnerObservation("owner process is not running"),
+			nil,
+		)
 	}
 
 	first := inspectWakeProcess(owner.PID)
 	firstSessionID, firstSessionErr := getWakeProcessSID(owner.PID)
 	exited, err = linuxPidfdPoll(pidfd, 0)
 	if err != nil {
-		_ = observation.Close()
-		return wakeOwnerObservation{}, fmt.Errorf("poll owner pidfd during inspection: %w", err)
+		return closeLinuxOwnerObservationPidfd(
+			pidfd,
+			wakeOwnerObservation{},
+			fmt.Errorf("poll owner pidfd during inspection: %w", err),
+		)
 	}
 	if exited {
-		observation.State = wakeOwnerDead
-		observation.Reason = "owner process is not running"
-		return observation, nil
+		return closeLinuxOwnerObservationPidfd(
+			pidfd,
+			deadWakeOwnerObservation("owner process is not running"),
+			nil,
+		)
 	}
 	second := inspectWakeProcess(owner.PID)
 	secondSessionID, secondSessionErr := getWakeProcessSID(owner.PID)
 	exitedAfter, err := linuxPidfdPoll(pidfd, 0)
 	if err != nil {
-		_ = observation.Close()
-		return wakeOwnerObservation{}, fmt.Errorf("poll owner pidfd after inspection: %w", err)
+		return closeLinuxOwnerObservationPidfd(
+			pidfd,
+			wakeOwnerObservation{},
+			fmt.Errorf("poll owner pidfd after inspection: %w", err),
+		)
 	}
 	if exitedAfter {
-		observation.State = wakeOwnerDead
-		observation.Reason = "owner process is not running"
-		return observation, nil
+		return closeLinuxOwnerObservationPidfd(
+			pidfd,
+			deadWakeOwnerObservation("owner process is not running"),
+			nil,
+		)
 	}
+	observation := wakeOwnerObservation{}
 	observation.State, observation.Reason = classifyStableAuthoritativeWakeOwner(
 		owner,
 		first, firstSessionID, firstSessionErr,
 		second, secondSessionID, secondSessionErr,
 	)
-	return observation, nil
+	switch observation.State {
+	case wakeOwnerSame:
+		monitor, monitorErr := startLinuxWakeOwnerObservationMonitor(pidfd)
+		if monitorErr != nil {
+			return wakeOwnerObservation{
+				State:  wakeOwnerUnknown,
+				Reason: fmt.Sprintf("owner pidfd monitor unavailable: %v", monitorErr),
+			}, monitorErr
+		}
+		observation.monitor = monitor
+		return observation, nil
+	case wakeOwnerDead:
+		observation.done = wakeOwnerObservationAlreadyDone
+	case wakeOwnerUnknown:
+		return closeLinuxOwnerObservationPidfd(
+			pidfd,
+			observation,
+			fmt.Errorf("owner process identity is unknown: %s", observation.Reason),
+		)
+	}
+	return closeLinuxOwnerObservationPidfd(pidfd, observation, nil)
+}
+
+func closeLinuxOwnerObservationPidfd(
+	pidfd int,
+	observation wakeOwnerObservation,
+	cause error,
+) (wakeOwnerObservation, error) {
+	closeErr := linuxPidfdClose(pidfd)
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close owner pidfd: %w", closeErr)
+	}
+	return observation, errors.Join(cause, closeErr)
+}
+
+func startLinuxWakeOwnerObservationMonitor(pidfd int) (*wakeOwnerObservationMonitor, error) {
+	cancelRead, cancelWrite, err := os.Pipe()
+	if err != nil {
+		_, closeErr := closeLinuxOwnerObservationPidfd(pidfd, wakeOwnerObservation{}, nil)
+		return nil, errors.Join(
+			fmt.Errorf("create owner pidfd monitor cancellation pipe: %w", err),
+			closeErr,
+		)
+	}
+	monitor := newWakeOwnerObservationMonitor(cancelWrite.Close)
+	go func() {
+		waitErr := waitLinuxWakeOwnerObservation(pidfd, int(cancelRead.Fd()))
+		closeErr := errors.Join(
+			linuxPidfdClose(pidfd),
+			cancelRead.Close(),
+		)
+		monitor.finish(errors.Join(waitErr, closeErr))
+	}()
+	return monitor, nil
+}
+
+func waitLinuxWakeOwnerObservation(pidfd, cancelFD int) error {
+	pollFDs := []unix.PollFd{
+		{Fd: int32(pidfd), Events: unix.POLLIN},
+		{Fd: int32(cancelFD), Events: unix.POLLIN},
+	}
+	for {
+		pollFDs[0].Revents = 0
+		pollFDs[1].Revents = 0
+		_, err := unix.Poll(pollFDs, -1)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("poll retained owner pidfd: %w", err)
+		}
+
+		ownerEvents := pollFDs[0].Revents
+		if ownerEvents&(unix.POLLIN|unix.POLLHUP) != 0 {
+			return nil
+		}
+		if ownerEvents&(unix.POLLERR|unix.POLLNVAL) != 0 {
+			return fmt.Errorf("retained owner pidfd poll failed with events %#x", ownerEvents)
+		}
+
+		cancelEvents := pollFDs[1].Revents
+		if cancelEvents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 {
+			return nil
+		}
+	}
 }
 
 func wakeOwnerCapabilityUnsupported(err error) bool {
