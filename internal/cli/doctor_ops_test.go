@@ -436,7 +436,7 @@ func TestRunOpsChecks_FixesStaleWakeLock(t *testing.T) {
 	}
 }
 
-func TestRunOpsChecks_ReportsWakeRepairAvailabilityWithoutSpawning(t *testing.T) {
+func TestRunOpsChecks_RequiresWakeRepairFloor(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("ensure root dirs: %v", err)
@@ -479,11 +479,11 @@ func TestRunOpsChecks_ReportsWakeRepairAvailabilityWithoutSpawning(t *testing.T)
 	if got.TargetReason != "" {
 		t.Fatalf("target_reason = %q, want empty", got.TargetReason)
 	}
-	if !got.RepairAvailable {
-		t.Fatal("repair_available = false, want true")
+	if got.RepairAvailable || got.Repair != "" {
+		t.Fatalf("repair advertised without continuity floor: %#v", got)
 	}
-	if got.Repair != wakeRepairCommand(root, "alice") {
-		t.Fatalf("repair = %q, want %q", got.Repair, wakeRepairCommand(root, "alice"))
+	if !strings.Contains(got.RepairReason, "wake repair floor is missing") {
+		t.Fatalf("repair_reason = %q, want missing floor", got.RepairReason)
 	}
 	if _, err := os.Stat(lockPath); err != nil {
 		t.Fatalf("doctor report should not remove lock: %v", err)

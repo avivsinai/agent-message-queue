@@ -43,8 +43,21 @@ type wakeConfig struct {
 	lastInterrupt     time.Time
 	controlStop       <-chan struct{}
 	baselineRequested bool
+	baselineInherited bool
 	baselineExisting  map[string]wakeFileIdentity
-	onPrepared        func() error
+	onBaselineReady   func(map[string]wakeFileIdentity) error
+	onPrepared        func(wakeAdmissionWatcher) error
+	retainedInbox     wakeInboxReader
+	touchPresence     func() error
+}
+
+type wakeAdmissionWatcher interface {
+	Errors() <-chan error
+}
+
+type wakeInboxReader interface {
+	ReadDir() ([]os.DirEntry, error)
+	ReadHeader(name string) (format.Header, error)
 }
 
 const defaultInjectTimeout = 5 * time.Second
@@ -139,7 +152,13 @@ func shouldDeferBeforeInject(cfg *wakeConfig, deferForInput bool) bool {
 func notifyNewMessages(cfg *wakeConfig) error {
 	inboxNew := fsq.AgentInboxNew(cfg.root, cfg.me)
 
-	entries, err := os.ReadDir(inboxNew)
+	var entries []os.DirEntry
+	var err error
+	if cfg.retainedInbox != nil {
+		entries, err = cfg.retainedInbox.ReadDir()
+	} else {
+		entries, err = os.ReadDir(inboxNew)
+	}
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -168,8 +187,12 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			delete(cfg.baselineExisting, name)
 		}
 
-		path := filepath.Join(inboxNew, name)
-		header, err := format.ReadHeaderFile(path)
+		var header format.Header
+		if cfg.retainedInbox != nil {
+			header, err = cfg.retainedInbox.ReadHeader(name)
+		} else {
+			header, err = format.ReadHeaderFile(filepath.Join(inboxNew, name))
+		}
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue

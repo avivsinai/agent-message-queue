@@ -21,18 +21,15 @@ func stubInspectWakeProcess(t *testing.T, fn func(pid int) wakeProcessInfo) {
 
 func secureTempDirForTest(t *testing.T) string {
 	t.Helper()
-	cwd, err := os.Getwd()
-	if err == nil {
-		if resolved, resolveErr := filepath.EvalSymlinks(cwd); resolveErr == nil {
-			cwd = resolved
-		}
-		dir, mkErr := os.MkdirTemp(cwd, ".amq-secure-test-")
-		if mkErr == nil {
-			t.Cleanup(func() { _ = os.RemoveAll(dir) })
-			return dir
-		}
+	dir, err := os.MkdirTemp(cliSecureTempRoot, "amq-test-")
+	if err != nil {
+		t.Fatalf("create secure test temp directory: %v", err)
 	}
-	dir := t.TempDir()
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove secure test temp directory: %v", err)
+		}
+	})
 	if resolved, resolveErr := filepath.EvalSymlinks(dir); resolveErr == nil {
 		return resolved
 	}

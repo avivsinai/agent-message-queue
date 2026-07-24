@@ -226,6 +226,9 @@ func runDoctor(args []string) error {
 			if wl.TargetReason != "" {
 				line += " target_reason=" + wl.TargetReason
 			}
+			if wl.RepairReason != "" {
+				line += " repair_reason=" + wl.RepairReason
+			}
 			if wl.RepairAvailable && wl.Status == string(wakeLockStale) {
 				line += " repair=" + wl.Repair
 			}
