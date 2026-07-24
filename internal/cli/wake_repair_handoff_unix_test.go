@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -282,6 +283,404 @@ func TestWakeRepairPrivateHandoffRequiresExactAdmittedEcho(t *testing.T) {
 	if err := parent.Release(prepared); err == nil ||
 		!strings.Contains(err.Error(), "already released") {
 		t.Fatalf("duplicate release error = %v", err)
+	}
+}
+
+func TestWakeRepairChildReportsBoundAdmissionRejection(t *testing.T) {
+	tests := []struct {
+		name      string
+		validator func() error
+		want      string
+	}{
+		{
+			name: "validation error",
+			validator: func() error {
+				return errors.New("injected canonical validation failure")
+			},
+			want: "injected canonical validation failure",
+		},
+		{
+			name: "missing validator",
+			want: "wake repair admission validation is missing",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, prepared := wakeRepairProtocolPreparedForTest(t, "child-generation")
+			parentToChildReader, parentToChildWriter, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			childToParentReader, childToParentWriter, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent := newWakeRepairParentHandoffForFiles(parentToChildWriter, childToParentReader)
+			child := newWakeRepairChildHandoffForFiles(parentToChildReader, childToParentWriter)
+			defer func() {
+				_ = parent.Close()
+				_ = child.Close()
+			}()
+
+			childResult := make(chan error, 1)
+			go func() {
+				childResult <- child.AwaitAdmitAcknowledgeAndRelease(
+					prepared,
+					test.validator,
+				)
+			}()
+
+			admitErr := parent.Admit(prepared)
+			if admitErr == nil ||
+				!strings.Contains(admitErr.Error(), "wake repair child rejected admission") ||
+				!strings.Contains(admitErr.Error(), test.want) {
+				t.Fatalf("parent admission rejection = %v, want %q", admitErr, test.want)
+			}
+			if parent.hasAdmit {
+				t.Fatal("rejected admission recorded an exact acknowledgement")
+			}
+			if !parent.hasReject {
+				t.Fatal("exact rejection did not make admission terminal")
+			}
+			if retryErr := parent.Admit(prepared); retryErr == nil ||
+				!strings.Contains(retryErr.Error(), "already rejected") {
+				t.Fatalf("second admission after rejection error = %v", retryErr)
+			}
+			if err := parent.Release(prepared); err == nil ||
+				!strings.Contains(err.Error(), "before exact acknowledgement") {
+				t.Fatalf("release after rejection error = %v", err)
+			}
+			select {
+			case childErr := <-childResult:
+				if childErr == nil || !strings.Contains(childErr.Error(), test.want) {
+					t.Fatalf("child admission rejection = %v, want %q", childErr, test.want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("child did not return after reporting admission rejection")
+			}
+		})
+	}
+}
+
+func TestWakeRepairHandoffRejectReasonIsStrictAndBounded(t *testing.T) {
+	_, prepared := wakeRepairProtocolPreparedForTest(t, "child-generation")
+	admit, err := newWakeRepairHandoffAdmit(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newWakeRepairHandoffReject(
+		admit,
+		errors.New("canonical wake repair agent directory no longer matches retained authority"),
+	); err != nil {
+		t.Fatalf("valid rejection reason: %v", err)
+	}
+	if _, err := newWakeRepairHandoffReject(
+		admit,
+		errors.New(strings.Repeat("x", wakeRepairHandoffMaxReasonBytes)),
+	); err != nil {
+		t.Fatalf("maximum rejection reason: %v", err)
+	}
+
+	for _, reason := range []string{
+		"",
+		" leading whitespace",
+		"trailing whitespace ",
+		"line\nbreak",
+		"carriage\rreturn",
+		"nul\x00byte",
+		"control\x7fbyte",
+		"line\u2028separator",
+		"paragraph\u2029separator",
+		"bidi\u202eoverride",
+		string([]byte{0xff}),
+		strings.Repeat("x", wakeRepairHandoffMaxReasonBytes+1),
+	} {
+		if _, err := newWakeRepairHandoffReject(admit, errors.New(reason)); err == nil {
+			t.Fatalf("invalid rejection reason accepted: %q", reason)
+		}
+	}
+}
+
+func TestWakeRepairChildAdmissionRejectionJoinsSendFailure(t *testing.T) {
+	_, prepared := wakeRepairProtocolPreparedForTest(t, "child-generation")
+	admit, err := newWakeRepairHandoffAdmit(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	handoff := &wakeRepairChildHandoff{writer: writer}
+	rejectionErr := handoff.rejectAdmission(
+		admit,
+		errors.New("injected canonical validation failure"),
+	)
+	for _, want := range []string{
+		"injected canonical validation failure",
+		"report wake repair admission rejection",
+		"write wake repair handoff message",
+	} {
+		if rejectionErr == nil || !strings.Contains(rejectionErr.Error(), want) {
+			t.Fatalf("joined rejection error = %v, want %q", rejectionErr, want)
+		}
+	}
+}
+
+func TestWakeRepairParentAdmissionResponsesFailClosed(t *testing.T) {
+	type responseFunc func(*os.File, wakeRepairHandoffAdmit) error
+	tests := []struct {
+		name    string
+		respond responseFunc
+		wants   []string
+		avoid   string
+	}{
+		{
+			name: "mismatched rejection generation",
+			respond: func(writer *os.File, admit wakeRepairHandoffAdmit) error {
+				reject, err := newWakeRepairHandoffReject(
+					admit,
+					errors.New("untrusted mismatched rejection reason"),
+				)
+				if err != nil {
+					return err
+				}
+				reject.childGeneration = "other-generation"
+				return writeWakeRepairHandoffReject(writer, reject)
+			},
+			wants: []string{"read wake repair admitted acknowledgement", "does not match exact admit"},
+			avoid: "untrusted mismatched rejection reason",
+		},
+		{
+			name: "mismatched rejection prepared digest",
+			respond: func(writer *os.File, admit wakeRepairHandoffAdmit) error {
+				reject, err := newWakeRepairHandoffReject(
+					admit,
+					errors.New("untrusted mismatched rejection reason"),
+				)
+				if err != nil {
+					return err
+				}
+				reject.preparedDigest = "sha256:" + strings.Repeat("9", 64)
+				return writeWakeRepairHandoffReject(writer, reject)
+			},
+			wants: []string{"read wake repair admitted acknowledgement", "does not match exact admit"},
+			avoid: "untrusted mismatched rejection reason",
+		},
+		{
+			name: "missing rejection reason",
+			respond: func(writer *os.File, admit wakeRepairHandoffAdmit) error {
+				return writeWakeRepairHandoffFrame(writer, wakeRepairHandoffAdmissionResultWire{
+					Schema:          wakeRepairHandoffSchema,
+					Kind:            wakeRepairHandoffKindReject,
+					ChildGeneration: admit.childGeneration,
+					PreparedDigest:  admit.preparedDigest,
+				})
+			},
+			wants: []string{"read wake repair admitted acknowledgement", "rejection reason is missing"},
+		},
+		{
+			name: "null rejection reason",
+			respond: func(writer *os.File, admit wakeRepairHandoffAdmit) error {
+				return writeWakeRepairHandoffFrame(writer, wakeRepairHandoffAdmissionResultWire{
+					Schema:          wakeRepairHandoffSchema,
+					Kind:            wakeRepairHandoffKindReject,
+					ChildGeneration: admit.childGeneration,
+					PreparedDigest:  admit.preparedDigest,
+					Reason:          json.RawMessage("null"),
+				})
+			},
+			wants: []string{"read wake repair admitted acknowledgement", "rejection reason is missing"},
+		},
+		{
+			name: "empty rejection reason",
+			respond: func(writer *os.File, admit wakeRepairHandoffAdmit) error {
+				return writeWakeRepairHandoffFrame(writer, wakeRepairHandoffAdmissionResultWire{
+					Schema:          wakeRepairHandoffSchema,
+					Kind:            wakeRepairHandoffKindReject,
+					ChildGeneration: admit.childGeneration,
+					PreparedDigest:  admit.preparedDigest,
+					Reason:          json.RawMessage(`""`),
+				})
+			},
+			wants: []string{"read wake repair admitted acknowledgement", "rejection reason is invalid"},
+		},
+		{
+			name: "invalid UTF-8 rejection",
+			respond: func(writer *os.File, admit wakeRepairHandoffAdmit) error {
+				frame := []byte(
+					`{"schema":1,"kind":"reject","child_generation":"` +
+						admit.childGeneration +
+						`","prepared_digest":"` +
+						admit.preparedDigest +
+						`","reason":"`,
+				)
+				frame = append(frame, 0xff)
+				frame = append(frame, '"', '}', '\n')
+				_, err := writer.Write(frame)
+				return err
+			},
+			wants: []string{"read wake repair admitted acknowledgement", "invalid UTF-8"},
+		},
+		{
+			name: "acknowledgement with nonempty reason",
+			respond: func(writer *os.File, admit wakeRepairHandoffAdmit) error {
+				return writeWakeRepairHandoffFrame(writer, wakeRepairHandoffAdmissionResultWire{
+					Schema:          wakeRepairHandoffSchema,
+					Kind:            wakeRepairHandoffKindAdmit,
+					ChildGeneration: admit.childGeneration,
+					PreparedDigest:  admit.preparedDigest,
+					Reason:          json.RawMessage(`"untrusted acknowledgement reason"`),
+				})
+			},
+			wants: []string{"read wake repair admitted acknowledgement", "contains a rejection reason"},
+			avoid: "untrusted acknowledgement reason",
+		},
+		{
+			name: "acknowledgement with empty reason",
+			respond: func(writer *os.File, admit wakeRepairHandoffAdmit) error {
+				return writeWakeRepairHandoffFrame(writer, wakeRepairHandoffAdmissionResultWire{
+					Schema:          wakeRepairHandoffSchema,
+					Kind:            wakeRepairHandoffKindAdmit,
+					ChildGeneration: admit.childGeneration,
+					PreparedDigest:  admit.preparedDigest,
+					Reason:          json.RawMessage(`""`),
+				})
+			},
+			wants: []string{"read wake repair admitted acknowledgement", "contains a rejection reason"},
+		},
+		{
+			name: "acknowledgement with null reason",
+			respond: func(writer *os.File, admit wakeRepairHandoffAdmit) error {
+				return writeWakeRepairHandoffFrame(writer, wakeRepairHandoffAdmissionResultWire{
+					Schema:          wakeRepairHandoffSchema,
+					Kind:            wakeRepairHandoffKindAdmit,
+					ChildGeneration: admit.childGeneration,
+					PreparedDigest:  admit.preparedDigest,
+					Reason:          json.RawMessage("null"),
+				})
+			},
+			wants: []string{"read wake repair admitted acknowledgement", "contains a rejection reason"},
+		},
+		{
+			name: "admission response with unknown field",
+			respond: func(writer *os.File, admit wakeRepairHandoffAdmit) error {
+				return writeWakeRepairHandoffFrame(writer, map[string]any{
+					"schema":           wakeRepairHandoffSchema,
+					"kind":             wakeRepairHandoffKindAdmit,
+					"child_generation": admit.childGeneration,
+					"prepared_digest":  admit.preparedDigest,
+					"unknown":          true,
+				})
+			},
+			wants: []string{"read wake repair admitted acknowledgement", "unknown field"},
+		},
+		{
+			name: "unknown kind",
+			respond: func(writer *os.File, admit wakeRepairHandoffAdmit) error {
+				return writeWakeRepairHandoffFrame(writer, wakeRepairHandoffAdmissionResultWire{
+					Schema:          wakeRepairHandoffSchema,
+					Kind:            "unknown",
+					ChildGeneration: admit.childGeneration,
+					PreparedDigest:  admit.preparedDigest,
+				})
+			},
+			wants: []string{"read wake repair admitted acknowledgement", "response kind"},
+		},
+		{
+			name: "unknown schema",
+			respond: func(writer *os.File, admit wakeRepairHandoffAdmit) error {
+				return writeWakeRepairHandoffFrame(writer, wakeRepairHandoffAdmissionResultWire{
+					Schema:          wakeRepairHandoffSchema + 1,
+					Kind:            wakeRepairHandoffKindReject,
+					ChildGeneration: admit.childGeneration,
+					PreparedDigest:  admit.preparedDigest,
+					Reason:          json.RawMessage(`"untrusted unknown schema reason"`),
+				})
+			},
+			wants: []string{"read wake repair admitted acknowledgement", "schema"},
+			avoid: "untrusted unknown schema reason",
+		},
+		{
+			name: "response EOF",
+			respond: func(writer *os.File, _ wakeRepairHandoffAdmit) error {
+				return writer.Close()
+			},
+			wants: []string{"read wake repair admitted acknowledgement", "unexpected EOF"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, prepared := wakeRepairProtocolPreparedForTest(t, "child-generation")
+			parentToChildReader, parentToChildWriter, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			childToParentReader, childToParentWriter, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent := newWakeRepairParentHandoffForFiles(parentToChildWriter, childToParentReader)
+			defer func() {
+				_ = parent.Close()
+				_ = parentToChildReader.Close()
+				_ = childToParentWriter.Close()
+			}()
+
+			responseResult := make(chan error, 1)
+			go func() {
+				admit, readErr := readWakeRepairHandoffAdmit(parentToChildReader)
+				if readErr != nil {
+					responseResult <- readErr
+					return
+				}
+				responseResult <- test.respond(childToParentWriter, admit)
+			}()
+
+			admitErr := parent.Admit(prepared)
+			if admitErr == nil {
+				t.Fatal("invalid admission response was accepted")
+			}
+			for _, want := range test.wants {
+				if !strings.Contains(admitErr.Error(), want) {
+					t.Fatalf("admission response error = %v, want %q", admitErr, want)
+				}
+			}
+			if test.avoid != "" && strings.Contains(admitErr.Error(), test.avoid) {
+				t.Fatalf("untrusted rejection reason surfaced before exact binding: %v", admitErr)
+			}
+			if parent.hasAdmit {
+				t.Fatal("invalid admission response recorded an exact acknowledgement")
+			}
+			if parent.hasReject {
+				t.Fatal("invalid admission response recorded an exact rejection")
+			}
+			if !parent.admitAttempted {
+				t.Fatal("invalid admission response did not make the exchange one-shot")
+			}
+			if retryErr := parent.Admit(prepared); retryErr == nil ||
+				!strings.Contains(retryErr.Error(), "already attempted") {
+				t.Fatalf("second admission after invalid response error = %v", retryErr)
+			}
+			if err := parent.Release(prepared); err == nil ||
+				!strings.Contains(err.Error(), "before exact acknowledgement") {
+				t.Fatalf("release after invalid response error = %v", err)
+			}
+			select {
+			case responseErr := <-responseResult:
+				if responseErr != nil {
+					t.Fatalf("write invalid admission response: %v", responseErr)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("invalid admission response writer did not finish")
+			}
+		})
 	}
 }
 
@@ -828,6 +1227,11 @@ func TestInheritedWakeRepairDirectoriesStayBoundAcrossAgentPathReplacement(t *te
 		_ = childInboxDir.Close()
 		_ = childAgentDir.Close()
 	}()
+	watcher, err := childInboxDir.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = watcher.Close() }()
 
 	detachedAgentPath := filepath.Join(filepath.Dir(sourceAgentPath), "codex-detached")
 	if err := os.Rename(sourceAgentPath, detachedAgentPath); err != nil {
@@ -884,28 +1288,49 @@ func TestInheritedWakeRepairDirectoriesStayBoundAcrossAgentPathReplacement(t *te
 		t.Fatalf("retained agent did not receive repair log: %v", err)
 	}
 
-	watcher, err := childInboxDir.NewWatcher()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = watcher.Close() }()
 	writeWakeRepairHandoffMessage(t, filepath.Join(replacementInboxPath, "replacement-event.md"), "replacement event")
-	select {
-	case event := <-watcher.Events():
-		t.Fatalf("replacement inbox reached retained watcher: %#v", event)
-	case err := <-watcher.Errors():
-		t.Fatalf("retained watcher error after replacement write: %v", err)
-	case <-time.After(150 * time.Millisecond):
-	}
-
 	detachedInboxPath := filepath.Join(detachedAgentPath, "inbox", "new")
 	writeWakeRepairHandoffMessage(t, filepath.Join(detachedInboxPath, "source-event.md"), "source event")
-	select {
-	case <-watcher.Events():
-	case err := <-watcher.Errors():
-		t.Fatalf("retained watcher error: %v", err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("retained watcher did not observe source inode write")
+	assertWakeRepairWatcherRejectsReplacementWithoutEvents(t, watcher)
+}
+
+func assertWakeRepairWatcherRejectsReplacementWithoutEvents(
+	t *testing.T,
+	watcher wakeEventWatcher,
+) {
+	t.Helper()
+	events := watcher.Events()
+	errorsC := watcher.Errors()
+	var watcherErr error
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+
+	for events != nil || errorsC != nil {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				events = nil
+				continue
+			}
+			t.Fatalf("retained watcher forwarded an event after namespace replacement: %#v", event)
+		case err, ok := <-errorsC:
+			if !ok {
+				errorsC = nil
+				continue
+			}
+			if err == nil {
+				t.Fatal("retained watcher reported an empty namespace replacement error")
+			}
+			if watcherErr != nil {
+				t.Fatalf("retained watcher reported multiple namespace replacement errors: %v; %v", watcherErr, err)
+			}
+			watcherErr = err
+		case <-timer.C:
+			t.Fatal("retained watcher did not terminate after namespace replacement and old-inode write")
+		}
+	}
+	if watcherErr == nil || !strings.Contains(watcherErr.Error(), "renamed or deleted") {
+		t.Fatalf("retained watcher namespace replacement error = %v", watcherErr)
 	}
 }
 

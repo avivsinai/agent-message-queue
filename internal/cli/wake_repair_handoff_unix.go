@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -23,12 +25,14 @@ import (
 var wakeRepairAdmitTimeout = wakeReadyTimeout
 
 const (
-	wakeRepairHandoffSchema        = 1
-	wakeRepairHandoffMaxFrameBytes = 64 * 1024
+	wakeRepairHandoffSchema         = 1
+	wakeRepairHandoffMaxFrameBytes  = 64 * 1024
+	wakeRepairHandoffMaxReasonBytes = 4 * 1024
 
 	wakeRepairHandoffKindSource   = "source"
 	wakeRepairHandoffKindPrepared = "prepared"
 	wakeRepairHandoffKindAdmit    = "admit"
+	wakeRepairHandoffKindReject   = "reject"
 	wakeRepairHandoffKindRelease  = "release"
 
 	envWakeRepairHandoffReadFD  = "AMQ_WAKE_REPAIR_HANDOFF_READ_FD"
@@ -76,6 +80,19 @@ type wakeRepairHandoffAdmit struct {
 	preparedDigest  string
 }
 
+type wakeRepairHandoffReject struct {
+	schema          int
+	childGeneration string
+	preparedDigest  string
+	reason          string
+}
+
+type wakeRepairHandoffAdmissionResult struct {
+	admit    wakeRepairHandoffAdmit
+	reject   wakeRepairHandoffReject
+	rejected bool
+}
+
 type wakeRepairHandoffRelease struct {
 	schema          int
 	childGeneration string
@@ -121,6 +138,22 @@ type wakeRepairHandoffAdmitWire struct {
 	Kind            string `json:"kind"`
 	ChildGeneration string `json:"child_generation"`
 	PreparedDigest  string `json:"prepared_digest"`
+}
+
+type wakeRepairHandoffRejectWire struct {
+	Schema          int    `json:"schema"`
+	Kind            string `json:"kind"`
+	ChildGeneration string `json:"child_generation"`
+	PreparedDigest  string `json:"prepared_digest"`
+	Reason          string `json:"reason"`
+}
+
+type wakeRepairHandoffAdmissionResultWire struct {
+	Schema          int             `json:"schema"`
+	Kind            string          `json:"kind"`
+	ChildGeneration string          `json:"child_generation"`
+	PreparedDigest  string          `json:"prepared_digest"`
+	Reason          json.RawMessage `json:"reason,omitempty"`
 }
 
 type wakeRepairHandoffReleaseWire struct {
@@ -534,6 +567,91 @@ func admitFromWire(wire wakeRepairHandoffAdmitWire) (wakeRepairHandoffAdmit, err
 	return admit, admit.validate()
 }
 
+func newWakeRepairHandoffReject(
+	admit wakeRepairHandoffAdmit,
+	cause error,
+) (wakeRepairHandoffReject, error) {
+	if err := admit.validate(); err != nil {
+		return wakeRepairHandoffReject{}, err
+	}
+	if cause == nil {
+		return wakeRepairHandoffReject{}, fmt.Errorf("wake repair handoff rejection reason is missing")
+	}
+	reject := wakeRepairHandoffReject{
+		schema:          wakeRepairHandoffSchema,
+		childGeneration: admit.childGeneration,
+		preparedDigest:  admit.preparedDigest,
+		reason:          cause.Error(),
+	}
+	return reject, reject.validate()
+}
+
+func (reject wakeRepairHandoffReject) validate() error {
+	if reject.schema != wakeRepairHandoffSchema {
+		return fmt.Errorf("wake repair handoff reject schema %d unsupported", reject.schema)
+	}
+	if err := validateWakeRepairHandoffToken(
+		"reject child generation",
+		reject.childGeneration,
+		1024,
+	); err != nil {
+		return err
+	}
+	if err := validateWakeRepairHandoffDigest("prepared", reject.preparedDigest); err != nil {
+		return err
+	}
+	return validateWakeRepairHandoffReason(reject.reason)
+}
+
+func (reject wakeRepairHandoffReject) validateAdmit(admit wakeRepairHandoffAdmit) error {
+	if err := reject.validate(); err != nil {
+		return err
+	}
+	if reject.childGeneration != admit.childGeneration ||
+		reject.preparedDigest != admit.preparedDigest {
+		return fmt.Errorf("wake repair rejection does not match exact admit")
+	}
+	return nil
+}
+
+func (reject wakeRepairHandoffReject) wire() wakeRepairHandoffRejectWire {
+	return wakeRepairHandoffRejectWire{
+		Schema:          reject.schema,
+		Kind:            wakeRepairHandoffKindReject,
+		ChildGeneration: reject.childGeneration,
+		PreparedDigest:  reject.preparedDigest,
+		Reason:          reject.reason,
+	}
+}
+
+func rejectFromWire(wire wakeRepairHandoffRejectWire) (wakeRepairHandoffReject, error) {
+	if wire.Kind != wakeRepairHandoffKindReject {
+		return wakeRepairHandoffReject{}, fmt.Errorf("wake repair handoff message kind %q, want reject", wire.Kind)
+	}
+	reject := wakeRepairHandoffReject{
+		schema:          wire.Schema,
+		childGeneration: wire.ChildGeneration,
+		preparedDigest:  wire.PreparedDigest,
+		reason:          wire.Reason,
+	}
+	return reject, reject.validate()
+}
+
+func validateWakeRepairHandoffReason(reason string) error {
+	if reason == "" || strings.TrimSpace(reason) != reason || !utf8.ValidString(reason) {
+		return fmt.Errorf("wake repair handoff rejection reason is invalid")
+	}
+	if len(reason) > wakeRepairHandoffMaxReasonBytes {
+		return fmt.Errorf("wake repair handoff rejection reason is too long")
+	}
+	for _, r := range reason {
+		if !unicode.IsGraphic(r) {
+			return fmt.Errorf("wake repair handoff rejection reason is invalid")
+		}
+	}
+	return nil
+}
+
 func newWakeRepairHandoffRelease(admit wakeRepairHandoffAdmit) (wakeRepairHandoffRelease, error) {
 	if err := admit.validate(); err != nil {
 		return wakeRepairHandoffRelease{}, err
@@ -624,19 +742,21 @@ type wakeRepairParentHandoff struct {
 	reader *bufio.Reader
 	writer io.Writer
 
-	source     wakeRepairHandoffSource
-	readFile   *os.File
-	writeFile  *os.File
-	childRead  *os.File
-	childWrite *os.File
-	childAgent *os.File
-	childInbox *os.File
-	stateMu    sync.Mutex
-	admitted   wakeRepairHandoffAdmit
-	hasAdmit   bool
-	released   bool
-	closeOnce  sync.Once
-	closeErr   error
+	source         wakeRepairHandoffSource
+	readFile       *os.File
+	writeFile      *os.File
+	childRead      *os.File
+	childWrite     *os.File
+	childAgent     *os.File
+	childInbox     *os.File
+	stateMu        sync.Mutex
+	admitted       wakeRepairHandoffAdmit
+	admitAttempted bool
+	hasAdmit       bool
+	hasReject      bool
+	released       bool
+	closeOnce      sync.Once
+	closeErr       error
 }
 
 type wakeRepairChildHandoff struct {
@@ -820,6 +940,16 @@ func (handoff *wakeRepairParentHandoff) Admit(prepared wakeRepairHandoffPrepared
 	if handoff.hasAdmit {
 		return fmt.Errorf("wake repair admission was already acknowledged")
 	}
+	if handoff.hasReject {
+		return fmt.Errorf("wake repair admission was already rejected")
+	}
+	if handoff.admitAttempted {
+		return fmt.Errorf("wake repair admission was already attempted")
+	}
+	admit, err := newWakeRepairHandoffAdmit(prepared)
+	if err != nil {
+		return err
+	}
 	deadline := time.Now().Add(wakeRepairAdmitTimeout)
 	if err := handoff.readFile.SetReadDeadline(deadline); err != nil {
 		return fmt.Errorf("set wake repair admitted acknowledgement deadline: %w", err)
@@ -829,18 +959,22 @@ func (handoff *wakeRepairParentHandoff) Admit(prepared wakeRepairHandoffPrepared
 		return fmt.Errorf("set wake repair admit write deadline: %w", err)
 	}
 	defer func() { _ = handoff.writeFile.SetWriteDeadline(time.Time{}) }()
-	admit, err := newWakeRepairHandoffAdmit(prepared)
-	if err != nil {
-		return err
-	}
+	handoff.admitAttempted = true
 	if err := writeWakeRepairHandoffAdmit(handoff.writer, admit); err != nil {
 		return err
 	}
-	ack, err := readWakeRepairHandoffAdmit(handoff.reader)
+	response, err := readWakeRepairHandoffAdmissionResult(handoff.reader)
 	if err != nil {
 		return fmt.Errorf("read wake repair admitted acknowledgement: %w", err)
 	}
-	if ack != admit {
+	if response.rejected {
+		if err := response.reject.validateAdmit(admit); err != nil {
+			return fmt.Errorf("read wake repair admitted acknowledgement: %w", err)
+		}
+		handoff.hasReject = true
+		return fmt.Errorf("wake repair child rejected admission: %s", response.reject.reason)
+	}
+	if response.admit != admit {
 		return fmt.Errorf("wake repair admitted acknowledgement does not match exact admit")
 	}
 	handoff.admitted = admit
@@ -1033,6 +1167,23 @@ func (handoff *wakeRepairChildHandoff) SendPrepared(prepared wakeRepairHandoffPr
 	return writeWakeRepairHandoffPrepared(handoff.writer, prepared)
 }
 
+func (handoff *wakeRepairChildHandoff) rejectAdmission(
+	admit wakeRepairHandoffAdmit,
+	cause error,
+) error {
+	reject, err := newWakeRepairHandoffReject(admit, cause)
+	if err == nil {
+		err = writeWakeRepairHandoffReject(handoff.writer, reject)
+	}
+	if err != nil {
+		return errors.Join(
+			cause,
+			fmt.Errorf("report wake repair admission rejection: %w", err),
+		)
+	}
+	return cause
+}
+
 // AwaitAdmitAcknowledgeAndRelease is the child admission gate. A repaired wake
 // must call it after publishing its prepared tuple and before scanning or
 // injecting. Acknowledgement alone is never authorization: only the exact
@@ -1053,10 +1204,16 @@ func (handoff *wakeRepairChildHandoff) AwaitAdmitAcknowledgeAndRelease(
 		return err
 	}
 	if beforeAcknowledge == nil {
-		return fmt.Errorf("wake repair admission validation is missing")
+		return handoff.rejectAdmission(
+			admit,
+			fmt.Errorf("wake repair admission validation is missing"),
+		)
 	}
 	if err := beforeAcknowledge(); err != nil {
-		return fmt.Errorf("wake repair admission validation failed: %w", err)
+		return handoff.rejectAdmission(
+			admit,
+			fmt.Errorf("wake repair admission validation failed: %w", err),
+		)
 	}
 	if err := writeWakeRepairHandoffAdmit(handoff.writer, admit); err != nil {
 		return fmt.Errorf("acknowledge wake repair admission: %w", err)
@@ -1170,6 +1327,72 @@ func readWakeRepairHandoffAdmit(reader io.Reader) (wakeRepairHandoffAdmit, error
 	return admitFromWire(wire)
 }
 
+func writeWakeRepairHandoffReject(writer io.Writer, reject wakeRepairHandoffReject) error {
+	if err := reject.validate(); err != nil {
+		return err
+	}
+	return writeWakeRepairHandoffFrame(writer, reject.wire())
+}
+
+func readWakeRepairHandoffAdmissionResult(
+	reader io.Reader,
+) (wakeRepairHandoffAdmissionResult, error) {
+	var wire wakeRepairHandoffAdmissionResultWire
+	if err := readWakeRepairHandoffFrame(reader, &wire); err != nil {
+		return wakeRepairHandoffAdmissionResult{}, err
+	}
+	switch wire.Kind {
+	case wakeRepairHandoffKindAdmit:
+		if wire.Reason != nil {
+			return wakeRepairHandoffAdmissionResult{}, fmt.Errorf(
+				"wake repair admitted acknowledgement contains a rejection reason",
+			)
+		}
+		admit, err := admitFromWire(wakeRepairHandoffAdmitWire{
+			Schema:          wire.Schema,
+			Kind:            wire.Kind,
+			ChildGeneration: wire.ChildGeneration,
+			PreparedDigest:  wire.PreparedDigest,
+		})
+		if err != nil {
+			return wakeRepairHandoffAdmissionResult{}, err
+		}
+		return wakeRepairHandoffAdmissionResult{admit: admit}, nil
+	case wakeRepairHandoffKindReject:
+		if wire.Reason == nil || bytes.Equal(bytes.TrimSpace(wire.Reason), []byte("null")) {
+			return wakeRepairHandoffAdmissionResult{}, fmt.Errorf(
+				"wake repair handoff rejection reason is missing",
+			)
+		}
+		var reason string
+		if err := json.Unmarshal(wire.Reason, &reason); err != nil {
+			return wakeRepairHandoffAdmissionResult{}, fmt.Errorf(
+				"decode wake repair handoff rejection reason: %w",
+				err,
+			)
+		}
+		reject, err := rejectFromWire(wakeRepairHandoffRejectWire{
+			Schema:          wire.Schema,
+			Kind:            wire.Kind,
+			ChildGeneration: wire.ChildGeneration,
+			PreparedDigest:  wire.PreparedDigest,
+			Reason:          reason,
+		})
+		if err != nil {
+			return wakeRepairHandoffAdmissionResult{}, err
+		}
+		return wakeRepairHandoffAdmissionResult{
+			reject:   reject,
+			rejected: true,
+		}, nil
+	default:
+		return wakeRepairHandoffAdmissionResult{}, fmt.Errorf(
+			"wake repair handoff admission response kind %q is invalid",
+			wire.Kind,
+		)
+	}
+}
+
 func writeWakeRepairHandoffRelease(writer io.Writer, release wakeRepairHandoffRelease) error {
 	if err := release.validate(); err != nil {
 		return err
@@ -1232,6 +1455,9 @@ func readWakeRepairHandoffFrame(reader io.Reader, value any) error {
 	}
 
 decode:
+	if !utf8.Valid(frame) {
+		return fmt.Errorf("decode wake repair handoff message: invalid UTF-8")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(frame))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {

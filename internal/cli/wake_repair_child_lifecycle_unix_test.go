@@ -574,7 +574,7 @@ func newWakeRepairLifecycleFixture(t *testing.T) wakeRepairLifecycleFixture {
 
 func wakeRepairLifecycleTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "amq-wr-")
+	dir, err := os.MkdirTemp(cliSecureTempRoot, "amq-wr-")
 	if err != nil {
 		t.Fatalf("create short wake repair lifecycle temp directory: %v", err)
 	}

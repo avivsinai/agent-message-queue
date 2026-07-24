@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -256,21 +257,59 @@ func TestWriteWakeTargetRejectsSymlink(t *testing.T) {
 func TestWriteWakeTargetSurvivesConcurrentCreate(t *testing.T) {
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
-	start := make(chan struct{})
-	errs := make(chan error, 8)
+	const writerCount = 8
+	targets := make([]wakeTarget, writerCount)
+	for i := range targets {
+		targets[i] = mustNewWakeTargetForTest(
+			t,
+			root,
+			"codex",
+			injector,
+			[]string{fmt.Sprintf("exec-%d", i)},
+		)
+	}
 
-	for i := 0; i < cap(errs); i++ {
-		i := i
-		go func() {
-			<-start
-			target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{fmt.Sprintf("exec-%d", i)})
-			errs <- writeWakeTarget(root, "codex", target)
-		}()
+	type writerResult struct {
+		index int
+		err   error
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	results := make(chan writerResult, writerCount)
+
+	for i, target := range targets {
+		go func(index int, target wakeTarget) {
+			select {
+			case <-start:
+			case <-ctx.Done():
+				return
+			}
+			result := writerResult{
+				index: index,
+				err:   writeWakeTarget(root, "codex", target),
+			}
+			select {
+			case results <- result:
+			case <-ctx.Done():
+			}
+		}(i, target)
 	}
 	close(start)
-	for i := 0; i < cap(errs); i++ {
-		if err := <-errs; err != nil {
-			t.Fatalf("writeWakeTarget concurrent writer %d: %v", i, err)
+
+	for completed := 0; completed < writerCount; completed++ {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				t.Errorf("writeWakeTarget concurrent writer %d: %v", result.index, result.err)
+			}
+		case <-ctx.Done():
+			t.Fatalf(
+				"writeWakeTarget concurrent writers completed %d/%d: %v",
+				completed,
+				writerCount,
+				ctx.Err(),
+			)
 		}
 	}
 

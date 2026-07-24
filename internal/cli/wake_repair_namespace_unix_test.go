@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -175,6 +176,7 @@ func TestRepairWakeChildAdmissionRejectsNamespaceReplacementAfterParentValidatio
 				}
 			},
 			wants: []string{
+				"wake watcher failed before admission: retained wake agent directory was renamed or deleted",
 				"canonical wake repair agent directory no longer matches retained authority",
 			},
 		},
@@ -224,29 +226,32 @@ func TestRepairWakeChildAdmissionRejectsNamespaceReplacementAfterParentValidatio
 			if result.Status == "repaired" {
 				t.Fatalf("detached namespace returned repaired: %#v", result)
 			}
+			returnedEvidence := result.Reason + "\n" + err.Error()
+			matched := false
+			for _, want := range test.wants {
+				if strings.Contains(returnedEvidence, want) {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				assertRepairLifecycleChildReapedWithoutClaim(t, fixture, child)
+				return
+			}
+
 			diagnostics := wakeRepairLifecycleDiagnostics(fixture, child)
 			logAgentPath := fsq.AgentBase(fixture.root, "codex")
 			if test.name == "ancestor agent directory" {
 				logAgentPath += ".detached"
 			}
 			logData, _ := os.ReadFile(filepath.Join(logAgentPath, ".wake.repair.log"))
-			evidence := diagnostics + "\nretained repair log:\n" + string(logData)
-			matched := false
-			for _, want := range test.wants {
-				if strings.Contains(evidence, want) {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				t.Fatalf(
-					"child did not report final namespace validation failure\nresult=%#v err=%v\n%s",
-					result,
-					err,
-					evidence,
-				)
-			}
-			assertRepairLifecycleChildReapedWithoutClaim(t, fixture, child)
+			t.Fatalf(
+				"child did not return final namespace validation failure\nresult=%#v err=%v\n%s\nretained repair log:\n%s",
+				result,
+				err,
+				diagnostics,
+				logData,
+			)
 		})
 	}
 }
@@ -324,6 +329,201 @@ func TestRepairWakeParentRevalidatesNamespaceAfterChildAcknowledgement(t *testin
 			path := filepath.Join(directory.path, name)
 			if _, err := os.Lstat(path); !os.IsNotExist(err) {
 				t.Fatalf("%s claim residue %s remains: %v", directory.label, path, err)
+			}
+		}
+	}
+}
+
+func TestRepairedWakeExitsWithoutInjectingDetachedNamespaceMessages(t *testing.T) {
+	tests := []struct {
+		name    string
+		replace func(t *testing.T, root string) (string, []string)
+	}{
+		{
+			name: "ancestor agent replacement",
+			replace: func(t *testing.T, root string) (string, []string) {
+				t.Helper()
+				canonicalAgent := fsq.AgentBase(root, "codex")
+				detachedAgent := canonicalAgent + ".post-release-detached"
+				if err := os.Rename(canonicalAgent, detachedAgent); err != nil {
+					t.Fatalf("detach live repaired agent directory: %v", err)
+				}
+				if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+					t.Fatalf("create replacement live agent directory: %v", err)
+				}
+				return filepath.Join(detachedAgent, "inbox", "new"), []string{
+					canonicalAgent,
+					detachedAgent,
+				}
+			},
+		},
+		{
+			name: "direct inbox replacement",
+			replace: func(t *testing.T, root string) (string, []string) {
+				t.Helper()
+				canonicalAgent := fsq.AgentBase(root, "codex")
+				canonicalInbox := fsq.AgentInboxNew(root, "codex")
+				detachedInbox := canonicalInbox + ".post-release-detached"
+				if err := os.Rename(canonicalInbox, detachedInbox); err != nil {
+					t.Fatalf("detach live repaired inbox directory: %v", err)
+				}
+				if err := os.Mkdir(canonicalInbox, 0o700); err != nil {
+					t.Fatalf("create replacement live inbox directory: %v", err)
+				}
+				return detachedInbox, []string{
+					canonicalAgent,
+					detachedInbox,
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newWakeRepairLifecycleFixture(t)
+			var child *wakeRepairChild
+			stubRealRepairStarter(
+				t,
+				func(started *wakeRepairChild, _ error) {
+					child = started
+					cleanupRepairLifecycleChild(t, started)
+				},
+				func(started *wakeRepairChild) {
+					stubRepairLifecycleChildInspectionWithoutLockMutation(t, fixture, started)
+				},
+			)
+
+			result, err := repairWake(fixture.root, "codex")
+			if err != nil || result.Status != "repaired" {
+				t.Fatalf("repair did not reach RELEASE: result=%#v err=%v", result, err)
+			}
+			if child == nil || child.Process == nil || child.Waiter == nil {
+				t.Fatal("successful repair did not retain its exact child and waiter")
+			}
+			if result.PID != child.Process.Pid {
+				t.Fatalf("repair result pid=%d, want captured child pid=%d", result.PID, child.Process.Pid)
+			}
+
+			releasedOutput := waitForWakeRepairOutputLine(t, fixture.outputPath)
+			if !bytes.Contains(releasedOutput, []byte("must wait for admission")) {
+				t.Fatalf("released wake output does not contain pending message: %q", releasedOutput)
+			}
+			releasedOutput = append([]byte(nil), releasedOutput...)
+
+			detachedInbox, authorities := test.replace(t, fixture.root)
+			writeWakeRepairHandoffMessage(
+				t,
+				filepath.Join(detachedInbox, "late-detached.md"),
+				"late detached message",
+			)
+
+			if err := child.Waiter.waitForExit(5 * time.Second); err != nil {
+				t.Fatalf("repaired wake did not exit after namespace replacement: %v", err)
+			}
+			if child.Waiter.state == nil {
+				t.Fatal("repaired wake exited without a process state")
+			}
+			if processAlive(child.Process.Pid) {
+				t.Fatalf("repaired wake pid %d remains alive after waiter exit", child.Process.Pid)
+			}
+
+			output, err := os.ReadFile(fixture.outputPath)
+			if err != nil {
+				t.Fatalf("read released wake output after child exit: %v", err)
+			}
+			if !bytes.Equal(output, releasedOutput) {
+				t.Fatalf(
+					"detached namespace message changed injector output:\nbefore=%q\nafter=%q",
+					releasedOutput,
+					output,
+				)
+			}
+			assertWakeRepairClaimResidueAbsent(t, authorities)
+		})
+	}
+}
+
+func stubRepairLifecycleChildInspectionWithoutLockMutation(
+	t *testing.T,
+	fixture wakeRepairLifecycleFixture,
+	child *wakeRepairChild,
+) {
+	t.Helper()
+	if child == nil || child.Process == nil {
+		t.Fatal("prepared repair child is missing")
+	}
+	inspection := inspectWakeLock(fixture.root, "codex")
+	if !inspection.Exists {
+		t.Fatal("prepared repair child did not publish a lock")
+	}
+	lock := inspection.Lock
+	previous := inspectWakeProcess
+	inspectWakeProcess = func(pid int) wakeProcessInfo {
+		if pid == child.Process.Pid {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: lock.ProcessStart,
+				BootID:     lock.BootID,
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"amq", "wake", "--root", fixture.root, "--me", "codex"},
+			}
+		}
+		return previous(pid)
+	}
+	t.Cleanup(func() {
+		inspectWakeProcess = previous
+	})
+	confirmed := inspectWakeLock(fixture.root, "codex")
+	if confirmed.Status != wakeLockValid || !confirmed.IdentityConfirmed {
+		t.Fatalf(
+			"stubbed prepared child inspection status=%q identity=%v reason=%q",
+			confirmed.Status,
+			confirmed.IdentityConfirmed,
+			confirmed.Reason,
+		)
+	}
+	if !sameWakeLockGeneration(inspection, confirmed) {
+		t.Fatal("process inspection stub changed exact child lock generation")
+	}
+}
+
+func waitForWakeRepairOutputLine(t *testing.T, path string) []byte {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	for {
+		output, err := os.ReadFile(path)
+		switch {
+		case err == nil && len(output) > 0 && output[len(output)-1] == '\n':
+			return output
+		case err != nil && !os.IsNotExist(err):
+			t.Fatalf("read released wake output: %v", err)
+		}
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			output, _ := os.ReadFile(path)
+			t.Fatalf("released wake did not produce a complete injector line: %q", output)
+		}
+	}
+}
+
+func assertWakeRepairClaimResidueAbsent(t *testing.T, authorities []string) {
+	t.Helper()
+	checked := make(map[string]struct{}, len(authorities))
+	for _, authority := range authorities {
+		if _, exists := checked[authority]; exists {
+			continue
+		}
+		checked[authority] = struct{}{}
+		for _, name := range []string{".wake.lock", wakeRepairFloorFileName} {
+			path := filepath.Join(authority, name)
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Fatalf("wake repair claim residue remains at %s: %v", path, err)
 			}
 		}
 	}
