@@ -1144,8 +1144,9 @@ func TestWakeRepairChildHandoffDescriptorsDoNotLeakIntoInjector(t *testing.T) {
 
 func assertWakeRepairDescriptorsClosedInInjector(t *testing.T, fds []int) {
 	t.Helper()
-	output := filepath.Join(t.TempDir(), "open-fds")
-	inspector := filepath.Join(t.TempDir(), "fd-inspector")
+	dir := secureTempDirForTest(t)
+	output := filepath.Join(dir, "open-fds")
+	inspector := filepath.Join(dir, "fd-inspector")
 	script := "#!/bin/sh\n" + `output=$1; shift; count=$1; shift; : > "$output"; while [ "$count" -gt 0 ]; do fd=$1; shift; if [ -e "/dev/fd/$fd" ]; then printf '%s\n' "$fd" >> "$output"; fi; count=$((count - 1)); done` + "\n"
 	if err := os.WriteFile(inspector, []byte(script), 0o700); err != nil {
 		t.Fatalf("write user-owned injector inspector: %v", err)
