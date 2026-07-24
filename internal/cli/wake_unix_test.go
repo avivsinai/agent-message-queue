@@ -540,25 +540,14 @@ func TestRunWakeWithLoopPersistsInjectViaWakeOwnerFromEnv(t *testing.T) {
 		t.Fatalf("encodeWakeOwnerEnv: %v", err)
 	}
 	t.Setenv(envWakeOwner, ownerEnv)
-	realInspect := inspectWakeProcess
-	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		if pid == owner.PID {
-			return wakeProcessInfo{
-				PID:        pid,
-				Running:    true,
-				StartToken: owner.ProcessStart,
-				BootID:     owner.BootID,
-			}
+	oldObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
+		if got != owner {
+			t.Fatalf("observed owner = %#v, want %#v", got, owner)
 		}
-		return realInspect(pid)
-	})
-	realSID := getWakeProcessSID
-	stubWakeProcessSID(t, func(pid int) (int, error) {
-		if pid == owner.PID {
-			return owner.SessionID, nil
-		}
-		return realSID(pid)
-	})
+		return wakeOwnerObservation{State: wakeOwnerSame}, nil
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
 
 	injector := writeExecutableForTest(t, "injector")
 	errDone := errors.New("done")
