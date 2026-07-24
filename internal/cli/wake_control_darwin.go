@@ -37,6 +37,15 @@ func wakeControlSocketPath(root, me, generation string) string {
 	return filepath.Join(fsq.AgentBase(root, me), ".w."+hex.EncodeToString(sum[:8]))
 }
 
+func removeWakeLockIfUnchangedAt(dirfd int, agentDir *wakeAgentDir, inspection wakeLockInspection) error {
+	path := filepath.Join(agentDir.path, ".wake.lock")
+	return removeWakeLockIfUnchangedGuardedWithIO(
+		inspection,
+		func() ([]byte, os.FileInfo, error) { return readWakeLockFileAt(dirfd, path) },
+		func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
+	)
+}
+
 func withDarwinSocketDirFD(dirfd int, fn func() error) error {
 	darwinSocketCWDMu.Lock()
 	defer darwinSocketCWDMu.Unlock()

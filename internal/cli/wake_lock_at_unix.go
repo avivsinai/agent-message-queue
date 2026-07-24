@@ -67,15 +67,6 @@ func readWakeLockMetadataAt(dirfd int, agentDir *wakeAgentDir, root, me string) 
 	})
 }
 
-func removeWakeLockIfUnchangedAt(dirfd int, agentDir *wakeAgentDir, inspection wakeLockInspection) error {
-	path := filepath.Join(agentDir.path, ".wake.lock")
-	return removeWakeLockIfUnchangedGuardedWithIO(
-		inspection,
-		func() ([]byte, os.FileInfo, error) { return readWakeLockFileAt(dirfd, path) },
-		func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
-	)
-}
-
 func readWakeGenerationFileAt(
 	dirfd int,
 	agentDir *wakeAgentDir,
