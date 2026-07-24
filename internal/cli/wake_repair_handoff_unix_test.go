@@ -1146,21 +1146,27 @@ func assertWakeRepairDescriptorsClosedInInjector(t *testing.T, fds []int) {
 	t.Helper()
 	dir := secureTempDirForTest(t)
 	output := filepath.Join(dir, "open-fds")
-	inspector := filepath.Join(dir, "fd-inspector")
-	script := "#!/bin/sh\n" + `output=$1; shift; count=$1; shift; : > "$output"; while [ "$count" -gt 0 ]; do fd=$1; shift; if [ -e "/dev/fd/$fd" ]; then printf '%s\n' "$fd" >> "$output"; fi; count=$((count - 1)); done` + "\n"
-	if err := os.WriteFile(inspector, []byte(script), 0o700); err != nil {
-		t.Fatalf("write user-owned injector inspector: %v", err)
+	t.Setenv(injectViaHelperEnv, "1")
+	args := []string{
+		"-test.run=^TestWakeRepairFDInspectorHelperProcess$",
+		"--",
+		output,
+		strconv.Itoa(len(fds)),
 	}
-	inspector, err := filepath.EvalSymlinks(inspector)
-	if err != nil {
-		t.Fatalf("resolve user-owned injector inspector: %v", err)
-	}
-	args := []string{output, strconv.Itoa(len(fds))}
 	for _, fd := range fds {
-		args = append(args, strconv.Itoa(fd))
+		var stat unix.Stat_t
+		if err := unix.Fstat(fd, &stat); err != nil {
+			t.Fatalf("stat repair descriptor %d before injector exec: %v", fd, err)
+		}
+		args = append(
+			args,
+			strconv.Itoa(fd)+":"+
+				strconv.FormatUint(uint64(stat.Dev), 10)+":"+
+				strconv.FormatUint(uint64(stat.Ino), 10),
+		)
 	}
 	if err := injectVia(&wakeConfig{
-		injectVia:     inspector,
+		injectVia:     copyTestBinaryForInjectVia(t),
 		injectArgs:    args,
 		injectTimeout: 2 * time.Second,
 	}, "ignored wake payload"); err != nil {
@@ -1173,6 +1179,57 @@ func assertWakeRepairDescriptorsClosedInInjector(t *testing.T, fds []int) {
 	if len(data) != 0 {
 		t.Fatalf("repair descriptors leaked into injector child: %s", data)
 	}
+}
+
+func TestWakeRepairFDInspectorHelperProcess(t *testing.T) {
+	if os.Getenv(injectViaHelperEnv) != "1" {
+		return
+	}
+
+	separator := -1
+	for index, arg := range os.Args {
+		if arg == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 || separator+2 >= len(os.Args) {
+		_, _ = os.Stderr.WriteString("missing repair descriptor inspector arguments\n")
+		os.Exit(2)
+	}
+	output := os.Args[separator+1]
+	count, err := strconv.Atoi(os.Args[separator+2])
+	if err != nil || count < 0 || separator+3+count > len(os.Args) {
+		_, _ = os.Stderr.WriteString("invalid repair descriptor inspector count\n")
+		os.Exit(2)
+	}
+
+	var leaked []string
+	for _, encoded := range os.Args[separator+3 : separator+3+count] {
+		parts := strings.Split(encoded, ":")
+		if len(parts) != 3 {
+			_, _ = os.Stderr.WriteString("invalid repair descriptor identity\n")
+			os.Exit(2)
+		}
+		fd, fdErr := strconv.Atoi(parts[0])
+		device, deviceErr := strconv.ParseUint(parts[1], 10, 64)
+		inode, inodeErr := strconv.ParseUint(parts[2], 10, 64)
+		if fdErr != nil || deviceErr != nil || inodeErr != nil {
+			_, _ = os.Stderr.WriteString("invalid repair descriptor identity\n")
+			os.Exit(2)
+		}
+		var stat unix.Stat_t
+		if statErr := unix.Fstat(fd, &stat); statErr == nil &&
+			uint64(stat.Dev) == device &&
+			uint64(stat.Ino) == inode {
+			leaked = append(leaked, strconv.Itoa(fd))
+		}
+	}
+	if err := os.WriteFile(output, []byte(strings.Join(leaked, "\n")), 0o600); err != nil {
+		_, _ = os.Stderr.WriteString("write repair descriptor inspection: " + err.Error() + "\n")
+		os.Exit(3)
+	}
+	os.Exit(0)
 }
 
 func TestInheritedWakeRepairDirectoriesStayBoundAcrossAgentPathReplacement(t *testing.T) {
@@ -1330,7 +1387,15 @@ func assertWakeRepairWatcherRejectsReplacementWithoutEvents(
 			t.Fatal("retained watcher did not terminate after namespace replacement and old-inode write")
 		}
 	}
-	if watcherErr == nil || !strings.Contains(watcherErr.Error(), "renamed or deleted") {
+	if watcherErr == nil {
+		t.Fatal("retained watcher closed without a namespace replacement error")
+	}
+	message := watcherErr.Error()
+	if !strings.Contains(message, "renamed or deleted") &&
+		!strings.Contains(
+			message,
+			"canonical wake repair agent directory no longer matches retained authority",
+		) {
 		t.Fatalf("retained watcher namespace replacement error = %v", watcherErr)
 	}
 }
