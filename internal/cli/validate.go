@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 type headerValidator struct {
@@ -19,6 +20,17 @@ func newHeaderValidator(root string, strict bool) (*headerValidator, error) {
 		return &headerValidator{strict: false}, nil
 	}
 	known, err := loadKnownAgentSet(root, strict)
+	if err != nil {
+		return nil, err
+	}
+	return &headerValidator{strict: true, known: known}, nil
+}
+
+func newHeaderValidatorDeliveryRoot(root *fsq.DeliveryRoot, strict bool) (*headerValidator, error) {
+	if !strict {
+		return &headerValidator{strict: false}, nil
+	}
+	known, err := loadKnownAgentSetDeliveryRoot(root, strict)
 	if err != nil {
 		return nil, err
 	}

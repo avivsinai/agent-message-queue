@@ -84,6 +84,7 @@ func TestChildNames(t *testing.T) {
 	}{
 		{name: "presence", want: []string{"set", "list"}},
 		{name: "dlq", want: []string{"list", "read", "retry", "purge"}},
+		{name: "wake", want: []string{"repair", "recover-owner", "retire"}},
 		{name: "coop", want: []string{"init", "exec"}},
 		{name: "swarm", want: []string{"list", "join", "leave", "tasks", "claim", "complete", "fail", "block", "bridge"}},
 		{name: "receipts", want: []string{"list", "wait"}},
@@ -173,6 +174,27 @@ func TestGroupUsageLinesPresence(t *testing.T) {
 	}
 	if !containsLine(lines, `amq presence set --me claude --status busy --note "reviewing PR"`) {
 		t.Fatal("groupUsageLines(presence) missing example")
+	}
+}
+
+func TestGroupUsageLinesWakeIncludesLifecycleCommands(t *testing.T) {
+	wake := findCommand("wake")
+	if wake == nil {
+		t.Fatal("findCommand(wake) = nil")
+	}
+
+	lines, err := groupUsageLines(wake)
+	if err != nil {
+		t.Fatalf("groupUsageLines(wake): %v", err)
+	}
+	if !containsLine(lines, "repair         Restart a proven-stale wake from a saved inject-via target") {
+		t.Fatal("groupUsageLines(wake) missing repair subcommand")
+	}
+	if !containsLine(lines, "recover-owner  Recover an exact owner-bound wake claim") {
+		t.Fatal("groupUsageLines(wake) missing recover-owner subcommand")
+	}
+	if !containsLine(lines, "retire         Stop an exact managed inject-via wake") {
+		t.Fatal("groupUsageLines(wake) missing retire subcommand")
 	}
 }
 

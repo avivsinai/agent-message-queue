@@ -71,7 +71,7 @@ func TestRunDrainMovesToCur(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if _, err := fsq.DeliverToInbox(root, "alice", "test-msg-1.md", data); err != nil {
+	if _, err := deliverToInboxForTest(t, root, "alice", "test-msg-1.md", data); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 
@@ -151,7 +151,7 @@ func TestRunDrainStrictAllowsReservedUserInbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if _, err := fsq.DeliverToInbox(root, "user", "operator-gate.md", data); err != nil {
+	if _, err := deliverToInboxForTest(t, root, "user", "operator-gate.md", data); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 
@@ -214,7 +214,7 @@ func TestRunDrainWithBody(t *testing.T) {
 		Body: "This is the message body.",
 	}
 	data, _ := msg.Marshal()
-	if _, err := fsq.DeliverToInbox(root, "alice", "body-test.md", data); err != nil {
+	if _, err := deliverToInboxForTest(t, root, "alice", "body-test.md", data); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 
@@ -230,7 +230,7 @@ func TestRunDrainWithBody(t *testing.T) {
 		if err := fsq.EnsureAgentDirs(root, "bob"); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := fsq.DeliverToInbox(root, "alice", "body-test.md", data); err != nil {
+		if _, err := deliverToInboxForTest(t, root, "alice", "body-test.md", data); err != nil {
 			t.Fatal(err)
 		}
 
@@ -251,7 +251,7 @@ func TestRunDrainWithBody(t *testing.T) {
 		if err := fsq.EnsureAgentDirs(root, "bob"); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := fsq.DeliverToInbox(root, "alice", "body-test.md", data); err != nil {
+		if _, err := deliverToInboxForTest(t, root, "alice", "body-test.md", data); err != nil {
 			t.Fatal(err)
 		}
 
@@ -289,7 +289,7 @@ func TestRunDrainLimit(t *testing.T) {
 			Body: "body",
 		}
 		data, _ := msg.Marshal()
-		if _, err := fsq.DeliverToInbox(root, "alice", "msg-"+string(rune('a'+i))+".md", data); err != nil {
+		if _, err := deliverToInboxForTest(t, root, "alice", "msg-"+string(rune('a'+i))+".md", data); err != nil {
 			t.Fatalf("deliver msg %d: %v", i, err)
 		}
 	}
@@ -341,11 +341,12 @@ func TestDrainInboxItemsConcurrentClaimsSingleWinner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if _, err := fsq.DeliverToInbox(root, "alice", "claim-once.md", data); err != nil {
+	if _, err := deliverToInboxForTest(t, root, "alice", "claim-once.md", data); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 
 	const workers = 2
+	deliveryRoot := openDeliveryRootForCLITest(t, root)
 	start := make(chan struct{})
 	results := make(chan []inboxItem, workers)
 	errs := make(chan error, workers)
@@ -356,7 +357,7 @@ func TestDrainInboxItemsConcurrentClaimsSingleWinner(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			items, err := drainInboxItems(root, "alice", false, 0, &headerValidator{})
+			items, err := drainInboxItems(deliveryRoot, root, "alice", false, 0, &headerValidator{})
 			if err != nil {
 				errs <- err
 				return
@@ -410,7 +411,7 @@ func TestClaimMailboxDirsExistRejectsMissingCur(t *testing.T) {
 		t.Fatalf("remove inbox/cur: %v", err)
 	}
 
-	exists, err := claimMailboxDirsExist(root, "alice")
+	exists, err := claimMailboxDirsExist(openDeliveryRootForCLITest(t, root), "alice")
 	if err != nil {
 		t.Fatalf("claimMailboxDirsExist: %v", err)
 	}
@@ -508,7 +509,7 @@ func TestRunDrainSorting(t *testing.T) {
 			Body: "body",
 		}
 		data, _ := msg.Marshal()
-		if _, err := fsq.DeliverToInbox(root, "alice", "msg-"+string(rune('a'+i))+".md", data); err != nil {
+		if _, err := deliverToInboxForTest(t, root, "alice", "msg-"+string(rune('a'+i))+".md", data); err != nil {
 			t.Fatalf("deliver msg %d: %v", i, err)
 		}
 	}

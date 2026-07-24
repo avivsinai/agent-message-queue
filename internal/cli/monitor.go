@@ -67,6 +67,10 @@ func runMonitor(args []string) error {
 	if err := guardMailboxContext("monitor", root, routed, *ignoreSessionPinFlag); err != nil {
 		return err
 	}
+	deliveryIdentity, err := snapshotMailboxDeliveryRoot(root, routed, *ignoreSessionPinFlag)
+	if err != nil {
+		return err
+	}
 	if err := requireMailbox(root, me); err != nil {
 		return err
 	}
@@ -78,6 +82,11 @@ func runMonitor(args []string) error {
 	if err != nil {
 		return err
 	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, deliveryIdentity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = deliveryRoot.Close() }()
 
 	inboxNew := fsq.AgentInboxNew(root, common.Me)
 
@@ -89,7 +98,7 @@ func runMonitor(args []string) error {
 	}
 
 	// First, try to drain existing messages
-	items, err := monitorInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator, mode)
+	items, err := monitorInboxItems(deliveryRoot, root, common.Me, *includeBodyFlag, *limitFlag, validator, mode)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return NotFoundError("mailbox for %q disappeared while monitoring root %s", common.Me, root)
@@ -153,7 +162,7 @@ func runMonitor(args []string) error {
 	if err := requireMailbox(root, me); err != nil {
 		return err
 	}
-	items, err = monitorInboxItems(root, common.Me, *includeBodyFlag, *limitFlag, validator, mode)
+	items, err = monitorInboxItems(deliveryRoot, root, common.Me, *includeBodyFlag, *limitFlag, validator, mode)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return NotFoundError("mailbox for %q disappeared while monitoring root %s", common.Me, root)
@@ -178,11 +187,11 @@ func runMonitor(args []string) error {
 	return outputMonitorResult(common.JSON, result)
 }
 
-func monitorInboxItems(root, me string, includeBody bool, limit int, validator *headerValidator, mode string) ([]monitorItem, error) {
+func monitorInboxItems(deliveryRoot *fsq.DeliveryRoot, root, me string, includeBody bool, limit int, validator *headerValidator, mode string) ([]monitorItem, error) {
 	if mode == "peek" {
 		return collectInboxItems(root, me, includeBody, limit, validator)
 	}
-	return drainInboxItems(root, me, includeBody, limit, validator)
+	return drainInboxItems(deliveryRoot, root, me, includeBody, limit, validator)
 }
 
 func monitorWithFsnotify(ctx context.Context, inboxNew string) (string, error) {

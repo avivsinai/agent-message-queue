@@ -719,6 +719,9 @@ func TestRepairWakeRemovesProvenStaleAndStartsFromTarget(t *testing.T) {
 		Executable: "/opt/homebrew/bin/amq",
 	}, target))
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == 9876 {
+			return wakeProcessInfo{PID: pid, Running: true, StartToken: "new-start", Executable: "/opt/homebrew/bin/amq", Args: []string{"amq", "wake", "--root", root, "--me", "codex"}}
+		}
 		return wakeProcessInfo{PID: pid, Running: false}
 	})
 	if err := writeWakeTarget(root, "codex", target); err != nil {
@@ -734,6 +737,9 @@ func TestRepairWakeRemovesProvenStaleAndStartsFromTarget(t *testing.T) {
 		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 			t.Fatalf("lock should be removed before start, stat=%v", err)
 		}
+		writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+			PID: 9876, ProcessStart: "new-start", Executable: "/opt/homebrew/bin/amq", Generation: "generation-new",
+		}, target))
 		return 9876, nil
 	})
 
@@ -743,6 +749,76 @@ func TestRepairWakeRemovesProvenStaleAndStartsFromTarget(t *testing.T) {
 	}
 	if result.Status != "repaired" || result.PID != 9876 {
 		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestRepairWakeRejectsConcurrentWinnerForExactTarget(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+		PID: 4242, Executable: "/opt/homebrew/bin/amq", Generation: "stale-generation",
+	}, target))
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatalf("writeWakeTarget: %v", err)
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == 9876 {
+			return wakeProcessInfo{PID: pid, Running: true, StartToken: "winner-start", Executable: "/opt/homebrew/bin/amq", Args: []string{"amq", "wake", "--root", root, "--me", "codex"}}
+		}
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+	stubStartWakeFromTarget(t, func(gotRoot, gotMe string, gotTarget wakeTarget) (int, error) {
+		writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+			PID: 9876, ProcessStart: "winner-start", Executable: "/opt/homebrew/bin/amq", Generation: "winner-generation",
+		}, gotTarget))
+		return 0, errors.New("lost start race")
+	})
+
+	result, err := repairWake(root, "codex")
+	if err == nil || !strings.Contains(err.Error(), "lost start race") {
+		t.Fatalf("exact concurrent winner should not satisfy baseline-aware repair: result=%#v err=%v", result, err)
+	}
+	if result.Status != "error" {
+		t.Fatalf("unexpected repair result: %#v", result)
+	}
+}
+
+func TestRepairWakeRefusesConcurrentWinnerForDifferentTarget(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+		PID: 4242, Executable: "/opt/homebrew/bin/amq", Generation: "stale-generation",
+	}, target))
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatalf("writeWakeTarget: %v", err)
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == 9876 {
+			return wakeProcessInfo{PID: pid, Running: true, StartToken: "winner-start", Executable: "/opt/homebrew/bin/amq", Args: []string{"amq", "wake", "--root", root, "--me", "codex"}}
+		}
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+	var winnerPath string
+	stubStartWakeFromTarget(t, func(gotRoot, gotMe string, gotTarget wakeTarget) (int, error) {
+		winner := gotTarget
+		winner.InjectArgs = []string{"different"}
+		if err := writeWakeTarget(root, "codex", winner); err != nil {
+			t.Fatalf("write concurrent target: %v", err)
+		}
+		winnerPath = writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+			PID: 9876, ProcessStart: "winner-start", Executable: "/opt/homebrew/bin/amq", Generation: "winner-generation",
+		}, winner))
+		return 0, errors.New("lost start race")
+	})
+
+	result, err := repairWake(root, "codex")
+	if err == nil || !strings.Contains(err.Error(), "lost start race") {
+		t.Fatalf("different concurrent winner should not satisfy repair: result=%#v err=%v", result, err)
+	}
+	if _, statErr := os.Stat(winnerPath); statErr != nil {
+		t.Fatalf("different concurrent winner must remain untouched: %v", statErr)
 	}
 }
 
@@ -776,7 +852,7 @@ func TestRepairWakeRefusesStaleRawLockWithLeftoverTarget(t *testing.T) {
 	}
 }
 
-func TestRepairWakeRefusesLiveIdentityMismatchLock(t *testing.T) {
+func TestRepairWakeRefusesUnknownBootIdentityLock(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		lock       wakeLock
@@ -799,23 +875,6 @@ func TestRepairWakeRefusesLiveIdentityMismatchLock(t *testing.T) {
 				Executable: "/opt/homebrew/bin/amq",
 			},
 			wantReason: "boot id mismatch",
-		},
-		{
-			name: "process start mismatch",
-			lock: wakeLock{
-				PID:          4242,
-				ProcessStart: "recorded-start",
-				BootID:       "same-boot",
-				Executable:   "/opt/homebrew/bin/amq",
-			},
-			process: wakeProcessInfo{
-				PID:        4242,
-				Running:    true,
-				StartToken: "actual-start",
-				BootID:     "same-boot",
-				Executable: "/opt/homebrew/bin/amq",
-			},
-			wantReason: "process start time mismatch",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -850,6 +909,46 @@ func TestRepairWakeRefusesLiveIdentityMismatchLock(t *testing.T) {
 				t.Fatalf("lock should remain on refused live identity mismatch: %v", statErr)
 			}
 		})
+	}
+}
+
+func TestRepairWakeRefusesProvenStartMismatchAsNonRepairable(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+		PID:          4242,
+		ProcessStart: "recorded-start",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+	}, target))
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatalf("writeWakeTarget: %v", err)
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "actual-start",
+			BootID:     "same-boot",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+	stubStartWakeFromTarget(t, func(root, me string, target wakeTarget) (int, error) {
+		t.Fatalf("startWakeFromTarget should not run for a non-repairable stale reason")
+		return 0, nil
+	})
+
+	result, err := repairWake(root, "codex")
+	if err == nil || !strings.Contains(err.Error(), `stale reason "process start time mismatch" is not repairable`) {
+		t.Fatalf("unexpected result: %#v err=%v", result, err)
+	}
+	if result.Status != "refused" {
+		t.Fatalf("status = %q, want refused", result.Status)
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("lock should remain after refused repair: %v", statErr)
 	}
 }
 
@@ -937,6 +1036,9 @@ func TestRunWakeRepairCLIRepairsStaleWakeWithJSON(t *testing.T) {
 		Executable: "/opt/homebrew/bin/amq",
 	}, target))
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == 9876 {
+			return wakeProcessInfo{PID: pid, Running: true, StartToken: "new-start", Executable: "/opt/homebrew/bin/amq", Args: []string{"amq", "wake", "--root", root, "--me", "codex"}}
+		}
 		return wakeProcessInfo{PID: pid, Running: false}
 	})
 	if err := writeWakeTarget(root, "codex", target); err != nil {
@@ -952,6 +1054,9 @@ func TestRunWakeRepairCLIRepairsStaleWakeWithJSON(t *testing.T) {
 		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 			t.Fatalf("lock should be removed before start, stat=%v", err)
 		}
+		writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+			PID: 9876, ProcessStart: "new-start", Executable: "/opt/homebrew/bin/amq", Generation: "generation-new",
+		}, target))
 		return 9876, nil
 	})
 
@@ -1009,9 +1114,9 @@ func TestRunWakeRepairClearsRepairAvailableAfterStartFailure(t *testing.T) {
 }
 
 func TestBuildCoopWakeArgsIncludesInjectViaTarget(t *testing.T) {
-	args := buildCoopWakeArgs("codex", "/tmp/root", wakeInjectModeAuto, "/abs/injector", []string{"exec", "target"})
+	args := buildCoopWakeArgs("codex", "/tmp/root", wakeInjectModeAuto, "/abs/injector", []string{"exec", "target"}, "/tmp/ready")
 	got := strings.Join(args, "|")
-	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target"
+	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--baseline-existing|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready|--accept-existing-wake"
 	if got != want {
 		t.Fatalf("args = %q, want %q", got, want)
 	}
@@ -1057,7 +1162,7 @@ func TestBuildRepairWakeArgsIncludesReadyFileAndTarget(t *testing.T) {
 	}
 	args := buildRepairWakeArgs("/tmp/root", "codex", target, "/tmp/ready")
 	got := strings.Join(args, "|")
-	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready"
+	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--baseline-existing|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready"
 	if got != want {
 		t.Fatalf("args = %q, want %q", got, want)
 	}

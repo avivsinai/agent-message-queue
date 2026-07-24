@@ -26,7 +26,7 @@ func runWho(args []string) error {
 
 	// Determine base root using the centralized classifier.
 	// Falls back to checking if root itself contains session subdirs.
-	baseRoot := classifyRoot(root)
+	baseRoot := classifyRootForDisplay(root)
 	if baseRoot == "" {
 		// classifyRoot couldn't determine from env or sibling sessions.
 		// Check if root IS the base root (contains session subdirs).

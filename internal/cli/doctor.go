@@ -75,6 +75,12 @@ func runDoctor(args []string) error {
 	// Check 3: Root directory
 	if root != "" {
 		result.Checks = append(result.Checks, checkRootDir(root))
+		_, sessionPresent := os.LookupEnv(envSession)
+		_, rootIDPresent := os.LookupEnv(envRootID)
+		_, baseIDPresent := os.LookupEnv(envBaseRootID)
+		if sessionPresent || rootIDPresent || baseIDPresent {
+			result.Checks = append(result.Checks, checkSessionPinIdentity(root))
+		}
 	}
 
 	// Check 4: Config.json
@@ -236,6 +242,35 @@ func runDoctor(args []string) error {
 	}
 
 	return nil
+}
+
+func checkSessionPinIdentity(root string) doctorCheck {
+	check := doctorCheck{Name: "Session identity pin"}
+	pin, err := loadSessionPin()
+	if err != nil {
+		check.Status = "warn"
+		check.Message = err.Error()
+		return check
+	}
+	if !pin.IdentityPin {
+		check.Status = "ok"
+		check.Message = "legacy lexical pin (identity tokens absent)"
+		return check
+	}
+	mismatch, err := sessionPinMismatch(root)
+	if err != nil {
+		check.Status = "warn"
+		check.Message = err.Error()
+		return check
+	}
+	if mismatch != nil {
+		check.Status = "warn"
+		check.Message = mismatch.Error()
+		return check
+	}
+	check.Status = "ok"
+	check.Message = "verified"
+	return check
 }
 
 func checkBinary() doctorCheck {

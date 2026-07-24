@@ -15,19 +15,29 @@ import (
 
 // wakeLock represents the lock file content for wake process deduplication.
 type wakeLock struct {
-	PID          int      `json:"pid"`
-	TTY          string   `json:"tty"`
-	Root         string   `json:"root"`                    // Absolute path to disambiguate relative AM_ROOT
-	Agent        string   `json:"agent,omitempty"`         // Agent handle that owns this lock
-	Hostname     string   `json:"hostname,omitempty"`      // Host that created the lock
-	Started      string   `json:"started"`                 // Wall-clock diagnostic timestamp
-	ProcessStart string   `json:"process_start,omitempty"` // Kernel process start token, guards PID reuse
-	BootID       string   `json:"boot_id,omitempty"`       // Boot identity paired with ProcessStart when available
-	Executable   string   `json:"executable,omitempty"`    // Diagnostic process executable basename/path
-	Args         []string `json:"args,omitempty"`          // Diagnostic argv when available
-	WakeMode     string   `json:"wake_mode,omitempty"`     // Proven wake transport/mode (inject-via or none)
-	TargetDigest string   `json:"target_digest,omitempty"` // Binds .wake.target to this lock instance
+	PID           int        `json:"pid"`
+	TTY           string     `json:"tty"`
+	Root          string     `json:"root"`                     // Absolute path to disambiguate relative AM_ROOT
+	Agent         string     `json:"agent,omitempty"`          // Agent handle that owns this lock
+	Hostname      string     `json:"hostname,omitempty"`       // Host that created the lock
+	Started       string     `json:"started"`                  // Wall-clock diagnostic timestamp
+	ProcessStart  string     `json:"process_start,omitempty"`  // Kernel process start token, guards PID reuse
+	BootID        string     `json:"boot_id,omitempty"`        // Boot identity paired with ProcessStart when available
+	Executable    string     `json:"executable,omitempty"`     // Diagnostic process executable basename/path
+	Args          []string   `json:"args,omitempty"`           // Diagnostic argv when available
+	WakeMode      string     `json:"wake_mode,omitempty"`      // none, raw, paste, or inject-via; empty means a legacy pre-v0.44 lock
+	TargetDigest  string     `json:"target_digest,omitempty"`  // Binds .wake.target to this lock instance
+	Generation    string     `json:"generation,omitempty"`     // Random nonce binding readiness and exact cleanup to this instance
+	ControlSocket string     `json:"control_socket,omitempty"` // Darwin cooperative shutdown endpoint
+	OwnerSchema   int        `json:"owner_schema,omitempty"`   // Non-zero only for an authoritative owner-bound lock
+	Owner         *wakeOwner `json:"owner,omitempty"`          // Exact owner identity for an authoritative owner-bound lock
 }
+
+const (
+	wakeOwnerLockSchema   = 1
+	wakeOwnerWakeMode     = "owner-inject-via-v1"
+	wakeOwnerLockFileMode = os.FileMode(0o400)
+)
 
 type wakeProcessInfo struct {
 	PID          int
@@ -50,6 +60,44 @@ const (
 	wakeLockUnverified wakeLockStatus = "unverified"
 )
 
+type wakeIdentityState uint8
+
+const (
+	wakeIdentityUnknown wakeIdentityState = iota
+	wakeIdentitySame
+	wakeIdentityGoneOrDifferent
+)
+
+func (state wakeIdentityState) String() string {
+	switch state {
+	case wakeIdentitySame:
+		return "same"
+	case wakeIdentityGoneOrDifferent:
+		return "gone or different"
+	default:
+		return "unknown"
+	}
+}
+
+type wakeOwnerIdentityState uint8
+
+const (
+	wakeOwnerUnknown wakeOwnerIdentityState = iota
+	wakeOwnerSame
+	wakeOwnerDead
+)
+
+func (state wakeOwnerIdentityState) String() string {
+	switch state {
+	case wakeOwnerSame:
+		return "same"
+	case wakeOwnerDead:
+		return "dead"
+	default:
+		return "unknown"
+	}
+}
+
 type wakeLockInspection struct {
 	Exists            bool
 	Status            wakeLockStatus
@@ -62,9 +110,12 @@ type wakeLockInspection struct {
 	Process           wakeProcessInfo
 	IdentityConfirmed bool
 	raw               []byte
+	fileInfo          os.FileInfo
 }
 
 var inspectWakeProcess = inspectWakeProcessPlatform
+
+type wakeLockFileReader func() ([]byte, os.FileInfo, error)
 
 type wakeAlreadyRunningError struct {
 	Agent      string
@@ -79,6 +130,22 @@ func (e *wakeAlreadyRunningError) Error() string {
 
 func inspectWakeLock(root, me string) wakeLockInspection {
 	lockPath := filepath.Join(fsq.AgentBase(root, me), ".wake.lock")
+	return inspectWakeLockWithReader(root, me, lockPath, func() ([]byte, os.FileInfo, error) {
+		return readWakeLockFileWithInfo(lockPath)
+	})
+}
+
+func inspectWakeLockWithReader(root, me, lockPath string, read wakeLockFileReader) wakeLockInspection {
+	inspection := readWakeLockMetadataWithReader(root, me, lockPath, read)
+	if !inspection.Exists || inspection.Status != wakeLockMissing {
+		return inspection
+	}
+	inspection.Process = inspectWakeProcess(inspection.Lock.PID)
+	classifyWakeLock(root, me, &inspection)
+	return inspection
+}
+
+func readWakeLockMetadataWithReader(root, me, lockPath string, read wakeLockFileReader) wakeLockInspection {
 	inspection := wakeLockInspection{
 		Status:   wakeLockMissing,
 		Root:     canonicalWakeRoot(root),
@@ -86,7 +153,7 @@ func inspectWakeLock(root, me string) wakeLockInspection {
 		LockPath: lockPath,
 	}
 
-	data, err := readWakeLockFile(lockPath)
+	data, fileInfo, err := read()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return inspection
@@ -99,9 +166,15 @@ func inspectWakeLock(root, me string) wakeLockInspection {
 
 	inspection.Exists = true
 	inspection.raw = data
+	inspection.fileInfo = fileInfo
 	var existing wakeLock
 	if err := json.Unmarshal(data, &existing); err != nil {
-		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) < 2*time.Second {
+		if fileInfo != nil && fileInfo.Mode().Perm() == wakeOwnerLockFileMode {
+			inspection.Status = wakeLockUnverified
+			inspection.Reason = "wake owner schema is malformed; owner-bound lock may be from a newer amq"
+			return inspection
+		}
+		if fileInfo != nil && time.Since(fileInfo.ModTime()) < 2*time.Second {
 			inspection.Status = wakeLockCreating
 			inspection.Reason = "lock is being created"
 			return inspection
@@ -113,32 +186,34 @@ func inspectWakeLock(root, me string) wakeLockInspection {
 
 	inspection.Lock = existing
 	inspection.PID = existing.PID
-	inspection.Process = inspectWakeProcess(existing.PID)
-	classifyWakeLock(root, me, &inspection)
 	return inspection
 }
 
-func readWakeLockFile(path string) ([]byte, error) {
+func readWakeLockFileWithInfo(path string) ([]byte, os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := validateWakeLockFile(path, info); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	file, err := openWakeMetadataFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { _ = file.Close() }()
 	openedInfo, err := file.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("stat wake lock: %w", err)
+		return nil, nil, fmt.Errorf("stat wake lock: %w", err)
 	}
 	if err := validateWakeLockFile(path, openedInfo); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return readWakeMetadata(file, "wake lock", path)
+	if !os.SameFile(info, openedInfo) {
+		return nil, nil, fmt.Errorf("wake lock %s changed while opening", path)
+	}
+	data, err := readWakeMetadata(file, "wake lock", path)
+	return data, openedInfo, err
 }
 
 func validateWakeLockFile(path string, info os.FileInfo) error {
@@ -148,14 +223,19 @@ func validateWakeLockFile(path string, info os.FileInfo) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("wake lock %s must be a regular file", path)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		return fmt.Errorf("wake lock %s mode is %o, want 0600", path, got)
+	if got := info.Mode().Perm(); got != 0o600 && got != wakeOwnerLockFileMode {
+		return fmt.Errorf("wake lock %s mode is %o, want 0600 or 0400", path, got)
 	}
 	return validateWakeTargetPathOwnership("wake lock", path, info)
 }
 
 func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
 	lock := inspection.Lock
+	if err := validateWakeLockFormat(lock, inspection.fileInfo); err != nil {
+		inspection.Status = wakeLockUnverified
+		inspection.Reason = err.Error()
+		return
+	}
 	if lock.PID <= 0 {
 		inspection.Status = wakeLockStale
 		inspection.Reason = "invalid pid"
@@ -190,68 +270,83 @@ func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
 		}
 	}
 
-	proc := inspection.Process
-	if !proc.Running {
+	state, reason := classifyWakeIdentity(*inspection, inspection.Process)
+	inspection.Reason = reason
+	switch state {
+	case wakeIdentitySame:
+		inspection.IdentityConfirmed = true
+		inspection.Status = wakeLockValid
+	case wakeIdentityGoneOrDifferent:
 		inspection.Status = wakeLockStale
-		inspection.Reason = "pid not running"
-		return
-	}
-	if lock.ProcessStart != "" {
-		if proc.StartToken == "" {
-			inspection.Status = wakeLockUnverified
-			inspection.Reason = inspectionReason("process start time unavailable", proc.InspectError)
-			return
-		}
-		if lock.ProcessStart != proc.StartToken {
-			inspection.Status = wakeLockUnverified
-			if wakeProcessProvenNotWake(proc) {
-				inspection.Status = wakeLockStale
-			}
-			inspection.Reason = "process start time mismatch"
-			return
-		}
-		if compareWakeBootID(lock.BootID, proc) != bootIDMatch {
-			inspection.Status = wakeLockUnverified
-			if wakeProcessProvenNotWake(proc) {
-				inspection.Status = wakeLockStale
-			}
-			inspection.Reason = "boot id mismatch"
-			return
-		}
-	}
-	if proc.Executable == "" {
+	default:
 		inspection.Status = wakeLockUnverified
-		inspection.Reason = inspectionReason("process identity unavailable", proc.InspectError)
-		return
 	}
-	if !processLooksLikeAMQ(proc) {
-		inspection.Status = wakeLockStale
-		inspection.Reason = "pid is not amq"
-		return
-	}
-	if len(proc.Args) > 0 && !processArgsLookLikeWake(proc.Args) {
-		inspection.Status = wakeLockStale
-		inspection.Reason = "pid is not amq wake"
-		return
-	}
+}
 
-	if lock.ProcessStart != "" {
-		inspection.IdentityConfirmed = true
-		inspection.Status = wakeLockValid
-		return
+func validateWakeLockFormat(lock wakeLock, info os.FileInfo) error {
+	if info == nil {
+		return fmt.Errorf("wake lock file identity unavailable")
 	}
-
-	if wakeArgsMatchRootAgent(proc.Args, root, me) {
-		inspection.IdentityConfirmed = true
-		inspection.Status = wakeLockValid
-		return
+	switch info.Mode().Perm() {
+	case wakeOwnerLockFileMode:
+		if lock.OwnerSchema != wakeOwnerLockSchema {
+			return fmt.Errorf("wake owner schema %d unsupported; owner-bound lock may be from a newer amq", lock.OwnerSchema)
+		}
+		if lock.WakeMode != wakeOwnerWakeMode {
+			return fmt.Errorf("wake owner mode %q unsupported; owner-bound lock may be from a newer amq", lock.WakeMode)
+		}
+		if lock.Owner == nil {
+			return fmt.Errorf("wake owner identity missing")
+		}
+		if err := validateAuthoritativeWakeOwner(*lock.Owner); err != nil {
+			return fmt.Errorf("wake owner identity invalid: %w", err)
+		}
+		if err := validateAuthoritativeWakeProcessIdentity(lock); err != nil {
+			return err
+		}
+		if strings.TrimSpace(lock.TargetDigest) == "" {
+			return fmt.Errorf("wake owner target digest missing")
+		}
+		if strings.TrimSpace(lock.Generation) == "" {
+			return fmt.Errorf("wake owner generation missing")
+		}
+	case 0o600:
+		if lock.OwnerSchema != 0 || lock.Owner != nil || lock.WakeMode == wakeOwnerWakeMode {
+			return fmt.Errorf("wake owner markers require mode 0400")
+		}
+	default:
+		return fmt.Errorf("wake lock mode %o unsupported", info.Mode().Perm())
 	}
+	return nil
+}
 
-	inspection.Status = wakeLockUnverified
-	inspection.Reason = "legacy lock lacks process start metadata"
+func validateAuthoritativeWakeProcessIdentity(lock wakeLock) error {
+	if err := validateAuthoritativeWakeOwnerToken("wake process start", lock.ProcessStart); err != nil {
+		return err
+	}
+	if err := validateAuthoritativeWakeOwnerToken("wake boot id", lock.BootID); err != nil {
+		return err
+	}
+	if !validWakeOwnerProcessStart(lock.ProcessStart) {
+		return fmt.Errorf("wake process start has malformed platform value")
+	}
+	if !validWakeOwnerBootID(lock.BootID) {
+		return fmt.Errorf("wake boot id has malformed platform value")
+	}
+	return nil
+}
+
+func sameWakeOwner(first, second *wakeOwner) bool {
+	if first == nil || second == nil {
+		return first == nil && second == nil
+	}
+	return *first == *second
 }
 
 func validateWakeLockRepairable(inspection wakeLockInspection) error {
+	if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestMutate); err != nil {
+		return err
+	}
 	if inspection.Status != wakeLockStale {
 		return fmt.Errorf("wake lock status %q is not repairable", inspection.Status)
 	}
@@ -264,23 +359,24 @@ func validateWakeLockRepairable(inspection wakeLockInspection) error {
 }
 
 func validateWakeLockStaleRemoval(inspection wakeLockInspection) error {
+	if wakeLockHasOwnerMarkers(inspection) {
+		return fmt.Errorf("owner-bound wake claims require 'amq wake recover-owner --me %s'", inspection.Agent)
+	}
 	if err := validateWakeLockRepairable(inspection); err == nil {
 		return nil
 	} else if inspection.Status != wakeLockStale {
 		return err
 	}
-	// Identity-token mismatches are removable only when process inspection proves
-	// the live PID is not an amq wake. Other stale reasons keep the historical
-	// self-heal behavior for corrupt or structurally stale lock files.
-	switch inspection.Reason {
-	case "boot id mismatch", "process start time mismatch":
-		if wakeProcessProvenNotWake(inspection.Process) {
-			return nil
-		}
-		return fmt.Errorf("wake lock stale reason %q is not removable while pid %d may still be amq wake", inspection.Reason, inspection.PID)
-	default:
-		return nil
+	// Identity mismatches reach stale only when the tri-state classifier has
+	// affirmative proof that the recorded generation is gone or different.
+	return nil
+}
+
+func wakeLockHasOwnerMarkers(inspection wakeLockInspection) bool {
+	if inspection.Lock.OwnerSchema != 0 || inspection.Lock.Owner != nil || inspection.Lock.WakeMode == wakeOwnerWakeMode {
+		return true
 	}
+	return inspection.fileInfo != nil && inspection.fileInfo.Mode().Perm() == wakeOwnerLockFileMode
 }
 
 func wakeProcessProvenNotWake(proc wakeProcessInfo) bool {
@@ -297,7 +393,24 @@ func wakeProcessProvenNotWake(proc wakeProcessInfo) bool {
 }
 
 func removeWakeLockIfUnchanged(inspection wakeLockInspection) error {
-	current, err := readWakeLockFile(inspection.LockPath)
+	return withWakeLifecycleGuard(inspection.Root, inspection.Agent, func() error {
+		return removeWakeLockIfUnchangedGuarded(inspection)
+	})
+}
+
+func removeWakeLockIfUnchangedGuarded(inspection wakeLockInspection) error {
+	return removeWakeLockIfUnchangedGuardedWithIO(
+		inspection,
+		func() ([]byte, os.FileInfo, error) { return readWakeLockFileWithInfo(inspection.LockPath) },
+		func() error { return os.Remove(inspection.LockPath) },
+	)
+}
+
+func removeWakeLockIfUnchangedGuardedWithIO(inspection wakeLockInspection, read wakeLockFileReader, remove func() error) error {
+	if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestMutate); err != nil {
+		return err
+	}
+	current, currentInfo, err := read()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -307,10 +420,26 @@ func removeWakeLockIfUnchanged(inspection wakeLockInspection) error {
 	if !bytes.Equal(current, inspection.raw) {
 		return fmt.Errorf("wake lock changed while cleaning stale lock; retry")
 	}
-	if err := os.Remove(inspection.LockPath); err != nil && !os.IsNotExist(err) {
+	if inspection.fileInfo == nil || currentInfo == nil || !sameWakeFileIdentity(inspection.fileInfo, currentInfo) {
+		return fmt.Errorf("wake lock generation changed while cleaning stale lock; retry")
+	}
+	if err := remove(); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale wake lock: %w", err)
 	}
 	return nil
+}
+
+func sameWakeLockGeneration(first, second wakeLockInspection) bool {
+	if !first.Exists || !second.Exists || first.fileInfo == nil || second.fileInfo == nil {
+		return false
+	}
+	if !sameWakeFileIdentity(first.fileInfo, second.fileInfo) || !bytes.Equal(first.raw, second.raw) {
+		return false
+	}
+	if first.Lock.Generation != "" || second.Lock.Generation != "" {
+		return first.Lock.Generation != "" && first.Lock.Generation == second.Lock.Generation
+	}
+	return true
 }
 
 func currentWakeLockMatches(lock wakeLock) bool {
@@ -406,29 +535,132 @@ func isAMQExecutable(value string) bool {
 	return base == "amq"
 }
 
-func wakeProcessStillMatches(inspection wakeLockInspection) bool {
-	proc := inspectWakeProcess(inspection.PID)
-	if !proc.Running {
-		return false
-	}
-	if inspection.Lock.ProcessStart != "" {
-		if proc.StartToken == "" || inspection.Lock.ProcessStart != proc.StartToken {
-			return false
+func inspectWakeIdentity(inspection wakeLockInspection) wakeIdentityState {
+	state, _ := classifyWakeIdentity(inspection, inspectWakeProcess(inspection.PID))
+	return state
+}
+
+func classifyWakeIdentity(inspection wakeLockInspection, proc wakeProcessInfo) (wakeIdentityState, string) {
+	lock := inspection.Lock
+	if lock.WakeMode == wakeOwnerWakeMode {
+		if err := validateAuthoritativeWakeProcessIdentity(lock); err != nil {
+			return wakeIdentityUnknown, err.Error()
 		}
-		if compareWakeBootID(inspection.Lock.BootID, proc) == bootIDMismatch {
-			return false
+	}
+	if !proc.Running {
+		return wakeIdentityGoneOrDifferent, "pid not running"
+	}
+	if lock.ProcessStart != "" {
+		if proc.StartToken == "" {
+			return wakeIdentityUnknown, inspectionReason("process start time unavailable", proc.InspectError)
+		}
+		bootComparison := compareWakeBootID(lock.BootID, proc)
+		switch bootComparison {
+		case bootIDMismatch:
+			return wakeIdentityGoneOrDifferent, "boot id mismatch"
+		case bootIDUnknown:
+			if wakeProcessProvenNotWake(proc) {
+				return wakeIdentityGoneOrDifferent, "boot id mismatch"
+			}
+			return wakeIdentityUnknown, "boot id mismatch"
+		}
+		if lock.ProcessStart != proc.StartToken {
+			if lock.BootID == "" {
+				if wakeProcessProvenNotWake(proc) {
+					return wakeIdentityGoneOrDifferent, "process start time mismatch"
+				}
+				return wakeIdentityUnknown, "process start time mismatch"
+			}
+			return wakeIdentityGoneOrDifferent, "process start time mismatch"
 		}
 	}
 	if proc.Executable == "" || !processLooksLikeAMQ(proc) {
-		return false
+		if proc.Executable == "" {
+			return wakeIdentityUnknown, inspectionReason("process identity unavailable", proc.InspectError)
+		}
+		return wakeIdentityGoneOrDifferent, "pid is not amq"
 	}
 	if len(proc.Args) > 0 && !processArgsLookLikeWake(proc.Args) {
-		return false
+		return wakeIdentityGoneOrDifferent, "pid is not amq wake"
 	}
-	if inspection.Lock.ProcessStart == "" && !wakeArgsMatchRootAgent(proc.Args, inspection.Root, inspection.Agent) {
-		return false
+	if lock.ProcessStart != "" {
+		return wakeIdentitySame, ""
 	}
-	return true
+	if lock.BootID != "" {
+		return wakeIdentityUnknown, "boot id requires process start metadata"
+	}
+	if wakeArgsMatchRootAgent(proc.Args, inspection.Root, inspection.Agent) {
+		return wakeIdentitySame, ""
+	}
+	return wakeIdentityUnknown, "legacy lock lacks process start metadata"
+}
+
+func classifyAuthoritativeWakeOwner(owner wakeOwner, proc wakeProcessInfo, sessionID int, sessionErr error) (wakeOwnerIdentityState, string) {
+	if err := validateAuthoritativeWakeOwner(owner); err != nil {
+		return wakeOwnerUnknown, err.Error()
+	}
+	if !proc.Running {
+		return wakeOwnerDead, "owner process is not running"
+	}
+	if proc.StartToken == "" {
+		return wakeOwnerUnknown, inspectionReason("owner process start unavailable", proc.InspectError)
+	}
+	switch compareWakeBootID(owner.BootID, proc) {
+	case bootIDMismatch:
+		return wakeOwnerDead, "owner boot id changed"
+	case bootIDUnknown:
+		return wakeOwnerUnknown, "owner boot id unavailable or incomparable"
+	}
+	if proc.StartToken != owner.ProcessStart {
+		return wakeOwnerDead, "owner process start changed"
+	}
+	if sessionErr != nil {
+		return wakeOwnerUnknown, fmt.Sprintf("owner session unavailable: %v", sessionErr)
+	}
+	if sessionID <= 0 {
+		return wakeOwnerUnknown, "owner session unavailable"
+	}
+	if sessionID != owner.SessionID {
+		return wakeOwnerUnknown, "owner session changed"
+	}
+	return wakeOwnerSame, ""
+}
+
+func classifyStableAuthoritativeWakeOwner(
+	owner wakeOwner,
+	first wakeProcessInfo,
+	firstSessionID int,
+	firstSessionErr error,
+	second wakeProcessInfo,
+	secondSessionID int,
+	secondSessionErr error,
+) (wakeOwnerIdentityState, string) {
+	firstState, firstReason := classifyAuthoritativeWakeOwner(owner, first, firstSessionID, firstSessionErr)
+	secondState, secondReason := classifyAuthoritativeWakeOwner(owner, second, secondSessionID, secondSessionErr)
+	if firstState == wakeOwnerDead && secondState == wakeOwnerDead {
+		return wakeOwnerDead, firstReason
+	}
+	if firstState != wakeOwnerSame || secondState != wakeOwnerSame {
+		if firstState != secondState {
+			return wakeOwnerUnknown, "owner identity changed while inspecting"
+		}
+		if firstReason != "" {
+			return wakeOwnerUnknown, firstReason
+		}
+		return wakeOwnerUnknown, secondReason
+	}
+	if !sameWakeOwnerProcessSnapshot(first, second) || firstSessionID != secondSessionID {
+		return wakeOwnerUnknown, "owner identity changed while inspecting"
+	}
+	return wakeOwnerSame, ""
+}
+
+func sameWakeOwnerProcessSnapshot(first, second wakeProcessInfo) bool {
+	return first.PID == second.PID &&
+		first.Running == second.Running &&
+		first.StartToken == second.StartToken &&
+		first.BootID == second.BootID &&
+		first.LegacyBootID == second.LegacyBootID
 }
 
 type bootIDComparison int

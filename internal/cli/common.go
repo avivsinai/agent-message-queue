@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 type commonFlags struct {
@@ -66,9 +68,7 @@ func isDefaultCoopRoot(path string) bool {
 		return true
 	}
 	exact := filepath.Join(filepath.Dir(path), defaultCoopRoot)
-	got, gotErr := os.Lstat(path)
-	want, wantErr := os.Lstat(exact)
-	return gotErr == nil && wantErr == nil && os.SameFile(got, want)
+	return relateTrees(path, exact) == TreeRelationSame
 }
 
 // classifyRoot returns the base root for the given root, or "" if it cannot
@@ -79,8 +79,7 @@ func isDefaultCoopRoot(path string) bool {
 //  2. If root's parent is the default root (.agent-mail), return that parent
 //  3. The nearest root-aware .amqrc, when root is the configured base or a direct session below it
 //  4. If root itself is the default root name (.agent-mail), return "" (known base)
-//  5. If root is a session root (parent contains sibling session dirs), return parent
-//  6. Otherwise, return "" (base or unknown — caller must handle)
+//  5. Otherwise, return "" (base or unknown — caller must handle)
 func classifyRoot(root string) string {
 	if strings.TrimSpace(root) == "" {
 		return ""
@@ -110,6 +109,20 @@ func classifyRoot(root string) string {
 	if isDefaultCoopRoot(resolvedRoot) {
 		return ""
 	}
+	return ""
+}
+
+// classifyRootForDisplay adds a lexical sibling-session hint for diagnostics.
+// It must never feed routing, pinning, or environment authority decisions.
+func classifyRootForDisplay(root string) string {
+	if base := classifyRoot(root); base != "" {
+		return base
+	}
+	if strings.TrimSpace(root) == "" {
+		return ""
+	}
+	resolvedRoot := absPath(resolveRoot(root))
+	parent := filepath.Dir(resolvedRoot)
 	// Check if root looks like a session: parent has sibling dirs with agents/.
 	entries, err := os.ReadDir(parent)
 	if err != nil {
@@ -135,6 +148,14 @@ func resolveSessionName(root string) string {
 	}
 	// Ensure root actually differs from base (not just base root itself)
 	if absPath(resolveRoot(root)) == absPath(resolveRoot(base)) {
+		return ""
+	}
+	return sessionName(root)
+}
+
+func resolveSessionNameForDisplay(root string) string {
+	base := classifyRootForDisplay(root)
+	if base == "" || absPath(resolveRoot(root)) == absPath(resolveRoot(base)) {
 		return ""
 	}
 	return sessionName(root)
@@ -268,16 +289,27 @@ func baseRootOf(root string) string {
 	return resolveRoot(root)
 }
 
+func baseRootOfForDisplay(root string) string {
+	if base := classifyRootForDisplay(root); base != "" {
+		return resolveRoot(base)
+	}
+	return resolveRoot(root)
+}
+
 // sameBaseTree reports whether two roots belong to the same base tree — the same
 // project/base root, including any of its session subdirectories. This is the
 // boundary used to decide whether an explicit --root crosses into a different
 // AMQ tree than the caller's own.
 func sameBaseTree(a, b string) bool {
+	return baseTreeRelation(a, b) == TreeRelationSame
+}
+
+func baseTreeRelation(a, b string) TreeRelation {
 	a, b = resolveRoot(a), resolveRoot(b)
 	if a == "" || b == "" {
-		return false
+		return TreeRelationUnknown
 	}
-	return baseRootOf(a) == baseRootOf(b)
+	return relateTrees(baseRootOf(a), baseRootOf(b))
 }
 
 // conflictingSourceRoot returns an established "home" root for the caller that
@@ -301,10 +333,16 @@ func conflictingSourceRoot(target string) (string, bool) {
 	if target == "" {
 		return "", false
 	}
-	for _, raw := range []string{
-		strings.TrimSpace(os.Getenv(envRoot)),
-		strings.TrimSpace(os.Getenv(envBaseRoot)),
+	type sourceEvidence struct {
+		raw       string
+		exactBase bool
+	}
+	var unknownBase string
+	for _, evidence := range []sourceEvidence{
+		{raw: strings.TrimSpace(os.Getenv(envRoot))},
+		{raw: strings.TrimSpace(os.Getenv(envBaseRoot)), exactBase: true},
 	} {
+		raw := evidence.raw
 		if raw == "" {
 			continue
 		}
@@ -312,9 +350,20 @@ func conflictingSourceRoot(target string) (string, bool) {
 		if src == "" || src == target {
 			continue
 		}
-		if !sameBaseTree(src, target) {
+		switch baseTreeRelation(src, target) {
+		case TreeRelationDifferent:
 			return src, true
+		case TreeRelationUnknown:
+			if evidence.exactBase {
+				unknownBase = src
+			}
 		}
+	}
+	// AM_ROOT alone is advisory: unresolved identity carries no cross-tree
+	// evidence. AM_BASE_ROOT explicitly claims the authority boundary, so an
+	// unverifiable claimed base is unsafe.
+	if unknownBase != "" {
+		return unknownBase, true
 	}
 	return "", false
 }
@@ -378,7 +427,19 @@ func requireMe(handle string) error {
 // If strict=true, returns an error for unreadable/corrupt config; otherwise warns to stderr.
 func loadKnownAgents(root string, strict bool) ([]string, error) {
 	configPath := filepath.Join(root, "meta", "config.json")
-	data, err := os.ReadFile(configPath)
+	return loadKnownAgentsWithRead(strict, func() ([]byte, error) {
+		return os.ReadFile(configPath)
+	})
+}
+
+func loadKnownAgentsDeliveryRoot(root *fsq.DeliveryRoot, strict bool) ([]string, error) {
+	return loadKnownAgentsWithRead(strict, func() ([]byte, error) {
+		return root.ReadRegularNoFollow(filepath.Join("meta", "config.json"))
+	})
+}
+
+func loadKnownAgentsWithRead(strict bool, read func() ([]byte, error)) ([]string, error) {
+	data, err := read()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil // No config, no validation
@@ -435,14 +496,35 @@ func loadKnownAgentSet(root string, strict bool) (map[string]struct{}, error) {
 	return known, nil
 }
 
+func loadKnownAgentSetDeliveryRoot(root *fsq.DeliveryRoot, strict bool) (map[string]struct{}, error) {
+	agents, err := loadKnownAgentsDeliveryRoot(root, strict)
+	if err != nil || len(agents) == 0 {
+		return nil, err
+	}
+	known := make(map[string]struct{}, len(agents))
+	for _, agent := range agents {
+		known[agent] = struct{}{}
+	}
+	return known, nil
+}
+
 // validateKnownHandles validates handles against config.json.
 // Accepts variadic handles for convenience (single or multiple).
 // Returns nil if config doesn't exist or all handles are known.
 // If strict=true, returns an error for unknown handles or unreadable/corrupt config; otherwise warns to stderr.
 func validateKnownHandles(root string, strict bool, handles ...string) error {
 	agents, err := loadKnownAgents(root, strict)
-	if err != nil {
-		return err
+	return validateKnownHandlesFromAgents(agents, err, strict, handles...)
+}
+
+func validateKnownHandlesDeliveryRoot(root *fsq.DeliveryRoot, strict bool, handles ...string) error {
+	agents, err := loadKnownAgentsDeliveryRoot(root, strict)
+	return validateKnownHandlesFromAgents(agents, err, strict, handles...)
+}
+
+func validateKnownHandlesFromAgents(agents []string, loadErr error, strict bool, handles ...string) error {
+	if loadErr != nil {
+		return loadErr
 	}
 	if agents == nil {
 		return nil // No config, no validation

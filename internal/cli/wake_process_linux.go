@@ -21,7 +21,11 @@ func inspectWakeProcessPlatform(pid int) wakeProcessInfo {
 
 	statPath := fmt.Sprintf("/proc/%d/stat", pid)
 	if data, err := os.ReadFile(statPath); err == nil {
-		if token, parseErr := linuxProcStartToken(string(data)); parseErr == nil {
+		if token, state, parseErr := linuxProcIdentity(string(data)); parseErr == nil {
+			if state == "Z" {
+				info.Running = false
+				return info
+			}
 			info.StartToken = token
 		} else {
 			info.InspectError = parseErr
@@ -44,17 +48,25 @@ func inspectWakeProcessPlatform(pid int) wakeProcessInfo {
 }
 
 func linuxProcStartToken(stat string) (string, error) {
+	token, _, err := linuxProcIdentity(stat)
+	return token, err
+}
+
+func linuxProcIdentity(stat string) (startToken string, state string, err error) {
 	endComm := strings.LastIndex(stat, ")")
 	if endComm < 0 || endComm+2 >= len(stat) {
-		return "", fmt.Errorf("malformed proc stat")
+		return "", "", fmt.Errorf("malformed proc stat")
 	}
 	fields := strings.Fields(stat[endComm+2:])
 	// fields[0] is stat field 3; starttime is field 22.
 	const startTimeIndex = 22 - 3
 	if len(fields) <= startTimeIndex {
-		return "", fmt.Errorf("proc stat missing starttime")
+		return "", "", fmt.Errorf("proc stat missing starttime")
 	}
-	return fields[startTimeIndex], nil
+	if len(fields[0]) != 1 {
+		return "", "", fmt.Errorf("proc stat has malformed state")
+	}
+	return fields[startTimeIndex], fields[0], nil
 }
 
 func splitProcCmdline(raw []byte) []string {

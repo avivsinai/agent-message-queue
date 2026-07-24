@@ -161,7 +161,7 @@ func TestReply_RejectsPositionalArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	if _, err := fsq.DeliverToInboxes(root, []string{"alice"}, originalID+".md", data); err != nil {
+	if _, err := deliverToInboxesForTest(t, root, []string{"alice"}, originalID+".md", data); err != nil {
 		t.Fatalf("DeliverToInboxes: %v", err)
 	}
 

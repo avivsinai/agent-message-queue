@@ -4,6 +4,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func TestSplitDashDash(t *testing.T) {
@@ -132,6 +134,107 @@ func TestCoopExecRequireWakeRejectsNoWake(t *testing.T) {
 	}
 }
 
+func TestCoopExecAlwaysOverwritesOwnerTokenImmediatelyBeforeExec(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	self := os.Getpid()
+	owner := wakeOwner{
+		PID:          self,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid != self {
+			return wakeProcessInfo{PID: pid}
+		}
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: owner.ProcessStart,
+			BootID:     owner.BootID,
+		}
+	})
+	stubWakeProcessSID(t, func(pid int) (int, error) {
+		if pid != self {
+			t.Fatalf("session lookup pid = %d, want %d", pid, self)
+		}
+		return owner.SessionID, nil
+	})
+	t.Setenv(envWakeOwner, `{"pid":1,"process_start":"stale","boot_id":"stale","session_id":1}`)
+
+	sentinel := errors.New("exec sentinel")
+	var execEnv []string
+	oldExec := coopExecProcess
+	coopExecProcess = func(_ string, _ []string, env []string) error {
+		execEnv = append([]string{}, env...)
+		return sentinel
+	}
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err := runCoopExec([]string{"--root", root, "--me", "codex", "--no-wake", "sh"})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("coop exec error = %v, want sentinel", err)
+	}
+	raw := ""
+	count := 0
+	for _, entry := range execEnv {
+		if strings.HasPrefix(entry, envWakeOwner+"=") {
+			count++
+			raw = strings.TrimPrefix(entry, envWakeOwner+"=")
+		}
+	}
+	if count != 1 {
+		t.Fatalf("final %s count = %d, env=%v", envWakeOwner, count, execEnv)
+	}
+	var got wakeOwner
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("decode final owner: %v", err)
+	}
+	if got != owner {
+		t.Fatalf("final owner = %#v, want %#v", got, owner)
+	}
+}
+
+func TestCoopWakeReadinessTempFailureDegradesOnlyWithoutRequiredOrLiveWake(t *testing.T) {
+	cause := errors.New("TMPDIR unavailable")
+	confirmedLive := wakeLockInspection{
+		Exists:            true,
+		Status:            wakeLockValid,
+		IdentityConfirmed: true,
+		Process:           wakeProcessInfo{Running: true},
+	}
+	tests := []struct {
+		name       string
+		require    bool
+		inspection wakeLockInspection
+		wantErr    bool
+	}{
+		{name: "optional without live wake degrades"},
+		{name: "required wake fails closed", require: true, wantErr: true},
+		{name: "confirmed live wake fails closed", inspection: confirmedLive, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error
+			stderr := captureWakeStderr(t, func() {
+				err = handleCoopWakeSetupFailure(tc.require, tc.inspection, "create wake readiness file", cause)
+			})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v, wantErr=%v", err, tc.wantErr)
+			}
+			if !tc.wantErr && !strings.Contains(stderr, "TMPDIR unavailable") {
+				t.Fatalf("degraded failure warning missing: %q", stderr)
+			}
+		})
+	}
+}
+
 func TestCoopExecWakeInjectViaValidation(t *testing.T) {
 	nonExecutable := filepath.Join(secureTempDirForTest(t), "injector")
 	if err := os.WriteFile(nonExecutable, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
@@ -212,10 +315,31 @@ func TestCoopExecWakeInjectModeValidation(t *testing.T) {
 }
 
 func TestBuildCoopWakeArgsIncludesNoneMode(t *testing.T) {
-	got := buildCoopWakeArgs("codex", "/tmp/root", "none", "", nil)
-	want := []string{"--no-update-check", "wake", "--me", "codex", "--root", "/tmp/root", "--inject-mode", "none"}
+	got := buildCoopWakeArgs("codex", "/tmp/root", "none", "", nil, "/tmp/ready")
+	want := []string{"--no-update-check", "wake", "--me", "codex", "--root", "/tmp/root", "--baseline-existing", "--inject-mode", "none", "--ready-file", "/tmp/ready", "--accept-existing-wake"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("buildCoopWakeArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestConfirmedLiveWakeRejectsStaleLockWithReusedPID(t *testing.T) {
+	inspection := wakeLockInspection{
+		Exists: true,
+		Status: wakeLockStale,
+		PID:    4242,
+		Process: wakeProcessInfo{
+			PID:     4242,
+			Running: true,
+		},
+	}
+	if confirmedLiveWake(inspection) {
+		t.Fatal("stale wake lock with a reused live PID must not block coop degradation")
+	}
+
+	inspection.Status = wakeLockValid
+	inspection.IdentityConfirmed = true
+	if !confirmedLiveWake(inspection) {
+		t.Fatal("confirmed valid live wake should block coop degradation")
 	}
 }
 

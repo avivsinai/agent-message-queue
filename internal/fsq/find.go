@@ -29,21 +29,21 @@ func FindMessage(root, agent, filename string) (string, string, error) {
 	return "", "", os.ErrNotExist
 }
 
-func MoveNewToCur(root, agent, filename string) error {
+func MoveNewToCur(root *DeliveryRoot, agent, filename string) error {
 	if err := ValidateMessageFilename(filename); err != nil {
 		return err
 	}
-	newPath := filepath.Join(root, "agents", agent, "inbox", "new", filename)
-	curDir := filepath.Join(root, "agents", agent, "inbox", "cur")
+	newPath := filepath.Join("agents", agent, "inbox", "new", filename)
+	curDir := filepath.Join("agents", agent, "inbox", "cur")
 	curPath := filepath.Join(curDir, filename)
-	if err := os.MkdirAll(curDir, 0o700); err != nil {
+	if err := root.root.MkdirAll(curDir, 0o700); err != nil {
 		return err
 	}
-	if err := os.Rename(newPath, curPath); err != nil {
+	if err := root.root.Rename(newPath, curPath); err != nil {
 		return err
 	}
-	if err := SyncDir(filepath.Dir(newPath)); err != nil {
+	if err := root.syncDir(filepath.Dir(newPath)); err != nil {
 		return err
 	}
-	return SyncDir(curDir)
+	return root.syncDir(curDir)
 }

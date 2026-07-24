@@ -69,10 +69,17 @@ func runList(args []string) error {
 	common.Me = me
 	root, routed, err := resolveMailboxRoot(common, *sessionFlag)
 	if err != nil {
-		return err
+		if GetExitCode(err) != ExitContextMismatch {
+			return err
+		}
+		_ = writeStderr("warning: %v\n", err)
+		root, routed = absPath(resolveRoot(common.Root)), false
 	}
 	if !routed {
 		if mismatch, checkErr := sessionPinMismatch(root); checkErr != nil {
+			if GetExitCode(checkErr) != ExitContextMismatch {
+				return checkErr
+			}
 			_ = writeStderr("warning: %v\n", checkErr)
 		} else if mismatch != nil {
 			_ = writeStderr("warning: %s\n", mismatch.Error())

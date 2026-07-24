@@ -17,6 +17,13 @@ concurrency:
 
 jobs:
   release-please:
+    # Release PRs squash to this prefix. Skip that push so release.yml can create
+    # the tag before the next conventional commit or manual dispatch scans again.
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        !startsWith(github.event.head_commit.message, 'chore(release): v')
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:

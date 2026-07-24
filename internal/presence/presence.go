@@ -39,6 +39,20 @@ func Write(root string, p Presence) error {
 	return err
 }
 
+// WriteDeliveryRoot writes presence through an already authorized root
+// capability. Send/reply use this form so a path alias change cannot redirect a
+// best-effort presence update outside the authorized tree.
+func WriteDeliveryRoot(root *fsq.DeliveryRoot, p Presence) error {
+	data, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	dir := filepath.Join("agents", p.Handle)
+	_, err = root.WriteFileAtomic(dir, "presence.json", data, 0o600)
+	return err
+}
+
 // Touch updates the LastSeen timestamp for an agent's presence.
 // If presence already exists, it preserves Status and Note.
 // If no presence exists, it creates one with status "active".
@@ -54,6 +68,25 @@ func Touch(root, handle string) error {
 		p.LastSeen = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	return Write(root, p)
+}
+
+// TouchDeliveryRoot updates presence through a pinned root capability.
+func TouchDeliveryRoot(root *fsq.DeliveryRoot, handle string) error {
+	path := filepath.Join("agents", handle, "presence.json")
+	data, err := root.ReadFile(path)
+	var p Presence
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		p = New(handle, "active", "", time.Now())
+	} else {
+		if err := json.Unmarshal(data, &p); err != nil {
+			return err
+		}
+		p.LastSeen = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	return WriteDeliveryRoot(root, p)
 }
 
 func Read(root, handle string) (Presence, error) {

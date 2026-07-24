@@ -41,7 +41,7 @@ func TestRunListPagination(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal msg %d: %v", i, err)
 		}
-		if _, err := fsq.DeliverToInbox(root, "alice", "msg-"+string(rune('a'+i))+".md", data); err != nil {
+		if _, err := deliverToInboxForTest(t, root, "alice", "msg-"+string(rune('a'+i))+".md", data); err != nil {
 			t.Fatalf("deliver msg %d: %v", i, err)
 		}
 	}
@@ -129,4 +129,21 @@ func runListJSON(t *testing.T, root, agent string, limit, offset int) []listItem
 		t.Fatalf("unmarshal: %v (output: %s)", err, buf.String())
 	}
 	return items
+}
+
+func TestListSessionDoesNotExistReturnsNotFound(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envRoot, root)
+	t.Setenv(envBaseRoot, root)
+	t.Setenv(envSession, "")
+	err := runList([]string{"--me", "alice", "--session", "missing", "--new"})
+	if GetExitCode(err) != ExitNotFound {
+		t.Fatalf("exit = %d, want %d (err=%v)", GetExitCode(err), ExitNotFound, err)
+	}
 }

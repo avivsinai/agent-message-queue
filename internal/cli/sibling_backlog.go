@@ -24,7 +24,7 @@ func findSiblingBacklogs(root, me string) []siblingBacklog {
 	}
 	me = normalized
 	root = absPath(resolveRoot(root))
-	base := baseRootOf(root)
+	base := baseRootOfForDisplay(root)
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		return nil
@@ -84,7 +84,7 @@ func emitSiblingBacklogHintsIfInboxEmpty(root, me string) {
 }
 
 func siblingContext(root string) string {
-	if session := resolveSessionName(absPath(resolveRoot(root))); session != "" && validateSessionName(session) == nil {
+	if session := resolveSessionNameForDisplay(absPath(resolveRoot(root))); session != "" && validateSessionName(session) == nil {
 		return session
 	}
 	return "base root"

@@ -69,6 +69,8 @@ func init() {
 			Handler: runWake,
 			Children: []CommandInfo{
 				{Name: "repair", Summary: "Restart a proven-stale wake from a saved inject-via target", Handler: runWake},
+				{Name: "recover-owner", Summary: "Recover an exact owner-bound wake claim", Handler: runWake},
+				{Name: "retire", Summary: "Stop an exact managed inject-via wake", Handler: runWake},
 			},
 		},
 		{Name: "upgrade", Summary: "Upgrade amq to the latest release", Handler: runUpgradeRegistry},
@@ -189,8 +191,10 @@ var usageGlobalOptions = []string{
 
 var usageEnvironment = []string{
 	"  AM_ROOT             Queue root directory (from flags, env, config, or coop exec session setup)",
+	"  AM_ROOT_ID          Opaque physical identity token for AM_ROOT when available",
 	"  AM_ME               Default agent handle",
 	"  AM_BASE_ROOT        Authorized session base, or exact root for a sessionless pin",
+	"  AM_BASE_ROOT_ID     Opaque physical identity token for AM_BASE_ROOT when available",
 	"  AM_SESSION          Pinned session identity (empty means exact-root context)",
 	"  AMQ_GLOBAL_ROOT     Global root fallback (for agents spawned by external orchestrators)",
 	"  AMQ_NO_UPDATE_CHECK  Disable update check (1/true/yes/on)",

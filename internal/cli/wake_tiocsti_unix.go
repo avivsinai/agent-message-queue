@@ -189,5 +189,5 @@ func ttyLastReadTime(fd uintptr) (time.Time, bool, error) {
 	if st.Atim.Sec == 0 && st.Atim.Nsec == 0 {
 		return time.Time{}, false, nil
 	}
-	return time.Unix(st.Atim.Sec, st.Atim.Nsec), true, nil
+	return time.Unix(int64(st.Atim.Sec), int64(st.Atim.Nsec)), true, nil
 }

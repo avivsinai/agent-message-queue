@@ -30,7 +30,17 @@ func buildCoopExecEnvironment(base []string, root, me, session string) []string 
 		baseRoot = filepath.Dir(root)
 	}
 	env = setEnvVar(env, envBaseRoot, baseRoot)
-	return setEnvVar(env, envSession, session)
+	env = setEnvVar(env, envSession, session)
+	rootID, baseRootID := treeIdentityTokens(root, baseRoot)
+	env = setOrUnsetEnvVar(env, envRootID, rootID)
+	return setOrUnsetEnvVar(env, envBaseRootID, baseRootID)
+}
+
+func setOrUnsetEnvVar(env []string, key, value string) []string {
+	if value == "" {
+		return unsetEnvVar(env, key)
+	}
+	return setEnvVar(env, key, value)
 }
 
 // setEnvVar sets or replaces an environment variable in a slice.

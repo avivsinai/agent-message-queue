@@ -118,7 +118,7 @@ func TestReplyWaitForDrained(t *testing.T) {
 		Body: "ping",
 	}
 	data, _ := originalMsg.Marshal()
-	if _, err := fsq.DeliverToInboxes(root, []string{"alice"}, originalID+".md", data); err != nil {
+	if _, err := deliverToInboxesForTest(t, root, []string{"alice"}, originalID+".md", data); err != nil {
 		t.Fatalf("DeliverToInboxes: %v", err)
 	}
 

@@ -76,6 +76,32 @@ func TestRunOpsChecksRejectsSymlinkAndFIFOWakeLocks(t *testing.T) {
 	}
 }
 
+func TestRunOpsChecksLeavesForeignAgentSymlinkWakeLockUntouched(t *testing.T) {
+	root := secureTempDirForTest(t)
+	foreign := secureTempDirForTest(t)
+	foreignAgent := fsq.AgentBase(foreign, "codex")
+	if err := os.MkdirAll(foreignAgent, 0o700); err != nil {
+		t.Fatalf("mkdir foreign agent: %v", err)
+	}
+	lockPath := filepath.Join(foreignAgent, ".wake.lock")
+	if err := os.WriteFile(lockPath, []byte(`{"pid":4242}`), 0o600); err != nil {
+		t.Fatalf("write foreign lock: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(fsq.AgentBase(root, "codex")), 0o700); err != nil {
+		t.Fatalf("mkdir agents root: %v", err)
+	}
+	if err := os.Symlink(foreignAgent, fsq.AgentBase(root, "codex")); err != nil {
+		t.Fatalf("symlink foreign agent: %v", err)
+	}
+	result := runOpsChecks(root, "test", true)
+	if len(result.WakeLocks) != 0 {
+		t.Fatalf("foreign agent symlink should not be inspected: %#v", result.WakeLocks)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("foreign wake lock was touched: %v", err)
+	}
+}
+
 func TestRunOpsChecksRejectsFIFOWakeTargetWithoutBlocking(t *testing.T) {
 	root := secureTempDirForTest(t)
 	agentBase := fsq.AgentBase(root, "codex")
@@ -147,7 +173,59 @@ func TestRunOpsChecksDoesNotAdvertiseRepairForTamperedStaleLock(t *testing.T) {
 	}
 }
 
-func TestRunOpsChecksDoesNotAdvertiseRepairForLiveIdentityMismatchLock(t *testing.T) {
+func TestRunOpsChecksDirectsOwnerClaimToRecoverOwner(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "owner-doctor-injector")
+	owner := wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	target.Owner = &owner
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatalf("write wake target: %v", err)
+	}
+	lock := bindWakeLockToTarget(wakeLock{
+		PID:          5151,
+		Root:         canonicalWakeRoot(root),
+		Agent:        "codex",
+		ProcessStart: "67890",
+		BootID:       owner.BootID,
+		Generation:   "owner-doctor-generation",
+		OwnerSchema:  wakeOwnerLockSchema,
+		Owner:        &owner,
+	}, target)
+	lock.WakeMode = wakeOwnerWakeMode
+	lockPath := writeWakeLockExactForTest(t, root, "codex", lock)
+	if err := os.Chmod(lockPath, wakeOwnerLockFileMode); err != nil {
+		t.Fatal(err)
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid}
+	})
+
+	result := runOpsChecks(root, "test", true)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != string(wakeLockStale) {
+		t.Fatalf("owner wake status = %q, want stale", got.Status)
+	}
+	if got.Fix != wakeRecoverOwnerCommand(root, "codex") {
+		t.Fatalf("owner wake fix = %q, want %q", got.Fix, wakeRecoverOwnerCommand(root, "codex"))
+	}
+	if got.Removed {
+		t.Fatal("doctor --fix removed an owner-bound wake claim")
+	}
+	if _, err := os.Lstat(lockPath); err != nil {
+		t.Fatalf("owner-bound wake claim was not preserved: %v", err)
+	}
+}
+
+func TestRunOpsChecksDoesNotAdvertiseRepairForUnknownBootIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		lock       wakeLock
@@ -170,23 +248,6 @@ func TestRunOpsChecksDoesNotAdvertiseRepairForLiveIdentityMismatchLock(t *testin
 				Executable: "/opt/homebrew/bin/amq",
 			},
 			wantReason: "boot id mismatch",
-		},
-		{
-			name: "process start mismatch",
-			lock: wakeLock{
-				PID:          4242,
-				ProcessStart: "recorded-start",
-				BootID:       "same-boot",
-				Executable:   "/opt/homebrew/bin/amq",
-			},
-			process: wakeProcessInfo{
-				PID:        4242,
-				Running:    true,
-				StartToken: "actual-start",
-				BootID:     "same-boot",
-				Executable: "/opt/homebrew/bin/amq",
-			},
-			wantReason: "process start time mismatch",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -222,7 +283,7 @@ func TestRunOpsChecksDoesNotAdvertiseRepairForLiveIdentityMismatchLock(t *testin
 	}
 }
 
-func TestRunOpsChecksFixRefusesLiveIdentityMismatchLock(t *testing.T) {
+func TestRunOpsChecksFixRefusesUnknownBootIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		lock       wakeLock
@@ -245,23 +306,6 @@ func TestRunOpsChecksFixRefusesLiveIdentityMismatchLock(t *testing.T) {
 				Executable: "/opt/homebrew/bin/amq",
 			},
 			wantReason: "boot id mismatch",
-		},
-		{
-			name: "process start mismatch",
-			lock: wakeLock{
-				PID:          4242,
-				ProcessStart: "recorded-start",
-				BootID:       "same-boot",
-				Executable:   "/opt/homebrew/bin/amq",
-			},
-			process: wakeProcessInfo{
-				PID:        4242,
-				Running:    true,
-				StartToken: "actual-start",
-				BootID:     "same-boot",
-				Executable: "/opt/homebrew/bin/amq",
-			},
-			wantReason: "process start time mismatch",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -297,5 +341,109 @@ func TestRunOpsChecksFixRefusesLiveIdentityMismatchLock(t *testing.T) {
 				t.Fatalf("identity-mismatch lock should remain after fix refusal: %v", statErr)
 			}
 		})
+	}
+}
+
+func TestDoctorFixWaitsForWakeLifecycleGuard(t *testing.T) {
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID: 4242, Executable: "/opt/homebrew/bin/amq", Generation: "stale-generation",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- withWakeLifecycleGuard(root, "codex", func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	fixed := make(chan []opsWakeLock, 1)
+	go func() { fixed <- checkWakeLocks(root, []string{"codex"}, true) }()
+	time.Sleep(25 * time.Millisecond)
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("doctor fix removed lock before lifecycle guard release: %v", err)
+	}
+	close(release)
+	if err := <-holderDone; err != nil {
+		t.Fatalf("guard holder: %v", err)
+	}
+	locks := <-fixed
+	if len(locks) != 1 || locks[0].Status != "fixed" || !locks[0].Removed {
+		t.Fatalf("unexpected doctor fix result: %#v", locks)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("doctor fix did not remove stale generation: %v", err)
+	}
+	if _, err := os.Stat(wakeLifecycleGuardPath(root, "codex")); err != nil {
+		t.Fatalf("doctor fix removed permanent lifecycle guard: %v", err)
+	}
+}
+
+func TestRunOpsChecksReportsProvenStartMismatchAsStale(t *testing.T) {
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		ProcessStart: "recorded-start",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "actual-start",
+			BootID:     "same-boot",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+
+	result := runOpsChecks(root, "test", false)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != string(wakeLockStale) || got.Reason != "process start time mismatch" {
+		t.Fatalf("unexpected wake lock: %#v", got)
+	}
+}
+
+func TestRunOpsChecksFixRemovesProvenStartMismatch(t *testing.T) {
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		ProcessStart: "recorded-start",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "actual-start",
+			BootID:     "same-boot",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+
+	result := runOpsChecks(root, "test", true)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != "fixed" || !got.Removed {
+		t.Fatalf("unexpected wake lock fix result: %#v", got)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("proven stale lock still exists: %v", err)
 	}
 }

@@ -41,6 +41,10 @@ type wakeConfig struct {
 	interruptNotice   string
 	interruptCooldown time.Duration
 	lastInterrupt     time.Time
+	controlStop       <-chan struct{}
+	baselineRequested bool
+	baselineExisting  map[string]wakeFileIdentity
+	onPrepared        func() error
 }
 
 const defaultInjectTimeout = 5 * time.Second
@@ -155,6 +159,13 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		name := entry.Name()
 		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
 			continue
+		}
+		if baselineIdentity, ignored := cfg.baselineExisting[name]; ignored {
+			info, infoErr := entry.Info()
+			if infoErr == nil && matchesWakeFileIdentity(baselineIdentity, info) {
+				continue
+			}
+			delete(cfg.baselineExisting, name)
 		}
 
 		path := filepath.Join(inboxNew, name)

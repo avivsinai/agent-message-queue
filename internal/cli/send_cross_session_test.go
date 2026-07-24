@@ -72,6 +72,53 @@ func TestSendFromSessionPreBootCrossSession(t *testing.T) {
 	}
 }
 
+func TestSendCrossProjectSessionSymlinkToForeignRefused(t *testing.T) {
+	peer := t.TempDir()
+	foreign := t.TempDir()
+	if err := os.Symlink(foreign, filepath.Join(peer, "evil")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveSessionRoot(peer, "evil"); err == nil {
+		t.Fatal("expected symlinked peer session to be refused")
+	}
+}
+
+func TestResolveSessionRootRejectsInBaseSymlink(t *testing.T) {
+	base := t.TempDir()
+	prod := filepath.Join(base, "prod")
+	if err := os.Mkdir(prod, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(prod, filepath.Join(base, "qa")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveSessionRoot(base, "qa"); err == nil {
+		t.Fatal("expected in-base session symlink refusal")
+	}
+}
+
+func TestSendFromSessionRetargetedStrongBasePinRefused(t *testing.T) {
+	baseA := filepath.Join(t.TempDir(), ".agent-mail")
+	baseB := filepath.Join(t.TempDir(), ".agent-mail")
+	if err := fsq.EnsureRootDirs(baseA); err != nil {
+		t.Fatal(err)
+	}
+	ensureSendSessionAgent(t, filepath.Join(baseB, "cto"), "alice")
+	idA, err := resolveTreeIdentityToken(baseA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envBaseRoot, baseA)
+	t.Setenv(envRoot, baseB)
+	t.Setenv(envSession, "")
+	t.Setenv(envBaseRootID, idA)
+	t.Setenv(envRootID, idA)
+	err = runSend([]string{"--me", "alice", "--root", baseB, "--from-session", "cto", "--session", "cto", "--to", "alice", "--body", "x"})
+	if GetExitCode(err) != ExitContextMismatch {
+		t.Fatalf("exit=%d err=%v, want context mismatch", GetExitCode(err), err)
+	}
+}
+
 func TestSendFromSessionRejectsProject(t *testing.T) {
 	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
 	ensureSendSessionAgent(t, filepath.Join(baseRoot, "cto"), "alice")

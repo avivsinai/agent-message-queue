@@ -138,12 +138,40 @@ func runSend(args []string) error {
 	// Fires only on positive evidence of a different home root (AM_ROOT /
 	// AM_BASE_ROOT); bare-root sends with no session env set are unaffected.
 	routed := targetProject != "" || targetSession != "" || fromSession != ""
+	// Validate explicit session evidence before advisory cross-tree classification;
+	// malformed pins must fail closed with the context-mismatch exit status.
+	var pin sessionPin
+	var pinErr error
+	pin, pinErr = loadSessionPin()
+	if pinErr != nil {
+		return pinErr
+	}
+	if pin.Present && pin.IdentityPin {
+		if verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID) != TreeRelationSame {
+			return ContextMismatchError("pinned base root identity is not current")
+		}
+		if fromSession != "" && verifyTreeIdentityToken(root, pin.RootID) != TreeRelationSame {
+			return ContextMismatchError("pinned root identity is not current")
+		}
+		if fromSession == "" {
+			if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
+				return err
+			}
+		}
+	}
 	if common.rootExplicit() && !routed {
 		if src, ok := conflictingSourceRoot(root); ok {
 			return UsageError("refusing send: --root %s targets a different AMQ tree than your own (%s), "+
 				"but no routing dimension was given, so the recipient could not reply.\n"+
 				"Use --project <peer> or --session <name> for replyable cross-tree routing, "+
 				"or set the target as AM_ROOT if this send is genuinely local.", root, src)
+		}
+	}
+	// Preserve the original lexical source guard after the advisory check. An
+	// identity pin was already validated above; lexical pins still need refusal.
+	if fromSession == "" && (!pin.Present || !pin.IdentityPin) {
+		if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
+			return err
 		}
 	}
 	var replyProject string
@@ -160,29 +188,17 @@ func runSend(args []string) error {
 		if classifyRoot(root) != "" {
 			return UsageError("--from-session requires --root to be the base root, not a session root")
 		}
-		sourceRoot = filepath.Join(root, fromSession)
-		if !dirExists(sourceRoot) {
-			return fmt.Errorf("source session %q not found at %s", fromSession, sourceRoot)
-		}
-		if !dirExists(filepath.Join(sourceRoot, "agents", me)) {
-			return fmt.Errorf("agent %q not found in source session %q", me, fromSession)
+		sourceRoot, err = resolveSessionRoot(root, fromSession)
+		if err != nil {
+			return fmt.Errorf("source session %q not found: %w", fromSession, err)
 		}
 		sourceSession = fromSession
 	}
-	if fromSession == "" {
-		if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
-			return err
-		}
-	}
-
 	if targetProject != "" {
 		// Cross-project delivery.
 		peerBaseRoot, err := resolvePeer(root, targetProject)
 		if err != nil {
 			return err
-		}
-		if !dirExists(peerBaseRoot) {
-			return fmt.Errorf("peer root for %q does not exist: %s", targetProject, peerBaseRoot)
 		}
 
 		if targetSession != "" {
@@ -192,35 +208,26 @@ func runSend(args []string) error {
 				return UsageError("--session: %v", err)
 			}
 			targetSession = normalized
-			deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
+			deliveryRoot, err = resolveSessionRoot(peerBaseRoot, targetSession)
+			if err != nil {
+				return err
+			}
 		} else {
 			// Cross-project, no explicit session. Mirror the sender's session when
 			// the source root is itself a session root.
 			if classifyRoot(root) != "" {
 				// Inside a session — use same session name in peer.
 				targetSession = sessionName(root)
-				deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
+				deliveryRoot, err = resolveSessionRoot(peerBaseRoot, targetSession)
+				if err != nil {
+					return err
+				}
 			} else {
 				// At base root — deliver to peer's base root directly.
 				deliveryRoot = peerBaseRoot
 			}
 		}
 
-		if !dirExists(deliveryRoot) {
-			if targetSession != "" {
-				return fmt.Errorf("session %q not found in peer %q at %s", targetSession, targetProject, deliveryRoot)
-			}
-			return fmt.Errorf("peer %q root does not exist at %s", targetProject, deliveryRoot)
-		}
-		for _, r := range recipients {
-			inbox := filepath.Join(deliveryRoot, "agents", r, "inbox")
-			if !dirExists(inbox) {
-				if targetSession != "" {
-					return fmt.Errorf("agent %q not found in peer %q session %q", r, targetProject, targetSession)
-				}
-				return fmt.Errorf("agent %q not found in peer %q", r, targetProject)
-			}
-		}
 		replyProject = resolveProject(root)
 	} else if targetSession != "" {
 		normalized, err := normalizeHandle(targetSession)
@@ -241,31 +248,74 @@ func runSend(args []string) error {
 			return fmt.Errorf("--session requires a session context: run from inside 'amq coop exec --session <name>'")
 		}
 
-		deliveryRoot = filepath.Join(baseRoot, targetSession)
-
-		// Verify the target session and agent inboxes exist.
-		if !dirExists(deliveryRoot) {
-			return fmt.Errorf("session %q not found at %s", targetSession, deliveryRoot)
+		deliveryRoot, err = resolveSessionRoot(baseRoot, targetSession)
+		if err != nil {
+			return err
 		}
-		for _, r := range recipients {
-			inbox := filepath.Join(deliveryRoot, "agents", r, "inbox")
-			if !dirExists(inbox) {
-				return fmt.Errorf("agent %q not found in session %q", r, targetSession)
-			}
+
+	}
+
+	// Snapshot the physical roots at the authorization boundary. Opening the
+	// capabilities below must prove it got these exact directories.
+	deliveryIdentity, err := fsq.SnapshotDeliveryRoot(deliveryRoot)
+	if err != nil {
+		return err
+	}
+	sourceIdentity := deliveryIdentity
+	if filepath.Clean(sourceRoot) != filepath.Clean(deliveryRoot) {
+		sourceIdentity, err = fsq.SnapshotDeliveryRoot(sourceRoot)
+		if err != nil {
+			return err
+		}
+	}
+	if pin.IdentityPin && !*ignoreSessionPinFlag && fromSession == "" &&
+		verifyTreeIdentityInfo(sourceIdentity.FileInfo(), pin.RootID) != TreeRelationSame {
+		return ContextMismatchError("authorized source root identity changed before capability open")
+	}
+
+	deliveryFS, err := fsq.OpenDeliveryRoot(deliveryRoot, deliveryIdentity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = deliveryFS.Close() }()
+	sourceFS := deliveryFS
+	if filepath.Clean(sourceRoot) != filepath.Clean(deliveryRoot) {
+		sourceFS, err = fsq.OpenDeliveryRoot(sourceRoot, sourceIdentity)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = sourceFS.Close() }()
+	}
+
+	if fromSession != "" && !deliveryAgentExists(sourceFS, me) {
+		return fmt.Errorf("agent %q not found in source session %q", me, fromSession)
+	}
+	for _, recipient := range recipients {
+		if deliveryInboxExists(deliveryFS, recipient) {
+			continue
+		}
+		switch {
+		case targetProject != "" && targetSession != "":
+			return fmt.Errorf("agent %q not found in peer %q session %q", recipient, targetProject, targetSession)
+		case targetProject != "":
+			return fmt.Errorf("agent %q not found in peer %q", recipient, targetProject)
+		case targetSession != "":
+			return fmt.Errorf("agent %q not found in session %q", recipient, targetSession)
 		}
 	}
 
-	// Validate sender in source root, recipients in target root. Always.
+	// Validate sender in source root and recipients in target root through the
+	// same capabilities that will perform delivery.
 	if targetProject != "" || targetSession != "" {
-		if err := validateKnownHandles(sourceRoot, common.Strict, me); err != nil {
+		if err := validateKnownHandlesDeliveryRoot(sourceFS, common.Strict, me); err != nil {
 			return err
 		}
-		if err := validateKnownHandles(deliveryRoot, common.Strict, recipients...); err != nil {
+		if err := validateKnownHandlesDeliveryRoot(deliveryFS, common.Strict, recipients...); err != nil {
 			return err
 		}
 	} else {
 		allHandles := append([]string{me}, recipients...)
-		if err := validateKnownHandles(root, common.Strict, allHandles...); err != nil {
+		if err := validateKnownHandlesDeliveryRoot(deliveryFS, common.Strict, allHandles...); err != nil {
 			return err
 		}
 	}
@@ -387,23 +437,23 @@ func runSend(args []string) error {
 	if targetProject != "" {
 		// Cross-project: use DeliverToExistingInbox (never creates dirs in peer).
 		for _, r := range recipients {
-			if _, err := fsq.DeliverToExistingInbox(deliveryRoot, r, filename, data); err != nil {
-				return err
+			if _, err := fsq.DeliverToExistingInbox(deliveryFS, r, filename, data); err != nil {
+				return reportDeliveryError(id, err)
 			}
 		}
 	} else {
-		if _, err := fsq.DeliverToInboxes(deliveryRoot, recipients, filename, data); err != nil {
-			return err
+		if _, err := fsq.DeliverToInboxes(deliveryFS, recipients, filename, data); err != nil {
+			return reportDeliveryError(id, err)
 		}
 	}
 
 	// Best-effort presence touch.
-	_ = presence.Touch(sourceRoot, common.Me)
+	_ = presence.TouchDeliveryRoot(sourceFS, common.Me)
 
 	// Copy to sender outbox/sent for audit (always in sender's root).
-	outboxDir := fsq.AgentOutboxSent(sourceRoot, common.Me)
+	outboxDir := filepath.Join("agents", common.Me, "outbox", "sent")
 	outboxErr := error(nil)
-	if _, err := fsq.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
+	if _, err := sourceFS.WriteFileAtomic(outboxDir, filename, data, 0o600); err != nil {
 		outboxErr = err
 	}
 
@@ -424,7 +474,7 @@ func runSend(args []string) error {
 	var waitErr error
 	if waitFor != "" {
 		consumer := recipients[0]
-		r, err := receipt.WaitFor(deliveryRoot, id, consumer, waitFor, *waitTimeoutFlag, 1*time.Second)
+		r, err := receipt.WaitForDeliveryRoot(deliveryFS, id, consumer, waitFor, *waitTimeoutFlag, 1*time.Second)
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			waitResult = &waitForResult{Event: "timeout", Stage: waitFor, Timeout: waitTimeoutFlag.String()}
 			waitErr = TimeoutError("send --wait-for %s timed out after %s (delivery session %s, root %s); run 'amq doctor --ops' to diagnose mailbox divergence", waitFor, *waitTimeoutFlag, targetDisplay, deliveryRoot)
@@ -445,10 +495,7 @@ func runSend(args []string) error {
 			"session":     targetDisplay,
 			"root":        deliveryRoot,
 			"source_root": sourceRoot,
-			"outbox": map[string]any{
-				"written": outboxErr == nil,
-				"error":   errString(outboxErr),
-			},
+			"outbox":      outboxResult(outboxErr),
 		}
 		if targetProject != "" {
 			out["cross_project"] = true
@@ -469,7 +516,7 @@ func runSend(args []string) error {
 		return waitErr
 	}
 	if outboxErr != nil {
-		if err := writeStderr("warning: outbox write failed: %v\n", outboxErr); err != nil {
+		if err := reportOutboxError(outboxErr); err != nil {
 			return err
 		}
 	}
