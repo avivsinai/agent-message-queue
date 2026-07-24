@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.47.0](https://github.com/avivsinai/agent-message-queue/compare/v0.46.0...v0.47.0) (2026-07-24)
+
+
+### Features
+
+* **wake:** add identity-safe owner-bound lifecycle ([#277](https://github.com/avivsinai/agent-message-queue/issues/277)) ([84ea950](https://github.com/avivsinai/agent-message-queue/commit/84ea9508faa673d70870bd004b73e2bb19c5c5b0))
+
+
+### Bug Fixes
+
+* **ci:** skip release-please on release-commit pushes to avoid tag race ([#271](https://github.com/avivsinai/agent-message-queue/issues/271)) ([e37067a](https://github.com/avivsinai/agent-message-queue/commit/e37067a91b4447c3ed99bf647b71e7ec9dbf3824))
+
 ## [0.46.0](https://github.com/avivsinai/agent-message-queue/compare/v0.45.0...v0.46.0) (2026-07-22)
 
 
