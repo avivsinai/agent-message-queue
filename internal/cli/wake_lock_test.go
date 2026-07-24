@@ -83,8 +83,16 @@ func writeWakeLockExactForTest(t *testing.T, root, agent string, lock wakeLock) 
 
 func bindWakeLockToTarget(lock wakeLock, target wakeTarget) wakeLock {
 	lock.WakeMode = wakeTargetInjectVia
-	lock.TargetDigest = wakeTargetDigest(target)
+	lock.TargetDigest = mustWakeTargetDigest(target)
 	return lock
+}
+
+func mustWakeTargetDigest(target wakeTarget) string {
+	digest, err := wakeTargetDigest(target)
+	if err != nil {
+		panic(err)
+	}
+	return digest
 }
 
 func TestSameWakeInjectorIdentityUsesOnlyPathAndOrderedArgs(t *testing.T) {

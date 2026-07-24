@@ -173,6 +173,58 @@ func TestRunOpsChecksDoesNotAdvertiseRepairForTamperedStaleLock(t *testing.T) {
 	}
 }
 
+func TestRunOpsChecksDirectsOwnerClaimToRecoverOwner(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "owner-doctor-injector")
+	owner := wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	target.Owner = &owner
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatalf("write wake target: %v", err)
+	}
+	lock := bindWakeLockToTarget(wakeLock{
+		PID:          5151,
+		Root:         canonicalWakeRoot(root),
+		Agent:        "codex",
+		ProcessStart: "67890",
+		BootID:       owner.BootID,
+		Generation:   "owner-doctor-generation",
+		OwnerSchema:  wakeOwnerLockSchema,
+		Owner:        &owner,
+	}, target)
+	lock.WakeMode = wakeOwnerWakeMode
+	lockPath := writeWakeLockExactForTest(t, root, "codex", lock)
+	if err := os.Chmod(lockPath, wakeOwnerLockFileMode); err != nil {
+		t.Fatal(err)
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid}
+	})
+
+	result := runOpsChecks(root, "test", true)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != string(wakeLockStale) {
+		t.Fatalf("owner wake status = %q, want stale", got.Status)
+	}
+	if got.Fix != wakeRecoverOwnerCommand(root, "codex") {
+		t.Fatalf("owner wake fix = %q, want %q", got.Fix, wakeRecoverOwnerCommand(root, "codex"))
+	}
+	if got.Removed {
+		t.Fatal("doctor --fix removed an owner-bound wake claim")
+	}
+	if _, err := os.Lstat(lockPath); err != nil {
+		t.Fatalf("owner-bound wake claim was not preserved: %v", err)
+	}
+}
+
 func TestRunOpsChecksDoesNotAdvertiseRepairForUnknownBootIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

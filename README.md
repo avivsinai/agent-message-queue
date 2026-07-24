@@ -125,9 +125,12 @@ draining mitigates that residual. `--require-wake` requires a usable notifier,
 not a rebased reused wake.
 Launchers that use an external injector can add `--wake-inject-via /absolute/path/to/injector`
 and repeated `--wake-inject-arg` values. When that invocation starts a new wake,
-the wake stores a repair target so `amq wake repair` can restart wake later
-without restarting the agent TUI. If `--require-wake` reuses an existing wake,
-that wake must already have repair metadata to be repairable.
+the wake is bound to the exact `coop exec` process identity and stores its
+injector target. The claim survives an ordinary wake exit so another process
+cannot silently take over the handle. If the owner or wake exits unexpectedly,
+use `amq wake recover-owner` instead of the ownerless repair path. When a
+required owner capability is conclusively unsupported before any claim exists,
+AMQ warns and starts one ownerless wake instead.
 
 ### 3. Send & Receive
 
@@ -205,6 +208,7 @@ amq doctor --ops
 amq doctor --ops --json
 amq doctor --ops --fix-wake-locks
 amq wake repair --me codex
+amq wake recover-owner --me codex
 amq wake retire --me codex --inject-via /absolute/injector \
   --inject-arg exec --inject-arg terminal-id
 ```
@@ -228,6 +232,15 @@ or injecting into the wrong terminal. Repaired wake output goes to
 `agents/<agent>/.wake.repair.log`; `doctor --ops` can report whether repair is
 available, but it never starts a wake process.
 
+`amq wake recover-owner` is the separate recovery path for an owner-bound
+`coop exec --wake-inject-via` claim. A live owner may release only its exact
+claim from the same OS session, using the inherited `AMQ_WAKE_OWNER` token.
+When the exact owner is dead, recovery does not require that token. AMQ stops
+only an identity-confirmed wake, re-checks the claim after every wait, and
+fails closed without mutation when the owner or claim is unknown, legacy, or
+corrupt. There is no force mode. The ownerless `repair`, `retire`, and
+`doctor --ops --fix-wake-locks` paths refuse owner-bound claims.
+
 `amq wake retire` is the exact managed-shutdown path. It requires the caller's
 expected `--inject-via` executable and ordered `--inject-arg` values. A live
 wake is retired only when its process identity, unchanged lock generation, and
@@ -239,6 +252,7 @@ target are preserved in either case; raw and unverified wakes fail closed.
 The lifecycle boundaries are:
 
 - repair = replace a proven-stale inject-via wake.
+- recover-owner = stop and release one exact owner-bound inject-via claim.
 - `doctor --ops --fix-wake-locks` = remove a proven-stale lock.
 - retire = stop an identity-confirmed live inject-via wake.
 - launchd, systemd, or the owning shell = stop a raw wake.
@@ -401,7 +415,7 @@ Common command groups:
 | Core messaging | `init`, `send`, `list`, `read`, `drain`, `reply`, `thread`, `watch`, `monitor`, `receipts` |
 | Collaboration | `coop init`, `coop exec`, `swarm list`, `swarm join`, `swarm tasks`, `swarm bridge` |
 | Integrations | `integration symphony init`, `integration symphony emit`, `integration kanban bridge` |
-| Operations | `presence set`, `presence list`, `route explain`, `who`, `doctor`, `doctor --ops`, `wake repair`, `wake retire`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |
+| Operations | `presence set`, `presence list`, `route explain`, `who`, `doctor`, `doctor --ops`, `wake repair`, `wake recover-owner`, `wake retire`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |
 
 For the full CLI syntax, examples, and message schema, see [CLAUDE.md](CLAUDE.md).
 

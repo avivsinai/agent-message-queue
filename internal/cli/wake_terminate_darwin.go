@@ -21,7 +21,10 @@ func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, er
 	var recheck wakeLockInspection
 	if err := withWakeLifecycleGuard(inspection.Root, inspection.Agent, func() error {
 		recheck = inspectWakeLock(inspection.Root, inspection.Agent)
-		return nil
+		if !sameWakeLockInspection(inspection, recheck) {
+			return nil
+		}
+		return validateWakeLockOwnerlessMutation(recheck)
 	}); err != nil {
 		return false, err
 	}
@@ -59,7 +62,10 @@ func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, er
 }
 
 func isLiveRawOrphan(inspection wakeLockInspection) bool {
-	return inspection.Process.Running && inspection.IdentityConfirmed && inspection.Lock.WakeMode != wakeTargetInjectVia
+	return inspection.Process.Running &&
+		inspection.IdentityConfirmed &&
+		inspection.Lock.WakeMode != wakeTargetInjectVia &&
+		!wakeLockHasOwnerMarkers(inspection)
 }
 
 func terminateWakeProcess(inspection wakeLockInspection) error {

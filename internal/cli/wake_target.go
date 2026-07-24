@@ -8,8 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -19,6 +22,8 @@ const (
 	wakeTargetFileName  = ".wake.target"
 	wakeTargetInjectVia = "inject-via"
 	envWakeOwner        = "AMQ_WAKE_OWNER"
+
+	maxWakeOwnerIdentityTokenBytes = 256
 )
 
 type wakeOwner struct {
@@ -69,15 +74,35 @@ func wakeTargetInjectViaPath(path string) (string, error) {
 	return validateWakeInjectViaPath(path)
 }
 
-func wakeTargetDigest(target wakeTarget) string {
-	data, _ := json.Marshal(target)
+func wakeTargetDigest(target wakeTarget) (string, error) {
+	data, err := json.Marshal(target)
+	if err != nil {
+		return "", fmt.Errorf("marshal wake target digest: %w", err)
+	}
 	sum := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
 func validateWakeTargetMatchesLock(lock wakeLock, target wakeTarget) error {
-	if lock.WakeMode != wakeTargetInjectVia || lock.TargetDigest == "" {
+	if (lock.WakeMode != wakeTargetInjectVia && lock.WakeMode != wakeOwnerWakeMode) || lock.TargetDigest == "" {
 		return fmt.Errorf("wake lock was not created for an inject-via repair target")
+	}
+	if lock.WakeMode == wakeOwnerWakeMode {
+		if lock.OwnerSchema != wakeOwnerLockSchema || lock.Owner == nil {
+			return fmt.Errorf("wake owner lock schema is incomplete")
+		}
+		if err := validateAuthoritativeWakeOwner(*lock.Owner); err != nil {
+			return fmt.Errorf("wake lock owner is invalid: %w", err)
+		}
+		if target.Owner == nil {
+			return fmt.Errorf("wake target owner is missing")
+		}
+		if err := validateAuthoritativeWakeOwner(*target.Owner); err != nil {
+			return fmt.Errorf("wake target owner is invalid: %w", err)
+		}
+		if !sameWakeOwner(lock.Owner, target.Owner) {
+			return fmt.Errorf("wake target owner does not match wake lock owner")
+		}
 	}
 	if strings.TrimSpace(lock.Root) == "" || canonicalWakeRoot(lock.Root) != canonicalWakeRoot(target.Root) {
 		return fmt.Errorf("wake lock root mismatch")
@@ -85,7 +110,11 @@ func validateWakeTargetMatchesLock(lock wakeLock, target wakeTarget) error {
 	if lock.Agent != target.Agent {
 		return fmt.Errorf("wake lock agent mismatch")
 	}
-	if got := wakeTargetDigest(target); got != lock.TargetDigest {
+	got, err := wakeTargetDigest(target)
+	if err != nil {
+		return err
+	}
+	if got != lock.TargetDigest {
 		return fmt.Errorf("wake target does not match wake lock")
 	}
 	return nil
@@ -208,7 +237,7 @@ func validateWakeTarget(target wakeTarget, root, me string) error {
 }
 
 func encodeWakeOwnerEnv(owner wakeOwner) (string, error) {
-	if err := validateWakeOwner(owner); err != nil {
+	if err := validateAuthoritativeWakeOwner(owner); err != nil {
 		return "", err
 	}
 	data, err := json.Marshal(owner)
@@ -247,6 +276,105 @@ func validateWakeOwner(owner wakeOwner) error {
 		return fmt.Errorf("wake owner session id must be >= 0")
 	}
 	return nil
+}
+
+func validateAuthoritativeWakeOwner(owner wakeOwner) error {
+	if err := validateWakeOwner(owner); err != nil {
+		return err
+	}
+	if err := validateAuthoritativeWakeOwnerToken("process start", owner.ProcessStart); err != nil {
+		return err
+	}
+	if err := validateAuthoritativeWakeOwnerToken("boot id", owner.BootID); err != nil {
+		return err
+	}
+	if owner.SessionID <= 0 {
+		return fmt.Errorf("wake owner session id must be > 0")
+	}
+	if !validWakeOwnerProcessStart(owner.ProcessStart) {
+		return fmt.Errorf("wake owner process start has malformed platform value")
+	}
+	if !validWakeOwnerBootID(owner.BootID) {
+		return fmt.Errorf("wake owner boot id has malformed platform value")
+	}
+	return nil
+}
+
+func validateAuthoritativeWakeOwnerToken(label, value string) error {
+	if value == "" {
+		return fmt.Errorf("wake owner %s is required", label)
+	}
+	if len(value) > maxWakeOwnerIdentityTokenBytes {
+		return fmt.Errorf("wake owner %s is too long", label)
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("wake owner %s is not valid UTF-8", label)
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("wake owner %s contains a control character", label)
+		}
+	}
+	if strings.TrimSpace(value) != value {
+		return fmt.Errorf("wake owner %s is not canonical", label)
+	}
+	return nil
+}
+
+func validWakeOwnerProcessStart(value string) bool {
+	if validPositiveDecimal(value) {
+		return true
+	}
+	return validWakeOwnerTimestamp(value)
+}
+
+func validWakeOwnerBootID(value string) bool {
+	if validWakeOwnerTimestamp(value) {
+		return true
+	}
+	if len(value) != 36 {
+		return false
+	}
+	for index, r := range value {
+		switch index {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if (r < '0' || r > '9') &&
+				(r < 'a' || r > 'f') &&
+				(r < 'A' || r > 'F') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validWakeOwnerTimestamp(value string) bool {
+	seconds, nanos, found := strings.Cut(value, ".")
+	if !found || !validPositiveDecimal(seconds) || len(nanos) != 9 {
+		return false
+	}
+	parsedNanos, err := strconv.ParseUint(nanos, 10, 32)
+	return err == nil && parsedNanos < 1_000_000_000
+}
+
+func validPositiveDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	if len(value) > 1 && value[0] == '0' {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	return err == nil && parsed > 0
 }
 
 func validateWakeInjectViaPath(path string) (string, error) {

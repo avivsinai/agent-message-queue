@@ -75,7 +75,7 @@ func TestWakeUpgradeRaceRepairRejectsConcurrentCurrentAcquire(t *testing.T) {
 	if winner.Lock.Generation == "" || winner.Lock.Generation == legacyGeneration {
 		t.Fatalf("winner generation = %q, want a new current generation", winner.Lock.Generation)
 	}
-	if winner.Lock.WakeMode != wakeTargetInjectVia || winner.Lock.TargetDigest != wakeTargetDigest(target) {
+	if winner.Lock.WakeMode != wakeTargetInjectVia || winner.Lock.TargetDigest != mustWakeTargetDigest(target) {
 		t.Fatalf("winner metadata = %#v, want current inject-via target binding", winner.Lock)
 	}
 	if runtime.GOOS == "darwin" && winner.Lock.ControlSocket == "" {
@@ -120,7 +120,7 @@ func TestWakeUpgradeRaceCleanupAndReadinessPreserveReplacement(t *testing.T) {
 			}
 			replacement := original.Lock
 			replacement.Generation = "replacement-generation"
-			replacement.TargetDigest = wakeTargetDigest(replacementTarget)
+			replacement.TargetDigest = mustWakeTargetDigest(replacementTarget)
 			replacement.ControlSocket = wakeControlSocketPath(root, "codex", replacement.Generation)
 			data, err := json.Marshal(replacement)
 			if err != nil {

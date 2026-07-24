@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func TestSplitDashDash(t *testing.T) {
@@ -130,6 +131,73 @@ func TestCoopExecRequireWakeRejectsNoWake(t *testing.T) {
 	}
 	if !containsStr(err.Error(), "--require-wake cannot be used with --no-wake") {
 		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestCoopExecAlwaysOverwritesOwnerTokenImmediatelyBeforeExec(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	self := os.Getpid()
+	owner := wakeOwner{
+		PID:          self,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid != self {
+			return wakeProcessInfo{PID: pid}
+		}
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: owner.ProcessStart,
+			BootID:     owner.BootID,
+		}
+	})
+	stubWakeProcessSID(t, func(pid int) (int, error) {
+		if pid != self {
+			t.Fatalf("session lookup pid = %d, want %d", pid, self)
+		}
+		return owner.SessionID, nil
+	})
+	t.Setenv(envWakeOwner, `{"pid":1,"process_start":"stale","boot_id":"stale","session_id":1}`)
+
+	sentinel := errors.New("exec sentinel")
+	var execEnv []string
+	oldExec := coopExecProcess
+	coopExecProcess = func(_ string, _ []string, env []string) error {
+		execEnv = append([]string{}, env...)
+		return sentinel
+	}
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err := runCoopExec([]string{"--root", root, "--me", "codex", "--no-wake", "sh"})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("coop exec error = %v, want sentinel", err)
+	}
+	raw := ""
+	count := 0
+	for _, entry := range execEnv {
+		if strings.HasPrefix(entry, envWakeOwner+"=") {
+			count++
+			raw = strings.TrimPrefix(entry, envWakeOwner+"=")
+		}
+	}
+	if count != 1 {
+		t.Fatalf("final %s count = %d, env=%v", envWakeOwner, count, execEnv)
+	}
+	var got wakeOwner
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("decode final owner: %v", err)
+	}
+	if got != owner {
+		t.Fatalf("final owner = %#v, want %#v", got, owner)
 	}
 }
 

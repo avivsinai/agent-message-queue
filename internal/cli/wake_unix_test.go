@@ -531,8 +531,8 @@ func TestRunWakeWithLoopPersistsInjectViaWakeOwnerFromEnv(t *testing.T) {
 
 	owner := wakeOwner{
 		PID:          4242,
-		ProcessStart: "owner-start",
-		BootID:       "boot-1",
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
 		SessionID:    99,
 	}
 	ownerEnv, err := encodeWakeOwnerEnv(owner)
@@ -540,6 +540,14 @@ func TestRunWakeWithLoopPersistsInjectViaWakeOwnerFromEnv(t *testing.T) {
 		t.Fatalf("encodeWakeOwnerEnv: %v", err)
 	}
 	t.Setenv(envWakeOwner, ownerEnv)
+	oldObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
+		if got != owner {
+			t.Fatalf("observed owner = %#v, want %#v", got, owner)
+		}
+		return wakeOwnerObservation{State: wakeOwnerSame}, nil
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
 
 	injector := writeExecutableForTest(t, "injector")
 	errDone := errors.New("done")
@@ -918,7 +926,7 @@ func TestRunWakeWithLoopWaitsForCurrentPreparedMarkerPastStaleGeneration(t *test
 	if err := writeWakeGenerationFile(wakePreparedPath(root, "orchestrator"), "wake prepared marker", wakeReady{
 		Schema:       wakeReadySchema,
 		Generation:   "previous-generation",
-		TargetDigest: wakeTargetDigest(target),
+		TargetDigest: mustWakeTargetDigest(target),
 	}); err != nil {
 		t.Fatalf("write previous-generation prepared marker: %v", err)
 	}
@@ -2377,7 +2385,7 @@ func TestShouldReplaceOrphanedWakeLockRevalidatesBeforeSignal(t *testing.T) {
 	}
 }
 
-func TestShouldReplaceOrphanedWakeLockReplacesInjectViaWhenOwnerGone(t *testing.T) {
+func TestShouldReplaceOrphanedWakeLockRefusesLegacyOwnerStateWhenOwnerGone(t *testing.T) {
 	requireBarePIDWakeTermination(t)
 	const wakePID = 4242
 	const ownerPID = 7777
@@ -2430,8 +2438,8 @@ func TestShouldReplaceOrphanedWakeLockReplacesInjectViaWhenOwnerGone(t *testing.
 
 	inspection := inspectWakeLock(root, "orchestrator")
 	replaced, err := shouldReplaceOrphanedWakeLock(inspection)
-	if err == nil || !strings.Contains(err.Error(), "no cooperative control endpoint") {
-		t.Fatalf("expected missing-control refusal, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "recover-owner") {
+		t.Fatalf("expected owner-state refusal, got %v", err)
 	}
 	if replaced || killed {
 		t.Fatal("legacy inject-via wake must not be terminated by PID")
@@ -2441,7 +2449,7 @@ func TestShouldReplaceOrphanedWakeLockReplacesInjectViaWhenOwnerGone(t *testing.
 	}
 }
 
-func TestShouldReplaceOrphanedWakeLockKeepsInjectViaWhenOwnerMatches(t *testing.T) {
+func TestShouldReplaceOrphanedWakeLockRefusesLegacyOwnerStateWhenOwnerMatches(t *testing.T) {
 	const wakePID = 4242
 	const ownerPID = 7777
 	root := secureTempDirForTest(t)
@@ -2489,11 +2497,11 @@ func TestShouldReplaceOrphanedWakeLockKeepsInjectViaWhenOwnerMatches(t *testing.
 
 	inspection := inspectWakeLock(root, "orchestrator")
 	replaced, err := shouldReplaceOrphanedWakeLock(inspection)
-	if err != nil {
-		t.Fatalf("shouldReplaceOrphanedWakeLock: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "recover-owner") {
+		t.Fatalf("expected owner-state refusal, got %v", err)
 	}
 	if replaced {
-		t.Fatal("owner-matched inject-via wake should not be replaced")
+		t.Fatal("legacy owner-bearing wake should not be replaced")
 	}
 	if _, statErr := os.Stat(lockPath); statErr != nil {
 		t.Fatalf("lock should remain for owner-matched wake, stat=%v", statErr)
@@ -3157,37 +3165,13 @@ func TestWakeHealthCheckKeepsInjectViaWhenOwnerMatches(t *testing.T) {
 	}
 }
 
-func TestCurrentWakeOwnerIncludesProcessIdentityWhenAvailable(t *testing.T) {
-	self := os.Getpid()
-	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		if pid != self {
-			return wakeProcessInfo{PID: pid}
-		}
-		return wakeProcessInfo{
-			PID:        pid,
-			Running:    true,
-			StartToken: "self-start",
-			BootID:     "boot-1",
-		}
-	})
-	stubWakeProcessSID(t, func(pid int) (int, error) {
-		if pid != self {
-			t.Fatalf("unexpected sid lookup pid %d", pid)
-		}
-		return 99, nil
-	})
-
-	owner := currentWakeOwner()
-	if owner == nil {
-		t.Fatal("expected owner")
-	}
-	if owner.PID != self || owner.ProcessStart != "self-start" || owner.BootID != "boot-1" || owner.SessionID != 99 {
-		t.Fatalf("owner = %#v, want pid=%d start/self boot/session", owner, self)
-	}
-}
-
 func TestWakeCommandEnvCarriesOwnerToken(t *testing.T) {
-	owner := wakeOwner{PID: 4242, ProcessStart: "owner-start", BootID: "boot-1", SessionID: 99}
+	owner := wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
 	env, err := wakeCommandEnv([]string{
 		"PATH=/bin",
 		envRoot + "=/old/root",
