@@ -8,7 +8,6 @@ import (
 	"os"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"golang.org/x/sys/unix"
 )
 
 func classifyPersistedWakeClaim(inspection wakeLockInspection) wakeClaimClass {
@@ -130,7 +129,6 @@ func acquireAuthoritativeWakeLockWithOptions(
 	for {
 		var created wakeLockInspection
 		var stopCapability *authoritativeWakeStopCapability
-		fallbackOwnerless := false
 		retry := false
 		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 			inspection := inspectWakeLockForOwnerTransition(dirfd, agentDir, root, me)
@@ -149,10 +147,6 @@ func acquireAuthoritativeWakeLockWithOptions(
 			requestedObservation, observeErr := observeAuthoritativeWakeOwner(*requested.Owner)
 			defer func() { _ = requestedObservation.Close() }()
 			if observeErr != nil {
-				if requestedObservation.CapabilityUnsupported && claimClass == wakeClaimAbsent {
-					fallbackOwnerless = true
-					return nil
-				}
 				return observeErr
 			}
 			if requestedObservation.State != wakeOwnerSame {
@@ -269,14 +263,25 @@ func acquireAuthoritativeWakeLockWithOptions(
 					if !publicationErr.Unsupported || publicationErr.Committed {
 						return err
 					}
-					if unlinkErr := unix.Unlinkat(dirfd, wakeTargetFileName, 0); unlinkErr != nil && unlinkErr != unix.ENOENT {
-						return fmt.Errorf("%w (remove uncommitted owner target: %v)", err, unlinkErr)
+					if publicationErr.InstalledTarget == nil {
+						return fmt.Errorf("%w (installed owner target identity is unavailable; preserving it)", err)
 					}
-					if syncErr := syncWakeOwnerDirFD(dirfd); syncErr != nil {
-						return fmt.Errorf("%w (sync ownerless fallback cleanup: %v)", err, syncErr)
+					removed, removeErr := removeWakeTargetIfSnapshotMatchesAt(
+						dirfd,
+						agentDir,
+						root,
+						me,
+						*publicationErr.InstalledTarget,
+					)
+					if removeErr != nil {
+						return fmt.Errorf("%w (uncommitted owner target cleanup refused: %v)", err, removeErr)
 					}
-					fallbackOwnerless = true
-					return nil
+					if removed {
+						if syncErr := syncWakeOwnerDirFD(dirfd); syncErr != nil {
+							return fmt.Errorf("%w (sync uncommitted owner target cleanup: %v)", err, syncErr)
+						}
+					}
+					return err
 				}
 				return err
 			}
@@ -310,17 +315,6 @@ func acquireAuthoritativeWakeLockWithOptions(
 		}
 		if retry {
 			continue
-		}
-		if fallbackOwnerless {
-			ownerless := requested
-			ownerless.Owner = nil
-			_ = writeStderr("warning: owner-bound wake capabilities are unavailable; starting one ownerless inject-via wake\n")
-			// Reflect the degradation in the caller's target too. The wake loop
-			// must not keep applying owner-health semantics to a claim that was
-			// deliberately published through the ownerless protocol.
-			*options.target = ownerless
-			options.wakeMode = wakeTargetInjectVia
-			return acquireWakeLockWithOptions(root, me, options)
 		}
 		if !created.Exists {
 			return nil, fmt.Errorf("authoritative wake acquisition produced no claim")

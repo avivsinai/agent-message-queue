@@ -62,10 +62,10 @@ func runCoopExec(args []string) error {
 		"  amq coop exec --wake-inject-via /path/to/injector codex",
 		"  amq coop exec --me myagent bash                   # Debug shell with AMQ env",
 		"",
-		"Zero-input readiness:",
-		"  --wake-inject-mode none never reuses an existing wake unless its lock",
-		"  proves it was also started in none mode; stop an older wake and retry.",
-		"  A default request remains transport-agnostic and may reuse a none wake.",
+		"Wake readiness:",
+		"  Coop never reuses a generic wake because it has no persisted",
+		"  exact-owner identity. Only an exact owner-bound inject-via wake can be",
+		"  reused; stop an older generic wake before retrying coop exec.",
 	)
 
 	if handled, err := parseFlags(fs, amqArgs, usage); err != nil {
@@ -234,30 +234,44 @@ func runCoopExec(args []string) error {
 		return fmt.Errorf("command not found: %s", cmdName)
 	}
 
-	// Start amq wake in background (unless --no-wake).
-	// On successful Exec, wake is orphaned (reparented to init/launchd) — intended.
-	// On failed Exec, deferred kill cleans up the wake process.
+	// Start amq wake in background (unless --no-wake). Every coop-started wake
+	// is bound to this exact process identity and exits when the exec-replaced
+	// agent exits. On failed Exec, stable child cleanup stops it immediately.
 	var wakeProc *os.Process
 	var wakeWaiter *wakeProcessWaiter
 	var wakeChildCapability *authoritativeWakeChildCapability
+	var wakeHelperClaim *wakeLockInspection
 	var cleanupWakeReady func()
 	var earlyOwner *wakeOwner
 	baseEnv := unsetEnvVar(unsetEnvVar(os.Environ(), envWakeOwner), envWakePrivateStopFD)
+	retainWakeHelperClaim := func(current wakeLockInspection) {
+		if retained := exactCoopWakeHelperClaim(wakeProc, current); retained != nil {
+			wakeHelperClaim = retained
+		}
+	}
+	cleanupWakeHelper := func(preservePersistedClaim bool) error {
+		return cleanupCoopWakeStartupHelper(
+			wakeProc,
+			wakeWaiter,
+			wakeChildCapability,
+			earlyOwner,
+			root,
+			agentHandle,
+			preservePersistedClaim,
+			wakeHelperClaim,
+		)
+	}
 	if !*noWakeFlag {
 		amqBin, binErr := os.Executable()
 		if binErr != nil {
 			amqBin = "amq"
 		}
 
-		var wakeOwner *wakeOwner
-		if wakeInjectVia != "" {
-			captured, ownerErr := captureAuthoritativeCurrentWakeOwner()
-			if ownerErr != nil {
-				return ownerErr
-			}
-			earlyOwner = &captured
-			wakeOwner = earlyOwner
+		captured, ownerErr := captureAuthoritativeCurrentWakeOwner()
+		if ownerErr != nil {
+			return fmt.Errorf("capture exact coop wake owner: %w", ownerErr)
 		}
+		earlyOwner = &captured
 		readyPath, cleanupReady, readyErr := newWakeReadyFile()
 		if readyErr != nil {
 			inspection := inspectWakeLock(root, agentHandle)
@@ -270,7 +284,7 @@ func runCoopExec(args []string) error {
 			wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(agentHandle, root, wakeInjectMode, wakeInjectVia, []string(wakeInjectArgFlags), readyPath)...)
 			// Set AM_ROOT in wake's env so the helper process resolves the same
 			// session root even if the parent shell inherited a different value.
-			wakeEnv, wakeEnvErr := wakeCommandEnv(baseEnv, root, wakeOwner)
+			wakeEnv, wakeEnvErr := wakeCommandEnv(baseEnv, root, earlyOwner)
 			if wakeEnvErr != nil {
 				return wakeEnvErr
 			}
@@ -278,29 +292,45 @@ func runCoopExec(args []string) error {
 			wakeCmd.Stdin = os.Stdin
 			wakeCmd.Stdout = os.Stdout
 			wakeCmd.Stderr = os.Stderr
-			if earlyOwner != nil {
-				wakeChildCapability, err = configureAuthoritativeWakeChild(wakeCmd)
-				if err != nil {
-					var unsupported *wakeOwnerChildCapabilityUnsupportedError
-					if !errors.As(err, &unsupported) {
-						return fmt.Errorf("prepare owner-bound wake child: %w", err)
-					}
-					_ = writeStderr("warning: owner-bound wake child capability is unsupported; starting one ownerless inject-via wake\n")
-					earlyOwner = nil
-					wakeCmd.Env, wakeEnvErr = wakeCommandEnv(baseEnv, root, nil)
-					if wakeEnvErr != nil {
-						return wakeEnvErr
-					}
-				}
+			wakeChildCapability, err = configureAuthoritativeWakeChild(wakeCmd)
+			if err == nil && wakeChildCapability == nil {
+				return fmt.Errorf("prepare exact-owner amq wake supervision returned nil capability")
 			}
-
-			if err := wakeCmd.Start(); err != nil {
+			if err != nil {
+				var closeErr error
 				if wakeChildCapability != nil {
-					_ = wakeChildCapability.Close()
+					closeErr = wakeChildCapability.Close()
 					wakeChildCapability = nil
 				}
+				if closeErr != nil {
+					return errors.Join(
+						fmt.Errorf("prepare exact-owner amq wake supervision: %w", err),
+						fmt.Errorf("cleanup unstarted coop wake capability: %w", closeErr),
+					)
+				}
 				inspection := inspectWakeLock(root, agentHandle)
-				if err := handleCoopWakeSetupFailure(*requireWakeFlag, inspection, "start amq wake baseline helper", err); err != nil {
+				if setupErr := handleCoopWakeSetupFailure(
+					*requireWakeFlag,
+					inspection,
+					"prepare exact-owner amq wake supervision",
+					err,
+				); setupErr != nil {
+					return setupErr
+				}
+			} else if err := wakeCmd.Start(); err != nil {
+				var closeErr error
+				if wakeChildCapability != nil {
+					closeErr = wakeChildCapability.Close()
+					wakeChildCapability = nil
+				}
+				if closeErr != nil {
+					return errors.Join(
+						fmt.Errorf("start exact-owner amq wake helper: %w", err),
+						fmt.Errorf("cleanup unstarted coop wake capability: %w", closeErr),
+					)
+				}
+				inspection := inspectWakeLock(root, agentHandle)
+				if err := handleCoopWakeSetupFailure(*requireWakeFlag, inspection, "start exact-owner amq wake helper", err); err != nil {
 					return err
 				}
 			} else {
@@ -308,51 +338,79 @@ func runCoopExec(args []string) error {
 				wakeWaiter = newWakeProcessWaiter(wakeProc)
 				if wakeChildCapability != nil {
 					if err := wakeChildCapability.Bind(wakeProc); err != nil {
-						stopErr := wakeChildCapability.Stop()
-						if stopErr == nil {
-							_ = wakeWaiter.waitForExit(wakeProcessExitTimeout)
+						current := inspectWakeLock(root, agentHandle)
+						retainWakeHelperClaim(current)
+						cleanupErr := cleanupWakeHelper(current.Exists && current.PID != wakeProc.Pid)
+						bindErr := fmt.Errorf("bind stable owner-bound wake child: %w", err)
+						if cleanupErr == nil {
+							return bindErr
 						}
-						_ = wakeChildCapability.Close()
-						if stopErr != nil {
-							return fmt.Errorf("bind stable owner-bound wake child: %w (stable cleanup unavailable: %v)", err, stopErr)
-						}
-						return fmt.Errorf("bind stable owner-bound wake child: %w", err)
+						return errors.Join(bindErr, fmt.Errorf("cleanup exact coop wake startup helper: %w", cleanupErr))
 					}
 				}
-				if err := waitForWakeReadyWithOwner(
+				readyErr := waitForWakeReadyWithOwner(
 					wakeWaiter,
 					readyPath,
 					root,
 					agentHandle,
 					earlyOwner,
 					wakeReadyTimeout,
-				); err != nil {
-					cleanupErr := cleanupStartedWakeHelper(
-						wakeProc,
-						wakeWaiter,
-						wakeChildCapability,
-						earlyOwner,
-						root,
-						agentHandle,
-					)
-					inspection := inspectWakeLock(root, agentHandle)
-					otherLiveWake := confirmedLiveWake(inspection) && inspection.PID != wakeProc.Pid
-					if *requireWakeFlag || otherLiveWake {
-						if cleanupErr != nil {
-							return fmt.Errorf("%w (cleanup: %v)", err, cleanupErr)
-						}
-						return err
-					}
+				)
+				current := inspectWakeLock(root, agentHandle)
+				retainWakeHelperClaim(current)
+				otherWake := current.Exists && current.PID != wakeProc.Pid
+				if readyErr != nil {
+					cleanupErr := cleanupWakeHelper(otherWake)
 					if cleanupErr != nil {
-						_ = writeStderr("warning: failed to prepare amq wake: %v (cleanup: %v)\n", err, cleanupErr)
-					} else {
-						_ = writeStderr("warning: failed to prepare amq wake: %v\n", err)
+						return errors.Join(
+							readyErr,
+							fmt.Errorf("cleanup exact coop wake startup helper: %w", cleanupErr),
+						)
 					}
+					if otherWake || *requireWakeFlag {
+						return readyErr
+					}
+					_ = writeStderr("warning: failed to prepare amq wake: %v\n", readyErr)
 					wakeProc = nil
 					wakeWaiter = nil
 					wakeChildCapability = nil
 				} else {
-					_ = writeStderr("%s\n", wakeReadyMessage(root, agentHandle, wakeProc.Pid))
+					current, claimErr := validatePreparedCoopWakeClaim(
+						root,
+						agentHandle,
+						wakeInjectVia,
+						[]string(wakeInjectArgFlags),
+						*earlyOwner,
+						wakeProc.Pid,
+					)
+					reused := current.Exists && current.PID != wakeProc.Pid
+					if !reused {
+						retainWakeHelperClaim(current)
+					}
+					if claimErr != nil {
+						cleanupErr := cleanupWakeHelper(reused)
+						if cleanupErr != nil {
+							return errors.Join(
+								claimErr,
+								fmt.Errorf("cleanup exact coop wake startup helper: %w", cleanupErr),
+							)
+						}
+						return claimErr
+					}
+					if reused {
+						if cleanupErr := cleanupWakeHelper(true); cleanupErr != nil {
+							return fmt.Errorf(
+								"finish exact reused-wake startup helper: %w",
+								cleanupErr,
+							)
+						}
+						_ = writeStderr("%s\n", wakeReadyMessage(root, agentHandle, current.PID))
+						wakeProc = nil
+						wakeWaiter = nil
+						wakeChildCapability = nil
+					} else {
+						_ = writeStderr("%s\n", wakeReadyMessage(root, agentHandle, wakeProc.Pid))
+					}
 				}
 			}
 		}
@@ -371,32 +429,143 @@ func runCoopExec(args []string) error {
 	if cleanupWakeReady != nil {
 		cleanupWakeReady()
 	}
+	cleanupAfterError := func(cause error) error {
+		cleanupErr := cleanupWakeHelper(false)
+		if cleanupErr == nil {
+			return cause
+		}
+		return errors.Join(
+			cause,
+			fmt.Errorf("cleanup exact coop wake helper: %w", cleanupErr),
+		)
+	}
 	finalOwner, ownerErr := captureAuthoritativeCurrentWakeOwner()
 	if ownerErr != nil {
-		if wakeProc != nil {
-			_ = cleanupStartedWakeHelper(wakeProc, wakeWaiter, wakeChildCapability, earlyOwner, root, agentHandle)
-		}
-		return ownerErr
+		return cleanupAfterError(fmt.Errorf("capture final coop wake owner: %w", ownerErr))
 	}
 	if earlyOwner != nil && *earlyOwner != finalOwner {
-		if wakeProc != nil {
-			_ = cleanupStartedWakeHelper(wakeProc, wakeWaiter, wakeChildCapability, earlyOwner, root, agentHandle)
-		}
-		return fmt.Errorf("coop exec process identity changed after owner-bound wake start")
+		return cleanupAfterError(fmt.Errorf("coop exec process identity changed after owner-bound wake start"))
 	}
 	encodedOwner, ownerErr := encodeWakeOwnerEnv(finalOwner)
 	if ownerErr != nil {
-		if wakeProc != nil {
-			_ = cleanupStartedWakeHelper(wakeProc, wakeWaiter, wakeChildCapability, earlyOwner, root, agentHandle)
-		}
-		return fmt.Errorf("encode final wake owner: %w", ownerErr)
+		return cleanupAfterError(fmt.Errorf("encode final wake owner: %w", ownerErr))
 	}
 	env = setEnvVar(unsetEnvVar(env, envWakeOwner), envWakeOwner, encodedOwner)
 	execErr := coopExecProcess(binaryPath, argv, env)
-	if wakeProc != nil {
-		_ = cleanupStartedWakeHelper(wakeProc, wakeWaiter, wakeChildCapability, earlyOwner, root, agentHandle)
+	if execErr == nil {
+		execErr = fmt.Errorf("exec returned without replacing process")
 	}
-	return execErr
+	return cleanupAfterError(execErr)
+}
+
+func exactCoopWakeHelperClaim(
+	proc *os.Process,
+	current wakeLockInspection,
+) *wakeLockInspection {
+	if proc == nil ||
+		!current.Exists ||
+		current.PID != proc.Pid ||
+		current.Lock.Generation == "" {
+		return nil
+	}
+	switch current.Status {
+	case wakeLockValid, wakeLockStale:
+	default:
+		return nil
+	}
+	switch classifyPersistedWakeClaim(current) {
+	case wakeClaimGeneric, wakeClaimAuthoritative:
+		retained := current
+		return &retained
+	default:
+		return nil
+	}
+}
+
+func validatePreparedCoopWakeClaim(
+	root string,
+	me string,
+	injectVia string,
+	injectArgs []string,
+	owner wakeOwner,
+	helperPID int,
+) (wakeLockInspection, error) {
+	agentDir, err := openWakeAgentDir(root, me)
+	if err != nil {
+		return wakeLockInspection{}, err
+	}
+	defer func() { _ = agentDir.Close() }()
+
+	var current wakeLockInspection
+	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		current = inspectWakeLockAt(dirfd, agentDir, root, me)
+		if !confirmedLiveWake(current) {
+			return fmt.Errorf("prepared coop wake is not a confirmed live wake")
+		}
+		if current.PID != helperPID && injectVia == "" {
+			return fmt.Errorf(
+				"generic coop wake readiness resolved to unrelated pid %d",
+				current.PID,
+			)
+		}
+		if injectVia == "" {
+			return nil
+		}
+		if classifyPersistedWakeClaim(current) != wakeClaimAuthoritative {
+			return fmt.Errorf("prepared inject-via wake is not an authoritative owner claim")
+		}
+		target, err := validateAuthoritativeWakeClaimPairAt(dirfd, agentDir, current)
+		if err != nil {
+			return fmt.Errorf("validate prepared inject-via owner claim: %w", err)
+		}
+		if !sameWakeOwner(current.Lock.Owner, &owner) ||
+			!sameWakeOwner(target.Owner, &owner) {
+			return fmt.Errorf("prepared inject-via wake belongs to a different exact owner")
+		}
+		requested, err := newWakeTarget(root, me, injectVia, injectArgs)
+		if err != nil {
+			return fmt.Errorf("rebuild requested inject-via target: %w", err)
+		}
+		requested.Owner = &owner
+		if !sameWakeInjectorIdentity(target, requested) {
+			return fmt.Errorf("prepared inject-via wake uses a different injector path or fixed arguments")
+		}
+		return nil
+	})
+	return current, err
+}
+
+func cleanupCoopWakeStartupHelper(
+	proc *os.Process,
+	waiter *wakeProcessWaiter,
+	capability *authoritativeWakeChildCapability,
+	owner *wakeOwner,
+	root string,
+	me string,
+	preservePersistedClaim bool,
+	helperClaim *wakeLockInspection,
+) error {
+	if proc == nil {
+		if capability == nil {
+			return nil
+		}
+		return capability.Close()
+	}
+	if !preservePersistedClaim {
+		return cleanupStartedWakeHelper(proc, waiter, capability, owner, root, me, helperClaim)
+	}
+	if waiter == nil {
+		return fmt.Errorf("coop wake startup helper waiter is missing")
+	}
+	if capability == nil {
+		return fmt.Errorf("coop wake startup helper capability is missing")
+	}
+	// The persisted claim belongs to another exact process. Stop and join only
+	// this startup helper; never run claim cleanup against the reused generation.
+	stopErr := capability.Stop()
+	waitErr := waiter.waitForExit(wakeProcessExitTimeout)
+	closeErr := capability.Close()
+	return errors.Join(stopErr, waitErr, closeErr)
 }
 
 func confirmedLiveWake(inspection wakeLockInspection) bool {
@@ -415,7 +584,14 @@ func handleCoopWakeSetupFailure(requireWake bool, inspection wakeLockInspection,
 }
 
 func buildCoopWakeArgs(agentHandle, root, injectMode, injectVia string, injectArgs []string, readyFile string) []string {
-	args := []string{"--no-update-check", "wake", "--me", agentHandle, "--root", root, "--baseline-existing"}
+	args := []string{
+		"--no-update-check",
+		"wake",
+		"--me", agentHandle,
+		"--root", root,
+		"--baseline-existing",
+		"--interrupt-cmd", "none",
+	}
 	if injectMode != "" && injectMode != wakeInjectModeAuto {
 		args = append(args, "--inject-mode", injectMode)
 	}
@@ -426,7 +602,12 @@ func buildCoopWakeArgs(agentHandle, root, injectMode, injectVia string, injectAr
 		}
 	}
 	if readyFile != "" {
-		args = append(args, "--ready-file", readyFile, "--accept-existing-wake")
+		args = append(args, "--ready-file", readyFile)
+		if injectVia != "" {
+			// Only an exact owner-bound inject-via claim has persisted owner
+			// metadata that can prove reuse belongs to this coop process.
+			args = append(args, "--accept-existing-wake")
+		}
 	}
 	return args
 }
@@ -544,11 +725,20 @@ func cleanupStartedWakeHelper(
 	owner *wakeOwner,
 	root string,
 	me string,
+	helperClaim *wakeLockInspection,
 ) error {
 	if owner == nil {
 		return terminateWakeHelperProcess(proc, waiter, root, me)
 	}
-	return terminateAuthoritativeWakeHelperProcess(proc, waiter, capability, root, me, *owner)
+	return terminateAuthoritativeWakeHelperProcessForClaim(
+		proc,
+		waiter,
+		capability,
+		root,
+		me,
+		*owner,
+		helperClaim,
+	)
 }
 
 func terminateAuthoritativeWakeHelperProcess(
@@ -559,43 +749,68 @@ func terminateAuthoritativeWakeHelperProcess(
 	me string,
 	owner wakeOwner,
 ) error {
-	if proc == nil || waiter == nil {
-		if capability != nil {
-			_ = capability.Close()
-		}
-		return nil
-	}
+	expected := inspectWakeLock(root, me)
+	return terminateAuthoritativeWakeHelperProcessForClaim(
+		proc,
+		waiter,
+		capability,
+		root,
+		me,
+		owner,
+		&expected,
+	)
+}
+
+func terminateAuthoritativeWakeHelperProcessForClaim(
+	proc *os.Process,
+	waiter *wakeProcessWaiter,
+	capability *authoritativeWakeChildCapability,
+	root string,
+	me string,
+	owner wakeOwner,
+	helperClaim *wakeLockInspection,
+) error {
 	if capability == nil {
 		return fmt.Errorf("stable owner-bound wake child capability is missing")
 	}
-	if err := capability.Stop(); err != nil {
-		_ = capability.Close()
-		return err
-	}
-	if err := waiter.waitForExit(wakeProcessExitTimeout); err != nil {
-		_ = capability.Close()
-		return err
-	}
-	if err := capability.Close(); err != nil {
-		return err
-	}
-	current := inspectWakeLock(root, me)
-	switch classifyPersistedWakeClaim(current) {
-	case wakeClaimAbsent:
-		return nil
-	case wakeClaimAuthoritative:
-		return rollbackAuthoritativeWakeClaim(root, me, owner)
-	case wakeClaimGeneric:
-		if current.PID != proc.Pid {
-			return fmt.Errorf("ownerless fallback wake generation changed before cleanup")
-		}
-		return cleanupTerminatedWakeLock(current)
+	stopErr := capability.Stop()
+	var waitErr error
+	switch {
+	case proc == nil:
+		waitErr = fmt.Errorf("stable owner-bound wake child process is missing")
+	case waiter == nil:
+		waitErr = fmt.Errorf("stable owner-bound wake child waiter is missing")
 	default:
-		return fmt.Errorf("wake claim is unverified after exact helper stop; preserving it")
+		waitErr = waiter.waitForExit(wakeProcessExitTimeout)
 	}
+	closeErr := capability.Close()
+
+	var claimErr error
+	if waitErr == nil && helperClaim != nil {
+		switch classifyPersistedWakeClaim(*helperClaim) {
+		case wakeClaimAuthoritative:
+			claimErr = rollbackAuthoritativeWakeClaimForInspection(root, me, owner, *helperClaim)
+		case wakeClaimGeneric:
+			claimErr = cleanupTerminatedWakeLock(*helperClaim)
+		case wakeClaimAbsent:
+		default:
+			claimErr = fmt.Errorf("retained helper wake claim is unverified; preserving it")
+		}
+	}
+	return errors.Join(stopErr, waitErr, closeErr, claimErr)
 }
 
 func rollbackAuthoritativeWakeClaim(root, me string, owner wakeOwner) error {
+	expected := inspectWakeLock(root, me)
+	return rollbackAuthoritativeWakeClaimForInspection(root, me, owner, expected)
+}
+
+func rollbackAuthoritativeWakeClaimForInspection(
+	root string,
+	me string,
+	owner wakeOwner,
+	expected wakeLockInspection,
+) error {
 	currentOwner, err := captureAuthoritativeCurrentWakeOwner()
 	if err != nil {
 		return err
@@ -611,6 +826,9 @@ func rollbackAuthoritativeWakeClaim(root, me string, owner wakeOwner) error {
 	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !current.Exists {
+			return nil
+		}
+		if !sameWakeLockGeneration(expected, current) {
 			return nil
 		}
 		if classifyPersistedWakeClaim(current) != wakeClaimAuthoritative ||

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -201,6 +202,38 @@ func TestCoopExecAlwaysOverwritesOwnerTokenImmediatelyBeforeExec(t *testing.T) {
 	}
 }
 
+func TestCoopExecRejectsExecReturningNil(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	oldExec := coopExecProcess
+	coopExecProcess = func(string, []string, []string) error { return nil }
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err := runCoopExec([]string{"--root", root, "--me", "codex", "--no-wake", "sh"})
+	if err == nil || !strings.Contains(err.Error(), "exec returned without replacing process") {
+		t.Fatalf("coop exec error = %v, want nil-return refusal", err)
+	}
+}
+
+func TestCoopExecRejectsNilWakeChildCapability(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	oldPrepare := prepareAuthoritativeWakeChild
+	prepareAuthoritativeWakeChild = func(*exec.Cmd) (*authoritativeWakeChildCapability, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() { prepareAuthoritativeWakeChild = oldPrepare })
+
+	err := runCoopExec([]string{"--root", root, "--me", "codex", "sh"})
+	if err == nil || !strings.Contains(err.Error(), "returned nil capability") {
+		t.Fatalf("coop exec error = %v, want nil-capability refusal", err)
+	}
+}
+
 func TestCoopWakeReadinessTempFailureDegradesOnlyWithoutRequiredOrLiveWake(t *testing.T) {
 	cause := errors.New("TMPDIR unavailable")
 	confirmedLive := wakeLockInspection{
@@ -314,11 +347,228 @@ func TestCoopExecWakeInjectModeValidation(t *testing.T) {
 	}
 }
 
-func TestBuildCoopWakeArgsIncludesNoneMode(t *testing.T) {
+func TestBuildCoopWakeArgsDisablesInterruptAndGenericReuse(t *testing.T) {
 	got := buildCoopWakeArgs("codex", "/tmp/root", "none", "", nil, "/tmp/ready")
-	want := []string{"--no-update-check", "wake", "--me", "codex", "--root", "/tmp/root", "--baseline-existing", "--inject-mode", "none", "--ready-file", "/tmp/ready", "--accept-existing-wake"}
+	want := []string{
+		"--no-update-check",
+		"wake",
+		"--me", "codex",
+		"--root", "/tmp/root",
+		"--baseline-existing",
+		"--interrupt-cmd", "none",
+		"--inject-mode", "none",
+		"--ready-file", "/tmp/ready",
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("buildCoopWakeArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestBuildCoopWakeArgsNeverAcceptsExistingGenericWake(t *testing.T) {
+	for _, mode := range []string{
+		wakeInjectModeAuto,
+		wakeInjectModeRaw,
+		wakeInjectModePaste,
+		wakeInjectModeNone,
+	} {
+		t.Run(mode, func(t *testing.T) {
+			args := buildCoopWakeArgs("codex", "/tmp/root", mode, "", nil, "/tmp/ready")
+			for _, arg := range args {
+				if arg == "--accept-existing-wake" {
+					t.Fatalf("generic mode %q permits ownerless wake reuse: %#v", mode, args)
+				}
+			}
+		})
+	}
+}
+
+func TestCleanupCoopWakeStartupHelperPreservesReusedClaim(t *testing.T) {
+	root := t.TempDir()
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:        5151,
+		Generation: "reused-generation",
+	})
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stopped := false
+	closed := false
+	capability := &authoritativeWakeChildCapability{
+		stop: func() error {
+			stopped = true
+			return nil
+		},
+		close: func() error {
+			closed = true
+			return nil
+		},
+	}
+	waiter := &wakeProcessWaiter{done: make(chan struct{})}
+	close(waiter.done)
+
+	if err := cleanupCoopWakeStartupHelper(
+		&os.Process{Pid: 5252},
+		waiter,
+		capability,
+		nil,
+		root,
+		"codex",
+		true,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !stopped || !closed {
+		t.Fatalf("startup helper cleanup stopped=%v closed=%v", stopped, closed)
+	}
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("reused claim changed during startup-helper cleanup:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestCleanupCoopWakeStartupHelperSurfacesCapabilityFailures(t *testing.T) {
+	stopErr := errors.New("stop failed")
+	closeErr := errors.New("close failed")
+	capability := &authoritativeWakeChildCapability{
+		stop: func() error { return stopErr },
+		close: func() error {
+			return closeErr
+		},
+	}
+	waiter := &wakeProcessWaiter{done: make(chan struct{})}
+	close(waiter.done)
+
+	err := cleanupCoopWakeStartupHelper(
+		&os.Process{Pid: 5252},
+		waiter,
+		capability,
+		nil,
+		t.TempDir(),
+		"codex",
+		true,
+		nil,
+	)
+	if !errors.Is(err, stopErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("cleanup error = %v, want joined stop and close failures", err)
+	}
+}
+
+func TestFreshWakeHelperCleanupAttemptsStopWaitAndClose(t *testing.T) {
+	stopErr := errors.New("stop failed")
+	closeErr := errors.New("close failed")
+	stopped := false
+	closed := false
+	capability := &authoritativeWakeChildCapability{
+		stop: func() error {
+			stopped = true
+			return stopErr
+		},
+		close: func() error {
+			closed = true
+			return closeErr
+		},
+	}
+
+	err := terminateAuthoritativeWakeHelperProcessForClaim(
+		&os.Process{Pid: 5252},
+		nil,
+		capability,
+		t.TempDir(),
+		"codex",
+		wakeOwner{},
+		nil,
+	)
+	if !stopped || !closed {
+		t.Fatalf("fresh cleanup stopped=%v closed=%v", stopped, closed)
+	}
+	if !errors.Is(err, stopErr) || !errors.Is(err, closeErr) ||
+		!strings.Contains(err.Error(), "waiter is missing") {
+		t.Fatalf("cleanup error = %v, want joined stop, wait, and close failures", err)
+	}
+}
+
+func TestFreshWakeHelperCleanupPreservesChangedGeneration(t *testing.T) {
+	root := t.TempDir()
+	const wakePID = 5252
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:        wakePID,
+		Generation: "helper-generation",
+	})
+	expected := inspectWakeLock(root, "codex")
+	capability := &authoritativeWakeChildCapability{
+		stop: func() error {
+			writeWakeLockForTest(t, root, "codex", wakeLock{
+				PID:        wakePID,
+				Generation: "replacement-generation",
+			})
+			return nil
+		},
+	}
+	waiter := &wakeProcessWaiter{done: make(chan struct{})}
+	close(waiter.done)
+
+	if err := terminateAuthoritativeWakeHelperProcessForClaim(
+		&os.Process{Pid: wakePID},
+		waiter,
+		capability,
+		root,
+		"codex",
+		wakeOwner{},
+		&expected,
+	); err != nil {
+		t.Fatal(err)
+	}
+	current := inspectWakeLock(root, "codex")
+	if current.Lock.Generation != "replacement-generation" {
+		t.Fatalf("changed generation was mutated during cleanup: %#v", current)
+	}
+}
+
+func TestFreshWakeHelperCleanupRetainsStalePublishedGeneration(t *testing.T) {
+	root := t.TempDir()
+	const wakePID = 5252
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid}
+	})
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:        wakePID,
+		Generation: "published-before-exit",
+	})
+	current := inspectWakeLock(root, "codex")
+	if current.Status != wakeLockStale {
+		t.Fatalf("published helper fixture is %s, want stale: %#v", current.Status, current)
+	}
+	claim := exactCoopWakeHelperClaim(&os.Process{Pid: wakePID}, current)
+	if claim == nil {
+		t.Fatal("same-helper stale generation was not retained for exact cleanup")
+	}
+	capability := &authoritativeWakeChildCapability{
+		stop:  func() error { return nil },
+		close: func() error { return nil },
+	}
+	waiter := &wakeProcessWaiter{done: make(chan struct{})}
+	close(waiter.done)
+	owner := wakeOwner{}
+	if err := cleanupCoopWakeStartupHelper(
+		&os.Process{Pid: wakePID},
+		waiter,
+		capability,
+		&owner,
+		root,
+		"codex",
+		false,
+		claim,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("stale same-helper generation survived exact cleanup: %v", err)
 	}
 }
 

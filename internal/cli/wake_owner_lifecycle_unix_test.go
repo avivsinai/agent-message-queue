@@ -260,6 +260,73 @@ func TestAuthoritativeOwnerLockRequiresTheSameStrictOwnerInTarget(t *testing.T) 
 	}
 }
 
+func TestOwnerAcquisitionNeverDegradesUnsupportedOrUnknownObservation(t *testing.T) {
+	tests := []struct {
+		name        string
+		observation wakeOwnerObservation
+		observeErr  error
+		want        string
+	}{
+		{
+			name: "unsupported observer",
+			observation: wakeOwnerObservation{
+				State:                 wakeOwnerUnknown,
+				Reason:                "kernel owner observation unsupported",
+				CapabilityUnsupported: true,
+			},
+			observeErr: errors.New("owner observation unsupported"),
+			want:       "owner observation unsupported",
+		},
+		{
+			name:        "unknown observer",
+			observation: wakeOwnerObservation{State: wakeOwnerUnknown, Reason: "identity incomplete"},
+			want:        "requested wake owner is unknown",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			owner := wakeOwner{
+				PID:          4242,
+				ProcessStart: "12345",
+				BootID:       "11111111-1111-1111-1111-111111111111",
+				SessionID:    99,
+			}
+			injector := writeExecutableForTest(t, "owner-observation-refusal-injector")
+			target := mustNewWakeTargetForTest(t, root, "codex", injector, nil)
+			target.Owner = &owner
+			oldObserve := observeAuthoritativeWakeOwner
+			observeAuthoritativeWakeOwner = func(wakeOwner) (wakeOwnerObservation, error) {
+				return tc.observation, tc.observeErr
+			}
+			t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
+
+			_, err := acquireAuthoritativeWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+				target:   &target,
+				wakeMode: wakeTargetInjectVia,
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("owner acquisition error = %v, want %q", err, tc.want)
+			}
+			if inspection := inspectWakeLock(root, "codex"); inspection.Exists {
+				t.Fatalf("refused owner acquisition published wake lock: %#v", inspection)
+			}
+			if _, exists, err := readWakeTarget(root, "codex"); err != nil || exists {
+				t.Fatalf("refused owner acquisition target exists=%v err=%v", exists, err)
+			}
+			if !sameWakeOwner(target.Owner, &owner) {
+				t.Fatalf("refused owner acquisition mutated requested owner: %#v", target.Owner)
+			}
+		})
+	}
+}
+
 func TestPublishAuthoritativeWakeClaimCommitsACompleteReadOnlyGeneration(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -501,6 +568,11 @@ func TestAcquireAuthoritativeWakeClaimPublishesOwnerAndCleanupPreservesLifetime(
 	observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
 		if err := validateAuthoritativeWakeOwner(got); err != nil {
 			t.Fatalf("observed invalid owner %#v: %v", got, err)
+		}
+		if ownerState == wakeOwnerSame {
+			observation := liveWakeOwnerObservationForTest()
+			observation.Reason = "test owner evidence"
+			return observation, nil
 		}
 		return wakeOwnerObservation{State: ownerState, Reason: "test owner evidence"}, nil
 	}

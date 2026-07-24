@@ -4,9 +4,11 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -57,6 +59,11 @@ func TestLinuxOwnerObservationRetainsPidfdAcrossStableDoubleSnapshot(t *testing.
 		BootID:       "11111111-1111-1111-1111-111111111111",
 		SessionID:    99,
 	}
+	pidfdPipe := make([]int, 2)
+	if err := unix.Pipe2(pidfdPipe, unix.O_CLOEXEC); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(pidfdPipe[1]) })
 	var events []string
 	oldOpen := linuxPidfdOpen
 	oldPoll := linuxPidfdPoll
@@ -66,21 +73,21 @@ func TestLinuxOwnerObservationRetainsPidfdAcrossStableDoubleSnapshot(t *testing.
 		if pid != owner.PID || flags != 0 {
 			t.Fatalf("pidfd_open(%d,%d)", pid, flags)
 		}
-		return 77, nil
+		return pidfdPipe[0], nil
 	}
 	linuxPidfdPoll = func(fd int, _ time.Duration) (bool, error) {
 		events = append(events, "poll")
-		if fd != 77 {
+		if fd != pidfdPipe[0] {
 			t.Fatalf("poll fd = %d", fd)
 		}
 		return false, nil
 	}
 	linuxPidfdClose = func(fd int) error {
 		events = append(events, "close")
-		if fd != 77 {
-			t.Fatalf("close fd = %d", fd)
+		if fd != pidfdPipe[0] {
+			return fmt.Errorf("close fd = %d, want %d", fd, pidfdPipe[0])
 		}
-		return nil
+		return unix.Close(fd)
 	}
 	t.Cleanup(func() {
 		linuxPidfdOpen = oldOpen
@@ -105,6 +112,15 @@ func TestLinuxOwnerObservationRetainsPidfdAcrossStableDoubleSnapshot(t *testing.
 	if err != nil || observation.State != wakeOwnerSame {
 		t.Fatalf("observation = %#v err=%v", observation, err)
 	}
+	t.Cleanup(func() { _ = observation.Close() })
+	if observation.Done() == nil {
+		t.Fatal("same-owner observation has no lifetime signal")
+	}
+	select {
+	case <-observation.Done():
+		t.Fatal("same-owner observation ended before owner exit or explicit disposal")
+	default:
+	}
 	if len(events) == 0 || events[0] != "open" {
 		t.Fatalf("events before close = %v, want pidfd open first", events)
 	}
@@ -116,6 +132,11 @@ func TestLinuxOwnerObservationRetainsPidfdAcrossStableDoubleSnapshot(t *testing.
 	}
 	if got := events[len(events)-1]; got != "close" {
 		t.Fatalf("last event = %q, events=%v", got, events)
+	}
+	select {
+	case <-observation.Done():
+	default:
+		t.Fatal("same-owner observation did not end after explicit disposal")
 	}
 }
 
@@ -176,12 +197,208 @@ func TestLinuxOwnerObservationTreatsPidfdConfirmedMidSnapshotExitAsDead(t *testi
 	if observation.State != wakeOwnerDead {
 		t.Fatalf("observation = %#v, want pidfd-confirmed dead", observation)
 	}
+	select {
+	case <-observation.Done():
+	default:
+		t.Fatal("dead-owner observation Done is not already closed")
+	}
 	if inspections != 1 || polls != 2 {
 		t.Fatalf("mid-snapshot exit inspected=%d polled=%d, want 1 and 2", inspections, polls)
 	}
 }
 
-func TestLinuxUnsupportedPidfdStillCapturesCurrentOwnerForOwnerlessFallback(t *testing.T) {
+func TestLinuxOwnerObservationESRCHIsDeadAndAlreadyDone(t *testing.T) {
+	oldOpen := linuxPidfdOpen
+	linuxPidfdOpen = func(int, int) (int, error) {
+		return -1, syscall.ESRCH
+	}
+	t.Cleanup(func() { linuxPidfdOpen = oldOpen })
+
+	observation, err := observeAuthoritativeWakeOwnerPlatform(wakeOwner{PID: 4242})
+	if err != nil || observation.State != wakeOwnerDead {
+		t.Fatalf("observation = %#v err=%v, want dead", observation, err)
+	}
+	select {
+	case <-observation.Done():
+	default:
+		t.Fatal("ESRCH observation Done is not already closed")
+	}
+}
+
+func TestLinuxOwnerObservationUnsupportedHasNoDoneSignal(t *testing.T) {
+	oldOpen := linuxPidfdOpen
+	linuxPidfdOpen = func(int, int) (int, error) {
+		return -1, syscall.ENOSYS
+	}
+	t.Cleanup(func() { linuxPidfdOpen = oldOpen })
+
+	observation, err := observeAuthoritativeWakeOwnerPlatform(wakeOwner{PID: 4242})
+	if err == nil || observation.State != wakeOwnerUnknown || !observation.CapabilityUnsupported {
+		t.Fatalf("observation = %#v err=%v, want unsupported unknown", observation, err)
+	}
+	if observation.Done() != nil {
+		t.Fatal("unsupported owner observation exposed a false lifetime signal")
+	}
+}
+
+func TestLinuxOwnerObservationStableUnknownReturnsErrorAndNoDoneSignal(t *testing.T) {
+	owner := wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	const pidfd = 77
+	oldOpen := linuxPidfdOpen
+	oldPoll := linuxPidfdPoll
+	oldClose := linuxPidfdClose
+	linuxPidfdOpen = func(pid, flags int) (int, error) {
+		if pid != owner.PID || flags != 0 {
+			t.Fatalf("pidfd_open(%d,%d)", pid, flags)
+		}
+		return pidfd, nil
+	}
+	polls := 0
+	linuxPidfdPoll = func(fd int, _ time.Duration) (bool, error) {
+		if fd != pidfd {
+			t.Fatalf("poll fd = %d", fd)
+		}
+		polls++
+		return false, nil
+	}
+	closes := 0
+	linuxPidfdClose = func(fd int) error {
+		if fd != pidfd {
+			t.Fatalf("close fd = %d", fd)
+		}
+		closes++
+		return nil
+	}
+	t.Cleanup(func() {
+		linuxPidfdOpen = oldOpen
+		linuxPidfdPoll = oldPoll
+		linuxPidfdClose = oldClose
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: owner.ProcessStart,
+			BootID:     owner.BootID,
+		}
+	})
+	sessionErr := errors.New("session inspection denied")
+	stubWakeProcessSID(t, func(int) (int, error) {
+		return 0, sessionErr
+	})
+
+	observation, err := observeAuthoritativeWakeOwnerPlatform(owner)
+	if err == nil || !strings.Contains(err.Error(), sessionErr.Error()) {
+		t.Fatalf("unknown observation error = %v", err)
+	}
+	if observation.State != wakeOwnerUnknown {
+		t.Fatalf("observation = %#v, want unknown", observation)
+	}
+	if observation.Done() != nil {
+		t.Fatal("stable unknown observation exposed a false lifetime signal")
+	}
+	if polls != 3 || closes != 1 {
+		t.Fatalf("stable unknown polled=%d closed=%d, want 3 and 1", polls, closes)
+	}
+}
+
+func TestLinuxOwnerObservationMonitorClosesDoneOnOwnerExit(t *testing.T) {
+	pidfdPipe := make([]int, 2)
+	if err := unix.Pipe2(pidfdPipe, unix.O_CLOEXEC); err != nil {
+		t.Fatal(err)
+	}
+	monitor, err := startLinuxWakeOwnerObservationMonitor(pidfdPipe[0])
+	if err != nil {
+		_ = unix.Close(pidfdPipe[0])
+		_ = unix.Close(pidfdPipe[1])
+		t.Fatal(err)
+	}
+	observation := wakeOwnerObservation{
+		State:   wakeOwnerSame,
+		monitor: monitor,
+	}
+	t.Cleanup(func() { _ = observation.Close() })
+	if _, err := unix.Write(pidfdPipe[1], []byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	_ = unix.Close(pidfdPipe[1])
+
+	select {
+	case <-observation.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("owner terminal event did not close observation Done")
+	}
+	if err := observation.Close(); err != nil {
+		t.Fatalf("close terminal observation: %v", err)
+	}
+}
+
+func TestLinuxOwnerObservationCloseIsConcurrentAndIdempotent(t *testing.T) {
+	pidfdPipe := make([]int, 2)
+	if err := unix.Pipe2(pidfdPipe, unix.O_CLOEXEC); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(pidfdPipe[1]) })
+	monitor, err := startLinuxWakeOwnerObservationMonitor(pidfdPipe[0])
+	if err != nil {
+		_ = unix.Close(pidfdPipe[0])
+		t.Fatal(err)
+	}
+	observation := wakeOwnerObservation{
+		State:   wakeOwnerSame,
+		monitor: monitor,
+	}
+
+	const callers = 16
+	errs := make(chan error, callers)
+	var wait sync.WaitGroup
+	wait.Add(callers)
+	for range callers {
+		go func() {
+			defer wait.Done()
+			errs <- observation.Close()
+		}()
+	}
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent close: %v", err)
+		}
+	}
+	select {
+	case <-observation.Done():
+	default:
+		t.Fatal("explicit disposal did not close observation Done")
+	}
+}
+
+func TestLinuxOwnerObservationMonitorFailureClosesDone(t *testing.T) {
+	const invalidFD = 1 << 20
+	monitor, err := startLinuxWakeOwnerObservationMonitor(invalidFD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := wakeOwnerObservation{
+		State:   wakeOwnerSame,
+		monitor: monitor,
+	}
+	select {
+	case <-observation.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("monitor failure did not close observation Done")
+	}
+	if err := observation.Close(); err == nil {
+		t.Fatal("monitor failure was not surfaced by Close")
+	}
+}
+
+func TestLinuxUnsupportedPidfdStillCapturesCurrentOwnerButRejectsChildSupervision(t *testing.T) {
 	oldOpen := linuxPidfdOpen
 	linuxPidfdOpen = func(int, int) (int, error) {
 		return -1, syscall.ENOSYS
@@ -219,11 +436,11 @@ func TestLinuxUnsupportedPidfdStillCapturesCurrentOwnerForOwnerlessFallback(t *t
 	_, err = prepareAuthoritativeWakeChildPlatform(exec.Command("true"))
 	var unsupported *wakeOwnerChildCapabilityUnsupportedError
 	if !errors.As(err, &unsupported) {
-		t.Fatalf("child capability error = %v, want ownerless-fallback signal", err)
+		t.Fatalf("child capability error = %v, want unsupported supervision error", err)
 	}
 }
 
-func TestLinuxFreshUnsupportedOwnerPidfdFallsBackWithoutPublishingOwnerMarkers(t *testing.T) {
+func TestLinuxFreshUnsupportedOwnerPidfdRefusesOwnerAcquisition(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
@@ -260,37 +477,29 @@ func TestLinuxFreshUnsupportedOwnerPidfdFallsBackWithoutPublishingOwnerMarkers(t
 		}
 	})
 
-	var cleanup func()
 	var acquireErr error
 	stderr := captureWakeStderr(t, func() {
-		cleanup, acquireErr = acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+		_, acquireErr = acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
 			target:   &target,
 			wakeMode: wakeTargetInjectVia,
 		})
 	})
-	if acquireErr != nil {
-		t.Fatalf("ownerless fallback acquisition: %v", acquireErr)
+	if acquireErr == nil || !strings.Contains(acquireErr.Error(), "pidfd_open") {
+		t.Fatalf("owner acquisition error = %v, want unsupported observer refusal", acquireErr)
 	}
-	defer cleanup()
-	if !strings.Contains(stderr, "ownerless") {
-		t.Fatalf("fallback warning = %q", stderr)
+	if stderr != "" {
+		t.Fatalf("owner acquisition emitted degradation warning: %q", stderr)
 	}
 	inspection := inspectWakeLock(root, "codex")
-	if inspection.fileInfo.Mode().Perm() != 0o600 ||
-		inspection.Lock.OwnerSchema != 0 ||
-		inspection.Lock.Owner != nil ||
-		inspection.Lock.WakeMode != wakeTargetInjectVia {
-		t.Fatalf("fallback lock published owner markers: %#v", inspection)
+	if inspection.Exists {
+		t.Fatalf("unsupported owner observation published a wake claim: %#v", inspection)
 	}
 	persisted, exists, err := readWakeTarget(root, "codex")
-	if err != nil || !exists {
-		t.Fatalf("fallback target = %#v exists=%v err=%v", persisted, exists, err)
+	if err != nil || exists {
+		t.Fatalf("unsupported owner observation target = %#v exists=%v err=%v", persisted, exists, err)
 	}
-	if persisted.Owner != nil {
-		t.Fatalf("fallback target retained owner: %#v", persisted.Owner)
-	}
-	if target.Owner != nil {
-		t.Fatalf("caller target retained owner-health semantics after fallback: %#v", target.Owner)
+	if !sameWakeOwner(target.Owner, &owner) {
+		t.Fatalf("owner acquisition mutated caller target owner: %#v", target.Owner)
 	}
 }
 
