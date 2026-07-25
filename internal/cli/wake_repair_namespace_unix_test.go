@@ -43,6 +43,27 @@ func TestValidateCanonicalWakeRepairDirectoriesRejectsNamespaceReplacement(t *te
 			want: "agent directory no longer matches",
 		},
 		{
+			name: "inbox parent directory",
+			replace: func(t *testing.T, root string) {
+				t.Helper()
+				inboxPath := filepath.Join(fsq.AgentBase(root, "codex"), "inbox")
+				detachedPath := inboxPath + ".detached"
+				if err := os.Rename(inboxPath, detachedPath); err != nil {
+					t.Fatalf("detach inbox parent directory: %v", err)
+				}
+				if err := os.Mkdir(inboxPath, 0o700); err != nil {
+					t.Fatalf("create replacement inbox parent directory: %v", err)
+				}
+				if err := os.Rename(
+					filepath.Join(detachedPath, "new"),
+					filepath.Join(inboxPath, "new"),
+				); err != nil {
+					t.Fatalf("move retained inbox below replacement parent: %v", err)
+				}
+			},
+			want: "inbox parent directory no longer matches",
+		},
+		{
 			name: "inbox directory",
 			replace: func(t *testing.T, root string) {
 				t.Helper()

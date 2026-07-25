@@ -25,7 +25,8 @@ import (
 var wakeRepairAdmitTimeout = wakeReadyTimeout
 
 const (
-	wakeRepairHandoffSchema         = 1
+	wakeRepairHandoffSchemaV1       = 1
+	wakeRepairHandoffSchema         = 2
 	wakeRepairHandoffMaxFrameBytes  = 64 * 1024
 	wakeRepairHandoffMaxReasonBytes = 4 * 1024
 
@@ -45,23 +46,25 @@ const (
 // constructed, copying one cannot alias mutable repair state held by either
 // process.
 type wakeRepairHandoffSource struct {
-	schema             int
-	root               string
-	rootIdentity       string
-	agent              string
-	sourceGeneration   string
-	sourceTargetDigest string
-	sourceFloorDigest  string
-	bootID             string
-	agentDirDevice     uint64
-	agentDirInode      uint64
-	inboxDirDevice     uint64
-	inboxDirInode      uint64
-	hasOwner           bool
-	ownerPID           int
-	ownerProcessStart  string
-	ownerBootID        string
-	ownerSessionID     int
+	schema               int
+	root                 string
+	rootIdentity         string
+	agent                string
+	sourceGeneration     string
+	sourceTargetDigest   string
+	sourceFloorDigest    string
+	bootID               string
+	agentDirDevice       uint64
+	agentDirInode        uint64
+	inboxParentDirDevice uint64
+	inboxParentDirInode  uint64
+	inboxDirDevice       uint64
+	inboxDirInode        uint64
+	hasOwner             bool
+	ownerPID             int
+	ownerProcessStart    string
+	ownerBootID          string
+	ownerSessionID       int
 }
 
 type wakeRepairHandoffPrepared struct {
@@ -100,24 +103,26 @@ type wakeRepairHandoffRelease struct {
 }
 
 type wakeRepairHandoffSourceWire struct {
-	Schema             int    `json:"schema"`
-	Kind               string `json:"kind"`
-	Root               string `json:"root"`
-	RootIdentity       string `json:"root_identity"`
-	Agent              string `json:"agent"`
-	SourceGeneration   string `json:"source_generation"`
-	SourceTargetDigest string `json:"source_target_digest"`
-	SourceFloorDigest  string `json:"source_floor_digest"`
-	BootID             string `json:"boot_id"`
-	AgentDirDevice     uint64 `json:"agent_dir_device"`
-	AgentDirInode      uint64 `json:"agent_dir_inode"`
-	InboxDirDevice     uint64 `json:"inbox_dir_device"`
-	InboxDirInode      uint64 `json:"inbox_dir_inode"`
-	HasOwner           bool   `json:"has_owner,omitempty"`
-	OwnerPID           int    `json:"owner_pid,omitempty"`
-	OwnerProcessStart  string `json:"owner_process_start,omitempty"`
-	OwnerBootID        string `json:"owner_boot_id,omitempty"`
-	OwnerSessionID     int    `json:"owner_session_id,omitempty"`
+	Schema               int    `json:"schema"`
+	Kind                 string `json:"kind"`
+	Root                 string `json:"root"`
+	RootIdentity         string `json:"root_identity"`
+	Agent                string `json:"agent"`
+	SourceGeneration     string `json:"source_generation"`
+	SourceTargetDigest   string `json:"source_target_digest"`
+	SourceFloorDigest    string `json:"source_floor_digest"`
+	BootID               string `json:"boot_id"`
+	AgentDirDevice       uint64 `json:"agent_dir_device"`
+	AgentDirInode        uint64 `json:"agent_dir_inode"`
+	InboxParentDirDevice uint64 `json:"inbox_parent_dir_device"`
+	InboxParentDirInode  uint64 `json:"inbox_parent_dir_inode"`
+	InboxDirDevice       uint64 `json:"inbox_dir_device"`
+	InboxDirInode        uint64 `json:"inbox_dir_inode"`
+	HasOwner             bool   `json:"has_owner,omitempty"`
+	OwnerPID             int    `json:"owner_pid,omitempty"`
+	OwnerProcessStart    string `json:"owner_process_start,omitempty"`
+	OwnerBootID          string `json:"owner_boot_id,omitempty"`
+	OwnerSessionID       int    `json:"owner_session_id,omitempty"`
 }
 
 type wakeRepairHandoffPreparedWire struct {
@@ -224,8 +229,11 @@ func (source *wakeRepairHandoffSource) bindRetainedDirectories(
 	if err != nil {
 		return err
 	}
+	inboxParentIdentity := inboxDir.inboxParentIdentity
 	source.agentDirDevice = agentIdentity.device
 	source.agentDirInode = agentIdentity.inode
+	source.inboxParentDirDevice = inboxParentIdentity.device
+	source.inboxParentDirInode = inboxParentIdentity.inode
 	source.inboxDirDevice = inboxIdentity.device
 	source.inboxDirInode = inboxIdentity.inode
 	return source.validate()
@@ -306,6 +314,7 @@ func (source wakeRepairHandoffSource) validate() error {
 		return err
 	}
 	if source.agentDirDevice == 0 || source.agentDirInode == 0 ||
+		source.inboxParentDirDevice == 0 || source.inboxParentDirInode == 0 ||
 		source.inboxDirDevice == 0 || source.inboxDirInode == 0 {
 		return fmt.Errorf("wake repair handoff retained directory identity is invalid")
 	}
@@ -322,24 +331,26 @@ func (source wakeRepairHandoffSource) validate() error {
 
 func (source wakeRepairHandoffSource) wire() wakeRepairHandoffSourceWire {
 	return wakeRepairHandoffSourceWire{
-		Schema:             source.schema,
-		Kind:               wakeRepairHandoffKindSource,
-		Root:               source.root,
-		RootIdentity:       source.rootIdentity,
-		Agent:              source.agent,
-		SourceGeneration:   source.sourceGeneration,
-		SourceTargetDigest: source.sourceTargetDigest,
-		SourceFloorDigest:  source.sourceFloorDigest,
-		BootID:             source.bootID,
-		AgentDirDevice:     source.agentDirDevice,
-		AgentDirInode:      source.agentDirInode,
-		InboxDirDevice:     source.inboxDirDevice,
-		InboxDirInode:      source.inboxDirInode,
-		HasOwner:           source.hasOwner,
-		OwnerPID:           source.ownerPID,
-		OwnerProcessStart:  source.ownerProcessStart,
-		OwnerBootID:        source.ownerBootID,
-		OwnerSessionID:     source.ownerSessionID,
+		Schema:               source.schema,
+		Kind:                 wakeRepairHandoffKindSource,
+		Root:                 source.root,
+		RootIdentity:         source.rootIdentity,
+		Agent:                source.agent,
+		SourceGeneration:     source.sourceGeneration,
+		SourceTargetDigest:   source.sourceTargetDigest,
+		SourceFloorDigest:    source.sourceFloorDigest,
+		BootID:               source.bootID,
+		AgentDirDevice:       source.agentDirDevice,
+		AgentDirInode:        source.agentDirInode,
+		InboxParentDirDevice: source.inboxParentDirDevice,
+		InboxParentDirInode:  source.inboxParentDirInode,
+		InboxDirDevice:       source.inboxDirDevice,
+		InboxDirInode:        source.inboxDirInode,
+		HasOwner:             source.hasOwner,
+		OwnerPID:             source.ownerPID,
+		OwnerProcessStart:    source.ownerProcessStart,
+		OwnerBootID:          source.ownerBootID,
+		OwnerSessionID:       source.ownerSessionID,
 	}
 }
 
@@ -347,24 +358,32 @@ func sourceFromWire(wire wakeRepairHandoffSourceWire) (wakeRepairHandoffSource, 
 	if wire.Kind != wakeRepairHandoffKindSource {
 		return wakeRepairHandoffSource{}, fmt.Errorf("wake repair handoff message kind %q, want source", wire.Kind)
 	}
+	if wire.Schema == wakeRepairHandoffSchemaV1 {
+		return wakeRepairHandoffSource{}, fmt.Errorf(
+			"wake repair handoff source schema %d unsupported: inbox parent directory identity is not bound",
+			wire.Schema,
+		)
+	}
 	source := wakeRepairHandoffSource{
-		schema:             wire.Schema,
-		root:               wire.Root,
-		rootIdentity:       wire.RootIdentity,
-		agent:              wire.Agent,
-		sourceGeneration:   wire.SourceGeneration,
-		sourceTargetDigest: wire.SourceTargetDigest,
-		sourceFloorDigest:  wire.SourceFloorDigest,
-		bootID:             wire.BootID,
-		agentDirDevice:     wire.AgentDirDevice,
-		agentDirInode:      wire.AgentDirInode,
-		inboxDirDevice:     wire.InboxDirDevice,
-		inboxDirInode:      wire.InboxDirInode,
-		hasOwner:           wire.HasOwner,
-		ownerPID:           wire.OwnerPID,
-		ownerProcessStart:  wire.OwnerProcessStart,
-		ownerBootID:        wire.OwnerBootID,
-		ownerSessionID:     wire.OwnerSessionID,
+		schema:               wire.Schema,
+		root:                 wire.Root,
+		rootIdentity:         wire.RootIdentity,
+		agent:                wire.Agent,
+		sourceGeneration:     wire.SourceGeneration,
+		sourceTargetDigest:   wire.SourceTargetDigest,
+		sourceFloorDigest:    wire.SourceFloorDigest,
+		bootID:               wire.BootID,
+		agentDirDevice:       wire.AgentDirDevice,
+		agentDirInode:        wire.AgentDirInode,
+		inboxParentDirDevice: wire.InboxParentDirDevice,
+		inboxParentDirInode:  wire.InboxParentDirInode,
+		inboxDirDevice:       wire.InboxDirDevice,
+		inboxDirInode:        wire.InboxDirInode,
+		hasOwner:             wire.HasOwner,
+		ownerPID:             wire.OwnerPID,
+		ownerProcessStart:    wire.OwnerProcessStart,
+		ownerBootID:          wire.OwnerBootID,
+		ownerSessionID:       wire.OwnerSessionID,
 	}
 	return source, source.validate()
 }
@@ -796,6 +815,8 @@ func prepareWakeRepairHandoff(
 	}
 	if agentIdentity.device != source.agentDirDevice ||
 		agentIdentity.inode != source.agentDirInode ||
+		inboxDir.inboxParentIdentity.device != source.inboxParentDirDevice ||
+		inboxDir.inboxParentIdentity.inode != source.inboxParentDirInode ||
 		inboxIdentity.device != source.inboxDirDevice ||
 		inboxIdentity.inode != source.inboxDirInode {
 		return nil, fmt.Errorf("wake repair retained directory capability does not match exact source")

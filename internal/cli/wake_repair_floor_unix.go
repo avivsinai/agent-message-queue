@@ -44,18 +44,20 @@ type wakeRepairFloor struct {
 }
 
 type wakeRepairSource struct {
-	Root               string
-	RootIdentity       string
-	Agent              string
-	DeadGeneration     string
-	BootID             string
-	Owner              *wakeOwner
-	SourceTargetDigest string
-	SourceFloorDigest  string
-	AgentDirDevice     uint64
-	AgentDirInode      uint64
-	InboxDirDevice     uint64
-	InboxDirInode      uint64
+	Root                 string
+	RootIdentity         string
+	Agent                string
+	DeadGeneration       string
+	BootID               string
+	Owner                *wakeOwner
+	SourceTargetDigest   string
+	SourceFloorDigest    string
+	AgentDirDevice       uint64
+	AgentDirInode        uint64
+	InboxParentDirDevice uint64
+	InboxParentDirInode  uint64
+	InboxDirDevice       uint64
+	InboxDirInode        uint64
 }
 
 type wakeRepairLineage struct {

@@ -27,12 +27,14 @@ type retainedWakeInboxKqueueWatcher struct {
 func newRetainedWakeInboxWatcher(
 	agentFD, inboxFD int,
 	agentLabel, inboxLabel string,
+	inboxParentIdentity wakeRepairDirectoryIdentity,
 ) (wakeEventWatcher, error) {
 	authority, err := newRetainedWakeDirectoryAuthority(
 		agentFD,
 		inboxFD,
 		agentLabel,
 		inboxLabel,
+		inboxParentIdentity,
 	)
 	if err != nil {
 		return nil, err

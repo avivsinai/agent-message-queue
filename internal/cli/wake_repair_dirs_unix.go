@@ -20,7 +20,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const wakeRepairInboxRelativePath = "inbox/new"
+const (
+	wakeRepairInboxParentRelativePath = "inbox"
+	wakeRepairInboxNewRelativePath    = "new"
+)
 
 type wakeRepairDirectoryIdentity struct {
 	device uint64
@@ -28,12 +31,13 @@ type wakeRepairDirectoryIdentity struct {
 }
 
 type wakeInboxDir struct {
-	agentPath string
-	agentFile *os.File
-	path      string
-	file      *os.File
-	mu        sync.RWMutex
-	closed    bool
+	agentPath           string
+	agentFile           *os.File
+	inboxParentIdentity wakeRepairDirectoryIdentity
+	path                string
+	file                *os.File
+	mu                  sync.RWMutex
+	closed              bool
 }
 
 type wakeEventWatcher interface {
@@ -43,10 +47,12 @@ type wakeEventWatcher interface {
 }
 
 type retainedWakeDirectoryAuthority struct {
-	agentPath     string
-	inboxPath     string
-	agentIdentity wakeRepairDirectoryIdentity
-	inboxIdentity wakeRepairDirectoryIdentity
+	agentPath           string
+	inboxParentPath     string
+	inboxPath           string
+	agentIdentity       wakeRepairDirectoryIdentity
+	inboxParentIdentity wakeRepairDirectoryIdentity
+	inboxIdentity       wakeRepairDirectoryIdentity
 }
 
 func wakeRepairDirectoryIdentityForFile(file *os.File) (wakeRepairDirectoryIdentity, error) {
@@ -95,9 +101,52 @@ func wakeRepairDirectoryIdentityForFD(
 	return identity, nil
 }
 
+func openWakeRepairDirectoryComponentAt(
+	parentFD int,
+	component, label, path string,
+) (*os.File, wakeRepairDirectoryIdentity, error) {
+	if filepath.Base(component) != component || component == "." || component == ".." {
+		return nil, wakeRepairDirectoryIdentity{}, fmt.Errorf("%s component is invalid", label)
+	}
+	fd, err := unix.Openat(
+		parentFD,
+		component,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
+	if err != nil {
+		return nil, wakeRepairDirectoryIdentity{}, fmt.Errorf("open %s: %w", label, err)
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, wakeRepairDirectoryIdentity{}, fmt.Errorf("open %s: descriptor is unavailable", label)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, wakeRepairDirectoryIdentity{}, fmt.Errorf("stat %s: %w", label, err)
+	}
+	if !info.IsDir() {
+		_ = file.Close()
+		return nil, wakeRepairDirectoryIdentity{}, fmt.Errorf("%s must be a directory", label)
+	}
+	if err := validateWakeTargetPathOwnership(label, path, info); err != nil {
+		_ = file.Close()
+		return nil, wakeRepairDirectoryIdentity{}, err
+	}
+	identity, err := wakeRepairDirectoryIdentityForFile(file)
+	if err != nil {
+		_ = file.Close()
+		return nil, wakeRepairDirectoryIdentity{}, err
+	}
+	return file, identity, nil
+}
+
 func newRetainedWakeDirectoryAuthority(
 	agentFD, inboxFD int,
 	agentPath, inboxPath string,
+	inboxParentIdentity wakeRepairDirectoryIdentity,
 ) (retainedWakeDirectoryAuthority, error) {
 	agentIdentity, err := wakeRepairDirectoryIdentityForFD(
 		agentFD,
@@ -106,18 +155,51 @@ func newRetainedWakeDirectoryAuthority(
 	if err != nil {
 		return retainedWakeDirectoryAuthority{}, err
 	}
-	inboxIdentity, err := wakeRepairDirectoryIdentityForFD(
+	retainedInboxIdentity, err := wakeRepairDirectoryIdentityForFD(
 		inboxFD,
 		"retained wake inbox directory",
 	)
 	if err != nil {
 		return retainedWakeDirectoryAuthority{}, err
 	}
+	inboxParentPath := filepath.Dir(inboxPath)
+	inboxParent, canonicalInboxParentIdentity, err := openWakeRepairDirectoryComponentAt(
+		agentFD,
+		wakeRepairInboxParentRelativePath,
+		"retained wake inbox parent directory",
+		inboxParentPath,
+	)
+	if err != nil {
+		return retainedWakeDirectoryAuthority{}, err
+	}
+	defer func() { _ = inboxParent.Close() }()
+	if canonicalInboxParentIdentity != inboxParentIdentity {
+		return retainedWakeDirectoryAuthority{}, fmt.Errorf(
+			"retained wake inbox parent directory no longer matches original authority",
+		)
+	}
+	inbox, inboxIdentity, err := openWakeRepairDirectoryComponentAt(
+		int(inboxParent.Fd()),
+		wakeRepairInboxNewRelativePath,
+		"retained wake inbox directory",
+		inboxPath,
+	)
+	if err != nil {
+		return retainedWakeDirectoryAuthority{}, err
+	}
+	defer func() { _ = inbox.Close() }()
+	if inboxIdentity != retainedInboxIdentity {
+		return retainedWakeDirectoryAuthority{}, fmt.Errorf(
+			"retained wake inbox directory no longer matches component authority",
+		)
+	}
 	return retainedWakeDirectoryAuthority{
-		agentPath:     agentPath,
-		inboxPath:     inboxPath,
-		agentIdentity: agentIdentity,
-		inboxIdentity: inboxIdentity,
+		agentPath:           agentPath,
+		inboxParentPath:     inboxParentPath,
+		inboxPath:           inboxPath,
+		agentIdentity:       agentIdentity,
+		inboxParentIdentity: inboxParentIdentity,
+		inboxIdentity:       inboxIdentity,
 	}, nil
 }
 
@@ -145,11 +227,29 @@ func (authority retainedWakeDirectoryAuthority) validateCanonical() error {
 		return fmt.Errorf("canonical wake repair agent directory no longer matches retained authority")
 	}
 
-	inboxFD, err := unix.Openat(
+	inboxParent, inboxParentIdentity, err := openWakeRepairDirectoryComponentAt(
 		agentFD,
-		wakeRepairInboxRelativePath,
-		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
-		0,
+		wakeRepairInboxParentRelativePath,
+		"canonical wake repair inbox parent directory",
+		authority.inboxParentPath,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"canonical wake repair inbox parent directory no longer matches retained authority: %w",
+			err,
+		)
+	}
+	defer func() { _ = inboxParent.Close() }()
+	if inboxParentIdentity != authority.inboxParentIdentity {
+		return fmt.Errorf(
+			"canonical wake repair inbox parent directory no longer matches retained authority",
+		)
+	}
+	inbox, inboxIdentity, err := openWakeRepairDirectoryComponentAt(
+		int(inboxParent.Fd()),
+		wakeRepairInboxNewRelativePath,
+		"canonical wake repair inbox directory",
+		authority.inboxPath,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -157,14 +257,7 @@ func (authority retainedWakeDirectoryAuthority) validateCanonical() error {
 			err,
 		)
 	}
-	defer func() { _ = unix.Close(inboxFD) }()
-	inboxIdentity, err := wakeRepairDirectoryIdentityForFD(
-		inboxFD,
-		"canonical wake repair inbox directory",
-	)
-	if err != nil {
-		return err
-	}
+	defer func() { _ = inbox.Close() }()
 	if inboxIdentity != authority.inboxIdentity {
 		return fmt.Errorf("canonical wake repair inbox directory no longer matches retained authority")
 	}
@@ -198,22 +291,38 @@ func validateCanonicalWakeRepairDirectories(
 		return fmt.Errorf("canonical wake repair agent directory no longer matches retained authority")
 	}
 
-	inboxPath := filepath.Join(agentPath, wakeRepairInboxRelativePath)
-	inboxFD, err := unix.Openat(
+	inboxParentPath := filepath.Join(agentPath, wakeRepairInboxParentRelativePath)
+	inboxParent, _, err := openWakeRepairDirectoryComponentAt(
 		agentFD,
-		wakeRepairInboxRelativePath,
-		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
-		0,
+		wakeRepairInboxParentRelativePath,
+		"canonical wake repair inbox parent directory",
+		inboxParentPath,
 	)
-	if err != nil {
-		return fmt.Errorf("open canonical wake repair inbox directory: %w", err)
-	}
-	inboxFile := os.NewFile(uintptr(inboxFD), inboxPath)
-	defer func() { _ = inboxFile.Close() }()
-	inboxIdentity, err := wakeRepairDirectoryIdentityForFile(inboxFile)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = inboxParent.Close() }()
+	inboxParentIdentity, err := wakeRepairDirectoryIdentityForFile(inboxParent)
+	if err != nil {
+		return err
+	}
+	if inboxParentIdentity.device != source.inboxParentDirDevice ||
+		inboxParentIdentity.inode != source.inboxParentDirInode {
+		return fmt.Errorf(
+			"canonical wake repair inbox parent directory no longer matches retained authority",
+		)
+	}
+	inboxPath := filepath.Join(inboxParentPath, wakeRepairInboxNewRelativePath)
+	inboxFile, inboxIdentity, err := openWakeRepairDirectoryComponentAt(
+		int(inboxParent.Fd()),
+		wakeRepairInboxNewRelativePath,
+		"canonical wake repair inbox directory",
+		inboxPath,
+	)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = inboxFile.Close() }()
 	if inboxIdentity.device != source.inboxDirDevice ||
 		inboxIdentity.inode != source.inboxDirInode {
 		return fmt.Errorf("canonical wake repair inbox directory no longer matches retained authority")
@@ -227,6 +336,7 @@ func openWakeRepairInboxDir(agentDir *wakeAgentDir) (*wakeInboxDir, error) {
 	}
 	var agentFile *os.File
 	var file *os.File
+	var inboxParentIdentity wakeRepairDirectoryIdentity
 	err := agentDir.withFD(func(dirfd int) error {
 		var err error
 		agentFile, err = duplicateWakeRepairDirectoryFD(
@@ -236,30 +346,29 @@ func openWakeRepairInboxDir(agentDir *wakeAgentDir) (*wakeInboxDir, error) {
 		if err != nil {
 			return err
 		}
-		fd, err := unix.Openat(
+		inboxParentPath := filepath.Join(
+			agentDir.path,
+			wakeRepairInboxParentRelativePath,
+		)
+		inboxParent, identity, err := openWakeRepairDirectoryComponentAt(
 			dirfd,
-			wakeRepairInboxRelativePath,
-			unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
-			0,
+			wakeRepairInboxParentRelativePath,
+			"retained wake inbox parent directory",
+			inboxParentPath,
 		)
 		if err != nil {
 			_ = agentFile.Close()
-			return fmt.Errorf("open retained wake inbox directory: %w", err)
+			return err
 		}
-		file = os.NewFile(uintptr(fd), filepath.Join(agentDir.path, wakeRepairInboxRelativePath))
-		info, err := file.Stat()
+		inboxParentIdentity = identity
+		defer func() { _ = inboxParent.Close() }()
+		file, _, err = openWakeRepairDirectoryComponentAt(
+			int(inboxParent.Fd()),
+			wakeRepairInboxNewRelativePath,
+			"retained wake inbox directory",
+			filepath.Join(inboxParentPath, wakeRepairInboxNewRelativePath),
+		)
 		if err != nil {
-			_ = file.Close()
-			_ = agentFile.Close()
-			return fmt.Errorf("stat retained wake inbox directory: %w", err)
-		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			_ = file.Close()
-			_ = agentFile.Close()
-			return fmt.Errorf("retained wake inbox must be a directory")
-		}
-		if err := validateWakeTargetPathOwnership("retained wake inbox directory", file.Name(), info); err != nil {
-			_ = file.Close()
 			_ = agentFile.Close()
 			return err
 		}
@@ -269,10 +378,11 @@ func openWakeRepairInboxDir(agentDir *wakeAgentDir) (*wakeInboxDir, error) {
 		return nil, err
 	}
 	return &wakeInboxDir{
-		agentPath: agentDir.path,
-		agentFile: agentFile,
-		path:      file.Name(),
-		file:      file,
+		agentPath:           agentDir.path,
+		agentFile:           agentFile,
+		inboxParentIdentity: inboxParentIdentity,
+		path:                file.Name(),
+		file:                file,
 	}, nil
 }
 
@@ -329,6 +439,43 @@ func openInheritedWakeRepairDirectories(
 		closeBoth()
 		return nil, nil, fmt.Errorf("inherited wake repair inbox directory identity mismatch")
 	}
+	agentPath := filepath.Join(source.root, "agents", source.agent)
+	inboxParentPath := filepath.Join(agentPath, wakeRepairInboxParentRelativePath)
+	inboxParent, inboxParentIdentity, err := openWakeRepairDirectoryComponentAt(
+		int(agentFile.Fd()),
+		wakeRepairInboxParentRelativePath,
+		"inherited wake repair inbox parent directory",
+		inboxParentPath,
+	)
+	if err != nil {
+		closeBoth()
+		return nil, nil, err
+	}
+	defer func() { _ = inboxParent.Close() }()
+	if inboxParentIdentity.device != source.inboxParentDirDevice ||
+		inboxParentIdentity.inode != source.inboxParentDirInode {
+		closeBoth()
+		return nil, nil, fmt.Errorf(
+			"inherited wake repair inbox parent directory identity mismatch",
+		)
+	}
+	canonicalInbox, canonicalInboxIdentity, err := openWakeRepairDirectoryComponentAt(
+		int(inboxParent.Fd()),
+		wakeRepairInboxNewRelativePath,
+		"inherited wake repair inbox directory",
+		filepath.Join(inboxParentPath, wakeRepairInboxNewRelativePath),
+	)
+	if err != nil {
+		closeBoth()
+		return nil, nil, err
+	}
+	defer func() { _ = canonicalInbox.Close() }()
+	if canonicalInboxIdentity != inboxIdentity {
+		closeBoth()
+		return nil, nil, fmt.Errorf(
+			"inherited wake repair inbox directory no longer matches component authority",
+		)
+	}
 	watcherAgentFile, err := duplicateWakeRepairDirectoryFile(
 		agentFile,
 		"retained wake watcher agent directory",
@@ -338,14 +485,18 @@ func openInheritedWakeRepairDirectories(
 		return nil, nil, err
 	}
 	agentDir := &wakeAgentDir{
-		path: filepath.Join(source.root, "agents", source.agent),
+		path: agentPath,
 		file: agentFile,
 	}
 	inboxDir := &wakeInboxDir{
 		agentPath: agentDir.path,
 		agentFile: watcherAgentFile,
-		path:      filepath.Join(agentDir.path, wakeRepairInboxRelativePath),
-		file:      inboxFile,
+		inboxParentIdentity: wakeRepairDirectoryIdentity{
+			device: source.inboxParentDirDevice,
+			inode:  source.inboxParentDirInode,
+		},
+		path: filepath.Join(inboxParentPath, wakeRepairInboxNewRelativePath),
+		file: inboxFile,
 	}
 	return agentDir, inboxDir, nil
 }
@@ -436,6 +587,7 @@ func (d *wakeInboxDir) NewWatcher() (wakeEventWatcher, error) {
 			inboxFD,
 			d.agentPath,
 			d.path,
+			d.inboxParentIdentity,
 		)
 		return err
 	})
