@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint ci smoke check-skills
+.PHONY: build test fmt fmt-check vet lint ci smoke contract-check check-skills
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -27,7 +27,11 @@ lint:
 smoke:
 	./scripts/smoke-test.sh
 
-ci: check-skills fmt-check vet lint test smoke
+ci: check-skills fmt-check vet lint test smoke contract-check
+
+contract-check:
+	@bash scripts/check-keepalive-amq-contract_test.sh
+	@bash scripts/check-keepalive-amq-contract.sh "$${AMQ_BIN:-amq}"
 
 # Skill integrity: skills/ is canonical, .claude/skills/ and .agents/skills/ are symlinks
 check-skills:
