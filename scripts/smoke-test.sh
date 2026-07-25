@@ -331,4 +331,6 @@ echo "  hook log rotation: small log left in place"
 
 echo "claude-session-start.sh hook test ok"
 
+bash scripts/test_install_checksum.sh
+
 echo "smoke test ok"

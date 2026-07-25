@@ -19,7 +19,7 @@ Installs to user-local directory (no sudo required):
 - `~/.local/bin` if exists
 - `~/go/bin` if exists
 - `~/.local/bin` (created if needed)
-The installer verifies release checksums when possible.
+The installer requires a readable `checksums.txt` with exactly one valid entry for the selected asset. It uses `sha256sum` or `shasum` and stops before extraction if verification cannot be completed.
 
 ### 2. Skill
 
@@ -114,16 +114,60 @@ Download from [Releases](https://github.com/avivsinai/agent-message-queue/releas
 | Linux (ARM64) | `amq_*_linux_arm64.tar.gz` |
 | Windows | `amq_*_windows_amd64.zip` (use in WSL) |
 
-```bash
-tar xzf amq_*.tar.gz
-mkdir -p ~/.local/bin
-mv amq ~/.local/bin/
-```
-
-Optionally verify checksums:
+For manual installs, verify the selected asset against `checksums.txt` before extracting it:
 
 ```bash
-curl -fsSL https://github.com/avivsinai/agent-message-queue/releases/download/<TAG>/checksums.txt | grep amq_<VERSION>_<OS>_<ARCH>
+# Replace X.Y.Z and darwin_arm64 with the release and platform you downloaded.
+TAG=vX.Y.Z
+ASSET=amq_X.Y.Z_darwin_arm64.tar.gz
+curl -fsSL "https://github.com/avivsinai/agent-message-queue/releases/download/$TAG/checksums.txt" -o checksums.txt
+CHECKSUM_LINE=$(
+  awk -v asset="$ASSET" '
+    {
+      field = $2
+      candidate = field
+      sub(/^\*/, "", candidate)
+      last = $NF
+      sub(/^\*/, "", last)
+      if (candidate == asset) {
+        count++
+        if (NF != 2 ||
+            length($1) != 64 ||
+            $1 !~ /^[0-9A-Fa-f]+$/ ||
+            (field != asset && field != "*" asset)) {
+          malformed = 1
+        }
+        line = $0
+      } else if (last == asset) {
+        count++
+        malformed = 1
+      }
+    }
+    END {
+      if (count != 1 || malformed) exit 1
+      print line
+    }
+  ' checksums.txt
+) || { echo "Expected exactly one well-formed checksum entry for $ASSET" >&2; exit 1; }
+printf '%s\n' "$CHECKSUM_LINE" > "$ASSET.sha256"
+verify_amq_checksum() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -c "$ASSET.sha256" || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 -c "$ASSET.sha256" || return 1
+  else
+    echo "sha256sum or shasum is required" >&2
+    return 1
+  fi
+}
+if verify_amq_checksum; then
+  tar xzf "$ASSET"
+  mkdir -p ~/.local/bin
+  mv amq ~/.local/bin/
+else
+  echo "Checksum verification failed; archive was not extracted." >&2
+  false
+fi
 ```
 
 ### Binary: Build from Source

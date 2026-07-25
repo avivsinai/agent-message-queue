@@ -110,7 +110,14 @@ echo "Downloading: $ASSET"
 
 # Create temp directory
 TMP_DIR=$(mktemp -d)
-trap 'rm -rf "$TMP_DIR"' EXIT
+STAGED_BINARY=""
+cleanup() {
+    if [ -n "$STAGED_BINARY" ]; then
+        rm -f "$STAGED_BINARY" || true
+    fi
+    rm -rf "$TMP_DIR" || true
+}
+trap cleanup EXIT
 
 # Download (curl -f fails on HTTP errors like 404)
 if ! curl -fsSL "$URL" -o "$TMP_DIR/$ASSET"; then
@@ -120,29 +127,97 @@ if ! curl -fsSL "$URL" -o "$TMP_DIR/$ASSET"; then
     exit 1
 fi
 
-# Verify checksums when possible
+# Verify the selected release asset before extracting or installing it.
 CHECKSUMS_FILE="$TMP_DIR/checksums.txt"
-if curl -fsSL "$CHECKSUMS_URL" -o "$CHECKSUMS_FILE"; then
-    CHECKSUM_LINE=$(grep " $ASSET$" "$CHECKSUMS_FILE" || true)
-    if [ -z "$CHECKSUM_LINE" ]; then
-        echo -e "${YELLOW}Warning: checksum entry not found for $ASSET${NC}"
-    elif command -v sha256sum &> /dev/null; then
-        (cd "$TMP_DIR" && echo "$CHECKSUM_LINE" | sha256sum -c -) || {
-            echo -e "${RED}Error: checksum verification failed${NC}"
-            exit 1
+if ! curl -fsSL "$CHECKSUMS_URL" -o "$CHECKSUMS_FILE"; then
+    echo -e "${RED}Error: failed to download checksums${NC}"
+    exit 1
+fi
+if [ ! -r "$CHECKSUMS_FILE" ]; then
+    echo -e "${RED}Error: checksums.txt is missing or unreadable${NC}"
+    exit 1
+fi
+
+if ! CHECKSUM_RESULT=$(awk -v asset="$ASSET" '
+    {
+        field = $2
+        candidate = field
+        sub(/^\*/, "", candidate)
+        last = $NF
+        sub(/^\*/, "", last)
+
+        if (candidate == asset) {
+            count++
+            if (NF != 2 ||
+                length($1) != 64 ||
+                $1 !~ /^[0-9A-Fa-f]+$/ ||
+                (field != asset && field != "*" asset)) {
+                malformed = 1
+            }
+            hash = $1
+        } else if (last == asset) {
+            count++
+            malformed = 1
         }
-    elif command -v shasum &> /dev/null; then
-        EXPECTED=$(echo "$CHECKSUM_LINE" | awk '{print $1}')
-        ACTUAL=$(shasum -a 256 "$TMP_DIR/$ASSET" | awk '{print $1}')
-        if [ "$EXPECTED" != "$ACTUAL" ]; then
-            echo -e "${RED}Error: checksum verification failed${NC}"
-            exit 1
-        fi
-    else
-        echo -e "${YELLOW}Warning: sha256 tool not found; skipping checksum verification${NC}"
+    }
+    END {
+        if (count == 0) {
+            print "missing"
+        } else if (count > 1) {
+            print "duplicate"
+        } else if (malformed) {
+            print "malformed"
+        } else {
+            print "ok:" hash
+        }
+    }
+' "$CHECKSUMS_FILE"); then
+    echo -e "${RED}Error: checksums.txt is unreadable${NC}"
+    exit 1
+fi
+
+case "$CHECKSUM_RESULT" in
+    missing)
+        echo -e "${RED}Error: checksum entry not found for $ASSET${NC}"
+        exit 1
+        ;;
+    duplicate)
+        echo -e "${RED}Error: duplicate checksum entries found for $ASSET${NC}"
+        exit 1
+        ;;
+    malformed)
+        echo -e "${RED}Error: malformed checksum entry for $ASSET${NC}"
+        exit 1
+        ;;
+    ok:*)
+        EXPECTED="${CHECKSUM_RESULT#ok:}"
+        ;;
+    *)
+        echo -e "${RED}Error: could not parse checksum entry for $ASSET${NC}"
+        exit 1
+        ;;
+esac
+
+if command -v sha256sum &> /dev/null; then
+    (cd "$TMP_DIR" && printf '%s  %s\n' "$EXPECTED" "$ASSET" | sha256sum -c -) || {
+        echo -e "${RED}Error: checksum verification failed${NC}"
+        exit 1
+    }
+elif command -v shasum &> /dev/null; then
+    if ! ACTUAL_LINE=$(shasum -a 256 "$TMP_DIR/$ASSET"); then
+        echo -e "${RED}Error: checksum verification failed${NC}"
+        exit 1
+    fi
+    ACTUAL="${ACTUAL_LINE%%[[:space:]]*}"
+    EXPECTED_NORMALIZED=$(printf '%s' "$EXPECTED" | tr '[:upper:]' '[:lower:]')
+    ACTUAL_NORMALIZED=$(printf '%s' "$ACTUAL" | tr '[:upper:]' '[:lower:]')
+    if [ "$EXPECTED_NORMALIZED" != "$ACTUAL_NORMALIZED" ]; then
+        echo -e "${RED}Error: checksum verification failed${NC}"
+        exit 1
     fi
 else
-    echo -e "${YELLOW}Warning: failed to download checksums; skipping verification${NC}"
+    echo -e "${RED}Error: sha256sum or shasum is required to verify the download${NC}"
+    exit 1
 fi
 
 cd "$TMP_DIR"
@@ -162,8 +237,27 @@ echo "Installing to: $INSTALL_DIR/amq"
 # Ensure install directory exists
 mkdir -p "$INSTALL_DIR"
 
-# Install binary with correct permissions
-install -m 0755 amq "$INSTALL_DIR/amq"
+# Build the replacement beside the target, then atomically publish it.
+if ! STAGED_BINARY=$(mktemp "$INSTALL_DIR/.amq.install.XXXXXX"); then
+    echo -e "${RED}Error: could not create staged install file${NC}"
+    exit 1
+fi
+if ! install -m 0755 amq "$STAGED_BINARY"; then
+    echo -e "${RED}Error: failed to stage binary${NC}"
+    exit 1
+fi
+if ! chmod 0755 "$STAGED_BINARY" ||
+   [ ! -f "$STAGED_BINARY" ] ||
+   [ ! -s "$STAGED_BINARY" ] ||
+   [ ! -x "$STAGED_BINARY" ]; then
+    echo -e "${RED}Error: staged binary validation failed${NC}"
+    exit 1
+fi
+if ! mv -f "$STAGED_BINARY" "$INSTALL_DIR/amq"; then
+    echo -e "${RED}Error: failed to publish binary${NC}"
+    exit 1
+fi
+STAGED_BINARY=""
 
 echo ""
 echo -e "${GREEN}Installation complete!${NC}"
