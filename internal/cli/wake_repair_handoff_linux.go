@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"syscall"
 )
@@ -87,6 +88,43 @@ func prepareWakeRepairChildCapabilityPlatform(cmd *exec.Cmd) (*wakeRepairChildCa
 	}, nil
 }
 
-func wakeRepairChildStopFromEnv() (<-chan struct{}, func(), error) {
+func wakeRepairBootstrapPlatformEnvNames() []string {
+	return []string{envWakeRepairChildControlFD}
+}
+
+func parseWakeRepairChildStopDescriptor(
+	bootstrap wakeRepairBootstrapEnv,
+) (wakeRepairChildStopDescriptor, error) {
+	raw := bootstrap.value(envWakeRepairChildControlFD)
+	if raw == "" {
+		return wakeRepairChildStopDescriptor{}, nil
+	}
+	fd, err := strconv.Atoi(raw)
+	if err != nil || fd < 3 {
+		return wakeRepairChildStopDescriptor{}, fmt.Errorf(
+			"%s is invalid",
+			envWakeRepairChildControlFD,
+		)
+	}
+	return wakeRepairChildStopDescriptor{}, fmt.Errorf(
+		"%s is unsupported on linux",
+		envWakeRepairChildControlFD,
+	)
+}
+
+func prepareWakeRepairChildStopDescriptor(wakeRepairChildStopDescriptor) error {
+	return nil
+}
+
+func validateWakeRepairChildPlatformDescriptorTuple(
+	wakeRepairChildHandoffDescriptors,
+	wakeRepairChildStopDescriptor,
+) error {
+	return nil
+}
+
+func adoptWakeRepairChildStopDescriptor(
+	wakeRepairChildStopDescriptor,
+) (<-chan struct{}, func(), error) {
 	return nil, func() {}, nil
 }

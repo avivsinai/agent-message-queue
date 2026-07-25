@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 	"sync"
 
 	"golang.org/x/sys/unix"
@@ -77,34 +76,84 @@ func validateDarwinWakeOwnerStartupRollbackFD(writeEnd *os.File) error {
 }
 
 func authoritativeWakePrivateStopFromEnv() (<-chan struct{}, func(), error) {
-	raw := strings.TrimSpace(os.Getenv(envWakePrivateStopFD))
-	if raw == "" {
-		return nil, func() {}, nil
+	bootstrap, err := captureAndScrubWakeRepairBootstrapEnv()
+	if err != nil {
+		return nil, nil, err
 	}
-	if err := os.Unsetenv(envWakePrivateStopFD); err != nil {
-		return nil, nil, fmt.Errorf("clear %s after ingestion: %w", envWakePrivateStopFD, err)
+	handoff, err := parseWakeRepairChildHandoffDescriptors(bootstrap)
+	if err != nil {
+		return nil, nil, err
+	}
+	repairStop, err := parseWakeRepairChildStopDescriptor(bootstrap)
+	if err != nil {
+		return nil, nil, err
+	}
+	if handoff.present || repairStop.present {
+		return nil, nil, fmt.Errorf(
+			"repair descriptors are not valid without the complete private bootstrap transaction",
+		)
+	}
+	descriptor, err := parseAuthoritativeWakePrivateStopDescriptor(bootstrap)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := prepareAuthoritativeWakePrivateStopDescriptor(descriptor); err != nil {
+		if descriptor.present {
+			_ = unix.Close(descriptor.fd)
+		}
+		return nil, nil, err
+	}
+	return adoptAuthoritativeWakePrivateStopDescriptor(descriptor)
+}
+
+func parseAuthoritativeWakePrivateStopDescriptor(
+	bootstrap wakeRepairBootstrapEnv,
+) (wakePrivateStopDescriptor, error) {
+	raw := bootstrap.value(envWakePrivateStopFD)
+	if raw == "" {
+		return wakePrivateStopDescriptor{}, nil
 	}
 	fd, err := strconv.Atoi(raw)
 	if err != nil || fd < 3 {
-		return nil, nil, fmt.Errorf("%s is invalid", envWakePrivateStopFD)
+		return wakePrivateStopDescriptor{}, fmt.Errorf("%s is invalid", envWakePrivateStopFD)
 	}
-	file := os.NewFile(uintptr(fd), "authoritative-wake-private-stop")
+	return wakePrivateStopDescriptor{
+		fd:      fd,
+		name:    envWakePrivateStopFD,
+		present: true,
+	}, nil
+}
+
+func prepareAuthoritativeWakePrivateStopDescriptor(descriptor wakePrivateStopDescriptor) error {
+	if !descriptor.present {
+		return nil
+	}
+	// The inherited descriptor arrives as a raw numeric fd. Make it pollable
+	// before os.NewFile adopts it so cleanup can interrupt and join the startup
+	// read without relying on Darwin closing a blocking syscall from another
+	// goroutine.
+	if err := unix.SetNonblock(descriptor.fd, true); err != nil {
+		return fmt.Errorf("make %s fd nonblocking: %w", envWakePrivateStopFD, err)
+	}
+	return sealDarwinWakePrivateStopFDNumber(uintptr(descriptor.fd))
+}
+
+func adoptAuthoritativeWakePrivateStopDescriptor(
+	descriptor wakePrivateStopDescriptor,
+) (<-chan struct{}, func(), error) {
+	if !descriptor.present {
+		return nil, func() {}, nil
+	}
+	file := os.NewFile(uintptr(descriptor.fd), "authoritative-wake-private-stop")
 	if file == nil {
+		_ = unix.Close(descriptor.fd)
 		return nil, nil, fmt.Errorf("%s fd is unavailable", envWakePrivateStopFD)
-	}
-	if err := sealDarwinWakePrivateStopFD(file); err != nil {
-		_ = file.Close()
-		return nil, nil, err
 	}
 	stop, cleanup := watchAuthoritativeWakePrivateStop(file)
 	return stop, cleanup, nil
 }
 
-func sealDarwinWakePrivateStopFD(file *os.File) error {
-	if file == nil {
-		return fmt.Errorf("%s fd is unavailable", envWakePrivateStopFD)
-	}
-	fd := file.Fd()
+func sealDarwinWakePrivateStopFDNumber(fd uintptr) error {
 	flags, err := unix.FcntlInt(fd, unix.F_GETFD, 0)
 	if err != nil {
 		return fmt.Errorf("inspect %s fd flags: %w", envWakePrivateStopFD, err)

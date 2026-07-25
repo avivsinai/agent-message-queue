@@ -1255,24 +1255,19 @@ func buildRepairWakeArgs(root, me string, target wakeTarget, generation, readyPa
 }
 
 func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
-	privateStop, cleanupPrivateStop, err := authoritativeWakePrivateStopFromEnv()
+	repairBootstrap, err := captureAndScrubWakeRepairBootstrapEnv()
 	if err != nil {
 		return err
 	}
-	defer cleanupPrivateStop()
-	repairHandoff, repairHandoffPresent, err := wakeRepairChildHandoffFromEnv()
+	repairHandoff, repairHandoffPresent, privateStop, cleanupPrivateStop, err :=
+		wakeRepairChildCapabilitiesFromBootstrap(repairBootstrap)
 	if err != nil {
 		return err
 	}
 	if repairHandoff != nil {
 		defer func() { _ = repairHandoff.Close() }()
 	}
-	repairPrivateStop, cleanupRepairPrivateStop, err := wakeRepairChildStopFromEnv()
-	if err != nil {
-		return err
-	}
-	defer cleanupRepairPrivateStop()
-	privateStop = mergeWakeStopChannels(privateStop, repairPrivateStop)
+	defer cleanupPrivateStop()
 
 	fs := flag.NewFlagSet("wake", flag.ContinueOnError)
 	common := addCommonFlags(fs)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 )
 
@@ -66,6 +67,26 @@ func prepareAuthoritativeWakeChildPlatform(cmd *exec.Cmd) (*authoritativeWakeChi
 	}, nil
 }
 
-func authoritativeWakePrivateStopFromEnv() (<-chan struct{}, func(), error) {
+func parseAuthoritativeWakePrivateStopDescriptor(
+	bootstrap wakeRepairBootstrapEnv,
+) (wakePrivateStopDescriptor, error) {
+	raw := bootstrap.value(envWakePrivateStopFD)
+	if raw == "" {
+		return wakePrivateStopDescriptor{}, nil
+	}
+	fd, err := strconv.Atoi(raw)
+	if err != nil || fd < 3 {
+		return wakePrivateStopDescriptor{}, fmt.Errorf("%s is invalid", envWakePrivateStopFD)
+	}
+	return wakePrivateStopDescriptor{}, fmt.Errorf("%s is unsupported on linux", envWakePrivateStopFD)
+}
+
+func prepareAuthoritativeWakePrivateStopDescriptor(wakePrivateStopDescriptor) error {
+	return nil
+}
+
+func adoptAuthoritativeWakePrivateStopDescriptor(
+	wakePrivateStopDescriptor,
+) (<-chan struct{}, func(), error) {
 	return nil, func() {}, nil
 }

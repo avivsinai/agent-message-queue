@@ -10,6 +10,12 @@ import (
 
 const envWakePrivateStopFD = "AMQ_WAKE_PRIVATE_STOP_FD"
 
+type wakePrivateStopDescriptor struct {
+	fd      int
+	name    string
+	present bool
+}
+
 type wakeOwnerChildCapabilityUnsupportedError struct {
 	Err error
 }

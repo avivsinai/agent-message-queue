@@ -39,6 +39,7 @@ const (
 	envWakeRepairHandoffWriteFD = "AMQ_WAKE_REPAIR_HANDOFF_WRITE_FD"
 	envWakeRepairAgentDirFD     = "AMQ_WAKE_REPAIR_AGENT_DIR_FD"
 	envWakeRepairInboxDirFD     = "AMQ_WAKE_REPAIR_INBOX_DIR_FD"
+	envWakeRepairChildControlFD = "AMQ_WAKE_REPAIR_CHILD_CONTROL_FD"
 )
 
 // The handoff values deliberately contain no maps, slices, or pointers. Once
@@ -1048,75 +1049,308 @@ func (handoff *wakeRepairParentHandoff) Close() error {
 }
 
 func wakeRepairChildHandoffFromEnv() (*wakeRepairChildHandoff, bool, error) {
-	readRaw := strings.TrimSpace(os.Getenv(envWakeRepairHandoffReadFD))
-	writeRaw := strings.TrimSpace(os.Getenv(envWakeRepairHandoffWriteFD))
-	agentRaw := strings.TrimSpace(os.Getenv(envWakeRepairAgentDirFD))
-	inboxRaw := strings.TrimSpace(os.Getenv(envWakeRepairInboxDirFD))
+	bootstrap, err := captureAndScrubWakeRepairBootstrapEnv()
+	if err != nil {
+		return nil, false, err
+	}
+	stopDescriptor, err := parseWakeRepairChildStopDescriptor(bootstrap)
+	if err != nil {
+		return nil, false, err
+	}
+	if stopDescriptor.present {
+		return nil, false, fmt.Errorf(
+			"%s is not valid without the complete wake repair bootstrap transaction",
+			stopDescriptor.name,
+		)
+	}
+	ownerStopDescriptor, err := parseAuthoritativeWakePrivateStopDescriptor(bootstrap)
+	if err != nil {
+		return nil, false, err
+	}
+	if ownerStopDescriptor.present {
+		return nil, false, fmt.Errorf(
+			"%s is not valid without the complete private bootstrap transaction",
+			ownerStopDescriptor.name,
+		)
+	}
+	return wakeRepairChildHandoffFromBootstrap(bootstrap)
+}
+
+type wakeRepairChildHandoffDescriptors struct {
+	readFD  int
+	writeFD int
+	agentFD int
+	inboxFD int
+	present bool
+}
+
+type wakeRepairChildStopDescriptor struct {
+	fd      int
+	name    string
+	present bool
+}
+
+func parseWakeRepairChildHandoffDescriptors(
+	bootstrap wakeRepairBootstrapEnv,
+) (wakeRepairChildHandoffDescriptors, error) {
+	readRaw := bootstrap.value(envWakeRepairHandoffReadFD)
+	writeRaw := bootstrap.value(envWakeRepairHandoffWriteFD)
+	agentRaw := bootstrap.value(envWakeRepairAgentDirFD)
+	inboxRaw := bootstrap.value(envWakeRepairInboxDirFD)
 	if readRaw == "" && writeRaw == "" && agentRaw == "" && inboxRaw == "" {
-		return nil, false, nil
+		return wakeRepairChildHandoffDescriptors{}, nil
 	}
 	if readRaw == "" || writeRaw == "" || agentRaw == "" || inboxRaw == "" {
-		return nil, true, fmt.Errorf("wake repair handoff descriptors are incomplete")
+		return wakeRepairChildHandoffDescriptors{}, fmt.Errorf(
+			"wake repair handoff descriptors are incomplete",
+		)
 	}
 	readFD, err := parseWakeRepairHandoffFD(envWakeRepairHandoffReadFD, readRaw)
 	if err != nil {
-		return nil, true, err
+		return wakeRepairChildHandoffDescriptors{}, err
 	}
 	writeFD, err := parseWakeRepairHandoffFD(envWakeRepairHandoffWriteFD, writeRaw)
 	if err != nil {
-		return nil, true, err
+		return wakeRepairChildHandoffDescriptors{}, err
 	}
 	if readFD == writeFD {
-		return nil, true, fmt.Errorf("wake repair handoff descriptors must be distinct")
+		return wakeRepairChildHandoffDescriptors{}, fmt.Errorf(
+			"wake repair handoff descriptors must be distinct",
+		)
 	}
 	agentFD, err := parseWakeRepairHandoffFD(envWakeRepairAgentDirFD, agentRaw)
 	if err != nil {
-		return nil, true, err
+		return wakeRepairChildHandoffDescriptors{}, err
 	}
 	inboxFD, err := parseWakeRepairHandoffFD(envWakeRepairInboxDirFD, inboxRaw)
 	if err != nil {
-		return nil, true, err
+		return wakeRepairChildHandoffDescriptors{}, err
 	}
 	if readFD == agentFD || readFD == inboxFD || writeFD == agentFD ||
 		writeFD == inboxFD || agentFD == inboxFD {
-		return nil, true, fmt.Errorf("wake repair handoff descriptors must be distinct")
+		return wakeRepairChildHandoffDescriptors{}, fmt.Errorf(
+			"wake repair handoff descriptors must be distinct",
+		)
+	}
+	return wakeRepairChildHandoffDescriptors{
+		readFD:  readFD,
+		writeFD: writeFD,
+		agentFD: agentFD,
+		inboxFD: inboxFD,
+		present: true,
+	}, nil
+}
+
+func wakeRepairChildCapabilitiesFromBootstrap(
+	bootstrap wakeRepairBootstrapEnv,
+) (
+	*wakeRepairChildHandoff,
+	bool,
+	<-chan struct{},
+	func(),
+	error,
+) {
+	handoffDescriptors, err := parseWakeRepairChildHandoffDescriptors(bootstrap)
+	if err != nil {
+		return nil, false, nil, nil, err
+	}
+	stopDescriptor, err := parseWakeRepairChildStopDescriptor(bootstrap)
+	if err != nil {
+		return nil, false, nil, nil, err
+	}
+	ownerStopDescriptor, err := parseAuthoritativeWakePrivateStopDescriptor(bootstrap)
+	if err != nil {
+		return nil, false, nil, nil, err
+	}
+	if err := validateWakeRepairChildDescriptorTuple(
+		handoffDescriptors,
+		stopDescriptor,
+		ownerStopDescriptor,
+	); err != nil {
+		return nil, false, nil, nil, err
+	}
+
+	if err := prepareWakeRepairChildHandoffDescriptors(handoffDescriptors); err != nil {
+		closeWakeRepairChildDescriptorTuple(
+			handoffDescriptors,
+			stopDescriptor,
+			ownerStopDescriptor,
+		)
+		return nil, false, nil, nil, err
+	}
+	if err := prepareAuthoritativeWakePrivateStopDescriptor(ownerStopDescriptor); err != nil {
+		closeWakeRepairChildDescriptorTuple(
+			handoffDescriptors,
+			stopDescriptor,
+			ownerStopDescriptor,
+		)
+		return nil, false, nil, nil, err
+	}
+	if err := prepareWakeRepairChildStopDescriptor(stopDescriptor); err != nil {
+		closeWakeRepairChildDescriptorTuple(
+			handoffDescriptors,
+			stopDescriptor,
+			ownerStopDescriptor,
+		)
+		return nil, false, nil, nil, err
+	}
+
+	handoff, err := adoptWakeRepairChildHandoffDescriptors(handoffDescriptors)
+	if err != nil {
+		if stopDescriptor.present {
+			_ = unix.Close(stopDescriptor.fd)
+		}
+		if ownerStopDescriptor.present {
+			_ = unix.Close(ownerStopDescriptor.fd)
+		}
+		return nil, false, nil, nil, err
+	}
+	ownerStop, cleanupOwnerStop, err :=
+		adoptAuthoritativeWakePrivateStopDescriptor(ownerStopDescriptor)
+	if err != nil {
+		_ = handoff.Close()
+		if stopDescriptor.present {
+			_ = unix.Close(stopDescriptor.fd)
+		}
+		return nil, false, nil, nil, err
+	}
+	repairStop, cleanupRepairStop, err := adoptWakeRepairChildStopDescriptor(stopDescriptor)
+	if err != nil {
+		cleanupOwnerStop()
+		_ = handoff.Close()
+		return nil, false, nil, nil, err
+	}
+	privateStop, cleanupMergedStop := mergeWakeBootstrapStopChannels(ownerStop, repairStop)
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			cleanupMergedStop()
+			cleanupRepairStop()
+			cleanupOwnerStop()
+		})
+	}
+	return handoff, handoffDescriptors.present, privateStop, cleanup, nil
+}
+
+func mergeWakeBootstrapStopChannels(
+	first, second <-chan struct{},
+) (<-chan struct{}, func()) {
+	if first == nil {
+		return second, func() {}
+	}
+	if second == nil {
+		return first, func() {}
+	}
+	merged := make(chan struct{})
+	cancel := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		select {
+		case <-first:
+			close(merged)
+		case <-second:
+			close(merged)
+		case <-cancel:
+		}
+	}()
+	var cancelOnce sync.Once
+	return merged, func() {
+		cancelOnce.Do(func() {
+			close(cancel)
+			<-finished
+		})
+	}
+}
+
+func validateWakeRepairChildDescriptorTuple(
+	handoff wakeRepairChildHandoffDescriptors,
+	stop wakeRepairChildStopDescriptor,
+	ownerStop wakePrivateStopDescriptor,
+) error {
+	if err := validateWakeRepairChildPlatformDescriptorTuple(handoff, stop); err != nil {
+		return err
+	}
+	if !handoff.present || !stop.present {
+		return nil
+	}
+	common := []struct {
+		name string
+		fd   int
+	}{
+		{name: envWakeRepairHandoffReadFD, fd: handoff.readFD},
+		{name: envWakeRepairHandoffWriteFD, fd: handoff.writeFD},
+		{name: envWakeRepairAgentDirFD, fd: handoff.agentFD},
+		{name: envWakeRepairInboxDirFD, fd: handoff.inboxFD},
+	}
+	for _, descriptor := range common {
+		if stop.fd == descriptor.fd {
+			return fmt.Errorf("%s aliases %s", stop.name, descriptor.name)
+		}
+	}
+	if !ownerStop.present {
+		return nil
+	}
+	otherDescriptors := common
+	if stop.present {
+		otherDescriptors = append(otherDescriptors, struct {
+			name string
+			fd   int
+		}{name: stop.name, fd: stop.fd})
+	}
+	for _, descriptor := range otherDescriptors {
+		if ownerStop.fd == descriptor.fd {
+			return fmt.Errorf("%s aliases %s", ownerStop.name, descriptor.name)
+		}
+	}
+	return nil
+}
+
+func prepareWakeRepairChildHandoffDescriptors(
+	descriptors wakeRepairChildHandoffDescriptors,
+) error {
+	if !descriptors.present {
+		return nil
 	}
 	inherited := []struct {
 		label string
 		fd    int
 	}{
-		{label: "read", fd: readFD},
-		{label: "write", fd: writeFD},
-		{label: "agent directory", fd: agentFD},
-		{label: "inbox directory", fd: inboxFD},
+		{label: "read", fd: descriptors.readFD},
+		{label: "write", fd: descriptors.writeFD},
+		{label: "agent directory", fd: descriptors.agentFD},
+		{label: "inbox directory", fd: descriptors.inboxFD},
 	}
 	for _, descriptor := range inherited {
 		if err := setWakeRepairFDCloseOnExec(descriptor.fd, descriptor.label); err != nil {
-			for _, candidate := range inherited {
-				_ = unix.Close(candidate.fd)
-			}
-			return nil, true, err
+			return err
 		}
 	}
 	// os/exec obtains ExtraFiles through File.Fd, which restores blocking mode.
 	// The child must remain cancellable while it waits for the final release
 	// frame, so make its inherited read end pollable before os.NewFile adopts it.
-	if err := unix.SetNonblock(readFD, true); err != nil {
-		for _, candidate := range inherited {
-			_ = unix.Close(candidate.fd)
-		}
-		return nil, true, fmt.Errorf("make wake repair handoff read fd nonblocking: %w", err)
+	if err := unix.SetNonblock(descriptors.readFD, true); err != nil {
+		return fmt.Errorf("make wake repair handoff read fd nonblocking: %w", err)
 	}
-	readFile := os.NewFile(uintptr(readFD), "wake-repair-handoff-read")
-	writeFile := os.NewFile(uintptr(writeFD), "wake-repair-handoff-write")
-	agentFile := os.NewFile(uintptr(agentFD), "wake-repair-agent-directory")
-	inboxFile := os.NewFile(uintptr(inboxFD), "wake-repair-inbox-directory")
+	return nil
+}
+
+func adoptWakeRepairChildHandoffDescriptors(
+	descriptors wakeRepairChildHandoffDescriptors,
+) (*wakeRepairChildHandoff, error) {
+	if !descriptors.present {
+		return nil, nil
+	}
+	readFile := os.NewFile(uintptr(descriptors.readFD), "wake-repair-handoff-read")
+	writeFile := os.NewFile(uintptr(descriptors.writeFD), "wake-repair-handoff-write")
+	agentFile := os.NewFile(uintptr(descriptors.agentFD), "wake-repair-agent-directory")
+	inboxFile := os.NewFile(uintptr(descriptors.inboxFD), "wake-repair-inbox-directory")
 	if readFile == nil || writeFile == nil || agentFile == nil || inboxFile == nil {
 		_ = closeFile(readFile)
 		_ = closeFile(writeFile)
 		_ = closeFile(agentFile)
 		_ = closeFile(inboxFile)
-		return nil, true, fmt.Errorf("wake repair handoff descriptor is unavailable")
+		return nil, fmt.Errorf("wake repair handoff descriptor is unavailable")
 	}
 	return &wakeRepairChildHandoff{
 		reader:    bufio.NewReader(readFile),
@@ -1125,7 +1359,48 @@ func wakeRepairChildHandoffFromEnv() (*wakeRepairChildHandoff, bool, error) {
 		writeFile: writeFile,
 		agentFile: agentFile,
 		inboxFile: inboxFile,
-	}, true, nil
+	}, nil
+}
+
+func closeWakeRepairChildDescriptorTuple(
+	handoff wakeRepairChildHandoffDescriptors,
+	stop wakeRepairChildStopDescriptor,
+	ownerStop wakePrivateStopDescriptor,
+) {
+	if handoff.present {
+		_ = unix.Close(handoff.readFD)
+		_ = unix.Close(handoff.writeFD)
+		_ = unix.Close(handoff.agentFD)
+		_ = unix.Close(handoff.inboxFD)
+	}
+	if stop.present {
+		_ = unix.Close(stop.fd)
+	}
+	if ownerStop.present {
+		_ = unix.Close(ownerStop.fd)
+	}
+}
+
+func wakeRepairChildHandoffFromBootstrap(
+	bootstrap wakeRepairBootstrapEnv,
+) (*wakeRepairChildHandoff, bool, error) {
+	descriptors, err := parseWakeRepairChildHandoffDescriptors(bootstrap)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := prepareWakeRepairChildHandoffDescriptors(descriptors); err != nil {
+		closeWakeRepairChildDescriptorTuple(
+			descriptors,
+			wakeRepairChildStopDescriptor{},
+			wakePrivateStopDescriptor{},
+		)
+		return nil, false, err
+	}
+	handoff, err := adoptWakeRepairChildHandoffDescriptors(descriptors)
+	if err != nil {
+		return nil, false, err
+	}
+	return handoff, descriptors.present, nil
 }
 
 func (handoff *wakeRepairChildHandoff) TakeRetainedDirectories(

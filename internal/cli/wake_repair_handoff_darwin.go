@@ -10,14 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 	"sync"
 
 	"golang.org/x/sys/unix"
 )
 
 const (
-	envWakeRepairChildControlFD  = "AMQ_WAKE_REPAIR_CHILD_CONTROL_FD"
 	wakeRepairChildControlStop   = "STOP"
 	wakeRepairChildControlDetach = "DETACH"
 )
@@ -148,29 +146,93 @@ func writeWakeRepairChildControl(writer io.Writer, command string) error {
 }
 
 func wakeRepairChildStopFromEnv() (<-chan struct{}, func(), error) {
-	raw := strings.TrimSpace(os.Getenv(envWakeRepairChildControlFD))
+	bootstrap, err := captureAndScrubWakeRepairBootstrapEnv()
+	if err != nil {
+		return nil, nil, err
+	}
+	handoffDescriptors, err := parseWakeRepairChildHandoffDescriptors(bootstrap)
+	if err != nil {
+		return nil, nil, err
+	}
+	if handoffDescriptors.present {
+		return nil, nil, fmt.Errorf(
+			"wake repair handoff descriptors are not valid without the complete bootstrap transaction",
+		)
+	}
+	ownerStopDescriptor, err := parseAuthoritativeWakePrivateStopDescriptor(bootstrap)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ownerStopDescriptor.present {
+		return nil, nil, fmt.Errorf(
+			"%s is not valid without the complete private bootstrap transaction",
+			ownerStopDescriptor.name,
+		)
+	}
+	return wakeRepairChildStopFromBootstrap(bootstrap)
+}
+
+func wakeRepairBootstrapPlatformEnvNames() []string {
+	return []string{envWakeRepairChildControlFD}
+}
+
+func parseWakeRepairChildStopDescriptor(
+	bootstrap wakeRepairBootstrapEnv,
+) (wakeRepairChildStopDescriptor, error) {
+	raw := bootstrap.value(envWakeRepairChildControlFD)
 	if raw == "" {
-		return nil, func() {}, nil
+		return wakeRepairChildStopDescriptor{}, nil
 	}
 	fd, err := strconv.Atoi(raw)
 	if err != nil || fd < 3 {
-		return nil, nil, fmt.Errorf("%s is invalid", envWakeRepairChildControlFD)
+		return wakeRepairChildStopDescriptor{}, fmt.Errorf(
+			"%s is invalid",
+			envWakeRepairChildControlFD,
+		)
+	}
+	return wakeRepairChildStopDescriptor{
+		fd:      fd,
+		name:    envWakeRepairChildControlFD,
+		present: true,
+	}, nil
+}
+
+func prepareWakeRepairChildStopDescriptor(descriptor wakeRepairChildStopDescriptor) error {
+	if !descriptor.present {
+		return nil
 	}
 	// os/exec obtains ExtraFiles through File.Fd, which deliberately restores
 	// blocking mode. Restore nonblocking mode before os.NewFile so Go registers
 	// the inherited pipe with its poller; then a concurrent Close interrupts the
 	// startup read and cleanup can wait for the watcher without deadlocking.
-	if err := unix.SetNonblock(fd, true); err != nil {
-		_ = unix.Close(fd)
-		return nil, nil, fmt.Errorf("make wake repair child control fd nonblocking: %w", err)
+	if err := unix.SetNonblock(descriptor.fd, true); err != nil {
+		return fmt.Errorf("make wake repair child control fd nonblocking: %w", err)
 	}
-	if err := setWakeRepairFDCloseOnExec(fd, "child control"); err != nil {
-		_ = unix.Close(fd)
-		return nil, nil, err
+	if err := setWakeRepairFDCloseOnExec(descriptor.fd, "child control"); err != nil {
+		return err
 	}
-	file := os.NewFile(uintptr(fd), "wake-repair-child-control")
+	return nil
+}
+
+func validateWakeRepairChildPlatformDescriptorTuple(
+	handoff wakeRepairChildHandoffDescriptors,
+	stop wakeRepairChildStopDescriptor,
+) error {
+	if handoff.present != stop.present {
+		return fmt.Errorf("wake repair bootstrap descriptors are incomplete")
+	}
+	return nil
+}
+
+func adoptWakeRepairChildStopDescriptor(
+	descriptor wakeRepairChildStopDescriptor,
+) (<-chan struct{}, func(), error) {
+	if !descriptor.present {
+		return nil, func() {}, nil
+	}
+	file := os.NewFile(uintptr(descriptor.fd), "wake-repair-child-control")
 	if file == nil {
-		_ = unix.Close(fd)
+		_ = unix.Close(descriptor.fd)
 		return nil, nil, fmt.Errorf("%s fd is unavailable", envWakeRepairChildControlFD)
 	}
 	stop, finished := watchWakeRepairDarwinChildControl(file)
@@ -179,6 +241,22 @@ func wakeRepairChildStopFromEnv() (<-chan struct{}, func(), error) {
 		<-finished
 	}
 	return stop, cleanup, nil
+}
+
+func wakeRepairChildStopFromBootstrap(
+	bootstrap wakeRepairBootstrapEnv,
+) (<-chan struct{}, func(), error) {
+	descriptor, err := parseWakeRepairChildStopDescriptor(bootstrap)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := prepareWakeRepairChildStopDescriptor(descriptor); err != nil {
+		if descriptor.present {
+			_ = unix.Close(descriptor.fd)
+		}
+		return nil, nil, err
+	}
+	return adoptWakeRepairChildStopDescriptor(descriptor)
 }
 
 func watchWakeRepairDarwinChildControl(file *os.File) (<-chan struct{}, <-chan struct{}) {
