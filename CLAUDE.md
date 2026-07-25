@@ -362,13 +362,19 @@ proven-stale lock and start a fresh wake only when the stale lock was created
 for `--inject-via`, and `agents/<agent>/.wake.target` exists with a digest that
 matches the lock's repair metadata. `.wake.target` is mode `0600` and stores
 schema metadata, root, agent, creation time, `mode:"inject-via"`, an absolute
-executable path, and fixed argv. Raw TTY wake has no repair target; repair must
-refuse raw locks, leftover targets from old locks, and `unverified` locks.
+executable path, and fixed argv. The private mode-`0600` `.wake.repair-floor`
+must also match the exact generation, target, physical root, boot, and owner
+state. It persists only the device/inode/ctime identities already suppressed by
+that wake, never message IDs. Repair hands that floor to the replacement rather
+than re-snapshotting `inbox/new`, so downtime arrivals and same-name DLQ retries
+remain eligible. Missing, corrupt, or mismatched floor state requires a normal
+wake restart. Raw TTY wake has no repair target; repair must refuse raw locks,
+leftover targets from old locks, and `unverified` locks.
 Repaired wake stdout/stderr goes to
 `agents/<agent>/.wake.repair.log`; repair itself must not keep stdout/stderr
 pipes open after its JSON/text output exits. `doctor --ops` may report
-`target_present` and `repair_available`, but must remain diagnostic-only and
-never spawn a wake process.
+`target_present`, `repair_available`, and a continuity `repair_reason`, but must
+remain diagnostic-only and never spawn a wake process.
 
 `amq wake retire` requires the expected inject-via executable and ordered fixed
 arguments. It stops only an identity-confirmed live inject-via wake with an

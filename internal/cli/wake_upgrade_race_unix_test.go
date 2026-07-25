@@ -27,6 +27,7 @@ func TestWakeUpgradeRaceRepairRejectsConcurrentCurrentAcquire(t *testing.T) {
 	if err := writeWakeTarget(root, "codex", target); err != nil {
 		t.Fatalf("write legacy wake target: %v", err)
 	}
+	writeWakeRepairFloorForTest(t, root, "codex", target, nil)
 
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid == os.Getpid() {
@@ -43,7 +44,7 @@ func TestWakeUpgradeRaceRepairRejectsConcurrentCurrentAcquire(t *testing.T) {
 	})
 	repairStarted := make(chan struct{})
 	releaseRepair := make(chan struct{})
-	stubStartWakeFromTarget(t, func(gotRoot, gotMe string, gotTarget wakeTarget) (int, error) {
+	stubStartWakeFromTarget(t, func(gotRoot, gotMe string, gotTarget wakeTarget, _ wakeRepairFloor) (int, error) {
 		if gotRoot != root || gotMe != "codex" || !sameWakeInjectorIdentity(gotTarget, target) {
 			t.Fatalf("repair starter got root=%q me=%q target=%#v", gotRoot, gotMe, gotTarget)
 		}

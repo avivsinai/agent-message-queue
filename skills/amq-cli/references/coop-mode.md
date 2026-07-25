@@ -83,10 +83,13 @@ Leader prepares commit -> user approves -> push
 - When starting a new wake after the agent owns its terminal, pass `amq wake
   --baseline-existing ...`. Existing `inbox/new` messages remain unread and
   emit no receipts; only later arrivals trigger that fresh wake. `coop exec`
-  and `wake repair` add the flag to wakes they start. Reuse requires
-  generation-bound proof that the live wake completed watcher preparation. It
-  does not retroactively baseline that wake, so pending backlog can still
-  notify; SessionStart draining mitigates that residual.
+  adds the flag to wakes it starts. `wake repair` instead inherits the dead
+  generation's private device/inode/ctime suppression floor; it does not
+  re-snapshot `inbox/new`, so messages delivered during notifier downtime
+  remain eligible. Reuse requires generation-bound proof that the live wake
+  completed watcher preparation. It does not retroactively baseline that wake,
+  so pending backlog can still notify; SessionStart draining mitigates that
+  residual.
 
 ## Message Handling
 

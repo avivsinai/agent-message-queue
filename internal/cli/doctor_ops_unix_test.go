@@ -10,8 +10,61 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
+
+func TestRunOpsChecksReportsWakeRepairAvailabilityWithFloor(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	if err := config.WriteConfig(filepath.Join(root, "meta", "config.json"), config.Config{
+		Version: 1,
+		Agents:  []string{"alice"},
+	}, true); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	injector := writeExecutableForTest(t, "doctor-repair-injector")
+	target := mustNewWakeTargetForTest(t, root, "alice", injector, []string{"exec"})
+	lockPath := writeWakeLockForTest(t, root, "alice", bindWakeLockToTarget(wakeLock{
+		PID:        999999999,
+		Executable: "/opt/homebrew/bin/amq",
+	}, target))
+	if err := writeWakeTarget(root, "alice", target); err != nil {
+		t.Fatalf("write wake target: %v", err)
+	}
+	writeWakeRepairFloorForTest(t, root, "alice", target, nil)
+
+	result := runOpsChecks(root, "test_source", false)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+	}
+	got := result.WakeLocks[0]
+	if got.Status != string(wakeLockStale) || !got.TargetPresent || got.TargetReason != "" {
+		t.Fatalf("unexpected stale repair state: %#v", got)
+	}
+	if !got.RepairAvailable || got.Repair != wakeRepairCommand(root, "alice") || got.RepairReason != "" {
+		t.Fatalf("repair availability = %#v", got)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("doctor report removed lock: %v", err)
+	}
+
+	stubCurrentWakeBootID(t, "22222222-2222-2222-2222-222222222222")
+	result = runOpsChecks(root, "test_source", false)
+	got = result.WakeLocks[0]
+	if got.RepairAvailable || got.Repair != "" ||
+		!strings.Contains(got.RepairReason, "does not match the current boot") {
+		t.Fatalf("doctor advertised prior-boot repair floor: %#v", got)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("doctor prior-boot report removed lock: %v", err)
+	}
+}
 
 func TestRunOpsChecksRejectsSymlinkAndFIFOWakeLocks(t *testing.T) {
 	for _, tc := range []struct {

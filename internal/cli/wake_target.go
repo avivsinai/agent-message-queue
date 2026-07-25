@@ -50,6 +50,12 @@ func sameWakeInjectorIdentity(first, second wakeTarget) bool {
 	return first.InjectVia == second.InjectVia && slices.Equal(first.InjectArgs, second.InjectArgs)
 }
 
+func sameWakeTarget(first, second wakeTarget) bool {
+	firstDigest, firstErr := wakeTargetDigest(first)
+	secondDigest, secondErr := wakeTargetDigest(second)
+	return firstErr == nil && secondErr == nil && firstDigest == secondDigest
+}
+
 func wakeTargetPath(root, me string) string {
 	return filepath.Join(fsq.AgentBase(root, me), wakeTargetFileName)
 }
@@ -198,13 +204,6 @@ func writeWakeTargetGuarded(root, me string, target wakeTarget) error {
 	}
 	data = append(data, '\n')
 	return writeWakeMetadataFile(wakeTargetPath(root, me), data, "wake target")
-}
-
-func removeWakeTargetGuarded(root, me string) error {
-	if err := os.Remove(wakeTargetPath(root, me)); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove wake target: %w", err)
-	}
-	return nil
 }
 
 func validateWakeTarget(target wakeTarget, root, me string) error {

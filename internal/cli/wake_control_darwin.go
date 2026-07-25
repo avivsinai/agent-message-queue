@@ -423,20 +423,44 @@ func handleDarwinOwnerControl(
 }
 
 func startWakeControlListener(root, me string, lock wakeLock) (func(), <-chan struct{}, func(), error) {
-	path := lock.ControlSocket
-	if path == "" {
-		return func() {}, nil, func() {}, nil
-	}
 	agentDir, err := openWakeAgentDir(root, me)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	keepAgentDir := false
-	defer func() {
-		if !keepAgentDir {
-			_ = agentDir.Close()
-		}
-	}()
+	cleanup, stop, markStopped, err := startWakeControlListenerInDirOwned(
+		agentDir,
+		root,
+		me,
+		lock,
+		true,
+	)
+	if err != nil {
+		_ = agentDir.Close()
+	}
+	return cleanup, stop, markStopped, err
+}
+
+func startWakeControlListenerInDir(
+	agentDir *wakeAgentDir,
+	root, me string,
+	lock wakeLock,
+) (func(), <-chan struct{}, func(), error) {
+	return startWakeControlListenerInDirOwned(agentDir, root, me, lock, false)
+}
+
+func startWakeControlListenerInDirOwned(
+	agentDir *wakeAgentDir,
+	root, me string,
+	lock wakeLock,
+	closeAgentDir bool,
+) (func(), <-chan struct{}, func(), error) {
+	path := lock.ControlSocket
+	if path == "" {
+		return func() {}, nil, func() {}, nil
+	}
+	if agentDir == nil {
+		return nil, nil, nil, fmt.Errorf("wake agent directory capability is missing")
+	}
 	name, err := darwinControlSocketName(agentDir, path)
 	if err != nil {
 		return nil, nil, nil, err
@@ -461,7 +485,6 @@ func startWakeControlListener(root, me string, lock wakeLock) (func(), <-chan st
 		_ = agentDir.withFD(func(dirfd int) error { return removeDarwinControlSocketAt(dirfd, name) })
 		return nil, nil, nil, err
 	}
-	keepAgentDir = true
 	stopRequest := make(chan struct{}, 1)
 	loopStopped := make(chan struct{})
 	var loopStoppedOnce sync.Once
@@ -570,7 +593,9 @@ func startWakeControlListener(root, me string, lock wakeLock) (func(), <-chan st
 				}
 				return removeDarwinControlSocketAt(dirfd, name)
 			})
-			_ = agentDir.Close()
+			if closeAgentDir {
+				_ = agentDir.Close()
+			}
 		})
 	}
 	return cleanup, stopRequest, markLoopStopped, nil

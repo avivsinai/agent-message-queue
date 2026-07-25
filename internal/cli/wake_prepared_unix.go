@@ -15,6 +15,7 @@ const wakePreparedFileName = ".wake.prepared"
 const wakePreparedPollInterval = 25 * time.Millisecond
 
 var waitForWakePreparedRetry = sleepUntilWakePreparedRetry
+var afterGenericWakeLockRemoval = func(int, *wakeAgentDir) error { return nil }
 
 func wakePreparedPath(root, me string) string {
 	return filepath.Join(fsq.AgentBase(root, me), wakePreparedFileName)
@@ -26,6 +27,17 @@ func writeWakePreparedFile(root, me string, expected wakeLockInspection) error {
 		return err
 	}
 	defer func() { _ = agentDir.Close() }()
+	return writeWakePreparedFileInDir(agentDir, root, me, expected)
+}
+
+func writeWakePreparedFileInDir(
+	agentDir *wakeAgentDir,
+	root, me string,
+	expected wakeLockInspection,
+) error {
+	if agentDir == nil {
+		return fmt.Errorf("wake agent directory capability is missing")
+	}
 	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !sameWakeLockGeneration(expected, current) {
@@ -39,13 +51,40 @@ func writeWakePreparedFile(root, me string, expected wakeLockInspection) error {
 		if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, marker); err != nil {
 			return err
 		}
-		// The marker intentionally persists after exit; its generation binding
-		// makes stale files unusable by later wake instances.
-		if current.Lock.WakeMode == wakeOwnerWakeMode {
-			return writeWakeGenerationFileAt(dirfd, wakePreparedFileName, "wake prepared marker", marker)
-		}
-		return writeWakeGenerationFile(wakePreparedPath(root, me), "wake prepared marker", marker)
+		return writeWakeGenerationFileAt(dirfd, wakePreparedFileName, "wake prepared marker", marker)
 	})
+}
+
+func freezeGenericWakePreparedCleanupAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	current wakeLockInspection,
+) (*wakeGenerationFileSnapshot, error) {
+	snapshot, exists, err := readWakeGenerationFileSnapshotAt(
+		dirfd,
+		agentDir,
+		wakePreparedFileName,
+		"wake prepared marker",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot wake prepared marker before cleanup: %w", err)
+	}
+	if !exists || snapshot.Marker.Generation != current.Lock.Generation {
+		return nil, nil
+	}
+	if err := validateWakeReadyLockAndTargetAt(
+		dirfd,
+		agentDir,
+		root,
+		me,
+		current,
+		snapshot.Marker,
+	); err != nil {
+		return nil, fmt.Errorf("validate wake prepared marker before cleanup: %w", err)
+	}
+	return &snapshot, nil
 }
 
 func validateWakePreparedFileAgainstInspection(root, me string, current wakeLockInspection) (bool, error) {

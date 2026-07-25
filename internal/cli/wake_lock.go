@@ -15,22 +15,24 @@ import (
 
 // wakeLock represents the lock file content for wake process deduplication.
 type wakeLock struct {
-	PID           int        `json:"pid"`
-	TTY           string     `json:"tty"`
-	Root          string     `json:"root"`                     // Absolute path to disambiguate relative AM_ROOT
-	Agent         string     `json:"agent,omitempty"`          // Agent handle that owns this lock
-	Hostname      string     `json:"hostname,omitempty"`       // Host that created the lock
-	Started       string     `json:"started"`                  // Wall-clock diagnostic timestamp
-	ProcessStart  string     `json:"process_start,omitempty"`  // Kernel process start token, guards PID reuse
-	BootID        string     `json:"boot_id,omitempty"`        // Boot identity paired with ProcessStart when available
-	Executable    string     `json:"executable,omitempty"`     // Diagnostic process executable basename/path
-	Args          []string   `json:"args,omitempty"`           // Diagnostic argv when available
-	WakeMode      string     `json:"wake_mode,omitempty"`      // none, raw, paste, or inject-via; empty means a legacy pre-v0.44 lock
-	TargetDigest  string     `json:"target_digest,omitempty"`  // Binds .wake.target to this lock instance
-	Generation    string     `json:"generation,omitempty"`     // Random nonce binding readiness and exact cleanup to this instance
-	ControlSocket string     `json:"control_socket,omitempty"` // Darwin cooperative shutdown endpoint
-	OwnerSchema   int        `json:"owner_schema,omitempty"`   // Non-zero only for an authoritative owner-bound lock
-	Owner         *wakeOwner `json:"owner,omitempty"`          // Exact owner identity for an authoritative owner-bound lock
+	PID               int        `json:"pid"`
+	TTY               string     `json:"tty"`
+	Root              string     `json:"root"`                          // Absolute path to disambiguate relative AM_ROOT
+	Agent             string     `json:"agent,omitempty"`               // Agent handle that owns this lock
+	Hostname          string     `json:"hostname,omitempty"`            // Host that created the lock
+	Started           string     `json:"started"`                       // Wall-clock diagnostic timestamp
+	ProcessStart      string     `json:"process_start,omitempty"`       // Kernel process start token, guards PID reuse
+	BootID            string     `json:"boot_id,omitempty"`             // Boot identity paired with ProcessStart when available
+	Executable        string     `json:"executable,omitempty"`          // Diagnostic process executable basename/path
+	Args              []string   `json:"args,omitempty"`                // Diagnostic argv when available
+	WakeMode          string     `json:"wake_mode,omitempty"`           // none, raw, paste, or inject-via; empty means a legacy pre-v0.44 lock
+	TargetDigest      string     `json:"target_digest,omitempty"`       // Binds .wake.target to this lock instance
+	Generation        string     `json:"generation,omitempty"`          // Random nonce binding readiness and exact cleanup to this instance
+	SourceGeneration  string     `json:"source_generation,omitempty"`   // Dead generation inherited by a repaired wake
+	SourceFloorDigest string     `json:"source_floor_digest,omitempty"` // Exact repair floor inherited by a repaired wake
+	ControlSocket     string     `json:"control_socket,omitempty"`      // Darwin cooperative shutdown endpoint
+	OwnerSchema       int        `json:"owner_schema,omitempty"`        // Non-zero only for an authoritative owner-bound lock
+	Owner             *wakeOwner `json:"owner,omitempty"`               // Exact owner identity for an authoritative owner-bound lock
 }
 
 const (
