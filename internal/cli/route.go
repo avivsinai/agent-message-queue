@@ -58,9 +58,6 @@ func runRouteExplain(args []string) error {
 	} else if handled {
 		return nil
 	}
-	if fs.NArg() > 0 {
-		return UsageError("route explain does not accept positional arguments (got %q)", strings.Join(fs.Args(), " "))
-	}
 	if !*jsonFlag {
 		return UsageError("route explain requires --json")
 	}

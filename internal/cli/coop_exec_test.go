@@ -115,6 +115,37 @@ func TestCoopExecUsageError(t *testing.T) {
 	}
 }
 
+func TestCoopExecForwardsCommandArguments(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+
+	sentinel := errors.New("exec sentinel")
+	var gotArgv []string
+	oldExec := coopExecProcess
+	coopExecProcess = func(_ string, argv []string, _ []string) error {
+		gotArgv = append([]string{}, argv...)
+		return sentinel
+	}
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err := runCoopExec([]string{
+		"--root", root,
+		"--me", "codex",
+		"--no-wake",
+		"sh", "-c", "echo ok",
+		"--", "--tail-flag",
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("coop exec error = %v, want sentinel", err)
+	}
+	wantArgv := []string{"sh", "-c", "echo ok", "--tail-flag"}
+	if !reflect.DeepEqual(gotArgv, wantArgv) {
+		t.Fatalf("argv = %#v, want %#v", gotArgv, wantArgv)
+	}
+}
+
 func TestCoopExecSessionRootMutuallyExclusive(t *testing.T) {
 	err := runCoopExec([]string{"--session", "feat", "--root", "/tmp/q", "claude"})
 	if err == nil {
