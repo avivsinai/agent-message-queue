@@ -167,6 +167,7 @@ type MailboxInspection struct {
 	Issues         []string                `json:"issues"`
 	Paths          []MailboxPathInspection `json:"paths,omitempty"`
 	RepairEligible bool                    `json:"repair_eligible"`
+	Remedy         string                  `json:"remedy,omitempty"`
 	CreatedPaths   []string                `json:"created_paths,omitempty"`
 }
 
