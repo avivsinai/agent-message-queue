@@ -51,7 +51,6 @@ printf ready > "$ready"
 		"wake\n",
 		"-root\n/tmp/amq-root\n",
 		"-me\ncodex\n",
-		"--baseline-existing\n",
 		"-inject-via\n/tmp/amq-keepalive\n",
 		"-inject-arg\ninject\n",
 		"-inject-arg\nghostty\n",
@@ -63,10 +62,58 @@ printf ready > "$ready"
 			t.Fatalf("args log missing %q:\n%s", want, args)
 		}
 	}
-	// --baseline-existing must precede -inject-via so a restarted wake ignores
-	// backlog already waiting, matching buildCoopWakeArgs/buildRepairWakeArgs
-	// on main.
-	if idx1, idx2 := strings.Index(args, "--baseline-existing\n"), strings.Index(args, "-inject-via\n"); idx1 < 0 || idx2 < 0 || idx1 > idx2 {
+	// keepalive starts a wake only when none is live, so mail already waiting in
+	// inbox/new arrived while nothing was notifying. Baselining it here made those
+	// downtime arrivals permanently silent, so the flag must be absent by default.
+	if strings.Contains(args, "--baseline-existing\n") {
+		t.Fatalf("args log must not baseline downtime arrivals by default:\n%s", args)
+	}
+}
+
+func TestStartWakeBaselinesExistingWhenOptedIn(t *testing.T) {
+	dir := t.TempDir()
+	argsLog := filepath.Join(dir, "args.log")
+	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
+	t.Setenv("AMQ_KEEPALIVE_BASELINE_EXISTING", "1")
+	fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
+printf '%s\n' "$@" > "$AMQ_KEEPALIVE_ARGS_LOG"
+ready=""
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "-ready-file" ]; then
+    ready="$arg"
+  fi
+  previous="$arg"
+done
+if [ -z "$ready" ]; then
+  exit 11
+fi
+printf ready > "$ready"
+`)
+
+	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
+		Root:      "/tmp/amq-root",
+		Me:        "codex",
+		InjectVia: "/tmp/amq-keepalive",
+		Adapter:   "ghostty",
+		Target:    "ghostty:terminal:abc",
+		Timeout:   5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("StartWake() error = %v", err)
+	}
+	data, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("read args log: %v", err)
+	}
+	args := string(data)
+	// The escape hatch restores the old suppressing behavior, and the flag must
+	// still precede -inject-via to match buildCoopWakeArgs/buildRepairWakeArgs.
+	idx1, idx2 := strings.Index(args, "--baseline-existing\n"), strings.Index(args, "-inject-via\n")
+	if idx1 < 0 {
+		t.Fatalf("args log missing --baseline-existing under opt-in:\n%s", args)
+	}
+	if idx2 < 0 || idx1 > idx2 {
 		t.Fatalf("args log has wrong ordering, want --baseline-existing before -inject-via:\n%s", args)
 	}
 }

@@ -126,8 +126,26 @@ func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 	if req.Me != "" {
 		args = append(args, "-me", req.Me)
 	}
+	// Do NOT baseline existing inbox mail by default.
+	//
+	// keepalive only reaches StartWake when no live wake owns this agent, so
+	// anything sitting in inbox/new arrived while nothing was notifying and has
+	// therefore never been announced. Passing --baseline-existing here made the
+	// replacement wake re-snapshot inbox/new and permanently suppress those
+	// downtime arrivals: the message stayed queued, no injection ever fired, and
+	// the peer looked like it had failed to send. This mirrors the guarantee the
+	// repair path already documents ("downtime arrivals remain eligible") — a
+	// wake that starts *after* downtime must not swallow what landed during it.
+	//
+	// Undrained mail in inbox/new is unread by definition, so re-announcing it is
+	// correct; the cost is at most one duplicate notice when a wake is replaced
+	// while mail is still undrained, which clears as soon as the agent drains.
+	// Set AMQ_KEEPALIVE_BASELINE_EXISTING=1 to restore the old suppressing
+	// behavior without a rebuild.
+	if baselineExistingEnabled() {
+		args = append(args, "--baseline-existing")
+	}
 	args = append(args,
-		"--baseline-existing",
 		"-inject-via", req.InjectVia,
 		"-inject-arg", "inject",
 		"-inject-arg", req.Adapter,
@@ -259,6 +277,18 @@ func (c CLI) RetireWake(ctx context.Context, req RetireWakeRequest) (RetireWakeR
 		return result, fmt.Errorf("%w: amq wake retire failed: %v: %s", ErrWakeRetireNotConfirmed, runErr, detail)
 	default:
 		return result, fmt.Errorf("%w: amq wake retire produced no status", ErrWakeRetireNotConfirmed)
+	}
+}
+
+// baselineExistingEnabled reports whether a replacement wake should suppress
+// inbox mail that is already queued when it starts. Default is false so that
+// arrivals during wake downtime still get announced; see StartWake.
+func baselineExistingEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AMQ_KEEPALIVE_BASELINE_EXISTING"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 
