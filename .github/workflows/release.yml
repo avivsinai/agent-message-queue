@@ -156,6 +156,7 @@ jobs:
           )
           PY
       - name: Release
+        id: publish_release
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
@@ -187,7 +188,7 @@ jobs:
           subject-path: ${{ steps.attestation_subjects.outputs.subjects }}
 
       - name: Mark release pull request as tagged
-        if: github.event_name == 'push'
+        if: always() && steps.publish_release.outcome == 'success'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
