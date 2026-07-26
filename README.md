@@ -52,7 +52,7 @@ Installs to `~/.local/bin` or `~/go/bin` (no sudo required). Verify: `amq --vers
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash -s -- --skill
 ```
 
-Review the script before running; it verifies release checksums when possible.
+Review the script before running. Installation fails unless `checksums.txt` has exactly one valid entry for the selected asset and `sha256sum` or `shasum` verifies it before extraction.
 
 ### 2. Install Skill
 

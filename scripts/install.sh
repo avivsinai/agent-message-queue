@@ -18,6 +18,7 @@ set -e
 REPO="avivsinai/agent-message-queue"
 VERSION="${VERSION:-latest}"
 INSTALL_SKILL=false
+CALLER_PWD=$PWD
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -50,6 +51,10 @@ determine_install_dir() {
 }
 
 INSTALL_DIR=$(determine_install_dir)
+case "$INSTALL_DIR" in
+    /*) ;;
+    *) INSTALL_DIR="$CALLER_PWD/$INSTALL_DIR" ;;
+esac
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -109,8 +114,21 @@ CHECKSUMS_URL="https://github.com/$REPO/releases/download/$VERSION/checksums.txt
 echo "Downloading: $ASSET"
 
 # Create temp directory
+TMP_DIR=""
+STAGE_DIR=""
+STAGED_BINARY=""
+cleanup() {
+    if [ -n "$STAGE_DIR" ]; then
+        rm -rf "$STAGE_DIR" || true
+    fi
+    if [ -n "$TMP_DIR" ]; then
+        rm -rf "$TMP_DIR" || true
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 TMP_DIR=$(mktemp -d)
-trap 'rm -rf "$TMP_DIR"' EXIT
 
 # Download (curl -f fails on HTTP errors like 404)
 if ! curl -fsSL "$URL" -o "$TMP_DIR/$ASSET"; then
@@ -120,39 +138,110 @@ if ! curl -fsSL "$URL" -o "$TMP_DIR/$ASSET"; then
     exit 1
 fi
 
-# Verify checksums when possible
+# Verify the selected release asset before extracting or installing it.
 CHECKSUMS_FILE="$TMP_DIR/checksums.txt"
-if curl -fsSL "$CHECKSUMS_URL" -o "$CHECKSUMS_FILE"; then
-    CHECKSUM_LINE=$(grep " $ASSET$" "$CHECKSUMS_FILE" || true)
-    if [ -z "$CHECKSUM_LINE" ]; then
-        echo -e "${YELLOW}Warning: checksum entry not found for $ASSET${NC}"
-    elif command -v sha256sum &> /dev/null; then
-        (cd "$TMP_DIR" && echo "$CHECKSUM_LINE" | sha256sum -c -) || {
-            echo -e "${RED}Error: checksum verification failed${NC}"
-            exit 1
-        }
-    elif command -v shasum &> /dev/null; then
-        EXPECTED=$(echo "$CHECKSUM_LINE" | awk '{print $1}')
-        ACTUAL=$(shasum -a 256 "$TMP_DIR/$ASSET" | awk '{print $1}')
-        if [ "$EXPECTED" != "$ACTUAL" ]; then
-            echo -e "${RED}Error: checksum verification failed${NC}"
-            exit 1
-        fi
-    else
-        echo -e "${YELLOW}Warning: sha256 tool not found; skipping checksum verification${NC}"
-    fi
-else
-    echo -e "${YELLOW}Warning: failed to download checksums; skipping verification${NC}"
+if ! curl -fsSL "$CHECKSUMS_URL" -o "$CHECKSUMS_FILE"; then
+    echo -e "${RED}Error: failed to download checksums${NC}"
+    exit 1
+fi
+if [ ! -r "$CHECKSUMS_FILE" ]; then
+    echo -e "${RED}Error: checksums.txt is missing or unreadable${NC}"
+    exit 1
 fi
 
-cd "$TMP_DIR"
-if ! tar xzf "$ASSET" 2>/dev/null; then
+if ! CHECKSUM_RESULT=$(awk -v asset="$ASSET" '
+    {
+        sub(/\r$/, "")
+        field = $2
+        candidate = field
+        sub(/^\*/, "", candidate)
+        last = $NF
+        sub(/^\*/, "", last)
+
+        if (candidate == asset) {
+            count++
+            if (NF != 2 ||
+                length($1) != 64 ||
+                $1 !~ /^[0-9A-Fa-f]+$/ ||
+                (field != asset && field != "*" asset)) {
+                malformed = 1
+            }
+            hash = $1
+        } else if (last == asset) {
+            count++
+            malformed = 1
+        }
+    }
+    END {
+        if (count == 0) {
+            print "missing"
+        } else if (count > 1) {
+            print "duplicate"
+        } else if (malformed) {
+            print "malformed"
+        } else {
+            print "ok:" hash
+        }
+    }
+' "$CHECKSUMS_FILE"); then
+    echo -e "${RED}Error: checksums.txt is unreadable${NC}"
+    exit 1
+fi
+
+case "$CHECKSUM_RESULT" in
+    missing)
+        echo -e "${RED}Error: checksum entry not found for $ASSET${NC}"
+        exit 1
+        ;;
+    duplicate)
+        echo -e "${RED}Error: duplicate checksum entries found for $ASSET${NC}"
+        exit 1
+        ;;
+    malformed)
+        echo -e "${RED}Error: malformed checksum entry for $ASSET${NC}"
+        exit 1
+        ;;
+    ok:*)
+        EXPECTED="${CHECKSUM_RESULT#ok:}"
+        ;;
+    *)
+        echo -e "${RED}Error: could not parse checksum entry for $ASSET${NC}"
+        exit 1
+        ;;
+esac
+
+if command -v sha256sum &> /dev/null; then
+    (cd "$TMP_DIR" && printf '%s  %s\n' "$EXPECTED" "$ASSET" | sha256sum -c -) || {
+        echo -e "${RED}Error: checksum verification failed${NC}"
+        exit 1
+    }
+elif command -v shasum &> /dev/null; then
+    if ! ACTUAL_LINE=$(shasum -a 256 "$TMP_DIR/$ASSET"); then
+        echo -e "${RED}Error: checksum verification failed${NC}"
+        exit 1
+    fi
+    ACTUAL="${ACTUAL_LINE%%[[:space:]]*}"
+    EXPECTED_NORMALIZED=$(printf '%s' "$EXPECTED" | tr '[:upper:]' '[:lower:]')
+    ACTUAL_NORMALIZED=$(printf '%s' "$ACTUAL" | tr '[:upper:]' '[:lower:]')
+    if [ "$EXPECTED_NORMALIZED" != "$ACTUAL_NORMALIZED" ]; then
+        echo -e "${RED}Error: checksum verification failed${NC}"
+        exit 1
+    fi
+else
+    echo -e "${RED}Error: sha256sum or shasum is required to verify the download${NC}"
+    exit 1
+fi
+
+if ! tar xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" 2>/dev/null; then
     echo -e "${RED}Error: Failed to extract archive (corrupted download?)${NC}"
     exit 1
 fi
 
-if [ ! -f "amq" ]; then
-    echo -e "${RED}Error: Binary not found in archive${NC}"
+if [ -L "$TMP_DIR/amq" ] ||
+   [ ! -f "$TMP_DIR/amq" ] ||
+   [ ! -s "$TMP_DIR/amq" ] ||
+   [ ! -x "$TMP_DIR/amq" ]; then
+    echo -e "${RED}Error: archive did not contain a regular executable amq binary${NC}"
     exit 1
 fi
 
@@ -162,18 +251,60 @@ echo "Installing to: $INSTALL_DIR/amq"
 # Ensure install directory exists
 mkdir -p "$INSTALL_DIR"
 
-# Install binary with correct permissions
-install -m 0755 amq "$INSTALL_DIR/amq"
+# Build the replacement beside the target, then atomically publish it.
+if ! STAGE_DIR=$(mktemp -d "$INSTALL_DIR/.amq.install.XXXXXX"); then
+    echo -e "${RED}Error: could not create staged install directory${NC}"
+    exit 1
+fi
+STAGED_BINARY="$STAGE_DIR/amq"
+if ! install -m 0755 "$TMP_DIR/amq" "$STAGED_BINARY"; then
+    echo -e "${RED}Error: failed to stage binary${NC}"
+    exit 1
+fi
+if ! chmod 0755 "$STAGED_BINARY" ||
+   [ ! -f "$STAGED_BINARY" ] ||
+   [ ! -s "$STAGED_BINARY" ] ||
+   [ ! -x "$STAGED_BINARY" ]; then
+    echo -e "${RED}Error: staged binary validation failed${NC}"
+    exit 1
+fi
+if ! "$STAGED_BINARY" --version >/dev/null; then
+    echo -e "${RED}Error: staged binary failed its version check${NC}"
+    exit 1
+fi
+if ! mv -f "$STAGED_BINARY" "$INSTALL_DIR/"; then
+    echo -e "${RED}Error: failed to publish binary${NC}"
+    exit 1
+fi
+if [ -e "$STAGED_BINARY" ] ||
+   [ -L "$STAGED_BINARY" ] ||
+   [ -L "$INSTALL_DIR/amq" ] ||
+   [ ! -f "$INSTALL_DIR/amq" ] ||
+   [ ! -s "$INSTALL_DIR/amq" ] ||
+   [ ! -x "$INSTALL_DIR/amq" ] ||
+   ! cmp -s "$TMP_DIR/amq" "$INSTALL_DIR/amq"; then
+    echo -e "${RED}Error: published binary validation failed${NC}"
+    exit 1
+fi
+rmdir "$STAGE_DIR" 2>/dev/null || true
+STAGE_DIR=""
+STAGED_BINARY=""
+
+# Verify the exact installed binary, never an older PATH entry.
+INSTALLED_BINARY="$INSTALL_DIR/amq"
+if INSTALLED_VERSION=$("$INSTALLED_BINARY" --version); then
+    echo "Installed: $INSTALLED_VERSION"
+else
+    echo -e "${RED}Error: installed binary failed its version check${NC}"
+    exit 1
+fi
 
 echo ""
 echo -e "${GREEN}Installation complete!${NC}"
 echo ""
 
-# Verify installation
-if command -v amq &> /dev/null; then
-    echo "Installed: $(amq --version)"
-else
-    echo -e "${RED}Warning: $INSTALL_DIR is not in your PATH${NC}"
+if ! PATH_AMQ=$(command -v amq 2>/dev/null); then
+    echo -e "${YELLOW}Warning: $INSTALL_DIR is not in your PATH${NC}"
     echo ""
     echo "Add it to your shell config:"
     if [ -n "$ZSH_VERSION" ] || [ -f "$HOME/.zshrc" ]; then
@@ -181,8 +312,20 @@ else
     else
         echo "  echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.bashrc && source ~/.bashrc"
     fi
-    echo ""
-    echo "Or run directly: $INSTALL_DIR/amq --version"
+else
+    case "$PATH_AMQ" in
+        /*) ;;
+        */*) PATH_AMQ="$CALLER_PWD/$PATH_AMQ" ;;
+    esac
+    if [[ ! "$PATH_AMQ" -ef "$INSTALLED_BINARY" ]]; then
+        echo -e "${YELLOW}Warning: PATH resolves amq to a different executable${NC}"
+        echo "  PATH-selected: $PATH_AMQ"
+        echo "  Verified install: $INSTALLED_BINARY"
+        echo ""
+        echo "Use the verified binary directly, or select it first in this shell:"
+        echo "  \"$INSTALLED_BINARY\" --version"
+        echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+    fi
 fi
 
 echo ""
@@ -205,6 +348,6 @@ if [ "$INSTALL_SKILL" = true ]; then
 fi
 
 echo "Next steps:"
-echo "  1. Start agent: amq coop exec claude"
-echo "  Tip: eval \"\$(amq shell-setup)\" to add co-op aliases to your shell"
+echo "  1. Start agent: \"$INSTALLED_BINARY\" coop exec claude"
+echo "  Tip: eval \"\$(\"$INSTALLED_BINARY\" shell-setup)\" to add co-op aliases to your shell"
 echo ""
