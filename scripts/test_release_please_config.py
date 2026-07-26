@@ -74,7 +74,8 @@ def test_release_workflow_marks_published_release_pr_as_tagged() -> None:
     assert publish < attest < mark_tagged
 
     mark_step = release_job[mark_tagged:]
-    assert "if: github.event_name == 'push'" in mark_step
+    assert "if: always() && steps.publish_release.outcome == 'success'" in mark_step
+    assert "if: github.event_name == 'push'" not in mark_step
     assert "RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}" in mark_step
     assert "VERSION: ${{ needs.prepare.outputs.version }}" in mark_step
     assert 'commits/${RELEASE_SHA}/pulls' in mark_step
