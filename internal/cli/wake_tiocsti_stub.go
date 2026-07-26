@@ -27,7 +27,7 @@ func (t tiocstiFuncs) Inject(text string) error {
 	return errors.New("TIOCSTI not available on this platform")
 }
 
-func waitForTTYInputQuiet(cfg *wakeConfig) {}
+func waitForTTYInputQuiet(cfg *wakeConfig) bool { return true }
 
 func waitForTTYInputDrain(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
 	return 0, false, errors.New("TTY input drain unavailable on this platform")
