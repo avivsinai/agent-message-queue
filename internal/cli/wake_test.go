@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -558,6 +559,67 @@ func TestInjectNotificationRawInjectsLFPreludeForCodex(t *testing.T) {
 	}
 	if len(*slept) != 2 {
 		t.Fatalf("settle sleeps = %v, want two settle delays", *slept)
+	}
+}
+
+func TestInjectNotificationUnsupportedDegradesOnceAndPersistsReason(t *testing.T) {
+	writes := 0
+	var statuses []struct {
+		status string
+		mode   string
+		reason string
+	}
+	cfg := &wakeConfig{
+		injectMode:   wakeInjectModeRaw,
+		fallbackWarn: true,
+		terminalWrite: func(string) error {
+			writes++
+			return newWakeInjectorUnsupportedError(syscall.EIO)
+		},
+		recordNotifierStatus: func(status, mode, reason string) error {
+			statuses = append(statuses, struct {
+				status string
+				mode   string
+				reason string
+			}{status: status, mode: mode, reason: reason})
+			return nil
+		},
+	}
+
+	first := captureWakeStderr(t, func() {
+		if err := injectNotification(cfg, "first doorbell", true); err != nil {
+			t.Fatalf("first injectNotification: %v", err)
+		}
+	})
+	if cfg.injectMode != wakeInjectModeNone {
+		t.Fatalf("inject mode = %q, want degraded non-input", cfg.injectMode)
+	}
+	if writes != 1 {
+		t.Fatalf("terminal writes = %d, want 1", writes)
+	}
+	if len(statuses) != 1 ||
+		statuses[0].status != wakeInjectorUnsupportedStatus ||
+		statuses[0].mode != wakeInjectModeRaw ||
+		!strings.Contains(statuses[0].reason, "--inject-via") {
+		t.Fatalf("recorded statuses = %#v", statuses)
+	}
+	if count := strings.Count(first, "warning:"); count != 1 {
+		t.Fatalf("first warning count = %d, want 1:\n%s", count, first)
+	}
+	if !strings.Contains(first, "first doorbell") {
+		t.Fatalf("first fallback missing doorbell:\n%s", first)
+	}
+
+	second := captureWakeStderr(t, func() {
+		if err := injectNotification(cfg, "second doorbell", true); err != nil {
+			t.Fatalf("second injectNotification: %v", err)
+		}
+	})
+	if writes != 1 {
+		t.Fatalf("degraded notifier retried terminal injection: writes=%d", writes)
+	}
+	if strings.Contains(second, "warning:") || !strings.Contains(second, "second doorbell") {
+		t.Fatalf("second non-input output = %q", second)
 	}
 }
 

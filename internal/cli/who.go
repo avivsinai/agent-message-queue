@@ -49,6 +49,9 @@ func runWho(args []string) error {
 		PresenceApplicable bool   `json:"presence_applicable"`
 		Active             bool   `json:"active"`
 		PresenceSource     string `json:"presence_source,omitempty"`
+		NotifierStatus     string `json:"notifier_status,omitempty"`
+		NotifierMode       string `json:"notifier_mode,omitempty"`
+		NotifierReason     string `json:"notifier_reason,omitempty"`
 		Note               string `json:"note,omitempty"`
 	}
 	type sessionInfo struct {
@@ -103,6 +106,9 @@ func runWho(args []string) error {
 					recentActivity = time.Since(t) < 10*time.Minute
 				}
 				ai.Note = p.Note
+				ai.NotifierStatus = p.NotifierStatus
+				ai.NotifierMode = p.NotifierMode
+				ai.NotifierReason = p.NotifierReason
 			}
 			ai.PresenceSource = resolvePresenceSource(sessDir, ae.Name(), recentActivity)
 			ai.Active = recentActivity || ai.PresenceSource == presenceSourceNotifierLive
@@ -152,6 +158,9 @@ func runWho(args []string) error {
 				status = "active"
 				if a.PresenceSource != "" {
 					status += " (" + a.PresenceSource + ")"
+				}
+				if a.NotifierStatus == wakeInjectorUnsupportedStatus {
+					status += "; " + a.NotifierStatus
 				}
 			}
 			note := ""

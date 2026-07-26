@@ -4,6 +4,8 @@ package cli
 
 import (
 	"os"
+	"runtime"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -18,6 +20,31 @@ var tiocsti = tiocstiFuncs{
 
 type tiocstiFuncs struct {
 	available bool
+}
+
+var readTIOCSTILegacySysctl = func() ([]byte, error) {
+	if runtime.GOOS != "linux" {
+		return nil, os.ErrNotExist
+	}
+	return os.ReadFile(tiocstiLegacySysctlPath)
+}
+
+type tiocstiInjectionError struct {
+	Err      error
+	Progress int
+}
+
+func (err *tiocstiInjectionError) Error() string {
+	return err.Err.Error()
+}
+
+func (err *tiocstiInjectionError) Unwrap() error {
+	return err.Err
+}
+
+func tiocstiLegacyDisabledHint() bool {
+	data, err := readTIOCSTILegacySysctl()
+	return err == nil && strings.TrimSpace(string(data)) == "0"
 }
 
 // Available returns true if TIOCSTI is supported on this platform.
@@ -47,9 +74,9 @@ func (t tiocstiFuncs) Inject(text string) error {
 // descriptor. Callers own the descriptor and its lifecycle.
 func (t tiocstiFuncs) InjectFD(fd uintptr, text string) error {
 	// Inject each character using TIOCSTI
-	for _, ch := range []byte(text) {
+	for progress, ch := range []byte(text) {
 		if err := ioctlTIOCSTI(fd, ch); err != nil {
-			return err
+			return &tiocstiInjectionError{Err: err, Progress: progress}
 		}
 	}
 

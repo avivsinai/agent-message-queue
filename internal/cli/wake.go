@@ -16,44 +16,45 @@ import (
 )
 
 type wakeConfig struct {
-	me                  string
-	root                string
-	session             string
-	injectCmd           string
-	injectVia           string // external command for injection (replaces TIOCSTI)
-	injectArgs          []string
-	wakeOwner           *wakeOwner
-	injectTimeout       time.Duration
-	bell                bool
-	debounce            time.Duration
-	previewLen          int
-	strict              bool
-	fallbackWarn        bool
-	injectMode          string // auto, raw, paste
-	debug               bool
-	deferWhileInput     bool
-	inputQuietFor       time.Duration
-	inputPollInterval   time.Duration
-	inputMaxHold        time.Duration
-	interrupt           bool
-	interruptLabel      string
-	interruptPriority   string
-	interruptKey        string
-	interruptNotice     string
-	interruptCooldown   time.Duration
-	lastInterrupt       time.Time
-	controlStop         <-chan struct{}
-	beforeTerminalWrite func() error
-	terminalWrite       func(string) error
-	terminalGeneration  string
-	terminalTTY         string
-	baselineRequested   bool
-	baselineInherited   bool
-	baselineExisting    map[string]wakeFileIdentity
-	onBaselineReady     func(map[string]wakeFileIdentity) error
-	onPrepared          func(wakeAdmissionWatcher) error
-	retainedInbox       wakeInboxReader
-	touchPresence       func() error
+	me                   string
+	root                 string
+	session              string
+	injectCmd            string
+	injectVia            string // external command for injection (replaces TIOCSTI)
+	injectArgs           []string
+	wakeOwner            *wakeOwner
+	injectTimeout        time.Duration
+	bell                 bool
+	debounce             time.Duration
+	previewLen           int
+	strict               bool
+	fallbackWarn         bool
+	injectMode           string // auto, raw, paste
+	debug                bool
+	deferWhileInput      bool
+	inputQuietFor        time.Duration
+	inputPollInterval    time.Duration
+	inputMaxHold         time.Duration
+	interrupt            bool
+	interruptLabel       string
+	interruptPriority    string
+	interruptKey         string
+	interruptNotice      string
+	interruptCooldown    time.Duration
+	lastInterrupt        time.Time
+	controlStop          <-chan struct{}
+	beforeTerminalWrite  func() error
+	terminalWrite        func(string) error
+	terminalGeneration   string
+	terminalTTY          string
+	baselineRequested    bool
+	baselineInherited    bool
+	baselineExisting     map[string]wakeFileIdentity
+	onBaselineReady      func(map[string]wakeFileIdentity) error
+	onPrepared           func(wakeAdmissionWatcher) error
+	retainedInbox        wakeInboxReader
+	touchPresence        func() error
+	recordNotifierStatus func(status, mode, reason string) error
 }
 
 type wakeAdmissionWatcher interface {
@@ -540,6 +541,25 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	}
 
 	if injectErr != nil {
+		var unsupported *wakeInjectorUnsupportedError
+		if errors.As(injectErr, &unsupported) {
+			mode := effectiveInjectMode(cfg)
+			reason := wakeInjectorUnsupportedReason(mode, injectErr)
+			if cfg.recordNotifierStatus != nil {
+				if err := cfg.recordNotifierStatus(
+					wakeInjectorUnsupportedStatus,
+					mode,
+					reason,
+				); err != nil {
+					_ = writeStderr("amq wake: record unsupported injector status: %v\n", err)
+				}
+			}
+			cfg.injectMode = wakeInjectModeNone
+			_ = writeStderr("amq wake: warning: %s\n", reason)
+			cfg.fallbackWarn = false
+			_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
+			return nil
+		}
 		var authorityErr *wakeTerminalAuthorityError
 		if errors.As(injectErr, &authorityErr) {
 			return injectErr
@@ -622,6 +642,10 @@ func writeTerminalChunk(cfg *wakeConfig, chunk string) (bool, error) {
 		if err := cfg.terminalWrite(chunk); err != nil {
 			if isWakeTerminalControlStopped(err) {
 				return false, nil
+			}
+			var unsupported *wakeInjectorUnsupportedError
+			if errors.As(err, &unsupported) {
+				return true, err
 			}
 			return true, &wakeTerminalAuthorityError{err: err}
 		}

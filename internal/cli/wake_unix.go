@@ -1514,14 +1514,29 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		defer func() { _ = ownerObservation.Close() }()
 	}
 
-	// Verify TIOCSTI is available (skip in inject-via mode — uses external command instead)
+	var initialNotifierStatus string
+	var initialNotifierMode string
+	var initialNotifierReason string
+
+	// Verify TIOCSTI is available (skip in inject-via mode — uses external command instead).
+	// Linux's legacy_tiocsti sysctl is advisory: a readable zero degrades this
+	// wake to a useful non-input notifier, while absence, read errors, and every
+	// other value remain unknown and do not block startup.
 	if injectVia == "" && injectMode != wakeInjectModeNone {
 		if !wakeTIOCSTIAvailable() {
 			return errors.New("TIOCSTI not available on this platform; use tmux send-keys or terminal-specific injection")
 		}
 
-		// Verify we have a real TTY
-		if !wakeInputIsTTY() {
+		if tiocstiLegacyDisabledHint() {
+			initialNotifierStatus = wakeInjectorUnsupportedStatus
+			initialNotifierMode = effectiveInjectMode(&wakeConfig{me: me, injectMode: injectMode})
+			initialNotifierReason = wakeInjectorUnsupportedReason(
+				initialNotifierMode,
+				fmt.Errorf("%s is 0", tiocstiLegacySysctlPath),
+			)
+			injectMode = wakeInjectModeNone
+		} else if !wakeInputIsTTY() {
+			// Verify we have a real TTY when synthetic input remains enabled.
 			return errors.New("amq wake requires a real terminal (run in foreground or as background job in same terminal, or use --inject-via for external injection)")
 		}
 	}
@@ -1770,6 +1785,18 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	} else {
 		currentWake = inspectWakeLock(root, me)
 	}
+	if err := presence.SetNotifierStatus(
+		root,
+		me,
+		initialNotifierStatus,
+		initialNotifierMode,
+		initialNotifierReason,
+	); err != nil {
+		return fmt.Errorf("record wake notifier status: %w", err)
+	}
+	if initialNotifierStatus == wakeInjectorUnsupportedStatus {
+		_ = writeStderr("amq wake: warning: %s\n", initialNotifierReason)
+	}
 	var terminalAuthority *wakeTerminalAuthority
 	effectiveMode := effectiveInjectMode(&wakeConfig{me: me, injectMode: injectMode})
 	if requestedOwner != nil &&
@@ -1812,6 +1839,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		terminalTTY:        currentWake.Lock.TTY,
 		baselineRequested:  *baselineExistingFlag || repairLineage != nil,
 		baselineInherited:  repairLineage != nil,
+		recordNotifierStatus: func(status, mode, reason string) error {
+			return presence.SetNotifierStatus(root, me, status, mode, reason)
+		},
 		onPrepared: func(watcher wakeAdmissionWatcher) error {
 			if repairLineage != nil {
 				if err := writeWakePreparedFileInDir(

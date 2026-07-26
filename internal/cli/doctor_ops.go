@@ -36,6 +36,9 @@ type opsAgent struct {
 	PresenceStatus         string  `json:"presence_status"`
 	PresenceAgeSeconds     float64 `json:"presence_age_seconds"`
 	PresenceSource         string  `json:"presence_source,omitempty"`
+	NotifierStatus         string  `json:"notifier_status,omitempty"`
+	NotifierMode           string  `json:"notifier_mode,omitempty"`
+	NotifierReason         string  `json:"notifier_reason,omitempty"`
 }
 
 type opsOperatorGate struct {
@@ -148,6 +151,9 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 		p, err := presence.Read(root, handle)
 		if err == nil {
 			agent.PresenceStatus = p.Status
+			agent.NotifierStatus = p.NotifierStatus
+			agent.NotifierMode = p.NotifierMode
+			agent.NotifierReason = p.NotifierReason
 			if t, err := time.Parse(time.RFC3339Nano, p.LastSeen); err == nil {
 				agent.PresenceAgeSeconds = now.Sub(t).Seconds()
 				recentActivity = agent.PresenceAgeSeconds < (10 * time.Minute).Seconds()

@@ -184,6 +184,19 @@ func (authority *wakeTerminalAuthority) Inject(text string) error {
 		return err
 	}
 	if err := injectWakeTerminalFD(authority.fd, text); err != nil {
+		var injectionErr *tiocstiInjectionError
+		if errors.As(err, &injectionErr) &&
+			injectionErr.Progress == 0 &&
+			(errors.Is(err, syscall.EIO) || errors.Is(err, syscall.EPERM)) {
+			// EIO and EPERM are ambiguous: the kernel may reject TIOCSTI, or
+			// the terminal authority may have changed. Only classify the
+			// injector after every retained/current identity and PGRP check
+			// still passes after the failed zero-progress ioctl.
+			if validateErr := authority.validateLocked(); validateErr != nil {
+				return validateErr
+			}
+			return newWakeInjectorUnsupportedError(err)
+		}
 		return newWakeTerminalAuthorityLoss("inject through retained controlling terminal", err)
 	}
 	return nil

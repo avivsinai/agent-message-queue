@@ -129,6 +129,97 @@ func TestDoctorOpsDistinguishesNotifierLiveFromRecentActivity(t *testing.T) {
 	}
 }
 
+func TestDoctorOpsReportsLiveUnsupportedInjectorAsDegraded(t *testing.T) {
+	root := setupPresenceSourceFixture(t)
+	p, err := presence.Read(root, "notifier")
+	if err != nil {
+		t.Fatalf("read notifier presence: %v", err)
+	}
+	p.NotifierStatus = wakeInjectorUnsupportedStatus
+	p.NotifierMode = wakeInjectModeRaw
+	p.NotifierReason = tiocstiLegacySysctlPath + " is 0; use --inject-via"
+	if err := presence.Write(root, p); err != nil {
+		t.Fatalf("write notifier presence: %v", err)
+	}
+
+	result := runOpsChecks(root, "test", false)
+	var got opsAgent
+	for _, agent := range result.Agents {
+		if agent.Handle == "notifier" {
+			got = agent
+			break
+		}
+	}
+	if got.PresenceSource != presenceSourceNotifierLive {
+		t.Fatalf("presence source = %q, want live notifier", got.PresenceSource)
+	}
+	if got.NotifierStatus != wakeInjectorUnsupportedStatus ||
+		got.NotifierMode != wakeInjectModeRaw ||
+		!strings.Contains(got.NotifierReason, tiocstiLegacySysctlPath) {
+		t.Fatalf("ops agent = %#v", got)
+	}
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal ops result: %v", err)
+	}
+	for _, want := range []string{
+		`"presence_source":"notifier_live"`,
+		`"notifier_status":"injector_unsupported"`,
+		tiocstiLegacySysctlPath,
+		"--inject-via",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("doctor JSON missing %q: %s", want, data)
+		}
+	}
+
+	t.Setenv("AM_ROOT", root)
+	t.Setenv("AM_BASE_ROOT", "")
+	t.Setenv("AM_SESSION", "")
+	text, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{"--ops"})
+	})
+	if err != nil {
+		t.Fatalf("runDoctor text: %v", err)
+	}
+	line := lineWithPrefix(text, "  notifier:")
+	for _, want := range []string{
+		"⚠ injector_unsupported",
+		tiocstiLegacySysctlPath,
+		"--inject-via",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("doctor line missing %q: %q\n%s", want, line, text)
+		}
+	}
+
+	whoJSON, err := captureEnvStdout(t, func() error {
+		return runWho([]string{"--root", root, "--json"})
+	})
+	if err != nil {
+		t.Fatalf("runWho json: %v", err)
+	}
+	for _, want := range []string{
+		`"presence_source": "notifier_live"`,
+		`"notifier_status": "injector_unsupported"`,
+		tiocstiLegacySysctlPath,
+	} {
+		if !strings.Contains(whoJSON, want) {
+			t.Fatalf("who JSON missing %q: %s", want, whoJSON)
+		}
+	}
+	whoText, err := captureEnvStdout(t, func() error {
+		return runWho([]string{"--root", root})
+	})
+	if err != nil {
+		t.Fatalf("runWho text: %v", err)
+	}
+	if line := lineWithPrefix(whoText, "    notifier  "); !strings.Contains(line, "injector_unsupported") {
+		t.Fatalf("who text hides degraded notifier: %q\n%s", line, whoText)
+	}
+}
+
 func lineWithPrefix(text, prefix string) string {
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(line, prefix) {

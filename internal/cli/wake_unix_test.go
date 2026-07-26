@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -107,6 +108,16 @@ func assertWakeLockOwnedByCurrentProcess(t *testing.T, lockPath string) {
 }
 
 func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
+	oldRead := readTIOCSTILegacySysctl
+	sysctlReads := 0
+	readTIOCSTILegacySysctl = func() ([]byte, error) {
+		sysctlReads++
+		return []byte("0\n"), nil
+	}
+	t.Cleanup(func() {
+		readTIOCSTILegacySysctl = oldRead
+	})
+
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
@@ -140,6 +151,124 @@ func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
 	}
 	if got.injectTimeout != 250*time.Millisecond {
 		t.Fatalf("expected inject timeout 250ms, got %s", got.injectTimeout)
+	}
+	if sysctlReads != 0 {
+		t.Fatalf("--inject-via read TIOCSTI sysctl %d times, want 0", sysctlReads)
+	}
+}
+
+func TestRunWakeWithLoopReadableDisabledTIOCSTIDegradesToNonInput(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	oldRead := readTIOCSTILegacySysctl
+	oldTTY := wakeInputIsTTY
+	readTIOCSTILegacySysctl = func() ([]byte, error) {
+		return []byte("0\n"), nil
+	}
+	ttyChecks := 0
+	wakeInputIsTTY = func() bool {
+		ttyChecks++
+		return false
+	}
+	t.Cleanup(func() {
+		readTIOCSTILegacySysctl = oldRead
+		wakeInputIsTTY = oldTTY
+	})
+
+	errDone := errors.New("done")
+	stderr := captureWakeStderr(t, func() {
+		err := runWakeWithLoop([]string{
+			"--root", root,
+			"--me", "orchestrator",
+			"--inject-mode", "raw",
+		}, func(cfg wakeConfig) error {
+			if cfg.injectMode != wakeInjectModeNone {
+				t.Fatalf("inject mode = %q, want non-input", cfg.injectMode)
+			}
+			p, err := presence.Read(root, "orchestrator")
+			if err != nil {
+				t.Fatalf("read durable notifier status: %v", err)
+			}
+			if p.NotifierStatus != wakeInjectorUnsupportedStatus ||
+				p.NotifierMode != wakeInjectModeRaw ||
+				!strings.Contains(p.NotifierReason, tiocstiLegacySysctlPath) {
+				t.Fatalf("durable notifier status = %#v", p)
+			}
+			return errDone
+		})
+		if !errors.Is(err, errDone) {
+			t.Fatalf("runWakeWithLoop error = %v, want sentinel", err)
+		}
+	})
+	if ttyChecks != 0 {
+		t.Fatalf("TTY checks = %d, want 0 after advisory downgrade", ttyChecks)
+	}
+	if count := strings.Count(stderr, "warning:"); count != 1 {
+		t.Fatalf("warning count = %d, want 1:\n%s", count, stderr)
+	}
+	for _, want := range []string{
+		tiocstiLegacySysctlPath,
+		"--inject-via",
+		"non-input",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("warning missing %q:\n%s", want, stderr)
+		}
+	}
+}
+
+func TestRunWakeWithLoopUnknownTIOCSTIHintDoesNotChangeMode(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		err  error
+	}{
+		{name: "absent", err: os.ErrNotExist},
+		{name: "unreadable", err: os.ErrPermission},
+		{name: "enabled", data: []byte("1\n")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatalf("EnsureRootDirs: %v", err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+				t.Fatalf("EnsureAgentDirs: %v", err)
+			}
+
+			oldRead := readTIOCSTILegacySysctl
+			oldTTY := wakeInputIsTTY
+			readTIOCSTILegacySysctl = func() ([]byte, error) {
+				return test.data, test.err
+			}
+			wakeInputIsTTY = func() bool { return true }
+			t.Cleanup(func() {
+				readTIOCSTILegacySysctl = oldRead
+				wakeInputIsTTY = oldTTY
+			})
+
+			errDone := errors.New("done")
+			err := runWakeWithLoop([]string{
+				"--root", root,
+				"--me", "orchestrator",
+				"--inject-mode", "raw",
+			}, func(cfg wakeConfig) error {
+				if cfg.injectMode != wakeInjectModeRaw {
+					t.Fatalf("inject mode = %q, want raw", cfg.injectMode)
+				}
+				return errDone
+			})
+			if !errors.Is(err, errDone) {
+				t.Fatalf("runWakeWithLoop error = %v, want sentinel", err)
+			}
+		})
 	}
 }
 
