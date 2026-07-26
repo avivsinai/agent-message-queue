@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 type wakeTerminalInjection struct {
@@ -431,6 +432,7 @@ func TestWakeTerminalAuthorityRefusesSamePathForegroundPGRPHandoff(t *testing.T)
 	fixture.foregroundPGRP++
 	err = authority.Inject("must-not-arrive")
 	if !isWakeTerminalAuthorityLoss(err) ||
+		!isWakeTerminalForegroundPGRPChanged(err) ||
 		!strings.Contains(err.Error(), "foreground process group changed") {
 		t.Fatalf("same-path foreground-pgrp handoff error = %v", err)
 	}
@@ -702,8 +704,108 @@ func TestRunWakeLoopTerminatesOnTerminalAuthorityLoss(t *testing.T) {
 	if !isWakeTerminalAuthorityLoss(err) || !errors.Is(err, loss) {
 		t.Fatalf("wake loop authority-loss result = %v", err)
 	}
+	if isWakeTerminalForegroundPGRPChanged(err) {
+		t.Fatalf("generic authority loss classified as foreground-pgrp change: %v", err)
+	}
 	if terminalWriteCalled {
 		t.Fatal("wake loop wrote after terminal authority loss")
+	}
+}
+
+func TestRunWakeLoopHoldsNotificationDuringForegroundPGRPMismatch(t *testing.T) {
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	message := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "foreground-pgrp-mismatch",
+			From:    "sender",
+			To:      []string{"codex"},
+			Thread:  "p2p/sender__codex",
+			Subject: "wake",
+			Created: time.Now().UTC().Format(time.RFC3339),
+		},
+		Body: "durable body",
+	}
+	data, err := message.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	messagePath := filepath.Join(
+		fsq.AgentInboxNew(root, "codex"),
+		"foreground-pgrp-mismatch.md",
+	)
+	if err := os.WriteFile(messagePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	firstRefused := make(chan struct{}, 1)
+	restored := make(chan struct{})
+	delivered := make(chan struct{}, 1)
+	controlStop := make(chan struct{})
+	runDone := make(chan error, 1)
+
+	go func() {
+		runDone <- runWakeLoop(wakeConfig{
+			root:        root,
+			me:          "codex",
+			injectMode:  wakeInjectModeRaw,
+			controlStop: controlStop,
+			beforeTerminalWrite: func() error {
+				select {
+				case <-restored:
+					return nil
+				default:
+					select {
+					case firstRefused <- struct{}{}:
+					default:
+					}
+					return newWakeTerminalForegroundPGRPChangedLoss(101, 202)
+				}
+			},
+			terminalWrite: func(string) error {
+				select {
+				case delivered <- struct{}{}:
+				default:
+				}
+				return nil
+			},
+		})
+	}()
+
+	select {
+	case <-firstRefused:
+	case err := <-runDone:
+		t.Fatalf("wake loop exited on foreground-pgrp mismatch: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not attempt held notification")
+	}
+
+	select {
+	case <-delivered:
+		t.Fatal("wake loop wrote while foreground pgrp mismatched")
+	case err := <-runDone:
+		t.Fatalf("wake loop exited while foreground pgrp mismatched: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(restored)
+	select {
+	case <-delivered:
+	case err := <-runDone:
+		t.Fatalf("wake loop exited before delivering held notification: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("held notification was not delivered after foreground pgrp restored")
+	}
+
+	close(controlStop)
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("wake loop after restored delivery: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not stop")
 	}
 }
 
