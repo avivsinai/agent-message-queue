@@ -24,13 +24,14 @@ import (
 )
 
 var (
-	wakeTerminateGrace   = 100 * time.Millisecond
-	wakeBaselineTimeout  = 5 * time.Second
-	wakeBaselineSettle   = 50 * time.Millisecond
-	getWakeCurrentTTY    = getCurrentTTY
-	getWakeProcessSID    = unix.Getsid
-	wakeTIOCSTIAvailable = func() bool { return tiocsti.Available() }
-	wakeInputIsTTY       = func() bool { return tiocsti.IsTTY() }
+	wakeTerminateGrace              = 100 * time.Millisecond
+	wakeBaselineTimeout             = 5 * time.Second
+	wakeBaselineSettle              = 50 * time.Millisecond
+	wakeTerminalAuthorityRetryDelay = 250 * time.Millisecond
+	getWakeCurrentTTY               = getCurrentTTY
+	getWakeProcessSID               = unix.Getsid
+	wakeTIOCSTIAvailable            = func() bool { return tiocsti.Available() }
+	wakeInputIsTTY                  = func() bool { return tiocsti.IsTTY() }
 )
 
 type fsnotifyWakeEventWatcher struct {
@@ -2270,6 +2271,66 @@ func runWakeLoop(cfg wakeConfig) error {
 	// Debounce timer
 	var debounceTimer *time.Timer
 	pendingNotify := false
+	var terminalAuthorityRetryTimer *time.Timer
+	var terminalAuthorityRetryC <-chan time.Time
+	defer func() {
+		if terminalAuthorityRetryTimer != nil {
+			terminalAuthorityRetryTimer.Stop()
+		}
+	}()
+
+	clearTerminalAuthorityRetry := func() {
+		terminalAuthorityRetryC = nil
+		if terminalAuthorityRetryTimer == nil {
+			return
+		}
+		if !terminalAuthorityRetryTimer.Stop() {
+			select {
+			case <-terminalAuthorityRetryTimer.C:
+			default:
+			}
+		}
+	}
+	scheduleTerminalAuthorityRetry := func() {
+		if terminalAuthorityRetryTimer == nil {
+			terminalAuthorityRetryTimer = time.NewTimer(wakeTerminalAuthorityRetryDelay)
+		} else {
+			if !terminalAuthorityRetryTimer.Stop() {
+				select {
+				case <-terminalAuthorityRetryTimer.C:
+				default:
+				}
+			}
+			terminalAuthorityRetryTimer.Reset(wakeTerminalAuthorityRetryDelay)
+		}
+		terminalAuthorityRetryC = terminalAuthorityRetryTimer.C
+	}
+	attemptNotification := func() error {
+		err := notifyNewMessages(&cfg)
+		if err == nil {
+			pendingNotify = false
+			clearTerminalAuthorityRetry()
+			return nil
+		}
+		if isWakeTerminalForegroundPGRPChanged(err) {
+			pendingNotify = true
+			scheduleTerminalAuthorityRetry()
+			if cfg.debug {
+				_ = writeStderr(
+					"amq wake [debug]: holding notification until foreground process group is restored: %v\n",
+					err,
+				)
+			}
+			return nil
+		}
+		pendingNotify = false
+		clearTerminalAuthorityRetry()
+		if isWakeTerminalAuthorityLoss(err) {
+			return err
+		}
+		_ = writeStderr("amq wake: notify error: %v\n", err)
+		return nil
+	}
 
 	// TTY health check timer - verify we can still inject every 30s
 	healthTicker := time.NewTicker(30 * time.Second)
@@ -2283,11 +2344,8 @@ func runWakeLoop(cfg wakeConfig) error {
 	}
 
 	// Notify if messages already exist
-	if err := notifyNewMessages(&cfg); err != nil {
-		if isWakeTerminalAuthorityLoss(err) {
-			return err
-		}
-		_ = writeStderr("amq wake: notify error: %v\n", err)
+	if err := attemptNotification(); err != nil {
+		return err
 	}
 
 	for {
@@ -2341,14 +2399,19 @@ func runWakeLoop(cfg wakeConfig) error {
 			if !pendingNotify {
 				continue
 			}
-			pendingNotify = false
 
 			// Collect and notify
-			if err := notifyNewMessages(&cfg); err != nil {
-				if isWakeTerminalAuthorityLoss(err) {
-					return err
-				}
-				_ = writeStderr("amq wake: notify error: %v\n", err)
+			if err := attemptNotification(); err != nil {
+				return err
+			}
+
+		case <-terminalAuthorityRetryC:
+			terminalAuthorityRetryC = nil
+			if !pendingNotify {
+				continue
+			}
+			if err := attemptNotification(); err != nil {
+				return err
 			}
 
 		case <-healthTicker.C:

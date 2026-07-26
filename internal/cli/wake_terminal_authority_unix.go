@@ -17,6 +17,7 @@ type wakeTerminalAuthorityLossKind uint8
 const (
 	wakeTerminalAuthorityLossUnknown wakeTerminalAuthorityLossKind = iota
 	wakeTerminalAuthorityLossControlStopped
+	wakeTerminalAuthorityLossForegroundPGRPChanged
 )
 
 type wakeTerminalAuthorityLossError struct {
@@ -45,6 +46,12 @@ func isWakeTerminalControlStopped(err error) bool {
 	var loss *wakeTerminalAuthorityLossError
 	return errors.As(err, &loss) &&
 		loss.Kind == wakeTerminalAuthorityLossControlStopped
+}
+
+func isWakeTerminalForegroundPGRPChanged(err error) bool {
+	var loss *wakeTerminalAuthorityLossError
+	return errors.As(err, &loss) &&
+		loss.Kind == wakeTerminalAuthorityLossForegroundPGRPChanged
 }
 
 var (
@@ -251,13 +258,9 @@ func (authority *wakeTerminalAuthority) validateLocked() error {
 		return newWakeTerminalAuthorityLoss("recheck controlling-terminal foreground process group", err)
 	}
 	if foregroundPGRP != authority.foregroundPGRP {
-		return newWakeTerminalAuthorityLoss(
-			fmt.Sprintf(
-				"controlling-terminal foreground process group changed from %d to %d",
-				authority.foregroundPGRP,
-				foregroundPGRP,
-			),
-			nil,
+		return newWakeTerminalForegroundPGRPChangedLoss(
+			authority.foregroundPGRP,
+			foregroundPGRP,
 		)
 	}
 	return nil
@@ -293,5 +296,16 @@ func newWakeTerminalControlStoppedLoss() error {
 	return &wakeTerminalAuthorityLossError{
 		Kind:   wakeTerminalAuthorityLossControlStopped,
 		Reason: "wake control stopped",
+	}
+}
+
+func newWakeTerminalForegroundPGRPChangedLoss(expected, current int) error {
+	return &wakeTerminalAuthorityLossError{
+		Kind: wakeTerminalAuthorityLossForegroundPGRPChanged,
+		Reason: fmt.Sprintf(
+			"controlling-terminal foreground process group changed from %d to %d",
+			expected,
+			current,
+		),
 	}
 }
