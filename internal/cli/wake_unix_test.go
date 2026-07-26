@@ -127,6 +127,106 @@ func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
 	}
 }
 
+func TestRunWakeWithLoopInterruptCommandDefaultsOffAndRemainsOptIn(t *testing.T) {
+	tests := []struct {
+		name             string
+		interruptCmdArgs []string
+		wantPrefix       string
+	}{
+		{
+			name:       "default emits notice without ctrl-c",
+			wantPrefix: "",
+		},
+		{
+			name:             "explicit ctrl-c injects before notice",
+			interruptCmdArgs: []string{"--interrupt-cmd", "ctrl-c"},
+			wantPrefix:       "\x03\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatalf("EnsureRootDirs: %v", err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+				t.Fatalf("EnsureAgentDirs: %v", err)
+			}
+
+			msg := format.Message{
+				Header: format.Header{
+					Schema:   1,
+					ID:       "msg-urgent",
+					From:     "codex",
+					To:       []string{"alice"},
+					Thread:   "p2p/alice__codex",
+					Subject:  "help needed",
+					Created:  "2026-07-26T12:00:00Z",
+					Priority: "urgent",
+					Labels:   []string{"interrupt"},
+				},
+				Body: "urgent body",
+			}
+			data, err := msg.Marshal()
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if _, err := deliverToInboxForTest(t, root, "alice", "msg-urgent.md", data); err != nil {
+				t.Fatalf("deliver: %v", err)
+			}
+
+			logPath := filepath.Join(root, "inject.log")
+			injector := filepath.Join(root, "inject.sh")
+			if err := os.WriteFile(
+				injector,
+				[]byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> "+logPath+"\n"),
+				0o755,
+			); err != nil {
+				t.Fatalf("write injector: %v", err)
+			}
+
+			errDone := errors.New("done")
+			args := []string{
+				"--root", root,
+				"--me", "alice",
+				"--inject-via", injector,
+			}
+			args = append(args, tt.interruptCmdArgs...)
+			err = runWakeWithLoop(args, func(cfg wakeConfig) error {
+				if err := notifyNewMessages(&cfg); err != nil {
+					t.Fatalf("notifyNewMessages: %v", err)
+				}
+				return errDone
+			})
+			if !errors.Is(err, errDone) {
+				t.Fatalf("runWakeWithLoop error = %v, want sentinel", err)
+			}
+
+			got, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("read injector log: %v", err)
+			}
+			notice := buildInterruptText(
+				"",
+				[]wakeMsgInfo{{
+					from:     "codex",
+					subject:  "help needed",
+					priority: "urgent",
+					labels:   []string{"interrupt"},
+				}},
+				map[string]int{"codex": 1},
+				48,
+				"",
+			)
+			want := tt.wantPrefix + notice + "\n"
+			if string(got) != want {
+				t.Fatalf("injector log = %q, want %q", string(got), want)
+			}
+		})
+	}
+}
+
 func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -510,6 +610,10 @@ func TestRunWakeHelpHidesInternalReadyFlags(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "none") || !strings.Contains(stdout, "zero terminal input") {
 		t.Fatalf("wake help should document none as zero-input mode:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "real SIGINT to the foreground process group") ||
+		!strings.Contains(stdout, "can interrupt or crash the agent") {
+		t.Fatalf("wake help should explain the destructive ctrl-c opt-in:\n%s", stdout)
 	}
 }
 

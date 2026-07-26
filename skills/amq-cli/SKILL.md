@@ -121,6 +121,23 @@ Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
 
 Add `--no-gitignore` when `coop exec` should auto-initialize the project without changing `.gitignore`.
 
+### Standalone wake interrupt safety
+
+Standalone wake keeps urgent interrupt notices and the bell without injecting
+Ctrl+C by default:
+```bash
+amq wake --me claude --interrupt-cmd none &
+```
+
+Real Ctrl+C injection is a destructive opt-in:
+```bash
+amq wake --me codex --interrupt-label swarm --interrupt-priority normal --interrupt-cmd ctrl-c &
+```
+
+`--interrupt-cmd ctrl-c` sends a real SIGINT to the foreground process group
+and can interrupt or crash the agent. Use it only when that process-level
+interruption is intentional.
+
 ## Statusline (Claude Code)
 
 To show the current AMQ session in your Claude Code status bar, add this snippet to your statusline script (e.g., `~/.claude/statusline.sh`):

@@ -1292,7 +1292,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	interruptFlag := fs.Bool("interrupt", true, "Enable interrupt injection for urgent interrupt messages")
 	interruptLabelFlag := fs.String("interrupt-label", "interrupt", "Label required to trigger interrupt")
 	interruptPriorityFlag := fs.String("interrupt-priority", "urgent", "Priority required to trigger interrupt")
-	interruptCmdFlag := fs.String("interrupt-cmd", "ctrl-c", "Interrupt command to inject (ctrl-c or none)")
+	interruptCmdFlag := fs.String("interrupt-cmd", "none", "Interrupt command to inject: none (default) or ctrl-c (sends real SIGINT to the foreground process group and can interrupt or crash the agent)")
 	interruptNoticeFlag := fs.String("interrupt-notice", "", "Custom interrupt notice (default: auto)")
 	interruptCooldownFlag := fs.Duration("interrupt-cooldown", 7*time.Second, "Minimum time between interrupts")
 	readyFileFlag := fs.String("ready-file", "", "Internal: write this file after wake lock acquisition")
@@ -1304,7 +1304,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	usage := usageWithHiddenFlags(fs, "amq wake --me <agent> [options]",
 		[]string{"ready-file", "accept-existing-wake", "repair-lineage"},
 		"Background waker: injects terminal notification when messages arrive.",
-		"Run as background job before starting CLI: amq wake --me claude &",
+		"Run as background job before starting CLI: amq wake --me claude --interrupt-cmd none &",
 		"",
 		"Inject modes:",
 		"  auto  - Detect CLI type: raw for Claude Code/Codex, paste for others",
@@ -1332,10 +1332,12 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		"  Linux tty atime is updated at ~8s granularity, so quiet windows",
 		"  shorter than that are advisory.",
 		"",
-		"Interrupts (default on): urgent messages tagged with label \"interrupt\"",
-		"  trigger Ctrl+C injection + an interrupt notice except in none mode.",
+		"Interrupt notices (default on): urgent messages tagged with label \"interrupt\"",
+		"  trigger an interrupt notice. Ctrl+C injection is opt-in with",
+		"  --interrupt-cmd ctrl-c; it sends real SIGINT to the foreground process",
+		"  group and can interrupt or crash the agent.",
 		"",
-		"Safety: raw, paste, --inject-cmd, --inject-via, and interrupt Ctrl+C",
+		"Safety: raw, paste, --inject-cmd, --inject-via, and opt-in interrupt Ctrl+C",
 		"  can activate a focused permission/approval dialog. Use none when AMQ",
 		"  must enforce zero synthetic input; stderr output may scribble until redraw.",
 		"",
