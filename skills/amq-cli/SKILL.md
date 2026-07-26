@@ -129,14 +129,16 @@ Ctrl+C by default:
 amq wake --me claude --interrupt-cmd none &
 ```
 
-Real Ctrl+C injection is a destructive opt-in:
+Swarm bridge events are hardcoded `priority=normal` plus label `swarm`, so do
+not bind that combination to Ctrl+C. Use ordinary non-destructive wake:
 ```bash
-amq wake --me codex --interrupt-label swarm --interrupt-priority normal --interrupt-cmd ctrl-c &
+amq wake --me codex --interrupt-cmd none &
 ```
 
 `--interrupt-cmd ctrl-c` sends a real SIGINT to the foreground process group
-and can interrupt or crash the agent. Use it only when that process-level
-interruption is intentional.
+and can interrupt or crash the agent. Use it only with a separate,
+operator-controlled label/priority when process-level interruption is
+intentional; the `interrupt` label alone never enables Ctrl+C.
 
 ## Statusline (Claude Code)
 

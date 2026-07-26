@@ -688,10 +688,11 @@ func runWakeRepair(args []string) error {
 	fs := flag.NewFlagSet("wake repair", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	usage := usageWithFlags(fs, "amq wake repair --me <agent> [options]",
-		"Repair a proven-stale wake by restarting it from a saved inject-via target.",
+		"Repair an eligible wake by restarting it from a saved inject-via target.",
 		"",
-		"Refuses unverified locks and raw terminal wake targets. This command only",
-		"uses .wake.target files created for --inject-via wake processes.")
+		"Accepts proven-stale or unverified ownerless generic locks. Refuses",
+		"owner-bound or invalid unverified claims and raw terminal wake targets.",
+		"This command only uses .wake.target files created for --inject-via wakes.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
