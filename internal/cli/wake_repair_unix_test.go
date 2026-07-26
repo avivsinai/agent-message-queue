@@ -1574,6 +1574,21 @@ func TestBuildCoopWakeArgsIncludesInjectViaTarget(t *testing.T) {
 	}
 }
 
+func TestWakeRepairHelpDescribesUnverifiedGenericSupersession(t *testing.T) {
+	stdout, _, err := captureWakeRepairOutput(t, func() error {
+		return runWakeRepair([]string{"--help"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "unverified ownerless generic locks") {
+		t.Fatalf("wake repair help omits generic supersession contract:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "Refuses unverified locks") {
+		t.Fatalf("wake repair help retains obsolete blanket refusal:\n%s", stdout)
+	}
+}
+
 func captureWakeRepairOutput(t *testing.T, fn func() error) (stdout, stderr string, runErr error) {
 	t.Helper()
 

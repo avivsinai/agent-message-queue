@@ -211,7 +211,10 @@ amq who [--json]
 amq doctor [--ops] [--fix-wake-locks] [--fix-mailboxes] [--json]
 ```
 
-Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has its own flags and doesn't accept these.
+`--root` is accepted only where it is listed above. Participating commands may
+also accept `--json` and `--strict` (error instead of warn on unknown handles or
+unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has
+its own flags and doesn't accept these.
 
 **Body resolution (`send`/`reply`)**: `--body` resolves from `@file`, a literal string, or stdin. A bare `--body -`, `--body @-`, or an omitted `--body` reads stdin (standard CLI convention). A send whose resolved body is empty or whitespace-only **fails closed** with a usage error rather than delivering a blank message — pass `--allow-empty` to send a blank body intentionally. This prevents a dropped or mistyped body (e.g. `--body -` with nothing piped) from silently shipping an empty message.
 
@@ -367,10 +370,11 @@ Wake lock states are intentionally conservative:
 - `stale`: AMQ proved the recorded PID is gone, mismatched, or not the same `amq wake`; `amq doctor --ops --fix-wake-locks` re-inspects and removes only these locks.
 - `unverified`: AMQ could not prove either ownership or staleness, so startup fails closed and doctor leaves the lock in place. Confirm the PID/root/agent manually before removing the `.wake.lock`.
 
-Live wake repair is explicit: `amq wake repair --me <agent>` may remove a
-proven-stale lock and start a fresh wake only when the stale lock was created
-for `--inject-via`, and `agents/<agent>/.wake.target` exists with a digest that
-matches the lock's repair metadata. `.wake.target` is mode `0600` and stores
+Live wake repair is explicit: `amq wake repair --me <agent>` may replace a
+proven-stale lock or supersede an unverified ownerless generic lock and start a
+fresh wake only when the lock was created for `--inject-via`, and
+`agents/<agent>/.wake.target` exists with a digest that matches the lock's
+repair metadata. `.wake.target` is mode `0600` and stores
 schema metadata, root, agent, creation time, `mode:"inject-via"`, an absolute
 executable path, and fixed argv. The private mode-`0600` `.wake.repair-floor`
 must also match the exact generation, target, physical root, boot, and owner
@@ -379,7 +383,9 @@ that wake, never message IDs. Repair hands that floor to the replacement rather
 than re-snapshotting `inbox/new`, so downtime arrivals and same-name DLQ retries
 remain eligible. Missing, corrupt, or mismatched floor state requires a normal
 wake restart. Raw TTY wake has no repair target; repair must refuse raw locks,
-leftover targets from old locks, and `unverified` locks.
+leftover targets from old locks, and unverified owner-bound or invalid claims.
+An unverified ownerless generic claim is superseded only after its target and
+continuity state pass the same fail-closed validation.
 Repaired wake stdout/stderr goes to
 `agents/<agent>/.wake.repair.log`; repair itself must not keep stdout/stderr
 pipes open after its JSON/text output exits. `doctor --ops` may report
@@ -483,7 +489,8 @@ amq coop init && eval "$(amq env --me claude)"
 ### Message Priority Handling
 
 When you see a notification, run `amq drain --include-body`:
-- **urgent** → Interrupt current work, respond immediately (label `interrupt` enables wake Ctrl+C)
+- **urgent** → Interrupt current work and respond immediately. Label
+  `interrupt` enables an interrupt notice; it never enables Ctrl+C by itself.
 - **normal** → Add to TodoWrite, respond when current task done
 - **low** → Batch for end of session
 
@@ -556,15 +563,19 @@ See `.claude/skills/amq-cli/SKILL.md` for the agent-facing workflow.
 - **Task workflow**: `amq swarm join`, `amq swarm tasks`, `amq swarm claim`, `amq swarm complete`, `amq swarm fail`, `amq swarm block`
 - **Notifications**: `amq swarm bridge` watches the shared task list and delivers AMQ messages labeled `swarm` into the agent's inbox
 
-**Wake compatibility**: bridge notifications are standard AMQ inbox messages, so `amq wake` will detect them automatically. If you want swarm notifications to trigger wake interrupts, configure wake to match the bridge label and priority:
+**Wake compatibility**: bridge notifications are standard AMQ inbox messages,
+so `amq wake` detects them automatically. Bridge lifecycle events are hardcoded
+`priority=normal` plus label `swarm`; do not bind that combination to Ctrl+C.
+Use ordinary non-destructive wake:
 
 ```bash
-amq wake --me codex --interrupt-label swarm --interrupt-priority normal --interrupt-cmd ctrl-c &
+amq wake --me codex --interrupt-cmd none &
 ```
 
 `--interrupt-cmd ctrl-c` is an explicit destructive opt-in: it sends a real
-SIGINT to the foreground process group and can interrupt or crash the agent.
-Omit it to keep the notice and bell without injecting Ctrl+C.
+SIGINT to the foreground process group and can interrupt or crash the agent. If
+process-level interruption is intentional, match a separate operator-controlled
+label/priority that the swarm bridge does not emit.
 
 **Direct messaging (A2A)**: the bridge only emits task lifecycle notifications.
 

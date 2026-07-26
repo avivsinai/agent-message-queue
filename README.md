@@ -223,11 +223,12 @@ an unsupported platform. AMQ leaves `unverified` locks in place; inspect the PID
 and remove the named `.wake.lock` manually only after confirming no matching
 `amq wake` still owns that agent/root.
 
-`amq wake repair` is an explicit live-session repair path. It only runs when
-the lock is proven `stale`, the lock was created for `--inject-via`, and the
-agent has a saved `agents/<agent>/.wake.target` whose digest matches the lock's
-repair metadata. It also requires AMQ's private `.wake.repair-floor` to match
-the exact dead generation, boot, physical queue root, owner state, and target.
+`amq wake repair` is an explicit live-session repair path. It runs when the lock
+is proven `stale` or is an unverified ownerless generic claim, the lock was
+created for `--inject-via`, and the agent has a saved
+`agents/<agent>/.wake.target` whose digest matches the lock's repair metadata.
+It also requires AMQ's private `.wake.repair-floor` to match the exact dead
+generation, boot, physical queue root, owner state, and target.
 That floor carries only the existing-message identities already suppressed by
 the dead wake (device, inode, and ctime), never message IDs. A repaired wake
 inherits it instead of re-snapshotting `inbox/new`, so messages delivered while
@@ -235,8 +236,9 @@ the notifier was down remain eligible to notify and same-name DLQ retries
 remain eligible when their file identity changes. Missing, corrupt, or
 mismatched continuity state fails closed and requires a normal wake restart.
 Repair refuses raw terminal wake targets, leftover targets from old locks, and
-`unverified` locks to avoid double-injecting into an active session or injecting
-into the wrong terminal. Repaired wake output goes to
+unverified owner-bound or invalid claims. It supersedes an unverified ownerless
+generic claim only after the saved target and continuity state pass the same
+fail-closed validation. Repaired wake output goes to
 `agents/<agent>/.wake.repair.log`; `doctor --ops` can report whether repair is
 available, but it never starts a wake process.
 
