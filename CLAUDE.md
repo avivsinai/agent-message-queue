@@ -207,7 +207,7 @@ amq integration symphony init [--workflow <path>] --me <agent> [--root <path>] [
 amq integration symphony emit --event <after_create|before_run|after_run|before_remove> --me <agent> [--root <path>] [--workspace <path>] [--identifier <key>] [--json]
 amq integration kanban bridge --me <agent> [--root <path>] [--url <ws://...>] [--workspace-id <id>] [--reconnect <duration>] [--json]
 amq who [--json]
-amq doctor [--ops] [--fix-wake-locks] [--json]
+amq doctor [--ops] [--fix-wake-locks] [--fix-mailboxes] [--json]
 ```
 
 Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has its own flags and doesn't accept these.
@@ -341,6 +341,13 @@ Use `--force` with retry to override the max retry limit.
 ## Doctor / Ops
 
 `amq doctor` verifies installation, root configuration, permissions, config, and skill setup.
+
+`amq doctor --fix-mailboxes` repairs the base mailbox layout without requiring
+`--ops`: it creates only missing required directories for agents listed in
+`config.json`. Filesystem-discovered mailboxes that are not configured are
+reported but are never repair eligible. Repair never edits, moves, overwrites,
+or deletes existing message files; symlinks, non-directories, unreadable paths,
+and concurrent layout changes fail closed.
 
 `amq doctor --ops` adds runtime checks:
 
