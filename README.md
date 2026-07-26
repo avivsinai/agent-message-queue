@@ -420,12 +420,13 @@ Common command groups:
 
 | Area | Commands |
 |------|----------|
-| Core messaging | `init`, `send`, `list`, `read`, `drain`, `reply`, `thread`, `watch`, `monitor`, `receipts` |
+| Core messaging | `init`, `send`, `list`, `read`, `drain`, `reply`, `thread`, `trace`, `watch`, `monitor`, `receipts` |
 | Collaboration | `coop init`, `coop exec`, `swarm list`, `swarm join`, `swarm tasks`, `swarm bridge` |
 | Integrations | `integration symphony init`, `integration symphony emit`, `integration kanban bridge` |
 | Operations | `presence set`, `presence list`, `route explain`, `who`, `doctor`, `doctor --ops`, `wake repair`, `wake recover-owner`, `wake retire`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |
 
 For the full CLI syntax, examples, and message schema, see [CLAUDE.md](CLAUDE.md).
+For the read-only trace contract and its evidence limits, see [docs/trace.md](docs/trace.md).
 
 ## How It Works
 

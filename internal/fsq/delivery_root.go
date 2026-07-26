@@ -235,30 +235,44 @@ func (r *DeliveryRoot) SyncDir(name string) error {
 // ReadRegularNoFollow reads a root-relative regular file while refusing an
 // initially symlinked artifact and detecting replacement between lstat/open.
 func (r *DeliveryRoot) ReadRegularNoFollow(name string) ([]byte, error) {
-	if err := r.VerifyBase(); err != nil {
-		return nil, err
-	}
-	before, err := r.root.Lstat(name)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateRegularNoFollowFile(r.displayPath(name), before); err != nil {
-		return nil, err
-	}
-	file, err := openRegularNoFollowRoot(r.root, name)
+	file, _, err := r.OpenRegularNoFollow(name)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = file.Close() }()
+	return io.ReadAll(file)
+}
+
+// OpenRegularNoFollow opens a root-relative regular file through the pinned
+// capability while refusing symlinks and detecting replacement during open.
+// The caller must close the returned file.
+func (r *DeliveryRoot) OpenRegularNoFollow(name string) (*os.File, os.FileInfo, error) {
+	if err := r.VerifyBase(); err != nil {
+		return nil, nil, err
+	}
+	before, err := r.root.Lstat(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateRegularNoFollowFile(r.displayPath(name), before); err != nil {
+		return nil, nil, err
+	}
+	file, err := openRegularNoFollowRoot(r.root, name)
+	if err != nil {
+		return nil, nil, err
+	}
 	after, err := file.Stat()
 	if err != nil {
-		return nil, err
+		_ = file.Close()
+		return nil, nil, err
 	}
 	if err := validateRegularNoFollowFile(r.displayPath(name), after); err != nil {
-		return nil, err
+		_ = file.Close()
+		return nil, nil, err
 	}
 	if !os.SameFile(before, after) {
-		return nil, fmt.Errorf("queue artifact changed while opening: %s", r.displayPath(name))
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("queue artifact changed while opening: %s", r.displayPath(name))
 	}
-	return io.ReadAll(file)
+	return file, after, nil
 }
