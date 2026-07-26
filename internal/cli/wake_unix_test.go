@@ -63,11 +63,14 @@ func stubWakeTTYSupport(t *testing.T) {
 	t.Helper()
 	oldAvailable := wakeTIOCSTIAvailable
 	oldIsTTY := wakeInputIsTTY
+	oldRead := readTIOCSTILegacySysctl
 	wakeTIOCSTIAvailable = func() bool { return true }
 	wakeInputIsTTY = func() bool { return true }
+	readTIOCSTILegacySysctl = func() ([]byte, error) { return nil, os.ErrNotExist }
 	t.Cleanup(func() {
 		wakeTIOCSTIAvailable = oldAvailable
 		wakeInputIsTTY = oldIsTTY
+		readTIOCSTILegacySysctl = oldRead
 	})
 }
 
@@ -732,6 +735,54 @@ func TestRunWakeWithLoopPersistsEffectiveAutoMode(t *testing.T) {
 				t.Fatalf("expected loop sentinel error, got %v", err)
 			}
 		})
+	}
+}
+
+func TestRunWakeWithLoopDisabledTIOCSTIPersistsEffectiveAutoModeNone(t *testing.T) {
+	stubWakeTTYSupport(t)
+	readTIOCSTILegacySysctl = func() ([]byte, error) {
+		return []byte("0\n"), nil
+	}
+
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	errDone := errors.New("done")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "claude",
+		"--inject-mode", "auto",
+	}, func(cfg wakeConfig) error {
+		lockPath := filepath.Join(fsq.AgentBase(root, "claude"), ".wake.lock")
+		data, readErr := os.ReadFile(lockPath)
+		if readErr != nil {
+			t.Fatalf("read wake lock: %v", readErr)
+		}
+		var lock wakeLock
+		if unmarshalErr := json.Unmarshal(data, &lock); unmarshalErr != nil {
+			t.Fatalf("unmarshal wake lock: %v", unmarshalErr)
+		}
+		if lock.WakeMode != wakeInjectModeNone {
+			t.Fatalf("WakeMode = %q, want none", lock.WakeMode)
+		}
+		p, readErr := presence.Read(root, "claude")
+		if readErr != nil {
+			t.Fatalf("read durable notifier status: %v", readErr)
+		}
+		if p.NotifierStatus != wakeInjectorUnsupportedStatus ||
+			p.NotifierMode != wakeInjectModeRaw ||
+			!strings.Contains(p.NotifierReason, tiocstiLegacySysctlPath) {
+			t.Fatalf("durable notifier status = %#v", p)
+		}
+		return errDone
+	})
+	if !errors.Is(err, errDone) {
+		t.Fatalf("expected loop sentinel error, got %v", err)
 	}
 }
 
