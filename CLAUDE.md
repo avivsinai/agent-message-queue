@@ -347,7 +347,9 @@ Use `--force` with retry to override the max retry limit.
 `config.json`. Filesystem-discovered mailboxes that are not configured are
 reported but are never repair eligible. Repair never edits, moves, overwrites,
 or deletes existing message files; symlinks, non-directories, unreadable paths,
-and concurrent layout changes fail closed.
+and concurrent layout changes fail closed. Inspection remains available when
+the target differs from the active session pin (reported separately as a
+warning); repair requires the target to match any populated session pin.
 
 `amq doctor --ops` adds runtime checks:
 

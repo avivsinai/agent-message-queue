@@ -384,11 +384,32 @@ func checkConfig(root string) doctorCheck {
 
 func inspectDoctorMailboxes(root string, repair bool) ([]fsq.MailboxInspection, *fsq.MailboxRepairResult, doctorCheck) {
 	check := doctorCheck{Name: "Mailboxes"}
-	identity, err := snapshotMailboxDeliveryRoot(root, false, false)
+	identity, err := fsq.SnapshotDeliveryRoot(root)
 	if err != nil {
 		check.Status = "error"
 		check.Message = err.Error()
 		return nil, nil, check
+	}
+	if repair {
+		mismatch, pinErr := sessionPinMismatch(root)
+		if pinErr != nil {
+			check.Status = "error"
+			check.Message = fmt.Sprintf(
+				"refusing to repair %s: invalid AMQ session context: %v; re-run with a complete session context",
+				root,
+				pinErr,
+			)
+			return nil, nil, check
+		}
+		if mismatch != nil {
+			check.Status = "error"
+			check.Message = fmt.Sprintf(
+				"refusing to repair %s because it does not match the pinned session context: %s; re-run from the intended session",
+				root,
+				mismatch.Message,
+			)
+			return nil, nil, check
+		}
 	}
 	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
 	if err != nil {

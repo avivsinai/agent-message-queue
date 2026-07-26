@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
@@ -38,6 +39,82 @@ func TestDoctorIssue289ConfiguredOnlyMailboxIsReported(t *testing.T) {
 	}
 	if !doctorMailboxContains(missing.Issues, "missing:.") {
 		t.Fatalf("issues = %#v, want missing mailbox root", missing.Issues)
+	}
+}
+
+func TestDoctorIssue289InspectionIgnoresMismatchedSessionPin(t *testing.T) {
+	root := healthyDoctorMailboxRoot(t, "healthy")
+	pinnedRoot := healthyDoctorMailboxRoot(t, "pinned")
+	setDoctorIdentityPin(t, pinnedRoot)
+
+	mailboxes, repair, check := inspectDoctorMailboxes(root, false)
+
+	if check.Status != "ok" {
+		t.Fatalf("mailbox check = %#v", check)
+	}
+	if repair != nil {
+		t.Fatalf("inspection returned repair result: %#v", repair)
+	}
+	if len(mailboxes) != 1 || mailboxes[0].Handle != "healthy" {
+		t.Fatalf("mailboxes = %#v", mailboxes)
+	}
+}
+
+func TestDoctorIssue289InspectionWithoutSessionPinFailsOpen(t *testing.T) {
+	root := healthyDoctorMailboxRoot(t, "healthy")
+	clearDoctorSessionPin(t)
+
+	mailboxes, repair, check := inspectDoctorMailboxes(root, false)
+
+	if check.Status != "ok" {
+		t.Fatalf("mailbox check = %#v", check)
+	}
+	if repair != nil {
+		t.Fatalf("inspection returned repair result: %#v", repair)
+	}
+	if len(mailboxes) != 1 || mailboxes[0].Handle != "healthy" {
+		t.Fatalf("mailboxes = %#v", mailboxes)
+	}
+}
+
+func TestDoctorIssue289RunDoctorInspectsOutsidePopulatedSessionPin(t *testing.T) {
+	root := healthyDoctorMailboxRoot(t, "healthy")
+	pinnedRoot := healthyDoctorMailboxRoot(t, "pinned")
+	setDoctorIdentityPin(t, pinnedRoot)
+
+	result := runDoctorMailboxJSON(t, root)
+
+	if got := doctorCheckStatus(result.Checks, "Mailboxes"); got != "ok" {
+		t.Fatalf("Mailboxes status = %q, checks=%#v", got, result.Checks)
+	}
+	if got := doctorCheckStatus(result.Checks, "Session identity pin"); got != "warn" {
+		t.Fatalf("Session identity pin status = %q, want warn", got)
+	}
+	if len(result.Mailboxes) != 1 || result.Mailboxes[0].Handle != "healthy" {
+		t.Fatalf("mailboxes = %#v", result.Mailboxes)
+	}
+}
+
+func TestDoctorIssue289RepairRefusesMismatchedSessionPinWithRemedy(t *testing.T) {
+	root := healthyDoctorMailboxRoot(t, "healthy")
+	pinnedRoot := healthyDoctorMailboxRoot(t, "pinned")
+	setDoctorIdentityPin(t, pinnedRoot)
+	if err := os.Remove(fsq.AgentInboxCur(root, "healthy")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, repair, check := inspectDoctorMailboxes(root, true)
+
+	if repair != nil {
+		t.Fatalf("refused repair returned result: %#v", repair)
+	}
+	for _, want := range []string{"refusing to repair", "pinned session context", "re-run from the intended session"} {
+		if !strings.Contains(check.Message, want) {
+			t.Fatalf("repair error missing %q: %#v", want, check)
+		}
+	}
+	if _, err := os.Stat(fsq.AgentInboxCur(root, "healthy")); !os.IsNotExist(err) {
+		t.Fatalf("refused repair mutated missing directory: %v", err)
 	}
 }
 
@@ -195,6 +272,43 @@ func runDoctorMailboxJSONArgs(t *testing.T, root string, args ...string) doctorM
 		t.Fatalf("unmarshal doctor JSON: %v\n%s", err, output)
 	}
 	return result
+}
+
+func healthyDoctorMailboxRoot(t *testing.T, handle string) string {
+	t.Helper()
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, handle); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteConfig(filepath.Join(root, "meta", "config.json"), config.Config{
+		Version: 1,
+		Agents:  []string{handle},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func setDoctorIdentityPin(t *testing.T, root string) {
+	t.Helper()
+	token, err := resolveTreeIdentityToken(root)
+	if err != nil {
+		t.Fatalf("resolveTreeIdentityToken(%s): %v", root, err)
+	}
+	t.Setenv(envBaseRoot, root)
+	t.Setenv(envSession, "")
+	t.Setenv(envRootID, token)
+	t.Setenv(envBaseRootID, token)
+}
+
+func clearDoctorSessionPin(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{envRootID, envBaseRoot, envBaseRootID, envSession} {
+		setOptionalEnv(t, key, "", false)
+	}
 }
 
 func TestDoctorIssue289ConfiguredDiscoveredLegacyMailbox(t *testing.T) {
