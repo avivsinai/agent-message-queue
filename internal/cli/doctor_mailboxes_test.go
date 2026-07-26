@@ -18,6 +18,7 @@ type doctorMailboxJSON struct {
 	Status         string   `json:"status"`
 	Issues         []string `json:"issues"`
 	RepairEligible bool     `json:"repair_eligible"`
+	Remedy         string   `json:"remedy"`
 }
 
 func TestDoctorIssue289ConfiguredOnlyMailboxIsReported(t *testing.T) {
@@ -140,6 +141,39 @@ func TestDoctorIssue289DiscoveredOnlyMailboxIsNotRepairEligible(t *testing.T) {
 	orphan := findDoctorMailboxTestEntry(t, result.Mailboxes, "orphan")
 	if orphan.Provenance != "discovered" || orphan.Status != "warn" || orphan.RepairEligible {
 		t.Fatalf("discovered-only mailbox = %#v", orphan)
+	}
+	for _, want := range []string{"meta/config.json", "amq doctor --fix-mailboxes", "agents/orphan", "preserve"} {
+		if !strings.Contains(orphan.Remedy, want) {
+			t.Fatalf("orphan remedy missing %q: %q", want, orphan.Remedy)
+		}
+	}
+}
+
+func TestDoctorDiscoveredOnlyMailboxKeepsRemedyAfterConfiguredRepair(t *testing.T) {
+	root := healthyDoctorMailboxRoot(t, "claude")
+	if err := os.Remove(fsq.AgentInboxCur(root, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "agents", "orphan"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runDoctorMailboxJSONArgs(t, root, "--fix-mailboxes", "--json")
+
+	if result.MailboxRepair == nil ||
+		len(result.MailboxRepair.CreatedPaths) != 1 ||
+		result.MailboxRepair.CreatedPaths[0] != "agents/claude/inbox/cur" {
+		t.Fatalf("repair = %#v", result.MailboxRepair)
+	}
+	orphan := findDoctorMailboxTestEntry(t, result.Mailboxes, "orphan")
+	if orphan.Status != "warn" || orphan.RepairEligible || orphan.Remedy == "" {
+		t.Fatalf("orphan = %#v", orphan)
+	}
+	check := findDoctorCheck(t, result.Checks, "Mailboxes")
+	for _, want := range []string{"orphan:", "next:", "meta/config.json"} {
+		if !strings.Contains(check.Message, want) {
+			t.Fatalf("mailbox check missing %q: %q", want, check.Message)
+		}
 	}
 }
 
@@ -408,4 +442,15 @@ func doctorCheckStatus(checks []doctorCheck, name string) string {
 		}
 	}
 	return ""
+}
+
+func findDoctorCheck(t *testing.T, checks []doctorCheck, name string) doctorCheck {
+	t.Helper()
+	for _, check := range checks {
+		if check.Name == name {
+			return check
+		}
+	}
+	t.Fatalf("doctor check %q missing: %#v", name, checks)
+	return doctorCheck{}
 }

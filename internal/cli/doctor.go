@@ -435,8 +435,30 @@ func inspectDoctorMailboxes(root string, repair bool) ([]fsq.MailboxInspection, 
 			return nil, nil, check
 		}
 	}
+	applyDoctorMailboxRemedies(&inventory)
 	check = checkMailboxInventory(inventory, result)
 	return inventory.Mailboxes, result, check
+}
+
+func applyDoctorMailboxRemedies(inventory *fsq.MailboxInventory) {
+	for i := range inventory.Mailboxes {
+		mailbox := &inventory.Mailboxes[i]
+		if mailbox.Provenance != fsq.MailboxDiscovered || len(mailbox.Issues) == 0 {
+			continue
+		}
+		if err := fsq.ValidateHandle(mailbox.Handle); err != nil {
+			mailbox.Remedy = fmt.Sprintf(
+				"preserve any messages, then rename or remove invalid entry %q under agents/",
+				mailbox.Handle,
+			)
+			continue
+		}
+		mailbox.Remedy = fmt.Sprintf(
+			"add %q to agents in meta/config.json, then run 'amq doctor --fix-mailboxes'; or preserve any messages and remove agents/%s if abandoned",
+			mailbox.Handle,
+			mailbox.Handle,
+		)
+	}
 }
 
 func checkMailboxInventory(inventory fsq.MailboxInventory, repair *fsq.MailboxRepairResult) doctorCheck {
@@ -457,7 +479,11 @@ func checkMailboxInventory(inventory fsq.MailboxInventory, repair *fsq.MailboxRe
 			check.Status = "warn"
 		}
 		if len(mailbox.Issues) > 0 {
-			issues = append(issues, mailbox.Handle+": "+strings.Join(mailbox.Issues, ", "))
+			detail := mailbox.Handle + ": " + strings.Join(mailbox.Issues, ", ")
+			if mailbox.Remedy != "" {
+				detail += "; next: " + mailbox.Remedy
+			}
+			issues = append(issues, detail)
 		}
 	}
 	if repair != nil && repair.Failure != nil {
