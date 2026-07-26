@@ -41,6 +41,16 @@ func newRetainedWakeInboxWatcher(
 	if err != nil {
 		return nil, fmt.Errorf("create retained wake directory kqueue: %w", err)
 	}
+	if err := setDarwinWakeOwnerObservationCloseOnExec(
+		kqueueFD,
+		"retained wake directory kqueue",
+	); err != nil {
+		closeErr := unix.Close(kqueueFD)
+		if closeErr != nil {
+			return nil, fmt.Errorf("%w (close kqueue: %v)", err, closeErr)
+		}
+		return nil, err
+	}
 	flags := uint32(
 		unix.NOTE_WRITE |
 			unix.NOTE_EXTEND |
