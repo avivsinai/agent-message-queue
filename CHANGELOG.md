@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.49.0](https://github.com/avivsinai/agent-message-queue/compare/v0.48.0...v0.49.0) (2026-07-26)
+
+
+### Features
+
+* **trace:** join message lifecycle evidence ([#307](https://github.com/avivsinai/agent-message-queue/issues/307)) ([e9cbd34](https://github.com/avivsinai/agent-message-queue/commit/e9cbd348b4af0cf03fc69a34195e4020fd9dea89))
+
+
+### Bug Fixes
+
+* **doctor:** add discovered mailbox remedies ([#305](https://github.com/avivsinai/agent-message-queue/issues/305)) ([4c4057d](https://github.com/avivsinai/agent-message-queue/commit/4c4057db305fbc6deb8660001947514e6febfc9f))
+
 ## [0.48.0](https://github.com/avivsinai/agent-message-queue/compare/v0.47.3...v0.48.0) (2026-07-26)
 
 
