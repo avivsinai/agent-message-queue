@@ -100,9 +100,9 @@ func ioctlTIOCSTI(fd uintptr, ch byte) error {
 	}
 }
 
-func waitForTTYInputQuiet(cfg *wakeConfig) {
+func waitForTTYInputQuiet(cfg *wakeConfig) bool {
 	if cfg.inputMaxHold <= 0 {
-		return
+		return true
 	}
 
 	queueFD, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
@@ -110,7 +110,7 @@ func waitForTTYInputQuiet(cfg *wakeConfig) {
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: input deferral unavailable: open /dev/tty: %v\n", err)
 		}
-		return
+		return true
 	}
 	defer func() { _ = unix.Close(queueFD) }()
 
@@ -129,37 +129,33 @@ func waitForTTYInputQuiet(cfg *wakeConfig) {
 		_ = writeStderr("amq wake [debug]: input deferral atime_source=%s\n", atimeSource)
 	}
 
-	deadline := time.Now().Add(cfg.inputMaxHold)
-	for {
-		now := time.Now()
-		state, err := sampleTTYInputState(uintptr(queueFD), atimeFD)
-		if err != nil {
+	allowInjection, activeReason, sampleErr := waitForInputQuiet(
+		func() (ttyInputState, error) {
+			return sampleTTYInputState(uintptr(queueFD), atimeFD)
+		},
+		time.Now,
+		func(delay time.Duration, state ttyInputState, reason string) {
 			if cfg.debug {
-				_ = writeStderr("amq wake [debug]: input deferral unavailable: %v\n", err)
+				_ = writeStderr(
+					"amq wake [debug]: deferring injection for %s (%s, pending_bytes=%d)\n",
+					delay,
+					reason,
+					state.pendingBytes,
+				)
 			}
-			return
-		}
-
-		active, reason := state.active(now, cfg.inputQuietFor)
-		if !active {
-			return
-		}
-		if !now.Before(deadline) {
-			if cfg.debug {
-				_ = writeStderr("amq wake [debug]: input deferral max hold reached (%s)\n", reason)
-			}
-			return
-		}
-
-		delay := inputDeferralDelay(state, now, deadline, cfg.inputQuietFor, cfg.inputPollInterval)
-		if delay <= 0 {
-			return
-		}
-		if cfg.debug {
-			_ = writeStderr("amq wake [debug]: deferring injection for %s (%s, pending_bytes=%d)\n", delay, reason, state.pendingBytes)
-		}
-		time.Sleep(delay)
+			time.Sleep(delay)
+		},
+		cfg.inputQuietFor,
+		cfg.inputMaxHold,
+		cfg.inputPollInterval,
+	)
+	if sampleErr != nil && cfg.debug {
+		_ = writeStderr("amq wake [debug]: input deferral unavailable: %v\n", sampleErr)
 	}
+	if !allowInjection && cfg.debug {
+		_ = writeStderr("amq wake [debug]: input deferral max hold reached (%s)\n", activeReason)
+	}
+	return allowInjection
 }
 
 func waitForTTYInputDrain(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {

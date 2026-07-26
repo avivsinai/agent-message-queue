@@ -33,6 +33,19 @@ func stubSignalWakeProcess(t *testing.T, fn func(pid int, sig os.Signal) error) 
 	})
 }
 
+func TestWakeHelpDocumentsMaxHoldDemotion(t *testing.T) {
+	output, err := captureEnvStdout(t, func() error {
+		return runWakeWithLoop([]string{"--help"}, runWakeLoop)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "input remains active through --input-max-hold") ||
+		!strings.Contains(output, "skips synthetic input") {
+		t.Fatalf("wake help omits max-hold demotion:\n%s", output)
+	}
+}
+
 func stubWakeCurrentTTY(t *testing.T, fn func() string) {
 	t.Helper()
 	old := getWakeCurrentTTY

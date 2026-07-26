@@ -101,6 +101,7 @@ const (
 var (
 	tiocstiInject          = func(text string) error { return tiocsti.Inject(text) }
 	waitForRawInputDrained = waitForTTYInputDrain
+	waitForWakeInputQuiet  = waitForTTYInputQuiet
 	rawInjectSleep         = time.Sleep
 )
 
@@ -151,6 +152,40 @@ func inputDeferralDelay(state ttyInputState, now, deadline time.Time, quietFor, 
 		return 0
 	}
 	return delay
+}
+
+func waitForInputQuiet(
+	sample func() (ttyInputState, error),
+	nowFn func() time.Time,
+	sleepFn func(time.Duration, ttyInputState, string),
+	quietFor, maxHold, pollInterval time.Duration,
+) (allowInjection bool, activeReason string, err error) {
+	if maxHold <= 0 {
+		return true, "", nil
+	}
+
+	deadline := nowFn().Add(maxHold)
+	for {
+		now := nowFn()
+		state, sampleErr := sample()
+		if sampleErr != nil {
+			return true, "", sampleErr
+		}
+
+		active, reason := state.active(now, quietFor)
+		if !active {
+			return true, "", nil
+		}
+		if !now.Before(deadline) {
+			return false, reason, nil
+		}
+
+		delay := inputDeferralDelay(state, now, deadline, quietFor, pollInterval)
+		if delay <= 0 {
+			return false, reason, nil
+		}
+		sleepFn(delay, state, reason)
+	}
 }
 
 func shouldDeferBeforeInject(cfg *wakeConfig, deferForInput bool) bool {
@@ -462,7 +497,10 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	}
 
 	if shouldDeferBeforeInject(cfg, deferForInput) {
-		waitForTTYInputQuiet(cfg)
+		if !waitForWakeInputQuiet(cfg) {
+			writeWakeOutput(text, cfg.bell && !ownerBound)
+			return nil
+		}
 	}
 
 	// External injection: delegate to user-specified command instead of TIOCSTI.

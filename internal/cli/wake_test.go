@@ -1299,6 +1299,61 @@ func TestInputDeferralDelayBoundsByDeadline(t *testing.T) {
 	}
 }
 
+func TestWaitForInputQuietDemotesWhenActiveThroughMaxHold(t *testing.T) {
+	now := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
+	var sleeps []time.Duration
+	sampleCalls := 0
+
+	allowInjection, reason, err := waitForInputQuiet(
+		func() (ttyInputState, error) {
+			sampleCalls++
+			return ttyInputState{pendingBytes: 1}, nil
+		},
+		func() time.Time {
+			return now
+		},
+		func(delay time.Duration, _ ttyInputState, _ string) {
+			sleeps = append(sleeps, delay)
+			now = now.Add(delay)
+		},
+		time.Second,
+		25*time.Millisecond,
+		10*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowInjection || reason != "pending terminal input" {
+		t.Fatalf("max-hold result allow=%v reason=%q", allowInjection, reason)
+	}
+	if sampleCalls != 4 {
+		t.Fatalf("sample calls = %d, want 4", sampleCalls)
+	}
+	if len(sleeps) != 3 ||
+		sleeps[0] != 10*time.Millisecond ||
+		sleeps[1] != 10*time.Millisecond ||
+		sleeps[2] != 5*time.Millisecond {
+		t.Fatalf("sleeps = %v, want [10ms 10ms 5ms]", sleeps)
+	}
+}
+
+func TestWaitForInputQuietSamplingFailureKeepsBestEffortInjection(t *testing.T) {
+	sampleErr := errors.New("sampling unavailable")
+	allowInjection, reason, err := waitForInputQuiet(
+		func() (ttyInputState, error) {
+			return ttyInputState{}, sampleErr
+		},
+		time.Now,
+		func(time.Duration, ttyInputState, string) {},
+		time.Second,
+		time.Second,
+		10*time.Millisecond,
+	)
+	if !allowInjection || reason != "" || !errors.Is(err, sampleErr) {
+		t.Fatalf("sampling failure result allow=%v reason=%q err=%v", allowInjection, reason, err)
+	}
+}
+
 func TestShouldDeferBeforeInject(t *testing.T) {
 	cfg := &wakeConfig{deferWhileInput: true}
 	if !shouldDeferBeforeInject(cfg, true) {
@@ -1317,5 +1372,37 @@ func TestShouldDeferBeforeInject(t *testing.T) {
 	cfg.injectVia = "external-injector"
 	if shouldDeferBeforeInject(cfg, true) {
 		t.Fatalf("expected external injection to bypass local TTY input deferral")
+	}
+}
+
+func TestInjectNotificationMaxHoldDemotesToOutput(t *testing.T) {
+	originalWait := waitForWakeInputQuiet
+	waitForWakeInputQuiet = func(*wakeConfig) bool {
+		return false
+	}
+	t.Cleanup(func() {
+		waitForWakeInputQuiet = originalWait
+	})
+
+	terminalWrites := 0
+	cfg := &wakeConfig{
+		injectMode:      wakeInjectModeRaw,
+		deferWhileInput: true,
+		terminalWrite: func(string) error {
+			terminalWrites++
+			return nil
+		},
+	}
+
+	stderr := captureWakeStderr(t, func() {
+		if err := injectNotification(cfg, "held doorbell", true); err != nil {
+			t.Fatalf("injectNotification: %v", err)
+		}
+	})
+	if terminalWrites != 0 {
+		t.Fatalf("terminal writes after max hold = %d, want 0", terminalWrites)
+	}
+	if !strings.Contains(stderr, "held doorbell") {
+		t.Fatalf("out-of-band output missing held doorbell: %q", stderr)
 	}
 }
