@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -73,11 +74,32 @@ type wakeTerminalAuthority struct {
 
 	tty            *os.File
 	fd             uintptr
-	identity       wakeFileIdentity
+	identity       wakeTerminalIdentity
 	foregroundPGRP int
 	generation     wakeLockInspection
 	controlStop    <-chan struct{}
 	closed         bool
+}
+
+type wakeTerminalIdentity struct {
+	Device uint64
+	Inode  uint64
+}
+
+func captureWakeTerminalIdentity(info os.FileInfo) (wakeTerminalIdentity, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return wakeTerminalIdentity{}, false
+	}
+	return wakeTerminalIdentity{
+		Device: uint64(stat.Dev),
+		Inode:  uint64(stat.Ino),
+	}, true
+}
+
+func matchesWakeTerminalIdentity(identity wakeTerminalIdentity, info os.FileInfo) bool {
+	current, ok := captureWakeTerminalIdentity(info)
+	return ok && identity == current
 }
 
 func bindWakeTerminalAuthority(
@@ -119,7 +141,7 @@ func bindWakeTerminalAuthority(
 	if err != nil {
 		return nil, newWakeTerminalAuthorityLoss("inspect retained controlling terminal", err)
 	}
-	identity, ok := captureWakeFileIdentity(info)
+	identity, ok := captureWakeTerminalIdentity(info)
 	if !ok {
 		return nil, newWakeTerminalAuthorityLoss("capture retained controlling-terminal identity", nil)
 	}
@@ -191,7 +213,7 @@ func (authority *wakeTerminalAuthority) validateLocked() error {
 	if err != nil {
 		return newWakeTerminalAuthorityLoss("inspect retained controlling terminal", err)
 	}
-	if !matchesWakeFileIdentity(authority.identity, retainedInfo) {
+	if !matchesWakeTerminalIdentity(authority.identity, retainedInfo) {
 		return newWakeTerminalAuthorityLoss("retained controlling-terminal identity changed", nil)
 	}
 
@@ -207,7 +229,7 @@ func (authority *wakeTerminalAuthority) validateLocked() error {
 	if closeErr != nil {
 		return newWakeTerminalAuthorityLoss("close current controlling-terminal check", closeErr)
 	}
-	if !matchesWakeFileIdentity(authority.identity, currentInfo) {
+	if !matchesWakeTerminalIdentity(authority.identity, currentInfo) {
 		return newWakeTerminalAuthorityLoss("current controlling-terminal identity changed", nil)
 	}
 

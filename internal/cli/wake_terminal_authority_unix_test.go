@@ -3,10 +3,16 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -53,6 +59,294 @@ func TestWakeTerminalAuthorityInjectsThroughRetainedFD(t *testing.T) {
 	if err := authority.Close(); err != nil {
 		t.Fatalf("second close: %v", err)
 	}
+}
+
+func TestWakeTerminalAuthorityAllowsSameTerminalCTimeMutation(t *testing.T) {
+	fixture := installWakeTerminalAuthorityFixture(t)
+	authority, err := bindWakeTerminalAuthority(fixture.generation, make(chan struct{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+	retainedFD := authority.fd
+
+	beforeInfo, err := os.Stat(fixture.currentTTYPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, ok := captureWakeFileIdentity(beforeInfo)
+	if !ok {
+		t.Fatal("capture generic identity before ctime mutation")
+	}
+	waitForSameFileCTimeMutation(t, fixture.currentTTYPath, beforeInfo, before)
+
+	if err := authority.BeforeWrite(); err != nil {
+		t.Fatalf("same-terminal ctime mutation invalidated BeforeWrite: %v", err)
+	}
+	if err := authority.Inject("doorbell-after-ctime-mutation"); err != nil {
+		t.Fatalf("same-terminal ctime mutation invalidated Inject: %v", err)
+	}
+	if len(fixture.injections) != 1 ||
+		fixture.injections[0].fd != retainedFD ||
+		fixture.injections[0].text != "doorbell-after-ctime-mutation" {
+		t.Fatalf("ctime-mutation injections = %#v, want fd=%d and exact payload", fixture.injections, retainedFD)
+	}
+}
+
+func TestWakeTerminalAuthorityDarwinPTYCTimeMutation(t *testing.T) {
+	const helperEnv = "AMQ_TEST_WAKE_TERMINAL_IDENTITY_PTY"
+	if os.Getenv(helperEnv) == "1" {
+		if runtime.GOOS != "darwin" {
+			t.Skip("Darwin PTY helper")
+		}
+
+		realOpen := openWakeControllingTerminal
+		realPGRP := wakeTerminalForegroundPGRP
+		fixture := installWakeTerminalAuthorityFixture(t)
+		openWakeControllingTerminal = realOpen
+		wakeTerminalForegroundPGRP = realPGRP
+		var injections []wakeTerminalInjection
+		injectWakeTerminalFD = func(fd uintptr, text string) error {
+			injections = append(injections, wakeTerminalInjection{fd: fd, text: text})
+			return nil
+		}
+
+		authority, err := bindWakeTerminalAuthority(fixture.generation, make(chan struct{}))
+		if err != nil {
+			t.Fatalf("bind real PTY authority: %v", err)
+		}
+		t.Cleanup(func() { _ = authority.Close() })
+		originalState := strings.TrimSpace(runDarwinTTYMutation(t, "-g"))
+		originalRows, originalCols := readDarwinTTYSize(t)
+		t.Cleanup(func() {
+			if output, err := exec.Command(
+				"/bin/stty",
+				"-f",
+				"/dev/tty",
+				originalState,
+			).CombinedOutput(); err != nil {
+				t.Errorf("restore tty state: %v\n%s", err, output)
+			}
+			if output, err := exec.Command(
+				"/bin/stty",
+				"-f",
+				"/dev/tty",
+				"rows",
+				strconv.Itoa(originalRows),
+				"cols",
+				strconv.Itoa(originalCols),
+			).CombinedOutput(); err != nil {
+				t.Errorf("restore tty size: %v\n%s", err, output)
+			}
+		})
+
+		if err := authority.Inject("before-mutation"); err != nil {
+			t.Fatalf("inject before real PTY mutation: %v", err)
+		}
+
+		beforeInfo, err := authority.tty.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, ok := captureWakeFileIdentity(beforeInfo)
+		if !ok {
+			t.Fatal("capture real PTY identity before mutation")
+		}
+		if _, err := authority.tty.Write([]byte("tty identity probe\r\n")); err != nil {
+			t.Fatalf("generate PTY traffic: %v", err)
+		}
+		runDarwinTTYMutation(t, "-echo")
+		runDarwinTTYMutation(t, "echo")
+		if err := authority.Inject("after-traffic-and-termios"); err != nil {
+			t.Fatalf("inject after PTY traffic and termios: %v", err)
+		}
+
+		resizeRows := originalRows + 1
+		resizeCols := originalCols + 1
+		runDarwinTTYMutation(
+			t,
+			"rows",
+			strconv.Itoa(resizeRows),
+			"cols",
+			strconv.Itoa(resizeCols),
+		)
+		actualRows, actualCols := readDarwinTTYSize(t)
+		if actualRows != resizeRows || actualCols != resizeCols {
+			t.Fatalf(
+				"PTY resize = %dx%d, want changed %dx%d from %dx%d",
+				actualRows,
+				actualCols,
+				resizeRows,
+				resizeCols,
+				originalRows,
+				originalCols,
+			)
+		}
+
+		afterInfo, err := authority.tty.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, ok := captureWakeFileIdentity(afterInfo)
+		if !ok {
+			t.Fatal("capture real PTY identity after mutation")
+		}
+		if before.Device != after.Device || before.Inode != after.Inode {
+			t.Fatalf("real PTY Dev/Ino changed: before=%+v after=%+v", before, after)
+		}
+		if matchesWakeFileIdentity(before, afterInfo) {
+			t.Fatalf("real PTY traffic/termios/resize did not change ctime: before=%+v after=%+v", before, after)
+		}
+		if err := authority.BeforeWrite(); err != nil {
+			t.Fatalf("real PTY mutation invalidated BeforeWrite: %v", err)
+		}
+		if err := authority.Inject("after-resize"); err != nil {
+			t.Fatalf("real PTY mutation invalidated Inject: %v", err)
+		}
+		wantInjections := []wakeTerminalInjection{
+			{fd: authority.fd, text: "before-mutation"},
+			{fd: authority.fd, text: "after-traffic-and-termios"},
+			{fd: authority.fd, text: "after-resize"},
+		}
+		if len(injections) != len(wantInjections) {
+			t.Fatalf("real PTY injections = %#v, want %#v", injections, wantInjections)
+		}
+		for i := range wantInjections {
+			if injections[i] != wantInjections[i] {
+				t.Fatalf("real PTY injection %d = %#v, want %#v", i, injections[i], wantInjections[i])
+			}
+		}
+		return
+	}
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin PTY regression")
+	}
+	if _, err := os.Stat("/usr/bin/script"); err != nil {
+		t.Skipf("Darwin PTY regression requires /usr/bin/script: %v", err)
+	}
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := os.CreateTemp(t.TempDir(), "amq-tty-identity-hotfix-pty-*.log")
+	if err != nil {
+		t.Fatalf("create owned PTY evidence: %v", err)
+	}
+	evidencePath := evidence.Name()
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(
+		ctx,
+		"/usr/bin/script",
+		"-q",
+		"/dev/null",
+		testBinary,
+		"-test.run=^TestWakeTerminalAuthorityDarwinPTYCTimeMutation$",
+	)
+	cmd.Env = append(os.Environ(), helperEnv+"=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 2 * time.Second
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	err = cmd.Run()
+	if _, writeErr := evidence.Write(output.Bytes()); writeErr != nil {
+		_ = evidence.Close()
+		t.Fatalf("write owned PTY evidence %s: %v", evidencePath, writeErr)
+	}
+	if syncErr := evidence.Sync(); syncErr != nil {
+		_ = evidence.Close()
+		t.Fatalf("sync owned PTY evidence %s: %v", evidencePath, syncErr)
+	}
+	if closeErr := evidence.Close(); closeErr != nil {
+		t.Fatalf("close owned PTY evidence %s: %v", evidencePath, closeErr)
+	}
+	t.Logf("PTY evidence: %s", evidencePath)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("Darwin real PTY identity regression timed out; evidence=%s\n%s", evidencePath, output.String())
+	}
+	if err != nil {
+		t.Fatalf("Darwin real PTY identity regression: %v; evidence=%s\n%s", err, evidencePath, output.String())
+	}
+}
+
+func waitForSameFileCTimeMutation(
+	t *testing.T,
+	path string,
+	beforeInfo os.FileInfo,
+	before wakeFileIdentity,
+) {
+	t.Helper()
+	originalMode := beforeInfo.Mode().Perm()
+	t.Cleanup(func() {
+		if err := os.Chmod(path, originalMode); err != nil {
+			t.Errorf("restore ctime fixture mode: %v", err)
+		}
+	})
+	alternateMode := originalMode ^ 0o040
+	deadline := time.Now().Add(500 * time.Millisecond)
+	mode := alternateMode
+	for {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		afterInfo, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, ok := captureWakeFileIdentity(afterInfo)
+		if !ok {
+			t.Fatal("capture generic identity after ctime mutation")
+		}
+		if before.Device != after.Device || before.Inode != after.Inode {
+			t.Fatalf("ctime mutation replaced file: before=%+v after=%+v", before, after)
+		}
+		if !matchesWakeFileIdentity(before, afterInfo) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("generic wakeFileIdentity did not observe bounded ctime mutation: before=%+v", before)
+		}
+		if mode == alternateMode {
+			mode = originalMode
+		} else {
+			mode = alternateMode
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func runDarwinTTYMutation(t *testing.T, args ...string) string {
+	t.Helper()
+	commandArgs := append([]string{"-f", "/dev/tty"}, args...)
+	output, err := exec.Command("/bin/stty", commandArgs...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("stty %v: %v\n%s", args, err, output)
+	}
+	return string(output)
+}
+
+func readDarwinTTYSize(t *testing.T) (int, int) {
+	t.Helper()
+	fields := strings.Fields(runDarwinTTYMutation(t, "size"))
+	if len(fields) != 2 {
+		t.Fatalf("stty size = %q, want rows and columns", fields)
+	}
+	rows, err := strconv.Atoi(fields[0])
+	if err != nil {
+		t.Fatalf("parse tty rows %q: %v", fields[0], err)
+	}
+	cols, err := strconv.Atoi(fields[1])
+	if err != nil {
+		t.Fatalf("parse tty cols %q: %v", fields[1], err)
+	}
+	return rows, cols
 }
 
 func TestWakeTerminalAuthorityRefusesSamePathForegroundPGRPHandoff(t *testing.T) {
@@ -118,6 +412,25 @@ func TestWakeTerminalAuthorityRefusesChangedCurrentTTYIdentity(t *testing.T) {
 	replacementPath := filepath.Join(t.TempDir(), "replacement-current-tty")
 	if err := os.WriteFile(replacementPath, []byte("replacement"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	replacementInfo, err := os.Stat(replacementPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, ok := captureWakeFileIdentity(replacementInfo)
+	if !ok {
+		t.Fatal("capture replacement terminal identity")
+	}
+	originalInfo, err := authority.tty.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, ok := captureWakeFileIdentity(originalInfo)
+	if !ok {
+		t.Fatal("capture original terminal identity")
+	}
+	if original.Device == replacement.Device && original.Inode == replacement.Inode {
+		t.Fatalf("replacement did not change terminal Dev/Ino: original=%+v replacement=%+v", original, replacement)
 	}
 	fixture.currentTTYPath = replacementPath
 
