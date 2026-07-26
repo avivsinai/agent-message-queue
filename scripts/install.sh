@@ -18,6 +18,7 @@ set -e
 REPO="avivsinai/agent-message-queue"
 VERSION="${VERSION:-latest}"
 INSTALL_SKILL=false
+CALLER_PWD=$PWD
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -50,6 +51,10 @@ determine_install_dir() {
 }
 
 INSTALL_DIR=$(determine_install_dir)
+case "$INSTALL_DIR" in
+    /*) ;;
+    *) INSTALL_DIR="$CALLER_PWD/$INSTALL_DIR" ;;
+esac
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -109,15 +114,21 @@ CHECKSUMS_URL="https://github.com/$REPO/releases/download/$VERSION/checksums.txt
 echo "Downloading: $ASSET"
 
 # Create temp directory
-TMP_DIR=$(mktemp -d)
+TMP_DIR=""
+STAGE_DIR=""
 STAGED_BINARY=""
 cleanup() {
-    if [ -n "$STAGED_BINARY" ]; then
-        rm -f "$STAGED_BINARY" || true
+    if [ -n "$STAGE_DIR" ]; then
+        rm -rf "$STAGE_DIR" || true
     fi
-    rm -rf "$TMP_DIR" || true
+    if [ -n "$TMP_DIR" ]; then
+        rm -rf "$TMP_DIR" || true
+    fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+TMP_DIR=$(mktemp -d)
 
 # Download (curl -f fails on HTTP errors like 404)
 if ! curl -fsSL "$URL" -o "$TMP_DIR/$ASSET"; then
@@ -140,6 +151,7 @@ fi
 
 if ! CHECKSUM_RESULT=$(awk -v asset="$ASSET" '
     {
+        sub(/\r$/, "")
         field = $2
         candidate = field
         sub(/^\*/, "", candidate)
@@ -220,14 +232,16 @@ else
     exit 1
 fi
 
-cd "$TMP_DIR"
-if ! tar xzf "$ASSET" 2>/dev/null; then
+if ! tar xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" 2>/dev/null; then
     echo -e "${RED}Error: Failed to extract archive (corrupted download?)${NC}"
     exit 1
 fi
 
-if [ ! -f "amq" ]; then
-    echo -e "${RED}Error: Binary not found in archive${NC}"
+if [ -L "$TMP_DIR/amq" ] ||
+   [ ! -f "$TMP_DIR/amq" ] ||
+   [ ! -s "$TMP_DIR/amq" ] ||
+   [ ! -x "$TMP_DIR/amq" ]; then
+    echo -e "${RED}Error: archive did not contain a regular executable amq binary${NC}"
     exit 1
 fi
 
@@ -238,11 +252,12 @@ echo "Installing to: $INSTALL_DIR/amq"
 mkdir -p "$INSTALL_DIR"
 
 # Build the replacement beside the target, then atomically publish it.
-if ! STAGED_BINARY=$(mktemp "$INSTALL_DIR/.amq.install.XXXXXX"); then
-    echo -e "${RED}Error: could not create staged install file${NC}"
+if ! STAGE_DIR=$(mktemp -d "$INSTALL_DIR/.amq.install.XXXXXX"); then
+    echo -e "${RED}Error: could not create staged install directory${NC}"
     exit 1
 fi
-if ! install -m 0755 amq "$STAGED_BINARY"; then
+STAGED_BINARY="$STAGE_DIR/amq"
+if ! install -m 0755 "$TMP_DIR/amq" "$STAGED_BINARY"; then
     echo -e "${RED}Error: failed to stage binary${NC}"
     exit 1
 fi
@@ -253,21 +268,43 @@ if ! chmod 0755 "$STAGED_BINARY" ||
     echo -e "${RED}Error: staged binary validation failed${NC}"
     exit 1
 fi
-if ! mv -f "$STAGED_BINARY" "$INSTALL_DIR/amq"; then
+if ! "$STAGED_BINARY" --version >/dev/null; then
+    echo -e "${RED}Error: staged binary failed its version check${NC}"
+    exit 1
+fi
+if ! mv -f "$STAGED_BINARY" "$INSTALL_DIR/"; then
     echo -e "${RED}Error: failed to publish binary${NC}"
     exit 1
 fi
+if [ -e "$STAGED_BINARY" ] ||
+   [ -L "$STAGED_BINARY" ] ||
+   [ -L "$INSTALL_DIR/amq" ] ||
+   [ ! -f "$INSTALL_DIR/amq" ] ||
+   [ ! -s "$INSTALL_DIR/amq" ] ||
+   [ ! -x "$INSTALL_DIR/amq" ] ||
+   ! cmp -s "$TMP_DIR/amq" "$INSTALL_DIR/amq"; then
+    echo -e "${RED}Error: published binary validation failed${NC}"
+    exit 1
+fi
+rmdir "$STAGE_DIR" 2>/dev/null || true
+STAGE_DIR=""
 STAGED_BINARY=""
+
+# Verify the exact installed binary, never an older PATH entry.
+INSTALLED_BINARY="$INSTALL_DIR/amq"
+if INSTALLED_VERSION=$("$INSTALLED_BINARY" --version); then
+    echo "Installed: $INSTALLED_VERSION"
+else
+    echo -e "${RED}Error: installed binary failed its version check${NC}"
+    exit 1
+fi
 
 echo ""
 echo -e "${GREEN}Installation complete!${NC}"
 echo ""
 
-# Verify installation
-if command -v amq &> /dev/null; then
-    echo "Installed: $(amq --version)"
-else
-    echo -e "${RED}Warning: $INSTALL_DIR is not in your PATH${NC}"
+if ! PATH_AMQ=$(command -v amq 2>/dev/null); then
+    echo -e "${YELLOW}Warning: $INSTALL_DIR is not in your PATH${NC}"
     echo ""
     echo "Add it to your shell config:"
     if [ -n "$ZSH_VERSION" ] || [ -f "$HOME/.zshrc" ]; then
@@ -275,8 +312,20 @@ else
     else
         echo "  echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.bashrc && source ~/.bashrc"
     fi
-    echo ""
-    echo "Or run directly: $INSTALL_DIR/amq --version"
+else
+    case "$PATH_AMQ" in
+        /*) ;;
+        */*) PATH_AMQ="$CALLER_PWD/$PATH_AMQ" ;;
+    esac
+    if [[ ! "$PATH_AMQ" -ef "$INSTALLED_BINARY" ]]; then
+        echo -e "${YELLOW}Warning: PATH resolves amq to a different executable${NC}"
+        echo "  PATH-selected: $PATH_AMQ"
+        echo "  Verified install: $INSTALLED_BINARY"
+        echo ""
+        echo "Use the verified binary directly, or select it first in this shell:"
+        echo "  \"$INSTALLED_BINARY\" --version"
+        echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+    fi
 fi
 
 echo ""
@@ -299,6 +348,6 @@ if [ "$INSTALL_SKILL" = true ]; then
 fi
 
 echo "Next steps:"
-echo "  1. Start agent: amq coop exec claude"
-echo "  Tip: eval \"\$(amq shell-setup)\" to add co-op aliases to your shell"
+echo "  1. Start agent: \"$INSTALLED_BINARY\" coop exec claude"
+echo "  Tip: eval \"\$(\"$INSTALLED_BINARY\" shell-setup)\" to add co-op aliases to your shell"
 echo ""
