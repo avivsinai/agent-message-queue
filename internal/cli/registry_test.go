@@ -15,6 +15,7 @@ func TestCommandNames(t *testing.T) {
 		"list",
 		"read",
 		"thread",
+		"trace",
 		"presence",
 		"cleanup",
 		"watch",

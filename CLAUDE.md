@@ -173,6 +173,7 @@ amq list --me <agent> [--session <name>] [--new | --cur] [--priority <p>] [--fro
 amq read --me <agent> --id <msg_id> [--session <name>] [--ignore-session-pin] [--json]
 amq drain --me <agent> [--session <name>] [--ignore-session-pin] [--limit N] [--include-body] [--json]
 amq thread --id <thread_id> [--agents <a,b,c>] [--limit N] [--include-body] [--json]
+amq trace <message-id> [--root <path>] [--json]
 amq receipts list --me <agent> [--msg-id <id>] [--stage <stage>] [--json]
 amq receipts wait --me <agent> --msg-id <id> [--stage <stage>] [--timeout <duration>] [--poll-interval <duration>] [--json]
 amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
