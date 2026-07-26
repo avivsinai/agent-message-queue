@@ -221,7 +221,6 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	}
 
 	var messages []wakeMsgInfo
-	senderCounts := make(map[string]int)
 	var interruptMessages []wakeMsgInfo
 	interruptCounts := make(map[string]int)
 
@@ -253,7 +252,6 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			}
 			// Count corrupt messages too
 			messages = append(messages, wakeMsgInfo{from: "unknown", subject: "(parse error)"})
-			senderCounts["unknown"]++
 			continue
 		}
 
@@ -274,7 +272,6 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		}
 
 		messages = append(messages, info)
-		senderCounts[from]++
 
 		if cfg.interrupt && isInterruptMessage(info, cfg) {
 			interruptMessages = append(interruptMessages, info)
@@ -326,57 +323,30 @@ func notifyNewMessages(cfg *wakeConfig) error {
 				}
 			}
 		}
-		return injectNotification(cfg, interruptText, false)
+		notificationText := coopWakeDoorbell
+		if cfg.interruptNotice != "" {
+			notificationText = interruptText
+		}
+		return injectNotification(cfg, notificationText, false)
 	}
 
 	// Build notification text
 	var text string
 	if cfg.injectCmd != "" {
 		// Power user mode: inject actual command
-		text = "\n" + cfg.injectCmd + "\n"
+		text = "\n" + sanitizeForTTY(cfg.injectCmd) + "\n"
 	} else {
-		// Default: informational notice
-		text = buildNotificationText(cfg.session, messages, senderCounts, cfg.previewLen)
+		// Peer-derived headers never enter terminal input. The fixed prefix is
+		// shell-inert if a standalone wake lands at a shell prompt.
+		text = coopWakeDoorbell
 	}
 
 	return injectNotification(cfg, text, true)
 }
 
-func buildNotificationText(session string, messages []wakeMsgInfo, senderCounts map[string]int, previewLen int) string {
-	count := len(messages)
-	prefix := notificationPrefix("AMQ", session)
-
-	if count == 1 {
-		// Single message: show from + truncated subject
-		msg := messages[0]
-		subject := msg.subject
-		if subject == "" {
-			subject = "(no subject)"
-		}
-		subject = truncateSubject(subject, previewLen)
-		return fmt.Sprintf("%s: message from %s - %s. Drain with: amq drain --include-body — then act on it", prefix, msg.from, subject)
-	}
-
-	// Multiple messages: show counts by sender
-	var parts []string
-	senders := make([]string, 0, len(senderCounts))
-	for s := range senderCounts {
-		senders = append(senders, s)
-	}
-	sort.Strings(senders)
-
-	for _, sender := range senders {
-		c := senderCounts[sender]
-		parts = append(parts, fmt.Sprintf("%d from %s", c, sender))
-	}
-
-	return fmt.Sprintf("%s: %d messages - %s. Drain with: amq drain --include-body — then act on it",
-		prefix, count, strings.Join(parts, ", "))
-}
-
 func buildInterruptText(session string, messages []wakeMsgInfo, senderCounts map[string]int, previewLen int, custom string) string {
 	if custom != "" {
-		return custom
+		return sanitizeForTTY(custom)
 	}
 
 	count := len(messages)

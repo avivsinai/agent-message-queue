@@ -405,8 +405,11 @@ func TestRepairedWakeExitsWithoutInjectingDetachedNamespaceMessages(t *testing.T
 			}
 
 			releasedOutput := waitForWakeRepairOutputLine(t, fixture.outputPath)
-			if !bytes.Contains(releasedOutput, []byte("must wait for admission")) {
-				t.Fatalf("released wake output does not contain pending message: %q", releasedOutput)
+			if !bytes.Contains(releasedOutput, []byte(coopWakeDoorbell)) {
+				t.Fatalf("released wake output does not contain fixed doorbell: %q", releasedOutput)
+			}
+			if bytes.Contains(releasedOutput, []byte("must wait for admission")) {
+				t.Fatalf("released wake output contains peer-derived message text: %q", releasedOutput)
 			}
 			releasedOutput = append([]byte(nil), releasedOutput...)
 

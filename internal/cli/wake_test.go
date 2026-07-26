@@ -43,44 +43,6 @@ func TestBuildInterruptText_DefaultSingle(t *testing.T) {
 	}
 }
 
-func TestBuildNotificationText_NoSession(t *testing.T) {
-	msg := wakeMsgInfo{from: "codex", subject: "review done"}
-	text := buildNotificationText("", []wakeMsgInfo{msg}, map[string]int{"codex": 1}, 48)
-	if !strings.HasPrefix(text, "AMQ: ") {
-		t.Fatalf("expected 'AMQ: ' prefix without session, got: %s", text)
-	}
-	if strings.Contains(text, "[") {
-		t.Fatalf("expected no brackets without session, got: %s", text)
-	}
-}
-
-func TestBuildNotificationText_WithSession(t *testing.T) {
-	msg := wakeMsgInfo{from: "codex", subject: "review done"}
-	text := buildNotificationText("stream3", []wakeMsgInfo{msg}, map[string]int{"codex": 1}, 48)
-	if !strings.HasPrefix(text, "AMQ [stream3]: ") {
-		t.Fatalf("expected 'AMQ [stream3]: ' prefix, got: %s", text)
-	}
-	if !strings.Contains(text, "codex") {
-		t.Fatalf("expected sender in text, got: %s", text)
-	}
-}
-
-func TestBuildNotificationText_MultipleWithSession(t *testing.T) {
-	messages := []wakeMsgInfo{
-		{from: "codex", subject: "a"},
-		{from: "codex", subject: "b"},
-		{from: "alice", subject: "c"},
-	}
-	counts := map[string]int{"codex": 2, "alice": 1}
-	text := buildNotificationText("collab", messages, counts, 48)
-	if !strings.HasPrefix(text, "AMQ [collab]: ") {
-		t.Fatalf("expected 'AMQ [collab]: ' prefix, got: %s", text)
-	}
-	if !strings.Contains(text, "3 messages") {
-		t.Fatalf("expected message count, got: %s", text)
-	}
-}
-
 func TestBuildInterruptText_WithSession(t *testing.T) {
 	msg := wakeMsgInfo{from: "alice", subject: "help"}
 	text := buildInterruptText("stream2", []wakeMsgInfo{msg}, map[string]int{"alice": 1}, 48, "")
@@ -91,8 +53,8 @@ func TestBuildInterruptText_WithSession(t *testing.T) {
 
 func TestBuildInterruptText_CustomOverride(t *testing.T) {
 	msg := wakeMsgInfo{from: "alice", subject: "help"}
-	text := buildInterruptText("stream2", []wakeMsgInfo{msg}, map[string]int{"alice": 1}, 48, "custom notice")
-	if text != "custom notice" {
+	text := buildInterruptText("stream2", []wakeMsgInfo{msg}, map[string]int{"alice": 1}, 48, "custom\x1b[31m\nnotice")
+	if text != "custom [31m notice" {
 		t.Fatalf("expected custom override, got: %s", text)
 	}
 }
@@ -861,14 +823,7 @@ func TestNotifyNewMessages_InjectViaInterruptInjectsKeyAndHonorsCooldown(t *test
 		t.Fatalf("second notifyNewMessages: %v", err)
 	}
 
-	expectedText := buildInterruptText(
-		"collab",
-		[]wakeMsgInfo{{from: "codex", subject: "help needed", priority: "urgent", labels: []string{"interrupt"}}},
-		map[string]int{"codex": 1},
-		48,
-		"",
-	)
-	expected := "\x03\n" + expectedText + "\n" + expectedText + "\n"
+	expected := "\x03\n" + coopWakeDoorbell + "\n" + coopWakeDoorbell + "\n"
 
 	got, err := os.ReadFile(logPath)
 	if err != nil {
@@ -1013,7 +968,7 @@ func TestNotifyNewMessages_InjectViaInjectCmdPayload(t *testing.T) {
 		me:         "alice",
 		root:       root,
 		injectVia:  scriptPath,
-		injectCmd:  "amq drain --include-body",
+		injectCmd:  "amq drain\x1b[31m\n--include-body",
 		previewLen: 48,
 	}
 
@@ -1025,7 +980,7 @@ func TestNotifyNewMessages_InjectViaInjectCmdPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
-	expected := "\namq drain --include-body\n"
+	expected := "\namq drain [31m --include-body\n"
 	if string(got) != expected {
 		t.Fatalf("expected inject-cmd payload %q, got %q", expected, string(got))
 	}
@@ -1103,8 +1058,8 @@ func TestNotifyNewMessagesSkipsBaselineWithoutDraining(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read injection output: %v", err)
 	}
-	if !strings.Contains(string(got), "fresh subject") || strings.Contains(string(got), "stale subject") {
-		t.Fatalf("injected payload = %q, want fresh message only", string(got))
+	if string(got) != coopWakeDoorbell {
+		t.Fatalf("injected payload = %q, want fixed doorbell %q", string(got), coopWakeDoorbell)
 	}
 }
 

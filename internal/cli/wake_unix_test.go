@@ -369,19 +369,7 @@ func TestRunWakeWithLoopInterruptCommandDefaultsOffAndRemainsOptIn(t *testing.T)
 			if err != nil {
 				t.Fatalf("read injector log: %v", err)
 			}
-			notice := buildInterruptText(
-				"",
-				[]wakeMsgInfo{{
-					from:     "codex",
-					subject:  "help needed",
-					priority: "urgent",
-					labels:   []string{"interrupt"},
-				}},
-				map[string]int{"codex": 1},
-				48,
-				"",
-			)
-			want := tt.wantPrefix + notice + "\n"
+			want := tt.wantPrefix + coopWakeDoorbell + "\n"
 			if string(got) != want {
 				t.Fatalf("injector log = %q, want %q", string(got), want)
 			}
