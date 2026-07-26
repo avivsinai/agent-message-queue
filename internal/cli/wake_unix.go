@@ -144,6 +144,40 @@ func acquireWakeLockWithOptions(root, me string, options wakeLockAcquireOptions)
 	}, nil
 }
 
+func supersedeUnverifiedGenericWakeAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	expected wakeLockInspection,
+) error {
+	current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
+	if !sameWakeLockGeneration(expected, current) {
+		return fmt.Errorf("unverified wake changed before supersession; retry")
+	}
+	if current.Status != wakeLockUnverified ||
+		classifyPersistedWakeClaim(current) != wakeClaimGeneric {
+		return fmt.Errorf(
+			"wake state for %s is not an unverified ownerless generic claim; use 'amq wake recover-owner --me %s' for an owner-bound claim",
+			expected.Agent,
+			expected.Agent,
+		)
+	}
+	if err := removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, current); err != nil {
+		return fmt.Errorf("supersede exact unverified wake claim: %w", err)
+	}
+
+	tty := strings.TrimSpace(current.Lock.TTY)
+	if tty == "" {
+		tty = "unknown"
+	}
+	_ = writeStderr(
+		"warning: superseded unidentified wake helper for %s (pid %d on %s) without signaling it; fresh wake is starting, but duplicate notifications may continue until the old helper exits; stop that helper if duplicates persist\n",
+		current.Agent,
+		current.Lock.PID,
+		tty,
+	)
+	return nil
+}
+
 func acquireWakeLockWithOptionsInDir(
 	agentDir *wakeAgentDir,
 	root, me string,
@@ -166,6 +200,14 @@ func acquireWakeLockWithOptionsInDir(
 			inspection := inspectWakeLockAt(dirfd, agentDir, root, me)
 			if options.repairLineage != nil && inspection.Exists {
 				return fmt.Errorf("wake lock changed before repair acquisition")
+			}
+			if inspection.Status == wakeLockUnverified && wakeLockHasOwnerMarkers(inspection) {
+				return fmt.Errorf(
+					"wake state for %s is unverified: %s; run 'amq wake recover-owner --me %s'",
+					me,
+					inspection.Reason,
+					me,
+				)
 			}
 			if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestAcquire); err != nil {
 				return err
@@ -215,8 +257,9 @@ func acquireWakeLockWithOptionsInDir(
 					}
 					return wakeLockAlreadyRunningError(me, inspection)
 				case wakeLockUnverified:
-					return fmt.Errorf("wake lock for %s is unverified (pid %d on %s since %s): %s; run 'amq doctor --ops' for details",
-						me, inspection.Lock.PID, inspection.Lock.TTY, inspection.Lock.Started, inspection.Reason)
+					if err := supersedeUnverifiedGenericWakeAt(dirfd, agentDir, inspection); err != nil {
+						return err
+					}
 				}
 			}
 			if replace.Exists {
@@ -708,6 +751,7 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 	var target wakeTarget
 	var repairFloor wakeRepairFloor
 	var lineage wakeRepairLineage
+	var unverifiedSupersession wakeLockInspection
 	var inboxDir *wakeInboxDir
 	defer func() { _ = inboxDir.Close() }()
 	prepareErr := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
@@ -735,10 +779,16 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 			result.Reason = "wake lock is being created; retry shortly"
 			return errors.New(result.Reason)
 		case wakeLockUnverified:
-			result.Status = "refused"
-			result.PID = inspection.PID
-			result.Reason = "wake lock is unverified; refusing to start a second injector"
-			return fmt.Errorf("%s: %s", result.Reason, inspection.Reason)
+			if classifyPersistedWakeClaim(inspection) != wakeClaimGeneric {
+				result.Status = "refused"
+				result.PID = inspection.PID
+				result.Reason = fmt.Sprintf(
+					"unverified wake is not an ownerless generic claim; use 'amq wake recover-owner --me %s' for an owner-bound claim",
+					me,
+				)
+				return errors.New(result.Reason)
+			}
+			unverifiedSupersession = inspection
 		default:
 			result.Status = "refused"
 			result.Reason = fmt.Sprintf("wake lock status %q is not repairable", inspection.Status)
@@ -830,7 +880,17 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 			floor: repairFloor,
 		}
 		result.RepairAvailable = true
-		if err := removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, inspection); err != nil {
+		var removeErr error
+		if unverifiedSupersession.Exists {
+			removeErr = supersedeUnverifiedGenericWakeAt(
+				dirfd,
+				agentDir,
+				unverifiedSupersession,
+			)
+		} else {
+			removeErr = removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, inspection)
+		}
+		if removeErr != nil {
 			result.Status = "refused"
 			result.RepairAvailable = false
 			result.PID = inspectWakeLockAt(dirfd, agentDir, root, me).PID

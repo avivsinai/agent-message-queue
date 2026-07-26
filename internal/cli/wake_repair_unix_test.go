@@ -923,12 +923,16 @@ func TestRepairWakeRefusesRawTTYWithoutInjectTarget(t *testing.T) {
 	}
 }
 
-func TestRepairWakeRefusesUnverifiedLock(t *testing.T) {
+func TestRepairWakeSupersedesUnverifiedGenericLockWithoutSignal(t *testing.T) {
 	root := secureTempDirForTest(t)
-	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
 		PID:        4242,
 		Executable: "/opt/homebrew/bin/amq",
-	})
+		Generation: "unverified-generation",
+		BootID:     wakeRepairTestBootID,
+	}, target))
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid == 4242 {
 			return wakeProcessInfo{
@@ -937,25 +941,70 @@ func TestRepairWakeRefusesUnverifiedLock(t *testing.T) {
 				Executable: "/opt/homebrew/bin/amq",
 			}
 		}
+		if pid == 9876 {
+			return wakeProcessInfo{
+				PID:        pid,
+				Running:    true,
+				StartToken: "new-start",
+				BootID:     wakeRepairTestBootID,
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+			}
+		}
 		return wakeProcessInfo{PID: pid}
 	})
-	if err := writeWakeTarget(root, "codex", mustNewWakeTargetForTest(t, root, "codex", writeExecutableForTest(t, "injector"), nil)); err != nil {
+	var signals []os.Signal
+	stubSignalWakeProcess(t, func(pid int, sig os.Signal) error {
+		signals = append(signals, sig)
+		return nil
+	})
+	if err := writeWakeTarget(root, "codex", target); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
 	}
-	stubStartWakeFromTarget(t, func(root, me string, target wakeTarget, _ wakeRepairFloor) (int, error) {
-		t.Fatalf("startWakeFromTarget should not run for unverified lock")
-		return 0, nil
+	writeWakeRepairFloorForTest(t, root, "codex", target, nil)
+	stubStartWakeFromTarget(t, func(gotRoot, gotMe string, gotTarget wakeTarget, source wakeRepairFloor) (int, error) {
+		if gotRoot != root || gotMe != "codex" || !sameWakeTarget(gotTarget, target) {
+			t.Fatalf("unexpected repair start: root=%q me=%q target=%#v", gotRoot, gotMe, gotTarget)
+		}
+		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+			t.Fatalf("unverified lock should be removed before start: %v", err)
+		}
+		writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+			PID:          9876,
+			ProcessStart: "new-start",
+			Executable:   "/opt/homebrew/bin/amq",
+			Generation:   "generation-new",
+		}, target))
+		writeWakeRepairWinnerFloorForTest(t, root, "codex", target, source)
+		return 9876, nil
 	})
 
-	result, err := repairWake(root, "codex")
-	if err == nil {
-		t.Fatal("expected unverified repair refusal")
+	var result wakeRepairResult
+	var repairErr error
+	stderr := captureWakeStderr(t, func() {
+		result, repairErr = repairWake(root, "codex")
+	})
+	if repairErr != nil {
+		t.Fatalf("repairWake: %v", repairErr)
 	}
-	if result.Status != "refused" || !strings.Contains(result.Reason, "unverified") {
-		t.Fatalf("unexpected result: %#v err=%v", result, err)
+	if result.Status != "repaired" || result.PID != 9876 {
+		t.Fatalf("unexpected result: %#v", result)
 	}
-	if _, statErr := os.Stat(lockPath); statErr != nil {
-		t.Fatalf("unverified lock should remain: %v", statErr)
+	if len(signals) != 0 {
+		t.Fatalf("unverified helper was signaled: %v", signals)
+	}
+	if count := strings.Count(stderr, "warning:"); count != 1 {
+		t.Fatalf("warning count = %d, want 1:\n%s", count, stderr)
+	}
+	for _, want := range []string{
+		"unidentified wake helper",
+		"pid 4242",
+		"duplicate notifications",
+		"stop that helper if duplicates persist",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("warning missing %q:\n%s", want, stderr)
+		}
 	}
 }
 
@@ -1252,7 +1301,7 @@ func TestRepairWakeRefusesStaleRawLockWithLeftoverTarget(t *testing.T) {
 	}
 }
 
-func TestRepairWakeRefusesUnknownBootIdentityLock(t *testing.T) {
+func TestRepairWakeUnknownBootIdentityContinuesToFloorValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		lock       wakeLock
@@ -1292,7 +1341,7 @@ func TestRepairWakeRefusesUnknownBootIdentityLock(t *testing.T) {
 				return proc
 			})
 			stubStartWakeFromTarget(t, func(root, me string, target wakeTarget, _ wakeRepairFloor) (int, error) {
-				t.Fatalf("startWakeFromTarget should not run for live identity mismatch")
+				t.Fatalf("startWakeFromTarget should not run without a repair floor")
 				return 0, nil
 			})
 
@@ -1301,12 +1350,12 @@ func TestRepairWakeRefusesUnknownBootIdentityLock(t *testing.T) {
 				t.Fatal("expected repair refusal")
 			}
 			if result.Status != "refused" ||
-				!strings.Contains(result.Reason, "unverified") ||
-				!strings.Contains(err.Error(), tc.wantReason) {
+				!strings.Contains(result.Reason, "repair floor is missing") ||
+				!strings.Contains(err.Error(), "repair floor is missing") {
 				t.Fatalf("unexpected result: %#v err=%v", result, err)
 			}
 			if _, statErr := os.Stat(lockPath); statErr != nil {
-				t.Fatalf("lock should remain on refused live identity mismatch: %v", statErr)
+				t.Fatalf("%s lock should remain until repair can start: %v", tc.wantReason, statErr)
 			}
 		})
 	}
