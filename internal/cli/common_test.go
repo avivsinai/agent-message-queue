@@ -2,13 +2,74 @@ package cli
 
 import (
 	"encoding/json"
+	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 )
+
+func TestParseFlagsRejectsPositionals(t *testing.T) {
+	fs := flag.NewFlagSet("route explain", flag.ContinueOnError)
+	laterFlag := fs.String("later", "", "test flag")
+
+	handled, err := parseFlags(fs, []string{"stray", "--later", "value"}, nil)
+	if handled {
+		t.Fatal("positional rejection was reported as handled")
+	}
+	if err == nil {
+		t.Fatal("expected positional arguments to be rejected")
+	}
+	if code := GetExitCode(err); code != ExitUsage {
+		t.Fatalf("exit code = %d, want %d", code, ExitUsage)
+	}
+	if !strings.Contains(err.Error(), `route explain does not accept positional arguments (got "stray --later value")`) {
+		t.Fatalf("error does not use flag set name and remaining arguments: %v", err)
+	}
+	if strings.Contains(err.Error(), "--body") {
+		t.Fatalf("error suggests unavailable --body flag: %v", err)
+	}
+	if *laterFlag != "" {
+		t.Fatalf("flag after positional was parsed as %q, want empty", *laterFlag)
+	}
+}
+
+func TestParseFlagsPositionalBodyHint(t *testing.T) {
+	fs := flag.NewFlagSet("send", flag.ContinueOnError)
+	fs.String("body", "", "message body")
+
+	_, err := parseFlags(fs, []string{"message text"}, nil)
+	if err == nil {
+		t.Fatal("expected positional arguments to be rejected")
+	}
+	if !strings.Contains(err.Error(), "--body") {
+		t.Fatalf("error should suggest registered --body flag: %v", err)
+	}
+}
+
+func TestParseFlagsAllowPositionalsRetainsArguments(t *testing.T) {
+	fs := flag.NewFlagSet("coop exec", flag.ContinueOnError)
+	rootFlag := fs.String("root", "", "queue root")
+
+	handled, err := parseFlagsAllowPositionals(fs, []string{"--root", "/tmp/queue", "codex", "--agent-flag"}, nil)
+	if err != nil {
+		t.Fatalf("parseFlagsAllowPositionals: %v", err)
+	}
+	if handled {
+		t.Fatal("ordinary parse was reported as handled")
+	}
+	if *rootFlag != "/tmp/queue" {
+		t.Fatalf("root = %q, want /tmp/queue", *rootFlag)
+	}
+	got := fs.Args()
+	want := []string{"codex", "--agent-flag"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("remaining args = %#v, want %#v", got, want)
+	}
+}
 
 func TestNormalizeHandle(t *testing.T) {
 	if got, err := normalizeHandle("codex"); err != nil || got != "codex" {

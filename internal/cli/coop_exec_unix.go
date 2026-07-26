@@ -68,7 +68,7 @@ func runCoopExec(args []string) error {
 		"  reused; stop an older generic wake before retrying coop exec.",
 	)
 
-	if handled, err := parseFlags(fs, amqArgs, usage); err != nil {
+	if handled, err := parseFlagsAllowPositionals(fs, amqArgs, usage); err != nil {
 		return err
 	} else if handled {
 		return nil

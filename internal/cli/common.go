@@ -722,6 +722,14 @@ func isHelp(arg string) bool {
 }
 
 func parseFlags(fs *flag.FlagSet, args []string, usage func()) (bool, error) {
+	return parseFlagsWithPositionals(fs, args, usage, false)
+}
+
+func parseFlagsAllowPositionals(fs *flag.FlagSet, args []string, usage func()) (bool, error) {
+	return parseFlagsWithPositionals(fs, args, usage, true)
+}
+
+func parseFlagsWithPositionals(fs *flag.FlagSet, args []string, usage func(), allowPositionals bool) (bool, error) {
 	fs.SetOutput(io.Discard)
 	if usage != nil {
 		fs.Usage = usage
@@ -735,6 +743,15 @@ func parseFlags(fs *flag.FlagSet, args []string, usage func()) (bool, error) {
 	for _, name := range []string{"root", "session"} {
 		if fl := fs.Lookup(name); fl != nil && flagWasVisited(fs, name) && strings.TrimSpace(fl.Value.String()) == "" {
 			return false, UsageError("--%s cannot be empty", name)
+		}
+	}
+	if !allowPositionals {
+		if remaining := fs.Args(); len(remaining) > 0 {
+			message := fmt.Sprintf("%s does not accept positional arguments (got %q)", fs.Name(), strings.Join(remaining, " "))
+			if fs.Lookup("body") != nil {
+				message += "; use --body to pass message text"
+			}
+			return false, UsageError("%s", message)
 		}
 	}
 	return false, nil
@@ -751,16 +768,6 @@ func flagWasVisited(fs *flag.FlagSet, name string) bool {
 		}
 	})
 	return visited
-}
-
-// rejectPositionalArgs returns a UsageError if the flag set has any remaining
-// positional arguments after parsing. Commands that don't accept positional
-// args should call this immediately after parseFlags to prevent silent drops.
-func rejectPositionalArgs(fs *flag.FlagSet, cmdName string) error {
-	if remaining := fs.Args(); len(remaining) > 0 {
-		return UsageError("%s does not accept positional arguments (got %q); use --body to pass message text", cmdName, strings.Join(remaining, " "))
-	}
-	return nil
 }
 
 func usageWithFlags(fs *flag.FlagSet, usage string, notes ...string) func() {
