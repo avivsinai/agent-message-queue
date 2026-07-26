@@ -78,7 +78,7 @@ func waitForTTYInputQuiet(cfg *wakeConfig) {
 		return
 	}
 
-	queueFD, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY, 0)
+	queueFD, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: input deferral unavailable: open /dev/tty: %v\n", err)
@@ -136,7 +136,7 @@ func waitForTTYInputQuiet(cfg *wakeConfig) {
 }
 
 func waitForTTYInputDrain(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
-	queueFD, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY, 0)
+	queueFD, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return 0, false, err
 	}
