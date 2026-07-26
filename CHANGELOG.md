@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.48.0](https://github.com/avivsinai/agent-message-queue/compare/v0.47.3...v0.48.0) (2026-07-26)
+
+
+### Features
+
+* **wake:** probe TIOCSTI capability and degrade to a non-input notifier ([#302](https://github.com/avivsinai/agent-message-queue/issues/302)) ([ac89fa5](https://github.com/avivsinai/agent-message-queue/commit/ac89fa566985eb5b5d5817ddce8b172fb68d1934))
+
+
+### Bug Fixes
+
+* **doctor:** report and repair malformed mailbox layout ([#304](https://github.com/avivsinai/agent-message-queue/issues/304)) ([9a9ec0f](https://github.com/avivsinai/agent-message-queue/commit/9a9ec0facaf15e1cae98b63d80da52c92f8c623b))
+
 ## [0.47.3](https://github.com/avivsinai/agent-message-queue/compare/v0.47.2...v0.47.3) (2026-07-26)
 
 
