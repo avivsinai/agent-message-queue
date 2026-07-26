@@ -122,9 +122,10 @@ func TestWakeRepairNotifiesMessageDeliveredDuringDowntime(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		data, readErr := os.ReadFile(injectedPath)
-		if readErr == nil && strings.Contains(string(data), "urgent message delivered during downtime") {
-			if strings.Contains(string(data), "startup backlog") {
-				t.Fatalf("repaired wake re-notified the startup backlog: %q", data)
+		if readErr == nil && strings.Contains(string(data), coopWakeDoorbell) {
+			if strings.Contains(string(data), "urgent message delivered during downtime") ||
+				strings.Contains(string(data), "startup backlog") {
+				t.Fatalf("repaired wake injected peer-derived message text: %q", data)
 			}
 			return
 		}
