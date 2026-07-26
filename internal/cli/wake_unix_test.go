@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,6 +89,21 @@ func writeExecutableForTest(t *testing.T, name string) string {
 		t.Fatalf("write executable: %v", err)
 	}
 	return path
+}
+
+func assertWakeLockOwnedByCurrentProcess(t *testing.T, lockPath string) {
+	t.Helper()
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read replacement lock: %v", err)
+	}
+	var got wakeLock
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal replacement lock: %v", err)
+	}
+	if got.PID != os.Getpid() {
+		t.Fatalf("replacement pid = %d, want %d", got.PID, os.Getpid())
+	}
 }
 
 func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
@@ -1839,7 +1855,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *test
 	}
 }
 
-func TestRunWakeWithLoopAcceptExistingWakeRejectsUnverifiedWake(t *testing.T) {
+func TestRunWakeWithLoopSupersedesUnverifiedGenericWakeWithoutSignal(t *testing.T) {
 	const wakePID = 4242
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid == wakePID {
@@ -1852,6 +1868,11 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsUnverifiedWake(t *testing.T) {
 		}
 		return wakeProcessInfo{PID: pid}
 	})
+	var signals []os.Signal
+	stubSignalWakeProcess(t, func(pid int, sig os.Signal) error {
+		signals = append(signals, sig)
+		return nil
+	})
 	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
@@ -1863,24 +1884,82 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsUnverifiedWake(t *testing.T) {
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
 	injector := writeExecutableForTest(t, "injector")
-	err := runWakeWithLoop([]string{
-		"--root", root,
-		"--me", "orchestrator",
-		"--inject-via", injector,
-		"--ready-file", readyPath,
-		"--accept-existing-wake",
-	}, func(cfg wakeConfig) error {
-		t.Fatalf("loop should not run with an unverified wake lock: %#v", cfg)
-		return nil
+	errDone := errors.New("done")
+	stderr := captureWakeStderr(t, func() {
+		err := runWakeWithLoop([]string{
+			"--root", root,
+			"--me", "orchestrator",
+			"--inject-via", injector,
+			"--ready-file", readyPath,
+			"--accept-existing-wake",
+		}, func(cfg wakeConfig) error {
+			inspection := inspectWakeLock(root, "orchestrator")
+			if !inspection.Exists || inspection.Lock.PID != os.Getpid() {
+				t.Fatalf("fresh wake was not admitted: %#v", inspection)
+			}
+			return errDone
+		})
+		if !errors.Is(err, errDone) {
+			t.Fatalf("runWakeWithLoop error = %v, want sentinel", err)
+		}
 	})
-	if err == nil {
-		t.Fatal("expected unverified wake lock error")
+	if len(signals) != 0 {
+		t.Fatalf("unverified helper was signaled: %v", signals)
 	}
-	if !strings.Contains(err.Error(), "unverified") {
-		t.Fatalf("unexpected error: %v", err)
+	if count := strings.Count(stderr, "warning:"); count != 1 {
+		t.Fatalf("warning count = %d, want 1:\n%s", count, stderr)
 	}
-	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
-		t.Fatalf("ready file should not exist, statErr=%v", statErr)
+	for _, want := range []string{
+		"unidentified wake helper",
+		"pid 4242",
+		"duplicate notifications",
+		"stop that helper if duplicates persist",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("warning missing %q:\n%s", want, stderr)
+		}
+	}
+}
+
+func TestRunWakeWithLoopPreservesUnverifiedMode0400Claim(t *testing.T) {
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
+		PID:        4242,
+		Executable: "/opt/homebrew/bin/amq",
+	})
+	if err := os.Chmod(lockPath, wakeOwnerLockFileMode); err != nil {
+		t.Fatalf("chmod owner-bound claim: %v", err)
+	}
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read owner-bound claim: %v", err)
+	}
+
+	injector := writeExecutableForTest(t, "injector")
+	stderr := captureWakeStderr(t, func() {
+		err := runWakeWithLoop([]string{
+			"--root", root,
+			"--me", "orchestrator",
+			"--inject-via", injector,
+		}, func(cfg wakeConfig) error {
+			t.Fatalf("loop should not run for an owner-bound claim: %#v", cfg)
+			return nil
+		})
+		if err == nil ||
+			!strings.Contains(err.Error(), "unverified") ||
+			!strings.Contains(err.Error(), "wake recover-owner") {
+			t.Fatalf("error = %v, want owner-bound refusal", err)
+		}
+	})
+	if stderr != "" {
+		t.Fatalf("owner-bound refusal emitted supersession warning: %q", stderr)
+	}
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read preserved owner-bound claim: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("owner-bound claim changed: got %q want %q", after, before)
 	}
 }
 
@@ -1939,7 +2018,7 @@ func TestAcquireWakeLockSelfHealsPIDReusedByNonAMQ(t *testing.T) {
 	}
 }
 
-func TestAcquireWakeLockTreatsUnknownBootIdentityAsUnverified(t *testing.T) {
+func TestAcquireWakeLockSupersedesUnknownBootIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		lock       wakeLock
@@ -1978,15 +2057,11 @@ func TestAcquireWakeLockTreatsUnknownBootIdentityAsUnverified(t *testing.T) {
 			})
 
 			cleanup, err := acquireWakeLock(root, "orchestrator", nil)
-			if cleanup != nil {
-				defer cleanup()
+			if err != nil {
+				t.Fatalf("acquireWakeLock should supersede %s: %v", tc.wantReason, err)
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantReason) || !strings.Contains(err.Error(), "unverified") {
-				t.Fatalf("expected identity-mismatch unverified refusal, got %v", err)
-			}
-			if _, statErr := os.Stat(lockPath); statErr != nil {
-				t.Fatalf("identity-mismatch lock should remain, stat=%v", statErr)
-			}
+			defer cleanup()
+			assertWakeLockOwnedByCurrentProcess(t, lockPath)
 		})
 	}
 }
@@ -2031,7 +2106,7 @@ func TestAcquireWakeLockReplacesProvenStartMismatchWhenBootMatches(t *testing.T)
 	}
 }
 
-func TestAcquireWakeLockPreservesStartMismatchWhenBootIsUnknown(t *testing.T) {
+func TestAcquireWakeLockSupersedesStartMismatchWhenBootIsUnknown(t *testing.T) {
 	const reusedPID = 4242
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
@@ -2056,18 +2131,14 @@ func TestAcquireWakeLockPreservesStartMismatchWhenBootIsUnknown(t *testing.T) {
 	})
 
 	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
-	if cleanup != nil {
-		defer cleanup()
+	if err != nil {
+		t.Fatalf("acquireWakeLock should supersede unknown boot identity: %v", err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "boot id mismatch") || !strings.Contains(err.Error(), "unverified") {
-		t.Fatalf("expected unknown-boot refusal, got %v", err)
-	}
-	if _, statErr := os.Stat(lockPath); statErr != nil {
-		t.Fatalf("lock should remain when boot identity is unknown, stat=%v", statErr)
-	}
+	defer cleanup()
+	assertWakeLockOwnedByCurrentProcess(t, lockPath)
 }
 
-func TestAcquireWakeLockPreservesStartMismatchWithoutBootIdentity(t *testing.T) {
+func TestAcquireWakeLockSupersedesStartMismatchWithoutBootIdentity(t *testing.T) {
 	const reusedPID = 4242
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
@@ -2089,18 +2160,14 @@ func TestAcquireWakeLockPreservesStartMismatchWithoutBootIdentity(t *testing.T) 
 	})
 
 	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
-	if cleanup != nil {
-		defer cleanup()
+	if err != nil {
+		t.Fatalf("acquireWakeLock should supersede missing boot identity: %v", err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "process start time mismatch") || !strings.Contains(err.Error(), "unverified") {
-		t.Fatalf("expected missing-boot refusal, got %v", err)
-	}
-	if _, statErr := os.Stat(lockPath); statErr != nil {
-		t.Fatalf("lock should remain without comparable boot identity, stat=%v", statErr)
-	}
+	defer cleanup()
+	assertWakeLockOwnedByCurrentProcess(t, lockPath)
 }
 
-func TestAcquireWakeLockStartReadFailureIsUnverifiedNotMismatch(t *testing.T) {
+func TestAcquireWakeLockSupersedesStartReadFailure(t *testing.T) {
 	const pid = 4242
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
@@ -2121,21 +2188,14 @@ func TestAcquireWakeLockStartReadFailureIsUnverifiedNotMismatch(t *testing.T) {
 	})
 
 	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
-	if cleanup != nil {
-		defer cleanup()
+	if err != nil {
+		t.Fatalf("acquireWakeLock should supersede process inspection failure: %v", err)
 	}
-	if err == nil {
-		t.Fatal("expected unverified lock error")
-	}
-	if !strings.Contains(err.Error(), "unverified") {
-		t.Fatalf("expected unverified error, got %v", err)
-	}
-	if _, statErr := os.Stat(lockPath); statErr != nil {
-		t.Fatalf("unverified lock should remain, stat=%v", statErr)
-	}
+	defer cleanup()
+	assertWakeLockOwnedByCurrentProcess(t, lockPath)
 }
 
-func TestAcquireWakeLockLegacyLiveLockDoesNotAutoDelete(t *testing.T) {
+func TestAcquireWakeLockSupersedesLegacyLiveLock(t *testing.T) {
 	const pid = 4242
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
@@ -2154,18 +2214,11 @@ func TestAcquireWakeLockLegacyLiveLockDoesNotAutoDelete(t *testing.T) {
 	})
 
 	cleanup, err := acquireWakeLock(root, "orchestrator", nil)
-	if cleanup != nil {
-		defer cleanup()
+	if err != nil {
+		t.Fatalf("acquireWakeLock should supersede legacy live lock: %v", err)
 	}
-	if err == nil {
-		t.Fatal("expected legacy unverified lock error")
-	}
-	if !strings.Contains(err.Error(), "unverified") {
-		t.Fatalf("expected unverified error, got %v", err)
-	}
-	if _, statErr := os.Stat(lockPath); statErr != nil {
-		t.Fatalf("legacy unverified lock should remain, stat=%v", statErr)
-	}
+	defer cleanup()
+	assertWakeLockOwnedByCurrentProcess(t, lockPath)
 }
 
 func TestRemoveWakeLockIfUnchangedRefusesChangedLock(t *testing.T) {
