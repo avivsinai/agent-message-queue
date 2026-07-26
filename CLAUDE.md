@@ -423,7 +423,7 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
 | Quick peek only | `amq list --new` | Non-blocking, no side effects |
 | Filter messages | `amq list --new --priority urgent` | Show only urgent messages |
-| Background wake | `amq wake --me <agent> &` | Injects notification via TIOCSTI with best-effort input deferral, or via explicit external transport (experimental) |
+| Background wake | `amq wake --me <agent> --interrupt-cmd none &` | Injects notification via TIOCSTI with best-effort input deferral, or via explicit external transport (experimental), without Ctrl+C injection |
 | Reply to message | `amq reply --id <msg_id>` | Auto thread/refs handling |
 
 ## Co-op Mode (Claude <-> Codex, optional peers)
@@ -549,8 +549,12 @@ See `.claude/skills/amq-cli/SKILL.md` for the agent-facing workflow.
 **Wake compatibility**: bridge notifications are standard AMQ inbox messages, so `amq wake` will detect them automatically. If you want swarm notifications to trigger wake interrupts, configure wake to match the bridge label and priority:
 
 ```bash
-amq wake --me codex --interrupt-label swarm --interrupt-priority normal &
+amq wake --me codex --interrupt-label swarm --interrupt-priority normal --interrupt-cmd ctrl-c &
 ```
+
+`--interrupt-cmd ctrl-c` is an explicit destructive opt-in: it sends a real
+SIGINT to the foreground process group and can interrupt or crash the agent.
+Omit it to keep the notice and bell without injecting Ctrl+C.
 
 **Direct messaging (A2A)**: the bridge only emits task lifecycle notifications.
 
@@ -564,7 +568,7 @@ amq send --me codex --to claude --thread swarm/my-team --labels swarm \
   --body "..."
 ```
 
-Leader loop options: periodic `amq drain --include-body`, tighter `amq monitor --include-body` (watch+drain), or `amq wake --me claude &` for terminal notifications.
+Leader loop options: periodic `amq drain --include-body`, tighter `amq monitor --include-body` (watch+drain), or `amq wake --me claude --interrupt-cmd none &` for terminal notifications.
 
 ## Testing
 
