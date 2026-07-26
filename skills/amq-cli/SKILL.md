@@ -188,6 +188,24 @@ amq doctor --ops
 amq doctor --ops --json
 ```
 
+## Exit Codes
+
+Treat AMQ's process exit code as the stable machine contract:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success. The command completed normally. |
+| `1` | General error. The failure has no more specific exit-code classification. |
+| `2` | Usage error. Arguments, flags, or command input are invalid. |
+| `3` | Not found. A requested resource such as a mailbox, message, session, agent, or configuration does not exist. |
+| `4` | Timeout. A watch, monitor, receipt wait, or delivery wait reached its deadline. |
+| `5` | Context mismatch. A syntactically valid command was refused because its resolved mailbox root conflicts with the `AM_BASE_ROOT`/`AM_SESSION` pin. |
+
+Do not parse stderr prose as a stable discriminator. `--json` preserves the
+same process exit codes. A read-only `list` on a mismatched session pin warns
+and continues; commands that consume or mutate mailbox state fail with code
+`5`.
+
 ## Delivery Receipts
 
 AMQ records delivery outcomes in consumer-local receipt files. The main stages are:
