@@ -8,6 +8,17 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.47.3](https://github.com/avivsinai/agent-message-queue/compare/v0.47.2...v0.47.3) (2026-07-26)
+
+
+### Bug Fixes
+
+* **cli:** reject stray leaf arguments ([#293](https://github.com/avivsinai/agent-message-queue/issues/293)) ([9bd6c1a](https://github.com/avivsinai/agent-message-queue/commit/9bd6c1a95cab0f1633aeaf2acfedde662b12ab24))
+* **install:** verify release checksums fail closed ([#291](https://github.com/avivsinai/agent-message-queue/issues/291)) ([321881c](https://github.com/avivsinai/agent-message-queue/commit/321881c81cf1c1c540f4556737369dd1b8304c56))
+* **wake:** admit wake when an unverified generic lock cannot be proven ([#301](https://github.com/avivsinai/agent-message-queue/issues/301)) ([d177948](https://github.com/avivsinai/agent-message-queue/commit/d1779485f982c73f257ce6db2372e242ef909fcb))
+* **wake:** close wake terminal descriptors on exec ([#300](https://github.com/avivsinai/agent-message-queue/issues/300)) ([e4db6ea](https://github.com/avivsinai/agent-message-queue/commit/e4db6ea11669aa9174e0e6398c56926fb3ed957e))
+* **wake:** make interrupt injection opt-in ([#299](https://github.com/avivsinai/agent-message-queue/issues/299)) ([bf11814](https://github.com/avivsinai/agent-message-queue/commit/bf11814b004d57ed619a6a6df6134cfe0d121a3a))
+
 ## [0.47.2](https://github.com/avivsinai/agent-message-queue/compare/v0.47.1...v0.47.2) (2026-07-26)
 
 
