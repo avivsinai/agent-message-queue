@@ -41,7 +41,8 @@ func TestWakeHelpDocumentsMaxHoldDemotion(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(output, "input remains active through --input-max-hold") ||
-		!strings.Contains(output, "skips synthetic input") {
+		!strings.Contains(output, "skips synthetic input") ||
+		!strings.Contains(output, "heuristic is advisory") {
 		t.Fatalf("wake help omits max-hold demotion:\n%s", output)
 	}
 }

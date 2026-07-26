@@ -80,6 +80,10 @@ const (
 	// rawInjectCRDrainTimeout bounds the wait for the submit CR itself to be
 	// consumed before deciding whether the second rescue CR is safe to send.
 	rawInjectCRDrainTimeout = 1 * time.Second
+	// Three samples require two follow-up confirmations after the first quiet
+	// observation, while adding at most two poll intervals to a real idle
+	// transition. Any active sample resets the evidence.
+	requiredInputQuietSamples = 3
 	// codexTUIEnterSuppressWindow mirrors codex-tui's
 	// PASTE_ENTER_SUPPRESS_WINDOW (codex-rs/tui/src/bottom_pane/paste_burst.rs,
 	// verified at rust-v0.144.1 and main): an Enter arriving within this window
@@ -165,6 +169,7 @@ func waitForInputQuiet(
 	}
 
 	deadline := nowFn().Add(maxHold)
+	quietSamples := 0
 	for {
 		now := nowFn()
 		state, sampleErr := sample()
@@ -173,8 +178,14 @@ func waitForInputQuiet(
 		}
 
 		active, reason := state.active(now, quietFor)
-		if !active {
-			return true, "", nil
+		if active {
+			quietSamples = 0
+		} else {
+			quietSamples++
+			if quietSamples >= requiredInputQuietSamples {
+				return true, "", nil
+			}
+			reason = "quiet confirmation incomplete"
 		}
 		if !now.Before(deadline) {
 			return false, reason, nil
