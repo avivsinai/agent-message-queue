@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.47.2](https://github.com/avivsinai/agent-message-queue/compare/v0.47.1...v0.47.2) (2026-07-26)
+
+
+### Bug Fixes
+
+* **wake:** keep terminal authority stable during tty activity ([0a62b1a](https://github.com/avivsinai/agent-message-queue/commit/0a62b1a5126e5dfa51bd80adbc212920d4295c0a))
+
 ## [0.47.1](https://github.com/avivsinai/agent-message-queue/compare/v0.47.0...v0.47.1) (2026-07-24)
 
 
