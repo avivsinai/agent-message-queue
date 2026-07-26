@@ -1354,6 +1354,64 @@ func TestWaitForInputQuietSamplingFailureKeepsBestEffortInjection(t *testing.T) 
 	}
 }
 
+func TestWaitForInputQuietRequiresThreeConsecutiveQuietSamples(t *testing.T) {
+	now := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
+	states := []ttyInputState{
+		{},
+		{},
+		{pendingBytes: 1},
+		{},
+		{},
+		{},
+	}
+	sampleCalls := 0
+
+	allowInjection, reason, err := waitForInputQuiet(
+		func() (ttyInputState, error) {
+			state := states[sampleCalls]
+			sampleCalls++
+			return state, nil
+		},
+		func() time.Time { return now },
+		func(delay time.Duration, _ ttyInputState, _ string) {
+			now = now.Add(delay)
+		},
+		time.Second,
+		time.Second,
+		10*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowInjection || reason != "" {
+		t.Fatalf("quiet result allow=%v reason=%q", allowInjection, reason)
+	}
+	if sampleCalls != len(states) {
+		t.Fatalf("sample calls = %d, want %d", sampleCalls, len(states))
+	}
+}
+
+func TestWaitForInputQuietDemotesBeforeThreeQuietSamplesAtDeadline(t *testing.T) {
+	now := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
+
+	allowInjection, reason, err := waitForInputQuiet(
+		func() (ttyInputState, error) { return ttyInputState{}, nil },
+		func() time.Time { return now },
+		func(delay time.Duration, _ ttyInputState, _ string) {
+			now = now.Add(delay)
+		},
+		time.Second,
+		5*time.Millisecond,
+		10*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowInjection || reason != "quiet confirmation incomplete" {
+		t.Fatalf("deadline result allow=%v reason=%q", allowInjection, reason)
+	}
+}
+
 func TestShouldDeferBeforeInject(t *testing.T) {
 	cfg := &wakeConfig{deferWhileInput: true}
 	if !shouldDeferBeforeInject(cfg, true) {

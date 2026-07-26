@@ -1348,7 +1348,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	previewLenFlag := fs.Int("preview-len", 48, "Max subject preview length")
 	injectModeFlag := fs.String("inject-mode", wakeInjectModeAuto, "Injection mode: auto, raw, paste, none (auto detects CLI type)")
 	deferWhileInputFlag := fs.Bool("defer-while-input", true, "Best-effort: defer non-interrupt injection while terminal input appears active")
-	inputQuietForFlag := fs.Duration("input-quiet-for", 1200*time.Millisecond, "Quiet window before deferred injection (best-effort; Linux tty atime granularity is ~8s)")
+	inputQuietForFlag := fs.Duration("input-quiet-for", 1200*time.Millisecond, "Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s)")
 	inputPollIntervalFlag := fs.Duration("input-poll-interval", 200*time.Millisecond, "Polling interval while waiting for quiet terminal input")
 	inputMaxHoldFlag := fs.Duration("input-max-hold", 15*time.Second, "Maximum time to defer one wake injection (0 = no hold)")
 	interruptFlag := fs.Bool("interrupt", true, "Enable interrupt injection for urgent interrupt messages")
@@ -1394,8 +1394,8 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		"  sampling is unavailable, injection remains best-effort. Interrupt",
 		"  messages bypass deferral.",
 		"  Atime sampling uses stdin (when a TTY) for cross-platform fidelity;",
-		"  Linux tty atime is updated at ~8s granularity, so quiet windows",
-		"  shorter than that are advisory.",
+		"  Linux tty atime is updated at ~8s granularity, so it cannot establish",
+		"  a precise 1200ms idle window. On Linux this heuristic is advisory.",
 		"",
 		"Interrupt notices (default on): urgent messages tagged with label \"interrupt\"",
 		"  trigger an interrupt notice. Ctrl+C injection is opt-in with",
