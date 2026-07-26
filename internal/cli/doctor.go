@@ -185,6 +185,14 @@ func runDoctor(args []string) error {
 			if a.PresenceSource != "" {
 				line += ", source " + a.PresenceSource
 			}
+			if a.NotifierStatus == wakeInjectorUnsupportedStatus {
+				line += fmt.Sprintf(
+					", ⚠ %s mode=%s reason=%s",
+					a.NotifierStatus,
+					a.NotifierMode,
+					a.NotifierReason,
+				)
+			}
 			if err := writeStdoutLine(line); err != nil {
 				return err
 			}

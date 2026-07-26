@@ -1,6 +1,7 @@
 package presence
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,5 +62,37 @@ func TestTouchPreservesExisting(t *testing.T) {
 	}
 	if time.Since(ts) > 5*time.Second {
 		t.Fatalf("LastSeen not updated: %s", got.LastSeen)
+	}
+}
+
+func TestSetNotifierStatusPreservesAgentPresenceAndTouchPreservesNotifierStatus(t *testing.T) {
+	root := t.TempDir()
+	p := New("codex", "busy", "reviewing", time.Now().Add(-time.Hour))
+	if err := Write(root, p); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := SetNotifierStatus(
+		root,
+		"codex",
+		"injector_unsupported",
+		"raw",
+		"dev.tty.legacy_tiocsti=0; use --inject-via",
+	); err != nil {
+		t.Fatalf("SetNotifierStatus: %v", err)
+	}
+	if err := Touch(root, "codex"); err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+	got, err := Read(root, "codex")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.Status != "busy" || got.Note != "reviewing" {
+		t.Fatalf("agent presence was clobbered: %#v", got)
+	}
+	if got.NotifierStatus != "injector_unsupported" ||
+		got.NotifierMode != "raw" ||
+		!strings.Contains(got.NotifierReason, "--inject-via") {
+		t.Fatalf("notifier status was not preserved: %#v", got)
 	}
 }

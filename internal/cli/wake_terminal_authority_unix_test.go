@@ -61,6 +61,77 @@ func TestWakeTerminalAuthorityInjectsThroughRetainedFD(t *testing.T) {
 	}
 }
 
+func TestWakeTerminalAuthorityClassifiesUnsupportedOnlyAfterZeroProgressAndRevalidation(t *testing.T) {
+	for _, errno := range []error{syscall.EIO, syscall.EPERM} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			fixture := installWakeTerminalAuthorityFixture(t)
+			authority, err := bindWakeTerminalAuthority(fixture.generation, make(chan struct{}))
+			if err != nil {
+				t.Fatalf("bindWakeTerminalAuthority: %v", err)
+			}
+			t.Cleanup(func() { _ = authority.Close() })
+
+			injectWakeTerminalFD = func(uintptr, string) error {
+				return &tiocstiInjectionError{Err: errno, Progress: 0}
+			}
+			err = authority.Inject("doorbell")
+			var unsupported *wakeInjectorUnsupportedError
+			if !errors.As(err, &unsupported) {
+				t.Fatalf("Inject error = %T %v, want injector unsupported", err, err)
+			}
+			if !errors.Is(err, errno) {
+				t.Fatalf("Inject error = %v, want wrapped %v", err, errno)
+			}
+		})
+	}
+}
+
+func TestWakeTerminalAuthorityEIOWithInvalidCurrentKeepsAuthorityOutcome(t *testing.T) {
+	fixture := installWakeTerminalAuthorityFixture(t)
+	authority, err := bindWakeTerminalAuthority(fixture.generation, make(chan struct{}))
+	if err != nil {
+		t.Fatalf("bindWakeTerminalAuthority: %v", err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+
+	injectWakeTerminalFD = func(uintptr, string) error {
+		fixture.current = wakeLockInspection{}
+		return &tiocstiInjectionError{Err: syscall.EIO, Progress: 0}
+	}
+	err = authority.Inject("doorbell")
+	var unsupported *wakeInjectorUnsupportedError
+	if errors.As(err, &unsupported) {
+		t.Fatalf("invalid current misclassified as injector unsupported: %v", err)
+	}
+	var authorityLoss *wakeTerminalAuthorityLossError
+	if !errors.As(err, &authorityLoss) ||
+		!strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("Inject error = %T %v, want generation authority loss", err, err)
+	}
+}
+
+func TestWakeTerminalAuthorityEIOAfterPartialProgressIsUncertain(t *testing.T) {
+	fixture := installWakeTerminalAuthorityFixture(t)
+	authority, err := bindWakeTerminalAuthority(fixture.generation, make(chan struct{}))
+	if err != nil {
+		t.Fatalf("bindWakeTerminalAuthority: %v", err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+
+	injectWakeTerminalFD = func(uintptr, string) error {
+		return &tiocstiInjectionError{Err: syscall.EIO, Progress: 1}
+	}
+	err = authority.Inject("doorbell")
+	var unsupported *wakeInjectorUnsupportedError
+	if errors.As(err, &unsupported) {
+		t.Fatalf("partial progress misclassified as injector unsupported: %v", err)
+	}
+	var authorityLoss *wakeTerminalAuthorityLossError
+	if !errors.As(err, &authorityLoss) {
+		t.Fatalf("Inject error = %T %v, want uncertain authority outcome", err, err)
+	}
+}
+
 func TestWakeTerminalAuthorityAllowsSameTerminalCTimeMutation(t *testing.T) {
 	fixture := installWakeTerminalAuthorityFixture(t)
 	authority, err := bindWakeTerminalAuthority(fixture.generation, make(chan struct{}))
