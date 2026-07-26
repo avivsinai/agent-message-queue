@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -18,6 +19,8 @@ type doctorCheck struct {
 
 type doctorResult struct {
 	Checks               []doctorCheck               `json:"checks"`
+	Mailboxes            []fsq.MailboxInspection     `json:"mailboxes,omitempty"`
+	MailboxRepair        *fsq.MailboxRepairResult    `json:"mailbox_repair,omitempty"`
 	ExtensionManifests   []doctorExtensionManifest   `json:"extension_manifests,omitempty"`
 	ExtensionDiagnostics []doctorExtensionDiagnostic `json:"extension_diagnostics,omitempty"`
 	Summary              struct {
@@ -33,6 +36,7 @@ func runDoctor(args []string) error {
 	jsonFlag := fs.Bool("json", false, "Output as JSON")
 	opsFlag := fs.Bool("ops", false, "Include runtime operational checks")
 	fixWakeLocksFlag := fs.Bool("fix-wake-locks", false, "With --ops, remove stale wake lock files")
+	fixMailboxesFlag := fs.Bool("fix-mailboxes", false, "Create missing required directories for configured mailboxes")
 
 	usage := usageWithFlags(fs, "amq doctor [options]",
 		"Verify AMQ installation and configuration.",
@@ -90,7 +94,10 @@ func runDoctor(args []string) error {
 
 	// Check 5: Mailbox permissions
 	if root != "" {
-		result.Checks = append(result.Checks, checkMailboxes(root))
+		mailboxes, repair, check := inspectDoctorMailboxes(root, *fixMailboxesFlag)
+		result.Mailboxes = mailboxes
+		result.MailboxRepair = repair
+		result.Checks = append(result.Checks, check)
 	}
 
 	// Check 6: Extension metadata
@@ -375,53 +382,107 @@ func checkConfig(root string) doctorCheck {
 	return check
 }
 
-func checkMailboxes(root string) doctorCheck {
+func inspectDoctorMailboxes(root string, repair bool) ([]fsq.MailboxInspection, *fsq.MailboxRepairResult, doctorCheck) {
 	check := doctorCheck{Name: "Mailboxes"}
-
-	agentsDir := filepath.Join(root, "agents")
-	entries, err := os.ReadDir(agentsDir)
-	if os.IsNotExist(err) {
-		check.Status = "warn"
-		check.Message = "no agents directory"
-		return check
-	}
+	identity, err := fsq.SnapshotDeliveryRoot(root)
 	if err != nil {
 		check.Status = "error"
-		check.Message = fmt.Sprintf("cannot read agents: %v", err)
-		return check
+		check.Message = err.Error()
+		return nil, nil, check
 	}
+	if repair {
+		mismatch, pinErr := sessionPinMismatch(root)
+		if pinErr != nil {
+			check.Status = "error"
+			check.Message = fmt.Sprintf(
+				"refusing to repair %s: invalid AMQ session context: %v; re-run with a complete session context",
+				root,
+				pinErr,
+			)
+			return nil, nil, check
+		}
+		if mismatch != nil {
+			check.Status = "error"
+			check.Message = fmt.Sprintf(
+				"refusing to repair %s because it does not match the pinned session context: %s; re-run from the intended session",
+				root,
+				mismatch.Message,
+			)
+			return nil, nil, check
+		}
+	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		check.Status = "error"
+		check.Message = err.Error()
+		return nil, nil, check
+	}
+	defer func() { _ = deliveryRoot.Close() }()
 
-	var agents []string
+	var (
+		inventory fsq.MailboxInventory
+		result    *fsq.MailboxRepairResult
+	)
+	if repair {
+		repairResult := fsq.RepairMailboxLayout(deliveryRoot)
+		result = &repairResult
+		inventory = repairResult.Inventory
+	} else {
+		inventory, err = fsq.InspectMailboxLayout(deliveryRoot)
+		if err != nil {
+			check.Status = "error"
+			check.Message = err.Error()
+			return nil, nil, check
+		}
+	}
+	check = checkMailboxInventory(inventory, result)
+	return inventory.Mailboxes, result, check
+}
+
+func checkMailboxInventory(inventory fsq.MailboxInventory, repair *fsq.MailboxRepairResult) doctorCheck {
+	check := doctorCheck{Name: "Mailboxes", Status: "ok"}
 	var issues []string
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	if inventory.ActiveConfigStatus != "ok" {
+		check.Status = "error"
+		issues = append(issues, inventory.ActiveConfigIssue)
+	}
+	if inventory.AgentsIssue != "" {
+		check.Status = "error"
+		issues = append(issues, inventory.AgentsIssue)
+	}
+	for _, mailbox := range inventory.Mailboxes {
+		if mailbox.Status == "error" {
+			check.Status = "error"
+		} else if mailbox.Status == "warn" && check.Status == "ok" {
+			check.Status = "warn"
 		}
-		agent := entry.Name()
-		agents = append(agents, agent)
-
-		// Check inbox directories exist
-		inboxNew := fsq.AgentInboxNew(root, agent)
-		if _, err := os.Stat(inboxNew); os.IsNotExist(err) {
-			issues = append(issues, fmt.Sprintf("%s: inbox/new missing", agent))
+		if len(mailbox.Issues) > 0 {
+			issues = append(issues, mailbox.Handle+": "+strings.Join(mailbox.Issues, ", "))
 		}
 	}
-
-	if len(agents) == 0 {
+	if repair != nil && repair.Failure != nil {
+		check.Status = "error"
+		issues = append(issues, "repair "+repair.Failure.Code+": "+repair.Failure.Message)
+	}
+	if len(inventory.Mailboxes) == 0 && len(issues) == 0 {
 		check.Status = "warn"
-		check.Message = "no agent mailboxes"
+		check.Message = "no configured or discovered mailboxes"
 		return check
 	}
-
+	check.Message = fmt.Sprintf("%d mailboxes", len(inventory.Mailboxes))
 	if len(issues) > 0 {
-		check.Status = "warn"
-		check.Message = fmt.Sprintf("%d agents, issues: %v", len(agents), issues)
-		return check
+		check.Message += "; " + strings.Join(issues, "; ")
 	}
-
-	check.Status = "ok"
-	check.Message = fmt.Sprintf("%d agents configured", len(agents))
+	if repair == nil {
+		for _, mailbox := range inventory.Mailboxes {
+			if mailbox.RepairEligible {
+				check.Message += "; repair: amq doctor --fix-mailboxes"
+				break
+			}
+		}
+	} else if len(repair.CreatedPaths) > 0 {
+		check.Message += "; created: " + strings.Join(repair.CreatedPaths, ", ")
+	}
 	return check
 }
 
