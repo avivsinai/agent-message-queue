@@ -427,6 +427,25 @@ Common command groups:
 | Integrations | `integration symphony init`, `integration symphony emit`, `integration kanban bridge` |
 | Operations | `presence set`, `presence list`, `route explain`, `who`, `doctor`, `doctor --ops`, `wake repair`, `wake recover-owner`, `wake retire`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |
 
+### Exit codes
+
+AMQ exposes stable process exit codes for scripts and agent consumers:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success. The command completed normally. |
+| `1` | General error. The failure has no more specific exit-code classification. |
+| `2` | Usage error. Arguments, flags, or command input are invalid. |
+| `3` | Not found. A requested resource such as a mailbox, message, session, agent, or configuration does not exist. |
+| `4` | Timeout. A watch, monitor, receipt wait, or delivery wait reached its deadline. |
+| `5` | Context mismatch. A syntactically valid command was refused because its resolved mailbox root conflicts with the `AM_BASE_ROOT`/`AM_SESSION` pin. |
+
+The numeric meaning is the machine contract; stderr is human-readable context
+and should not be parsed as a stable discriminator. `--json` does not change
+these process exit codes. A read-only `list` on a mismatched session pin warns
+and continues; commands that consume or mutate mailbox state fail with code
+`5`.
+
 For the full CLI syntax, examples, and message schema, see [CLAUDE.md](CLAUDE.md).
 For the read-only trace contract and its evidence limits, see [docs/trace.md](docs/trace.md).
 
