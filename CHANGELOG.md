@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.49.7](https://github.com/avivsinai/agent-message-queue/compare/v0.49.6...v0.49.7) (2026-07-27)
+
+
+### Bug Fixes
+
+* **doctor:** expose structured base backlog hints ([#341](https://github.com/avivsinai/agent-message-queue/issues/341)) ([6484837](https://github.com/avivsinai/agent-message-queue/commit/648483747811d4714761bbb9a44729b39f8d72d0))
+* **doctor:** warn on stale wake binaries ([#342](https://github.com/avivsinai/agent-message-queue/issues/342)) ([0a9c2d6](https://github.com/avivsinai/agent-message-queue/commit/0a9c2d67c71d08739a52fb5fc943ccc9ed4593eb))
+* **release:** reconcile published labels idempotently ([#344](https://github.com/avivsinai/agent-message-queue/issues/344)) ([5c0c4e7](https://github.com/avivsinai/agent-message-queue/commit/5c0c4e702ead5dfe37be63f471f1722ccfb7d0b2))
+* **send:** complete destination mailbox before delivery ([#339](https://github.com/avivsinai/agent-message-queue/issues/339)) ([f7be8b7](https://github.com/avivsinai/agent-message-queue/commit/f7be8b7191ab61c3dbed83107e29b032dca9fc73))
+* **send:** make mailbox recovery self-healing ([fab4c76](https://github.com/avivsinai/agent-message-queue/commit/fab4c76af2734610c157fe8996a6c7d8ed037000))
+* **upgrade:** refuse Homebrew-managed binaries ([#340](https://github.com/avivsinai/agent-message-queue/issues/340)) ([d1b04db](https://github.com/avivsinai/agent-message-queue/commit/d1b04db8a01d15fbb32bf29e8f6fa75fd5821be1))
+
 ## [0.49.6](https://github.com/avivsinai/agent-message-queue/compare/v0.49.5...v0.49.6) (2026-07-27)
 
 
