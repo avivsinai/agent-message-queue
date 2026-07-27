@@ -43,8 +43,12 @@ func terminateAndRemoveOrphanedWakeLockWithRawConsent(
 		return false, nil
 	}
 	if recheck.Process.Running && recheck.Lock.WakeMode != wakeTargetInjectVia {
-		if !allowRawOrphan || !isLiveRawOrphan(recheck) {
-			return false, fmt.Errorf("live raw wake orphan for %s (pid %d, start %s); stop the owning terminal/launchd supervisor; manual kill is non-identity-safe — recheck before running; see doctor --ops", recheck.Agent, recheck.PID, recheck.Lock.ProcessStart)
+		allowed := wakeLockNeedsReplacement(recheck)
+		if allowRawOrphan {
+			allowed = isLiveRawOrphan(recheck)
+		}
+		if !allowed {
+			return false, fmt.Errorf("live raw wake for %s (pid %d, start %s) is not eligible for automatic replacement; retry through amq coop exec to review and consent to takeover, or stop it from its owning session; refusing to signal without consent", recheck.Agent, recheck.PID, recheck.Lock.ProcessStart)
 		}
 	}
 	if recheck.Process.Running && recheck.Lock.WakeMode == wakeTargetInjectVia {
@@ -59,6 +63,10 @@ func terminateAndRemoveOrphanedWakeLockWithRawConsent(
 	removed := false
 	err := withWakeLifecycleGuard(inspection.Root, inspection.Agent, func() error {
 		current := inspectWakeLock(inspection.Root, inspection.Agent)
+		if !current.Exists {
+			removed = true
+			return nil
+		}
 		if !sameWakeLockGeneration(recheck, current) {
 			return nil
 		}
@@ -72,14 +80,6 @@ func terminateAndRemoveOrphanedWakeLockWithRawConsent(
 		return nil
 	})
 	return removed, err
-}
-
-func isLiveRawOrphan(inspection wakeLockInspection) bool {
-	return inspection.Process.Running &&
-		inspection.IdentityConfirmed &&
-		inspection.Lock.WakeMode != wakeTargetInjectVia &&
-		!wakeLockHasOwnerMarkers(inspection) &&
-		wakeLockTerminalGone(inspection)
 }
 
 func terminateWakeProcess(inspection wakeLockInspection) error {

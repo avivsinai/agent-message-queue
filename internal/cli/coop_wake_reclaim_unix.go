@@ -29,12 +29,20 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
 		return nil
 	}
 
+	// Wake acquisition already performs exact-identity retirement for this
+	// designed automatic case. Do not turn it into an interactive preflight.
+	if isLiveRawOrphan(inspection) &&
+		wakeLockNeedsReplacement(inspection) {
+		return nil
+	}
+
 	if isLiveRawOrphan(inspection) {
-		state := "running, but its terminal is gone"
+		terminal := wakeLockTerminalAttachment(inspection)
+		state := coopWakeTerminalState(terminal)
 		proceed, err := confirmCoopBadWake(
 			inspection,
 			state,
-			"gone",
+			coopWakeTTYDisplay(inspection),
 			yes,
 			coopWakeRemedy(inspection, state, remedy),
 		)
@@ -47,6 +55,15 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
 		}
 		if !retired {
 			return fmt.Errorf("wake changed before live raw orphan retirement; retry")
+		}
+		if terminal != wakeTerminalGone {
+			_ = writeStderr(
+				"warning: took over blocking wake for %s (pid %d on %s): %s\n",
+				agent,
+				inspection.PID,
+				coopWakeTTYDisplay(inspection),
+				state,
+			)
 		}
 		return nil
 	}
@@ -125,6 +142,17 @@ func consentToClearWake(yes bool, remedy string) (bool, error) {
 		return false, nil
 	}
 	return confirmPrompt("Clear it and start a fresh wake?")
+}
+
+func coopWakeTerminalState(terminal wakeTerminalAttachment) string {
+	switch terminal {
+	case wakeTerminalGone:
+		return "running, but its terminal is gone"
+	case wakeTerminalAttached:
+		return "running, and still attached to a terminal — this may be a live session in another window"
+	default:
+		return "running; cannot determine whether its terminal is still attached"
+	}
 }
 
 func coopWakeTTYDisplay(inspection wakeLockInspection) string {

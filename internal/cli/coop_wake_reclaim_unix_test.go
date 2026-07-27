@@ -36,6 +36,9 @@ func TestPrepareCoopWakeLockUnverifiedYesRemovesMetadataWithoutSignal(t *testing
 	if !strings.Contains(stderr, "without signaling it") || !strings.Contains(stderr, "duplicate notifications may continue") {
 		t.Fatalf("warning missing safety facts: %q", stderr)
 	}
+	if got := strings.Count(stderr, "duplicate notifications may continue"); got != 1 {
+		t.Fatalf("duplicate-notification warning count = %d, want 1: %q", got, stderr)
+	}
 }
 
 func TestPrepareCoopWakeLockProvenForeignProcessRefusesWithoutMutation(t *testing.T) {
@@ -64,10 +67,15 @@ func TestPrepareCoopWakeLockHeadlessPrintsRemedyWithoutPrompt(t *testing.T) {
 	root := secureTempDirForTest(t)
 	lockPath := writeUnverifiedCoopWakeLock(t, root)
 	remedy := "amq coop exec -y --root /resolved/session --me codex codex"
-	var got error
-	stderr := captureWakeStderr(t, func() { got = prepareCoopWakeLock(root, "codex", false, remedy) })
+	stdout, stderr, got := captureEnvOutput(t, func() error {
+		return prepareCoopWakeLock(root, "codex", false, remedy)
+	})
 	if got == nil || !strings.Contains(got.Error(), "declined") {
 		t.Fatalf("headless result = %v", got)
+	}
+	if strings.Contains(stdout, "Clear it and start a fresh wake?") ||
+		strings.Contains(stderr, "Clear it and start a fresh wake?") {
+		t.Fatalf("headless cleanup printed an unanswerable prompt: stdout=%q stderr=%q", stdout, stderr)
 	}
 	if !strings.Contains(stderr, remedy) || !strings.Contains(stderr, "AM_ROOT=") {
 		t.Fatalf("remedy missing: %q", stderr)
@@ -82,6 +90,35 @@ func TestCoopWakeRemedyForCommandUsesResolvedRootAndYes(t *testing.T) {
 	want := "amq coop exec -y --root /resolved/session --me codex codex --dangerously-bypass-approvals-and-sandbox"
 	if got != want {
 		t.Fatalf("command = %q, want %q", got, want)
+	}
+}
+
+func TestWakeLockHasUsableNotificationPathChoosesExplicitTerminalFailDirection(t *testing.T) {
+	tests := []struct {
+		name       string
+		tty        string
+		known      bool
+		has        bool
+		wantUsable bool
+	}{
+		{name: "attached legacy unknown is usable", tty: "unknown", known: true, has: true, wantUsable: true},
+		{name: "undeterminable legacy unknown fails closed", tty: "unknown"},
+		{name: "undeterminable concrete path preserves Linux evidence", tty: "/dev/null", wantUsable: true},
+		{name: "proven gone fails closed", tty: "/dev/amq-missing-notification-tty", known: true, has: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inspection := wakeLockInspection{
+				Lock: wakeLock{TTY: tt.tty, WakeMode: wakeInjectModeRaw},
+				Process: wakeProcessInfo{
+					ControllingTerminalKnown: tt.known,
+					HasControllingTerminal:   tt.has,
+				},
+			}
+			if got := wakeLockHasUsableNotificationPath(inspection); got != tt.wantUsable {
+				t.Fatalf("usable = %v, want %v", got, tt.wantUsable)
+			}
+		})
 	}
 }
 

@@ -50,6 +50,7 @@ func inspectWakeProcessPlatform(pid int) wakeProcessInfo {
 	info.Executable = nulTerminatedString(kp.Proc.P_comm[:])
 	info.ControllingTerminalKnown = true
 	info.HasControllingTerminal = kp.Eproc.Tdev != darwinNoControllingTerminal
+	info.ControllingTerminalDevice = kp.Eproc.Tdev
 
 	info.BootID, info.LegacyBootID = darwinBootIdentity()
 

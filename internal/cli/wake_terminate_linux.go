@@ -32,6 +32,13 @@ func readWakeLockMetadata(root, me string) wakeLockInspection {
 }
 
 func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
+	return terminateAndRemoveOrphanedWakeLockWithRawConsent(inspection, false)
+}
+
+func terminateAndRemoveOrphanedWakeLockWithRawConsent(
+	inspection wakeLockInspection,
+	allowRawOrphan bool,
+) (bool, error) {
 	var locked wakeLockInspection
 	pidfd := -1
 	provenGone := false
@@ -80,6 +87,16 @@ func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, er
 	}
 	defer func() { _ = linuxPidfdClose(pidfd) }()
 
+	if locked.Process.Running && locked.Lock.WakeMode != wakeTargetInjectVia {
+		allowed := wakeLockNeedsReplacement(locked)
+		if allowRawOrphan {
+			allowed = isLiveRawOrphan(locked)
+		}
+		if !allowed {
+			return false, fmt.Errorf("live raw wake for %s (pid %d, start %s) is not eligible for automatic replacement; retry through amq coop exec to review and consent to takeover, or stop it from its owning session; refusing to signal without consent", locked.Agent, locked.PID, locked.Lock.ProcessStart)
+		}
+	}
+
 	// Signaling and both waits happen without the lifecycle guard. The retained
 	// pidfd cannot retarget a recycled numeric PID.
 	if err := terminateWakePidfd(pidfd); err != nil {
@@ -89,6 +106,10 @@ func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, er
 	removed := false
 	err := withWakeLifecycleGuard(inspection.Root, inspection.Agent, func() error {
 		current := inspectWakeLock(inspection.Root, inspection.Agent)
+		if !current.Exists {
+			removed = true
+			return nil
+		}
 		if !sameWakeLockGeneration(locked, current) {
 			return nil
 		}
@@ -108,7 +129,7 @@ func retireLiveRawOrphan(inspection wakeLockInspection) (bool, error) {
 	if !isLiveRawOrphan(inspection) {
 		return false, fmt.Errorf("wake is not an identity-confirmed live raw orphan")
 	}
-	return terminateAndRemoveOrphanedWakeLock(inspection)
+	return terminateAndRemoveOrphanedWakeLockWithRawConsent(inspection, true)
 }
 
 func terminateWakePidfd(pidfd int) error {
