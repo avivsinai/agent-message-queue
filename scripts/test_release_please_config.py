@@ -42,18 +42,34 @@ def test_release_please_workflow_is_pr_only_and_staged() -> None:
     assert "token: ${{ secrets.RELEASE_PLEASE_TOKEN }}" in workflow
     assert "skip-github-release: true" in workflow
     assert "RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}" in workflow
-    assert "if: ${{ env.RELEASE_PLEASE_TOKEN != '' }}" in workflow
     assert "if: ${{ env.RELEASE_PLEASE_TOKEN == '' }}" in workflow
 
-    release_commit_guard = """\
-    if: >-
-      ${{
-        github.event_name == 'workflow_dispatch' ||
-        !startsWith(github.event.head_commit.message, 'chore(release): v')
-      }}
-"""
     release_job = workflow[workflow.index("  release-please:\n") :]
-    assert release_commit_guard in release_job
+    assert "github.event.head_commit.message" not in release_job
+    assert 'workflows: ["Release"]' in workflow
+    assert "types: [completed]" in workflow
+    assert "branches: [main]" in workflow
+    assert "github.event.workflow_run.conclusion" not in workflow
+    assert "github.event.workflow_run.head_sha" not in workflow
+
+    state_step = release_job[
+        release_job.index("      - name: Check published release state\n") :
+        release_job.index("      - name: Await release-please credential\n")
+    ]
+    assert 'jq -er \'.\".\"' in state_step
+    assert 'tag="v${version}"' in state_step
+    assert 'repos/${GITHUB_REPOSITORY}/releases?per_page=100' in state_step
+    assert "select(.draft == false and .published_at != null)" in state_step
+    assert 'grep -Fxq "$tag"' in state_step
+    assert 'echo "released=${released}" >> "$GITHUB_OUTPUT"' in state_step
+
+    action_step = release_job[
+        release_job.index("      - name: Open or update release pull request\n") :
+    ]
+    assert (
+        "if: ${{ env.RELEASE_PLEASE_TOKEN != '' && "
+        "steps.release_state.outputs.released == 'true' }}"
+    ) in action_step
 
     release_workflow = (ROOT / ".github/workflows/release.yml").read_text()
     assert "predates scripts/release_changelog_section.py" in release_workflow
