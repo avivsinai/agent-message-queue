@@ -59,6 +59,23 @@ func TestBuildInterruptText_CustomOverride(t *testing.T) {
 	}
 }
 
+func TestBuildNotificationTextRestoresPeerHeadersForOutput(t *testing.T) {
+	text := buildNotificationText(
+		"collab",
+		[]wakeMsgInfo{{from: "codex", subject: "review ready"}},
+		48,
+	)
+	for _, want := range []string{
+		"AMQ [collab]",
+		"message from codex",
+		"review ready",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("notification output %q missing %q", text, want)
+		}
+	}
+}
+
 func TestNotificationPrefix(t *testing.T) {
 	if got := notificationPrefix("AMQ", ""); got != "AMQ" {
 		t.Fatalf("expected 'AMQ', got: %s", got)
@@ -191,7 +208,12 @@ func TestInjectNotificationNoneWritesOutputWithoutTIOCSTI(t *testing.T) {
 	})
 
 	stderr := captureWakeStderr(t, func() {
-		cfg := &wakeConfig{injectMode: wakeInjectModeNone, bell: true}
+		cfg := &wakeConfig{
+			injectMode:     wakeInjectModeNone,
+			bell:           true,
+			attentionEnv:   func(string) string { return "" },
+			attentionIsTTY: func() bool { return true },
+		}
 		if err := injectNotification(cfg, "safe notice", true); err != nil {
 			t.Fatalf("injectNotification: %v", err)
 		}
@@ -200,8 +222,8 @@ func TestInjectNotificationNoneWritesOutputWithoutTIOCSTI(t *testing.T) {
 	if len(injected) != 0 {
 		t.Fatalf("none mode injected terminal input: %q", injected)
 	}
-	if stderr != "\asafe notice\n" {
-		t.Fatalf("stderr = %q, want bell + notice", stderr)
+	if stderr != "\x1b]0;AMQ attention\a\asafe notice\n" {
+		t.Fatalf("stderr = %q, want title + bell + notice", stderr)
 	}
 }
 
@@ -209,6 +231,8 @@ func TestInjectNotificationNoneDoesNotInvokeInjectVia(t *testing.T) {
 	cfg, outputPath := injectViaCaptureConfig(t)
 	cfg.injectMode = wakeInjectModeNone
 	cfg.bell = true
+	cfg.attentionEnv = func(string) string { return "" }
+	cfg.attentionIsTTY = func() bool { return true }
 
 	stderr := captureWakeStderr(t, func() {
 		if err := injectNotification(cfg, "safe notice", true); err != nil {
@@ -219,8 +243,8 @@ func TestInjectNotificationNoneDoesNotInvokeInjectVia(t *testing.T) {
 	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
 		t.Fatalf("none mode invoked inject-via; output stat error = %v", err)
 	}
-	if stderr != "\asafe notice\n" {
-		t.Fatalf("stderr = %q, want bell + notice", stderr)
+	if stderr != "\x1b]0;AMQ attention\a\asafe notice\n" {
+		t.Fatalf("stderr = %q, want title + bell + notice", stderr)
 	}
 }
 
@@ -882,6 +906,8 @@ func TestNotifyNewMessagesNoneUrgentUsesOutputBellWithoutInput(t *testing.T) {
 		interruptLabel:    "interrupt",
 		interruptPriority: "urgent",
 		interruptCooldown: 7 * time.Second,
+		attentionEnv:      func(string) string { return "" },
+		attentionIsTTY:    func() bool { return true },
 	}
 	stderr := captureWakeStderr(t, func() {
 		if err := notifyNewMessages(cfg); err != nil {
@@ -902,8 +928,9 @@ func TestNotifyNewMessagesNoneUrgentUsesOutputBellWithoutInput(t *testing.T) {
 		48,
 		"",
 	)
-	if stderr != "\a"+expectedText+"\n" {
-		t.Fatalf("stderr = %q, want one bell + urgent notice %q", stderr, expectedText)
+	expectedOutput := "\x1b]0;AMQ attention\a\a" + expectedText + "\n"
+	if stderr != expectedOutput {
+		t.Fatalf("stderr = %q, want title + bell + urgent notice %q", stderr, expectedText)
 	}
 
 	externalCfg, outputPath := injectViaCaptureConfig(t)
@@ -916,6 +943,8 @@ func TestNotifyNewMessagesNoneUrgentUsesOutputBellWithoutInput(t *testing.T) {
 	externalCfg.interruptKey = "\x03"
 	externalCfg.interruptLabel = "interrupt"
 	externalCfg.interruptPriority = "urgent"
+	externalCfg.attentionEnv = func(string) string { return "" }
+	externalCfg.attentionIsTTY = func() bool { return true }
 	externalStderr := captureWakeStderr(t, func() {
 		if err := notifyNewMessages(externalCfg); err != nil {
 			t.Fatalf("notifyNewMessages with inject-via config: %v", err)
@@ -924,8 +953,253 @@ func TestNotifyNewMessagesNoneUrgentUsesOutputBellWithoutInput(t *testing.T) {
 	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
 		t.Fatalf("none mode invoked inject-via for urgent notice; output stat error = %v", err)
 	}
-	if externalStderr != "\a"+expectedText+"\n" {
-		t.Fatalf("external stderr = %q, want one bell + urgent notice %q", externalStderr, expectedText)
+	if externalStderr != expectedOutput {
+		t.Fatalf("external stderr = %q, want title + bell + urgent notice %q", externalStderr, expectedText)
+	}
+}
+
+func TestNotifyNewMessagesNoneNormalUsesPeerOutput(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "msg-normal-output",
+			From:    "codex",
+			To:      []string{"alice"},
+			Thread:  "p2p/alice__codex",
+			Subject: "review ready",
+			Created: "2026-07-27T05:00:00Z",
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-normal-output.md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	var emission wakeAttentionEmission
+	cfg := &wakeConfig{
+		me:             "alice",
+		root:           root,
+		session:        "collab",
+		injectMode:     wakeInjectModeNone,
+		previewLen:     48,
+		attentionIsTTY: func() bool { return false },
+		recordAttention: func(got wakeAttentionEmission) error {
+			emission = got
+			return nil
+		},
+	}
+	stderr := captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("notifyNewMessages: %v", err)
+		}
+	})
+	for _, want := range []string{"message from codex", "review ready"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("normal output %q missing %q", stderr, want)
+		}
+	}
+	if strings.Contains(stderr, coopWakeDoorbell) {
+		t.Fatalf("normal output leaked fixed input payload: %q", stderr)
+	}
+	if emission.OutputProvenance != wakePayloadPeerHeaders {
+		t.Fatalf("provenance = %q, want peer headers", emission.OutputProvenance)
+	}
+}
+
+func TestNotifyNewMessagesNormalSuccessUsesFixedInputOnly(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "msg-normal-input",
+			From:    "untrusted-sender",
+			To:      []string{"alice"},
+			Thread:  "p2p/alice__untrusted-sender",
+			Subject: "untrusted-subject",
+			Created: "2026-07-27T05:10:00Z",
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-normal-input.md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	cfg := &wakeConfig{
+		me:         "alice",
+		root:       root,
+		injectMode: wakeInjectModeRaw,
+		previewLen: 48,
+	}
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notifyNewMessages: %v", err)
+	}
+
+	got := strings.Join(injected, "|")
+	if !strings.Contains(got, coopWakeDoorbell) {
+		t.Fatalf("injected bytes = %q, missing fixed doorbell", got)
+	}
+	for _, forbidden := range []string{"untrusted-sender", "untrusted-subject"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("peer header %q entered terminal input: %q", forbidden, got)
+		}
+	}
+}
+
+func TestNotifyNewMessagesCustomInterruptUsesSanitizedOperatorPayloadForInputAndFallback(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:   1,
+			ID:       "msg-custom-interrupt",
+			From:     "peer",
+			To:       []string{"alice"},
+			Thread:   "p2p/alice__peer",
+			Subject:  "peer subject",
+			Created:  "2026-07-27T05:20:00Z",
+			Priority: "urgent",
+			Labels:   []string{"interrupt"},
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-custom-interrupt.md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	fail := false
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		if fail {
+			return errors.New("injection unavailable")
+		}
+		injected = append(injected, text)
+		return nil
+	})
+	var emission wakeAttentionEmission
+	cfg := &wakeConfig{
+		me:                "alice",
+		root:              root,
+		injectMode:        wakeInjectModeRaw,
+		interrupt:         true,
+		interruptPriority: "urgent",
+		interruptLabel:    "interrupt",
+		interruptNotice:   "operator\x1b[31m\nnotice",
+		attentionIsTTY:    func() bool { return false },
+		recordAttention: func(got wakeAttentionEmission) error {
+			emission = got
+			return nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("successful notifyNewMessages: %v", err)
+	}
+	safeNotice := sanitizeForTTY(cfg.interruptNotice)
+	if got := strings.Join(injected, "|"); !strings.Contains(got, safeNotice) {
+		t.Fatalf("injected bytes = %q, want sanitized operator notice %q", got, safeNotice)
+	}
+	fail = true
+	stderr := captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("fallback notifyNewMessages: %v", err)
+		}
+	})
+	if !strings.Contains(stderr, safeNotice) || strings.Contains(stderr, "peer subject") {
+		t.Fatalf("fallback output = %q, want only sanitized operator notice", stderr)
+	}
+	if emission.OutputProvenance != wakePayloadOperatorFlag {
+		t.Fatalf("fallback provenance = %q, want operator", emission.OutputProvenance)
+	}
+}
+
+func TestNotifyNewMessagesOperatorFailurePreservesOperatorOutputProvenance(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "msg-operator-output",
+			From:    "codex",
+			To:      []string{"alice"},
+			Thread:  "p2p/alice__codex",
+			Subject: "must remain peer-only",
+			Created: "2026-07-27T05:00:00Z",
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-operator-output.md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	stubTIOCSTIInject(t, func(string) error {
+		return errors.New("injection unavailable")
+	})
+
+	var emission wakeAttentionEmission
+	cfg := &wakeConfig{
+		me:             "alice",
+		root:           root,
+		injectMode:     wakeInjectModeRaw,
+		injectCmd:      "amq drain\x1b[31m\n--include-body",
+		previewLen:     48,
+		attentionIsTTY: func() bool { return false },
+		recordAttention: func(got wakeAttentionEmission) error {
+			emission = got
+			return nil
+		},
+	}
+	stderr := captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("notifyNewMessages: %v", err)
+		}
+	})
+	if !strings.Contains(stderr, "amq drain [31m --include-body") {
+		t.Fatalf("operator output missing sanitized command: %q", stderr)
+	}
+	if strings.Contains(stderr, "must remain peer-only") {
+		t.Fatalf("operator output replaced by peer headers: %q", stderr)
+	}
+	if emission.OutputProvenance != wakePayloadOperatorFlag {
+		t.Fatalf("provenance = %q, want operator", emission.OutputProvenance)
 	}
 }
 

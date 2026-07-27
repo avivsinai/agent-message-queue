@@ -55,6 +55,10 @@ type wakeConfig struct {
 	retainedInbox        wakeInboxReader
 	touchPresence        func() error
 	recordNotifierStatus func(status, mode, reason string) error
+	recordAttention      func(wakeAttentionEmission) error
+	attentionEnv         func(string) string
+	attentionIsTTY       func() bool
+	attentionWrite       func([]byte) (int, error)
 }
 
 type wakeAdmissionWatcher interface {
@@ -114,6 +118,45 @@ type wakeMsgInfo struct {
 	subject  string
 	priority string
 	labels   []string
+}
+
+type wakePayloadProvenance string
+
+const (
+	wakePayloadSystemFixed  wakePayloadProvenance = "system_fixed"
+	wakePayloadPeerHeaders  wakePayloadProvenance = "peer_headers"
+	wakePayloadOperatorFlag wakePayloadProvenance = "operator_flag"
+)
+
+type wakePayload struct {
+	text       string
+	provenance wakePayloadProvenance
+}
+
+type wakeNotification struct {
+	input  wakePayload
+	output wakePayload
+}
+
+func peerWakeNotification(output string) wakeNotification {
+	return wakeNotification{
+		input: wakePayload{
+			text:       coopWakeDoorbell,
+			provenance: wakePayloadSystemFixed,
+		},
+		output: wakePayload{
+			text:       output,
+			provenance: wakePayloadPeerHeaders,
+		},
+	}
+}
+
+func operatorWakeNotification(text string) wakeNotification {
+	payload := wakePayload{
+		text:       text,
+		provenance: wakePayloadOperatorFlag,
+	}
+	return wakeNotification{input: payload, output: payload}
 }
 
 type ttyInputState struct {
@@ -283,21 +326,19 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		return nil
 	}
 
-	// A supervised/co-op wake is only a fixed doorbell. Message headers,
-	// session names, custom notices, commands, and urgency never become
-	// terminal input.
-	if usesCoopDoorbell(cfg) {
-		return injectNotification(cfg, coopWakeDoorbell, len(interruptMessages) == 0)
-	}
-
 	if cfg.interrupt && len(interruptMessages) > 0 {
 		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.previewLen, cfg.interruptNotice)
+		notice := peerWakeNotification(interruptText)
+		if cfg.interruptNotice != "" {
+			notice = operatorWakeNotification(interruptText)
+		}
 		if cfg.injectMode == wakeInjectModeNone {
-			writeWakeOutput(interruptText, true)
-			return nil
+			return deliverWakeNotification(cfg, notice, false)
 		}
 		now := time.Now()
-		if cfg.interruptKey != "" && shouldInterruptNow(cfg, now) {
+		if !usesCoopDoorbell(cfg) &&
+			cfg.interruptKey != "" &&
+			shouldInterruptNow(cfg, now) {
 			if cfg.injectVia != "" {
 				allowed, guardErr := authorizeTerminalWrite(cfg)
 				if guardErr != nil {
@@ -323,25 +364,59 @@ func notifyNewMessages(cfg *wakeConfig) error {
 				}
 			}
 		}
-		notificationText := coopWakeDoorbell
-		if cfg.interruptNotice != "" {
-			notificationText = interruptText
-		}
-		return injectNotification(cfg, notificationText, false)
+		return deliverWakeNotification(cfg, notice, false)
 	}
 
-	// Build notification text
-	var text string
+	var notice wakeNotification
 	if cfg.injectCmd != "" {
-		// Power user mode: inject actual command
-		text = "\n" + sanitizeForTTY(cfg.injectCmd) + "\n"
+		// Power user mode: inject the operator-authored command.
+		text := "\n" + sanitizeForTTY(cfg.injectCmd) + "\n"
+		notice = operatorWakeNotification(text)
 	} else {
-		// Peer-derived headers never enter terminal input. The fixed prefix is
-		// shell-inert if a standalone wake lands at a shell prompt.
-		text = coopWakeDoorbell
+		notice = peerWakeNotification(
+			buildNotificationText(cfg.session, messages, cfg.previewLen),
+		)
 	}
 
-	return injectNotification(cfg, text, true)
+	return deliverWakeNotification(cfg, notice, true)
+}
+
+func buildNotificationText(session string, messages []wakeMsgInfo, previewLen int) string {
+	count := len(messages)
+	prefix := notificationPrefix("AMQ", session)
+	if count == 1 {
+		msg := messages[0]
+		subject := msg.subject
+		if subject == "" {
+			subject = "(no subject)"
+		}
+		return fmt.Sprintf(
+			"%s: message from %s - %s. Drain with: amq drain --include-body — then act on it",
+			prefix,
+			msg.from,
+			truncateSubject(subject, previewLen),
+		)
+	}
+
+	senderCounts := make(map[string]int)
+	for _, msg := range messages {
+		senderCounts[msg.from]++
+	}
+	senders := make([]string, 0, len(senderCounts))
+	for sender := range senderCounts {
+		senders = append(senders, sender)
+	}
+	sort.Strings(senders)
+	parts := make([]string, 0, len(senders))
+	for _, sender := range senders {
+		parts = append(parts, fmt.Sprintf("%d from %s", senderCounts[sender], sender))
+	}
+	return fmt.Sprintf(
+		"%s: %d messages - %s. Drain with: amq drain --include-body — then act on it",
+		prefix,
+		count,
+		strings.Join(parts, ", "),
+	)
 }
 
 func buildInterruptText(session string, messages []wakeMsgInfo, senderCounts map[string]int, previewLen int, custom string) string {
@@ -454,32 +529,43 @@ func normalizeWakeInjectMode(raw string) (string, error) {
 	}
 }
 
-func writeWakeOutput(text string, bell bool) {
-	if bell {
-		text = "\a" + text
+// injectNotification preserves the legacy test/internal string helper. New
+// production routing uses deliverWakeNotification so input and output sources
+// remain explicit.
+func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error {
+	payload := wakePayload{
+		text:       text,
+		provenance: wakePayloadSystemFixed,
 	}
-	_, _ = fmt.Fprint(os.Stderr, text+"\n")
+	return deliverWakeNotification(
+		cfg,
+		wakeNotification{input: payload, output: payload},
+		deferForInput,
+	)
 }
 
-func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error {
+func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForInput bool) error {
 	ownerBound := usesCoopDoorbell(cfg)
 	if ownerBound {
-		text = coopWakeDoorbell
+		notice.input = wakePayload{
+			text:       coopWakeDoorbell,
+			provenance: wakePayloadSystemFixed,
+		}
 	}
 	if cfg.injectMode == wakeInjectModeNone {
-		writeWakeOutput(text, cfg.bell && !ownerBound)
+		emitWakeAttention(cfg, notice.output)
 		return nil
 	}
 
-	// Keep plain text for stderr fallback
-	plainText := text
+	inputText := notice.input.text
+	plainText := inputText
 	if cfg.bell && !ownerBound {
 		plainText = "\a" + plainText
 	}
 
 	if shouldDeferBeforeInject(cfg, deferForInput) {
 		if !waitForWakeInputQuiet(cfg) {
-			writeWakeOutput(text, cfg.bell && !ownerBound)
+			emitWakeAttention(cfg, notice.output)
 			return nil
 		}
 	}
@@ -500,14 +586,14 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 				_ = writeStderr("amq wake: falling back to stderr notification\n")
 				cfg.fallbackWarn = false
 			}
-			_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
+			emitWakeAttention(cfg, notice.output)
 		}
 		return nil
 	}
 
 	mode := effectiveInjectMode(cfg)
 	if cfg.debug {
-		_ = writeStderr("amq wake [debug]: mode=%s text_len=%d\n", mode, len(text))
+		_ = writeStderr("amq wake [debug]: mode=%s text_len=%d\n", mode, len(inputText))
 	}
 	var injectErr error
 	switch mode {
@@ -515,7 +601,7 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 		// Raw mode: inject text and CR separately to avoid paste detection.
 		// Ink treats multi-char input as paste, not keypresses. Sending text+CR
 		// as one chunk makes Ink see pasted text, not an Enter keypress.
-		injectedText := text
+		injectedText := inputText
 		if cfg.bell && !ownerBound {
 			injectedText = "\a" + injectedText
 		}
@@ -525,9 +611,9 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 		// Paste mode: bracketed paste with delayed CR
 		// Works with crossterm/ratatui apps
 		// Send paste content first, then CR after short delay to avoid coalescing
-		pasteText := text
+		pasteText := inputText
 		if !ownerBound {
-			pasteText = "\x1b[200~" + text + "\x1b[201~"
+			pasteText = "\x1b[200~" + inputText + "\x1b[201~"
 		}
 		if cfg.bell && !ownerBound {
 			pasteText = "\a" + pasteText
@@ -544,14 +630,14 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	default:
 		// Unknown mode, fall back to raw
 		if ownerBound {
-			wrote, err := writeTerminalChunk(cfg, text)
+			wrote, err := writeTerminalChunk(cfg, inputText)
 			if err != nil {
 				injectErr = err
 			} else if wrote {
 				_, injectErr = writeTerminalChunk(cfg, "\r")
 			}
 		} else {
-			injectedText := text + "\r"
+			injectedText := inputText + "\r"
 			if cfg.bell {
 				injectedText = "\a" + injectedText
 			}
@@ -576,7 +662,7 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 			cfg.injectMode = wakeInjectModeNone
 			_ = writeStderr("amq wake: warning: %s\n", reason)
 			cfg.fallbackWarn = false
-			_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
+			emitWakeAttention(cfg, notice.output)
 			return nil
 		}
 		var authorityErr *wakeTerminalAuthorityError
@@ -588,8 +674,8 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 			_ = writeStderr("amq wake: falling back to stderr notification\n")
 			cfg.fallbackWarn = false
 		}
-		// Fallback: print plain text to stderr (no escape sequences)
-		_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
+		// Fallback: use the output-only attention tier; never retry input.
+		emitWakeAttention(cfg, notice.output)
 		return nil
 	}
 
