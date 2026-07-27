@@ -146,6 +146,34 @@ func sessionPinMismatch(target string) (*SessionContextError, error) {
 	return nil, nil
 }
 
+// isExplicitOwnBaseRootInspection recognizes list's narrow read-only path back
+// to the base root named by the current pin. Identity pins must still
+// authenticate both the complete active context and the target base. Legacy
+// pins retain their exact lexical comparison.
+func isExplicitOwnBaseRootInspection(common *commonFlags, target string) bool {
+	if common == nil || !common.rootExplicit() {
+		return false
+	}
+	pin, err := loadSessionPin()
+	if err != nil || !pin.Present {
+		return false
+	}
+	target = absPath(resolveRoot(target))
+	if !pin.IdentityPin {
+		return target == pin.BaseRoot
+	}
+	if err := verifyRootUnderBase(
+		pin.BaseRoot,
+		pin.BaseRootID,
+		pin.Session,
+		pin.ExpectedRoot,
+		pin.RootID,
+	); err != nil {
+		return false
+	}
+	return verifyTreeIdentityToken(target, pin.BaseRootID) == TreeRelationSame
+}
+
 // resolveMailboxRoot makes --session a routing operation. With a pin, the
 // target is always constructed from the authorized base rather than ambient
 // AM_ROOT. Without a pin, an explicit session remains deliberate legacy input.
