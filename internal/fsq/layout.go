@@ -299,7 +299,7 @@ func readActiveMailboxConfig(root *layoutDirCapability) (mailboxActiveConfig, st
 	return cfg, "ok", ""
 }
 
-func inspectMailboxLayout(root *DeliveryRoot) (mailboxLayoutPlan, error) {
+func inspectMailboxLayout(root *DeliveryRoot, additionalHandles ...string) (mailboxLayoutPlan, error) {
 	if err := root.VerifyBase(); err != nil {
 		return mailboxLayoutPlan{}, err
 	}
@@ -349,6 +349,9 @@ func inspectMailboxLayout(root *DeliveryRoot) (mailboxLayoutPlan, error) {
 		handleSet[handle] = true
 	}
 	for handle := range discovered {
+		handleSet[handle] = true
+	}
+	for _, handle := range additionalHandles {
 		handleSet[handle] = true
 	}
 	handles := make([]string, 0, len(handleSet))
@@ -475,18 +478,22 @@ func InspectMailboxLayout(root *DeliveryRoot) (MailboxInventory, error) {
 	return plan.inventory, err
 }
 
-func preflightHazard(plan mailboxLayoutPlan) (string, bool) {
+func preflightHazard(plan mailboxLayoutPlan, repairHandles []string) (string, bool) {
 	if !plan.inventory.RepairAuthorized {
 		return plan.inventory.ActiveConfigIssue, true
 	}
 	if plan.inventory.AgentsState != MailboxPathDirectory && plan.inventory.AgentsState != MailboxPathMissing {
 		return plan.inventory.AgentsIssue, true
 	}
+	repairSet := make(map[string]bool, len(repairHandles))
+	for _, handle := range repairHandles {
+		repairSet[handle] = true
+	}
 	for _, mailbox := range plan.inventory.Mailboxes {
-		if mailbox.Provenance == MailboxDiscovered {
+		if !repairSet[mailbox.Handle] {
 			continue
 		}
-		if len(mailbox.Issues) > 0 && !mailbox.RepairEligible {
+		if len(mailbox.Issues) > 0 && !mailboxIssuesRepairable(mailbox.Issues) {
 			return mailbox.Handle + ":" + strings.Join(mailbox.Issues, ","), true
 		}
 		for _, path := range mailbox.Paths {
@@ -500,10 +507,10 @@ func preflightHazard(plan mailboxLayoutPlan) (string, bool) {
 	return "", false
 }
 
-func repairComponentPaths(plan mailboxLayoutPlan) []string {
+func repairComponentPaths(repairHandles []string) []string {
 	paths := []string{"agents"}
 	seen := map[string]bool{"agents": true}
-	handles := append([]string(nil), plan.inventory.ConfiguredAgents...)
+	handles := append([]string(nil), repairHandles...)
 	sort.Strings(handles)
 	for _, handle := range handles {
 		for _, rel := range mailboxComponentPaths() {
@@ -561,15 +568,19 @@ func mergeCreatedPaths(inventory *MailboxInventory, created []string) {
 	}
 }
 
-func repairMailboxLayout(root *DeliveryRoot, hooks mailboxRepairHooks) MailboxRepairResult {
-	plan, err := inspectMailboxLayout(root)
+func repairMailboxLayoutHandles(root *DeliveryRoot, requestedHandles []string, configuredSet bool, hooks mailboxRepairHooks) MailboxRepairResult {
+	plan, err := inspectMailboxLayout(root, requestedHandles...)
 	if err != nil {
 		return MailboxRepairResult{
 			Status:  "failed",
 			Failure: &MailboxRepairFailure{Code: "unsafe_root", Stage: "preflight", Message: err.Error()},
 		}
 	}
-	if issue, hazard := preflightHazard(plan); hazard {
+	repairHandles := requestedHandles
+	if configuredSet {
+		repairHandles = plan.inventory.ConfiguredAgents
+	}
+	if issue, hazard := preflightHazard(plan, repairHandles); hazard {
 		return MailboxRepairResult{
 			Status:    "failed",
 			Failure:   &MailboxRepairFailure{Code: "preflight_failed", Stage: "preflight", Message: issue},
@@ -595,7 +606,7 @@ func repairMailboxLayout(root *DeliveryRoot, hooks mailboxRepairHooks) MailboxRe
 		}
 	}()
 
-	for _, path := range repairComponentPaths(plan) {
+	for _, path := range repairComponentPaths(repairHandles) {
 		parentPath := filepath.Dir(path)
 		if parentPath == "." {
 			parentPath = ""
@@ -694,13 +705,18 @@ func repairMailboxLayout(root *DeliveryRoot, hooks mailboxRepairHooks) MailboxRe
 		}
 	}
 
-	inventory, inspectErr := InspectMailboxLayout(root)
+	verifiedPlan, inspectErr := inspectMailboxLayout(root, repairHandles...)
 	if inspectErr != nil {
 		return repairFailure("verification_failed", "verify", ".", inspectErr, created, root)
 	}
+	inventory := verifiedPlan.inventory
 	mergeCreatedPaths(&inventory, created)
+	repairSet := make(map[string]bool, len(repairHandles))
+	for _, handle := range repairHandles {
+		repairSet[handle] = true
+	}
 	for _, mailbox := range inventory.Mailboxes {
-		if mailbox.Provenance == MailboxDiscovered {
+		if !repairSet[mailbox.Handle] {
 			continue
 		}
 		for _, path := range mailbox.Paths {
@@ -718,8 +734,34 @@ func repairMailboxLayout(root *DeliveryRoot, hooks mailboxRepairHooks) MailboxRe
 	}
 }
 
+func repairMailboxLayout(root *DeliveryRoot, hooks mailboxRepairHooks) MailboxRepairResult {
+	return repairMailboxLayoutHandles(root, nil, true, hooks)
+}
+
 // RepairMailboxLayout validates the complete configured set before creating
 // any directory and returns exact partial results if creation later fails.
 func RepairMailboxLayout(root *DeliveryRoot) MailboxRepairResult {
 	return repairMailboxLayout(root, mailboxRepairHooks{})
+}
+
+// RepairMailboxLayoutForAgents validates and completes only the requested
+// mailbox layouts using the same no-symlink, identity-pinned repair machinery
+// as RepairMailboxLayout. A valid active config is still required, but the
+// requested handles do not need to be listed in it.
+func RepairMailboxLayoutForAgents(root *DeliveryRoot, agents []string) MailboxRepairResult {
+	handles := make([]string, 0, len(agents))
+	seen := make(map[string]bool, len(agents))
+	for _, handle := range agents {
+		if err := ValidateHandle(handle); err != nil {
+			return MailboxRepairResult{
+				Status:  "failed",
+				Failure: &MailboxRepairFailure{Code: "preflight_failed", Stage: "preflight", Message: err.Error()},
+			}
+		}
+		if !seen[handle] {
+			seen[handle] = true
+			handles = append(handles, handle)
+		}
+	}
+	return repairMailboxLayoutHandles(root, handles, false, mailboxRepairHooks{})
 }

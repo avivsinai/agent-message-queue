@@ -287,17 +287,15 @@ func runSend(args []string) error {
 	if fromSession != "" && !deliveryAgentExists(sourceFS, me) {
 		return fmt.Errorf("agent %q not found in source session %q", me, fromSession)
 	}
-	for _, recipient := range recipients {
-		if deliveryInboxExists(deliveryFS, recipient) {
-			continue
-		}
-		switch {
-		case targetProject != "" && targetSession != "":
-			return fmt.Errorf("agent %q not found in peer %q session %q", recipient, targetProject, targetSession)
-		case targetProject != "":
+	if targetProject != "" {
+		for _, recipient := range recipients {
+			if deliveryInboxExists(deliveryFS, recipient) {
+				continue
+			}
+			if targetSession != "" {
+				return fmt.Errorf("agent %q not found in peer %q session %q", recipient, targetProject, targetSession)
+			}
 			return fmt.Errorf("agent %q not found in peer %q", recipient, targetProject)
-		case targetSession != "":
-			return fmt.Errorf("agent %q not found in session %q", recipient, targetSession)
 		}
 	}
 
@@ -313,6 +311,11 @@ func runSend(args []string) error {
 	} else {
 		allHandles := append([]string{me}, recipients...)
 		if err := validateKnownHandlesDeliveryRoot(deliveryFS, common.Strict, allHandles...); err != nil {
+			return err
+		}
+	}
+	if targetProject == "" {
+		if err := prepareLocalSendMailboxes(deliveryFS, deliveryRoot, recipients); err != nil {
 			return err
 		}
 	}

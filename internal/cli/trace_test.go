@@ -31,6 +31,7 @@ func TestTraceCommandEntryPointJoinsCurrentEvidence(t *testing.T) {
 			t.Fatalf("EnsureAgentDirs(%s): %v", agent, err)
 		}
 	}
+	configureSendTestRoot(t, root, "alice", "bob")
 
 	sent := runSendJSONForTest(t,
 		"--root", root,
@@ -160,6 +161,7 @@ func TestTraceOutboxCopyDoesNotEstablishDelivery(t *testing.T) {
 			t.Fatalf("EnsureAgentDirs(%s): %v", agent, err)
 		}
 	}
+	configureSendTestRoot(t, root, "alice", "bob")
 	sent := runSendJSONForTest(t,
 		"--root", root,
 		"--me", "alice",
@@ -198,6 +200,7 @@ func TestTraceInboxCurWithoutReceiptDoesNotInferDrain(t *testing.T) {
 			t.Fatalf("EnsureAgentDirs(%s): %v", agent, err)
 		}
 	}
+	configureSendTestRoot(t, root, "alice", "bob")
 	sent := runSendJSONForTest(t,
 		"--root", root,
 		"--me", "alice",
@@ -269,6 +272,7 @@ func TestTraceDoesNotFollowAgentsSymlinkOutsidePinnedRoot(t *testing.T) {
 			t.Fatalf("EnsureAgentDirs(%s): %v", agent, err)
 		}
 	}
+	configureSendTestRoot(t, outside, "alice", "bob")
 	sent := runSendJSONForTest(t,
 		"--root", outside,
 		"--me", "alice",
@@ -298,6 +302,7 @@ func TestTraceReportsUnreadableJoinInputsInsteadOfNoEvidence(t *testing.T) {
 			t.Fatalf("EnsureAgentDirs(%s): %v", agent, err)
 		}
 	}
+	configureSendTestRoot(t, root, "alice", "bob")
 	sent := runSendJSONForTest(t,
 		"--root", root,
 		"--me", "alice",

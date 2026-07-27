@@ -214,6 +214,7 @@ func TestSendFromSessionRequiresRecipientInTargetSession(t *testing.T) {
 	if err := fsq.EnsureRootDirs(targetRoot); err != nil {
 		t.Fatalf("EnsureRootDirs(target): %v", err)
 	}
+	configureSendTestRoot(t, targetRoot, "carol")
 	ensureSendSessionAgent(t, sourceRoot, "bob")
 
 	err := runSend([]string{
@@ -222,12 +223,13 @@ func TestSendFromSessionRequiresRecipientInTargetSession(t *testing.T) {
 		"--from-session", "cto",
 		"--to", "bob",
 		"--session", "qa",
+		"--strict",
 		"--body", "recipient only exists in source",
 	})
 	if err == nil {
 		t.Fatal("expected recipient missing from target session to fail")
 	}
-	if !strings.Contains(err.Error(), `agent "bob" not found in session "qa"`) {
+	if !strings.Contains(err.Error(), `handle "bob" not in config.json`) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -269,6 +271,8 @@ func TestSendCrossSessionWithExplicitRootOverride(t *testing.T) {
 			t.Fatalf("mkdir target inbox: %v", err)
 		}
 	}
+	configureSendTestRoot(t, sourceRoot, "claude")
+	configureSendTestRoot(t, targetRoot, "codex")
 
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -351,6 +355,8 @@ func TestSendCrossSessionWaitForUsesDeliveryRoot(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(targetRoot, "agents", "codex", "receipts"), 0o700); err != nil {
 		t.Fatalf("mkdir target receipts: %v", err)
 	}
+	configureSendTestRoot(t, sourceRoot, "claude")
+	configureSendTestRoot(t, targetRoot, "codex")
 
 	done := make(chan struct{})
 	go func() {
@@ -464,6 +470,7 @@ func ensureSendSessionAgent(t *testing.T, root, agent string) {
 	if err := fsq.EnsureAgentDirs(root, agent); err != nil {
 		t.Fatalf("EnsureAgentDirs(%q, %q): %v", root, agent, err)
 	}
+	configureSendTestRoot(t, root, agent)
 }
 
 func mustReadDir(t *testing.T, path string) []os.DirEntry {
