@@ -47,10 +47,11 @@ type opsOperatorGate struct {
 }
 
 type opsHint struct {
-	Code    string      `json:"code"`
-	Status  string      `json:"status"`
-	Message string      `json:"message"`
-	Backlog *opsBacklog `json:"backlog,omitempty"`
+	Code       string             `json:"code"`
+	Status     string             `json:"status"`
+	Message    string             `json:"message"`
+	Backlog    *opsBacklog        `json:"backlog,omitempty"`
+	WakeBinary *opsWakeBinaryHint `json:"wake_binary,omitempty"`
 }
 
 type opsBacklog struct {
@@ -59,6 +60,12 @@ type opsBacklog struct {
 	Agent          string `json:"agent"`
 	Pending        int    `json:"pending"`
 	Command        string `json:"command"`
+}
+
+type opsWakeBinaryHint struct {
+	Agent  string `json:"agent"`
+	PID    int    `json:"pid"`
+	Remedy string `json:"remedy"`
 }
 
 type opsWakeLock struct {
@@ -100,7 +107,13 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 			Status:  "error",
 			Message: fmt.Sprintf("Cannot load config: %v", err),
 		})
-		result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, nil), fixWakeLocks)
+		var wakeHints []opsHint
+		result.WakeLocks, wakeHints = checkWakeLocksWithHints(
+			root,
+			discoveredWakeLockAgents(root, nil),
+			fixWakeLocks,
+		)
+		result.Hints = append(result.Hints, wakeHints...)
 		return result
 	}
 
@@ -184,9 +197,15 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 	// eligible for diagnostic wake-lock inspection.  Discovery performs the
 	// same check for handles found on disk; checkWakeLocks repeats it at its
 	// boundary as a defense against future callers passing untrusted input.
-	result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, validatedAgents), fixWakeLocks)
+	var wakeHints []opsHint
+	result.WakeLocks, wakeHints = checkWakeLocksWithHints(
+		root,
+		discoveredWakeLockAgents(root, validatedAgents),
+		fixWakeLocks,
+	)
 
 	// Operational and integration hints
+	result.Hints = append(result.Hints, wakeHints...)
 	result.Hints = append(result.Hints, checkSiblingBacklogHints(root, agents)...)
 	result.Hints = append(result.Hints, checkBaseBacklogHints(root, agents)...)
 	result.Hints = append(result.Hints, checkWorktreeDivergenceHints(root, agents)...)
@@ -311,7 +330,13 @@ func discoveredWakeLockAgents(root string, configured []string) []string {
 }
 
 func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
+	locks, _ := checkWakeLocksWithHints(root, agents, fix)
+	return locks
+}
+
+func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeLock, []opsHint) {
 	var locks []opsWakeLock
+	var hints []opsHint
 	for _, agent := range agents {
 		if validateWakeLockAgent(root, agent) != nil {
 			continue
@@ -319,6 +344,9 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 		inspection := inspectWakeLock(root, agent)
 		if !inspection.Exists {
 			continue
+		}
+		if hint, ok := checkStaleWakeBinaryHint(inspection); ok {
+			hints = append(hints, hint)
 		}
 
 		lock := opsWakeLock{
@@ -392,7 +420,7 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 		}
 		locks = append(locks, lock)
 	}
-	return locks
+	return locks, hints
 }
 
 // validateWakeLockAgent ensures diagnostics cannot follow an agent directory
