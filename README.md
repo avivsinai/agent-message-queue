@@ -84,35 +84,54 @@ amq coop init
 
 Creates `.amqrc`, mailboxes for `claude`, `codex`, and the reserved `user` operator handle, and updates `.gitignore`.
 
-Optionally add shell aliases (`amc` for Claude, `amx` for Codex, and `amg` for Grok CLI as an optional peer):
-```bash
-eval "$(amq shell-setup)"
-```
-
 ### 2. Start Agent Sessions
 
 ```bash
 # Terminal 1 — Claude Code
-amc
+amq coop exec claude
 
 # Terminal 2 — Codex CLI
-amx
+amq coop exec codex
 ```
 
-Each alias sets up the environment, starts wake notifications, and launches the agent. For isolated sessions (multiple pairs working on different features):
+Each command sets up the environment, starts wake notifications, and launches
+the agent.
+
+> **First-message check:** start both agents before sending the test message.
+> A newly started wake deliberately baselines messages that were already
+> waiting, so they remain unread but do not trigger a notification. If you sent
+> first, run `amq drain --include-body` in the target agent.
+
+For isolated sessions (multiple pairs working on different features):
 
 ```bash
-amc feature-a          # Claude in feature-a session
-amx feature-a          # Codex in feature-a session
-amg feature-a          # Grok CLI in feature-a session (optional third peer)
+amq coop exec --session feature-a claude
+amq coop exec --session feature-a codex
+amq coop exec --session feature-a grok     # Optional third peer
 ```
 
-Without aliases, use `amq coop exec` directly:
+Pass agent flags after `--`:
 ```bash
 amq coop exec claude -- --dangerously-skip-permissions
-amq coop exec --session feature-a codex
-amq coop exec grok     # Grok CLI as an optional peer; caller flags forwarded unchanged
+amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
 ```
+
+Optional aliases are a convenience, not part of the canonical quickstart.
+A bare `eval "$(amq shell-setup)"` affects only the current shell. To make
+aliases such as `amc`, `amx`, and `amg` available in future terminals, add the
+setup command to your shell startup file:
+
+```bash
+# zsh
+amq shell-setup --shell zsh >> ~/.zshrc
+
+# bash
+amq shell-setup --shell bash >> ~/.bashrc
+```
+
+Run the appropriate append command once, then open a new terminal or source
+that startup file. Use the bare `eval` only when you intentionally want aliases
+in one already-open shell.
 
 Add `--no-gitignore` when `coop exec` should auto-initialize the project without changing `.gitignore`.
 Managed launchers can add `--require-wake` to fail instead of launching the agent when the wake watcher cannot start.
@@ -495,7 +514,9 @@ Files are universal, debuggable, and work everywhere. No connection strings, no 
 Those require infrastructure. AMQ is for local inter-process communication where agents share a filesystem. No server to configure or keep running.
 
 **What about Windows?**
-The core queue works on Windows. The `amq wake` notification feature requires WSL. `doctor --ops` can still report wake lock files on unsupported platforms, but it cannot verify live wake process identity there and will not auto-fix `unverified` locks.
+Native Windows supports the core queue, but not `coop exec` or `wake`. Use WSL
+with the Linux binary for the complete co-op workflow. See the explicit
+[platform capability matrix](INSTALL.md#platform-capability-matrix).
 
 **Is this production-ready?**
 For local development workflows, yes. AMQ is intentionally simple—it's not trying to be a distributed message broker.

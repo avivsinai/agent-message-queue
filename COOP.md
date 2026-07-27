@@ -162,7 +162,7 @@ Integration messages are self-delivered and carry `context.orchestrator` plus la
 
 `amq wake` uses TIOCSTI which may be unavailable on:
 - Hardened Linux (CONFIG_LEGACY_TIOCSTI=n)
-- Windows (use WSL)
+- Native Windows (`wake` is unavailable; use WSL with a Linux asset)
 
 If wake fails, configure the notify hook for desktop notifications:
 
@@ -279,6 +279,11 @@ add the flag to wakes they start. Reuse requires generation-bound proof that
 the live wake completed watcher preparation. It does not retroactively baseline
 that wake, so pending backlog can still notify; SessionStart draining mitigates
 that residual.
+
+For the first notification test, start both `coop exec` agents before sending
+the message. If a message was already waiting when the target wake started, it
+will not notify; it remains unread and visible to `amq drain --include-body`.
+
 For orchestrators or hardened environments without a controlling TTY, use an
 explicit external transport:
 
@@ -398,10 +403,11 @@ consumed a partially typed prompt and the user pauses longer than
 messages bypass this deferral. Use `none` when AMQ must guarantee zero synthetic
 input.
 
-**Platform support:**
-- macOS: Works
-- Linux: May be disabled by kernel hardening (CONFIG_LEGACY_TIOCSTI)
-- Windows: Not supported (use WSL)
+**Platform support:** `coop exec` and `wake` require macOS or Linux. Native
+Windows supports core queue commands and `coop init`, but not these two
+commands; use WSL with a Linux asset for the complete workflow. Linux raw TTY
+injection may be disabled by kernel hardening (`CONFIG_LEGACY_TIOCSTI`). See
+the [platform capability matrix](INSTALL.md#platform-capability-matrix).
 
 ## Message Format
 
