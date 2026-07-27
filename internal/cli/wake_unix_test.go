@@ -3681,8 +3681,9 @@ func TestRunWakeWithLoopRejectsNonPositiveInjectTimeout(t *testing.T) {
 	}
 }
 
-func TestWakeHealthCheckSkipsTTYForInjectVia(t *testing.T) {
-	err := wakeHealthCheck(wakeConfig{injectVia: "/tmp/injector"}, func() bool {
+func TestWakeInjectionPreconditionCheckSkipsTTYForInjectVia(t *testing.T) {
+	cfg := wakeConfig{injectVia: "/tmp/injector"}
+	err := wakeInjectionPreconditionCheck(&cfg, func() bool {
 		return false
 	})
 	if err != nil {
@@ -3690,8 +3691,9 @@ func TestWakeHealthCheckSkipsTTYForInjectVia(t *testing.T) {
 	}
 }
 
-func TestWakeHealthCheckSkipsTTYForNoneMode(t *testing.T) {
-	err := wakeHealthCheck(wakeConfig{injectMode: wakeInjectModeNone}, func() bool {
+func TestWakeInjectionPreconditionCheckSkipsTTYForNoneMode(t *testing.T) {
+	cfg := wakeConfig{injectMode: wakeInjectModeNone}
+	err := wakeInjectionPreconditionCheck(&cfg, func() bool {
 		return false
 	})
 	if err != nil {
@@ -3699,13 +3701,14 @@ func TestWakeHealthCheckSkipsTTYForNoneMode(t *testing.T) {
 	}
 }
 
-func TestWakeHealthCheckExitsWhenInjectViaOwnerGone(t *testing.T) {
+func TestWakeInjectionPreconditionCheckExitsWhenInjectViaOwnerGone(t *testing.T) {
 	owner := wakeOwner{PID: 4242, ProcessStart: "owner-start", BootID: "boot-1"}
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return wakeProcessInfo{PID: pid, Running: false}
 	})
 
-	err := wakeHealthCheck(wakeConfig{injectVia: "/tmp/injector", wakeOwner: &owner}, func() bool {
+	cfg := wakeConfig{injectVia: "/tmp/injector", wakeOwner: &owner}
+	err := wakeInjectionPreconditionCheck(&cfg, func() bool {
 		return false
 	})
 	if err == nil {
@@ -3716,7 +3719,7 @@ func TestWakeHealthCheckExitsWhenInjectViaOwnerGone(t *testing.T) {
 	}
 }
 
-func TestWakeHealthCheckExitsWhenInjectViaOwnerIdentityChanges(t *testing.T) {
+func TestWakeInjectionPreconditionCheckExitsWhenInjectViaOwnerIdentityChanges(t *testing.T) {
 	owner := wakeOwner{PID: 4242, ProcessStart: "owner-start", BootID: "boot-1", SessionID: 99}
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return wakeProcessInfo{
@@ -3727,7 +3730,8 @@ func TestWakeHealthCheckExitsWhenInjectViaOwnerIdentityChanges(t *testing.T) {
 		}
 	})
 
-	err := wakeHealthCheck(wakeConfig{injectVia: "/tmp/injector", wakeOwner: &owner}, func() bool {
+	cfg := wakeConfig{injectVia: "/tmp/injector", wakeOwner: &owner}
+	err := wakeInjectionPreconditionCheck(&cfg, func() bool {
 		return false
 	})
 	if err == nil {
@@ -3738,7 +3742,7 @@ func TestWakeHealthCheckExitsWhenInjectViaOwnerIdentityChanges(t *testing.T) {
 	}
 }
 
-func TestWakeHealthCheckKeepsInjectViaWhenOwnerMatches(t *testing.T) {
+func TestWakeInjectionPreconditionCheckKeepsInjectViaWhenOwnerMatches(t *testing.T) {
 	owner := wakeOwner{PID: 4242, ProcessStart: "owner-start", BootID: "boot-1"}
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return wakeProcessInfo{
@@ -3749,7 +3753,8 @@ func TestWakeHealthCheckKeepsInjectViaWhenOwnerMatches(t *testing.T) {
 		}
 	})
 
-	err := wakeHealthCheck(wakeConfig{injectVia: "/tmp/injector", wakeOwner: &owner}, func() bool {
+	cfg := wakeConfig{injectVia: "/tmp/injector", wakeOwner: &owner}
+	err := wakeInjectionPreconditionCheck(&cfg, func() bool {
 		return false
 	})
 	if err != nil {
@@ -3795,15 +3800,122 @@ func TestWakeCommandEnvCarriesOwnerToken(t *testing.T) {
 	}
 }
 
-func TestWakeHealthCheckRequiresTTYForTIOCSTI(t *testing.T) {
-	err := wakeHealthCheck(wakeConfig{}, func() bool {
+func TestWakeInjectionPreconditionCheckReportsOnlyOpenability(t *testing.T) {
+	cfg := wakeConfig{}
+	err := wakeInjectionPreconditionCheck(&cfg, func() bool {
 		return false
 	})
 	if err == nil {
-		t.Fatal("expected TTY health failure")
+		t.Fatal("expected controlling-terminal precondition failure")
 	}
-	if err.Error() != "TTY no longer available" {
-		t.Fatalf("expected TTY health error, got %v", err)
+	if err.Error() != "controlling terminal is no longer openable; TIOCSTI injectability was not tested" {
+		t.Fatalf("unexpected precondition error: %v", err)
+	}
+}
+
+func TestWakeInjectionPreconditionCheckSurfacesLegacyCapabilityChangeWithoutInjecting(t *testing.T) {
+	oldRead := readTIOCSTILegacySysctl
+	oldInject := tiocstiInject
+	legacyControl := "1\n"
+	legacyReads := 0
+	readTIOCSTILegacySysctl = func() ([]byte, error) {
+		legacyReads++
+		return []byte(legacyControl), nil
+	}
+	tiocstiInject = func(text string) error {
+		t.Fatalf("periodic precondition check test-injected %q", text)
+		return nil
+	}
+	t.Cleanup(func() {
+		readTIOCSTILegacySysctl = oldRead
+		tiocstiInject = oldInject
+	})
+
+	var status, mode, reason string
+	cfg := wakeConfig{
+		me:         "codex",
+		injectMode: wakeInjectModePaste,
+		recordNotifierStatus: func(gotStatus, gotMode, gotReason string) error {
+			status, mode, reason = gotStatus, gotMode, gotReason
+			return nil
+		},
+	}
+	openChecks := 0
+	openable := func() bool {
+		openChecks++
+		return true
+	}
+	if err := wakeInjectionPreconditionCheck(&cfg, openable); err != nil {
+		t.Fatalf("initial precondition check: %v", err)
+	}
+	if cfg.injectMode != wakeInjectModePaste || status != "" {
+		t.Fatalf("unchanged capability altered notifier: mode=%q status=%q", cfg.injectMode, status)
+	}
+
+	legacyControl = "0\n"
+	if err := wakeInjectionPreconditionCheck(&cfg, openable); err != nil {
+		t.Fatalf("changed precondition check: %v", err)
+	}
+	if openChecks != 1 {
+		t.Fatalf("controlling terminal checks = %d, want 1 before capability became unsupported", openChecks)
+	}
+	if cfg.injectMode != wakeInjectModeNone {
+		t.Fatalf("inject mode = %q, want none", cfg.injectMode)
+	}
+	if status != wakeInjectorUnsupportedStatus || mode != wakeInjectModePaste {
+		t.Fatalf("status/mode = %q/%q, want %q/%q", status, mode, wakeInjectorUnsupportedStatus, wakeInjectModePaste)
+	}
+	for _, want := range []string{
+		tiocstiLegacySysctlPath + " is 0",
+		"observed after wake binding",
+	} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason = %q, want %q", reason, want)
+		}
+	}
+	if err := wakeInjectionPreconditionCheck(&cfg, openable); err != nil {
+		t.Fatalf("demoted precondition check: %v", err)
+	}
+	if legacyReads != 2 {
+		t.Fatalf("legacy capability reads = %d, want 2 before permanent demotion", legacyReads)
+	}
+}
+
+func TestWakeInjectionPreconditionCheckSurfacesPersistenceFailureAfterDemotion(t *testing.T) {
+	oldRead := readTIOCSTILegacySysctl
+	oldInject := tiocstiInject
+	readTIOCSTILegacySysctl = func() ([]byte, error) {
+		return []byte("0\n"), nil
+	}
+	tiocstiInject = func(text string) error {
+		t.Fatalf("periodic precondition check test-injected %q", text)
+		return nil
+	}
+	t.Cleanup(func() {
+		readTIOCSTILegacySysctl = oldRead
+		tiocstiInject = oldInject
+	})
+
+	persistErr := errors.New("presence unavailable")
+	cfg := wakeConfig{
+		me:         "codex",
+		injectMode: wakeInjectModeRaw,
+		recordNotifierStatus: func(status, mode, reason string) error {
+			return persistErr
+		},
+	}
+	err := wakeInjectionPreconditionCheck(&cfg, func() bool {
+		t.Fatal("unsupported capability should demote before checking the terminal")
+		return false
+	})
+	if !errors.Is(err, persistErr) {
+		t.Fatalf("error = %v, want persistence failure", err)
+	}
+	if cfg.injectMode != wakeInjectModeNone {
+		t.Fatalf("inject mode = %q, want immediate safety demotion", cfg.injectMode)
+	}
+	if !strings.Contains(err.Error(), "after safety demotion") {
+		t.Fatalf("error does not surface demotion state: %v", err)
 	}
 }
 
