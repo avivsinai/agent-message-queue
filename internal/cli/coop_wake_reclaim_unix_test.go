@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -38,6 +39,52 @@ func TestPrepareCoopWakeLockUnverifiedYesRemovesMetadataWithoutSignal(t *testing
 	}
 	if got := strings.Count(stderr, "duplicate notifications may continue"); got != 1 {
 		t.Fatalf("duplicate-notification warning count = %d, want 1: %q", got, stderr)
+	}
+}
+
+func TestResolveMissingWakeLockAfterTerminationPreservesPresentGenerationError(t *testing.T) {
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:        66121,
+		Generation: "same-generation",
+	})
+	inspection := inspectWakeLock(root, "codex")
+	terminationErr := errors.New("test termination failure")
+
+	retired, err := resolveMissingWakeLockAfterTermination(inspection, terminationErr)
+	if retired {
+		t.Fatal("present exact generation reported retired")
+	}
+	if !errors.Is(err, terminationErr) {
+		t.Fatalf("present exact generation error = %v, want %v", err, terminationErr)
+	}
+}
+
+func TestResolveMissingWakeLockAfterTerminationReturnsRetryForReplacementGeneration(t *testing.T) {
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:        66121,
+		Generation: "old-generation",
+	})
+	inspection := inspectWakeLock(root, "codex")
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:        77121,
+		Generation: "replacement-generation",
+	})
+
+	retired, err := resolveMissingWakeLockAfterTermination(
+		inspection,
+		errors.New("test termination failure"),
+	)
+	if err != nil {
+		t.Fatalf("replacement-generation result = %v, want caller retry", err)
+	}
+	if retired {
+		t.Fatal("replacement generation reported retired")
+	}
+	current := inspectWakeLock(root, "codex")
+	if !current.Exists || current.Lock.Generation != "replacement-generation" {
+		t.Fatalf("replacement lock changed at %s: %#v", lockPath, current)
 	}
 }
 
