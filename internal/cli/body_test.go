@@ -94,6 +94,7 @@ func TestSend_DashBodyDoesNotDeliverLiteralHyphen(t *testing.T) {
 			t.Fatalf("EnsureAgentDirs: %v", err)
 		}
 	}
+	configureSendTestRoot(t, root, "alice", "bob")
 
 	restore := withStdin(t, "")
 	defer restore()
@@ -127,6 +128,7 @@ func TestSend_AllowEmptyDeliversBlankBody(t *testing.T) {
 			t.Fatalf("EnsureAgentDirs: %v", err)
 		}
 	}
+	configureSendTestRoot(t, root, "alice", "bob")
 
 	restore := withStdin(t, "")
 	defer restore()

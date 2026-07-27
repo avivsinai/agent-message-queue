@@ -22,6 +22,7 @@ func sessionRoot(t *testing.T, parent, session string, agents ...string) string 
 			t.Fatalf("EnsureAgentDirs(%s, %s): %v", root, a, err)
 		}
 	}
+	configureSendTestRoot(t, root, agents...)
 	return root
 }
 
@@ -103,6 +104,7 @@ func TestSend_AllowsBareRootWithoutIdentity(t *testing.T) {
 			t.Fatalf("EnsureAgentDirs: %v", err)
 		}
 	}
+	configureSendTestRoot(t, root, "claude", "bob")
 	if err := runSend([]string{"--root", root, "--me", "claude", "--to", "bob", "--body", "hi"}); err != nil {
 		t.Fatalf("bare-root send should succeed, got: %v", err)
 	}

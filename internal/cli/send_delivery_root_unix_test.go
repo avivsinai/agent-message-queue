@@ -25,6 +25,7 @@ func TestSendRejectsSymlinkSwapAfterGuard(t *testing.T) {
 				t.Fatalf("EnsureAgentDirs(%s,%s): %v", root, agent, err)
 			}
 		}
+		configureSendTestRoot(t, root, "alice", "bob")
 	}
 	clearDeliveryRootTestEnv(t)
 
@@ -111,6 +112,7 @@ func TestSendRejectsEscapingMailboxSymlink(t *testing.T) {
 			t.Fatalf("EnsureAgentDirs(%s): %v", agent, err)
 		}
 	}
+	configureSendTestRoot(t, root, "alice", "bob")
 	outsideInbox := filepath.Join(parent, "outside-inbox")
 	for _, box := range []string{"tmp", "new"} {
 		if err := os.MkdirAll(filepath.Join(outsideInbox, box), 0o700); err != nil {
@@ -243,7 +245,7 @@ func TestReplyRejectsSymlinkSwapAfterGuard(t *testing.T) {
 	}
 }
 
-func TestSendAllowsInRootRelativeMailboxSymlink(t *testing.T) {
+func TestSendRejectsInRootRelativeMailboxSymlink(t *testing.T) {
 	parent := secureTempDirForTest(t)
 	root := filepath.Join(parent, "authorized")
 	for _, agent := range []string{"alice", "bob"} {
@@ -251,6 +253,7 @@ func TestSendAllowsInRootRelativeMailboxSymlink(t *testing.T) {
 			t.Fatalf("EnsureAgentDirs(%s): %v", agent, err)
 		}
 	}
+	configureSendTestRoot(t, root, "alice", "bob")
 	inRootInbox := filepath.Join(root, "mailboxes", "bob")
 	for _, box := range []string{"tmp", "new"} {
 		if err := os.MkdirAll(filepath.Join(inRootInbox, box), 0o700); err != nil {
@@ -271,15 +274,15 @@ func TestSendAllowsInRootRelativeMailboxSymlink(t *testing.T) {
 		"--me", "alice",
 		"--to", "bob",
 		"--body", "contained symlink",
-	}); err != nil {
-		t.Fatalf("send through contained mailbox symlink: %v", err)
+	}); err == nil {
+		t.Fatal("send through contained mailbox symlink succeeded")
 	}
 	entries, err := os.ReadDir(filepath.Join(inRootInbox, "new"))
 	if err != nil {
 		t.Fatalf("ReadDir in-root inbox: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("in-root mailbox received %d messages, want 1", len(entries))
+	if len(entries) != 0 {
+		t.Fatalf("refused in-root mailbox symlink received %d messages", len(entries))
 	}
 }
 
