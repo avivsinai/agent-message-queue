@@ -3801,6 +3801,14 @@ func TestWakeCommandEnvCarriesOwnerToken(t *testing.T) {
 }
 
 func TestWakeInjectionPreconditionCheckReportsOnlyOpenability(t *testing.T) {
+	oldRead := readTIOCSTILegacySysctl
+	readTIOCSTILegacySysctl = func() ([]byte, error) {
+		return []byte("1\n"), nil
+	}
+	t.Cleanup(func() {
+		readTIOCSTILegacySysctl = oldRead
+	})
+
 	cfg := wakeConfig{}
 	err := wakeInjectionPreconditionCheck(&cfg, func() bool {
 		return false
