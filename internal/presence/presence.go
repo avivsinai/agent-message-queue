@@ -73,9 +73,9 @@ func Touch(root, handle string) error {
 	return Write(root, p)
 }
 
-// SetNotifierStatus records notifier capability without overwriting the
-// agent's own presence status or note. Empty values clear a stale notifier
-// diagnosis when a later wake starts with a usable injector.
+// SetNotifierStatus records the notifier's observed capability state without
+// overwriting the agent's own presence status or note. Empty values clear
+// stale diagnostics for transports that do not need capability reporting.
 func SetNotifierStatus(root, handle, status, mode, reason string) error {
 	p, err := Read(root, handle)
 	if err != nil {

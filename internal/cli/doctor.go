@@ -199,6 +199,13 @@ func runDoctor(args []string) error {
 					a.NotifierMode,
 					a.NotifierReason,
 				)
+			} else if a.NotifierStatus != "" {
+				line += fmt.Sprintf(
+					", notifier %s mode=%s reason=%s",
+					a.NotifierStatus,
+					a.NotifierMode,
+					a.NotifierReason,
+				)
 			}
 			if err := writeStdoutLine(line); err != nil {
 				return err

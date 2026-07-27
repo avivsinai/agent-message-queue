@@ -6,6 +6,7 @@ import (
 
 const (
 	wakeInjectorUnsupportedStatus = "injector_unsupported"
+	wakeInjectorUnverifiedStatus  = "injector_unverified"
 	tiocstiLegacySysctlPath       = "/proc/sys/dev/tty/legacy_tiocsti"
 )
 
@@ -31,5 +32,13 @@ func wakeInjectorUnsupportedReason(mode string, err error) string {
 		mode,
 		err,
 		tiocstiLegacySysctlPath,
+	)
+}
+
+func wakeInjectorUnverifiedReason(mode, verified string) string {
+	return fmt.Sprintf(
+		"TIOCSTI injection mode %s is unverified: %s; no TIOCSTI test injection was attempted",
+		mode,
+		verified,
 	)
 }

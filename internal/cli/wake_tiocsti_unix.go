@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"runtime"
 	"strings"
@@ -43,8 +44,26 @@ func (err *tiocstiInjectionError) Unwrap() error {
 }
 
 func tiocstiLegacyDisabledHint() bool {
+	return probeTIOCSTILegacyControl().disabled
+}
+
+type tiocstiLegacyControlProbe struct {
+	disabled bool
+	detail   string
+}
+
+func probeTIOCSTILegacyControl() tiocstiLegacyControlProbe {
 	data, err := readTIOCSTILegacySysctl()
-	return err == nil && strings.TrimSpace(string(data)) == "0"
+	if err != nil {
+		return tiocstiLegacyControlProbe{
+			detail: fmt.Sprintf("%s was not readable (%v)", tiocstiLegacySysctlPath, err),
+		}
+	}
+	value := strings.TrimSpace(string(data))
+	return tiocstiLegacyControlProbe{
+		disabled: value == "0",
+		detail:   fmt.Sprintf("%s is %s", tiocstiLegacySysctlPath, value),
+	}
 }
 
 // Available returns true if TIOCSTI is supported on this platform.

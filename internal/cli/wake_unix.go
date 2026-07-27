@@ -1529,17 +1529,26 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 			return errors.New("TIOCSTI not available on this platform; use tmux send-keys or terminal-specific injection")
 		}
 
-		if tiocstiLegacyDisabledHint() {
+		mode := effectiveInjectMode(&wakeConfig{me: me, injectMode: injectMode})
+		legacyControl := probeTIOCSTILegacyControl()
+		if legacyControl.disabled {
 			initialNotifierStatus = wakeInjectorUnsupportedStatus
-			initialNotifierMode = effectiveInjectMode(&wakeConfig{me: me, injectMode: injectMode})
+			initialNotifierMode = mode
 			initialNotifierReason = wakeInjectorUnsupportedReason(
 				initialNotifierMode,
-				fmt.Errorf("%s is 0", tiocstiLegacySysctlPath),
+				errors.New(legacyControl.detail),
 			)
 			injectMode = wakeInjectModeNone
 		} else if !wakeInputIsTTY() {
 			// Verify we have a real TTY when synthetic input remains enabled.
 			return errors.New("amq wake requires a real terminal (run in foreground or as background job in same terminal, or use --inject-via for external injection)")
+		} else {
+			initialNotifierStatus = wakeInjectorUnverifiedStatus
+			initialNotifierMode = mode
+			initialNotifierReason = wakeInjectorUnverifiedReason(
+				mode,
+				"platform support is declared, stdin is a TTY, and "+legacyControl.detail,
+			)
 		}
 	}
 
@@ -2333,9 +2342,11 @@ func runWakeLoop(cfg wakeConfig) error {
 		return nil
 	}
 
-	// TTY health check timer - verify we can still inject every 30s
-	healthTicker := time.NewTicker(30 * time.Second)
-	defer healthTicker.Stop()
+	// Periodically recheck non-invasive injector preconditions. This never
+	// test-injects, so a successful check must not be described as proof that
+	// TIOCSTI injection will succeed.
+	capabilityTicker := time.NewTicker(30 * time.Second)
+	defer capabilityTicker.Stop()
 
 	// Touch presence immediately so `amq who` shows agent as active
 	if cfg.touchPresence != nil {
@@ -2415,7 +2426,7 @@ func runWakeLoop(cfg wakeConfig) error {
 				return err
 			}
 
-		case <-healthTicker.C:
+		case <-capabilityTicker.C:
 			// Keep presence alive so `amq who` reports the agent as active
 			if cfg.touchPresence != nil {
 				_ = cfg.touchPresence()
@@ -2423,14 +2434,14 @@ func runWakeLoop(cfg wakeConfig) error {
 				_ = presence.Touch(cfg.root, cfg.me)
 			}
 
-			if err := wakeHealthCheck(cfg, ttyAvailable); err != nil {
+			if err := wakeCapabilityCheck(&cfg, controllingTerminalOpenable); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func wakeHealthCheck(cfg wakeConfig, ttyAvailableFn func() bool) error {
+func wakeCapabilityCheck(cfg *wakeConfig, controllingTerminalOpenableFn func() bool) error {
 	if cfg.injectMode == wakeInjectModeNone {
 		return nil
 	}
@@ -2440,8 +2451,41 @@ func wakeHealthCheck(cfg wakeConfig, ttyAvailableFn func() bool) error {
 		}
 		return nil
 	}
-	if !ttyAvailableFn() {
-		return errors.New("TTY no longer available")
+
+	mode := effectiveInjectMode(cfg)
+	legacyControl := probeTIOCSTILegacyControl()
+	if legacyControl.disabled {
+		reason := wakeInjectorUnsupportedReason(mode, errors.New(legacyControl.detail))
+		if cfg.recordNotifierStatus != nil {
+			if err := cfg.recordNotifierStatus(
+				wakeInjectorUnsupportedStatus,
+				mode,
+				reason,
+			); err != nil {
+				_ = writeStderr("amq wake: record changed injector capability: %v\n", err)
+			}
+		}
+		cfg.injectMode = wakeInjectModeNone
+		cfg.fallbackWarn = false
+		_ = writeStderr("amq wake: warning: %s\n", reason)
+		return nil
+	}
+	if !controllingTerminalOpenableFn() {
+		return errors.New("controlling terminal is no longer openable; TIOCSTI injectability was not tested")
+	}
+
+	reason := wakeInjectorUnverifiedReason(
+		mode,
+		"platform support is declared, controlling terminal is openable, and "+legacyControl.detail,
+	)
+	if cfg.recordNotifierStatus != nil {
+		if err := cfg.recordNotifierStatus(
+			wakeInjectorUnverifiedStatus,
+			mode,
+			reason,
+		); err != nil {
+			_ = writeStderr("amq wake: record injector precondition status: %v\n", err)
+		}
 	}
 	return nil
 }
@@ -2533,8 +2577,9 @@ func wakeOwnerHealthCheck(owner wakeOwner) error {
 	return nil
 }
 
-func ttyAvailable() bool {
-	// Mirrors injection path: if /dev/tty can't be opened, wake can't inject.
+func controllingTerminalOpenable() bool {
+	// This verifies only that /dev/tty can be opened. TIOCSTI capability cannot
+	// be established without an ioctl, and this periodic check never injects.
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
 		return false
