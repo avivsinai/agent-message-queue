@@ -387,6 +387,7 @@ func TestBuildCoopWakeArgsDisablesInterruptAndGenericReuse(t *testing.T) {
 		"--root", "/tmp/root",
 		"--baseline-existing",
 		"--interrupt-cmd", "none",
+		"--refuse-unverified-wake",
 		"--inject-mode", "none",
 		"--ready-file", "/tmp/ready",
 	}

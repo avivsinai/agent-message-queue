@@ -42,6 +42,34 @@ func TestInspectWakeProcessPlatformPreservesAliveStateWhenKinfoFails(t *testing.
 	}
 }
 
+func TestInspectWakeProcessPlatformReportsControllingTerminalState(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tdev int32
+		has  bool
+	}{
+		{name: "terminal gone", tdev: darwinNoControllingTerminal, has: false},
+		{name: "terminal present", tdev: 1234, has: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := readDarwinKinfoProc
+			readDarwinKinfoProc = func(string, ...int) (*unix.KinfoProc, error) {
+				return &unix.KinfoProc{
+					Proc:  unix.ExternProc{P_stat: 1},
+					Eproc: unix.Eproc{Tdev: tc.tdev},
+				}, nil
+			}
+			t.Cleanup(func() { readDarwinKinfoProc = old })
+
+			info := inspectWakeProcessPlatform(os.Getpid())
+			if !info.ControllingTerminalKnown || info.HasControllingTerminal != tc.has {
+				t.Fatalf("terminal state = known:%v has:%v, want known:true has:%v",
+					info.ControllingTerminalKnown, info.HasControllingTerminal, tc.has)
+			}
+		})
+	}
+}
+
 func stubDarwinBootIdentityReaders(
 	t *testing.T,
 	session func() (string, error),

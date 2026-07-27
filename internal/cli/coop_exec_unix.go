@@ -40,7 +40,7 @@ func runCoopExec(args []string) error {
 	wakeInjectViaFlag := fs.String("wake-inject-via", "", "Start wake with this absolute --inject-via executable, enabling later amq wake repair")
 	var wakeInjectArgFlags multiStringFlag
 	fs.Var(&wakeInjectArgFlags, "wake-inject-arg", "Fixed argument for wake --inject-via before the payload (repeatable)")
-	yesFlag := fs.Bool("y", false, "Skip confirmation prompts")
+	yesFlag := fs.Bool("y", false, "Skip confirmation prompts (including clearing a blocking wake)")
 
 	usage := usageWithFlags(fs, "amq coop exec [options] <command> [-- <command-flags>]",
 		"Set up co-op mode and exec into the agent (replaces this process).",
@@ -232,6 +232,16 @@ func runCoopExec(args []string) error {
 	binaryPath, err := exec.LookPath(cmdName)
 	if err != nil {
 		return fmt.Errorf("command not found: %s", cmdName)
+	}
+	if !*noWakeFlag {
+		if err := prepareCoopWakeLock(
+			root,
+			agentHandle,
+			*yesFlag,
+			coopWakeRemedyForCommand(root, agentHandle, cmdName, agentArgs),
+		); err != nil {
+			return err
+		}
 	}
 
 	// Start amq wake in background (unless --no-wake). Every coop-started wake
@@ -591,6 +601,7 @@ func buildCoopWakeArgs(agentHandle, root, injectMode, injectVia string, injectAr
 		"--root", root,
 		"--baseline-existing",
 		"--interrupt-cmd", "none",
+		"--refuse-unverified-wake",
 	}
 	if injectMode != "" && injectMode != wakeInjectModeAuto {
 		args = append(args, "--inject-mode", injectMode)

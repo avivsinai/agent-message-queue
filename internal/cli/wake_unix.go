@@ -82,12 +82,13 @@ func (child *wakeRepairChild) Admit() error {
 }
 
 type wakeLockAcquireOptions struct {
-	acceptExistingValid  bool
-	target               *wakeTarget
-	wakeMode             string
-	requestedOwner       *wakeOwner
-	repairLineage        *wakeRepairLineage
-	repairFloorAuthority *wakeRepairFloorAuthority
+	acceptExistingValid     bool
+	refuseUnverifiedGeneric bool
+	target                  *wakeTarget
+	wakeMode                string
+	requestedOwner          *wakeOwner
+	repairLineage           *wakeRepairLineage
+	repairFloorAuthority    *wakeRepairFloorAuthority
 }
 
 type wakeLockCreatingError struct{}
@@ -258,6 +259,14 @@ func acquireWakeLockWithOptionsInDir(
 					}
 					return wakeLockAlreadyRunningError(me, inspection)
 				case wakeLockUnverified:
+					if options.refuseUnverifiedGeneric {
+						return fmt.Errorf(
+							"wake lock for %s cannot be verified; lock: %s; root: %s; retry coop exec with -y",
+							me,
+							inspection.LockPath,
+							inspection.Root,
+						)
+					}
 					if err := supersedeUnverifiedGenericWakeAt(dirfd, agentDir, inspection); err != nil {
 						return err
 					}
@@ -543,10 +552,8 @@ func wakeLockNeedsReplacement(inspection wakeLockInspection) bool {
 
 	// Process is a confirmed matching amq wake. If its TTY disappeared, stop
 	// that orphan before taking over; never signal an unconfirmed PID.
-	if strings.HasPrefix(existing.TTY, "/dev/") {
-		if _, statErr := os.Stat(existing.TTY); os.IsNotExist(statErr) {
-			return true
-		}
+	if wakeLockTerminalGone(inspection) {
+		return true
 	}
 
 	currentTTY := getWakeCurrentTTY()
@@ -564,6 +571,17 @@ func wakeLockNeedsReplacement(inspection wakeLockInspection) bool {
 		}
 	}
 	return false
+}
+
+func wakeLockTerminalGone(inspection wakeLockInspection) bool {
+	tty := strings.TrimSpace(inspection.Lock.TTY)
+	if strings.HasPrefix(tty, "/dev/") {
+		if _, statErr := os.Stat(tty); os.IsNotExist(statErr) {
+			return true
+		}
+	}
+	return inspection.Process.ControllingTerminalKnown &&
+		!inspection.Process.HasControllingTerminal
 }
 
 func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, requestedTarget *wakeTarget) error {
@@ -1360,11 +1378,12 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 	readyFileFlag := fs.String("ready-file", "", "Internal: write this file after wake lock acquisition")
 	debugFlag := fs.Bool("debug", false, "Log injection diagnostics to stderr")
 	acceptExistingWakeFlag := fs.Bool("accept-existing-wake", false, "Internal: allow a usable existing wake to satisfy readiness")
+	refuseUnverifiedWakeFlag := fs.Bool("refuse-unverified-wake", false, "Internal: refuse unverified wake locks instead of superseding them")
 	repairLineageFlag := fs.String("repair-lineage", "", "Internal: inherit the suppression floor from an exact dead wake generation")
 	baselineExistingFlag := fs.Bool("baseline-existing", false, "Ignore messages already waiting when this wake starts")
 
 	usage := usageWithHiddenFlags(fs, "amq wake --me <agent> [options]",
-		[]string{"ready-file", "accept-existing-wake", "repair-lineage"},
+		[]string{"ready-file", "accept-existing-wake", "refuse-unverified-wake", "repair-lineage"},
 		"Background waker: injects terminal notification when messages arrive.",
 		"Run as background job before starting CLI: amq wake --me claude --interrupt-cmd none &",
 		"",
@@ -1680,11 +1699,12 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 			}
 		}
 		options := wakeLockAcquireOptions{
-			acceptExistingValid: acceptExistingWake,
-			target:              target,
-			wakeMode:            lockWakeMode,
-			requestedOwner:      requestedOwner,
-			repairLineage:       repairLineage,
+			acceptExistingValid:     acceptExistingWake,
+			refuseUnverifiedGeneric: *refuseUnverifiedWakeFlag,
+			target:                  target,
+			wakeMode:                lockWakeMode,
+			requestedOwner:          requestedOwner,
+			repairLineage:           repairLineage,
 		}
 		if repairLineage != nil {
 			options.repairFloorAuthority = &repairFloorAuthority
