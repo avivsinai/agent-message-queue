@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"syscall"
@@ -61,6 +62,108 @@ func TestPrepareCoopWakeLockConsentedWakeSelfCleanupIsSuccess(t *testing.T) {
 		ControllingTerminalKnown: true,
 		HasControllingTerminal:   true,
 	}, "running, and still attached to a terminal — this may be a live session in another window", true)
+}
+
+func TestPrepareCoopWakeLockConsentedWakeSelfCleanupWithoutProvenExitWarnsAndProceeds(t *testing.T) {
+	tests := []struct {
+		name        string
+		afterSignal wakeProcessInfo
+	}{
+		{
+			name: "same identity",
+			afterSignal: wakeProcessInfo{
+				Running:    true,
+				StartToken: "start",
+				BootID:     "boot",
+				Executable: "/opt/homebrew/bin/amq",
+			},
+		},
+		{
+			name: "unknown identity",
+			afterSignal: wakeProcessInfo{
+				Running:      true,
+				InspectError: errors.New("test identity inspection failure"),
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const (
+				pid = 66121
+				tty = "/dev/null"
+			)
+			root := secureTempDirForTest(t)
+			args := []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex"}
+			lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+				PID:          pid,
+				TTY:          tty,
+				ProcessStart: "start",
+				BootID:       "boot",
+				Executable:   "/opt/homebrew/bin/amq",
+				Args:         args,
+				Generation:   "live-raw-partial-takeover",
+			})
+			signaled := false
+			stubInspectWakeProcess(t, func(got int) wakeProcessInfo {
+				if signaled {
+					info := test.afterSignal
+					info.PID = got
+					return info
+				}
+				return wakeProcessInfo{
+					PID:                      got,
+					Running:                  true,
+					StartToken:               "start",
+					BootID:                   "boot",
+					Executable:               "/opt/homebrew/bin/amq",
+					Args:                     args,
+					ControllingTerminalKnown: true,
+					HasControllingTerminal:   true,
+				}
+			})
+			var signals []os.Signal
+			stubSignalWakeProcess(t, func(got int, signal os.Signal) error {
+				signals = append(signals, signal)
+				if got != pid || signal != syscall.SIGTERM {
+					t.Fatalf("signal = (%d, %v), want (%d, SIGTERM)", got, signal, pid)
+				}
+				signaled = true
+				if err := os.Remove(lockPath); err != nil {
+					t.Fatalf("simulate old wake self-cleanup: %v", err)
+				}
+				return nil
+			})
+
+			var prepareErr error
+			stderr := captureWakeStderr(t, func() {
+				prepareErr = prepareCoopWakeLock(root, "codex", true, "unused")
+			})
+			if prepareErr != nil {
+				t.Fatalf("approved takeover after partial old-wake cleanup: %v", prepareErr)
+			}
+			if len(signals) != 1 || signals[0] != syscall.SIGTERM {
+				t.Fatalf("signals = %v, want [SIGTERM]", signals)
+			}
+			if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+				t.Fatalf("self-cleaned live raw lock exists after takeover: %v", err)
+			}
+			for _, want := range []string{
+				"superseded wake helper",
+				"pid 66121",
+				tty,
+				"without a confirmed exit",
+				"duplicate notifications may continue",
+			} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("partial-takeover output %q missing %q", stderr, want)
+				}
+			}
+			if got := strings.Count(stderr, "duplicate notifications may continue"); got != 1 {
+				t.Fatalf("duplicate warning count = %d, want 1 in %q", got, stderr)
+			}
+		})
+	}
 }
 
 func TestPrepareCoopWakeLockSameTerminalDifferentSessionDefersToSilentReplacement(t *testing.T) {

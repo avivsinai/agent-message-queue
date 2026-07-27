@@ -100,7 +100,7 @@ func terminateAndRemoveOrphanedWakeLockWithRawConsent(
 	// Signaling and both waits happen without the lifecycle guard. The retained
 	// pidfd cannot retarget a recycled numeric PID.
 	if err := terminateWakePidfd(pidfd); err != nil {
-		return false, err
+		return resolveMissingWakeLockAfterTermination(locked, err)
 	}
 
 	removed := false

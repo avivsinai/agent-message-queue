@@ -57,7 +57,7 @@ func terminateAndRemoveOrphanedWakeLockWithRawConsent(
 	// Process termination can wait. It must happen after releasing the guard.
 	if recheck.Process.Running {
 		if err := terminateWakeProcess(recheck); err != nil {
-			return false, err
+			return resolveMissingWakeLockAfterTermination(recheck, err)
 		}
 	}
 	removed := false

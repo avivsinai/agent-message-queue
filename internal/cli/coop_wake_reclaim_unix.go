@@ -163,6 +163,35 @@ func coopWakeTTYDisplay(inspection wakeLockInspection) string {
 	return tty
 }
 
+// resolveMissingWakeLockAfterTermination handles the irreversible half of a
+// takeover: the exact old helper's lock disappeared during termination, but
+// the process path could not prove that the helper exited. With no lock left to
+// preserve, proceeding is safer than returning a false retry; warn that the old
+// helper may still emit duplicate notifications.
+func resolveMissingWakeLockAfterTermination(
+	inspection wakeLockInspection,
+	terminationErr error,
+) (bool, error) {
+	current := inspectWakeLock(inspection.Root, inspection.Agent)
+	if current.Exists && !sameWakeLockGeneration(inspection, current) {
+		return false, nil
+	}
+	if current.Exists {
+		return false, terminationErr
+	}
+	// This PID-based inspection only decides whether to print the warning. Both
+	// outcomes proceed identically, so PID reuse cannot authorize an action.
+	if inspectWakeIdentity(inspection) != wakeIdentityGoneOrDifferent {
+		_ = writeStderr(
+			"warning: superseded wake helper for %s (pid %d on %s) after its lock disappeared during termination without a confirmed exit; fresh wake is starting, but duplicate notifications may continue until the old helper exits; stop that helper if duplicates persist\n",
+			inspection.Agent,
+			inspection.PID,
+			coopWakeTTYDisplay(inspection),
+		)
+	}
+	return true, nil
+}
+
 func coopWakeRemedy(inspection wakeLockInspection, state, command string) string {
 	return fmt.Sprintf("wake for %s is blocking startup and cannot notify you.\n  lock: %s\n  state: %s\n\nRe-run with -y to clear it and start a fresh wake:\n  %s\n\nTo inspect first:\n  AM_ROOT=%s amq doctor --ops", inspection.Agent, inspection.LockPath, state, command, inspection.Root)
 }
