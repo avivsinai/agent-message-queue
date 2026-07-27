@@ -144,6 +144,9 @@ func DeliverToExistingInbox(root *DeliveryRoot, agent, filename string, data []b
 	if err := root.VerifyBase(); err != nil {
 		return "", err
 	}
+	if err := ValidateExistingMailboxLayout(root, agent); err != nil {
+		return "", err
+	}
 	tmpDir := filepath.Join("agents", agent, "inbox", "tmp")
 	newDir := filepath.Join("agents", agent, "inbox", "new")
 

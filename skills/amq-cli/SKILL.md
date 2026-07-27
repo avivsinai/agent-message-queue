@@ -186,6 +186,11 @@ amq integration kanban bridge --me codex --workspace-id my-workspace
 # Runtime diagnostics
 amq doctor --ops
 amq doctor --ops --json
+amq doctor --root <exact-root> --ops
+
+# Base-config-only session repair outside the current pin
+amq doctor --root <session-root> --base-root <base-root> \
+  --ignore-session-pin --fix-mailboxes
 ```
 
 ## Exit Codes
@@ -246,6 +251,13 @@ has pending messages in a sibling session; follow the exact `amq list --session
 <name> --me <handle> --new` command in that note.
 This is an operational safety check, not an authorization boundary; a local
 process can deliberately repin or override it.
+
+For `doctor`, `--root` selects the exact target but does not waive the active
+pin. Read-only inspection continues and reports a mismatch warning.
+`--fix-mailboxes` and `--ops --fix-wake-locks` require a matching pin unless an explicit non-empty
+`--root` is paired with `--ignore-session-pin`. `--base-root` requires
+`--root`, supplies retained config authority for the target or one direct
+child, and never waives the pin.
 
 ## Session Layout
 

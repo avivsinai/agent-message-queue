@@ -153,6 +153,51 @@ func (r *DeliveryRoot) OpenOrCreateDirectChild(name string, perm os.FileMode) (*
 	}, nil
 }
 
+// OpenDirectChild pins one existing direct, non-symlink child directory beneath
+// the authorized root without creating it.
+func (r *DeliveryRoot) OpenDirectChild(name string) (*DeliveryRoot, error) {
+	if r == nil || r.root == nil {
+		return nil, fmt.Errorf("delivery root is closed")
+	}
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return nil, fmt.Errorf("invalid direct child name %q", name)
+	}
+	if err := r.VerifyBase(); err != nil {
+		return nil, err
+	}
+	before, err := r.root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%q is not a direct directory under delivery root", name)
+	}
+	childRoot, err := r.root.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := childRoot.Stat(".")
+	if err != nil {
+		_ = childRoot.Close()
+		return nil, err
+	}
+	after, err := r.root.Lstat(name)
+	if err != nil {
+		_ = childRoot.Close()
+		return nil, err
+	}
+	if !after.IsDir() || after.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(before, after) || !os.SameFile(after, opened) {
+		_ = childRoot.Close()
+		return nil, fmt.Errorf("direct child %q changed while opening", name)
+	}
+	return &DeliveryRoot{
+		base:     filepath.Join(r.base, name),
+		root:     childRoot,
+		identity: opened,
+	}, nil
+}
+
 // EnsureRootDirs creates the queue-level layout through the pinned root
 // capability.
 func (r *DeliveryRoot) EnsureRootDirs() error {

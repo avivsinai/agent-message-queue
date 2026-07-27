@@ -43,12 +43,226 @@ func TestDoctorIssue289ConfiguredOnlyMailboxIsReported(t *testing.T) {
 	}
 }
 
+func TestDoctorRepairIncludesReservedHumanMailboxOutsideRawRoster(t *testing.T) {
+	root := healthyDoctorMailboxRoot(t, "alice")
+	if err := fsq.EnsureAgentDirs(root, reservedHumanHandle); err != nil {
+		t.Fatal(err)
+	}
+	missing := fsq.AgentDLQCur(root, reservedHumanHandle)
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+	clearDoctorSessionPin(t)
+
+	mailboxes, repair, check := inspectDoctorMailboxes(root, "", true, false)
+
+	if check.Status != "ok" {
+		t.Fatalf("mailbox check = %#v", check)
+	}
+	if repair == nil || repair.Status != "repaired" {
+		t.Fatalf("repair = %#v", repair)
+	}
+	if _, err := os.Stat(missing); err != nil {
+		t.Fatalf("doctor did not repair reserved human mailbox: %v; mailboxes=%#v", err, mailboxes)
+	}
+}
+
+func TestDoctorMailboxRepairRemedyNeverAdvertisesPinOverride(t *testing.T) {
+	target := healthyDoctorMailboxRoot(t, "bob")
+	if err := os.Remove(fsq.AgentInboxCur(target, "bob")); err != nil {
+		t.Fatal(err)
+	}
+
+	setDoctorIdentityPin(t, target)
+	_, _, matchingCheck := inspectDoctorMailboxes(target, "", false, false)
+	if strings.Contains(matchingCheck.Message, "--ignore-session-pin") {
+		t.Fatalf("matching-pin remedy advertised escape hatch: %q", matchingCheck.Message)
+	}
+	wantMatching := doctorRootCommandForOS(target, "", runtime.GOOS, "--fix-mailboxes")
+	if !strings.Contains(matchingCheck.Message, wantMatching) {
+		t.Fatalf("matching-pin remedy missing exact command %q: %q", wantMatching, matchingCheck.Message)
+	}
+
+	foreignPin := healthyDoctorMailboxRoot(t, "alice")
+	setDoctorIdentityPin(t, foreignPin)
+	_, _, crossPinCheck := inspectDoctorMailboxes(target, "", false, false)
+	wantCrossPin := doctorRootCommandForOS(target, "", runtime.GOOS, "--fix-mailboxes")
+	if !strings.Contains(crossPinCheck.Message, wantCrossPin) {
+		t.Fatalf("cross-pin remedy missing exact non-bypass command %q: %q", wantCrossPin, crossPinCheck.Message)
+	}
+	if strings.Contains(crossPinCheck.Message, "--ignore-session-pin") {
+		t.Fatalf("cross-pin remedy advertised escape hatch: %q", crossPinCheck.Message)
+	}
+}
+
+func TestDoctorSessionLocalConfigRemedyExecutesWithoutConfiglessBase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exact printed command execution uses the POSIX test shell")
+	}
+	base := filepath.Join(secureTempDirForTest(t), ".agent-mail")
+	root := filepath.Join(base, "collab")
+	if err := fsq.EnsureRootDirs(base); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	configureSendTestRoot(t, root, "bob")
+	missing := fsq.AgentDLQCur(root, "bob")
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+	clearDoctorSessionPin(t)
+
+	_, _, check := inspectDoctorMailboxes(root, "", false, false)
+	command := advertisedDoctorMailboxRepairCommand(t, check)
+	if strings.Contains(command, "--base-root") {
+		t.Fatalf("session-local remedy named config-less parent: %q", command)
+	}
+	if strings.Contains(command, "--ignore-session-pin") {
+		t.Fatalf("session-local remedy advertised pin escape: %q", command)
+	}
+	executeAdvertisedAMQCommand(t, command)
+	if err := fsq.ValidateExistingMailboxLayout(openDeliveryRootForCLITest(t, root), "bob"); err != nil {
+		t.Fatalf("advertised doctor remedy left mailbox incomplete: %v", err)
+	}
+}
+
+func TestDoctorImplicitUserUsesEffectiveConfiguredRoster(t *testing.T) {
+	for _, authority := range []string{"session_local", "base"} {
+		for _, state := range []string{"absent", "incomplete"} {
+			t.Run(authority+"/"+state, func(t *testing.T) {
+				base := filepath.Join(secureTempDirForTest(t), ".agent-mail")
+				root := filepath.Join(base, "collab")
+				if err := fsq.EnsureRootDirs(base); err != nil {
+					t.Fatal(err)
+				}
+				if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+					t.Fatal(err)
+				}
+				configRoot := root
+				explicitBase := ""
+				if authority == "base" {
+					configRoot = base
+					explicitBase = base
+				}
+				configureSendTestRoot(t, configRoot, "alice")
+				if state == "incomplete" {
+					if err := fsq.EnsureAgentDirs(root, reservedHumanHandle); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Remove(fsq.AgentDLQCur(root, reservedHumanHandle)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				clearDoctorSessionPin(t)
+
+				mailboxes, repair, check := inspectDoctorMailboxes(root, explicitBase, false, false)
+				if repair != nil {
+					t.Fatalf("inspection returned repair: %#v", repair)
+				}
+				user := findDoctorMailboxInspection(t, mailboxes, reservedHumanHandle)
+				wantProvenance := fsq.MailboxConfigured
+				if state == "incomplete" {
+					wantProvenance = fsq.MailboxConfiguredAndDiscovered
+				}
+				if user.Provenance != wantProvenance || !user.RepairEligible || user.Status != "error" {
+					t.Fatalf("implicit user inspection = %#v, want provenance=%s repairable error", user, wantProvenance)
+				}
+				if strings.Contains(user.Remedy, "add") || strings.Contains(check.Message, `add "user"`) {
+					t.Fatalf("implicit user was treated as unconfigured: entry=%#v check=%q", user, check.Message)
+				}
+
+				_, repaired, repairedCheck := inspectDoctorMailboxes(root, explicitBase, true, false)
+				if repaired == nil || repaired.Status != "repaired" || repairedCheck.Status != "ok" {
+					t.Fatalf("repair=%#v check=%#v", repaired, repairedCheck)
+				}
+				if err := fsq.ValidateExistingMailboxLayout(openDeliveryRootForCLITest(t, root), reservedHumanHandle); err != nil {
+					t.Fatalf("doctor did not repair implicit user: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestDoctorImplicitUserUsesPresentEmptyEffectiveRoster(t *testing.T) {
+	for _, authority := range []string{"session_local", "base"} {
+		for _, state := range []string{"absent", "incomplete"} {
+			t.Run(authority+"/"+state, func(t *testing.T) {
+				base := filepath.Join(secureTempDirForTest(t), ".agent-mail")
+				root := filepath.Join(base, "collab")
+				configRoot := root
+				explicitBase := ""
+				if authority == "base" {
+					configRoot = base
+					explicitBase = base
+				}
+				configureSendTestRoot(t, configRoot)
+				if err := fsq.EnsureRootDirs(root); err != nil {
+					t.Fatal(err)
+				}
+				if state == "incomplete" {
+					if err := fsq.EnsureAgentDirs(root, reservedHumanHandle); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Remove(fsq.AgentDLQCur(root, reservedHumanHandle)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				clearDoctorSessionPin(t)
+
+				mailboxes, repair, check := inspectDoctorMailboxes(root, explicitBase, false, false)
+				if repair != nil {
+					t.Fatalf("inspection returned repair: %#v", repair)
+				}
+				user := findDoctorMailboxInspection(t, mailboxes, reservedHumanHandle)
+				wantProvenance := fsq.MailboxConfigured
+				if state == "incomplete" {
+					wantProvenance = fsq.MailboxConfiguredAndDiscovered
+				}
+				if user.Provenance != wantProvenance || !user.RepairEligible || user.Status != "error" {
+					t.Fatalf("empty-roster user inspection = %#v, want provenance=%s repairable error; check=%#v", user, wantProvenance, check)
+				}
+
+				_, repaired, repairedCheck := inspectDoctorMailboxes(root, explicitBase, true, false)
+				if repaired == nil || repaired.Status != "repaired" || repairedCheck.Status != "ok" {
+					t.Fatalf("repair=%#v check=%#v", repaired, repairedCheck)
+				}
+				if err := fsq.ValidateExistingMailboxLayout(openDeliveryRootForCLITest(t, root), reservedHumanHandle); err != nil {
+					t.Fatalf("doctor did not repair empty-roster user: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func advertisedDoctorMailboxRepairCommand(t *testing.T, check doctorCheck) string {
+	t.Helper()
+	const marker = "repair: "
+	parts := strings.SplitN(check.Message, marker, 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
+		t.Fatalf("doctor check has no repair command: %#v", check)
+	}
+	return strings.TrimSpace(strings.SplitN(parts[1], ";", 2)[0])
+}
+
+func findDoctorMailboxInspection(t *testing.T, mailboxes []fsq.MailboxInspection, handle string) fsq.MailboxInspection {
+	t.Helper()
+	for _, mailbox := range mailboxes {
+		if mailbox.Handle == handle {
+			return mailbox
+		}
+	}
+	t.Fatalf("mailbox %q not found in %#v", handle, mailboxes)
+	return fsq.MailboxInspection{}
+}
+
 func TestDoctorIssue289InspectionIgnoresMismatchedSessionPin(t *testing.T) {
 	root := healthyDoctorMailboxRoot(t, "healthy")
 	pinnedRoot := healthyDoctorMailboxRoot(t, "pinned")
 	setDoctorIdentityPin(t, pinnedRoot)
 
-	mailboxes, repair, check := inspectDoctorMailboxes(root, false)
+	mailboxes, repair, check := inspectDoctorMailboxes(root, "", false, false)
 
 	if check.Status != "ok" {
 		t.Fatalf("mailbox check = %#v", check)
@@ -56,7 +270,9 @@ func TestDoctorIssue289InspectionIgnoresMismatchedSessionPin(t *testing.T) {
 	if repair != nil {
 		t.Fatalf("inspection returned repair result: %#v", repair)
 	}
-	if len(mailboxes) != 1 || mailboxes[0].Handle != "healthy" {
+	if len(mailboxes) != 2 ||
+		findDoctorMailboxInspection(t, mailboxes, "healthy").Status != "ok" ||
+		findDoctorMailboxInspection(t, mailboxes, reservedHumanHandle).Status != "ok" {
 		t.Fatalf("mailboxes = %#v", mailboxes)
 	}
 }
@@ -65,7 +281,7 @@ func TestDoctorIssue289InspectionWithoutSessionPinFailsOpen(t *testing.T) {
 	root := healthyDoctorMailboxRoot(t, "healthy")
 	clearDoctorSessionPin(t)
 
-	mailboxes, repair, check := inspectDoctorMailboxes(root, false)
+	mailboxes, repair, check := inspectDoctorMailboxes(root, "", false, false)
 
 	if check.Status != "ok" {
 		t.Fatalf("mailbox check = %#v", check)
@@ -73,7 +289,9 @@ func TestDoctorIssue289InspectionWithoutSessionPinFailsOpen(t *testing.T) {
 	if repair != nil {
 		t.Fatalf("inspection returned repair result: %#v", repair)
 	}
-	if len(mailboxes) != 1 || mailboxes[0].Handle != "healthy" {
+	if len(mailboxes) != 2 ||
+		findDoctorMailboxInspection(t, mailboxes, "healthy").Status != "ok" ||
+		findDoctorMailboxInspection(t, mailboxes, reservedHumanHandle).Status != "ok" {
 		t.Fatalf("mailboxes = %#v", mailboxes)
 	}
 }
@@ -91,7 +309,9 @@ func TestDoctorIssue289RunDoctorInspectsOutsidePopulatedSessionPin(t *testing.T)
 	if got := doctorCheckStatus(result.Checks, "Session identity pin"); got != "warn" {
 		t.Fatalf("Session identity pin status = %q, want warn", got)
 	}
-	if len(result.Mailboxes) != 1 || result.Mailboxes[0].Handle != "healthy" {
+	if len(result.Mailboxes) != 2 ||
+		findDoctorMailboxTestEntry(t, result.Mailboxes, "healthy").Status != "ok" ||
+		findDoctorMailboxTestEntry(t, result.Mailboxes, reservedHumanHandle).Status != "ok" {
 		t.Fatalf("mailboxes = %#v", result.Mailboxes)
 	}
 }
@@ -104,7 +324,7 @@ func TestDoctorIssue289RepairRefusesMismatchedSessionPinWithRemedy(t *testing.T)
 		t.Fatal(err)
 	}
 
-	_, repair, check := inspectDoctorMailboxes(root, true)
+	_, repair, check := inspectDoctorMailboxes(root, "", true, false)
 
 	if repair != nil {
 		t.Fatalf("refused repair returned result: %#v", repair)
@@ -116,6 +336,212 @@ func TestDoctorIssue289RepairRefusesMismatchedSessionPinWithRemedy(t *testing.T)
 	}
 	if _, err := os.Stat(fsq.AgentInboxCur(root, "healthy")); !os.IsNotExist(err) {
 		t.Fatalf("refused repair mutated missing directory: %v", err)
+	}
+}
+
+func TestDoctorExplicitRootRepairRequiresPinMatchOrOverride(t *testing.T) {
+	baseRoot := filepath.Join(secureTempDirForTest(t), "custom base")
+	sessionRoot := filepath.Join(baseRoot, "collab")
+	if err := fsq.EnsureAgentDirs(sessionRoot, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureRootDirs(baseRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteConfig(filepath.Join(baseRoot, "meta", "config.json"), config.Config{
+		Version: 1,
+		Agents:  []string{"bob"},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	missing := fsq.AgentDLQCur(sessionRoot, "bob")
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := healthyDoctorMailboxRoot(t, "source")
+	setDoctorIdentityPin(t, unrelated)
+	t.Setenv(envRoot, unrelated)
+	t.Setenv(envSession, "source-session")
+
+	inspectionOutput, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{
+			"--root", sessionRoot,
+			"--base-root", baseRoot,
+			"--json",
+		})
+	})
+	if err != nil {
+		t.Fatalf("explicit doctor inspection: %v", err)
+	}
+	var inspection doctorMailboxResultJSON
+	if err := json.Unmarshal([]byte(inspectionOutput), &inspection); err != nil {
+		t.Fatal(err)
+	}
+	if got := doctorCheckStatus(inspection.Checks, "Session identity pin"); got != "warn" {
+		t.Fatalf("explicit inspection pin status = %q, want warn", got)
+	}
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("explicit inspection mutated mailbox: %v", err)
+	}
+
+	refusedOutput, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{
+			"--root", sessionRoot,
+			"--base-root", baseRoot,
+			"--fix-mailboxes",
+			"--json",
+		})
+	})
+	if err != nil {
+		t.Fatalf("mismatched repair command: %v", err)
+	}
+	var refused doctorMailboxResultJSON
+	if err := json.Unmarshal([]byte(refusedOutput), &refused); err != nil {
+		t.Fatal(err)
+	}
+	refusedCheck := findDoctorCheck(t, refused.Checks, "Mailboxes")
+	if refused.MailboxRepair != nil || refusedCheck.Status != "error" ||
+		!strings.Contains(refusedCheck.Message, "pinned session context") {
+		t.Fatalf("mismatched repair was not refused: repair=%#v check=%#v", refused.MailboxRepair, refusedCheck)
+	}
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("mismatched explicit repair mutated mailbox: %v", err)
+	}
+
+	overrideOutput, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{
+			"--root", sessionRoot,
+			"--base-root", baseRoot,
+			"--ignore-session-pin",
+			"--fix-mailboxes",
+			"--json",
+		})
+	})
+	if err != nil {
+		t.Fatalf("explicit override repair: %v", err)
+	}
+	var repaired doctorMailboxResultJSON
+	if err := json.Unmarshal([]byte(overrideOutput), &repaired); err != nil {
+		t.Fatal(err)
+	}
+	if repaired.MailboxRepair == nil || repaired.MailboxRepair.Status != "repaired" {
+		t.Fatalf("override repair = %#v checks=%#v", repaired.MailboxRepair, repaired.Checks)
+	}
+	if err := fsq.ValidateExistingMailboxLayout(openDeliveryRootForCLITest(t, sessionRoot), "bob"); err != nil {
+		t.Fatalf("override doctor repair left mailbox incomplete: %v", err)
+	}
+}
+
+func TestDoctorExplicitBaseRequiresRootAndDirectRelationship(t *testing.T) {
+	baseRoot := healthyDoctorMailboxRoot(t, "bob")
+	if err := runDoctor([]string{"--base-root", baseRoot, "--fix-mailboxes"}); err == nil ||
+		!strings.Contains(err.Error(), "--base-root requires an explicit --root") {
+		t.Fatalf("base without root error = %v", err)
+	}
+	if err := runDoctor([]string{"--ignore-session-pin", "--fix-mailboxes"}); err == nil ||
+		!strings.Contains(err.Error(), "--ignore-session-pin requires an explicit --root") {
+		t.Fatalf("pin override without root error = %v", err)
+	}
+	if err := runDoctor([]string{"--root=", "--ignore-session-pin", "--fix-mailboxes"}); err == nil ||
+		!strings.Contains(err.Error(), "--root cannot be empty") {
+		t.Fatalf("pin override with blank root error = %v", err)
+	}
+
+	outsideRoot := healthyDoctorMailboxRoot(t, "bob")
+	missing := fsq.AgentInboxCur(outsideRoot, "bob")
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+	err := runDoctor([]string{
+		"--root", outsideRoot,
+		"--base-root", baseRoot,
+		"--fix-mailboxes",
+		"--json",
+	})
+	if err == nil || !strings.Contains(err.Error(), "one direct child") {
+		t.Fatalf("outside base error = %v", err)
+	}
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("outside-base refusal mutated mailbox: %v", err)
+	}
+}
+
+func TestDoctorExplicitPinnedBaseRepairIsAuthorized(t *testing.T) {
+	baseRoot := filepath.Join(secureTempDirForTest(t), ".agent-mail")
+	sessionRoot := filepath.Join(baseRoot, "collab")
+	configureSendTestRoot(t, baseRoot, "alice", "bob")
+	if err := fsq.EnsureAgentDirs(sessionRoot, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(baseRoot, "agents", "bob")); err != nil {
+		t.Fatal(err)
+	}
+	pinSendSessionForTest(t, baseRoot, sessionRoot, "collab")
+
+	output, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{
+			"--root", baseRoot,
+			"--fix-mailboxes",
+			"--json",
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result doctorMailboxResultJSON
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.MailboxRepair == nil || result.MailboxRepair.Status != "repaired" {
+		t.Fatalf("pinned base repair = %#v checks=%#v", result.MailboxRepair, result.Checks)
+	}
+	if err := fsq.ValidateExistingMailboxLayout(openDeliveryRootForCLITest(t, baseRoot), "bob"); err != nil {
+		t.Fatalf("pinned base repair left mailbox incomplete: %v", err)
+	}
+}
+
+func TestDoctorOpsUsesExplicitBaseConfigAuthority(t *testing.T) {
+	baseRoot := filepath.Join(secureTempDirForTest(t), "custom base")
+	sessionRoot := filepath.Join(baseRoot, "collab")
+	configureSendTestRoot(t, baseRoot, "bob")
+	if err := fsq.EnsureAgentDirs(sessionRoot, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(sessionRoot, reservedHumanHandle); err != nil {
+		t.Fatal(err)
+	}
+	clearDoctorSessionPin(t)
+
+	output, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{
+			"--root", sessionRoot,
+			"--base-root", baseRoot,
+			"--ops",
+			"--json",
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result doctorMailboxResultJSON
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Ops == nil || len(result.Ops.Agents) != 1 || result.Ops.Agents[0].Handle != "bob" {
+		t.Fatalf("explicit-base ops = %#v", result.Ops)
+	}
+	mailbox := findDoctorMailboxTestEntry(t, result.Mailboxes, "bob")
+	if mailbox.Provenance != "configured_and_discovered" || mailbox.Status != "ok" ||
+		len(mailbox.Issues) != 0 || mailbox.Remedy != "" {
+		t.Fatalf("explicit-base mailbox classification = %#v", mailbox)
+	}
+	if check := findDoctorCheck(t, result.Checks, "Mailboxes"); check.Status != "ok" {
+		t.Fatalf("explicit-base mailbox check = %#v", check)
+	}
+	for _, hint := range result.Ops.Hints {
+		if hint.Code == "config_error" {
+			t.Fatalf("explicit-base ops emitted config error: %#v", hint)
+		}
 	}
 }
 
@@ -142,10 +568,13 @@ func TestDoctorIssue289DiscoveredOnlyMailboxIsNotRepairEligible(t *testing.T) {
 	if orphan.Provenance != "discovered" || orphan.Status != "warn" || orphan.RepairEligible {
 		t.Fatalf("discovered-only mailbox = %#v", orphan)
 	}
-	for _, want := range []string{"meta/config.json", "amq doctor --fix-mailboxes", "agents/orphan", "preserve"} {
+	for _, want := range []string{"meta/config.json", "amq doctor --root", "--fix-mailboxes", "agents/orphan", "preserve"} {
 		if !strings.Contains(orphan.Remedy, want) {
 			t.Fatalf("orphan remedy missing %q: %q", want, orphan.Remedy)
 		}
+	}
+	if strings.Contains(orphan.Remedy, "--ignore-session-pin") {
+		t.Fatalf("unpinned orphan remedy advertised escape hatch: %q", orphan.Remedy)
 	}
 }
 
@@ -161,9 +590,11 @@ func TestDoctorDiscoveredOnlyMailboxKeepsRemedyAfterConfiguredRepair(t *testing.
 	result := runDoctorMailboxJSONArgs(t, root, "--fix-mailboxes", "--json")
 
 	if result.MailboxRepair == nil ||
-		len(result.MailboxRepair.CreatedPaths) != 1 ||
-		result.MailboxRepair.CreatedPaths[0] != "agents/claude/inbox/cur" {
+		!doctorMailboxContains(result.MailboxRepair.CreatedPaths, "agents/claude/inbox/cur") {
 		t.Fatalf("repair = %#v", result.MailboxRepair)
+	}
+	if doctorMailboxContains(result.MailboxRepair.CreatedPaths, "agents/orphan/inbox") {
+		t.Fatalf("repair completed discovered-only orphan: %#v", result.MailboxRepair.CreatedPaths)
 	}
 	orphan := findDoctorMailboxTestEntry(t, result.Mailboxes, "orphan")
 	if orphan.Status != "warn" || orphan.RepairEligible || orphan.Remedy == "" {
@@ -211,8 +642,8 @@ func TestDoctorIssue289RepairCreatesOnlyMissingDirsAndIsIdempotent(t *testing.T)
 		}
 		t.Fatalf("repair = %#v failure=%#v", first.MailboxRepair, failure)
 	}
-	if len(first.MailboxRepair.CreatedPaths) != 1 ||
-		first.MailboxRepair.CreatedPaths[0] != "agents/legacy/inbox/cur" {
+	if !doctorMailboxContains(first.MailboxRepair.CreatedPaths, "agents/legacy/inbox/cur") ||
+		!doctorMailboxContains(first.MailboxRepair.CreatedPaths, "agents/user/receipts") {
 		t.Fatalf("created_paths = %#v", first.MailboxRepair.CreatedPaths)
 	}
 	after, err := os.Stat(messagePath)
@@ -315,6 +746,9 @@ func healthyDoctorMailboxRoot(t *testing.T, handle string) string {
 		t.Fatal(err)
 	}
 	if err := fsq.EnsureAgentDirs(root, handle); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, reservedHumanHandle); err != nil {
 		t.Fatal(err)
 	}
 	if err := config.WriteConfig(filepath.Join(root, "meta", "config.json"), config.Config{

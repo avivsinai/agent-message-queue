@@ -107,6 +107,78 @@ func TestMailboxLayoutRepairRefusesNonDirectoryPreflight(t *testing.T) {
 	}
 }
 
+func TestMailboxLayoutRepairRefusesConfigReplacementBeforeFirstMkdir(t *testing.T) {
+	rootPath := mailboxLayoutTestRoot(t, "legacy")
+	if err := EnsureAgentDirs(rootPath, "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	missing := AgentDLQCur(rootPath, "legacy")
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+	root := openMailboxLayoutTestRoot(t, rootPath)
+	configPath := filepath.Join(rootPath, "meta", "config.json")
+	originalPath := configPath + ".original"
+
+	result := repairMailboxLayout(root, mailboxRepairHooks{
+		afterPreflight: func() {
+			if err := os.Rename(configPath, originalPath); err != nil {
+				t.Fatalf("rename config: %v", err)
+			}
+			if err := os.WriteFile(configPath, []byte(`{"version":1,"agents":["attacker"]}`), 0o600); err != nil {
+				t.Fatalf("replace config: %v", err)
+			}
+		},
+	})
+	if result.Status == "repaired" {
+		t.Fatalf("repair accepted replaced authorization config: %#v", result)
+	}
+	if len(result.CreatedPaths) != 0 {
+		t.Fatalf("repair mutated before rejecting config replacement: %#v", result.CreatedPaths)
+	}
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("repair created path after config replacement: %v", err)
+	}
+}
+
+func TestMailboxLayoutRepairRefusesConfigReplacementAfterFinalInspectionBeforeDelivery(t *testing.T) {
+	rootPath := mailboxLayoutTestRoot(t, "legacy")
+	if err := EnsureAgentDirs(rootPath, "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	root := openMailboxLayoutTestRoot(t, rootPath)
+	configPath := filepath.Join(rootPath, "meta", "config.json")
+	authorization, _, err := OpenMailboxConfigAuthorization(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = authorization.Close() }()
+
+	result := repairMailboxLayoutHandlesAuthorized(root, authorization, []string{"legacy"}, false, mailboxRepairHooks{
+		afterFinalInspection: func() {
+			if err := os.Rename(configPath, configPath+".original"); err != nil {
+				t.Fatalf("rename config: %v", err)
+			}
+			if err := os.WriteFile(configPath, []byte(`{"version":1,"agents":[]}`), 0o600); err != nil {
+				t.Fatalf("replace config: %v", err)
+			}
+		},
+	})
+	if result.Status == "repaired" {
+		t.Fatalf("repair accepted config replacement during final inspection: %#v", result)
+	}
+	if result.Failure == nil || result.Failure.Code != "authorization_changed" {
+		t.Fatalf("failure = %#v", result.Failure)
+	}
+	entries, readErr := os.ReadDir(AgentInboxNew(rootPath, "legacy"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("authorization failure allowed delivery: %#v", entries)
+	}
+}
+
 func mailboxLayoutTestRoot(t *testing.T, agents ...string) string {
 	t.Helper()
 	root := t.TempDir()

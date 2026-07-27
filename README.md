@@ -214,6 +214,16 @@ identity-authenticated when identity tokens are present). Implicit, sibling,
 foreign, stale, and malformed contexts still warn. Unpinned scripts and CI
 retain the existing fail-open behavior.
 
+`amq doctor --root <path>` follows the same inspection-versus-mutation split:
+the explicit root selects the exact target but does not repin the shell or
+waive its session pin. Read-only inspection continues with a mismatch warning.
+`--fix-mailboxes` and `--ops --fix-wake-locks` refuse a mismatched target unless
+`--ignore-session-pin` is also supplied; that override requires an explicit
+non-empty `--root`. For a session whose roster lives only in its base, use
+`amq doctor --root <session> --base-root <base> --ignore-session-pin --fix-mailboxes`.
+`--base-root` is config authority only, must be the target itself or its direct
+parent, and never overrides the session pin.
+
 A missing mailbox is an error, not an empty inbox. When `drain` or `list --new`
 finds an actually empty inbox, it prints a stderr-only note if the same handle
 has pending messages in a sibling session, including an exact non-destructive

@@ -1,9 +1,11 @@
 package fsq
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -200,6 +202,20 @@ type mailboxActiveConfig struct {
 	Agents []string `json:"agents"`
 }
 
+type mailboxConfigPin struct {
+	root *DeliveryRoot
+	file *os.File
+	info os.FileInfo
+	data []byte
+	cfg  mailboxActiveConfig
+}
+
+// MailboxConfigAuthorization retains the exact config descriptor and content
+// used to authorize mailbox repair. Callers must close it.
+type MailboxConfigAuthorization struct {
+	pin *mailboxConfigPin
+}
+
 type mailboxLayoutNode struct {
 	state MailboxPathState
 	mode  os.FileMode
@@ -212,8 +228,9 @@ type mailboxLayoutPlan struct {
 }
 
 type mailboxRepairHooks struct {
-	afterPreflight func()
-	fail           func(stage, path string) error
+	afterPreflight       func()
+	afterFinalInspection func()
+	fail                 func(stage, path string) error
 }
 
 var errLayoutIdentityChanged = errors.New("layout component changed during inspection")
@@ -299,6 +316,125 @@ func readActiveMailboxConfig(root *layoutDirCapability) (mailboxActiveConfig, st
 	return cfg, "ok", ""
 }
 
+func pinActiveMailboxConfig(root *DeliveryRoot) (*mailboxConfigPin, string, string) {
+	const configPath = "meta/config.json"
+	file, info, err := root.OpenRegularNoFollow(configPath)
+	if err != nil {
+		state := MailboxPathUnreadable
+		if errors.Is(err, fs.ErrNotExist) {
+			state = MailboxPathMissing
+		}
+		issue := mailboxIssue(state, configPath)
+		if state != MailboxPathMissing {
+			issue += ":" + err.Error()
+		}
+		return nil, string(state), issue
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		_ = file.Close()
+		return nil, string(MailboxPathUnreadable), mailboxIssue(MailboxPathUnreadable, configPath)
+	}
+	var cfg mailboxActiveConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		_ = file.Close()
+		return nil, "malformed", fmt.Sprintf("malformed:%s:%v", configPath, err)
+	}
+	for _, handle := range cfg.Agents {
+		if err := ValidateHandle(handle); err != nil {
+			_ = file.Close()
+			return nil, "invalid_handles", fmt.Sprintf("invalid_handle:%s:%v", handle, err)
+		}
+	}
+	return &mailboxConfigPin{
+		root: root,
+		file: file,
+		info: info,
+		data: append([]byte(nil), data...),
+		cfg:  cfg,
+	}, "ok", ""
+}
+
+func (p *mailboxConfigPin) verify() error {
+	if p == nil || p.file == nil || p.info == nil {
+		return fmt.Errorf("mailbox config authorization is closed")
+	}
+	if err := p.root.VerifyBase(); err != nil {
+		return err
+	}
+	info, err := p.file.Stat()
+	if err != nil || !os.SameFile(p.info, info) {
+		return fmt.Errorf("mailbox config descriptor identity changed")
+	}
+	if _, err := p.file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind mailbox config descriptor: %w", err)
+	}
+	pinnedData, err := io.ReadAll(p.file)
+	if err != nil {
+		return fmt.Errorf("re-read mailbox config descriptor: %w", err)
+	}
+	if !bytes.Equal(pinnedData, p.data) {
+		return fmt.Errorf("mailbox config content changed")
+	}
+
+	current, currentInfo, err := p.root.OpenRegularNoFollow("meta/config.json")
+	if err != nil {
+		return fmt.Errorf("re-open mailbox config: %w", err)
+	}
+	defer func() { _ = current.Close() }()
+	if !os.SameFile(p.info, currentInfo) {
+		return fmt.Errorf("mailbox config path identity changed")
+	}
+	currentData, err := io.ReadAll(current)
+	if err != nil {
+		return fmt.Errorf("re-read current mailbox config: %w", err)
+	}
+	if !bytes.Equal(currentData, p.data) {
+		return fmt.Errorf("mailbox config path content changed")
+	}
+	return nil
+}
+
+// OpenMailboxConfigAuthorization pins the active config through configRoot.
+func OpenMailboxConfigAuthorization(configRoot *DeliveryRoot) (*MailboxConfigAuthorization, MailboxInventory, error) {
+	pin, status, issue := pinActiveMailboxConfig(configRoot)
+	inventory := MailboxInventory{
+		ActiveConfigStatus: status,
+		ActiveConfigIssue:  issue,
+		RepairAuthorized:   pin != nil,
+	}
+	if pin == nil {
+		return nil, inventory, errors.New(issue)
+	}
+	inventory.ConfiguredAgents = append([]string(nil), pin.cfg.Agents...)
+	return &MailboxConfigAuthorization{pin: pin}, inventory, nil
+}
+
+// Close releases the retained config descriptor.
+func (a *MailboxConfigAuthorization) Close() error {
+	if a == nil || a.pin == nil || a.pin.file == nil {
+		return nil
+	}
+	return a.pin.file.Close()
+}
+
+// ConfiguredAgents returns the roster bound to this authorization.
+func (a *MailboxConfigAuthorization) ConfiguredAgents() []string {
+	if a == nil || a.pin == nil {
+		return nil
+	}
+	return append([]string(nil), a.pin.cfg.Agents...)
+}
+
+// Verify confirms the retained descriptor, its content, and its current path
+// still identify the exact config that authorized this operation.
+func (a *MailboxConfigAuthorization) Verify() error {
+	if a == nil || a.pin == nil {
+		return fmt.Errorf("mailbox config authorization is missing")
+	}
+	return a.pin.verify()
+}
+
 func inspectMailboxLayout(root *DeliveryRoot, additionalHandles ...string) (mailboxLayoutPlan, error) {
 	if err := root.VerifyBase(); err != nil {
 		return mailboxLayoutPlan{}, err
@@ -310,6 +446,22 @@ func inspectMailboxLayout(root *DeliveryRoot, additionalHandles ...string) (mail
 	defer rootCap.close()
 
 	cfg, configStatus, configIssue := readActiveMailboxConfig(rootCap)
+	return inspectMailboxLayoutCapability(rootCap, cfg, configStatus, configIssue, additionalHandles...)
+}
+
+func inspectMailboxLayoutWithConfig(root *DeliveryRoot, cfg mailboxActiveConfig, additionalHandles ...string) (mailboxLayoutPlan, error) {
+	if err := root.VerifyBase(); err != nil {
+		return mailboxLayoutPlan{}, err
+	}
+	rootCap, err := openLayoutRootCapability(root)
+	if err != nil {
+		return mailboxLayoutPlan{}, err
+	}
+	defer rootCap.close()
+	return inspectMailboxLayoutCapability(rootCap, cfg, "ok", "", additionalHandles...)
+}
+
+func inspectMailboxLayoutCapability(rootCap *layoutDirCapability, cfg mailboxActiveConfig, configStatus, configIssue string, additionalHandles ...string) (mailboxLayoutPlan, error) {
 	inventory := MailboxInventory{
 		ActiveConfigStatus: configStatus,
 		ActiveConfigIssue:  configIssue,
@@ -478,6 +630,83 @@ func InspectMailboxLayout(root *DeliveryRoot) (MailboxInventory, error) {
 	return plan.inventory, err
 }
 
+// InspectMailboxLayoutWithAuthorization inventories root using the exact
+// retained config capability supplied by the caller. effectiveAgents are
+// treated as configured for callers whose roster includes implicit handles.
+func InspectMailboxLayoutWithAuthorization(root *DeliveryRoot, authorization *MailboxConfigAuthorization, effectiveAgents ...string) (MailboxInventory, error) {
+	if authorization == nil || authorization.pin == nil {
+		return MailboxInventory{}, fmt.Errorf("mailbox config authorization is missing")
+	}
+	if err := authorization.Verify(); err != nil {
+		return MailboxInventory{}, fmt.Errorf("verify mailbox config authorization: %w", err)
+	}
+	cfg, err := mailboxConfigWithEffectiveAgents(authorization.pin.cfg, effectiveAgents)
+	if err != nil {
+		return MailboxInventory{}, err
+	}
+	plan, err := inspectMailboxLayoutWithConfig(root, cfg)
+	if err != nil {
+		return plan.inventory, err
+	}
+	if err := authorization.Verify(); err != nil {
+		return plan.inventory, fmt.Errorf("mailbox config authorization changed during inspection: %w", err)
+	}
+	return plan.inventory, nil
+}
+
+func mailboxConfigWithEffectiveAgents(cfg mailboxActiveConfig, effectiveAgents []string) (mailboxActiveConfig, error) {
+	cfg.Agents = append([]string(nil), cfg.Agents...)
+	seen := make(map[string]bool, len(cfg.Agents)+len(effectiveAgents))
+	for _, handle := range cfg.Agents {
+		seen[handle] = true
+	}
+	for _, handle := range effectiveAgents {
+		if err := ValidateHandle(handle); err != nil {
+			return mailboxActiveConfig{}, err
+		}
+		if !seen[handle] {
+			seen[handle] = true
+			cfg.Agents = append(cfg.Agents, handle)
+		}
+	}
+	return cfg, nil
+}
+
+// ValidateExistingMailboxLayout requires the complete mailbox contract for each
+// requested handle without creating or changing any path.
+func ValidateExistingMailboxLayout(root *DeliveryRoot, handles ...string) error {
+	unique := make([]string, 0, len(handles))
+	seen := make(map[string]bool, len(handles))
+	for _, handle := range handles {
+		if err := ValidateHandle(handle); err != nil {
+			return err
+		}
+		if !seen[handle] {
+			seen[handle] = true
+			unique = append(unique, handle)
+		}
+	}
+	plan, err := inspectMailboxLayout(root, unique...)
+	if err != nil {
+		return err
+	}
+	byHandle := make(map[string]MailboxInspection, len(plan.inventory.Mailboxes))
+	for _, mailbox := range plan.inventory.Mailboxes {
+		byHandle[mailbox.Handle] = mailbox
+	}
+	for _, handle := range unique {
+		mailbox, ok := byHandle[handle]
+		if !ok || len(mailbox.Issues) != 0 {
+			issues := mailbox.Issues
+			if !ok {
+				issues = []string{"missing:."}
+			}
+			return fmt.Errorf("mailbox for %q is incomplete: %s", handle, strings.Join(issues, ","))
+		}
+	}
+	return nil
+}
+
 func preflightHazard(plan mailboxLayoutPlan, repairHandles []string) (string, bool) {
 	if !plan.inventory.RepairAuthorized {
 		return plan.inventory.ActiveConfigIssue, true
@@ -527,8 +756,9 @@ func repairComponentPaths(repairHandles []string) []string {
 	return paths
 }
 
-func repairFailure(code, stage, path string, err error, created []string, root *DeliveryRoot) MailboxRepairResult {
-	inventory, inspectErr := InspectMailboxLayout(root)
+func repairFailure(code, stage, path string, err error, created []string, root *DeliveryRoot, cfg mailboxActiveConfig) MailboxRepairResult {
+	plan, inspectErr := inspectMailboxLayoutWithConfig(root, cfg)
+	inventory := plan.inventory
 	if inspectErr != nil {
 		err = fmt.Errorf("%w; re-inspection failed: %v", err, inspectErr)
 	}
@@ -568,8 +798,65 @@ func mergeCreatedPaths(inventory *MailboxInventory, created []string) {
 	}
 }
 
-func repairMailboxLayoutHandles(root *DeliveryRoot, requestedHandles []string, configuredSet bool, hooks mailboxRepairHooks) MailboxRepairResult {
-	plan, err := inspectMailboxLayout(root, requestedHandles...)
+func repairMailboxLayoutHandles(root, configRoot *DeliveryRoot, requestedHandles []string, configuredSet bool, hooks mailboxRepairHooks) MailboxRepairResult {
+	authorization, inventory, err := OpenMailboxConfigAuthorization(configRoot)
+	if err != nil {
+		return MailboxRepairResult{
+			Status: "failed",
+			Failure: &MailboxRepairFailure{
+				Code:    "preflight_failed",
+				Stage:   "authorization",
+				Message: inventory.ActiveConfigIssue,
+			},
+			Inventory: inventory,
+		}
+	}
+	defer func() { _ = authorization.Close() }()
+	return repairMailboxLayoutHandlesAuthorized(root, authorization, requestedHandles, configuredSet, hooks)
+}
+
+func repairMailboxLayoutHandlesAuthorized(root *DeliveryRoot, authorization *MailboxConfigAuthorization, requestedHandles []string, configuredSet bool, hooks mailboxRepairHooks) MailboxRepairResult {
+	if authorization == nil || authorization.pin == nil {
+		return MailboxRepairResult{
+			Status:  "failed",
+			Failure: &MailboxRepairFailure{Code: "preflight_failed", Stage: "authorization", Message: "mailbox config authorization is missing"},
+		}
+	}
+	return repairMailboxLayoutHandlesAuthorizedWithConfig(
+		root,
+		authorization,
+		requestedHandles,
+		configuredSet,
+		authorization.pin.cfg,
+		hooks,
+	)
+}
+
+func repairMailboxLayoutHandlesAuthorizedWithConfig(root *DeliveryRoot, authorization *MailboxConfigAuthorization, requestedHandles []string, configuredSet bool, inspectionConfig mailboxActiveConfig, hooks mailboxRepairHooks) MailboxRepairResult {
+	if authorization == nil || authorization.pin == nil {
+		return MailboxRepairResult{
+			Status:  "failed",
+			Failure: &MailboxRepairFailure{Code: "preflight_failed", Stage: "authorization", Message: "mailbox config authorization is missing"},
+		}
+	}
+	configPin := authorization.pin
+	if err := configPin.verify(); err != nil {
+		return MailboxRepairResult{
+			Status: "failed",
+			Failure: &MailboxRepairFailure{
+				Code:    "authorization_changed",
+				Stage:   "authorization",
+				Path:    "meta/config.json",
+				Message: err.Error(),
+			},
+			Inventory: MailboxInventory{
+				ActiveConfigStatus: "changed",
+				ActiveConfigIssue:  err.Error(),
+				ConfiguredAgents:   append([]string(nil), inspectionConfig.Agents...),
+			},
+		}
+	}
+	plan, err := inspectMailboxLayoutWithConfig(root, inspectionConfig, requestedHandles...)
 	if err != nil {
 		return MailboxRepairResult{
 			Status:  "failed",
@@ -590,10 +877,17 @@ func repairMailboxLayoutHandles(root *DeliveryRoot, requestedHandles []string, c
 	if hooks.afterPreflight != nil {
 		hooks.afterPreflight()
 	}
+	if err := configPin.verify(); err != nil {
+		return MailboxRepairResult{
+			Status:    "failed",
+			Failure:   &MailboxRepairFailure{Code: "authorization_changed", Stage: "authorization", Path: "meta/config.json", Message: err.Error()},
+			Inventory: plan.inventory,
+		}
+	}
 
 	rootCap, err := openLayoutRootCapability(root)
 	if err != nil {
-		return repairFailure("unsafe_root", "open", ".", err, nil, root)
+		return repairFailure("unsafe_root", "open", ".", err, nil, root, inspectionConfig)
 	}
 	defer rootCap.close()
 	caps := map[string]*layoutDirCapability{"": rootCap}
@@ -613,7 +907,7 @@ func repairMailboxLayoutHandles(root *DeliveryRoot, requestedHandles []string, c
 		}
 		parent := caps[parentPath]
 		if parent == nil {
-			return repairFailure("concurrent_change", "open", path, errLayoutIdentityChanged, created, root)
+			return repairFailure("concurrent_change", "open", path, errLayoutIdentityChanged, created, root, inspectionConfig)
 		}
 		name := filepath.Base(path)
 		before := plan.nodes[path]
@@ -622,14 +916,14 @@ func repairMailboxLayoutHandles(root *DeliveryRoot, requestedHandles []string, c
 		switch before.state {
 		case MailboxPathMissing:
 			if statErr == nil {
-				return repairFailure("concurrent_race", "create", path, fmt.Errorf("%s appeared after preflight", path), created, root)
+				return repairFailure("concurrent_race", "create", path, fmt.Errorf("%s appeared after preflight", path), created, root, inspectionConfig)
 			}
 			if !errors.Is(statErr, fs.ErrNotExist) {
-				return repairFailure("create_failed", "create", path, statErr, created, root)
+				return repairFailure("create_failed", "create", path, statErr, created, root, inspectionConfig)
 			}
 			if hooks.fail != nil {
 				if failErr := hooks.fail("mkdir", path); failErr != nil {
-					return repairFailure("create_failed", "mkdir", path, failErr, created, root)
+					return repairFailure("create_failed", "mkdir", path, failErr, created, root, inspectionConfig)
 				}
 			}
 			if err := mkdirLayoutDirectory(parent, name, 0o700); err != nil {
@@ -637,77 +931,83 @@ func repairMailboxLayoutHandles(root *DeliveryRoot, requestedHandles []string, c
 				if errors.Is(err, fs.ErrExist) {
 					code = "concurrent_race"
 				}
-				return repairFailure(code, "mkdir", path, err, created, root)
+				return repairFailure(code, "mkdir", path, err, created, root, inspectionConfig)
 			}
 			created = append(created, filepath.ToSlash(path))
 			current, statErr = lstatLayoutNode(parent, name)
 			if statErr != nil {
-				return repairFailure("create_failed", "lstat", path, statErr, created, root)
+				return repairFailure("create_failed", "lstat", path, statErr, created, root, inspectionConfig)
 			}
 			if current.kind != layoutNodeDirectory {
-				return repairFailure("concurrent_race", "identity", path, fmt.Errorf("created path is not a directory"), created, root)
+				return repairFailure("concurrent_race", "identity", path, fmt.Errorf("created path is not a directory"), created, root, inspectionConfig)
 			}
 			if hooks.fail != nil {
 				if failErr := hooks.fail("open", path); failErr != nil {
-					return repairFailure("create_failed", "open", path, failErr, created, root)
+					return repairFailure("create_failed", "open", path, failErr, created, root, inspectionConfig)
 				}
 			}
 			child, openErr := openLayoutDirectory(parent, name, current)
 			if openErr != nil {
-				return repairFailure("create_failed", "open", path, openErr, created, root)
+				return repairFailure("create_failed", "open", path, openErr, created, root, inspectionConfig)
 			}
 			caps[path] = child
 			if hooks.fail != nil {
 				if failErr := hooks.fail("chmod", path); failErr != nil {
-					return repairFailure("create_failed", "chmod", path, failErr, created, root)
+					return repairFailure("create_failed", "chmod", path, failErr, created, root, inspectionConfig)
 				}
 			}
 			if err := child.chmod(0o700); err != nil {
-				return repairFailure("create_failed", "chmod", path, err, created, root)
+				return repairFailure("create_failed", "chmod", path, err, created, root, inspectionConfig)
 			}
 			mode, err := child.mode()
 			if err != nil {
-				return repairFailure("create_failed", "fstat", path, err, created, root)
+				return repairFailure("create_failed", "fstat", path, err, created, root, inspectionConfig)
 			}
 			if !layoutModeSupported(mode) {
-				return repairFailure("create_failed", "mode", path, fmt.Errorf("created directory mode is %04o, want 0700", mode.Perm()), created, root)
+				return repairFailure("create_failed", "mode", path, fmt.Errorf("created directory mode is %04o, want 0700", mode.Perm()), created, root, inspectionConfig)
 			}
 			if hooks.fail != nil {
 				if failErr := hooks.fail("child_sync", path); failErr != nil {
-					return repairFailure("durability_failed", "child_sync", path, failErr, created, root)
+					return repairFailure("durability_failed", "child_sync", path, failErr, created, root, inspectionConfig)
 				}
 			}
 			if err := child.sync(); err != nil {
-				return repairFailure("durability_failed", "child_sync", path, err, created, root)
+				return repairFailure("durability_failed", "child_sync", path, err, created, root, inspectionConfig)
 			}
 			if hooks.fail != nil {
 				if failErr := hooks.fail("parent_sync", path); failErr != nil {
-					return repairFailure("durability_failed", "parent_sync", path, failErr, created, root)
+					return repairFailure("durability_failed", "parent_sync", path, failErr, created, root, inspectionConfig)
 				}
 			}
 			if err := parent.sync(); err != nil {
-				return repairFailure("durability_failed", "parent_sync", path, err, created, root)
+				return repairFailure("durability_failed", "parent_sync", path, err, created, root, inspectionConfig)
 			}
 		case MailboxPathDirectory:
 			if statErr != nil || !sameLayoutNode(before.info, current) {
 				if statErr == nil {
 					statErr = errLayoutIdentityChanged
 				}
-				return repairFailure("concurrent_change", "identity", path, statErr, created, root)
+				return repairFailure("concurrent_change", "identity", path, statErr, created, root, inspectionConfig)
 			}
 			child, openErr := openLayoutDirectory(parent, name, current)
 			if openErr != nil {
-				return repairFailure("concurrent_change", "open", path, openErr, created, root)
+				return repairFailure("concurrent_change", "open", path, openErr, created, root, inspectionConfig)
 			}
 			caps[path] = child
 		default:
-			return repairFailure("preflight_failed", "preflight", path, fmt.Errorf("unsafe preflight state %s", before.state), created, root)
+			return repairFailure("preflight_failed", "preflight", path, fmt.Errorf("unsafe preflight state %s", before.state), created, root, inspectionConfig)
 		}
 	}
 
-	verifiedPlan, inspectErr := inspectMailboxLayout(root, repairHandles...)
+	if err := configPin.verify(); err != nil {
+		return repairFailure("authorization_changed", "verify", "meta/config.json", err, created, root, inspectionConfig)
+	}
+	verifiedPlan, inspectErr := inspectMailboxLayoutWithConfig(root, inspectionConfig, repairHandles...)
 	if inspectErr != nil {
-		return repairFailure("verification_failed", "verify", ".", inspectErr, created, root)
+		return repairFailure("verification_failed", "verify", ".", inspectErr, created, root, inspectionConfig)
+	}
+	if hooks.afterFinalInspection != nil {
+		hooks.afterFinalInspection()
 	}
 	inventory := verifiedPlan.inventory
 	mergeCreatedPaths(&inventory, created)
@@ -723,9 +1023,12 @@ func repairMailboxLayoutHandles(root *DeliveryRoot, requestedHandles []string, c
 			switch path.State {
 			case MailboxPathDirectory:
 			default:
-				return repairFailure("verification_failed", "verify", filepath.Join("agents", mailbox.Handle, path.Path), fmt.Errorf("post-repair state %s", path.State), created, root)
+				return repairFailure("verification_failed", "verify", filepath.Join("agents", mailbox.Handle, path.Path), fmt.Errorf("post-repair state %s", path.State), created, root, inspectionConfig)
 			}
 		}
+	}
+	if err := authorization.Verify(); err != nil {
+		return repairFailure("authorization_changed", "verify", "meta/config.json", err, created, root, inspectionConfig)
 	}
 	return MailboxRepairResult{
 		Status:       "repaired",
@@ -735,7 +1038,7 @@ func repairMailboxLayoutHandles(root *DeliveryRoot, requestedHandles []string, c
 }
 
 func repairMailboxLayout(root *DeliveryRoot, hooks mailboxRepairHooks) MailboxRepairResult {
-	return repairMailboxLayoutHandles(root, nil, true, hooks)
+	return repairMailboxLayoutHandles(root, root, nil, true, hooks)
 }
 
 // RepairMailboxLayout validates the complete configured set before creating
@@ -749,6 +1052,27 @@ func RepairMailboxLayout(root *DeliveryRoot) MailboxRepairResult {
 // as RepairMailboxLayout. A valid active config is still required, but the
 // requested handles do not need to be listed in it.
 func RepairMailboxLayoutForAgents(root *DeliveryRoot, agents []string) MailboxRepairResult {
+	return RepairMailboxLayoutForAgentsAuthorized(root, root, agents)
+}
+
+// RepairMailboxLayoutForAgentsAuthorized validates and completes only agents in
+// root while taking initialization and roster authority from configRoot.
+func RepairMailboxLayoutForAgentsAuthorized(root, configRoot *DeliveryRoot, agents []string) MailboxRepairResult {
+	authorization, inventory, err := OpenMailboxConfigAuthorization(configRoot)
+	if err != nil {
+		return MailboxRepairResult{
+			Status:    "failed",
+			Failure:   &MailboxRepairFailure{Code: "preflight_failed", Stage: "authorization", Message: inventory.ActiveConfigIssue},
+			Inventory: inventory,
+		}
+	}
+	defer func() { _ = authorization.Close() }()
+	return RepairMailboxLayoutForAgentsWithAuthorization(root, authorization, agents)
+}
+
+// RepairMailboxLayoutForAgentsWithAuthorization repairs only agents using the
+// exact retained config authorization previously used for roster validation.
+func RepairMailboxLayoutForAgentsWithAuthorization(root *DeliveryRoot, authorization *MailboxConfigAuthorization, agents []string) MailboxRepairResult {
 	handles := make([]string, 0, len(agents))
 	seen := make(map[string]bool, len(agents))
 	for _, handle := range agents {
@@ -763,5 +1087,32 @@ func RepairMailboxLayoutForAgents(root *DeliveryRoot, agents []string) MailboxRe
 			handles = append(handles, handle)
 		}
 	}
-	return repairMailboxLayoutHandles(root, handles, false, mailboxRepairHooks{})
+	return repairMailboxLayoutHandlesAuthorized(root, authorization, handles, false, mailboxRepairHooks{})
+}
+
+// RepairMailboxLayoutForConfiguredAgentsWithAuthorization repairs an effective
+// configured roster, including caller-owned implicit handles, while retaining
+// the exact on-disk config authorization for mutation checks.
+func RepairMailboxLayoutForConfiguredAgentsWithAuthorization(root *DeliveryRoot, authorization *MailboxConfigAuthorization, effectiveAgents []string) MailboxRepairResult {
+	if authorization == nil || authorization.pin == nil {
+		return MailboxRepairResult{
+			Status:  "failed",
+			Failure: &MailboxRepairFailure{Code: "preflight_failed", Stage: "authorization", Message: "mailbox config authorization is missing"},
+		}
+	}
+	cfg, err := mailboxConfigWithEffectiveAgents(authorization.pin.cfg, effectiveAgents)
+	if err != nil {
+		return MailboxRepairResult{
+			Status:  "failed",
+			Failure: &MailboxRepairFailure{Code: "preflight_failed", Stage: "preflight", Message: err.Error()},
+		}
+	}
+	return repairMailboxLayoutHandlesAuthorizedWithConfig(
+		root,
+		authorization,
+		cfg.Agents,
+		false,
+		cfg,
+		mailboxRepairHooks{},
+	)
 }

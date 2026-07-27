@@ -4,9 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func TestParseInlineRecipient(t *testing.T) {
@@ -327,11 +331,8 @@ func TestCrossProjectSendFromOutsideTree(t *testing.T) {
 	peerBaseRoot := filepath.Join(peerProjectDir, ".agent-mail")
 	peerSessionRoot := filepath.Join(peerBaseRoot, "collab")
 	for _, agent := range []string{"claude", "codex"} {
-		for _, sub := range []string{"tmp", "new", "cur"} {
-			dir := filepath.Join(peerSessionRoot, "agents", agent, "inbox", sub)
-			if err := os.MkdirAll(dir, 0o700); err != nil {
-				t.Fatal(err)
-			}
+		if err := fsq.EnsureAgentDirs(peerSessionRoot, agent); err != nil {
+			t.Fatal(err)
 		}
 		// outbox/sent for sender
 		if err := os.MkdirAll(filepath.Join(srcSessionRoot, "agents", agent, "outbox", "sent"), 0o700); err != nil {
@@ -435,5 +436,249 @@ func TestCrossProjectSendRejectsMultipleRecipients(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--project supports exactly one recipient") {
 		t.Fatalf("error = %q, want explicit cross-project multi-recipient rejection", err)
+	}
+}
+
+func TestCrossProjectSendReportsIncompleteMailboxCauseAndPeerRepair(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	srcProjectDir := t.TempDir()
+	srcRoot := filepath.Join(srcProjectDir, ".agent-mail", "collab")
+	peerBase := filepath.Join(t.TempDir(), "custom peer base")
+	peerRoot := filepath.Join(peerBase, "collab")
+	if err := fsq.EnsureAgentDirs(srcRoot, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(peerRoot, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	configureSendTestRoot(t, peerBase, "bob")
+	missing := fsq.AgentDLQCur(peerRoot, "bob")
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+	rcData, err := json.Marshal(map[string]any{
+		"root":    ".agent-mail",
+		"project": "source",
+		"peers":   map[string]string{"peer": peerBase},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcProjectDir, ".amqrc"), rcData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err = runSend([]string{
+		"--root", srcRoot,
+		"--me", "alice",
+		"--to", "bob",
+		"--project", "peer",
+		"--body", "no partial peer delivery",
+	})
+	if err == nil {
+		t.Fatal("incomplete peer send succeeded")
+	}
+	for _, want := range []string{"dlq/cur", "incomplete", "amq doctor", "--root", "--base-root", "--fix-mailboxes", peerRoot, peerBase} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("peer error missing %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "AM_ROOT=") {
+		t.Fatalf("peer error advertised environment-specific recovery: %v", err)
+	}
+	if strings.Contains(err.Error(), `agent "bob" not found`) {
+		t.Fatalf("incomplete mailbox was misreported as missing agent: %v", err)
+	}
+	entries, readErr := os.ReadDir(fsq.AgentInboxNew(peerRoot, "bob"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("incomplete peer received message: %#v", entries)
+	}
+	if _, statErr := os.Lstat(missing); !os.IsNotExist(statErr) {
+		t.Fatalf("cross-project send repaired peer mailbox: %v", statErr)
+	}
+
+	if runtime.GOOS == "windows" {
+		t.Skip("exact printed command execution uses the POSIX test shell")
+	}
+	repairCommand := advertisedPeerRepairCommand(t, err)
+	if strings.Contains(repairCommand, "--ignore-session-pin") {
+		t.Fatalf("unpinned repair command advertised escape hatch: %q", repairCommand)
+	}
+	executeAdvertisedAMQCommand(t, repairCommand)
+	if err := fsq.ValidateExistingMailboxLayout(openDeliveryRootForCLITest(t, peerRoot), "bob"); err != nil {
+		t.Fatalf("advertised peer recovery left mailbox incomplete: %v", err)
+	}
+}
+
+func TestCrossProjectRepairCommandUsesSessionConfigAuthorityWhenBaseHasNoConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exact printed command execution uses the POSIX test shell")
+	}
+	clearSendMailboxTestEnv(t)
+	srcProjectDir := t.TempDir()
+	srcRoot := filepath.Join(srcProjectDir, ".agent-mail", "collab")
+	peerBase := filepath.Join(t.TempDir(), "peer base without config")
+	peerRoot := filepath.Join(peerBase, "collab")
+	if err := fsq.EnsureAgentDirs(srcRoot, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(peerRoot, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	configureSendTestRoot(t, peerRoot, "bob")
+	missing := fsq.AgentDLQCur(peerRoot, "bob")
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+	rcData, err := json.Marshal(map[string]any{
+		"root":    ".agent-mail",
+		"project": "source",
+		"peers":   map[string]string{"peer": peerBase},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcProjectDir, ".amqrc"), rcData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sendErr := runSend([]string{
+		"--root", srcRoot,
+		"--me", "alice",
+		"--to", "bob",
+		"--project", "peer",
+		"--body", "repair from effective authority",
+	})
+	if sendErr == nil {
+		t.Fatal("incomplete peer send succeeded")
+	}
+	command := advertisedPeerRepairCommand(t, sendErr)
+	if strings.Contains(command, "--base-root") {
+		t.Fatalf("session-authorized repair command named config-less base: %q", command)
+	}
+	if strings.Contains(command, "--ignore-session-pin") {
+		t.Fatalf("unpinned repair command advertised a session-pin escape hatch: %q", command)
+	}
+	executeAdvertisedAMQCommand(t, command)
+	if err := fsq.ValidateExistingMailboxLayout(openDeliveryRootForCLITest(t, peerRoot), "bob"); err != nil {
+		t.Fatalf("advertised session-authorized repair left mailbox incomplete: %v", err)
+	}
+}
+
+func advertisedPeerRepairCommand(t *testing.T, err error) string {
+	t.Helper()
+	const marker = "run: "
+	parts := strings.SplitN(err.Error(), marker, 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
+		t.Fatalf("peer error has no advertised command: %v", err)
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+func executeAdvertisedAMQCommand(t *testing.T, commandText string) {
+	t.Helper()
+	binDir := t.TempDir()
+	helperBinary, absErr := filepath.Abs(os.Args[0])
+	if absErr != nil {
+		t.Fatal(absErr)
+	}
+	if linkErr := os.Symlink(helperBinary, filepath.Join(binDir, "amq")); linkErr != nil {
+		t.Fatal(linkErr)
+	}
+	command := exec.Command("/bin/sh", "-c", commandText)
+	command.Env = append(os.Environ(),
+		cliHelperEnv+"=1",
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	if output, commandErr := command.CombinedOutput(); commandErr != nil {
+		t.Fatalf("execute exact advertised peer recovery %q: %v\n%s", commandText, commandErr, output)
+	}
+}
+
+func TestCrossProjectSendValidatesPeerRosterBeforeMailboxLayout(t *testing.T) {
+	for _, strict := range []bool{true, false} {
+		t.Run(map[bool]string{true: "strict", false: "non-strict"}[strict], func(t *testing.T) {
+			clearSendMailboxTestEnv(t)
+			srcProjectDir := t.TempDir()
+			srcRoot := filepath.Join(srcProjectDir, ".agent-mail", "collab")
+			peerBase := filepath.Join(t.TempDir(), "peer base")
+			peerRoot := filepath.Join(peerBase, "collab")
+			if err := fsq.EnsureAgentDirs(srcRoot, "alice"); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(peerRoot, "mallory"); err != nil {
+				t.Fatal(err)
+			}
+			configureSendTestRoot(t, peerBase, "bob")
+			missing := fsq.AgentDLQCur(peerRoot, "mallory")
+			if err := os.Remove(missing); err != nil {
+				t.Fatal(err)
+			}
+			rcData, err := json.Marshal(map[string]any{
+				"root":    ".agent-mail",
+				"project": "source",
+				"peers":   map[string]string{"peer": peerBase},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(srcProjectDir, ".amqrc"), rcData, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			args := []string{
+				"--root", srcRoot,
+				"--me", "alice",
+				"--to", "mallory",
+				"--project", "peer",
+				"--body", "no delivery",
+			}
+			if strict {
+				args = append(args, "--strict")
+			}
+			_, stderr, sendErr := captureEnvOutput(t, func() error { return runSend(args) })
+			if sendErr == nil {
+				t.Fatal("unconfigured incomplete peer send succeeded")
+			}
+			if strict {
+				if !strings.Contains(sendErr.Error(), `handle "mallory" not in config.json`) {
+					t.Fatalf("strict error = %v, want roster refusal", sendErr)
+				}
+				if strings.Contains(sendErr.Error(), "incomplete") || strings.Contains(sendErr.Error(), "--fix-mailboxes") {
+					t.Fatalf("strict roster refusal leaked layout remedy: %v", sendErr)
+				}
+			} else {
+				if !strings.Contains(stderr, `warning: handle "mallory" not in config.json`) {
+					t.Fatalf("non-strict warning = %q", stderr)
+				}
+				for _, want := range []string{"incomplete", "missing:dlq/cur", "add", "config.json", "--fix-mailboxes"} {
+					if !strings.Contains(sendErr.Error(), want) {
+						t.Fatalf("non-strict error missing %q: %v", want, sendErr)
+					}
+				}
+			}
+			if entries, readErr := os.ReadDir(fsq.AgentInboxNew(peerRoot, "mallory")); readErr != nil || len(entries) != 0 {
+				t.Fatalf("peer inbox changed: entries=%#v err=%v", entries, readErr)
+			}
+		})
+	}
+}
+
+func TestPeerMailboxRepairCommandUsesNativeWindowsArguments(t *testing.T) {
+	clearDoctorSessionPin(t)
+	got := peerMailboxRepairCommandForOS(
+		`C:\AMQ & Data\peer's $collab`,
+		`C:\AMQ & Data\peer's`,
+		"windows",
+	)
+	want := `amq doctor --root 'C:\AMQ & Data\peer''s $collab' --base-root 'C:\AMQ & Data\peer''s' --fix-mailboxes`
+	if got != want {
+		t.Fatalf("Windows peer repair command = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "AM_ROOT=") {
+		t.Fatalf("Windows peer repair command used POSIX semantics: %q", got)
 	}
 }

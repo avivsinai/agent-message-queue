@@ -470,9 +470,6 @@ func loadKnownAgentsWithRead(strict bool, read func() ([]byte, error)) ([]string
 }
 
 func withReservedHumanHandle(agents []string) []string {
-	if len(agents) == 0 {
-		return agents
-	}
 	for _, agent := range agents {
 		if agent == reservedHumanHandle {
 			return agents

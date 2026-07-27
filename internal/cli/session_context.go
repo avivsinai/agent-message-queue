@@ -154,6 +154,10 @@ func isExplicitOwnBaseRootInspection(common *commonFlags, target string) bool {
 	if common == nil || !common.rootExplicit() {
 		return false
 	}
+	return isPinnedBaseRoot(target)
+}
+
+func isPinnedBaseRoot(target string) bool {
 	pin, err := loadSessionPin()
 	if err != nil || !pin.Present {
 		return false

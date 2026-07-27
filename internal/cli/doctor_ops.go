@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -85,9 +86,7 @@ type opsWakeLock struct {
 	RepairReason    string `json:"repair_reason,omitempty"`
 }
 
-const fixWakeLocksCommand = "amq doctor --ops --fix-wake-locks"
-
-func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsResult {
+func runOpsChecks(root string, rootSource string, fixWakeLocks bool, explicitBaseRoot ...string) *doctorOpsResult {
 	result := &doctorOpsResult{}
 	now := time.Now()
 
@@ -100,7 +99,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 
 	// Load the active root's config, falling back to the base config for normal
 	// session layouts where coop init owns the single config.json.
-	agents, err := loadOpsAgents(root, fixWakeLocks)
+	agents, err := loadOpsAgents(root, fixWakeLocks, explicitBaseRoot...)
 	if err != nil {
 		result.Hints = append(result.Hints, opsHint{
 			Code:    "config_error",
@@ -216,7 +215,14 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 	return result
 }
 
-func loadOpsAgents(root string, fixWakeLocks bool) ([]string, error) {
+func loadOpsAgents(root string, fixWakeLocks bool, explicitBaseRoot ...string) ([]string, error) {
+	if len(explicitBaseRoot) > 0 && strings.TrimSpace(explicitBaseRoot[0]) != "" {
+		cfg, err := config.LoadConfig(filepath.Join(explicitBaseRoot[0], "meta", "config.json"))
+		if err != nil {
+			return nil, err
+		}
+		return cfg.Agents, nil
+	}
 	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
 	if err == nil {
 		return cfg.Agents, nil
@@ -382,7 +388,7 @@ func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeL
 				locks = append(locks, lock)
 				continue
 			}
-			lock.Fix = fixWakeLocksCommand
+			lock.Fix = doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
 			if lock.TargetPresent && lock.TargetReason == "" && validateWakeLockRepairable(inspection) == nil {
 				if err := validateWakeRepairFloorAvailable(root, agent, inspection, target); err != nil {
 					lock.RepairReason = err.Error()

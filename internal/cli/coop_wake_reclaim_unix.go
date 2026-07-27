@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -193,7 +194,7 @@ func resolveMissingWakeLockAfterTermination(
 }
 
 func coopWakeRemedy(inspection wakeLockInspection, state, command string) string {
-	return fmt.Sprintf("wake for %s is blocking startup and cannot notify you.\n  lock: %s\n  state: %s\n\nRe-run with -y to clear it and start a fresh wake:\n  %s\n\nTo inspect first:\n  AM_ROOT=%s amq doctor --ops", inspection.Agent, inspection.LockPath, state, command, inspection.Root)
+	return fmt.Sprintf("wake for %s is blocking startup and cannot notify you.\n  lock: %s\n  state: %s\n\nRe-run with -y to clear it and start a fresh wake:\n  %s\n\nTo inspect first:\n  %s", inspection.Agent, inspection.LockPath, state, command, doctorRootCommandForOS(inspection.Root, "", runtime.GOOS, "--ops"))
 }
 
 func coopWakeRemedyForCommand(root, agent, command string, commandArgs []string) string {

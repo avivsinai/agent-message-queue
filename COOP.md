@@ -122,7 +122,11 @@ When a terminal has a complete `AM_BASE_ROOT`/`AM_SESSION` pin, `read`, `drain`,
 <name>` for sibling routing. For deliberate raw-root access,
 `--ignore-session-pin` requires a non-empty explicit `--root`; it never blesses
 an inherited `AM_ROOT`. `list` warns on a mismatch but remains available for
-non-destructive inspection. A missing mailbox is an error, not an empty inbox.
+non-destructive inspection. `doctor --root` also keeps inspection available
+with a mismatch warning, but `--fix-mailboxes` and
+`--ops --fix-wake-locks` require a matching pin unless that explicit root is
+paired with `--ignore-session-pin`. `--base-root` selects config authority and
+never waives the pin. A missing mailbox is an error, not an empty inbox.
 
 ### For Scripts/CI
 
