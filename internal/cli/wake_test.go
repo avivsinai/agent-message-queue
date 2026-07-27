@@ -783,7 +783,7 @@ func TestInjectNotificationRawInjectsBothCRsOnDrainError(t *testing.T) {
 	}
 }
 
-func TestNotifyNewMessages_InjectViaInterruptInjectsKeyAndHonorsCooldown(t *testing.T) {
+func TestNotifyNewMessages_InjectViaExitZeroAdvancesInterruptCooldown(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
