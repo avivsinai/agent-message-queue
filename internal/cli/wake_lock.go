@@ -42,16 +42,17 @@ const (
 )
 
 type wakeProcessInfo struct {
-	PID                      int
-	Running                  bool
-	StartToken               string
-	BootID                   string
-	LegacyBootID             string
-	Executable               string
-	Args                     []string
-	ControllingTerminalKnown bool
-	HasControllingTerminal   bool
-	InspectError             error
+	PID                       int
+	Running                   bool
+	StartToken                string
+	BootID                    string
+	LegacyBootID              string
+	Executable                string
+	Args                      []string
+	ControllingTerminalKnown  bool
+	HasControllingTerminal    bool
+	ControllingTerminalDevice int32
+	InspectError              error
 }
 
 type wakeLockStatus string

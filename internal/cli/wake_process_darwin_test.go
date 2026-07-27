@@ -66,6 +66,9 @@ func TestInspectWakeProcessPlatformReportsControllingTerminalState(t *testing.T)
 				t.Fatalf("terminal state = known:%v has:%v, want known:true has:%v",
 					info.ControllingTerminalKnown, info.HasControllingTerminal, tc.has)
 			}
+			if info.ControllingTerminalDevice != tc.tdev {
+				t.Fatalf("terminal device = %d, want %d", info.ControllingTerminalDevice, tc.tdev)
+			}
 		})
 	}
 }

@@ -548,7 +548,6 @@ func wakeLockNeedsReplacement(inspection wakeLockInspection) bool {
 	if !inspection.IdentityConfirmed {
 		return false
 	}
-	existing := inspection.Lock
 
 	// Process is a confirmed matching amq wake. If its TTY disappeared, stop
 	// that orphan before taking over; never signal an unconfirmed PID.
@@ -556,32 +555,55 @@ func wakeLockNeedsReplacement(inspection wakeLockInspection) bool {
 		return true
 	}
 
+	return wakeLockSharesCurrentTerminalDifferentSession(inspection)
+}
+
+func wakeLockSharesCurrentTerminalDifferentSession(inspection wakeLockInspection) bool {
+	if !sameWakeTerminalAsCurrent(inspection) {
+		return false
+	}
+	existingSID, existingErr := getWakeProcessSID(inspection.Lock.PID)
+	currentSID, currentErr := getWakeProcessSID(0)
+	return existingErr == nil && currentErr == nil && existingSID != currentSID
+}
+
+func sameWakeTTYPathAsCurrent(inspection wakeLockInspection) bool {
 	currentTTY := getWakeCurrentTTY()
-	existingTTY := existing.TTY
+	existingTTY := inspection.Lock.TTY
 	if strings.HasPrefix(existingTTY, "/dev/") {
 		if real, err := filepath.EvalSymlinks(existingTTY); err == nil {
 			existingTTY = real
 		}
 	}
-	if currentTTY != "" && currentTTY == existingTTY {
-		existingSid, sidErr := getWakeProcessSID(existing.PID)
-		currentSid, _ := getWakeProcessSID(0)
-		if sidErr == nil && existingSid != currentSid {
-			return true
-		}
-	}
-	return false
+	return currentTTY != "" && currentTTY == existingTTY
 }
 
-func wakeLockTerminalGone(inspection wakeLockInspection) bool {
+type wakeTerminalAttachment uint8
+
+const (
+	wakeTerminalUndeterminable wakeTerminalAttachment = iota
+	wakeTerminalGone
+	wakeTerminalAttached
+)
+
+func wakeLockTerminalAttachment(inspection wakeLockInspection) wakeTerminalAttachment {
 	tty := strings.TrimSpace(inspection.Lock.TTY)
 	if strings.HasPrefix(tty, "/dev/") {
 		if _, statErr := os.Stat(tty); os.IsNotExist(statErr) {
-			return true
+			return wakeTerminalGone
 		}
 	}
-	return inspection.Process.ControllingTerminalKnown &&
-		!inspection.Process.HasControllingTerminal
+	if inspection.Process.ControllingTerminalKnown {
+		if inspection.Process.HasControllingTerminal {
+			return wakeTerminalAttached
+		}
+		return wakeTerminalGone
+	}
+	return wakeTerminalUndeterminable
+}
+
+func wakeLockTerminalGone(inspection wakeLockInspection) bool {
+	return wakeLockTerminalAttachment(inspection) == wakeTerminalGone
 }
 
 func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, requestedTarget *wakeTarget) error {
@@ -639,6 +661,15 @@ func wakeLockHasUsableNotificationPath(inspection wakeLockInspection) bool {
 		inspection.Lock.TargetDigest != "") || wakeArgsUseInjectVia(inspection.Process.Args) {
 		return true
 	}
+	switch wakeLockTerminalAttachment(inspection) {
+	case wakeTerminalGone:
+		return false
+	case wakeTerminalAttached:
+		return true
+	}
+	// Linux cannot currently inspect controlling-terminal attachment. Preserve
+	// its concrete-path evidence while treating an absent/legacy unknown name
+	// as unusable when attachment is undeterminable.
 	tty := strings.TrimSpace(inspection.Lock.TTY)
 	return tty != "" && tty != "unknown"
 }
@@ -2606,12 +2637,5 @@ func getCurrentTTY() string {
 		return ""
 	}
 	defer func() { _ = tty.Close() }()
-	if link, err := os.Readlink(fmt.Sprintf("/dev/fd/%d", tty.Fd())); err == nil {
-		// Normalize symlinks for reliable comparison
-		if real, err := filepath.EvalSymlinks(link); err == nil {
-			return real
-		}
-		return link
-	}
-	return ""
+	return currentTTYPath(tty)
 }

@@ -2694,17 +2694,22 @@ func TestShouldReplaceOrphanedWakeLockKeepsLockWhenKillDoesNotTerminate(t *testi
 		}
 		return wakeProcessInfo{PID: pid}
 	})
+	var signals []os.Signal
 	stubSignalWakeProcess(t, func(pid int, sig os.Signal) error {
+		signals = append(signals, sig)
 		return nil
 	})
 
 	inspection := inspectWakeLock(root, "orchestrator")
 	replaced, err := shouldReplaceOrphanedWakeLock(inspection)
-	if err == nil || !strings.Contains(err.Error(), "live raw wake orphan") {
-		t.Fatalf("expected live raw orphan refusal, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "still alive after SIGKILL") {
+		t.Fatalf("expected failed automatic termination, got %v", err)
 	}
 	if replaced {
 		t.Fatal("should not replace lock when old wake remains alive")
+	}
+	if len(signals) != 2 || signals[0] != syscall.SIGTERM || signals[1] != syscall.SIGKILL {
+		t.Fatalf("signals = %v, want SIGTERM then SIGKILL", signals)
 	}
 	if _, statErr := os.Stat(lockPath); statErr != nil {
 		t.Fatalf("lock should remain after failed kill, stat=%v", statErr)

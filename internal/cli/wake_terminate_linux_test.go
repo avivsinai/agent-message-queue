@@ -176,7 +176,7 @@ func TestTerminateOpensPidfdBeforeIdentityInspectionAndReleasesGuardBeforeWait(t
 	const wakePID = 4242
 	root := secureTempDirForTest(t)
 	writeWakeLockForTest(t, root, "codex", wakeLock{
-		PID: wakePID, TTY: "missing", ProcessStart: "start-1", BootID: "boot-1", Executable: "/usr/bin/amq",
+		PID: wakePID, TTY: "/dev/amq-missing-auto-replacement-tty", ProcessStart: "start-1", BootID: "boot-1", Executable: "/usr/bin/amq",
 	})
 	var mu sync.Mutex
 	var events []string
@@ -243,6 +243,81 @@ func TestTerminateOpensPidfdBeforeIdentityInspectionAndReleasesGuardBeforeWait(t
 	defer mu.Unlock()
 	if len(events) < 2 || events[0] != "open" || events[1] != "inspect" {
 		t.Fatalf("pre-signal events = %v, want pidfd open before identity inspection", events)
+	}
+}
+
+func TestTerminateRefusesLiveRawUnknownTerminalBeforePidfdSignal(t *testing.T) {
+	const (
+		wakePID = 4242
+		pidfd   = 99
+	)
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		TTY:          "unknown",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/usr/bin/amq",
+		Args:         []string{"/usr/bin/amq", "wake", "--root", root, "--me", "codex"},
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "live-raw-unknown-terminal",
+	})
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read original lock: %v", err)
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return matchingLinuxWakeProcess(pid, root)
+	})
+
+	openCalls := 0
+	signalCalls := 0
+	pollCalls := 0
+	stubLinuxPidfd(
+		t,
+		func(pid, flags int) (int, error) {
+			openCalls++
+			if pid != wakePID || flags != 0 {
+				t.Fatalf("pidfd_open = (%d, %d), want (%d, 0)", pid, flags, wakePID)
+			}
+			return pidfd, nil
+		},
+		func(gotFD int, signal unix.Signal, _ *unix.Siginfo, flags int) error {
+			signalCalls++
+			return nil
+		},
+		func(gotFD int, timeout time.Duration) (bool, error) {
+			pollCalls++
+			return true, nil
+		},
+	)
+
+	inspection := inspectWakeLock(root, "codex")
+	if inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
+		t.Fatalf("initial inspection = %#v, want identity-confirmed valid wake", inspection)
+	}
+	replaced, err := terminateAndRemoveOrphanedWakeLock(inspection)
+	if err == nil || !strings.Contains(err.Error(), "refusing to signal without consent") {
+		t.Errorf("termination error = %v, want live-raw refusal", err)
+	}
+	if replaced {
+		t.Error("live raw wake without replacement evidence was replaced")
+	}
+	if openCalls != 1 {
+		t.Errorf("pidfd open calls = %d, want 1 identity capability acquisition", openCalls)
+	}
+	if signalCalls != 0 {
+		t.Errorf("pidfd signal calls = %d, want 0", signalCalls)
+	}
+	if pollCalls != 0 {
+		t.Errorf("pidfd poll calls = %d, want 0", pollCalls)
+	}
+	after, readErr := os.ReadFile(lockPath)
+	if readErr != nil {
+		t.Fatalf("read preserved lock: %v", readErr)
+	}
+	if string(after) != string(before) {
+		t.Error("live raw refusal changed the exact wake lock")
 	}
 }
 
