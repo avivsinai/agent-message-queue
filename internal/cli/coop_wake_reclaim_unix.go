@@ -141,9 +141,7 @@ func coopWakeRemedy(inspection wakeLockInspection, state, command string) string
 
 func coopWakeRemedyForCommand(root, agent, command string, commandArgs []string) string {
 	quoted := []string{"amq", "coop", "exec", "-y", "--root", root, "--me", agent, command}
-	for _, arg := range commandArgs {
-		quoted = append(quoted, arg)
-	}
+	quoted = append(quoted, commandArgs...)
 	parts := make([]string, 0, len(quoted))
 	for _, arg := range quoted {
 		parts = append(parts, shellQuoteArg(arg))
