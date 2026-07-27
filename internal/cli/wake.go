@@ -345,6 +345,12 @@ func notifyNewMessages(cfg *wakeConfig) error {
 					return guardErr
 				}
 				if allowed {
+					// Exit zero is the strongest acceptance evidence the v0
+					// external transport exposes. It cannot prove the provider
+					// delivered the key, but advancing the cooldown bounds
+					// duplicate control-key injection. A false-success provider
+					// may therefore suppress one genuine interrupt until the
+					// next window; stronger evidence needs a structured protocol.
 					if err := injectVia(cfg, cfg.interruptKey); err == nil {
 						cfg.lastInterrupt = now
 						time.Sleep(50 * time.Millisecond)
@@ -358,6 +364,8 @@ func notifyNewMessages(cfg *wakeConfig) error {
 						return writeErr
 					}
 				}
+				// The raw path can require positive terminal-write evidence
+				// instead of inferring acceptance from a process exit status.
 				if writeErr == nil && wrote {
 					cfg.lastInterrupt = now
 					time.Sleep(50 * time.Millisecond)

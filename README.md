@@ -151,6 +151,13 @@ use `amq wake recover-owner` instead of the ownerless repair path. When a
 required owner capability is conclusively unsupported before any claim exists,
 AMQ warns and starts one ownerless wake instead.
 
+AMQ identifies an external injector by its resolved executable and ordered
+fixed arguments. Put any provider target identity needed to distinguish a pane,
+window, or session in `--wake-inject-arg` (`--inject-arg` when starting
+`amq wake` directly). Ambient environment variables and provider configuration
+are not part of this identity, so repair, recovery, and retirement cannot
+detect target changes made only through those channels.
+
 ### 3. Send & Receive
 
 ```bash

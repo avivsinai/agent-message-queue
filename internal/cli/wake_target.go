@@ -44,8 +44,11 @@ type wakeTarget struct {
 	Owner      *wakeOwner `json:"owner,omitempty"`
 }
 
-// sameWakeInjectorIdentity compares the behavior fixed at launch. Created and
-// owner metadata describe an instance, not the injector semantics it provides.
+// sameWakeInjectorIdentity compares the behavior fixed at launch: the resolved
+// executable and ordered fixed arguments. Provider target identity must
+// therefore be encoded in InjectArgs; ambient environment or provider config is
+// intentionally invisible. Created and owner metadata describe an instance,
+// not the injector semantics it provides.
 func sameWakeInjectorIdentity(first, second wakeTarget) bool {
 	return first.InjectVia == second.InjectVia && slices.Equal(first.InjectArgs, second.InjectArgs)
 }

@@ -300,6 +300,12 @@ as the final argv element. This executes a local process for each notification,
 and the payload can include sanitized but message-derived header content such as
 sender and subject.
 
+The resolved executable plus the ordered fixed arguments are the injector's
+saved identity. Put any target identity needed to distinguish a pane, window,
+or session in `--inject-arg`. Ambient environment variables and provider
+configuration are invisible to repair and retire, so changing only those
+channels cannot select a different target safely.
+
 For permission-prompt workflows, use AMQ's fail-closed zero-input mode:
 
 ```bash
