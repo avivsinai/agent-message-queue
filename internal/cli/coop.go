@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -69,16 +70,12 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		return nil
 	}
 
-	// Parse and validate agents
-	agents, err := parseHandles(*agentsFlag)
-	if err != nil {
-		return err
-	}
-	if len(agents) == 0 {
-		return UsageError("at least one agent required")
-	}
-	agents = dedupeStrings(agents)
-	sort.Strings(agents)
+	explicitAgents := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "agents" {
+			explicitAgents = true
+		}
+	})
 
 	root := *rootFlag
 
@@ -115,6 +112,54 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 	// The root in .amqrc is the literal queue root.
 	queueRoot := root
 
+	cfgPath := filepath.Join(queueRoot, "meta", "config.json")
+	var agents []string
+	writeConfig := *forceFlag
+	if !*forceFlag {
+		_, lstatErr := os.Lstat(cfgPath)
+		switch {
+		case lstatErr == nil:
+			cfg, loadErr := config.LoadConfig(cfgPath)
+			if loadErr != nil {
+				return fmt.Errorf("failed to load existing config: %w", loadErr)
+			}
+			agents = append([]string(nil), cfg.Agents...)
+			if len(agents) == 0 {
+				return fmt.Errorf("existing config has no agents")
+			}
+			for _, agent := range agents {
+				if err := fsq.ValidateHandle(agent); err != nil {
+					return fmt.Errorf("invalid agent in existing config: %w", err)
+				}
+			}
+			if explicitAgents {
+				requestedAgents, err := parseCoopInitAgents(*agentsFlag)
+				if err != nil {
+					return err
+				}
+				configuredRoster := dedupeStrings(append([]string(nil), agents...))
+				sort.Strings(configuredRoster)
+				if !slices.Equal(requestedAgents, configuredRoster) {
+					_ = writeStderr(
+						"warning: using existing config agents %s; use --force to overwrite\n",
+						strings.Join(agents, ","),
+					)
+				}
+			}
+		case os.IsNotExist(lstatErr):
+			writeConfig = true
+		default:
+			return fmt.Errorf("failed to inspect existing config: %w", lstatErr)
+		}
+	}
+	if writeConfig {
+		parsedAgents, err := parseCoopInitAgents(*agentsFlag)
+		if err != nil {
+			return err
+		}
+		agents = parsedAgents
+	}
+
 	// Create root directories
 	if err := fsq.EnsureRootDirs(queueRoot); err != nil {
 		return fmt.Errorf("failed to create root directories: %w", err)
@@ -127,15 +172,8 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		}
 	}
 
-	// Write config.json only if it doesn't exist or --force is set
-	cfgPath := filepath.Join(queueRoot, "meta", "config.json")
-	configExists := false
-	if _, err := os.Stat(cfgPath); err == nil {
-		configExists = true
-	}
-
 	configWritten := false
-	if !configExists || *forceFlag {
+	if writeConfig {
 		cfg := config.Config{
 			Version:    format.CurrentVersion,
 			CreatedUTC: time.Now().UTC().Format(time.RFC3339),
@@ -232,4 +270,17 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		}
 	}
 	return nil
+}
+
+func parseCoopInitAgents(raw string) ([]string, error) {
+	agents, err := parseHandles(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(agents) == 0 {
+		return nil, UsageError("at least one agent required")
+	}
+	agents = dedupeStrings(agents)
+	sort.Strings(agents)
+	return agents, nil
 }
