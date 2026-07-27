@@ -8,9 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/update"
+)
+
+var (
+	executablePathForUpgrade = update.ExecutablePath
+	fetchLatestTagForUpgrade = update.FetchLatestTag
 )
 
 func runUpgrade(args []string, currentVersion string) error {
@@ -22,12 +28,21 @@ func runUpgrade(args []string, currentVersion string) error {
 		return nil
 	}
 
+	path, resolved, err := executablePathForUpgrade()
+	if err != nil {
+		return err
+	}
+	destPath, err := selectUpgradeDestination(path, resolved, upgradeDestinationWritable)
+	if err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	client := &http.Client{Timeout: 30 * time.Second}
 
-	latestTag, err := update.FetchLatestTag(ctx, client)
+	latestTag, err := fetchLatestTagForUpgrade(ctx, client)
 	if err != nil {
 		return err
 	}
@@ -82,18 +97,6 @@ func runUpgrade(args []string, currentVersion string) error {
 		return err
 	}
 
-	path, resolved, err := update.ExecutablePath()
-	if err != nil {
-		return err
-	}
-	destPath := resolved
-	if destPath == "" {
-		destPath = path
-	}
-	if destPath == "" {
-		return fmt.Errorf("unable to resolve executable path")
-	}
-
 	scheduled, err := update.ReplaceBinary(binaryPath, destPath)
 	if err != nil {
 		return err
@@ -110,4 +113,23 @@ func runUpgrade(args []string, currentVersion string) error {
 		return writeStdoutLine("Upgrade scheduled; it will complete after this process exits.")
 	}
 	return writeStdoutLine("Upgrade complete.")
+}
+
+func selectUpgradeDestination(path, resolved string, writable func(string) error) (string, error) {
+	destPath := resolved
+	if destPath == "" {
+		destPath = path
+	}
+	if destPath == "" {
+		return "", fmt.Errorf("unable to resolve executable path")
+	}
+	destPath = filepath.Clean(destPath)
+
+	if strings.Contains(filepath.ToSlash(destPath), "/Cellar/") {
+		return "", fmt.Errorf("amq is installed via Homebrew; run brew upgrade amq instead")
+	}
+	if err := writable(destPath); err != nil {
+		return "", fmt.Errorf("cannot write the amq install location %s: %w", destPath, err)
+	}
+	return destPath, nil
 }
