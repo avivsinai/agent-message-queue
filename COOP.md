@@ -392,8 +392,8 @@ follows the same daemon-free contract and talks to AMQ only through the public
 - `--defer-while-input` / `--defer-while-input=false` - Best-effort quiet-window gate before non-interrupt injection
 - `--input-quiet-for 1200ms` - Required quiet window before deferred injection
 - `--input-poll-interval 200ms` - Poll interval while waiting for terminal input to quiet
-- `--input-max-hold 15s` - Maximum hold time for one deferred wake injection
-- `--interrupt` / `--interrupt=false` - Enable/disable Ctrl+C for urgent messages
+- `--input-max-hold 15s` - Maximum deferral; input still active at the deadline emits the notice out-of-band and skips synthetic input
+- `--interrupt` / `--interrupt=false` - Enable/disable urgent interrupt notices; Ctrl+C still requires `--interrupt-cmd ctrl-c`
 
 Every input-injecting mode can activate a focused permission or approval dialog:
 raw and paste payload bytes, `--inject-cmd`, external injectors, and urgent Ctrl+C
@@ -406,8 +406,10 @@ after a wake notification is pending. An idle approval dialog is
 indistinguishable from an idle composer. If the foreground app has already
 consumed a partially typed prompt and the user pauses longer than
 `--input-quiet-for`, wake can still inject and submit. Explicit urgent interrupt
-messages bypass this deferral. Use `none` when AMQ must guarantee zero synthetic
-input.
+messages bypass this deferral. If input stays active through
+`--input-max-hold`, wake emits the notice out-of-band and skips synthetic input;
+if input sampling is unavailable, injection remains best-effort. Use `none`
+when AMQ must guarantee zero synthetic input.
 
 **Platform support:** `coop exec` and `wake` require macOS or Linux. Native
 Windows supports core queue commands and `coop init`, but not these two
