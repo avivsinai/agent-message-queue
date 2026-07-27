@@ -12,6 +12,7 @@ import (
 // SZOMB from <sys/proc.h>: the process has exited and is waiting for its
 // parent to reap it. kill(pid, 0) still succeeds for this state.
 const darwinProcessStateZombie int8 = 5
+const darwinNoControllingTerminal int32 = -1
 
 var (
 	readDarwinKinfoProc       = unix.SysctlKinfoProc
@@ -47,6 +48,8 @@ func inspectWakeProcessPlatform(pid int) wakeProcessInfo {
 	sec, nsec := kp.Proc.P_starttime.Unix()
 	info.StartToken = fmt.Sprintf("%d.%09d", sec, nsec)
 	info.Executable = nulTerminatedString(kp.Proc.P_comm[:])
+	info.ControllingTerminalKnown = true
+	info.HasControllingTerminal = kp.Eproc.Tdev != darwinNoControllingTerminal
 
 	info.BootID, info.LegacyBootID = darwinBootIdentity()
 

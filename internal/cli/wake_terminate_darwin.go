@@ -18,6 +18,17 @@ var signalWakeProcess = func(pid int, sig os.Signal) error {
 }
 
 func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
+	return terminateAndRemoveOrphanedWakeLockWithRawConsent(inspection, false)
+}
+
+func retireLiveRawOrphan(inspection wakeLockInspection) (bool, error) {
+	return terminateAndRemoveOrphanedWakeLockWithRawConsent(inspection, true)
+}
+
+func terminateAndRemoveOrphanedWakeLockWithRawConsent(
+	inspection wakeLockInspection,
+	allowRawOrphan bool,
+) (bool, error) {
 	var recheck wakeLockInspection
 	if err := withWakeLifecycleGuard(inspection.Root, inspection.Agent, func() error {
 		recheck = inspectWakeLock(inspection.Root, inspection.Agent)
@@ -32,7 +43,9 @@ func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, er
 		return false, nil
 	}
 	if recheck.Process.Running && recheck.Lock.WakeMode != wakeTargetInjectVia {
-		return false, fmt.Errorf("live raw wake orphan for %s (pid %d, start %s); stop the owning terminal/launchd supervisor; manual kill is non-identity-safe — recheck before running; see doctor --ops", recheck.Agent, recheck.PID, recheck.Lock.ProcessStart)
+		if !allowRawOrphan || !isLiveRawOrphan(recheck) {
+			return false, fmt.Errorf("live raw wake orphan for %s (pid %d, start %s); stop the owning terminal/launchd supervisor; manual kill is non-identity-safe — recheck before running; see doctor --ops", recheck.Agent, recheck.PID, recheck.Lock.ProcessStart)
+		}
 	}
 	if recheck.Process.Running && recheck.Lock.WakeMode == wakeTargetInjectVia {
 		return cooperativeStopInjectVia(recheck)
@@ -65,7 +78,8 @@ func isLiveRawOrphan(inspection wakeLockInspection) bool {
 	return inspection.Process.Running &&
 		inspection.IdentityConfirmed &&
 		inspection.Lock.WakeMode != wakeTargetInjectVia &&
-		!wakeLockHasOwnerMarkers(inspection)
+		!wakeLockHasOwnerMarkers(inspection) &&
+		wakeLockTerminalGone(inspection)
 }
 
 func terminateWakeProcess(inspection wakeLockInspection) error {

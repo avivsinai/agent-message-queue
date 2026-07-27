@@ -104,6 +104,13 @@ func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, er
 	return removed, err
 }
 
+func retireLiveRawOrphan(inspection wakeLockInspection) (bool, error) {
+	if !isLiveRawOrphan(inspection) {
+		return false, fmt.Errorf("wake is not an identity-confirmed live raw orphan")
+	}
+	return terminateAndRemoveOrphanedWakeLock(inspection)
+}
+
 func terminateWakePidfd(pidfd int) error {
 	if err := linuxPidfdSendSignal(pidfd, unix.SIGTERM, nil, 0); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
