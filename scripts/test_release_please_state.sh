@@ -140,6 +140,11 @@ git -C "$SOURCE_REPO" commit -qm "one"
 git init -q --bare "$REMOTE_REPO"
 git -C "$SOURCE_REPO" remote add origin "$REMOTE_REPO"
 git -C "$SOURCE_REPO" push -q -u origin main
+# Bare repositories inherit the host's default branch name. Bind the remote
+# HEAD to the branch this fixture created so clones are deterministic even
+# when the host default is not "main".
+git -C "$REMOTE_REPO" symbolic-ref HEAD refs/heads/main
+[[ "$(git -C "$REMOTE_REPO" symbolic-ref HEAD)" == "refs/heads/main" ]]
 git clone -q "$REMOTE_REPO" "$RUNNER_REPO"
 
 BOUND_SHA="$(git -C "$RUNNER_REPO" rev-parse HEAD)"
