@@ -4,6 +4,7 @@ package cli
 
 import (
 	"errors"
+	"os"
 	"time"
 )
 
@@ -11,6 +12,10 @@ import (
 var tiocsti = tiocstiFuncs{}
 
 type tiocstiFuncs struct{}
+
+var readTIOCSTILegacySysctl = func() ([]byte, error) {
+	return nil, os.ErrNotExist
+}
 
 // Available returns false on non-Unix systems.
 func (t tiocstiFuncs) Available() bool {
