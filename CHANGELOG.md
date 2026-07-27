@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.49.2](https://github.com/avivsinai/agent-message-queue/compare/v0.49.1...v0.49.2) (2026-07-27)
+
+
+### Bug Fixes
+
+* deliver wake attention in Ghostty ([#324](https://github.com/avivsinai/agent-message-queue/issues/324)) ([82c28ba](https://github.com/avivsinai/agent-message-queue/commit/82c28ba83d56cc39bd3b6893b262db389e769cb4))
+* safely reclaim blocking coop wake locks ([#322](https://github.com/avivsinai/agent-message-queue/issues/322)) ([e5f98c6](https://github.com/avivsinai/agent-message-queue/commit/e5f98c6631e660b5ea68dcb77dda5b4e33e2cf00))
+
 ## [0.49.1](https://github.com/avivsinai/agent-message-queue/compare/v0.49.0...v0.49.1) (2026-07-27)
 
 
