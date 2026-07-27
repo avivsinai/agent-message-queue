@@ -1,6 +1,7 @@
 package presence
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -94,5 +95,28 @@ func TestSetNotifierStatusPreservesAgentPresenceAndTouchPreservesNotifierStatus(
 		got.NotifierMode != "raw" ||
 		!strings.Contains(got.NotifierReason, "--inject-via") {
 		t.Fatalf("notifier status was not preserved: %#v", got)
+	}
+}
+
+func TestSetNotifierEffectsEmittedRecordsFactsWithoutVisibilityClaim(t *testing.T) {
+	root := t.TempDir()
+	p := New("codex", "busy", "reviewing", time.Now().Add(-time.Hour))
+	if err := Write(root, p); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	effects := []string{"stderr_output", "bell", "title"}
+	if err := SetNotifierEffectsEmitted(root, "codex", effects); err != nil {
+		t.Fatalf("SetNotifierEffectsEmitted: %v", err)
+	}
+	if err := Touch(root, "codex"); err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+	got, err := Read(root, "codex")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !reflect.DeepEqual(got.NotifierEffectsEmitted, effects) {
+		t.Fatalf("effects emitted = %#v, want %#v", got.NotifierEffectsEmitted, effects)
 	}
 }

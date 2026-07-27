@@ -229,7 +229,11 @@ func TestInjectNotificationNoneWritesOutputWithoutTIOCSTI(t *testing.T) {
 	})
 
 	stderr := captureWakeStderr(t, func() {
-		cfg := &wakeConfig{injectMode: wakeInjectModeNone, bell: true}
+		cfg := &wakeConfig{
+			injectMode:   wakeInjectModeNone,
+			bell:         true,
+			attentionEnv: func(string) string { return "" },
+		}
 		if err := injectNotification(cfg, "safe notice", true); err != nil {
 			t.Fatalf("injectNotification: %v", err)
 		}
@@ -238,8 +242,8 @@ func TestInjectNotificationNoneWritesOutputWithoutTIOCSTI(t *testing.T) {
 	if len(injected) != 0 {
 		t.Fatalf("none mode injected terminal input: %q", injected)
 	}
-	if stderr != "\asafe notice\n" {
-		t.Fatalf("stderr = %q, want bell + notice", stderr)
+	if stderr != "\x1b]0;AMQ attention\a\asafe notice\n" {
+		t.Fatalf("stderr = %q, want title + bell + notice", stderr)
 	}
 }
 
@@ -247,6 +251,7 @@ func TestInjectNotificationNoneDoesNotInvokeInjectVia(t *testing.T) {
 	cfg, outputPath := injectViaCaptureConfig(t)
 	cfg.injectMode = wakeInjectModeNone
 	cfg.bell = true
+	cfg.attentionEnv = func(string) string { return "" }
 
 	stderr := captureWakeStderr(t, func() {
 		if err := injectNotification(cfg, "safe notice", true); err != nil {
@@ -257,8 +262,8 @@ func TestInjectNotificationNoneDoesNotInvokeInjectVia(t *testing.T) {
 	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
 		t.Fatalf("none mode invoked inject-via; output stat error = %v", err)
 	}
-	if stderr != "\asafe notice\n" {
-		t.Fatalf("stderr = %q, want bell + notice", stderr)
+	if stderr != "\x1b]0;AMQ attention\a\asafe notice\n" {
+		t.Fatalf("stderr = %q, want title + bell + notice", stderr)
 	}
 }
 
@@ -927,6 +932,7 @@ func TestNotifyNewMessagesNoneUrgentUsesOutputBellWithoutInput(t *testing.T) {
 		interruptLabel:    "interrupt",
 		interruptPriority: "urgent",
 		interruptCooldown: 7 * time.Second,
+		attentionEnv:      func(string) string { return "" },
 	}
 	stderr := captureWakeStderr(t, func() {
 		if err := notifyNewMessages(cfg); err != nil {
@@ -947,8 +953,9 @@ func TestNotifyNewMessagesNoneUrgentUsesOutputBellWithoutInput(t *testing.T) {
 		48,
 		"",
 	)
-	if stderr != "\a"+expectedText+"\n" {
-		t.Fatalf("stderr = %q, want one bell + urgent notice %q", stderr, expectedText)
+	expectedOutput := "\x1b]0;AMQ attention\a\a" + expectedText + "\n"
+	if stderr != expectedOutput {
+		t.Fatalf("stderr = %q, want title + bell + urgent notice %q", stderr, expectedText)
 	}
 
 	externalCfg, outputPath := injectViaCaptureConfig(t)
@@ -961,6 +968,7 @@ func TestNotifyNewMessagesNoneUrgentUsesOutputBellWithoutInput(t *testing.T) {
 	externalCfg.interruptKey = "\x03"
 	externalCfg.interruptLabel = "interrupt"
 	externalCfg.interruptPriority = "urgent"
+	externalCfg.attentionEnv = func(string) string { return "" }
 	externalStderr := captureWakeStderr(t, func() {
 		if err := notifyNewMessages(externalCfg); err != nil {
 			t.Fatalf("notifyNewMessages with inject-via config: %v", err)
@@ -969,8 +977,8 @@ func TestNotifyNewMessagesNoneUrgentUsesOutputBellWithoutInput(t *testing.T) {
 	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
 		t.Fatalf("none mode invoked inject-via for urgent notice; output stat error = %v", err)
 	}
-	if externalStderr != "\a"+expectedText+"\n" {
-		t.Fatalf("external stderr = %q, want one bell + urgent notice %q", externalStderr, expectedText)
+	if externalStderr != expectedOutput {
+		t.Fatalf("external stderr = %q, want title + bell + urgent notice %q", externalStderr, expectedText)
 	}
 }
 

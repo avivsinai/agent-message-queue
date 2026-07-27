@@ -55,6 +55,8 @@ type wakeConfig struct {
 	retainedInbox        wakeInboxReader
 	touchPresence        func() error
 	recordNotifierStatus func(status, mode, reason string) error
+	recordEffects        func(effects []string) error
+	attentionEnv         func(string) string
 }
 
 type wakeAdmissionWatcher interface {
@@ -250,7 +252,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	if cfg.interrupt && len(interruptMessages) > 0 {
 		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.previewLen, cfg.interruptNotice)
 		if cfg.injectMode == wakeInjectModeNone {
-			writeWakeOutput(interruptText, true)
+			emitWakeAttention(cfg, interruptText)
 			return nil
 		}
 		now := time.Now()
@@ -451,7 +453,7 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 		text = coopWakeDoorbell
 	}
 	if cfg.injectMode == wakeInjectModeNone {
-		writeWakeOutput(text, cfg.bell && !ownerBound)
+		emitWakeAttention(cfg, text)
 		return nil
 	}
 
@@ -481,7 +483,7 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 				_ = writeStderr("amq wake: falling back to stderr notification\n")
 				cfg.fallbackWarn = false
 			}
-			_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
+			emitWakeAttention(cfg, text)
 		}
 		return nil
 	}
@@ -557,7 +559,7 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 			cfg.injectMode = wakeInjectModeNone
 			_ = writeStderr("amq wake: warning: %s\n", reason)
 			cfg.fallbackWarn = false
-			_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
+			emitWakeAttention(cfg, text)
 			return nil
 		}
 		var authorityErr *wakeTerminalAuthorityError
@@ -569,8 +571,8 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 			_ = writeStderr("amq wake: falling back to stderr notification\n")
 			cfg.fallbackWarn = false
 		}
-		// Fallback: print plain text to stderr (no escape sequences)
-		_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
+		// Fallback: use the output-only attention tier; never retry input.
+		emitWakeAttention(cfg, text)
 		return nil
 	}
 

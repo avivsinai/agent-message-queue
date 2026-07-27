@@ -11,14 +11,15 @@ import (
 
 // Presence captures the current presence for an agent handle.
 type Presence struct {
-	Schema         int    `json:"schema"`
-	Handle         string `json:"handle"`
-	Status         string `json:"status"`
-	LastSeen       string `json:"last_seen"`
-	Note           string `json:"note,omitempty"`
-	NotifierStatus string `json:"notifier_status,omitempty"`
-	NotifierMode   string `json:"notifier_mode,omitempty"`
-	NotifierReason string `json:"notifier_reason,omitempty"`
+	Schema                 int      `json:"schema"`
+	Handle                 string   `json:"handle"`
+	Status                 string   `json:"status"`
+	LastSeen               string   `json:"last_seen"`
+	Note                   string   `json:"note,omitempty"`
+	NotifierStatus         string   `json:"notifier_status,omitempty"`
+	NotifierMode           string   `json:"notifier_mode,omitempty"`
+	NotifierReason         string   `json:"notifier_reason,omitempty"`
+	NotifierEffectsEmitted []string `json:"notifier_effects_emitted,omitempty"`
 }
 
 func New(handle, status, note string, now time.Time) Presence {
@@ -87,6 +88,21 @@ func SetNotifierStatus(root, handle, status, mode, reason string) error {
 	p.NotifierStatus = status
 	p.NotifierMode = mode
 	p.NotifierReason = reason
+	p.LastSeen = time.Now().UTC().Format(time.RFC3339Nano)
+	return Write(root, p)
+}
+
+// SetNotifierEffectsEmitted records what the notifier wrote without claiming
+// that a terminal rendered it or that a person observed it.
+func SetNotifierEffectsEmitted(root, handle string, effects []string) error {
+	p, err := Read(root, handle)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		p = New(handle, "active", "", time.Now())
+	}
+	p.NotifierEffectsEmitted = append([]string(nil), effects...)
 	p.LastSeen = time.Now().UTC().Format(time.RFC3339Nano)
 	return Write(root, p)
 }

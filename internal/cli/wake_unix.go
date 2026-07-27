@@ -1844,6 +1844,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		recordNotifierStatus: func(status, mode, reason string) error {
 			return presence.SetNotifierStatus(root, me, status, mode, reason)
 		},
+		recordEffects: func(effects []string) error {
+			return presence.SetNotifierEffectsEmitted(root, me, effects)
+		},
 		onPrepared: func(watcher wakeAdmissionWatcher) error {
 			if repairLineage != nil {
 				if err := writeWakePreparedFileInDir(
