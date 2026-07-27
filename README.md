@@ -70,6 +70,12 @@ For manual installation or troubleshooting, see [INSTALL.md](INSTALL.md).
 
 ### Updating
 
+For Homebrew installations:
+```bash
+brew upgrade amq
+```
+
+For installations made with the install script or another manual binary install:
 ```bash
 amq upgrade
 ```
