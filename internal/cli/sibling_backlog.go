@@ -14,6 +14,13 @@ type siblingBacklog struct {
 	Pending int
 }
 
+type baseBacklog struct {
+	Root    string
+	Session string
+	Agent   string
+	Pending int
+}
+
 // findSiblingBacklogs performs a shallow, best-effort scan under the current
 // base root. It counts message-shaped files only; parsing headers here would
 // turn an empty-inbox diagnostic into an expensive second validation path.
@@ -51,6 +58,72 @@ func findSiblingBacklogs(root, me string) []siblingBacklog {
 	return backlogs
 }
 
+func findBaseBacklogs(root string, agents []string) []baseBacklog {
+	root = absPath(resolveRoot(root))
+	base := classifyRoot(root)
+	if base == "" {
+		return nil
+	}
+	base = absPath(resolveRoot(base))
+	if base == root {
+		return nil
+	}
+	session := sessionName(root)
+	if validateSessionName(session) != nil {
+		return nil
+	}
+	resolvedSession, err := resolveSessionRoot(base, session)
+	if err != nil || resolvedSession != root {
+		return nil
+	}
+
+	identity, err := fsq.SnapshotDeliveryRoot(base)
+	if err != nil {
+		return nil
+	}
+	baseRoot, err := fsq.OpenDeliveryRoot(base, identity)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = baseRoot.Close() }()
+
+	inventory, err := fsq.InspectMailboxLayout(baseRoot)
+	if err != nil {
+		return nil
+	}
+	healthy := make(map[string]bool, len(inventory.Mailboxes))
+	for _, mailbox := range inventory.Mailboxes {
+		if len(mailbox.Issues) == 0 {
+			healthy[mailbox.Handle] = true
+		}
+	}
+
+	seen := make(map[string]bool, len(agents))
+	var backlogs []baseBacklog
+	for _, agent := range agents {
+		normalized, err := normalizeHandle(agent)
+		if err != nil || seen[normalized] || !healthy[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		entries, err := baseRoot.ReadDir(filepath.Join("agents", normalized, "inbox", "new"))
+		if err != nil {
+			continue
+		}
+		pending := countPendingMessageEntries(entries)
+		if pending == 0 {
+			continue
+		}
+		backlogs = append(backlogs, baseBacklog{
+			Root:    base,
+			Session: session,
+			Agent:   normalized,
+			Pending: pending,
+		})
+	}
+	return backlogs
+}
+
 func countPendingMessageFiles(dir string) (int, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -59,6 +132,10 @@ func countPendingMessageFiles(dir string) (int, error) {
 		}
 		return 0, err
 	}
+	return countPendingMessageEntries(entries), nil
+}
+
+func countPendingMessageEntries(entries []os.DirEntry) int {
 	count := 0
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -69,7 +146,7 @@ func countPendingMessageFiles(dir string) (int, error) {
 			count++
 		}
 	}
-	return count, nil
+	return count
 }
 
 func emitSiblingBacklogHintsIfInboxEmpty(root, me string) {
@@ -80,6 +157,9 @@ func emitSiblingBacklogHintsIfInboxEmpty(root, me string) {
 	current := siblingContext(root)
 	for _, backlog := range findSiblingBacklogs(root, me) {
 		_ = writeStderr("note: %s\n", formatSiblingBacklogHint(backlog, me, current))
+	}
+	for _, backlog := range findBaseBacklogs(root, []string{me}) {
+		_ = writeStderr("note: %s\n", formatBaseBacklogHint(backlog))
 	}
 }
 
@@ -94,4 +174,10 @@ func formatSiblingBacklogHint(backlog siblingBacklog, me, current string) string
 	return fmt.Sprintf("%d pending for %q in sibling session %q (current: %s); use: "+
 		"amq list --session %s --me %s --new",
 		backlog.Pending, me, backlog.Session, current, backlog.Session, me)
+}
+
+func formatBaseBacklogHint(backlog baseBacklog) string {
+	return fmt.Sprintf("%d pending for %q in base root %q (current: %s); use: "+
+		"amq list --root %s --me %s --new",
+		backlog.Pending, backlog.Agent, backlog.Root, backlog.Session, shellQuoteArg(backlog.Root), backlog.Agent)
 }

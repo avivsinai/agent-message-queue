@@ -45,7 +45,21 @@ func loadSessionPin() (sessionPin, error) {
 	}
 
 	if pin.BaseRoot == "" {
-		return sessionPin{}, ContextMismatchError("incomplete AMQ session pin: %s=%q requires an exact %s", envSession, pin.Session, envBaseRoot)
+		evidence := make([]string, 0, 3)
+		if present {
+			evidence = append(evidence, envSession)
+		}
+		if rootIDPresent {
+			evidence = append(evidence, envRootID)
+		}
+		if baseRootIDPresent {
+			evidence = append(evidence, envBaseRootID)
+		}
+		return sessionPin{}, ContextMismatchError(
+			"incomplete AMQ session pin: evidence from %s requires an exact %s; re-run amq env with explicit --root <path> to replace the complete context, or clear stale pin variables before using --session <name>",
+			strings.Join(evidence, ", "),
+			envBaseRoot,
+		)
 	}
 	if pin.Session != "" {
 		pin.ExpectedRoot = filepath.Join(pin.BaseRoot, pin.Session)

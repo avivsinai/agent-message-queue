@@ -636,6 +636,199 @@ func TestCoopExecSessionInvalidName(t *testing.T) {
 	}
 }
 
+func TestCoopInitProvisionsDefaultExecSession(t *testing.T) {
+	baseRoot := initCoopProjectForTest(t, "alice,bob")
+	sessionRoot := filepath.Join(baseRoot, defaultSessionName)
+
+	for _, agent := range []string{"alice", "bob"} {
+		for _, leaf := range fsq.RequiredMailboxLeaves() {
+			path := fsq.AgentMailboxPath(sessionRoot, agent, leaf)
+			if info, err := os.Stat(path); err != nil || !info.IsDir() {
+				t.Fatalf("coop init did not provision %s where default coop exec reads: info=%v err=%v", path, info, err)
+			}
+		}
+		if info, err := os.Stat(fsq.AgentInboxNew(baseRoot, agent)); err != nil || !info.IsDir() {
+			t.Fatalf("coop init did not preserve compatibility base mailbox for %q: info=%v err=%v", agent, info, err)
+		}
+	}
+
+	sentinel := errors.New("exec sentinel")
+	var execEnv []string
+	oldExec := coopExecProcess
+	coopExecProcess = func(_ string, _ []string, env []string) error {
+		execEnv = append([]string(nil), env...)
+		return sentinel
+	}
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err := runCoopExec([]string{"--no-wake", "--me", "alice", "sh"})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("coop exec error = %v, want sentinel", err)
+	}
+	if got := envValue(execEnv, envRoot); !sameTreeIdentity(got, sessionRoot) {
+		t.Fatalf("coop exec AM_ROOT = %q, want provisioned session root %q", got, sessionRoot)
+	}
+}
+
+func TestCoopInitBareSendListAndDrainAgree(t *testing.T) {
+	initCoopProjectForTest(t, "alice,bob")
+
+	sendOut, _, err := captureEnvOutput(t, func() error {
+		return runSend([]string{
+			"--me", "bob",
+			"--to", "alice",
+			"--subject", "first-run agreement",
+			"--body", "must remain readable",
+			"--json",
+		})
+	})
+	if err != nil {
+		t.Fatalf("bare send after coop init: %v", err)
+	}
+	if !strings.Contains(sendOut, `"id"`) {
+		t.Fatalf("bare send did not report success JSON: %q", sendOut)
+	}
+
+	listOut, _, err := captureEnvOutput(t, func() error {
+		return runList([]string{"--me", "alice", "--new", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("bare list after successful send: %v", err)
+	}
+	if !strings.Contains(listOut, `"subject": "first-run agreement"`) {
+		t.Fatalf("bare list did not return sent message: %q", listOut)
+	}
+
+	drainOut, _, err := captureEnvOutput(t, func() error {
+		return runDrain([]string{"--me", "alice", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("bare drain after successful send: %v", err)
+	}
+	if !strings.Contains(drainOut, `"count": 1`) {
+		t.Fatalf("bare drain did not consume sent message: %q", drainOut)
+	}
+}
+
+func TestCoopInitRejectsPreexistingDefaultSessionSymlink(t *testing.T) {
+	projectDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside target")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatalf("create outside target: %v", err)
+	}
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	baseRoot := filepath.Join(projectDir, defaultCoopRoot)
+	if err := os.Mkdir(baseRoot, 0o700); err != nil {
+		t.Fatalf("create base root: %v", err)
+	}
+	sessionRoot := filepath.Join(baseRoot, defaultSessionName)
+	if err := os.Symlink(outside, sessionRoot); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	_, err = captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--agents", "alice,bob", "--json", "--no-gitignore"}, false)
+	})
+	if err == nil ||
+		!strings.Contains(err.Error(), "is a symlink") ||
+		!strings.Contains(err.Error(), sessionRoot) ||
+		!strings.Contains(err.Error(), "remove it") {
+		t.Fatalf("coop init result = %v, want actionable session symlink refusal", err)
+	}
+	entries, readErr := os.ReadDir(outside)
+	if readErr != nil {
+		t.Fatalf("read outside target: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("coop init followed collab symlink and mutated outside target: %v", entries)
+	}
+	info, lstatErr := os.Lstat(sessionRoot)
+	if lstatErr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("collab symlink was changed: info=%v err=%v", info, lstatErr)
+	}
+}
+
+func TestCoopExecRejectsPreexistingDefaultSessionSymlink(t *testing.T) {
+	projectDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside target")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatalf("create outside target: %v", err)
+	}
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	baseRoot := filepath.Join(projectDir, defaultCoopRoot)
+	if err := fsq.EnsureRootDirs(baseRoot); err != nil {
+		t.Fatalf("create base root: %v", err)
+	}
+	cfg := config.Config{Version: 1, Agents: []string{"alice", "bob"}}
+	if err := config.WriteConfig(filepath.Join(baseRoot, "meta", "config.json"), cfg, false); err != nil {
+		t.Fatalf("write base config: %v", err)
+	}
+	amqrcData, err := json.Marshal(amqrc{Root: defaultCoopRoot})
+	if err != nil {
+		t.Fatalf("marshal .amqrc: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".amqrc"), amqrcData, 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+	sessionRoot := filepath.Join(baseRoot, defaultSessionName)
+	if err := os.Symlink(outside, sessionRoot); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	resolvedOutside, err := filepath.EvalSymlinks(outside)
+	if err != nil {
+		t.Fatalf("resolve outside target: %v", err)
+	}
+
+	execCalled := false
+	oldExec := coopExecProcess
+	coopExecProcess = func(string, []string, []string) error {
+		execCalled = true
+		return errors.New("unexpected exec")
+	}
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err = runCoopExec([]string{"--no-wake", "--me", "alice", "sh"})
+	if err == nil ||
+		!strings.Contains(err.Error(), "is a symlink") ||
+		!strings.Contains(err.Error(), sessionRoot) ||
+		!strings.Contains(err.Error(), "use: amq coop exec --root "+shellQuoteArg(resolvedOutside)+" --me alice sh") {
+		t.Fatalf("coop exec result = %v, want actionable session symlink refusal", err)
+	}
+	if execCalled {
+		t.Fatal("coop exec reached process replacement after session symlink refusal")
+	}
+	entries, readErr := os.ReadDir(outside)
+	if readErr != nil {
+		t.Fatalf("read outside target: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("coop exec followed collab symlink and mutated outside target: %v", entries)
+	}
+}
+
 func TestCoopInitDefaultIncludesUser(t *testing.T) {
 	projectDir := t.TempDir()
 	oldDir, err := os.Getwd()
@@ -675,7 +868,7 @@ func TestCoopInitDefaultIncludesUser(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Agents, want) {
 		t.Fatalf("config agents = %#v, want %#v", cfg.Agents, want)
 	}
-	if _, err := os.Stat(filepath.Join(projectDir, defaultCoopRoot, "agents", "user", "inbox", "new")); err != nil {
+	if _, err := os.Stat(filepath.Join(projectDir, defaultCoopRoot, defaultSessionName, "agents", "user", "inbox", "new")); err != nil {
 		t.Fatalf("user inbox should be created: %v", err)
 	}
 }
@@ -687,7 +880,7 @@ func TestCoopInitRerunUsesConfiguredAgents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read initial config: %v", err)
 	}
-	if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
+	if err := os.RemoveAll(filepath.Join(root, defaultSessionName, "agents")); err != nil {
 		t.Fatalf("remove initial mailboxes: %v", err)
 	}
 	resetAmqrcCache()
@@ -712,12 +905,12 @@ func TestCoopInitRerunUsesConfiguredAgents(t *testing.T) {
 		t.Fatalf("rerun agents = %#v, want configured %#v", result.Agents, want)
 	}
 	for _, agent := range want {
-		if _, err := os.Stat(filepath.Join(root, "agents", agent, "inbox", "new")); err != nil {
+		if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", agent, "inbox", "new")); err != nil {
 			t.Fatalf("%s inbox was not restored: %v", agent, err)
 		}
 	}
 	for _, agent := range []string{"claude", "codex", "user"} {
-		if _, err := os.Stat(filepath.Join(root, "agents", agent)); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", agent)); !os.IsNotExist(err) {
 			t.Fatalf("rerun created default agent %q, stat err=%v", agent, err)
 		}
 	}
@@ -755,11 +948,11 @@ func TestCoopInitRerunWarnsWhenRequestedAgentsDifferWithoutForce(t *testing.T) {
 	if !reflect.DeepEqual(result.Agents, want) || result.ConfigWritten {
 		t.Fatalf("non-force result = %#v, want configured agents %#v without config rewrite", result, want)
 	}
-	if _, err := os.Stat(filepath.Join(root, "agents", "alice", "inbox", "new")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", "alice", "inbox", "new")); err != nil {
 		t.Fatalf("non-force rerun did not retain configured mailbox: %v", err)
 	}
 	for _, agent := range []string{"carol", "dave"} {
-		if _, err := os.Stat(filepath.Join(root, "agents", agent)); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", agent)); !os.IsNotExist(err) {
 			t.Fatalf("non-force rerun created requested agent %q, stat err=%v", agent, err)
 		}
 	}
@@ -793,7 +986,7 @@ func TestCoopInitRerunDoesNotWarnWhenRequestedAgentsMatch(t *testing.T) {
 
 func TestCoopInitRerunRejectsInvalidExplicitAgentsBeforeMailboxMutation(t *testing.T) {
 	root := initCoopProjectForTest(t, "alice,bob")
-	if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
+	if err := os.RemoveAll(filepath.Join(root, defaultSessionName, "agents")); err != nil {
 		t.Fatalf("remove initial mailboxes: %v", err)
 	}
 	resetAmqrcCache()
@@ -804,7 +997,7 @@ func TestCoopInitRerunRejectsInvalidExplicitAgentsBeforeMailboxMutation(t *testi
 	if err == nil || !strings.Contains(err.Error(), "slashes not allowed") {
 		t.Fatalf("invalid explicit agents result = %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(root, "agents")); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(filepath.Join(root, defaultSessionName, "agents")); !os.IsNotExist(statErr) {
 		t.Fatalf("invalid explicit agents mutated mailboxes, stat err=%v", statErr)
 	}
 }
@@ -815,7 +1008,7 @@ func TestCoopInitRerunWithoutConfigUsesRequestedAgents(t *testing.T) {
 	if err := os.Remove(cfgPath); err != nil {
 		t.Fatalf("remove initial config: %v", err)
 	}
-	if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
+	if err := os.RemoveAll(filepath.Join(root, defaultSessionName, "agents")); err != nil {
 		t.Fatalf("remove initial mailboxes: %v", err)
 	}
 	resetAmqrcCache()
@@ -874,7 +1067,7 @@ func TestCoopInitForceUsesRequestedAgents(t *testing.T) {
 		t.Fatalf("forced config agents = %#v, want %#v", cfg.Agents, want)
 	}
 	for _, agent := range want {
-		if _, err := os.Stat(filepath.Join(root, "agents", agent, "inbox", "new")); err != nil {
+		if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", agent, "inbox", "new")); err != nil {
 			t.Fatalf("%s inbox was not created: %v", agent, err)
 		}
 	}
@@ -887,7 +1080,7 @@ func TestCoopInitRerunRejectsMalformedConfigBeforeMailboxMutation(t *testing.T) 
 	if err := os.WriteFile(cfgPath, []byte(malformed), 0o600); err != nil {
 		t.Fatalf("write malformed config: %v", err)
 	}
-	if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
+	if err := os.RemoveAll(filepath.Join(root, defaultSessionName, "agents")); err != nil {
 		t.Fatalf("remove initial mailboxes: %v", err)
 	}
 	resetAmqrcCache()
@@ -898,7 +1091,7 @@ func TestCoopInitRerunRejectsMalformedConfigBeforeMailboxMutation(t *testing.T) 
 	if err == nil || !strings.Contains(err.Error(), "failed to load existing config") {
 		t.Fatalf("malformed config result = %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(root, "agents")); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(filepath.Join(root, defaultSessionName, "agents")); !os.IsNotExist(statErr) {
 		t.Fatalf("malformed rerun mutated mailboxes, stat err=%v", statErr)
 	}
 	data, readErr := os.ReadFile(cfgPath)
@@ -933,7 +1126,7 @@ func TestCoopInitRerunRejectsInvalidConfiguredAgentsBeforeMailboxMutation(t *tes
 			if err := config.WriteConfig(cfgPath, cfg, true); err != nil {
 				t.Fatalf("write invalid agents config: %v", err)
 			}
-			if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
+			if err := os.RemoveAll(filepath.Join(root, defaultSessionName, "agents")); err != nil {
 				t.Fatalf("remove initial mailboxes: %v", err)
 			}
 			resetAmqrcCache()
@@ -944,7 +1137,7 @@ func TestCoopInitRerunRejectsInvalidConfiguredAgentsBeforeMailboxMutation(t *tes
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("invalid agents config result = %v, want %q", err, test.wantErr)
 			}
-			if _, statErr := os.Stat(filepath.Join(root, "agents")); !os.IsNotExist(statErr) {
+			if _, statErr := os.Stat(filepath.Join(root, defaultSessionName, "agents")); !os.IsNotExist(statErr) {
 				t.Fatalf("invalid agents rerun mutated mailboxes, stat err=%v", statErr)
 			}
 		})
@@ -960,7 +1153,7 @@ func TestCoopInitRerunRejectsUnreadableConfigBeforeMailboxMutation(t *testing.T)
 	if err := os.Mkdir(cfgPath, 0o700); err != nil {
 		t.Fatalf("replace config with unreadable shape: %v", err)
 	}
-	if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
+	if err := os.RemoveAll(filepath.Join(root, defaultSessionName, "agents")); err != nil {
 		t.Fatalf("remove initial mailboxes: %v", err)
 	}
 	resetAmqrcCache()
@@ -971,7 +1164,7 @@ func TestCoopInitRerunRejectsUnreadableConfigBeforeMailboxMutation(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), "failed to load existing config") {
 		t.Fatalf("unreadable config result = %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(root, "agents")); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(filepath.Join(root, defaultSessionName, "agents")); !os.IsNotExist(statErr) {
 		t.Fatalf("unreadable rerun mutated mailboxes, stat err=%v", statErr)
 	}
 }
@@ -1008,7 +1201,7 @@ func TestCoopInitRerunRejectsDanglingConfigSymlinkBeforeMailboxMutation(t *testi
 		t.Fatalf("dangling config result = %v", err)
 	}
 	for _, path := range []string{
-		filepath.Join(root, "agents"),
+		filepath.Join(root, defaultSessionName),
 		filepath.Join(root, "threads"),
 		filepath.Join(projectDir, ".amqrc"),
 		filepath.Join(projectDir, ".gitignore"),

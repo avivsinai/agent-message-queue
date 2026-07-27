@@ -201,9 +201,12 @@ A missing mailbox is an error, not an empty inbox. When `drain` or `list --new`
 finds an actually empty inbox, it prints a stderr-only note if the same handle
 has pending messages in a sibling session, including an exact non-destructive
 `amq list --session <name> --me <handle> --new` command. `doctor --ops` reports
-the same condition as a `sibling_backlog` warning. The pin is an operational
-safety check, not access control: a local process can still repin the
-environment or use the explicit override.
+the same condition as a `sibling_backlog` warning. When the active root is a
+session, an empty `drain` or `list --new` also notes unread mail for the same
+handle in the base root, while `doctor --ops` reports it as a `base_backlog`
+warning. Both include an exact non-destructive `amq list --root ...` command.
+The pin is an operational safety check, not access control: a local process can
+still repin the environment or use the explicit override.
 
 Git worktrees are isolated by default when the project root is relative (for
 example `{"root":".agent-mail"}`): the same session name resolves beneath each
@@ -366,11 +369,12 @@ eval "$(amq env --session auth --me claude --export)"
 ```
 
 Every shell-mode `amq env` output replaces the complete context: `AM_ROOT`,
-`AM_ME`, `AM_BASE_ROOT`, and `AM_SESSION`. Sessionless output sets
-`AM_BASE_ROOT` to the exact root and writes an empty `AM_SESSION`, so changing
-to another sessionless root is detectable. `--export` additionally prints a
-stderr note that the terminal is pinned. Treat this as one terminal, one
-session.
+`AM_ROOT_ID`, `AM_ME`, `AM_BASE_ROOT`, `AM_BASE_ROOT_ID`, and `AM_SESSION`.
+The two `_ID` values are opaque physical-identity tokens emitted or unset by
+AMQ; do not set them manually. Sessionless output sets `AM_BASE_ROOT` to the
+exact root and writes an empty `AM_SESSION`, so changing to another sessionless
+root is detectable. `--export` additionally prints a stderr note that the
+terminal is pinned. Treat this as one terminal, one session.
 
 Auto-detect covers the default `.agent-mail` layout, including `.agent-mail/<session>` session roots without `.amqrc`. Custom root names and peer config still require `.amqrc` or explicit flags/env.
 This same chain is used by `amq env`, `amq doctor`, and the integration commands, so Symphony and Kanban-launched agents can find the correct queue even when they are not started from the project directory.

@@ -160,16 +160,18 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		agents = parsedAgents
 	}
 
-	// Create root directories
+	// Keep the shared config at the base root, but provision the roster in the
+	// default session that coop exec actually selects.
 	if err := fsq.EnsureRootDirs(queueRoot); err != nil {
 		return fmt.Errorf("failed to create root directories: %w", err)
 	}
-
-	// Create agent mailboxes under the session subdirectory
 	for _, agent := range agents {
 		if err := fsq.EnsureAgentDirs(queueRoot, agent); err != nil {
-			return fmt.Errorf("failed to create mailbox for %s: %w", agent, err)
+			return fmt.Errorf("failed to create compatibility base mailbox for %s: %w", agent, err)
 		}
+	}
+	if _, err := provisionCoopSession(queueRoot, defaultSessionName, agents, "", ""); err != nil {
+		return fmt.Errorf("failed to create default session root: %w", err)
 	}
 
 	configWritten := false
@@ -270,6 +272,69 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		}
 	}
 	return nil
+}
+
+// provisionCoopSession creates or validates one named session as a direct,
+// non-symlink child of a pinned base capability, then creates every requested
+// mailbox through the pinned child capability. No provisioning write reopens
+// the session through its ambient lexical path.
+func provisionCoopSession(base, session string, agents []string, execAgent, execCommand string) (string, error) {
+	if err := validateSessionName(session); err != nil {
+		return "", err
+	}
+	base, err := absoluteSessionRoot(base)
+	if err != nil {
+		return "", err
+	}
+	if !dirExists(base) {
+		return "", NotFoundError("base root not found at %s", base)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(base)
+	if err != nil {
+		return "", err
+	}
+	baseRoot, err := fsq.OpenDeliveryRoot(base, identity)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = baseRoot.Close() }()
+
+	sessionRoot, err := baseRoot.OpenOrCreateDirectChild(session, 0o700)
+	if err != nil {
+		sessionPath := filepath.Join(base, session)
+		if info, lstatErr := os.Lstat(sessionPath); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			message := fmt.Sprintf(
+				"session root %s is a symlink; refusing to provision through it; remove it to use the named session",
+				sessionPath,
+			)
+			if target, resolveErr := filepath.EvalSymlinks(sessionPath); resolveErr == nil &&
+				execAgent != "" && execCommand != "" {
+				message += fmt.Sprintf(
+					"; for intentional relocation, use: amq coop exec --root %s --me %s %s",
+					shellQuoteArg(target),
+					shellQuoteArg(execAgent),
+					shellQuoteArg(execCommand),
+				)
+			}
+			return "", ContextMismatchError("%s", message)
+		}
+		return "", ContextMismatchError(
+			"refusing session %q: path %s is not a stable direct directory under base: %v",
+			session,
+			sessionPath,
+			err,
+		)
+	}
+	defer func() { _ = sessionRoot.Close() }()
+	if err := sessionRoot.EnsureRootDirs(); err != nil {
+		return "", err
+	}
+	for _, agent := range agents {
+		if err := sessionRoot.EnsureAgentDirs(agent); err != nil {
+			return "", fmt.Errorf("failed to create mailbox for %s: %w", agent, err)
+		}
+	}
+	return sessionRoot.Base(), nil
 }
 
 func parseCoopInitAgents(raw string) ([]string, error) {
