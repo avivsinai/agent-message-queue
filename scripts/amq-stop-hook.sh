@@ -1,5 +1,5 @@
 #!/bin/bash
-# AMQ Co-op Stop Hook. Allows silently on unavailable/invalid context.
+# AMQ Co-op Stop Hook. Allows on unavailable/invalid context.
 set -u
 
 payload="$(cat)"
@@ -10,18 +10,36 @@ active="$(printf '%s' "$payload" | python3 -c \
   exit 0
 
 ME="${AM_ME:-claude}"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
+SESSION="${AM_SESSION:-}"
 env_args=(env --me "$ME" --json)
-if [ -n "${AM_SESSION:-}" ]; then
-  env_args+=(--session "$AM_SESSION")
+if [ -n "$SESSION" ]; then
+  env_args+=(--session "$SESSION")
 fi
-env_json="$(cd "${CLAUDE_PROJECT_DIR:-.}" && amq "${env_args[@]}" 2>/dev/null)" || exit 0
+if ! env_json="$(cd "$PROJECT_DIR" && amq "${env_args[@]}" 2>/dev/null)"; then
+  unset AM_SESSION
+  retry_args=(env --me "$ME" --json)
+  if [ -n "$SESSION" ]; then
+    retry_args+=(--session "$SESSION")
+  fi
+  if ! env_json="$(cd "$PROJECT_DIR" && amq "${retry_args[@]}" 2>/dev/null)"; then
+    if [ -n "${CLAUDE_PROJECT_DIR:-}" ] &&
+      { [ -f "$PROJECT_DIR/.amqrc" ] || [ -d "$PROJECT_DIR/.agent-mail" ]; }; then
+      printf '%s\n' '{"systemMessage":"AMQ context unresolved; pending messages may exist. Resolve the project/session context and drain before stopping."}'
+    fi
+    exit 0
+  fi
+fi
 resolved="$(printf '%s' "$env_json" | python3 -c \
   'import json,sys; d=json.load(sys.stdin); print("\x1f".join((d["root"],d.get("session_name",""),d["me"])))' 2>/dev/null)" ||
   exit 0
 IFS=$'\x1f' read -r ROOT SESSION ME <<<"$resolved"
 
 list_json="$(cd "${CLAUDE_PROJECT_DIR:-.}" &&
-  amq list --root "$ROOT" --me "$ME" --new --json 2>/dev/null)" || exit 0
+  amq list --root "$ROOT" --me "$ME" --new --json 2>/dev/null)" || {
+  python3 -c 'import json,sys; print(json.dumps({"systemMessage":f"AMQ mailbox unreadable at {sys.argv[1]}; pending messages may exist."},separators=(",",":")))' "$ROOT"
+  exit 0
+}
 state="$ROOT/agents/$ME/.stop-hook-state.json"
 decision="$(printf '%s' "$list_json" | python3 -c '
 import json,os,sys
