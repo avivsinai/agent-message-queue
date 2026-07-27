@@ -208,7 +208,11 @@ sibling deliberately. For deliberate raw-root access, `--ignore-session-pin`
 is accepted only together with a non-empty explicit `--root`; blank `--root`
 and `--session` values are usage errors. `list` remains a non-destructive
 inspection path: it warns on a pin mismatch but still lists the resolved
-mailbox. Unpinned scripts and CI retain the existing fail-open behavior.
+mailbox. The exact base-backlog inspection path is quieter: an explicit
+`--root` equal to the current pin's own base root does not warn (and is
+identity-authenticated when identity tokens are present). Implicit, sibling,
+foreign, stale, and malformed contexts still warn. Unpinned scripts and CI
+retain the existing fail-open behavior.
 
 A missing mailbox is an error, not an empty inbox. When `drain` or `list --new`
 finds an actually empty inbox, it prints a stderr-only note if the same handle
@@ -218,6 +222,8 @@ the same condition as a `sibling_backlog` warning. When the active root is a
 session, an empty `drain` or `list --new` also notes unread mail for the same
 handle in the base root, while `doctor --ops` reports it as a `base_backlog`
 warning. Both include an exact non-destructive `amq list --root ...` command.
+In JSON output, `base_backlog` hints also include a structured `backlog` object
+with `root`, `current_session`, `agent`, `pending`, and `command`.
 The pin is an operational safety check, not access control: a local process can
 still repin the environment or use the explicit override.
 

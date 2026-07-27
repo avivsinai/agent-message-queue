@@ -81,7 +81,7 @@ func runList(args []string) error {
 				return checkErr
 			}
 			_ = writeStderr("warning: %v\n", checkErr)
-		} else if mismatch != nil {
+		} else if mismatch != nil && !isExplicitOwnBaseRootInspection(common, root) {
 			_ = writeStderr("warning: %s\n", mismatch.Error())
 		}
 	}

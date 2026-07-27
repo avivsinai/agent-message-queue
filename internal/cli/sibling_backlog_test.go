@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -206,6 +207,193 @@ func TestListWarnsOnPinnedSessionMismatch(t *testing.T) {
 	}
 }
 
+func TestListExplicitOwnBaseRootSuppressesPinWarning(t *testing.T) {
+	for _, identityPin := range []bool{false, true} {
+		name := "legacy"
+		if identityPin {
+			name = "identity"
+		}
+		t.Run(name, func(t *testing.T) {
+			parent := filepath.Join(t.TempDir(), "project with space")
+			baseRoot := filepath.Join(parent, ".agent-mail")
+			currentRoot := sessionRoot(t, parent, "collab", "alice")
+			if err := fsq.EnsureAgentDirs(baseRoot, "alice"); err != nil {
+				t.Fatalf("ensure base mailbox: %v", err)
+			}
+			deliverGuardMessage(t, baseRoot, "alice", "base-inspection")
+
+			t.Setenv(envRoot, currentRoot)
+			t.Setenv(envBaseRoot, baseRoot)
+			t.Setenv(envSession, "collab")
+			setOptionalEnv(t, envRootID, "", false)
+			setOptionalEnv(t, envBaseRootID, "", false)
+			if identityPin {
+				rootID, err := resolveTreeIdentityToken(currentRoot)
+				if err != nil {
+					t.Fatalf("resolve current root identity: %v", err)
+				}
+				baseRootID, err := resolveTreeIdentityToken(baseRoot)
+				if err != nil {
+					t.Fatalf("resolve base root identity: %v", err)
+				}
+				t.Setenv(envRootID, rootID)
+				t.Setenv(envBaseRootID, baseRootID)
+			}
+
+			stdout, stderr, err := captureEnvOutput(t, func() error {
+				return runList([]string{"--root", baseRoot, "--me", "alice", "--new", "--json"})
+			})
+			if err != nil {
+				t.Fatalf("explicit own-base list: %v", err)
+			}
+			if !strings.Contains(stdout, `"id": "base-inspection"`) {
+				t.Fatalf("explicit own-base list missed message: %q", stdout)
+			}
+			if strings.Contains(stderr, "warning:") {
+				t.Fatalf("explicit own-base list emitted pin warning: %q", stderr)
+			}
+		})
+	}
+}
+
+func TestListPreservesPinWarningOutsideExplicitOwnBaseRoot(t *testing.T) {
+	tests := []struct {
+		name      string
+		target    string
+		explicit  bool
+		configure func(t *testing.T, baseRoot, currentRoot string)
+	}{
+		{
+			name:     "implicit own base root",
+			target:   "base",
+			explicit: false,
+		},
+		{
+			name:     "explicit sibling session",
+			target:   "sibling",
+			explicit: true,
+		},
+		{
+			name:     "explicit foreign root",
+			target:   "foreign",
+			explicit: true,
+		},
+		{
+			name:     "stale identity pin",
+			target:   "base",
+			explicit: true,
+			configure: func(t *testing.T, baseRoot, currentRoot string) {
+				t.Helper()
+				rootID, err := resolveTreeIdentityToken(currentRoot)
+				if err != nil {
+					t.Fatalf("resolve current root identity: %v", err)
+				}
+				otherRoot := t.TempDir()
+				staleBaseID, err := resolveTreeIdentityToken(otherRoot)
+				if err != nil {
+					t.Fatalf("resolve stale base identity: %v", err)
+				}
+				t.Setenv(envRootID, rootID)
+				t.Setenv(envBaseRootID, staleBaseID)
+			},
+		},
+		{
+			name:     "malformed pin",
+			target:   "base",
+			explicit: true,
+			configure: func(t *testing.T, _, _ string) {
+				t.Helper()
+				t.Setenv(envBaseRoot, "relative-base")
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent := t.TempDir()
+			baseRoot := filepath.Join(parent, ".agent-mail")
+			currentRoot := sessionRoot(t, parent, "session1", "alice")
+			siblingRoot := sessionRoot(t, parent, "session2", "alice")
+			foreignRoot := filepath.Join(t.TempDir(), "foreign-root")
+			for _, root := range []string{baseRoot, foreignRoot} {
+				if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+					t.Fatalf("ensure mailbox at %s: %v", root, err)
+				}
+			}
+
+			targetRoot := baseRoot
+			switch test.target {
+			case "sibling":
+				targetRoot = siblingRoot
+			case "foreign":
+				targetRoot = foreignRoot
+			}
+			deliverGuardMessage(t, targetRoot, "alice", "warning-preserved")
+
+			ambientRoot := currentRoot
+			if !test.explicit {
+				ambientRoot = targetRoot
+			}
+			t.Setenv(envRoot, ambientRoot)
+			t.Setenv(envBaseRoot, baseRoot)
+			t.Setenv(envSession, "session1")
+			setOptionalEnv(t, envRootID, "", false)
+			setOptionalEnv(t, envBaseRootID, "", false)
+			if test.configure != nil {
+				test.configure(t, baseRoot, currentRoot)
+			}
+
+			args := []string{"--me", "alice", "--new", "--json"}
+			if test.explicit {
+				args = append([]string{"--root", targetRoot}, args...)
+			}
+			stdout, stderr, err := captureEnvOutput(t, func() error {
+				return runList(args)
+			})
+			if err != nil {
+				t.Fatalf("list remains an inspection path: %v", err)
+			}
+			if !strings.Contains(stdout, `"id": "warning-preserved"`) {
+				t.Fatalf("list missed target message: %q", stdout)
+			}
+			if !strings.Contains(stderr, "warning:") {
+				t.Fatalf("pin warning was suppressed outside explicit own base: %q", stderr)
+			}
+		})
+	}
+}
+
+func TestDrainExplicitOwnBaseRootStillRefusesPinMismatch(t *testing.T) {
+	parent := t.TempDir()
+	baseRoot := filepath.Join(parent, ".agent-mail")
+	currentRoot := sessionRoot(t, parent, "collab", "alice")
+	if err := fsq.EnsureAgentDirs(baseRoot, "alice"); err != nil {
+		t.Fatalf("ensure base mailbox: %v", err)
+	}
+	deliverGuardMessage(t, baseRoot, "alice", "base-drain")
+
+	t.Setenv(envRoot, currentRoot)
+	t.Setenv(envBaseRoot, baseRoot)
+	t.Setenv(envSession, "collab")
+	setOptionalEnv(t, envRootID, "", false)
+	setOptionalEnv(t, envBaseRootID, "", false)
+
+	err := runDrain([]string{"--root", baseRoot, "--me", "alice"})
+	assertConsumeRefused(t, err, "drain")
+	if got := inboxCount(t, baseRoot, "alice"); got != 1 {
+		t.Fatalf("base inbox count = %d, want 1 untouched", got)
+	}
+}
+
+func TestListDoesNotAcceptPinOverrideFlag(t *testing.T) {
+	_, _, err := captureEnvOutput(t, func() error {
+		return runList([]string{"--root", t.TempDir(), "--me", "alice", "--ignore-session-pin"})
+	})
+	if err == nil || GetExitCode(err) != ExitUsage {
+		t.Fatalf("list --ignore-session-pin should remain a usage error, got %v", err)
+	}
+}
+
 func TestListMissingMailboxIsNotEmpty(t *testing.T) {
 	parent := t.TempDir()
 	baseRoot := filepath.Join(parent, ".agent-mail")
@@ -321,6 +509,41 @@ func TestDoctorOpsReportsBaseBacklogMismatch(t *testing.T) {
 		if !strings.Contains(hint.Message, want) {
 			t.Fatalf("base backlog hint missing %q: %q", want, hint.Message)
 		}
+	}
+
+	encoded, err := json.Marshal(hint)
+	if err != nil {
+		t.Fatalf("marshal base backlog hint: %v", err)
+	}
+	var wire struct {
+		Code    string `json:"code"`
+		Status  string `json:"status"`
+		Message string `json:"message"`
+		Backlog *struct {
+			Root           string `json:"root"`
+			CurrentSession string `json:"current_session"`
+			Agent          string `json:"agent"`
+			Pending        int    `json:"pending"`
+			Command        string `json:"command"`
+		} `json:"backlog"`
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatalf("unmarshal base backlog hint: %v", err)
+	}
+	if wire.Code != hint.Code || wire.Status != hint.Status || wire.Message != hint.Message {
+		t.Fatalf("existing hint contract changed: %#v", wire)
+	}
+	if wire.Backlog == nil {
+		t.Fatalf("base backlog hint missing structured backlog: %s", encoded)
+	}
+	wantCommand := "amq list --root " + shellQuoteArg(baseRoot) + " --me alice --new"
+	if wire.Backlog.Root != baseRoot ||
+		wire.Backlog.CurrentSession != "collab" ||
+		wire.Backlog.Agent != "alice" ||
+		wire.Backlog.Pending != 1 ||
+		wire.Backlog.Command != wantCommand {
+		t.Fatalf("structured base backlog = %#v, want root=%q current_session=collab agent=alice pending=1 command=%q",
+			wire.Backlog, baseRoot, wantCommand)
 	}
 }
 

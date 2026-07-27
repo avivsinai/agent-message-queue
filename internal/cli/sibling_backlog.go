@@ -177,7 +177,11 @@ func formatSiblingBacklogHint(backlog siblingBacklog, me, current string) string
 }
 
 func formatBaseBacklogHint(backlog baseBacklog) string {
-	return fmt.Sprintf("%d pending for %q in base root %q (current: %s); use: "+
-		"amq list --root %s --me %s --new",
-		backlog.Pending, backlog.Agent, backlog.Root, backlog.Session, shellQuoteArg(backlog.Root), backlog.Agent)
+	return fmt.Sprintf("%d pending for %q in base root %q (current: %s); use: %s",
+		backlog.Pending, backlog.Agent, backlog.Root, backlog.Session, baseBacklogInspectionCommand(backlog))
+}
+
+func baseBacklogInspectionCommand(backlog baseBacklog) string {
+	return fmt.Sprintf("amq list --root %s --me %s --new",
+		shellQuoteArg(backlog.Root), backlog.Agent)
 }

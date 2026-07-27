@@ -47,9 +47,18 @@ type opsOperatorGate struct {
 }
 
 type opsHint struct {
-	Code    string `json:"code"`
-	Status  string `json:"status"`
-	Message string `json:"message"`
+	Code    string      `json:"code"`
+	Status  string      `json:"status"`
+	Message string      `json:"message"`
+	Backlog *opsBacklog `json:"backlog,omitempty"`
+}
+
+type opsBacklog struct {
+	Root           string `json:"root"`
+	CurrentSession string `json:"current_session"`
+	Agent          string `json:"agent"`
+	Pending        int    `json:"pending"`
+	Command        string `json:"command"`
 }
 
 type opsWakeLock struct {
@@ -233,6 +242,13 @@ func checkBaseBacklogHints(root string, agents []string) []opsHint {
 			Code:    "base_backlog",
 			Status:  "warn",
 			Message: formatBaseBacklogHint(backlog),
+			Backlog: &opsBacklog{
+				Root:           backlog.Root,
+				CurrentSession: backlog.Session,
+				Agent:          backlog.Agent,
+				Pending:        backlog.Pending,
+				Command:        baseBacklogInspectionCommand(backlog),
+			},
 		})
 	}
 	return hints
