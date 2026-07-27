@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
@@ -37,6 +38,9 @@ func runDoctor(args []string) error {
 	opsFlag := fs.Bool("ops", false, "Include runtime operational checks")
 	fixWakeLocksFlag := fs.Bool("fix-wake-locks", false, "With --ops, remove stale wake lock files")
 	fixMailboxesFlag := fs.Bool("fix-mailboxes", false, "Create missing required directories for configured mailboxes")
+	rootFlag := fs.String("root", "", "Exact AMQ root to inspect or repair")
+	baseRootFlag := fs.String("base-root", "", "Config-authority root for an explicit session --root")
+	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, allow repair outside the pinned session context")
 
 	usage := usageWithFlags(fs, "amq doctor [options]",
 		"Verify AMQ installation and configuration.",
@@ -66,6 +70,20 @@ func runDoctor(args []string) error {
 	if *fixWakeLocksFlag && !*opsFlag {
 		return UsageError("--fix-wake-locks requires --ops")
 	}
+	rootExplicit := flagWasVisited(fs, "root")
+	baseRootExplicit := flagWasVisited(fs, "base-root")
+	if rootExplicit && strings.TrimSpace(*rootFlag) == "" {
+		return UsageError("--root cannot be empty")
+	}
+	if baseRootExplicit && strings.TrimSpace(*baseRootFlag) == "" {
+		return UsageError("--base-root cannot be empty")
+	}
+	if baseRootExplicit && !rootExplicit {
+		return UsageError("--base-root requires an explicit --root")
+	}
+	if *ignoreSessionPinFlag && !rootExplicit {
+		return UsageError("--ignore-session-pin requires an explicit --root")
+	}
 
 	result := doctorResult{}
 
@@ -74,6 +92,23 @@ func runDoctor(args []string) error {
 
 	// Check 2: .amqrc
 	amqrcCheck, root := checkAmqrc()
+	if rootExplicit {
+		root = resolveRoot(*rootFlag)
+		amqrcCheck = doctorCheck{
+			Name:    "Root config",
+			Status:  "ok",
+			Message: fmt.Sprintf("queue root=%s (source: flag)", root),
+		}
+	}
+	baseRoot := ""
+	if baseRootExplicit {
+		baseRoot = resolveRoot(*baseRootFlag)
+	}
+	if baseRoot != "" {
+		if err := validateDoctorExplicitBaseRoot(root, baseRoot); err != nil {
+			return UsageError("%v", err)
+		}
+	}
 	result.Checks = append(result.Checks, amqrcCheck)
 
 	// Check 3: Root directory
@@ -89,12 +124,16 @@ func runDoctor(args []string) error {
 
 	// Check 4: Config.json
 	if root != "" {
-		result.Checks = append(result.Checks, checkConfig(root))
+		configRoot := root
+		if baseRoot != "" {
+			configRoot = baseRoot
+		}
+		result.Checks = append(result.Checks, checkConfig(configRoot))
 	}
 
 	// Check 5: Mailbox permissions
 	if root != "" {
-		mailboxes, repair, check := inspectDoctorMailboxes(root, *fixMailboxesFlag)
+		mailboxes, repair, check := inspectDoctorMailboxes(root, baseRoot, *fixMailboxesFlag, *ignoreSessionPinFlag)
 		result.Mailboxes = mailboxes
 		result.MailboxRepair = repair
 		result.Checks = append(result.Checks, check)
@@ -117,8 +156,30 @@ func runDoctor(args []string) error {
 	// Ops checks (runtime health)
 	if *opsFlag && root != "" {
 		// Resolve root source once here; avoids re-resolving with empty flags in runOpsChecks.
-		_, source, _, _ := resolveEnvConfigWithSource("", "")
-		result.Ops = runOpsChecks(root, string(source), *fixWakeLocksFlag)
+		source := rootSourceFlag
+		if !rootExplicit {
+			_, source, _, _ = resolveEnvConfigWithSource("", "")
+		}
+		fixWakeLocks := *fixWakeLocksFlag
+		if fixWakeLocks && !*ignoreSessionPinFlag {
+			mismatch, pinErr := sessionPinMismatch(root)
+			if pinErr != nil {
+				result.Checks = append(result.Checks, doctorCheck{
+					Name:    "Wake lock repair",
+					Status:  "error",
+					Message: fmt.Sprintf("refusing to repair %s: invalid AMQ session context: %v", root, pinErr),
+				})
+				fixWakeLocks = false
+			} else if mismatch != nil && !isPinnedBaseRoot(root) {
+				result.Checks = append(result.Checks, doctorCheck{
+					Name:    "Wake lock repair",
+					Status:  "error",
+					Message: fmt.Sprintf("refusing to repair %s because it does not match the pinned session context: %s", root, mismatch.Message),
+				})
+				fixWakeLocks = false
+			}
+		}
+		result.Ops = runOpsChecks(root, string(source), fixWakeLocks, baseRoot)
 	}
 
 	// Calculate summary
@@ -262,6 +323,30 @@ func runDoctor(args []string) error {
 	return nil
 }
 
+func validateDoctorExplicitBaseRoot(root, baseRoot string) error {
+	if relateTrees(root, baseRoot) == TreeRelationSame {
+		return nil
+	}
+	if !isSessionRootUnderBase(root, baseRoot) {
+		return fmt.Errorf("explicit --root %s must be the base root or one direct child of --base-root %s", root, baseRoot)
+	}
+	baseIdentity, err := fsq.SnapshotDeliveryRoot(baseRoot)
+	if err != nil {
+		return fmt.Errorf("open explicit --base-root: %w", err)
+	}
+	baseCapability, err := fsq.OpenDeliveryRoot(baseRoot, baseIdentity)
+	if err != nil {
+		return fmt.Errorf("open explicit --base-root: %w", err)
+	}
+	defer func() { _ = baseCapability.Close() }()
+	child, err := baseCapability.OpenDirectChild(filepath.Base(resolveRoot(root)))
+	if err != nil {
+		return fmt.Errorf("open explicit --root under --base-root: %w", err)
+	}
+	defer func() { _ = child.Close() }()
+	return child.VerifyBase()
+}
+
 func checkSessionPinIdentity(root string) doctorCheck {
 	check := doctorCheck{Name: "Session identity pin"}
 	pin, err := loadSessionPin()
@@ -282,6 +367,11 @@ func checkSessionPinIdentity(root string) doctorCheck {
 		return check
 	}
 	if mismatch != nil {
+		if isPinnedBaseRoot(root) {
+			check.Status = "ok"
+			check.Message = "verified pinned base root"
+			return check
+		}
 		check.Status = "warn"
 		check.Message = mismatch.Error()
 		return check
@@ -382,15 +472,9 @@ func checkConfig(root string) doctorCheck {
 	return check
 }
 
-func inspectDoctorMailboxes(root string, repair bool) ([]fsq.MailboxInspection, *fsq.MailboxRepairResult, doctorCheck) {
+func inspectDoctorMailboxes(root, explicitBaseRoot string, repair, ignoreSessionPins bool) ([]fsq.MailboxInspection, *fsq.MailboxRepairResult, doctorCheck) {
 	check := doctorCheck{Name: "Mailboxes"}
-	identity, err := fsq.SnapshotDeliveryRoot(root)
-	if err != nil {
-		check.Status = "error"
-		check.Message = err.Error()
-		return nil, nil, check
-	}
-	if repair {
+	if repair && !ignoreSessionPins {
 		mismatch, pinErr := sessionPinMismatch(root)
 		if pinErr != nil {
 			check.Status = "error"
@@ -401,7 +485,7 @@ func inspectDoctorMailboxes(root string, repair bool) ([]fsq.MailboxInspection, 
 			)
 			return nil, nil, check
 		}
-		if mismatch != nil {
+		if mismatch != nil && !isPinnedBaseRoot(root) {
 			check.Status = "error"
 			check.Message = fmt.Sprintf(
 				"refusing to repair %s because it does not match the pinned session context: %s; re-run from the intended session",
@@ -411,36 +495,133 @@ func inspectDoctorMailboxes(root string, repair bool) ([]fsq.MailboxInspection, 
 			return nil, nil, check
 		}
 	}
-	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
-	if err != nil {
-		check.Status = "error"
-		check.Message = err.Error()
-		return nil, nil, check
-	}
-	defer func() { _ = deliveryRoot.Close() }()
 
-	var (
-		inventory fsq.MailboxInventory
-		result    *fsq.MailboxRepairResult
-	)
-	if repair {
-		repairResult := fsq.RepairMailboxLayout(deliveryRoot)
-		result = &repairResult
-		inventory = repairResult.Inventory
+	var deliveryRoot, explicitConfigRoot *fsq.DeliveryRoot
+	if explicitBaseRoot != "" {
+		baseIdentity, err := fsq.SnapshotDeliveryRoot(explicitBaseRoot)
+		if err != nil {
+			check.Status = "error"
+			check.Message = fmt.Sprintf("open explicit base root: %v", err)
+			return nil, nil, check
+		}
+		explicitConfigRoot, err = fsq.OpenDeliveryRoot(explicitBaseRoot, baseIdentity)
+		if err != nil {
+			check.Status = "error"
+			check.Message = fmt.Sprintf("open explicit base root: %v", err)
+			return nil, nil, check
+		}
+		defer func() { _ = explicitConfigRoot.Close() }()
+		if relateTrees(root, explicitBaseRoot) == TreeRelationSame {
+			deliveryRoot = explicitConfigRoot
+		} else {
+			if !isSessionRootUnderBase(root, explicitBaseRoot) {
+				check.Status = "error"
+				check.Message = fmt.Sprintf("explicit --root %s must be the base root or one direct child of --base-root %s", root, explicitBaseRoot)
+				return nil, nil, check
+			}
+			deliveryRoot, err = explicitConfigRoot.OpenDirectChild(filepath.Base(resolveRoot(root)))
+			if err != nil {
+				check.Status = "error"
+				check.Message = fmt.Sprintf("open explicit session root: %v", err)
+				return nil, nil, check
+			}
+			defer func() { _ = deliveryRoot.Close() }()
+		}
 	} else {
-		inventory, err = fsq.InspectMailboxLayout(deliveryRoot)
+		identity, err := fsq.SnapshotDeliveryRoot(root)
 		if err != nil {
 			check.Status = "error"
 			check.Message = err.Error()
 			return nil, nil, check
 		}
+		deliveryRoot, err = fsq.OpenDeliveryRoot(root, identity)
+		if err != nil {
+			check.Status = "error"
+			check.Message = err.Error()
+			return nil, nil, check
+		}
+		defer func() { _ = deliveryRoot.Close() }()
 	}
-	applyDoctorMailboxRemedies(&inventory)
-	check = checkMailboxInventory(inventory, result)
+
+	var (
+		inventory fsq.MailboxInventory
+		result    *fsq.MailboxRepairResult
+	)
+	configRoot := deliveryRoot
+	var baseConfigRoot *fsq.DeliveryRoot
+	repairBaseRoot := explicitBaseRoot
+	if explicitConfigRoot != nil {
+		configRoot = explicitConfigRoot
+	} else if _, configErr := deliveryRoot.ReadRegularNoFollow(filepath.Join("meta", "config.json")); os.IsNotExist(configErr) {
+		if base := classifyRoot(root); base != "" {
+			repairBaseRoot = base
+			baseIdentity, baseErr := fsq.SnapshotDeliveryRoot(base)
+			if baseErr != nil {
+				check.Status = "error"
+				check.Message = fmt.Sprintf("open base config root: %v", baseErr)
+				return nil, nil, check
+			}
+			baseConfigRoot, baseErr = fsq.OpenDeliveryRoot(base, baseIdentity)
+			if baseErr != nil {
+				check.Status = "error"
+				check.Message = fmt.Sprintf("open base config root: %v", baseErr)
+				return nil, nil, check
+			}
+			defer func() { _ = baseConfigRoot.Close() }()
+			configRoot = baseConfigRoot
+		}
+	}
+
+	authorization, authorizationInventory, authorizationErr := fsq.OpenMailboxConfigAuthorization(configRoot)
+	if authorizationErr != nil {
+		if repair {
+			repairResult := fsq.MailboxRepairResult{
+				Status: "failed",
+				Failure: &fsq.MailboxRepairFailure{
+					Code:    "preflight_failed",
+					Stage:   "authorization",
+					Message: authorizationInventory.ActiveConfigIssue,
+				},
+				Inventory: authorizationInventory,
+			}
+			result = &repairResult
+			inventory = repairResult.Inventory
+			repairCommand := doctorMailboxRepairCommandForOS(root, repairBaseRoot, runtime.GOOS)
+			applyDoctorMailboxRemedies(&inventory, repairCommand)
+			check = checkMailboxInventory(inventory, result, repairCommand)
+			return inventory.Mailboxes, result, check
+		}
+		check.Status = "error"
+		check.Message = authorizationInventory.ActiveConfigIssue
+		return nil, nil, check
+	}
+	defer func() { _ = authorization.Close() }()
+	effectiveAgents := withReservedHumanHandle(authorization.ConfiguredAgents())
+
+	if repair {
+		repairResult := fsq.RepairMailboxLayoutForConfiguredAgentsWithAuthorization(
+			deliveryRoot,
+			authorization,
+			effectiveAgents,
+		)
+		result = &repairResult
+		inventory = repairResult.Inventory
+	} else {
+		inspected, err := fsq.InspectMailboxLayoutWithAuthorization(deliveryRoot, authorization, effectiveAgents...)
+		if err != nil {
+			check.Status = "error"
+			check.Message = err.Error()
+			return nil, nil, check
+		}
+		inventory = inspected
+	}
+	repairCommand := doctorMailboxRepairCommandForOS(root, repairBaseRoot, runtime.GOOS)
+	applyDoctorMailboxRemedies(&inventory, repairCommand)
+	check = checkMailboxInventory(inventory, result, repairCommand)
 	return inventory.Mailboxes, result, check
 }
 
-func applyDoctorMailboxRemedies(inventory *fsq.MailboxInventory) {
+func applyDoctorMailboxRemedies(inventory *fsq.MailboxInventory, repairCommand string) {
 	for i := range inventory.Mailboxes {
 		mailbox := &inventory.Mailboxes[i]
 		if mailbox.Provenance != fsq.MailboxDiscovered || len(mailbox.Issues) == 0 {
@@ -454,14 +635,15 @@ func applyDoctorMailboxRemedies(inventory *fsq.MailboxInventory) {
 			continue
 		}
 		mailbox.Remedy = fmt.Sprintf(
-			"add %q to agents in meta/config.json, then run 'amq doctor --fix-mailboxes'; or preserve any messages and remove agents/%s if abandoned",
+			"add %q to agents in meta/config.json, then run %s; or preserve any messages and remove agents/%s if abandoned",
 			mailbox.Handle,
+			repairCommand,
 			mailbox.Handle,
 		)
 	}
 }
 
-func checkMailboxInventory(inventory fsq.MailboxInventory, repair *fsq.MailboxRepairResult) doctorCheck {
+func checkMailboxInventory(inventory fsq.MailboxInventory, repair *fsq.MailboxRepairResult, repairCommand string) doctorCheck {
 	check := doctorCheck{Name: "Mailboxes", Status: "ok"}
 	var issues []string
 	if inventory.ActiveConfigStatus != "ok" {
@@ -502,7 +684,7 @@ func checkMailboxInventory(inventory fsq.MailboxInventory, repair *fsq.MailboxRe
 	if repair == nil {
 		for _, mailbox := range inventory.Mailboxes {
 			if mailbox.RepairEligible {
-				check.Message += "; repair: amq doctor --fix-mailboxes"
+				check.Message += "; repair: " + repairCommand
 				break
 			}
 		}

@@ -112,7 +112,11 @@ Layer names must use lowercase ASCII letters, digits, hyphen, underscore, and do
 
 **Cross-tree send guard**: A direct `--root` is root *selection*, not federation routing. `send` refuses an explicit `--root` that targets a different base tree than the caller's own active session (`AM_ROOT`/`AM_BASE_ROOT`) when no routing dimension (`--project`/`--session`/`--from-session`) is given — such a message carries no sender-origin metadata, so the recipient could not reply and a naive reply would loop into their own tree. Replyable cross-tree messaging must use `--project`/`--session`, which stamp the routing headers. With no session env set (bare-root scripts/CI), the guard does not fire; a direct `--root` cross-tree send in that case can still produce an unreplyable message — the documented cost of keeping bare-root sends working.
 
-**Session-root guard**: `read`, `drain`, `monitor`, `watch`, and mutating DLQ commands compare their resolved target against the exact context pinned by `AM_BASE_ROOT`/`AM_SESSION` before inspecting or moving mailbox state; `send` and `reply` apply the same check to their local source. For named sessions `AM_BASE_ROOT` is the authorized parent; for sessionless contexts it is the exact root and `AM_SESSION` is empty. A mismatch exits with code 5; use `--session <name>` as the deliberate routing dimension. The raw-root escape hatch is `--ignore-session-pin`, which requires a non-empty explicit `--root`; explicitly blank `--root`/`--session` values are usage errors. Target routing never authorizes a mismatched source. `list` warns instead of refusing so it remains a non-destructive inspection path; the exact base-backlog inspection command is quiet only when its explicit root is the current pin's own base root, identity-authenticated when tokens are present. With no positive session/tree evidence, scripts and CI remain fail-open. A missing mailbox is a not-found error. Empty `drain` and `list --new` results perform a shallow sibling-session scan and write exact `amq list --session <name> --me <handle> --new` inspection commands to stderr; `doctor --ops` reports the same condition as `sibling_backlog` hints. `doctor --ops --json` adds a structured `backlog` object to `base_backlog` hints with the target root, current session, agent, pending count, and exact command. Known limitation: `send --from-session` remains a double-explicit legacy route from its supplied raw base; callers must ensure that base is intentional until the follow-up resolver work lands.
+**Session-root guard**: `read`, `drain`, `monitor`, `watch`, and mutating DLQ commands compare their resolved target against the exact context pinned by `AM_BASE_ROOT`/`AM_SESSION` before inspecting or moving mailbox state; `send` and `reply` apply the same check to their local source. For named sessions `AM_BASE_ROOT` is the authorized parent; for sessionless contexts it is the exact root and `AM_SESSION` is empty. A mismatch exits with code 5; use `--session <name>` as the deliberate routing dimension. The raw-root escape hatch is `--ignore-session-pin`, which requires a non-empty explicit `--root`; explicitly blank `--root`/`--session` values are usage errors. Target routing never authorizes a mismatched source. `list` warns instead of refusing so it remains a non-destructive inspection path. `doctor --root` likewise selects an exact inspection target without repinning the shell: inspection continues with a mismatch warning, while `--fix-mailboxes` refuses mutation unless the pin matches or the caller also supplies `--ignore-session-pin`. `--base-root` supplies config authority only and never waives the pin. The exact base-backlog inspection command is quiet only when its explicit root is the current pin's own base root, identity-authenticated when tokens are present. With no positive session/tree evidence, scripts and CI remain fail-open. A missing mailbox is a not-found error. Empty `drain` and `list --new` results perform a shallow sibling-session scan and write exact `amq list --session <name> --me <handle> --new` inspection commands to stderr; `doctor --ops` reports the same condition as `sibling_backlog` hints. `doctor --ops --json` adds a structured `backlog` object to `base_backlog` hints with the target root, current session, agent, pending count, and exact command. Known limitation: `send --from-session` remains a double-explicit legacy route from its supplied raw base; callers must ensure that base is intentional until the follow-up resolver work lands.
+
+The same doctor mutation rule applies to `--ops --fix-wake-locks`: a
+mismatched target is inspected but its wake locks are not changed without
+`--ignore-session-pin`.
 
 **Environment context replacement**: Every shell-mode `amq env` output replaces `AM_ROOT`, `AM_ME`, `AM_BASE_ROOT`, and `AM_SESSION` as one context. Sessionless output pins `AM_BASE_ROOT` to the exact root and emits an empty `AM_SESSION`; `--export` additionally prints a pin note. An ambient root that conflicts with an existing pin is rejected unless a non-empty `--root` or `--session` explicitly repins it. `amq env --session` routes from a valid existing pin base before consulting cwd configuration.
 
@@ -208,7 +212,7 @@ amq integration symphony init [--workflow <path>] --me <agent> [--root <path>] [
 amq integration symphony emit --event <after_create|before_run|after_run|before_remove> --me <agent> [--root <path>] [--workspace <path>] [--identifier <key>] [--json]
 amq integration kanban bridge --me <agent> [--root <path>] [--url <ws://...>] [--workspace-id <id>] [--reconnect <duration>] [--json]
 amq who [--json]
-amq doctor [--ops] [--fix-wake-locks] [--fix-mailboxes] [--json]
+amq doctor [--root <path>] [--base-root <path>] [--ignore-session-pin] [--ops] [--fix-wake-locks] [--fix-mailboxes] [--json]
 ```
 
 `--root` is accepted only where it is listed above. Participating commands may
@@ -347,13 +351,26 @@ Use `--force` with retry to override the max retry limit.
 `amq doctor` verifies installation, root configuration, permissions, config, and skill setup.
 
 `amq doctor --fix-mailboxes` repairs the base mailbox layout without requiring
-`--ops`: it creates only missing required directories for agents listed in
-`config.json`. Filesystem-discovered mailboxes that are not configured are
+`--ops`: it creates only missing required directories for the effective
+configured roster (`config.json` agents plus the reserved human handle
+`user`). Filesystem-discovered mailboxes outside that effective roster are
 reported but are never repair eligible. Repair never edits, moves, overwrites,
-or deletes existing message files; symlinks, non-directories, unreadable paths,
-and concurrent layout changes fail closed. Inspection remains available when
-the target differs from the active session pin (reported separately as a
-warning); repair requires the target to match any populated session pin.
+or deletes existing message files; symlinks, non-directories, unreadable
+paths, and concurrent layout changes fail closed. Inspection remains
+available when the target differs from the active session pin (reported
+separately as a warning); without the explicit override, repair requires the
+target to match any populated session pin.
+
+`amq doctor --root <path>` selects the exact inspection or repair target; it
+does not repin the shell or bypass an inherited session pin. Read-only
+inspection still runs on a mismatch and reports a `Session identity pin`
+warning. Mailbox repair refuses a mismatched target unless the command also
+uses `--ignore-session-pin`, which requires an explicit non-empty `--root`.
+For a base-config-only session, use
+`amq doctor --root <session> --base-root <base> --ignore-session-pin --fix-mailboxes`.
+`--base-root` requires `--root`, is used only as the retained config authority,
+and must be the same tree or the direct parent of the target; it never waives
+the session pin.
 
 `amq doctor --ops` adds runtime checks:
 

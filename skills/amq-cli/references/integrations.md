@@ -68,12 +68,20 @@ Defaults:
 ```bash
 amq doctor --ops
 amq doctor --ops --json
+amq doctor --root <exact-root> --ops
 ```
 
 `doctor --ops` adds queue depth, sibling-session backlog hints, oldest unread
 age, DLQ state, presence freshness, and integration hints on top of the base
 `doctor` checks. A `sibling_backlog` hint includes an exact non-destructive
 `amq list --session <name> --me <handle> --new` inspection command.
+
+An explicit doctor root selects the inspected tree without changing the
+terminal pin. Inspection continues with a mismatch warning. Mutating doctor
+operations (`--fix-mailboxes` or `--ops --fix-wake-locks`) require the target
+to match the pin unless the command uses an explicit non-empty `--root`
+together with `--ignore-session-pin`. `--base-root` supplies config authority
+for the target or one direct child and never waives the pin.
 
 ## Message Shape
 

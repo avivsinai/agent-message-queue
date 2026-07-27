@@ -149,7 +149,7 @@ func TestValidateKnownHandlesAllowsReservedUserWithConfig(t *testing.T) {
 	}
 }
 
-func TestLoadKnownAgentsDoesNotReserveUserWithoutConfiguredAgents(t *testing.T) {
+func TestLoadKnownAgentsDistinguishesAbsentFromPresentEmptyConfig(t *testing.T) {
 	root := t.TempDir()
 
 	agents, err := loadKnownAgents(root, true)
@@ -172,8 +172,18 @@ func TestLoadKnownAgentsDoesNotReserveUserWithoutConfiguredAgents(t *testing.T) 
 	if err != nil {
 		t.Fatalf("loadKnownAgents with empty config: %v", err)
 	}
-	if len(agents) != 0 {
-		t.Fatalf("empty configured agents should not synthesize user, got %#v", agents)
+	if len(agents) != 1 || agents[0] != reservedHumanHandle {
+		t.Fatalf("empty configured agents = %#v, want reserved user", agents)
+	}
+	known, err = loadKnownAgentSet(root, true)
+	if err != nil {
+		t.Fatalf("loadKnownAgentSet with empty config: %v", err)
+	}
+	if len(known) != 1 {
+		t.Fatalf("empty configured known set = %#v, want reserved user only", known)
+	}
+	if _, ok := known[reservedHumanHandle]; !ok {
+		t.Fatalf("empty configured known set = %#v, want reserved user", known)
 	}
 }
 

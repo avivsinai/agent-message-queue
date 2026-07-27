@@ -5,6 +5,7 @@ package cli
 import (
 	"errors"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -124,11 +125,25 @@ func TestPrepareCoopWakeLockHeadlessPrintsRemedyWithoutPrompt(t *testing.T) {
 		strings.Contains(stderr, "Clear it and start a fresh wake?") {
 		t.Fatalf("headless cleanup printed an unanswerable prompt: stdout=%q stderr=%q", stdout, stderr)
 	}
-	if !strings.Contains(stderr, remedy) || !strings.Contains(stderr, "AM_ROOT=") {
+	inspectCommand := doctorRootCommandForOS(root, "", runtime.GOOS, "--ops")
+	if !strings.Contains(stderr, remedy) || !strings.Contains(stderr, inspectCommand) || strings.Contains(stderr, "AM_ROOT=") {
 		t.Fatalf("remedy missing: %q", stderr)
 	}
 	if _, err := os.Stat(lockPath); err != nil {
 		t.Fatalf("headless cleanup changed lock: %v", err)
+	}
+}
+
+func TestCoopWakeRemedyQuotesExplicitDoctorRoot(t *testing.T) {
+	root := `/tmp/AMQ & peer's $root`
+	got := coopWakeRemedy(wakeLockInspection{
+		Agent:    "codex",
+		LockPath: "/tmp/wake.lock",
+		Root:     root,
+	}, "unverified", "amq coop exec -y")
+	want := doctorRootCommandForOS(root, "", runtime.GOOS, "--ops")
+	if !strings.Contains(got, want) || strings.Contains(got, "AM_ROOT=") {
+		t.Fatalf("wake remedy = %q, want explicit command %q", got, want)
 	}
 }
 

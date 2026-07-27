@@ -108,6 +108,26 @@ func TestSendStrictUnknownDestinationDoesNotCreateMailbox(t *testing.T) {
 	}
 }
 
+func TestSendStrictPresentEmptyConfigStillValidatesEffectiveRoster(t *testing.T) {
+	root := initializedSendMailboxRoot(t)
+
+	_, _, err := captureEnvOutput(t, func() error {
+		return runSend([]string{
+			"--root", root,
+			"--me", reservedHumanHandle,
+			"--to", "typo",
+			"--strict",
+			"--body", "hello",
+		})
+	})
+	if err == nil || !strings.Contains(err.Error(), `handle "typo" not in config.json`) {
+		t.Fatalf("strict empty-config send error = %v", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(root, "agents", "typo")); !os.IsNotExist(statErr) {
+		t.Fatalf("strict empty-config send created typo mailbox: %v", statErr)
+	}
+}
+
 func TestSendRefusesUninitializedRootWithoutWriting(t *testing.T) {
 	root := t.TempDir()
 	clearSendMailboxTestEnv(t)
@@ -214,6 +234,214 @@ func TestSendUnknownMailboxRepairRefusesSymlinkWithoutDelivery(t *testing.T) {
 	if statErr != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("repair changed symlink: info=%v err=%v", info, statErr)
 	}
+}
+
+func TestSendRepairsBaseOnlyCoopMailboxAcrossSessionRoutes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args func(base string) []string
+		pin  bool
+	}{
+		{
+			name: "same session",
+			args: func(string) []string {
+				return []string{"--me", "alice", "--to", "bob", "--body", "same"}
+			},
+			pin: true,
+		},
+		{
+			name: "target session",
+			args: func(string) []string {
+				return []string{"--me", "alice", "--to", "bob", "--session", "qa", "--body", "target"}
+			},
+			pin: true,
+		},
+		{
+			name: "from session",
+			args: func(base string) []string {
+				return []string{"--root", base, "--from-session", "collab", "--me", "alice", "--to", "bob", "--session", "qa", "--body", "from"}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearSendMailboxTestEnv(t)
+			base := filepath.Join(t.TempDir(), ".agent-mail")
+			source := filepath.Join(base, "collab")
+			target := source
+			if tc.name != "same session" {
+				target = filepath.Join(base, "qa")
+			}
+			configureSendTestRoot(t, base, "alice", "bob")
+			configPath := filepath.Join(base, "meta", "config.json")
+			configBefore, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, root := range dedupeStrings([]string{source, target}) {
+				if err := fsq.EnsureRootDirs(root); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := fsq.EnsureAgentDirs(source, "alice"); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(target, "bob"); err != nil {
+				t.Fatal(err)
+			}
+			missing := fsq.AgentDLQCur(target, "bob")
+			if err := os.Remove(missing); err != nil {
+				t.Fatal(err)
+			}
+			if tc.pin {
+				pinSendSessionForTest(t, base, source, "collab")
+			}
+
+			if _, _, err := captureEnvOutput(t, func() error {
+				return runSend(tc.args(base))
+			}); err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			assertCompleteSendMailbox(t, target, "bob")
+			if _, err := os.Lstat(filepath.Join(target, "meta", "config.json")); !os.IsNotExist(err) {
+				t.Fatalf("send copied config into session: %v", err)
+			}
+			configAfter, err := os.ReadFile(configPath)
+			if err != nil || string(configAfter) != string(configBefore) {
+				t.Fatalf("send changed base config: err=%v before=%q after=%q", err, configBefore, configAfter)
+			}
+			entries, err := os.ReadDir(fsq.AgentInboxNew(target, "bob"))
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("delivered entries = %d, err=%v", len(entries), err)
+			}
+		})
+	}
+}
+
+func TestSendInvalidMessageDoesNotRepairMailbox(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "alice", "bob")
+	missing := fsq.AgentDLQCur(root, "bob")
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := captureEnvOutput(t, func() error {
+		return runSend([]string{
+			"--root", root,
+			"--me", "alice",
+			"--to", "bob",
+			"--priority", "not-a-priority",
+			"--body", "invalid",
+		})
+	})
+	if err == nil {
+		t.Fatal("invalid send succeeded")
+	}
+	if _, statErr := os.Lstat(missing); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid send repaired mailbox: %v", statErr)
+	}
+}
+
+func TestSendBaseOnlyCoopConfigPreservesUnknownHandleModes(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	base := filepath.Join(t.TempDir(), ".agent-mail")
+	session := filepath.Join(base, "collab")
+	configureSendTestRoot(t, base, "alice", "bob")
+	if err := fsq.EnsureAgentDirs(session, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	pinSendSessionForTest(t, base, session, "collab")
+
+	_, _, err := captureEnvOutput(t, func() error {
+		return runSend([]string{"--me", "alice", "--to", "typo", "--strict", "--body", "strict"})
+	})
+	if err == nil || !strings.Contains(err.Error(), `handle "typo" not in config.json`) {
+		t.Fatalf("strict base-config error = %v", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(session, "agents", "typo")); !os.IsNotExist(statErr) {
+		t.Fatalf("strict base-config send created mailbox: %v", statErr)
+	}
+
+	_, stderr, err := captureEnvOutput(t, func() error {
+		return runSend([]string{"--me", "alice", "--to", "typo", "--body", "warn"})
+	})
+	if err != nil {
+		t.Fatalf("non-strict base-config send: %v", err)
+	}
+	if !strings.Contains(stderr, `warning: handle "typo" not in config.json`) {
+		t.Fatalf("non-strict warning changed: %q", stderr)
+	}
+	assertCompleteSendMailbox(t, session, "typo")
+}
+
+func TestSendRepairsOnlyRequestedRecipients(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "alice", "bob", "carol")
+	bobMissing := fsq.AgentDLQCur(root, "bob")
+	carolMissing := fsq.AgentDLQCur(root, "carol")
+	for _, path := range []string{bobMissing, carolMissing} {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, _, err := captureEnvOutput(t, func() error {
+		return runSend([]string{"--root", root, "--me", "alice", "--to", "bob", "--body", "targeted"})
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if info, err := os.Stat(bobMissing); err != nil || !info.IsDir() {
+		t.Fatalf("requested mailbox was not repaired: info=%v err=%v", info, err)
+	}
+	if _, err := os.Lstat(carolMissing); !os.IsNotExist(err) {
+		t.Fatalf("unrequested mailbox was repaired: %v", err)
+	}
+}
+
+func TestSendMixedRecipientRepairPreflightsAsOneTransaction(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "alice", "bob")
+	bobMissing := fsq.AgentDLQCur(root, "bob")
+	if err := os.Remove(bobMissing); err != nil {
+		t.Fatal(err)
+	}
+	carolInbox := filepath.Join(root, "agents", "carol", "inbox")
+	if err := os.MkdirAll(filepath.Dir(carolInbox), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(carolInbox, []byte("unsafe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := captureEnvOutput(t, func() error {
+		return runSend([]string{
+			"--root", root,
+			"--me", "alice",
+			"--to", "bob,carol,bob",
+			"--thread", "transactional",
+			"--body", "must not partially repair",
+		})
+	})
+	if err == nil {
+		t.Fatal("mixed unsafe send succeeded")
+	}
+	if _, statErr := os.Lstat(bobMissing); !os.IsNotExist(statErr) {
+		t.Fatalf("failed transaction repaired safe recipient first: %v", statErr)
+	}
+}
+
+func pinSendSessionForTest(t *testing.T, base, root, session string) {
+	t.Helper()
+	baseID, err := resolveTreeIdentityToken(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID, err := resolveTreeIdentityToken(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envBaseRoot, base)
+	t.Setenv(envRoot, root)
+	t.Setenv(envSession, session)
+	t.Setenv(envBaseRootID, baseID)
+	t.Setenv(envRootID, rootID)
 }
 
 func initializedSendMailboxRoot(t *testing.T, agents ...string) string {

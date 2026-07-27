@@ -3,6 +3,9 @@
 package cli
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -101,6 +105,494 @@ func TestSendRejectsSymlinkSwapAfterGuard(t *testing.T) {
 		t.Fatalf("ReadDir original inbox: %v", err)
 	} else if len(entries) != 0 {
 		t.Fatalf("refused send wrote %d message(s) into moved authorized root", len(entries))
+	}
+}
+
+func TestSendStrictConfigReplacementBeforeRepairDoesNotCreateOrDeliver(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "alice", "bob")
+	missing := fsq.AgentDLQCur(root, "bob")
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "meta", "config.json")
+	bodyFIFO := filepath.Join(secureTempDirForTest(t), "strict-body.fifo")
+	if err := syscall.Mkfifo(bodyFIFO, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	type openResult struct {
+		file *os.File
+		err  error
+	}
+	writerCh := make(chan openResult, 1)
+	go func() {
+		file, err := os.OpenFile(bodyFIFO, os.O_WRONLY, 0)
+		writerCh <- openResult{file: file, err: err}
+	}()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runSend([]string{
+			"--root", root,
+			"--me", "alice",
+			"--to", "bob",
+			"--strict",
+			"--body", "@" + bodyFIFO,
+		})
+	}()
+
+	var writer *os.File
+	select {
+	case result := <-writerCh:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		writer = result.file
+	case err := <-errCh:
+		t.Fatalf("send returned before body read: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("send did not reach body read after strict validation")
+	}
+	original := configPath + ".original"
+	if err := os.Rename(configPath, original); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"version":1,"agents":["alice"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("must not deliver")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "config") {
+			t.Fatalf("send error = %v, want retained-config refusal", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("send did not return")
+	}
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("strict send repaired after roster removal: %v", err)
+	}
+	entries, err := os.ReadDir(fsq.AgentInboxNew(root, "bob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("strict send delivered after roster removal: %#v", entries)
+	}
+}
+
+func TestCrossProjectSendReportsRepairWhenMailboxBecomesIncompleteAtDelivery(t *testing.T) {
+	clearDeliveryRootTestEnv(t)
+	srcProjectDir := secureTempDirForTest(t)
+	srcRoot := filepath.Join(srcProjectDir, ".agent-mail", "collab")
+	peerBase := filepath.Join(secureTempDirForTest(t), "peer base")
+	peerRoot := filepath.Join(peerBase, "collab")
+	if err := fsq.EnsureAgentDirs(srcRoot, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(peerRoot, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	configureSendTestRoot(t, peerBase, "bob")
+	rcData, err := json.Marshal(map[string]any{
+		"root":    ".agent-mail",
+		"project": "source",
+		"peers":   map[string]string{"peer": peerBase},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcProjectDir, ".amqrc"), rcData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bodyFIFO := filepath.Join(secureTempDirForTest(t), "peer-body.fifo")
+	if err := syscall.Mkfifo(bodyFIFO, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	type openResult struct {
+		file *os.File
+		err  error
+	}
+	writerCh := make(chan openResult, 1)
+	go func() {
+		file, err := os.OpenFile(bodyFIFO, os.O_WRONLY, 0)
+		writerCh <- openResult{file: file, err: err}
+	}()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runSend([]string{
+			"--root", srcRoot,
+			"--me", "alice",
+			"--to", "bob",
+			"--project", "peer",
+			"--body", "@" + bodyFIFO,
+		})
+	}()
+
+	var writer *os.File
+	select {
+	case result := <-writerCh:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		writer = result.file
+	case err := <-errCh:
+		t.Fatalf("send returned before body read: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("send did not reach body read after peer validation")
+	}
+	if err := config.WriteConfig(filepath.Join(peerBase, "meta", "config.json"), config.Config{
+		Version: 1,
+		Agents:  []string{"carol"},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	missing := fsq.AgentDLQCur(peerRoot, "bob")
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("must not deliver")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case sendErr := <-errCh:
+		if sendErr == nil {
+			t.Fatal("send succeeded after peer mailbox became incomplete")
+		}
+		for _, want := range []string{"incomplete", "missing:dlq/cur", `add "bob"`, "peer config", "--root", "--base-root", "--fix-mailboxes"} {
+			if !strings.Contains(sendErr.Error(), want) {
+				t.Fatalf("delivery-time peer error missing %q: %v", want, sendErr)
+			}
+		}
+		if err := config.WriteConfig(filepath.Join(peerBase, "meta", "config.json"), config.Config{
+			Version: 1,
+			Agents:  []string{"bob"},
+		}, true); err != nil {
+			t.Fatal(err)
+		}
+		executeAdvertisedAMQCommand(t, advertisedPeerRepairCommand(t, sendErr))
+		if err := fsq.ValidateExistingMailboxLayout(openDeliveryRootForCLITest(t, peerRoot), "bob"); err != nil {
+			t.Fatalf("delivery-time advertised remedy left mailbox incomplete: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("send did not return")
+	}
+	if entries, err := os.ReadDir(fsq.AgentInboxNew(peerRoot, "bob")); err != nil || len(entries) != 0 {
+		t.Fatalf("incomplete peer received message: entries=%#v err=%v", entries, err)
+	}
+}
+
+func TestCrossProjectSendRevalidatesRosterAfterBlockingBodyRead(t *testing.T) {
+	for _, strict := range []bool{true, false} {
+		t.Run(map[bool]string{true: "strict_refuses", false: "non_strict_warns"}[strict], func(t *testing.T) {
+			clearDeliveryRootTestEnv(t)
+			srcProjectDir := secureTempDirForTest(t)
+			srcRoot := filepath.Join(srcProjectDir, ".agent-mail", "collab")
+			peerBase := filepath.Join(secureTempDirForTest(t), "peer")
+			peerRoot := filepath.Join(peerBase, "collab")
+			if err := fsq.EnsureAgentDirs(srcRoot, "alice"); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(peerRoot, "bob"); err != nil {
+				t.Fatal(err)
+			}
+			configureSendTestRoot(t, peerBase, "bob")
+			rcData, err := json.Marshal(map[string]any{
+				"root":    ".agent-mail",
+				"project": "source",
+				"peers":   map[string]string{"peer": peerBase},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(srcProjectDir, ".amqrc"), rcData, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			bodyFIFO := filepath.Join(secureTempDirForTest(t), "peer-roster-body.fifo")
+			if err := syscall.Mkfifo(bodyFIFO, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			type openResult struct {
+				file *os.File
+				err  error
+			}
+			writerCh := make(chan openResult, 1)
+			go func() {
+				file, err := os.OpenFile(bodyFIFO, os.O_WRONLY, 0)
+				writerCh <- openResult{file: file, err: err}
+			}()
+
+			oldStderr := os.Stderr
+			stderrReader, stderrWriter, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			os.Stderr = stderrWriter
+			t.Cleanup(func() { os.Stderr = oldStderr })
+
+			args := []string{
+				"--root", srcRoot,
+				"--me", "alice",
+				"--to", "bob",
+				"--project", "peer",
+				"--body", "@" + bodyFIFO,
+			}
+			if strict {
+				args = append(args, "--strict")
+			}
+			errCh := make(chan error, 1)
+			go func() { errCh <- runSend(args) }()
+
+			var writer *os.File
+			select {
+			case result := <-writerCh:
+				if result.err != nil {
+					t.Fatal(result.err)
+				}
+				writer = result.file
+			case sendErr := <-errCh:
+				t.Fatalf("send returned before body read: %v", sendErr)
+			case <-time.After(2 * time.Second):
+				t.Fatal("send did not reach body read after peer roster validation")
+			}
+			if err := config.WriteConfig(filepath.Join(peerBase, "meta", "config.json"), config.Config{
+				Version: 1,
+				Agents:  []string{"carol"},
+			}, true); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writer.Write([]byte("fresh roster required")); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			sendErr := <-errCh
+			_ = stderrWriter.Close()
+			os.Stderr = oldStderr
+			stderr, readErr := io.ReadAll(stderrReader)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			entries, readErr := os.ReadDir(fsq.AgentInboxNew(peerRoot, "bob"))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if strict {
+				if sendErr == nil || !strings.Contains(sendErr.Error(), `handle "bob" not in config.json`) {
+					t.Fatalf("strict send error = %v, want fresh roster refusal", sendErr)
+				}
+				if len(entries) != 0 {
+					t.Fatalf("strict send delivered after roster removal: %#v", entries)
+				}
+			} else {
+				if sendErr != nil {
+					t.Fatalf("non-strict send failed: %v", sendErr)
+				}
+				if !strings.Contains(string(stderr), `warning: handle "bob" not in config.json`) {
+					t.Fatalf("non-strict stderr = %q, want fresh roster warning", stderr)
+				}
+				if len(entries) != 1 {
+					t.Fatalf("non-strict send delivered %d messages, want 1", len(entries))
+				}
+			}
+		})
+	}
+}
+
+func TestCrossProjectSendRevalidatesDisappearedConfigAfterBlockingBodyRead(t *testing.T) {
+	for _, strict := range []bool{true, false} {
+		t.Run(map[bool]string{true: "strict_refuses", false: "non_strict_warns"}[strict], func(t *testing.T) {
+			clearDeliveryRootTestEnv(t)
+			srcProjectDir := secureTempDirForTest(t)
+			srcRoot := filepath.Join(srcProjectDir, ".agent-mail", "collab")
+			peerBase := filepath.Join(secureTempDirForTest(t), "peer")
+			peerRoot := filepath.Join(peerBase, "collab")
+			if err := fsq.EnsureAgentDirs(srcRoot, "alice"); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(peerRoot, "bob"); err != nil {
+				t.Fatal(err)
+			}
+			configureSendTestRoot(t, peerBase, "bob")
+			rcData, err := json.Marshal(map[string]any{
+				"root":    ".agent-mail",
+				"project": "source",
+				"peers":   map[string]string{"peer": peerBase},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(srcProjectDir, ".amqrc"), rcData, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			bodyFIFO := filepath.Join(secureTempDirForTest(t), "peer-config-removal-body.fifo")
+			if err := syscall.Mkfifo(bodyFIFO, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			type openResult struct {
+				file *os.File
+				err  error
+			}
+			writerCh := make(chan openResult, 1)
+			go func() {
+				file, err := os.OpenFile(bodyFIFO, os.O_WRONLY, 0)
+				writerCh <- openResult{file: file, err: err}
+			}()
+
+			oldStderr := os.Stderr
+			stderrReader, stderrWriter, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			os.Stderr = stderrWriter
+			t.Cleanup(func() { os.Stderr = oldStderr })
+
+			args := []string{
+				"--root", srcRoot,
+				"--me", "alice",
+				"--to", "bob",
+				"--project", "peer",
+				"--body", "@" + bodyFIFO,
+			}
+			if strict {
+				args = append(args, "--strict")
+			}
+			errCh := make(chan error, 1)
+			go func() { errCh <- runSend(args) }()
+
+			var writer *os.File
+			select {
+			case result := <-writerCh:
+				if result.err != nil {
+					t.Fatal(result.err)
+				}
+				writer = result.file
+			case sendErr := <-errCh:
+				t.Fatalf("send returned before body read: %v", sendErr)
+			case <-time.After(2 * time.Second):
+				t.Fatal("send did not reach body read after peer roster validation")
+			}
+			configPath := filepath.Join(peerBase, "meta", "config.json")
+			if err := os.Rename(configPath, configPath+".removed"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writer.Write([]byte("fresh config authority required")); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			sendErr := <-errCh
+			_ = stderrWriter.Close()
+			os.Stderr = oldStderr
+			stderr, readErr := io.ReadAll(stderrReader)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			entries, readErr := os.ReadDir(fsq.AgentInboxNew(peerRoot, "bob"))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			const transition = "selected peer config.json disappeared after initial validation"
+			if strict {
+				if sendErr == nil || !strings.Contains(sendErr.Error(), transition) {
+					t.Fatalf("strict send error = %v, want disappeared-config refusal", sendErr)
+				}
+				if len(entries) != 0 {
+					t.Fatalf("strict send delivered after selected config disappeared: %#v", entries)
+				}
+			} else {
+				if sendErr != nil {
+					t.Fatalf("non-strict send failed: %v", sendErr)
+				}
+				if !strings.Contains(string(stderr), "warning: "+transition) {
+					t.Fatalf("non-strict stderr = %q, want fresh disappeared-config warning", stderr)
+				}
+				if len(entries) != 1 {
+					t.Fatalf("non-strict send delivered %d messages, want 1", len(entries))
+				}
+			}
+		})
+	}
+}
+
+func TestCrossProjectSendPreservesCommittedDeliveryWhenLayoutAlsoChanges(t *testing.T) {
+	clearDeliveryRootTestEnv(t)
+	srcProjectDir := secureTempDirForTest(t)
+	srcRoot := filepath.Join(srcProjectDir, ".agent-mail", "collab")
+	peerBase := filepath.Join(secureTempDirForTest(t), "peer")
+	peerRoot := filepath.Join(peerBase, "collab")
+	if err := fsq.EnsureAgentDirs(srcRoot, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(peerRoot, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	configureSendTestRoot(t, peerBase, "bob")
+	rcData, err := json.Marshal(map[string]any{
+		"root":    ".agent-mail",
+		"project": "source",
+		"peers":   map[string]string{"peer": peerBase},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcProjectDir, ".amqrc"), rcData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	originalDeliver := deliverToExistingInbox
+	deliverToExistingInbox = func(root *fsq.DeliveryRoot, agent, filename string, data []byte) (string, error) {
+		path, deliverErr := originalDeliver(root, agent, filename, data)
+		if deliverErr != nil {
+			return path, deliverErr
+		}
+		if removeErr := os.Remove(fsq.AgentDLQCur(peerRoot, agent)); removeErr != nil {
+			return path, removeErr
+		}
+		return path, &fsq.CommittedDurabilityError{
+			FinalPath: path,
+			Recipient: agent,
+			Err:       errors.New("injected post-rename directory sync failure"),
+		}
+	}
+	t.Cleanup(func() { deliverToExistingInbox = originalDeliver })
+
+	sendErr := runSend([]string{
+		"--root", srcRoot,
+		"--me", "alice",
+		"--to", "bob",
+		"--project", "peer",
+		"--body", "already visible",
+	})
+	if sendErr == nil {
+		t.Fatal("send error = nil, want committed durability warning")
+	}
+	var committed *fsq.CommittedDurabilityError
+	if !errors.As(sendErr, &committed) {
+		t.Fatalf("send error lost committed classification after layout change: %T %v", sendErr, sendErr)
+	}
+	if !strings.Contains(sendErr.Error(), "retrying may duplicate") {
+		t.Fatalf("send error = %v, want explicit duplicate warning", sendErr)
+	}
+	entries, readErr := os.ReadDir(fsq.AgentInboxNew(peerRoot, "bob"))
+	if readErr != nil || len(entries) != 1 {
+		t.Fatalf("committed inbox state = %#v, err=%v", entries, readErr)
 	}
 }
 
