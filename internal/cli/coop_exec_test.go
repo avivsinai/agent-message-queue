@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -677,6 +678,376 @@ func TestCoopInitDefaultIncludesUser(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(projectDir, defaultCoopRoot, "agents", "user", "inbox", "new")); err != nil {
 		t.Fatalf("user inbox should be created: %v", err)
 	}
+}
+
+func TestCoopInitRerunUsesConfiguredAgents(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	configBefore, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read initial config: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
+		t.Fatalf("remove initial mailboxes: %v", err)
+	}
+	resetAmqrcCache()
+
+	output, stderr, err := captureEnvOutput(t, func() error {
+		return runCoopInitInternal([]string{"--json"}, false)
+	})
+	if err != nil {
+		t.Fatalf("rerun coop init: %v", err)
+	}
+	if stderr != "" {
+		t.Fatalf("rerun without explicit --agents wrote stderr: %q", stderr)
+	}
+	var result struct {
+		Agents []string `json:"agents"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal rerun output: %v (output: %s)", err, output)
+	}
+	want := []string{"alice", "bob"}
+	if !reflect.DeepEqual(result.Agents, want) {
+		t.Fatalf("rerun agents = %#v, want configured %#v", result.Agents, want)
+	}
+	for _, agent := range want {
+		if _, err := os.Stat(filepath.Join(root, "agents", agent, "inbox", "new")); err != nil {
+			t.Fatalf("%s inbox was not restored: %v", agent, err)
+		}
+	}
+	for _, agent := range []string{"claude", "codex", "user"} {
+		if _, err := os.Stat(filepath.Join(root, "agents", agent)); !os.IsNotExist(err) {
+			t.Fatalf("rerun created default agent %q, stat err=%v", agent, err)
+		}
+	}
+	configAfter, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config after rerun: %v", err)
+	}
+	if !bytes.Equal(configAfter, configBefore) {
+		t.Fatalf("non-force rerun rewrote config:\nbefore=%s\nafter=%s", configBefore, configAfter)
+	}
+}
+
+func TestCoopInitRerunWarnsWhenRequestedAgentsDifferWithoutForce(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	resetAmqrcCache()
+
+	output, stderr, err := captureEnvOutput(t, func() error {
+		return runCoopInitInternal([]string{"--agents", "carol,dave", "--json"}, false)
+	})
+	if err != nil {
+		t.Fatalf("non-force coop init: %v", err)
+	}
+	const wantWarning = "warning: using existing config agents alice,bob; use --force to overwrite\n"
+	if stderr != wantWarning {
+		t.Fatalf("non-force warning = %q, want %q", stderr, wantWarning)
+	}
+	var result struct {
+		Agents        []string `json:"agents"`
+		ConfigWritten bool     `json:"config_written"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal non-force output: %v (output: %s)", err, output)
+	}
+	want := []string{"alice", "bob"}
+	if !reflect.DeepEqual(result.Agents, want) || result.ConfigWritten {
+		t.Fatalf("non-force result = %#v, want configured agents %#v without config rewrite", result, want)
+	}
+	if _, err := os.Stat(filepath.Join(root, "agents", "alice", "inbox", "new")); err != nil {
+		t.Fatalf("non-force rerun did not retain configured mailbox: %v", err)
+	}
+	for _, agent := range []string{"carol", "dave"} {
+		if _, err := os.Stat(filepath.Join(root, "agents", agent)); !os.IsNotExist(err) {
+			t.Fatalf("non-force rerun created requested agent %q, stat err=%v", agent, err)
+		}
+	}
+}
+
+func TestCoopInitRerunDoesNotWarnWhenRequestedAgentsMatch(t *testing.T) {
+	_ = initCoopProjectForTest(t, "alice,bob")
+	resetAmqrcCache()
+
+	output, stderr, err := captureEnvOutput(t, func() error {
+		return runCoopInitInternal([]string{"--agents", "bob,alice,alice", "--json"}, false)
+	})
+	if err != nil {
+		t.Fatalf("non-force coop init: %v", err)
+	}
+	if stderr != "" {
+		t.Fatalf("matching explicit --agents wrote stderr: %q", stderr)
+	}
+	var result struct {
+		Agents        []string `json:"agents"`
+		ConfigWritten bool     `json:"config_written"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal non-force output: %v (output: %s)", err, output)
+	}
+	want := []string{"alice", "bob"}
+	if !reflect.DeepEqual(result.Agents, want) || result.ConfigWritten {
+		t.Fatalf("non-force result = %#v, want configured agents %#v without config rewrite", result, want)
+	}
+}
+
+func TestCoopInitRerunRejectsInvalidExplicitAgentsBeforeMailboxMutation(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
+		t.Fatalf("remove initial mailboxes: %v", err)
+	}
+	resetAmqrcCache()
+
+	_, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--agents", "../invalid-handle", "--json"}, false)
+	})
+	if err == nil || !strings.Contains(err.Error(), "slashes not allowed") {
+		t.Fatalf("invalid explicit agents result = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "agents")); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid explicit agents mutated mailboxes, stat err=%v", statErr)
+	}
+}
+
+func TestCoopInitRerunWithoutConfigUsesRequestedAgents(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := os.Remove(cfgPath); err != nil {
+		t.Fatalf("remove initial config: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
+		t.Fatalf("remove initial mailboxes: %v", err)
+	}
+	resetAmqrcCache()
+
+	output, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--agents", "carol,dave", "--json"}, false)
+	})
+	if err != nil {
+		t.Fatalf("missing-config coop init: %v", err)
+	}
+	var result struct {
+		Agents        []string `json:"agents"`
+		ConfigWritten bool     `json:"config_written"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal missing-config output: %v (output: %s)", err, output)
+	}
+	want := []string{"carol", "dave"}
+	if !reflect.DeepEqual(result.Agents, want) || !result.ConfigWritten {
+		t.Fatalf("missing-config result = %#v, want requested agents %#v with config rewrite", result, want)
+	}
+	cfg, err := config.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("load recreated config: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Agents, want) {
+		t.Fatalf("recreated config agents = %#v, want %#v", cfg.Agents, want)
+	}
+}
+
+func TestCoopInitForceUsesRequestedAgents(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	resetAmqrcCache()
+	output, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--force", "--agents", "carol,dave", "--json"}, false)
+	})
+	if err != nil {
+		t.Fatalf("forced coop init: %v", err)
+	}
+	var result struct {
+		Agents        []string `json:"agents"`
+		ConfigWritten bool     `json:"config_written"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal forced output: %v (output: %s)", err, output)
+	}
+	want := []string{"carol", "dave"}
+	if !reflect.DeepEqual(result.Agents, want) || !result.ConfigWritten {
+		t.Fatalf("forced result = %#v, want agents %#v with config_written", result, want)
+	}
+	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
+	if err != nil {
+		t.Fatalf("load forced config: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Agents, want) {
+		t.Fatalf("forced config agents = %#v, want %#v", cfg.Agents, want)
+	}
+	for _, agent := range want {
+		if _, err := os.Stat(filepath.Join(root, "agents", agent, "inbox", "new")); err != nil {
+			t.Fatalf("%s inbox was not created: %v", agent, err)
+		}
+	}
+}
+
+func TestCoopInitRerunRejectsMalformedConfigBeforeMailboxMutation(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	const malformed = "{not-json\n"
+	if err := os.WriteFile(cfgPath, []byte(malformed), 0o600); err != nil {
+		t.Fatalf("write malformed config: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
+		t.Fatalf("remove initial mailboxes: %v", err)
+	}
+	resetAmqrcCache()
+
+	_, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--json"}, false)
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to load existing config") {
+		t.Fatalf("malformed config result = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "agents")); !os.IsNotExist(statErr) {
+		t.Fatalf("malformed rerun mutated mailboxes, stat err=%v", statErr)
+	}
+	data, readErr := os.ReadFile(cfgPath)
+	if readErr != nil {
+		t.Fatalf("read malformed config: %v", readErr)
+	}
+	if string(data) != malformed {
+		t.Fatalf("malformed config was rewritten: %q", data)
+	}
+}
+
+func TestCoopInitRerunRejectsInvalidConfiguredAgentsBeforeMailboxMutation(t *testing.T) {
+	tests := []struct {
+		name    string
+		agents  []string
+		wantErr string
+	}{
+		{name: "empty", wantErr: "existing config has no agents"},
+		{name: "invalid handle", agents: []string{"alice", "../escape"}, wantErr: "invalid agent in existing config"},
+		{name: "whitespace padded", agents: []string{" alice "}, wantErr: "invalid agent in existing config"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := initCoopProjectForTest(t, "alice,bob")
+			cfgPath := filepath.Join(root, "meta", "config.json")
+			cfg, err := config.LoadConfig(cfgPath)
+			if err != nil {
+				t.Fatalf("load initial config: %v", err)
+			}
+			cfg.Agents = test.agents
+			if err := config.WriteConfig(cfgPath, cfg, true); err != nil {
+				t.Fatalf("write invalid agents config: %v", err)
+			}
+			if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
+				t.Fatalf("remove initial mailboxes: %v", err)
+			}
+			resetAmqrcCache()
+
+			_, err = captureEnvStdout(t, func() error {
+				return runCoopInitInternal([]string{"--json"}, false)
+			})
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("invalid agents config result = %v, want %q", err, test.wantErr)
+			}
+			if _, statErr := os.Stat(filepath.Join(root, "agents")); !os.IsNotExist(statErr) {
+				t.Fatalf("invalid agents rerun mutated mailboxes, stat err=%v", statErr)
+			}
+		})
+	}
+}
+
+func TestCoopInitRerunRejectsUnreadableConfigBeforeMailboxMutation(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := os.Remove(cfgPath); err != nil {
+		t.Fatalf("remove initial config: %v", err)
+	}
+	if err := os.Mkdir(cfgPath, 0o700); err != nil {
+		t.Fatalf("replace config with unreadable shape: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
+		t.Fatalf("remove initial mailboxes: %v", err)
+	}
+	resetAmqrcCache()
+
+	_, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--json"}, false)
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to load existing config") {
+		t.Fatalf("unreadable config result = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "agents")); !os.IsNotExist(statErr) {
+		t.Fatalf("unreadable rerun mutated mailboxes, stat err=%v", statErr)
+	}
+}
+
+func TestCoopInitRerunRejectsDanglingConfigSymlinkBeforeMailboxMutation(t *testing.T) {
+	projectDir := t.TempDir()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	root := filepath.Join(projectDir, defaultCoopRoot)
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		t.Fatalf("create config directory: %v", err)
+	}
+	const missingTarget = "missing-config-target.json"
+	if err := os.Symlink(missingTarget, cfgPath); err != nil {
+		t.Fatalf("create dangling config symlink: %v", err)
+	}
+
+	_, err = captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--agents", "carol", "--json"}, false)
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to load existing config") {
+		t.Fatalf("dangling config result = %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(root, "agents"),
+		filepath.Join(root, "threads"),
+		filepath.Join(projectDir, ".amqrc"),
+		filepath.Join(projectDir, ".gitignore"),
+	} {
+		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("dangling-config init mutated %s, lstat err=%v", path, statErr)
+		}
+	}
+	info, lstatErr := os.Lstat(cfgPath)
+	if lstatErr != nil {
+		t.Fatalf("lstat config symlink: %v", lstatErr)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("config path mode = %v, want symlink", info.Mode())
+	}
+}
+
+func initCoopProjectForTest(t *testing.T, agents string) string {
+	t.Helper()
+	projectDir := t.TempDir()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	if _, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--agents", agents, "--json"}, false)
+	}); err != nil {
+		t.Fatalf("first coop init: %v", err)
+	}
+	return filepath.Join(projectDir, defaultCoopRoot)
 }
 
 func TestCoopInitNextStepsDefaultAgentsSkipsUser(t *testing.T) {
