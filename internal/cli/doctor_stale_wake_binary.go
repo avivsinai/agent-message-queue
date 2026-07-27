@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"slices"
 
 	"github.com/avivsinai/agent-message-queue/internal/update"
 )
@@ -15,8 +16,23 @@ const (
 )
 
 type wakeBinaryStaleness struct {
-	Stale  bool
-	Method wakeBinaryComparisonMethod
+	Stale    bool
+	Method   wakeBinaryComparisonMethod
+	Evidence wakeBinaryEvidence
+}
+
+type wakeBinaryEvidence struct {
+	Available      bool
+	Running        wakeBinaryFileEvidence
+	Current        wakeBinaryFileEvidence
+	CurrentModTime int64
+}
+
+type wakeBinaryFileEvidence struct {
+	Device    uint64
+	Inode     uint64
+	CTimeSec  int64
+	CTimeNsec int64
 }
 
 type resolvedWakeBinary struct {
@@ -76,7 +92,20 @@ func checkStaleWakeBinaryHint(inspection wakeLockInspection) (opsHint, bool) {
 	confirmed := inspectWakeLock(inspection.Root, inspection.Agent)
 	if !sameWakeBinaryInspection(inspection, confirmed) ||
 		!confirmed.IdentityConfirmed ||
-		!sameWakeOwnerProcessSnapshot(inspection.Process, confirmed.Process) {
+		!sameWakeBinaryProcessEvidence(inspection.Process, confirmed.Process) {
+		return opsHint{}, false
+	}
+	recheckedComparison, err := inspectWakeBinaryStaleness(confirmed)
+	if err != nil ||
+		!recheckedComparison.Stale ||
+		recheckedComparison.Method != comparison.Method ||
+		!sameWakeBinaryEvidence(comparison.Evidence, recheckedComparison.Evidence) {
+		return opsHint{}, false
+	}
+	final := inspectWakeLock(confirmed.Root, confirmed.Agent)
+	if !sameWakeBinaryInspection(confirmed, final) ||
+		!final.IdentityConfirmed ||
+		!sameWakeBinaryProcessEvidence(confirmed.Process, final.Process) {
 		return opsHint{}, false
 	}
 
@@ -108,6 +137,16 @@ func checkStaleWakeBinaryHint(inspection wakeLockInspection) (opsHint, bool) {
 			Remedy: remedy,
 		},
 	}, true
+}
+
+func sameWakeBinaryEvidence(first, second wakeBinaryEvidence) bool {
+	return first.Available && second.Available && first == second
+}
+
+func sameWakeBinaryProcessEvidence(first, second wakeProcessInfo) bool {
+	return sameWakeOwnerProcessSnapshot(first, second) &&
+		first.Executable == second.Executable &&
+		slices.Equal(first.Args, second.Args)
 }
 
 func sameWakeBinaryInspection(first, second wakeLockInspection) bool {

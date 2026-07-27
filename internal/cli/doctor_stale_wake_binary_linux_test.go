@@ -23,6 +23,9 @@ func TestLinuxWakeBinaryComparisonUsesRunningExecutableDeviceAndInode(t *testing
 	if got.Stale {
 		t.Fatalf("matching executable reported stale: %#v", got)
 	}
+	if !got.Evidence.Available {
+		t.Fatalf("matching executable comparison omitted identity evidence: %#v", got)
+	}
 
 	otherPath := filepath.Join(t.TempDir(), "other-amq")
 	if err := os.WriteFile(otherPath, []byte("different inode"), 0o700); err != nil {
@@ -41,6 +44,9 @@ func TestLinuxWakeBinaryComparisonUsesRunningExecutableDeviceAndInode(t *testing
 	}
 	if !got.Stale || got.Method != wakeBinaryComparisonExactIdentity {
 		t.Fatalf("different executable comparison = %#v", got)
+	}
+	if !got.Evidence.Available || got.Evidence.Running == got.Evidence.Current {
+		t.Fatalf("different executable comparison omitted distinct identity evidence: %#v", got)
 	}
 }
 

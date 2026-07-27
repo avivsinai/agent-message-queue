@@ -30,5 +30,14 @@ func inspectWakeBinaryStalenessPlatform(
 		Stale: runningIdentity.Device != currentIdentity.Device ||
 			runningIdentity.Inode != currentIdentity.Inode,
 		Method: wakeBinaryComparisonExactIdentity,
+		Evidence: wakeBinaryEvidence{
+			Available: true,
+			Running:   wakeBinaryFileEvidenceFromIdentity(runningIdentity),
+			Current:   wakeBinaryFileEvidenceFromIdentity(currentIdentity),
+		},
 	}, nil
+}
+
+func wakeBinaryFileEvidenceFromIdentity(identity wakeFileIdentity) wakeBinaryFileEvidence {
+	return wakeBinaryFileEvidence(identity)
 }

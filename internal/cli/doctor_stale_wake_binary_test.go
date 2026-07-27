@@ -43,8 +43,9 @@ func TestDoctorOpsReportsStructuredStaleWakeBinaryHintWithoutMutation(t *testing
 			t.Fatalf("unexpected inspection: %#v", inspection)
 		}
 		return wakeBinaryStaleness{
-			Stale:  true,
-			Method: wakeBinaryComparisonExactIdentity,
+			Stale:    true,
+			Method:   wakeBinaryComparisonExactIdentity,
+			Evidence: stableWakeBinaryEvidenceForTest(),
 		}, nil
 	})
 
@@ -197,8 +198,9 @@ func TestStaleWakeBinaryHintDescribesDarwinTimestampEvidenceAsHeuristic(t *testi
 	})
 	stubWakeBinaryStaleness(t, func(wakeLockInspection) (wakeBinaryStaleness, error) {
 		return wakeBinaryStaleness{
-			Stale:  true,
-			Method: wakeBinaryComparisonStartedMTime,
+			Stale:    true,
+			Method:   wakeBinaryComparisonStartedMTime,
+			Evidence: stableWakeBinaryEvidenceForTest(),
 		}, nil
 	})
 
@@ -246,14 +248,211 @@ func TestStaleWakeBinaryHintSuppressesRacedProcessIdentity(t *testing.T) {
 	})
 	stubWakeBinaryStaleness(t, func(wakeLockInspection) (wakeBinaryStaleness, error) {
 		return wakeBinaryStaleness{
-			Stale:  true,
-			Method: wakeBinaryComparisonExactIdentity,
+			Stale:    true,
+			Method:   wakeBinaryComparisonExactIdentity,
+			Evidence: stableWakeBinaryEvidenceForTest(),
 		}, nil
 	})
 
 	result := runOpsChecks(root, "test", false)
 	if hint, found := findOpsHint(result.Hints, "stale_wake_binary"); found {
 		t.Fatalf("raced process produced stale binary hint: %#v", hint)
+	}
+}
+
+func TestStaleWakeBinaryHintSuppressesChangedBinaryEvidence(t *testing.T) {
+	root := secureTempDirForTest(t)
+	const agent = "codex"
+	writeWakeLockForTest(t, root, agent, wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(root),
+		Agent:        agent,
+		Started:      "2026-07-27T10:00:00Z",
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		Executable:   "/opt/homebrew/bin/amq",
+		Args:         []string{"amq", "wake", "--root", root, "--me", agent},
+		Generation:   "changed-binary-evidence-generation",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "12345",
+			BootID:     "11111111-1111-1111-1111-111111111111",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", agent},
+		}
+	})
+	probes := 0
+	stubWakeBinaryStaleness(t, func(wakeLockInspection) (wakeBinaryStaleness, error) {
+		probes++
+		return wakeBinaryStaleness{
+			Stale:    probes == 1,
+			Method:   wakeBinaryComparisonExactIdentity,
+			Evidence: stableWakeBinaryEvidenceForTest(),
+		}, nil
+	})
+
+	result := runOpsChecks(root, "test", false)
+	if hint, found := findOpsHint(result.Hints, "stale_wake_binary"); found {
+		t.Fatalf("changed binary evidence produced stale binary hint: %#v", hint)
+	}
+	if probes != 2 {
+		t.Fatalf("binary staleness probes = %d, want 2", probes)
+	}
+}
+
+func TestStaleWakeBinaryHintSuppressesChangedBinaryIdentityEvidence(t *testing.T) {
+	root := secureTempDirForTest(t)
+	const agent = "codex"
+	writeWakeLockForTest(t, root, agent, wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(root),
+		Agent:        agent,
+		Started:      "2026-07-27T10:00:00Z",
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		Executable:   "/opt/homebrew/bin/amq",
+		Args:         []string{"amq", "wake", "--root", root, "--me", agent},
+		Generation:   "changed-binary-identity-evidence-generation",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "12345",
+			BootID:     "11111111-1111-1111-1111-111111111111",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", agent},
+		}
+	})
+	probes := 0
+	stubWakeBinaryStaleness(t, func(wakeLockInspection) (wakeBinaryStaleness, error) {
+		probes++
+		return wakeBinaryStaleness{
+			Stale:  true,
+			Method: wakeBinaryComparisonExactIdentity,
+			Evidence: wakeBinaryEvidence{
+				Available: true,
+				Running:   wakeBinaryFileEvidence{Device: 1, Inode: uint64(probes)},
+				Current:   wakeBinaryFileEvidence{Device: 2, Inode: uint64(probes)},
+			},
+		}, nil
+	})
+
+	result := runOpsChecks(root, "test", false)
+	if hint, found := findOpsHint(result.Hints, "stale_wake_binary"); found {
+		t.Fatalf("changed binary identity evidence produced stale binary hint: %#v", hint)
+	}
+	if probes != 2 {
+		t.Fatalf("binary staleness probes = %d, want 2", probes)
+	}
+}
+
+func TestStaleWakeBinaryHintSuppressesFinalProcessExecutableChange(t *testing.T) {
+	root := secureTempDirForTest(t)
+	const agent = "codex"
+	writeWakeLockForTest(t, root, agent, wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(root),
+		Agent:        agent,
+		Started:      "2026-07-27T10:00:00Z",
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		Executable:   "/opt/homebrew/bin/amq",
+		Args:         []string{"amq", "wake", "--root", root, "--me", agent},
+		Generation:   "changed-final-executable-generation",
+	})
+	inspections := 0
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		inspections++
+		executable := "/opt/homebrew/bin/amq"
+		if inspections == 3 {
+			executable = "/usr/local/bin/amq"
+		}
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "12345",
+			BootID:     "11111111-1111-1111-1111-111111111111",
+			Executable: executable,
+			Args:       []string{"amq", "wake", "--root", root, "--me", agent},
+		}
+	})
+	probes := 0
+	stubWakeBinaryStaleness(t, func(wakeLockInspection) (wakeBinaryStaleness, error) {
+		probes++
+		return wakeBinaryStaleness{
+			Stale:    true,
+			Method:   wakeBinaryComparisonExactIdentity,
+			Evidence: stableWakeBinaryEvidenceForTest(),
+		}, nil
+	})
+
+	result := runOpsChecks(root, "test", false)
+	if hint, found := findOpsHint(result.Hints, "stale_wake_binary"); found {
+		t.Fatalf("changed final executable produced stale binary hint: %#v", hint)
+	}
+	if probes != 2 || inspections != 3 {
+		t.Fatalf("probes/inspections = %d/%d, want 2/3", probes, inspections)
+	}
+}
+
+func TestStaleWakeBinaryHintSuppressesFinalProcessIdentityChange(t *testing.T) {
+	root := secureTempDirForTest(t)
+	const agent = "codex"
+	writeWakeLockForTest(t, root, agent, wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(root),
+		Agent:        agent,
+		Started:      "2026-07-27T10:00:00Z",
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		Executable:   "/opt/homebrew/bin/amq",
+		Args:         []string{"amq", "wake", "--root", root, "--me", agent},
+		Generation:   "changed-final-identity-generation",
+	})
+	inspections := 0
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		inspections++
+		start := "12345"
+		if inspections == 3 {
+			start = "67890"
+		}
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: start,
+			BootID:     "11111111-1111-1111-1111-111111111111",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", agent},
+		}
+	})
+	probes := 0
+	stubWakeBinaryStaleness(t, func(wakeLockInspection) (wakeBinaryStaleness, error) {
+		probes++
+		return wakeBinaryStaleness{
+			Stale:    true,
+			Method:   wakeBinaryComparisonExactIdentity,
+			Evidence: stableWakeBinaryEvidenceForTest(),
+		}, nil
+	})
+
+	result := runOpsChecks(root, "test", false)
+	if hint, found := findOpsHint(result.Hints, "stale_wake_binary"); found {
+		t.Fatalf("changed final process identity produced stale binary hint: %#v", hint)
+	}
+	if probes != 2 || inspections != 3 {
+		t.Fatalf("probes/inspections = %d/%d, want 2/3", probes, inspections)
+	}
+}
+
+func stableWakeBinaryEvidenceForTest() wakeBinaryEvidence {
+	return wakeBinaryEvidence{
+		Available: true,
+		Running:   wakeBinaryFileEvidence{Device: 1, Inode: 1},
+		Current:   wakeBinaryFileEvidence{Device: 2, Inode: 2},
 	}
 }
 

@@ -48,6 +48,9 @@ func TestDarwinWakeBinaryComparisonUsesStrictStartedMTimeHeuristic(t *testing.T)
 			if got.Stale && got.Method != wakeBinaryComparisonStartedMTime {
 				t.Fatalf("stale method = %q", got.Method)
 			}
+			if !got.Evidence.Available || got.Evidence.CurrentModTime != tc.mtime.UnixNano() {
+				t.Fatalf("comparison evidence = %#v, want current mtime %d", got.Evidence, tc.mtime.UnixNano())
+			}
 		})
 	}
 }

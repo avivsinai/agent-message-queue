@@ -20,6 +20,10 @@ func inspectWakeBinaryStalenessPlatform(
 	if current.Info == nil {
 		return wakeBinaryStaleness{}, fmt.Errorf("current amq executable metadata unavailable")
 	}
+	currentIdentity, ok := captureWakeFileIdentity(current.Info)
+	if !ok || currentIdentity.Device == 0 || currentIdentity.Inode == 0 {
+		return wakeBinaryStaleness{}, fmt.Errorf("current amq executable identity unavailable")
+	}
 
 	// Started is currently written with RFC3339 second precision. Require the
 	// binary mtime to be strictly beyond that full uncertainty window. This is
@@ -27,5 +31,14 @@ func inspectWakeBinaryStalenessPlatform(
 	return wakeBinaryStaleness{
 		Stale:  current.Info.ModTime().After(started.Add(wakeStartedTimestampUncertainty)),
 		Method: wakeBinaryComparisonStartedMTime,
+		Evidence: wakeBinaryEvidence{
+			Available:      true,
+			Current:        wakeBinaryFileEvidenceFromIdentity(currentIdentity),
+			CurrentModTime: current.Info.ModTime().UnixNano(),
+		},
 	}, nil
+}
+
+func wakeBinaryFileEvidenceFromIdentity(identity wakeFileIdentity) wakeBinaryFileEvidence {
+	return wakeBinaryFileEvidence(identity)
 }
