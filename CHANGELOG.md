@@ -13,7 +13,9 @@ editing the release PR.
 
 ### Bug Fixes
 
+* **wake:** resolve Darwin wake TTYs so same-terminal replacement works ([#326](https://github.com/avivsinai/agent-message-queue/issues/326)) ([996e329](https://github.com/avivsinai/agent-message-queue/commit/996e3297bba7b2e43f0be1da244cff080a1bade6))
 * **wake:** recover live raw coop takeovers ([#326](https://github.com/avivsinai/agent-message-queue/issues/326)) ([996e329](https://github.com/avivsinai/agent-message-queue/commit/996e3297bba7b2e43f0be1da244cff080a1bade6))
+* **wake:** enable guarded live-wake recovery on Linux ([#326](https://github.com/avivsinai/agent-message-queue/issues/326)) ([996e329](https://github.com/avivsinai/agent-message-queue/commit/996e3297bba7b2e43f0be1da244cff080a1bade6))
 
 ## [0.49.2](https://github.com/avivsinai/agent-message-queue/compare/v0.49.1...v0.49.2) (2026-07-27)
 
