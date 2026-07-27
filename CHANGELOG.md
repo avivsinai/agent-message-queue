@@ -13,7 +13,9 @@ editing the release PR.
 
 ### Bug Fixes
 
-* **coop:** reconcile coop session mailbox routing ([#332](https://github.com/avivsinai/agent-message-queue/issues/332)) ([6236c7a](https://github.com/avivsinai/agent-message-queue/commit/6236c7ae1a87f6ef9507df91f3636049d6482059))
+* **coop:** provision the full roster where `coop exec` reads while preserving base compatibility mailboxes ([#332](https://github.com/avivsinai/agent-message-queue/issues/332)) ([6236c7a](https://github.com/avivsinai/agent-message-queue/commit/6236c7ae1a87f6ef9507df91f3636049d6482059))
+* **coop:** refuse session symlinks instead of redirecting mailbox writes through them ([#332](https://github.com/avivsinai/agent-message-queue/issues/332)) ([6236c7a](https://github.com/avivsinai/agent-message-queue/commit/6236c7ae1a87f6ef9507df91f3636049d6482059))
+* **coop:** report base-root backlog from session consumer paths and `doctor --ops` ([#332](https://github.com/avivsinai/agent-message-queue/issues/332)) ([6236c7a](https://github.com/avivsinai/agent-message-queue/commit/6236c7ae1a87f6ef9507df91f3636049d6482059))
 
 ## [0.49.5](https://github.com/avivsinai/agent-message-queue/compare/v0.49.4...v0.49.5) (2026-07-27)
 
