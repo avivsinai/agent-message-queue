@@ -12,6 +12,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 )
 
 func TestIsInterruptMessage(t *testing.T) {
@@ -180,6 +181,76 @@ func TestInjectNotification_InjectVia(t *testing.T) {
 	}
 	if string(got) != text {
 		t.Fatalf("expected %q, got %q", text, string(got))
+	}
+}
+
+func TestNotifyNewMessagesPersistsTwoPhaseNotificationAttempt(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	message := format.Message{
+		Header: format.Header{
+			Schema:  format.CurrentSchema,
+			ID:      "msg-ledger",
+			From:    "codex",
+			To:      []string{"alice"},
+			Thread:  "p2p/alice__codex",
+			Subject: "ledger evidence",
+			Created: "2026-07-26T18:00:00Z",
+		},
+		Body: "body",
+	}
+	data, err := message.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-ledger.md", data); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, outputPath := injectViaCaptureConfig(t)
+	cfg.root = root
+	cfg.me = "alice"
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notifyNewMessages: %v", err)
+	}
+	if _, err := os.Stat(outputPath); err != nil {
+		t.Fatalf("external notifier output: %v", err)
+	}
+
+	attempts, err := notificationattempt.List(root, "alice", "msg-ledger")
+	if err != nil {
+		t.Fatalf("List attempts: %v", err)
+	}
+	if len(attempts) != 1 || attempts[0].State != notificationattempt.OutcomeWritten ||
+		attempts[0].Result == nil {
+		t.Fatalf("attempts = %+v", attempts)
+	}
+	if attempts[0].Prepared.Mode != "external" ||
+		strings.Contains(attempts[0].Result.Outcome, "display") ||
+		strings.Contains(attempts[0].Result.Outcome, "submit") {
+		t.Fatalf("dishonest attempt record = %+v", attempts[0])
+	}
+}
+
+func TestNotificationAttemptLoggingIsBestEffort(t *testing.T) {
+	cfg, outputPath := injectViaCaptureConfig(t)
+	cfg.me = "../invalid-ledger-owner"
+	cfg.root = t.TempDir()
+
+	if err := attemptNotification(cfg, []string{"msg-best-effort"}, "doorbell", true); err != nil {
+		t.Fatalf("attemptNotification: %v", err)
+	}
+	got, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("external notifier output: %v", err)
+	}
+	if string(got) != "doorbell" {
+		t.Fatalf("notifier output = %q", got)
 	}
 }
 

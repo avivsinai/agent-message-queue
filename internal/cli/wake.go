@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 )
 
 type wakeConfig struct {
@@ -55,6 +57,8 @@ type wakeConfig struct {
 	retainedInbox        wakeInboxReader
 	touchPresence        func() error
 	recordNotifierStatus func(status, mode, reason string) error
+	notificationWritten  bool
+	notificationDetail   string
 }
 
 type wakeAdmissionWatcher interface {
@@ -105,6 +109,7 @@ var (
 )
 
 type wakeMsgInfo struct {
+	id       string
 	from     string
 	subject  string
 	priority string
@@ -206,7 +211,11 @@ func notifyNewMessages(cfg *wakeConfig) error {
 				continue
 			}
 			// Count corrupt messages too
-			messages = append(messages, wakeMsgInfo{from: "unknown", subject: "(parse error)"})
+			messages = append(messages, wakeMsgInfo{
+				id:      strings.TrimSuffix(name, filepath.Ext(name)),
+				from:    "unknown",
+				subject: "(parse error)",
+			})
 			senderCounts["unknown"]++
 			continue
 		}
@@ -221,6 +230,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		priority := strings.TrimSpace(header.Priority)
 
 		info := wakeMsgInfo{
+			id:       header.ID,
 			from:     from,
 			subject:  subject,
 			priority: priority,
@@ -239,19 +249,23 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	if len(messages) == 0 {
 		return nil
 	}
+	messageIDs := wakeMessageIDs(messages)
 
 	// A supervised/co-op wake is only a fixed doorbell. Message headers,
 	// session names, custom notices, commands, and urgency never become
 	// terminal input.
 	if usesCoopDoorbell(cfg) {
-		return injectNotification(cfg, coopWakeDoorbell, len(interruptMessages) == 0)
+		return attemptNotification(cfg, messageIDs, coopWakeDoorbell, len(interruptMessages) == 0)
 	}
 
 	if cfg.interrupt && len(interruptMessages) > 0 {
 		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.previewLen, cfg.interruptNotice)
 		if cfg.injectMode == wakeInjectModeNone {
-			writeWakeOutput(interruptText, true)
-			return nil
+			bell := cfg.bell
+			cfg.bell = true
+			err := attemptNotification(cfg, messageIDs, interruptText, false)
+			cfg.bell = bell
+			return err
 		}
 		now := time.Now()
 		if cfg.interruptKey != "" && shouldInterruptNow(cfg, now) {
@@ -280,7 +294,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 				}
 			}
 		}
-		return injectNotification(cfg, interruptText, false)
+		return attemptNotification(cfg, messageIDs, interruptText, false)
 	}
 
 	// Build notification text
@@ -293,7 +307,17 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		text = buildNotificationText(cfg.session, messages, senderCounts, cfg.previewLen)
 	}
 
-	return injectNotification(cfg, text, true)
+	return attemptNotification(cfg, messageIDs, text, true)
+}
+
+func wakeMessageIDs(messages []wakeMsgInfo) []string {
+	ids := make([]string, 0, len(messages))
+	for _, message := range messages {
+		if strings.TrimSpace(message.id) != "" {
+			ids = append(ids, message.id)
+		}
+	}
+	return ids
 }
 
 func buildNotificationText(session string, messages []wakeMsgInfo, senderCounts map[string]int, previewLen int) string {
@@ -439,19 +463,68 @@ func normalizeWakeInjectMode(raw string) (string, error) {
 }
 
 func writeWakeOutput(text string, bell bool) {
+	_ = writeWakeOutputChecked(text, bell)
+}
+
+func writeWakeOutputChecked(text string, bell bool) error {
 	if bell {
 		text = "\a" + text
 	}
-	_, _ = fmt.Fprint(os.Stderr, text+"\n")
+	output := text + "\n"
+	n, err := fmt.Fprint(os.Stderr, output)
+	if err != nil {
+		return err
+	}
+	if n != len(output) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
+func attemptNotification(cfg *wakeConfig, messageIDs []string, text string, deferForInput bool) error {
+	writer := notificationattempt.NewWriter(cfg.root, cfg.me)
+	prepared, prepareErr := writer.Prepare(messageIDs, notificationAttemptMode(cfg))
+	if prepareErr != nil && cfg.debug {
+		_ = writeStderr("amq wake [debug]: persist prepared notification attempt: %v\n", prepareErr)
+	}
+
+	err := injectNotification(cfg, text, deferForInput)
+	if prepareErr == nil {
+		outcome := notificationattempt.OutcomeFailed
+		if cfg.notificationWritten {
+			outcome = notificationattempt.OutcomeWritten
+		}
+		if resultErr := writer.Result(prepared, outcome, cfg.notificationDetail); resultErr != nil && cfg.debug {
+			_ = writeStderr("amq wake [debug]: persist notification attempt result: %v\n", resultErr)
+		}
+	}
+	return err
+}
+
+func notificationAttemptMode(cfg *wakeConfig) string {
+	if cfg.injectMode == wakeInjectModeNone {
+		return "stderr"
+	}
+	if cfg.injectVia != "" {
+		return "external"
+	}
+	return effectiveInjectMode(cfg)
 }
 
 func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error {
+	cfg.notificationWritten = false
+	cfg.notificationDetail = ""
 	ownerBound := usesCoopDoorbell(cfg)
 	if ownerBound {
 		text = coopWakeDoorbell
 	}
 	if cfg.injectMode == wakeInjectModeNone {
-		writeWakeOutput(text, cfg.bell && !ownerBound)
+		if err := writeWakeOutputChecked(text, cfg.bell && !ownerBound); err != nil {
+			cfg.notificationDetail = err.Error()
+		} else {
+			cfg.notificationWritten = true
+			cfg.notificationDetail = "notification bytes written to stderr"
+		}
 		return nil
 	}
 
@@ -473,6 +546,7 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 			return guardErr
 		}
 		if !allowed {
+			cfg.notificationDetail = "terminal write was not authorized"
 			return nil
 		}
 		if err := injectVia(cfg, plainText); err != nil {
@@ -481,7 +555,15 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 				_ = writeStderr("amq wake: falling back to stderr notification\n")
 				cfg.fallbackWarn = false
 			}
-			_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
+			if fallbackErr := writeWakeOutputChecked(plainText, false); fallbackErr != nil {
+				cfg.notificationDetail = fmt.Sprintf("external notifier failed: %v; stderr fallback failed: %v", err, fallbackErr)
+			} else {
+				cfg.notificationWritten = true
+				cfg.notificationDetail = "external notifier failed; notification bytes written to stderr fallback"
+			}
+		} else {
+			cfg.notificationWritten = true
+			cfg.notificationDetail = "external notifier completed successfully"
 		}
 		return nil
 	}
@@ -557,11 +639,17 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 			cfg.injectMode = wakeInjectModeNone
 			_ = writeStderr("amq wake: warning: %s\n", reason)
 			cfg.fallbackWarn = false
-			_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
+			if fallbackErr := writeWakeOutputChecked(plainText, false); fallbackErr != nil {
+				cfg.notificationDetail = fmt.Sprintf("terminal injection unsupported: %v; stderr fallback failed: %v", injectErr, fallbackErr)
+			} else {
+				cfg.notificationWritten = true
+				cfg.notificationDetail = "terminal injection unsupported; notification bytes written to stderr fallback"
+			}
 			return nil
 		}
 		var authorityErr *wakeTerminalAuthorityError
 		if errors.As(injectErr, &authorityErr) {
+			cfg.notificationDetail = injectErr.Error()
 			return injectErr
 		}
 		if cfg.fallbackWarn {
@@ -570,10 +658,17 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 			cfg.fallbackWarn = false
 		}
 		// Fallback: print plain text to stderr (no escape sequences)
-		_, _ = fmt.Fprint(os.Stderr, plainText+"\n")
+		if fallbackErr := writeWakeOutputChecked(plainText, false); fallbackErr != nil {
+			cfg.notificationDetail = fmt.Sprintf("terminal injection failed: %v; stderr fallback failed: %v", injectErr, fallbackErr)
+		} else {
+			cfg.notificationWritten = true
+			cfg.notificationDetail = "terminal injection failed; notification bytes written to stderr fallback"
+		}
 		return nil
 	}
 
+	cfg.notificationWritten = true
+	cfg.notificationDetail = "notification bytes written to terminal input"
 	return nil
 }
 

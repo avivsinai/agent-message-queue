@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 )
 
 type traceResultJSON struct {
@@ -16,6 +17,46 @@ type traceResultJSON struct {
 	MessageID string                  `json:"message_id"`
 	Status    string                  `json:"status"`
 	Legs      map[string]traceLegJSON `json:"legs"`
+}
+
+func TestTraceJoinsWrittenAndIndeterminateNotificationAttempts(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	writer := notificationattempt.NewWriter(root, "codex")
+	written, err := writer.Prepare([]string{"msg-notification"}, "raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Result(written, notificationattempt.OutcomeWritten, "terminal bytes accepted"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Prepare([]string{"msg-notification"}, "external"); err != nil {
+		t.Fatal(err)
+	}
+
+	result := collectTrace(root, "msg-notification")
+	leg := result.Legs["notification"]
+	if leg.Status != "evidence" || len(leg.Evidence) != 2 {
+		t.Fatalf("notification leg = %+v", leg)
+	}
+	states := map[string]bool{}
+	for _, evidence := range leg.Evidence {
+		states[evidence.State] = true
+		if evidence.Authority != "notification_attempt" || evidence.Notification == nil {
+			t.Fatalf("notification evidence = %+v", evidence)
+		}
+		if strings.Contains(evidence.Limitation, "seen") && evidence.State == notificationattempt.StateIndeterminate {
+			t.Fatalf("indeterminate limitation should explain missing result: %+v", evidence)
+		}
+	}
+	if !states[notificationattempt.OutcomeWritten] || !states[notificationattempt.StateIndeterminate] {
+		t.Fatalf("notification states = %v", states)
+	}
 }
 
 type traceLegJSON struct {
