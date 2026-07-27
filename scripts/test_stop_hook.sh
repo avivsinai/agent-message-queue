@@ -20,6 +20,22 @@ run_hook() {
       AMQ_NO_UPDATE_CHECK=1 PATH="$(dirname "$BIN"):$PATH" \
       CLAUDE_PROJECT_DIR="$TMP" bash "$HOOK"
 }
+run_hook_with_incomplete_pin() {
+  local project_dir="$1"
+  printf '{"stop_hook_active":false}\n' |
+    env -u AM_ROOT -u AM_BASE_ROOT -u AMQ_GLOBAL_ROOT \
+      AM_SESSION=session1 AM_ME=claude HOME="$TMP/empty-home" \
+      AMQ_NO_UPDATE_CHECK=1 PATH="$(dirname "$BIN"):$PATH" \
+      CLAUDE_PROJECT_DIR="$project_dir" bash "$HOOK"
+}
+run_hook_without_pin() {
+  local project_dir="$1"
+  printf '{"stop_hook_active":false}\n' |
+    env -u AM_ROOT -u AM_BASE_ROOT -u AM_SESSION -u AMQ_GLOBAL_ROOT \
+      AM_ME=claude HOME="$TMP/empty-home" \
+      AMQ_NO_UPDATE_CHECK=1 PATH="$(dirname "$BIN"):$PATH" \
+      CLAUDE_PROJECT_DIR="$project_dir" bash "$HOOK"
+}
 
 assert_eq() { # want got label
   if [ "$1" != "$2" ]; then
@@ -34,14 +50,41 @@ assert_absent() { # path label
   fi
 }
 
+mkdir -p "$TMP/empty-home" "$TMP/pinned-project"
+printf '{"root":"%s"}\n' "$BASE" >"$TMP/pinned-project/.amqrc"
 assert_eq "" "$(run_hook false)" "ordinary allow output"
 id1="$(send one)"
-first="$(run_hook false)"
-python3 - "$first" "$ROOT" <<'PY'
+fallback="$(run_hook_with_incomplete_pin "$TMP/pinned-project")"
+python3 - "$fallback" "$ROOT" <<'PY'
 import json, sys
 d=json.loads(sys.argv[1]); assert d["decision"]=="block"
-assert sys.argv[2] in d["reason"] and "session1" in d["reason"]
+assert sys.argv[2] in d["reason"]
 PY
+
+mkdir -p "$TMP/unresolved-project"
+printf '{invalid\n' >"$TMP/unresolved-project/.amqrc"
+unresolved="$(run_hook_with_incomplete_pin "$TMP/unresolved-project")"
+python3 - "$unresolved" <<'PY'
+import json, sys
+d=json.loads(sys.argv[1]); assert "decision" not in d
+message=d["systemMessage"].lower()
+assert "context" in message and "pending messages may exist" in message
+PY
+
+mkdir -p "$TMP/unreadable-project" "$TMP/unreadable-mailbox"
+printf '{"root":"%s"}\n' "$TMP/unreadable-mailbox" >"$TMP/unreadable-project/.amqrc"
+unreadable="$(run_hook_without_pin "$TMP/unreadable-project")"
+python3 - "$unreadable" "$TMP/unreadable-mailbox" <<'PY'
+import json, sys
+d=json.loads(sys.argv[1]); assert "decision" not in d
+message=d["systemMessage"]
+assert "mailbox unreadable" in message.lower() and sys.argv[2] in message
+assert "pending messages may exist" in message.lower()
+PY
+
+mkdir -p "$TMP/no-amq-project"
+assert_eq "" "$(run_hook_with_incomplete_pin "$TMP/no-amq-project")" "unconfigured project output"
+
 assert_eq "" "$(run_hook true)" "active repeat output"
 assert_eq 1 "$("$BIN" list --root "$ROOT" --me claude --new --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" "message remains unread"
 
