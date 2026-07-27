@@ -8,6 +8,20 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.49.1](https://github.com/avivsinai/agent-message-queue/compare/v0.49.0...v0.49.1) (2026-07-27)
+
+
+### Bug Fixes
+
+* **hooks:** guard Stop blocks by message content ([#318](https://github.com/avivsinai/agent-message-queue/issues/318)) ([bc18f97](https://github.com/avivsinai/agent-message-queue/commit/bc18f97113d3df2091cd9c7aa2d6d2d915266b6b))
+* **hooks:** recover incomplete session context ([#319](https://github.com/avivsinai/agent-message-queue/issues/319)) ([2b02729](https://github.com/avivsinai/agent-message-queue/commit/2b027298a21b21609f6e8ec3d8c4d3b810913b20))
+* **release:** reconcile labels after attestation failure ([#308](https://github.com/avivsinai/agent-message-queue/issues/308)) ([3fc28a7](https://github.com/avivsinai/agent-message-queue/commit/3fc28a7ed2553d1b0c4ba5217c6cbecd618e36db))
+* **wake:** defer injection after max hold ([#314](https://github.com/avivsinai/agent-message-queue/issues/314)) ([d3f92db](https://github.com/avivsinai/agent-message-queue/commit/d3f92db49e720c31c4ce2ff5df828a50e8ec66c1))
+* **wake:** make periodic capability checks honest ([#320](https://github.com/avivsinai/agent-message-queue/issues/320)) ([4b9bc8d](https://github.com/avivsinai/agent-message-queue/commit/4b9bc8d1caf7d73b2872242485d3aa60fcfcd4ee))
+* **wake:** require consecutive quiet samples ([#315](https://github.com/avivsinai/agent-message-queue/issues/315)) ([a68d9b2](https://github.com/avivsinai/agent-message-queue/commit/a68d9b241c8909eccf39afd8a0e8f523641e873a))
+* **wake:** retry held notifications after pgrp handoff ([#310](https://github.com/avivsinai/agent-message-queue/issues/310)) ([f015d8b](https://github.com/avivsinai/agent-message-queue/commit/f015d8bfc9c5cf56d3aefbb3d4ff7c6700bcc9a2))
+* **wake:** use fixed standalone doorbell ([#317](https://github.com/avivsinai/agent-message-queue/issues/317)) ([3641d5e](https://github.com/avivsinai/agent-message-queue/commit/3641d5e82cf852ed1861982bbf3d59c86f08abda))
+
 ## [0.49.0](https://github.com/avivsinai/agent-message-queue/compare/v0.48.0...v0.49.0) (2026-07-26)
 
 
