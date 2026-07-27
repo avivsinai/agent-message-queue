@@ -98,6 +98,92 @@ func (r *DeliveryRoot) Base() string {
 	return r.base
 }
 
+// OpenOrCreateDirectChild pins one direct, non-symlink child directory beneath
+// the authorized root. The before/open/after identity checks prevent a child
+// swapped during validation from redirecting later writes through a symlink.
+func (r *DeliveryRoot) OpenOrCreateDirectChild(name string, perm os.FileMode) (*DeliveryRoot, error) {
+	if r == nil || r.root == nil {
+		return nil, fmt.Errorf("delivery root is closed")
+	}
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return nil, fmt.Errorf("invalid direct child name %q", name)
+	}
+	if err := r.VerifyBase(); err != nil {
+		return nil, err
+	}
+
+	before, err := r.root.Lstat(name)
+	if os.IsNotExist(err) {
+		if err := r.root.Mkdir(name, perm); err != nil {
+			return nil, err
+		}
+		before, err = r.root.Lstat(name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%q is not a direct directory under delivery root", name)
+	}
+
+	childRoot, err := r.root.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := childRoot.Stat(".")
+	if err != nil {
+		_ = childRoot.Close()
+		return nil, err
+	}
+	after, err := r.root.Lstat(name)
+	if err != nil {
+		_ = childRoot.Close()
+		return nil, err
+	}
+	if !after.IsDir() || after.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(before, after) || !os.SameFile(after, opened) {
+		_ = childRoot.Close()
+		return nil, fmt.Errorf("direct child %q changed while opening", name)
+	}
+
+	return &DeliveryRoot{
+		base:     filepath.Join(r.base, name),
+		root:     childRoot,
+		identity: opened,
+	}, nil
+}
+
+// EnsureRootDirs creates the queue-level layout through the pinned root
+// capability.
+func (r *DeliveryRoot) EnsureRootDirs() error {
+	if err := r.VerifyBase(); err != nil {
+		return err
+	}
+	for _, dir := range []string{"agents", "threads", "meta"} {
+		if err := r.root.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// EnsureAgentDirs creates one agent's mailbox layout through the pinned root
+// capability.
+func (r *DeliveryRoot) EnsureAgentDirs(agent string) error {
+	if err := ValidateHandle(agent); err != nil {
+		return err
+	}
+	if err := r.VerifyBase(); err != nil {
+		return err
+	}
+	for _, leaf := range requiredMailboxLeaves {
+		if err := r.root.MkdirAll(MailboxRootRelativePath(agent, leaf), 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // VerifyBase reports a lexical alias change after authorization. The open root
 // remains the security boundary even if an alias changes immediately after
 // this check; this verification makes a detected swap fail closed instead of

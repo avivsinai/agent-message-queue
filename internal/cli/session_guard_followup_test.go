@@ -80,14 +80,92 @@ func TestSessionlessEnvOutputPinsExactRoot(t *testing.T) {
 	}
 }
 
-func TestLoadSessionPinRejectsEmptySessionWithoutBaseRoot(t *testing.T) {
-	t.Setenv(envSession, "")
-	setOptionalEnv(t, envBaseRoot, "", false)
-
-	_, err := loadSessionPin()
-	if err == nil || GetExitCode(err) != ExitContextMismatch {
-		t.Fatalf("empty session without exact base pin should be context mismatch, got %v", err)
+func TestLoadSessionPinNamesIncompletePinEvidence(t *testing.T) {
+	tests := []struct {
+		name        string
+		session     *string
+		rootID      *string
+		baseRootID  *string
+		wantNames   []string
+		secretValue string
+	}{
+		{
+			name:      "named session only",
+			session:   pointerTo("collab"),
+			wantNames: []string{envSession, envBaseRoot},
+		},
+		{
+			name:      "empty session only",
+			session:   pointerTo(""),
+			wantNames: []string{envSession, envBaseRoot},
+		},
+		{
+			name:        "root identity only",
+			rootID:      pointerTo("v1:secret-root-token"),
+			wantNames:   []string{envRootID, envBaseRoot},
+			secretValue: "v1:secret-root-token",
+		},
+		{
+			name:        "base identity only",
+			baseRootID:  pointerTo("v1:secret-base-token"),
+			wantNames:   []string{envBaseRootID, envBaseRoot},
+			secretValue: "v1:secret-base-token",
+		},
+		{
+			name:        "identity pair",
+			rootID:      pointerTo("v1:secret-root-token"),
+			baseRootID:  pointerTo("v1:secret-base-token"),
+			wantNames:   []string{envRootID, envBaseRootID, envBaseRoot},
+			secretValue: "secret-",
+		},
 	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setOptionalEnv(t, envSession, optionalString(tc.session), tc.session != nil)
+			setOptionalEnv(t, envRootID, optionalString(tc.rootID), tc.rootID != nil)
+			setOptionalEnv(t, envBaseRootID, optionalString(tc.baseRootID), tc.baseRootID != nil)
+			setOptionalEnv(t, envBaseRoot, "", false)
+
+			_, err := loadSessionPin()
+			if err == nil || GetExitCode(err) != ExitContextMismatch {
+				t.Fatalf("incomplete pin should be context mismatch, got %v", err)
+			}
+			for _, name := range tc.wantNames {
+				if !strings.Contains(err.Error(), name) {
+					t.Fatalf("error must name evidence %s: %v", name, err)
+				}
+			}
+			presentEvidence := map[string]bool{
+				envSession:    tc.session != nil,
+				envRootID:     tc.rootID != nil,
+				envBaseRootID: tc.baseRootID != nil,
+			}
+			for name, shouldAppear := range presentEvidence {
+				if strings.Contains(err.Error(), name) != shouldAppear {
+					t.Fatalf("error evidence name %s presence = %t, want %t: %v", name, strings.Contains(err.Error(), name), shouldAppear, err)
+				}
+			}
+			if !strings.Contains(err.Error(), "--root <path>") ||
+				!strings.Contains(err.Error(), "clear stale pin variables before using --session <name>") {
+				t.Fatalf("error must distinguish direct repin from clearing stale evidence first: %v", err)
+			}
+			if tc.secretValue != "" && strings.Contains(err.Error(), tc.secretValue) {
+				t.Fatalf("error leaked opaque identity token: %v", err)
+			}
+		})
+	}
+}
+
+func pointerTo(value string) *string {
+	return &value
+}
+
+func optionalString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func TestEnvSessionFlagUsesPinnedCustomBaseFromForeignCWD(t *testing.T) {

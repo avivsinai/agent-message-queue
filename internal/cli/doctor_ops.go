@@ -179,6 +179,7 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 
 	// Operational and integration hints
 	result.Hints = append(result.Hints, checkSiblingBacklogHints(root, agents)...)
+	result.Hints = append(result.Hints, checkBaseBacklogHints(root, agents)...)
 	result.Hints = append(result.Hints, checkWorktreeDivergenceHints(root, agents)...)
 	result.Hints = append(result.Hints, checkGlobalRootHint()...)
 	result.Hints = append(result.Hints, checkKanbanHint()...)
@@ -221,6 +222,18 @@ func checkSiblingBacklogHints(root string, agents []string) []opsHint {
 				Message: formatSiblingBacklogHint(backlog, agent, current),
 			})
 		}
+	}
+	return hints
+}
+
+func checkBaseBacklogHints(root string, agents []string) []opsHint {
+	var hints []opsHint
+	for _, backlog := range findBaseBacklogs(root, agents) {
+		hints = append(hints, opsHint{
+			Code:    "base_backlog",
+			Status:  "warn",
+			Message: formatBaseBacklogHint(backlog),
+		})
 	}
 	return hints
 }

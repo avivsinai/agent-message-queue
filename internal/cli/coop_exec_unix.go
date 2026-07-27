@@ -135,6 +135,7 @@ func runCoopExec(args []string) error {
 
 	// Resolve root: --root flag (or --session-derived) > .amqrc > default.
 	root := *rootFlag
+	sessionProvisioned := false
 	if root == "" {
 		existing, existingErr := findAndLoadAmqrc()
 		switch existingErr {
@@ -148,6 +149,27 @@ func runCoopExec(args []string) error {
 		default:
 			return fmt.Errorf("invalid .amqrc: %w", existingErr)
 		}
+	}
+
+	// Explicit named sessions use the same direct-child creation boundary as
+	// coop init/default exec. In particular, never let MkdirAll traverse a
+	// pre-existing session symlink.
+	if *sessionFlag != "" {
+		if *noInitFlag && !dirExists(root) {
+			return fmt.Errorf("root %q does not exist; run 'amq coop init' first or remove --no-init", root)
+		}
+		base := filepath.Dir(root)
+		if !dirExists(base) {
+			if err := fsq.EnsureRootDirs(base); err != nil {
+				return fmt.Errorf("failed to create base root %q: %w", base, err)
+			}
+		}
+		requestedRoot := root
+		root, err = provisionCoopSession(base, *sessionFlag, []string{agentHandle}, agentHandle, cmdName)
+		if err != nil {
+			return fmt.Errorf("failed to create session root %q: %w", requestedRoot, err)
+		}
+		sessionProvisioned = true
 	}
 
 	// Auto-init if needed (before session defaulting so full init fires on fresh projects).
@@ -203,14 +225,11 @@ func runCoopExec(args []string) error {
 	// This runs after auto-init so .amqrc exists and resolveBaseRoot() works.
 	if *sessionFlag == "" && *rootFlag == "" {
 		base := root // root is the literal .amqrc root (e.g., .agent-mail)
-		root = filepath.Join(base, defaultSessionName)
-		// Ensure session root + agent dirs exist.
-		if err := fsq.EnsureRootDirs(root); err != nil {
-			return fmt.Errorf("failed to create session root %q: %w", root, err)
+		root, err = provisionCoopSession(base, defaultSessionName, []string{agentHandle}, agentHandle, cmdName)
+		if err != nil {
+			return fmt.Errorf("failed to create session root %q: %w", filepath.Join(base, defaultSessionName), err)
 		}
-		if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
-			return fmt.Errorf("failed to create mailbox for %s at %q: %w", agentHandle, root, err)
-		}
+		sessionProvisioned = true
 	}
 
 	// Pin the session root to an absolute path before it reaches the wake
@@ -224,8 +243,10 @@ func runCoopExec(args []string) error {
 	}
 
 	// Ensure agent mailbox exists.
-	if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
-		return fmt.Errorf("failed to ensure mailbox for %s: %w", agentHandle, err)
+	if !sessionProvisioned {
+		if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
+			return fmt.Errorf("failed to ensure mailbox for %s: %w", agentHandle, err)
+		}
 	}
 
 	// Resolve command binary.
