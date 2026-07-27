@@ -81,8 +81,10 @@ esac
 case "$OS" in
     darwin|linux) ;;
     mingw*|msys*|cygwin*)
-        echo -e "${RED}Error: Windows detected. Please use WSL or download manually.${NC}"
-        echo "See: https://github.com/$REPO/releases"
+        echo -e "${RED}Error: The installer script does not support native Windows.${NC}"
+        echo "For the complete coop/wake workflow, use WSL with the Linux installer."
+        echo "For native core queue commands, download the Windows ZIP manually:"
+        echo "  https://github.com/$REPO/releases"
         exit 1
         ;;
     *)
@@ -99,6 +101,11 @@ if [ "$VERSION" = "latest" ]; then
     VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
     if [ -z "$VERSION" ]; then
         echo -e "${RED}Error: Could not determine latest version${NC}"
+        echo "The GitHub API may be unavailable, rate-limited, or blocked by a proxy."
+        echo "Try one of:"
+        echo "  Homebrew: brew install avivsinai/tap/amq"
+        echo "  Manual download: https://github.com/$REPO/releases"
+        echo "  Pinned rerun: curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | VERSION=vX.Y.Z bash"
         exit 1
     fi
 fi
@@ -349,5 +356,7 @@ fi
 
 echo "Next steps:"
 echo "  1. Start agent: \"$INSTALLED_BINARY\" coop exec claude"
-echo "  Tip: eval \"\$(\"$INSTALLED_BINARY\" shell-setup)\" to add co-op aliases to your shell"
+echo "  Tip: eval \"\$(\"$INSTALLED_BINARY\" shell-setup)\" adds aliases to this shell only."
+echo "       Persist zsh aliases: \"$INSTALLED_BINARY\" shell-setup --shell zsh >> ~/.zshrc"
+echo "       Persist bash aliases: \"$INSTALLED_BINARY\" shell-setup --shell bash >> ~/.bashrc"
 echo ""

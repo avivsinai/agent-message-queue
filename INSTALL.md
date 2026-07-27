@@ -112,7 +112,21 @@ Download from [Releases](https://github.com/avivsinai/agent-message-queue/releas
 | macOS (Intel) | `amq_*_darwin_amd64.tar.gz` |
 | Linux (x86_64) | `amq_*_linux_amd64.tar.gz` |
 | Linux (ARM64) | `amq_*_linux_arm64.tar.gz` |
-| Windows | `amq_*_windows_amd64.zip` (use in WSL) |
+| Native Windows (x86_64) | `amq_*_windows_amd64.zip` |
+| WSL (x86_64) | `amq_*_linux_amd64.tar.gz` |
+
+### Platform capability matrix
+
+| Platform | Core queue (`send`, `drain`, `read`, threads) | `coop init` | `coop exec` | `wake` notifications | Installer script |
+|----------|------------------------------------------------|-------------|-------------|----------------------|------------------|
+| macOS | Supported | Supported | Supported | Supported | Supported |
+| Linux | Supported | Supported | Supported | Supported; raw TTY injection may be disabled by kernel hardening | Supported |
+| WSL | Supported via the Linux binary | Supported | Supported | Same constraints as Linux | Supported |
+| Native Windows | Supported via the Windows ZIP | Supported | **Not supported natively** | **Not supported natively** | Rejects Windows; install the ZIP manually |
+
+WSL is a Linux environment: install a Linux asset there, not the Windows ZIP.
+On native Windows, `doctor --ops` can report wake lock files but cannot verify
+live wake process identity or auto-fix `unverified` locks.
 
 For manual installs, verify the selected asset against `checksums.txt` before extracting it:
 
@@ -306,9 +320,13 @@ mv amq ~/.local/bin/
 
 ### Binary: Install Script Options
 
+If the installer cannot query GitHub's latest-release API, choose a tag from
+the [Releases page](https://github.com/avivsinai/agent-message-queue/releases)
+and rerun with `VERSION=`:
+
 ```bash
-# Specific version
-curl -fsSL .../install.sh | VERSION=v0.8.0 bash
+# Specific version (replace vX.Y.Z)
+curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | VERSION=vX.Y.Z bash
 
 # Custom directory
 curl -fsSL .../install.sh | INSTALL_DIR=~/bin bash
