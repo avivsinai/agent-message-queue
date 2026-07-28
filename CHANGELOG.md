@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.49.9](https://github.com/avivsinai/agent-message-queue/compare/v0.49.8...v0.49.9) (2026-07-28)
+
+
+### Bug Fixes
+
+* **wake:** coalesce pending co-op doorbells ([#348](https://github.com/avivsinai/agent-message-queue/issues/348)) ([1ed2b3b](https://github.com/avivsinai/agent-message-queue/commit/1ed2b3b26e194dccfd5a6ef5f40f2a631724298a))
+
 ## [0.49.8](https://github.com/avivsinai/agent-message-queue/compare/v0.49.7...v0.49.8) (2026-07-28)
 
 
