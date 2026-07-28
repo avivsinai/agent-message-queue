@@ -412,7 +412,7 @@ func deliverNewMessageNotification(
 	}
 
 	result, err := deliverWakeNotificationResult(cfg, notice, deferForInput)
-	if err == nil && ownerBound && result.inputSubmitted {
+	if ownerBound && result.inputSubmitted {
 		cfg.announcedPending = snapshotWakeFileIdentities(currentPending)
 	}
 	return err

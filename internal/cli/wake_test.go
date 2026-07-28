@@ -1415,6 +1415,89 @@ func TestNotifyNewMessagesRetriesCoopInputAfterPartialSubmitFailure(t *testing.T
 	}
 }
 
+func TestNotifyNewMessagesLatchesRawSubmitBeforeRescueAuthorityError(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	writeMessage := func(filename, id string) {
+		t.Helper()
+		msg := format.Message{
+			Header: format.Header{
+				Schema:  1,
+				ID:      id,
+				From:    "peer",
+				To:      []string{"codex"},
+				Thread:  "p2p/codex__peer",
+				Subject: id,
+				Created: "2026-07-28T15:00:00Z",
+			},
+		}
+		data, err := msg.Marshal()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", id, err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "codex", filename, data); err != nil {
+			t.Fatalf("deliver %s: %v", id, err)
+		}
+	}
+
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+	failRescue := true
+	var injected []string
+	cfg := &wakeConfig{
+		me:             "codex",
+		root:           root,
+		session:        "session3",
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModeRaw,
+		attentionIsTTY: func() bool { return false },
+		terminalWrite: func(text string) error {
+			injected = append(injected, text)
+			if failRescue && len(injected) == 4 {
+				return errors.New("foreground process group changed")
+			}
+			return nil
+		},
+	}
+
+	writeMessage("first.md", "first")
+	err := notifyNewMessages(cfg)
+	var authorityErr *wakeTerminalAuthorityError
+	if !errors.As(err, &authorityErr) {
+		t.Fatalf("notify rescue error = %v, want wakeTerminalAuthorityError", err)
+	}
+	if got := strings.Join(injected, "|"); got != coopWakeDoorbell+"|\n|\r|\r" {
+		t.Fatalf("raw injection before rescue error = %q, want submitted doorbell plus failed rescue", got)
+	}
+	if len(cfg.announcedPending) != 1 {
+		t.Fatalf("submitted doorbell announced %d pending messages after rescue error, want 1", len(cfg.announcedPending))
+	}
+
+	failRescue = false
+	injected = nil
+	writeMessage("second.md", "second")
+	stderr := captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("notify after rescue authority error: %v", err)
+		}
+	})
+	if len(injected) != 0 {
+		t.Fatalf("pending submitted doorbell retried terminal input: %q", injected)
+	}
+	for _, want := range []string{"AMQ [session3]: 2 messages", "2 from peer"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("coalesced output %q missing %q", stderr, want)
+		}
+	}
+}
+
 func TestNotifyNewMessagesCustomInterruptUsesSanitizedOperatorPayloadForInputAndFallback(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
