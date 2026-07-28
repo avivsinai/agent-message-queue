@@ -50,6 +50,7 @@ type wakeConfig struct {
 	baselineRequested    bool
 	baselineInherited    bool
 	baselineExisting     map[string]wakeFileIdentity
+	announcedPending     map[string]wakeFileIdentity
 	onBaselineReady      func(map[string]wakeFileIdentity) error
 	onPrepared           func(wakeAdmissionWatcher) error
 	retainedInbox        wakeInboxReader
@@ -266,6 +267,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	var messages []wakeMsgInfo
 	var interruptMessages []wakeMsgInfo
 	interruptCounts := make(map[string]int)
+	currentPending := make(map[string]os.FileInfo)
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -275,9 +277,9 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
 			continue
 		}
+		fileInfo, infoErr := entry.Info()
 		if baselineIdentity, ignored := cfg.baselineExisting[name]; ignored {
-			info, infoErr := entry.Info()
-			if infoErr == nil && matchesWakeFileIdentity(baselineIdentity, info) {
+			if infoErr == nil && matchesWakeFileIdentity(baselineIdentity, fileInfo) {
 				continue
 			}
 			delete(cfg.baselineExisting, name)
@@ -295,7 +297,13 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			}
 			// Count corrupt messages too
 			messages = append(messages, wakeMsgInfo{from: "unknown", subject: "(parse error)"})
+			if infoErr == nil {
+				currentPending[name] = fileInfo
+			}
 			continue
+		}
+		if infoErr == nil {
+			currentPending[name] = fileInfo
 		}
 
 		from := strings.TrimSpace(header.From)
@@ -333,7 +341,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			notice = operatorWakeNotification(interruptText)
 		}
 		if cfg.injectMode == wakeInjectModeNone {
-			return deliverWakeNotification(cfg, notice, false)
+			return deliverNewMessageNotification(cfg, notice, false, currentPending)
 		}
 		now := time.Now()
 		if !usesCoopDoorbell(cfg) &&
@@ -372,7 +380,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 				}
 			}
 		}
-		return deliverWakeNotification(cfg, notice, false)
+		return deliverNewMessageNotification(cfg, notice, false, currentPending)
 	}
 
 	var notice wakeNotification
@@ -386,7 +394,51 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		)
 	}
 
-	return deliverWakeNotification(cfg, notice, true)
+	return deliverNewMessageNotification(cfg, notice, true, currentPending)
+}
+
+func deliverNewMessageNotification(
+	cfg *wakeConfig,
+	notice wakeNotification,
+	deferForInput bool,
+	currentPending map[string]os.FileInfo,
+) error {
+	ownerBound := usesCoopDoorbell(cfg)
+	if ownerBound &&
+		cfg.injectMode != wakeInjectModeNone &&
+		announcedWakeStillPending(cfg.announcedPending, currentPending) {
+		emitWakeAttention(cfg, notice.output)
+		return nil
+	}
+
+	result, err := deliverWakeNotificationResult(cfg, notice, deferForInput)
+	if err == nil && ownerBound && result.inputSubmitted {
+		cfg.announcedPending = snapshotWakeFileIdentities(currentPending)
+	}
+	return err
+}
+
+func announcedWakeStillPending(
+	announced map[string]wakeFileIdentity,
+	current map[string]os.FileInfo,
+) bool {
+	for name, identity := range announced {
+		info, ok := current[name]
+		if ok && matchesWakeFileIdentity(identity, info) {
+			return true
+		}
+	}
+	return false
+}
+
+func snapshotWakeFileIdentities(current map[string]os.FileInfo) map[string]wakeFileIdentity {
+	snapshot := make(map[string]wakeFileIdentity, len(current))
+	for name, info := range current {
+		if identity, ok := captureWakeFileIdentity(info); ok {
+			snapshot[name] = identity
+		}
+	}
+	return snapshot
 }
 
 func buildNotificationText(session string, messages []wakeMsgInfo, previewLen int) string {
@@ -552,7 +604,21 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	)
 }
 
+type wakeDeliveryResult struct {
+	inputSubmitted bool
+}
+
 func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForInput bool) error {
+	_, err := deliverWakeNotificationResult(cfg, notice, deferForInput)
+	return err
+}
+
+func deliverWakeNotificationResult(
+	cfg *wakeConfig,
+	notice wakeNotification,
+	deferForInput bool,
+) (wakeDeliveryResult, error) {
+	var result wakeDeliveryResult
 	ownerBound := usesCoopDoorbell(cfg)
 	if ownerBound {
 		notice.input = wakePayload{
@@ -562,7 +628,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	}
 	if cfg.injectMode == wakeInjectModeNone {
 		emitWakeAttention(cfg, notice.output)
-		return nil
+		return result, nil
 	}
 
 	inputText := notice.input.text
@@ -574,7 +640,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	if shouldDeferBeforeInject(cfg, deferForInput) {
 		if !waitForWakeInputQuiet(cfg) {
 			emitWakeAttention(cfg, notice.output)
-			return nil
+			return result, nil
 		}
 	}
 
@@ -583,10 +649,10 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	if cfg.injectVia != "" {
 		allowed, guardErr := authorizeTerminalWrite(cfg)
 		if guardErr != nil {
-			return guardErr
+			return result, guardErr
 		}
 		if !allowed {
-			return nil
+			return result, nil
 		}
 		if err := injectVia(cfg, plainText); err != nil {
 			if cfg.fallbackWarn {
@@ -595,8 +661,10 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 				cfg.fallbackWarn = false
 			}
 			emitWakeAttention(cfg, notice.output)
+			return result, nil
 		}
-		return nil
+		result.inputSubmitted = true
+		return result, nil
 	}
 
 	mode := effectiveInjectMode(cfg)
@@ -613,7 +681,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		if cfg.bell && !ownerBound {
 			injectedText = "\a" + injectedText
 		}
-		injectErr = injectRawNotification(cfg, injectedText)
+		result.inputSubmitted, injectErr = injectRawNotification(cfg, injectedText)
 
 	case wakeInjectModePaste:
 		// Paste mode: bracketed paste with delayed CR
@@ -632,7 +700,11 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		} else if wrote {
 			// Small delay to ensure CR lands in separate read cycle
 			time.Sleep(25 * time.Millisecond)
-			_, injectErr = writeTerminalChunk(cfg, "\r")
+			submitted, err := writeTerminalChunk(cfg, "\r")
+			if err == nil {
+				result.inputSubmitted = submitted
+			}
+			injectErr = err
 		}
 
 	default:
@@ -642,14 +714,18 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			if err != nil {
 				injectErr = err
 			} else if wrote {
-				_, injectErr = writeTerminalChunk(cfg, "\r")
+				submitted, err := writeTerminalChunk(cfg, "\r")
+				if err == nil {
+					result.inputSubmitted = submitted
+				}
+				injectErr = err
 			}
 		} else {
 			injectedText := inputText + "\r"
 			if cfg.bell {
 				injectedText = "\a" + injectedText
 			}
-			_, injectErr = writeTerminalChunk(cfg, injectedText)
+			result.inputSubmitted, injectErr = writeTerminalChunk(cfg, injectedText)
 		}
 	}
 
@@ -671,11 +747,11 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			_ = writeStderr("amq wake: warning: %s\n", reason)
 			cfg.fallbackWarn = false
 			emitWakeAttention(cfg, notice.output)
-			return nil
+			return result, nil
 		}
 		var authorityErr *wakeTerminalAuthorityError
 		if errors.As(injectErr, &authorityErr) {
-			return injectErr
+			return result, injectErr
 		}
 		if cfg.fallbackWarn {
 			_ = writeStderr("amq wake: TIOCSTI injection failed: %v\n", injectErr)
@@ -684,10 +760,10 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		}
 		// Fallback: use the output-only attention tier; never retry input.
 		emitWakeAttention(cfg, notice.output)
-		return nil
+		return result, nil
 	}
 
-	return nil
+	return result, nil
 }
 
 func usesCoopDoorbell(cfg *wakeConfig) bool {
@@ -787,7 +863,7 @@ func rawSubmitPrelude(me string) string {
 	return ""
 }
 
-func injectRawNotification(cfg *wakeConfig, injectedText string) error {
+func injectRawNotification(cfg *wakeConfig, injectedText string) (bool, error) {
 	if cfg.debug {
 		_ = writeStderr("amq wake [debug]: injecting %d bytes of text\n", len(injectedText))
 	}
@@ -796,10 +872,10 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: text inject failed: %v\n", err)
 		}
-		return err
+		return false, err
 	}
 	if !wrote {
-		return nil
+		return false, nil
 	}
 	prelude := rawSubmitPrelude(cfg.me)
 
@@ -827,10 +903,10 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 			if cfg.debug {
 				_ = writeStderr("amq wake [debug]: prelude inject failed: %v\n", err)
 			}
-			return err
+			return false, err
 		}
 		if !wrote {
-			return nil
+			return false, nil
 		}
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: prelude injected OK (%q)\n", prelude)
@@ -847,10 +923,10 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: submit key inject failed: %v\n", err)
 		}
-		return err
+		return false, err
 	}
 	if !wrote {
-		return nil
+		return false, nil
 	}
 	if cfg.debug {
 		_ = writeStderr("amq wake [debug]: submit key injected OK\n")
@@ -869,7 +945,7 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: submit key still queued after %s; skipping rescue submit\n", crWaited)
 		}
-		return nil
+		return true, nil
 	}
 	rawInjectSleep(rawInjectSettleDelay)
 	wrote, err = writeTerminalChunk(cfg, "\r")
@@ -878,20 +954,20 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) error {
 		// best-effort unless exact terminal authority was lost.
 		var authorityErr *wakeTerminalAuthorityError
 		if errors.As(err, &authorityErr) {
-			return err
+			return true, err
 		}
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: rescue submit inject failed: %v\n", err)
 		}
-		return nil
+		return true, nil
 	}
 	if !wrote {
-		return nil
+		return true, nil
 	}
 	if cfg.debug {
 		_ = writeStderr("amq wake [debug]: rescue submit injected OK\n")
 	}
-	return nil
+	return true, nil
 }
 
 func waitForInputQueueDrain(
