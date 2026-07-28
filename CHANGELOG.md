@@ -8,6 +8,16 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.49.8](https://github.com/avivsinai/agent-message-queue/compare/v0.49.7...v0.49.8) (2026-07-28)
+
+
+### Bug Fixes
+
+* **routing:** unify root authority and fail closed on ambiguous Git contexts ([5bf4247](https://github.com/avivsinai/agent-message-queue/commit/5bf4247ae2d19a25a393d02116f62bdad8b8e39c))
+* **dlq:** serialize retries and preserve terminal audit state ([5bf4247](https://github.com/avivsinai/agent-message-queue/commit/5bf4247ae2d19a25a393d02116f62bdad8b8e39c))
+* **federation:** refuse symlinked source roots ([5bf4247](https://github.com/avivsinai/agent-message-queue/commit/5bf4247ae2d19a25a393d02116f62bdad8b8e39c))
+* **watch:** refuse replaced mailbox roots ([5bf4247](https://github.com/avivsinai/agent-message-queue/commit/5bf4247ae2d19a25a393d02116f62bdad8b8e39c))
+
 ## [0.49.7](https://github.com/avivsinai/agent-message-queue/compare/v0.49.6...v0.49.7) (2026-07-27)
 
 
