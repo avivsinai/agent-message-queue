@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -399,6 +400,116 @@ func TestDrainInboxItemsConcurrentClaimsSingleWinner(t *testing.T) {
 	}
 	if len(receipts) != 1 {
 		t.Fatalf("expected exactly one drained receipt, got %d", len(receipts))
+	}
+}
+
+func TestDrainInboxItemsReturnsClaimedResultsWithLaterPostClaimError(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "alice", "bob")
+	deliverGuardMessage(t, root, "alice", "a-complete")
+	deliverGuardMessage(t, root, "alice", "b-interrupted")
+	injectedErr := errors.New("injected post-claim failure")
+
+	items, err := drainInboxItemsWithClaimHook(
+		openDeliveryRootForCLITest(t, root),
+		root,
+		"alice",
+		true,
+		0,
+		&headerValidator{},
+		func(claimed string) error {
+			if claimed == "b-interrupted.md" {
+				return injectedErr
+			}
+			return nil
+		},
+	)
+	if !errors.Is(err, injectedErr) {
+		t.Fatalf("drain error = %v, want injected post-claim failure", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("returned items = %d, want both committed claims: %#v", len(items), items)
+	}
+	itemsByID := make(map[string]inboxItem, len(items))
+	for _, item := range items {
+		itemsByID[item.ID] = item
+	}
+	if item := itemsByID["a-complete"]; item.ID != "a-complete" || !item.MovedToCur || item.ParseError != "" {
+		t.Fatalf("completed first claim was hidden or changed: %#v", item)
+	}
+	if item := itemsByID["b-interrupted"]; item.ID != "b-interrupted" ||
+		item.ParseError == "" ||
+		item.FailureReason != "processing_error" ||
+		item.MovedToCur ||
+		item.MovedToDLQ {
+		t.Fatalf("interrupted committed claim was not surfaced: %#v", item)
+	}
+}
+
+func TestFinishDrainBatchOutputsCommittedClaimsBeforeReturningError(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "alice", "bob")
+	deliverGuardMessage(t, root, "alice", "a-complete")
+	deliverGuardMessage(t, root, "alice", "b-interrupted")
+	injectedErr := errors.New("injected post-claim failure")
+	deliveryRoot := openDeliveryRootForCLITest(t, root)
+
+	items, drainErr := drainInboxItemsWithClaimHook(
+		deliveryRoot,
+		root,
+		"alice",
+		true,
+		0,
+		&headerValidator{},
+		func(claimed string) error {
+			if claimed == "b-interrupted.md" {
+				return injectedErr
+			}
+			return nil
+		},
+	)
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return finishDrainBatch(deliveryRoot, root, "alice", true, true, items, drainErr)
+	})
+	if !errors.Is(err, injectedErr) {
+		t.Fatalf("finish error = %v, want injected post-claim failure", err)
+	}
+	var result drainResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("unmarshal partial drain output: %v (output: %s)", err, stdout)
+	}
+	if result.Count != 2 || len(result.Drained) != 2 {
+		t.Fatalf("partial drain output = %#v, want both committed claims", result)
+	}
+	gotIDs := make(map[string]bool, len(result.Drained))
+	for _, item := range result.Drained {
+		gotIDs[item.ID] = true
+	}
+	for _, id := range []string{"a-complete", "b-interrupted"} {
+		if !gotIDs[id] {
+			t.Fatalf("partial drain output hid committed claim %q: %#v", id, result)
+		}
+	}
+}
+
+func TestFinishDrainBatchPreservesCommittedErrorThatWrapsNotExist(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "alice", "bob")
+	committed := &fsq.CommittedDurabilityError{
+		FinalPath: filepath.Join(root, "agents", "alice", "inbox", "cur", "claimed.md"),
+		Recipient: "alice",
+		Err:       os.ErrNotExist,
+	}
+
+	err := finishDrainBatch(
+		openDeliveryRootForCLITest(t, root),
+		root,
+		"alice",
+		true,
+		true,
+		nil,
+		committed,
+	)
+	if err != committed {
+		t.Fatalf("finish error = %T %v, want original committed error", err, err)
 	}
 }
 

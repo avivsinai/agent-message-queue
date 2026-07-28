@@ -2,8 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -200,5 +203,129 @@ func TestRunWatchNewMessage(t *testing.T) {
 	}
 	if len(result.Messages) > 0 && result.Messages[0].ID != "msg-new" {
 		t.Errorf("expected message ID 'msg-new', got %s", result.Messages[0].ID)
+	}
+}
+
+func TestRunWatchRejectsReplacementRootWhileIdle(t *testing.T) {
+	for _, poll := range []bool{true, false} {
+		name := "fsnotify"
+		if poll {
+			name = "poll"
+		}
+		t.Run(name, func(t *testing.T) {
+			parent := t.TempDir()
+			active := filepath.Join(parent, "active")
+			replacement := filepath.Join(parent, "replacement")
+			displaced := filepath.Join(parent, "displaced")
+			for _, root := range []string{active, replacement} {
+				for _, agent := range []string{"alice", "bob"} {
+					if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+						t.Fatalf("EnsureAgentDirs(%s,%s): %v", root, agent, err)
+					}
+				}
+			}
+			deliverGuardMessage(t, replacement, "alice", "replacement-message")
+
+			ready := make(chan struct{})
+			resume := make(chan struct{})
+			oldIdleHook := watchIdleForTest
+			watchIdleForTest = func() {
+				close(ready)
+				<-resume
+			}
+			t.Cleanup(func() { watchIdleForTest = oldIdleHook })
+
+			oldStdout := os.Stdout
+			stdoutReader, stdoutWriter, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			os.Stdout = stdoutWriter
+			t.Cleanup(func() { os.Stdout = oldStdout })
+
+			args := []string{
+				"--root", active,
+				"--me", "alice",
+				"--json",
+				"--timeout", "2s",
+			}
+			if poll {
+				args = append(args, "--poll")
+			}
+			errCh := make(chan error, 1)
+			go func() { errCh <- runWatch(args) }()
+
+			select {
+			case <-ready:
+			case watchErr := <-errCh:
+				t.Fatalf("watch returned before idle swap: %v", watchErr)
+			case <-time.After(2 * time.Second):
+				t.Fatal("watch did not finish its initial empty scan")
+			}
+			if err := os.Rename(active, displaced); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(replacement, active); err != nil {
+				t.Fatal(err)
+			}
+			close(resume)
+
+			var watchErr error
+			select {
+			case watchErr = <-errCh:
+			case <-time.After(3 * time.Second):
+				t.Fatal("watch did not detect replacement root")
+			}
+			_ = stdoutWriter.Close()
+			os.Stdout = oldStdout
+			var stdout bytes.Buffer
+			_, _ = stdout.ReadFrom(stdoutReader)
+
+			if watchErr == nil || !strings.Contains(watchErr.Error(), "delivery root changed after authorization") {
+				t.Fatalf("watch error = %v, want replacement-root refusal (stdout=%s)", watchErr, stdout.String())
+			}
+			if strings.Contains(stdout.String(), "replacement-message") {
+				t.Fatalf("watch exposed replacement-root payload: %s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestWatchStopsExistingBatchWhenContextChangesBetweenHeaderReads(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "bob"); err != nil {
+		t.Fatalf("EnsureAgentDirs bob: %v", err)
+	}
+	for _, id := range []string{"batch-a", "batch-b", "batch-c"} {
+		deliverGuardMessage(t, root, "alice", id)
+	}
+
+	checks := 0
+	revalidateContext := func() error {
+		checks++
+		if checks == 3 {
+			return ContextMismatchError("repo-local queue appeared")
+		}
+		return nil
+	}
+
+	messages, event, err := watchWithPolling(
+		context.Background(),
+		openDeliveryRootForCLITest(t, root),
+		filepath.Join("agents", "alice", "inbox", "new"),
+		&headerValidator{},
+		revalidateContext,
+	)
+	if err == nil || GetExitCode(err) != ExitContextMismatch {
+		t.Fatalf("watch batch error = %v, want context mismatch", err)
+	}
+	if len(messages) != 0 || event != "" {
+		t.Fatalf("watch returned foreign batch data after mismatch: event=%q messages=%#v", event, messages)
+	}
+	if checks != 3 {
+		t.Fatalf("context checks = %d, want 3 (entry plus one per header)", checks)
 	}
 }

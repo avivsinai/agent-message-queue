@@ -23,6 +23,11 @@ type monitorResult struct {
 	Drained    []monitorItem `json:"drained"`
 }
 
+var (
+	monitorIdleForTest        func()
+	monitorPollingIdleForTest func()
+)
+
 func runMonitor(args []string) error {
 	fs := flag.NewFlagSet("monitor", flag.ContinueOnError)
 	common := addCommonFlags(fs)
@@ -64,21 +69,10 @@ func runMonitor(args []string) error {
 	if err := validatePinOverride(common, *ignoreSessionPinFlag, routed); err != nil {
 		return err
 	}
-	if err := guardMailboxContext("monitor", root, routed, *ignoreSessionPinFlag); err != nil {
+	if err := guardMailboxContext("monitor", root, routed, *ignoreSessionPinFlag, common.rootExplicit()); err != nil {
 		return err
 	}
 	deliveryIdentity, err := snapshotMailboxDeliveryRoot(root, routed, *ignoreSessionPinFlag)
-	if err != nil {
-		return err
-	}
-	if err := requireMailbox(root, me); err != nil {
-		return err
-	}
-
-	if err := validateKnownHandles(root, common.Strict, me); err != nil {
-		return err
-	}
-	validator, err := newHeaderValidator(root, common.Strict)
 	if err != nil {
 		return err
 	}
@@ -87,8 +81,26 @@ func runMonitor(args []string) error {
 		return err
 	}
 	defer func() { _ = deliveryRoot.Close() }()
+	if err := requireMailboxDeliveryRoot(deliveryRoot, root, me); err != nil {
+		return err
+	}
 
-	inboxNew := fsq.AgentInboxNew(root, common.Me)
+	if err := validateKnownHandlesDeliveryRoot(deliveryRoot, common.Strict, me); err != nil {
+		return err
+	}
+	validator, err := newHeaderValidatorDeliveryRoot(deliveryRoot, common.Strict)
+	if err != nil {
+		return err
+	}
+
+	inboxNew := filepath.Join("agents", common.Me, "inbox", "new")
+	inboxNewDisplay := deliveryRoot.DisplayPath(inboxNew)
+	revalidateContext := func() error {
+		if err := guardMailboxContext("monitor", root, routed, *ignoreSessionPinFlag, common.rootExplicit()); err != nil {
+			return err
+		}
+		return deliveryRoot.VerifyBase()
+	}
 
 	session := resolveSessionName(root)
 
@@ -98,24 +110,27 @@ func runMonitor(args []string) error {
 	}
 
 	// First, try to drain existing messages
-	items, err := monitorInboxItems(deliveryRoot, root, common.Me, *includeBodyFlag, *limitFlag, validator, mode)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return NotFoundError("mailbox for %q disappeared while monitoring root %s", common.Me, root)
-		}
-		return err
+	items, err := monitorInboxItems(
+		deliveryRoot,
+		root,
+		common.Me,
+		*includeBodyFlag,
+		*limitFlag,
+		validator,
+		mode,
+		revalidateContext,
+	)
+	initialResult := monitorResult{
+		Event:      "messages",
+		WatchEvent: "existing",
+		Mode:       mode,
+		Session:    session,
+		Me:         common.Me,
+		Count:      len(items),
+		Drained:    items,
 	}
-
-	if len(items) > 0 {
-		return outputMonitorResult(common.JSON, monitorResult{
-			Event:      "messages",
-			WatchEvent: "existing",
-			Mode:       mode,
-			Session:    session,
-			Me:         common.Me,
-			Count:      len(items),
-			Drained:    items,
-		})
+	if handled, finishErr := finishMonitorCollection(common.JSON, root, initialResult, err); handled {
+		return finishErr
 	}
 
 	// No existing messages - wait for new ones
@@ -130,14 +145,17 @@ func runMonitor(args []string) error {
 	var watchErr error
 
 	if *pollFlag {
-		watchEvent, watchErr = monitorWithPolling(ctx, inboxNew)
+		watchEvent, watchErr = monitorWithPollingDeliveryRoot(ctx, deliveryRoot, inboxNew, revalidateContext)
 	} else {
-		watchEvent, watchErr = monitorWithFsnotify(ctx, inboxNew)
+		watchEvent, watchErr = monitorWithFsnotifyDeliveryRoot(ctx, deliveryRoot, inboxNew, revalidateContext)
+	}
+	if err := revalidateContext(); err != nil {
+		return err
 	}
 
 	if watchErr != nil {
 		if os.IsNotExist(watchErr) {
-			return NotFoundError("mailbox for %q disappeared while monitoring %s", common.Me, inboxNew)
+			return NotFoundError("mailbox for %q disappeared while monitoring %s", common.Me, inboxNewDisplay)
 		}
 		if errors.Is(watchErr, context.DeadlineExceeded) {
 			if err := outputMonitorResult(common.JSON, monitorResult{
@@ -156,19 +174,19 @@ func runMonitor(args []string) error {
 	}
 
 	// New message arrived - drain it
-	if err := guardMailboxContext("monitor", root, routed, *ignoreSessionPinFlag); err != nil {
+	if err := requireMailboxDeliveryRoot(deliveryRoot, root, me); err != nil {
 		return err
 	}
-	if err := requireMailbox(root, me); err != nil {
-		return err
-	}
-	items, err = monitorInboxItems(deliveryRoot, root, common.Me, *includeBodyFlag, *limitFlag, validator, mode)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return NotFoundError("mailbox for %q disappeared while monitoring root %s", common.Me, root)
-		}
-		return err
-	}
+	items, err = monitorInboxItems(
+		deliveryRoot,
+		root,
+		common.Me,
+		*includeBodyFlag,
+		*limitFlag,
+		validator,
+		mode,
+		revalidateContext,
+	)
 
 	result := monitorResult{
 		Event:      "messages",
@@ -180,6 +198,10 @@ func runMonitor(args []string) error {
 		Drained:    items,
 	}
 
+	if handled, finishErr := finishMonitorCollection(common.JSON, root, result, err); handled {
+		return finishErr
+	}
+
 	if len(items) == 0 {
 		result.Event = "empty"
 	}
@@ -187,67 +209,201 @@ func runMonitor(args []string) error {
 	return outputMonitorResult(common.JSON, result)
 }
 
-func monitorInboxItems(deliveryRoot *fsq.DeliveryRoot, root, me string, includeBody bool, limit int, validator *headerValidator, mode string) ([]monitorItem, error) {
+func finishMonitorCollection(jsonOutput bool, root string, result monitorResult, collectErr error) (bool, error) {
+	// A drain may have committed earlier claims before a later failure. Surface
+	// those payloads first, then preserve the non-zero error for orchestration.
+	if len(result.Drained) > 0 {
+		if err := outputMonitorResult(jsonOutput, result); err != nil {
+			if collectErr != nil {
+				return true, errors.Join(collectErr, err)
+			}
+			return true, err
+		}
+	}
+	if collectErr != nil {
+		var committed *fsq.CommittedDurabilityError
+		if errors.As(collectErr, &committed) {
+			return true, collectErr
+		}
+		if os.IsNotExist(collectErr) {
+			return true, NotFoundError("mailbox for %q disappeared while monitoring root %s", result.Me, root)
+		}
+		return true, collectErr
+	}
+	return len(result.Drained) > 0, nil
+}
+
+func monitorInboxItems(
+	deliveryRoot *fsq.DeliveryRoot,
+	root, me string,
+	includeBody bool,
+	limit int,
+	validator *headerValidator,
+	mode string,
+	revalidateContext func() error,
+) ([]monitorItem, error) {
+	// A drain batch is one finite transaction: authorize immediately before it,
+	// then finish every claim, parse, receipt, and payload in that batch. A
+	// context change discovered mid-batch must not hide already-claimed messages
+	// from the consumer. Idle monitor loops revalidate separately while waiting.
+	if revalidateContext != nil {
+		if err := revalidateContext(); err != nil {
+			return nil, err
+		}
+	}
 	if mode == "peek" {
-		return collectInboxItems(root, me, includeBody, limit, validator)
+		return collectInboxItems(deliveryRoot, me, includeBody, limit, validator, revalidateContext)
 	}
 	return drainInboxItems(deliveryRoot, root, me, includeBody, limit, validator)
 }
 
-func monitorWithFsnotify(ctx context.Context, inboxNew string) (string, error) {
+func monitorWithFsnotify(ctx context.Context, inboxNew string, revalidateContext func() error) (string, error) {
+	return monitorWithFsnotifyProbe(
+		ctx,
+		inboxNew,
+		func() (bool, error) { return hasMessageFiles(inboxNew) },
+		revalidateContext,
+	)
+}
+
+func monitorWithFsnotifyDeliveryRoot(
+	ctx context.Context,
+	root *fsq.DeliveryRoot,
+	inboxNew string,
+	revalidateContext func() error,
+) (string, error) {
+	return monitorWithFsnotifyProbe(
+		ctx,
+		root.DisplayPath(inboxNew),
+		func() (bool, error) { return hasMessageFilesDeliveryRoot(root, inboxNew) },
+		revalidateContext,
+	)
+}
+
+func monitorWithFsnotifyProbe(
+	ctx context.Context,
+	inboxNewDisplay string,
+	hasMessages func() (bool, error),
+	revalidateContext func() error,
+) (string, error) {
+	if err := revalidateContext(); err != nil {
+		return "", err
+	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return monitorWithPolling(ctx, inboxNew)
+		return monitorWithPollingProbe(ctx, hasMessages, revalidateContext)
 	}
 	defer func() { _ = watcher.Close() }()
 
-	if err := watcher.Add(inboxNew); err != nil {
-		return monitorWithPolling(ctx, inboxNew)
+	if err := watcher.Add(inboxNewDisplay); err != nil {
+		return monitorWithPollingProbe(ctx, hasMessages, revalidateContext)
 	}
 
 	// Check for existing messages AFTER setting up watcher to avoid race condition
 	// (messages arriving between drain and watcher setup would be missed otherwise)
-	hasMessages, err := hasMessageFiles(inboxNew)
+	if err := revalidateContext(); err != nil {
+		return "", err
+	}
+	found, err := hasMessages()
 	if err != nil {
 		return "", err
 	}
-	if hasMessages {
+	if found {
 		return "existing", nil
 	}
+	if monitorIdleForTest != nil {
+		monitorIdleForTest()
+		if err := revalidateContext(); err != nil {
+			return "", err
+		}
+	}
+
+	contextTicker := time.NewTicker(500 * time.Millisecond)
+	defer contextTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
+		case <-contextTicker.C:
+			if err := revalidateContext(); err != nil {
+				return "", err
+			}
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return "", errors.New("watcher closed")
 			}
+			if err := revalidateContext(); err != nil {
+				return "", err
+			}
 			if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 &&
-				filepath.Clean(event.Name) == filepath.Clean(inboxNew) {
+				filepath.Clean(event.Name) == filepath.Clean(inboxNewDisplay) {
 				return "", os.ErrNotExist
 			}
 			if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
 				time.Sleep(10 * time.Millisecond)
+				if err := revalidateContext(); err != nil {
+					return "", err
+				}
 				return "new_message", nil
 			}
 		case err, ok := <-watcher.Errors:
 			if !ok {
 				return "", errors.New("watcher closed")
 			}
+			if contextErr := revalidateContext(); contextErr != nil {
+				return "", contextErr
+			}
 			return "", err
 		}
 	}
 }
 
-func monitorWithPolling(ctx context.Context, inboxNew string) (string, error) {
+func monitorWithPolling(ctx context.Context, inboxNew string, revalidateContext func() error) (string, error) {
+	return monitorWithPollingProbe(
+		ctx,
+		func() (bool, error) { return hasMessageFiles(inboxNew) },
+		revalidateContext,
+	)
+}
+
+func monitorWithPollingDeliveryRoot(
+	ctx context.Context,
+	root *fsq.DeliveryRoot,
+	inboxNew string,
+	revalidateContext func() error,
+) (string, error) {
+	return monitorWithPollingProbe(
+		ctx,
+		func() (bool, error) { return hasMessageFilesDeliveryRoot(root, inboxNew) },
+		revalidateContext,
+	)
+}
+
+func monitorWithPollingProbe(
+	ctx context.Context,
+	hasMessages func() (bool, error),
+	revalidateContext func() error,
+) (string, error) {
 	// Check immediately first to avoid missing messages that arrived before polling started
-	hasMessages, err := hasMessageFiles(inboxNew)
+	if err := revalidateContext(); err != nil {
+		return "", err
+	}
+	found, err := hasMessages()
 	if err != nil {
 		return "", err
 	}
-	if hasMessages {
+	if found {
 		return "existing", nil
+	}
+	if monitorIdleForTest != nil {
+		monitorIdleForTest()
+		if err := revalidateContext(); err != nil {
+			return "", err
+		}
+	}
+	if monitorPollingIdleForTest != nil {
+		monitorPollingIdleForTest()
 	}
 
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -258,11 +414,14 @@ func monitorWithPolling(ctx context.Context, inboxNew string) (string, error) {
 		case <-ctx.Done():
 			return "", ctx.Err()
 		case <-ticker.C:
-			hasMessages, err := hasMessageFiles(inboxNew)
+			if err := revalidateContext(); err != nil {
+				return "", err
+			}
+			found, err := hasMessages()
 			if err != nil {
 				return "", err
 			}
-			if hasMessages {
+			if found {
 				return "new_message", nil
 			}
 		}
@@ -275,6 +434,18 @@ func hasMessageFiles(dir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	return messageFilesPresent(entries), nil
+}
+
+func hasMessageFilesDeliveryRoot(root *fsq.DeliveryRoot, dir string) (bool, error) {
+	entries, err := root.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	return messageFilesPresent(entries), nil
+}
+
+func messageFilesPresent(entries []os.DirEntry) bool {
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -285,10 +456,10 @@ func hasMessageFiles(dir string) (bool, error) {
 			continue
 		}
 		if strings.HasSuffix(name, ".md") {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 func outputMonitorResult(jsonOutput bool, result monitorResult) error {

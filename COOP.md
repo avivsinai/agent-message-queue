@@ -109,6 +109,10 @@ and set `AMQ_GLOBAL_ROOT` to one absolute base. Use `amq doctor --ops` when a
 delivery receipt times out; it can name divergent same-session roots when a
 peer has fresher presence in another worktree.
 
+An unconfigured Git worktree or bare repository fails closed instead of implicitly using
+`~/.amqrc`. Add a local `.amqrc`, retain an existing pin, pass explicit
+`--root`, or set `AMQ_GLOBAL_ROOT` when sharing is intentional.
+
 For read-side access, prefer the named route:
 
 ```bash
@@ -117,13 +121,13 @@ amq drain --session auth --include-body
 ```
 
 When a terminal has a complete `AM_BASE_ROOT`/`AM_SESSION` pin, `read`, `drain`,
-`monitor`, `watch`, `reply`, and mutating DLQ commands refuse a conflicting raw
-`AM_ROOT`/`--root` before inspecting or moving mailbox state. Use `--session
-<name>` for sibling routing. For deliberate raw-root access,
-`--ignore-session-pin` requires a non-empty explicit `--root`; it never blesses
-an inherited `AM_ROOT`. `list` warns on a mismatch but remains available for
-non-destructive inspection. `doctor --root` also keeps inspection available
-with a mismatch warning, but `--fix-mailboxes` and
+`monitor`, `watch`, and all DLQ commands refuse a conflicting target before
+inspecting or moving mailbox state; `send` and `reply` apply the same check to
+their local source. Use `--session <name>` for sibling routing. For deliberate
+raw-root access, `--ignore-session-pin` requires a non-empty explicit `--root`;
+it never blesses an inherited `AM_ROOT`. `list` warns on a mismatch but remains
+available for non-destructive inspection. `doctor --root` also keeps inspection
+available with a mismatch warning, but `--fix-mailboxes` and
 `--ops --fix-wake-locks` require a matching pin unless that explicit root is
 paired with `--ignore-session-pin`. `--base-root` selects config authority and
 never waives the pin. A missing mailbox is an error, not an empty inbox.
@@ -133,7 +137,7 @@ never waives the pin. A missing mailbox is an error, not an empty inbox.
 When you can't use `exec` (non-interactive environments):
 ```bash
 amq coop init
-eval "$(amq env --me claude)"
+amq_context="$(amq env --me claude)" && eval "$amq_context"
 ```
 
 All shell-mode `amq env` output replaces `AM_ROOT`, `AM_ME`, `AM_BASE_ROOT`,
@@ -143,11 +147,21 @@ and `AM_SESSION` as one context. For a base/sessionless root it sets
 `amq env` resolves the root with the full precedence chain:
 
 ```text
-flags > AM_ROOT > project .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
+explicit --root > AM_ROOT > project-local .amqrc > AMQ_GLOBAL_ROOT > implicit fallbacks
 ```
 
-Auto-detect covers the default `.agent-mail` layout in the current tree, including `.agent-mail/<session>` session roots without `.amqrc`. Custom root names still need `.amqrc`, explicit flags, or env vars.
+Inside a Git worktree or bare repository, the remaining eligible fallback is repo-local detected
+`.agent-mail`; outside Git, `~/.amqrc` precedes detected `.agent-mail`.
+Auto-detect covers the default `.agent-mail` layout in the current tree,
+including `.agent-mail/<session>` session roots without `.amqrc`. Custom root
+names still need `.amqrc`, explicit flags, or env vars.
 That matters when agents are launched by external orchestrators from outside the project root.
+
+An initialized cwd-local queue is also a routing safety signal. If the terminal
+is pinned to a different root, implicit participating commands refuse instead
+of silently following the pin. Repin to the cwd-local queue, route deliberately
+with `--session`/`--project`, or pass an explicit `--root` to confirm the active
+queue; ordinary pin checks still apply.
 
 ## External Orchestrators
 

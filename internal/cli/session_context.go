@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -86,6 +87,30 @@ func loadSessionPin() (sessionPin, error) {
 	return pin, nil
 }
 
+// validateLegacySessionPinRoot keeps a complete legacy base/session pin from
+// silently overriding a contradictory live AM_ROOT. Identity pins authenticate
+// the same relationship separately; a missing AM_ROOT retains legacy support
+// for callers that inherited only AM_BASE_ROOT and AM_SESSION.
+func validateLegacySessionPinRoot(pin sessionPin) error {
+	if !pin.Present || pin.IdentityPin {
+		return nil
+	}
+	ambientRoot := strings.TrimSpace(os.Getenv(envRoot))
+	if ambientRoot == "" {
+		return nil
+	}
+	ambientRoot = absPath(resolveRoot(ambientRoot))
+	if ambientRoot == pin.ExpectedRoot {
+		return nil
+	}
+	return ContextMismatchError(
+		"session context mismatch: target root %s differs from pinned root %s (AM_SESSION=%q)",
+		ambientRoot,
+		pin.ExpectedRoot,
+		pin.Session,
+	)
+}
+
 // verifyRootUnderBase authenticates the base and proves that session is a
 // direct, non-symlink child of it before authenticating the resulting root.
 func verifyRootUnderBase(base, baseID, session, root, rootID string) error {
@@ -121,6 +146,9 @@ func sessionPinMismatch(target string) (*SessionContextError, error) {
 		return nil, err
 	}
 	if pin.Present {
+		if err := validateLegacySessionPinRoot(pin); err != nil {
+			return &SessionContextError{Message: err.Error()}, nil
+		}
 		if pin.IdentityPin {
 			if err := verifyRootUnderBase(pin.BaseRoot, pin.BaseRootID, pin.Session, target, pin.RootID); err != nil {
 				return &SessionContextError{Message: err.Error()}, nil
@@ -162,6 +190,9 @@ func isPinnedBaseRoot(target string) bool {
 	if err != nil || !pin.Present {
 		return false
 	}
+	if err := validateLegacySessionPinRoot(pin); err != nil {
+		return false
+	}
 	target = absPath(resolveRoot(target))
 	if !pin.IdentityPin {
 		return target == pin.BaseRoot
@@ -201,6 +232,9 @@ func resolveMailboxRoot(common *commonFlags, rawSession string) (root string, ro
 	base := ""
 	switch {
 	case pin.Present:
+		if err := validateLegacySessionPinRoot(pin); err != nil {
+			return "", false, err
+		}
 		if pin.IdentityPin {
 			if err := verifyRootUnderBase(pin.BaseRoot, pin.BaseRootID, pin.Session, root, pin.RootID); err != nil {
 				return "", false, err
@@ -264,9 +298,121 @@ func resolveSessionRoot(base, session string) (string, error) {
 	return target, nil
 }
 
-func guardMailboxContext(command, target string, routed, ignorePin bool) error {
+func cwdLocalMailboxRoot(target string) (string, bool, error) {
+	pin, err := loadSessionPin()
+	if err != nil || !pin.Present {
+		return "", false, err
+	}
+	preferredSession := pin.Session
+	if preferredSession == "" {
+		preferredSession = resolveSessionName(target)
+	}
+	return cwdLocalMailboxRootForSession(preferredSession)
+}
+
+func cwdLocalMailboxRootForSession(preferredSession string) (string, bool, error) {
+	var local string
+	result, err := findAndLoadAmqrc()
+	switch {
+	case err == nil && result.Config.Root != "":
+		local = result.Config.Root
+		if !filepath.IsAbs(local) {
+			local = filepath.Join(result.Dir, local)
+		}
+	case err == nil, errors.Is(err, errAmqrcNotFound):
+		local = detectAgentMailDir()
+	case strings.TrimSpace(os.Getenv(envRoot)) != "":
+		// AM_ROOT outranks a project config, including a broken one. The cwd
+		// safety probe must not re-select that lower-precedence error after root
+		// resolution already accepted the override. A detectable repo-local
+		// .agent-mail is still independent routing evidence and must keep the
+		// ordinary conflict refusal/warning behavior.
+		local = detectAgentMailDir()
+	default:
+		return "", false, err
+	}
+	if strings.TrimSpace(local) == "" {
+		return "", false, nil
+	}
+	local = absPath(resolveRoot(local))
+
+	// Prefer the local peer of the active session only when that peer is
+	// initialized. An empty same-named directory must not mask an initialized
+	// base or another initialized session in this tree.
+	if preferredSession != "" {
+		if candidate, ok := initializedDirectSessionRoot(local, preferredSession); ok {
+			return candidate, true, nil
+		}
+	}
+
+	if dirExists(filepath.Join(local, "agents")) {
+		return local, true, nil
+	}
+
+	entries, err := os.ReadDir(local)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		if candidate, ok := initializedDirectSessionRoot(local, entry.Name()); ok {
+			return candidate, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func initializedDirectSessionRoot(base, session string) (string, bool) {
+	candidate := filepath.Join(base, session)
+	info, err := os.Lstat(candidate)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", false
+	}
+	if !dirExists(filepath.Join(candidate, "agents")) {
+		return "", false
+	}
+	return candidate, true
+}
+
+func guardCwdLocalContext(command, target string) error {
+	pin, err := loadSessionPin()
+	if err != nil {
+		return err
+	}
+	if !pin.Present {
+		return nil
+	}
+	local, ok, err := cwdLocalMailboxRootForSession(pin.Session)
+	if err != nil || !ok {
+		return err
+	}
+	target = absPath(resolveRoot(target))
+	if sameBaseTree(local, target) {
+		return nil
+	}
+	return ContextMismatchError(
+		"refusing %s: active root %s conflicts with initialized repo-local root %s detected from cwd. Repin with `amq_context=\"$(amq env --root %s --me <handle>)\" && eval \"$amq_context\"`, or pass explicit --root %s to confirm the active queue",
+		command,
+		target,
+		local,
+		shellQuotePosix(local),
+		shellQuotePosix(target),
+	)
+}
+
+func guardMailboxContext(command, target string, routed, ignorePin, explicitRoot bool) error {
 	if routed || ignorePin {
 		return nil
+	}
+	if !explicitRoot {
+		if err := guardCwdLocalContext(command, target); err != nil {
+			return err
+		}
 	}
 	mismatch, err := sessionPinMismatch(target)
 	if err != nil {
@@ -278,9 +424,14 @@ func guardMailboxContext(command, target string, routed, ignorePin bool) error {
 	return ContextMismatchError("refusing %s: %s. Use --session <name> to route deliberately, or explicit --root with --ignore-session-pin", command, mismatch.Error())
 }
 
-func guardPinnedSourceContext(command, target string, ignorePin bool) error {
+func guardPinnedSourceContext(command, target string, crossProject, ignorePin, explicitRoot bool) error {
 	if ignorePin {
 		return nil
+	}
+	if !explicitRoot && !crossProject {
+		if err := guardCwdLocalContext(command, target); err != nil {
+			return err
+		}
 	}
 	mismatch, err := sessionPinMismatch(target)
 	if err != nil {

@@ -29,11 +29,6 @@ func requireMailboxDeliveryRoot(root *fsq.DeliveryRoot, displayRoot, me string) 
 	return nil
 }
 
-func deliveryInboxExists(root *fsq.DeliveryRoot, agent string) bool {
-	info, err := root.Stat(filepath.Join("agents", agent, "inbox"))
-	return err == nil && info.IsDir()
-}
-
 func deliveryAgentExists(root *fsq.DeliveryRoot, agent string) bool {
 	info, err := root.Stat(filepath.Join("agents", agent))
 	return err == nil && info.IsDir()

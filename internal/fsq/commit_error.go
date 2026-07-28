@@ -3,8 +3,8 @@ package fsq
 import "fmt"
 
 // CommittedDurabilityError means the visible rename succeeded, but the
-// destination directory could not be synced. Retrying with a new identifier
-// may duplicate an artifact that is already present at FinalPath.
+// affected directory metadata could not be fully synced. Retrying with a new
+// identifier may duplicate an artifact that is already present at FinalPath.
 type CommittedDurabilityError struct {
 	FinalPath string
 	Recipient string
@@ -22,8 +22,9 @@ func (e *CommittedDurabilityError) Unwrap() error {
 	return e.Err
 }
 
-// DLQTransitionError reports that a DLQ envelope is visible but its directory
-// sync failed, so the claimed source was deliberately retained for recovery.
+// DLQTransitionError reports an incomplete DLQ transition where the envelope
+// is visible but the recoverable source is still present. Completed logical
+// transitions with indeterminate durability use CommittedDurabilityError.
 type DLQTransitionError struct {
 	EnvelopePath   string
 	SourcePath     string
@@ -32,7 +33,7 @@ type DLQTransitionError struct {
 }
 
 func (e *DLQTransitionError) Error() string {
-	return fmt.Sprintf("DLQ envelope committed at %s with indeterminate durability; source retained at %s: %v; resolve the partial transition before retrying", e.EnvelopePath, e.SourcePath, e.Err)
+	return fmt.Sprintf("DLQ envelope visible at %s; source retained at %s: %v; resolve the partial transition before retrying", e.EnvelopePath, e.SourcePath, e.Err)
 }
 
 func (e *DLQTransitionError) Unwrap() error {

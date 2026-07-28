@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestOpenDeliveryRootRejectsSwapBetweenAuthorizationAndOpen(t *testing.T) {
@@ -124,8 +126,10 @@ func TestDeliveryRootConcurrentAncestorAndRootAliasSwap(t *testing.T) {
 				if restoreErr := <-restored; restoreErr != nil {
 					t.Fatal(restoreErr)
 				}
-				if err == nil || !strings.Contains(err.Error(), "delivery root changed after authorization") {
-					t.Fatalf("DeliverToInboxes error = %v, want root-change refusal", err)
+				if err == nil ||
+					!strings.Contains(err.Error(), "delivery root changed after authorization") ||
+					!strings.Contains(err.Error(), deliveryRootChangedRemedy) {
+					t.Fatalf("DeliverToInboxes error = %v, want actionable root-change refusal", err)
 				}
 			}
 			entries, err := os.ReadDir(AgentInboxNew(maliciousBase, "bob"))
@@ -136,5 +140,75 @@ func TestDeliveryRootConcurrentAncestorAndRootAliasSwap(t *testing.T) {
 				t.Fatalf("malicious inbox received %d messages", len(entries))
 			}
 		})
+	}
+}
+
+func TestDLQEnvelopeLockRechecksRootAliasAfterWaiting(t *testing.T) {
+	parent := t.TempDir()
+	base := filepath.Join(parent, "authorized")
+	parked := filepath.Join(parent, "authorized-parked")
+	outside := filepath.Join(parent, "outside")
+	for _, tree := range []string{base, outside} {
+		if err := EnsureAgentDirs(tree, "alice"); err != nil {
+			t.Fatalf("EnsureAgentDirs(%s): %v", tree, err)
+		}
+	}
+	identity, err := SnapshotDeliveryRoot(base)
+	if err != nil {
+		t.Fatalf("SnapshotDeliveryRoot: %v", err)
+	}
+	first, err := OpenDeliveryRoot(base, identity)
+	if err != nil {
+		t.Fatalf("OpenDeliveryRoot(first): %v", err)
+	}
+	defer func() { _ = first.Close() }()
+	second, err := OpenDeliveryRoot(base, identity)
+	if err != nil {
+		t.Fatalf("OpenDeliveryRoot(second): %v", err)
+	}
+	defer func() { _ = second.Close() }()
+
+	firstLocked := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- first.WithDLQEnvelopeLock("alice", "blocked.md", func(*DeliveryRoot) error {
+			close(firstLocked)
+			<-releaseFirst
+			return nil
+		})
+	}()
+	<-firstLocked
+
+	var secondCallbackRan atomic.Bool
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- second.WithDLQEnvelopeLock("alice", "blocked.md", func(*DeliveryRoot) error {
+			secondCallbackRan.Store(true)
+			return nil
+		})
+	}()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second lock did not wait: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := os.Rename(base, parked); err != nil {
+		t.Fatalf("park authorized root: %v", err)
+	}
+	if err := os.Symlink(outside, base); err != nil {
+		t.Fatalf("install replacement alias: %v", err)
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first lock holder: %v", err)
+	}
+	err = <-secondDone
+	if err == nil || !strings.Contains(err.Error(), "delivery root changed after authorization") {
+		t.Fatalf("waiting lock error = %v, want root-change refusal", err)
+	}
+	if secondCallbackRan.Load() {
+		t.Fatal("waiting lock callback ran after the authorized root alias changed")
 	}
 }

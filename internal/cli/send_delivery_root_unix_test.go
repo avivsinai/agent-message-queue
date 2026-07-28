@@ -18,6 +18,66 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
+func runBlockedBodyCommandAfterMutation(
+	t *testing.T,
+	name string,
+	command func(bodyPath string) error,
+	mutate func(),
+) error {
+	t.Helper()
+	bodyFIFO := filepath.Join(secureTempDirForTest(t), name+".fifo")
+	if err := syscall.Mkfifo(bodyFIFO, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	type openResult struct {
+		file *os.File
+		err  error
+	}
+	writerCh := make(chan openResult, 1)
+	go func() {
+		file, err := os.OpenFile(bodyFIFO, os.O_WRONLY, 0)
+		writerCh <- openResult{file: file, err: err}
+	}()
+	t.Cleanup(func() {
+		reader, err := os.OpenFile(bodyFIFO, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if err == nil {
+			_ = reader.Close()
+		}
+	})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- command(bodyFIFO)
+	}()
+
+	var writer *os.File
+	select {
+	case result := <-writerCh:
+		if result.err != nil {
+			t.Fatalf("open FIFO writer: %v", result.err)
+		}
+		writer = result.file
+	case err := <-errCh:
+		t.Fatalf("command returned before body read: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("command did not reach body read")
+	}
+	mutate()
+	if _, err := writer.Write([]byte("release after authorized state changed")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatal("command did not return after body release")
+		return nil
+	}
+}
+
 func TestSendRejectsSymlinkSwapAfterGuard(t *testing.T) {
 	parent := secureTempDirForTest(t)
 	authorizedAlias := filepath.Join(parent, "authorized")
@@ -526,6 +586,413 @@ func TestCrossProjectSendRevalidatesDisappearedConfigAfterBlockingBodyRead(t *te
 				if len(entries) != 1 {
 					t.Fatalf("non-strict send delivered %d messages, want 1", len(entries))
 				}
+			}
+		})
+	}
+}
+
+func TestCrossProjectReplyRevalidatesDisappearedBaseConfigAfterBlockingBodyRead(t *testing.T) {
+	clearDeliveryRootTestEnv(t)
+	sourceProjectDir := secureTempDirForTest(t)
+	sourceRoot := filepath.Join(sourceProjectDir, ".agent-mail", "collab")
+	peerBase := filepath.Join(secureTempDirForTest(t), "peer")
+	peerRoot := filepath.Join(peerBase, "collab")
+	if err := fsq.EnsureAgentDirs(sourceRoot, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(peerRoot, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	configureSendTestRoot(t, peerBase, "bob")
+	rcData, err := json.Marshal(map[string]any{
+		"root":    ".agent-mail",
+		"project": "source",
+		"peers":   map[string]string{"peer": peerBase},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceProjectDir, ".amqrc"), rcData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resetAmqrcCache()
+	t.Cleanup(resetAmqrcCache)
+	originalID := deliverOriginalForReply(t, sourceRoot, "alice", format.Header{
+		From:         "bob",
+		To:           []string{"alice"},
+		Thread:       "peer-config-disappearance",
+		ReplyTo:      "bob@collab",
+		ReplyProject: "peer",
+		FromProject:  "peer",
+	})
+
+	bodyFIFO := filepath.Join(secureTempDirForTest(t), "reply-config-removal-body.fifo")
+	if err := syscall.Mkfifo(bodyFIFO, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	type openResult struct {
+		file *os.File
+		err  error
+	}
+	writerCh := make(chan openResult, 1)
+	go func() {
+		file, err := os.OpenFile(bodyFIFO, os.O_WRONLY, 0)
+		writerCh <- openResult{file: file, err: err}
+	}()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runReply([]string{
+			"--root", sourceRoot,
+			"--me", "alice",
+			"--id", originalID,
+			"--strict",
+			"--body", "@" + bodyFIFO,
+		})
+	}()
+
+	var writer *os.File
+	select {
+	case result := <-writerCh:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		writer = result.file
+	case replyErr := <-errCh:
+		t.Fatalf("reply returned before body read: %v", replyErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("reply did not reach body read after peer roster validation")
+	}
+	configPath := filepath.Join(peerBase, "meta", "config.json")
+	if err := os.Rename(configPath, configPath+".removed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("fresh config authority required")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	replyErr := <-errCh
+	const transition = "selected peer config.json disappeared after initial validation"
+	if replyErr == nil || !strings.Contains(replyErr.Error(), transition) {
+		t.Fatalf("strict reply error = %v, want disappeared-config refusal", replyErr)
+	}
+	if got := inboxCount(t, peerRoot, "bob"); got != 0 {
+		t.Fatalf("strict reply delivered %d messages after peer config disappeared", got)
+	}
+}
+
+func TestCrossProjectSendRevalidatesChangedSourceBaseConfigAfterBlockingBodyRead(t *testing.T) {
+	clearDeliveryRootTestEnv(t)
+	sourceProjectDir := secureTempDirForTest(t)
+	sourceBase := filepath.Join(sourceProjectDir, ".agent-mail")
+	sourceRoot := filepath.Join(sourceBase, "collab")
+	peerBase := filepath.Join(secureTempDirForTest(t), "peer")
+	peerRoot := filepath.Join(peerBase, "collab")
+	if err := fsq.EnsureAgentDirs(sourceRoot, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(peerRoot, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	configureSendTestRoot(t, sourceBase, "alice")
+	configureSendTestRoot(t, peerBase, "bob")
+	rcData, err := json.Marshal(map[string]any{
+		"root":    ".agent-mail",
+		"project": "source",
+		"peers":   map[string]string{"peer": peerBase},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceProjectDir, ".amqrc"), rcData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resetAmqrcCache()
+	t.Cleanup(resetAmqrcCache)
+
+	bodyFIFO := filepath.Join(secureTempDirForTest(t), "source-config-change-body.fifo")
+	if err := syscall.Mkfifo(bodyFIFO, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	type openResult struct {
+		file *os.File
+		err  error
+	}
+	writerCh := make(chan openResult, 1)
+	go func() {
+		file, err := os.OpenFile(bodyFIFO, os.O_WRONLY, 0)
+		writerCh <- openResult{file: file, err: err}
+	}()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runSend([]string{
+			"--root", sourceRoot,
+			"--me", "alice",
+			"--to", "bob",
+			"--project", "peer",
+			"--strict",
+			"--body", "@" + bodyFIFO,
+		})
+	}()
+
+	var writer *os.File
+	select {
+	case result := <-writerCh:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		writer = result.file
+	case sendErr := <-errCh:
+		t.Fatalf("send returned before body read: %v", sendErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("send did not reach body read after source roster validation")
+	}
+	if err := config.WriteConfig(
+		filepath.Join(sourceBase, "meta", "config.json"),
+		config.Config{Version: 1, Agents: []string{"carol"}},
+		true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("fresh source authority required")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	sendErr := <-errCh
+	if sendErr == nil || !strings.Contains(sendErr.Error(), `handle "alice" not in config.json`) {
+		t.Fatalf("strict send error = %v, want changed source-roster refusal", sendErr)
+	}
+	if got := inboxCount(t, peerRoot, "bob"); got != 0 {
+		t.Fatalf("strict send delivered %d messages after source roster changed", got)
+	}
+}
+
+func TestCrossProjectReplyRevalidatesChangedSourceBaseConfigAfterBlockingBodyRead(t *testing.T) {
+	clearDeliveryRootTestEnv(t)
+	sourceProjectDir := secureTempDirForTest(t)
+	sourceBase := filepath.Join(sourceProjectDir, ".agent-mail")
+	sourceRoot := filepath.Join(sourceBase, "collab")
+	peerBase := filepath.Join(secureTempDirForTest(t), "peer")
+	peerRoot := filepath.Join(peerBase, "collab")
+	if err := fsq.EnsureAgentDirs(sourceRoot, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(peerRoot, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	configureSendTestRoot(t, sourceBase, "alice")
+	configureSendTestRoot(t, peerBase, "bob")
+	rcData, err := json.Marshal(map[string]any{
+		"root":    ".agent-mail",
+		"project": "source",
+		"peers":   map[string]string{"peer": peerBase},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceProjectDir, ".amqrc"), rcData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resetAmqrcCache()
+	t.Cleanup(resetAmqrcCache)
+	originalID := deliverOriginalForReply(t, sourceRoot, "alice", format.Header{
+		From:         "bob",
+		To:           []string{"alice"},
+		Thread:       "source-roster-change-reply",
+		ReplyTo:      "bob@collab",
+		ReplyProject: "peer",
+		FromProject:  "peer",
+	})
+
+	replyErr := runBlockedBodyCommandAfterMutation(
+		t,
+		"reply-source-config-change",
+		func(bodyPath string) error {
+			return runReply([]string{
+				"--root", sourceRoot,
+				"--me", "alice",
+				"--id", originalID,
+				"--strict",
+				"--body", "@" + bodyPath,
+			})
+		},
+		func() {
+			if err := config.WriteConfig(
+				filepath.Join(sourceBase, "meta", "config.json"),
+				config.Config{Version: 1, Agents: []string{"carol"}},
+				true,
+			); err != nil {
+				t.Fatal(err)
+			}
+		},
+	)
+	if replyErr == nil || !strings.Contains(replyErr.Error(), `handle "alice" not in config.json`) {
+		t.Fatalf("strict reply error = %v, want changed source-roster refusal", replyErr)
+	}
+	if got := inboxCount(t, peerRoot, "bob"); got != 0 {
+		t.Fatalf("strict reply delivered %d messages after source roster changed", got)
+	}
+}
+
+func TestRoutedSendAndReplyRejectSourceSessionReplacementAfterBlockingBodyRead(t *testing.T) {
+	for _, operation := range []string{"send", "reply"} {
+		t.Run(operation, func(t *testing.T) {
+			clearDeliveryRootTestEnv(t)
+			sourceProjectDir := secureTempDirForTest(t)
+			sourceBase := filepath.Join(sourceProjectDir, ".agent-mail")
+			sourceRoot := filepath.Join(sourceBase, "collab")
+			movedSourceRoot := filepath.Join(sourceBase, "collab-authorized")
+			replacementRoot := filepath.Join(sourceBase, "replacement")
+			peerBase := filepath.Join(secureTempDirForTest(t), "peer")
+			peerRoot := filepath.Join(peerBase, "collab")
+			for _, root := range []string{sourceRoot, replacementRoot} {
+				if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := fsq.EnsureAgentDirs(peerRoot, "bob"); err != nil {
+				t.Fatal(err)
+			}
+			configureSendTestRoot(t, sourceBase, "alice")
+			configureSendTestRoot(t, peerBase, "bob")
+			rcData, err := json.Marshal(map[string]any{
+				"root":    ".agent-mail",
+				"project": "source",
+				"peers":   map[string]string{"peer": peerBase},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sourceProjectDir, ".amqrc"), rcData, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			resetAmqrcCache()
+			t.Cleanup(resetAmqrcCache)
+
+			originalID := ""
+			if operation == "reply" {
+				originalID = deliverOriginalForReply(t, sourceRoot, "alice", format.Header{
+					From:         "bob",
+					To:           []string{"alice"},
+					Thread:       "source-session-replacement-reply",
+					ReplyTo:      "bob@collab",
+					ReplyProject: "peer",
+					FromProject:  "peer",
+				})
+			}
+			commandErr := runBlockedBodyCommandAfterMutation(
+				t,
+				operation+"-source-session-replacement",
+				func(bodyPath string) error {
+					if operation == "send" {
+						return runSend([]string{
+							"--root", sourceRoot,
+							"--me", "alice",
+							"--to", "bob",
+							"--project", "peer",
+							"--session", "collab",
+							"--strict",
+							"--body", "@" + bodyPath,
+						})
+					}
+					return runReply([]string{
+						"--root", sourceRoot,
+						"--me", "alice",
+						"--id", originalID,
+						"--strict",
+						"--body", "@" + bodyPath,
+					})
+				},
+				func() {
+					if err := os.Rename(sourceRoot, movedSourceRoot); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Rename(replacementRoot, sourceRoot); err != nil {
+						t.Fatal(err)
+					}
+				},
+			)
+			if commandErr == nil || !strings.Contains(commandErr.Error(), "delivery root changed after authorization") {
+				t.Fatalf("%s error = %v, want source-root replacement refusal", operation, commandErr)
+			}
+			if got := inboxCount(t, peerRoot, "bob"); got != 0 {
+				t.Fatalf("%s delivered %d messages after source session replacement", operation, got)
+			}
+		})
+	}
+}
+
+func TestCrossSessionSendAndReplyRejectSourceSessionReplacementAfterBlockingBodyRead(t *testing.T) {
+	for _, operation := range []string{"send", "reply"} {
+		t.Run(operation, func(t *testing.T) {
+			clearDeliveryRootTestEnv(t)
+			baseRoot := filepath.Join(secureTempDirForTest(t), ".agent-mail")
+			sourceRoot := filepath.Join(baseRoot, "collab")
+			movedSourceRoot := filepath.Join(baseRoot, "collab-authorized")
+			replacementRoot := filepath.Join(baseRoot, "replacement")
+			targetRoot := filepath.Join(baseRoot, "qa")
+			for _, root := range []string{sourceRoot, replacementRoot} {
+				if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := fsq.EnsureAgentDirs(targetRoot, "bob"); err != nil {
+				t.Fatal(err)
+			}
+			configureSendTestRoot(t, baseRoot, "alice", "bob")
+
+			originalID := ""
+			if operation == "reply" {
+				originalID = deliverOriginalForReply(t, sourceRoot, "alice", format.Header{
+					From:    "bob",
+					To:      []string{"alice"},
+					Thread:  "cross-session-source-replacement-reply",
+					ReplyTo: "bob@qa",
+				})
+			}
+			commandErr := runBlockedBodyCommandAfterMutation(
+				t,
+				operation+"-cross-session-source-replacement",
+				func(bodyPath string) error {
+					if operation == "send" {
+						return runSend([]string{
+							"--root", sourceRoot,
+							"--me", "alice",
+							"--to", "bob",
+							"--session", "qa",
+							"--strict",
+							"--body", "@" + bodyPath,
+						})
+					}
+					return runReply([]string{
+						"--root", sourceRoot,
+						"--me", "alice",
+						"--id", originalID,
+						"--strict",
+						"--body", "@" + bodyPath,
+					})
+				},
+				func() {
+					if err := os.Rename(sourceRoot, movedSourceRoot); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Rename(replacementRoot, sourceRoot); err != nil {
+						t.Fatal(err)
+					}
+				},
+			)
+			if commandErr == nil || !strings.Contains(commandErr.Error(), "delivery root changed after authorization") {
+				t.Fatalf("%s error = %v, want cross-session source-root replacement refusal", operation, commandErr)
+			}
+			if got := inboxCount(t, targetRoot, "bob"); got != 0 {
+				t.Fatalf("%s delivered %d cross-session messages after source replacement", operation, got)
 			}
 		})
 	}

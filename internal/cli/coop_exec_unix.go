@@ -123,31 +123,44 @@ func runCoopExec(args []string) error {
 
 	// Resolve explicit --session (pure sugar for --root <base>/<session>).
 	if *sessionFlag != "" {
-		if *rootFlag != "" {
+		if flagWasVisited(fs, "root") {
 			return UsageError("--session and --root are mutually exclusive")
 		}
 		if err := validateSessionName(*sessionFlag); err != nil {
 			return err
 		}
-		base := resolveBaseRoot()
+		base, ambient, err := resolveCoopAmbientSessionBase()
+		if err != nil {
+			return err
+		}
+		if !ambient {
+			base, err = resolveBaseRoot()
+			if err != nil {
+				return err
+			}
+		}
 		*rootFlag = filepath.Join(base, *sessionFlag)
 	}
 
-	// Resolve root: --root flag (or --session-derived) > .amqrc > default.
+	// Resolve root: --root flag (or --session-derived) > ambient context >
+	// project/repo-local/global discovery > local initialization.
 	root := *rootFlag
 	sessionProvisioned := false
 	if root == "" {
-		existing, existingErr := findAndLoadAmqrc()
-		switch existingErr {
-		case nil:
-			root = existing.Config.Root
-			if root != "" && !filepath.IsAbs(root) {
-				root = filepath.Join(existing.Dir, root)
+		ambientBase, ambient, ambientErr := resolveCoopAmbientSessionBase()
+		if ambientErr != nil {
+			return ambientErr
+		}
+		if ambient {
+			root = ambientBase
+		} else {
+			discoveredBase, found, discoveryErr := resolveDiscoveredBaseRoot()
+			if discoveryErr != nil {
+				return fmt.Errorf("invalid AMQ root configuration: %w", discoveryErr)
 			}
-		case errAmqrcNotFound:
-			// Will auto-init below.
-		default:
-			return fmt.Errorf("invalid .amqrc: %w", existingErr)
+			if found {
+				root = discoveredBase
+			}
 		}
 	}
 
@@ -176,7 +189,7 @@ func runCoopExec(args []string) error {
 	if root == "" || !dirExists(root) {
 		if *noInitFlag {
 			if root == "" {
-				return fmt.Errorf("no .amqrc found and no --root specified; run 'amq coop init' first or remove --no-init")
+				return fmt.Errorf("no project, repo-local, or global AMQ root found and no --root specified; run 'amq coop init' first or remove --no-init")
 			}
 			return fmt.Errorf("root %q does not exist; run 'amq coop init' first or remove --no-init", root)
 		}
@@ -190,9 +203,10 @@ func runCoopExec(args []string) error {
 				return fmt.Errorf("failed to create mailbox for %s at %q: %w", agentHandle, root, err)
 			}
 		} else {
-			// No --root flag and no .amqrc found: run full coop init (writes .amqrc).
+			// No explicit, ambient, project, repo-local, or global root: run
+			// full coop init in the cwd (writes .amqrc).
 			if !*yesFlag {
-				ok, err := confirmPromptYes("No .amqrc found. Initialize co-op mode in current directory?")
+				ok, err := confirmPromptYes("No project, repo-local, or global AMQ root found. Initialize co-op mode in current directory?")
 				if err != nil {
 					return err
 				}
@@ -915,6 +929,44 @@ func wakeReadyMessage(root, agentHandle string, startedPID int) string {
 		return fmt.Sprintf("Using existing amq wake (pid %d)", inspection.PID)
 	}
 	return fmt.Sprintf("Started amq wake (pid %d)", startedPID)
+}
+
+// resolveCoopAmbientSessionBase returns the base selected by an inherited AMQ
+// context. A complete pin owns routing; otherwise AM_ROOT keeps its normal
+// precedence and is classified as either a base or a session root. Callers use
+// the project/global fallback only when no ambient context exists.
+func resolveCoopAmbientSessionBase() (string, bool, error) {
+	pin, err := loadSessionPin()
+	if err != nil {
+		return "", false, err
+	}
+	if pin.Present {
+		if err := validateLegacySessionPinRoot(pin); err != nil {
+			return "", false, err
+		}
+		if pin.IdentityPin {
+			ambientRoot := strings.TrimSpace(os.Getenv(envRoot))
+			if ambientRoot == "" {
+				ambientRoot = pin.ExpectedRoot
+			}
+			if err := verifyRootUnderBase(
+				pin.BaseRoot,
+				pin.BaseRootID,
+				pin.Session,
+				ambientRoot,
+				pin.RootID,
+			); err != nil {
+				return "", false, err
+			}
+		}
+		return pin.BaseRoot, true, nil
+	}
+
+	ambientRoot := strings.TrimSpace(os.Getenv(envRoot))
+	if ambientRoot == "" {
+		return "", false, nil
+	}
+	return absPath(baseRootOf(ambientRoot)), true, nil
 }
 
 // splitDashDash splits args at the first "--" separator.

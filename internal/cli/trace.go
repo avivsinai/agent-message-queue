@@ -105,7 +105,7 @@ type traceCollector struct {
 func runTrace(args []string) error {
 	fs := flag.NewFlagSet("trace", flag.ContinueOnError)
 	common := &commonFlags{flagSet: fs}
-	fs.StringVar(&common.Root, "root", defaultRoot(), "Root directory for the queue")
+	registerImplicitRootFlag(fs, &common.Root, "Root directory for the queue")
 	fs.BoolVar(&common.JSON, "json", false, "Emit JSON output")
 	usage := usageWithFlags(fs, "amq trace <message-id> [options]",
 		"Join current on-disk evidence for one message without mutating the queue.",

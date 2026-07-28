@@ -57,7 +57,7 @@ func runReply(args []string) error {
 	if err := validatePinOverride(common, *ignoreSessionPinFlag, false); err != nil {
 		return err
 	}
-	if err := guardPinnedSourceContext("reply", root, *ignoreSessionPinFlag); err != nil {
+	if err := guardPinnedSourceContext("reply", root, false, *ignoreSessionPinFlag, common.rootExplicit()); err != nil {
 		return err
 	}
 
@@ -141,60 +141,31 @@ func runReply(args []string) error {
 	var deliveryRoot string
 	var targetSession string
 	var targetProject string
+	var sourceProject string
 
-	if originalMsg.Header.ReplyProject != "" && originalMsg.Header.ReplyTo != "" {
+	if originalMsg.Header.ReplyProject != "" {
 		// Cross-project reply: route via peer lookup.
-		targetProject = originalMsg.Header.ReplyProject
-
-		// reply_to is either "handle@session" (cross-project+session) or "handle" (base root).
-		parts := strings.SplitN(originalMsg.Header.ReplyTo, "@", 2)
-		recipientNorm, err := normalizeHandle(parts[0])
+		targetProject = strings.TrimSpace(originalMsg.Header.ReplyProject)
+		if targetProject == "" {
+			return fmt.Errorf("invalid empty reply_project in original message")
+		}
+		recipientNorm, sessionNorm, err := parseReplyToRoute(originalMsg.Header.ReplyTo, true)
 		if err != nil {
-			return fmt.Errorf("invalid handle in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
-		}
-		recipient = recipientNorm
-
-		peerBaseRoot, err := resolvePeer(root, targetProject)
-		if err != nil {
-			return err
-		}
-
-		if len(parts) == 2 && parts[1] != "" {
-			// Cross-project + session: deliver to peer's session.
-			sessionNorm, err := normalizeHandle(parts[1])
-			if err != nil {
-				return fmt.Errorf("invalid session in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
-			}
-			targetSession = sessionNorm
-			deliveryRoot = filepath.Join(peerBaseRoot, targetSession)
-		} else {
-			// Cross-project, base root: deliver to peer's base root.
-			deliveryRoot = peerBaseRoot
-		}
-
-	} else if originalMsg.Header.ReplyTo != "" {
-		// Cross-session reply (no cross-project). Strict reply_to parsing.
-		parts := strings.SplitN(originalMsg.Header.ReplyTo, "@", 2)
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			return fmt.Errorf("malformed reply_to %q: expected handle@session", originalMsg.Header.ReplyTo)
-		}
-		recipientNorm, err := normalizeHandle(parts[0])
-		if err != nil {
-			return fmt.Errorf("invalid handle in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
-		}
-		sessionNorm, err := normalizeHandle(parts[1])
-		if err != nil {
-			return fmt.Errorf("invalid session in reply_to %q: %v", originalMsg.Header.ReplyTo, err)
+			return fmt.Errorf("malformed cross-project reply metadata for project %q: %w", targetProject, err)
 		}
 		recipient = recipientNorm
 		targetSession = sessionNorm
 
-		// Use classifyRoot for consistent root resolution.
-		baseRoot := classifyRoot(root)
-		if baseRoot == "" {
-			return fmt.Errorf("cannot route cross-session reply: run from inside 'amq coop exec --session <name>'")
+	} else if originalMsg.Header.ReplyTo != "" {
+		// A same-project routing hint must include a session. Bare handles are
+		// meaningful only alongside reply_project, where they identify a peer's
+		// base root.
+		recipientNorm, sessionNorm, err := parseReplyToRoute(originalMsg.Header.ReplyTo, false)
+		if err != nil {
+			return err
 		}
-		deliveryRoot = filepath.Join(baseRoot, targetSession)
+		recipient = recipientNorm
+		targetSession = sessionNorm
 	} else {
 		// Local reply: send to original sender in current session.
 		rawRecipient := originalMsg.Header.From
@@ -213,9 +184,16 @@ func runReply(args []string) error {
 			return fmt.Errorf("invalid recipient handle in original message: %q (normalized to %q)", rawRecipient, recipientNorm)
 		}
 		recipient = recipientNorm
-		deliveryRoot = root
 
 	}
+
+	routePlan, err := planDeliveryRoute(root, targetProject, targetSession, deliveryRouteOptions{})
+	if err != nil {
+		return err
+	}
+	deliveryRoot = routePlan.DeliveryRoot
+	targetSession = routePlan.TargetSession
+	sourceProject = routePlan.SourceProject
 
 	deliveryFS := sourceFS
 	if filepath.Clean(root) != filepath.Clean(deliveryRoot) {
@@ -229,22 +207,96 @@ func runReply(args []string) error {
 		}
 		defer func() { _ = deliveryFS.Close() }()
 	}
-	if !deliveryInboxExists(deliveryFS, recipient) {
-		switch {
-		case targetProject != "" && targetSession != "":
-			return fmt.Errorf("agent %q not found in peer %q session %q", recipient, targetProject, targetSession)
-		case targetProject != "":
-			return fmt.Errorf("agent %q not found in peer %q", recipient, targetProject)
-		case targetSession != "":
-			return fmt.Errorf("agent %q not found in session %q", recipient, targetSession)
-		default:
-			return fmt.Errorf("agent %q not found in current session (no reply_to in original message — sender may not be in a session)", recipient)
-		}
-	}
 
-	// Validate recipient through the same capability used for delivery.
-	if err := validateKnownHandlesDeliveryRoot(deliveryFS, common.Strict, recipient); err != nil {
-		return err
+	var localMailboxAuthorization *fsq.MailboxConfigAuthorization
+	var peerConfigFS *fsq.DeliveryRoot
+	var peerConfigPresent bool
+	var sourceConfigFS *fsq.DeliveryRoot
+	var sourceConfigPresent bool
+	if targetProject != "" {
+		sourceConfigBase, expectedSourceBaseRootID := localMailboxConfigAuthority(
+			root,
+			pin,
+			*ignoreSessionPinFlag,
+		)
+		sourceConfigSelection, err := openMailboxConfigSelection(
+			sourceFS,
+			root,
+			sourceConfigBase,
+			expectedSourceBaseRootID,
+		)
+		if err != nil {
+			return err
+		}
+		defer sourceConfigSelection.Close()
+		sourceAgents, configPresent, sourceAgentsErr := loadPeerAgentsForSend(
+			sourceConfigSelection.ConfigFS,
+			common.Strict,
+		)
+		if err := validateKnownHandlesFromAgents(sourceAgents, sourceAgentsErr, common.Strict, me); err != nil {
+			return err
+		}
+		sourceConfigFS = sourceConfigSelection.ConfigFS
+		sourceConfigPresent = configPresent
+
+		peerConfigSelection, err := openMailboxConfigSelection(
+			deliveryFS,
+			deliveryRoot,
+			routePlan.PeerBaseRoot,
+			"",
+		)
+		if err != nil {
+			return err
+		}
+		defer peerConfigSelection.Close()
+		if !deliveryAgentExists(deliveryFS, recipient) {
+			if targetSession != "" {
+				return fmt.Errorf("agent %q not found in peer %q session %q", recipient, targetProject, targetSession)
+			}
+			return fmt.Errorf("agent %q not found in peer %q", recipient, targetProject)
+		}
+		if layoutErr := fsq.ValidateExistingMailboxLayout(deliveryFS, recipient); layoutErr != nil {
+			return layoutErr
+		}
+		peerAgents, configPresent, peerAgentsErr := loadPeerAgentsForSend(
+			peerConfigSelection.ConfigFS,
+			common.Strict,
+		)
+		if err := validateKnownHandlesFromAgents(peerAgents, peerAgentsErr, common.Strict, recipient); err != nil {
+			return err
+		}
+		peerConfigFS = peerConfigSelection.ConfigFS
+		peerConfigPresent = configPresent
+	} else {
+		layoutErr := fsq.ValidateExistingMailboxLayout(deliveryFS, recipient)
+		authorization, cleanup, err := openLocalMailboxAuthorization(
+			deliveryFS,
+			deliveryRoot,
+			pin,
+			*ignoreSessionPinFlag,
+			true,
+		)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		if authorization == nil {
+			if layoutErr != nil {
+				return layoutErr
+			}
+			if err := validateKnownHandlesDeliveryRoot(deliveryFS, common.Strict, recipient); err != nil {
+				return err
+			}
+		} else {
+			if err := validateAuthorizedLocalMailbox(deliveryFS, authorization, recipient); err != nil {
+				return err
+			}
+			targetAgents := withReservedHumanHandle(authorization.ConfiguredAgents())
+			if err := validateKnownHandlesFromAgents(targetAgents, nil, common.Strict, recipient); err != nil {
+				return err
+			}
+			localMailboxAuthorization = authorization
+		}
 	}
 
 	body, err := readBody(*bodyFlag, *allowEmptyFlag)
@@ -285,6 +337,7 @@ func runReply(args []string) error {
 	if err != nil {
 		return err
 	}
+	replyTo := replyToForSource(me, root, targetProject, targetSession)
 
 	msg := format.Message{
 		Header: format.Header{
@@ -301,24 +354,16 @@ func runReply(args []string) error {
 			Labels:   labels,
 			Context:  context,
 			// Restamp ReplyTo/ReplyProject so the recipient can reply back.
-			ReplyTo: func() string {
-				if targetSession != "" {
-					return me + "@" + sessionName(root)
-				}
-				if targetProject != "" {
-					return me // base-root cross-project: just handle
-				}
-				return ""
-			}(),
+			ReplyTo: replyTo,
 			ReplyProject: func() string {
 				if targetProject != "" {
-					return resolveProject(root)
+					return sourceProject
 				}
 				return ""
 			}(),
 			FromProject: func() string {
 				if targetProject != "" {
-					return resolveProject(root)
+					return sourceProject
 				}
 				return ""
 			}(),
@@ -330,14 +375,61 @@ func runReply(args []string) error {
 	if err != nil {
 		return err
 	}
+	if localMailboxAuthorization != nil {
+		if err := prepareLocalSendMailboxes(
+			deliveryFS,
+			localMailboxAuthorization,
+			deliveryRoot,
+			[]string{recipient},
+		); err != nil {
+			return err
+		}
+		if err := localMailboxAuthorization.Verify(); err != nil {
+			return fmt.Errorf("destination mailbox authorization changed before delivery: %w", err)
+		}
+	}
 
 	filename := id + ".md"
 	if targetProject != "" {
+		currentSourceAgents, currentSourceAgentsErr := revalidateSourceAgentsForSend(
+			sourceConfigFS,
+			sourceConfigPresent,
+			common.Strict,
+		)
+		if err := validateKnownHandlesFromAgents(
+			currentSourceAgents,
+			currentSourceAgentsErr,
+			common.Strict,
+			me,
+		); err != nil {
+			return err
+		}
+		currentPeerAgents, currentPeerAgentsErr := revalidatePeerAgentsForSend(
+			peerConfigFS,
+			peerConfigPresent,
+			common.Strict,
+		)
+		if err := validateKnownHandlesFromAgents(
+			currentPeerAgents,
+			currentPeerAgentsErr,
+			common.Strict,
+			recipient,
+		); err != nil {
+			return err
+		}
+		if err := sourceFS.VerifyBase(); err != nil {
+			return err
+		}
 		// Cross-project: use DeliverToExistingInbox (never creates dirs in peer).
 		if _, err := fsq.DeliverToExistingInbox(deliveryFS, recipient, filename, data); err != nil {
 			return reportDeliveryError(id, err)
 		}
 	} else {
+		if targetSession != "" {
+			if err := sourceFS.VerifyBase(); err != nil {
+				return err
+			}
+		}
 		if _, err := fsq.DeliverToInboxes(deliveryFS, []string{recipient}, filename, data); err != nil {
 			return reportDeliveryError(id, err)
 		}
@@ -388,7 +480,7 @@ func runReply(args []string) error {
 		}
 		if targetProject != "" {
 			out["cross_project"] = true
-			out["source_project"] = resolveProject(root)
+			out["source_project"] = sourceProject
 			out["target_project"] = targetProject
 		}
 		if targetSession != "" {
@@ -426,4 +518,51 @@ func runReply(args []string) error {
 		return waitErr
 	}
 	return writeStdout("Replied %s to %s (session: %s, root: %s)\n", id, recipient, targetDisplay, deliveryRoot)
+}
+
+// parseReplyToRoute accepts exactly one reply routing shape: handle@session,
+// or a bare handle when a cross-project reply may target the peer's base root.
+func parseReplyToRoute(raw string, allowBase bool) (handle, session string, err error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", "", fmt.Errorf("malformed reply_to %q: value is empty", raw)
+	}
+	if value != raw || strings.Count(value, "@") > 1 {
+		return "", "", fmt.Errorf("malformed reply_to %q: expected handle or handle@session", raw)
+	}
+
+	parts := strings.Split(value, "@")
+	if len(parts) == 1 {
+		if !allowBase {
+			return "", "", fmt.Errorf("malformed reply_to %q: expected handle@session", raw)
+		}
+	} else if parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("malformed reply_to %q: expected non-empty handle@session", raw)
+	}
+
+	handle, err = normalizeHandle(parts[0])
+	if err != nil {
+		return "", "", fmt.Errorf("invalid handle in reply_to %q: %w", raw, err)
+	}
+	if len(parts) == 1 {
+		return handle, "", nil
+	}
+	session, err = normalizeHandle(parts[1])
+	if err != nil {
+		return "", "", fmt.Errorf("invalid session in reply_to %q: %w", raw, err)
+	}
+	return handle, session, nil
+}
+
+func replyToForSource(me, sourceRoot, targetProject, targetSession string) string {
+	if targetProject == "" && targetSession == "" {
+		return ""
+	}
+	if sourceSession := resolveSessionName(sourceRoot); sourceSession != "" {
+		return me + "@" + sourceSession
+	}
+	if targetProject != "" {
+		return me
+	}
+	return ""
 }

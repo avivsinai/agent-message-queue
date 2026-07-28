@@ -355,9 +355,9 @@ func checkSessionPinIdentity(root string) doctorCheck {
 		check.Message = err.Error()
 		return check
 	}
-	if !pin.IdentityPin {
-		check.Status = "ok"
-		check.Message = "legacy lexical pin (identity tokens absent)"
+	if err := validateLegacySessionPinRoot(pin); err != nil {
+		check.Status = "warn"
+		check.Message = err.Error()
 		return check
 	}
 	mismatch, err := sessionPinMismatch(root)
@@ -369,11 +369,20 @@ func checkSessionPinIdentity(root string) doctorCheck {
 	if mismatch != nil {
 		if isPinnedBaseRoot(root) {
 			check.Status = "ok"
-			check.Message = "verified pinned base root"
+			if pin.IdentityPin {
+				check.Message = "verified pinned base root"
+			} else {
+				check.Message = "legacy lexical pinned base root (identity tokens absent)"
+			}
 			return check
 		}
 		check.Status = "warn"
 		check.Message = mismatch.Error()
+		return check
+	}
+	if !pin.IdentityPin {
+		check.Status = "ok"
+		check.Message = "legacy lexical pin (identity tokens absent)"
 		return check
 	}
 	check.Status = "ok"

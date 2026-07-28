@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,143 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
+
+func TestDrainRefusesPinnedRootWhenCwdHasRepoLocalSession(t *testing.T) {
+	parent := t.TempDir()
+	globalProject := filepath.Join(parent, "global")
+	repoProject := filepath.Join(parent, "snagline")
+	globalBase := filepath.Join(globalProject, ".agent-mail")
+	globalRoot := sessionRoot(t, globalProject, "session1", "alice")
+	repoRoot := sessionRoot(t, repoProject, "session1", "alice")
+	deliverGuardMessage(t, globalRoot, "alice", "wrong project")
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(repoProject); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	pinSendSessionForTest(t, globalBase, globalRoot, "session1")
+
+	err = runDrain([]string{"--me", "alice"})
+	assertConsumeRefused(t, err, "drain")
+	if got := inboxCount(t, globalRoot, "alice"); got != 1 {
+		t.Fatalf("ambiguous drain moved global inbox message; count = %d, want 1", got)
+	}
+	if got := inboxCount(t, repoRoot, "alice"); got != 0 {
+		t.Fatalf("ambiguous drain touched repo-local inbox; count = %d, want 0", got)
+	}
+}
+
+func TestDrainPinnedAMRootOverridesBrokenLowerProjectConfig(t *testing.T) {
+	targetRoot := initializedSendMailboxRoot(t, "alice")
+	deliverGuardMessage(t, targetRoot, "alice", "am-root-override")
+	enterBrokenRootProject(t)
+	pinSendSessionForTest(t, targetRoot, targetRoot, "")
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runDrain([]string{"--me", "alice", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("pinned AM_ROOT should override broken lower project config: %v", err)
+	}
+	if !strings.Contains(stdout, `"id": "am-root-override"`) {
+		t.Fatalf("drain did not consume the AM_ROOT target: %q", stdout)
+	}
+	if got := inboxCount(t, targetRoot, "alice"); got != 0 {
+		t.Fatalf("AM_ROOT inbox count = %d, want 0 after drain", got)
+	}
+}
+
+func TestDrainBrokenLowerProjectConfigStillDetectsRepoLocalConflict(t *testing.T) {
+	targetRoot := initializedSendMailboxRoot(t, "alice")
+	deliverGuardMessage(t, targetRoot, "alice", "must-stay-global")
+	projectDir := enterBrokenRootProject(t)
+	localRoot := filepath.Join(projectDir, defaultCoopRoot)
+	if err := fsq.EnsureAgentDirs(localRoot, "alice"); err != nil {
+		t.Fatalf("initialize detectable repo-local queue: %v", err)
+	}
+	pinSendSessionForTest(t, targetRoot, targetRoot, "")
+
+	err := runDrain([]string{"--me", "alice"})
+	assertConsumeRefused(t, err, "drain")
+	if got := inboxCount(t, targetRoot, "alice"); got != 1 {
+		t.Fatalf("conflicting drain moved AM_ROOT inbox message; count = %d, want 1", got)
+	}
+	if got := inboxCount(t, localRoot, "alice"); got != 0 {
+		t.Fatalf("conflicting drain touched repo-local inbox; count = %d, want 0", got)
+	}
+}
+
+func TestDrainRefusesSessionlessForeignPinWhenCwdHasOnlyInitializedSession(t *testing.T) {
+	parent := t.TempDir()
+	globalProject := filepath.Join(parent, "global")
+	repoProject := filepath.Join(parent, "snagline")
+	globalRoot := filepath.Join(globalProject, ".agent-mail")
+	if err := fsq.EnsureAgentDirs(globalRoot, "alice"); err != nil {
+		t.Fatalf("initialize global root: %v", err)
+	}
+	configureSendTestRoot(t, globalRoot, "alice")
+	localAuth := sessionRoot(t, repoProject, "auth", "alice")
+	deliverGuardMessage(t, globalRoot, "alice", "sessionless-foreign")
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(repoProject); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	pinSendSessionForTest(t, globalRoot, globalRoot, "")
+
+	err = runDrain([]string{"--me", "alice"})
+	assertConsumeRefused(t, err, "drain")
+	if got := inboxCount(t, globalRoot, "alice"); got != 1 {
+		t.Fatalf("foreign sessionless marker count = %d, want 1 untouched", got)
+	}
+	if got := inboxCount(t, localAuth, "alice"); got != 0 {
+		t.Fatalf("ambiguous drain touched local auth inbox: %d message(s)", got)
+	}
+}
+
+func TestDrainEmptySameNamedLocalSessionDoesNotMaskInitializedBase(t *testing.T) {
+	parent := t.TempDir()
+	globalProject := filepath.Join(parent, "global")
+	repoProject := filepath.Join(parent, "snagline")
+	globalBase := filepath.Join(globalProject, ".agent-mail")
+	globalRoot := sessionRoot(t, globalProject, "collab", "alice")
+	localBase := filepath.Join(repoProject, ".agent-mail")
+	if err := fsq.EnsureAgentDirs(localBase, "alice"); err != nil {
+		t.Fatalf("initialize local base: %v", err)
+	}
+	configureSendTestRoot(t, localBase, "alice")
+	if err := os.MkdirAll(filepath.Join(localBase, "collab"), 0o700); err != nil {
+		t.Fatalf("create empty same-named session: %v", err)
+	}
+	deliverGuardMessage(t, globalRoot, "alice", "empty-same-name")
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(repoProject); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	pinSendSessionForTest(t, globalBase, globalRoot, "collab")
+
+	err = runDrain([]string{"--me", "alice"})
+	assertConsumeRefused(t, err, "drain")
+	if got := inboxCount(t, globalRoot, "alice"); got != 1 {
+		t.Fatalf("foreign collab marker count = %d, want 1 untouched", got)
+	}
+	if got := inboxCount(t, localBase, "alice"); got != 0 {
+		t.Fatalf("ambiguous drain touched initialized local base: %d message(s)", got)
+	}
+}
 
 func TestDrainRefusesSiblingSessionFromOverriddenAMRoot(t *testing.T) {
 	parent := t.TempDir()
@@ -26,6 +164,34 @@ func TestDrainRefusesSiblingSessionFromOverriddenAMRoot(t *testing.T) {
 	assertConsumeRefused(t, err, "drain")
 	if got := inboxCount(t, targetRoot, "alice"); got != 1 {
 		t.Fatalf("foreign message count = %d, want 1 untouched in inbox/new", got)
+	}
+}
+
+func TestDrainSessionRouteRejectsAMRootOutsideLegacyPinBeforeRead(t *testing.T) {
+	parent := t.TempDir()
+	baseRoot := filepath.Join(parent, ".agent-mail")
+	_ = sessionRoot(t, parent, "session1", "alice")
+	targetRoot := sessionRoot(t, parent, "session2", "alice")
+	foreignRoot := initializedSendMailboxRoot(t, "alice")
+	deliverGuardMessage(t, targetRoot, "alice", "must-stay-in-sibling")
+	deliverGuardMessage(t, foreignRoot, "alice", "must-stay-in-ambient")
+
+	t.Setenv(envRoot, foreignRoot)
+	t.Setenv(envBaseRoot, baseRoot)
+	t.Setenv(envSession, "session1")
+	setOptionalEnv(t, envRootID, "", false)
+	setOptionalEnv(t, envBaseRootID, "", false)
+
+	err := runDrain([]string{"--me", "alice", "--session", "session2"})
+	if err == nil || GetExitCode(err) != ExitContextMismatch ||
+		!strings.Contains(err.Error(), "differs from pinned root") {
+		t.Fatalf("drain error = %v, want legacy AM_ROOT/pin mismatch", err)
+	}
+	if got := inboxCount(t, targetRoot, "alice"); got != 1 {
+		t.Fatalf("mismatched route consumed sibling inbox; count = %d, want 1", got)
+	}
+	if got := inboxCount(t, foreignRoot, "alice"); got != 1 {
+		t.Fatalf("mismatched route touched ambient inbox; count = %d, want 1", got)
 	}
 }
 
@@ -84,16 +250,12 @@ func TestDrainAllowsPinnedSessionRoot(t *testing.T) {
 func TestDrainAllowsExplicitSessionRouting(t *testing.T) {
 	parent := t.TempDir()
 	authorizedParent := filepath.Join(parent, "authorized")
-	ambientParent := filepath.Join(parent, "ambient")
 	authorizedBase := filepath.Join(authorizedParent, ".agent-mail")
-	_ = sessionRoot(t, authorizedParent, "session1", "alice")
+	authorizedRoot := sessionRoot(t, authorizedParent, "session1", "alice")
 	authorizedTarget := sessionRoot(t, authorizedParent, "session2", "alice")
-	ambientRoot := sessionRoot(t, ambientParent, "session9", "alice")
-	ambientTarget := sessionRoot(t, ambientParent, "session2", "alice")
 	deliverGuardMessage(t, authorizedTarget, "alice", "authorized-target")
-	deliverGuardMessage(t, ambientTarget, "alice", "ambient-target")
 
-	t.Setenv("AM_ROOT", ambientRoot)
+	t.Setenv("AM_ROOT", authorizedRoot)
 	t.Setenv("AM_BASE_ROOT", authorizedBase)
 	t.Setenv("AM_SESSION", "session1")
 
@@ -102,9 +264,6 @@ func TestDrainAllowsExplicitSessionRouting(t *testing.T) {
 	}
 	if got := inboxCount(t, authorizedTarget, "alice"); got != 0 {
 		t.Fatalf("authorized target count = %d, want 0 after routed drain", got)
-	}
-	if got := inboxCount(t, ambientTarget, "alice"); got != 1 {
-		t.Fatalf("ambient-base target count = %d, want 1 untouched", got)
 	}
 }
 
@@ -251,6 +410,106 @@ func TestMonitorRechecksSessionPinBeforePostWatchDrain(t *testing.T) {
 	assertConsumeRefused(t, err, "monitor")
 	if got := inboxCount(t, root, "alice"); got != 1 {
 		t.Fatalf("post-watch message count = %d, want 1 untouched", got)
+	}
+}
+
+func TestLongRunningConsumersRefuseRepoLocalQueueInitializedAfterStart(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		run     func(context.Context, *fsq.DeliveryRoot, string, func() error) error
+	}{
+		{
+			name:    "watch/poll",
+			command: "watch",
+			run: func(ctx context.Context, root *fsq.DeliveryRoot, inbox string, revalidate func() error) error {
+				_, _, err := watchWithPolling(ctx, root, inbox, &headerValidator{}, revalidate)
+				return err
+			},
+		},
+		{
+			name:    "watch/fsnotify",
+			command: "watch",
+			run: func(ctx context.Context, root *fsq.DeliveryRoot, inbox string, revalidate func() error) error {
+				_, _, err := watchWithFsnotify(ctx, root, inbox, &headerValidator{}, revalidate)
+				return err
+			},
+		},
+		{
+			name:    "monitor/poll",
+			command: "monitor",
+			run: func(ctx context.Context, root *fsq.DeliveryRoot, inbox string, revalidate func() error) error {
+				_, err := monitorWithPolling(ctx, root.DisplayPath(inbox), revalidate)
+				return err
+			},
+		},
+		{
+			name:    "monitor/fsnotify",
+			command: "monitor",
+			run: func(ctx context.Context, root *fsq.DeliveryRoot, inbox string, revalidate func() error) error {
+				_, err := monitorWithFsnotify(ctx, root.DisplayPath(inbox), revalidate)
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent := t.TempDir()
+			globalProject := filepath.Join(parent, "global")
+			localProject := filepath.Join(parent, "local")
+			globalBase := filepath.Join(globalProject, ".agent-mail")
+			globalRoot := sessionRoot(t, globalProject, "session1", "alice", "bob")
+			localRoot := filepath.Join(localProject, ".agent-mail", "session1")
+			if err := os.MkdirAll(localProject, 0o700); err != nil {
+				t.Fatalf("create local project: %v", err)
+			}
+
+			t.Chdir(localProject)
+			pinSendSessionForTest(t, globalBase, globalRoot, "session1")
+
+			initialCheckComplete := make(chan struct{})
+			checks := 0
+			revalidate := func() error {
+				err := guardMailboxContext(test.command, globalRoot, false, false, false)
+				checks++
+				if checks == 1 {
+					close(initialCheckComplete)
+				}
+				return err
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			deliveryRoot := openDeliveryRootForCLITest(t, globalRoot)
+			inbox := filepath.Join("agents", "alice", "inbox", "new")
+			result := make(chan error, 1)
+			go func() {
+				result <- test.run(ctx, deliveryRoot, inbox, revalidate)
+			}()
+
+			select {
+			case <-initialCheckComplete:
+			case <-ctx.Done():
+				t.Fatal("long-running consumer did not complete its initial context check")
+			}
+			if err := fsq.EnsureAgentDirs(localRoot, "alice"); err != nil {
+				t.Fatalf("initialize local queue after consumer start: %v", err)
+			}
+
+			select {
+			case err := <-result:
+				assertConsumeRefused(t, err, test.command)
+			case <-ctx.Done():
+				t.Fatal("long-running consumer did not revalidate after the local queue appeared")
+			}
+			if checks < 2 {
+				t.Fatalf("context checks = %d, want initial authorization plus idle revalidation", checks)
+			}
+			if got := inboxCount(t, globalRoot, "alice"); got != 0 {
+				t.Fatalf("%s consumed %d foreign message(s)", test.name, got)
+			}
+		})
 	}
 }
 

@@ -13,7 +13,8 @@ import (
 
 func runInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	rootFlag := fs.String("root", defaultRoot(), "Root directory for the queue")
+	rootFlag := new(string)
+	registerImplicitRootFlag(fs, rootFlag, "Root directory for the queue")
 	agentsFlag := fs.String("agents", "", "Comma-separated agent handles (required)")
 	forceFlag := fs.Bool("force", false, "Overwrite existing config.json if present")
 

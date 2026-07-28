@@ -3,6 +3,7 @@ package fsq
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -74,5 +75,49 @@ func TestDeliveryRootDirectChildProvisioningFailsClosedAfterAliasSwap(t *testing
 	}
 	if len(entries) != 0 {
 		t.Fatalf("pinned child provisioning mutated swapped symlink target: %v", entries)
+	}
+}
+
+func TestDeliveryRootPinnedBatchExpiresAfterCallback(t *testing.T) {
+	root := openDeliveryRootForTest(t, t.TempDir())
+	var retained *DeliveryRoot
+
+	if err := root.WithPinnedBatch(func(batch *DeliveryRoot) error {
+		retained = batch
+		return batch.EnsureRootDirs()
+	}); err != nil {
+		t.Fatalf("WithPinnedBatch: %v", err)
+	}
+
+	if _, err := retained.ReadDir("."); err == nil || !strings.Contains(err.Error(), "pinned delivery batch expired") {
+		t.Fatalf("retained batch ReadDir error = %v, want expired batch refusal", err)
+	}
+	if err := root.VerifyBase(); err != nil {
+		t.Fatalf("owning root unusable after batch expiry: %v", err)
+	}
+}
+
+func TestDeliveryRootPinnedBatchChildExpiresAfterCallback(t *testing.T) {
+	base := t.TempDir()
+	if err := os.Mkdir(filepath.Join(base, "collab"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := openDeliveryRootForTest(t, base)
+	var retainedChild *DeliveryRoot
+
+	if err := root.WithPinnedBatch(func(batch *DeliveryRoot) error {
+		child, err := batch.OpenDirectChild("collab")
+		if err != nil {
+			return err
+		}
+		retainedChild = child
+		return child.EnsureRootDirs()
+	}); err != nil {
+		t.Fatalf("WithPinnedBatch child: %v", err)
+	}
+	defer func() { _ = retainedChild.Close() }()
+
+	if _, err := retainedChild.ReadDir("."); err == nil || !strings.Contains(err.Error(), "pinned delivery batch expired") {
+		t.Fatalf("retained child ReadDir error = %v, want expired batch refusal", err)
 	}
 }

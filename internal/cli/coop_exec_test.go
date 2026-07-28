@@ -1355,6 +1355,10 @@ func TestCoopInitNoGitignore(t *testing.T) {
 }
 
 func TestCoopExecAutoInitNoGitignore(t *testing.T) {
+	clearCoopSessionPinForTest(t)
+	setOptionalEnv(t, envRoot, "", false)
+	setOptionalEnv(t, envGlobalRoot, "", false)
+	t.Setenv("HOME", t.TempDir())
 	projectDir := t.TempDir()
 	oldDir, err := os.Getwd()
 	if err != nil {

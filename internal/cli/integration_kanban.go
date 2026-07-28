@@ -46,7 +46,8 @@ func printKanbanUsage() error {
 
 func runKanbanBridge(args []string) error {
 	fs := flag.NewFlagSet("integration kanban bridge", flag.ContinueOnError)
-	rootFlag := fs.String("root", defaultRoot(), "Root directory for the queue")
+	rootFlag := new(string)
+	registerImplicitRootFlag(fs, rootFlag, "Root directory for the queue")
 	meFlag := fs.String("me", defaultMe(), "Agent handle (or AM_ME)")
 	urlFlag := fs.String("url", "ws://127.0.0.1:3484/api/runtime/ws", "Kanban runtime websocket URL")
 	workspaceIDFlag := fs.String("workspace-id", "", "Workspace ID (appended as ?workspaceId=<id> query param)")

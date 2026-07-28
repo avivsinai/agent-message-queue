@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -13,6 +14,7 @@ func TestRouteExplainSameSession(t *testing.T) {
 	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
 	sourceRoot := filepath.Join(baseRoot, "collab")
 	ensureRouteAgents(t, sourceRoot, "alice", "bob")
+	configureSendTestRoot(t, sourceRoot, "alice", "bob")
 
 	result := runRouteExplainJSONForTest(t,
 		"--from-root", sourceRoot,
@@ -41,6 +43,7 @@ func TestRouteExplainCrossSession(t *testing.T) {
 	targetRoot := filepath.Join(baseRoot, "qa")
 	ensureRouteAgents(t, sourceRoot, "alice")
 	ensureRouteAgents(t, targetRoot, "bob")
+	configureSendTestRoot(t, targetRoot, "bob")
 
 	result := runRouteExplainJSONForTest(t,
 		"--from-root", sourceRoot,
@@ -187,6 +190,7 @@ func TestRouteExplainFromCWD(t *testing.T) {
 	projectDir := filepath.Join(t.TempDir(), "project-a")
 	sourceRoot := filepath.Join(projectDir, ".agent-mail")
 	ensureRouteAgents(t, sourceRoot, "alice", "bob")
+	configureSendTestRoot(t, sourceRoot, "alice", "bob")
 	writeRouteAmqrc(t, projectDir, map[string]any{
 		"root":    ".agent-mail",
 		"project": "project-a",
@@ -219,10 +223,177 @@ func TestRouteExplainFromCWD(t *testing.T) {
 	}
 }
 
+func TestRouteExplainFromCWDReportsPinnedRootConflict(t *testing.T) {
+	parent := t.TempDir()
+	globalProject := filepath.Join(parent, "global")
+	repoProject := filepath.Join(parent, "snagline")
+	globalBase := filepath.Join(globalProject, ".agent-mail")
+	globalRoot := sessionRoot(t, globalProject, "session1", "alice", "bob")
+	repoRoot := sessionRoot(t, repoProject, "session1", "alice", "bob")
+	pinSendSessionForTest(t, globalBase, globalRoot, "session1")
+
+	result := runRouteExplainJSONForTest(t,
+		"--from-cwd", repoProject,
+		"--me", "alice",
+		"--to", "bob",
+	)
+
+	if result.Routable {
+		t.Fatalf("ambiguous cwd route should be non-routable: %#v", result)
+	}
+	expectSamePath(t, result.SourceRoot, globalRoot)
+	if result.DeliveryRoot != "" {
+		t.Fatalf("delivery_root = %q, want empty", result.DeliveryRoot)
+	}
+	if len(result.Argv) != 0 {
+		t.Fatalf("argv = %v, want empty", result.Argv)
+	}
+	for _, want := range []string{"active root", globalRoot, repoRoot, "repo-local root"} {
+		if !strings.Contains(result.Error, want) {
+			t.Errorf("error = %q, want %q", result.Error, want)
+		}
+	}
+}
+
+func TestRouteExplainFromCWDRejectsConflictingExplicitFromRoot(t *testing.T) {
+	parent := t.TempDir()
+	globalProject := filepath.Join(parent, "global")
+	repoProject := filepath.Join(parent, "snagline")
+	globalBase := filepath.Join(globalProject, ".agent-mail")
+	globalRoot := sessionRoot(t, globalProject, "session1", "alice", "bob")
+	repoRoot := sessionRoot(t, repoProject, "session1", "alice", "bob")
+	pinSendSessionForTest(t, globalBase, globalRoot, "session1")
+
+	result := runRouteExplainJSONForTest(t,
+		"--from-cwd", repoProject,
+		"--from-root", repoRoot,
+		"--me", "alice",
+		"--to", "bob",
+	)
+
+	if result.Routable {
+		t.Fatalf("conflicting explicit source root should be non-routable: %#v", result)
+	}
+	expectSamePath(t, result.SourceRoot, repoRoot)
+	if result.DeliveryRoot != "" {
+		t.Fatalf("delivery_root = %q, want empty", result.DeliveryRoot)
+	}
+	if len(result.Argv) != 0 {
+		t.Fatalf("argv = %v, want empty", result.Argv)
+	}
+	for _, want := range []string{"refusing send", "pinned session", "mismatched source"} {
+		if !strings.Contains(result.Error, want) {
+			t.Errorf("error = %q, want %q", result.Error, want)
+		}
+	}
+}
+
+func TestRouteExplainRoutableArgvIsAcceptedBySend(t *testing.T) {
+	parent := t.TempDir()
+	globalProject := filepath.Join(parent, "global")
+	repoProject := filepath.Join(parent, "snagline")
+	globalBase := filepath.Join(globalProject, ".agent-mail")
+	globalRoot := sessionRoot(t, globalProject, "session1", "alice", "bob")
+	repoRoot := sessionRoot(t, repoProject, "session1", "alice", "bob")
+	pinSendSessionForTest(t, globalBase, globalRoot, "session1")
+
+	result := runRouteExplainJSONForTest(t,
+		"--from-cwd", repoProject,
+		"--from-root", globalRoot,
+		"--me", "alice",
+		"--to", "bob",
+	)
+	if !result.Routable {
+		t.Fatalf("matching explicit source root should be routable: %s", result.Error)
+	}
+	if len(result.Argv) < 2 || result.Argv[0] != "amq" || result.Argv[1] != "send" {
+		t.Fatalf("argv = %v, want amq send prefix", result.Argv)
+	}
+
+	sendArgs := append([]string{}, result.Argv[2:]...)
+	sendArgs = append(sendArgs, "--body", "route argv parity")
+	_, _, err := captureEnvOutput(t, func() error {
+		return runSend(sendArgs)
+	})
+	if err != nil {
+		t.Fatalf("routable argv was rejected by send: %v", err)
+	}
+	if got := inboxCount(t, globalRoot, "bob"); got != 1 {
+		t.Fatalf("pinned inbox count = %d, want 1", got)
+	}
+	if got := inboxCount(t, repoRoot, "bob"); got != 0 {
+		t.Fatalf("repo-local inbox count = %d, want 0", got)
+	}
+}
+
+func TestRouteExplainFromCWDAllowsExplicitCrossProjectRoute(t *testing.T) {
+	parent := t.TempDir()
+	globalProject := filepath.Join(parent, "global")
+	repoProject := filepath.Join(parent, "snagline")
+	peerProject := filepath.Join(parent, "peer")
+	globalBase := filepath.Join(globalProject, ".agent-mail")
+	globalRoot := sessionRoot(t, globalProject, "session1", "alice")
+	_ = sessionRoot(t, repoProject, "session1", "alice", "bob")
+	peerBase := filepath.Join(peerProject, ".agent-mail")
+	peerRoot := sessionRoot(t, peerProject, "session1", "bob")
+	writeRouteAmqrc(t, globalProject, map[string]any{
+		"root":    ".agent-mail",
+		"project": "global",
+		"peers": map[string]string{
+			"peer": peerBase,
+		},
+	})
+	pinSendSessionForTest(t, globalBase, globalRoot, "session1")
+
+	result := runRouteExplainJSONForTest(t,
+		"--from-cwd", repoProject,
+		"--me", "alice",
+		"--to", "bob",
+		"--project", "peer",
+	)
+
+	if !result.Routable {
+		t.Fatalf("explicit cross-project route should remain routable: %s", result.Error)
+	}
+	expectSamePath(t, result.SourceRoot, globalRoot)
+	expectSamePath(t, result.DeliveryRoot, peerRoot)
+	if result.TargetProject != "peer" {
+		t.Fatalf("target_project = %q, want peer", result.TargetProject)
+	}
+}
+
+func TestRouteExplainFromCWDTargetSessionDoesNotAuthorizePinnedRootConflict(t *testing.T) {
+	parent := t.TempDir()
+	globalProject := filepath.Join(parent, "global")
+	repoProject := filepath.Join(parent, "snagline")
+	globalBase := filepath.Join(globalProject, ".agent-mail")
+	globalRoot := sessionRoot(t, globalProject, "session1", "alice")
+	_ = sessionRoot(t, globalProject, "session2", "bob")
+	repoRoot := sessionRoot(t, repoProject, "session1", "alice", "bob")
+	pinSendSessionForTest(t, globalBase, globalRoot, "session1")
+
+	result := runRouteExplainJSONForTest(t,
+		"--from-cwd", repoProject,
+		"--me", "alice",
+		"--to", "bob",
+		"--session", "session2",
+	)
+
+	if result.Routable {
+		t.Fatalf("target session authorized ambiguous source context: %#v", result)
+	}
+	for _, want := range []string{"active root", globalRoot, repoRoot, "repo-local root"} {
+		if !strings.Contains(result.Error, want) {
+			t.Errorf("error = %q, want %q", result.Error, want)
+		}
+	}
+}
+
 func TestRouteExplainJSONV1Fields(t *testing.T) {
 	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
 	sourceRoot := filepath.Join(baseRoot, "collab")
 	ensureRouteAgents(t, sourceRoot, "alice", "bob")
+	configureSendTestRoot(t, sourceRoot, "alice", "bob")
 
 	routable := runRouteExplainRawJSONForTest(t,
 		"--from-root", sourceRoot,

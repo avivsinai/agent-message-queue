@@ -60,6 +60,35 @@ func TestSessionlessCoopPinRejectsRootSwitch(t *testing.T) {
 	}
 }
 
+func TestListOwnBaseDoesNotSuppressContradictoryLegacyPinWarning(t *testing.T) {
+	baseRoot := initializedSendMailboxRoot(t, "alice")
+	if err := fsq.EnsureAgentDirs(filepath.Join(baseRoot, "current"), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	deliverGuardMessage(t, baseRoot, "alice", "base-inspection")
+	t.Setenv(envRoot, baseRoot)
+	t.Setenv(envBaseRoot, baseRoot)
+	t.Setenv(envSession, "current")
+	setOptionalEnv(t, envRootID, "", false)
+	setOptionalEnv(t, envBaseRootID, "", false)
+
+	stdout, stderr, err := captureEnvOutput(t, func() error {
+		return runList([]string{"--root", baseRoot, "--me", "alice", "--new", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("contradictory legacy pin should retain read-only list inspection: %v", err)
+	}
+	if !strings.Contains(stdout, `"id": "base-inspection"`) {
+		t.Fatalf("list did not inspect the requested base mailbox: %q", stdout)
+	}
+	if !strings.Contains(stderr, "warning:") || !strings.Contains(stderr, "differs from pinned root") {
+		t.Fatalf("list suppressed contradictory legacy pin warning: %q", stderr)
+	}
+	if got := inboxCount(t, baseRoot, "alice"); got != 1 {
+		t.Fatalf("read-only list mutated base inbox: count = %d, want 1", got)
+	}
+}
+
 func TestSessionlessEnvOutputPinsExactRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "queue-a")
 	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {

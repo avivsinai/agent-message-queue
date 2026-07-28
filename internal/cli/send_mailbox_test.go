@@ -373,6 +373,117 @@ func TestSendBaseOnlyCoopConfigPreservesUnknownHandleModes(t *testing.T) {
 	assertCompleteSendMailbox(t, session, "typo")
 }
 
+func TestSendExplicitUnpinnedSessionUsesBaseOnlyCoopConfig(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	base := filepath.Join(t.TempDir(), ".agent-mail")
+	session := filepath.Join(base, "dev")
+	configureSendTestRoot(t, base, "alice", "bob")
+	configPath := filepath.Join(base, "meta", "config.json")
+	configBefore, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(session, "alice"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := captureEnvOutput(t, func() error {
+		return runSend([]string{
+			"--root", session,
+			"--me", "alice",
+			"--to", "bob",
+			"--strict",
+			"--body", "explicit unpinned session",
+			"--json",
+		})
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	assertCompleteSendMailbox(t, session, "bob")
+	if got := inboxCount(t, session, "bob"); got != 1 {
+		t.Fatalf("delivered messages = %d, want 1", got)
+	}
+	if _, err := os.Lstat(filepath.Join(session, "meta", "config.json")); !os.IsNotExist(err) {
+		t.Fatalf("send copied base config into session: %v", err)
+	}
+	configAfter, err := os.ReadFile(configPath)
+	if err != nil || string(configAfter) != string(configBefore) {
+		t.Fatalf("send changed base config: err=%v before=%q after=%q", err, configBefore, configAfter)
+	}
+}
+
+func TestLocalMailboxConfigAuthorityPrecedence(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	base := filepath.Join(t.TempDir(), ".agent-mail")
+	session := filepath.Join(base, "dev")
+	foreignBase := filepath.Join(t.TempDir(), "custom-base")
+
+	for _, test := range []struct {
+		name       string
+		root       string
+		pin        sessionPin
+		ignorePin  bool
+		wantBase   string
+		wantBaseID string
+	}{
+		{
+			name:     "classified unpinned session",
+			root:     session,
+			wantBase: base,
+		},
+		{
+			name: "named identity pin",
+			root: session,
+			pin: sessionPin{
+				Present:     true,
+				Session:     "dev",
+				BaseRoot:    foreignBase,
+				IdentityPin: true,
+				BaseRootID:  "base-id",
+			},
+			wantBase:   foreignBase,
+			wantBaseID: "base-id",
+		},
+		{
+			name: "sessionless pin stays exact",
+			root: session,
+			pin: sessionPin{
+				Present:     true,
+				BaseRoot:    session,
+				IdentityPin: true,
+				BaseRootID:  "exact-root-id",
+			},
+		},
+		{
+			name: "ignored named pin uses classified root",
+			root: session,
+			pin: sessionPin{
+				Present:     true,
+				Session:     "foreign",
+				BaseRoot:    foreignBase,
+				IdentityPin: true,
+				BaseRootID:  "foreign-base-id",
+			},
+			ignorePin: true,
+			wantBase:  base,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gotBase, gotBaseID := localMailboxConfigAuthority(test.root, test.pin, test.ignorePin)
+			if gotBase != test.wantBase || gotBaseID != test.wantBaseID {
+				t.Fatalf(
+					"authority = (%q, %q), want (%q, %q)",
+					gotBase,
+					gotBaseID,
+					test.wantBase,
+					test.wantBaseID,
+				)
+			}
+		})
+	}
+}
+
 func TestSendRepairsOnlyRequestedRecipients(t *testing.T) {
 	root := initializedSendMailboxRoot(t, "alice", "bob", "carol")
 	bobMissing := fsq.AgentDLQCur(root, "bob")
