@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 type routeExplainResult struct {
@@ -136,23 +138,44 @@ func explainRoute(opts routeExplainOptions) routeExplainResult {
 	}
 	target := recipients[0]
 
-	deliveryRoot, normalizedTargetSession, err := resolveRouteDelivery(sourceRoot, targetProject, targetSession, target)
+	// Validate the source context exactly as the emitted send will. An explicit
+	// --from-root confirms the cwd choice, but it does not waive an active pin or
+	// cross-tree mismatch. Cross-project routing disambiguates the cwd boundary;
+	// a target session never authorizes a mismatched source.
+	explicitRoot := strings.TrimSpace(opts.FromRoot) != ""
+	crossProject := targetProject != ""
+	if err := guardPinnedSourceContext("send", sourceRoot, crossProject, false, explicitRoot); err != nil {
+		result.Error = err.Error()
+		return result
+	}
+
+	plan, err := planDeliveryRoute(sourceRoot, targetProject, targetSession, deliveryRouteOptions{
+		MirrorPeerSession: true,
+	})
 	if err != nil {
-		result.TargetSession = normalizedTargetSession
+		result.TargetSession = plan.TargetSession
+		result.Error = err.Error()
+		return result
+	}
+	if err := validatePlannedMailbox(plan, target); err != nil {
+		result.TargetSession = plan.TargetSession
 		result.Error = err.Error()
 		return result
 	}
 
 	result.Routable = true
-	result.DeliveryRoot = deliveryRoot
-	result.TargetSession = normalizedTargetSession
+	result.DeliveryRoot = plan.DeliveryRoot
+	if plan.SourceProject != "" {
+		result.SourceProject = plan.SourceProject
+	}
+	result.TargetSession = plan.TargetSession
 	if result.TargetProject == "" {
 		result.TargetProject = targetProject
 	}
 	if result.TargetSession == "" {
 		result.TargetSession = result.SourceSession
 	}
-	result.Argv = buildRouteArgv(sourceRoot, me, target, targetProject, normalizedTargetSession)
+	result.Argv = buildRouteArgv(sourceRoot, me, target, targetProject, plan.TargetSession)
 	result.DisplayCommand = displayCommand(result.Argv)
 	return result
 }
@@ -185,71 +208,162 @@ func resolveRouteSource(fromRoot, meFlag string) (sourceRoot, me string, err err
 	return sourceRoot, resolvedMe, nil
 }
 
-func resolveRouteDelivery(sourceRoot, targetProject, targetSession, target string) (deliveryRoot, normalizedTargetSession string, err error) {
-	deliveryRoot = sourceRoot
-	normalizedTargetSession = strings.TrimSpace(targetSession)
+type deliveryRoutePlan struct {
+	DeliveryRoot  string
+	PeerBaseRoot  string
+	SourceProject string
+	TargetProject string
+	TargetSession string
+}
 
-	if targetProject != "" {
-		peerBaseRoot, err := resolvePeer(sourceRoot, targetProject)
-		if err != nil {
-			return "", normalizedTargetSession, err
-		}
-		if !dirExists(peerBaseRoot) {
-			return "", normalizedTargetSession, fmt.Errorf("peer root for %q does not exist: %s", targetProject, peerBaseRoot)
-		}
+type deliveryRouteOptions struct {
+	MirrorPeerSession bool
+}
 
-		if normalizedTargetSession != "" {
-			normalized, err := normalizeHandle(normalizedTargetSession)
-			if err != nil {
-				return "", normalizedTargetSession, fmt.Errorf("--session: %v", err)
-			}
-			normalizedTargetSession = normalized
-			deliveryRoot = filepath.Join(peerBaseRoot, normalizedTargetSession)
-		} else if classifyRoot(sourceRoot) != "" {
-			normalizedTargetSession = sessionName(sourceRoot)
-			deliveryRoot = filepath.Join(peerBaseRoot, normalizedTargetSession)
-		} else {
-			deliveryRoot = peerBaseRoot
-		}
+var findDeliveryRouteAmqrc = findAmqrcForRoot
 
-		if !dirExists(deliveryRoot) {
-			if normalizedTargetSession != "" {
-				return "", normalizedTargetSession, fmt.Errorf("session %q not found in peer %q at %s", normalizedTargetSession, targetProject, deliveryRoot)
-			}
-			return "", normalizedTargetSession, fmt.Errorf("peer %q root does not exist at %s", targetProject, deliveryRoot)
-		}
-		inbox := filepath.Join(deliveryRoot, "agents", target, "inbox")
-		if !dirExists(inbox) {
-			if normalizedTargetSession != "" {
-				return "", normalizedTargetSession, fmt.Errorf("agent %q not found in peer %q session %q", target, targetProject, normalizedTargetSession)
-			}
-			return "", normalizedTargetSession, fmt.Errorf("agent %q not found in peer %q", target, targetProject)
-		}
-		return deliveryRoot, normalizedTargetSession, nil
+func planDeliveryRoute(sourceRoot, targetProject, targetSession string, opts deliveryRouteOptions) (deliveryRoutePlan, error) {
+	plan := deliveryRoutePlan{
+		DeliveryRoot:  sourceRoot,
+		TargetProject: strings.TrimSpace(targetProject),
+		TargetSession: strings.TrimSpace(targetSession),
 	}
 
-	if normalizedTargetSession != "" {
-		normalized, err := normalizeHandle(normalizedTargetSession)
+	if plan.TargetProject != "" {
+		routeConfig, err := findDeliveryRouteAmqrc(sourceRoot)
 		if err != nil {
-			return "", normalizedTargetSession, fmt.Errorf("--session: %v", err)
+			return plan, federationSourceProjectError(sourceRoot)
 		}
-		normalizedTargetSession = normalized
+		sourceProject, err := requireFederationSourceProject(routeConfig, sourceRoot)
+		if err != nil {
+			return plan, err
+		}
+		plan.SourceProject = sourceProject
+
+		peerBaseRoot, err := resolvePeerFromAmqrcResult(routeConfig, targetProject)
+		if err != nil {
+			return plan, err
+		}
+		plan.PeerBaseRoot = peerBaseRoot
+
+		if plan.TargetSession != "" {
+			normalized, err := normalizeHandle(plan.TargetSession)
+			if err != nil {
+				return plan, fmt.Errorf("--session: %v", err)
+			}
+			plan.TargetSession = normalized
+			plan.DeliveryRoot, err = resolveSessionRoot(peerBaseRoot, plan.TargetSession)
+			if err != nil {
+				return plan, err
+			}
+		} else if opts.MirrorPeerSession && classifyRoot(sourceRoot) != "" {
+			plan.TargetSession = sessionName(sourceRoot)
+			plan.DeliveryRoot, err = resolveSessionRoot(peerBaseRoot, plan.TargetSession)
+			if err != nil {
+				return plan, err
+			}
+		} else {
+			plan.DeliveryRoot = peerBaseRoot
+		}
+		return plan, nil
+	}
+
+	if plan.TargetSession != "" {
+		normalized, err := normalizeHandle(plan.TargetSession)
+		if err != nil {
+			return plan, fmt.Errorf("--session: %v", err)
+		}
+		plan.TargetSession = normalized
 		baseRoot := classifyRoot(sourceRoot)
 		if baseRoot == "" {
-			return "", normalizedTargetSession, fmt.Errorf("--session requires a session context: run from inside 'amq coop exec --session <name>'")
+			return plan, fmt.Errorf("--session requires a session context: run from inside 'amq coop exec --session <name>'")
 		}
-		deliveryRoot = filepath.Join(baseRoot, normalizedTargetSession)
-		if !dirExists(deliveryRoot) {
-			return "", normalizedTargetSession, fmt.Errorf("session %q not found at %s", normalizedTargetSession, deliveryRoot)
+		plan.DeliveryRoot, err = resolveSessionRoot(baseRoot, plan.TargetSession)
+		if err != nil {
+			return plan, err
 		}
-		inbox := filepath.Join(deliveryRoot, "agents", target, "inbox")
-		if !dirExists(inbox) {
-			return "", normalizedTargetSession, fmt.Errorf("agent %q not found in session %q", target, normalizedTargetSession)
-		}
-		return deliveryRoot, normalizedTargetSession, nil
 	}
 
-	return deliveryRoot, "", nil
+	return plan, nil
+}
+
+func requireFederationSourceProject(result amqrcResult, sourceRoot string) (string, error) {
+	project := strings.TrimSpace(projectFromAmqrcResult(result))
+	if project == "" {
+		return "", federationSourceProjectError(sourceRoot)
+	}
+	configuredRoot := strings.TrimSpace(result.Config.Root)
+	if configuredRoot == "" {
+		return "", federationSourceOwnershipError(result, sourceRoot, "")
+	}
+	configuredBase, err := resolvePeerPath(result, configuredRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve configured source root: %w", err)
+	}
+	sourceRoot = absPath(resolveRoot(sourceRoot))
+	configuredBase = absPath(resolveRoot(configuredBase))
+	if sourceRoot != configuredBase {
+		if filepath.Dir(sourceRoot) != configuredBase {
+			return "", federationSourceOwnershipError(result, sourceRoot, configuredBase)
+		}
+		ownedSession, err := resolveSessionRoot(configuredBase, filepath.Base(sourceRoot))
+		if err != nil || ownedSession != sourceRoot {
+			return "", federationSourceOwnershipError(result, sourceRoot, configuredBase)
+		}
+	}
+	return project, nil
+}
+
+func federationSourceProjectError(sourceRoot string) error {
+	return fmt.Errorf(
+		"cross-project routing requires a non-empty source project identity; set \"project\" in the .amqrc that owns source root %s",
+		sourceRoot,
+	)
+}
+
+func federationSourceOwnershipError(result amqrcResult, sourceRoot, configuredRoot string) error {
+	if configuredRoot == "" {
+		configuredRoot = "<empty>"
+	}
+	return fmt.Errorf(
+		"configured .amqrc at %s does not own source root %s (configured root: %s)",
+		result.Path,
+		sourceRoot,
+		configuredRoot,
+	)
+}
+
+func validatePlannedMailbox(plan deliveryRoutePlan, target string) error {
+	identity, err := fsq.SnapshotDeliveryRoot(plan.DeliveryRoot)
+	if err != nil {
+		return err
+	}
+	root, err := fsq.OpenDeliveryRoot(plan.DeliveryRoot, identity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	layoutErr := fsq.ValidateExistingMailboxLayout(root, target)
+	if plan.TargetProject != "" {
+		return layoutErr
+	}
+
+	pin, err := loadSessionPin()
+	if err != nil {
+		return err
+	}
+	authorization, cleanup, err := openLocalMailboxAuthorization(root, plan.DeliveryRoot, pin, false, false)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	if authorization == nil {
+		return layoutErr
+	}
+	if layoutErr == nil {
+		return nil
+	}
+	return validateAuthorizedLocalMailbox(root, authorization, target)
 }
 
 func buildRouteArgv(sourceRoot, me, target, targetProject, targetSession string) []string {

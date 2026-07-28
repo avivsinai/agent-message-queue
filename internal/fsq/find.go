@@ -1,6 +1,8 @@
 package fsq
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -33,6 +35,9 @@ func MoveNewToCur(root *DeliveryRoot, agent, filename string) error {
 	if err := ValidateMessageFilename(filename); err != nil {
 		return err
 	}
+	if err := root.VerifyBase(); err != nil {
+		return err
+	}
 	newPath := filepath.Join("agents", agent, "inbox", "new", filename)
 	curDir := filepath.Join("agents", agent, "inbox", "cur")
 	curPath := filepath.Join(curDir, filename)
@@ -42,8 +47,25 @@ func MoveNewToCur(root *DeliveryRoot, agent, filename string) error {
 	if err := root.root.Rename(newPath, curPath); err != nil {
 		return err
 	}
-	if err := root.syncDir(filepath.Dir(newPath)); err != nil {
-		return err
+
+	// The rename is already visible. Sync the destination first so a crash is
+	// more likely to preserve one claimed copy than to lose the message, but
+	// attempt both directories even if either sync fails. Any failure after the
+	// rename is a committed claim with indeterminate durability, not a failed
+	// claim that callers may safely ignore or retry.
+	var durabilityErr error
+	if err := root.syncDir(curDir); err != nil {
+		durabilityErr = errors.Join(durabilityErr, fmt.Errorf("sync inbox/cur dir: %w", err))
 	}
-	return root.syncDir(curDir)
+	if err := root.syncDir(filepath.Dir(newPath)); err != nil {
+		durabilityErr = errors.Join(durabilityErr, fmt.Errorf("sync inbox/new dir: %w", err))
+	}
+	if durabilityErr != nil {
+		return &CommittedDurabilityError{
+			FinalPath: root.displayPath(curPath),
+			Recipient: agent,
+			Err:       durabilityErr,
+		}
+	}
+	return nil
 }

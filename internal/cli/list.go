@@ -75,6 +75,22 @@ func runList(args []string) error {
 		_ = writeStderr("warning: %v\n", err)
 		root, routed = absPath(resolveRoot(common.Root)), false
 	}
+	if !routed && !common.rootExplicit() {
+		localRoot, ok, checkErr := cwdLocalMailboxRoot(root)
+		if checkErr != nil && GetExitCode(checkErr) != ExitContextMismatch {
+			return checkErr
+		}
+		if checkErr == nil && ok && !sameBaseTree(localRoot, root) {
+			if err := writeStderr(
+				"warning: active root %s conflicts with initialized repo-local root %s detected from cwd; list is read-only and will inspect the active root. Pass explicit --root %s to confirm it, or repin to the repo-local root.\n",
+				absPath(resolveRoot(root)),
+				localRoot,
+				shellQuotePosix(absPath(resolveRoot(root))),
+			); err != nil {
+				return err
+			}
+		}
+	}
 	if !routed {
 		if mismatch, checkErr := sessionPinMismatch(root); checkErr != nil {
 			if GetExitCode(checkErr) != ExitContextMismatch {

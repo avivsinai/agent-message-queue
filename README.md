@@ -202,17 +202,22 @@ amq reply --id <msg_id> --kind review_response --body "LGTM with comments"
 root context with `AM_BASE_ROOT` plus `AM_SESSION`. For named sessions,
 `AM_BASE_ROOT` is the authorized parent; for sessionless contexts, it is the
 exact root and `AM_SESSION` is empty. `read`, `drain`, `monitor`, `watch`,
-`reply`, and mutating DLQ commands refuse a raw root that conflicts with that
-pin before reading or moving mailbox state. Use `--session <name>` to target a
-sibling deliberately. For deliberate raw-root access, `--ignore-session-pin`
-is accepted only together with a non-empty explicit `--root`; blank `--root`
-and `--session` values are usage errors. `list` remains a non-destructive
-inspection path: it warns on a pin mismatch but still lists the resolved
-mailbox. The exact base-backlog inspection path is quieter: an explicit
-`--root` equal to the current pin's own base root does not warn (and is
-identity-authenticated when identity tokens are present). Implicit, sibling,
-foreign, stale, and malformed contexts still warn. Unpinned scripts and CI
-retain the existing fail-open behavior.
+`send`, `reply`, and all DLQ commands refuse a raw root that conflicts
+with that pin before reading, moving, or delivering mailbox state. An implicit
+participating command also refuses when the active pin conflicts with an
+initialized cwd-local queue discovered from a project `.amqrc` or repo-local
+`.agent-mail`; AMQ does not silently choose between the two roots. Repin to the
+cwd-local queue, use deliberate `--session`/`--project` routing, or pass an
+explicit `--root` to confirm the active queue. Explicit roots remain subject
+to the ordinary pin checks. For deliberate raw-root access,
+`--ignore-session-pin` is accepted only together with a non-empty explicit
+`--root`; blank `--root` and `--session` values are usage errors. `list`
+remains a non-destructive inspection path: it warns on a pin mismatch but
+still lists the resolved mailbox. The exact base-backlog inspection path is
+quieter: an explicit `--root` equal to the current pin's own base root does
+not warn (and is identity-authenticated when identity tokens are present).
+Implicit, sibling, foreign, stale, and malformed contexts still warn.
+Unpinned scripts and CI retain the existing fail-open behavior.
 
 `amq doctor --root <path>` follows the same inspection-versus-mutation split:
 the explicit root selects the exact target but does not repin the shell or
@@ -249,7 +254,10 @@ If agents in several worktrees should share one mailbox, give all of them the
 same absolute base root. Use an absolute, machine-local `.amqrc` value such as
 `{"root":"/absolute/path/to/shared/.agent-mail"}`, or remove the project-relative
 `.amqrc` and export `AMQ_GLOBAL_ROOT=/absolute/path/to/shared/.agent-mail`.
-Per-worktree isolation remains the default when sharing is not intended.
+Per-worktree isolation remains the default when sharing is not intended. A Git
+worktree without local AMQ configuration does not implicitly inherit
+`~/.amqrc`; AMQ refuses that ambiguous route so a global default cannot
+silently select a different project's mailbox.
 
 ### 4. Inspect Health
 
@@ -372,7 +380,11 @@ For the full command reference, see [CLAUDE.md](CLAUDE.md).
 
 ## Global Root Fallback
 
-Most AMQ commands resolve the queue root from the project `.amqrc` or the default `.agent-mail` layout in the current tree. For agents launched outside the repo root by external orchestrators, you can configure a global fallback instead:
+Most AMQ commands resolve the queue root from the project `.amqrc` or the
+default `.agent-mail` layout in the current tree. For agents launched outside
+an AMQ-enabled repo by external orchestrators, you can configure a global
+root. Explicit `AMQ_GLOBAL_ROOT` does not shadow project `.amqrc`, but it does
+take precedence over repo-local auto-detection:
 
 ```bash
 export AMQ_GLOBAL_ROOT="$HOME/.agent-mail"
@@ -387,14 +399,24 @@ Or create `~/.amqrc`:
 Root resolution precedence is:
 
 ```text
-flags > AM_ROOT > project .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
+explicit --root > AM_ROOT > project-local .amqrc > AMQ_GLOBAL_ROOT > implicit fallbacks
 ```
+
+Inside a Git worktree or bare repository, the remaining eligible fallback is
+repo-local detected `.agent-mail`; implicit `~/.amqrc` is refused. Outside
+Git, `~/.amqrc` remains a convenience fallback and precedes detected
+`.agent-mail`. Set
+`AMQ_GLOBAL_ROOT` explicitly when shared routing is intentional.
+
+If a project `.amqrc` exists but cannot be read or parsed, AMQ stops instead
+of silently delivering through a lower-precedence fallback. Use an explicit
+`--root` or `AM_ROOT` when you intentionally need to override that config.
 
 For an external orchestrator or plain shell that should stay pinned to one
 session, opt in explicitly:
 
 ```sh
-eval "$(amq env --session auth --me claude --export)"
+amq_context="$(amq env --session auth --me claude --export)" && eval "$amq_context"
 ```
 
 Every shell-mode `amq env` output replaces the complete context: `AM_ROOT`,
@@ -490,7 +512,7 @@ AMQ exposes stable process exit codes for scripts and agent consumers:
 | `2` | Usage error. Arguments, flags, or command input are invalid. |
 | `3` | Not found. A requested resource such as a mailbox, message, session, agent, or configuration does not exist. |
 | `4` | Timeout. A watch, monitor, receipt wait, or delivery wait reached its deadline. |
-| `5` | Context mismatch. A syntactically valid command was refused because its resolved mailbox root conflicts with the `AM_BASE_ROOT`/`AM_SESSION` pin. |
+| `5` | Context mismatch. A syntactically valid route was refused, including a pin conflict or an ineligible implicit root inside Git. |
 
 The numeric meaning is the machine contract; stderr is human-readable context
 and should not be parsed as a stable discriminator. `--json` does not change

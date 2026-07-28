@@ -207,6 +207,192 @@ func TestListWarnsOnPinnedSessionMismatch(t *testing.T) {
 	}
 }
 
+func TestListImplicitRootRemainsUsableWithInvalidSessionPin(t *testing.T) {
+	tests := []struct {
+		name           string
+		configurePin   func(t *testing.T, baseRoot string)
+		wantDiagnostic string
+	}{
+		{
+			name: "incomplete legacy pin",
+			configurePin: func(t *testing.T, _ string) {
+				t.Setenv(envSession, "session1")
+			},
+			wantDiagnostic: "incomplete AMQ session pin",
+		},
+		{
+			name: "malformed identity pin",
+			configurePin: func(t *testing.T, baseRoot string) {
+				t.Setenv(envSession, "session1")
+				t.Setenv(envBaseRoot, baseRoot)
+				t.Setenv(envRootID, "malformed-root-id")
+				t.Setenv(envBaseRootID, "malformed-base-id")
+			},
+			wantDiagnostic: "unverifiable AMQ identity pin",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent := t.TempDir()
+			baseRoot := filepath.Join(parent, ".agent-mail")
+			targetRoot := sessionRoot(t, parent, "session1", "alice")
+			deliverGuardMessage(t, targetRoot, "alice", "invalid-pin-inspection")
+
+			clearSendMailboxTestEnv(t)
+			t.Setenv(envRoot, targetRoot)
+			test.configurePin(t, baseRoot)
+
+			stdout, stderr, err := captureEnvOutput(t, func() error {
+				return runList([]string{"--me", "alice", "--new", "--json"})
+			})
+			if err != nil {
+				t.Fatalf("ordinary implicit list must stay usable: %v", err)
+			}
+			if !strings.Contains(stdout, `"id": "invalid-pin-inspection"`) {
+				t.Fatalf("list missed active-root message: %q", stdout)
+			}
+			if !strings.Contains(stderr, "warning:") || !strings.Contains(stderr, test.wantDiagnostic) {
+				t.Fatalf("list did not surface %q as a warning: %q", test.wantDiagnostic, stderr)
+			}
+			if got := inboxCount(t, targetRoot, "alice"); got != 1 {
+				t.Fatalf("list mutated inbox; count = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestListWarnsOnImplicitGlobalRootWhenCwdHasRepoLocalSession(t *testing.T) {
+	parent := t.TempDir()
+	globalProject := filepath.Join(parent, "global project")
+	repoProject := filepath.Join(parent, "snagline project")
+	globalBase := filepath.Join(globalProject, ".agent-mail")
+	globalRoot := sessionRoot(t, globalProject, "session1", "alice")
+	repoRoot := sessionRoot(t, repoProject, "session1", "alice")
+	deliverGuardMessage(t, globalRoot, "alice", "global-inspection")
+
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldDir) })
+	if err := os.Chdir(repoProject); err != nil {
+		t.Fatal(err)
+	}
+	pinSendSessionForTest(t, globalBase, globalRoot, "session1")
+
+	stdout, stderr, err := captureEnvOutput(t, func() error {
+		return runList([]string{"--me", "alice", "--new", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("list remains a warning-only inspection path: %v", err)
+	}
+	if !strings.Contains(stdout, `"id": "global-inspection"`) {
+		t.Fatalf("list did not inspect the active global root: %q", stdout)
+	}
+	for _, want := range []string{"warning:", "active root", globalRoot, repoRoot, "repo-local root"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("list context warning missing %q: %q", want, stderr)
+		}
+	}
+	if !strings.Contains(stderr, "--root "+shellQuotePosix(globalRoot)) {
+		t.Fatalf("list guidance does not shell-quote active root: %q", stderr)
+	}
+	if got := inboxCount(t, globalRoot, "alice"); got != 1 {
+		t.Fatalf("list mutated global inbox; count = %d, want 1", got)
+	}
+	if got := inboxCount(t, repoRoot, "alice"); got != 0 {
+		t.Fatalf("list touched repo-local inbox; count = %d, want 0", got)
+	}
+}
+
+func TestListPinnedAMRootOverridesBrokenConfigAndWarnsOnDetectedLocalQueue(t *testing.T) {
+	targetRoot := initializedSendMailboxRoot(t, "alice")
+	deliverGuardMessage(t, targetRoot, "alice", "broken-config-inspection")
+	projectDir := enterBrokenRootProject(t)
+	localRoot := filepath.Join(projectDir, defaultCoopRoot)
+	if err := fsq.EnsureAgentDirs(localRoot, "alice"); err != nil {
+		t.Fatalf("initialize detectable repo-local queue: %v", err)
+	}
+	pinSendSessionForTest(t, targetRoot, targetRoot, "")
+
+	stdout, stderr, err := captureEnvOutput(t, func() error {
+		return runList([]string{"--me", "alice", "--new", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("list should keep AM_ROOT as a warning-only inspection path: %v", err)
+	}
+	if !strings.Contains(stdout, `"id": "broken-config-inspection"`) {
+		t.Fatalf("list did not inspect the AM_ROOT target: %q", stdout)
+	}
+	for _, want := range []string{"warning:", "active root", targetRoot, localRoot, "repo-local root"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("list conflict warning missing %q: %q", want, stderr)
+		}
+	}
+	if got := inboxCount(t, targetRoot, "alice"); got != 1 {
+		t.Fatalf("list mutated AM_ROOT inbox; count = %d, want 1", got)
+	}
+	if got := inboxCount(t, localRoot, "alice"); got != 0 {
+		t.Fatalf("list touched repo-local inbox; count = %d, want 0", got)
+	}
+}
+
+func TestListExplicitPinnedBaseWarnsOnContradictoryLegacyAMRoot(t *testing.T) {
+	baseRoot := initializedSendMailboxRoot(t, "alice")
+	if err := fsq.EnsureAgentDirs(filepath.Join(baseRoot, "current"), "alice"); err != nil {
+		t.Fatalf("initialize pinned session: %v", err)
+	}
+	deliverGuardMessage(t, baseRoot, "alice", "base-read-only")
+	foreignRoot := initializedSendMailboxRoot(t, "alice")
+
+	t.Setenv(envRoot, foreignRoot)
+	t.Setenv(envBaseRoot, baseRoot)
+	t.Setenv(envSession, "current")
+	setOptionalEnv(t, envRootID, "", false)
+	setOptionalEnv(t, envBaseRootID, "", false)
+
+	stdout, stderr, err := captureEnvOutput(t, func() error {
+		return runList([]string{"--root", baseRoot, "--me", "alice", "--new", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("explicit pinned-base list should remain read-only inspection: %v", err)
+	}
+	if !strings.Contains(stdout, `"id": "base-read-only"`) {
+		t.Fatalf("list did not inspect explicit pinned base: %q", stdout)
+	}
+	for _, want := range []string{"warning:", "differs from pinned root", foreignRoot, filepath.Join(baseRoot, "current")} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("contradictory pinned-base warning missing %q: %q", want, stderr)
+		}
+	}
+	if got := inboxCount(t, baseRoot, "alice"); got != 1 {
+		t.Fatalf("pinned-base list mutated inbox; count = %d, want 1", got)
+	}
+}
+
+func TestListHonorsUnpinnedAMRootWithoutCwdConflictWarning(t *testing.T) {
+	parent := t.TempDir()
+	globalProject := filepath.Join(parent, "global")
+	repoProject := filepath.Join(parent, "snagline")
+	globalRoot := sessionRoot(t, globalProject, "session1", "alice")
+	_ = sessionRoot(t, repoProject, "session1", "alice")
+
+	t.Chdir(repoProject)
+	clearSendMailboxTestEnv(t)
+	t.Setenv(envRoot, globalRoot)
+
+	_, stderr, err := captureEnvOutput(t, func() error {
+		return runList([]string{"--me", "alice", "--new", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("unpinned AM_ROOT list: %v", err)
+	}
+	if strings.Contains(stderr, "repo-local root") {
+		t.Fatalf("unpinned AM_ROOT produced cwd conflict warning: %q", stderr)
+	}
+}
+
 func TestListExplicitOwnBaseRootSuppressesPinWarning(t *testing.T) {
 	for _, identityPin := range []bool{false, true} {
 		name := "legacy"

@@ -316,6 +316,60 @@ func TestDoctorIssue289RunDoctorInspectsOutsidePopulatedSessionPin(t *testing.T)
 	}
 }
 
+func TestDoctorWarnsOnContradictoryLegacyPinAndStillInspects(t *testing.T) {
+	root := healthyDoctorMailboxRoot(t, "healthy")
+	pinnedBase := secureTempDirForTest(t)
+	t.Setenv(envBaseRoot, pinnedBase)
+	t.Setenv(envSession, "current")
+	setOptionalEnv(t, envRootID, "", false)
+	setOptionalEnv(t, envBaseRootID, "", false)
+
+	result := runDoctorMailboxJSON(t, root)
+
+	pinCheck := findDoctorCheck(t, result.Checks, "Session identity pin")
+	if pinCheck.Status != "warn" || !strings.Contains(pinCheck.Message, "differs from pinned root") {
+		t.Fatalf("legacy pin check = %#v, want mismatch warning", pinCheck)
+	}
+	if got := doctorCheckStatus(result.Checks, "Mailboxes"); got != "ok" {
+		t.Fatalf("Mailboxes status = %q, checks=%#v", got, result.Checks)
+	}
+	if len(result.Mailboxes) != 2 ||
+		findDoctorMailboxTestEntry(t, result.Mailboxes, "healthy").Status != "ok" ||
+		findDoctorMailboxTestEntry(t, result.Mailboxes, reservedHumanHandle).Status != "ok" {
+		t.Fatalf("doctor did not complete read-only inspection: %#v", result.Mailboxes)
+	}
+}
+
+func TestDoctorOwnBaseMailboxRepairRefusesContradictoryLegacyPin(t *testing.T) {
+	baseRoot := healthyDoctorMailboxRoot(t, "healthy")
+	if err := fsq.EnsureAgentDirs(filepath.Join(baseRoot, "current"), "healthy"); err != nil {
+		t.Fatal(err)
+	}
+	missing := fsq.AgentInboxCur(baseRoot, "healthy")
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envBaseRoot, baseRoot)
+	t.Setenv(envSession, "current")
+	setOptionalEnv(t, envRootID, "", false)
+	setOptionalEnv(t, envBaseRootID, "", false)
+
+	result := runDoctorMailboxJSONArgs(t, baseRoot,
+		"--root", baseRoot,
+		"--fix-mailboxes",
+		"--json",
+	)
+
+	check := findDoctorCheck(t, result.Checks, "Mailboxes")
+	if result.MailboxRepair != nil || check.Status != "error" ||
+		!strings.Contains(check.Message, "pinned session context") {
+		t.Fatalf("contradictory legacy pin did not refuse own-base repair: repair=%#v check=%#v", result.MailboxRepair, check)
+	}
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("refused own-base repair mutated mailbox: %v", err)
+	}
+}
+
 func TestDoctorIssue289RepairRefusesMismatchedSessionPinWithRemedy(t *testing.T) {
 	root := healthyDoctorMailboxRoot(t, "healthy")
 	pinnedRoot := healthyDoctorMailboxRoot(t, "pinned")

@@ -192,6 +192,9 @@ func TestInitMissingAgents_ExitCode(t *testing.T) {
 
 func TestCleanupMissingFlag_ExitCode(t *testing.T) {
 	// amq cleanup (no --tmp-older-than) should exit 2
+	// Pin a valid root so this test isolates argument validation from the
+	// fail-closed implicit-root policy of the repository running the suite.
+	t.Setenv(envRoot, t.TempDir())
 	err := Run([]string{"cleanup"}, "test")
 	if err == nil {
 		t.Fatal("Run(cleanup) without --tmp-older-than should return error")

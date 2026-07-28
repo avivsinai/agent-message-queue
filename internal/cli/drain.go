@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"os"
 
@@ -47,7 +48,7 @@ func runDrain(args []string) error {
 	if err := validatePinOverride(common, *ignoreSessionPinFlag, routed); err != nil {
 		return err
 	}
-	if err := guardMailboxContext("drain", root, routed, *ignoreSessionPinFlag); err != nil {
+	if err := guardMailboxContext("drain", root, routed, *ignoreSessionPinFlag, common.rootExplicit()); err != nil {
 		return err
 	}
 	deliveryIdentity, err := snapshotMailboxDeliveryRoot(root, routed, *ignoreSessionPinFlag)
@@ -73,32 +74,52 @@ func runDrain(args []string) error {
 	defer func() { _ = deliveryRoot.Close() }()
 
 	items, err := drainInboxItems(deliveryRoot, root, common.Me, *includeBodyFlag, *limitFlag, validator)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return NotFoundError("mailbox for %q disappeared while draining root %s", common.Me, root)
+	return finishDrainBatch(deliveryRoot, root, common.Me, common.JSON, *includeBodyFlag, items, err)
+}
+
+func finishDrainBatch(deliveryRoot *fsq.DeliveryRoot, root, me string, jsonOutput, includeBody bool, items []inboxItem, drainErr error) error {
+	// Once a claim commits, its payload or failure record must be observable
+	// even if a later claim fails. Emit accumulated results before returning the
+	// batch error so callers can both consume the committed work and retry.
+	if len(items) > 0 {
+		_ = presence.TouchDeliveryRoot(deliveryRoot, me)
+		if err := outputDrainItems(jsonOutput, me, includeBody, items); err != nil {
+			if drainErr != nil {
+				return errors.Join(drainErr, err)
+			}
+			return err
 		}
-		return err
 	}
 
-	// Nothing to drain
+	if drainErr != nil {
+		var committed *fsq.CommittedDurabilityError
+		if errors.As(drainErr, &committed) {
+			return drainErr
+		}
+		if os.IsNotExist(drainErr) {
+			return NotFoundError("mailbox for %q disappeared while draining root %s", me, root)
+		}
+		return drainErr
+	}
+
 	if len(items) == 0 {
-		emitSiblingBacklogHintsIfInboxEmpty(root, common.Me)
-		if common.JSON {
+		emitSiblingBacklogHintsIfInboxEmpty(root, me)
+		if jsonOutput {
 			return writeJSON(os.Stdout, drainResult{Drained: []drainItem{}, Count: 0})
 		}
 		// Silent for text mode when empty (hook-friendly)
 		return nil
 	}
+	return nil
+}
 
-	// Best-effort presence touch.
-	_ = presence.TouchDeliveryRoot(deliveryRoot, common.Me)
-
-	if common.JSON {
+func outputDrainItems(jsonOutput bool, me string, includeBody bool, items []inboxItem) error {
+	if jsonOutput {
 		return writeJSON(os.Stdout, drainResult{Drained: items, Count: len(items)})
 	}
 
 	// Text output
-	if err := writeStdout("[AMQ] %d new message(s) for %s:\n\n", len(items), common.Me); err != nil {
+	if err := writeStdout("[AMQ] %d new message(s) for %s:\n\n", len(items), me); err != nil {
 		return err
 	}
 	for _, item := range items {
@@ -132,7 +153,7 @@ func runDrain(args []string) error {
 			fromDisplay, item.Thread, item.ID, subject, priority, kind, item.Created); err != nil {
 			return err
 		}
-		if *includeBodyFlag && item.Body != "" {
+		if includeBody && item.Body != "" {
 			if err := writeStdout("  Body:\n%s\n", item.Body); err != nil {
 				return err
 			}

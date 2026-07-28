@@ -35,6 +35,8 @@ type msgInfo struct {
 	ParseError   string   `json:"parse_error,omitempty"`
 }
 
+var watchIdleForTest func()
+
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	common := addCommonFlags(fs)
@@ -68,23 +70,39 @@ func runWatch(args []string) error {
 	if err := validatePinOverride(common, *ignoreSessionPinFlag, routed); err != nil {
 		return err
 	}
-	if err := guardMailboxContext("watch", root, routed, *ignoreSessionPinFlag); err != nil {
+	if err := guardMailboxContext("watch", root, routed, *ignoreSessionPinFlag, common.rootExplicit()); err != nil {
 		return err
 	}
-	if err := requireMailbox(root, me); err != nil {
+	deliveryIdentity, err := snapshotMailboxDeliveryRoot(root, routed, *ignoreSessionPinFlag)
+	if err != nil {
+		return err
+	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, deliveryIdentity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = deliveryRoot.Close() }()
+	if err := requireMailboxDeliveryRoot(deliveryRoot, root, me); err != nil {
 		return err
 	}
 
 	// Validate handle against config.json
-	if err := validateKnownHandles(root, common.Strict, me); err != nil {
+	if err := validateKnownHandlesDeliveryRoot(deliveryRoot, common.Strict, me); err != nil {
 		return err
 	}
-	validator, err := newHeaderValidator(root, common.Strict)
+	validator, err := newHeaderValidatorDeliveryRoot(deliveryRoot, common.Strict)
 	if err != nil {
 		return err
 	}
 
-	inboxNew := fsq.AgentInboxNew(root, common.Me)
+	inboxNew := filepath.Join("agents", common.Me, "inbox", "new")
+	inboxNewDisplay := deliveryRoot.DisplayPath(inboxNew)
+	revalidateContext := func() error {
+		if err := guardMailboxContext("watch", root, routed, *ignoreSessionPinFlag, common.rootExplicit()); err != nil {
+			return err
+		}
+		return deliveryRoot.VerifyBase()
+	}
 
 	// Set up context with timeout
 	ctx := context.Background()
@@ -100,17 +118,20 @@ func runWatch(args []string) error {
 	var watchErr error
 
 	if *pollFlag {
-		messages, event, watchErr = watchWithPolling(ctx, inboxNew, validator)
+		messages, event, watchErr = watchWithPolling(ctx, deliveryRoot, inboxNew, validator, revalidateContext)
 	} else {
-		messages, event, watchErr = watchWithFsnotify(ctx, inboxNew, validator)
+		messages, event, watchErr = watchWithFsnotify(ctx, deliveryRoot, inboxNew, validator, revalidateContext)
+	}
+	if err := revalidateContext(); err != nil {
+		return err
 	}
 
 	if watchErr != nil {
 		if os.IsNotExist(watchErr) {
-			return NotFoundError("mailbox for %q disappeared while watching %s", common.Me, inboxNew)
+			return NotFoundError("mailbox for %q disappeared while watching %s", common.Me, inboxNewDisplay)
 		}
 		if errors.Is(watchErr, context.DeadlineExceeded) {
-			if err := requireMailbox(root, me); err != nil {
+			if err := requireMailboxDeliveryRoot(deliveryRoot, root, me); err != nil {
 				return err
 			}
 			// Output timeout result but return a timeout exit code
@@ -125,45 +146,77 @@ func runWatch(args []string) error {
 	return outputWatchResult(common.JSON, event, messages)
 }
 
-func watchWithFsnotify(ctx context.Context, inboxNew string, validator *headerValidator) ([]msgInfo, string, error) {
+func watchWithFsnotify(
+	ctx context.Context,
+	deliveryRoot *fsq.DeliveryRoot,
+	inboxNew string,
+	validator *headerValidator,
+	revalidateContext func() error,
+) ([]msgInfo, string, error) {
+	inboxNewDisplay := deliveryRoot.DisplayPath(inboxNew)
+	if err := revalidateContext(); err != nil {
+		return nil, "", err
+	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		// Fall back to polling if fsnotify fails
-		return watchWithPolling(ctx, inboxNew, validator)
+		return watchWithPolling(ctx, deliveryRoot, inboxNew, validator, revalidateContext)
 	}
 	defer func() { _ = watcher.Close() }()
 
-	if err := watcher.Add(inboxNew); err != nil {
-		return watchWithPolling(ctx, inboxNew, validator)
+	if err := watcher.Add(inboxNewDisplay); err != nil {
+		return watchWithPolling(ctx, deliveryRoot, inboxNew, validator, revalidateContext)
 	}
 
 	// Check for existing messages AFTER watcher is set up to avoid race condition.
 	// Any message arriving after this check will trigger a watcher event.
-	existing, err := listNewMessages(inboxNew, validator)
+	if err := revalidateContext(); err != nil {
+		return nil, "", err
+	}
+	existing, err := listNewMessages(deliveryRoot, inboxNew, validator, revalidateContext)
 	if err != nil {
 		return nil, "", err
 	}
 	if len(existing) > 0 {
 		return existing, "existing", nil
 	}
+	if watchIdleForTest != nil {
+		watchIdleForTest()
+		if err := revalidateContext(); err != nil {
+			return nil, "", err
+		}
+	}
+
+	contextTicker := time.NewTicker(500 * time.Millisecond)
+	defer contextTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, "", ctx.Err()
+		case <-contextTicker.C:
+			if err := revalidateContext(); err != nil {
+				return nil, "", err
+			}
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return nil, "", errors.New("watcher closed")
 			}
+			if err := revalidateContext(); err != nil {
+				return nil, "", err
+			}
 			if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 &&
-				filepath.Clean(event.Name) == filepath.Clean(inboxNew) {
+				filepath.Clean(event.Name) == filepath.Clean(inboxNewDisplay) {
 				return nil, "", os.ErrNotExist
 			}
 			// Only care about new files (Create or Rename into directory)
 			if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
 				// Small delay to ensure file is fully written
 				time.Sleep(10 * time.Millisecond)
-				messages, err := listNewMessages(inboxNew, validator)
+				if err := revalidateContext(); err != nil {
+					return nil, "", err
+				}
+				messages, err := listNewMessages(deliveryRoot, inboxNew, validator, revalidateContext)
 				if err != nil {
 					return nil, "", err
 				}
@@ -175,19 +228,37 @@ func watchWithFsnotify(ctx context.Context, inboxNew string, validator *headerVa
 			if !ok {
 				return nil, "", errors.New("watcher closed")
 			}
+			if contextErr := revalidateContext(); contextErr != nil {
+				return nil, "", contextErr
+			}
 			return nil, "", err
 		}
 	}
 }
 
-func watchWithPolling(ctx context.Context, inboxNew string, validator *headerValidator) ([]msgInfo, string, error) {
+func watchWithPolling(
+	ctx context.Context,
+	deliveryRoot *fsq.DeliveryRoot,
+	inboxNew string,
+	validator *headerValidator,
+	revalidateContext func() error,
+) ([]msgInfo, string, error) {
 	// Check for existing messages first
-	existing, err := listNewMessages(inboxNew, validator)
+	if err := revalidateContext(); err != nil {
+		return nil, "", err
+	}
+	existing, err := listNewMessages(deliveryRoot, inboxNew, validator, revalidateContext)
 	if err != nil {
 		return nil, "", err
 	}
 	if len(existing) > 0 {
 		return existing, "existing", nil
+	}
+	if watchIdleForTest != nil {
+		watchIdleForTest()
+		if err := revalidateContext(); err != nil {
+			return nil, "", err
+		}
 	}
 
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -198,7 +269,10 @@ func watchWithPolling(ctx context.Context, inboxNew string, validator *headerVal
 		case <-ctx.Done():
 			return nil, "", ctx.Err()
 		case <-ticker.C:
-			messages, err := listNewMessages(inboxNew, validator)
+			if err := revalidateContext(); err != nil {
+				return nil, "", err
+			}
+			messages, err := listNewMessages(deliveryRoot, inboxNew, validator, revalidateContext)
 			if err != nil {
 				return nil, "", err
 			}
@@ -209,8 +283,13 @@ func watchWithPolling(ctx context.Context, inboxNew string, validator *headerVal
 	}
 }
 
-func listNewMessages(inboxNew string, validator *headerValidator) ([]msgInfo, error) {
-	entries, err := os.ReadDir(inboxNew)
+func listNewMessages(
+	deliveryRoot *fsq.DeliveryRoot,
+	inboxNew string,
+	validator *headerValidator,
+	revalidateContext func() error,
+) ([]msgInfo, error) {
+	entries, err := deliveryRoot.ReadDir(inboxNew)
 	if err != nil {
 		return nil, err
 	}
@@ -228,15 +307,29 @@ func listNewMessages(inboxNew string, validator *headerValidator) ([]msgInfo, er
 		if !strings.HasSuffix(filename, ".md") {
 			continue
 		}
+		if err := revalidateContext(); err != nil {
+			return nil, err
+		}
 
 		path := filepath.Join(inboxNew, filename)
+		displayPath := deliveryRoot.DisplayPath(path)
 		baseID := strings.TrimSuffix(filename, ".md")
-		header, err := format.ReadHeaderFile(path)
+		file, _, openErr := deliveryRoot.OpenRegularNoFollow(path)
+		if openErr != nil {
+			messages = append(messages, msgInfo{
+				ID:         baseID,
+				Path:       displayPath,
+				ParseError: openErr.Error(),
+			})
+			continue
+		}
+		header, err := format.ReadHeader(file)
+		_ = file.Close()
 		if err != nil {
 			// Include corrupt messages so watch doesn't hang
 			messages = append(messages, msgInfo{
 				ID:         baseID,
-				Path:       path,
+				Path:       displayPath,
 				ParseError: err.Error(),
 			})
 			continue
@@ -249,7 +342,7 @@ func listNewMessages(inboxNew string, validator *headerValidator) ([]msgInfo, er
 			}
 			messages = append(messages, msgInfo{
 				ID:         id,
-				Path:       path,
+				Path:       displayPath,
 				ParseError: parseErr,
 			})
 			continue
@@ -261,7 +354,7 @@ func listNewMessages(inboxNew string, validator *headerValidator) ([]msgInfo, er
 			Subject:      header.Subject,
 			Thread:       header.Thread,
 			Created:      header.Created,
-			Path:         path,
+			Path:         displayPath,
 			Priority:     header.Priority,
 			Kind:         header.Kind,
 			Labels:       header.Labels,

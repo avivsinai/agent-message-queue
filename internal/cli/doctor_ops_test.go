@@ -473,6 +473,45 @@ func TestDoctorExplicitRootWakeRepairRequiresPinMatchOrOverride(t *testing.T) {
 	}
 }
 
+func TestDoctorOwnBaseWakeRepairRefusesContradictoryLegacyPin(t *testing.T) {
+	baseRoot := healthyDoctorMailboxRoot(t, "alice")
+	if err := fsq.EnsureAgentDirs(filepath.Join(baseRoot, "current"), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := writeWakeLockForTest(t, baseRoot, "alice", wakeLock{
+		PID:        999999999,
+		Executable: "/opt/homebrew/bin/amq",
+	})
+	t.Setenv(envRoot, baseRoot)
+	t.Setenv(envBaseRoot, baseRoot)
+	t.Setenv(envSession, "current")
+	setOptionalEnv(t, envRootID, "", false)
+	setOptionalEnv(t, envBaseRootID, "", false)
+
+	output, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{
+			"--root", baseRoot,
+			"--ops",
+			"--fix-wake-locks",
+			"--json",
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result doctorMailboxResultJSON
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatal(err)
+	}
+	check := findDoctorCheck(t, result.Checks, "Wake lock repair")
+	if check.Status != "error" || !strings.Contains(check.Message, "pinned session context") {
+		t.Fatalf("contradictory legacy pin wake repair check = %#v", check)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("refused own-base wake repair changed stale lock: %v", err)
+	}
+}
+
 func TestDoctorInvalidBaseRootPreflightPreventsWakeRepair(t *testing.T) {
 	targetRoot := healthyDoctorMailboxRoot(t, "alice")
 	unrelatedBase := healthyDoctorMailboxRoot(t, "alice")
