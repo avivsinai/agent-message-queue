@@ -103,6 +103,10 @@ amq coop exec codex
 Each command sets up the environment, starts wake notifications, and launches
 the agent.
 
+Codex terminal notifications are retried until the inbox makes durable
+progress. The bundled prompt-observation hook only pauses duplicate retries for
+a short lease; it never acknowledges or drains a message.
+
 > **First-message check:** start both agents before sending the test message.
 > A newly started wake deliberately baselines messages that were already
 > waiting, so they remain unread but do not trigger a notification. If you sent
