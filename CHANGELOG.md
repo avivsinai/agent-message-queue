@@ -8,6 +8,16 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.49.10](https://github.com/avivsinai/agent-message-queue/compare/v0.49.9...v0.49.10) (2026-07-29)
+
+
+### Bug Fixes
+
+* **cli:** reject flag-shaped handles while preserving legacy read-only inspection ([1be7cd8](https://github.com/avivsinai/agent-message-queue/commit/1be7cd80b4b3df8ce9108e488429eb0abb67d961))
+* **upgrade:** report stale wakes across the active AMQ base tree after upgrade ([1be7cd8](https://github.com/avivsinai/agent-message-queue/commit/1be7cd80b4b3df8ce9108e488429eb0abb67d961))
+* **wake:** preserve usable legacy raw wakes during orphan checks ([1be7cd8](https://github.com/avivsinai/agent-message-queue/commit/1be7cd80b4b3df8ce9108e488429eb0abb67d961))
+* **wake:** re-announce pending doorbells without stacking input turns ([1be7cd8](https://github.com/avivsinai/agent-message-queue/commit/1be7cd80b4b3df8ce9108e488429eb0abb67d961))
+
 ## [0.49.9](https://github.com/avivsinai/agent-message-queue/compare/v0.49.8...v0.49.9) (2026-07-28)
 
 
