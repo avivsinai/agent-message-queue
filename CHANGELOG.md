@@ -14,6 +14,7 @@ editing the release PR.
 ### Bug Fixes
 
 * **cli:** reject flag-shaped handles while preserving legacy read-only inspection ([1be7cd8](https://github.com/avivsinai/agent-message-queue/commit/1be7cd80b4b3df8ce9108e488429eb0abb67d961))
+* **upgrade:** report stale wakes across the active AMQ base tree after upgrade ([1be7cd8](https://github.com/avivsinai/agent-message-queue/commit/1be7cd80b4b3df8ce9108e488429eb0abb67d961))
 * **wake:** preserve usable legacy raw wakes during orphan checks ([1be7cd8](https://github.com/avivsinai/agent-message-queue/commit/1be7cd80b4b3df8ce9108e488429eb0abb67d961))
 * **wake:** re-announce pending doorbells without stacking input turns ([1be7cd8](https://github.com/avivsinai/agent-message-queue/commit/1be7cd80b4b3df8ce9108e488429eb0abb67d961))
 
