@@ -21,7 +21,9 @@ AMQ owns agent-to-agent messaging, thread continuity, cross-project/session rout
 - PR titles must follow `type(scope): description`; the repository uses
   squash-only merges so the title becomes the conventional commit on `main`.
   Use `BEGIN_COMMIT_OVERRIDE` in a merged PR body or edit the release PR when a
-  change needs multiple or richer release-note entries.
+  change needs multiple or richer release-note entries. Each override entry
+  must be one conventional header of at most 72 characters, separated from
+  adjacent entries by a blank line.
 
 ## Operational Constraints
 
