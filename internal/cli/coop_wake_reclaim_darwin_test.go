@@ -38,18 +38,18 @@ func TestPrepareCoopWakeLockTerminalGoneDefersToSilentReplacement(t *testing.T) 
 	}
 }
 
-func TestPrepareCoopWakeLockLiveRawAttachedYesTakesOverWithWarning(t *testing.T) {
-	testPrepareCoopWakeLockLiveRawTakeover(t, "/dev/null", wakeProcessInfo{
+func TestPrepareCoopWakeLockLiveRawAttachedIsPreserved(t *testing.T) {
+	testPrepareCoopWakeLockHealthyRawPreserved(t, "/dev/null", wakeProcessInfo{
 		ControllingTerminalKnown: true,
 		HasControllingTerminal:   true,
-	}, "running, and still attached to a terminal — this may be a live session in another window", false)
+	})
 }
 
-func TestPrepareCoopWakeLockLiveRawUnknownTTYAttachedYesTakesOverWithWarning(t *testing.T) {
-	testPrepareCoopWakeLockLiveRawTakeover(t, "unknown", wakeProcessInfo{
+func TestPrepareCoopWakeLockLiveRawUnknownTTYAttachedIsPreserved(t *testing.T) {
+	testPrepareCoopWakeLockHealthyRawPreserved(t, "unknown", wakeProcessInfo{
 		ControllingTerminalKnown: true,
 		HasControllingTerminal:   true,
-	}, "running, and still attached to a terminal — this may be a live session in another window", false)
+	})
 }
 
 func TestPrepareCoopWakeLockLiveRawUndeterminableYesTakesOverWithWarning(t *testing.T) {
@@ -58,10 +58,8 @@ func TestPrepareCoopWakeLockLiveRawUndeterminableYesTakesOverWithWarning(t *test
 }
 
 func TestPrepareCoopWakeLockConsentedWakeSelfCleanupIsSuccess(t *testing.T) {
-	testPrepareCoopWakeLockLiveRawTakeover(t, "/dev/null", wakeProcessInfo{
-		ControllingTerminalKnown: true,
-		HasControllingTerminal:   true,
-	}, "running, and still attached to a terminal — this may be a live session in another window", true)
+	testPrepareCoopWakeLockLiveRawTakeover(t, "unknown", wakeProcessInfo{},
+		"running; cannot determine whether its terminal is still attached", true)
 }
 
 func TestPrepareCoopWakeLockConsentedWakeSelfCleanupWithoutProvenExitWarnsAndProceeds(t *testing.T) {
@@ -91,7 +89,7 @@ func TestPrepareCoopWakeLockConsentedWakeSelfCleanupWithoutProvenExitWarnsAndPro
 		t.Run(test.name, func(t *testing.T) {
 			const (
 				pid = 66121
-				tty = "/dev/null"
+				tty = "unknown"
 			)
 			root := secureTempDirForTest(t)
 			args := []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex"}
@@ -112,14 +110,12 @@ func TestPrepareCoopWakeLockConsentedWakeSelfCleanupWithoutProvenExitWarnsAndPro
 					return info
 				}
 				return wakeProcessInfo{
-					PID:                      got,
-					Running:                  true,
-					StartToken:               "start",
-					BootID:                   "boot",
-					Executable:               "/opt/homebrew/bin/amq",
-					Args:                     args,
-					ControllingTerminalKnown: true,
-					HasControllingTerminal:   true,
+					PID:        got,
+					Running:    true,
+					StartToken: "start",
+					BootID:     "boot",
+					Executable: "/opt/homebrew/bin/amq",
+					Args:       args,
 				}
 			})
 			var signals []os.Signal
@@ -276,6 +272,52 @@ func TestPrepareCoopWakeLockUnverifiedNeverSignals(t *testing.T) {
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("unverified metadata remains: %v", err)
+	}
+}
+
+func testPrepareCoopWakeLockHealthyRawPreserved(
+	t *testing.T,
+	tty string,
+	terminal wakeProcessInfo,
+) {
+	t.Helper()
+
+	const pid = 66121
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          pid,
+		TTY:          tty,
+		ProcessStart: "start",
+		BootID:       "boot",
+		Executable:   "/opt/homebrew/bin/amq",
+		Args:         []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex"},
+		Generation:   "healthy-live-raw",
+	})
+	stubInspectWakeProcess(t, func(got int) wakeProcessInfo {
+		terminal.PID = got
+		terminal.Running = true
+		terminal.StartToken = "start"
+		terminal.BootID = "boot"
+		terminal.Executable = "/opt/homebrew/bin/amq"
+		terminal.Args = []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex"}
+		return terminal
+	})
+	stubSignalWakeProcess(t, func(int, os.Signal) error {
+		t.Fatal("healthy raw wake must not be signaled")
+		return nil
+	})
+
+	stdout, stderr, err := captureEnvOutput(t, func() error {
+		return prepareCoopWakeLock(root, "codex", true, "unused")
+	})
+	if err != nil {
+		t.Fatalf("prepare healthy raw wake: %v", err)
+	}
+	if stdout != "" || stderr != "" {
+		t.Fatalf("healthy raw wake emitted output: stdout=%q stderr=%q", stdout, stderr)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("healthy raw lock changed: %v", err)
 	}
 }
 

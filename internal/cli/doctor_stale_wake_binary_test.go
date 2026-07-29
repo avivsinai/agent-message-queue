@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -104,6 +105,84 @@ func TestDoctorOpsReportsStructuredStaleWakeBinaryHintWithoutMutation(t *testing
 	}
 	if _, err := os.Stat(filepath.Dir(lockPath)); err != nil {
 		t.Fatalf("diagnostic changed wake directory: %v", err)
+	}
+}
+
+func TestDoctorOpsReportsLegacyFlagShapedStaleWakeWithoutAuthorizingFix(t *testing.T) {
+	root := secureTempDirForTest(t)
+	const (
+		agent = "-legacy"
+		pid   = 4242
+	)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fsq.AgentBase(root, agent), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock := wakeLock{
+		PID:          pid,
+		Root:         canonicalWakeRoot(root),
+		Agent:        agent,
+		Started:      "2026-07-27T10:00:00Z",
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		Executable:   "/opt/homebrew/bin/amq",
+		Args:         []string{"amq", "wake", "--root", root, "--me", agent},
+		Generation:   "legacy-stale-binary-generation",
+	}
+	data, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(fsq.AgentBase(root, agent), ".wake.lock")
+	if err := os.WriteFile(lockPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stubInspectWakeProcess(t, func(gotPID int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        gotPID,
+			Running:    true,
+			StartToken: "12345",
+			BootID:     "11111111-1111-1111-1111-111111111111",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", agent},
+		}
+	})
+	stubWakeBinaryStaleness(t, func(inspection wakeLockInspection) (wakeBinaryStaleness, error) {
+		if inspection.Agent != agent || inspection.PID != pid || !inspection.IdentityConfirmed {
+			t.Fatalf("unexpected inspection: %#v", inspection)
+		}
+		return wakeBinaryStaleness{
+			Stale:    true,
+			Method:   wakeBinaryComparisonExactIdentity,
+			Evidence: stableWakeBinaryEvidenceForTest(),
+		}, nil
+	})
+
+	for _, fix := range []bool{false, true} {
+		result := runOpsChecks(root, "test", fix)
+		hint, found := findOpsHint(result.Hints, "stale_wake_binary")
+		if !found || hint.WakeBinary == nil || hint.WakeBinary.Agent != agent {
+			t.Fatalf("fix=%v legacy stale-wake hint missing: %#v", fix, result.Hints)
+		}
+		if len(result.WakeLocks) != 1 || result.WakeLocks[0].Agent != agent {
+			t.Fatalf("fix=%v legacy wake locks = %#v", fix, result.WakeLocks)
+		}
+		if result.WakeLocks[0].Fix != "" || result.WakeLocks[0].Repair != "" ||
+			result.WakeLocks[0].RepairAvailable || result.WakeLocks[0].Removed {
+			t.Fatalf("fix=%v authorized legacy mutation: %#v", fix, result.WakeLocks[0])
+		}
+		if len(result.Agents) != 0 {
+			t.Fatalf("fix=%v exposed legacy handle as live agent: %#v", fix, result.Agents)
+		}
+		gotData, err := os.ReadFile(lockPath)
+		if err != nil {
+			t.Fatalf("fix=%v read legacy wake lock: %v", fix, err)
+		}
+		if !bytes.Equal(gotData, data) {
+			t.Fatalf("fix=%v changed legacy wake lock bytes", fix)
+		}
 	}
 }
 

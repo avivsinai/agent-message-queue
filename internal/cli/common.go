@@ -581,26 +581,11 @@ func validateKnownHandlesFromAgents(agents []string, loadErr error, strict bool,
 
 func normalizeHandle(raw string) (string, error) {
 	handle := strings.TrimSpace(raw)
-	if handle == "" {
-		return "", errors.New("agent handle cannot be empty")
-	}
 	if strings.ContainsAny(handle, "/\\") {
 		return "", fmt.Errorf("invalid handle (slashes not allowed): %s", handle)
 	}
-	if handle != strings.ToLower(handle) {
-		return "", fmt.Errorf("handle must be lowercase: %s", handle)
-	}
-	for _, r := range handle {
-		if r >= 'a' && r <= 'z' {
-			continue
-		}
-		if r >= '0' && r <= '9' {
-			continue
-		}
-		if r == '-' || r == '_' {
-			continue
-		}
-		return "", fmt.Errorf("invalid handle (allowed: a-z, 0-9, -, _): %s", handle)
+	if err := fsq.ValidateHandle(handle); err != nil {
+		return "", err
 	}
 	return handle, nil
 }

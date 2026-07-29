@@ -578,6 +578,110 @@ func TestRunWakeLoopStopsBeforePublishingPreparedMarker(t *testing.T) {
 	}
 }
 
+func TestRunWakeLoopReannouncesPendingDoorbellWithoutStackingInput(t *testing.T) {
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	message := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "pending-reannounce",
+			From:    "claude",
+			To:      []string{"codex"},
+			Thread:  "p2p/claude__codex",
+			Subject: "still pending",
+			Created: "2026-07-29T07:00:00Z",
+		},
+		Body: "body",
+	}
+	data, err := message.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "codex", "pending-reannounce.md", data); err != nil {
+		t.Fatal(err)
+	}
+
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+	firstDoorbell := make(chan struct{}, 1)
+	extraDoorbell := make(chan struct{}, 1)
+	attention := make(chan string, 1)
+	ticks := make(chan time.Time)
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	doorbells := 0
+
+	go func() {
+		done <- runWakeLoop(wakeConfig{
+			root:             root,
+			me:               "codex",
+			session:          "session1",
+			wakeOwner:        &wakeOwner{},
+			injectMode:       wakeInjectModeRaw,
+			controlStop:      stop,
+			maintenanceTicks: ticks,
+			preconditionCheck: func(*wakeConfig) error {
+				return nil
+			},
+			terminalWrite: func(text string) error {
+				if strings.Contains(text, coopWakeDoorbell) {
+					doorbells++
+					if doorbells == 1 {
+						firstDoorbell <- struct{}{}
+					} else {
+						extraDoorbell <- struct{}{}
+					}
+				}
+				return nil
+			},
+			attentionIsTTY: func() bool { return false },
+			attentionWrite: func(data []byte) (int, error) {
+				attention <- string(data)
+				return len(data), nil
+			},
+		})
+	}()
+
+	select {
+	case <-firstDoorbell:
+	case err := <-done:
+		t.Fatalf("wake loop exited before initial doorbell: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not submit initial doorbell")
+	}
+
+	// Model the operator clearing the TUI composer/queue: AMQ has no positive
+	// acknowledgement for that UI state, while the durable inbox item remains.
+	ticks <- time.Now()
+	select {
+	case output := <-attention:
+		if !strings.Contains(output, "AMQ [session1]: message from claude") ||
+			!strings.Contains(output, "amq drain --include-body") {
+			t.Fatalf("re-announcement = %q", output)
+		}
+	case err := <-done:
+		t.Fatalf("wake loop exited before re-announcement: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending doorbell was not re-announced")
+	}
+	close(stop)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("wake loop stop: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not stop")
+	}
+	select {
+	case <-extraDoorbell:
+		t.Fatal("re-announcement stacked another synthetic input turn")
+	default:
+	}
+}
+
 func TestBaselineDLQRetryWithSameFilenameRemainsNotifyEligible(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {

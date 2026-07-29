@@ -192,10 +192,9 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool, explicitBas
 		result.Agents = append(result.Agents, agent)
 	}
 
-	// Only handles which passed validation while traversing the config are
-	// eligible for diagnostic wake-lock inspection.  Discovery performs the
-	// same check for handles found on disk; checkWakeLocks repeats it at its
-	// boundary as a defense against future callers passing untrusted input.
+	// Configured live agents require canonical handles. Discovery additionally
+	// retains legacy-safe on-disk handles for read-only wake diagnostics;
+	// checkWakeLocks repeats that inspection boundary for untrusted callers.
 	var wakeHints []opsHint
 	result.WakeLocks, wakeHints = checkWakeLocksWithHints(
 		root,
@@ -308,7 +307,7 @@ func discoveredWakeLockAgents(root string, configured []string) []string {
 	seen := make(map[string]struct{}, len(configured))
 	agents := make([]string, 0, len(configured))
 	for _, agent := range configured {
-		if validateWakeLockAgent(root, agent) != nil {
+		if validateWakeLockAgentForInspection(root, agent) != nil {
 			continue
 		}
 		if _, ok := seen[agent]; ok {
@@ -326,7 +325,7 @@ func discoveredWakeLockAgents(root string, configured []string) []string {
 		if _, ok := seen[agent]; ok {
 			continue
 		}
-		if err := validateWakeLockAgent(root, agent); err != nil {
+		if err := validateWakeLockAgentForInspection(root, agent); err != nil {
 			continue
 		}
 		seen[agent] = struct{}{}
@@ -344,9 +343,10 @@ func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeL
 	var locks []opsWakeLock
 	var hints []opsHint
 	for _, agent := range agents {
-		if validateWakeLockAgent(root, agent) != nil {
+		if validateWakeLockAgentForInspection(root, agent) != nil {
 			continue
 		}
+		mutationAuthorized := fsq.ValidateHandle(agent) == nil
 		inspection := inspectWakeLock(root, agent)
 		if !inspection.Exists {
 			continue
@@ -364,12 +364,16 @@ func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeL
 			Reason: inspection.Reason,
 		}
 		ownerBound := classifyWakeClaimForGenericTransition(inspection) == wakeClaimAuthoritative
-		if ownerBound {
+		if ownerBound && mutationAuthorized {
 			lock.Fix = wakeRecoverOwnerCommand(root, agent)
 		}
 		if isLiveRawOrphan(inspection) {
 			lock.Status = "live-raw-orphan"
 			lock.Reason = "live raw wake orphan; stop the owning terminal or launchd supervisor"
+		}
+		if !mutationAuthorized {
+			locks = append(locks, lock)
+			continue
 		}
 		target, exists, targetErr := readWakeTarget(root, agent)
 		if exists {
@@ -437,6 +441,17 @@ func validateWakeLockAgent(root, agent string) error {
 	if err := fsq.ValidateHandle(agent); err != nil {
 		return err
 	}
+	return validateWakeLockAgentPath(root, agent)
+}
+
+func validateWakeLockAgentForInspection(root, agent string) error {
+	if err := fsq.ValidateLegacyHandleForInspection(agent); err != nil {
+		return err
+	}
+	return validateWakeLockAgentPath(root, agent)
+}
+
+func validateWakeLockAgentPath(root, agent string) error {
 	path := fsq.AgentBase(root, agent)
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {

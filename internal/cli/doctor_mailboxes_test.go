@@ -21,6 +21,68 @@ type doctorMailboxJSON struct {
 	Remedy         string   `json:"remedy"`
 }
 
+func TestDoctorReportsFlagShapedLegacyMailboxWithoutRepairingIt(t *testing.T) {
+	root := healthyDoctorMailboxRoot(t, "alice")
+	legacy := "-legacy"
+	for _, leaf := range fsq.RequiredMailboxLeaves() {
+		if err := os.MkdirAll(fsq.AgentMailboxPath(root, legacy, leaf), 0o700); err != nil {
+			t.Fatalf("create legacy mailbox leaf %s: %v", leaf, err)
+		}
+	}
+
+	result := runDoctorMailboxJSON(t, root)
+	got := findDoctorMailboxTestEntry(t, result.Mailboxes, legacy)
+	if got.Provenance != "discovered" || got.Status != "warn" ||
+		got.RepairEligible || !doctorMailboxContains(got.Issues, "invalid_handle") {
+		t.Fatalf("flag-shaped legacy mailbox = %#v", got)
+	}
+	for _, want := range []string{"preserve", "rename or remove"} {
+		if !strings.Contains(got.Remedy, want) {
+			t.Fatalf("legacy remedy missing %q: %q", want, got.Remedy)
+		}
+	}
+}
+
+func TestDoctorKeepsConfiguredFlagShapedLegacyMailboxVisibleAndUnrepairable(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	legacy := "-legacy"
+	for _, leaf := range fsq.RequiredMailboxLeaves() {
+		if err := os.MkdirAll(fsq.AgentMailboxPath(root, legacy, leaf), 0o700); err != nil {
+			t.Fatalf("create legacy mailbox leaf %s: %v", leaf, err)
+		}
+	}
+	configPath := filepath.Join(root, "meta", "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"version":1,"agents":["-legacy"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, repair := range []bool{false, true} {
+		name := "inspect"
+		args := []string{"--json"}
+		if repair {
+			name = "repair_refusal"
+			args = []string{"--fix-mailboxes", "--json"}
+		}
+		t.Run(name, func(t *testing.T) {
+			result := runDoctorMailboxJSONArgs(t, root, args...)
+			got := findDoctorMailboxTestEntry(t, result.Mailboxes, legacy)
+			if got.Provenance != "configured_and_discovered" ||
+				got.Status != "error" || got.RepairEligible ||
+				!doctorMailboxContains(got.Issues, "invalid_handle") {
+				t.Fatalf("configured flag-shaped legacy mailbox = %#v", got)
+			}
+			if repair && (result.MailboxRepair == nil ||
+				result.MailboxRepair.Failure == nil ||
+				result.MailboxRepair.Failure.Stage != "authorization") {
+				t.Fatalf("repair result = %#v", result.MailboxRepair)
+			}
+		})
+	}
+}
+
 func TestDoctorIssue289ConfiguredOnlyMailboxIsReported(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {

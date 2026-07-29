@@ -84,6 +84,9 @@ func TestNormalizeHandle(t *testing.T) {
 	if _, err := normalizeHandle("co/dex"); err == nil {
 		t.Fatalf("expected error for invalid characters")
 	}
+	if _, err := normalizeHandle("-codex"); err == nil {
+		t.Fatalf("expected error for flag-shaped handle")
+	}
 	if got, err := normalizeHandle("codex_1"); err != nil || got != "codex_1" {
 		t.Fatalf("normalizeHandle underscore: %v, %v", got, err)
 	}
