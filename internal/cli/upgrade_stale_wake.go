@@ -14,7 +14,7 @@ type upgradeStaleWake struct {
 }
 
 func reportStaleWakesAfterUpgrade() error {
-	root, _, _, err := resolveEnvConfigWithSource("", "")
+	root, err := resolveUpgradeDiagnosticRoot()
 	if err != nil || strings.TrimSpace(root) == "" {
 		return nil
 	}
@@ -32,6 +32,17 @@ func reportStaleWakesAfterUpgrade() error {
 		}
 	}
 	return nil
+}
+
+func resolveUpgradeDiagnosticRoot() (string, error) {
+	if root := strings.TrimSpace(os.Getenv(envRoot)); root != "" {
+		return absPath(resolveRoot(root)), nil
+	}
+	root, found, err := resolveDiscoveredBaseRoot()
+	if err != nil || !found {
+		return "", err
+	}
+	return absPath(resolveRoot(root)), nil
 }
 
 func collectUpgradeStaleWakes(root string) []upgradeStaleWake {
@@ -74,8 +85,7 @@ func upgradeDiagnosticRoots(root string) []string {
 	entries, err := os.ReadDir(base)
 	if err == nil {
 		for _, entry := range entries {
-			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") ||
-				strings.HasPrefix(entry.Name(), "_") {
+			if !entry.IsDir() || validateSessionName(entry.Name()) != nil {
 				continue
 			}
 			candidate := filepath.Join(base, entry.Name())

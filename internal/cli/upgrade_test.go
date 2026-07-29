@@ -15,7 +15,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-func TestRunUpgradeAlreadyCurrentReportsStaleWakesAcrossSessions(t *testing.T) {
+func TestRunUpgradeAlreadyCurrentReportsStaleWakesWithInvalidAmbientAgent(t *testing.T) {
 	baseRoot := secureTempDirForTest(t)
 	staleRoot := filepath.Join(baseRoot, "session1")
 	currentRoot := filepath.Join(baseRoot, "session2")
@@ -85,6 +85,7 @@ func TestRunUpgradeAlreadyCurrentReportsStaleWakesAcrossSessions(t *testing.T) {
 	t.Setenv(envRoot, baseRoot)
 	t.Setenv(envBaseRoot, baseRoot)
 	t.Setenv(envSession, "")
+	t.Setenv(envMe, "-legacy")
 	roots := upgradeDiagnosticRoots(baseRoot)
 	if !slices.Contains(roots, staleRoot) || !slices.Contains(roots, currentRoot) {
 		t.Fatalf("upgrade diagnostic roots = %#v, want both session roots", roots)
@@ -116,6 +117,20 @@ func TestRunUpgradeAlreadyCurrentReportsStaleWakesAcrossSessions(t *testing.T) {
 	}
 	if strings.Contains(stdout, currentRoot) || strings.Contains(stdout, "pid 4343") {
 		t.Fatalf("upgrade reported current wake as stale:\n%s", stdout)
+	}
+}
+
+func TestUpgradeDiagnosticRootsIncludesValidUnderscoreSession(t *testing.T) {
+	baseRoot := secureTempDirForTest(t)
+	sessionRoot := filepath.Join(baseRoot, "_ops")
+	if err := fsq.EnsureAgentDirs(sessionRoot, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSessionName(filepath.Base(sessionRoot)); err != nil {
+		t.Fatalf("test session is not valid: %v", err)
+	}
+	if roots := upgradeDiagnosticRoots(baseRoot); !slices.Contains(roots, sessionRoot) {
+		t.Fatalf("upgrade diagnostic roots = %#v, want %s", roots, sessionRoot)
 	}
 }
 
