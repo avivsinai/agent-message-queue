@@ -52,7 +52,10 @@ func runUpgrade(args []string, currentVersion string) error {
 	}
 
 	if cmp, ok := update.CompareVersions(currentVersion, latest); ok && cmp >= 0 {
-		return writeStdoutLine(fmt.Sprintf("amq is already up to date (%s)", latest))
+		if err := writeStdoutLine(fmt.Sprintf("amq is already up to date (%s)", latest)); err != nil {
+			return err
+		}
+		return reportStaleWakesAfterUpgrade()
 	}
 
 	if err := writeStdoutLine("Upgrading to", latest, "..."); err != nil {
@@ -110,9 +113,15 @@ func runUpgrade(args []string, currentVersion string) error {
 	}
 
 	if scheduled {
-		return writeStdoutLine("Upgrade scheduled; it will complete after this process exits.")
+		if err := writeStdoutLine("Upgrade scheduled; it will complete after this process exits."); err != nil {
+			return err
+		}
+		return reportStaleWakesAfterUpgrade()
 	}
-	return writeStdoutLine("Upgrade complete.")
+	if err := writeStdoutLine("Upgrade complete."); err != nil {
+		return err
+	}
+	return reportStaleWakesAfterUpgrade()
 }
 
 func selectUpgradeDestination(path, resolved string, writable func(string) error) (string, error) {

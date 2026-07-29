@@ -25,7 +25,7 @@ AMQ owns agent-to-agent messaging, thread continuity, cross-project/session rout
 
 ## Operational Constraints
 
-- Handles must be lowercase and match `[a-z0-9_-]+`.
+- Handles must be lowercase, match `[a-z0-9_-]+`, and must not start with `-`.
 - Never edit queue files directly; use the CLI for all mailbox operations.
 - Cleanup is explicit via `amq cleanup`; do not add automatic deletion behavior.
 
@@ -641,7 +641,7 @@ Key test files:
 - Files use 0600 permissions (owner read/write only)
 - Unknown handles trigger a warning by default; use `--strict` to error instead
 - With `--strict`, unreadable or corrupt `config.json` also causes an error
-- Handles must be lowercase: `[a-z0-9_-]+`
+- Handles must be lowercase, match `[a-z0-9_-]+`, and must not start with `-`.
 - Path traversal prevented via strict handle/ID validation
 
 ## Contributing

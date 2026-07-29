@@ -11,8 +11,9 @@ import (
 )
 
 type headerValidator struct {
-	strict bool
-	known  map[string]struct{}
+	strict                 bool
+	known                  map[string]struct{}
+	allowLegacyFlagHandles bool
 }
 
 func newHeaderValidator(root string, strict bool) (*headerValidator, error) {
@@ -60,22 +61,32 @@ func (v *headerValidator) validateHeaderBasic(header format.Header) error {
 	if v.strict && header.Schema != format.CurrentSchema {
 		return fmt.Errorf("unsupported schema: %d (expected %d)", header.Schema, format.CurrentSchema)
 	}
+	if v.allowLegacyFlagHandles {
+		return validateHeaderFieldsWithHandleValidation(header, validateLegacyInspectionHandleValue)
+	}
 	return validateHeaderFields(header)
 }
 
 // validateHeaderFields checks all header fields except schema version
 func validateHeaderFields(header format.Header) error {
+	return validateHeaderFieldsWithHandleValidation(header, validateHandleValue)
+}
+
+func validateHeaderFieldsWithHandleValidation(
+	header format.Header,
+	validate func(string, string) error,
+) error {
 	if _, err := ensureSafeBaseName(header.ID); err != nil {
 		return fmt.Errorf("invalid message id: %w", err)
 	}
-	if err := validateHandleValue("sender", header.From); err != nil {
+	if err := validate("sender", header.From); err != nil {
 		return err
 	}
 	if len(header.To) == 0 {
 		return errors.New("missing recipients")
 	}
 	for _, recipient := range header.To {
-		if err := validateHandleValue("recipient", recipient); err != nil {
+		if err := validate("recipient", recipient); err != nil {
 			return err
 		}
 	}
@@ -101,6 +112,16 @@ func validateHeaderFields(header format.Header) error {
 	}
 	if !format.IsValidKind(header.Kind) {
 		return fmt.Errorf("invalid kind: %s", header.Kind)
+	}
+	return nil
+}
+
+func validateLegacyInspectionHandleValue(label, handle string) error {
+	if err := validateHandleValue(label, handle); err == nil {
+		return nil
+	}
+	if err := fsq.ValidateLegacyHandleForInspection(handle); err != nil {
+		return fmt.Errorf("invalid %s handle: %w", label, err)
 	}
 	return nil
 }

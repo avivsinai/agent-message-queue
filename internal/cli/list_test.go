@@ -4,12 +4,66 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
+
+func TestListCanInspectFlagShapedLegacyMailboxButDrainRejectsIt(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	legacy := "-legacy"
+	for _, leaf := range fsq.RequiredMailboxLeaves() {
+		if err := os.MkdirAll(fsq.AgentMailboxPath(root, legacy, leaf), 0o700); err != nil {
+			t.Fatalf("create legacy mailbox leaf %s: %v", leaf, err)
+		}
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "legacy-message",
+			From:    "bob",
+			To:      []string{legacy},
+			Thread:  "p2p/-legacy__bob",
+			Subject: "recover me",
+			Created: "2026-07-29T07:00:00Z",
+		},
+		Body: "legacy body",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deliverToInboxForTest(t, root, legacy, "legacy-message.md", data); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runList([]string{"--root", root, "--me=-legacy", "--new", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("read-only legacy list: %v", err)
+	}
+	var items []listItem
+	if err := json.Unmarshal([]byte(stdout), &items); err != nil {
+		t.Fatalf("decode legacy list: %v\n%s", err, stdout)
+	}
+	if len(items) != 1 || items[0].ID != "legacy-message" {
+		t.Fatalf("legacy list items = %#v", items)
+	}
+
+	if err := runDrain([]string{"--root", root, "--me=-legacy"}); err == nil {
+		t.Fatal("drain accepted flag-shaped legacy handle")
+	}
+	if _, err := os.Stat(filepath.Join(fsq.AgentInboxNew(root, legacy), "legacy-message.md")); err != nil {
+		t.Fatalf("rejected drain changed legacy message: %v", err)
+	}
+}
 
 func TestRunListPagination(t *testing.T) {
 	root := t.TempDir()

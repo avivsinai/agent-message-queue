@@ -8,9 +8,116 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
+
+func TestRunUpgradeAlreadyCurrentReportsStaleWakesAcrossSessions(t *testing.T) {
+	baseRoot := secureTempDirForTest(t)
+	staleRoot := filepath.Join(baseRoot, "session1")
+	currentRoot := filepath.Join(baseRoot, "session2")
+	for _, root := range []string{staleRoot, currentRoot} {
+		if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+			t.Fatalf("ensure agent dirs for %s: %v", root, err)
+		}
+	}
+	writeWakeLockForTest(t, staleRoot, "codex", wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(staleRoot),
+		Agent:        "codex",
+		Started:      "2026-07-27T10:00:00Z",
+		ProcessStart: "stale-start",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		Executable:   "/opt/homebrew/bin/amq",
+		Args:         []string{"amq", "wake"},
+		Generation:   "stale-generation",
+	})
+	writeWakeLockForTest(t, currentRoot, "codex", wakeLock{
+		PID:          4343,
+		Root:         canonicalWakeRoot(currentRoot),
+		Agent:        "codex",
+		Started:      "2026-07-29T10:00:00Z",
+		ProcessStart: "current-start",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		Executable:   "/opt/homebrew/bin/amq",
+		Args:         []string{"amq", "wake"},
+		Generation:   "current-generation",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		start := "stale-start"
+		if pid == 4343 {
+			start = "current-start"
+		}
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: start,
+			BootID:     "11111111-1111-1111-1111-111111111111",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake"},
+		}
+	})
+	stubWakeBinaryStaleness(t, func(inspection wakeLockInspection) (wakeBinaryStaleness, error) {
+		return wakeBinaryStaleness{
+			Stale:    inspection.Root == canonicalWakeRoot(staleRoot),
+			Method:   wakeBinaryComparisonExactIdentity,
+			Evidence: stableWakeBinaryEvidenceForTest(),
+		}, nil
+	})
+
+	binary := filepath.Join(t.TempDir(), "amq")
+	if err := os.WriteFile(binary, []byte("current"), 0o755); err != nil {
+		t.Fatalf("write current binary: %v", err)
+	}
+	oldExecutablePath := executablePathForUpgrade
+	executablePathForUpgrade = func() (string, string, error) {
+		return binary, binary, nil
+	}
+	t.Cleanup(func() { executablePathForUpgrade = oldExecutablePath })
+	oldFetchLatestTag := fetchLatestTagForUpgrade
+	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) {
+		return "v0.49.9", nil
+	}
+	t.Cleanup(func() { fetchLatestTagForUpgrade = oldFetchLatestTag })
+	t.Setenv(envRoot, baseRoot)
+	t.Setenv(envBaseRoot, baseRoot)
+	t.Setenv(envSession, "")
+	roots := upgradeDiagnosticRoots(baseRoot)
+	if !slices.Contains(roots, staleRoot) || !slices.Contains(roots, currentRoot) {
+		t.Fatalf("upgrade diagnostic roots = %#v, want both session roots", roots)
+	}
+	inspection := inspectWakeLock(staleRoot, "codex")
+	if hint, ok := checkStaleWakeBinaryHint(inspection); !ok {
+		t.Fatalf("stale fixture produced no hint: %#v", inspection)
+	} else if hint.WakeBinary == nil || hint.WakeBinary.PID != 4242 {
+		t.Fatalf("stale fixture hint = %#v", hint)
+	}
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runUpgrade(nil, "v0.49.9")
+	})
+	if err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+	for _, want := range []string{
+		"amq is already up to date (v0.49.9)",
+		"Stale running wakes:",
+		staleRoot,
+		`agent "codex"`,
+		"pid 4242",
+		"restart",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("upgrade output missing %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, currentRoot) || strings.Contains(stdout, "pid 4343") {
+		t.Fatalf("upgrade reported current wake as stale:\n%s", stdout)
+	}
+}
 
 func TestRunUpgradeRefusesHomebrewSymlinkBeforeDownload(t *testing.T) {
 	base := t.TempDir()

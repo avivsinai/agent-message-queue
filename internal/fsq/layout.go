@@ -14,12 +14,31 @@ import (
 	"strings"
 )
 
-// handleRe matches valid agent handles: lowercase letters, digits, underscore, hyphen.
+// handleRe matches the historical safe single-component handle character set.
+// ValidateHandle separately rejects leading '-' for live handles.
 var handleRe = regexp.MustCompile(`^[a-z0-9_-]+$`)
 
 // ValidateHandle returns an error if the agent handle contains path traversal
 // characters or does not match the allowed pattern.
 func ValidateHandle(agent string) error {
+	if err := validateLegacyInspectableHandle(agent); err != nil {
+		return err
+	}
+	if strings.HasPrefix(agent, "-") {
+		return fmt.Errorf("agent handle must not start with '-': %q", agent)
+	}
+	return nil
+}
+
+// ValidateLegacyHandleForInspection accepts the historical safe single-path
+// component grammar. It exists only so read-only inventory/list operations can
+// surface mailboxes created before leading '-' was rejected. It must not
+// authorize creation, delivery, consumption, repair, wake, or presence writes.
+func ValidateLegacyHandleForInspection(agent string) error {
+	return validateLegacyInspectableHandle(agent)
+}
+
+func validateLegacyInspectableHandle(agent string) error {
 	if agent == "" || strings.TrimSpace(agent) == "" {
 		return fmt.Errorf("agent handle is empty")
 	}

@@ -55,6 +55,8 @@ type wakeConfig struct {
 	onPrepared           func(wakeAdmissionWatcher) error
 	retainedInbox        wakeInboxReader
 	touchPresence        func() error
+	maintenanceTicks     <-chan time.Time
+	preconditionCheck    func(*wakeConfig) error
 	recordNotifierStatus func(status, mode, reason string) error
 	recordAttention      func(wakeAttentionEmission) error
 	attentionEnv         func(string) string

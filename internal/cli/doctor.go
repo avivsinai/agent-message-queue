@@ -583,6 +583,12 @@ func inspectDoctorMailboxes(root, explicitBaseRoot string, repair, ignoreSession
 
 	authorization, authorizationInventory, authorizationErr := fsq.OpenMailboxConfigAuthorization(configRoot)
 	if authorizationErr != nil {
+		if inspected, err := fsq.InspectMailboxLayout(deliveryRoot); err == nil {
+			inspected.ActiveConfigStatus = authorizationInventory.ActiveConfigStatus
+			inspected.ActiveConfigIssue = authorizationInventory.ActiveConfigIssue
+			inspected.RepairAuthorized = false
+			authorizationInventory = inspected
+		}
 		if repair {
 			repairResult := fsq.MailboxRepairResult{
 				Status: "failed",
@@ -600,9 +606,11 @@ func inspectDoctorMailboxes(root, explicitBaseRoot string, repair, ignoreSession
 			check = checkMailboxInventory(inventory, result, repairCommand)
 			return inventory.Mailboxes, result, check
 		}
-		check.Status = "error"
-		check.Message = authorizationInventory.ActiveConfigIssue
-		return nil, nil, check
+		inventory = authorizationInventory
+		repairCommand := doctorMailboxRepairCommandForOS(root, repairBaseRoot, runtime.GOOS)
+		applyDoctorMailboxRemedies(&inventory, repairCommand)
+		check = checkMailboxInventory(inventory, nil, repairCommand)
+		return inventory.Mailboxes, nil, check
 	}
 	defer func() { _ = authorization.Close() }()
 	effectiveAgents := withReservedHumanHandle(authorization.ConfiguredAgents())

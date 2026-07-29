@@ -2387,10 +2387,22 @@ func runWakeLoop(cfg wakeConfig) error {
 		return nil
 	}
 
-	// Recheck non-invasive injection preconditions every 30s. This never
-	// test-injects, so success proves only the checks named below.
-	preconditionTicker := time.NewTicker(30 * time.Second)
-	defer preconditionTicker.Stop()
+	// Recheck non-invasive injection preconditions and re-announce durable
+	// pending work every 30s. Re-announcement stays output-only while an
+	// announced inbox identity remains pending, so it cannot stack user turns.
+	maintenanceTicks := cfg.maintenanceTicks
+	var maintenanceTicker *time.Ticker
+	if maintenanceTicks == nil {
+		maintenanceTicker = time.NewTicker(30 * time.Second)
+		maintenanceTicks = maintenanceTicker.C
+		defer maintenanceTicker.Stop()
+	}
+	preconditionCheck := cfg.preconditionCheck
+	if preconditionCheck == nil {
+		preconditionCheck = func(cfg *wakeConfig) error {
+			return wakeInjectionPreconditionCheck(cfg, controllingTerminalOpenable)
+		}
+	}
 
 	// Touch presence immediately so `amq who` shows agent as active
 	if cfg.touchPresence != nil {
@@ -2470,7 +2482,13 @@ func runWakeLoop(cfg wakeConfig) error {
 				return err
 			}
 
-		case <-preconditionTicker.C:
+		case <-maintenanceTicks:
+			if len(cfg.announcedPending) > 0 {
+				if err := attemptNotification(); err != nil {
+					return err
+				}
+			}
+
 			// Keep presence alive so `amq who` reports the agent as active
 			if cfg.touchPresence != nil {
 				_ = cfg.touchPresence()
@@ -2478,7 +2496,7 @@ func runWakeLoop(cfg wakeConfig) error {
 				_ = presence.Touch(cfg.root, cfg.me)
 			}
 
-			if err := wakeInjectionPreconditionCheck(&cfg, controllingTerminalOpenable); err != nil {
+			if err := preconditionCheck(&cfg); err != nil {
 				return err
 			}
 		}

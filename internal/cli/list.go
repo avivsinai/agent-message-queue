@@ -63,8 +63,15 @@ func runList(args []string) error {
 		return err
 	}
 	me, err := normalizeHandle(common.Me)
+	legacyInspection := false
 	if err != nil {
-		return UsageError("--me: %v", err)
+		legacy := strings.TrimSpace(common.Me)
+		if !strings.HasPrefix(legacy, "-") ||
+			fsq.ValidateLegacyHandleForInspection(legacy) != nil {
+			return UsageError("--me: %v", err)
+		}
+		me = legacy
+		legacyInspection = true
 	}
 	common.Me = me
 	root, routed, err := resolveMailboxRoot(common, *sessionFlag)
@@ -114,6 +121,7 @@ func runList(args []string) error {
 	if err != nil {
 		return err
 	}
+	validator.allowLegacyFlagHandles = legacyInspection
 
 	box := "new"
 	if *newFlag && *curFlag {

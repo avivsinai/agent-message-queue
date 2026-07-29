@@ -40,15 +40,18 @@ func TestLiveRawOrphanState(t *testing.T) {
 	}
 }
 
-func TestLiveRawOrphanDoesNotDependOnTerminalEvidence(t *testing.T) {
+func TestLiveRawOrphanRequiresUnusableNotificationPath(t *testing.T) {
 	tests := []struct {
 		name string
 		tty  string
+		mode string
 		proc wakeProcessInfo
+		want bool
 	}{
 		{
 			name: "attached",
 			tty:  "/dev/null",
+			mode: "raw",
 			proc: wakeProcessInfo{
 				ControllingTerminalKnown: true,
 				HasControllingTerminal:   true,
@@ -57,12 +60,14 @@ func TestLiveRawOrphanDoesNotDependOnTerminalEvidence(t *testing.T) {
 		{
 			name: "attached with unknown saved tty",
 			tty:  "unknown",
+			mode: "raw",
 			proc: wakeProcessInfo{
 				ControllingTerminalKnown: true,
 				HasControllingTerminal:   true,
 			},
 		},
-		{name: "undeterminable", tty: "unknown"},
+		{name: "undeterminable legacy tty", tty: "unknown", mode: "raw", want: true},
+		{name: "output only", tty: "unknown", mode: wakeInjectModeNone},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -70,10 +75,10 @@ func TestLiveRawOrphanDoesNotDependOnTerminalEvidence(t *testing.T) {
 			i := wakeLockInspection{
 				IdentityConfirmed: true,
 				Process:           tt.proc,
-				Lock:              wakeLock{WakeMode: "raw", TTY: tt.tty},
+				Lock:              wakeLock{WakeMode: tt.mode, TTY: tt.tty},
 			}
-			if !isLiveRawOrphan(i) {
-				t.Fatal("live identity-confirmed ownerless raw wake must be a takeover candidate")
+			if got := isLiveRawOrphan(i); got != tt.want {
+				t.Fatalf("isLiveRawOrphan = %v, want %v", got, tt.want)
 			}
 		})
 	}
