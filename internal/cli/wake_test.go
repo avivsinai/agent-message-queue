@@ -662,8 +662,12 @@ func TestInjectNotificationRawDrainsSettlesThenInjectsCRWithRescue(t *testing.T)
 	wantDrains := [][2]time.Duration{
 		{rawInjectDrainTimeout, rawInjectDrainPollInterval},
 		{rawInjectCRDrainTimeout, rawInjectDrainPollInterval},
+		{rawInjectCRDrainTimeout, rawInjectDrainPollInterval},
 	}
-	if len(drainCalls) != len(wantDrains) || drainCalls[0] != wantDrains[0] || drainCalls[1] != wantDrains[1] {
+	if len(drainCalls) != len(wantDrains) ||
+		drainCalls[0] != wantDrains[0] ||
+		drainCalls[1] != wantDrains[1] ||
+		drainCalls[2] != wantDrains[2] {
 		t.Fatalf("drain calls = %v, want %v", drainCalls, wantDrains)
 	}
 	if len(*slept) != 2 || (*slept)[0] != rawInjectSettleDelay || (*slept)[1] != rawInjectSettleDelay {
@@ -690,12 +694,18 @@ func TestInjectNotificationRawSkipsRescueCRWhenFirstCRStillQueued(t *testing.T) 
 	slept := stubRawInjectSleep(t)
 
 	cfg := &wakeConfig{injectMode: "raw", debug: true}
+	var submitted bool
 	stderr := captureWakeStderr(t, func() {
-		if err := injectNotification(cfg, "AMQ wake", true); err != nil {
-			t.Fatalf("injectNotification: %v", err)
+		var err error
+		submitted, err = injectRawNotification(cfg, "AMQ wake")
+		if err != nil {
+			t.Fatalf("injectRawNotification: %v", err)
 		}
 	})
 
+	if submitted {
+		t.Fatal("queued submit key reported as submitted")
+	}
 	if got := strings.Join(injected, "|"); got != "AMQ wake|\r" {
 		t.Fatalf("raw injection sequence = %q, want text then one CR", got)
 	}
@@ -732,12 +742,18 @@ func TestInjectNotificationRawSkipsRescueCROnTotalReaderStall(t *testing.T) {
 	slept := stubRawInjectSleep(t)
 
 	cfg := &wakeConfig{injectMode: "raw", debug: true}
+	var submitted bool
 	stderr := captureWakeStderr(t, func() {
-		if err := injectNotification(cfg, "AMQ wake", true); err != nil {
-			t.Fatalf("injectNotification: %v", err)
+		var err error
+		submitted, err = injectRawNotification(cfg, "AMQ wake")
+		if err != nil {
+			t.Fatalf("injectRawNotification: %v", err)
 		}
 	})
 
+	if submitted {
+		t.Fatal("stalled reader reported queued submit key as submitted")
+	}
 	if got := strings.Join(injected, "|"); got != "AMQ wake|\r" {
 		t.Fatalf("raw injection sequence = %q, want text then one CR", got)
 	}
@@ -749,6 +765,86 @@ func TestInjectNotificationRawSkipsRescueCROnTotalReaderStall(t *testing.T) {
 	}
 	if len(*slept) != 1 || (*slept)[0] != rawInjectSettleDelay {
 		t.Fatalf("settle sleeps = %v, want one of %s", *slept, rawInjectSettleDelay)
+	}
+}
+
+func TestInjectNotificationRawResumesQueuedSubmitWithoutRetyping(t *testing.T) {
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	drainCall := 0
+	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+		drainCall++
+		switch drainCall {
+		case 1:
+			return 5 * time.Millisecond, true, nil // notification text drained
+		case 2:
+			return timeout, false, nil // first submit remains queued
+		default:
+			return 5 * time.Millisecond, true, nil // reader resumed
+		}
+	})
+	stubRawInjectSleep(t)
+
+	cfg := &wakeConfig{injectMode: wakeInjectModeRaw}
+	submitted, err := injectRawNotification(cfg, "AMQ wake")
+	if err != nil {
+		t.Fatalf("initial injectRawNotification: %v", err)
+	}
+	if submitted {
+		t.Fatal("initial queued submit reported as submitted")
+	}
+
+	submitted, err = injectRawNotification(cfg, "AMQ wake")
+	if err != nil {
+		t.Fatalf("resumed injectRawNotification: %v", err)
+	}
+	if !submitted {
+		t.Fatal("drained rescue submit was not reported as submitted")
+	}
+	if got := strings.Join(injected, "|"); got != "AMQ wake|\r|\r" {
+		t.Fatalf("raw injection sequence = %q, want text then queued CR then rescue CR", got)
+	}
+}
+
+func TestInjectNotificationRawStopsAfterQueuedRescueDrains(t *testing.T) {
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	drainCall := 0
+	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+		drainCall++
+		switch drainCall {
+		case 1:
+			return 5 * time.Millisecond, true, nil // notification text drained
+		case 2:
+			return timeout, false, nil // first submit remains queued
+		case 3:
+			return 5 * time.Millisecond, true, nil // first submit drained
+		case 4:
+			return timeout, false, nil // rescue remains queued
+		default:
+			return 5 * time.Millisecond, true, nil // rescue drained
+		}
+	})
+	stubRawInjectSleep(t)
+
+	cfg := &wakeConfig{injectMode: wakeInjectModeRaw}
+	for attempt := 1; attempt <= 3; attempt++ {
+		submitted, err := injectRawNotification(cfg, "AMQ wake")
+		if err != nil {
+			t.Fatalf("injectRawNotification attempt %d: %v", attempt, err)
+		}
+		if want := attempt == 3; submitted != want {
+			t.Fatalf("attempt %d submitted = %v, want %v", attempt, submitted, want)
+		}
+	}
+	if got := strings.Join(injected, "|"); got != "AMQ wake|\r|\r" {
+		t.Fatalf("raw injection sequence = %q, want at most the first and rescue CR", got)
 	}
 }
 
@@ -1069,7 +1165,7 @@ func TestNotifyNewMessagesNormalSuccessUsesFixedInputOnly(t *testing.T) {
 	}
 }
 
-func TestNotifyNewMessagesCoalescesCoopInputUntilAnnouncedBacklogDrains(t *testing.T) {
+func TestNotifyNewMessagesWaitsSilentlyUntilRetryOrProgress(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
@@ -1106,12 +1202,14 @@ func TestNotifyNewMessagesCoalescesCoopInputUntilAnnouncedBacklogDrains(t *testi
 	})
 	stubRawInjectSleep(t)
 	var injected []string
+	now := time.Unix(1_800_000_000, 0)
 	cfg := &wakeConfig{
 		me:             "codex",
 		root:           root,
 		session:        "session3",
 		wakeOwner:      &wakeOwner{},
 		injectMode:     wakeInjectModeRaw,
+		doorbellNow:    func() time.Time { return now },
 		attentionIsTTY: func() bool { return false },
 		terminalWrite: func(text string) error {
 			injected = append(injected, text)
@@ -1137,10 +1235,8 @@ func TestNotifyNewMessagesCoalescesCoopInputUntilAnnouncedBacklogDrains(t *testi
 	if len(injected) != 0 {
 		t.Fatalf("second pending message injected another user turn: %q", injected)
 	}
-	for _, want := range []string{"AMQ [session3]: 2 messages", "2 from peer"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("coalesced output %q missing %q", stderr, want)
-		}
+	if stderr != "" {
+		t.Fatalf("pending generation emitted output-only reminder: %q", stderr)
 	}
 
 	if drained := runDrainJSON(t, root, "codex", 1, false); drained.Count != 1 {
@@ -1164,12 +1260,12 @@ func TestNotifyNewMessagesCoalescesCoopInputUntilAnnouncedBacklogDrains(t *testi
 	if len(injected) != 0 {
 		t.Fatalf("re-armed backlog injected another user turn: %q", injected)
 	}
-	if !strings.Contains(stderr, "AMQ [session3]: 3 messages") {
-		t.Fatalf("re-armed coalesced output missing current count: %q", stderr)
+	if stderr != "" {
+		t.Fatalf("re-armed generation emitted output-only reminder: %q", stderr)
 	}
 }
 
-func TestNotifyNewMessagesCoalescesUrgentCoopInputToAttention(t *testing.T) {
+func TestNotifyNewMessagesDoesNotFloodAttentionForUrgentAddition(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
@@ -1239,10 +1335,8 @@ func TestNotifyNewMessagesCoalescesUrgentCoopInputToAttention(t *testing.T) {
 	if len(injected) != 0 {
 		t.Fatalf("urgent pending message injected another user turn: %q", injected)
 	}
-	for _, want := range []string{"AMQ interrupt [session3]", "urgent review"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("urgent coalesced output %q missing %q", stderr, want)
-		}
+	if stderr != "" {
+		t.Fatalf("urgent addition emitted periodic output attention: %q", stderr)
 	}
 }
 
@@ -1277,6 +1371,7 @@ func TestNotifyNewMessagesRetriesCoopInputAfterOutputOnlyFallback(t *testing.T) 
 	}
 
 	working, outputPath := injectViaCaptureConfig(t)
+	now := time.Unix(1_800_000_000, 0)
 	cfg := &wakeConfig{
 		me:             "codex",
 		root:           root,
@@ -1284,6 +1379,7 @@ func TestNotifyNewMessagesRetriesCoopInputAfterOutputOnlyFallback(t *testing.T) 
 		wakeOwner:      &wakeOwner{},
 		injectVia:      filepath.Join(root, "missing-injector"),
 		injectTimeout:  time.Second,
+		doorbellNow:    func() time.Time { return now },
 		attentionIsTTY: func() bool { return false },
 	}
 
@@ -1293,19 +1389,167 @@ func TestNotifyNewMessagesRetriesCoopInputAfterOutputOnlyFallback(t *testing.T) 
 			t.Fatalf("notify with unavailable input transport: %v", err)
 		}
 	})
-	if len(cfg.announcedPending) != 0 {
-		t.Fatalf("output-only fallback latched announced input: %#v", cfg.announcedPending)
+	if cfg.doorbell.phase != wakeDoorbellAwaitingObservation {
+		t.Fatalf("output-only fallback phase = %v, want awaiting observation", cfg.doorbell.phase)
 	}
 
 	cfg.injectVia = working.injectVia
 	cfg.injectArgs = working.injectArgs
 	cfg.injectTimeout = working.injectTimeout
+	now = now.Add(wakeDoorbellRetryBase)
 	writeMessage("second.md", "second")
 	if err := notifyNewMessages(cfg); err != nil {
 		t.Fatalf("retry after output-only fallback: %v", err)
 	}
 	if got, err := os.ReadFile(outputPath); err != nil || string(got) != coopWakeDoorbell {
 		t.Fatalf("retry injection = %q, err=%v; want fixed doorbell", got, err)
+	}
+}
+
+func TestNotifyNewMessagesDrainsStaleSubmitBeforeNewBatch(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	writeMessage := func(filename, id string) {
+		t.Helper()
+		msg := format.Message{
+			Header: format.Header{
+				Schema:  1,
+				ID:      id,
+				From:    "peer",
+				To:      []string{"codex"},
+				Thread:  "p2p/codex__peer",
+				Subject: id,
+				Created: "2026-07-29T18:17:38Z",
+			},
+		}
+		data, err := msg.Marshal()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", id, err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "codex", filename, data); err != nil {
+			t.Fatalf("deliver %s: %v", id, err)
+		}
+	}
+
+	drainCall := 0
+	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+		drainCall++
+		if drainCall == 2 {
+			return timeout, false, nil // first message's submit remains queued
+		}
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+	var injected []string
+	tokens := []string{
+		"11111111111111111111111111111111",
+		"22222222222222222222222222222222",
+	}
+	cfg := &wakeConfig{
+		me:         "codex",
+		root:       root,
+		session:    "session3",
+		wakeOwner:  &wakeOwner{},
+		injectMode: wakeInjectModeRaw,
+		newDoorbellToken: func() (string, error) {
+			token := tokens[0]
+			tokens = tokens[1:]
+			return token, nil
+		},
+		attentionIsTTY: func() bool { return false },
+		terminalWrite: func(text string) error {
+			injected = append(injected, text)
+			return nil
+		},
+	}
+
+	writeMessage("first.md", "first")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify first message: %v", err)
+	}
+	if drained := runDrainJSON(t, root, "codex", 0, false); drained.Count != 1 {
+		t.Fatalf("drained count = %d, want 1", drained.Count)
+	}
+
+	injected = nil
+	writeMessage("second.md", "second")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify later message: %v", err)
+	}
+	want := "\r|" + buildCoopWakeDoorbell("22222222222222222222222222222222") + "|\n|\r|\r"
+	if got := strings.Join(injected, "|"); got != want {
+		t.Fatalf("later injection = %q, want old rescue before fresh fixed doorbell", got)
+	}
+}
+
+func TestNotifyNewMessagesReconcilesQueuedSubmitAfterInboxDrain(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		startPhase rawSubmitPhase
+		drained    bool
+		wantPhase  rawSubmitPhase
+		wantWrites string
+	}{
+		{
+			name:       "first submit consumed",
+			startPhase: rawFirstSubmitQueued,
+			drained:    true,
+			wantPhase:  rawSubmitIdle,
+			wantWrites: "\r",
+		},
+		{
+			name:       "first submit still stalled",
+			startPhase: rawFirstSubmitQueued,
+			drained:    false,
+			wantPhase:  rawFirstSubmitQueued,
+		},
+		{
+			name:       "rescue submit consumed",
+			startPhase: rawRescueSubmitQueued,
+			drained:    true,
+			wantPhase:  rawSubmitIdle,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatalf("EnsureRootDirs: %v", err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+				t.Fatalf("EnsureAgentDirs: %v", err)
+			}
+			stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+				return 0, tc.drained, nil
+			})
+			stubRawInjectSleep(t)
+			var writes []string
+			cfg := &wakeConfig{
+				me:               "codex",
+				root:             root,
+				wakeOwner:        &wakeOwner{},
+				injectMode:       wakeInjectModeRaw,
+				rawSubmitPhase:   tc.startPhase,
+				rawSubmitPayload: coopWakeDoorbell,
+				terminalWrite: func(text string) error {
+					writes = append(writes, text)
+					return nil
+				},
+			}
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("notify empty inbox: %v", err)
+			}
+			if cfg.rawSubmitPhase != tc.wantPhase {
+				t.Fatalf("raw submit phase = %v, want %v", cfg.rawSubmitPhase, tc.wantPhase)
+			}
+			if got := strings.Join(writes, "|"); got != tc.wantWrites {
+				t.Fatalf("terminal writes = %q, want %q", got, tc.wantWrites)
+			}
+		})
 	}
 }
 
@@ -1367,6 +1611,7 @@ func TestNotifyNewMessagesRetriesCoopInputAfterPartialSubmitFailure(t *testing.T
 			stubRawInjectSleep(t)
 			failSubmit := true
 			var injected []string
+			now := time.Unix(1_800_000_000, 0)
 			stubTIOCSTIInject(t, func(text string) error {
 				injected = append(injected, text)
 				if failSubmit && len(injected) == 2 {
@@ -1380,6 +1625,7 @@ func TestNotifyNewMessagesRetriesCoopInputAfterPartialSubmitFailure(t *testing.T
 				session:        "session3",
 				wakeOwner:      &wakeOwner{},
 				injectMode:     tc.mode,
+				doorbellNow:    func() time.Time { return now },
 				attentionIsTTY: func() bool { return false },
 			}
 
@@ -1395,12 +1641,13 @@ func TestNotifyNewMessagesRetriesCoopInputAfterPartialSubmitFailure(t *testing.T
 			if !strings.Contains(stderr, "AMQ [session3]: message from peer") {
 				t.Fatalf("partial %s fallback missing output attention: %q", tc.mode, stderr)
 			}
-			if len(cfg.announcedPending) != 0 {
-				t.Fatalf("partial %s failure latched announced input: %#v", tc.mode, cfg.announcedPending)
+			if cfg.doorbell.phase != wakeDoorbellAwaitingObservation {
+				t.Fatalf("partial %s phase = %v, want awaiting observation", tc.mode, cfg.doorbell.phase)
 			}
 
 			failSubmit = false
 			injected = nil
+			now = now.Add(wakeDoorbellRetryBase)
 			writeMessage("second.md", "second")
 			if err := notifyNewMessages(cfg); err != nil {
 				t.Fatalf("retry after partial %s failure: %v", tc.mode, err)
@@ -1408,14 +1655,14 @@ func TestNotifyNewMessagesRetriesCoopInputAfterPartialSubmitFailure(t *testing.T
 			if got := strings.Join(injected, "|"); got != tc.retryWant {
 				t.Fatalf("retry %s injection = %q, want %q", tc.mode, got, tc.retryWant)
 			}
-			if len(cfg.announcedPending) != 2 {
-				t.Fatalf("successful %s retry announced %d messages, want 2", tc.mode, len(cfg.announcedPending))
+			if len(cfg.doorbell.cohort) != 1 {
+				t.Fatalf("successful %s retry changed frozen cohort to %d messages, want 1", tc.mode, len(cfg.doorbell.cohort))
 			}
 		})
 	}
 }
 
-func TestNotifyNewMessagesLatchesRawSubmitBeforeRescueAuthorityError(t *testing.T) {
+func TestNotifyNewMessagesRetriesAfterRescueAuthorityError(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
@@ -1451,12 +1698,14 @@ func TestNotifyNewMessagesLatchesRawSubmitBeforeRescueAuthorityError(t *testing.
 	stubRawInjectSleep(t)
 	failRescue := true
 	var injected []string
+	now := time.Unix(1_800_000_000, 0)
 	cfg := &wakeConfig{
 		me:             "codex",
 		root:           root,
 		session:        "session3",
 		wakeOwner:      &wakeOwner{},
 		injectMode:     wakeInjectModeRaw,
+		doorbellNow:    func() time.Time { return now },
 		attentionIsTTY: func() bool { return false },
 		terminalWrite: func(text string) error {
 			injected = append(injected, text)
@@ -1476,8 +1725,8 @@ func TestNotifyNewMessagesLatchesRawSubmitBeforeRescueAuthorityError(t *testing.
 	if got := strings.Join(injected, "|"); got != coopWakeDoorbell+"|\n|\r|\r" {
 		t.Fatalf("raw injection before rescue error = %q, want submitted doorbell plus failed rescue", got)
 	}
-	if len(cfg.announcedPending) != 1 {
-		t.Fatalf("submitted doorbell announced %d pending messages after rescue error, want 1", len(cfg.announcedPending))
+	if len(cfg.doorbell.cohort) != 1 {
+		t.Fatalf("submitted doorbell cohort has %d pending messages after rescue error, want 1", len(cfg.doorbell.cohort))
 	}
 
 	failRescue = false
@@ -1489,12 +1738,21 @@ func TestNotifyNewMessagesLatchesRawSubmitBeforeRescueAuthorityError(t *testing.
 		}
 	})
 	if len(injected) != 0 {
-		t.Fatalf("pending submitted doorbell retried terminal input: %q", injected)
+		t.Fatalf("doorbell retried before deadline: %q", injected)
 	}
-	for _, want := range []string{"AMQ [session3]: 2 messages", "2 from peer"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("coalesced output %q missing %q", stderr, want)
-		}
+	if stderr != "" {
+		t.Fatalf("pending generation emitted output-only reminder: %q", stderr)
+	}
+
+	now = now.Add(wakeDoorbellRetryBase)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("retry after deadline: %v", err)
+	}
+	if got := strings.Join(injected, "|"); got != "\r" {
+		t.Fatalf("deadline retry = %q, want only the preserved rescue submit", got)
+	}
+	if cfg.rawSubmitPhase != rawSubmitIdle {
+		t.Fatalf("raw submit phase = %v, want idle after rescue completion", cfg.rawSubmitPhase)
 	}
 }
 

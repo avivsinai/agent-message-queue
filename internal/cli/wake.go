@@ -50,7 +50,13 @@ type wakeConfig struct {
 	baselineRequested    bool
 	baselineInherited    bool
 	baselineExisting     map[string]wakeFileIdentity
-	announcedPending     map[string]wakeFileIdentity
+	rawSubmitPhase       rawSubmitPhase
+	rawSubmitPayload     string
+	doorbell             wakeDoorbellState
+	doorbellNow          func() time.Time
+	newDoorbellToken     func() (string, error)
+	promptObserved       <-chan string
+	suppressAttention    bool
 	onBaselineReady      func(map[string]wakeFileIdentity) error
 	onPrepared           func(wakeAdmissionWatcher) error
 	retainedInbox        wakeInboxReader
@@ -63,6 +69,14 @@ type wakeConfig struct {
 	attentionIsTTY       func() bool
 	attentionWrite       func([]byte) (int, error)
 }
+
+type rawSubmitPhase uint8
+
+const (
+	rawSubmitIdle rawSubmitPhase = iota
+	rawFirstSubmitQueued
+	rawRescueSubmitQueued
+)
 
 type wakeAdmissionWatcher interface {
 	Errors() <-chan error
@@ -80,7 +94,10 @@ const (
 	wakeInjectModePaste = "paste"
 	wakeInjectModeNone  = "none"
 
-	coopWakeDoorbell = ": AMQ doorbell run amq drain --include-body then act on it"
+	coopWakeDoorbellTokenForTests = "00000000000000000000000000000000"
+	coopWakeDoorbellPrefix        = ": AMQ doorbell v1 token="
+	coopWakeDoorbellSuffix        = " run amq drain --include-body then act on it"
+	coopWakeDoorbell              = coopWakeDoorbellPrefix + coopWakeDoorbellTokenForTests + coopWakeDoorbellSuffix
 
 	rawInjectDrainTimeout      = 2 * time.Second
 	rawInjectDrainPollInterval = 10 * time.Millisecond
@@ -152,6 +169,19 @@ func peerWakeNotification(output string) wakeNotification {
 			provenance: wakePayloadPeerHeaders,
 		},
 	}
+}
+
+func buildCoopWakeDoorbell(token string) string {
+	return coopWakeDoorbellPrefix + token + coopWakeDoorbellSuffix
+}
+
+func parseCoopWakeDoorbell(prompt string) (string, bool) {
+	if !strings.HasPrefix(prompt, coopWakeDoorbellPrefix) ||
+		!strings.HasSuffix(prompt, coopWakeDoorbellSuffix) {
+		return "", false
+	}
+	token := strings.TrimSuffix(strings.TrimPrefix(prompt, coopWakeDoorbellPrefix), coopWakeDoorbellSuffix)
+	return token, validWakeDoorbellToken(token)
 }
 
 func operatorWakeNotification(text string) wakeNotification {
@@ -333,6 +363,18 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	}
 
 	if len(messages) == 0 {
+		if usesCoopDoorbell(cfg) {
+			if _, err := cfg.doorbell.plan(
+				cfg.wakeDoorbellNow(),
+				currentPending,
+				cfg.wakeDoorbellToken,
+			); err != nil {
+				return err
+			}
+			if err := reconcileRawSubmitAfterInboxDrain(cfg); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 
@@ -406,31 +448,48 @@ func deliverNewMessageNotification(
 	currentPending map[string]os.FileInfo,
 ) error {
 	ownerBound := usesCoopDoorbell(cfg)
-	if ownerBound &&
-		cfg.injectMode != wakeInjectModeNone &&
-		announcedWakeStillPending(cfg.announcedPending, currentPending) {
-		emitWakeAttention(cfg, notice.output)
-		return nil
+	if ownerBound && cfg.injectMode != wakeInjectModeNone {
+		now := cfg.wakeDoorbellNow()
+		plan, err := cfg.doorbell.plan(now, currentPending, cfg.wakeDoorbellToken)
+		if err != nil {
+			return err
+		}
+		if !plan.attempt {
+			return nil
+		}
+		notice.input = wakePayload{
+			text:       plan.prompt,
+			provenance: wakePayloadSystemFixed,
+		}
+		cfg.suppressAttention = plan.retry
+		deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
+		cfg.suppressAttention = false
+		if deliveryErr == nil || !isWakeTerminalForegroundPGRPChanged(deliveryErr) {
+			cfg.doorbell.recordAttempt(now)
+		}
+		return deliveryErr
 	}
 
-	result, err := deliverWakeNotificationResult(cfg, notice, deferForInput)
-	if ownerBound && result.inputSubmitted {
-		cfg.announcedPending = snapshotWakeFileIdentities(currentPending)
-	}
-	return err
+	return deliverWakeNotification(cfg, notice, deferForInput)
 }
 
-func announcedWakeStillPending(
-	announced map[string]wakeFileIdentity,
-	current map[string]os.FileInfo,
-) bool {
-	for name, identity := range announced {
-		info, ok := current[name]
-		if ok && matchesWakeFileIdentity(identity, info) {
-			return true
-		}
+func (cfg *wakeConfig) wakeDoorbellNow() time.Time {
+	if cfg.doorbellNow != nil {
+		return cfg.doorbellNow()
 	}
-	return false
+	return time.Now()
+}
+
+func (cfg *wakeConfig) wakeDoorbellToken() (string, error) {
+	if cfg.newDoorbellToken != nil {
+		return cfg.newDoorbellToken()
+	}
+	// Internal direct-call tests do not carry a published wake generation.
+	// Production wake instances always do and receive a fresh random token.
+	if cfg.terminalGeneration == "" {
+		return coopWakeDoorbellTokenForTests, nil
+	}
+	return generateWakeDoorbellToken()
 }
 
 func snapshotWakeFileIdentities(current map[string]os.FileInfo) map[string]wakeFileIdentity {
@@ -606,31 +665,21 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	)
 }
 
-type wakeDeliveryResult struct {
-	inputSubmitted bool
-}
-
 func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForInput bool) error {
-	_, err := deliverWakeNotificationResult(cfg, notice, deferForInput)
-	return err
-}
-
-func deliverWakeNotificationResult(
-	cfg *wakeConfig,
-	notice wakeNotification,
-	deferForInput bool,
-) (wakeDeliveryResult, error) {
-	var result wakeDeliveryResult
 	ownerBound := usesCoopDoorbell(cfg)
 	if ownerBound {
-		notice.input = wakePayload{
-			text:       coopWakeDoorbell,
-			provenance: wakePayloadSystemFixed,
+		if _, valid := parseCoopWakeDoorbell(notice.input.text); valid {
+			// Generation-token prompts are system-created before delivery.
+		} else {
+			notice.input = wakePayload{
+				text:       coopWakeDoorbell,
+				provenance: wakePayloadSystemFixed,
+			}
 		}
 	}
 	if cfg.injectMode == wakeInjectModeNone {
 		emitWakeAttention(cfg, notice.output)
-		return result, nil
+		return nil
 	}
 
 	inputText := notice.input.text
@@ -642,7 +691,7 @@ func deliverWakeNotificationResult(
 	if shouldDeferBeforeInject(cfg, deferForInput) {
 		if !waitForWakeInputQuiet(cfg) {
 			emitWakeAttention(cfg, notice.output)
-			return result, nil
+			return nil
 		}
 	}
 
@@ -651,10 +700,10 @@ func deliverWakeNotificationResult(
 	if cfg.injectVia != "" {
 		allowed, guardErr := authorizeTerminalWrite(cfg)
 		if guardErr != nil {
-			return result, guardErr
+			return guardErr
 		}
 		if !allowed {
-			return result, nil
+			return nil
 		}
 		if err := injectVia(cfg, plainText); err != nil {
 			if cfg.fallbackWarn {
@@ -663,10 +712,9 @@ func deliverWakeNotificationResult(
 				cfg.fallbackWarn = false
 			}
 			emitWakeAttention(cfg, notice.output)
-			return result, nil
+			return nil
 		}
-		result.inputSubmitted = true
-		return result, nil
+		return nil
 	}
 
 	mode := effectiveInjectMode(cfg)
@@ -683,7 +731,7 @@ func deliverWakeNotificationResult(
 		if cfg.bell && !ownerBound {
 			injectedText = "\a" + injectedText
 		}
-		result.inputSubmitted, injectErr = injectRawNotification(cfg, injectedText)
+		_, injectErr = injectRawNotification(cfg, injectedText)
 
 	case wakeInjectModePaste:
 		// Paste mode: bracketed paste with delayed CR
@@ -702,10 +750,7 @@ func deliverWakeNotificationResult(
 		} else if wrote {
 			// Small delay to ensure CR lands in separate read cycle
 			time.Sleep(25 * time.Millisecond)
-			submitted, err := writeTerminalChunk(cfg, "\r")
-			if err == nil {
-				result.inputSubmitted = submitted
-			}
+			_, err := writeTerminalChunk(cfg, "\r")
 			injectErr = err
 		}
 
@@ -716,10 +761,7 @@ func deliverWakeNotificationResult(
 			if err != nil {
 				injectErr = err
 			} else if wrote {
-				submitted, err := writeTerminalChunk(cfg, "\r")
-				if err == nil {
-					result.inputSubmitted = submitted
-				}
+				_, err := writeTerminalChunk(cfg, "\r")
 				injectErr = err
 			}
 		} else {
@@ -727,7 +769,7 @@ func deliverWakeNotificationResult(
 			if cfg.bell {
 				injectedText = "\a" + injectedText
 			}
-			result.inputSubmitted, injectErr = writeTerminalChunk(cfg, injectedText)
+			_, injectErr = writeTerminalChunk(cfg, injectedText)
 		}
 	}
 
@@ -749,11 +791,11 @@ func deliverWakeNotificationResult(
 			_ = writeStderr("amq wake: warning: %s\n", reason)
 			cfg.fallbackWarn = false
 			emitWakeAttention(cfg, notice.output)
-			return result, nil
+			return nil
 		}
 		var authorityErr *wakeTerminalAuthorityError
 		if errors.As(injectErr, &authorityErr) {
-			return result, injectErr
+			return injectErr
 		}
 		if cfg.fallbackWarn {
 			_ = writeStderr("amq wake: TIOCSTI injection failed: %v\n", injectErr)
@@ -762,10 +804,10 @@ func deliverWakeNotificationResult(
 		}
 		// Fallback: use the output-only attention tier; never retry input.
 		emitWakeAttention(cfg, notice.output)
-		return result, nil
+		return nil
 	}
 
-	return result, nil
+	return nil
 }
 
 func usesCoopDoorbell(cfg *wakeConfig) bool {
@@ -865,7 +907,79 @@ func rawSubmitPrelude(me string) string {
 	return ""
 }
 
+func clearRawSubmitState(cfg *wakeConfig) {
+	cfg.rawSubmitPhase = rawSubmitIdle
+	cfg.rawSubmitPayload = ""
+}
+
+func reconcileRawSubmitAfterInboxDrain(cfg *wakeConfig) error {
+	if cfg.rawSubmitPhase == rawSubmitIdle {
+		return nil
+	}
+	waited, drained, err := waitForRawInputDrained(
+		rawInjectCRDrainTimeout,
+		rawInjectDrainPollInterval,
+	)
+	if cfg.debug {
+		switch {
+		case err != nil:
+			_ = writeStderr("amq wake [debug]: empty-inbox submit drain check failed after %s: %v\n", waited, err)
+		case drained:
+			_ = writeStderr("amq wake [debug]: empty-inbox submit queue drained after %s\n", waited)
+		default:
+			_ = writeStderr("amq wake [debug]: empty-inbox submit key still queued after %s\n", waited)
+		}
+	}
+	if err != nil || !drained {
+		return nil
+	}
+	if cfg.rawSubmitPhase == rawFirstSubmitQueued {
+		_, err := injectRawRescueSubmit(cfg)
+		return err
+	}
+	clearRawSubmitState(cfg)
+	return nil
+}
+
 func injectRawNotification(cfg *wakeConfig, injectedText string) (bool, error) {
+	if cfg.rawSubmitPhase != rawSubmitIdle {
+		// A previous submit key is still in the terminal input queue. Never
+		// retype the notification: wait until the reader resumes, then send only
+		// the one permitted rescue Enter after the first submit. A drained
+		// rescue is final; it must not generate a third Enter.
+		pendingPhase := cfg.rawSubmitPhase
+		pendingPayload := cfg.rawSubmitPayload
+		waited, drained, err := waitForRawInputDrained(rawInjectCRDrainTimeout, rawInjectDrainPollInterval)
+		if err != nil {
+			if cfg.debug {
+				_ = writeStderr("amq wake [debug]: pending submit drain check failed after %s: %v\n", waited, err)
+			}
+			return false, nil
+		}
+		if !drained {
+			if cfg.debug {
+				_ = writeStderr("amq wake [debug]: submit key still queued after %s; waiting for terminal reader\n", waited)
+			}
+			return false, nil
+		}
+		clearRawSubmitState(cfg)
+		if pendingPhase == rawFirstSubmitQueued {
+			cfg.rawSubmitPhase = rawFirstSubmitQueued
+			cfg.rawSubmitPayload = pendingPayload
+			if _, err := injectRawRescueSubmit(cfg); err != nil {
+				return false, err
+			}
+			if cfg.rawSubmitPhase != rawSubmitIdle {
+				return false, nil
+			}
+		}
+		if pendingPayload != "" && pendingPayload == injectedText {
+			return true, nil
+		}
+		// The old submit sequence is fully drained. It is now safe to type the
+		// current generation without stacking bytes behind stale terminal input.
+	}
+
 	if cfg.debug {
 		_ = writeStderr("amq wake [debug]: injecting %d bytes of text\n", len(injectedText))
 	}
@@ -933,6 +1047,7 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) (bool, error) {
 	if cfg.debug {
 		_ = writeStderr("amq wake [debug]: submit key injected OK\n")
 	}
+	cfg.rawSubmitPayload = injectedText
 
 	// Rescue submit: if the first Enter was swallowed anyway (input buffer
 	// flush or a burst-window race), a repeat Enter submits the composer; if
@@ -944,31 +1059,80 @@ func injectRawNotification(cfg *wakeConfig, injectedText string) (bool, error) {
 	// paste-shaped chunk and both would be swallowed.
 	crWaited, crDrained, crErr := waitForRawInputDrained(rawInjectCRDrainTimeout, rawInjectDrainPollInterval)
 	if crErr == nil && !crDrained {
+		cfg.rawSubmitPhase = rawFirstSubmitQueued
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: submit key still queued after %s; skipping rescue submit\n", crWaited)
 		}
+		return false, nil
+	}
+	if crErr != nil {
+		// Without queue visibility, preserve the historical best-effort path:
+		// one spaced rescue Enter and no unbounded retries.
+		rawInjectSleep(rawInjectSettleDelay)
+		wrote, err = writeTerminalChunk(cfg, "\r")
+		if err != nil {
+			var authorityErr *wakeTerminalAuthorityError
+			if errors.As(err, &authorityErr) {
+				clearRawSubmitState(cfg)
+				return true, err
+			}
+			if cfg.debug {
+				_ = writeStderr("amq wake [debug]: rescue submit inject failed: %v\n", err)
+			}
+			clearRawSubmitState(cfg)
+			return true, nil
+		}
+		if !wrote {
+			clearRawSubmitState(cfg)
+			return true, nil
+		}
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: rescue submit injected OK\n")
+		}
+		clearRawSubmitState(cfg)
 		return true, nil
 	}
+
+	cfg.rawSubmitPhase = rawFirstSubmitQueued
+	return injectRawRescueSubmit(cfg)
+}
+
+func injectRawRescueSubmit(cfg *wakeConfig) (bool, error) {
 	rawInjectSleep(rawInjectSettleDelay)
-	wrote, err = writeTerminalChunk(cfg, "\r")
+	wrote, err := writeTerminalChunk(cfg, "\r")
 	if err != nil {
 		// The text and first submit key were already delivered; the rescue is
 		// best-effort unless exact terminal authority was lost.
 		var authorityErr *wakeTerminalAuthorityError
 		if errors.As(err, &authorityErr) {
-			return true, err
+			return false, err
 		}
 		if cfg.debug {
 			_ = writeStderr("amq wake [debug]: rescue submit inject failed: %v\n", err)
 		}
-		return true, nil
+		return false, nil
 	}
 	if !wrote {
-		return true, nil
+		return false, nil
 	}
 	if cfg.debug {
 		_ = writeStderr("amq wake [debug]: rescue submit injected OK\n")
 	}
+	waited, drained, drainErr := waitForRawInputDrained(rawInjectCRDrainTimeout, rawInjectDrainPollInterval)
+	if drainErr != nil {
+		// Queue inspection is best-effort. A successful terminal write remains
+		// the strongest evidence available when the platform cannot inspect it.
+		clearRawSubmitState(cfg)
+		return true, nil
+	}
+	if !drained {
+		cfg.rawSubmitPhase = rawRescueSubmitQueued
+		if cfg.debug {
+			_ = writeStderr("amq wake [debug]: rescue submit still queued after %s; waiting for terminal reader\n", waited)
+		}
+		return false, nil
+	}
+	clearRawSubmitState(cfg)
 	return true, nil
 }
 

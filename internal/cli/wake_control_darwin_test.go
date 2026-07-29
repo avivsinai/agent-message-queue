@@ -28,6 +28,69 @@ func testDarwinControlLock(t *testing.T) (string, string, wakeLock) {
 	return root, agent, lock
 }
 
+func testDarwinRawObservationLock(t *testing.T) (string, string, wakeLock) {
+	t.Helper()
+	root := secureTempDirForTest(t)
+	const agent = "codex"
+	lock := wakeLock{
+		PID:        os.Getpid(),
+		TTY:        "/dev/ttys999",
+		Root:       canonicalWakeRoot(root),
+		Agent:      agent,
+		Started:    "2026-07-29T00:00:00Z",
+		WakeMode:   wakeInjectModeRaw,
+		Generation: "0123456789abcdef0123456789abcdef",
+	}
+	lock.ControlSocket = wakeControlSocketPath(root, agent, lock.Generation)
+	writeWakeLockExactForTest(t, root, agent, lock)
+	return root, agent, lock
+}
+
+func TestDarwinRawControlAcceptsOnlyPromptObservation(t *testing.T) {
+	root, agent, lock := testDarwinRawObservationLock(t)
+	observed := make(chan string, 1)
+	cleanup, stop, _, err := startWakeControlListener(root, agent, lock, observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if stop != nil {
+		t.Fatal("raw prompt-observation control exposed a stop channel")
+	}
+
+	const token = "0123456789abcdef0123456789abcdef"
+	rejected := sendDarwinOwnerControlRequest(t, root, agent, lock, wakeControlOwnerRequest{
+		Generation: lock.Generation,
+		Operation:  wakeControlPromptObserved,
+		Token:      strings.ToUpper(token),
+	})
+	if rejected != "" {
+		t.Fatalf("noncanonical token response = %q", rejected)
+	}
+	select {
+	case got := <-observed:
+		t.Fatalf("noncanonical token was observed: %q", got)
+	default:
+	}
+
+	response := sendDarwinOwnerControlRequest(t, root, agent, lock, wakeControlOwnerRequest{
+		Generation: lock.Generation,
+		Operation:  wakeControlPromptObserved,
+		Token:      token,
+	})
+	if response != "ACK" {
+		t.Fatalf("prompt observation response = %q", response)
+	}
+	select {
+	case got := <-observed:
+		if got != token {
+			t.Fatalf("observed token = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prompt observation was not delivered")
+	}
+}
+
 func testDarwinOwnerControlLock(
 	t *testing.T,
 ) (string, string, wakeOwner, wakeLock, *wakeOwnerIdentityState, *int) {
@@ -186,7 +249,7 @@ func sendDarwinOwnerControlRequest(
 
 func TestDarwinCooperativeStopACKAfterLockRemoval(t *testing.T) {
 	root, agent, lock := testDarwinControlLock(t)
-	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock)
+	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +267,7 @@ func TestDarwinCooperativeStopACKAfterLockRemoval(t *testing.T) {
 
 func TestDarwinCooperativeStopACKWaitsForLoopExit(t *testing.T) {
 	root, agent, lock := testDarwinControlLock(t)
-	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock)
+	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +318,7 @@ func TestDarwinCooperativeStopKeepsGenerationPublishedUntilLoopExit(t *testing.T
 			Args:       []string{"amq", "wake", "--root", root, "--me", agent},
 		}
 	})
-	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock)
+	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +367,7 @@ func TestDarwinCooperativeStopKeepsGenerationPublishedUntilLoopExit(t *testing.T
 
 func TestDarwinCooperativeStopCompletionOutlivesAuthenticationDeadline(t *testing.T) {
 	root, agent, lock := testDarwinControlLock(t)
-	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock)
+	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +403,7 @@ func TestDarwinCooperativeStopCompletionOutlivesAuthenticationDeadline(t *testin
 
 func TestDarwinControlTokenMismatchRefused(t *testing.T) {
 	root, agent, lock := testDarwinControlLock(t)
-	cleanup, _, _, err := startWakeControlListener(root, agent, lock)
+	cleanup, _, _, err := startWakeControlListener(root, agent, lock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +436,7 @@ func TestDarwinControlTokenMismatchRefused(t *testing.T) {
 func TestDarwinOwnerControlRefusesGenerationOnlyAndWrongSessionBeforeQuiesce(t *testing.T) {
 	t.Run("generation only", func(t *testing.T) {
 		root, agent, _, lock, _, _ := testDarwinOwnerControlLock(t)
-		cleanup, stopped, _, err := startWakeControlListener(root, agent, lock)
+		cleanup, stopped, _, err := startWakeControlListener(root, agent, lock, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -396,7 +459,7 @@ func TestDarwinOwnerControlRefusesGenerationOnlyAndWrongSessionBeforeQuiesce(t *
 	t.Run("wrong peer session", func(t *testing.T) {
 		root, agent, owner, lock, _, peerSession := testDarwinOwnerControlLock(t)
 		*peerSession = owner.SessionID + 1
-		cleanup, stopped, _, err := startWakeControlListener(root, agent, lock)
+		cleanup, stopped, _, err := startWakeControlListener(root, agent, lock, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -420,7 +483,7 @@ func TestDarwinOwnerControlRefusesGenerationOnlyAndWrongSessionBeforeQuiesce(t *
 
 func TestDarwinOwnerControlAuthenticatedReleaseACKsAfterExactClaimRemoval(t *testing.T) {
 	root, agent, owner, lock, _, _ := testDarwinOwnerControlLock(t)
-	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock)
+	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +524,7 @@ func TestDarwinOwnerControlAuthenticatedReleaseACKsAfterExactClaimRemoval(t *tes
 
 func TestDarwinOwnerControlReauthorizesAfterQuiesce(t *testing.T) {
 	root, agent, owner, lock, ownerState, _ := testDarwinOwnerControlLock(t)
-	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock)
+	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,7 +634,7 @@ func TestDarwinControlRemovesStaleSocketBeforeListen(t *testing.T) {
 	if err := os.WriteFile(lock.ControlSocket, []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cleanup, _, _, err := startWakeControlListener(root, agent, lock)
+	cleanup, _, _, err := startWakeControlListener(root, agent, lock, nil)
 	if err != nil {
 		t.Fatalf("stale socket prevented listener: %v", err)
 	}
@@ -617,7 +680,7 @@ func TestDarwinControlStartPinsAuthorizedAgentDirectory(t *testing.T) {
 		}
 	})
 
-	cleanup, _, _, err := startWakeControlListener(root, agent, lock)
+	cleanup, _, _, err := startWakeControlListener(root, agent, lock, nil)
 	if err != nil {
 		t.Fatalf("start control listener: %v", err)
 	}
@@ -650,7 +713,7 @@ func TestDarwinControlCleanupPinsAuthorizedAgentDirectory(t *testing.T) {
 	lock.ControlSocket = wakeControlSocketPath(root, agent, lock.Generation)
 	writeWakeLockForTest(t, root, agent, lock)
 
-	cleanup, _, _, err := startWakeControlListener(root, agent, lock)
+	cleanup, _, _, err := startWakeControlListener(root, agent, lock, nil)
 	if err != nil {
 		t.Fatalf("start control listener: %v", err)
 	}
@@ -718,7 +781,7 @@ func TestDarwinControlAuthenticationPinsAuthorizedAgentDirectory(t *testing.T) {
 		}
 	})
 
-	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock)
+	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock, nil)
 	if err != nil {
 		t.Fatalf("start control listener: %v", err)
 	}

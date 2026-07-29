@@ -496,6 +496,10 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 			lock.OwnerSchema = wakeOwnerLockSchema
 			lock.Owner = &owner
 		}
+	} else if lock.WakeMode == wakeInjectModeRaw || lock.WakeMode == wakeInjectModePaste {
+		// Raw/paste wakes expose a narrow prompt-observation endpoint. It
+		// cannot stop, drain, or mutate mailbox state.
+		lock.ControlSocket = wakeControlSocketPath(root, me, lock.Generation)
 	}
 	if options.repairLineage != nil {
 		lock.SourceGeneration = options.repairLineage.source.DeadGeneration
@@ -1800,43 +1804,6 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	if requestedOwner != nil {
 		controlStop = mergeWakeStopChannels(controlStop, ownerObservation.Done())
 	}
-	if injectVia != "" {
-		var current wakeLockInspection
-		if repairAgentDir != nil {
-			if err := repairAgentDir.withFD(func(dirfd int) error {
-				current = inspectWakeLockAt(dirfd, repairAgentDir, root, me)
-				return nil
-			}); err != nil {
-				return err
-			}
-		} else {
-			current = inspectWakeLock(root, me)
-		}
-		var controlCleanup func()
-		var stop <-chan struct{}
-		var markStopped func()
-		var controlErr error
-		if repairAgentDir != nil {
-			controlCleanup, stop, markStopped, controlErr = startWakeControlListenerInDir(
-				repairAgentDir, root, me, current.Lock,
-			)
-		} else {
-			controlCleanup, stop, markStopped, controlErr = startWakeControlListener(root, me, current.Lock)
-		}
-		if controlErr != nil {
-			return controlErr
-		}
-		defer controlCleanup()
-		defer markStopped()
-		controlStop = mergeWakeStopChannels(controlStop, stop)
-	}
-
-	if injectVia != "" {
-		if err := validateResolvedWakeInjectViaPath(injectVia); err != nil {
-			return err
-		}
-	}
-
 	var currentWake wakeLockInspection
 	if repairAgentDir != nil {
 		if err := repairAgentDir.withFD(func(dirfd int) error {
@@ -1848,6 +1815,37 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	} else {
 		currentWake = inspectWakeLock(root, me)
 	}
+	promptObserved := make(chan string, 16)
+	if currentWake.Lock.ControlSocket != "" {
+		var controlCleanup func()
+		var stop <-chan struct{}
+		var markStopped func()
+		var controlErr error
+		if repairAgentDir != nil {
+			controlCleanup, stop, markStopped, controlErr = startWakeControlListenerInDir(
+				repairAgentDir, root, me, currentWake.Lock, promptObserved,
+			)
+		} else {
+			controlCleanup, stop, markStopped, controlErr = startWakeControlListener(
+				root, me, currentWake.Lock, promptObserved,
+			)
+		}
+		if controlErr != nil {
+			return controlErr
+		}
+		defer controlCleanup()
+		defer markStopped()
+		if stop != nil {
+			controlStop = mergeWakeStopChannels(controlStop, stop)
+		}
+	}
+
+	if injectVia != "" {
+		if err := validateResolvedWakeInjectViaPath(injectVia); err != nil {
+			return err
+		}
+	}
+
 	if err := presence.SetNotifierStatus(
 		root,
 		me,
@@ -1900,6 +1898,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		controlStop:        controlStop,
 		terminalGeneration: currentWake.Lock.Generation,
 		terminalTTY:        currentWake.Lock.TTY,
+		promptObserved:     promptObserved,
 		baselineRequested:  *baselineExistingFlag || repairLineage != nil,
 		baselineInherited:  repairLineage != nil,
 		recordNotifierStatus: func(status, mode, reason string) error {
@@ -2335,9 +2334,14 @@ func runWakeLoop(cfg wakeConfig) error {
 	pendingNotify := false
 	var terminalAuthorityRetryTimer *time.Timer
 	var terminalAuthorityRetryC <-chan time.Time
+	var doorbellTimer *time.Timer
+	var doorbellTimerC <-chan time.Time
 	defer func() {
 		if terminalAuthorityRetryTimer != nil {
 			terminalAuthorityRetryTimer.Stop()
+		}
+		if doorbellTimer != nil {
+			doorbellTimer.Stop()
 		}
 	}()
 
@@ -2367,8 +2371,38 @@ func runWakeLoop(cfg wakeConfig) error {
 		}
 		terminalAuthorityRetryC = terminalAuthorityRetryTimer.C
 	}
+	scheduleDoorbellDeadline := func() {
+		deadline, ok := cfg.doorbell.nextDeadline()
+		if !ok {
+			doorbellTimerC = nil
+			if doorbellTimer != nil && !doorbellTimer.Stop() {
+				select {
+				case <-doorbellTimer.C:
+				default:
+				}
+			}
+			return
+		}
+		delay := deadline.Sub(cfg.wakeDoorbellNow())
+		if delay < 0 {
+			delay = 0
+		}
+		if doorbellTimer == nil {
+			doorbellTimer = time.NewTimer(delay)
+		} else {
+			if !doorbellTimer.Stop() {
+				select {
+				case <-doorbellTimer.C:
+				default:
+				}
+			}
+			doorbellTimer.Reset(delay)
+		}
+		doorbellTimerC = doorbellTimer.C
+	}
 	attemptNotification := func() error {
 		err := notifyNewMessages(&cfg)
+		scheduleDoorbellDeadline()
 		if err == nil {
 			pendingNotify = false
 			clearTerminalAuthorityRetry()
@@ -2394,9 +2428,9 @@ func runWakeLoop(cfg wakeConfig) error {
 		return nil
 	}
 
-	// Recheck non-invasive injection preconditions and re-announce durable
-	// pending work every 30s. Re-announcement stays output-only while an
-	// announced inbox identity remains pending, so it cannot stack user turns.
+	// Recheck non-invasive injection preconditions and silently reconcile
+	// durable pending work every 30s. Doorbell retries use finite generation
+	// deadlines and never emit periodic alternate-screen output.
 	maintenanceTicks := cfg.maintenanceTicks
 	var maintenanceTicker *time.Ticker
 	if maintenanceTicks == nil {
@@ -2441,8 +2475,10 @@ func runWakeLoop(cfg wakeConfig) error {
 				return failWakeOnWatcherError(&cfg, "watcher closed", nil)
 			}
 			invalidateWakeBaselineEvent(&cfg, event)
-			// Only care about new files
-			if event.Op&(fsnotify.Create|fsnotify.Rename|fsnotify.Write) == 0 {
+			// Creates/additions can accelerate delivery; removals are durable
+			// progress and must rearm the generation without waiting for the
+			// maintenance reconciliation fallback.
+			if event.Op&(fsnotify.Create|fsnotify.Rename|fsnotify.Write|fsnotify.Remove) == 0 {
 				continue
 			}
 			// Skip non-.md files
@@ -2489,8 +2525,20 @@ func runWakeLoop(cfg wakeConfig) error {
 				return err
 			}
 
+		case <-doorbellTimerC:
+			doorbellTimerC = nil
+			if err := attemptNotification(); err != nil {
+				return err
+			}
+
+		case token := <-cfg.promptObserved:
+			if cfg.doorbell.observe(token, cfg.wakeDoorbellNow()) {
+				clearRawSubmitState(&cfg)
+				scheduleDoorbellDeadline()
+			}
+
 		case <-maintenanceTicks:
-			if len(cfg.announcedPending) > 0 {
+			if cfg.doorbell.phase != wakeDoorbellIdle || cfg.rawSubmitPhase != rawSubmitIdle {
 				if err := attemptNotification(); err != nil {
 					return err
 				}

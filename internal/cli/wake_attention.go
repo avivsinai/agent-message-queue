@@ -28,6 +28,9 @@ type wakeAttentionEmission struct {
 // Effects record only a complete write by AMQ; they do not assert that a
 // terminal rendered them or that a person observed them.
 func emitWakeAttention(cfg *wakeConfig, payload wakePayload) {
+	if cfg != nil && cfg.suppressAttention {
+		return
+	}
 	effects := []string{wakeAttentionEffectOutput}
 	var output strings.Builder
 
