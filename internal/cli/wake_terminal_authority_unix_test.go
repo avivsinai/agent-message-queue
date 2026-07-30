@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -723,7 +724,7 @@ func TestRunWakeLoopTerminatesOnTerminalAuthorityLoss(t *testing.T) {
 	}
 }
 
-func TestRunWakeLoopUsesAttentionCadenceAfterZeroProgressForegroundPGRPMismatch(t *testing.T) {
+func TestRunWakeLoopRetriesForegroundPGRPMismatchWithoutAttentionFlood(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	message := format.Message{
@@ -750,9 +751,11 @@ func TestRunWakeLoopUsesAttentionCadenceAfterZeroProgressForegroundPGRPMismatch(
 		t.Fatal(err)
 	}
 
-	firstRefused := make(chan struct{}, 1)
+	refused := make(chan struct{}, 4)
+	restored := make(chan struct{})
 	delivered := make(chan struct{}, 1)
-	attention := make(chan struct{}, 1)
+	attention := make(chan struct{}, 4)
+	var attentionWrites atomic.Int64
 	controlStop := make(chan struct{})
 	runDone := make(chan error, 1)
 
@@ -770,14 +773,22 @@ func TestRunWakeLoopUsesAttentionCadenceAfterZeroProgressForegroundPGRPMismatch(
 				case attention <- struct{}{}:
 				default:
 				}
+				if attentionWrites.Add(1) == 1 {
+					return len(data) - 1, nil
+				}
 				return len(data), nil
 			},
 			beforeTerminalWrite: func() error {
 				select {
-				case firstRefused <- struct{}{}:
+				case refused <- struct{}{}:
 				default:
 				}
-				return newWakeTerminalForegroundPGRPChangedLoss(101, 202)
+				select {
+				case <-restored:
+					return nil
+				default:
+					return newWakeTerminalForegroundPGRPChangedLoss(101, 202)
+				}
 			},
 			terminalWrite: func(string) error {
 				select {
@@ -790,7 +801,7 @@ func TestRunWakeLoopUsesAttentionCadenceAfterZeroProgressForegroundPGRPMismatch(
 	}()
 
 	select {
-	case <-firstRefused:
+	case <-refused:
 	case err := <-runDone:
 		t.Fatalf("wake loop exited on foreground-pgrp mismatch: %v", err)
 	case <-time.After(2 * time.Second):
@@ -805,11 +816,33 @@ func TestRunWakeLoopUsesAttentionCadenceAfterZeroProgressForegroundPGRPMismatch(
 	}
 
 	select {
-	case <-delivered:
-		t.Fatal("wake loop wrote while foreground pgrp mismatched")
+	case <-refused:
 	case err := <-runDone:
 		t.Fatalf("wake loop exited while foreground pgrp mismatched: %v", err)
-	case <-time.After(wakeTerminalAuthorityRetryDelay + 100*time.Millisecond):
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not retry foreground pgrp promptly")
+	}
+	select {
+	case <-attention:
+		t.Fatal("foreground pgrp retry repeated attention before its deadline")
+	default:
+	}
+	if got := attentionWrites.Load(); got != 1 {
+		t.Fatalf("foreground pgrp attention writes = %d, want one short write", got)
+	}
+	select {
+	case <-delivered:
+		t.Fatal("wake loop wrote while foreground pgrp mismatched")
+	default:
+	}
+
+	close(restored)
+	select {
+	case <-delivered:
+	case err := <-runDone:
+		t.Fatalf("wake loop exited before foreground pgrp recovery: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not deliver promptly after foreground pgrp recovery")
 	}
 
 	close(controlStop)

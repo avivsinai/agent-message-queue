@@ -184,8 +184,8 @@ func TestNotifyNewMessagesForegroundPGRPResumesAtFirstMissingChunk(t *testing.T)
 
 			err := notifyNewMessages(cfg)
 			if tc.failAt == 1 {
-				if err != nil {
-					t.Fatalf("zero-progress refusal = %v, want attention fallback", err)
+				if !isWakeTerminalForegroundPGRPChanged(err) {
+					t.Fatalf("zero-progress refusal = %T %v, want foreground-PGRP change", err, err)
 				}
 				if attentionWrites != 1 {
 					t.Fatalf("zero-progress attention writes = %d, want 1", attentionWrites)
@@ -197,9 +197,6 @@ func TestNotifyNewMessagesForegroundPGRPResumesAtFirstMissingChunk(t *testing.T)
 				t.Fatalf("first writes = %q, want %q", got, strings.Join(tc.firstWant, "|"))
 			}
 			wantAttempts := uint(0)
-			if tc.failAt == 1 {
-				wantAttempts = 1
-			}
 			if cfg.doorbell.attempts != wantAttempts {
 				t.Fatalf(
 					"attempts after foreground refusal = %d, want %d",
@@ -207,11 +204,14 @@ func TestNotifyNewMessagesForegroundPGRPResumesAtFirstMissingChunk(t *testing.T)
 					wantAttempts,
 				)
 			}
+			if !cfg.doorbell.nextAttempt.IsZero() {
+				t.Fatalf(
+					"foreground refusal armed delivery ladder: %#v",
+					cfg.doorbell,
+				)
+			}
 
 			writes = nil
-			if tc.failAt == 1 {
-				now = now.Add(wakeDoorbellAttentionRetryBase)
-			}
 			if err := notifyNewMessages(cfg); err != nil {
 				t.Fatalf("retry notify: %v", err)
 			}
@@ -441,8 +441,8 @@ func TestNotifyNewMessagesReconcilesPartialDeliveryAfterInboxDrain(t *testing.T)
 
 			err := notifyNewMessages(cfg)
 			if tc.failAt == 1 {
-				if err != nil {
-					t.Fatalf("zero-progress refusal = %v, want attention fallback", err)
+				if !isWakeTerminalForegroundPGRPChanged(err) {
+					t.Fatalf("zero-progress refusal = %T %v, want foreground-PGRP change", err, err)
 				}
 				if attentionWrites != 1 {
 					t.Fatalf("zero-progress attention writes = %d, want 1", attentionWrites)
@@ -2017,6 +2017,282 @@ func TestNotifyNewMessagesAttentionOnlyRetryCadence(t *testing.T) {
 	}
 }
 
+func TestNotifyNewMessagesMaxHoldRetriesInputWithoutAttentionFlood(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "max-hold-retry")
+
+	oldWait := waitForWakeInputQuiet
+	waitForWakeInputQuiet = func(*wakeConfig) bool { return false }
+	t.Cleanup(func() { waitForWakeInputQuiet = oldWait })
+
+	now := time.Unix(1_800_000_000, 0)
+	attentionWrites := 0
+	cfg := &wakeConfig{
+		root:            root,
+		me:              "codex",
+		session:         "session1",
+		wakeOwner:       &wakeOwner{},
+		injectMode:      wakeInjectModeRaw,
+		deferWhileInput: true,
+		doorbellNow:     func() time.Time { return now },
+		attentionIsTTY:  func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("initial max-hold notification: %v", err)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("initial max-hold attention writes = %d, want 1", attentionWrites)
+	}
+	if deadline, ok := cfg.doorbell.nextDeadline(); !ok ||
+		!deadline.Equal(now.Add(wakeDoorbellRetryBase)) {
+		t.Fatalf(
+			"max-hold input deadline = %s, ok=%v; want %s",
+			deadline,
+			ok,
+			now.Add(wakeDoorbellRetryBase),
+		)
+	}
+
+	now = now.Add(wakeDoorbellRetryBase)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("max-hold input retry: %v", err)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("max-hold retry flooded attention: writes=%d", attentionWrites)
+	}
+}
+
+func TestNotifyNewMessagesMaxHoldShortAttentionKeepsInputRetryCadence(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "max-hold-short-attention")
+
+	oldWait := waitForWakeInputQuiet
+	waitForWakeInputQuiet = func(*wakeConfig) bool { return false }
+	t.Cleanup(func() { waitForWakeInputQuiet = oldWait })
+
+	now := time.Unix(1_800_000_000, 0)
+	attentionWrites := 0
+	cfg := &wakeConfig{
+		root:            root,
+		me:              "codex",
+		session:         "session1",
+		wakeOwner:       &wakeOwner{},
+		injectMode:      wakeInjectModeRaw,
+		deferWhileInput: true,
+		doorbellNow:     func() time.Time { return now },
+		attentionIsTTY:  func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data) - 1, nil
+		},
+	}
+
+	err := notifyNewMessages(cfg)
+	var attentionErr *wakeAttentionDeliveryError
+	if !errors.As(err, &attentionErr) {
+		t.Fatalf("max-hold short attention = %v, want typed output failure", err)
+	}
+	if deadline, ok := cfg.doorbell.nextDeadline(); !ok ||
+		!deadline.Equal(now.Add(wakeDoorbellRetryBase)) {
+		t.Fatalf(
+			"max-hold short-attention input deadline = %s, ok=%v; want %s",
+			deadline,
+			ok,
+			now.Add(wakeDoorbellRetryBase),
+		)
+	}
+	if !cfg.doorbell.nextTransientAttention.Equal(
+		now.Add(wakeDoorbellAttentionRetryBase),
+	) {
+		t.Fatalf("max-hold output retry was not rate-limited: %#v", cfg.doorbell)
+	}
+
+	now = now.Add(wakeDoorbellRetryBase)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("max-hold input retry after short attention: %v", err)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("max-hold input retry flooded failed attention: writes=%d", attentionWrites)
+	}
+}
+
+func TestNotifyNewMessagesRecoveryAttentionRetriesOnAttentionCadence(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "recovery-retry")
+
+	now := time.Unix(1_800_000_000, 0)
+	attentionWrites := 0
+	cfg := &wakeConfig{
+		root:                  root,
+		me:                    "codex",
+		inputRecoveryRequired: true,
+		doorbellNow:           func() time.Time { return now },
+		attentionIsTTY:        func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("initial recovery attention: %v", err)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("initial recovery attention writes = %d, want 1", attentionWrites)
+	}
+	firstDeadline := now.Add(wakeDoorbellAttentionRetryBase)
+	if deadline, ok := cfg.doorbell.nextDeadline(); !ok ||
+		!deadline.Equal(firstDeadline) {
+		t.Fatalf("recovery deadline = %s, ok=%v; want %s", deadline, ok, firstDeadline)
+	}
+
+	now = firstDeadline.Add(-time.Millisecond)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("early recovery retry: %v", err)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("recovery attention repeated early: writes=%d", attentionWrites)
+	}
+
+	now = firstDeadline
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("due recovery retry: %v", err)
+	}
+	if attentionWrites != 2 {
+		t.Fatalf("due recovery attention writes = %d, want 2", attentionWrites)
+	}
+	if deadline, ok := cfg.doorbell.nextDeadline(); !ok ||
+		!deadline.Equal(now.Add(time.Minute)) {
+		t.Fatalf(
+			"second recovery deadline = %s, ok=%v; want %s",
+			deadline,
+			ok,
+			now.Add(time.Minute),
+		)
+	}
+}
+
+func TestRunWakeLoopCoalescesAdditionThenRearmsAfterDrain(t *testing.T) {
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	deliverWakeWatcherMessageForTest(t, root, "codex", "a", "claude")
+	aPath := filepath.Join(fsq.AgentInboxNew(root, "codex"), "a.md")
+	aInfo, err := os.Stat(aPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+
+	startedAt := time.Now()
+	floorAt := startedAt.Add(500 * time.Millisecond)
+	lastAttempt := floorAt.Add(-wakeDoorbellRetryBase)
+	decayedRetryAt := startedAt.Add(15 * time.Minute)
+	doorbells := make(chan struct{}, 3)
+	pending := make(chan struct{}, 1)
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runWakeLoop(wakeConfig{
+			root:        root,
+			me:          "codex",
+			session:     "session1",
+			wakeOwner:   &wakeOwner{},
+			injectMode:  wakeInjectModeRaw,
+			controlStop: stop,
+			debounce:    10 * time.Millisecond,
+			doorbell: wakeDoorbellState{
+				phase:                wakeDoorbellRetrying,
+				cohort:               snapshotWakeFileIdentities(map[string]os.FileInfo{"a.md": aInfo}),
+				attempts:             6,
+				nextAttempt:          decayedRetryAt,
+				additionAttemptFloor: lastAttempt.Add(wakeDoorbellRetryBase),
+			},
+			preconditionCheck: func(*wakeConfig) error { return nil },
+			terminalWrite: func(text string) error {
+				if strings.Contains(text, coopWakeDoorbell) {
+					doorbells <- struct{}{}
+				}
+				return nil
+			},
+			attentionIsTTY: func() bool { return false },
+			onPendingNotify: func() {
+				select {
+				case pending <- struct{}{}:
+				default:
+				}
+			},
+		})
+	}()
+	defer func() {
+		close(stop)
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("wake loop stop: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("wake loop did not stop")
+		}
+	}()
+
+	deliverWakeWatcherMessageForTest(t, root, "codex", "b", "claude")
+	select {
+	case <-pending:
+	case err := <-done:
+		t.Fatalf("wake loop exited before observing addition: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not observe first addition")
+	}
+	deliverWakeWatcherMessageForTest(t, root, "codex", "c", "claude")
+
+	if earlyWait := time.Until(floorAt) / 2; earlyWait > 0 {
+		select {
+		case <-doorbells:
+			t.Fatal("added-message burst emitted before the delivery floor")
+		case err := <-done:
+			t.Fatalf("wake loop exited before delivery floor: %v", err)
+		case <-time.After(earlyWait):
+		}
+	}
+	select {
+	case <-doorbells:
+	case err := <-done:
+		t.Fatalf("wake loop exited before delivery floor: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("coalesced cohort waited for the decayed retry deadline")
+	}
+	select {
+	case <-doorbells:
+		t.Fatal("one debounce burst emitted more than one doorbell")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if drained := runDrainJSON(t, root, "codex", 1, false); drained.Count != 1 {
+		t.Fatalf("drained count = %d, want 1", drained.Count)
+	}
+	select {
+	case <-doorbells:
+	case err := <-done:
+		t.Fatalf("wake loop exited before post-drain rearm: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("draining one coalesced message did not immediately rearm the remainder")
+	}
+	select {
+	case <-doorbells:
+		t.Fatal("post-drain rearm emitted more than one consolidated doorbell")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestNotifyNewMessagesInjectionFallbackUsesAttentionRetryCadence(t *testing.T) {
 	root := secureTempDirForTest(t)
 	deliverPartialWakeMessageForTest(t, root, "codex", "attention-fallback")
@@ -2145,6 +2421,75 @@ func TestRunWakeLoopHonorsAttentionOnlyDoorbellDeadline(t *testing.T) {
 	}
 	if got := afterDeadlineCalls.Load(); got != callsAfterRetry {
 		t.Fatalf("attention retry hot-looped: deadline calls %d -> %d", callsAfterRetry, got)
+	}
+}
+
+func TestRunWakeLoopRetriesShortOutputAttentionWithoutExit(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "short-output-attention")
+
+	start := time.Unix(1_800_000_000, 0)
+	nowCalls := 0
+	var attentionWrites atomic.Int64
+	retried := make(chan struct{}, 1)
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runWakeLoop(wakeConfig{
+			root:        root,
+			me:          "codex",
+			session:     "session1",
+			injectMode:  wakeInjectModeNone,
+			controlStop: stop,
+			doorbellNow: func() time.Time {
+				nowCalls++
+				if nowCalls >= 3 {
+					return start.Add(wakeDoorbellAttentionRetryBase)
+				}
+				return start
+			},
+			attentionIsTTY: func() bool {
+				return false
+			},
+			attentionWrite: func(data []byte) (int, error) {
+				if attentionWrites.Add(1) == 1 {
+					return len(data) - 1, nil
+				}
+				select {
+				case retried <- struct{}{}:
+				default:
+				}
+				return len(data), nil
+			},
+		})
+	}()
+
+	select {
+	case <-retried:
+	case err := <-done:
+		t.Fatalf("wake loop exited on short output attention: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatalf("wake loop did not retry short output attention: writes=%d", attentionWrites.Load())
+	}
+	if got := attentionWrites.Load(); got != 2 {
+		t.Fatalf("attention writes = %d, want short write plus retry", got)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("wake loop exited after output retry: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if got := attentionWrites.Load(); got != 2 {
+		t.Fatalf("output attention hot-looped after retry: writes=%d", got)
+	}
+	close(stop)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("wake loop stop: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not stop")
 	}
 }
 
@@ -3639,7 +3984,7 @@ func TestRunWakeLoopKeepsWatchingAfterConfirmedInputBecomesUnsupported(t *testin
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	nowNanos.Store(start.Add(wakeDoorbellRetryBase).UnixNano())
+	nowNanos.Store(start.Add(wakeDoorbellAttentionRetryBase).UnixNano())
 	writeMessage("second.md", "second")
 	select {
 	case output := <-attention:
@@ -3663,7 +4008,7 @@ func TestRunWakeLoopKeepsWatchingAfterConfirmedInputBecomesUnsupported(t *testin
 	}
 }
 
-func TestRunWakeLoopMessageRecoveryAttentionFailureIsFatalWithoutRetry(t *testing.T) {
+func TestRunWakeLoopMessageRecoveryAttentionFailureRetriesWithoutExit(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	message := format.Message{
@@ -3692,6 +4037,8 @@ func TestRunWakeLoopMessageRecoveryAttentionFailureIsFatalWithoutRetry(t *testin
 
 	attentionSinkErr := errors.New("attention sink unavailable")
 	var attentionWrites atomic.Int64
+	now := time.Unix(1_800_000_000, 0)
+	retried := make(chan struct{}, 1)
 	stop := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
@@ -3711,13 +4058,19 @@ func TestRunWakeLoopMessageRecoveryAttentionFailureIsFatalWithoutRetry(t *testin
 				phase:  wakeDoorbellRetrying,
 				cohort: snapshotWakeFileIdentities(map[string]os.FileInfo{"message.md": info}),
 			},
+			doorbellNow: func() time.Time { return now },
 			terminalWrite: func(string) error {
 				return newWakeInjectorUnsupportedError(errors.New("injector disabled"))
 			},
 			attentionIsTTY: func() bool { return false },
 			attentionWrite: func(data []byte) (int, error) {
 				if attentionWrites.Add(1) == 1 {
+					now = now.Add(wakeDoorbellAttentionRetryBase)
 					return 0, attentionSinkErr
+				}
+				select {
+				case retried <- struct{}{}:
+				default:
 				}
 				return len(data), nil
 			},
@@ -3725,23 +4078,31 @@ func TestRunWakeLoopMessageRecoveryAttentionFailureIsFatalWithoutRetry(t *testin
 	}()
 
 	select {
+	case <-retried:
 	case err := <-done:
-		var attentionErr *wakeAttentionDeliveryError
-		if !errors.As(err, &attentionErr) ||
-			!errors.Is(err, attentionSinkErr) ||
-			!isWakeInputDemotionBlocked(err) {
-			t.Fatalf("wake loop error = %v, want blocked input plus attention failure", err)
+		t.Fatalf("wake loop exited on recovery attention failure: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatalf("wake loop did not retry recovery attention: writes=%d", attentionWrites.Load())
+	}
+	if got := attentionWrites.Load(); got != 2 {
+		t.Fatalf("recovery attention writes = %d, want failed write plus retry", got)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("wake loop exited after successful recovery attention retry: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if got := attentionWrites.Load(); got != 2 {
+		t.Fatalf("recovery attention hot-looped after retry: writes=%d", got)
+	}
+	close(stop)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("wake loop stop: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		close(stop)
-		<-done
-		t.Fatalf(
-			"wake loop retried or masked recovery attention failure; writes=%d",
-			attentionWrites.Load(),
-		)
-	}
-	if got := attentionWrites.Load(); got != 1 {
-		t.Fatalf("recovery attention writes = %d, want exactly 1", got)
+		t.Fatal("wake loop did not stop")
 	}
 }
 
@@ -3825,10 +4186,14 @@ func TestRunWakeLoopKeepsWatchingWhenDrainedInboxReconciliationBecomesUncertain(
 	}
 }
 
-func TestRunWakeLoopDrainedInboxRecoveryAttentionFailureIsFatal(t *testing.T) {
+func TestRunWakeLoopDrainedInboxRecoveryAttentionFailureRetriesWithoutExit(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	attentionSinkErr := errors.New("attention sink unavailable")
+	now := time.Unix(1_800_000_000, 0)
+	var attentionWrites atomic.Int64
+	retried := make(chan struct{}, 1)
+	stop := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
 		done <- runWakeLoop(wakeConfig{
@@ -3837,7 +4202,8 @@ func TestRunWakeLoopDrainedInboxRecoveryAttentionFailureIsFatal(t *testing.T) {
 			session:     "session1",
 			wakeOwner:   &wakeOwner{},
 			injectMode:  wakeInjectModePaste,
-			controlStop: make(chan struct{}),
+			controlStop: stop,
+			doorbellNow: func() time.Time { return now },
 			inputDelivery: wakeInputDeliveryState{
 				phase:   wakeInputPrimarySubmitPending,
 				mode:    wakeInjectModePaste,
@@ -3850,23 +4216,38 @@ func TestRunWakeLoopDrainedInboxRecoveryAttentionFailureIsFatal(t *testing.T) {
 				}
 			},
 			attentionIsTTY: func() bool { return false },
-			attentionWrite: func([]byte) (int, error) {
-				return 0, attentionSinkErr
+			attentionWrite: func(data []byte) (int, error) {
+				if attentionWrites.Add(1) == 1 {
+					now = now.Add(wakeDoorbellAttentionRetryBase)
+					return 0, attentionSinkErr
+				}
+				select {
+				case retried <- struct{}{}:
+				default:
+				}
+				return len(data), nil
 			},
 		})
 	}()
 
 	select {
+	case <-retried:
 	case err := <-done:
-		var uncertainErr *wakeTerminalProgressUncertainError
-		var attentionErr *wakeAttentionDeliveryError
-		if !errors.As(err, &uncertainErr) ||
-			!errors.As(err, &attentionErr) ||
-			!errors.Is(err, attentionSinkErr) {
-			t.Fatalf("wake loop error = %v, want uncertain input plus attention failure", err)
+		t.Fatalf("wake loop exited on drained-inbox recovery attention failure: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatalf("wake loop did not retry drained-inbox recovery attention: writes=%d", attentionWrites.Load())
+	}
+	if got := attentionWrites.Load(); got != 2 {
+		t.Fatalf("drained recovery attention writes = %d, want failed write plus retry", got)
+	}
+	close(stop)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("wake loop stop: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("wake loop did not fail after recovery attention failure")
+		t.Fatal("wake loop did not stop")
 	}
 }
 
@@ -7448,6 +7829,117 @@ func TestOpenWakeOutputsBoundAccumulatedLogsAtLaunch(t *testing.T) {
 				t.Fatalf("unexpected rotated sibling: %v", err)
 			}
 		})
+	}
+}
+
+func TestMaintainWakeOutputBoundsTruncatesOnceAndPreservesAppend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wake.log")
+	output, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = output.Close() }()
+	if _, err := output.Write(bytes.Repeat([]byte("x"), 2<<20)); err != nil {
+		t.Fatal(err)
+	}
+
+	originalTruncate := truncateWakeOutput
+	truncations := 0
+	truncateWakeOutput = func(fd int, size int64) error {
+		truncations++
+		return originalTruncate(fd, size)
+	}
+	t.Cleanup(func() { truncateWakeOutput = originalTruncate })
+
+	if err := maintainWakeOutputBounds(output, output); err != nil {
+		t.Fatalf("maintain output bounds: %v", err)
+	}
+	if truncations != 1 {
+		t.Fatalf("same wake output truncated %d times, want 1", truncations)
+	}
+	if _, err := output.WriteString("fresh\n"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "fresh\n" {
+		t.Fatalf("post-truncation append = %q, want fresh log", data)
+	}
+}
+
+func TestRunWakeLoopOutputBoundFailureDoesNotBlockMaintenance(t *testing.T) {
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	output, err := os.OpenFile(
+		filepath.Join(t.TempDir(), "wake.log"),
+		os.O_CREATE|os.O_RDWR|os.O_APPEND,
+		0o600,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = output.Close() }()
+	if _, err := output.Write(bytes.Repeat([]byte("x"), 2<<20)); err != nil {
+		t.Fatal(err)
+	}
+
+	truncateErr := errors.New("truncate denied")
+	originalTruncate := truncateWakeOutput
+	truncateWakeOutput = func(int, int64) error { return truncateErr }
+	t.Cleanup(func() { truncateWakeOutput = originalTruncate })
+
+	ticks := make(chan time.Time)
+	touched := make(chan struct{}, 2)
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runWakeLoop(wakeConfig{
+			root:               root,
+			me:                 "codex",
+			injectMode:         wakeInjectModeNone,
+			controlStop:        stop,
+			maintenanceTicks:   ticks,
+			maintenanceOutputs: []*os.File{output},
+			touchPresence: func() error {
+				touched <- struct{}{}
+				return nil
+			},
+			attentionIsTTY: func() bool { return false },
+		})
+	}()
+
+	select {
+	case <-touched:
+	case err := <-done:
+		t.Fatalf("wake loop exited before initial presence: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not touch initial presence")
+	}
+	select {
+	case ticks <- time.Now():
+	case err := <-done:
+		t.Fatalf("wake loop exited before maintenance tick: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not accept maintenance tick")
+	}
+	select {
+	case <-touched:
+	case err := <-done:
+		t.Fatalf("wake loop exited on output truncation failure: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("output truncation failure blocked maintenance")
+	}
+
+	close(stop)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("wake loop stop after output truncation failure: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not stop after output truncation failure")
 	}
 }
 

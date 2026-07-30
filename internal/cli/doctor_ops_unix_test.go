@@ -469,6 +469,75 @@ func TestRunOpsChecksReportsProvenStartMismatchAsStale(t *testing.T) {
 	}
 }
 
+func TestDoctorOpsTextReportsForeignLiveWakeAndSilencesCurrentTTY(t *testing.T) {
+	const (
+		pid     = 66121
+		lockTTY = "/dev/null"
+		started = "2026-07-30T18:13:25Z"
+	)
+	root := healthyDoctorMailboxRoot(t, "codex")
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          pid,
+		TTY:          lockTTY,
+		Started:      started,
+		ProcessStart: "same-start",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+		Args:         []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex"},
+		Generation:   "live-generation",
+	})
+	stubInspectWakeProcess(t, func(gotPID int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        gotPID,
+			Running:    true,
+			StartToken: "same-start",
+			BootID:     "same-boot",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+
+	oldCurrentTTY := getWakeCurrentTTY
+	currentTTY := "/dev/ttys099"
+	getWakeCurrentTTY = func() string { return currentTTY }
+	t.Cleanup(func() { getWakeCurrentTTY = oldCurrentTTY })
+	t.Setenv(envRoot, root)
+	t.Setenv(envBaseRoot, root)
+	t.Setenv(envSession, "")
+
+	output, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{"--root", root, "--ops"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"wake for codex is owned by a live process",
+		"pid=66121",
+		"tty=" + lockTTY,
+		"started=" + started,
+		"root=" + root,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("foreign live wake output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "fix=") {
+		t.Fatalf("healthy foreign live wake advertised a repair:\n%s", output)
+	}
+
+	currentTTY = lockTTY
+	output, err = captureEnvStdout(t, func() error {
+		return runDoctor([]string{"--root", root, "--ops"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output, "owned by a live process") {
+		t.Fatalf("current-terminal wake was reported as foreign:\n%s", output)
+	}
+}
+
 func TestRunOpsChecksFixRemovesProvenStartMismatch(t *testing.T) {
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{

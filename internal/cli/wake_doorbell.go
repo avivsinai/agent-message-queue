@@ -21,11 +21,15 @@ const (
 )
 
 type wakeDoorbellState struct {
-	phase           wakeDoorbellPhase
-	cohort          map[string]*wakeFileIdentity
-	attempts        uint
-	nextAttempt     time.Time
-	recoveryPending bool
+	phase                        wakeDoorbellPhase
+	cohort                       map[string]*wakeFileIdentity
+	attempts                     uint
+	nextAttempt                  time.Time
+	additionAttemptFloor         time.Time
+	transientAttentionAttempts   uint
+	nextTransientAttention       time.Time
+	recoveryPending              bool
+	recoveryAttentionUndelivered bool
 }
 
 type wakeDoorbellPlan struct {
@@ -46,6 +50,14 @@ func (state *wakeDoorbellState) plan(
 	progress := state.phase != wakeDoorbellIdle && wakeCohortProgressed(state.cohort, current)
 	if progress {
 		state.reset()
+	} else if state.phase != wakeDoorbellIdle && wakeCohortExpanded(state.cohort, current) {
+		// Additions extend the pending obligation without resetting its retry
+		// ladder, but pull its deadline forward to the delivery floor because
+		// the new information has not been announced yet. One outstanding
+		// "drain everything" doorbell covers the whole current cohort, so N
+		// unread messages do not need N doorbells.
+		state.arm(current)
+		state.pullForwardForAddition(now)
 	}
 	if state.phase == wakeDoorbellIdle {
 		state.arm(current)
@@ -78,11 +90,26 @@ func (state *wakeDoorbellState) recordAttentionAttempt(now time.Time) {
 	)
 }
 
+func (state *wakeDoorbellState) transientAttentionDue(now time.Time) bool {
+	return state.nextTransientAttention.IsZero() ||
+		!now.Before(state.nextTransientAttention)
+}
+
+func (state *wakeDoorbellState) recordTransientAttentionAttempt(now time.Time) {
+	state.transientAttentionAttempts++
+	state.nextTransientAttention = now.Add(cappedExponentialBackoff(
+		state.transientAttentionAttempts,
+		wakeDoorbellAttentionRetryBase,
+		wakeDoorbellAttentionRetryMax,
+	))
+}
+
 func (state *wakeDoorbellState) recordAttemptWithBase(
 	now time.Time,
 	base, maximum time.Duration,
 ) {
 	state.attempts++
+	state.additionAttemptFloor = now.Add(base)
 	state.nextAttempt = now.Add(cappedExponentialBackoff(
 		state.attempts,
 		base,
@@ -90,23 +117,37 @@ func (state *wakeDoorbellState) recordAttemptWithBase(
 	))
 }
 
+func (state *wakeDoorbellState) pullForwardForAddition(now time.Time) {
+	if state.additionAttemptFloor.IsZero() {
+		return
+	}
+	deadline := state.additionAttemptFloor
+	if deadline.Before(now) {
+		deadline = now
+	}
+	if state.nextAttempt.IsZero() || deadline.Before(state.nextAttempt) {
+		state.nextAttempt = deadline
+	}
+}
+
 func (state *wakeDoorbellState) planRecoveryAttention(
 	now time.Time,
 	current map[string]os.FileInfo,
 ) bool {
 	if len(current) == 0 {
+		if state.phase == wakeDoorbellRecoveryRequired &&
+			state.recoveryAttentionUndelivered {
+			return state.nextAttempt.IsZero() ||
+				!now.Before(state.nextAttempt)
+		}
 		state.noteRecoveryInboxEmpty()
 		return false
 	}
 	if state.phase != wakeDoorbellRecoveryRequired {
 		return true
 	}
-	if sameKnownWakeCohort(state.cohort, current) {
-		state.recoveryPending = false
-		return false
-	}
+	state.recoveryPending = true
 	if !state.nextAttempt.IsZero() && now.Before(state.nextAttempt) {
-		state.recoveryPending = true
 		return false
 	}
 	return true
@@ -116,10 +157,14 @@ func (state *wakeDoorbellState) recordRecoveryRequired(
 	now time.Time,
 	current map[string]os.FileInfo,
 ) {
-	state.reset()
+	if state.phase != wakeDoorbellRecoveryRequired {
+		state.reset()
+	}
 	state.phase = wakeDoorbellRecoveryRequired
 	state.cohort = snapshotWakeFileIdentities(current)
-	state.nextAttempt = now.Add(wakeDoorbellRetryBase)
+	state.recoveryPending = true
+	state.recoveryAttentionUndelivered = true
+	state.recordAttentionAttempt(now)
 }
 
 func (state *wakeDoorbellState) retainRecoveryRequired(now time.Time) {
@@ -127,7 +172,13 @@ func (state *wakeDoorbellState) retainRecoveryRequired(now time.Time) {
 	state.reset()
 	state.phase = wakeDoorbellRecoveryRequired
 	state.cohort = cohort
-	state.nextAttempt = now.Add(wakeDoorbellRetryBase)
+	state.recoveryPending = true
+	state.recoveryAttentionUndelivered = true
+	state.recordAttentionAttempt(now)
+}
+
+func (state *wakeDoorbellState) recordRecoveryAttentionDelivered() {
+	state.recoveryAttentionUndelivered = false
 }
 
 func (state *wakeDoorbellState) noteRecoveryInboxEmpty() {
@@ -136,6 +187,7 @@ func (state *wakeDoorbellState) noteRecoveryInboxEmpty() {
 		state.phase = wakeDoorbellRecoveryRequired
 	}
 	state.recoveryPending = false
+	state.recoveryAttentionUndelivered = false
 }
 
 func (state wakeDoorbellState) pendingInput() bool {
@@ -195,6 +247,18 @@ func wakeCohortProgressed(
 			continue
 		}
 		if *identity != currentIdentity {
+			return true
+		}
+	}
+	return false
+}
+
+func wakeCohortExpanded(
+	cohort map[string]*wakeFileIdentity,
+	current map[string]os.FileInfo,
+) bool {
+	for name := range current {
+		if _, exists := cohort[name]; !exists {
 			return true
 		}
 	}

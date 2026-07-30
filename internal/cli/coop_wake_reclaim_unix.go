@@ -69,6 +69,23 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
 		return nil
 	}
 
+	if confirmedLiveWake(inspection) {
+		switch classifyPersistedWakeClaim(inspection) {
+		case wakeClaimAuthoritative:
+			// Owner-bound claims belong to a specific coop session. A new
+			// session cannot reuse or replace one while its wake is live.
+			return coopWakeStartupConflictError(inspection, nil)
+		case wakeClaimGeneric:
+			replaceNeeded, err := wakeLockReplacementNeeded(inspection)
+			if err != nil {
+				return err
+			}
+			if !replaceNeeded {
+				return coopWakeStartupConflictError(inspection, nil)
+			}
+		}
+	}
+
 	if inspection.Status != wakeLockUnverified {
 		// Valid non-orphans and creating locks retain their existing fail-closed
 		// behavior in the wake acquisition path.
@@ -205,6 +222,80 @@ func coopWakeRemedyForCommand(root, agent, command string, commandArgs []string)
 		parts = append(parts, shellQuoteArg(arg))
 	}
 	return strings.Join(parts, " ")
+}
+
+func coopWakeStartupConflictError(inspection wakeLockInspection, cause error) error {
+	var message string
+	switch {
+	case confirmedLiveWake(inspection):
+		started := strings.TrimSpace(inspection.Lock.Started)
+		if started == "" {
+			started = "unknown"
+		}
+		message = fmt.Sprintf(
+			"wake for %s is owned by a live process\n"+
+				"  pid:     %d\n"+
+				"  tty:     %s\n"+
+				"  started: %s\n"+
+				"  root:    %s\n\n"+
+				"No AMQ command can safely take over this live wake; use that terminal, "+
+				"or stop process %d and retry amq coop exec.",
+			inspection.Agent,
+			inspection.PID,
+			coopWakeTTYDisplay(inspection),
+			started,
+			inspection.Root,
+			inspection.PID,
+		)
+	case inspection.Status == wakeLockStale:
+		repair := doctorRootCommandForOS(
+			inspection.Root,
+			"",
+			runtime.GOOS,
+			"--ops",
+			"--fix-wake-locks",
+		)
+		action := "Remove only the proven-stale session lock, then retry:\n  " + repair
+		if wakeLockHasOwnerMarkers(inspection) {
+			action = "Recover the exact owner-bound claim, then retry:\n  " +
+				wakeRecoverOwnerCommand(inspection.Root, inspection.Agent)
+		}
+		message = fmt.Sprintf(
+			"a proven-stale wake lock is blocking startup for %s\n"+
+				"  lock:   %s\n"+
+				"  pid:    %d\n"+
+				"  reason: %s\n"+
+				"  root:   %s\n\n%s",
+			inspection.Agent,
+			inspection.LockPath,
+			inspection.PID,
+			inspection.Reason,
+			inspection.Root,
+			action,
+		)
+	case inspection.Exists:
+		message = fmt.Sprintf(
+			"wake state for %s could not be verified and was preserved\n"+
+				"  lock:   %s\n"+
+				"  pid:    %d\n"+
+				"  reason: %s\n"+
+				"  root:   %s\n\n"+
+				"Inspect the exact session before changing it:\n  %s",
+			inspection.Agent,
+			inspection.LockPath,
+			inspection.PID,
+			inspection.Reason,
+			inspection.Root,
+			doctorRootCommandForOS(inspection.Root, "", runtime.GOOS, "--ops"),
+		)
+	}
+	if message == "" {
+		return cause
+	}
+	if cause == nil {
+		return errors.New(message)
+	}
+	return fmt.Errorf("%s\nstartup detail: %w", message, cause)
 }
 
 func formatCoopWakeLockAge(started string, now time.Time) string {

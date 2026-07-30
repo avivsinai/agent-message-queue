@@ -106,7 +106,8 @@ the agent. The wake child appends full diagnostics to the private
 terminal-safe attention to the controlling terminal. This process boundary
 keeps runtime and fatal-error text out of Codex and Claude full-screen
 composers. Accumulated diagnostics are truncated when a new wake starts after
-the log reaches 1 MiB; a single long-lived wake can exceed that launch bound.
+the log reaches 1 MiB and checked again on the wake's 30-second maintenance
+tick, so long-lived ordinary and repair wakes bound their own logs.
 
 Wake treats terminal notification as an attempt, not delivery, and retries on
 a capped backoff until the inbox makes durable progress. The first notification
@@ -118,9 +119,18 @@ the cohort remains unread. Contextual peer headers appear only in terminal
 output or attention; terminal input always uses the fixed doorbell. The delay
 starts after the preceding injector process exits or times out. Because
 `--wake-inject-via` executes arbitrary local code, a retry can repeat
-injector-side effects. A successful input attempt does not also emit attention;
-when input is unavailable or fails, attention becomes the delivered channel and
-repeats on its slower cadence.
+injector-side effects. Added messages join the pending cohort and share its next
+notification without resetting the retry ladder; if that ladder had decayed,
+new information pulls the deadline forward to the channel's 5- or 30-second
+delivery floor. Bursts within the debounce window remain one notification.
+Removals or replacements immediately rearm the cohort.
+A successful input attempt does not also emit attention. Transient foreground
+authority or input-quiet refusals keep the input retry armed while rate-limiting
+their separate attention output. Output-only delivery repeats on its slower
+cadence, and a short or failed attention write stays pending on that cadence
+instead of terminating the notifier. Recovery-required state never retries
+uncertain terminal input; it repeats the manual drain-and-restart notice on that
+same attention cadence until the unread cohort drains.
 
 > **First-message check:** start both agents before sending the test message.
 > A newly started wake deliberately baselines messages that were already

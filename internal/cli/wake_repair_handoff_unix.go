@@ -912,12 +912,20 @@ func (handoff *wakeRepairParentHandoff) SendSource(source wakeRepairHandoffSourc
 func (handoff *wakeRepairParentHandoff) ReceivePrepared(
 	source wakeRepairHandoffSource,
 ) (wakeRepairHandoffPrepared, error) {
-	if handoff == nil || handoff.reader == nil {
+	if handoff == nil || handoff.reader == nil || handoff.readFile == nil {
 		return wakeRepairHandoffPrepared{}, fmt.Errorf("wake repair parent handoff is unavailable")
 	}
+	if wakeRepairAdmitTimeout <= 0 {
+		return wakeRepairHandoffPrepared{}, fmt.Errorf("wake repair preparation timeout is invalid")
+	}
+	deadline := time.Now().Add(wakeRepairAdmitTimeout)
+	if err := handoff.readFile.SetReadDeadline(deadline); err != nil {
+		return wakeRepairHandoffPrepared{}, fmt.Errorf("set wake repair prepared tuple deadline: %w", err)
+	}
+	defer func() { _ = handoff.readFile.SetReadDeadline(time.Time{}) }()
 	prepared, err := readWakeRepairHandoffPrepared(handoff.reader)
 	if err != nil {
-		return wakeRepairHandoffPrepared{}, err
+		return wakeRepairHandoffPrepared{}, fmt.Errorf("wait for wake repair prepared tuple: %w", err)
 	}
 	if err := prepared.validateSource(source); err != nil {
 		return wakeRepairHandoffPrepared{}, err
@@ -1196,6 +1204,14 @@ func (handoff *wakeRepairChildHandoff) AwaitAdmitAcknowledgeAndRelease(
 		handoff.readFile == nil {
 		return fmt.Errorf("wake repair child handoff is unavailable")
 	}
+	if wakeRepairAdmitTimeout <= 0 {
+		return fmt.Errorf("wake repair admission timeout is invalid")
+	}
+	deadline := time.Now().Add(wakeRepairAdmitTimeout)
+	if err := handoff.readFile.SetReadDeadline(deadline); err != nil {
+		return fmt.Errorf("set wake repair admission deadline: %w", err)
+	}
+	defer func() { _ = handoff.readFile.SetReadDeadline(time.Time{}) }()
 	admit, err := readWakeRepairHandoffAdmit(handoff.reader)
 	if err != nil {
 		return fmt.Errorf("wait for wake repair admission: %w", err)
@@ -1218,10 +1234,7 @@ func (handoff *wakeRepairChildHandoff) AwaitAdmitAcknowledgeAndRelease(
 	if err := writeWakeRepairHandoffAdmit(handoff.writer, admit); err != nil {
 		return fmt.Errorf("acknowledge wake repair admission: %w", err)
 	}
-	if wakeRepairAdmitTimeout <= 0 {
-		return fmt.Errorf("wake repair release timeout is invalid")
-	}
-	deadline := time.Now().Add(wakeRepairAdmitTimeout)
+	deadline = time.Now().Add(wakeRepairAdmitTimeout)
 	if err := handoff.readFile.SetReadDeadline(deadline); err != nil {
 		return fmt.Errorf("set wake repair release deadline: %w", err)
 	}

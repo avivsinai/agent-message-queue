@@ -6,6 +6,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -396,6 +397,52 @@ func TestDeliverWakeAttentionOnlyMarksAttemptAfterCompleteWrite(t *testing.T) {
 			t.Fatal("short attention write was recorded as the delivered channel")
 		}
 	})
+}
+
+func TestDeliverWakeTransientAttentionAdvancesOnlyAfterCompleteWrite(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	writes := 0
+	cfg := &wakeConfig{
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			writes++
+			if writes == 1 {
+				return len(data) - 1, nil
+			}
+			return len(data), nil
+		},
+	}
+	payload := wakePayload{
+		text:       "safe notice",
+		provenance: wakePayloadSystemFixed,
+	}
+
+	captureWakeStderr(t, func() {
+		if err := deliverWakeTransientAttention(cfg, payload, nil); err == nil {
+			t.Fatal("short transient attention write succeeded")
+		}
+	})
+	if cfg.doorbell.transientAttentionAttempts != 1 ||
+		!cfg.doorbell.nextTransientAttention.Equal(now.Add(wakeDoorbellAttentionRetryBase)) {
+		t.Fatalf("short transient attention did not arm output retry: %#v", cfg.doorbell)
+	}
+
+	if err := deliverWakeTransientAttention(cfg, payload, nil); err != nil {
+		t.Fatalf("suppressed transient attention retry: %v", err)
+	}
+	if writes != 1 {
+		t.Fatalf("transient attention retried before output deadline: writes=%d", writes)
+	}
+
+	now = now.Add(wakeDoorbellAttentionRetryBase)
+	if err := deliverWakeTransientAttention(cfg, payload, nil); err != nil {
+		t.Fatalf("due transient attention retry: %v", err)
+	}
+	if cfg.doorbell.transientAttentionAttempts != 2 ||
+		!cfg.doorbell.nextTransientAttention.Equal(now.Add(2*wakeDoorbellAttentionRetryBase)) {
+		t.Fatalf("complete transient attention did not advance cadence: %#v", cfg.doorbell)
+	}
 }
 
 func TestWakeAttentionAlternateScreenAgentOmitsPlainTerminalOutput(t *testing.T) {

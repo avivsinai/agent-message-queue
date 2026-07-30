@@ -16,60 +16,64 @@ import (
 )
 
 type wakeConfig struct {
-	me                    string
-	root                  string
-	session               string
-	injectCmd             string
-	injectVia             string // external command for injection (replaces TIOCSTI)
-	injectArgs            []string
-	wakeOwner             *wakeOwner
-	injectTimeout         time.Duration
-	bell                  bool
-	debounce              time.Duration
-	previewLen            int
-	strict                bool
-	fallbackWarn          bool
-	injectMode            string // auto, raw, paste
-	debug                 bool
-	deferWhileInput       bool
-	inputQuietFor         time.Duration
-	inputPollInterval     time.Duration
-	inputMaxHold          time.Duration
-	interrupt             bool
-	interruptLabel        string
-	interruptPriority     string
-	interruptKey          string
-	interruptNotice       string
-	interruptCooldown     time.Duration
-	lastInterrupt         time.Time
-	controlStop           <-chan struct{}
-	beforeTerminalWrite   func() error
-	terminalWrite         func(string) error
-	terminalGeneration    string
-	terminalTTY           string
-	baselineRequested     bool
-	baselineInherited     bool
-	baselineExisting      map[string]wakeFileIdentity
-	inputDelivery         wakeInputDeliveryState
-	inputRecoveryRequired bool
-	doorbell              wakeDoorbellState
-	doorbellNow           func() time.Time
-	lastAttemptAttention  bool
-	onBaselineReady       func(map[string]wakeFileIdentity) error
-	onPrepared            func(wakeAdmissionWatcher) error
-	retainedAgent         wakeRetainedAgent
-	retainedInbox         wakeInboxReader
-	touchPresence         func() error
-	maintenanceTicks      <-chan time.Time
-	preconditionCheck     func(*wakeConfig) error
-	onPendingNotify       func()
-	recordNotifierStatus  func(status, mode, reason string) error
-	recordAttention       func(wakeAttentionEmission) error
-	attentionEnv          func(string) string
-	attentionIsTTY        func() bool
-	attentionWrite        func([]byte) (int, error)
-	diagnosticIsTTY       func() bool
+	me                            string
+	root                          string
+	session                       string
+	injectCmd                     string
+	injectVia                     string // external command for injection (replaces TIOCSTI)
+	injectArgs                    []string
+	wakeOwner                     *wakeOwner
+	injectTimeout                 time.Duration
+	bell                          bool
+	debounce                      time.Duration
+	previewLen                    int
+	strict                        bool
+	fallbackWarn                  bool
+	injectMode                    string // auto, raw, paste
+	debug                         bool
+	deferWhileInput               bool
+	inputQuietFor                 time.Duration
+	inputPollInterval             time.Duration
+	inputMaxHold                  time.Duration
+	interrupt                     bool
+	interruptLabel                string
+	interruptPriority             string
+	interruptKey                  string
+	interruptNotice               string
+	interruptCooldown             time.Duration
+	lastInterrupt                 time.Time
+	controlStop                   <-chan struct{}
+	beforeTerminalWrite           func() error
+	terminalWrite                 func(string) error
+	terminalGeneration            string
+	terminalTTY                   string
+	baselineRequested             bool
+	baselineInherited             bool
+	baselineExisting              map[string]wakeFileIdentity
+	inputDelivery                 wakeInputDeliveryState
+	inputRecoveryRequired         bool
+	doorbell                      wakeDoorbellState
+	doorbellNow                   func() time.Time
+	lastAttemptAttention          bool
+	lastAttemptTransientAttention bool
+	onBaselineReady               func(map[string]wakeFileIdentity) error
+	onPrepared                    func(wakeAdmissionWatcher) error
+	retainedAgent                 wakeRetainedAgent
+	retainedInbox                 wakeInboxReader
+	touchPresence                 func() error
+	maintenanceTicks              <-chan time.Time
+	maintenanceOutputs            []*os.File
+	preconditionCheck             func(*wakeConfig) error
+	onPendingNotify               func()
+	recordNotifierStatus          func(status, mode, reason string) error
+	recordAttention               func(wakeAttentionEmission) error
+	attentionEnv                  func(string) string
+	attentionIsTTY                func() bool
+	attentionWrite                func([]byte) (int, error)
+	diagnosticIsTTY               func() bool
 }
+
+const maxWakeNotificationSenderClauses = 8
 
 type wakeInputDeliveryPhase uint8
 
@@ -464,8 +468,10 @@ func notifyNewMessages(cfg *wakeConfig) error {
 
 	if len(messages) == 0 {
 		if cfg.inputRecoveryRequired {
-			cfg.doorbell.noteRecoveryInboxEmpty()
-			return nil
+			return deliverWakeInputRecoveryAttention(
+				cfg,
+				currentPending,
+			)
 		}
 		cfg.doorbell.reset()
 		return reconcileWakeInputAfterInboxDrain(cfg)
@@ -579,16 +585,23 @@ func deliverNewMessageNotification(
 		}
 		if cfg.injectMode == wakeInjectModeNone {
 			clearWakeInputState(cfg)
-			if deliveryErr == nil {
-				// Permanent input demotion retires the old doorbell state.
-				// Re-arm the unread cohort before recording the fallback.
-				cfg.doorbell.arm(currentPending)
-				recordWakeAttempt(cfg, cfg.wakeDoorbellNow())
+			if shouldRecordWakeAttempt(deliveryErr) {
+				recordWakeAttempt(
+					cfg,
+					cfg.wakeDoorbellNow(),
+					currentPending,
+					deliveryErr,
+				)
 			}
 			return deliveryErr
 		}
 		if shouldRecordWakeAttempt(deliveryErr) {
-			recordWakeAttempt(cfg, cfg.wakeDoorbellNow())
+			recordWakeAttempt(
+				cfg,
+				cfg.wakeDoorbellNow(),
+				currentPending,
+				deliveryErr,
+			)
 		}
 		return deliveryErr
 	}
@@ -598,14 +611,31 @@ func deliverNewMessageNotification(
 		return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
 	}
 	if shouldRecordWakeAttempt(deliveryErr) {
-		recordWakeAttempt(cfg, cfg.wakeDoorbellNow())
+		recordWakeAttempt(
+			cfg,
+			cfg.wakeDoorbellNow(),
+			currentPending,
+			deliveryErr,
+		)
 	}
 	return deliveryErr
 }
 
-func recordWakeAttempt(cfg *wakeConfig, now time.Time) {
-	cfg.doorbell.phase = wakeDoorbellRetrying
-	if cfg.lastAttemptAttention {
+func recordWakeAttempt(
+	cfg *wakeConfig,
+	now time.Time,
+	currentPending map[string]os.FileInfo,
+	deliveryErr error,
+) {
+	if len(cfg.doorbell.cohort) == 0 {
+		cfg.doorbell.arm(currentPending)
+	}
+	var attentionErr *wakeAttentionDeliveryError
+	if cfg.lastAttemptTransientAttention {
+		cfg.doorbell.recordAttempt(now)
+		return
+	}
+	if cfg.lastAttemptAttention || errors.As(deliveryErr, &attentionErr) {
 		cfg.doorbell.recordAttentionAttempt(now)
 		return
 	}
@@ -616,9 +646,7 @@ func shouldRecordWakeAttempt(err error) bool {
 	if err == nil {
 		return true
 	}
-	var attentionErr *wakeAttentionDeliveryError
-	return !errors.As(err, &attentionErr) &&
-		!isWakeTerminalForegroundPGRPChanged(err) &&
+	return !isWakeTerminalAuthorityLoss(err) &&
 		!isWakeTerminalPartialProgress(err) &&
 		!isWakeInputDemotionBlocked(err) &&
 		!isWakeTerminalProgressUncertain(err)
@@ -632,13 +660,17 @@ func deliverWakeInputRecoveryAttention(
 	if !cfg.doorbell.planRecoveryAttention(now, currentPending) {
 		return nil
 	}
+	cfg.doorbell.recordRecoveryRequired(now, currentPending)
 	if err := emitWakeAttention(cfg, wakePayload{
 		text:       wakeInputRecoveryNotice,
 		provenance: wakePayloadSystemFixed,
 	}); err != nil {
 		return err
 	}
-	cfg.doorbell.recordRecoveryRequired(now, currentPending)
+	cfg.doorbell.recordRecoveryAttentionDelivered()
+	if len(currentPending) == 0 {
+		cfg.doorbell.noteRecoveryInboxEmpty()
+	}
 	return nil
 }
 
@@ -742,15 +774,11 @@ func buildNotificationText(session string, messages []wakeMsgInfo, previewLen in
 		senders = append(senders, sender)
 	}
 	sort.Strings(senders)
-	parts := make([]string, 0, len(senders))
-	for _, sender := range senders {
-		parts = append(parts, fmt.Sprintf("%d from %s", senderCounts[sender], sender))
-	}
 	return fmt.Sprintf(
 		"%s: %d messages - %s. Drain with: amq drain --include-body — then act on it",
 		prefix,
 		count,
-		strings.Join(parts, ", "),
+		strings.Join(buildWakeSenderClauses(senders, senderCounts), ", "),
 	)
 }
 
@@ -773,18 +801,30 @@ func buildInterruptText(session string, messages []wakeMsgInfo, senderCounts map
 			prefix, msg.from, subject)
 	}
 
-	var parts []string
 	senders := make([]string, 0, len(senderCounts))
 	for s := range senderCounts {
 		senders = append(senders, s)
 	}
 	sort.Strings(senders)
-	for _, sender := range senders {
-		c := senderCounts[sender]
-		parts = append(parts, fmt.Sprintf("%d from %s", c, sender))
-	}
+	parts := buildWakeSenderClauses(senders, senderCounts)
 	return fmt.Sprintf("%s: %d urgent messages - %s. Drain with: amq drain --include-body — then act on it",
 		prefix, count, strings.Join(parts, ", "))
+}
+
+func buildWakeSenderClauses(senders []string, senderCounts map[string]int) []string {
+	limit := min(len(senders), maxWakeNotificationSenderClauses)
+	parts := make([]string, 0, limit+1)
+	for _, sender := range senders[:limit] {
+		parts = append(parts, fmt.Sprintf("%d from %s", senderCounts[sender], sender))
+	}
+	if omitted := len(senders) - limit; omitted > 0 {
+		label := "senders"
+		if omitted == 1 {
+			label = "sender"
+		}
+		parts = append(parts, fmt.Sprintf("%d other %s", omitted, label))
+	}
+	return parts
 }
 
 // notificationPrefix builds "AMQ [session]" or just "AMQ" when session is empty.
@@ -885,6 +925,7 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 
 func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForInput bool) error {
 	cfg.lastAttemptAttention = false
+	cfg.lastAttemptTransientAttention = false
 	ownerBound := usesCoopDoorbell(cfg)
 	if ownerBound {
 		if validCoopWakeDoorbell(notice.input.text) {
@@ -908,7 +949,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 
 	if shouldDeferBeforeInject(cfg, deferForInput) {
 		if !waitForWakeInputQuiet(cfg) {
-			return deliverWakeAttentionOnly(cfg, notice.output)
+			return deliverWakeTransientAttention(cfg, notice.output, nil)
 		}
 	}
 
@@ -1059,17 +1100,36 @@ func deliverWakeAttentionAfterInputRefusal(
 	payload wakePayload,
 	cause error,
 ) error {
+	if isWakeTerminalForegroundPGRPChanged(cause) {
+		return deliverWakeTransientAttention(cfg, payload, cause)
+	}
 	if err := deliverWakeAttentionOnly(cfg, payload); err != nil {
 		return errors.Join(cause, err)
 	}
-	if isWakeTerminalAuthorityLoss(cause) &&
-		!isWakeTerminalForegroundPGRPChanged(cause) {
+	if isWakeTerminalAuthorityLoss(cause) {
 		// Loss of the retained terminal or wake generation is fatal even when
 		// the final attention write succeeds. A replacement wake, not this
 		// stale owner, must retry the inbox cohort.
 		return cause
 	}
 	return nil
+}
+
+func deliverWakeTransientAttention(
+	cfg *wakeConfig,
+	payload wakePayload,
+	cause error,
+) error {
+	now := cfg.wakeDoorbellNow()
+	if !cfg.doorbell.transientAttentionDue(now) {
+		return cause
+	}
+	cfg.lastAttemptTransientAttention = true
+	cfg.doorbell.recordTransientAttentionAttempt(now)
+	if err := emitWakeAttention(cfg, payload); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
 }
 
 func deliverWakeAttentionOnly(cfg *wakeConfig, payload wakePayload) error {
