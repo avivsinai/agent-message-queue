@@ -2136,6 +2136,12 @@ func TestNotifyNewMessagesOwnerlessRefusedWriteRemainsRetryEligible(t *testing.T
 	controlStop := make(chan struct{})
 	close(controlStop)
 	now := time.Unix(1_800_000_000, 0)
+	writtenBytes := 0
+	attentionWrites := 0
+	stubTIOCSTIInject(t, func(text string) error {
+		writtenBytes += len(text)
+		return nil
+	})
 	cfg := &wakeConfig{
 		me:          "codex",
 		root:        root,
@@ -2143,26 +2149,93 @@ func TestNotifyNewMessagesOwnerlessRefusedWriteRemainsRetryEligible(t *testing.T
 		injectMode:  wakeInjectModeRaw,
 		controlStop: controlStop,
 		doorbellNow: func() time.Time { return now },
+		attentionIsTTY: func() bool {
+			return false
+		},
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
 	}
 
 	if err := notifyNewMessages(cfg); err != nil {
 		t.Fatalf("notify refused write: %v", err)
 	}
+	if writtenBytes != 0 {
+		t.Fatalf("refused write injected %d bytes, want 0", writtenBytes)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("refused write attention writes = %d, want 1", attentionWrites)
+	}
 	if cfg.doorbell.attempts != 1 {
 		t.Fatalf("attempts after refused write = %d, want 1", cfg.doorbell.attempts)
 	}
 	if deadline, ok := cfg.doorbell.nextDeadline(); !ok ||
-		!deadline.Equal(now.Add(wakeDoorbellRetryBase)) {
+		!deadline.Equal(now.Add(wakeDoorbellAttentionRetryBase)) {
 		t.Fatalf(
 			"deadline after refused write = %s, ok=%v; want %s",
 			deadline,
 			ok,
-			now.Add(wakeDoorbellRetryBase),
+			now.Add(wakeDoorbellAttentionRetryBase),
 		)
 	}
 }
 
-func TestNotifyNewMessagesOwnerlessRetrySuppressesRepeatedPeerAttention(t *testing.T) {
+func TestNotifyNewMessagesOwnerlessAuthorityErrorBeforeInputUsesAttentionCadence(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "authority-refused")
+
+	now := time.Unix(1_800_000_000, 0)
+	authorityErr := errors.New("terminal authority changed")
+	inputWrites := 0
+	attentionWrites := 0
+	cfg := &wakeConfig{
+		me:          "codex",
+		root:        root,
+		session:     "session1",
+		injectMode:  wakeInjectModeRaw,
+		controlStop: make(chan struct{}),
+		doorbellNow: func() time.Time { return now },
+		beforeTerminalWrite: func() error {
+			return authorityErr
+		},
+		terminalWrite: func(string) error {
+			inputWrites++
+			return nil
+		},
+		attentionIsTTY: func() bool {
+			return false
+		},
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify authority refusal: %v", err)
+	}
+	if inputWrites != 0 {
+		t.Fatalf("authority refusal wrote %d input chunks, want 0", inputWrites)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("authority refusal attention writes = %d, want 1", attentionWrites)
+	}
+	if cfg.doorbell.attempts != 1 {
+		t.Fatalf("attempts after authority refusal = %d, want 1", cfg.doorbell.attempts)
+	}
+	if deadline, ok := cfg.doorbell.nextDeadline(); !ok ||
+		!deadline.Equal(now.Add(wakeDoorbellAttentionRetryBase)) {
+		t.Fatalf(
+			"deadline after authority refusal = %s, ok=%v; want %s",
+			deadline,
+			ok,
+			now.Add(wakeDoorbellAttentionRetryBase),
+		)
+	}
+}
+
+func TestNotifyNewMessagesOwnerlessFallbackRateLimitsRepeatedPeerAttention(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
@@ -2217,15 +2290,113 @@ func TestNotifyNewMessagesOwnerlessRetrySuppressesRepeatedPeerAttention(t *testi
 	if len(attentions) != 1 || !strings.Contains(attentions[0], "review the retry") {
 		t.Fatalf("first ownerless attention = %#v, want one peer notice", attentions)
 	}
-	now = now.Add(wakeDoorbellAttentionRetryBase)
+	now = now.Add(wakeDoorbellAttentionRetryBase - time.Millisecond)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("ownerless early retry: %v", err)
+	}
+	if len(attentions) != 1 {
+		t.Fatalf("ownerless fallback repeated before deadline: %#v", attentions)
+	}
+	now = now.Add(time.Millisecond)
 	if err := notifyNewMessages(cfg); err != nil {
 		t.Fatalf("ownerless retry: %v", err)
 	}
 	if cfg.doorbell.attempts != 2 {
 		t.Fatalf("ownerless attempts = %d, want 2", cfg.doorbell.attempts)
 	}
-	if len(attentions) != 1 {
-		t.Fatalf("ownerless retry repeated peer attention: %#v", attentions)
+	if len(attentions) != 2 || !strings.Contains(attentions[1], "review the retry") {
+		t.Fatalf("ownerless fallback attention = %#v, want two rate-limited peer notices", attentions)
+	}
+	if deadline, ok := cfg.doorbell.nextDeadline(); !ok ||
+		!deadline.Equal(now.Add(time.Minute)) {
+		t.Fatalf(
+			"attention fallback deadline = %s, ok=%v; want %s",
+			deadline,
+			ok,
+			now.Add(time.Minute),
+		)
+	}
+}
+
+func TestNotifyNewMessagesOwnerlessSuccessfulInputRetryEmitsNoAttention(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "ownerless-input")
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+
+	now := time.Unix(1_800_000_000, 0)
+	var injected, attentions []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	cfg := &wakeConfig{
+		me:             "codex",
+		root:           root,
+		session:        "session1",
+		injectMode:     wakeInjectModeRaw,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentions = append(attentions, string(data))
+			return len(data), nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first ownerless input attempt: %v", err)
+	}
+	firstInputChunks := len(injected)
+	if firstInputChunks == 0 {
+		t.Fatal("first ownerless attempt injected no input")
+	}
+	now = now.Add(wakeDoorbellRetryBase)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("ownerless input retry: %v", err)
+	}
+	if len(injected) <= firstInputChunks {
+		t.Fatal("ownerless retry injected no additional input")
+	}
+	if len(attentions) != 0 {
+		t.Fatalf("successful ownerless input attempts emitted attention: %#v", attentions)
+	}
+}
+
+func TestRecordWakeAttemptForcesRetryPhase(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	tests := []struct {
+		name  string
+		phase wakeDoorbellPhase
+	}{
+		{name: "idle", phase: wakeDoorbellIdle},
+		{name: "recovery required", phase: wakeDoorbellRecoveryRequired},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &wakeConfig{
+				doorbell: wakeDoorbellState{phase: tt.phase},
+			}
+
+			recordWakeAttempt(cfg, now)
+
+			if cfg.doorbell.phase != wakeDoorbellRetrying {
+				t.Fatalf(
+					"recorded phase = %d, want retrying",
+					cfg.doorbell.phase,
+				)
+			}
+			if deadline, ok := cfg.doorbell.nextDeadline(); !ok ||
+				!deadline.Equal(now.Add(wakeDoorbellRetryBase)) {
+				t.Fatalf(
+					"recorded deadline = %s, ok=%v; want %s",
+					deadline,
+					ok,
+					now.Add(wakeDoorbellRetryBase),
+				)
+			}
+		})
 	}
 }
 

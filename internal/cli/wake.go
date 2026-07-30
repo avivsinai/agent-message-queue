@@ -54,7 +54,6 @@ type wakeConfig struct {
 	inputRecoveryRequired bool
 	doorbell              wakeDoorbellState
 	doorbellNow           func() time.Time
-	suppressAttention     bool
 	lastAttemptAttention  bool
 	onBaselineReady       func(map[string]wakeFileIdentity) error
 	onPrepared            func(wakeAdmissionWatcher) error
@@ -574,23 +573,12 @@ func deliverNewMessageNotification(
 			text:       plan.prompt,
 			provenance: wakePayloadSystemFixed,
 		}
-		deliveryErr := deliverPlannedWakeNotification(
-			cfg,
-			notice,
-			deferForInput,
-			plan.retry,
-		)
+		deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
 		if isWakeInputDemotionBlocked(deliveryErr) {
 			return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
 		}
 		if cfg.injectMode == wakeInjectModeNone {
 			clearWakeInputState(cfg)
-			if plan.retry {
-				deliveryErr = errors.Join(
-					deliveryErr,
-					emitWakeAttention(cfg, notice.output),
-				)
-			}
 			if deliveryErr == nil {
 				// Permanent input demotion retires the old doorbell state.
 				// Re-arm the unread cohort before recording the fallback.
@@ -605,12 +593,7 @@ func deliverNewMessageNotification(
 		return deliveryErr
 	}
 
-	deliveryErr := deliverPlannedWakeNotification(
-		cfg,
-		notice,
-		deferForInput,
-		plan.retry,
-	)
+	deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
 	if isWakeInputDemotionBlocked(deliveryErr) {
 		return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
 	}
@@ -620,19 +603,8 @@ func deliverNewMessageNotification(
 	return deliveryErr
 }
 
-func deliverPlannedWakeNotification(
-	cfg *wakeConfig,
-	notice wakeNotification,
-	deferForInput, retry bool,
-) error {
-	previous := cfg.suppressAttention
-	cfg.suppressAttention = previous || retry
-	err := deliverWakeNotification(cfg, notice, deferForInput)
-	cfg.suppressAttention = previous
-	return err
-}
-
 func recordWakeAttempt(cfg *wakeConfig, now time.Time) {
+	cfg.doorbell.phase = wakeDoorbellRetrying
 	if cfg.lastAttemptAttention {
 		cfg.doorbell.recordAttentionAttempt(now)
 		return
@@ -945,10 +917,14 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	if cfg.injectVia != "" {
 		allowed, guardErr := authorizeTerminalWrite(cfg)
 		if guardErr != nil {
-			return guardErr
+			return deliverWakeAttentionAfterInputRefusal(
+				cfg,
+				notice.output,
+				guardErr,
+			)
 		}
 		if !allowed {
-			return nil
+			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
 		if err := injectVia(cfg, plainText); err != nil {
 			if cfg.fallbackWarn {
@@ -966,6 +942,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: mode=%s text_len=%d\n", mode, len(inputText))
 	}
 	var injectErr error
+	inputAccepted := false
 	switch mode {
 	case wakeInjectModeRaw:
 		// Raw mode: inject text and CR separately to avoid paste detection.
@@ -975,7 +952,8 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		if cfg.bell && !ownerBound {
 			injectedText = "\a" + injectedText
 		}
-		_, injectErr = injectRawNotification(cfg, injectedText)
+		inputAccepted, injectErr = injectRawNotification(cfg, injectedText)
+		inputAccepted = inputAccepted || cfg.inputDelivery.confirmedInput()
 
 	case wakeInjectModePaste:
 		// Paste mode: bracketed paste with delayed CR
@@ -988,16 +966,23 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		if cfg.bell && !ownerBound {
 			pasteText = "\a" + pasteText
 		}
-		_, injectErr = injectTerminalNotification(cfg, wakeInjectModePaste, pasteText)
+		inputAccepted, injectErr = injectTerminalNotification(
+			cfg,
+			wakeInjectModePaste,
+			pasteText,
+		)
+		inputAccepted = inputAccepted || cfg.inputDelivery.confirmedInput()
 
 	default:
 		// Unknown mode, fall back to raw
 		if ownerBound {
 			wrote, err := writeTerminalChunk(cfg, inputText)
+			inputAccepted = wrote
 			if err != nil {
 				injectErr = err
 			} else if wrote {
-				_, err := writeTerminalChunk(cfg, "\r")
+				submitted, err := writeTerminalChunk(cfg, "\r")
+				inputAccepted = inputAccepted || submitted
 				injectErr = err
 			}
 		} else {
@@ -1005,7 +990,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			if cfg.bell {
 				injectedText = "\a" + injectedText
 			}
-			_, injectErr = writeTerminalChunk(cfg, injectedText)
+			inputAccepted, injectErr = writeTerminalChunk(cfg, injectedText)
 		}
 	}
 
@@ -1045,6 +1030,13 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		}
 		var authorityErr *wakeTerminalAuthorityError
 		if errors.As(injectErr, &authorityErr) {
+			if !cfg.inputDelivery.confirmedInput() {
+				return deliverWakeAttentionAfterInputRefusal(
+					cfg,
+					notice.output,
+					injectErr,
+				)
+			}
 			return injectErr
 		}
 		if cfg.fallbackWarn {
@@ -1055,13 +1047,37 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		// Fallback: use the output-only attention tier; never retry input.
 		return deliverWakeAttentionOnly(cfg, notice.output)
 	}
+	if !inputAccepted {
+		return deliverWakeAttentionOnly(cfg, notice.output)
+	}
 
 	return nil
 }
 
+func deliverWakeAttentionAfterInputRefusal(
+	cfg *wakeConfig,
+	payload wakePayload,
+	cause error,
+) error {
+	if err := deliverWakeAttentionOnly(cfg, payload); err != nil {
+		return errors.Join(cause, err)
+	}
+	if isWakeTerminalAuthorityLoss(cause) &&
+		!isWakeTerminalForegroundPGRPChanged(cause) {
+		// Loss of the retained terminal or wake generation is fatal even when
+		// the final attention write succeeds. A replacement wake, not this
+		// stale owner, must retry the inbox cohort.
+		return cause
+	}
+	return nil
+}
+
 func deliverWakeAttentionOnly(cfg *wakeConfig, payload wakePayload) error {
+	if err := emitWakeAttention(cfg, payload); err != nil {
+		return err
+	}
 	cfg.lastAttemptAttention = true
-	return emitWakeAttention(cfg, payload)
+	return nil
 }
 
 func usesCoopDoorbell(cfg *wakeConfig) bool {

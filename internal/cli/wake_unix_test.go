@@ -154,13 +154,20 @@ func TestNotifyNewMessagesForegroundPGRPResumesAtFirstMissingChunk(t *testing.T)
 			var writes []string
 			guardCalls := 0
 			failed := false
+			now := time.Unix(1_800_000_000, 0)
+			attentionWrites := 0
 			cfg := &wakeConfig{
 				root:           root,
 				me:             tc.me,
 				session:        "session1",
 				wakeOwner:      &wakeOwner{},
 				injectMode:     tc.mode,
+				doorbellNow:    func() time.Time { return now },
 				attentionIsTTY: func() bool { return false },
+				attentionWrite: func(data []byte) (int, error) {
+					attentionWrites++
+					return len(data), nil
+				},
 				beforeTerminalWrite: func() error {
 					guardCalls++
 					if !failed && guardCalls == tc.failAt {
@@ -176,25 +183,59 @@ func TestNotifyNewMessagesForegroundPGRPResumesAtFirstMissingChunk(t *testing.T)
 			}
 
 			err := notifyNewMessages(cfg)
-			if !isWakeTerminalForegroundPGRPChanged(err) {
+			if tc.failAt == 1 {
+				if err != nil {
+					t.Fatalf("zero-progress refusal = %v, want attention fallback", err)
+				}
+				if attentionWrites != 1 {
+					t.Fatalf("zero-progress attention writes = %d, want 1", attentionWrites)
+				}
+			} else if !isWakeTerminalForegroundPGRPChanged(err) {
 				t.Fatalf("first notify error = %T %v, want foreground-PGRP change", err, err)
 			}
 			if got := strings.Join(writes, "|"); got != strings.Join(tc.firstWant, "|") {
 				t.Fatalf("first writes = %q, want %q", got, strings.Join(tc.firstWant, "|"))
 			}
-			if cfg.doorbell.attempts != 0 {
-				t.Fatalf("attempts after foreground refusal = %d, want 0", cfg.doorbell.attempts)
+			wantAttempts := uint(0)
+			if tc.failAt == 1 {
+				wantAttempts = 1
+			}
+			if cfg.doorbell.attempts != wantAttempts {
+				t.Fatalf(
+					"attempts after foreground refusal = %d, want %d",
+					cfg.doorbell.attempts,
+					wantAttempts,
+				)
 			}
 
 			writes = nil
+			if tc.failAt == 1 {
+				now = now.Add(wakeDoorbellAttentionRetryBase)
+			}
 			if err := notifyNewMessages(cfg); err != nil {
 				t.Fatalf("retry notify: %v", err)
 			}
 			if got := strings.Join(writes, "|"); got != strings.Join(tc.retryWant, "|") {
 				t.Fatalf("retry writes = %q, want %q", got, strings.Join(tc.retryWant, "|"))
 			}
-			if cfg.doorbell.attempts != 1 {
-				t.Fatalf("attempts after completed retry = %d, want 1", cfg.doorbell.attempts)
+			wantAttempts++
+			if cfg.doorbell.attempts != wantAttempts {
+				t.Fatalf(
+					"attempts after completed retry = %d, want %d",
+					cfg.doorbell.attempts,
+					wantAttempts,
+				)
+			}
+			wantAttentionWrites := 0
+			if tc.failAt == 1 {
+				wantAttentionWrites = 1
+			}
+			if attentionWrites != wantAttentionWrites {
+				t.Fatalf(
+					"attention writes after input retry = %d, want %d",
+					attentionWrites,
+					wantAttentionWrites,
+				)
 			}
 		})
 	}
@@ -372,6 +413,7 @@ func TestNotifyNewMessagesReconcilesPartialDeliveryAfterInboxDrain(t *testing.T)
 			var writes []string
 			guardCalls := 0
 			failed := false
+			attentionWrites := 0
 			cfg := &wakeConfig{
 				root:           root,
 				me:             "codex",
@@ -379,6 +421,10 @@ func TestNotifyNewMessagesReconcilesPartialDeliveryAfterInboxDrain(t *testing.T)
 				wakeOwner:      &wakeOwner{},
 				injectMode:     tc.mode,
 				attentionIsTTY: func() bool { return false },
+				attentionWrite: func(data []byte) (int, error) {
+					attentionWrites++
+					return len(data), nil
+				},
 				beforeTerminalWrite: func() error {
 					guardCalls++
 					if !failed && guardCalls == tc.failAt {
@@ -394,7 +440,17 @@ func TestNotifyNewMessagesReconcilesPartialDeliveryAfterInboxDrain(t *testing.T)
 			}
 
 			err := notifyNewMessages(cfg)
-			if !isWakeTerminalForegroundPGRPChanged(err) {
+			if tc.failAt == 1 {
+				if err != nil {
+					t.Fatalf("zero-progress refusal = %v, want attention fallback", err)
+				}
+				if attentionWrites != 1 {
+					t.Fatalf("zero-progress attention writes = %d, want 1", attentionWrites)
+				}
+				if cfg.inputDelivery.confirmedInput() {
+					t.Fatalf("zero-progress refusal retained confirmed input: %#v", cfg.inputDelivery)
+				}
+			} else if !isWakeTerminalForegroundPGRPChanged(err) {
 				t.Fatalf("first notify error = %T %v, want foreground-PGRP change", err, err)
 			}
 			if drained := runDrainJSON(t, root, "codex", 0, false); drained.Count != 1 {
@@ -407,6 +463,9 @@ func TestNotifyNewMessagesReconcilesPartialDeliveryAfterInboxDrain(t *testing.T)
 			}
 			if got := strings.Join(writes, "|"); got != strings.Join(tc.reconcileWant, "|") {
 				t.Fatalf("reconciliation writes = %q, want %q", got, strings.Join(tc.reconcileWant, "|"))
+			}
+			if cfg.inputDelivery.pending() {
+				t.Fatalf("reconciliation retained input state: %#v", cfg.inputDelivery)
 			}
 		})
 	}
@@ -1913,14 +1972,22 @@ func TestNotifyNewMessagesAttentionOnlyRetryCadence(t *testing.T) {
 		30 * time.Second,
 		time.Minute,
 		2 * time.Minute,
-		2 * time.Minute,
+		4 * time.Minute,
+		8 * time.Minute,
+		15 * time.Minute,
+		15 * time.Minute,
 	}
 	for attempt, wantDelay := range wantDelays {
 		if err := notifyNewMessages(cfg); err != nil {
 			t.Fatalf("attention attempt %d: %v", attempt+1, err)
 		}
-		if writes != 1 {
-			t.Fatalf("attention writes after attempt %d = %d, want 1", attempt+1, writes)
+		if writes != attempt+1 {
+			t.Fatalf(
+				"attention writes after attempt %d = %d, want %d",
+				attempt+1,
+				writes,
+				attempt+1,
+			)
 		}
 		if cfg.doorbell.attempts != uint(attempt+1) {
 			t.Fatalf(
@@ -1943,7 +2010,7 @@ func TestNotifyNewMessagesAttentionOnlyRetryCadence(t *testing.T) {
 		if err := notifyNewMessages(cfg); err != nil {
 			t.Fatalf("early attention check %d: %v", attempt+1, err)
 		}
-		if writes != 1 {
+		if writes != attempt+1 {
 			t.Fatalf("attention repeated before deadline %d: writes=%d", attempt+1, writes)
 		}
 		now = wantDeadline
@@ -2054,21 +2121,24 @@ func TestRunWakeLoopHonorsAttentionOnlyDoorbellDeadline(t *testing.T) {
 	if got := afterDeadlineCalls.Load(); got != 0 {
 		t.Fatalf("doorbell deadline evaluated early %d times", got)
 	}
-	deadline := time.After(2 * time.Second)
-	for afterDeadlineCalls.Load() == 0 {
-		select {
-		case err := <-done:
-			t.Fatalf("wake loop exited before attention retry: %v", err)
-		case <-deadline:
-			t.Fatal("attention-only retry deadline was ignored")
-		case <-time.After(10 * time.Millisecond):
+	select {
+	case output := <-attention:
+		if !strings.Contains(output, "AMQ") {
+			t.Fatalf("attention retry output = %q, want AMQ notice", output)
 		}
+	case err := <-done:
+		t.Fatalf("wake loop exited before attention retry: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("attention-only retry deadline was ignored")
 	}
 	time.Sleep(25 * time.Millisecond)
 	callsAfterRetry := afterDeadlineCalls.Load()
+	if callsAfterRetry == 0 {
+		t.Fatal("attention retry did not evaluate the expired deadline")
+	}
 	select {
 	case output := <-attention:
-		t.Fatalf("attention retry repeated peer output: %q", output)
+		t.Fatalf("attention retry hot-looped output: %q", output)
 	case err := <-done:
 		t.Fatalf("wake loop exited after attention retry: %v", err)
 	case <-time.After(200 * time.Millisecond):
@@ -2972,14 +3042,11 @@ func TestRunWakeLoopPreservesForegroundRetryAcrossInboxScanError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	originalAuthorityRetryDelay := wakeTerminalAuthorityRetryDelay
 	originalScanRetryBase := wakeInboxScanRetryBase
 	originalScanRetryMax := wakeInboxScanRetryMax
-	wakeTerminalAuthorityRetryDelay = 50 * time.Millisecond
 	wakeInboxScanRetryBase = 50 * time.Millisecond
 	wakeInboxScanRetryMax = time.Second
 	t.Cleanup(func() {
-		wakeTerminalAuthorityRetryDelay = originalAuthorityRetryDelay
 		wakeInboxScanRetryBase = originalScanRetryBase
 		wakeInboxScanRetryMax = originalScanRetryMax
 	})
@@ -3001,17 +3068,25 @@ func TestRunWakeLoopPreservesForegroundRetryAcrossInboxScanError(t *testing.T) {
 	var promptWrites atomic.Int64
 	firstPrompt := make(chan string, 1)
 	recoveredPrompt := make(chan string, 1)
+	attention := make(chan struct{}, 1)
+	maintenanceTicks := make(chan time.Time, 1)
+	var fakeNow atomic.Int64
+	fakeNow.Store(time.Unix(1_800_000_000, 0).UnixNano())
 	stop := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
 		done <- runWakeLoop(wakeConfig{
-			root:              root,
-			me:                "codex",
-			session:           "session1",
-			wakeOwner:         &wakeOwner{},
-			injectMode:        wakeInjectModePaste,
-			controlStop:       stop,
-			retainedInbox:     reader,
+			root:             root,
+			me:               "codex",
+			session:          "session1",
+			wakeOwner:        &wakeOwner{},
+			injectMode:       wakeInjectModePaste,
+			controlStop:      stop,
+			retainedInbox:    reader,
+			maintenanceTicks: maintenanceTicks,
+			doorbellNow: func() time.Time {
+				return time.Unix(0, fakeNow.Load())
+			},
 			preconditionCheck: func(*wakeConfig) error { return nil },
 			terminalWrite: func(text string) error {
 				if !strings.Contains(text, coopWakeDoorbell) {
@@ -3025,6 +3100,13 @@ func TestRunWakeLoopPreservesForegroundRetryAcrossInboxScanError(t *testing.T) {
 				return nil
 			},
 			attentionIsTTY: func() bool { return false },
+			attentionWrite: func(data []byte) (int, error) {
+				select {
+				case attention <- struct{}{}:
+				default:
+				}
+				return len(data), nil
+			},
 		})
 	}()
 	t.Cleanup(func() {
@@ -3044,6 +3126,15 @@ func TestRunWakeLoopPreservesForegroundRetryAcrossInboxScanError(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("wake loop did not establish foreground-authority hold")
 	}
+	select {
+	case <-attention:
+	case err := <-done:
+		t.Fatalf("wake loop exited before zero-progress attention: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("foreground refusal emitted no attention")
+	}
+	fakeNow.Add(int64(wakeDoorbellAttentionRetryBase))
+	maintenanceTicks <- time.Now()
 	select {
 	case <-scanFailed:
 	case err := <-done:

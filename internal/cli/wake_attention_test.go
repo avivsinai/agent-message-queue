@@ -359,6 +359,45 @@ func TestWakeAttentionReportsOnlyFullyWrittenOutputEffectsAndProvenance(t *testi
 	}
 }
 
+func TestDeliverWakeAttentionOnlyMarksAttemptAfterCompleteWrite(t *testing.T) {
+	payload := wakePayload{
+		text:       "safe notice",
+		provenance: wakePayloadSystemFixed,
+	}
+
+	t.Run("complete", func(t *testing.T) {
+		cfg := &wakeConfig{
+			attentionIsTTY: func() bool { return false },
+			attentionWrite: func(data []byte) (int, error) {
+				return len(data), nil
+			},
+		}
+		if err := deliverWakeAttentionOnly(cfg, payload); err != nil {
+			t.Fatalf("deliver complete attention: %v", err)
+		}
+		if !cfg.lastAttemptAttention {
+			t.Fatal("complete attention was not recorded as the delivered channel")
+		}
+	})
+
+	t.Run("short", func(t *testing.T) {
+		cfg := &wakeConfig{
+			attentionIsTTY: func() bool { return false },
+			attentionWrite: func(data []byte) (int, error) {
+				return len(data) - 1, nil
+			},
+		}
+		captureWakeStderr(t, func() {
+			if err := deliverWakeAttentionOnly(cfg, payload); err == nil {
+				t.Fatal("short attention write succeeded")
+			}
+		})
+		if cfg.lastAttemptAttention {
+			t.Fatal("short attention write was recorded as the delivered channel")
+		}
+	})
+}
+
 func TestWakeAttentionAlternateScreenAgentOmitsPlainTerminalOutput(t *testing.T) {
 	for _, me := range []string{"codex", "codex2", "claude"} {
 		t.Run(me, func(t *testing.T) {

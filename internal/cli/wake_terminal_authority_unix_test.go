@@ -678,11 +678,19 @@ func TestRunWakeLoopTerminatesOnTerminalAuthorityLoss(t *testing.T) {
 	}
 	loss := newWakeTerminalAuthorityLoss("test authority loss", nil)
 	terminalWriteCalled := false
+	attentionWrites := 0
 	err = runWakeLoop(wakeConfig{
 		root:        root,
 		me:          "codex",
 		injectMode:  wakeInjectModeRaw,
 		controlStop: make(chan struct{}),
+		attentionIsTTY: func() bool {
+			return false
+		},
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
 		beforeTerminalWrite: func() error {
 			return loss
 		},
@@ -710,9 +718,12 @@ func TestRunWakeLoopTerminatesOnTerminalAuthorityLoss(t *testing.T) {
 	if terminalWriteCalled {
 		t.Fatal("wake loop wrote after terminal authority loss")
 	}
+	if attentionWrites != 1 {
+		t.Fatalf("wake loop authority-loss attention writes = %d, want 1", attentionWrites)
+	}
 }
 
-func TestRunWakeLoopHoldsNotificationDuringForegroundPGRPMismatch(t *testing.T) {
+func TestRunWakeLoopUsesAttentionCadenceAfterZeroProgressForegroundPGRPMismatch(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	message := format.Message{
@@ -740,8 +751,8 @@ func TestRunWakeLoopHoldsNotificationDuringForegroundPGRPMismatch(t *testing.T) 
 	}
 
 	firstRefused := make(chan struct{}, 1)
-	restored := make(chan struct{})
 	delivered := make(chan struct{}, 1)
+	attention := make(chan struct{}, 1)
 	controlStop := make(chan struct{})
 	runDone := make(chan error, 1)
 
@@ -751,17 +762,22 @@ func TestRunWakeLoopHoldsNotificationDuringForegroundPGRPMismatch(t *testing.T) 
 			me:          "codex",
 			injectMode:  wakeInjectModeRaw,
 			controlStop: controlStop,
+			attentionIsTTY: func() bool {
+				return false
+			},
+			attentionWrite: func(data []byte) (int, error) {
+				select {
+				case attention <- struct{}{}:
+				default:
+				}
+				return len(data), nil
+			},
 			beforeTerminalWrite: func() error {
 				select {
-				case <-restored:
-					return nil
+				case firstRefused <- struct{}{}:
 				default:
-					select {
-					case firstRefused <- struct{}{}:
-					default:
-					}
-					return newWakeTerminalForegroundPGRPChangedLoss(101, 202)
 				}
+				return newWakeTerminalForegroundPGRPChangedLoss(101, 202)
 			},
 			terminalWrite: func(string) error {
 				select {
@@ -780,29 +796,27 @@ func TestRunWakeLoopHoldsNotificationDuringForegroundPGRPMismatch(t *testing.T) 
 	case <-time.After(2 * time.Second):
 		t.Fatal("wake loop did not attempt held notification")
 	}
+	select {
+	case <-attention:
+	case err := <-runDone:
+		t.Fatalf("wake loop exited before authority attention: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop emitted no attention for zero-progress authority refusal")
+	}
 
 	select {
 	case <-delivered:
 		t.Fatal("wake loop wrote while foreground pgrp mismatched")
 	case err := <-runDone:
 		t.Fatalf("wake loop exited while foreground pgrp mismatched: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	close(restored)
-	select {
-	case <-delivered:
-	case err := <-runDone:
-		t.Fatalf("wake loop exited before delivering held notification: %v", err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("held notification was not delivered after foreground pgrp restored")
+	case <-time.After(wakeTerminalAuthorityRetryDelay + 100*time.Millisecond):
 	}
 
 	close(controlStop)
 	select {
 	case err := <-runDone:
 		if err != nil {
-			t.Fatalf("wake loop after restored delivery: %v", err)
+			t.Fatalf("wake loop stop: %v", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("wake loop did not stop")

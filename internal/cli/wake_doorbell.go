@@ -17,6 +17,7 @@ const (
 	wakeDoorbellRetryBase          = 5 * time.Second
 	wakeDoorbellAttentionRetryBase = 30 * time.Second
 	wakeDoorbellRetryMax           = 2 * time.Minute
+	wakeDoorbellAttentionRetryMax  = 15 * time.Minute
 )
 
 type wakeDoorbellState struct {
@@ -29,7 +30,6 @@ type wakeDoorbellState struct {
 
 type wakeDoorbellPlan struct {
 	attempt  bool
-	retry    bool
 	prompt   string
 	progress bool
 }
@@ -56,7 +56,6 @@ func (state *wakeDoorbellState) plan(
 
 	return wakeDoorbellPlan{
 		attempt:  true,
-		retry:    state.attempts > 0,
 		prompt:   coopWakeDoorbell,
 		progress: progress,
 	}
@@ -68,19 +67,26 @@ func (state *wakeDoorbellState) arm(current map[string]os.FileInfo) {
 }
 
 func (state *wakeDoorbellState) recordAttempt(now time.Time) {
-	state.recordAttemptWithBase(now, wakeDoorbellRetryBase)
+	state.recordAttemptWithBase(now, wakeDoorbellRetryBase, wakeDoorbellRetryMax)
 }
 
 func (state *wakeDoorbellState) recordAttentionAttempt(now time.Time) {
-	state.recordAttemptWithBase(now, wakeDoorbellAttentionRetryBase)
+	state.recordAttemptWithBase(
+		now,
+		wakeDoorbellAttentionRetryBase,
+		wakeDoorbellAttentionRetryMax,
+	)
 }
 
-func (state *wakeDoorbellState) recordAttemptWithBase(now time.Time, base time.Duration) {
+func (state *wakeDoorbellState) recordAttemptWithBase(
+	now time.Time,
+	base, maximum time.Duration,
+) {
 	state.attempts++
 	state.nextAttempt = now.Add(cappedExponentialBackoff(
 		state.attempts,
 		base,
-		wakeDoorbellRetryMax,
+		maximum,
 	))
 }
 
@@ -150,10 +156,6 @@ func (state *wakeDoorbellState) nextDeadline() (time.Time, bool) {
 
 func (state *wakeDoorbellState) reset() {
 	*state = wakeDoorbellState{}
-}
-
-func wakeDoorbellRetryDelay(attempt uint) time.Duration {
-	return cappedExponentialBackoff(attempt, wakeDoorbellRetryBase, wakeDoorbellRetryMax)
 }
 
 func cappedExponentialBackoff(attempt uint, base, maximum time.Duration) time.Duration {
