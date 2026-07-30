@@ -8,6 +8,15 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.49.11](https://github.com/avivsinai/agent-message-queue/compare/v0.49.10...v0.49.11) (2026-07-30)
+
+
+### Bug Fixes
+
+* **wake:** preserve retry delivery guarantees ([27923be](https://github.com/avivsinai/agent-message-queue/commit/27923be925733b4e7d57fdc82a2ca57b1a716fc5))
+* **wake:** suppress repeated retry attention ([61149dc](https://github.com/avivsinai/agent-message-queue/commit/61149dc5ba4d78b598dacd617d9862b1ad86b61a))
+* **wake:** surface owner lifecycle failures ([#358](https://github.com/avivsinai/agent-message-queue/issues/358)) ([5c8a971](https://github.com/avivsinai/agent-message-queue/commit/5c8a971f15ca9fb44784cdac1360ced0c5785269))
+
 ## [0.49.10](https://github.com/avivsinai/agent-message-queue/compare/v0.49.9...v0.49.10) (2026-07-29)
 
 
