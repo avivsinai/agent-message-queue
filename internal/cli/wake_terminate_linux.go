@@ -35,6 +35,113 @@ func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, er
 	return terminateAndRemoveOrphanedWakeLockWithRawConsent(inspection, false)
 }
 
+func terminateAndRemoveOrphanedWakeLockInDir(
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+) (bool, error) {
+	var locked wakeLockInspection
+	pidfd := -1
+	provenGone := false
+	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		locked = readWakeLockMetadataAt(
+			dirfd,
+			agentDir,
+			inspection.Root,
+			inspection.Agent,
+		)
+		if !sameWakeLockGeneration(inspection, locked) {
+			return nil
+		}
+		if err := validateWakeLockOwnerlessMutation(locked); err != nil {
+			return err
+		}
+		fd, err := linuxPidfdOpen(locked.PID, 0)
+		if err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				provenGone = true
+				return removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, locked)
+			}
+			return fmt.Errorf("pidfd_open wake process %d: %w", locked.PID, err)
+		}
+		pidfd = fd
+		locked.Process = inspectWakeProcess(locked.PID)
+		classifyWakeLock(locked.Root, locked.Agent, &locked)
+		if !sameWakeLockInspection(inspection, locked) || !locked.IdentityConfirmed {
+			return nil
+		}
+		return nil
+	}); err != nil {
+		if pidfd >= 0 {
+			_ = linuxPidfdClose(pidfd)
+		}
+		return false, err
+	}
+	if provenGone {
+		return true, nil
+	}
+	if pidfd < 0 || !locked.IdentityConfirmed {
+		if pidfd >= 0 {
+			_ = linuxPidfdClose(pidfd)
+		}
+		return false, nil
+	}
+	defer func() { _ = linuxPidfdClose(pidfd) }()
+
+	if locked.Process.Running && locked.Lock.WakeMode != wakeTargetInjectVia &&
+		!wakeLockNeedsReplacement(locked) {
+		return false, fmt.Errorf(
+			"live raw wake for %s (pid %d, start %s) is not eligible for automatic replacement; retry through amq coop exec to review and consent to takeover, or stop it from its owning session; refusing to signal without consent",
+			locked.Agent,
+			locked.PID,
+			locked.Lock.ProcessStart,
+		)
+	}
+	if err := terminateWakePidfd(pidfd); err != nil {
+		missing := false
+		_ = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+			current := inspectWakeLockAt(
+				dirfd,
+				agentDir,
+				inspection.Root,
+				inspection.Agent,
+			)
+			missing = !current.Exists ||
+				!sameWakeLockGeneration(locked, current)
+			return nil
+		})
+		if missing {
+			return true, nil
+		}
+		return false, err
+	}
+
+	removed := false
+	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		current := inspectWakeLockAt(
+			dirfd,
+			agentDir,
+			inspection.Root,
+			inspection.Agent,
+		)
+		if !current.Exists {
+			removed = true
+			return nil
+		}
+		if !sameWakeLockGeneration(locked, current) {
+			return nil
+		}
+		if err := validateWakeLockStaleRemoval(current); err != nil {
+			return err
+		}
+		if err := removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, current); err != nil {
+			return err
+		}
+		removed = true
+		return nil
+	})
+	return removed, err
+}
+
 func terminateAndRemoveOrphanedWakeLockWithRawConsent(
 	inspection wakeLockInspection,
 	allowRawOrphan bool,

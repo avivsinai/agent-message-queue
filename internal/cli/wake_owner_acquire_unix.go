@@ -113,10 +113,6 @@ func acquireAuthoritativeWakeLockWithOptions(
 	me string,
 	options wakeLockAcquireOptions,
 ) (func(), error) {
-	requested := *options.target
-	if err := validateAuthoritativeWakeTarget(requested, root, me); err != nil {
-		return nil, err
-	}
 	if err := os.MkdirAll(fsq.AgentBase(root, me), 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create agent directory: %w", err)
 	}
@@ -125,7 +121,22 @@ func acquireAuthoritativeWakeLockWithOptions(
 		return nil, err
 	}
 	defer func() { _ = agentDir.Close() }()
+	return acquireAuthoritativeWakeLockWithOptionsInDir(agentDir, root, me, options)
+}
 
+func acquireAuthoritativeWakeLockWithOptionsInDir(
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	options wakeLockAcquireOptions,
+) (func(), error) {
+	if agentDir == nil {
+		return nil, fmt.Errorf("wake agent directory capability is missing")
+	}
+	requested := *options.target
+	if err := validateAuthoritativeWakeTarget(requested, root, me); err != nil {
+		return nil, err
+	}
 	for {
 		var created wakeLockInspection
 		var stopCapability *authoritativeWakeStopCapability
@@ -145,12 +156,17 @@ func acquireAuthoritativeWakeLockWithOptions(
 			}
 
 			requestedObservation, observeErr := observeAuthoritativeWakeOwner(*requested.Owner)
-			defer func() { _ = requestedObservation.Close() }()
 			if observeErr != nil {
-				return observeErr
+				return errors.Join(observeErr, requestedObservation.Close())
 			}
 			if requestedObservation.State != wakeOwnerSame {
-				return fmt.Errorf("requested wake owner is %s: %s", requestedObservation.State, requestedObservation.Reason)
+				return errors.Join(
+					fmt.Errorf("requested wake owner is %s: %s", requestedObservation.State, requestedObservation.Reason),
+					requestedObservation.Close(),
+				)
+			}
+			if err := requestedObservation.Close(); err != nil {
+				return err
 			}
 
 			if claimClass == wakeClaimAuthoritative {
@@ -162,12 +178,14 @@ func acquireAuthoritativeWakeLockWithOptions(
 				persistedReason := requestedObservation.Reason
 				if !sameWakeOwner(inspection.Lock.Owner, requested.Owner) {
 					persistedObservation, err := observeAuthoritativeWakeOwner(*inspection.Lock.Owner)
-					defer func() { _ = persistedObservation.Close() }()
 					if err != nil {
-						return err
+						return errors.Join(err, persistedObservation.Close())
 					}
 					persistedState = persistedObservation.State
 					persistedReason = persistedObservation.Reason
+					if err := persistedObservation.Close(); err != nil {
+						return err
+					}
 				}
 				ownersEqual := sameWakeOwner(inspection.Lock.Owner, requested.Owner)
 				wakeCapability, err := prepareAuthoritativeWakeStop(dirfd, agentDir, inspection)

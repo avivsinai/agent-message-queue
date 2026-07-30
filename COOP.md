@@ -302,6 +302,18 @@ For the first notification test, start both `coop exec` agents before sending
 the message. If a message was already waiting when the target wake started, it
 will not notify; it remains unread and visible to `amq drain --include-body`.
 
+Wake treats one transport execution only as a delivery attempt. While the same
+inbox cohort remains unread, it retries on its own capped backoff. The first
+notification is immediate. Attempts that inject the fixed doorbell start at 5
+seconds because they drive the agent; attention-only attempts start at 30
+seconds because they alert a human. Both double to a 2-minute cap. Contextual
+peer headers appear only in terminal output or attention; terminal input always
+uses the fixed doorbell. The delay starts after the prior injector process exits
+or times out. Because an external injector is arbitrary local code, retries can
+duplicate its side effects. Removing or replacing any message from that cohort
+is durable progress and immediately rearms the next notification. Owner-bound
+retries do not repeat the out-of-band attention text.
+
 For orchestrators or hardened environments without a controlling TTY, use an
 explicit external transport:
 
@@ -333,12 +345,24 @@ amq wake --me claude --inject-mode none --bell &
 amq coop exec --require-wake --wake-inject-mode none claude
 ```
 
-`none` writes notification text (and the optional bell) to wake's stderr and
-never writes terminal input. Urgent interrupt messages degrade to one bell plus
-the stderr notice instead of Ctrl+C. Because `--inject-via` is arbitrary local
+`none` never writes terminal input. `coop exec` gives its wake child separate
+process capabilities: full stdout/stderr diagnostics append to the private
+`agents/<agent>/.wake.log`, while notification attention uses a dedicated
+terminal descriptor. Codex and Claude receive only terminal-safe title, bell,
+and supported desktop-notification sequences on that descriptor, so runtime,
+cleanup, and top-level fatal diagnostics cannot overwrite the active composer.
+After `.wake.log` reaches 1 MiB, the next `coop exec` wake launch truncates it.
+`.wake.repair.log` is truncated only when the next eligible `amq wake repair`
+attempt opens replacement-wake diagnostics, before child start. One long-lived
+child can exceed either launch bound. Without a controlling terminal, attention
+is appended to the same durable log.
+Urgent interrupt messages degrade to terminal-safe attention instead of Ctrl+C.
+Because
+`--inject-via` is arbitrary local
 code and may itself inject terminal input, `none` rejects `--inject-via`,
-`--inject-arg`, and `--inject-cmd`. Stderr output shares the TUI terminal by
-default and may remain visible until the TUI redraws.
+`--inject-arg`, and `--inject-cmd`. A directly launched or externally
+supervised `amq wake` should likewise route stdout/stderr to a private log when
+it shares a terminal with an alternate-screen agent.
 
 ### Supervisor recipes
 

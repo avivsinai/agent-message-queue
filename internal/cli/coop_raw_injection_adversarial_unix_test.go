@@ -19,10 +19,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-const (
-	adversarialCoopDoorbell = ": AMQ doorbell run amq drain --include-body then act on it"
-	publicCoopPTYTimeout    = 12 * time.Second
-)
+const publicCoopPTYTimeout = 12 * time.Second
 
 func TestCoopRawDoorbellDoesNotContainMessageDerivedBytes(t *testing.T) {
 	root := secureTempDirForTest(t)
@@ -181,8 +178,9 @@ func TestPublicCoopRawPTYDoorbellAndOwnerCleanup(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read public PTY input: %v", err)
 		}
-		if got := strings.TrimSuffix(string(line), "\r"); got != adversarialCoopDoorbell {
-			t.Fatalf("public PTY input = %q, want fixed doorbell %q", got, adversarialCoopDoorbell)
+		got := strings.TrimSuffix(string(line), "\r")
+		if !validCoopWakeDoorbell(got) {
+			t.Fatalf("public PTY input = %q, want canonical fixed doorbell", got)
 		}
 		for _, sentinel := range sentinels {
 			if bytes.Contains(line, []byte(sentinel)) {
@@ -225,9 +223,9 @@ func assertFixedASCIIOnlyCoopInjection(t *testing.T, chunks, forbidden []string)
 	if len(chunks) == 0 {
 		t.Fatal("coop raw wake injected no doorbell")
 	}
-	if chunks[0] != adversarialCoopDoorbell {
-		t.Fatalf("first coop injection chunk = %q, want %q; all chunks=%#v",
-			chunks[0], adversarialCoopDoorbell, chunks)
+	if !validCoopWakeDoorbell(chunks[0]) {
+		t.Fatalf("first coop injection chunk = %q, want canonical fixed doorbell; all chunks=%#v",
+			chunks[0], chunks)
 	}
 	joined := strings.Join(chunks, "")
 	for index, value := range []byte(joined) {

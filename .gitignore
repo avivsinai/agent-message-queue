@@ -16,7 +16,8 @@ __pycache__/
 !.claude/skills/
 !.claude/skills/**
 .claude/skills/*-workspace/
-.codex/
+.codex/**
+!.codex/hooks.json
 .agents/**
 !.agents/skills/
 !.agents/skills/**

@@ -16,61 +16,182 @@ import (
 )
 
 type wakeConfig struct {
-	me                   string
-	root                 string
-	session              string
-	injectCmd            string
-	injectVia            string // external command for injection (replaces TIOCSTI)
-	injectArgs           []string
-	wakeOwner            *wakeOwner
-	injectTimeout        time.Duration
-	bell                 bool
-	debounce             time.Duration
-	previewLen           int
-	strict               bool
-	fallbackWarn         bool
-	injectMode           string // auto, raw, paste
-	debug                bool
-	deferWhileInput      bool
-	inputQuietFor        time.Duration
-	inputPollInterval    time.Duration
-	inputMaxHold         time.Duration
-	interrupt            bool
-	interruptLabel       string
-	interruptPriority    string
-	interruptKey         string
-	interruptNotice      string
-	interruptCooldown    time.Duration
-	lastInterrupt        time.Time
-	controlStop          <-chan struct{}
-	beforeTerminalWrite  func() error
-	terminalWrite        func(string) error
-	terminalGeneration   string
-	terminalTTY          string
-	baselineRequested    bool
-	baselineInherited    bool
-	baselineExisting     map[string]wakeFileIdentity
-	announcedPending     map[string]wakeFileIdentity
-	onBaselineReady      func(map[string]wakeFileIdentity) error
-	onPrepared           func(wakeAdmissionWatcher) error
-	retainedInbox        wakeInboxReader
-	touchPresence        func() error
-	maintenanceTicks     <-chan time.Time
-	preconditionCheck    func(*wakeConfig) error
-	recordNotifierStatus func(status, mode, reason string) error
-	recordAttention      func(wakeAttentionEmission) error
-	attentionEnv         func(string) string
-	attentionIsTTY       func() bool
-	attentionWrite       func([]byte) (int, error)
+	me                    string
+	root                  string
+	session               string
+	injectCmd             string
+	injectVia             string // external command for injection (replaces TIOCSTI)
+	injectArgs            []string
+	wakeOwner             *wakeOwner
+	injectTimeout         time.Duration
+	bell                  bool
+	debounce              time.Duration
+	previewLen            int
+	strict                bool
+	fallbackWarn          bool
+	injectMode            string // auto, raw, paste
+	debug                 bool
+	deferWhileInput       bool
+	inputQuietFor         time.Duration
+	inputPollInterval     time.Duration
+	inputMaxHold          time.Duration
+	interrupt             bool
+	interruptLabel        string
+	interruptPriority     string
+	interruptKey          string
+	interruptNotice       string
+	interruptCooldown     time.Duration
+	lastInterrupt         time.Time
+	controlStop           <-chan struct{}
+	beforeTerminalWrite   func() error
+	terminalWrite         func(string) error
+	terminalGeneration    string
+	terminalTTY           string
+	baselineRequested     bool
+	baselineInherited     bool
+	baselineExisting      map[string]wakeFileIdentity
+	inputDelivery         wakeInputDeliveryState
+	inputRecoveryRequired bool
+	doorbell              wakeDoorbellState
+	doorbellNow           func() time.Time
+	suppressAttention     bool
+	lastAttemptAttention  bool
+	onBaselineReady       func(map[string]wakeFileIdentity) error
+	onPrepared            func(wakeAdmissionWatcher) error
+	retainedAgent         wakeRetainedAgent
+	retainedInbox         wakeInboxReader
+	touchPresence         func() error
+	maintenanceTicks      <-chan time.Time
+	preconditionCheck     func(*wakeConfig) error
+	onPendingNotify       func()
+	recordNotifierStatus  func(status, mode, reason string) error
+	recordAttention       func(wakeAttentionEmission) error
+	attentionEnv          func(string) string
+	attentionIsTTY        func() bool
+	attentionWrite        func([]byte) (int, error)
+	diagnosticIsTTY       func() bool
+}
+
+type wakeInputDeliveryPhase uint8
+
+const (
+	wakeInputDeliveryIdle wakeInputDeliveryPhase = iota
+	wakeInputPayloadPending
+	wakeInputRawPreludePending
+	wakeInputPrimarySubmitPending
+	wakeInputRawFirstSubmitQueued
+	wakeInputRawRescuePending
+	wakeInputRawRescueQueued
+)
+
+type wakeInputDeliveryState struct {
+	phase               wakeInputDeliveryPhase
+	mode                string
+	payload             string
+	acceptedBytes       int
+	acceptanceUncertain bool
+}
+
+func (state *wakeInputDeliveryState) reset() {
+	*state = wakeInputDeliveryState{}
+}
+
+func (state wakeInputDeliveryState) pending() bool {
+	return state.phase != wakeInputDeliveryIdle
+}
+
+func (state wakeInputDeliveryState) confirmedInput() bool {
+	return state.acceptedBytes > 0 ||
+		(state.phase != wakeInputDeliveryIdle &&
+			state.phase != wakeInputPayloadPending)
+}
+
+func (state wakeInputDeliveryState) blocksDemotion() bool {
+	return state.confirmedInput() || state.acceptanceUncertain
 }
 
 type wakeAdmissionWatcher interface {
 	Errors() <-chan error
 }
 
+type wakeRetainedAgent interface {
+	isWakeRetainedAgent()
+}
+
 type wakeInboxReader interface {
 	ReadDir() ([]os.DirEntry, error)
 	ReadHeader(name string) (format.Header, error)
+}
+
+type wakeInboxFileInfoReader interface {
+	FileInfo(name string) (os.FileInfo, error)
+}
+
+type wakeInboxScanError struct {
+	err error
+}
+
+func (err *wakeInboxScanError) Error() string {
+	return err.err.Error()
+}
+
+func (err *wakeInboxScanError) Unwrap() error {
+	return err.err
+}
+
+type wakeTerminalPartialProgressError struct {
+	err error
+}
+
+func (err *wakeTerminalPartialProgressError) Error() string {
+	return err.err.Error()
+}
+
+func (err *wakeTerminalPartialProgressError) Unwrap() error {
+	return err.err
+}
+
+func isWakeTerminalPartialProgress(err error) bool {
+	var partial *wakeTerminalPartialProgressError
+	return errors.As(err, &partial)
+}
+
+type wakeInputDemotionBlockedError struct {
+	err error
+}
+
+func (err *wakeInputDemotionBlockedError) Error() string {
+	return "terminal input has confirmed or uncertain progress; refusing to discard its exact completion debt: " + err.err.Error()
+}
+
+func (err *wakeInputDemotionBlockedError) Unwrap() error {
+	return err.err
+}
+
+func isWakeInputDemotionBlocked(err error) bool {
+	var blocked *wakeInputDemotionBlockedError
+	return errors.As(err, &blocked)
+}
+
+type wakeTerminalProgressUncertainError struct {
+	err error
+}
+
+func (err *wakeTerminalProgressUncertainError) Error() string {
+	return "terminal input acceptance is uncertain; refusing to replay: " + err.err.Error()
+}
+
+func (err *wakeTerminalProgressUncertainError) Unwrap() error {
+	return err.err
+}
+
+func isWakeTerminalProgressUncertain(err error) bool {
+	var uncertain *wakeTerminalProgressUncertainError
+	return errors.As(err, &uncertain)
+}
+
+type wakeTerminalAcceptedProgress interface {
+	wakeAcceptedBytes() int
 }
 
 const defaultInjectTimeout = 5 * time.Second
@@ -91,6 +212,8 @@ const (
 	// observation, while adding at most two poll intervals to a real idle
 	// transition. Any active sample resets the evidence.
 	requiredInputQuietSamples = 3
+
+	wakeInputRecoveryNotice = "AMQ terminal input delivery is incomplete; inspect the composer, run amq drain --include-body, then restart this agent session"
 	// codexTUIEnterSuppressWindow mirrors codex-tui's
 	// PASTE_ENTER_SUPPRESS_WINDOW (codex-rs/tui/src/bottom_pane/paste_burst.rs,
 	// verified at rust-v0.144.1 and main): an Enter arriving within this window
@@ -152,6 +275,10 @@ func peerWakeNotification(output string) wakeNotification {
 			provenance: wakePayloadPeerHeaders,
 		},
 	}
+}
+
+func validCoopWakeDoorbell(prompt string) bool {
+	return prompt == coopWakeDoorbell
 }
 
 func operatorWakeNotification(text string) wakeNotification {
@@ -260,10 +387,9 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		entries, err = os.ReadDir(inboxNew)
 	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+		return &wakeInboxScanError{
+			err: fmt.Errorf("read wake inbox %s: %w", inboxNew, err),
 		}
-		return err
 	}
 
 	var messages []wakeMsgInfo
@@ -279,7 +405,17 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") {
 			continue
 		}
-		fileInfo, infoErr := entry.Info()
+		var fileInfo os.FileInfo
+		var infoErr error
+		if retained, ok := cfg.retainedInbox.(wakeInboxFileInfoReader); ok {
+			fileInfo, infoErr = retained.FileInfo(name)
+		} else {
+			fileInfo, infoErr = entry.Info()
+		}
+		pendingInfo := fileInfo
+		if infoErr != nil {
+			pendingInfo = nil
+		}
 		if baselineIdentity, ignored := cfg.baselineExisting[name]; ignored {
 			if infoErr == nil && matchesWakeFileIdentity(baselineIdentity, fileInfo) {
 				continue
@@ -293,19 +429,14 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		} else {
 			header, err = format.ReadHeaderFile(filepath.Join(inboxNew, name))
 		}
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			// Count corrupt messages too
-			messages = append(messages, wakeMsgInfo{from: "unknown", subject: "(parse error)"})
-			if infoErr == nil {
-				currentPending[name] = fileInfo
-			}
+		if err != nil && os.IsNotExist(err) {
 			continue
 		}
-		if infoErr == nil {
-			currentPending[name] = fileInfo
+		currentPending[name] = pendingInfo
+		if err != nil {
+			// Count corrupt messages too
+			messages = append(messages, wakeMsgInfo{from: "unknown", subject: "(parse error)"})
+			continue
 		}
 
 		from := strings.TrimSpace(header.From)
@@ -333,7 +464,12 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	}
 
 	if len(messages) == 0 {
-		return nil
+		if cfg.inputRecoveryRequired {
+			cfg.doorbell.noteRecoveryInboxEmpty()
+			return nil
+		}
+		cfg.doorbell.reset()
+		return reconcileWakeInputAfterInboxDrain(cfg)
 	}
 
 	if cfg.interrupt && len(interruptMessages) > 0 {
@@ -341,6 +477,9 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		notice := peerWakeNotification(interruptText)
 		if cfg.interruptNotice != "" {
 			notice = operatorWakeNotification(interruptText)
+		}
+		if cfg.inputRecoveryRequired {
+			return deliverNewMessageNotification(cfg, notice, false, currentPending)
 		}
 		if cfg.injectMode == wakeInjectModeNone {
 			return deliverNewMessageNotification(cfg, notice, false, currentPending)
@@ -405,42 +544,184 @@ func deliverNewMessageNotification(
 	deferForInput bool,
 	currentPending map[string]os.FileInfo,
 ) error {
-	ownerBound := usesCoopDoorbell(cfg)
-	if ownerBound &&
-		cfg.injectMode != wakeInjectModeNone &&
-		announcedWakeStillPending(cfg.announcedPending, currentPending) {
-		emitWakeAttention(cfg, notice.output)
+	if cfg.inputRecoveryRequired {
+		return deliverWakeInputRecoveryAttention(cfg, currentPending)
+	}
+	if cfg.injectMode == wakeInjectModeNone {
+		if cfg.inputDelivery.blocksDemotion() {
+			return &wakeInputDemotionBlockedError{
+				err: errors.New("input mode became none before retained terminal input completed"),
+			}
+		}
+		clearWakeInputState(cfg)
+	}
+	now := cfg.wakeDoorbellNow()
+	plan := cfg.doorbell.plan(now, currentPending)
+	if !plan.attempt {
 		return nil
 	}
-
-	result, err := deliverWakeNotificationResult(cfg, notice, deferForInput)
-	if ownerBound && result.inputSubmitted {
-		cfg.announcedPending = snapshotWakeFileIdentities(currentPending)
-	}
-	return err
-}
-
-func announcedWakeStillPending(
-	announced map[string]wakeFileIdentity,
-	current map[string]os.FileInfo,
-) bool {
-	for name, identity := range announced {
-		info, ok := current[name]
-		if ok && matchesWakeFileIdentity(identity, info) {
-			return true
+	if plan.progress && cfg.inputDelivery.pending() {
+		if err := reconcileWakeInputAfterInboxDrain(cfg); err != nil {
+			return err
+		}
+		if cfg.inputDelivery.pending() {
+			return nil
 		}
 	}
-	return false
+	ownerBound := usesCoopDoorbell(cfg)
+	if ownerBound && cfg.injectMode != wakeInjectModeNone {
+		notice.input = wakePayload{
+			text:       plan.prompt,
+			provenance: wakePayloadSystemFixed,
+		}
+		cfg.suppressAttention = plan.retry
+		deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
+		cfg.suppressAttention = false
+		if isWakeInputDemotionBlocked(deliveryErr) {
+			return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
+		}
+		if cfg.injectMode == wakeInjectModeNone {
+			clearWakeInputState(cfg)
+			if plan.retry {
+				deliveryErr = errors.Join(
+					deliveryErr,
+					emitWakeAttention(cfg, notice.output),
+				)
+			}
+			if deliveryErr == nil {
+				// Permanent input demotion retires the old doorbell state.
+				// Re-arm the unread cohort before recording the fallback.
+				cfg.doorbell.arm(currentPending)
+				recordWakeAttempt(cfg, cfg.wakeDoorbellNow())
+			}
+			return deliveryErr
+		}
+		if shouldRecordWakeAttempt(deliveryErr) {
+			recordWakeAttempt(cfg, cfg.wakeDoorbellNow())
+		}
+		return deliveryErr
+	}
+
+	deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
+	if isWakeInputDemotionBlocked(deliveryErr) {
+		return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
+	}
+	if shouldRecordWakeAttempt(deliveryErr) {
+		recordWakeAttempt(cfg, cfg.wakeDoorbellNow())
+	}
+	return deliveryErr
 }
 
-func snapshotWakeFileIdentities(current map[string]os.FileInfo) map[string]wakeFileIdentity {
-	snapshot := make(map[string]wakeFileIdentity, len(current))
+func recordWakeAttempt(cfg *wakeConfig, now time.Time) {
+	if cfg.lastAttemptAttention {
+		cfg.doorbell.recordAttentionAttempt(now)
+		return
+	}
+	cfg.doorbell.recordAttempt(now)
+}
+
+func shouldRecordWakeAttempt(err error) bool {
+	if err == nil {
+		return true
+	}
+	var attentionErr *wakeAttentionDeliveryError
+	return !errors.As(err, &attentionErr) &&
+		!isWakeTerminalForegroundPGRPChanged(err) &&
+		!isWakeTerminalPartialProgress(err) &&
+		!isWakeInputDemotionBlocked(err) &&
+		!isWakeTerminalProgressUncertain(err)
+}
+
+func deliverWakeInputRecoveryAttention(
+	cfg *wakeConfig,
+	currentPending map[string]os.FileInfo,
+) error {
+	now := cfg.wakeDoorbellNow()
+	if !cfg.doorbell.planRecoveryAttention(now, currentPending) {
+		return nil
+	}
+	if err := emitWakeAttention(cfg, wakePayload{
+		text:       wakeInputRecoveryNotice,
+		provenance: wakePayloadSystemFixed,
+	}); err != nil {
+		return err
+	}
+	cfg.doorbell.recordRecoveryRequired(now, currentPending)
+	return nil
+}
+
+func enterWakeInputRecovery(
+	cfg *wakeConfig,
+	currentPending map[string]os.FileInfo,
+	cause error,
+) error {
+	markWakeInputRecoveryRequired(cfg, cause)
+	if err := deliverWakeInputRecoveryAttention(cfg, currentPending); err != nil {
+		return errors.Join(cause, err)
+	}
+	return nil
+}
+
+func markWakeInputRecoveryRequired(cfg *wakeConfig, cause error) {
+	cfg.inputRecoveryRequired = true
+	if cfg.recordNotifierStatus == nil {
+		return
+	}
+	mode := effectiveInjectMode(cfg)
+	reason := wakeInputRecoveryNotice
+	if cause != nil {
+		reason += ": " + cause.Error()
+	}
+	if err := cfg.recordNotifierStatus(
+		wakeInputRecoveryRequiredStatus,
+		mode,
+		reason,
+	); err != nil {
+		_ = writeWakeDiagnostic(cfg, "amq wake: record input recovery-required status: %v\n", err)
+	}
+}
+
+func (cfg *wakeConfig) wakeDoorbellNow() time.Time {
+	if cfg.doorbellNow != nil {
+		return cfg.doorbellNow()
+	}
+	return time.Now()
+}
+
+func snapshotWakeFileIdentities(current map[string]os.FileInfo) map[string]*wakeFileIdentity {
+	snapshot := make(map[string]*wakeFileIdentity, len(current))
 	for name, info := range current {
-		if identity, ok := captureWakeFileIdentity(info); ok {
-			snapshot[name] = identity
+		if info == nil {
+			snapshot[name] = nil
+			continue
 		}
+		if identity, ok := captureWakeFileIdentity(info); ok {
+			snapshot[name] = &identity
+			continue
+		}
+		snapshot[name] = nil
 	}
 	return snapshot
+}
+
+func sameKnownWakeCohort(
+	previous map[string]*wakeFileIdentity,
+	current map[string]os.FileInfo,
+) bool {
+	if len(previous) == 0 || len(previous) != len(current) {
+		return false
+	}
+	for name, previousIdentity := range previous {
+		info, exists := current[name]
+		if !exists || previousIdentity == nil || info == nil {
+			return false
+		}
+		currentIdentity, known := captureWakeFileIdentity(info)
+		if !known || currentIdentity != *previousIdentity {
+			return false
+		}
+	}
+	return true
 }
 
 func buildNotificationText(session string, messages []wakeMsgInfo, previewLen int) string {
@@ -568,14 +849,18 @@ func effectiveInjectMode(cfg *wakeConfig) string {
 		// Enter swallowing in some CLIs. Paste mode remains available via flag.
 		// Claude Code's Ink framework has buggy bracketed paste handling where CR gets
 		// coalesced with the paste-end sequence and swallowed by the input parser.
-		meLower := strings.ToLower(cfg.me)
-		if strings.Contains(meLower, "claude") || strings.Contains(meLower, "codex") {
+		if wakeUsesAlternateScreenTUI(cfg.me) {
 			mode = wakeInjectModeRaw
 		} else {
 			mode = wakeInjectModePaste
 		}
 	}
 	return mode
+}
+
+func wakeUsesAlternateScreenTUI(me string) bool {
+	meLower := strings.ToLower(me)
+	return strings.Contains(meLower, "claude") || strings.Contains(meLower, "codex")
 }
 
 func normalizeWakeInjectMode(raw string) (string, error) {
@@ -606,31 +891,21 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 	)
 }
 
-type wakeDeliveryResult struct {
-	inputSubmitted bool
-}
-
 func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForInput bool) error {
-	_, err := deliverWakeNotificationResult(cfg, notice, deferForInput)
-	return err
-}
-
-func deliverWakeNotificationResult(
-	cfg *wakeConfig,
-	notice wakeNotification,
-	deferForInput bool,
-) (wakeDeliveryResult, error) {
-	var result wakeDeliveryResult
+	cfg.lastAttemptAttention = false
 	ownerBound := usesCoopDoorbell(cfg)
 	if ownerBound {
-		notice.input = wakePayload{
-			text:       coopWakeDoorbell,
-			provenance: wakePayloadSystemFixed,
+		if validCoopWakeDoorbell(notice.input.text) {
+			// The fixed doorbell is system-created before delivery.
+		} else {
+			notice.input = wakePayload{
+				text:       coopWakeDoorbell,
+				provenance: wakePayloadSystemFixed,
+			}
 		}
 	}
 	if cfg.injectMode == wakeInjectModeNone {
-		emitWakeAttention(cfg, notice.output)
-		return result, nil
+		return deliverWakeAttentionOnly(cfg, notice.output)
 	}
 
 	inputText := notice.input.text
@@ -641,8 +916,7 @@ func deliverWakeNotificationResult(
 
 	if shouldDeferBeforeInject(cfg, deferForInput) {
 		if !waitForWakeInputQuiet(cfg) {
-			emitWakeAttention(cfg, notice.output)
-			return result, nil
+			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
 	}
 
@@ -651,27 +925,25 @@ func deliverWakeNotificationResult(
 	if cfg.injectVia != "" {
 		allowed, guardErr := authorizeTerminalWrite(cfg)
 		if guardErr != nil {
-			return result, guardErr
+			return guardErr
 		}
 		if !allowed {
-			return result, nil
+			return nil
 		}
 		if err := injectVia(cfg, plainText); err != nil {
 			if cfg.fallbackWarn {
-				_ = writeStderr("amq wake: --inject-via failed: %v\n", err)
-				_ = writeStderr("amq wake: falling back to stderr notification\n")
+				_ = writeWakeDiagnostic(cfg, "amq wake: --inject-via failed: %v\n", err)
+				_ = writeWakeDiagnostic(cfg, "amq wake: falling back to stderr notification\n")
 				cfg.fallbackWarn = false
 			}
-			emitWakeAttention(cfg, notice.output)
-			return result, nil
+			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
-		result.inputSubmitted = true
-		return result, nil
+		return nil
 	}
 
 	mode := effectiveInjectMode(cfg)
 	if cfg.debug {
-		_ = writeStderr("amq wake [debug]: mode=%s text_len=%d\n", mode, len(inputText))
+		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: mode=%s text_len=%d\n", mode, len(inputText))
 	}
 	var injectErr error
 	switch mode {
@@ -683,7 +955,7 @@ func deliverWakeNotificationResult(
 		if cfg.bell && !ownerBound {
 			injectedText = "\a" + injectedText
 		}
-		result.inputSubmitted, injectErr = injectRawNotification(cfg, injectedText)
+		_, injectErr = injectRawNotification(cfg, injectedText)
 
 	case wakeInjectModePaste:
 		// Paste mode: bracketed paste with delayed CR
@@ -696,18 +968,7 @@ func deliverWakeNotificationResult(
 		if cfg.bell && !ownerBound {
 			pasteText = "\a" + pasteText
 		}
-		wrote, err := writeTerminalChunk(cfg, pasteText)
-		if err != nil {
-			injectErr = err
-		} else if wrote {
-			// Small delay to ensure CR lands in separate read cycle
-			time.Sleep(25 * time.Millisecond)
-			submitted, err := writeTerminalChunk(cfg, "\r")
-			if err == nil {
-				result.inputSubmitted = submitted
-			}
-			injectErr = err
-		}
+		_, injectErr = injectTerminalNotification(cfg, wakeInjectModePaste, pasteText)
 
 	default:
 		// Unknown mode, fall back to raw
@@ -716,10 +977,7 @@ func deliverWakeNotificationResult(
 			if err != nil {
 				injectErr = err
 			} else if wrote {
-				submitted, err := writeTerminalChunk(cfg, "\r")
-				if err == nil {
-					result.inputSubmitted = submitted
-				}
+				_, err := writeTerminalChunk(cfg, "\r")
 				injectErr = err
 			}
 		} else {
@@ -727,11 +985,24 @@ func deliverWakeNotificationResult(
 			if cfg.bell {
 				injectedText = "\a" + injectedText
 			}
-			result.inputSubmitted, injectErr = writeTerminalChunk(cfg, injectedText)
+			_, injectErr = writeTerminalChunk(cfg, injectedText)
 		}
 	}
 
 	if injectErr != nil {
+		if isWakeTerminalPartialProgress(injectErr) {
+			return injectErr
+		}
+		var uncertain *wakeTerminalProgressUncertainError
+		if errors.As(injectErr, &uncertain) {
+			cfg.inputDelivery.acceptanceUncertain = true
+			_ = writeWakeDiagnostic(cfg, "amq wake: warning: %v\n", uncertain)
+			cfg.fallbackWarn = false
+			return &wakeInputDemotionBlockedError{err: uncertain}
+		}
+		if isWakeInputDemotionBlocked(injectErr) {
+			return injectErr
+		}
 		var unsupported *wakeInjectorUnsupportedError
 		if errors.As(injectErr, &unsupported) {
 			mode := effectiveInjectMode(cfg)
@@ -742,30 +1013,35 @@ func deliverWakeNotificationResult(
 					mode,
 					reason,
 				); err != nil {
-					_ = writeStderr("amq wake: record unsupported injector status: %v\n", err)
+					_ = writeWakeDiagnostic(cfg, "amq wake: record unsupported injector status: %v\n", err)
 				}
 			}
-			cfg.injectMode = wakeInjectModeNone
-			_ = writeStderr("amq wake: warning: %s\n", reason)
+			if err := disableWakeInput(cfg, injectErr); err != nil {
+				return err
+			}
+			_ = writeWakeDiagnostic(cfg, "amq wake: warning: %s\n", reason)
 			cfg.fallbackWarn = false
-			emitWakeAttention(cfg, notice.output)
-			return result, nil
+			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
 		var authorityErr *wakeTerminalAuthorityError
 		if errors.As(injectErr, &authorityErr) {
-			return result, injectErr
+			return injectErr
 		}
 		if cfg.fallbackWarn {
-			_ = writeStderr("amq wake: TIOCSTI injection failed: %v\n", injectErr)
-			_ = writeStderr("amq wake: falling back to stderr notification\n")
+			_ = writeWakeDiagnostic(cfg, "amq wake: TIOCSTI injection failed: %v\n", injectErr)
+			_ = writeWakeDiagnostic(cfg, "amq wake: falling back to stderr notification\n")
 			cfg.fallbackWarn = false
 		}
 		// Fallback: use the output-only attention tier; never retry input.
-		emitWakeAttention(cfg, notice.output)
-		return result, nil
+		return deliverWakeAttentionOnly(cfg, notice.output)
 	}
 
-	return result, nil
+	return nil
+}
+
+func deliverWakeAttentionOnly(cfg *wakeConfig, payload wakePayload) error {
+	cfg.lastAttemptAttention = true
+	return emitWakeAttention(cfg, payload)
 }
 
 func usesCoopDoorbell(cfg *wakeConfig) bool {
@@ -845,6 +1121,83 @@ func writeTerminalChunk(cfg *wakeConfig, chunk string) (bool, error) {
 	return true, tiocstiInject(chunk)
 }
 
+func writePendingWakeInputChunk(
+	cfg *wakeConfig,
+	state *wakeInputDeliveryState,
+	chunk string,
+) (bool, error) {
+	if state.acceptanceUncertain {
+		return false, &wakeInputDemotionBlockedError{
+			err: errors.New("a prior terminal write has uncertain acceptance"),
+		}
+	}
+	if state.acceptedBytes < 0 || state.acceptedBytes > len(chunk) {
+		state.acceptanceUncertain = true
+		return false, &wakeTerminalProgressUncertainError{
+			err: fmt.Errorf(
+				"invalid retained input offset %d for %d-byte chunk",
+				state.acceptedBytes,
+				len(chunk),
+			),
+		}
+	}
+	remaining := chunk[state.acceptedBytes:]
+	wrote, err := writeTerminalChunk(cfg, remaining)
+	if err == nil {
+		if wrote {
+			state.acceptedBytes = 0
+		} else if state.confirmedInput() {
+			return false, &wakeTerminalPartialProgressError{
+				err: errors.New("terminal write authorization is temporarily unavailable"),
+			}
+		}
+		return wrote, nil
+	}
+
+	var unsupported *wakeInjectorUnsupportedError
+	if errors.As(err, &unsupported) {
+		if state.blocksDemotion() {
+			return wrote, &wakeInputDemotionBlockedError{err: err}
+		}
+		return wrote, err
+	}
+	if !wrote {
+		if state.confirmedInput() {
+			return false, &wakeTerminalPartialProgressError{err: err}
+		}
+		return false, err
+	}
+
+	var progress wakeTerminalAcceptedProgress
+	if !errors.As(err, &progress) {
+		if isWakeTerminalAuthorityLoss(err) {
+			if state.confirmedInput() {
+				return true, &wakeTerminalPartialProgressError{err: err}
+			}
+			return true, err
+		}
+		state.acceptanceUncertain = true
+		return true, &wakeTerminalProgressUncertainError{err: err}
+	}
+	accepted := progress.wakeAcceptedBytes()
+	if accepted < 0 || accepted >= len(remaining) {
+		state.acceptanceUncertain = true
+		return true, &wakeTerminalProgressUncertainError{
+			err: fmt.Errorf(
+				"invalid terminal progress %d for %d-byte suffix: %w",
+				accepted,
+				len(remaining),
+				err,
+			),
+		}
+	}
+	state.acceptedBytes += accepted
+	if state.confirmedInput() {
+		return true, &wakeTerminalPartialProgressError{err: err}
+	}
+	return true, err
+}
+
 // rawSubmitPrelude returns the bytes injected between the drained notification
 // text and the settle delay. codex targets get a single LF: codex-tui maps a
 // raw 0x0A to Ctrl-J, whose editor binding routes through handle_input_basic,
@@ -865,109 +1218,274 @@ func rawSubmitPrelude(me string) string {
 	return ""
 }
 
+func clearWakeInputState(cfg *wakeConfig) {
+	cfg.inputDelivery.reset()
+}
+
+func retireWakeInputState(cfg *wakeConfig, cause error) error {
+	if cfg.inputDelivery.blocksDemotion() {
+		if cause == nil {
+			cause = errors.New("input retirement requested before terminal completion")
+		}
+		return &wakeInputDemotionBlockedError{err: cause}
+	}
+	cfg.doorbell.reset()
+	clearWakeInputState(cfg)
+	return nil
+}
+
+func disableWakeInput(cfg *wakeConfig, cause error) error {
+	if err := retireWakeInputState(cfg, cause); err != nil {
+		return err
+	}
+	cfg.injectMode = wakeInjectModeNone
+	return nil
+}
+
+func reconcileWakeInputAfterInboxDrain(cfg *wakeConfig) error {
+	if cfg.inputDelivery.acceptanceUncertain {
+		return &wakeInputDemotionBlockedError{
+			err: errors.New("inbox progressed after a terminal write with uncertain acceptance"),
+		}
+	}
+	if !cfg.inputDelivery.pending() {
+		return nil
+	}
+	if cfg.inputDelivery.phase == wakeInputPayloadPending {
+		if cfg.inputDelivery.acceptedBytes == 0 {
+			// No terminal byte was confirmed, so there is no stale composer input
+			// to finish after the inbox made progress.
+			clearWakeInputState(cfg)
+			return nil
+		}
+	}
+	_, err := resumeWakeInputDelivery(cfg)
+	return err
+}
+
 func injectRawNotification(cfg *wakeConfig, injectedText string) (bool, error) {
-	if cfg.debug {
-		_ = writeStderr("amq wake [debug]: injecting %d bytes of text\n", len(injectedText))
-	}
-	wrote, err := writeTerminalChunk(cfg, injectedText)
-	if err != nil {
-		if cfg.debug {
-			_ = writeStderr("amq wake [debug]: text inject failed: %v\n", err)
-		}
-		return false, err
-	}
-	if !wrote {
-		return false, nil
-	}
-	prelude := rawSubmitPrelude(cfg.me)
+	return injectTerminalNotification(cfg, wakeInjectModeRaw, injectedText)
+}
 
-	// The submit key must arrive in its own read() chunk; otherwise the TUI can
-	// treat text+Enter as pasted input instead of a keypress. Waiting for the
-	// text bytes to drain keeps the submit key out of a paste-shaped chunk even
-	// when the reader stalls (#208).
-	waited, drained, err := waitForRawInputDrained(rawInjectDrainTimeout, rawInjectDrainPollInterval)
-	if cfg.debug {
-		switch {
-		case err != nil:
-			_ = writeStderr("amq wake [debug]: input drain wait unavailable after %s: %v; continuing on timing alone\n", waited, err)
-		case drained:
-			_ = writeStderr("amq wake [debug]: input queue drained after %s\n", waited)
-		default:
-			_ = writeStderr("amq wake [debug]: input drain timeout after %s; injecting submit key anyway\n", waited)
+func injectTerminalNotification(
+	cfg *wakeConfig,
+	mode string,
+	payload string,
+) (bool, error) {
+	state := &cfg.inputDelivery
+	if state.acceptanceUncertain {
+		return false, &wakeInputDemotionBlockedError{
+			err: errors.New("new terminal input arrived after a write with uncertain acceptance"),
 		}
 	}
-
-	// Prelude (codex: a lone LF) clears the TUI's paste-burst state while the
-	// injected text is fresh; its newline is trimmed from the submitted payload.
-	if prelude != "" {
-		wrote, err := writeTerminalChunk(cfg, prelude)
-		if err != nil {
-			if cfg.debug {
-				_ = writeStderr("amq wake [debug]: prelude inject failed: %v\n", err)
+	if state.pending() && (state.mode != mode || state.payload != payload) {
+		if state.phase == wakeInputPayloadPending && state.acceptedBytes == 0 {
+			// The previous payload never made confirmed progress.
+			state.reset()
+		} else {
+			completed, err := resumeWakeInputDelivery(cfg)
+			if err != nil || !completed {
+				return false, err
 			}
-			return false, err
-		}
-		if !wrote {
-			return false, nil
-		}
-		if cfg.debug {
-			_ = writeStderr("amq wake [debug]: prelude injected OK (%q)\n", prelude)
 		}
 	}
+	if !state.pending() {
+		*state = wakeInputDeliveryState{
+			phase:   wakeInputPayloadPending,
+			mode:    mode,
+			payload: payload,
+		}
+	}
+	return resumeWakeInputDelivery(cfg)
+}
 
-	// Hold the submit CR past the TUI's paste-burst window (see
-	// rawInjectSettleDelay) so it is classified as a real Enter keypress, not a
-	// pasted newline.
-	rawInjectSleep(rawInjectSettleDelay)
+func resumeWakeInputDelivery(cfg *wakeConfig) (bool, error) {
+	state := &cfg.inputDelivery
+	for state.pending() {
+		switch state.phase {
+		case wakeInputPayloadPending:
+			if cfg.debug {
+				_ = writeWakeDiagnostic(cfg, "amq wake [debug]: injecting %d bytes of text\n", len(state.payload))
+			}
+			wrote, err := writePendingWakeInputChunk(cfg, state, state.payload)
+			if err != nil {
+				if cfg.debug {
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: text inject failed: %v\n", err)
+				}
+				return false, err
+			}
+			if !wrote {
+				return false, nil
+			}
+			if state.mode == wakeInjectModePaste {
+				state.phase = wakeInputPrimarySubmitPending
+				continue
+			}
+			if state.mode != wakeInjectModeRaw {
+				return false, fmt.Errorf("unsupported pending wake input mode %q", state.mode)
+			}
 
-	wrote, err = writeTerminalChunk(cfg, "\r")
-	if err != nil {
-		if cfg.debug {
-			_ = writeStderr("amq wake [debug]: submit key inject failed: %v\n", err)
-		}
-		return false, err
-	}
-	if !wrote {
-		return false, nil
-	}
-	if cfg.debug {
-		_ = writeStderr("amq wake [debug]: submit key injected OK\n")
-	}
+			// The submit key must arrive in its own read() chunk; otherwise the
+			// TUI can treat text+Enter as pasted input instead of a keypress.
+			waited, drained, err := waitForRawInputDrained(
+				rawInjectDrainTimeout,
+				rawInjectDrainPollInterval,
+			)
+			if cfg.debug {
+				switch {
+				case err != nil:
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input drain wait unavailable after %s: %v; continuing on timing alone\n", waited, err)
+				case drained:
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input queue drained after %s\n", waited)
+				default:
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input drain timeout after %s; injecting submit key anyway\n", waited)
+				}
+			}
+			if rawSubmitPrelude(cfg.me) != "" {
+				state.phase = wakeInputRawPreludePending
+			} else {
+				state.phase = wakeInputPrimarySubmitPending
+			}
 
-	// Rescue submit: if the first Enter was swallowed anyway (input buffer
-	// flush or a burst-window race), a repeat Enter submits the composer; if
-	// the first already submitted, Enter on an empty composer is a no-op. The
-	// rescue must be spaced a full settle delay after the first: a swallowed
-	// Enter re-extends codex-tui's 120ms suppress window, so a faster rescue
-	// would be swallowed too. Skip the rescue only when the first submit key is
-	// provably still queued — a second would coalesce with it into one
-	// paste-shaped chunk and both would be swallowed.
-	crWaited, crDrained, crErr := waitForRawInputDrained(rawInjectCRDrainTimeout, rawInjectDrainPollInterval)
-	if crErr == nil && !crDrained {
-		if cfg.debug {
-			_ = writeStderr("amq wake [debug]: submit key still queued after %s; skipping rescue submit\n", crWaited)
+		case wakeInputRawPreludePending:
+			prelude := rawSubmitPrelude(cfg.me)
+			if prelude == "" {
+				state.phase = wakeInputPrimarySubmitPending
+				continue
+			}
+			wrote, err := writePendingWakeInputChunk(cfg, state, prelude)
+			if err != nil {
+				if cfg.debug {
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: prelude inject failed: %v\n", err)
+				}
+				return false, err
+			}
+			if !wrote {
+				return false, nil
+			}
+			if cfg.debug {
+				_ = writeWakeDiagnostic(cfg, "amq wake [debug]: prelude injected OK (%q)\n", prelude)
+			}
+			state.phase = wakeInputPrimarySubmitPending
+
+		case wakeInputPrimarySubmitPending:
+			if state.mode == wakeInjectModePaste {
+				// Keep Enter in a separate read cycle from the paste payload.
+				time.Sleep(25 * time.Millisecond)
+			} else {
+				// Hold the submit CR past the TUI's paste-burst window.
+				rawInjectSleep(rawInjectSettleDelay)
+			}
+			wrote, err := writePendingWakeInputChunk(cfg, state, "\r")
+			if err != nil {
+				if cfg.debug {
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: submit key inject failed: %v\n", err)
+				}
+				return false, err
+			}
+			if !wrote {
+				return false, nil
+			}
+			if state.mode == wakeInjectModePaste {
+				state.reset()
+				return true, nil
+			}
+			if cfg.debug {
+				_ = writeWakeDiagnostic(cfg, "amq wake [debug]: submit key injected OK\n")
+			}
+
+			// A repeat Enter rescues a swallowed first submit. Skip it only when
+			// the first Enter is provably still queued.
+			waited, drained, drainErr := waitForRawInputDrained(
+				rawInjectCRDrainTimeout,
+				rawInjectDrainPollInterval,
+			)
+			if drainErr == nil && !drained {
+				state.phase = wakeInputRawFirstSubmitQueued
+				if cfg.debug {
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: submit key still queued after %s; skipping rescue submit\n", waited)
+				}
+				return false, nil
+			}
+			// When queue inspection is unavailable, preserve the historical one
+			// spaced rescue, but retain this exact step across authority loss.
+			state.phase = wakeInputRawRescuePending
+
+		case wakeInputRawFirstSubmitQueued:
+			waited, drained, err := waitForRawInputDrained(
+				rawInjectCRDrainTimeout,
+				rawInjectDrainPollInterval,
+			)
+			if cfg.debug {
+				switch {
+				case err != nil:
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: pending submit drain check failed after %s: %v\n", waited, err)
+				case !drained:
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: submit key still queued after %s; waiting for terminal reader\n", waited)
+				}
+			}
+			if err != nil || !drained {
+				return false, nil
+			}
+			state.phase = wakeInputRawRescuePending
+
+		case wakeInputRawRescuePending:
+			rawInjectSleep(rawInjectSettleDelay)
+			wrote, err := writePendingWakeInputChunk(cfg, state, "\r")
+			if err != nil {
+				if cfg.debug {
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: rescue submit inject failed: %v\n", err)
+				}
+				return false, err
+			}
+			if !wrote {
+				return false, nil
+			}
+			if cfg.debug {
+				_ = writeWakeDiagnostic(cfg, "amq wake [debug]: rescue submit injected OK\n")
+			}
+			waited, drained, drainErr := waitForRawInputDrained(
+				rawInjectCRDrainTimeout,
+				rawInjectDrainPollInterval,
+			)
+			if drainErr != nil {
+				// Queue inspection is best-effort. A successful write remains
+				// the strongest available completion evidence.
+				state.reset()
+				return true, nil
+			}
+			if !drained {
+				state.phase = wakeInputRawRescueQueued
+				if cfg.debug {
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: rescue submit still queued after %s; waiting for terminal reader\n", waited)
+				}
+				return false, nil
+			}
+			state.reset()
+			return true, nil
+
+		case wakeInputRawRescueQueued:
+			waited, drained, err := waitForRawInputDrained(
+				rawInjectCRDrainTimeout,
+				rawInjectDrainPollInterval,
+			)
+			if cfg.debug {
+				switch {
+				case err != nil:
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: pending submit drain check failed after %s: %v\n", waited, err)
+				case !drained:
+					_ = writeWakeDiagnostic(cfg, "amq wake [debug]: submit key still queued after %s; waiting for terminal reader\n", waited)
+				}
+			}
+			if err != nil || !drained {
+				return false, nil
+			}
+			state.reset()
+			return true, nil
+
+		default:
+			return false, fmt.Errorf("invalid pending wake input phase %d", state.phase)
 		}
-		return true, nil
-	}
-	rawInjectSleep(rawInjectSettleDelay)
-	wrote, err = writeTerminalChunk(cfg, "\r")
-	if err != nil {
-		// The text and first submit key were already delivered; the rescue is
-		// best-effort unless exact terminal authority was lost.
-		var authorityErr *wakeTerminalAuthorityError
-		if errors.As(err, &authorityErr) {
-			return true, err
-		}
-		if cfg.debug {
-			_ = writeStderr("amq wake [debug]: rescue submit inject failed: %v\n", err)
-		}
-		return true, nil
-	}
-	if !wrote {
-		return true, nil
-	}
-	if cfg.debug {
-		_ = writeStderr("amq wake [debug]: rescue submit injected OK\n")
 	}
 	return true, nil
 }
@@ -1012,7 +1530,7 @@ func waitForInputQueueDrain(
 
 func injectVia(cfg *wakeConfig, text string) error {
 	if cfg.debug {
-		_ = writeStderr("amq wake [debug]: inject-via mode, running: %s %s <text>\n", cfg.injectVia, strings.Join(cfg.injectArgs, " "))
+		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via mode, running: %s %s <text>\n", cfg.injectVia, strings.Join(cfg.injectArgs, " "))
 	}
 
 	executable := strings.TrimSpace(cfg.injectVia)
@@ -1034,17 +1552,26 @@ func injectVia(cfg *wakeConfig, text string) error {
 	args := append([]string{}, cfg.injectArgs...)
 	args = append(args, text)
 	cmd := exec.CommandContext(ctx, executable, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			if cfg.debug {
-				_ = writeStderr("amq wake [debug]: inject-via timed out after %s (%s)\n", timeout, string(out))
-			}
-			return fmt.Errorf("inject-via timed out after %s", timeout)
-		}
+	waitDelay := timeout / 10
+	if waitDelay <= 0 {
+		waitDelay = time.Millisecond
+	}
+	if waitDelay > 100*time.Millisecond {
+		waitDelay = 100 * time.Millisecond
+	}
+	cmd.WaitDelay = waitDelay
+	out, runErr := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded || errors.Is(runErr, exec.ErrWaitDelay) {
 		if cfg.debug {
-			_ = writeStderr("amq wake [debug]: inject-via failed: %v (%s)\n", err, string(out))
+			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via timed out after %s (%s)\n", timeout, string(out))
 		}
-		return err
+		return fmt.Errorf("inject-via timed out after %s", timeout)
+	}
+	if runErr != nil {
+		if cfg.debug {
+			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via failed: %v (%s)\n", runErr, string(out))
+		}
+		return runErr
 	}
 
 	return nil

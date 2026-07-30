@@ -101,7 +101,22 @@ amq coop exec codex
 ```
 
 Each command sets up the environment, starts wake notifications, and launches
-the agent.
+the agent. The wake child appends full diagnostics to the private
+`agents/<agent>/.wake.log`; a separate inherited descriptor carries only
+terminal-safe attention to the controlling terminal. This process boundary
+keeps runtime and fatal-error text out of Codex and Claude full-screen
+composers. Accumulated diagnostics are truncated when a new wake starts after
+the log reaches 1 MiB; a single long-lived wake can exceed that launch bound.
+
+Wake treats terminal notification as an attempt, not delivery, and retries on
+a capped backoff until the inbox makes durable progress. The first notification
+is immediate. Attempts that inject the fixed doorbell start at 5 seconds because
+they drive the agent; attention-only attempts start at 30 seconds because they
+alert a human. Both double to a 2-minute cap. Contextual peer headers appear
+only in terminal output or attention; terminal input always uses the fixed
+doorbell. The delay starts after the preceding injector process exits or times
+out. Because `--wake-inject-via` executes arbitrary local code, a retry can
+repeat injector-side effects.
 
 > **First-message check:** start both agents before sending the test message.
 > A newly started wake deliberately baselines messages that were already

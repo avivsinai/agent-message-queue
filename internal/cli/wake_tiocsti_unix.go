@@ -42,6 +42,10 @@ func (err *tiocstiInjectionError) Unwrap() error {
 	return err.Err
 }
 
+func (err *tiocstiInjectionError) wakeAcceptedBytes() int {
+	return err.Progress
+}
+
 func tiocstiLegacyDisabledHint() bool {
 	data, err := readTIOCSTILegacySysctl()
 	return err == nil && strings.TrimSpace(string(data)) == "0"
@@ -108,7 +112,7 @@ func waitForTTYInputQuiet(cfg *wakeConfig) bool {
 	queueFD, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if cfg.debug {
-			_ = writeStderr("amq wake [debug]: input deferral unavailable: open /dev/tty: %v\n", err)
+			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input deferral unavailable: open /dev/tty: %v\n", err)
 		}
 		return true
 	}
@@ -126,7 +130,7 @@ func waitForTTYInputQuiet(cfg *wakeConfig) bool {
 		atimeSource = "stdin"
 	}
 	if cfg.debug {
-		_ = writeStderr("amq wake [debug]: input deferral atime_source=%s\n", atimeSource)
+		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input deferral atime_source=%s\n", atimeSource)
 	}
 
 	allowInjection, activeReason, sampleErr := waitForInputQuiet(
@@ -136,7 +140,8 @@ func waitForTTYInputQuiet(cfg *wakeConfig) bool {
 		time.Now,
 		func(delay time.Duration, state ttyInputState, reason string) {
 			if cfg.debug {
-				_ = writeStderr(
+				_ = writeWakeDiagnostic(
+					cfg,
 					"amq wake [debug]: deferring injection for %s (%s, pending_bytes=%d)\n",
 					delay,
 					reason,
@@ -150,10 +155,10 @@ func waitForTTYInputQuiet(cfg *wakeConfig) bool {
 		cfg.inputPollInterval,
 	)
 	if sampleErr != nil && cfg.debug {
-		_ = writeStderr("amq wake [debug]: input deferral unavailable: %v\n", sampleErr)
+		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input deferral unavailable: %v\n", sampleErr)
 	}
 	if !allowInjection && cfg.debug {
-		_ = writeStderr("amq wake [debug]: input deferral max hold reached (%s)\n", activeReason)
+		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input deferral max hold reached (%s)\n", activeReason)
 	}
 	return allowInjection
 }
