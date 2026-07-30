@@ -574,9 +574,12 @@ func deliverNewMessageNotification(
 			text:       plan.prompt,
 			provenance: wakePayloadSystemFixed,
 		}
-		cfg.suppressAttention = plan.retry
-		deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
-		cfg.suppressAttention = false
+		deliveryErr := deliverPlannedWakeNotification(
+			cfg,
+			notice,
+			deferForInput,
+			plan.retry,
+		)
 		if isWakeInputDemotionBlocked(deliveryErr) {
 			return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
 		}
@@ -602,7 +605,12 @@ func deliverNewMessageNotification(
 		return deliveryErr
 	}
 
-	deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
+	deliveryErr := deliverPlannedWakeNotification(
+		cfg,
+		notice,
+		deferForInput,
+		plan.retry,
+	)
 	if isWakeInputDemotionBlocked(deliveryErr) {
 		return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
 	}
@@ -610,6 +618,18 @@ func deliverNewMessageNotification(
 		recordWakeAttempt(cfg, cfg.wakeDoorbellNow())
 	}
 	return deliveryErr
+}
+
+func deliverPlannedWakeNotification(
+	cfg *wakeConfig,
+	notice wakeNotification,
+	deferForInput, retry bool,
+) error {
+	previous := cfg.suppressAttention
+	cfg.suppressAttention = previous || retry
+	err := deliverWakeNotification(cfg, notice, deferForInput)
+	cfg.suppressAttention = previous
+	return err
 }
 
 func recordWakeAttempt(cfg *wakeConfig, now time.Time) {

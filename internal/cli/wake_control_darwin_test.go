@@ -185,7 +185,7 @@ func sendDarwinOwnerControlRequest(
 	return strings.TrimSpace(line)
 }
 
-func TestDarwinOwnerControlRejectsRetiredNamedOperation(t *testing.T) {
+func TestDarwinOwnerControlRejectsNamedOperationsAndContinues(t *testing.T) {
 	root, agent, owner, lock, _, _ := testDarwinOwnerControlLock(t)
 	cleanup, stopped, markStopped, err := startWakeControlListener(root, agent, lock)
 	if err != nil {
@@ -193,22 +193,24 @@ func TestDarwinOwnerControlRejectsRetiredNamedOperation(t *testing.T) {
 	}
 	defer cleanup()
 
-	response := sendDarwinOwnerControlRequest(t, root, agent, lock, wakeControlOwnerRequest{
-		Generation: lock.Generation,
-		Owner:      &owner,
-		Operation:  "prompt_observed",
-	})
-	if response != "" {
-		t.Fatalf("retired named operation response = %q, want refusal", response)
+	for _, operation := range []string{"prompt_observed", "unknown_op", "release"} {
+		response := sendDarwinOwnerControlRequest(t, root, agent, lock, wakeControlOwnerRequest{
+			Generation: lock.Generation,
+			Owner:      &owner,
+			Operation:  operation,
+		})
+		if response != "" {
+			t.Fatalf("named operation %q response = %q, want refusal", operation, response)
+		}
 	}
 	select {
 	case <-stopped:
-		t.Fatal("retired named operation requested owner shutdown")
+		t.Fatal("named operation requested owner shutdown")
 	default:
 	}
 	if current := inspectWakeLock(root, agent); !current.Exists ||
 		current.Lock.Generation != lock.Generation {
-		t.Fatalf("retired named operation changed owner claim: %#v", current)
+		t.Fatalf("named operation changed owner claim: %#v", current)
 	}
 
 	result := make(chan string, 1)
@@ -221,7 +223,7 @@ func TestDarwinOwnerControlRejectsRetiredNamedOperation(t *testing.T) {
 	select {
 	case <-stopped:
 	case <-time.After(2 * time.Second):
-		t.Fatal("valid release after retired operation did not quiesce notification work")
+		t.Fatal("valid release after named-operation refusals did not quiesce notification work")
 	}
 	if !inspectWakeLock(root, agent).Exists {
 		t.Fatal("valid release removed owner claim before notification work quiesced")
@@ -230,13 +232,13 @@ func TestDarwinOwnerControlRejectsRetiredNamedOperation(t *testing.T) {
 	select {
 	case got := <-result:
 		if got != "ACK" {
-			t.Fatalf("valid release after retired operation = %q, want ACK", got)
+			t.Fatalf("valid release after named-operation refusals = %q, want ACK", got)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("valid release after retired operation did not acknowledge")
+		t.Fatal("valid release after named-operation refusals did not acknowledge")
 	}
 	if inspectWakeLock(root, agent).Exists {
-		t.Fatal("valid release after retired operation left the lock")
+		t.Fatal("valid release after named-operation refusals left the lock")
 	}
 }
 

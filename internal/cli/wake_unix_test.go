@@ -1919,8 +1919,16 @@ func TestNotifyNewMessagesAttentionOnlyRetryCadence(t *testing.T) {
 		if err := notifyNewMessages(cfg); err != nil {
 			t.Fatalf("attention attempt %d: %v", attempt+1, err)
 		}
-		if writes != attempt+1 {
-			t.Fatalf("attention writes after attempt %d = %d, want %d", attempt+1, writes, attempt+1)
+		if writes != 1 {
+			t.Fatalf("attention writes after attempt %d = %d, want 1", attempt+1, writes)
+		}
+		if cfg.doorbell.attempts != uint(attempt+1) {
+			t.Fatalf(
+				"recorded attempts after attempt %d = %d, want %d",
+				attempt+1,
+				cfg.doorbell.attempts,
+				attempt+1,
+			)
 		}
 		wantDeadline := now.Add(wantDelay)
 		if deadline, ok := cfg.doorbell.nextDeadline(); !ok || !deadline.Equal(wantDeadline) {
@@ -1935,8 +1943,8 @@ func TestNotifyNewMessagesAttentionOnlyRetryCadence(t *testing.T) {
 		if err := notifyNewMessages(cfg); err != nil {
 			t.Fatalf("early attention check %d: %v", attempt+1, err)
 		}
-		if writes != attempt+1 {
-			t.Fatalf("attention retried before deadline %d: writes=%d", attempt+1, writes)
+		if writes != 1 {
+			t.Fatalf("attention repeated before deadline %d: writes=%d", attempt+1, writes)
 		}
 		now = wantDeadline
 	}
@@ -1990,7 +1998,8 @@ func TestRunWakeLoopHonorsAttentionOnlyDoorbellDeadline(t *testing.T) {
 	}
 
 	retryAt := time.Now().Add(150 * time.Millisecond)
-	attention := make(chan time.Time, 2)
+	var afterDeadlineCalls atomic.Int64
+	attention := make(chan string, 1)
 	maintenanceTicks := make(chan time.Time)
 	stop := make(chan struct{})
 	done := make(chan error, 1)
@@ -2002,6 +2011,13 @@ func TestRunWakeLoopHonorsAttentionOnlyDoorbellDeadline(t *testing.T) {
 			injectMode:       wakeInjectModeNone,
 			controlStop:      stop,
 			maintenanceTicks: maintenanceTicks,
+			doorbellNow: func() time.Time {
+				now := time.Now()
+				if !now.Before(retryAt) {
+					afterDeadlineCalls.Add(1)
+				}
+				return now
+			},
 			doorbell: wakeDoorbellState{
 				phase:       wakeDoorbellRetrying,
 				cohort:      snapshotWakeFileIdentities(map[string]os.FileInfo{"attention-deadline.md": info}),
@@ -2011,7 +2027,7 @@ func TestRunWakeLoopHonorsAttentionOnlyDoorbellDeadline(t *testing.T) {
 			preconditionCheck: func(*wakeConfig) error { return nil },
 			attentionIsTTY:    func() bool { return false },
 			attentionWrite: func(data []byte) (int, error) {
-				attention <- time.Now()
+				attention <- string(data)
 				return len(data), nil
 			},
 		})
@@ -2029,28 +2045,36 @@ func TestRunWakeLoopHonorsAttentionOnlyDoorbellDeadline(t *testing.T) {
 	}()
 
 	select {
-	case at := <-attention:
-		t.Fatalf("attention retried before deadline at %s, deadline %s", at, retryAt)
+	case output := <-attention:
+		t.Fatalf("retry emitted peer attention before deadline: %q", output)
 	case err := <-done:
 		t.Fatalf("wake loop exited before attention deadline: %v", err)
 	case <-time.After(75 * time.Millisecond):
 	}
-	select {
-	case at := <-attention:
-		if at.Before(retryAt) {
-			t.Fatalf("attention retried at %s before deadline %s", at, retryAt)
-		}
-	case err := <-done:
-		t.Fatalf("wake loop exited before attention retry: %v", err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("attention-only retry deadline was ignored")
+	if got := afterDeadlineCalls.Load(); got != 0 {
+		t.Fatalf("doorbell deadline evaluated early %d times", got)
 	}
+	deadline := time.After(2 * time.Second)
+	for afterDeadlineCalls.Load() == 0 {
+		select {
+		case err := <-done:
+			t.Fatalf("wake loop exited before attention retry: %v", err)
+		case <-deadline:
+			t.Fatal("attention-only retry deadline was ignored")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	time.Sleep(25 * time.Millisecond)
+	callsAfterRetry := afterDeadlineCalls.Load()
 	select {
-	case at := <-attention:
-		t.Fatalf("attention retry hot-looped at %s", at)
+	case output := <-attention:
+		t.Fatalf("attention retry repeated peer output: %q", output)
 	case err := <-done:
 		t.Fatalf("wake loop exited after attention retry: %v", err)
 	case <-time.After(200 * time.Millisecond):
+	}
+	if got := afterDeadlineCalls.Load(); got != callsAfterRetry {
+		t.Fatalf("attention retry hot-looped: deadline calls %d -> %d", callsAfterRetry, got)
 	}
 }
 
