@@ -857,6 +857,86 @@ func TestWakeRepairParentAdmissionAcknowledgementIsBounded(t *testing.T) {
 	}
 }
 
+func TestWakeRepairParentPreparedReadIsBounded(t *testing.T) {
+	source, _ := wakeRepairProtocolPreparedForTest(t, "child-generation")
+	parentToChildReader, parentToChildWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	childToParentReader, childToParentWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = parentToChildReader.Close()
+		_ = parentToChildWriter.Close()
+		_ = childToParentReader.Close()
+		_ = childToParentWriter.Close()
+	}()
+	parent := newWakeRepairParentHandoffForFiles(parentToChildWriter, childToParentReader)
+
+	oldTimeout := wakeRepairAdmitTimeout
+	wakeRepairAdmitTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { wakeRepairAdmitTimeout = oldTimeout })
+
+	result := make(chan error, 1)
+	go func() {
+		_, receiveErr := parent.ReceivePrepared(source)
+		result <- receiveErr
+	}()
+	select {
+	case err := <-result:
+		if err == nil ||
+			!strings.Contains(err.Error(), "prepared") ||
+			!strings.Contains(err.Error(), "timeout") {
+			t.Fatalf("prepared read timeout = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("parent prepared read remained blocked past its deadline")
+	}
+}
+
+func TestWakeRepairChildAdmissionReadIsBounded(t *testing.T) {
+	_, prepared := wakeRepairProtocolPreparedForTest(t, "child-generation")
+	parentToChildReader, parentToChildWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	childToParentReader, childToParentWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = parentToChildReader.Close()
+		_ = parentToChildWriter.Close()
+		_ = childToParentReader.Close()
+		_ = childToParentWriter.Close()
+	}()
+	child := newWakeRepairChildHandoffForFiles(parentToChildReader, childToParentWriter)
+
+	oldTimeout := wakeRepairAdmitTimeout
+	wakeRepairAdmitTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { wakeRepairAdmitTimeout = oldTimeout })
+
+	result := make(chan error, 1)
+	go func() {
+		result <- child.AwaitAdmitAcknowledgeAndRelease(
+			prepared,
+			func() error { return nil },
+		)
+	}()
+	select {
+	case err := <-result:
+		if err == nil ||
+			!strings.Contains(err.Error(), "admission") ||
+			!strings.Contains(err.Error(), "timeout") {
+			t.Fatalf("admission read timeout = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("child admission read remained blocked past its deadline")
+	}
+}
+
 func TestWakeRepairParentReleaseRequiresExactAcknowledgement(t *testing.T) {
 	_, prepared := wakeRepairProtocolPreparedForTest(t, "child-generation")
 	parentToChildReader, parentToChildWriter, err := os.Pipe()

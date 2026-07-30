@@ -449,15 +449,19 @@ func runCoopExec(args []string) error {
 				retainWakeHelperClaim(current)
 				otherWake := current.Exists && current.PID != wakeProc.Pid
 				if readyErr != nil {
+					startupErr := readyErr
+					if otherWake {
+						startupErr = coopWakeStartupConflictError(current, readyErr)
+					}
 					cleanupErr := cleanupWakeHelper(otherWake)
 					if cleanupErr != nil {
 						return errors.Join(
-							readyErr,
+							startupErr,
 							fmt.Errorf("cleanup exact coop wake startup helper: %w", cleanupErr),
 						)
 					}
 					if otherWake || *requireWakeFlag {
-						return readyErr
+						return startupErr
 					}
 					_ = writeStderr("warning: failed to prepare amq wake: %v\n", readyErr)
 					wakeProc = nil

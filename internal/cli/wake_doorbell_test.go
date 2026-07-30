@@ -73,6 +73,82 @@ func TestWakeDoorbellStateRetriesUntilInboxProgress(t *testing.T) {
 	}
 }
 
+func TestWakeDoorbellStateCoalescesAddedMessageUntilExistingDeadline(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	first := wakeDoorbellTestFiles(t, "a.md")
+	var state wakeDoorbellState
+
+	if plan := state.plan(now, first); !plan.attempt {
+		t.Fatalf("initial plan = %#v", plan)
+	}
+	state.recordAttempt(now)
+	lastAttempt := now
+	for state.attempts < 6 {
+		lastAttempt = state.nextAttempt
+		if plan := state.plan(lastAttempt, first); !plan.attempt {
+			t.Fatalf("ladder attempt %d plan = %#v", state.attempts+1, plan)
+		}
+		state.recordAttempt(lastAttempt)
+	}
+	decayedDeadline := state.nextAttempt
+
+	added := wakeDoorbellTestFiles(t, "b.md", "c.md", "d.md")
+	current := map[string]os.FileInfo{
+		"a.md": first["a.md"],
+		"b.md": added["b.md"],
+		"c.md": added["c.md"],
+	}
+	additionScannedAt := lastAttempt.Add(time.Second)
+	plan := state.plan(additionScannedAt, current)
+	if plan.attempt || plan.progress {
+		t.Fatalf("addition emitted before delivery floor: %#v", plan)
+	}
+	if state.attempts != 6 || !sameKnownWakeCohort(state.cohort, current) {
+		t.Fatalf("addition did not extend the pending cohort: %#v", state)
+	}
+	floorDeadline := lastAttempt.Add(wakeDoorbellRetryBase)
+	if !state.nextAttempt.Equal(floorDeadline) {
+		t.Fatalf(
+			"addition deadline = %s, want floor %s instead of decayed %s",
+			state.nextAttempt,
+			floorDeadline,
+			decayedDeadline,
+		)
+	}
+
+	burst := map[string]os.FileInfo{
+		"a.md": first["a.md"],
+		"b.md": added["b.md"],
+		"c.md": added["c.md"],
+		"d.md": added["d.md"],
+	}
+	plan = state.plan(additionScannedAt.Add(time.Millisecond), burst)
+	if plan.attempt || plan.progress {
+		t.Fatalf("same-burst addition emitted another doorbell: %#v", plan)
+	}
+	if state.attempts != 6 || !state.nextAttempt.Equal(floorDeadline) {
+		t.Fatalf("same-burst addition changed retry ladder: %#v", state)
+	}
+
+	plan = state.plan(floorDeadline, burst)
+	if !plan.attempt || plan.progress || plan.prompt != coopWakeDoorbell {
+		t.Fatalf("consolidated floor plan = %#v", plan)
+	}
+	state.recordAttempt(floorDeadline)
+	if plan = state.plan(floorDeadline.Add(time.Millisecond), burst); plan.attempt {
+		t.Fatalf("coalesced burst emitted more than one doorbell: %#v", plan)
+	}
+
+	remaining := map[string]os.FileInfo{"d.md": burst["d.md"]}
+	plan = state.plan(floorDeadline.Add(2*time.Millisecond), remaining)
+	if !plan.attempt || !plan.progress || plan.prompt != coopWakeDoorbell {
+		t.Fatalf("post-expansion drain plan = %#v", plan)
+	}
+	if state.attempts != 0 || !sameKnownWakeCohort(state.cohort, remaining) {
+		t.Fatalf("post-expansion drain did not rearm remaining cohort: %#v", state)
+	}
+}
+
 func TestWakeDoorbellStateRearmsWhenUnknownIdentityBecomesKnown(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	current := map[string]os.FileInfo{
@@ -123,17 +199,18 @@ func TestWakeDoorbellRecoveryAttentionIsCohortBoundedAndRateLimited(t *testing.T
 		t.Fatal("initial recovery cohort was suppressed")
 	}
 	state.recordRecoveryRequired(now, first)
+	state.recordRecoveryAttentionDelivered()
 	if state.phase != wakeDoorbellRecoveryRequired {
 		t.Fatalf("recovery phase = %v", state.phase)
 	}
 	if state.planRecoveryAttention(now.Add(time.Millisecond), first) {
 		t.Fatal("unchanged recovery cohort was repeated")
 	}
-	if state.planRecoveryAttention(now.Add(wakeDoorbellRetryBase-time.Millisecond), second) {
+	if state.planRecoveryAttention(now.Add(wakeDoorbellAttentionRetryBase-time.Millisecond), second) {
 		t.Fatal("changed recovery cohort bypassed output rate bound")
 	}
 	if deadline, ok := state.nextDeadline(); !ok ||
-		!deadline.Equal(now.Add(wakeDoorbellRetryBase)) {
+		!deadline.Equal(now.Add(wakeDoorbellAttentionRetryBase)) {
 		t.Fatalf("recovery deadline = %s, ok=%v", deadline, ok)
 	}
 	if state.planRecoveryAttention(now.Add(time.Millisecond), nil) {
@@ -145,11 +222,11 @@ func TestWakeDoorbellRecoveryAttentionIsCohortBoundedAndRateLimited(t *testing.T
 	if state.planRecoveryAttention(now.Add(2*time.Millisecond), second) {
 		t.Fatal("drain-and-arrive recovery flap bypassed output rate bound")
 	}
-	if !state.planRecoveryAttention(now.Add(wakeDoorbellRetryBase), second) {
+	if !state.planRecoveryAttention(now.Add(wakeDoorbellAttentionRetryBase), second) {
 		t.Fatal("changed recovery cohort was not emitted after rate bound")
 	}
-	state.recordRecoveryRequired(now.Add(wakeDoorbellRetryBase), second)
-	if state.planRecoveryAttention(now.Add(2*wakeDoorbellRetryBase), second) {
+	state.recordRecoveryRequired(now.Add(wakeDoorbellAttentionRetryBase), second)
+	if state.planRecoveryAttention(now.Add(2*wakeDoorbellAttentionRetryBase), second) {
 		t.Fatal("recorded recovery cohort repeated")
 	}
 }

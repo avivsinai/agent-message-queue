@@ -88,6 +88,13 @@ func authoritativeWakePrivateStopFromEnv() (<-chan struct{}, func(), error) {
 	if err != nil || fd < 3 {
 		return nil, nil, fmt.Errorf("%s is invalid", envWakePrivateStopFD)
 	}
+	// ExtraFiles are inherited as blocking descriptors. Restore nonblocking
+	// mode before os.NewFile so Go registers the pipe with its poller and a
+	// concurrent Close can interrupt the startup read during early failure.
+	if err := unix.SetNonblock(fd, true); err != nil {
+		_ = unix.Close(fd)
+		return nil, nil, fmt.Errorf("make authoritative wake private-stop fd nonblocking: %w", err)
+	}
 	file := os.NewFile(uintptr(fd), "authoritative-wake-private-stop")
 	if file == nil {
 		return nil, nil, fmt.Errorf("%s fd is unavailable", envWakePrivateStopFD)

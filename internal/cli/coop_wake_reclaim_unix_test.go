@@ -11,6 +11,63 @@ import (
 	"time"
 )
 
+func TestCoopWakeStartupConflictGivesExactStaleSessionRepair(t *testing.T) {
+	root := `/tmp/AMQ & stale's $session`
+	inspection := wakeLockInspection{
+		Exists:   true,
+		Status:   wakeLockStale,
+		Reason:   "process is not running",
+		Root:     root,
+		Agent:    "codex",
+		LockPath: root + "/agents/codex/.wake.lock",
+		Lock: wakeLock{
+			PID:     66121,
+			TTY:     "/dev/ttys042",
+			Started: "2026-07-30T17:00:00Z",
+		},
+	}
+	err := coopWakeStartupConflictError(
+		inspection,
+		errors.New("amq wake exited before becoming ready"),
+	)
+	if err == nil {
+		t.Fatal("stale startup conflict returned nil")
+	}
+	want := doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("stale conflict = %v, want exact repair %q", err, want)
+	}
+	if strings.Contains(err.Error(), "use that terminal") {
+		t.Fatalf("stale conflict rendered live-owner advice: %v", err)
+	}
+}
+
+func TestCoopWakeStartupConflictPreservesUnverifiedState(t *testing.T) {
+	root := secureTempDirForTest(t)
+	inspection := wakeLockInspection{
+		Exists:   true,
+		Status:   wakeLockUnverified,
+		Reason:   "owner identity unavailable",
+		Root:     root,
+		Agent:    "codex",
+		LockPath: root + "/agents/codex/.wake.lock",
+		Lock:     wakeLock{PID: 66121},
+	}
+	err := coopWakeStartupConflictError(
+		inspection,
+		errors.New("amq wake exited before becoming ready"),
+	)
+	if err == nil {
+		t.Fatal("unverified startup conflict returned nil")
+	}
+	inspect := doctorRootCommandForOS(root, "", runtime.GOOS, "--ops")
+	if !strings.Contains(err.Error(), inspect) ||
+		strings.Contains(err.Error(), "--fix-wake-locks") ||
+		!strings.Contains(err.Error(), "preserved") {
+		t.Fatalf("unverified conflict is not an inspect-only refusal: %v", err)
+	}
+}
+
 func TestPrepareCoopWakeLockRemovesProvenStaleWithoutPrompt(t *testing.T) {
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{PID: 66121, Generation: "stale"})
@@ -108,6 +165,92 @@ func TestPrepareCoopWakeLockProvenForeignProcessRefusesWithoutMutation(t *testin
 	}
 	if string(after) != string(before) {
 		t.Fatal("foreign process lock changed")
+	}
+}
+
+func TestPrepareCoopWakeLockLiveAuthoritativeRefusesWithoutMutation(t *testing.T) {
+	const wakePID = 66121
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "authoritative-coop-conflict-injector")
+	owner := currentAuthoritativeOwnerForCoopWakeTest(t)
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	target.Owner = &owner
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatalf("write wake target: %v", err)
+	}
+	wakeArgs := []string{
+		"/opt/homebrew/bin/amq",
+		"wake",
+		"--root",
+		root,
+		"--me",
+		"codex",
+		"--inject-via",
+		injector,
+	}
+	lock := bindWakeLockToTarget(wakeLock{
+		PID:          wakePID,
+		Root:         canonicalWakeRoot(root),
+		Agent:        "codex",
+		TTY:          "/dev/ttys042",
+		ProcessStart: owner.ProcessStart,
+		BootID:       owner.BootID,
+		Executable:   wakeArgs[0],
+		Args:         wakeArgs,
+		Generation:   "authoritative-conflict",
+		OwnerSchema:  wakeOwnerLockSchema,
+		Owner:        &owner,
+	}, target)
+	lock.WakeMode = wakeOwnerWakeMode
+	lockPath := writeWakeLockExactForTest(t, root, "codex", lock)
+	if err := os.Chmod(lockPath, wakeOwnerLockFileMode); err != nil {
+		t.Fatal(err)
+	}
+	targetPath := wakeTargetPath(root, "codex")
+	beforeLock, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeTarget, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: owner.ProcessStart,
+			BootID:     owner.BootID,
+			Executable: wakeArgs[0],
+			Args:       wakeArgs,
+		}
+	})
+	stubSignalWakeProcess(t, func(int, os.Signal) error {
+		t.Fatal("authoritative wake must not be signaled through coop startup")
+		return nil
+	})
+
+	err = prepareCoopWakeLock(root, "codex", true, "unused")
+	if err == nil || !strings.Contains(err.Error(), "owned by a live process") {
+		t.Fatalf("prepare live authoritative wake = %v, want live-owner refusal", err)
+	}
+	afterLock, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("authoritative lock changed: %v", err)
+	}
+	afterTarget, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("authoritative target changed: %v", err)
+	}
+	if string(afterLock) != string(beforeLock) || string(afterTarget) != string(beforeTarget) {
+		t.Fatal("authoritative claim changed during startup refusal")
+	}
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != wakeOwnerLockFileMode {
+		t.Fatalf("authoritative lock mode = %o, want %o", got, wakeOwnerLockFileMode)
 	}
 }
 

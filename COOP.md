@@ -312,11 +312,20 @@ Retries never give up while the cohort remains unread. Contextual peer headers
 appear only in terminal output or attention; terminal input always uses the
 fixed doorbell. The delay starts after the prior injector process exits or times
 out. Because an external injector is arbitrary local code, retries can duplicate
-its side effects. Removing or replacing any message from that cohort is durable
-progress and immediately rearms the next notification. Owner-bound retries do
-not emit attention when terminal input succeeds; when input is unavailable or
-fails, attention becomes the delivered channel and repeats on its slower
-cadence.
+its side effects. Added messages join the pending cohort and share its next
+notification without resetting the retry ladder. If that ladder had decayed,
+new information pulls the deadline forward to the channel's 5- or 30-second
+delivery floor; bursts within the debounce window remain consolidated.
+Removing or replacing any message is durable progress and immediately rearms
+the next notification.
+Owner-bound retries do not emit attention when terminal input succeeds.
+Transient foreground authority or input-quiet refusals keep the input retry
+armed while rate-limiting their separate attention output. Output-only delivery
+repeats on its slower cadence, and a short or failed attention write stays
+pending on that cadence instead of terminating the notifier. Recovery-required
+state never retries uncertain terminal input; it repeats the manual
+drain-and-restart notice on that same attention cadence until the unread cohort
+drains.
 
 For orchestrators or hardened environments without a controlling TTY, use an
 explicit external transport:

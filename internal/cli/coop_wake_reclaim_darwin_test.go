@@ -38,15 +38,15 @@ func TestPrepareCoopWakeLockTerminalGoneDefersToSilentReplacement(t *testing.T) 
 	}
 }
 
-func TestPrepareCoopWakeLockLiveRawAttachedIsPreserved(t *testing.T) {
-	testPrepareCoopWakeLockHealthyRawPreserved(t, "/dev/null", wakeProcessInfo{
+func TestPrepareCoopWakeLockLiveRawAttachedIsRefusedWithoutMutation(t *testing.T) {
+	testPrepareCoopWakeLockHealthyRawRefused(t, "/dev/null", wakeProcessInfo{
 		ControllingTerminalKnown: true,
 		HasControllingTerminal:   true,
 	})
 }
 
-func TestPrepareCoopWakeLockLiveRawUnknownTTYAttachedIsPreserved(t *testing.T) {
-	testPrepareCoopWakeLockHealthyRawPreserved(t, "unknown", wakeProcessInfo{
+func TestPrepareCoopWakeLockLiveRawUnknownTTYAttachedIsRefusedWithoutMutation(t *testing.T) {
+	testPrepareCoopWakeLockHealthyRawRefused(t, "unknown", wakeProcessInfo{
 		ControllingTerminalKnown: true,
 		HasControllingTerminal:   true,
 	})
@@ -223,7 +223,7 @@ func TestPrepareCoopWakeLockSameTerminalDifferentSessionDefersToSilentReplacemen
 	}
 }
 
-func TestPrepareCoopWakeLockInjectViaNeverSignalsThroughTakeover(t *testing.T) {
+func TestPrepareCoopWakeLockLiveGenericInjectViaRefusesWithoutMutation(t *testing.T) {
 	const pid = 66121
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
@@ -251,8 +251,9 @@ func TestPrepareCoopWakeLockInjectViaNeverSignalsThroughTakeover(t *testing.T) {
 		return nil
 	})
 
-	if err := prepareCoopWakeLock(root, "codex", true, "unused"); err != nil {
-		t.Fatalf("prepare inject-via wake: %v", err)
+	err := prepareCoopWakeLock(root, "codex", true, "unused")
+	if err == nil || !strings.Contains(err.Error(), "owned by a live process") {
+		t.Fatalf("prepare live generic inject-via wake = %v, want live-owner refusal", err)
 	}
 	if _, err := os.Stat(lockPath); err != nil {
 		t.Fatalf("inject-via lock changed: %v", err)
@@ -275,7 +276,7 @@ func TestPrepareCoopWakeLockUnverifiedNeverSignals(t *testing.T) {
 	}
 }
 
-func testPrepareCoopWakeLockHealthyRawPreserved(
+func testPrepareCoopWakeLockHealthyRawRefused(
 	t *testing.T,
 	tty string,
 	terminal wakeProcessInfo,
@@ -310,8 +311,23 @@ func testPrepareCoopWakeLockHealthyRawPreserved(
 	stdout, stderr, err := captureEnvOutput(t, func() error {
 		return prepareCoopWakeLock(root, "codex", true, "unused")
 	})
-	if err != nil {
-		t.Fatalf("prepare healthy raw wake: %v", err)
+	if err == nil {
+		t.Fatal("healthy raw wake in another terminal was accepted")
+	}
+	for _, want := range []string{
+		"owned by a live process",
+		"pid:     66121",
+		"tty:     " + tty,
+		"started: ",
+		"use that terminal",
+		"stop process 66121",
+	} {
+		if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {
+			t.Fatalf("live conflict error missing %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "doctor") {
+		t.Fatalf("live conflict incorrectly recommends doctor: %v", err)
 	}
 	if stdout != "" || stderr != "" {
 		t.Fatalf("healthy raw wake emitted output: stdout=%q stderr=%q", stdout, stderr)

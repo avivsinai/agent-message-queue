@@ -1351,12 +1351,44 @@ func openCoopWakeOutput(root, me string) (*os.File, error) {
 	return openWakeOutputInDir(agentDir, ".wake.log", "wake log")
 }
 
-// wakeOutputMaxBytes bounds diagnostics accumulated across wake launches.
-// Children inherit the descriptor directly, so one long-lived child can exceed
-// the threshold; the next launch truncates that same hardened regular file.
+// wakeOutputMaxBytes bounds accumulated diagnostics both at launch and on the
+// existing wake maintenance tick.
 const wakeOutputMaxBytes int64 = 1 << 20
 
 var truncateWakeOutput = unix.Ftruncate
+
+func maintainWakeOutputBounds(outputs ...*os.File) error {
+	var bounded []os.FileInfo
+	var errs []error
+	for _, output := range outputs {
+		if output == nil {
+			continue
+		}
+		info, err := output.Stat()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("stat wake output %s: %w", output.Name(), err))
+			continue
+		}
+		if !info.Mode().IsRegular() || info.Size() < wakeOutputMaxBytes {
+			continue
+		}
+		duplicate := false
+		for _, prior := range bounded {
+			if os.SameFile(prior, info) {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		bounded = append(bounded, info)
+		if err := truncateWakeOutput(int(output.Fd()), 0); err != nil {
+			errs = append(errs, fmt.Errorf("truncate wake output %s: %w", output.Name(), err))
+		}
+	}
+	return errors.Join(errs...)
+}
 
 func openWakeOutputInDir(
 	agentDir *wakeAgentDir,
@@ -2725,16 +2757,16 @@ func runWakeLoop(cfg wakeConfig) error {
 	}
 	enterRetainedInputRecovery := func(cause error) error {
 		markWakeInputRecoveryRequired(&cfg, cause)
-		if err := emitWakeAttention(&cfg, wakePayload{
-			text:       wakeInputRecoveryNotice,
-			provenance: wakePayloadSystemFixed,
-		}); err != nil {
-			return errors.Join(cause, err)
-		}
 		cfg.doorbell.retainRecoveryRequired(cfg.wakeDoorbellNow())
 		pendingNotify = false
 		clearTerminalAuthorityRetry()
-		clearDoorbellDeadline()
+		if err := emitWakeAttention(&cfg, wakePayload{
+			text:       wakeInputRecoveryNotice,
+			provenance: wakePayloadSystemFixed,
+		}); err == nil {
+			cfg.doorbell.recordRecoveryAttentionDelivered()
+		}
+		scheduleDoorbellDeadline()
 		return nil
 	}
 	attemptNotification := func() error {
@@ -2751,16 +2783,6 @@ func runWakeLoop(cfg wakeConfig) error {
 			clearDoorbellDeadline()
 			_ = writeWakeDiagnostic(&cfg, "amq wake: notify error: %v\n", err)
 			return nil
-		}
-		var attentionErr *wakeAttentionDeliveryError
-		if errors.As(err, &attentionErr) {
-			pendingNotify = true
-			clearDoorbellDeadline()
-			return err
-		}
-		if isWakeInputDemotionBlocked(err) ||
-			isWakeTerminalProgressUncertain(err) {
-			return enterRetainedInputRecovery(err)
 		}
 		clearInboxScanRetry()
 		inboxScanFailures = 0
@@ -2789,6 +2811,18 @@ func runWakeLoop(cfg wakeConfig) error {
 				)
 			}
 			return nil
+		}
+		var attentionErr *wakeAttentionDeliveryError
+		if errors.As(err, &attentionErr) &&
+			!isWakeTerminalAuthorityLoss(err) {
+			pendingNotify = false
+			clearTerminalAuthorityRetry()
+			scheduleDoorbellDeadline()
+			return nil
+		}
+		if isWakeInputDemotionBlocked(err) ||
+			isWakeTerminalProgressUncertain(err) {
+			return enterRetainedInputRecovery(err)
 		}
 		pendingNotify = false
 		clearTerminalAuthorityRetry()
@@ -2823,6 +2857,10 @@ func runWakeLoop(cfg wakeConfig) error {
 		maintenanceTicker = time.NewTicker(30 * time.Second)
 		maintenanceTicks = maintenanceTicker.C
 		defer maintenanceTicker.Stop()
+	}
+	maintenanceOutputs := cfg.maintenanceOutputs
+	if maintenanceOutputs == nil {
+		maintenanceOutputs = []*os.File{os.Stdout, os.Stderr}
 	}
 	preconditionCheck := cfg.preconditionCheck
 	if preconditionCheck == nil {
@@ -2952,6 +2990,13 @@ func runWakeLoop(cfg wakeConfig) error {
 			}
 
 		case <-maintenanceTicks:
+			if err := maintainWakeOutputBounds(maintenanceOutputs...); err != nil {
+				_ = writeWakeDiagnostic(
+					&cfg,
+					"amq wake: maintain output bound: %v; continuing without truncation\n",
+					err,
+				)
+			}
 			pendingInputWork := !cfg.inputRecoveryRequired &&
 				(cfg.doorbell.pendingInput() || cfg.inputDelivery.pending())
 			hadPendingInputWork := pendingNotify || pendingInputWork

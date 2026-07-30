@@ -75,6 +75,8 @@ type opsWakeLock struct {
 	Root            string `json:"root"`
 	Lock            string `json:"lock"`
 	PID             int    `json:"pid,omitempty"`
+	TTY             string `json:"tty,omitempty"`
+	Started         string `json:"started,omitempty"`
 	Reason          string `json:"reason,omitempty"`
 	Fix             string `json:"fix,omitempty"`
 	Removed         bool   `json:"removed,omitempty"`
@@ -84,6 +86,7 @@ type opsWakeLock struct {
 	Repair          string `json:"repair,omitempty"`
 	RepairAvailable bool   `json:"repair_available,omitempty"`
 	RepairReason    string `json:"repair_reason,omitempty"`
+	CurrentTerminal bool   `json:"-"`
 }
 
 func runOpsChecks(root string, rootSource string, fixWakeLocks bool, explicitBaseRoot ...string) *doctorOpsResult {
@@ -356,12 +359,15 @@ func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeL
 		}
 
 		lock := opsWakeLock{
-			Status: string(inspection.Status),
-			Agent:  agent,
-			Root:   inspection.Root,
-			Lock:   inspection.LockPath,
-			PID:    inspection.PID,
-			Reason: inspection.Reason,
+			Status:          string(inspection.Status),
+			Agent:           agent,
+			Root:            inspection.Root,
+			Lock:            inspection.LockPath,
+			PID:             inspection.PID,
+			TTY:             strings.TrimSpace(inspection.Lock.TTY),
+			Started:         strings.TrimSpace(inspection.Lock.Started),
+			Reason:          inspection.Reason,
+			CurrentTerminal: doctorWakeLockOnCurrentTerminal(inspection),
 		}
 		ownerBound := classifyWakeClaimForGenericTransition(inspection) == wakeClaimAuthoritative
 		if ownerBound && mutationAuthorized {

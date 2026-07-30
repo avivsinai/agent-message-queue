@@ -276,6 +276,29 @@ func runDoctor(args []string) error {
 		}
 		for _, wl := range result.Ops.WakeLocks {
 			if wl.Status == string(wakeLockValid) {
+				if wl.CurrentTerminal {
+					continue
+				}
+				tty := wl.TTY
+				if tty == "" {
+					tty = "unknown"
+				}
+				started := wl.Started
+				if started == "" {
+					started = "unknown"
+				}
+				line := fmt.Sprintf(
+					"  wake for %s is owned by a live process: pid=%d tty=%s started=%s root=%s; "+
+						"no AMQ command can safely take over this live wake",
+					wl.Agent,
+					wl.PID,
+					tty,
+					started,
+					wl.Root,
+				)
+				if err := writeStdoutLine(line); err != nil {
+					return err
+				}
 				continue
 			}
 			icon := statusIcons["warn"]

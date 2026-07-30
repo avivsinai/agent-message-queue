@@ -130,6 +130,7 @@ if command -v python3 >/dev/null 2>&1; then
   echo "python session-name tests ok"
   python3 scripts/test_check_pr_title.py
   python3 scripts/test_check_commit_overrides.py
+  python3 scripts/test_check_wake_test_changes.py
   python3 scripts/test_release_changelog_section.py
   python3 scripts/test_release_please_config.py
   bash scripts/test_release_metadata.sh
