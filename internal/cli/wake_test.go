@@ -2162,6 +2162,73 @@ func TestNotifyNewMessagesOwnerlessRefusedWriteRemainsRetryEligible(t *testing.T
 	}
 }
 
+func TestNotifyNewMessagesOwnerlessRetrySuppressesRepeatedPeerAttention(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "ownerless-attention",
+			From:    "peer",
+			To:      []string{"codex"},
+			Thread:  "p2p/codex__peer",
+			Subject: "review the retry",
+			Created: "2026-07-30T08:00:00Z",
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(fsq.AgentInboxNew(root, "codex"), "ownerless-attention.md"),
+		data,
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Unix(1_800_000_000, 0)
+	var attentions []string
+	cfg := &wakeConfig{
+		me:             "codex",
+		root:           root,
+		session:        "session1",
+		injectMode:     wakeInjectModeRaw,
+		injectVia:      filepath.Join(root, "missing-injector"),
+		injectTimeout:  time.Second,
+		previewLen:     80,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentions = append(attentions, string(data))
+			return len(data), nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first ownerless attempt: %v", err)
+	}
+	if len(attentions) != 1 || !strings.Contains(attentions[0], "review the retry") {
+		t.Fatalf("first ownerless attention = %#v, want one peer notice", attentions)
+	}
+	now = now.Add(wakeDoorbellAttentionRetryBase)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("ownerless retry: %v", err)
+	}
+	if cfg.doorbell.attempts != 2 {
+		t.Fatalf("ownerless attempts = %d, want 2", cfg.doorbell.attempts)
+	}
+	if len(attentions) != 1 {
+		t.Fatalf("ownerless retry repeated peer attention: %#v", attentions)
+	}
+}
+
 func TestNotifyNewMessagesResumesExactTIOCSTISuffix(t *testing.T) {
 	for _, mode := range []string{wakeInjectModeRaw, wakeInjectModePaste} {
 		t.Run(mode, func(t *testing.T) {
