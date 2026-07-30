@@ -467,17 +467,19 @@ func removeAuthoritativeWakeClaimAt(
 	)
 	if err != nil {
 		preparedSnapshotErr = fmt.Errorf("snapshot released wake prepared marker: %w", err)
+		if releaseTargetSnapshot == nil {
+			return preparedSnapshotErr
+		}
 	} else if preparedExists &&
 		preparedSnapshot.Marker.Schema == wakeReadySchema &&
 		preparedSnapshot.Marker.Generation == current.Lock.Generation &&
 		preparedSnapshot.Marker.TargetDigest == current.Lock.TargetDigest {
-		if current.Lock.TargetDigest != "" && releaseTargetSnapshot == nil {
-			preparedSnapshotErr = fmt.Errorf(
+		if releaseTargetSnapshot == nil {
+			return fmt.Errorf(
 				"validate released wake prepared marker: authoritative wake target snapshot is unavailable",
 			)
-		} else {
-			releasePreparedSnapshot = &preparedSnapshot
 		}
+		releasePreparedSnapshot = &preparedSnapshot
 	}
 
 	if err := unix.Unlinkat(dirfd, ".wake.lock", 0); err != nil {

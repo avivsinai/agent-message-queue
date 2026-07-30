@@ -1365,7 +1365,7 @@ func buildRepairWakeArgs(root, me string, target wakeTarget, generation, readyPa
 	return args
 }
 
-func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
+func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	privateStop, cleanupPrivateStop, err := authoritativeWakePrivateStopFromEnv()
 	if err != nil {
 		return err
@@ -1566,7 +1566,14 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		if err != nil {
 			return err
 		}
-		defer func() { _ = ownerObservation.Close() }()
+		defer func() {
+			if err := ownerObservation.Close(); err != nil {
+				returnErr = errors.Join(
+					returnErr,
+					fmt.Errorf("requested wake owner observation failed: %w", err),
+				)
+			}
+		}()
 	}
 
 	var initialNotifierStatus string
@@ -1725,7 +1732,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 		if requestedOwner != nil {
 			select {
 			case <-ownerObservation.Done():
-				return fmt.Errorf("requested wake owner exited before lock acquisition")
+				return fmt.Errorf("requested wake owner observation ended before lock acquisition")
 			default:
 			}
 		}
@@ -1760,7 +1767,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) error {
 			if requestedOwner != nil {
 				select {
 				case <-ownerObservation.Done():
-					return fmt.Errorf("requested wake owner exited before existing-wake readiness")
+					return fmt.Errorf("requested wake owner observation ended before existing-wake readiness")
 				default:
 				}
 			}
