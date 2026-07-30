@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.49.12](https://github.com/avivsinai/agent-message-queue/compare/v0.49.11...v0.49.12) (2026-07-30)
+
+
+### Bug Fixes
+
+* **ci:** require justification for removed wake tests ([70fe085](https://github.com/avivsinai/agent-message-queue/commit/70fe085872530ea799c4e33bf079a8a3d703dc18))
+* **coop:** refuse live wake conflicts immediately ([70fe085](https://github.com/avivsinai/agent-message-queue/commit/70fe085872530ea799c4e33bf079a8a3d703dc18))
+* **doctor:** report foreign live wake ownership ([70fe085](https://github.com/avivsinai/agent-message-queue/commit/70fe085872530ea799c4e33bf079a8a3d703dc18))
+* **wake:** keep transient delivery failures retryable ([70fe085](https://github.com/avivsinai/agent-message-queue/commit/70fe085872530ea799c4e33bf079a8a3d703dc18))
+* **wake:** preserve authoritative recovery ([#369](https://github.com/avivsinai/agent-message-queue/issues/369)) ([0acad72](https://github.com/avivsinai/agent-message-queue/commit/0acad72bb8fd4ee9a44ad94163b5070d38ae7dac))
+* **wake:** restore rate-limited attention retries ([#366](https://github.com/avivsinai/agent-message-queue/issues/366)) ([637f11e](https://github.com/avivsinai/agent-message-queue/commit/637f11e893f474ce9aaf55d5903649ea3d5ce2c3))
+
 ## [0.49.11](https://github.com/avivsinai/agent-message-queue/compare/v0.49.10...v0.49.11) (2026-07-30)
 
 
