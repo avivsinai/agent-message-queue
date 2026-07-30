@@ -308,10 +308,11 @@ doorbell on its own capped backoff. Removing or replacing any message from that
 cohort is durable progress and immediately rearms the next notification.
 Retries do not repeat the out-of-band attention text.
 
-The bundled Codex `UserPromptSubmit` hook can observe the exact doorbell token
-and pause retries for a short, nonrenewable lease. Hook observation does not
-acknowledge, drain, or complete a message; only inbox progress does. Hook
-activation is therefore an optimization, not a liveness requirement. Use
+On macOS, the bundled Codex `UserPromptSubmit` hook can observe the exact
+doorbell token and pause retries for a short, nonrenewable lease. Hook
+observation does not acknowledge, drain, or complete a message; only inbox
+progress does. Hook activation is therefore an optimization, not a liveness
+requirement. Use
 Codex's `/hooks` view to confirm activation in the current environment. If
 project hooks are unavailable or untrusted, wake continues retrying and the
 agent may see duplicate doorbells until it drains the inbox.
