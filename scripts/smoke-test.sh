@@ -337,6 +337,4 @@ echo "claude-session-start.sh hook test ok"
 
 bash scripts/test_install_checksum.sh
 AMQ_TEST_BIN="$BIN" bash scripts/test_stop_hook.sh
-python3 scripts/test_codex_prompt_observed.py
-
 echo "smoke test ok"

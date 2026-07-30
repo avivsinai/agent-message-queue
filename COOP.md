@@ -302,25 +302,17 @@ For the first notification test, start both `coop exec` agents before sending
 the message. If a message was already waiting when the target wake started, it
 will not notify; it remains unread and visible to `amq drain --include-body`.
 
-For owner-bound raw, paste, and `--wake-inject-via` sessions started by
-`amq coop exec`, wake treats one transport execution only as a delivery
-attempt. While the same inbox cohort remains unread, wake retries a fixed,
-tokenized doorbell on its own capped backoff. The delay starts after the prior
-injector process exits or times out. Because an external injector is arbitrary
-local code, retries can duplicate its side effects. Removing or replacing any
-message from that cohort is durable progress and immediately rearms the next
-notification. Retries do not repeat the out-of-band attention text. Standalone
-ownerless `amq wake` keeps its legacy one-shot notification behavior.
-
-On macOS, the bundled Codex `UserPromptSubmit` hook can observe the exact
-doorbell token and pause retries for a short, nonrenewable lease. Hook
-observation does not acknowledge, drain, or complete a message; only inbox
-progress does. Hook activation is therefore an optimization, not a liveness
-requirement. Use Codex's `/hooks` view to confirm activation in the current
-environment. If project hooks are unavailable or untrusted, wake continues
-retrying and the agent may see duplicate doorbells until it drains the inbox.
-Linux co-op wakes have no prompt-observation lease; their retries continue on a
-capped backoff until the inbox makes durable progress.
+Wake treats one transport execution only as a delivery attempt. While the same
+inbox cohort remains unread, it retries on its own capped backoff. The first
+notification is immediate. Attempts that inject the fixed doorbell start at 5
+seconds because they drive the agent; attention-only attempts start at 30
+seconds because they alert a human. Both double to a 2-minute cap. Contextual
+peer headers appear only in terminal output or attention; terminal input always
+uses the fixed doorbell. The delay starts after the prior injector process exits
+or times out. Because an external injector is arbitrary local code, retries can
+duplicate its side effects. Removing or replacing any message from that cohort
+is durable progress and immediately rearms the next notification. Owner-bound
+retries do not repeat the out-of-band attention text.
 
 For orchestrators or hardened environments without a controlling TTY, use an
 explicit external transport:
@@ -359,7 +351,10 @@ process capabilities: full stdout/stderr diagnostics append to the private
 terminal descriptor. Codex and Claude receive only terminal-safe title, bell,
 and supported desktop-notification sequences on that descriptor, so runtime,
 cleanup, and top-level fatal diagnostics cannot overwrite the active composer.
-Without a controlling terminal, attention is appended to the same durable log.
+Accumulated wake and repair diagnostics are truncated on the next launch after
+their private log reaches 1 MiB; one long-lived child can exceed that launch
+bound. Without a controlling terminal, attention is appended to the same
+durable log.
 Urgent interrupt messages degrade to terminal-safe attention instead of Ctrl+C.
 Because
 `--inject-via` is arbitrary local

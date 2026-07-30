@@ -520,10 +520,6 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 			lock.OwnerSchema = wakeOwnerLockSchema
 			lock.Owner = &owner
 		}
-	} else if lock.WakeMode == wakeInjectModeRaw || lock.WakeMode == wakeInjectModePaste {
-		// Raw/paste wakes expose a narrow prompt-observation endpoint. It
-		// cannot stop, drain, or mutate mailbox state.
-		lock.ControlSocket = wakeControlSocketPath(root, me, lock.Generation)
 	}
 	if options.repairLineage != nil {
 		lock.SourceGeneration = options.repairLineage.source.DeadGeneration
@@ -1355,6 +1351,11 @@ func openCoopWakeOutput(root, me string) (*os.File, error) {
 	return openWakeOutputInDir(agentDir, ".wake.log", "wake log")
 }
 
+// wakeOutputMaxBytes bounds diagnostics accumulated across wake launches.
+// Children inherit the descriptor directly, so one long-lived child can exceed
+// the threshold; the next launch truncates that same hardened regular file.
+const wakeOutputMaxBytes int64 = 1 << 20
+
 func openWakeOutputInDir(
 	agentDir *wakeAgentDir,
 	name, label string,
@@ -1378,6 +1379,21 @@ func openWakeOutputInDir(
 				return fmt.Errorf("%s %s must be a regular file", label, filepath.Join(agentDir.path, name))
 			}
 			return fmt.Errorf("open %s: %w", label, err)
+		}
+		var stat unix.Stat_t
+		if err := unix.Fstat(fd, &stat); err != nil {
+			_ = unix.Close(fd)
+			return fmt.Errorf("stat %s: %w", label, err)
+		}
+		if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+			_ = unix.Close(fd)
+			return fmt.Errorf("%s %s must be a regular file", label, filepath.Join(agentDir.path, name))
+		}
+		if stat.Size >= wakeOutputMaxBytes {
+			if err := unix.Ftruncate(fd, 0); err != nil {
+				_ = unix.Close(fd)
+				return fmt.Errorf("truncate %s: %w", label, err)
+			}
 		}
 		file = os.NewFile(uintptr(fd), filepath.Join(agentDir.path, name))
 		return nil
@@ -1886,14 +1902,13 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	}); err != nil {
 		return err
 	}
-	promptObserved := make(chan string, 16)
 	if currentWake.Lock.ControlSocket != "" {
 		var controlCleanup func()
 		var stop <-chan struct{}
 		var markStopped func()
 		var controlErr error
 		controlCleanup, stop, markStopped, controlErr = startWakeControlListenerInDir(
-			activeAgentDir, root, me, currentWake.Lock, promptObserved,
+			activeAgentDir, root, me, currentWake.Lock,
 		)
 		if controlErr != nil {
 			return controlErr
@@ -1963,7 +1978,6 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		controlStop:        controlStop,
 		terminalGeneration: currentWake.Lock.Generation,
 		terminalTTY:        currentWake.Lock.TTY,
-		promptObserved:     promptObserved,
 		baselineRequested:  *baselineExistingFlag || repairLineage != nil,
 		baselineInherited:  repairLineage != nil,
 		retainedAgent:      activeAgentDir,
@@ -2616,8 +2630,7 @@ func runWakeLoop(cfg wakeConfig) error {
 		}
 	}
 	scheduleDoorbellDeadline := func() {
-		if cfg.injectMode == wakeInjectModeNone ||
-			terminalAuthorityRetryC != nil ||
+		if terminalAuthorityRetryC != nil ||
 			inboxScanRetryC != nil {
 			clearDoorbellDeadline()
 			return
@@ -2643,17 +2656,6 @@ func runWakeLoop(cfg wakeConfig) error {
 			doorbellTimer.Reset(delay)
 		}
 		doorbellTimerC = doorbellTimer.C
-	}
-	var pendingPromptObservation string
-	commitPendingPromptObservation := func() {
-		if pendingPromptObservation == "" || cfg.inputDelivery.pending() {
-			return
-		}
-		token := pendingPromptObservation
-		pendingPromptObservation = ""
-		if cfg.doorbell.observe(token, cfg.wakeDoorbellNow()) {
-			scheduleDoorbellDeadline()
-		}
 	}
 	retryOrdinaryWatcher := func(context string, cause error) {
 		cfg.baselineExisting = nil
@@ -2726,7 +2728,6 @@ func runWakeLoop(cfg wakeConfig) error {
 		return nil
 	}
 	attemptNotification := func() error {
-		defer commitPendingPromptObservation()
 		if terminalAuthorityRetryC != nil || inboxScanRetryC != nil {
 			return nil
 		}
@@ -2938,19 +2939,6 @@ func runWakeLoop(cfg wakeConfig) error {
 			doorbellTimerC = nil
 			if err := attemptNotification(); err != nil {
 				return err
-			}
-
-		case token := <-cfg.promptObserved:
-			if cfg.inputDelivery.pending() {
-				if cfg.doorbell.phase == wakeDoorbellAwaitingObservation &&
-					!cfg.doorbell.observationUsed &&
-					token == cfg.doorbell.token {
-					pendingPromptObservation = token
-				}
-				continue
-			}
-			if cfg.doorbell.observe(token, cfg.wakeDoorbellNow()) {
-				scheduleDoorbellDeadline()
 			}
 
 		case <-maintenanceTicks:

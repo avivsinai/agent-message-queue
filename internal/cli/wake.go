@@ -54,9 +54,8 @@ type wakeConfig struct {
 	inputRecoveryRequired bool
 	doorbell              wakeDoorbellState
 	doorbellNow           func() time.Time
-	newDoorbellToken      func() (string, error)
-	promptObserved        <-chan string
 	suppressAttention     bool
+	lastAttemptAttention  bool
 	onBaselineReady       func(map[string]wakeFileIdentity) error
 	onPrepared            func(wakeAdmissionWatcher) error
 	retainedAgent         wakeRetainedAgent
@@ -202,10 +201,7 @@ const (
 	wakeInjectModePaste = "paste"
 	wakeInjectModeNone  = "none"
 
-	coopWakeDoorbellTokenForTests = "00000000000000000000000000000000"
-	coopWakeDoorbellPrefix        = ": AMQ doorbell v1 token="
-	coopWakeDoorbellSuffix        = " run amq drain --include-body then act on it"
-	coopWakeDoorbell              = coopWakeDoorbellPrefix + coopWakeDoorbellTokenForTests + coopWakeDoorbellSuffix
+	coopWakeDoorbell = ": AMQ doorbell run amq drain --include-body then act on it"
 
 	rawInjectDrainTimeout      = 2 * time.Second
 	rawInjectDrainPollInterval = 10 * time.Millisecond
@@ -281,17 +277,8 @@ func peerWakeNotification(output string) wakeNotification {
 	}
 }
 
-func buildCoopWakeDoorbell(token string) string {
-	return coopWakeDoorbellPrefix + token + coopWakeDoorbellSuffix
-}
-
 func validCoopWakeDoorbell(prompt string) bool {
-	if !strings.HasPrefix(prompt, coopWakeDoorbellPrefix) ||
-		!strings.HasSuffix(prompt, coopWakeDoorbellSuffix) {
-		return false
-	}
-	token := strings.TrimSuffix(strings.TrimPrefix(prompt, coopWakeDoorbellPrefix), coopWakeDoorbellSuffix)
-	return validWakeDoorbellToken(token)
+	return prompt == coopWakeDoorbell
 }
 
 func operatorWakeNotification(text string) wakeNotification {
@@ -568,16 +555,21 @@ func deliverNewMessageNotification(
 		}
 		clearWakeInputState(cfg)
 	}
-	ownerBound := usesCoopDoorbell(cfg)
-	if ownerBound && cfg.injectMode != wakeInjectModeNone {
-		now := cfg.wakeDoorbellNow()
-		plan, err := cfg.doorbell.plan(now, currentPending, cfg.wakeDoorbellToken)
-		if err != nil {
+	now := cfg.wakeDoorbellNow()
+	plan := cfg.doorbell.plan(now, currentPending)
+	if !plan.attempt {
+		return nil
+	}
+	if plan.progress && cfg.inputDelivery.pending() {
+		if err := reconcileWakeInputAfterInboxDrain(cfg); err != nil {
 			return err
 		}
-		if !plan.attempt {
+		if cfg.inputDelivery.pending() {
 			return nil
 		}
+	}
+	ownerBound := usesCoopDoorbell(cfg)
+	if ownerBound && cfg.injectMode != wakeInjectModeNone {
 		notice.input = wakePayload{
 			text:       plan.prompt,
 			provenance: wakePayloadSystemFixed,
@@ -597,31 +589,47 @@ func deliverNewMessageNotification(
 				)
 			}
 			if deliveryErr == nil {
-				cfg.doorbell.recordCohortDelivered(currentPending)
+				// Permanent input demotion retires the old doorbell state.
+				// Re-arm the unread cohort before recording the fallback.
+				cfg.doorbell.arm(currentPending)
+				recordWakeAttempt(cfg, cfg.wakeDoorbellNow())
 			}
 			return deliveryErr
 		}
-		if deliveryErr == nil ||
-			(!isWakeTerminalForegroundPGRPChanged(deliveryErr) &&
-				!isWakeTerminalPartialProgress(deliveryErr) &&
-				!isWakeInputDemotionBlocked(deliveryErr) &&
-				!isWakeTerminalProgressUncertain(deliveryErr)) {
-			cfg.doorbell.recordAttempt(cfg.wakeDoorbellNow())
+		if shouldRecordWakeAttempt(deliveryErr) {
+			recordWakeAttempt(cfg, cfg.wakeDoorbellNow())
 		}
 		return deliveryErr
 	}
 
-	if !cfg.doorbell.planCohortDelivery(currentPending) {
-		return nil
-	}
 	deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
 	if isWakeInputDemotionBlocked(deliveryErr) {
 		return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
 	}
-	if deliveryErr == nil {
-		cfg.doorbell.recordCohortDelivered(currentPending)
+	if shouldRecordWakeAttempt(deliveryErr) {
+		recordWakeAttempt(cfg, cfg.wakeDoorbellNow())
 	}
 	return deliveryErr
+}
+
+func recordWakeAttempt(cfg *wakeConfig, now time.Time) {
+	if cfg.lastAttemptAttention {
+		cfg.doorbell.recordAttentionAttempt(now)
+		return
+	}
+	cfg.doorbell.recordAttempt(now)
+}
+
+func shouldRecordWakeAttempt(err error) bool {
+	if err == nil {
+		return true
+	}
+	var attentionErr *wakeAttentionDeliveryError
+	return !errors.As(err, &attentionErr) &&
+		!isWakeTerminalForegroundPGRPChanged(err) &&
+		!isWakeTerminalPartialProgress(err) &&
+		!isWakeInputDemotionBlocked(err) &&
+		!isWakeTerminalProgressUncertain(err)
 }
 
 func deliverWakeInputRecoveryAttention(
@@ -678,18 +686,6 @@ func (cfg *wakeConfig) wakeDoorbellNow() time.Time {
 		return cfg.doorbellNow()
 	}
 	return time.Now()
-}
-
-func (cfg *wakeConfig) wakeDoorbellToken() (string, error) {
-	if cfg.newDoorbellToken != nil {
-		return cfg.newDoorbellToken()
-	}
-	// Internal direct-call tests do not carry a published wake generation.
-	// Production wake instances always do and receive a fresh random token.
-	if cfg.terminalGeneration == "" {
-		return coopWakeDoorbellTokenForTests, nil
-	}
-	return generateWakeDoorbellToken()
 }
 
 func snapshotWakeFileIdentities(current map[string]os.FileInfo) map[string]*wakeFileIdentity {
@@ -896,10 +892,11 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 }
 
 func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForInput bool) error {
+	cfg.lastAttemptAttention = false
 	ownerBound := usesCoopDoorbell(cfg)
 	if ownerBound {
 		if validCoopWakeDoorbell(notice.input.text) {
-			// Generation-token prompts are system-created before delivery.
+			// The fixed doorbell is system-created before delivery.
 		} else {
 			notice.input = wakePayload{
 				text:       coopWakeDoorbell,
@@ -908,7 +905,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		}
 	}
 	if cfg.injectMode == wakeInjectModeNone {
-		return emitWakeAttention(cfg, notice.output)
+		return deliverWakeAttentionOnly(cfg, notice.output)
 	}
 
 	inputText := notice.input.text
@@ -919,7 +916,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 
 	if shouldDeferBeforeInject(cfg, deferForInput) {
 		if !waitForWakeInputQuiet(cfg) {
-			return emitWakeAttention(cfg, notice.output)
+			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
 	}
 
@@ -939,7 +936,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 				_ = writeWakeDiagnostic(cfg, "amq wake: falling back to stderr notification\n")
 				cfg.fallbackWarn = false
 			}
-			return emitWakeAttention(cfg, notice.output)
+			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
 		return nil
 	}
@@ -1024,7 +1021,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			}
 			_ = writeWakeDiagnostic(cfg, "amq wake: warning: %s\n", reason)
 			cfg.fallbackWarn = false
-			return emitWakeAttention(cfg, notice.output)
+			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
 		var authorityErr *wakeTerminalAuthorityError
 		if errors.As(injectErr, &authorityErr) {
@@ -1036,10 +1033,15 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			cfg.fallbackWarn = false
 		}
 		// Fallback: use the output-only attention tier; never retry input.
-		return emitWakeAttention(cfg, notice.output)
+		return deliverWakeAttentionOnly(cfg, notice.output)
 	}
 
 	return nil
+}
+
+func deliverWakeAttentionOnly(cfg *wakeConfig, payload wakePayload) error {
+	cfg.lastAttemptAttention = true
+	return emitWakeAttention(cfg, payload)
 }
 
 func usesCoopDoorbell(cfg *wakeConfig) bool {

@@ -1,11 +1,7 @@
 package cli
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -13,112 +9,79 @@ type wakeDoorbellPhase uint8
 
 const (
 	wakeDoorbellIdle wakeDoorbellPhase = iota
-	wakeDoorbellAwaitingToken
-	wakeDoorbellAwaitingObservation
-	wakeDoorbellObserved
-	wakeDoorbellCohortDelivered
+	wakeDoorbellRetrying
 	wakeDoorbellRecoveryRequired
 )
 
 const (
-	wakeDoorbellRetryBase       = 5 * time.Second
-	wakeDoorbellRetryMax        = 2 * time.Minute
-	wakeDoorbellObservationHold = 2 * time.Minute
+	wakeDoorbellRetryBase          = 5 * time.Second
+	wakeDoorbellAttentionRetryBase = 30 * time.Second
+	wakeDoorbellRetryMax           = 2 * time.Minute
 )
 
 type wakeDoorbellState struct {
-	phase            wakeDoorbellPhase
-	token            string
-	cohort           map[string]*wakeFileIdentity
-	tokenFailures    uint
-	attempts         uint
-	nextAttempt      time.Time
-	observationUntil time.Time
-	observationUsed  bool
-	recoveryPending  bool
+	phase           wakeDoorbellPhase
+	cohort          map[string]*wakeFileIdentity
+	attempts        uint
+	nextAttempt     time.Time
+	recoveryPending bool
 }
 
 type wakeDoorbellPlan struct {
-	attempt bool
-	retry   bool
-	prompt  string
+	attempt  bool
+	retry    bool
+	prompt   string
+	progress bool
 }
 
 func (state *wakeDoorbellState) plan(
 	now time.Time,
 	current map[string]os.FileInfo,
-	newToken func() (string, error),
-) (wakeDoorbellPlan, error) {
+) wakeDoorbellPlan {
 	if len(current) == 0 {
 		state.reset()
-		return wakeDoorbellPlan{}, nil
+		return wakeDoorbellPlan{}
 	}
 
-	if state.phase == wakeDoorbellCohortDelivered {
-		if sameKnownWakeCohort(state.cohort, current) {
-			return wakeDoorbellPlan{}, nil
-		}
+	progress := state.phase != wakeDoorbellIdle && wakeCohortProgressed(state.cohort, current)
+	if progress {
 		state.reset()
 	}
-	if state.phase != wakeDoorbellIdle && wakeCohortProgressed(state.cohort, current) {
-		state.reset()
+	if state.phase == wakeDoorbellIdle {
+		state.arm(current)
 	}
-	if state.phase == wakeDoorbellObserved && !now.Before(state.observationUntil) {
-		state.phase = wakeDoorbellAwaitingObservation
-		state.observationUntil = time.Time{}
-	}
-	if state.phase == wakeDoorbellAwaitingToken && now.Before(state.nextAttempt) {
-		return wakeDoorbellPlan{}, nil
-	}
-	if state.phase == wakeDoorbellIdle || state.phase == wakeDoorbellAwaitingToken {
-		token, err := newToken()
-		if err != nil {
-			if state.phase == wakeDoorbellIdle {
-				state.cohort = snapshotWakeFileIdentities(current)
-			}
-			state.phase = wakeDoorbellAwaitingToken
-			state.tokenFailures++
-			state.nextAttempt = now.Add(wakeDoorbellRetryDelay(state.tokenFailures))
-			return wakeDoorbellPlan{}, err
-		}
-		state.phase = wakeDoorbellAwaitingObservation
-		state.token = token
-		state.cohort = snapshotWakeFileIdentities(current)
-		state.tokenFailures = 0
-		state.nextAttempt = time.Time{}
-	}
-	if state.phase == wakeDoorbellObserved || (state.attempts > 0 && now.Before(state.nextAttempt)) {
-		return wakeDoorbellPlan{}, nil
+	if state.attempts > 0 && now.Before(state.nextAttempt) {
+		return wakeDoorbellPlan{}
 	}
 
 	return wakeDoorbellPlan{
-		attempt: true,
-		retry:   state.attempts > 0,
-		prompt:  buildCoopWakeDoorbell(state.token),
-	}, nil
+		attempt:  true,
+		retry:    state.attempts > 0,
+		prompt:   coopWakeDoorbell,
+		progress: progress,
+	}
+}
+
+func (state *wakeDoorbellState) arm(current map[string]os.FileInfo) {
+	state.phase = wakeDoorbellRetrying
+	state.cohort = snapshotWakeFileIdentities(current)
 }
 
 func (state *wakeDoorbellState) recordAttempt(now time.Time) {
+	state.recordAttemptWithBase(now, wakeDoorbellRetryBase)
+}
+
+func (state *wakeDoorbellState) recordAttentionAttempt(now time.Time) {
+	state.recordAttemptWithBase(now, wakeDoorbellAttentionRetryBase)
+}
+
+func (state *wakeDoorbellState) recordAttemptWithBase(now time.Time, base time.Duration) {
 	state.attempts++
-	state.nextAttempt = now.Add(wakeDoorbellRetryDelay(state.attempts))
-}
-
-// planCohortDelivery gates non-doorbell delivery through the same obligation
-// state used by tokenized input. An unchanged delivered cohort has no remaining
-// obligation; any cohort change must be delivered and then recorded explicitly.
-func (state *wakeDoorbellState) planCohortDelivery(current map[string]os.FileInfo) bool {
-	if len(current) == 0 {
-		state.reset()
-		return false
-	}
-	return state.phase != wakeDoorbellCohortDelivered ||
-		!sameKnownWakeCohort(state.cohort, current)
-}
-
-func (state *wakeDoorbellState) recordCohortDelivered(current map[string]os.FileInfo) {
-	state.reset()
-	state.phase = wakeDoorbellCohortDelivered
-	state.cohort = snapshotWakeFileIdentities(current)
+	state.nextAttempt = now.Add(cappedExponentialBackoff(
+		state.attempts,
+		base,
+		wakeDoorbellRetryMax,
+	))
 }
 
 func (state *wakeDoorbellState) planRecoveryAttention(
@@ -170,37 +133,16 @@ func (state *wakeDoorbellState) noteRecoveryInboxEmpty() {
 }
 
 func (state wakeDoorbellState) pendingInput() bool {
-	switch state.phase {
-	case wakeDoorbellAwaitingToken,
-		wakeDoorbellAwaitingObservation,
-		wakeDoorbellObserved:
-		return true
-	default:
-		return false
-	}
-}
-
-func (state *wakeDoorbellState) observe(token string, now time.Time) bool {
-	if state.phase != wakeDoorbellAwaitingObservation ||
-		state.observationUsed ||
-		token != state.token {
-		return false
-	}
-	state.phase = wakeDoorbellObserved
-	state.observationUntil = now.Add(wakeDoorbellObservationHold)
-	state.observationUsed = true
-	return true
+	return state.phase == wakeDoorbellRetrying
 }
 
 func (state *wakeDoorbellState) nextDeadline() (time.Time, bool) {
 	switch state.phase {
-	case wakeDoorbellAwaitingToken, wakeDoorbellAwaitingObservation:
+	case wakeDoorbellRetrying:
 		return state.nextAttempt, !state.nextAttempt.IsZero()
 	case wakeDoorbellRecoveryRequired:
 		return state.nextAttempt,
 			state.recoveryPending && !state.nextAttempt.IsZero()
-	case wakeDoorbellObserved:
-		return state.observationUntil, !state.observationUntil.IsZero()
 	default:
 		return time.Time{}, false
 	}
@@ -255,20 +197,4 @@ func wakeCohortProgressed(
 		}
 	}
 	return false
-}
-
-func generateWakeDoorbellToken() (string, error) {
-	var token [16]byte
-	if _, err := rand.Read(token[:]); err != nil {
-		return "", fmt.Errorf("generate wake doorbell token: %w", err)
-	}
-	return hex.EncodeToString(token[:]), nil
-}
-
-func validWakeDoorbellToken(token string) bool {
-	if len(token) != 32 || token != strings.ToLower(token) {
-		return false
-	}
-	_, err := hex.DecodeString(token)
-	return err == nil
 }

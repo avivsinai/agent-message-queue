@@ -9,7 +9,6 @@
   "repository": "https://github.com/avivsinai/agent-message-queue",
   "license": "MIT",
   "skills": "./skills/",
-  "hooks": "./hooks/codex-hooks.json",
   "keywords": [
     "messaging",
     "agents",

@@ -193,9 +193,6 @@ func TestNotifyNewMessagesForegroundPGRPResumesAtFirstMissingChunk(t *testing.T)
 			if got := strings.Join(writes, "|"); got != strings.Join(tc.retryWant, "|") {
 				t.Fatalf("retry writes = %q, want %q", got, strings.Join(tc.retryWant, "|"))
 			}
-			if cfg.doorbell.token != coopWakeDoorbellTokenForTests {
-				t.Fatalf("retry token = %q, want preserved token", cfg.doorbell.token)
-			}
 			if cfg.doorbell.attempts != 1 {
 				t.Fatalf("attempts after completed retry = %d, want 1", cfg.doorbell.attempts)
 			}
@@ -1893,6 +1890,170 @@ func TestRunWakeLoopRetriesPendingDoorbellWithoutOutputFlood(t *testing.T) {
 	}
 }
 
+func TestNotifyNewMessagesAttentionOnlyRetryCadence(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "attention-cadence")
+
+	now := time.Unix(1_800_000_000, 0)
+	writes := 0
+	cfg := &wakeConfig{
+		root:           root,
+		me:             "codex",
+		session:        "session1",
+		injectMode:     wakeInjectModeNone,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			writes++
+			return len(data), nil
+		},
+	}
+
+	wantDelays := []time.Duration{
+		30 * time.Second,
+		time.Minute,
+		2 * time.Minute,
+		2 * time.Minute,
+	}
+	for attempt, wantDelay := range wantDelays {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("attention attempt %d: %v", attempt+1, err)
+		}
+		if writes != attempt+1 {
+			t.Fatalf("attention writes after attempt %d = %d, want %d", attempt+1, writes, attempt+1)
+		}
+		wantDeadline := now.Add(wantDelay)
+		if deadline, ok := cfg.doorbell.nextDeadline(); !ok || !deadline.Equal(wantDeadline) {
+			t.Fatalf(
+				"attention deadline after attempt %d = %s, ok=%v; want %s",
+				attempt+1,
+				deadline,
+				ok,
+				wantDeadline,
+			)
+		}
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("early attention check %d: %v", attempt+1, err)
+		}
+		if writes != attempt+1 {
+			t.Fatalf("attention retried before deadline %d: writes=%d", attempt+1, writes)
+		}
+		now = wantDeadline
+	}
+}
+
+func TestNotifyNewMessagesInjectionFallbackUsesAttentionRetryCadence(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "attention-fallback")
+
+	now := time.Unix(1_800_000_000, 0)
+	writes := 0
+	cfg := &wakeConfig{
+		root:          root,
+		me:            "codex",
+		session:       "session1",
+		wakeOwner:     &wakeOwner{},
+		injectMode:    wakeInjectModeRaw,
+		injectVia:     filepath.Join(root, "missing-injector"),
+		injectTimeout: time.Second,
+		doorbellNow:   func() time.Time { return now },
+		attentionIsTTY: func() bool {
+			return false
+		},
+		attentionWrite: func(data []byte) (int, error) {
+			writes++
+			return len(data), nil
+		},
+	}
+
+	captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("fallback notification: %v", err)
+		}
+	})
+	if writes != 1 {
+		t.Fatalf("fallback attention writes = %d, want 1", writes)
+	}
+	want := now.Add(30 * time.Second)
+	if deadline, ok := cfg.doorbell.nextDeadline(); !ok || !deadline.Equal(want) {
+		t.Fatalf("fallback deadline = %s, ok=%v; want %s", deadline, ok, want)
+	}
+}
+
+func TestRunWakeLoopHonorsAttentionOnlyDoorbellDeadline(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "attention-deadline")
+	path := filepath.Join(fsq.AgentInboxNew(root, "codex"), "attention-deadline.md")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retryAt := time.Now().Add(150 * time.Millisecond)
+	attention := make(chan time.Time, 2)
+	maintenanceTicks := make(chan time.Time)
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runWakeLoop(wakeConfig{
+			root:             root,
+			me:               "codex",
+			session:          "session1",
+			injectMode:       wakeInjectModeNone,
+			controlStop:      stop,
+			maintenanceTicks: maintenanceTicks,
+			doorbell: wakeDoorbellState{
+				phase:       wakeDoorbellRetrying,
+				cohort:      snapshotWakeFileIdentities(map[string]os.FileInfo{"attention-deadline.md": info}),
+				attempts:    1,
+				nextAttempt: retryAt,
+			},
+			preconditionCheck: func(*wakeConfig) error { return nil },
+			attentionIsTTY:    func() bool { return false },
+			attentionWrite: func(data []byte) (int, error) {
+				attention <- time.Now()
+				return len(data), nil
+			},
+		})
+	}()
+	defer func() {
+		close(stop)
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("wake loop stop: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("wake loop did not stop")
+		}
+	}()
+
+	select {
+	case at := <-attention:
+		t.Fatalf("attention retried before deadline at %s, deadline %s", at, retryAt)
+	case err := <-done:
+		t.Fatalf("wake loop exited before attention deadline: %v", err)
+	case <-time.After(75 * time.Millisecond):
+	}
+	select {
+	case at := <-attention:
+		if at.Before(retryAt) {
+			t.Fatalf("attention retried at %s before deadline %s", at, retryAt)
+		}
+	case err := <-done:
+		t.Fatalf("wake loop exited before attention retry: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("attention-only retry deadline was ignored")
+	}
+	select {
+	case at := <-attention:
+		t.Fatalf("attention retry hot-looped at %s", at)
+	case err := <-done:
+		t.Fatalf("wake loop exited after attention retry: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestRunWakeLoopForegroundAuthorityRetryDoesNotCompeteWithExpiredDoorbell(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
@@ -1956,7 +2117,7 @@ func TestRunWakeLoopForegroundAuthorityRetryDoesNotCompeteWithExpiredDoorbell(t 
 				return nil
 			},
 			terminalWrite: func(text string) error {
-				if strings.Contains(text, coopWakeDoorbellPrefix) {
+				if strings.Contains(text, coopWakeDoorbell) {
 					switch promptWrites.Add(1) {
 					case 1:
 						return nil
@@ -2111,7 +2272,7 @@ func TestRunWakeLoopMaintenanceDemotionRetiresForegroundAuthorityHold(t *testing
 				return nil
 			},
 			terminalWrite: func(text string) error {
-				if !strings.Contains(text, coopWakeDoorbellPrefix) {
+				if !strings.Contains(text, coopWakeDoorbell) {
 					return nil
 				}
 				if promptWrites.Add(1) == 1 {
@@ -2193,17 +2354,17 @@ func TestRunWakeLoopMaintenanceDemotionRetiresForegroundAuthorityHold(t *testing
 	}
 }
 
-func TestRunWakeLoopDefersObservationUntilPartialInputCompletes(t *testing.T) {
+func TestRunWakeLoopCompletesRetainedPartialInputBeforeRetry(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	message := format.Message{
 		Header: format.Header{
 			Schema:  1,
-			ID:      "deferred-observation",
+			ID:      "retained-partial-input",
 			From:    "peer",
 			To:      []string{"codex"},
 			Thread:  "p2p/codex__peer",
-			Subject: "deferred observation",
+			Subject: "retained partial input",
 			Created: "2026-07-30T08:00:00Z",
 		},
 	}
@@ -2224,10 +2385,8 @@ func TestRunWakeLoopDefersObservationUntilPartialInputCompletes(t *testing.T) {
 	wakeTerminalAuthorityRetryDelay = 50 * time.Millisecond
 	t.Cleanup(func() { wakeTerminalAuthorityRetryDelay = originalRetryDelay })
 
-	token := coopWakeDoorbellTokenForTests
-	payload := buildCoopWakeDoorbell(token)
+	payload := coopWakeDoorbell
 	const accepted = 7
-	promptObserved := make(chan string, 1)
 	firstBlocked := make(chan struct{}, 1)
 	writes := make(chan string, 4)
 	var calls atomic.Int64
@@ -2235,16 +2394,14 @@ func TestRunWakeLoopDefersObservationUntilPartialInputCompletes(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- runWakeLoop(wakeConfig{
-			root:           root,
-			me:             "codex",
-			session:        "session1",
-			wakeOwner:      &wakeOwner{},
-			injectMode:     wakeInjectModePaste,
-			controlStop:    stop,
-			promptObserved: promptObserved,
+			root:        root,
+			me:          "codex",
+			session:     "session1",
+			wakeOwner:   &wakeOwner{},
+			injectMode:  wakeInjectModePaste,
+			controlStop: stop,
 			doorbell: wakeDoorbellState{
-				phase:       wakeDoorbellAwaitingObservation,
-				token:       token,
+				phase:       wakeDoorbellRetrying,
 				cohort:      snapshotWakeFileIdentities(map[string]os.FileInfo{"pending.md": info}),
 				attempts:    1,
 				nextAttempt: time.Now().Add(-time.Second),
@@ -2283,8 +2440,6 @@ func TestRunWakeLoopDefersObservationUntilPartialInputCompletes(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("wake loop did not retain partial input")
 	}
-	promptObserved <- token
-
 	select {
 	case got := <-writes:
 		if want := payload[accepted:]; got != want {
@@ -2307,7 +2462,7 @@ func TestRunWakeLoopDefersObservationUntilPartialInputCompletes(t *testing.T) {
 	}
 	select {
 	case got := <-writes:
-		t.Fatalf("deferred observation replayed terminal input: %q", got)
+		t.Fatalf("retained input completion replayed terminal input: %q", got)
 	case <-time.After(2 * wakeTerminalAuthorityRetryDelay):
 	}
 }
@@ -2493,8 +2648,7 @@ func TestRunWakeLoopPacesPersistentInboxScanErrors(t *testing.T) {
 			retainedInbox: reader,
 			doorbellNow:   func() time.Time { return now },
 			doorbell: wakeDoorbellState{
-				phase:       wakeDoorbellAwaitingObservation,
-				token:       coopWakeDoorbellTokenForTests,
+				phase:       wakeDoorbellRetrying,
 				cohort:      map[string]*wakeFileIdentity{"pending.md": nil},
 				attempts:    1,
 				nextAttempt: now.Add(-time.Second),
@@ -2569,8 +2723,7 @@ func TestRunWakeLoopRecoversAfterTransientInboxScanError(t *testing.T) {
 			retainedInbox: reader,
 			doorbellNow:   func() time.Time { return now },
 			doorbell: wakeDoorbellState{
-				phase:       wakeDoorbellAwaitingObservation,
-				token:       coopWakeDoorbellTokenForTests,
+				phase:       wakeDoorbellRetrying,
 				cohort:      map[string]*wakeFileIdentity{"pending.md": nil},
 				attempts:    1,
 				nextAttempt: now.Add(-time.Second),
@@ -2837,7 +2990,7 @@ func TestRunWakeLoopPreservesForegroundRetryAcrossInboxScanError(t *testing.T) {
 			retainedInbox:     reader,
 			preconditionCheck: func(*wakeConfig) error { return nil },
 			terminalWrite: func(text string) error {
-				if !strings.Contains(text, coopWakeDoorbellPrefix) {
+				if !strings.Contains(text, coopWakeDoorbell) {
 					return nil
 				}
 				if promptWrites.Add(1) == 1 {
@@ -2981,7 +3134,7 @@ func TestRunWakeLoopMaintenanceDemotionTransfersDormantDoorbellRetry(t *testing.
 				return nil
 			},
 			terminalWrite: func(text string) error {
-				if strings.Contains(text, coopWakeDoorbellPrefix) {
+				if strings.Contains(text, coopWakeDoorbell) {
 					promptWrites.Add(1)
 				}
 				if text == "\r" &&
@@ -3119,8 +3272,7 @@ func TestRunWakeLoopMaintenanceDemotionTransfersBeforePersistenceFailure(t *test
 			injectMode:  wakeInjectModePaste,
 			controlStop: make(chan struct{}),
 			doorbell: wakeDoorbellState{
-				phase:       wakeDoorbellAwaitingObservation,
-				token:       coopWakeDoorbellTokenForTests,
+				phase:       wakeDoorbellRetrying,
 				cohort:      snapshotWakeFileIdentities(map[string]os.FileInfo{"pending.md": info}),
 				attempts:    1,
 				nextAttempt: time.Now().Add(time.Hour),
@@ -3214,11 +3366,10 @@ func TestRunWakeLoopMaintenanceKeepsWatchingAfterConfirmedInputDemotion(t *testi
 			inputDelivery: wakeInputDeliveryState{
 				phase:   wakeInputRawRescueQueued,
 				mode:    wakeInjectModeRaw,
-				payload: buildCoopWakeDoorbell(coopWakeDoorbellTokenForTests),
+				payload: coopWakeDoorbell,
 			},
 			doorbell: wakeDoorbellState{
-				phase:       wakeDoorbellAwaitingObservation,
-				token:       coopWakeDoorbellTokenForTests,
+				phase:       wakeDoorbellRetrying,
 				cohort:      snapshotWakeFileIdentities(map[string]os.FileInfo{"pending.md": info}),
 				attempts:    1,
 				nextAttempt: time.Now().Add(time.Hour),
@@ -3326,11 +3477,10 @@ func TestRunWakeLoopKeepsWatchingAfterConfirmedInputBecomesUnsupported(t *testin
 			inputDelivery: wakeInputDeliveryState{
 				phase:   wakeInputPrimarySubmitPending,
 				mode:    wakeInjectModePaste,
-				payload: buildCoopWakeDoorbell(coopWakeDoorbellTokenForTests),
+				payload: coopWakeDoorbell,
 			},
 			doorbell: wakeDoorbellState{
-				phase:  wakeDoorbellAwaitingObservation,
-				token:  coopWakeDoorbellTokenForTests,
+				phase:  wakeDoorbellRetrying,
 				cohort: snapshotWakeFileIdentities(map[string]os.FileInfo{"first.md": firstInfo}),
 			},
 			maintenanceTicks: ticks,
@@ -3440,11 +3590,10 @@ func TestRunWakeLoopMessageRecoveryAttentionFailureIsFatalWithoutRetry(t *testin
 			inputDelivery: wakeInputDeliveryState{
 				phase:   wakeInputPrimarySubmitPending,
 				mode:    wakeInjectModePaste,
-				payload: buildCoopWakeDoorbell(coopWakeDoorbellTokenForTests),
+				payload: coopWakeDoorbell,
 			},
 			doorbell: wakeDoorbellState{
-				phase:  wakeDoorbellAwaitingObservation,
-				token:  coopWakeDoorbellTokenForTests,
+				phase:  wakeDoorbellRetrying,
 				cohort: snapshotWakeFileIdentities(map[string]os.FileInfo{"message.md": info}),
 			},
 			terminalWrite: func(string) error {
@@ -3500,7 +3649,7 @@ func TestRunWakeLoopKeepsWatchingWhenDrainedInboxReconciliationBecomesUncertain(
 			inputDelivery: wakeInputDeliveryState{
 				phase:   wakeInputPrimarySubmitPending,
 				mode:    wakeInjectModePaste,
-				payload: buildCoopWakeDoorbell(coopWakeDoorbellTokenForTests),
+				payload: coopWakeDoorbell,
 			},
 			maintenanceTicks: ticks,
 			terminalWrite: func(string) error {
@@ -3577,7 +3726,7 @@ func TestRunWakeLoopDrainedInboxRecoveryAttentionFailureIsFatal(t *testing.T) {
 			inputDelivery: wakeInputDeliveryState{
 				phase:   wakeInputPrimarySubmitPending,
 				mode:    wakeInjectModePaste,
-				payload: buildCoopWakeDoorbell(coopWakeDoorbellTokenForTests),
+				payload: coopWakeDoorbell,
 			},
 			terminalWrite: func(string) error {
 				return &wakeTestAcceptedProgressError{
@@ -3656,11 +3805,10 @@ func TestRunWakeLoopBuiltInMaintenanceKeepsWatchingAfterConfirmedInputDemotion(t
 			inputDelivery: wakeInputDeliveryState{
 				phase:   wakeInputRawRescuePending,
 				mode:    wakeInjectModeRaw,
-				payload: buildCoopWakeDoorbell(coopWakeDoorbellTokenForTests),
+				payload: coopWakeDoorbell,
 			},
 			doorbell: wakeDoorbellState{
-				phase:       wakeDoorbellAwaitingObservation,
-				token:       coopWakeDoorbellTokenForTests,
+				phase:       wakeDoorbellRetrying,
 				cohort:      snapshotWakeFileIdentities(map[string]os.FileInfo{"pending.md": info}),
 				attempts:    1,
 				nextAttempt: time.Now().Add(time.Hour),
@@ -7134,6 +7282,97 @@ func TestOpenCoopWakeOutputCreatesPrivateDurableLog(t *testing.T) {
 	}
 }
 
+func TestOpenWakeOutputsBoundAccumulatedLogsAtLaunch(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		open     func(string, string) (*os.File, error)
+	}{
+		{
+			name:     "coop",
+			filename: ".wake.log",
+			open:     openCoopWakeOutput,
+		},
+		{
+			name:     "repair",
+			filename: ".wake.repair.log",
+			open:     openWakeRepairOutputForTest,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			agentBase := fsq.AgentBase(root, "orchestrator")
+			if err := os.MkdirAll(agentBase, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(agentBase, tc.filename)
+			if err := os.WriteFile(path, bytes.Repeat([]byte("x"), 2<<20), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			output, err := tc.open(root, "orchestrator")
+			if err != nil {
+				t.Fatalf("open oversized output: %v", err)
+			}
+			if info, err := output.Stat(); err != nil {
+				t.Fatalf("stat opened output: %v", err)
+			} else if info.Size() != 0 {
+				t.Fatalf("oversized output retained %d bytes, want launch truncation", info.Size())
+			}
+			if _, err := output.WriteString("fresh\n"); err != nil {
+				t.Fatalf("write bounded output: %v", err)
+			}
+			if err := output.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if data, err := os.ReadFile(path); err != nil || string(data) != "fresh\n" {
+				t.Fatalf("bounded output = %q err=%v", data, err)
+			}
+			if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
+				t.Fatalf("unexpected rotated sibling: %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenWakeOutputsPreserveSmallLogsForAppend(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		open     func(string, string) (*os.File, error)
+	}{
+		{name: "coop", filename: ".wake.log", open: openCoopWakeOutput},
+		{name: "repair", filename: ".wake.repair.log", open: openWakeRepairOutputForTest},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			agentBase := fsq.AgentBase(root, "orchestrator")
+			if err := os.MkdirAll(agentBase, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(agentBase, tc.filename)
+			if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := tc.open(root, "orchestrator")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := output.WriteString("new\n"); err != nil {
+				t.Fatal(err)
+			}
+			if err := output.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if data, err := os.ReadFile(path); err != nil || string(data) != "old\nnew\n" {
+				t.Fatalf("small output = %q err=%v", data, err)
+			}
+		})
+	}
+}
+
 func TestOpenCoopWakeOutputRejectsSymlinkLog(t *testing.T) {
 	root := secureTempDirForTest(t)
 	agentBase := fsq.AgentBase(root, "orchestrator")
@@ -7531,11 +7770,9 @@ func TestWakeInjectionPreconditionCheckSurfacesLegacyCapabilityChangeWithoutInje
 			payload: "stale doorbell",
 		},
 		doorbell: wakeDoorbellState{
-			phase:            wakeDoorbellObserved,
-			token:            "11111111111111111111111111111111",
-			attempts:         2,
-			nextAttempt:      time.Unix(1_800_000_000, 0),
-			observationUntil: time.Unix(1_800_000_100, 0),
+			phase:       wakeDoorbellRetrying,
+			attempts:    2,
+			nextAttempt: time.Unix(1_800_000_000, 0),
 		},
 		recordNotifierStatus: func(gotStatus, gotMode, gotReason string) error {
 			status, mode, reason = gotStatus, gotMode, gotReason
@@ -7569,11 +7806,8 @@ func TestWakeInjectionPreconditionCheckSurfacesLegacyCapabilityChangeWithoutInje
 		t.Fatalf("inject mode = %q, want retained paste mode", cfg.injectMode)
 	}
 	if cfg.doorbell.phase != previousDoorbell.phase ||
-		cfg.doorbell.token != previousDoorbell.token ||
 		cfg.doorbell.attempts != previousDoorbell.attempts ||
-		!cfg.doorbell.nextAttempt.Equal(previousDoorbell.nextAttempt) ||
-		!cfg.doorbell.observationUntil.Equal(previousDoorbell.observationUntil) ||
-		cfg.doorbell.observationUsed != previousDoorbell.observationUsed {
+		!cfg.doorbell.nextAttempt.Equal(previousDoorbell.nextAttempt) {
 		t.Fatalf("blocked demotion mutated doorbell: %#v", cfg.doorbell)
 	}
 	if cfg.inputDelivery != previousInput {

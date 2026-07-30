@@ -220,6 +220,59 @@ func TestDoctorOpsReportsLiveUnsupportedInjectorAsDegraded(t *testing.T) {
 	}
 }
 
+func TestHumanHealthOutputReportsLiveRecoveryRequiredNotifier(t *testing.T) {
+	root := setupPresenceSourceFixture(t)
+	p, err := presence.Read(root, "notifier")
+	if err != nil {
+		t.Fatalf("read notifier presence: %v", err)
+	}
+	p.NotifierStatus = wakeInputRecoveryRequiredStatus
+	p.NotifierMode = wakeInjectModePaste
+	p.NotifierReason = wakeInputRecoveryNotice
+	if err := presence.Write(root, p); err != nil {
+		t.Fatalf("write notifier presence: %v", err)
+	}
+
+	t.Setenv("AM_ROOT", root)
+	t.Setenv("AM_BASE_ROOT", "")
+	t.Setenv("AM_SESSION", "")
+	doctorText, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{"--ops"})
+	})
+	if err != nil {
+		t.Fatalf("runDoctor text: %v", err)
+	}
+	doctorLine := lineWithPrefix(doctorText, "  notifier:")
+	for _, want := range []string{
+		"source notifier_live",
+		"⚠ input_recovery_required",
+		"mode=paste",
+		wakeInputRecoveryNotice,
+	} {
+		if !strings.Contains(doctorLine, want) {
+			t.Fatalf("doctor line missing %q: %q\n%s", want, doctorLine, doctorText)
+		}
+	}
+
+	whoText, err := captureEnvStdout(t, func() error {
+		return runWho([]string{"--root", root})
+	})
+	if err != nil {
+		t.Fatalf("runWho text: %v", err)
+	}
+	whoLine := lineWithPrefix(whoText, "    notifier  ")
+	for _, want := range []string{
+		"active (notifier_live)",
+		"input_recovery_required",
+		"mode=paste",
+		wakeInputRecoveryNotice,
+	} {
+		if !strings.Contains(whoLine, want) {
+			t.Fatalf("who line missing %q: %q\n%s", want, whoLine, whoText)
+		}
+	}
+}
+
 func lineWithPrefix(text, prefix string) string {
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(line, prefix) {

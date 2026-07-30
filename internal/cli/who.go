@@ -159,8 +159,10 @@ func runWho(args []string) error {
 				if a.PresenceSource != "" {
 					status += " (" + a.PresenceSource + ")"
 				}
-				if a.NotifierStatus == wakeInjectorUnsupportedStatus {
-					status += "; " + a.NotifierStatus
+				if a.NotifierStatus != "" {
+					status += "; " + a.NotifierStatus +
+						" mode=" + a.NotifierMode +
+						" reason=" + a.NotifierReason
 				}
 			}
 			note := ""
