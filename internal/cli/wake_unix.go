@@ -2815,8 +2815,8 @@ func runWakeLoop(cfg wakeConfig) error {
 	}
 
 	// Recheck non-invasive injection preconditions and silently reconcile
-	// durable pending work every 30s. Doorbell retries use finite generation
-	// deadlines and never emit periodic alternate-screen output.
+	// durable pending work every 30s. Independent doorbell deadlines keep
+	// re-notifying unread cohorts, with separate input and attention cadences.
 	maintenanceTicks := cfg.maintenanceTicks
 	var maintenanceTicker *time.Ticker
 	if maintenanceTicks == nil {

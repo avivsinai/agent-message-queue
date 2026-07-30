@@ -42,7 +42,7 @@ func TestWakeDoorbellStateRetriesUntilInboxProgress(t *testing.T) {
 	var state wakeDoorbellState
 
 	plan := state.plan(now, current)
-	if !plan.attempt || plan.retry || plan.prompt != coopWakeDoorbell {
+	if !plan.attempt || plan.prompt != coopWakeDoorbell {
 		t.Fatalf("initial plan = %#v", plan)
 	}
 	state.recordAttempt(now)
@@ -52,13 +52,13 @@ func TestWakeDoorbellStateRetriesUntilInboxProgress(t *testing.T) {
 		t.Fatalf("early retry plan = %#v", plan)
 	}
 	plan = state.plan(now.Add(wakeDoorbellRetryBase), current)
-	if !plan.attempt || !plan.retry || plan.prompt != coopWakeDoorbell {
+	if !plan.attempt || plan.prompt != coopWakeDoorbell {
 		t.Fatalf("due retry plan = %#v", plan)
 	}
 
 	remaining := map[string]os.FileInfo{"b.md": current["b.md"]}
 	plan = state.plan(now.Add(wakeDoorbellRetryBase+time.Millisecond), remaining)
-	if !plan.attempt || plan.retry {
+	if !plan.attempt {
 		t.Fatalf("progress plan = %#v", plan)
 	}
 	if state.attempts != 0 || len(state.cohort) != 1 {
@@ -89,7 +89,7 @@ func TestWakeDoorbellStateRearmsWhenUnknownIdentityBecomesKnown(t *testing.T) {
 
 	known := wakeDoorbellTestFiles(t, "readable.md")
 	plan := state.plan(now.Add(time.Second), known)
-	if !plan.attempt || plan.retry {
+	if !plan.attempt {
 		t.Fatalf("identity recovery plan = %#v", plan)
 	}
 }
@@ -105,7 +105,7 @@ func TestWakeDoorbellStateKeepsRetryWhenKnownIdentityBecomesUnavailable(t *testi
 
 	temporarilyUnknown := map[string]os.FileInfo{"readable.md": nil}
 	plan := state.plan(now.Add(wakeDoorbellRetryBase), temporarilyUnknown)
-	if !plan.attempt || !plan.retry {
+	if !plan.attempt {
 		t.Fatalf("temporarily unknown plan = %#v", plan)
 	}
 }
@@ -154,20 +154,58 @@ func TestWakeDoorbellRecoveryAttentionIsCohortBoundedAndRateLimited(t *testing.T
 	}
 }
 
-func TestWakeDoorbellRetryDelayCaps(t *testing.T) {
-	cases := []struct {
-		attempt uint
-		want    time.Duration
+func TestWakeDoorbellRetryCadenceCapsPerDeliveredChannel(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	tests := []struct {
+		name   string
+		record func(*wakeDoorbellState, time.Time)
+		wants  []time.Duration
 	}{
-		{attempt: 1, want: 5 * time.Second},
-		{attempt: 2, want: 10 * time.Second},
-		{attempt: 5, want: 80 * time.Second},
-		{attempt: 6, want: 2 * time.Minute},
-		{attempt: 1000, want: 2 * time.Minute},
+		{
+			name: "input",
+			record: func(state *wakeDoorbellState, attemptAt time.Time) {
+				state.recordAttempt(attemptAt)
+			},
+			wants: []time.Duration{
+				5 * time.Second,
+				10 * time.Second,
+				20 * time.Second,
+				40 * time.Second,
+				80 * time.Second,
+				2 * time.Minute,
+				2 * time.Minute,
+			},
+		},
+		{
+			name: "attention",
+			record: func(state *wakeDoorbellState, attemptAt time.Time) {
+				state.recordAttentionAttempt(attemptAt)
+			},
+			wants: []time.Duration{
+				30 * time.Second,
+				time.Minute,
+				2 * time.Minute,
+				4 * time.Minute,
+				8 * time.Minute,
+				15 * time.Minute,
+				15 * time.Minute,
+			},
+		},
 	}
-	for _, tc := range cases {
-		if got := wakeDoorbellRetryDelay(tc.attempt); got != tc.want {
-			t.Fatalf("attempt %d delay = %s, want %s", tc.attempt, got, tc.want)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var state wakeDoorbellState
+			for attempt, want := range tt.wants {
+				tt.record(&state, now)
+				if got := state.nextAttempt.Sub(now); got != want {
+					t.Fatalf(
+						"attempt %d delay = %s, want %s",
+						attempt+1,
+						got,
+						want,
+					)
+				}
+			}
+		})
 	}
 }

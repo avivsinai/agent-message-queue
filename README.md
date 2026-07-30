@@ -112,11 +112,15 @@ Wake treats terminal notification as an attempt, not delivery, and retries on
 a capped backoff until the inbox makes durable progress. The first notification
 is immediate. Attempts that inject the fixed doorbell start at 5 seconds because
 they drive the agent; attention-only attempts start at 30 seconds because they
-alert a human. Both double to a 2-minute cap. Contextual peer headers appear
-only in terminal output or attention; terminal input always uses the fixed
-doorbell. The delay starts after the preceding injector process exits or times
-out. Because `--wake-inject-via` executes arbitrary local code, a retry can
-repeat injector-side effects.
+alert a human. Input attempts double to a 2-minute cap; attention-only attempts
+continue through 4 and 8 minutes to a 15-minute cap. Retries never give up while
+the cohort remains unread. Contextual peer headers appear only in terminal
+output or attention; terminal input always uses the fixed doorbell. The delay
+starts after the preceding injector process exits or times out. Because
+`--wake-inject-via` executes arbitrary local code, a retry can repeat
+injector-side effects. A successful input attempt does not also emit attention;
+when input is unavailable or fails, attention becomes the delivered channel and
+repeats on its slower cadence.
 
 > **First-message check:** start both agents before sending the test message.
 > A newly started wake deliberately baselines messages that were already

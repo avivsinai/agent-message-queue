@@ -306,13 +306,17 @@ Wake treats one transport execution only as a delivery attempt. While the same
 inbox cohort remains unread, it retries on its own capped backoff. The first
 notification is immediate. Attempts that inject the fixed doorbell start at 5
 seconds because they drive the agent; attention-only attempts start at 30
-seconds because they alert a human. Both double to a 2-minute cap. Contextual
-peer headers appear only in terminal output or attention; terminal input always
-uses the fixed doorbell. The delay starts after the prior injector process exits
-or times out. Because an external injector is arbitrary local code, retries can
-duplicate its side effects. Removing or replacing any message from that cohort
-is durable progress and immediately rearms the next notification. Owner-bound
-retries do not repeat the out-of-band attention text.
+seconds because they alert a human. Input attempts double to a 2-minute cap;
+attention-only attempts continue through 4 and 8 minutes to a 15-minute cap.
+Retries never give up while the cohort remains unread. Contextual peer headers
+appear only in terminal output or attention; terminal input always uses the
+fixed doorbell. The delay starts after the prior injector process exits or times
+out. Because an external injector is arbitrary local code, retries can duplicate
+its side effects. Removing or replacing any message from that cohort is durable
+progress and immediately rearms the next notification. Owner-bound retries do
+not emit attention when terminal input succeeds; when input is unavailable or
+fails, attention becomes the delivered channel and repeats on its slower
+cadence.
 
 For orchestrators or hardened environments without a controlling TTY, use an
 explicit external transport:

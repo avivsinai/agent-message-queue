@@ -65,9 +65,6 @@ func wakeDiagnosticIsTerminal(cfg *wakeConfig) bool {
 // Effects record only a complete write by AMQ; they do not assert that a
 // terminal rendered them or that a person observed them.
 func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
-	if cfg != nil && cfg.suppressAttention {
-		return nil
-	}
 	isTerminal := wakeAttentionIsTerminal(cfg)
 	writePlainOutput := !isTerminal || cfg == nil || !wakeUsesAlternateScreenTUI(cfg.me)
 	var effects []string
