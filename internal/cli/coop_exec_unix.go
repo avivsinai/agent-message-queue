@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"golang.org/x/sys/unix"
 )
 
 const wakeReadyTimeout = 25 * time.Second
@@ -23,6 +24,30 @@ const wakeProcessExitTimeout = 5 * time.Second
 var killWakeHelperProcess = func(proc *os.Process) error { return proc.Kill() }
 
 var coopExecProcess = syscall.Exec
+
+var openCoopWakeTTY = func() (*os.File, error) {
+	return os.OpenFile("/dev/tty", os.O_WRONLY|unix.O_CLOEXEC, 0)
+}
+
+func openCoopWakeAttention(output *os.File) (*os.File, error) {
+	if attention, err := openCoopWakeTTY(); err == nil {
+		return attention, nil
+	}
+	if output == nil {
+		return nil, fmt.Errorf("wake diagnostics are unavailable")
+	}
+	fd, err := unix.Dup(int(output.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("duplicate wake diagnostics for non-terminal attention: %w", err)
+	}
+	unix.CloseOnExec(fd)
+	attention := os.NewFile(uintptr(fd), output.Name())
+	if attention == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("adopt non-terminal wake attention descriptor")
+	}
+	return attention, nil
+}
 
 func runCoopExec(args []string) error {
 	// Split at "--" before flag parsing so agent flags aren't consumed.
@@ -288,7 +313,13 @@ func runCoopExec(args []string) error {
 	var wakeHelperClaim *wakeLockInspection
 	var cleanupWakeReady func()
 	var earlyOwner *wakeOwner
-	baseEnv := unsetEnvVar(unsetEnvVar(os.Environ(), envWakeOwner), envWakePrivateStopFD)
+	baseEnv := unsetEnvVar(
+		unsetEnvVar(
+			unsetEnvVar(os.Environ(), envWakeOwner),
+			envWakePrivateStopFD,
+		),
+		envWakeAttentionFD,
+	)
 	retainWakeHelperClaim := func(current wakeLockInspection) {
 		if retained := exactCoopWakeHelperClaim(wakeProc, current); retained != nil {
 			wakeHelperClaim = retained
@@ -335,8 +366,21 @@ func runCoopExec(args []string) error {
 			}
 			wakeCmd.Env = wakeEnv
 			wakeCmd.Stdin = os.Stdin
-			wakeCmd.Stdout = os.Stdout
-			wakeCmd.Stderr = os.Stderr
+			wakeOutput, outputErr := openCoopWakeOutput(root, agentHandle)
+			if outputErr != nil {
+				return fmt.Errorf("open durable coop wake diagnostics: %w", outputErr)
+			}
+			defer func() { _ = wakeOutput.Close() }()
+			wakeAttention, attentionErr := openCoopWakeAttention(wakeOutput)
+			if attentionErr != nil {
+				return fmt.Errorf("open isolated coop wake attention: %w", attentionErr)
+			}
+			defer func() { _ = wakeAttention.Close() }()
+			wakeCmd.Stdout = wakeOutput
+			wakeCmd.Stderr = wakeOutput
+			if err := attachWakeAttentionFD(wakeCmd, wakeAttention); err != nil {
+				return fmt.Errorf("attach isolated coop wake attention: %w", err)
+			}
 			wakeChildCapability, err = configureAuthoritativeWakeChild(wakeCmd)
 			if err == nil && wakeChildCapability == nil {
 				return fmt.Errorf("prepare exact-owner amq wake supervision returned nil capability")

@@ -179,7 +179,7 @@ func TestPublicCoopRawPTYDoorbellAndOwnerCleanup(t *testing.T) {
 			t.Fatalf("read public PTY input: %v", err)
 		}
 		got := strings.TrimSuffix(string(line), "\r")
-		if _, valid := parseCoopWakeDoorbell(got); !valid {
+		if !validCoopWakeDoorbell(got) {
 			t.Fatalf("public PTY input = %q, want canonical tokenized doorbell", got)
 		}
 		for _, sentinel := range sentinels {
@@ -223,7 +223,7 @@ func assertFixedASCIIOnlyCoopInjection(t *testing.T, chunks, forbidden []string)
 	if len(chunks) == 0 {
 		t.Fatal("coop raw wake injected no doorbell")
 	}
-	if _, valid := parseCoopWakeDoorbell(chunks[0]); !valid {
+	if !validCoopWakeDoorbell(chunks[0]) {
 		t.Fatalf("first coop injection chunk = %q, want canonical tokenized doorbell; all chunks=%#v",
 			chunks[0], chunks)
 	}

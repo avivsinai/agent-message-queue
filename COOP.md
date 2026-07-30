@@ -302,20 +302,25 @@ For the first notification test, start both `coop exec` agents before sending
 the message. If a message was already waiting when the target wake started, it
 will not notify; it remains unread and visible to `amq drain --include-body`.
 
-For Codex raw/paste sessions, a terminal write is only a delivery attempt.
-While the same inbox cohort remains unread, wake retries a fixed, tokenized
-doorbell on its own capped backoff. Removing or replacing any message from that
-cohort is durable progress and immediately rearms the next notification.
-Retries do not repeat the out-of-band attention text.
+For owner-bound raw, paste, and `--wake-inject-via` sessions started by
+`amq coop exec`, wake treats one transport execution only as a delivery
+attempt. While the same inbox cohort remains unread, wake retries a fixed,
+tokenized doorbell on its own capped backoff. The delay starts after the prior
+injector process exits or times out. Because an external injector is arbitrary
+local code, retries can duplicate its side effects. Removing or replacing any
+message from that cohort is durable progress and immediately rearms the next
+notification. Retries do not repeat the out-of-band attention text. Standalone
+ownerless `amq wake` keeps its legacy one-shot notification behavior.
 
 On macOS, the bundled Codex `UserPromptSubmit` hook can observe the exact
 doorbell token and pause retries for a short, nonrenewable lease. Hook
 observation does not acknowledge, drain, or complete a message; only inbox
 progress does. Hook activation is therefore an optimization, not a liveness
-requirement. Use
-Codex's `/hooks` view to confirm activation in the current environment. If
-project hooks are unavailable or untrusted, wake continues retrying and the
-agent may see duplicate doorbells until it drains the inbox.
+requirement. Use Codex's `/hooks` view to confirm activation in the current
+environment. If project hooks are unavailable or untrusted, wake continues
+retrying and the agent may see duplicate doorbells until it drains the inbox.
+Linux co-op wakes have no prompt-observation lease; their retries continue on a
+capped backoff until the inbox makes durable progress.
 
 For orchestrators or hardened environments without a controlling TTY, use an
 explicit external transport:
@@ -348,12 +353,20 @@ amq wake --me claude --inject-mode none --bell &
 amq coop exec --require-wake --wake-inject-mode none claude
 ```
 
-`none` writes notification text (and the optional bell) to wake's stderr and
-never writes terminal input. Urgent interrupt messages degrade to one bell plus
-the stderr notice instead of Ctrl+C. Because `--inject-via` is arbitrary local
+`none` never writes terminal input. `coop exec` gives its wake child separate
+process capabilities: full stdout/stderr diagnostics append to the private
+`agents/<agent>/.wake.log`, while notification attention uses a dedicated
+terminal descriptor. Codex and Claude receive only terminal-safe title, bell,
+and supported desktop-notification sequences on that descriptor, so runtime,
+cleanup, and top-level fatal diagnostics cannot overwrite the active composer.
+Without a controlling terminal, attention is appended to the same durable log.
+Urgent interrupt messages degrade to terminal-safe attention instead of Ctrl+C.
+Because
+`--inject-via` is arbitrary local
 code and may itself inject terminal input, `none` rejects `--inject-via`,
-`--inject-arg`, and `--inject-cmd`. Stderr output shares the TUI terminal by
-default and may remain visible until the TUI redraws.
+`--inject-arg`, and `--inject-cmd`. A directly launched or externally
+supervised `amq wake` should likewise route stdout/stderr to a private log when
+it shares a terminal with an alternate-screen agent.
 
 ### Supervisor recipes
 

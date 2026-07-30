@@ -16,6 +16,7 @@ const (
 	wakeDoorbellAwaitingToken
 	wakeDoorbellAwaitingObservation
 	wakeDoorbellObserved
+	wakeDoorbellCohortDelivered
 )
 
 const (
@@ -27,11 +28,12 @@ const (
 type wakeDoorbellState struct {
 	phase            wakeDoorbellPhase
 	token            string
-	cohort           map[string]wakeFileIdentity
+	cohort           map[string]*wakeFileIdentity
 	tokenFailures    uint
 	attempts         uint
 	nextAttempt      time.Time
 	observationUntil time.Time
+	observationUsed  bool
 }
 
 type wakeDoorbellPlan struct {
@@ -50,11 +52,18 @@ func (state *wakeDoorbellState) plan(
 		return wakeDoorbellPlan{}, nil
 	}
 
+	if state.phase == wakeDoorbellCohortDelivered {
+		if sameKnownWakeCohort(state.cohort, current) {
+			return wakeDoorbellPlan{}, nil
+		}
+		state.reset()
+	}
 	if state.phase != wakeDoorbellIdle && wakeCohortProgressed(state.cohort, current) {
 		state.reset()
 	}
 	if state.phase == wakeDoorbellObserved && !now.Before(state.observationUntil) {
-		state.reset()
+		state.phase = wakeDoorbellAwaitingObservation
+		state.observationUntil = time.Time{}
 	}
 	if state.phase == wakeDoorbellAwaitingToken && now.Before(state.nextAttempt) {
 		return wakeDoorbellPlan{}, nil
@@ -92,20 +101,50 @@ func (state *wakeDoorbellState) recordAttempt(now time.Time) {
 	state.nextAttempt = now.Add(wakeDoorbellRetryDelay(state.attempts))
 }
 
+// planCohortDelivery gates non-doorbell delivery through the same obligation
+// state used by tokenized input. An unchanged delivered cohort has no remaining
+// obligation; any cohort change must be delivered and then recorded explicitly.
+func (state *wakeDoorbellState) planCohortDelivery(current map[string]os.FileInfo) bool {
+	if len(current) == 0 {
+		state.reset()
+		return false
+	}
+	return state.phase != wakeDoorbellCohortDelivered ||
+		!sameKnownWakeCohort(state.cohort, current)
+}
+
+func (state *wakeDoorbellState) recordCohortDelivered(current map[string]os.FileInfo) {
+	state.reset()
+	state.phase = wakeDoorbellCohortDelivered
+	state.cohort = snapshotWakeFileIdentities(current)
+}
+
+func (state wakeDoorbellState) pendingInput() bool {
+	switch state.phase {
+	case wakeDoorbellAwaitingToken,
+		wakeDoorbellAwaitingObservation,
+		wakeDoorbellObserved:
+		return true
+	default:
+		return false
+	}
+}
+
 func (state *wakeDoorbellState) observe(token string, now time.Time) bool {
-	if state.phase != wakeDoorbellAwaitingObservation || token != state.token {
+	if state.phase != wakeDoorbellAwaitingObservation ||
+		state.observationUsed ||
+		token != state.token {
 		return false
 	}
 	state.phase = wakeDoorbellObserved
 	state.observationUntil = now.Add(wakeDoorbellObservationHold)
+	state.observationUsed = true
 	return true
 }
 
 func (state *wakeDoorbellState) nextDeadline() (time.Time, bool) {
 	switch state.phase {
-	case wakeDoorbellAwaitingToken:
-		return state.nextAttempt, !state.nextAttempt.IsZero()
-	case wakeDoorbellAwaitingObservation:
+	case wakeDoorbellAwaitingToken, wakeDoorbellAwaitingObservation:
 		return state.nextAttempt, !state.nextAttempt.IsZero()
 	case wakeDoorbellObserved:
 		return state.observationUntil, !state.observationUntil.IsZero()
@@ -119,23 +158,46 @@ func (state *wakeDoorbellState) reset() {
 }
 
 func wakeDoorbellRetryDelay(attempt uint) time.Duration {
-	delay := wakeDoorbellRetryBase
-	for i := uint(1); i < attempt && delay < wakeDoorbellRetryMax; i++ {
+	return cappedExponentialBackoff(attempt, wakeDoorbellRetryBase, wakeDoorbellRetryMax)
+}
+
+func cappedExponentialBackoff(attempt uint, base, maximum time.Duration) time.Duration {
+	delay := base
+	if delay >= maximum {
+		return maximum
+	}
+	for i := uint(1); i < attempt && delay < maximum; i++ {
 		delay *= 2
-		if delay >= wakeDoorbellRetryMax {
-			return wakeDoorbellRetryMax
+		if delay >= maximum {
+			return maximum
 		}
 	}
 	return delay
 }
 
 func wakeCohortProgressed(
-	cohort map[string]wakeFileIdentity,
+	cohort map[string]*wakeFileIdentity,
 	current map[string]os.FileInfo,
 ) bool {
 	for name, identity := range cohort {
 		info, ok := current[name]
-		if !ok || !matchesWakeFileIdentity(identity, info) {
+		if !ok {
+			return true
+		}
+		if info == nil {
+			continue
+		}
+		currentIdentity, known := captureWakeFileIdentity(info)
+		if identity == nil {
+			if known {
+				return true
+			}
+			continue
+		}
+		if !known {
+			continue
+		}
+		if *identity != currentIdentity {
 			return true
 		}
 	}

@@ -196,6 +196,102 @@ func TestWakeRepairAdmissionFailureStopsAndReapsPreparedChild(t *testing.T) {
 	assertRepairLifecycleChildReapedWithoutClaim(t, fixture, child)
 }
 
+func TestWakeRepairFailedChildCleanupPreservesExactClaimWithoutObservedExit(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		capabilityDetached bool
+	}{
+		{name: "pre-detach"},
+		{name: "capability-detached", capabilityDetached: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newWakeRepairLifecycleFixture(t)
+			if err := os.Remove(fixture.lockPath); err != nil {
+				t.Fatalf("remove dead source lock: %v", err)
+			}
+			child, err := startWakeFromTargetDefault(
+				fixture.agentDir,
+				fixture.inboxDir,
+				fixture.root,
+				"codex",
+				fixture.target,
+				fixture.lineage,
+			)
+			cleanupRepairLifecycleChild(t, child)
+			if err != nil {
+				t.Fatalf(
+					"start prepared repair child: %v\n%s",
+					err,
+					wakeRepairLifecycleDiagnostics(fixture, child),
+				)
+			}
+			forceRepairLifecycleChildInspection(t, fixture, child)
+
+			lockBefore, err := os.ReadFile(fixture.lockPath)
+			if err != nil {
+				t.Fatalf("read exact child lock: %v", err)
+			}
+			floorPath := wakeRepairFloorPath(fixture.root, "codex")
+			floorBefore, err := os.ReadFile(floorPath)
+			if err != nil {
+				t.Fatalf("read exact child floor: %v", err)
+			}
+
+			realHandoff := child.Handoff
+			realCapability := child.Capability
+			t.Cleanup(func() {
+				child.Handoff = realHandoff
+				child.Capability = realCapability
+			})
+			stopErr := errors.New("stop unavailable")
+			child.Handoff = &wakeRepairParentHandoff{}
+			child.Capability = &wakeRepairChildCapability{
+				stop: func() error { return stopErr },
+			}
+			child.capabilityDetached = tc.capabilityDetached
+
+			waitErr := errors.New("exit not observed")
+			oldWait := waitForWakeRepairChildExit
+			waitForWakeRepairChildExit = func(*wakeProcessWaiter) error {
+				return waitErr
+			}
+			t.Cleanup(func() {
+				waitForWakeRepairChildExit = oldWait
+			})
+
+			err = cleanupFailedWakeRepairChild(
+				fixture.agentDir,
+				fixture.root,
+				"codex",
+				child,
+			)
+			if !errors.Is(err, waitErr) {
+				t.Fatalf("cleanup error = %v, want exit-wait failure", err)
+			}
+			if !tc.capabilityDetached && !errors.Is(err, stopErr) {
+				t.Fatalf("cleanup error = %v, want stop failure", err)
+			}
+			if !processAlive(child.Process.Pid) {
+				t.Fatal("child exited without observed exit evidence")
+			}
+			lockAfter, err := os.ReadFile(fixture.lockPath)
+			if err != nil {
+				t.Fatalf("read preserved child lock: %v", err)
+			}
+			if !bytes.Equal(lockAfter, lockBefore) {
+				t.Fatalf("child lock changed without observed exit")
+			}
+			floorAfter, err := os.ReadFile(floorPath)
+			if err != nil {
+				t.Fatalf("read preserved child floor: %v", err)
+			}
+			if !bytes.Equal(floorAfter, floorBefore) {
+				t.Fatalf("child floor changed without observed exit")
+			}
+		})
+	}
+}
+
 func TestWakeRepairFailedChildCleanupPreservesFloorReplacedBeforeCleanup(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -101,11 +101,21 @@ amq coop exec codex
 ```
 
 Each command sets up the environment, starts wake notifications, and launches
-the agent.
+the agent. The wake child appends full diagnostics to the private
+`agents/<agent>/.wake.log`; a separate inherited descriptor carries only
+terminal-safe attention to the controlling terminal. This process boundary
+keeps runtime and fatal-error text out of Codex and Claude full-screen
+composers.
 
-Codex terminal notifications are retried until the inbox makes durable
-progress. The bundled prompt-observation hook only pauses duplicate retries for
-a short lease; it never acknowledges or drains a message.
+Owner-bound raw, paste, and external-injector wakes started by `amq coop exec`
+retry terminal notifications on a capped backoff until the inbox makes durable
+progress. The delay starts after the preceding injector process exits or times
+out. Because `--wake-inject-via` executes arbitrary local code, a retry can
+repeat injector-side effects. Standalone ownerless `amq wake` remains one-shot.
+On macOS, the bundled Codex prompt-observation hook can pause duplicate retries
+for a short lease; it never acknowledges or drains a message. Linux co-op wakes
+retain liveness through retries on that capped backoff, without an observation
+lease.
 
 > **First-message check:** start both agents before sending the test message.
 > A newly started wake deliberately baselines messages that were already

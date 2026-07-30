@@ -7,6 +7,17 @@ import (
 	"time"
 )
 
+type wakeIdentityUnavailableFileInfo struct {
+	name string
+}
+
+func (info wakeIdentityUnavailableFileInfo) Name() string  { return info.name }
+func (wakeIdentityUnavailableFileInfo) Size() int64        { return 0 }
+func (wakeIdentityUnavailableFileInfo) Mode() os.FileMode  { return 0o600 }
+func (wakeIdentityUnavailableFileInfo) ModTime() time.Time { return time.Time{} }
+func (wakeIdentityUnavailableFileInfo) IsDir() bool        { return false }
+func (wakeIdentityUnavailableFileInfo) Sys() any           { return nil }
+
 func wakeDoorbellTestFiles(t *testing.T, names ...string) map[string]os.FileInfo {
 	t.Helper()
 	dir := t.TempDir()
@@ -28,11 +39,13 @@ func wakeDoorbellTestFiles(t *testing.T, names ...string) map[string]os.FileInfo
 func TestWakeDoorbellStateRetriesUntilObserved(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	current := wakeDoorbellTestFiles(t, "a.md")
+	tokenCalls := 0
 	tokens := []string{
 		"11111111111111111111111111111111",
 		"22222222222222222222222222222222",
 	}
 	nextToken := func() (string, error) {
+		tokenCalls++
 		token := tokens[0]
 		tokens = tokens[1:]
 		return token, nil
@@ -70,8 +83,23 @@ func TestWakeDoorbellStateRetriesUntilObserved(t *testing.T) {
 		t.Fatalf("observed hold plan = %#v, err=%v", plan, err)
 	}
 	plan, err = state.plan(observedUntil, current, nextToken)
-	if err != nil || !plan.attempt || plan.prompt != buildCoopWakeDoorbell("22222222222222222222222222222222") {
+	if err != nil ||
+		!plan.attempt ||
+		!plan.retry ||
+		plan.prompt != buildCoopWakeDoorbell("11111111111111111111111111111111") {
 		t.Fatalf("expired observation plan = %#v, err=%v", plan, err)
+	}
+	if tokenCalls != 1 {
+		t.Fatalf("token generation calls = %d, want 1 without cohort progress", tokenCalls)
+	}
+	if state.attempts != 1 || len(state.cohort) != 1 {
+		t.Fatalf("expired observation state = %#v, want preserved attempt and cohort", state)
+	}
+	if state.observe(state.token, observedUntil.Add(time.Second)) {
+		t.Fatal("expired generation accepted a second observation lease")
+	}
+	if !state.observationUntil.IsZero() {
+		t.Fatalf("expired generation renewed observation until %s", state.observationUntil)
 	}
 }
 
@@ -108,6 +136,83 @@ func TestWakeDoorbellStateRearmsOnAnyCohortProgress(t *testing.T) {
 	}
 }
 
+func TestWakeDoorbellStateKeepsPendingMembershipWithoutFileIdentity(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	current := map[string]os.FileInfo{"readable.md": nil}
+	tokenCalls := 0
+	var state wakeDoorbellState
+
+	plan, err := state.plan(now, current, func() (string, error) {
+		tokenCalls++
+		return "11111111111111111111111111111111", nil
+	})
+	if err != nil || !plan.attempt || plan.retry {
+		t.Fatalf("identity-unavailable plan = %#v, err=%v", plan, err)
+	}
+	if tokenCalls != 1 || len(state.cohort) != 1 {
+		t.Fatalf("identity-unavailable state = %#v, token calls=%d", state, tokenCalls)
+	}
+	if _, ok := state.cohort["readable.md"]; !ok {
+		t.Fatal("readable pending filename was dropped from the doorbell cohort")
+	}
+}
+
+func TestWakeDoorbellStateRearmsWhenUnknownIdentityBecomesKnown(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	current := map[string]os.FileInfo{
+		"readable.md": wakeIdentityUnavailableFileInfo{name: "readable.md"},
+	}
+	tokens := []string{
+		"11111111111111111111111111111111",
+		"22222222222222222222222222222222",
+	}
+	tokenCalls := 0
+	nextToken := func() (string, error) {
+		token := tokens[tokenCalls]
+		tokenCalls++
+		return token, nil
+	}
+	var state wakeDoorbellState
+	if _, err := state.plan(now, current, nextToken); err != nil {
+		t.Fatal(err)
+	}
+
+	known := wakeDoorbellTestFiles(t, "readable.md")
+	plan, err := state.plan(now.Add(time.Second), known, nextToken)
+	if err != nil || !plan.attempt || plan.retry {
+		t.Fatalf("identity recovery plan = %#v, err=%v", plan, err)
+	}
+	if tokenCalls != 2 ||
+		plan.prompt != buildCoopWakeDoorbell("22222222222222222222222222222222") {
+		t.Fatalf("identity recovery plan = %#v, token calls=%d; want rearmed generation", plan, tokenCalls)
+	}
+}
+
+func TestWakeDoorbellStateKeepsGenerationWhenKnownIdentityBecomesUnavailable(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	current := wakeDoorbellTestFiles(t, "readable.md")
+	tokenCalls := 0
+	nextToken := func() (string, error) {
+		tokenCalls++
+		return "11111111111111111111111111111111", nil
+	}
+	var state wakeDoorbellState
+	if _, err := state.plan(now, current, nextToken); err != nil {
+		t.Fatal(err)
+	}
+	state.recordAttempt(now)
+
+	temporarilyUnknown := map[string]os.FileInfo{"readable.md": nil}
+	plan, err := state.plan(now.Add(wakeDoorbellRetryBase), temporarilyUnknown, nextToken)
+	if err != nil || !plan.attempt || !plan.retry {
+		t.Fatalf("temporarily unknown plan = %#v, err=%v", plan, err)
+	}
+	if tokenCalls != 1 ||
+		plan.prompt != buildCoopWakeDoorbell("11111111111111111111111111111111") {
+		t.Fatalf("temporarily unknown plan = %#v, token calls=%d; want preserved generation", plan, tokenCalls)
+	}
+}
+
 func TestWakeDoorbellStateRetriesTokenGenerationFailure(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	current := wakeDoorbellTestFiles(t, "a.md")
@@ -136,6 +241,64 @@ func TestWakeDoorbellStateRetriesTokenGenerationFailure(t *testing.T) {
 	plan, err := state.plan(now.Add(wakeDoorbellRetryBase), current, nextToken)
 	if err != nil || !plan.attempt || plan.retry {
 		t.Fatalf("token retry plan = %#v, err=%v", plan, err)
+	}
+}
+
+func TestWakeDoorbellStateGatesDeliveredCohortAndRearmsOnChange(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	current := wakeDoorbellTestFiles(t, "a.md")
+	var state wakeDoorbellState
+
+	if !state.planCohortDelivery(current) {
+		t.Fatal("initial cohort delivery was suppressed")
+	}
+	state.recordCohortDelivered(current)
+	if state.planCohortDelivery(current) {
+		t.Fatal("unchanged delivered cohort was redelivered")
+	}
+	if _, ok := state.nextDeadline(); ok {
+		t.Fatal("delivered cohort retained a retry deadline")
+	}
+	if state.observe("11111111111111111111111111111111", now) {
+		t.Fatal("delivered cohort accepted an input observation")
+	}
+
+	added := map[string]os.FileInfo{
+		"a.md": current["a.md"],
+		"b.md": wakeDoorbellTestFiles(t, "b.md")["b.md"],
+	}
+	if !state.planCohortDelivery(added) {
+		t.Fatal("cohort addition was suppressed")
+	}
+	state.recordCohortDelivered(added)
+	replacement := map[string]os.FileInfo{
+		"a.md": added["a.md"],
+		"b.md": wakeDoorbellTestFiles(t, "b.md")["b.md"],
+	}
+	if !state.planCohortDelivery(replacement) {
+		t.Fatal("cohort replacement was suppressed")
+	}
+
+	plan, err := state.plan(now, replacement, func() (string, error) {
+		return "22222222222222222222222222222222", nil
+	})
+	if err != nil || !plan.attempt || plan.retry {
+		t.Fatalf("re-entered token plan = %#v, err=%v", plan, err)
+	}
+	if plan.prompt != buildCoopWakeDoorbell("22222222222222222222222222222222") {
+		t.Fatalf("re-entered token prompt = %q", plan.prompt)
+	}
+}
+
+func TestWakeDoorbellStateDeliveredCohortFailsOpenWithoutIdentity(t *testing.T) {
+	current := map[string]os.FileInfo{
+		"pending.md": wakeIdentityUnavailableFileInfo{name: "pending.md"},
+	}
+	var state wakeDoorbellState
+	state.recordCohortDelivered(current)
+
+	if !state.planCohortDelivery(current) {
+		t.Fatal("identity-unavailable delivered cohort was treated as exact")
 	}
 }
 

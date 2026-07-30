@@ -3,9 +3,12 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 const wakeReadySchema = 1
@@ -35,6 +38,27 @@ func writeWakeReadyFileAgainstOwner(
 		return err
 	}
 	defer func() { _ = agentDir.Close() }()
+	return writeWakeReadyFileAgainstOwnerInDir(
+		agentDir,
+		root,
+		me,
+		path,
+		expected,
+		requestedOwner,
+	)
+}
+
+func writeWakeReadyFileAgainstOwnerInDir(
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	path string,
+	expected wakeLockInspection,
+	requestedOwner *wakeOwner,
+) error {
+	if agentDir == nil {
+		return fmt.Errorf("wake agent directory capability is missing")
+	}
 	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !sameWakeLockGeneration(expected, current) {
@@ -61,6 +85,96 @@ func writeWakeGenerationFile(path, label string, marker wakeReady) error {
 		return fmt.Errorf("marshal %s: %w", label, err)
 	}
 	return writeWakeMetadataFile(path, append(data, '\n'), label)
+}
+
+type wakeReadyPublication struct {
+	dir      *wakeAgentDir
+	name     string
+	snapshot wakeGenerationFileSnapshot
+}
+
+var beforeWakeReadyCleanupUnlink = func() {}
+var afterWakeReadyPublicationWrite = func() {}
+
+func publishWakeReadyFile(path string, marker wakeReady) (*wakeReadyPublication, error) {
+	parent, err := openWakeDirectory(filepath.Dir(path), "wake ready parent directory")
+	if err != nil {
+		return nil, err
+	}
+	name := filepath.Base(path)
+	var snapshot wakeGenerationFileSnapshot
+	err = parent.withFD(func(dirfd int) error {
+		var err error
+		snapshot, err = writeWakeGenerationFileAtWithSnapshot(
+			dirfd,
+			name,
+			"wake ready file",
+			marker,
+		)
+		if err != nil {
+			return err
+		}
+		afterWakeReadyPublicationWrite()
+		installed, exists, err := readWakeGenerationFileSnapshotAt(
+			dirfd,
+			parent,
+			name,
+			"wake ready file",
+		)
+		if err != nil {
+			return fmt.Errorf("validate installed wake ready file: %w", err)
+		}
+		if !exists {
+			return fmt.Errorf("installed wake ready file disappeared during publication")
+		}
+		if !os.SameFile(snapshot.FileInfo, installed.FileInfo) ||
+			!bytes.Equal(snapshot.Raw, installed.Raw) ||
+			snapshot.Marker != installed.Marker {
+			return fmt.Errorf("installed wake ready file changed during publication; preserving it")
+		}
+		snapshot = installed
+		return nil
+	})
+	publication := &wakeReadyPublication{
+		dir:      parent,
+		name:     name,
+		snapshot: snapshot,
+	}
+	if err != nil {
+		var cleanupErr error
+		if snapshot.FileInfo != nil {
+			cleanupErr = publication.removeIfUnchanged()
+		}
+		closeErr := publication.Close()
+		return nil, errors.Join(err, cleanupErr, closeErr)
+	}
+	return publication, nil
+}
+
+func (publication *wakeReadyPublication) Close() error {
+	if publication == nil || publication.dir == nil {
+		return nil
+	}
+	err := publication.dir.Close()
+	publication.dir = nil
+	return err
+}
+
+func (publication *wakeReadyPublication) removeIfUnchanged() error {
+	if publication == nil || publication.dir == nil {
+		return nil
+	}
+	beforeWakeReadyCleanupUnlink()
+	return publication.dir.withFD(func(dirfd int) error {
+		_, err := removeWakeGenerationFileIfSnapshotMatchesAt(
+			dirfd,
+			publication.dir,
+			publication.name,
+			"wake ready file",
+			publication.snapshot,
+		)
+		return err
+	})
 }
 
 func readWakeReadyFile(path string) (wakeReady, bool, error) {
@@ -236,13 +350,32 @@ func validateWakeReadyFileAgainstOwner(
 ) (bool, error) {
 	// A wake can still die immediately after this guarded validation; the local
 	// process notifier has no durable liveness lease beyond the lock generation.
-	ready := false
 	agentDir, err := openWakeAgentDir(root, me)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = agentDir.Close() }()
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return validateWakeReadyFileAgainstOwnerInDir(
+		agentDir,
+		root,
+		me,
+		path,
+		requestedOwner,
+	)
+}
+
+func validateWakeReadyFileAgainstOwnerInDir(
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	path string,
+	requestedOwner *wakeOwner,
+) (bool, error) {
+	if agentDir == nil {
+		return false, fmt.Errorf("wake agent directory capability is missing")
+	}
+	ready := false
+	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		published, exists, err := readWakeReadyFile(path)
 		if err != nil || !exists {
 			return err
