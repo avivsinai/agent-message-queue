@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HOOK_ROOT=\"${PLUGIN_ROOT:-}\"; if [ -z \"$HOOK_ROOT\" ]; then HOOK_ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || true)\"; fi; AMQ_HOOK=\"$HOOK_ROOT/hooks/codex-prompt-observed.py\"; if [ -n \"$HOOK_ROOT\" ] && [ -f \"$AMQ_HOOK\" ]; then /usr/bin/python3 \"$AMQ_HOOK\"; else /usr/bin/true; fi",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}

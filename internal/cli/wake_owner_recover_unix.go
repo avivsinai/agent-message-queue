@@ -110,7 +110,7 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 	for {
 		var stopCapability *authoritativeWakeStopCapability
 		var stopAuthorization wakeOwnerReleaseAuthorization
-		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) (retErr error) {
 			inspection := inspectWakeLockForOwnerTransition(dirfd, agentDir, root, me)
 			result.PID = inspection.PID
 			switch classifyPersistedWakeClaim(inspection) {
@@ -159,7 +159,17 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 			result.OwnerPID = owner.PID
 			result.OwnerSession = owner.SessionID
 			observation, err := observeAuthoritativeWakeOwner(owner)
-			defer func() { _ = observation.Close() }()
+			observationClosed := false
+			closeObservation := func() error {
+				if observationClosed {
+					return nil
+				}
+				observationClosed = true
+				return observation.Close()
+			}
+			defer func() {
+				retErr = errors.Join(retErr, closeObservation())
+			}()
 			if err != nil {
 				return refuse("wake owner is unknown: "+err.Error(), "retry after owner identity inspection is available")
 			}
@@ -198,6 +208,12 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 					"wake owner is unknown: "+observation.Reason,
 					"retry after owner identity inspection is available",
 				)
+			}
+			if err := closeObservation(); err != nil {
+				return errors.Join(refuse(
+					"wake owner observation failed before recovery mutation: "+err.Error(),
+					"preserve the claim and retry after owner monitoring is healthy",
+				), err)
 			}
 			wakeCapability, err := prepareAuthoritativeWakeStop(dirfd, agentDir, inspection)
 			if err != nil {

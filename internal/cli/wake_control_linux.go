@@ -11,6 +11,7 @@ func startWakeControlListenerInDir(
 	string,
 	string,
 	wakeLock,
+	chan<- string,
 ) (func(), <-chan struct{}, func(), error) {
 	return func() {}, nil, func() {}, nil
 }

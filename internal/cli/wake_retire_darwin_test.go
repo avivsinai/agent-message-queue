@@ -19,7 +19,7 @@ func TestRetireWakeUsesDarwinCooperativeControlAndPreservesTarget(t *testing.T) 
 		return matchingRetireWakeProcess(pid, root, "codex", injector)
 	})
 
-	cleanup, stopRequested, markStopped, err := startWakeControlListener(root, "codex", lock)
+	cleanup, stopRequested, markStopped, err := startWakeControlListener(root, "codex", lock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

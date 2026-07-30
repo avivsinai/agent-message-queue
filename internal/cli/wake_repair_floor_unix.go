@@ -172,15 +172,22 @@ func sameWakeRepairSuppression(first, second wakeRepairFloor) bool {
 }
 
 func writeWakeRepairFloor(root, me string, floor wakeRepairFloor) error {
-	data, err := json.MarshalIndent(floor, "", "  ")
+	agentDir, err := openWakeAgentDir(root, me)
 	if err != nil {
-		return fmt.Errorf("marshal wake repair floor: %w", err)
+		return err
 	}
-	data = append(data, '\n')
-	if len(data) > maxWakeRepairFloorFileBytes {
-		return fmt.Errorf("wake repair floor has too many existing messages (%d-byte limit)", maxWakeRepairFloorFileBytes)
-	}
-	return writeWakeMetadataFile(wakeRepairFloorPath(root, me), data, "wake repair floor")
+	defer func() { _ = agentDir.Close() }()
+	return writeWakeRepairFloorInDir(agentDir, root, floor)
+}
+
+func writeWakeRepairFloorInDir(
+	agentDir *wakeAgentDir,
+	root string,
+	floor wakeRepairFloor,
+) error {
+	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		return writeWakeRepairFloorAt(dirfd, agentDir, root, floor)
+	})
 }
 
 func readWakeRepairFloor(root, me string) (wakeRepairFloor, bool, error) {

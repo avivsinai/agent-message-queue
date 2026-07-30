@@ -7,7 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -30,7 +32,11 @@ type wakeControlOwnerRequest struct {
 	Generation string     `json:"generation"`
 	Owner      *wakeOwner `json:"owner,omitempty"`
 	Rollback   bool       `json:"rollback,omitempty"`
+	Operation  string     `json:"operation,omitempty"`
+	Token      string     `json:"token,omitempty"`
 }
+
+const wakeControlPromptObserved = "prompt_observed"
 
 func wakeControlSocketPath(root, me, generation string) string {
 	sum := sha256.Sum256([]byte(canonicalWakeRoot(root) + "\x00" + me + "\x00" + generation))
@@ -294,7 +300,7 @@ func authorizeDarwinOwnerControlAt(
 	request wakeControlOwnerRequest,
 	peerPID int,
 	peerUID uint32,
-) (wakeLockInspection, *wakeTarget, error) {
+) (authorized wakeLockInspection, authorizedTarget *wakeTarget, retErr error) {
 	if peerUID != uint32(os.Geteuid()) {
 		return wakeLockInspection{}, nil, fmt.Errorf("wake control peer uid is not authorized")
 	}
@@ -313,7 +319,13 @@ func authorizeDarwinOwnerControlAt(
 		return wakeLockInspection{}, nil, err
 	}
 	observation, err := observeAuthoritativeWakeOwner(*current.Lock.Owner)
-	defer func() { _ = observation.Close() }()
+	defer func() {
+		if closeErr := observation.Close(); closeErr != nil {
+			authorized = wakeLockInspection{}
+			authorizedTarget = nil
+			retErr = errors.Join(retErr, closeErr)
+		}
+	}()
 	if err != nil {
 		return wakeLockInspection{}, nil, err
 	}
@@ -365,6 +377,7 @@ func handleDarwinOwnerControl(
 	peerUID uint32,
 	stopRequest chan<- struct{},
 	loopStopped <-chan struct{},
+	testHooks *darwinWakeControlTestHooks,
 ) {
 	authorized := false
 	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
@@ -394,6 +407,9 @@ func handleDarwinOwnerControl(
 	default:
 	}
 	<-loopStopped
+	if testHooks != nil && testHooks.afterLoopStopped != nil {
+		testHooks.afterLoopStopped()
+	}
 
 	removed := false
 	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
@@ -422,7 +438,11 @@ func handleDarwinOwnerControl(
 	_, _ = conn.Write([]byte("ACK\n"))
 }
 
-func startWakeControlListener(root, me string, lock wakeLock) (func(), <-chan struct{}, func(), error) {
+func startWakeControlListener(
+	root, me string,
+	lock wakeLock,
+	promptObserved chan<- string,
+) (func(), <-chan struct{}, func(), error) {
 	agentDir, err := openWakeAgentDir(root, me)
 	if err != nil {
 		return nil, nil, nil, err
@@ -433,6 +453,8 @@ func startWakeControlListener(root, me string, lock wakeLock) (func(), <-chan st
 		me,
 		lock,
 		true,
+		promptObserved,
+		nil,
 	)
 	if err != nil {
 		_ = agentDir.Close()
@@ -444,8 +466,13 @@ func startWakeControlListenerInDir(
 	agentDir *wakeAgentDir,
 	root, me string,
 	lock wakeLock,
+	promptObserved chan<- string,
 ) (func(), <-chan struct{}, func(), error) {
-	return startWakeControlListenerInDirOwned(agentDir, root, me, lock, false)
+	return startWakeControlListenerInDirOwned(agentDir, root, me, lock, false, promptObserved, nil)
+}
+
+type darwinWakeControlTestHooks struct {
+	afterLoopStopped func()
 }
 
 func startWakeControlListenerInDirOwned(
@@ -453,6 +480,8 @@ func startWakeControlListenerInDirOwned(
 	root, me string,
 	lock wakeLock,
 	closeAgentDir bool,
+	promptObserved chan<- string,
+	testHooks *darwinWakeControlTestHooks,
 ) (func(), <-chan struct{}, func(), error) {
 	path := lock.ControlSocket
 	if path == "" {
@@ -489,21 +518,26 @@ func startWakeControlListenerInDirOwned(
 	loopStopped := make(chan struct{})
 	var loopStoppedOnce sync.Once
 	markLoopStopped := func() { loopStoppedOnce.Do(func() { close(loopStopped) }) }
+	acceptDone := make(chan struct{})
+	var handlers sync.WaitGroup
 	go func() {
+		defer close(acceptDone)
 		for {
 			conn, err := listener.AcceptUnix()
 			if err != nil {
 				return
 			}
+			handlers.Add(1)
 			go func(conn *net.UnixConn) {
+				defer handlers.Done()
 				defer func() { _ = conn.Close() }()
 				_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 				uid, err := darwinPeerEUID(conn)
 				if err != nil || uid != uint32(os.Geteuid()) {
 					return
 				}
-				line, err := bufio.NewReader(conn).ReadString('\n')
-				if err != nil {
+				line, err := bufio.NewReader(io.LimitReader(conn, 4097)).ReadString('\n')
+				if err != nil || len(line) > 4096 {
 					return
 				}
 				if lock.WakeMode == wakeOwnerWakeMode {
@@ -513,6 +547,38 @@ func startWakeControlListenerInDirOwned(
 					}
 					peerPID, err := darwinPeerPID(conn)
 					if err != nil {
+						return
+					}
+					if request.Operation == wakeControlPromptObserved {
+						accepted := false
+						err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+							_, _, authErr := authorizeDarwinOwnerControlAt(
+								dirfd,
+								agentDir,
+								root,
+								me,
+								lock,
+								request,
+								peerPID,
+								uid,
+							)
+							if authErr != nil {
+								return authErr
+							}
+							accepted = true
+							return nil
+						})
+						if err != nil || !accepted || !validWakeDoorbellToken(request.Token) {
+							return
+						}
+						if promptObserved != nil {
+							select {
+							case promptObserved <- request.Token:
+							default:
+								return
+							}
+						}
+						_, _ = conn.Write([]byte("ACK\n"))
 						return
 					}
 					handleDarwinOwnerControl(
@@ -526,7 +592,41 @@ func startWakeControlListenerInDirOwned(
 						uid,
 						stopRequest,
 						loopStopped,
+						testHooks,
 					)
+					return
+				}
+				if lock.WakeMode == wakeInjectModeRaw || lock.WakeMode == wakeInjectModePaste {
+					var request wakeControlOwnerRequest
+					if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &request); err != nil ||
+						request.Operation != wakeControlPromptObserved ||
+						request.Generation != lock.Generation ||
+						!validWakeDoorbellToken(request.Token) {
+						return
+					}
+					accepted := false
+					err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+						current := inspectWakeLockAt(dirfd, agentDir, root, me)
+						if !current.Exists ||
+							current.Lock.Generation != lock.Generation ||
+							current.Lock.ControlSocket != path ||
+							current.Lock.WakeMode != lock.WakeMode {
+							return nil
+						}
+						accepted = true
+						return nil
+					})
+					if err != nil || !accepted {
+						return
+					}
+					if promptObserved != nil {
+						select {
+						case promptObserved <- request.Token:
+						default:
+							return
+						}
+					}
+					_, _ = conn.Write([]byte("ACK\n"))
 					return
 				}
 				if strings.TrimSpace(line) != lock.Generation {
@@ -557,6 +657,9 @@ func startWakeControlListenerInDirOwned(
 				default:
 				}
 				<-loopStopped
+				if testHooks != nil && testHooks.afterLoopStopped != nil {
+					testHooks.afterLoopStopped()
+				}
 				removed := false
 				err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 					current := inspectWakeLockAt(dirfd, agentDir, root, me)
@@ -586,7 +689,10 @@ func startWakeControlListenerInDirOwned(
 	var cleanupOnce sync.Once
 	cleanup := func() {
 		cleanupOnce.Do(func() {
+			markLoopStopped()
 			_ = listener.Close()
+			<-acceptDone
+			handlers.Wait()
 			_ = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 				if cur := inspectWakeLockAt(dirfd, agentDir, root, me); cur.Exists && cur.Lock.Generation != lock.Generation {
 					return nil
@@ -598,7 +704,11 @@ func startWakeControlListenerInDirOwned(
 			}
 		})
 	}
-	return cleanup, stopRequest, markLoopStopped, nil
+	var exposedStop <-chan struct{} = stopRequest
+	if lock.WakeMode == wakeInjectModeRaw || lock.WakeMode == wakeInjectModePaste {
+		exposedStop = nil
+	}
+	return cleanup, exposedStop, markLoopStopped, nil
 }
 
 func cooperativeStopInjectVia(i wakeLockInspection) (bool, error) {
@@ -610,6 +720,16 @@ func cooperativeStopInjectVia(i wakeLockInspection) (bool, error) {
 		return false, fmt.Errorf("cooperative wake stop unavailable: %w", err)
 	}
 	defer func() { _ = agentDir.Close() }()
+	return cooperativeStopInjectViaInDir(agentDir, i)
+}
+
+func cooperativeStopInjectViaInDir(
+	agentDir *wakeAgentDir,
+	i wakeLockInspection,
+) (bool, error) {
+	if agentDir == nil {
+		return false, fmt.Errorf("cooperative wake stop agent capability is missing")
+	}
 	name, err := darwinControlSocketName(agentDir, i.Lock.ControlSocket)
 	if err != nil {
 		return false, fmt.Errorf("cooperative wake stop unavailable: %w", err)

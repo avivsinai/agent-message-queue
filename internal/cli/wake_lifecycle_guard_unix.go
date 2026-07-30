@@ -33,33 +33,37 @@ func openWakeAgentDir(root, me string) (*wakeAgentDir, error) {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return nil, fmt.Errorf("create wake agent directory %s: %w", path, err)
 	}
+	return openWakeDirectory(path, "wake agent directory")
+}
+
+func openWakeDirectory(path, label string) (*wakeAgentDir, error) {
 	before, err := os.Lstat(path)
 	if err != nil {
-		return nil, fmt.Errorf("stat wake agent directory %s: %w", path, err)
+		return nil, fmt.Errorf("stat %s %s: %w", label, path, err)
 	}
-	if err := validateWakeAgentDir(path, before); err != nil {
+	if err := validateWakeDirectory(label, path, before); err != nil {
 		return nil, err
 	}
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, fmt.Errorf("open wake agent directory %s: %w", path, err)
+		return nil, fmt.Errorf("open %s %s: %w", label, path, err)
 	}
 	file := os.NewFile(uintptr(fd), path)
 	opened, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("stat opened wake agent directory %s: %w", path, err)
+		return nil, fmt.Errorf("stat opened %s %s: %w", label, path, err)
 	}
-	if err := validateWakeAgentDir(path, opened); err != nil {
+	if err := validateWakeDirectory(label, path, opened); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
 	after, err := os.Lstat(path)
 	if err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("re-stat wake agent directory %s: %w", path, err)
+		return nil, fmt.Errorf("re-stat %s %s: %w", label, path, err)
 	}
-	if err := validateWakeAgentDir(path, after); err != nil {
+	if err := validateWakeDirectory(label, path, after); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
@@ -68,16 +72,20 @@ func openWakeAgentDir(root, me string) (*wakeAgentDir, error) {
 	// it retain the stricter ctime-aware generation checks.
 	if !os.SameFile(before, opened) || !os.SameFile(opened, after) {
 		_ = file.Close()
-		return nil, fmt.Errorf("wake agent directory %s changed while opening", path)
+		return nil, fmt.Errorf("%s %s changed while opening", label, path)
 	}
 	return &wakeAgentDir{path: path, file: file}, nil
 }
 
 func validateWakeAgentDir(path string, info os.FileInfo) error {
+	return validateWakeDirectory("wake agent directory", path, info)
+}
+
+func validateWakeDirectory(label, path string, info os.FileInfo) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("wake agent directory %s must be a directory, not a symlink", path)
+		return fmt.Errorf("%s %s must be a directory, not a symlink", label, path)
 	}
-	return validateWakeTargetPathOwnership("wake agent directory", path, info)
+	return validateWakeTargetPathOwnership(label, path, info)
 }
 
 func (d *wakeAgentDir) withFD(fn func(int) error) error {

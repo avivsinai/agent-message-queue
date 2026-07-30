@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -137,8 +138,35 @@ func writeWakeReadyFileForPreparedWake(root, me, path string, expected wakeLockI
 		return err
 	}
 	defer func() { _ = agentDir.Close() }()
+	publication, err := writeWakeReadyFileForPreparedWakeInDir(
+		agentDir,
+		root,
+		me,
+		path,
+		expected,
+		deadline,
+	)
+	if publication != nil {
+		_ = publication.Close()
+	}
+	return err
+}
+
+func writeWakeReadyFileForPreparedWakeInDir(
+	agentDir *wakeAgentDir,
+	root, me, path string,
+	expected wakeLockInspection,
+	deadline time.Time,
+) (*wakeReadyPublication, error) {
+	if agentDir == nil {
+		return nil, fmt.Errorf("wake agent directory capability is missing")
+	}
 	for {
+		if err := validateCanonicalWakeAgentDir(agentDir); err != nil {
+			return nil, err
+		}
 		prepared := false
+		var publication *wakeReadyPublication
 		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 			current := inspectWakeLockAt(dirfd, agentDir, root, me)
 			if !sameWakeLockGeneration(expected, current) {
@@ -155,17 +183,13 @@ func writeWakeReadyFileForPreparedWake(root, me, path string, expected wakeLockI
 				return fmt.Errorf("existing amq wake became incompatible before preparation completed: %w", err)
 			}
 			var err error
-			if current.Lock.WakeMode == wakeOwnerWakeMode {
-				prepared, err = validateWakePreparedFileAgainstInspectionAt(
-					dirfd,
-					agentDir,
-					root,
-					me,
-					current,
-				)
-			} else {
-				prepared, err = validateWakePreparedFileAgainstInspection(root, me, current)
-			}
+			prepared, err = validateWakePreparedFileAgainstInspectionAt(
+				dirfd,
+				agentDir,
+				root,
+				me,
+				current,
+			)
 			if err != nil || !prepared {
 				return err
 			}
@@ -174,16 +198,22 @@ func writeWakeReadyFileForPreparedWake(root, me, path string, expected wakeLockI
 				Generation:   current.Lock.Generation,
 				TargetDigest: current.Lock.TargetDigest,
 			}
-			return writeWakeGenerationFile(path, "wake ready file", marker)
+			publication, err = publishWakeReadyFile(path, marker)
+			return err
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if prepared {
-			return nil
+			if err := validateCanonicalWakeAgentDir(agentDir); err != nil {
+				cleanupErr := publication.removeIfUnchanged()
+				closeErr := publication.Close()
+				return nil, errors.Join(err, cleanupErr, closeErr)
+			}
+			return publication, nil
 		}
 		if !waitForWakePreparedRetry(deadline) {
-			return fmt.Errorf("existing amq wake did not publish its prepared marker before the readiness deadline")
+			return nil, fmt.Errorf("existing amq wake did not publish its prepared marker before the readiness deadline")
 		}
 	}
 }

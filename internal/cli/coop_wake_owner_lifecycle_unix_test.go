@@ -26,6 +26,65 @@ const (
 	coopWakePTYHelperEnv    = "AMQ_TEST_COOP_WAKE_PTY_HELPER"
 )
 
+func TestOpenCoopWakeAttentionPrefersControllingTTY(t *testing.T) {
+	attentionPath := filepath.Join(t.TempDir(), "attention")
+	originalOpen := openCoopWakeTTY
+	openCoopWakeTTY = func() (*os.File, error) {
+		return os.OpenFile(attentionPath, os.O_CREATE|os.O_WRONLY, 0o600)
+	}
+	t.Cleanup(func() { openCoopWakeTTY = originalOpen })
+
+	output, err := os.OpenFile(
+		filepath.Join(t.TempDir(), "diagnostics"),
+		os.O_CREATE|os.O_WRONLY,
+		0o600,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = output.Close() }()
+
+	attention, err := openCoopWakeAttention(output)
+	if err != nil {
+		t.Fatalf("openCoopWakeAttention: %v", err)
+	}
+	if attention.Name() != attentionPath {
+		t.Fatalf("attention path = %q, want %q", attention.Name(), attentionPath)
+	}
+	_ = attention.Close()
+}
+
+func TestOpenCoopWakeAttentionFallsBackToIndependentLogDescriptor(t *testing.T) {
+	originalOpen := openCoopWakeTTY
+	openCoopWakeTTY = func() (*os.File, error) {
+		return nil, errors.New("no controlling terminal")
+	}
+	t.Cleanup(func() { openCoopWakeTTY = originalOpen })
+
+	outputPath := filepath.Join(t.TempDir(), "diagnostics")
+	output, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attention, err := openCoopWakeAttention(output)
+	if err != nil {
+		t.Fatalf("openCoopWakeAttention: %v", err)
+	}
+	if err := attention.Close(); err != nil {
+		t.Fatalf("close attention duplicate: %v", err)
+	}
+	if _, err := output.WriteString("diagnostic survives attention close\n"); err != nil {
+		t.Fatalf("write original diagnostic descriptor: %v", err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatalf("close diagnostic output: %v", err)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil || string(data) != "diagnostic survives attention close\n" {
+		t.Fatalf("diagnostic data = %q err=%v", data, err)
+	}
+}
+
 func TestCoopWakeArgsDisableInterruptInjection(t *testing.T) {
 	for _, mode := range []string{
 		wakeInjectModeAuto,
@@ -439,13 +498,18 @@ func TestOwnerDeathGatesTerminalInjection(t *testing.T) {
 				}
 				return nil
 			}
-			err := injectNotification(&wakeConfig{
+			cfg := &wakeConfig{
 				me:          "codex",
 				injectMode:  mode,
 				controlStop: stop,
-			}, "one in-flight write at most", false)
-			if err != nil {
-				t.Fatalf("mid-injection owner death: %v", err)
+			}
+			err := injectNotification(cfg, "one in-flight write at most", false)
+			var partial *wakeTerminalPartialProgressError
+			if !errors.As(err, &partial) {
+				t.Fatalf("mid-injection owner death error = %v, want retained partial progress", err)
+			}
+			if !cfg.inputDelivery.pending() {
+				t.Fatal("mid-injection owner death discarded retained delivery progress")
 			}
 			if len(calls) != 1 {
 				t.Fatalf("owner death allowed follow-up terminal injection: %#v", calls)
@@ -604,14 +668,19 @@ func TestCoopRawDoorbellRechecksGenerationBeforeEveryWrite(t *testing.T) {
 		}
 		return nil
 	}
-	err = injectNotification(&wakeConfig{
+	cfg := &wakeConfig{
 		me:          "codex",
 		root:        root,
 		injectMode:  wakeInjectModeRaw,
 		controlStop: stop,
-	}, "dynamic", false)
-	if err != nil {
-		t.Fatalf("generation change: %v", err)
+	}
+	err = injectNotification(cfg, "dynamic", false)
+	var partial *wakeTerminalPartialProgressError
+	if !errors.As(err, &partial) {
+		t.Fatalf("generation change error = %v, want retained partial progress", err)
+	}
+	if !cfg.inputDelivery.pending() {
+		t.Fatal("generation change discarded retained delivery progress")
 	}
 	if len(injected) != 1 {
 		t.Fatalf("replacement generation received follow-up LF/CR/rescue writes: %#v", injected)

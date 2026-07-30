@@ -319,13 +319,24 @@ func writeWakeGenerationFileAt(
 	label string,
 	marker wakeReady,
 ) error {
+	_, err := writeWakeGenerationFileAtWithSnapshot(dirfd, name, label, marker)
+	return err
+}
+
+func writeWakeGenerationFileAtWithSnapshot(
+	dirfd int,
+	name string,
+	label string,
+	marker wakeReady,
+) (wakeGenerationFileSnapshot, error) {
 	data, err := json.Marshal(marker)
 	if err != nil {
-		return fmt.Errorf("marshal %s: %w", label, err)
+		return wakeGenerationFileSnapshot{}, fmt.Errorf("marshal %s: %w", label, err)
 	}
-	temp, err := writeWakeOwnerTempAt(dirfd, "wake-generation", append(data, '\n'), 0o600)
+	raw := append(data, '\n')
+	temp, err := writeWakeOwnerTempAt(dirfd, "wake-generation", raw, 0o600)
 	if err != nil {
-		return err
+		return wakeGenerationFileSnapshot{}, err
 	}
 	tempPresent := true
 	defer func() {
@@ -333,12 +344,70 @@ func writeWakeGenerationFileAt(
 			_ = unix.Unlinkat(dirfd, temp, 0)
 		}
 	}()
+	tempFD, err := unix.Openat(
+		dirfd,
+		temp,
+		unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+		0,
+	)
+	if err != nil {
+		return wakeGenerationFileSnapshot{}, fmt.Errorf("open %s temp file: %w", label, err)
+	}
+	tempFile := os.NewFile(uintptr(tempFD), temp)
+	tempInfo, statErr := tempFile.Stat()
+	_ = tempFile.Close()
+	if statErr != nil {
+		return wakeGenerationFileSnapshot{}, fmt.Errorf("stat %s temp file: %w", label, statErr)
+	}
+	if !tempInfo.Mode().IsRegular() || tempInfo.Mode().Perm() != 0o600 {
+		return wakeGenerationFileSnapshot{}, fmt.Errorf("%s temp must be a regular 0600 file", label)
+	}
+	if err := validateWakeTargetPathOwnership(label+" temp", temp, tempInfo); err != nil {
+		return wakeGenerationFileSnapshot{}, err
+	}
+	snapshot := wakeGenerationFileSnapshot{
+		Marker:   marker,
+		Raw:      bytes.Clone(raw),
+		FileInfo: tempInfo,
+	}
 	if err := unix.Renameat(dirfd, temp, dirfd, name); err != nil {
-		return fmt.Errorf("install %s: %w", label, err)
+		return wakeGenerationFileSnapshot{}, fmt.Errorf("install %s: %w", label, err)
 	}
 	tempPresent = false
-	if err := syncWakeOwnerDirFD(dirfd); err != nil {
-		return fmt.Errorf("sync %s directory: %w", label, err)
+	installedFD, err := unix.Openat(
+		dirfd,
+		name,
+		unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+		0,
+	)
+	if err != nil {
+		return snapshot, fmt.Errorf("open installed %s: %w", label, err)
 	}
-	return nil
+	installedFile := os.NewFile(uintptr(installedFD), name)
+	installedInfo, statErr := installedFile.Stat()
+	if statErr != nil {
+		_ = installedFile.Close()
+		return snapshot, fmt.Errorf("stat installed %s: %w", label, statErr)
+	}
+	if !os.SameFile(tempInfo, installedInfo) {
+		_ = installedFile.Close()
+		return snapshot, fmt.Errorf("installed %s changed during publication; preserving it", label)
+	}
+	snapshot.FileInfo = installedInfo
+	if !installedInfo.Mode().IsRegular() || installedInfo.Mode().Perm() != 0o600 {
+		_ = installedFile.Close()
+		return snapshot, fmt.Errorf("installed %s must be a regular 0600 file", label)
+	}
+	installedRaw, readErr := readWakeMetadata(installedFile, label, name)
+	_ = installedFile.Close()
+	if readErr != nil {
+		return snapshot, readErr
+	}
+	if !bytes.Equal(installedRaw, raw) {
+		return snapshot, fmt.Errorf("installed %s content changed during publication; preserving it", label)
+	}
+	if err := syncWakeOwnerDirFD(dirfd); err != nil {
+		return snapshot, fmt.Errorf("sync %s directory: %w", label, err)
+	}
+	return snapshot, nil
 }
