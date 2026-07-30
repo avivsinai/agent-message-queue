@@ -1356,6 +1356,8 @@ func openCoopWakeOutput(root, me string) (*os.File, error) {
 // the threshold; the next launch truncates that same hardened regular file.
 const wakeOutputMaxBytes int64 = 1 << 20
 
+var truncateWakeOutput = unix.Ftruncate
+
 func openWakeOutputInDir(
 	agentDir *wakeAgentDir,
 	name, label string,
@@ -1364,6 +1366,7 @@ func openWakeOutputInDir(
 		return nil, fmt.Errorf("%s agent directory capability is missing", label)
 	}
 	var file *os.File
+	var truncateErr error
 	err := agentDir.withFD(func(dirfd int) error {
 		fd, err := unix.Openat(
 			dirfd,
@@ -1390,9 +1393,8 @@ func openWakeOutputInDir(
 			return fmt.Errorf("%s %s must be a regular file", label, filepath.Join(agentDir.path, name))
 		}
 		if stat.Size >= wakeOutputMaxBytes {
-			if err := unix.Ftruncate(fd, 0); err != nil {
-				_ = unix.Close(fd)
-				return fmt.Errorf("truncate %s: %w", label, err)
+			if err := truncateWakeOutput(fd, 0); err != nil {
+				truncateErr = err
 			}
 		}
 		file = os.NewFile(uintptr(fd), filepath.Join(agentDir.path, name))
@@ -1400,6 +1402,14 @@ func openWakeOutputInDir(
 	})
 	if err != nil {
 		return nil, err
+	}
+	if truncateErr != nil {
+		_, _ = fmt.Fprintf(
+			file,
+			"amq wake: warning: %s reached the launch bound but could not be truncated: %v; continuing without truncation\n",
+			label,
+			truncateErr,
+		)
 	}
 	if info, err := file.Stat(); err != nil {
 		_ = file.Close()

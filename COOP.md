@@ -351,10 +351,11 @@ process capabilities: full stdout/stderr diagnostics append to the private
 terminal descriptor. Codex and Claude receive only terminal-safe title, bell,
 and supported desktop-notification sequences on that descriptor, so runtime,
 cleanup, and top-level fatal diagnostics cannot overwrite the active composer.
-Accumulated wake and repair diagnostics are truncated on the next launch after
-their private log reaches 1 MiB; one long-lived child can exceed that launch
-bound. Without a controlling terminal, attention is appended to the same
-durable log.
+After `.wake.log` reaches 1 MiB, the next `coop exec` wake launch truncates it.
+`.wake.repair.log` is truncated only when the next eligible `amq wake repair`
+attempt opens replacement-wake diagnostics, before child start. One long-lived
+child can exceed either launch bound. Without a controlling terminal, attention
+is appended to the same durable log.
 Urgent interrupt messages degrade to terminal-safe attention instead of Ctrl+C.
 Because
 `--inject-via` is arbitrary local

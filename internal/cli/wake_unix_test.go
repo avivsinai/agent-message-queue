@@ -7373,6 +7373,40 @@ func TestOpenWakeOutputsPreserveSmallLogsForAppend(t *testing.T) {
 	}
 }
 
+func TestOpenWakeOutputTruncationFailurePreservesDiagnosticsAndLaunch(t *testing.T) {
+	root := secureTempDirForTest(t)
+	agentBase := fsq.AgentBase(root, "orchestrator")
+	if err := os.MkdirAll(agentBase, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(agentBase, ".wake.log")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), 2<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	truncateErr := errors.New("append-only log")
+	originalTruncate := truncateWakeOutput
+	truncateWakeOutput = func(int, int64) error { return truncateErr }
+	t.Cleanup(func() { truncateWakeOutput = originalTruncate })
+
+	output, err := openCoopWakeOutput(root, "orchestrator")
+	if err != nil {
+		t.Fatalf("truncation failure blocked wake output: %v", err)
+	}
+	defer func() { _ = output.Close() }()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(data, bytes.Repeat([]byte("x"), 2<<20)) {
+		t.Fatal("truncation failure discarded existing diagnostics")
+	}
+	if got := string(data[2<<20:]); !strings.Contains(got, "continuing without truncation") ||
+		!strings.Contains(got, truncateErr.Error()) {
+		t.Fatalf("truncation warning = %q", got)
+	}
+}
+
 func TestOpenCoopWakeOutputRejectsSymlinkLog(t *testing.T) {
 	root := secureTempDirForTest(t)
 	agentBase := fsq.AgentBase(root, "orchestrator")
