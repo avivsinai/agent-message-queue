@@ -24,6 +24,7 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
 		return fmt.Errorf("wake lock for %s names a running process proven not to be this wake; refusing to signal or remove it; lock: %s; root: %s; reason: %s", agent, inspection.LockPath, inspection.Root, inspection.Reason)
 	}
 	if inspection.Status == wakeLockStale {
+		// This returns before stale owner-bound recovery advice is rendered below.
 		if err := removeWakeLockIfUnchanged(inspection); err != nil {
 			return fmt.Errorf("remove exact stale wake lock: %w", err)
 		}
@@ -72,6 +73,26 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
 	if confirmedLiveWake(inspection) {
 		switch classifyPersistedWakeClaim(inspection) {
 		case wakeClaimAuthoritative:
+			if inspection.Lock.Owner == nil {
+				return coopWakeStartupConflictError(
+					inspection,
+					errors.New("authoritative wake owner is missing"),
+				)
+			}
+			ownerObservation, err := observeAuthoritativeWakeOwner(*inspection.Lock.Owner)
+			if err != nil {
+				return coopWakeStartupConflictError(
+					inspection,
+					errors.Join(err, ownerObservation.Close()),
+				)
+			}
+			ownerState := ownerObservation.State
+			if err := ownerObservation.Close(); err != nil {
+				return coopWakeStartupConflictError(inspection, err)
+			}
+			if ownerState == wakeOwnerDead {
+				break
+			}
 			// Owner-bound claims belong to a specific coop session. A new
 			// session cannot reuse or replace one while its wake is live.
 			return coopWakeStartupConflictError(inspection, nil)
@@ -290,6 +311,9 @@ func coopWakeStartupConflictError(inspection wakeLockInspection, cause error) er
 		)
 	}
 	if message == "" {
+		if cause == nil {
+			return errors.New("wake startup conflict could not be classified")
+		}
 		return cause
 	}
 	if cause == nil {

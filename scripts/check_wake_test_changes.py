@@ -16,6 +16,7 @@ TEST_FUNCTION = re.compile(
     r"(?m)^func\s+(?:\([^\n)]*\)\s+)?(Test[A-Za-z0-9_]+)\s*\("
 )
 COMMIT_SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+WAKE_TEST_PATH = re.compile(r"internal/cli/[^/]*wake[^/]*_test\.go")
 
 
 def marker_matches(body: str, marker: str) -> list[re.Match[str]]:
@@ -27,7 +28,7 @@ def wake_test_names(files: Mapping[str, str]) -> set[str]:
     return {
         match.group(1)
         for path, source in files.items()
-        if re.fullmatch(r"internal/cli/wake[^/]*_test\.go", path)
+        if WAKE_TEST_PATH.fullmatch(path)
         for match in TEST_FUNCTION.finditer(source)
     }
 
@@ -114,7 +115,7 @@ def files_at(revision: str) -> dict[str, str]:
     return {
         path: git_output("show", f"{revision}:{path}")
         for path in paths
-        if re.fullmatch(r"internal/cli/wake[^/]*_test\.go", path)
+        if WAKE_TEST_PATH.fullmatch(path)
     }
 
 
@@ -130,7 +131,12 @@ def main() -> int:
     try:
         git_output("rev-parse", "--verify", f"{base}^{{commit}}")
         git_output("rev-parse", "--verify", f"{head}^{{commit}}")
-        errors = validate_change(files_at(base), files_at(head), os.environ.get("PR_BODY", ""))
+        comparison_base = git_output("merge-base", base, head).strip()
+        errors = validate_change(
+            files_at(comparison_base),
+            files_at(head),
+            os.environ.get("PR_BODY", ""),
+        )
     except subprocess.CalledProcessError as error:
         print(error.stderr.strip() or "error: unable to inspect wake test changes", file=sys.stderr)
         return 1
