@@ -70,8 +70,9 @@ func TestDeliverWakeNotificationSuccessUsesOnlyInput(t *testing.T) {
 
 func TestDeliverWakeNotificationNonInputOutcomesUseOnlyOutput(t *testing.T) {
 	tests := []struct {
-		name  string
-		setup func(*testing.T, *wakeConfig)
+		name        string
+		setup       func(*testing.T, *wakeConfig)
+		wantBlocked bool
 	}{
 		{
 			name: "none",
@@ -99,7 +100,8 @@ func TestDeliverWakeNotificationNonInputOutcomesUseOnlyOutput(t *testing.T) {
 			},
 		},
 		{
-			name: "generic failure",
+			name:        "generic failure with uncertain acceptance",
+			wantBlocked: true,
 			setup: func(t *testing.T, cfg *wakeConfig) {
 				cfg.injectMode = wakeInjectModeRaw
 				stubTIOCSTIInject(t, func(string) error {
@@ -126,12 +128,30 @@ func TestDeliverWakeNotificationNonInputOutcomesUseOnlyOutput(t *testing.T) {
 				wakePayloadPeerHeaders,
 			)
 
+			var deliveryErr error
 			stderr := captureWakeStderr(t, func() {
-				if err := deliverWakeNotification(cfg, notice, true); err != nil {
-					t.Fatalf("deliverWakeNotification: %v", err)
-				}
+				deliveryErr = deliverWakeNotification(cfg, notice, true)
 			})
 
+			if tc.wantBlocked {
+				var blocked *wakeInputDemotionBlockedError
+				if !errors.As(deliveryErr, &blocked) {
+					t.Fatalf("delivery error = %v, want blocked uncertain-input demotion", deliveryErr)
+				}
+				if strings.Contains(stderr, "message from peer - output only") {
+					t.Fatalf("uncertain input emitted output fallback: %q", stderr)
+				}
+				if !strings.Contains(stderr, "terminal input acceptance is uncertain") {
+					t.Fatalf("uncertain input diagnostic missing: %q", stderr)
+				}
+				if emission.OutputProvenance != "" || emission.Effects != nil {
+					t.Fatalf("uncertain input recorded output delivery: %#v", emission)
+				}
+				return
+			}
+			if deliveryErr != nil {
+				t.Fatalf("deliverWakeNotification: %v", deliveryErr)
+			}
 			if !strings.Contains(stderr, "message from peer - output only") {
 				t.Fatalf("fallback output = %q, missing peer output", stderr)
 			}
@@ -277,7 +297,9 @@ func TestWakeAttentionReportsOnlyFullyWrittenOutputEffectsAndProvenance(t *testi
 	cfg := testOutputAttentionConfig(&recorded)
 
 	stderr := captureWakeStderr(t, func() {
-		emitWakeAttention(cfg, payload)
+		if err := emitWakeAttention(cfg, payload); err != nil {
+			t.Fatalf("emit complete attention: %v", err)
+		}
 	})
 	for _, want := range []string{
 		"\x1b]0;AMQ attention\a",
@@ -304,14 +326,36 @@ func TestWakeAttentionReportsOnlyFullyWrittenOutputEffectsAndProvenance(t *testi
 	cfg.attentionWrite = func(data []byte) (int, error) {
 		return len(data) - 1, nil
 	}
+	var writeErr error
 	stderr = captureWakeStderr(t, func() {
-		emitWakeAttention(cfg, payload)
+		writeErr = emitWakeAttention(cfg, payload)
 	})
+	var deliveryErr *wakeAttentionDeliveryError
+	if !errors.As(writeErr, &deliveryErr) {
+		t.Fatalf("partial write error = %v, want typed attention delivery failure", writeErr)
+	}
 	if recorded.OutputProvenance != "" || recorded.Effects != nil {
 		t.Fatalf("partial write recorded emission: %#v", recorded)
 	}
 	if !strings.Contains(stderr, "output attention write failed") {
 		t.Fatalf("partial-write diagnostic missing: %q", stderr)
+	}
+
+	sinkErr := errors.New("attention sink unavailable")
+	cfg.attentionWrite = func([]byte) (int, error) {
+		return 0, sinkErr
+	}
+	stderr = captureWakeStderr(t, func() {
+		writeErr = emitWakeAttention(cfg, payload)
+	})
+	if !errors.As(writeErr, &deliveryErr) || !errors.Is(writeErr, sinkErr) {
+		t.Fatalf("failed write error = %v, want typed attention failure wrapping sink error", writeErr)
+	}
+	if recorded.OutputProvenance != "" || recorded.Effects != nil {
+		t.Fatalf("failed write recorded emission: %#v", recorded)
+	}
+	if !strings.Contains(stderr, "attention sink unavailable") {
+		t.Fatalf("failed-write diagnostic missing: %q", stderr)
 	}
 }
 
@@ -337,7 +381,9 @@ func TestWakeAttentionAlternateScreenAgentOmitsPlainTerminalOutput(t *testing.T)
 				provenance: wakePayloadPeerHeaders,
 			}
 
-			emitWakeAttention(cfg, payload)
+			if err := emitWakeAttention(cfg, payload); err != nil {
+				t.Fatalf("emit alternate-screen attention: %v", err)
+			}
 
 			if got := written.String(); got != "\x1b]0;AMQ attention\a\a" {
 				t.Fatalf("alternate-screen attention = %q, want title and bell only", got)
@@ -376,7 +422,9 @@ func TestWakeAttentionAlternateScreenAgentKeepsSupportedOSCNotification(t *testi
 		provenance: wakePayloadPeerHeaders,
 	}
 
-	emitWakeAttention(cfg, payload)
+	if err := emitWakeAttention(cfg, payload); err != nil {
+		t.Fatalf("emit supported OSC attention: %v", err)
+	}
 
 	got := written.String()
 	if !strings.Contains(got, "\x1b]9;AMQ [session1]: safe,notice\a") {
@@ -595,7 +643,9 @@ func TestWakeAttentionRedirectedOutputOmitsControls(t *testing.T) {
 	}
 
 	stderr := captureWakeStderr(t, func() {
-		emitWakeAttention(cfg, payload)
+		if err := emitWakeAttention(cfg, payload); err != nil {
+			t.Fatalf("emit redirected attention: %v", err)
+		}
 	})
 	if stderr != "peer ]2;spoof \n" {
 		t.Fatalf("redirected output = %q", stderr)
@@ -649,10 +699,12 @@ func TestWakeAttentionOptionalOSCRequiresPositiveTerminalSupport(t *testing.T) {
 				},
 			}
 			stderr := captureWakeStderr(t, func() {
-				emitWakeAttention(cfg, wakePayload{
+				if err := emitWakeAttention(cfg, wakePayload{
 					text:       "safe;notice",
 					provenance: wakePayloadPeerHeaders,
-				})
+				}); err != nil {
+					t.Fatalf("emit optional OSC attention: %v", err)
+				}
 			})
 			if tc.wantBytes == "" {
 				if strings.Contains(stderr, "\x1b]9;") ||
@@ -691,7 +743,9 @@ func TestWakeAttentionDoesNotInferOperatorProvenanceFromPayloadText(t *testing.T
 	}
 
 	stderr := captureWakeStderr(t, func() {
-		emitWakeAttention(cfg, payload)
+		if err := emitWakeAttention(cfg, payload); err != nil {
+			t.Fatalf("emit operator-provenance attention: %v", err)
+		}
 	})
 	if stderr != coopWakeDoorbell+"\n" {
 		t.Fatalf("operator output was content-normalized: %q", stderr)

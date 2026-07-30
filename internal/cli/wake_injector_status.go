@@ -5,8 +5,9 @@ import (
 )
 
 const (
-	wakeInjectorUnsupportedStatus = "injector_unsupported"
-	tiocstiLegacySysctlPath       = "/proc/sys/dev/tty/legacy_tiocsti"
+	wakeInjectorUnsupportedStatus   = "injector_unsupported"
+	wakeInputRecoveryRequiredStatus = "input_recovery_required"
+	tiocstiLegacySysctlPath         = "/proc/sys/dev/tty/legacy_tiocsti"
 )
 
 type wakeInjectorUnsupportedError struct {

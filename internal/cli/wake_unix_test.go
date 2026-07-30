@@ -3171,6 +3171,538 @@ func TestRunWakeLoopMaintenanceDemotionTransfersBeforePersistenceFailure(t *test
 	}
 }
 
+func TestRunWakeLoopMaintenanceKeepsWatchingAfterConfirmedInputDemotion(t *testing.T) {
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	message := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "confirmed-input-demotion",
+			From:    "peer",
+			To:      []string{"codex"},
+			Thread:  "p2p/codex__peer",
+			Subject: "retain suffix debt",
+			Created: "2026-07-30T08:00:00Z",
+		},
+	}
+	data, err := message.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := deliverToInboxForTest(t, root, "codex", "pending.md", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	persistErr := errors.New("presence unavailable")
+	stop := make(chan struct{})
+	ticks := make(chan time.Time)
+	done := make(chan error, 1)
+	var attentionWrites atomic.Int64
+	go func() {
+		done <- runWakeLoop(wakeConfig{
+			root:        root,
+			me:          "codex",
+			session:     "session1",
+			wakeOwner:   &wakeOwner{},
+			injectMode:  wakeInjectModePaste,
+			controlStop: stop,
+			inputDelivery: wakeInputDeliveryState{
+				phase:   wakeInputRawRescueQueued,
+				mode:    wakeInjectModeRaw,
+				payload: buildCoopWakeDoorbell(coopWakeDoorbellTokenForTests),
+			},
+			doorbell: wakeDoorbellState{
+				phase:       wakeDoorbellAwaitingObservation,
+				token:       coopWakeDoorbellTokenForTests,
+				cohort:      snapshotWakeFileIdentities(map[string]os.FileInfo{"pending.md": info}),
+				attempts:    1,
+				nextAttempt: time.Now().Add(time.Hour),
+			},
+			maintenanceTicks: ticks,
+			preconditionCheck: func(cfg *wakeConfig) error {
+				cfg.injectMode = wakeInjectModeNone
+				return persistErr
+			},
+			attentionIsTTY: func() bool { return false },
+			attentionWrite: func(data []byte) (int, error) {
+				attentionWrites.Add(1)
+				return len(data), nil
+			},
+		})
+	}()
+
+	select {
+	case ticks <- time.Now():
+	case err := <-done:
+		t.Fatalf("wake loop exited before maintenance: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not accept maintenance tick")
+	}
+	deadline := time.After(2 * time.Second)
+	for attentionWrites.Load() != 1 {
+		select {
+		case err := <-done:
+			t.Fatalf("wake loop exited during confirmed-input recovery: %v", err)
+		case <-deadline:
+			t.Fatal("wake loop did not emit confirmed-input recovery attention")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	select {
+	case ticks <- time.Now():
+	case err := <-done:
+		t.Fatalf("wake loop exited before recovery maintenance: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not accept recovery maintenance tick")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := attentionWrites.Load(); got != 1 {
+		t.Fatalf("unchanged recovery state emitted %d alerts, want one", got)
+	}
+	close(stop)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("wake loop stop: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not stop")
+	}
+}
+
+func TestRunWakeLoopKeepsWatchingAfterConfirmedInputBecomesUnsupported(t *testing.T) {
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	writeMessage := func(filename, id string) os.FileInfo {
+		t.Helper()
+		message := format.Message{
+			Header: format.Header{
+				Schema:  1,
+				ID:      id,
+				From:    "peer",
+				To:      []string{"codex"},
+				Thread:  "p2p/codex__peer",
+				Subject: id,
+				Created: "2026-07-30T08:00:00Z",
+			},
+		}
+		data, err := message.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		path, err := deliverToInboxForTest(t, root, "codex", filename, data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+	firstInfo := writeMessage("first.md", "first")
+
+	stop := make(chan struct{})
+	ticks := make(chan time.Time)
+	attention := make(chan string, 3)
+	done := make(chan error, 1)
+	start := time.Now()
+	var nowNanos atomic.Int64
+	nowNanos.Store(start.UnixNano())
+	go func() {
+		done <- runWakeLoop(wakeConfig{
+			root:        root,
+			me:          "codex",
+			session:     "session1",
+			wakeOwner:   &wakeOwner{},
+			injectMode:  wakeInjectModePaste,
+			controlStop: stop,
+			inputDelivery: wakeInputDeliveryState{
+				phase:   wakeInputPrimarySubmitPending,
+				mode:    wakeInjectModePaste,
+				payload: buildCoopWakeDoorbell(coopWakeDoorbellTokenForTests),
+			},
+			doorbell: wakeDoorbellState{
+				phase:  wakeDoorbellAwaitingObservation,
+				token:  coopWakeDoorbellTokenForTests,
+				cohort: snapshotWakeFileIdentities(map[string]os.FileInfo{"first.md": firstInfo}),
+			},
+			maintenanceTicks: ticks,
+			doorbellNow: func() time.Time {
+				return time.Unix(0, nowNanos.Load())
+			},
+			terminalWrite: func(string) error {
+				return newWakeInjectorUnsupportedError(errors.New("injector disabled"))
+			},
+			attentionIsTTY: func() bool { return false },
+			attentionWrite: func(data []byte) (int, error) {
+				attention <- string(data)
+				return len(data), nil
+			},
+		})
+	}()
+
+	select {
+	case output := <-attention:
+		if !strings.Contains(output, "terminal input delivery is incomplete") {
+			t.Fatalf("recovery attention = %q, want manual recovery guidance", output)
+		}
+	case err := <-done:
+		t.Fatalf("wake loop exited after confirmed input became unsupported: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not emit recovery attention")
+	}
+
+	select {
+	case ticks <- time.Now():
+	case err := <-done:
+		t.Fatalf("wake loop exited before recovery maintenance: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not accept recovery maintenance tick")
+	}
+	select {
+	case duplicate := <-attention:
+		t.Fatalf("unchanged recovery cohort emitted duplicate attention: %q", duplicate)
+	case err := <-done:
+		t.Fatalf("wake loop exited during recovery maintenance: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	nowNanos.Store(start.Add(wakeDoorbellRetryBase).UnixNano())
+	writeMessage("second.md", "second")
+	select {
+	case output := <-attention:
+		if !strings.Contains(output, "terminal input delivery is incomplete") {
+			t.Fatalf("changed-cohort recovery attention = %q", output)
+		}
+	case err := <-done:
+		t.Fatalf("wake loop exited before changed recovery cohort: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("changed recovery cohort did not emit attention")
+	}
+
+	close(stop)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("wake loop stop: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not stop")
+	}
+}
+
+func TestRunWakeLoopMessageRecoveryAttentionFailureIsFatalWithoutRetry(t *testing.T) {
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	message := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "confirmed-input-recovery-attention-failure",
+			From:    "peer",
+			To:      []string{"codex"},
+			Thread:  "p2p/codex__peer",
+			Subject: "confirmed-input-recovery-attention-failure",
+			Created: "2026-07-30T08:00:00Z",
+		},
+	}
+	data, err := message.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := deliverToInboxForTest(t, root, "codex", "message.md", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attentionSinkErr := errors.New("attention sink unavailable")
+	var attentionWrites atomic.Int64
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runWakeLoop(wakeConfig{
+			root:        root,
+			me:          "codex",
+			session:     "session1",
+			wakeOwner:   &wakeOwner{},
+			injectMode:  wakeInjectModePaste,
+			controlStop: stop,
+			inputDelivery: wakeInputDeliveryState{
+				phase:   wakeInputPrimarySubmitPending,
+				mode:    wakeInjectModePaste,
+				payload: buildCoopWakeDoorbell(coopWakeDoorbellTokenForTests),
+			},
+			doorbell: wakeDoorbellState{
+				phase:  wakeDoorbellAwaitingObservation,
+				token:  coopWakeDoorbellTokenForTests,
+				cohort: snapshotWakeFileIdentities(map[string]os.FileInfo{"message.md": info}),
+			},
+			terminalWrite: func(string) error {
+				return newWakeInjectorUnsupportedError(errors.New("injector disabled"))
+			},
+			attentionIsTTY: func() bool { return false },
+			attentionWrite: func(data []byte) (int, error) {
+				if attentionWrites.Add(1) == 1 {
+					return 0, attentionSinkErr
+				}
+				return len(data), nil
+			},
+		})
+	}()
+
+	select {
+	case err := <-done:
+		var attentionErr *wakeAttentionDeliveryError
+		if !errors.As(err, &attentionErr) ||
+			!errors.Is(err, attentionSinkErr) ||
+			!isWakeInputDemotionBlocked(err) {
+			t.Fatalf("wake loop error = %v, want blocked input plus attention failure", err)
+		}
+	case <-time.After(2 * time.Second):
+		close(stop)
+		<-done
+		t.Fatalf(
+			"wake loop retried or masked recovery attention failure; writes=%d",
+			attentionWrites.Load(),
+		)
+	}
+	if got := attentionWrites.Load(); got != 1 {
+		t.Fatalf("recovery attention writes = %d, want exactly 1", got)
+	}
+}
+
+func TestRunWakeLoopKeepsWatchingWhenDrainedInboxReconciliationBecomesUncertain(t *testing.T) {
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	stop := make(chan struct{})
+	ticks := make(chan time.Time)
+	attention := make(chan string, 2)
+	done := make(chan error, 1)
+	var terminalWrites atomic.Int64
+	go func() {
+		done <- runWakeLoop(wakeConfig{
+			root:        root,
+			me:          "codex",
+			session:     "session1",
+			wakeOwner:   &wakeOwner{},
+			injectMode:  wakeInjectModePaste,
+			controlStop: stop,
+			inputDelivery: wakeInputDeliveryState{
+				phase:   wakeInputPrimarySubmitPending,
+				mode:    wakeInjectModePaste,
+				payload: buildCoopWakeDoorbell(coopWakeDoorbellTokenForTests),
+			},
+			maintenanceTicks: ticks,
+			terminalWrite: func(string) error {
+				terminalWrites.Add(1)
+				return &wakeTestAcceptedProgressError{
+					err:      errors.New("terminal progress unavailable"),
+					accepted: -1,
+				}
+			},
+			attentionIsTTY: func() bool { return false },
+			attentionWrite: func(data []byte) (int, error) {
+				attention <- string(data)
+				return len(data), nil
+			},
+		})
+	}()
+
+	select {
+	case output := <-attention:
+		if !strings.Contains(output, "terminal input delivery is incomplete") {
+			t.Fatalf("reconciliation recovery attention = %q", output)
+		}
+	case err := <-done:
+		t.Fatalf("wake loop exited during drained-inbox reconciliation: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("drained-inbox reconciliation did not emit recovery attention")
+	}
+	if got := terminalWrites.Load(); got != 1 {
+		t.Fatalf("terminal writes = %d, want one uncertain reconciliation attempt", got)
+	}
+
+	select {
+	case ticks <- time.Now():
+	case err := <-done:
+		t.Fatalf("wake loop exited before recovery maintenance: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not accept recovery maintenance tick")
+	}
+	select {
+	case duplicate := <-attention:
+		t.Fatalf("recovery maintenance emitted duplicate attention: %q", duplicate)
+	case err := <-done:
+		t.Fatalf("wake loop exited during recovery maintenance: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if got := terminalWrites.Load(); got != 1 {
+		t.Fatalf("recovery maintenance retried terminal input: writes=%d", got)
+	}
+
+	close(stop)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("wake loop stop: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not stop")
+	}
+}
+
+func TestRunWakeLoopDrainedInboxRecoveryAttentionFailureIsFatal(t *testing.T) {
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	attentionSinkErr := errors.New("attention sink unavailable")
+	done := make(chan error, 1)
+	go func() {
+		done <- runWakeLoop(wakeConfig{
+			root:        root,
+			me:          "codex",
+			session:     "session1",
+			wakeOwner:   &wakeOwner{},
+			injectMode:  wakeInjectModePaste,
+			controlStop: make(chan struct{}),
+			inputDelivery: wakeInputDeliveryState{
+				phase:   wakeInputPrimarySubmitPending,
+				mode:    wakeInjectModePaste,
+				payload: buildCoopWakeDoorbell(coopWakeDoorbellTokenForTests),
+			},
+			terminalWrite: func(string) error {
+				return &wakeTestAcceptedProgressError{
+					err:      errors.New("terminal progress unavailable"),
+					accepted: -1,
+				}
+			},
+			attentionIsTTY: func() bool { return false },
+			attentionWrite: func([]byte) (int, error) {
+				return 0, attentionSinkErr
+			},
+		})
+	}()
+
+	select {
+	case err := <-done:
+		var uncertainErr *wakeTerminalProgressUncertainError
+		var attentionErr *wakeAttentionDeliveryError
+		if !errors.As(err, &uncertainErr) ||
+			!errors.As(err, &attentionErr) ||
+			!errors.Is(err, attentionSinkErr) {
+			t.Fatalf("wake loop error = %v, want uncertain input plus attention failure", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not fail after recovery attention failure")
+	}
+}
+
+func TestRunWakeLoopBuiltInMaintenanceKeepsWatchingAfterConfirmedInputDemotion(t *testing.T) {
+	oldRead := readTIOCSTILegacySysctl
+	readTIOCSTILegacySysctl = func() ([]byte, error) {
+		return []byte("0\n"), nil
+	}
+	t.Cleanup(func() {
+		readTIOCSTILegacySysctl = oldRead
+	})
+
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	message := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "built-in-confirmed-input-demotion",
+			From:    "peer",
+			To:      []string{"codex"},
+			Thread:  "p2p/codex__peer",
+			Subject: "retain suffix debt",
+			Created: "2026-07-30T08:00:00Z",
+		},
+	}
+	data, err := message.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := deliverToInboxForTest(t, root, "codex", "pending.md", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ticks := make(chan time.Time)
+	done := make(chan error, 1)
+	stop := make(chan struct{})
+	var attentionWrites atomic.Int64
+	go func() {
+		done <- runWakeLoop(wakeConfig{
+			root:        root,
+			me:          "codex",
+			session:     "session1",
+			wakeOwner:   &wakeOwner{},
+			injectMode:  wakeInjectModeRaw,
+			controlStop: stop,
+			inputDelivery: wakeInputDeliveryState{
+				phase:   wakeInputRawRescuePending,
+				mode:    wakeInjectModeRaw,
+				payload: buildCoopWakeDoorbell(coopWakeDoorbellTokenForTests),
+			},
+			doorbell: wakeDoorbellState{
+				phase:       wakeDoorbellAwaitingObservation,
+				token:       coopWakeDoorbellTokenForTests,
+				cohort:      snapshotWakeFileIdentities(map[string]os.FileInfo{"pending.md": info}),
+				attempts:    1,
+				nextAttempt: time.Now().Add(time.Hour),
+			},
+			maintenanceTicks: ticks,
+			attentionIsTTY:   func() bool { return false },
+			attentionWrite: func(data []byte) (int, error) {
+				attentionWrites.Add(1)
+				return len(data), nil
+			},
+		})
+	}()
+
+	select {
+	case ticks <- time.Now():
+	case err := <-done:
+		t.Fatalf("wake loop exited before built-in maintenance: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not accept built-in maintenance tick")
+	}
+	deadline := time.After(2 * time.Second)
+	for attentionWrites.Load() != 1 {
+		select {
+		case err := <-done:
+			t.Fatalf("wake loop exited during built-in recovery: %v", err)
+		case <-deadline:
+			t.Fatal("wake loop did not emit built-in recovery attention")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	close(stop)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("wake loop stop: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not stop")
+	}
+}
+
 func TestRunWakeLoopFatalDemotionTransfersDuringScanBackoff(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
@@ -3262,6 +3794,85 @@ func TestRunWakeLoopFatalDemotionTransfersDuringScanBackoff(t *testing.T) {
 	case output := <-attention:
 		t.Fatalf("fatal demotion emitted duplicate attention: %q", output)
 	default:
+	}
+}
+
+func TestRunWakeLoopFatalScanFallbackSurfacesAttentionWriteFailure(t *testing.T) {
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	persistErr := errors.New("presence unavailable")
+	originalScanRetryBase := wakeInboxScanRetryBase
+	originalScanRetryMax := wakeInboxScanRetryMax
+	wakeInboxScanRetryBase = time.Hour
+	wakeInboxScanRetryMax = time.Hour
+	t.Cleanup(func() {
+		wakeInboxScanRetryBase = originalScanRetryBase
+		wakeInboxScanRetryMax = originalScanRetryMax
+	})
+
+	scanned := make(chan struct{}, 1)
+	reader := wakeScriptedInboxReader{
+		readDir: func() ([]os.DirEntry, error) {
+			select {
+			case scanned <- struct{}{}:
+			default:
+			}
+			return nil, syscall.EIO
+		},
+	}
+	ticks := make(chan time.Time)
+	done := make(chan error, 1)
+	var attentionWrites atomic.Int64
+	attentionSinkErr := errors.New("attention sink unavailable")
+	go func() {
+		done <- runWakeLoop(wakeConfig{
+			root:             root,
+			me:               "codex",
+			session:          "session1",
+			wakeOwner:        &wakeOwner{},
+			injectMode:       wakeInjectModePaste,
+			controlStop:      make(chan struct{}),
+			maintenanceTicks: ticks,
+			retainedInbox:    reader,
+			preconditionCheck: func(cfg *wakeConfig) error {
+				cfg.injectMode = wakeInjectModeNone
+				return persistErr
+			},
+			attentionIsTTY: func() bool { return false },
+			attentionWrite: func(data []byte) (int, error) {
+				attentionWrites.Add(1)
+				return 0, attentionSinkErr
+			},
+		})
+	}()
+
+	select {
+	case <-scanned:
+	case err := <-done:
+		t.Fatalf("wake loop exited before initial scan backoff: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not arm scan backoff")
+	}
+	select {
+	case ticks <- time.Now():
+	case err := <-done:
+		t.Fatalf("wake loop exited before fatal demotion: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not accept maintenance tick")
+	}
+	select {
+	case err := <-done:
+		var attentionErr *wakeAttentionDeliveryError
+		if !errors.Is(err, persistErr) ||
+			!errors.As(err, &attentionErr) ||
+			!errors.Is(err, attentionSinkErr) {
+			t.Fatalf("wake loop error = %v, want persistence plus attention sink failure", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not surface failed fatal fallback")
+	}
+	if got := attentionWrites.Load(); got != 1 {
+		t.Fatalf("attention writes = %d, want one failed fallback", got)
 	}
 }
 
@@ -6944,25 +7555,29 @@ func TestWakeInjectionPreconditionCheckSurfacesLegacyCapabilityChangeWithoutInje
 	}
 
 	legacyControl = "0\n"
-	if err := wakeInjectionPreconditionCheck(&cfg, openable); err != nil {
-		t.Fatalf("changed precondition check: %v", err)
+	previousInput := cfg.inputDelivery
+	previousDoorbell := cfg.doorbell
+	err := wakeInjectionPreconditionCheck(&cfg, openable)
+	var demotionErr *wakeInputDemotionBlockedError
+	if !errors.As(err, &demotionErr) {
+		t.Fatalf("changed precondition error = %v, want blocked input demotion", err)
 	}
 	if openChecks != 1 {
 		t.Fatalf("controlling terminal checks = %d, want 1 before capability became unsupported", openChecks)
 	}
-	if cfg.injectMode != wakeInjectModeNone {
-		t.Fatalf("inject mode = %q, want none", cfg.injectMode)
+	if cfg.injectMode != wakeInjectModePaste {
+		t.Fatalf("inject mode = %q, want retained paste mode", cfg.injectMode)
 	}
-	if cfg.doorbell.phase != wakeDoorbellIdle ||
-		cfg.doorbell.token != "" ||
-		cfg.doorbell.attempts != 0 ||
-		!cfg.doorbell.nextAttempt.IsZero() ||
-		!cfg.doorbell.observationUntil.IsZero() ||
-		cfg.doorbell.observationUsed {
-		t.Fatalf("doorbell state survived capability demotion: %#v", cfg.doorbell)
+	if cfg.doorbell.phase != previousDoorbell.phase ||
+		cfg.doorbell.token != previousDoorbell.token ||
+		cfg.doorbell.attempts != previousDoorbell.attempts ||
+		!cfg.doorbell.nextAttempt.Equal(previousDoorbell.nextAttempt) ||
+		!cfg.doorbell.observationUntil.Equal(previousDoorbell.observationUntil) ||
+		cfg.doorbell.observationUsed != previousDoorbell.observationUsed {
+		t.Fatalf("blocked demotion mutated doorbell: %#v", cfg.doorbell)
 	}
-	if cfg.inputDelivery.pending() {
-		t.Fatalf("input delivery survived capability demotion: %#v", cfg.inputDelivery)
+	if cfg.inputDelivery != previousInput {
+		t.Fatalf("blocked demotion mutated input state: %#v", cfg.inputDelivery)
 	}
 	if status != wakeInjectorUnsupportedStatus || mode != wakeInjectModePaste {
 		t.Fatalf("status/mode = %q/%q, want %q/%q", status, mode, wakeInjectorUnsupportedStatus, wakeInjectModePaste)
@@ -6975,11 +7590,8 @@ func TestWakeInjectionPreconditionCheckSurfacesLegacyCapabilityChangeWithoutInje
 			t.Fatalf("reason = %q, want %q", reason, want)
 		}
 	}
-	if err := wakeInjectionPreconditionCheck(&cfg, openable); err != nil {
-		t.Fatalf("demoted precondition check: %v", err)
-	}
 	if legacyReads != 2 {
-		t.Fatalf("legacy capability reads = %d, want 2 before permanent demotion", legacyReads)
+		t.Fatalf("legacy capability reads = %d, want 2 through blocked demotion", legacyReads)
 	}
 }
 

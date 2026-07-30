@@ -17,6 +17,7 @@ const (
 	wakeDoorbellAwaitingObservation
 	wakeDoorbellObserved
 	wakeDoorbellCohortDelivered
+	wakeDoorbellRecoveryRequired
 )
 
 const (
@@ -34,6 +35,7 @@ type wakeDoorbellState struct {
 	nextAttempt      time.Time
 	observationUntil time.Time
 	observationUsed  bool
+	recoveryPending  bool
 }
 
 type wakeDoorbellPlan struct {
@@ -119,6 +121,54 @@ func (state *wakeDoorbellState) recordCohortDelivered(current map[string]os.File
 	state.cohort = snapshotWakeFileIdentities(current)
 }
 
+func (state *wakeDoorbellState) planRecoveryAttention(
+	now time.Time,
+	current map[string]os.FileInfo,
+) bool {
+	if len(current) == 0 {
+		state.noteRecoveryInboxEmpty()
+		return false
+	}
+	if state.phase != wakeDoorbellRecoveryRequired {
+		return true
+	}
+	if sameKnownWakeCohort(state.cohort, current) {
+		state.recoveryPending = false
+		return false
+	}
+	if !state.nextAttempt.IsZero() && now.Before(state.nextAttempt) {
+		state.recoveryPending = true
+		return false
+	}
+	return true
+}
+
+func (state *wakeDoorbellState) recordRecoveryRequired(
+	now time.Time,
+	current map[string]os.FileInfo,
+) {
+	state.reset()
+	state.phase = wakeDoorbellRecoveryRequired
+	state.cohort = snapshotWakeFileIdentities(current)
+	state.nextAttempt = now.Add(wakeDoorbellRetryBase)
+}
+
+func (state *wakeDoorbellState) retainRecoveryRequired(now time.Time) {
+	cohort := state.cohort
+	state.reset()
+	state.phase = wakeDoorbellRecoveryRequired
+	state.cohort = cohort
+	state.nextAttempt = now.Add(wakeDoorbellRetryBase)
+}
+
+func (state *wakeDoorbellState) noteRecoveryInboxEmpty() {
+	if state.phase != wakeDoorbellRecoveryRequired {
+		state.reset()
+		state.phase = wakeDoorbellRecoveryRequired
+	}
+	state.recoveryPending = false
+}
+
 func (state wakeDoorbellState) pendingInput() bool {
 	switch state.phase {
 	case wakeDoorbellAwaitingToken,
@@ -146,6 +196,9 @@ func (state *wakeDoorbellState) nextDeadline() (time.Time, bool) {
 	switch state.phase {
 	case wakeDoorbellAwaitingToken, wakeDoorbellAwaitingObservation:
 		return state.nextAttempt, !state.nextAttempt.IsZero()
+	case wakeDoorbellRecoveryRequired:
+		return state.nextAttempt,
+			state.recoveryPending && !state.nextAttempt.IsZero()
 	case wakeDoorbellObserved:
 		return state.observationUntil, !state.observationUntil.IsZero()
 	default:

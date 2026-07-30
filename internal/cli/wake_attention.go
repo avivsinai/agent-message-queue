@@ -24,6 +24,25 @@ type wakeAttentionEmission struct {
 	OutputProvenance wakePayloadProvenance
 }
 
+type wakeAttentionDeliveryError struct {
+	written int
+	total   int
+	err     error
+}
+
+func (err *wakeAttentionDeliveryError) Error() string {
+	return fmt.Sprintf(
+		"output attention write failed after %d/%d bytes: %v",
+		err.written,
+		err.total,
+		err.err,
+	)
+}
+
+func (err *wakeAttentionDeliveryError) Unwrap() error {
+	return err.err
+}
+
 // writeWakeDiagnostic preserves human-readable logs without writing printable
 // bytes over a Codex or Claude alternate-screen composer on the shared TTY.
 func writeWakeDiagnostic(cfg *wakeConfig, format string, args ...any) error {
@@ -45,9 +64,9 @@ func wakeDiagnosticIsTerminal(cfg *wakeConfig) bool {
 // emitWakeAttention is the non-input destination for a wake notification.
 // Effects record only a complete write by AMQ; they do not assert that a
 // terminal rendered them or that a person observed them.
-func emitWakeAttention(cfg *wakeConfig, payload wakePayload) {
+func emitWakeAttention(cfg *wakeConfig, payload wakePayload) error {
 	if cfg != nil && cfg.suppressAttention {
-		return
+		return nil
 	}
 	isTerminal := wakeAttentionIsTerminal(cfg)
 	writePlainOutput := !isTerminal || cfg == nil || !wakeUsesAlternateScreenTUI(cfg.me)
@@ -94,7 +113,11 @@ func emitWakeAttention(cfg *wakeConfig, payload wakePayload) {
 			err = io.ErrShortWrite
 		}
 		_ = writeWakeDiagnostic(cfg, "amq wake: output attention write failed after %d/%d bytes: %v\n", n, len(data), err)
-		return
+		return &wakeAttentionDeliveryError{
+			written: n,
+			total:   len(data),
+			err:     err,
+		}
 	}
 
 	if cfg != nil && cfg.recordAttention != nil {
@@ -106,6 +129,7 @@ func emitWakeAttention(cfg *wakeConfig, payload wakePayload) {
 			_ = writeWakeDiagnostic(cfg, "amq wake: record output attention write: %v\n", err)
 		}
 	}
+	return nil
 }
 
 func wakeAttentionIsTerminal(cfg *wakeConfig) bool {

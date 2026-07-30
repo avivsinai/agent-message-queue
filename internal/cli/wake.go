@@ -16,60 +16,61 @@ import (
 )
 
 type wakeConfig struct {
-	me                   string
-	root                 string
-	session              string
-	injectCmd            string
-	injectVia            string // external command for injection (replaces TIOCSTI)
-	injectArgs           []string
-	wakeOwner            *wakeOwner
-	injectTimeout        time.Duration
-	bell                 bool
-	debounce             time.Duration
-	previewLen           int
-	strict               bool
-	fallbackWarn         bool
-	injectMode           string // auto, raw, paste
-	debug                bool
-	deferWhileInput      bool
-	inputQuietFor        time.Duration
-	inputPollInterval    time.Duration
-	inputMaxHold         time.Duration
-	interrupt            bool
-	interruptLabel       string
-	interruptPriority    string
-	interruptKey         string
-	interruptNotice      string
-	interruptCooldown    time.Duration
-	lastInterrupt        time.Time
-	controlStop          <-chan struct{}
-	beforeTerminalWrite  func() error
-	terminalWrite        func(string) error
-	terminalGeneration   string
-	terminalTTY          string
-	baselineRequested    bool
-	baselineInherited    bool
-	baselineExisting     map[string]wakeFileIdentity
-	inputDelivery        wakeInputDeliveryState
-	doorbell             wakeDoorbellState
-	doorbellNow          func() time.Time
-	newDoorbellToken     func() (string, error)
-	promptObserved       <-chan string
-	suppressAttention    bool
-	onBaselineReady      func(map[string]wakeFileIdentity) error
-	onPrepared           func(wakeAdmissionWatcher) error
-	retainedAgent        wakeRetainedAgent
-	retainedInbox        wakeInboxReader
-	touchPresence        func() error
-	maintenanceTicks     <-chan time.Time
-	preconditionCheck    func(*wakeConfig) error
-	onPendingNotify      func()
-	recordNotifierStatus func(status, mode, reason string) error
-	recordAttention      func(wakeAttentionEmission) error
-	attentionEnv         func(string) string
-	attentionIsTTY       func() bool
-	attentionWrite       func([]byte) (int, error)
-	diagnosticIsTTY      func() bool
+	me                    string
+	root                  string
+	session               string
+	injectCmd             string
+	injectVia             string // external command for injection (replaces TIOCSTI)
+	injectArgs            []string
+	wakeOwner             *wakeOwner
+	injectTimeout         time.Duration
+	bell                  bool
+	debounce              time.Duration
+	previewLen            int
+	strict                bool
+	fallbackWarn          bool
+	injectMode            string // auto, raw, paste
+	debug                 bool
+	deferWhileInput       bool
+	inputQuietFor         time.Duration
+	inputPollInterval     time.Duration
+	inputMaxHold          time.Duration
+	interrupt             bool
+	interruptLabel        string
+	interruptPriority     string
+	interruptKey          string
+	interruptNotice       string
+	interruptCooldown     time.Duration
+	lastInterrupt         time.Time
+	controlStop           <-chan struct{}
+	beforeTerminalWrite   func() error
+	terminalWrite         func(string) error
+	terminalGeneration    string
+	terminalTTY           string
+	baselineRequested     bool
+	baselineInherited     bool
+	baselineExisting      map[string]wakeFileIdentity
+	inputDelivery         wakeInputDeliveryState
+	inputRecoveryRequired bool
+	doorbell              wakeDoorbellState
+	doorbellNow           func() time.Time
+	newDoorbellToken      func() (string, error)
+	promptObserved        <-chan string
+	suppressAttention     bool
+	onBaselineReady       func(map[string]wakeFileIdentity) error
+	onPrepared            func(wakeAdmissionWatcher) error
+	retainedAgent         wakeRetainedAgent
+	retainedInbox         wakeInboxReader
+	touchPresence         func() error
+	maintenanceTicks      <-chan time.Time
+	preconditionCheck     func(*wakeConfig) error
+	onPendingNotify       func()
+	recordNotifierStatus  func(status, mode, reason string) error
+	recordAttention       func(wakeAttentionEmission) error
+	attentionEnv          func(string) string
+	attentionIsTTY        func() bool
+	attentionWrite        func([]byte) (int, error)
+	diagnosticIsTTY       func() bool
 }
 
 type wakeInputDeliveryPhase uint8
@@ -85,10 +86,11 @@ const (
 )
 
 type wakeInputDeliveryState struct {
-	phase         wakeInputDeliveryPhase
-	mode          string
-	payload       string
-	acceptedBytes int
+	phase               wakeInputDeliveryPhase
+	mode                string
+	payload             string
+	acceptedBytes       int
+	acceptanceUncertain bool
 }
 
 func (state *wakeInputDeliveryState) reset() {
@@ -103,6 +105,10 @@ func (state wakeInputDeliveryState) confirmedInput() bool {
 	return state.acceptedBytes > 0 ||
 		(state.phase != wakeInputDeliveryIdle &&
 			state.phase != wakeInputPayloadPending)
+}
+
+func (state wakeInputDeliveryState) blocksDemotion() bool {
+	return state.confirmedInput() || state.acceptanceUncertain
 }
 
 type wakeAdmissionWatcher interface {
@@ -151,6 +157,23 @@ func isWakeTerminalPartialProgress(err error) bool {
 	return errors.As(err, &partial)
 }
 
+type wakeInputDemotionBlockedError struct {
+	err error
+}
+
+func (err *wakeInputDemotionBlockedError) Error() string {
+	return "terminal input has confirmed or uncertain progress; refusing to discard its exact completion debt: " + err.err.Error()
+}
+
+func (err *wakeInputDemotionBlockedError) Unwrap() error {
+	return err.err
+}
+
+func isWakeInputDemotionBlocked(err error) bool {
+	var blocked *wakeInputDemotionBlockedError
+	return errors.As(err, &blocked)
+}
+
 type wakeTerminalProgressUncertainError struct {
 	err error
 }
@@ -161,6 +184,11 @@ func (err *wakeTerminalProgressUncertainError) Error() string {
 
 func (err *wakeTerminalProgressUncertainError) Unwrap() error {
 	return err.err
+}
+
+func isWakeTerminalProgressUncertain(err error) bool {
+	var uncertain *wakeTerminalProgressUncertainError
+	return errors.As(err, &uncertain)
 }
 
 type wakeTerminalAcceptedProgress interface {
@@ -188,6 +216,8 @@ const (
 	// observation, while adding at most two poll intervals to a real idle
 	// transition. Any active sample resets the evidence.
 	requiredInputQuietSamples = 3
+
+	wakeInputRecoveryNotice = "AMQ terminal input delivery is incomplete; inspect the composer, run amq drain --include-body, then restart this agent session"
 	// codexTUIEnterSuppressWindow mirrors codex-tui's
 	// PASTE_ENTER_SUPPRESS_WINDOW (codex-rs/tui/src/bottom_pane/paste_burst.rs,
 	// verified at rust-v0.144.1 and main): an Enter arriving within this window
@@ -447,6 +477,10 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	}
 
 	if len(messages) == 0 {
+		if cfg.inputRecoveryRequired {
+			cfg.doorbell.noteRecoveryInboxEmpty()
+			return nil
+		}
 		cfg.doorbell.reset()
 		return reconcileWakeInputAfterInboxDrain(cfg)
 	}
@@ -456,6 +490,9 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		notice := peerWakeNotification(interruptText)
 		if cfg.interruptNotice != "" {
 			notice = operatorWakeNotification(interruptText)
+		}
+		if cfg.inputRecoveryRequired {
+			return deliverNewMessageNotification(cfg, notice, false, currentPending)
 		}
 		if cfg.injectMode == wakeInjectModeNone {
 			return deliverNewMessageNotification(cfg, notice, false, currentPending)
@@ -520,7 +557,15 @@ func deliverNewMessageNotification(
 	deferForInput bool,
 	currentPending map[string]os.FileInfo,
 ) error {
+	if cfg.inputRecoveryRequired {
+		return deliverWakeInputRecoveryAttention(cfg, currentPending)
+	}
 	if cfg.injectMode == wakeInjectModeNone {
+		if cfg.inputDelivery.blocksDemotion() {
+			return &wakeInputDemotionBlockedError{
+				err: errors.New("input mode became none before retained terminal input completed"),
+			}
+		}
 		clearWakeInputState(cfg)
 	}
 	ownerBound := usesCoopDoorbell(cfg)
@@ -540,10 +585,16 @@ func deliverNewMessageNotification(
 		cfg.suppressAttention = plan.retry
 		deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
 		cfg.suppressAttention = false
+		if isWakeInputDemotionBlocked(deliveryErr) {
+			return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
+		}
 		if cfg.injectMode == wakeInjectModeNone {
 			clearWakeInputState(cfg)
 			if plan.retry {
-				emitWakeAttention(cfg, notice.output)
+				deliveryErr = errors.Join(
+					deliveryErr,
+					emitWakeAttention(cfg, notice.output),
+				)
 			}
 			if deliveryErr == nil {
 				cfg.doorbell.recordCohortDelivered(currentPending)
@@ -552,7 +603,9 @@ func deliverNewMessageNotification(
 		}
 		if deliveryErr == nil ||
 			(!isWakeTerminalForegroundPGRPChanged(deliveryErr) &&
-				!isWakeTerminalPartialProgress(deliveryErr)) {
+				!isWakeTerminalPartialProgress(deliveryErr) &&
+				!isWakeInputDemotionBlocked(deliveryErr) &&
+				!isWakeTerminalProgressUncertain(deliveryErr)) {
 			cfg.doorbell.recordAttempt(cfg.wakeDoorbellNow())
 		}
 		return deliveryErr
@@ -562,10 +615,62 @@ func deliverNewMessageNotification(
 		return nil
 	}
 	deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
+	if isWakeInputDemotionBlocked(deliveryErr) {
+		return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
+	}
 	if deliveryErr == nil {
 		cfg.doorbell.recordCohortDelivered(currentPending)
 	}
 	return deliveryErr
+}
+
+func deliverWakeInputRecoveryAttention(
+	cfg *wakeConfig,
+	currentPending map[string]os.FileInfo,
+) error {
+	now := cfg.wakeDoorbellNow()
+	if !cfg.doorbell.planRecoveryAttention(now, currentPending) {
+		return nil
+	}
+	if err := emitWakeAttention(cfg, wakePayload{
+		text:       wakeInputRecoveryNotice,
+		provenance: wakePayloadSystemFixed,
+	}); err != nil {
+		return err
+	}
+	cfg.doorbell.recordRecoveryRequired(now, currentPending)
+	return nil
+}
+
+func enterWakeInputRecovery(
+	cfg *wakeConfig,
+	currentPending map[string]os.FileInfo,
+	cause error,
+) error {
+	markWakeInputRecoveryRequired(cfg, cause)
+	if err := deliverWakeInputRecoveryAttention(cfg, currentPending); err != nil {
+		return errors.Join(cause, err)
+	}
+	return nil
+}
+
+func markWakeInputRecoveryRequired(cfg *wakeConfig, cause error) {
+	cfg.inputRecoveryRequired = true
+	if cfg.recordNotifierStatus == nil {
+		return
+	}
+	mode := effectiveInjectMode(cfg)
+	reason := wakeInputRecoveryNotice
+	if cause != nil {
+		reason += ": " + cause.Error()
+	}
+	if err := cfg.recordNotifierStatus(
+		wakeInputRecoveryRequiredStatus,
+		mode,
+		reason,
+	); err != nil {
+		_ = writeWakeDiagnostic(cfg, "amq wake: record input recovery-required status: %v\n", err)
+	}
 }
 
 func (cfg *wakeConfig) wakeDoorbellNow() time.Time {
@@ -803,8 +908,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		}
 	}
 	if cfg.injectMode == wakeInjectModeNone {
-		emitWakeAttention(cfg, notice.output)
-		return nil
+		return emitWakeAttention(cfg, notice.output)
 	}
 
 	inputText := notice.input.text
@@ -815,8 +919,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 
 	if shouldDeferBeforeInject(cfg, deferForInput) {
 		if !waitForWakeInputQuiet(cfg) {
-			emitWakeAttention(cfg, notice.output)
-			return nil
+			return emitWakeAttention(cfg, notice.output)
 		}
 	}
 
@@ -836,8 +939,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 				_ = writeWakeDiagnostic(cfg, "amq wake: falling back to stderr notification\n")
 				cfg.fallbackWarn = false
 			}
-			emitWakeAttention(cfg, notice.output)
-			return nil
+			return emitWakeAttention(cfg, notice.output)
 		}
 		return nil
 	}
@@ -896,11 +998,13 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		}
 		var uncertain *wakeTerminalProgressUncertainError
 		if errors.As(injectErr, &uncertain) {
-			disableWakeInput(cfg)
+			cfg.inputDelivery.acceptanceUncertain = true
 			_ = writeWakeDiagnostic(cfg, "amq wake: warning: %v\n", uncertain)
 			cfg.fallbackWarn = false
-			emitWakeAttention(cfg, notice.output)
-			return nil
+			return &wakeInputDemotionBlockedError{err: uncertain}
+		}
+		if isWakeInputDemotionBlocked(injectErr) {
+			return injectErr
 		}
 		var unsupported *wakeInjectorUnsupportedError
 		if errors.As(injectErr, &unsupported) {
@@ -915,11 +1019,12 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 					_ = writeWakeDiagnostic(cfg, "amq wake: record unsupported injector status: %v\n", err)
 				}
 			}
-			disableWakeInput(cfg)
+			if err := disableWakeInput(cfg, injectErr); err != nil {
+				return err
+			}
 			_ = writeWakeDiagnostic(cfg, "amq wake: warning: %s\n", reason)
 			cfg.fallbackWarn = false
-			emitWakeAttention(cfg, notice.output)
-			return nil
+			return emitWakeAttention(cfg, notice.output)
 		}
 		var authorityErr *wakeTerminalAuthorityError
 		if errors.As(injectErr, &authorityErr) {
@@ -931,8 +1036,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			cfg.fallbackWarn = false
 		}
 		// Fallback: use the output-only attention tier; never retry input.
-		emitWakeAttention(cfg, notice.output)
-		return nil
+		return emitWakeAttention(cfg, notice.output)
 	}
 
 	return nil
@@ -1020,7 +1124,13 @@ func writePendingWakeInputChunk(
 	state *wakeInputDeliveryState,
 	chunk string,
 ) (bool, error) {
+	if state.acceptanceUncertain {
+		return false, &wakeInputDemotionBlockedError{
+			err: errors.New("a prior terminal write has uncertain acceptance"),
+		}
+	}
 	if state.acceptedBytes < 0 || state.acceptedBytes > len(chunk) {
+		state.acceptanceUncertain = true
 		return false, &wakeTerminalProgressUncertainError{
 			err: fmt.Errorf(
 				"invalid retained input offset %d for %d-byte chunk",
@@ -1044,6 +1154,9 @@ func writePendingWakeInputChunk(
 
 	var unsupported *wakeInjectorUnsupportedError
 	if errors.As(err, &unsupported) {
+		if state.blocksDemotion() {
+			return wrote, &wakeInputDemotionBlockedError{err: err}
+		}
 		return wrote, err
 	}
 	if !wrote {
@@ -1061,10 +1174,12 @@ func writePendingWakeInputChunk(
 			}
 			return true, err
 		}
+		state.acceptanceUncertain = true
 		return true, &wakeTerminalProgressUncertainError{err: err}
 	}
 	accepted := progress.wakeAcceptedBytes()
 	if accepted < 0 || accepted >= len(remaining) {
+		state.acceptanceUncertain = true
 		return true, &wakeTerminalProgressUncertainError{
 			err: fmt.Errorf(
 				"invalid terminal progress %d for %d-byte suffix: %w",
@@ -1105,17 +1220,32 @@ func clearWakeInputState(cfg *wakeConfig) {
 	cfg.inputDelivery.reset()
 }
 
-func retireWakeInputState(cfg *wakeConfig) {
+func retireWakeInputState(cfg *wakeConfig, cause error) error {
+	if cfg.inputDelivery.blocksDemotion() {
+		if cause == nil {
+			cause = errors.New("input retirement requested before terminal completion")
+		}
+		return &wakeInputDemotionBlockedError{err: cause}
+	}
 	cfg.doorbell.reset()
 	clearWakeInputState(cfg)
+	return nil
 }
 
-func disableWakeInput(cfg *wakeConfig) {
+func disableWakeInput(cfg *wakeConfig, cause error) error {
+	if err := retireWakeInputState(cfg, cause); err != nil {
+		return err
+	}
 	cfg.injectMode = wakeInjectModeNone
-	retireWakeInputState(cfg)
+	return nil
 }
 
 func reconcileWakeInputAfterInboxDrain(cfg *wakeConfig) error {
+	if cfg.inputDelivery.acceptanceUncertain {
+		return &wakeInputDemotionBlockedError{
+			err: errors.New("inbox progressed after a terminal write with uncertain acceptance"),
+		}
+	}
 	if !cfg.inputDelivery.pending() {
 		return nil
 	}
@@ -1141,6 +1271,11 @@ func injectTerminalNotification(
 	payload string,
 ) (bool, error) {
 	state := &cfg.inputDelivery
+	if state.acceptanceUncertain {
+		return false, &wakeInputDemotionBlockedError{
+			err: errors.New("new terminal input arrived after a write with uncertain acceptance"),
+		}
+	}
 	if state.pending() && (state.mode != mode || state.payload != payload) {
 		if state.phase == wakeInputPayloadPending && state.acceptedBytes == 0 {
 			// The previous payload never made confirmed progress.

@@ -2711,6 +2711,20 @@ func runWakeLoop(cfg wakeConfig) error {
 		cfg.retainedInbox = inboxDir
 		return true, nil
 	}
+	enterRetainedInputRecovery := func(cause error) error {
+		markWakeInputRecoveryRequired(&cfg, cause)
+		if err := emitWakeAttention(&cfg, wakePayload{
+			text:       wakeInputRecoveryNotice,
+			provenance: wakePayloadSystemFixed,
+		}); err != nil {
+			return errors.Join(cause, err)
+		}
+		cfg.doorbell.retainRecoveryRequired(cfg.wakeDoorbellNow())
+		pendingNotify = false
+		clearTerminalAuthorityRetry()
+		clearDoorbellDeadline()
+		return nil
+	}
 	attemptNotification := func() error {
 		defer commitPendingPromptObservation()
 		if terminalAuthorityRetryC != nil || inboxScanRetryC != nil {
@@ -2726,6 +2740,16 @@ func runWakeLoop(cfg wakeConfig) error {
 			clearDoorbellDeadline()
 			_ = writeWakeDiagnostic(&cfg, "amq wake: notify error: %v\n", err)
 			return nil
+		}
+		var attentionErr *wakeAttentionDeliveryError
+		if errors.As(err, &attentionErr) {
+			pendingNotify = true
+			clearDoorbellDeadline()
+			return err
+		}
+		if isWakeInputDemotionBlocked(err) ||
+			isWakeTerminalProgressUncertain(err) {
+			return enterRetainedInputRecovery(err)
 		}
 		clearInboxScanRetry()
 		inboxScanFailures = 0
@@ -2767,13 +2791,16 @@ func runWakeLoop(cfg wakeConfig) error {
 		_ = writeWakeDiagnostic(&cfg, "amq wake: notify error: %v\n", err)
 		return nil
 	}
-	emitFatalScanFallback := func() {
-		emitWakeAttention(&cfg, wakePayload{
+	emitFatalScanFallback := func() error {
+		if err := emitWakeAttention(&cfg, wakePayload{
 			text:       "AMQ messages may be pending; run amq drain --include-body",
 			provenance: wakePayloadSystemFixed,
-		})
+		}); err != nil {
+			return err
+		}
 		pendingNotify = false
 		clearInboxScanRetry()
+		return nil
 	}
 
 	// Recheck non-invasive injection preconditions and silently reconcile
@@ -2927,7 +2954,8 @@ func runWakeLoop(cfg wakeConfig) error {
 			}
 
 		case <-maintenanceTicks:
-			pendingInputWork := cfg.doorbell.pendingInput() || cfg.inputDelivery.pending()
+			pendingInputWork := !cfg.inputRecoveryRequired &&
+				(cfg.doorbell.pendingInput() || cfg.inputDelivery.pending())
 			hadPendingInputWork := pendingNotify || pendingInputWork
 			if pendingInputWork {
 				if err := attemptNotification(); err != nil {
@@ -2941,12 +2969,46 @@ func runWakeLoop(cfg wakeConfig) error {
 			} else {
 				_ = presence.Touch(cfg.root, cfg.me)
 			}
+			if cfg.inputRecoveryRequired {
+				scheduleDoorbellDeadline()
+				continue
+			}
 
-			inputEnabledBeforeCheck := cfg.injectMode != wakeInjectModeNone
+			inputModeBeforeCheck := cfg.injectMode
+			inputEnabledBeforeCheck := inputModeBeforeCheck != wakeInjectModeNone
+			inputStateBeforeCheck := cfg.inputDelivery
+			doorbellBeforeCheck := cfg.doorbell
 			preconditionErr := preconditionCheck(&cfg)
+			if inputEnabledBeforeCheck &&
+				cfg.injectMode == wakeInjectModeNone &&
+				inputStateBeforeCheck.blocksDemotion() {
+				cfg.injectMode = inputModeBeforeCheck
+				cfg.inputDelivery = inputStateBeforeCheck
+				cfg.doorbell = doorbellBeforeCheck
+				preconditionErr = errors.Join(
+					preconditionErr,
+					&wakeInputDemotionBlockedError{
+						err: errors.New("maintenance attempted output-only demotion before terminal input completed"),
+					},
+				)
+			}
+			if isWakeInputDemotionBlocked(preconditionErr) {
+				if err := enterRetainedInputRecovery(preconditionErr); err != nil {
+					return err
+				}
+				continue
+			}
 			if cfg.injectMode == wakeInjectModeNone {
 				if inputEnabledBeforeCheck {
-					retireWakeInputState(&cfg)
+					if err := retireWakeInputState(
+						&cfg,
+						errors.New("maintenance transferred pending work to output-only delivery"),
+					); err != nil {
+						cfg.injectMode = inputModeBeforeCheck
+						preconditionErr = errors.Join(preconditionErr, err)
+						scheduleDoorbellDeadline()
+						return preconditionErr
+					}
 				} else {
 					clearWakeInputState(&cfg)
 				}
@@ -2954,13 +3016,19 @@ func runWakeLoop(cfg wakeConfig) error {
 				if inputEnabledBeforeCheck && hadPendingInputWork {
 					pendingNotify = true
 					if preconditionErr != nil && inboxScanRetryC != nil {
-						emitFatalScanFallback()
+						preconditionErr = errors.Join(
+							preconditionErr,
+							emitFatalScanFallback(),
+						)
 					} else {
 						if err := attemptNotification(); err != nil {
 							return err
 						}
 						if preconditionErr != nil && pendingNotify && inboxScanRetryC != nil {
-							emitFatalScanFallback()
+							preconditionErr = errors.Join(
+								preconditionErr,
+								emitFatalScanFallback(),
+							)
 						}
 					}
 				} else if inputEnabledBeforeCheck {
@@ -2998,26 +3066,34 @@ func wakeInjectionPreconditionCheck(
 	// to disabled is surfaced and safely demoted without issuing an ioctl.
 	if tiocstiLegacyDisabledHint() {
 		mode := effectiveInjectMode(cfg)
+		capabilityErr := fmt.Errorf(
+			"%s is 0 (observed after wake binding)",
+			tiocstiLegacySysctlPath,
+		)
 		reason := wakeInjectorUnsupportedReason(
 			mode,
-			fmt.Errorf("%s is 0 (observed after wake binding)", tiocstiLegacySysctlPath),
+			capabilityErr,
 		)
-		disableWakeInput(cfg)
+		demotionErr := disableWakeInput(
+			cfg,
+			newWakeInjectorUnsupportedError(capabilityErr),
+		)
 		cfg.fallbackWarn = false
+		var statusErr error
 		if cfg.recordNotifierStatus != nil {
 			if err := cfg.recordNotifierStatus(
 				wakeInjectorUnsupportedStatus,
 				mode,
 				reason,
 			); err != nil {
-				return fmt.Errorf(
+				statusErr = fmt.Errorf(
 					"record changed injector capability after safety demotion: %w",
 					err,
 				)
 			}
 		}
 		_ = writeWakeDiagnostic(cfg, "amq wake: warning: injector capability changed since binding: %s\n", reason)
-		return nil
+		return errors.Join(demotionErr, statusErr)
 	}
 	if !controllingTerminalOpenableFn() {
 		return errors.New("controlling terminal is no longer openable; TIOCSTI injectability was not tested")

@@ -842,6 +842,254 @@ func TestDeliverNewMessageNotificationRecordsFirstAttemptDemotion(t *testing.T) 
 	}
 }
 
+func TestDeliverNewMessageNotificationRetriesCohortAfterShortOutputAttention(t *testing.T) {
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	writes := 0
+	cfg := &wakeConfig{
+		injectMode:     wakeInjectModeNone,
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			writes++
+			if writes == 1 {
+				return len(data) - 1, nil
+			}
+			return len(data), nil
+		},
+	}
+
+	err := deliverNewMessageNotification(
+		cfg,
+		peerWakeNotification("pending message"),
+		false,
+		current,
+	)
+	var attentionErr *wakeAttentionDeliveryError
+	if !errors.As(err, &attentionErr) {
+		t.Fatalf("first delivery error = %v, want typed attention failure", err)
+	}
+	if cfg.doorbell.phase == wakeDoorbellCohortDelivered {
+		t.Fatalf("short output write retired cohort: %#v", cfg.doorbell)
+	}
+
+	if err := deliverNewMessageNotification(
+		cfg,
+		peerWakeNotification("pending message"),
+		false,
+		current,
+	); err != nil {
+		t.Fatalf("retry after short output write: %v", err)
+	}
+	if writes != 2 {
+		t.Fatalf("attention writes = %d, want failed write plus retry", writes)
+	}
+	if cfg.doorbell.phase != wakeDoorbellCohortDelivered ||
+		!sameKnownWakeCohort(cfg.doorbell.cohort, current) {
+		t.Fatalf("successful output retry did not retire cohort: %#v", cfg.doorbell)
+	}
+}
+
+func TestDeliverNewMessageNotificationEntersRecoveryAfterUnsupportedConfirmedInput(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	prompt := buildCoopWakeDoorbell(coopWakeDoorbellTokenForTests)
+	stubRawInjectSleep(t)
+	tests := []struct {
+		name  string
+		state wakeInputDeliveryState
+	}{
+		{
+			name: "accepted payload prefix",
+			state: wakeInputDeliveryState{
+				phase:         wakeInputPayloadPending,
+				mode:          wakeInjectModePaste,
+				payload:       prompt,
+				acceptedBytes: 1,
+			},
+		},
+		{
+			name: "paste payload complete before submit",
+			state: wakeInputDeliveryState{
+				phase:   wakeInputPrimarySubmitPending,
+				mode:    wakeInjectModePaste,
+				payload: prompt,
+			},
+		},
+		{
+			name: "raw payload complete before first submit",
+			state: wakeInputDeliveryState{
+				phase:   wakeInputPrimarySubmitPending,
+				mode:    wakeInjectModeRaw,
+				payload: prompt,
+			},
+		},
+		{
+			name: "raw payload and first submit complete before rescue",
+			state: wakeInputDeliveryState{
+				phase:   wakeInputRawRescuePending,
+				mode:    wakeInjectModeRaw,
+				payload: prompt,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			attentionWrites := 0
+			var notifierStatus, notifierMode, notifierReason string
+			cfg := &wakeConfig{
+				me:            "codex",
+				wakeOwner:     &wakeOwner{},
+				injectMode:    tc.state.mode,
+				inputDelivery: tc.state,
+				doorbell: wakeDoorbellState{
+					phase:  wakeDoorbellAwaitingObservation,
+					token:  coopWakeDoorbellTokenForTests,
+					cohort: snapshotWakeFileIdentities(current),
+				},
+				doorbellNow: func() time.Time { return now },
+				terminalWrite: func(string) error {
+					return newWakeInjectorUnsupportedError(errors.New("injector disabled"))
+				},
+				attentionIsTTY: func() bool { return false },
+				attentionWrite: func(data []byte) (int, error) {
+					attentionWrites++
+					return len(data), nil
+				},
+				recordNotifierStatus: func(status, mode, reason string) error {
+					notifierStatus, notifierMode, notifierReason = status, mode, reason
+					return nil
+				},
+			}
+
+			err := deliverNewMessageNotification(
+				cfg,
+				peerWakeNotification("pending message"),
+				false,
+				current,
+			)
+			if err != nil {
+				t.Fatalf("delivery error = %v, want live recovery transition", err)
+			}
+			if !cfg.inputRecoveryRequired {
+				t.Fatal("confirmed input did not enter recovery-required mode")
+			}
+			if cfg.injectMode != tc.state.mode {
+				t.Fatalf("inject mode = %q, want retained %q mode", cfg.injectMode, tc.state.mode)
+			}
+			if cfg.inputDelivery != tc.state {
+				t.Fatalf("input state = %#v, want exact retained %#v", cfg.inputDelivery, tc.state)
+			}
+			if cfg.doorbell.phase != wakeDoorbellRecoveryRequired ||
+				!sameKnownWakeCohort(cfg.doorbell.cohort, current) {
+				t.Fatalf("recovery cohort state = %#v", cfg.doorbell)
+			}
+			if attentionWrites != 1 {
+				t.Fatalf("recovery transition emitted %d output alerts, want one", attentionWrites)
+			}
+			if notifierStatus != wakeInputRecoveryRequiredStatus ||
+				notifierMode != tc.state.mode ||
+				!strings.Contains(notifierReason, wakeInputRecoveryNotice) {
+				t.Fatalf(
+					"recovery notifier status = %q/%q/%q",
+					notifierStatus,
+					notifierMode,
+					notifierReason,
+				)
+			}
+		})
+	}
+}
+
+func TestDeliverNewMessageNotificationEntersRecoveryAfterUncertainInput(t *testing.T) {
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	attentionWrites := 0
+	stubTIOCSTIInject(t, func(string) error {
+		return errors.New("terminal write acceptance unavailable")
+	})
+	cfg := &wakeConfig{
+		me:             "codex",
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModePaste,
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
+	}
+
+	err := deliverNewMessageNotification(
+		cfg,
+		peerWakeNotification("pending message"),
+		false,
+		current,
+	)
+	if err != nil {
+		t.Fatalf("delivery error = %v, want live recovery transition", err)
+	}
+	if !cfg.inputDelivery.acceptanceUncertain {
+		t.Fatalf("uncertain acceptance was not retained: %#v", cfg.inputDelivery)
+	}
+	if !cfg.inputRecoveryRequired {
+		t.Fatal("uncertain input did not enter recovery-required mode")
+	}
+	if cfg.injectMode != wakeInjectModePaste {
+		t.Fatalf("inject mode = %q, want retained paste mode", cfg.injectMode)
+	}
+	if cfg.doorbell.phase != wakeDoorbellRecoveryRequired ||
+		!sameKnownWakeCohort(cfg.doorbell.cohort, current) {
+		t.Fatalf("uncertain-input recovery cohort = %#v", cfg.doorbell)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("uncertain input emitted %d recovery alerts, want one", attentionWrites)
+	}
+}
+
+func TestUncertainInputSurvivesInboxProgressAndNewPayload(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	state := wakeInputDeliveryState{
+		phase:               wakeInputPayloadPending,
+		mode:                wakeInjectModePaste,
+		payload:             "uncertain payload",
+		acceptanceUncertain: true,
+	}
+	writes := 0
+	cfg := &wakeConfig{
+		me:            "codex",
+		root:          root,
+		injectMode:    wakeInjectModePaste,
+		inputDelivery: state,
+		terminalWrite: func(string) error {
+			writes++
+			return nil
+		},
+	}
+
+	err := notifyNewMessages(cfg)
+	var demotionErr *wakeInputDemotionBlockedError
+	if !errors.As(err, &demotionErr) {
+		t.Fatalf("empty-inbox reconciliation error = %v, want blocked uncertain input", err)
+	}
+	if cfg.inputDelivery != state {
+		t.Fatalf("empty-inbox reconciliation mutated uncertain state: %#v", cfg.inputDelivery)
+	}
+
+	if _, err := injectTerminalNotification(cfg, wakeInjectModePaste, "new payload"); !errors.As(err, &demotionErr) {
+		t.Fatalf("new payload error = %v, want blocked uncertain input", err)
+	}
+	if cfg.inputDelivery != state {
+		t.Fatalf("new payload mutated uncertain state: %#v", cfg.inputDelivery)
+	}
+	if writes != 0 {
+		t.Fatalf("uncertain state replayed or replaced terminal input with %d writes", writes)
+	}
+}
+
 func TestNotifyNewMessagesKeepsReadablePendingNameWhenInfoFails(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "readable.md")
@@ -2440,7 +2688,7 @@ func TestNotifyNewMessagesCustomInterruptUsesSanitizedOperatorPayloadForInputAnd
 	var injected []string
 	stubTIOCSTIInject(t, func(text string) error {
 		if fail {
-			return errors.New("injection unavailable")
+			return newWakeInjectorUnsupportedError(errors.New("injection unavailable"))
 		}
 		injected = append(injected, text)
 		return nil
@@ -2516,7 +2764,7 @@ func TestNotifyNewMessagesOperatorFailurePreservesOperatorOutputProvenance(t *te
 		t.Fatalf("deliver: %v", err)
 	}
 	stubTIOCSTIInject(t, func(string) error {
-		return errors.New("injection unavailable")
+		return newWakeInjectorUnsupportedError(errors.New("injection unavailable"))
 	})
 
 	var emission wakeAttentionEmission

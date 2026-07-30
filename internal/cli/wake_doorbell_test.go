@@ -302,6 +302,55 @@ func TestWakeDoorbellStateDeliveredCohortFailsOpenWithoutIdentity(t *testing.T) 
 	}
 }
 
+func TestWakeDoorbellRecoveryAttentionIsCohortBoundedAndRateLimited(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	first := wakeDoorbellTestFiles(t, "first.md")
+	second := map[string]os.FileInfo{
+		"first.md":  first["first.md"],
+		"second.md": wakeDoorbellTestFiles(t, "second.md")["second.md"],
+	}
+	var state wakeDoorbellState
+
+	if !state.planRecoveryAttention(now, first) {
+		t.Fatal("initial recovery cohort was suppressed")
+	}
+	state.recordRecoveryRequired(now, first)
+	if state.phase != wakeDoorbellRecoveryRequired {
+		t.Fatalf("recovery phase = %v", state.phase)
+	}
+	if state.planRecoveryAttention(now.Add(time.Millisecond), first) {
+		t.Fatal("unchanged recovery cohort was repeated")
+	}
+	if state.planRecoveryAttention(now.Add(wakeDoorbellRetryBase-time.Millisecond), second) {
+		t.Fatal("changed recovery cohort bypassed output rate bound")
+	}
+	if deadline, ok := state.nextDeadline(); !ok || !deadline.Equal(now.Add(wakeDoorbellRetryBase)) {
+		t.Fatalf("recovery deadline = %s, ok=%v", deadline, ok)
+	}
+	if state.planRecoveryAttention(now.Add(time.Millisecond), nil) {
+		t.Fatal("empty recovery inbox emitted attention")
+	}
+	if _, ok := state.nextDeadline(); ok {
+		t.Fatal("empty recovery inbox retained a pending alert deadline")
+	}
+	if state.planRecoveryAttention(now.Add(2*time.Millisecond), second) {
+		t.Fatal("drain-and-arrive recovery flap bypassed output rate bound")
+	}
+	if deadline, ok := state.nextDeadline(); !ok || !deadline.Equal(now.Add(wakeDoorbellRetryBase)) {
+		t.Fatalf("re-armed recovery deadline = %s, ok=%v", deadline, ok)
+	}
+	if !state.planRecoveryAttention(now.Add(wakeDoorbellRetryBase), second) {
+		t.Fatal("changed recovery cohort stayed suppressed after rate bound")
+	}
+	state.recordRecoveryRequired(now.Add(wakeDoorbellRetryBase), second)
+	if !sameKnownWakeCohort(state.cohort, second) {
+		t.Fatalf("recovery cohort was not advanced: %#v", state.cohort)
+	}
+	if state.phase == wakeDoorbellCohortDelivered {
+		t.Fatal("recovery attention was recorded as cohort delivery")
+	}
+}
+
 func TestWakeDoorbellRetryDelayCaps(t *testing.T) {
 	var previous time.Duration
 	for attempt := uint(1); attempt <= 20; attempt++ {

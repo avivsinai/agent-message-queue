@@ -230,10 +230,12 @@ func TestRunWakeWithLoopSeparatesInheritedAttentionFromDiagnostics(t *testing.T)
 			if err := writeWakeDiagnostic(&cfg, "diagnostic-only\n"); err != nil {
 				t.Fatal(err)
 			}
-			emitWakeAttention(&cfg, wakePayload{
+			if err := emitWakeAttention(&cfg, wakePayload{
 				text:       "attention-only",
 				provenance: wakePayloadSystemFixed,
-			})
+			}); err != nil {
+				t.Fatalf("emit inherited-FD attention: %v", err)
+			}
 			return sentinel
 		})
 	})
