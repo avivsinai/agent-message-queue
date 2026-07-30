@@ -1075,6 +1075,92 @@ func TestRunWakeWithLoopSupervisesOwnerBeforeGenericLockAndMergesDone(t *testing
 	}
 }
 
+func TestRunWakeWithLoopDistinguishesOwnerExitFromMonitorFailure(t *testing.T) {
+	monitorFailure := errors.New("owner monitor failed")
+	loopFailure := errors.New("wake loop failed")
+	tests := []struct {
+		name       string
+		monitorErr error
+		loopErr    error
+	}{
+		{
+			name: "owner exit is a normal stop",
+		},
+		{
+			name:       "monitor failure is returned",
+			monitorErr: monitorFailure,
+		},
+		{
+			name:       "monitor and loop failures are both returned",
+			monitorErr: monitorFailure,
+			loopErr:    loopFailure,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+				t.Fatal(err)
+			}
+			owner := wakeOwner{
+				PID:          4242,
+				ProcessStart: "12345",
+				BootID:       "11111111-1111-1111-1111-111111111111",
+				SessionID:    99,
+			}
+			encoded, err := encodeWakeOwnerEnv(owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(envWakeOwner, encoded)
+
+			monitor := newWakeOwnerObservationMonitor(nil)
+			oldObserve := observeAuthoritativeWakeOwner
+			observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
+				if got != owner {
+					t.Fatalf("observed owner = %#v, want %#v", got, owner)
+				}
+				return wakeOwnerObservation{
+					State:   wakeOwnerSame,
+					monitor: monitor,
+				}, nil
+			}
+			t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
+
+			err = runWakeWithLoop([]string{
+				"--root", root,
+				"--me", "orchestrator",
+				"--inject-mode", wakeInjectModeNone,
+			}, func(cfg wakeConfig) error {
+				monitor.finish(test.monitorErr)
+				select {
+				case <-cfg.controlStop:
+					return test.loopErr
+				case <-time.After(time.Second):
+					t.Fatal("owner observation did not stop the wake loop")
+					return nil
+				}
+			})
+			if test.monitorErr == nil {
+				if err != nil {
+					t.Fatalf("normal owner exit returned error: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, test.monitorErr) {
+				t.Fatalf("monitor failure result = %v, want %v", err, test.monitorErr)
+			}
+			if test.loopErr != nil && !errors.Is(err, test.loopErr) {
+				t.Fatalf("joined result = %v, want loop failure %v", err, test.loopErr)
+			}
+		})
+	}
+}
+
 func TestRunWakeWithLoopRejectsSameOwnerWithoutLifetimeSignalBeforeLock(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
