@@ -68,6 +68,12 @@ func TestCoopWakeStartupConflictPreservesUnverifiedState(t *testing.T) {
 	}
 }
 
+func TestCoopWakeStartupConflictNeverReturnsNil(t *testing.T) {
+	if err := coopWakeStartupConflictError(wakeLockInspection{}, nil); err == nil {
+		t.Fatal("unclassified startup conflict returned nil")
+	}
+}
+
 func TestPrepareCoopWakeLockRemovesProvenStaleWithoutPrompt(t *testing.T) {
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{PID: 66121, Generation: "stale"})
@@ -229,10 +235,36 @@ func TestPrepareCoopWakeLockLiveAuthoritativeRefusesWithoutMutation(t *testing.T
 		t.Fatal("authoritative wake must not be signaled through coop startup")
 		return nil
 	})
+	ownerState := wakeOwnerSame
+	var observeErr error
+	observationClosed := false
+	oldObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
+		if !sameWakeOwner(&got, &owner) {
+			t.Fatalf("observed owner = %#v, want %#v", got, owner)
+		}
+		if observeErr != nil {
+			monitor := newWakeOwnerObservationMonitor(func() error {
+				observationClosed = true
+				return nil
+			})
+			monitor.finish(nil)
+			return wakeOwnerObservation{State: wakeOwnerUnknown, monitor: monitor}, observeErr
+		}
+		return wakeOwnerObservation{State: ownerState}, nil
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
 
 	err = prepareCoopWakeLock(root, "codex", true, "unused")
 	if err == nil || !strings.Contains(err.Error(), "owned by a live process") {
 		t.Fatalf("prepare live authoritative wake = %v, want live-owner refusal", err)
+	}
+	if strings.Contains(err.Error(), "doctor") ||
+		strings.Contains(err.Error(), "wake retire") ||
+		!strings.Contains(err.Error(), "pid:") ||
+		!strings.Contains(err.Error(), "tty:") ||
+		!strings.Contains(err.Error(), "started:") {
+		t.Fatalf("live-owner refusal has unsafe or incomplete remedy: %v", err)
 	}
 	afterLock, err := os.ReadFile(lockPath)
 	if err != nil {
@@ -251,6 +283,31 @@ func TestPrepareCoopWakeLockLiveAuthoritativeRefusesWithoutMutation(t *testing.T
 	}
 	if got := info.Mode().Perm(); got != wakeOwnerLockFileMode {
 		t.Fatalf("authoritative lock mode = %o, want %o", got, wakeOwnerLockFileMode)
+	}
+
+	ownerState = wakeOwnerDead
+	if err := prepareCoopWakeLock(root, "codex", true, "unused"); err != nil {
+		t.Fatalf("dead-owner authoritative wake blocked automatic takeover: %v", err)
+	}
+	afterDeadOwnerLock, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("dead-owner preflight changed authoritative lock: %v", err)
+	}
+	afterDeadOwnerTarget, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("dead-owner preflight changed authoritative target: %v", err)
+	}
+	if string(afterDeadOwnerLock) != string(beforeLock) ||
+		string(afterDeadOwnerTarget) != string(beforeTarget) {
+		t.Fatal("dead-owner preflight mutated authoritative claim before acquisition")
+	}
+
+	observeErr = errors.New("owner observer failed")
+	if err := prepareCoopWakeLock(root, "codex", true, "unused"); err == nil {
+		t.Fatal("owner observation failure did not block startup")
+	}
+	if !observationClosed {
+		t.Fatal("owner observation failure leaked its returned capability")
 	}
 }
 
