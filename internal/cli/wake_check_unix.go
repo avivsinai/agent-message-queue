@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 const (
@@ -55,6 +57,19 @@ type wakeStartCapability struct {
 	Reason   string
 }
 
+type wakeCheckMetadataFingerprint struct {
+	Exists   bool
+	Identity wakeFileIdentity
+	Digest   string
+}
+
+type wakeCheckObservation struct {
+	Inspection wakeLockInspection
+	Target     wakeCheckMetadataFingerprint
+	Floor      wakeCheckMetadataFingerprint
+	Repair     wakeRepairAssessment
+}
+
 func runWakeCheck(args []string) error {
 	fs := flag.NewFlagSet("wake check", flag.ContinueOnError)
 	common := addCommonFlags(fs)
@@ -98,27 +113,149 @@ func runWakeCheck(args []string) error {
 
 func inspectWakeCheck(root, me string) wakeCheckResult {
 	root = canonicalWakeRoot(root)
-	before := inspectWakeLock(root, me)
-	checked := checkWakeLocks(root, []string{me}, false)
-	inspection := inspectWakeLock(root, me)
-	var opsLock *opsWakeLock
-	if sameWakeCheckInspection(before, inspection) &&
-		inspection.Exists &&
-		len(checked) == 1 &&
-		checked[0].Agent == me {
-		opsLock = &checked[0]
+	first, firstErr := observeWakeCheck(root, me)
+	if firstErr != nil {
+		return unstableWakeCheckResult(root, me, first.Inspection)
 	}
-	result := buildWakeCheckResult(root, me, inspection, opsLock, true)
-	after := inspectWakeLock(root, me)
-	stable := sameWakeCheckInspection(before, inspection) &&
-		sameWakeCheckInspection(inspection, after)
-	if !stable {
-		result.CanRepairInjectVia = false
-		result.RepairReason = "wake state changed during inspection"
-		result.RestartCapability = wakeRestartUnavailable
-		result.OperatorTerminalRequired = false
-		result.NextAction = "wake state changed during inspection; retry amq wake check"
+	second, secondErr := observeWakeCheck(root, me)
+	if secondErr != nil || !sameWakeCheckObservation(first, second) {
+		return unstableWakeCheckResult(root, me, second.Inspection)
 	}
+	opsLock := opsWakeLockFromWakeCheckObservation(root, me, second)
+	return buildWakeCheckResult(root, me, second.Inspection, opsLock, true)
+}
+
+func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
+	var observation wakeCheckObservation
+	agentPath := fsq.AgentBase(root, me)
+	if _, err := os.Lstat(agentPath); err != nil {
+		if os.IsNotExist(err) {
+			observation.Inspection = inspectWakeLock(root, me)
+			return observation, nil
+		}
+		return observation, fmt.Errorf("stat wake agent directory: %w", err)
+	}
+
+	agentDir, err := openWakeDirectory(agentPath, "wake agent directory")
+	if err != nil {
+		return observation, err
+	}
+	defer func() { _ = agentDir.Close() }()
+
+	err = agentDir.withFD(func(dirfd int) error {
+		observation.Inspection = inspectWakeLockAt(dirfd, agentDir, root, me)
+		observation.Repair = assessWakeRepair(
+			root,
+			me,
+			observation.Inspection,
+			func() (wakeTarget, bool, error) {
+				snapshot, exists, err := readWakeTargetSnapshotAt(dirfd, agentDir, root, me)
+				observation.Target.Exists = exists
+				if err != nil || !exists {
+					return snapshot.Target, exists, err
+				}
+				fingerprint, err := newWakeCheckMetadataFingerprint(exists, snapshot.Raw, snapshot.FileInfo)
+				if err != nil {
+					return snapshot.Target, exists, err
+				}
+				observation.Target = fingerprint
+				return snapshot.Target, true, nil
+			},
+			func(target wakeTarget) error {
+				snapshot, exists, err := readWakeRepairFloorSnapshotAt(dirfd, agentDir)
+				observation.Floor.Exists = exists
+				if err != nil {
+					return err
+				}
+				if !exists {
+					return fmt.Errorf("wake repair floor is missing")
+				}
+				fingerprint, err := newWakeCheckMetadataFingerprint(exists, snapshot.Raw, snapshot.FileInfo)
+				if err != nil {
+					return err
+				}
+				observation.Floor = fingerprint
+				if err := validateWakeRepairFloor(
+					snapshot.Floor,
+					root,
+					me,
+					observation.Inspection.Lock,
+					target,
+				); err != nil {
+					return err
+				}
+				return validateWakeRepairFloorCurrentBoot(snapshot.Floor)
+			},
+		)
+		confirmed := inspectWakeLockAt(dirfd, agentDir, root, me)
+		// Catch a lock change that reverts before the outer observation comparison.
+		if !sameWakeCheckInspection(observation.Inspection, confirmed) {
+			return fmt.Errorf("wake state changed during inspection")
+		}
+		return nil
+	})
+	if err != nil {
+		return observation, err
+	}
+	if err := validateCanonicalWakeAgentDir(agentDir); err != nil {
+		return observation, err
+	}
+	return observation, nil
+}
+
+func newWakeCheckMetadataFingerprint(
+	exists bool,
+	raw []byte,
+	info os.FileInfo,
+) (wakeCheckMetadataFingerprint, error) {
+	fingerprint := wakeCheckMetadataFingerprint{Exists: exists}
+	if !exists {
+		return fingerprint, nil
+	}
+	identity, ok := captureWakeFileIdentity(info)
+	if !ok {
+		return fingerprint, fmt.Errorf("capture wake metadata file identity")
+	}
+	fingerprint.Identity = identity
+	fingerprint.Digest = wakeMetadataDigest(raw)
+	return fingerprint, nil
+}
+
+func sameWakeCheckObservation(first, second wakeCheckObservation) bool {
+	return sameWakeCheckInspection(first.Inspection, second.Inspection) &&
+		first.Target == second.Target &&
+		first.Floor == second.Floor &&
+		first.Repair == second.Repair
+}
+
+func opsWakeLockFromWakeCheckObservation(
+	root, me string,
+	observation wakeCheckObservation,
+) *opsWakeLock {
+	if !observation.Inspection.Exists {
+		return nil
+	}
+	opsLock := &opsWakeLock{
+		Agent:           me,
+		TargetPresent:   observation.Repair.TargetPresent,
+		TargetReason:    observation.Repair.TargetReason,
+		RepairAvailable: observation.Repair.RepairAvailable,
+		RepairReason:    observation.Repair.RepairReason,
+		Repair:          observation.Repair.Repair,
+	}
+	if opsLock.TargetPresent {
+		opsLock.Target = wakeTargetPath(root, me)
+	}
+	return opsLock
+}
+
+func unstableWakeCheckResult(root, me string, inspection wakeLockInspection) wakeCheckResult {
+	result := buildWakeCheckResult(root, me, inspection, nil, true)
+	result.CanRepairInjectVia = false
+	result.RepairReason = "wake state changed during inspection"
+	result.RestartCapability = wakeRestartUnavailable
+	result.OperatorTerminalRequired = false
+	result.NextAction = "wake state changed during inspection; retry amq wake check"
 	return result
 }
 

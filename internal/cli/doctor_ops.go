@@ -353,6 +353,51 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 	return locks
 }
 
+type wakeRepairAssessment struct {
+	TargetPresent   bool
+	TargetReason    string
+	RepairAvailable bool
+	RepairReason    string
+	Repair          string
+}
+
+type wakeTargetReader func() (wakeTarget, bool, error)
+type wakeRepairFloorValidator func(wakeTarget) error
+
+func assessWakeRepair(
+	root, agent string,
+	inspection wakeLockInspection,
+	readTarget wakeTargetReader,
+	validateFloor wakeRepairFloorValidator,
+) wakeRepairAssessment {
+	var assessment wakeRepairAssessment
+	target, exists, targetErr := readTarget()
+	assessment.TargetPresent = exists
+	if exists {
+		if targetErr != nil {
+			assessment.TargetReason = targetErr.Error()
+		} else if err := validateWakeTarget(target, root, agent); err != nil {
+			assessment.TargetReason = err.Error()
+		} else if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
+			assessment.TargetReason = err.Error()
+		}
+	}
+
+	ownerBound := classifyWakeClaimForGenericTransition(inspection) == wakeClaimAuthoritative
+	if inspection.Status != wakeLockStale || ownerBound ||
+		!assessment.TargetPresent || assessment.TargetReason != "" ||
+		validateWakeLockRepairable(inspection) != nil {
+		return assessment
+	}
+	if err := validateFloor(target); err != nil {
+		assessment.RepairReason = err.Error()
+		return assessment
+	}
+	assessment.RepairAvailable = true
+	assessment.Repair = wakeRepairCommand(root, agent)
+	return assessment
+}
+
 func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeLock, []opsHint) {
 	var locks []opsWakeLock
 	var hints []opsHint
@@ -398,17 +443,19 @@ func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeL
 			appendLock(lock, inspection, staleBinary)
 			continue
 		}
-		target, exists, targetErr := readWakeTarget(root, agent)
-		if exists {
+		assessment := assessWakeRepair(
+			root,
+			agent,
+			inspection,
+			func() (wakeTarget, bool, error) { return readWakeTarget(root, agent) },
+			func(target wakeTarget) error {
+				return validateWakeRepairFloorAvailable(root, agent, inspection, target)
+			},
+		)
+		if assessment.TargetPresent {
 			lock.Target = wakeTargetPath(root, agent)
 			lock.TargetPresent = true
-			if targetErr != nil {
-				lock.TargetReason = targetErr.Error()
-			} else if err := validateWakeTarget(target, root, agent); err != nil {
-				lock.TargetReason = err.Error()
-			} else if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
-				lock.TargetReason = err.Error()
-			}
+			lock.TargetReason = assessment.TargetReason
 		}
 		if inspection.Status == wakeLockStale {
 			if ownerBound {
@@ -416,14 +463,9 @@ func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeL
 				continue
 			}
 			lock.Fix = doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
-			if lock.TargetPresent && lock.TargetReason == "" && validateWakeLockRepairable(inspection) == nil {
-				if err := validateWakeRepairFloorAvailable(root, agent, inspection, target); err != nil {
-					lock.RepairReason = err.Error()
-				} else {
-					lock.RepairAvailable = true
-					lock.Repair = wakeRepairCommand(root, agent)
-				}
-			}
+			lock.RepairAvailable = assessment.RepairAvailable
+			lock.RepairReason = assessment.RepairReason
+			lock.Repair = assessment.Repair
 			if fix {
 				guardErr := withWakeLifecycleGuard(root, agent, func() error {
 					recheck := inspectWakeLock(root, agent)
