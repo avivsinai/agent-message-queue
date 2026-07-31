@@ -14,6 +14,8 @@ editing the release PR.
 ### Bug Fixes
 
 * **wake:** keep admitted delivery self-healing ([#372](https://github.com/avivsinai/agent-message-queue/issues/372)) ([037aa60](https://github.com/avivsinai/agent-message-queue/commit/037aa60ed32ec58cef109e98f54461eff09c6a99))
+* **wake:** keep inconclusive ownership retryable ([#372](https://github.com/avivsinai/agent-message-queue/issues/372)) ([037aa60](https://github.com/avivsinai/agent-message-queue/commit/037aa60ed32ec58cef109e98f54461eff09c6a99))
+* **wake:** preserve live renamed wake locks ([#372](https://github.com/avivsinai/agent-message-queue/issues/372)) ([037aa60](https://github.com/avivsinai/agent-message-queue/commit/037aa60ed32ec58cef109e98f54461eff09c6a99))
 
 ## [0.49.12](https://github.com/avivsinai/agent-message-queue/compare/v0.49.11...v0.49.12) (2026-07-30)
 
