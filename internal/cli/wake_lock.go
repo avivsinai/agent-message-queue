@@ -53,6 +53,7 @@ type wakeProcessInfo struct {
 	BootID                    string
 	LegacyBootID              string
 	Executable                string
+	ExecutablePath            string
 	Args                      []string
 	ControllingTerminalKnown  bool
 	HasControllingTerminal    bool

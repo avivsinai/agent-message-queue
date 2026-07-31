@@ -11,8 +11,9 @@ import (
 type wakeBinaryComparisonMethod string
 
 const (
-	wakeBinaryComparisonExactIdentity wakeBinaryComparisonMethod = "device_inode"
-	wakeBinaryComparisonStartedMTime  wakeBinaryComparisonMethod = "started_mtime_heuristic"
+	wakeBinaryComparisonExactIdentity      wakeBinaryComparisonMethod = "device_inode"
+	wakeBinaryComparisonDarwinProcessImage wakeBinaryComparisonMethod = "darwin_process_image"
+	wakeBinaryComparisonStartedMTime       wakeBinaryComparisonMethod = "started_mtime_heuristic"
 )
 
 type wakeBinaryStaleness struct {
@@ -83,6 +84,7 @@ func checkStaleWakeBinaryHint(inspection wakeLockInspection) (opsHint, bool) {
 		return opsHint{}, false
 	}
 	if comparison.Method != wakeBinaryComparisonExactIdentity &&
+		comparison.Method != wakeBinaryComparisonDarwinProcessImage &&
 		comparison.Method != wakeBinaryComparisonStartedMTime {
 		return opsHint{}, false
 	}
@@ -146,6 +148,7 @@ func sameWakeBinaryEvidence(first, second wakeBinaryEvidence) bool {
 func sameWakeBinaryProcessEvidence(first, second wakeProcessInfo) bool {
 	return sameWakeOwnerProcessSnapshot(first, second) &&
 		first.Executable == second.Executable &&
+		first.ExecutablePath == second.ExecutablePath &&
 		slices.Equal(first.Args, second.Args)
 }
 

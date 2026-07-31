@@ -228,6 +228,22 @@ func TestWakeCheckImageStatusRequiresCompleteExactEvidence(t *testing.T) {
 			want: wakeImageUnknown,
 		},
 		{
+			name: "complete lock with corroborated Darwin comparison is current",
+			lock: wakeLock{
+				ImagePath:    "/opt/homebrew/bin/amq",
+				ImageVersion: "0.49.14",
+			},
+			result: wakeCheckResult{
+				RunningVersion: "0.49.14",
+				CurrentVersion: "0.49.14",
+			},
+			comparison: wakeBinaryStaleness{
+				Method:   wakeBinaryComparisonMethod("darwin_process_image"),
+				Evidence: stableWakeBinaryEvidenceForTest(),
+			},
+			want: wakeImageCurrent,
+		},
+		{
 			name: "legacy lock stays unknown despite exact comparison",
 			result: wakeCheckResult{
 				RunningVersion: wakeCheckUnknown,
@@ -775,6 +791,54 @@ func TestWakeCheckRefusesCapabilityFromChangingWakeState(t *testing.T) {
 	assertWakeCheckTreeUnchanged(t, root, expectedAfterChange)
 }
 
+func TestWakeCheckRefusesImageStatusWhenWakeChangesDuringImageProbe(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	baseLock := wakeLock{
+		PID:          4242,
+		TTY:          "/dev/ttys005",
+		Root:         canonicalWakeRoot(root),
+		Agent:        "codex",
+		Started:      "2026-07-31T01:00:00Z",
+		ProcessStart: "same-start",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "probe-generation",
+		ImagePath:    "/opt/homebrew/bin/amq",
+		ImageVersion: "0.49.14",
+	}
+	writeWakeLockForTest(t, root, "codex", baseLock)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "same-start",
+			BootID:     "same-boot",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+	stubWakeCheckRuntime(t, false, "0.49.14")
+	stubWakeBinaryStaleness(t, func(wakeLockInspection) (wakeBinaryStaleness, error) {
+		replacement := baseLock
+		replacement.Generation = "replacement-during-probe"
+		writeWakeLockExactForTest(t, root, "codex", replacement)
+		return wakeBinaryStaleness{
+			Method:   wakeBinaryComparisonExactIdentity,
+			Evidence: stableWakeBinaryEvidenceForTest(),
+		}, nil
+	})
+
+	got := inspectWakeCheck(root, "codex")
+	if got.ImageStatus != wakeImageUnknown ||
+		got.NextAction != "wake state changed during inspection; retry amq wake check" {
+		t.Fatalf("wake changed during image probe = %#v", got)
+	}
+}
+
 func TestWakeCheckTextPrintsExactClassifiedAction(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
@@ -818,6 +882,13 @@ func TestNewWakeLockCapturesRunningImageEvidence(t *testing.T) {
 	}
 	if lock.ImageVersion != "0.49.14-test" {
 		t.Fatalf("image_version = %q", lock.ImageVersion)
+	}
+	if lock.RunningImageEvidence == nil {
+		t.Fatal("new wake lock is missing running image evidence")
+	}
+	if lock.RunningImageEvidence.ExecutionPath != lock.ImagePath ||
+		lock.RunningImageEvidence.EmbeddedVersion != lock.ImageVersion {
+		t.Fatalf("running image evidence does not bind path/version: %#v", lock)
 	}
 }
 
