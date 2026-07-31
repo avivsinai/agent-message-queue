@@ -1355,6 +1355,39 @@ func TestCoopInitNoGitignore(t *testing.T) {
 }
 
 func TestCoopExecAutoInitNoGitignore(t *testing.T) {
+	runCoopExecAutoInitNoGitignoreFixture(t)
+}
+
+func TestCoopExecAutoInitNoGitignoreLeavesInheritedCoopTreeUnchanged(t *testing.T) {
+	ambientBase, ambientRoot := makeCoopAmbientSessionForTest(t, "current")
+	rootID, baseRootID := treeIdentityTokens(ambientRoot, ambientBase)
+	if rootID == "" || baseRootID == "" {
+		t.Fatal("ambient fixture did not produce complete identity tokens")
+	}
+	t.Setenv(envRoot, ambientRoot)
+	t.Setenv(envRootID, rootID)
+	t.Setenv(envBaseRoot, ambientBase)
+	t.Setenv(envBaseRootID, baseRootID)
+	t.Setenv(envSession, "current")
+	t.Setenv(envGlobalRoot, ambientBase)
+	before := snapshotTreeDigest(t, ambientBase)
+
+	projectDir := runCoopExecAutoInitNoGitignoreFixture(t)
+
+	if after := snapshotTreeDigest(t, ambientBase); after != before {
+		t.Fatalf("inherited AMQ tree mutated: before=%s after=%s", before, after)
+	}
+	fixtureAgent := fsq.AgentBase(
+		filepath.Join(projectDir, defaultCoopRoot, defaultSessionName),
+		"definitely-missing-amq-test-binary",
+	)
+	if info, err := os.Stat(fixtureAgent); err != nil || !info.IsDir() {
+		t.Fatalf("isolated fixture mailbox missing: info=%v err=%v", info, err)
+	}
+}
+
+func runCoopExecAutoInitNoGitignoreFixture(t *testing.T) string {
+	t.Helper()
 	clearCoopSessionPinForTest(t)
 	setOptionalEnv(t, envRoot, "", false)
 	setOptionalEnv(t, envGlobalRoot, "", false)
@@ -1394,6 +1427,7 @@ func TestCoopExecAutoInitNoGitignore(t *testing.T) {
 	if string(gitignoreAfter) != gitignoreBefore {
 		t.Fatalf(".gitignore changed with coop exec --no-gitignore:\n%s", gitignoreAfter)
 	}
+	return projectDir
 }
 
 func TestInitExplicitAgentsDoesNotInjectUser(t *testing.T) {
