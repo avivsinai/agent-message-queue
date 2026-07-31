@@ -422,6 +422,18 @@ func classifyWakeCheckRestart(
 			result.NextAction = wakeRecoverOwnerCommand(result.Root, result.Agent)
 			return
 		}
+		if result.WakeMode == wakeTargetInjectVia {
+			result.RestartCapability = wakeRestartUnavailable
+			result.OperatorTerminalRequired = false
+			result.NextAction = "restore the configured --inject-via supervisor or reconfigure a supported full-strength injector before replacing this stale wake; do not fall back to raw terminal injection"
+			return
+		}
+		if result.StartMode == wakeInjectModeNone {
+			result.RestartCapability = wakeRestartUnavailable
+			result.OperatorTerminalRequired = false
+			result.NextAction = "restore a supported full-strength injector or configure --inject-via; do not accept an attention-only downgrade"
+			return
+		}
 		result.RestartCapability = wakeRestartOperatorOnly
 		result.OperatorTerminalRequired = true
 		result.NextAction = fmt.Sprintf(
@@ -442,6 +454,13 @@ func inspectWakeCheckImageStatus(
 	inspection wakeLockInspection,
 	result wakeCheckResult,
 ) string {
+	if strings.TrimSpace(inspection.Lock.ImagePath) == "" ||
+		strings.TrimSpace(inspection.Lock.ImageVersion) == "" {
+		return wakeImageUnknown
+	}
+	// A running process retains its loaded image. A recorded version mismatch is
+	// therefore conclusive even if the executable path now resolves to the same
+	// device and inode as the current AMQ binary.
 	if result.RunningVersion != wakeCheckUnknown &&
 		result.CurrentVersion != wakeCheckUnknown &&
 		result.RunningVersion != result.CurrentVersion {
@@ -454,10 +473,7 @@ func inspectWakeCheckImageStatus(
 	if comparison.Stale {
 		return wakeImageDifferent
 	}
-	if comparison.Method == wakeBinaryComparisonExactIdentity ||
-		(result.RunningVersion != wakeCheckUnknown &&
-			result.CurrentVersion != wakeCheckUnknown &&
-			result.RunningVersion == result.CurrentVersion) {
+	if comparison.Method == wakeBinaryComparisonExactIdentity {
 		return wakeImageCurrent
 	}
 	return wakeImageUnknown
