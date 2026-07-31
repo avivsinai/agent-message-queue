@@ -242,6 +242,18 @@ func runSend(args []string) error {
 			return err
 		}
 	}
+	if !*allowSelfFlag && os.SameFile(sourceIdentity.FileInfo(), deliveryIdentity.FileInfo()) {
+		for _, recipient := range recipients {
+			if recipient == me {
+				return UsageError(
+					"refusing send: recipient %q resolves to the sender's physical AMQ tree. "+
+						"Use --project <peer> or --session <name> to reach another instance, "+
+						"or pass --allow-self to confirm an intentional same-root self-send.",
+					me,
+				)
+			}
+		}
+	}
 	if pin.IdentityPin && !*ignoreSessionPinFlag && fromSession == "" &&
 		verifyTreeIdentityInfo(sourceIdentity.FileInfo(), pin.RootID) != TreeRelationSame {
 		return ContextMismatchError("authorized source root identity changed before capability open")
