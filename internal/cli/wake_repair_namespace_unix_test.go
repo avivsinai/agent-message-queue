@@ -249,6 +249,9 @@ func replaceWakeRepairInboxDirectoryAtomicallyForTest(t *testing.T, root, me str
 	if err := os.Mkdir(replacementPath, 0o700); err != nil {
 		t.Fatalf("create replacement inbox directory: %v", err)
 	}
+	// A plain os.Rename cannot replace inbox/new once it contains handoff
+	// messages. The platform exchange remains atomic and preserves the
+	// original directory at replacementPath for post-condition checks.
 	if err := exchangeWakeRepairDirectoriesForTest(replacementPath, inboxPath); err != nil {
 		t.Fatalf("atomically replace inbox directory: %v", err)
 	}
