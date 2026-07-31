@@ -19,6 +19,9 @@ editing the release PR.
 * **wake:** reject incoherent repair observations ([#387](https://github.com/avivsinai/agent-message-queue/issues/387)) ([744c681](https://github.com/avivsinai/agent-message-queue/commit/744c681b676319c142a08e41280b6cad5b08d23e))
 * **wake:** silence superseded attention ([#383](https://github.com/avivsinai/agent-message-queue/issues/383)) ([2e9883c](https://github.com/avivsinai/agent-message-queue/commit/2e9883c30d9438c34ed62d76bcccc197ecfffc9e))
 
+#383 and #385 close the generation-exclusivity portion of known issue #377: a superseded wake generation can no longer emit peer or operator attention, and inconclusive evidence never silences a healthy wake.
+The cadence-accumulation portion of #377 (attention re-announce ladder while an agent is not draining) remains open.
+
 ## [0.50.0](https://github.com/avivsinai/agent-message-queue/compare/v0.49.13...v0.50.0) (2026-07-31)
 
 
