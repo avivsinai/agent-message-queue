@@ -9,20 +9,24 @@ func authorizeTerminalWritePlatform(cfg *wakeConfig) bool {
 	return allowed
 }
 
-func authorizeTerminalWritePlatformState(cfg *wakeConfig) (bool, error) {
+func classifyWakeGenerationPlatformState(
+	cfg *wakeConfig,
+) (wakeLockInspection, bool, error) {
 	current := inspectWakeLock(cfg.root, cfg.me)
 	if !current.Exists {
-		if cfg.terminalGeneration != "" {
-			return false, newWakeTerminalAuthorityLoss("wake generation disappeared")
+		if strings.TrimSpace(cfg.terminalGeneration) != "" {
+			return current, false, newWakeTerminalAuthorityLoss(
+				"wake generation disappeared",
+			)
 		}
-		return false, nil
+		return current, false, nil
 	}
-	if current.Lock.Generation == "" {
+	if strings.TrimSpace(current.Lock.Generation) == "" {
 		// An empty or unreadable generation is not owner-identity evidence.
 		// Park input without silencing attention while ownership is inconclusive.
-		return false, nil
+		return current, false, nil
 	}
-	if cfg.terminalGeneration == "" {
+	if strings.TrimSpace(cfg.terminalGeneration) == "" {
 		cfg.terminalGeneration = current.Lock.Generation
 		cfg.terminalTTY = current.Lock.TTY
 	}
@@ -30,10 +34,30 @@ func authorizeTerminalWritePlatformState(cfg *wakeConfig) (bool, error) {
 		// A readable different generation is positive replacement evidence even
 		// when a newer lock schema is otherwise unverified. Mixed-version
 		// upgrades must supersede the old narrator instead of preserving it.
-		return false, newWakeTerminalAuthorityLoss("wake generation changed")
+		return current, false, newWakeTerminalAuthorityLoss(
+			"wake generation changed",
+		)
+	}
+	return current, true, nil
+}
+
+func authorizeTerminalWritePlatformState(cfg *wakeConfig) (bool, error) {
+	current, generationCurrent, err := classifyWakeGenerationPlatformState(cfg)
+	if err != nil || !generationCurrent {
+		return false, err
+	}
+	if strings.TrimSpace(current.Lock.TTY) == "" ||
+		strings.TrimSpace(cfg.terminalTTY) == "" {
+		// Absent TTY metadata cannot authorize input even when both missing
+		// values compare equal. The literal legacy value "unknown" remains a
+		// deliberate non-empty fail-open capability.
+		return false, nil
 	}
 	if current.Lock.TTY != cfg.terminalTTY {
-		return false, newWakeTerminalAuthorityLoss("wake terminal changed")
+		// The generation still belongs to this wake, so changed or absent TTY
+		// metadata cannot prove that a replacement narrator exists. Park input
+		// while keeping bounded attention alive.
+		return false, nil
 	}
 	switch wakeLockTerminalAttachment(current) {
 	case wakeTerminalGone:

@@ -1187,6 +1187,9 @@ func deliverWakeTransientAttention(
 	payload wakePayload,
 	cause error,
 ) error {
+	if err := authorizePeerWakeAttention(cfg, payload); err != nil {
+		return err
+	}
 	now := cfg.wakeDoorbellNow()
 	if !cfg.doorbell.transientAttentionDue(now) {
 		return cause
@@ -1200,11 +1203,32 @@ func deliverWakeTransientAttention(
 }
 
 func deliverWakeAttentionOnly(cfg *wakeConfig, payload wakePayload) error {
+	if err := authorizePeerWakeAttention(cfg, payload); err != nil {
+		return err
+	}
 	if err := emitWakeAttention(cfg, payload); err != nil {
 		return err
 	}
 	cfg.lastAttemptAttention = true
 	return nil
+}
+
+func authorizePeerWakeAttention(cfg *wakeConfig, payload wakePayload) error {
+	if cfg == nil ||
+		payload.provenance == wakePayloadSystemFixed ||
+		cfg.root == "" ||
+		cfg.me == "" ||
+		strings.TrimSpace(cfg.terminalGeneration) == "" {
+		return nil
+	}
+	// Fence notifications fired by mailbox-cohort state, including
+	// operator-authored interrupt text. System-fixed notices describe this
+	// process's own state and remain available for diagnostics.
+	// The platform layer owns the single generation classifier. Its typed
+	// error is reserved for a missing or readable-different retained
+	// generation; false with no error parks input but keeps attention alive.
+	_, _, err := classifyWakeGenerationPlatformState(cfg)
+	return err
 }
 
 func usesCoopDoorbell(cfg *wakeConfig) bool {
