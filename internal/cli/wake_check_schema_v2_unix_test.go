@@ -1,0 +1,944 @@
+//go:build darwin || linux
+
+package cli
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/config"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+)
+
+func TestWakeCheckJSONSchemaV1GoldenBytes(t *testing.T) {
+	result := wakeCheckResult{
+		Schema:                   1,
+		Agent:                    "codex",
+		Root:                     "/queue",
+		CanStartHere:             false,
+		StartMode:                "raw",
+		StartReason:              "owning terminal required",
+		LiveWake:                 true,
+		WakeStatus:               "valid",
+		WakePID:                  42,
+		WakeMode:                 "raw",
+		OwnerBound:               false,
+		RunningImagePath:         "/running/amq",
+		RunningVersion:           "0.50.0",
+		CurrentImagePath:         "/current/amq",
+		CurrentVersion:           "0.50.1",
+		ImageStatus:              "different",
+		CanRepairInjectVia:       false,
+		RepairReason:             "wake is live",
+		RestartCapability:        "operator_only",
+		OperatorTerminalRequired: true,
+		NextAction:               "leave the live wake running",
+	}
+
+	output, err := captureEnvStdout(t, func() error {
+		return writeJSON(os.Stdout, result)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "{\n" +
+		"  \"schema\": 1,\n" +
+		"  \"agent\": \"codex\",\n" +
+		"  \"root\": \"/queue\",\n" +
+		"  \"can_start_here\": false,\n" +
+		"  \"start_mode\": \"raw\",\n" +
+		"  \"start_reason\": \"owning terminal required\",\n" +
+		"  \"live_wake\": true,\n" +
+		"  \"wake_status\": \"valid\",\n" +
+		"  \"wake_pid\": 42,\n" +
+		"  \"wake_mode\": \"raw\",\n" +
+		"  \"owner_bound\": false,\n" +
+		"  \"running_image_path\": \"/running/amq\",\n" +
+		"  \"running_version\": \"0.50.0\",\n" +
+		"  \"current_image_path\": \"/current/amq\",\n" +
+		"  \"current_version\": \"0.50.1\",\n" +
+		"  \"image_status\": \"different\",\n" +
+		"  \"can_repair_inject_via\": false,\n" +
+		"  \"repair_reason\": \"wake is live\",\n" +
+		"  \"restart_capability\": \"operator_only\",\n" +
+		"  \"operator_terminal_required\": true,\n" +
+		"  \"next_action\": \"leave the live wake running\"\n" +
+		"}\n"
+	if output != want {
+		t.Fatalf("v1 wake-check bytes changed:\n--- got ---\n%s--- want ---\n%s", output, want)
+	}
+}
+
+func TestDoctorOpsJSONSchemaV1GoldenBytes(t *testing.T) {
+	result := doctorResult{
+		Checks: []doctorCheck{{Name: "Binary", Status: "ok", Message: "ok"}},
+		Ops: &doctorOpsResult{
+			Root: opsRoot{Path: "/queue", Source: "flag"},
+			WakeLocks: []opsWakeLock{{
+				Status:                   "missing",
+				Agent:                    "codex",
+				Root:                     "/queue",
+				Lock:                     "/queue/.wake.lock",
+				CanStartHere:             false,
+				OperatorTerminalRequired: false,
+			}},
+		},
+	}
+	result.Summary.OK = 1
+
+	output, err := captureEnvStdout(t, func() error {
+		return writeJSON(os.Stdout, result)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "{\n" +
+		"  \"checks\": [\n" +
+		"    {\n" +
+		"      \"name\": \"Binary\",\n" +
+		"      \"status\": \"ok\",\n" +
+		"      \"message\": \"ok\"\n" +
+		"    }\n" +
+		"  ],\n" +
+		"  \"summary\": {\n" +
+		"    \"ok\": 1,\n" +
+		"    \"warn\": 0,\n" +
+		"    \"error\": 0\n" +
+		"  },\n" +
+		"  \"ops\": {\n" +
+		"    \"root\": {\n" +
+		"      \"path\": \"/queue\",\n" +
+		"      \"source\": \"flag\"\n" +
+		"    },\n" +
+		"    \"agents\": null,\n" +
+		"    \"wake_locks\": [\n" +
+		"      {\n" +
+		"        \"status\": \"missing\",\n" +
+		"        \"agent\": \"codex\",\n" +
+		"        \"root\": \"/queue\",\n" +
+		"        \"lock\": \"/queue/.wake.lock\",\n" +
+		"        \"can_start_here\": false,\n" +
+		"        \"operator_terminal_required\": false\n" +
+		"      }\n" +
+		"    ],\n" +
+		"    \"hints\": null\n" +
+		"  }\n" +
+		"}\n"
+	if output != want {
+		t.Fatalf("v1 doctor bytes changed:\n--- got ---\n%s--- want ---\n%s", output, want)
+	}
+}
+
+func TestJSONSchemaOneMatchesDefaultBytes(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	stubWakeCheckRuntime(t, true, "0.50.1")
+
+	wakeDefault, err := captureEnvStdout(t, func() error {
+		return runWake([]string{"check", "--root", root, "--me", "codex", "--json"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wakeExplicit, err := captureEnvStdout(t, func() error {
+		return runWake([]string{
+			"check", "--root", root, "--me", "codex", "--json", "--json-schema=1",
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wakeExplicit != wakeDefault {
+		t.Fatalf("explicit wake schema 1 changed bytes:\n--- default ---\n%s--- explicit ---\n%s", wakeDefault, wakeExplicit)
+	}
+
+	doctorDefault, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{"--root", root, "--json"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doctorExplicit, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{"--root", root, "--json", "--json-schema=1"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doctorExplicit != doctorDefault {
+		t.Fatalf("explicit doctor schema 1 changed bytes:\n--- default ---\n%s--- explicit ---\n%s", doctorDefault, doctorExplicit)
+	}
+}
+
+func TestWakeCheckJSONSchemaV2DirectStartUsesExplicitNullsAndArgv(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	stubWakeCheckRuntime(t, true, "0.50.1")
+
+	output, err := captureEnvStdout(t, func() error {
+		return runWake([]string{
+			"check", "--root", root, "--me", "codex",
+			"--json", "--json-schema=2",
+		})
+	})
+	if err != nil {
+		t.Fatalf("wake check v2: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("decode wake check v2: %v\n%s", err, output)
+	}
+	if got["schema"] != float64(2) || got["agent"] != "codex" || got["root"] != canonicalWakeRoot(root) {
+		t.Fatalf("identity = %#v", got)
+	}
+	platform := requireJSONObject(t, got, "platform")
+	if platform["wake_supported"] != true || platform["reason_code"] != nil {
+		t.Fatalf("platform = %#v", platform)
+	}
+	start := requireJSONObject(t, got, "start")
+	if start["available"] != true || start["mode"] != wakeInjectModeRaw ||
+		start["reason_code"] != nil || start["detail"] != nil {
+		t.Fatalf("start = %#v", start)
+	}
+	wake := requireJSONObject(t, got, "wake")
+	if wake["status"] != string(wakeLockMissing) || wake["live"] != false ||
+		wake["pid"] != nil || wake["mode"] != nil || wake["owner_bound"] != false {
+		t.Fatalf("wake = %#v", wake)
+	}
+	image := requireJSONObject(t, got, "image")
+	running := requireJSONObject(t, image, "running")
+	if running["path"] != nil || running["version"] != nil || image["status"] != wakeImageUnknown {
+		t.Fatalf("image = %#v", image)
+	}
+	repair := requireJSONObject(t, got, "repair")
+	if repair["inject_via_available"] != false || repair["reason_code"] != "no_wake_lock" || repair["detail"] != nil {
+		t.Fatalf("repair = %#v", repair)
+	}
+	if got["restart_capability"] != wakeRestartAgentSafe {
+		t.Fatalf("restart_capability = %#v", got["restart_capability"])
+	}
+	action := requireJSONObject(t, got, "action")
+	if action["kind"] != "start_wake" || action["actor"] != "agent" ||
+		action["reason_code"] != "wake_missing_start_available" || action["terminal_required"] != false {
+		t.Fatalf("action = %#v", action)
+	}
+	command := requireJSONObject(t, action, "command")
+	program, ok := command["program"].(string)
+	if !ok || !filepath.IsAbs(program) {
+		t.Fatalf("action command program = %#v", command["program"])
+	}
+	wantArgs := []any{"wake", "--root", canonicalWakeRoot(root), "--me", "codex"}
+	if !reflect.DeepEqual(command["args"], wantArgs) {
+		t.Fatalf("action command args = %#v, want %#v", command["args"], wantArgs)
+	}
+}
+
+func TestDoctorOpsJSONSchemaV2NestsSingleWakeDecision(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteConfig(
+		filepath.Join(root, "meta", "config.json"),
+		config.Config{Version: 1, Agents: []string{"codex"}},
+		true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(root),
+		Agent:        "codex",
+		ProcessStart: "12345",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "doctor-v2-generation",
+		ImagePath:    "/opt/homebrew/bin/amq",
+		ImageVersion: "0.50.1",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID: pid, Running: true, StartToken: "12345", BootID: "same-boot",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+	stubWakeCheckRuntime(t, false, "0.50.1")
+
+	output, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{
+			"--root", root, "--ops", "--json", "--json-schema=2",
+		})
+	})
+	if err != nil {
+		t.Fatalf("doctor ops v2: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("decode doctor v2: %v\n%s", err, output)
+	}
+	ops := requireJSONObject(t, got, "ops")
+	locks, ok := ops["wake_locks"].([]any)
+	if !ok || len(locks) != 1 {
+		t.Fatalf("wake_locks = %#v", ops["wake_locks"])
+	}
+	lock, ok := locks[0].(map[string]any)
+	if !ok {
+		t.Fatalf("wake lock = %#v", locks[0])
+	}
+	wakeCheck := requireJSONObject(t, lock, "wake_check")
+	if wakeCheck["schema"] != float64(2) || wakeCheck["agent"] != "codex" ||
+		wakeCheck["restart_capability"] != wakeRestartOperatorOnly {
+		t.Fatalf("nested wake_check = %#v", wakeCheck)
+	}
+	for _, duplicate := range []string{
+		"can_start_here", "start_mode", "start_reason", "running_image_path",
+		"running_version", "current_image_path", "current_version", "image_status",
+		"restart_capability", "operator_terminal_required", "next_action",
+	} {
+		if _, exists := lock[duplicate]; exists {
+			t.Fatalf("doctor v2 wake lock duplicated %q: %#v", duplicate, lock)
+		}
+	}
+}
+
+func TestJSONSchemaRequiresJSONAndKnownVersion(t *testing.T) {
+	root := t.TempDir()
+	tests := []struct {
+		name string
+		run  func() error
+		want string
+	}{
+		{
+			name: "wake check schema requires JSON",
+			run: func() error {
+				return runWake([]string{"check", "--root", root, "--me", "codex", "--json-schema=2"})
+			},
+			want: "--json-schema requires --json",
+		},
+		{
+			name: "doctor schema requires JSON",
+			run: func() error {
+				return runDoctor([]string{"--root", root, "--json-schema=2"})
+			},
+			want: "--json-schema requires --json",
+		},
+		{
+			name: "wake check rejects schema 3",
+			run: func() error {
+				return runWake([]string{"check", "--root", root, "--me", "codex", "--json", "--json-schema=3"})
+			},
+			want: "--json-schema must be 1 or 2",
+		},
+		{
+			name: "doctor rejects schema 3",
+			run: func() error {
+				return runDoctor([]string{"--root", root, "--json", "--json-schema=3"})
+			},
+			want: "--json-schema must be 1 or 2",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.run()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestWakeCheckV2ClassifierActions(t *testing.T) {
+	baseDecision := func() wakeCheckDecision {
+		return wakeCheckDecision{
+			Agent: "codex",
+			Root:  "/queue with spaces",
+			Platform: wakeCheckPlatformDecision{
+				OS:            "darwin",
+				WakeSupported: true,
+			},
+			Start: wakeCheckStartDecision{Available: true, Mode: wakeInjectModeRaw},
+			Wake:  wakeCheckWakeDecision{Status: string(wakeLockMissing)},
+			Image: wakeCheckImageDecision{Status: wakeImageUnknown},
+		}
+	}
+	tests := []struct {
+		name      string
+		configure func(*wakeCheckDecision) (wakeLockInspection, *opsWakeLock)
+		kind      string
+		actor     string
+		reason    string
+		restart   string
+		args      []string
+		terminal  bool
+	}{
+		{
+			name: "missing direct start",
+			configure: func(*wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
+				return wakeLockInspection{}, nil
+			},
+			kind: wakeActionStartWake, actor: wakeActionActorAgent,
+			reason: wakeReasonMissingStartAvailable, restart: wakeRestartAgentSafe,
+			args: []string{"wake", "--root", "/queue with spaces", "--me", "codex"},
+		},
+		{
+			name: "missing full strength unavailable",
+			configure: func(d *wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
+				d.Start.Available = false
+				d.Start.Mode = wakeInjectModeNone
+				return wakeLockInspection{}, nil
+			},
+			kind: wakeActionConfigureInjector, actor: wakeActionActorOperator,
+			reason: wakeReasonFullStrengthUnavailable, restart: wakeRestartUnavailable,
+		},
+		{
+			name: "missing owning terminal",
+			configure: func(d *wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
+				d.Start.Available = false
+				return wakeLockInspection{}, nil
+			},
+			kind: wakeActionStartWake, actor: wakeActionActorOperator,
+			reason: wakeReasonOwningTerminalRequired, restart: wakeRestartOperatorOnly,
+			args:     []string{"wake", "--root", "/queue with spaces", "--me", "codex"},
+			terminal: true,
+		},
+		{
+			name: "stale inject-via repair",
+			configure: func(d *wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
+				d.Wake.Status = string(wakeLockStale)
+				d.Wake.Mode = wakeCheckOptionalString(wakeTargetInjectVia)
+				d.Repair.InjectViaAvailable = true
+				return wakeLockInspection{Exists: true, Status: wakeLockStale}, &opsWakeLock{
+					Repair: wakeRepairCommand(d.Root, d.Agent),
+				}
+			},
+			kind: wakeActionRepairWake, actor: wakeActionActorAgent,
+			reason: wakeReasonStaleRepairAvailable, restart: wakeRestartAgentSafe,
+			args: []string{"wake", "repair", "--root", "/queue with spaces", "--me", "codex"},
+		},
+		{
+			name: "live raw wake",
+			configure: func(d *wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
+				d.Wake.Status = string(wakeLockValid)
+				d.Wake.Live = true
+				d.Wake.Mode = wakeCheckOptionalString(wakeInjectModeRaw)
+				return wakeLockInspection{Exists: true, Status: wakeLockValid}, nil
+			},
+			kind: wakeActionPreserveLiveWake, actor: wakeActionActorOperator,
+			reason: wakeReasonLiveWakePreserve, restart: wakeRestartOperatorOnly,
+			terminal: true,
+		},
+		{
+			name: "live inject-via wake",
+			configure: func(d *wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
+				d.Wake.Status = string(wakeLockValid)
+				d.Wake.Live = true
+				d.Wake.Mode = wakeCheckOptionalString(wakeTargetInjectVia)
+				return wakeLockInspection{Exists: true, Status: wakeLockValid}, nil
+			},
+			kind: wakeActionPreserveLiveWake, actor: wakeActionActorOperator,
+			reason: wakeReasonLiveWakePreserve, restart: wakeRestartOperatorOnly,
+		},
+		{
+			name: "stale owner-bound wake",
+			configure: func(d *wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
+				d.Wake.Status = string(wakeLockStale)
+				d.Wake.OwnerBound = true
+				return wakeLockInspection{Exists: true, Status: wakeLockStale}, nil
+			},
+			kind: wakeActionRecoverOwner, actor: wakeActionActorOperator,
+			reason: wakeReasonOwnerRecoveryRequired, restart: wakeRestartUnavailable,
+			args: []string{"wake", "recover-owner", "--root", "/queue with spaces", "--me", "codex"},
+		},
+		{
+			name: "stale inject-via without repair",
+			configure: func(d *wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
+				d.Wake.Status = string(wakeLockStale)
+				d.Wake.Mode = wakeCheckOptionalString(wakeTargetInjectVia)
+				return wakeLockInspection{Exists: true, Status: wakeLockStale}, nil
+			},
+			kind: wakeActionConfigureInjector, actor: wakeActionActorOperator,
+			reason: wakeReasonFullStrengthUnavailable, restart: wakeRestartUnavailable,
+		},
+		{
+			name: "stale generic without full strength injector",
+			configure: func(d *wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
+				d.Start.Available = false
+				d.Start.Mode = wakeInjectModeNone
+				d.Wake.Status = string(wakeLockStale)
+				d.Wake.Mode = wakeCheckOptionalString(wakeInjectModeRaw)
+				return wakeLockInspection{Exists: true, Status: wakeLockStale}, nil
+			},
+			kind: wakeActionConfigureInjector, actor: wakeActionActorOperator,
+			reason: wakeReasonFullStrengthUnavailable, restart: wakeRestartUnavailable,
+		},
+		{
+			name: "stale generic manual cleanup",
+			configure: func(d *wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
+				d.Wake.Status = string(wakeLockStale)
+				d.Wake.Mode = wakeCheckOptionalString(wakeInjectModeRaw)
+				return wakeLockInspection{Exists: true, Status: wakeLockStale}, nil
+			},
+			kind: wakeActionManualStaleCleanup, actor: wakeActionActorOperator,
+			reason: wakeReasonStaleManualCleanupRequired, restart: wakeRestartOperatorOnly,
+			terminal: true,
+		},
+		{
+			name: "creating wake",
+			configure: func(d *wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
+				d.Wake.Status = string(wakeLockCreating)
+				return wakeLockInspection{Exists: true, Status: wakeLockCreating}, nil
+			},
+			kind: wakeActionWaitForStableState, actor: wakeActionActorNone,
+			reason: wakeReasonWakeStateCreating, restart: wakeRestartUnavailable,
+		},
+		{
+			name: "unverified wake",
+			configure: func(d *wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
+				d.Wake.Status = string(wakeLockUnverified)
+				return wakeLockInspection{Exists: true, Status: wakeLockUnverified}, nil
+			},
+			kind: wakeActionInspectUnverified, actor: wakeActionActorOperator,
+			reason: wakeReasonWakeStateUnverified, restart: wakeRestartUnavailable,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decision := baseDecision()
+			inspection, opsLock := test.configure(&decision)
+			classifyWakeCheckRestart(&decision, inspection, opsLock)
+
+			if decision.Action.Kind != test.kind || decision.Action.Actor != test.actor ||
+				decision.Action.ReasonCode != test.reason ||
+				decision.RestartCapability != test.restart ||
+				decision.Action.TerminalRequired != test.terminal {
+				t.Fatalf("decision = %#v", decision)
+			}
+			if decision.Action.Message == "" {
+				t.Fatal("action message is empty")
+			}
+			if test.args == nil {
+				if decision.Action.Command != nil {
+					t.Fatalf("command = %#v, want null", decision.Action.Command)
+				}
+			} else {
+				if decision.Action.Command == nil ||
+					!filepath.IsAbs(decision.Action.Command.Program) ||
+					!reflect.DeepEqual(decision.Action.Command.Args, test.args) {
+					t.Fatalf("command = %#v, want args %#v", decision.Action.Command, test.args)
+				}
+			}
+
+			v1 := renderWakeCheckV1(decision)
+			v2 := renderWakeCheckV2(decision)
+			if v1.RestartCapability != v2.RestartCapability ||
+				v1.NextAction != v2.Action.Message {
+				t.Fatalf("cross-schema mismatch: v1=%#v v2=%#v", v1, v2)
+			}
+		})
+	}
+}
+
+func TestWakeCheckV2ObservationChangedIsRetryOnly(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	stubWakeCheckRuntime(t, true, "0.50.1")
+
+	decision := unstableWakeCheckDecision(root, "codex", wakeLockInspection{})
+	if decision.RestartCapability != wakeRestartUnavailable ||
+		decision.Action.Kind != wakeActionRetryCheck ||
+		decision.Action.Actor != wakeActionActorAgent ||
+		decision.Action.ReasonCode != wakeReasonObservationChanged ||
+		decision.Action.Command == nil ||
+		!reflect.DeepEqual(decision.Action.Command.Args, []string{
+			"wake", "check", "--root", canonicalWakeRoot(root), "--me", "codex",
+			"--json", "--json-schema=2",
+		}) {
+		t.Fatalf("observation-changed decision = %#v", decision)
+	}
+	for _, mutating := range []string{wakeActionStartWake, wakeActionRepairWake, wakeActionRecoverOwner} {
+		if decision.Action.Kind == mutating {
+			t.Fatalf("observation change advertised mutating action %q", mutating)
+		}
+	}
+}
+
+func TestWakeCheckV2RetryActionIsReadOnly(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	stubWakeCheckRuntime(t, true, "0.50.1")
+	decision := unstableWakeCheckDecision(root, "codex", wakeLockInspection{})
+	if decision.Action.Command == nil {
+		t.Fatal("retry action has no command")
+	}
+	before := snapshotWakeCheckTree(t, root)
+	if _, err := captureEnvStdout(t, func() error {
+		return runWake(decision.Action.Command.Args[1:])
+	}); err != nil {
+		t.Fatalf("execute retry action: %v", err)
+	}
+	assertWakeCheckTreeUnchanged(t, root, before)
+}
+
+func TestWakeCheckV2ActionProgramKeepsPublicExecutableAndLiteralArgv(t *testing.T) {
+	dir := t.TempDir()
+	cellar := filepath.Join(dir, "Cellar", "amq", "0.50.1", "bin", "amq")
+	if err := os.MkdirAll(filepath.Dir(cellar), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cellar, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	public := filepath.Join(dir, "bin", "amq")
+	if err := os.MkdirAll(filepath.Dir(public), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(cellar, public); err != nil {
+		t.Fatal(err)
+	}
+	oldExecutable := wakeCheckExecutable
+	wakeCheckExecutable = func() (string, error) { return public, nil }
+	t.Cleanup(func() { wakeCheckExecutable = oldExecutable })
+
+	root := "/queue with spaces/and ' quotes"
+	command := wakeCheckActionCommand("wake", "--root", root, "--me", "codex")
+	if command == nil || command.Program != public {
+		t.Fatalf("program = %#v, want unresolved public path %q", command, public)
+	}
+	wantArgs := []string{"wake", "--root", root, "--me", "codex"}
+	if !reflect.DeepEqual(command.Args, wantArgs) {
+		t.Fatalf("args = %#v, want literal %#v", command.Args, wantArgs)
+	}
+}
+
+func TestWakeCheckV2WithholdsAdviceWhenExecutableIdentityIsUnavailable(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	stubWakeCheckRuntime(t, true, "0.50.1")
+	baselineV1, err := captureEnvStdout(t, func() error {
+		return runWake([]string{"check", "--root", root, "--me", "codex", "--json"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		stub func() (string, error)
+	}{
+		{name: "executable lookup failed", stub: func() (string, error) {
+			return "", errors.New("executable unavailable")
+		}},
+		{name: "executable path is relative", stub: func() (string, error) {
+			return "bin/amq", nil
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			oldExecutable := wakeCheckExecutable
+			wakeCheckExecutable = test.stub
+			t.Cleanup(func() { wakeCheckExecutable = oldExecutable })
+
+			v1, err := captureEnvStdout(t, func() error {
+				return runWake([]string{"check", "--root", root, "--me", "codex", "--json"})
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v1 != baselineV1 {
+				t.Fatalf("v1 bytes changed when executable identity was unavailable:\n--- baseline ---\n%s--- got ---\n%s", baselineV1, v1)
+			}
+
+			output, err := captureEnvStdout(t, func() error {
+				return runWake([]string{
+					"check", "--root", root, "--me", "codex",
+					"--json", "--json-schema=2",
+				})
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got wakeCheckResultV2
+			if err := json.Unmarshal([]byte(output), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.RestartCapability != wakeRestartUnavailable ||
+				got.Action.Kind != wakeActionRetryCheck ||
+				got.Action.Actor != wakeActionActorAgent ||
+				got.Action.ReasonCode != wakeReasonExecutableUnavailable ||
+				got.Action.Command != nil || got.Action.TerminalRequired {
+				t.Fatalf("unavailable executable decision = %#v", got)
+			}
+		})
+	}
+}
+
+func TestWakeCheckV2UnsupportedPlatformClassification(t *testing.T) {
+	got := renderWakeCheckV2(unsupportedWakeCheckDecision("/queue", "codex"))
+	if got.Schema != wakeCheckSchemaV2 || got.Platform.WakeSupported ||
+		got.Platform.ReasonCode == nil || *got.Platform.ReasonCode != wakeReasonPlatformUnsupported ||
+		got.RestartCapability != wakeRestartUnavailable ||
+		got.Action.Kind != wakeActionUnsupported || got.Action.Actor != wakeActionActorNone ||
+		got.Action.ReasonCode != wakeReasonPlatformUnsupported || got.Action.Command != nil {
+		t.Fatalf("unsupported classification = %#v", got)
+	}
+}
+
+func TestUnsupportedWakeDispatchRequiresExplicitV2OptIn(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "legacy default", args: []string{"--json"}},
+		{name: "legacy explicit one", args: []string{"--json", "--json-schema=1"}},
+		{name: "help stays legacy", args: []string{"--help"}},
+		{name: "schema without JSON stays legacy", args: []string{"--json-schema=2"}},
+		{name: "v2 equals", args: []string{"--json", "--json-schema=2"}, want: true},
+		{name: "v2 separate", args: []string{"--json", "--json-schema", "2"}, want: true},
+		{name: "single dash", args: []string{"-json", "-json-schema=2"}, want: true},
+		{name: "bool one", args: []string{"--json=1", "--json-schema=2"}, want: true},
+		{name: "bool t", args: []string{"--json=t", "--json-schema=2"}, want: true},
+		{name: "bool uppercase", args: []string{"--json=TRUE", "--json-schema=2"}, want: true},
+		{name: "last bool disables", args: []string{"--json", "--json=false", "--json-schema=2"}},
+		{name: "last bool enables", args: []string{"--json=false", "--json=1", "--json-schema=2"}, want: true},
+		{name: "last schema disables", args: []string{"--json", "--json-schema=2", "--json-schema=1"}},
+		{name: "last schema enables", args: []string{"--json", "--json-schema=1", "--json-schema=2"}, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := wakeCheckV2OptInPresent(test.args); got != test.want {
+				t.Fatalf("wakeCheckV2OptInPresent(%#v) = %t, want %t", test.args, got, test.want)
+			}
+		})
+	}
+}
+
+func TestDoctorOpsV2UsesSameNestedDecisionAsWakeCheck(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteConfig(
+		filepath.Join(root, "meta", "config.json"),
+		config.Config{Version: 1, Agents: []string{"codex"}},
+		true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(root),
+		Agent:        "codex",
+		ProcessStart: "12345",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "shared-v2-generation",
+		ImagePath:    "/opt/homebrew/bin/amq",
+		ImageVersion: "0.50.1",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID: pid, Running: true, StartToken: "12345", BootID: "same-boot",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+	stubWakeCheckRuntime(t, false, "0.50.1")
+	stubWakeBinaryStaleness(t, func(wakeLockInspection) (wakeBinaryStaleness, error) {
+		return wakeBinaryStaleness{
+			Method:   wakeBinaryComparisonExactIdentity,
+			Evidence: stableWakeBinaryEvidenceForTest(),
+		}, nil
+	})
+
+	wakeCheck := renderWakeCheckV2(inspectWakeCheckDecision(root, "codex"))
+	doctor := runOpsChecksWithSchema(root, "test", false, wakeCheckSchemaV2)
+	if len(doctor.WakeLocks) != 1 || doctor.WakeLocks[0].WakeCheckDecision == nil {
+		t.Fatalf("doctor wake locks = %#v", doctor.WakeLocks)
+	}
+	doctorWakeCheck := renderWakeCheckV2(*doctor.WakeLocks[0].WakeCheckDecision)
+	if !reflect.DeepEqual(doctorWakeCheck, wakeCheck) {
+		t.Fatalf("doctor and wake check decisions differ:\ndoctor=%#v\nwake=%#v", doctorWakeCheck, wakeCheck)
+	}
+}
+
+func TestDoctorOpsV2UsesOneStableSnapshotAfterEarlierDoctorStateChanged(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	lock := wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(root),
+		Agent:        "codex",
+		ProcessStart: "12345",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "doctor-first-generation",
+	}
+	writeWakeLockForTest(t, root, "codex", lock)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		startToken := "12345"
+		if pid == 5252 {
+			startToken = "54321"
+		}
+		return wakeProcessInfo{
+			PID: pid, Running: true, StartToken: startToken, BootID: "same-boot",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+	stubWakeCheckRuntime(t, false, "0.50.1")
+
+	initial := inspectWakeLock(root, "codex")
+	if initial.Status != wakeLockValid {
+		t.Fatalf("initial inspection = %#v", initial)
+	}
+	lock.PID = 5252
+	lock.ProcessStart = "54321"
+	lock.Generation = "doctor-replacement-generation"
+	writeWakeLockExactForTest(t, root, "codex", lock)
+
+	opsLock := opsWakeLock{
+		Status: string(initial.Status),
+		Agent:  "codex",
+		Root:   initial.Root,
+		Lock:   initial.LockPath,
+		PID:    initial.PID,
+	}
+	decorateOpsWakeLockWithWakeCheck(root, &opsLock, initial, false, true)
+	if opsLock.WakeCheckDecision == nil {
+		t.Fatal("doctor v2 wake decision is missing")
+	}
+	decision := *opsLock.WakeCheckDecision
+	if opsLock.PID != lock.PID || decision.Wake.PID == nil || *decision.Wake.PID != lock.PID ||
+		opsLock.Status != "live-raw-orphan" || decision.Action.Kind != wakeActionPreserveLiveWake {
+		t.Fatalf("mixed doctor snapshots: outer=%#v decision=%#v", opsLock, decision)
+	}
+}
+
+func TestWakeCheckV2AdvertisedStartRevalidatesChangedWakeState(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	stubWakeCheckRuntime(t, true, "0.50.1")
+	decision := inspectWakeCheckDecision(root, "codex")
+	if decision.Action.Kind != wakeActionStartWake ||
+		decision.Action.Actor != wakeActionActorAgent ||
+		decision.Action.Command == nil {
+		t.Fatalf("advertised start = %#v", decision)
+	}
+
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		TTY:          "/dev/ttys005",
+		Root:         canonicalWakeRoot(root),
+		Agent:        "codex",
+		ProcessStart: "12345",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "arrived-after-check",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID: pid, Running: true, StartToken: "12345", BootID: "same-boot",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+	lockPath := filepath.Join(fsq.AgentBase(root, "codex"), ".wake.lock")
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loopCalled := false
+	err = runWakeWithLoop(decision.Action.Command.Args[1:], func(wakeConfig) error {
+		loopCalled = true
+		return nil
+	})
+	if err == nil || loopCalled {
+		t.Fatalf("changed-state start: err=%v loop_called=%t", err, loopCalled)
+	}
+	after, readErr := os.ReadFile(lockPath)
+	if readErr != nil || !reflect.DeepEqual(after, before) {
+		t.Fatalf("changed-state start altered wake lock: err=%v before=%q after=%q", readErr, before, after)
+	}
+}
+
+func TestWakeCheckV2AdvertisedRepairRevalidatesChangedGeneration(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	injector := writeExecutableForTest(t, "injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+	targetDigest, err := wakeTargetDigest(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(root),
+		Agent:        "codex",
+		Started:      "2026-07-31T01:00:00Z",
+		ProcessStart: "12345",
+		BootID:       wakeRepairTestBootID,
+		Executable:   "amq",
+		WakeMode:     wakeTargetInjectVia,
+		TargetDigest: targetDigest,
+		Generation:   "advertised-generation",
+	}
+	writeWakeLockForTest(t, root, "codex", lock)
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeRepairFloorForTest(t, root, "codex", target, nil)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo { return wakeProcessInfo{PID: pid} })
+	stubWakeCheckRuntime(t, false, "0.50.1")
+
+	decision := inspectWakeCheckDecision(root, "codex")
+	if decision.Action.Kind != wakeActionRepairWake ||
+		decision.Action.Actor != wakeActionActorAgent ||
+		decision.Action.Command == nil {
+		t.Fatalf("advertised repair = %#v", decision)
+	}
+	lock.Generation = "replacement-generation"
+	writeWakeLockExactForTest(t, root, "codex", lock)
+	before := snapshotWakeCheckTree(t, root)
+
+	err = runWake(decision.Action.Command.Args[1:])
+	if err == nil {
+		t.Fatal("repair unexpectedly accepted changed generation")
+	}
+	assertWakeCheckTreeUnchanged(t, root, before)
+}
+
+func requireJSONObject(t *testing.T, object map[string]any, key string) map[string]any {
+	t.Helper()
+	value, ok := object[key].(map[string]any)
+	if !ok {
+		t.Fatalf("%s = %#v, want object", key, object[key])
+	}
+	return value
+}

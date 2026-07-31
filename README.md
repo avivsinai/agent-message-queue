@@ -296,6 +296,8 @@ amq doctor --ops
 amq doctor --ops --json
 amq wake check --me codex
 amq wake check --me codex --json
+amq wake check --me codex --json --json-schema=2
+amq doctor --ops --json --json-schema=2
 amq doctor --ops --fix-wake-locks
 amq wake repair --me codex
 amq wake recover-owner --me codex
@@ -311,6 +313,16 @@ with an exact `next_action`. Automated agents may act only on `agent_safe`.
 They must leave a live wake running for `operator_only`, and must never turn a
 TIOCSTI refusal into an attention-only downgrade. `doctor --ops` exposes the
 same image and restart fields for every discovered wake lock.
+
+JSON schema 1 remains the byte-compatible default. Schema 2 is explicit with
+`--json-schema=2` and is available only with `--json`. It replaces prose
+parsing with a closed action kind, actor, reason code, and an argv command
+object when one action is directly executable. Missing evidence is an explicit
+JSON `null`; `image.status="unknown"` remains a real classification. In doctor
+schema 2, each wake-lock entry contains the same decision under `wake_check`
+rather than duplicating the wake advice as flat fields. Check output is advice,
+not authority: every advertised mutating command revalidates current wake state
+before changing it.
 
 Wake locks reported by `doctor --ops` can be `stale`, `unverified`, or, in JSON
 output, any current lock state. With `--fix-wake-locks`, fixed and error states
