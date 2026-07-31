@@ -1170,14 +1170,14 @@ func deliverWakeAttentionAfterInputRefusal(
 	if isWakeTerminalForegroundPGRPChanged(cause) {
 		return deliverWakeTransientAttention(cfg, payload, cause)
 	}
+	if isWakeTerminalAuthorityLoss(cause) {
+		// A replacement wake owns both terminal input and peer-rich attention.
+		// Let an inconclusive authority check continue narrating, but never let
+		// a conclusively stale driver speak alongside its replacement.
+		return cause
+	}
 	if err := deliverWakeAttentionOnly(cfg, payload); err != nil {
 		return errors.Join(cause, err)
-	}
-	if isWakeTerminalAuthorityLoss(cause) {
-		// Loss of the retained terminal or wake generation is fatal even when
-		// the final attention write succeeds. A replacement wake, not this
-		// stale owner, must retry the inbox cohort.
-		return cause
 	}
 	return nil
 }
@@ -1248,7 +1248,11 @@ func authorizeTerminalWrite(cfg *wakeConfig) (bool, error) {
 		cfg.terminalWrite == nil &&
 		cfg.root != "" &&
 		cfg.me != "" {
-		if !authorizeTerminalWritePlatform(cfg) {
+		allowed, err := authorizeTerminalWritePlatformState(cfg)
+		if err != nil {
+			return false, &wakeTerminalAuthorityError{err: err}
+		}
+		if !allowed {
 			return false, nil
 		}
 	}
