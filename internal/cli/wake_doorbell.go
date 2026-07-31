@@ -88,6 +88,10 @@ func (state *wakeDoorbellState) recordAttentionAttempt(now time.Time) {
 		wakeDoorbellAttentionRetryBase,
 		wakeDoorbellAttentionRetryMax,
 	)
+	// Additions join the continuously unread cohort and are rendered at its
+	// existing attention deadline. Pulling every decayed retry back to the
+	// 30-second floor lets a steady arrival stream defeat the attention ladder.
+	state.additionAttemptFloor = time.Time{}
 }
 
 func (state *wakeDoorbellState) transientAttentionDue(now time.Time) bool {
