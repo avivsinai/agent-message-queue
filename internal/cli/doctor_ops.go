@@ -70,23 +70,34 @@ type opsWakeBinaryHint struct {
 }
 
 type opsWakeLock struct {
-	Status          string `json:"status"`
-	Agent           string `json:"agent"`
-	Root            string `json:"root"`
-	Lock            string `json:"lock"`
-	PID             int    `json:"pid,omitempty"`
-	TTY             string `json:"tty,omitempty"`
-	Started         string `json:"started,omitempty"`
-	Reason          string `json:"reason,omitempty"`
-	Fix             string `json:"fix,omitempty"`
-	Removed         bool   `json:"removed,omitempty"`
-	Target          string `json:"target,omitempty"`
-	TargetPresent   bool   `json:"target_present,omitempty"`
-	TargetReason    string `json:"target_reason,omitempty"`
-	Repair          string `json:"repair,omitempty"`
-	RepairAvailable bool   `json:"repair_available,omitempty"`
-	RepairReason    string `json:"repair_reason,omitempty"`
-	CurrentTerminal bool   `json:"-"`
+	Status                   string `json:"status"`
+	Agent                    string `json:"agent"`
+	Root                     string `json:"root"`
+	Lock                     string `json:"lock"`
+	PID                      int    `json:"pid,omitempty"`
+	TTY                      string `json:"tty,omitempty"`
+	Started                  string `json:"started,omitempty"`
+	Reason                   string `json:"reason,omitempty"`
+	Fix                      string `json:"fix,omitempty"`
+	Removed                  bool   `json:"removed,omitempty"`
+	Target                   string `json:"target,omitempty"`
+	TargetPresent            bool   `json:"target_present,omitempty"`
+	TargetReason             string `json:"target_reason,omitempty"`
+	Repair                   string `json:"repair,omitempty"`
+	RepairAvailable          bool   `json:"repair_available,omitempty"`
+	RepairReason             string `json:"repair_reason,omitempty"`
+	CanStartHere             bool   `json:"can_start_here"`
+	StartMode                string `json:"start_mode,omitempty"`
+	StartReason              string `json:"start_reason,omitempty"`
+	RunningImagePath         string `json:"running_image_path,omitempty"`
+	RunningVersion           string `json:"running_version,omitempty"`
+	CurrentImagePath         string `json:"current_image_path,omitempty"`
+	CurrentVersion           string `json:"current_version,omitempty"`
+	ImageStatus              string `json:"image_status,omitempty"`
+	RestartCapability        string `json:"restart_capability,omitempty"`
+	OperatorTerminalRequired bool   `json:"operator_terminal_required"`
+	NextAction               string `json:"next_action,omitempty"`
+	CurrentTerminal          bool   `json:"-"`
 }
 
 func runOpsChecks(root string, rootSource string, fixWakeLocks bool, explicitBaseRoot ...string) *doctorOpsResult {
@@ -345,6 +356,10 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeLock, []opsHint) {
 	var locks []opsWakeLock
 	var hints []opsHint
+	appendLock := func(lock opsWakeLock, inspection wakeLockInspection, staleBinary bool) {
+		decorateOpsWakeLockWithWakeCheck(root, &lock, inspection, staleBinary)
+		locks = append(locks, lock)
+	}
 	for _, agent := range agents {
 		if validateWakeLockAgentForInspection(root, agent) != nil {
 			continue
@@ -354,8 +369,10 @@ func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeL
 		if !inspection.Exists {
 			continue
 		}
+		staleBinary := false
 		if hint, ok := checkStaleWakeBinaryHint(inspection); ok {
 			hints = append(hints, hint)
+			staleBinary = true
 		}
 
 		lock := opsWakeLock{
@@ -378,7 +395,7 @@ func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeL
 			lock.Reason = "live raw wake orphan; stop the owning terminal or launchd supervisor"
 		}
 		if !mutationAuthorized {
-			locks = append(locks, lock)
+			appendLock(lock, inspection, staleBinary)
 			continue
 		}
 		target, exists, targetErr := readWakeTarget(root, agent)
@@ -395,7 +412,7 @@ func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeL
 		}
 		if inspection.Status == wakeLockStale {
 			if ownerBound {
-				locks = append(locks, lock)
+				appendLock(lock, inspection, staleBinary)
 				continue
 			}
 			lock.Fix = doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
@@ -434,7 +451,11 @@ func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeL
 				}
 			}
 		}
-		locks = append(locks, lock)
+		if lock.Removed {
+			inspection = inspectWakeLock(root, agent)
+			staleBinary = false
+		}
+		appendLock(lock, inspection, staleBinary)
 	}
 	return locks, hints
 }

@@ -519,6 +519,18 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 		Generation: hex.EncodeToString(generationBytes),
 		WakeMode:   options.wakeMode,
 	}
+	if imagePath, imageErr := os.Executable(); imageErr == nil {
+		imagePath = strings.TrimSpace(imagePath)
+		if imagePath != "" {
+			if resolved, resolveErr := filepath.EvalSymlinks(imagePath); resolveErr == nil {
+				imagePath = resolved
+			}
+			if filepath.IsAbs(imagePath) {
+				lock.ImagePath = filepath.Clean(imagePath)
+			}
+		}
+	}
+	lock.ImageVersion = strings.TrimSpace(cliVersion)
 	if options.target != nil {
 		targetDigest, err := wakeTargetDigest(*options.target)
 		if err != nil {
@@ -759,6 +771,8 @@ type wakeLoopFunc func(wakeConfig) error
 func runWake(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
+		case "check":
+			return runWakeCheck(args[1:])
 		case "repair":
 			return runWakeRepair(args[1:])
 		case "retire":
