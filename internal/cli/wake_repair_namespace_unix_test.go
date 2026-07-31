@@ -46,13 +46,7 @@ func TestValidateCanonicalWakeRepairDirectoriesRejectsNamespaceReplacement(t *te
 			name: "inbox directory",
 			replace: func(t *testing.T, root string) {
 				t.Helper()
-				inboxPath := fsq.AgentInboxNew(root, "codex")
-				if err := os.Rename(inboxPath, inboxPath+".detached"); err != nil {
-					t.Fatalf("detach inbox directory: %v", err)
-				}
-				if err := os.Mkdir(inboxPath, 0o700); err != nil {
-					t.Fatalf("create replacement inbox directory: %v", err)
-				}
+				replaceWakeRepairInboxDirectoryAtomicallyForTest(t, root, "codex")
 			},
 			want: "inbox directory no longer matches",
 		},
@@ -132,13 +126,7 @@ func TestRepairWakeRefusesCanonicalInboxReplacementBeforeAdmission(t *testing.T)
 		},
 		func(started *wakeRepairChild) {
 			forceRepairLifecycleChildInspection(t, fixture, started)
-			inboxPath := fsq.AgentInboxNew(fixture.root, "codex")
-			if err := os.Rename(inboxPath, inboxPath+".detached"); err != nil {
-				t.Fatalf("detach prepared child inbox: %v", err)
-			}
-			if err := os.Mkdir(inboxPath, 0o700); err != nil {
-				t.Fatalf("create replacement child inbox: %v", err)
-			}
+			replaceWakeRepairInboxDirectoryAtomicallyForTest(t, fixture.root, "codex")
 		},
 	)
 
@@ -184,13 +172,7 @@ func TestRepairWakeChildAdmissionRejectsNamespaceReplacementAfterParentValidatio
 			name: "direct inbox loss",
 			replace: func(t *testing.T, root string) {
 				t.Helper()
-				inboxPath := fsq.AgentInboxNew(root, "codex")
-				if err := os.Rename(inboxPath, inboxPath+".detached"); err != nil {
-					t.Fatalf("detach prepared child inbox: %v", err)
-				}
-				if err := os.Mkdir(inboxPath, 0o700); err != nil {
-					t.Fatalf("create replacement child inbox: %v", err)
-				}
+				replaceWakeRepairInboxDirectoryAtomicallyForTest(t, root, "codex")
 			},
 			wants: []string{
 				"wake watcher failed before admission: retained wake inbox directory was renamed or deleted",
@@ -210,6 +192,10 @@ func TestRepairWakeChildAdmissionRejectsNamespaceReplacementAfterParentValidatio
 					forceRepairLifecycleChildInspection(t, fixture, started)
 					admit := started.admit
 					started.admit = func() error {
+						// Admission failure is fail-closed: repairWake reaps
+						// this prepared child without a claim. If admission
+						// ever retries, a transient namespace observation could
+						// leave a child running against detached authority.
 						// repairWake has completed its parent-side prepared
 						// validation when this closure runs. The child is still
 						// blocked waiting for the admit frame.
@@ -253,6 +239,21 @@ func TestRepairWakeChildAdmissionRejectsNamespaceReplacementAfterParentValidatio
 				logData,
 			)
 		})
+	}
+}
+
+func replaceWakeRepairInboxDirectoryAtomicallyForTest(t *testing.T, root, me string) {
+	t.Helper()
+	inboxPath := fsq.AgentInboxNew(root, me)
+	replacementPath := inboxPath + ".replacement"
+	if err := os.Mkdir(replacementPath, 0o700); err != nil {
+		t.Fatalf("create replacement inbox directory: %v", err)
+	}
+	// A plain os.Rename cannot replace inbox/new once it contains handoff
+	// messages. The platform exchange remains atomic and preserves the
+	// original directory at replacementPath for post-condition checks.
+	if err := exchangeWakeRepairDirectoriesForTest(replacementPath, inboxPath); err != nil {
+		t.Fatalf("atomically replace inbox directory: %v", err)
 	}
 }
 
