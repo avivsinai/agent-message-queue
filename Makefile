@@ -23,7 +23,16 @@ lint:
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed. Install from https://golangci-lint.run/usage/install/"; exit 1; }
 	GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" golangci-lint run
 
+# Keep this hostile AMQ context tuple aligned with smoke-test.sh's startup scrub.
 smoke:
+	AM_ROOT=/smoke/inherited/root \
+	AM_ROOT_ID=smoke-inherited-root-id \
+	AM_ME=smoke-caller \
+	AM_BASE_ROOT=/smoke/inherited/base \
+	AM_BASE_ROOT_ID=smoke-inherited-base-root-id \
+	AM_SESSION=smoke-session \
+	AMQ_GLOBAL_ROOT=/smoke/inherited/global \
+	AMQ_WAKE_OWNER=smoke-inherited-wake-owner \
 	./scripts/smoke-test.sh
 
 ci: check-skills fmt-check vet lint test smoke
