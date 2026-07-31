@@ -47,6 +47,7 @@ type wakeConfig struct {
 	controlStop                   <-chan struct{}
 	beforeTerminalWrite           func() error
 	terminalWrite                 func(string) error
+	inspectTerminalGeneration     func() wakeLockInspection
 	terminalGeneration            string
 	terminalTTY                   string
 	baselineRequested             bool

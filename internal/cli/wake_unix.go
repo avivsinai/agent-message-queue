@@ -2033,11 +2033,14 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		interruptNotice:     strings.TrimSpace(*interruptNoticeFlag),
 		interruptCooldown:   *interruptCooldownFlag,
 		controlStop:         controlStop,
-		terminalGeneration:  currentWake.Lock.Generation,
-		terminalTTY:         currentWake.Lock.TTY,
-		baselineRequested:   *baselineExistingFlag || repairLineage != nil,
-		baselineInherited:   repairLineage != nil,
-		retainedAgent:       activeAgentDir,
+		inspectTerminalGeneration: func() wakeLockInspection {
+			return inspectWakeTerminalGeneration(root, me)
+		},
+		terminalGeneration: currentWake.Lock.Generation,
+		terminalTTY:        currentWake.Lock.TTY,
+		baselineRequested:  *baselineExistingFlag || repairLineage != nil,
+		baselineInherited:  repairLineage != nil,
+		retainedAgent:      activeAgentDir,
 		recordNotifierStatus: func(status, mode, reason string) error {
 			return setWakeNotifierStatusInDir(activeAgentDir, me, status, mode, reason)
 		},
@@ -2407,15 +2410,30 @@ const (
 )
 
 type wakeOwnershipLossError struct {
-	err error
+	reason string
+}
+
+type wakeUnreadableGenerationNoticeState struct {
+	consecutiveFailures uint
+	statusActive        bool
+	attentionDelivered  bool
+}
+
+const wakeUnreadableGenerationNoticeThreshold = 5
+
+func (state *wakeUnreadableGenerationNoticeState) resetWithoutStatusWrite() {
+	if state == nil {
+		return
+	}
+	*state = wakeUnreadableGenerationNoticeState{}
 }
 
 func (err *wakeOwnershipLossError) Error() string {
-	return err.err.Error()
+	return err.reason
 }
 
-func (err *wakeOwnershipLossError) Unwrap() error {
-	return err.err
+func newWakeOwnershipLoss(reason string) error {
+	return &wakeOwnershipLossError{reason: reason}
 }
 
 func classifyWakeFailure(err error) wakeFailureDisposition {
@@ -2436,6 +2454,86 @@ func classifyWakeFailure(err error) wakeFailureDisposition {
 		return wakeFailureDegrade
 	}
 	return wakeFailureRetry
+}
+
+func (state *wakeUnreadableGenerationNoticeState) observe(
+	cfg *wakeConfig,
+) {
+	if state == nil || cfg == nil {
+		return
+	}
+	if cfg.inspectTerminalGeneration == nil ||
+		cfg.injectMode == wakeInjectModeNone ||
+		cfg.inputRecoveryRequired {
+		state.resetWithoutStatusWrite()
+		return
+	}
+	inspection := cfg.inspectTerminalGeneration()
+	if inspection.Exists && inspection.fileInfo == nil {
+		state.consecutiveFailures++
+		// This threshold counts the loop's fixed maintenance observations. It
+		// gates operator visibility only; delivery authorization and retry
+		// scheduling remain owned by the per-write validation path.
+		if state.consecutiveFailures < wakeUnreadableGenerationNoticeThreshold {
+			return
+		}
+		if !state.statusActive {
+			if err := persistWakeNotifierStatus(
+				cfg,
+				"degraded",
+				effectiveInjectMode(cfg),
+				"wake lock unreadable",
+			); err != nil {
+				_ = writeWakeDiagnostic(
+					cfg,
+					"amq wake: record unreadable wake-lock status: %v; retrying\n",
+					err,
+				)
+			} else {
+				state.statusActive = true
+			}
+		}
+		if state.attentionDelivered {
+			return
+		}
+		if err := emitWakeAttention(cfg, wakePayload{
+			text:       "wake lock unreadable; injection paused; will resume automatically",
+			provenance: wakePayloadSystemFixed,
+		}); err != nil {
+			_ = writeWakeDiagnostic(
+				cfg,
+				"amq wake: emit unreadable wake-lock attention: %v; retrying\n",
+				err,
+			)
+			return
+		}
+		state.attentionDelivered = true
+		return
+	}
+
+	if !inspection.Exists {
+		state.resetWithoutStatusWrite()
+		return
+	}
+	state.consecutiveFailures = 0
+	state.attentionDelivered = false
+	if !state.statusActive {
+		return
+	}
+	if err := persistWakeNotifierStatus(
+		cfg,
+		"",
+		effectiveInjectMode(cfg),
+		"",
+	); err != nil {
+		_ = writeWakeDiagnostic(
+			cfg,
+			"amq wake: clear recovered wake-lock status: %v; retrying\n",
+			err,
+		)
+	} else {
+		state.statusActive = false
+	}
 }
 
 func pendingWakeWatcherError(watcher wakeAdmissionWatcher) error {
@@ -2482,7 +2580,7 @@ func parseInterruptKey(raw string) (string, error) {
 	}
 }
 
-func waitWakeRetry(
+var waitWakeRetry = func(
 	controlStop <-chan struct{},
 	signals <-chan os.Signal,
 	delay time.Duration,
@@ -2569,15 +2667,18 @@ func runWakeLoop(cfg wakeConfig) error {
 			inboxDir, err := openWakeRepairInboxDir(ordinaryAgentDir)
 			if err != nil {
 				if validateErr := validateCanonicalWakeAgentDir(ordinaryAgentDir); validateErr != nil {
-					return &wakeOwnershipLossError{err: fmt.Errorf(
-						"validate acquired wake agent authority after inbox failure: %w",
-						validateErr,
-					)}
+					return errors.Join(
+						fmt.Errorf("open acquired wake inbox capability: %w", err),
+						fmt.Errorf(
+							"validate acquired wake agent authority after inbox failure: %w",
+							validateErr,
+						),
+					)
 				}
-				return &wakeOwnershipLossError{err: fmt.Errorf(
+				return fmt.Errorf(
 					"open acquired wake inbox capability: %w",
 					err,
-				)}
+				)
 			}
 			nextWatcher, err := newWakeInboxEventWatcher(inboxDir)
 			if err != nil {
@@ -2592,10 +2693,13 @@ func runWakeLoop(cfg wakeConfig) error {
 			nextWatcher, err := newWakeInboxEventWatcher(retained)
 			if err != nil {
 				if validateErr := retained.ValidateCanonical(); validateErr != nil {
-					return &wakeOwnershipLossError{err: fmt.Errorf(
-						"validate retained wake inbox authority after watcher failure: %w",
-						validateErr,
-					)}
+					return errors.Join(
+						err,
+						fmt.Errorf(
+							"validate retained wake inbox authority after watcher failure: %w",
+							validateErr,
+						),
+					)
 				}
 				return err
 			}
@@ -2683,10 +2787,14 @@ func runWakeLoop(cfg wakeConfig) error {
 			}
 			cfg.baselineExisting = nil
 			if err := retained.ValidateCanonical(); err != nil {
-				return &wakeOwnershipLossError{err: fmt.Errorf(
+				validationErr := fmt.Errorf(
 					"validate startup baseline watcher authority: %w",
 					err,
-				)}
+				)
+				if classifyWakeFailure(validationErr) == wakeFailureFatal {
+					return validationErr
+				}
+				prepareErr = errors.Join(prepareErr, validationErr)
 			}
 			historyUncertain = true
 			failures++
@@ -2927,11 +3035,11 @@ func runWakeLoop(cfg wakeConfig) error {
 		}
 		if ordinaryRecoverable {
 			if err := validateCanonicalWakeAgentDir(ordinaryAgentDir); err != nil {
-				return false, &wakeOwnershipLossError{err: failWakeOnWatcherError(
+				return false, failWakeOnWatcherError(
 					&cfg,
 					"ordinary wake agent authority changed while rearming watcher",
 					err,
-				)}
+				)
 			}
 			inboxDir, nextWatcher, err := openWatchedWakeInboxDir(ordinaryAgentDir)
 			if err != nil {
@@ -2949,11 +3057,11 @@ func runWakeLoop(cfg wakeConfig) error {
 
 		if retained, ok := cfg.retainedInbox.(*wakeInboxDir); ok {
 			if err := retained.ValidateCanonical(); err != nil {
-				return false, &wakeOwnershipLossError{err: failWakeOnWatcherError(
+				return false, failWakeOnWatcherError(
 					&cfg,
 					"retained wake inbox authority changed while rearming watcher",
 					err,
-				)}
+				)
 			}
 			nextWatcher, err := newWakeInboxEventWatcher(retained)
 			if err != nil {
@@ -2992,6 +3100,7 @@ func runWakeLoop(cfg wakeConfig) error {
 		scheduleDoorbellDeadline()
 		return nil
 	}
+	var unreadableGenerationNotice wakeUnreadableGenerationNoticeState
 	attemptNotification := func() error {
 		if terminalAuthorityRetryC != nil || inboxScanRetryC != nil {
 			return nil
@@ -3241,6 +3350,7 @@ func runWakeLoop(cfg wakeConfig) error {
 				)
 			}
 			if cfg.inputRecoveryRequired {
+				unreadableGenerationNotice.resetWithoutStatusWrite()
 				scheduleDoorbellDeadline()
 				continue
 			}
@@ -3264,6 +3374,7 @@ func runWakeLoop(cfg wakeConfig) error {
 				)
 			}
 			if isWakeInputDemotionBlocked(preconditionErr) {
+				unreadableGenerationNotice.resetWithoutStatusWrite()
 				if err := enterRetainedInputRecovery(preconditionErr); err != nil {
 					return err
 				}
@@ -3324,6 +3435,7 @@ func runWakeLoop(cfg wakeConfig) error {
 					preconditionErr,
 				)
 			}
+			unreadableGenerationNotice.observe(&cfg)
 		}
 	}
 }
@@ -3374,7 +3486,7 @@ func wakeInjectionPreconditionCheck(
 	if cfg.injectVia != "" {
 		if cfg.wakeOwner != nil {
 			if err := wakeOwnerHealthCheck(*cfg.wakeOwner); err != nil {
-				return &wakeOwnershipLossError{err: err}
+				return err
 			}
 		}
 		return nil
@@ -3481,18 +3593,49 @@ func wakeOwnerHealthCheck(owner wakeOwner) error {
 	}
 	proc := inspectWakeProcess(owner.PID)
 	if !proc.Running {
-		return fmt.Errorf("inject-via wake owner pid %d is not running", owner.PID)
+		return newWakeOwnershipLoss(
+			fmt.Sprintf("inject-via wake owner pid %d is not running", owner.PID),
+		)
 	}
 	if owner.ProcessStart != "" {
 		if proc.StartToken == "" {
-			return fmt.Errorf("inject-via wake owner process start unavailable for pid %d: %v", owner.PID, proc.InspectError)
+			if proc.InspectError != nil {
+				return fmt.Errorf(
+					"inject-via wake owner process start unavailable for pid %d: %w",
+					owner.PID,
+					proc.InspectError,
+				)
+			}
+			return fmt.Errorf(
+				"inject-via wake owner process start unavailable for pid %d",
+				owner.PID,
+			)
 		}
 		if proc.StartToken != owner.ProcessStart {
-			return fmt.Errorf("inject-via wake owner process start changed for pid %d", owner.PID)
+			return newWakeOwnershipLoss(
+				fmt.Sprintf("inject-via wake owner process start changed for pid %d", owner.PID),
+			)
 		}
 	}
-	if owner.BootID != "" && proc.BootID != "" && proc.BootID != owner.BootID {
-		return fmt.Errorf("inject-via wake owner boot id changed for pid %d", owner.PID)
+	if owner.BootID != "" {
+		switch compareWakeBootID(owner.BootID, proc) {
+		case bootIDMismatch:
+			return newWakeOwnershipLoss(
+				fmt.Sprintf("inject-via wake owner boot id changed for pid %d", owner.PID),
+			)
+		case bootIDUnknown:
+			if proc.InspectError != nil {
+				return fmt.Errorf(
+					"inject-via wake owner boot id unavailable or incomparable for pid %d: %w",
+					owner.PID,
+					proc.InspectError,
+				)
+			}
+			return fmt.Errorf(
+				"inject-via wake owner boot id unavailable or incomparable for pid %d",
+				owner.PID,
+			)
+		}
 	}
 	if owner.SessionID != 0 {
 		sid, err := getWakeProcessSID(owner.PID)
@@ -3500,7 +3643,9 @@ func wakeOwnerHealthCheck(owner wakeOwner) error {
 			return fmt.Errorf("inject-via wake owner session unavailable for pid %d: %w", owner.PID, err)
 		}
 		if sid != owner.SessionID {
-			return fmt.Errorf("inject-via wake owner session changed for pid %d", owner.PID)
+			return newWakeOwnershipLoss(
+				fmt.Sprintf("inject-via wake owner session changed for pid %d", owner.PID),
+			)
 		}
 	}
 	return nil
