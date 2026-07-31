@@ -851,7 +851,7 @@ func TestWakeCheckV2AdvertisedStartRevalidatesChangedWakeState(t *testing.T) {
 
 	writeWakeLockForTest(t, root, "codex", wakeLock{
 		PID:          4242,
-		TTY:          "/dev/ttys005",
+		TTY:          "unknown",
 		Root:         canonicalWakeRoot(root),
 		Agent:        "codex",
 		ProcessStart: "12345",
