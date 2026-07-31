@@ -104,6 +104,9 @@ type wakeLockAcquireOptions struct {
 	requestedOwner          *wakeOwner
 	repairLineage           *wakeRepairLineage
 	repairFloorAuthority    *wakeRepairFloorAuthority
+	// resumeEligible is startup policy, not authority. newWakeLock still requires
+	// the complete owner/process/control/image advertisement below.
+	resumeEligible bool
 }
 
 type wakeLockCreatingError struct{}
@@ -558,6 +561,26 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 		lock.BootID = proc.BootID
 		lock.Executable = proc.Executable
 		lock.Args = proc.Args
+	}
+	if options.resumeEligible && options.requestedOwner != nil && options.repairLineage == nil {
+		// Resume metadata is additive capability. Missing or inconsistent evidence
+		// keeps the ordinary notifier usable without advertising agent-safe reload.
+		candidate := lock
+		if candidate.ControlSocket == "" {
+			candidate.ControlSocket = wakeControlSocketPath(root, me, candidate.Generation)
+		}
+		evidence, evidenceErr := captureCurrentWakeImageEvidence()
+		if evidenceErr == nil {
+			owner := *options.requestedOwner
+			candidate.ResumeSchema = wakeResumeSchemaV2
+			candidate.ResumeOwner = &owner
+			candidate.RunningImageEvidence = &evidence
+			candidate.ImagePath = evidence.ExecutionPath
+			candidate.ImageVersion = evidence.EmbeddedVersion
+			if validateWakeResumeAdvertisement(candidate) == nil {
+				lock = candidate
+			}
+		}
 	}
 	return lock, nil
 }
@@ -1895,6 +1918,13 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 			wakeMode:                lockWakeMode,
 			requestedOwner:          requestedOwner,
 			repairLineage:           repairLineage,
+			resumeEligible: wakeResumeStartupEligible(
+				requestedOwner,
+				repairLineage != nil,
+				*injectCmdFlag,
+				interruptKey,
+				lockWakeMode,
+			),
 		}
 		if repairLineage != nil {
 			options.repairFloorAuthority = &repairFloorAuthority
