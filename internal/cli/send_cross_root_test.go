@@ -113,6 +113,109 @@ func TestSend_AllowsBareRootWithoutIdentity(t *testing.T) {
 	}
 }
 
+func TestSend_RefusesUnroutedSameRootSelfAddress(t *testing.T) {
+	root := sessionRoot(t, t.TempDir(), "collab", "claude")
+
+	err := runSend([]string{
+		"--root", root,
+		"--me", "claude",
+		"--to", "claude",
+		"--body", "ambiguous self-send",
+	})
+	if err == nil {
+		t.Fatal("expected self-send refusal, got nil")
+	}
+	if code := GetExitCode(err); code != ExitUsage {
+		t.Fatalf("exit code = %d, want %d", code, ExitUsage)
+	}
+	if !strings.Contains(err.Error(), "--allow-self") {
+		t.Fatalf("error should name the explicit escape hatch, got: %v", err)
+	}
+	if n := inboxCount(t, root, "claude"); n != 0 {
+		t.Fatalf("self-send refusal delivered %d message(s)", n)
+	}
+}
+
+func TestSend_AllowSelfConfirmsUnroutedSameRootSelfAddress(t *testing.T) {
+	root := sessionRoot(t, t.TempDir(), "collab", "claude")
+
+	if err := runSend([]string{
+		"--root", root,
+		"--me", "claude",
+		"--to", "claude",
+		"--body", "intentional self-send",
+		"--allow-self",
+	}); err != nil {
+		t.Fatalf("intentional self-send: %v", err)
+	}
+	header := soleDeliveredHeader(t, root, "claude")
+	if header.From != "claude" || len(header.To) != 1 || header.To[0] != "claude" {
+		t.Fatalf("unexpected self-send header: %+v", header)
+	}
+}
+
+func TestSend_RefusesSelfRecipientBeforeMultiRecipientDelivery(t *testing.T) {
+	root := sessionRoot(t, t.TempDir(), "collab", "claude", "codex")
+
+	err := runSend([]string{
+		"--root", root,
+		"--me", "claude",
+		"--to", "codex,claude",
+		"--thread", "topic/ambiguous-self-send",
+		"--body", "must not deliver partially",
+	})
+	if err == nil || !strings.Contains(err.Error(), "--allow-self") {
+		t.Fatalf("expected self-recipient refusal, got: %v", err)
+	}
+	for _, agent := range []string{"claude", "codex"} {
+		if n := inboxCount(t, root, agent); n != 0 {
+			t.Fatalf("self-recipient refusal delivered %d message(s) to %s", n, agent)
+		}
+	}
+}
+
+func TestSend_AllowsRoutedSameHandleWithoutAllowSelf(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, ".agent-mail")
+	sourceRoot := sessionRoot(t, tmp, "collab", "claude")
+	targetRoot := sessionRoot(t, tmp, "auth", "claude")
+	pinSendSessionForTest(t, base, sourceRoot, "collab")
+
+	if err := runSend([]string{
+		"--me", "claude",
+		"--to", "claude",
+		"--session", "auth",
+		"--body", "routed same-handle message",
+	}); err != nil {
+		t.Fatalf("routed same-handle send: %v", err)
+	}
+	header := soleDeliveredHeader(t, targetRoot, "claude")
+	if header.ReplyTo != "claude@collab" {
+		t.Fatalf("reply_to = %q, want %q", header.ReplyTo, "claude@collab")
+	}
+}
+
+func TestSend_AllowSelfDoesNotBypassCrossTreeGuard(t *testing.T) {
+	tmp := t.TempDir()
+	sourceRoot := sessionRoot(t, filepath.Join(tmp, "projA"), "collab", "claude")
+	targetRoot := sessionRoot(t, filepath.Join(tmp, "projB"), "collab", "claude")
+	t.Setenv("AM_ROOT", sourceRoot)
+
+	err := runSend([]string{
+		"--root", targetRoot,
+		"--me", "claude",
+		"--to", "claude",
+		"--body", "must stay local",
+		"--allow-self",
+	})
+	if err == nil || !strings.Contains(err.Error(), "different AMQ tree") {
+		t.Fatalf("--allow-self bypassed the cross-tree guard: %v", err)
+	}
+	if n := inboxCount(t, targetRoot, "claude"); n != 0 {
+		t.Fatalf("cross-tree refusal delivered %d message(s)", n)
+	}
+}
+
 // TestSend_AllowsRedundantSameTreeRoot: an explicit --root equal to (or within)
 // the caller's own tree is not a crossing and must be allowed.
 func TestSend_AllowsRedundantSameTreeRoot(t *testing.T) {
