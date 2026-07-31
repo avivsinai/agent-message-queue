@@ -4555,6 +4555,7 @@ func TestRunWakeLoopScanFallbackAttentionFailureKeepsWatching(t *testing.T) {
 	stop := make(chan struct{})
 	done := make(chan error, 1)
 	var attentionWrites atomic.Int64
+	attentionAttempted := make(chan struct{}, 1)
 	attentionSinkErr := errors.New("attention sink unavailable")
 	go func() {
 		done <- runWakeLoop(wakeConfig{
@@ -4573,6 +4574,10 @@ func TestRunWakeLoopScanFallbackAttentionFailureKeepsWatching(t *testing.T) {
 			attentionIsTTY: func() bool { return false },
 			attentionWrite: func(data []byte) (int, error) {
 				attentionWrites.Add(1)
+				select {
+				case attentionAttempted <- struct{}{}:
+				default:
+				}
 				return 0, attentionSinkErr
 			},
 		})
@@ -4593,9 +4598,11 @@ func TestRunWakeLoopScanFallbackAttentionFailureKeepsWatching(t *testing.T) {
 		t.Fatal("wake loop did not accept maintenance tick")
 	}
 	select {
+	case <-attentionAttempted:
 	case err := <-done:
 		t.Fatalf("persistence plus attention failure killed wake loop: %v", err)
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(2 * time.Second):
+		t.Fatal("scan fallback did not attempt output attention")
 	}
 	if got := attentionWrites.Load(); got != 1 {
 		t.Fatalf("attention writes = %d, want one failed fallback", got)
