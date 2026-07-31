@@ -175,64 +175,26 @@ func TestSendStrictConfigReplacementBeforeRepairDoesNotCreateOrDeliver(t *testin
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(root, "meta", "config.json")
-	bodyFIFO := filepath.Join(secureTempDirForTest(t), "strict-body.fifo")
-	if err := syscall.Mkfifo(bodyFIFO, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	type openResult struct {
-		file *os.File
-		err  error
-	}
-	writerCh := make(chan openResult, 1)
-	go func() {
-		file, err := os.OpenFile(bodyFIFO, os.O_WRONLY, 0)
-		writerCh <- openResult{file: file, err: err}
-	}()
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- runSend([]string{
+	err := runSendWithAfterBodyRead(
+		[]string{
 			"--root", root,
 			"--me", "alice",
 			"--to", "bob",
 			"--strict",
-			"--body", "@" + bodyFIFO,
-		})
-	}()
-
-	var writer *os.File
-	select {
-	case result := <-writerCh:
-		if result.err != nil {
-			t.Fatal(result.err)
-		}
-		writer = result.file
-	case err := <-errCh:
-		t.Fatalf("send returned before body read: %v", err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("send did not reach body read after strict validation")
-	}
-	original := configPath + ".original"
-	if err := os.Rename(configPath, original); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, []byte(`{"version":1,"agents":["alice"]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writer.Write([]byte("must not deliver")); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	select {
-	case err := <-errCh:
-		if err == nil || !strings.Contains(err.Error(), "config") {
-			t.Fatalf("send error = %v, want retained-config refusal", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("send did not return")
+			"--body", "must not deliver",
+		},
+		func() {
+			original := configPath + ".original"
+			if err := os.Rename(configPath, original); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, []byte(`{"version":1,"agents":["alice"]}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "config") {
+		t.Fatalf("send error = %v, want retained-config refusal", err)
 	}
 	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
 		t.Fatalf("strict send repaired after roster removal: %v", err)
