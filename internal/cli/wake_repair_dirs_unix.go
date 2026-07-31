@@ -42,6 +42,10 @@ type wakeInboxDir struct {
 	closed    bool
 }
 
+var newWakeInboxEventWatcher = func(inbox *wakeInboxDir) (wakeEventWatcher, error) {
+	return inbox.NewWatcher()
+}
+
 func (*wakeAgentDir) isWakeRetainedAgent() {}
 
 type wakeEventWatcher interface {
@@ -417,7 +421,7 @@ func openWatchedWakeInboxDir(
 	if err != nil {
 		return nil, nil, err
 	}
-	watcher, err := inboxDir.NewWatcher()
+	watcher, err := newWakeInboxEventWatcher(inboxDir)
 	if err != nil {
 		closeErr := inboxDir.Close()
 		return nil, nil, errors.Join(err, closeErr)

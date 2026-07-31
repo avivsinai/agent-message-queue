@@ -26,6 +26,22 @@ type wakeTerminalAuthorityLossError struct {
 	Err    error
 }
 
+type wakeTerminalTransientError struct {
+	Reason string
+	Err    error
+}
+
+func (err *wakeTerminalTransientError) Error() string {
+	if err.Err != nil {
+		return fmt.Sprintf("wake terminal temporarily unavailable: %s: %v", err.Reason, err.Err)
+	}
+	return "wake terminal temporarily unavailable: " + err.Reason
+}
+
+func (err *wakeTerminalTransientError) Unwrap() error {
+	return err.Err
+}
+
 func (err *wakeTerminalAuthorityLossError) Error() string {
 	if err.Err != nil {
 		return fmt.Sprintf("wake terminal authority lost: %s: %v", err.Reason, err.Err)
@@ -192,19 +208,21 @@ func (authority *wakeTerminalAuthority) Inject(text string) error {
 	}
 	if err := injectWakeTerminalFD(authority.fd, text); err != nil {
 		var injectionErr *tiocstiInjectionError
-		if errors.As(err, &injectionErr) &&
-			injectionErr.Progress == 0 &&
-			(errors.Is(err, syscall.EIO) || errors.Is(err, syscall.EPERM)) {
-			// EIO and EPERM are ambiguous: the kernel may reject TIOCSTI, or
-			// the terminal authority may have changed. Only classify the
-			// injector after every retained/current identity and PGRP check
-			// still passes after the failed zero-progress ioctl.
+		if errors.As(err, &injectionErr) {
+			// Every TIOCSTI error is ambiguous until the retained authority is
+			// revalidated. Once authority still holds, preserve unclassified
+			// errors and accepted-byte progress for the loop's bounded retry
+			// policy instead of relabeling an effect failure as ownership loss.
 			if validateErr := authority.validateLocked(); validateErr != nil {
 				return validateErr
 			}
+		}
+		if injectionErr != nil &&
+			injectionErr.Progress == 0 &&
+			(errors.Is(err, syscall.EIO) || errors.Is(err, syscall.EPERM)) {
 			return newWakeInjectorUnsupportedError(err)
 		}
-		return newWakeTerminalAuthorityLoss("inject through retained controlling terminal", err)
+		return err
 	}
 	return nil
 }
@@ -231,7 +249,7 @@ func (authority *wakeTerminalAuthority) validateLocked() error {
 	}
 	retainedInfo, err := authority.tty.Stat()
 	if err != nil {
-		return newWakeTerminalAuthorityLoss("inspect retained controlling terminal", err)
+		return newWakeTerminalTransientFailure("inspect retained controlling terminal", err)
 	}
 	if !matchesWakeTerminalIdentity(authority.identity, retainedInfo) {
 		return newWakeTerminalAuthorityLoss("retained controlling-terminal identity changed", nil)
@@ -239,15 +257,15 @@ func (authority *wakeTerminalAuthority) validateLocked() error {
 
 	currentTTY, err := openWakeControllingTerminal()
 	if err != nil {
-		return newWakeTerminalAuthorityLoss("re-open current controlling terminal", err)
+		return newWakeTerminalTransientFailure("re-open current controlling terminal", err)
 	}
 	currentInfo, statErr := currentTTY.Stat()
 	closeErr := currentTTY.Close()
 	if statErr != nil {
-		return newWakeTerminalAuthorityLoss("inspect current controlling terminal", statErr)
+		return newWakeTerminalTransientFailure("inspect current controlling terminal", statErr)
 	}
 	if closeErr != nil {
-		return newWakeTerminalAuthorityLoss("close current controlling-terminal check", closeErr)
+		return newWakeTerminalTransientFailure("close current controlling-terminal check", closeErr)
 	}
 	if !matchesWakeTerminalIdentity(authority.identity, currentInfo) {
 		return newWakeTerminalAuthorityLoss("current controlling-terminal identity changed", nil)
@@ -255,7 +273,10 @@ func (authority *wakeTerminalAuthority) validateLocked() error {
 
 	foregroundPGRP, err := wakeTerminalForegroundPGRP(authority.fd)
 	if err != nil {
-		return newWakeTerminalAuthorityLoss("recheck controlling-terminal foreground process group", err)
+		return newWakeTerminalTransientFailure(
+			"recheck controlling-terminal foreground process group",
+			err,
+		)
 	}
 	if foregroundPGRP != authority.foregroundPGRP {
 		return newWakeTerminalForegroundPGRPChangedLoss(
@@ -287,6 +308,13 @@ func (authority *wakeTerminalAuthority) Close() error {
 func newWakeTerminalAuthorityLoss(reason string, err error) error {
 	return &wakeTerminalAuthorityLossError{
 		Kind:   wakeTerminalAuthorityLossUnknown,
+		Reason: reason,
+		Err:    err,
+	}
+}
+
+func newWakeTerminalTransientFailure(reason string, err error) error {
+	return &wakeTerminalTransientError{
 		Reason: reason,
 		Err:    err,
 	}

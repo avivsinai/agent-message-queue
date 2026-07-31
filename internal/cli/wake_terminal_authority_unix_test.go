@@ -63,6 +63,36 @@ func TestWakeTerminalAuthorityInjectsThroughRetainedFD(t *testing.T) {
 	}
 }
 
+func TestWakeTerminalAuthorityTreatsCurrentTTYOpenFailureAsTransient(t *testing.T) {
+	fixture := installWakeTerminalAuthorityFixture(t)
+	authority, err := bindWakeTerminalAuthority(fixture.generation, make(chan struct{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+
+	stableOpen := openWakeControllingTerminal
+	var calls atomic.Int64
+	openWakeControllingTerminal = func() (*os.File, error) {
+		if calls.Add(1) == 1 {
+			return nil, syscall.EMFILE
+		}
+		return stableOpen()
+	}
+
+	err = authority.BeforeWrite()
+	var transient *wakeTerminalTransientError
+	if !errors.As(err, &transient) || !errors.Is(err, syscall.EMFILE) {
+		t.Fatalf("BeforeWrite error = %T %v, want transient EMFILE", err, err)
+	}
+	if isWakeTerminalAuthorityLoss(err) {
+		t.Fatalf("transient current-tty open failure became authority loss: %v", err)
+	}
+	if err := authority.BeforeWrite(); err != nil {
+		t.Fatalf("BeforeWrite did not recover after transient open failure: %v", err)
+	}
+}
+
 func TestWakeTerminalAuthorityClassifiesUnsupportedOnlyAfterZeroProgressAndRevalidation(t *testing.T) {
 	for _, errno := range []error{syscall.EIO, syscall.EPERM} {
 		t.Run(errno.Error(), func(t *testing.T) {
@@ -112,7 +142,7 @@ func TestWakeTerminalAuthorityEIOWithInvalidCurrentKeepsAuthorityOutcome(t *test
 	}
 }
 
-func TestWakeTerminalAuthorityEIOAfterPartialProgressIsUncertain(t *testing.T) {
+func TestWakeTerminalAuthorityEIOAfterPartialProgressPreservesProgress(t *testing.T) {
 	fixture := installWakeTerminalAuthorityFixture(t)
 	authority, err := bindWakeTerminalAuthority(fixture.generation, make(chan struct{}))
 	if err != nil {
@@ -128,9 +158,12 @@ func TestWakeTerminalAuthorityEIOAfterPartialProgressIsUncertain(t *testing.T) {
 	if errors.As(err, &unsupported) {
 		t.Fatalf("partial progress misclassified as injector unsupported: %v", err)
 	}
-	var authorityLoss *wakeTerminalAuthorityLossError
-	if !errors.As(err, &authorityLoss) {
-		t.Fatalf("Inject error = %T %v, want uncertain authority outcome", err, err)
+	var progress *tiocstiInjectionError
+	if !errors.As(err, &progress) || progress.Progress != 1 {
+		t.Fatalf("Inject error = %T %v, want one accepted byte", err, err)
+	}
+	if isWakeTerminalAuthorityLoss(err) {
+		t.Fatalf("valid retained authority misclassified partial progress as ownership loss: %v", err)
 	}
 }
 

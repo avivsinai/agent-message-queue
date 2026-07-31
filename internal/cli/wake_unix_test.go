@@ -3692,7 +3692,7 @@ func TestRunWakeLoopMaintenanceDemotionTransfersDormantDoorbellRetry(t *testing.
 	}
 }
 
-func TestRunWakeLoopMaintenanceDemotionTransfersBeforePersistenceFailure(t *testing.T) {
+func TestRunWakeLoopMaintenanceDemotionTransfersDespitePersistenceFailure(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	message := format.Message{
@@ -3721,6 +3721,7 @@ func TestRunWakeLoopMaintenanceDemotionTransfersBeforePersistenceFailure(t *test
 	persistErr := errors.New("presence unavailable")
 	ticks := make(chan time.Time)
 	attention := make(chan string, 1)
+	stop := make(chan struct{})
 	done := make(chan error, 1)
 	var terminalWrites atomic.Int64
 	go func() {
@@ -3730,7 +3731,7 @@ func TestRunWakeLoopMaintenanceDemotionTransfersBeforePersistenceFailure(t *test
 			session:     "session1",
 			wakeOwner:   &wakeOwner{},
 			injectMode:  wakeInjectModePaste,
-			controlStop: make(chan struct{}),
+			controlStop: stop,
 			doorbell: wakeDoorbellState{
 				phase:       wakeDoorbellRetrying,
 				cohort:      snapshotWakeFileIdentities(map[string]os.FileInfo{"pending.md": info}),
@@ -3772,14 +3773,15 @@ func TestRunWakeLoopMaintenanceDemotionTransfersBeforePersistenceFailure(t *test
 	}
 	select {
 	case err := <-done:
-		if !errors.Is(err, persistErr) {
-			t.Fatalf("wake loop error = %v, want persistence failure", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("wake loop did not surface persistence failure")
+		t.Fatalf("persistence failure killed wake loop: %v", err)
+	case <-time.After(100 * time.Millisecond):
 	}
 	if got := terminalWrites.Load(); got != 0 {
 		t.Fatalf("dormant retry wrote %d terminal chunks", got)
+	}
+	close(stop)
+	if err := <-done; err != nil {
+		t.Fatalf("wake loop stop: %v", err)
 	}
 }
 
@@ -4186,13 +4188,13 @@ func TestRunWakeLoopKeepsWatchingWhenDrainedInboxReconciliationBecomesUncertain(
 	}
 }
 
-func TestRunWakeLoopDrainedInboxRecoveryAttentionFailureRetriesWithoutExit(t *testing.T) {
+func TestRunWakeLoopDrainedInboxRecoveryAttentionFailureClearsWithoutExit(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	attentionSinkErr := errors.New("attention sink unavailable")
 	now := time.Unix(1_800_000_000, 0)
 	var attentionWrites atomic.Int64
-	retried := make(chan struct{}, 1)
+	attempted := make(chan struct{}, 1)
 	stop := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
@@ -4217,28 +4219,31 @@ func TestRunWakeLoopDrainedInboxRecoveryAttentionFailureRetriesWithoutExit(t *te
 			},
 			attentionIsTTY: func() bool { return false },
 			attentionWrite: func(data []byte) (int, error) {
-				if attentionWrites.Add(1) == 1 {
-					now = now.Add(wakeDoorbellAttentionRetryBase)
-					return 0, attentionSinkErr
-				}
 				select {
-				case retried <- struct{}{}:
+				case attempted <- struct{}{}:
 				default:
 				}
-				return len(data), nil
+				attentionWrites.Add(1)
+				now = now.Add(wakeDoorbellAttentionRetryBase)
+				return 0, attentionSinkErr
 			},
 		})
 	}()
 
 	select {
-	case <-retried:
+	case <-attempted:
 	case err := <-done:
 		t.Fatalf("wake loop exited on drained-inbox recovery attention failure: %v", err)
 	case <-time.After(2 * time.Second):
-		t.Fatalf("wake loop did not retry drained-inbox recovery attention: writes=%d", attentionWrites.Load())
+		t.Fatal("wake loop did not attempt drained-inbox recovery attention")
 	}
-	if got := attentionWrites.Load(); got != 2 {
-		t.Fatalf("drained recovery attention writes = %d, want failed write plus retry", got)
+	select {
+	case err := <-done:
+		t.Fatalf("wake loop exited while clearing drained recovery: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if got := attentionWrites.Load(); got != 1 {
+		t.Fatalf("drained recovery attention writes = %d, want one failed attempt before discharge", got)
 	}
 	close(stop)
 	select {
@@ -4347,7 +4352,7 @@ func TestRunWakeLoopBuiltInMaintenanceKeepsWatchingAfterConfirmedInputDemotion(t
 	}
 }
 
-func TestRunWakeLoopFatalDemotionTransfersDuringScanBackoff(t *testing.T) {
+func TestRunWakeLoopDemotionPersistenceFailureKeepsWatchingDuringScanBackoff(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	persistErr := errors.New("presence unavailable")
@@ -4372,6 +4377,7 @@ func TestRunWakeLoopFatalDemotionTransfersDuringScanBackoff(t *testing.T) {
 	}
 	ticks := make(chan time.Time)
 	attention := make(chan string, 2)
+	stop := make(chan struct{})
 	done := make(chan error, 1)
 	var terminalWrites atomic.Int64
 	go func() {
@@ -4381,7 +4387,7 @@ func TestRunWakeLoopFatalDemotionTransfersDuringScanBackoff(t *testing.T) {
 			session:          "session1",
 			wakeOwner:        &wakeOwner{},
 			injectMode:       wakeInjectModePaste,
-			controlStop:      make(chan struct{}),
+			controlStop:      stop,
 			maintenanceTicks: ticks,
 			retainedInbox:    reader,
 			preconditionCheck: func(cfg *wakeConfig) error {
@@ -4425,11 +4431,8 @@ func TestRunWakeLoopFatalDemotionTransfersDuringScanBackoff(t *testing.T) {
 	}
 	select {
 	case err := <-done:
-		if !errors.Is(err, persistErr) {
-			t.Fatalf("wake loop error = %v, want persistence failure", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("wake loop did not surface fatal demotion")
+		t.Fatalf("persistence failure killed wake loop: %v", err)
+	case <-time.After(100 * time.Millisecond):
 	}
 	if got := terminalWrites.Load(); got != 0 {
 		t.Fatalf("fatal demotion wrote %d terminal chunks", got)
@@ -4439,9 +4442,13 @@ func TestRunWakeLoopFatalDemotionTransfersDuringScanBackoff(t *testing.T) {
 		t.Fatalf("fatal demotion emitted duplicate attention: %q", output)
 	default:
 	}
+	close(stop)
+	if err := <-done; err != nil {
+		t.Fatalf("wake loop stop: %v", err)
+	}
 }
 
-func TestRunWakeLoopFatalScanFallbackSurfacesAttentionWriteFailure(t *testing.T) {
+func TestRunWakeLoopScanFallbackAttentionFailureKeepsWatching(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	persistErr := errors.New("presence unavailable")
@@ -4465,6 +4472,7 @@ func TestRunWakeLoopFatalScanFallbackSurfacesAttentionWriteFailure(t *testing.T)
 		},
 	}
 	ticks := make(chan time.Time)
+	stop := make(chan struct{})
 	done := make(chan error, 1)
 	var attentionWrites atomic.Int64
 	attentionSinkErr := errors.New("attention sink unavailable")
@@ -4475,7 +4483,7 @@ func TestRunWakeLoopFatalScanFallbackSurfacesAttentionWriteFailure(t *testing.T)
 			session:          "session1",
 			wakeOwner:        &wakeOwner{},
 			injectMode:       wakeInjectModePaste,
-			controlStop:      make(chan struct{}),
+			controlStop:      stop,
 			maintenanceTicks: ticks,
 			retainedInbox:    reader,
 			preconditionCheck: func(cfg *wakeConfig) error {
@@ -4506,21 +4514,19 @@ func TestRunWakeLoopFatalScanFallbackSurfacesAttentionWriteFailure(t *testing.T)
 	}
 	select {
 	case err := <-done:
-		var attentionErr *wakeAttentionDeliveryError
-		if !errors.Is(err, persistErr) ||
-			!errors.As(err, &attentionErr) ||
-			!errors.Is(err, attentionSinkErr) {
-			t.Fatalf("wake loop error = %v, want persistence plus attention sink failure", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("wake loop did not surface failed fatal fallback")
+		t.Fatalf("persistence plus attention failure killed wake loop: %v", err)
+	case <-time.After(100 * time.Millisecond):
 	}
 	if got := attentionWrites.Load(); got != 1 {
 		t.Fatalf("attention writes = %d, want one failed fallback", got)
 	}
+	close(stop)
+	if err := <-done; err != nil {
+		t.Fatalf("wake loop stop: %v", err)
+	}
 }
 
-func TestRunWakeLoopFatalDemotionTransfersWhenScanBackoffStartsDuringTransfer(t *testing.T) {
+func TestRunWakeLoopDemotionPersistenceFailureKeepsWatchingWhenScanBackoffStartsDuringTransfer(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	persistErr := errors.New("presence unavailable")
@@ -4552,6 +4558,7 @@ func TestRunWakeLoopFatalDemotionTransfersWhenScanBackoffStartsDuringTransfer(t 
 	pending := make(chan struct{}, 1)
 	ticks := make(chan time.Time)
 	attention := make(chan string, 2)
+	stop := make(chan struct{})
 	done := make(chan error, 1)
 	var terminalWrites atomic.Int64
 	go func() {
@@ -4562,7 +4569,7 @@ func TestRunWakeLoopFatalDemotionTransfersWhenScanBackoffStartsDuringTransfer(t 
 			wakeOwner:        &wakeOwner{},
 			debounce:         time.Hour,
 			injectMode:       wakeInjectModePaste,
-			controlStop:      make(chan struct{}),
+			controlStop:      stop,
 			maintenanceTicks: ticks,
 			retainedInbox:    reader,
 			onPendingNotify: func() {
@@ -4638,11 +4645,8 @@ func TestRunWakeLoopFatalDemotionTransfersWhenScanBackoffStartsDuringTransfer(t 
 	}
 	select {
 	case err := <-done:
-		if !errors.Is(err, persistErr) {
-			t.Fatalf("wake loop error = %v, want persistence failure", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("wake loop did not surface fatal demotion")
+		t.Fatalf("persistence failure killed wake loop: %v", err)
+	case <-time.After(100 * time.Millisecond):
 	}
 	if got := terminalWrites.Load(); got != 0 {
 		t.Fatalf("fatal demotion wrote %d terminal chunks", got)
@@ -4651,6 +4655,10 @@ func TestRunWakeLoopFatalDemotionTransfersWhenScanBackoffStartsDuringTransfer(t 
 	case output := <-attention:
 		t.Fatalf("fatal demotion emitted duplicate attention: %q", output)
 	default:
+	}
+	close(stop)
+	if err := <-done; err != nil {
+		t.Fatalf("wake loop stop: %v", err)
 	}
 }
 
