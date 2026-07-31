@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -534,6 +535,16 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 		}
 	}
 	lock.ImageVersion = strings.TrimSpace(cliVersion)
+	if runtime.GOOS == "darwin" {
+		// Darwin has no retained executable FD. Capture the verified pathname
+		// identity for every new lock so later proc_pidpath evidence can be
+		// corroborated without making notifier startup depend on this metadata.
+		if evidence, evidenceErr := captureCurrentWakeImageEvidence(); evidenceErr == nil {
+			lock.RunningImageEvidence = &evidence
+			lock.ImagePath = evidence.ExecutionPath
+			lock.ImageVersion = evidence.EmbeddedVersion
+		}
+	}
 	if options.target != nil {
 		targetDigest, err := wakeTargetDigest(*options.target)
 		if err != nil {
@@ -569,12 +580,18 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 		if candidate.ControlSocket == "" {
 			candidate.ControlSocket = wakeControlSocketPath(root, me, candidate.Generation)
 		}
-		evidence, evidenceErr := captureCurrentWakeImageEvidence()
-		if evidenceErr == nil {
+		evidence := lock.RunningImageEvidence
+		if evidence == nil {
+			captured, evidenceErr := captureCurrentWakeImageEvidence()
+			if evidenceErr == nil {
+				evidence = &captured
+			}
+		}
+		if evidence != nil {
 			owner := *options.requestedOwner
 			candidate.ResumeSchema = wakeResumeSchemaV2
 			candidate.ResumeOwner = &owner
-			candidate.RunningImageEvidence = &evidence
+			candidate.RunningImageEvidence = evidence
 			candidate.ImagePath = evidence.ExecutionPath
 			candidate.ImageVersion = evidence.EmbeddedVersion
 			if validateWakeResumeAdvertisement(candidate) == nil {

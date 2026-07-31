@@ -145,10 +145,20 @@ func inspectWakeCheckSnapshot(root, me string) wakeCheckSnapshot {
 		}
 	}
 	opsLock := opsWakeLockFromWakeCheckObservation(root, me, second)
-	return wakeCheckSnapshot{
+	snapshot := wakeCheckSnapshot{
 		OpsLock:  opsLock,
 		Decision: buildWakeCheckDecision(root, me, second.Inspection, opsLock, true),
 	}
+	// Image probing occurs while building the decision. Re-observe afterwards
+	// so a PID reuse or lock generation change cannot inherit that conclusion.
+	third, thirdErr := observeWakeCheck(root, me)
+	if thirdErr != nil || !sameWakeCheckObservation(second, third) {
+		return wakeCheckSnapshot{
+			OpsLock:  opsWakeLockFromWakeCheckObservation(root, me, third),
+			Decision: unstableWakeCheckDecision(root, me, third.Inspection),
+		}
+	}
+	return snapshot
 }
 
 func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
@@ -294,7 +304,9 @@ func opsWakeLockFromWakeCheckObservation(
 }
 
 func unstableWakeCheckDecision(root, me string, inspection wakeLockInspection) wakeCheckDecision {
-	decision := buildWakeCheckDecision(root, me, inspection, nil, true)
+	// Unstable state cannot authorize an image conclusion, and probing again
+	// would widen the observation window after instability is already known.
+	decision := buildWakeCheckDecision(root, me, inspection, nil, false)
 	detail := "wake state changed during inspection"
 	reason := wakeRepairReasonExactEvidenceMissing
 	decision.Repair.InjectViaAvailable = false
@@ -754,7 +766,8 @@ func inspectWakeCheckImageStatus(
 	if comparison.Stale {
 		return wakeImageDifferent
 	}
-	if comparison.Method == wakeBinaryComparisonExactIdentity {
+	if comparison.Method == wakeBinaryComparisonExactIdentity ||
+		comparison.Method == wakeBinaryComparisonDarwinProcessImage {
 		return wakeImageCurrent
 	}
 	return wakeImageUnknown

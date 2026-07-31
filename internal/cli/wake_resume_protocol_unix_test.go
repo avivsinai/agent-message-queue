@@ -295,8 +295,11 @@ func TestNewWakeLockAdvertisesResumeOnlyWhenTheProtocolIsComplete(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if notEligible.ResumeSchema != 0 || notEligible.ResumeOwner != nil || notEligible.RunningImageEvidence != nil {
+	if notEligible.ResumeSchema != 0 || notEligible.ResumeOwner != nil {
 		t.Fatalf("ineligible wake advertised resume: %#v", notEligible)
+	}
+	if notEligible.RunningImageEvidence == nil || *notEligible.RunningImageEvidence != evidence {
+		t.Fatalf("ordinary Darwin wake omitted additive image evidence: %#v", notEligible)
 	}
 
 	captureCurrentWakeImageEvidence = func() (wakeImageEvidenceV1, error) {
