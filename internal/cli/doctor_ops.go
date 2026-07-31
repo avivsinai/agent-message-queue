@@ -98,9 +98,27 @@ type opsWakeLock struct {
 	OperatorTerminalRequired bool   `json:"operator_terminal_required"`
 	NextAction               string `json:"next_action,omitempty"`
 	CurrentTerminal          bool   `json:"-"`
+
+	WakeCheckDecision *wakeCheckDecision `json:"-"`
 }
 
 func runOpsChecks(root string, rootSource string, fixWakeLocks bool, explicitBaseRoot ...string) *doctorOpsResult {
+	return runOpsChecksWithSchema(
+		root,
+		rootSource,
+		fixWakeLocks,
+		wakeCheckSchemaV1,
+		explicitBaseRoot...,
+	)
+}
+
+func runOpsChecksWithSchema(
+	root string,
+	rootSource string,
+	fixWakeLocks bool,
+	jsonSchema int,
+	explicitBaseRoot ...string,
+) *doctorOpsResult {
 	result := &doctorOpsResult{}
 	now := time.Now()
 
@@ -121,10 +139,11 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool, explicitBas
 			Message: fmt.Sprintf("Cannot load config: %v", err),
 		})
 		var wakeHints []opsHint
-		result.WakeLocks, wakeHints = checkWakeLocksWithHints(
+		result.WakeLocks, wakeHints = checkWakeLocksWithHintsSchema(
 			root,
 			discoveredWakeLockAgents(root, nil),
 			fixWakeLocks,
+			jsonSchema,
 		)
 		result.Hints = append(result.Hints, wakeHints...)
 		return result
@@ -210,10 +229,11 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool, explicitBas
 	// retains legacy-safe on-disk handles for read-only wake diagnostics;
 	// checkWakeLocks repeats that inspection boundary for untrusted callers.
 	var wakeHints []opsHint
-	result.WakeLocks, wakeHints = checkWakeLocksWithHints(
+	result.WakeLocks, wakeHints = checkWakeLocksWithHintsSchema(
 		root,
 		discoveredWakeLockAgents(root, validatedAgents),
 		fixWakeLocks,
+		jsonSchema,
 	)
 
 	// Operational and integration hints
@@ -399,10 +419,25 @@ func assessWakeRepair(
 }
 
 func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeLock, []opsHint) {
+	return checkWakeLocksWithHintsSchema(root, agents, fix, wakeCheckSchemaV1)
+}
+
+func checkWakeLocksWithHintsSchema(
+	root string,
+	agents []string,
+	fix bool,
+	jsonSchema int,
+) ([]opsWakeLock, []opsHint) {
 	var locks []opsWakeLock
 	var hints []opsHint
 	appendLock := func(lock opsWakeLock, inspection wakeLockInspection, staleBinary bool) {
-		decorateOpsWakeLockWithWakeCheck(root, &lock, inspection, staleBinary)
+		decorateOpsWakeLockWithWakeCheck(
+			root,
+			&lock,
+			inspection,
+			staleBinary,
+			jsonSchema == wakeCheckSchemaV2,
+		)
 		locks = append(locks, lock)
 	}
 	for _, agent := range agents {

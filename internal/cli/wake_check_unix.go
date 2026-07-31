@@ -13,20 +13,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-const (
-	wakeCheckSchema = 1
-
-	wakeRestartAgentSafe    = "agent_safe"
-	wakeRestartOperatorOnly = "operator_only"
-	wakeRestartUnavailable  = "unavailable"
-
-	wakeImageCurrent   = "current"
-	wakeImageDifferent = "different"
-	wakeImageUnknown   = "unknown"
-
-	wakeCheckUnknown = "unknown"
-)
-
 type wakeCheckResult struct {
 	Schema                   int    `json:"schema"`
 	Agent                    string `json:"agent"`
@@ -57,6 +43,17 @@ type wakeStartCapability struct {
 	Reason   string
 }
 
+func wakeCheckStartReason(start wakeStartCapability) (*string, *string) {
+	if start.CanStart {
+		return nil, nil
+	}
+	reason := wakeReasonOwningTerminalRequired
+	if start.Mode == wakeInjectModeNone {
+		reason = wakeReasonFullStrengthUnavailable
+	}
+	return &reason, wakeCheckOptionalString(start.Reason)
+}
+
 type wakeCheckMetadataFingerprint struct {
 	Exists   bool
 	Identity wakeFileIdentity
@@ -70,9 +67,15 @@ type wakeCheckObservation struct {
 	Repair     wakeRepairAssessment
 }
 
+type wakeCheckSnapshot struct {
+	OpsLock  *opsWakeLock
+	Decision wakeCheckDecision
+}
+
 func runWakeCheck(args []string) error {
 	fs := flag.NewFlagSet("wake check", flag.ContinueOnError)
 	common := addCommonFlags(fs)
+	jsonSchema := addJSONSchemaFlag(fs)
 	usage := usageWithFlags(
 		fs,
 		"amq wake check --me <agent> [options]",
@@ -89,6 +92,9 @@ func runWakeCheck(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if err := validateJSONSchemaFlag(fs, common.JSON, *jsonSchema); err != nil {
+		return err
+	}
 	if err := requireMe(common.Me); err != nil {
 		return err
 	}
@@ -104,25 +110,45 @@ func runWakeCheck(args []string) error {
 		return fmt.Errorf("inspect wake for %s: %w", me, err)
 	}
 
-	result := inspectWakeCheck(root, me)
+	decision := inspectWakeCheckDecision(root, me)
 	if common.JSON {
-		return writeJSON(os.Stdout, result)
+		if *jsonSchema == wakeCheckSchemaV2 {
+			return writeJSON(os.Stdout, renderWakeCheckV2(decision))
+		}
+		return writeJSON(os.Stdout, renderWakeCheckV1(decision))
 	}
-	return writeWakeCheckText(result)
+	return writeWakeCheckText(renderWakeCheckV1(decision))
 }
 
 func inspectWakeCheck(root, me string) wakeCheckResult {
+	return renderWakeCheckV1(inspectWakeCheckDecision(root, me))
+}
+
+func inspectWakeCheckDecision(root, me string) wakeCheckDecision {
+	return inspectWakeCheckSnapshot(root, me).Decision
+}
+
+func inspectWakeCheckSnapshot(root, me string) wakeCheckSnapshot {
 	root = canonicalWakeRoot(root)
 	first, firstErr := observeWakeCheck(root, me)
 	if firstErr != nil {
-		return unstableWakeCheckResult(root, me, first.Inspection)
+		return wakeCheckSnapshot{
+			OpsLock:  opsWakeLockFromWakeCheckObservation(root, me, first),
+			Decision: unstableWakeCheckDecision(root, me, first.Inspection),
+		}
 	}
 	second, secondErr := observeWakeCheck(root, me)
 	if secondErr != nil || !sameWakeCheckObservation(first, second) {
-		return unstableWakeCheckResult(root, me, second.Inspection)
+		return wakeCheckSnapshot{
+			OpsLock:  opsWakeLockFromWakeCheckObservation(root, me, second),
+			Decision: unstableWakeCheckDecision(root, me, second.Inspection),
+		}
 	}
 	opsLock := opsWakeLockFromWakeCheckObservation(root, me, second)
-	return buildWakeCheckResult(root, me, second.Inspection, opsLock, true)
+	return wakeCheckSnapshot{
+		OpsLock:  opsLock,
+		Decision: buildWakeCheckDecision(root, me, second.Inspection, opsLock, true),
+	}
 }
 
 func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
@@ -232,31 +258,62 @@ func opsWakeLockFromWakeCheckObservation(
 	root, me string,
 	observation wakeCheckObservation,
 ) *opsWakeLock {
-	if !observation.Inspection.Exists {
-		return nil
+	inspection := observation.Inspection
+	status := string(inspection.Status)
+	if !inspection.Exists {
+		status = string(wakeLockMissing)
+	}
+	lockPath := inspection.LockPath
+	if lockPath == "" {
+		lockPath = filepath.Join(fsq.AgentBase(root, me), ".wake.lock")
 	}
 	opsLock := &opsWakeLock{
+		Status:          status,
 		Agent:           me,
+		Root:            canonicalWakeRoot(root),
+		Lock:            lockPath,
+		PID:             inspection.PID,
+		TTY:             strings.TrimSpace(inspection.Lock.TTY),
+		Started:         strings.TrimSpace(inspection.Lock.Started),
+		Reason:          inspection.Reason,
 		TargetPresent:   observation.Repair.TargetPresent,
 		TargetReason:    observation.Repair.TargetReason,
 		RepairAvailable: observation.Repair.RepairAvailable,
 		RepairReason:    observation.Repair.RepairReason,
 		Repair:          observation.Repair.Repair,
+		CurrentTerminal: doctorWakeLockOnCurrentTerminal(inspection),
 	}
 	if opsLock.TargetPresent {
 		opsLock.Target = wakeTargetPath(root, me)
 	}
+	if isLiveRawOrphan(inspection) {
+		opsLock.Status = "live-raw-orphan"
+		opsLock.Reason = "live raw wake orphan; stop the owning terminal or launchd supervisor"
+	}
 	return opsLock
 }
 
-func unstableWakeCheckResult(root, me string, inspection wakeLockInspection) wakeCheckResult {
-	result := buildWakeCheckResult(root, me, inspection, nil, true)
-	result.CanRepairInjectVia = false
-	result.RepairReason = "wake state changed during inspection"
-	result.RestartCapability = wakeRestartUnavailable
-	result.OperatorTerminalRequired = false
-	result.NextAction = "wake state changed during inspection; retry amq wake check"
-	return result
+func unstableWakeCheckDecision(root, me string, inspection wakeLockInspection) wakeCheckDecision {
+	decision := buildWakeCheckDecision(root, me, inspection, nil, true)
+	detail := "wake state changed during inspection"
+	reason := wakeRepairReasonExactEvidenceMissing
+	decision.Repair.InjectViaAvailable = false
+	decision.Repair.ReasonCode = &reason
+	decision.Repair.Detail = &detail
+	decision.Repair.legacyReason = detail
+	decision.RestartCapability = wakeRestartUnavailable
+	decision.Action = wakeCheckActionDecision{
+		Kind:       wakeActionRetryCheck,
+		Actor:      wakeActionActorAgent,
+		ReasonCode: wakeReasonObservationChanged,
+		Command: wakeCheckActionCommand(
+			"wake", "check", "--root", decision.Root, "--me", decision.Agent,
+			"--json", "--json-schema=2",
+		),
+		Message: "wake state changed during inspection; retry amq wake check",
+	}
+	finalizeWakeCheckDecision(&decision)
+	return decision
 }
 
 func sameWakeCheckInspection(first, second wakeLockInspection) bool {
@@ -269,60 +326,172 @@ func sameWakeCheckInspection(first, second wakeLockInspection) bool {
 		sameWakeBinaryProcessEvidence(first.Process, second.Process)
 }
 
-func buildWakeCheckResult(
+func buildWakeCheckDecision(
 	root, me string,
 	inspection wakeLockInspection,
 	opsLock *opsWakeLock,
 	probeImage bool,
-) wakeCheckResult {
+) wakeCheckDecision {
 	// probeImage is intentionally enabled only for the single-target wake
 	// check. Fleet doctor scans stay cheap and conservative: they reuse already
 	// validated "different" evidence but never claim "current" from versions
 	// alone.
 	start := inspectWakeStartCapability(me)
-	result := wakeCheckResult{
-		Schema:           wakeCheckSchema,
-		Agent:            me,
-		Root:             root,
-		CanStartHere:     start.CanStart,
-		StartMode:        start.Mode,
-		StartReason:      start.Reason,
-		WakeStatus:       string(inspection.Status),
-		WakePID:          inspection.PID,
-		WakeMode:         strings.TrimSpace(inspection.Lock.WakeMode),
-		OwnerBound:       classifyWakeClaimForGenericTransition(inspection) == wakeClaimAuthoritative,
-		RunningImagePath: wakeCheckUnknown,
-		RunningVersion:   wakeCheckUnknown,
-		CurrentImagePath: wakeCheckCurrentImagePath(),
-		CurrentVersion:   wakeCheckVersion(cliVersion),
-		ImageStatus:      wakeImageUnknown,
-	}
+	startReason, startDetail := wakeCheckStartReason(start)
+	ownerBound := classifyWakeClaimForGenericTransition(inspection) == wakeClaimAuthoritative
+	wakeStatus := string(inspection.Status)
 	if !inspection.Exists {
-		result.WakeStatus = string(wakeLockMissing)
+		wakeStatus = string(wakeLockMissing)
 	}
-	result.LiveWake = inspection.Exists &&
+	decision := wakeCheckDecision{
+		Agent: me,
+		Root:  root,
+		Platform: wakeCheckPlatformDecision{
+			OS:            runtime.GOOS,
+			WakeSupported: true,
+		},
+		Start: wakeCheckStartDecision{
+			Available:  start.CanStart,
+			Mode:       start.Mode,
+			ReasonCode: startReason,
+			Detail:     startDetail,
+		},
+		Wake: wakeCheckWakeDecision{
+			Status:     wakeStatus,
+			PID:        wakeCheckOptionalInt(inspection.PID),
+			Mode:       wakeCheckOptionalString(inspection.Lock.WakeMode),
+			OwnerBound: ownerBound,
+		},
+		Image: wakeCheckImageDecision{
+			Current: wakeCheckImageEvidenceDecision{
+				Path:    wakeCheckOptionalString(wakeCheckCurrentImagePath()),
+				Version: wakeCheckOptionalString(wakeCheckVersion(cliVersion)),
+			},
+			Status: wakeImageUnknown,
+		},
+	}
+	decision.Wake.Live = inspection.Exists &&
 		inspection.Status == wakeLockValid &&
 		inspection.IdentityConfirmed &&
 		inspection.Process.Running
-	if result.LiveWake {
-		result.RunningImagePath = wakeCheckRunningImagePath(inspection)
-		result.RunningVersion = wakeCheckVersion(inspection.Lock.ImageVersion)
+	if decision.Wake.Live {
+		decision.Image.Running.Path = wakeCheckOptionalString(wakeCheckRunningImagePath(inspection))
+		decision.Image.Running.Version = wakeCheckOptionalString(wakeCheckVersion(inspection.Lock.ImageVersion))
 		if opsLock != nil && opsLock.ImageStatus == wakeImageDifferent {
-			result.ImageStatus = opsLock.ImageStatus
+			decision.Image.Status = opsLock.ImageStatus
 		} else if probeImage {
-			result.ImageStatus = inspectWakeCheckImageStatus(inspection, result)
+			decision.Image.Status = inspectWakeCheckImageStatus(
+				inspection,
+				renderWakeCheckV1(decision),
+			)
 		}
 	}
 
+	legacyRepairReason := ""
 	if opsLock != nil {
-		result.CanRepairInjectVia = opsLock.RepairAvailable
-		result.RepairReason = opsLock.RepairReason
+		decision.Repair.InjectViaAvailable = opsLock.RepairAvailable
+		legacyRepairReason = opsLock.RepairReason
 	}
-	if !result.CanRepairInjectVia && result.RepairReason == "" {
-		result.RepairReason = wakeCheckRepairIneligibility(inspection, result.OwnerBound)
+	if !decision.Repair.InjectViaAvailable && legacyRepairReason == "" {
+		legacyRepairReason = wakeCheckRepairIneligibility(inspection, decision.Wake.OwnerBound)
 	}
-	classifyWakeCheckRestart(&result, inspection, opsLock)
-	return result
+	decision.Repair.legacyReason = legacyRepairReason
+	decision.Repair.ReasonCode, decision.Repair.Detail = wakeCheckRepairReason(
+		inspection,
+		decision.Wake.OwnerBound,
+		decision.Repair.InjectViaAvailable,
+		legacyRepairReason,
+	)
+	classifyWakeCheckRestart(&decision, inspection, opsLock)
+	finalizeWakeCheckDecision(&decision)
+	return decision
+}
+
+func renderWakeCheckV1(decision wakeCheckDecision) wakeCheckResult {
+	return wakeCheckResult{
+		Schema:                   wakeCheckSchemaV1,
+		Agent:                    decision.Agent,
+		Root:                     decision.Root,
+		CanStartHere:             decision.Start.Available,
+		StartMode:                decision.Start.Mode,
+		StartReason:              wakeCheckStringValue(decision.Start.Detail, ""),
+		LiveWake:                 decision.Wake.Live,
+		WakeStatus:               decision.Wake.Status,
+		WakePID:                  wakeCheckIntValue(decision.Wake.PID),
+		WakeMode:                 wakeCheckStringValue(decision.Wake.Mode, ""),
+		OwnerBound:               decision.Wake.OwnerBound,
+		RunningImagePath:         wakeCheckStringValue(decision.Image.Running.Path, wakeCheckUnknown),
+		RunningVersion:           wakeCheckStringValue(decision.Image.Running.Version, wakeCheckUnknown),
+		CurrentImagePath:         wakeCheckStringValue(decision.Image.Current.Path, wakeCheckUnknown),
+		CurrentVersion:           wakeCheckStringValue(decision.Image.Current.Version, wakeCheckUnknown),
+		ImageStatus:              decision.Image.Status,
+		CanRepairInjectVia:       decision.Repair.InjectViaAvailable,
+		RepairReason:             decision.Repair.legacyReason,
+		RestartCapability:        wakeCheckLegacyRestartCapability(decision),
+		OperatorTerminalRequired: wakeCheckLegacyTerminalRequired(decision),
+		NextAction:               wakeCheckLegacyActionMessage(decision),
+	}
+}
+
+func wakeCheckLegacyRestartCapability(decision wakeCheckDecision) string {
+	if decision.legacyRestartCapability != "" {
+		return decision.legacyRestartCapability
+	}
+	return decision.RestartCapability
+}
+
+func wakeCheckLegacyTerminalRequired(decision wakeCheckDecision) bool {
+	if decision.legacyRestartCapability != "" {
+		return decision.legacyTerminalRequired
+	}
+	return decision.Action.TerminalRequired
+}
+
+func wakeCheckLegacyActionMessage(decision wakeCheckDecision) string {
+	if decision.legacyRestartCapability != "" {
+		return decision.legacyActionMessage
+	}
+	return decision.Action.Message
+}
+
+func wakeCheckStringValue(value *string, fallback string) string {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func wakeCheckIntValue(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func wakeCheckRepairReason(
+	inspection wakeLockInspection,
+	ownerBound bool,
+	available bool,
+	legacyReason string,
+) (*string, *string) {
+	if available {
+		return nil, nil
+	}
+	var reason string
+	switch {
+	case !inspection.Exists:
+		reason = wakeRepairReasonNoLock
+		return &reason, nil
+	case ownerBound:
+		reason = wakeRepairReasonOwnerBound
+	case inspection.Status == wakeLockValid:
+		reason = wakeRepairReasonLive
+	case inspection.Status != wakeLockStale:
+		reason = wakeRepairReasonNotStale
+	default:
+		reason = wakeRepairReasonExactEvidenceMissing
+	}
+	return &reason, wakeCheckOptionalString(legacyReason)
 }
 
 func decorateOpsWakeLockWithWakeCheck(
@@ -330,8 +499,24 @@ func decorateOpsWakeLockWithWakeCheck(
 	lock *opsWakeLock,
 	inspection wakeLockInspection,
 	staleBinary bool,
+	includeV2 bool,
 ) {
 	root = canonicalWakeRoot(root)
+	if includeV2 {
+		removed := lock.Removed
+		removedStatus := lock.Status
+		removedReason := lock.Reason
+		snapshot := inspectWakeCheckSnapshot(root, lock.Agent)
+		opsLock := snapshot.OpsLock
+		if removed {
+			opsLock.Status = removedStatus
+			opsLock.Reason = removedReason
+			opsLock.Removed = true
+		}
+		opsLock.WakeCheckDecision = &snapshot.Decision
+		*lock = *opsLock
+		return
+	}
 	runningVersion := wakeCheckVersion(inspection.Lock.ImageVersion)
 	currentVersion := wakeCheckVersion(cliVersion)
 	switch {
@@ -344,7 +529,8 @@ func decorateOpsWakeLockWithWakeCheck(
 	default:
 		lock.ImageStatus = wakeImageUnknown
 	}
-	check := buildWakeCheckResult(root, lock.Agent, inspection, lock, false)
+	legacyDecision := buildWakeCheckDecision(root, lock.Agent, inspection, lock, false)
+	check := renderWakeCheckV1(legacyDecision)
 	lock.CanStartHere = check.CanStartHere
 	lock.StartMode = check.StartMode
 	lock.StartReason = check.StartReason
@@ -382,71 +568,138 @@ func inspectWakeStartCapability(me string) wakeStartCapability {
 }
 
 func classifyWakeCheckRestart(
-	result *wakeCheckResult,
+	decision *wakeCheckDecision,
 	inspection wakeLockInspection,
 	opsLock *opsWakeLock,
 ) {
-	startCommand := wakeStartCommand(result.Root, result.Agent)
+	startCommand := wakeStartCommand(decision.Root, decision.Agent)
+	startArgv := wakeCheckActionCommand(
+		"wake", "--root", decision.Root, "--me", decision.Agent,
+	)
 	if !inspection.Exists {
 		switch {
-		case result.CanStartHere && result.StartMode != wakeInjectModeNone:
-			result.RestartCapability = wakeRestartAgentSafe
-			result.NextAction = startCommand
-		case result.StartMode == wakeInjectModeNone:
-			result.RestartCapability = wakeRestartUnavailable
-			result.NextAction = "restore a supported full-strength injector or configure --inject-via; do not accept an attention-only downgrade"
+		case decision.Start.Available && decision.Start.Mode != wakeInjectModeNone:
+			decision.RestartCapability = wakeRestartAgentSafe
+			decision.Action = wakeCheckActionDecision{
+				Kind:       wakeActionStartWake,
+				Actor:      wakeActionActorAgent,
+				ReasonCode: wakeReasonMissingStartAvailable,
+				Command:    startArgv,
+				Message:    startCommand,
+			}
+		case decision.Start.Mode == wakeInjectModeNone:
+			decision.RestartCapability = wakeRestartUnavailable
+			decision.Action = wakeCheckActionDecision{
+				Kind:       wakeActionConfigureInjector,
+				Actor:      wakeActionActorOperator,
+				ReasonCode: wakeReasonFullStrengthUnavailable,
+				Message:    "restore a supported full-strength injector or configure --inject-via; do not accept an attention-only downgrade",
+			}
 		default:
-			result.RestartCapability = wakeRestartOperatorOnly
-			result.OperatorTerminalRequired = true
-			result.NextAction = "from the owning terminal, run " + startCommand
+			decision.RestartCapability = wakeRestartOperatorOnly
+			decision.Action = wakeCheckActionDecision{
+				Kind:             wakeActionStartWake,
+				Actor:            wakeActionActorOperator,
+				ReasonCode:       wakeReasonOwningTerminalRequired,
+				Command:          startArgv,
+				TerminalRequired: true,
+				Message:          "from the owning terminal, run " + startCommand,
+			}
 		}
 		return
 	}
-	if result.CanRepairInjectVia && opsLock != nil {
-		result.RestartCapability = wakeRestartAgentSafe
-		result.NextAction = opsLock.Repair
+	if decision.Repair.InjectViaAvailable && opsLock != nil {
+		decision.RestartCapability = wakeRestartAgentSafe
+		decision.Action = wakeCheckActionDecision{
+			Kind:       wakeActionRepairWake,
+			Actor:      wakeActionActorAgent,
+			ReasonCode: wakeReasonStaleRepairAvailable,
+			Command: wakeCheckActionCommand(
+				"wake", "repair", "--root", decision.Root, "--me", decision.Agent,
+			),
+			Message: opsLock.Repair,
+		}
 		return
 	}
-	if result.LiveWake {
-		result.RestartCapability = wakeRestartOperatorOnly
-		result.OperatorTerminalRequired =
-			result.WakeMode != wakeTargetInjectVia &&
-				result.WakeMode != wakeOwnerWakeMode
-		result.NextAction = "leave the live wake running; restart it from its owning terminal or supervisor after verifying replacement readiness"
+	if decision.Wake.Live {
+		decision.RestartCapability = wakeRestartOperatorOnly
+		terminalRequired :=
+			wakeCheckStringValue(decision.Wake.Mode, "") != wakeTargetInjectVia &&
+				wakeCheckStringValue(decision.Wake.Mode, "") != wakeOwnerWakeMode
+		decision.Action = wakeCheckActionDecision{
+			Kind:             wakeActionPreserveLiveWake,
+			Actor:            wakeActionActorOperator,
+			ReasonCode:       wakeReasonLiveWakePreserve,
+			TerminalRequired: terminalRequired,
+			Message:          "leave the live wake running; restart it from its owning terminal or supervisor after verifying replacement readiness",
+		}
 		return
 	}
 	switch inspection.Status {
 	case wakeLockStale:
-		if result.OwnerBound {
-			result.RestartCapability = wakeRestartUnavailable
-			result.NextAction = wakeRecoverOwnerCommand(result.Root, result.Agent)
+		if decision.Wake.OwnerBound {
+			message := wakeRecoverOwnerCommand(decision.Root, decision.Agent)
+			decision.RestartCapability = wakeRestartUnavailable
+			decision.Action = wakeCheckActionDecision{
+				Kind:       wakeActionRecoverOwner,
+				Actor:      wakeActionActorOperator,
+				ReasonCode: wakeReasonOwnerRecoveryRequired,
+				Command: wakeCheckActionCommand(
+					"wake", "recover-owner", "--root", decision.Root, "--me", decision.Agent,
+				),
+				Message: message,
+			}
 			return
 		}
-		if result.WakeMode == wakeTargetInjectVia {
-			result.RestartCapability = wakeRestartUnavailable
-			result.OperatorTerminalRequired = false
-			result.NextAction = "restore the configured --inject-via supervisor or reconfigure a supported full-strength injector before replacing this stale wake; do not fall back to raw terminal injection"
+		if wakeCheckStringValue(decision.Wake.Mode, "") == wakeTargetInjectVia {
+			decision.RestartCapability = wakeRestartUnavailable
+			decision.Action = wakeCheckActionDecision{
+				Kind:       wakeActionConfigureInjector,
+				Actor:      wakeActionActorOperator,
+				ReasonCode: wakeReasonFullStrengthUnavailable,
+				Message:    "restore the configured --inject-via supervisor or reconfigure a supported full-strength injector before replacing this stale wake; do not fall back to raw terminal injection",
+			}
 			return
 		}
-		if result.StartMode == wakeInjectModeNone {
-			result.RestartCapability = wakeRestartUnavailable
-			result.OperatorTerminalRequired = false
-			result.NextAction = "restore a supported full-strength injector or configure --inject-via; do not accept an attention-only downgrade"
+		if decision.Start.Mode == wakeInjectModeNone {
+			decision.RestartCapability = wakeRestartUnavailable
+			decision.Action = wakeCheckActionDecision{
+				Kind:       wakeActionConfigureInjector,
+				Actor:      wakeActionActorOperator,
+				ReasonCode: wakeReasonFullStrengthUnavailable,
+				Message:    "restore a supported full-strength injector or configure --inject-via; do not accept an attention-only downgrade",
+			}
 			return
 		}
-		result.RestartCapability = wakeRestartOperatorOnly
-		result.OperatorTerminalRequired = true
-		result.NextAction = fmt.Sprintf(
+		message := fmt.Sprintf(
 			"from the owning terminal, remove the proven-stale lock with %s, then run %s",
-			doctorRootCommandForOS(result.Root, "", runtime.GOOS, "--ops", "--fix-wake-locks"),
+			doctorRootCommandForOS(decision.Root, "", runtime.GOOS, "--ops", "--fix-wake-locks"),
 			startCommand,
 		)
+		decision.RestartCapability = wakeRestartOperatorOnly
+		decision.Action = wakeCheckActionDecision{
+			Kind:             wakeActionManualStaleCleanup,
+			Actor:            wakeActionActorOperator,
+			ReasonCode:       wakeReasonStaleManualCleanupRequired,
+			TerminalRequired: true,
+			Message:          message,
+		}
 	case wakeLockCreating:
-		result.RestartCapability = wakeRestartUnavailable
-		result.NextAction = "leave wake state unchanged and retry after lock creation finishes"
+		decision.RestartCapability = wakeRestartUnavailable
+		decision.Action = wakeCheckActionDecision{
+			Kind:       wakeActionWaitForStableState,
+			Actor:      wakeActionActorNone,
+			ReasonCode: wakeReasonWakeStateCreating,
+			Message:    "leave wake state unchanged and retry after lock creation finishes",
+		}
 	default:
-		result.RestartCapability = wakeRestartUnavailable
-		result.NextAction = "preserve the unverified wake state and inspect it with amq doctor --ops"
+		decision.RestartCapability = wakeRestartUnavailable
+		decision.Action = wakeCheckActionDecision{
+			Kind:       wakeActionInspectUnverified,
+			Actor:      wakeActionActorOperator,
+			ReasonCode: wakeReasonWakeStateUnverified,
+			Message:    "preserve the unverified wake state and inspect it with amq doctor --ops",
+		}
 	}
 }
 

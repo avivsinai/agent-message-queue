@@ -42,6 +42,7 @@ func wakeCheckTextValue(value string) string {
 func runDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "Output as JSON")
+	jsonSchemaFlag := addJSONSchemaFlag(fs)
 	opsFlag := fs.Bool("ops", false, "Include runtime operational checks")
 	fixWakeLocksFlag := fs.Bool("fix-wake-locks", false, "With --ops, remove stale wake lock files")
 	fixMailboxesFlag := fs.Bool("fix-mailboxes", false, "Create missing required directories for configured mailboxes")
@@ -73,6 +74,9 @@ func runDoctor(args []string) error {
 		return err
 	} else if handled {
 		return nil
+	}
+	if err := validateJSONSchemaFlag(fs, *jsonFlag, *jsonSchemaFlag); err != nil {
+		return err
 	}
 	if *fixWakeLocksFlag && !*opsFlag {
 		return UsageError("--fix-wake-locks requires --ops")
@@ -186,7 +190,13 @@ func runDoctor(args []string) error {
 				fixWakeLocks = false
 			}
 		}
-		result.Ops = runOpsChecks(root, string(source), fixWakeLocks, baseRoot)
+		result.Ops = runOpsChecksWithSchema(
+			root,
+			string(source),
+			fixWakeLocks,
+			*jsonSchemaFlag,
+			baseRoot,
+		)
 	}
 
 	// Calculate summary
@@ -202,6 +212,9 @@ func runDoctor(args []string) error {
 	}
 
 	if *jsonFlag {
+		if *jsonSchemaFlag == wakeCheckSchemaV2 {
+			return writeJSON(os.Stdout, renderDoctorResultV2(result))
+		}
 		return writeJSON(os.Stdout, result)
 	}
 
