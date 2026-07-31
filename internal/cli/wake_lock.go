@@ -547,6 +547,7 @@ func inspectWakeIdentity(inspection wakeLockInspection) wakeIdentityState {
 
 func classifyWakeIdentity(inspection wakeLockInspection, proc wakeProcessInfo) (wakeIdentityState, string) {
 	lock := inspection.Lock
+	strongProcessIdentityMatched := false
 	if lock.WakeMode == wakeOwnerWakeMode {
 		if err := validateAuthoritativeWakeProcessIdentity(lock); err != nil {
 			return wakeIdentityUnknown, err.Error()
@@ -578,11 +579,16 @@ func classifyWakeIdentity(inspection wakeLockInspection, proc wakeProcessInfo) (
 			}
 			return wakeIdentityGoneOrDifferent, "process start time mismatch"
 		}
+		strongProcessIdentityMatched =
+			lock.BootID != "" && bootComparison == bootIDMatch
 	}
-	if proc.Executable == "" || !processLooksLikeAMQ(proc) {
-		if proc.Executable == "" {
-			return wakeIdentityUnknown, inspectionReason("process identity unavailable", proc.InspectError)
-		}
+	if proc.Executable == "" {
+		return wakeIdentityUnknown, inspectionReason("process identity unavailable", proc.InspectError)
+	}
+	if strongProcessIdentityMatched && !isAMQExecutable(proc.Executable) {
+		return wakeIdentityUnknown, "matching process identity has a non-amq executable name"
+	}
+	if !processLooksLikeAMQ(proc) {
 		return wakeIdentityGoneOrDifferent, "pid is not amq"
 	}
 	if len(proc.Args) > 0 && !processArgsLookLikeWake(proc.Args) {

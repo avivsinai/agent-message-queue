@@ -23,18 +23,26 @@ const (
 type wakeTerminalAuthorityLossError struct {
 	Kind   wakeTerminalAuthorityLossKind
 	Reason string
+}
+
+type wakeTerminalTransientError struct {
+	Reason string
 	Err    error
 }
 
-func (err *wakeTerminalAuthorityLossError) Error() string {
+func (err *wakeTerminalTransientError) Error() string {
 	if err.Err != nil {
-		return fmt.Sprintf("wake terminal authority lost: %s: %v", err.Reason, err.Err)
+		return fmt.Sprintf("wake terminal temporarily unavailable: %s: %v", err.Reason, err.Err)
 	}
-	return "wake terminal authority lost: " + err.Reason
+	return "wake terminal temporarily unavailable: " + err.Reason
 }
 
-func (err *wakeTerminalAuthorityLossError) Unwrap() error {
+func (err *wakeTerminalTransientError) Unwrap() error {
 	return err.Err
+}
+
+func (err *wakeTerminalAuthorityLossError) Error() string {
+	return "wake terminal authority lost: " + err.Reason
 }
 
 func isWakeTerminalAuthorityLoss(err error) bool {
@@ -114,11 +122,11 @@ func bindWakeTerminalAuthority(
 	controlStop <-chan struct{},
 ) (*wakeTerminalAuthority, error) {
 	if controlStop == nil {
-		return nil, newWakeTerminalAuthorityLoss("control-stop capability is missing", nil)
+		return nil, fmt.Errorf("bind wake terminal authority: control-stop capability is missing")
 	}
 	select {
 	case <-controlStop:
-		return nil, newWakeTerminalAuthorityLoss("control-stop capability is already closed", nil)
+		return nil, fmt.Errorf("bind wake terminal authority: control-stop capability is already closed")
 	default:
 	}
 	if !generation.Exists ||
@@ -126,16 +134,25 @@ func bindWakeTerminalAuthority(
 		generation.Lock.Generation == "" ||
 		generation.Root == "" ||
 		generation.Agent == "" {
-		return nil, newWakeTerminalAuthorityLoss("exact wake generation is unavailable", nil)
+		return nil, fmt.Errorf("bind wake terminal authority: exact wake generation is unavailable")
 	}
 	current := inspectWakeTerminalGeneration(generation.Root, generation.Agent)
+	if !current.Exists {
+		return nil, fmt.Errorf("bind wake terminal authority: wake generation disappeared")
+	}
+	if current.fileInfo == nil {
+		return nil, fmt.Errorf(
+			"inspect wake generation before terminal binding: %w",
+			wakeTerminalGenerationInspectionError(current),
+		)
+	}
 	if !sameWakeLockGeneration(generation, current) {
-		return nil, newWakeTerminalAuthorityLoss("wake generation changed before terminal binding", nil)
+		return nil, fmt.Errorf("bind wake terminal authority: wake generation changed")
 	}
 
 	tty, err := openWakeControllingTerminal()
 	if err != nil {
-		return nil, newWakeTerminalAuthorityLoss("open controlling terminal", err)
+		return nil, fmt.Errorf("open controlling terminal for wake binding: %w", err)
 	}
 	keep := false
 	defer func() {
@@ -146,19 +163,19 @@ func bindWakeTerminalAuthority(
 
 	info, err := tty.Stat()
 	if err != nil {
-		return nil, newWakeTerminalAuthorityLoss("inspect retained controlling terminal", err)
+		return nil, fmt.Errorf("inspect retained controlling terminal for wake binding: %w", err)
 	}
 	identity, ok := captureWakeTerminalIdentity(info)
 	if !ok {
-		return nil, newWakeTerminalAuthorityLoss("capture retained controlling-terminal identity", nil)
+		return nil, fmt.Errorf("capture retained controlling-terminal identity for wake binding")
 	}
 	fd := tty.Fd()
 	foregroundPGRP, err := wakeTerminalForegroundPGRP(fd)
 	if err != nil {
-		return nil, newWakeTerminalAuthorityLoss("inspect controlling-terminal foreground process group", err)
+		return nil, fmt.Errorf("inspect controlling-terminal foreground process group for wake binding: %w", err)
 	}
 	if foregroundPGRP <= 0 {
-		return nil, newWakeTerminalAuthorityLoss("controlling-terminal foreground process group is invalid", nil)
+		return nil, fmt.Errorf("bind wake terminal authority: controlling-terminal foreground process group is invalid")
 	}
 
 	keep = true
@@ -174,7 +191,7 @@ func bindWakeTerminalAuthority(
 
 func (authority *wakeTerminalAuthority) BeforeWrite() error {
 	if authority == nil {
-		return newWakeTerminalAuthorityLoss("terminal capability is missing", nil)
+		return newWakeTerminalAuthorityLoss("terminal capability is missing")
 	}
 	authority.mu.Lock()
 	defer authority.mu.Unlock()
@@ -183,7 +200,7 @@ func (authority *wakeTerminalAuthority) BeforeWrite() error {
 
 func (authority *wakeTerminalAuthority) Inject(text string) error {
 	if authority == nil {
-		return newWakeTerminalAuthorityLoss("terminal capability is missing", nil)
+		return newWakeTerminalAuthorityLoss("terminal capability is missing")
 	}
 	authority.mu.Lock()
 	defer authority.mu.Unlock()
@@ -192,26 +209,28 @@ func (authority *wakeTerminalAuthority) Inject(text string) error {
 	}
 	if err := injectWakeTerminalFD(authority.fd, text); err != nil {
 		var injectionErr *tiocstiInjectionError
-		if errors.As(err, &injectionErr) &&
-			injectionErr.Progress == 0 &&
-			(errors.Is(err, syscall.EIO) || errors.Is(err, syscall.EPERM)) {
-			// EIO and EPERM are ambiguous: the kernel may reject TIOCSTI, or
-			// the terminal authority may have changed. Only classify the
-			// injector after every retained/current identity and PGRP check
-			// still passes after the failed zero-progress ioctl.
+		if errors.As(err, &injectionErr) {
+			// Every TIOCSTI error is ambiguous until the retained authority is
+			// revalidated. Once authority still holds, preserve unclassified
+			// errors and accepted-byte progress for the loop's bounded retry
+			// policy instead of relabeling an effect failure as ownership loss.
 			if validateErr := authority.validateLocked(); validateErr != nil {
 				return validateErr
 			}
+		}
+		if injectionErr != nil &&
+			injectionErr.Progress == 0 &&
+			(errors.Is(err, syscall.EIO) || errors.Is(err, syscall.EPERM)) {
 			return newWakeInjectorUnsupportedError(err)
 		}
-		return newWakeTerminalAuthorityLoss("inject through retained controlling terminal", err)
+		return err
 	}
 	return nil
 }
 
 func (authority *wakeTerminalAuthority) validateLocked() error {
 	if authority.closed || authority.tty == nil {
-		return newWakeTerminalAuthorityLoss("retained controlling terminal is closed", nil)
+		return newWakeTerminalAuthorityLoss("retained controlling terminal is closed")
 	}
 	select {
 	case <-authority.controlStop:
@@ -223,39 +242,51 @@ func (authority *wakeTerminalAuthority) validateLocked() error {
 		authority.generation.Root,
 		authority.generation.Agent,
 	)
+	if !currentGeneration.Exists {
+		return newWakeTerminalAuthorityLoss("wake generation disappeared")
+	}
+	if currentGeneration.fileInfo == nil {
+		return newWakeTerminalTransientFailure(
+			"inspect current wake generation",
+			wakeTerminalGenerationInspectionError(currentGeneration),
+		)
+	}
 	if !sameWakeLockGeneration(authority.generation, currentGeneration) {
-		return newWakeTerminalAuthorityLoss("wake generation changed", nil)
+		return newWakeTerminalAuthorityLoss("wake generation changed")
 	}
 	if authority.tty.Fd() != authority.fd {
-		return newWakeTerminalAuthorityLoss("retained controlling-terminal descriptor changed", nil)
+		return newWakeTerminalAuthorityLoss("retained controlling-terminal descriptor changed")
 	}
 	retainedInfo, err := authority.tty.Stat()
 	if err != nil {
-		return newWakeTerminalAuthorityLoss("inspect retained controlling terminal", err)
+		return newWakeTerminalTransientFailure("inspect retained controlling terminal", err)
 	}
 	if !matchesWakeTerminalIdentity(authority.identity, retainedInfo) {
-		return newWakeTerminalAuthorityLoss("retained controlling-terminal identity changed", nil)
+		return newWakeTerminalAuthorityLoss("retained controlling-terminal identity changed")
 	}
 
 	currentTTY, err := openWakeControllingTerminal()
 	if err != nil {
-		return newWakeTerminalAuthorityLoss("re-open current controlling terminal", err)
+		return newWakeTerminalTransientFailure("re-open current controlling terminal", err)
 	}
 	currentInfo, statErr := currentTTY.Stat()
 	closeErr := currentTTY.Close()
 	if statErr != nil {
-		return newWakeTerminalAuthorityLoss("inspect current controlling terminal", statErr)
+		return newWakeTerminalTransientFailure("inspect current controlling terminal", statErr)
 	}
 	if closeErr != nil {
-		return newWakeTerminalAuthorityLoss("close current controlling-terminal check", closeErr)
+		return newWakeTerminalTransientFailure("close current controlling-terminal check", closeErr)
 	}
 	if !matchesWakeTerminalIdentity(authority.identity, currentInfo) {
-		return newWakeTerminalAuthorityLoss("current controlling-terminal identity changed", nil)
+		return newWakeTerminalAuthorityLoss("current controlling-terminal identity changed")
 	}
 
 	foregroundPGRP, err := wakeTerminalForegroundPGRP(authority.fd)
 	if err != nil {
-		return newWakeTerminalAuthorityLoss("recheck controlling-terminal foreground process group", err)
+		return newWakeTerminalTransientFailure(
+			"recheck controlling-terminal foreground process group",
+			err,
+		)
 	}
 	if foregroundPGRP != authority.foregroundPGRP {
 		return newWakeTerminalForegroundPGRPChangedLoss(
@@ -284,9 +315,25 @@ func (authority *wakeTerminalAuthority) Close() error {
 	return err
 }
 
-func newWakeTerminalAuthorityLoss(reason string, err error) error {
+func wakeTerminalGenerationInspectionError(inspection wakeLockInspection) error {
+	if inspection.Reason != "" {
+		return errors.New(inspection.Reason)
+	}
+	return fmt.Errorf(
+		"wake lock status %q has no readable file identity",
+		inspection.Status,
+	)
+}
+
+func newWakeTerminalAuthorityLoss(reason string) error {
 	return &wakeTerminalAuthorityLossError{
 		Kind:   wakeTerminalAuthorityLossUnknown,
+		Reason: reason,
+	}
+}
+
+func newWakeTerminalTransientFailure(reason string, err error) error {
+	return &wakeTerminalTransientError{
 		Reason: reason,
 		Err:    err,
 	}

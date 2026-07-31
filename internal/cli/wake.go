@@ -30,6 +30,8 @@ type wakeConfig struct {
 	strict                        bool
 	fallbackWarn                  bool
 	injectMode                    string // auto, raw, paste
+	requestedInjectMode           string
+	legacyTIOCSTIDemoted          bool
 	debug                         bool
 	deferWhileInput               bool
 	inputQuietFor                 time.Duration
@@ -45,6 +47,7 @@ type wakeConfig struct {
 	controlStop                   <-chan struct{}
 	beforeTerminalWrite           func() error
 	terminalWrite                 func(string) error
+	inspectTerminalGeneration     func() wakeLockInspection
 	terminalGeneration            string
 	terminalTTY                   string
 	baselineRequested             bool
@@ -66,11 +69,18 @@ type wakeConfig struct {
 	preconditionCheck             func(*wakeConfig) error
 	onPendingNotify               func()
 	recordNotifierStatus          func(status, mode, reason string) error
+	pendingNotifierStatus         *wakeNotifierStatus
 	recordAttention               func(wakeAttentionEmission) error
 	attentionEnv                  func(string) string
 	attentionIsTTY                func() bool
 	attentionWrite                func([]byte) (int, error)
 	diagnosticIsTTY               func() bool
+}
+
+type wakeNotifierStatus struct {
+	status string
+	mode   string
+	reason string
 }
 
 const maxWakeNotificationSenderClauses = 8
@@ -466,6 +476,11 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		}
 	}
 
+	if cfg.inputRecoveryRequired &&
+		dischargeWakeInputRecoveryAfterProgress(cfg, currentPending) &&
+		len(messages) == 0 {
+		return nil
+	}
 	if len(messages) == 0 {
 		if cfg.inputRecoveryRequired {
 			return deliverWakeInputRecoveryAttention(
@@ -550,7 +565,12 @@ func deliverNewMessageNotification(
 	currentPending map[string]os.FileInfo,
 ) error {
 	if cfg.inputRecoveryRequired {
-		return deliverWakeInputRecoveryAttention(cfg, currentPending)
+		if !dischargeWakeInputRecoveryAfterProgress(cfg, currentPending) {
+			return deliverWakeInputRecoveryAttention(cfg, currentPending)
+		}
+		if len(currentPending) == 0 {
+			return nil
+		}
 	}
 	if cfg.injectMode == wakeInjectModeNone {
 		if cfg.inputDelivery.blocksDemotion() {
@@ -688,21 +708,69 @@ func enterWakeInputRecovery(
 
 func markWakeInputRecoveryRequired(cfg *wakeConfig, cause error) {
 	cfg.inputRecoveryRequired = true
-	if cfg.recordNotifierStatus == nil {
-		return
-	}
 	mode := effectiveInjectMode(cfg)
 	reason := wakeInputRecoveryNotice
 	if cause != nil {
 		reason += ": " + cause.Error()
 	}
-	if err := cfg.recordNotifierStatus(
+	if err := persistWakeNotifierStatus(
+		cfg,
 		wakeInputRecoveryRequiredStatus,
 		mode,
 		reason,
 	); err != nil {
 		_ = writeWakeDiagnostic(cfg, "amq wake: record input recovery-required status: %v\n", err)
 	}
+}
+
+func dischargeWakeInputRecoveryAfterProgress(
+	cfg *wakeConfig,
+	currentPending map[string]os.FileInfo,
+) bool {
+	if cfg == nil || !cfg.inputRecoveryRequired {
+		return false
+	}
+	progressed := len(currentPending) == 0
+	if !progressed && cfg.doorbell.phase == wakeDoorbellRecoveryRequired {
+		progressed = wakeCohortProgressed(cfg.doorbell.cohort, currentPending)
+	}
+	if !progressed {
+		return false
+	}
+
+	// Durable consumer progress proves that the composer state changed after
+	// the uncertain write. Never resume the old suffix: discard that debt and
+	// let any remaining cohort start with one fresh, complete doorbell. This
+	// accepts bounded composer noise over a permanently undriven session, while
+	// preserving the no-stacking rule for the old partial payload.
+	cfg.inputRecoveryRequired = false
+	clearWakeInputState(cfg)
+	cfg.doorbell.reset()
+	if err := persistWakeNotifierStatus(cfg, "", effectiveInjectMode(cfg), ""); err != nil {
+		_ = writeWakeDiagnostic(cfg, "amq wake: clear input recovery-required status: %v\n", err)
+	}
+	return true
+}
+
+func persistWakeNotifierStatus(cfg *wakeConfig, status, mode, reason string) error {
+	if cfg == nil || cfg.recordNotifierStatus == nil {
+		return nil
+	}
+	desired := &wakeNotifierStatus{status: status, mode: mode, reason: reason}
+	if err := cfg.recordNotifierStatus(status, mode, reason); err != nil {
+		cfg.pendingNotifierStatus = desired
+		return err
+	}
+	cfg.pendingNotifierStatus = nil
+	return nil
+}
+
+func retryPendingWakeNotifierStatus(cfg *wakeConfig) error {
+	if cfg == nil || cfg.pendingNotifierStatus == nil {
+		return nil
+	}
+	pending := cfg.pendingNotifierStatus
+	return persistWakeNotifierStatus(cfg, pending.status, pending.mode, pending.reason)
 }
 
 func (cfg *wakeConfig) wakeDoorbellNow() time.Time {
@@ -1053,14 +1121,13 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		if errors.As(injectErr, &unsupported) {
 			mode := effectiveInjectMode(cfg)
 			reason := wakeInjectorUnsupportedReason(mode, injectErr)
-			if cfg.recordNotifierStatus != nil {
-				if err := cfg.recordNotifierStatus(
-					wakeInjectorUnsupportedStatus,
-					mode,
-					reason,
-				); err != nil {
-					_ = writeWakeDiagnostic(cfg, "amq wake: record unsupported injector status: %v\n", err)
-				}
+			if err := persistWakeNotifierStatus(
+				cfg,
+				wakeInjectorUnsupportedStatus,
+				mode,
+				reason,
+			); err != nil {
+				_ = writeWakeDiagnostic(cfg, "amq wake: record unsupported injector status: %v\n", err)
 			}
 			if err := disableWakeInput(cfg, injectErr); err != nil {
 				return err
@@ -1331,11 +1398,32 @@ func retireWakeInputState(cfg *wakeConfig, cause error) error {
 }
 
 func disableWakeInput(cfg *wakeConfig, cause error) error {
+	rememberRequestedWakeInputMode(cfg)
 	if err := retireWakeInputState(cfg, cause); err != nil {
 		return err
 	}
 	cfg.injectMode = wakeInjectModeNone
+	cfg.legacyTIOCSTIDemoted = false
 	return nil
+}
+
+func disableWakeInputForLegacyTIOCSTI(cfg *wakeConfig, cause error) error {
+	rememberRequestedWakeInputMode(cfg)
+	if err := retireWakeInputState(cfg, cause); err != nil {
+		return err
+	}
+	cfg.injectMode = wakeInjectModeNone
+	cfg.legacyTIOCSTIDemoted = true
+	return nil
+}
+
+func rememberRequestedWakeInputMode(cfg *wakeConfig) {
+	if cfg.requestedInjectMode != "" ||
+		cfg.injectMode == "" ||
+		cfg.injectMode == wakeInjectModeNone {
+		return
+	}
+	cfg.requestedInjectMode = cfg.injectMode
 }
 
 func reconcileWakeInputAfterInboxDrain(cfg *wakeConfig) error {

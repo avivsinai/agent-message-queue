@@ -219,14 +219,18 @@ func TestWakeDoorbellRecoveryAttentionIsCohortBoundedAndRateLimited(t *testing.T
 	if _, ok := state.nextDeadline(); ok {
 		t.Fatal("empty recovery inbox retained a pending alert deadline")
 	}
-	if state.planRecoveryAttention(now.Add(2*time.Millisecond), second) {
-		t.Fatal("drain-and-arrive recovery flap bypassed output rate bound")
+	if state.phase != wakeDoorbellIdle {
+		t.Fatalf("empty recovery inbox phase = %v, want idle", state.phase)
 	}
-	if !state.planRecoveryAttention(now.Add(wakeDoorbellAttentionRetryBase), second) {
-		t.Fatal("changed recovery cohort was not emitted after rate bound")
+	if !state.planRecoveryAttention(now.Add(2*time.Millisecond), second) {
+		t.Fatal("new recovery cohort inherited the drained cohort's rate bound")
 	}
-	state.recordRecoveryRequired(now.Add(wakeDoorbellAttentionRetryBase), second)
-	if state.planRecoveryAttention(now.Add(2*wakeDoorbellAttentionRetryBase), second) {
+	recordedAt := now.Add(2 * time.Millisecond)
+	state.recordRecoveryRequired(recordedAt, second)
+	if state.planRecoveryAttention(
+		recordedAt.Add(wakeDoorbellAttentionRetryBase-time.Millisecond),
+		second,
+	) {
 		t.Fatal("recorded recovery cohort repeated")
 	}
 }
