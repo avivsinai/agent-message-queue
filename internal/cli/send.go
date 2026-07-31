@@ -26,6 +26,7 @@ func runSend(args []string) error {
 	threadFlag := fs.String("thread", "", "Thread id (required for multiple recipients; default p2p/<a>__<b> for single-recipient sends)")
 	bodyFlag := fs.String("body", "", "Body string, @file, or - / empty to read stdin")
 	allowEmptyFlag := fs.Bool("allow-empty", false, "Allow sending a blank body (otherwise an empty body is rejected)")
+	allowSelfFlag := fs.Bool("allow-self", false, "Allow an intentional same-root send to the sender's own handle")
 	refsFlag := fs.String("refs", "", "Comma-separated related message ids")
 	waitForFlag := fs.String("wait-for", "", "Wait for receipt stage after send (drained, dlq)")
 	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for (0 = wait forever)")
@@ -181,6 +182,18 @@ func runSend(args []string) error {
 	if fromSession == "" && (!pin.Present || !pin.IdentityPin) {
 		if err := guardPinnedSourceContext("send", sourceRoot, targetProject != "", *ignoreSessionPinFlag, common.rootExplicit()); err != nil {
 			return err
+		}
+	}
+	if !routed && !*allowSelfFlag {
+		for _, recipient := range recipients {
+			if recipient == me {
+				return UsageError(
+					"refusing send: recipient %q matches the sender and no routing dimension was given. "+
+						"Use --project <peer> or --session <name> to reach another instance, "+
+						"or pass --allow-self to confirm an intentional same-root self-send.",
+					me,
+				)
+			}
 		}
 	}
 	sourceProject := ""

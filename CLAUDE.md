@@ -178,7 +178,7 @@ When `--kind` is set but `--priority` is not, priority defaults to `normal`.
 
 ```bash
 amq init --root <path> --agents a,b,c [--force]
-amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--refs <ids>] [--body <str|@file|-|stdin>] [--allow-empty] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--session <target-session>] [--from-session <source-session>] [--project <project>] [--ignore-session-pin] [--wait-for <stage>] [--wait-timeout <duration>]
+amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--refs <ids>] [--body <str|@file|-|stdin>] [--allow-empty] [--allow-self] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--session <target-session>] [--from-session <source-session>] [--project <project>] [--ignore-session-pin] [--wait-for <stage>] [--wait-timeout <duration>]
 amq list --me <agent> [--session <name>] [--new | --cur] [--priority <p>] [--from <h>] [--kind <k>] [--label <l>...] [--limit N] [--offset N] [--json]
 amq read --me <agent> --id <msg_id> [--session <name>] [--ignore-session-pin] [--json]
 amq drain --me <agent> [--session <name>] [--ignore-session-pin] [--limit N] [--include-body] [--json]
