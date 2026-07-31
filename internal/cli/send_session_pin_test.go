@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func TestSendRefusesPinnedRootWhenCwdHasRepoLocalSession(t *testing.T) {
@@ -36,6 +38,35 @@ func TestSendRefusesPinnedRootWhenCwdHasRepoLocalSession(t *testing.T) {
 	}
 	if got := inboxCount(t, repoRoot, "bob"); got != 0 {
 		t.Fatalf("ambiguous send delivered %d message(s) to repo-local root", got)
+	}
+}
+
+func TestSendHonorsVerifiedSessionlessRootWhenCwdHasDifferentRepoQueue(t *testing.T) {
+	project := t.TempDir()
+	localRoot := filepath.Join(project, ".agent-mail")
+	targetRoot := filepath.Join(localRoot, "squad", "v2-25-1")
+	for _, root := range []string{localRoot, targetRoot} {
+		for _, agent := range []string{"alice", "bob"} {
+			if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+				t.Fatalf("initialize %s/%s: %v", root, agent, err)
+			}
+		}
+		configureSendTestRoot(t, root, "alice", "bob")
+	}
+	if err := os.WriteFile(filepath.Join(project, ".amqrc"), []byte(`{"root":".agent-mail"}`), 0o600); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+	t.Chdir(project)
+	pinSendSessionForTest(t, targetRoot, targetRoot, "")
+
+	if err := runSend([]string{"--me", "alice", "--to", "bob", "--body", "verified root"}); err != nil {
+		t.Fatalf("verified sessionless root should outrank cwd discovery: %v", err)
+	}
+	if got := inboxCount(t, targetRoot, "bob"); got != 1 {
+		t.Fatalf("identity-pinned inbox count = %d, want 1", got)
+	}
+	if got := inboxCount(t, localRoot, "bob"); got != 0 {
+		t.Fatalf("send touched cwd-local inbox: %d message(s)", got)
 	}
 }
 
