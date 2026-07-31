@@ -368,6 +368,84 @@ func TestWakeCheckReportsEligibleInjectViaRepairAsAgentSafe(t *testing.T) {
 	}
 }
 
+func TestWakeCheckRefusesCapabilityFromChangingRepairMetadata(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, string, wakeTarget, wakeRepairFloor)
+	}{
+		{
+			name: "target changed",
+			mutate: func(t *testing.T, root string, target wakeTarget, _ wakeRepairFloor) {
+				t.Helper()
+				target.InjectArgs = append(target.InjectArgs, "changed-during-check")
+				if err := writeWakeTarget(root, "codex", target); err != nil {
+					t.Fatalf("replace wake target: %v", err)
+				}
+			},
+		},
+		{
+			name: "repair floor changed",
+			mutate: func(t *testing.T, root string, _ wakeTarget, floor wakeRepairFloor) {
+				t.Helper()
+				floor.Existing["changed-during-check.md"] = wakeFileIdentity{
+					Device: 1, Inode: 2, CTimeSec: 3, CTimeNsec: 4,
+				}
+				if err := writeWakeRepairFloor(root, "codex", floor); err != nil {
+					t.Fatalf("replace wake repair floor: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			injector := writeExecutableForTest(t, "injector")
+			target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec"})
+			targetDigest, err := wakeTargetDigest(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeWakeLockForTest(t, root, "codex", wakeLock{
+				PID:          4242,
+				Root:         canonicalWakeRoot(root),
+				Agent:        "codex",
+				Started:      "2026-07-31T01:00:00Z",
+				ProcessStart: "12345",
+				BootID:       wakeRepairTestBootID,
+				Executable:   "amq",
+				WakeMode:     wakeTargetInjectVia,
+				TargetDigest: targetDigest,
+				Generation:   "stale-inject-via-generation",
+			})
+			if err := writeWakeTarget(root, "codex", target); err != nil {
+				t.Fatal(err)
+			}
+			floor := writeWakeRepairFloorForTest(t, root, "codex", target, nil)
+
+			inspections := 0
+			stubInspectWakeProcess(t, func(gotPID int) wakeProcessInfo {
+				inspections++
+				if inspections == 3 {
+					test.mutate(t, root, target, floor)
+				}
+				return wakeProcessInfo{PID: gotPID}
+			})
+			stubWakeCheckRuntime(t, false, "0.49.14")
+
+			got := inspectWakeCheck(root, "codex")
+			if got.RestartCapability != wakeRestartUnavailable ||
+				got.CanRepairInjectVia ||
+				got.NextAction != "wake state changed during inspection; retry amq wake check" {
+				t.Fatalf("changing repair metadata capability = %#v", got)
+			}
+		})
+	}
+}
+
 func TestWakeCheckPreservesUnverifiedWakeState(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
