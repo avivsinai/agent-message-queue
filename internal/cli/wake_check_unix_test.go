@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -882,6 +883,12 @@ func TestNewWakeLockCapturesRunningImageEvidence(t *testing.T) {
 	}
 	if lock.ImageVersion != "0.49.14-test" {
 		t.Fatalf("image_version = %q", lock.ImageVersion)
+	}
+	if runtime.GOOS != "darwin" {
+		if lock.RunningImageEvidence != nil {
+			t.Fatalf("non-Darwin wake lock unexpectedly has running image evidence: %#v", lock.RunningImageEvidence)
+		}
+		return
 	}
 	if lock.RunningImageEvidence == nil {
 		t.Fatal("new wake lock is missing running image evidence")
