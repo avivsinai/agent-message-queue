@@ -8,6 +8,20 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.50.1](https://github.com/avivsinai/agent-message-queue/compare/v0.50.0...v0.50.1) (2026-07-31)
+
+
+### Bug Fixes
+
+* **send:** refuse routed physical self-delivery ([#386](https://github.com/avivsinai/agent-message-queue/issues/386)) ([9454eb1](https://github.com/avivsinai/agent-message-queue/commit/9454eb1a094264c2552ea1981687abee51a4c53a))
+* **wake:** fence cohort attention by generation ([#385](https://github.com/avivsinai/agent-message-queue/issues/385)) ([47a8b73](https://github.com/avivsinai/agent-message-queue/commit/47a8b731457ecad6ca259dad80f699c21e1bf913))
+* **wake:** harden check evidence and restart advice ([#388](https://github.com/avivsinai/agent-message-queue/issues/388)) ([2f20e94](https://github.com/avivsinai/agent-message-queue/commit/2f20e94b17bd5ed3b2dafe1debf9dd673e8df1df))
+* **wake:** reject incoherent repair observations ([#387](https://github.com/avivsinai/agent-message-queue/issues/387)) ([744c681](https://github.com/avivsinai/agent-message-queue/commit/744c681b676319c142a08e41280b6cad5b08d23e))
+* **wake:** silence superseded attention ([#383](https://github.com/avivsinai/agent-message-queue/issues/383)) ([2e9883c](https://github.com/avivsinai/agent-message-queue/commit/2e9883c30d9438c34ed62d76bcccc197ecfffc9e))
+
+#383 and #385 close the generation-exclusivity portion of known issue #377: a superseded wake generation can no longer emit peer or operator attention, and inconclusive evidence never silences a healthy wake.
+The cadence-accumulation portion of #377 (attention re-announce ladder while an agent is not draining) remains open.
+
 ## [0.50.0](https://github.com/avivsinai/agent-message-queue/compare/v0.49.13...v0.50.0) (2026-07-31)
 
 
