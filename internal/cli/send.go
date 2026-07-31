@@ -19,6 +19,10 @@ import (
 var deliverToExistingInbox = fsq.DeliverToExistingInbox
 
 func runSend(args []string) error {
+	return runSendWithAfterBodyRead(args, nil)
+}
+
+func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	toFlag := fs.String("to", "", "Receiver handle (comma-separated)")
@@ -398,6 +402,9 @@ func runSend(args []string) error {
 	body, err := readBody(*bodyFlag, *allowEmptyFlag)
 	if err != nil {
 		return err
+	}
+	if afterBodyRead != nil {
+		afterBodyRead()
 	}
 
 	// Validate and process co-op mode fields
