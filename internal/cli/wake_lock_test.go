@@ -219,6 +219,44 @@ func TestInspectWakeLockAcceptsLegacyDarwinBootIDForProvenWake(t *testing.T) {
 	}
 }
 
+func TestInspectWakeLockDoesNotProveLiveRenamedBinaryStale(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		TTY:          "tty",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/amq-dev",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "start-1",
+			BootID:     "boot-1",
+			Executable: "/opt/amq-dev",
+			Args: []string{
+				"amq",
+				"wake",
+				"--root",
+				root,
+				"--me",
+				"codex",
+			},
+		}
+	})
+
+	inspection := inspectWakeLock(root, "codex")
+	if inspection.Status != wakeLockUnverified {
+		t.Fatalf(
+			"matching live renamed binary status = %s (%s), want unverified",
+			inspection.Status,
+			inspection.Reason,
+		)
+	}
+}
+
 func TestInspectWakeLockTreatsUnavailableCurrentBootIdentityAsUnverified(t *testing.T) {
 	const wakePID = 4343
 	root := secureTempDirForTest(t)

@@ -42,6 +42,10 @@ type wakeInboxDir struct {
 	closed    bool
 }
 
+var newWakeInboxEventWatcher = func(inbox *wakeInboxDir) (wakeEventWatcher, error) {
+	return inbox.NewWatcher()
+}
+
 func (*wakeAgentDir) isWakeRetainedAgent() {}
 
 type wakeEventWatcher interface {
@@ -62,6 +66,32 @@ type retainedWakeDirectoryAuthority struct {
 	inboxPath     string
 	agentIdentity wakeRepairDirectoryIdentity
 	inboxIdentity wakeRepairDirectoryIdentity
+}
+
+type wakeDirectoryTransientError struct {
+	Reason string
+	Err    error
+}
+
+func (err *wakeDirectoryTransientError) Error() string {
+	return fmt.Sprintf("wake directory temporarily unavailable: %s: %v", err.Reason, err.Err)
+}
+
+func (err *wakeDirectoryTransientError) Unwrap() error {
+	return err.Err
+}
+
+func newWakeDirectoryTransientFailure(reason string, err error) error {
+	return &wakeDirectoryTransientError{Reason: reason, Err: err}
+}
+
+func classifyWakeDirectoryOpenFailure(reason string, err error) error {
+	// An open failure, including ENOENT, ENOTDIR, ELOOP, EACCES, or EMFILE,
+	// cannot compare the canonical path with the retained descriptor and
+	// therefore cannot prove ownership loss. A permanently unavailable lock or
+	// agent directory retries indefinitely, with bounded diagnostics, until it
+	// recovers or a later successful open proves an identity change.
+	return newWakeDirectoryTransientFailure(reason, err)
 }
 
 func wakeRepairDirectoryIdentityForFile(file *os.File) (wakeRepairDirectoryIdentity, error) {
@@ -143,8 +173,8 @@ func (authority retainedWakeDirectoryAuthority) validateCanonical() error {
 		0,
 	)
 	if err != nil {
-		return fmt.Errorf(
-			"canonical wake repair agent directory no longer matches retained authority: %w",
+		return classifyWakeDirectoryOpenFailure(
+			"canonical wake repair agent directory no longer matches retained authority",
 			err,
 		)
 	}
@@ -154,10 +184,13 @@ func (authority retainedWakeDirectoryAuthority) validateCanonical() error {
 		"canonical wake repair agent directory",
 	)
 	if err != nil {
-		return err
+		return newWakeDirectoryTransientFailure(
+			"inspect canonical wake repair agent directory",
+			err,
+		)
 	}
 	if agentIdentity != authority.agentIdentity {
-		return fmt.Errorf("canonical wake repair agent directory no longer matches retained authority")
+		return newWakeOwnershipLoss("canonical wake repair agent directory no longer matches retained authority")
 	}
 
 	inboxFile, err := openWakeInboxNewDirectoryAt(
@@ -166,25 +199,25 @@ func (authority retainedWakeDirectoryAuthority) validateCanonical() error {
 		"canonical wake repair",
 	)
 	if err != nil {
-		return fmt.Errorf(
-			"canonical wake repair inbox directory no longer matches retained authority: %w",
-			err,
-		)
+		return err
 	}
 	defer func() { _ = inboxFile.Close() }()
 	inboxIdentity, err := wakeRepairDirectoryIdentityForFile(inboxFile)
 	if err != nil {
-		return err
+		return newWakeDirectoryTransientFailure(
+			"inspect canonical wake repair inbox directory",
+			err,
+		)
 	}
 	if inboxIdentity != authority.inboxIdentity {
-		return fmt.Errorf("canonical wake repair inbox directory no longer matches retained authority")
+		return newWakeOwnershipLoss("canonical wake repair inbox directory no longer matches retained authority")
 	}
 	return nil
 }
 
 func validateCanonicalWakeAgentDir(agentDir *wakeAgentDir) error {
 	if agentDir == nil {
-		return fmt.Errorf("retained wake agent directory capability is missing")
+		return newWakeOwnershipLoss("retained wake agent directory capability is missing")
 	}
 	var retainedIdentity wakeRepairDirectoryIdentity
 	if err := agentDir.withFD(func(agentFD int) error {
@@ -195,7 +228,10 @@ func validateCanonicalWakeAgentDir(agentDir *wakeAgentDir) error {
 		)
 		return err
 	}); err != nil {
-		return err
+		return newWakeDirectoryTransientFailure(
+			"inspect retained wake agent directory",
+			err,
+		)
 	}
 
 	openCanonical := func() (*os.File, os.FileInfo, error) {
@@ -205,8 +241,8 @@ func validateCanonicalWakeAgentDir(agentDir *wakeAgentDir) error {
 			0,
 		)
 		if err != nil {
-			return nil, nil, fmt.Errorf(
-				"canonical wake agent directory no longer matches retained authority: %w",
+			return nil, nil, classifyWakeDirectoryOpenFailure(
+				"canonical wake agent directory no longer matches retained authority",
 				err,
 			)
 		}
@@ -214,11 +250,14 @@ func validateCanonicalWakeAgentDir(agentDir *wakeAgentDir) error {
 		info, err := file.Stat()
 		if err != nil {
 			_ = file.Close()
-			return nil, nil, fmt.Errorf("stat canonical wake agent directory: %w", err)
+			return nil, nil, newWakeDirectoryTransientFailure(
+				"stat canonical wake agent directory",
+				err,
+			)
 		}
 		if err := validateWakeAgentDir(agentDir.path, info); err != nil {
 			_ = file.Close()
-			return nil, nil, err
+			return nil, nil, newWakeOwnershipLoss(err.Error())
 		}
 		return file, info, nil
 	}
@@ -230,10 +269,13 @@ func validateCanonicalWakeAgentDir(agentDir *wakeAgentDir) error {
 	defer func() { _ = canonical.Close() }()
 	canonicalIdentity, err := wakeRepairDirectoryIdentityForFile(canonical)
 	if err != nil {
-		return err
+		return newWakeDirectoryTransientFailure(
+			"inspect canonical wake agent directory identity",
+			err,
+		)
 	}
 	if canonicalIdentity != retainedIdentity {
-		return fmt.Errorf("canonical wake agent directory no longer matches retained authority")
+		return newWakeOwnershipLoss("canonical wake agent directory no longer matches retained authority")
 	}
 
 	verification, verificationInfo, err := openCanonical()
@@ -242,7 +284,7 @@ func validateCanonicalWakeAgentDir(agentDir *wakeAgentDir) error {
 	}
 	defer func() { _ = verification.Close() }()
 	if !os.SameFile(canonicalInfo, verificationInfo) {
-		return fmt.Errorf("canonical wake agent directory changed while validating retained authority")
+		return newWakeOwnershipLoss("canonical wake agent directory changed while validating retained authority")
 	}
 	return nil
 }
@@ -311,21 +353,29 @@ func openValidatedWakeDirectoryAt(
 			0,
 		)
 		if err != nil {
-			return nil, nil, fmt.Errorf("open %s: %w", label, err)
+			return nil, nil, classifyWakeDirectoryOpenFailure(
+				"open "+label,
+				err,
+			)
 		}
 		file := os.NewFile(uintptr(fd), path)
 		info, err := file.Stat()
 		if err != nil {
 			_ = file.Close()
-			return nil, nil, fmt.Errorf("stat %s: %w", label, err)
+			return nil, nil, newWakeDirectoryTransientFailure(
+				"stat "+label,
+				err,
+			)
 		}
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			_ = file.Close()
-			return nil, nil, fmt.Errorf("%s must be a directory, not a symlink", label)
+			return nil, nil, newWakeOwnershipLoss(
+				fmt.Sprintf("%s must be a directory, not a symlink", label),
+			)
 		}
 		if err := validateWakeTargetPathOwnership(label, path, info); err != nil {
 			_ = file.Close()
-			return nil, nil, err
+			return nil, nil, newWakeOwnershipLoss(err.Error())
 		}
 		return file, info, nil
 	}
@@ -342,7 +392,7 @@ func openValidatedWakeDirectoryAt(
 	defer func() { _ = verification.Close() }()
 	if !os.SameFile(openedInfo, verificationInfo) {
 		_ = file.Close()
-		return nil, fmt.Errorf("%s changed while opening", label)
+		return nil, newWakeOwnershipLoss(fmt.Sprintf("%s changed while opening", label))
 	}
 	return file, nil
 }
@@ -417,7 +467,7 @@ func openWatchedWakeInboxDir(
 	if err != nil {
 		return nil, nil, err
 	}
-	watcher, err := inboxDir.NewWatcher()
+	watcher, err := newWakeInboxEventWatcher(inboxDir)
 	if err != nil {
 		closeErr := inboxDir.Close()
 		return nil, nil, errors.Join(err, closeErr)
@@ -691,7 +741,10 @@ func (d *wakeInboxDir) ValidateCanonical() error {
 			d.path,
 		)
 		if err != nil {
-			return err
+			return newWakeDirectoryTransientFailure(
+				"inspect retained wake watcher directories",
+				err,
+			)
 		}
 		return authority.validateCanonical()
 	})

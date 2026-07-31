@@ -34,6 +34,7 @@ var (
 	getWakeProcessSID               = unix.Getsid
 	wakeTIOCSTIAvailable            = func() bool { return tiocsti.Available() }
 	wakeInputIsTTY                  = func() bool { return tiocsti.IsTTY() }
+	newWakeBaselineEventWatcher     = newWakePathEventWatcher
 )
 
 type fsnotifyWakeEventWatcher struct {
@@ -50,6 +51,18 @@ func (w *fsnotifyWakeEventWatcher) Errors() <-chan error {
 
 func (w *fsnotifyWakeEventWatcher) Close() error {
 	return w.watcher.Close()
+}
+
+func newWakePathEventWatcher(path string) (wakeEventWatcher, error) {
+	native, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, err
+	}
+	if err := native.Add(path); err != nil {
+		_ = native.Close()
+		return nil, err
+	}
+	return &fsnotifyWakeEventWatcher{watcher: native}, nil
 }
 
 type wakeRepairResult struct {
@@ -1604,6 +1617,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	if err != nil {
 		return UsageError("%v", err)
 	}
+	requestedInjectMode := injectMode
 
 	interruptLabel := strings.TrimSpace(*interruptLabelFlag)
 	interruptPriority := strings.ToLower(strings.TrimSpace(*interruptPriorityFlag))
@@ -1992,32 +2006,36 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		defer func() { _ = terminalAuthority.Close() }()
 	}
 	cfg := wakeConfig{
-		me:                 me,
-		root:               root,
-		session:            resolveSessionName(root),
-		injectCmd:          *injectCmdFlag,
-		injectVia:          injectVia,
-		injectArgs:         []string(injectArgFlags),
-		wakeOwner:          requestedOwner,
-		injectTimeout:      *injectTimeoutFlag,
-		bell:               *bellFlag,
-		debounce:           *debounceFlag,
-		previewLen:         *previewLenFlag,
-		strict:             common.Strict,
-		fallbackWarn:       true,
-		injectMode:         injectMode,
-		debug:              *debugFlag,
-		deferWhileInput:    *deferWhileInputFlag,
-		inputQuietFor:      *inputQuietForFlag,
-		inputPollInterval:  *inputPollIntervalFlag,
-		inputMaxHold:       *inputMaxHoldFlag,
-		interrupt:          *interruptFlag,
-		interruptLabel:     interruptLabel,
-		interruptPriority:  interruptPriority,
-		interruptKey:       interruptKey,
-		interruptNotice:    strings.TrimSpace(*interruptNoticeFlag),
-		interruptCooldown:  *interruptCooldownFlag,
-		controlStop:        controlStop,
+		me:                  me,
+		root:                root,
+		session:             resolveSessionName(root),
+		injectCmd:           *injectCmdFlag,
+		injectVia:           injectVia,
+		injectArgs:          []string(injectArgFlags),
+		wakeOwner:           requestedOwner,
+		injectTimeout:       *injectTimeoutFlag,
+		bell:                *bellFlag,
+		debounce:            *debounceFlag,
+		previewLen:          *previewLenFlag,
+		strict:              common.Strict,
+		fallbackWarn:        true,
+		injectMode:          injectMode,
+		requestedInjectMode: requestedInjectMode,
+		debug:               *debugFlag,
+		deferWhileInput:     *deferWhileInputFlag,
+		inputQuietFor:       *inputQuietForFlag,
+		inputPollInterval:   *inputPollIntervalFlag,
+		inputMaxHold:        *inputMaxHoldFlag,
+		interrupt:           *interruptFlag,
+		interruptLabel:      interruptLabel,
+		interruptPriority:   interruptPriority,
+		interruptKey:        interruptKey,
+		interruptNotice:     strings.TrimSpace(*interruptNoticeFlag),
+		interruptCooldown:   *interruptCooldownFlag,
+		controlStop:         controlStop,
+		inspectTerminalGeneration: func() wakeLockInspection {
+			return inspectWakeTerminalGeneration(root, me)
+		},
 		terminalGeneration: currentWake.Lock.Generation,
 		terminalTTY:        currentWake.Lock.TTY,
 		baselineRequested:  *baselineExistingFlag || repairLineage != nil,
@@ -2381,6 +2399,143 @@ func failWakeOnWatcherError(cfg *wakeConfig, context string, cause error) error 
 	return fmt.Errorf("%s: %w", context, cause)
 }
 
+type wakeFailureDisposition uint8
+
+const (
+	// Unknown failures retry by default. An admitted wake may abandon its
+	// durable inbox obligation only after proven ownership transfer.
+	wakeFailureRetry wakeFailureDisposition = iota
+	wakeFailureDegrade
+	wakeFailureFatal
+)
+
+type wakeOwnershipLossError struct {
+	reason string
+}
+
+type wakeUnreadableGenerationNoticeState struct {
+	consecutiveFailures uint
+	statusActive        bool
+	attentionDelivered  bool
+}
+
+const wakeUnreadableGenerationNoticeThreshold = 5
+
+func (state *wakeUnreadableGenerationNoticeState) resetWithoutStatusWrite() {
+	if state == nil {
+		return
+	}
+	*state = wakeUnreadableGenerationNoticeState{}
+}
+
+func (err *wakeOwnershipLossError) Error() string {
+	return err.reason
+}
+
+func newWakeOwnershipLoss(reason string) error {
+	return &wakeOwnershipLossError{reason: reason}
+}
+
+func classifyWakeFailure(err error) wakeFailureDisposition {
+	if err == nil {
+		return wakeFailureRetry
+	}
+	var ownershipLoss *wakeOwnershipLossError
+	if errors.As(err, &ownershipLoss) ||
+		(isWakeTerminalAuthorityLoss(err) &&
+			!isWakeTerminalForegroundPGRPChanged(err) &&
+			!isWakeTerminalControlStopped(err)) {
+		return wakeFailureFatal
+	}
+	var unsupported *wakeInjectorUnsupportedError
+	if isWakeInputDemotionBlocked(err) ||
+		isWakeTerminalProgressUncertain(err) ||
+		errors.As(err, &unsupported) {
+		return wakeFailureDegrade
+	}
+	return wakeFailureRetry
+}
+
+func (state *wakeUnreadableGenerationNoticeState) observe(
+	cfg *wakeConfig,
+) {
+	if state == nil || cfg == nil {
+		return
+	}
+	if cfg.inspectTerminalGeneration == nil ||
+		cfg.injectMode == wakeInjectModeNone ||
+		cfg.inputRecoveryRequired {
+		state.resetWithoutStatusWrite()
+		return
+	}
+	inspection := cfg.inspectTerminalGeneration()
+	if inspection.Exists && inspection.fileInfo == nil {
+		state.consecutiveFailures++
+		// This threshold counts the loop's fixed maintenance observations. It
+		// gates operator visibility only; delivery authorization and retry
+		// scheduling remain owned by the per-write validation path.
+		if state.consecutiveFailures < wakeUnreadableGenerationNoticeThreshold {
+			return
+		}
+		if !state.statusActive {
+			if err := persistWakeNotifierStatus(
+				cfg,
+				"degraded",
+				effectiveInjectMode(cfg),
+				"wake lock unreadable",
+			); err != nil {
+				_ = writeWakeDiagnostic(
+					cfg,
+					"amq wake: record unreadable wake-lock status: %v; retrying\n",
+					err,
+				)
+			} else {
+				state.statusActive = true
+			}
+		}
+		if state.attentionDelivered {
+			return
+		}
+		if err := emitWakeAttention(cfg, wakePayload{
+			text:       "wake lock unreadable; injection paused; will resume automatically",
+			provenance: wakePayloadSystemFixed,
+		}); err != nil {
+			_ = writeWakeDiagnostic(
+				cfg,
+				"amq wake: emit unreadable wake-lock attention: %v; retrying\n",
+				err,
+			)
+			return
+		}
+		state.attentionDelivered = true
+		return
+	}
+
+	if !inspection.Exists {
+		state.resetWithoutStatusWrite()
+		return
+	}
+	state.consecutiveFailures = 0
+	state.attentionDelivered = false
+	if !state.statusActive {
+		return
+	}
+	if err := persistWakeNotifierStatus(
+		cfg,
+		"",
+		effectiveInjectMode(cfg),
+		"",
+	); err != nil {
+		_ = writeWakeDiagnostic(
+			cfg,
+			"amq wake: clear recovered wake-lock status: %v; retrying\n",
+			err,
+		)
+	} else {
+		state.statusActive = false
+	}
+}
+
 func pendingWakeWatcherError(watcher wakeAdmissionWatcher) error {
 	if watcher == nil {
 		return fmt.Errorf("wake watcher is unavailable at admission")
@@ -2422,6 +2577,23 @@ func parseInterruptKey(raw string) (string, error) {
 		return "", nil
 	default:
 		return "", fmt.Errorf("invalid interrupt-cmd %q (use ctrl-c or none)", raw)
+	}
+}
+
+var waitWakeRetry = func(
+	controlStop <-chan struct{},
+	signals <-chan os.Signal,
+	delay time.Duration,
+) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-controlStop:
+		return false
+	case <-signals:
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -2479,77 +2651,201 @@ func runWakeLoop(cfg wakeConfig) error {
 		} else if err := validateCanonicalWakeAgentDir(ordinaryAgentDir); err != nil {
 			return fmt.Errorf("validate acquired wake agent authority: %w", err)
 		}
-		var err error
-		ordinaryInboxDir, watcher, err = openWatchedWakeInboxDir(ordinaryAgentDir)
-		if err != nil {
-			return fmt.Errorf("failed to create ordinary wake inbox watcher: %w", err)
-		}
-		cfg.retainedInbox = ordinaryInboxDir
 		if cfg.touchPresence == nil {
 			cfg.touchPresence = func() error {
 				return touchWakePresenceInDir(ordinaryAgentDir, cfg.me)
 			}
 		}
-	} else if retained, ok := cfg.retainedInbox.(*wakeInboxDir); ok {
-		var err error
-		watcher, err = retained.NewWatcher()
-		if err != nil {
-			return fmt.Errorf("failed to create retained watcher: %w", err)
-		}
-	} else {
+	} else if _, ok := cfg.retainedInbox.(*wakeInboxDir); !ok {
 		if err := os.MkdirAll(inboxNew, 0o700); err != nil {
 			return err
 		}
-		native, err := fsnotify.NewWatcher()
-		if err != nil {
-			return fmt.Errorf("failed to create watcher: %w", err)
+	}
+
+	openMainWatcher := func() error {
+		if ordinaryRecoverable {
+			inboxDir, err := openWakeRepairInboxDir(ordinaryAgentDir)
+			if err != nil {
+				if validateErr := validateCanonicalWakeAgentDir(ordinaryAgentDir); validateErr != nil {
+					return errors.Join(
+						fmt.Errorf("open acquired wake inbox capability: %w", err),
+						fmt.Errorf(
+							"validate acquired wake agent authority after inbox failure: %w",
+							validateErr,
+						),
+					)
+				}
+				return fmt.Errorf(
+					"open acquired wake inbox capability: %w",
+					err,
+				)
+			}
+			nextWatcher, err := newWakeInboxEventWatcher(inboxDir)
+			if err != nil {
+				return errors.Join(err, inboxDir.Close())
+			}
+			ordinaryInboxDir = inboxDir
+			watcher = nextWatcher
+			cfg.retainedInbox = inboxDir
+			return nil
 		}
-		if err := native.Add(inboxNew); err != nil {
-			_ = native.Close()
-			return fmt.Errorf("failed to watch inbox: %w", err)
+		if retained, ok := cfg.retainedInbox.(*wakeInboxDir); ok {
+			nextWatcher, err := newWakeInboxEventWatcher(retained)
+			if err != nil {
+				if validateErr := retained.ValidateCanonical(); validateErr != nil {
+					return errors.Join(
+						err,
+						fmt.Errorf(
+							"validate retained wake inbox authority after watcher failure: %w",
+							validateErr,
+						),
+					)
+				}
+				return err
+			}
+			watcher = nextWatcher
+			return nil
 		}
-		watcher = &fsnotifyWakeEventWatcher{watcher: native}
+
+		nextWatcher, err := newWakePathEventWatcher(inboxNew)
+		if err == nil {
+			watcher = nextWatcher
+		}
+		return err
+	}
+	armMainWatcher := func() (bool, error) {
+		for failures := uint(1); ; failures++ {
+			err := openMainWatcher()
+			if err == nil {
+				return true, nil
+			}
+			if classifyWakeFailure(err) == wakeFailureFatal {
+				return false, err
+			}
+			delay := wakeStartupRetryBackoff(failures)
+			_ = writeWakeDiagnostic(
+				&cfg,
+				"amq wake: create wake inbox watcher: %v; retrying in %s\n",
+				err,
+				delay,
+			)
+			if !waitWakeRetry(cfg.controlStop, sigCh, delay) {
+				return false, nil
+			}
+		}
+	}
+	armed, err := armMainWatcher()
+	if err != nil {
+		return err
+	}
+	if !armed {
+		return nil
 	}
 	if cfg.baselineRequested && !cfg.baselineInherited {
 		retained, ok := cfg.retainedInbox.(*wakeInboxDir)
 		if !ok {
 			return fmt.Errorf("wake baseline requires a retained inbox capability")
 		}
-		native, err := fsnotify.NewWatcher()
-		if err != nil {
-			return fmt.Errorf("failed to create startup baseline watcher: %w", err)
+		var failures uint
+		historyUncertain := false
+		for {
+			var prepareErr error
+			startupBaselineWatcher, prepareErr = newWakeBaselineEventWatcher(retained.path)
+			if prepareErr == nil {
+				prepareErr = retained.ValidateCanonical()
+			}
+			if prepareErr == nil {
+				// The startup boundary is watcher installation, not lock
+				// acquisition; messages delivered in between are intentionally
+				// treated as startup backlog.
+				prepareErr = prepareWakeBaselineEvents(
+					&cfg,
+					startupBaselineWatcher.Events(),
+					startupBaselineWatcher.Errors(),
+					inboxNew,
+				)
+			}
+			if startupBaselineWatcher != nil {
+				closeErr := startupBaselineWatcher.Close()
+				startupBaselineWatcher = nil
+				if prepareErr == nil && closeErr != nil {
+					_ = writeWakeDiagnostic(
+						&cfg,
+						"amq wake: close startup baseline watcher: %v; continuing\n",
+						closeErr,
+					)
+				}
+			}
+			if prepareErr == nil {
+				if historyUncertain {
+					// The original watcher lost event history. Reaching a new
+					// barrier proves readiness, but treating all backlog as new
+					// is the only lossless delivery fallback.
+					cfg.baselineExisting = nil
+				}
+				break
+			}
+			cfg.baselineExisting = nil
+			if err := retained.ValidateCanonical(); err != nil {
+				validationErr := fmt.Errorf(
+					"validate startup baseline watcher authority: %w",
+					err,
+				)
+				if classifyWakeFailure(validationErr) == wakeFailureFatal {
+					return validationErr
+				}
+				prepareErr = errors.Join(prepareErr, validationErr)
+			}
+			historyUncertain = true
+			failures++
+			delay := wakeStartupRetryBackoff(failures)
+			_ = writeWakeDiagnostic(
+				&cfg,
+				"amq wake: startup baseline watcher failed: %v; retrying in %s\n",
+				prepareErr,
+				delay,
+			)
+			if !waitWakeRetry(cfg.controlStop, sigCh, delay) {
+				return nil
+			}
 		}
-		if err := native.Add(retained.path); err != nil {
-			_ = native.Close()
-			return fmt.Errorf("failed to watch retained startup baseline inbox: %w", err)
-		}
-		startupBaselineWatcher = &fsnotifyWakeEventWatcher{watcher: native}
-		if err := retained.ValidateCanonical(); err != nil {
-			_ = startupBaselineWatcher.Close()
-			startupBaselineWatcher = nil
-			return fmt.Errorf("validate startup baseline watcher authority: %w", err)
-		}
-	}
-
-	// The startup boundary is watcher installation, not lock acquisition;
-	// messages delivered in between are intentionally treated as startup backlog.
-	baselineWatcher := watcher
-	if startupBaselineWatcher != nil {
-		baselineWatcher = startupBaselineWatcher
-	}
-	if err := prepareWakeBaselineEvents(
+	} else if err := prepareWakeBaselineEvents(
 		&cfg,
-		baselineWatcher.Events(),
-		baselineWatcher.Errors(),
+		watcher.Events(),
+		watcher.Errors(),
 		inboxNew,
 	); err != nil {
 		return err
 	}
-	if startupBaselineWatcher != nil {
-		if err := startupBaselineWatcher.Close(); err != nil {
-			return fmt.Errorf("close startup baseline watcher: %w", err)
+	// A separate baseline watcher can take long enough for the main watcher to
+	// fail before admission. Rearm it and discard startup tombstones so messages
+	// from the uncertain interval are delivered instead of publishing false
+	// readiness with an already-dead watcher.
+	for {
+		if err := pendingWakeWatcherError(watcher); err == nil {
+			break
+		} else {
+			cfg.baselineExisting = nil
+			_ = watcher.Close()
+			watcher = nil
+			if ordinaryRecoverable {
+				_ = ordinaryInboxDir.Close()
+				ordinaryInboxDir = nil
+				cfg.retainedInbox = nil
+			}
+			_ = writeWakeDiagnostic(
+				&cfg,
+				"amq wake: main watcher failed before admission: %v; rearming\n",
+				err,
+			)
 		}
-		startupBaselineWatcher = nil
+		armed, err := armMainWatcher()
+		if err != nil {
+			return err
+		}
+		if !armed {
+			return nil
+		}
 	}
 	if retained, ok := cfg.retainedInbox.(*wakeInboxDir); ok {
 		if err := retained.ValidateCanonical(); err != nil {
@@ -2699,15 +2995,17 @@ func runWakeLoop(cfg wakeConfig) error {
 		}
 		doorbellTimerC = doorbellTimer.C
 	}
-	retryOrdinaryWatcher := func(context string, cause error) {
+	retryWatcher := func(context string, cause error) {
 		cfg.baselineExisting = nil
 		if watcher != nil {
 			_ = watcher.Close()
 			watcher = nil
 		}
-		_ = ordinaryInboxDir.Close()
-		ordinaryInboxDir = nil
-		cfg.retainedInbox = nil
+		if ordinaryRecoverable {
+			_ = ordinaryInboxDir.Close()
+			ordinaryInboxDir = nil
+			cfg.retainedInbox = nil
+		}
 		pendingNotify = true
 		clearTerminalAuthorityRetry()
 		inboxScanFailures++
@@ -2719,40 +3017,73 @@ func runWakeLoop(cfg wakeConfig) error {
 		}
 		_ = writeWakeDiagnostic(&cfg, "amq wake: %s: %v; retrying watcher setup\n", context, cause)
 	}
-	rebindOrdinaryWatcher := func() (bool, error) {
-		if !ordinaryRecoverable || watcher != nil {
+	scheduleWatcherRebindFailure := func(context string, cause error) {
+		pendingNotify = true
+		inboxScanFailures++
+		scheduleInboxScanRetry(wakeInboxScanRetryBackoff(inboxScanFailures))
+		clearDoorbellDeadline()
+		_ = writeWakeDiagnostic(
+			&cfg,
+			"amq wake: %s: %v; retrying watcher setup\n",
+			context,
+			cause,
+		)
+	}
+	rebindWatcher := func() (bool, error) {
+		if watcher != nil {
 			return true, nil
 		}
-		if err := validateCanonicalWakeAgentDir(ordinaryAgentDir); err != nil {
-			return false, failWakeOnWatcherError(
-				&cfg,
-				"ordinary wake agent authority changed while rearming watcher",
-				err,
-			)
-		}
-		inboxDir, nextWatcher, err := openWatchedWakeInboxDir(ordinaryAgentDir)
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
+		if ordinaryRecoverable {
+			if err := validateCanonicalWakeAgentDir(ordinaryAgentDir); err != nil {
 				return false, failWakeOnWatcherError(
 					&cfg,
-					"failed to rearm ordinary wake inbox watcher",
+					"ordinary wake agent authority changed while rearming watcher",
 					err,
 				)
 			}
-			pendingNotify = true
-			inboxScanFailures++
-			scheduleInboxScanRetry(wakeInboxScanRetryBackoff(inboxScanFailures))
-			clearDoorbellDeadline()
-			_ = writeWakeDiagnostic(
-				&cfg,
-				"amq wake: ordinary wake inbox is unavailable while rearming watcher: %v\n",
+			inboxDir, nextWatcher, err := openWatchedWakeInboxDir(ordinaryAgentDir)
+			if err != nil {
+				scheduleWatcherRebindFailure(
+					"ordinary wake inbox is unavailable while rearming watcher",
+					err,
+				)
+				return false, nil
+			}
+			ordinaryInboxDir = inboxDir
+			watcher = nextWatcher
+			cfg.retainedInbox = inboxDir
+			return true, nil
+		}
+
+		if retained, ok := cfg.retainedInbox.(*wakeInboxDir); ok {
+			if err := retained.ValidateCanonical(); err != nil {
+				return false, failWakeOnWatcherError(
+					&cfg,
+					"retained wake inbox authority changed while rearming watcher",
+					err,
+				)
+			}
+			nextWatcher, err := newWakeInboxEventWatcher(retained)
+			if err != nil {
+				scheduleWatcherRebindFailure(
+					"retained wake inbox watcher is unavailable while rearming",
+					err,
+				)
+				return false, nil
+			}
+			watcher = nextWatcher
+			return true, nil
+		}
+
+		nextWatcher, err := newWakePathEventWatcher(inboxNew)
+		if err != nil {
+			scheduleWatcherRebindFailure(
+				"wake inbox watcher is unavailable while rearming",
 				err,
 			)
 			return false, nil
 		}
-		ordinaryInboxDir = inboxDir
 		watcher = nextWatcher
-		cfg.retainedInbox = inboxDir
 		return true, nil
 	}
 	enterRetainedInputRecovery := func(cause error) error {
@@ -2769,6 +3100,7 @@ func runWakeLoop(cfg wakeConfig) error {
 		scheduleDoorbellDeadline()
 		return nil
 	}
+	var unreadableGenerationNotice wakeUnreadableGenerationNoticeState
 	attemptNotification := func() error {
 		if terminalAuthorityRetryC != nil || inboxScanRetryC != nil {
 			return nil
@@ -2786,6 +3118,10 @@ func runWakeLoop(cfg wakeConfig) error {
 		}
 		clearInboxScanRetry()
 		inboxScanFailures = 0
+		disposition := classifyWakeFailure(err)
+		if disposition == wakeFailureFatal {
+			return err
+		}
 		if isWakeTerminalForegroundPGRPChanged(err) {
 			pendingNotify = true
 			scheduleTerminalAuthorityRetry()
@@ -2820,8 +3156,7 @@ func runWakeLoop(cfg wakeConfig) error {
 			scheduleDoorbellDeadline()
 			return nil
 		}
-		if isWakeInputDemotionBlocked(err) ||
-			isWakeTerminalProgressUncertain(err) {
+		if disposition == wakeFailureDegrade {
 			return enterRetainedInputRecovery(err)
 		}
 		pendingNotify = false
@@ -2830,13 +3165,10 @@ func runWakeLoop(cfg wakeConfig) error {
 		if err == nil {
 			return nil
 		}
-		if isWakeTerminalAuthorityLoss(err) {
-			return err
-		}
 		_ = writeWakeDiagnostic(&cfg, "amq wake: notify error: %v\n", err)
 		return nil
 	}
-	emitFatalScanFallback := func() error {
+	emitScanFallback := func() error {
 		if err := emitWakeAttention(&cfg, wakePayload{
 			text:       "AMQ messages may be pending; run amq drain --include-body",
 			provenance: wakePayloadSystemFixed,
@@ -2902,11 +3234,8 @@ func runWakeLoop(cfg wakeConfig) error {
 
 		case event, ok := <-watcherEvents:
 			if !ok {
-				if ordinaryRecoverable {
-					retryOrdinaryWatcher("ordinary wake inbox watcher closed", nil)
-					continue
-				}
-				return failWakeOnWatcherError(&cfg, "watcher closed", nil)
+				retryWatcher("wake inbox watcher closed", nil)
+				continue
 			}
 			invalidateWakeBaselineEvent(&cfg, event)
 			// Creates/additions can accelerate delivery; removals are durable
@@ -2939,17 +3268,11 @@ func runWakeLoop(cfg wakeConfig) error {
 
 		case err, ok := <-watcherErrors:
 			if !ok {
-				if ordinaryRecoverable {
-					retryOrdinaryWatcher("ordinary wake inbox watcher closed", nil)
-					continue
-				}
-				return failWakeOnWatcherError(&cfg, "watcher closed", nil)
-			}
-			if ordinaryRecoverable {
-				retryOrdinaryWatcher("ordinary wake inbox watcher failed", err)
+				retryWatcher("wake inbox watcher closed", nil)
 				continue
 			}
-			return failWakeOnWatcherError(&cfg, "amq wake: watcher error", err)
+			retryWatcher("wake inbox watcher failed", err)
+			continue
 
 		case <-debounceC:
 			if !pendingNotify {
@@ -2972,9 +3295,16 @@ func runWakeLoop(cfg wakeConfig) error {
 
 		case <-inboxScanRetryC:
 			inboxScanRetryC = nil
-			rebound, err := rebindOrdinaryWatcher()
+			rebound, err := rebindWatcher()
 			if err != nil {
-				return err
+				if classifyWakeFailure(err) == wakeFailureFatal {
+					return err
+				}
+				scheduleWatcherRebindFailure(
+					"wake inbox watcher rearm failed",
+					err,
+				)
+				continue
 			}
 			if !rebound {
 				continue
@@ -3012,7 +3342,15 @@ func runWakeLoop(cfg wakeConfig) error {
 			} else {
 				_ = presence.Touch(cfg.root, cfg.me)
 			}
+			if err := retryPendingWakeNotifierStatus(&cfg); err != nil {
+				_ = writeWakeDiagnostic(
+					&cfg,
+					"amq wake: persist notifier status: %v; retrying\n",
+					err,
+				)
+			}
 			if cfg.inputRecoveryRequired {
+				unreadableGenerationNotice.resetWithoutStatusWrite()
 				scheduleDoorbellDeadline()
 				continue
 			}
@@ -3036,10 +3374,18 @@ func runWakeLoop(cfg wakeConfig) error {
 				)
 			}
 			if isWakeInputDemotionBlocked(preconditionErr) {
+				unreadableGenerationNotice.resetWithoutStatusWrite()
 				if err := enterRetainedInputRecovery(preconditionErr); err != nil {
 					return err
 				}
 				continue
+			}
+			if !inputEnabledBeforeCheck && cfg.injectMode != wakeInjectModeNone {
+				cfg.doorbell.makeDue(cfg.wakeDoorbellNow())
+				pendingNotify = true
+				if err := attemptNotification(); err != nil {
+					return err
+				}
 			}
 			if cfg.injectMode == wakeInjectModeNone {
 				if inputEnabledBeforeCheck {
@@ -3061,7 +3407,7 @@ func runWakeLoop(cfg wakeConfig) error {
 					if preconditionErr != nil && inboxScanRetryC != nil {
 						preconditionErr = errors.Join(
 							preconditionErr,
-							emitFatalScanFallback(),
+							emitScanFallback(),
 						)
 					} else {
 						if err := attemptNotification(); err != nil {
@@ -3070,7 +3416,7 @@ func runWakeLoop(cfg wakeConfig) error {
 						if preconditionErr != nil && pendingNotify && inboxScanRetryC != nil {
 							preconditionErr = errors.Join(
 								preconditionErr,
-								emitFatalScanFallback(),
+								emitScanFallback(),
 							)
 						}
 					}
@@ -3080,8 +3426,16 @@ func runWakeLoop(cfg wakeConfig) error {
 			}
 			scheduleDoorbellDeadline()
 			if preconditionErr != nil {
-				return preconditionErr
+				if classifyWakeFailure(preconditionErr) == wakeFailureFatal {
+					return preconditionErr
+				}
+				_ = writeWakeDiagnostic(
+					&cfg,
+					"amq wake: maintenance precondition failed: %v; retrying\n",
+					preconditionErr,
+				)
 			}
+			unreadableGenerationNotice.observe(&cfg)
 		}
 	}
 }
@@ -3090,16 +3444,50 @@ func wakeInboxScanRetryBackoff(failures uint) time.Duration {
 	return cappedExponentialBackoff(failures, wakeInboxScanRetryBase, wakeInboxScanRetryMax)
 }
 
+func wakeStartupRetryBackoff(failures uint) time.Duration {
+	// Keep several retry opportunities inside the coop parent's readiness
+	// budget. Deriving the ceiling prevents startup backoff from drifting past
+	// the timeout that supervises this child.
+	const readinessSlices = 10
+	return cappedExponentialBackoff(
+		failures,
+		wakeInboxScanRetryBase,
+		wakeReadyTimeout/readinessSlices,
+	)
+}
+
 func wakeInjectionPreconditionCheck(
 	cfg *wakeConfig,
 	controllingTerminalOpenableFn func() bool,
 ) error {
 	if cfg.injectMode == wakeInjectModeNone {
+		if !cfg.legacyTIOCSTIDemoted ||
+			cfg.requestedInjectMode == "" ||
+			cfg.requestedInjectMode == wakeInjectModeNone ||
+			tiocstiLegacyDisabledHint() {
+			return nil
+		}
+		if !controllingTerminalOpenableFn() {
+			return errors.New("controlling terminal is not yet openable while restoring TIOCSTI input")
+		}
+		cfg.injectMode = cfg.requestedInjectMode
+		cfg.legacyTIOCSTIDemoted = false
+		cfg.fallbackWarn = true
+		if err := persistWakeNotifierStatus(
+			cfg,
+			"",
+			effectiveInjectMode(cfg),
+			"",
+		); err != nil {
+			return fmt.Errorf("clear restored injector status: %w", err)
+		}
 		return nil
 	}
 	if cfg.injectVia != "" {
 		if cfg.wakeOwner != nil {
-			return wakeOwnerHealthCheck(*cfg.wakeOwner)
+			if err := wakeOwnerHealthCheck(*cfg.wakeOwner); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -3117,23 +3505,22 @@ func wakeInjectionPreconditionCheck(
 			mode,
 			capabilityErr,
 		)
-		demotionErr := disableWakeInput(
+		demotionErr := disableWakeInputForLegacyTIOCSTI(
 			cfg,
 			newWakeInjectorUnsupportedError(capabilityErr),
 		)
 		cfg.fallbackWarn = false
 		var statusErr error
-		if cfg.recordNotifierStatus != nil {
-			if err := cfg.recordNotifierStatus(
-				wakeInjectorUnsupportedStatus,
-				mode,
-				reason,
-			); err != nil {
-				statusErr = fmt.Errorf(
-					"record changed injector capability after safety demotion: %w",
-					err,
-				)
-			}
+		if err := persistWakeNotifierStatus(
+			cfg,
+			wakeInjectorUnsupportedStatus,
+			mode,
+			reason,
+		); err != nil {
+			statusErr = fmt.Errorf(
+				"record changed injector capability after safety demotion: %w",
+				err,
+			)
 		}
 		_ = writeWakeDiagnostic(cfg, "amq wake: warning: injector capability changed since binding: %s\n", reason)
 		return errors.Join(demotionErr, statusErr)
@@ -3206,18 +3593,49 @@ func wakeOwnerHealthCheck(owner wakeOwner) error {
 	}
 	proc := inspectWakeProcess(owner.PID)
 	if !proc.Running {
-		return fmt.Errorf("inject-via wake owner pid %d is not running", owner.PID)
+		return newWakeOwnershipLoss(
+			fmt.Sprintf("inject-via wake owner pid %d is not running", owner.PID),
+		)
 	}
 	if owner.ProcessStart != "" {
 		if proc.StartToken == "" {
-			return fmt.Errorf("inject-via wake owner process start unavailable for pid %d: %v", owner.PID, proc.InspectError)
+			if proc.InspectError != nil {
+				return fmt.Errorf(
+					"inject-via wake owner process start unavailable for pid %d: %w",
+					owner.PID,
+					proc.InspectError,
+				)
+			}
+			return fmt.Errorf(
+				"inject-via wake owner process start unavailable for pid %d",
+				owner.PID,
+			)
 		}
 		if proc.StartToken != owner.ProcessStart {
-			return fmt.Errorf("inject-via wake owner process start changed for pid %d", owner.PID)
+			return newWakeOwnershipLoss(
+				fmt.Sprintf("inject-via wake owner process start changed for pid %d", owner.PID),
+			)
 		}
 	}
-	if owner.BootID != "" && proc.BootID != "" && proc.BootID != owner.BootID {
-		return fmt.Errorf("inject-via wake owner boot id changed for pid %d", owner.PID)
+	if owner.BootID != "" {
+		switch compareWakeBootID(owner.BootID, proc) {
+		case bootIDMismatch:
+			return newWakeOwnershipLoss(
+				fmt.Sprintf("inject-via wake owner boot id changed for pid %d", owner.PID),
+			)
+		case bootIDUnknown:
+			if proc.InspectError != nil {
+				return fmt.Errorf(
+					"inject-via wake owner boot id unavailable or incomparable for pid %d: %w",
+					owner.PID,
+					proc.InspectError,
+				)
+			}
+			return fmt.Errorf(
+				"inject-via wake owner boot id unavailable or incomparable for pid %d",
+				owner.PID,
+			)
+		}
 	}
 	if owner.SessionID != 0 {
 		sid, err := getWakeProcessSID(owner.PID)
@@ -3225,7 +3643,9 @@ func wakeOwnerHealthCheck(owner wakeOwner) error {
 			return fmt.Errorf("inject-via wake owner session unavailable for pid %d: %w", owner.PID, err)
 		}
 		if sid != owner.SessionID {
-			return fmt.Errorf("inject-via wake owner session changed for pid %d", owner.PID)
+			return newWakeOwnershipLoss(
+				fmt.Sprintf("inject-via wake owner session changed for pid %d", owner.PID),
+			)
 		}
 	}
 	return nil

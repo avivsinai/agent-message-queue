@@ -182,12 +182,14 @@ func (state *wakeDoorbellState) recordRecoveryAttentionDelivered() {
 }
 
 func (state *wakeDoorbellState) noteRecoveryInboxEmpty() {
-	if state.phase != wakeDoorbellRecoveryRequired {
-		state.reset()
-		state.phase = wakeDoorbellRecoveryRequired
+	state.reset()
+}
+
+func (state *wakeDoorbellState) makeDue(now time.Time) {
+	if state.phase != wakeDoorbellRetrying || len(state.cohort) == 0 {
+		return
 	}
-	state.recoveryPending = false
-	state.recoveryAttentionUndelivered = false
+	state.nextAttempt = now
 }
 
 func (state wakeDoorbellState) pendingInput() bool {

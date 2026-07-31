@@ -63,6 +63,245 @@ func TestWakeTerminalAuthorityInjectsThroughRetainedFD(t *testing.T) {
 	}
 }
 
+func TestWakeTerminalAuthorityTreatsCurrentTTYOpenFailureAsTransient(t *testing.T) {
+	fixture := installWakeTerminalAuthorityFixture(t)
+	stop := make(chan struct{})
+	authority, err := bindWakeTerminalAuthority(fixture.generation, stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+
+	inspectWakeTerminalGeneration = func(root, agent string) wakeLockInspection {
+		return inspectWakeLockWithReader(
+			root,
+			agent,
+			fixture.generation.LockPath,
+			func() ([]byte, os.FileInfo, error) {
+				return readWakeLockFileWithInfo(fixture.generation.LockPath)
+			},
+		)
+	}
+	stableOpen := openWakeControllingTerminal
+	var calls atomic.Int64
+	failureObserved := make(chan struct{}, 1)
+	openWakeControllingTerminal = func() (*os.File, error) {
+		if calls.Add(1) == 1 {
+			failureObserved <- struct{}{}
+			return nil, syscall.EMFILE
+		}
+		return stableOpen()
+	}
+	injected := make(chan struct{}, 1)
+	injectWakeTerminalFD = func(uintptr, string) error {
+		select {
+		case injected <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	deliverWakeWatcherMessageForTest(t, root, "codex", "transient-current-tty-open", "claude")
+	done := make(chan error, 1)
+	ticks := make(chan time.Time)
+	maintenanceObserved := make(chan struct{}, 2)
+	var doorbellNow atomic.Int64
+	doorbellNow.Store(time.Now().UnixNano())
+	loopFinished := false
+	go func() {
+		done <- runWakeLoop(wakeConfig{
+			root:                root,
+			me:                  "codex",
+			session:             "session1",
+			injectMode:          wakeInjectModeRaw,
+			controlStop:         stop,
+			beforeTerminalWrite: authority.BeforeWrite,
+			terminalWrite:       authority.Inject,
+			maintenanceTicks:    ticks,
+			doorbellNow: func() time.Time {
+				return time.Unix(0, doorbellNow.Load())
+			},
+			preconditionCheck: func(*wakeConfig) error {
+				maintenanceObserved <- struct{}{}
+				return nil
+			},
+			attentionIsTTY: func() bool { return false },
+			attentionWrite: func(data []byte) (int, error) {
+				return len(data), nil
+			},
+		})
+	}()
+	t.Cleanup(func() {
+		if loopFinished {
+			return
+		}
+		select {
+		case <-stop:
+		default:
+			close(stop)
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("wake loop did not stop")
+		}
+	})
+
+	select {
+	case <-failureObserved:
+	case err := <-done:
+		loopFinished = true
+		t.Fatalf("wake loop exited before transient current-tty open failure: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not exercise transient current-tty open failure")
+	}
+	// Let the failed attempt finish recording its retry deadline before
+	// advancing the fake clock. Signalling from the failing open itself races
+	// that bookkeeping under the race detector.
+	select {
+	case ticks <- time.Now():
+	case err := <-done:
+		loopFinished = true
+		t.Fatalf("transient current-tty open failure killed wake loop: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not accept maintenance retry")
+	}
+	select {
+	case <-maintenanceObserved:
+	case err := <-done:
+		loopFinished = true
+		t.Fatalf("transient current-tty open failure killed wake loop: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not finish maintenance synchronization")
+	}
+	doorbellNow.Add(int64(2 * wakeDoorbellAttentionRetryBase))
+	select {
+	case ticks <- time.Now():
+	case err := <-done:
+		loopFinished = true
+		t.Fatalf("transient current-tty open failure killed wake loop: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not accept due maintenance retry")
+	}
+	select {
+	case <-injected:
+	case err := <-done:
+		loopFinished = true
+		t.Fatalf("transient current-tty open failure killed wake loop: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not retry after transient current-tty open failure")
+	}
+	close(stop)
+	if err := <-done; err != nil {
+		loopFinished = true
+		t.Fatalf("wake loop stop: %v", err)
+	}
+	loopFinished = true
+	if got := calls.Load(); got < 2 {
+		t.Fatalf("current-tty open calls = %d, want retry after EMFILE", got)
+	}
+}
+
+func TestBindWakeTerminalAuthorityKeepsSetupFailuresOutOfRuntimeLossType(t *testing.T) {
+	t.Run("generation disappeared", func(t *testing.T) {
+		fixture := installWakeTerminalAuthorityFixture(t)
+		fixture.current = wakeLockInspection{
+			Exists:   false,
+			Status:   wakeLockMissing,
+			Root:     fixture.generation.Root,
+			Agent:    fixture.generation.Agent,
+			LockPath: fixture.generation.LockPath,
+		}
+
+		authority, err := bindWakeTerminalAuthority(
+			fixture.generation,
+			make(chan struct{}),
+		)
+		if authority != nil {
+			_ = authority.Close()
+			t.Fatal("missing generation returned terminal authority")
+		}
+		if err == nil || isWakeTerminalAuthorityLoss(err) {
+			t.Fatalf("bind-time generation disappearance = %T %v, want ordinary setup error", err, err)
+		}
+	})
+
+	t.Run("generation changed", func(t *testing.T) {
+		fixture := installWakeTerminalAuthorityFixture(t)
+		fixture.current.Lock.Generation = "replacement-generation"
+
+		authority, err := bindWakeTerminalAuthority(
+			fixture.generation,
+			make(chan struct{}),
+		)
+		if authority != nil {
+			_ = authority.Close()
+			t.Fatal("changed generation returned terminal authority")
+		}
+		if err == nil || isWakeTerminalAuthorityLoss(err) {
+			t.Fatalf("bind-time generation change = %T %v, want ordinary setup error", err, err)
+		}
+	})
+
+	t.Run("generation read", func(t *testing.T) {
+		fixture := installWakeTerminalAuthorityFixture(t)
+		inspectWakeTerminalGeneration = func(root, agent string) wakeLockInspection {
+			return inspectWakeLockWithReader(
+				root,
+				agent,
+				fixture.generation.LockPath,
+				func() ([]byte, os.FileInfo, error) {
+					return nil, nil, syscall.EMFILE
+				},
+			)
+		}
+
+		authority, err := bindWakeTerminalAuthority(
+			fixture.generation,
+			make(chan struct{}),
+		)
+		if authority != nil {
+			_ = authority.Close()
+			t.Fatal("generation-read failure returned terminal authority")
+		}
+		if err == nil {
+			t.Fatal("generation-read failure returned nil error")
+		}
+		if isWakeTerminalAuthorityLoss(err) {
+			t.Fatalf("startup generation-read failure became runtime authority loss: %v", err)
+		}
+	})
+
+	t.Run("open controlling terminal", func(t *testing.T) {
+		fixture := installWakeTerminalAuthorityFixture(t)
+		openWakeControllingTerminal = func() (*os.File, error) {
+			return nil, syscall.EMFILE
+		}
+
+		authority, err := bindWakeTerminalAuthority(
+			fixture.generation,
+			make(chan struct{}),
+		)
+		if authority != nil {
+			_ = authority.Close()
+			t.Fatal("terminal-open failure returned terminal authority")
+		}
+		if !errors.Is(err, syscall.EMFILE) {
+			t.Fatalf("terminal-open error = %v, want wrapped EMFILE", err)
+		}
+		if isWakeTerminalAuthorityLoss(err) {
+			t.Fatalf("startup terminal-open failure became runtime authority loss: %v", err)
+		}
+	})
+}
+
 func TestWakeTerminalAuthorityClassifiesUnsupportedOnlyAfterZeroProgressAndRevalidation(t *testing.T) {
 	for _, errno := range []error{syscall.EIO, syscall.EPERM} {
 		t.Run(errno.Error(), func(t *testing.T) {
@@ -107,12 +346,12 @@ func TestWakeTerminalAuthorityEIOWithInvalidCurrentKeepsAuthorityOutcome(t *test
 	}
 	var authorityLoss *wakeTerminalAuthorityLossError
 	if !errors.As(err, &authorityLoss) ||
-		!strings.Contains(err.Error(), "generation changed") {
-		t.Fatalf("Inject error = %T %v, want generation authority loss", err, err)
+		!strings.Contains(err.Error(), "generation disappeared") {
+		t.Fatalf("Inject error = %T %v, want missing-generation authority loss", err, err)
 	}
 }
 
-func TestWakeTerminalAuthorityEIOAfterPartialProgressIsUncertain(t *testing.T) {
+func TestWakeTerminalAuthorityEIOAfterPartialProgressPreservesProgress(t *testing.T) {
 	fixture := installWakeTerminalAuthorityFixture(t)
 	authority, err := bindWakeTerminalAuthority(fixture.generation, make(chan struct{}))
 	if err != nil {
@@ -128,9 +367,12 @@ func TestWakeTerminalAuthorityEIOAfterPartialProgressIsUncertain(t *testing.T) {
 	if errors.As(err, &unsupported) {
 		t.Fatalf("partial progress misclassified as injector unsupported: %v", err)
 	}
-	var authorityLoss *wakeTerminalAuthorityLossError
-	if !errors.As(err, &authorityLoss) {
-		t.Fatalf("Inject error = %T %v, want uncertain authority outcome", err, err)
+	var progress *tiocstiInjectionError
+	if !errors.As(err, &progress) || progress.Progress != 1 {
+		t.Fatalf("Inject error = %T %v, want one accepted byte", err, err)
+	}
+	if isWakeTerminalAuthorityLoss(err) {
+		t.Fatalf("valid retained authority misclassified partial progress as ownership loss: %v", err)
 	}
 }
 
@@ -519,6 +761,33 @@ func TestWakeTerminalAuthorityRefusesChangedCurrentTTYIdentity(t *testing.T) {
 }
 
 func TestWakeTerminalAuthorityRefusesChangedGenerationAndStoppedControl(t *testing.T) {
+	t.Run("generation missing", func(t *testing.T) {
+		fixture := installWakeTerminalAuthorityFixture(t)
+		authority, err := bindWakeTerminalAuthority(fixture.generation, make(chan struct{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = authority.Close() })
+
+		fixture.current = wakeLockInspection{
+			Exists:   false,
+			Status:   wakeLockMissing,
+			Reason:   "wake lock does not exist",
+			Root:     fixture.generation.Root,
+			Agent:    fixture.generation.Agent,
+			LockPath: fixture.generation.LockPath,
+		}
+		err = authority.Inject("must-not-arrive")
+		if !isWakeTerminalAuthorityLoss(err) ||
+			classifyWakeFailure(err) != wakeFailureFatal ||
+			!strings.Contains(err.Error(), "wake generation disappeared") {
+			t.Fatalf("missing generation error = %v, want fatal disappearance", err)
+		}
+		if len(fixture.injections) != 0 {
+			t.Fatalf("missing generation injected: %#v", fixture.injections)
+		}
+	})
+
 	t.Run("generation", func(t *testing.T) {
 		fixture := installWakeTerminalAuthorityFixture(t)
 		authority, err := bindWakeTerminalAuthority(fixture.generation, make(chan struct{}))
@@ -530,6 +799,7 @@ func TestWakeTerminalAuthorityRefusesChangedGenerationAndStoppedControl(t *testi
 		fixture.current.Lock.Generation = "replacement-generation"
 		err = authority.Inject("must-not-arrive")
 		if !isWakeTerminalAuthorityLoss(err) ||
+			classifyWakeFailure(err) != wakeFailureFatal ||
 			!strings.Contains(err.Error(), "wake generation changed") {
 			t.Fatalf("changed generation error = %v", err)
 		}
@@ -565,7 +835,7 @@ func TestWakeTerminalControlStoppedClassificationIsStructural(t *testing.T) {
 		t.Fatalf("typed stopped-control loss was not classified: %v", stopped)
 	}
 
-	sameReasonOnly := newWakeTerminalAuthorityLoss("wake control stopped", nil)
+	sameReasonOnly := newWakeTerminalAuthorityLoss("wake control stopped")
 	if isWakeTerminalControlStopped(sameReasonOnly) {
 		t.Fatalf("reason-only authority loss was classified as stopped control: %v", sameReasonOnly)
 	}
@@ -677,7 +947,7 @@ func TestRunWakeLoopTerminatesOnTerminalAuthorityLoss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loss := newWakeTerminalAuthorityLoss("test authority loss", nil)
+	loss := newWakeTerminalAuthorityLoss("test authority loss")
 	terminalWriteCalled := false
 	attentionWrites := 0
 	err = runWakeLoop(wakeConfig{
