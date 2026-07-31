@@ -32,6 +32,13 @@ type doctorResult struct {
 	Ops *doctorOpsResult `json:"ops,omitempty"`
 }
 
+func wakeCheckTextValue(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "none"
+	}
+	return value
+}
+
 func runDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "Output as JSON")
@@ -276,9 +283,6 @@ func runDoctor(args []string) error {
 		}
 		for _, wl := range result.Ops.WakeLocks {
 			if wl.Status == string(wakeLockValid) {
-				if wl.CurrentTerminal {
-					continue
-				}
 				tty := wl.TTY
 				if tty == "" {
 					tty = "unknown"
@@ -287,14 +291,36 @@ func runDoctor(args []string) error {
 				if started == "" {
 					started = "unknown"
 				}
-				line := fmt.Sprintf(
-					"  wake for %s is owned by a live process: pid=%d tty=%s started=%s root=%s; "+
-						"no AMQ command can safely take over this live wake",
-					wl.Agent,
-					wl.PID,
-					tty,
-					started,
-					wl.Root,
+				var line string
+				if wl.CurrentTerminal {
+					line = fmt.Sprintf(
+						"  wake for %s is live on the current terminal: pid=%d tty=%s started=%s root=%s",
+						wl.Agent,
+						wl.PID,
+						tty,
+						started,
+						wl.Root,
+					)
+				} else {
+					line = fmt.Sprintf(
+						"  wake for %s is owned by a live process: pid=%d tty=%s started=%s root=%s; "+
+							"no AMQ command can safely take over this live wake",
+						wl.Agent,
+						wl.PID,
+						tty,
+						started,
+						wl.Root,
+					)
+				}
+				line += fmt.Sprintf(
+					" running_image=%s running_version=%s current_image=%s current_version=%s image_status=%s restart=%s next=%s",
+					wakeCheckTextValue(wl.RunningImagePath),
+					wakeCheckTextValue(wl.RunningVersion),
+					wakeCheckTextValue(wl.CurrentImagePath),
+					wakeCheckTextValue(wl.CurrentVersion),
+					wakeCheckTextValue(wl.ImageStatus),
+					wakeCheckTextValue(wl.RestartCapability),
+					wakeCheckTextValue(wl.NextAction),
 				)
 				if err := writeStdoutLine(line); err != nil {
 					return err
@@ -330,6 +356,18 @@ func runDoctor(args []string) error {
 			}
 			if wl.RepairAvailable && wl.Status == string(wakeLockStale) {
 				line += " repair=" + wl.Repair
+			}
+			if wl.RestartCapability != "" {
+				line += fmt.Sprintf(
+					" running_image=%s running_version=%s current_image=%s current_version=%s image_status=%s restart=%s next=%s",
+					wakeCheckTextValue(wl.RunningImagePath),
+					wakeCheckTextValue(wl.RunningVersion),
+					wakeCheckTextValue(wl.CurrentImagePath),
+					wakeCheckTextValue(wl.CurrentVersion),
+					wakeCheckTextValue(wl.ImageStatus),
+					wl.RestartCapability,
+					wakeCheckTextValue(wl.NextAction),
+				)
 			}
 			if err := writeStdoutLine(line); err != nil {
 				return err

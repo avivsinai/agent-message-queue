@@ -289,6 +289,23 @@ amq reply --id "msg_123" --kind review_response --body "LGTM with minor suggesti
 
 > Co-op works without wake. `coop exec` starts it automatically.
 
+Before replacing or repairing a wake, inspect its exact capability:
+
+```bash
+amq wake check --me codex
+amq wake check --me codex --json
+```
+
+This command never changes wake state. `restart_capability=agent_safe` is the
+only result an automated agent may act on, using the returned `next_action`.
+For `operator_only`, leave the live wake running and hand the action to its
+owning terminal or supervisor. For `unavailable`, preserve the state and
+diagnose it. A process without a controlling TTY must not kill or replace a
+live raw wake, and TIOCSTI refusal must not be treated as permission to weaken
+delivery to attention-only. The result includes both the running wake image and
+the currently invoked AMQ image; legacy locks may report unknown image fields.
+`amq doctor --ops` shares these fields for discovered locks.
+
 `amq wake` uses TIOCSTI to inject notifications into your terminal by default.
 Pass `--baseline-existing` when starting a new wake after the agent already
 owns its terminal. Messages already present in `inbox/new` remain unread and do

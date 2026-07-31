@@ -294,12 +294,23 @@ silently select a different project's mailbox.
 amq doctor
 amq doctor --ops
 amq doctor --ops --json
+amq wake check --me codex
+amq wake check --me codex --json
 amq doctor --ops --fix-wake-locks
 amq wake repair --me codex
 amq wake recover-owner --me codex
 amq wake retire --me codex --inject-via /absolute/injector \
   --inject-arg exec --inject-arg terminal-id
 ```
+
+`amq wake check` is read-only. It reports whether the current process can start
+a full-strength wake, whether a saved inject-via target can repair the exact
+stale wake, and the running and current AMQ image path and version. Its
+`restart_capability` is one of `agent_safe`, `operator_only`, or `unavailable`,
+with an exact `next_action`. Automated agents may act only on `agent_safe`.
+They must leave a live wake running for `operator_only`, and must never turn a
+TIOCSTI refusal into an attention-only downgrade. `doctor --ops` exposes the
+same image and restart fields for every discovered wake lock.
 
 Wake locks reported by `doctor --ops` can be `stale`, `unverified`, or, in JSON
 output, any current lock state. With `--fix-wake-locks`, fixed and error states
@@ -528,7 +539,7 @@ Common command groups:
 | Core messaging | `init`, `send`, `list`, `read`, `drain`, `reply`, `thread`, `trace`, `watch`, `monitor`, `receipts` |
 | Collaboration | `coop init`, `coop exec`, `swarm list`, `swarm join`, `swarm tasks`, `swarm bridge` |
 | Integrations | `integration symphony init`, `integration symphony emit`, `integration kanban bridge` |
-| Operations | `presence set`, `presence list`, `route explain`, `who`, `doctor`, `doctor --ops`, `wake repair`, `wake recover-owner`, `wake retire`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |
+| Operations | `presence set`, `presence list`, `route explain`, `who`, `doctor`, `doctor --ops`, `wake check`, `wake repair`, `wake recover-owner`, `wake retire`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |
 
 ### Exit codes
 

@@ -536,6 +536,17 @@ func TestDoctorOpsTextReportsForeignLiveWakeAndSilencesCurrentTTY(t *testing.T) 
 	if strings.Contains(output, "owned by a live process") {
 		t.Fatalf("current-terminal wake was reported as foreign:\n%s", output)
 	}
+	for _, want := range []string{
+		"wake for codex is live on the current terminal",
+		"running_image=",
+		"current_image=",
+		"restart=operator_only",
+		"next=",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("current-terminal wake output missing %q:\n%s", want, output)
+		}
+	}
 }
 
 func TestRunOpsChecksFixRemovesProvenStartMismatch(t *testing.T) {
@@ -564,6 +575,9 @@ func TestRunOpsChecksFixRemovesProvenStartMismatch(t *testing.T) {
 	got := result.WakeLocks[0]
 	if got.Status != "fixed" || !got.Removed {
 		t.Fatalf("unexpected wake lock fix result: %#v", got)
+	}
+	if strings.Contains(got.NextAction, "remove the proven-stale lock") {
+		t.Fatalf("fixed wake advertised stale-lock removal again: %#v", got)
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("proven stale lock still exists: %v", err)
