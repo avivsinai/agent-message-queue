@@ -191,6 +191,7 @@ func TestRunWakeWithLoopSeparatesInheritedAttentionFromDiagnostics(t *testing.T)
 	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
 		t.Fatal(err)
 	}
+	deliverPartialWakeMessageForTest(t, root, "orchestrator", "attention-fd")
 
 	attentionRead, attentionWrite, err := os.Pipe()
 	if err != nil {
@@ -214,6 +215,7 @@ func TestRunWakeWithLoopSeparatesInheritedAttentionFromDiagnostics(t *testing.T)
 
 	t.Setenv(envWakeAttentionFD, strconv.Itoa(inheritedFD))
 	sentinel := errors.New("wake-loop-complete")
+	inputWrites := 0
 	var runErr error
 	stderr := captureWakeStderr(t, func() {
 		runErr = runWakeWithLoop([]string{
@@ -236,6 +238,15 @@ func TestRunWakeWithLoopSeparatesInheritedAttentionFromDiagnostics(t *testing.T)
 			}); err != nil {
 				t.Fatalf("emit inherited-FD attention: %v", err)
 			}
+			cfg.session = "session1"
+			cfg.previewLen = 80
+			cfg.terminalWrite = func(string) error {
+				inputWrites++
+				return nil
+			}
+			if err := notifyNewMessages(&cfg); err != nil {
+				t.Fatalf("emit peer notice to inherited attention FD: %v", err)
+			}
 			return sentinel
 		})
 	})
@@ -250,11 +261,17 @@ func TestRunWakeWithLoopSeparatesInheritedAttentionFromDiagnostics(t *testing.T)
 	if stderr != "diagnostic-only\n" {
 		t.Fatalf("diagnostic stream = %q, want only diagnostic", stderr)
 	}
+	if inputWrites != 0 {
+		t.Fatalf("output-only inherited attention wrote %d input chunks", inputWrites)
+	}
 	attentionOutput, err := io.ReadAll(attentionRead)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(attentionOutput), "attention-only\n"; got != want {
+	wantAttention := "attention-only\n" +
+		"AMQ [session1]: message from peer - attention-fd. " +
+		"Drain with: amq drain --include-body — then act on it\n"
+	if got, want := string(attentionOutput), wantAttention; got != want {
 		t.Fatalf("attention stream = %q, want %q", got, want)
 	}
 }

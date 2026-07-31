@@ -989,8 +989,10 @@ func TestRunWakeLoopTerminatesOnTerminalAuthorityLoss(t *testing.T) {
 	if terminalWriteCalled {
 		t.Fatal("wake loop wrote after terminal authority loss")
 	}
-	if attentionWrites != 1 {
-		t.Fatalf("wake loop authority-loss attention writes = %d, want 1", attentionWrites)
+	// Conclusive authority loss means the terminal is no longer ours. Preserve
+	// the typed fatal exit without narrating into the lost destination.
+	if attentionWrites != 0 {
+		t.Fatalf("wake loop authority-loss attention writes = %d, want 0", attentionWrites)
 	}
 }
 
