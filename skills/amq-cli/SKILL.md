@@ -219,6 +219,8 @@ amq integration kanban bridge --me codex --workspace-id my-workspace
 amq doctor --ops
 amq doctor --ops --json
 amq doctor --root <exact-root> --ops
+amq wake check --me <agent>
+amq wake check --me <agent> --json
 
 # Base-config-only session repair outside the current pin
 amq doctor --root <session-root> --base-root <base-root> \
@@ -278,6 +280,15 @@ notification, not message consumption. `recent_activity` means only that
 `last_seen` is fresh. Use `drain` or `monitor` when consumption is required;
 run long-lived wake/monitor commands under launchd, systemd, or another
 supervisor rather than treating AMQ itself as a daemon.
+
+Before replacing a wake, run `amq wake check --me <agent> --json`. It is
+read-only and reports the running/current image path and version plus an exact
+`next_action`. An automated agent may act only when
+`restart_capability=agent_safe`. For `operator_only`, leave the live wake
+running and hand off to its owning terminal or supervisor. For `unavailable`,
+preserve the state and diagnose it. Never kill a live raw wake from a non-TTY
+process, and never accept an attention-only fallback as a replacement for
+full-strength input delivery.
 
 Those consuming commands, `watch`, and all DLQ commands refuse a raw
 target that conflicts with a complete `AM_BASE_ROOT`/`AM_SESSION` pin before
