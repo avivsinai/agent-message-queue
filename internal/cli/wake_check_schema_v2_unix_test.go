@@ -568,10 +568,173 @@ func TestWakeCheckV2ObservationChangedIsRetryOnly(t *testing.T) {
 		}) {
 		t.Fatalf("observation-changed decision = %#v", decision)
 	}
+	if decision.Reload.Status != wakeReloadUnavailable ||
+		decision.Reload.ReasonCode != wakeReloadReasonObservationChanged {
+		t.Fatalf("observation-changed reload = %#v", decision.Reload)
+	}
 	for _, mutating := range []string{wakeActionStartWake, wakeActionRepairWake, wakeActionRecoverOwner} {
 		if decision.Action.Kind == mutating {
 			t.Fatalf("observation change advertised mutating action %q", mutating)
 		}
+	}
+}
+
+func TestWakeCheckV2ReloadObservationChangeUsesExistingSnapshotRetry(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	lock := validWakeResumeLockForTest()
+	lock.Root = canonicalWakeRoot(root)
+	lock.Agent = "codex"
+	lock.Generation = "first-resume-generation"
+	writeWakeLockForTest(t, root, "codex", lock)
+	inspections := 0
+	var expectedAfterChange map[string]wakeCheckTreeEntry
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		inspections++
+		if inspections == 2 {
+			replacement := lock
+			replacement.Generation = "replacement-resume-generation"
+			writeWakeLockExactForTest(t, root, "codex", replacement)
+			expectedAfterChange = snapshotWakeCheckTree(t, root)
+		}
+		return wakeProcessInfo{
+			PID: pid, Running: true, StartToken: lock.ProcessStart, BootID: lock.BootID,
+			Executable: lock.RunningImageEvidence.ExecutionPath,
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+	stubWakeCheckRuntime(t, false, "0.50.1")
+
+	output, err := captureEnvStdout(t, func() error {
+		return runWake([]string{
+			"check", "--root", root, "--me", "codex", "--json", "--json-schema=2",
+		})
+	})
+	if err != nil {
+		t.Fatalf("wake check v2: %v", err)
+	}
+	var got wakeCheckResultV2
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("decode wake check v2: %v\n%s", err, output)
+	}
+	if got.Reload.Status != wakeReloadUnavailable ||
+		got.Reload.ReasonCode != wakeReloadReasonObservationChanged ||
+		got.RestartCapability != wakeRestartUnavailable ||
+		got.Action.Kind != wakeActionRetryCheck {
+		t.Fatalf("changing reload observation = %#v", got)
+	}
+	if expectedAfterChange == nil {
+		t.Fatal("test did not inject the lock change")
+	}
+	assertWakeCheckTreeUnchanged(t, root, expectedAfterChange)
+}
+
+func TestWakeCheckV2ReloadClassificationIsStructuralAndNonExecutable(t *testing.T) {
+	validLock := validWakeResumeLockForTest()
+	validInspection := wakeLockInspection{
+		Exists:            true,
+		Status:            wakeLockValid,
+		PID:               validLock.PID,
+		Lock:              validLock,
+		Process:           wakeProcessInfo{PID: validLock.PID, Running: true},
+		IdentityConfirmed: true,
+	}
+	tests := []struct {
+		name       string
+		mutate     func(*wakeLockInspection)
+		wantStatus string
+		wantReason string
+	}{
+		{
+			name: "not live",
+			mutate: func(inspection *wakeLockInspection) {
+				inspection.Process.Running = false
+			},
+			wantStatus: wakeReloadUnavailable,
+			wantReason: wakeReloadReasonNotLive,
+		},
+		{
+			name: "legacy not advertised",
+			mutate: func(inspection *wakeLockInspection) {
+				inspection.Lock.ResumeSchema = 0
+				inspection.Lock.ResumeOwner = nil
+				inspection.Lock.RunningImageEvidence = nil
+			},
+			wantStatus: wakeReloadUnavailable,
+			wantReason: wakeReloadReasonNotAdvertised,
+		},
+		{
+			name: "future schema",
+			mutate: func(inspection *wakeLockInspection) {
+				inspection.Lock.ResumeSchema = wakeResumeSchemaV2 + 1
+			},
+			wantStatus: wakeReloadUnavailable,
+			wantReason: wakeReloadReasonSchemaUnsupported,
+		},
+		{
+			name: "malformed advertisement",
+			mutate: func(inspection *wakeLockInspection) {
+				inspection.Lock.RunningImageEvidence = nil
+			},
+			wantStatus: wakeReloadUnavailable,
+			wantReason: wakeReloadReasonAdvertisementInvalid,
+		},
+		{
+			name: "repair lineage",
+			mutate: func(inspection *wakeLockInspection) {
+				inspection.Lock.SourceGeneration = "repaired-generation"
+			},
+			wantStatus: wakeReloadUnavailable,
+			wantReason: wakeReloadReasonAdvertisementInvalid,
+		},
+		{
+			name:       "valid advertisement",
+			wantStatus: wakeReloadAdvertised,
+			wantReason: wakeReloadReasonCommandUnavailable,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			inspection := validInspection
+			if test.mutate != nil {
+				test.mutate(&inspection)
+			}
+			got := classifyWakeCheckReload(inspection)
+			if got.Status != test.wantStatus || got.ReasonCode != test.wantReason {
+				t.Fatalf("reload decision = %#v, want status=%q reason=%q", got, test.wantStatus, test.wantReason)
+			}
+		})
+	}
+
+	stubWakeCheckRuntime(t, false, "0.50.1")
+	decision := buildWakeCheckDecision("/queue", "codex", validInspection, &opsWakeLock{}, false)
+	if decision.Reload.Status != wakeReloadAdvertised ||
+		decision.Reload.ReasonCode != wakeReloadReasonCommandUnavailable ||
+		decision.RestartCapability != wakeRestartOperatorOnly ||
+		decision.Action.Kind != wakeActionPreserveLiveWake ||
+		decision.Action.Command != nil {
+		t.Fatalf("advertised reload changed executable action semantics: %#v", decision)
+	}
+	rendered := renderWakeCheckV2(decision)
+	if rendered.Reload.Status != wakeReloadAdvertised ||
+		rendered.Reload.ReasonCode != wakeReloadReasonCommandUnavailable {
+		t.Fatalf("advertised reload output = %#v", rendered.Reload)
+	}
+}
+
+func TestWakeCheckV2UnsupportedPlatformReloadIsUnavailable(t *testing.T) {
+	decision := unsupportedWakeCheckDecision("/queue", "codex")
+	if decision.Reload.Status != wakeReloadUnavailable ||
+		decision.Reload.ReasonCode != wakeReloadReasonPlatformUnsupported {
+		t.Fatalf("unsupported reload decision = %#v", decision.Reload)
+	}
+	reload := renderWakeCheckV2(decision).Reload
+	if reload.Status != wakeReloadUnavailable ||
+		reload.ReasonCode != wakeReloadReasonPlatformUnsupported {
+		t.Fatalf("unsupported reload output = %#v", reload)
 	}
 }
 

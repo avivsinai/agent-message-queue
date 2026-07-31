@@ -21,7 +21,9 @@ const (
 	wakeImageDifferent = "different"
 	wakeImageUnknown   = "unknown"
 
-	wakeCheckUnknown = "unknown"
+	wakeCheckUnknown      = "unknown"
+	wakeReloadAdvertised  = "advertised"
+	wakeReloadUnavailable = "unavailable"
 )
 
 const (
@@ -59,6 +61,13 @@ const (
 	wakeRepairReasonLive                 = "wake_live"
 	wakeRepairReasonNotStale             = "wake_not_stale"
 	wakeRepairReasonExactEvidenceMissing = "exact_repair_evidence_unavailable"
+	wakeReloadReasonNotLive              = "reload_not_live"
+	wakeReloadReasonNotAdvertised        = "reload_not_advertised"
+	wakeReloadReasonSchemaUnsupported    = "reload_schema_unsupported"
+	wakeReloadReasonAdvertisementInvalid = "reload_advertisement_invalid"
+	wakeReloadReasonObservationChanged   = "reload_observation_changed"
+	wakeReloadReasonPlatformUnsupported  = "reload_platform_unsupported"
+	wakeReloadReasonCommandUnavailable   = "reload_command_unavailable"
 )
 
 type wakeCheckDecision struct {
@@ -69,6 +78,7 @@ type wakeCheckDecision struct {
 	Wake                    wakeCheckWakeDecision
 	Image                   wakeCheckImageDecision
 	Repair                  wakeCheckRepairDecision
+	Reload                  wakeCheckReloadDecision
 	RestartCapability       string
 	Action                  wakeCheckActionDecision
 	legacyRestartCapability string
@@ -115,6 +125,11 @@ type wakeCheckRepairDecision struct {
 	legacyReason       string
 }
 
+type wakeCheckReloadDecision struct {
+	Status     string
+	ReasonCode string
+}
+
 type wakeCheckActionDecision struct {
 	Kind             string
 	Actor            string
@@ -138,6 +153,7 @@ type wakeCheckResultV2 struct {
 	Wake              wakeCheckWakeV2     `json:"wake"`
 	Image             wakeCheckImageV2    `json:"image"`
 	Repair            wakeCheckRepairV2   `json:"repair"`
+	Reload            wakeCheckReloadV2   `json:"reload"`
 	RestartCapability string              `json:"restart_capability"`
 	Action            wakeCheckActionV2   `json:"action"`
 }
@@ -178,6 +194,11 @@ type wakeCheckRepairV2 struct {
 	InjectViaAvailable bool    `json:"inject_via_available"`
 	ReasonCode         *string `json:"reason_code"`
 	Detail             *string `json:"detail"`
+}
+
+type wakeCheckReloadV2 struct {
+	Status     string `json:"status"`
+	ReasonCode string `json:"reason_code"`
 }
 
 type wakeCheckActionV2 struct {
@@ -223,6 +244,10 @@ func renderWakeCheckV2(decision wakeCheckDecision) wakeCheckResultV2 {
 			InjectViaAvailable: decision.Repair.InjectViaAvailable,
 			ReasonCode:         decision.Repair.ReasonCode,
 			Detail:             decision.Repair.Detail,
+		},
+		Reload: wakeCheckReloadV2{
+			Status:     decision.Reload.Status,
+			ReasonCode: decision.Reload.ReasonCode,
 		},
 		RestartCapability: decision.RestartCapability,
 		Action: wakeCheckActionV2{
@@ -357,6 +382,10 @@ func unsupportedWakeCheckDecision(root, agent string) wakeCheckDecision {
 			ReasonCode:   &reason,
 			Detail:       &detail,
 			legacyReason: detail,
+		},
+		Reload: wakeCheckReloadDecision{
+			Status:     wakeReloadUnavailable,
+			ReasonCode: wakeReloadReasonPlatformUnsupported,
 		},
 		RestartCapability: wakeRestartUnavailable,
 		Action: wakeCheckActionDecision{

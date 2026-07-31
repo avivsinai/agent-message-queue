@@ -312,6 +312,10 @@ func unstableWakeCheckDecision(root, me string, inspection wakeLockInspection) w
 		),
 		Message: "wake state changed during inspection; retry amq wake check",
 	}
+	decision.Reload = wakeCheckReloadDecision{
+		Status:     wakeReloadUnavailable,
+		ReasonCode: wakeReloadReasonObservationChanged,
+	}
 	finalizeWakeCheckDecision(&decision)
 	return decision
 }
@@ -369,6 +373,7 @@ func buildWakeCheckDecision(
 			},
 			Status: wakeImageUnknown,
 		},
+		Reload: classifyWakeCheckReload(inspection),
 	}
 	decision.Wake.Live = inspection.Exists &&
 		inspection.Status == wakeLockValid &&
@@ -405,6 +410,29 @@ func buildWakeCheckDecision(
 	classifyWakeCheckRestart(&decision, inspection, opsLock)
 	finalizeWakeCheckDecision(&decision)
 	return decision
+}
+
+func classifyWakeCheckReload(inspection wakeLockInspection) wakeCheckReloadDecision {
+	unavailable := func(reason string) wakeCheckReloadDecision {
+		return wakeCheckReloadDecision{Status: wakeReloadUnavailable, ReasonCode: reason}
+	}
+	if !inspection.Exists || inspection.Status != wakeLockValid ||
+		!inspection.IdentityConfirmed || !inspection.Process.Running {
+		return unavailable(wakeReloadReasonNotLive)
+	}
+	if inspection.Lock.ResumeSchema == 0 {
+		return unavailable(wakeReloadReasonNotAdvertised)
+	}
+	if inspection.Lock.ResumeSchema != wakeResumeSchemaV2 {
+		return unavailable(wakeReloadReasonSchemaUnsupported)
+	}
+	if validateWakeResumeAdvertisement(inspection.Lock) != nil {
+		return unavailable(wakeReloadReasonAdvertisementInvalid)
+	}
+	return wakeCheckReloadDecision{
+		Status:     wakeReloadAdvertised,
+		ReasonCode: wakeReloadReasonCommandUnavailable,
+	}
 }
 
 func renderWakeCheckV1(decision wakeCheckDecision) wakeCheckResult {
