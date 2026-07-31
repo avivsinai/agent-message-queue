@@ -235,10 +235,13 @@ exact root and `AM_SESSION` is empty. `read`, `drain`, `monitor`, `watch`,
 with that pin before reading, moving, or delivering mailbox state. An implicit
 participating command also refuses when the active pin conflicts with an
 initialized cwd-local queue discovered from a project `.amqrc` or repo-local
-`.agent-mail`; AMQ does not silently choose between the two roots. Repin to the
-cwd-local queue, use deliberate `--session`/`--project` routing, or pass an
-explicit `--root` to confirm the active queue. Explicit roots remain subject
-to the ordinary pin checks. For deliberate raw-root access,
+`.agent-mail`; AMQ does not silently choose between the two roots. The narrow
+exception is a live identity-bound sessionless pin: when both identity tokens
+authenticate its exact root, that explicit context outranks ambient cwd
+discovery. Named, legacy, incomplete, stale, or mismatched pins still refuse.
+Otherwise, repin to the cwd-local queue, use deliberate `--session`/`--project`
+routing, or pass an explicit `--root` to confirm the active queue. Explicit
+roots remain subject to the ordinary pin checks. For deliberate raw-root access,
 `--ignore-session-pin` is accepted only together with a non-empty explicit
 `--root`; blank `--root` and `--session` values are usage errors. `list`
 remains a non-destructive inspection path: it warns on a pin mismatch but

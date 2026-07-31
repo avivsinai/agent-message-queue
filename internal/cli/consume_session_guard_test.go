@@ -41,6 +41,71 @@ func TestDrainRefusesPinnedRootWhenCwdHasRepoLocalSession(t *testing.T) {
 	}
 }
 
+func TestDrainHonorsVerifiedSessionlessRootWhenCwdHasDifferentRepoQueue(t *testing.T) {
+	project := t.TempDir()
+	localRoot := filepath.Join(project, ".agent-mail")
+	targetRoot := filepath.Join(localRoot, "squad", "v2-25-1")
+	for _, root := range []string{localRoot, targetRoot} {
+		if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+			t.Fatalf("initialize %s: %v", root, err)
+		}
+		configureSendTestRoot(t, root, "alice")
+	}
+	if err := os.WriteFile(filepath.Join(project, ".amqrc"), []byte(`{"root":".agent-mail"}`), 0o600); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+	deliverGuardMessage(t, targetRoot, "alice", "verified-sessionless-root")
+	t.Chdir(project)
+	pinSendSessionForTest(t, targetRoot, targetRoot, "")
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runDrain([]string{"--me", "alice", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("verified sessionless root should outrank cwd discovery: %v", err)
+	}
+	if !strings.Contains(stdout, `"id": "verified-sessionless-root"`) {
+		t.Fatalf("drain did not consume the identity-pinned root: %q", stdout)
+	}
+	if got := inboxCount(t, targetRoot, "alice"); got != 0 {
+		t.Fatalf("identity-pinned inbox count = %d, want 0 after drain", got)
+	}
+	if got := inboxCount(t, localRoot, "alice"); got != 0 {
+		t.Fatalf("drain touched cwd-local inbox: %d message(s)", got)
+	}
+}
+
+func TestDrainRefusesStaleSessionlessIdentityDespiteCwdConflict(t *testing.T) {
+	parent := t.TempDir()
+	targetRoot := initializedSendMailboxRoot(t, "alice")
+	deliverGuardMessage(t, targetRoot, "alice", "stale-sessionless-identity")
+	localProject := filepath.Join(parent, "local")
+	localRoot := filepath.Join(localProject, ".agent-mail")
+	if err := fsq.EnsureAgentDirs(localRoot, "alice"); err != nil {
+		t.Fatalf("initialize local root: %v", err)
+	}
+	configureSendTestRoot(t, localRoot, "alice")
+	if err := os.MkdirAll(localProject, 0o700); err != nil {
+		t.Fatalf("create local project: %v", err)
+	}
+	t.Chdir(localProject)
+	pinSendSessionForTest(t, targetRoot, targetRoot, "")
+	staleRootID, err := resolveTreeIdentityToken(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve stale identity fixture: %v", err)
+	}
+	t.Setenv(envRootID, staleRootID)
+
+	err = runDrain([]string{"--me", "alice"})
+	assertConsumeRefused(t, err, "drain")
+	if got := inboxCount(t, targetRoot, "alice"); got != 1 {
+		t.Fatalf("stale identity moved target message; count = %d, want 1", got)
+	}
+	if got := inboxCount(t, localRoot, "alice"); got != 0 {
+		t.Fatalf("stale identity touched local inbox: %d message(s)", got)
+	}
+}
+
 func TestDrainPinnedAMRootOverridesBrokenLowerProjectConfig(t *testing.T) {
 	targetRoot := initializedSendMailboxRoot(t, "alice")
 	deliverGuardMessage(t, targetRoot, "alice", "am-root-override")
@@ -61,7 +126,7 @@ func TestDrainPinnedAMRootOverridesBrokenLowerProjectConfig(t *testing.T) {
 	}
 }
 
-func TestDrainBrokenLowerProjectConfigStillDetectsRepoLocalConflict(t *testing.T) {
+func TestDrainVerifiedSessionlessPinOverridesBrokenLowerProjectConfigAndLocalQueue(t *testing.T) {
 	targetRoot := initializedSendMailboxRoot(t, "alice")
 	deliverGuardMessage(t, targetRoot, "alice", "must-stay-global")
 	projectDir := enterBrokenRootProject(t)
@@ -71,17 +136,18 @@ func TestDrainBrokenLowerProjectConfigStillDetectsRepoLocalConflict(t *testing.T
 	}
 	pinSendSessionForTest(t, targetRoot, targetRoot, "")
 
-	err := runDrain([]string{"--me", "alice"})
-	assertConsumeRefused(t, err, "drain")
-	if got := inboxCount(t, targetRoot, "alice"); got != 1 {
-		t.Fatalf("conflicting drain moved AM_ROOT inbox message; count = %d, want 1", got)
+	if err := runDrain([]string{"--me", "alice"}); err != nil {
+		t.Fatalf("verified sessionless root should override lower cwd evidence: %v", err)
+	}
+	if got := inboxCount(t, targetRoot, "alice"); got != 0 {
+		t.Fatalf("AM_ROOT inbox count = %d, want 0 after drain", got)
 	}
 	if got := inboxCount(t, localRoot, "alice"); got != 0 {
-		t.Fatalf("conflicting drain touched repo-local inbox; count = %d, want 0", got)
+		t.Fatalf("drain touched repo-local inbox; count = %d, want 0", got)
 	}
 }
 
-func TestDrainRefusesSessionlessForeignPinWhenCwdHasOnlyInitializedSession(t *testing.T) {
+func TestDrainHonorsVerifiedSessionlessForeignPinWhenCwdHasOnlyInitializedSession(t *testing.T) {
 	parent := t.TempDir()
 	globalProject := filepath.Join(parent, "global")
 	repoProject := filepath.Join(parent, "snagline")
@@ -103,13 +169,14 @@ func TestDrainRefusesSessionlessForeignPinWhenCwdHasOnlyInitializedSession(t *te
 	}
 	pinSendSessionForTest(t, globalRoot, globalRoot, "")
 
-	err = runDrain([]string{"--me", "alice"})
-	assertConsumeRefused(t, err, "drain")
-	if got := inboxCount(t, globalRoot, "alice"); got != 1 {
-		t.Fatalf("foreign sessionless marker count = %d, want 1 untouched", got)
+	if err := runDrain([]string{"--me", "alice"}); err != nil {
+		t.Fatalf("verified sessionless root should override cwd discovery: %v", err)
+	}
+	if got := inboxCount(t, globalRoot, "alice"); got != 0 {
+		t.Fatalf("foreign sessionless marker count = %d, want 0 after drain", got)
 	}
 	if got := inboxCount(t, localAuth, "alice"); got != 0 {
-		t.Fatalf("ambiguous drain touched local auth inbox: %d message(s)", got)
+		t.Fatalf("drain touched local auth inbox: %d message(s)", got)
 	}
 }
 

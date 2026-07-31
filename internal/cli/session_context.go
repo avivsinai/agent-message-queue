@@ -387,6 +387,21 @@ func guardCwdLocalContext(command, target string) error {
 	if !pin.Present {
 		return nil
 	}
+	if pin.IdentityPin && pin.Session == "" {
+		// A live identity-bound exact-root pin is stronger routing evidence
+		// than ambient cwd discovery. Keep named and legacy pins subject to
+		// the cwd conflict guard because they do not express this exact-root
+		// authority.
+		if err := verifyRootUnderBase(
+			pin.BaseRoot,
+			pin.BaseRootID,
+			pin.Session,
+			target,
+			pin.RootID,
+		); err == nil {
+			return nil
+		}
+	}
 	local, ok, err := cwdLocalMailboxRootForSession(pin.Session)
 	if err != nil || !ok {
 		return err
