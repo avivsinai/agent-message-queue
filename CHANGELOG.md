@@ -13,12 +13,32 @@ editing the release PR.
 
 ### Features
 
-* **wake:** expose restart capability probe ([#379](https://github.com/avivsinai/agent-message-queue/issues/379)) ([2d1ef6b](https://github.com/avivsinai/agent-message-queue/commit/2d1ef6b5bb5a57d8196ba12414cd64f5f6a4f23e)), closes [#356](https://github.com/avivsinai/agent-message-queue/issues/356)
+* **wake:** expose a read-only restart capability probe ([#379](https://github.com/avivsinai/agent-message-queue/issues/379)) ([2d1ef6b](https://github.com/avivsinai/agent-message-queue/commit/2d1ef6b5bb5a57d8196ba12414cd64f5f6a4f23e))
+
+`amq wake check` reports whether a wake can be safely restarted as
+`agent_safe`, `operator_only`, or `unavailable`, with an exact next action. It
+diagnoses restart capability; it does not restart a wake. Existing wakes remain
+`operator_only`: they cannot be replaced in place and still require their
+owning terminal or supervisor. Agent-safe restart remains tracked in
+[#356](https://github.com/avivsinai/agent-message-queue/issues/356).
 
 
 ### Bug Fixes
 
 * **send:** refuse ambiguous self-delivery ([#378](https://github.com/avivsinai/agent-message-queue/issues/378)) ([9f5e1fc](https://github.com/avivsinai/agent-message-queue/commit/9f5e1fc77970411df6194559b88065cda97e1b28)), closes [#357](https://github.com/avivsinai/agent-message-queue/issues/357)
+
+### Known Issues
+
+* **wake attention exclusivity ([#377](https://github.com/avivsinai/agent-message-queue/issues/377)):**
+  terminal-input delivery remains count-independent and bounded, and controlled
+  testing confirmed that pending messages remain intact across attention
+  re-announcements: no message is dropped, discarded, or suppressed. The
+  separate attention channel still re-announces on its 30-second-to-15-minute
+  cadence and pulls its deadline forward on new arrivals, so repeated notices
+  can accumulate while an agent is not draining. Independently, a superseded
+  wake generation is correctly barred from terminal input but can still emit
+  attention. These are open notification cadence and generation-exclusivity
+  defects, not delivery-loss defects.
 
 
 ### Dependencies
