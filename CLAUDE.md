@@ -198,6 +198,7 @@ amq dlq read --me <agent> --id <dlq_id> [--session <name>] [--ignore-session-pin
 amq dlq retry --me <agent> --id <dlq_id> [--session <name>] [--ignore-session-pin] [--all] [--force]
 amq dlq purge --me <agent> [--session <name>] [--ignore-session-pin] [--older-than <duration>] [--dry-run] [--yes]
 amq wake --me <agent> [--baseline-existing] [--inject-cmd <cmd>] [--inject-mode <auto|raw|paste|none>] [--inject-via <absolute-executable>] [--inject-arg <arg>...] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>] [--interrupt] [--interrupt-label <label>] [--interrupt-priority <p>] [--interrupt-cmd <ctrl-c|none>] [--interrupt-notice <str>] [--interrupt-cooldown <duration>] [--debug]
+amq wake check --me <agent> [--root <path>] [--strict] [--json]
 amq wake repair --me <agent> [--root <path>] [--json]
 amq wake retire --me <agent> --inject-via <absolute-executable> [--inject-arg <arg>...] [--root <path>] [--json]
 amq upgrade
@@ -399,6 +400,14 @@ Wake lock states are intentionally conservative:
 
 - `stale`: AMQ proved the recorded PID is gone, mismatched, or not the same `amq wake`; `amq doctor --ops --fix-wake-locks` re-inspects and removes only these locks.
 - `unverified`: AMQ could not prove either ownership or staleness, so startup fails closed and doctor leaves the lock in place. Confirm the PID/root/agent manually before removing the `.wake.lock`.
+
+Before stopping or replacing a wake, run `amq wake check --me <agent>
+--json`. The probe is read-only and reports `restart_capability` as
+`agent_safe`, `operator_only`, or `unavailable`, with an exact next action.
+Only `agent_safe` authorizes an agent-side action. A non-TTY agent must leave a
+live wake running unless the probe reports `agent_safe`; `operator_only`
+requires the owning terminal or supervisor. The probe diagnoses restart
+capability but does not itself implement agent-safe restart.
 
 Live wake repair is explicit: `amq wake repair --me <agent>` may replace a
 proven-stale lock or supersede an unverified ownerless generic lock and start a
