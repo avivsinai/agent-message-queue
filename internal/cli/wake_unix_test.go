@@ -2097,6 +2097,68 @@ func TestNotifyNewMessagesAttentionOnlyRetryCadence(t *testing.T) {
 	}
 }
 
+func TestNotifyNewMessagesAttentionAdditionsPreserveRetryDecay(t *testing.T) {
+	root := secureTempDirForTest(t)
+	now := time.Unix(1_800_000_000, 0)
+	type emission struct {
+		at      time.Time
+		payload string
+	}
+	var emissions []emission
+	cfg := &wakeConfig{
+		root:           root,
+		me:             "codex",
+		session:        "session1",
+		injectMode:     wakeInjectModeNone,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			emissions = append(emissions, emission{at: now, payload: string(data)})
+			return len(data), nil
+		},
+	}
+
+	deliverPartialWakeMessageForTest(t, root, "codex", "first")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("initial attention: %v", err)
+	}
+	now = now.Add(wakeDoorbellAttentionRetryBase)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first bounded retry: %v", err)
+	}
+	decayedDeadline := now.Add(2 * wakeDoorbellAttentionRetryBase)
+	if deadline, ok := cfg.doorbell.nextDeadline(); !ok || !deadline.Equal(decayedDeadline) {
+		t.Fatalf("decayed deadline = %s, ok=%v; want %s", deadline, ok, decayedDeadline)
+	}
+
+	now = now.Add(time.Second)
+	deliverPartialWakeMessageForTest(t, root, "codex", "second")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first spaced addition: %v", err)
+	}
+	if deadline, ok := cfg.doorbell.nextDeadline(); !ok || !deadline.Equal(decayedDeadline) {
+		t.Fatalf("addition collapsed retry decay: deadline=%s ok=%v want=%s", deadline, ok, decayedDeadline)
+	}
+
+	now = now.Add(wakeDoorbellAttentionRetryBase)
+	deliverPartialWakeMessageForTest(t, root, "codex", "third")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("second spaced addition: %v", err)
+	}
+	if len(emissions) != 2 {
+		t.Fatalf("spaced additions emitted %d notices before decayed deadline: %#v", len(emissions), emissions)
+	}
+
+	now = decayedDeadline
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("decayed retry: %v", err)
+	}
+	if len(emissions) != 3 || !emissions[2].at.Equal(decayedDeadline) ||
+		!strings.Contains(emissions[2].payload, "3 messages - 3 from peer") {
+		t.Fatalf("decayed retry did not render the current collapsed cohort: %#v", emissions)
+	}
+}
+
 func TestNotifyNewMessagesMaxHoldRetriesInputWithoutAttentionFlood(t *testing.T) {
 	root := secureTempDirForTest(t)
 	deliverPartialWakeMessageForTest(t, root, "codex", "max-hold-retry")
