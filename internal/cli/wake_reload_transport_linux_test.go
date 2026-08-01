@@ -326,16 +326,20 @@ func TestLinuxWakeReloadExternalHelperProcess(t *testing.T) {
 	if writeErr != nil && !writeTeardown {
 		t.Fatal(writeErr)
 	}
-	if written != len(payload) && !(allowEarlyRefusal && writeTeardown) {
-		t.Fatalf("external helper wrote %d/%d request bytes", written, len(payload))
+	if written != len(payload) {
+		if !allowEarlyRefusal || !writeTeardown {
+			t.Fatalf("external helper wrote %d/%d request bytes", written, len(payload))
+		}
 	}
 	closeWriteErr := unixConn.CloseWrite()
 	if closeWriteErr != nil && !linuxWakeReloadSilentTeardownError(closeWriteErr) {
 		t.Fatal(closeWriteErr)
 	}
 	response, readErr := io.ReadAll(unixConn)
-	if readErr != nil && !(len(response) == 0 && linuxWakeReloadSilentTeardownError(readErr)) {
-		t.Fatal(readErr)
+	if readErr != nil {
+		if len(response) != 0 || !linuxWakeReloadSilentTeardownError(readErr) {
+			t.Fatal(readErr)
+		}
 	}
 	if len(response) != 0 && (writeErr != nil || closeWriteErr != nil) {
 		t.Fatalf("external helper received %d response bytes after connection teardown", len(response))
