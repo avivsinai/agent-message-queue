@@ -25,6 +25,8 @@ import (
 
 const linuxWakeReloadExternalHelperEnv = "AMQ_TEST_WAKE_RELOAD_EXTERNAL_HELPER"
 
+const linuxWakeReloadExternalAllowEarlyRefusalEnv = "AMQ_TEST_WAKE_RELOAD_ALLOW_EARLY_REFUSAL"
+
 const linuxWakeReloadExternalResponsePrefix = "AMQ_TEST_WAKE_RELOAD_RESPONSE_BASE64="
 
 type linuxWakeReloadTransportFixture struct {
@@ -318,20 +320,34 @@ func TestLinuxWakeReloadExternalHelperProcess(t *testing.T) {
 		t.Fatal("external helper connection is not unix")
 	}
 	defer func() { _ = unixConn.Close() }()
-	if _, err := unixConn.Write(payload); err != nil {
-		t.Fatal(err)
+	allowEarlyRefusal := os.Getenv(linuxWakeReloadExternalAllowEarlyRefusalEnv) == "1"
+	written, writeErr := unixConn.Write(payload)
+	writeTeardown := linuxWakeReloadSilentTeardownError(writeErr)
+	if writeErr != nil && !writeTeardown {
+		t.Fatal(writeErr)
 	}
-	if err := unixConn.CloseWrite(); err != nil {
-		t.Fatal(err)
+	if written != len(payload) && !(allowEarlyRefusal && writeTeardown) {
+		t.Fatalf("external helper wrote %d/%d request bytes", written, len(payload))
 	}
-	response, err := io.ReadAll(unixConn)
-	if err != nil && !(len(response) == 0 && errors.Is(err, syscall.ECONNRESET)) {
-		t.Fatal(err)
+	closeWriteErr := unixConn.CloseWrite()
+	if closeWriteErr != nil && !linuxWakeReloadSilentTeardownError(closeWriteErr) {
+		t.Fatal(closeWriteErr)
+	}
+	response, readErr := io.ReadAll(unixConn)
+	if readErr != nil && !(len(response) == 0 && linuxWakeReloadSilentTeardownError(readErr)) {
+		t.Fatal(readErr)
+	}
+	if len(response) != 0 && (writeErr != nil || closeWriteErr != nil) {
+		t.Fatalf("external helper received %d response bytes after connection teardown", len(response))
 	}
 	_, _ = fmt.Fprintln(
 		os.Stdout,
 		linuxWakeReloadExternalResponsePrefix+base64.StdEncoding.EncodeToString(response),
 	)
+}
+
+func linuxWakeReloadSilentTeardownError(err error) bool {
+	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
 }
 
 func runLinuxWakeReloadExternalHelper(
@@ -348,12 +364,24 @@ func runLinuxWakeReloadExternalHelper(
 		"AMQ_TEST_WAKE_RELOAD_PATH="+endpoint.Path(),
 		"AMQ_TEST_WAKE_RELOAD_PAYLOAD="+base64.StdEncoding.EncodeToString(payload),
 	)
+	allowEarlyRefusal := "0"
 	if setsid {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		allowEarlyRefusal = "1"
 	}
+	cmd.Env = append(cmd.Env, linuxWakeReloadExternalAllowEarlyRefusalEnv+"="+allowEarlyRefusal)
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, fmt.Errorf(
+				"external helper failed: %w (stdout=%q stderr=%q)",
+				err,
+				output,
+				exitErr.Stderr,
+			)
+		}
+		return nil, fmt.Errorf("start external helper: %w", err)
 	}
 	for _, line := range strings.Split(string(output), "\n") {
 		if !strings.HasPrefix(line, linuxWakeReloadExternalResponsePrefix) {

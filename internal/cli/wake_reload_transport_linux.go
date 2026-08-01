@@ -139,7 +139,7 @@ func startLinuxWakeReloadTransport(
 	}
 	listener, identity, err := listenLinuxWakeReloadTransportAt(agentDir, socketName, path)
 	if err != nil {
-		return nil, err
+		return nil, &wakeReloadTransportUnavailableError{err: err}
 	}
 	transport := &linuxWakeReloadTransport{
 		agentDir:       agentDir,

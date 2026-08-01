@@ -34,6 +34,27 @@ type wakeReloadTransportResponse struct {
 	ReasonCode string `json:"reason_code"`
 }
 
+// wakeReloadTransportUnavailableError marks failures that occur only while
+// creating the optional endpoint. Authority and lifecycle failures remain
+// ordinary errors and must still stop wake startup.
+type wakeReloadTransportUnavailableError struct {
+	err error
+}
+
+func (err *wakeReloadTransportUnavailableError) Error() string {
+	if err == nil || err.err == nil {
+		return "wake reload transport unavailable"
+	}
+	return err.err.Error()
+}
+
+func (err *wakeReloadTransportUnavailableError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.err
+}
+
 func decodeWakeReloadTransportRequest(payload []byte) (wakeReloadTransportRequest, error) {
 	if len(payload) == 0 || len(payload) > wakeReloadTransportMaxRequestBytes {
 		return wakeReloadTransportRequest{}, fmt.Errorf("wake reload request size is invalid")
