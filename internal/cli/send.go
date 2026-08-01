@@ -14,6 +14,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
 var deliverToExistingInbox = fsq.DeliverToExistingInbox
@@ -174,12 +175,12 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		}
 	}
 	if fromSession != "" {
-		decision := decideSessionGuard(sessionGuardInput{
-			Kind: sessionGuardSource,
-			Pin:  sessionGuardPinStateFor(pin), Relation: sessionGuardTargetMismatch,
-			Flags: sessionGuardFlags{FromSession: true},
+		decision := sessionguard.Decide(sessionguard.Input{
+			Kind: sessionguard.KindSource,
+			Pin:  sessionGuardPinStateFor(pin), Relation: sessionguard.TargetMismatch,
+			Flags: sessionguard.Flags{FromSession: true},
 		})
-		if decision.Verdict != sessionGuardAllow {
+		if decision.Verdict != sessionguard.Allow {
 			return ContextMismatchError("refusing send: source session routing was not authorized")
 		}
 	}

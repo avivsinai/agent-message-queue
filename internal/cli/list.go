@@ -9,6 +9,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
 type listItem struct {
@@ -82,16 +83,16 @@ func runList(args []string) error {
 		pin, pinErr := loadSessionPin()
 		pinState := sessionGuardPinStateFor(pin)
 		if pinErr != nil {
-			pinState = sessionGuardPinInvalid
+			pinState = sessionguard.PinInvalid
 		}
 		decision := sessionGuardDecisionForContext(
-			sessionGuardList,
-			sessionGuardChannelExit5,
+			sessionguard.KindList,
+			sessionguard.ChannelExit5,
 			pinState,
 			&SessionContextError{Message: err.Error()},
-			sessionGuardFlags{},
+			sessionguard.Flags{},
 		)
-		if decision.Verdict != sessionGuardWarnContinue {
+		if decision.Verdict != sessionguard.WarnContinue {
 			return err
 		}
 		_ = writeStderr("warning: %v\n", err)
@@ -106,16 +107,16 @@ func runList(args []string) error {
 			pin, pinErr := loadSessionPin()
 			pinState := sessionGuardPinStateFor(pin)
 			if pinErr != nil {
-				pinState = sessionGuardPinInvalid
+				pinState = sessionguard.PinInvalid
 			}
 			decision := sessionGuardDecisionForContext(
-				sessionGuardList,
-				sessionGuardChannelExit5,
+				sessionguard.KindList,
+				sessionguard.ChannelExit5,
 				pinState,
 				&SessionContextError{Message: "active root conflicts with initialized repo-local root"},
-				sessionGuardFlags{},
+				sessionguard.Flags{},
 			)
-			if decision.Verdict != sessionGuardWarnContinue {
+			if decision.Verdict != sessionguard.WarnContinue {
 				return ContextMismatchError("list context warning was not authorized")
 			}
 			if err := writeStderr(
@@ -135,13 +136,13 @@ func runList(args []string) error {
 				return pinErr
 			}
 			decision := sessionGuardDecisionForContext(
-				sessionGuardList,
-				sessionGuardChannelExit5,
-				sessionGuardPinInvalid,
+				sessionguard.KindList,
+				sessionguard.ChannelExit5,
+				sessionguard.PinInvalid,
 				&SessionContextError{Message: pinErr.Error()},
-				sessionGuardFlags{},
+				sessionguard.Flags{},
 			)
-			if decision.Verdict != sessionGuardWarnContinue {
+			if decision.Verdict != sessionguard.WarnContinue {
 				return pinErr
 			}
 			_ = writeStderr("warning: %v\n", pinErr)
@@ -152,35 +153,35 @@ func runList(args []string) error {
 					return checkErr
 				}
 				decision := sessionGuardDecisionForContext(
-					sessionGuardList,
-					sessionGuardChannelExit5,
-					sessionGuardPinInvalid,
+					sessionguard.KindList,
+					sessionguard.ChannelExit5,
+					sessionguard.PinInvalid,
 					&SessionContextError{Message: checkErr.Error()},
-					sessionGuardFlags{},
+					sessionguard.Flags{},
 				)
-				if decision.Verdict != sessionGuardWarnContinue {
+				if decision.Verdict != sessionguard.WarnContinue {
 					return checkErr
 				}
 				_ = writeStderr("warning: %v\n", checkErr)
 			} else if mismatch != nil {
 				if isExplicitOwnBaseRootInspectionWithPin(common, root, pin) {
-					decision := decideSessionGuard(sessionGuardInput{
-						Kind: sessionGuardList,
-						Pin:  sessionGuardPinStateFor(pin), Relation: sessionGuardTargetOwnPinnedBase,
-						Flags: sessionGuardFlags{ExplicitRoot: true},
+					decision := sessionguard.Decide(sessionguard.Input{
+						Kind: sessionguard.KindList,
+						Pin:  sessionGuardPinStateFor(pin), Relation: sessionguard.TargetOwnPinnedBase,
+						Flags: sessionguard.Flags{ExplicitRoot: true},
 					})
-					if decision.Verdict != sessionGuardAllow {
+					if decision.Verdict != sessionguard.Allow {
 						return ContextMismatchError("list pinned-base inspection was not authorized")
 					}
 				} else {
 					decision := sessionGuardDecisionForContext(
-						sessionGuardList,
-						sessionGuardChannelExit5,
+						sessionguard.KindList,
+						sessionguard.ChannelExit5,
 						sessionGuardPinStateFor(pin),
 						mismatch,
-						sessionGuardFlags{},
+						sessionguard.Flags{},
 					)
-					if decision.Verdict != sessionGuardWarnContinue {
+					if decision.Verdict != sessionguard.WarnContinue {
 						return ContextMismatchError("list context warning was not authorized")
 					}
 					_ = writeStderr("warning: %s\n", mismatch.Error())
