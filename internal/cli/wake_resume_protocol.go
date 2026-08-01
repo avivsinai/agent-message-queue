@@ -20,10 +20,10 @@ const (
 	wakeImageMethodPathnameExecVerified = "pathname_execve_verified"
 )
 
-// wakeImageEvidenceV1 records image metadata and its authority method. Ordinary
-// Darwin wakes can observe only a mutable pathname after exec; the stronger
-// pathname_execve_verified method is reserved for a path authenticated
-// immediately before the corresponding execve.
+// wakeImageEvidenceV1 records image metadata and its authority method.
+// pathname_observed is diagnostic on every platform. Darwin reserves
+// pathname_execve_verified for a path authenticated immediately before execve;
+// Linux resume authority requires fd_exec evidence from the executing image.
 type wakeImageEvidenceV1 struct {
 	Schema          int    `json:"schema"`
 	Platform        string `json:"platform"`
@@ -40,6 +40,22 @@ type wakeImageEvidenceV1 struct {
 var errWakeResumeControlEndpointUnsupported = errors.New("wake resume control endpoint is unsupported")
 
 func validateWakeResumeAdvertisement(lock wakeLock, expectedRoot, expectedAgent string) error {
+	return validateWakeResumeAdvertisementWithContext(
+		lock,
+		expectedRoot,
+		expectedAgent,
+		runtime.GOOS,
+		wakeControlSocketPath(expectedRoot, expectedAgent, lock.Generation),
+	)
+}
+
+func validateWakeResumeAdvertisementWithContext(
+	lock wakeLock,
+	expectedRoot string,
+	expectedAgent string,
+	platform string,
+	expectedControlSocket string,
+) error {
 	if strings.TrimSpace(expectedRoot) == "" {
 		return fmt.Errorf("trusted wake resume root is empty")
 	}
@@ -56,9 +72,8 @@ func validateWakeResumeAdvertisement(lock wakeLock, expectedRoot, expectedAgent 
 	if lock.Agent != expectedAgent {
 		return fmt.Errorf("wake resume agent does not match the trusted agent")
 	}
-	expectedControlSocket := wakeControlSocketPath(expectedRoot, expectedAgent, lock.Generation)
 	if expectedControlSocket == "" {
-		return fmt.Errorf("%w on %s", errWakeResumeControlEndpointUnsupported, runtime.GOOS)
+		return fmt.Errorf("%w on %s", errWakeResumeControlEndpointUnsupported, platform)
 	}
 	if lock.ResumeSchema != wakeResumeSchemaV2 {
 		if lock.ResumeSchema == 0 {
@@ -90,12 +105,18 @@ func validateWakeResumeAdvertisement(lock wakeLock, expectedRoot, expectedAgent 
 	if lock.RunningImageEvidence == nil {
 		return fmt.Errorf("wake running image evidence is missing")
 	}
-	if err := validateWakeImageEvidence(*lock.RunningImageEvidence); err != nil {
+	if err := validateWakeImageEvidenceForPlatform(*lock.RunningImageEvidence, platform); err != nil {
 		return err
 	}
-	if runtime.GOOS == "darwin" &&
-		lock.RunningImageEvidence.Method != wakeImageMethodPathnameExecVerified {
-		return fmt.Errorf("wake running image evidence is not bound immediately before execve")
+	switch platform {
+	case "darwin":
+		if lock.RunningImageEvidence.Method != wakeImageMethodPathnameExecVerified {
+			return fmt.Errorf("wake running image evidence is not bound immediately before execve")
+		}
+	case "linux":
+		if lock.RunningImageEvidence.Method != wakeImageMethodFDExec {
+			return fmt.Errorf("wake running image evidence is not kernel-bound to the executing image")
+		}
 	}
 	if lock.ImagePath != lock.RunningImageEvidence.ExecutionPath {
 		return fmt.Errorf("wake image path does not match running image evidence")
@@ -115,16 +136,25 @@ func validateWakeResumeAdvertisement(lock wakeLock, expectedRoot, expectedAgent 
 }
 
 func validateWakeImageEvidence(evidence wakeImageEvidenceV1) error {
+	return validateWakeImageEvidenceForPlatform(evidence, runtime.GOOS)
+}
+
+func validateWakeImageEvidenceForPlatform(evidence wakeImageEvidenceV1, platform string) error {
 	if evidence.Schema != wakeImageEvidenceSchemaV1 {
 		return fmt.Errorf("wake image evidence schema %d unsupported", evidence.Schema)
 	}
-	if evidence.Platform != runtime.GOOS {
-		return fmt.Errorf("wake image platform %q does not match %q", evidence.Platform, runtime.GOOS)
+	if evidence.Platform != platform {
+		return fmt.Errorf("wake image platform %q does not match %q", evidence.Platform, platform)
 	}
-	if runtime.GOOS == "darwin" {
+	if platform == "darwin" {
 		if evidence.Method != wakeImageMethodPathnameObserved &&
 			evidence.Method != wakeImageMethodPathnameExecVerified {
 			return fmt.Errorf("wake image method %q does not match a Darwin pathname evidence method", evidence.Method)
+		}
+	} else if platform == "linux" {
+		if evidence.Method != wakeImageMethodPathnameObserved &&
+			evidence.Method != wakeImageMethodFDExec {
+			return fmt.Errorf("wake image method %q does not match a Linux image evidence method", evidence.Method)
 		}
 	} else if evidence.Method != wakeImageMethodFDExec {
 		return fmt.Errorf("wake image method %q does not match platform method %q", evidence.Method, wakeImageMethodFDExec)

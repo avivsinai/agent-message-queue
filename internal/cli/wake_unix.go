@@ -142,6 +142,7 @@ func childRepairSource(lineage *wakeRepairLineage) wakeRepairHandoffSource {
 }
 
 var startWakeFromTarget = startWakeFromTargetDefault
+var startWakeReloadTransportForWake = startWakeReloadTransportInDir
 var afterExistingWakeReadyPublication = func() {}
 var waitForWakeRepairChildExit = func(waiter *wakeProcessWaiter) error {
 	return waiter.waitForExit(wakeProcessExitTimeout)
@@ -1918,6 +1919,14 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		lockWakeMode = effectiveInjectMode(&wakeConfig{me: me, injectMode: lockWakeMode})
 	}
 	acceptExistingDeadline := time.Now().Add(wakeReadyTimeout)
+	resumeEligible := wakeResumeStartupEligible(
+		requestedOwner,
+		repairLineage != nil,
+		*injectCmdFlag,
+		interruptKey,
+		lockWakeMode,
+	)
+	reloadTransportEligible := resumeEligible && target == nil
 	var cleanup func()
 	var repairFloorAuthority wakeRepairFloorAuthority
 	for {
@@ -1935,13 +1944,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 			wakeMode:                lockWakeMode,
 			requestedOwner:          requestedOwner,
 			repairLineage:           repairLineage,
-			resumeEligible: wakeResumeStartupEligible(
-				requestedOwner,
-				repairLineage != nil,
-				*injectCmdFlag,
-				interruptKey,
-				lockWakeMode,
-			),
+			resumeEligible:          resumeEligible,
 		}
 		if repairLineage != nil {
 			options.repairFloorAuthority = &repairFloorAuthority
@@ -2281,6 +2284,42 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 				return err
 			}
 			return writeWakeRepairFloorInDir(activeAgentDir, root, floor)
+		}
+	}
+
+	// Reload transport is additive capability. If this process cannot confirm
+	// the freshly published lock identity, keep the ordinary notifier running
+	// without opening the unadvertised endpoint.
+	if reloadTransportEligible && currentWake.IdentityConfirmed {
+		if requestedOwner == nil {
+			return fmt.Errorf("wake reload transport requires an exact owner")
+		}
+		select {
+		case <-ownerObservation.Done():
+			return fmt.Errorf("requested wake owner observation ended before reload transport startup")
+		default:
+		}
+		stopReloadTransport, startErr := startWakeReloadTransportForWake(
+			activeAgentDir,
+			root,
+			me,
+			currentWake,
+			*requestedOwner,
+		)
+		if startErr != nil {
+			var unavailable *wakeReloadTransportUnavailableError
+			if !errors.As(startErr, &unavailable) {
+				return startErr
+			}
+			_ = writeStderr(
+				"amq wake: reload transport unavailable: %v; continuing without reload transport\n",
+				startErr,
+			)
+		} else {
+			if stopReloadTransport == nil {
+				return fmt.Errorf("wake reload transport returned no cleanup")
+			}
+			defer stopReloadTransport()
 		}
 	}
 

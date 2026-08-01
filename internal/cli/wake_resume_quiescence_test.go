@@ -9,15 +9,24 @@ import (
 
 func readyWakeResumeQuiescenceForTest() wakeResumeQuiescence {
 	return wakeResumeQuiescence{
-		Lifecycle:            wakeResumeLifecycleAdmitted,
-		WatcherArmed:         true,
-		ControlListenerReady: true,
-		OwnerLive:            true,
-		AuthorityExact:       true,
-		CanonicalDirs:        true,
-		FinalScan:            wakeResumeScanComplete,
-		FinalScanMessages:    3,
-		PendingDoorbell:      true,
+		Lifecycle:                   wakeResumeLifecycleAdmitted,
+		WatcherArmed:                true,
+		ControlListenerReady:        true,
+		OwnerObservation:            wakeResumeAuthorityExact,
+		TerminalIdentityObservation: wakeResumeAuthorityExact,
+		GenerationObservation:       wakeResumeAuthorityExact,
+		LockTargetObservation:       wakeResumeAuthorityExact,
+		CanonicalDirs:               true,
+		FinalScan:                   wakeResumeScanComplete,
+		FinalScanMessages:           3,
+		PendingDoorbell:             true,
+	}
+}
+
+func TestWakeResumeAuthorityObservationZeroIsInconclusive(t *testing.T) {
+	var observation wakeResumeAuthorityObservation
+	if observation != wakeResumeAuthorityInconclusive {
+		t.Fatalf("zero observation = %v, want inconclusive", observation)
 	}
 }
 
@@ -89,6 +98,34 @@ func TestWakeResumeQuiescenceRefusesUntransferableStateWithoutMutation(t *testin
 				state.DestructiveInterrupt = true
 			},
 			reason: wakeResumeReasonDestructiveInterrupt,
+		},
+		{
+			name: "owner identity lost",
+			mutate: func(state *wakeResumeQuiescence) {
+				state.OwnerObservation = wakeResumeAuthorityLost
+			},
+			reason: wakeResumeReasonOwnerLost,
+		},
+		{
+			name: "terminal identity lost",
+			mutate: func(state *wakeResumeQuiescence) {
+				state.TerminalIdentityObservation = wakeResumeAuthorityLost
+			},
+			reason: wakeResumeReasonTerminalIdentityLost,
+		},
+		{
+			name: "generation lost",
+			mutate: func(state *wakeResumeQuiescence) {
+				state.GenerationObservation = wakeResumeAuthorityLost
+			},
+			reason: wakeResumeReasonGenerationLost,
+		},
+		{
+			name: "lock or target lost",
+			mutate: func(state *wakeResumeQuiescence) {
+				state.LockTargetObservation = wakeResumeAuthorityLost
+			},
+			reason: wakeResumeReasonLockTargetLost,
 		},
 	}
 
@@ -167,8 +204,10 @@ func TestWakeResumeQuiescenceDefersTransientStateWithoutMutation(t *testing.T) {
 		{name: "one control handler", mutate: func(s *wakeResumeQuiescence) { s.ControlHandlers = 1 }, reason: wakeResumeReasonControlHandlers},
 		{name: "two control handlers", mutate: func(s *wakeResumeQuiescence) { s.ControlHandlers = 2 }, reason: wakeResumeReasonControlHandlers},
 		{name: "control listener unavailable", mutate: func(s *wakeResumeQuiescence) { s.ControlListenerReady = false }, reason: wakeResumeReasonControlListener},
-		{name: "owner unavailable", mutate: func(s *wakeResumeQuiescence) { s.OwnerLive = false }, reason: wakeResumeReasonOwnerUnavailable},
-		{name: "authority drift", mutate: func(s *wakeResumeQuiescence) { s.AuthorityExact = false }, reason: wakeResumeReasonAuthorityUnverified},
+		{name: "owner observation inconclusive", mutate: func(s *wakeResumeQuiescence) { s.OwnerObservation = wakeResumeAuthorityInconclusive }, reason: wakeResumeReasonOwnerInconclusive},
+		{name: "terminal identity inconclusive", mutate: func(s *wakeResumeQuiescence) { s.TerminalIdentityObservation = wakeResumeAuthorityInconclusive }, reason: wakeResumeReasonTerminalIdentityInconclusive},
+		{name: "generation inconclusive", mutate: func(s *wakeResumeQuiescence) { s.GenerationObservation = wakeResumeAuthorityInconclusive }, reason: wakeResumeReasonGenerationInconclusive},
+		{name: "lock or target inconclusive", mutate: func(s *wakeResumeQuiescence) { s.LockTargetObservation = wakeResumeAuthorityInconclusive }, reason: wakeResumeReasonLockTargetInconclusive},
 		{name: "directories unverified", mutate: func(s *wakeResumeQuiescence) { s.CanonicalDirs = false }, reason: wakeResumeReasonDirectoriesUnverified},
 		{name: "full scan incomplete", mutate: func(s *wakeResumeQuiescence) { s.FinalScan = wakeResumeScanTransientFailure }, reason: wakeResumeReasonFinalScanIncomplete},
 	}
@@ -198,7 +237,45 @@ func TestWakeResumeQuiescenceAllowsUnreadCohortAndExistingBackoff(t *testing.T) 
 
 	decision := classifyWakeResumeQuiescence(state)
 
-	if decision.Disposition != wakeResumeReady || decision.Reason != "" {
-		t.Fatalf("decision = %#v, want ready", decision)
+	if decision.Disposition != wakeResumeProceed || decision.Reason != "" {
+		t.Fatalf("decision = %#v, want proceed", decision)
 	}
+}
+
+func TestWakeResumeQuiescencePreservesRefuseAndDeferPrecedence(t *testing.T) {
+	t.Run("existing refusal precedes authority loss", func(t *testing.T) {
+		state := readyWakeResumeQuiescenceForTest()
+		state.RecoveryRequired = true
+		state.OwnerObservation = wakeResumeAuthorityLost
+
+		decision := classifyWakeResumeQuiescence(state)
+
+		if decision.Disposition != wakeResumeRefuse || decision.Reason != wakeResumeReasonInputRecovery {
+			t.Fatalf("decision = %#v, want input-recovery refusal", decision)
+		}
+	})
+
+	t.Run("authority loss precedes transient deferral", func(t *testing.T) {
+		state := readyWakeResumeQuiescenceForTest()
+		state.OwnerObservation = wakeResumeAuthorityLost
+		state.InjectViaActive = true
+
+		decision := classifyWakeResumeQuiescence(state)
+
+		if decision.Disposition != wakeResumeRefuse || decision.Reason != wakeResumeReasonOwnerLost {
+			t.Fatalf("decision = %#v, want owner-loss refusal", decision)
+		}
+	})
+
+	t.Run("existing transient deferral precedes inconclusive authority", func(t *testing.T) {
+		state := readyWakeResumeQuiescenceForTest()
+		state.InjectViaActive = true
+		state.OwnerObservation = wakeResumeAuthorityInconclusive
+
+		decision := classifyWakeResumeQuiescence(state)
+
+		if decision.Disposition != wakeResumeDefer || decision.Reason != wakeResumeReasonInjectorActive {
+			t.Fatalf("decision = %#v, want injector-active deferral", decision)
+		}
+	})
 }

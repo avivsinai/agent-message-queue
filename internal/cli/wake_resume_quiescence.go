@@ -5,7 +5,7 @@ package cli
 type wakeResumeDisposition uint8
 
 const (
-	wakeResumeReady wakeResumeDisposition = iota
+	wakeResumeProceed wakeResumeDisposition = iota
 	wakeResumeDefer
 	wakeResumeRefuse
 )
@@ -22,6 +22,15 @@ type wakeResumeScan uint8
 const (
 	wakeResumeScanTransientFailure wakeResumeScan = iota
 	wakeResumeScanComplete
+)
+
+type wakeResumeAuthorityObservation uint8
+
+const (
+	// The zero value is inconclusive so a partially populated proof cannot proceed.
+	wakeResumeAuthorityInconclusive wakeResumeAuthorityObservation = iota
+	wakeResumeAuthorityExact
+	wakeResumeAuthorityLost
 )
 
 const (
@@ -44,10 +53,19 @@ const (
 	wakeResumeReasonDebounceActive        = "debounce_callback_active"
 	wakeResumeReasonControlHandlers       = "control_handlers_active"
 	wakeResumeReasonControlListener       = "control_listener_unavailable"
-	wakeResumeReasonOwnerUnavailable      = "owner_unavailable"
-	wakeResumeReasonAuthorityUnverified   = "wake_authority_unverified"
 	wakeResumeReasonDirectoriesUnverified = "wake_directories_unverified"
 	wakeResumeReasonFinalScanIncomplete   = "final_inbox_scan_incomplete"
+)
+
+const (
+	wakeResumeReasonOwnerInconclusive            = "owner_observation_inconclusive"
+	wakeResumeReasonOwnerLost                    = "owner_identity_lost"
+	wakeResumeReasonTerminalIdentityInconclusive = "terminal_identity_inconclusive"
+	wakeResumeReasonTerminalIdentityLost         = "terminal_identity_lost"
+	wakeResumeReasonGenerationInconclusive       = "wake_generation_inconclusive"
+	wakeResumeReasonGenerationLost               = "wake_generation_lost"
+	wakeResumeReasonLockTargetInconclusive       = "wake_lock_target_inconclusive"
+	wakeResumeReasonLockTargetLost               = "wake_lock_target_lost"
 )
 
 type wakeResumeQuiescence struct {
@@ -73,13 +91,15 @@ type wakeResumeQuiescence struct {
 	WatcherRebindRetry           bool
 	UnreadableGenerationRecovery bool
 
-	DebounceExecuting    bool
-	ControlHandlers      uint
-	ControlListenerReady bool
-	OwnerLive            bool
-	AuthorityExact       bool
-	CanonicalDirs        bool
-	FinalScan            wakeResumeScan
+	DebounceExecuting           bool
+	ControlHandlers             uint
+	ControlListenerReady        bool
+	OwnerObservation            wakeResumeAuthorityObservation
+	TerminalIdentityObservation wakeResumeAuthorityObservation
+	GenerationObservation       wakeResumeAuthorityObservation
+	LockTargetObservation       wakeResumeAuthorityObservation
+	CanonicalDirs               bool
+	FinalScan                   wakeResumeScan
 
 	// These fields are deliberately not gates. Durable unread work and old
 	// doorbell/backoff state become an immediately-due fresh cohort after resume.
@@ -118,6 +138,14 @@ func classifyWakeResumeQuiescence(state wakeResumeQuiescence) wakeResumeQuiescen
 		return refuse(wakeResumeReasonInputProgress)
 	case state.Delivery.phase != wakeInputDeliveryIdle:
 		return refuse(wakeResumeReasonInputDelivery)
+	case state.OwnerObservation == wakeResumeAuthorityLost:
+		return refuse(wakeResumeReasonOwnerLost)
+	case state.TerminalIdentityObservation == wakeResumeAuthorityLost:
+		return refuse(wakeResumeReasonTerminalIdentityLost)
+	case state.GenerationObservation == wakeResumeAuthorityLost:
+		return refuse(wakeResumeReasonGenerationLost)
+	case state.LockTargetObservation == wakeResumeAuthorityLost:
+		return refuse(wakeResumeReasonLockTargetLost)
 	case state.InjectViaActive:
 		return deferReload(wakeResumeReasonInjectorActive)
 	case state.InjectorCleanupPending:
@@ -140,16 +168,20 @@ func classifyWakeResumeQuiescence(state wakeResumeQuiescence) wakeResumeQuiescen
 		return deferReload(wakeResumeReasonControlHandlers)
 	case !state.ControlListenerReady:
 		return deferReload(wakeResumeReasonControlListener)
-	case !state.OwnerLive:
-		return deferReload(wakeResumeReasonOwnerUnavailable)
-	case !state.AuthorityExact:
-		return deferReload(wakeResumeReasonAuthorityUnverified)
+	case state.OwnerObservation != wakeResumeAuthorityExact:
+		return deferReload(wakeResumeReasonOwnerInconclusive)
+	case state.TerminalIdentityObservation != wakeResumeAuthorityExact:
+		return deferReload(wakeResumeReasonTerminalIdentityInconclusive)
+	case state.GenerationObservation != wakeResumeAuthorityExact:
+		return deferReload(wakeResumeReasonGenerationInconclusive)
+	case state.LockTargetObservation != wakeResumeAuthorityExact:
+		return deferReload(wakeResumeReasonLockTargetInconclusive)
 	case !state.CanonicalDirs:
 		return deferReload(wakeResumeReasonDirectoriesUnverified)
 	case state.FinalScan != wakeResumeScanComplete:
 		return deferReload(wakeResumeReasonFinalScanIncomplete)
 	default:
-		return wakeResumeQuiescenceDecision{Disposition: wakeResumeReady}
+		return wakeResumeQuiescenceDecision{Disposition: wakeResumeProceed}
 	}
 }
 
