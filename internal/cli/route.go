@@ -144,7 +144,7 @@ func explainRoute(opts routeExplainOptions) routeExplainResult {
 	// a target session never authorizes a mismatched source.
 	explicitRoot := strings.TrimSpace(opts.FromRoot) != ""
 	crossProject := targetProject != ""
-	if err := guardPinnedSourceContext("send", sourceRoot, crossProject, false, explicitRoot); err != nil {
+	if err := guardPinnedSourceContextJSON("send", sourceRoot, crossProject, explicitRoot); err != nil {
 		result.Error = err.Error()
 		return result
 	}

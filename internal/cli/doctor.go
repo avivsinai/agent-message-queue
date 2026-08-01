@@ -172,16 +172,17 @@ func runDoctor(args []string) error {
 			_, source, _, _ = resolveEnvConfigWithSource("", "")
 		}
 		fixWakeLocks := *fixWakeLocksFlag
-		if fixWakeLocks && !*ignoreSessionPinFlag {
-			mismatch, pinErr := sessionPinMismatch(root)
-			if pinErr != nil {
+		if fixWakeLocks {
+			decision, mismatch, pinErr := doctorRepairSessionGuard(root, *ignoreSessionPinFlag)
+			switch decision.Row {
+			case sessionGuardRowR13DoctorInvalidErr:
 				result.Checks = append(result.Checks, doctorCheck{
 					Name:    "Wake lock repair",
 					Status:  "error",
 					Message: fmt.Sprintf("refusing to repair %s: invalid AMQ session context: %v", root, pinErr),
 				})
 				fixWakeLocks = false
-			} else if mismatch != nil && !isPinnedBaseRoot(root) {
+			case sessionGuardRowR12DoctorMismatchErr:
 				result.Checks = append(result.Checks, doctorCheck{
 					Name:    "Wake lock repair",
 					Status:  "error",
@@ -555,11 +556,54 @@ func checkConfig(root string) doctorCheck {
 	return check
 }
 
+func doctorRepairSessionGuard(root string, ignoreSessionPins bool) (sessionGuardDecision, *SessionContextError, error) {
+	if ignoreSessionPins {
+		return decideSessionGuard(sessionGuardInput{
+			Kind: sessionGuardDoctorRepair,
+			Pin:  sessionGuardPinInvalid, Relation: sessionGuardTargetMismatch,
+			Flags: sessionGuardFlags{ExplicitRoot: true, IgnorePin: true},
+		}), nil, nil
+	}
+	pin, pinErr := loadSessionPin()
+	if pinErr != nil {
+		return sessionGuardDecisionForContext(
+			sessionGuardDoctorRepair,
+			sessionGuardChannelExit5,
+			sessionGuardPinInvalid,
+			&SessionContextError{Message: pinErr.Error()},
+			sessionGuardFlags{},
+		), nil, pinErr
+	}
+	mismatch, checkErr := sessionPinMismatchWithPin(root, pin)
+	if checkErr != nil {
+		return sessionGuardDecisionForContext(
+			sessionGuardDoctorRepair,
+			sessionGuardChannelExit5,
+			sessionGuardPinInvalid,
+			&SessionContextError{Message: checkErr.Error()},
+			sessionGuardFlags{},
+		), nil, checkErr
+	}
+	if mismatch != nil && isPinnedBaseRootWithPin(root, pin) {
+		return decideSessionGuard(sessionGuardInput{
+			Kind: sessionGuardDoctorRepair,
+			Pin:  sessionGuardPinStateFor(pin), Relation: sessionGuardTargetOwnPinnedBase,
+		}), mismatch, nil
+	}
+	return sessionGuardDecisionForContext(
+		sessionGuardDoctorRepair,
+		sessionGuardChannelExit5,
+		sessionGuardPinStateFor(pin),
+		mismatch,
+		sessionGuardFlags{},
+	), mismatch, nil
+}
+
 func inspectDoctorMailboxes(root, explicitBaseRoot string, repair, ignoreSessionPins bool) ([]fsq.MailboxInspection, *fsq.MailboxRepairResult, doctorCheck) {
 	check := doctorCheck{Name: "Mailboxes"}
-	if repair && !ignoreSessionPins {
-		mismatch, pinErr := sessionPinMismatch(root)
-		if pinErr != nil {
+	if repair {
+		decision, mismatch, pinErr := doctorRepairSessionGuard(root, ignoreSessionPins)
+		if decision.Row == sessionGuardRowR13DoctorInvalidErr {
 			check.Status = "error"
 			check.Message = fmt.Sprintf(
 				"refusing to repair %s: invalid AMQ session context: %v; re-run with a complete session context",
@@ -568,7 +612,7 @@ func inspectDoctorMailboxes(root, explicitBaseRoot string, repair, ignoreSession
 			)
 			return nil, nil, check
 		}
-		if mismatch != nil && !isPinnedBaseRoot(root) {
+		if decision.Row == sessionGuardRowR12DoctorMismatchErr {
 			check.Status = "error"
 			check.Message = fmt.Sprintf(
 				"refusing to repair %s because it does not match the pinned session context: %s; re-run from the intended session",

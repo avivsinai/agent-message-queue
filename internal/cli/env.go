@@ -158,10 +158,41 @@ func runEnv(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !contextExplicit {
-		if mismatch, checkErr := sessionPinMismatch(root); checkErr != nil {
+	if contextExplicit {
+		decision := decideSessionGuard(sessionGuardInput{
+			Kind: sessionGuardEnv,
+			Pin:  sessionGuardPinAbsent, Relation: sessionGuardTargetUnbound,
+			Flags: sessionGuardFlags{ExplicitContext: true},
+		})
+		if decision.Verdict != sessionGuardAllow {
+			return ContextMismatchError("refusing env: explicit context replacement was not authorized")
+		}
+	} else {
+		pin, pinErr := loadSessionPin()
+		if pinErr != nil {
+			decision := sessionGuardDecisionForContext(
+				sessionGuardEnv,
+				sessionGuardChannelExit5,
+				sessionGuardPinInvalid,
+				&SessionContextError{Message: pinErr.Error()},
+				sessionGuardFlags{},
+			)
+			if decision.Verdict == sessionGuardAllow {
+				return nil
+			}
+			return pinErr
+		}
+		mismatch, checkErr := sessionPinMismatchWithPin(root, pin)
+		decision := sessionGuardDecisionForContext(
+			sessionGuardEnv,
+			sessionGuardChannelExit5,
+			sessionGuardPinStateFor(pin),
+			mismatch,
+			sessionGuardFlags{},
+		)
+		if checkErr != nil {
 			return checkErr
-		} else if mismatch != nil {
+		} else if decision.Verdict != sessionGuardAllow && mismatch != nil {
 			return ContextMismatchError("refusing env: %s. Use explicit --session <name> or --root <path> to repin", mismatch.Error())
 		}
 	}

@@ -145,6 +145,11 @@ func sessionPinMismatch(target string) (*SessionContextError, error) {
 	if err != nil {
 		return nil, err
 	}
+	return sessionPinMismatchWithPin(target, pin)
+}
+
+func sessionPinMismatchWithPin(target string, pin sessionPin) (*SessionContextError, error) {
+	target = absPath(resolveRoot(target))
 	if pin.Present {
 		if err := validateLegacySessionPinRoot(pin); err != nil {
 			return &SessionContextError{Message: err.Error()}, nil
@@ -174,20 +179,23 @@ func sessionPinMismatch(target string) (*SessionContextError, error) {
 	return nil, nil
 }
 
-// isExplicitOwnBaseRootInspection recognizes list's narrow read-only path back
-// to the base root named by the current pin. Identity pins must still
-// authenticate both the complete active context and the target base. Legacy
-// pins retain their exact lexical comparison.
-func isExplicitOwnBaseRootInspection(common *commonFlags, target string) bool {
+func isExplicitOwnBaseRootInspectionWithPin(common *commonFlags, target string, pin sessionPin) bool {
 	if common == nil || !common.rootExplicit() {
 		return false
 	}
-	return isPinnedBaseRoot(target)
+	return isPinnedBaseRootWithPin(target, pin)
 }
 
 func isPinnedBaseRoot(target string) bool {
 	pin, err := loadSessionPin()
 	if err != nil || !pin.Present {
+		return false
+	}
+	return isPinnedBaseRootWithPin(target, pin)
+}
+
+func isPinnedBaseRootWithPin(target string, pin sessionPin) bool {
+	if !pin.Present {
 		return false
 	}
 	if err := validateLegacySessionPinRoot(pin); err != nil {
@@ -379,11 +387,7 @@ func initializedDirectSessionRoot(base, session string) (string, bool) {
 	return candidate, true
 }
 
-func guardCwdLocalContext(command, target string) error {
-	pin, err := loadSessionPin()
-	if err != nil {
-		return err
-	}
+func guardCwdLocalContextWithPin(command, target string, pin sessionPin) error {
 	if !pin.Present {
 		return nil
 	}
@@ -421,39 +425,160 @@ func guardCwdLocalContext(command, target string) error {
 }
 
 func guardMailboxContext(command, target string, routed, ignorePin, explicitRoot bool) error {
-	if routed || ignorePin {
-		return nil
+	if routed {
+		decision := decideSessionGuard(sessionGuardInput{
+			Kind: sessionGuardMailbox,
+			Pin:  sessionGuardPinAbsent, Relation: sessionGuardTargetUnbound,
+			Flags: sessionGuardFlags{Routed: true},
+		})
+		if decision.Verdict == sessionGuardAllow {
+			return nil
+		}
 	}
+	if ignorePin {
+		decision := decideSessionGuard(sessionGuardInput{
+			Kind: sessionGuardMailbox,
+			Pin:  sessionGuardPinInvalid, Relation: sessionGuardTargetMismatch,
+			Flags: sessionGuardFlags{ExplicitRoot: explicitRoot, IgnorePin: true},
+		})
+		if decision.Verdict == sessionGuardAllow {
+			return nil
+		}
+	}
+	pin, err := loadSessionPin()
+	if err != nil {
+		// The caller owns the error wording and exit code; the table owns the
+		// refusal decision for malformed or incomplete pin evidence.
+		decision := sessionGuardDecisionForContext(
+			sessionGuardMailbox,
+			sessionGuardChannelExit5,
+			sessionGuardPinInvalid,
+			&SessionContextError{Message: err.Error()},
+			sessionGuardFlags{ExplicitRoot: explicitRoot},
+		)
+		if decision.Verdict == sessionGuardAllow {
+			return nil
+		}
+		return err
+	}
+	pinState := sessionGuardPinStateFor(pin)
 	if !explicitRoot {
-		if err := guardCwdLocalContext(command, target); err != nil {
+		if err := guardCwdLocalContextWithPin(command, target, pin); err != nil {
+			decision := sessionGuardDecisionForContext(
+				sessionGuardMailbox,
+				sessionGuardChannelExit5,
+				pinState,
+				&SessionContextError{Message: err.Error()},
+				sessionGuardFlags{ExplicitRoot: explicitRoot},
+			)
+			if decision.Verdict == sessionGuardAllow {
+				return nil
+			}
 			return err
 		}
 	}
-	mismatch, err := sessionPinMismatch(target)
+	mismatch, err := sessionPinMismatchWithPin(target, pin)
 	if err != nil {
+		decision := sessionGuardDecisionForContext(
+			sessionGuardMailbox,
+			sessionGuardChannelExit5,
+			sessionGuardPinInvalid,
+			&SessionContextError{Message: err.Error()},
+			sessionGuardFlags{ExplicitRoot: explicitRoot},
+		)
+		if decision.Verdict == sessionGuardAllow {
+			return nil
+		}
 		return err
 	}
-	if mismatch == nil {
+	decision := sessionGuardDecisionForContext(
+		sessionGuardMailbox,
+		sessionGuardChannelExit5,
+		pinState,
+		mismatch,
+		sessionGuardFlags{ExplicitRoot: explicitRoot},
+	)
+	if decision.Verdict == sessionGuardAllow {
 		return nil
 	}
 	return ContextMismatchError("refusing %s: %s. Use --session <name> to route deliberately, or explicit --root with --ignore-session-pin", command, mismatch.Error())
 }
 
 func guardPinnedSourceContext(command, target string, crossProject, ignorePin, explicitRoot bool) error {
+	return guardPinnedSourceContextWithChannel(command, target, crossProject, ignorePin, explicitRoot, sessionGuardChannelExit5)
+}
+
+func guardPinnedSourceContextJSON(command, target string, crossProject, explicitRoot bool) error {
+	return guardPinnedSourceContextWithChannel(command, target, crossProject, false, explicitRoot, sessionGuardChannelJSON)
+}
+
+func guardPinnedSourceContextWithChannel(command, target string, crossProject, ignorePin, explicitRoot bool, channel sessionGuardChannel) error {
 	if ignorePin {
-		return nil
+		decision := decideSessionGuard(sessionGuardInput{
+			Kind: sessionGuardSource,
+			Pin:  sessionGuardPinInvalid, Relation: sessionGuardTargetMismatch,
+			Flags: sessionGuardFlags{ExplicitRoot: explicitRoot, IgnorePin: true},
+		})
+		if decision.Verdict == sessionGuardAllow {
+			return nil
+		}
 	}
+	pin, err := loadSessionPin()
+	if err != nil {
+		decision := sessionGuardDecisionForContext(
+			sessionGuardSource,
+			channel,
+			sessionGuardPinInvalid,
+			&SessionContextError{Message: err.Error()},
+			sessionGuardFlags{ExplicitRoot: explicitRoot, CrossProject: crossProject},
+		)
+		if decision.Verdict == sessionGuardAllow {
+			return nil
+		}
+		return err
+	}
+	pinState := sessionGuardPinStateFor(pin)
 	if !explicitRoot && !crossProject {
-		if err := guardCwdLocalContext(command, target); err != nil {
+		if err := guardCwdLocalContextWithPin(command, target, pin); err != nil {
+			decision := sessionGuardDecisionForContext(
+				sessionGuardSource,
+				channel,
+				pinState,
+				&SessionContextError{Message: err.Error()},
+				sessionGuardFlags{ExplicitRoot: explicitRoot, CrossProject: crossProject},
+			)
+			if decision.Verdict == sessionGuardAllow {
+				return nil
+			}
 			return err
 		}
 	}
-	mismatch, err := sessionPinMismatch(target)
+	mismatch, err := sessionPinMismatchWithPin(target, pin)
 	if err != nil {
+		decision := sessionGuardDecisionForContext(
+			sessionGuardSource,
+			channel,
+			sessionGuardPinInvalid,
+			&SessionContextError{Message: err.Error()},
+			sessionGuardFlags{ExplicitRoot: explicitRoot, CrossProject: crossProject},
+		)
+		if decision.Verdict == sessionGuardAllow {
+			return nil
+		}
 		return err
 	}
-	if mismatch == nil {
+	decision := sessionGuardDecisionForContext(
+		sessionGuardSource,
+		channel,
+		pinState,
+		mismatch,
+		sessionGuardFlags{ExplicitRoot: explicitRoot, CrossProject: crossProject},
+	)
+	if decision.Verdict == sessionGuardAllow {
 		return nil
+	}
+	if mismatch == nil {
+		return ContextMismatchError("refusing %s: session context did not authorize the source. Target routing does not authorize a mismatched source; use an explicit source route, or explicit --root with --ignore-session-pin", command)
 	}
 	return ContextMismatchError("refusing %s: %s. Target routing does not authorize a mismatched source; use an explicit source route, or explicit --root with --ignore-session-pin", command, mismatch.Error())
 }
