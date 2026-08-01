@@ -36,8 +36,50 @@ func TestCaptureWakeImageEvidenceBindsStableRegularExecutable(t *testing.T) {
 		evidence.Inode == 0 || evidence.CTimeNS <= 0 {
 		t.Fatalf("evidence = %#v", evidence)
 	}
+	if evidence.Method != wakeImageMethodPathnameObserved {
+		t.Fatalf("path-opened image method = %q, want observational evidence", evidence.Method)
+	}
 	if err := validateWakeImageEvidence(evidence); err != nil {
 		t.Fatalf("captured evidence is invalid: %v", err)
+	}
+}
+
+func TestLinuxFabricatedPathEvidenceCannotAuthorizeResume(t *testing.T) {
+	dir := secureTempDirForTest(t)
+	path := filepath.Join(dir, "fabricated-amq")
+	if err := os.WriteFile(path, []byte("not the running image\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	evidence, err := captureWakeImageEvidence(path, "0.50.2")
+	if err != nil {
+		t.Fatalf("capture fabricated path evidence: %v", err)
+	}
+	evidence.Platform = "linux"
+	if evidence.Method != wakeImageMethodPathnameObserved {
+		t.Fatalf("fabricated path evidence method = %q, want observational evidence", evidence.Method)
+	}
+	if err := validateWakeImageEvidenceForPlatform(evidence, "linux"); err != nil {
+		t.Fatalf("Linux observational image evidence should remain valid diagnostics: %v", err)
+	}
+
+	lock := validWakeResumeLockForTest()
+	lock.Root = canonicalWakeRoot("/queue")
+	lock.RunningImageEvidence = &evidence
+	lock.ImagePath = evidence.ExecutionPath
+	lock.ImageVersion = evidence.EmbeddedVersion
+	controlSocket := filepath.Join(fsq.AgentBase(lock.Root, lock.Agent), ".w.test-linux-resume")
+	lock.ControlSocket = controlSocket
+
+	err = validateWakeResumeAdvertisementWithContext(
+		lock,
+		lock.Root,
+		lock.Agent,
+		"linux",
+		controlSocket,
+	)
+	if err == nil || !strings.Contains(err.Error(), "kernel-bound") {
+		t.Fatalf("Linux fabricated path advertisement error = %v, want kernel-bound refusal", err)
 	}
 }
 

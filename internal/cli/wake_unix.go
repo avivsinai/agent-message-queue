@@ -1918,6 +1918,14 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		lockWakeMode = effectiveInjectMode(&wakeConfig{me: me, injectMode: lockWakeMode})
 	}
 	acceptExistingDeadline := time.Now().Add(wakeReadyTimeout)
+	resumeEligible := wakeResumeStartupEligible(
+		requestedOwner,
+		repairLineage != nil,
+		*injectCmdFlag,
+		interruptKey,
+		lockWakeMode,
+	)
+	reloadTransportEligible := resumeEligible && target == nil
 	var cleanup func()
 	var repairFloorAuthority wakeRepairFloorAuthority
 	for {
@@ -1935,13 +1943,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 			wakeMode:                lockWakeMode,
 			requestedOwner:          requestedOwner,
 			repairLineage:           repairLineage,
-			resumeEligible: wakeResumeStartupEligible(
-				requestedOwner,
-				repairLineage != nil,
-				*injectCmdFlag,
-				interruptKey,
-				lockWakeMode,
-			),
+			resumeEligible:          resumeEligible,
 		}
 		if repairLineage != nil {
 			options.repairFloorAuthority = &repairFloorAuthority
@@ -2282,6 +2284,28 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 			}
 			return writeWakeRepairFloorInDir(activeAgentDir, root, floor)
 		}
+	}
+
+	if reloadTransportEligible {
+		if requestedOwner == nil {
+			return fmt.Errorf("wake reload transport requires an exact owner")
+		}
+		select {
+		case <-ownerObservation.Done():
+			return fmt.Errorf("requested wake owner observation ended before reload transport startup")
+		default:
+		}
+		cleanupReloadTransport, err := startWakeReloadTransportInDir(
+			activeAgentDir,
+			root,
+			me,
+			currentWake,
+			*requestedOwner,
+		)
+		if err != nil {
+			return err
+		}
+		defer cleanupReloadTransport()
 	}
 
 	return loop(cfg)

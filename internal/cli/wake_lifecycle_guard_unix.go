@@ -124,6 +124,14 @@ func withWakeLifecycleGuard(root, me string, fn func() error) error {
 }
 
 func withWakeLifecycleGuardInDir(agentDir *wakeAgentDir, fn func(int) error) error {
+	return withWakeLifecycleGuardModeInDir(agentDir, unix.LOCK_EX, fn)
+}
+
+func withWakeLifecycleGuardModeInDir(
+	agentDir *wakeAgentDir,
+	lockMode int,
+	fn func(int) error,
+) error {
 	return agentDir.withFD(func(dirfd int) error {
 		path := filepath.Join(agentDir.path, wakeLifecycleGuardFileName)
 		file, err := openWakeLifecycleGuardAt(dirfd, path)
@@ -132,7 +140,7 @@ func withWakeLifecycleGuardInDir(agentDir *wakeAgentDir, fn func(int) error) err
 		}
 		defer func() { _ = file.Close() }()
 
-		if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
+		if err := unix.Flock(int(file.Fd()), lockMode); err != nil {
 			return fmt.Errorf("acquire wake lifecycle guard %s: %w", path, err)
 		}
 		defer func() { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }()

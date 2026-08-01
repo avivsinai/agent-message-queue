@@ -28,6 +28,8 @@ func captureCurrentWakeImageEvidenceDefault() (wakeImageEvidenceV1, error) {
 	if err != nil {
 		return wakeImageEvidenceV1{}, fmt.Errorf("resolve current wake executable symlinks: %w", err)
 	}
+	// Resolving the process-reported pathname does not bind this open to the
+	// image actually executing. Keep it diagnostic on every platform.
 	return captureWakeImageEvidence(filepath.Clean(resolved), strings.TrimSpace(cliVersion))
 }
 
@@ -82,14 +84,10 @@ func captureWakeImageEvidence(path, embeddedVersion string) (wakeImageEvidenceV1
 		return wakeImageEvidenceV1{}, fmt.Errorf("wake image changed while hashing")
 	}
 
-	method := wakeImageMethodFDExec
-	if runtime.GOOS == "darwin" {
-		method = wakeImageMethodPathnameObserved
-	}
 	evidence := wakeImageEvidenceV1{
 		Schema:          wakeImageEvidenceSchemaV1,
 		Platform:        runtime.GOOS,
-		Method:          method,
+		Method:          wakeImageMethodPathnameObserved,
 		ExecutionPath:   path,
 		Device:          identity.Device,
 		Inode:           identity.Inode,
