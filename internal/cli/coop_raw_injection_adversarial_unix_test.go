@@ -264,17 +264,19 @@ func deliverAdversarialWakeMessage(t *testing.T, root, me string, message format
 }
 
 type publicCoopPTYFixture struct {
-	root          string
-	ownerPath     string
-	linePath      string
-	interruptPath string
-	cmd           *exec.Cmd
-	done          chan error
-	output        *bytes.Buffer
-	stdin         *os.File
-	ownerPID      int
-	wakeClaim     *wakeLockInspection
-	waited        bool
+	root           string
+	ownerPath      string
+	linePath       string
+	interruptPath  string
+	cmd            *exec.Cmd
+	processGroup   int
+	commandPIDPath string
+	done           chan error
+	output         *bytes.Buffer
+	stdin          *os.File
+	ownerPID       int
+	wakeClaim      *wakeLockInspection
+	waited         bool
 }
 
 func startPublicCoopPTYFixture(t *testing.T, mode string) *publicCoopPTYFixture {
@@ -286,6 +288,7 @@ func startPublicCoopPTYFixture(t *testing.T, mode string) *publicCoopPTYFixture 
 	linePath := filepath.Join(dir, "terminal-line")
 	interruptPath := filepath.Join(dir, "interrupt")
 	agentPath := filepath.Join(dir, "agent.sh")
+	commandPIDPath := filepath.Join(dir, "command.pid")
 	agentScript := `#!/bin/sh
 set -eu
 owner_path=$1
@@ -323,8 +326,13 @@ done
 	if err := os.WriteFile(amqBinary, testData, 0o700); err != nil {
 		t.Fatalf("write hermetic amq binary: %v", err)
 	}
+	commandScript := `printf '%s\n' "$$" > "$1"
+shift
+exec "$@"
+`
 	args := []string{
 		"-q", "/dev/null",
+		"/bin/sh", "-c", commandScript, "amq-command", commandPIDPath,
 		amqBinary,
 		"--no-update-check",
 		"coop", "exec",
@@ -340,6 +348,7 @@ done
 	}
 	output := &bytes.Buffer{}
 	cmd := exec.Command("/usr/bin/script", args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = append(os.Environ(), cliHelperEnv+"=1", "AMQ_NO_UPDATE_CHECK=1")
 	cmd.Stdout = output
 	cmd.Stderr = output
@@ -353,20 +362,17 @@ done
 		_ = stdinWriter.Close()
 		t.Fatalf("start public coop PTY: %v", err)
 	}
-	if err := stdinReader.Close(); err != nil {
-		_ = stdinWriter.Close()
-		_ = cmd.Process.Kill()
-		t.Fatalf("close parent PTY stdin reader: %v", err)
-	}
 	fixture := &publicCoopPTYFixture{
-		root:          root,
-		ownerPath:     ownerPath,
-		linePath:      linePath,
-		interruptPath: interruptPath,
-		cmd:           cmd,
-		done:          make(chan error, 1),
-		output:        output,
-		stdin:         stdinWriter,
+		root:           root,
+		ownerPath:      ownerPath,
+		linePath:       linePath,
+		interruptPath:  interruptPath,
+		cmd:            cmd,
+		processGroup:   cmd.Process.Pid,
+		commandPIDPath: commandPIDPath,
+		done:           make(chan error, 1),
+		output:         output,
+		stdin:          stdinWriter,
 	}
 	go func() { fixture.done <- cmd.Wait() }()
 	t.Cleanup(func() {
@@ -375,13 +381,23 @@ done
 			fixture.stdin = nil
 		}
 		if !fixture.waited && fixture.cmd.Process != nil {
+			if fixture.processGroup > 1 {
+				_ = syscall.Kill(-fixture.processGroup, syscall.SIGKILL)
+			}
+			if data, err := os.ReadFile(fixture.commandPIDPath); err == nil {
+				if commandPID, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && commandPID > 1 {
+					_ = syscall.Kill(-commandPID, syscall.SIGKILL)
+				}
+			}
 			if fixture.ownerPID > 1 {
 				_ = syscall.Kill(fixture.ownerPID, syscall.SIGKILL)
 			}
 			_ = fixture.cmd.Process.Kill()
 			select {
 			case <-fixture.done:
+				fixture.waited = true
 			case <-time.After(3 * time.Second):
+				t.Errorf("public coop PTY cleanup did not join process group %d after SIGKILL", fixture.processGroup)
 			}
 		}
 		if fixture.wakeClaim != nil {
@@ -392,6 +408,9 @@ done
 			}
 		}
 	})
+	if err := stdinReader.Close(); err != nil {
+		t.Fatalf("close parent PTY stdin reader: %v", err)
+	}
 	return fixture
 }
 

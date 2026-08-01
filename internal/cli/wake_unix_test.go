@@ -7709,26 +7709,43 @@ func TestWaitForWakeReadyReturnsWhenReadyFileAppears(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
 	}
+	waiter := newWakeProcessWaiter(cmd.Process)
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
+		_ = waiter.waitForExit(time.Second)
 	})
 
 	if err := writeWakeReadyFile(root, "orchestrator", readyPath, inspection); err != nil {
 		t.Fatalf("writeWakeReadyFile: %v", err)
 	}
-	if err := waitForWakeReady(cmd.Process, readyPath, root, "orchestrator", time.Second); err != nil {
+	if err := waitForWakeReadyWithWaiter(waiter, readyPath, root, "orchestrator", time.Second); err != nil {
 		t.Fatalf("waitForWakeReady: %v", err)
 	}
 }
 
 func TestWaitForWakeReadyFailsWhenWakeExitsBeforeReady(t *testing.T) {
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	root := t.TempDir()
 	cmd := exec.Command("sh", "-c", "exit 7")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
 	}
+	result := make(chan error, 1)
+	waitDone := make(chan struct{})
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		select {
+		case <-waitDone:
+		case <-time.After(time.Second):
+			t.Errorf("waitForWakeReady wrapper did not join helper")
+		}
+	})
+	go func() {
+		defer close(waitDone)
+		result <- waitForWakeReady(cmd.Process, readyPath, root, "orchestrator", time.Second)
+	}()
 
-	err := waitForWakeReady(cmd.Process, readyPath, t.TempDir(), "orchestrator", time.Second)
+	err := <-result
 	if err == nil {
 		t.Fatal("expected readiness failure")
 	}
@@ -7752,8 +7769,13 @@ func TestWaitForWakeReadyAcceptsReadyFileWrittenBeforeExit(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
 	}
+	waiter := newWakeProcessWaiter(cmd.Process)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = waiter.waitForExit(time.Second)
+	})
 
-	if err := waitForWakeReady(cmd.Process, readyPath, root, "orchestrator", time.Second); err != nil {
+	if err := waitForWakeReadyWithWaiter(waiter, readyPath, root, "orchestrator", time.Second); err != nil {
 		t.Fatalf("waitForWakeReady should accept ready file written before exit: %v", err)
 	}
 }
@@ -7768,9 +7790,13 @@ func TestWaitForWakeReadyRefusesLegacyReadyFile(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	waiter := newWakeProcessWaiter(cmd.Process)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = waiter.waitForExit(time.Second)
+	})
 
-	err := waitForWakeReady(cmd.Process, readyPath, root, "orchestrator", time.Second)
+	err := waitForWakeReadyWithWaiter(waiter, readyPath, root, "orchestrator", time.Second)
 	if err == nil || !strings.Contains(err.Error(), "legacy") {
 		t.Fatalf("expected legacy readiness refusal, got %v", err)
 	}
@@ -7786,9 +7812,13 @@ func TestWaitForWakeReadyRefusesEmptyReadyFile(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	waiter := newWakeProcessWaiter(cmd.Process)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = waiter.waitForExit(time.Second)
+	})
 
-	err := waitForWakeReady(cmd.Process, readyPath, root, "orchestrator", time.Second)
+	err := waitForWakeReadyWithWaiter(waiter, readyPath, root, "orchestrator", time.Second)
 	if err == nil || !strings.Contains(err.Error(), "legacy") {
 		t.Fatalf("expected empty readiness refusal, got %v", err)
 	}
@@ -7882,7 +7912,11 @@ func TestTerminateWakeHelperProcessKillsWaitsAndRemovesCapturedLock(t *testing.T
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	waiter := newWakeProcessWaiter(cmd.Process)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = waiter.waitForExit(time.Second)
+	})
 	wakePID := cmd.Process.Pid
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid != wakePID {
@@ -7900,7 +7934,6 @@ func TestTerminateWakeHelperProcessKillsWaitsAndRemovesCapturedLock(t *testing.T
 		PID: wakePID, ProcessStart: "start-1", BootID: "boot-1",
 		Executable: "/opt/homebrew/bin/amq", Generation: "generation-1",
 	})
-	waiter := newWakeProcessWaiter(cmd.Process)
 	if err := terminateWakeHelperProcess(cmd.Process, waiter, root, "orchestrator"); err != nil {
 		t.Fatalf("terminateWakeHelperProcess: %v", err)
 	}
@@ -7917,7 +7950,11 @@ func TestTerminateWakeHelperProcessRemovesLockCommittedAfterFirstInspection(t *t
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	waiter := newWakeProcessWaiter(cmd.Process)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = waiter.waitForExit(time.Second)
+	})
 	root := secureTempDirForTest(t)
 	lockPath := filepath.Join(fsq.AgentBase(root, "orchestrator"), ".wake.lock")
 	originalKill := killWakeHelperProcess
@@ -7929,7 +7966,6 @@ func TestTerminateWakeHelperProcessRemovesLockCommittedAfterFirstInspection(t *t
 	}
 	t.Cleanup(func() { killWakeHelperProcess = originalKill })
 
-	waiter := newWakeProcessWaiter(cmd.Process)
 	if err := terminateWakeHelperProcess(cmd.Process, waiter, root, "orchestrator"); err != nil {
 		t.Fatalf("terminateWakeHelperProcess: %v", err)
 	}
@@ -7967,9 +8003,13 @@ func TestWaitForWakeReadyRefusesLockReplacement(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	waiter := newWakeProcessWaiter(cmd.Process)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = waiter.waitForExit(time.Second)
+	})
 
-	err = waitForWakeReady(cmd.Process, readyPath, root, "orchestrator", time.Second)
+	err = waitForWakeReadyWithWaiter(waiter, readyPath, root, "orchestrator", time.Second)
 	if err == nil || !strings.Contains(err.Error(), "generation") {
 		t.Fatalf("expected replacement generation refusal, got %v", err)
 	}
@@ -7998,9 +8038,13 @@ func TestWaitForWakeReadyRefusesTargetReplacement(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	waiter := newWakeProcessWaiter(cmd.Process)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = waiter.waitForExit(time.Second)
+	})
 
-	err = waitForWakeReady(cmd.Process, readyPath, root, "orchestrator", time.Second)
+	err = waitForWakeReadyWithWaiter(waiter, readyPath, root, "orchestrator", time.Second)
 	if err == nil || !strings.Contains(err.Error(), "does not match wake lock") {
 		t.Fatalf("expected replacement target refusal, got %v", err)
 	}
@@ -8027,9 +8071,13 @@ func TestWaitForWakeReadyRefusesStrayTargetForTargetlessLock(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	waiter := newWakeProcessWaiter(cmd.Process)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = waiter.waitForExit(time.Second)
+	})
 
-	err = waitForWakeReady(cmd.Process, readyPath, root, "orchestrator", time.Second)
+	err = waitForWakeReadyWithWaiter(waiter, readyPath, root, "orchestrator", time.Second)
 	if err == nil || !strings.Contains(err.Error(), "target does not match current wake lock") {
 		t.Fatalf("expected stray target refusal for targetless lock, got %v", err)
 	}

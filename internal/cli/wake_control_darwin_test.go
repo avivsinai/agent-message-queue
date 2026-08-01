@@ -821,11 +821,15 @@ func TestDarwinOwnerWakeChildStopsThroughInheritedPrivateFD(t *testing.T) {
 		_ = capability.Close()
 		t.Fatal(err)
 	}
+	waiter := newWakeProcessWaiter(cmd.Process)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = waiter.waitForExit(time.Second)
+	})
 	if err := capability.Bind(cmd.Process); err != nil {
 		_ = capability.Close()
 		t.Fatal(err)
 	}
-	waiter := newWakeProcessWaiter(cmd.Process)
 	if err := capability.Stop(); err != nil {
 		_ = capability.Close()
 		t.Fatal(err)
@@ -850,11 +854,15 @@ func TestDarwinOwnerWakeChildAlreadyExitedStillClosesStableCapability(t *testing
 		_ = capability.Close()
 		t.Fatal(err)
 	}
+	waiter := newWakeProcessWaiter(cmd.Process)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = waiter.waitForExit(time.Second)
+	})
 	if err := capability.Bind(cmd.Process); err != nil {
 		_ = capability.Close()
 		t.Fatal(err)
 	}
-	waiter := newWakeProcessWaiter(cmd.Process)
 	if err := waiter.waitForExit(2 * time.Second); err != nil {
 		_ = capability.Close()
 		t.Fatal(err)

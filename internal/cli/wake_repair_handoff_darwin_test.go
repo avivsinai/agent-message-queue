@@ -301,26 +301,27 @@ func TestDarwinWakeRepairChildCapabilityStopsChildBlockedBeforeControlRead(t *te
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if err := capability.Bind(cmd.Process); err != nil {
+	waiter := newWakeProcessWaiter(cmd.Process)
+	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		_ = waiter.waitForExit(time.Second)
+	})
+	if err := capability.Bind(cmd.Process); err != nil {
 		t.Fatal(err)
 	}
 	if err := capability.Stop(); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
 		t.Fatalf("stop child blocked before control read: %v", err)
 	}
 
-	waited := make(chan error, 1)
-	go func() { waited <- cmd.Wait() }()
 	select {
-	case err := <-waited:
-		if err == nil {
+	case <-waiter.done:
+		if waiter.err != nil {
+			t.Fatalf("wait for exact-stop child: %v", waiter.err)
+		}
+		if waiter.state == nil || waiter.state.Success() {
 			t.Fatal("blocked child exited successfully after exact stop; want signal termination")
 		}
 	case <-time.After(2 * time.Second):
-		_ = cmd.Process.Kill()
 		t.Fatal("exact pre-admission child remained alive after stop")
 	}
 }
@@ -335,13 +336,16 @@ func TestDarwinWakeRepairChildCapabilityStopAfterWaitCannotSignalReusedPID(t *te
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if err := capability.Bind(cmd.Process); err != nil {
+	waiter := newWakeProcessWaiter(cmd.Process)
+	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		_ = waiter.waitForExit(time.Second)
+	})
+	if err := capability.Bind(cmd.Process); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("wait direct child: %v", err)
+	if err := waiter.waitForExit(time.Second); err != nil || waiter.err != nil {
+		t.Fatalf("wait direct child: wait=%v child=%v", err, waiter.err)
 	}
 
 	// os.Process synchronizes Wait with Signal and returns ErrProcessDone
