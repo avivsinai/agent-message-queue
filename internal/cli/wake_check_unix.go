@@ -438,6 +438,13 @@ func classifyWakeCheckReload(inspection wakeLockInspection) wakeCheckReloadDecis
 	if inspection.Lock.ResumeSchema != wakeResumeSchemaV2 {
 		return unavailable(wakeReloadReasonSchemaUnsupported)
 	}
+	if wakeControlSocketPath(
+		inspection.Lock.Root,
+		inspection.Lock.Agent,
+		inspection.Lock.Generation,
+	) == "" {
+		return unavailable(wakeReloadReasonPlatformUnsupported)
+	}
 	if validateWakeResumeAdvertisement(inspection.Lock) != nil {
 		return unavailable(wakeReloadReasonAdvertisementInvalid)
 	}
@@ -543,16 +550,17 @@ func decorateOpsWakeLockWithWakeCheck(
 ) {
 	root = canonicalWakeRoot(root)
 	if includeV2 {
-		removed := lock.Removed
-		removedStatus := lock.Status
-		removedReason := lock.Reason
+		var mutation *opsWakeMutation
+		if lock.Removed {
+			mutation = &opsWakeMutation{
+				Status:  lock.Status,
+				Reason:  lock.Reason,
+				Removed: true,
+			}
+		}
 		snapshot := inspectWakeCheckSnapshot(root, lock.Agent)
 		opsLock := snapshot.OpsLock
-		if removed {
-			opsLock.Status = removedStatus
-			opsLock.Reason = removedReason
-			opsLock.Removed = true
-		}
+		opsLock.Mutation = mutation
 		opsLock.WakeCheckDecision = &snapshot.Decision
 		*lock = *opsLock
 		return
@@ -766,8 +774,7 @@ func inspectWakeCheckImageStatus(
 	if comparison.Stale {
 		return wakeImageDifferent
 	}
-	if comparison.Method == wakeBinaryComparisonExactIdentity ||
-		comparison.Method == wakeBinaryComparisonDarwinProcessImage {
+	if comparison.Method == wakeBinaryComparisonExactIdentity {
 		return wakeImageCurrent
 	}
 	return wakeImageUnknown

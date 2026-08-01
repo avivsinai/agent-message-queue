@@ -198,7 +198,7 @@ amq dlq read --me <agent> --id <dlq_id> [--session <name>] [--ignore-session-pin
 amq dlq retry --me <agent> --id <dlq_id> [--session <name>] [--ignore-session-pin] [--all] [--force]
 amq dlq purge --me <agent> [--session <name>] [--ignore-session-pin] [--older-than <duration>] [--dry-run] [--yes]
 amq wake --me <agent> [--baseline-existing] [--inject-cmd <cmd>] [--inject-mode <auto|raw|paste|none>] [--inject-via <absolute-executable>] [--inject-arg <arg>...] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>] [--interrupt] [--interrupt-label <label>] [--interrupt-priority <p>] [--interrupt-cmd <ctrl-c|none>] [--interrupt-notice <str>] [--interrupt-cooldown <duration>] [--debug]
-amq wake check --me <agent> [--root <path>] [--strict] [--json]
+amq wake check --me <agent> [--root <path>] [--strict] [--json] [--json-schema <1|2>]
 amq wake repair --me <agent> [--root <path>] [--json]
 amq wake retire --me <agent> --inject-via <absolute-executable> [--inject-arg <arg>...] [--root <path>] [--json]
 amq upgrade
@@ -219,13 +219,13 @@ amq integration symphony init [--workflow <path>] --me <agent> [--root <path>] [
 amq integration symphony emit --event <after_create|before_run|after_run|before_remove> --me <agent> [--root <path>] [--workspace <path>] [--identifier <key>] [--json]
 amq integration kanban bridge --me <agent> [--root <path>] [--url <ws://...>] [--workspace-id <id>] [--reconnect <duration>] [--json]
 amq who [--json]
-amq doctor [--root <path>] [--base-root <path>] [--ignore-session-pin] [--ops] [--fix-wake-locks] [--fix-mailboxes] [--json]
+amq doctor [--root <path>] [--base-root <path>] [--ignore-session-pin] [--ops] [--fix-wake-locks] [--fix-mailboxes] [--json] [--json-schema <1|2>]
 ```
 
 `--root` is accepted only where it is listed above. Participating commands may
 also accept `--json` and `--strict` (error instead of warn on unknown handles or
 unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has
-its own flags and doesn't accept these.
+its own flags and doesn't accept these. `--json-schema` requires `--json`.
 
 **Body resolution (`send`/`reply`)**: `--body` resolves from `@file`, a literal string, or stdin. A bare `--body -`, `--body @-`, or an omitted `--body` reads stdin (standard CLI convention). A send whose resolved body is empty or whitespace-only **fails closed** with a usage error rather than delivering a blank message — pass `--allow-empty` to send a blank body intentionally. This prevents a dropped or mistyped body (e.g. `--body -` with nothing piped) from silently shipping an empty message.
 

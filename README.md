@@ -556,6 +556,15 @@ Common command groups:
 | Integrations | `integration symphony init`, `integration symphony emit`, `integration kanban bridge` |
 | Operations | `presence set`, `presence list`, `route explain`, `who`, `doctor`, `doctor --ops`, `wake check`, `wake repair`, `wake recover-owner`, `wake retire`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |
 
+Canonical schema-selecting diagnostic forms:
+
+```text
+amq wake check --me <agent> [--root <path>] [--strict] [--json] [--json-schema <1|2>]
+amq doctor [--root <path>] [--base-root <path>] [--ignore-session-pin] [--ops] [--fix-wake-locks] [--fix-mailboxes] [--json] [--json-schema <1|2>]
+```
+
+`--json-schema` requires `--json`.
+
 ### Exit codes
 
 AMQ exposes stable process exit codes for scripts and agent consumers:
