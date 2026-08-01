@@ -1957,6 +1957,17 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 			}
 			continue
 		}
+		var snapshotChanged *wakeSnapshotReadChangedError
+		if acceptExistingWake && errors.As(err, &snapshotChanged) {
+			if !waitForWakePreparedRetry(acceptExistingDeadline) {
+				return fmt.Errorf(
+					"wake lock did not stabilize within %s: %w",
+					wakeReadyTimeout,
+					err,
+				)
+			}
+			continue
+		}
 		var alreadyRunning *wakeAlreadyRunningError
 		if acceptExistingWake && errors.As(err, &alreadyRunning) {
 			if requestedOwner != nil {

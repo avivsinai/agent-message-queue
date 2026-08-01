@@ -403,7 +403,9 @@ func readWakeTargetSnapshotAt(
 		return wakeTargetSnapshot{}, true, fmt.Errorf("re-stat wake target: %w", statErr)
 	}
 	if !sameWakeFileIdentity(info, pathInfo) {
-		return wakeTargetSnapshot{}, true, fmt.Errorf("wake target changed while opening")
+		return wakeTargetSnapshot{}, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("wake target changed while opening"),
+		)
 	}
 	var target wakeTarget
 	if err := json.Unmarshal(data, &target); err != nil {

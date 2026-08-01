@@ -5998,6 +5998,159 @@ func TestRunWakeWithLoopRetriesCreatingWakeUntilPrepared(t *testing.T) {
 	}
 }
 
+func TestRunWakeWithLoopRetriesWakeLockChangedWhileOpening(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		retryAllowed    bool
+		wantDeadlineErr bool
+	}{
+		{name: "stabilizes", retryAllowed: true},
+		{name: "deadline expires", wantDeadlineErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const wakePID = 4242
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				if pid == wakePID {
+					return wakeProcessInfo{
+						PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1",
+						Executable: "/opt/homebrew/bin/amq",
+						Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+					}
+				}
+				return wakeProcessInfo{PID: pid}
+			})
+			root := secureTempDirForTest(t)
+			injector := writeExecutableForTest(t, "injector")
+			target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, nil)
+			lock := bindWakeLockToTarget(wakeLock{
+				PID: wakePID, TTY: "tty", ProcessStart: "start-1", BootID: "boot-1",
+				Executable: "/opt/homebrew/bin/amq", Generation: "generation-1",
+			}, target)
+			if err := writeWakeTarget(root, "orchestrator", target); err != nil {
+				t.Fatalf("writeWakeTarget: %v", err)
+			}
+			writeWakeLockForTest(t, root, "orchestrator", lock)
+			writeWakePreparedForTest(t, root, "orchestrator")
+
+			originalAfterRead := afterWakeLockAtRead
+			replaced := false
+			afterWakeLockAtRead = func() {
+				if replaced {
+					return
+				}
+				replaced = true
+				afterWakeLockAtRead = func() {}
+				writeWakeLockForTest(t, root, "orchestrator", lock)
+			}
+			t.Cleanup(func() { afterWakeLockAtRead = originalAfterRead })
+			originalRetry := waitForWakePreparedRetry
+			retryCalls := 0
+			waitForWakePreparedRetry = func(time.Time) bool {
+				retryCalls++
+				return tc.retryAllowed
+			}
+			t.Cleanup(func() { waitForWakePreparedRetry = originalRetry })
+
+			readyPath := filepath.Join(t.TempDir(), "wake.ready")
+			err := runWakeWithLoop([]string{
+				"--root", root,
+				"--me", "orchestrator",
+				"--inject-via", injector,
+				"--ready-file", readyPath,
+				"--accept-existing-wake",
+			}, func(cfg wakeConfig) error {
+				t.Fatalf("loop should not run with an existing wake: %#v", cfg)
+				return nil
+			})
+			if !tc.wantDeadlineErr {
+				if err != nil {
+					t.Fatalf("torn wake-lock read did not retry: %v", err)
+				}
+				if _, err := os.Stat(readyPath); err != nil {
+					t.Fatalf("ready file missing: %v", err)
+				}
+			} else {
+				wantPrefix := fmt.Sprintf("wake lock did not stabilize within %s:", wakeReadyTimeout)
+				if err == nil || !strings.HasPrefix(err.Error(), wantPrefix) {
+					t.Fatalf("deadline error = %v, want prefix %q", err, wantPrefix)
+				}
+				var snapshotChanged *wakeSnapshotReadChangedError
+				if !errors.As(err, &snapshotChanged) {
+					t.Fatalf("deadline error lost typed torn-read cause: %v", err)
+				}
+				if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+					t.Fatalf("ready file should not exist, statErr=%v", statErr)
+				}
+			}
+			if !replaced {
+				t.Fatal("wake-lock read interleave did not run")
+			}
+			if retryCalls != 1 {
+				t.Fatalf("torn wake-lock read retry calls = %d, want 1", retryCalls)
+			}
+		})
+	}
+}
+
+func TestWakeSnapshotReadChangedErrorRequiresTypedCause(t *testing.T) {
+	cause := errors.New("wake lock changed while opening")
+	err := newWakeSnapshotReadChangedError(cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("typed snapshot error does not unwrap to its cause: %v", err)
+	}
+	var changed *wakeSnapshotReadChangedError
+	if !errors.As(fmt.Errorf("inspect wake snapshot: %w", err), &changed) {
+		t.Fatalf("wrapped typed snapshot error was not classified: %v", err)
+	}
+	changed = nil
+	if errors.As(errors.New(err.Error()), &changed) {
+		t.Fatal("equivalent error text was classified without the typed cause")
+	}
+}
+
+func TestRunWakeWithLoopCreatingWakeDeadlineExpires(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	lockPath := filepath.Join(fsq.AgentBase(root, "orchestrator"), ".wake.lock")
+	if err := os.WriteFile(lockPath, []byte("{"), 0o600); err != nil {
+		t.Fatalf("write creating lock: %v", err)
+	}
+
+	originalRetry := waitForWakePreparedRetry
+	retryCalls := 0
+	waitForWakePreparedRetry = func(time.Time) bool {
+		retryCalls++
+		return false
+	}
+	t.Cleanup(func() { waitForWakePreparedRetry = originalRetry })
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-mode", "none",
+		"--ready-file", readyPath,
+		"--accept-existing-wake",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run while the wake lock is being created: %#v", cfg)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "wake lock did not finish creation") {
+		t.Fatalf("creation deadline error = %v", err)
+	}
+	if retryCalls != 1 {
+		t.Fatalf("creation deadline retry calls = %d, want 1", retryCalls)
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("creating lock was not preserved: %v", statErr)
+	}
+	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+		t.Fatalf("ready file should not exist, statErr=%v", statErr)
+	}
+}
+
 func TestRunWakeWithLoopNoneRejectsExistingInputWake(t *testing.T) {
 	const wakePID = 4242
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
@@ -6412,6 +6565,13 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsDifferentInjector(t *testing.T)
 	if err := writeWakeTarget(root, "orchestrator", existingTarget); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
 	}
+	originalRetry := waitForWakePreparedRetry
+	retryCalls := 0
+	waitForWakePreparedRetry = func(time.Time) bool {
+		retryCalls++
+		return false
+	}
+	t.Cleanup(func() { waitForWakePreparedRetry = originalRetry })
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
 	err := runWakeWithLoop([]string{
@@ -6431,6 +6591,9 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsDifferentInjector(t *testing.T)
 	}
 	if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
 		t.Fatalf("ready file should not exist, statErr=%v", statErr)
+	}
+	if retryCalls != 0 {
+		t.Fatalf("conclusive injector mismatch retried %d times", retryCalls)
 	}
 }
 

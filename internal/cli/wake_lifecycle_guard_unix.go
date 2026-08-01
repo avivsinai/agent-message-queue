@@ -72,7 +72,9 @@ func openWakeDirectory(path, label string) (*wakeAgentDir, error) {
 	// it retain the stricter ctime-aware generation checks.
 	if !os.SameFile(before, opened) || !os.SameFile(opened, after) {
 		_ = file.Close()
-		return nil, fmt.Errorf("%s %s changed while opening", label, path)
+		return nil, newWakeSnapshotReadChangedError(
+			fmt.Errorf("%s %s changed while opening", label, path),
+		)
 	}
 	return &wakeAgentDir{path: path, file: file}, nil
 }

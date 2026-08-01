@@ -122,6 +122,7 @@ type wakeLockInspection struct {
 	IdentityConfirmed bool
 	raw               []byte
 	fileInfo          os.FileInfo
+	observationErr    error
 }
 
 var inspectWakeProcess = inspectWakeProcessPlatform
@@ -172,6 +173,7 @@ func readWakeLockMetadataWithReader(root, me, lockPath string, read wakeLockFile
 		inspection.Exists = true
 		inspection.Status = wakeLockUnverified
 		inspection.Reason = fmt.Sprintf("cannot read lock: %v", err)
+		inspection.observationErr = err
 		return inspection
 	}
 
@@ -221,7 +223,9 @@ func readWakeLockFileWithInfo(path string) ([]byte, os.FileInfo, error) {
 		return nil, nil, err
 	}
 	if !os.SameFile(info, openedInfo) {
-		return nil, nil, fmt.Errorf("wake lock %s changed while opening", path)
+		return nil, nil, newWakeSnapshotReadChangedError(
+			fmt.Errorf("wake lock %s changed while opening", path),
+		)
 	}
 	data, err := readWakeMetadata(file, "wake lock", path)
 	return data, openedInfo, err
