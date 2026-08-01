@@ -711,7 +711,7 @@ func TestWakeCheckV2ReloadClassificationIsStructuralAndNonExecutable(t *testing.
 			if test.mutate != nil {
 				test.mutate(&inspection)
 			}
-			got := classifyWakeCheckReload(inspection)
+			got := classifyWakeCheckReload("/queue", "codex", inspection)
 			if got.Status != test.wantStatus || got.ReasonCode != test.wantReason {
 				t.Fatalf("reload decision = %#v, want status=%q reason=%q", got, test.wantStatus, test.wantReason)
 			}
@@ -731,6 +731,108 @@ func TestWakeCheckV2ReloadClassificationIsStructuralAndNonExecutable(t *testing.
 	if rendered.Reload.Status != validStatus ||
 		rendered.Reload.ReasonCode != validReason {
 		t.Fatalf("advertised reload output = %#v", rendered.Reload)
+	}
+}
+
+func TestWakeCheckV2RejectsResumeAdvertisementBoundOnlyToArtifactAgent(t *testing.T) {
+	for _, artifactAgent := range []string{"", "claude"} {
+		name := artifactAgent
+		if name == "" {
+			name = "omitted"
+		}
+		t.Run(name, func(t *testing.T) {
+			lock := validWakeResumeLockForTest()
+			lock.Agent = artifactAgent
+			lock.ControlSocket = wakeControlSocketPath(lock.Root, artifactAgent, lock.Generation)
+			inspection := wakeLockInspection{
+				Exists:            true,
+				Status:            wakeLockValid,
+				PID:               lock.PID,
+				Lock:              lock,
+				Process:           wakeProcessInfo{PID: lock.PID, Running: true},
+				IdentityConfirmed: true,
+			}
+
+			decision := buildWakeCheckDecision(lock.Root, "codex", inspection, &opsWakeLock{}, false)
+			if decision.Reload.Status != wakeReloadUnavailable ||
+				decision.Reload.ReasonCode != wakeReloadReasonAdvertisementInvalid {
+				t.Fatalf("artifact-bound reload decision = %#v, want invalid advertisement", decision.Reload)
+			}
+		})
+	}
+}
+
+func TestDoctorOpsV2RejectsResumeAdvertisementBoundOnlyToArtifactAgent(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		artifactAgent string
+		wantReason    string
+	}{
+		{name: "omitted", wantReason: wakeReloadReasonAdvertisementInvalid},
+		{name: "mismatched", artifactAgent: "claude", wantReason: wakeReloadReasonNotLive},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			lock := validWakeResumeLockForTest()
+			lock.Root = canonicalWakeRoot(root)
+			lock.Agent = test.artifactAgent
+			lock.ControlSocket = wakeControlSocketPath(lock.Root, lock.Agent, lock.Generation)
+			writeWakeLockExactForTest(t, root, "codex", lock)
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				return wakeProcessInfo{
+					PID: pid, Running: true, StartToken: lock.ProcessStart, BootID: lock.BootID,
+					Executable: lock.RunningImageEvidence.ExecutionPath,
+					Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+				}
+			})
+
+			locks, _ := checkWakeLocksWithHintsSchema(root, []string{"codex"}, false, wakeCheckSchemaV2)
+			if len(locks) != 1 || locks[0].WakeCheckDecision == nil {
+				t.Fatalf("doctor wake locks = %#v", locks)
+			}
+			reload := locks[0].WakeCheckDecision.Reload
+			if reload.Status != wakeReloadUnavailable || reload.ReasonCode != test.wantReason {
+				t.Fatalf("doctor artifact-bound reload decision = %#v, want reason %q", reload, test.wantReason)
+			}
+		})
+	}
+}
+
+func TestDoctorOpsV2UsesTrustedRosterAgentInsteadOfOuterRecord(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	lock := validWakeResumeLockForTest()
+	lock.Root = canonicalWakeRoot(root)
+	lock.ControlSocket = wakeControlSocketPath(lock.Root, lock.Agent, lock.Generation)
+	writeWakeLockExactForTest(t, root, "codex", lock)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID: pid, Running: true, StartToken: lock.ProcessStart, BootID: lock.BootID,
+			Executable: lock.RunningImageEvidence.ExecutionPath,
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+	stubWakeCheckRuntime(t, false, "0.50.1")
+
+	inspection := inspectWakeLock(root, "codex")
+	if inspection.Status != wakeLockValid {
+		t.Fatalf("initial inspection = %#v", inspection)
+	}
+	opsLock := opsWakeLock{Agent: "claude"}
+	decorateOpsWakeLockWithWakeCheck(root, "codex", &opsLock, inspection, false, true)
+	if opsLock.Agent != "codex" || opsLock.WakeCheckDecision == nil {
+		t.Fatalf("doctor trusted-agent snapshot = %#v", opsLock)
+	}
+	wantStatus := wakeReloadAdvertised
+	wantReason := wakeReloadReasonCommandUnavailable
+	if runtime.GOOS == "linux" {
+		wantStatus = wakeReloadUnavailable
+		wantReason = wakeReloadReasonPlatformUnsupported
+	}
+	if reload := opsLock.WakeCheckDecision.Reload; reload.Status != wantStatus || reload.ReasonCode != wantReason {
+		t.Fatalf("doctor trusted-agent reload = %#v, want status=%q reason=%q", reload, wantStatus, wantReason)
 	}
 }
 
@@ -1006,7 +1108,7 @@ func TestDoctorOpsV2UsesOneStableSnapshotAfterEarlierDoctorStateChanged(t *testi
 		Lock:   initial.LockPath,
 		PID:    initial.PID,
 	}
-	decorateOpsWakeLockWithWakeCheck(root, &opsLock, initial, false, true)
+	decorateOpsWakeLockWithWakeCheck(root, "codex", &opsLock, initial, false, true)
 	if opsLock.WakeCheckDecision == nil {
 		t.Fatal("doctor v2 wake decision is missing")
 	}
@@ -1062,9 +1164,15 @@ func TestDoctorOpsV2DoesNotMixRemovedOutcomeWithReplacementSnapshot(t *testing.T
 		PID:     removedInspection.PID,
 		Reason:  "removed stale wake lock",
 		Removed: true,
+		Mutation: &opsWakeMutation{
+			Status:  "fixed",
+			Reason:  "removed stale wake lock",
+			Removed: true,
+		},
 	}}}}
 	decorateOpsWakeLockWithWakeCheck(
 		root,
+		"codex",
 		&result.Ops.WakeLocks[0],
 		removedInspection,
 		false,
@@ -1082,6 +1190,123 @@ func TestDoctorOpsV2DoesNotMixRemovedOutcomeWithReplacementSnapshot(t *testing.T
 	if got.Status != "live-raw-orphan" || got.PID != replacement.PID || got.Mutation == nil ||
 		got.Mutation.Status != "fixed" || !got.Mutation.Removed {
 		t.Fatalf("replacement snapshot and removal outcome were not separated: %#v", got)
+	}
+}
+
+func TestDoctorOpsV2PreservesFailedRemovalMutation(t *testing.T) {
+	root := secureTempDirForTest(t)
+	original := wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(root),
+		Agent:        "codex",
+		ProcessStart: "12345",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "failed-removal-generation",
+	}
+	writeWakeLockExactForTest(t, root, "codex", original)
+	replacement := original
+	replacement.PID = 5252
+	replacement.ProcessStart = "54321"
+	replacement.Generation = "replacement-after-recheck"
+	inspectCalls := 0
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		inspectCalls++
+		if inspectCalls == 2 {
+			writeWakeLockExactForTest(t, root, "codex", replacement)
+		}
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+
+	locks, _ := checkWakeLocksWithHintsSchema(root, []string{"codex"}, true, wakeCheckSchemaV2)
+	if len(locks) != 1 {
+		t.Fatalf("doctor wake locks = %#v", locks)
+	}
+	got := locks[0]
+	if got.Status == "error" {
+		t.Fatalf("failed mutation leaked into fresh snapshot: %#v", got)
+	}
+	if got.Mutation == nil || got.Mutation.Status != "error" || got.Mutation.Removed ||
+		!strings.Contains(got.Mutation.Reason, "wake lock changed while cleaning stale lock") {
+		t.Fatalf("failed removal mutation = %#v", got.Mutation)
+	}
+	rendered := renderDoctorResultV2(doctorResult{Ops: &doctorOpsResult{WakeLocks: locks}})
+	renderedMutation := rendered.Ops.WakeLocks[0].Mutation
+	if renderedMutation == nil || renderedMutation.Status != "error" || renderedMutation.Removed {
+		t.Fatalf("rendered failed removal mutation = %#v", renderedMutation)
+	}
+	encoded, err := json.Marshal(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"mutation":{"status":"error","reason":`) ||
+		!strings.Contains(string(encoded), `"removed":false`) {
+		t.Fatalf("rendered mutation bytes = %s", encoded)
+	}
+}
+
+func TestDoctorOpsV2PreservesGenerationChangeMutation(t *testing.T) {
+	root := secureTempDirForTest(t)
+	original := wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(root),
+		Agent:        "codex",
+		ProcessStart: "12345",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "initial-generation",
+	}
+	writeWakeLockExactForTest(t, root, "codex", original)
+	replacement := original
+	replacement.PID = 5252
+	replacement.ProcessStart = "54321"
+	replacement.Generation = "changed-before-fix"
+	inspected := make(chan struct{}, 1)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		select {
+		case inspected <- struct{}{}:
+		default:
+		}
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+
+	guardEntered := make(chan struct{})
+	releaseGuard := make(chan struct{})
+	guardDone := make(chan error, 1)
+	go func() {
+		guardDone <- withWakeLifecycleGuard(root, "codex", func() error {
+			close(guardEntered)
+			<-releaseGuard
+			return nil
+		})
+	}()
+	<-guardEntered
+
+	locksDone := make(chan []opsWakeLock, 1)
+	go func() {
+		locks, _ := checkWakeLocksWithHintsSchema(root, []string{"codex"}, true, wakeCheckSchemaV2)
+		locksDone <- locks
+	}()
+	<-inspected
+	writeWakeLockExactForTest(t, root, "codex", replacement)
+	close(releaseGuard)
+	if err := <-guardDone; err != nil {
+		t.Fatalf("release lifecycle guard: %v", err)
+	}
+
+	locks := <-locksDone
+	if len(locks) != 1 {
+		t.Fatalf("doctor wake locks = %#v", locks)
+	}
+	got := locks[0]
+	if got.Reason == "wake lock changed before fix" {
+		t.Fatalf("guarded-skip mutation leaked into fresh snapshot: %#v", got)
+	}
+	if got.Mutation == nil || got.Mutation.Status != string(wakeLockStale) ||
+		got.Mutation.Reason != "wake lock changed before fix" || got.Mutation.Removed {
+		t.Fatalf("generation-change mutation = %#v", got.Mutation)
 	}
 }
 

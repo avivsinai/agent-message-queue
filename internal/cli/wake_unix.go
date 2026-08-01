@@ -594,7 +594,7 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 			candidate.RunningImageEvidence = evidence
 			candidate.ImagePath = evidence.ExecutionPath
 			candidate.ImageVersion = evidence.EmbeddedVersion
-			if validateWakeResumeAdvertisement(candidate) == nil {
+			if validateWakeResumeAdvertisement(candidate, root, me) == nil {
 				lock = candidate
 			}
 		}

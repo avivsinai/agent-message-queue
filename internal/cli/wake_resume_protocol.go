@@ -2,10 +2,13 @@ package cli
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 const (
@@ -34,7 +37,29 @@ type wakeImageEvidenceV1 struct {
 	EmbeddedVersion string `json:"embedded_version"`
 }
 
-func validateWakeResumeAdvertisement(lock wakeLock) error {
+var errWakeResumeControlEndpointUnsupported = errors.New("wake resume control endpoint is unsupported")
+
+func validateWakeResumeAdvertisement(lock wakeLock, expectedRoot, expectedAgent string) error {
+	if strings.TrimSpace(expectedRoot) == "" {
+		return fmt.Errorf("trusted wake resume root is empty")
+	}
+	if err := fsq.ValidateHandle(expectedAgent); err != nil {
+		return fmt.Errorf("trusted wake resume agent is invalid: %w", err)
+	}
+	expectedRoot = canonicalWakeRoot(expectedRoot)
+	if lock.Root != expectedRoot {
+		return fmt.Errorf("wake resume root does not match the trusted root")
+	}
+	if err := fsq.ValidateHandle(lock.Agent); err != nil {
+		return fmt.Errorf("wake resume agent is invalid: %w", err)
+	}
+	if lock.Agent != expectedAgent {
+		return fmt.Errorf("wake resume agent does not match the trusted agent")
+	}
+	expectedControlSocket := wakeControlSocketPath(expectedRoot, expectedAgent, lock.Generation)
+	if expectedControlSocket == "" {
+		return fmt.Errorf("%w on %s", errWakeResumeControlEndpointUnsupported, runtime.GOOS)
+	}
 	if lock.ResumeSchema != wakeResumeSchemaV2 {
 		if lock.ResumeSchema == 0 {
 			return fmt.Errorf("wake resume schema is missing")
@@ -52,10 +77,6 @@ func validateWakeResumeAdvertisement(lock wakeLock) error {
 	}
 	if err := validateAuthoritativeWakeProcessIdentity(lock); err != nil {
 		return fmt.Errorf("wake resume process identity is invalid: %w", err)
-	}
-	expectedControlSocket := wakeControlSocketPath(lock.Root, lock.Agent, lock.Generation)
-	if expectedControlSocket == "" {
-		return fmt.Errorf("wake resume control endpoint is unsupported on %s", runtime.GOOS)
 	}
 	if strings.TrimSpace(lock.ControlSocket) == "" {
 		return fmt.Errorf("wake resume control endpoint is missing")

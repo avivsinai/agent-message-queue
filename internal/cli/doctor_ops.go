@@ -437,9 +437,10 @@ func checkWakeLocksWithHintsSchema(
 ) ([]opsWakeLock, []opsHint) {
 	var locks []opsWakeLock
 	var hints []opsHint
-	appendLock := func(lock opsWakeLock, inspection wakeLockInspection, staleBinary bool) {
+	appendLock := func(agent string, lock opsWakeLock, inspection wakeLockInspection, staleBinary bool) {
 		decorateOpsWakeLockWithWakeCheck(
 			root,
+			agent,
 			&lock,
 			inspection,
 			staleBinary,
@@ -482,7 +483,7 @@ func checkWakeLocksWithHintsSchema(
 			lock.Reason = "live raw wake orphan; stop the owning terminal or launchd supervisor"
 		}
 		if !mutationAuthorized {
-			appendLock(lock, inspection, staleBinary)
+			appendLock(agent, lock, inspection, staleBinary)
 			continue
 		}
 		assessment := assessWakeRepair(
@@ -501,7 +502,7 @@ func checkWakeLocksWithHintsSchema(
 		}
 		if inspection.Status == wakeLockStale {
 			if ownerBound {
-				appendLock(lock, inspection, staleBinary)
+				appendLock(agent, lock, inspection, staleBinary)
 				continue
 			}
 			lock.Fix = doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
@@ -533,13 +534,18 @@ func checkWakeLocksWithHintsSchema(
 					lock.Status = "error"
 					lock.Reason = guardErr.Error()
 				}
+				lock.Mutation = &opsWakeMutation{
+					Status:  lock.Status,
+					Reason:  lock.Reason,
+					Removed: lock.Removed,
+				}
 			}
 		}
 		if lock.Removed {
 			inspection = inspectWakeLock(root, agent)
 			staleBinary = false
 		}
-		appendLock(lock, inspection, staleBinary)
+		appendLock(agent, lock, inspection, staleBinary)
 	}
 	return locks, hints
 }

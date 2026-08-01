@@ -144,15 +144,59 @@ func validWakeResumeLockForTest() wakeLock {
 	}
 }
 
+func TestValidateWakeResumeAdvertisementBindsTrustedRootAndAgent(t *testing.T) {
+	tests := []struct {
+		name          string
+		expectedRoot  string
+		expectedAgent string
+		mutate        func(*wakeLock)
+		want          string
+	}{
+		{name: "empty trusted root", expectedAgent: "codex", want: "trusted wake resume root is empty"},
+		{name: "invalid trusted agent", expectedRoot: "/queue", expectedAgent: "-codex", want: "trusted wake resume agent is invalid"},
+		{name: "mismatched root", expectedRoot: "/queue", expectedAgent: "codex", mutate: func(lock *wakeLock) {
+			lock.Root = canonicalWakeRoot("/other-queue")
+			lock.ControlSocket = wakeControlSocketPath(lock.Root, lock.Agent, lock.Generation)
+		}, want: "does not match the trusted root"},
+		{name: "omitted agent", expectedRoot: "/queue", expectedAgent: "codex", mutate: func(lock *wakeLock) {
+			lock.Agent = ""
+			lock.ControlSocket = wakeControlSocketPath(lock.Root, lock.Agent, lock.Generation)
+		}, want: "wake resume agent is invalid"},
+		{name: "mismatched agent", expectedRoot: "/queue", expectedAgent: "codex", mutate: func(lock *wakeLock) {
+			lock.Agent = "claude"
+			lock.ControlSocket = wakeControlSocketPath(lock.Root, lock.Agent, lock.Generation)
+		}, want: "does not match the trusted agent"},
+		{name: "invalid artifact agent", expectedRoot: "/queue", expectedAgent: "codex", mutate: func(lock *wakeLock) {
+			lock.Agent = "-legacy"
+			lock.ControlSocket = wakeControlSocketPath(lock.Root, lock.Agent, lock.Generation)
+		}, want: "wake resume agent is invalid"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lock := validWakeResumeLockForTest()
+			if test.mutate != nil {
+				test.mutate(&lock)
+			}
+			err := validateWakeResumeAdvertisement(lock, test.expectedRoot, test.expectedAgent)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestValidateWakeResumeAdvertisementAcceptsOnlyCompleteExactV2(t *testing.T) {
 	if runtime.GOOS != "darwin" {
-		err := validateWakeResumeAdvertisement(validWakeResumeLockForTest())
+		lock := validWakeResumeLockForTest()
+		err := validateWakeResumeAdvertisement(lock, lock.Root, lock.Agent)
 		if err == nil || !strings.Contains(err.Error(), "unsupported") {
 			t.Fatalf("non-Darwin resume advertisement error = %v, want unsupported", err)
 		}
 		return
 	}
-	if err := validateWakeResumeAdvertisement(validWakeResumeLockForTest()); err != nil {
+	lock := validWakeResumeLockForTest()
+	if err := validateWakeResumeAdvertisement(lock, lock.Root, lock.Agent); err != nil {
 		t.Fatalf("valid resume advertisement rejected: %v", err)
 	}
 
@@ -220,7 +264,7 @@ func TestValidateWakeResumeAdvertisementAcceptsOnlyCompleteExactV2(t *testing.T)
 		t.Run(test.name, func(t *testing.T) {
 			lock := validWakeResumeLockForTest()
 			test.mutate(&lock)
-			err := validateWakeResumeAdvertisement(lock)
+			err := validateWakeResumeAdvertisement(lock, "/queue", "codex")
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want substring %q", err, test.want)
 			}
@@ -255,7 +299,7 @@ func TestWakeResumeMetadataRoundTripsWithoutChangingGenericClaim(t *testing.T) {
 	if got := classifyWakeClaimForGenericTransition(inspection); got != wakeClaimGeneric {
 		t.Fatalf("claim = %v, want generic", got)
 	}
-	if err := validateWakeResumeAdvertisement(inspection.Lock); runtime.GOOS == "darwin" {
+	if err := validateWakeResumeAdvertisement(inspection.Lock, root, "codex"); runtime.GOOS == "darwin" {
 		if err != nil {
 			t.Fatalf("round-tripped advertisement invalid: %v", err)
 		}
@@ -294,7 +338,7 @@ func TestMalformedOrFutureResumeMetadataDoesNotPoisonLiveNotifier(t *testing.T) 
 			if inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
 				t.Fatalf("resume metadata poisoned notifier: status=%q reason=%q", inspection.Status, inspection.Reason)
 			}
-			if err := validateWakeResumeAdvertisement(inspection.Lock); err == nil {
+			if err := validateWakeResumeAdvertisement(inspection.Lock, root, "codex"); err == nil {
 				t.Fatal("invalid resume metadata unexpectedly authorized reload")
 			}
 		})
@@ -331,7 +375,7 @@ func TestNewWakeLockAdvertisesResumeOnlyWhenTheProtocolIsComplete(t *testing.T) 
 	if lock.ControlSocket == "" {
 		t.Fatal("Darwin resume advertisement has no control endpoint")
 	}
-	if err := validateWakeResumeAdvertisement(lock); err != nil {
+	if err := validateWakeResumeAdvertisement(lock, "/queue", "codex"); err != nil {
 		t.Fatalf("new lock advertisement invalid: %v", err)
 	}
 
