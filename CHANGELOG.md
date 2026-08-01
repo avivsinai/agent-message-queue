@@ -17,6 +17,17 @@ editing the release PR.
 * **wake:** add versioned check schema ([#391](https://github.com/avivsinai/agent-message-queue/issues/391)) ([3024aec](https://github.com/avivsinai/agent-message-queue/commit/3024aec6c7ae48bbf78859ede14da248a5b471e6))
 * **wake:** classify reload advertisement ([#392](https://github.com/avivsinai/agent-message-queue/issues/392)) ([6f3b3d4](https://github.com/avivsinai/agent-message-queue/commit/6f3b3d40a4fecbb288b61cc67717beb532852d54))
 
+Schema v2 had not shipped before this release, so its `reload` field was
+additive to a pre-release contract; schema 1 and default JSON bytes remain
+unchanged. `reload: advertised` is structural metadata only: it means a live,
+identity-confirmed wake has a structurally valid resume advertisement, not that
+the wake is reloadable. No wake started by this release advertises it yet:
+Darwin requires launch-bound image evidence (Wave 3), and Linux requires the
+Wave 2 control endpoint. The field ships as forward schema only. This release
+adds no reload command, transport, quiescence claim, or execution permission.
+It also does not ship a general agent-safe wake restart; that remains tracked
+in [#356](https://github.com/avivsinai/agent-message-queue/issues/356).
+
 
 ### Bug Fixes
 
@@ -25,6 +36,21 @@ editing the release PR.
 * **wake:** bind resume claims to exact evidence ([#399](https://github.com/avivsinai/agent-message-queue/issues/399)) ([3da2f32](https://github.com/avivsinai/agent-message-queue/commit/3da2f32d3c5fe1d65a4a9233470f102024fea97d))
 * **wake:** corroborate Darwin process image ([#395](https://github.com/avivsinai/agent-message-queue/issues/395)) ([3dd1987](https://github.com/avivsinai/agent-message-queue/commit/3dd1987eaa76a8d008b5f13a35b34c4e7b1172d1))
 * **wake:** preserve attention retry decay ([#393](https://github.com/avivsinai/agent-message-queue/issues/393)) ([f8a8d81](https://github.com/avivsinai/agent-message-queue/commit/f8a8d81b83293b1945c6b6377cb650cd2722868c))
+
+[#377](https://github.com/avivsinai/agent-message-queue/issues/377) is fully
+closed: generation-exclusivity fencing landed in
+[#383](https://github.com/avivsinai/agent-message-queue/pull/383) and
+[#385](https://github.com/avivsinai/agent-message-queue/pull/385); cadence
+accumulation and current-cohort rendering at the retained retry deadline landed
+in [#393](https://github.com/avivsinai/agent-message-queue/pull/393). For the
+#393 cadence change, durable inbox completion and terminal-input delivery
+semantics are unchanged.
+
+
+### Tests
+
+* **coop:** pin auto-init fixture isolation ([#396](https://github.com/avivsinai/agent-message-queue/pull/396)) ([2c388d5](https://github.com/avivsinai/agent-message-queue/commit/2c388d5c6aabeab416e8c55750410b1bea1049c3)), closes [#376](https://github.com/avivsinai/agent-message-queue/issues/376). This is hostile-context regression coverage for containment already fixed by [#346](https://github.com/avivsinai/agent-message-queue/pull/346), not a new production routing change.
+* **send:** make strict replacement race deterministic ([#394](https://github.com/avivsinai/agent-message-queue/pull/394)) ([6cba0a1](https://github.com/avivsinai/agent-message-queue/commit/6cba0a1b013b3d8f79a84f146deff7c8005cfe74)), closes [#381](https://github.com/avivsinai/agent-message-queue/issues/381). This replaces a FIFO/timeout race in the test harness with a deterministic seam; the production send path is unchanged.
 
 ## [0.50.1](https://github.com/avivsinai/agent-message-queue/compare/v0.50.0...v0.50.1) (2026-07-31)
 
