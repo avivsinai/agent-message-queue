@@ -3,7 +3,7 @@
 This table is the behavior-preserving freeze derived from
 [`w2a-session-guard-derivation.md`](w2a-session-guard-derivation.md) and
 Claude’s R1–R6 rulings. Rows are policy decisions, not call sites. The pure
-implementation is `internal/cli/session_guard_table.go`; the authorized Step 3
+implementation is `internal/sessionguard/session_guard_table.go`; the authorized Step 3
 rewire now feeds the existing handlers through it.
 
 ## Dimensions

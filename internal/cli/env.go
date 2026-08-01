@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
 // amqrc represents the .amqrc configuration file format.
@@ -159,40 +161,40 @@ func runEnv(args []string) error {
 		return err
 	}
 	if contextExplicit {
-		decision := decideSessionGuard(sessionGuardInput{
-			Kind: sessionGuardEnv,
-			Pin:  sessionGuardPinAbsent, Relation: sessionGuardTargetUnbound,
-			Flags: sessionGuardFlags{ExplicitContext: true},
+		decision := sessionguard.Decide(sessionguard.Input{
+			Kind: sessionguard.KindEnv,
+			Pin:  sessionguard.PinAbsent, Relation: sessionguard.TargetUnbound,
+			Flags: sessionguard.Flags{ExplicitContext: true},
 		})
-		if decision.Verdict != sessionGuardAllow {
+		if decision.Verdict != sessionguard.Allow {
 			return ContextMismatchError("refusing env: explicit context replacement was not authorized")
 		}
 	} else {
 		pin, pinErr := loadSessionPin()
 		if pinErr != nil {
 			decision := sessionGuardDecisionForContext(
-				sessionGuardEnv,
-				sessionGuardChannelExit5,
-				sessionGuardPinInvalid,
+				sessionguard.KindEnv,
+				sessionguard.ChannelExit5,
+				sessionguard.PinInvalid,
 				&SessionContextError{Message: pinErr.Error()},
-				sessionGuardFlags{},
+				sessionguard.Flags{},
 			)
-			if decision.Verdict == sessionGuardAllow {
+			if decision.Verdict == sessionguard.Allow {
 				return nil
 			}
 			return pinErr
 		}
 		mismatch, checkErr := sessionPinMismatchWithPin(root, pin)
 		decision := sessionGuardDecisionForContext(
-			sessionGuardEnv,
-			sessionGuardChannelExit5,
+			sessionguard.KindEnv,
+			sessionguard.ChannelExit5,
 			sessionGuardPinStateFor(pin),
 			mismatch,
-			sessionGuardFlags{},
+			sessionguard.Flags{},
 		)
 		if checkErr != nil {
 			return checkErr
-		} else if decision.Verdict != sessionGuardAllow && mismatch != nil {
+		} else if decision.Verdict != sessionguard.Allow && mismatch != nil {
 			return ContextMismatchError("refusing env: %s. Use explicit --session <name> or --root <path> to repin", mismatch.Error())
 		}
 	}

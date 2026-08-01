@@ -10,6 +10,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
 type doctorCheck struct {
@@ -175,14 +176,14 @@ func runDoctor(args []string) error {
 		if fixWakeLocks {
 			decision, mismatch, pinErr := doctorRepairSessionGuard(root, *ignoreSessionPinFlag)
 			switch decision.Row {
-			case sessionGuardRowR13DoctorInvalidErr:
+			case sessionguard.RowR13DoctorInvalidErr:
 				result.Checks = append(result.Checks, doctorCheck{
 					Name:    "Wake lock repair",
 					Status:  "error",
 					Message: fmt.Sprintf("refusing to repair %s: invalid AMQ session context: %v", root, pinErr),
 				})
 				fixWakeLocks = false
-			case sessionGuardRowR12DoctorMismatchErr:
+			case sessionguard.RowR12DoctorMismatchErr:
 				result.Checks = append(result.Checks, doctorCheck{
 					Name:    "Wake lock repair",
 					Status:  "error",
@@ -556,46 +557,46 @@ func checkConfig(root string) doctorCheck {
 	return check
 }
 
-func doctorRepairSessionGuard(root string, ignoreSessionPins bool) (sessionGuardDecision, *SessionContextError, error) {
+func doctorRepairSessionGuard(root string, ignoreSessionPins bool) (sessionguard.Decision, *SessionContextError, error) {
 	if ignoreSessionPins {
-		return decideSessionGuard(sessionGuardInput{
-			Kind: sessionGuardDoctorRepair,
-			Pin:  sessionGuardPinInvalid, Relation: sessionGuardTargetMismatch,
-			Flags: sessionGuardFlags{ExplicitRoot: true, IgnorePin: true},
+		return sessionguard.Decide(sessionguard.Input{
+			Kind: sessionguard.KindDoctorRepair,
+			Pin:  sessionguard.PinInvalid, Relation: sessionguard.TargetMismatch,
+			Flags: sessionguard.Flags{ExplicitRoot: true, IgnorePin: true},
 		}), nil, nil
 	}
 	pin, pinErr := loadSessionPin()
 	if pinErr != nil {
 		return sessionGuardDecisionForContext(
-			sessionGuardDoctorRepair,
-			sessionGuardChannelExit5,
-			sessionGuardPinInvalid,
+			sessionguard.KindDoctorRepair,
+			sessionguard.ChannelExit5,
+			sessionguard.PinInvalid,
 			&SessionContextError{Message: pinErr.Error()},
-			sessionGuardFlags{},
+			sessionguard.Flags{},
 		), nil, pinErr
 	}
 	mismatch, checkErr := sessionPinMismatchWithPin(root, pin)
 	if checkErr != nil {
 		return sessionGuardDecisionForContext(
-			sessionGuardDoctorRepair,
-			sessionGuardChannelExit5,
-			sessionGuardPinInvalid,
+			sessionguard.KindDoctorRepair,
+			sessionguard.ChannelExit5,
+			sessionguard.PinInvalid,
 			&SessionContextError{Message: checkErr.Error()},
-			sessionGuardFlags{},
+			sessionguard.Flags{},
 		), nil, checkErr
 	}
 	if mismatch != nil && isPinnedBaseRootWithPin(root, pin) {
-		return decideSessionGuard(sessionGuardInput{
-			Kind: sessionGuardDoctorRepair,
-			Pin:  sessionGuardPinStateFor(pin), Relation: sessionGuardTargetOwnPinnedBase,
+		return sessionguard.Decide(sessionguard.Input{
+			Kind: sessionguard.KindDoctorRepair,
+			Pin:  sessionGuardPinStateFor(pin), Relation: sessionguard.TargetOwnPinnedBase,
 		}), mismatch, nil
 	}
 	return sessionGuardDecisionForContext(
-		sessionGuardDoctorRepair,
-		sessionGuardChannelExit5,
+		sessionguard.KindDoctorRepair,
+		sessionguard.ChannelExit5,
 		sessionGuardPinStateFor(pin),
 		mismatch,
-		sessionGuardFlags{},
+		sessionguard.Flags{},
 	), mismatch, nil
 }
 
@@ -603,7 +604,7 @@ func inspectDoctorMailboxes(root, explicitBaseRoot string, repair, ignoreSession
 	check := doctorCheck{Name: "Mailboxes"}
 	if repair {
 		decision, mismatch, pinErr := doctorRepairSessionGuard(root, ignoreSessionPins)
-		if decision.Row == sessionGuardRowR13DoctorInvalidErr {
+		if decision.Row == sessionguard.RowR13DoctorInvalidErr {
 			check.Status = "error"
 			check.Message = fmt.Sprintf(
 				"refusing to repair %s: invalid AMQ session context: %v; re-run with a complete session context",
@@ -612,7 +613,7 @@ func inspectDoctorMailboxes(root, explicitBaseRoot string, repair, ignoreSession
 			)
 			return nil, nil, check
 		}
-		if decision.Row == sessionGuardRowR12DoctorMismatchErr {
+		if decision.Row == sessionguard.RowR12DoctorMismatchErr {
 			check.Status = "error"
 			check.Message = fmt.Sprintf(
 				"refusing to repair %s because it does not match the pinned session context: %s; re-run from the intended session",
