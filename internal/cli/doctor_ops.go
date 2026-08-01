@@ -100,6 +100,13 @@ type opsWakeLock struct {
 	CurrentTerminal          bool   `json:"-"`
 
 	WakeCheckDecision *wakeCheckDecision `json:"-"`
+	Mutation          *opsWakeMutation   `json:"-"`
+}
+
+type opsWakeMutation struct {
+	Status  string
+	Reason  string
+	Removed bool
 }
 
 func runOpsChecks(root string, rootSource string, fixWakeLocks bool, explicitBaseRoot ...string) *doctorOpsResult {

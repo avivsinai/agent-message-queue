@@ -112,19 +112,32 @@ func validWakeImageEvidenceForTest() wakeImageEvidenceV1 {
 	}
 }
 
+func TestValidateWakeImageEvidenceRejectsNonCanonicalExecutionPath(t *testing.T) {
+	evidence := validWakeImageEvidenceForTest()
+	evidence.ExecutionPath = " " + evidence.ExecutionPath
+	if err := validateWakeImageEvidence(evidence); err == nil || !strings.Contains(err.Error(), "canonical") {
+		t.Fatalf("non-canonical execution path error = %v, want canonical", err)
+	}
+}
+
 func validWakeResumeLockForTest() wakeLock {
 	owner := validWakeResumeOwnerForTest()
 	evidence := validWakeImageEvidenceForTest()
+	root := canonicalWakeRoot("/queue")
+	agent := "codex"
+	generation := "resume-generation"
 	return wakeLock{
 		PID:                  5151,
 		TTY:                  "/dev/ttys001",
-		Root:                 "/queue",
-		Agent:                "codex",
+		Root:                 root,
+		Agent:                agent,
 		ProcessStart:         "67890",
 		BootID:               owner.BootID,
 		WakeMode:             wakeInjectModeRaw,
-		Generation:           "resume-generation",
-		ControlSocket:        "/queue/agents/codex/.w.0123456789abcdef",
+		Generation:           generation,
+		ControlSocket:        wakeControlSocketPath(root, agent, generation),
+		ImagePath:            evidence.ExecutionPath,
+		ImageVersion:         evidence.EmbeddedVersion,
 		ResumeSchema:         wakeResumeSchemaV2,
 		ResumeOwner:          &owner,
 		RunningImageEvidence: &evidence,
@@ -132,6 +145,13 @@ func validWakeResumeLockForTest() wakeLock {
 }
 
 func TestValidateWakeResumeAdvertisementAcceptsOnlyCompleteExactV2(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		err := validateWakeResumeAdvertisement(validWakeResumeLockForTest())
+		if err == nil || !strings.Contains(err.Error(), "unsupported") {
+			t.Fatalf("non-Darwin resume advertisement error = %v, want unsupported", err)
+		}
+		return
+	}
 	if err := validateWakeResumeAdvertisement(validWakeResumeLockForTest()); err != nil {
 		t.Fatalf("valid resume advertisement rejected: %v", err)
 	}
@@ -149,18 +169,40 @@ func TestValidateWakeResumeAdvertisementAcceptsOnlyCompleteExactV2(t *testing.T)
 		{name: "missing wake process start", mutate: func(l *wakeLock) { l.ProcessStart = "" }, want: "process start"},
 		{name: "missing wake boot id", mutate: func(l *wakeLock) { l.BootID = "" }, want: "boot id"},
 		{name: "missing control endpoint", mutate: func(l *wakeLock) { l.ControlSocket = "" }, want: "control"},
+		{name: "relative control endpoint", mutate: func(l *wakeLock) { l.ControlSocket = ".w.relative" }, want: "control"},
+		{name: "outside-agent control endpoint", mutate: func(l *wakeLock) {
+			l.ControlSocket = filepath.Join(l.Root, ".w.outside")
+		}, want: "control"},
+		{name: "wrong-prefix control endpoint", mutate: func(l *wakeLock) {
+			l.ControlSocket = filepath.Join(fsq.AgentBase(l.Root, l.Agent), ".wake.sock")
+		}, want: "control"},
+		{name: "wrong-generation control endpoint", mutate: func(l *wakeLock) {
+			l.ControlSocket = wakeControlSocketPath(l.Root, l.Agent, "other-generation")
+		}, want: "control"},
+		{name: "wrong-agent control endpoint", mutate: func(l *wakeLock) {
+			l.ControlSocket = wakeControlSocketPath(l.Root, "other", l.Generation)
+		}, want: "control"},
+		{name: "wrong-root control endpoint", mutate: func(l *wakeLock) {
+			l.ControlSocket = wakeControlSocketPath(filepath.Join(l.Root, "other"), l.Agent, l.Generation)
+		}, want: "control"},
 		{name: "repair lineage", mutate: func(l *wakeLock) { l.SourceGeneration = "dead-generation" }, want: "repair"},
 		{name: "missing evidence", mutate: func(l *wakeLock) { l.RunningImageEvidence = nil }, want: "image evidence"},
 		{name: "wrong evidence schema", mutate: func(l *wakeLock) { l.RunningImageEvidence.Schema++ }, want: "image evidence schema"},
 		{name: "wrong platform", mutate: func(l *wakeLock) { l.RunningImageEvidence.Platform = "plan9" }, want: "platform"},
 		{name: "wrong method", mutate: func(l *wakeLock) { l.RunningImageEvidence.Method = "pathname" }, want: "method"},
 		{name: "relative execution path", mutate: func(l *wakeLock) { l.RunningImageEvidence.ExecutionPath = "bin/amq" }, want: "absolute"},
+		{name: "non-canonical execution path", mutate: func(l *wakeLock) {
+			l.RunningImageEvidence.ExecutionPath = " " + l.RunningImageEvidence.ExecutionPath
+			l.ImagePath = l.RunningImageEvidence.ExecutionPath
+		}, want: "canonical"},
 		{name: "missing device", mutate: func(l *wakeLock) { l.RunningImageEvidence.Device = 0 }, want: "device"},
 		{name: "missing inode", mutate: func(l *wakeLock) { l.RunningImageEvidence.Inode = 0 }, want: "inode"},
 		{name: "empty image", mutate: func(l *wakeLock) { l.RunningImageEvidence.Size = 0 }, want: "size"},
 		{name: "missing ctime", mutate: func(l *wakeLock) { l.RunningImageEvidence.CTimeNS = 0 }, want: "ctime"},
 		{name: "malformed digest", mutate: func(l *wakeLock) { l.RunningImageEvidence.SHA256 = "sha256:abc" }, want: "sha256"},
 		{name: "missing version", mutate: func(l *wakeLock) { l.RunningImageEvidence.EmbeddedVersion = "" }, want: "version"},
+		{name: "image path disagreement", mutate: func(l *wakeLock) { l.ImagePath += ".other" }, want: "image path"},
+		{name: "image version disagreement", mutate: func(l *wakeLock) { l.ImageVersion += ".other" }, want: "image version"},
 		{
 			name: "authoritative owner mismatch",
 			mutate: func(l *wakeLock) {
@@ -193,6 +235,7 @@ func TestWakeResumeMetadataRoundTripsWithoutChangingGenericClaim(t *testing.T) {
 	}
 	lock := validWakeResumeLockForTest()
 	lock.Root = canonicalWakeRoot(root)
+	lock.ControlSocket = wakeControlSocketPath(lock.Root, lock.Agent, lock.Generation)
 	writeWakeLockForTest(t, root, "codex", lock)
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return wakeProcessInfo{
@@ -212,8 +255,12 @@ func TestWakeResumeMetadataRoundTripsWithoutChangingGenericClaim(t *testing.T) {
 	if got := classifyWakeClaimForGenericTransition(inspection); got != wakeClaimGeneric {
 		t.Fatalf("claim = %v, want generic", got)
 	}
-	if err := validateWakeResumeAdvertisement(inspection.Lock); err != nil {
-		t.Fatalf("round-tripped advertisement invalid: %v", err)
+	if err := validateWakeResumeAdvertisement(inspection.Lock); runtime.GOOS == "darwin" {
+		if err != nil {
+			t.Fatalf("round-tripped advertisement invalid: %v", err)
+		}
+	} else if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("non-Darwin round-tripped advertisement error = %v, want unsupported", err)
 	}
 
 	data, err := json.Marshal(inspection.Lock)

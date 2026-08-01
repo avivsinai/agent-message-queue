@@ -84,7 +84,7 @@ func captureWakeImageEvidence(path, embeddedVersion string) (wakeImageEvidenceV1
 
 	method := wakeImageMethodFDExec
 	if runtime.GOOS == "darwin" {
-		method = wakeImageMethodPathnameExecVerified
+		method = wakeImageMethodPathnameObserved
 	}
 	evidence := wakeImageEvidenceV1{
 		Schema:          wakeImageEvidenceSchemaV1,

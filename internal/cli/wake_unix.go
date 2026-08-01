@@ -536,9 +536,9 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 	}
 	lock.ImageVersion = strings.TrimSpace(cliVersion)
 	if runtime.GOOS == "darwin" {
-		// Darwin has no retained executable FD. Capture the verified pathname
-		// identity for every new lock so later proc_pidpath evidence can be
-		// corroborated without making notifier startup depend on this metadata.
+		// Darwin has no retained executable FD. Capture the observed pathname
+		// identity for diagnostics, but do not treat it as agent-safe resume
+		// authority after exec.
 		if evidence, evidenceErr := captureCurrentWakeImageEvidence(); evidenceErr == nil {
 			lock.RunningImageEvidence = &evidence
 			lock.ImagePath = evidence.ExecutionPath

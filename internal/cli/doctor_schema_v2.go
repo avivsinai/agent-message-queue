@@ -39,7 +39,14 @@ type opsWakeLockV2 struct {
 	Target        string             `json:"target,omitempty"`
 	TargetPresent bool               `json:"target_present,omitempty"`
 	TargetReason  string             `json:"target_reason,omitempty"`
+	Mutation      *opsWakeMutationV2 `json:"mutation,omitempty"`
 	WakeCheck     *wakeCheckResultV2 `json:"wake_check"`
+}
+
+type opsWakeMutationV2 struct {
+	Status  string `json:"status"`
+	Reason  string `json:"reason,omitempty"`
+	Removed bool   `json:"removed"`
 }
 
 func renderDoctorResultV2(result doctorResult) doctorResultV2 {
@@ -79,6 +86,13 @@ func renderDoctorResultV2(result doctorResult) doctorResultV2 {
 			Target:        lock.Target,
 			TargetPresent: lock.TargetPresent,
 			TargetReason:  lock.TargetReason,
+		}
+		if lock.Mutation != nil {
+			v2Lock.Mutation = &opsWakeMutationV2{
+				Status:  lock.Mutation.Status,
+				Reason:  lock.Mutation.Reason,
+				Removed: lock.Mutation.Removed,
+			}
 		}
 		if lock.WakeCheckDecision != nil {
 			wakeCheck := renderWakeCheckV2(*lock.WakeCheckDecision)

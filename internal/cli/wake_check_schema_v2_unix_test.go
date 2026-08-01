@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -633,6 +634,14 @@ func TestWakeCheckV2ReloadObservationChangeUsesExistingSnapshotRetry(t *testing.
 
 func TestWakeCheckV2ReloadClassificationIsStructuralAndNonExecutable(t *testing.T) {
 	validLock := validWakeResumeLockForTest()
+	validStatus := wakeReloadAdvertised
+	validReason := wakeReloadReasonCommandUnavailable
+	invalidAdvertisementReason := wakeReloadReasonAdvertisementInvalid
+	if runtime.GOOS != "darwin" {
+		validStatus = wakeReloadUnavailable
+		validReason = wakeReloadReasonPlatformUnsupported
+		invalidAdvertisementReason = wakeReloadReasonPlatformUnsupported
+	}
 	validInspection := wakeLockInspection{
 		Exists:            true,
 		Status:            wakeLockValid,
@@ -679,7 +688,7 @@ func TestWakeCheckV2ReloadClassificationIsStructuralAndNonExecutable(t *testing.
 				inspection.Lock.RunningImageEvidence = nil
 			},
 			wantStatus: wakeReloadUnavailable,
-			wantReason: wakeReloadReasonAdvertisementInvalid,
+			wantReason: invalidAdvertisementReason,
 		},
 		{
 			name: "repair lineage",
@@ -687,12 +696,12 @@ func TestWakeCheckV2ReloadClassificationIsStructuralAndNonExecutable(t *testing.
 				inspection.Lock.SourceGeneration = "repaired-generation"
 			},
 			wantStatus: wakeReloadUnavailable,
-			wantReason: wakeReloadReasonAdvertisementInvalid,
+			wantReason: invalidAdvertisementReason,
 		},
 		{
 			name:       "valid advertisement",
-			wantStatus: wakeReloadAdvertised,
-			wantReason: wakeReloadReasonCommandUnavailable,
+			wantStatus: validStatus,
+			wantReason: validReason,
 		},
 	}
 
@@ -711,16 +720,16 @@ func TestWakeCheckV2ReloadClassificationIsStructuralAndNonExecutable(t *testing.
 
 	stubWakeCheckRuntime(t, false, "0.50.1")
 	decision := buildWakeCheckDecision("/queue", "codex", validInspection, &opsWakeLock{}, false)
-	if decision.Reload.Status != wakeReloadAdvertised ||
-		decision.Reload.ReasonCode != wakeReloadReasonCommandUnavailable ||
+	if decision.Reload.Status != validStatus ||
+		decision.Reload.ReasonCode != validReason ||
 		decision.RestartCapability != wakeRestartOperatorOnly ||
 		decision.Action.Kind != wakeActionPreserveLiveWake ||
 		decision.Action.Command != nil {
 		t.Fatalf("advertised reload changed executable action semantics: %#v", decision)
 	}
 	rendered := renderWakeCheckV2(decision)
-	if rendered.Reload.Status != wakeReloadAdvertised ||
-		rendered.Reload.ReasonCode != wakeReloadReasonCommandUnavailable {
+	if rendered.Reload.Status != validStatus ||
+		rendered.Reload.ReasonCode != validReason {
 		t.Fatalf("advertised reload output = %#v", rendered.Reload)
 	}
 }
@@ -810,6 +819,15 @@ func TestWakeCheckV2WithholdsAdviceWhenExecutableIdentityIsUnavailable(t *testin
 		}},
 		{name: "executable path is relative", stub: func() (string, error) {
 			return "bin/amq", nil
+		}},
+		{name: "executable path has leading whitespace", stub: func() (string, error) {
+			return " " + filepath.Join(root, "bin", "amq"), nil
+		}},
+		{name: "executable path has trailing whitespace", stub: func() (string, error) {
+			return filepath.Join(root, "bin", "amq") + " ", nil
+		}},
+		{name: "executable path is not clean", stub: func() (string, error) {
+			return filepath.Join(root, "bin") + "/../amq", nil
 		}},
 	}
 	for _, test := range tests {
@@ -996,6 +1014,74 @@ func TestDoctorOpsV2UsesOneStableSnapshotAfterEarlierDoctorStateChanged(t *testi
 	if opsLock.PID != lock.PID || decision.Wake.PID == nil || *decision.Wake.PID != lock.PID ||
 		opsLock.Status != "live-raw-orphan" || decision.Action.Kind != wakeActionPreserveLiveWake {
 		t.Fatalf("mixed doctor snapshots: outer=%#v decision=%#v", opsLock, decision)
+	}
+}
+
+func TestDoctorOpsV2DoesNotMixRemovedOutcomeWithReplacementSnapshot(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	removed := wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(root),
+		Agent:        "codex",
+		ProcessStart: "12345",
+		BootID:       "same-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "removed-generation",
+	}
+	writeWakeLockForTest(t, root, "codex", removed)
+	replacement := removed
+	replacement.PID = 5252
+	replacement.ProcessStart = "54321"
+	replacement.Generation = "replacement-generation"
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == replacement.PID {
+			return wakeProcessInfo{
+				PID: pid, Running: true, StartToken: replacement.ProcessStart,
+				BootID: replacement.BootID, Executable: replacement.Executable,
+				Args: []string{"amq", "wake", "--root", root, "--me", "codex"},
+			}
+		}
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+	stubWakeCheckRuntime(t, false, "0.50.1")
+
+	removedInspection := inspectWakeLock(root, "codex")
+	if removedInspection.PID != removed.PID || removedInspection.Status != wakeLockStale {
+		t.Fatalf("removed inspection = %#v", removedInspection)
+	}
+	writeWakeLockExactForTest(t, root, "codex", replacement)
+	result := doctorResult{Ops: &doctorOpsResult{WakeLocks: []opsWakeLock{{
+		Status:  "fixed",
+		Agent:   "codex",
+		Root:    removedInspection.Root,
+		Lock:    removedInspection.LockPath,
+		PID:     removedInspection.PID,
+		Reason:  "removed stale wake lock",
+		Removed: true,
+	}}}}
+	decorateOpsWakeLockWithWakeCheck(
+		root,
+		&result.Ops.WakeLocks[0],
+		removedInspection,
+		false,
+		true,
+	)
+
+	rendered := renderDoctorResultV2(result)
+	if len(rendered.Ops.WakeLocks) != 1 {
+		t.Fatalf("rendered wake locks = %#v", rendered.Ops.WakeLocks)
+	}
+	got := rendered.Ops.WakeLocks[0]
+	if got.Removed && got.PID == replacement.PID {
+		t.Fatalf("removed outcome was combined with replacement snapshot: %#v", got)
+	}
+	if got.Status != "live-raw-orphan" || got.PID != replacement.PID || got.Mutation == nil ||
+		got.Mutation.Status != "fixed" || !got.Mutation.Removed {
+		t.Fatalf("replacement snapshot and removal outcome were not separated: %#v", got)
 	}
 }
 

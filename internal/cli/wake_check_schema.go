@@ -294,11 +294,11 @@ func wakeCheckActionProgram() string {
 	if err != nil {
 		return ""
 	}
-	path = strings.TrimSpace(path)
-	if path == "" || !filepath.IsAbs(path) {
+	if path == "" || strings.TrimSpace(path) != path || strings.ContainsRune(path, 0) ||
+		!filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return ""
 	}
-	return filepath.Clean(path)
+	return path
 }
 
 func wakeCheckActionCommand(args ...string) *wakeCheckCommand {

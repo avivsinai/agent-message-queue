@@ -13,13 +13,14 @@ const (
 	wakeImageEvidenceSchemaV1 = 1
 
 	wakeImageMethodFDExec               = "fd_exec"
+	wakeImageMethodPathnameObserved     = "pathname_observed"
 	wakeImageMethodPathnameExecVerified = "pathname_execve_verified"
 )
 
-// wakeImageEvidenceV1 is serialized execution evidence, not a path/version
-// hint. Later waves use Method to preserve the honest platform asymmetry:
-// Linux retains an fd authority; Darwin immediately re-verifies the resolved
-// versioned pathname before execve.
+// wakeImageEvidenceV1 records image metadata and its authority method. Ordinary
+// Darwin wakes can observe only a mutable pathname after exec; the stronger
+// pathname_execve_verified method is reserved for a path authenticated
+// immediately before the corresponding execve.
 type wakeImageEvidenceV1 struct {
 	Schema          int    `json:"schema"`
 	Platform        string `json:"platform"`
@@ -52,8 +53,15 @@ func validateWakeResumeAdvertisement(lock wakeLock) error {
 	if err := validateAuthoritativeWakeProcessIdentity(lock); err != nil {
 		return fmt.Errorf("wake resume process identity is invalid: %w", err)
 	}
+	expectedControlSocket := wakeControlSocketPath(lock.Root, lock.Agent, lock.Generation)
+	if expectedControlSocket == "" {
+		return fmt.Errorf("wake resume control endpoint is unsupported on %s", runtime.GOOS)
+	}
 	if strings.TrimSpace(lock.ControlSocket) == "" {
 		return fmt.Errorf("wake resume control endpoint is missing")
+	}
+	if lock.ControlSocket != expectedControlSocket {
+		return fmt.Errorf("wake resume control endpoint does not match the exact root, agent, and generation")
 	}
 	if lock.SourceGeneration != "" || lock.SourceFloorDigest != "" {
 		return fmt.Errorf("wake repair lineage is not resumable")
@@ -63,6 +71,16 @@ func validateWakeResumeAdvertisement(lock wakeLock) error {
 	}
 	if err := validateWakeImageEvidence(*lock.RunningImageEvidence); err != nil {
 		return err
+	}
+	if runtime.GOOS == "darwin" &&
+		lock.RunningImageEvidence.Method != wakeImageMethodPathnameExecVerified {
+		return fmt.Errorf("wake running image evidence is not bound immediately before execve")
+	}
+	if lock.ImagePath != lock.RunningImageEvidence.ExecutionPath {
+		return fmt.Errorf("wake image path does not match running image evidence")
+	}
+	if lock.ImageVersion != lock.RunningImageEvidence.EmbeddedVersion {
+		return fmt.Errorf("wake image version does not match running image evidence")
 	}
 	if lock.WakeMode == wakeOwnerWakeMode {
 		if lock.OwnerSchema != wakeOwnerLockSchema || lock.Owner == nil {
@@ -82,15 +100,17 @@ func validateWakeImageEvidence(evidence wakeImageEvidenceV1) error {
 	if evidence.Platform != runtime.GOOS {
 		return fmt.Errorf("wake image platform %q does not match %q", evidence.Platform, runtime.GOOS)
 	}
-	expectedMethod := wakeImageMethodFDExec
 	if runtime.GOOS == "darwin" {
-		expectedMethod = wakeImageMethodPathnameExecVerified
-	}
-	if evidence.Method != expectedMethod {
-		return fmt.Errorf("wake image method %q does not match platform method %q", evidence.Method, expectedMethod)
+		if evidence.Method != wakeImageMethodPathnameObserved &&
+			evidence.Method != wakeImageMethodPathnameExecVerified {
+			return fmt.Errorf("wake image method %q does not match a Darwin pathname evidence method", evidence.Method)
+		}
+	} else if evidence.Method != wakeImageMethodFDExec {
+		return fmt.Errorf("wake image method %q does not match platform method %q", evidence.Method, wakeImageMethodFDExec)
 	}
 	path := strings.TrimSpace(evidence.ExecutionPath)
-	if path == "" || strings.ContainsRune(path, 0) || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+	if path == "" || path != evidence.ExecutionPath || strings.ContainsRune(path, 0) ||
+		!filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return fmt.Errorf("wake image execution path must be a canonical absolute path")
 	}
 	if evidence.Device == 0 {
