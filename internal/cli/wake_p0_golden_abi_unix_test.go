@@ -226,6 +226,7 @@ func TestWakeP0BinaryV1DefaultCheckSchemaBytes(t *testing.T) {
 	binary, repoRoot := buildWakeABIBinary(t)
 	root := t.TempDir()
 	initializeWakeABIRoot(t, binary, repoRoot, root)
+	version := wakeABIBinaryVersion(t, binary, repoRoot)
 
 	defaultRun := runWakeABIBinary(t, binary, repoRoot, wakeABICleanEnv(),
 		"wake", "check", "--root", root, "--me", "codex", "--json")
@@ -253,13 +254,26 @@ func TestWakeP0BinaryV1DefaultCheckSchemaBytes(t *testing.T) {
 		t.Fatalf("wake check schema-1 default bytes changed:\ndefault:\n%s\nexplicit:\n%s", defaultRun.stdout, explicitRun.stdout)
 	}
 
-	want := wakeABIV1MissingLockGolden(t, root, binary)
+	want := wakeABIV1MissingLockGolden(t, root, binary, version)
 	if !bytes.Equal(defaultRun.stdout, want) {
 		t.Fatalf("wake check schema-1 golden bytes changed:\n--- got ---\n%s--- want ---\n%s", defaultRun.stdout, want)
 	}
 }
 
-func wakeABIV1MissingLockGolden(t *testing.T, root, binary string) []byte {
+func wakeABIBinaryVersion(t *testing.T, binary, repoRoot string) string {
+	t.Helper()
+	run := runWakeABIBinary(t, binary, repoRoot, wakeABICleanEnv(), "--version")
+	if run.code != 0 || len(run.stderr) != 0 {
+		t.Fatalf("amq --version failed (exit %d): stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
+	}
+	version := strings.TrimSpace(string(run.stdout))
+	if version == "" {
+		t.Fatal("amq --version returned an empty version")
+	}
+	return version
+}
+
+func wakeABIV1MissingLockGolden(t *testing.T, root, binary, version string) []byte {
 	t.Helper()
 	root = canonicalWakeABIRoot(t, root)
 	image := canonicalWakeABIBinary(t, binary)
@@ -296,7 +310,7 @@ func wakeABIV1MissingLockGolden(t *testing.T, root, binary string) []byte {
 			"  \"owner_bound\": false,\n"+
 			"  \"running_image_path\": \"unknown\",\n"+
 			"  \"running_version\": \"unknown\",\n"+"  \"current_image_path\": %s,\n"+
-			"  \"current_version\": \"dev\",\n"+
+			"  \"current_version\": %s,\n"+
 			"  \"image_status\": \"unknown\",\n"+
 			"  \"can_repair_inject_via\": false,\n"+
 			"  \"repair_reason\": \"no wake lock is present\",\n"+
@@ -304,7 +318,7 @@ func wakeABIV1MissingLockGolden(t *testing.T, root, binary string) []byte {
 			"  \"operator_terminal_required\": %t,\n"+
 			"  \"next_action\": %s\n"+
 			"}\n",
-		quote(root), quote(startMode), quote(startReason), quote(image),
+		quote(root), quote(startMode), quote(startReason), quote(image), quote(version),
 		quote(restartCapability), operatorTerminalRequired, quote(nextAction),
 	)
 	return []byte(golden)
