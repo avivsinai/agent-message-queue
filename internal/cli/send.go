@@ -173,6 +173,16 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 			}
 		}
 	}
+	if fromSession != "" {
+		decision := decideSessionGuard(sessionGuardInput{
+			Kind: sessionGuardSource,
+			Pin:  sessionGuardPinStateFor(pin), Relation: sessionGuardTargetMismatch,
+			Flags: sessionGuardFlags{FromSession: true},
+		})
+		if decision.Verdict != sessionGuardAllow {
+			return ContextMismatchError("refusing send: source session routing was not authorized")
+		}
+	}
 	if common.rootExplicit() && !routed {
 		if src, ok := conflictingSourceRoot(root); ok {
 			return UsageError("refusing send: --root %s targets a different AMQ tree than your own (%s), "+

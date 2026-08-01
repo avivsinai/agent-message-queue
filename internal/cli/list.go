@@ -79,6 +79,21 @@ func runList(args []string) error {
 		if GetExitCode(err) != ExitContextMismatch {
 			return err
 		}
+		pin, pinErr := loadSessionPin()
+		pinState := sessionGuardPinStateFor(pin)
+		if pinErr != nil {
+			pinState = sessionGuardPinInvalid
+		}
+		decision := sessionGuardDecisionForContext(
+			sessionGuardList,
+			sessionGuardChannelExit5,
+			pinState,
+			&SessionContextError{Message: err.Error()},
+			sessionGuardFlags{},
+		)
+		if decision.Verdict != sessionGuardWarnContinue {
+			return err
+		}
 		_ = writeStderr("warning: %v\n", err)
 		root, routed = absPath(resolveRoot(common.Root)), false
 	}
@@ -88,6 +103,21 @@ func runList(args []string) error {
 			return checkErr
 		}
 		if checkErr == nil && ok && !sameBaseTree(localRoot, root) {
+			pin, pinErr := loadSessionPin()
+			pinState := sessionGuardPinStateFor(pin)
+			if pinErr != nil {
+				pinState = sessionGuardPinInvalid
+			}
+			decision := sessionGuardDecisionForContext(
+				sessionGuardList,
+				sessionGuardChannelExit5,
+				pinState,
+				&SessionContextError{Message: "active root conflicts with initialized repo-local root"},
+				sessionGuardFlags{},
+			)
+			if decision.Verdict != sessionGuardWarnContinue {
+				return ContextMismatchError("list context warning was not authorized")
+			}
 			if err := writeStderr(
 				"warning: active root %s conflicts with initialized repo-local root %s detected from cwd; list is read-only and will inspect the active root. Pass explicit --root %s to confirm it, or repin to the repo-local root.\n",
 				absPath(resolveRoot(root)),
@@ -99,13 +129,63 @@ func runList(args []string) error {
 		}
 	}
 	if !routed {
-		if mismatch, checkErr := sessionPinMismatch(root); checkErr != nil {
-			if GetExitCode(checkErr) != ExitContextMismatch {
-				return checkErr
+		pin, pinErr := loadSessionPin()
+		if pinErr != nil {
+			if GetExitCode(pinErr) != ExitContextMismatch {
+				return pinErr
 			}
-			_ = writeStderr("warning: %v\n", checkErr)
-		} else if mismatch != nil && !isExplicitOwnBaseRootInspection(common, root) {
-			_ = writeStderr("warning: %s\n", mismatch.Error())
+			decision := sessionGuardDecisionForContext(
+				sessionGuardList,
+				sessionGuardChannelExit5,
+				sessionGuardPinInvalid,
+				&SessionContextError{Message: pinErr.Error()},
+				sessionGuardFlags{},
+			)
+			if decision.Verdict != sessionGuardWarnContinue {
+				return pinErr
+			}
+			_ = writeStderr("warning: %v\n", pinErr)
+		} else {
+			mismatch, checkErr := sessionPinMismatchWithPin(root, pin)
+			if checkErr != nil {
+				if GetExitCode(checkErr) != ExitContextMismatch {
+					return checkErr
+				}
+				decision := sessionGuardDecisionForContext(
+					sessionGuardList,
+					sessionGuardChannelExit5,
+					sessionGuardPinInvalid,
+					&SessionContextError{Message: checkErr.Error()},
+					sessionGuardFlags{},
+				)
+				if decision.Verdict != sessionGuardWarnContinue {
+					return checkErr
+				}
+				_ = writeStderr("warning: %v\n", checkErr)
+			} else if mismatch != nil {
+				if isExplicitOwnBaseRootInspectionWithPin(common, root, pin) {
+					decision := decideSessionGuard(sessionGuardInput{
+						Kind: sessionGuardList,
+						Pin:  sessionGuardPinStateFor(pin), Relation: sessionGuardTargetOwnPinnedBase,
+						Flags: sessionGuardFlags{ExplicitRoot: true},
+					})
+					if decision.Verdict != sessionGuardAllow {
+						return ContextMismatchError("list pinned-base inspection was not authorized")
+					}
+				} else {
+					decision := sessionGuardDecisionForContext(
+						sessionGuardList,
+						sessionGuardChannelExit5,
+						sessionGuardPinStateFor(pin),
+						mismatch,
+						sessionGuardFlags{},
+					)
+					if decision.Verdict != sessionGuardWarnContinue {
+						return ContextMismatchError("list context warning was not authorized")
+					}
+					_ = writeStderr("warning: %s\n", mismatch.Error())
+				}
+			}
 		}
 	}
 	if err := requireMailbox(root, me); err != nil {
