@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -385,7 +386,7 @@ func buildWakeCheckDecision(
 			},
 			Status: wakeImageUnknown,
 		},
-		Reload: classifyWakeCheckReload(inspection),
+		Reload: classifyWakeCheckReload(root, me, inspection),
 	}
 	decision.Wake.Live = inspection.Exists &&
 		inspection.Status == wakeLockValid &&
@@ -424,7 +425,7 @@ func buildWakeCheckDecision(
 	return decision
 }
 
-func classifyWakeCheckReload(inspection wakeLockInspection) wakeCheckReloadDecision {
+func classifyWakeCheckReload(root, agent string, inspection wakeLockInspection) wakeCheckReloadDecision {
 	unavailable := func(reason string) wakeCheckReloadDecision {
 		return wakeCheckReloadDecision{Status: wakeReloadUnavailable, ReasonCode: reason}
 	}
@@ -438,14 +439,10 @@ func classifyWakeCheckReload(inspection wakeLockInspection) wakeCheckReloadDecis
 	if inspection.Lock.ResumeSchema != wakeResumeSchemaV2 {
 		return unavailable(wakeReloadReasonSchemaUnsupported)
 	}
-	if wakeControlSocketPath(
-		inspection.Lock.Root,
-		inspection.Lock.Agent,
-		inspection.Lock.Generation,
-	) == "" {
-		return unavailable(wakeReloadReasonPlatformUnsupported)
-	}
-	if validateWakeResumeAdvertisement(inspection.Lock) != nil {
+	if err := validateWakeResumeAdvertisement(inspection.Lock, root, agent); err != nil {
+		if errors.Is(err, errWakeResumeControlEndpointUnsupported) {
+			return unavailable(wakeReloadReasonPlatformUnsupported)
+		}
 		return unavailable(wakeReloadReasonAdvertisementInvalid)
 	}
 	return wakeCheckReloadDecision{
@@ -542,7 +539,7 @@ func wakeCheckRepairReason(
 }
 
 func decorateOpsWakeLockWithWakeCheck(
-	root string,
+	root, agent string,
 	lock *opsWakeLock,
 	inspection wakeLockInspection,
 	staleBinary bool,
@@ -550,15 +547,8 @@ func decorateOpsWakeLockWithWakeCheck(
 ) {
 	root = canonicalWakeRoot(root)
 	if includeV2 {
-		var mutation *opsWakeMutation
-		if lock.Removed {
-			mutation = &opsWakeMutation{
-				Status:  lock.Status,
-				Reason:  lock.Reason,
-				Removed: true,
-			}
-		}
-		snapshot := inspectWakeCheckSnapshot(root, lock.Agent)
+		mutation := lock.Mutation
+		snapshot := inspectWakeCheckSnapshot(root, agent)
 		opsLock := snapshot.OpsLock
 		opsLock.Mutation = mutation
 		opsLock.WakeCheckDecision = &snapshot.Decision
@@ -577,7 +567,7 @@ func decorateOpsWakeLockWithWakeCheck(
 	default:
 		lock.ImageStatus = wakeImageUnknown
 	}
-	legacyDecision := buildWakeCheckDecision(root, lock.Agent, inspection, lock, false)
+	legacyDecision := buildWakeCheckDecision(root, agent, inspection, lock, false)
 	check := renderWakeCheckV1(legacyDecision)
 	lock.CanStartHere = check.CanStartHere
 	lock.StartMode = check.StartMode

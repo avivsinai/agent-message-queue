@@ -9,7 +9,7 @@ import (
 )
 
 func decorateOpsWakeLockWithWakeCheck(
-	root string,
+	root, agent string,
 	lock *opsWakeLock,
 	_ wakeLockInspection,
 	_ bool,
@@ -18,7 +18,7 @@ func decorateOpsWakeLockWithWakeCheck(
 	if !includeV2 {
 		return
 	}
-	decision := unsupportedWakeCheckDecision(root, lock.Agent)
+	decision := unsupportedWakeCheckDecision(root, agent)
 	lock.WakeCheckDecision = &decision
 }
 
