@@ -330,9 +330,11 @@ appear only in terminal output or attention; terminal input always uses the
 fixed doorbell. The delay starts after the prior injector process exits or times
 out. Because an external injector is arbitrary local code, retries can duplicate
 its side effects. Added messages join the pending cohort and share its next
-notification without resetting the retry ladder. If that ladder had decayed,
-new information pulls the deadline forward to the channel's 5- or 30-second
-delivery floor; bursts within the debounce window remain consolidated.
+notification without resetting the retry ladder. Input-delivery additions may
+pull a decayed deadline forward to the delivery floor 5 seconds after the last
+input attempt, or immediately if that floor has already passed; attention-only
+additions retain the cohort's current decayed deadline. Bursts within the
+debounce window remain consolidated.
 Removing or replacing any message is durable progress and immediately rearms
 the next notification.
 Owner-bound retries do not emit attention when terminal input succeeds.

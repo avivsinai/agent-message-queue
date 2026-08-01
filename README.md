@@ -120,9 +120,11 @@ output or attention; terminal input always uses the fixed doorbell. The delay
 starts after the preceding injector process exits or times out. Because
 `--wake-inject-via` executes arbitrary local code, a retry can repeat
 injector-side effects. Added messages join the pending cohort and share its next
-notification without resetting the retry ladder; if that ladder had decayed,
-new information pulls the deadline forward to the channel's 5- or 30-second
-delivery floor. Bursts within the debounce window remain one notification.
+notification without resetting the retry ladder. Input-delivery additions may
+pull a decayed deadline forward to the delivery floor 5 seconds after the last
+input attempt, or immediately if that floor has already passed; attention-only
+additions retain the cohort's current decayed deadline. Bursts within the
+debounce window remain one notification.
 Removals or replacements immediately rearm the cohort.
 A successful input attempt does not also emit attention. Transient foreground
 authority or input-quiet refusals keep the input retry armed while rate-limiting
