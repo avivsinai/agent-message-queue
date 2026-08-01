@@ -69,6 +69,14 @@ func TestRetireDoesNotSignalRecycledPID(t *testing.T) {
 	if err := old.Start(); err != nil {
 		t.Fatalf("start old child: %v", err)
 	}
+	oldWaited := false
+	t.Cleanup(func() {
+		if oldWaited {
+			return
+		}
+		_ = old.Process.Kill()
+		_ = old.Wait()
+	})
 	pidfd, err := linuxPidfdOpen(old.Process.Pid, 0)
 	if err != nil {
 		_ = old.Process.Kill()
@@ -83,6 +91,7 @@ func TestRetireDoesNotSignalRecycledPID(t *testing.T) {
 		t.Fatalf("poll old child exit = (%v, %v), want exited", exited, err)
 	}
 	_, _ = old.Process.Wait()
+	oldWaited = true
 
 	replacement := exec.Command("sleep", "30")
 	if err := replacement.Start(); err != nil {

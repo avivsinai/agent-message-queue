@@ -77,6 +77,14 @@ func TestRetryFromDLQSerializesAcrossProcessesAndCrashReleases(t *testing.T) {
 	if err := child.Start(); err != nil {
 		t.Fatalf("start retry helper: %v", err)
 	}
+	childWaited := false
+	t.Cleanup(func() {
+		if childWaited {
+			return
+		}
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	})
 	waitForTestFile(t, ready)
 	parentDone := make(chan error, 1)
 	go func() { parentDone <- RetryFromDLQ(openDeliveryRootForTest(t, rootPath), agent, dlqFilename, false) }()
@@ -91,6 +99,7 @@ func TestRetryFromDLQSerializesAcrossProcessesAndCrashReleases(t *testing.T) {
 	if err := child.Wait(); err != nil {
 		t.Fatalf("child retry: %v", err)
 	}
+	childWaited = true
 	if err := <-parentDone; err == nil || !strings.Contains(err.Error(), "retry already delivered") {
 		t.Fatalf("parent retry result = %v, want already-delivered refusal", err)
 	}
@@ -100,10 +109,19 @@ func TestRetryFromDLQSerializesAcrossProcessesAndCrashReleases(t *testing.T) {
 	if err := crash.Start(); err != nil {
 		t.Fatalf("start crash helper: %v", err)
 	}
+	crashWaited := false
+	t.Cleanup(func() {
+		if crashWaited {
+			return
+		}
+		_ = crash.Process.Kill()
+		_ = crash.Wait()
+	})
 	waitForTestFile(t, crashReady)
 	if err := crash.Wait(); err != nil {
 		t.Fatalf("crash helper: %v", err)
 	}
+	crashWaited = true
 	// The completed retry remains present, so this proves the post-crash lock
 	// is acquirable by reaching the normal already-delivered state.
 	if err := RetryFromDLQ(openDeliveryRootForTest(t, rootPath), agent, dlqFilename, false); err == nil || !strings.Contains(err.Error(), "retry already delivered") {
