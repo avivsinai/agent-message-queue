@@ -205,7 +205,9 @@ func readWakeGenerationFile(path, label string) (wakeReady, bool, error) {
 		return wakeReady{}, true, err
 	}
 	if !os.SameFile(info, openedInfo) {
-		return wakeReady{}, true, fmt.Errorf("%s %s changed while opening", label, path)
+		return wakeReady{}, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("%s %s changed while opening", label, path),
+		)
 	}
 	data, err := readWakeMetadata(file, label, path)
 	if err != nil {

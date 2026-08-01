@@ -218,7 +218,9 @@ func readWakeRepairFloor(root, me string) (wakeRepairFloor, bool, error) {
 		return wakeRepairFloor{}, true, err
 	}
 	if !os.SameFile(info, openedInfo) {
-		return wakeRepairFloor{}, true, fmt.Errorf("wake repair floor %s changed while opening", path)
+		return wakeRepairFloor{}, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("wake repair floor %s changed while opening", path),
+		)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxWakeRepairFloorFileBytes+1))
 	if err != nil {

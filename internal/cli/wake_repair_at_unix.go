@@ -513,7 +513,9 @@ func readWakeRepairMetadataAt(
 		return nil, nil, true, fmt.Errorf("re-stat %s: %w", label, statErr)
 	}
 	if !sameWakeFileIdentity(info, pathInfo) {
-		return nil, nil, true, fmt.Errorf("%s changed while opening", label)
+		return nil, nil, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("%s changed while opening", label),
+		)
 	}
 	return data, info, true, nil
 }

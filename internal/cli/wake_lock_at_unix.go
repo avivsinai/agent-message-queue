@@ -14,6 +14,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var afterWakeLockAtRead = func() {}
+
 func readWakeLockFileAt(dirfd int, path string) ([]byte, os.FileInfo, error) {
 	open := func() (*os.File, error) {
 		fd, err := unix.Openat(dirfd, ".wake.lock", unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -38,6 +40,7 @@ func readWakeLockFileAt(dirfd int, path string) ([]byte, os.FileInfo, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	afterWakeLockAtRead()
 	pathFile, err := open()
 	if err != nil {
 		return nil, nil, err
@@ -51,7 +54,9 @@ func readWakeLockFileAt(dirfd int, path string) ([]byte, os.FileInfo, error) {
 		return nil, nil, err
 	}
 	if !sameWakeFileIdentity(info, pathInfo) {
-		return nil, nil, fmt.Errorf("wake lock %s changed while opening", path)
+		return nil, nil, newWakeSnapshotReadChangedError(
+			fmt.Errorf("wake lock %s changed while opening", path),
+		)
 	}
 	return data, info, nil
 }
@@ -240,7 +245,9 @@ func readWakeGenerationFileSnapshotAt(
 		return wakeGenerationFileSnapshot{}, true, err
 	}
 	if !sameWakeFileIdentity(info, pathInfo) {
-		return wakeGenerationFileSnapshot{}, true, fmt.Errorf("%s changed while opening", label)
+		return wakeGenerationFileSnapshot{}, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("%s changed while opening", label),
+		)
 	}
 	var marker wakeReady
 	if err := json.Unmarshal(data, &marker); err != nil {
