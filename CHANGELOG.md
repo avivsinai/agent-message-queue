@@ -8,6 +8,24 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.51.0](https://github.com/avivsinai/agent-message-queue/compare/v0.50.1...v0.51.0) (2026-08-01)
+
+
+### Features
+
+* **wake:** add self-resume protocol foundation ([#389](https://github.com/avivsinai/agent-message-queue/issues/389)) ([595241c](https://github.com/avivsinai/agent-message-queue/commit/595241c9447c786f8161551e968d41df96a12640))
+* **wake:** add versioned check schema ([#391](https://github.com/avivsinai/agent-message-queue/issues/391)) ([3024aec](https://github.com/avivsinai/agent-message-queue/commit/3024aec6c7ae48bbf78859ede14da248a5b471e6))
+* **wake:** classify reload advertisement ([#392](https://github.com/avivsinai/agent-message-queue/issues/392)) ([6f3b3d4](https://github.com/avivsinai/agent-message-queue/commit/6f3b3d40a4fecbb288b61cc67717beb532852d54))
+
+
+### Bug Fixes
+
+* **routing:** honor verified sessionless root pin ([#397](https://github.com/avivsinai/agent-message-queue/issues/397)) ([9331546](https://github.com/avivsinai/agent-message-queue/commit/9331546896600929411f82cd2e486cb5839854e7)), closes [#350](https://github.com/avivsinai/agent-message-queue/issues/350)
+* **wake:** bind resume advertisements to trusted agent ([#400](https://github.com/avivsinai/agent-message-queue/issues/400)) ([1578501](https://github.com/avivsinai/agent-message-queue/commit/1578501f43a5698c33c670fed0dc7c78fef268f8))
+* **wake:** bind resume claims to exact evidence ([#399](https://github.com/avivsinai/agent-message-queue/issues/399)) ([3da2f32](https://github.com/avivsinai/agent-message-queue/commit/3da2f32d3c5fe1d65a4a9233470f102024fea97d))
+* **wake:** corroborate Darwin process image ([#395](https://github.com/avivsinai/agent-message-queue/issues/395)) ([3dd1987](https://github.com/avivsinai/agent-message-queue/commit/3dd1987eaa76a8d008b5f13a35b34c4e7b1172d1))
+* **wake:** preserve attention retry decay ([#393](https://github.com/avivsinai/agent-message-queue/issues/393)) ([f8a8d81](https://github.com/avivsinai/agent-message-queue/commit/f8a8d81b83293b1945c6b6377cb650cd2722868c))
+
 ## [0.50.1](https://github.com/avivsinai/agent-message-queue/compare/v0.50.0...v0.50.1) (2026-07-31)
 
 
