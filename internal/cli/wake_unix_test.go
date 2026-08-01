@@ -2669,6 +2669,7 @@ func TestRunWakeLoopForegroundAuthorityRetryDoesNotCompeteWithExpiredDoorbell(t 
 	nowNanos.Store(start.UnixNano())
 	var promptWrites atomic.Int64
 	initialSubmitted := make(chan struct{}, 1)
+	initialAttemptClockSampled := make(chan struct{}, 1)
 	refused := make(chan struct{}, 1)
 	extra := make(chan struct{}, 1)
 	stop := make(chan struct{})
@@ -2692,7 +2693,14 @@ func TestRunWakeLoopForegroundAuthorityRetryDoesNotCompeteWithExpiredDoorbell(t 
 			injectMode:  wakeInjectModePaste,
 			controlStop: stop,
 			doorbellNow: func() time.Time {
-				return time.Unix(0, nowNanos.Load())
+				now := time.Unix(0, nowNanos.Load())
+				if promptWrites.Load() == 1 && now.Equal(start) {
+					select {
+					case initialAttemptClockSampled <- struct{}{}:
+					default:
+					}
+				}
+				return now
 			},
 			preconditionCheck: func(*wakeConfig) error {
 				return nil
@@ -2730,6 +2738,16 @@ func TestRunWakeLoopForegroundAuthorityRetryDoesNotCompeteWithExpiredDoorbell(t 
 		t.Fatalf("wake loop exited before initial submit: %v", err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("wake loop did not submit initial doorbell")
+	}
+	// terminalWrite reports the submit before deliverNewMessageNotification
+	// records the attempt. Wait until that record has sampled the old clock;
+	// the loop completes the state update before it can handle another event.
+	select {
+	case <-initialAttemptClockSampled:
+	case err := <-done:
+		t.Fatalf("wake loop exited before recording initial attempt: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not sample the initial attempt clock")
 	}
 	nowNanos.Store(start.Add(wakeDoorbellRetryBase).UnixNano())
 	message.Header.ID = "trigger-expired-foreground-retry"
@@ -5922,13 +5940,23 @@ func TestRunWakeWithLoopRetriesCreatingWakeUntilPrepared(t *testing.T) {
 	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, nil)
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
 	retryEntered := make(chan struct{}, 1)
+	retryRelease := make(chan struct{})
+	releaseRetry := func() {
+		select {
+		case <-retryRelease:
+		default:
+			close(retryRelease)
+		}
+	}
+	t.Cleanup(releaseRetry)
 	originalRetry := waitForWakePreparedRetry
-	waitForWakePreparedRetry = func(deadline time.Time) bool {
+	waitForWakePreparedRetry = func(time.Time) bool {
 		select {
 		case retryEntered <- struct{}{}:
 		default:
 		}
-		return originalRetry(deadline)
+		<-retryRelease
+		return true
 	}
 	t.Cleanup(func() { waitForWakePreparedRetry = originalRetry })
 	done := make(chan error, 1)
@@ -5959,6 +5987,9 @@ func TestRunWakeWithLoopRetriesCreatingWakeUntilPrepared(t *testing.T) {
 		Executable: "/opt/homebrew/bin/amq", Generation: "generation-1",
 	}, target))
 	writeWakePreparedForTest(t, root, "orchestrator")
+	// The retry must observe the complete target/lock/prepared publication, not
+	// an accidental mid-replacement snapshot created by the test goroutine.
+	releaseRetry()
 	if err := <-done; err != nil {
 		t.Fatalf("creating wake did not become reusable: %v", err)
 	}
