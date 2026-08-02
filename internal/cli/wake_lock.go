@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -390,21 +391,22 @@ func validateWakeLockStateBinding(lock wakeLock) error {
 	return nil
 }
 
+// Wake-lock input trust is enforced jointly by the reader's syntax gate, the
+// occurrence-preserving scanner below, json.Unmarshal's known-field type
+// checks, and the envelope validators. Keep that complete family synchronized
+// with TestWakeLockJSONTrustMatrix: (1) raw parse failure; (2) non-object top
+// levels; (3) known-field wrong types at early and late byte positions;
+// (4) direct and folded known-field nulls; (5) top-level duplicate known keys
+// in both orders and through folded aliases; (6) nested colliding keys, which
+// are opaque; (7) single, duplicate, and null unknown fields, which remain
+// additive ABI; and (8) valid bound and unbound controls.
 func validateWakeLockStateBindingJSON(data []byte) error {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return fmt.Errorf("wake lock JSON is malformed: %w", err)
-	}
-	if fields == nil {
-		return fmt.Errorf("wake lock JSON must be an object")
+	fields, err := decodeWakeLockJSONFields(data)
+	if err != nil {
+		return err
 	}
 	if err := validateWakeLockStateBindingFields(fields); err != nil {
 		return err
-	}
-	for name, raw := range fields {
-		if wakeLockJSONFieldIsKnown(name) && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-			return fmt.Errorf("wake lock JSON field %q must not be null", name)
-		}
 	}
 	pid, exists := fields["pid"]
 	if !exists {
@@ -428,14 +430,72 @@ func validateWakeLockStateBindingJSON(data []byte) error {
 }
 
 func validateWakeLockStateBindingFieldsJSON(data []byte) error {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return fmt.Errorf("wake lock JSON is malformed: %w", err)
-	}
-	if fields == nil {
-		return fmt.Errorf("wake lock JSON must be an object")
+	fields, err := decodeWakeLockJSONFields(data)
+	if err != nil {
+		return err
 	}
 	return validateWakeLockStateBindingFields(fields)
+}
+
+// decodeWakeLockJSONFields preserves top-level member occurrences before map
+// or struct decoding can collapse them. Only top-level known names are
+// uniqueness constrained; values and unknown fields remain opaque here.
+func decodeWakeLockJSONFields(data []byte) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	opening, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("wake lock JSON is malformed: %w", err)
+	}
+	if delimiter, ok := opening.(json.Delim); !ok || delimiter != '{' {
+		return nil, fmt.Errorf("wake lock JSON must be an object")
+	}
+
+	fields := make(map[string]json.RawMessage)
+	knownNames := make(map[string]string)
+	knownOrder := make([]string, 0, len(wakeLockKnownJSONFields))
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, fmt.Errorf("wake lock JSON is malformed: %w", err)
+		}
+		name, ok := token.(string)
+		if !ok {
+			return nil, fmt.Errorf("wake lock JSON field name is malformed")
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return nil, fmt.Errorf("wake lock JSON field %q is malformed: %w", name, err)
+		}
+
+		canonicalName, known := wakeLockJSONFieldCanonicalName(name)
+		if !known {
+			// Unknown additive fields are opaque. In particular, duplicate
+			// unknown names remain compatible with future serializers.
+			fields[name] = raw
+			continue
+		}
+		if previous, exists := knownNames[canonicalName]; exists {
+			return nil, fmt.Errorf("wake lock JSON field %q duplicates known field %q", name, previous)
+		}
+		knownNames[canonicalName] = name
+		knownOrder = append(knownOrder, canonicalName)
+		fields[canonicalName] = raw
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, fmt.Errorf("wake lock JSON is malformed: %w", err)
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("wake lock JSON has trailing data")
+		}
+		return nil, fmt.Errorf("wake lock JSON is malformed: %w", err)
+	}
+	for _, canonicalName := range knownOrder {
+		if bytes.Equal(bytes.TrimSpace(fields[canonicalName]), []byte("null")) {
+			return nil, fmt.Errorf("wake lock JSON field %q must not be null", knownNames[canonicalName])
+		}
+	}
+	return fields, nil
 }
 
 func validateWakeLockStateBindingFields(fields map[string]json.RawMessage) error {
@@ -477,13 +537,13 @@ var wakeLockKnownJSONFields = func() []string {
 	return fields
 }()
 
-func wakeLockJSONFieldIsKnown(name string) bool {
+func wakeLockJSONFieldCanonicalName(name string) (string, bool) {
 	for _, known := range wakeLockKnownJSONFields {
 		if strings.EqualFold(name, known) {
-			return true
+			return known, true
 		}
 	}
-	return false
+	return "", false
 }
 
 func decodeWakeLockStateBindingString(name string, raw json.RawMessage) (string, error) {

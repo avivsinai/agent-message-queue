@@ -375,6 +375,35 @@ func TestInspectWakeLockRejectsMalformedWholeJSON(t *testing.T) {
 	}
 }
 
+func TestDecodeWakeLockJSONFieldsWireScanner(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr bool
+		wantPID bool
+	}{
+		{name: "trailing whitespace", raw: "{\"pid\":7}\n\t", wantPID: true},
+		{name: "trailing document", raw: `{"pid":7}{}`, wantErr: true},
+		{name: "raw parse failure", raw: `{"pid":`, wantErr: true},
+		{name: "non-object", raw: `[]`, wantErr: true},
+		{name: "duplicate known", raw: `{"pid":null,"pid":7}`, wantErr: true},
+		{name: "duplicate unknown", raw: `{"future":null,"future":{"pid":null}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fields, err := decodeWakeLockJSONFields([]byte(test.raw))
+			if (err != nil) != test.wantErr {
+				t.Fatalf("decode error = %v, wantErr=%v", err, test.wantErr)
+			}
+			if test.wantPID {
+				if _, exists := fields["pid"]; !exists {
+					t.Fatalf("decoded fields = %#v, want canonical pid", fields)
+				}
+			}
+		})
+	}
+}
+
 func TestValidUnboundP2aWakeLockRemainsGeneric(t *testing.T) {
 	root := secureTempDirForTest(t)
 	path := writeWakeLockForTest(t, root, "codex", wakeLock{PID: 4242})

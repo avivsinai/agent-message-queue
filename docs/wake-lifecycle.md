@@ -149,8 +149,11 @@ as specified in section 6. P2b readers classify a lock/document binding
 failure as inconclusive and retry-only.
 
 Every present known `.wake.lock` field, including optional fields, MUST use
-its declared JSON type; `null` is not an encoding for omission. Unknown lock
-fields remain tolerated for forward compatibility.
+its declared JSON type; `null` is not an encoding for omission. A known field
+MUST occur at most once, including names that match under Go JSON's
+case-insensitive field matching. Unknown lock fields, including duplicate
+unknown names and nested objects, remain opaque and tolerated for forward
+compatibility.
 
 ## 3. Lifetime and authority table
 
