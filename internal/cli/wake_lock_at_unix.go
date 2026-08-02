@@ -5,11 +5,14 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -191,7 +194,73 @@ type wakeGenerationFileSnapshot struct {
 	Marker   wakeReady
 	Raw      []byte
 	FileInfo os.FileInfo
+	Failure  *wakeGenerationFileFailureSnapshot
 }
+
+type wakeGenerationFileFailureSnapshot struct {
+	Stage         string
+	Class         string
+	Identity      wakeFileIdentity
+	IdentityKnown bool
+	Mode          uint32
+	Size          int64
+}
+
+func wakeGenerationFileFailureClass(err error) string {
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return "errno:" + strconv.FormatUint(uint64(errno), 10)
+	}
+	return err.Error()
+}
+
+func captureWakeGenerationFileIdentityAt(
+	dirfd int,
+	name string,
+) (wakeFileIdentity, uint32, int64, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstatat(dirfd, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return wakeFileIdentity{}, 0, 0, err
+	}
+	return wakeFileIdentity{
+		Device:    uint64(stat.Dev),
+		Inode:     uint64(stat.Ino),
+		CTimeSec:  int64(stat.Ctim.Sec),
+		CTimeNsec: int64(stat.Ctim.Nsec),
+	}, uint32(stat.Mode), stat.Size, nil
+}
+
+func recordWakeGenerationFileFailureAt(
+	dirfd int,
+	name string,
+	stage string,
+	err error,
+	snapshot wakeGenerationFileSnapshot,
+) wakeGenerationFileSnapshot {
+	failure := &wakeGenerationFileFailureSnapshot{
+		Stage: stage,
+		Class: wakeGenerationFileFailureClass(err),
+	}
+	if snapshot.FileInfo != nil {
+		failure.Identity, failure.IdentityKnown = captureWakeFileIdentity(snapshot.FileInfo)
+		failure.Mode = uint32(snapshot.FileInfo.Mode())
+		failure.Size = snapshot.FileInfo.Size()
+	} else if stage == "open" {
+		identity, mode, size, statErr := captureWakeGenerationFileIdentityAt(dirfd, name)
+		if statErr != nil {
+			snapshot.Failure = failure
+			return snapshot
+		}
+		failure.Identity = identity
+		failure.IdentityKnown = true
+		failure.Mode = mode
+		failure.Size = size
+	}
+	snapshot.Failure = failure
+	return snapshot
+}
+
+var afterWakeGenerationFileSnapshotDataRead = func(string) {}
 
 func readWakeGenerationFileSnapshotAt(
 	dirfd int,
@@ -212,31 +281,50 @@ func readWakeGenerationFileSnapshotAt(
 		if err == unix.ENOENT {
 			return wakeGenerationFileSnapshot{}, false, nil
 		}
-		return wakeGenerationFileSnapshot{}, true, err
+		snapshot := recordWakeGenerationFileFailureAt(
+			dirfd, name, "open", err, wakeGenerationFileSnapshot{},
+		)
+		return snapshot, true, err
 	}
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
-		return wakeGenerationFileSnapshot{}, true, err
+		snapshot := recordWakeGenerationFileFailureAt(
+			dirfd, name, "stat", err, wakeGenerationFileSnapshot{},
+		)
+		return snapshot, true, err
 	}
+	snapshot := wakeGenerationFileSnapshot{FileInfo: info}
 	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		return wakeGenerationFileSnapshot{}, true, fmt.Errorf("%s must be a regular 0600 file", label)
+		err := fmt.Errorf("%s must be a regular 0600 file", label)
+		return recordWakeGenerationFileFailureAt(dirfd, name, "shape", err, snapshot), true, err
 	}
 	if err := validateWakeTargetPathOwnership(label, path, info); err != nil {
-		return wakeGenerationFileSnapshot{}, true, err
+		return recordWakeGenerationFileFailureAt(dirfd, name, "ownership", err, snapshot), true, err
 	}
 	data, err := readWakeMetadata(file, label, path)
 	if err != nil {
-		return wakeGenerationFileSnapshot{}, true, err
+		return recordWakeGenerationFileFailureAt(dirfd, name, "read", err, snapshot), true, err
 	}
+	snapshot.Raw = bytes.Clone(data)
+	afterWakeGenerationFileSnapshotDataRead(name)
 	pathFile, err := open()
 	if err != nil {
-		return wakeGenerationFileSnapshot{}, true, err
+		return wakeGenerationFileSnapshot{}, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("%s changed while reopening: %w", label, err),
+		)
 	}
 	pathInfo, statErr := pathFile.Stat()
 	_ = pathFile.Close()
 	if statErr != nil {
-		return wakeGenerationFileSnapshot{}, true, statErr
+		return wakeGenerationFileSnapshot{}, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("%s changed while restating: %w", label, statErr),
+		)
+	}
+	if !sameWakeFileIdentity(info, pathInfo) {
+		return wakeGenerationFileSnapshot{}, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("%s changed while opening", label),
+		)
 	}
 	if !pathInfo.Mode().IsRegular() || pathInfo.Mode().Perm() != 0o600 {
 		return wakeGenerationFileSnapshot{}, true, fmt.Errorf("%s must be a regular 0600 file", label)
@@ -244,23 +332,16 @@ func readWakeGenerationFileSnapshotAt(
 	if err := validateWakeTargetPathOwnership(label, path, pathInfo); err != nil {
 		return wakeGenerationFileSnapshot{}, true, err
 	}
-	if !sameWakeFileIdentity(info, pathInfo) {
-		return wakeGenerationFileSnapshot{}, true, newWakeSnapshotReadChangedError(
-			fmt.Errorf("%s changed while opening", label),
-		)
-	}
 	var marker wakeReady
 	if err := json.Unmarshal(data, &marker); err != nil {
-		return wakeGenerationFileSnapshot{}, true, err
+		return recordWakeGenerationFileFailureAt(dirfd, name, "parse", err, snapshot), true, err
 	}
 	if marker.Schema != wakeReadySchema || marker.Generation == "" {
-		return wakeGenerationFileSnapshot{}, true, fmt.Errorf("%s schema is unsupported", label)
+		err := fmt.Errorf("%s schema is unsupported", label)
+		return recordWakeGenerationFileFailureAt(dirfd, name, "schema", err, snapshot), true, err
 	}
-	return wakeGenerationFileSnapshot{
-		Marker:   marker,
-		Raw:      bytes.Clone(data),
-		FileInfo: info,
-	}, true, nil
+	snapshot.Marker = marker
+	return snapshot, true, nil
 }
 
 func readWakeGenerationFileAt(

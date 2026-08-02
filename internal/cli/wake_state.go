@@ -219,6 +219,8 @@ func newerWakeStateSchema(data []byte) (component string, schema int, ok bool) {
 	if err := json.Unmarshal(data, &document); err != nil {
 		return "", 0, false
 	}
+	// A missing or malformed schema is invalid/healable state, not evidence of
+	// a recognizable newer document that must be preserved specially.
 	documentSchema, valid := wakeStateSchemaNumber(document["schema"])
 	if valid && documentSchema > wakeStateSchema {
 		return "", documentSchema, true
@@ -357,6 +359,8 @@ func validateWakeStateAgainstLegacy(state wakeState, legacy wakeStateLegacy) err
 	if err != nil {
 		return err
 	}
+	// The semantic digest covers the complete wakeTarget, including Root and
+	// Agent; validateWakeStateTarget has already enforced their canonical shape.
 	if state.Target.TargetDigest != wantTarget {
 		return newWakeStateLegacyMismatch("target semantic digest mismatch")
 	}

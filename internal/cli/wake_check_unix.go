@@ -186,17 +186,23 @@ func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
 			me,
 			observation.Inspection,
 			func() (wakeTarget, bool, error) {
-				snapshot, exists, err := readWakeTargetSnapshotAt(dirfd, agentDir, root, me)
-				observation.Target.Exists = exists
-				if err != nil || !exists {
-					return snapshot.Target, exists, err
+				selection, err := readWakeStateSelectionAt(dirfd, agentDir, root, me)
+				observation.Target.Exists = selection.TargetPresent
+				if err != nil || !selection.TargetPresent {
+					return selection.Target, selection.TargetPresent, err
 				}
-				fingerprint, err := newWakeCheckMetadataFingerprint(exists, snapshot.Raw, snapshot.FileInfo)
+				// Keep the public observation bound to legacy authority. Shadow-state
+				// replacement must not create diagnostic or retry drift in P2a.
+				fingerprint, err := newWakeCheckMetadataFingerprint(
+					selection.legacy.TargetPresent,
+					selection.legacy.Target.Raw,
+					selection.legacy.Target.FileInfo,
+				)
 				if err != nil {
-					return snapshot.Target, exists, err
+					return selection.Target, selection.TargetPresent, err
 				}
 				observation.Target = fingerprint
-				return snapshot.Target, true, nil
+				return selection.Target, true, nil
 			},
 			func(target wakeTarget) error {
 				snapshot, exists, err := readWakeRepairFloorSnapshotAt(dirfd, agentDir)

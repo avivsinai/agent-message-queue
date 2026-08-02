@@ -27,6 +27,7 @@ var errWakeOwnerLockExists = errors.New("wake lock already exists")
 var publishAuthoritativeWakeLinkAt = unix.Linkat
 var publishAuthoritativeWakeAfterTargetRename = func() {}
 var removeAuthoritativeWakeAfterLockRelease = func() {}
+var afterWakeTargetSnapshotDataRead = func() {}
 
 func (err *wakeOwnerPublicationError) Error() string {
 	return err.Err.Error()
@@ -392,8 +393,11 @@ func readWakeTargetSnapshotAt(
 	if err != nil {
 		return wakeTargetSnapshot{}, true, fmt.Errorf("stat wake target: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		return wakeTargetSnapshot{}, true, fmt.Errorf("wake target must be a regular 0600 file")
+	if !info.Mode().IsRegular() {
+		return wakeTargetSnapshot{}, true, fmt.Errorf("wake target must be a regular file")
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		return wakeTargetSnapshot{}, true, fmt.Errorf("wake target mode is %o, want 0600", got)
 	}
 	if err := validateWakeTargetPathOwnership("wake target", path, info); err != nil {
 		return wakeTargetSnapshot{}, true, err
@@ -402,30 +406,36 @@ func readWakeTargetSnapshotAt(
 	if err != nil {
 		return wakeTargetSnapshot{}, true, err
 	}
+	afterWakeTargetSnapshotDataRead()
 	pathFile, err := open()
 	if err != nil {
-		return wakeTargetSnapshot{}, true, fmt.Errorf("re-open wake target: %w", err)
+		return wakeTargetSnapshot{}, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("wake target changed while reopening: %w", err),
+		)
 	}
 	pathInfo, statErr := pathFile.Stat()
 	_ = pathFile.Close()
 	if statErr != nil {
-		return wakeTargetSnapshot{}, true, fmt.Errorf("re-stat wake target: %w", statErr)
+		return wakeTargetSnapshot{}, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("wake target changed while restating: %w", statErr),
+		)
 	}
 	if !sameWakeFileIdentity(info, pathInfo) {
 		return wakeTargetSnapshot{}, true, newWakeSnapshotReadChangedError(
 			fmt.Errorf("wake target changed while opening"),
 		)
 	}
-	var target wakeTarget
-	if err := json.Unmarshal(data, &target); err != nil {
-		return wakeTargetSnapshot{}, true, fmt.Errorf("parse wake target: %w", err)
-	}
-	_ = agentDir
-	return wakeTargetSnapshot{
-		Target:   target,
+	snapshot := wakeTargetSnapshot{
 		Raw:      data,
 		FileInfo: info,
-	}, true, nil
+	}
+	var target wakeTarget
+	if err := json.Unmarshal(data, &target); err != nil {
+		return snapshot, true, fmt.Errorf("parse wake target: %w", err)
+	}
+	_ = agentDir
+	snapshot.Target = target
+	return snapshot, true, nil
 }
 
 func removeAuthoritativeWakeClaimAt(

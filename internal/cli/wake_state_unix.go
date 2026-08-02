@@ -436,6 +436,13 @@ func sameWakeStateLegacySnapshot(first, second wakeStateLegacySnapshot) bool {
 		}
 	}
 	if first.PreparedPresent {
+		if first.Prepared.Failure != nil || second.Prepared.Failure != nil {
+			if first.Prepared.Failure == nil || second.Prepared.Failure == nil ||
+				*first.Prepared.Failure != *second.Prepared.Failure {
+				return false
+			}
+			return true
+		}
 		if first.Prepared.FileInfo == nil || second.Prepared.FileInfo == nil ||
 			!sameWakeFileIdentity(first.Prepared.FileInfo, second.Prepared.FileInfo) ||
 			!bytes.Equal(first.Prepared.Raw, second.Prepared.Raw) ||

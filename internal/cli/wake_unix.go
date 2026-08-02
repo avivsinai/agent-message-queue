@@ -743,7 +743,7 @@ func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, r
 		if requestedTarget == nil {
 			return fmt.Errorf("existing inject-via wake for %s cannot be reused without a requested wake target", inspection.Agent)
 		}
-		persistedTarget, exists, err := readWakeTarget(inspection.Root, inspection.Agent)
+		persistedTarget, exists, err := readWakeTargetFromState(inspection.Root, inspection.Agent)
 		if err != nil {
 			return fmt.Errorf("existing inject-via wake target for %s is not usable: %w", inspection.Agent, err)
 		}
@@ -960,7 +960,7 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 
 		var exists bool
 		var err error
-		target, exists, err = readWakeTargetAt(dirfd, agentDir, root, me)
+		target, exists, err = readWakeTargetFromStateAt(dirfd, agentDir, root, me)
 		if err != nil {
 			result.Status = "refused"
 			result.Reason = err.Error()
