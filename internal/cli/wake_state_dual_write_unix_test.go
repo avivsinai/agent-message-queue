@@ -138,6 +138,69 @@ func TestWakePreparedPublicationRefreshesStateLegacyFirst(t *testing.T) {
 	}
 }
 
+func TestBoundPreparedCurrentMarkerRefusesMalformedBindingWithoutMutation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*wakeLock)
+	}{
+		{
+			name: "partial binding",
+			mutate: func(lock *wakeLock) {
+				lock.StateDigest = ""
+			},
+		},
+		{
+			name: "malformed binding",
+			mutate: func(lock *wakeLock) {
+				lock.StateGeneration = "not-a-valid-state-generation"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+			statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
+			stateRaw, stateInfo := snapshotWakeFileForTest(t, statePath)
+			preparedRaw, preparedInfo := snapshotWakeFileForTest(t, fixture.preparedPath)
+
+			lock := fixture.inspection.Lock
+			test.mutate(&lock)
+			replaceWakeLockForTest(t, fixture.lockPath, lock)
+			fixture.inspection = inspectWakeLock(fixture.root, fixture.me)
+
+			err := writeWakePreparedFile(fixture.root, fixture.me, fixture.inspection)
+			var bound *wakeStateBoundInconclusiveError
+			if !errors.As(err, &bound) {
+				t.Fatalf("prepared publication error = %v, want bound refusal", err)
+			}
+			assertWakeFileSnapshotUnchangedForTest(t, statePath, stateRaw, stateInfo)
+			assertWakeFileSnapshotUnchangedForTest(t, fixture.preparedPath, preparedRaw, preparedInfo)
+		})
+	}
+}
+
+func TestBoundPreparedCurrentMarkerRefusesPostSelectionLockReplacement(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
+	stateRaw, stateInfo := installWakeStatePreparedMismatchForTest(t, statePath)
+	preparedRaw, preparedInfo := snapshotWakeFileForTest(t, fixture.preparedPath)
+
+	original := afterWakePreparedBoundValidation
+	afterWakePreparedBoundValidation = func() {
+		afterWakePreparedBoundValidation = func() {}
+		replaceWakeLockForTest(t, fixture.lockPath, fixture.inspection.Lock)
+	}
+	t.Cleanup(func() { afterWakePreparedBoundValidation = original })
+
+	err := writeWakePreparedFile(fixture.root, fixture.me, fixture.inspection)
+	var bound *wakeStateBoundInconclusiveError
+	var changed *wakeSnapshotReadChangedError
+	if !errors.As(err, &bound) || !errors.As(err, &changed) {
+		t.Fatalf("prepared publication error = %v, want bound replacement refusal", err)
+	}
+	assertWakeFileSnapshotUnchangedForTest(t, statePath, stateRaw, stateInfo)
+	assertWakeFileSnapshotUnchangedForTest(t, fixture.preparedPath, preparedRaw, preparedInfo)
+}
+
 func TestWakePreparedStateCrashSeamsLeaveLegacyPreparedAuthoritative(t *testing.T) {
 	for _, test := range []struct {
 		boundary            wakeStatePublicationBoundary
@@ -715,8 +778,9 @@ func TestBoundPreparedMutationRejectsNewerWakeStateSchemas(t *testing.T) {
 			stateRaw, stateInfo := installNewerWakeStateSchemaForTest(t, statePath, component)
 
 			writeErr := writeWakePreparedFile(fixture.root, fixture.me, fixture.inspection)
-			if writeErr == nil || !strings.Contains(writeErr.Error(), "refresh bound wake state") {
-				t.Fatalf("bound prepared mutation error = %v, want state-refresh refusal", writeErr)
+			var bound *wakeStateBoundInconclusiveError
+			if !errors.As(writeErr, &bound) {
+				t.Fatalf("bound prepared mutation error = %v, want bound refusal", writeErr)
 			}
 			assertWakeStateSnapshotUnchangedForTest(t, statePath, stateRaw, stateInfo)
 			marker, exists, err := readWakeGenerationFile(fixture.preparedPath, "wake prepared marker")
@@ -971,15 +1035,76 @@ func assertSingleWakeStateProjectionWarning(t *testing.T, stderr string) {
 
 func assertWakeStateSnapshotUnchangedForTest(t *testing.T, path string, raw []byte, info os.FileInfo) {
 	t.Helper()
+	assertWakeFileSnapshotUnchangedForTest(t, path, raw, info)
+}
+
+func snapshotWakeFileForTest(t *testing.T, path string) ([]byte, os.FileInfo) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw, info
+}
+
+func assertWakeFileSnapshotUnchangedForTest(t *testing.T, path string, raw []byte, info os.FileInfo) {
+	t.Helper()
 	got, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(got, raw) {
-		t.Fatalf("preserved wake state bytes=%q err=%v", got, err)
+		t.Fatalf("preserved wake file %s bytes=%q err=%v", path, got, err)
 	}
 	after, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !sameWakeFileIdentity(info, after) {
-		t.Fatal("preserved wake state identity changed")
+		t.Fatalf("preserved wake file %s identity changed", path)
 	}
+}
+
+func replaceWakeLockForTest(t *testing.T, lockPath string, lock wakeLock) {
+	t.Helper()
+	raw, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementPath := lockPath + ".replacement"
+	if err := os.WriteFile(replacementPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(replacementPath, wakeOwnerLockFileMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacementPath, lockPath); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func installWakeStatePreparedMismatchForTest(t *testing.T, statePath string) ([]byte, os.FileInfo) {
+	t.Helper()
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := decodeWakeState(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Prepared = nil
+	raw, err = encodeWakeState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw, info
 }

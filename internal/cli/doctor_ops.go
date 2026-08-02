@@ -490,7 +490,9 @@ func checkWakeLocksWithHintsSchema(
 			root,
 			agent,
 			inspection,
-			func() (wakeTarget, bool, error) { return readWakeTargetFromState(root, agent) },
+			func() (wakeTarget, bool, error) {
+				return readWakeTargetFromStateForInspection(root, agent, inspection)
+			},
 			func(target wakeTarget) error {
 				return validateWakeRepairFloorAvailable(root, agent, inspection, target)
 			},

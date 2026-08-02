@@ -8045,8 +8045,11 @@ func TestWaitForWakeReadyRefusesTargetReplacement(t *testing.T) {
 	})
 
 	err = waitForWakeReadyWithWaiter(waiter, readyPath, root, "orchestrator", time.Second)
-	if err == nil || !strings.Contains(err.Error(), "does not match wake lock") {
-		t.Fatalf("expected replacement target refusal, got %v", err)
+	var inconclusive *wakeStateBoundInconclusiveError
+	var mismatch *wakeStateLegacyMismatchError
+	var changed *wakeSnapshotReadChangedError
+	if err == nil || !errors.As(err, &inconclusive) || !errors.As(err, &mismatch) || errors.As(err, &changed) {
+		t.Fatalf("expected bound legacy-mismatch refusal without snapshot race, got %v", err)
 	}
 }
 
