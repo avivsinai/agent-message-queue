@@ -1,8 +1,9 @@
 # Wake lifecycle state document
 
-Status: W3 Step 1 specification only. This document defines the contract for
-`.wake.state`; it does not implement or activate the document. The existing
-legacy files remain authoritative through P2a.
+Status: W3 P2a contract and implementation. W3.2 through W3.4 implement the
+legacy-authoritative `.wake.state` projection described here; they do not
+activate bound P2b mode or migration. The existing legacy files remain
+authoritative through P2a.
 
 The normative words MUST, MUST NOT, SHOULD, and MAY describe the contract that
 the W3 implementation and its tests must preserve.
