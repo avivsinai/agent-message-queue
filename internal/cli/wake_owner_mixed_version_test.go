@@ -69,6 +69,8 @@ func TestOwnerFencePreservesClaimAgainstExactE370Binary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	lock.StateGeneration = lock.Generation
+	lock.StateDigest = lock.TargetDigest
 	agentDir, err := openWakeAgentDir(root, "codex")
 	if err != nil {
 		t.Fatal(err)

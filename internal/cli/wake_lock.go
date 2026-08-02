@@ -30,6 +30,8 @@ type wakeLock struct {
 	WakeMode             string               `json:"wake_mode,omitempty"`              // none, raw, paste, or inject-via; empty means a legacy pre-v0.44 lock
 	TargetDigest         string               `json:"target_digest,omitempty"`          // Binds .wake.target to this lock instance
 	Generation           string               `json:"generation,omitempty"`             // Random nonce binding readiness and exact cleanup to this instance
+	StateGeneration      string               `json:"state_generation,omitempty"`       // P2b binding to the state target section for this exact lock generation
+	StateDigest          string               `json:"state_digest,omitempty"`           // Durable P2b wire slot; equals TargetDigest in v1
 	SourceGeneration     string               `json:"source_generation,omitempty"`      // Dead generation inherited by a repaired wake
 	SourceFloorDigest    string               `json:"source_floor_digest,omitempty"`    // Exact repair floor inherited by a repaired wake
 	ControlSocket        string               `json:"control_socket,omitempty"`         // Generation-derived cooperative control endpoint
@@ -180,6 +182,11 @@ func readWakeLockMetadataWithReader(root, me, lockPath string, read wakeLockFile
 	inspection.Exists = true
 	inspection.raw = data
 	inspection.fileInfo = fileInfo
+	if err := validateWakeLockStateBindingJSON(data); err != nil {
+		inspection.Status = wakeLockUnverified
+		inspection.Reason = err.Error()
+		return inspection
+	}
 	var existing wakeLock
 	if err := json.Unmarshal(data, &existing); err != nil {
 		if fileInfo != nil && fileInfo.Mode().Perm() == wakeOwnerLockFileMode {
@@ -302,6 +309,9 @@ func validateWakeLockFormat(lock wakeLock, info os.FileInfo) error {
 	if info == nil {
 		return fmt.Errorf("wake lock file identity unavailable")
 	}
+	if err := validateWakeLockStateBinding(lock); err != nil {
+		return err
+	}
 	switch info.Mode().Perm() {
 	case wakeOwnerLockFileMode:
 		if lock.OwnerSchema != wakeOwnerLockSchema {
@@ -333,6 +343,69 @@ func validateWakeLockFormat(lock wakeLock, info os.FileInfo) error {
 		return fmt.Errorf("wake lock mode %o unsupported", info.Mode().Perm())
 	}
 	return nil
+}
+
+func validateWakeLockStateBinding(lock wakeLock) error {
+	hasGeneration := lock.StateGeneration != ""
+	hasDigest := lock.StateDigest != ""
+	if hasGeneration != hasDigest {
+		return fmt.Errorf("wake state_generation and state_digest must be present together")
+	}
+	if !hasGeneration {
+		return nil
+	}
+	if !validWakeStateGeneration(lock.StateGeneration) {
+		return fmt.Errorf("wake state generation is invalid")
+	}
+	if !validWakeStateDigest(lock.StateDigest) {
+		return fmt.Errorf("wake state digest is invalid")
+	}
+	if lock.StateGeneration != lock.Generation {
+		return fmt.Errorf("wake state generation does not match lock generation")
+	}
+	if lock.TargetDigest == "" {
+		return fmt.Errorf("wake state binding requires a target digest")
+	}
+	if lock.StateDigest != lock.TargetDigest {
+		return fmt.Errorf("wake state digest does not match lock target digest")
+	}
+	if lock.WakeMode != wakeTargetInjectVia && lock.WakeMode != wakeOwnerWakeMode {
+		return fmt.Errorf("wake state binding requires a target-bearing lock")
+	}
+	return nil
+}
+
+func validateWakeLockStateBindingJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil
+	}
+	generation, hasGeneration := fields["state_generation"]
+	digest, hasDigest := fields["state_digest"]
+	if !hasGeneration && !hasDigest {
+		return nil
+	}
+	if hasGeneration != hasDigest {
+		return fmt.Errorf("wake state_generation and state_digest must be present together")
+	}
+	if _, err := decodeWakeLockStateBindingString("state_generation", generation); err != nil {
+		return err
+	}
+	if _, err := decodeWakeLockStateBindingString("state_digest", digest); err != nil {
+		return err
+	}
+	return nil
+}
+
+func decodeWakeLockStateBindingString(name string, raw json.RawMessage) (string, error) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", fmt.Errorf("wake %s must be a non-empty string", name)
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || value == "" {
+		return "", fmt.Errorf("wake %s must be a non-empty string", name)
+	}
+	return value, nil
 }
 
 func validateAuthoritativeWakeProcessIdentity(lock wakeLock) error {
