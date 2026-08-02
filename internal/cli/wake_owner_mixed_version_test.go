@@ -188,6 +188,78 @@ func TestLegacyWriterPreservesNewerWakeStateDocument(t *testing.T) {
 		t.Fatalf("legacy writer did not commit orphan target cleanup: %v", err)
 	}
 	assertWakeStateSnapshotUnchangedForTest(t, statePath, stateRaw, stateInfo)
+	selection, err := readWakeStateSelection(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.TargetPresent || selection.StatePreferred {
+		t.Fatalf("new reader did not fall back after legacy-only mutation: %#v", selection)
+	}
+	assertWakeStateSnapshotUnchangedForTest(t, statePath, stateRaw, stateInfo)
+}
+
+func TestWakeStateDualReadMixedVersionMatrix(t *testing.T) {
+	legacyBinary := buildHistoricalAMQForWakeStateTest(t, wakeStateLegacyWriterCommit)
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	injector := writeExecutableForTest(t, "mixed-version-dual-read-injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"legacy"})
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatal(err)
+	}
+	agentDir, err := openWakeAgentDir(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = agentDir.Close() })
+	fixture := wakeStateUnixFixture{root: root, agent: "codex", agentDir: agentDir}
+
+	selection, err := readWakeStateSelectionForTest(t, fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.StatePreferred || !selection.TargetPresent || !sameWakeTarget(selection.Target, target) {
+		t.Fatalf("legacy-only selection = %#v", selection)
+	}
+	statePath := filepath.Join(fsq.AgentBase(root, "codex"), wakeStateFileName)
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("legacy-only read created state: %v", err)
+	}
+
+	legacyBefore := runHistoricalWakeCheckForStateTest(t, legacyBinary, root)
+	publishWakeStateForDualReadTest(t, fixture)
+	selection, err = readWakeStateSelectionForTest(t, fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selection.StatePreferred || !sameWakeTarget(selection.Target, target) {
+		t.Fatalf("projected selection = %#v", selection)
+	}
+	legacyAfter := runHistoricalWakeCheckForStateTest(t, legacyBinary, root)
+	if !bytes.Equal(legacyBefore, legacyAfter) {
+		t.Fatalf("historical reader changed after state projection:\nbefore=%s\nafter=%s", legacyBefore, legacyAfter)
+	}
+}
+
+func runHistoricalWakeCheckForStateTest(t *testing.T, binary, root string) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, binary, "wake", "check", "--root", root, "--me", "codex", "--json")
+	command.Env = ownerFenceCommandEnv(root)
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("historical wake check timed out: %v\n%s", ctx.Err(), output)
+	}
+	if err != nil {
+		t.Fatalf("historical wake check failed: %v\n%s", err, output)
+	}
+	return output
 }
 
 func buildHistoricalAMQForWakeStateTest(t *testing.T, commit string) string {

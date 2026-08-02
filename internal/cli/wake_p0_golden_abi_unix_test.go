@@ -260,6 +260,182 @@ func TestWakeP0BinaryV1DefaultCheckSchemaBytes(t *testing.T) {
 	}
 }
 
+func TestWakeP0BinaryDiagnosticsIgnoreP2aStatePresenceAndValidity(t *testing.T) {
+	binary, repoRoot := buildWakeABIBinary(t)
+	root := t.TempDir()
+	initializeWakeABIRoot(t, binary, repoRoot, root)
+	injector := writeExecutableForTest(t, "wake-p0-dual-read-injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"p2a"})
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatal(err)
+	}
+	agentDir, err := openWakeAgentDir(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = agentDir.Close() })
+	fixture := wakeStateUnixFixture{root: root, agent: "codex", agentDir: agentDir}
+
+	absent := runWakeP0StateDiagnostics(t, binary, repoRoot, root)
+	publishWakeStateForDualReadTest(t, fixture)
+	present := runWakeP0StateDiagnostics(t, binary, repoRoot, root)
+	assertWakeP0StateDiagnosticsEqual(t, absent, present, "eligible state")
+	statePath := filepath.Join(agentDir.path, wakeStateFileName)
+	if err := os.WriteFile(statePath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	malformed := runWakeP0StateDiagnostics(t, binary, repoRoot, root)
+	assertWakeP0StateDiagnosticsEqual(t, absent, malformed, "malformed state")
+}
+
+func TestWakeP0BinaryDiagnosticsPreserveStableInvalidPreparedEvidence(t *testing.T) {
+	binary, repoRoot := buildWakeABIBinary(t)
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{
+			name: "mode-0640",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Chmod(path, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "symlink",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				target := path + ".symlink-target"
+				if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "oversized",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, bytes.Repeat([]byte("x"), maxWakeMetadataFileBytes+1), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			initializeWakeABIRoot(t, binary, repoRoot, root)
+			injector := writeExecutableForTest(t, "wake-p0-invalid-prepared-injector")
+			target := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"p2a"})
+			if err := writeWakeTarget(root, "codex", target); err != nil {
+				t.Fatal(err)
+			}
+			digest, err := wakeTargetDigest(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			preparedPath := wakePreparedPath(root, "codex")
+			if err := writeWakeGenerationFile(preparedPath, "wake prepared marker", wakeReady{
+				Schema:       wakeReadySchema,
+				Generation:   "11111111111111111111111111111111",
+				TargetDigest: digest,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			agentDir, err := openWakeAgentDir(root, "codex")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = agentDir.Close() })
+			fixture := wakeStateUnixFixture{root: root, agent: "codex", agentDir: agentDir}
+			publishWakeStateForDualReadTest(t, fixture)
+			statePath := filepath.Join(agentDir.path, wakeStateFileName)
+			stateRaw, err := os.ReadFile(statePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(statePath); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(t, preparedPath)
+
+			legacy := runWakeP0StateDiagnostics(t, binary, repoRoot, root)
+			assertWakeP0DiagnosticsHaveNoFalseSnapshotChange(t, legacy, "legacy-only")
+			if err := os.WriteFile(statePath, stateRaw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			projected := runWakeP0StateDiagnostics(t, binary, repoRoot, root)
+			assertWakeP0StateDiagnosticsEqual(t, legacy, projected, "stable invalid prepared")
+			assertWakeP0DiagnosticsHaveNoFalseSnapshotChange(t, projected, "state present")
+		})
+	}
+}
+
+func assertWakeP0DiagnosticsHaveNoFalseSnapshotChange(
+	t *testing.T,
+	runs [2]wakeABIRun,
+	label string,
+) {
+	t.Helper()
+	for index, name := range []string{"wake check", "doctor ops"} {
+		combined := append(bytes.Clone(runs[index].stdout), runs[index].stderr...)
+		if bytes.Contains(combined, []byte("wake legacy state changed")) ||
+			bytes.Contains(combined, []byte("observation changed")) {
+			t.Fatalf("%s %s falsely reported a stable snapshot change: %s", label, name, combined)
+		}
+	}
+}
+
+func runWakeP0StateDiagnostics(
+	t *testing.T,
+	binary string,
+	repoRoot string,
+	root string,
+) [2]wakeABIRun {
+	t.Helper()
+	env := wakeABICleanEnv()
+	return [2]wakeABIRun{
+		runWakeABIBinary(t, binary, repoRoot, env,
+			"wake", "check", "--root", root, "--me", "codex", "--json", "--json-schema=2"),
+		runWakeABIBinary(t, binary, repoRoot, env,
+			"doctor", "--root", root, "--ops", "--json", "--json-schema=2"),
+	}
+}
+
+func assertWakeP0StateDiagnosticsEqual(
+	t *testing.T,
+	want [2]wakeABIRun,
+	got [2]wakeABIRun,
+	label string,
+) {
+	t.Helper()
+	for index, name := range []string{"wake check", "doctor ops"} {
+		if want[index].code != got[index].code ||
+			!bytes.Equal(want[index].stdout, got[index].stdout) ||
+			!bytes.Equal(want[index].stderr, got[index].stderr) {
+			t.Fatalf(
+				"%s changed %s process bytes:\nwant code=%d stdout=%s stderr=%s\ngot code=%d stdout=%s stderr=%s",
+				label,
+				name,
+				want[index].code,
+				want[index].stdout,
+				want[index].stderr,
+				got[index].code,
+				got[index].stdout,
+				got[index].stderr,
+			)
+		}
+	}
+}
+
 func wakeABIBinaryVersion(t *testing.T, binary, repoRoot string) string {
 	t.Helper()
 	run := runWakeABIBinary(t, binary, repoRoot, wakeABICleanEnv(), "--version")

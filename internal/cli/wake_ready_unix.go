@@ -236,25 +236,22 @@ func validateWakeGenerationFile(path, label string, info os.FileInfo) error {
 	return validateWakeTargetPathOwnership(label, path, info)
 }
 
-func validateWakeReadyLockAndTarget(root, me string, current wakeLockInspection, ready wakeReady) error {
+func validateWakeReadyLockAndSelectedTarget(
+	current wakeLockInspection,
+	ready wakeReady,
+	target wakeTarget,
+	targetExists bool,
+) error {
 	if err := validateWakeReadyAgainstLock(current, ready); err != nil {
 		return err
 	}
 	if current.Lock.TargetDigest == "" {
-		_, exists, err := readWakeTarget(root, me)
-		if err != nil {
-			return err
-		}
-		if exists {
+		if targetExists {
 			return fmt.Errorf("wake readiness target does not match current wake lock")
 		}
 		return nil
 	}
-	target, exists, err := readWakeTarget(root, me)
-	if err != nil {
-		return err
-	}
-	if !exists {
+	if !targetExists {
 		return fmt.Errorf("wake readiness target is missing")
 	}
 	return validateWakeReadyTargetAndOwner(current, target)
@@ -268,23 +265,16 @@ func validateWakeReadyLockAndTargetAt(
 	current wakeLockInspection,
 	ready wakeReady,
 ) error {
-	if err := validateWakeReadyAgainstLock(current, ready); err != nil {
-		return err
-	}
-	target, exists, err := readWakeTargetAt(dirfd, agentDir, root, me)
+	selection, err := readWakeStateSelectionAt(dirfd, agentDir, root, me)
 	if err != nil {
 		return err
 	}
-	if current.Lock.TargetDigest == "" {
-		if exists {
-			return fmt.Errorf("wake readiness target does not match current wake lock")
-		}
-		return nil
-	}
-	if !exists {
-		return fmt.Errorf("wake readiness target is missing")
-	}
-	return validateWakeReadyTargetAndOwner(current, target)
+	return validateWakeReadyLockAndSelectedTarget(
+		current,
+		ready,
+		selection.Target,
+		selection.TargetPresent,
+	)
 }
 
 func validateWakeReadyAgainstLock(current wakeLockInspection, ready wakeReady) error {
