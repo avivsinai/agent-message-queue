@@ -8,6 +8,17 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.52.0](https://github.com/avivsinai/agent-message-queue/compare/v0.51.1...v0.52.0) (2026-08-02)
+
+
+### Features
+
+* **wake:** add inert .wake.state document primitives ([#415](https://github.com/avivsinai/agent-message-queue/issues/415)) ([fbc574a](https://github.com/avivsinai/agent-message-queue/commit/fbc574a8d2b26b2526dfae5d9c5c87408007ac39))
+* **wake:** decompose resume authority and add reload endpoint ([#405](https://github.com/avivsinai/agent-message-queue/issues/405)) ([e4b6c17](https://github.com/avivsinai/agent-message-queue/commit/e4b6c1742b4c587abf9c00d2eb3b3d4cf1c346ce))
+* **wake:** dual-write state from legacy mutations ([#416](https://github.com/avivsinai/agent-message-queue/issues/416)) ([1d16b1e](https://github.com/avivsinai/agent-message-queue/commit/1d16b1e82c34451997ab100ad84d6d0e883c706a))
+* **wake:** prefer state document on validated dual-read ([#417](https://github.com/avivsinai/agent-message-queue/issues/417)) ([acd9e35](https://github.com/avivsinai/agent-message-queue/commit/acd9e35511f0d5f13c9ed68349929bfcf488cecf))
+* **wake:** route session guards through decision table ([#412](https://github.com/avivsinai/agent-message-queue/issues/412)) ([6619399](https://github.com/avivsinai/agent-message-queue/commit/661939938923e7be8d807b02ea183bbac775bdf1))
+
 ## [0.51.1](https://github.com/avivsinai/agent-message-queue/compare/v0.51.0...v0.51.1) (2026-08-01)
 
 
