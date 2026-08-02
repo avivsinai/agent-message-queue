@@ -8,6 +8,39 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.52.0](https://github.com/avivsinai/agent-message-queue/compare/v0.51.1...v0.52.0) (2026-08-02)
+
+
+### Features
+
+* **wake:** add inert .wake.state document primitives ([#415](https://github.com/avivsinai/agent-message-queue/issues/415)) ([fbc574a](https://github.com/avivsinai/agent-message-queue/commit/fbc574a8d2b26b2526dfae5d9c5c87408007ac39))
+* **wake:** decompose resume authority and add reload endpoint ([#405](https://github.com/avivsinai/agent-message-queue/issues/405)) ([e4b6c17](https://github.com/avivsinai/agent-message-queue/commit/e4b6c1742b4c587abf9c00d2eb3b3d4cf1c346ce))
+* **wake:** dual-write state from legacy mutations ([#416](https://github.com/avivsinai/agent-message-queue/issues/416)) ([1d16b1e](https://github.com/avivsinai/agent-message-queue/commit/1d16b1e82c34451997ab100ad84d6d0e883c706a))
+* **wake:** prefer state document on validated dual-read ([#417](https://github.com/avivsinai/agent-message-queue/issues/417)) ([acd9e35](https://github.com/avivsinai/agent-message-queue/commit/acd9e35511f0d5f13c9ed68349929bfcf488cecf))
+* **wake:** route session guards through decision table ([#412](https://github.com/avivsinai/agent-message-queue/issues/412)) ([6619399](https://github.com/avivsinai/agent-message-queue/commit/661939938923e7be8d807b02ea183bbac775bdf1))
+
+The new `.wake.state` document ships in three P2a compatibility stages: inert
+storage primitives, legacy-first shadow writes, and validated dual-read that
+silently falls back to the legacy files whenever the document does not match
+the live legacy publication. Legacy files remain authoritative through P2a;
+these stages do not activate self-resume, change the legacy lock ABI, or add
+migration machinery. The Linux reload transport is an unadvertised,
+refusal-only seam in this release; it adds no reload command, candidate custody,
+self-exec, or ready capability. Session routing now shares one explicit guard
+table through the `internal/sessionguard` package; the extraction preserves the
+existing routing outcomes and command-line contract.
+
+### Documentation
+
+* **wake:** specify the authoritative `.wake.state` lifecycle, commit protocol, invariants, and crash matrix ([#407](https://github.com/avivsinai/agent-message-queue/issues/407), [#414](https://github.com/avivsinai/agent-message-queue/issues/414)). These documents define forward contracts; they do not by themselves activate new runtime behavior.
+
+
+### Tests
+
+* **wake:** add a crash-contract regression net across publication boundaries ([#409](https://github.com/avivsinai/agent-message-queue/issues/409)). This is test-only coverage of the existing fail-closed publication contract.
+* **wake:** make detached-child cleanup unconditional, including `setsid` process groups. This is test-harness hygiene; production behavior is unchanged.
+* **wake:** pin schema-1 check output byte-for-byte and protect the P0 legacy lock keys, diagnostic fields and enums, exit status, and read-only behavior ([#411](https://github.com/avivsinai/agent-message-queue/issues/411)). This golden suite protects the existing ABI; it does not introduce an ABI change.
+
 ## [0.51.1](https://github.com/avivsinai/agent-message-queue/compare/v0.51.0...v0.51.1) (2026-08-01)
 
 
