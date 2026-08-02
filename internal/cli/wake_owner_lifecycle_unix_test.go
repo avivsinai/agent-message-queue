@@ -354,7 +354,7 @@ func TestPublishAuthoritativeWakeClaimCommitsACompleteReadOnlyGeneration(t *test
 		BootID:       owner.BootID,
 		Executable:   "/usr/local/bin/amq",
 		Args:         []string{"amq", "wake", "--me", "codex", "--root", root},
-		Generation:   "owner-generation",
+		Generation:   "0123456789abcdef0123456789abcdef",
 		OwnerSchema:  wakeOwnerLockSchema,
 		Owner:        &owner,
 	}, target)
@@ -401,7 +401,7 @@ func TestPublishAuthoritativeWakeClaimCommitsACompleteReadOnlyGeneration(t *test
 	}
 
 	replacement := lock
-	replacement.Generation = "replacement-generation"
+	replacement.Generation = "fedcba9876543210fedcba9876543210"
 	replacementTarget := target
 	replacementTarget.Created = "2026-07-23T01:00:00Z"
 	replacement.TargetDigest = mustWakeTargetDigest(replacementTarget)
@@ -468,9 +468,6 @@ func TestPublishAuthoritativeWakeClaimDirectorySyncFailureIsNotDegradable(t *tes
 	var publicationErr *wakeOwnerPublicationError
 	if !errors.As(err, &publicationErr) {
 		t.Fatalf("publication error = %v, want typed durability failure", err)
-	}
-	if publicationErr.Unsupported {
-		t.Fatalf("directory-sync failure was marked degradable: %#v", publicationErr)
 	}
 	if inspection := inspectWakeLock(root, "codex"); inspection.Exists {
 		t.Fatalf("directory-sync failure published a lock: %#v", inspection)
@@ -851,7 +848,7 @@ func TestAcquireAuthoritativeWakeClaimReclaimsOnlyADeadOwnerWithAbsentWake(t *te
 		BootID:       oldOwner.BootID,
 		Executable:   "/usr/local/bin/amq",
 		Args:         []string{"amq", "wake", "--me", "codex", "--root", root},
-		Generation:   "old-owner-generation",
+		Generation:   "11111111111111111111111111111111",
 		OwnerSchema:  wakeOwnerLockSchema,
 		Owner:        &oldOwner,
 	}, oldTarget)
@@ -1084,7 +1081,7 @@ func TestExactHelperCleanupRollsBackOnlyCurrentAuthoritativeOwner(t *testing.T) 
 		BootID:       owner.BootID,
 		Executable:   "/usr/local/bin/amq",
 		Args:         []string{"amq", "wake", "--root", root, "--me", "codex", "--inject-via", injector},
-		Generation:   "authoritative-rollback-cleanup-generation",
+		Generation:   "22222222222222222222222222222222",
 		OwnerSchema:  wakeOwnerLockSchema,
 		Owner:        &owner,
 	}, target)

@@ -11,16 +11,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
 type wakeOwnerPublicationError struct {
-	Err             error
-	Committed       bool
-	Unsupported     bool
-	InstalledTarget *wakeTargetSnapshot
+	Err       error
+	Committed bool
 }
 
 var errWakeOwnerLockExists = errors.New("wake lock already exists")
@@ -28,6 +25,10 @@ var publishAuthoritativeWakeLinkAt = unix.Linkat
 var publishAuthoritativeWakeAfterTargetRename = func() {}
 var removeAuthoritativeWakeAfterLockRelease = func() {}
 var afterWakeTargetSnapshotDataRead = func() {}
+var removeAuthoritativeWakeLockTempAfterCommitAt = unix.Unlinkat
+var syncAuthoritativeWakeLockAfterCommitDirFD = func(fd int) error {
+	return syncWakeOwnerDirFD(fd)
+}
 
 func (err *wakeOwnerPublicationError) Error() string {
 	return err.Err.Error()
@@ -66,11 +67,6 @@ func publishAuthoritativeWakeClaimAt(
 		return fmt.Errorf("marshal authoritative wake target: %w", err)
 	}
 	targetData = append(targetData, '\n')
-	lockData, err := json.Marshal(lock)
-	if err != nil {
-		return fmt.Errorf("marshal authoritative wake lock: %w", err)
-	}
-
 	targetTemp, err := writeWakeOwnerTempAt(dirfd, "wake-target", targetData, 0o600)
 	if err != nil {
 		return err
@@ -136,12 +132,19 @@ func publishAuthoritativeWakeClaimAt(
 			Err: fmt.Errorf("installed authoritative wake target changed during publication; preserving it"),
 		}
 	}
-	installedTarget := visibleTarget
 	if err := syncWakeOwnerDirFD(dirfd); err != nil {
 		return &wakeOwnerPublicationError{
-			Err:             fmt.Errorf("sync authoritative wake target directory: %w", err),
-			InstalledTarget: &installedTarget,
+			Err: fmt.Errorf("sync authoritative wake target directory: %w", err),
 		}
+	}
+	if err := publishWakeStateAndBindLockAt(dirfd, agentDir, root, me, &lock); err != nil {
+		return &wakeOwnerPublicationError{
+			Err: fmt.Errorf("publish wake state before authoritative wake lock: %w", err),
+		}
+	}
+	lockData, err := json.Marshal(lock)
+	if err != nil {
+		return fmt.Errorf("marshal authoritative wake lock: %w", err)
 	}
 
 	lockTemp, err := writeWakeOwnerTempAt(dirfd, "wake-lock", lockData, wakeOwnerLockFileMode)
@@ -159,34 +162,39 @@ func publishAuthoritativeWakeClaimAt(
 			return errWakeOwnerLockExists
 		}
 		return &wakeOwnerPublicationError{
-			Err:             fmt.Errorf("publish authoritative wake lock: %w", err),
-			Unsupported:     wakeOwnerStorageUnsupported(err),
-			InstalledTarget: &installedTarget,
+			Err: fmt.Errorf("publish authoritative wake lock: %w", err),
 		}
 	}
-	if err := unix.Unlinkat(dirfd, lockTemp, 0); err != nil {
+	if err := removeAuthoritativeWakeLockTempAfterCommitAt(dirfd, lockTemp, 0); err != nil {
 		return &wakeOwnerPublicationError{
-			Err:             fmt.Errorf("remove authoritative wake lock temp after commit: %w", err),
-			Committed:       true,
-			InstalledTarget: &installedTarget,
+			Err:       fmt.Errorf("remove authoritative wake lock temp after commit: %w", err),
+			Committed: true,
 		}
 	}
 	lockTempPresent = false
-	if err := syncWakeOwnerDirFD(dirfd); err != nil {
+	if err := syncAuthoritativeWakeLockAfterCommitDirFD(dirfd); err != nil {
 		return &wakeOwnerPublicationError{
-			Err:             fmt.Errorf("sync authoritative wake lock directory after commit: %w", err),
-			Committed:       true,
-			InstalledTarget: &installedTarget,
+			Err:       fmt.Errorf("sync authoritative wake lock directory after commit: %w", err),
+			Committed: true,
 		}
 	}
-	if err := reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me); err != nil {
-		if continueAfterWakeStateProjectionError(err) {
-			return nil
-		}
+	visibleLock := readWakeLockMetadataAt(dirfd, agentDir, root, me)
+	if !visibleLock.Exists || visibleLock.Lock.Generation != lock.Generation || !bytes.Equal(visibleLock.raw, lockData) {
 		return &wakeOwnerPublicationError{
-			Err:             fmt.Errorf("publish wake state after authoritative wake commit: %w", err),
-			Committed:       true,
-			InstalledTarget: &installedTarget,
+			Err:       fmt.Errorf("verify bound authoritative wake lock after commit"),
+			Committed: true,
+		}
+	}
+	if _, err := validateAuthoritativeWakeClaimPairAt(dirfd, agentDir, visibleLock); err != nil {
+		return &wakeOwnerPublicationError{
+			Err:       fmt.Errorf("verify bound authoritative wake target after commit: %w", err),
+			Committed: true,
+		}
+	}
+	if err := validateWakeBoundStateAt(dirfd, agentDir, root, me, visibleLock.Lock); err != nil {
+		return &wakeOwnerPublicationError{
+			Err:       fmt.Errorf("verify bound authoritative wake state after commit: %w", err),
+			Committed: true,
 		}
 	}
 	return nil
@@ -293,10 +301,6 @@ func writeWakeOwnerTempAt(dirfd int, label string, data []byte, mode os.FileMode
 }
 
 var syncWakeOwnerDirFD = unix.Fsync
-
-func wakeOwnerStorageUnsupported(err error) bool {
-	return errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EOPNOTSUPP)
-}
 
 func readAuthoritativeWakeTargetAt(
 	dirfd int,

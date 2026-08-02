@@ -31,46 +31,40 @@ func TestAuthoritativeWakeAcquisitionPublishesLegacyFirstState(t *testing.T) {
 	if state.State.Prepared != nil {
 		t.Fatalf("new acquisition state prepared = %#v, want nil", state.State.Prepared)
 	}
+	inspection := inspectWakeLock(root, "codex")
+	if inspection.Lock.StateGeneration != inspection.Lock.Generation ||
+		inspection.Lock.StateDigest != inspection.Lock.TargetDigest ||
+		inspection.Lock.StateDigest != state.State.Target.TargetDigest {
+		t.Fatalf("authoritative bound lock = %#v, state target = %#v", inspection.Lock, state.State.Target)
+	}
 }
 
-func TestAuthoritativeWakeAcquisitionStateFailurePreservesCommittedLegacy(t *testing.T) {
+func TestAuthoritativeWakeAcquisitionStateFailureLeavesUnboundTargetShadow(t *testing.T) {
 	root, target, _ := newOwnerAcquisitionPublicationFixture(t)
 	injected := errors.New("state projection failed after owner commit")
 	installWakeStatePublicationFailure(t, wakeStateAfterTempWrite, injected)
 
-	var cleanup func()
-	var err error
-	stderr := captureWakeStderr(t, func() {
-		cleanup, err = acquireAuthoritativeWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
-			target:   &target,
-			wakeMode: wakeTargetInjectVia,
-		})
+	_, err := acquireAuthoritativeWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+		target:   &target,
+		wakeMode: wakeTargetInjectVia,
 	})
-	if err != nil || cleanup == nil {
-		t.Fatalf("acquisition cleanup=%v err=%v, want success", cleanup != nil, err)
-	}
-	if !strings.Contains(stderr, "continuing with legacy wake state") || !strings.Contains(stderr, injected.Error()) {
-		t.Fatalf("projection warning = %q", stderr)
+	if !errors.Is(err, injected) {
+		t.Fatalf("acquisition error = %v, want state failure", err)
 	}
 	inspection := inspectWakeLock(root, "codex")
-	if classifyPersistedWakeClaim(inspection) != wakeClaimAuthoritative {
-		t.Fatalf("legacy lock was not committed: %#v", inspection)
+	if inspection.Exists {
+		t.Fatalf("pre-link state failure committed a wake lock: %#v", inspection)
 	}
 	persisted, exists, readErr := readWakeTarget(root, "codex")
 	if readErr != nil || !exists || !sameWakeTarget(persisted, target) {
-		t.Fatalf("legacy target = %#v exists=%v err=%v", persisted, exists, readErr)
+		t.Fatalf("target shadow = %#v exists=%v err=%v", persisted, exists, readErr)
 	}
-	afterWakeStatePublicationBoundary = func(wakeStatePublicationBoundary) error { return nil }
-	if err := writeWakePreparedFile(root, "codex", inspection); err != nil {
-		t.Fatalf("next guarded mutation did not heal state: %v", err)
-	}
-	state := readWakeStateAtPathForTest(t, root, "codex")
-	if state.State.Prepared == nil || state.State.Prepared.Generation != inspection.Lock.Generation {
-		t.Fatalf("healed state prepared = %#v", state.State.Prepared)
+	if _, stateExists := readOptionalWakeStateAtPathForTest(t, root, "codex"); stateExists {
+		t.Fatal("state exists after pre-rename publication failure")
 	}
 }
 
-func TestAuthoritativeWakeAcquisitionStateCrashSeamsKeepCommittedLegacy(t *testing.T) {
+func TestAuthoritativeWakeAcquisitionStateCrashSeamsLeaveUnboundShadows(t *testing.T) {
 	for _, test := range []struct {
 		boundary  wakeStatePublicationBoundary
 		wantState bool
@@ -87,22 +81,19 @@ func TestAuthoritativeWakeAcquisitionStateCrashSeamsKeepCommittedLegacy(t *testi
 			injected := errors.New("owner state crash seam")
 			installWakeStatePublicationFailure(t, test.boundary, injected)
 
-			var cleanup func()
-			var err error
-			stderr := captureWakeStderr(t, func() {
-				cleanup, err = acquireAuthoritativeWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
-					target:   &target,
-					wakeMode: wakeTargetInjectVia,
-				})
+			_, err := acquireAuthoritativeWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+				target:   &target,
+				wakeMode: wakeTargetInjectVia,
 			})
-			if err != nil || cleanup == nil {
-				t.Fatalf("acquisition cleanup=%v err=%v, want success", cleanup != nil, err)
+			if !errors.Is(err, injected) {
+				t.Fatalf("acquisition error = %v, want state failure", err)
 			}
-			if !strings.Contains(stderr, "continuing with legacy wake state") || !strings.Contains(stderr, injected.Error()) {
-				t.Fatalf("projection warning = %q", stderr)
+			if inspection := inspectWakeLock(root, "codex"); inspection.Exists {
+				t.Fatalf("pre-link state failure committed a wake lock: %#v", inspection)
 			}
-			if inspection := inspectWakeLock(root, "codex"); classifyPersistedWakeClaim(inspection) != wakeClaimAuthoritative {
-				t.Fatalf("legacy lock was not committed: %#v", inspection)
+			persisted, exists, readErr := readWakeTarget(root, "codex")
+			if readErr != nil || !exists || !sameWakeTarget(persisted, target) {
+				t.Fatalf("target shadow = %#v exists=%v err=%v", persisted, exists, readErr)
 			}
 			_, stateExists := readOptionalWakeStateAtPathForTest(t, root, "codex")
 			if stateExists != test.wantState {
@@ -126,15 +117,8 @@ func TestWakePreparedPublicationRefreshesStateLegacyFirst(t *testing.T) {
 
 	injected := errors.New("state refresh failed after prepared commit")
 	installWakeStatePublicationFailure(t, wakeStateAfterTempWrite, injected)
-	var preparedErr error
-	stderr := captureWakeStderr(t, func() {
-		preparedErr = writeWakePreparedFile(root, "codex", inspection)
-	})
-	if preparedErr != nil {
-		t.Fatalf("prepared publication error = %v, want success", preparedErr)
-	}
-	if !strings.Contains(stderr, "continuing with legacy wake state") || !strings.Contains(stderr, injected.Error()) {
-		t.Fatalf("projection warning = %q", stderr)
+	if preparedErr := writeWakePreparedFile(root, "codex", inspection); !errors.Is(preparedErr, injected) {
+		t.Fatalf("prepared publication error = %v, want state refresh failure", preparedErr)
 	}
 	if _, exists, err := readWakeGenerationFile(wakePreparedPath(root, "codex"), "wake prepared marker"); err != nil || !exists {
 		t.Fatalf("legacy prepared marker exists=%v err=%v", exists, err)
@@ -180,15 +164,8 @@ func TestWakePreparedStateCrashSeamsLeaveLegacyPreparedAuthoritative(t *testing.
 			injected := errors.New("prepared state crash seam")
 			installWakeStatePublicationFailure(t, test.boundary, injected)
 
-			var preparedErr error
-			stderr := captureWakeStderr(t, func() {
-				preparedErr = writeWakePreparedFile(root, "codex", inspection)
-			})
-			if preparedErr != nil {
-				t.Fatalf("prepared publication error = %v, want success", preparedErr)
-			}
-			if !strings.Contains(stderr, "continuing with legacy wake state") || !strings.Contains(stderr, injected.Error()) {
-				t.Fatalf("projection warning = %q", stderr)
+			if preparedErr := writeWakePreparedFile(root, "codex", inspection); !errors.Is(preparedErr, injected) {
+				t.Fatalf("prepared publication error = %v, want state refresh failure", preparedErr)
 			}
 			if _, exists, err := readWakeGenerationFile(wakePreparedPath(root, "codex"), "wake prepared marker"); err != nil || !exists {
 				t.Fatalf("legacy prepared marker exists=%v err=%v", exists, err)
@@ -205,6 +182,11 @@ func TestWakePreparedStateCrashSeamsLeaveLegacyPreparedAuthoritative(t *testing.
 func TestGenericWakeTargetAndPreparedMutationsRefreshState(t *testing.T) {
 	fixture := newGenericWakePreparedCleanupFixture(t, true)
 	state := readWakeStateAtPathForTest(t, fixture.root, fixture.me)
+	if fixture.created.Lock.StateGeneration != fixture.created.Lock.Generation ||
+		fixture.created.Lock.StateDigest != fixture.created.Lock.TargetDigest ||
+		fixture.created.Lock.StateDigest != state.State.Target.TargetDigest {
+		t.Fatalf("generic bound lock = %#v, state target = %#v", fixture.created.Lock, state.State.Target)
+	}
 	if state.State.Prepared == nil || state.State.Prepared.Generation != fixture.created.Lock.Generation {
 		t.Fatalf("generic prepared state = %#v", state.State.Prepared)
 	}
@@ -264,7 +246,7 @@ func TestGenericWakeCleanupProjectionFailureKeepsLegacyCleanupCommitted(t *testi
 	}
 }
 
-func TestGenericWakeStateCrashSeamsKeepCommittedLegacy(t *testing.T) {
+func TestGenericWakeStateCrashSeamsLeaveUnboundShadows(t *testing.T) {
 	for _, test := range []struct {
 		boundary  wakeStatePublicationBoundary
 		wantState bool
@@ -283,23 +265,16 @@ func TestGenericWakeStateCrashSeamsKeepCommittedLegacy(t *testing.T) {
 			injected := errors.New("state projection failed after generic lock commit")
 			installWakeStatePublicationFailure(t, test.boundary, injected)
 
-			var cleanup func()
-			var err error
-			stderr := captureWakeStderr(t, func() {
-				cleanup, err = acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
-					target:   &target,
-					wakeMode: wakeTargetInjectVia,
-				})
+			_, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+				target:   &target,
+				wakeMode: wakeTargetInjectVia,
 			})
-			if err != nil || cleanup == nil {
-				t.Fatalf("generic acquisition cleanup=%v err=%v, want success", cleanup != nil, err)
-			}
-			if !strings.Contains(stderr, "continuing with legacy wake state") || !strings.Contains(stderr, injected.Error()) {
-				t.Fatalf("projection warning = %q", stderr)
+			if !errors.Is(err, injected) {
+				t.Fatalf("generic acquisition error = %v, want state failure", err)
 			}
 			inspection := inspectWakeLock(root, "codex")
-			if !inspection.Exists {
-				t.Fatal("projection failure did not preserve committed generic lock")
+			if inspection.Exists {
+				t.Fatalf("pre-link state failure committed a generic wake lock: %#v", inspection)
 			}
 			persisted, exists, readErr := readWakeTarget(root, "codex")
 			if readErr != nil || !exists || !sameWakeTarget(persisted, target) {
@@ -309,15 +284,88 @@ func TestGenericWakeStateCrashSeamsKeepCommittedLegacy(t *testing.T) {
 			if stateExists != test.wantState {
 				t.Fatalf("state exists=%v, want %v", stateExists, test.wantState)
 			}
-			afterWakeStatePublicationBoundary = func(wakeStatePublicationBoundary) error { return nil }
-			if err := writeWakePreparedFile(root, "codex", inspection); err != nil {
-				t.Fatalf("next guarded mutation did not heal state: %v", err)
-			}
-			state := readWakeStateAtPathForTest(t, root, "codex")
-			if state.State.Prepared == nil || state.State.Prepared.Generation != inspection.Lock.Generation {
-				t.Fatalf("healed generic state prepared = %#v", state.State.Prepared)
-			}
 		})
+	}
+}
+
+func TestGenericBoundLockSyncFailurePreservesCommittedClaim(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "generic-bound-sync-injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, nil)
+
+	originalSync := syncWakeLockAfterCommitDirFD
+	syncWakeLockAfterCommitDirFD = func(int) error {
+		return syscall.EIO
+	}
+	t.Cleanup(func() { syncWakeLockAfterCommitDirFD = originalSync })
+
+	_, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+		target:   &target,
+		wakeMode: wakeTargetInjectVia,
+	})
+	if !errors.Is(err, syscall.EIO) {
+		t.Fatalf("generic acquisition error = %v, want post-link sync failure", err)
+	}
+	inspection := inspectWakeLock(root, "codex")
+	if !inspection.Exists || inspection.Lock.StateGeneration != inspection.Lock.Generation ||
+		inspection.Lock.StateDigest != inspection.Lock.TargetDigest {
+		t.Fatalf("post-link generic claim = %#v", inspection)
+	}
+	persisted, exists, readErr := readWakeTarget(root, "codex")
+	if readErr != nil || !exists || !sameWakeTarget(persisted, target) {
+		t.Fatalf("post-link generic target = %#v exists=%v err=%v", persisted, exists, readErr)
+	}
+	state := readWakeStateAtPathForTest(t, root, "codex")
+	if state.State.Target.TargetDigest != inspection.Lock.StateDigest {
+		t.Fatalf("post-link generic state target = %#v, lock = %#v", state.State.Target, inspection.Lock)
+	}
+}
+
+func TestExistingGenericTargetLockIsNotUpgradedToStateBinding(t *testing.T) {
+	fixture := newGenericWakePreparedCleanupFixture(t, true)
+	legacy := fixture.created.Lock
+	legacy.StateGeneration = ""
+	legacy.StateDigest = ""
+	legacy.PID = 4242
+	legacy.ProcessStart = "legacy-start"
+	legacy.BootID = "legacy-boot"
+	legacy.Executable = "/opt/amq"
+	legacy.ImagePath = ""
+	legacy.ImageVersion = ""
+	legacy.Args = []string{"amq", "wake", "--root", fixture.root, "--me", fixture.me}
+	legacy.RunningImageEvidence = nil
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: legacy.ProcessStart,
+			BootID:     legacy.BootID,
+			Executable: legacy.Executable,
+			Args:       legacy.Args,
+		}
+	})
+	lockPath := writeWakeLockExactForTest(t, fixture.root, fixture.me, legacy)
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection := inspectWakeLock(fixture.root, fixture.me); inspection.Status != wakeLockValid {
+		t.Fatalf("rewritten legacy fixture is not a live lock: %#v", inspection)
+	}
+
+	if _, err := acquireWakeLockWithOptions(fixture.root, fixture.me, fixture.options); err == nil {
+		t.Fatal("existing target-bearing lock acquisition unexpectedly succeeded")
+	}
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("existing target-bearing lock was rewritten:\n got %s\nwant %s", after, before)
+	}
+	inspection := inspectWakeLock(fixture.root, fixture.me)
+	if inspection.Lock.StateGeneration != "" || inspection.Lock.StateDigest != "" {
+		t.Fatalf("existing target-bearing lock was upgraded: %#v", inspection.Lock)
 	}
 }
 
@@ -341,6 +389,10 @@ func TestGenericWakeWithoutTargetRemovesStaleState(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(cleanup)
+	inspection := inspectWakeLock(fixture.root, fixture.me)
+	if inspection.Lock.StateGeneration != "" || inspection.Lock.StateDigest != "" {
+		t.Fatalf("targetless generic lock must remain unbound: %#v", inspection.Lock)
+	}
 	assertPathMissingForTest(t, statePath)
 }
 
@@ -428,7 +480,7 @@ func TestRecoverOwnerStateRemovalFailureKeepsTargetlessRecoveryCommitted(t *test
 	}
 }
 
-func TestUnsupportedOwnerPublicationRemovesStateAfterExactTargetCleanup(t *testing.T) {
+func TestUnsupportedOwnerPublicationPreservesTargetAndStateShadows(t *testing.T) {
 	root, target, _ := newOwnerAcquisitionPublicationFixture(t)
 	if err := writeWakeTarget(root, "codex", target); err != nil {
 		t.Fatal(err)
@@ -455,11 +507,17 @@ func TestUnsupportedOwnerPublicationRemovesStateAfterExactTargetCleanup(t *testi
 	}); !errors.Is(err, syscall.EOPNOTSUPP) {
 		t.Fatalf("unsupported publication error=%v", err)
 	}
-	assertPathMissingForTest(t, wakeTargetPath(root, "codex"))
-	assertPathMissingForTest(t, filepath.Join(agentDir.path, wakeStateFileName))
+	persisted, exists, readErr := readWakeTarget(root, "codex")
+	if readErr != nil || !exists || !sameWakeTarget(persisted, target) {
+		t.Fatalf("target shadow = %#v exists=%v err=%v", persisted, exists, readErr)
+	}
+	state := readWakeStateAtPathForTest(t, root, "codex")
+	if !sameWakeTarget(state.State.Target.wakeTarget(), target) || state.State.Prepared != nil {
+		t.Fatalf("state shadow = %#v", state.State)
+	}
 }
 
-func TestUnsupportedOwnerPublicationStateRemovalFailureKeepsTargetCleanupCommitted(t *testing.T) {
+func TestOwnerPublicationStateReplacementBeforeLinkIsPreserved(t *testing.T) {
 	root, target, _ := newOwnerAcquisitionPublicationFixture(t)
 	if err := writeWakeTarget(root, "codex", target); err != nil {
 		t.Fatal(err)
@@ -481,8 +539,10 @@ func TestUnsupportedOwnerPublicationStateRemovalFailureKeepsTargetCleanupCommitt
 	}
 
 	originalLink := publishAuthoritativeWakeLinkAt
+	linked := false
 	publishAuthoritativeWakeLinkAt = func(int, string, int, string, int) error {
-		return syscall.EOPNOTSUPP
+		linked = true
+		return nil
 	}
 	t.Cleanup(func() { publishAuthoritativeWakeLinkAt = originalLink })
 	originalReadHook := afterWakeStateSnapshotRead
@@ -504,16 +564,22 @@ func TestUnsupportedOwnerPublicationStateRemovalFailureKeepsTargetCleanupCommitt
 			wakeMode: wakeTargetInjectVia,
 		})
 	})
-	if !errors.Is(acquireErr, syscall.EOPNOTSUPP) {
-		t.Fatalf("unsupported publication error=%v", acquireErr)
+	if acquireErr == nil || !strings.Contains(acquireErr.Error(), "wake state changed") {
+		t.Fatalf("state replacement publication error=%v", acquireErr)
 	}
-	if !strings.Contains(stderr, "continuing with legacy wake state") || !strings.Contains(stderr, "wake state changed") {
-		t.Fatalf("unsupported cleanup projection warning = %q", stderr)
+	if linked {
+		t.Fatal("state replacement reached the ownership link")
 	}
-	assertPathMissingForTest(t, wakeTargetPath(root, "codex"))
+	if strings.Contains(stderr, "continuing with legacy wake state") {
+		t.Fatalf("state replacement warning = %q", stderr)
+	}
+	persisted, exists, readErr := readWakeTarget(root, "codex")
+	if readErr != nil || !exists || !sameWakeTarget(persisted, target) {
+		t.Fatalf("target shadow = %#v exists=%v err=%v", persisted, exists, readErr)
+	}
 	got, readErr := os.ReadFile(statePath)
 	if readErr != nil || !bytes.Equal(got, state.Raw) {
-		t.Fatalf("preserved unsupported state bytes=%q err=%v", got, readErr)
+		t.Fatalf("preserved replacement state bytes=%q err=%v", got, readErr)
 	}
 }
 
@@ -572,10 +638,11 @@ func TestAuthoritativeWakeReleaseStateSnapshotFailureKeepsLegacyCleanupCommitted
 	}
 }
 
-func TestGuardedPreparedMutationPreservesNewerWakeStateSchemas(t *testing.T) {
+func TestUnboundP2aPreparedMutationPreservesNewerWakeStateSchemas(t *testing.T) {
 	for _, component := range []string{"document", "target", "prepared"} {
 		t.Run(component, func(t *testing.T) {
 			fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+			unbindAuthoritativeWakePreparedFixtureForP2a(t, fixture)
 			statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
 			stateRaw, stateInfo := installNewerWakeStateSchemaForTest(t, statePath, component)
 
@@ -596,8 +663,9 @@ func TestGuardedPreparedMutationPreservesNewerWakeStateSchemas(t *testing.T) {
 	}
 }
 
-func TestGuardedPreparedMutationPreservesNewerWakeStateInstalledBeforeRename(t *testing.T) {
+func TestUnboundP2aPreparedMutationPreservesNewerWakeStateInstalledBeforeRename(t *testing.T) {
 	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	unbindAuthoritativeWakePreparedFixtureForP2a(t, fixture)
 	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
 	currentRaw, err := os.ReadFile(statePath)
 	if err != nil {
@@ -637,6 +705,89 @@ func TestGuardedPreparedMutationPreservesNewerWakeStateInstalledBeforeRename(t *
 	}
 	assertSingleWakeStateProjectionWarning(t, stderr)
 	assertWakeStateSnapshotUnchangedForTest(t, statePath, newerRaw, installedInfo)
+}
+
+func TestBoundPreparedMutationRejectsNewerWakeStateSchemas(t *testing.T) {
+	for _, component := range []string{"document", "target", "prepared"} {
+		t.Run(component, func(t *testing.T) {
+			fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+			statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
+			stateRaw, stateInfo := installNewerWakeStateSchemaForTest(t, statePath, component)
+
+			writeErr := writeWakePreparedFile(fixture.root, fixture.me, fixture.inspection)
+			if writeErr == nil || !strings.Contains(writeErr.Error(), "refresh bound wake state") {
+				t.Fatalf("bound prepared mutation error = %v, want state-refresh refusal", writeErr)
+			}
+			assertWakeStateSnapshotUnchangedForTest(t, statePath, stateRaw, stateInfo)
+			marker, exists, err := readWakeGenerationFile(fixture.preparedPath, "wake prepared marker")
+			if err != nil || !exists || marker.Generation != fixture.inspection.Lock.Generation {
+				t.Fatalf("bound legacy prepared marker = %#v exists=%v err=%v", marker, exists, err)
+			}
+		})
+	}
+}
+
+func TestBoundPreparedMutationRejectsNewerWakeStateInstalledBeforeRename(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
+	currentRaw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newerRaw := newerWakeStateRawForTest(t, currentRaw, "document")
+	replacementPath := statePath + ".newer"
+	if err := os.WriteFile(replacementPath, newerRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalBoundary := afterWakeStatePublicationBoundary
+	replaced := false
+	var installedInfo os.FileInfo
+	afterWakeStatePublicationBoundary = func(boundary wakeStatePublicationBoundary) error {
+		if boundary == wakeStateAfterPreRenameDirSync && !replaced {
+			replaced = true
+			if err := os.Rename(replacementPath, statePath); err != nil {
+				return err
+			}
+			var err error
+			installedInfo, err = os.Stat(statePath)
+			return err
+		}
+		return nil
+	}
+	t.Cleanup(func() { afterWakeStatePublicationBoundary = originalBoundary })
+
+	writeErr := writeWakePreparedFile(fixture.root, fixture.me, fixture.inspection)
+	if writeErr == nil || !strings.Contains(writeErr.Error(), "refresh bound wake state") {
+		t.Fatalf("bound prepared mutation error = %v, want state-refresh refusal", writeErr)
+	}
+	if !replaced {
+		t.Fatal("newer state interleave did not run")
+	}
+	assertWakeStateSnapshotUnchangedForTest(t, statePath, newerRaw, installedInfo)
+}
+
+func unbindAuthoritativeWakePreparedFixtureForP2a(t *testing.T, fixture *authoritativeWakePreparedCleanupFixture) {
+	t.Helper()
+	lock := fixture.inspection.Lock
+	lock.StateGeneration = ""
+	lock.StateDigest = ""
+	raw, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(fixture.lockPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.lockPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(fixture.lockPath, wakeOwnerLockFileMode); err != nil {
+		t.Fatal(err)
+	}
+	fixture.inspection = inspectWakeLock(fixture.root, fixture.me)
+	if !fixture.inspection.Exists || fixture.inspection.Lock.StateGeneration != "" || fixture.inspection.Lock.StateDigest != "" {
+		t.Fatalf("unbound P2a fixture = %#v", fixture.inspection)
+	}
 }
 
 func TestAuthoritativeReleasePreservesNewerWakeStateSchemas(t *testing.T) {

@@ -298,6 +298,68 @@ func publishWakeStateAt(
 	return installed, nil
 }
 
+func publishWakeStateAndBindLockAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	lock *wakeLock,
+) error {
+	if lock == nil {
+		return fmt.Errorf("wake lock is missing")
+	}
+	expected, err := captureWakeStateLegacySnapshotAt(dirfd, agentDir, root, me)
+	if err != nil {
+		return err
+	}
+	installed, err := publishWakeStateAt(dirfd, agentDir, root, me, expected)
+	if err != nil {
+		return err
+	}
+	if installed.State.Target.TargetDigest != lock.TargetDigest {
+		return fmt.Errorf("published wake state target digest does not match wake lock target")
+	}
+	lock.StateGeneration = lock.Generation
+	lock.StateDigest = installed.State.Target.TargetDigest
+	if err := validateWakeLockStateBinding(*lock); err != nil {
+		return fmt.Errorf("bind wake lock to published state: %w", err)
+	}
+	return nil
+}
+
+func validateWakeBoundStateAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	lock wakeLock,
+) error {
+	if err := validateWakeLockStateBinding(lock); err != nil {
+		return err
+	}
+	if lock.StateGeneration == "" {
+		return fmt.Errorf("wake lock is not state-bound")
+	}
+	state, exists, err := readWakeStateSnapshotAt(dirfd, agentDir)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("bound wake state is missing")
+	}
+	legacy, err := captureWakeStateLegacySnapshotAt(dirfd, agentDir, root, me)
+	if err != nil {
+		return err
+	}
+	if err := validateWakeStateAgainstLegacy(state.State, legacy.legacy()); err != nil {
+		return err
+	}
+	if state.State.Target.TargetDigest != lock.TargetDigest || state.State.Target.TargetDigest != lock.StateDigest {
+		return fmt.Errorf("bound wake state target digest does not match wake lock")
+	}
+	return nil
+}
+
 func readWakeStateSnapshotAt(
 	dirfd int,
 	agentDir *wakeAgentDir,

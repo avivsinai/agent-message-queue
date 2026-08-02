@@ -358,6 +358,11 @@ func acquireWakeLockWithOptionsInDir(
 			if err != nil {
 				return err
 			}
+			if options.target != nil {
+				if err := publishWakeStateAndBindLockAt(dirfd, agentDir, root, me, &lock); err != nil {
+					return fmt.Errorf("publish wake state before generic wake lock: %w", err)
+				}
+			}
 			if options.repairLineage != nil {
 				err = createWakeRepairLockAt(
 					dirfd,
@@ -378,11 +383,8 @@ func acquireWakeLockWithOptionsInDir(
 				return fmt.Errorf("failed to verify created wake lock generation")
 			}
 			if options.target != nil {
-				if err := reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me); err != nil {
-					if continueAfterWakeStateProjectionError(err) {
-						return nil
-					}
-					return err
+				if err := validateWakeBoundStateAt(dirfd, agentDir, root, me, created.Lock); err != nil {
+					return fmt.Errorf("verify created generic wake binding: %w", err)
 				}
 			}
 			return nil

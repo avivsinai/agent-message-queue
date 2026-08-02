@@ -56,6 +56,9 @@ func writeWakePreparedFileInDir(
 			return err
 		}
 		if err := reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me); err != nil {
+			if current.Lock.StateGeneration != "" && current.Lock.StateDigest != "" {
+				return fmt.Errorf("wake prepared marker committed; refresh bound wake state: %w", err)
+			}
 			if continueAfterWakeStateProjectionError(err) {
 				return nil
 			}

@@ -18,6 +18,9 @@ import (
 )
 
 var afterWakeLockAtRead = func() {}
+var syncWakeLockAfterCommitDirFD = func(fd int) error {
+	return syncWakeOwnerDirFD(fd)
+}
 
 func readWakeLockFileAt(dirfd int, path string) ([]byte, os.FileInfo, error) {
 	open := func() (*os.File, error) {
@@ -94,6 +97,9 @@ func createWakeLockAt(
 	if lock.Agent != me {
 		return fmt.Errorf("wake lock agent mismatch")
 	}
+	if err := validateWakeLockStateBinding(lock); err != nil {
+		return err
+	}
 	data, err := json.Marshal(lock)
 	if err != nil {
 		return fmt.Errorf("marshal wake lock: %w", err)
@@ -150,7 +156,10 @@ func createWakeLockAt(
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("failed to close wake lock: %w", err)
 	}
-	if err := syncWakeOwnerDirFD(dirfd); err != nil {
+	// O_EXCL made this lock name the no-replace ownership commit. Preserve the
+	// exact claim if the following durability confirmation reports an error.
+	committed = true
+	if err := syncWakeLockAfterCommitDirFD(dirfd); err != nil {
 		return fmt.Errorf("sync wake lock directory after commit: %w", err)
 	}
 	created := readWakeLockMetadataAt(dirfd, agentDir, root, me)
@@ -159,7 +168,6 @@ func createWakeLockAt(
 		!bytes.Equal(created.raw, data) {
 		return fmt.Errorf("failed to verify created wake lock generation")
 	}
-	committed = true
 	return nil
 }
 

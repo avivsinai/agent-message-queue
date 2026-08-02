@@ -276,43 +276,10 @@ func acquireAuthoritativeWakeLockWithOptionsInDir(
 						if _, verifyErr := validateAuthoritativeWakeClaimPairAt(dirfd, agentDir, current); verifyErr != nil {
 							return fmt.Errorf("%w (visible owner claim is unverified: %v)", err, verifyErr)
 						}
+						if verifyErr := validateWakeBoundStateAt(dirfd, agentDir, root, me, current.Lock); verifyErr != nil {
+							return fmt.Errorf("%w (visible owner state binding is unverified: %v)", err, verifyErr)
+						}
 						return fmt.Errorf("%w (the exact owner claim is visible and was preserved)", err)
-					}
-					if !publicationErr.Unsupported || publicationErr.Committed {
-						return err
-					}
-					if publicationErr.InstalledTarget == nil {
-						return fmt.Errorf("%w (installed owner target identity is unavailable; preserving it)", err)
-					}
-					stateSnapshot, stateExists, stateErr := readWakeStateRawSnapshotAt(dirfd, agentDir)
-					if stateErr != nil {
-						continueAfterWakeStateProjectionError(newWakeStateProjectionError(stateErr))
-						stateExists = false
-					}
-					removed, removeErr := removeWakeTargetIfSnapshotMatchesAt(
-						dirfd,
-						agentDir,
-						root,
-						me,
-						*publicationErr.InstalledTarget,
-					)
-					if removeErr != nil {
-						return fmt.Errorf("%w (uncommitted owner target cleanup refused: %v)", err, removeErr)
-					}
-					if removed {
-						if syncErr := syncWakeOwnerDirFD(dirfd); syncErr != nil {
-							return fmt.Errorf("%w (sync uncommitted owner target cleanup: %v)", err, syncErr)
-						}
-						if _, stateRemoveErr := removeWakeStateIfTargetAbsentAt(
-							dirfd,
-							agentDir,
-							stateSnapshot,
-							stateExists,
-						); stateRemoveErr != nil {
-							if !continueAfterWakeStateProjectionError(stateRemoveErr) {
-								return fmt.Errorf("%w (uncommitted owner state cleanup refused: %v)", err, stateRemoveErr)
-							}
-						}
 					}
 					return err
 				}
@@ -324,6 +291,9 @@ func acquireAuthoritativeWakeLockWithOptionsInDir(
 			}
 			if _, err := validateAuthoritativeWakeClaimPairAt(dirfd, agentDir, created); err != nil {
 				return fmt.Errorf("verify created authoritative wake claim: %w", err)
+			}
+			if err := validateWakeBoundStateAt(dirfd, agentDir, root, me, created.Lock); err != nil {
+				return fmt.Errorf("verify created authoritative wake binding: %w", err)
 			}
 			return nil
 		})
