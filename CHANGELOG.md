@@ -21,11 +21,11 @@ editing the release PR.
 
 The new `.wake.state` document ships in three inert stages: storage primitives,
 legacy-first shadow writes, and validated dual-read that silently falls back to
-the legacy files whenever the document does not match. These stages do not
-activate self-resume, change the legacy lock ABI, or add migration machinery.
-Session routing now shares one explicit guard table through the
-`internal/sessionguard` package; the extraction preserves the existing routing
-outcomes and command-line contract.
+the legacy files whenever the document does not match the live legacy
+publication. These stages do not activate self-resume, change the legacy lock
+ABI, or add migration machinery. Session routing now shares one explicit guard
+table through the `internal/sessionguard` package; the extraction preserves the
+existing routing outcomes and command-line contract.
 
 ### Documentation
 
