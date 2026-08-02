@@ -41,6 +41,64 @@ type wakeStateFileSnapshot struct {
 	FileInfo os.FileInfo
 }
 
+func reconcileWakeStateAfterLegacyMutationAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+) (retErr error) {
+	// Precondition: the caller holds this agent directory's lifecycle guard and
+	// has already committed the authorized legacy mutation.
+	defer func() {
+		if retErr != nil {
+			retErr = newWakeStateProjectionError(retErr)
+		}
+	}()
+	_, exists, err := readWakeTargetSnapshotAt(dirfd, agentDir, root, me)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		state, stateExists, err := readWakeStateRawSnapshotAt(dirfd, agentDir)
+		if err != nil || !stateExists {
+			return err
+		}
+		_, err = removeWakeStateIfSnapshotMatchesAt(dirfd, agentDir, state)
+		return err
+	}
+	expected, err := captureWakeStateLegacySnapshotAt(dirfd, agentDir, root, me)
+	if err != nil {
+		return err
+	}
+	_, err = publishWakeStateAt(dirfd, agentDir, root, me, expected)
+	return err
+}
+
+func removeWakeStateIfTargetAbsentAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	expected wakeStateFileSnapshot,
+	expectedExists bool,
+) (removed bool, retErr error) {
+	// Precondition: the caller holds this agent directory's lifecycle guard and
+	// captured expected before removing the target.
+	defer func() {
+		if retErr != nil {
+			retErr = newWakeStateProjectionError(retErr)
+		}
+	}()
+	var targetInfo unix.Stat_t
+	err := unix.Fstatat(dirfd, wakeTargetFileName, &targetInfo, unix.AT_SYMLINK_NOFOLLOW)
+	targetExists := err == nil
+	if err != nil && err != unix.ENOENT {
+		return false, fmt.Errorf("verify wake target absence before state removal: %w", err)
+	}
+	if targetExists || !expectedExists {
+		return false, nil
+	}
+	return removeWakeStateIfSnapshotMatchesAt(dirfd, agentDir, expected)
+}
+
 func (snapshot wakeStateLegacySnapshot) legacy() wakeStateLegacy {
 	legacy := wakeStateLegacy{}
 	if snapshot.TargetPresent {
@@ -107,8 +165,9 @@ func publishWakeStateAt(
 	expected wakeStateLegacySnapshot,
 ) (wakeStateFileSnapshot, error) {
 	// Precondition: the caller holds this agent directory's lifecycle guard.
-	// The guard closes the check-to-rename windows against legitimate writers;
-	// the fd-bound checks below detect bypassers and preserve replacements.
+	// Every schema generation uses that guard, which excludes legitimate writers
+	// across the final destination validation-to-rename window. The fd-bound
+	// checks below detect bypassers outside that window and preserve replacements.
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 		return wakeStateFileSnapshot{}, err
 	}
@@ -243,6 +302,22 @@ func readWakeStateSnapshotAt(
 	dirfd int,
 	agentDir *wakeAgentDir,
 ) (wakeStateFileSnapshot, bool, error) {
+	snapshot, exists, err := readWakeStateRawSnapshotAt(dirfd, agentDir)
+	if err != nil || !exists {
+		return snapshot, exists, err
+	}
+	state, err := decodeWakeState(snapshot.Raw)
+	if err != nil {
+		return wakeStateFileSnapshot{}, true, err
+	}
+	snapshot.State = state
+	return snapshot, true, nil
+}
+
+func readWakeStateRawSnapshotAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+) (wakeStateFileSnapshot, bool, error) {
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 		return wakeStateFileSnapshot{}, false, err
 	}
@@ -300,12 +375,7 @@ func readWakeStateSnapshotAt(
 	if err := validateWakeStateFileInfo(path, pathInfo); err != nil {
 		return wakeStateFileSnapshot{}, true, err
 	}
-	state, err := decodeWakeState(raw)
-	if err != nil {
-		return wakeStateFileSnapshot{}, true, err
-	}
 	return wakeStateFileSnapshot{
-		State:    state,
 		Raw:      bytes.Clone(raw),
 		FileInfo: info,
 	}, true, nil
@@ -322,7 +392,13 @@ func removeWakeStateIfSnapshotMatchesAt(
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 		return false, err
 	}
-	current, exists, err := readWakeStateSnapshotAt(dirfd, agentDir)
+	if _, _, newer := newerWakeStateSchema(expected.Raw); newer {
+		// A newer reader will reject this now-stale projection by its legacy
+		// digest, so preserving it cannot authorize state while retaining data
+		// that only the newer reader or an operator can interpret.
+		return false, fmt.Errorf("wake state uses a newer schema; preserving it")
+	}
+	current, exists, err := readWakeStateRawSnapshotAt(dirfd, agentDir)
 	if err != nil {
 		return false, fmt.Errorf("re-read wake state before removal: %w", err)
 	}
@@ -371,26 +447,16 @@ func sameWakeStateLegacySnapshot(first, second wakeStateLegacySnapshot) bool {
 }
 
 func validateWakeStateDestinationAt(dirfd int, agentDir *wakeAgentDir) error {
-	path := filepath.Join(agentDir.path, wakeStateFileName)
-	fd, err := unix.Openat(
-		dirfd,
-		wakeStateFileName,
-		unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
-		0,
-	)
-	if err != nil {
-		if err == unix.ENOENT {
-			return nil
-		}
-		return fmt.Errorf("open wake state destination: %w", err)
+	current, exists, err := readWakeStateRawSnapshotAt(dirfd, agentDir)
+	if err != nil || !exists {
+		return err
 	}
-	file := os.NewFile(uintptr(fd), path)
-	defer func() { _ = file.Close() }()
-	info, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat wake state destination: %w", err)
+	if _, _, newer := newerWakeStateSchema(current.Raw); newer {
+		// The authorized legacy mutation has already committed. Preserve newer
+		// state; its legacy digest becomes stale and therefore non-authoritative.
+		return fmt.Errorf("wake state uses a newer schema; preserving it")
 	}
-	return validateWakeStateFileInfo(path, info)
+	return nil
 }
 
 func validateWakeStateFileInfo(path string, info os.FileInfo) error {

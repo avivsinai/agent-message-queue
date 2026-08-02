@@ -1430,7 +1430,7 @@ func TestRunWakeWithLoopAcceptExistingRemovesReadyAfterOwnerLoss(t *testing.T) {
 		ProcessStart: "67890",
 		BootID:       owner.BootID,
 		Executable:   "/opt/homebrew/bin/amq",
-		Generation:   "generation-1",
+		Generation:   "11111111111111111111111111111111",
 		OwnerSchema:  wakeOwnerLockSchema,
 		Owner:        &owner,
 	}, target)
@@ -5845,7 +5845,7 @@ func TestRunWakeWithLoopWaitsForCurrentPreparedMarkerPastStaleGeneration(t *test
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
-		Generation:   "generation-1",
+		Generation:   "11111111111111111111111111111111",
 	}, target))
 	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)
@@ -5984,7 +5984,7 @@ func TestRunWakeWithLoopRetriesCreatingWakeUntilPrepared(t *testing.T) {
 	}
 	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
 		PID: wakePID, TTY: "tty", ProcessStart: "start-1", BootID: "boot-1",
-		Executable: "/opt/homebrew/bin/amq", Generation: "generation-1",
+		Executable: "/opt/homebrew/bin/amq", Generation: "11111111111111111111111111111111",
 	}, target))
 	writeWakePreparedForTest(t, root, "orchestrator")
 	// The retry must observe the complete target/lock/prepared publication, not
@@ -6024,7 +6024,7 @@ func TestRunWakeWithLoopRetriesWakeLockChangedWhileOpening(t *testing.T) {
 			target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, nil)
 			lock := bindWakeLockToTarget(wakeLock{
 				PID: wakePID, TTY: "tty", ProcessStart: "start-1", BootID: "boot-1",
-				Executable: "/opt/homebrew/bin/amq", Generation: "generation-1",
+				Executable: "/opt/homebrew/bin/amq", Generation: "11111111111111111111111111111111",
 			}, target)
 			if err := writeWakeTarget(root, "orchestrator", target); err != nil {
 				t.Fatalf("writeWakeTarget: %v", err)
@@ -6509,7 +6509,7 @@ func TestRunWakeWithLoopAcceptExistingWakeAcceptsInjectViaUnknownTTY(t *testing.
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
-		Generation:   "generation-1",
+		Generation:   "11111111111111111111111111111111",
 	}, target))
 	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
 		t.Fatalf("writeWakeTarget: %v", err)

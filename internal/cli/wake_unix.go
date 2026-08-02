@@ -377,6 +377,14 @@ func acquireWakeLockWithOptionsInDir(
 			if !created.Exists || created.Lock.Generation != lock.Generation {
 				return fmt.Errorf("failed to verify created wake lock generation")
 			}
+			if options.target != nil {
+				if err := reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me); err != nil {
+					if continueAfterWakeStateProjectionError(err) {
+						return nil
+					}
+					return err
+				}
+			}
 			return nil
 		})
 		if err != nil {
@@ -466,6 +474,17 @@ func cleanupGenericWakeGenerationAt(
 			)
 		}
 	}
+	var stateRefreshErr error
+	if !replacement.Exists {
+		stateRefreshErr = reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me)
+		if stateRefreshErr != nil {
+			if continueAfterWakeStateProjectionError(stateRefreshErr) {
+				stateRefreshErr = nil
+			} else {
+				stateRefreshErr = fmt.Errorf("refresh wake state after generic cleanup: %w", stateRefreshErr)
+			}
+		}
+	}
 
 	floorCleanupErr := cleanupGenericWakeRepairFloorAt(
 		dirfd,
@@ -479,6 +498,7 @@ func cleanupGenericWakeGenerationAt(
 		interleaveErr,
 		replacementErr,
 		preparedCleanupErr,
+		stateRefreshErr,
 		floorCleanupErr,
 	)
 }

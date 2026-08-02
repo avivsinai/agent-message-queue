@@ -52,7 +52,16 @@ func writeWakePreparedFileInDir(
 		if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, marker); err != nil {
 			return err
 		}
-		return writeWakeGenerationFileAt(dirfd, wakePreparedFileName, "wake prepared marker", marker)
+		if err := writeWakeGenerationFileAt(dirfd, wakePreparedFileName, "wake prepared marker", marker); err != nil {
+			return err
+		}
+		if err := reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me); err != nil {
+			if continueAfterWakeStateProjectionError(err) {
+				return nil
+			}
+			return fmt.Errorf("wake prepared marker committed; refresh wake state: %w", err)
+		}
+		return nil
 	})
 }
 

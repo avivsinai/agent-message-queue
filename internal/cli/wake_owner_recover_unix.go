@@ -119,6 +119,11 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 				if err != nil {
 					return refuse("orphan wake target is unverified: "+err.Error(), "inspect the target and retry")
 				}
+				stateSnapshot, stateExists, stateErr := readWakeStateRawSnapshotAt(dirfd, agentDir)
+				if stateErr != nil {
+					continueAfterWakeStateProjectionError(newWakeStateProjectionError(stateErr))
+					stateExists = false
+				}
 				if exists {
 					digest, err := wakeTargetDigest(target)
 					if err != nil {
@@ -140,6 +145,16 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 					}
 					if err := syncWakeOwnerDirFD(dirfd); err != nil {
 						return fmt.Errorf("sync orphan wake target removal: %w", err)
+					}
+				}
+				if _, err := removeWakeStateIfTargetAbsentAt(
+					dirfd,
+					agentDir,
+					stateSnapshot,
+					stateExists,
+				); err != nil {
+					if !continueAfterWakeStateProjectionError(err) {
+						return fmt.Errorf("remove orphan wake state: %w", err)
 					}
 				}
 				result.Status = "recovered"

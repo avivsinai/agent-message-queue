@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -67,6 +68,40 @@ type wakeStateLegacy struct {
 
 type wakeStateLegacyMismatchError struct {
 	reason string
+}
+
+type wakeStateProjectionError struct {
+	Err error
+}
+
+func newWakeStateProjectionError(err error) *wakeStateProjectionError {
+	return &wakeStateProjectionError{Err: err}
+}
+
+func (err *wakeStateProjectionError) Error() string {
+	if err == nil || err.Err == nil {
+		return "wake state projection failed"
+	}
+	return "wake state projection failed: " + err.Err.Error()
+}
+
+func (err *wakeStateProjectionError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Err
+}
+
+func continueAfterWakeStateProjectionError(err error) bool {
+	var projection *wakeStateProjectionError
+	if !errors.As(err, &projection) {
+		return false
+	}
+	_ = writeStderr(
+		"warning: %v; continuing with legacy wake state\n",
+		projection,
+	)
+	return true
 }
 
 func (err *wakeStateLegacyMismatchError) Error() string {
@@ -147,6 +182,12 @@ func decodeWakeState(data []byte) (wakeState, error) {
 	if len(data) == 0 || len(data) > maxWakeMetadataFileBytes {
 		return wakeState{}, fmt.Errorf("wake state size is invalid")
 	}
+	if component, schema, ok := newerWakeStateSchema(data); ok {
+		if component == "" {
+			return wakeState{}, fmt.Errorf("wake state schema %d unsupported", schema)
+		}
+		return wakeState{}, fmt.Errorf("wake state %s schema %d unsupported", component, schema)
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var state wakeState
@@ -171,6 +212,48 @@ func decodeWakeState(data []byte) (wakeState, error) {
 		return wakeState{}, fmt.Errorf("wake state is not canonical")
 	}
 	return state, nil
+}
+
+func newerWakeStateSchema(data []byte) (component string, schema int, ok bool) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return "", 0, false
+	}
+	documentSchema, valid := wakeStateSchemaNumber(document["schema"])
+	if valid && documentSchema > wakeStateSchema {
+		return "", documentSchema, true
+	}
+	if !valid || documentSchema != wakeStateSchema {
+		return "", 0, false
+	}
+	for _, section := range []struct {
+		name    string
+		current int
+	}{
+		{name: "target", current: wakeStateSectionSchema},
+		{name: "prepared", current: wakeStatePreparedSchema},
+	} {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(document[section.name], &fields); err == nil {
+			if schema, ok := wakeStateSchemaAbove(fields["schema"], section.current); ok {
+				return section.name, schema, true
+			}
+		}
+	}
+	return "", 0, false
+}
+
+func wakeStateSchemaAbove(raw json.RawMessage, current int) (int, bool) {
+	schema, ok := wakeStateSchemaNumber(raw)
+	if !ok || schema <= current {
+		return 0, false
+	}
+	return schema, true
+}
+
+func wakeStateSchemaNumber(raw json.RawMessage) (int, bool) {
+	var schema int
+	return schema, json.Unmarshal(raw, &schema) == nil
 }
 
 func validateWakeState(state wakeState) error {
