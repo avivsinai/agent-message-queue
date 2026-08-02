@@ -364,7 +364,13 @@ claim from the same OS session, using the inherited `AMQ_WAKE_OWNER` token.
 When the exact owner is dead, recovery does not require that token. AMQ stops
 only an identity-confirmed wake, re-checks the claim after every wait, and
 fails closed without mutation when the owner or claim is unknown, legacy, or
-corrupt. There is no force mode. The ownerless `repair`, `retire`, and
+corrupt. A bound state/document mismatch is also a refusal before stop or
+unlink; AMQ preserves that claim and its artifacts. A target/state shadow with
+no lock is preserved for operator handling rather than cleaned by pathname.
+Rollback means returning to an older compatible binary or reader, not
+destructively rewriting a P2b lock; existing unbound claims remain P2a, and an
+older binary may release its own exact claim. There is no force mode. The
+ownerless `repair`, `retire`, and
 `doctor --ops --fix-wake-locks` paths refuse owner-bound claims.
 
 `amq wake retire` is the exact managed-shutdown path. It requires the caller's

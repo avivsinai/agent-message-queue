@@ -1,9 +1,12 @@
 # Wake lifecycle state document
 
-Status: W3 P2a contract and implementation. W3.2 through W3.4 implement the
-legacy-authoritative `.wake.state` projection described here; they do not
-activate bound P2b mode or migration. The existing legacy files remain
-authoritative through P2a.
+Status: W3 P2a implemented; W3.5/P2b binding contract under review.
+W3.2 through W3.4 implement the legacy-authoritative `.wake.state`
+projection described here. This document additionally defines the W3.5/P2b
+binding contract implemented by the candidate under review; that is not a
+claim that the candidate is merged, released, or deployed, and it does not
+add migration. Legacy authority continues through P2a for existing unbound
+claims, which are never rewritten.
 
 The normative words MUST, MUST NOT, SHOULD, and MAY describe the contract that
 the W3 implementation and its tests must preserve.
@@ -145,6 +148,10 @@ or repair anything. P2a readers fall back to the self-consistent legacy pair
 as specified in section 6. P2b readers classify a lock/document binding
 failure as inconclusive and retry-only.
 
+Every present known `.wake.lock` field, including optional fields, MUST use
+its declared JSON type; `null` is not an encoding for omission. Unknown lock
+fields remain tolerated for forward compatibility.
+
 ## 3. Lifetime and authority table
 
 The sections have independent lifetime bindings. The document is a projection;
@@ -273,7 +280,7 @@ document adds observations but does not weaken any existing required result.
 | Ready-file replacement during cleanup | Caller ready files remain external while the retained state projection is unchanged. | Cleanup compares the original ready publication's identity, bytes, and semantics, then preserves a replacement. | Do not remove or report a replacement as the original receipt. |
 | Guard release before waits | The guard covers bounded validation/publication only; waits happen after it is released. | Another participant can acquire the guard while a child, pidfd, or control wait is in progress; completion may reacquire it. | Do not hold the guard across a wait or encode a wait in `.wake.state`. |
 | Endpoint generation mismatch | Control/reload endpoints remain ephemeral and may be addressed with a wrong generation or replaced socket. | The request/refusal is tied to the expected generation/socket identity. A mismatch is refused without changing durable state. | Do not mutate state, lock, target, or floor from an unauthenticated endpoint/path. |
-| Crash at every publication point | Stop after temp creation, file sync, pre-rename directory sync, rename, post-rename sync, state verification, lock link, lock-temp removal, or final directory sync. Include the P2b target-state-before-lock geometry and the later prepared-legacy-before-state refresh gap. | Pre-lock states never claim ownership. Post-link lock states are committed even when later cleanup/sync reports an error. In P2a, state/doc mismatch falls back to live legacy. For a bound P2b claim, a torn/mismatched state document is typed inconclusive/retry-only until an authorized mutating path refreshes it; ambiguous installed artifacts are preserved. | Never let a document, temp name, stale marker, or pathname-only cleanup remove another generation or authorize a mutation. |
+| Crash at every publication point | Stop after temp creation, file sync, pre-rename directory sync, rename, post-rename sync, state verification, lock link, lock-temp removal, or final directory sync. Include the P2b target-state-before-lock geometry and the later prepared-legacy-before-state refresh gap. | Pre-lock states never claim ownership. Post-link lock states are committed even when later cleanup/sync reports an error. In P2a, state/doc mismatch falls back to live legacy. For a bound P2b claim, a torn/mismatched state document is typed inconclusive/retry-only until an authorized mutating path refreshes it; ambiguous installed artifacts are preserved. A subsequent authorized acquisition may replace a no-lock shadow through the ordinary publication protocol; preservation protects shadows from cleanup, not from supersession. Before replacement, debug mode records the prior target and state digests. | Never let a document, temp name, stale marker, or pathname-only cleanup remove another generation or authorize a mutation. |
 
 The tests MUST exercise the state-specific versions of these cases, including
 crash hooks after every legacy and state boundary. The existing typed
@@ -419,6 +426,16 @@ document on that authorized mutating path, but a read-only inspection never
 performs migration. Existing live locks are never rewritten: a pre-P2b lock
 remains unbound and usable through P2a fallback until its wake restarts and
 republishes with the new fields.
+
+Recovery and rollback of a bound claim MUST validate the current binding under
+the lifecycle guard before stopping a wake or unlinking its lock. An
+inconclusive binding refuses and preserves the lock, target, prepared marker,
+and state document; it never falls back to a destructive legacy cleanup. A
+target/state shadow with no lock is likewise preserved because it can be the
+durable pre-link side of a failed P2b publication. Here rollback means using an
+older binary or reader that remains compatible with the retained legacy
+artifacts; it does not rewrite a lock to remove P2b fields. Existing unbound
+claims remain P2a, and an older binary may still release its own exact claim.
 
 The lock's exact-key ABI golden test MUST be updated in the same PR as the new
 fields, migration, state binding, and acceptance tests. P2b is held until

@@ -308,6 +308,9 @@ func authorizeDarwinOwnerControlAt(
 		request.Generation != expected.Generation {
 		return wakeLockInspection{}, nil, fmt.Errorf("authoritative wake generation changed")
 	}
+	if err := validateBoundWakeMutationAt(dirfd, agentDir, current); err != nil {
+		return wakeLockInspection{}, nil, err
+	}
 	if classifyPersistedWakeClaim(current) != wakeClaimAuthoritative {
 		return wakeLockInspection{}, nil, fmt.Errorf("wake control target is not an authoritative owner claim")
 	}

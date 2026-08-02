@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"golang.org/x/sys/unix"
 )
 
 type wakeOwnerRecoverResult struct {
@@ -115,37 +114,20 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 			result.PID = inspection.PID
 			switch classifyPersistedWakeClaim(inspection) {
 			case wakeClaimAbsent:
-				target, exists, err := readWakeTargetAt(dirfd, agentDir, root, me)
+				_, exists, err := readWakeTargetAt(dirfd, agentDir, root, me)
 				if err != nil {
 					return refuse("orphan wake target is unverified: "+err.Error(), "inspect the target and retry")
+				}
+				if exists {
+					return refuse(
+						"orphan wake target is preserved because it may be an uncommitted bound-claim shadow",
+						"inspect the target and state evidence before explicit operator handling",
+					)
 				}
 				stateSnapshot, stateExists, stateErr := readWakeStateRawSnapshotAt(dirfd, agentDir)
 				if stateErr != nil {
 					continueAfterWakeStateProjectionError(newWakeStateProjectionError(stateErr))
 					stateExists = false
-				}
-				if exists {
-					digest, err := wakeTargetDigest(target)
-					if err != nil {
-						return refuse("orphan wake target digest is unavailable: "+err.Error(), "inspect the target and retry")
-					}
-					current, currentExists, err := readWakeTargetAt(dirfd, agentDir, root, me)
-					if err != nil {
-						return refuse("orphan wake target changed while recovering: "+err.Error(), "retry")
-					}
-					currentDigest, digestErr := wakeTargetDigest(current)
-					if digestErr != nil {
-						return refuse("orphan wake target digest changed while recovering: "+digestErr.Error(), "retry")
-					}
-					if !currentExists || currentDigest != digest {
-						return refuse("orphan wake target changed while recovering", "retry")
-					}
-					if err := unix.Unlinkat(dirfd, wakeTargetFileName, 0); err != nil && err != unix.ENOENT {
-						return fmt.Errorf("remove orphan wake target: %w", err)
-					}
-					if err := syncWakeOwnerDirFD(dirfd); err != nil {
-						return fmt.Errorf("sync orphan wake target removal: %w", err)
-					}
 				}
 				if _, err := removeWakeStateIfTargetAbsentAt(
 					dirfd,

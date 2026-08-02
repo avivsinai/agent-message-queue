@@ -318,13 +318,79 @@ func TestInspectWakeLockRejectsMalformedStateBindingFields(t *testing.T) {
 				if err := os.Chmod(path, mode); err != nil {
 					t.Fatal(err)
 				}
-
 				inspection := inspectWakeLock(root, "codex")
 				if inspection.Status != wakeLockUnverified {
 					t.Fatalf("inspection status = %q reason %q, want unverified", inspection.Status, inspection.Reason)
 				}
 			})
 		}
+	}
+}
+
+func TestInspectWakeLockRejectsMalformedWholeJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "empty", raw: []byte{}},
+		{name: "whitespace", raw: []byte(" \n\t")},
+		{name: "empty object", raw: []byte(`{}`)},
+		{name: "null required fields", raw: []byte(`{"pid":null,"tty":null,"root":null,"started":null}`)},
+		{name: "pid wrong type", raw: []byte(`{"pid":"4242","tty":"tty","root":"/tmp","started":"now"}`)},
+		{name: "tty wrong type", raw: []byte(`{"pid":4242,"tty":42,"root":"/tmp","started":"now"}`)},
+		{name: "root wrong type", raw: []byte(`{"pid":4242,"tty":"tty","root":42,"started":"now"}`)},
+		{name: "started wrong type", raw: []byte(`{"pid":4242,"tty":"tty","root":"/tmp","started":42}`)},
+		{name: "truncated object", raw: []byte(`{"pid":`)},
+		{name: "null", raw: []byte(`null`)},
+		{name: "array", raw: []byte(`[]`)},
+	}
+
+	for _, mode := range []os.FileMode{0o600, wakeOwnerLockFileMode} {
+		for _, tc := range tests {
+			t.Run(tc.name+"-"+mode.String(), func(t *testing.T) {
+				root := secureTempDirForTest(t)
+				path := writeWakeLockForTest(t, root, "codex", wakeLock{PID: 4242})
+				if err := os.WriteFile(path, tc.raw, mode); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, mode); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(path, time.Now().Add(-3*time.Second), time.Now().Add(-3*time.Second)); err != nil {
+					t.Fatal(err)
+				}
+
+				inspection := inspectWakeLock(root, "codex")
+				if inspection.Status != wakeLockUnverified {
+					t.Fatalf("inspection status = %q reason %q, want unverified", inspection.Status, inspection.Reason)
+				}
+				if claim := classifyWakeClaimForGenericTransition(inspection); claim != wakeClaimInvalid {
+					t.Fatalf("claim = %v, want invalid", claim)
+				}
+				if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestMutate); err == nil {
+					t.Fatal("generic mutation accepted malformed whole lock JSON")
+				}
+			})
+		}
+	}
+}
+
+func TestValidUnboundP2aWakeLockRemainsGeneric(t *testing.T) {
+	root := secureTempDirForTest(t)
+	path := writeWakeLockForTest(t, root, "codex", wakeLock{PID: 4242})
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWakeLockStateBindingJSON(raw); err != nil {
+		t.Fatalf("unbound P2a wake lock rejected: %v", err)
+	}
+	inspection := inspectWakeLock(root, "codex")
+	if claim := classifyWakeClaimForGenericTransition(inspection); claim != wakeClaimGeneric {
+		t.Fatalf("claim = %v, want generic", claim)
+	}
+	if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestMutate); err != nil {
+		t.Fatalf("generic P2a mutation rejected: %v", err)
 	}
 }
 

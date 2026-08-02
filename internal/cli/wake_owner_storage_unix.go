@@ -24,6 +24,7 @@ var errWakeOwnerLockExists = errors.New("wake lock already exists")
 var publishAuthoritativeWakeLinkAt = unix.Linkat
 var publishAuthoritativeWakeAfterTargetRename = func() {}
 var removeAuthoritativeWakeAfterLockRelease = func() {}
+var removeAuthoritativeWakeBeforeFinalAuthorityCheck = func() {}
 var afterWakeTargetSnapshotDataRead = func() {}
 var removeAuthoritativeWakeLockTempAfterCommitAt = unix.Unlinkat
 var syncAuthoritativeWakeLockAfterCommitDirFD = func(fd int) error {
@@ -46,6 +47,18 @@ func publishAuthoritativeWakeClaimAt(
 	target wakeTarget,
 	lock wakeLock,
 ) error {
+	return publishAuthoritativeWakeClaimWithDebugAt(dirfd, agentDir, root, me, target, lock, false)
+}
+
+func publishAuthoritativeWakeClaimWithDebugAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	target wakeTarget,
+	lock wakeLock,
+	debug bool,
+) error {
 	if err := validateAuthoritativeWakeTarget(target, root, me); err != nil {
 		return err
 	}
@@ -61,6 +74,7 @@ func publishAuthoritativeWakeClaimAt(
 	if err != unix.ENOENT {
 		return fmt.Errorf("check existing wake lock: %w", err)
 	}
+	debugWakeNoLockShadowReplacementAt(dirfd, agentDir, root, me, "authoritative", debug)
 
 	targetData, err := json.MarshalIndent(target, "", "  ")
 	if err != nil {
@@ -452,6 +466,9 @@ func removeAuthoritativeWakeClaimAt(
 	if !sameWakeLockGeneration(expected, current) {
 		return fmt.Errorf("authoritative wake claim changed before release")
 	}
+	if err := validateBoundWakeMutationAt(dirfd, agentDir, current); err != nil {
+		return err
+	}
 	if classifyPersistedWakeClaim(current) != wakeClaimAuthoritative {
 		return fmt.Errorf("authoritative wake lock became invalid before release")
 	}
@@ -514,6 +531,10 @@ func removeAuthoritativeWakeClaimAt(
 		releaseStateExists = false
 	}
 
+	// Pathname unlink is safe under the lifecycle guard held by every
+	// cooperating writer; an unguarded same-UID writer is out of contract. A
+	// rename-and-verify alternative would expose lock absence to pre-P2b readers
+	// during a two-step removal, creating a real competing-authority hazard.
 	if err := unix.Unlinkat(dirfd, ".wake.lock", 0); err != nil {
 		if err == unix.ENOENT {
 			return preparedSnapshotErr
@@ -530,6 +551,15 @@ func removeAuthoritativeWakeClaimAt(
 		)
 	}
 	removeAuthoritativeWakeAfterLockRelease()
+	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+		if retainedWakeAgentDirIsDetached(agentDir) {
+			return errors.Join(
+				preparedSnapshotErr,
+				newWakeDetachedCleanupOnlyError(err),
+			)
+		}
+		return errors.Join(preparedSnapshotErr, err)
+	}
 
 	// A replacement is never selected or cleaned. Cooperative writers cannot
 	// install one while this guard is held; this check also catches bypassers.
@@ -608,6 +638,13 @@ func removeAuthoritativeWakeClaimAt(
 				fmt.Errorf("sync authoritative wake claim cleanup: %w", err),
 			)
 		}
+	}
+	removeAuthoritativeWakeBeforeFinalAuthorityCheck()
+	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+		if retainedWakeAgentDirIsDetached(agentDir) {
+			return errors.Join(cleanupErr, newWakeDetachedCleanupOnlyError(err))
+		}
+		return errors.Join(cleanupErr, err)
 	}
 	return cleanupErr
 }

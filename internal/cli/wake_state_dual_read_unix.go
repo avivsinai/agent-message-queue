@@ -240,7 +240,7 @@ func wakeLockInspectionStateBound(inspection wakeLockInspection) (bool, error) {
 	if !inspection.Exists {
 		return false, nil
 	}
-	if err := validateWakeLockStateBindingJSON(inspection.raw); err != nil {
+	if err := validateWakeLockInspectionStateBindingJSON(inspection); err != nil {
 		return false, err
 	}
 	if err := validateWakeLockStateBinding(inspection.Lock); err != nil {
@@ -297,16 +297,6 @@ func readWakeStateLegacyPairAt(
 
 func readWakeTargetFromState(root, me string) (wakeTarget, bool, error) {
 	selection, err := readWakeStateSelection(root, me)
-	return selection.Target, selection.TargetPresent, err
-}
-
-func readWakeTargetFromStateAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
-	root string,
-	me string,
-) (wakeTarget, bool, error) {
-	selection, err := readWakeStateSelectionAt(dirfd, agentDir, root, me)
 	return selection.Target, selection.TargetPresent, err
 }
 

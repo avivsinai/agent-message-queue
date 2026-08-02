@@ -17,6 +17,9 @@ func classifyPersistedWakeClaim(inspection wakeLockInspection) wakeClaimClass {
 	if inspection.fileInfo == nil {
 		return wakeClaimInvalid
 	}
+	if err := validateWakeLockInspectionStateBindingJSON(inspection); err != nil {
+		return wakeClaimInvalid
+	}
 	switch inspection.fileInfo.Mode().Perm() {
 	case wakeOwnerLockFileMode:
 		if validateAuthoritativeWakeLockEnvelope(
@@ -44,6 +47,9 @@ func validateAuthoritativeWakeClaimPairAt(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 ) (wakeTarget, error) {
+	if err := validateBoundWakeMutationAt(dirfd, agentDir, inspection); err != nil {
+		return wakeTarget{}, err
+	}
 	if classifyPersistedWakeClaim(inspection) != wakeClaimAuthoritative {
 		return wakeTarget{}, fmt.Errorf("wake lock is not an authoritative owner claim")
 	}
@@ -61,6 +67,9 @@ func authoritativeWakeRecoveryTargetAt(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 ) (*wakeTarget, error) {
+	if err := validateBoundWakeMutationAt(dirfd, agentDir, inspection); err != nil {
+		return nil, err
+	}
 	target, exists, err := readWakeTargetRawAt(
 		dirfd,
 		agentDir,
@@ -142,6 +151,9 @@ func acquireAuthoritativeWakeLockWithOptionsInDir(
 		var stopCapability *authoritativeWakeStopCapability
 		retry := false
 		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+			if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+				return fmt.Errorf("validate canonical wake agent directory before owner acquisition: %w", err)
+			}
 			inspection := inspectWakeLockForOwnerTransition(dirfd, agentDir, root, me)
 			claimClass := classifyPersistedWakeClaim(inspection)
 			switch claimClass {
@@ -261,7 +273,9 @@ func acquireAuthoritativeWakeLockWithOptionsInDir(
 			if err != nil {
 				return err
 			}
-			if err := publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, me, requested, lock); err != nil {
+			if err := publishAuthoritativeWakeClaimWithDebugAt(
+				dirfd, agentDir, root, me, requested, lock, options.debug,
+			); err != nil {
 				if errors.Is(err, errWakeOwnerLockExists) {
 					retry = true
 					return nil

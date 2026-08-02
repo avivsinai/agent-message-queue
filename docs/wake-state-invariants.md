@@ -134,19 +134,21 @@ Source anchors: `wake_control_darwin.go`, `wake_reload_transport_linux.go`,
 
 ## Authoritative claim publication order
 
-An authoritative inject-via claim has two durable publication steps:
+An authoritative inject-via claim has three durable publication steps:
 
 1. Write, validate, atomically rename, re-read, and directory-sync
    `.wake.target`.
-2. Write the lock temporary file, publish `.wake.lock` without replacing an
+2. Publish and re-read the canonical target-section `.wake.state` projection.
+   This is a durable shadow only; it does not claim ownership.
+3. Write the lock temporary file, publish `.wake.lock` without replacing an
    existing claim, remove the temporary name, and directory-sync the lock
    commit.
 
-The target can therefore be installed when no lock has committed. Failures
-after target installation report the installed target snapshot, and cleanup
-does not assume that an uncommitted lock makes the target safe to delete. Once
-the lock link succeeds, errors removing the temporary name or syncing the
-directory are reported as committed-lock errors.
+The target and state shadow can therefore be installed when no lock has
+committed. Failures before the lock link preserve both artifacts; recovery does
+not assume that an uncommitted lock makes either safe to delete. Once the lock
+link succeeds, errors removing the temporary name or syncing the directory are
+reported as committed-lock errors.
 
 This order gives target intent and wake ownership separate observable commit
 points. Recovery must classify the point reached rather than infer a single
@@ -156,10 +158,10 @@ all-or-nothing state across both files.
 
 | Case | Injected interleaving | Required observation |
 | --- | --- | --- |
-| Target commits before lock | Fail after target rename or target directory sync and before the lock link. | No authoritative lock exists. The installed target is reported and preserved unless exact snapshot-based cleanup is separately authorized. A later reader does not infer ownership from the target alone. |
+| Target/state commit before lock | Fail after target publication, state publication, or either directory sync and before the lock link. | No authoritative lock exists. The installed target and state shadow are reported and preserved for explicit operator handling. A later reader does not infer ownership from either artifact. |
 | Lock replacement during a reader | Replace `.wake.lock` between the reader's pathname snapshot, opened-file read, and final comparison while reading lock-, target-, prepared-, or ready-bound state. | The operation reports changed or inconclusive state and performs no mutation based on the old snapshot. The replacement remains present. |
 | Prepared marker generation | Exercise absent, stale-generation, current-generation/current-digest, and current-generation/wrong-digest markers. | Absence and stale generation remain not prepared; the exact current marker is accepted; an incompatible current marker is refused rather than treated as readiness. |
 | Ready file replacement during cleanup | Publish a caller ready file, replace its pathname, then run failure cleanup for the original publication. | Cleanup removes only the original unchanged snapshot. The replacement is preserved and is not reported as the original receipt. |
 | Guard release before waits | Pause immediately before a child, pidfd, or control wait and attempt lifecycle-guard acquisition from another participant. | The second participant can acquire the guard. Completion paths may reacquire it for final publication or cleanup; the wait itself never owns it. |
 | Endpoint generation mismatch | Address or request a Darwin control endpoint with the wrong generation, or replace a Linux reload socket before authorization or retirement. | The request is refused without lifecycle mutation. Cleanup removes only the endpoint authorized by the released generation or exact socket identity and preserves a successor. |
-| Crash at every authoritative publication point | Stop after temporary-file creation, target rename, target sync, lock link, lock-temp removal, and final directory sync. | Pre-lock states never claim ownership; post-link states are classified as committed even if later cleanup or sync reports an error. Recovery preserves ambiguous installed artifacts and never removes a different generation by pathname alone. |
+| Crash at every authoritative publication point | Stop after target temporary-file creation, target rename/sync, state temporary-file creation, state rename/sync/re-read, lock link, lock-temp removal, and final directory sync. | Pre-lock target/state shadows never claim ownership and are preserved; post-link states are classified as committed even if later cleanup or sync reports an error. Recovery preserves ambiguous installed artifacts and never removes a different generation by pathname alone. |

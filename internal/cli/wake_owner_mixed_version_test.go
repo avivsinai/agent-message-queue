@@ -20,6 +20,7 @@ import (
 
 const ownerFenceLegacyCommit = "e37067a91b4447c3ed99bf647b71e7ec9dbf3824"
 const wakeStateLegacyWriterCommit = "fbc574a8d2b26b2526dfae5d9c5c87408007ac39"
+const wakeStateP2aRollbackCommit = "acd9e35511f0d5f13c9ed68349929bfcf488cecf"
 
 func TestOwnerFencePreservesClaimAgainstExactE370Binary(t *testing.T) {
 	repoRootCommand := exec.Command("git", "rev-parse", "--show-toplevel")
@@ -98,10 +99,6 @@ func TestOwnerFencePreservesClaimAgainstExactE370Binary(t *testing.T) {
 	}
 
 	lockPath := filepath.Join(fsq.AgentBase(root, "codex"), ".wake.lock")
-	beforeBytes, err := os.ReadFile(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 	beforeInfo, err := os.Lstat(lockPath)
 	if err != nil {
 		t.Fatal(err)
@@ -109,15 +106,7 @@ func TestOwnerFencePreservesClaimAgainstExactE370Binary(t *testing.T) {
 	if beforeInfo.Mode().Perm() != wakeOwnerLockFileMode {
 		t.Fatalf("owner fence mode = %o, want %o", beforeInfo.Mode().Perm(), wakeOwnerLockFileMode)
 	}
-	statePath := filepath.Join(fsq.AgentBase(root, "codex"), wakeStateFileName)
-	beforeStateBytes, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	beforeStateInfo, err := os.Lstat(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	beforeTree := snapshotWakeCheckTree(t, root)
 
 	commands := []struct {
 		name string
@@ -158,28 +147,7 @@ func TestOwnerFencePreservesClaimAgainstExactE370Binary(t *testing.T) {
 			if !strings.Contains(strings.ToLower(string(output)), test.want) {
 				t.Fatalf("legacy command %v output missing %q:\n%s", test.args, test.want, output)
 			}
-			afterBytes, err := os.ReadFile(lockPath)
-			if err != nil {
-				t.Fatalf("legacy command %v removed owner fence: %v\n%s", test.args, err, output)
-			}
-			afterInfo, err := os.Lstat(lockPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(afterBytes, beforeBytes) || !os.SameFile(beforeInfo, afterInfo) {
-				t.Fatalf("legacy command %v changed owner fence bytes or inode", test.args)
-			}
-			afterStateBytes, err := os.ReadFile(statePath)
-			if err != nil {
-				t.Fatalf("legacy command %v removed bound wake state: %v\n%s", test.args, err, output)
-			}
-			afterStateInfo, err := os.Lstat(statePath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(afterStateBytes, beforeStateBytes) || !os.SameFile(beforeStateInfo, afterStateInfo) {
-				t.Fatalf("legacy command %v changed bound wake state bytes or inode", test.args)
-			}
+			assertWakeCheckTreeUnchanged(t, root, beforeTree)
 		})
 	}
 }
@@ -226,6 +194,101 @@ func TestMixedVersionOldLiveUnboundLockUsesNewReaderFallback(t *testing.T) {
 	}
 	if !bytes.Equal(after, before) || !os.SameFile(beforeInfo, afterInfo) {
 		t.Fatal("new reader rewrote the old unbound lock")
+	}
+}
+
+func TestExactP2aRollbackBinaryReadsBoundThenPublishesUnbound(t *testing.T) {
+	legacyBinary := buildHistoricalAMQForWakeStateTest(t, wakeStateP2aRollbackCommit)
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	boundTree := snapshotWakeCheckTree(t, fixture.root)
+	output := runHistoricalWakeCheckForStateTest(t, legacyBinary, fixture.root)
+	var historicalCheck wakeCheckResult
+	if err := json.Unmarshal(output, &historicalCheck); err != nil ||
+		historicalCheck.Agent != fixture.me ||
+		!historicalCheck.OwnerBound ||
+		historicalCheck.WakeMode != wakeOwnerWakeMode ||
+		historicalCheck.WakeStatus != string(wakeLockUnverified) {
+		t.Fatalf("rollback binary bound inspection = %#v err=%v:\n%s", historicalCheck, err, output)
+	}
+	assertWakeCheckTreeUnchanged(t, fixture.root, boundTree)
+
+	if err := fixture.release(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	readyPath := filepath.Join(t.TempDir(), "rollback.ready")
+	command := exec.CommandContext(
+		ctx,
+		legacyBinary,
+		"wake",
+		"--root", fixture.root,
+		"--me", fixture.me,
+		"--inject-via", fixture.target.InjectVia,
+		"--ready-file", readyPath,
+	)
+	command.Dir = t.TempDir()
+	command.Env = ownerFenceCommandEnv(fixture.root)
+	var commandOutput bytes.Buffer
+	command.Stdout = &commandOutput
+	command.Stderr = &commandOutput
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	processDone := make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = command.Wait()
+		close(processDone)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-processDone
+	})
+
+	deadline := time.Now().Add(10 * time.Second)
+	var inspection wakeLockInspection
+	for time.Now().Before(deadline) {
+		inspection = inspectWakeLock(fixture.root, fixture.me)
+		if _, readyErr := os.Stat(readyPath); inspection.Exists && readyErr == nil {
+			break
+		}
+		select {
+		case <-processDone:
+			t.Fatalf("rollback binary exited before readiness: %v\n%s", waitErr, commandOutput.String())
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(readyPath); !inspection.Exists || err != nil {
+		t.Fatalf("rollback binary did not publish a ready wake lock: lock=%t ready_err=%v\n%s", inspection.Exists, err, commandOutput.String())
+	}
+	select {
+	case <-processDone:
+		t.Fatalf("rollback binary exited after readiness: %v\n%s", waitErr, commandOutput.String())
+	default:
+	}
+	bound, err := wakeLockInspectionStateBound(inspection)
+	if err != nil || bound || inspection.Lock.StateGeneration != "" || inspection.Lock.StateDigest != "" {
+		t.Fatalf("rollback publication = %#v bound=%v err=%v", inspection.Lock, bound, err)
+	}
+	selection, err := readWakeStateSelectionForInspection(fixture.root, fixture.me, inspection)
+	if err != nil || !selection.TargetPresent ||
+		selection.Target.Root != canonicalWakeRoot(fixture.root) ||
+		selection.Target.Agent != fixture.me ||
+		selection.Target.InjectVia != fixture.target.InjectVia ||
+		selection.Target.Owner != nil {
+		t.Fatalf("new reader rollback selection = %#v err=%v", selection, err)
+	}
+	output = runHistoricalWakeCheckForStateTest(t, legacyBinary, fixture.root)
+	historicalCheck = wakeCheckResult{}
+	if err := json.Unmarshal(output, &historicalCheck); err != nil ||
+		historicalCheck.Agent != fixture.me ||
+		historicalCheck.OwnerBound ||
+		historicalCheck.LiveWake ||
+		historicalCheck.WakeMode != wakeTargetInjectVia ||
+		historicalCheck.WakeStatus != string(wakeLockUnverified) {
+		t.Fatalf("rollback binary unbound inspection = %#v err=%v:\n%s", historicalCheck, err, output)
 	}
 }
 

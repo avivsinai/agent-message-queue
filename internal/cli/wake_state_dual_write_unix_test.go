@@ -459,22 +459,18 @@ func TestGenericWakeWithoutTargetRemovesStaleState(t *testing.T) {
 	assertPathMissingForTest(t, statePath)
 }
 
-func TestRecoverOwnerRemovesOrphanTargetAndExactState(t *testing.T) {
+func TestRecoverOwnerPreservesOrphanTargetAndExactState(t *testing.T) {
 	fixture := newGenericWakePreparedCleanupFixture(t, true)
 	if err := fixture.cleanupNow(); err != nil {
 		t.Fatal(err)
 	}
-	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
-	if _, err := os.Stat(statePath); err != nil {
-		t.Fatalf("state missing before orphan recovery: %v", err)
-	}
+	before := snapshotWakeCheckTree(t, fixture.root)
 
 	result, err := recoverOwnerWake(fixture.root, fixture.me)
-	if err != nil || result.Status != "recovered" {
-		t.Fatalf("orphan recovery = %#v err=%v", result, err)
+	if err == nil || result.Status != "refused" {
+		t.Fatalf("orphan recovery = %#v err=%v, want refused", result, err)
 	}
-	assertPathMissingForTest(t, wakeTargetPath(fixture.root, fixture.me))
-	assertPathMissingForTest(t, statePath)
+	assertWakeCheckTreeUnchanged(t, fixture.root, before)
 }
 
 func TestRecoverOwnerWithoutTargetConvergesExactState(t *testing.T) {
@@ -659,8 +655,9 @@ func TestAuthoritativeWakeReleaseRemovesStateAfterTarget(t *testing.T) {
 	assertPathMissingForTest(t, statePath)
 }
 
-func TestAuthoritativeWakeReleaseRemovesInvalidStateAfterTarget(t *testing.T) {
+func TestUnboundP2aAuthoritativeWakeReleaseRemovesInvalidStateAfterTarget(t *testing.T) {
 	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	unbindAuthoritativeWakePreparedFixtureForP2a(t, fixture)
 	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
 	if err := os.WriteFile(statePath, []byte("{not-json\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -672,8 +669,9 @@ func TestAuthoritativeWakeReleaseRemovesInvalidStateAfterTarget(t *testing.T) {
 	assertPathMissingForTest(t, statePath)
 }
 
-func TestAuthoritativeWakeReleaseStateSnapshotFailureKeepsLegacyCleanupCommitted(t *testing.T) {
+func TestUnboundP2aAuthoritativeWakeReleaseStateSnapshotFailureKeepsLegacyCleanupCommitted(t *testing.T) {
 	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	unbindAuthoritativeWakePreparedFixtureForP2a(t, fixture)
 	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
 	stateRaw, err := os.ReadFile(statePath)
 	if err != nil {
@@ -854,10 +852,11 @@ func unbindAuthoritativeWakePreparedFixtureForP2a(t *testing.T, fixture *authori
 	}
 }
 
-func TestAuthoritativeReleasePreservesNewerWakeStateSchemas(t *testing.T) {
+func TestUnboundP2aAuthoritativeReleasePreservesNewerWakeStateSchemas(t *testing.T) {
 	for _, component := range []string{"document", "target", "prepared"} {
 		t.Run(component, func(t *testing.T) {
 			fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+			unbindAuthoritativeWakePreparedFixtureForP2a(t, fixture)
 			statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
 			stateRaw, stateInfo := installNewerWakeStateSchemaForTest(t, statePath, component)
 
@@ -885,18 +884,23 @@ func TestAuthoritativeWakeReleaseRemovesStateWhenTargetAlreadyMissing(t *testing
 		t.Fatal(err)
 	}
 	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+	before := snapshotWakeCheckTree(t, fixture.root)
+	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
 		return removeAuthoritativeWakeClaimAt(
 			dirfd,
 			fixture.agentDir,
 			fixture.inspection,
 			nil,
 		)
-	}); err != nil {
-		t.Fatal(err)
+	})
+	var inconclusive *wakeStateBoundInconclusiveError
+	if !errors.As(err, &inconclusive) {
+		t.Fatalf("release error = %v, want bound inconclusive", err)
 	}
-	assertPathMissingForTest(t, fixture.lockPath)
-	assertPathMissingForTest(t, statePath)
+	assertWakeCheckTreeUnchanged(t, fixture.root, before)
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("state missing after refused release: %v", err)
+	}
 }
 
 func TestAuthoritativeWakeReleasePreservesStateReplacement(t *testing.T) {

@@ -190,12 +190,71 @@ func removeWakeLockIfUnchangedGuardedAt(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 ) error {
+	var detachedValidationErr error
+	if err := validateBoundWakeMutationAt(dirfd, agentDir, inspection); err != nil {
+		// A retained directory capability can outlive replacement of its
+		// canonical pathname. Exact cleanup inside that proven-detached inode
+		// cannot signal or unlink the successor claim, so it may reap its own
+		// private residue even though canonical bound-state validation is no
+		// longer possible.
+		if !retainedWakeAgentDirIsDetached(agentDir) {
+			return err
+		}
+		detachedValidationErr = err
+	}
 	path := filepath.Join(agentDir.path, ".wake.lock")
-	return removeWakeLockIfUnchangedGuardedWithIO(
+	if err := removeWakeLockIfUnchangedGuardedWithIO(
 		inspection,
 		func() ([]byte, os.FileInfo, error) { return readWakeLockFileAt(dirfd, path) },
 		func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
+	); err != nil {
+		return err
+	}
+	return newWakeDetachedCleanupOnlyError(detachedValidationErr)
+}
+
+// wakeDetachedCleanupOnlyError reports that a retained descriptor proved
+// detached from its canonical pathname. The exact old residue was removed,
+// but callers must not continue mutation through that detached capability.
+type wakeDetachedCleanupOnlyError struct {
+	err error
+}
+
+func (err *wakeDetachedCleanupOnlyError) Error() string {
+	return fmt.Sprintf("wake lock residue removed from detached directory; refusing further mutation: %v", err.err)
+}
+
+func (err *wakeDetachedCleanupOnlyError) Unwrap() error {
+	return err.err
+}
+
+func newWakeDetachedCleanupOnlyError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &wakeDetachedCleanupOnlyError{err: err}
+}
+
+func retainedWakeAgentDirIsDetached(agentDir *wakeAgentDir) bool {
+	if agentDir == nil || agentDir.file == nil {
+		return false
+	}
+	retainedInfo, err := agentDir.file.Stat()
+	if err != nil {
+		return false
+	}
+	fd, err := unix.Open(
+		agentDir.path,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
 	)
+	if err != nil {
+		return errors.Is(err, unix.ENOENT)
+	}
+	canonical := os.NewFile(uintptr(fd), agentDir.path)
+	defer func() { _ = canonical.Close() }()
+	canonicalInfo, err := canonical.Stat()
+	return err == nil && !os.SameFile(retainedInfo, canonicalInfo)
 }
 
 type wakeGenerationFileSnapshot struct {

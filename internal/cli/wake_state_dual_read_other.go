@@ -2,6 +2,16 @@
 
 package cli
 
+type wakeStateReadSelection struct{}
+
+func readWakeStateSelectionForInspection(
+	_ string,
+	_ string,
+	_ wakeLockInspection,
+) (wakeStateReadSelection, error) {
+	return wakeStateReadSelection{}, nil
+}
+
 func readWakeTargetFromState(root, me string) (wakeTarget, bool, error) {
 	return readWakeTarget(root, me)
 }
