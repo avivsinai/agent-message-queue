@@ -16,6 +16,7 @@ import (
 )
 
 const ownerFenceLegacyCommit = "e37067a91b4447c3ed99bf647b71e7ec9dbf3824"
+const wakeStateLegacyWriterCommit = "fbc574a8d2b26b2526dfae5d9c5c87408007ac39"
 
 func TestOwnerFencePreservesClaimAgainstExactE370Binary(t *testing.T) {
 	repoRootCommand := exec.Command("git", "rev-parse", "--show-toplevel")
@@ -145,6 +146,71 @@ func TestOwnerFencePreservesClaimAgainstExactE370Binary(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLegacyWriterPreservesNewerWakeStateDocument(t *testing.T) {
+	legacyBinary := buildHistoricalAMQForWakeStateTest(t, wakeStateLegacyWriterCommit)
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	injector := writeExecutableForTest(t, "mixed-version-state-injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, nil)
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatal(err)
+	}
+
+	statePath := filepath.Join(fsq.AgentBase(root, "codex"), wakeStateFileName)
+	stateRaw := []byte(`{"schema":2,"future_field":{"preserve":"exactly"}}`)
+	if err := os.WriteFile(statePath, stateRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateInfo, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, legacyBinary, "wake", "recover-owner", "--root", root, "--me", "codex")
+	command.Env = ownerFenceCommandEnv(root)
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("legacy recover-owner timed out: %v\n%s", ctx.Err(), output)
+	}
+	if err != nil {
+		t.Fatalf("legacy recover-owner failed: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(wakeTargetPath(root, "codex")); !os.IsNotExist(err) {
+		t.Fatalf("legacy writer did not commit orphan target cleanup: %v", err)
+	}
+	assertWakeStateSnapshotUnchangedForTest(t, statePath, stateRaw, stateInfo)
+}
+
+func buildHistoricalAMQForWakeStateTest(t *testing.T, commit string) string {
+	t.Helper()
+	repoRootOutput, err := exec.Command("git", "rev-parse", "--show-toplevel").CombinedOutput()
+	if err != nil {
+		t.Skipf("mixed-version git history unavailable: %v", err)
+	}
+	repoRoot := strings.TrimSpace(string(repoRootOutput))
+	if output, err := exec.Command("git", "-C", repoRoot, "cat-file", "-e", commit+"^{commit}").CombinedOutput(); err != nil {
+		t.Skipf("mixed-version commit %s unavailable: %v\n%s", commit, err, output)
+	}
+	buildRoot := t.TempDir()
+	sourceRoot := filepath.Join(buildRoot, "source")
+	if err := os.Mkdir(sourceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(buildRoot, "legacy.tar")
+	commandOutputForOwnerFence(t, repoRoot, "git", "archive", "--format=tar", "--output="+archivePath, commit)
+	commandOutputForOwnerFence(t, "", "tar", "-xf", archivePath, "-C", sourceRoot)
+	binary := filepath.Join(buildRoot, "amq-legacy-state-writer")
+	commandOutputForOwnerFence(t, sourceRoot, "go", "build", "-o", binary, "./cmd/amq")
+	return binary
 }
 
 func commandOutputForOwnerFence(t *testing.T, dir, name string, args ...string) string {

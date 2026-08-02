@@ -284,6 +284,11 @@ func acquireAuthoritativeWakeLockWithOptionsInDir(
 					if publicationErr.InstalledTarget == nil {
 						return fmt.Errorf("%w (installed owner target identity is unavailable; preserving it)", err)
 					}
+					stateSnapshot, stateExists, stateErr := readWakeStateRawSnapshotAt(dirfd, agentDir)
+					if stateErr != nil {
+						continueAfterWakeStateProjectionError(newWakeStateProjectionError(stateErr))
+						stateExists = false
+					}
 					removed, removeErr := removeWakeTargetIfSnapshotMatchesAt(
 						dirfd,
 						agentDir,
@@ -297,6 +302,16 @@ func acquireAuthoritativeWakeLockWithOptionsInDir(
 					if removed {
 						if syncErr := syncWakeOwnerDirFD(dirfd); syncErr != nil {
 							return fmt.Errorf("%w (sync uncommitted owner target cleanup: %v)", err, syncErr)
+						}
+						if _, stateRemoveErr := removeWakeStateIfTargetAbsentAt(
+							dirfd,
+							agentDir,
+							stateSnapshot,
+							stateExists,
+						); stateRemoveErr != nil {
+							if !continueAfterWakeStateProjectionError(stateRemoveErr) {
+								return fmt.Errorf("%w (uncommitted owner state cleanup refused: %v)", err, stateRemoveErr)
+							}
 						}
 					}
 					return err

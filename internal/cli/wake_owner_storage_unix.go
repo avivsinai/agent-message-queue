@@ -178,7 +178,16 @@ func publishAuthoritativeWakeClaimAt(
 			InstalledTarget: &installedTarget,
 		}
 	}
-	_ = agentDir
+	if err := reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me); err != nil {
+		if continueAfterWakeStateProjectionError(err) {
+			return nil
+		}
+		return &wakeOwnerPublicationError{
+			Err:             fmt.Errorf("publish wake state after authoritative wake commit: %w", err),
+			Committed:       true,
+			InstalledTarget: &installedTarget,
+		}
+	}
 	return nil
 }
 
@@ -483,6 +492,13 @@ func removeAuthoritativeWakeClaimAt(
 		}
 		releasePreparedSnapshot = &preparedSnapshot
 	}
+	releaseStateSnapshot, releaseStateExists, stateSnapshotErr := readWakeStateRawSnapshotAt(dirfd, agentDir)
+	if stateSnapshotErr != nil {
+		continueAfterWakeStateProjectionError(newWakeStateProjectionError(
+			fmt.Errorf("snapshot wake state before release: %w", stateSnapshotErr),
+		))
+		releaseStateExists = false
+	}
 
 	if err := unix.Unlinkat(dirfd, ".wake.lock", 0); err != nil {
 		if err == unix.ENOENT {
@@ -530,6 +546,19 @@ func removeAuthoritativeWakeClaimAt(
 		} else if removed {
 			cleaned = true
 		}
+	}
+	stateRemoved, stateErr := removeWakeStateIfTargetAbsentAt(
+		dirfd,
+		agentDir,
+		releaseStateSnapshot,
+		releaseStateExists,
+	)
+	if stateErr != nil {
+		if !continueAfterWakeStateProjectionError(stateErr) {
+			cleanupErr = errors.Join(cleanupErr, stateErr)
+		}
+	} else if stateRemoved {
+		cleaned = true
 	}
 	if releasePreparedSnapshot != nil {
 		_, err := removeWakeGenerationFileIfSnapshotMatchesAt(

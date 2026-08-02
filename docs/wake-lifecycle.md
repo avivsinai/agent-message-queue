@@ -173,6 +173,9 @@ exception: a new bound claim may publish and verify the target section before
 the lock link, as section 7.1 specifies, but that state projection never
 authorizes the link. A state write that fails MUST NOT make a legacy operation
 appear committed when it was not.
+This guard requirement binds writers of every document schema generation; a
+writer that mutates state without the guard is out of contract regardless of
+schema.
 
 The state document uses a private 0600 temporary file in the agent directory.
 The required state publication sequence is:

@@ -167,8 +167,8 @@ func TestGenericWakeCleanupLockSyncFailureContinuesPreparedAndFloorCleanup(t *te
 	if err == nil || !strings.Contains(err.Error(), "sync exact generic wake lock removal") {
 		t.Fatalf("lock sync cleanup error = %v, want durability error", err)
 	}
-	if *syncCalls != 3 {
-		t.Fatalf("directory sync calls = %d, want lock, prepared, and floor syncs", *syncCalls)
+	if *syncCalls != 5 {
+		t.Fatalf("directory sync calls = %d, want lock, prepared, state pre/post-install, and floor syncs", *syncCalls)
 	}
 	fixture.assertLockMissing(t)
 	assertPathMissingForTest(t, fixture.preparedPath)

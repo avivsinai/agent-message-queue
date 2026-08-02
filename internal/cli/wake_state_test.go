@@ -40,6 +40,58 @@ func TestWakeStateRefusesEverySchemaExceptExactlyOne(t *testing.T) {
 	}
 }
 
+func TestNewerWakeStateSchemaProbeSharesReaderClassification(t *testing.T) {
+	tests := []struct {
+		name          string
+		data          string
+		wantComponent string
+		wantSchema    int
+		wantNewer     bool
+	}{
+		{
+			name:          "newer document before unknown fields",
+			data:          `{"schema":2,"future":true,"target":"unknown"}`,
+			wantComponent: "",
+			wantSchema:    2,
+			wantNewer:     true,
+		},
+		{
+			name:          "newer target inside current document",
+			data:          `{"schema":1,"target":{"schema":2,"future":true},"prepared":null}`,
+			wantComponent: "target",
+			wantSchema:    2,
+			wantNewer:     true,
+		},
+		{
+			name:          "newer prepared inside current document",
+			data:          `{"schema":1,"target":{},"prepared":{"schema":2,"future":true}}`,
+			wantComponent: "prepared",
+			wantSchema:    2,
+			wantNewer:     true,
+		},
+		{
+			name: "section schema does not rescue older document",
+			data: `{"schema":0,"target":{"schema":2},"prepared":null}`,
+		},
+		{name: "current document with unknown field", data: `{"schema":1,"future":true,"target":{},"prepared":null}`},
+		{name: "current document with null prepared", data: `{"schema":1,"target":{},"prepared":null}`},
+		{name: "malformed current document", data: `{"schema":1`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			component, schema, newer := newerWakeStateSchema([]byte(test.data))
+			if component != test.wantComponent || schema != test.wantSchema || newer != test.wantNewer {
+				t.Fatalf("probe = (%q, %d, %v), want (%q, %d, %v)", component, schema, newer, test.wantComponent, test.wantSchema, test.wantNewer)
+			}
+			if test.wantNewer {
+				if _, err := decodeWakeState([]byte(test.data)); err == nil || !strings.Contains(err.Error(), "schema") {
+					t.Fatalf("reader error = %v, want shared newer-schema refusal", err)
+				}
+			}
+		})
+	}
+}
+
 func TestWakeStateRefusesUnknownFieldsAndNonCanonicalBytes(t *testing.T) {
 	state, _ := validWakeStateFixture(t, true)
 	canonical, err := encodeWakeState(state)

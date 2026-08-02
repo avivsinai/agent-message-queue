@@ -322,7 +322,7 @@ func TestAuthoritativeWakeCleanupPreparedSyncFailureContinuesCleanup(t *testing.
 	syncCalls := 0
 	syncWakeOwnerDirFD = func(int) error {
 		syncCalls++
-		if syncCalls == 2 {
+		if syncCalls == 3 {
 			return syscall.ENOSYS
 		}
 		return nil
@@ -333,8 +333,8 @@ func TestAuthoritativeWakeCleanupPreparedSyncFailureContinuesCleanup(t *testing.
 	if err == nil || !strings.Contains(err.Error(), "sync wake prepared marker removal") {
 		t.Fatalf("prepared sync cleanup error = %v, want durability error", err)
 	}
-	if syncCalls != 3 {
-		t.Fatalf("directory sync calls = %d, want 3", syncCalls)
+	if syncCalls != 4 {
+		t.Fatalf("directory sync calls = %d, want 4", syncCalls)
 	}
 	fixture.assertReleasedClaimMissing(t)
 	assertPathMissingForTest(t, fixture.preparedPath)
@@ -347,7 +347,7 @@ func TestAuthoritativeWakeCleanupFinalSyncFailureIsReported(t *testing.T) {
 	syncCalls := 0
 	syncWakeOwnerDirFD = func(int) error {
 		syncCalls++
-		if syncCalls == 3 {
+		if syncCalls == 4 {
 			return syscall.ENOSYS
 		}
 		return nil
@@ -358,8 +358,8 @@ func TestAuthoritativeWakeCleanupFinalSyncFailureIsReported(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "sync authoritative wake claim cleanup") {
 		t.Fatalf("final sync cleanup error = %v, want durability error", err)
 	}
-	if syncCalls != 3 {
-		t.Fatalf("directory sync calls = %d, want 3", syncCalls)
+	if syncCalls != 4 {
+		t.Fatalf("directory sync calls = %d, want 4", syncCalls)
 	}
 	fixture.assertReleasedClaimMissing(t)
 	assertPathMissingForTest(t, fixture.preparedPath)
