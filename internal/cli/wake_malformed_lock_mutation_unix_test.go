@@ -128,7 +128,7 @@ func TestWakeLockJSONTrustMatrix(t *testing.T) {
 			return replaceWakeLockJSONFieldForTest(t, raw, "agent", `42`)
 		}},
 		{name: "known wrong type late", invalid: true, mutate: func(t *testing.T, raw []byte) []byte {
-			return replaceWakeLockJSONFieldForTest(t, raw, "running_image_evidence", `42`)
+			return appendWakeLockJSONFieldForTest(t, raw, "resume_owner", `42`)
 		}},
 		{name: "known null direct", invalid: true, mutate: func(t *testing.T, raw []byte) []byte {
 			return replaceWakeLockJSONFieldForTest(t, raw, "wake_mode", `null`)
