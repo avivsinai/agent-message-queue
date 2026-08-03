@@ -30,9 +30,6 @@ func writeWakeReadyFileAgainstOwner(
 	expected wakeLockInspection,
 	requestedOwner *wakeOwner,
 ) error {
-	if path == "" {
-		return nil
-	}
 	agentDir, err := openWakeAgentDir(root, me)
 	if err != nil {
 		return err
@@ -56,6 +53,14 @@ func writeWakeReadyFileAgainstOwnerInDir(
 	expected wakeLockInspection,
 	requestedOwner *wakeOwner,
 ) error {
+	// No readiness path means no supervising parent is waiting on the
+	// handshake — a bare `amq wake` rather than a repair child or a
+	// `coop exec` launch. Publishing is then a no-op, and this is the one
+	// place every caller passes through, so the rule cannot be bypassed by
+	// entering with an already-open agent directory capability.
+	if path == "" {
+		return nil
+	}
 	if agentDir == nil {
 		return fmt.Errorf("wake agent directory capability is missing")
 	}
