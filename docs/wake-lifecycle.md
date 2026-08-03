@@ -128,6 +128,11 @@ There are exactly three digest kinds in this contract:
 3. the canonical-state digest of the exact installed `.wake.state` bytes,
    used only for document evidence and never as the P2b lock binding.
 
+Any new field on a structure that feeds `target_digest` MUST use `omitempty`,
+MUST remain unset at its default value, and MUST pass through reconciliation
+without normalization. Normalization is for comparison only. This preserves
+the bytes and digest of existing default-valued targets across schema growth.
+
 Legacy digests therefore do not change merely because the embedded JSON is
 semantically equivalent, while raw corruption remains visible.
 

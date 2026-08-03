@@ -121,7 +121,7 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 				if exists {
 					return refuse(
 						"orphan wake target is preserved because it may be an uncommitted bound-claim shadow",
-						"inspect the target and state evidence before explicit operator handling",
+						"start a new wake to supersede it, or inspect the target and state evidence first",
 					)
 				}
 				stateSnapshot, stateExists, stateErr := readWakeStateRawSnapshotAt(dirfd, agentDir)
