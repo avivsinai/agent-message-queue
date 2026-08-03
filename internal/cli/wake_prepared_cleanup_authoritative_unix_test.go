@@ -384,6 +384,23 @@ func TestAuthoritativeWakeCleanupInvalidPreparedRefusesBoundMutation(t *testing.
 	assertFileRawForTest(t, fixture.preparedPath, invalid)
 }
 
+func TestUnboundP2aAuthoritativeWakeCleanupInvalidPreparedStillCleansExactClaim(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	unbindAuthoritativeWakePreparedFixtureForP2a(t, fixture)
+	invalid := []byte("{not-json\n")
+	if err := os.WriteFile(fixture.preparedPath, invalid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := fixture.release()
+	if err == nil || !strings.Contains(err.Error(), "snapshot released wake prepared marker") {
+		t.Fatalf("invalid prepared cleanup error = %v, want snapshot error", err)
+	}
+	fixture.assertReleasedClaimMissing(t)
+	assertFileRawForTest(t, fixture.preparedPath, invalid)
+	fixture.assertControlSocketMissing(t)
+}
+
 func TestAuthoritativeWakeCleanupPreparedSyncFailureContinuesCleanup(t *testing.T) {
 	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
 	originalSync := syncWakeOwnerDirFD

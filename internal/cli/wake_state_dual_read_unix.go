@@ -228,6 +228,9 @@ func readWakeStateSelectionForInspectionAt(
 	if err != nil {
 		return wakeStateReadSelection{}, newWakeStateBoundInconclusiveError(err)
 	}
+	// StateDigest repeats validateWakeLockStateBinding's StateDigest == TargetDigest
+	// invariant as defense in depth; it is unreachable while that check stands, and
+	// becomes the only guard if it is ever relaxed.
 	if targetDigest != inspection.Lock.TargetDigest || targetDigest != inspection.Lock.StateDigest {
 		return wakeStateReadSelection{}, newWakeStateBoundInconclusiveError(
 			fmt.Errorf("bound wake state target digest does not match wake lock"),
