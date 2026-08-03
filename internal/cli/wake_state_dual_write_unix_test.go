@@ -852,7 +852,7 @@ func unbindAuthoritativeWakePreparedFixtureForP2a(t *testing.T, fixture *authori
 	}
 }
 
-func TestUnboundP2aAuthoritativeReleasePreservesNewerWakeStateSchemas(t *testing.T) {
+func TestUnboundP2aAuthoritativeWakeReleasePreservesNewerWakeStateSchemas(t *testing.T) {
 	for _, component := range []string{"document", "target", "prepared"} {
 		t.Run(component, func(t *testing.T) {
 			fixture := newAuthoritativeWakePreparedCleanupFixture(t)
@@ -875,7 +875,7 @@ func TestUnboundP2aAuthoritativeReleasePreservesNewerWakeStateSchemas(t *testing
 	}
 }
 
-func TestAuthoritativeWakeReleaseRemovesStateWhenTargetAlreadyMissing(t *testing.T) {
+func TestBoundAuthoritativeWakeReleaseRefusesWhenTargetAlreadyMissing(t *testing.T) {
 	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
 	if err := os.Remove(fixture.preparedPath); err != nil {
 		t.Fatal(err)
@@ -901,6 +901,30 @@ func TestAuthoritativeWakeReleaseRemovesStateWhenTargetAlreadyMissing(t *testing
 	if _, err := os.Stat(statePath); err != nil {
 		t.Fatalf("state missing after refused release: %v", err)
 	}
+}
+
+func TestUnboundP2aAuthoritativeWakeReleaseRemovesStateWhenTargetAlreadyMissing(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	unbindAuthoritativeWakePreparedFixtureForP2a(t, fixture)
+	if err := os.Remove(fixture.preparedPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(fixture.targetPath); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return removeAuthoritativeWakeClaimAt(
+			dirfd,
+			fixture.agentDir,
+			fixture.inspection,
+			nil,
+		)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertPathMissingForTest(t, fixture.lockPath)
+	assertPathMissingForTest(t, statePath)
 }
 
 func TestAuthoritativeWakeReleasePreservesStateReplacement(t *testing.T) {
