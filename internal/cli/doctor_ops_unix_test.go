@@ -66,6 +66,66 @@ func TestRunOpsChecksReportsWakeRepairAvailabilityWithFloor(t *testing.T) {
 	}
 }
 
+func TestRunOpsChecksDistinguishesBoundStateInconclusiveFromAbsentTarget(t *testing.T) {
+	t.Run("bound state inconclusive", func(t *testing.T) {
+		root, target, _ := newOwnerAcquisitionPublicationFixture(t)
+		cleanup, err := acquireAuthoritativeWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+			target:   &target,
+			wakeMode: wakeTargetInjectVia,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(cleanup)
+
+		inspection := inspectWakeLock(root, "codex")
+		lock := inspection.Lock
+		lock.PID = 999999999
+		lock.Executable = "/opt/homebrew/bin/amq"
+		lock.WakeMode = wakeTargetInjectVia
+		lock.Owner = nil
+		writeBoundReadLockForTest(t, root, lock)
+		if err := os.Remove(filepath.Join(fsq.AgentBase(root, "codex"), wakeStateFileName)); err != nil {
+			t.Fatal(err)
+		}
+
+		result := runOpsChecks(root, "test_source", false)
+		if len(result.WakeLocks) != 1 {
+			t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+		}
+		got := result.WakeLocks[0]
+		if got.TargetPresent {
+			t.Fatalf("target_present = true, want false: %#v", got)
+		}
+		if !strings.Contains(got.TargetReason, "bound wake state") {
+			t.Fatalf("target_reason = %q, want bound-state inconclusive reason", got.TargetReason)
+		}
+	})
+
+	t.Run("genuinely absent target", func(t *testing.T) {
+		root := secureTempDirForTest(t)
+		if err := fsq.EnsureRootDirs(root); err != nil {
+			t.Fatal(err)
+		}
+		if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+			t.Fatal(err)
+		}
+		writeWakeLockForTest(t, root, "codex", wakeLock{
+			PID:        999999999,
+			Executable: "/opt/homebrew/bin/amq",
+		})
+
+		result := runOpsChecks(root, "test_source", false)
+		if len(result.WakeLocks) != 1 {
+			t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+		}
+		got := result.WakeLocks[0]
+		if got.TargetPresent || got.TargetReason != "" {
+			t.Fatalf("genuinely absent target reported as inconclusive: %#v", got)
+		}
+	})
+}
+
 func TestRunOpsChecksRejectsSymlinkAndFIFOWakeLocks(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

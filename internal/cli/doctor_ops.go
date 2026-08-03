@@ -400,10 +400,10 @@ func assessWakeRepair(
 	var assessment wakeRepairAssessment
 	target, exists, targetErr := readTarget()
 	assessment.TargetPresent = exists
-	if exists {
-		if targetErr != nil {
-			assessment.TargetReason = targetErr.Error()
-		} else if err := validateWakeTarget(target, root, agent); err != nil {
+	if targetErr != nil {
+		assessment.TargetReason = targetErr.Error()
+	} else if exists {
+		if err := validateWakeTarget(target, root, agent); err != nil {
 			assessment.TargetReason = err.Error()
 		} else if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
 			assessment.TargetReason = err.Error()
@@ -497,10 +497,10 @@ func checkWakeLocksWithHintsSchema(
 				return validateWakeRepairFloorAvailable(root, agent, inspection, target)
 			},
 		)
+		lock.TargetReason = assessment.TargetReason
 		if assessment.TargetPresent {
 			lock.Target = wakeTargetPath(root, agent)
 			lock.TargetPresent = true
-			lock.TargetReason = assessment.TargetReason
 		}
 		if inspection.Status == wakeLockStale {
 			if ownerBound {
