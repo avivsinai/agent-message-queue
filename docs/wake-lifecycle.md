@@ -128,11 +128,6 @@ There are exactly three digest kinds in this contract:
 3. the canonical-state digest of the exact installed `.wake.state` bytes,
    used only for document evidence and never as the P2b lock binding.
 
-Any new field on a structure that feeds `target_digest` MUST use `omitempty`,
-MUST remain unset at its default value, and MUST pass through reconciliation
-without normalization. Normalization is for comparison only. This preserves
-the bytes and digest of existing default-valued targets across schema growth.
-
 Legacy digests therefore do not change merely because the embedded JSON is
 semantically equivalent, while raw corruption remains visible.
 
@@ -159,6 +154,27 @@ MUST occur at most once, including names that match under Go JSON's
 case-insensitive field matching. Unknown lock fields, including duplicate
 unknown names and nested objects, remain opaque and tolerated for forward
 compatibility.
+
+### Digest-affecting target fields
+
+`state_digest` binds a lock to the digest of the target it published, so any
+change to the bytes covered by the target digest invalidates every binding
+published before that change. New target fields MUST therefore be additive in
+the byte sense:
+
+- A new field MUST be declared `omitempty` and MUST be left unset at its
+  default value, so that an otherwise unchanged target serializes
+  byte-identically before and after the field exists.
+- Normalization of such a field MAY be applied when comparing two values, but
+  MUST NOT be persisted. A legacy mutation that rewrites the target MUST pass
+  the stored value through unchanged rather than writing its normalized form.
+- A field whose default cannot be omitted is not an additive change. It
+  requires a state generation change and republication of every bound claim.
+
+A bound read has no legacy fallback. Persisting a normalized default would
+shift the target digest while the already-published lock retained the older
+`state_digest`, so every bound claim would become permanently inconclusive and
+retry-only after an upgrade.
 
 ## 3. Lifetime and authority table
 
