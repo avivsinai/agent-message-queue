@@ -27,6 +27,7 @@ func runWakeRetire(args []string) error {
 	fs := flag.NewFlagSet("wake retire", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	injectViaFlag := fs.String("inject-via", "", "Expected external injection executable")
+	retryUntilFlag := fs.String("retry-until", wakeRetryUntilDrained, "Expected doorbell acknowledgement: drained or injected")
 	var injectArgFlags multiStringFlag
 	fs.Var(&injectArgFlags, "inject-arg", "Expected fixed injection argument (repeatable)")
 	usage := usageWithFlags(fs, "amq wake retire --me <agent> --inject-via <path> [options]",
@@ -56,6 +57,13 @@ func runWakeRetire(args []string) error {
 	requested, err := newWakeTarget(root, me, *injectViaFlag, []string(injectArgFlags))
 	if err != nil {
 		return UsageError("--inject-via: %v", err)
+	}
+	retryUntil, err := normalizeWakeRetryUntil(*retryUntilFlag)
+	if err != nil {
+		return UsageError("%v", err)
+	}
+	if retryUntil == wakeRetryUntilInjected {
+		requested.RetryUntil = retryUntil
 	}
 	result, retireErr := retireWake(root, me, requested)
 	if common.JSON {

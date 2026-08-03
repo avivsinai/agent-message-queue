@@ -11,6 +11,7 @@ const (
 	wakeDoorbellIdle wakeDoorbellPhase = iota
 	wakeDoorbellRetrying
 	wakeDoorbellParked
+	wakeDoorbellAnnounced
 	wakeDoorbellRecoveryRequired
 )
 
@@ -54,6 +55,19 @@ func (state *wakeDoorbellState) plan(
 ) wakeDoorbellPlan {
 	if len(current) == 0 {
 		state.reset()
+		return wakeDoorbellPlan{}
+	}
+	if state.phase == wakeDoorbellAnnounced {
+		// A replaced physical file keeps its name but is a message the agent
+		// has never seen; it re-arms like an addition, not like a drain.
+		if wakeCohortExpanded(state.cohort, current) ||
+			wakeCohortReplacedInPlace(state.cohort, current) {
+			state.arm(current)
+			return wakeDoorbellPlan{attempt: true, prompt: coopWakeDoorbell}
+		}
+		if wakeCohortProgressed(state.cohort, current) {
+			state.recordInjected(current)
+		}
 		return wakeDoorbellPlan{}
 	}
 
@@ -123,6 +137,12 @@ func (state *wakeDoorbellState) recordDeferredInputAttempt(now time.Time) {
 func (state *wakeDoorbellState) parkCurrentCohort() {
 	state.phase = wakeDoorbellParked
 	state.nextAttempt = time.Time{}
+}
+
+func (state *wakeDoorbellState) recordInjected(current map[string]os.FileInfo) {
+	state.reset()
+	state.phase = wakeDoorbellAnnounced
+	state.cohort = snapshotWakeFileIdentities(current)
 }
 
 func (state *wakeDoorbellState) recordAttentionAttempt(now time.Time) {
@@ -312,6 +332,29 @@ func wakeCohortExpanded(
 ) bool {
 	for name := range current {
 		if _, exists := cohort[name]; !exists {
+			return true
+		}
+	}
+	return false
+}
+
+// wakeCohortReplacedInPlace reports whether a cohort member's name now refers
+// to a provably different physical file. Unknown identities on either side
+// stay conservative and report no replacement.
+func wakeCohortReplacedInPlace(
+	cohort map[string]*wakeFileIdentity,
+	current map[string]os.FileInfo,
+) bool {
+	for name, identity := range cohort {
+		info, ok := current[name]
+		if !ok || info == nil || identity == nil {
+			continue
+		}
+		currentIdentity, known := captureWakeFileIdentity(info)
+		if !known {
+			continue
+		}
+		if *identity != currentIdentity {
 			return true
 		}
 	}

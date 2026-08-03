@@ -58,6 +58,7 @@ by the canonicalization rule below.
     "created": "2026-08-01T22:00:00Z",
     "inject_via": "/absolute/path/to/injector",
     "inject_args": ["fixed", "argument"],
+    "retry_until": "injected",
     "owner": {
       "pid": 1234,
       "process_start": "...",
@@ -91,6 +92,11 @@ It MUST agree with the corresponding lock target digest whenever a lock/target
 relationship is being validated. `legacy_present` MUST be true for an existing
 target section. Its `legacy_digest` is the SHA-256 of the exact installed
 `.wake.target` bytes, including formatting and any trailing newline.
+
+The optional `retry_until` field is part of injector behavior and target
+identity. Missing means the compatibility default `drained`; `injected` is the
+only non-default stored value. Its delivery contract is specified in
+`docs/wake-doorbell-acknowledgement.md`.
 
 The `prepared` section mirrors the existing `wakeReady` marker. Its generation
 and target digest MUST be copied exactly from the legacy marker. Its

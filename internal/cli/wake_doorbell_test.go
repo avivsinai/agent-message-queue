@@ -74,6 +74,72 @@ func TestWakeDoorbellStateRetriesUntilInboxProgress(t *testing.T) {
 	}
 }
 
+func TestWakeDoorbellStateInjectedAcknowledgementSuppressesUnchangedCohort(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	first := wakeDoorbellTestFiles(t, "a.md", "b.md")
+	var state wakeDoorbellState
+
+	if plan := state.plan(now, first); !plan.attempt {
+		t.Fatalf("initial plan = %#v", plan)
+	}
+	state.recordInjected(first)
+	if state.phase != wakeDoorbellAnnounced {
+		t.Fatalf("acknowledged phase = %v, want announced", state.phase)
+	}
+	if _, ok := state.nextDeadline(); ok {
+		t.Fatal("acknowledged cohort retained a retry deadline")
+	}
+	if plan := state.plan(now.Add(10*wakeDoorbellRetryMax), first); plan.attempt {
+		t.Fatalf("unchanged acknowledged cohort retried: %#v", plan)
+	}
+
+	remaining := map[string]os.FileInfo{"b.md": first["b.md"]}
+	if plan := state.plan(now.Add(time.Second), remaining); plan.attempt {
+		t.Fatalf("partial drain reannounced remaining cohort: %#v", plan)
+	}
+	if !sameKnownWakeCohort(state.cohort, remaining) {
+		t.Fatalf("partial drain did not rebase announced cohort: %#v", state)
+	}
+
+	added := wakeDoorbellTestFiles(t, "c.md")
+	expanded := map[string]os.FileInfo{
+		"b.md": remaining["b.md"],
+		"c.md": added["c.md"],
+	}
+	if plan := state.plan(now.Add(2*time.Second), expanded); !plan.attempt {
+		t.Fatalf("new physical message did not rearm doorbell: %#v", plan)
+	}
+	state.recordInjected(expanded)
+	if plan := state.plan(now.Add(3*time.Second), expanded); plan.attempt {
+		t.Fatalf("expanded acknowledged cohort retried: %#v", plan)
+	}
+}
+
+func TestWakeDoorbellStateAnnouncedRearmsOnInPlaceReplacement(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	original := wakeDoorbellTestFiles(t, "a.md")
+	var state wakeDoorbellState
+
+	if plan := state.plan(now, original); !plan.attempt {
+		t.Fatalf("initial plan = %#v", plan)
+	}
+	state.recordInjected(original)
+	if plan := state.plan(now.Add(time.Second), original); plan.attempt {
+		t.Fatalf("unchanged acknowledged cohort retried: %#v", plan)
+	}
+
+	// Same file name, distinct physical file: the acknowledged message was
+	// replaced, so the new content has never been announced.
+	replaced := wakeDoorbellTestFiles(t, "a.md")
+	plan := state.plan(now.Add(2*time.Second), replaced)
+	if !plan.attempt || plan.prompt != coopWakeDoorbell {
+		t.Fatalf("replaced message did not rearm doorbell: %#v", plan)
+	}
+	if !sameKnownWakeCohort(state.cohort, replaced) {
+		t.Fatalf("replacement did not rebase cohort: %#v", state)
+	}
+}
+
 func TestWakeDoorbellStateCoalescesAddedMessageUntilExistingDeadline(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	first := wakeDoorbellTestFiles(t, "a.md")

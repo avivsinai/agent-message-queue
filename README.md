@@ -109,9 +109,9 @@ composers. Accumulated diagnostics are truncated when a new wake starts after
 the log reaches 1 MiB and checked again on the wake's 30-second maintenance
 tick, so long-lived ordinary and repair wakes bound their own logs.
 
-Wake treats terminal notification as an attempt, not delivery, and retries on
-a capped backoff until the inbox makes durable progress. The first notification
-is immediate. Attempts that inject the fixed doorbell start at 5 seconds because
+Wake defaults to treating terminal notification as an attempt, not delivery,
+and retries on a capped backoff until the inbox makes durable progress. The
+first notification is immediate. Attempts that inject the fixed doorbell start at 5 seconds because
 they drive the agent; attention-only attempts start at 30 seconds because they
 alert a human. Input attempts double to a 2-minute cap; attention-only attempts
 continue through 4 and 8 minutes to a 15-minute cap. Retries never give up while
@@ -126,6 +126,12 @@ input attempt, or immediately if that floor has already passed; attention-only
 additions retain the cohort's current decayed deadline. Bursts within the
 debounce window remain one notification.
 Removals or replacements immediately rearm the cohort.
+A receipt-aware integration can select `--retry-until injected` together with
+`--inject-via`: exit zero then acknowledges the unchanged physical cohort and
+removes its retry deadline, while injector failure remains retryable and a new
+inbox member triggers one fresh doorbell. The default remains
+`--retry-until drained`. Injection acknowledgement never emits or replaces a
+`drained` receipt.
 A successful input attempt does not also emit attention. Transient foreground
 authority or input-quiet refusals keep the input retry armed while rate-limiting
 their separate attention output. Output-only delivery repeats on its slower
@@ -314,7 +320,7 @@ amq doctor --ops --fix-wake-locks
 amq wake repair --me codex
 amq wake recover-owner --me codex
 amq wake retire --me codex --inject-via /absolute/injector \
-  --inject-arg exec --inject-arg terminal-id
+  --retry-until injected --inject-arg exec --inject-arg terminal-id
 ```
 
 `amq wake check` is read-only. It reports whether the current process can start

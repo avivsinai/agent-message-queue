@@ -39,6 +39,7 @@ type wakeStateTarget struct {
 	Created       string     `json:"created"`
 	InjectVia     string     `json:"inject_via"`
 	InjectArgs    []string   `json:"inject_args,omitempty"`
+	RetryUntil    string     `json:"retry_until,omitempty"`
 	Owner         *wakeOwner `json:"owner,omitempty"`
 	LegacyPresent bool       `json:"legacy_present"`
 	TargetDigest  string     `json:"target_digest"`
@@ -141,6 +142,7 @@ func newWakeState(legacy wakeStateLegacy) (wakeState, error) {
 			Created:       legacy.Target.Created,
 			InjectVia:     legacy.Target.InjectVia,
 			InjectArgs:    append([]string(nil), legacy.Target.InjectArgs...),
+			RetryUntil:    legacy.Target.RetryUntil,
 			Owner:         cloneWakeStateOwner(legacy.Target.Owner),
 			LegacyPresent: true,
 			TargetDigest:  targetDigest,
@@ -449,6 +451,7 @@ func (target wakeStateTarget) wakeTarget() wakeTarget {
 		Created:    target.Created,
 		InjectVia:  target.InjectVia,
 		InjectArgs: append([]string(nil), target.InjectArgs...),
+		RetryUntil: target.RetryUntil,
 		Owner:      cloneWakeStateOwner(target.Owner),
 	}
 }
