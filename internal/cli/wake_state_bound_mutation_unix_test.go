@@ -94,6 +94,108 @@ func TestBoundAuthoritativeWakeReleasePreservesReplacementDuringStateValidation(
 	assertWakeCheckTreeUnchanged(t, fixture.root, replacedTree)
 }
 
+func TestBoundAuthoritativeWakeReleaseReconcilesPreparedPublicationGap(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*wakeState)
+	}{
+		{
+			name: "missing prepared projection",
+			mutate: func(state *wakeState) {
+				state.Prepared = nil
+			},
+		},
+		{
+			name: "stale prepared projection",
+			mutate: func(state *wakeState) {
+				state.Prepared.Generation = "00000000000000000000000000000000"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+			statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
+			installWakeStateMutationForTest(t, statePath, test.mutate)
+
+			if err := fixture.release(); err != nil {
+				t.Fatalf("release after prepared publication gap: %v", err)
+			}
+			fixture.assertReleasedClaimMissing(t)
+			assertPathMissingForTest(t, fixture.preparedPath)
+			fixture.assertControlSocketMissing(t)
+		})
+	}
+}
+
+func TestBoundPreparedPublicationGapReconciliationRefusesMarkerMismatch(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*wakeReady)
+	}{
+		{
+			name: "generation",
+			mutate: func(marker *wakeReady) {
+				marker.Generation = "00000000000000000000000000000000"
+			},
+		},
+		{
+			name: "target digest",
+			mutate: func(marker *wakeReady) {
+				marker.TargetDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+			statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
+			installWakeStateMutationForTest(t, statePath, func(state *wakeState) {
+				state.Prepared = nil
+			})
+			marker := fixture.preparedMarker
+			test.mutate(&marker)
+			writeAuthoritativePreparedMarkerForTest(t, fixture.preparedPath, marker)
+			before := snapshotWakeCheckTree(t, fixture.root)
+
+			err := fixture.release()
+			var inconclusive *wakeStateBoundInconclusiveError
+			if !errors.As(err, &inconclusive) {
+				t.Fatalf("release error = %v, want bound inconclusive", err)
+			}
+			assertWakeCheckTreeUnchanged(t, fixture.root, before)
+		})
+	}
+}
+
+func TestBoundPreparedPublicationGapAllowsPublicWakeRestart(t *testing.T) {
+	fixture := newGenericWakePreparedCleanupFixture(t, true)
+	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
+	installWakeStateMutationForTest(t, statePath, func(state *wakeState) {
+		state.Prepared = nil
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+
+	cleanup, err := acquireWakeLockWithOptions(fixture.root, fixture.me, fixture.options)
+	if err != nil {
+		t.Fatalf("restart after prepared publication gap: %v", err)
+	}
+	t.Cleanup(cleanup)
+	restarted := inspectWakeLock(fixture.root, fixture.me)
+	if sameWakeLockGeneration(fixture.created, restarted) {
+		t.Fatal("restart retained the stale wake generation")
+	}
+	if err := writeWakePreparedFile(fixture.root, fixture.me, restarted); err != nil {
+		t.Fatalf("publish restarted wake preparation: %v", err)
+	}
+	state := readWakeStateAtPathForTest(t, fixture.root, fixture.me)
+	if state.State.Prepared == nil ||
+		state.State.Prepared.Generation != restarted.Lock.Generation ||
+		state.State.Prepared.TargetDigest != restarted.Lock.TargetDigest {
+		t.Fatalf("restarted prepared projection = %#v, lock = %#v", state.State.Prepared, restarted.Lock)
+	}
+}
+
 func TestBoundGenericWakeOwnerlessMutationRefusesInconclusiveState(t *testing.T) {
 	fixture := newGenericWakePreparedCleanupFixture(t, true)
 	if err := os.Remove(filepath.Join(fixture.agentDir.path, wakeStateFileName)); err != nil {
@@ -139,4 +241,24 @@ func TestTargetlessAcquisitionPreservesNoLockTargetShadow(t *testing.T) {
 		t.Fatal("targetless acquisition removed a no-lock target shadow")
 	}
 	assertWakeCheckTreeUnchanged(t, fixture.root, before)
+}
+
+func installWakeStateMutationForTest(t *testing.T, path string, mutate func(*wakeState)) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := decodeWakeState(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(&state)
+	raw, err = encodeWakeState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }

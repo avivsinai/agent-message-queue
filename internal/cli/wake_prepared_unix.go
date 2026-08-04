@@ -45,6 +45,17 @@ func writeWakePreparedFileInDir(
 		if !sameWakeLockGeneration(expected, current) {
 			return fmt.Errorf("wake lock generation changed before preparation publication")
 		}
+		afterWakePreparedBoundValidation()
+		confirmed := inspectWakeLockAt(dirfd, agentDir, root, me)
+		if !sameWakeLockGeneration(expected, confirmed) {
+			return newWakeStateBoundInconclusiveError(
+				newWakeSnapshotReadChangedError(fmt.Errorf("wake lock changed before prepared state refresh")),
+			)
+		}
+		current = confirmed
+		if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, current); err != nil {
+			return fmt.Errorf("refresh bound wake state before preparation publication: %w", err)
+		}
 		marker := wakeReady{
 			Schema:       wakeReadySchema,
 			Generation:   current.Lock.Generation,
@@ -63,37 +74,7 @@ func writeWakePreparedFileInDir(
 			return nil
 		}
 		if err := validateWakeReadyLockAndTargetForInspectionAt(dirfd, agentDir, root, me, current, marker); err != nil {
-			var bound *wakeStateBoundInconclusiveError
-			if !errors.As(err, &bound) {
-				return err
-			}
-			var changed *wakeSnapshotReadChangedError
-			var mismatch *wakeStateLegacyMismatchError
-			if errors.As(err, &changed) || !errors.As(err, &mismatch) {
-				return err
-			}
-			existing, exists, readErr := readWakeGenerationFileSnapshotAt(
-				dirfd, agentDir, wakePreparedFileName, "wake prepared marker",
-			)
-			if readErr != nil || !exists || existing.Marker != marker {
-				return err
-			}
-			target, targetExists, targetErr := readWakeTargetSnapshotAt(dirfd, agentDir, root, me)
-			if targetErr != nil || validateWakeReadyLockAndSelectedTarget(current, marker, target.Target, targetExists) != nil {
-				return err
-			}
-			afterWakePreparedBoundValidation()
-			confirmed := inspectWakeLockAt(dirfd, agentDir, root, me)
-			lockBound, bindingErr := wakeLockInspectionStateBound(confirmed)
-			if bindingErr != nil || !lockBound {
-				return err
-			}
-			if !sameWakeLockGeneration(expected, confirmed) {
-				return newWakeStateBoundInconclusiveError(
-					newWakeSnapshotReadChangedError(fmt.Errorf("wake lock changed before prepared state refresh")),
-				)
-			}
-			return refreshState()
+			return err
 		}
 		if err := writeWakeGenerationFileAt(dirfd, wakePreparedFileName, "wake prepared marker", marker); err != nil {
 			return err

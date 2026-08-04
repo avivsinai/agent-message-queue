@@ -66,6 +66,35 @@ func TestRunOpsChecksReportsWakeRepairAvailabilityWithFloor(t *testing.T) {
 	}
 }
 
+func TestRunOpsChecksFixReconcilesPreparedPublicationGapMutationOnly(t *testing.T) {
+	fixture := newGenericWakePreparedCleanupFixture(t, true)
+	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
+	installWakeStateMutationForTest(t, statePath, func(state *wakeState) {
+		state.Prepared = nil
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+	beforeRaw, beforeInfo := snapshotWakeFileForTest(t, statePath)
+
+	inspection := runOpsChecks(fixture.root, "test_source", false)
+	if len(inspection.WakeLocks) != 1 || inspection.WakeLocks[0].Status != string(wakeLockStale) {
+		t.Fatalf("read-only doctor wake locks = %#v, want one stale lock", inspection.WakeLocks)
+	}
+	assertWakeFileSnapshotUnchangedForTest(t, statePath, beforeRaw, beforeInfo)
+
+	fixed := runOpsChecks(fixture.root, "test_source", true)
+	if len(fixed.WakeLocks) != 1 || fixed.WakeLocks[0].Status != "fixed" || !fixed.WakeLocks[0].Removed {
+		t.Fatalf("doctor fix wake locks = %#v, want fixed removal", fixed.WakeLocks)
+	}
+	state := readWakeStateAtPathForTest(t, fixture.root, fixture.me)
+	if state.State.Prepared == nil ||
+		state.State.Prepared.Generation != fixture.created.Lock.Generation ||
+		state.State.Prepared.TargetDigest != fixture.created.Lock.TargetDigest {
+		t.Fatalf("doctor-reconciled prepared projection = %#v", state.State.Prepared)
+	}
+}
+
 func TestRunOpsChecksDistinguishesBoundStateInconclusiveFromAbsentTarget(t *testing.T) {
 	t.Run("bound state inconclusive", func(t *testing.T) {
 		root, target, _ := newOwnerAcquisitionPublicationFixture(t)

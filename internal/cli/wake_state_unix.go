@@ -164,6 +164,17 @@ func publishWakeStateAt(
 	me string,
 	expected wakeStateLegacySnapshot,
 ) (wakeStateFileSnapshot, error) {
+	return publishWakeStateValidatedAt(dirfd, agentDir, root, me, expected, nil)
+}
+
+func publishWakeStateValidatedAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	expected wakeStateLegacySnapshot,
+	validateBeforeInstall func() error,
+) (wakeStateFileSnapshot, error) {
 	// Precondition: the caller holds this agent directory's lifecycle guard.
 	// Every schema generation uses that guard, which excludes legitimate writers
 	// across the final destination validation-to-rename window. The fd-bound
@@ -253,6 +264,11 @@ func publishWakeStateAt(
 	}
 	if err := validateWakeStateDestinationAt(dirfd, agentDir); err != nil {
 		return wakeStateFileSnapshot{}, err
+	}
+	if validateBeforeInstall != nil {
+		if err := validateBeforeInstall(); err != nil {
+			return wakeStateFileSnapshot{}, err
+		}
 	}
 	if err := unix.Renameat(dirfd, tempName, dirfd, wakeStateFileName); err != nil {
 		return wakeStateFileSnapshot{}, fmt.Errorf("install wake state: %w", err)

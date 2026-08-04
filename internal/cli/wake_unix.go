@@ -310,6 +310,9 @@ func acquireWakeLockWithOptionsInDir(
 			if inspection.Exists {
 				switch inspection.Status {
 				case wakeLockStale:
+					if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, inspection); err != nil {
+						return err
+					}
 					if err := validateWakeLockStaleRemoval(inspection); err != nil {
 						return err
 					}
@@ -494,6 +497,9 @@ func cleanupGenericWakeGenerationAt(
 	current := inspectWakeLockAt(dirfd, agentDir, root, me)
 	if !sameWakeLockGeneration(created, current) || !currentWakeLockMatches(current.Lock) {
 		return nil
+	}
+	if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, current); err != nil {
+		return err
 	}
 
 	preparedSnapshot, preparedSnapshotErr := freezeGenericWakePreparedCleanupAt(
@@ -1030,6 +1036,12 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 			result.Status = "refused"
 			result.Reason = fmt.Sprintf("wake lock status %q is not repairable", inspection.Status)
 			return errors.New(result.Reason)
+		}
+		if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, inspection); err != nil {
+			result.Status = "refused"
+			result.PID = inspection.PID
+			result.Reason = err.Error()
+			return err
 		}
 
 		var exists bool
