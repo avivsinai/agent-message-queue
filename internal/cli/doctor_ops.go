@@ -48,11 +48,12 @@ type opsOperatorGate struct {
 }
 
 type opsHint struct {
-	Code       string             `json:"code"`
-	Status     string             `json:"status"`
-	Message    string             `json:"message"`
-	Backlog    *opsBacklog        `json:"backlog,omitempty"`
-	WakeBinary *opsWakeBinaryHint `json:"wake_binary,omitempty"`
+	Code                    string                          `json:"code"`
+	Status                  string                          `json:"status"`
+	Message                 string                          `json:"message"`
+	Backlog                 *opsBacklog                     `json:"backlog,omitempty"`
+	WakeBinary              *opsWakeBinaryHint              `json:"wake_binary,omitempty"`
+	UnreadBacklogNoNotifier *opsUnreadBacklogNoNotifierHint `json:"unread_backlog_no_notifier,omitempty"`
 }
 
 type opsBacklog struct {
@@ -67,6 +68,14 @@ type opsWakeBinaryHint struct {
 	Agent  string `json:"agent"`
 	PID    int    `json:"pid"`
 	Remedy string `json:"remedy"`
+}
+
+type opsUnreadBacklogNoNotifierHint struct {
+	Agent                  string  `json:"agent"`
+	UnreadCount            int     `json:"unread_count"`
+	OldestUnreadAgeSeconds float64 `json:"oldest_unread_age_seconds"`
+	Command                string  `json:"command"`
+	Remedy                 string  `json:"remedy"`
 }
 
 type opsWakeLock struct {
@@ -98,6 +107,7 @@ type opsWakeLock struct {
 	OperatorTerminalRequired bool   `json:"operator_terminal_required"`
 	NextAction               string `json:"next_action,omitempty"`
 	CurrentTerminal          bool   `json:"-"`
+	NotifierAbsent           bool   `json:"-"`
 
 	WakeCheckDecision *wakeCheckDecision `json:"-"`
 	Mutation          *opsWakeMutation   `json:"-"`
@@ -245,6 +255,7 @@ func runOpsChecksWithSchema(
 
 	// Operational and integration hints
 	result.Hints = append(result.Hints, wakeHints...)
+	result.Hints = append(result.Hints, checkUnreadBacklogNoNotifierHints(root, result.Agents, result.WakeLocks)...)
 	result.Hints = append(result.Hints, checkSiblingBacklogHints(root, agents)...)
 	result.Hints = append(result.Hints, checkBaseBacklogHints(root, agents)...)
 	result.Hints = append(result.Hints, checkWorktreeDivergenceHints(root, agents)...)
@@ -253,6 +264,62 @@ func runOpsChecksWithSchema(
 	result.Hints = append(result.Hints, checkSymphonyHint()...)
 
 	return result
+}
+
+func checkUnreadBacklogNoNotifierHints(root string, agents []opsAgent, wakeLocks []opsWakeLock) []opsHint {
+	notifierAbsent := make(map[string]bool, len(wakeLocks))
+	for _, lock := range wakeLocks {
+		notifierAbsent[lock.Agent] = wakeLockProvesNotifierAbsent(lock)
+	}
+
+	var hints []opsHint
+	for _, agent := range agents {
+		if agent.UnreadCount == 0 {
+			continue
+		}
+		absent, lockExists := notifierAbsent[agent.Handle]
+		// Missing, proven-stale, and removed locks prove notifier absence.
+		// Unverified and live rows stay with their existing fail-closed signals.
+		if lockExists && !absent {
+			continue
+		}
+
+		messageWord := "messages"
+		if agent.UnreadCount == 1 {
+			messageWord = "message"
+		}
+		command := fmt.Sprintf(
+			"amq wake check --root %s --me %s",
+			shellQuoteArg(root),
+			agent.Handle,
+		)
+		remedy := "drain from the owning session"
+		hints = append(hints, opsHint{
+			Code:   "unread_backlog_no_notifier",
+			Status: "warn",
+			Message: fmt.Sprintf(
+				"%s has %d unread %s, oldest %.0fs; run %s for restart capability; %s",
+				agent.Handle,
+				agent.UnreadCount,
+				messageWord,
+				agent.OldestUnreadAgeSeconds,
+				command,
+				remedy,
+			),
+			UnreadBacklogNoNotifier: &opsUnreadBacklogNoNotifierHint{
+				Agent:                  agent.Handle,
+				UnreadCount:            agent.UnreadCount,
+				OldestUnreadAgeSeconds: agent.OldestUnreadAgeSeconds,
+				Command:                command,
+				Remedy:                 remedy,
+			},
+		})
+	}
+	return hints
+}
+
+func wakeLockProvesNotifierAbsent(lock opsWakeLock) bool {
+	return lock.NotifierAbsent
 }
 
 func loadOpsAgents(root string, fixWakeLocks bool, explicitBaseRoot ...string) ([]string, error) {
@@ -446,6 +513,12 @@ func checkWakeLocksWithHintsSchema(
 			staleBinary,
 			jsonSchema == wakeCheckSchemaV2,
 		)
+		if lock.WakeCheckDecision != nil && lock.WakeCheckDecision.Platform.WakeSupported {
+			status := lock.WakeCheckDecision.Wake.Status
+			lock.NotifierAbsent = status == string(wakeLockMissing) || status == string(wakeLockStale)
+		} else {
+			lock.NotifierAbsent = !inspection.Exists || inspection.Status == wakeLockStale
+		}
 		locks = append(locks, lock)
 	}
 	for _, agent := range agents {
@@ -512,7 +585,9 @@ func checkWakeLocksWithHintsSchema(
 			if fix {
 				guardErr := withWakeLifecycleGuard(root, agent, func() error {
 					recheck := inspectWakeLock(root, agent)
-					if !sameWakeLockGeneration(inspection, recheck) || recheck.Status != wakeLockStale {
+					sameGeneration := sameWakeLockGeneration(inspection, recheck)
+					inspection = recheck
+					if !sameGeneration || recheck.Status != wakeLockStale {
 						lock.Status = string(recheck.Status)
 						lock.Reason = "wake lock changed before fix"
 						return nil
