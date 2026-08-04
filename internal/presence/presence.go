@@ -11,14 +11,16 @@ import (
 
 // Presence captures the current presence for an agent handle.
 type Presence struct {
-	Schema         int    `json:"schema"`
-	Handle         string `json:"handle"`
-	Status         string `json:"status"`
-	LastSeen       string `json:"last_seen"`
-	Note           string `json:"note,omitempty"`
-	NotifierStatus string `json:"notifier_status,omitempty"`
-	NotifierMode   string `json:"notifier_mode,omitempty"`
-	NotifierReason string `json:"notifier_reason,omitempty"`
+	Schema           int    `json:"schema"`
+	Handle           string `json:"handle"`
+	Status           string `json:"status"`
+	LastSeen         string `json:"last_seen"`
+	Note             string `json:"note,omitempty"`
+	NotifierStatus   string `json:"notifier_status,omitempty"`
+	NotifierMode     string `json:"notifier_mode,omitempty"`
+	NotifierReason   string `json:"notifier_reason,omitempty"`
+	DoorbellParked   bool   `json:"doorbell_parked,omitempty"`
+	DoorbellAttempts uint   `json:"doorbell_attempts,omitempty"`
 }
 
 func New(handle, status, note string, now time.Time) Presence {

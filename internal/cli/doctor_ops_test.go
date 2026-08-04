@@ -108,6 +108,65 @@ func TestRunOpsChecks_BasicAgentStats(t *testing.T) {
 
 }
 
+func TestRunOpsChecks_DoorbellParkedHintRequiresUnreadBacklog(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteConfig(filepath.Join(root, "meta", "config.json"), config.Config{
+		Version: 1,
+		Agents:  []string{"codex"},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	presencePath := filepath.Join(fsq.AgentBase(root, "codex"), "presence.json")
+	parkedPresence := `{"schema":1,"handle":"codex","status":"active","last_seen":"2026-08-04T12:00:00Z","doorbell_parked":true,"doorbell_attempts":4}`
+	if err := os.WriteFile(presencePath, []byte(parkedPresence), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if hint, ok := findOpsHint(runOpsChecks(root, "test", false).Hints, "doorbell_parked"); ok {
+		t.Fatalf("empty inbox reported parked hint: %#v", hint)
+	}
+
+	messagePath := filepath.Join(fsq.AgentInboxNew(root, "codex"), "pending.md")
+	if err := os.WriteFile(messagePath, []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(messagePath, time.Now().Add(-90*time.Second), time.Now().Add(-90*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	parkedResult := runOpsChecks(root, "test", false)
+	hint, ok := findOpsHint(parkedResult.Hints, "doorbell_parked")
+	if !ok {
+		t.Fatal("parked doorbell with unread backlog emitted no ops hint")
+	}
+	if hint.Status != "warn" ||
+		!strings.Contains(hint.Message, "codex") ||
+		!strings.Contains(hint.Message, "4 attempts") ||
+		!strings.Contains(hint.Message, "90s") {
+		t.Fatalf("parked hint = %#v", hint)
+	}
+	if len(parkedResult.Agents) != 1 ||
+		!parkedResult.Agents[0].DoorbellParked ||
+		parkedResult.Agents[0].DoorbellAttempts != 4 {
+		t.Fatalf("parked agent state = %#v", parkedResult.Agents)
+	}
+
+	activePresence := `{"schema":1,"handle":"codex","status":"active","last_seen":"2026-08-04T12:00:00Z"}`
+	if err := os.WriteFile(presencePath, []byte(activePresence), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if hint, ok := findOpsHint(runOpsChecks(root, "test", false).Hints, "doorbell_parked"); ok {
+		t.Fatalf("unparked notifier reported parked hint: %#v", hint)
+	}
+}
+
 func TestRunOpsChecks_NoConfig(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {

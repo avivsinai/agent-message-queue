@@ -40,6 +40,8 @@ type opsAgent struct {
 	NotifierStatus         string  `json:"notifier_status,omitempty"`
 	NotifierMode           string  `json:"notifier_mode,omitempty"`
 	NotifierReason         string  `json:"notifier_reason,omitempty"`
+	DoorbellParked         bool    `json:"doorbell_parked,omitempty"`
+	DoorbellAttempts       uint    `json:"doorbell_attempts,omitempty"`
 }
 
 type opsOperatorGate struct {
@@ -215,6 +217,8 @@ func runOpsChecksWithSchema(
 			agent.NotifierStatus = p.NotifierStatus
 			agent.NotifierMode = p.NotifierMode
 			agent.NotifierReason = p.NotifierReason
+			agent.DoorbellParked = p.DoorbellParked
+			agent.DoorbellAttempts = p.DoorbellAttempts
 			if t, err := time.Parse(time.RFC3339Nano, p.LastSeen); err == nil {
 				agent.PresenceAgeSeconds = now.Sub(t).Seconds()
 				recentActivity = agent.PresenceAgeSeconds < (10 * time.Minute).Seconds()
@@ -230,6 +234,18 @@ func runOpsChecksWithSchema(
 		agent.PresenceAgeSeconds = math.Round(agent.PresenceAgeSeconds)
 
 		result.Agents = append(result.Agents, agent)
+		if agent.DoorbellParked && agent.UnreadCount > 0 {
+			result.Hints = append(result.Hints, opsHint{
+				Code:   "doorbell_parked",
+				Status: "warn",
+				Message: fmt.Sprintf(
+					"Agent %s doorbell is parked after %d attempts with unread messages (oldest unread %.0fs)",
+					agent.Handle,
+					agent.DoorbellAttempts,
+					agent.OldestUnreadAgeSeconds,
+				),
+			})
+		}
 	}
 
 	// Configured live agents require canonical handles. Discovery additionally

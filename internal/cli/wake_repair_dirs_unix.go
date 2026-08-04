@@ -825,6 +825,33 @@ func setWakeNotifierStatusInDir(
 	agentDir *wakeAgentDir,
 	me, status, mode, reason string,
 ) error {
+	return updateWakePresenceInDir(agentDir, me, func(value *presence.Presence) {
+		value.NotifierStatus = status
+		value.NotifierMode = mode
+		value.NotifierReason = reason
+	})
+}
+
+func setWakeDoorbellStatusInDir(
+	agentDir *wakeAgentDir,
+	me string,
+	parked bool,
+	attempts uint,
+) error {
+	return updateWakePresenceInDir(agentDir, me, func(value *presence.Presence) {
+		value.DoorbellParked = parked
+		value.DoorbellAttempts = attempts
+		if !parked {
+			value.DoorbellAttempts = 0
+		}
+	})
+}
+
+func updateWakePresenceInDir(
+	agentDir *wakeAgentDir,
+	me string,
+	update func(*presence.Presence),
+) error {
 	if agentDir == nil {
 		return fmt.Errorf("wake agent directory capability is missing")
 	}
@@ -848,9 +875,7 @@ func setWakeNotifierStatusInDir(
 				return fmt.Errorf("parse wake presence: %w", err)
 			}
 		}
-		value.NotifierStatus = status
-		value.NotifierMode = mode
-		value.NotifierReason = reason
+		update(&value)
 		value.LastSeen = time.Now().UTC().Format(time.RFC3339Nano)
 		encoded, err := json.MarshalIndent(value, "", "  ")
 		if err != nil {
