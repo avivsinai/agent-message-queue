@@ -71,7 +71,10 @@ Grok is opt-in. To provision mailboxes for all three engines explicitly:
 amq coop init --agents claude,codex,grok,user
 ```
 
-That's it. `coop exec` auto-initializes the project if needed, sets
+That's it. `coop exec` auto-initializes the project if needed. In a Git
+worktree with no eligible root it creates `.amqrc` and `.agent-mail` at that
+worktree's top, even from a subdirectory or with `--session`; it does not
+consult `~/.amqrc`. Use `--no-init` to keep the refusal instead. It then sets
 `AM_ROOT`/`AM_ME`, `AM_BASE_ROOT`, and the independent `AM_SESSION` identity,
 starts wake notifications, and execs into the agent. Without `--session` or
 `--root`, it defaults to `--session collab` (i.e.,
@@ -109,9 +112,11 @@ and set `AMQ_GLOBAL_ROOT` to one absolute base. Use `amq doctor --ops` when a
 delivery receipt times out; it can name divergent same-session roots when a
 peer has fresher presence in another worktree.
 
-An unconfigured Git worktree or bare repository fails closed instead of implicitly using
-`~/.amqrc`. Add a local `.amqrc`, retain an existing pin, pass explicit
-`--root`, or set `AMQ_GLOBAL_ROOT` when sharing is intentional.
+Participating commands in a Git worktree or bare repository with no eligible
+root fail closed instead of implicitly using `~/.amqrc`. `coop init` explicitly
+initializes a worktree-local queue at the worktree top; `coop exec` does the
+same after root precedence finds no eligible root. A bare repository has no
+worktree to host that queue, so use a worktree or explicit `--root` there.
 
 For read-side access, prefer the named route:
 

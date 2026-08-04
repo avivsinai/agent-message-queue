@@ -170,7 +170,11 @@ Run the appropriate append command once, then open a new terminal or source
 that startup file. Use the bare `eval` only when you intentionally want aliases
 in one already-open shell.
 
-Add `--no-gitignore` when `coop exec` should auto-initialize the project without changing `.gitignore`.
+In a Git worktree with no eligible root, `coop exec` initializes `.agent-mail` and
+`.amqrc` at the worktree top, even when invoked from a subdirectory or with
+`--session`. It never uses `~/.amqrc` for that bootstrap. Add `--no-gitignore`
+to leave `.gitignore` unchanged, or `--no-init` to refuse instead of creating
+the local queue.
 Managed launchers can add `--require-wake` to fail instead of launching the agent when the wake watcher cannot start.
 When `coop exec` starts a fresh wake, it baselines messages that were already
 waiting. Those messages remain unread, create no receipt, and do not trigger
@@ -289,9 +293,12 @@ same absolute base root. Use an absolute, machine-local `.amqrc` value such as
 `{"root":"/absolute/path/to/shared/.agent-mail"}`, or remove the project-relative
 `.amqrc` and export `AMQ_GLOBAL_ROOT=/absolute/path/to/shared/.agent-mail`.
 Per-worktree isolation remains the default when sharing is not intended. A Git
-worktree without local AMQ configuration does not implicitly inherit
-`~/.amqrc`; AMQ refuses that ambiguous route so a global default cannot
-silently select a different project's mailbox.
+worktree without an eligible root does not implicitly inherit
+`~/.amqrc`; participating commands refuse that ambiguous route so a global
+default cannot silently select a different project's mailbox. `coop init`
+explicitly creates the worktree-local queue at its top; `coop exec` does the
+same when no eligible root exists. Bare repositories still require a worktree
+or explicit `--root`.
 
 ### 4. Inspect Health
 
@@ -464,6 +471,12 @@ repo-local detected `.agent-mail`; implicit `~/.amqrc` is refused. Outside
 Git, `~/.amqrc` remains a convenience fallback and precedes detected
 `.agent-mail`. Set
 `AMQ_GLOBAL_ROOT` explicitly when shared routing is intentional.
+
+`coop exec` honors that precedence before bootstrap. In a Git worktree with no
+eligible root, it bootstraps `<git-top>/.agent-mail`; `--session X` creates that
+named session afterward, while `--no-init` preserves the refusal. `coop init`
+is the explicit local-bootstrap command and also targets the Git top. Bare
+repositories do not auto-bootstrap.
 
 If a project `.amqrc` exists but cannot be read or parsed, AMQ stops instead
 of silently delivering through a lower-precedence fallback. Use an explicit

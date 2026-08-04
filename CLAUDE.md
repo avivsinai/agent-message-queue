@@ -127,6 +127,13 @@ changed; the structured refusal is reported with process exit 0 unless
 - **Root**: explicit `--root` > env (`AM_ROOT`) > project-local `.amqrc` > `AMQ_GLOBAL_ROOT` > implicit fallbacks. Inside Git, only repo-local `.agent-mail` is eligible; outside Git, `~/.amqrc` precedes detected `.agent-mail`.
 - **Me**: flags > env (`AM_ME`)
 
+That fail-closed rule applies to participating commands. `coop exec` honors root
+precedence before bootstrap; when no eligible root exists, it initializes
+`.agent-mail` at the worktree top, including explicit `--session <name>`.
+`coop init` is the explicit local-bootstrap command and also targets the Git
+top. `coop exec --no-init` keeps the refusal. Bare repositories cannot host
+this implicit bootstrap; use a worktree or `--root`.
+
 Note: `.amqrc` configures the root directory. Agent identity (`me`) is set per-terminal via `--me` or `AM_ME`.
 Auto-detect covers the default `.agent-mail` layout in the current tree. A
 project `.amqrc` is still required for custom root names and peer
@@ -466,6 +473,12 @@ and warns only when the same session exists under another worktree root with
 fresher peer presence. `send --wait-for` timeout text may name the
 already-resolved delivery root/session and recommend `doctor --ops`, but must
 not scan git worktrees itself.
+
+When no higher-precedence root is eligible, the routing refusal does not block
+`coop exec`; it creates a fresh worktree-local queue at that worktree's top.
+`coop init` explicitly targets the same local top. Participating commands still
+refuse, `--no-init` declines creation, and bare repositories still require a
+worktree or explicit `--root`.
 
 Use `amq doctor --ops --json` for machine-readable health output.
 

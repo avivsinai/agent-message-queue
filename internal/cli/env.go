@@ -539,11 +539,50 @@ func resolveDiscoveredBaseRoot() (string, bool, error) {
 	return "", false, nil
 }
 
+// resolveDiscoveredBaseRootForBootstrap preserves ordinary root precedence but
+// turns an unconfigured Git worktree into a bootstrap target. Participating
+// commands must continue using resolveDiscoveredBaseRoot so they never create a
+// queue merely because cwd is inside a repository.
+func resolveDiscoveredBaseRootForBootstrap() (string, bool, error) {
+	base, found, err := resolveDiscoveredBaseRoot()
+	if err == nil || GetExitCode(err) != ExitContextMismatch {
+		return base, found, err
+	}
+
+	if top, ok := gitWorktreeTopFromCWD(); ok {
+		return filepath.Join(top, defaultCoopRoot), false, nil
+	}
+	return "", false, err
+}
+
 func noEligibleRootInGitError(top string) error {
 	return ContextMismatchError(
-		"cannot determine an eligible AMQ root while cwd is inside Git worktree or bare repository %s: no project .amqrc, repo-local .agent-mail, or explicit root was found; implicit ~/.amqrc is ineligible here; --session selects a session but does not authorize a base root; configure this repository, set AMQ_GLOBAL_ROOT or AM_ROOT, or pass --root explicitly",
+		"cannot determine an eligible AMQ root while cwd is inside Git worktree or bare repository %s: no project .amqrc, repo-local .agent-mail, or explicit root was found; implicit ~/.amqrc is ineligible here; --session selects a session but does not authorize a base root; run 'amq coop init' (or 'amq coop exec <agent>') in this repository to create its queue; for a bare repository, cd into a worktree or pass --root explicitly; alternatively configure this repository, set AMQ_GLOBAL_ROOT or AM_ROOT, or pass --root explicitly",
 		top,
 	)
+}
+
+func gitWorktreeTopFromCWD() (string, bool) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(cwd); resolveErr == nil {
+		cwd = resolved
+	}
+	top, err := gitTopLevel(cwd)
+	if err != nil {
+		return "", false
+	}
+	markerInfo, err := gitMarkerLstat(filepath.Join(top, ".git"))
+	if err != nil || (!markerInfo.IsDir() && !markerInfo.Mode().IsRegular()) {
+		return "", false
+	}
+	boundary, insideGit := gitWorktreeRootFromCWD()
+	if !insideGit || !sameTreeIdentity(top, boundary) {
+		return "", false
+	}
+	return top, true
 }
 
 func gitWorktreeRootFromCWD() (string, bool) {

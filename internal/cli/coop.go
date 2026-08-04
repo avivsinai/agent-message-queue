@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -41,7 +42,7 @@ func runCoopInit(args []string) error {
 	return runCoopInitInternal(args, true)
 }
 
-func runCoopInitInternal(args []string, printNextSteps bool) error {
+func runCoopInitInternal(args []string, printNextSteps bool) (returnErr error) {
 	fs := flag.NewFlagSet("coop init", flag.ContinueOnError)
 	rootFlag := fs.String("root", defaultCoopRoot, "Root directory for the queue")
 	agentsFlag := fs.String("agents", defaultCoopAgents, "Comma-separated agent handles")
@@ -68,6 +69,33 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		return err
 	} else if handled {
 		return nil
+	}
+
+	rootExplicit := flagWasVisited(fs, "root")
+	if !rootExplicit {
+		if _, existingErr := findAndLoadAmqrc(); errors.Is(existingErr, errAmqrcNotFound) {
+			gitBoundary, insideGit := gitWorktreeRootFromCWD()
+			if top, worktree := gitWorktreeTopFromCWD(); worktree {
+				cwd, cwdErr := os.Getwd()
+				if cwdErr != nil {
+					return cwdErr
+				}
+				if !sameTreeIdentity(cwd, top) {
+					if err := os.Chdir(top); err != nil {
+						return fmt.Errorf("enter Git worktree top %q: %w", top, err)
+					}
+					resetAmqrcCache()
+					defer func() {
+						if err := os.Chdir(cwd); err != nil {
+							returnErr = errors.Join(returnErr, fmt.Errorf("restore working directory %q: %w", cwd, err))
+						}
+						resetAmqrcCache()
+					}()
+				}
+			} else if insideGit {
+				return noEligibleRootInGitError(gitBoundary)
+			}
+		}
 	}
 
 	explicitAgents := false
