@@ -16,11 +16,17 @@ import (
 )
 
 type doctorOpsResult struct {
-	Root         opsRoot          `json:"root"`
-	Agents       []opsAgent       `json:"agents"`
-	OperatorGate *opsOperatorGate `json:"operator_gate,omitempty"`
-	WakeLocks    []opsWakeLock    `json:"wake_locks,omitempty"`
-	Hints        []opsHint        `json:"hints"`
+	Root           opsRoot           `json:"root"`
+	Agents         []opsAgent        `json:"agents"`
+	OperatorGate   *opsOperatorGate  `json:"operator_gate,omitempty"`
+	WakeLocks      []opsWakeLock     `json:"wake_locks,omitempty"`
+	WakeQuarantine opsWakeQuarantine `json:"wake_quarantine"`
+	Hints          []opsHint         `json:"hints"`
+}
+
+type opsWakeQuarantine struct {
+	Count            int      `json:"count"`
+	NewestAgeSeconds *float64 `json:"newest_age_seconds"`
 }
 
 type opsRoot struct {
@@ -133,6 +139,7 @@ func runOpsChecksWithSchema(
 		Path:   root,
 		Source: rootSource,
 	}
+	result.WakeQuarantine = checkWakeQuarantine(root, now)
 	result.OperatorGate = checkOperatorGate(root, now)
 	result.Hints = append(result.Hints, checkLinkedWorktreeLocalHint(root, rootSource)...)
 

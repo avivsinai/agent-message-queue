@@ -225,22 +225,43 @@ func TestBoundGenericWakeCleanupRefusesInconclusiveState(t *testing.T) {
 	assertWakeCheckTreeUnchanged(t, fixture.root, before)
 }
 
-func TestTargetlessAcquisitionPreservesNoLockTargetShadow(t *testing.T) {
+func TestTargetlessAcquisitionQuarantinesNoLockTargetShadow(t *testing.T) {
 	fixture := newGenericWakePreparedCleanupFixture(t, true)
 	if err := fixture.cleanupNow(); err != nil {
 		t.Fatal(err)
 	}
-	before := snapshotWakeCheckTree(t, fixture.root)
+	targetPath := wakeTargetPath(fixture.root, fixture.me)
+	targetRaw, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetInfo, err := os.Lstat(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cleanup, err := acquireWakeLockWithOptions(fixture.root, fixture.me, wakeLockAcquireOptions{
 		wakeMode: wakeInjectModeNone,
 	})
-	if cleanup != nil {
-		t.Cleanup(cleanup)
+	if err != nil {
+		t.Fatalf("targetless acquisition after orphan quarantine: %v", err)
 	}
-	if err == nil {
-		t.Fatal("targetless acquisition removed a no-lock target shadow")
+	t.Cleanup(cleanup)
+
+	if _, err := os.Lstat(targetPath); !os.IsNotExist(err) {
+		t.Fatalf("orphan target still occupies live path: %v", err)
 	}
-	assertWakeCheckTreeUnchanged(t, fixture.root, before)
+	assertExactWakeQuarantineForTest(
+		t,
+		fixture.agentDir.path,
+		".wake.target.quarantined.",
+		targetRaw,
+		targetInfo,
+	)
+	inspection := inspectWakeLock(fixture.root, fixture.me)
+	if !inspection.Exists || inspection.Lock.PID != os.Getpid() || inspection.Lock.TargetDigest != "" ||
+		inspection.Lock.StateGeneration != "" || inspection.Lock.StateDigest != "" {
+		t.Fatalf("fresh targetless wake = %#v, want new unbound lock", inspection)
+	}
 }
 
 func installWakeStateMutationForTest(t *testing.T, path string, mutate func(*wakeState)) {

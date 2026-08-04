@@ -66,6 +66,60 @@ func TestRunOpsChecksReportsWakeRepairAvailabilityWithFloor(t *testing.T) {
 	}
 }
 
+func TestRunOpsChecksAlwaysReportsExactWakeQuarantineNamesWithoutLocks(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := config.WriteConfig(cfgPath, config.Config{Agents: []string{"alice"}}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	empty := runOpsChecks(root, "flag", false)
+	if empty.WakeQuarantine.Count != 0 || empty.WakeQuarantine.NewestAgeSeconds != nil {
+		t.Fatalf("empty wake quarantine = %#v", empty.WakeQuarantine)
+	}
+
+	now := time.Now().UTC()
+	agentDir := filepath.Join(root, "agents", "alice")
+	for _, item := range []struct{ name string }{
+		{name: ".wake.lock.quarantined." + now.Add(-8*time.Second).Format(wakeQuarantineTimestampLayout)},
+		{name: ".wake.target.quarantined." + now.Add(-3*time.Second).Format(wakeQuarantineTimestampLayout)},
+	} {
+		if err := os.WriteFile(filepath.Join(agentDir, item.name), []byte("preserved"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, decoy := range []string{
+		".wake.lock.quarantined.",
+		".wake.lock.quarantined." + now.Format(wakeQuarantineTimestampLayout) + ".extra",
+		"wake.lock.quarantined." + now.Format(wakeQuarantineTimestampLayout),
+	} {
+		if err := os.WriteFile(filepath.Join(agentDir, decoy), []byte("decoy"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result := runOpsChecks(root, "flag", false)
+	if result.WakeQuarantine.Count != 2 || result.WakeQuarantine.NewestAgeSeconds == nil {
+		t.Fatalf("wake quarantine = %#v, want two exact artifacts", result.WakeQuarantine)
+	}
+	if age := *result.WakeQuarantine.NewestAgeSeconds; age < 2 || age > 8 {
+		t.Fatalf("newest wake quarantine age = %v, want about 3 seconds", age)
+	}
+	if len(result.WakeLocks) != 0 {
+		t.Fatalf("wake quarantine reporting depended on locks: %#v", result.WakeLocks)
+	}
+	v2 := renderDoctorResultV2(doctorResult{Ops: result})
+	if v2.Ops == nil || v2.Ops.WakeQuarantine.Count != 2 {
+		t.Fatalf("schema v2 wake quarantine = %#v", v2.Ops)
+	}
+}
+
 func TestRunOpsChecksFixReconcilesPreparedPublicationGapMutationOnly(t *testing.T) {
 	fixture := newGenericWakePreparedCleanupFixture(t, true)
 	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -52,18 +53,16 @@ func assertMalformedWakeLockPreserved(t *testing.T, path string, wantRaw []byte,
 	}
 }
 
-func TestMalformedPreviouslyBoundWakeLockRefusesGenericAcquire(t *testing.T) {
+func TestMalformedPreviouslyBoundWakeLockQuarantinesOnGenericAcquire(t *testing.T) {
 	root := secureTempDirForTest(t)
 	path, raw, info := writeMalformedPreviouslyBoundWakeLockForTest(t, root, "codex")
 
 	cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{})
-	if err == nil {
-		if cleanup != nil {
-			cleanup()
-		}
-		t.Fatal("generic acquisition accepted malformed previously-bound wake lock")
+	if err != nil {
+		t.Fatalf("generic acquisition after malformed lock quarantine: %v", err)
 	}
-	assertMalformedWakeLockPreserved(t, path, raw, info)
+	t.Cleanup(cleanup)
+	assertExactWakeQuarantineForTest(t, filepath.Dir(path), ".wake.lock.quarantined.", raw, info)
 }
 
 func TestValidUnboundP2aStaleWakeLockIsReplaced(t *testing.T) {
@@ -221,12 +220,26 @@ func TestWakeLockJSONTrustMatrix(t *testing.T) {
 						t.Fatalf("invalid lock inspection = %#v claim=%v, want invalid unverified", inspection, claim)
 					}
 					before := snapshotWakeCheckTree(t, fixture.root)
+					quarantineOnAcquire := test.name == "raw parse failure" && operation == "acquisition"
 
 					switch operation {
 					case "acquisition":
 						cleanup, err := acquireWakeLockWithOptions(fixture.root, fixture.me, wakeLockAcquireOptions{})
 						if cleanup != nil {
 							cleanup()
+						}
+						if quarantineOnAcquire {
+							if err != nil {
+								t.Fatalf("acquisition after syntax-invalid lock quarantine: %v", err)
+							}
+							assertExactWakeQuarantineForTest(
+								t,
+								fixture.agentDir.path,
+								".wake.lock.quarantined.",
+								raw,
+								inspection.fileInfo,
+							)
+							return
 						}
 						if err == nil {
 							t.Fatal("acquisition accepted invalid lock JSON")

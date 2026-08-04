@@ -197,7 +197,7 @@ func TestGroupUsageLinesWakeIncludesLifecycleCommands(t *testing.T) {
 	if !containsLine(lines, "recover-owner  Recover an exact owner-bound wake claim") {
 		t.Fatal("groupUsageLines(wake) missing recover-owner subcommand")
 	}
-	if !containsLine(lines, "retire         Stop an exact managed inject-via wake") {
+	if !containsLine(lines, "retire         Retire an exact managed wake and its matching retained state") {
 		t.Fatal("groupUsageLines(wake) missing retire subcommand")
 	}
 }

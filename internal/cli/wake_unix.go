@@ -282,6 +282,7 @@ func acquireWakeLockWithOptionsInDir(
 	for {
 		var replace wakeLockInspection
 		var created wakeLockInspection
+		quarantined := false
 		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 			inspection := inspectWakeLockAt(dirfd, agentDir, root, me)
 			if options.repairLineage != nil && inspection.Exists {
@@ -294,6 +295,13 @@ func acquireWakeLockWithOptionsInDir(
 					inspection.Reason,
 					me,
 				)
+			}
+			if wakeLockEligibleForQuarantine(inspection, wakeQuarantineNow()) {
+				if _, err := quarantineMalformedWakeLockAt(dirfd, agentDir, inspection); err != nil {
+					return err
+				}
+				quarantined = true
+				return nil
 			}
 			if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestAcquire); err != nil {
 				return err
@@ -365,6 +373,20 @@ func acquireWakeLockWithOptionsInDir(
 			}
 			if replace.Exists {
 				return nil
+			}
+			if !inspection.Exists && options.target == nil && options.repairLineage == nil {
+				orphan, exists, readErr := readWakeTargetSnapshotAt(dirfd, agentDir, root, me)
+				// Parse errors retain an exact snapshot; quarantineWakeTargetAt independently revalidates inode and raw bytes.
+				if readErr != nil && (orphan.FileInfo == nil || orphan.Raw == nil) {
+					return fmt.Errorf("orphan wake target is unverified before targetless acquisition: %w", readErr)
+				}
+				if exists {
+					if _, err := quarantineWakeTargetAt(dirfd, agentDir, orphan); err != nil {
+						return err
+					}
+					quarantined = true
+					return nil
+				}
 			}
 			if orphan, exists, readErr := readWakeTargetAt(dirfd, agentDir, root, me); readErr != nil {
 				return fmt.Errorf("wake target for %s is unverified: %w", me, readErr)
@@ -457,6 +479,9 @@ func acquireWakeLockWithOptionsInDir(
 		})
 		if err != nil {
 			return nil, err
+		}
+		if quarantined {
+			continue
 		}
 		if replace.Exists {
 			if _, err := terminateAndRemoveOrphanedWakeLockInDir(

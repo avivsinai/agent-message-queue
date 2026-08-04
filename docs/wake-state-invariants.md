@@ -16,7 +16,10 @@ digest.
 **Commit domain:** the lock becomes authoritative when `.wake.lock` is linked
 into the retained agent directory. Readers verify both its content and file
 identity. Removal is conditional on the exact inspected claim still matching;
-a replacement lock is not selected for cleanup.
+a replacement lock is not selected for cleanup. For managed retirement, exact
+lock removal is the commit point: pre-commit failure is `refused`; post-commit
+target/state residue cannot undo retirement and is reported as
+`retired_with_residue` rather than a refusal.
 
 **Independence invariant:** ownership changes only when the lock publication or
 exact-claim removal commits. Treating a target update, preparation marker, ready
@@ -38,6 +41,11 @@ of `.wake.lock`. During authoritative acquisition, the installed target is
 re-read and directory-synced before lock publication. During release, target
 cleanup occurs only after lock removal and only when file identity, raw bytes,
 parsed value, and digest still match the captured target snapshot.
+Managed retirement follows the same retained-directory capability boundary:
+after exact lock removal commits, it removes only the captured matching target
+and its exact corresponding bound state. Unbound projection state is removed
+only when its target-section digest matches that target. Mailbox contents and
+replacement target/state artifacts are preserved.
 
 **Independence invariant:** changing injector behavior is not an ownership
 transition. If target and lock shared one commit domain, a target replacement
@@ -47,6 +55,38 @@ state. If their cleanup domains were combined, release of an old claim could
 delete a newer target.
 
 Source anchors: `wake_target.go` and `wake_owner_storage_unix.go`.
+
+Retirement results are exactly `refused`, `retired`, and
+`retired_with_residue`. The last is exit-0 success with a warning: ownership is
+already retired, but target/state cleanup failed or was skipped. The next
+acquisition converges that residue through the quarantine/supersession path;
+there is no separate recovery contract.
+
+## `.wake.<lock|target>.quarantined.<timestamp>`: preserved blocked input
+
+**Owns:** no wake authority. A quarantine artifact preserves the exact inode
+and bytes of a blocked lock or orphan target while freeing the live pathname
+for a fresh acquisition decision.
+
+**Commit domain:** under the lifecycle guard and retained agent-directory FD,
+AMQ revalidates identity and raw bytes, renames without replacement, syncs the
+directory, and reopens the quarantine name to verify the moved inode and bytes.
+The caller then discards every pre-move observation and starts acquisition from
+a fresh inspection. The lock case is deliberately narrow: only aged,
+syntax-invalid/empty/truncated, same-owner, regular 0600 generic files qualify.
+Fresh creating, 0400, owner-shaped, unreadable, oversized, special, and
+valid-JSON wrong-known-type locks are preserved at `.wake.lock`. With no lock,
+a targetless acquisition may quarantine an exact readable regular 0600 orphan
+target.
+
+**Independence invariant:** quarantine is preservation, not cleanup or
+ownership. Exact names are reported by `doctor --ops` independently of lock
+discovery. Ordinary tmp cleanup never removes them. Explicit
+`--wake-quarantine-older-than` cleanup captures and revalidates exact identity
+and bytes under the same guard before `unlinkat` and directory sync; ambiguity
+or replacement preserves the artifact.
+
+Source anchors: `wake_quarantine_unix.go`, `wake_unix.go`, and `cleanup.go`.
 
 ## `.wake.prepared`: generation preparation marker
 
@@ -145,10 +185,11 @@ An authoritative inject-via claim has three durable publication steps:
    commit.
 
 The target and state shadow can therefore be installed when no lock has
-committed. Failures before the lock link preserve both artifacts; recovery does
-not assume that an uncommitted lock makes either safe to delete. Once the lock
-link succeeds, errors removing the temporary name or syncing the directory are
-reported as committed-lock errors.
+committed. Failures before the lock link preserve both artifacts; a later
+targetless acquisition may quarantine only the exact target, then must inspect
+again before superseding the corresponding projection or publishing a lock.
+Once the lock link succeeds, errors removing the temporary name or syncing the
+directory are reported as committed-lock errors.
 
 This order gives target intent and wake ownership separate observable commit
 points. Recovery must classify the point reached rather than infer a single
@@ -158,7 +199,7 @@ all-or-nothing state across both files.
 
 | Case | Injected interleaving | Required observation |
 | --- | --- | --- |
-| Target/state commit before lock | Fail after target publication, state publication, or either directory sync and before the lock link. | No authoritative lock exists. The installed target and state shadow are reported and preserved for explicit operator handling. A later reader does not infer ownership from either artifact. |
+| Target/state commit before lock | Fail after target publication, state publication, or either directory sync and before the lock link. | No authoritative lock exists. The installed target and state shadow are preserved. A later targetless acquisition may move the exact target to quarantine, then fresh-inspect before superseding matching projection state or creating ownership. |
 | Lock replacement during a reader | Replace `.wake.lock` between the reader's pathname snapshot, opened-file read, and final comparison while reading lock-, target-, prepared-, or ready-bound state. | The operation reports changed or inconclusive state and performs no mutation based on the old snapshot. The replacement remains present. |
 | Prepared marker generation | Exercise absent, stale-generation, current-generation/current-digest, and current-generation/wrong-digest markers. | Absence and stale generation remain not prepared; the exact current marker is accepted; an incompatible current marker is refused rather than treated as readiness. |
 | Ready file replacement during cleanup | Publish a caller ready file, replace its pathname, then run failure cleanup for the original publication. | Cleanup removes only the original unchanged snapshot. The replacement is preserved and is not reported as the original receipt. |

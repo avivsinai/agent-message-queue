@@ -127,6 +127,10 @@ func TestDoctorOpsJSONSchemaV1GoldenBytes(t *testing.T) {
 		"        \"operator_terminal_required\": false\n" +
 		"      }\n" +
 		"    ],\n" +
+		"    \"wake_quarantine\": {\n" +
+		"      \"count\": 0,\n" +
+		"      \"newest_age_seconds\": null\n" +
+		"    },\n" +
 		"    \"hints\": null\n" +
 		"  }\n" +
 		"}\n"

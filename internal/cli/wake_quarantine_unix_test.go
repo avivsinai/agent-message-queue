@@ -1,0 +1,356 @@
+//go:build darwin || linux
+
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+func assertExactWakeQuarantineForTest(
+	t *testing.T,
+	agentDir string,
+	prefix string,
+	wantRaw []byte,
+	wantInfo os.FileInfo,
+) {
+	t.Helper()
+	entries, err := os.ReadDir(agentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var path string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) {
+			if path != "" {
+				t.Fatalf("multiple quarantine artifacts with prefix %q", prefix)
+			}
+			path = filepath.Join(agentDir, entry.Name())
+		}
+	}
+	if path == "" {
+		t.Fatalf("missing quarantine artifact with prefix %q", prefix)
+	}
+	gotRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotInfo, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotRaw, wantRaw) || !os.SameFile(gotInfo, wantInfo) {
+		t.Fatal("quarantine artifact did not preserve exact inode/raw")
+	}
+}
+
+func TestAcquireQuarantinesAgedSyntaxInvalidGenericWakeLock(t *testing.T) {
+	for _, raw := range [][]byte{nil, []byte(`{"pid":`), []byte(`not-json`)} {
+		t.Run(string(raw), func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			agentDir := filepath.Join(root, "agents", "codex")
+			if err := os.MkdirAll(agentDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			lockPath := filepath.Join(agentDir, ".wake.lock")
+			if err := os.WriteFile(lockPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			past := time.Now().Add(-3 * time.Second)
+			if err := os.Chtimes(lockPath, past, past); err != nil {
+				t.Fatal(err)
+			}
+			beforeInfo, err := os.Lstat(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{})
+			if err != nil {
+				t.Fatalf("acquire after malformed lock quarantine: %v", err)
+			}
+			t.Cleanup(cleanup)
+			assertExactWakeQuarantineForTest(
+				t,
+				agentDir,
+				".wake.lock.quarantined.",
+				raw,
+				beforeInfo,
+			)
+			var replacement wakeLock
+			replacementRaw, err := os.ReadFile(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(replacementRaw, &replacement); err != nil || replacement.PID != os.Getpid() {
+				t.Fatalf("replacement wake lock = %#v err=%v", replacement, err)
+			}
+		})
+	}
+}
+
+func TestTargetlessAcquisitionQuarantinesReadableMalformedOrphanTarget(t *testing.T) {
+	for _, raw := range [][]byte{nil, []byte(`{"schema":`)} {
+		t.Run(string(raw), func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			agentDir := filepath.Join(root, "agents", "codex")
+			if err := os.MkdirAll(agentDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			targetPath := filepath.Join(agentDir, wakeTargetFileName)
+			if err := os.WriteFile(targetPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Lstat(targetPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{})
+			if err != nil {
+				t.Fatalf("targetless acquisition after malformed target quarantine: %v", err)
+			}
+			t.Cleanup(cleanup)
+			assertExactWakeQuarantineForTest(
+				t,
+				agentDir,
+				".wake.target.quarantined.",
+				raw,
+				before,
+			)
+		})
+	}
+}
+
+func TestTargetlessAcquisitionPreservesIneligibleOrphanTargets(t *testing.T) {
+	for _, kind := range []string{"wrong-mode", "oversized", "symlink", "fifo"} {
+		t.Run(kind, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			agentDir := filepath.Join(root, "agents", "codex")
+			if err := os.MkdirAll(agentDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			targetPath := filepath.Join(agentDir, wakeTargetFileName)
+			switch kind {
+			case "wrong-mode":
+				if err := os.WriteFile(targetPath, []byte(`{"schema":`), 0o400); err != nil {
+					t.Fatal(err)
+				}
+			case "oversized":
+				if err := os.WriteFile(targetPath, bytes.Repeat([]byte("x"), maxWakeMetadataFileBytes+1), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				outside := filepath.Join(t.TempDir(), "outside")
+				if err := os.WriteFile(outside, []byte(`{"schema":`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, targetPath); err != nil {
+					t.Fatal(err)
+				}
+			case "fifo":
+				if err := syscall.Mkfifo(targetPath, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.Lstat(targetPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{})
+			if cleanup != nil {
+				cleanup()
+			}
+			if err == nil {
+				t.Fatalf("targetless acquisition accepted %s orphan target", kind)
+			}
+			after, statErr := os.Lstat(targetPath)
+			if statErr != nil || !os.SameFile(before, after) {
+				t.Fatalf("%s orphan target changed: info=%v err=%v", kind, after, statErr)
+			}
+			entries, readErr := os.ReadDir(agentDir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), ".wake.target.quarantined.") {
+					t.Fatalf("%s orphan target was quarantined", kind)
+				}
+			}
+		})
+	}
+}
+
+func TestAcquirePreservesIneligibleMalformedWakeLocks(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+		mode os.FileMode
+		aged bool
+	}{
+		{name: "fresh", raw: []byte(`{"pid":`), mode: 0o600},
+		{name: "owner mode", raw: []byte(`{"pid":`), mode: wakeOwnerLockFileMode, aged: true},
+		{name: "owner shaped", raw: []byte(`{"owner_schema":1,`), mode: 0o600, aged: true},
+		{name: "escaped owner shape", raw: []byte(`{"ow\u006eer_schema":1,`), mode: 0o600, aged: true},
+		{name: "valid JSON wrong known type", raw: []byte(`{"pid":"wrong","tty":"","root":"","started":""}`), mode: 0o600, aged: true},
+		{name: "oversized", raw: bytes.Repeat([]byte("x"), maxWakeMetadataFileBytes+1), mode: 0o600, aged: true},
+		{name: "wrong mode", raw: []byte(`{"pid":`), mode: 0o000, aged: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			agentDir := filepath.Join(root, "agents", "codex")
+			if err := os.MkdirAll(agentDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			lockPath := filepath.Join(agentDir, ".wake.lock")
+			if err := os.WriteFile(lockPath, test.raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(lockPath, test.mode); err != nil {
+				t.Fatal(err)
+			}
+			if test.aged {
+				past := time.Now().Add(-3 * time.Second)
+				if err := os.Chtimes(lockPath, past, past); err != nil {
+					t.Fatal(err)
+				}
+			}
+			beforeInfo, err := os.Lstat(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{})
+			if cleanup != nil {
+				cleanup()
+			}
+			if err == nil {
+				t.Fatal("acquisition accepted ineligible malformed wake lock")
+			}
+			afterInfo, statErr := os.Lstat(lockPath)
+			if statErr != nil {
+				t.Fatalf("ineligible malformed lock was moved: %v", statErr)
+			}
+			if !os.SameFile(beforeInfo, afterInfo) {
+				t.Fatal("ineligible malformed lock inode changed")
+			}
+			entries, readErr := os.ReadDir(agentDir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), ".wake.lock.quarantined.") {
+					t.Fatalf("ineligible malformed lock was quarantined as %s", entry.Name())
+				}
+			}
+		})
+	}
+}
+
+func TestMalformedLockQuarantineNoReplaceCollisionPreservesSource(t *testing.T) {
+	root := secureTempDirForTest(t)
+	agentDir := filepath.Join(root, "agents", "codex")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(agentDir, ".wake.lock")
+	raw := []byte(`{"pid":`)
+	if err := os.WriteFile(lockPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-3 * time.Second)
+	if err := os.Chtimes(lockPath, past, past); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixed := time.Date(2026, 8, 4, 12, 0, 0, 123456789, time.UTC)
+	originalNow := wakeQuarantineNow
+	wakeQuarantineNow = func() time.Time { return fixed }
+	t.Cleanup(func() { wakeQuarantineNow = originalNow })
+	name, err := wakeQuarantineName(".wake.lock", fixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collisionPath := filepath.Join(agentDir, name)
+	if err := os.WriteFile(collisionPath, []byte("existing quarantine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{})
+	if cleanup != nil {
+		cleanup()
+	}
+	if err == nil {
+		t.Fatal("quarantine collision unexpectedly allowed acquisition")
+	}
+	afterRaw, readErr := os.ReadFile(lockPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	after, statErr := os.Lstat(lockPath)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if !bytes.Equal(afterRaw, raw) || !os.SameFile(before, after) {
+		t.Fatal("quarantine collision changed source lock")
+	}
+	if got, readErr := os.ReadFile(collisionPath); readErr != nil || string(got) != "existing quarantine" {
+		t.Fatalf("quarantine collision target changed: %q err=%v", got, readErr)
+	}
+}
+
+func TestAcquirePreservesSpecialWakeLocks(t *testing.T) {
+	for _, kind := range []string{"symlink", "fifo"} {
+		t.Run(kind, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			agentDir := filepath.Join(root, "agents", "codex")
+			if err := os.MkdirAll(agentDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			lockPath := filepath.Join(agentDir, ".wake.lock")
+			switch kind {
+			case "symlink":
+				target := filepath.Join(t.TempDir(), "target")
+				if err := os.WriteFile(target, []byte(`{"pid":`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, lockPath); err != nil {
+					t.Fatal(err)
+				}
+			case "fifo":
+				if err := syscall.Mkfifo(lockPath, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{})
+			if cleanup != nil {
+				cleanup()
+			}
+			if err == nil {
+				t.Fatalf("acquisition accepted %s wake lock", kind)
+			}
+			if _, err := os.Lstat(lockPath); err != nil {
+				t.Fatalf("%s wake lock was removed: %v", kind, err)
+			}
+			entries, err := os.ReadDir(agentDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), ".wake.lock.quarantined.") {
+					t.Fatalf("%s wake lock was quarantined", kind)
+				}
+			}
+		})
+	}
+}

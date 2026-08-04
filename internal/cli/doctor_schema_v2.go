@@ -19,11 +19,12 @@ type doctorSummaryV2 struct {
 }
 
 type doctorOpsResultV2 struct {
-	Root         opsRoot          `json:"root"`
-	Agents       []opsAgent       `json:"agents"`
-	OperatorGate *opsOperatorGate `json:"operator_gate,omitempty"`
-	WakeLocks    []opsWakeLockV2  `json:"wake_locks,omitempty"`
-	Hints        []opsHint        `json:"hints"`
+	Root           opsRoot           `json:"root"`
+	Agents         []opsAgent        `json:"agents"`
+	OperatorGate   *opsOperatorGate  `json:"operator_gate,omitempty"`
+	WakeLocks      []opsWakeLockV2   `json:"wake_locks,omitempty"`
+	WakeQuarantine opsWakeQuarantine `json:"wake_quarantine"`
+	Hints          []opsHint         `json:"hints"`
 }
 
 type opsWakeLockV2 struct {
@@ -66,11 +67,12 @@ func renderDoctorResultV2(result doctorResult) doctorResultV2 {
 		return v2
 	}
 	v2.Ops = &doctorOpsResultV2{
-		Root:         result.Ops.Root,
-		Agents:       result.Ops.Agents,
-		OperatorGate: result.Ops.OperatorGate,
-		Hints:        result.Ops.Hints,
-		WakeLocks:    make([]opsWakeLockV2, 0, len(result.Ops.WakeLocks)),
+		Root:           result.Ops.Root,
+		Agents:         result.Ops.Agents,
+		OperatorGate:   result.Ops.OperatorGate,
+		Hints:          result.Ops.Hints,
+		WakeLocks:      make([]opsWakeLockV2, 0, len(result.Ops.WakeLocks)),
+		WakeQuarantine: result.Ops.WakeQuarantine,
 	}
 	for _, lock := range result.Ops.WakeLocks {
 		v2Lock := opsWakeLockV2{
