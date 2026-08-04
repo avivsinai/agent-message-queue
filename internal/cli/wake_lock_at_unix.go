@@ -190,6 +190,60 @@ func removeWakeLockIfUnchangedGuardedAt(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 ) error {
+	_, err := removeWakeLockIfUnchangedGuardedAtStatus(dirfd, agentDir, inspection)
+	return err
+}
+
+func removeWakeLockIfUnchangedGuardedAtStatus(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+) (bool, error) {
+	outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
+		dirfd,
+		agentDir,
+		inspection,
+		func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
+	)
+	return outcome.Committed, outcome.Err
+}
+
+type wakeLockRemovalOutcome struct {
+	Committed bool
+	Err       error
+}
+
+type wakeLockRemovalResidue string
+
+const (
+	wakeLockResidueDurability      wakeLockRemovalResidue = "wake lock durability"
+	wakeLockResidueDetachedCleanup wakeLockRemovalResidue = "detached wake cleanup"
+	wakeLockResidueReplacement     wakeLockRemovalResidue = "replacement wake lock"
+	wakeLockResiduePreservedClaim  wakeLockRemovalResidue = ".wake.lock"
+	wakeLockResidueCleanup         wakeLockRemovalResidue = "wake lock cleanup"
+)
+
+type wakeLockResidueError struct {
+	residue wakeLockRemovalResidue
+	err     error
+}
+
+func (err *wakeLockResidueError) Error() string { return err.err.Error() }
+func (err *wakeLockResidueError) Unwrap() error { return err.err }
+
+func newWakeLockResidueError(residue wakeLockRemovalResidue, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &wakeLockResidueError{residue: residue, err: err}
+}
+
+func removeWakeLockIfUnchangedGuardedAtOutcome(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	unlink func() error,
+) wakeLockRemovalOutcome {
 	var detachedValidationErr error
 	if err := validateBoundWakeMutationAt(dirfd, agentDir, inspection); err != nil {
 		// A retained directory capability can outlive replacement of its
@@ -198,19 +252,92 @@ func removeWakeLockIfUnchangedGuardedAt(
 		// private residue even though canonical bound-state validation is no
 		// longer possible.
 		if !retainedWakeAgentDirIsDetached(agentDir) {
-			return err
+			return wakeLockRemovalOutcome{Err: err}
 		}
 		detachedValidationErr = err
 	}
 	path := filepath.Join(agentDir.path, ".wake.lock")
-	if err := removeWakeLockIfUnchangedGuardedWithIO(
+	committed, err := removeWakeLockIfUnchangedGuardedWithIOStatus(
 		inspection,
 		func() ([]byte, os.FileInfo, error) { return readWakeLockFileAt(dirfd, path) },
-		func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
-	); err != nil {
-		return err
+		unlink,
+	)
+	if err != nil {
+		return wakeLockRemovalOutcome{Committed: committed, Err: err}
 	}
-	return newWakeDetachedCleanupOnlyError(detachedValidationErr)
+	if !committed {
+		return wakeLockRemovalOutcome{}
+	}
+	outcome := wakeLockRemovalOutcome{Committed: true}
+	if detachedValidationErr != nil {
+		outcome.Err = newWakeDetachedCleanupOnlyError(detachedValidationErr)
+	}
+	return outcome
+}
+
+func removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	unlink func() error,
+) wakeLockRemovalOutcome {
+	outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
+		dirfd, agentDir, inspection, unlink,
+	)
+	if !outcome.Committed {
+		return outcome
+	}
+	if err := syncWakeLockAfterCommitDirFD(dirfd); err != nil {
+		outcome.Err = errors.Join(
+			outcome.Err,
+			newWakeLockResidueError(
+				wakeLockResidueDurability,
+				fmt.Errorf("sync wake lock directory after exact removal: %w", err),
+			),
+		)
+	}
+	return outcome
+}
+
+func appendWakeLockRemovalResidue(
+	residue []wakeLockRemovalResidue,
+	value wakeLockRemovalResidue,
+) []wakeLockRemovalResidue {
+	for _, existing := range residue {
+		if existing == value {
+			return residue
+		}
+	}
+	return append(residue, value)
+}
+
+func wakeLockRemovalResiduesFromError(err error) []wakeLockRemovalResidue {
+	var residue []wakeLockRemovalResidue
+	var collect func(error)
+	collect = func(current error) {
+		if current == nil {
+			return
+		}
+		if typed, ok := current.(*wakeLockResidueError); ok {
+			residue = appendWakeLockRemovalResidue(residue, typed.residue)
+			return
+		}
+		if _, ok := current.(*wakeDetachedCleanupOnlyError); ok {
+			residue = appendWakeLockRemovalResidue(residue, wakeLockResidueDetachedCleanup)
+			return
+		}
+		if joined, ok := current.(interface{ Unwrap() []error }); ok {
+			for _, child := range joined.Unwrap() {
+				collect(child)
+			}
+			return
+		}
+		if wrapped, ok := current.(interface{ Unwrap() error }); ok {
+			collect(wrapped.Unwrap())
+		}
+	}
+	collect(err)
+	return residue
 }
 
 // wakeDetachedCleanupOnlyError reports that a retained descriptor proved

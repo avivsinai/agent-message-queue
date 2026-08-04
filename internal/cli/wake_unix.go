@@ -321,7 +321,7 @@ func acquireWakeLockWithOptionsInDir(
 					if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, inspection); err != nil {
 						return err
 					}
-					if err := validateWakeLockStaleRemoval(inspection); err != nil {
+					if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, inspection); err != nil {
 						return err
 					}
 					if err := removeWakeLockIfUnchangedGuardedAt(
@@ -343,12 +343,16 @@ func acquireWakeLockWithOptionsInDir(
 								me,
 							)
 						}
-						if err := requireWakeLockUsable(inspection, options.wakeMode, options.target); err != nil {
+						if err := requireWakeLockUsableAt(
+							dirfd, agentDir, inspection, options.wakeMode, options.target,
+						); err != nil {
 							return err
 						}
 						return wakeLockAlreadyRunningError(me, inspection)
 					}
-					replaceNeeded, replaceErr := wakeLockReplacementNeeded(inspection)
+					replaceNeeded, replaceErr := wakeLockReplacementNeededAt(
+						dirfd, agentDir, inspection,
+					)
 					if replaceErr != nil {
 						return replaceErr
 					}
@@ -734,6 +738,17 @@ func wakeLockReplacementNeeded(inspection wakeLockInspection) (bool, error) {
 	return wakeLockNeedsReplacement(inspection), nil
 }
 
+func wakeLockReplacementNeededAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+) (bool, error) {
+	if err := validateWakeLockOwnerlessMutationAt(dirfd, agentDir, inspection); err != nil {
+		return false, err
+	}
+	return wakeLockNeedsReplacement(inspection), nil
+}
+
 func validateWakeLockOwnerlessMutation(inspection wakeLockInspection) error {
 	if _, err := readWakeStateSelectionForInspection(
 		inspection.Root,
@@ -820,6 +835,41 @@ func wakeLockTerminalGone(inspection wakeLockInspection) bool {
 }
 
 func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, requestedTarget *wakeTarget) error {
+	return requireWakeLockUsableWithTargetReader(
+		inspection,
+		requiredMode,
+		requestedTarget,
+		func() (wakeTarget, bool, error) {
+			return readWakeTargetFromStateForInspection(
+				inspection.Root, inspection.Agent, inspection,
+			)
+		},
+	)
+}
+
+func requireWakeLockUsableAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	requiredMode string,
+	requestedTarget *wakeTarget,
+) error {
+	return requireWakeLockUsableWithTargetReader(
+		inspection,
+		requiredMode,
+		requestedTarget,
+		func() (wakeTarget, bool, error) {
+			return readWakeTargetForRetainedInspectionAt(dirfd, agentDir, inspection)
+		},
+	)
+}
+
+func requireWakeLockUsableWithTargetReader(
+	inspection wakeLockInspection,
+	requiredMode string,
+	requestedTarget *wakeTarget,
+	readTarget func() (wakeTarget, bool, error),
+) error {
 	if !inspection.Exists || inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
 		return fmt.Errorf("existing wake lock for %s is not a confirmed valid wake", inspection.Agent)
 	}
@@ -846,9 +896,7 @@ func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, r
 		if requestedTarget == nil {
 			return fmt.Errorf("existing inject-via wake for %s cannot be reused without a requested wake target", inspection.Agent)
 		}
-		persistedTarget, exists, err := readWakeTargetFromStateForInspection(
-			inspection.Root, inspection.Agent, inspection,
-		)
+		persistedTarget, exists, err := readTarget()
 		if err != nil {
 			return fmt.Errorf("existing inject-via wake target for %s is not usable: %w", inspection.Agent, err)
 		}

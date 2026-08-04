@@ -110,6 +110,72 @@ func TestDetachedBoundStaleGenericWakeAcquireStopsWithoutPublishing(t *testing.T
 	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
 }
 
+func TestDetachedBoundValidWakeReuseUsesRetainedState(t *testing.T) {
+	fixture := newGenericWakePreparedCleanupFixture(t, true)
+	lock := fixture.created.Lock
+	lock.PID = 4242
+	lock.ProcessStart = "wake-start"
+	lock.BootID = "boot-1"
+	lock.Executable = "/usr/local/bin/amq"
+	lock.Args = []string{"/usr/local/bin/amq", "wake", "--root", fixture.root, "--me", fixture.me, "--inject-via", fixture.target.InjectVia}
+	writeWakeLockForTest(t, fixture.root, fixture.me, lock)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return matchingRetireWakeProcessFromLock(pid, lock)
+	})
+	detachedPath := fixture.agentDir.path + ".valid-reuse-detached"
+	var successorBefore map[string]detachedWakeFileSnapshot
+	originalAfterRead := afterWakeLockAtRead
+	afterWakeLockAtRead = func() {
+		afterWakeLockAtRead = func() {}
+		if err := os.Rename(fixture.agentDir.path, detachedPath); err != nil {
+			t.Fatalf("detach valid wake agent directory: %v", err)
+		}
+		if err := os.Mkdir(fixture.agentDir.path, 0o700); err != nil {
+			t.Fatalf("create valid wake successor directory: %v", err)
+		}
+		copyDetachedWakeSuccessorFiles(t, detachedPath, fixture.agentDir.path)
+		if err := os.Remove(filepath.Join(fixture.agentDir.path, wakeStateFileName)); err != nil {
+			t.Fatalf("remove successor wake state: %v", err)
+		}
+		successorBefore = snapshotDetachedWakeFiles(
+			t,
+			fixture.agentDir.path,
+			".wake.lock",
+			wakeTargetFileName,
+			wakePreparedFileName,
+		)
+	}
+	t.Cleanup(func() { afterWakeLockAtRead = originalAfterRead })
+
+	cleanup, err := acquireWakeLockWithOptionsInDir(
+		fixture.agentDir,
+		fixture.root,
+		fixture.me,
+		wakeLockAcquireOptions{
+			acceptExistingValid: true,
+			target:              fixture.target,
+			wakeMode:            wakeTargetInjectVia,
+		},
+	)
+	if cleanup != nil {
+		t.Fatal("detached valid-wake reuse returned cleanup authority")
+	}
+	var alreadyRunning *wakeAlreadyRunningError
+	if !errors.As(err, &alreadyRunning) {
+		t.Fatalf("detached valid-wake reuse error = %v, want already running", err)
+	}
+	if successorBefore == nil {
+		t.Fatal("valid-wake reuse did not reach detached-directory seam")
+	}
+	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
+	if _, err := os.Stat(filepath.Join(fixture.agentDir.path, wakeStateFileName)); !os.IsNotExist(err) {
+		t.Fatalf("missing successor state changed during retained reuse: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(detachedPath, wakeStateFileName)); err != nil {
+		t.Fatalf("retained wake state was not preserved: %v", err)
+	}
+}
+
 func TestDetachedBoundWakeRepairStopsWithoutStarting(t *testing.T) {
 	fixture := newGenericWakePreparedCleanupFixture(t, true)
 	writeWakeRepairFloorForTest(t, fixture.root, fixture.me, *fixture.target, nil)

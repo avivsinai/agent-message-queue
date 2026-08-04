@@ -22,7 +22,7 @@ func TestWakeUpgradeRetireLegacyWithoutControlMetadataFailsClosed(t *testing.T) 
 	})
 
 	result, err := retireWake(root, "codex", requested)
-	if err == nil || result.Status != "error" || !strings.Contains(result.Reason, "no cooperative control endpoint") {
+	if err == nil || result.Status != "refused" || !strings.Contains(result.Reason, "no cooperative control endpoint") {
 		t.Fatalf("retire result = %#v err=%v, want missing-control failure", result, err)
 	}
 	if _, err := os.Stat(lockPath); err != nil {

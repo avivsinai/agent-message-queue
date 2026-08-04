@@ -6193,7 +6193,7 @@ func TestRunWakeWithLoopRetriesBoundInconclusiveState(t *testing.T) {
 	}
 }
 
-func TestRunWakeWithLoopRetriesBoundDirectoryObservationFailure(t *testing.T) {
+func TestRunWakeWithLoopRetainedBoundReuseSkipsPathnameStateObservation(t *testing.T) {
 	const wakePID = 4242
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid == wakePID {
@@ -6225,12 +6225,9 @@ func TestRunWakeWithLoopRetriesBoundDirectoryObservationFailure(t *testing.T) {
 	writeWakePreparedForTest(t, root, "orchestrator")
 
 	originalOpen := openWakeStateInspectionDirectory
-	observationFailures := 0
+	observationCalls := 0
 	openWakeStateInspectionDirectory = func(path, label string) (*wakeAgentDir, error) {
-		if observationFailures == 0 {
-			observationFailures++
-			return nil, os.ErrPermission
-		}
+		observationCalls++
 		return originalOpen(path, label)
 	}
 	t.Cleanup(func() { openWakeStateInspectionDirectory = originalOpen })
@@ -6255,13 +6252,13 @@ func TestRunWakeWithLoopRetriesBoundDirectoryObservationFailure(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("bound directory observation failure did not retry: %v", err)
+		t.Fatalf("retained bound reuse failed: %v", err)
 	}
 	if _, err := os.Stat(readyPath); err != nil {
 		t.Fatalf("ready file missing: %v", err)
 	}
-	if observationFailures != 1 || retryCalls != 1 {
-		t.Fatalf("observation failures=%d retry calls=%d, want 1 each", observationFailures, retryCalls)
+	if observationCalls != 0 || retryCalls != 0 {
+		t.Fatalf("pathname observation calls=%d retry calls=%d, want 0 each", observationCalls, retryCalls)
 	}
 }
 

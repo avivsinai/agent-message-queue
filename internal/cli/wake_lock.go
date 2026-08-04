@@ -658,30 +658,42 @@ func removeWakeLockIfUnchangedGuarded(inspection wakeLockInspection) error {
 }
 
 func removeWakeLockIfUnchangedGuardedWithIO(inspection wakeLockInspection, read wakeLockFileReader, remove func() error) error {
+	_, err := removeWakeLockIfUnchangedGuardedWithIOStatus(inspection, read, remove)
+	return err
+}
+
+func removeWakeLockIfUnchangedGuardedWithIOStatus(
+	inspection wakeLockInspection,
+	read wakeLockFileReader,
+	remove func() error,
+) (bool, error) {
 	if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestMutate); err != nil {
-		return err
+		return false, err
 	}
 	current, currentInfo, err := read()
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("re-read wake lock before removal: %w", err)
+		return false, fmt.Errorf("re-read wake lock before removal: %w", err)
 	}
 	if !bytes.Equal(current, inspection.raw) {
-		return fmt.Errorf("wake lock changed while cleaning stale lock; retry")
+		return false, fmt.Errorf("wake lock changed while cleaning stale lock; retry")
 	}
 	if inspection.fileInfo == nil || currentInfo == nil || !sameWakeFileIdentity(inspection.fileInfo, currentInfo) {
-		return fmt.Errorf("wake lock generation changed while cleaning stale lock; retry")
+		return false, fmt.Errorf("wake lock generation changed while cleaning stale lock; retry")
 	}
 	// Pathname removal is safe under the lifecycle guard held by every
 	// cooperating writer; an unguarded same-UID writer is out of contract. A
 	// rename-and-verify alternative would expose lock absence to pre-P2b readers
 	// during a two-step removal, creating a real competing-authority hazard.
-	if err := remove(); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove stale wake lock: %w", err)
+	if err := remove(); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("remove stale wake lock: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 func sameWakeLockGeneration(first, second wakeLockInspection) bool {

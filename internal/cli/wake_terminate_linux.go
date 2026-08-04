@@ -52,14 +52,21 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 		if !sameWakeLockGeneration(inspection, locked) {
 			return nil
 		}
-		if err := validateWakeLockOwnerlessMutation(locked); err != nil {
+		if err := validateWakeLockOwnerlessMutationAt(dirfd, agentDir, locked); err != nil {
 			return err
 		}
 		fd, err := linuxPidfdOpen(locked.PID, 0)
 		if err != nil {
 			if errors.Is(err, syscall.ESRCH) {
-				provenGone = true
-				return removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, locked)
+				var removeErr error
+				outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+					dirfd,
+					agentDir,
+					locked,
+					func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
+				)
+				provenGone, removeErr = outcome.Committed, outcome.Err
+				return removeErr
 			}
 			return fmt.Errorf("pidfd_open wake process %d: %w", locked.PID, err)
 		}
@@ -74,7 +81,7 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 		if pidfd >= 0 {
 			_ = linuxPidfdClose(pidfd)
 		}
-		return false, err
+		return provenGone, err
 	}
 	if provenGone {
 		return true, nil
@@ -128,18 +135,54 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 			return nil
 		}
 		if !sameWakeLockGeneration(locked, current) {
-			return nil
+			return newWakeLockResidueError(
+				wakeLockResidueReplacement,
+				errors.New("wake lock changed after wake process stopped; preserving replacement claim"),
+			)
 		}
-		if err := validateWakeLockStaleRemoval(current); err != nil {
-			return err
+		if retainedWakeAgentDirIsDetached(agentDir) {
+			var removeErr error
+			outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+				dirfd,
+				agentDir,
+				current,
+				func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
+			)
+			removed, removeErr = outcome.Committed, outcome.Err
+			return removeErr
 		}
-		if err := removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, current); err != nil {
-			return err
+		if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, current); err != nil {
+			return newWakeLockResidueError(
+				wakeLockResiduePreservedClaim,
+				fmt.Errorf("wake process stopped but exact wake lock cleanup is unavailable; preserving retained claim: %w", err),
+			)
 		}
-		removed = true
-		return nil
+		var removeErr error
+		outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+			dirfd,
+			agentDir,
+			current,
+			func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
+		)
+		removed, removeErr = outcome.Committed, outcome.Err
+		return removeErr
 	})
-	return removed, err
+	if err != nil {
+		if len(wakeLockRemovalResiduesFromError(err)) == 0 {
+			err = newWakeLockResidueError(
+				wakeLockResiduePreservedClaim,
+				fmt.Errorf("wake process stopped but wake lock cleanup did not complete; preserving exact claim: %w", err),
+			)
+		}
+		return true, err
+	}
+	if !removed {
+		return true, newWakeLockResidueError(
+			wakeLockResidueCleanup,
+			errors.New("wake process stopped but exact wake lock cleanup outcome changed"),
+		)
+	}
+	return true, nil
 }
 
 func terminateAndRemoveOrphanedWakeLockWithRawConsent(

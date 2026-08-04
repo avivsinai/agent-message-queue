@@ -519,33 +519,7 @@ func checkWakeLocksWithHintsSchema(
 			lock.RepairReason = assessment.RepairReason
 			lock.Repair = assessment.Repair
 			if fix {
-				guardErr := func() error {
-					agentDir, err := openWakeAgentDir(root, agent)
-					if err != nil {
-						return err
-					}
-					defer func() { _ = agentDir.Close() }()
-					return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-						recheck := inspectWakeLockAt(dirfd, agentDir, root, agent)
-						if !sameWakeLockGeneration(inspection, recheck) || recheck.Status != wakeLockStale {
-							lock.Status = string(recheck.Status)
-							lock.Reason = "wake lock changed before fix"
-							return nil
-						}
-						if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, recheck); err != nil {
-							return err
-						}
-						if err := validateWakeLockStaleRemoval(recheck); err != nil {
-							return err
-						}
-						if err := removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, recheck); err != nil {
-							return err
-						}
-						lock.Status = "fixed"
-						lock.Removed = true
-						return nil
-					})
-				}()
+				guardErr := fixStaleWakeLockForDoctor(root, agent, inspection, &lock)
 				lock.RepairAvailable = false
 				lock.Repair = ""
 				lock.RepairReason = ""
