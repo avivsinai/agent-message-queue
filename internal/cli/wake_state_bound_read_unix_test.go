@@ -166,6 +166,71 @@ func TestBoundWakeStateSelectionFailsClosedWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestBoundWakeStateSelectionWrapsDirectoryObservationFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		install func(error)
+	}{
+		{
+			name: "non-ENOENT open failure",
+			install: func(failure error) {
+				openWakeStateInspectionDirectory = func(string, string) (*wakeAgentDir, error) {
+					return nil, failure
+				}
+			},
+		},
+		{
+			name: "withFD failure",
+			install: func(failure error) {
+				withWakeStateInspectionDirectoryFD = func(*wakeAgentDir, func(int) error) error {
+					return failure
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root, target, _ := newOwnerAcquisitionPublicationFixture(t)
+			cleanup, err := acquireAuthoritativeWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+				target: &target, wakeMode: wakeTargetInjectVia,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(cleanup)
+			inspection := inspectWakeLock(root, "codex")
+
+			originalOpen := openWakeStateInspectionDirectory
+			originalWithFD := withWakeStateInspectionDirectoryFD
+			failure := os.ErrPermission
+			test.install(failure)
+			t.Cleanup(func() {
+				openWakeStateInspectionDirectory = originalOpen
+				withWakeStateInspectionDirectoryFD = originalWithFD
+			})
+
+			selection, err := readWakeStateSelectionForInspection(root, "codex", inspection)
+			var inconclusive *wakeStateBoundInconclusiveError
+			if !errors.As(err, &inconclusive) || !errors.Is(err, failure) || errors.Is(err, os.ErrNotExist) ||
+				selection.TargetPresent || selection.PreparedPresent {
+				t.Fatalf("selection=%#v err=%v, want bound inconclusive wrapping observation failure", selection, err)
+			}
+		})
+	}
+}
+
+func TestWakeStateBoundInconclusiveErrorConstructorIsIdempotent(t *testing.T) {
+	first := newWakeStateBoundInconclusiveError(os.ErrPermission)
+	second := newWakeStateBoundInconclusiveError(first)
+	if second != first {
+		t.Fatalf("second wrap = %T %v, want original error identity", second, second)
+	}
+	if got := second.Error(); got != os.ErrPermission.Error() {
+		t.Fatalf("second wrap message = %q, want %q", got, os.ErrPermission)
+	}
+}
+
 func TestBoundWakeStateSelectionPreservesSnapshotRaceCause(t *testing.T) {
 	root, target, _ := newOwnerAcquisitionPublicationFixture(t)
 	cleanup, err := acquireAuthoritativeWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{target: &target, wakeMode: wakeTargetInjectVia})

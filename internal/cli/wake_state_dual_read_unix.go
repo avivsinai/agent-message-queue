@@ -18,6 +18,13 @@ var afterWakeStateDualReadDocument = func() {}
 // snapshots are stable but before the lock binding is confirmed again.
 var afterWakeStateBoundSelection = func() {}
 
+// These seams let tests deterministically exercise failures at the two
+// directory-capability boundaries without relying on permission behavior.
+var openWakeStateInspectionDirectory = openWakeDirectory
+var withWakeStateInspectionDirectoryFD = func(agentDir *wakeAgentDir, fn func(int) error) error {
+	return agentDir.withFD(fn)
+}
+
 type wakeStateReadSelection struct {
 	Target          wakeTarget
 	TargetPresent   bool
@@ -47,6 +54,10 @@ func (err *wakeStateBoundInconclusiveError) Unwrap() error {
 func newWakeStateBoundInconclusiveError(err error) error {
 	if err == nil {
 		return nil
+	}
+	var inconclusive *wakeStateBoundInconclusiveError
+	if errors.As(err, &inconclusive) {
+		return err
 	}
 	return &wakeStateBoundInconclusiveError{err: err}
 }
@@ -149,7 +160,7 @@ func readWakeStateSelectionForInspection(
 	if err != nil {
 		return wakeStateReadSelection{}, newWakeStateBoundInconclusiveError(err)
 	}
-	agentDir, err := openWakeDirectory(fsq.AgentBase(root, me), "wake agent directory")
+	agentDir, err := openWakeStateInspectionDirectory(fsq.AgentBase(root, me), "wake agent directory")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			if bound {
@@ -159,11 +170,14 @@ func readWakeStateSelectionForInspection(
 			}
 			return wakeStateReadSelection{}, nil
 		}
+		if bound {
+			return wakeStateReadSelection{}, newWakeStateBoundInconclusiveError(err)
+		}
 		return wakeStateReadSelection{}, err
 	}
 	defer func() { _ = agentDir.Close() }()
 	var selection wakeStateReadSelection
-	err = agentDir.withFD(func(dirfd int) error {
+	err = withWakeStateInspectionDirectoryFD(agentDir, func(dirfd int) error {
 		var readErr error
 		selection, readErr = readWakeStateSelectionForInspectionAt(dirfd, agentDir, root, me, inspection)
 		return readErr
@@ -172,7 +186,7 @@ func readWakeStateSelectionForInspection(
 		if !bound {
 			return selection, err
 		}
-		return wakeStateReadSelection{}, err
+		return wakeStateReadSelection{}, newWakeStateBoundInconclusiveError(err)
 	}
 	if err := validateCanonicalWakeAgentDir(agentDir); err != nil {
 		if bound {

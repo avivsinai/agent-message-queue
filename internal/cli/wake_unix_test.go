@@ -6193,6 +6193,78 @@ func TestRunWakeWithLoopRetriesBoundInconclusiveState(t *testing.T) {
 	}
 }
 
+func TestRunWakeWithLoopRetriesBoundDirectoryObservationFailure(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "bound-observation-retry-injector")
+	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, nil)
+	cleanup, err := acquireWakeLockWithOptions(root, "orchestrator", wakeLockAcquireOptions{
+		target: &target, wakeMode: wakeTargetInjectVia,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+	lock := inspectWakeLock(root, "orchestrator").Lock
+	lock.PID = wakePID
+	lock.TTY = "tty"
+	lock.ProcessStart = "start-1"
+	lock.BootID = "boot-1"
+	lock.Executable = "/opt/homebrew/bin/amq"
+	writeWakeLockForTest(t, root, "orchestrator", lock)
+	writeWakePreparedForTest(t, root, "orchestrator")
+
+	originalOpen := openWakeStateInspectionDirectory
+	observationFailures := 0
+	openWakeStateInspectionDirectory = func(path, label string) (*wakeAgentDir, error) {
+		if observationFailures == 0 {
+			observationFailures++
+			return nil, os.ErrPermission
+		}
+		return originalOpen(path, label)
+	}
+	t.Cleanup(func() { openWakeStateInspectionDirectory = originalOpen })
+
+	originalRetry := waitForWakePreparedRetry
+	retryCalls := 0
+	waitForWakePreparedRetry = func(time.Time) bool {
+		retryCalls++
+		return true
+	}
+	t.Cleanup(func() { waitForWakePreparedRetry = originalRetry })
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err = runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", injector,
+		"--ready-file", readyPath,
+		"--accept-existing-wake",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with an existing wake: %#v", cfg)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bound directory observation failure did not retry: %v", err)
+	}
+	if _, err := os.Stat(readyPath); err != nil {
+		t.Fatalf("ready file missing: %v", err)
+	}
+	if observationFailures != 1 || retryCalls != 1 {
+		t.Fatalf("observation failures=%d retry calls=%d, want 1 each", observationFailures, retryCalls)
+	}
+}
+
 func TestWakeSnapshotReadChangedErrorRequiresTypedCause(t *testing.T) {
 	cause := errors.New("wake lock changed while opening")
 	err := newWakeSnapshotReadChangedError(cause)
