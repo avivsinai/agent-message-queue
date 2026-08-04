@@ -249,7 +249,7 @@ func retainedWakeAgentDirIsDetached(agentDir *wakeAgentDir) bool {
 		0,
 	)
 	if err != nil {
-		return errors.Is(err, unix.ENOENT)
+		return false
 	}
 	canonical := os.NewFile(uintptr(fd), agentDir.path)
 	defer func() { _ = canonical.Close() }()

@@ -4,6 +4,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -111,6 +112,49 @@ func TestNoLockShadowPublicationDebugNoteIsSilentByDefault(t *testing.T) {
 	defer cleanup()
 	if strings.Contains(stderr, "superseding no-lock wake shadow") {
 		t.Fatalf("default publication emitted debug shadow note: %q", stderr)
+	}
+}
+
+func TestGenericNoLockShadowPublicationSurfacesDebugWriteError(t *testing.T) {
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "shadow-debug-error-injector")
+	shadow := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"shadow"})
+	if err := writeWakeTarget(root, "codex", shadow); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := shadow
+	replacement.Created = "2026-08-04T00:00:00Z"
+	readOnlyStderr, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = readOnlyStderr.Close() }()
+	oldStderr := os.Stderr
+	os.Stderr = readOnlyStderr
+	defer func() { os.Stderr = oldStderr }()
+
+	cleanup, acquireErr := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+		target:   &replacement,
+		wakeMode: wakeTargetInjectVia,
+		debug:    true,
+	})
+	if cleanup != nil {
+		cleanup()
+		t.Fatal("debug write failure returned a live wake cleanup")
+	}
+	if acquireErr == nil {
+		t.Fatal("debug write failure was ignored")
+	}
+	persisted, exists, err := readWakeTarget(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || !sameWakeTarget(persisted, shadow) {
+		t.Fatalf("shadow target changed after diagnostic failure: target=%#v exists=%v", persisted, exists)
+	}
+	if inspection := inspectWakeLock(root, "codex"); inspection.Exists {
+		t.Fatalf("wake lock published after diagnostic failure: %#v", inspection)
 	}
 }
 

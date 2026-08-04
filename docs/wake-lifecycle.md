@@ -461,6 +461,16 @@ older binary or reader that remains compatible with the retained legacy
 artifacts; it does not rewrite a lock to remove P2b fields. Existing unbound
 claims remain P2a, and an older binary may still release its own exact claim.
 
+There is one narrow terminal-cleanup exception for a retained agent-directory
+descriptor. After selecting an exact unchanged lock snapshot, AMQ MAY remove
+only that lock from the retained directory when opening the canonical agent
+path succeeds and comparing directory identities proves that the retained
+directory was replaced by a different canonical directory. The operation MUST
+return a typed cleanup-only error and MUST NOT authorize any subsequent repair,
+publication, or other mutation through the detached descriptor. An absent or
+unopenable canonical path, or any failure to compare both identities, is
+inconclusive: preserve the residue and fail closed.
+
 The lock's exact-key ABI golden test MUST be updated in the same PR as the new
 fields, migration, state binding, and acceptance tests. P2b is held until
 W3.2 (inert state primitives), W3.3 (dual-write), and W3.4 (dual-read) have

@@ -22,6 +22,39 @@ func TestDetachedBoundWakeResidueCleanupReturnsCleanupOnlyError(t *testing.T) {
 	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
 }
 
+func TestDetachedBoundWakeResidueCleanupFailsClosedWhenCanonicalPathAbsent(t *testing.T) {
+	fixture := newGenericWakePreparedCleanupFixture(t, true)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: true}
+	})
+	inspection := inspectWakeLock(fixture.root, fixture.me)
+	detachedPath := fixture.agentDir.path + ".detached-absent-canonical"
+	if err := os.Rename(fixture.agentDir.path, detachedPath); err != nil {
+		t.Fatal(err)
+	}
+	residueBefore := snapshotDetachedWakeFiles(
+		t,
+		detachedPath,
+		".wake.lock",
+		wakeTargetFileName,
+		wakeStateFileName,
+		wakePreparedFileName,
+	)
+
+	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return removeWakeLockIfUnchangedGuardedAt(dirfd, fixture.agentDir, inspection)
+	})
+	var cleanupOnly *wakeDetachedCleanupOnlyError
+	if errors.As(err, &cleanupOnly) {
+		t.Fatalf("canonical-path-absent cleanup returned detached authority: %v", err)
+	}
+	var bound *wakeStateBoundInconclusiveError
+	if !errors.As(err, &bound) {
+		t.Fatalf("canonical-path-absent cleanup error = %v, want bound inconclusive", err)
+	}
+	assertDetachedWakeFilesUnchanged(t, detachedPath, residueBefore)
+}
+
 func TestDetachedBoundGenericWakeAcquireStopsWithoutPublishing(t *testing.T) {
 	fixture, _, detachedPath := newDetachedBoundGenericWakeResidue(t)
 	successorBefore := snapshotDetachedWakeFiles(t, fixture.agentDir.path, ".wake.lock", wakeTargetFileName, wakeStateFileName, wakePreparedFileName)
@@ -105,6 +138,9 @@ func TestDetachedBoundWakeRepairStopsWithoutStarting(t *testing.T) {
 	assertDetachedWakeCleanupOnlyError(t, err)
 	if result.Status != "refused" {
 		t.Fatalf("detached repair result = %#v, want refused", result)
+	}
+	if result.Reason != err.Error() {
+		t.Fatalf("detached repair reason = %q, want returned error %q", result.Reason, err)
 	}
 	assertDetachedBoundWakeResidueRemoved(t, detachedPath, residueBefore)
 	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)

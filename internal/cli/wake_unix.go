@@ -118,9 +118,9 @@ func debugWakeNoLockShadowReplacementAt(
 	me string,
 	kind string,
 	enabled bool,
-) {
+) error {
 	if !enabled {
-		return
+		return nil
 	}
 	const (
 		absent      = "absent"
@@ -148,9 +148,9 @@ func debugWakeNoLockShadowReplacementAt(
 		stateDigest = unavailable
 	}
 	if !targetExists && !stateExists && targetErr == nil && stateErr == nil {
-		return
+		return nil
 	}
-	_ = writeWakeDiagnostic(
+	return writeWakeDiagnostic(
 		nil,
 		"amq wake [debug]: %s publication superseding no-lock wake shadow target_digest=%s state_target_digest=%s\n",
 		kind,
@@ -396,7 +396,11 @@ func acquireWakeLockWithOptionsInDir(
 
 			// Stage target metadata first. The lock is the transaction commit point.
 			if options.target != nil {
-				debugWakeNoLockShadowReplacementAt(dirfd, agentDir, root, me, "generic", options.debug)
+				if err := debugWakeNoLockShadowReplacementAt(
+					dirfd, agentDir, root, me, "generic", options.debug,
+				); err != nil {
+					return fmt.Errorf("write no-lock wake shadow diagnostic: %w", err)
+				}
 				if err := writeWakeTargetGuardedAt(dirfd, agentDir, root, me, *options.target); err != nil {
 					return err
 				}
@@ -1129,11 +1133,12 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 			result.Status = "refused"
 			result.RepairAvailable = false
 			result.PID = inspectWakeLockAt(dirfd, agentDir, root, me).PID
-			result.Reason = "wake lock changed before repair"
 			var detachedCleanup *wakeDetachedCleanupOnlyError
 			if errors.As(removeErr, &detachedCleanup) {
+				result.Reason = removeErr.Error()
 				return removeErr
 			}
+			result.Reason = "wake lock changed before repair"
 			return errors.New(result.Reason)
 		}
 		return nil

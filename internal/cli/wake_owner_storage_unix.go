@@ -74,7 +74,11 @@ func publishAuthoritativeWakeClaimWithDebugAt(
 	if err != unix.ENOENT {
 		return fmt.Errorf("check existing wake lock: %w", err)
 	}
-	debugWakeNoLockShadowReplacementAt(dirfd, agentDir, root, me, "authoritative", debug)
+	if err := debugWakeNoLockShadowReplacementAt(
+		dirfd, agentDir, root, me, "authoritative", debug,
+	); err != nil {
+		return fmt.Errorf("write no-lock wake shadow diagnostic: %w", err)
+	}
 
 	targetData, err := json.MarshalIndent(target, "", "  ")
 	if err != nil {
