@@ -79,9 +79,12 @@ Set `AMQ_GLOBAL_ROOT` or `~/.amqrc` so `amq env` and `amq doctor` still resolve
 the correct queue. `AMQ_GLOBAL_ROOT` is explicit authority and therefore
 precedes repo-local auto-detection. The implicit home config is ineligible
 inside a Git worktree or bare repository.
-An unconfigured Git worktree or bare repository refuses implicit `~/.amqrc` fallback
-because it can silently select another project's mailbox; use a local
-`.amqrc`, an existing pin, explicit `--root`, or `AMQ_GLOBAL_ROOT`.
+A Git worktree or bare repository with no eligible root refuses implicit
+`~/.amqrc` fallback because it can silently select another project's mailbox.
+Participating commands keep that refusal. `coop exec` honors root precedence,
+then bootstraps a worktree-local queue at the Git top when no eligible root
+exists; `coop exec --no-init` refuses. `coop init` explicitly targets that local
+Git top. Bare repositories require a worktree or an explicit `--root`.
 
 **Session pitfall**: `coop exec` defaults to `--session collab` (i.e., `.agent-mail/collab`). Outside `coop exec`, the base root is `.agent-mail` (no session suffix). These are different mailbox trees — don't mix them up.
 
@@ -91,7 +94,11 @@ because it can silently select another project's mailbox; use a local
 |---------|---------|---------------------|
 | Outside `coop exec` | `amq env --me claude` | resolved base root from project `.amqrc`, `AMQ_GLOBAL_ROOT`, or an eligible implicit fallback |
 | Git worktree or bare repository, no project `.amqrc` | `amq env --me claude` | `AMQ_GLOBAL_ROOT` when set, otherwise repo-local detected `.agent-mail` |
-| Unconfigured Git worktree or bare repository | `amq env --session auth --me claude` | refuses implicit `~/.amqrc`; requires a local or explicit root |
+| Git worktree or bare repository, no eligible root | `amq env --session auth --me claude` | refuses implicit `~/.amqrc`; requires a local or explicit root |
+| Git worktree, no eligible root | `amq coop exec claude` | bootstraps `<git-top>/.agent-mail/collab`; never consults `~/.amqrc` |
+| Git worktree, no eligible root | `amq coop exec --session auth claude` | bootstraps `<git-top>/.agent-mail/auth` |
+| Git worktree, no eligible root | `amq coop exec --no-init claude` | refuses and names `amq coop init` as the remedy |
+| Bare repository, no eligible root | `amq coop exec claude` | refuses; use a worktree or explicit `--root` |
 | Outside `coop exec`, isolated session | `amq env --session auth --me claude` | `<resolved-base-root>/auth` |
 | Inside `coop exec` (no flags) | automatic | `.agent-mail/collab` (default session) |
 | Inside `coop exec --session X` | automatic | `.agent-mail/X` |
