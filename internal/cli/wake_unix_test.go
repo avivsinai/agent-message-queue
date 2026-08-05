@@ -2340,6 +2340,7 @@ func TestRunWakeLoopCoalescesAdditionThenRearmsAfterDrain(t *testing.T) {
 	decayedRetryAt := startedAt.Add(15 * time.Minute)
 	doorbells := make(chan struct{}, 3)
 	pending := make(chan struct{}, 1)
+	baselineReady := make(chan struct{})
 	stop := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
@@ -2359,6 +2360,10 @@ func TestRunWakeLoopCoalescesAdditionThenRearmsAfterDrain(t *testing.T) {
 				additionAttemptFloor: lastAttempt.Add(wakeDoorbellRetryBase),
 			},
 			preconditionCheck: func(*wakeConfig) error { return nil },
+			onBaselineReady: func(map[string]wakeFileIdentity) error {
+				close(baselineReady)
+				return nil
+			},
 			terminalWrite: func(text string) error {
 				if strings.Contains(text, coopWakeDoorbell) {
 					doorbells <- struct{}{}
@@ -2386,6 +2391,13 @@ func TestRunWakeLoopCoalescesAdditionThenRearmsAfterDrain(t *testing.T) {
 		}
 	}()
 
+	select {
+	case <-baselineReady:
+	case err := <-done:
+		t.Fatalf("wake loop exited before baseline readiness: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not publish baseline readiness")
+	}
 	deliverWakeWatcherMessageForTest(t, root, "codex", "b", "claude")
 	select {
 	case <-pending:
