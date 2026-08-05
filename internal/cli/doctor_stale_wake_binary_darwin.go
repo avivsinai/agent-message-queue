@@ -5,14 +5,18 @@ package cli
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 )
 
 const wakeStartedTimestampUncertainty = time.Second
+
+const deletedWakeImageReason = "wake is running a deleted image; restart it"
 
 func inspectWakeBinaryStalenessPlatform(
 	inspection wakeLockInspection,
@@ -58,6 +62,22 @@ func inspectWakeBinaryStalenessPlatform(
 
 	running, err := inspectDarwinWakeProcessImage(inspection.PID)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) && inspection.IdentityConfirmed && inspection.Process.Running {
+			imagePath := running.Path
+			if imagePath == "" {
+				imagePath = recorded.ExecutionPath
+			}
+			if imagePath == recorded.ExecutionPath {
+				if _, pathErr := os.Lstat(imagePath); errors.Is(pathErr, fs.ErrNotExist) {
+					return wakeBinaryStaleness{
+						Stale:    true,
+						Method:   wakeBinaryComparisonDarwinDeletedImage,
+						Evidence: comparisonEvidence,
+						Reason:   deletedWakeImageReason,
+					}, nil
+				}
+			}
+		}
 		return wakeBinaryStaleness{}, err
 	}
 	if !darwinRecordedImageMatches(recorded, running) {
@@ -108,7 +128,7 @@ func inspectDarwinWakeProcessImage(pid int) (darwinWakeProcessImage, error) {
 
 	pathInfo, err := os.Lstat(path)
 	if err != nil {
-		return darwinWakeProcessImage{}, fmt.Errorf("stat wake process executable path: %w", err)
+		return darwinWakeProcessImage{Path: path}, fmt.Errorf("stat wake process executable path: %w", err)
 	}
 	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
 		return darwinWakeProcessImage{}, fmt.Errorf("wake process executable path is not a regular non-symlink file")
