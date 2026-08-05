@@ -70,6 +70,9 @@ type wakeConfig struct {
 	onPendingNotify               func()
 	recordNotifierStatus          func(status, mode, reason string) error
 	pendingNotifierStatus         *wakeNotifierStatus
+	recordDoorbellStatus          func(parked bool, attempts uint) error
+	pendingDoorbellStatus         *wakeDoorbellStatus
+	reportedDoorbellStatus        wakeDoorbellStatus
 	recordAttention               func(wakeAttentionEmission) error
 	attentionEnv                  func(string) string
 	attentionIsTTY                func() bool
@@ -81,6 +84,11 @@ type wakeNotifierStatus struct {
 	status string
 	mode   string
 	reason string
+}
+
+type wakeDoorbellStatus struct {
+	parked   bool
+	attempts uint
 }
 
 const maxWakeNotificationSenderClauses = 8
@@ -489,6 +497,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			)
 		}
 		cfg.doorbell.reset()
+		persistWakeDoorbellStatusBestEffort(cfg)
 		return reconcileWakeInputAfterInboxDrain(cfg)
 	}
 
@@ -582,6 +591,7 @@ func deliverNewMessageNotification(
 	}
 	now := cfg.wakeDoorbellNow()
 	plan := cfg.doorbell.plan(now, currentPending)
+	persistWakeDoorbellStatusBestEffort(cfg)
 	if !plan.attempt {
 		return nil
 	}
@@ -652,14 +662,15 @@ func recordWakeAttempt(
 	}
 	var attentionErr *wakeAttentionDeliveryError
 	if cfg.lastAttemptTransientAttention {
-		cfg.doorbell.recordAttempt(now)
-		return
-	}
-	if cfg.lastAttemptAttention || errors.As(deliveryErr, &attentionErr) {
+		// Input deferral emitted attention but made no synthetic-input attempt,
+		// so it advances cadence without consuming the finite injection budget.
+		cfg.doorbell.recordDeferredInputAttempt(now)
+	} else if cfg.lastAttemptAttention || errors.As(deliveryErr, &attentionErr) {
 		cfg.doorbell.recordAttentionAttempt(now)
-		return
+	} else {
+		cfg.doorbell.recordAttempt(now)
 	}
-	cfg.doorbell.recordAttempt(now)
+	persistWakeDoorbellStatusBestEffort(cfg)
 }
 
 func shouldRecordWakeAttempt(err error) bool {
@@ -681,6 +692,7 @@ func deliverWakeInputRecoveryAttention(
 		return nil
 	}
 	cfg.doorbell.recordRecoveryRequired(now, currentPending)
+	persistWakeDoorbellStatusBestEffort(cfg)
 	if err := emitWakeAttention(cfg, wakePayload{
 		text:       wakeInputRecoveryNotice,
 		provenance: wakePayloadSystemFixed,
@@ -746,6 +758,7 @@ func dischargeWakeInputRecoveryAfterProgress(
 	cfg.inputRecoveryRequired = false
 	clearWakeInputState(cfg)
 	cfg.doorbell.reset()
+	persistWakeDoorbellStatusBestEffort(cfg)
 	if err := persistWakeNotifierStatus(cfg, "", effectiveInjectMode(cfg), ""); err != nil {
 		_ = writeWakeDiagnostic(cfg, "amq wake: clear input recovery-required status: %v\n", err)
 	}
@@ -771,6 +784,46 @@ func retryPendingWakeNotifierStatus(cfg *wakeConfig) error {
 	}
 	pending := cfg.pendingNotifierStatus
 	return persistWakeNotifierStatus(cfg, pending.status, pending.mode, pending.reason)
+}
+
+func persistWakeDoorbellStatusBestEffort(cfg *wakeConfig) {
+	if err := persistWakeDoorbellStatus(cfg); err != nil {
+		_ = writeWakeDiagnostic(cfg, "amq wake: persist doorbell parked status: %v; retrying\n", err)
+	}
+}
+
+func persistWakeDoorbellStatus(cfg *wakeConfig) error {
+	if cfg == nil || cfg.recordDoorbellStatus == nil {
+		return nil
+	}
+	attempts, parked := cfg.doorbell.parkedReminderAttempts()
+	desired := wakeDoorbellStatus{parked: parked, attempts: attempts}
+	if !parked {
+		desired.attempts = 0
+	}
+	if cfg.pendingDoorbellStatus == nil && desired == cfg.reportedDoorbellStatus {
+		return nil
+	}
+	if err := cfg.recordDoorbellStatus(desired.parked, desired.attempts); err != nil {
+		cfg.pendingDoorbellStatus = &desired
+		return err
+	}
+	cfg.reportedDoorbellStatus = desired
+	cfg.pendingDoorbellStatus = nil
+	return nil
+}
+
+func retryPendingWakeDoorbellStatus(cfg *wakeConfig) error {
+	if cfg == nil || cfg.pendingDoorbellStatus == nil || cfg.recordDoorbellStatus == nil {
+		return nil
+	}
+	pending := *cfg.pendingDoorbellStatus
+	if err := cfg.recordDoorbellStatus(pending.parked, pending.attempts); err != nil {
+		return err
+	}
+	cfg.reportedDoorbellStatus = pending
+	cfg.pendingDoorbellStatus = nil
+	return nil
 }
 
 func (cfg *wakeConfig) wakeDoorbellNow() time.Time {
@@ -1421,6 +1474,7 @@ func retireWakeInputState(cfg *wakeConfig, cause error) error {
 		return &wakeInputDemotionBlockedError{err: cause}
 	}
 	cfg.doorbell.reset()
+	persistWakeDoorbellStatusBestEffort(cfg)
 	clearWakeInputState(cfg)
 	return nil
 }

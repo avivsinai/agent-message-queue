@@ -2086,6 +2086,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	); err != nil {
 		return fmt.Errorf("record wake notifier status: %w", err)
 	}
+	if err := setWakeDoorbellStatusInDir(activeAgentDir, me, false, 0); err != nil {
+		return fmt.Errorf("clear wake doorbell status: %w", err)
+	}
 	if initialNotifierStatus == wakeInjectorUnsupportedStatus {
 		_ = writeStderr("amq wake: warning: %s\n", initialNotifierReason)
 	}
@@ -2138,6 +2141,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		retainedAgent:      activeAgentDir,
 		recordNotifierStatus: func(status, mode, reason string) error {
 			return setWakeNotifierStatusInDir(activeAgentDir, me, status, mode, reason)
+		},
+		recordDoorbellStatus: func(parked bool, attempts uint) error {
+			return setWakeDoorbellStatusInDir(activeAgentDir, me, parked, attempts)
 		},
 		onPrepared: func(watcher wakeAdmissionWatcher) error {
 			if repairLineage != nil {
@@ -2343,6 +2349,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		}
 	}
 
+	defer func() {
+		_ = setWakeDoorbellStatusInDir(activeAgentDir, me, false, 0)
+	}()
 	return loop(cfg)
 }
 
@@ -3477,6 +3486,13 @@ func runWakeLoop(cfg wakeConfig) error {
 				_ = writeWakeDiagnostic(
 					&cfg,
 					"amq wake: persist notifier status: %v; retrying\n",
+					err,
+				)
+			}
+			if err := retryPendingWakeDoorbellStatus(&cfg); err != nil {
+				_ = writeWakeDiagnostic(
+					&cfg,
+					"amq wake: persist doorbell parked status: %v; retrying\n",
 					err,
 				)
 			}
