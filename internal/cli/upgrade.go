@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -15,9 +16,21 @@ import (
 )
 
 var (
-	executablePathForUpgrade = update.ExecutablePath
-	fetchLatestTagForUpgrade = update.FetchLatestTag
+	executablePathForUpgrade        = update.ExecutablePath
+	fetchLatestTagForUpgrade        = update.FetchLatestTag
+	detectHomebrewPrefixForUpgrade  = detectHomebrewPrefix
+	lookPathForHomebrewUpgrade      = exec.LookPath
+	runBrewPrefixForHomebrewUpgrade = runBrewPrefix
+	homebrewBrewExistsForUpgrade    = homebrewBrewExists
 )
+
+const homebrewDetectionTimeout = 2 * time.Second
+
+var wellKnownHomebrewPrefixes = []string{
+	"/opt/homebrew",
+	"/usr/local",
+	"/home/linuxbrew/.linuxbrew",
+}
 
 func runUpgrade(args []string, currentVersion string) error {
 	fs := flag.NewFlagSet("upgrade", flag.ContinueOnError)
@@ -134,11 +147,80 @@ func selectUpgradeDestination(path, resolved string, writable func(string) error
 	}
 	destPath = filepath.Clean(destPath)
 
-	if strings.Contains(filepath.ToSlash(destPath), "/Cellar/") {
-		return "", fmt.Errorf("amq is installed via Homebrew; run brew upgrade amq instead")
+	if prefix := detectHomebrewPrefixForUpgrade(); prefix != "" &&
+		(homebrewOwnsUpgradePath(prefix, path) || homebrewOwnsUpgradePath(prefix, destPath)) {
+		if isSeveredHomebrewBinary(prefix, path) {
+			return "", fmt.Errorf("amq is installed via Homebrew; run brew reinstall amq")
+		}
+		return "", fmt.Errorf("amq is installed via Homebrew; run brew update && brew upgrade amq")
 	}
 	if err := writable(destPath); err != nil {
 		return "", fmt.Errorf("cannot write the amq install location %s: %w", destPath, err)
 	}
 	return destPath, nil
+}
+
+func detectHomebrewPrefix() string {
+	if prefix := cleanHomebrewPrefix(os.Getenv("HOMEBREW_PREFIX")); prefix != "" {
+		return prefix
+	}
+
+	if brewPath, err := lookPathForHomebrewUpgrade("brew"); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), homebrewDetectionTimeout)
+		output, runErr := runBrewPrefixForHomebrewUpgrade(ctx, brewPath)
+		cancel()
+		if runErr == nil {
+			if prefix := cleanHomebrewPrefix(strings.TrimSpace(string(output))); prefix != "" {
+				return prefix
+			}
+		}
+	}
+
+	for _, prefix := range wellKnownHomebrewPrefixes {
+		if homebrewBrewExistsForUpgrade(filepath.Join(prefix, "bin", "brew")) {
+			return filepath.Clean(prefix)
+		}
+	}
+	return ""
+}
+
+func runBrewPrefix(ctx context.Context, brewPath string) ([]byte, error) {
+	return exec.CommandContext(ctx, brewPath, "--prefix").Output()
+}
+
+func homebrewBrewExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func cleanHomebrewPrefix(prefix string) string {
+	if prefix == "" || !filepath.IsAbs(prefix) {
+		return ""
+	}
+	return filepath.Clean(prefix)
+}
+
+func homebrewOwnsUpgradePath(prefix, path string) bool {
+	if path == "" {
+		return false
+	}
+	path = filepath.Clean(path)
+	return pathWithinDirectory(path, filepath.Join(prefix, "bin")) ||
+		pathWithinDirectory(path, filepath.Join(prefix, "Cellar"))
+}
+
+func pathWithinDirectory(path, directory string) bool {
+	rel, err := filepath.Rel(filepath.Clean(directory), path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func isSeveredHomebrewBinary(prefix, path string) bool {
+	if path == "" || !pathWithinDirectory(filepath.Clean(path), filepath.Join(prefix, "bin")) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular()
 }

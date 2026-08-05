@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.52.3](https://github.com/avivsinai/agent-message-queue/compare/v0.52.2...v0.52.3) (2026-08-05)
+
+
+### Bug Fixes
+
+* **upgrade:** guard Homebrew-owned paths by prefix ownership ([#435](https://github.com/avivsinai/agent-message-queue/issues/435)) ([1f5169c](https://github.com/avivsinai/agent-message-queue/commit/1f5169cd34c87eeceb9db89fa54f758e358c4385))
+
 ## [0.52.2](https://github.com/avivsinai/agent-message-queue/compare/v0.52.1...v0.52.2) (2026-08-05)
 
 
