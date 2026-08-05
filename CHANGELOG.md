@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.52.5](https://github.com/avivsinai/agent-message-queue/compare/v0.52.4...v0.52.5) (2026-08-05)
+
+
+### Bug Fixes
+
+* **wake:** guard readiness publication on the capability path ([#420](https://github.com/avivsinai/agent-message-queue/issues/420)) ([8295405](https://github.com/avivsinai/agent-message-queue/commit/8295405751a64b2677add01aa77607b3f43e1234))
+* **wake:** retry the retained-inbox kqueue wait on EINTR ([#422](https://github.com/avivsinai/agent-message-queue/issues/422)) ([c32199f](https://github.com/avivsinai/agent-message-queue/commit/c32199f59c33851d25c742e9a466ec0941577c62)), closes [#421](https://github.com/avivsinai/agent-message-queue/issues/421)
+
 ## [0.52.4](https://github.com/avivsinai/agent-message-queue/compare/v0.52.3...v0.52.4) (2026-08-05)
 
 
