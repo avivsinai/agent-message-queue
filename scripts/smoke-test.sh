@@ -31,12 +31,14 @@ if [[ -z "$msg_id" || -z "$thread_id" ]]; then
   exit 1
 fi
 
-"$BIN" list --root "$QUEUE_ROOT" --me claude --new | grep -q "$msg_id"
+new_list_out="$("$BIN" list --root "$QUEUE_ROOT" --me claude --new)"
+printf '%s' "$new_list_out" | grep -q "$msg_id"
 
 read_out="$("$BIN" read --root "$QUEUE_ROOT" --me claude --id "$msg_id")"
 printf '%s' "$read_out" | grep -q "hello"
 
-"$BIN" list --root "$QUEUE_ROOT" --me claude --cur | grep -q "$msg_id"
+cur_list_out="$("$BIN" list --root "$QUEUE_ROOT" --me claude --cur)"
+printf '%s' "$cur_list_out" | grep -q "$msg_id"
 
 # read already moved the message to cur, which emits a drained receipt
 test -f "$QUEUE_ROOT/agents/claude/receipts/${msg_id}__claude__drained.json"
@@ -49,7 +51,8 @@ if [[ "$thread_msg" != "$msg_id" ]]; then
 fi
 
 "$BIN" presence set --root "$QUEUE_ROOT" --me codex --status busy
-"$BIN" presence list --root "$QUEUE_ROOT" | grep -q "^codex"
+presence_out="$("$BIN" presence list --root "$QUEUE_ROOT")"
+printf '%s' "$presence_out" | grep -q "^codex"
 
 tmpfile="$QUEUE_ROOT/agents/codex/inbox/tmp/old.tmp"
 mkdir -p "$(dirname "$tmpfile")"
