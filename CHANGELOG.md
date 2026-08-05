@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.52.4](https://github.com/avivsinai/agent-message-queue/compare/v0.52.3...v0.52.4) (2026-08-05)
+
+
+### Bug Fixes
+
+* **doctor:** report darwin wakes running deleted images ([#438](https://github.com/avivsinai/agent-message-queue/issues/438)) ([#439](https://github.com/avivsinai/agent-message-queue/issues/439)) ([6fdab50](https://github.com/avivsinai/agent-message-queue/commit/6fdab5093e88816de530e3540eef5ca668a83a26))
+
 ## [0.52.3](https://github.com/avivsinai/agent-message-queue/compare/v0.52.2...v0.52.3) (2026-08-05)
 
 
