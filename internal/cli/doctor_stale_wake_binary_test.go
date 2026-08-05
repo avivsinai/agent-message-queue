@@ -108,6 +108,63 @@ func TestDoctorOpsReportsStructuredStaleWakeBinaryHintWithoutMutation(t *testing
 	}
 }
 
+func TestDoctorOpsReportsWakeBinaryInspectionErrorInJSONWithoutHumanHint(t *testing.T) {
+	root := secureTempDirForTest(t)
+	const agent = "codex"
+	writeWakeLockForTest(t, root, agent, wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(root),
+		Agent:        agent,
+		Started:      "2026-07-27T10:00:00Z",
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		Executable:   "/opt/homebrew/bin/amq",
+		Args:         []string{"amq", "wake", "--root", root, "--me", agent},
+		Generation:   "inspection-error-generation",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "12345",
+			BootID:     "11111111-1111-1111-1111-111111111111",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", agent},
+		}
+	})
+	stubWakeBinaryStaleness(t, func(wakeLockInspection) (wakeBinaryStaleness, error) {
+		return wakeBinaryStaleness{}, errors.New("transient image inspection failure")
+	})
+
+	result := runOpsChecks(root, "test", false)
+	if hint, found := findOpsHint(result.Hints, "stale_wake_binary"); found {
+		t.Fatalf("inspection failure emitted human stale hint: %#v", hint)
+	}
+	values := map[string]any{
+		"schema v1": result,
+		"schema v2": renderDoctorResultV2(doctorResult{Ops: result}).Ops,
+	}
+	for name, value := range values {
+		t.Run(name, func(t *testing.T) {
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire struct {
+				WakeLocks []struct {
+					InspectionError string `json:"inspection_error"`
+				} `json:"wake_locks"`
+			}
+			if err := json.Unmarshal(encoded, &wire); err != nil {
+				t.Fatal(err)
+			}
+			if len(wire.WakeLocks) != 1 || wire.WakeLocks[0].InspectionError != "transient image inspection failure" {
+				t.Fatalf("machine-readable inspection error missing: %s", encoded)
+			}
+		})
+	}
+}
+
 func TestDoctorOpsReportsLegacyFlagShapedStaleWakeWithoutAuthorizingFix(t *testing.T) {
 	root := secureTempDirForTest(t)
 	const (
@@ -214,6 +271,7 @@ func TestStaleWakeBinaryHintFailsClosedOnUnknownOrUnconfirmedEvidence(t *testing
 		name       string
 		inspection wakeLockInspection
 		probe      func(wakeLockInspection) (wakeBinaryStaleness, error)
+		wantErr    bool
 	}{
 		{
 			name: "identity not confirmed",
@@ -230,6 +288,7 @@ func TestStaleWakeBinaryHintFailsClosedOnUnknownOrUnconfirmedEvidence(t *testing
 		{
 			name:       "probe error",
 			inspection: base,
+			wantErr:    true,
 			probe: func(wakeLockInspection) (wakeBinaryStaleness, error) {
 				return wakeBinaryStaleness{}, errors.New("identity unavailable")
 			},
@@ -244,7 +303,11 @@ func TestStaleWakeBinaryHintFailsClosedOnUnknownOrUnconfirmedEvidence(t *testing
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubWakeBinaryStaleness(t, tc.probe)
-			if hint, ok := checkStaleWakeBinaryHint(tc.inspection); ok {
+			hint, ok, err := checkStaleWakeBinaryHint(tc.inspection)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if ok {
 				t.Fatalf("unexpected hint: %#v", hint)
 			}
 		})
@@ -292,6 +355,50 @@ func TestStaleWakeBinaryHintDescribesDarwinTimestampEvidenceAsHeuristic(t *testi
 		if !strings.Contains(hint.Message, want) {
 			t.Fatalf("heuristic message missing %q: %q", want, hint.Message)
 		}
+	}
+}
+
+func TestStaleWakeBinaryHintDescribesDeletedImage(t *testing.T) {
+	root := secureTempDirForTest(t)
+	const agent = "codex"
+	writeWakeLockForTest(t, root, agent, wakeLock{
+		PID:          4242,
+		Root:         canonicalWakeRoot(root),
+		Agent:        agent,
+		Started:      "2026-07-27T10:00:00Z",
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		Executable:   "/opt/homebrew/bin/amq",
+		Args:         []string{"amq", "wake", "--root", root, "--me", agent},
+		Generation:   "deleted-image-generation",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "12345",
+			BootID:     "11111111-1111-1111-1111-111111111111",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", agent},
+		}
+	})
+	stubWakeBinaryStaleness(t, func(wakeLockInspection) (wakeBinaryStaleness, error) {
+		return wakeBinaryStaleness{
+			Stale:    true,
+			Method:   wakeBinaryComparisonDarwinDeletedImage,
+			Evidence: stableWakeBinaryEvidenceForTest(),
+			Reason:   "wake is running a deleted image; restart it",
+		}, nil
+	})
+
+	result := runOpsChecks(root, "test", false)
+	hint, found := findOpsHint(result.Hints, "stale_wake_binary")
+	if !found || hint.WakeBinary == nil {
+		t.Fatalf("deleted-image hint missing: %#v", result.Hints)
+	}
+	const want = "wake is running a deleted image; restart it"
+	if hint.WakeBinary.Reason != want || !strings.Contains(hint.Message, want) {
+		t.Fatalf("deleted-image reason = %#v message=%q", hint.WakeBinary, hint.Message)
 	}
 }
 

@@ -69,6 +69,7 @@ type opsBacklog struct {
 type opsWakeBinaryHint struct {
 	Agent  string `json:"agent"`
 	PID    int    `json:"pid"`
+	Reason string `json:"reason,omitempty"`
 	Remedy string `json:"remedy"`
 }
 
@@ -108,6 +109,7 @@ type opsWakeLock struct {
 	RestartCapability        string `json:"restart_capability,omitempty"`
 	OperatorTerminalRequired bool   `json:"operator_terminal_required"`
 	NextAction               string `json:"next_action,omitempty"`
+	InspectionError          string `json:"inspection_error,omitempty"`
 	CurrentTerminal          bool   `json:"-"`
 	NotifierAbsent           bool   `json:"-"`
 
@@ -547,7 +549,10 @@ func checkWakeLocksWithHintsSchema(
 			continue
 		}
 		staleBinary := false
-		if hint, ok := checkStaleWakeBinaryHint(inspection); ok {
+		wakeBinaryInspectionError := ""
+		if hint, ok, err := checkStaleWakeBinaryHint(inspection); err != nil {
+			wakeBinaryInspectionError = err.Error()
+		} else if ok {
 			hints = append(hints, hint)
 			staleBinary = true
 		}
@@ -561,6 +566,7 @@ func checkWakeLocksWithHintsSchema(
 			TTY:             strings.TrimSpace(inspection.Lock.TTY),
 			Started:         strings.TrimSpace(inspection.Lock.Started),
 			Reason:          inspection.Reason,
+			InspectionError: wakeBinaryInspectionError,
 			CurrentTerminal: doctorWakeLockOnCurrentTerminal(inspection),
 		}
 		ownerBound := classifyWakeClaimForGenericTransition(inspection) == wakeClaimAuthoritative
