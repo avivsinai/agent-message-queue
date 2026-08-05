@@ -5,12 +5,14 @@ package cli
 func fixStaleWakeLockForDoctor(
 	root string,
 	agent string,
-	inspection wakeLockInspection,
+	inspection *wakeLockInspection,
 	lock *opsWakeLock,
 ) error {
 	return withWakeLifecycleGuard(root, agent, func() error {
 		recheck := inspectWakeLock(root, agent)
-		if !sameWakeLockGeneration(inspection, recheck) || recheck.Status != wakeLockStale {
+		sameGeneration := sameWakeLockGeneration(*inspection, recheck)
+		*inspection = recheck
+		if !sameGeneration || recheck.Status != wakeLockStale {
 			lock.Status = string(recheck.Status)
 			lock.Reason = "wake lock changed before fix"
 			return nil

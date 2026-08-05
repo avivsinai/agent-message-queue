@@ -10,6 +10,7 @@ type wakeDoorbellPhase uint8
 const (
 	wakeDoorbellIdle wakeDoorbellPhase = iota
 	wakeDoorbellRetrying
+	wakeDoorbellParked
 	wakeDoorbellRecoveryRequired
 )
 
@@ -18,12 +19,21 @@ const (
 	wakeDoorbellAttentionRetryBase = 30 * time.Second
 	wakeDoorbellRetryMax           = 2 * time.Minute
 	wakeDoorbellAttentionRetryMax  = 15 * time.Minute
+
+	// Repeated synthetic input is not consumer-safe: queueing consumers may
+	// retain every identical reminder and flush them as one later turn. Bound
+	// an unchanged cohort, while leaving additions a small finite chance to
+	// announce genuinely new work.
+	wakeDoorbellInitialAttemptBudget = uint(4)
+	wakeDoorbellLifetimeAttemptCap   = uint(8)
 )
 
 type wakeDoorbellState struct {
 	phase                        wakeDoorbellPhase
 	cohort                       map[string]*wakeFileIdentity
 	attempts                     uint
+	reminderAttempts             uint
+	attemptBudget                uint
 	nextAttempt                  time.Time
 	additionAttemptFloor         time.Time
 	transientAttentionAttempts   uint
@@ -56,11 +66,23 @@ func (state *wakeDoorbellState) plan(
 		// the new information has not been announced yet. One outstanding
 		// "drain everything" doorbell covers the whole current cohort, so N
 		// unread messages do not need N doorbells.
-		state.arm(current)
-		state.pullForwardForAddition(now)
+		if state.phase == wakeDoorbellParked {
+			state.cohort = snapshotWakeFileIdentities(current)
+			if state.attemptBudget < wakeDoorbellLifetimeAttemptCap {
+				state.attemptBudget++
+				state.phase = wakeDoorbellRetrying
+				state.pullForwardForAddition(now)
+			}
+		} else {
+			state.arm(current)
+			state.pullForwardForAddition(now)
+		}
 	}
 	if state.phase == wakeDoorbellIdle {
 		state.arm(current)
+	}
+	if state.phase == wakeDoorbellParked {
+		return wakeDoorbellPlan{}
 	}
 	if state.attempts > 0 && now.Before(state.nextAttempt) {
 		return wakeDoorbellPlan{}
@@ -76,10 +98,31 @@ func (state *wakeDoorbellState) plan(
 func (state *wakeDoorbellState) arm(current map[string]os.FileInfo) {
 	state.phase = wakeDoorbellRetrying
 	state.cohort = snapshotWakeFileIdentities(current)
+	if state.attemptBudget == 0 {
+		state.attemptBudget = wakeDoorbellInitialAttemptBudget
+	}
 }
 
 func (state *wakeDoorbellState) recordAttempt(now time.Time) {
+	if state.attemptBudget == 0 {
+		state.attemptBudget = wakeDoorbellInitialAttemptBudget
+	}
 	state.recordAttemptWithBase(now, wakeDoorbellRetryBase, wakeDoorbellRetryMax)
+	state.reminderAttempts++
+	if state.reminderAttempts >= state.attemptBudget {
+		state.parkCurrentCohort()
+	}
+}
+
+func (state *wakeDoorbellState) recordDeferredInputAttempt(now time.Time) {
+	state.recordAttemptWithBase(now, wakeDoorbellRetryBase, wakeDoorbellRetryMax)
+}
+
+// parkCurrentCohort is the acknowledgement seam: a future injected-ack policy
+// can park the acknowledged cohort here without changing the budget model.
+func (state *wakeDoorbellState) parkCurrentCohort() {
+	state.phase = wakeDoorbellParked
+	state.nextAttempt = time.Time{}
 }
 
 func (state *wakeDoorbellState) recordAttentionAttempt(now time.Time) {
@@ -198,6 +241,10 @@ func (state *wakeDoorbellState) makeDue(now time.Time) {
 
 func (state wakeDoorbellState) pendingInput() bool {
 	return state.phase == wakeDoorbellRetrying
+}
+
+func (state wakeDoorbellState) parkedReminderAttempts() (uint, bool) {
+	return state.reminderAttempts, state.phase == wakeDoorbellParked
 }
 
 func (state *wakeDoorbellState) nextDeadline() (time.Time, bool) {

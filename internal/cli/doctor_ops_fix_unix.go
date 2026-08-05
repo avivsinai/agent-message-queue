@@ -5,7 +5,7 @@ package cli
 func fixStaleWakeLockForDoctor(
 	root string,
 	agent string,
-	inspection wakeLockInspection,
+	inspection *wakeLockInspection,
 	lock *opsWakeLock,
 ) error {
 	agentDir, err := openWakeAgentDir(root, agent)
@@ -16,7 +16,9 @@ func fixStaleWakeLockForDoctor(
 
 	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		recheck := inspectWakeLockAt(dirfd, agentDir, root, agent)
-		if !sameWakeLockGeneration(inspection, recheck) || recheck.Status != wakeLockStale {
+		sameGeneration := sameWakeLockGeneration(*inspection, recheck)
+		*inspection = recheck
+		if !sameGeneration || recheck.Status != wakeLockStale {
 			lock.Status = string(recheck.Status)
 			lock.Reason = "wake lock changed before fix"
 			return nil

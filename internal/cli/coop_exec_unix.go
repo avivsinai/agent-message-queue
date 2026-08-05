@@ -147,6 +147,9 @@ func runCoopExec(args []string) error {
 	}
 
 	// Resolve explicit --session (pure sugar for --root <base>/<session>).
+	// A fresh Git worktree has no base yet; remember that bootstrap is needed
+	// and provision the requested session after full coop init completes.
+	bootstrapBase := ""
 	if *sessionFlag != "" {
 		if flagWasVisited(fs, "root") {
 			return UsageError("--session and --root are mutually exclusive")
@@ -159,12 +162,26 @@ func runCoopExec(args []string) error {
 			return err
 		}
 		if !ambient {
-			base, err = resolveBaseRoot()
-			if err != nil {
-				return err
+			if *noInitFlag {
+				base, err = resolveBaseRoot()
+				if err != nil {
+					return err
+				}
+			} else {
+				var found bool
+				base, found, err = resolveDiscoveredBaseRootForBootstrap()
+				if err != nil {
+					return err
+				}
+				if !found {
+					bootstrapBase = base
+					base = ""
+				}
 			}
 		}
-		*rootFlag = filepath.Join(base, *sessionFlag)
+		if base != "" {
+			*rootFlag = filepath.Join(base, *sessionFlag)
+		}
 	}
 
 	// Resolve root: --root flag (or --session-derived) > ambient context >
@@ -179,12 +196,21 @@ func runCoopExec(args []string) error {
 		if ambient {
 			root = ambientBase
 		} else {
-			discoveredBase, found, discoveryErr := resolveDiscoveredBaseRoot()
+			var discoveredBase string
+			var found bool
+			var discoveryErr error
+			if *noInitFlag {
+				discoveredBase, found, discoveryErr = resolveDiscoveredBaseRoot()
+			} else {
+				discoveredBase, found, discoveryErr = resolveDiscoveredBaseRootForBootstrap()
+			}
 			if discoveryErr != nil {
-				return fmt.Errorf("invalid AMQ root configuration: %w", discoveryErr)
+				return discoveryErr
 			}
 			if found {
 				root = discoveredBase
+			} else if discoveredBase != "" {
+				bootstrapBase = discoveredBase
 			}
 		}
 	}
@@ -192,7 +218,7 @@ func runCoopExec(args []string) error {
 	// Explicit named sessions use the same direct-child creation boundary as
 	// coop init/default exec. In particular, never let MkdirAll traverse a
 	// pre-existing session symlink.
-	if *sessionFlag != "" {
+	if *sessionFlag != "" && root != "" {
 		if *noInitFlag && !dirExists(root) {
 			return fmt.Errorf("root %q does not exist; run 'amq coop init' first or remove --no-init", root)
 		}
@@ -229,9 +255,14 @@ func runCoopExec(args []string) error {
 			}
 		} else {
 			// No explicit, ambient, project, repo-local, or global root: run
-			// full coop init in the cwd (writes .amqrc).
+			// full coop init. In a Git worktree, coop init relocates this to
+			// the worktree top so nested invocations do not scatter queues.
 			if !*yesFlag {
-				ok, err := confirmPromptYes("No project, repo-local, or global AMQ root found. Initialize co-op mode in current directory?")
+				location := "current directory"
+				if bootstrapBase != "" {
+					location = fmt.Sprintf("Git worktree at %s", filepath.Dir(bootstrapBase))
+				}
+				ok, err := confirmPromptYes(fmt.Sprintf("No project, repo-local, or global AMQ root found. Initialize co-op mode in %s?", location))
 				if err != nil {
 					return err
 				}
@@ -258,6 +289,19 @@ func runCoopExec(args []string) error {
 				root = filepath.Join(existing.Dir, root)
 			}
 		}
+	}
+
+	if *sessionFlag != "" && !sessionProvisioned {
+		base := root
+		if bootstrapBase != "" && !sameTreeIdentity(base, bootstrapBase) {
+			return fmt.Errorf("bootstrap resolved base %q, but coop init produced %q", bootstrapBase, base)
+		}
+		requestedRoot := filepath.Join(base, *sessionFlag)
+		root, err = provisionCoopSession(base, *sessionFlag, []string{agentHandle}, agentHandle, cmdName)
+		if err != nil {
+			return fmt.Errorf("failed to create session root %q: %w", requestedRoot, err)
+		}
+		sessionProvisioned = true
 	}
 
 	// Default to --session collab when neither --session nor --root was specified.
