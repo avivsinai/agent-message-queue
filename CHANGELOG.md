@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.52.2](https://github.com/avivsinai/agent-message-queue/compare/v0.52.1...v0.52.2) (2026-08-05)
+
+
+### Bug Fixes
+
+* **doctor:** correlate unread backlog with proven notifier absence ([#430](https://github.com/avivsinai/agent-message-queue/issues/430)) ([085ddeb](https://github.com/avivsinai/agent-message-queue/commit/085ddebed0457f0911ca71d8b0af2d5332230ed3))
+* **wake:** bound doorbell reminders per undrained cohort ([#428](https://github.com/avivsinai/agent-message-queue/issues/428)) ([2cefc16](https://github.com/avivsinai/agent-message-queue/commit/2cefc1662dd46364465f52dc354bb5072c93bed8))
+
 ## [0.52.1](https://github.com/avivsinai/agent-message-queue/compare/v0.52.0...v0.52.1) (2026-08-04)
 
 
