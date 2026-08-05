@@ -991,6 +991,42 @@ func TestRunWakeWithLoopWritesReadyFileAfterLock(t *testing.T) {
 	}
 }
 
+// A bare `amq wake` — the invocation an orchestrator spawns directly, with no
+// supervising parent waiting on a readiness handshake — carries no
+// --ready-file. Preparation must still complete: readiness publication is the
+// handshake's side of the contract, not a precondition for owning the wake.
+func TestRunWakeWithLoopPreparesWithoutReadyFile(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "orchestrator"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	injector := writeExecutableForTest(t, "injector")
+	errDone := errors.New("done")
+	err := runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", injector,
+	}, func(cfg wakeConfig) error {
+		if err := cfg.onPrepared(nil); err != nil {
+			t.Fatalf("prepare wake without --ready-file: %v", err)
+		}
+		if _, exists, preparedErr := readWakeGenerationFile(
+			wakePreparedPath(root, "orchestrator"),
+			"wake prepared marker",
+		); preparedErr != nil || !exists {
+			t.Fatalf("generation-bound prepared marker missing: exists=%v err=%v", exists, preparedErr)
+		}
+		return errDone
+	})
+	if !errors.Is(err, errDone) {
+		t.Fatalf("expected loop sentinel error, got %v", err)
+	}
+}
+
 func TestRunWakeWithLoopBaselinesBeforeReadiness(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {

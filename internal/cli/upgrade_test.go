@@ -93,7 +93,9 @@ func TestRunUpgradeAlreadyCurrentReportsStaleWakesWithInvalidAmbientAgent(t *tes
 		t.Fatalf("upgrade diagnostic roots = %#v, want both session roots", roots)
 	}
 	inspection := inspectWakeLock(staleRoot, "codex")
-	if hint, ok := checkStaleWakeBinaryHint(inspection); !ok {
+	if hint, ok, err := checkStaleWakeBinaryHint(inspection); err != nil {
+		t.Fatalf("stale fixture inspection error: %v", err)
+	} else if !ok {
 		t.Fatalf("stale fixture produced no hint: %#v", inspection)
 	} else if hint.WakeBinary == nil || hint.WakeBinary.PID != 4242 {
 		t.Fatalf("stale fixture hint = %#v", hint)

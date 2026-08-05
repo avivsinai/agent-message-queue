@@ -13,6 +13,7 @@ type wakeBinaryComparisonMethod string
 const (
 	wakeBinaryComparisonExactIdentity      wakeBinaryComparisonMethod = "device_inode"
 	wakeBinaryComparisonDarwinProcessImage wakeBinaryComparisonMethod = "darwin_process_image"
+	wakeBinaryComparisonDarwinDeletedImage wakeBinaryComparisonMethod = "darwin_deleted_process_image"
 	wakeBinaryComparisonStartedMTime       wakeBinaryComparisonMethod = "started_mtime_heuristic"
 )
 
@@ -20,6 +21,7 @@ type wakeBinaryStaleness struct {
 	Stale    bool
 	Method   wakeBinaryComparisonMethod
 	Evidence wakeBinaryEvidence
+	Reason   string
 }
 
 type wakeBinaryEvidence struct {
@@ -71,22 +73,26 @@ func resolveWakeBinary() (resolvedWakeBinary, error) {
 	return resolvedWakeBinary{Info: info}, nil
 }
 
-func checkStaleWakeBinaryHint(inspection wakeLockInspection) (opsHint, bool) {
+func checkStaleWakeBinaryHint(inspection wakeLockInspection) (opsHint, bool, error) {
 	if !inspection.Exists ||
 		inspection.Status != wakeLockValid ||
 		!inspection.IdentityConfirmed ||
 		!inspection.Process.Running {
-		return opsHint{}, false
+		return opsHint{}, false, nil
 	}
 
 	comparison, err := inspectWakeBinaryStaleness(inspection)
-	if err != nil || !comparison.Stale {
-		return opsHint{}, false
+	if err != nil {
+		return opsHint{}, false, err
+	}
+	if !comparison.Stale {
+		return opsHint{}, false, nil
 	}
 	if comparison.Method != wakeBinaryComparisonExactIdentity &&
 		comparison.Method != wakeBinaryComparisonDarwinProcessImage &&
+		comparison.Method != wakeBinaryComparisonDarwinDeletedImage &&
 		comparison.Method != wakeBinaryComparisonStartedMTime {
-		return opsHint{}, false
+		return opsHint{}, false, nil
 	}
 
 	// A PID can exit and be reused while its executable is inspected. Re-read
@@ -95,20 +101,23 @@ func checkStaleWakeBinaryHint(inspection wakeLockInspection) (opsHint, bool) {
 	if !sameWakeBinaryInspection(inspection, confirmed) ||
 		!confirmed.IdentityConfirmed ||
 		!sameWakeBinaryProcessEvidence(inspection.Process, confirmed.Process) {
-		return opsHint{}, false
+		return opsHint{}, false, nil
 	}
 	recheckedComparison, err := inspectWakeBinaryStaleness(confirmed)
-	if err != nil ||
-		!recheckedComparison.Stale ||
+	if err != nil {
+		return opsHint{}, false, err
+	}
+	if !recheckedComparison.Stale ||
 		recheckedComparison.Method != comparison.Method ||
+		comparison.Reason != recheckedComparison.Reason ||
 		!sameWakeBinaryEvidence(comparison.Evidence, recheckedComparison.Evidence) {
-		return opsHint{}, false
+		return opsHint{}, false, nil
 	}
 	final := inspectWakeLock(confirmed.Root, confirmed.Agent)
 	if !sameWakeBinaryInspection(confirmed, final) ||
 		!final.IdentityConfirmed ||
 		!sameWakeBinaryProcessEvidence(confirmed.Process, final.Process) {
-		return opsHint{}, false
+		return opsHint{}, false, nil
 	}
 
 	remedy := "restart this wake through its owning shell, launchd, systemd, or coop supervisor"
@@ -127,6 +136,8 @@ func checkStaleWakeBinaryHint(inspection wakeLockInspection) (opsHint, bool) {
 			inspection.PID,
 			remedy,
 		)
+	} else if comparison.Reason != "" {
+		message = fmt.Sprintf("Wake for agent %q (pid %d): %s.", inspection.Agent, inspection.PID, comparison.Reason)
 	}
 
 	return opsHint{
@@ -136,9 +147,10 @@ func checkStaleWakeBinaryHint(inspection wakeLockInspection) (opsHint, bool) {
 		WakeBinary: &opsWakeBinaryHint{
 			Agent:  inspection.Agent,
 			PID:    inspection.PID,
+			Reason: comparison.Reason,
 			Remedy: remedy,
 		},
-	}, true
+	}, true, nil
 }
 
 func sameWakeBinaryEvidence(first, second wakeBinaryEvidence) bool {

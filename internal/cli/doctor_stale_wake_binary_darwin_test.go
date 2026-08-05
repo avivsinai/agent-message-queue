@@ -327,6 +327,150 @@ func TestDarwinWakeBinaryComparisonReportsHomebrewReplacementDifferent(t *testin
 	}
 }
 
+func TestDarwinWakeBinaryComparisonReportsDeletedLiveImageStale(t *testing.T) {
+	started := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	dir := t.TempDir()
+	runningPath := filepath.Join(dir, "Cellar", "amq", "0.52.0", "bin", "amq")
+	currentPath := filepath.Join(dir, "Cellar", "amq", "0.52.3", "bin", "amq")
+	for _, path := range []string{runningPath, currentPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runningInfo, err := os.Stat(runningPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentInfo, err := os.Stat(currentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := darwinWakeImageEvidenceForTest(t, runningPath, runningInfo)
+	stubDarwinProcessExecutablePath(t, func(int) (string, error) { return runningPath, nil })
+	if err := os.Remove(runningPath); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := inspectWakeBinaryStalenessPlatform(
+		wakeLockInspection{
+			PID:               4242,
+			IdentityConfirmed: true,
+			Process:           wakeProcessInfo{PID: 4242, Running: true},
+			Lock: wakeLock{
+				Started:              started.Format(time.RFC3339),
+				ImagePath:            runningPath,
+				ImageVersion:         evidence.EmbeddedVersion,
+				RunningImageEvidence: &evidence,
+			},
+		},
+		resolvedWakeBinary{Info: currentInfo},
+	)
+	if err != nil {
+		t.Fatalf("compare deleted live image: %v", err)
+	}
+	if !got.Stale || got.Method != wakeBinaryComparisonDarwinDeletedImage {
+		t.Fatalf("deleted live image comparison = %#v, want proven stale", got)
+	}
+	if got.Reason != "wake is running a deleted image; restart it" {
+		t.Fatalf("deleted live image reason = %q", got.Reason)
+	}
+}
+
+func TestDarwinWakeBinaryComparisonReportsDeletedRecordedImageWhenProcPIDPathReturnsENOENT(t *testing.T) {
+	started := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	dir := t.TempDir()
+	runningPath := filepath.Join(dir, "Cellar", "amq", "0.52.0", "bin", "amq")
+	currentPath := filepath.Join(dir, "Cellar", "amq", "0.52.3", "bin", "amq")
+	for _, path := range []string{runningPath, currentPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runningInfo, err := os.Stat(runningPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentInfo, err := os.Stat(currentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := darwinWakeImageEvidenceForTest(t, runningPath, runningInfo)
+	stubDarwinProcessExecutablePath(t, func(int) (string, error) { return "", os.ErrNotExist })
+	if err := os.Remove(runningPath); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := inspectWakeBinaryStalenessPlatform(
+		wakeLockInspection{
+			PID:               4242,
+			IdentityConfirmed: true,
+			Process:           wakeProcessInfo{PID: 4242, Running: true},
+			Lock: wakeLock{
+				Started:              started.Format(time.RFC3339),
+				ImagePath:            runningPath,
+				ImageVersion:         evidence.EmbeddedVersion,
+				RunningImageEvidence: &evidence,
+			},
+		},
+		resolvedWakeBinary{Info: currentInfo},
+	)
+	if err != nil {
+		t.Fatalf("compare deleted recorded image after proc_pidpath ENOENT: %v", err)
+	}
+	if !got.Stale || got.Method != wakeBinaryComparisonDarwinDeletedImage || got.Reason != deletedWakeImageReason {
+		t.Fatalf("deleted recorded image comparison = %#v, want proven stale", got)
+	}
+}
+
+func TestDarwinWakeBinaryComparisonKeepsNonENOENTImageFailureUnknown(t *testing.T) {
+	path := t.TempDir()
+	currentPath := filepath.Join(t.TempDir(), "amq")
+	if err := os.WriteFile(currentPath, []byte("current"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	currentInfo, err := os.Stat(currentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubDarwinProcessExecutablePath(t, func(int) (string, error) { return path, nil })
+	recorded := wakeImageEvidenceV1{
+		Schema:          wakeImageEvidenceSchemaV1,
+		Platform:        "darwin",
+		Method:          wakeImageMethodPathnameExecVerified,
+		ExecutionPath:   path,
+		Device:          1,
+		Inode:           1,
+		Size:            1,
+		CTimeNS:         1,
+		SHA256:          "sha256:" + strings.Repeat("0", 64),
+		EmbeddedVersion: "test-version",
+	}
+
+	got, err := inspectWakeBinaryStalenessPlatform(
+		wakeLockInspection{
+			PID:               4242,
+			IdentityConfirmed: true,
+			Process:           wakeProcessInfo{PID: 4242, Running: true},
+			Lock: wakeLock{
+				Started:              time.Now().UTC().Format(time.RFC3339Nano),
+				ImagePath:            path,
+				ImageVersion:         recorded.EmbeddedVersion,
+				RunningImageEvidence: &recorded,
+			},
+		},
+		resolvedWakeBinary{Info: currentInfo},
+	)
+	if err == nil || got.Stale {
+		t.Fatalf("non-ENOENT image failure = %#v, %v; want unknown error", got, err)
+	}
+}
+
 func TestDarwinWakeBinaryComparisonRejectsRecordedEvidenceDisagreement(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "amq")
 	if err := os.WriteFile(path, []byte("binary"), 0o700); err != nil {
