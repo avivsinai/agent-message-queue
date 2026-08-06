@@ -2092,6 +2092,166 @@ func TestRunWakeLoopRetriesPendingDoorbellWithSubmitOnlyNudge(t *testing.T) {
 	}
 }
 
+func TestRunWakeLoopOwnerlessConfirmedPresentationUsesSubmitOnlyNudge(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "ownerless-submit-only")
+	cleanup, err := acquireWakeLock(root, "codex", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	lock := inspectWakeLock(root, "codex")
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+
+	start := time.Unix(1_800_000_000, 0)
+	var nowNanos atomic.Int64
+	nowNanos.Store(start.UnixNano())
+	var initialRawComplete atomic.Bool
+	var rawWrites atomic.Int64
+	initialAttemptRecorded := make(chan struct{}, 1)
+	writes := make(chan string, 8)
+	attention := make(chan string, 1)
+	ticks := make(chan time.Time)
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	loopDone := make(chan struct{})
+	defer func() {
+		select {
+		case <-stop:
+		default:
+			close(stop)
+		}
+		select {
+		case <-loopDone:
+		case <-time.After(2 * time.Second):
+			t.Error("wake loop did not stop during cleanup")
+		}
+	}()
+	stubTIOCSTIInject(t, func(text string) error {
+		writes <- text
+		if text == "\r" && rawWrites.Add(1) == 4 {
+			initialRawComplete.Store(true)
+		} else if text != "\r" {
+			rawWrites.Add(1)
+		}
+		return nil
+	})
+
+	cfg := wakeConfig{
+		root:               root,
+		me:                 "codex",
+		session:            "session1",
+		previewLen:         80,
+		injectMode:         wakeInjectModeRaw,
+		controlStop:        stop,
+		maintenanceTicks:   ticks,
+		terminalGeneration: lock.Lock.Generation,
+		terminalTTY:        lock.Lock.TTY,
+		doorbellNow: func() time.Time {
+			now := time.Unix(0, nowNanos.Load())
+			if initialRawComplete.Load() && now.Equal(start) {
+				select {
+				case initialAttemptRecorded <- struct{}{}:
+				default:
+				}
+			}
+			return now
+		},
+		preconditionCheck: func(*wakeConfig) error { return nil },
+		attentionIsTTY:    func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attention <- string(data)
+			return len(data), nil
+		},
+	}
+	if usesCoopDoorbell(&cfg) {
+		t.Error("ownerless generic wake loop selected the coop doorbell")
+	}
+
+	go func() {
+		defer close(loopDone)
+		done <- runWakeLoop(cfg)
+	}()
+
+	var payload string
+	select {
+	case payload = <-writes:
+		if payload != coopWakeDoorbell {
+			t.Fatalf("initial full raw payload = %q, want %q", payload, coopWakeDoorbell)
+		}
+	case err := <-done:
+		t.Fatalf("wake loop exited before first full presentation: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not write its first raw payload")
+	}
+	for _, want := range []string{"\n", "\r", "\r"} {
+		select {
+		case got := <-writes:
+			if got != want {
+				t.Fatalf("initial raw write = %q, want %q", got, want)
+			}
+		case err := <-done:
+			t.Fatalf("wake loop exited during first full presentation: %v", err)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("wake loop did not write initial raw chunk %q", want)
+		}
+	}
+	select {
+	case <-initialAttemptRecorded:
+	case err := <-done:
+		t.Fatalf("wake loop exited before recording first presentation: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not record the first full presentation")
+	}
+
+	nowNanos.Store(start.Add(wakeDoorbellRetryBase).UnixNano())
+	select {
+	case ticks <- time.Now():
+	case err := <-done:
+		t.Fatalf("wake loop exited before retry deadline: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not accept retry-deadline maintenance tick")
+	}
+	for _, want := range []string{"\n", "\r", "\r"} {
+		select {
+		case got := <-writes:
+			if got != want {
+				if got == payload {
+					t.Fatalf("submit-only reminder retyped first payload %q, want %q", got, want)
+				}
+				t.Fatalf("submit-only reminder write = %q, want %q", got, want)
+			}
+		case err := <-done:
+			t.Fatalf("wake loop exited during submit-only reminder: %v", err)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("wake loop did not write submit-only raw chunk %q", want)
+		}
+	}
+	select {
+	case got := <-writes:
+		t.Fatalf("submit-only reminder retyped payload %q", got)
+	default:
+	}
+	select {
+	case output := <-attention:
+		t.Fatalf("ownerless submit-only reminder emitted attention: %q", output)
+	default:
+	}
+
+	close(stop)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("wake loop stop: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not stop")
+	}
+}
+
 func TestNotifyNewMessagesAttentionOnlyRetryCadence(t *testing.T) {
 	root := secureTempDirForTest(t)
 	deliverPartialWakeMessageForTest(t, root, "codex", "attention-cadence")
