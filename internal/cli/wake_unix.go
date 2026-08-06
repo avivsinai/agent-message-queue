@@ -388,7 +388,7 @@ func acquireWakeLockWithOptionsInDir(
 					return fmt.Errorf("wake handle %s has an owner-bearing orphan target; run 'amq wake recover-owner --me %s'", me, me)
 				}
 				if readErr != nil && malformedWakeTargetLooksOwnerShaped(orphan.Raw) {
-					return fmt.Errorf("wake handle %s has an unverified owner-shaped orphan target; inspect or run 'amq wake recover-owner --me %s'", me, me)
+					return fmt.Errorf("wake handle %s has an unverified owner-shaped orphan target; inspect the target because automatic owner recovery is unavailable", me)
 				}
 				if exists {
 					if _, err := quarantineWakeTargetAt(dirfd, agentDir, orphan); err != nil {

@@ -266,9 +266,11 @@ If a mutation removes the last target, legacy removal is followed by guarded
 exact-snapshot removal of `.wake.state`; the state document must not survive a
 missing target. If a crash or error leaves an installed target with no lock,
 the target and any state document remain non-authoritative. A later targetless
-acquisition may quarantine the exact target and then, only after a fresh
-inspection, supersede corresponding stale projection state. No pathname-only
-cleanup or ownership inference is permitted.
+acquisition may quarantine an exact conclusively ownerless target and then,
+only after a fresh inspection, supersede corresponding stale projection state.
+A clean owner-bearing target instead requires dead-owner recovery; malformed
+ownership remains preserved for inspection. No pathname-only cleanup or
+ownership inference is permitted.
 
 **P2a must be abortable by simply deleting the doc.**
 
@@ -300,7 +302,10 @@ exact artifacts:
    owner-shaped lock, an unreadable/oversized/special file, and valid JSON with
    a wrong known-field type never qualify.
 2. With no lock, a targetless acquisition may preserve an exact readable
-   regular 0600 orphan `.wake.target`.
+   regular 0600 orphan `.wake.target` only when its bytes are conclusively
+   ownerless. Clean owner-bearing and malformed owner-shaped targets remain at
+   the live pathname. `recover-owner` may remove the clean form only after its
+   exact owner is conclusively dead; malformed ownership remains inspection-only.
 
 The mover holds the lifecycle guard and retained agent-directory FD, revalidates
 inode and raw bytes, performs a Darwin/Linux no-replace rename to
@@ -309,8 +314,11 @@ reopens the destination to verify the same inode and bytes. Success forces a
 new acquisition loop; stale observations never authorize fresh lock
 publication. Any uncertainty, collision, or replacement preserves/refuses.
 
-`doctor --ops` scans those exact names independently of `.wake.lock` and always
-reports `wake_quarantine` with `count` and nullable `newest_age_seconds`.
+`doctor --ops` scans those exact names independently of `.wake.lock` and
+reports `wake_quarantine` with `count` and nullable `newest_age_seconds` only
+after a complete scan. Any root or agent-directory open/validation failure is
+root-wide: doctor reports `wake_quarantine.error`, and explicit quarantine
+cleanup refuses instead of acting on a partial result.
 Quarantine is preservation. Only explicit
 `amq cleanup --wake-quarantine-older-than <duration>` may remove it; dry-run
 does not mutate, and actual cleanup revalidates identity/raw bytes under the
@@ -330,8 +338,8 @@ Post-commit cleanup removes only the exact captured target and its corresponding
 state. For unbound state, the target-section digest must match the retired
 target; a mismatch is preserved as residue. The mailbox and every replacement
 lock, target, or state artifact are always preserved. Residue converges
-automatically on the next acquisition through quarantine/supersession; no
-bespoke recovery action is part of the contract.
+automatically on the next acquisition only when it is conclusively ownerless.
+Owner-bearing residue follows the owner-recovery rules above.
 
 The sequence is intentionally legacy-first. A torn state projection can make
 the projection unusable, but it cannot make a torn legacy operation look safe.
@@ -343,13 +351,13 @@ document adds observations but does not weaken any existing required result.
 
 | Case | W3 geometry | Required observation | Mutation prohibition |
 | --- | --- | --- | --- |
-| Target commits before lock | `.wake.target` and possibly its target section are installed before `.wake.lock` links. | No authoritative lock exists. The target remains preserved state; target alone never implies ownership. A targetless acquisition may quarantine its exact inode/bytes, then must fresh-inspect before superseding matching projection state or publishing a lock. | Do not create ownership from the shadow, remove it by pathname, or clean a different generation. |
+| Target commits before lock | `.wake.target` and possibly its target section are installed before `.wake.lock` links. | No authoritative lock exists. The target remains preserved state; target alone never implies ownership. A targetless acquisition may quarantine its exact inode/bytes only when conclusively ownerless, then must fresh-inspect before superseding matching projection state or publishing a lock. A clean owner-bearing target requires dead-owner recovery. | Do not create ownership from the shadow, remove it by pathname, or clean a different generation. |
 | Lock replacement during a reader | A reader may observe the lock, state, target, prepared marker, or their digest, then a replacement may occur before the final comparison. | Re-open and compare file identity/raw bytes. A legacy-artifact replacement is `wakeSnapshotReadChangedError`-family inconclusive evidence and must classify as unverified/retry-only. For a P2a shadow-document replacement or torn read, section 6.3 resolves the observation as silent legacy fallback; document retry-only classification applies only after P2b binding. | Do not use the old snapshot for cleanup, readiness, repair, or ownership. Preserve the replacement. |
 | Prepared marker generation | State and legacy may show four distinct observations: (a) absent marker / `prepared: null`; (b) stale-generation marker / object; (c) current-generation plus current target digest; or (d) current-generation plus a wrong target digest. | (a) is not-prepared. (b) is stale evidence and not-prepared. (c) is the only valid preparation. (d) is refused and is never treated as ready. | Do not promote absent, stale, or wrong-digest state into readiness or owner admission. |
 | Ready-file replacement during cleanup | Caller ready files remain external while the retained state projection is unchanged. | Cleanup compares the original ready publication's identity, bytes, and semantics, then preserves a replacement. | Do not remove or report a replacement as the original receipt. |
 | Guard release before waits | The guard covers bounded validation/publication only; waits happen after it is released. | Another participant can acquire the guard while a child, pidfd, or control wait is in progress; completion may reacquire it. | Do not hold the guard across a wait or encode a wait in `.wake.state`. |
 | Endpoint generation mismatch | Control/reload endpoints remain ephemeral and may be addressed with a wrong generation or replaced socket. | The request/refusal is tied to the expected generation/socket identity. A mismatch is refused without changing durable state. | Do not mutate state, lock, target, or floor from an unauthenticated endpoint/path. |
-| Crash at every publication point | Stop after temp creation, file sync, pre-rename directory sync, rename, post-rename sync, state verification, lock link, lock-temp removal, or final directory sync. Include the P2b target-state-before-lock geometry and the later prepared-legacy-before-state refresh gap. | Pre-lock states never claim ownership. Post-link lock states are committed even when later cleanup/sync reports an error. In P2a, state/doc mismatch falls back to live legacy. For a bound P2b claim, a torn/mismatched state document is typed inconclusive/retry-only until an authorized mutating path refreshes it. A subsequent targetless acquisition may quarantine an exact no-lock target and only then fresh-inspect before superseding matching projection residue. Before replacement, debug mode records the prior target and state digests. | Never let a document, temp name, stale marker, quarantine artifact, or pathname-only cleanup remove another generation or authorize a mutation. |
+| Crash at every publication point | Stop after temp creation, file sync, pre-rename directory sync, rename, post-rename sync, state verification, lock link, lock-temp removal, or final directory sync. Include the P2b target-state-before-lock geometry and the later prepared-legacy-before-state refresh gap. | Pre-lock states never claim ownership. Post-link lock states are committed even when later cleanup/sync reports an error. In P2a, state/doc mismatch falls back to live legacy. For a bound P2b claim, a torn/mismatched state document is typed inconclusive/retry-only until an authorized mutating path refreshes it. A subsequent targetless acquisition may quarantine an exact conclusively ownerless no-lock target and only then fresh-inspect before superseding matching projection residue; owner-bearing residue requires owner recovery or inspection. Before replacement, debug mode records the prior target and state digests. | Never let a document, temp name, stale marker, quarantine artifact, or pathname-only cleanup remove another generation or authorize a mutation. |
 
 The tests MUST exercise the state-specific versions of these cases, including
 crash hooks after every legacy and state boundary. The existing typed
@@ -501,8 +509,10 @@ the lifecycle guard before stopping a wake or unlinking its lock. An
 inconclusive binding refuses and preserves the lock, target, prepared marker,
 and state document; it never falls back to a destructive legacy cleanup. A
 target/state shadow with no lock is likewise non-authoritative preservation; a
-targetless acquisition may move only the exact target into quarantine and must
-fresh-inspect before converging matching projection residue. Here rollback
+targetless acquisition may move only an exact conclusively ownerless target
+into quarantine and must fresh-inspect before converging matching projection
+residue. Clean owner-bearing residue requires dead-owner recovery, while
+malformed ownership remains inspection-only. Here rollback
 means using an older binary or reader that remains compatible with the retained
 legacy artifacts; it does not rewrite a lock to remove P2b fields. Existing
 unbound claims remain P2a, and an older binary may still release its own exact

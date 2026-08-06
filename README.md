@@ -354,9 +354,12 @@ only that narrow case by atomically moving the exact inode and bytes to
 again from a fresh inspection. A targetless acquisition similarly quarantines
 an exact readable regular 0600 orphan `.wake.target` only when it is
 conclusively generic. Clean owner-bearing targets and malformed owner-shaped
-targets remain untouched and direct the operator to owner recovery; unreadable,
-oversized, special, and valid JSON targets with wrong known-field types also
-fail closed. `doctor --ops` reports `wake_quarantine.count` and nullable
+targets remain untouched: clean targets direct the operator to owner recovery,
+while malformed targets require inspection because automatic recovery cannot
+authenticate their owner. Unreadable, oversized, and special targets also fail
+closed. Valid JSON targets with wrong known-field types are quarantined only
+when their retained bytes are conclusively ownerless. `doctor --ops` reports
+`wake_quarantine.count` and nullable
 `wake_quarantine.newest_age_seconds` when the complete scan succeeds. A scan
 failure instead produces `wake_quarantine.error` plus an error hint; explicit
 quarantine cleanup refuses rather than acting on a partial result.
@@ -397,8 +400,10 @@ unlink; AMQ preserves that claim and its artifacts. A conclusively generic
 target/state shadow with no lock carries no ownership: targetless acquisition
 may move the exact target into quarantine, then must inspect again before
 superseding stale projection state or creating a wake. An owner-bearing target,
-or a malformed target with a non-null owner marker, remains preserved for
-inspection or `recover-owner`.
+with no lock, can be removed by `recover-owner` only after its exact owner is
+conclusively dead; a live or unknown owner preserves it. A malformed target
+with a non-null owner marker remains preserved for inspection because automatic
+owner recovery cannot authenticate it.
 Rollback means returning to an older compatible binary or reader, not
 destructively rewriting a P2b lock; existing unbound claims remain P2a, and an
 older binary may release its own exact claim. There is no force mode. The
@@ -419,13 +424,15 @@ mailbox and every replacement lock, target, or state artifact are preserved.
 Results are exactly `refused`, `retired`, or `retired_with_residue`.
 `retired_with_residue` is an exit-0 success warning: the lock is gone, but
 target/state cleanup failed or was skipped. That residue converges
-automatically on the next acquisition through the same quarantine/supersession
-path.
+automatically on the next acquisition only when conclusively ownerless;
+owner-bearing residue follows owner recovery, and malformed ownership remains
+inspection-only.
 
 The lifecycle boundaries are:
 
 - repair = replace a proven-stale inject-via wake.
-- recover-owner = stop and release one exact owner-bound inject-via claim.
+- recover-owner = stop and release one exact owner-bound inject-via claim, or
+  remove a lockless clean owner-bearing target after proving its owner dead.
 - `doctor --ops --fix-wake-locks` = remove a proven-stale lock.
 - retire = stop an identity-confirmed live inject-via wake.
 - launchd, systemd, or the owning shell = stop a raw wake.

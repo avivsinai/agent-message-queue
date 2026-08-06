@@ -238,7 +238,7 @@ func malformedWakeTargetLooksOwnerShaped(raw []byte) bool {
 	for searchAt := 0; searchAt < len(raw); {
 		relative := bytes.IndexByte(raw[searchAt:], '"')
 		if relative < 0 {
-			return false
+			return malformedWakeTargetHasBareOwnerMarker(raw)
 		}
 		keyStart := searchAt + relative
 		keyEnd := keyStart + 1
@@ -253,19 +253,26 @@ func malformedWakeTargetLooksOwnerShaped(raw []byte) bool {
 			keyEnd++
 		}
 		if keyEnd >= len(raw) {
-			return bytes.Contains(bytes.ToLower(raw[keyStart+1:]), []byte("owner"))
+			key, err := strconv.Unquote(string(raw[keyStart:]) + `"`)
+			if err != nil {
+				return true
+			}
+			return strings.EqualFold(key, "owner")
+		}
+		key, err := strconv.Unquote(string(raw[keyStart : keyEnd+1]))
+		if err != nil {
+			return true
 		}
 		valueAt := keyEnd + 1
 		for valueAt < len(raw) && isJSONWhitespace(raw[valueAt]) {
 			valueAt++
 		}
 		if valueAt >= len(raw) || raw[valueAt] != ':' {
+			if strings.EqualFold(key, "owner") {
+				return true
+			}
 			searchAt = keyEnd + 1
 			continue
-		}
-		key, err := strconv.Unquote(string(raw[keyStart : keyEnd+1]))
-		if err != nil {
-			return true
 		}
 		if !strings.EqualFold(key, "owner") {
 			searchAt = keyEnd + 1
@@ -287,7 +294,42 @@ func malformedWakeTargetLooksOwnerShaped(raw []byte) bool {
 		}
 		searchAt = afterNull
 	}
+	return malformedWakeTargetHasBareOwnerMarker(raw)
+}
+
+func malformedWakeTargetHasBareOwnerMarker(raw []byte) bool {
+	lower := bytes.ToLower(raw)
+	marker := []byte("owner")
+	for searchAt := 0; searchAt < len(lower); {
+		relative := bytes.Index(lower[searchAt:], marker)
+		if relative < 0 {
+			return false
+		}
+		start := searchAt + relative
+		end := start + len(marker)
+		if start > 0 && isMalformedWakeTargetIdentifierByte(lower[start-1]) {
+			searchAt = end
+			continue
+		}
+		if end < len(lower) && isMalformedWakeTargetIdentifierByte(lower[end]) {
+			searchAt = end
+			continue
+		}
+		for end < len(lower) && isJSONWhitespace(lower[end]) {
+			end++
+		}
+		if end == len(lower) || lower[end] == ':' {
+			return true
+		}
+		searchAt = end + 1
+	}
 	return false
+}
+
+func isMalformedWakeTargetIdentifierByte(value byte) bool {
+	return value == '_' || value == '$' ||
+		(value >= 'a' && value <= 'z') ||
+		(value >= '0' && value <= '9')
 }
 
 func isJSONWhitespace(value byte) bool {

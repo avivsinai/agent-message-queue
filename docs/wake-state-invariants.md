@@ -59,8 +59,9 @@ Source anchors: `wake_target.go` and `wake_owner_storage_unix.go`.
 Retirement results are exactly `refused`, `retired`, and
 `retired_with_residue`. The last is exit-0 success with a warning: ownership is
 already retired, but target/state cleanup failed or was skipped. The next
-acquisition converges that residue through the quarantine/supersession path;
-there is no separate recovery contract.
+acquisition converges conclusively ownerless residue through the
+quarantine/supersession path. Owner-bearing residue follows owner recovery;
+malformed ownership remains inspection-only.
 
 ## `.wake.<lock|target>.quarantined.<timestamp>`: preserved blocked input
 
@@ -77,11 +78,17 @@ syntax-invalid/empty/truncated, same-owner, regular 0600 generic files qualify.
 Fresh creating, 0400, owner-shaped, unreadable, oversized, special, and
 valid-JSON wrong-known-type locks are preserved at `.wake.lock`. With no lock,
 a targetless acquisition may quarantine an exact readable regular 0600 orphan
-target.
+target only when its bytes are conclusively ownerless. Clean owner-bearing and
+malformed owner-shaped targets stay at the live pathname. `recover-owner` may
+remove the clean form only after proving its exact owner dead; malformed
+ownership remains inspection-only.
 
 **Independence invariant:** quarantine is preservation, not cleanup or
 ownership. Exact names are reported by `doctor --ops` independently of lock
-discovery. Ordinary tmp cleanup never removes them. Explicit
+discovery only after a complete root-wide scan. Any root or agent-directory
+open/validation failure produces `wake_quarantine.error` and blocks explicit
+quarantine cleanup rather than exposing a partial result. Ordinary tmp cleanup
+never removes them. Explicit
 `--wake-quarantine-older-than` cleanup captures and revalidates exact identity
 and bytes under the same guard before `unlinkat` and directory sync; ambiguity
 or replacement preserves the artifact.
@@ -186,8 +193,10 @@ An authoritative inject-via claim has three durable publication steps:
 
 The target and state shadow can therefore be installed when no lock has
 committed. Failures before the lock link preserve both artifacts; a later
-targetless acquisition may quarantine only the exact target, then must inspect
-again before superseding the corresponding projection or publishing a lock.
+targetless acquisition may quarantine only an exact conclusively ownerless
+target, then must inspect again before superseding the corresponding projection
+or publishing a lock. Clean owner-bearing residue requires dead-owner recovery;
+malformed ownership remains inspection-only.
 Once the lock link succeeds, errors removing the temporary name or syncing the
 directory are reported as committed-lock errors.
 
@@ -199,7 +208,7 @@ all-or-nothing state across both files.
 
 | Case | Injected interleaving | Required observation |
 | --- | --- | --- |
-| Target/state commit before lock | Fail after target publication, state publication, or either directory sync and before the lock link. | No authoritative lock exists. The installed target and state shadow are preserved. A later targetless acquisition may move the exact target to quarantine, then fresh-inspect before superseding matching projection state or creating ownership. |
+| Target/state commit before lock | Fail after target publication, state publication, or either directory sync and before the lock link. | No authoritative lock exists. The installed target and state shadow are preserved. A later targetless acquisition may move the exact target to quarantine only when conclusively ownerless, then fresh-inspect before superseding matching projection state or creating ownership. Clean owner-bearing residue requires dead-owner recovery. |
 | Lock replacement during a reader | Replace `.wake.lock` between the reader's pathname snapshot, opened-file read, and final comparison while reading lock-, target-, prepared-, or ready-bound state. | The operation reports changed or inconclusive state and performs no mutation based on the old snapshot. The replacement remains present. |
 | Prepared marker generation | Exercise absent, stale-generation, current-generation/current-digest, and current-generation/wrong-digest markers. | Absence and stale generation remain not prepared; the exact current marker is accepted; an incompatible current marker is refused rather than treated as readiness. |
 | Ready file replacement during cleanup | Publish a caller ready file, replace its pathname, then run failure cleanup for the original publication. | Cleanup removes only the original unchanged snapshot. The replacement is preserved and is not reported as the original receipt. |

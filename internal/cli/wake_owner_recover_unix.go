@@ -114,15 +114,74 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 			result.PID = inspection.PID
 			switch classifyPersistedWakeClaim(inspection) {
 			case wakeClaimAbsent:
-				_, exists, err := readWakeTargetAt(dirfd, agentDir, root, me)
+				target, exists, err := readWakeTargetSnapshotAt(dirfd, agentDir, root, me)
 				if err != nil {
 					return refuse("orphan wake target is unverified: "+err.Error(), "inspect the target and retry")
 				}
 				if exists {
-					return refuse(
-						"orphan wake target is preserved because it may be an uncommitted bound-claim shadow",
-						"start a new wake to supersede it, or inspect the target and state evidence first",
+					if err := validateAuthoritativeWakeTarget(target.Target, root, me); err != nil {
+						return refuse(
+							"orphan wake target is not a verified owner-bearing target: "+err.Error(),
+							"inspect the target; automatic owner recovery is unavailable",
+						)
+					}
+					owner := *target.Target.Owner
+					result.OwnerPID = owner.PID
+					result.OwnerSession = owner.SessionID
+					observation, err := observeAuthoritativeWakeOwner(owner)
+					if err != nil {
+						return errors.Join(
+							refuse("orphan target owner is unknown: "+err.Error(), "retry after owner identity inspection is available"),
+							observation.Close(),
+						)
+					}
+					if observation.State == wakeOwnerUnknown {
+						closeErr := observation.Close()
+						return errors.Join(refuse(
+							"orphan target owner is unknown: "+observation.Reason,
+							"retry after owner identity inspection is available",
+						), closeErr)
+					}
+					if observation.State == wakeOwnerSame {
+						closeErr := observation.Close()
+						return errors.Join(refuse(
+							"orphan target owner is still live",
+							fmt.Sprintf("exit or stop owner pid %d, then rerun amq wake recover-owner --me %s", owner.PID, me),
+						), closeErr)
+					}
+					if err := observation.Close(); err != nil {
+						return errors.Join(refuse(
+							"orphan target owner observation failed before recovery mutation: "+err.Error(),
+							"preserve the target and retry after owner monitoring is healthy",
+						), err)
+					}
+					stateSnapshot, stateExists, stateErr := readWakeStateRawSnapshotAt(dirfd, agentDir)
+					if stateErr != nil {
+						continueAfterWakeStateProjectionError(newWakeStateProjectionError(stateErr))
+						stateExists = false
+					}
+					removed, err := removeWakeTargetIfSnapshotMatchesAt(dirfd, agentDir, root, me, target)
+					if err != nil {
+						return err
+					}
+					if !removed {
+						return fmt.Errorf("owner-bearing orphan target disappeared before recovery")
+					}
+					if err := syncWakeOwnerDirFD(dirfd); err != nil {
+						return fmt.Errorf("sync owner-bearing orphan target recovery: %w", err)
+					}
+					_, err = removeWakeStateIfTargetAbsentAt(
+						dirfd,
+						agentDir,
+						stateSnapshot,
+						stateExists,
 					)
+					if err != nil && !continueAfterWakeStateProjectionError(err) {
+						return fmt.Errorf("remove orphan wake state: %w", err)
+					}
+					result.Status = "recovered"
+					result.Reason = "dead owner-bearing orphan target removed"
+					return nil
 				}
 				stateSnapshot, stateExists, stateErr := readWakeStateRawSnapshotAt(dirfd, agentDir)
 				if stateErr != nil {

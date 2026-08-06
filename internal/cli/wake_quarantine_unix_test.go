@@ -101,6 +101,7 @@ func TestTargetlessAcquisitionQuarantinesReadableMalformedOrphanTarget(t *testin
 		[]byte(`{"schema":`),
 		[]byte(`{"owner":null,"schema":`),
 		[]byte(`{"ow\u006eer_note":"x","schema":`),
+		[]byte(`{owner_note:`),
 	} {
 		t.Run(string(raw), func(t *testing.T) {
 			root := secureTempDirForTest(t)
@@ -165,6 +166,113 @@ func TestTargetlessAcquisitionPreservesOwnerBearingOrphanTarget(t *testing.T) {
 	)
 }
 
+func TestRecoverOwnerClearsDeadOwnerBearingOrphanTarget(t *testing.T) {
+	root := secureTempDirForTest(t)
+	agentDir := filepath.Join(root, "agents", "codex")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := mustNewWakeTargetForTest(
+		t,
+		root,
+		"codex",
+		writeExecutableForTest(t, "dead-owner-orphan-injector"),
+		nil,
+	)
+	target.Owner = &wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatal(err)
+	}
+	wakeDir, err := openWakeAgentDir(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wakeDir.Close() })
+	fixture := wakeStateUnixFixture{
+		root:     root,
+		agent:    "codex",
+		injector: target.InjectVia,
+		agentDir: wakeDir,
+	}
+	if _, err := publishWakeStateForTest(fixture, captureWakeStateLegacyForTest(t, fixture)); err != nil {
+		t.Fatalf("publish orphan target state: %v", err)
+	}
+
+	originalObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
+		if !sameWakeOwner(&got, target.Owner) {
+			t.Fatalf("observed owner = %#v, want %#v", got, *target.Owner)
+		}
+		return wakeOwnerObservation{State: wakeOwnerDead}, nil
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = originalObserve })
+
+	result, err := recoverOwnerWake(root, "codex")
+	if err != nil || result.Status != "recovered" {
+		t.Fatalf("recover dead owner-bearing orphan = %#v err=%v", result, err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(agentDir, wakeTargetFileName)); !os.IsNotExist(statErr) {
+		t.Fatalf("recovered orphan target still exists: %v", statErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(agentDir, wakeStateFileName)); !os.IsNotExist(statErr) {
+		t.Fatalf("recovered orphan target state still exists: %v", statErr)
+	}
+	cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{})
+	if err != nil {
+		t.Fatalf("advertised targetless acquisition after recover-owner: %v", err)
+	}
+	t.Cleanup(cleanup)
+}
+
+func TestRecoverOwnerPreservesLiveOwnerBearingOrphanTarget(t *testing.T) {
+	root := secureTempDirForTest(t)
+	agentDir := filepath.Join(root, "agents", "codex")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := mustNewWakeTargetForTest(
+		t,
+		root,
+		"codex",
+		writeExecutableForTest(t, "live-owner-orphan-injector"),
+		nil,
+	)
+	target.Owner = &wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatal(err)
+	}
+	targetPath := filepath.Join(agentDir, wakeTargetFileName)
+	before, err := os.Lstat(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	originalObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(wakeOwner) (wakeOwnerObservation, error) {
+		return wakeOwnerObservation{State: wakeOwnerSame}, nil
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = originalObserve })
+
+	result, err := recoverOwnerWake(root, "codex")
+	if err == nil || result.Status != "refused" || !strings.Contains(result.Reason, "still live") {
+		t.Fatalf("recover live owner-bearing orphan = %#v err=%v", result, err)
+	}
+	after, statErr := os.Lstat(targetPath)
+	if statErr != nil || !os.SameFile(before, after) {
+		t.Fatalf("live owner-bearing orphan target changed: info=%v err=%v", after, statErr)
+	}
+}
+
 func TestTargetlessAcquisitionPreservesMalformedOwnerShapedOrphanTarget(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -173,6 +281,12 @@ func TestTargetlessAcquisitionPreservesMalformedOwnerShapedOrphanTarget(t *testi
 		{name: "lowercase", raw: []byte(`{"schema":1,"owner":{"pid":4242`)},
 		{name: "uppercase", raw: []byte(`{"schema":1,"OWNER":{"pid":4242`)},
 		{name: "escaped", raw: []byte(`{"schema":1,"ow\u006eer":{"pid":4242`)},
+		{name: "truncated lowercase key", raw: []byte(`{"schema":1,"owner`)},
+		{name: "truncated escaped key", raw: []byte(`{"schema":1,"ow\u006eer`)},
+		{name: "terminated key without colon", raw: []byte(`{"schema":1,"owner"`)},
+		{name: "bare lowercase", raw: []byte(`{owner:{`)},
+		{name: "bare uppercase", raw: []byte(`{OWNER:`)},
+		{name: "truncated bare", raw: []byte(`{owner`)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := secureTempDirForTest(t)
