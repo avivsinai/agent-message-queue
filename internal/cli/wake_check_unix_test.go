@@ -229,7 +229,7 @@ func TestWakeCheckImageStatusRequiresCompleteExactEvidence(t *testing.T) {
 			want: wakeImageUnknown,
 		},
 		{
-			name: "complete lock with post-exec Darwin pathname agreement stays unknown",
+			name: "complete lock with Darwin mapped-vnode agreement is current",
 			lock: wakeLock{
 				ImagePath:    "/opt/homebrew/bin/amq",
 				ImageVersion: "0.49.14",
@@ -239,10 +239,10 @@ func TestWakeCheckImageStatusRequiresCompleteExactEvidence(t *testing.T) {
 				CurrentVersion: "0.49.14",
 			},
 			comparison: wakeBinaryStaleness{
-				Method:   wakeBinaryComparisonMethod("darwin_process_image"),
+				Method:   wakeBinaryComparisonDarwinProcessImage,
 				Evidence: stableWakeBinaryEvidenceForTest(),
 			},
-			want: wakeImageUnknown,
+			want: wakeImageCurrent,
 		},
 		{
 			name: "legacy lock stays unknown despite exact comparison",

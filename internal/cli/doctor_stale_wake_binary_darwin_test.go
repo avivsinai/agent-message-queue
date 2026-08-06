@@ -134,13 +134,13 @@ func TestDarwinSameVersionPathReplacementCannotReportCurrent(t *testing.T) {
 	}
 	comparison, err := inspectWakeBinaryStalenessPlatform(
 		inspection,
-		resolvedWakeBinary{Info: currentInfo},
+		resolvedWakeBinary{Path: captured.Evidence.ExecutionPath, Info: currentInfo},
 	)
 	if err != nil {
 		t.Fatalf("compare post-exec replacement: %v", err)
 	}
-	if comparison.Stale || comparison.Method != wakeBinaryComparisonDarwinProcessImage {
-		t.Fatalf("pathname evidence did not reproduce false agreement: %#v", comparison)
+	if !comparison.Stale || comparison.Method != wakeBinaryComparisonDarwinProcessImage {
+		t.Fatalf("mapped image did not distinguish post-exec replacement: %#v", comparison)
 	}
 	stubWakeBinaryStaleness(t, func(wakeLockInspection) (wakeBinaryStaleness, error) {
 		return comparison, nil
@@ -148,8 +148,8 @@ func TestDarwinSameVersionPathReplacementCannotReportCurrent(t *testing.T) {
 	if got := inspectWakeCheckImageStatus(inspection, wakeCheckResult{
 		RunningVersion: captured.Evidence.EmbeddedVersion,
 		CurrentVersion: captured.Evidence.EmbeddedVersion,
-	}); got != wakeImageUnknown {
-		t.Fatalf("post-exec pathname replacement image status = %q, want %q", got, wakeImageUnknown)
+	}); got != wakeImageDifferent {
+		t.Fatalf("post-exec pathname replacement image status = %q, want %q", got, wakeImageDifferent)
 	}
 
 	if err := os.WriteFile(releasePath, []byte("release\n"), 0o600); err != nil {
@@ -264,7 +264,7 @@ func TestDarwinWakeBinaryComparisonReportsCurrentFromCorroboratedLiveImage(t *te
 				RunningImageEvidence: &evidence,
 			},
 		},
-		resolvedWakeBinary{Info: info},
+		resolvedWakeBinary{Path: path, Info: info},
 	)
 	if err != nil {
 		t.Fatalf("compare corroborated current image: %v", err)
@@ -305,7 +305,7 @@ func TestDarwinWakeBinaryComparisonReportsHomebrewReplacementDifferent(t *testin
 		t.Fatal(err)
 	}
 	evidence := darwinWakeImageEvidenceForTest(t, runningPath, runningInfo)
-	stubDarwinProcessExecutablePath(t, func(int) (string, error) { return runningPath, nil })
+	stubDarwinProcessImage(t, darwinMappedImageForTest(t, runningPath, runningInfo), nil)
 
 	got, err := inspectWakeBinaryStalenessPlatform(
 		wakeLockInspection{
@@ -317,7 +317,7 @@ func TestDarwinWakeBinaryComparisonReportsHomebrewReplacementDifferent(t *testin
 				RunningImageEvidence: &evidence,
 			},
 		},
-		resolvedWakeBinary{Info: currentInfo},
+		resolvedWakeBinary{Path: currentPath, Info: currentInfo},
 	)
 	if err != nil {
 		t.Fatalf("compare Homebrew replacement: %v", err)
@@ -349,7 +349,7 @@ func TestDarwinWakeBinaryComparisonReportsDeletedLiveImageStale(t *testing.T) {
 		t.Fatal(err)
 	}
 	evidence := darwinWakeImageEvidenceForTest(t, runningPath, runningInfo)
-	stubDarwinProcessExecutablePath(t, func(int) (string, error) { return runningPath, nil })
+	stubDarwinProcessImage(t, darwinWakeProcessImage{Path: runningPath}, os.ErrNotExist)
 	if err := os.Remove(runningPath); err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func TestDarwinWakeBinaryComparisonReportsDeletedLiveImageStale(t *testing.T) {
 				RunningImageEvidence: &evidence,
 			},
 		},
-		resolvedWakeBinary{Info: currentInfo},
+		resolvedWakeBinary{Path: currentPath, Info: currentInfo},
 	)
 	if err != nil {
 		t.Fatalf("compare deleted live image: %v", err)
@@ -401,7 +401,7 @@ func TestDarwinWakeBinaryComparisonReportsDeletedRecordedImageWhenProcPIDPathRet
 		t.Fatal(err)
 	}
 	evidence := darwinWakeImageEvidenceForTest(t, runningPath, runningInfo)
-	stubDarwinProcessExecutablePath(t, func(int) (string, error) { return "", os.ErrNotExist })
+	stubDarwinProcessImage(t, darwinWakeProcessImage{}, os.ErrNotExist)
 	if err := os.Remove(runningPath); err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +418,7 @@ func TestDarwinWakeBinaryComparisonReportsDeletedRecordedImageWhenProcPIDPathRet
 				RunningImageEvidence: &evidence,
 			},
 		},
-		resolvedWakeBinary{Info: currentInfo},
+		resolvedWakeBinary{Path: currentPath, Info: currentInfo},
 	)
 	if err != nil {
 		t.Fatalf("compare deleted recorded image after proc_pidpath ENOENT: %v", err)
@@ -438,7 +438,7 @@ func TestDarwinWakeBinaryComparisonKeepsNonENOENTImageFailureUnknown(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	stubDarwinProcessExecutablePath(t, func(int) (string, error) { return path, nil })
+	stubDarwinProcessImage(t, darwinWakeProcessImage{Path: path}, fmt.Errorf("region query denied"))
 	recorded := wakeImageEvidenceV1{
 		Schema:          wakeImageEvidenceSchemaV1,
 		Platform:        "darwin",
@@ -464,14 +464,14 @@ func TestDarwinWakeBinaryComparisonKeepsNonENOENTImageFailureUnknown(t *testing.
 				RunningImageEvidence: &recorded,
 			},
 		},
-		resolvedWakeBinary{Info: currentInfo},
+		resolvedWakeBinary{Path: currentPath, Info: currentInfo},
 	)
 	if err == nil || got.Stale {
 		t.Fatalf("non-ENOENT image failure = %#v, %v; want unknown error", got, err)
 	}
 }
 
-func TestDarwinWakeBinaryComparisonRejectsRecordedEvidenceDisagreement(t *testing.T) {
+func TestDarwinWakeBinaryComparisonUsesMappedVnodeOverRecordedPathIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "amq")
 	if err := os.WriteFile(path, []byte("binary"), 0o700); err != nil {
 		t.Fatal(err)
@@ -482,7 +482,7 @@ func TestDarwinWakeBinaryComparisonRejectsRecordedEvidenceDisagreement(t *testin
 	}
 	evidence := darwinWakeImageEvidenceForTest(t, path, info)
 	evidence.Inode++
-	stubDarwinProcessExecutablePath(t, func(int) (string, error) { return path, nil })
+	stubDarwinProcessImage(t, darwinMappedImageForTest(t, path, info), nil)
 
 	got, err := inspectWakeBinaryStalenessPlatform(
 		wakeLockInspection{
@@ -494,14 +494,14 @@ func TestDarwinWakeBinaryComparisonRejectsRecordedEvidenceDisagreement(t *testin
 				RunningImageEvidence: &evidence,
 			},
 		},
-		resolvedWakeBinary{Info: info},
+		resolvedWakeBinary{Path: path, Info: info},
 	)
-	if err == nil {
-		t.Fatalf("disagreeing recorded evidence returned %#v, want unknown error", got)
+	if err != nil || got.Stale || got.Method != wakeBinaryComparisonDarwinProcessImage {
+		t.Fatalf("mapped vnode comparison = %#v, %v; want current despite stale pathname identity", got, err)
 	}
 }
 
-func TestDarwinWakeBinaryComparisonRejectsRecordedDigestDisagreement(t *testing.T) {
+func TestDarwinWakeBinaryComparisonDoesNotTreatRecordedDigestAsMappedAuthority(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "amq")
 	if err := os.WriteFile(path, []byte("binary"), 0o700); err != nil {
 		t.Fatal(err)
@@ -512,7 +512,7 @@ func TestDarwinWakeBinaryComparisonRejectsRecordedDigestDisagreement(t *testing.
 	}
 	evidence := darwinWakeImageEvidenceForTest(t, path, info)
 	evidence.SHA256 = "sha256:" + strings.Repeat("f", 64)
-	stubDarwinProcessExecutablePath(t, func(int) (string, error) { return path, nil })
+	stubDarwinProcessImage(t, darwinMappedImageForTest(t, path, info), nil)
 
 	got, err := inspectWakeBinaryStalenessPlatform(
 		wakeLockInspection{
@@ -524,10 +524,46 @@ func TestDarwinWakeBinaryComparisonRejectsRecordedDigestDisagreement(t *testing.
 				RunningImageEvidence: &evidence,
 			},
 		},
-		resolvedWakeBinary{Info: info},
+		resolvedWakeBinary{Path: path, Info: info},
 	)
-	if err == nil {
-		t.Fatalf("disagreeing recorded digest returned %#v, want unknown error", got)
+	if err != nil || got.Stale || got.Method != wakeBinaryComparisonDarwinProcessImage {
+		t.Fatalf("mapped vnode comparison = %#v, %v; want current despite pathname digest", got, err)
+	}
+}
+
+func TestDarwinWakeBinaryComparisonCurrentRelinkBecomesUnknown(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "amq")
+	replacementPath := filepath.Join(dir, "replacement")
+	for _, path := range []string{currentPath, replacementPath} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	currentInfo, err := os.Stat(currentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := darwinWakeImageEvidenceForTest(t, currentPath, currentInfo)
+	stubDarwinProcessImage(t, darwinMappedImageForTest(t, currentPath, currentInfo), nil)
+	if err := os.Rename(replacementPath, currentPath); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := inspectWakeBinaryStalenessPlatform(
+		wakeLockInspection{
+			PID: 42,
+			Lock: wakeLock{
+				Started:              time.Now().UTC().Format(time.RFC3339Nano),
+				ImagePath:            currentPath,
+				ImageVersion:         evidence.EmbeddedVersion,
+				RunningImageEvidence: &evidence,
+			},
+		},
+		resolvedWakeBinary{Path: currentPath, Info: currentInfo},
+	)
+	if err == nil || got.Stale || !strings.Contains(err.Error(), "changed during comparison") {
+		t.Fatalf("current relink comparison = %#v, %v; want unknown change error", got, err)
 	}
 }
 
@@ -563,6 +599,24 @@ func stubDarwinProcessExecutablePath(t *testing.T, fn func(int) (string, error))
 	t.Cleanup(func() { readDarwinProcessExecutablePath = old })
 }
 
+func darwinMappedImageForTest(t *testing.T, path string, info os.FileInfo) darwinWakeProcessImage {
+	t.Helper()
+	identity, ok := captureWakeFileIdentity(info)
+	if !ok {
+		t.Fatal("capture mapped image identity")
+	}
+	return darwinWakeProcessImage{Path: path, Identity: identity, Size: info.Size()}
+}
+
+func stubDarwinProcessImage(t *testing.T, image darwinWakeProcessImage, err error) {
+	t.Helper()
+	old := inspectDarwinWakeProcessImage
+	inspectDarwinWakeProcessImage = func(int) (darwinWakeProcessImage, error) {
+		return image, err
+	}
+	t.Cleanup(func() { inspectDarwinWakeProcessImage = old })
+}
+
 func TestDarwinWakeBinaryComparisonUsesStrictStartedMTimeHeuristic(t *testing.T) {
 	started := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "amq")
@@ -591,7 +645,7 @@ func TestDarwinWakeBinaryComparisonUsesStrictStartedMTimeHeuristic(t *testing.T)
 			}
 			got, err := inspectWakeBinaryStalenessPlatform(
 				wakeLockInspection{Lock: wakeLock{Started: started.Format(time.RFC3339)}},
-				resolvedWakeBinary{Info: info},
+				resolvedWakeBinary{Path: path, Info: info},
 			)
 			if err != nil {
 				t.Fatalf("compare timestamps: %v", err)
@@ -620,7 +674,7 @@ func TestDarwinWakeBinaryComparisonReturnsUnknownForInvalidStarted(t *testing.T)
 	}
 	got, err := inspectWakeBinaryStalenessPlatform(
 		wakeLockInspection{Lock: wakeLock{Started: "not-a-timestamp"}},
-		resolvedWakeBinary{Info: info},
+		resolvedWakeBinary{Path: path, Info: info},
 	)
 	if err == nil {
 		t.Fatal("invalid Started returned nil error")
