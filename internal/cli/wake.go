@@ -605,11 +605,13 @@ func deliverNewMessageNotification(
 		}
 	}
 	ownerBound := usesCoopDoorbell(cfg)
-	if ownerBound && cfg.injectMode != wakeInjectModeNone {
+	if cfg.injectMode != wakeInjectModeNone {
 		retainedInputPending := cfg.inputDelivery.pending()
-		notice.input = wakePayload{
-			text:       plan.prompt,
-			provenance: wakePayloadSystemFixed,
+		if ownerBound {
+			notice.input = wakePayload{
+				text:       plan.prompt,
+				provenance: wakePayloadSystemFixed,
+			}
 		}
 		notice.submitOnly = plan.submitOnly
 		deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
@@ -1100,7 +1102,10 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	}
 
 	// External injection: delegate to user-specified command instead of TIOCSTI.
-	// The command receives the notification text as its last argument.
+	// The command receives the notification text as its last argument. This
+	// transport does not participate in inputDelivery, so exit zero is its only
+	// presentation-confirmation evidence; an unchanged confirmed cohort therefore
+	// invokes the injector with a submit-only CR on its next reminder.
 	if cfg.injectVia != "" {
 		allowed, guardErr := authorizeTerminalWrite(cfg)
 		if guardErr != nil {

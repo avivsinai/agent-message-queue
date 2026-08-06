@@ -2661,6 +2661,399 @@ func TestNotifyNewMessagesOwnerlessSuccessfulInputRetryEmitsNoAttention(t *testi
 	}
 }
 
+func TestNotifyNewMessagesGenericFullPresentationConfirmsDoorbell(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "generic-confirmed-presentation")
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+
+	var injected strings.Builder
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:          "codex",
+		root:        root,
+		session:     "session1",
+		injectMode:  wakeInjectModeRaw,
+		doorbellNow: func() time.Time { return now },
+		terminalWrite: func(text string) error {
+			injected.WriteString(text)
+			return nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first generic presentation: %v", err)
+	}
+	if got, want := injected.String(), coopWakeDoorbell+"\n\r\r"; got != want {
+		t.Fatalf("first generic presentation = %q, want %q", got, want)
+	}
+	if !cfg.doorbell.presentationConfirmed {
+		t.Fatal("successful generic full presentation was not confirmed")
+	}
+}
+
+func TestNotifyNewMessagesGenericConfirmedCohortUsesSubmitOnly(t *testing.T) {
+	testCases := []struct {
+		name      string
+		mode      string
+		firstWant string
+		retryWant string
+	}{
+		{
+			name:      "raw",
+			mode:      wakeInjectModeRaw,
+			firstWant: "\a" + coopWakeDoorbell + "\n\r\r",
+			retryWant: "\n\r\r",
+		},
+		{
+			name:      "paste",
+			mode:      wakeInjectModePaste,
+			firstWant: "\a\x1b[200~" + coopWakeDoorbell + "\x1b[201~\r",
+			retryWant: "\r",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			deliverPartialWakeMessageForTest(t, root, "codex", "generic-submit-only-"+tc.name)
+			stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+				return 0, true, nil
+			})
+			stubRawInjectSleep(t)
+
+			var injected strings.Builder
+			now := time.Unix(1_800_000_000, 0)
+			cfg := &wakeConfig{
+				me:          "codex",
+				root:        root,
+				session:     "session1",
+				injectMode:  tc.mode,
+				bell:        true,
+				doorbellNow: func() time.Time { return now },
+				terminalWrite: func(text string) error {
+					injected.WriteString(text)
+					return nil
+				},
+			}
+
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("first generic presentation: %v", err)
+			}
+			if got := injected.String(); got != tc.firstWant {
+				t.Fatalf("first generic presentation = %q, want %q", got, tc.firstWant)
+			}
+			// Keep this test focused on propagating a confirmed cohort's plan into
+			// the generic notification. Confirmation itself has a separate guard.
+			cfg.doorbell.confirmPresentation()
+			injected.Reset()
+			now = cfg.doorbell.nextAttempt
+
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("generic submit-only reminder: %v", err)
+			}
+			if got := injected.String(); got != tc.retryWant {
+				t.Fatalf("generic submit-only reminder = %q, want %q", got, tc.retryWant)
+			}
+		})
+	}
+}
+
+func TestNotifyNewMessagesGenericInjectViaConfirmedCohortUsesCROnly(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "alice", "generic-inject-via-submit-only")
+	transport, outputPath := injectViaCaptureConfig(t)
+	now := time.Unix(1_800_000_000, 0)
+	transport.me = "alice"
+	transport.root = root
+	transport.session = "session1"
+	transport.bell = true
+	transport.doorbellNow = func() time.Time { return now }
+
+	if err := notifyNewMessages(transport); err != nil {
+		t.Fatalf("first generic inject-via presentation: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || string(got) != "\a"+coopWakeDoorbell {
+		t.Fatalf("first generic inject-via payload = %q, err=%v; want bell plus %q", got, err, coopWakeDoorbell)
+	}
+	if !transport.doorbell.presentationConfirmed {
+		t.Fatal("inject-via exit zero did not confirm the full presentation")
+	}
+	now = transport.doorbell.nextAttempt
+
+	if err := notifyNewMessages(transport); err != nil {
+		t.Fatalf("generic inject-via submit-only reminder: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || string(got) != "\a\r" {
+		t.Fatalf("generic inject-via reminder = %q, err=%v; want bell plus CR only", got, err)
+	}
+}
+
+func TestNotifyNewMessagesGenericAdditionRearmsFullPresentation(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "generic-addition-first")
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+
+	var injected strings.Builder
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:          "codex",
+		root:        root,
+		session:     "session1",
+		injectMode:  wakeInjectModeRaw,
+		doorbellNow: func() time.Time { return now },
+		terminalWrite: func(text string) error {
+			injected.WriteString(text)
+			return nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first generic presentation: %v", err)
+	}
+	cfg.doorbell.confirmPresentation()
+	deliverPartialWakeMessageForTest(t, root, "codex", "generic-addition-second")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic content addition: %v", err)
+	}
+	if cfg.doorbell.presentationConfirmed {
+		t.Fatal("generic content addition did not rearm the full presentation")
+	}
+	injected.Reset()
+	now = cfg.doorbell.nextAttempt
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic re-presentation: %v", err)
+	}
+	if got, want := injected.String(), coopWakeDoorbell+"\n\r\r"; got != want {
+		t.Fatalf("generic re-presentation = %q, want %q", got, want)
+	}
+	if !cfg.doorbell.presentationConfirmed {
+		t.Fatal("successful generic re-presentation was not confirmed")
+	}
+}
+
+func TestNotifyNewMessagesGenericZeroConfirmedProgressRetriesFullPayload(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "generic-zero-progress")
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+
+	firstWrite := true
+	var accepted strings.Builder
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:             "codex",
+		root:           root,
+		session:        "session1",
+		injectMode:     wakeInjectModeRaw,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		terminalWrite: func(text string) error {
+			if firstWrite {
+				firstWrite = false
+				return &wakeTestAcceptedProgressError{
+					err:      errors.New("refused before acceptance"),
+					accepted: 0,
+				}
+			}
+			accepted.WriteString(text)
+			return nil
+		},
+	}
+
+	captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("generic zero-progress presentation: %v", err)
+		}
+	})
+	now = cfg.doorbell.nextAttempt
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic full retry: %v", err)
+	}
+	if got, want := accepted.String(), coopWakeDoorbell+"\n\r\r"; got != want {
+		t.Fatalf("generic zero-progress retry = %q, want full payload %q", got, want)
+	}
+}
+
+func TestNotifyNewMessagesGenericNoneDoesNotNudgeTerminal(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "alice", "generic-no-terminal-nudge")
+
+	terminalWrites := 0
+	attentionWrites := 0
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:          "alice",
+		root:        root,
+		session:     "session1",
+		injectMode:  wakeInjectModeNone,
+		doorbellNow: func() time.Time { return now },
+		terminalWrite: func(string) error {
+			terminalWrites++
+			return nil
+		},
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic attention-only notification: %v", err)
+	}
+	if terminalWrites != 0 {
+		t.Fatalf("inject-mode none wrote %d terminal chunks, want 0", terminalWrites)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("inject-mode none attention writes = %d, want 1", attentionWrites)
+	}
+	now = cfg.doorbell.nextAttempt
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic attention-only reminder: %v", err)
+	}
+	if terminalWrites != 0 {
+		t.Fatalf("inject-mode none reminder wrote %d terminal chunks, want 0", terminalWrites)
+	}
+	if attentionWrites != 2 {
+		t.Fatalf("inject-mode none reminder attention writes = %d, want 2", attentionWrites)
+	}
+	if cfg.doorbell.presentationConfirmed {
+		t.Fatal("inject-mode none marked terminal presentation confirmed")
+	}
+}
+
+func TestNotifyNewMessagesGenericCustomInterruptRePresentsNewUrgentWork(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	writeUrgent := func(id string) {
+		t.Helper()
+		message := format.Message{
+			Header: format.Header{
+				Schema:   1,
+				ID:       id,
+				From:     "peer",
+				To:       []string{"alice"},
+				Thread:   "p2p/alice__peer",
+				Subject:  id,
+				Created:  "2026-08-06T10:00:00Z",
+				Priority: "urgent",
+				Labels:   []string{"interrupt"},
+			},
+		}
+		data, err := message.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "alice", id+".md", data); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+	var injected strings.Builder
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:                "alice",
+		root:              root,
+		session:           "session1",
+		injectMode:        wakeInjectModeRaw,
+		interrupt:         true,
+		interruptPriority: "urgent",
+		interruptLabel:    "interrupt",
+		interruptNotice:   "operator interrupt",
+		doorbellNow:       func() time.Time { return now },
+		terminalWrite: func(text string) error {
+			injected.WriteString(text)
+			return nil
+		},
+	}
+
+	writeUrgent("generic-interrupt-first")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first generic custom interrupt: %v", err)
+	}
+	if got, want := injected.String(), cfg.interruptNotice+"\r\r"; got != want {
+		t.Fatalf("first generic custom interrupt = %q, want %q", got, want)
+	}
+	cfg.doorbell.confirmPresentation()
+	injected.Reset()
+	now = cfg.doorbell.nextAttempt
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic custom interrupt reminder: %v", err)
+	}
+	if got, want := injected.String(), "\r\r"; got != want {
+		t.Fatalf("generic custom interrupt reminder = %q, want submit only %q", got, want)
+	}
+
+	writeUrgent("generic-interrupt-second")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic custom interrupt addition: %v", err)
+	}
+	injected.Reset()
+	now = cfg.doorbell.nextAttempt
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic custom interrupt re-presentation: %v", err)
+	}
+	if got, want := injected.String(), cfg.interruptNotice+"\r\r"; got != want {
+		t.Fatalf("generic custom interrupt re-presentation = %q, want %q", got, want)
+	}
+}
+
+// normalizeWakeInjectMode rejects unknown CLI input; this locks the defensive
+// delivery switch fallback for an internally constructed future mode.
+func TestNotifyNewMessagesGenericUnknownModeUsesSingleChunkFallback(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "alice", "generic-unknown-mode")
+
+	var injected strings.Builder
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:          "alice",
+		root:        root,
+		session:     "session1",
+		injectMode:  "future-mode",
+		bell:        true,
+		doorbellNow: func() time.Time { return now },
+		terminalWrite: func(text string) error {
+			injected.WriteString(text)
+			return nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first generic unknown-mode presentation: %v", err)
+	}
+	if got, want := injected.String(), "\a"+coopWakeDoorbell+"\r"; got != want {
+		t.Fatalf("first generic unknown-mode bytes = %q, want %q", got, want)
+	}
+	cfg.doorbell.confirmPresentation()
+	injected.Reset()
+	now = cfg.doorbell.nextAttempt
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic unknown-mode submit-only reminder: %v", err)
+	}
+	if got := injected.String(); got != "\a\r" {
+		t.Fatalf("generic unknown-mode reminder bytes = %q, want bell plus CR only", got)
+	}
+}
+
 func TestRecordWakeAttemptArmsMissingCohort(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	current := wakeDoorbellTestFiles(t, "pending.md")
