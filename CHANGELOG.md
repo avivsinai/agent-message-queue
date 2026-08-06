@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.54.0](https://github.com/avivsinai/agent-message-queue/compare/v0.53.0...v0.54.0) (2026-08-06)
+
+
+### Features
+
+* **wake:** acknowledge injected doorbells with --retry-until injected ([#424](https://github.com/avivsinai/agent-message-queue/issues/424)) ([96a872b](https://github.com/avivsinai/agent-message-queue/commit/96a872b5c6ad593112c6123c0180574f3326ed12))
+
 ## [0.53.0](https://github.com/avivsinai/agent-message-queue/compare/v0.52.6...v0.53.0) (2026-08-06)
 
 
