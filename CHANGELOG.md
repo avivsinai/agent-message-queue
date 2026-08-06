@@ -8,6 +8,15 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.52.6](https://github.com/avivsinai/agent-message-queue/compare/v0.52.5...v0.52.6) (2026-08-06)
+
+
+### Bug Fixes
+
+* **ci:** capture output before grep -q in smoke test to avoid SIGPIPE flake ([#442](https://github.com/avivsinai/agent-message-queue/issues/442)) ([cd8777e](https://github.com/avivsinai/agent-message-queue/commit/cd8777edfc44b9fc8f84faf33b15a18a2c843c2c))
+* **test:** make reload-transport FD-leak check immune to concurrent descriptor churn ([#447](https://github.com/avivsinai/agent-message-queue/issues/447)) ([eaccc52](https://github.com/avivsinai/agent-message-queue/commit/eaccc52907acc923312b7c2409e27e095dc85725)), closes [#444](https://github.com/avivsinai/agent-message-queue/issues/444)
+* **wake:** nudge submit instead of re-typing reminder payloads ([#445](https://github.com/avivsinai/agent-message-queue/issues/445)) ([bf3eeda](https://github.com/avivsinai/agent-message-queue/commit/bf3eedaaa546c61564aae05dc84bbb1ee8a5b484))
+
 ## [0.52.5](https://github.com/avivsinai/agent-message-queue/compare/v0.52.4...v0.52.5) (2026-08-05)
 
 
