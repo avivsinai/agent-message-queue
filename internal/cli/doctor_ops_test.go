@@ -149,8 +149,18 @@ func TestRunOpsChecks_DoorbellParkedHintRequiresUnreadBacklog(t *testing.T) {
 	if hint.Status != "warn" ||
 		!strings.Contains(hint.Message, "codex") ||
 		!strings.Contains(hint.Message, "4 attempts") ||
-		!strings.Contains(hint.Message, "90s") {
+		!strings.Contains(hint.Message, "90s") ||
+		!strings.Contains(hint.Message, "input may be stranded") ||
+		!strings.Contains(hint.Message, "manual Enter") {
 		t.Fatalf("parked hint = %#v", hint)
+	}
+	parkedJSON, err := json.Marshal(parkedResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(parkedJSON), "input may be stranded") ||
+		!strings.Contains(string(parkedJSON), "manual Enter") {
+		t.Fatalf("parked JSON omitted recovery guidance: %s", parkedJSON)
 	}
 	if len(parkedResult.Agents) != 1 ||
 		!parkedResult.Agents[0].DoorbellParked ||

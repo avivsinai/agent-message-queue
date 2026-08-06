@@ -281,8 +281,9 @@ type wakePayload struct {
 }
 
 type wakeNotification struct {
-	input  wakePayload
-	output wakePayload
+	input      wakePayload
+	output     wakePayload
+	submitOnly bool
 }
 
 func peerWakeNotification(output string) wakeNotification {
@@ -605,10 +606,12 @@ func deliverNewMessageNotification(
 	}
 	ownerBound := usesCoopDoorbell(cfg)
 	if ownerBound && cfg.injectMode != wakeInjectModeNone {
+		retainedInputPending := cfg.inputDelivery.pending()
 		notice.input = wakePayload{
 			text:       plan.prompt,
 			provenance: wakePayloadSystemFixed,
 		}
+		notice.submitOnly = plan.submitOnly
 		deliveryErr := deliverWakeNotification(cfg, notice, deferForInput)
 		if isWakeInputDemotionBlocked(deliveryErr) {
 			return enterWakeInputRecovery(cfg, currentPending, deliveryErr)
@@ -626,6 +629,11 @@ func deliverNewMessageNotification(
 			return deliveryErr
 		}
 		if shouldRecordWakeAttempt(deliveryErr) {
+			if !plan.submitOnly &&
+				(!plan.contentChange || !retainedInputPending) &&
+				wakeInputAttemptConfirmed(cfg, deliveryErr) {
+				cfg.doorbell.confirmPresentation()
+			}
 			recordWakeAttempt(
 				cfg,
 				cfg.wakeDoorbellNow(),
@@ -649,6 +657,14 @@ func deliverNewMessageNotification(
 		)
 	}
 	return deliveryErr
+}
+
+func wakeInputAttemptConfirmed(cfg *wakeConfig, deliveryErr error) bool {
+	return deliveryErr == nil &&
+		cfg.injectMode != wakeInjectModeNone &&
+		!cfg.inputDelivery.pending() &&
+		!cfg.lastAttemptAttention &&
+		!cfg.lastAttemptTransientAttention
 }
 
 func recordWakeAttempt(
@@ -1049,7 +1065,10 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	cfg.lastAttemptTransientAttention = false
 	ownerBound := usesCoopDoorbell(cfg)
 	if ownerBound {
-		if validCoopWakeDoorbell(notice.input.text) {
+		if notice.submitOnly && notice.input.provenance == wakePayloadSystemFixed {
+			// A submit-only reminder is system-created from cohort state. It has
+			// no payload text to validate or replace.
+		} else if validCoopWakeDoorbell(notice.input.text) {
 			// The fixed doorbell is system-created before delivery.
 		} else {
 			notice.input = wakePayload{
@@ -1063,7 +1082,13 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	}
 
 	inputText := notice.input.text
+	if notice.submitOnly {
+		inputText = ""
+	}
 	plainText := inputText
+	if notice.submitOnly {
+		plainText = "\r"
+	}
 	if cfg.bell && !ownerBound {
 		plainText = "\a" + plainText
 	}
@@ -1114,7 +1139,11 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		if cfg.bell && !ownerBound {
 			injectedText = "\a" + injectedText
 		}
-		inputAccepted, injectErr = injectRawNotification(cfg, injectedText)
+		if notice.submitOnly {
+			inputAccepted, injectErr = injectTerminalSubmitOnly(cfg, wakeInjectModeRaw)
+		} else {
+			inputAccepted, injectErr = injectRawNotification(cfg, injectedText)
+		}
 		inputAccepted = inputAccepted || cfg.inputDelivery.confirmedInput()
 
 	case wakeInjectModePaste:
@@ -1128,24 +1157,32 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		if cfg.bell && !ownerBound {
 			pasteText = "\a" + pasteText
 		}
-		inputAccepted, injectErr = injectTerminalNotification(
-			cfg,
-			wakeInjectModePaste,
-			pasteText,
-		)
+		if notice.submitOnly {
+			inputAccepted, injectErr = injectTerminalSubmitOnly(cfg, wakeInjectModePaste)
+		} else {
+			inputAccepted, injectErr = injectTerminalNotification(
+				cfg,
+				wakeInjectModePaste,
+				pasteText,
+			)
+		}
 		inputAccepted = inputAccepted || cfg.inputDelivery.confirmedInput()
 
 	default:
 		// Unknown mode, fall back to raw
 		if ownerBound {
-			wrote, err := writeTerminalChunk(cfg, inputText)
-			inputAccepted = wrote
-			if err != nil {
-				injectErr = err
-			} else if wrote {
-				submitted, err := writeTerminalChunk(cfg, "\r")
-				inputAccepted = inputAccepted || submitted
-				injectErr = err
+			if notice.submitOnly {
+				inputAccepted, injectErr = writeTerminalChunk(cfg, "\r")
+			} else {
+				wrote, err := writeTerminalChunk(cfg, inputText)
+				inputAccepted = wrote
+				if err != nil {
+					injectErr = err
+				} else if wrote {
+					submitted, err := writeTerminalChunk(cfg, "\r")
+					inputAccepted = inputAccepted || submitted
+					injectErr = err
+				}
 			}
 		} else {
 			injectedText := inputText + "\r"
@@ -1561,6 +1598,33 @@ func injectTerminalNotification(
 			mode:    mode,
 			payload: payload,
 		}
+	}
+	return resumeWakeInputDelivery(cfg)
+}
+
+func injectTerminalSubmitOnly(cfg *wakeConfig, mode string) (bool, error) {
+	state := &cfg.inputDelivery
+	if state.acceptanceUncertain {
+		return false, &wakeInputDemotionBlockedError{
+			err: errors.New("submit-only terminal input followed a write with uncertain acceptance"),
+		}
+	}
+	if state.pending() {
+		if state.mode != mode || state.payload != "" {
+			return false, &wakeInputDemotionBlockedError{
+				err: errors.New("submit-only terminal input collided with retained payload delivery"),
+			}
+		}
+		return resumeWakeInputDelivery(cfg)
+	}
+
+	phase := wakeInputPrimarySubmitPending
+	if mode == wakeInjectModeRaw && rawSubmitPrelude(cfg.me) != "" {
+		phase = wakeInputRawPreludePending
+	}
+	*state = wakeInputDeliveryState{
+		phase: phase,
+		mode:  mode,
 	}
 	return resumeWakeInputDelivery(cfg)
 }

@@ -251,7 +251,7 @@ func runOpsChecksWithSchema(
 				Code:   "doorbell_parked",
 				Status: "warn",
 				Message: fmt.Sprintf(
-					"Agent %s doorbell is parked after %d attempts with unread messages (oldest unread %.0fs)",
+					"Agent %s doorbell is parked after %d attempts with unread messages (oldest unread %.0fs); input may be stranded at the agent prompt, and a manual Enter in its pane can recover it",
 					agent.Handle,
 					agent.DoorbellAttempts,
 					agent.OldestUnreadAgeSeconds,

@@ -1953,6 +1953,182 @@ func TestNotifyNewMessagesCoalescesAdditionsUntilRetryOrProgress(t *testing.T) {
 	}
 }
 
+func TestNotifyNewMessagesReminderUsesSubmitOnlyAfterConfirmedPresentation(t *testing.T) {
+	testCases := []struct {
+		name                   string
+		mode                   string
+		queueFirstSubmit       bool
+		wantConfirmedInitially bool
+		wantInjected           string
+	}{
+		{
+			name:                   "raw-confirmed",
+			mode:                   wakeInjectModeRaw,
+			wantConfirmedInitially: true,
+			wantInjected:           coopWakeDoorbell + "\n\r\r\n\r\r",
+		},
+		{
+			name:                   "paste-confirmed",
+			mode:                   wakeInjectModePaste,
+			wantConfirmedInitially: true,
+			wantInjected:           coopWakeDoorbell + "\r\r",
+		},
+		{
+			name:             "raw-first-submit-queued",
+			mode:             wakeInjectModeRaw,
+			queueFirstSubmit: true,
+			wantInjected:     coopWakeDoorbell + "\n\r\r",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			msg := format.Message{
+				Header: format.Header{
+					Schema:  1,
+					ID:      "unchanged-reminder-" + tc.name,
+					From:    "peer",
+					To:      []string{"codex"},
+					Thread:  "p2p/codex__peer",
+					Subject: "unchanged reminder",
+					Created: "2026-08-05T19:00:00Z",
+				},
+			}
+			data, err := msg.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := deliverToInboxForTest(t, root, "codex", "unchanged.md", data); err != nil {
+				t.Fatal(err)
+			}
+
+			drainCall := 0
+			stubRawInputDrained(t, func(timeout time.Duration, _ time.Duration) (time.Duration, bool, error) {
+				drainCall++
+				if tc.queueFirstSubmit && drainCall == 2 {
+					return timeout, false, nil
+				}
+				return 0, true, nil
+			})
+			stubRawInjectSleep(t)
+			var injected strings.Builder
+			now := time.Unix(1_800_000_000, 0)
+			cfg := &wakeConfig{
+				me:          "codex",
+				root:        root,
+				session:     "session1",
+				wakeOwner:   &wakeOwner{},
+				injectMode:  tc.mode,
+				doorbellNow: func() time.Time { return now },
+				terminalWrite: func(text string) error {
+					injected.WriteString(text)
+					return nil
+				},
+			}
+
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("initial presentation: %v", err)
+			}
+			if got := cfg.doorbell.presentationConfirmed; got != tc.wantConfirmedInitially {
+				t.Fatalf("initial presentation confirmed = %t, want %t", got, tc.wantConfirmedInitially)
+			}
+			now = cfg.doorbell.nextAttempt
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("next attempt: %v", err)
+			}
+			if cfg.inputRecoveryRequired {
+				t.Fatal("ordinary queued-suffix resume entered input recovery")
+			}
+			if !cfg.doorbell.presentationConfirmed {
+				t.Fatal("completed full presentation was not marked confirmed")
+			}
+
+			got := injected.String()
+			if count := strings.Count(got, coopWakeDoorbell); count != 1 {
+				t.Fatalf("payload occurrences = %d, want exactly one across presentation and reminder: %q", count, got)
+			}
+			if got != tc.wantInjected {
+				t.Fatalf("presentation sequence = %q, want %q", got, tc.wantInjected)
+			}
+		})
+	}
+}
+
+func TestNotifyNewMessagesRetriesFullPayloadAfterZeroConfirmedProgress(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "zero-progress",
+			From:    "peer",
+			To:      []string{"codex"},
+			Thread:  "p2p/codex__peer",
+			Subject: "zero progress",
+			Created: "2026-08-05T19:00:00Z",
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "codex", "zero-progress.md", data); err != nil {
+		t.Fatal(err)
+	}
+
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+	firstWrite := true
+	var accepted strings.Builder
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:             "codex",
+		root:           root,
+		session:        "session1",
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModeRaw,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		terminalWrite: func(text string) error {
+			if firstWrite {
+				firstWrite = false
+				return &wakeTestAcceptedProgressError{
+					err:      errors.New("refused before acceptance"),
+					accepted: 0,
+				}
+			}
+			accepted.WriteString(text)
+			return nil
+		},
+	}
+
+	captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("zero-progress presentation: %v", err)
+		}
+	})
+	now = cfg.doorbell.nextAttempt
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("full retry: %v", err)
+	}
+	if got, want := accepted.String(), coopWakeDoorbell+"\n\r\r"; got != want {
+		t.Fatalf("accepted retry = %q, want full presentation %q", got, want)
+	}
+}
+
 func TestNotifyNewMessagesCoalescesUrgentAdditionWithoutOutputAttention(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
