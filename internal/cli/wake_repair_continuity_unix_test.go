@@ -122,7 +122,7 @@ func TestWakeRepairNotifiesMessageDeliveredDuringDowntime(t *testing.T) {
 	if result.Status != "repaired" {
 		t.Fatalf("repair result = %#v", result)
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(wakeDoorbellRetryBase + 2*time.Second)
 	for time.Now().Before(deadline) {
 		data, readErr := os.ReadFile(injectedPath)
 		if readErr == nil && strings.Contains(string(data), coopWakeDoorbell) {
@@ -138,7 +138,12 @@ func TestWakeRepairNotifiesMessageDeliveredDuringDowntime(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	data, _ := os.ReadFile(injectedPath)
-	t.Fatalf("repaired wake suppressed the downtime message; injected output: %q", data)
+	repairLog, _ := os.ReadFile(filepath.Join(fsq.AgentBase(root, "codex"), ".wake.repair.log"))
+	t.Fatalf(
+		"repaired wake suppressed the downtime message; injected output: %q\nrepair log:\n%s",
+		data,
+		repairLog,
+	)
 }
 
 func stopWakeContinuityHelper(pid int, helper, root, me string) bool {
