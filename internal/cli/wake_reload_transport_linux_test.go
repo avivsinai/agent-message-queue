@@ -14,7 +14,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -462,13 +465,32 @@ func requireLinuxWakeReloadSilentRefusal(t *testing.T, response string, err erro
 	}
 }
 
-func linuxOpenFDCount(t *testing.T) int {
+func linuxOpenFDSet(t *testing.T) map[int]struct{} {
 	t.Helper()
-	entries, err := os.ReadDir("/proc/self/fd")
+	directory, err := os.Open("/proc/self/fd")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return len(entries)
+	snapshotFD := int(directory.Fd())
+	names, err := directory.Readdirnames(-1)
+	closeErr := directory.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	open := make(map[int]struct{}, len(names))
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
+		if err != nil {
+			t.Fatalf("parse /proc/self/fd entry %q: %v", name, err)
+		}
+		if fd != snapshotFD {
+			open[fd] = struct{}{}
+		}
+	}
+	return open
 }
 
 func TestLinuxWakeReloadTransportAuthenticatesAndOnlyRefusesUnavailable(t *testing.T) {
@@ -622,6 +644,19 @@ func TestLinuxWakeReloadTransportClosesEveryReceivedFD(t *testing.T) {
 
 func TestLinuxWakeReloadTransportClosesParsedFDsOnControlTruncationWithoutLeaks(t *testing.T) {
 	fixture := newLinuxWakeReloadTransportFixture(t)
+	var closed atomic.Int32
+	var receivedMu sync.Mutex
+	receivedFDs := make(map[int]struct{})
+	originalClose := closeWakeReloadReceivedFD
+	closeWakeReloadReceivedFD = func(fd int) error {
+		receivedMu.Lock()
+		receivedFDs[fd] = struct{}{}
+		receivedMu.Unlock()
+		closed.Add(1)
+		return unix.Close(fd)
+	}
+	t.Cleanup(func() { closeWakeReloadReceivedFD = originalClose })
+
 	endpoint, err := startLinuxWakeReloadTransport(
 		fixture.agentDir,
 		fixture.root,
@@ -634,14 +669,6 @@ func TestLinuxWakeReloadTransportClosesParsedFDsOnControlTruncationWithoutLeaks(
 		t.Fatal(err)
 	}
 	defer func() { _ = endpoint.Close() }()
-
-	var closed atomic.Int32
-	originalClose := closeWakeReloadReceivedFD
-	closeWakeReloadReceivedFD = func(fd int) error {
-		closed.Add(1)
-		return unix.Close(fd)
-	}
-	t.Cleanup(func() { closeWakeReloadReceivedFD = originalClose })
 
 	fdCount := linuxWakeReloadMaxReceivedFDs + 4
 	pipes := make([][2]int, fdCount)
@@ -658,7 +685,35 @@ func TestLinuxWakeReloadTransportClosesParsedFDsOnControlTruncationWithoutLeaks(
 			_ = unix.Close(pipe[1])
 		}
 	}()
-	before := linuxOpenFDCount(t)
+	scratch := make([][2]int, 0, 32)
+	closeScratchPipes := func() {
+		for _, pipe := range scratch {
+			_ = unix.Close(pipe[0])
+			_ = unix.Close(pipe[1])
+		}
+	}
+	for range cap(scratch) {
+		var pipe [2]int
+		if err := unix.Pipe2(pipe[:], unix.O_CLOEXEC); err != nil {
+			closeScratchPipes()
+			t.Fatal(err)
+		}
+		scratch = append(scratch, pipe)
+	}
+	closeScratch := make(chan struct{})
+	scratchClosed := make(chan struct{})
+	var closeScratchOnce sync.Once
+	closeScratchAndWait := func() {
+		closeScratchOnce.Do(func() { close(closeScratch) })
+		<-scratchClosed
+	}
+	t.Cleanup(closeScratchAndWait)
+	go func() {
+		<-closeScratch
+		closeScratchPipes()
+		close(scratchClosed)
+	}()
+	before := linuxOpenFDSet(t)
 	response, err := sendLinuxWakeReloadTransportRequest(
 		t,
 		fixture,
@@ -674,11 +729,29 @@ func TestLinuxWakeReloadTransportClosesParsedFDsOnControlTruncationWithoutLeaks(
 	if got := endpoint.ActiveHandlers(); got != 0 {
 		t.Fatalf("truncated ancillary handler count = %d", got)
 	}
+	// Model an unrelated test tearing down descriptors between snapshots.
+	closeScratchAndWait()
 	if got := closed.Load(); got == 0 || got > int32(linuxWakeReloadMaxReceivedFDs) {
 		t.Fatalf("parsed truncated descriptor closes = %d", got)
 	}
-	if after := linuxOpenFDCount(t); after != before {
-		t.Fatalf("descriptor count after truncated control = %d, want %d", after, before)
+	after := linuxOpenFDSet(t)
+	receivedMu.Lock()
+	for fd := range receivedFDs {
+		if _, open := after[fd]; open {
+			receivedMu.Unlock()
+			t.Fatalf("received descriptor %d remained open after handler quiescence", fd)
+		}
+	}
+	receivedMu.Unlock()
+	var newFDs []int
+	for fd := range after {
+		if _, existed := before[fd]; !existed {
+			newFDs = append(newFDs, fd)
+		}
+	}
+	if len(newFDs) != 0 {
+		sort.Ints(newFDs)
+		t.Fatalf("new descriptors remained after truncated control: %v", newFDs)
 	}
 }
 
