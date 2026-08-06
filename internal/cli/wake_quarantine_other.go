@@ -11,8 +11,8 @@ type wakeQuarantineCleanupCandidate struct {
 	Path string
 }
 
-func checkWakeQuarantine(string, time.Time) opsWakeQuarantine {
-	return opsWakeQuarantine{}
+func checkWakeQuarantine(string, time.Time) (opsWakeQuarantine, error) {
+	return opsWakeQuarantine{}, nil
 }
 
 func findWakeQuarantineOlderThan(string, time.Time) ([]wakeQuarantineCleanupCandidate, error) {

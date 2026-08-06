@@ -352,11 +352,14 @@ new wake without carrying usable authority. During acquisition AMQ preserves
 only that narrow case by atomically moving the exact inode and bytes to
 `.wake.lock.quarantined.<UTC-nanosecond>` under the lifecycle guard, then starts
 again from a fresh inspection. A targetless acquisition similarly quarantines
-an exact readable regular 0600 orphan `.wake.target`. Fresh creating locks,
-0400 or owner-shaped locks, unreadable/oversized/special files, and valid JSON
-with wrong known-field types remain untouched and fail closed. `doctor --ops`
-always reports `wake_quarantine.count` and nullable
-`wake_quarantine.newest_age_seconds`, even when no wake lock exists.
+an exact readable regular 0600 orphan `.wake.target` only when it is
+conclusively generic. Clean owner-bearing targets and malformed owner-shaped
+targets remain untouched and direct the operator to owner recovery; unreadable,
+oversized, special, and valid JSON targets with wrong known-field types also
+fail closed. `doctor --ops` reports `wake_quarantine.count` and nullable
+`wake_quarantine.newest_age_seconds` when the complete scan succeeds. A scan
+failure instead produces `wake_quarantine.error` plus an error hint; explicit
+quarantine cleanup refuses rather than acting on a partial result.
 
 Quarantine is preservation, not deletion. Ordinary tmp cleanup never selects
 it. Removal requires the explicit selector
@@ -390,10 +393,12 @@ When the exact owner is dead, recovery does not require that token. AMQ stops
 only an identity-confirmed wake, re-checks the claim after every wait, and
 fails closed without mutation when the owner or claim is unknown, legacy, or
 corrupt. A bound state/document mismatch is also a refusal before stop or
-unlink; AMQ preserves that claim and its artifacts. A target/state shadow with
-no lock carries no ownership: targetless acquisition may move the exact target
-into quarantine, then must inspect again before superseding stale projection
-state or creating a wake.
+unlink; AMQ preserves that claim and its artifacts. A conclusively generic
+target/state shadow with no lock carries no ownership: targetless acquisition
+may move the exact target into quarantine, then must inspect again before
+superseding stale projection state or creating a wake. An owner-bearing target,
+or a malformed target with a non-null owner marker, remains preserved for
+inspection or `recover-owner`.
 Rollback means returning to an older compatible binary or reader, not
 destructively rewriting a P2b lock; existing unbound claims remain P2a, and an
 older binary may release its own exact claim. There is no force mode. The

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,11 +57,14 @@ func parseWakeQuarantineName(name string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func scanWakeQuarantine(root string) []wakeQuarantineEntry {
+func scanWakeQuarantine(root string) ([]wakeQuarantineEntry, error) {
 	agentsDir := filepath.Join(root, "agents")
 	agents, err := os.ReadDir(agentsDir)
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("scan wake quarantine agents directory: %w", err)
 	}
 	var quarantined []wakeQuarantineEntry
 	for _, agent := range agents {
@@ -70,7 +74,7 @@ func scanWakeQuarantine(root string) []wakeQuarantineEntry {
 		path := filepath.Join(agentsDir, agent.Name())
 		agentDir, err := openWakeDirectory(path, "wake quarantine agent directory")
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scan wake quarantine for agent %s: %w", agent.Name(), err)
 		}
 		var entries []os.DirEntry
 		readErr := agentDir.withFD(func(dirfd int) error {
@@ -85,7 +89,7 @@ func scanWakeQuarantine(root string) []wakeQuarantineEntry {
 		})
 		_ = agentDir.Close()
 		if readErr != nil {
-			continue
+			return nil, fmt.Errorf("scan wake quarantine for agent %s: %w", agent.Name(), readErr)
 		}
 		for _, entry := range entries {
 			when, ok := parseWakeQuarantineName(entry.Name())
@@ -100,14 +104,17 @@ func scanWakeQuarantine(root string) []wakeQuarantineEntry {
 			})
 		}
 	}
-	return quarantined
+	return quarantined, nil
 }
 
-func checkWakeQuarantine(root string, now time.Time) opsWakeQuarantine {
-	entries := scanWakeQuarantine(root)
+func checkWakeQuarantine(root string, now time.Time) (opsWakeQuarantine, error) {
+	entries, err := scanWakeQuarantine(root)
+	if err != nil {
+		return opsWakeQuarantine{}, err
+	}
 	result := opsWakeQuarantine{Count: len(entries)}
 	if len(entries) == 0 {
-		return result
+		return result, nil
 	}
 	newest := entries[0].Quarantined
 	for _, entry := range entries[1:] {
@@ -121,11 +128,14 @@ func checkWakeQuarantine(root string, now time.Time) opsWakeQuarantine {
 	}
 	age = float64(int64(age + 0.5))
 	result.NewestAgeSeconds = &age
-	return result
+	return result, nil
 }
 
 func findWakeQuarantineOlderThan(root string, cutoff time.Time) ([]wakeQuarantineCleanupCandidate, error) {
-	entries := scanWakeQuarantine(root)
+	entries, err := scanWakeQuarantine(root)
+	if err != nil {
+		return nil, err
+	}
 	candidates := make([]wakeQuarantineCleanupCandidate, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.Quarantined.Before(cutoff) {
@@ -222,6 +232,66 @@ func malformedWakeLockLooksOwnerShaped(raw []byte) bool {
 		}
 	}
 	return bytes.Contains(bytes.ToLower(raw), []byte("owner"))
+}
+
+func malformedWakeTargetLooksOwnerShaped(raw []byte) bool {
+	for searchAt := 0; searchAt < len(raw); {
+		relative := bytes.IndexByte(raw[searchAt:], '"')
+		if relative < 0 {
+			return false
+		}
+		keyStart := searchAt + relative
+		keyEnd := keyStart + 1
+		for keyEnd < len(raw) {
+			if raw[keyEnd] == '\\' {
+				keyEnd += 2
+				continue
+			}
+			if raw[keyEnd] == '"' {
+				break
+			}
+			keyEnd++
+		}
+		if keyEnd >= len(raw) {
+			return bytes.Contains(bytes.ToLower(raw[keyStart+1:]), []byte("owner"))
+		}
+		valueAt := keyEnd + 1
+		for valueAt < len(raw) && isJSONWhitespace(raw[valueAt]) {
+			valueAt++
+		}
+		if valueAt >= len(raw) || raw[valueAt] != ':' {
+			searchAt = keyEnd + 1
+			continue
+		}
+		key, err := strconv.Unquote(string(raw[keyStart : keyEnd+1]))
+		if err != nil {
+			return true
+		}
+		if !strings.EqualFold(key, "owner") {
+			searchAt = keyEnd + 1
+			continue
+		}
+		valueAt++
+		for valueAt < len(raw) && isJSONWhitespace(raw[valueAt]) {
+			valueAt++
+		}
+		if !bytes.HasPrefix(raw[valueAt:], []byte("null")) {
+			return true
+		}
+		afterNull := valueAt + len("null")
+		for afterNull < len(raw) && isJSONWhitespace(raw[afterNull]) {
+			afterNull++
+		}
+		if afterNull < len(raw) && raw[afterNull] != ',' && raw[afterNull] != '}' {
+			return true
+		}
+		searchAt = afterNull
+	}
+	return false
+}
+
+func isJSONWhitespace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n'
 }
 
 func wakeQuarantineName(source string, now time.Time) (string, error) {

@@ -96,7 +96,12 @@ func TestAcquireQuarantinesAgedSyntaxInvalidGenericWakeLock(t *testing.T) {
 }
 
 func TestTargetlessAcquisitionQuarantinesReadableMalformedOrphanTarget(t *testing.T) {
-	for _, raw := range [][]byte{nil, []byte(`{"schema":`)} {
+	for _, raw := range [][]byte{
+		nil,
+		[]byte(`{"schema":`),
+		[]byte(`{"owner":null,"schema":`),
+		[]byte(`{"ow\u006eer_note":"x","schema":`),
+	} {
 		t.Run(string(raw), func(t *testing.T) {
 			root := secureTempDirForTest(t)
 			agentDir := filepath.Join(root, "agents", "codex")
@@ -125,6 +130,113 @@ func TestTargetlessAcquisitionQuarantinesReadableMalformedOrphanTarget(t *testin
 				before,
 			)
 		})
+	}
+}
+
+func TestTargetlessAcquisitionPreservesOwnerBearingOrphanTarget(t *testing.T) {
+	root := secureTempDirForTest(t)
+	agentDir := filepath.Join(root, "agents", "codex")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := mustNewWakeTargetForTest(
+		t,
+		root,
+		"codex",
+		writeExecutableForTest(t, "owner-orphan-injector"),
+		[]string{"exec"},
+	)
+	target.Owner = &wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	raw, err := json.Marshal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTargetlessAcquisitionPreservesOwnerShapedTarget(
+		t,
+		root,
+		agentDir,
+		raw,
+		"owner-bearing orphan target; run 'amq wake recover-owner --me codex'",
+	)
+}
+
+func TestTargetlessAcquisitionPreservesMalformedOwnerShapedOrphanTarget(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "lowercase", raw: []byte(`{"schema":1,"owner":{"pid":4242`)},
+		{name: "uppercase", raw: []byte(`{"schema":1,"OWNER":{"pid":4242`)},
+		{name: "escaped", raw: []byte(`{"schema":1,"ow\u006eer":{"pid":4242`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			agentDir := filepath.Join(root, "agents", "codex")
+			if err := os.MkdirAll(agentDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			assertTargetlessAcquisitionPreservesOwnerShapedTarget(
+				t,
+				root,
+				agentDir,
+				test.raw,
+				"unverified owner-shaped orphan target",
+			)
+		})
+	}
+}
+
+func assertTargetlessAcquisitionPreservesOwnerShapedTarget(
+	t *testing.T,
+	root string,
+	agentDir string,
+	raw []byte,
+	wantError string,
+) {
+	t.Helper()
+	targetPath := filepath.Join(agentDir, wakeTargetFileName)
+	if err := os.WriteFile(targetPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{})
+	if cleanup != nil {
+		cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), wantError) {
+		t.Fatalf("targetless owner-shaped acquisition error = %v, want %q", err, wantError)
+	}
+	afterRaw, readErr := os.ReadFile(targetPath)
+	after, statErr := os.Lstat(targetPath)
+	if readErr != nil || statErr != nil || !bytes.Equal(afterRaw, raw) || !os.SameFile(before, after) {
+		t.Fatalf(
+			"owner-shaped orphan target changed: raw=%q read_err=%v info=%v stat_err=%v",
+			afterRaw,
+			readErr,
+			after,
+			statErr,
+		)
+	}
+	if _, lockErr := os.Lstat(filepath.Join(agentDir, ".wake.lock")); !os.IsNotExist(lockErr) {
+		t.Fatalf("targetless owner-shaped refusal created a wake lock: %v", lockErr)
+	}
+	entries, readDirErr := os.ReadDir(agentDir)
+	if readDirErr != nil {
+		t.Fatal(readDirErr)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".wake.target.quarantined.") {
+			t.Fatalf("owner-shaped orphan target was quarantined as %s", entry.Name())
+		}
 	}
 }
 

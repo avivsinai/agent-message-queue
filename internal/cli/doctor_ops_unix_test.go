@@ -120,6 +120,52 @@ func TestRunOpsChecksAlwaysReportsExactWakeQuarantineNamesWithoutLocks(t *testin
 	}
 }
 
+func TestWakeQuarantineScanFailureIsExplicitAndCleanupRefuses(t *testing.T) {
+	root := healthyDoctorMailboxRoot(t, "codex")
+	agentPath := filepath.Join(root, "agents", "codex")
+	if err := os.Chmod(agentPath, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runOpsChecks(root, "flag", false)
+	found := false
+	for _, hint := range result.Hints {
+		if hint.Code == "wake_quarantine_scan_error" && hint.Status == "error" &&
+			strings.Contains(hint.Message, "wake quarantine") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("doctor wake quarantine scan failure was silent: %#v", result)
+	}
+	if result.WakeQuarantine.Error == "" {
+		t.Fatalf("doctor wake quarantine result lacks explicit error: %#v", result.WakeQuarantine)
+	}
+	setDoctorIdentityPin(t, root)
+	output, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{"--root", root, "--ops"})
+	})
+	if err != nil {
+		t.Fatalf("doctor scan failure report: %v", err)
+	}
+	if !strings.Contains(output, "wake quarantine: scan unavailable:") ||
+		strings.Contains(output, "wake quarantine: 0 preserved") {
+		t.Fatalf("doctor scan failure output = %q", output)
+	}
+
+	_, err = captureEnvStdout(t, func() error {
+		return runCleanup([]string{
+			"--root", root,
+			"--wake-quarantine-older-than", "1h",
+			"--dry-run",
+		})
+	})
+	if err == nil || !strings.Contains(err.Error(), "wake quarantine") {
+		t.Fatalf("cleanup scan failure = %v, want explicit refusal", err)
+	}
+}
+
 func TestRunOpsChecksFixReconcilesPreparedPublicationGapMutationOnly(t *testing.T) {
 	fixture := newGenericWakePreparedCleanupFixture(t, true)
 	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)

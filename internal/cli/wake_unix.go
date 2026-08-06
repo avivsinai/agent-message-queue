@@ -384,6 +384,12 @@ func acquireWakeLockWithOptionsInDir(
 				if readErr != nil && (orphan.FileInfo == nil || orphan.Raw == nil) {
 					return fmt.Errorf("orphan wake target is unverified before targetless acquisition: %w", readErr)
 				}
+				if readErr == nil && exists && orphan.Target.Owner != nil {
+					return fmt.Errorf("wake handle %s has an owner-bearing orphan target; run 'amq wake recover-owner --me %s'", me, me)
+				}
+				if readErr != nil && malformedWakeTargetLooksOwnerShaped(orphan.Raw) {
+					return fmt.Errorf("wake handle %s has an unverified owner-shaped orphan target; inspect or run 'amq wake recover-owner --me %s'", me, me)
+				}
 				if exists {
 					if _, err := quarantineWakeTargetAt(dirfd, agentDir, orphan); err != nil {
 						return err

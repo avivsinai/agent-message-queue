@@ -27,6 +27,7 @@ type doctorOpsResult struct {
 type opsWakeQuarantine struct {
 	Count            int      `json:"count"`
 	NewestAgeSeconds *float64 `json:"newest_age_seconds"`
+	Error            string   `json:"error,omitempty"`
 }
 
 type opsRoot struct {
@@ -153,7 +154,16 @@ func runOpsChecksWithSchema(
 		Path:   root,
 		Source: rootSource,
 	}
-	result.WakeQuarantine = checkWakeQuarantine(root, now)
+	var quarantineErr error
+	result.WakeQuarantine, quarantineErr = checkWakeQuarantine(root, now)
+	if quarantineErr != nil {
+		result.WakeQuarantine.Error = quarantineErr.Error()
+		result.Hints = append(result.Hints, opsHint{
+			Code:    "wake_quarantine_scan_error",
+			Status:  "error",
+			Message: fmt.Sprintf("Cannot scan wake quarantine: %v", quarantineErr),
+		})
+	}
 	result.OperatorGate = checkOperatorGate(root, now)
 	result.Hints = append(result.Hints, checkLinkedWorktreeLocalHint(root, rootSource)...)
 
