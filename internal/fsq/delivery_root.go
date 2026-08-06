@@ -5,8 +5,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 )
+
+const deliveryRootChangedRemedy = "re-run the command against the current root"
 
 // DeliveryRootIdentity is an opaque physical-identity snapshot taken at the
 // authorization boundary and consumed when the directory capability is opened.
@@ -18,11 +21,17 @@ type DeliveryRootIdentity struct {
 // tree. All delivery paths are resolved relative to the open directory rather
 // than by reopening Base through the ambient filesystem namespace.
 type DeliveryRoot struct {
-	base     string
-	root     *os.Root
-	identity os.FileInfo
+	base       string
+	root       *os.Root
+	identity   os.FileInfo
+	batchLease *pinnedBatchLease
+	borrowed   bool
 
 	syncDirForTest func(string) error
+}
+
+type pinnedBatchLease struct {
+	active atomic.Bool
 }
 
 // SnapshotDeliveryRoot captures the physical directory identity at the
@@ -86,6 +95,9 @@ func (r *DeliveryRoot) Close() error {
 	if r == nil || r.root == nil {
 		return nil
 	}
+	if r.borrowed {
+		return nil
+	}
 	return r.root.Close()
 }
 
@@ -98,6 +110,168 @@ func (r *DeliveryRoot) Base() string {
 	return r.base
 }
 
+// OpenOrCreateDirectChild pins one direct, non-symlink child directory beneath
+// the authorized root. The before/open/after identity checks prevent a child
+// swapped during validation from redirecting later writes through a symlink.
+func (r *DeliveryRoot) OpenOrCreateDirectChild(name string, perm os.FileMode) (*DeliveryRoot, error) {
+	if r == nil || r.root == nil {
+		return nil, fmt.Errorf("delivery root is closed")
+	}
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return nil, fmt.Errorf("invalid direct child name %q", name)
+	}
+	if err := r.VerifyBase(); err != nil {
+		return nil, err
+	}
+
+	before, err := r.root.Lstat(name)
+	if os.IsNotExist(err) {
+		if err := r.root.Mkdir(name, perm); err != nil {
+			return nil, err
+		}
+		before, err = r.root.Lstat(name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%q is not a direct directory under delivery root", name)
+	}
+
+	childRoot, err := r.root.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := childRoot.Stat(".")
+	if err != nil {
+		_ = childRoot.Close()
+		return nil, err
+	}
+	after, err := r.root.Lstat(name)
+	if err != nil {
+		_ = childRoot.Close()
+		return nil, err
+	}
+	if !after.IsDir() || after.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(before, after) || !os.SameFile(after, opened) {
+		_ = childRoot.Close()
+		return nil, fmt.Errorf("direct child %q changed while opening", name)
+	}
+
+	return &DeliveryRoot{
+		base:       filepath.Join(r.base, name),
+		root:       childRoot,
+		identity:   opened,
+		batchLease: r.batchLease,
+	}, nil
+}
+
+// OpenDirectChild pins one existing direct, non-symlink child directory beneath
+// the authorized root without creating it.
+func (r *DeliveryRoot) OpenDirectChild(name string) (*DeliveryRoot, error) {
+	if r == nil || r.root == nil {
+		return nil, fmt.Errorf("delivery root is closed")
+	}
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return nil, fmt.Errorf("invalid direct child name %q", name)
+	}
+	if err := r.VerifyBase(); err != nil {
+		return nil, err
+	}
+	before, err := r.root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%q is not a direct directory under delivery root", name)
+	}
+	childRoot, err := r.root.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := childRoot.Stat(".")
+	if err != nil {
+		_ = childRoot.Close()
+		return nil, err
+	}
+	after, err := r.root.Lstat(name)
+	if err != nil {
+		_ = childRoot.Close()
+		return nil, err
+	}
+	if !after.IsDir() || after.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(before, after) || !os.SameFile(after, opened) {
+		_ = childRoot.Close()
+		return nil, fmt.Errorf("direct child %q changed while opening", name)
+	}
+	return &DeliveryRoot{
+		base:       filepath.Join(r.base, name),
+		root:       childRoot,
+		identity:   opened,
+		batchLease: r.batchLease,
+	}, nil
+}
+
+// WithPinnedBatch verifies the ambient root identity once, then runs one
+// finite operation entirely through the already-open directory capability.
+// Renaming or replacing the lexical base after the callback starts cannot
+// redirect any batch filesystem operation to another tree.
+//
+// The borrowed root and any direct children opened from it expire when the
+// callback returns. Closing the borrowed root is a no-op; owned child roots
+// remain closeable after expiry.
+func (r *DeliveryRoot) WithPinnedBatch(fn func(*DeliveryRoot) error) error {
+	if fn == nil {
+		return fmt.Errorf("pinned delivery batch callback is nil")
+	}
+	if err := r.VerifyBase(); err != nil {
+		return err
+	}
+	lease := &pinnedBatchLease{}
+	lease.active.Store(true)
+	defer lease.active.Store(false)
+	batch := &DeliveryRoot{
+		base:           r.base,
+		root:           r.root,
+		identity:       r.identity,
+		batchLease:     lease,
+		borrowed:       true,
+		syncDirForTest: r.syncDirForTest,
+	}
+	return fn(batch)
+}
+
+// EnsureRootDirs creates the queue-level layout through the pinned root
+// capability.
+func (r *DeliveryRoot) EnsureRootDirs() error {
+	if err := r.VerifyBase(); err != nil {
+		return err
+	}
+	for _, dir := range []string{"agents", "threads", "meta"} {
+		if err := r.root.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// EnsureAgentDirs creates one agent's mailbox layout through the pinned root
+// capability.
+func (r *DeliveryRoot) EnsureAgentDirs(agent string) error {
+	if err := ValidateHandle(agent); err != nil {
+		return err
+	}
+	if err := r.VerifyBase(); err != nil {
+		return err
+	}
+	for _, leaf := range requiredMailboxLeaves {
+		if err := r.root.MkdirAll(MailboxRootRelativePath(agent, leaf), 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // VerifyBase reports a lexical alias change after authorization. The open root
 // remains the security boundary even if an alias changes immediately after
 // this check; this verification makes a detected swap fail closed instead of
@@ -106,12 +280,27 @@ func (r *DeliveryRoot) VerifyBase() error {
 	if r == nil || r.root == nil {
 		return fmt.Errorf("delivery root is closed")
 	}
+	if r.batchLease != nil {
+		if !r.batchLease.active.Load() {
+			return fmt.Errorf("pinned delivery batch expired")
+		}
+		return nil
+	}
 	current, err := os.Stat(r.base)
 	if err != nil {
-		return fmt.Errorf("delivery root changed after authorization: %s: %w", r.base, err)
+		return fmt.Errorf(
+			"delivery root changed after authorization: %s: %w; %s",
+			r.base,
+			err,
+			deliveryRootChangedRemedy,
+		)
 	}
 	if !os.SameFile(r.identity, current) {
-		return fmt.Errorf("delivery root changed after authorization: %s", r.base)
+		return fmt.Errorf(
+			"delivery root changed after authorization: %s; %s",
+			r.base,
+			deliveryRootChangedRemedy,
+		)
 	}
 	return nil
 }
@@ -232,33 +421,82 @@ func (r *DeliveryRoot) SyncDir(name string) error {
 	return r.syncDir(name)
 }
 
+// WithDLQEnvelopeLock runs fn while holding the durable, process-scoped lock
+// for one DLQ envelope. The lock file is retained deliberately: its advisory
+// handle lock is released by the kernel on close or process crash, so no stale
+// O_EXCL sentinel can block a later recovery.
+func (r *DeliveryRoot) WithDLQEnvelopeLock(agent, filename string, fn func(*DeliveryRoot) error) error {
+	if err := ValidateHandle(agent); err != nil {
+		return err
+	}
+	if err := ValidateMessageFilename(filename); err != nil {
+		return err
+	}
+	if fn == nil {
+		return fmt.Errorf("DLQ envelope lock callback is nil")
+	}
+	return r.WithPinnedBatch(func(batch *DeliveryRoot) error {
+		lockDir := filepath.Join("agents", agent, "dlq", "locks")
+		if err := batch.root.MkdirAll(lockDir, 0o700); err != nil {
+			return fmt.Errorf("prepare DLQ envelope lock directory: %w", err)
+		}
+		lockFile, err := batch.root.OpenFile(filepath.Join(lockDir, filename+".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return fmt.Errorf("open DLQ envelope lock: %w", err)
+		}
+		defer func() { _ = lockFile.Close() }()
+		return withExclusiveDLQEnvelopeLock(lockFile, func() error {
+			// Waiting for the sidecar lock is outside the transaction. Recheck the
+			// lexical authorization boundary immediately before the pinned work.
+			if err := r.VerifyBase(); err != nil {
+				return err
+			}
+			return fn(batch)
+		})
+	})
+}
+
 // ReadRegularNoFollow reads a root-relative regular file while refusing an
 // initially symlinked artifact and detecting replacement between lstat/open.
 func (r *DeliveryRoot) ReadRegularNoFollow(name string) ([]byte, error) {
-	if err := r.VerifyBase(); err != nil {
-		return nil, err
-	}
-	before, err := r.root.Lstat(name)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateRegularNoFollowFile(r.displayPath(name), before); err != nil {
-		return nil, err
-	}
-	file, err := openRegularNoFollowRoot(r.root, name)
+	file, _, err := r.OpenRegularNoFollow(name)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = file.Close() }()
+	return io.ReadAll(file)
+}
+
+// OpenRegularNoFollow opens a root-relative regular file through the pinned
+// capability while refusing symlinks and detecting replacement during open.
+// The caller must close the returned file.
+func (r *DeliveryRoot) OpenRegularNoFollow(name string) (*os.File, os.FileInfo, error) {
+	if err := r.VerifyBase(); err != nil {
+		return nil, nil, err
+	}
+	before, err := r.root.Lstat(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateRegularNoFollowFile(r.displayPath(name), before); err != nil {
+		return nil, nil, err
+	}
+	file, err := openRegularNoFollowRoot(r.root, name)
+	if err != nil {
+		return nil, nil, err
+	}
 	after, err := file.Stat()
 	if err != nil {
-		return nil, err
+		_ = file.Close()
+		return nil, nil, err
 	}
 	if err := validateRegularNoFollowFile(r.displayPath(name), after); err != nil {
-		return nil, err
+		_ = file.Close()
+		return nil, nil, err
 	}
 	if !os.SameFile(before, after) {
-		return nil, fmt.Errorf("queue artifact changed while opening: %s", r.displayPath(name))
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("queue artifact changed while opening: %s", r.displayPath(name))
 	}
-	return io.ReadAll(file)
+	return file, after, nil
 }

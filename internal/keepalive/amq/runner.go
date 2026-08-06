@@ -18,6 +18,7 @@ var ErrWakeReadinessUncertain = errors.New("amq wake readiness is uncertain; chi
 
 const defaultWakeReadyTimeout = 10 * time.Second
 const staleWakeReadyMarkerAge = 24 * time.Hour
+const keepaliveWakeRetryUntil = "injected"
 
 type Env struct {
 	SchemaVersion int               `json:"schema_version"`
@@ -54,10 +55,11 @@ type RetireWakeRequest struct {
 	Target    string
 }
 
-// RetireWakeResult mirrors `amq wake retire -json`. Only Status == "retired"
-// is a positive confirmation; every other status ("refused", "error",
-// "unknown") means the wake was not stopped and its registry entry must be
-// preserved.
+// RetireWakeResult mirrors `amq wake retire -json`. Both "retired" and
+// "retired_with_residue" positively confirm that the wake was stopped. The
+// latter preserves cleanup residue for AMQ's next acquisition to converge;
+// keepalive must still release its obsolete registry row. Every other status
+// means retirement was not confirmed and the row must be preserved.
 type RetireWakeResult struct {
 	Status string `json:"status"`
 	Agent  string `json:"agent"`
@@ -71,7 +73,7 @@ type RetireWakeResult struct {
 // Retired reports whether AMQ positively confirmed the wake was stopped (or its
 // exactly-bound proven-stale lock removed).
 func (r RetireWakeResult) Retired() bool {
-	return r.Status == "retired"
+	return r.Status == "retired" || r.Status == "retired_with_residue"
 }
 
 // ErrWakeRetireNotConfirmed wraps every non-retired outcome so callers can log
@@ -150,6 +152,7 @@ func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 		"-inject-arg", "inject",
 		"-inject-arg", req.Adapter,
 		"-inject-arg", req.Target,
+		"--retry-until", keepaliveWakeRetryUntil,
 		"--accept-existing-wake",
 		"-ready-file", readyFile,
 	)
@@ -215,10 +218,10 @@ func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 // RetireWake asks AMQ to stop an identity-confirmed live inject-via wake (or
 // remove its exactly-bound proven-stale lock) whose saved target matches the
 // requested adapter/target exactly. It returns nil only when AMQ reports
-// status "retired"; any other outcome — a refusal (including owner-bound
-// claims), an unparseable or empty JSON body, or a non-zero exit — returns a
-// descriptive error wrapping ErrWakeRetireNotConfirmed so the caller never
-// forgets the registry entry.
+// status "retired" or "retired_with_residue"; any other outcome — a refusal
+// (including owner-bound claims), an unparseable or empty JSON body, or a
+// non-zero exit — returns a descriptive error wrapping
+// ErrWakeRetireNotConfirmed so the caller never forgets the registry entry.
 func (c CLI) RetireWake(ctx context.Context, req RetireWakeRequest) (RetireWakeResult, error) {
 	if req.Me == "" {
 		return RetireWakeResult{}, errors.New("me is required")
@@ -242,6 +245,7 @@ func (c CLI) RetireWake(ctx context.Context, req RetireWakeRequest) (RetireWakeR
 		"--inject-arg", "inject",
 		"--inject-arg", req.Adapter,
 		"--inject-arg", req.Target,
+		"--retry-until", keepaliveWakeRetryUntil,
 		"-json",
 	)
 

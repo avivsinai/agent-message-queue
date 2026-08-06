@@ -2,10 +2,12 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -40,7 +42,7 @@ func runCoopInit(args []string) error {
 	return runCoopInitInternal(args, true)
 }
 
-func runCoopInitInternal(args []string, printNextSteps bool) error {
+func runCoopInitInternal(args []string, printNextSteps bool) (returnErr error) {
 	fs := flag.NewFlagSet("coop init", flag.ContinueOnError)
 	rootFlag := fs.String("root", defaultCoopRoot, "Root directory for the queue")
 	agentsFlag := fs.String("agents", defaultCoopAgents, "Comma-separated agent handles")
@@ -69,16 +71,39 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		return nil
 	}
 
-	// Parse and validate agents
-	agents, err := parseHandles(*agentsFlag)
-	if err != nil {
-		return err
+	rootExplicit := flagWasVisited(fs, "root")
+	if !rootExplicit {
+		if _, existingErr := findAndLoadAmqrc(); errors.Is(existingErr, errAmqrcNotFound) {
+			gitBoundary, insideGit := gitWorktreeRootFromCWD()
+			if top, worktree := gitWorktreeTopFromCWD(); worktree {
+				cwd, cwdErr := os.Getwd()
+				if cwdErr != nil {
+					return cwdErr
+				}
+				if !sameTreeIdentity(cwd, top) {
+					if err := os.Chdir(top); err != nil {
+						return fmt.Errorf("enter Git worktree top %q: %w", top, err)
+					}
+					resetAmqrcCache()
+					defer func() {
+						if err := os.Chdir(cwd); err != nil {
+							returnErr = errors.Join(returnErr, fmt.Errorf("restore working directory %q: %w", cwd, err))
+						}
+						resetAmqrcCache()
+					}()
+				}
+			} else if insideGit {
+				return noEligibleRootInGitError(gitBoundary)
+			}
+		}
 	}
-	if len(agents) == 0 {
-		return UsageError("at least one agent required")
-	}
-	agents = dedupeStrings(agents)
-	sort.Strings(agents)
+
+	explicitAgents := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "agents" {
+			explicitAgents = true
+		}
+	})
 
 	root := *rootFlag
 
@@ -115,27 +140,70 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 	// The root in .amqrc is the literal queue root.
 	queueRoot := root
 
-	// Create root directories
+	cfgPath := filepath.Join(queueRoot, "meta", "config.json")
+	var agents []string
+	writeConfig := *forceFlag
+	if !*forceFlag {
+		_, lstatErr := os.Lstat(cfgPath)
+		switch {
+		case lstatErr == nil:
+			cfg, loadErr := config.LoadConfig(cfgPath)
+			if loadErr != nil {
+				return fmt.Errorf("failed to load existing config: %w", loadErr)
+			}
+			agents = append([]string(nil), cfg.Agents...)
+			if len(agents) == 0 {
+				return fmt.Errorf("existing config has no agents")
+			}
+			for _, agent := range agents {
+				if err := fsq.ValidateHandle(agent); err != nil {
+					return fmt.Errorf("invalid agent in existing config: %w", err)
+				}
+			}
+			if explicitAgents {
+				requestedAgents, err := parseCoopInitAgents(*agentsFlag)
+				if err != nil {
+					return err
+				}
+				configuredRoster := dedupeStrings(append([]string(nil), agents...))
+				sort.Strings(configuredRoster)
+				if !slices.Equal(requestedAgents, configuredRoster) {
+					_ = writeStderr(
+						"warning: using existing config agents %s; use --force to overwrite\n",
+						strings.Join(agents, ","),
+					)
+				}
+			}
+		case os.IsNotExist(lstatErr):
+			writeConfig = true
+		default:
+			return fmt.Errorf("failed to inspect existing config: %w", lstatErr)
+		}
+	}
+	if writeConfig {
+		parsedAgents, err := parseCoopInitAgents(*agentsFlag)
+		if err != nil {
+			return err
+		}
+		agents = parsedAgents
+	}
+
+	// Keep the shared config at the base root, but provision the roster in the
+	// default session that coop exec actually selects.
 	if err := fsq.EnsureRootDirs(queueRoot); err != nil {
 		return fmt.Errorf("failed to create root directories: %w", err)
 	}
-
-	// Create agent mailboxes under the session subdirectory
 	for _, agent := range agents {
 		if err := fsq.EnsureAgentDirs(queueRoot, agent); err != nil {
-			return fmt.Errorf("failed to create mailbox for %s: %w", agent, err)
+			return fmt.Errorf("failed to create compatibility base mailbox for %s: %w", agent, err)
 		}
 	}
-
-	// Write config.json only if it doesn't exist or --force is set
-	cfgPath := filepath.Join(queueRoot, "meta", "config.json")
-	configExists := false
-	if _, err := os.Stat(cfgPath); err == nil {
-		configExists = true
+	if _, err := provisionCoopSession(queueRoot, defaultSessionName, agents, "", ""); err != nil {
+		return fmt.Errorf("failed to create default session root: %w", err)
 	}
 
 	configWritten := false
-	if !configExists || *forceFlag {
+	if writeConfig {
 		cfg := config.Config{
 			Version:    format.CurrentVersion,
 			CreatedUTC: time.Now().UTC().Format(time.RFC3339),
@@ -232,4 +300,80 @@ func runCoopInitInternal(args []string, printNextSteps bool) error {
 		}
 	}
 	return nil
+}
+
+// provisionCoopSession creates or validates one named session as a direct,
+// non-symlink child of a pinned base capability, then creates every requested
+// mailbox through the pinned child capability. No provisioning write reopens
+// the session through its ambient lexical path.
+func provisionCoopSession(base, session string, agents []string, execAgent, execCommand string) (string, error) {
+	if err := validateSessionName(session); err != nil {
+		return "", err
+	}
+	base, err := absoluteSessionRoot(base)
+	if err != nil {
+		return "", err
+	}
+	if !dirExists(base) {
+		return "", NotFoundError("base root not found at %s", base)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(base)
+	if err != nil {
+		return "", err
+	}
+	baseRoot, err := fsq.OpenDeliveryRoot(base, identity)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = baseRoot.Close() }()
+
+	sessionRoot, err := baseRoot.OpenOrCreateDirectChild(session, 0o700)
+	if err != nil {
+		sessionPath := filepath.Join(base, session)
+		if info, lstatErr := os.Lstat(sessionPath); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			message := fmt.Sprintf(
+				"session root %s is a symlink; refusing to provision through it; remove it to use the named session",
+				sessionPath,
+			)
+			if target, resolveErr := filepath.EvalSymlinks(sessionPath); resolveErr == nil &&
+				execAgent != "" && execCommand != "" {
+				message += fmt.Sprintf(
+					"; for intentional relocation, use: amq coop exec --root %s --me %s %s",
+					shellQuoteArg(target),
+					shellQuoteArg(execAgent),
+					shellQuoteArg(execCommand),
+				)
+			}
+			return "", ContextMismatchError("%s", message)
+		}
+		return "", ContextMismatchError(
+			"refusing session %q: path %s is not a stable direct directory under base: %v",
+			session,
+			sessionPath,
+			err,
+		)
+	}
+	defer func() { _ = sessionRoot.Close() }()
+	if err := sessionRoot.EnsureRootDirs(); err != nil {
+		return "", err
+	}
+	for _, agent := range agents {
+		if err := sessionRoot.EnsureAgentDirs(agent); err != nil {
+			return "", fmt.Errorf("failed to create mailbox for %s: %w", agent, err)
+		}
+	}
+	return sessionRoot.Base(), nil
+}
+
+func parseCoopInitAgents(raw string) ([]string, error) {
+	agents, err := parseHandles(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(agents) == 0 {
+		return nil, UsageError("at least one agent required")
+	}
+	agents = dedupeStrings(agents)
+	sort.Strings(agents)
+	return agents, nil
 }

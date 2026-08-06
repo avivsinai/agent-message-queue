@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Clear env vars that could interfere with explicit --root/--me flags. The
-# session guards treat AM_BASE_ROOT/AM_SESSION as positive caller context, so an
-# ambient coop session would otherwise make the temp queue look foreign.
-unset AM_ROOT AM_ME AM_BASE_ROOT AM_SESSION AMQ_GLOBAL_ROOT 2>/dev/null || true
+# Clear env vars that could interfere with explicit --root/--me flags. Session
+# identity tokens and wake ownership are one context with their path fields, so
+# retaining any of them would mix the caller's coop session into the temp queue.
+# Keep this list aligned with the hostile AMQ context tuple in Makefile's smoke target.
+unset AM_ROOT AM_ROOT_ID AM_ME AM_BASE_ROOT AM_BASE_ROOT_ID AM_SESSION \
+  AMQ_GLOBAL_ROOT AMQ_WAKE_OWNER 2>/dev/null || true
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE 2>/dev/null || true
 
@@ -29,12 +31,14 @@ if [[ -z "$msg_id" || -z "$thread_id" ]]; then
   exit 1
 fi
 
-"$BIN" list --root "$QUEUE_ROOT" --me claude --new | grep -q "$msg_id"
+new_list_out="$("$BIN" list --root "$QUEUE_ROOT" --me claude --new)"
+printf '%s' "$new_list_out" | grep -q "$msg_id"
 
 read_out="$("$BIN" read --root "$QUEUE_ROOT" --me claude --id "$msg_id")"
 printf '%s' "$read_out" | grep -q "hello"
 
-"$BIN" list --root "$QUEUE_ROOT" --me claude --cur | grep -q "$msg_id"
+cur_list_out="$("$BIN" list --root "$QUEUE_ROOT" --me claude --cur)"
+printf '%s' "$cur_list_out" | grep -q "$msg_id"
 
 # read already moved the message to cur, which emits a drained receipt
 test -f "$QUEUE_ROOT/agents/claude/receipts/${msg_id}__claude__drained.json"
@@ -47,7 +51,8 @@ if [[ "$thread_msg" != "$msg_id" ]]; then
 fi
 
 "$BIN" presence set --root "$QUEUE_ROOT" --me codex --status busy
-"$BIN" presence list --root "$QUEUE_ROOT" | grep -q "^codex"
+presence_out="$("$BIN" presence list --root "$QUEUE_ROOT")"
+printf '%s' "$presence_out" | grep -q "^codex"
 
 tmpfile="$QUEUE_ROOT/agents/codex/inbox/tmp/old.tmp"
 mkdir -p "$(dirname "$tmpfile")"
@@ -129,9 +134,14 @@ if command -v python3 >/dev/null 2>&1; then
   python3 scripts/test_session_name.py
   echo "python session-name tests ok"
   python3 scripts/test_check_pr_title.py
+  python3 scripts/test_check_commit_overrides.py
+  python3 scripts/test_check_wake_test_changes.py
   python3 scripts/test_release_changelog_section.py
   python3 scripts/test_release_please_config.py
   bash scripts/test_release_metadata.sh
+  bash scripts/test_release_please_state.sh
+  bash scripts/test_reconcile_release_please_labels.sh
+  bash scripts/test_release_workflow_labels.sh
   bash scripts/test_git_env_sanitization.sh
 fi
 
@@ -331,4 +341,6 @@ echo "  hook log rotation: small log left in place"
 
 echo "claude-session-start.sh hook test ok"
 
+bash scripts/test_install_checksum.sh
+AMQ_TEST_BIN="$BIN" bash scripts/test_stop_hook.sh
 echo "smoke test ok"

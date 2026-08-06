@@ -107,6 +107,32 @@ func TestDeliverToExistingInboxNoDir(t *testing.T) {
 	}
 }
 
+func TestDeliverToExistingInboxRejectsIncompleteMailboxWithoutMutation(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	missing := AgentDLQCur(root, "codex")
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := DeliverToExistingInbox(openDeliveryRootForTest(t, root), "codex", "test.md", []byte("nope"))
+	if err == nil {
+		t.Fatal("DeliverToExistingInbox accepted incomplete mailbox")
+	}
+	entries, readErr := os.ReadDir(AgentInboxNew(root, "codex"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("incomplete peer received messages: %#v", entries)
+	}
+	if _, statErr := os.Lstat(missing); !os.IsNotExist(statErr) {
+		t.Fatalf("cross-project delivery created missing leaf: %v", statErr)
+	}
+}
+
 func TestDeliverToExistingInboxPostRenameSyncFailureReportsCommittedResult(t *testing.T) {
 	root := t.TempDir()
 	if err := EnsureAgentDirs(root, "codex"); err != nil {

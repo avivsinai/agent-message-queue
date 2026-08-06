@@ -76,8 +76,39 @@ func TestCmuxProbeUsesGlobalSystemTreeForExactSurface(t *testing.T) {
 		t.Fatalf("calls = %d, want 1", len(runner.calls))
 	}
 	call := runner.calls[0]
-	if call.name != "/fake/cmux" || len(call.args) != 3 || call.args[0] != "rpc" || call.args[1] != "system.tree" || call.args[2] != "{}" {
-		t.Fatalf("call = %#v, want raw global system.tree RPC", call)
+	if call.name != "/fake/cmux" || len(call.args) != 3 || call.args[0] != "rpc" || call.args[1] != "system.tree" || call.args[2] != cmuxSystemTreeParams {
+		t.Fatalf("call = %#v, want all-windows system.tree RPC", call)
+	}
+}
+
+func TestCmuxInventoryIncludesSurfaceInNonFocusedWindow(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	nonFocused := "B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
+	runner := &fakeCommandRunner{output: cmuxTreeWithWindows(
+		map[string]any{
+			"is_focused": true,
+			"workspaces": []any{map[string]any{
+				"id":    testCmuxWorkspaceID,
+				"panes": []any{map[string]any{"surfaces": []any{}}},
+			}},
+		},
+		map[string]any{
+			"is_focused": false,
+			"workspaces": []any{map[string]any{
+				"id":    testCmuxWorkspaceID,
+				"panes": []any{map[string]any{"surfaces": []any{map[string]any{"id": nonFocused, "tty": "ttys002"}}}},
+			}},
+		},
+	)}
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("Inventory() error = %v", err)
+	}
+	if err := inventory.Probe("cmux:surface:" + nonFocused); err != nil {
+		t.Fatalf("Probe(non-focused surface) error = %v", err)
+	}
+	if got := runner.calls[0].args[2]; got != cmuxSystemTreeParams {
+		t.Fatalf("system.tree params = %q, want %q; empty request excludes non-focused windows", got, cmuxSystemTreeParams)
 	}
 }
 
@@ -135,40 +166,33 @@ func TestCmuxInventoryRejectsMultipleLiveAliasesForPhysicalTTY(t *testing.T) {
 	}
 }
 
-func TestCmuxInventoryResolvesContestedTTYToTrustedCandidateAndEvictsCorpse(t *testing.T) {
+func TestCmuxInventoryKeepsTrustedCandidateAmbiguousWithoutDeadProof(t *testing.T) {
 	skipCmuxNonDarwin(t)
-	// The incident fix: on registration the discovered candidate is live by
-	// construction. It is trusted independently of the best-effort kernel
-	// liveness probe, so the co-claimant is a provable corpse.
-	corpse := "B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
-	runner := &fakeCommandRunner{results: []fakeCommandResult{
-		{output: cmuxTreeWithSurfaceRecords(
-			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
-			map[string]string{"id": corpse, "tty": "/dev/ttys011"},
-		)},
-		{}, // surface.report_tty
-		{output: cmuxTreeWithSurfaceRecords(
-			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
-			map[string]string{"id": corpse, "tty": cmuxEvictedTTYName},
-		)},
-	}}
-	liveness := &fakeTTYLiveness{err: errors.New("trusted candidate must bypass liveness")}
+	// CMUX_SURFACE_ID proves the candidate exists, not that every co-claimant is
+	// dead. Preserve both aliases until cmux explicitly marks one dead or the
+	// kernel proves there are no live tty owners.
+	second := "B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+		map[string]string{"id": second, "tty": "/dev/ttys011"},
+	)}
+	liveness := &fakeTTYLiveness{count: 1}
 	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveness.ownerCount}).
 		Inventory(context.Background(), trustedCmux(testCmuxSurfaceID))
 	if err != nil {
 		t.Fatalf("Inventory() error = %v", err)
 	}
-	key, err := inventory.OwnershipKey("cmux:surface:" + testCmuxSurfaceID)
-	if err != nil || key != "tty:/dev/ttys011" {
-		t.Fatalf("OwnershipKey(candidate) = %q, %v, want the resolved tty", key, err)
+	for _, target := range []string{testCmuxSurfaceID, second} {
+		if _, err := inventory.OwnershipKey("cmux:surface:" + target); err == nil || !strings.Contains(err.Error(), "2 live surface aliases") {
+			t.Fatalf("OwnershipKey(%q) error = %v, want alias ambiguity", target, err)
+		}
 	}
-	if _, err := inventory.OwnershipKey("cmux:surface:" + corpse); !errors.Is(err, ErrTargetNotFound) {
-		t.Fatalf("OwnershipKey(corpse) error = %v, want ErrTargetNotFound after eviction", err)
+	if len(liveness.calls) != 1 {
+		t.Fatalf("liveness calls = %v, want one tty ownership probe", liveness.calls)
 	}
-	if len(liveness.calls) != 0 {
-		t.Fatalf("liveness calls = %v, want none for trusted candidate", liveness.calls)
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls = %d, want one system.tree and no eviction", len(runner.calls))
 	}
-	assertCmuxEviction(t, runner, corpse)
 }
 
 // assertCmuxEviction verifies exactly one surface.report_tty eviction of the
@@ -606,7 +630,7 @@ func TestCmuxInventoryPreservesAmbiguityWhenEvictionFails(t *testing.T) {
 	runner := &fakeCommandRunner{results: []fakeCommandResult{
 		{output: cmuxTreeWithSurfaceRecords(
 			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
-			map[string]string{"id": corpse, "tty": "ttys011"},
+			map[string]string{"id": corpse, "tty": "ttys011", "process_alive": "false"},
 		)},
 		{output: []byte("surface gone"), err: errors.New("exit status 1")},
 	}}
@@ -617,12 +641,12 @@ func TestCmuxInventoryPreservesAmbiguityWhenEvictionFails(t *testing.T) {
 		Path:              "/fake/cmux",
 		LiveTTYOwnerCount: liveness.ownerCount,
 		Logf:              captureLogf(&logs),
-	}).Inventory(context.Background(), trustedCmux(testCmuxSurfaceID))
+	}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("Inventory() error = %v", err)
 	}
-	if _, err := inventory.OwnershipKey("cmux:surface:" + testCmuxSurfaceID); err == nil || !strings.Contains(err.Error(), "2 live surface aliases") {
-		t.Fatalf("OwnershipKey() error = %v, want original ambiguity preserved", err)
+	if _, err := inventory.OwnershipKey("cmux:surface:" + testCmuxSurfaceID); !errors.Is(err, ErrTargetDegraded) {
+		t.Fatalf("OwnershipKey() error = %v, want degraded ownership after failed eviction", err)
 	}
 	if len(runner.calls) != 2 {
 		t.Fatalf("calls = %d, want tree + failed report_tty only (no rebuild loop)", len(runner.calls))
@@ -688,25 +712,29 @@ func TestCmuxInventoryPartialEvictionFailureStaysFailClosedAndRetries(t *testing
 func TestCmuxInventoryWarnsWhenSuccessfulEvictionRebuildStaysAmbiguous(t *testing.T) {
 	skipCmuxNonDarwin(t)
 	corpse := "B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
-	contested := cmuxTreeWithSurfaceRecords(
+	initial := cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+		map[string]string{"id": corpse, "tty": "ttys011", "process_alive": "false"},
+	)
+	rebuilt := cmuxTreeWithSurfaceRecords(
 		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
 		map[string]string{"id": corpse, "tty": "ttys011"},
 	)
 	runner := &fakeCommandRunner{results: []fakeCommandResult{
-		{output: contested},
+		{output: initial},
 		{},
-		{output: contested},
+		{output: rebuilt},
 	}}
 	var logs []string
 	inventory, err := (Cmux{
 		Runner: runner,
 		Path:   "/fake/cmux",
 		LiveTTYOwnerCount: func(string) (int, error) {
-			t.Fatal("trusted registration candidate must not probe liveness")
+			t.Fatal("explicit process_alive:false must not probe liveness")
 			return 0, nil
 		},
 		Logf: captureLogf(&logs),
-	}).Inventory(context.Background(), trustedCmux(testCmuxSurfaceID))
+	}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("Inventory() error = %v", err)
 	}
@@ -850,14 +878,16 @@ func cmuxTreeWithWorkspace(workspaceID string, surfaces ...map[string]string) []
 		}
 		records = append(records, record)
 	}
-	tree := map[string]any{
-		"windows": []any{map[string]any{
-			"workspaces": []any{map[string]any{
-				"id":    workspaceID,
-				"panes": []any{map[string]any{"surfaces": records}},
-			}},
+	return cmuxTreeWithWindows(map[string]any{
+		"workspaces": []any{map[string]any{
+			"id":    workspaceID,
+			"panes": []any{map[string]any{"surfaces": records}},
 		}},
-	}
+	})
+}
+
+func cmuxTreeWithWindows(windows ...map[string]any) []byte {
+	tree := map[string]any{"windows": windows}
 	data, err := json.Marshal(tree)
 	if err != nil {
 		panic(err)

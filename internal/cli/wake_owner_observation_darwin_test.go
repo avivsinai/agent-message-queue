@@ -275,20 +275,15 @@ while [ ! -e "$3" ]; do sleep 0.01; done
 exit 0
 `
 	cmd := exec.Command("/bin/sh", "-c", script, "sh", descendantPath, ready, release)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start owner: %v", err)
 	}
+	ownerProcessGroup := cmd.Process.Pid
 	t.Cleanup(func() {
+		_ = syscall.Kill(-ownerProcessGroup, syscall.SIGKILL)
 		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
 			_, _ = cmd.Process.Wait()
-		}
-		if data, err := os.ReadFile(descendantPath); err == nil {
-			if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
-				if descendant, err := os.FindProcess(pid); err == nil {
-					_ = descendant.Kill()
-				}
-			}
 		}
 	})
 	waitForDarwinWakeObservationPath(t, ready)

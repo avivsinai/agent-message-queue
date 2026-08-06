@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +106,103 @@ func TestRunOpsChecks_BasicAgentStats(t *testing.T) {
 		t.Errorf("bob presence = %q, want %q", bob.PresenceStatus, "unknown")
 	}
 
+}
+
+func TestRunOpsChecks_DoorbellParkedHintRequiresUnreadBacklog(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteConfig(filepath.Join(root, "meta", "config.json"), config.Config{
+		Version: 1,
+		Agents:  []string{"codex"},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	presencePath := filepath.Join(fsq.AgentBase(root, "codex"), "presence.json")
+	parkedPresence := `{"schema":1,"handle":"codex","status":"active","last_seen":"2026-08-04T12:00:00Z","doorbell_parked":true,"doorbell_attempts":4}`
+	if err := os.WriteFile(presencePath, []byte(parkedPresence), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if hint, ok := findOpsHint(runOpsChecks(root, "test", false).Hints, "doorbell_parked"); ok {
+		t.Fatalf("empty inbox reported parked hint: %#v", hint)
+	}
+
+	messagePath := filepath.Join(fsq.AgentInboxNew(root, "codex"), "pending.md")
+	if err := os.WriteFile(messagePath, []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(messagePath, time.Now().Add(-90*time.Second), time.Now().Add(-90*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		ProcessStart: "verified-start",
+		BootID:       "verified-boot",
+		Executable:   "amq",
+		Args:         []string{"amq", "wake", "--root", root, "--me", "codex"},
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "verified-start",
+			BootID:     "verified-boot",
+			Executable: "/usr/local/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
+
+	parkedResult := runOpsChecks(root, "test", false)
+	hint, ok := findOpsHint(parkedResult.Hints, "doorbell_parked")
+	if !ok {
+		t.Fatal("parked doorbell with unread backlog emitted no ops hint")
+	}
+	if hint.Status != "warn" ||
+		!strings.Contains(hint.Message, "codex") ||
+		!strings.Contains(hint.Message, "4 attempts") ||
+		!strings.Contains(hint.Message, "90s") ||
+		!strings.Contains(hint.Message, "input may be stranded") ||
+		!strings.Contains(hint.Message, "manual Enter") {
+		t.Fatalf("parked hint = %#v", hint)
+	}
+	parkedJSON, err := json.Marshal(parkedResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(parkedJSON), "input may be stranded") ||
+		!strings.Contains(string(parkedJSON), "manual Enter") {
+		t.Fatalf("parked JSON omitted recovery guidance: %s", parkedJSON)
+	}
+	if len(parkedResult.Agents) != 1 ||
+		!parkedResult.Agents[0].DoorbellParked ||
+		parkedResult.Agents[0].DoorbellAttempts != 4 {
+		t.Fatalf("parked agent state = %#v", parkedResult.Agents)
+	}
+
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	stalePresenceResult := runOpsChecks(root, "test", false)
+	if hint, ok := findOpsHint(stalePresenceResult.Hints, "doorbell_parked"); ok {
+		t.Fatalf("parked presence without a live notifier emitted hint: %#v", hint)
+	}
+	if _, ok := findOpsHint(stalePresenceResult.Hints, "unread_backlog_no_notifier"); !ok {
+		t.Fatalf("absent notifier warning missing: %#v", stalePresenceResult.Hints)
+	}
+
+	activePresence := `{"schema":1,"handle":"codex","status":"active","last_seen":"2026-08-04T12:00:00Z"}`
+	if err := os.WriteFile(presencePath, []byte(activePresence), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if hint, ok := findOpsHint(runOpsChecks(root, "test", false).Hints, "doorbell_parked"); ok {
+		t.Fatalf("unparked notifier reported parked hint: %#v", hint)
+	}
 }
 
 func TestRunOpsChecks_NoConfig(t *testing.T) {
@@ -299,8 +397,12 @@ func TestRunOpsChecks_ReportsAndFixesStaleWakeLockWithoutConfig(t *testing.T) {
 	if got.Agent != "alice" {
 		t.Fatalf("agent = %q, want alice", got.Agent)
 	}
-	if got.Fix != fixWakeLocksCommand {
-		t.Fatalf("fix = %q, want %q", got.Fix, fixWakeLocksCommand)
+	wantFix := doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+	if got.Fix != wantFix {
+		t.Fatalf("fix = %q, want %q", got.Fix, wantFix)
+	}
+	if strings.Contains(got.Fix, "--ignore-session-pin") {
+		t.Fatalf("fix advice bypasses session pin: %q", got.Fix)
 	}
 	if _, err := os.Stat(lockPath); err != nil {
 		t.Fatalf("lock should not be removed without fix flag: %v", err)
@@ -329,6 +431,206 @@ func TestRunOpsChecks_ReportsAndFixesStaleWakeLockWithoutConfig(t *testing.T) {
 	}
 	if !foundConfigError {
 		t.Fatalf("expected config_error hint, got: %+v", result.Hints)
+	}
+}
+
+func TestDoctorStaleWakeLockFixAdviceRespectsSessionPin(t *testing.T) {
+	tests := []struct {
+		name         string
+		configurePin func(t *testing.T, root string)
+		wantRemoved  bool
+	}{
+		{
+			name: "unpinned",
+			configurePin: func(t *testing.T, _ string) {
+				clearDoctorSessionPin(t)
+			},
+			wantRemoved: true,
+		},
+		{
+			name: "matching pin",
+			configurePin: func(t *testing.T, root string) {
+				setDoctorIdentityPin(t, root)
+				t.Setenv(envRoot, root)
+			},
+			wantRemoved: true,
+		},
+		{
+			name: "cross pin",
+			configurePin: func(t *testing.T, _ string) {
+				pinnedRoot := healthyDoctorMailboxRoot(t, "source")
+				setDoctorIdentityPin(t, pinnedRoot)
+				t.Setenv(envRoot, pinnedRoot)
+			},
+			wantRemoved: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := healthyDoctorMailboxRoot(t, "alice")
+			lockPath := writeWakeLockForTest(t, root, "alice", wakeLock{
+				PID:        999999999,
+				Executable: "/opt/homebrew/bin/amq",
+			})
+			test.configurePin(t, root)
+
+			result := runOpsChecks(root, "test_source", false)
+			if len(result.WakeLocks) != 1 {
+				t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+			}
+			wantFix := doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+			if got := result.WakeLocks[0].Fix; got != wantFix {
+				t.Fatalf("fix = %q, want %q", got, wantFix)
+			}
+			if strings.Contains(result.WakeLocks[0].Fix, "--ignore-session-pin") {
+				t.Fatalf("fix advice bypasses session pin: %q", result.WakeLocks[0].Fix)
+			}
+
+			output, err := captureEnvStdout(t, func() error {
+				return runDoctor([]string{
+					"--root", root,
+					"--ops",
+					"--fix-wake-locks",
+					"--json",
+				})
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var doctor doctorMailboxResultJSON
+			if err := json.Unmarshal([]byte(output), &doctor); err != nil {
+				t.Fatal(err)
+			}
+
+			_, statErr := os.Stat(lockPath)
+			if test.wantRemoved {
+				if !os.IsNotExist(statErr) {
+					t.Fatalf("generated fix command did not remove stale lock: %v", statErr)
+				}
+				return
+			}
+			if statErr != nil {
+				t.Fatalf("cross-pin generated fix command changed stale lock: %v", statErr)
+			}
+			check := findDoctorCheck(t, doctor.Checks, "Wake lock repair")
+			if check.Status != "error" || !strings.Contains(check.Message, "pinned session context") {
+				t.Fatalf("cross-pin authority check = %#v", check)
+			}
+		})
+	}
+}
+
+func TestDoctorExplicitRootWakeRepairRequiresPinMatchOrOverride(t *testing.T) {
+	pinnedRoot := healthyDoctorMailboxRoot(t, "source")
+	foreignRoot := healthyDoctorMailboxRoot(t, "alice")
+	lockPath := writeWakeLockForTest(t, foreignRoot, "alice", wakeLock{
+		PID:        999999999,
+		Executable: "/opt/homebrew/bin/amq",
+	})
+	setDoctorIdentityPin(t, pinnedRoot)
+	t.Setenv(envRoot, pinnedRoot)
+
+	output, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{
+			"--root", foreignRoot,
+			"--ops",
+			"--fix-wake-locks",
+			"--json",
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refused doctorMailboxResultJSON
+	if err := json.Unmarshal([]byte(output), &refused); err != nil {
+		t.Fatal(err)
+	}
+	check := findDoctorCheck(t, refused.Checks, "Wake lock repair")
+	if check.Status != "error" || !strings.Contains(check.Message, "pinned session context") {
+		t.Fatalf("wake repair authority check = %#v", check)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("mismatched doctor removed wake lock: %v", err)
+	}
+
+	if _, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{
+			"--root", foreignRoot,
+			"--ignore-session-pin",
+			"--ops",
+			"--fix-wake-locks",
+			"--json",
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("explicit wake repair override did not remove lock: %v", err)
+	}
+}
+
+func TestDoctorOwnBaseWakeRepairRefusesContradictoryLegacyPin(t *testing.T) {
+	baseRoot := healthyDoctorMailboxRoot(t, "alice")
+	if err := fsq.EnsureAgentDirs(filepath.Join(baseRoot, "current"), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := writeWakeLockForTest(t, baseRoot, "alice", wakeLock{
+		PID:        999999999,
+		Executable: "/opt/homebrew/bin/amq",
+	})
+	t.Setenv(envRoot, baseRoot)
+	t.Setenv(envBaseRoot, baseRoot)
+	t.Setenv(envSession, "current")
+	setOptionalEnv(t, envRootID, "", false)
+	setOptionalEnv(t, envBaseRootID, "", false)
+
+	output, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{
+			"--root", baseRoot,
+			"--ops",
+			"--fix-wake-locks",
+			"--json",
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result doctorMailboxResultJSON
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatal(err)
+	}
+	check := findDoctorCheck(t, result.Checks, "Wake lock repair")
+	if check.Status != "error" || !strings.Contains(check.Message, "pinned session context") {
+		t.Fatalf("contradictory legacy pin wake repair check = %#v", check)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("refused own-base wake repair changed stale lock: %v", err)
+	}
+}
+
+func TestDoctorInvalidBaseRootPreflightPreventsWakeRepair(t *testing.T) {
+	targetRoot := healthyDoctorMailboxRoot(t, "alice")
+	unrelatedBase := healthyDoctorMailboxRoot(t, "alice")
+	lockPath := writeWakeLockForTest(t, targetRoot, "alice", wakeLock{
+		PID:        999999999,
+		Executable: "/opt/homebrew/bin/amq",
+	})
+	clearDoctorSessionPin(t)
+
+	err := runDoctor([]string{
+		"--root", targetRoot,
+		"--base-root", unrelatedBase,
+		"--ignore-session-pin",
+		"--ops",
+		"--fix-wake-locks",
+		"--json",
+	})
+	if err == nil || !strings.Contains(err.Error(), "one direct child") {
+		t.Fatalf("invalid base relationship error = %v", err)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("invalid base relationship mutated wake lock: %v", err)
 	}
 }
 
@@ -388,8 +690,12 @@ func TestRunOpsChecks_ReportsStaleWakeLock(t *testing.T) {
 	if got.Reason != "pid not running" {
 		t.Fatalf("reason = %q, want pid not running", got.Reason)
 	}
-	if got.Fix != fixWakeLocksCommand {
-		t.Fatalf("fix = %q, want %q", got.Fix, fixWakeLocksCommand)
+	wantFix := doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+	if got.Fix != wantFix {
+		t.Fatalf("fix = %q, want %q", got.Fix, wantFix)
+	}
+	if strings.Contains(got.Fix, "--ignore-session-pin") {
+		t.Fatalf("fix advice bypasses session pin: %q", got.Fix)
 	}
 	if _, err := os.Stat(lockPath); err != nil {
 		t.Fatalf("lock should not be removed without fix flag: %v", err)

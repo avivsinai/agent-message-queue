@@ -3,13 +3,21 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/sys/unix"
 )
+
+// waitRetainedWakeInboxEvent is a seam so tests can inject the interrupts the
+// Go runtime delivers in production.
+var waitRetainedWakeInboxEvent = func(kqueueFD int, events []unix.Kevent_t) (int, error) {
+	return unix.Kevent(kqueueFD, nil, events, nil)
+}
 
 type retainedWakeInboxKqueueWatcher struct {
 	kqueueFD  int
@@ -40,6 +48,16 @@ func newRetainedWakeInboxWatcher(
 	kqueueFD, err := unix.Kqueue()
 	if err != nil {
 		return nil, fmt.Errorf("create retained wake directory kqueue: %w", err)
+	}
+	if err := setDarwinWakeOwnerObservationCloseOnExec(
+		kqueueFD,
+		"retained wake directory kqueue",
+	); err != nil {
+		closeErr := unix.Close(kqueueFD)
+		if closeErr != nil {
+			return nil, fmt.Errorf("%w (close kqueue: %v)", err, closeErr)
+		}
+		return nil, err
 	}
 	flags := uint32(
 		unix.NOTE_WRITE |
@@ -103,15 +121,18 @@ func (w *retainedWakeInboxKqueueWatcher) run() {
 	eventName := filepath.Join(w.authority.inboxPath, "retained-inbox-event.md")
 	for {
 		events := make([]unix.Kevent_t, 2)
-		count, err := unix.Kevent(w.kqueueFD, nil, events, nil)
+		count, err := waitRetainedWakeInboxEvent(w.kqueueFD, events)
 		if err != nil {
 			select {
 			case <-w.closing:
 				return
 			default:
-				w.fail(fmt.Errorf("wait for retained wake directory event: %w", err))
-				return
 			}
+			if errors.Is(err, syscall.EINTR) {
+				continue
+			}
+			w.fail(fmt.Errorf("wait for retained wake directory event: %w", err))
+			return
 		}
 		if count == 0 {
 			continue

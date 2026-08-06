@@ -2,16 +2,62 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
+
+type wakeInfoErrorDirEntry struct {
+	os.DirEntry
+	err error
+}
+
+type wakeTestAcceptedProgressError struct {
+	err      error
+	accepted int
+}
+
+func (err *wakeTestAcceptedProgressError) Error() string {
+	return err.err.Error()
+}
+
+func (err *wakeTestAcceptedProgressError) Unwrap() error {
+	return err.err
+}
+
+func (err *wakeTestAcceptedProgressError) wakeAcceptedBytes() int {
+	return err.accepted
+}
+
+func (entry wakeInfoErrorDirEntry) Info() (os.FileInfo, error) {
+	info, _ := entry.DirEntry.Info()
+	return info, entry.err
+}
+
+type wakeStaticInboxReader struct {
+	entries []os.DirEntry
+	headers map[string]format.Header
+}
+
+func (reader wakeStaticInboxReader) ReadDir() ([]os.DirEntry, error) {
+	return reader.entries, nil
+}
+
+func (reader wakeStaticInboxReader) ReadHeader(name string) (format.Header, error) {
+	header, ok := reader.headers[name]
+	if !ok {
+		return format.Header{}, os.ErrNotExist
+	}
+	return header, nil
+}
 
 func TestIsInterruptMessage(t *testing.T) {
 	cfg := &wakeConfig{
@@ -42,44 +88,6 @@ func TestBuildInterruptText_DefaultSingle(t *testing.T) {
 	}
 }
 
-func TestBuildNotificationText_NoSession(t *testing.T) {
-	msg := wakeMsgInfo{from: "codex", subject: "review done"}
-	text := buildNotificationText("", []wakeMsgInfo{msg}, map[string]int{"codex": 1}, 48)
-	if !strings.HasPrefix(text, "AMQ: ") {
-		t.Fatalf("expected 'AMQ: ' prefix without session, got: %s", text)
-	}
-	if strings.Contains(text, "[") {
-		t.Fatalf("expected no brackets without session, got: %s", text)
-	}
-}
-
-func TestBuildNotificationText_WithSession(t *testing.T) {
-	msg := wakeMsgInfo{from: "codex", subject: "review done"}
-	text := buildNotificationText("stream3", []wakeMsgInfo{msg}, map[string]int{"codex": 1}, 48)
-	if !strings.HasPrefix(text, "AMQ [stream3]: ") {
-		t.Fatalf("expected 'AMQ [stream3]: ' prefix, got: %s", text)
-	}
-	if !strings.Contains(text, "codex") {
-		t.Fatalf("expected sender in text, got: %s", text)
-	}
-}
-
-func TestBuildNotificationText_MultipleWithSession(t *testing.T) {
-	messages := []wakeMsgInfo{
-		{from: "codex", subject: "a"},
-		{from: "codex", subject: "b"},
-		{from: "alice", subject: "c"},
-	}
-	counts := map[string]int{"codex": 2, "alice": 1}
-	text := buildNotificationText("collab", messages, counts, 48)
-	if !strings.HasPrefix(text, "AMQ [collab]: ") {
-		t.Fatalf("expected 'AMQ [collab]: ' prefix, got: %s", text)
-	}
-	if !strings.Contains(text, "3 messages") {
-		t.Fatalf("expected message count, got: %s", text)
-	}
-}
-
 func TestBuildInterruptText_WithSession(t *testing.T) {
 	msg := wakeMsgInfo{from: "alice", subject: "help"}
 	text := buildInterruptText("stream2", []wakeMsgInfo{msg}, map[string]int{"alice": 1}, 48, "")
@@ -90,9 +98,65 @@ func TestBuildInterruptText_WithSession(t *testing.T) {
 
 func TestBuildInterruptText_CustomOverride(t *testing.T) {
 	msg := wakeMsgInfo{from: "alice", subject: "help"}
-	text := buildInterruptText("stream2", []wakeMsgInfo{msg}, map[string]int{"alice": 1}, 48, "custom notice")
-	if text != "custom notice" {
+	text := buildInterruptText("stream2", []wakeMsgInfo{msg}, map[string]int{"alice": 1}, 48, "custom\x1b[31m\nnotice")
+	if text != "custom [31m notice" {
 		t.Fatalf("expected custom override, got: %s", text)
+	}
+}
+
+func TestBuildNotificationTextRestoresPeerHeadersForOutput(t *testing.T) {
+	text := buildNotificationText(
+		"collab",
+		[]wakeMsgInfo{{from: "codex", subject: "review ready"}},
+		48,
+	)
+	for _, want := range []string{
+		"AMQ [collab]",
+		"message from codex",
+		"review ready",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("notification output %q missing %q", text, want)
+		}
+	}
+}
+
+func TestWakeNotificationTextCapsDistinctSenderClauses(t *testing.T) {
+	var messages []wakeMsgInfo
+	senderCounts := make(map[string]int)
+	for i := maxWakeNotificationSenderClauses + 1; i >= 0; i-- {
+		sender := fmt.Sprintf("sender-%02d", i)
+		messages = append(messages, wakeMsgInfo{from: sender})
+		senderCounts[sender]++
+	}
+
+	notification := buildNotificationText("session1", messages, 48)
+	interrupt := buildInterruptText("session1", messages, senderCounts, 48, "")
+	for name, text := range map[string]string{
+		"notification": notification,
+		"interrupt":    interrupt,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(text, fmt.Sprintf("%d ", len(messages))) {
+				t.Fatalf("aggregate count missing from %q", text)
+			}
+			if !strings.Contains(text, "1 from sender-00") ||
+				!strings.Contains(text, fmt.Sprintf(
+					"1 from sender-%02d",
+					maxWakeNotificationSenderClauses-1,
+				)) {
+				t.Fatalf("bounded sender clauses missing from %q", text)
+			}
+			if strings.Contains(text, fmt.Sprintf(
+				"1 from sender-%02d",
+				maxWakeNotificationSenderClauses,
+			)) {
+				t.Fatalf("omitted sender leaked into %q", text)
+			}
+			if !strings.Contains(text, "2 other senders") {
+				t.Fatalf("omitted sender count missing from %q", text)
+			}
+		})
 	}
 }
 
@@ -228,7 +292,12 @@ func TestInjectNotificationNoneWritesOutputWithoutTIOCSTI(t *testing.T) {
 	})
 
 	stderr := captureWakeStderr(t, func() {
-		cfg := &wakeConfig{injectMode: wakeInjectModeNone, bell: true}
+		cfg := &wakeConfig{
+			injectMode:     wakeInjectModeNone,
+			bell:           true,
+			attentionEnv:   func(string) string { return "" },
+			attentionIsTTY: func() bool { return true },
+		}
 		if err := injectNotification(cfg, "safe notice", true); err != nil {
 			t.Fatalf("injectNotification: %v", err)
 		}
@@ -237,8 +306,8 @@ func TestInjectNotificationNoneWritesOutputWithoutTIOCSTI(t *testing.T) {
 	if len(injected) != 0 {
 		t.Fatalf("none mode injected terminal input: %q", injected)
 	}
-	if stderr != "\asafe notice\n" {
-		t.Fatalf("stderr = %q, want bell + notice", stderr)
+	if stderr != "\x1b]0;AMQ attention\a\asafe notice\n" {
+		t.Fatalf("stderr = %q, want title + bell + notice", stderr)
 	}
 }
 
@@ -246,6 +315,8 @@ func TestInjectNotificationNoneDoesNotInvokeInjectVia(t *testing.T) {
 	cfg, outputPath := injectViaCaptureConfig(t)
 	cfg.injectMode = wakeInjectModeNone
 	cfg.bell = true
+	cfg.attentionEnv = func(string) string { return "" }
+	cfg.attentionIsTTY = func() bool { return true }
 
 	stderr := captureWakeStderr(t, func() {
 		if err := injectNotification(cfg, "safe notice", true); err != nil {
@@ -256,8 +327,8 @@ func TestInjectNotificationNoneDoesNotInvokeInjectVia(t *testing.T) {
 	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
 		t.Fatalf("none mode invoked inject-via; output stat error = %v", err)
 	}
-	if stderr != "\asafe notice\n" {
-		t.Fatalf("stderr = %q, want bell + notice", stderr)
+	if stderr != "\x1b]0;AMQ attention\a\asafe notice\n" {
+		t.Fatalf("stderr = %q, want title + bell + notice", stderr)
 	}
 }
 
@@ -274,25 +345,37 @@ func TestOwnerBoundNotificationUsesFixedDoorbellAndGuardsEveryChunk(t *testing.T
 	})
 
 	tests := []struct {
+		name string
+		me   string
 		mode string
 		want []string
 	}{
 		{
+			name: "codex-raw",
+			me:   "codex",
 			mode: wakeInjectModeRaw,
 			want: []string{coopWakeDoorbell, "\n", "\r", "\r"},
 		},
 		{
+			name: "claude-raw",
+			me:   "claude",
+			mode: wakeInjectModeRaw,
+			want: []string{coopWakeDoorbell, "\r", "\r"},
+		},
+		{
+			name: "grok-paste",
+			me:   "grok",
 			mode: wakeInjectModePaste,
 			want: []string{coopWakeDoorbell, "\r"},
 		},
 	}
 	for _, tc := range tests {
-		t.Run(tc.mode, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			stop := make(chan struct{})
 			var writes []string
 			guardCalls := 0
 			cfg := &wakeConfig{
-				me:          "codex",
+				me:          tc.me,
 				injectMode:  tc.mode,
 				controlStop: stop,
 				bell:        true,
@@ -317,6 +400,28 @@ func TestOwnerBoundNotificationUsesFixedDoorbellAndGuardsEveryChunk(t *testing.T
 				t.Fatalf("guard calls = %d, want %d", guardCalls, len(tc.want))
 			}
 		})
+	}
+}
+
+func TestUsesCoopDoorbellIsOwnerBoundAcrossProviders(t *testing.T) {
+	for _, me := range []string{"claude", "codex", "grok", "orchestrator"} {
+		t.Run(me, func(t *testing.T) {
+			if !usesCoopDoorbell(&wakeConfig{
+				me:        me,
+				root:      "/explicit/amq/root",
+				wakeOwner: &wakeOwner{},
+			}) {
+				t.Fatalf("owner-bound %s wake is not eligible for co-op redelivery", me)
+			}
+		})
+	}
+
+	if usesCoopDoorbell(&wakeConfig{
+		me:          "codex",
+		root:        "/explicit/amq/root",
+		controlStop: make(chan struct{}),
+	}) {
+		t.Fatal("rooted ownerless wake is eligible for co-op redelivery")
 	}
 }
 
@@ -399,6 +504,27 @@ func TestInjectViaTimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("expected timeout error, got %v", err)
+	}
+}
+
+func TestInjectViaTimeoutBoundsInheritedDescendantOutput(t *testing.T) {
+	scriptPath := filepath.Join(secureTempDirForTest(t), "background-output.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nsleep 2 &\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	cfg := &wakeConfig{
+		injectVia:     scriptPath,
+		injectTimeout: 50 * time.Millisecond,
+	}
+	start := time.Now()
+	err := injectVia(cfg, "test")
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("inherited-output error = %v, want timeout", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("inherited-output timeout returned after %s", elapsed)
 	}
 }
 
@@ -561,6 +687,564 @@ func TestInjectNotificationRawInjectsLFPreludeForCodex(t *testing.T) {
 	}
 }
 
+func TestInjectNotificationUnsupportedDegradesOnceAndPersistsReason(t *testing.T) {
+	writes := 0
+	var statuses []struct {
+		status string
+		mode   string
+		reason string
+	}
+	cfg := &wakeConfig{
+		injectMode:   wakeInjectModeRaw,
+		fallbackWarn: true,
+		terminalWrite: func(string) error {
+			writes++
+			return newWakeInjectorUnsupportedError(syscall.EIO)
+		},
+		recordNotifierStatus: func(status, mode, reason string) error {
+			statuses = append(statuses, struct {
+				status string
+				mode   string
+				reason string
+			}{status: status, mode: mode, reason: reason})
+			return nil
+		},
+	}
+
+	first := captureWakeStderr(t, func() {
+		if err := injectNotification(cfg, "first doorbell", true); err != nil {
+			t.Fatalf("first injectNotification: %v", err)
+		}
+	})
+	if cfg.injectMode != wakeInjectModeNone {
+		t.Fatalf("inject mode = %q, want degraded non-input", cfg.injectMode)
+	}
+	if writes != 1 {
+		t.Fatalf("terminal writes = %d, want 1", writes)
+	}
+	if len(statuses) != 1 ||
+		statuses[0].status != wakeInjectorUnsupportedStatus ||
+		statuses[0].mode != wakeInjectModeRaw ||
+		!strings.Contains(statuses[0].reason, "--inject-via") {
+		t.Fatalf("recorded statuses = %#v", statuses)
+	}
+	if count := strings.Count(first, "warning:"); count != 1 {
+		t.Fatalf("first warning count = %d, want 1:\n%s", count, first)
+	}
+	if !strings.Contains(first, "first doorbell") {
+		t.Fatalf("first fallback missing doorbell:\n%s", first)
+	}
+
+	second := captureWakeStderr(t, func() {
+		if err := injectNotification(cfg, "second doorbell", true); err != nil {
+			t.Fatalf("second injectNotification: %v", err)
+		}
+	})
+	if writes != 1 {
+		t.Fatalf("degraded notifier retried terminal injection: writes=%d", writes)
+	}
+	if strings.Contains(second, "warning:") || !strings.Contains(second, "second doorbell") {
+		t.Fatalf("second non-input output = %q", second)
+	}
+}
+
+func TestDeliverNewMessageNotificationRetiresInputStateAfterUnsupportedInjector(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	attention := make(chan string, 2)
+	cfg := &wakeConfig{
+		me:         "codex",
+		wakeOwner:  &wakeOwner{},
+		injectMode: wakeInjectModePaste,
+		doorbell: wakeDoorbellState{
+			phase:       wakeDoorbellRetrying,
+			cohort:      snapshotWakeFileIdentities(current),
+			attempts:    1,
+			nextAttempt: now,
+		},
+		doorbellNow: func() time.Time { return now },
+		terminalWrite: func(string) error {
+			return newWakeInjectorUnsupportedError(errors.New("injector disabled"))
+		},
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attention <- string(data)
+			return len(data), nil
+		},
+	}
+
+	captureWakeStderr(t, func() {
+		err := deliverNewMessageNotification(
+			cfg,
+			peerWakeNotification("pending message"),
+			false,
+			current,
+		)
+		if err != nil {
+			t.Fatalf("deliver unsupported notification: %v", err)
+		}
+	})
+
+	if cfg.injectMode != wakeInjectModeNone {
+		t.Fatalf("inject mode = %q, want none", cfg.injectMode)
+	}
+	if cfg.doorbell.phase != wakeDoorbellRetrying ||
+		!sameKnownWakeCohort(cfg.doorbell.cohort, current) ||
+		cfg.doorbell.attempts != 1 ||
+		!cfg.doorbell.nextAttempt.Equal(now.Add(wakeDoorbellAttentionRetryBase)) {
+		t.Fatalf("demoted cohort retry state = %#v", cfg.doorbell)
+	}
+	if cfg.inputDelivery.pending() {
+		t.Fatalf("input delivery survived permanent injection demotion: %#v", cfg.inputDelivery)
+	}
+	select {
+	case got := <-attention:
+		if !strings.Contains(got, "pending message") {
+			t.Fatalf("demotion fallback = %q, want message-specific output", got)
+		}
+	default:
+		t.Fatal("unsupported retry demotion suppressed its output fallback")
+	}
+	select {
+	case duplicate := <-attention:
+		t.Fatalf("unsupported retry demotion emitted duplicate fallback: %q", duplicate)
+	default:
+	}
+
+	captureWakeStderr(t, func() {
+		err := deliverNewMessageNotification(
+			cfg,
+			peerWakeNotification("pending message"),
+			false,
+			current,
+		)
+		if err != nil {
+			t.Fatalf("redeliver unchanged demoted cohort: %v", err)
+		}
+	})
+	select {
+	case duplicate := <-attention:
+		t.Fatalf("unchanged demoted cohort emitted duplicate fallback: %q", duplicate)
+	default:
+	}
+}
+
+func TestDeliverNewMessageNotificationRecordsFirstAttemptDemotion(t *testing.T) {
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	attention := make(chan string, 2)
+	cfg := &wakeConfig{
+		me:         "codex",
+		wakeOwner:  &wakeOwner{},
+		injectMode: wakeInjectModePaste,
+		terminalWrite: func(string) error {
+			return newWakeInjectorUnsupportedError(errors.New("injector disabled"))
+		},
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attention <- string(data)
+			return len(data), nil
+		},
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		captureWakeStderr(t, func() {
+			if err := deliverNewMessageNotification(
+				cfg,
+				peerWakeNotification("pending message"),
+				false,
+				current,
+			); err != nil {
+				t.Fatalf("deliver attempt %d: %v", attempt, err)
+			}
+		})
+	}
+
+	if cfg.doorbell.phase != wakeDoorbellRetrying ||
+		!sameKnownWakeCohort(cfg.doorbell.cohort, current) ||
+		cfg.doorbell.attempts != 1 {
+		t.Fatalf("first-attempt demotion state = %#v", cfg.doorbell)
+	}
+	select {
+	case got := <-attention:
+		if !strings.Contains(got, "pending message") {
+			t.Fatalf("demotion fallback = %q", got)
+		}
+	default:
+		t.Fatal("first-attempt demotion did not emit fallback")
+	}
+	select {
+	case duplicate := <-attention:
+		t.Fatalf("unchanged first-attempt demotion emitted duplicate: %q", duplicate)
+	default:
+	}
+}
+
+func TestDeliverNewMessageNotificationOwnerlessDemotionRearmsOnPartialDrain(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	current := wakeDoorbellTestFiles(t, "first.md", "second.md")
+	remaining := map[string]os.FileInfo{"second.md": current["second.md"]}
+	attentionWrites := 0
+	cfg := &wakeConfig{
+		me:         "codex",
+		injectMode: wakeInjectModePaste,
+		doorbellNow: func() time.Time {
+			return now
+		},
+		terminalWrite: func(string) error {
+			return newWakeInjectorUnsupportedError(errors.New("injector disabled"))
+		},
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
+	}
+
+	if err := deliverNewMessageNotification(
+		cfg,
+		peerWakeNotification("two pending messages"),
+		false,
+		current,
+	); err != nil {
+		t.Fatalf("ownerless demotion: %v", err)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("ownerless demotion attention writes = %d, want 1", attentionWrites)
+	}
+	if !sameKnownWakeCohort(cfg.doorbell.cohort, current) {
+		t.Fatalf("ownerless demotion lost cohort: %#v", cfg.doorbell)
+	}
+
+	now = now.Add(time.Second)
+	if err := deliverNewMessageNotification(
+		cfg,
+		peerWakeNotification("one pending message"),
+		false,
+		remaining,
+	); err != nil {
+		t.Fatalf("ownerless partial-drain rearm: %v", err)
+	}
+	if attentionWrites != 2 {
+		t.Fatalf("partial drain did not immediately rearm attention: writes=%d", attentionWrites)
+	}
+	if !sameKnownWakeCohort(cfg.doorbell.cohort, remaining) {
+		t.Fatalf("partial drain did not snapshot remaining cohort: %#v", cfg.doorbell)
+	}
+}
+
+func TestDeliverNewMessageNotificationRetriesCohortAfterShortOutputAttention(t *testing.T) {
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	now := time.Unix(1_800_000_000, 0)
+	writes := 0
+	cfg := &wakeConfig{
+		injectMode:     wakeInjectModeNone,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			writes++
+			if writes == 1 {
+				return len(data) - 1, nil
+			}
+			return len(data), nil
+		},
+	}
+
+	err := deliverNewMessageNotification(
+		cfg,
+		peerWakeNotification("pending message"),
+		false,
+		current,
+	)
+	var attentionErr *wakeAttentionDeliveryError
+	if !errors.As(err, &attentionErr) {
+		t.Fatalf("first delivery error = %v, want typed attention failure", err)
+	}
+	if cfg.doorbell.attempts != 1 ||
+		!cfg.doorbell.nextAttempt.Equal(now.Add(wakeDoorbellAttentionRetryBase)) {
+		t.Fatalf("short output write did not arm attention retry: %#v", cfg.doorbell)
+	}
+
+	if err := deliverNewMessageNotification(
+		cfg,
+		peerWakeNotification("pending message"),
+		false,
+		current,
+	); err != nil {
+		t.Fatalf("suppressed retry after short output write: %v", err)
+	}
+	if writes != 1 {
+		t.Fatalf("attention retried before output deadline: writes=%d", writes)
+	}
+
+	now = now.Add(wakeDoorbellAttentionRetryBase)
+	if err := deliverNewMessageNotification(
+		cfg,
+		peerWakeNotification("pending message"),
+		false,
+		current,
+	); err != nil {
+		t.Fatalf("due retry after short output write: %v", err)
+	}
+	if writes != 2 {
+		t.Fatalf("attention writes = %d, want failed write plus due retry", writes)
+	}
+	if cfg.doorbell.phase != wakeDoorbellRetrying ||
+		!sameKnownWakeCohort(cfg.doorbell.cohort, current) ||
+		cfg.doorbell.attempts != 2 {
+		t.Fatalf("successful output retry did not arm backoff: %#v", cfg.doorbell)
+	}
+}
+
+func TestDeliverNewMessageNotificationEntersRecoveryAfterUnsupportedConfirmedInput(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	prompt := coopWakeDoorbell
+	stubRawInjectSleep(t)
+	tests := []struct {
+		name  string
+		state wakeInputDeliveryState
+	}{
+		{
+			name: "accepted payload prefix",
+			state: wakeInputDeliveryState{
+				phase:         wakeInputPayloadPending,
+				mode:          wakeInjectModePaste,
+				payload:       prompt,
+				acceptedBytes: 1,
+			},
+		},
+		{
+			name: "paste payload complete before submit",
+			state: wakeInputDeliveryState{
+				phase:   wakeInputPrimarySubmitPending,
+				mode:    wakeInjectModePaste,
+				payload: prompt,
+			},
+		},
+		{
+			name: "raw payload complete before first submit",
+			state: wakeInputDeliveryState{
+				phase:   wakeInputPrimarySubmitPending,
+				mode:    wakeInjectModeRaw,
+				payload: prompt,
+			},
+		},
+		{
+			name: "raw payload and first submit complete before rescue",
+			state: wakeInputDeliveryState{
+				phase:   wakeInputRawRescuePending,
+				mode:    wakeInjectModeRaw,
+				payload: prompt,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			attentionWrites := 0
+			var notifierStatus, notifierMode, notifierReason string
+			cfg := &wakeConfig{
+				me:            "codex",
+				wakeOwner:     &wakeOwner{},
+				injectMode:    tc.state.mode,
+				inputDelivery: tc.state,
+				doorbell: wakeDoorbellState{
+					phase:  wakeDoorbellRetrying,
+					cohort: snapshotWakeFileIdentities(current),
+				},
+				doorbellNow: func() time.Time { return now },
+				terminalWrite: func(string) error {
+					return newWakeInjectorUnsupportedError(errors.New("injector disabled"))
+				},
+				attentionIsTTY: func() bool { return false },
+				attentionWrite: func(data []byte) (int, error) {
+					attentionWrites++
+					return len(data), nil
+				},
+				recordNotifierStatus: func(status, mode, reason string) error {
+					notifierStatus, notifierMode, notifierReason = status, mode, reason
+					return nil
+				},
+			}
+
+			err := deliverNewMessageNotification(
+				cfg,
+				peerWakeNotification("pending message"),
+				false,
+				current,
+			)
+			if err != nil {
+				t.Fatalf("delivery error = %v, want live recovery transition", err)
+			}
+			if !cfg.inputRecoveryRequired {
+				t.Fatal("confirmed input did not enter recovery-required mode")
+			}
+			if cfg.injectMode != tc.state.mode {
+				t.Fatalf("inject mode = %q, want retained %q mode", cfg.injectMode, tc.state.mode)
+			}
+			if cfg.inputDelivery != tc.state {
+				t.Fatalf("input state = %#v, want exact retained %#v", cfg.inputDelivery, tc.state)
+			}
+			if cfg.doorbell.phase != wakeDoorbellRecoveryRequired ||
+				!sameKnownWakeCohort(cfg.doorbell.cohort, current) {
+				t.Fatalf("recovery cohort state = %#v", cfg.doorbell)
+			}
+			if attentionWrites != 1 {
+				t.Fatalf("recovery transition emitted %d output alerts, want one", attentionWrites)
+			}
+			if notifierStatus != wakeInputRecoveryRequiredStatus ||
+				notifierMode != tc.state.mode ||
+				!strings.Contains(notifierReason, wakeInputRecoveryNotice) {
+				t.Fatalf(
+					"recovery notifier status = %q/%q/%q",
+					notifierStatus,
+					notifierMode,
+					notifierReason,
+				)
+			}
+		})
+	}
+}
+
+func TestDeliverNewMessageNotificationEntersRecoveryAfterUncertainInput(t *testing.T) {
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	attentionWrites := 0
+	stubTIOCSTIInject(t, func(string) error {
+		return errors.New("terminal write acceptance unavailable")
+	})
+	cfg := &wakeConfig{
+		me:             "codex",
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModePaste,
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
+	}
+
+	err := deliverNewMessageNotification(
+		cfg,
+		peerWakeNotification("pending message"),
+		false,
+		current,
+	)
+	if err != nil {
+		t.Fatalf("delivery error = %v, want live recovery transition", err)
+	}
+	if !cfg.inputDelivery.acceptanceUncertain {
+		t.Fatalf("uncertain acceptance was not retained: %#v", cfg.inputDelivery)
+	}
+	if !cfg.inputRecoveryRequired {
+		t.Fatal("uncertain input did not enter recovery-required mode")
+	}
+	if cfg.injectMode != wakeInjectModePaste {
+		t.Fatalf("inject mode = %q, want retained paste mode", cfg.injectMode)
+	}
+	if cfg.doorbell.phase != wakeDoorbellRecoveryRequired ||
+		!sameKnownWakeCohort(cfg.doorbell.cohort, current) {
+		t.Fatalf("uncertain-input recovery cohort = %#v", cfg.doorbell)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("uncertain input emitted %d recovery alerts, want one", attentionWrites)
+	}
+}
+
+func TestUncertainInputSurvivesInboxProgressAndNewPayload(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	state := wakeInputDeliveryState{
+		phase:               wakeInputPayloadPending,
+		mode:                wakeInjectModePaste,
+		payload:             "uncertain payload",
+		acceptanceUncertain: true,
+	}
+	writes := 0
+	cfg := &wakeConfig{
+		me:            "codex",
+		root:          root,
+		injectMode:    wakeInjectModePaste,
+		inputDelivery: state,
+		terminalWrite: func(string) error {
+			writes++
+			return nil
+		},
+	}
+
+	err := notifyNewMessages(cfg)
+	var demotionErr *wakeInputDemotionBlockedError
+	if !errors.As(err, &demotionErr) {
+		t.Fatalf("empty-inbox reconciliation error = %v, want blocked uncertain input", err)
+	}
+	if cfg.inputDelivery != state {
+		t.Fatalf("empty-inbox reconciliation mutated uncertain state: %#v", cfg.inputDelivery)
+	}
+
+	if _, err := injectTerminalNotification(cfg, wakeInjectModePaste, "new payload"); !errors.As(err, &demotionErr) {
+		t.Fatalf("new payload error = %v, want blocked uncertain input", err)
+	}
+	if cfg.inputDelivery != state {
+		t.Fatalf("new payload mutated uncertain state: %#v", cfg.inputDelivery)
+	}
+	if writes != 0 {
+		t.Fatalf("uncertain state replayed or replaced terminal input with %d writes", writes)
+	}
+}
+
+func TestNotifyNewMessagesKeepsReadablePendingNameWhenInfoFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "readable.md")
+	if err := os.WriteFile(path, []byte("placeholder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := wakeStaticInboxReader{
+		entries: []os.DirEntry{
+			wakeInfoErrorDirEntry{
+				DirEntry: entries[0],
+				err:      errors.New("transient stat failure"),
+			},
+		},
+		headers: map[string]format.Header{
+			"readable.md": {
+				From:    "peer",
+				Subject: "readable despite stat failure",
+			},
+		},
+	}
+	var writes []string
+	cfg := &wakeConfig{
+		me:            "codex",
+		wakeOwner:     &wakeOwner{},
+		injectMode:    wakeInjectModePaste,
+		retainedInbox: reader,
+		doorbellNow:   func() time.Time { return time.Unix(1_800_000_000, 0) },
+		terminalWrite: func(text string) error {
+			writes = append(writes, text)
+			return nil
+		},
+		attentionIsTTY: func() bool { return false },
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify readable message with unavailable identity: %v", err)
+	}
+	if len(writes) == 0 || writes[0] != coopWakeDoorbell {
+		t.Fatalf("terminal writes = %#v, want fixed doorbell", writes)
+	}
+	if identity, ok := cfg.doorbell.cohort["readable.md"]; !ok || identity != nil {
+		t.Fatalf("doorbell cohort dropped readable pending filename: %#v", cfg.doorbell.cohort)
+	}
+}
+
 func TestInjectNotificationRawNeverInjectsEscapeBytes(t *testing.T) {
 	// TIOCSTI delivers one byte per ioctl, so a multi-byte escape sequence can
 	// be split by reader scheduling: a reader that sees a lone ESC parses the
@@ -614,8 +1298,12 @@ func TestInjectNotificationRawDrainsSettlesThenInjectsCRWithRescue(t *testing.T)
 	wantDrains := [][2]time.Duration{
 		{rawInjectDrainTimeout, rawInjectDrainPollInterval},
 		{rawInjectCRDrainTimeout, rawInjectDrainPollInterval},
+		{rawInjectCRDrainTimeout, rawInjectDrainPollInterval},
 	}
-	if len(drainCalls) != len(wantDrains) || drainCalls[0] != wantDrains[0] || drainCalls[1] != wantDrains[1] {
+	if len(drainCalls) != len(wantDrains) ||
+		drainCalls[0] != wantDrains[0] ||
+		drainCalls[1] != wantDrains[1] ||
+		drainCalls[2] != wantDrains[2] {
 		t.Fatalf("drain calls = %v, want %v", drainCalls, wantDrains)
 	}
 	if len(*slept) != 2 || (*slept)[0] != rawInjectSettleDelay || (*slept)[1] != rawInjectSettleDelay {
@@ -642,12 +1330,18 @@ func TestInjectNotificationRawSkipsRescueCRWhenFirstCRStillQueued(t *testing.T) 
 	slept := stubRawInjectSleep(t)
 
 	cfg := &wakeConfig{injectMode: "raw", debug: true}
+	var submitted bool
 	stderr := captureWakeStderr(t, func() {
-		if err := injectNotification(cfg, "AMQ wake", true); err != nil {
-			t.Fatalf("injectNotification: %v", err)
+		var err error
+		submitted, err = injectRawNotification(cfg, "AMQ wake")
+		if err != nil {
+			t.Fatalf("injectRawNotification: %v", err)
 		}
 	})
 
+	if submitted {
+		t.Fatal("queued submit key reported as submitted")
+	}
 	if got := strings.Join(injected, "|"); got != "AMQ wake|\r" {
 		t.Fatalf("raw injection sequence = %q, want text then one CR", got)
 	}
@@ -684,12 +1378,18 @@ func TestInjectNotificationRawSkipsRescueCROnTotalReaderStall(t *testing.T) {
 	slept := stubRawInjectSleep(t)
 
 	cfg := &wakeConfig{injectMode: "raw", debug: true}
+	var submitted bool
 	stderr := captureWakeStderr(t, func() {
-		if err := injectNotification(cfg, "AMQ wake", true); err != nil {
-			t.Fatalf("injectNotification: %v", err)
+		var err error
+		submitted, err = injectRawNotification(cfg, "AMQ wake")
+		if err != nil {
+			t.Fatalf("injectRawNotification: %v", err)
 		}
 	})
 
+	if submitted {
+		t.Fatal("stalled reader reported queued submit key as submitted")
+	}
 	if got := strings.Join(injected, "|"); got != "AMQ wake|\r" {
 		t.Fatalf("raw injection sequence = %q, want text then one CR", got)
 	}
@@ -701,6 +1401,86 @@ func TestInjectNotificationRawSkipsRescueCROnTotalReaderStall(t *testing.T) {
 	}
 	if len(*slept) != 1 || (*slept)[0] != rawInjectSettleDelay {
 		t.Fatalf("settle sleeps = %v, want one of %s", *slept, rawInjectSettleDelay)
+	}
+}
+
+func TestInjectNotificationRawResumesQueuedSubmitWithoutRetyping(t *testing.T) {
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	drainCall := 0
+	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+		drainCall++
+		switch drainCall {
+		case 1:
+			return 5 * time.Millisecond, true, nil // notification text drained
+		case 2:
+			return timeout, false, nil // first submit remains queued
+		default:
+			return 5 * time.Millisecond, true, nil // reader resumed
+		}
+	})
+	stubRawInjectSleep(t)
+
+	cfg := &wakeConfig{injectMode: wakeInjectModeRaw}
+	submitted, err := injectRawNotification(cfg, "AMQ wake")
+	if err != nil {
+		t.Fatalf("initial injectRawNotification: %v", err)
+	}
+	if submitted {
+		t.Fatal("initial queued submit reported as submitted")
+	}
+
+	submitted, err = injectRawNotification(cfg, "AMQ wake")
+	if err != nil {
+		t.Fatalf("resumed injectRawNotification: %v", err)
+	}
+	if !submitted {
+		t.Fatal("drained rescue submit was not reported as submitted")
+	}
+	if got := strings.Join(injected, "|"); got != "AMQ wake|\r|\r" {
+		t.Fatalf("raw injection sequence = %q, want text then queued CR then rescue CR", got)
+	}
+}
+
+func TestInjectNotificationRawStopsAfterQueuedRescueDrains(t *testing.T) {
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	drainCall := 0
+	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+		drainCall++
+		switch drainCall {
+		case 1:
+			return 5 * time.Millisecond, true, nil // notification text drained
+		case 2:
+			return timeout, false, nil // first submit remains queued
+		case 3:
+			return 5 * time.Millisecond, true, nil // first submit drained
+		case 4:
+			return timeout, false, nil // rescue remains queued
+		default:
+			return 5 * time.Millisecond, true, nil // rescue drained
+		}
+	})
+	stubRawInjectSleep(t)
+
+	cfg := &wakeConfig{injectMode: wakeInjectModeRaw}
+	for attempt := 1; attempt <= 3; attempt++ {
+		submitted, err := injectRawNotification(cfg, "AMQ wake")
+		if err != nil {
+			t.Fatalf("injectRawNotification attempt %d: %v", attempt, err)
+		}
+		if want := attempt == 3; submitted != want {
+			t.Fatalf("attempt %d submitted = %v, want %v", attempt, submitted, want)
+		}
+	}
+	if got := strings.Join(injected, "|"); got != "AMQ wake|\r|\r" {
+		t.Fatalf("raw injection sequence = %q, want at most the first and rescue CR", got)
 	}
 }
 
@@ -735,7 +1515,50 @@ func TestInjectNotificationRawInjectsBothCRsOnDrainError(t *testing.T) {
 	}
 }
 
-func TestNotifyNewMessages_InjectViaInterruptInjectsKeyAndHonorsCooldown(t *testing.T) {
+func TestNotifyNewMessagesMissingInboxReturnsScanErrorWithoutMutatingGeneration(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deadline := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		root:       root,
+		me:         "codex",
+		injectMode: wakeInjectModePaste,
+		inputDelivery: wakeInputDeliveryState{
+			phase:   wakeInputRawRescueQueued,
+			mode:    wakeInjectModeRaw,
+			payload: coopWakeDoorbell,
+		},
+		doorbell: wakeDoorbellState{
+			phase:       wakeDoorbellRetrying,
+			cohort:      map[string]*wakeFileIdentity{"pending.md": nil},
+			attempts:    2,
+			nextAttempt: deadline,
+		},
+	}
+	err := notifyNewMessages(cfg)
+	if err == nil {
+		t.Fatal("missing inbox scan returned success")
+	}
+	var scanErr *wakeInboxScanError
+	if !errors.As(err, &scanErr) {
+		t.Fatalf("missing inbox scan error = %T, want wakeInboxScanError", err)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing inbox scan error = %v, want not-exist cause", err)
+	}
+	if cfg.doorbell.phase != wakeDoorbellRetrying ||
+		cfg.doorbell.attempts != 2 ||
+		!cfg.doorbell.nextAttempt.Equal(deadline) ||
+		len(cfg.doorbell.cohort) != 1 {
+		t.Fatalf("missing inbox scan mutated doorbell generation: %#v", cfg.doorbell)
+	}
+	if cfg.inputDelivery.phase != wakeInputRawRescueQueued ||
+		cfg.inputDelivery.mode != wakeInjectModeRaw ||
+		cfg.inputDelivery.payload != coopWakeDoorbell {
+		t.Fatalf("missing inbox scan mutated input delivery: %#v", cfg.inputDelivery)
+	}
+}
+
+func TestNotifyNewMessages_InjectViaExitZeroAdvancesInterruptCooldown(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
@@ -799,14 +1622,7 @@ func TestNotifyNewMessages_InjectViaInterruptInjectsKeyAndHonorsCooldown(t *test
 		t.Fatalf("second notifyNewMessages: %v", err)
 	}
 
-	expectedText := buildInterruptText(
-		"collab",
-		[]wakeMsgInfo{{from: "codex", subject: "help needed", priority: "urgent", labels: []string{"interrupt"}}},
-		map[string]int{"codex": 1},
-		48,
-		"",
-	)
-	expected := "\x03\n" + expectedText + "\n" + expectedText + "\n"
+	expected := "\x03\n" + coopWakeDoorbell + "\n"
 
 	got, err := os.ReadFile(logPath)
 	if err != nil {
@@ -865,6 +1681,8 @@ func TestNotifyNewMessagesNoneUrgentUsesOutputBellWithoutInput(t *testing.T) {
 		interruptLabel:    "interrupt",
 		interruptPriority: "urgent",
 		interruptCooldown: 7 * time.Second,
+		attentionEnv:      func(string) string { return "" },
+		attentionIsTTY:    func() bool { return true },
 	}
 	stderr := captureWakeStderr(t, func() {
 		if err := notifyNewMessages(cfg); err != nil {
@@ -885,8 +1703,9 @@ func TestNotifyNewMessagesNoneUrgentUsesOutputBellWithoutInput(t *testing.T) {
 		48,
 		"",
 	)
-	if stderr != "\a"+expectedText+"\n" {
-		t.Fatalf("stderr = %q, want one bell + urgent notice %q", stderr, expectedText)
+	expectedOutput := "\x1b]0;AMQ attention\a\a" + expectedText + "\n"
+	if stderr != expectedOutput {
+		t.Fatalf("stderr = %q, want title + bell + urgent notice %q", stderr, expectedText)
 	}
 
 	externalCfg, outputPath := injectViaCaptureConfig(t)
@@ -899,6 +1718,8 @@ func TestNotifyNewMessagesNoneUrgentUsesOutputBellWithoutInput(t *testing.T) {
 	externalCfg.interruptKey = "\x03"
 	externalCfg.interruptLabel = "interrupt"
 	externalCfg.interruptPriority = "urgent"
+	externalCfg.attentionEnv = func(string) string { return "" }
+	externalCfg.attentionIsTTY = func() bool { return true }
 	externalStderr := captureWakeStderr(t, func() {
 		if err := notifyNewMessages(externalCfg); err != nil {
 			t.Fatalf("notifyNewMessages with inject-via config: %v", err)
@@ -907,8 +1728,2110 @@ func TestNotifyNewMessagesNoneUrgentUsesOutputBellWithoutInput(t *testing.T) {
 	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
 		t.Fatalf("none mode invoked inject-via for urgent notice; output stat error = %v", err)
 	}
-	if externalStderr != "\a"+expectedText+"\n" {
-		t.Fatalf("external stderr = %q, want one bell + urgent notice %q", externalStderr, expectedText)
+	if externalStderr != expectedOutput {
+		t.Fatalf("external stderr = %q, want title + bell + urgent notice %q", externalStderr, expectedText)
+	}
+}
+
+func TestNotifyNewMessagesNoneNormalUsesPeerOutput(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "msg-normal-output",
+			From:    "codex",
+			To:      []string{"alice"},
+			Thread:  "p2p/alice__codex",
+			Subject: "review ready",
+			Created: "2026-07-27T05:00:00Z",
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-normal-output.md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	var emission wakeAttentionEmission
+	cfg := &wakeConfig{
+		me:             "alice",
+		root:           root,
+		session:        "collab",
+		injectMode:     wakeInjectModeNone,
+		previewLen:     48,
+		attentionIsTTY: func() bool { return false },
+		recordAttention: func(got wakeAttentionEmission) error {
+			emission = got
+			return nil
+		},
+	}
+	stderr := captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("notifyNewMessages: %v", err)
+		}
+	})
+	for _, want := range []string{"message from codex", "review ready"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("normal output %q missing %q", stderr, want)
+		}
+	}
+	if strings.Contains(stderr, coopWakeDoorbell) {
+		t.Fatalf("normal output leaked fixed input payload: %q", stderr)
+	}
+	if emission.OutputProvenance != wakePayloadPeerHeaders {
+		t.Fatalf("provenance = %q, want peer headers", emission.OutputProvenance)
+	}
+}
+
+func TestNotifyNewMessagesNormalSuccessUsesFixedInputOnly(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "msg-normal-input",
+			From:    "untrusted-sender",
+			To:      []string{"alice"},
+			Thread:  "p2p/alice__untrusted-sender",
+			Subject: "untrusted-subject",
+			Created: "2026-07-27T05:10:00Z",
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-normal-input.md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	cfg := &wakeConfig{
+		me:         "alice",
+		root:       root,
+		injectMode: wakeInjectModeRaw,
+		previewLen: 48,
+	}
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notifyNewMessages: %v", err)
+	}
+
+	got := strings.Join(injected, "|")
+	if !strings.Contains(got, coopWakeDoorbell) {
+		t.Fatalf("injected bytes = %q, missing fixed doorbell", got)
+	}
+	for _, forbidden := range []string{"untrusted-sender", "untrusted-subject"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("peer header %q entered terminal input: %q", forbidden, got)
+		}
+	}
+}
+
+func TestNotifyNewMessagesCoalescesAdditionsUntilRetryOrProgress(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	writeMessage := func(filename, id, subject string) {
+		t.Helper()
+		msg := format.Message{
+			Header: format.Header{
+				Schema:  1,
+				ID:      id,
+				From:    "peer",
+				To:      []string{"codex"},
+				Thread:  "p2p/codex__peer",
+				Subject: subject,
+				Created: "2026-07-28T15:00:00Z",
+			},
+			Body: "body",
+		}
+		data, err := msg.Marshal()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", id, err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "codex", filename, data); err != nil {
+			t.Fatalf("deliver %s: %v", id, err)
+		}
+	}
+
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+	var injected []string
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:             "codex",
+		root:           root,
+		session:        "session3",
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModeRaw,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		terminalWrite: func(text string) error {
+			injected = append(injected, text)
+			return nil
+		},
+	}
+
+	writeMessage("first.md", "first", "first review")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify first message: %v", err)
+	}
+	if got := strings.Join(injected, "|"); got != coopWakeDoorbell+"|\n|\r|\r" {
+		t.Fatalf("first raw injection = %q, want one fixed doorbell submission", got)
+	}
+	injected = nil
+
+	writeMessage("second.md", "second", "second review")
+	stderr := captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("notify second message: %v", err)
+		}
+	})
+	if len(injected) != 0 {
+		t.Fatalf("second pending message injected another user turn: %q", injected)
+	}
+	if stderr != "" {
+		t.Fatalf("pending generation emitted output-only reminder: %q", stderr)
+	}
+
+	now = now.Add(wakeDoorbellRetryBase)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify at consolidated retry deadline: %v", err)
+	}
+	if got := strings.Join(injected, "|"); got != coopWakeDoorbell+"|\n|\r|\r" {
+		t.Fatalf("consolidated raw injection = %q, want one fixed doorbell", got)
+	}
+	injected = nil
+
+	if drained := runDrainJSON(t, root, "codex", 1, false); drained.Count != 1 {
+		t.Fatalf("drained count = %d, want 1", drained.Count)
+	}
+	writeMessage("third.md", "third", "third review")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify after drain: %v", err)
+	}
+	if got := strings.Join(injected, "|"); got != coopWakeDoorbell+"|\n|\r|\r" {
+		t.Fatalf("post-drain raw injection = %q, want a fresh fixed doorbell submission", got)
+	}
+	injected = nil
+
+	writeMessage("fourth.md", "fourth", "fourth review")
+	stderr = captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("notify after re-armed doorbell: %v", err)
+		}
+	})
+	if len(injected) != 0 {
+		t.Fatalf("fourth pending message injected another user turn: %q", injected)
+	}
+	if stderr != "" {
+		t.Fatalf("re-armed generation emitted output-only reminder: %q", stderr)
+	}
+}
+
+func TestNotifyNewMessagesReminderUsesSubmitOnlyAfterConfirmedPresentation(t *testing.T) {
+	testCases := []struct {
+		name                   string
+		mode                   string
+		queueFirstSubmit       bool
+		wantConfirmedInitially bool
+		wantInjected           string
+	}{
+		{
+			name:                   "raw-confirmed",
+			mode:                   wakeInjectModeRaw,
+			wantConfirmedInitially: true,
+			wantInjected:           coopWakeDoorbell + "\n\r\r\n\r\r",
+		},
+		{
+			name:                   "paste-confirmed",
+			mode:                   wakeInjectModePaste,
+			wantConfirmedInitially: true,
+			wantInjected:           coopWakeDoorbell + "\r\r",
+		},
+		{
+			name:             "raw-first-submit-queued",
+			mode:             wakeInjectModeRaw,
+			queueFirstSubmit: true,
+			wantInjected:     coopWakeDoorbell + "\n\r\r",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			msg := format.Message{
+				Header: format.Header{
+					Schema:  1,
+					ID:      "unchanged-reminder-" + tc.name,
+					From:    "peer",
+					To:      []string{"codex"},
+					Thread:  "p2p/codex__peer",
+					Subject: "unchanged reminder",
+					Created: "2026-08-05T19:00:00Z",
+				},
+			}
+			data, err := msg.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := deliverToInboxForTest(t, root, "codex", "unchanged.md", data); err != nil {
+				t.Fatal(err)
+			}
+
+			drainCall := 0
+			stubRawInputDrained(t, func(timeout time.Duration, _ time.Duration) (time.Duration, bool, error) {
+				drainCall++
+				if tc.queueFirstSubmit && drainCall == 2 {
+					return timeout, false, nil
+				}
+				return 0, true, nil
+			})
+			stubRawInjectSleep(t)
+			var injected strings.Builder
+			now := time.Unix(1_800_000_000, 0)
+			cfg := &wakeConfig{
+				me:          "codex",
+				root:        root,
+				session:     "session1",
+				wakeOwner:   &wakeOwner{},
+				injectMode:  tc.mode,
+				doorbellNow: func() time.Time { return now },
+				terminalWrite: func(text string) error {
+					injected.WriteString(text)
+					return nil
+				},
+			}
+
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("initial presentation: %v", err)
+			}
+			if got := cfg.doorbell.presentationConfirmed; got != tc.wantConfirmedInitially {
+				t.Fatalf("initial presentation confirmed = %t, want %t", got, tc.wantConfirmedInitially)
+			}
+			now = cfg.doorbell.nextAttempt
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("next attempt: %v", err)
+			}
+			if cfg.inputRecoveryRequired {
+				t.Fatal("ordinary queued-suffix resume entered input recovery")
+			}
+			if !cfg.doorbell.presentationConfirmed {
+				t.Fatal("completed full presentation was not marked confirmed")
+			}
+
+			got := injected.String()
+			if count := strings.Count(got, coopWakeDoorbell); count != 1 {
+				t.Fatalf("payload occurrences = %d, want exactly one across presentation and reminder: %q", count, got)
+			}
+			if got != tc.wantInjected {
+				t.Fatalf("presentation sequence = %q, want %q", got, tc.wantInjected)
+			}
+		})
+	}
+}
+
+func TestNotifyNewMessagesRetriesFullPayloadAfterZeroConfirmedProgress(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "zero-progress",
+			From:    "peer",
+			To:      []string{"codex"},
+			Thread:  "p2p/codex__peer",
+			Subject: "zero progress",
+			Created: "2026-08-05T19:00:00Z",
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "codex", "zero-progress.md", data); err != nil {
+		t.Fatal(err)
+	}
+
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+	firstWrite := true
+	var accepted strings.Builder
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:             "codex",
+		root:           root,
+		session:        "session1",
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModeRaw,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		terminalWrite: func(text string) error {
+			if firstWrite {
+				firstWrite = false
+				return &wakeTestAcceptedProgressError{
+					err:      errors.New("refused before acceptance"),
+					accepted: 0,
+				}
+			}
+			accepted.WriteString(text)
+			return nil
+		},
+	}
+
+	captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("zero-progress presentation: %v", err)
+		}
+	})
+	now = cfg.doorbell.nextAttempt
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("full retry: %v", err)
+	}
+	if got, want := accepted.String(), coopWakeDoorbell+"\n\r\r"; got != want {
+		t.Fatalf("accepted retry = %q, want full presentation %q", got, want)
+	}
+}
+
+func TestNotifyNewMessagesCoalescesUrgentAdditionWithoutOutputAttention(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	writeMessage := func(filename, id, subject, priority string, labels []string) {
+		t.Helper()
+		msg := format.Message{
+			Header: format.Header{
+				Schema:   1,
+				ID:       id,
+				From:     "peer",
+				To:       []string{"codex"},
+				Thread:   "p2p/codex__peer",
+				Subject:  subject,
+				Created:  "2026-07-28T15:00:00Z",
+				Priority: priority,
+				Labels:   labels,
+			},
+		}
+		data, err := msg.Marshal()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", id, err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "codex", filename, data); err != nil {
+			t.Fatalf("deliver %s: %v", id, err)
+		}
+	}
+
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+	var injected []string
+	cfg := &wakeConfig{
+		me:                "codex",
+		root:              root,
+		session:           "session3",
+		wakeOwner:         &wakeOwner{},
+		injectMode:        wakeInjectModeRaw,
+		previewLen:        48,
+		interrupt:         true,
+		interruptKey:      "\x03",
+		interruptLabel:    "interrupt",
+		interruptPriority: "urgent",
+		attentionIsTTY:    func() bool { return false },
+		terminalWrite: func(text string) error {
+			injected = append(injected, text)
+			return nil
+		},
+	}
+
+	writeMessage("first.md", "first", "first review", "", nil)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify first message: %v", err)
+	}
+	injected = nil
+
+	writeMessage("urgent.md", "urgent", "urgent review", "urgent", []string{"interrupt"})
+	stderr := captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("notify urgent message: %v", err)
+		}
+	})
+	if len(injected) != 0 {
+		t.Fatalf("urgent pending message injected another user turn: %q", injected)
+	}
+	if len(cfg.doorbell.cohort) != 2 {
+		t.Fatalf("urgent addition was not retained in the cohort: %#v", cfg.doorbell)
+	}
+	if stderr != "" {
+		t.Fatalf("urgent addition emitted periodic output attention: %q", stderr)
+	}
+}
+
+func TestNotifyNewMessagesRetriesCoopInputAfterOutputOnlyFallback(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	writeMessage := func(filename, id string) {
+		t.Helper()
+		msg := format.Message{
+			Header: format.Header{
+				Schema:  1,
+				ID:      id,
+				From:    "peer",
+				To:      []string{"codex"},
+				Thread:  "p2p/codex__peer",
+				Subject: id,
+				Created: "2026-07-28T15:00:00Z",
+			},
+		}
+		data, err := msg.Marshal()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", id, err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "codex", filename, data); err != nil {
+			t.Fatalf("deliver %s: %v", id, err)
+		}
+	}
+
+	working, outputPath := injectViaCaptureConfig(t)
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:             "codex",
+		root:           root,
+		session:        "session3",
+		wakeOwner:      &wakeOwner{},
+		injectVia:      filepath.Join(root, "missing-injector"),
+		injectTimeout:  time.Second,
+		retryUntil:     wakeRetryUntilInjected,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+	}
+
+	writeMessage("first.md", "first")
+	captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("notify with unavailable input transport: %v", err)
+		}
+	})
+	if cfg.doorbell.phase != wakeDoorbellRetrying {
+		t.Fatalf("output-only fallback phase = %v, want retrying", cfg.doorbell.phase)
+	}
+
+	cfg.injectVia = working.injectVia
+	cfg.injectArgs = working.injectArgs
+	cfg.injectTimeout = working.injectTimeout
+	now = now.Add(wakeDoorbellAttentionRetryBase)
+	writeMessage("second.md", "second")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("retry after output-only fallback: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || string(got) != coopWakeDoorbell {
+		t.Fatalf("retry injection = %q, err=%v; want fixed doorbell", got, err)
+	}
+}
+
+func TestNotifyNewMessagesRecordsInjectViaRetryAfterCompletion(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "slow-injector",
+			From:    "peer",
+			To:      []string{"codex"},
+			Thread:  "p2p/codex__peer",
+			Subject: "slow injector",
+			Created: "2026-07-30T08:00:00Z",
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "codex", "slow.md", data); err != nil {
+		t.Fatal(err)
+	}
+
+	working, _ := injectViaCaptureConfig(t)
+	start := time.Unix(1_800_000_000, 0)
+	completed := start.Add(2 * wakeDoorbellRetryBase)
+	clockCalls := 0
+	cfg := &wakeConfig{
+		me:            "codex",
+		root:          root,
+		session:       "session1",
+		wakeOwner:     &wakeOwner{},
+		injectVia:     working.injectVia,
+		injectArgs:    working.injectArgs,
+		injectTimeout: working.injectTimeout,
+		doorbellNow: func() time.Time {
+			clockCalls++
+			if clockCalls == 1 {
+				return start
+			}
+			return completed
+		},
+	}
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify: %v", err)
+	}
+	want := completed.Add(wakeDoorbellRetryBase)
+	if !cfg.doorbell.nextAttempt.Equal(want) {
+		t.Fatalf("next attempt = %s, want completion-relative %s", cfg.doorbell.nextAttempt, want)
+	}
+}
+
+func TestNotifyNewMessagesInjectedPolicyAcknowledgesSuccessfulInjectVia(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	writeMessage := func(filename, id string) {
+		t.Helper()
+		msg := format.Message{Header: format.Header{
+			Schema: 1, ID: id, From: "peer", To: []string{"codex"},
+			Thread: "p2p/codex__peer", Subject: id,
+			Created: "2026-08-03T08:00:00Z",
+		}}
+		data, err := msg.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "codex", filename, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	working, outputPath := injectViaCaptureConfig(t)
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me: "codex", root: root, session: "session1", wakeOwner: &wakeOwner{},
+		injectVia: working.injectVia, injectArgs: working.injectArgs,
+		injectTimeout: working.injectTimeout, retryUntil: wakeRetryUntilInjected,
+		doorbellNow: func() time.Time { return now },
+	}
+
+	writeMessage("first.md", "first")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first notify: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || string(got) != coopWakeDoorbell {
+		t.Fatalf("first injection = %q, err=%v", got, err)
+	}
+	if err := os.WriteFile(outputPath, []byte("not-called-again"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * wakeDoorbellRetryMax)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("unchanged notify: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || string(got) != "not-called-again" {
+		t.Fatalf("unchanged cohort reinjected = %q, err=%v", got, err)
+	}
+
+	writeMessage("second.md", "second")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("expanded notify: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || string(got) != coopWakeDoorbell {
+		t.Fatalf("expanded cohort injection = %q, err=%v", got, err)
+	}
+}
+
+func TestNormalizeWakeRetryUntil(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: wakeRetryUntilDrained},
+		{input: "drained", want: wakeRetryUntilDrained},
+		{input: " INJECTED ", want: wakeRetryUntilInjected},
+	} {
+		got, err := normalizeWakeRetryUntil(tc.input)
+		if err != nil || got != tc.want {
+			t.Fatalf("normalizeWakeRetryUntil(%q) = %q, %v; want %q", tc.input, got, err, tc.want)
+		}
+	}
+	if _, err := normalizeWakeRetryUntil("replied"); err == nil {
+		t.Fatal("unknown retry-until value was accepted")
+	}
+}
+
+func TestNotifyNewMessagesOwnerlessPhysicalCohortDeduplicates(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	write := func(subject string) {
+		t.Helper()
+		msg := format.Message{
+			Header: format.Header{
+				Schema:  1,
+				ID:      subject,
+				From:    "peer",
+				To:      []string{"codex"},
+				Thread:  "p2p/codex__peer",
+				Subject: subject,
+				Created: "2026-07-30T08:00:00Z",
+			},
+		}
+		data, err := msg.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(fsq.AgentInboxNew(root, "codex"), "same.md")
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var writes []string
+	cfg := &wakeConfig{
+		me:         "codex",
+		root:       root,
+		session:    "session1",
+		injectMode: wakeInjectModeRaw,
+		terminalWrite: func(text string) error {
+			writes = append(writes, text)
+			return nil
+		},
+	}
+	write("first")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatal(err)
+	}
+	firstWriteCount := len(writes)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(writes) != firstWriteCount {
+		t.Fatalf(
+			"unchanged physical cohort added %d terminal chunks, want 0",
+			len(writes)-firstWriteCount,
+		)
+	}
+
+	path := filepath.Join(fsq.AgentInboxNew(root, "codex"), "same.md")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	write("replacement")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(writes) <= firstWriteCount {
+		t.Fatal("same-name physical replacement did not emit a fresh notice")
+	}
+}
+
+func TestNotifyNewMessagesOwnerlessRefusedWriteRemainsRetryEligible(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "refused-write",
+			From:    "peer",
+			To:      []string{"codex"},
+			Thread:  "p2p/codex__peer",
+			Subject: "refused write",
+			Created: "2026-07-30T08:00:00Z",
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(fsq.AgentInboxNew(root, "codex"), "refused-write.md"),
+		data,
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	controlStop := make(chan struct{})
+	close(controlStop)
+	now := time.Unix(1_800_000_000, 0)
+	writtenBytes := 0
+	attentionWrites := 0
+	stubTIOCSTIInject(t, func(text string) error {
+		writtenBytes += len(text)
+		return nil
+	})
+	cfg := &wakeConfig{
+		me:          "codex",
+		root:        root,
+		session:     "session1",
+		injectMode:  wakeInjectModeRaw,
+		controlStop: controlStop,
+		doorbellNow: func() time.Time { return now },
+		attentionIsTTY: func() bool {
+			return false
+		},
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify refused write: %v", err)
+	}
+	if writtenBytes != 0 {
+		t.Fatalf("refused write injected %d bytes, want 0", writtenBytes)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("refused write attention writes = %d, want 1", attentionWrites)
+	}
+	if cfg.doorbell.attempts != 1 {
+		t.Fatalf("attempts after refused write = %d, want 1", cfg.doorbell.attempts)
+	}
+	if deadline, ok := cfg.doorbell.nextDeadline(); !ok ||
+		!deadline.Equal(now.Add(wakeDoorbellAttentionRetryBase)) {
+		t.Fatalf(
+			"deadline after refused write = %s, ok=%v; want %s",
+			deadline,
+			ok,
+			now.Add(wakeDoorbellAttentionRetryBase),
+		)
+	}
+}
+
+func TestNotifyNewMessagesOwnerlessAuthorityErrorBeforeInputUsesAttentionCadence(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "authority-refused")
+
+	now := time.Unix(1_800_000_000, 0)
+	authorityErr := errors.New("terminal authority changed")
+	inputWrites := 0
+	attentionWrites := 0
+	cfg := &wakeConfig{
+		me:          "codex",
+		root:        root,
+		session:     "session1",
+		injectMode:  wakeInjectModeRaw,
+		controlStop: make(chan struct{}),
+		doorbellNow: func() time.Time { return now },
+		beforeTerminalWrite: func() error {
+			return authorityErr
+		},
+		terminalWrite: func(string) error {
+			inputWrites++
+			return nil
+		},
+		attentionIsTTY: func() bool {
+			return false
+		},
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify authority refusal: %v", err)
+	}
+	if inputWrites != 0 {
+		t.Fatalf("authority refusal wrote %d input chunks, want 0", inputWrites)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("authority refusal attention writes = %d, want 1", attentionWrites)
+	}
+	if cfg.doorbell.attempts != 1 {
+		t.Fatalf("attempts after authority refusal = %d, want 1", cfg.doorbell.attempts)
+	}
+	if deadline, ok := cfg.doorbell.nextDeadline(); !ok ||
+		!deadline.Equal(now.Add(wakeDoorbellAttentionRetryBase)) {
+		t.Fatalf(
+			"deadline after authority refusal = %s, ok=%v; want %s",
+			deadline,
+			ok,
+			now.Add(wakeDoorbellAttentionRetryBase),
+		)
+	}
+}
+
+func TestNotifyNewMessagesOwnerlessFallbackRateLimitsRepeatedPeerAttention(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "ownerless-attention",
+			From:    "peer",
+			To:      []string{"codex"},
+			Thread:  "p2p/codex__peer",
+			Subject: "review the retry",
+			Created: "2026-07-30T08:00:00Z",
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(fsq.AgentInboxNew(root, "codex"), "ownerless-attention.md"),
+		data,
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Unix(1_800_000_000, 0)
+	var attentions []string
+	cfg := &wakeConfig{
+		me:             "codex",
+		root:           root,
+		session:        "session1",
+		injectMode:     wakeInjectModeRaw,
+		injectVia:      filepath.Join(root, "missing-injector"),
+		injectTimeout:  time.Second,
+		previewLen:     80,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentions = append(attentions, string(data))
+			return len(data), nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first ownerless attempt: %v", err)
+	}
+	if len(attentions) != 1 || !strings.Contains(attentions[0], "review the retry") {
+		t.Fatalf("first ownerless attention = %#v, want one peer notice", attentions)
+	}
+	now = now.Add(wakeDoorbellAttentionRetryBase - time.Millisecond)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("ownerless early retry: %v", err)
+	}
+	if len(attentions) != 1 {
+		t.Fatalf("ownerless fallback repeated before deadline: %#v", attentions)
+	}
+	now = now.Add(time.Millisecond)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("ownerless retry: %v", err)
+	}
+	if cfg.doorbell.attempts != 2 {
+		t.Fatalf("ownerless attempts = %d, want 2", cfg.doorbell.attempts)
+	}
+	if len(attentions) != 2 || !strings.Contains(attentions[1], "review the retry") {
+		t.Fatalf("ownerless fallback attention = %#v, want two rate-limited peer notices", attentions)
+	}
+	if deadline, ok := cfg.doorbell.nextDeadline(); !ok ||
+		!deadline.Equal(now.Add(time.Minute)) {
+		t.Fatalf(
+			"attention fallback deadline = %s, ok=%v; want %s",
+			deadline,
+			ok,
+			now.Add(time.Minute),
+		)
+	}
+}
+
+func TestNotifyNewMessagesOwnerlessSuccessfulInputRetryEmitsNoAttention(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "ownerless-input")
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+
+	now := time.Unix(1_800_000_000, 0)
+	var injected, attentions []string
+	stubTIOCSTIInject(t, func(text string) error {
+		injected = append(injected, text)
+		return nil
+	})
+	cfg := &wakeConfig{
+		me:             "codex",
+		root:           root,
+		session:        "session1",
+		injectMode:     wakeInjectModeRaw,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentions = append(attentions, string(data))
+			return len(data), nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first ownerless input attempt: %v", err)
+	}
+	firstInputChunks := len(injected)
+	if firstInputChunks == 0 {
+		t.Fatal("first ownerless attempt injected no input")
+	}
+	now = now.Add(wakeDoorbellRetryBase)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("ownerless input retry: %v", err)
+	}
+	if len(injected) <= firstInputChunks {
+		t.Fatal("ownerless retry injected no additional input")
+	}
+	if len(attentions) != 0 {
+		t.Fatalf("successful ownerless input attempts emitted attention: %#v", attentions)
+	}
+}
+
+func TestNotifyNewMessagesGenericFullPresentationConfirmsDoorbell(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "generic-confirmed-presentation")
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+
+	var injected strings.Builder
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:          "codex",
+		root:        root,
+		session:     "session1",
+		injectMode:  wakeInjectModeRaw,
+		doorbellNow: func() time.Time { return now },
+		terminalWrite: func(text string) error {
+			injected.WriteString(text)
+			return nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first generic presentation: %v", err)
+	}
+	if got, want := injected.String(), coopWakeDoorbell+"\n\r\r"; got != want {
+		t.Fatalf("first generic presentation = %q, want %q", got, want)
+	}
+	if !cfg.doorbell.presentationConfirmed {
+		t.Fatal("successful generic full presentation was not confirmed")
+	}
+}
+
+func TestNotifyNewMessagesGenericConfirmedCohortUsesSubmitOnly(t *testing.T) {
+	testCases := []struct {
+		name      string
+		mode      string
+		firstWant string
+		retryWant string
+	}{
+		{
+			name:      "raw",
+			mode:      wakeInjectModeRaw,
+			firstWant: "\a" + coopWakeDoorbell + "\n\r\r",
+			retryWant: "\n\r\r",
+		},
+		{
+			name:      "paste",
+			mode:      wakeInjectModePaste,
+			firstWant: "\a\x1b[200~" + coopWakeDoorbell + "\x1b[201~\r",
+			retryWant: "\r",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			deliverPartialWakeMessageForTest(t, root, "codex", "generic-submit-only-"+tc.name)
+			stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+				return 0, true, nil
+			})
+			stubRawInjectSleep(t)
+
+			var injected strings.Builder
+			now := time.Unix(1_800_000_000, 0)
+			cfg := &wakeConfig{
+				me:          "codex",
+				root:        root,
+				session:     "session1",
+				injectMode:  tc.mode,
+				bell:        true,
+				doorbellNow: func() time.Time { return now },
+				terminalWrite: func(text string) error {
+					injected.WriteString(text)
+					return nil
+				},
+			}
+
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("first generic presentation: %v", err)
+			}
+			if got := injected.String(); got != tc.firstWant {
+				t.Fatalf("first generic presentation = %q, want %q", got, tc.firstWant)
+			}
+			// Keep this test focused on propagating a confirmed cohort's plan into
+			// the generic notification. Confirmation itself has a separate guard.
+			cfg.doorbell.confirmPresentation()
+			injected.Reset()
+			now = cfg.doorbell.nextAttempt
+
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("generic submit-only reminder: %v", err)
+			}
+			if got := injected.String(); got != tc.retryWant {
+				t.Fatalf("generic submit-only reminder = %q, want %q", got, tc.retryWant)
+			}
+		})
+	}
+}
+
+func TestNotifyNewMessagesGenericInjectViaConfirmedCohortUsesCROnly(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "alice", "generic-inject-via-submit-only")
+	transport, outputPath := injectViaCaptureConfig(t)
+	now := time.Unix(1_800_000_000, 0)
+	transport.me = "alice"
+	transport.root = root
+	transport.session = "session1"
+	transport.bell = true
+	transport.doorbellNow = func() time.Time { return now }
+
+	if err := notifyNewMessages(transport); err != nil {
+		t.Fatalf("first generic inject-via presentation: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || string(got) != "\a"+coopWakeDoorbell {
+		t.Fatalf("first generic inject-via payload = %q, err=%v; want bell plus %q", got, err, coopWakeDoorbell)
+	}
+	if !transport.doorbell.presentationConfirmed {
+		t.Fatal("inject-via exit zero did not confirm the full presentation")
+	}
+	now = transport.doorbell.nextAttempt
+
+	if err := notifyNewMessages(transport); err != nil {
+		t.Fatalf("generic inject-via submit-only reminder: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || string(got) != "\a\r" {
+		t.Fatalf("generic inject-via reminder = %q, err=%v; want bell plus CR only", got, err)
+	}
+}
+
+func TestNotifyNewMessagesGenericAdditionRearmsFullPresentation(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "generic-addition-first")
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+
+	var injected strings.Builder
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:          "codex",
+		root:        root,
+		session:     "session1",
+		injectMode:  wakeInjectModeRaw,
+		doorbellNow: func() time.Time { return now },
+		terminalWrite: func(text string) error {
+			injected.WriteString(text)
+			return nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first generic presentation: %v", err)
+	}
+	cfg.doorbell.confirmPresentation()
+	deliverPartialWakeMessageForTest(t, root, "codex", "generic-addition-second")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic content addition: %v", err)
+	}
+	if cfg.doorbell.presentationConfirmed {
+		t.Fatal("generic content addition did not rearm the full presentation")
+	}
+	injected.Reset()
+	now = cfg.doorbell.nextAttempt
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic re-presentation: %v", err)
+	}
+	if got, want := injected.String(), coopWakeDoorbell+"\n\r\r"; got != want {
+		t.Fatalf("generic re-presentation = %q, want %q", got, want)
+	}
+	if !cfg.doorbell.presentationConfirmed {
+		t.Fatal("successful generic re-presentation was not confirmed")
+	}
+}
+
+func TestNotifyNewMessagesGenericZeroConfirmedProgressRetriesFullPayload(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "generic-zero-progress")
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+
+	firstWrite := true
+	var accepted strings.Builder
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:             "codex",
+		root:           root,
+		session:        "session1",
+		injectMode:     wakeInjectModeRaw,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		terminalWrite: func(text string) error {
+			if firstWrite {
+				firstWrite = false
+				return &wakeTestAcceptedProgressError{
+					err:      errors.New("refused before acceptance"),
+					accepted: 0,
+				}
+			}
+			accepted.WriteString(text)
+			return nil
+		},
+	}
+
+	captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("generic zero-progress presentation: %v", err)
+		}
+	})
+	now = cfg.doorbell.nextAttempt
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic full retry: %v", err)
+	}
+	if got, want := accepted.String(), coopWakeDoorbell+"\n\r\r"; got != want {
+		t.Fatalf("generic zero-progress retry = %q, want full payload %q", got, want)
+	}
+}
+
+func TestNotifyNewMessagesGenericNoneDoesNotNudgeTerminal(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "alice", "generic-no-terminal-nudge")
+
+	terminalWrites := 0
+	attentionWrites := 0
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:          "alice",
+		root:        root,
+		session:     "session1",
+		injectMode:  wakeInjectModeNone,
+		doorbellNow: func() time.Time { return now },
+		terminalWrite: func(string) error {
+			terminalWrites++
+			return nil
+		},
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic attention-only notification: %v", err)
+	}
+	if terminalWrites != 0 {
+		t.Fatalf("inject-mode none wrote %d terminal chunks, want 0", terminalWrites)
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("inject-mode none attention writes = %d, want 1", attentionWrites)
+	}
+	now = cfg.doorbell.nextAttempt
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic attention-only reminder: %v", err)
+	}
+	if terminalWrites != 0 {
+		t.Fatalf("inject-mode none reminder wrote %d terminal chunks, want 0", terminalWrites)
+	}
+	if attentionWrites != 2 {
+		t.Fatalf("inject-mode none reminder attention writes = %d, want 2", attentionWrites)
+	}
+	if cfg.doorbell.presentationConfirmed {
+		t.Fatal("inject-mode none marked terminal presentation confirmed")
+	}
+}
+
+func TestNotifyNewMessagesGenericCustomInterruptRePresentsNewUrgentWork(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	writeUrgent := func(id string) {
+		t.Helper()
+		message := format.Message{
+			Header: format.Header{
+				Schema:   1,
+				ID:       id,
+				From:     "peer",
+				To:       []string{"alice"},
+				Thread:   "p2p/alice__peer",
+				Subject:  id,
+				Created:  "2026-08-06T10:00:00Z",
+				Priority: "urgent",
+				Labels:   []string{"interrupt"},
+			},
+		}
+		data, err := message.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "alice", id+".md", data); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+	var injected strings.Builder
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:                "alice",
+		root:              root,
+		session:           "session1",
+		injectMode:        wakeInjectModeRaw,
+		interrupt:         true,
+		interruptPriority: "urgent",
+		interruptLabel:    "interrupt",
+		interruptNotice:   "operator interrupt",
+		doorbellNow:       func() time.Time { return now },
+		terminalWrite: func(text string) error {
+			injected.WriteString(text)
+			return nil
+		},
+	}
+
+	writeUrgent("generic-interrupt-first")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first generic custom interrupt: %v", err)
+	}
+	if got, want := injected.String(), cfg.interruptNotice+"\r\r"; got != want {
+		t.Fatalf("first generic custom interrupt = %q, want %q", got, want)
+	}
+	cfg.doorbell.confirmPresentation()
+	injected.Reset()
+	now = cfg.doorbell.nextAttempt
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic custom interrupt reminder: %v", err)
+	}
+	if got, want := injected.String(), "\r\r"; got != want {
+		t.Fatalf("generic custom interrupt reminder = %q, want submit only %q", got, want)
+	}
+
+	writeUrgent("generic-interrupt-second")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic custom interrupt addition: %v", err)
+	}
+	injected.Reset()
+	now = cfg.doorbell.nextAttempt
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic custom interrupt re-presentation: %v", err)
+	}
+	if got, want := injected.String(), cfg.interruptNotice+"\r\r"; got != want {
+		t.Fatalf("generic custom interrupt re-presentation = %q, want %q", got, want)
+	}
+}
+
+// normalizeWakeInjectMode rejects unknown CLI input; this locks the defensive
+// delivery switch fallback for an internally constructed future mode.
+func TestNotifyNewMessagesGenericUnknownModeUsesSingleChunkFallback(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "alice", "generic-unknown-mode")
+
+	var injected strings.Builder
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:          "alice",
+		root:        root,
+		session:     "session1",
+		injectMode:  "future-mode",
+		bell:        true,
+		doorbellNow: func() time.Time { return now },
+		terminalWrite: func(text string) error {
+			injected.WriteString(text)
+			return nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first generic unknown-mode presentation: %v", err)
+	}
+	if got, want := injected.String(), "\a"+coopWakeDoorbell+"\r"; got != want {
+		t.Fatalf("first generic unknown-mode bytes = %q, want %q", got, want)
+	}
+	cfg.doorbell.confirmPresentation()
+	injected.Reset()
+	now = cfg.doorbell.nextAttempt
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("generic unknown-mode submit-only reminder: %v", err)
+	}
+	if got := injected.String(); got != "\a\r" {
+		t.Fatalf("generic unknown-mode reminder bytes = %q, want bell plus CR only", got)
+	}
+}
+
+func TestRecordWakeAttemptArmsMissingCohort(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	cfg := &wakeConfig{}
+
+	recordWakeAttempt(cfg, now, current, nil)
+
+	if cfg.doorbell.phase != wakeDoorbellRetrying {
+		t.Fatalf("recorded phase = %d, want retrying", cfg.doorbell.phase)
+	}
+	if !sameKnownWakeCohort(cfg.doorbell.cohort, current) {
+		t.Fatalf("recorded attempt did not retain current cohort: %#v", cfg.doorbell)
+	}
+	if deadline, ok := cfg.doorbell.nextDeadline(); !ok ||
+		!deadline.Equal(now.Add(wakeDoorbellRetryBase)) {
+		t.Fatalf(
+			"recorded deadline = %s, ok=%v; want %s",
+			deadline,
+			ok,
+			now.Add(wakeDoorbellRetryBase),
+		)
+	}
+}
+
+func TestNotifyNewMessagesResumesExactTIOCSTISuffix(t *testing.T) {
+	for _, mode := range []string{wakeInjectModeRaw, wakeInjectModePaste} {
+		t.Run(mode, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			msg := format.Message{
+				Header: format.Header{
+					Schema:  1,
+					ID:      "partial-" + mode,
+					From:    "peer",
+					To:      []string{"codex"},
+					Thread:  "p2p/codex__peer",
+					Subject: "partial",
+					Created: "2026-07-30T08:00:00Z",
+				},
+			}
+			data, err := msg.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := deliverToInboxForTest(t, root, "codex", "partial.md", data); err != nil {
+				t.Fatal(err)
+			}
+			stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+				return 0, true, nil
+			})
+			stubRawInjectSleep(t)
+
+			var accepted strings.Builder
+			first := true
+			cfg := &wakeConfig{
+				me:         "codex",
+				root:       root,
+				session:    "session1",
+				wakeOwner:  &wakeOwner{},
+				injectMode: mode,
+				terminalWrite: func(text string) error {
+					if first {
+						first = false
+						progress := len(text) / 2
+						accepted.WriteString(text[:progress])
+						return &wakeTestAcceptedProgressError{
+							err:      syscall.EIO,
+							accepted: progress,
+						}
+					}
+					accepted.WriteString(text)
+					return nil
+				},
+			}
+			err = notifyNewMessages(cfg)
+			if !isWakeTerminalPartialProgress(err) {
+				t.Fatalf("first notify error = %v, want retryable partial progress", err)
+			}
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("suffix retry: %v", err)
+			}
+
+			want := coopWakeDoorbell + "\r"
+			if mode == wakeInjectModeRaw {
+				want = coopWakeDoorbell + "\n\r\r"
+			}
+			if got := accepted.String(); got != want {
+				t.Fatalf("accepted bytes = %q, want exact one-shot sequence %q", got, want)
+			}
+		})
+	}
+}
+
+func TestNotifyNewMessagesFinishesPartialPayloadAfterInboxDrain(t *testing.T) {
+	for _, mode := range []string{wakeInjectModeRaw, wakeInjectModePaste} {
+		t.Run(mode, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			msg := format.Message{
+				Header: format.Header{
+					Schema:  1,
+					ID:      "partial-drain-" + mode,
+					From:    "peer",
+					To:      []string{"codex"},
+					Thread:  "p2p/codex__peer",
+					Subject: "partial drain",
+					Created: "2026-07-30T08:00:00Z",
+				},
+			}
+			data, err := msg.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, err := deliverToInboxForTest(t, root, "codex", "partial.md", data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+				return 0, true, nil
+			})
+			stubRawInjectSleep(t)
+
+			var accepted strings.Builder
+			first := true
+			var firstPayload string
+			var laterWrites []string
+			collectLater := false
+			stubTIOCSTIInject(t, func(text string) error {
+				if collectLater {
+					laterWrites = append(laterWrites, text)
+				}
+				if first {
+					first = false
+					firstPayload = text
+					progress := len(text) / 2
+					accepted.WriteString(text[:progress])
+					return &wakeTestAcceptedProgressError{
+						err:      syscall.EIO,
+						accepted: progress,
+					}
+				}
+				accepted.WriteString(text)
+				return nil
+			})
+			cfg := &wakeConfig{
+				me:         "codex",
+				root:       root,
+				session:    "session1",
+				injectMode: mode,
+			}
+			if err := notifyNewMessages(cfg); !isWakeTerminalPartialProgress(err) {
+				t.Fatalf("first notify error = %v, want retryable partial progress", err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("empty-inbox reconciliation: %v", err)
+			}
+
+			want := firstPayload + "\r"
+			if mode == wakeInjectModeRaw {
+				want = firstPayload + "\n\r\r"
+			}
+			if got := accepted.String(); got != want {
+				t.Fatalf("accepted bytes = %q, want exact reconciled sequence %q", got, want)
+			}
+			if cfg.inputDelivery.pending() {
+				t.Fatalf("input delivery remained pending: %#v", cfg.inputDelivery)
+			}
+
+			later := format.Message{
+				Header: format.Header{
+					Schema:  1,
+					ID:      "later-" + mode,
+					From:    "other",
+					To:      []string{"codex"},
+					Thread:  "p2p/codex__other",
+					Subject: "later",
+					Created: "2026-07-30T08:01:00Z",
+				},
+			}
+			laterData, err := later.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := deliverToInboxForTest(t, root, "codex", "later.md", laterData); err != nil {
+				t.Fatal(err)
+			}
+			collectLater = true
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("later notify: %v", err)
+			}
+			if len(laterWrites) == 0 {
+				t.Fatal("later notify wrote no terminal input")
+			}
+			staleSuffix := firstPayload[len(firstPayload)/2:]
+			if strings.HasPrefix(strings.Join(laterWrites, ""), staleSuffix) {
+				t.Fatalf("later notify replayed stale suffix %q: %q", staleSuffix, laterWrites)
+			}
+		})
+	}
+}
+
+func TestNotifyNewMessagesDrainsStaleSubmitBeforeNewBatch(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	writeMessage := func(filename, id string) {
+		t.Helper()
+		msg := format.Message{
+			Header: format.Header{
+				Schema:  1,
+				ID:      id,
+				From:    "peer",
+				To:      []string{"codex"},
+				Thread:  "p2p/codex__peer",
+				Subject: id,
+				Created: "2026-07-29T18:17:38Z",
+			},
+		}
+		data, err := msg.Marshal()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", id, err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "codex", filename, data); err != nil {
+			t.Fatalf("deliver %s: %v", id, err)
+		}
+	}
+
+	drainCall := 0
+	stubRawInputDrained(t, func(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
+		drainCall++
+		if drainCall == 2 {
+			return timeout, false, nil // first message's submit remains queued
+		}
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+	var injected []string
+	cfg := &wakeConfig{
+		me:             "codex",
+		root:           root,
+		session:        "session3",
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModeRaw,
+		attentionIsTTY: func() bool { return false },
+		terminalWrite: func(text string) error {
+			injected = append(injected, text)
+			return nil
+		},
+	}
+
+	writeMessage("first.md", "first")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify first message: %v", err)
+	}
+	if drained := runDrainJSON(t, root, "codex", 0, false); drained.Count != 1 {
+		t.Fatalf("drained count = %d, want 1", drained.Count)
+	}
+
+	injected = nil
+	writeMessage("second.md", "second")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("notify later message: %v", err)
+	}
+	want := "\r|" + coopWakeDoorbell + "|\n|\r|\r"
+	if got := strings.Join(injected, "|"); got != want {
+		t.Fatalf("later injection = %q, want old rescue before fresh fixed doorbell", got)
+	}
+}
+
+func TestNotifyNewMessagesReconcilesQueuedSubmitAfterInboxDrain(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		startPhase wakeInputDeliveryPhase
+		drained    bool
+		wantPhase  wakeInputDeliveryPhase
+		wantWrites string
+	}{
+		{
+			name:       "first submit consumed",
+			startPhase: wakeInputRawFirstSubmitQueued,
+			drained:    true,
+			wantPhase:  wakeInputDeliveryIdle,
+			wantWrites: "\r",
+		},
+		{
+			name:       "first submit still stalled",
+			startPhase: wakeInputRawFirstSubmitQueued,
+			drained:    false,
+			wantPhase:  wakeInputRawFirstSubmitQueued,
+		},
+		{
+			name:       "rescue submit consumed",
+			startPhase: wakeInputRawRescueQueued,
+			drained:    true,
+			wantPhase:  wakeInputDeliveryIdle,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatalf("EnsureRootDirs: %v", err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+				t.Fatalf("EnsureAgentDirs: %v", err)
+			}
+			stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+				return 0, tc.drained, nil
+			})
+			stubRawInjectSleep(t)
+			var writes []string
+			stubTIOCSTIInject(t, func(text string) error {
+				writes = append(writes, text)
+				return nil
+			})
+			cfg := &wakeConfig{
+				me:         "codex",
+				root:       root,
+				injectMode: wakeInjectModeRaw,
+				inputDelivery: wakeInputDeliveryState{
+					phase:   tc.startPhase,
+					mode:    wakeInjectModeRaw,
+					payload: coopWakeDoorbell,
+				},
+			}
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("notify empty inbox: %v", err)
+			}
+			if cfg.inputDelivery.phase != tc.wantPhase {
+				t.Fatalf("input delivery phase = %v, want %v", cfg.inputDelivery.phase, tc.wantPhase)
+			}
+			if got := strings.Join(writes, "|"); got != tc.wantWrites {
+				t.Fatalf("terminal writes = %q, want %q", got, tc.wantWrites)
+			}
+		})
+	}
+}
+
+func TestNotifyNewMessagesResumesCoopInputAfterPartialSubmitFailure(t *testing.T) {
+	tests := []struct {
+		name        string
+		mode        string
+		partialWant string
+		retryWant   string
+	}{
+		{
+			name:        "raw prelude",
+			mode:        wakeInjectModeRaw,
+			partialWant: coopWakeDoorbell + "|\n",
+			retryWant:   "\n|\r|\r",
+		},
+		{
+			name:        "paste submit",
+			mode:        wakeInjectModePaste,
+			partialWant: coopWakeDoorbell + "|\r",
+			retryWant:   "\r",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatalf("EnsureRootDirs: %v", err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+				t.Fatalf("EnsureAgentDirs: %v", err)
+			}
+			writeMessage := func(filename, id string) {
+				t.Helper()
+				msg := format.Message{
+					Header: format.Header{
+						Schema:  1,
+						ID:      id,
+						From:    "peer",
+						To:      []string{"codex"},
+						Thread:  "p2p/codex__peer",
+						Subject: id,
+						Created: "2026-07-28T15:00:00Z",
+					},
+				}
+				data, err := msg.Marshal()
+				if err != nil {
+					t.Fatalf("marshal %s: %v", id, err)
+				}
+				if _, err := deliverToInboxForTest(t, root, "codex", filename, data); err != nil {
+					t.Fatalf("deliver %s: %v", id, err)
+				}
+			}
+
+			stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+				return 0, true, nil
+			})
+			stubRawInjectSleep(t)
+			failSubmit := true
+			var injected []string
+			now := time.Unix(1_800_000_000, 0)
+			stubTIOCSTIInject(t, func(text string) error {
+				injected = append(injected, text)
+				if failSubmit && len(injected) == 2 {
+					return &wakeTestAcceptedProgressError{
+						err:      syscall.EIO,
+						accepted: 0,
+					}
+				}
+				return nil
+			})
+			cfg := &wakeConfig{
+				me:             "codex",
+				root:           root,
+				session:        "session3",
+				wakeOwner:      &wakeOwner{},
+				injectMode:     tc.mode,
+				doorbellNow:    func() time.Time { return now },
+				attentionIsTTY: func() bool { return false },
+			}
+
+			writeMessage("first.md", "first")
+			err := notifyNewMessages(cfg)
+			if !isWakeTerminalPartialProgress(err) {
+				t.Fatalf("notify with partial %s failure = %v, want retryable partial", tc.mode, err)
+			}
+			if got := strings.Join(injected, "|"); got != tc.partialWant {
+				t.Fatalf("partial %s injection = %q, want %q", tc.mode, got, tc.partialWant)
+			}
+			if cfg.doorbell.phase != wakeDoorbellRetrying {
+				t.Fatalf("partial %s phase = %v, want retrying", tc.mode, cfg.doorbell.phase)
+			}
+
+			failSubmit = false
+			injected = nil
+			now = now.Add(wakeDoorbellRetryBase)
+			writeMessage("second.md", "second")
+			if err := notifyNewMessages(cfg); err != nil {
+				t.Fatalf("retry after partial %s failure: %v", tc.mode, err)
+			}
+			if got := strings.Join(injected, "|"); got != tc.retryWant {
+				t.Fatalf("coalesced %s retry injection = %q, want %q", tc.mode, got, tc.retryWant)
+			}
+			if len(cfg.doorbell.cohort) != 2 {
+				t.Fatalf("successful %s addition rearm retained %d messages, want 2", tc.mode, len(cfg.doorbell.cohort))
+			}
+		})
+	}
+}
+
+func TestNotifyNewMessagesRetriesAfterRescueAuthorityError(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	writeMessage := func(filename, id string) {
+		t.Helper()
+		msg := format.Message{
+			Header: format.Header{
+				Schema:  1,
+				ID:      id,
+				From:    "peer",
+				To:      []string{"codex"},
+				Thread:  "p2p/codex__peer",
+				Subject: id,
+				Created: "2026-07-28T15:00:00Z",
+			},
+		}
+		data, err := msg.Marshal()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", id, err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "codex", filename, data); err != nil {
+			t.Fatalf("deliver %s: %v", id, err)
+		}
+	}
+
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+	failRescue := true
+	var injected []string
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me:             "codex",
+		root:           root,
+		session:        "session3",
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModeRaw,
+		doorbellNow:    func() time.Time { return now },
+		attentionIsTTY: func() bool { return false },
+		terminalWrite: func(text string) error {
+			injected = append(injected, text)
+			if failRescue && len(injected) == 4 {
+				return &wakeTestAcceptedProgressError{
+					err:      errors.New("foreground process group changed"),
+					accepted: 0,
+				}
+			}
+			return nil
+		},
+	}
+
+	writeMessage("first.md", "first")
+	err := notifyNewMessages(cfg)
+	if !isWakeTerminalPartialProgress(err) {
+		t.Fatalf("notify rescue error = %v, want retryable partial progress", err)
+	}
+	if got := strings.Join(injected, "|"); got != coopWakeDoorbell+"|\n|\r|\r" {
+		t.Fatalf("raw injection before rescue error = %q, want submitted doorbell plus failed rescue", got)
+	}
+	if len(cfg.doorbell.cohort) != 1 {
+		t.Fatalf("submitted doorbell cohort has %d pending messages after rescue error, want 1", len(cfg.doorbell.cohort))
+	}
+
+	failRescue = false
+	injected = nil
+	writeMessage("second.md", "second")
+	stderr := captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("notify after rescue authority error: %v", err)
+		}
+	})
+	if got := strings.Join(injected, "|"); got != "\r" {
+		t.Fatalf("coalesced rescue retry = %q, want exact missing rescue CR", got)
+	}
+	if stderr != "" {
+		t.Fatalf("pending generation emitted output-only reminder: %q", stderr)
+	}
+
+	now = now.Add(wakeDoorbellRetryBase)
+	injected = nil
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("retry after deadline: %v", err)
+	}
+	want := coopWakeDoorbell + "|\n|\r|\r"
+	if got := strings.Join(injected, "|"); got != want {
+		t.Fatalf("deadline retry = %q, want one full retry %q", got, want)
+	}
+	if cfg.inputDelivery.pending() {
+		t.Fatalf("input delivery = %#v, want idle after rescue completion", cfg.inputDelivery)
+	}
+}
+
+func TestNotifyNewMessagesCustomInterruptUsesSanitizedOperatorPayloadForInputAndFallback(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:   1,
+			ID:       "msg-custom-interrupt",
+			From:     "peer",
+			To:       []string{"alice"},
+			Thread:   "p2p/alice__peer",
+			Subject:  "peer subject",
+			Created:  "2026-07-27T05:20:00Z",
+			Priority: "urgent",
+			Labels:   []string{"interrupt"},
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-custom-interrupt.md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	fail := false
+	var injected []string
+	stubTIOCSTIInject(t, func(text string) error {
+		if fail {
+			return newWakeInjectorUnsupportedError(errors.New("injection unavailable"))
+		}
+		injected = append(injected, text)
+		return nil
+	})
+	var emission wakeAttentionEmission
+	cfg := &wakeConfig{
+		me:                "alice",
+		root:              root,
+		injectMode:        wakeInjectModeRaw,
+		interrupt:         true,
+		interruptPriority: "urgent",
+		interruptLabel:    "interrupt",
+		interruptNotice:   "operator\x1b[31m\nnotice",
+		attentionIsTTY:    func() bool { return false },
+		recordAttention: func(got wakeAttentionEmission) error {
+			emission = got
+			return nil
+		},
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("successful notifyNewMessages: %v", err)
+	}
+	safeNotice := sanitizeForTTY(cfg.interruptNotice)
+	if got := strings.Join(injected, "|"); !strings.Contains(got, safeNotice) {
+		t.Fatalf("injected bytes = %q, want sanitized operator notice %q", got, safeNotice)
+	}
+	fail = true
+	path := filepath.Join(fsq.AgentInboxNew(root, "alice"), "msg-custom-interrupt.md")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stderr := captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("fallback notifyNewMessages: %v", err)
+		}
+	})
+	if !strings.Contains(stderr, safeNotice) || strings.Contains(stderr, "peer subject") {
+		t.Fatalf("fallback output = %q, want only sanitized operator notice", stderr)
+	}
+	if emission.OutputProvenance != wakePayloadOperatorFlag {
+		t.Fatalf("fallback provenance = %q, want operator", emission.OutputProvenance)
+	}
+}
+
+func TestNotifyNewMessagesOperatorFailurePreservesOperatorOutputProvenance(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "msg-operator-output",
+			From:    "codex",
+			To:      []string{"alice"},
+			Thread:  "p2p/alice__codex",
+			Subject: "must remain peer-only",
+			Created: "2026-07-27T05:00:00Z",
+		},
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := deliverToInboxForTest(t, root, "alice", "msg-operator-output.md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	stubTIOCSTIInject(t, func(string) error {
+		return newWakeInjectorUnsupportedError(errors.New("injection unavailable"))
+	})
+
+	var emission wakeAttentionEmission
+	cfg := &wakeConfig{
+		me:             "alice",
+		root:           root,
+		injectMode:     wakeInjectModeRaw,
+		injectCmd:      "amq drain\x1b[31m\n--include-body",
+		previewLen:     48,
+		attentionIsTTY: func() bool { return false },
+		recordAttention: func(got wakeAttentionEmission) error {
+			emission = got
+			return nil
+		},
+	}
+	stderr := captureWakeStderr(t, func() {
+		if err := notifyNewMessages(cfg); err != nil {
+			t.Fatalf("notifyNewMessages: %v", err)
+		}
+	})
+	if !strings.Contains(stderr, "amq drain [31m --include-body") {
+		t.Fatalf("operator output missing sanitized command: %q", stderr)
+	}
+	if strings.Contains(stderr, "must remain peer-only") {
+		t.Fatalf("operator output replaced by peer headers: %q", stderr)
+	}
+	if emission.OutputProvenance != wakePayloadOperatorFlag {
+		t.Fatalf("provenance = %q, want operator", emission.OutputProvenance)
 	}
 }
 
@@ -951,7 +3874,7 @@ func TestNotifyNewMessages_InjectViaInjectCmdPayload(t *testing.T) {
 		me:         "alice",
 		root:       root,
 		injectVia:  scriptPath,
-		injectCmd:  "amq drain --include-body",
+		injectCmd:  "amq drain\x1b[31m\n--include-body",
 		previewLen: 48,
 	}
 
@@ -963,7 +3886,7 @@ func TestNotifyNewMessages_InjectViaInjectCmdPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
-	expected := "\namq drain --include-body\n"
+	expected := "\namq drain [31m --include-body\n"
 	if string(got) != expected {
 		t.Fatalf("expected inject-cmd payload %q, got %q", expected, string(got))
 	}
@@ -1041,8 +3964,8 @@ func TestNotifyNewMessagesSkipsBaselineWithoutDraining(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read injection output: %v", err)
 	}
-	if !strings.Contains(string(got), "fresh subject") || strings.Contains(string(got), "stale subject") {
-		t.Fatalf("injected payload = %q, want fresh message only", string(got))
+	if string(got) != coopWakeDoorbell {
+		t.Fatalf("injected payload = %q, want fixed doorbell %q", string(got), coopWakeDoorbell)
 	}
 }
 
@@ -1237,6 +4160,119 @@ func TestInputDeferralDelayBoundsByDeadline(t *testing.T) {
 	}
 }
 
+func TestWaitForInputQuietDemotesWhenActiveThroughMaxHold(t *testing.T) {
+	now := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
+	var sleeps []time.Duration
+	sampleCalls := 0
+
+	allowInjection, reason, err := waitForInputQuiet(
+		func() (ttyInputState, error) {
+			sampleCalls++
+			return ttyInputState{pendingBytes: 1}, nil
+		},
+		func() time.Time {
+			return now
+		},
+		func(delay time.Duration, _ ttyInputState, _ string) {
+			sleeps = append(sleeps, delay)
+			now = now.Add(delay)
+		},
+		time.Second,
+		25*time.Millisecond,
+		10*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowInjection || reason != "pending terminal input" {
+		t.Fatalf("max-hold result allow=%v reason=%q", allowInjection, reason)
+	}
+	if sampleCalls != 4 {
+		t.Fatalf("sample calls = %d, want 4", sampleCalls)
+	}
+	if len(sleeps) != 3 ||
+		sleeps[0] != 10*time.Millisecond ||
+		sleeps[1] != 10*time.Millisecond ||
+		sleeps[2] != 5*time.Millisecond {
+		t.Fatalf("sleeps = %v, want [10ms 10ms 5ms]", sleeps)
+	}
+}
+
+func TestWaitForInputQuietSamplingFailureKeepsBestEffortInjection(t *testing.T) {
+	sampleErr := errors.New("sampling unavailable")
+	allowInjection, reason, err := waitForInputQuiet(
+		func() (ttyInputState, error) {
+			return ttyInputState{}, sampleErr
+		},
+		time.Now,
+		func(time.Duration, ttyInputState, string) {},
+		time.Second,
+		time.Second,
+		10*time.Millisecond,
+	)
+	if !allowInjection || reason != "" || !errors.Is(err, sampleErr) {
+		t.Fatalf("sampling failure result allow=%v reason=%q err=%v", allowInjection, reason, err)
+	}
+}
+
+func TestWaitForInputQuietRequiresThreeConsecutiveQuietSamples(t *testing.T) {
+	now := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
+	states := []ttyInputState{
+		{},
+		{},
+		{pendingBytes: 1},
+		{},
+		{},
+		{},
+	}
+	sampleCalls := 0
+
+	allowInjection, reason, err := waitForInputQuiet(
+		func() (ttyInputState, error) {
+			state := states[sampleCalls]
+			sampleCalls++
+			return state, nil
+		},
+		func() time.Time { return now },
+		func(delay time.Duration, _ ttyInputState, _ string) {
+			now = now.Add(delay)
+		},
+		time.Second,
+		time.Second,
+		10*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowInjection || reason != "" {
+		t.Fatalf("quiet result allow=%v reason=%q", allowInjection, reason)
+	}
+	if sampleCalls != len(states) {
+		t.Fatalf("sample calls = %d, want %d", sampleCalls, len(states))
+	}
+}
+
+func TestWaitForInputQuietDemotesBeforeThreeQuietSamplesAtDeadline(t *testing.T) {
+	now := time.Date(2026, 7, 26, 18, 0, 0, 0, time.UTC)
+
+	allowInjection, reason, err := waitForInputQuiet(
+		func() (ttyInputState, error) { return ttyInputState{}, nil },
+		func() time.Time { return now },
+		func(delay time.Duration, _ ttyInputState, _ string) {
+			now = now.Add(delay)
+		},
+		time.Second,
+		5*time.Millisecond,
+		10*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowInjection || reason != "quiet confirmation incomplete" {
+		t.Fatalf("deadline result allow=%v reason=%q", allowInjection, reason)
+	}
+}
+
 func TestShouldDeferBeforeInject(t *testing.T) {
 	cfg := &wakeConfig{deferWhileInput: true}
 	if !shouldDeferBeforeInject(cfg, true) {
@@ -1255,5 +4291,37 @@ func TestShouldDeferBeforeInject(t *testing.T) {
 	cfg.injectVia = "external-injector"
 	if shouldDeferBeforeInject(cfg, true) {
 		t.Fatalf("expected external injection to bypass local TTY input deferral")
+	}
+}
+
+func TestInjectNotificationMaxHoldDemotesToOutput(t *testing.T) {
+	originalWait := waitForWakeInputQuiet
+	waitForWakeInputQuiet = func(*wakeConfig) bool {
+		return false
+	}
+	t.Cleanup(func() {
+		waitForWakeInputQuiet = originalWait
+	})
+
+	terminalWrites := 0
+	cfg := &wakeConfig{
+		injectMode:      wakeInjectModeRaw,
+		deferWhileInput: true,
+		terminalWrite: func(string) error {
+			terminalWrites++
+			return nil
+		},
+	}
+
+	stderr := captureWakeStderr(t, func() {
+		if err := injectNotification(cfg, "held doorbell", true); err != nil {
+			t.Fatalf("injectNotification: %v", err)
+		}
+	})
+	if terminalWrites != 0 {
+		t.Fatalf("terminal writes after max hold = %d, want 0", terminalWrites)
+	}
+	if !strings.Contains(stderr, "held doorbell") {
+		t.Fatalf("out-of-band output missing held doorbell: %q", stderr)
 	}
 }

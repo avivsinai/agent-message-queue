@@ -3,9 +3,12 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 const wakeReadySchema = 1
@@ -27,14 +30,40 @@ func writeWakeReadyFileAgainstOwner(
 	expected wakeLockInspection,
 	requestedOwner *wakeOwner,
 ) error {
-	if path == "" {
-		return nil
-	}
 	agentDir, err := openWakeAgentDir(root, me)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = agentDir.Close() }()
+	return writeWakeReadyFileAgainstOwnerInDir(
+		agentDir,
+		root,
+		me,
+		path,
+		expected,
+		requestedOwner,
+	)
+}
+
+func writeWakeReadyFileAgainstOwnerInDir(
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	path string,
+	expected wakeLockInspection,
+	requestedOwner *wakeOwner,
+) error {
+	// No readiness path means no supervising parent is waiting on the
+	// handshake — a bare `amq wake` rather than a repair child or a
+	// `coop exec` launch. Publishing is then a no-op, and this is the one
+	// place every caller passes through, so the rule cannot be bypassed by
+	// entering with an already-open agent directory capability.
+	if path == "" {
+		return nil
+	}
+	if agentDir == nil {
+		return fmt.Errorf("wake agent directory capability is missing")
+	}
 	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !sameWakeLockGeneration(expected, current) {
@@ -45,7 +74,7 @@ func writeWakeReadyFileAgainstOwner(
 			Generation:   current.Lock.Generation,
 			TargetDigest: current.Lock.TargetDigest,
 		}
-		if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, ready); err != nil {
+		if err := validateWakeReadyLockAndTargetForInspectionAt(dirfd, agentDir, root, me, current, ready); err != nil {
 			return err
 		}
 		if err := validateRequestedWakeOwnerForReadiness(current, requestedOwner); err != nil {
@@ -61,6 +90,96 @@ func writeWakeGenerationFile(path, label string, marker wakeReady) error {
 		return fmt.Errorf("marshal %s: %w", label, err)
 	}
 	return writeWakeMetadataFile(path, append(data, '\n'), label)
+}
+
+type wakeReadyPublication struct {
+	dir      *wakeAgentDir
+	name     string
+	snapshot wakeGenerationFileSnapshot
+}
+
+var beforeWakeReadyCleanupUnlink = func() {}
+var afterWakeReadyPublicationWrite = func() {}
+
+func publishWakeReadyFile(path string, marker wakeReady) (*wakeReadyPublication, error) {
+	parent, err := openWakeDirectory(filepath.Dir(path), "wake ready parent directory")
+	if err != nil {
+		return nil, err
+	}
+	name := filepath.Base(path)
+	var snapshot wakeGenerationFileSnapshot
+	err = parent.withFD(func(dirfd int) error {
+		var err error
+		snapshot, err = writeWakeGenerationFileAtWithSnapshot(
+			dirfd,
+			name,
+			"wake ready file",
+			marker,
+		)
+		if err != nil {
+			return err
+		}
+		afterWakeReadyPublicationWrite()
+		installed, exists, err := readWakeGenerationFileSnapshotAt(
+			dirfd,
+			parent,
+			name,
+			"wake ready file",
+		)
+		if err != nil {
+			return fmt.Errorf("validate installed wake ready file: %w", err)
+		}
+		if !exists {
+			return fmt.Errorf("installed wake ready file disappeared during publication")
+		}
+		if !os.SameFile(snapshot.FileInfo, installed.FileInfo) ||
+			!bytes.Equal(snapshot.Raw, installed.Raw) ||
+			snapshot.Marker != installed.Marker {
+			return fmt.Errorf("installed wake ready file changed during publication; preserving it")
+		}
+		snapshot = installed
+		return nil
+	})
+	publication := &wakeReadyPublication{
+		dir:      parent,
+		name:     name,
+		snapshot: snapshot,
+	}
+	if err != nil {
+		var cleanupErr error
+		if snapshot.FileInfo != nil {
+			cleanupErr = publication.removeIfUnchanged()
+		}
+		closeErr := publication.Close()
+		return nil, errors.Join(err, cleanupErr, closeErr)
+	}
+	return publication, nil
+}
+
+func (publication *wakeReadyPublication) Close() error {
+	if publication == nil || publication.dir == nil {
+		return nil
+	}
+	err := publication.dir.Close()
+	publication.dir = nil
+	return err
+}
+
+func (publication *wakeReadyPublication) removeIfUnchanged() error {
+	if publication == nil || publication.dir == nil {
+		return nil
+	}
+	beforeWakeReadyCleanupUnlink()
+	return publication.dir.withFD(func(dirfd int) error {
+		_, err := removeWakeGenerationFileIfSnapshotMatchesAt(
+			dirfd,
+			publication.dir,
+			publication.name,
+			"wake ready file",
+			publication.snapshot,
+		)
+		return err
+	})
 }
 
 func readWakeReadyFile(path string) (wakeReady, bool, error) {
@@ -91,7 +210,9 @@ func readWakeGenerationFile(path, label string) (wakeReady, bool, error) {
 		return wakeReady{}, true, err
 	}
 	if !os.SameFile(info, openedInfo) {
-		return wakeReady{}, true, fmt.Errorf("%s %s changed while opening", label, path)
+		return wakeReady{}, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("%s %s changed while opening", label, path),
+		)
 	}
 	data, err := readWakeMetadata(file, label, path)
 	if err != nil {
@@ -120,31 +241,28 @@ func validateWakeGenerationFile(path, label string, info os.FileInfo) error {
 	return validateWakeTargetPathOwnership(label, path, info)
 }
 
-func validateWakeReadyLockAndTarget(root, me string, current wakeLockInspection, ready wakeReady) error {
+func validateWakeReadyLockAndSelectedTarget(
+	current wakeLockInspection,
+	ready wakeReady,
+	target wakeTarget,
+	targetExists bool,
+) error {
 	if err := validateWakeReadyAgainstLock(current, ready); err != nil {
 		return err
 	}
 	if current.Lock.TargetDigest == "" {
-		_, exists, err := readWakeTarget(root, me)
-		if err != nil {
-			return err
-		}
-		if exists {
+		if targetExists {
 			return fmt.Errorf("wake readiness target does not match current wake lock")
 		}
 		return nil
 	}
-	target, exists, err := readWakeTarget(root, me)
-	if err != nil {
-		return err
-	}
-	if !exists {
+	if !targetExists {
 		return fmt.Errorf("wake readiness target is missing")
 	}
 	return validateWakeReadyTargetAndOwner(current, target)
 }
 
-func validateWakeReadyLockAndTargetAt(
+func validateWakeReadyLockAndTargetForInspectionAt(
 	dirfd int,
 	agentDir *wakeAgentDir,
 	root string,
@@ -152,23 +270,16 @@ func validateWakeReadyLockAndTargetAt(
 	current wakeLockInspection,
 	ready wakeReady,
 ) error {
-	if err := validateWakeReadyAgainstLock(current, ready); err != nil {
-		return err
-	}
-	target, exists, err := readWakeTargetAt(dirfd, agentDir, root, me)
+	selection, err := readWakeStateSelectionForInspectionAt(dirfd, agentDir, root, me, current)
 	if err != nil {
 		return err
 	}
-	if current.Lock.TargetDigest == "" {
-		if exists {
-			return fmt.Errorf("wake readiness target does not match current wake lock")
-		}
-		return nil
-	}
-	if !exists {
-		return fmt.Errorf("wake readiness target is missing")
-	}
-	return validateWakeReadyTargetAndOwner(current, target)
+	return validateWakeReadyLockAndSelectedTarget(
+		current,
+		ready,
+		selection.Target,
+		selection.TargetPresent,
+	)
 }
 
 func validateWakeReadyAgainstLock(current wakeLockInspection, ready wakeReady) error {
@@ -236,19 +347,38 @@ func validateWakeReadyFileAgainstOwner(
 ) (bool, error) {
 	// A wake can still die immediately after this guarded validation; the local
 	// process notifier has no durable liveness lease beyond the lock generation.
-	ready := false
 	agentDir, err := openWakeAgentDir(root, me)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = agentDir.Close() }()
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return validateWakeReadyFileAgainstOwnerInDir(
+		agentDir,
+		root,
+		me,
+		path,
+		requestedOwner,
+	)
+}
+
+func validateWakeReadyFileAgainstOwnerInDir(
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	path string,
+	requestedOwner *wakeOwner,
+) (bool, error) {
+	if agentDir == nil {
+		return false, fmt.Errorf("wake agent directory capability is missing")
+	}
+	ready := false
+	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		published, exists, err := readWakeReadyFile(path)
 		if err != nil || !exists {
 			return err
 		}
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
-		if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, published); err != nil {
+		if err := validateWakeReadyLockAndTargetForInspectionAt(dirfd, agentDir, root, me, current, published); err != nil {
 			return err
 		}
 		if err := validateRequestedWakeOwnerForReadiness(current, requestedOwner); err != nil {

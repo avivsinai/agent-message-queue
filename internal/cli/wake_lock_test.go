@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,7 +93,337 @@ func mustWakeTargetDigest(target wakeTarget) string {
 	return digest
 }
 
-func TestSameWakeInjectorIdentityUsesOnlyPathAndOrderedArgs(t *testing.T) {
+func TestWakeLockStateBindingRawABIGoldens(t *testing.T) {
+	const (
+		generation = "0123456789abcdef0123456789abcdef"
+		digest     = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	)
+
+	tests := []struct {
+		name string
+		lock wakeLock
+		want string
+	}{
+		{
+			name: "bound generic target lock",
+			lock: wakeLock{
+				PID:             1,
+				TTY:             "tty",
+				Root:            "/queue",
+				Agent:           "codex",
+				Started:         "2026-08-02T00:00:00Z",
+				WakeMode:        wakeTargetInjectVia,
+				TargetDigest:    digest,
+				Generation:      generation,
+				StateGeneration: generation,
+				StateDigest:     digest,
+			},
+			want: `{"pid":1,"tty":"tty","root":"/queue","agent":"codex","started":"2026-08-02T00:00:00Z","wake_mode":"inject-via","target_digest":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","generation":"0123456789abcdef0123456789abcdef","state_generation":"0123456789abcdef0123456789abcdef","state_digest":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`,
+		},
+		{
+			name: "bound authoritative target lock",
+			lock: wakeLock{
+				PID:             1,
+				TTY:             "tty",
+				Root:            "/queue",
+				Agent:           "codex",
+				Started:         "2026-08-02T00:00:00Z",
+				WakeMode:        wakeOwnerWakeMode,
+				TargetDigest:    digest,
+				Generation:      generation,
+				StateGeneration: generation,
+				StateDigest:     digest,
+				OwnerSchema:     wakeOwnerLockSchema,
+				Owner:           &wakeOwner{PID: 1},
+			},
+			want: `{"pid":1,"tty":"tty","root":"/queue","agent":"codex","started":"2026-08-02T00:00:00Z","wake_mode":"owner-inject-via-v1","target_digest":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","generation":"0123456789abcdef0123456789abcdef","state_generation":"0123456789abcdef0123456789abcdef","state_digest":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","owner_schema":1,"owner":{"pid":1}}`,
+		},
+		{
+			name: "unbound generic target lock preserves legacy bytes",
+			lock: wakeLock{
+				PID:          1,
+				TTY:          "tty",
+				Root:         "/queue",
+				Agent:        "codex",
+				Started:      "2026-08-02T00:00:00Z",
+				WakeMode:     wakeTargetInjectVia,
+				TargetDigest: digest,
+				Generation:   generation,
+			},
+			want: `{"pid":1,"tty":"tty","root":"/queue","agent":"codex","started":"2026-08-02T00:00:00Z","wake_mode":"inject-via","target_digest":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","generation":"0123456789abcdef0123456789abcdef"}`,
+		},
+		{
+			name: "unbound authoritative target lock preserves legacy bytes",
+			lock: wakeLock{
+				PID:          1,
+				TTY:          "tty",
+				Root:         "/queue",
+				Agent:        "codex",
+				Started:      "2026-08-02T00:00:00Z",
+				WakeMode:     wakeOwnerWakeMode,
+				TargetDigest: digest,
+				Generation:   generation,
+				OwnerSchema:  wakeOwnerLockSchema,
+				Owner:        &wakeOwner{PID: 1},
+			},
+			want: `{"pid":1,"tty":"tty","root":"/queue","agent":"codex","started":"2026-08-02T00:00:00Z","wake_mode":"owner-inject-via-v1","target_digest":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","generation":"0123456789abcdef0123456789abcdef","owner_schema":1,"owner":{"pid":1}}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(tc.lock)
+			if err != nil {
+				t.Fatalf("marshal wake lock: %v", err)
+			}
+			if got := string(raw); got != tc.want {
+				t.Fatalf("wake lock raw bytes = %s\nwant = %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWakeLockStateBindingValidation(t *testing.T) {
+	const (
+		generation = "0123456789abcdef0123456789abcdef"
+		digest     = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	)
+	bound := wakeLock{
+		WakeMode:        wakeTargetInjectVia,
+		TargetDigest:    digest,
+		Generation:      generation,
+		StateGeneration: generation,
+		StateDigest:     digest,
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*wakeLock)
+		wantErr string
+	}{
+		{name: "unbound legacy target lock remains valid", mutate: func(lock *wakeLock) {
+			lock.StateGeneration = ""
+			lock.StateDigest = ""
+		}},
+		{name: "generation without digest", mutate: func(lock *wakeLock) { lock.StateDigest = "" }, wantErr: "must be present together"},
+		{name: "digest without generation", mutate: func(lock *wakeLock) { lock.StateGeneration = "" }, wantErr: "must be present together"},
+		{name: "malformed state generation", mutate: func(lock *wakeLock) { lock.StateGeneration = "not-a-generation" }, wantErr: "state generation is invalid"},
+		{name: "generation differs from lock", mutate: func(lock *wakeLock) { lock.StateGeneration = "fedcba9876543210fedcba9876543210" }, wantErr: "state generation does not match lock generation"},
+		{name: "malformed state digest", mutate: func(lock *wakeLock) { lock.StateDigest = "sha256:bad" }, wantErr: "state digest is invalid"},
+		{name: "digest differs from target", mutate: func(lock *wakeLock) {
+			lock.StateDigest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+		}, wantErr: "state digest does not match lock target digest"},
+		{name: "targetless lock cannot bind state", mutate: func(lock *wakeLock) { lock.TargetDigest = "" }, wantErr: "state binding requires a target digest"},
+		{name: "non-target wake mode cannot bind state", mutate: func(lock *wakeLock) { lock.WakeMode = "none" }, wantErr: "state binding requires a target-bearing lock"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			lock := bound
+			tc.mutate(&lock)
+			err := validateWakeLockStateBinding(lock)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validate state binding: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validate state binding error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestWakeLockStateBindingIsToleratedByLegacyJSONReader(t *testing.T) {
+	const (
+		generation = "0123456789abcdef0123456789abcdef"
+		digest     = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	)
+	bound := wakeLock{
+		PID:             1,
+		TTY:             "tty",
+		Root:            "/queue",
+		Agent:           "codex",
+		Started:         "2026-08-02T00:00:00Z",
+		WakeMode:        wakeTargetInjectVia,
+		TargetDigest:    digest,
+		Generation:      generation,
+		StateGeneration: generation,
+		StateDigest:     digest,
+	}
+	raw, err := json.Marshal(bound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"state_generation"`) || !strings.Contains(string(raw), `"state_digest"`) {
+		t.Fatalf("bound lock omitted state ABI fields: %s", raw)
+	}
+	var legacy struct {
+		PID          int    `json:"pid"`
+		Root         string `json:"root"`
+		Agent        string `json:"agent"`
+		TargetDigest string `json:"target_digest"`
+		Generation   string `json:"generation"`
+	}
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatalf("legacy JSON reader rejected additive state fields: %v", err)
+	}
+	if legacy.PID != bound.PID || legacy.Root != bound.Root || legacy.Agent != bound.Agent ||
+		legacy.TargetDigest != bound.TargetDigest || legacy.Generation != bound.Generation {
+		t.Fatalf("legacy JSON reader changed known lock fields: %#v", legacy)
+	}
+}
+
+func TestInspectWakeLockRejectsMalformedStateBindingFields(t *testing.T) {
+	const (
+		generation = "0123456789abcdef0123456789abcdef"
+		digest     = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	)
+	tests := []struct {
+		name   string
+		fields string
+	}{
+		{name: "both null", fields: `"state_generation":null,"state_digest":null`},
+		{name: "both empty", fields: `"state_generation":"","state_digest":""`},
+		{name: "both wrong type", fields: `"state_generation":42,"state_digest":42`},
+		{name: "partial null generation", fields: `"state_generation":null`},
+		{name: "partial null digest", fields: `"state_digest":null`},
+		{name: "partial string generation", fields: `"state_generation":"0123456789abcdef0123456789abcdef"`},
+	}
+
+	for _, mode := range []os.FileMode{0o600, wakeOwnerLockFileMode} {
+		for _, tc := range tests {
+			t.Run(tc.name+"-"+mode.String(), func(t *testing.T) {
+				root := secureTempDirForTest(t)
+				lock := wakeLock{
+					PID:          4242,
+					TTY:          "tty",
+					Root:         canonicalWakeRoot(root),
+					Agent:        "codex",
+					Started:      "2026-08-02T00:00:00Z",
+					WakeMode:     wakeTargetInjectVia,
+					TargetDigest: digest,
+					Generation:   generation,
+				}
+				base, err := json.Marshal(lock)
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw := append(append([]byte{}, base[:len(base)-1]...), append([]byte(","+tc.fields), '}')...)
+				path := writeWakeLockForTest(t, root, "codex", lock)
+				if err := os.WriteFile(path, raw, mode); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, mode); err != nil {
+					t.Fatal(err)
+				}
+				inspection := inspectWakeLock(root, "codex")
+				if inspection.Status != wakeLockUnverified {
+					t.Fatalf("inspection status = %q reason %q, want unverified", inspection.Status, inspection.Reason)
+				}
+			})
+		}
+	}
+}
+
+func TestInspectWakeLockRejectsMalformedWholeJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "empty", raw: []byte{}},
+		{name: "whitespace", raw: []byte(" \n\t")},
+		{name: "empty object", raw: []byte(`{}`)},
+		{name: "null required fields", raw: []byte(`{"pid":null,"tty":null,"root":null,"started":null}`)},
+		{name: "pid wrong type", raw: []byte(`{"pid":"4242","tty":"tty","root":"/tmp","started":"now"}`)},
+		{name: "tty wrong type", raw: []byte(`{"pid":4242,"tty":42,"root":"/tmp","started":"now"}`)},
+		{name: "root wrong type", raw: []byte(`{"pid":4242,"tty":"tty","root":42,"started":"now"}`)},
+		{name: "started wrong type", raw: []byte(`{"pid":4242,"tty":"tty","root":"/tmp","started":42}`)},
+		{name: "truncated object", raw: []byte(`{"pid":`)},
+		{name: "null", raw: []byte(`null`)},
+		{name: "array", raw: []byte(`[]`)},
+	}
+
+	for _, mode := range []os.FileMode{0o600, wakeOwnerLockFileMode} {
+		for _, tc := range tests {
+			t.Run(tc.name+"-"+mode.String(), func(t *testing.T) {
+				root := secureTempDirForTest(t)
+				path := writeWakeLockForTest(t, root, "codex", wakeLock{PID: 4242})
+				if err := os.WriteFile(path, tc.raw, mode); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, mode); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(path, time.Now().Add(-3*time.Second), time.Now().Add(-3*time.Second)); err != nil {
+					t.Fatal(err)
+				}
+
+				inspection := inspectWakeLock(root, "codex")
+				if inspection.Status != wakeLockUnverified {
+					t.Fatalf("inspection status = %q reason %q, want unverified", inspection.Status, inspection.Reason)
+				}
+				if claim := classifyWakeClaimForGenericTransition(inspection); claim != wakeClaimInvalid {
+					t.Fatalf("claim = %v, want invalid", claim)
+				}
+				if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestMutate); err == nil {
+					t.Fatal("generic mutation accepted malformed whole lock JSON")
+				}
+			})
+		}
+	}
+}
+
+func TestDecodeWakeLockJSONFieldsWireScanner(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr bool
+		wantPID bool
+	}{
+		{name: "trailing whitespace", raw: "{\"pid\":7}\n\t", wantPID: true},
+		{name: "trailing document", raw: `{"pid":7}{}`, wantErr: true},
+		{name: "raw parse failure", raw: `{"pid":`, wantErr: true},
+		{name: "non-object", raw: `[]`, wantErr: true},
+		{name: "duplicate known", raw: `{"pid":null,"pid":7}`, wantErr: true},
+		{name: "duplicate unknown", raw: `{"future":null,"future":{"pid":null}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fields, err := decodeWakeLockJSONFields([]byte(test.raw))
+			if (err != nil) != test.wantErr {
+				t.Fatalf("decode error = %v, wantErr=%v", err, test.wantErr)
+			}
+			if test.wantPID {
+				if _, exists := fields["pid"]; !exists {
+					t.Fatalf("decoded fields = %#v, want canonical pid", fields)
+				}
+			}
+		})
+	}
+}
+
+func TestValidUnboundP2aWakeLockRemainsGeneric(t *testing.T) {
+	root := secureTempDirForTest(t)
+	path := writeWakeLockForTest(t, root, "codex", wakeLock{PID: 4242})
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWakeLockStateBindingJSON(raw); err != nil {
+		t.Fatalf("unbound P2a wake lock rejected: %v", err)
+	}
+	inspection := inspectWakeLock(root, "codex")
+	if claim := classifyWakeClaimForGenericTransition(inspection); claim != wakeClaimGeneric {
+		t.Fatalf("claim = %v, want generic", claim)
+	}
+	if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestMutate); err != nil {
+		t.Fatalf("generic P2a mutation rejected: %v", err)
+	}
+}
+
+func TestSameWakeInjectorIdentityUsesPathOrderedArgsAndRetryPolicy(t *testing.T) {
 	first := wakeTarget{
 		InjectVia:  "/opt/amq/injector",
 		InjectArgs: []string{"exec", "target"},
@@ -114,6 +445,16 @@ func TestSameWakeInjectorIdentityUsesOnlyPathAndOrderedArgs(t *testing.T) {
 	second.InjectVia = "/opt/amq/other-injector"
 	if sameWakeInjectorIdentity(first, second) {
 		t.Fatal("different injector paths were treated as the same identity")
+	}
+	second = first
+	second.RetryUntil = wakeRetryUntilInjected
+	if sameWakeInjectorIdentity(first, second) {
+		t.Fatal("different retry acknowledgement policies were treated as the same identity")
+	}
+	second = first
+	second.RetryUntil = wakeRetryUntilDrained
+	if !sameWakeInjectorIdentity(first, second) {
+		t.Fatal("omitted and explicit drained policies were treated as different identities")
 	}
 }
 
@@ -216,6 +557,44 @@ func TestInspectWakeLockAcceptsLegacyDarwinBootIDForProvenWake(t *testing.T) {
 	inspection := inspectWakeLock(root, "codex")
 	if inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
 		t.Fatalf("inspection = status %q reason %q confirmed %v", inspection.Status, inspection.Reason, inspection.IdentityConfirmed)
+	}
+}
+
+func TestInspectWakeLockDoesNotProveLiveRenamedBinaryStale(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		TTY:          "tty",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/amq-dev",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "start-1",
+			BootID:     "boot-1",
+			Executable: "/opt/amq-dev",
+			Args: []string{
+				"amq",
+				"wake",
+				"--root",
+				root,
+				"--me",
+				"codex",
+			},
+		}
+	})
+
+	inspection := inspectWakeLock(root, "codex")
+	if inspection.Status != wakeLockUnverified {
+		t.Fatalf(
+			"matching live renamed binary status = %s (%s), want unverified",
+			inspection.Status,
+			inspection.Reason,
+		)
 	}
 }
 

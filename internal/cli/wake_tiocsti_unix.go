@@ -4,6 +4,8 @@ package cli
 
 import (
 	"os"
+	"runtime"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -18,6 +20,35 @@ var tiocsti = tiocstiFuncs{
 
 type tiocstiFuncs struct {
 	available bool
+}
+
+var readTIOCSTILegacySysctl = func() ([]byte, error) {
+	if runtime.GOOS != "linux" {
+		return nil, os.ErrNotExist
+	}
+	return os.ReadFile(tiocstiLegacySysctlPath)
+}
+
+type tiocstiInjectionError struct {
+	Err      error
+	Progress int
+}
+
+func (err *tiocstiInjectionError) Error() string {
+	return err.Err.Error()
+}
+
+func (err *tiocstiInjectionError) Unwrap() error {
+	return err.Err
+}
+
+func (err *tiocstiInjectionError) wakeAcceptedBytes() int {
+	return err.Progress
+}
+
+func tiocstiLegacyDisabledHint() bool {
+	data, err := readTIOCSTILegacySysctl()
+	return err == nil && strings.TrimSpace(string(data)) == "0"
 }
 
 // Available returns true if TIOCSTI is supported on this platform.
@@ -47,9 +78,9 @@ func (t tiocstiFuncs) Inject(text string) error {
 // descriptor. Callers own the descriptor and its lifecycle.
 func (t tiocstiFuncs) InjectFD(fd uintptr, text string) error {
 	// Inject each character using TIOCSTI
-	for _, ch := range []byte(text) {
+	for progress, ch := range []byte(text) {
 		if err := ioctlTIOCSTI(fd, ch); err != nil {
-			return err
+			return &tiocstiInjectionError{Err: err, Progress: progress}
 		}
 	}
 
@@ -73,17 +104,17 @@ func ioctlTIOCSTI(fd uintptr, ch byte) error {
 	}
 }
 
-func waitForTTYInputQuiet(cfg *wakeConfig) {
+func waitForTTYInputQuiet(cfg *wakeConfig) bool {
 	if cfg.inputMaxHold <= 0 {
-		return
+		return true
 	}
 
-	queueFD, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY, 0)
+	queueFD, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if cfg.debug {
-			_ = writeStderr("amq wake [debug]: input deferral unavailable: open /dev/tty: %v\n", err)
+			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input deferral unavailable: open /dev/tty: %v\n", err)
 		}
-		return
+		return true
 	}
 	defer func() { _ = unix.Close(queueFD) }()
 
@@ -99,44 +130,41 @@ func waitForTTYInputQuiet(cfg *wakeConfig) {
 		atimeSource = "stdin"
 	}
 	if cfg.debug {
-		_ = writeStderr("amq wake [debug]: input deferral atime_source=%s\n", atimeSource)
+		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input deferral atime_source=%s\n", atimeSource)
 	}
 
-	deadline := time.Now().Add(cfg.inputMaxHold)
-	for {
-		now := time.Now()
-		state, err := sampleTTYInputState(uintptr(queueFD), atimeFD)
-		if err != nil {
+	allowInjection, activeReason, sampleErr := waitForInputQuiet(
+		func() (ttyInputState, error) {
+			return sampleTTYInputState(uintptr(queueFD), atimeFD)
+		},
+		time.Now,
+		func(delay time.Duration, state ttyInputState, reason string) {
 			if cfg.debug {
-				_ = writeStderr("amq wake [debug]: input deferral unavailable: %v\n", err)
+				_ = writeWakeDiagnostic(
+					cfg,
+					"amq wake [debug]: deferring injection for %s (%s, pending_bytes=%d)\n",
+					delay,
+					reason,
+					state.pendingBytes,
+				)
 			}
-			return
-		}
-
-		active, reason := state.active(now, cfg.inputQuietFor)
-		if !active {
-			return
-		}
-		if !now.Before(deadline) {
-			if cfg.debug {
-				_ = writeStderr("amq wake [debug]: input deferral max hold reached (%s)\n", reason)
-			}
-			return
-		}
-
-		delay := inputDeferralDelay(state, now, deadline, cfg.inputQuietFor, cfg.inputPollInterval)
-		if delay <= 0 {
-			return
-		}
-		if cfg.debug {
-			_ = writeStderr("amq wake [debug]: deferring injection for %s (%s, pending_bytes=%d)\n", delay, reason, state.pendingBytes)
-		}
-		time.Sleep(delay)
+			time.Sleep(delay)
+		},
+		cfg.inputQuietFor,
+		cfg.inputMaxHold,
+		cfg.inputPollInterval,
+	)
+	if sampleErr != nil && cfg.debug {
+		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input deferral unavailable: %v\n", sampleErr)
 	}
+	if !allowInjection && cfg.debug {
+		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input deferral max hold reached (%s)\n", activeReason)
+	}
+	return allowInjection
 }
 
 func waitForTTYInputDrain(timeout time.Duration, pollInterval time.Duration) (time.Duration, bool, error) {
-	queueFD, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY, 0)
+	queueFD, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return 0, false, err
 	}

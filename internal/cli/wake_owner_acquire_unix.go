@@ -17,6 +17,9 @@ func classifyPersistedWakeClaim(inspection wakeLockInspection) wakeClaimClass {
 	if inspection.fileInfo == nil {
 		return wakeClaimInvalid
 	}
+	if err := validateWakeLockInspectionStateBindingJSON(inspection); err != nil {
+		return wakeClaimInvalid
+	}
 	switch inspection.fileInfo.Mode().Perm() {
 	case wakeOwnerLockFileMode:
 		if validateAuthoritativeWakeLockEnvelope(
@@ -44,6 +47,9 @@ func validateAuthoritativeWakeClaimPairAt(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 ) (wakeTarget, error) {
+	if err := validateBoundWakeMutationAt(dirfd, agentDir, inspection); err != nil {
+		return wakeTarget{}, err
+	}
 	if classifyPersistedWakeClaim(inspection) != wakeClaimAuthoritative {
 		return wakeTarget{}, fmt.Errorf("wake lock is not an authoritative owner claim")
 	}
@@ -61,6 +67,9 @@ func authoritativeWakeRecoveryTargetAt(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 ) (*wakeTarget, error) {
+	if err := validateBoundWakeMutationAt(dirfd, agentDir, inspection); err != nil {
+		return nil, err
+	}
 	target, exists, err := readWakeTargetRawAt(
 		dirfd,
 		agentDir,
@@ -113,10 +122,6 @@ func acquireAuthoritativeWakeLockWithOptions(
 	me string,
 	options wakeLockAcquireOptions,
 ) (func(), error) {
-	requested := *options.target
-	if err := validateAuthoritativeWakeTarget(requested, root, me); err != nil {
-		return nil, err
-	}
 	if err := os.MkdirAll(fsq.AgentBase(root, me), 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create agent directory: %w", err)
 	}
@@ -125,12 +130,30 @@ func acquireAuthoritativeWakeLockWithOptions(
 		return nil, err
 	}
 	defer func() { _ = agentDir.Close() }()
+	return acquireAuthoritativeWakeLockWithOptionsInDir(agentDir, root, me, options)
+}
 
+func acquireAuthoritativeWakeLockWithOptionsInDir(
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	options wakeLockAcquireOptions,
+) (func(), error) {
+	if agentDir == nil {
+		return nil, fmt.Errorf("wake agent directory capability is missing")
+	}
+	requested := *options.target
+	if err := validateAuthoritativeWakeTarget(requested, root, me); err != nil {
+		return nil, err
+	}
 	for {
 		var created wakeLockInspection
 		var stopCapability *authoritativeWakeStopCapability
 		retry := false
 		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+			if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+				return fmt.Errorf("validate canonical wake agent directory before owner acquisition: %w", err)
+			}
 			inspection := inspectWakeLockForOwnerTransition(dirfd, agentDir, root, me)
 			claimClass := classifyPersistedWakeClaim(inspection)
 			switch claimClass {
@@ -145,12 +168,17 @@ func acquireAuthoritativeWakeLockWithOptions(
 			}
 
 			requestedObservation, observeErr := observeAuthoritativeWakeOwner(*requested.Owner)
-			defer func() { _ = requestedObservation.Close() }()
 			if observeErr != nil {
-				return observeErr
+				return errors.Join(observeErr, requestedObservation.Close())
 			}
 			if requestedObservation.State != wakeOwnerSame {
-				return fmt.Errorf("requested wake owner is %s: %s", requestedObservation.State, requestedObservation.Reason)
+				return errors.Join(
+					fmt.Errorf("requested wake owner is %s: %s", requestedObservation.State, requestedObservation.Reason),
+					requestedObservation.Close(),
+				)
+			}
+			if err := requestedObservation.Close(); err != nil {
+				return err
 			}
 
 			if claimClass == wakeClaimAuthoritative {
@@ -162,12 +190,14 @@ func acquireAuthoritativeWakeLockWithOptions(
 				persistedReason := requestedObservation.Reason
 				if !sameWakeOwner(inspection.Lock.Owner, requested.Owner) {
 					persistedObservation, err := observeAuthoritativeWakeOwner(*inspection.Lock.Owner)
-					defer func() { _ = persistedObservation.Close() }()
 					if err != nil {
-						return err
+						return errors.Join(err, persistedObservation.Close())
 					}
 					persistedState = persistedObservation.State
 					persistedReason = persistedObservation.Reason
+					if err := persistedObservation.Close(); err != nil {
+						return err
+					}
 				}
 				ownersEqual := sameWakeOwner(inspection.Lock.Owner, requested.Owner)
 				wakeCapability, err := prepareAuthoritativeWakeStop(dirfd, agentDir, inspection)
@@ -243,7 +273,9 @@ func acquireAuthoritativeWakeLockWithOptions(
 			if err != nil {
 				return err
 			}
-			if err := publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, me, requested, lock); err != nil {
+			if err := publishAuthoritativeWakeClaimWithDebugAt(
+				dirfd, agentDir, root, me, requested, lock, options.debug,
+			); err != nil {
 				if errors.Is(err, errWakeOwnerLockExists) {
 					retry = true
 					return nil
@@ -258,28 +290,10 @@ func acquireAuthoritativeWakeLockWithOptions(
 						if _, verifyErr := validateAuthoritativeWakeClaimPairAt(dirfd, agentDir, current); verifyErr != nil {
 							return fmt.Errorf("%w (visible owner claim is unverified: %v)", err, verifyErr)
 						}
-						return fmt.Errorf("%w (the exact owner claim is visible and was preserved)", err)
-					}
-					if !publicationErr.Unsupported || publicationErr.Committed {
-						return err
-					}
-					if publicationErr.InstalledTarget == nil {
-						return fmt.Errorf("%w (installed owner target identity is unavailable; preserving it)", err)
-					}
-					removed, removeErr := removeWakeTargetIfSnapshotMatchesAt(
-						dirfd,
-						agentDir,
-						root,
-						me,
-						*publicationErr.InstalledTarget,
-					)
-					if removeErr != nil {
-						return fmt.Errorf("%w (uncommitted owner target cleanup refused: %v)", err, removeErr)
-					}
-					if removed {
-						if syncErr := syncWakeOwnerDirFD(dirfd); syncErr != nil {
-							return fmt.Errorf("%w (sync uncommitted owner target cleanup: %v)", err, syncErr)
+						if verifyErr := validateWakeBoundStateAt(dirfd, agentDir, root, me, current.Lock); verifyErr != nil {
+							return fmt.Errorf("%w (visible owner state binding is unverified: %v)", err, verifyErr)
 						}
+						return fmt.Errorf("%w (the exact owner claim is visible and was preserved)", err)
 					}
 					return err
 				}
@@ -291,6 +305,9 @@ func acquireAuthoritativeWakeLockWithOptions(
 			}
 			if _, err := validateAuthoritativeWakeClaimPairAt(dirfd, agentDir, created); err != nil {
 				return fmt.Errorf("verify created authoritative wake claim: %w", err)
+			}
+			if err := validateWakeBoundStateAt(dirfd, agentDir, root, me, created.Lock); err != nil {
+				return fmt.Errorf("verify created authoritative wake binding: %w", err)
 			}
 			return nil
 		})

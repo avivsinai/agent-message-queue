@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,10 @@ var cliSecureTempRoot string
 // dir look like refused cross-tree sends. Tests that need these signals set them
 // explicitly via t.Setenv, which overrides and restores around this clean baseline.
 func TestMain(m *testing.M) {
+	readTIOCSTILegacySysctl = func() ([]byte, error) {
+		return nil, os.ErrNotExist
+	}
+
 	if os.Getenv(cliHelperEnv) == "1" {
 		if err := Run(os.Args[1:], "test"); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)
@@ -29,7 +34,7 @@ func TestMain(m *testing.M) {
 		os.Exit(m.Run())
 	}
 
-	for _, k := range []string{"AM_ROOT", "AM_ROOT_ID", "AM_BASE_ROOT", "AM_BASE_ROOT_ID", "AM_SESSION", "AMQ_GLOBAL_ROOT"} {
+	for _, k := range []string{"AM_ROOT", "AM_ROOT_ID", "AM_BASE_ROOT", "AM_BASE_ROOT_ID", "AM_SESSION", "AMQ_GLOBAL_ROOT", envWakeOwner, "AMQ_WAKE_PRIVATE_STOP_FD"} {
 		_ = os.Unsetenv(k)
 	}
 
@@ -62,4 +67,14 @@ func TestMain(m *testing.M) {
 		exitCode = 1
 	}
 	os.Exit(exitCode)
+}
+
+func TestTIOCSTILegacySysctlTestDefaultIsNotReadableZero(t *testing.T) {
+	data, err := readTIOCSTILegacySysctl()
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("default error = %v, want os.ErrNotExist", err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("default data = %q, want empty", data)
+	}
 }

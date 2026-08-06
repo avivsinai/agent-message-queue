@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const DefaultLabel = "com.ohade.amq-keepalive"
+const DefaultLabel = "io.github.avivsinai.amq-keepalive"
 
 type Options struct {
 	Label        string
@@ -174,7 +174,9 @@ func Uninstall(ctx context.Context, label string, plistPath string, unload bool)
 		}
 	}
 	if unload {
-		_ = runLaunchctl(ctx, "bootout", serviceTarget(label))
+		if err := runLaunchctl(ctx, "bootout", serviceTarget(label)); err != nil {
+			return err
+		}
 	}
 	err := os.Remove(plistPath)
 	if errors.Is(err, os.ErrNotExist) {

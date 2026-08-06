@@ -49,7 +49,7 @@ func (g Ghostty) Discover(ctx context.Context) (string, error) {
 	if id == "" {
 		return "", errors.New("discover Ghostty terminal: empty terminal id")
 	}
-	return ghosttyTerminalTargetPrefix + id, nil
+	return g.NormalizeTarget(ghosttyTerminalTargetPrefix + id)
 }
 
 func (g Ghostty) Probe(ctx context.Context, target string) error {
@@ -113,7 +113,7 @@ func parseGhosttyTerminalTarget(target string) (string, error) {
 	if id == "" {
 		return "", errors.New("ghostty terminal target is missing an id")
 	}
-	return id, nil
+	return strings.ToUpper(id), nil
 }
 
 func sanitizePayloadForSubmit(payload string) string {

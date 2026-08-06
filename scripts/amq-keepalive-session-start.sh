@@ -85,11 +85,28 @@ read_hook_input() {
 INPUT="$(read_hook_input 2>/dev/null || true)"
 
 CWD=""
+SOURCE=""
 if command -v jq >/dev/null 2>&1 && [[ -n "$INPUT" ]]; then
     CWD="$(printf '%s' "$INPUT" | jq -r '.cwd // .workdir // .working_directory // empty' 2>/dev/null || true)"
+    SOURCE="$(printf '%s' "$INPUT" | jq -r '.source // empty' 2>/dev/null || true)"
 fi
 if [[ -n "$CWD" && -d "$CWD" ]]; then
     cd "$CWD" 2>/dev/null || true
+fi
+
+SOURCE_LOWER="$(printf '%s' "$SOURCE" | tr '[:upper:]' '[:lower:]')"
+case "$SOURCE_LOWER" in
+    clear|compact)
+        log "skip: SessionStart source=$SOURCE"
+        printf '{}\n'
+        exit 0
+        ;;
+esac
+
+if [[ -z "$TARGET" ]]; then
+    log "skip: no exact terminal target adapter=$ADAPTER"
+    printf '{}\n'
+    exit 0
 fi
 
 if ! command -v "$BIN" >/dev/null 2>&1; then
@@ -98,9 +115,9 @@ if ! command -v "$BIN" >/dev/null 2>&1; then
     exit 0
 fi
 
-args=(reattach --adapter "$ADAPTER" --amq "$AMQ_BIN" --wake-ready-timeout "${WAKE_TIMEOUT_MILLISECONDS}ms")
+args=(reattach --adapter "$ADAPTER" --amq "$AMQ_BIN" --wake-ready-timeout "${WAKE_TIMEOUT_MILLISECONDS}ms" --retire-detached)
 [[ -n "${AMQ_KEEPALIVE_SELF:-}" ]] && args+=(--self "$SELF_BIN")
-[[ -n "$TARGET" ]] && args+=(--target "$TARGET")
+args+=(--target "$TARGET")
 [[ -n "$REGISTRY" ]] && args+=(--registry "$REGISTRY")
 [[ -n "$ROOT" ]] && args+=(--root "$ROOT")
 [[ -n "$BASE_ROOT" ]] && args+=(--base-root "$BASE_ROOT")

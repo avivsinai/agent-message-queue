@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -129,10 +130,51 @@ func runEnvJSONForTest(t *testing.T, args ...string) envOutput {
 func expectSamePath(t *testing.T, got, want string) {
 	t.Helper()
 
-	resolvedGot, _ := filepath.EvalSymlinks(got)
-	resolvedWant, _ := filepath.EvalSymlinks(want)
+	resolvedGot := canonicalTestPath(t, got)
+	resolvedWant := canonicalTestPath(t, want)
 	if resolvedGot != resolvedWant {
 		t.Errorf("expected path %q, got %q", resolvedWant, resolvedGot)
+	}
+}
+
+// canonicalTestPath resolves symlinks in the longest existing prefix while
+// preserving any nonexistent suffix. EvalSymlinks returns an empty result on
+// failure, so ignoring its error can make two different missing paths compare
+// equal and let a resolution regression pass unnoticed.
+func canonicalTestPath(t *testing.T, path string) string {
+	t.Helper()
+
+	current, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("absolute path for %q: %v", path, err)
+	}
+	missing := make([]string, 0, 2)
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return filepath.Clean(resolved)
+		}
+		if !os.IsNotExist(err) {
+			t.Fatalf("resolve path %q at existing prefix %q: %v", path, current, err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			t.Fatalf("resolve path %q: no existing path prefix", path)
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
+}
+
+func TestCanonicalTestPathPreservesNonexistentSuffix(t *testing.T) {
+	parent := t.TempDir()
+	left := canonicalTestPath(t, filepath.Join(parent, "missing", "left"))
+	right := canonicalTestPath(t, filepath.Join(parent, "missing", "right"))
+	if left == right {
+		t.Fatalf("different nonexistent paths collapsed to %q", left)
 	}
 }
 
@@ -226,11 +268,7 @@ func TestFindAndLoadAmqrc(t *testing.T) {
 	// 'me' is not in .amqrc
 
 	// Verify Dir is set correctly (should be the root where .amqrc was found)
-	resolvedDir, _ := filepath.EvalSymlinks(result.Dir)
-	resolvedRoot, _ := filepath.EvalSymlinks(root)
-	if resolvedDir != resolvedRoot {
-		t.Errorf("expected Dir=%q, got %q", resolvedRoot, resolvedDir)
-	}
+	expectSamePath(t, result.Dir, root)
 }
 
 func TestFindAndLoadAmqrcNotFound(t *testing.T) {
@@ -311,11 +349,7 @@ func TestDetectAgentMailDir(t *testing.T) {
 
 		detected := detectAgentMailDir()
 		// Compare resolved paths (handles macOS /var -> /private/var symlink)
-		detectedResolved, _ := filepath.EvalSymlinks(detected)
-		expectedResolved, _ := filepath.EvalSymlinks(agentMailDir)
-		if detectedResolved != expectedResolved {
-			t.Errorf("expected %q, got %q", expectedResolved, detectedResolved)
-		}
+		expectSamePath(t, detected, agentMailDir)
 	})
 }
 
@@ -362,11 +396,7 @@ func TestResolveEnvConfigFromAmqrc(t *testing.T) {
 
 	// Root should be the literal .amqrc root
 	expectedRoot := filepath.Join(root, ".agent-mail")
-	resolvedRoot, _ := filepath.EvalSymlinks(rootVal)
-	expectedResolved, _ := filepath.EvalSymlinks(expectedRoot)
-	if resolvedRoot != expectedResolved {
-		t.Errorf("expected root=%q, got %q", expectedResolved, resolvedRoot)
-	}
+	expectSamePath(t, rootVal, expectedRoot)
 	// me is NOT read from .amqrc (use env var or flag instead)
 	if meVal != "" {
 		t.Errorf("expected me=empty (not from .amqrc), got %q", meVal)
@@ -406,11 +436,7 @@ func TestResolveEnvConfigRelativeRootFromSubdir(t *testing.T) {
 
 	// Root should be resolved relative to .amqrc location (literal)
 	expectedRoot := filepath.Join(root, ".agent-mail")
-	resolvedRoot, _ := filepath.EvalSymlinks(rootVal)
-	expectedResolved, _ := filepath.EvalSymlinks(expectedRoot)
-	if resolvedRoot != expectedResolved {
-		t.Errorf("expected root=%q (relative to .amqrc), got %q", expectedResolved, resolvedRoot)
-	}
+	expectSamePath(t, rootVal, expectedRoot)
 }
 
 func TestResolveEnvConfigFlagOverride(t *testing.T) {
@@ -520,8 +546,8 @@ func TestResolveEnvConfigFlagOverridesEnv(t *testing.T) {
 func TestResolveEnvConfigAutoDetect(t *testing.T) {
 	root := t.TempDir()
 
-	// Isolate from the developer's real global config: a ~/.amqrc or
-	// AMQ_GLOBAL_ROOT on the machine would win over auto-detect.
+	// Isolate from the developer's real global config so this test exercises
+	// auto-detection without unrelated fallback warnings.
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AMQ_GLOBAL_ROOT", "")
 
@@ -546,10 +572,11 @@ func TestResolveEnvConfigAutoDetect(t *testing.T) {
 		t.Fatalf("resolveEnvConfig: %v", err)
 	}
 
-	// Auto-detect finds .agent-mail (literal, no session appended)
-	if rootVal != ".agent-mail" {
-		t.Errorf("expected root=.agent-mail, got %q", rootVal)
+	// Auto-detect returns the canonical tree (no session appended).
+	if !filepath.IsAbs(rootVal) {
+		t.Errorf("expected absolute auto-detected root, got %q", rootVal)
 	}
+	expectSamePath(t, rootVal, agentMailDir)
 	if meVal != "" {
 		t.Errorf("expected me=empty (not in .amqrc), got %q", meVal)
 	}
@@ -851,7 +878,7 @@ func TestRunEnvJSONGlobalAmqrcNoProject(t *testing.T) {
 	}
 }
 
-func TestRunEnvInvalidGlobalAmqrcBeatsAutoDetect(t *testing.T) {
+func TestRunEnvInvalidGlobalAmqrcBeatsAutoDetectOutsideGit(t *testing.T) {
 	cwd := t.TempDir()
 	fakeHome := t.TempDir()
 	if err := os.Mkdir(filepath.Join(cwd, ".agent-mail"), 0o755); err != nil {
@@ -873,14 +900,11 @@ func TestRunEnvInvalidGlobalAmqrcBeatsAutoDetect(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 
-	_, err := captureEnvStdout(t, func() error {
+	_, _, err := captureEnvOutput(t, func() error {
 		return runEnv([]string{"--json"})
 	})
-	if err == nil {
-		t.Fatal("expected invalid global ~/.amqrc to fail before auto-detect")
-	}
-	if !strings.Contains(err.Error(), "invalid ~/.amqrc") {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "invalid ~/.amqrc") {
+		t.Fatalf("error = %v, want invalid global config before outside-Git auto-detect", err)
 	}
 }
 
@@ -923,6 +947,56 @@ func TestRunEnvJSONV1SessionFlag(t *testing.T) {
 	}
 	if result.RootSource != string(rootSourceFlag) {
 		t.Errorf("expected root_source=%q, got %q", rootSourceFlag, result.RootSource)
+	}
+}
+
+func TestRunEnvSessionHonorsConsistentLegacyPin(t *testing.T) {
+	baseRoot := t.TempDir()
+	currentRoot := filepath.Join(baseRoot, "current")
+	targetRoot := filepath.Join(baseRoot, "feature-x")
+	for _, root := range []string{currentRoot, targetRoot} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatalf("mkdir session root %s: %v", root, err)
+		}
+	}
+	t.Setenv(envRoot, currentRoot)
+	t.Setenv(envBaseRoot, baseRoot)
+	t.Setenv(envSession, "current")
+	setOptionalEnv(t, envRootID, "", false)
+	setOptionalEnv(t, envBaseRootID, "", false)
+
+	result := runEnvJSONForTest(t, "--session", "feature-x", "--me", "codex")
+	expectSamePath(t, result.Root, targetRoot)
+	expectSamePath(t, result.BaseRoot, baseRoot)
+	if result.SessionName != "feature-x" {
+		t.Fatalf("session_name = %q, want feature-x", result.SessionName)
+	}
+}
+
+func TestRunEnvSessionRejectsAMRootOutsideLegacyPin(t *testing.T) {
+	baseRoot := t.TempDir()
+	currentRoot := filepath.Join(baseRoot, "current")
+	targetRoot := filepath.Join(baseRoot, "feature-x")
+	foreignRoot := filepath.Join(t.TempDir(), "foreign")
+	for _, root := range []string{currentRoot, targetRoot, foreignRoot} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatalf("mkdir session root %s: %v", root, err)
+		}
+	}
+	t.Setenv(envRoot, foreignRoot)
+	t.Setenv(envBaseRoot, baseRoot)
+	t.Setenv(envSession, "current")
+	setOptionalEnv(t, envRootID, "", false)
+	setOptionalEnv(t, envBaseRootID, "", false)
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runEnv([]string{"--session", "feature-x", "--me", "codex", "--json"})
+	})
+	if err == nil || !strings.Contains(err.Error(), "differs from pinned root") {
+		t.Fatalf("runEnv error = %v, want AM_ROOT/legacy-pin mismatch refusal", err)
+	}
+	if stdout != "" {
+		t.Fatalf("runEnv emitted a replacement context after mismatch: %q", stdout)
 	}
 }
 
@@ -1431,12 +1505,12 @@ func TestRunEnvJSONV1AutoDetect(t *testing.T) {
 
 	result := runEnvJSONForTest(t)
 
-	if result.Root != ".agent-mail" {
-		t.Errorf("expected root=.agent-mail, got %q", result.Root)
+	expectedRoot := filepath.Join(cwd, ".agent-mail")
+	if !filepath.IsAbs(result.Root) || !filepath.IsAbs(result.BaseRoot) {
+		t.Errorf("expected absolute root/base_root, got root=%q base=%q", result.Root, result.BaseRoot)
 	}
-	if result.BaseRoot != ".agent-mail" {
-		t.Errorf("expected base_root=.agent-mail, got %q", result.BaseRoot)
-	}
+	expectSamePath(t, result.Root, expectedRoot)
+	expectSamePath(t, result.BaseRoot, expectedRoot)
 	if result.RootSource != string(rootSourceAutoDetect) {
 		t.Errorf("expected root_source=%q, got %q", rootSourceAutoDetect, result.RootSource)
 	}
@@ -1618,11 +1692,7 @@ func TestLoadGlobalAmqrc(t *testing.T) {
 	if result.Config.Root != "/global/agent-mail" {
 		t.Errorf("expected root=/global/agent-mail, got %q", result.Config.Root)
 	}
-	resolvedDir, _ := filepath.EvalSymlinks(result.Dir)
-	resolvedHome, _ := filepath.EvalSymlinks(fakeHome)
-	if resolvedDir != resolvedHome {
-		t.Errorf("expected Dir=%q, got %q", resolvedHome, resolvedDir)
-	}
+	expectSamePath(t, result.Dir, fakeHome)
 }
 
 func TestFindAndLoadAmqrcRejectsUntrustedProvenance(t *testing.T) {
@@ -1670,6 +1740,31 @@ func TestLoadGlobalAmqrcNotFound(t *testing.T) {
 	}
 }
 
+func TestLoadGlobalAmqrcReadErrorIsNotAbsence(t *testing.T) {
+	fakeHome := t.TempDir()
+	path := filepath.Join(fakeHome, ".amqrc")
+	if err := os.WriteFile(path, []byte(`{"root":"/global/agent-mail"}`), 0o600); err != nil {
+		t.Fatalf("write ~/.amqrc: %v", err)
+	}
+	t.Setenv("HOME", fakeHome)
+
+	originalReadFile := globalAmqrcReadFile
+	globalAmqrcReadFile = func(string) ([]byte, error) {
+		return nil, errors.New("read denied")
+	}
+	t.Cleanup(func() {
+		globalAmqrcReadFile = originalReadFile
+	})
+
+	_, err := loadGlobalAmqrc()
+	if err == nil || !strings.Contains(err.Error(), "cannot read ~/.amqrc") {
+		t.Fatalf("loadGlobalAmqrc error = %v, want read failure", err)
+	}
+	if errors.Is(err, errAmqrcNotFound) {
+		t.Fatalf("read failure was classified as absence: %v", err)
+	}
+}
+
 func TestLoadGlobalAmqrcInvalidJSON(t *testing.T) {
 	fakeHome := t.TempDir()
 	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), []byte("not json"), 0o644); err != nil {
@@ -1689,6 +1784,55 @@ func TestLoadGlobalAmqrcInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestFindAmqrcForRootUsesGlobalConfigOnlyForConfiguredTree(t *testing.T) {
+	fakeHome := t.TempDir()
+	globalRoot := filepath.Join(fakeHome, "global-mail")
+	globalSession := filepath.Join(globalRoot, "session1")
+	peerRoot := filepath.Join(fakeHome, "peer-mail")
+	unrelatedRoot := filepath.Join(fakeHome, "workspace", "unrelated", ".agent-mail", "session1")
+	for _, dir := range []string{globalSession, peerRoot, unrelatedRoot} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	rcData, err := json.Marshal(amqrc{
+		Root:    "global-mail",
+		Project: "global-fabric",
+		Peers:   map[string]string{"peer": "peer-mail"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), rcData, 0o600); err != nil {
+		t.Fatalf("write global .amqrc: %v", err)
+	}
+	t.Setenv("HOME", fakeHome)
+
+	for _, root := range []string{globalRoot, globalSession} {
+		result, err := findAmqrcForRoot(root)
+		if err != nil {
+			t.Fatalf("findAmqrcForRoot(%s): %v", root, err)
+		}
+		if result.Path != filepath.Join(fakeHome, ".amqrc") {
+			t.Fatalf("config path for %s = %q, want global ~/.amqrc", root, result.Path)
+		}
+		project, peers := envProjectAndPeers(root)
+		if project != "global-fabric" {
+			t.Fatalf("project for %s = %q, want global-fabric", root, project)
+		}
+		expectSamePath(t, peers["peer"], peerRoot)
+		resolvedPeer, err := resolvePeer(root, "peer")
+		if err != nil {
+			t.Fatalf("resolvePeer(%s): %v", root, err)
+		}
+		expectSamePath(t, resolvedPeer, peerRoot)
+	}
+
+	if _, err := findAmqrcForRoot(unrelatedRoot); !errors.Is(err, errAmqrcNotFound) {
+		t.Fatalf("unrelated root reached global ~/.amqrc: %v", err)
+	}
+}
+
 func TestGlobalAmqrcFallbackWhenProjectAbsent(t *testing.T) {
 	// No project .amqrc, but global ~/.amqrc exists -> global wins
 	projectDir := t.TempDir()
@@ -1703,6 +1847,7 @@ func TestGlobalAmqrcFallbackWhenProjectAbsent(t *testing.T) {
 	defer func() { _ = os.Chdir(oldWd) }()
 
 	t.Setenv("HOME", fakeHome)
+	t.Setenv("PATH", "") // Outside-repository fallback must not require git.
 	_ = os.Unsetenv("AM_ROOT")
 	_ = os.Unsetenv("AM_ME")
 	_ = os.Unsetenv("AMQ_GLOBAL_ROOT")
@@ -1720,6 +1865,566 @@ func TestGlobalAmqrcFallbackWhenProjectAbsent(t *testing.T) {
 	}
 	if source != rootSourceGlobalRC {
 		t.Errorf("expected source=global_amqrc, got %q", source)
+	}
+}
+
+func TestGlobalAmqrcFallbackRefusedInUnconfiguredLinkedWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for linked worktree routing")
+	}
+
+	fakeHome := t.TempDir()
+	primary := filepath.Join(fakeHome, "workspace", "primary")
+	linked := filepath.Join(fakeHome, "workspace", "linked")
+	if err := os.MkdirAll(primary, 0o700); err != nil {
+		t.Fatalf("mkdir primary: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(primary, "README.md"), []byte("fixture\n"), 0o600); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	runGitForTest(t, primary, "init")
+	runGitForTest(t, primary, "add", "README.md")
+	runGitForTest(t, primary, "-c", "user.name=AMQ Test", "-c", "user.email=amq@example.invalid", "commit", "-m", "fixture")
+	runGitForTest(t, primary, "worktree", "add", "-b", "linked", linked)
+
+	primaryRoot := filepath.Join(primary, ".agent-mail")
+	globalRoot := filepath.Join(fakeHome, "global-agent-mail")
+	for _, root := range []string{primaryRoot, globalRoot} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatalf("mkdir root %s: %v", root, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(primary, ".amqrc"), []byte(`{"root":".agent-mail","project":"primary"}`), 0o600); err != nil {
+		t.Fatalf("write primary .amqrc: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), []byte(`{"root":"`+globalRoot+`","project":"unrelated"}`), 0o600); err != nil {
+		t.Fatalf("write global .amqrc: %v", err)
+	}
+
+	t.Setenv("HOME", fakeHome)
+	setOptionalEnv(t, envRoot, "", false)
+	setOptionalEnv(t, envBaseRoot, "", false)
+	setOptionalEnv(t, envSession, "", false)
+	setOptionalEnv(t, envRootID, "", false)
+	setOptionalEnv(t, envBaseRootID, "", false)
+	setOptionalEnv(t, envMe, "", false)
+	setOptionalEnv(t, envGlobalRoot, "", false)
+	t.Chdir(linked)
+	t.Cleanup(resetAmqrcCache)
+	resetAmqrcCache()
+
+	if _, err := os.Stat(filepath.Join(linked, ".amqrc")); !os.IsNotExist(err) {
+		t.Fatalf("linked .amqrc unexpectedly exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linked, ".agent-mail")); !os.IsNotExist(err) {
+		t.Fatalf("linked .agent-mail unexpectedly exists: %v", err)
+	}
+	if _, err := findAndLoadAmqrc(); !errors.Is(err, errAmqrcNotFound) {
+		t.Fatalf("linked worktree project config = %v, want errAmqrcNotFound", err)
+	}
+
+	_, _, _, err := resolveEnvConfigWithSource("", "")
+	if err == nil {
+		t.Fatal("expected implicit ~/.amqrc fallback to be refused in an unconfigured linked worktree")
+	}
+	for _, want := range []string{"Git worktree", linked, "~/.amqrc", "--session", "AMQ_GLOBAL_ROOT"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q: %v", want, err)
+		}
+	}
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runEnv([]string{"--session", "session1", "--me", "codex-lead"})
+	})
+	if err == nil || GetExitCode(err) != ExitContextMismatch || !strings.Contains(err.Error(), "Git worktree") {
+		t.Fatalf("amq env --session error = %v, want context-mismatch refusal", err)
+	}
+	if stdout != "" {
+		t.Fatalf("amq env --session emitted a wrong-root context: %q", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(globalRoot, "session1")); !os.IsNotExist(err) {
+		t.Fatalf("wrong-root session was mutated: %v", err)
+	}
+	if _, found, err := resolveDiscoveredBaseRoot(); err == nil || found {
+		t.Fatalf("coop base discovery = found %v, err %v; want refusal", found, err)
+	}
+
+	t.Setenv(envGlobalRoot, primaryRoot)
+	root, source, _, err := resolveEnvConfigWithSource("", "")
+	if err != nil {
+		t.Fatalf("explicit AMQ_GLOBAL_ROOT: %v", err)
+	}
+	expectSamePath(t, root, primaryRoot)
+	if source != rootSourceGlobalEnv {
+		t.Fatalf("source = %q, want %q", source, rootSourceGlobalEnv)
+	}
+	result := runEnvJSONForTest(t, "--session", "session1", "--me", "codex-lead")
+	expectSamePath(t, result.Root, filepath.Join(primaryRoot, "session1"))
+	if result.RootSource != string(rootSourceFlag) {
+		t.Fatalf("session root source = %q, want %q", result.RootSource, rootSourceFlag)
+	}
+}
+
+func TestGlobalAmqrcFallbackRefusedForSubmoduleStyleGitFile(t *testing.T) {
+	fakeHome := t.TempDir()
+	submodule := filepath.Join(fakeHome, "workspace", "submodule")
+	submoduleGitDir := filepath.Join(fakeHome, "workspace", "primary", ".git", "modules", "submodule")
+	globalRoot := filepath.Join(fakeHome, "global-agent-mail")
+	for _, dir := range []string{submodule, submoduleGitDir, globalRoot} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(submodule, ".git"), []byte("gitdir: "+submoduleGitDir+"\n"), 0o600); err != nil {
+		t.Fatalf("write submodule .git file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), []byte(`{"root":"`+globalRoot+`"}`), 0o600); err != nil {
+		t.Fatalf("write global .amqrc: %v", err)
+	}
+
+	t.Setenv("HOME", fakeHome)
+	setOptionalEnv(t, envRoot, "", false)
+	setOptionalEnv(t, envBaseRoot, "", false)
+	setOptionalEnv(t, envSession, "", false)
+	setOptionalEnv(t, envRootID, "", false)
+	setOptionalEnv(t, envBaseRootID, "", false)
+	setOptionalEnv(t, envMe, "", false)
+	setOptionalEnv(t, envGlobalRoot, "", false)
+	t.Chdir(submodule)
+	t.Cleanup(resetAmqrcCache)
+	resetAmqrcCache()
+
+	_, _, _, err := resolveEnvConfigWithSource("", "")
+	if err == nil || GetExitCode(err) != ExitContextMismatch {
+		t.Fatalf("submodule-style .git error = %v, want context mismatch", err)
+	}
+}
+
+func TestGlobalAmqrcFallbackRefusedInPrimaryGitWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for primary worktree routing")
+	}
+	fakeHome := t.TempDir()
+	repo := filepath.Join(fakeHome, "workspace", "primary")
+	globalRoot := filepath.Join(fakeHome, "global-agent-mail")
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, repo, "init")
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), []byte(`{"root":"`+globalRoot+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", fakeHome)
+	for _, key := range []string{envRoot, envBaseRoot, envSession, envRootID, envBaseRootID, envMe, envGlobalRoot} {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+	t.Chdir(repo)
+	resetAmqrcCache()
+	t.Cleanup(resetAmqrcCache)
+
+	_, _, _, err := resolveEnvConfigWithSource("", "")
+	if err == nil || GetExitCode(err) != ExitContextMismatch || !strings.Contains(err.Error(), repo) {
+		t.Fatalf("primary worktree error = %v, want context mismatch naming %s", err, repo)
+	}
+}
+
+func TestGitWorktreeDetectionUsesFilesystemAcrossSymlinkAndHostileGitEnv(t *testing.T) {
+	realRepo := filepath.Join(t.TempDir(), "repo")
+	nested := filepath.Join(realRepo, "nested")
+	if err := os.MkdirAll(filepath.Join(realRepo, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(realRepo, alias); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "hostile"))
+	t.Setenv("GIT_WORK_TREE", t.TempDir())
+	t.Setenv("GIT_COMMON_DIR", t.TempDir())
+	t.Chdir(filepath.Join(alias, "nested"))
+
+	top, ok := gitWorktreeRootFromCWD()
+	if !ok {
+		t.Fatal("filesystem-backed Git worktree was not detected")
+	}
+	expectSamePath(t, top, realRepo)
+}
+
+func TestGitWorktreeDetectionTreatsAnyMarkerOrInspectionFailureAsSafetySignal(t *testing.T) {
+	t.Run("symlink marker", func(t *testing.T) {
+		repo := t.TempDir()
+		target := filepath.Join(t.TempDir(), "actual-git-dir")
+		if err := os.MkdirAll(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(repo, ".git")); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Chdir(repo)
+		top, ok := gitWorktreeRootFromCWD()
+		if !ok {
+			t.Fatal(".git symlink was not treated as a routing safety signal")
+		}
+		expectSamePath(t, top, repo)
+	})
+
+	t.Run("inspection failure", func(t *testing.T) {
+		repo := t.TempDir()
+		t.Chdir(repo)
+		physicalRepo, err := filepath.EvalSymlinks(repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		targetMarker := filepath.Join(physicalRepo, ".git")
+		original := gitMarkerLstat
+		gitMarkerLstat = func(path string) (os.FileInfo, error) {
+			if filepath.Clean(path) == filepath.Clean(targetMarker) {
+				return nil, os.ErrPermission
+			}
+			return os.Lstat(path)
+		}
+		t.Cleanup(func() { gitMarkerLstat = original })
+		top, ok := gitWorktreeRootFromCWD()
+		if !ok {
+			t.Fatal("non-ENOENT .git inspection failure failed open")
+		}
+		expectSamePath(t, top, repo)
+	})
+}
+
+func TestGitWorktreeDiscoveryStopsAtWorktreeRoot(t *testing.T) {
+	for _, source := range []string{".amqrc", ".agent-mail"} {
+		t.Run(source, func(t *testing.T) {
+			fakeHome := t.TempDir()
+			workspace := filepath.Join(t.TempDir(), "workspace")
+			repo := filepath.Join(workspace, "repo")
+			nested := filepath.Join(repo, "nested")
+			if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(nested, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ancestorRoot := filepath.Join(workspace, ".agent-mail")
+			if source == ".amqrc" {
+				if err := os.WriteFile(filepath.Join(workspace, ".amqrc"), []byte(`{"root":".agent-mail"}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.MkdirAll(ancestorRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			t.Setenv("HOME", fakeHome)
+			for _, key := range []string{envRoot, envBaseRoot, envSession, envRootID, envBaseRootID, envMe, envGlobalRoot} {
+				setOptionalEnv(t, key, "", false)
+			}
+			t.Chdir(nested)
+			resetAmqrcCache()
+			t.Cleanup(resetAmqrcCache)
+
+			if _, err := findAndLoadAmqrc(); !errors.Is(err, errAmqrcNotFound) {
+				t.Fatalf("ancestor config escaped Git ceiling: %v", err)
+			}
+			if got := detectAgentMailDir(); got != "" {
+				t.Fatalf("ancestor queue escaped Git ceiling: %q", got)
+			}
+			if _, _, _, err := resolveEnvConfigWithSource("", ""); err == nil || GetExitCode(err) != ExitContextMismatch {
+				t.Fatalf("environment resolver error = %v, want context mismatch", err)
+			}
+			if _, found, err := resolveDiscoveredBaseRoot(); err == nil || found || GetExitCode(err) != ExitContextMismatch {
+				t.Fatalf("base resolver found=%v err=%v, want context mismatch", found, err)
+			}
+			stdout, _, err := captureEnvOutput(t, func() error {
+				return runEnv([]string{"--session", "session1", "--me", "codex-lead"})
+			})
+			if err == nil || GetExitCode(err) != ExitContextMismatch || stdout != "" {
+				t.Fatalf("runEnv stdout=%q err=%v, want empty stdout and exit 5", stdout, err)
+			}
+			if _, err := os.Stat(filepath.Join(ancestorRoot, "session1")); !os.IsNotExist(err) {
+				t.Fatalf("ancestor queue was mutated: %v", err)
+			}
+		})
+	}
+}
+
+func TestDiscoveryAtGitTopAndAbovePlainDirectory(t *testing.T) {
+	for _, insideGit := range []bool{false, true} {
+		for _, source := range []string{".amqrc", ".agent-mail"} {
+			name := fmt.Sprintf("inside_git=%v/%s", insideGit, source)
+			t.Run(name, func(t *testing.T) {
+				fakeHome := t.TempDir()
+				top := filepath.Join(t.TempDir(), "top")
+				nested := filepath.Join(top, "nested")
+				if err := os.MkdirAll(nested, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if insideGit {
+					if err := os.MkdirAll(filepath.Join(top, ".git"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				root := filepath.Join(top, ".agent-mail")
+				if source == ".amqrc" {
+					if err := os.WriteFile(filepath.Join(top, ".amqrc"), []byte(`{"root":".agent-mail"}`), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.MkdirAll(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("HOME", fakeHome)
+				setOptionalEnv(t, envRoot, "", false)
+				setOptionalEnv(t, envGlobalRoot, "", false)
+				t.Chdir(nested)
+				resetAmqrcCache()
+				t.Cleanup(resetAmqrcCache)
+
+				resolved, sourceKind, _, err := resolveEnvConfigWithSource("", "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				expectSamePath(t, resolveRoot(resolved), root)
+				wantSource := rootSourceAutoDetect
+				if source == ".amqrc" {
+					wantSource = rootSourceProjectRC
+				}
+				if sourceKind != wantSource {
+					t.Fatalf("source = %q, want %q", sourceKind, wantSource)
+				}
+			})
+		}
+	}
+}
+
+func TestGitTopAtHomeIsIncludedInLocalDiscovery(t *testing.T) {
+	for _, source := range []string{".amqrc", ".agent-mail"} {
+		t.Run(source, func(t *testing.T) {
+			home := t.TempDir()
+			nested := filepath.Join(home, "nested", "deeper")
+			if err := os.MkdirAll(filepath.Join(home, ".git"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(nested, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			root := filepath.Join(home, ".agent-mail")
+			if source == ".amqrc" {
+				if err := os.WriteFile(filepath.Join(home, ".amqrc"), []byte(`{"root":".agent-mail"}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", home)
+			for _, key := range []string{envRoot, envBaseRoot, envSession, envRootID, envBaseRootID, envMe, envGlobalRoot} {
+				setOptionalEnv(t, key, "", false)
+			}
+			t.Chdir(nested)
+			resetAmqrcCache()
+
+			resolved, sourceKind, _, err := resolveEnvConfigWithSource("", "")
+			if err != nil {
+				t.Fatalf("environment resolver: %v", err)
+			}
+			expectSamePath(t, resolveRoot(resolved), root)
+			wantSource := rootSourceAutoDetect
+			if source == ".amqrc" {
+				wantSource = rootSourceProjectRC
+			}
+			if sourceKind != wantSource {
+				t.Fatalf("source = %q, want %q", sourceKind, wantSource)
+			}
+			discovered, found, err := resolveDiscoveredBaseRoot()
+			if err != nil || !found {
+				t.Fatalf("base resolver root=%q found=%v err=%v", discovered, found, err)
+			}
+			expectSamePath(t, discovered, root)
+		})
+	}
+}
+
+func TestGitWorktreeLocalRootIgnoresMalformedHomeConfig(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for repository routing")
+	}
+	fakeHome := t.TempDir()
+	repo := filepath.Join(fakeHome, "workspace", "repo")
+	localRoot := filepath.Join(repo, ".agent-mail")
+	if err := os.MkdirAll(localRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, repo, "init")
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", fakeHome)
+	setOptionalEnv(t, envRoot, "", false)
+	setOptionalEnv(t, envGlobalRoot, "", false)
+	t.Chdir(repo)
+	resetAmqrcCache()
+	t.Cleanup(resetAmqrcCache)
+
+	root, source, _, err := resolveEnvConfigWithSource("", "")
+	if err != nil {
+		t.Fatalf("local root with ineligible malformed home config: %v", err)
+	}
+	expectSamePath(t, resolveRoot(root), localRoot)
+	if source != rootSourceAutoDetect {
+		t.Fatalf("source = %q, want %q", source, rootSourceAutoDetect)
+	}
+}
+
+func TestAMQGlobalRootWinsOverRepoLocalAutoDetect(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for repository routing")
+	}
+	repo := t.TempDir()
+	localRoot := filepath.Join(repo, ".agent-mail")
+	explicitRoot := filepath.Join(t.TempDir(), "shared")
+	for _, root := range []string{localRoot, explicitRoot} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGitForTest(t, repo, "init")
+	t.Setenv(envGlobalRoot, explicitRoot)
+	setOptionalEnv(t, envRoot, "", false)
+	t.Chdir(repo)
+	resetAmqrcCache()
+	t.Cleanup(resetAmqrcCache)
+
+	root, source, _, err := resolveEnvConfigWithSource("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectSamePath(t, root, explicitRoot)
+	if source != rootSourceGlobalEnv {
+		t.Fatalf("source = %q, want %q", source, rootSourceGlobalEnv)
+	}
+	discovered, found, err := resolveDiscoveredBaseRoot()
+	if err != nil || !found {
+		t.Fatalf("discovered root = %q, found=%v, err=%v", discovered, found, err)
+	}
+	expectSamePath(t, discovered, explicitRoot)
+}
+
+func TestStatusPreservingEnvShellFormStopsBeforeSend(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "sent")
+	script := `
+amq() {
+  if [ "$1" = env ]; then
+    return 5
+  fi
+  : > "$AMQ_TEST_SEND_MARKER"
+}
+amq_context="$(amq env --session session1 --me codex-lead)" &&
+eval "$amq_context" &&
+amq send --to peer --body wrong-root
+`
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Env = append(os.Environ(), "AMQ_TEST_SEND_MARKER="+marker)
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != ExitContextMismatch {
+		t.Fatalf("status-preserving shell exit = %v, want %d", err, ExitContextMismatch)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("send continued after env failure: %v", err)
+	}
+}
+
+func TestHomeConfigAndAgentMailAreGlobalNotProjectLocal(t *testing.T) {
+	fakeHome := t.TempDir()
+	projectDir := filepath.Join(fakeHome, "workspace", "plain-repo")
+	homeAgentMail := filepath.Join(fakeHome, defaultCoopRoot)
+	globalRCRoot := filepath.Join(fakeHome, "configured-global-root")
+	for _, dir := range []string{projectDir, homeAgentMail, globalRCRoot} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	rcData, err := json.Marshal(map[string]string{"root": globalRCRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeHome, ".amqrc"), rcData, 0o600); err != nil {
+		t.Fatalf("write global .amqrc: %v", err)
+	}
+
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldDir) })
+	t.Setenv("HOME", fakeHome)
+	t.Setenv(envRoot, "")
+	t.Setenv(envGlobalRoot, "")
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := findAndLoadAmqrc(); !errors.Is(err, errAmqrcNotFound) {
+		t.Fatalf("project config discovery reached HOME/.amqrc: %v", err)
+	}
+	if got := detectAgentMailDir(); got != "" {
+		t.Fatalf("repo-local auto-detection reached HOME/.agent-mail: %q", got)
+	}
+	root, source, _, err := resolveEnvConfigWithSource("", "")
+	if err != nil {
+		t.Fatalf("resolveEnvConfigWithSource: %v", err)
+	}
+	expectSamePath(t, root, globalRCRoot)
+	if source != rootSourceGlobalRC {
+		t.Fatalf("root source = %q, want %q", source, rootSourceGlobalRC)
+	}
+}
+
+func TestRepoLocalAgentMailWinsOverGlobalAmqrcFallback(t *testing.T) {
+	fakeHome := t.TempDir()
+	projectDir := filepath.Join(fakeHome, "workspace", "snagline")
+	localRoot := filepath.Join(projectDir, ".agent-mail")
+	gitDir := filepath.Join(projectDir, ".git")
+	globalRoot := filepath.Join(fakeHome, "global-agent-mail")
+	for _, dir := range []string{localRoot, gitDir, globalRoot} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(
+		filepath.Join(fakeHome, ".amqrc"),
+		[]byte(fmt.Sprintf(`{"root":%q}`, globalRoot)),
+		0o600,
+	); err != nil {
+		t.Fatalf("write global .amqrc: %v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWd)
+		resetAmqrcCache()
+	})
+
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("AM_ROOT", "")
+	t.Setenv("AM_ME", "")
+	t.Setenv("AMQ_GLOBAL_ROOT", "")
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	root, source, _, err := resolveEnvConfigWithSource("", "")
+	if err != nil {
+		t.Fatalf("resolveEnvConfigWithSource: %v", err)
+	}
+	expectSamePath(t, resolveRoot(root), localRoot)
+	if source != rootSourceAutoDetect {
+		t.Fatalf("root source = %q, want %q", source, rootSourceAutoDetect)
 	}
 }
 

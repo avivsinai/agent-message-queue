@@ -5,14 +5,22 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
+
+var afterWakeLockAtRead = func() {}
+var syncWakeLockAfterCommitDirFD = func(fd int) error {
+	return syncWakeOwnerDirFD(fd)
+}
 
 func readWakeLockFileAt(dirfd int, path string) ([]byte, os.FileInfo, error) {
 	open := func() (*os.File, error) {
@@ -38,6 +46,7 @@ func readWakeLockFileAt(dirfd int, path string) ([]byte, os.FileInfo, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	afterWakeLockAtRead()
 	pathFile, err := open()
 	if err != nil {
 		return nil, nil, err
@@ -51,7 +60,9 @@ func readWakeLockFileAt(dirfd int, path string) ([]byte, os.FileInfo, error) {
 		return nil, nil, err
 	}
 	if !sameWakeFileIdentity(info, pathInfo) {
-		return nil, nil, fmt.Errorf("wake lock %s changed while opening", path)
+		return nil, nil, newWakeSnapshotReadChangedError(
+			fmt.Errorf("wake lock %s changed while opening", path),
+		)
 	}
 	return data, info, nil
 }
@@ -85,6 +96,9 @@ func createWakeLockAt(
 	}
 	if lock.Agent != me {
 		return fmt.Errorf("wake lock agent mismatch")
+	}
+	if err := validateWakeLockStateBinding(lock); err != nil {
+		return err
 	}
 	data, err := json.Marshal(lock)
 	if err != nil {
@@ -142,7 +156,10 @@ func createWakeLockAt(
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("failed to close wake lock: %w", err)
 	}
-	if err := syncWakeOwnerDirFD(dirfd); err != nil {
+	// O_EXCL made this lock name the no-replace ownership commit. Preserve the
+	// exact claim if the following durability confirmation reports an error.
+	committed = true
+	if err := syncWakeLockAfterCommitDirFD(dirfd); err != nil {
 		return fmt.Errorf("sync wake lock directory after commit: %w", err)
 	}
 	created := readWakeLockMetadataAt(dirfd, agentDir, root, me)
@@ -151,7 +168,6 @@ func createWakeLockAt(
 		!bytes.Equal(created.raw, data) {
 		return fmt.Errorf("failed to verify created wake lock generation")
 	}
-	committed = true
 	return nil
 }
 
@@ -174,19 +190,271 @@ func removeWakeLockIfUnchangedGuardedAt(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 ) error {
-	path := filepath.Join(agentDir.path, ".wake.lock")
-	return removeWakeLockIfUnchangedGuardedWithIO(
+	_, err := removeWakeLockIfUnchangedGuardedAtStatus(dirfd, agentDir, inspection)
+	return err
+}
+
+func removeWakeLockIfUnchangedGuardedAtStatus(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+) (bool, error) {
+	outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
+		dirfd,
+		agentDir,
 		inspection,
-		func() ([]byte, os.FileInfo, error) { return readWakeLockFileAt(dirfd, path) },
 		func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
 	)
+	return outcome.Committed, outcome.Err
+}
+
+type wakeLockRemovalOutcome struct {
+	Committed bool
+	Err       error
+}
+
+type wakeLockRemovalResidue string
+
+const (
+	wakeLockResidueDurability      wakeLockRemovalResidue = "wake lock durability"
+	wakeLockResidueDetachedCleanup wakeLockRemovalResidue = "detached wake cleanup"
+	wakeLockResidueReplacement     wakeLockRemovalResidue = "replacement wake lock"
+	wakeLockResiduePreservedClaim  wakeLockRemovalResidue = ".wake.lock"
+	wakeLockResidueCleanup         wakeLockRemovalResidue = "wake lock cleanup"
+)
+
+type wakeLockResidueError struct {
+	residue wakeLockRemovalResidue
+	err     error
+}
+
+func (err *wakeLockResidueError) Error() string { return err.err.Error() }
+func (err *wakeLockResidueError) Unwrap() error { return err.err }
+
+func newWakeLockResidueError(residue wakeLockRemovalResidue, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &wakeLockResidueError{residue: residue, err: err}
+}
+
+func removeWakeLockIfUnchangedGuardedAtOutcome(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	unlink func() error,
+) wakeLockRemovalOutcome {
+	var detachedValidationErr error
+	if err := validateBoundWakeMutationAt(dirfd, agentDir, inspection); err != nil {
+		// A retained directory capability can outlive replacement of its
+		// canonical pathname. Exact cleanup inside that proven-detached inode
+		// cannot signal or unlink the successor claim, so it may reap its own
+		// private residue even though canonical bound-state validation is no
+		// longer possible.
+		if !retainedWakeAgentDirIsDetached(agentDir) {
+			return wakeLockRemovalOutcome{Err: err}
+		}
+		detachedValidationErr = err
+	}
+	path := filepath.Join(agentDir.path, ".wake.lock")
+	committed, err := removeWakeLockIfUnchangedGuardedWithIOStatus(
+		inspection,
+		func() ([]byte, os.FileInfo, error) { return readWakeLockFileAt(dirfd, path) },
+		unlink,
+	)
+	if err != nil {
+		return wakeLockRemovalOutcome{Committed: committed, Err: err}
+	}
+	if !committed {
+		return wakeLockRemovalOutcome{}
+	}
+	outcome := wakeLockRemovalOutcome{Committed: true}
+	if detachedValidationErr != nil {
+		outcome.Err = newWakeDetachedCleanupOnlyError(detachedValidationErr)
+	}
+	return outcome
+}
+
+func removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	unlink func() error,
+) wakeLockRemovalOutcome {
+	outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
+		dirfd, agentDir, inspection, unlink,
+	)
+	if !outcome.Committed {
+		return outcome
+	}
+	if err := syncWakeLockAfterCommitDirFD(dirfd); err != nil {
+		outcome.Err = errors.Join(
+			outcome.Err,
+			newWakeLockResidueError(
+				wakeLockResidueDurability,
+				fmt.Errorf("sync wake lock directory after exact removal: %w", err),
+			),
+		)
+	}
+	return outcome
+}
+
+func appendWakeLockRemovalResidue(
+	residue []wakeLockRemovalResidue,
+	value wakeLockRemovalResidue,
+) []wakeLockRemovalResidue {
+	for _, existing := range residue {
+		if existing == value {
+			return residue
+		}
+	}
+	return append(residue, value)
+}
+
+func wakeLockRemovalResiduesFromError(err error) []wakeLockRemovalResidue {
+	var residue []wakeLockRemovalResidue
+	var collect func(error)
+	collect = func(current error) {
+		if current == nil {
+			return
+		}
+		if typed, ok := current.(*wakeLockResidueError); ok {
+			residue = appendWakeLockRemovalResidue(residue, typed.residue)
+			return
+		}
+		if _, ok := current.(*wakeDetachedCleanupOnlyError); ok {
+			residue = appendWakeLockRemovalResidue(residue, wakeLockResidueDetachedCleanup)
+			return
+		}
+		if joined, ok := current.(interface{ Unwrap() []error }); ok {
+			for _, child := range joined.Unwrap() {
+				collect(child)
+			}
+			return
+		}
+		if wrapped, ok := current.(interface{ Unwrap() error }); ok {
+			collect(wrapped.Unwrap())
+		}
+	}
+	collect(err)
+	return residue
+}
+
+// wakeDetachedCleanupOnlyError reports that a retained descriptor proved
+// detached from its canonical pathname. The exact old residue was removed,
+// but callers must not continue mutation through that detached capability.
+type wakeDetachedCleanupOnlyError struct {
+	err error
+}
+
+func (err *wakeDetachedCleanupOnlyError) Error() string {
+	return fmt.Sprintf("wake lock residue removed from detached directory; refusing further mutation: %v", err.err)
+}
+
+func (err *wakeDetachedCleanupOnlyError) Unwrap() error {
+	return err.err
+}
+
+func newWakeDetachedCleanupOnlyError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &wakeDetachedCleanupOnlyError{err: err}
+}
+
+func retainedWakeAgentDirIsDetached(agentDir *wakeAgentDir) bool {
+	if agentDir == nil || agentDir.file == nil {
+		return false
+	}
+	retainedInfo, err := agentDir.file.Stat()
+	if err != nil {
+		return false
+	}
+	fd, err := unix.Open(
+		agentDir.path,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
+	if err != nil {
+		return false
+	}
+	canonical := os.NewFile(uintptr(fd), agentDir.path)
+	defer func() { _ = canonical.Close() }()
+	canonicalInfo, err := canonical.Stat()
+	return err == nil && !os.SameFile(retainedInfo, canonicalInfo)
 }
 
 type wakeGenerationFileSnapshot struct {
 	Marker   wakeReady
 	Raw      []byte
 	FileInfo os.FileInfo
+	Failure  *wakeGenerationFileFailureSnapshot
 }
+
+type wakeGenerationFileFailureSnapshot struct {
+	Stage         string
+	Class         string
+	Identity      wakeFileIdentity
+	IdentityKnown bool
+	Mode          uint32
+	Size          int64
+}
+
+func wakeGenerationFileFailureClass(err error) string {
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return "errno:" + strconv.FormatUint(uint64(errno), 10)
+	}
+	return err.Error()
+}
+
+func captureWakeGenerationFileIdentityAt(
+	dirfd int,
+	name string,
+) (wakeFileIdentity, uint32, int64, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstatat(dirfd, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return wakeFileIdentity{}, 0, 0, err
+	}
+	return wakeFileIdentity{
+		Device:    uint64(stat.Dev),
+		Inode:     uint64(stat.Ino),
+		CTimeSec:  int64(stat.Ctim.Sec),
+		CTimeNsec: int64(stat.Ctim.Nsec),
+	}, uint32(stat.Mode), stat.Size, nil
+}
+
+func recordWakeGenerationFileFailureAt(
+	dirfd int,
+	name string,
+	stage string,
+	err error,
+	snapshot wakeGenerationFileSnapshot,
+) wakeGenerationFileSnapshot {
+	failure := &wakeGenerationFileFailureSnapshot{
+		Stage: stage,
+		Class: wakeGenerationFileFailureClass(err),
+	}
+	if snapshot.FileInfo != nil {
+		failure.Identity, failure.IdentityKnown = captureWakeFileIdentity(snapshot.FileInfo)
+		failure.Mode = uint32(snapshot.FileInfo.Mode())
+		failure.Size = snapshot.FileInfo.Size()
+	} else if stage == "open" {
+		identity, mode, size, statErr := captureWakeGenerationFileIdentityAt(dirfd, name)
+		if statErr != nil {
+			snapshot.Failure = failure
+			return snapshot
+		}
+		failure.Identity = identity
+		failure.IdentityKnown = true
+		failure.Mode = mode
+		failure.Size = size
+	}
+	snapshot.Failure = failure
+	return snapshot
+}
+
+var afterWakeGenerationFileSnapshotDataRead = func(string) {}
 
 func readWakeGenerationFileSnapshotAt(
 	dirfd int,
@@ -207,31 +475,50 @@ func readWakeGenerationFileSnapshotAt(
 		if err == unix.ENOENT {
 			return wakeGenerationFileSnapshot{}, false, nil
 		}
-		return wakeGenerationFileSnapshot{}, true, err
+		snapshot := recordWakeGenerationFileFailureAt(
+			dirfd, name, "open", err, wakeGenerationFileSnapshot{},
+		)
+		return snapshot, true, err
 	}
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
-		return wakeGenerationFileSnapshot{}, true, err
+		snapshot := recordWakeGenerationFileFailureAt(
+			dirfd, name, "stat", err, wakeGenerationFileSnapshot{},
+		)
+		return snapshot, true, err
 	}
+	snapshot := wakeGenerationFileSnapshot{FileInfo: info}
 	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		return wakeGenerationFileSnapshot{}, true, fmt.Errorf("%s must be a regular 0600 file", label)
+		err := fmt.Errorf("%s must be a regular 0600 file", label)
+		return recordWakeGenerationFileFailureAt(dirfd, name, "shape", err, snapshot), true, err
 	}
 	if err := validateWakeTargetPathOwnership(label, path, info); err != nil {
-		return wakeGenerationFileSnapshot{}, true, err
+		return recordWakeGenerationFileFailureAt(dirfd, name, "ownership", err, snapshot), true, err
 	}
 	data, err := readWakeMetadata(file, label, path)
 	if err != nil {
-		return wakeGenerationFileSnapshot{}, true, err
+		return recordWakeGenerationFileFailureAt(dirfd, name, "read", err, snapshot), true, err
 	}
+	snapshot.Raw = bytes.Clone(data)
+	afterWakeGenerationFileSnapshotDataRead(name)
 	pathFile, err := open()
 	if err != nil {
-		return wakeGenerationFileSnapshot{}, true, err
+		return wakeGenerationFileSnapshot{}, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("%s changed while reopening: %w", label, err),
+		)
 	}
 	pathInfo, statErr := pathFile.Stat()
 	_ = pathFile.Close()
 	if statErr != nil {
-		return wakeGenerationFileSnapshot{}, true, statErr
+		return wakeGenerationFileSnapshot{}, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("%s changed while restating: %w", label, statErr),
+		)
+	}
+	if !sameWakeFileIdentity(info, pathInfo) {
+		return wakeGenerationFileSnapshot{}, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("%s changed while opening", label),
+		)
 	}
 	if !pathInfo.Mode().IsRegular() || pathInfo.Mode().Perm() != 0o600 {
 		return wakeGenerationFileSnapshot{}, true, fmt.Errorf("%s must be a regular 0600 file", label)
@@ -239,21 +526,16 @@ func readWakeGenerationFileSnapshotAt(
 	if err := validateWakeTargetPathOwnership(label, path, pathInfo); err != nil {
 		return wakeGenerationFileSnapshot{}, true, err
 	}
-	if !sameWakeFileIdentity(info, pathInfo) {
-		return wakeGenerationFileSnapshot{}, true, fmt.Errorf("%s changed while opening", label)
-	}
 	var marker wakeReady
 	if err := json.Unmarshal(data, &marker); err != nil {
-		return wakeGenerationFileSnapshot{}, true, err
+		return recordWakeGenerationFileFailureAt(dirfd, name, "parse", err, snapshot), true, err
 	}
 	if marker.Schema != wakeReadySchema || marker.Generation == "" {
-		return wakeGenerationFileSnapshot{}, true, fmt.Errorf("%s schema is unsupported", label)
+		err := fmt.Errorf("%s schema is unsupported", label)
+		return recordWakeGenerationFileFailureAt(dirfd, name, "schema", err, snapshot), true, err
 	}
-	return wakeGenerationFileSnapshot{
-		Marker:   marker,
-		Raw:      bytes.Clone(data),
-		FileInfo: info,
-	}, true, nil
+	snapshot.Marker = marker
+	return snapshot, true, nil
 }
 
 func readWakeGenerationFileAt(
@@ -319,13 +601,24 @@ func writeWakeGenerationFileAt(
 	label string,
 	marker wakeReady,
 ) error {
+	_, err := writeWakeGenerationFileAtWithSnapshot(dirfd, name, label, marker)
+	return err
+}
+
+func writeWakeGenerationFileAtWithSnapshot(
+	dirfd int,
+	name string,
+	label string,
+	marker wakeReady,
+) (wakeGenerationFileSnapshot, error) {
 	data, err := json.Marshal(marker)
 	if err != nil {
-		return fmt.Errorf("marshal %s: %w", label, err)
+		return wakeGenerationFileSnapshot{}, fmt.Errorf("marshal %s: %w", label, err)
 	}
-	temp, err := writeWakeOwnerTempAt(dirfd, "wake-generation", append(data, '\n'), 0o600)
+	raw := append(data, '\n')
+	temp, err := writeWakeOwnerTempAt(dirfd, "wake-generation", raw, 0o600)
 	if err != nil {
-		return err
+		return wakeGenerationFileSnapshot{}, err
 	}
 	tempPresent := true
 	defer func() {
@@ -333,12 +626,70 @@ func writeWakeGenerationFileAt(
 			_ = unix.Unlinkat(dirfd, temp, 0)
 		}
 	}()
+	tempFD, err := unix.Openat(
+		dirfd,
+		temp,
+		unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+		0,
+	)
+	if err != nil {
+		return wakeGenerationFileSnapshot{}, fmt.Errorf("open %s temp file: %w", label, err)
+	}
+	tempFile := os.NewFile(uintptr(tempFD), temp)
+	tempInfo, statErr := tempFile.Stat()
+	_ = tempFile.Close()
+	if statErr != nil {
+		return wakeGenerationFileSnapshot{}, fmt.Errorf("stat %s temp file: %w", label, statErr)
+	}
+	if !tempInfo.Mode().IsRegular() || tempInfo.Mode().Perm() != 0o600 {
+		return wakeGenerationFileSnapshot{}, fmt.Errorf("%s temp must be a regular 0600 file", label)
+	}
+	if err := validateWakeTargetPathOwnership(label+" temp", temp, tempInfo); err != nil {
+		return wakeGenerationFileSnapshot{}, err
+	}
+	snapshot := wakeGenerationFileSnapshot{
+		Marker:   marker,
+		Raw:      bytes.Clone(raw),
+		FileInfo: tempInfo,
+	}
 	if err := unix.Renameat(dirfd, temp, dirfd, name); err != nil {
-		return fmt.Errorf("install %s: %w", label, err)
+		return wakeGenerationFileSnapshot{}, fmt.Errorf("install %s: %w", label, err)
 	}
 	tempPresent = false
-	if err := syncWakeOwnerDirFD(dirfd); err != nil {
-		return fmt.Errorf("sync %s directory: %w", label, err)
+	installedFD, err := unix.Openat(
+		dirfd,
+		name,
+		unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+		0,
+	)
+	if err != nil {
+		return snapshot, fmt.Errorf("open installed %s: %w", label, err)
 	}
-	return nil
+	installedFile := os.NewFile(uintptr(installedFD), name)
+	installedInfo, statErr := installedFile.Stat()
+	if statErr != nil {
+		_ = installedFile.Close()
+		return snapshot, fmt.Errorf("stat installed %s: %w", label, statErr)
+	}
+	if !os.SameFile(tempInfo, installedInfo) {
+		_ = installedFile.Close()
+		return snapshot, fmt.Errorf("installed %s changed during publication; preserving it", label)
+	}
+	snapshot.FileInfo = installedInfo
+	if !installedInfo.Mode().IsRegular() || installedInfo.Mode().Perm() != 0o600 {
+		_ = installedFile.Close()
+		return snapshot, fmt.Errorf("installed %s must be a regular 0600 file", label)
+	}
+	installedRaw, readErr := readWakeMetadata(installedFile, label, name)
+	_ = installedFile.Close()
+	if readErr != nil {
+		return snapshot, readErr
+	}
+	if !bytes.Equal(installedRaw, raw) {
+		return snapshot, fmt.Errorf("installed %s content changed during publication; preserving it", label)
+	}
+	if err := syncWakeOwnerDirFD(dirfd); err != nil {
+		return snapshot, fmt.Errorf("sync %s directory: %w", label, err)
+	}
+	return snapshot, nil
 }

@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -15,11 +16,18 @@ import (
 )
 
 type doctorOpsResult struct {
-	Root         opsRoot          `json:"root"`
-	Agents       []opsAgent       `json:"agents"`
-	OperatorGate *opsOperatorGate `json:"operator_gate,omitempty"`
-	WakeLocks    []opsWakeLock    `json:"wake_locks,omitempty"`
-	Hints        []opsHint        `json:"hints"`
+	Root           opsRoot           `json:"root"`
+	Agents         []opsAgent        `json:"agents"`
+	OperatorGate   *opsOperatorGate  `json:"operator_gate,omitempty"`
+	WakeLocks      []opsWakeLock     `json:"wake_locks,omitempty"`
+	WakeQuarantine opsWakeQuarantine `json:"wake_quarantine"`
+	Hints          []opsHint         `json:"hints"`
+}
+
+type opsWakeQuarantine struct {
+	Count            int      `json:"count"`
+	NewestAgeSeconds *float64 `json:"newest_age_seconds"`
+	Error            string   `json:"error,omitempty"`
 }
 
 type opsRoot struct {
@@ -36,6 +44,11 @@ type opsAgent struct {
 	PresenceStatus         string  `json:"presence_status"`
 	PresenceAgeSeconds     float64 `json:"presence_age_seconds"`
 	PresenceSource         string  `json:"presence_source,omitempty"`
+	NotifierStatus         string  `json:"notifier_status,omitempty"`
+	NotifierMode           string  `json:"notifier_mode,omitempty"`
+	NotifierReason         string  `json:"notifier_reason,omitempty"`
+	DoorbellParked         bool    `json:"doorbell_parked,omitempty"`
+	DoorbellAttempts       uint    `json:"doorbell_attempts,omitempty"`
 }
 
 type opsOperatorGate struct {
@@ -44,31 +57,96 @@ type opsOperatorGate struct {
 }
 
 type opsHint struct {
-	Code    string `json:"code"`
-	Status  string `json:"status"`
-	Message string `json:"message"`
+	Code                    string                          `json:"code"`
+	Status                  string                          `json:"status"`
+	Message                 string                          `json:"message"`
+	Backlog                 *opsBacklog                     `json:"backlog,omitempty"`
+	WakeBinary              *opsWakeBinaryHint              `json:"wake_binary,omitempty"`
+	UnreadBacklogNoNotifier *opsUnreadBacklogNoNotifierHint `json:"unread_backlog_no_notifier,omitempty"`
+}
+
+type opsBacklog struct {
+	Root           string `json:"root"`
+	CurrentSession string `json:"current_session"`
+	Agent          string `json:"agent"`
+	Pending        int    `json:"pending"`
+	Command        string `json:"command"`
+}
+
+type opsWakeBinaryHint struct {
+	Agent  string `json:"agent"`
+	PID    int    `json:"pid"`
+	Reason string `json:"reason,omitempty"`
+	Remedy string `json:"remedy"`
+}
+
+type opsUnreadBacklogNoNotifierHint struct {
+	Agent                  string  `json:"agent"`
+	UnreadCount            int     `json:"unread_count"`
+	OldestUnreadAgeSeconds float64 `json:"oldest_unread_age_seconds"`
+	Command                string  `json:"command"`
+	Remedy                 string  `json:"remedy"`
 }
 
 type opsWakeLock struct {
-	Status          string `json:"status"`
-	Agent           string `json:"agent"`
-	Root            string `json:"root"`
-	Lock            string `json:"lock"`
-	PID             int    `json:"pid,omitempty"`
-	Reason          string `json:"reason,omitempty"`
-	Fix             string `json:"fix,omitempty"`
-	Removed         bool   `json:"removed,omitempty"`
-	Target          string `json:"target,omitempty"`
-	TargetPresent   bool   `json:"target_present,omitempty"`
-	TargetReason    string `json:"target_reason,omitempty"`
-	Repair          string `json:"repair,omitempty"`
-	RepairAvailable bool   `json:"repair_available,omitempty"`
-	RepairReason    string `json:"repair_reason,omitempty"`
+	Status                   string `json:"status"`
+	Agent                    string `json:"agent"`
+	Root                     string `json:"root"`
+	Lock                     string `json:"lock"`
+	PID                      int    `json:"pid,omitempty"`
+	TTY                      string `json:"tty,omitempty"`
+	Started                  string `json:"started,omitempty"`
+	Reason                   string `json:"reason,omitempty"`
+	Fix                      string `json:"fix,omitempty"`
+	Removed                  bool   `json:"removed,omitempty"`
+	Target                   string `json:"target,omitempty"`
+	TargetPresent            bool   `json:"target_present,omitempty"`
+	TargetReason             string `json:"target_reason,omitempty"`
+	Repair                   string `json:"repair,omitempty"`
+	RepairAvailable          bool   `json:"repair_available,omitempty"`
+	RepairReason             string `json:"repair_reason,omitempty"`
+	CanStartHere             bool   `json:"can_start_here"`
+	StartMode                string `json:"start_mode,omitempty"`
+	StartReason              string `json:"start_reason,omitempty"`
+	RunningImagePath         string `json:"running_image_path,omitempty"`
+	RunningVersion           string `json:"running_version,omitempty"`
+	CurrentImagePath         string `json:"current_image_path,omitempty"`
+	CurrentVersion           string `json:"current_version,omitempty"`
+	ImageStatus              string `json:"image_status,omitempty"`
+	RestartCapability        string `json:"restart_capability,omitempty"`
+	OperatorTerminalRequired bool   `json:"operator_terminal_required"`
+	NextAction               string `json:"next_action,omitempty"`
+	InspectionError          string `json:"inspection_error,omitempty"`
+	CurrentTerminal          bool   `json:"-"`
+	NotifierAbsent           bool   `json:"-"`
+
+	WakeCheckDecision *wakeCheckDecision `json:"-"`
+	Mutation          *opsWakeMutation   `json:"-"`
 }
 
-const fixWakeLocksCommand = "amq doctor --ops --fix-wake-locks"
+type opsWakeMutation struct {
+	Status  string
+	Reason  string
+	Removed bool
+}
 
-func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsResult {
+func runOpsChecks(root string, rootSource string, fixWakeLocks bool, explicitBaseRoot ...string) *doctorOpsResult {
+	return runOpsChecksWithSchema(
+		root,
+		rootSource,
+		fixWakeLocks,
+		wakeCheckSchemaV1,
+		explicitBaseRoot...,
+	)
+}
+
+func runOpsChecksWithSchema(
+	root string,
+	rootSource string,
+	fixWakeLocks bool,
+	jsonSchema int,
+	explicitBaseRoot ...string,
+) *doctorOpsResult {
 	result := &doctorOpsResult{}
 	now := time.Now()
 
@@ -76,19 +154,36 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 		Path:   root,
 		Source: rootSource,
 	}
+	var quarantineErr error
+	result.WakeQuarantine, quarantineErr = checkWakeQuarantine(root, now)
+	if quarantineErr != nil {
+		result.WakeQuarantine.Error = quarantineErr.Error()
+		result.Hints = append(result.Hints, opsHint{
+			Code:    "wake_quarantine_scan_error",
+			Status:  "error",
+			Message: fmt.Sprintf("Cannot scan wake quarantine: %v", quarantineErr),
+		})
+	}
 	result.OperatorGate = checkOperatorGate(root, now)
 	result.Hints = append(result.Hints, checkLinkedWorktreeLocalHint(root, rootSource)...)
 
 	// Load the active root's config, falling back to the base config for normal
 	// session layouts where coop init owns the single config.json.
-	agents, err := loadOpsAgents(root, fixWakeLocks)
+	agents, err := loadOpsAgents(root, fixWakeLocks, explicitBaseRoot...)
 	if err != nil {
 		result.Hints = append(result.Hints, opsHint{
 			Code:    "config_error",
 			Status:  "error",
 			Message: fmt.Sprintf("Cannot load config: %v", err),
 		})
-		result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, nil), fixWakeLocks)
+		var wakeHints []opsHint
+		result.WakeLocks, wakeHints = checkWakeLocksWithHintsSchema(
+			root,
+			discoveredWakeLockAgents(root, nil),
+			fixWakeLocks,
+			jsonSchema,
+		)
+		result.Hints = append(result.Hints, wakeHints...)
 		return result
 	}
 
@@ -148,6 +243,11 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 		p, err := presence.Read(root, handle)
 		if err == nil {
 			agent.PresenceStatus = p.Status
+			agent.NotifierStatus = p.NotifierStatus
+			agent.NotifierMode = p.NotifierMode
+			agent.NotifierReason = p.NotifierReason
+			agent.DoorbellParked = p.DoorbellParked
+			agent.DoorbellAttempts = p.DoorbellAttempts
 			if t, err := time.Parse(time.RFC3339Nano, p.LastSeen); err == nil {
 				agent.PresenceAgeSeconds = now.Sub(t).Seconds()
 				recentActivity = agent.PresenceAgeSeconds < (10 * time.Minute).Seconds()
@@ -163,16 +263,37 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 		agent.PresenceAgeSeconds = math.Round(agent.PresenceAgeSeconds)
 
 		result.Agents = append(result.Agents, agent)
+		if agent.DoorbellParked && agent.UnreadCount > 0 &&
+			agent.PresenceSource == presenceSourceNotifierLive {
+			result.Hints = append(result.Hints, opsHint{
+				Code:   "doorbell_parked",
+				Status: "warn",
+				Message: fmt.Sprintf(
+					"Agent %s doorbell is parked after %d attempts with unread messages (oldest unread %.0fs); input may be stranded at the agent prompt, and a manual Enter in its pane can recover it",
+					agent.Handle,
+					agent.DoorbellAttempts,
+					agent.OldestUnreadAgeSeconds,
+				),
+			})
+		}
 	}
 
-	// Only handles which passed validation while traversing the config are
-	// eligible for diagnostic wake-lock inspection.  Discovery performs the
-	// same check for handles found on disk; checkWakeLocks repeats it at its
-	// boundary as a defense against future callers passing untrusted input.
-	result.WakeLocks = checkWakeLocks(root, discoveredWakeLockAgents(root, validatedAgents), fixWakeLocks)
+	// Configured live agents require canonical handles. Discovery additionally
+	// retains legacy-safe on-disk handles for read-only wake diagnostics;
+	// checkWakeLocks repeats that inspection boundary for untrusted callers.
+	var wakeHints []opsHint
+	result.WakeLocks, wakeHints = checkWakeLocksWithHintsSchema(
+		root,
+		discoveredWakeLockAgents(root, validatedAgents),
+		fixWakeLocks,
+		jsonSchema,
+	)
 
 	// Operational and integration hints
+	result.Hints = append(result.Hints, wakeHints...)
+	result.Hints = append(result.Hints, checkUnreadBacklogNoNotifierHints(root, result.Agents, result.WakeLocks)...)
 	result.Hints = append(result.Hints, checkSiblingBacklogHints(root, agents)...)
+	result.Hints = append(result.Hints, checkBaseBacklogHints(root, agents)...)
 	result.Hints = append(result.Hints, checkWorktreeDivergenceHints(root, agents)...)
 	result.Hints = append(result.Hints, checkGlobalRootHint()...)
 	result.Hints = append(result.Hints, checkKanbanHint()...)
@@ -181,7 +302,70 @@ func runOpsChecks(root string, rootSource string, fixWakeLocks bool) *doctorOpsR
 	return result
 }
 
-func loadOpsAgents(root string, fixWakeLocks bool) ([]string, error) {
+func checkUnreadBacklogNoNotifierHints(root string, agents []opsAgent, wakeLocks []opsWakeLock) []opsHint {
+	notifierAbsent := make(map[string]bool, len(wakeLocks))
+	for _, lock := range wakeLocks {
+		notifierAbsent[lock.Agent] = wakeLockProvesNotifierAbsent(lock)
+	}
+
+	var hints []opsHint
+	for _, agent := range agents {
+		if agent.UnreadCount == 0 {
+			continue
+		}
+		absent, lockExists := notifierAbsent[agent.Handle]
+		// Missing, proven-stale, and removed locks prove notifier absence.
+		// Unverified and live rows stay with their existing fail-closed signals.
+		if lockExists && !absent {
+			continue
+		}
+
+		messageWord := "messages"
+		if agent.UnreadCount == 1 {
+			messageWord = "message"
+		}
+		command := fmt.Sprintf(
+			"amq wake check --root %s --me %s",
+			shellQuoteArg(root),
+			agent.Handle,
+		)
+		remedy := "drain from the owning session"
+		hints = append(hints, opsHint{
+			Code:   "unread_backlog_no_notifier",
+			Status: "warn",
+			Message: fmt.Sprintf(
+				"%s has %d unread %s, oldest %.0fs; run %s for restart capability; %s",
+				agent.Handle,
+				agent.UnreadCount,
+				messageWord,
+				agent.OldestUnreadAgeSeconds,
+				command,
+				remedy,
+			),
+			UnreadBacklogNoNotifier: &opsUnreadBacklogNoNotifierHint{
+				Agent:                  agent.Handle,
+				UnreadCount:            agent.UnreadCount,
+				OldestUnreadAgeSeconds: agent.OldestUnreadAgeSeconds,
+				Command:                command,
+				Remedy:                 remedy,
+			},
+		})
+	}
+	return hints
+}
+
+func wakeLockProvesNotifierAbsent(lock opsWakeLock) bool {
+	return lock.NotifierAbsent
+}
+
+func loadOpsAgents(root string, fixWakeLocks bool, explicitBaseRoot ...string) ([]string, error) {
+	if len(explicitBaseRoot) > 0 && strings.TrimSpace(explicitBaseRoot[0]) != "" {
+		cfg, err := config.LoadConfig(filepath.Join(explicitBaseRoot[0], "meta", "config.json"))
+		if err != nil {
+			return nil, err
+		}
+		return cfg.Agents, nil
+	}
 	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
 	if err == nil {
 		return cfg.Agents, nil
@@ -219,6 +403,25 @@ func checkSiblingBacklogHints(root string, agents []string) []opsHint {
 	return hints
 }
 
+func checkBaseBacklogHints(root string, agents []string) []opsHint {
+	var hints []opsHint
+	for _, backlog := range findBaseBacklogs(root, agents) {
+		hints = append(hints, opsHint{
+			Code:    "base_backlog",
+			Status:  "warn",
+			Message: formatBaseBacklogHint(backlog),
+			Backlog: &opsBacklog{
+				Root:           backlog.Root,
+				CurrentSession: backlog.Session,
+				Agent:          backlog.Agent,
+				Pending:        backlog.Pending,
+				Command:        baseBacklogInspectionCommand(backlog),
+			},
+		})
+	}
+	return hints
+}
+
 func checkOperatorGate(root string, now time.Time) *opsOperatorGate {
 	inboxNew := fsq.AgentInboxNew(root, reservedHumanHandle)
 	entries, err := os.ReadDir(inboxNew)
@@ -248,7 +451,7 @@ func discoveredWakeLockAgents(root string, configured []string) []string {
 	seen := make(map[string]struct{}, len(configured))
 	agents := make([]string, 0, len(configured))
 	for _, agent := range configured {
-		if validateWakeLockAgent(root, agent) != nil {
+		if validateWakeLockAgentForInspection(root, agent) != nil {
 			continue
 		}
 		if _, ok := seen[agent]; ok {
@@ -266,7 +469,7 @@ func discoveredWakeLockAgents(root string, configured []string) []string {
 		if _, ok := seen[agent]; ok {
 			continue
 		}
-		if err := validateWakeLockAgent(root, agent); err != nil {
+		if err := validateWakeLockAgentForInspection(root, agent); err != nil {
 			continue
 		}
 		seen[agent] = struct{}{}
@@ -276,76 +479,158 @@ func discoveredWakeLockAgents(root string, configured []string) []string {
 }
 
 func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
+	locks, _ := checkWakeLocksWithHints(root, agents, fix)
+	return locks
+}
+
+type wakeRepairAssessment struct {
+	TargetPresent   bool
+	TargetReason    string
+	RepairAvailable bool
+	RepairReason    string
+	Repair          string
+}
+
+type wakeTargetReader func() (wakeTarget, bool, error)
+type wakeRepairFloorValidator func(wakeTarget) error
+
+func assessWakeRepair(
+	root, agent string,
+	inspection wakeLockInspection,
+	readTarget wakeTargetReader,
+	validateFloor wakeRepairFloorValidator,
+) wakeRepairAssessment {
+	var assessment wakeRepairAssessment
+	target, exists, targetErr := readTarget()
+	assessment.TargetPresent = exists
+	if targetErr != nil {
+		assessment.TargetReason = targetErr.Error()
+	} else if exists {
+		if err := validateWakeTarget(target, root, agent); err != nil {
+			assessment.TargetReason = err.Error()
+		} else if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
+			assessment.TargetReason = err.Error()
+		}
+	}
+
+	ownerBound := classifyWakeClaimForGenericTransition(inspection) == wakeClaimAuthoritative
+	if inspection.Status != wakeLockStale || ownerBound ||
+		!assessment.TargetPresent || assessment.TargetReason != "" ||
+		validateWakeLockRepairable(inspection) != nil {
+		return assessment
+	}
+	if err := validateFloor(target); err != nil {
+		assessment.RepairReason = err.Error()
+		return assessment
+	}
+	assessment.RepairAvailable = true
+	assessment.Repair = wakeRepairCommand(root, agent)
+	return assessment
+}
+
+func checkWakeLocksWithHints(root string, agents []string, fix bool) ([]opsWakeLock, []opsHint) {
+	return checkWakeLocksWithHintsSchema(root, agents, fix, wakeCheckSchemaV1)
+}
+
+func checkWakeLocksWithHintsSchema(
+	root string,
+	agents []string,
+	fix bool,
+	jsonSchema int,
+) ([]opsWakeLock, []opsHint) {
 	var locks []opsWakeLock
+	var hints []opsHint
+	appendLock := func(agent string, lock opsWakeLock, inspection wakeLockInspection, staleBinary bool) {
+		decorateOpsWakeLockWithWakeCheck(
+			root,
+			agent,
+			&lock,
+			inspection,
+			staleBinary,
+			jsonSchema == wakeCheckSchemaV2,
+		)
+		if lock.WakeCheckDecision != nil && lock.WakeCheckDecision.Platform.WakeSupported {
+			status := lock.WakeCheckDecision.Wake.Status
+			lock.NotifierAbsent = status == string(wakeLockMissing) || status == string(wakeLockStale)
+		} else {
+			lock.NotifierAbsent = !inspection.Exists || inspection.Status == wakeLockStale
+		}
+		locks = append(locks, lock)
+	}
 	for _, agent := range agents {
-		if validateWakeLockAgent(root, agent) != nil {
+		if validateWakeLockAgentForInspection(root, agent) != nil {
 			continue
 		}
+		mutationAuthorized := fsq.ValidateHandle(agent) == nil
 		inspection := inspectWakeLock(root, agent)
 		if !inspection.Exists {
 			continue
 		}
+		staleBinary := false
+		wakeBinaryInspectionError := ""
+		if hint, ok, err := checkStaleWakeBinaryHint(inspection); err != nil {
+			wakeBinaryInspectionError = err.Error()
+		} else if ok {
+			hints = append(hints, hint)
+			staleBinary = true
+		}
 
 		lock := opsWakeLock{
-			Status: string(inspection.Status),
-			Agent:  agent,
-			Root:   inspection.Root,
-			Lock:   inspection.LockPath,
-			PID:    inspection.PID,
-			Reason: inspection.Reason,
+			Status:          string(inspection.Status),
+			Agent:           agent,
+			Root:            inspection.Root,
+			Lock:            inspection.LockPath,
+			PID:             inspection.PID,
+			TTY:             strings.TrimSpace(inspection.Lock.TTY),
+			Started:         strings.TrimSpace(inspection.Lock.Started),
+			Reason:          inspection.Reason,
+			InspectionError: wakeBinaryInspectionError,
+			CurrentTerminal: doctorWakeLockOnCurrentTerminal(inspection),
 		}
 		ownerBound := classifyWakeClaimForGenericTransition(inspection) == wakeClaimAuthoritative
-		if ownerBound {
+		if ownerBound && mutationAuthorized {
 			lock.Fix = wakeRecoverOwnerCommand(root, agent)
 		}
 		if isLiveRawOrphan(inspection) {
 			lock.Status = "live-raw-orphan"
 			lock.Reason = "live raw wake orphan; stop the owning terminal or launchd supervisor"
 		}
-		target, exists, targetErr := readWakeTarget(root, agent)
-		if exists {
+		if !mutationAuthorized {
+			appendLock(agent, lock, inspection, staleBinary)
+			continue
+		}
+		assessment := assessWakeRepair(
+			root,
+			agent,
+			inspection,
+			func() (wakeTarget, bool, error) {
+				return readWakeTargetFromStateForInspection(root, agent, inspection)
+			},
+			func(target wakeTarget) error {
+				return validateWakeRepairFloorAvailable(root, agent, inspection, target)
+			},
+		)
+		lock.TargetReason = assessment.TargetReason
+		if assessment.TargetPresent {
 			lock.Target = wakeTargetPath(root, agent)
 			lock.TargetPresent = true
-			if targetErr != nil {
-				lock.TargetReason = targetErr.Error()
-			} else if err := validateWakeTarget(target, root, agent); err != nil {
-				lock.TargetReason = err.Error()
-			} else if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
-				lock.TargetReason = err.Error()
-			}
 		}
 		if inspection.Status == wakeLockStale {
 			if ownerBound {
-				locks = append(locks, lock)
+				appendLock(agent, lock, inspection, staleBinary)
 				continue
 			}
-			lock.Fix = fixWakeLocksCommand
-			if lock.TargetPresent && lock.TargetReason == "" && validateWakeLockRepairable(inspection) == nil {
-				if err := validateWakeRepairFloorAvailable(root, agent, inspection, target); err != nil {
-					lock.RepairReason = err.Error()
-				} else {
-					lock.RepairAvailable = true
-					lock.Repair = wakeRepairCommand(root, agent)
-				}
-			}
+			lock.Fix = doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+			lock.RepairAvailable = assessment.RepairAvailable
+			lock.RepairReason = assessment.RepairReason
+			lock.Repair = assessment.Repair
 			if fix {
-				guardErr := withWakeLifecycleGuard(root, agent, func() error {
-					recheck := inspectWakeLock(root, agent)
-					if !sameWakeLockGeneration(inspection, recheck) || recheck.Status != wakeLockStale {
-						lock.Status = string(recheck.Status)
-						lock.Reason = "wake lock changed before fix"
-						return nil
-					}
-					if err := validateWakeLockStaleRemoval(recheck); err != nil {
-						return err
-					}
-					if err := removeWakeLockIfUnchangedGuarded(recheck); err != nil {
-						return err
-					}
-					lock.Status = "fixed"
-					lock.Removed = true
-					return nil
-				})
+				guardErr := fixStaleWakeLockForDoctor(root, agent, &inspection, &lock)
+				// The mutation helper may retain an agent-directory capability across
+				// a pathname replacement. Keep its mutation outcome, but classify the
+				// notifier from a fresh canonical inspection.
+				inspection = inspectWakeLock(root, agent)
+				staleBinary = false
 				lock.RepairAvailable = false
 				lock.Repair = ""
 				lock.RepairReason = ""
@@ -353,11 +638,16 @@ func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
 					lock.Status = "error"
 					lock.Reason = guardErr.Error()
 				}
+				lock.Mutation = &opsWakeMutation{
+					Status:  lock.Status,
+					Reason:  lock.Reason,
+					Removed: lock.Removed,
+				}
 			}
 		}
-		locks = append(locks, lock)
+		appendLock(agent, lock, inspection, staleBinary)
 	}
-	return locks
+	return locks, hints
 }
 
 // validateWakeLockAgent ensures diagnostics cannot follow an agent directory
@@ -368,6 +658,17 @@ func validateWakeLockAgent(root, agent string) error {
 	if err := fsq.ValidateHandle(agent); err != nil {
 		return err
 	}
+	return validateWakeLockAgentPath(root, agent)
+}
+
+func validateWakeLockAgentForInspection(root, agent string) error {
+	if err := fsq.ValidateLegacyHandleForInspection(agent); err != nil {
+		return err
+	}
+	return validateWakeLockAgentPath(root, agent)
+}
+
+func validateWakeLockAgentPath(root, agent string) error {
 	path := fsq.AgentBase(root, agent)
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {

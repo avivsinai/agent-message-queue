@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"golang.org/x/sys/unix"
 )
 
 const wakeReadyTimeout = 25 * time.Second
@@ -23,6 +24,30 @@ const wakeProcessExitTimeout = 5 * time.Second
 var killWakeHelperProcess = func(proc *os.Process) error { return proc.Kill() }
 
 var coopExecProcess = syscall.Exec
+
+var openCoopWakeTTY = func() (*os.File, error) {
+	return os.OpenFile("/dev/tty", os.O_WRONLY|unix.O_CLOEXEC, 0)
+}
+
+func openCoopWakeAttention(output *os.File) (*os.File, error) {
+	if attention, err := openCoopWakeTTY(); err == nil {
+		return attention, nil
+	}
+	if output == nil {
+		return nil, fmt.Errorf("wake diagnostics are unavailable")
+	}
+	fd, err := unix.Dup(int(output.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("duplicate wake diagnostics for non-terminal attention: %w", err)
+	}
+	unix.CloseOnExec(fd)
+	attention := os.NewFile(uintptr(fd), output.Name())
+	if attention == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("adopt non-terminal wake attention descriptor")
+	}
+	return attention, nil
+}
 
 func runCoopExec(args []string) error {
 	// Split at "--" before flag parsing so agent flags aren't consumed.
@@ -40,7 +65,7 @@ func runCoopExec(args []string) error {
 	wakeInjectViaFlag := fs.String("wake-inject-via", "", "Start wake with this absolute --inject-via executable, enabling later amq wake repair")
 	var wakeInjectArgFlags multiStringFlag
 	fs.Var(&wakeInjectArgFlags, "wake-inject-arg", "Fixed argument for wake --inject-via before the payload (repeatable)")
-	yesFlag := fs.Bool("y", false, "Skip confirmation prompts")
+	yesFlag := fs.Bool("y", false, "Skip confirmation prompts (including clearing a blocking wake)")
 
 	usage := usageWithFlags(fs, "amq coop exec [options] <command> [-- <command-flags>]",
 		"Set up co-op mode and exec into the agent (replaces this process).",
@@ -68,7 +93,7 @@ func runCoopExec(args []string) error {
 		"  reused; stop an older generic wake before retrying coop exec.",
 	)
 
-	if handled, err := parseFlags(fs, amqArgs, usage); err != nil {
+	if handled, err := parseFlagsAllowPositionals(fs, amqArgs, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
@@ -122,39 +147,100 @@ func runCoopExec(args []string) error {
 	}
 
 	// Resolve explicit --session (pure sugar for --root <base>/<session>).
+	// A fresh Git worktree has no base yet; remember that bootstrap is needed
+	// and provision the requested session after full coop init completes.
+	bootstrapBase := ""
 	if *sessionFlag != "" {
-		if *rootFlag != "" {
+		if flagWasVisited(fs, "root") {
 			return UsageError("--session and --root are mutually exclusive")
 		}
 		if err := validateSessionName(*sessionFlag); err != nil {
 			return err
 		}
-		base := resolveBaseRoot()
-		*rootFlag = filepath.Join(base, *sessionFlag)
+		base, ambient, err := resolveCoopAmbientSessionBase()
+		if err != nil {
+			return err
+		}
+		if !ambient {
+			if *noInitFlag {
+				base, err = resolveBaseRoot()
+				if err != nil {
+					return err
+				}
+			} else {
+				var found bool
+				base, found, err = resolveDiscoveredBaseRootForBootstrap()
+				if err != nil {
+					return err
+				}
+				if !found {
+					bootstrapBase = base
+					base = ""
+				}
+			}
+		}
+		if base != "" {
+			*rootFlag = filepath.Join(base, *sessionFlag)
+		}
 	}
 
-	// Resolve root: --root flag (or --session-derived) > .amqrc > default.
+	// Resolve root: --root flag (or --session-derived) > ambient context >
+	// project/repo-local/global discovery > local initialization.
 	root := *rootFlag
+	sessionProvisioned := false
 	if root == "" {
-		existing, existingErr := findAndLoadAmqrc()
-		switch existingErr {
-		case nil:
-			root = existing.Config.Root
-			if root != "" && !filepath.IsAbs(root) {
-				root = filepath.Join(existing.Dir, root)
-			}
-		case errAmqrcNotFound:
-			// Will auto-init below.
-		default:
-			return fmt.Errorf("invalid .amqrc: %w", existingErr)
+		ambientBase, ambient, ambientErr := resolveCoopAmbientSessionBase()
+		if ambientErr != nil {
+			return ambientErr
 		}
+		if ambient {
+			root = ambientBase
+		} else {
+			var discoveredBase string
+			var found bool
+			var discoveryErr error
+			if *noInitFlag {
+				discoveredBase, found, discoveryErr = resolveDiscoveredBaseRoot()
+			} else {
+				discoveredBase, found, discoveryErr = resolveDiscoveredBaseRootForBootstrap()
+			}
+			if discoveryErr != nil {
+				return discoveryErr
+			}
+			if found {
+				root = discoveredBase
+			} else if discoveredBase != "" {
+				bootstrapBase = discoveredBase
+			}
+		}
+	}
+
+	// Explicit named sessions use the same direct-child creation boundary as
+	// coop init/default exec. In particular, never let MkdirAll traverse a
+	// pre-existing session symlink.
+	if *sessionFlag != "" && root != "" {
+		if *noInitFlag && !dirExists(root) {
+			return fmt.Errorf("root %q does not exist; run 'amq coop init' first or remove --no-init", root)
+		}
+		base := filepath.Dir(root)
+		if !dirExists(base) {
+			if err := fsq.EnsureRootDirs(base); err != nil {
+				return fmt.Errorf("failed to create base root %q: %w", base, err)
+			}
+		}
+		requestedRoot := root
+		root, err = provisionCoopSession(base, *sessionFlag, []string{agentHandle}, agentHandle, cmdName)
+		if err != nil {
+			return fmt.Errorf("failed to create session root %q: %w", requestedRoot, err)
+		}
+		sessionProvisioned = true
 	}
 
 	// Auto-init if needed (before session defaulting so full init fires on fresh projects).
 	if root == "" || !dirExists(root) {
 		if *noInitFlag {
 			if root == "" {
-				return fmt.Errorf("no .amqrc found and no --root specified; run 'amq coop init' first or remove --no-init")
+				return fmt.Errorf("no project, repo-local, or global AMQ root found and no --root specified; run 'amq coop init' first or remove --no-init")
 			}
 			return fmt.Errorf("root %q does not exist; run 'amq coop init' first or remove --no-init", root)
 		}
@@ -168,9 +254,15 @@ func runCoopExec(args []string) error {
 				return fmt.Errorf("failed to create mailbox for %s at %q: %w", agentHandle, root, err)
 			}
 		} else {
-			// No --root flag and no .amqrc found: run full coop init (writes .amqrc).
+			// No explicit, ambient, project, repo-local, or global root: run
+			// full coop init. In a Git worktree, coop init relocates this to
+			// the worktree top so nested invocations do not scatter queues.
 			if !*yesFlag {
-				ok, err := confirmPromptYes("No .amqrc found. Initialize co-op mode in current directory?")
+				location := "current directory"
+				if bootstrapBase != "" {
+					location = fmt.Sprintf("Git worktree at %s", filepath.Dir(bootstrapBase))
+				}
+				ok, err := confirmPromptYes(fmt.Sprintf("No project, repo-local, or global AMQ root found. Initialize co-op mode in %s?", location))
 				if err != nil {
 					return err
 				}
@@ -199,18 +291,28 @@ func runCoopExec(args []string) error {
 		}
 	}
 
+	if *sessionFlag != "" && !sessionProvisioned {
+		base := root
+		if bootstrapBase != "" && !sameTreeIdentity(base, bootstrapBase) {
+			return fmt.Errorf("bootstrap resolved base %q, but coop init produced %q", bootstrapBase, base)
+		}
+		requestedRoot := filepath.Join(base, *sessionFlag)
+		root, err = provisionCoopSession(base, *sessionFlag, []string{agentHandle}, agentHandle, cmdName)
+		if err != nil {
+			return fmt.Errorf("failed to create session root %q: %w", requestedRoot, err)
+		}
+		sessionProvisioned = true
+	}
+
 	// Default to --session collab when neither --session nor --root was specified.
 	// This runs after auto-init so .amqrc exists and resolveBaseRoot() works.
 	if *sessionFlag == "" && *rootFlag == "" {
 		base := root // root is the literal .amqrc root (e.g., .agent-mail)
-		root = filepath.Join(base, defaultSessionName)
-		// Ensure session root + agent dirs exist.
-		if err := fsq.EnsureRootDirs(root); err != nil {
-			return fmt.Errorf("failed to create session root %q: %w", root, err)
+		root, err = provisionCoopSession(base, defaultSessionName, []string{agentHandle}, agentHandle, cmdName)
+		if err != nil {
+			return fmt.Errorf("failed to create session root %q: %w", filepath.Join(base, defaultSessionName), err)
 		}
-		if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
-			return fmt.Errorf("failed to create mailbox for %s at %q: %w", agentHandle, root, err)
-		}
+		sessionProvisioned = true
 	}
 
 	// Pin the session root to an absolute path before it reaches the wake
@@ -224,14 +326,26 @@ func runCoopExec(args []string) error {
 	}
 
 	// Ensure agent mailbox exists.
-	if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
-		return fmt.Errorf("failed to ensure mailbox for %s: %w", agentHandle, err)
+	if !sessionProvisioned {
+		if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
+			return fmt.Errorf("failed to ensure mailbox for %s: %w", agentHandle, err)
+		}
 	}
 
 	// Resolve command binary.
 	binaryPath, err := exec.LookPath(cmdName)
 	if err != nil {
 		return fmt.Errorf("command not found: %s", cmdName)
+	}
+	if !*noWakeFlag {
+		if err := prepareCoopWakeLock(
+			root,
+			agentHandle,
+			*yesFlag,
+			coopWakeRemedyForCommand(root, agentHandle, cmdName, agentArgs),
+		); err != nil {
+			return err
+		}
 	}
 
 	// Start amq wake in background (unless --no-wake). Every coop-started wake
@@ -243,7 +357,13 @@ func runCoopExec(args []string) error {
 	var wakeHelperClaim *wakeLockInspection
 	var cleanupWakeReady func()
 	var earlyOwner *wakeOwner
-	baseEnv := unsetEnvVar(unsetEnvVar(os.Environ(), envWakeOwner), envWakePrivateStopFD)
+	baseEnv := unsetEnvVar(
+		unsetEnvVar(
+			unsetEnvVar(os.Environ(), envWakeOwner),
+			envWakePrivateStopFD,
+		),
+		envWakeAttentionFD,
+	)
 	retainWakeHelperClaim := func(current wakeLockInspection) {
 		if retained := exactCoopWakeHelperClaim(wakeProc, current); retained != nil {
 			wakeHelperClaim = retained
@@ -290,8 +410,21 @@ func runCoopExec(args []string) error {
 			}
 			wakeCmd.Env = wakeEnv
 			wakeCmd.Stdin = os.Stdin
-			wakeCmd.Stdout = os.Stdout
-			wakeCmd.Stderr = os.Stderr
+			wakeOutput, outputErr := openCoopWakeOutput(root, agentHandle)
+			if outputErr != nil {
+				return fmt.Errorf("open durable coop wake diagnostics: %w", outputErr)
+			}
+			defer func() { _ = wakeOutput.Close() }()
+			wakeAttention, attentionErr := openCoopWakeAttention(wakeOutput)
+			if attentionErr != nil {
+				return fmt.Errorf("open isolated coop wake attention: %w", attentionErr)
+			}
+			defer func() { _ = wakeAttention.Close() }()
+			wakeCmd.Stdout = wakeOutput
+			wakeCmd.Stderr = wakeOutput
+			if err := attachWakeAttentionFD(wakeCmd, wakeAttention); err != nil {
+				return fmt.Errorf("attach isolated coop wake attention: %w", err)
+			}
 			wakeChildCapability, err = configureAuthoritativeWakeChild(wakeCmd)
 			if err == nil && wakeChildCapability == nil {
 				return fmt.Errorf("prepare exact-owner amq wake supervision returned nil capability")
@@ -360,15 +493,19 @@ func runCoopExec(args []string) error {
 				retainWakeHelperClaim(current)
 				otherWake := current.Exists && current.PID != wakeProc.Pid
 				if readyErr != nil {
+					startupErr := readyErr
+					if otherWake {
+						startupErr = coopWakeStartupConflictError(current, readyErr)
+					}
 					cleanupErr := cleanupWakeHelper(otherWake)
 					if cleanupErr != nil {
 						return errors.Join(
-							readyErr,
+							startupErr,
 							fmt.Errorf("cleanup exact coop wake startup helper: %w", cleanupErr),
 						)
 					}
 					if otherWake || *requireWakeFlag {
-						return readyErr
+						return startupErr
 					}
 					_ = writeStderr("warning: failed to prepare amq wake: %v\n", readyErr)
 					wakeProc = nil
@@ -591,6 +728,7 @@ func buildCoopWakeArgs(agentHandle, root, injectMode, injectVia string, injectAr
 		"--root", root,
 		"--baseline-existing",
 		"--interrupt-cmd", "none",
+		"--refuse-unverified-wake",
 	}
 	if injectMode != "" && injectMode != wakeInjectModeAuto {
 		args = append(args, "--inject-mode", injectMode)
@@ -883,6 +1021,44 @@ func wakeReadyMessage(root, agentHandle string, startedPID int) string {
 		return fmt.Sprintf("Using existing amq wake (pid %d)", inspection.PID)
 	}
 	return fmt.Sprintf("Started amq wake (pid %d)", startedPID)
+}
+
+// resolveCoopAmbientSessionBase returns the base selected by an inherited AMQ
+// context. A complete pin owns routing; otherwise AM_ROOT keeps its normal
+// precedence and is classified as either a base or a session root. Callers use
+// the project/global fallback only when no ambient context exists.
+func resolveCoopAmbientSessionBase() (string, bool, error) {
+	pin, err := loadSessionPin()
+	if err != nil {
+		return "", false, err
+	}
+	if pin.Present {
+		if err := validateLegacySessionPinRoot(pin); err != nil {
+			return "", false, err
+		}
+		if pin.IdentityPin {
+			ambientRoot := strings.TrimSpace(os.Getenv(envRoot))
+			if ambientRoot == "" {
+				ambientRoot = pin.ExpectedRoot
+			}
+			if err := verifyRootUnderBase(
+				pin.BaseRoot,
+				pin.BaseRootID,
+				pin.Session,
+				ambientRoot,
+				pin.RootID,
+			); err != nil {
+				return "", false, err
+			}
+		}
+		return pin.BaseRoot, true, nil
+	}
+
+	ambientRoot := strings.TrimSpace(os.Getenv(envRoot))
+	if ambientRoot == "" {
+		return "", false, nil
+	}
+	return absPath(baseRootOf(ambientRoot)), true, nil
 }
 
 // splitDashDash splits args at the first "--" separator.

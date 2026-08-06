@@ -46,13 +46,7 @@ func TestValidateCanonicalWakeRepairDirectoriesRejectsNamespaceReplacement(t *te
 			name: "inbox directory",
 			replace: func(t *testing.T, root string) {
 				t.Helper()
-				inboxPath := fsq.AgentInboxNew(root, "codex")
-				if err := os.Rename(inboxPath, inboxPath+".detached"); err != nil {
-					t.Fatalf("detach inbox directory: %v", err)
-				}
-				if err := os.Mkdir(inboxPath, 0o700); err != nil {
-					t.Fatalf("create replacement inbox directory: %v", err)
-				}
+				replaceWakeRepairInboxDirectoryAtomicallyForTest(t, root, "codex")
 			},
 			want: "inbox directory no longer matches",
 		},
@@ -132,13 +126,7 @@ func TestRepairWakeRefusesCanonicalInboxReplacementBeforeAdmission(t *testing.T)
 		},
 		func(started *wakeRepairChild) {
 			forceRepairLifecycleChildInspection(t, fixture, started)
-			inboxPath := fsq.AgentInboxNew(fixture.root, "codex")
-			if err := os.Rename(inboxPath, inboxPath+".detached"); err != nil {
-				t.Fatalf("detach prepared child inbox: %v", err)
-			}
-			if err := os.Mkdir(inboxPath, 0o700); err != nil {
-				t.Fatalf("create replacement child inbox: %v", err)
-			}
+			replaceWakeRepairInboxDirectoryAtomicallyForTest(t, fixture.root, "codex")
 		},
 	)
 
@@ -184,13 +172,7 @@ func TestRepairWakeChildAdmissionRejectsNamespaceReplacementAfterParentValidatio
 			name: "direct inbox loss",
 			replace: func(t *testing.T, root string) {
 				t.Helper()
-				inboxPath := fsq.AgentInboxNew(root, "codex")
-				if err := os.Rename(inboxPath, inboxPath+".detached"); err != nil {
-					t.Fatalf("detach prepared child inbox: %v", err)
-				}
-				if err := os.Mkdir(inboxPath, 0o700); err != nil {
-					t.Fatalf("create replacement child inbox: %v", err)
-				}
+				replaceWakeRepairInboxDirectoryAtomicallyForTest(t, root, "codex")
 			},
 			wants: []string{
 				"wake watcher failed before admission: retained wake inbox directory was renamed or deleted",
@@ -210,6 +192,10 @@ func TestRepairWakeChildAdmissionRejectsNamespaceReplacementAfterParentValidatio
 					forceRepairLifecycleChildInspection(t, fixture, started)
 					admit := started.admit
 					started.admit = func() error {
+						// Admission failure is fail-closed: repairWake reaps
+						// this prepared child without a claim. If admission
+						// ever retries, a transient namespace observation could
+						// leave a child running against detached authority.
 						// repairWake has completed its parent-side prepared
 						// validation when this closure runs. The child is still
 						// blocked waiting for the admit frame.
@@ -253,6 +239,21 @@ func TestRepairWakeChildAdmissionRejectsNamespaceReplacementAfterParentValidatio
 				logData,
 			)
 		})
+	}
+}
+
+func replaceWakeRepairInboxDirectoryAtomicallyForTest(t *testing.T, root, me string) {
+	t.Helper()
+	inboxPath := fsq.AgentInboxNew(root, me)
+	replacementPath := inboxPath + ".replacement"
+	if err := os.Mkdir(replacementPath, 0o700); err != nil {
+		t.Fatalf("create replacement inbox directory: %v", err)
+	}
+	// A plain os.Rename cannot replace inbox/new once it contains handoff
+	// messages. The platform exchange remains atomic and preserves the
+	// original directory at replacementPath for post-condition checks.
+	if err := exchangeWakeRepairDirectoriesForTest(replacementPath, inboxPath); err != nil {
+		t.Fatalf("atomically replace inbox directory: %v", err)
 	}
 }
 
@@ -319,14 +320,21 @@ func TestRepairWakeParentRevalidatesNamespaceAfterChildAcknowledgement(t *testin
 	assertRepairLifecycleChildReapedWithoutClaim(t, fixture, child)
 	assertWakeRepairOutputAbsent(t, fixture.outputPath, "after rejected repair child reap")
 	for _, directory := range []struct {
-		label string
-		path  string
+		label       string
+		path        string
+		retainFloor bool
 	}{
 		{label: "canonical replacement", path: fsq.AgentBase(fixture.root, "codex")},
-		{label: "detached retained", path: detachedAgentPath},
+		{label: "detached retained", path: detachedAgentPath, retainFloor: true},
 	} {
 		for _, name := range []string{".wake.lock", wakeRepairFloorFileName} {
 			path := filepath.Join(directory.path, name)
+			if directory.retainFloor && name == wakeRepairFloorFileName {
+				if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+					t.Fatalf("%s private repair floor was not preserved: %v", directory.label, err)
+				}
+				continue
+			}
 			if _, err := os.Lstat(path); !os.IsNotExist(err) {
 				t.Fatalf("%s claim residue %s remains: %v", directory.label, path, err)
 			}
@@ -405,8 +413,11 @@ func TestRepairedWakeExitsWithoutInjectingDetachedNamespaceMessages(t *testing.T
 			}
 
 			releasedOutput := waitForWakeRepairOutputLine(t, fixture.outputPath)
-			if !bytes.Contains(releasedOutput, []byte("must wait for admission")) {
-				t.Fatalf("released wake output does not contain pending message: %q", releasedOutput)
+			if !bytes.Contains(releasedOutput, []byte(coopWakeDoorbell)) {
+				t.Fatalf("released wake output does not contain fixed doorbell: %q", releasedOutput)
+			}
+			if bytes.Contains(releasedOutput, []byte("must wait for admission")) {
+				t.Fatalf("released wake output contains peer-derived message text: %q", releasedOutput)
 			}
 			releasedOutput = append([]byte(nil), releasedOutput...)
 
@@ -438,7 +449,19 @@ func TestRepairedWakeExitsWithoutInjectingDetachedNamespaceMessages(t *testing.T
 					output,
 				)
 			}
-			assertWakeRepairClaimResidueAbsent(t, authorities)
+			if test.name == "ancestor agent replacement" {
+				assertWakeRepairClaimResidueAbsent(t, authorities[:1])
+				detached := authorities[1]
+				if _, err := os.Lstat(filepath.Join(detached, ".wake.lock")); !os.IsNotExist(err) {
+					t.Fatalf("detached wake lock residue remains: %v", err)
+				}
+				floor := filepath.Join(detached, wakeRepairFloorFileName)
+				if info, err := os.Lstat(floor); err != nil || !info.Mode().IsRegular() {
+					t.Fatalf("detached private repair floor was not preserved: %v", err)
+				}
+			} else {
+				assertWakeRepairClaimResidueAbsent(t, authorities)
+			}
 		})
 	}
 }

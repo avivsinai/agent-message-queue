@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -13,9 +14,16 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
+var deliverToExistingInbox = fsq.DeliverToExistingInbox
+
 func runSend(args []string) error {
+	return runSendWithAfterBodyRead(args, nil)
+}
+
+func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	toFlag := fs.String("to", "", "Receiver handle (comma-separated)")
@@ -23,6 +31,7 @@ func runSend(args []string) error {
 	threadFlag := fs.String("thread", "", "Thread id (required for multiple recipients; default p2p/<a>__<b> for single-recipient sends)")
 	bodyFlag := fs.String("body", "", "Body string, @file, or - / empty to read stdin")
 	allowEmptyFlag := fs.Bool("allow-empty", false, "Allow sending a blank body (otherwise an empty body is rejected)")
+	allowSelfFlag := fs.Bool("allow-self", false, "Allow an intentional same-root send to the sender's own handle")
 	refsFlag := fs.String("refs", "", "Comma-separated related message ids")
 	waitForFlag := fs.String("wait-for", "", "Wait for receipt stage after send (drained, dlq)")
 	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for (0 = wait forever)")
@@ -58,9 +67,6 @@ func runSend(args []string) error {
 		return err
 	} else if handled {
 		return nil
-	}
-	if err := rejectPositionalArgs(fs, "send"); err != nil {
-		return err
 	}
 	if err := requireMe(common.Me); err != nil {
 		return err
@@ -114,6 +120,7 @@ func runSend(args []string) error {
 
 	// Determine delivery root: local, cross-session, or cross-project.
 	deliveryRoot := root
+	peerBaseRoot := ""
 	targetSession := strings.TrimSpace(*sessionFlag)
 	// Inline session from @project:session takes effect only when not overridden.
 	if targetSession == "" && inlineSession != "" {
@@ -146,6 +153,14 @@ func runSend(args []string) error {
 	if pinErr != nil {
 		return pinErr
 	}
+	if !*ignoreSessionPinFlag {
+		if err := validateLegacySessionPinRoot(pin); err != nil {
+			return ContextMismatchError(
+				"refusing send: %s. Target routing does not authorize a mismatched source; use an explicit source route, or explicit --root with --ignore-session-pin",
+				err,
+			)
+		}
+	}
 	if pin.Present && pin.IdentityPin {
 		if verifyTreeIdentityToken(pin.BaseRoot, pin.BaseRootID) != TreeRelationSame {
 			return ContextMismatchError("pinned base root identity is not current")
@@ -154,9 +169,19 @@ func runSend(args []string) error {
 			return ContextMismatchError("pinned root identity is not current")
 		}
 		if fromSession == "" {
-			if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
+			if err := guardPinnedSourceContext("send", sourceRoot, targetProject != "", *ignoreSessionPinFlag, common.rootExplicit()); err != nil {
 				return err
 			}
+		}
+	}
+	if fromSession != "" {
+		decision := sessionguard.Decide(sessionguard.Input{
+			Kind: sessionguard.KindSource,
+			Pin:  sessionGuardPinStateFor(pin), Relation: sessionguard.TargetMismatch,
+			Flags: sessionguard.Flags{FromSession: true},
+		})
+		if decision.Verdict != sessionguard.Allow {
+			return ContextMismatchError("refusing send: source session routing was not authorized")
 		}
 	}
 	if common.rootExplicit() && !routed {
@@ -170,11 +195,23 @@ func runSend(args []string) error {
 	// Preserve the original lexical source guard after the advisory check. An
 	// identity pin was already validated above; lexical pins still need refusal.
 	if fromSession == "" && (!pin.Present || !pin.IdentityPin) {
-		if err := guardPinnedSourceContext("send", sourceRoot, *ignoreSessionPinFlag); err != nil {
+		if err := guardPinnedSourceContext("send", sourceRoot, targetProject != "", *ignoreSessionPinFlag, common.rootExplicit()); err != nil {
 			return err
 		}
 	}
-	var replyProject string
+	if !routed && !*allowSelfFlag {
+		for _, recipient := range recipients {
+			if recipient == me {
+				return UsageError(
+					"refusing send: recipient %q matches the sender and no routing dimension was given. "+
+						"Use --project <peer> or --session <name> to reach another instance, "+
+						"or pass --allow-self to confirm an intentional same-root self-send.",
+					me,
+				)
+			}
+		}
+	}
+	sourceProject := ""
 	if fromSession != "" {
 		if targetProject != "" {
 			return UsageError("--from-session is not supported with --project")
@@ -194,65 +231,17 @@ func runSend(args []string) error {
 		}
 		sourceSession = fromSession
 	}
-	if targetProject != "" {
-		// Cross-project delivery.
-		peerBaseRoot, err := resolvePeer(root, targetProject)
+	if targetProject != "" || targetSession != "" {
+		routePlan, err := planDeliveryRoute(sourceRoot, targetProject, targetSession, deliveryRouteOptions{
+			MirrorPeerSession: true,
+		})
 		if err != nil {
 			return err
 		}
-
-		if targetSession != "" {
-			// Cross-project + explicit session.
-			normalized, err := normalizeHandle(targetSession)
-			if err != nil {
-				return UsageError("--session: %v", err)
-			}
-			targetSession = normalized
-			deliveryRoot, err = resolveSessionRoot(peerBaseRoot, targetSession)
-			if err != nil {
-				return err
-			}
-		} else {
-			// Cross-project, no explicit session. Mirror the sender's session when
-			// the source root is itself a session root.
-			if classifyRoot(root) != "" {
-				// Inside a session — use same session name in peer.
-				targetSession = sessionName(root)
-				deliveryRoot, err = resolveSessionRoot(peerBaseRoot, targetSession)
-				if err != nil {
-					return err
-				}
-			} else {
-				// At base root — deliver to peer's base root directly.
-				deliveryRoot = peerBaseRoot
-			}
-		}
-
-		replyProject = resolveProject(root)
-	} else if targetSession != "" {
-		normalized, err := normalizeHandle(targetSession)
-		if err != nil {
-			return UsageError("--session: %v", err)
-		}
-		targetSession = normalized
-
-		baseRoot := root
-		if fromSession == "" {
-			// Cross-session requires AM_BASE_ROOT to be set (by coop exec) or
-			// the root must be a session root (has a parent with sibling sessions).
-			// This eliminates the base-root ambiguity: --session only works from
-			// a session context, never from the base root directly.
-			baseRoot = classifyRoot(root)
-		}
-		if baseRoot == "" {
-			return fmt.Errorf("--session requires a session context: run from inside 'amq coop exec --session <name>'")
-		}
-
-		deliveryRoot, err = resolveSessionRoot(baseRoot, targetSession)
-		if err != nil {
-			return err
-		}
-
+		deliveryRoot = routePlan.DeliveryRoot
+		peerBaseRoot = routePlan.PeerBaseRoot
+		targetSession = routePlan.TargetSession
+		sourceProject = routePlan.SourceProject
 	}
 
 	// Snapshot the physical roots at the authorization boundary. Opening the
@@ -266,6 +255,18 @@ func runSend(args []string) error {
 		sourceIdentity, err = fsq.SnapshotDeliveryRoot(sourceRoot)
 		if err != nil {
 			return err
+		}
+	}
+	if !*allowSelfFlag && os.SameFile(sourceIdentity.FileInfo(), deliveryIdentity.FileInfo()) {
+		for _, recipient := range recipients {
+			if recipient == me {
+				return UsageError(
+					"refusing send: recipient %q resolves to the sender's physical AMQ tree. "+
+						"Use --project <peer> or --session <name> to reach another instance, "+
+						"or pass --allow-self to confirm an intentional same-root self-send.",
+					me,
+				)
+			}
 		}
 	}
 	if pin.IdentityPin && !*ignoreSessionPinFlag && fromSession == "" &&
@@ -286,36 +287,125 @@ func runSend(args []string) error {
 		}
 		defer func() { _ = sourceFS.Close() }()
 	}
+	peerConfigBaseRoot := ""
+	configBase := ""
+	expectedBaseRootID := ""
+	switch {
+	case targetProject != "":
+		configBase = peerBaseRoot
+	case fromSession != "":
+		configBase = root
+		if pin.IdentityPin && !*ignoreSessionPinFlag {
+			expectedBaseRootID = pin.BaseRootID
+		}
+	default:
+		configBase, expectedBaseRootID = localMailboxConfigAuthority(
+			deliveryRoot,
+			pin,
+			*ignoreSessionPinFlag,
+		)
+	}
+	configSelection, err := openMailboxConfigSelection(
+		deliveryFS,
+		deliveryRoot,
+		configBase,
+		expectedBaseRootID,
+	)
+	if err != nil {
+		return err
+	}
+	defer configSelection.Close()
+	configFS := configSelection.ConfigFS
+	sharedConfig := configSelection.Shared
+	configAuthorityBaseRoot := configSelection.AuthorityRoot
+	if targetProject != "" && sharedConfig {
+		peerConfigBaseRoot = peerBaseRoot
+	}
+	var mailboxAuthorization *fsq.MailboxConfigAuthorization
+	if targetProject == "" {
+		var inventory fsq.MailboxInventory
+		mailboxAuthorization, inventory, err = fsq.OpenMailboxConfigAuthorization(configFS)
+		if err != nil {
+			return sendMailboxAuthorizationError(deliveryRoot, inventory)
+		}
+		defer func() { _ = mailboxAuthorization.Close() }()
+	}
 
 	if fromSession != "" && !deliveryAgentExists(sourceFS, me) {
 		return fmt.Errorf("agent %q not found in source session %q", me, fromSession)
 	}
-	for _, recipient := range recipients {
-		if deliveryInboxExists(deliveryFS, recipient) {
-			continue
+	peerRecipientConfigured := false
+	peerConfigPresent := false
+	if targetProject != "" {
+		peerAgents, configPresent, peerAgentsErr := loadPeerAgentsForSend(configFS, common.Strict)
+		if err := validateKnownHandlesFromAgents(peerAgents, peerAgentsErr, common.Strict, recipients...); err != nil {
+			return err
 		}
-		switch {
-		case targetProject != "" && targetSession != "":
-			return fmt.Errorf("agent %q not found in peer %q session %q", recipient, targetProject, targetSession)
-		case targetProject != "":
-			return fmt.Errorf("agent %q not found in peer %q", recipient, targetProject)
-		case targetSession != "":
-			return fmt.Errorf("agent %q not found in session %q", recipient, targetSession)
+		peerConfigPresent = configPresent
+		peerRecipientConfigured = handleConfigured(peerAgents, recipients[0])
+		for _, recipient := range recipients {
+			layoutErr := fsq.ValidateExistingMailboxLayout(deliveryFS, recipient)
+			if layoutErr == nil {
+				continue
+			}
+			return peerMailboxIncompleteError(
+				targetProject,
+				targetSession,
+				recipient,
+				layoutErr,
+				deliveryRoot,
+				peerConfigBaseRoot,
+				peerRecipientConfigured,
+			)
 		}
 	}
 
 	// Validate sender in source root and recipients in target root through the
 	// same capabilities that will perform delivery.
+	var sourceConfigFS *fsq.DeliveryRoot
+	var sourceConfigPresent bool
 	if targetProject != "" || targetSession != "" {
-		if err := validateKnownHandlesDeliveryRoot(sourceFS, common.Strict, me); err != nil {
+		var sourceAgents []string
+		var sourceAgentsErr error
+		if targetProject == "" && sharedConfig {
+			sourceAgents = withReservedHumanHandle(mailboxAuthorization.ConfiguredAgents())
+		} else if targetProject == "" {
+			sourceAgents, sourceAgentsErr = loadKnownAgentsDeliveryRoot(sourceFS, common.Strict)
+		} else {
+			sourceConfigBase, expectedSourceBaseRootID := localMailboxConfigAuthority(
+				sourceRoot,
+				pin,
+				*ignoreSessionPinFlag,
+			)
+			sourceConfigSelection, sourceConfigErr := openMailboxConfigSelection(
+				sourceFS,
+				sourceRoot,
+				sourceConfigBase,
+				expectedSourceBaseRootID,
+			)
+			if sourceConfigErr != nil {
+				return sourceConfigErr
+			}
+			defer sourceConfigSelection.Close()
+			sourceAgents, sourceConfigPresent, sourceAgentsErr = loadPeerAgentsForSend(
+				sourceConfigSelection.ConfigFS,
+				common.Strict,
+			)
+			sourceConfigFS = sourceConfigSelection.ConfigFS
+		}
+		if err := validateKnownHandlesFromAgents(sourceAgents, sourceAgentsErr, common.Strict, me); err != nil {
 			return err
 		}
-		if err := validateKnownHandlesDeliveryRoot(deliveryFS, common.Strict, recipients...); err != nil {
-			return err
+		if targetProject == "" {
+			targetAgents := withReservedHumanHandle(mailboxAuthorization.ConfiguredAgents())
+			if err := validateKnownHandlesFromAgents(targetAgents, nil, common.Strict, recipients...); err != nil {
+				return err
+			}
 		}
 	} else {
 		allHandles := append([]string{me}, recipients...)
-		if err := validateKnownHandlesDeliveryRoot(deliveryFS, common.Strict, allHandles...); err != nil {
+		agents := withReservedHumanHandle(mailboxAuthorization.ConfiguredAgents())
+		if err := validateKnownHandlesFromAgents(agents, nil, common.Strict, allHandles...); err != nil {
 			return err
 		}
 	}
@@ -323,6 +413,9 @@ func runSend(args []string) error {
 	body, err := readBody(*bodyFlag, *allowEmptyFlag)
 	if err != nil {
 		return err
+	}
+	if afterBodyRead != nil {
+		afterBodyRead()
 	}
 
 	// Validate and process co-op mode fields
@@ -358,15 +451,14 @@ func runSend(args []string) error {
 		if len(recipients) == 1 {
 			if targetProject != "" {
 				// Cross-project: include project names (and session names when applicable).
-				srcProject := resolveProject(root)
 				if targetSession != "" && senderInSession {
 					srcSession := sourceSessionName(root, sourceSession)
-					threadID = "p2p/" + srcProject + ":" + srcSession + ":" + common.Me + "__" + targetProject + ":" + targetSession + ":" + recipients[0]
+					threadID = "p2p/" + sourceProject + ":" + srcSession + ":" + common.Me + "__" + targetProject + ":" + targetSession + ":" + recipients[0]
 				} else if targetSession != "" {
 					// Sender at base root targeting a session.
-					threadID = "p2p/" + srcProject + ":" + common.Me + "__" + targetProject + ":" + targetSession + ":" + recipients[0]
+					threadID = "p2p/" + sourceProject + ":" + common.Me + "__" + targetProject + ":" + targetSession + ":" + recipients[0]
 				} else {
-					threadID = "p2p/" + srcProject + ":" + common.Me + "__" + targetProject + ":" + recipients[0]
+					threadID = "p2p/" + sourceProject + ":" + common.Me + "__" + targetProject + ":" + recipients[0]
 				}
 			} else if targetSession != "" {
 				// Cross-session: include session names to avoid collisions.
@@ -404,7 +496,7 @@ func runSend(args []string) error {
 	// same-handle senders from different projects.
 	fromProject := ""
 	if targetProject != "" {
-		fromProject = replyProject
+		fromProject = sourceProject
 	}
 
 	msg := format.Message{
@@ -422,7 +514,7 @@ func runSend(args []string) error {
 			Labels:       labels,
 			Context:      context,
 			ReplyTo:      replyTo,
-			ReplyProject: replyProject,
+			ReplyProject: sourceProject,
 			FromProject:  fromProject,
 		},
 		Body: body,
@@ -432,16 +524,68 @@ func runSend(args []string) error {
 	if err != nil {
 		return err
 	}
+	if targetProject == "" {
+		if err := prepareLocalSendMailboxes(deliveryFS, mailboxAuthorization, deliveryRoot, recipients); err != nil {
+			return err
+		}
+		if err := mailboxAuthorization.Verify(); err != nil {
+			return fmt.Errorf("destination mailbox authorization changed before delivery: %w", err)
+		}
+	}
 
 	filename := id + ".md"
 	if targetProject != "" {
+		currentSourceAgents, currentSourceAgentsErr := revalidateSourceAgentsForSend(
+			sourceConfigFS,
+			sourceConfigPresent,
+			common.Strict,
+		)
+		if err := validateKnownHandlesFromAgents(
+			currentSourceAgents,
+			currentSourceAgentsErr,
+			common.Strict,
+			me,
+		); err != nil {
+			return err
+		}
+		currentPeerAgents, currentPeerAgentsErr := revalidatePeerAgentsForSend(configFS, peerConfigPresent, common.Strict)
+		if err := validateKnownHandlesFromAgents(currentPeerAgents, currentPeerAgentsErr, common.Strict, recipients...); err != nil {
+			return err
+		}
+		if err := sourceFS.VerifyBase(); err != nil {
+			return err
+		}
 		// Cross-project: use DeliverToExistingInbox (never creates dirs in peer).
 		for _, r := range recipients {
-			if _, err := fsq.DeliverToExistingInbox(deliveryFS, r, filename, data); err != nil {
+			if _, err := deliverToExistingInbox(deliveryFS, r, filename, data); err != nil {
+				var committed *fsq.CommittedDurabilityError
+				if errors.As(err, &committed) {
+					return reportDeliveryError(id, err)
+				}
+				if layoutErr := fsq.ValidateExistingMailboxLayout(deliveryFS, r); layoutErr != nil {
+					currentPeerAgents, currentPeerAgentsErr := revalidatePeerAgentsForSend(configFS, peerConfigPresent, common.Strict)
+					if rosterErr := validateKnownHandlesFromAgents(currentPeerAgents, currentPeerAgentsErr, common.Strict, r); rosterErr != nil {
+						return rosterErr
+					}
+					return peerMailboxIncompleteError(
+						targetProject,
+						targetSession,
+						r,
+						layoutErr,
+						deliveryRoot,
+						peerConfigBaseRoot,
+						handleConfigured(currentPeerAgents, r),
+					)
+				}
 				return reportDeliveryError(id, err)
 			}
 		}
 	} else {
+		if targetSession != "" {
+			if err := sourceFS.VerifyBase(); err != nil {
+				return err
+			}
+		}
 		if _, err := fsq.DeliverToInboxes(deliveryFS, recipients, filename, data); err != nil {
 			return reportDeliveryError(id, err)
 		}
@@ -477,7 +621,8 @@ func runSend(args []string) error {
 		r, err := receipt.WaitForDeliveryRoot(deliveryFS, id, consumer, waitFor, *waitTimeoutFlag, 1*time.Second)
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			waitResult = &waitForResult{Event: "timeout", Stage: waitFor, Timeout: waitTimeoutFlag.String()}
-			waitErr = TimeoutError("send --wait-for %s timed out after %s (delivery session %s, root %s); run 'amq doctor --ops' to diagnose mailbox divergence", waitFor, *waitTimeoutFlag, targetDisplay, deliveryRoot)
+			diagnosticCommand := doctorRootCommandForOS(deliveryRoot, configAuthorityBaseRoot, runtime.GOOS, "--ops")
+			waitErr = TimeoutError("send --wait-for %s timed out after %s (delivery session %s, root %s); run %s to diagnose mailbox divergence", waitFor, *waitTimeoutFlag, targetDisplay, deliveryRoot, diagnosticCommand)
 		} else if err != nil {
 			waitResult = &waitForResult{Event: "error", Stage: waitFor, Detail: err.Error()}
 			waitErr = fmt.Errorf("send --wait-for: %w", err)
@@ -499,7 +644,7 @@ func runSend(args []string) error {
 		}
 		if targetProject != "" {
 			out["cross_project"] = true
-			out["source_project"] = replyProject
+			out["source_project"] = sourceProject
 			out["target_project"] = targetProject
 		}
 		if targetSession != "" {
@@ -542,6 +687,118 @@ func runSend(args []string) error {
 		}
 	}
 	return nil
+}
+
+func loadPeerAgentsForSend(root *fsq.DeliveryRoot, strict bool) ([]string, bool, error) {
+	configPresent := true
+	agents, err := loadKnownAgentsWithRead(strict, func() ([]byte, error) {
+		data, readErr := root.ReadRegularNoFollow(filepath.Join("meta", "config.json"))
+		if os.IsNotExist(readErr) {
+			configPresent = false
+		}
+		return data, readErr
+	})
+	return agents, configPresent, err
+}
+
+func revalidatePeerAgentsForSend(root *fsq.DeliveryRoot, configInitiallyPresent, strict bool) ([]string, error) {
+	return revalidateSelectedAgentsForSend(root, configInitiallyPresent, strict, "peer")
+}
+
+func revalidateSourceAgentsForSend(root *fsq.DeliveryRoot, configInitiallyPresent, strict bool) ([]string, error) {
+	return revalidateSelectedAgentsForSend(root, configInitiallyPresent, strict, "source")
+}
+
+func revalidateSelectedAgentsForSend(
+	root *fsq.DeliveryRoot,
+	configInitiallyPresent, strict bool,
+	authority string,
+) ([]string, error) {
+	agents, configPresent, err := loadPeerAgentsForSend(root, strict)
+	if err != nil {
+		return nil, err
+	}
+	if !configInitiallyPresent || configPresent {
+		return agents, nil
+	}
+	transition := fmt.Sprintf("selected %s config.json disappeared after initial validation", authority)
+	if strict {
+		return nil, errors.New(transition)
+	}
+	_ = writeStderr("warning: %s\n", transition)
+	return agents, nil
+}
+
+func handleConfigured(agents []string, handle string) bool {
+	for _, configured := range agents {
+		if configured == handle {
+			return true
+		}
+	}
+	return false
+}
+
+func peerMailboxIncompleteError(project, session, recipient string, layoutErr error, root, baseRoot string, configured bool) error {
+	peerContext := fmt.Sprintf("peer %q", project)
+	if session != "" {
+		peerContext += fmt.Sprintf(" session %q", session)
+	}
+	command := peerMailboxRepairCommandForOS(root, baseRoot, runtime.GOOS)
+	runInstruction := "run"
+	if runtime.GOOS == "windows" {
+		runInstruction = "run in PowerShell"
+	}
+	if !configured {
+		configRoot := baseRoot
+		if configRoot == "" {
+			configRoot = root
+		}
+		return fmt.Errorf(
+			"%s mailbox for %q is incomplete: %w; add %q to agents in peer config %s, then %s: %s",
+			peerContext,
+			recipient,
+			layoutErr,
+			recipient,
+			filepath.Join(configRoot, "meta", "config.json"),
+			runInstruction,
+			command,
+		)
+	}
+	return fmt.Errorf(
+		"%s mailbox for %q is incomplete: %w; ask the peer owner to %s: %s",
+		peerContext,
+		recipient,
+		layoutErr,
+		runInstruction,
+		command,
+	)
+}
+
+func peerMailboxRepairCommandForOS(root, baseRoot, goos string) string {
+	return doctorMailboxRepairCommandForOS(root, baseRoot, goos)
+}
+
+func doctorMailboxRepairCommandForOS(root, baseRoot, goos string) string {
+	return doctorRootCommandForOS(root, baseRoot, goos, "--fix-mailboxes")
+}
+
+func doctorRootCommandForOS(root, baseRoot, goos string, trailingArgs ...string) string {
+	quote := shellQuoteArg
+	if goos == "windows" {
+		quote = quotePowerShellCommandArg
+	}
+	command := "amq doctor --root " + quote(root)
+	if baseRoot != "" && filepath.Clean(baseRoot) != filepath.Clean(root) {
+		command += " --base-root " + quote(baseRoot)
+	}
+	for _, arg := range trailingArgs {
+		command += " " + arg
+	}
+	return command
+}
+
+func quotePowerShellCommandArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 type waitForResult struct {

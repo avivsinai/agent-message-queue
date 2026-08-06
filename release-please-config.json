@@ -4,6 +4,8 @@
   "include-component-in-tag": false,
   "skip-github-release": true,
   "pull-request-title-pattern": "chore(release): v${version}",
+  "label": "autorelease: pending",
+  "release-label": "autorelease: tagged",
   "changelog-sections": [
     {
       "type": "feat",

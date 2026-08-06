@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -16,6 +17,7 @@ const wakePreparedPollInterval = 25 * time.Millisecond
 
 var waitForWakePreparedRetry = sleepUntilWakePreparedRetry
 var afterGenericWakeLockRemoval = func(int, *wakeAgentDir) error { return nil }
+var afterWakePreparedBoundValidation = func() {}
 
 func wakePreparedPath(root, me string) string {
 	return filepath.Join(fsq.AgentBase(root, me), wakePreparedFileName)
@@ -43,15 +45,41 @@ func writeWakePreparedFileInDir(
 		if !sameWakeLockGeneration(expected, current) {
 			return fmt.Errorf("wake lock generation changed before preparation publication")
 		}
+		afterWakePreparedBoundValidation()
+		confirmed := inspectWakeLockAt(dirfd, agentDir, root, me)
+		if !sameWakeLockGeneration(expected, confirmed) {
+			return newWakeStateBoundInconclusiveError(
+				newWakeSnapshotReadChangedError(fmt.Errorf("wake lock changed before prepared state refresh")),
+			)
+		}
+		current = confirmed
+		if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, current); err != nil {
+			return fmt.Errorf("refresh bound wake state before preparation publication: %w", err)
+		}
 		marker := wakeReady{
 			Schema:       wakeReadySchema,
 			Generation:   current.Lock.Generation,
 			TargetDigest: current.Lock.TargetDigest,
 		}
-		if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, marker); err != nil {
+		refreshState := func() error {
+			if err := reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me); err != nil {
+				if current.Lock.StateGeneration != "" && current.Lock.StateDigest != "" {
+					return fmt.Errorf("wake prepared marker committed; refresh bound wake state: %w", err)
+				}
+				if continueAfterWakeStateProjectionError(err) {
+					return nil
+				}
+				return fmt.Errorf("wake prepared marker committed; refresh wake state: %w", err)
+			}
+			return nil
+		}
+		if err := validateWakeReadyLockAndTargetForInspectionAt(dirfd, agentDir, root, me, current, marker); err != nil {
 			return err
 		}
-		return writeWakeGenerationFileAt(dirfd, wakePreparedFileName, "wake prepared marker", marker)
+		if err := writeWakeGenerationFileAt(dirfd, wakePreparedFileName, "wake prepared marker", marker); err != nil {
+			return err
+		}
+		return refreshState()
 	})
 }
 
@@ -74,7 +102,7 @@ func freezeGenericWakePreparedCleanupAt(
 	if !exists || snapshot.Marker.Generation != current.Lock.Generation {
 		return nil, nil
 	}
-	if err := validateWakeReadyLockAndTargetAt(
+	if err := validateWakeReadyLockAndTargetForInspectionAt(
 		dirfd,
 		agentDir,
 		root,
@@ -88,22 +116,11 @@ func freezeGenericWakePreparedCleanupAt(
 }
 
 func validateWakePreparedFileAgainstInspection(root, me string, current wakeLockInspection) (bool, error) {
-	marker, exists, err := readWakeGenerationFile(wakePreparedPath(root, me), "wake prepared marker")
+	selection, err := readWakeStateSelectionForInspection(root, me, current)
 	if err != nil {
 		return false, err
 	}
-	if !exists {
-		return false, nil
-	}
-	if marker.Generation != current.Lock.Generation {
-		// Persistent marker from the previous wake generation: this exact wake
-		// has not published preparation yet, so its caller should keep polling.
-		return false, nil
-	}
-	if err := validateWakeReadyLockAndTarget(root, me, current, marker); err != nil {
-		return false, fmt.Errorf("existing amq wake prepared marker is not valid: %w", err)
-	}
-	return true, nil
+	return validateWakePreparedSelection(current, selection)
 }
 
 func validateWakePreparedFileAgainstInspectionAt(
@@ -113,22 +130,46 @@ func validateWakePreparedFileAgainstInspectionAt(
 	me string,
 	current wakeLockInspection,
 ) (bool, error) {
-	marker, exists, err := readWakeGenerationFileAt(
-		dirfd,
-		agentDir,
-		wakePreparedFileName,
-		"wake prepared marker",
-	)
+	selection, err := readWakeStateSelectionForInspectionAt(dirfd, agentDir, root, me, current)
 	if err != nil {
 		return false, err
 	}
-	if !exists || marker.Generation != current.Lock.Generation {
+	return validateWakePreparedSelection(current, selection)
+}
+
+func validateWakePreparedSelection(
+	current wakeLockInspection,
+	selection wakeStateReadSelection,
+) (bool, error) {
+	if selection.PreparedErr != nil {
+		return false, selection.PreparedErr
+	}
+	var prepared *wakeStatePrepared
+	if selection.PreparedPresent {
+		prepared = &wakeStatePrepared{
+			Schema:       selection.Prepared.Schema,
+			Generation:   selection.Prepared.Generation,
+			TargetDigest: selection.Prepared.TargetDigest,
+		}
+	}
+	observation := classifyWakeStatePrepared(
+		prepared,
+		current.Lock.Generation,
+		current.Lock.TargetDigest,
+	)
+	if observation == wakeStatePreparedAbsent || observation == wakeStatePreparedStale {
+		// A missing marker or one from a previous generation is not preparation.
 		return false, nil
 	}
-	if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, marker); err != nil {
+	if err := validateWakeReadyLockAndSelectedTarget(
+		current,
+		selection.Prepared,
+		selection.Target,
+		selection.TargetPresent,
+	); err != nil {
 		return false, fmt.Errorf("existing amq wake prepared marker is not valid: %w", err)
 	}
-	return true, nil
+	return observation == wakeStatePreparedCurrent, nil
 }
 
 func writeWakeReadyFileForPreparedWake(root, me, path string, expected wakeLockInspection, deadline time.Time) error {
@@ -137,8 +178,35 @@ func writeWakeReadyFileForPreparedWake(root, me, path string, expected wakeLockI
 		return err
 	}
 	defer func() { _ = agentDir.Close() }()
+	publication, err := writeWakeReadyFileForPreparedWakeInDir(
+		agentDir,
+		root,
+		me,
+		path,
+		expected,
+		deadline,
+	)
+	if publication != nil {
+		_ = publication.Close()
+	}
+	return err
+}
+
+func writeWakeReadyFileForPreparedWakeInDir(
+	agentDir *wakeAgentDir,
+	root, me, path string,
+	expected wakeLockInspection,
+	deadline time.Time,
+) (*wakeReadyPublication, error) {
+	if agentDir == nil {
+		return nil, fmt.Errorf("wake agent directory capability is missing")
+	}
 	for {
+		if err := validateCanonicalWakeAgentDir(agentDir); err != nil {
+			return nil, err
+		}
 		prepared := false
+		var publication *wakeReadyPublication
 		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 			current := inspectWakeLockAt(dirfd, agentDir, root, me)
 			if !sameWakeLockGeneration(expected, current) {
@@ -147,7 +215,7 @@ func writeWakeReadyFileForPreparedWake(root, me, path string, expected wakeLockI
 			if !confirmedLiveWake(current) {
 				return fmt.Errorf("existing amq wake stopped before preparation completed")
 			}
-			if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, wakeReady{
+			if err := validateWakeReadyLockAndTargetForInspectionAt(dirfd, agentDir, root, me, current, wakeReady{
 				Schema:       wakeReadySchema,
 				Generation:   current.Lock.Generation,
 				TargetDigest: current.Lock.TargetDigest,
@@ -155,17 +223,13 @@ func writeWakeReadyFileForPreparedWake(root, me, path string, expected wakeLockI
 				return fmt.Errorf("existing amq wake became incompatible before preparation completed: %w", err)
 			}
 			var err error
-			if current.Lock.WakeMode == wakeOwnerWakeMode {
-				prepared, err = validateWakePreparedFileAgainstInspectionAt(
-					dirfd,
-					agentDir,
-					root,
-					me,
-					current,
-				)
-			} else {
-				prepared, err = validateWakePreparedFileAgainstInspection(root, me, current)
-			}
+			prepared, err = validateWakePreparedFileAgainstInspectionAt(
+				dirfd,
+				agentDir,
+				root,
+				me,
+				current,
+			)
 			if err != nil || !prepared {
 				return err
 			}
@@ -174,16 +238,22 @@ func writeWakeReadyFileForPreparedWake(root, me, path string, expected wakeLockI
 				Generation:   current.Lock.Generation,
 				TargetDigest: current.Lock.TargetDigest,
 			}
-			return writeWakeGenerationFile(path, "wake ready file", marker)
+			publication, err = publishWakeReadyFile(path, marker)
+			return err
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if prepared {
-			return nil
+			if err := validateCanonicalWakeAgentDir(agentDir); err != nil {
+				cleanupErr := publication.removeIfUnchanged()
+				closeErr := publication.Close()
+				return nil, errors.Join(err, cleanupErr, closeErr)
+			}
+			return publication, nil
 		}
 		if !waitForWakePreparedRetry(deadline) {
-			return fmt.Errorf("existing amq wake did not publish its prepared marker before the readiness deadline")
+			return nil, fmt.Errorf("existing amq wake did not publish its prepared marker before the readiness deadline")
 		}
 	}
 }

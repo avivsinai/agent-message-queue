@@ -21,12 +21,35 @@ builds:
       post:
         - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
 
+  - id: amq-keepalive
+    main: ./cmd/amq-keepalive
+    binary: amq-keepalive
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    hooks:
+      post:
+        - sh -ceu 'codesign --force --sign - --identifier io.github.avivsinai.amq-keepalive "$1"' _ "{{ .Path }}"
+
 archives:
-  - formats: [tar.gz]
+  - id: amq
+    ids: [amq]
+    formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
         formats: [zip]
+
+  - id: amq-keepalive
+    ids: [amq-keepalive]
+    formats: [tar.gz]
+    name_template: "amq-keepalive_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: "checksums.txt"
@@ -57,6 +80,7 @@ changelog:
 
 brews:
   - name: amq
+    ids: [amq]
     repository:
       owner: avivsinai
       name: homebrew-tap

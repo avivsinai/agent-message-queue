@@ -151,6 +151,99 @@ func TestStoreRejectsSecondOwnerForSameAdapterTarget(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsSecondRegistrationForSameRootAndAgentAcrossAdapters(t *testing.T) {
+	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	first, err := store.Upsert(Entry{Root: "/tmp/amq-root", Agent: "codex", Adapter: "file", Target: "/tmp/first.txt"})
+	if err != nil {
+		t.Fatalf("Upsert(first) error = %v", err)
+	}
+	_, err = store.Upsert(Entry{Root: "/tmp/amq-root", Agent: "codex", Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"})
+	if !errors.Is(err, ErrRegistrationOwned) {
+		t.Fatalf("Upsert(second) error = %v, want ErrRegistrationOwned", err)
+	}
+	loaded, loadErr := store.Load()
+	if loadErr != nil || len(loaded.Entries) != 1 || loaded.Entries[0] != first {
+		t.Fatalf("registry changed after second-registration refusal: entries=%#v err=%v", loaded.Entries, loadErr)
+	}
+}
+
+func TestStoreUsesCanonicalRootForRegistrationOwnershipAndReattach(t *testing.T) {
+	dir := t.TempDir()
+	realRoot := filepath.Join(dir, "real-root")
+	if err := os.Mkdir(realRoot, 0o700); err != nil {
+		t.Fatalf("Mkdir real root: %v", err)
+	}
+	aliasRoot := filepath.Join(dir, "alias-root")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Fatalf("Symlink root alias: %v", err)
+	}
+	canonicalRoot, err := CanonicalRoot(realRoot)
+	if err != nil {
+		t.Fatalf("CanonicalRoot(real root): %v", err)
+	}
+	store := New(filepath.Join(dir, "registry.json"))
+	first, err := store.Upsert(Entry{Root: aliasRoot, Agent: "codex", Adapter: "file", Target: filepath.Join(dir, "first.txt")})
+	if err != nil {
+		t.Fatalf("Upsert(first) error = %v", err)
+	}
+	if first.Root != canonicalRoot {
+		t.Fatalf("first root = %q, want canonical %q", first.Root, canonicalRoot)
+	}
+	_, err = store.Upsert(Entry{Root: realRoot, Agent: "codex", Adapter: "ghostty", Target: "ghostty:terminal:second"})
+	if !errors.Is(err, ErrRegistrationOwned) {
+		t.Fatalf("Upsert(alias collision) error = %v, want ErrRegistrationOwned", err)
+	}
+
+	replacement, removed, err := store.ReplaceSessionAdapter(Entry{Root: realRoot, Agent: "codex", Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"})
+	if err != nil {
+		t.Fatalf("ReplaceSessionAdapter() error = %v", err)
+	}
+	if len(removed) != 1 || removed[0] != first {
+		t.Fatalf("removed=%#v, want canonical prior registration %#v", removed, first)
+	}
+	loaded, loadErr := store.Load()
+	if loadErr != nil || len(loaded.Entries) != 1 || loaded.Entries[0] != replacement || replacement.Root != canonicalRoot {
+		t.Fatalf("reattach did not converge canonical alias: entries=%#v replacement=%#v err=%v", loaded.Entries, replacement, loadErr)
+	}
+}
+
+func TestStoreUpsertRewritesEquivalentLegacyRootAlias(t *testing.T) {
+	dir := t.TempDir()
+	realRoot := filepath.Join(dir, "real-root")
+	if err := os.Mkdir(realRoot, 0o700); err != nil {
+		t.Fatalf("Mkdir real root: %v", err)
+	}
+	aliasRoot := filepath.Join(dir, "alias-root")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Fatalf("Symlink root alias: %v", err)
+	}
+	canonicalRoot, err := CanonicalRoot(realRoot)
+	if err != nil {
+		t.Fatalf("CanonicalRoot(real root): %v", err)
+	}
+	target := filepath.Join(dir, "inbox.txt")
+	legacy := Entry{
+		ID:      "legacy-alias-id",
+		Root:    aliasRoot,
+		Agent:   "codex",
+		Adapter: "file",
+		Target:  target,
+		State:   StateActive,
+	}
+	store := New(filepath.Join(dir, "registry.json"))
+	if err := store.Save(File{Entries: []Entry{legacy}}); err != nil {
+		t.Fatalf("Save legacy entry: %v", err)
+	}
+	rewritten, err := store.Upsert(Entry{Root: realRoot, Agent: "codex", Adapter: "file", Target: target})
+	if err != nil {
+		t.Fatalf("Upsert equivalent registration: %v", err)
+	}
+	loaded, loadErr := store.Load()
+	if loadErr != nil || len(loaded.Entries) != 1 || loaded.Entries[0] != rewritten || rewritten.Root != canonicalRoot {
+		t.Fatalf("legacy alias did not converge: entries=%#v rewritten=%#v err=%v", loaded.Entries, rewritten, loadErr)
+	}
+}
+
 func TestStoreRejectsCanonicalCmuxTargetOwnedByLegacyLowercaseRow(t *testing.T) {
 	store := New(filepath.Join(t.TempDir(), "registry.json"))
 	lower := "cmux:surface:f901d722-6789-4bbb-9818-c4e97f20beb3"
@@ -169,6 +262,55 @@ func TestStoreRejectsCanonicalCmuxTargetOwnedByLegacyLowercaseRow(t *testing.T) 
 	loaded, loadErr := store.Load()
 	if loadErr != nil || len(loaded.Entries) != 1 || loaded.Entries[0] != legacy {
 		t.Fatalf("legacy registry changed: entries=%#v err=%v", loaded.Entries, loadErr)
+	}
+}
+
+func TestStoreRejectsCanonicalGhosttyTargetOwnedByLegacyLowercaseRow(t *testing.T) {
+	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	legacy := Entry{
+		ID: "legacy-ghostty-id", Root: "/tmp/first", Agent: "codex",
+		Adapter: "ghostty", Target: "ghostty:terminal:terminal-1", State: StateActive,
+	}
+	if err := store.Save(File{Entries: []Entry{legacy}}); err != nil {
+		t.Fatalf("Save legacy row: %v", err)
+	}
+	_, err := store.Upsert(Entry{Root: "/tmp/second", Agent: "claude", Adapter: "ghostty", Target: "ghostty:terminal:TERMINAL-1"})
+	if !errors.Is(err, ErrTargetOwned) {
+		t.Fatalf("Upsert(canonical Ghostty) error = %v, want ErrTargetOwned", err)
+	}
+	loaded, loadErr := store.Load()
+	if loadErr != nil || len(loaded.Entries) != 1 || loaded.Entries[0] != legacy {
+		t.Fatalf("legacy Ghostty row changed: entries=%#v err=%v", loaded.Entries, loadErr)
+	}
+}
+
+func TestStoreRejectsFileTargetOwnedByLegacySymlinkAlias(t *testing.T) {
+	dir := t.TempDir()
+	realParent := filepath.Join(dir, "real")
+	if err := os.Mkdir(realParent, 0o700); err != nil {
+		t.Fatalf("Mkdir real parent: %v", err)
+	}
+	aliasParent := filepath.Join(dir, "alias")
+	if err := os.Symlink(realParent, aliasParent); err != nil {
+		t.Fatalf("Symlink file target parent: %v", err)
+	}
+	legacy := Entry{
+		ID: "legacy-file-id", Root: "/tmp/first", Agent: "codex",
+		Adapter: "file", Target: filepath.Join(aliasParent, "inbox.txt"), State: StateActive,
+	}
+	store := New(filepath.Join(dir, "registry.json"))
+	if err := store.Save(File{Entries: []Entry{legacy}}); err != nil {
+		t.Fatalf("Save legacy row: %v", err)
+	}
+	_, err := store.Upsert(Entry{
+		Root: "/tmp/second", Agent: "claude", Adapter: "file", Target: filepath.Join(realParent, "inbox.txt"),
+	})
+	if !errors.Is(err, ErrTargetOwned) {
+		t.Fatalf("Upsert(canonical file target) error = %v, want ErrTargetOwned", err)
+	}
+	loaded, loadErr := store.Load()
+	if loadErr != nil || len(loaded.Entries) != 1 || loaded.Entries[0] != legacy {
+		t.Fatalf("legacy file row changed: entries=%#v err=%v", loaded.Entries, loadErr)
 	}
 }
 
@@ -336,14 +478,20 @@ func TestStoreReplaceSessionAdapterRemovesAllEntriesForRootAndAgent(t *testing.T
 	if err != nil {
 		t.Fatalf("Upsert(keepDifferentAgent) error = %v", err)
 	}
-	replaceDifferentAdapter, err := store.Upsert(Entry{
+	replaceDifferentAdapter := Entry{
 		Root:    "/tmp/amq-root",
 		Agent:   "codex",
 		Adapter: "ghostty",
 		Target:  "ghostty:terminal:old",
-	})
+		State:   StateAttached,
+	}
+	legacy, err := store.Load()
 	if err != nil {
-		t.Fatalf("Upsert(replaceDifferentAdapter) error = %v", err)
+		t.Fatalf("Load legacy registry: %v", err)
+	}
+	legacy.Entries = append(legacy.Entries, replaceDifferentAdapter)
+	if err := store.Save(legacy); err != nil {
+		t.Fatalf("Save legacy duplicate registration: %v", err)
 	}
 
 	next, removed, err := store.ReplaceSessionAdapter(Entry{
@@ -436,7 +584,7 @@ func TestStoreConcurrentUpsertsDoNotLoseEntries(t *testing.T) {
 			defer wg.Done()
 			_, err := store.Upsert(Entry{
 				Root:    "/tmp/amq-root",
-				Agent:   "codex",
+				Agent:   string(rune('a' + i)),
 				Adapter: "file",
 				Target:  filepath.Join("/tmp", "inbox", string(rune('a'+i))),
 			})

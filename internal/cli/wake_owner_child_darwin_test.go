@@ -112,6 +112,41 @@ func TestDarwinWakeOwnerPrivateStopCleanupInterruptsAndJoinsRead(t *testing.T) {
 	}
 }
 
+func TestDarwinWakeOwnerPrivateStopCleanupInterruptsInheritedBlockingRead(t *testing.T) {
+	var pipeFDs [2]int
+	if err := unix.Pipe(pipeFDs[:]); err != nil {
+		t.Fatal(err)
+	}
+	readFD, writeFD := pipeFDs[0], pipeFDs[1]
+	defer func() { _ = unix.Close(writeFD) }()
+	if err := unix.SetNonblock(readFD, false); err != nil {
+		_ = unix.Close(readFD)
+		t.Fatal(err)
+	}
+	t.Setenv(envWakePrivateStopFD, strconv.Itoa(readFD))
+
+	stop, cleanup, err := authoritativeWakePrivateStopFromEnv()
+	if err != nil {
+		_ = unix.Close(readFD)
+		t.Fatal(err)
+	}
+	finished := make(chan struct{})
+	go func() {
+		cleanup()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("private-stop cleanup did not interrupt inherited blocking read")
+	}
+	select {
+	case <-stop:
+		t.Fatal("cleanup was misclassified as explicit startup rollback")
+	default:
+	}
+}
+
 func TestDarwinWakeOwnerPrivateStopIsSealedFromDescendantExec(t *testing.T) {
 	if os.Getenv(darwinWakeOwnerDescendantHelperEnv) != "" {
 		if raw := os.Getenv(envWakePrivateStopFD); raw != "" {

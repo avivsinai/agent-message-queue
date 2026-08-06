@@ -41,13 +41,22 @@ type wakeTarget struct {
 	Created    string     `json:"created"`
 	InjectVia  string     `json:"inject_via"`
 	InjectArgs []string   `json:"inject_args,omitempty"`
+	RetryUntil string     `json:"retry_until,omitempty"`
 	Owner      *wakeOwner `json:"owner,omitempty"`
 }
 
-// sameWakeInjectorIdentity compares the behavior fixed at launch. Created and
-// owner metadata describe an instance, not the injector semantics it provides.
+// sameWakeInjectorIdentity compares the behavior fixed at launch: the resolved
+// executable and ordered fixed arguments. Provider target identity must
+// therefore be encoded in InjectArgs; ambient environment or provider config is
+// intentionally invisible. Created and owner metadata describe an instance,
+// not the injector semantics it provides.
 func sameWakeInjectorIdentity(first, second wakeTarget) bool {
-	return first.InjectVia == second.InjectVia && slices.Equal(first.InjectArgs, second.InjectArgs)
+	firstRetry, firstErr := normalizeWakeRetryUntil(first.RetryUntil)
+	secondRetry, secondErr := normalizeWakeRetryUntil(second.RetryUntil)
+	return firstErr == nil && secondErr == nil &&
+		first.InjectVia == second.InjectVia &&
+		slices.Equal(first.InjectArgs, second.InjectArgs) &&
+		firstRetry == secondRetry
 }
 
 func sameWakeTarget(first, second wakeTarget) bool {
@@ -226,6 +235,9 @@ func validateWakeTarget(target wakeTarget, root, me string) error {
 		if strings.ContainsRune(arg, 0) {
 			return fmt.Errorf("wake target inject arg contains NUL")
 		}
+	}
+	if err := validateStoredWakeRetryUntil(target.RetryUntil); err != nil {
+		return fmt.Errorf("wake target %w", err)
 	}
 	if target.Owner != nil {
 		if err := validateWakeOwner(*target.Owner); err != nil {

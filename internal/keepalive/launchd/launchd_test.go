@@ -6,9 +6,17 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestDefaultLabelIsProjectOwned(t *testing.T) {
+	const want = "io.github.avivsinai.amq-keepalive"
+	if DefaultLabel != want {
+		t.Fatalf("DefaultLabel = %q, want %q", DefaultLabel, want)
+	}
+}
 
 func TestBuildPlistContainsSupervisorContract(t *testing.T) {
 	opts := Options{
@@ -96,6 +104,47 @@ func TestUninstallNoUnloadRemovesPlist(t *testing.T) {
 	}
 	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
 		t.Fatalf("Stat() error = %v, want not exist", err)
+	}
+}
+
+func TestUninstallBootoutFailurePreservesPlist(t *testing.T) {
+	dir := t.TempDir()
+	plistPath := filepath.Join(dir, "com.example.amq-keepalive.plist")
+	data := BuildPlist(Options{
+		Label:        "com.example.amq-keepalive",
+		BinaryPath:   "/bin/echo",
+		RegistryPath: "/tmp/registry.json",
+		AMQPath:      "/bin/echo",
+		Interval:     time.Second,
+		StdoutPath:   "/tmp/out.log",
+		StderrPath:   "/tmp/err.log",
+	})
+	if err := os.WriteFile(plistPath, data, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	launchctl := filepath.Join(binDir, "launchctl")
+	if err := os.WriteFile(launchctl, []byte("#!/bin/sh\necho bootout failed >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := Uninstall(context.Background(), "com.example.amq-keepalive", plistPath, true)
+	if err == nil {
+		t.Fatal("Uninstall() error = nil, want bootout failure")
+	}
+	if !strings.Contains(err.Error(), "launchctl bootout") {
+		t.Fatalf("Uninstall() error = %v, want bootout context", err)
+	}
+	got, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatalf("ReadFile() after failed bootout error = %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("plist changed after failed bootout:\n%s", got)
 	}
 }
 

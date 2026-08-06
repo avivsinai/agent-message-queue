@@ -5,11 +5,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
+
+var moveReadMessageToDLQ = fsq.MoveToDLQ
 
 func runRead(args []string) error {
 	fs := flag.NewFlagSet("read", flag.ContinueOnError)
@@ -44,7 +47,7 @@ func runRead(args []string) error {
 	if err := validatePinOverride(common, *ignoreSessionPinFlag, routed); err != nil {
 		return err
 	}
-	if err := guardMailboxContext("read", root, routed, *ignoreSessionPinFlag); err != nil {
+	if err := guardMailboxContext("read", root, routed, *ignoreSessionPinFlag, common.rootExplicit()); err != nil {
 		return err
 	}
 	deliveryIdentity, err := snapshotMailboxDeliveryRoot(root, routed, *ignoreSessionPinFlag)
@@ -86,22 +89,47 @@ func runRead(args []string) error {
 	msg, err := readMessageDeliveryRoot(deliveryRoot, path)
 	if err != nil {
 		// If message is corrupt and in new, move to DLQ
+		readErr := fmt.Errorf("failed to parse message %s: %w", *idFlag, err)
 		if box == fsq.BoxNew {
-			moveReadFailureToDLQ(deliveryRoot, common.Me, filename, *idFlag, "parse_error", err.Error(), nil)
+			item, transitionErr := moveReadFailureToDLQ(
+				deliveryRoot,
+				common.Me,
+				filename,
+				*idFlag,
+				"parse_error",
+				err.Error(),
+				nil,
+			)
+			return errors.Join(readErr, transitionErr, outputReadFailure(common.JSON, item))
 		}
-		return fmt.Errorf("failed to parse message %s: %w", *idFlag, err)
+		return readErr
 	}
 	if err := validator.validate(msg.Header); err != nil {
+		readErr := fmt.Errorf("invalid message header %s: %w", *idFlag, err)
 		if box == fsq.BoxNew {
-			moveReadFailureToDLQ(deliveryRoot, common.Me, filename, *idFlag, "invalid_header", "invalid header: "+err.Error(), &msg.Header)
+			item, transitionErr := moveReadFailureToDLQ(
+				deliveryRoot,
+				common.Me,
+				filename,
+				*idFlag,
+				"invalid_header",
+				"invalid header: "+err.Error(),
+				&msg.Header,
+			)
+			return errors.Join(readErr, transitionErr, outputReadFailure(common.JSON, item))
 		}
-		return fmt.Errorf("invalid message header %s: %w", *idFlag, err)
+		return readErr
 	}
 
 	// Move to cur only after successful parse
+	var claimErr error
 	if box == fsq.BoxNew {
-		if err := fsq.MoveNewToCur(deliveryRoot, common.Me, filename); err != nil {
-			return err
+		claimErr = claimInboxNewToCur(deliveryRoot, common.Me, filename)
+		if claimErr != nil {
+			var committed *fsq.CommittedDurabilityError
+			if !errors.As(claimErr, &committed) {
+				return claimErr
+			}
 		}
 		emitReceipt(deliveryRoot, common.Me, &inboxItem{
 			ID:     msg.Header.ID,
@@ -111,25 +139,23 @@ func runRead(args []string) error {
 	}
 
 	if common.JSON {
-		return writeJSON(os.Stdout, map[string]any{
+		return errors.Join(claimErr, writeJSON(os.Stdout, map[string]any{
 			"header": msg.Header,
 			"body":   msg.Body,
-		})
+		}))
 	}
 
-	if err := writeStdout("%s", msg.Body); err != nil {
-		return err
-	}
-	return nil
+	return errors.Join(claimErr, writeStdout("%s", msg.Body))
 }
 
-func moveReadFailureToDLQ(root *fsq.DeliveryRoot, me, filename, fallbackID, reason, detail string, header *format.Header) {
-	if _, err := fsq.MoveToDLQ(root, me, filename, fallbackID, reason, detail); err != nil {
-		_ = writeStderr("warning: failed to move invalid message to DLQ: %v\n", err)
-		return
+func moveReadFailureToDLQ(root *fsq.DeliveryRoot, me, filename, fallbackID, reason, detail string, header *format.Header) (*inboxItem, error) {
+	dlqPath, transitionErr := moveReadMessageToDLQ(root, me, filename, fallbackID, reason, detail)
+	item := &inboxItem{
+		ID:            fallbackID,
+		Filename:      filename,
+		ParseError:    detail,
+		FailureReason: reason,
 	}
-
-	item := &inboxItem{ID: fallbackID}
 	if header != nil {
 		if safeID, ok := safeHeaderID(header.ID); ok {
 			item.ID = safeID
@@ -137,5 +163,47 @@ func moveReadFailureToDLQ(root *fsq.DeliveryRoot, me, filename, fallbackID, reas
 		item.From = header.From
 		item.Thread = header.Thread
 	}
+
+	var partial *fsq.DLQTransitionError
+	if errors.As(transitionErr, &partial) {
+		if dlqPath == "" {
+			return nil, transitionErr
+		}
+		return item, transitionErr
+	}
+
+	var committed *fsq.CommittedDurabilityError
+	if dlqPath == "" {
+		if transitionErr == nil {
+			return nil, nil
+		}
+		if errors.As(transitionErr, &committed) {
+			expectedCur := root.DisplayPath(filepath.Join("agents", me, "inbox", "cur", filename))
+			if filepath.Clean(committed.FinalPath) != filepath.Clean(expectedCur) {
+				return nil, transitionErr
+			}
+		}
+		return item, transitionErr
+	}
+	if transitionErr != nil && !errors.As(transitionErr, &committed) {
+		return nil, transitionErr
+	}
+
+	item.MovedToDLQ = true
 	emitReceipt(root, me, item, receipt.StageDLQ, detail)
+	return item, transitionErr
+}
+
+func outputReadFailure(jsonOutput bool, item *inboxItem) error {
+	if item == nil {
+		return nil
+	}
+	if jsonOutput {
+		return writeJSON(os.Stdout, item)
+	}
+	dlqNote := ""
+	if item.MovedToDLQ {
+		dlqNote = " [moved to DLQ]"
+	}
+	return writeStdout("- ID: %s\n  ERROR: %s%s\n---\n", item.ID, item.ParseError, dlqNote)
 }

@@ -8,6 +8,383 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.54.0](https://github.com/avivsinai/agent-message-queue/compare/v0.53.0...v0.54.0) (2026-08-06)
+
+
+### Features
+
+* **wake:** acknowledge injected doorbells with --retry-until injected ([#424](https://github.com/avivsinai/agent-message-queue/issues/424)) ([96a872b](https://github.com/avivsinai/agent-message-queue/commit/96a872b5c6ad593112c6123c0180574f3326ed12))
+
+## [0.53.0](https://github.com/avivsinai/agent-message-queue/compare/v0.52.6...v0.53.0) (2026-08-06)
+
+
+### Features
+
+* **wake:** enforce fail-closed bound-state reads ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** gate bound-lock mutations and document rollback ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** publish state-bound locks for new claims ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+
+
+### Bug Fixes
+
+* **doctor:** fail closed on root-wide wake quarantine scan errors ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** apply submit-only reminder nudge to all injecting wakes, not just owner-bound ([#449](https://github.com/avivsinai/agent-message-queue/issues/449)) ([a179217](https://github.com/avivsinai/agent-message-queue/commit/a1792171690aaf8480cf4e21943acb0c65df6c68))
+* **wake:** close P2b review contract gaps ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** name a runnable orphan-target remedy ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** quarantine orphan lifecycle artifacts ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** reconcile bound prepared projections ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** reject ambiguous lock JSON ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** retire exact claims durably ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** retry bound state observation failures ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** surface inconclusive doctor target reads ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+
+## [0.52.6](https://github.com/avivsinai/agent-message-queue/compare/v0.52.5...v0.52.6) (2026-08-06)
+
+
+### Bug Fixes
+
+* **ci:** capture output before grep -q in smoke test to avoid SIGPIPE flake ([#442](https://github.com/avivsinai/agent-message-queue/issues/442)) ([cd8777e](https://github.com/avivsinai/agent-message-queue/commit/cd8777edfc44b9fc8f84faf33b15a18a2c843c2c))
+* **test:** make reload-transport FD-leak check immune to concurrent descriptor churn ([#447](https://github.com/avivsinai/agent-message-queue/issues/447)) ([eaccc52](https://github.com/avivsinai/agent-message-queue/commit/eaccc52907acc923312b7c2409e27e095dc85725)), closes [#444](https://github.com/avivsinai/agent-message-queue/issues/444)
+* **wake:** nudge submit instead of re-typing reminder payloads ([#445](https://github.com/avivsinai/agent-message-queue/issues/445)) ([bf3eeda](https://github.com/avivsinai/agent-message-queue/commit/bf3eedaaa546c61564aae05dc84bbb1ee8a5b484))
+
+## [0.52.5](https://github.com/avivsinai/agent-message-queue/compare/v0.52.4...v0.52.5) (2026-08-05)
+
+
+### Bug Fixes
+
+* **wake:** guard readiness publication on the capability path ([#420](https://github.com/avivsinai/agent-message-queue/issues/420)) ([8295405](https://github.com/avivsinai/agent-message-queue/commit/8295405751a64b2677add01aa77607b3f43e1234))
+* **wake:** retry the retained-inbox kqueue wait on EINTR ([#422](https://github.com/avivsinai/agent-message-queue/issues/422)) ([c32199f](https://github.com/avivsinai/agent-message-queue/commit/c32199f59c33851d25c742e9a466ec0941577c62)), closes [#421](https://github.com/avivsinai/agent-message-queue/issues/421)
+
+## [0.52.4](https://github.com/avivsinai/agent-message-queue/compare/v0.52.3...v0.52.4) (2026-08-05)
+
+
+### Bug Fixes
+
+* **doctor:** report darwin wakes running deleted images ([#438](https://github.com/avivsinai/agent-message-queue/issues/438)) ([#439](https://github.com/avivsinai/agent-message-queue/issues/439)) ([6fdab50](https://github.com/avivsinai/agent-message-queue/commit/6fdab5093e88816de530e3540eef5ca668a83a26))
+
+## [0.52.3](https://github.com/avivsinai/agent-message-queue/compare/v0.52.2...v0.52.3) (2026-08-05)
+
+
+### Bug Fixes
+
+* **upgrade:** guard Homebrew-owned paths by prefix ownership ([#435](https://github.com/avivsinai/agent-message-queue/issues/435)) ([1f5169c](https://github.com/avivsinai/agent-message-queue/commit/1f5169cd34c87eeceb9db89fa54f758e358c4385))
+
+## [0.52.2](https://github.com/avivsinai/agent-message-queue/compare/v0.52.1...v0.52.2) (2026-08-05)
+
+
+### Bug Fixes
+
+* **doctor:** correlate unread backlog with proven notifier absence ([#430](https://github.com/avivsinai/agent-message-queue/issues/430)) ([085ddeb](https://github.com/avivsinai/agent-message-queue/commit/085ddebed0457f0911ca71d8b0af2d5332230ed3))
+* **wake:** bound doorbell reminders per undrained cohort ([#428](https://github.com/avivsinai/agent-message-queue/issues/428)) ([2cefc16](https://github.com/avivsinai/agent-message-queue/commit/2cefc1662dd46364465f52dc354bb5072c93bed8))
+
+## [0.52.1](https://github.com/avivsinai/agent-message-queue/compare/v0.52.0...v0.52.1) (2026-08-04)
+
+
+### Bug Fixes
+
+* **coop:** bootstrap AMQ queue at Git worktree top when unconfigured ([#429](https://github.com/avivsinai/agent-message-queue/issues/429)) ([2f3b2a5](https://github.com/avivsinai/agent-message-queue/commit/2f3b2a5d7821f3b0f5953dbc5268d946627a2658))
+
+## [0.52.0](https://github.com/avivsinai/agent-message-queue/compare/v0.51.1...v0.52.0) (2026-08-02)
+
+
+### Features
+
+* **wake:** add inert .wake.state document primitives ([#415](https://github.com/avivsinai/agent-message-queue/issues/415)) ([fbc574a](https://github.com/avivsinai/agent-message-queue/commit/fbc574a8d2b26b2526dfae5d9c5c87408007ac39))
+* **wake:** decompose resume authority and add reload endpoint ([#405](https://github.com/avivsinai/agent-message-queue/issues/405)) ([e4b6c17](https://github.com/avivsinai/agent-message-queue/commit/e4b6c1742b4c587abf9c00d2eb3b3d4cf1c346ce))
+* **wake:** dual-write state from legacy mutations ([#416](https://github.com/avivsinai/agent-message-queue/issues/416)) ([1d16b1e](https://github.com/avivsinai/agent-message-queue/commit/1d16b1e82c34451997ab100ad84d6d0e883c706a))
+* **wake:** prefer state document on validated dual-read ([#417](https://github.com/avivsinai/agent-message-queue/issues/417)) ([acd9e35](https://github.com/avivsinai/agent-message-queue/commit/acd9e35511f0d5f13c9ed68349929bfcf488cecf))
+* **wake:** route session guards through decision table ([#412](https://github.com/avivsinai/agent-message-queue/issues/412)) ([6619399](https://github.com/avivsinai/agent-message-queue/commit/661939938923e7be8d807b02ea183bbac775bdf1))
+
+The new `.wake.state` document ships in three P2a compatibility stages: inert
+storage primitives, legacy-first shadow writes, and validated dual-read that
+silently falls back to the legacy files whenever the document does not match
+the live legacy publication. Legacy files remain authoritative through P2a;
+these stages do not activate self-resume, change the legacy lock ABI, or add
+migration machinery. The Linux reload transport is an unadvertised,
+refusal-only seam in this release; it adds no reload command, candidate custody,
+self-exec, or ready capability. Session routing now shares one explicit guard
+table through the `internal/sessionguard` package; the extraction preserves the
+existing routing outcomes and command-line contract.
+
+### Documentation
+
+* **wake:** specify the authoritative `.wake.state` lifecycle, commit protocol, invariants, and crash matrix ([#407](https://github.com/avivsinai/agent-message-queue/issues/407), [#414](https://github.com/avivsinai/agent-message-queue/issues/414)). These documents define forward contracts; they do not by themselves activate new runtime behavior.
+
+
+### Tests
+
+* **wake:** add a crash-contract regression net across publication boundaries ([#409](https://github.com/avivsinai/agent-message-queue/issues/409)). This is test-only coverage of the existing fail-closed publication contract.
+* **wake:** make detached-child cleanup unconditional, including `setsid` process groups. This is test-harness hygiene; production behavior is unchanged.
+* **wake:** pin schema-1 check output byte-for-byte and protect the P0 legacy lock keys, diagnostic fields and enums, exit status, and read-only behavior ([#411](https://github.com/avivsinai/agent-message-queue/issues/411)). This golden suite protects the existing ABI; it does not introduce an ABI change.
+
+## [0.51.1](https://github.com/avivsinai/agent-message-queue/compare/v0.51.0...v0.51.1) (2026-08-01)
+
+
+### Bug Fixes
+
+* **wake:** retry torn lock reads during acquisition ([#403](https://github.com/avivsinai/agent-message-queue/issues/403)) ([48901d1](https://github.com/avivsinai/agent-message-queue/commit/48901d1e58aacf2d60c1d6c759077da353065714))
+
+## [0.51.0](https://github.com/avivsinai/agent-message-queue/compare/v0.50.1...v0.51.0) (2026-08-01)
+
+
+### Features
+
+* **wake:** add self-resume protocol foundation ([#389](https://github.com/avivsinai/agent-message-queue/issues/389)) ([595241c](https://github.com/avivsinai/agent-message-queue/commit/595241c9447c786f8161551e968d41df96a12640))
+* **wake:** add versioned check schema ([#391](https://github.com/avivsinai/agent-message-queue/issues/391)) ([3024aec](https://github.com/avivsinai/agent-message-queue/commit/3024aec6c7ae48bbf78859ede14da248a5b471e6))
+* **wake:** classify reload advertisement ([#392](https://github.com/avivsinai/agent-message-queue/issues/392)) ([6f3b3d4](https://github.com/avivsinai/agent-message-queue/commit/6f3b3d40a4fecbb288b61cc67717beb532852d54))
+
+Schema v2 had not shipped before this release, so its `reload` field was
+additive to a pre-release contract; schema 1 and default JSON bytes remain
+unchanged. `reload: advertised` is structural metadata only: it means a live,
+identity-confirmed wake has a structurally valid resume advertisement, not that
+the wake is reloadable. No wake started by this release advertises it yet:
+Darwin requires launch-bound image evidence (Wave 3), and Linux requires the
+Wave 2 control endpoint. The field ships as forward schema only. This release
+adds no reload command, transport, quiescence claim, or execution permission.
+It also does not ship a general agent-safe wake restart; that remains tracked
+in [#356](https://github.com/avivsinai/agent-message-queue/issues/356).
+
+
+### Bug Fixes
+
+* **routing:** honor verified sessionless root pin ([#397](https://github.com/avivsinai/agent-message-queue/issues/397)) ([9331546](https://github.com/avivsinai/agent-message-queue/commit/9331546896600929411f82cd2e486cb5839854e7)), closes [#350](https://github.com/avivsinai/agent-message-queue/issues/350)
+* **wake:** bind resume advertisements to trusted agent ([#400](https://github.com/avivsinai/agent-message-queue/issues/400)) ([1578501](https://github.com/avivsinai/agent-message-queue/commit/1578501f43a5698c33c670fed0dc7c78fef268f8))
+* **wake:** bind resume claims to exact evidence ([#399](https://github.com/avivsinai/agent-message-queue/issues/399)) ([3da2f32](https://github.com/avivsinai/agent-message-queue/commit/3da2f32d3c5fe1d65a4a9233470f102024fea97d))
+* **wake:** corroborate Darwin process image ([#395](https://github.com/avivsinai/agent-message-queue/issues/395)) ([3dd1987](https://github.com/avivsinai/agent-message-queue/commit/3dd1987eaa76a8d008b5f13a35b34c4e7b1172d1))
+* **wake:** preserve attention retry decay ([#393](https://github.com/avivsinai/agent-message-queue/issues/393)) ([f8a8d81](https://github.com/avivsinai/agent-message-queue/commit/f8a8d81b83293b1945c6b6377cb650cd2722868c))
+
+[#377](https://github.com/avivsinai/agent-message-queue/issues/377) is fully
+closed: generation-exclusivity fencing landed in
+[#383](https://github.com/avivsinai/agent-message-queue/pull/383) and
+[#385](https://github.com/avivsinai/agent-message-queue/pull/385); cadence
+accumulation and current-cohort rendering at the retained retry deadline landed
+in [#393](https://github.com/avivsinai/agent-message-queue/pull/393). For the
+#393 cadence change, durable inbox completion and terminal-input delivery
+semantics are unchanged.
+
+
+### Tests
+
+* **coop:** pin auto-init fixture isolation ([#396](https://github.com/avivsinai/agent-message-queue/pull/396)) ([2c388d5](https://github.com/avivsinai/agent-message-queue/commit/2c388d5c6aabeab416e8c55750410b1bea1049c3)), closes [#376](https://github.com/avivsinai/agent-message-queue/issues/376). This is hostile-context regression coverage for containment already fixed by [#346](https://github.com/avivsinai/agent-message-queue/pull/346), not a new production routing change.
+* **send:** make strict replacement race deterministic ([#394](https://github.com/avivsinai/agent-message-queue/pull/394)) ([6cba0a1](https://github.com/avivsinai/agent-message-queue/commit/6cba0a1b013b3d8f79a84f146deff7c8005cfe74)), closes [#381](https://github.com/avivsinai/agent-message-queue/issues/381). This replaces a FIFO/timeout race in the test harness with a deterministic seam; the production send path is unchanged.
+
+## [0.50.1](https://github.com/avivsinai/agent-message-queue/compare/v0.50.0...v0.50.1) (2026-07-31)
+
+
+### Bug Fixes
+
+* **send:** refuse routed physical self-delivery ([#386](https://github.com/avivsinai/agent-message-queue/issues/386)) ([9454eb1](https://github.com/avivsinai/agent-message-queue/commit/9454eb1a094264c2552ea1981687abee51a4c53a))
+* **wake:** fence cohort attention by generation ([#385](https://github.com/avivsinai/agent-message-queue/issues/385)) ([47a8b73](https://github.com/avivsinai/agent-message-queue/commit/47a8b731457ecad6ca259dad80f699c21e1bf913))
+* **wake:** harden check evidence and restart advice ([#388](https://github.com/avivsinai/agent-message-queue/issues/388)) ([2f20e94](https://github.com/avivsinai/agent-message-queue/commit/2f20e94b17bd5ed3b2dafe1debf9dd673e8df1df))
+* **wake:** reject incoherent repair observations ([#387](https://github.com/avivsinai/agent-message-queue/issues/387)) ([744c681](https://github.com/avivsinai/agent-message-queue/commit/744c681b676319c142a08e41280b6cad5b08d23e))
+* **wake:** silence superseded attention ([#383](https://github.com/avivsinai/agent-message-queue/issues/383)) ([2e9883c](https://github.com/avivsinai/agent-message-queue/commit/2e9883c30d9438c34ed62d76bcccc197ecfffc9e))
+
+#383 and #385 close the generation-exclusivity portion of known issue #377: a superseded wake generation can no longer emit peer or operator attention, and inconclusive evidence never silences a healthy wake.
+The cadence-accumulation portion of #377 (attention re-announce ladder while an agent is not draining) remains open.
+
+## [0.50.0](https://github.com/avivsinai/agent-message-queue/compare/v0.49.13...v0.50.0) (2026-07-31)
+
+
+### Features
+
+* **wake:** expose a read-only restart capability probe ([#379](https://github.com/avivsinai/agent-message-queue/issues/379)) ([2d1ef6b](https://github.com/avivsinai/agent-message-queue/commit/2d1ef6b5bb5a57d8196ba12414cd64f5f6a4f23e))
+
+`amq wake check` reports whether a wake can be safely restarted as
+`agent_safe`, `operator_only`, or `unavailable`, with an exact next action. It
+diagnoses restart capability; it does not restart a wake. Existing wakes remain
+`operator_only`: they cannot be replaced in place and still require their
+owning terminal or supervisor. Agent-safe restart remains tracked in
+[#356](https://github.com/avivsinai/agent-message-queue/issues/356).
+
+
+### Bug Fixes
+
+* **send:** refuse ambiguous self-delivery ([#378](https://github.com/avivsinai/agent-message-queue/issues/378)) ([9f5e1fc](https://github.com/avivsinai/agent-message-queue/commit/9f5e1fc77970411df6194559b88065cda97e1b28)), closes [#357](https://github.com/avivsinai/agent-message-queue/issues/357)
+
+### Known Issues
+
+* **wake attention exclusivity ([#377](https://github.com/avivsinai/agent-message-queue/issues/377)):**
+  terminal-input delivery remains count-independent and bounded, and controlled
+  testing confirmed that pending messages remain intact across attention
+  re-announcements: no message is dropped, discarded, or suppressed. The
+  separate attention channel still re-announces on its 30-second-to-15-minute
+  cadence and pulls its deadline forward on new arrivals, so repeated notices
+  can accumulate while an agent is not draining. Independently, a superseded
+  wake generation is correctly barred from terminal input but can still emit
+  attention. These are open notification cadence and generation-exclusivity
+  defects, not delivery-loss defects.
+
+
+### Dependencies
+
+* bump actions/checkout from 7.0.0 to 7.0.1 ([#371](https://github.com/avivsinai/agent-message-queue/issues/371)) ([16edd6c](https://github.com/avivsinai/agent-message-queue/commit/16edd6cca9212b78a55ed20e8ce441b8ede42d5e))
+
+## [0.49.13](https://github.com/avivsinai/agent-message-queue/compare/v0.49.12...v0.49.13) (2026-07-31)
+
+
+### Bug Fixes
+
+* **wake:** keep admitted delivery self-healing ([#372](https://github.com/avivsinai/agent-message-queue/issues/372)) ([037aa60](https://github.com/avivsinai/agent-message-queue/commit/037aa60ed32ec58cef109e98f54461eff09c6a99))
+* **wake:** keep inconclusive ownership retryable ([#372](https://github.com/avivsinai/agent-message-queue/issues/372)) ([037aa60](https://github.com/avivsinai/agent-message-queue/commit/037aa60ed32ec58cef109e98f54461eff09c6a99))
+* **wake:** preserve live renamed wake locks ([#372](https://github.com/avivsinai/agent-message-queue/issues/372)) ([037aa60](https://github.com/avivsinai/agent-message-queue/commit/037aa60ed32ec58cef109e98f54461eff09c6a99))
+
+## [0.49.12](https://github.com/avivsinai/agent-message-queue/compare/v0.49.11...v0.49.12) (2026-07-30)
+
+
+### Bug Fixes
+
+* **ci:** require justification for removed wake tests ([70fe085](https://github.com/avivsinai/agent-message-queue/commit/70fe085872530ea799c4e33bf079a8a3d703dc18))
+* **coop:** refuse live wake conflicts immediately ([70fe085](https://github.com/avivsinai/agent-message-queue/commit/70fe085872530ea799c4e33bf079a8a3d703dc18))
+* **doctor:** report foreign live wake ownership ([70fe085](https://github.com/avivsinai/agent-message-queue/commit/70fe085872530ea799c4e33bf079a8a3d703dc18))
+* **wake:** keep transient delivery failures retryable ([70fe085](https://github.com/avivsinai/agent-message-queue/commit/70fe085872530ea799c4e33bf079a8a3d703dc18))
+* **wake:** preserve authoritative recovery ([#369](https://github.com/avivsinai/agent-message-queue/issues/369)) ([0acad72](https://github.com/avivsinai/agent-message-queue/commit/0acad72bb8fd4ee9a44ad94163b5070d38ae7dac))
+* **wake:** restore rate-limited attention retries ([#366](https://github.com/avivsinai/agent-message-queue/issues/366)) ([637f11e](https://github.com/avivsinai/agent-message-queue/commit/637f11e893f474ce9aaf55d5903649ea3d5ce2c3))
+
+## [0.49.11](https://github.com/avivsinai/agent-message-queue/compare/v0.49.10...v0.49.11) (2026-07-30)
+
+
+### Bug Fixes
+
+* **wake:** preserve retry delivery guarantees ([27923be](https://github.com/avivsinai/agent-message-queue/commit/27923be925733b4e7d57fdc82a2ca57b1a716fc5))
+* **wake:** suppress repeated retry attention ([61149dc](https://github.com/avivsinai/agent-message-queue/commit/61149dc5ba4d78b598dacd617d9862b1ad86b61a))
+* **wake:** surface owner lifecycle failures ([#358](https://github.com/avivsinai/agent-message-queue/issues/358)) ([5c8a971](https://github.com/avivsinai/agent-message-queue/commit/5c8a971f15ca9fb44784cdac1360ced0c5785269))
+
+## [0.49.10](https://github.com/avivsinai/agent-message-queue/compare/v0.49.9...v0.49.10) (2026-07-29)
+
+
+### Bug Fixes
+
+* **cli:** reject flag-shaped handles while preserving legacy read-only inspection ([1be7cd8](https://github.com/avivsinai/agent-message-queue/commit/1be7cd80b4b3df8ce9108e488429eb0abb67d961))
+* **upgrade:** report stale wakes across the active AMQ base tree after upgrade ([1be7cd8](https://github.com/avivsinai/agent-message-queue/commit/1be7cd80b4b3df8ce9108e488429eb0abb67d961))
+* **wake:** preserve usable legacy raw wakes during orphan checks ([1be7cd8](https://github.com/avivsinai/agent-message-queue/commit/1be7cd80b4b3df8ce9108e488429eb0abb67d961))
+* **wake:** re-announce pending doorbells without stacking input turns ([1be7cd8](https://github.com/avivsinai/agent-message-queue/commit/1be7cd80b4b3df8ce9108e488429eb0abb67d961))
+
+## [0.49.9](https://github.com/avivsinai/agent-message-queue/compare/v0.49.8...v0.49.9) (2026-07-28)
+
+
+### Bug Fixes
+
+* **wake:** coalesce pending co-op doorbells ([#348](https://github.com/avivsinai/agent-message-queue/issues/348)) ([1ed2b3b](https://github.com/avivsinai/agent-message-queue/commit/1ed2b3b26e194dccfd5a6ef5f40f2a631724298a))
+
+## [0.49.8](https://github.com/avivsinai/agent-message-queue/compare/v0.49.7...v0.49.8) (2026-07-28)
+
+
+### Bug Fixes
+
+* **routing:** unify root authority and fail closed on ambiguous Git contexts ([5bf4247](https://github.com/avivsinai/agent-message-queue/commit/5bf4247ae2d19a25a393d02116f62bdad8b8e39c))
+* **dlq:** serialize retries and preserve terminal audit state ([5bf4247](https://github.com/avivsinai/agent-message-queue/commit/5bf4247ae2d19a25a393d02116f62bdad8b8e39c))
+* **federation:** refuse symlinked source roots ([5bf4247](https://github.com/avivsinai/agent-message-queue/commit/5bf4247ae2d19a25a393d02116f62bdad8b8e39c))
+* **watch:** refuse replaced mailbox roots ([5bf4247](https://github.com/avivsinai/agent-message-queue/commit/5bf4247ae2d19a25a393d02116f62bdad8b8e39c))
+
+## [0.49.7](https://github.com/avivsinai/agent-message-queue/compare/v0.49.6...v0.49.7) (2026-07-27)
+
+
+### Bug Fixes
+
+* **doctor:** expose structured base backlog hints ([#341](https://github.com/avivsinai/agent-message-queue/issues/341)) ([6484837](https://github.com/avivsinai/agent-message-queue/commit/648483747811d4714761bbb9a44729b39f8d72d0))
+* **doctor:** warn on stale wake binaries ([#342](https://github.com/avivsinai/agent-message-queue/issues/342)) ([0a9c2d6](https://github.com/avivsinai/agent-message-queue/commit/0a9c2d67c71d08739a52fb5fc943ccc9ed4593eb))
+* **release:** reconcile published labels idempotently ([#344](https://github.com/avivsinai/agent-message-queue/issues/344)) ([5c0c4e7](https://github.com/avivsinai/agent-message-queue/commit/5c0c4e702ead5dfe37be63f471f1722ccfb7d0b2))
+* **send:** complete destination mailbox before delivery ([#339](https://github.com/avivsinai/agent-message-queue/issues/339)) ([f7be8b7](https://github.com/avivsinai/agent-message-queue/commit/f7be8b7191ab61c3dbed83107e29b032dca9fc73))
+* **send:** make mailbox recovery self-healing ([fab4c76](https://github.com/avivsinai/agent-message-queue/commit/fab4c76af2734610c157fe8996a6c7d8ed037000))
+* **upgrade:** refuse Homebrew-managed binaries ([#340](https://github.com/avivsinai/agent-message-queue/issues/340)) ([d1b04db](https://github.com/avivsinai/agent-message-queue/commit/d1b04db8a01d15fbb32bf29e8f6fa75fd5821be1))
+
+## [0.49.6](https://github.com/avivsinai/agent-message-queue/compare/v0.49.5...v0.49.6) (2026-07-27)
+
+
+### Bug Fixes
+
+* **coop:** provision the full roster where `coop exec` reads while preserving base compatibility mailboxes ([#332](https://github.com/avivsinai/agent-message-queue/issues/332)) ([6236c7a](https://github.com/avivsinai/agent-message-queue/commit/6236c7ae1a87f6ef9507df91f3636049d6482059))
+* **coop:** refuse session symlinks instead of redirecting mailbox writes through them ([#332](https://github.com/avivsinai/agent-message-queue/issues/332)) ([6236c7a](https://github.com/avivsinai/agent-message-queue/commit/6236c7ae1a87f6ef9507df91f3636049d6482059))
+* **coop:** report base-root backlog from session consumer paths and `doctor --ops` ([#332](https://github.com/avivsinai/agent-message-queue/issues/332)) ([6236c7a](https://github.com/avivsinai/agent-message-queue/commit/6236c7ae1a87f6ef9507df91f3636049d6482059))
+
+## [0.49.5](https://github.com/avivsinai/agent-message-queue/compare/v0.49.4...v0.49.5) (2026-07-27)
+
+
+### Bug Fixes
+
+* **coop:** preserve configured agents on init reruns ([#330](https://github.com/avivsinai/agent-message-queue/issues/330)) ([3424c7b](https://github.com/avivsinai/agent-message-queue/commit/3424c7b5f8262443345c8faaecc335e62f8d518d))
+
+## [0.49.4](https://github.com/avivsinai/agent-message-queue/compare/v0.49.3...v0.49.4) (2026-07-27)
+
+
+### Bug Fixes
+
+* **wake:** recover partial takeovers with duplicate warning ([#328](https://github.com/avivsinai/agent-message-queue/issues/328)) ([7684772](https://github.com/avivsinai/agent-message-queue/commit/76847726b82e9668bf5a487b5d8f9e33ba1f5c7e))
+
+## [0.49.3](https://github.com/avivsinai/agent-message-queue/compare/v0.49.2...v0.49.3) (2026-07-27)
+
+
+### Bug Fixes
+
+* **wake:** resolve Darwin wake TTYs so same-terminal replacement works ([#326](https://github.com/avivsinai/agent-message-queue/issues/326)) ([996e329](https://github.com/avivsinai/agent-message-queue/commit/996e3297bba7b2e43f0be1da244cff080a1bade6))
+* **wake:** recover live raw coop takeovers ([#326](https://github.com/avivsinai/agent-message-queue/issues/326)) ([996e329](https://github.com/avivsinai/agent-message-queue/commit/996e3297bba7b2e43f0be1da244cff080a1bade6))
+* **wake:** enable guarded live-wake recovery on Linux ([#326](https://github.com/avivsinai/agent-message-queue/issues/326)) ([996e329](https://github.com/avivsinai/agent-message-queue/commit/996e3297bba7b2e43f0be1da244cff080a1bade6))
+
+## [0.49.2](https://github.com/avivsinai/agent-message-queue/compare/v0.49.1...v0.49.2) (2026-07-27)
+
+
+### Bug Fixes
+
+* deliver wake attention in Ghostty ([#324](https://github.com/avivsinai/agent-message-queue/issues/324)) ([82c28ba](https://github.com/avivsinai/agent-message-queue/commit/82c28ba83d56cc39bd3b6893b262db389e769cb4))
+* safely reclaim blocking coop wake locks ([#322](https://github.com/avivsinai/agent-message-queue/issues/322)) ([e5f98c6](https://github.com/avivsinai/agent-message-queue/commit/e5f98c6631e660b5ea68dcb77dda5b4e33e2cf00))
+
+## [0.49.1](https://github.com/avivsinai/agent-message-queue/compare/v0.49.0...v0.49.1) (2026-07-27)
+
+
+### Bug Fixes
+
+* **hooks:** guard Stop blocks by message content ([#318](https://github.com/avivsinai/agent-message-queue/issues/318)) ([bc18f97](https://github.com/avivsinai/agent-message-queue/commit/bc18f97113d3df2091cd9c7aa2d6d2d915266b6b))
+* **hooks:** recover incomplete session context ([#319](https://github.com/avivsinai/agent-message-queue/issues/319)) ([2b02729](https://github.com/avivsinai/agent-message-queue/commit/2b027298a21b21609f6e8ec3d8c4d3b810913b20))
+* **release:** reconcile labels after attestation failure ([#308](https://github.com/avivsinai/agent-message-queue/issues/308)) ([3fc28a7](https://github.com/avivsinai/agent-message-queue/commit/3fc28a7ed2553d1b0c4ba5217c6cbecd618e36db))
+* **wake:** correct interrupt and repair guidance ([#313](https://github.com/avivsinai/agent-message-queue/issues/313)) ([ce3a6f8](https://github.com/avivsinai/agent-message-queue/commit/ce3a6f8249f00a29432956ada05bf779f4a25da1))
+* **wake:** defer injection after max hold ([#314](https://github.com/avivsinai/agent-message-queue/issues/314)) ([d3f92db](https://github.com/avivsinai/agent-message-queue/commit/d3f92db49e720c31c4ce2ff5df828a50e8ec66c1))
+* **wake:** make periodic capability checks honest ([#320](https://github.com/avivsinai/agent-message-queue/issues/320)) ([4b9bc8d](https://github.com/avivsinai/agent-message-queue/commit/4b9bc8d1caf7d73b2872242485d3aa60fcfcd4ee))
+* **wake:** require consecutive quiet samples ([#315](https://github.com/avivsinai/agent-message-queue/issues/315)) ([a68d9b2](https://github.com/avivsinai/agent-message-queue/commit/a68d9b241c8909eccf39afd8a0e8f523641e873a))
+* **wake:** retry held notifications after pgrp handoff ([#310](https://github.com/avivsinai/agent-message-queue/issues/310)) ([f015d8b](https://github.com/avivsinai/agent-message-queue/commit/f015d8bfc9c5cf56d3aefbb3d4ff7c6700bcc9a2))
+* **wake:** use fixed standalone doorbell ([#317](https://github.com/avivsinai/agent-message-queue/issues/317)) ([3641d5e](https://github.com/avivsinai/agent-message-queue/commit/3641d5e82cf852ed1861982bbf3d59c86f08abda))
+
+## [0.49.0](https://github.com/avivsinai/agent-message-queue/compare/v0.48.0...v0.49.0) (2026-07-26)
+
+
+### Features
+
+* **trace:** join message lifecycle evidence ([#307](https://github.com/avivsinai/agent-message-queue/issues/307)) ([e9cbd34](https://github.com/avivsinai/agent-message-queue/commit/e9cbd348b4af0cf03fc69a34195e4020fd9dea89))
+
+
+### Bug Fixes
+
+* **doctor:** add discovered mailbox remedies ([#305](https://github.com/avivsinai/agent-message-queue/issues/305)) ([4c4057d](https://github.com/avivsinai/agent-message-queue/commit/4c4057db305fbc6deb8660001947514e6febfc9f))
+
+## [0.48.0](https://github.com/avivsinai/agent-message-queue/compare/v0.47.3...v0.48.0) (2026-07-26)
+
+
+### Features
+
+* **wake:** probe TIOCSTI capability and degrade to a non-input notifier ([#302](https://github.com/avivsinai/agent-message-queue/issues/302)) ([ac89fa5](https://github.com/avivsinai/agent-message-queue/commit/ac89fa566985eb5b5d5817ddce8b172fb68d1934))
+
+
+### Bug Fixes
+
+* **doctor:** report and repair malformed mailbox layout ([#304](https://github.com/avivsinai/agent-message-queue/issues/304)) ([9a9ec0f](https://github.com/avivsinai/agent-message-queue/commit/9a9ec0facaf15e1cae98b63d80da52c92f8c623b))
+
+## [0.47.3](https://github.com/avivsinai/agent-message-queue/compare/v0.47.2...v0.47.3) (2026-07-26)
+
+
+### Bug Fixes
+
+* **cli:** reject stray leaf arguments ([#293](https://github.com/avivsinai/agent-message-queue/issues/293)) ([9bd6c1a](https://github.com/avivsinai/agent-message-queue/commit/9bd6c1a95cab0f1633aeaf2acfedde662b12ab24))
+* **install:** verify release checksums fail closed ([#291](https://github.com/avivsinai/agent-message-queue/issues/291)) ([321881c](https://github.com/avivsinai/agent-message-queue/commit/321881c81cf1c1c540f4556737369dd1b8304c56))
+* **wake:** admit wake when an unverified generic lock cannot be proven ([#301](https://github.com/avivsinai/agent-message-queue/issues/301)) ([d177948](https://github.com/avivsinai/agent-message-queue/commit/d1779485f982c73f257ce6db2372e242ef909fcb))
+* **wake:** close wake terminal descriptors on exec ([#300](https://github.com/avivsinai/agent-message-queue/issues/300)) ([e4db6ea](https://github.com/avivsinai/agent-message-queue/commit/e4db6ea11669aa9174e0e6398c56926fb3ed957e))
+* **wake:** make interrupt injection opt-in ([#299](https://github.com/avivsinai/agent-message-queue/issues/299)) ([bf11814](https://github.com/avivsinai/agent-message-queue/commit/bf11814b004d57ed619a6a6df6134cfe0d121a3a))
+
+## [0.47.2](https://github.com/avivsinai/agent-message-queue/compare/v0.47.1...v0.47.2) (2026-07-26)
+
+
+### Bug Fixes
+
+* **wake:** keep terminal authority stable during tty activity ([0a62b1a](https://github.com/avivsinai/agent-message-queue/commit/0a62b1a5126e5dfa51bd80adbc212920d4295c0a))
+
 ## [0.47.1](https://github.com/avivsinai/agent-message-queue/compare/v0.47.0...v0.47.1) (2026-07-24)
 
 

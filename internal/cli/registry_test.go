@@ -15,6 +15,7 @@ func TestCommandNames(t *testing.T) {
 		"list",
 		"read",
 		"thread",
+		"trace",
 		"presence",
 		"cleanup",
 		"watch",
@@ -84,7 +85,7 @@ func TestChildNames(t *testing.T) {
 	}{
 		{name: "presence", want: []string{"set", "list"}},
 		{name: "dlq", want: []string{"list", "read", "retry", "purge"}},
-		{name: "wake", want: []string{"repair", "recover-owner", "retire"}},
+		{name: "wake", want: []string{"check", "repair", "recover-owner", "retire"}},
 		{name: "coop", want: []string{"init", "exec"}},
 		{name: "swarm", want: []string{"list", "join", "leave", "tasks", "claim", "complete", "fail", "block", "bridge"}},
 		{name: "receipts", want: []string{"list", "wait"}},
@@ -187,13 +188,16 @@ func TestGroupUsageLinesWakeIncludesLifecycleCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("groupUsageLines(wake): %v", err)
 	}
+	if !containsLine(lines, "check          Inspect wake start and restart capability without mutation") {
+		t.Fatal("groupUsageLines(wake) missing check subcommand")
+	}
 	if !containsLine(lines, "repair         Restart a proven-stale wake from a saved inject-via target") {
 		t.Fatal("groupUsageLines(wake) missing repair subcommand")
 	}
 	if !containsLine(lines, "recover-owner  Recover an exact owner-bound wake claim") {
 		t.Fatal("groupUsageLines(wake) missing recover-owner subcommand")
 	}
-	if !containsLine(lines, "retire         Stop an exact managed inject-via wake") {
+	if !containsLine(lines, "retire         Retire an exact managed wake and its matching retained state") {
 		t.Fatal("groupUsageLines(wake) missing retire subcommand")
 	}
 }

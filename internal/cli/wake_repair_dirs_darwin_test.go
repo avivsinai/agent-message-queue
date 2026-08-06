@@ -6,12 +6,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/fsnotify/fsnotify"
+	"golang.org/x/sys/unix"
 )
 
 type darwinRetainedWakeWatcherFixture struct {
@@ -257,5 +260,29 @@ func assertDarwinRetainedWakeWatcherTerminalWithoutEvents(
 	}
 	if !strings.Contains(terminalErr.Error(), "retained wake") {
 		t.Fatalf("terminal retained watcher error = %v", terminalErr)
+	}
+}
+
+func TestDarwinRetainedWakeWatcherRetriesInterruptedWait(t *testing.T) {
+	var waits atomic.Int32
+	previousWait := waitRetainedWakeInboxEvent
+	waitRetainedWakeInboxEvent = func(kqueueFD int, events []unix.Kevent_t) (int, error) {
+		if waits.Add(1) == 1 {
+			return 0, syscall.EINTR
+		}
+		return previousWait(kqueueFD, events)
+	}
+	t.Cleanup(func() { waitRetainedWakeInboxEvent = previousWait })
+
+	fixture := newDarwinRetainedWakeWatcherForTest(t)
+	writeDarwinRetainedWakeWatcherMessage(
+		t,
+		filepath.Join(fixture.inboxPath, "delivered.md"),
+		"delivered",
+	)
+	assertDarwinRetainedWakeWatcherEvent(t, fixture.watcher, fixture.inboxPath)
+
+	if got := waits.Load(); got < 2 {
+		t.Fatalf("retained watcher waits = %d, want at least 2 after an interrupted wait", got)
 	}
 }

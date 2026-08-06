@@ -1,60 +1,84 @@
 #!/bin/bash
-# AMQ Co-op Stop Hook
-# Blocks stop if there are pending messages in inbox
-# Safe fallback: approves if amq unavailable or co-op not configured
+# AMQ Co-op Stop Hook. Allows on unavailable/invalid context.
+set -u
 
-DEFAULT_ROOT=".agent-mail"
-if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
-    DEFAULT_ROOT="${CLAUDE_PROJECT_DIR}/.agent-mail"
-fi
-ROOT="${AM_ROOT:-$DEFAULT_ROOT}"
+payload="$(cat)"
+command -v amq >/dev/null 2>&1 || exit 0
+command -v python3 >/dev/null 2>&1 || exit 0
+active="$(printf '%s' "$payload" | python3 -c \
+  'import json,sys; print("1" if json.load(sys.stdin).get("stop_hook_active") is True else "0")' 2>/dev/null)" ||
+  exit 0
+
 ME="${AM_ME:-claude}"
-
-# Fast path: approve immediately if co-op not set up
-if [ ! -d "$ROOT/agents/$ME/inbox/new" ]; then
-    echo '{"decision": "approve"}'
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
+SESSION="${AM_SESSION:-}"
+env_args=(env --me "$ME" --json)
+if [ -n "$SESSION" ]; then
+  env_args+=(--session "$SESSION")
+fi
+if ! env_json="$(cd "$PROJECT_DIR" && amq "${env_args[@]}" 2>/dev/null)"; then
+  unset AM_SESSION
+  retry_args=(env --me "$ME" --json)
+  if [ -n "$SESSION" ]; then
+    retry_args+=(--session "$SESSION")
+  fi
+  if ! env_json="$(cd "$PROJECT_DIR" && amq "${retry_args[@]}" 2>/dev/null)"; then
+    if [ -n "${CLAUDE_PROJECT_DIR:-}" ] &&
+      { [ -f "$PROJECT_DIR/.amqrc" ] || [ -d "$PROJECT_DIR/.agent-mail" ]; }; then
+      printf '%s\n' '{"systemMessage":"AMQ context unresolved; pending messages may exist. Resolve the project/session context and drain before stopping."}'
+    fi
     exit 0
+  fi
 fi
+resolved="$(printf '%s' "$env_json" | python3 -c \
+  'import json,sys; d=json.load(sys.stdin); print("\x1f".join((d["root"],d.get("session_name",""),d["me"])))' 2>/dev/null)" ||
+  exit 0
+IFS=$'\x1f' read -r ROOT SESSION ME <<<"$resolved"
 
-# Fast path: if inbox/new has no message files, approve without invoking amq
-inbox_new="$ROOT/agents/$ME/inbox/new"
-shopt -s nullglob
-files=("$inbox_new"/*.md)
-shopt -u nullglob
-if [ ${#files[@]} -eq 0 ]; then
-    echo '{"decision": "approve"}'
-    exit 0
+list_json="$(cd "${CLAUDE_PROJECT_DIR:-.}" &&
+  amq list --root "$ROOT" --me "$ME" --new --json 2>/dev/null)" || {
+  python3 -c 'import json,sys; print(json.dumps({"systemMessage":f"AMQ mailbox unreadable at {sys.argv[1]}; pending messages may exist."},separators=(",",":")))' "$ROOT"
+  exit 0
+}
+state="$ROOT/agents/$ME/.stop-hook-state.json"
+decision="$(printf '%s' "$list_json" | python3 -c '
+import json,os,sys
+state,active,root,session=sys.argv[1:]
+session=session or "(none)"
+ids=sorted({x["id"] for x in json.load(sys.stdin) if x.get("id")})
+old={"blocked_ids":[],"chain_blocks":0}
+try:
+  with open(state,encoding="utf-8") as f: old=json.load(f)
+except (OSError,ValueError,TypeError): pass
+blocked=sorted(set(old.get("blocked_ids",[])) & set(ids))
+blocks=int(old.get("chain_blocks",0)) if active=="1" else 0
+fresh=sorted(set(ids)-set(blocked))
+out=None
+if not ids: blocks=0
+# Five local blocks leave a three-block reserve below the harness limit of eight.
+if fresh and blocks >= 5:
+  blocks=0
+  out={"systemMessage":f"AMQ stop-hook block budget exhausted; allowing stop and resetting the guard with {len(fresh)} fresh message(s) still at root={root} session={session}."}
+elif fresh:
+  blocked=sorted(set(blocked)|set(fresh)); blocks+=1
+  out={"decision":"block","reason":f"You have {len(ids)} pending AMQ message(s), including {len(fresh)} not previously reported. Drain before stopping. root={root} session={session}."}
+data=(json.dumps({"schema":1,"blocked_ids":blocked,"chain_blocks":blocks},separators=(",",":"))+"\n").encode()
+tmp=f"{state}.tmp"
+try:
+  try: os.unlink(tmp)
+  except FileNotFoundError: pass
+  fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+  with os.fdopen(fd,"wb") as f: f.write(data); f.flush(); os.fsync(f.fileno())
+  os.replace(tmp,state)
+  dfd=os.open(os.path.dirname(state),os.O_RDONLY)
+  try: os.fsync(dfd)
+  finally: os.close(dfd)
+finally:
+  try: os.unlink(tmp)
+  except FileNotFoundError: pass
+if out is not None: print(json.dumps(out,separators=(",",":")))
+' "$state" "$active" "$ROOT" "$SESSION" 2>/dev/null)" || exit 0
+
+if [ -n "$decision" ]; then
+  printf '%s\n' "$decision"
 fi
-
-# Safe fallback if dependencies missing
-if ! command -v amq &> /dev/null; then
-    echo '{"decision": "approve"}'
-    exit 0
-fi
-
-if command -v jq &> /dev/null; then
-    # Check for pending messages (safe fallback on any error)
-    COUNT=$(amq list --root "$ROOT" --me "$ME" --new --json 2>/dev/null | jq -r 'length // 0' 2>/dev/null || echo "0")
-
-    # Sanitize COUNT to ensure it's a number
-    if ! [[ "$COUNT" =~ ^[0-9]+$ ]]; then
-        COUNT=0
-    fi
-
-    if [ "$COUNT" -gt 0 ]; then
-        echo '{"decision": "block", "reason": "You have '"$COUNT"' pending message(s). Ask me to drain the inbox before stopping."}'
-        exit 0
-    fi
-else
-    OUT=$(amq list --root "$ROOT" --me "$ME" --new 2>/dev/null || true)
-    if echo "$OUT" | grep -q "^No messages\\.$"; then
-        echo '{"decision": "approve"}'
-        exit 0
-    fi
-    if [ -n "$OUT" ]; then
-        echo '{"decision": "block", "reason": "You have pending message(s). Ask me to drain the inbox before stopping."}'
-        exit 0
-    fi
-fi
-
-echo '{"decision": "approve"}'

@@ -2,10 +2,23 @@
 
 package cli
 
-import "testing"
+import (
+	"os"
+	"testing"
+
+	"golang.org/x/sys/unix"
+)
 
 func TestLiveRawOrphanState(t *testing.T) {
-	i := wakeLockInspection{IdentityConfirmed: true, Process: wakeProcessInfo{Running: true}, Lock: wakeLock{WakeMode: "raw"}}
+	i := wakeLockInspection{
+		IdentityConfirmed: true,
+		Process: wakeProcessInfo{
+			Running:                  true,
+			ControllingTerminalKnown: true,
+			HasControllingTerminal:   false,
+		},
+		Lock: wakeLock{WakeMode: "raw"},
+	}
 	if !isLiveRawOrphan(i) {
 		t.Fatal("expected live raw orphan")
 	}
@@ -24,5 +37,128 @@ func TestLiveRawOrphanState(t *testing.T) {
 	i.Process.Running = false
 	if isLiveRawOrphan(i) {
 		t.Fatal("dead process is not a live raw orphan")
+	}
+}
+
+func TestLiveRawOrphanRequiresUnusableNotificationPath(t *testing.T) {
+	tests := []struct {
+		name string
+		tty  string
+		mode string
+		proc wakeProcessInfo
+		want bool
+	}{
+		{
+			name: "attached",
+			tty:  "/dev/null",
+			mode: "raw",
+			proc: wakeProcessInfo{
+				ControllingTerminalKnown: true,
+				HasControllingTerminal:   true,
+			},
+		},
+		{
+			name: "attached with unknown saved tty",
+			tty:  "unknown",
+			mode: "raw",
+			proc: wakeProcessInfo{
+				ControllingTerminalKnown: true,
+				HasControllingTerminal:   true,
+			},
+		},
+		{name: "undeterminable legacy tty", tty: "unknown", mode: "raw", want: true},
+		{name: "output only", tty: "unknown", mode: wakeInjectModeNone},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.proc.Running = true
+			i := wakeLockInspection{
+				IdentityConfirmed: true,
+				Process:           tt.proc,
+				Lock:              wakeLock{WakeMode: tt.mode, TTY: tt.tty},
+			}
+			if got := isLiveRawOrphan(i); got != tt.want {
+				t.Fatalf("isLiveRawOrphan = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWakeLockNeedsReplacementDarwinUsesLiveTerminalDevice(t *testing.T) {
+	const (
+		wakePID = 66121
+		tdev    = 268435464
+	)
+	oldKinfo := readDarwinKinfoProc
+	readDarwinKinfoProc = func(name string, args ...int) (*unix.KinfoProc, error) {
+		if name != "kern.proc.pid" || len(args) != 1 || args[0] != os.Getpid() {
+			t.Fatalf("unexpected current-process lookup: name=%q args=%v", name, args)
+		}
+		return &unix.KinfoProc{
+			Proc:  unix.ExternProc{P_stat: 1},
+			Eproc: unix.Eproc{Tdev: tdev},
+		}, nil
+	}
+	t.Cleanup(func() { readDarwinKinfoProc = oldKinfo })
+	stubWakeProcessSID(t, func(pid int) (int, error) {
+		if pid == wakePID {
+			return 100, nil
+		}
+		if pid == 0 {
+			return 200, nil
+		}
+		t.Fatalf("unexpected SID lookup for pid %d", pid)
+		return 0, nil
+	})
+
+	inspection := wakeLockInspection{
+		IdentityConfirmed: true,
+		Lock: wakeLock{
+			PID: wakePID,
+			TTY: "unknown",
+		},
+		Process: wakeProcessInfo{
+			PID:                       wakePID,
+			Running:                   true,
+			ControllingTerminalKnown:  true,
+			HasControllingTerminal:    true,
+			ControllingTerminalDevice: tdev,
+		},
+	}
+	if !wakeLockNeedsReplacement(inspection) {
+		t.Fatal("same terminal device in a different session must trigger automatic replacement")
+	}
+}
+
+func TestDoctorReportsLiveRawOrphan(t *testing.T) {
+	const pid = 66121
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          pid,
+		TTY:          "unknown",
+		ProcessStart: "recorded-start",
+		BootID:       "recorded-boot",
+		Executable:   "/opt/homebrew/bin/amq",
+		Generation:   "live-raw-orphan",
+	})
+	stubInspectWakeProcess(t, func(gotPID int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:                      gotPID,
+			Running:                  true,
+			StartToken:               "recorded-start",
+			BootID:                   "recorded-boot",
+			Executable:               "/opt/homebrew/bin/amq",
+			ControllingTerminalKnown: true,
+			HasControllingTerminal:   false,
+		}
+	})
+
+	locks := checkWakeLocks(root, []string{"codex"}, false)
+	if len(locks) != 1 {
+		t.Fatalf("wake locks = %#v", locks)
+	}
+	got := locks[0]
+	if got.Status != "live-raw-orphan" {
+		t.Fatalf("status = %q", got.Status)
 	}
 }

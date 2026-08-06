@@ -354,7 +354,7 @@ func TestPublishAuthoritativeWakeClaimCommitsACompleteReadOnlyGeneration(t *test
 		BootID:       owner.BootID,
 		Executable:   "/usr/local/bin/amq",
 		Args:         []string{"amq", "wake", "--me", "codex", "--root", root},
-		Generation:   "owner-generation",
+		Generation:   "0123456789abcdef0123456789abcdef",
 		OwnerSchema:  wakeOwnerLockSchema,
 		Owner:        &owner,
 	}, target)
@@ -401,7 +401,7 @@ func TestPublishAuthoritativeWakeClaimCommitsACompleteReadOnlyGeneration(t *test
 	}
 
 	replacement := lock
-	replacement.Generation = "replacement-generation"
+	replacement.Generation = "fedcba9876543210fedcba9876543210"
 	replacementTarget := target
 	replacementTarget.Created = "2026-07-23T01:00:00Z"
 	replacement.TargetDigest = mustWakeTargetDigest(replacementTarget)
@@ -468,9 +468,6 @@ func TestPublishAuthoritativeWakeClaimDirectorySyncFailureIsNotDegradable(t *tes
 	var publicationErr *wakeOwnerPublicationError
 	if !errors.As(err, &publicationErr) {
 		t.Fatalf("publication error = %v, want typed durability failure", err)
-	}
-	if publicationErr.Unsupported {
-		t.Fatalf("directory-sync failure was marked degradable: %#v", publicationErr)
 	}
 	if inspection := inspectWakeLock(root, "codex"); inspection.Exists {
 		t.Fatalf("directory-sync failure published a lock: %#v", inspection)
@@ -777,6 +774,53 @@ func TestConcurrentAuthoritativeAcquisitionPublishesOneGeneration(t *testing.T) 
 	}
 }
 
+func TestAuthoritativeAcquisitionSurfacesOwnerObservationCloseFailure(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	owner := wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	injector := writeExecutableForTest(t, "owner-close-failure-injector")
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, nil)
+	target.Owner = &owner
+	monitorErr := errors.New("owner monitor failed")
+	originalObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
+		if got != owner {
+			t.Fatalf("owner = %#v, want %#v", got, owner)
+		}
+		monitor := newWakeOwnerObservationMonitor(nil)
+		monitor.finish(monitorErr)
+		return wakeOwnerObservation{State: wakeOwnerSame, monitor: monitor}, nil
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = originalObserve })
+
+	cleanup, err := acquireAuthoritativeWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+		target:   &target,
+		wakeMode: wakeTargetInjectVia,
+	})
+	if cleanup != nil {
+		t.Fatal("observation close failure returned successful acquisition cleanup")
+	}
+	if !errors.Is(err, monitorErr) {
+		t.Fatalf("acquisition error = %v, want owner monitor failure", err)
+	}
+	if inspection := inspectWakeLock(root, "codex"); inspection.Exists {
+		t.Fatalf("owner monitor failure published wake claim: %#v", inspection)
+	}
+	if _, exists, err := readWakeTarget(root, "codex"); err != nil || exists {
+		t.Fatalf("owner monitor failure target exists=%v err=%v", exists, err)
+	}
+}
+
 func TestAcquireAuthoritativeWakeClaimReclaimsOnlyADeadOwnerWithAbsentWake(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -804,7 +848,7 @@ func TestAcquireAuthoritativeWakeClaimReclaimsOnlyADeadOwnerWithAbsentWake(t *te
 		BootID:       oldOwner.BootID,
 		Executable:   "/usr/local/bin/amq",
 		Args:         []string{"amq", "wake", "--me", "codex", "--root", root},
-		Generation:   "old-owner-generation",
+		Generation:   "11111111111111111111111111111111",
 		OwnerSchema:  wakeOwnerLockSchema,
 		Owner:        &oldOwner,
 	}, oldTarget)
@@ -1037,7 +1081,7 @@ func TestExactHelperCleanupRollsBackOnlyCurrentAuthoritativeOwner(t *testing.T) 
 		BootID:       owner.BootID,
 		Executable:   "/usr/local/bin/amq",
 		Args:         []string{"amq", "wake", "--root", root, "--me", "codex", "--inject-via", injector},
-		Generation:   "authoritative-rollback-cleanup-generation",
+		Generation:   "22222222222222222222222222222222",
 		OwnerSchema:  wakeOwnerLockSchema,
 		Owner:        &owner,
 	}, target)
@@ -1258,6 +1302,78 @@ func TestRecoverOwnerRequiresExactTokenAndCallerSessionForLiveOwner(t *testing.T
 	}
 }
 
+func TestRecoverOwnerObservationCloseFailurePreservesClaim(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	injector := writeExecutableForTest(t, "owner-recover-close-failure-injector")
+	owner := wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, nil)
+	target.Owner = &owner
+	if err := writeWakeTarget(root, "codex", target); err != nil {
+		t.Fatal(err)
+	}
+	lock := bindWakeLockToTarget(wakeLock{
+		PID:          5151,
+		TTY:          "unknown",
+		ProcessStart: "67890",
+		BootID:       owner.BootID,
+		Generation:   "owner-recover-close-failure",
+		OwnerSchema:  wakeOwnerLockSchema,
+		Owner:        &owner,
+	}, target)
+	lock.WakeMode = wakeOwnerWakeMode
+	lockPath := writeWakeLockForTest(t, root, "codex", lock)
+	if err := os.Chmod(lockPath, wakeOwnerLockFileMode); err != nil {
+		t.Fatal(err)
+	}
+	lockBefore, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetPath := wakeTargetPath(root, "codex")
+	targetBefore, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid}
+	})
+	monitorErr := errors.New("owner monitor failed")
+	oldObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(got wakeOwner) (wakeOwnerObservation, error) {
+		if got != owner {
+			t.Fatalf("observed owner = %#v, want %#v", got, owner)
+		}
+		monitor := newWakeOwnerObservationMonitor(nil)
+		monitor.finish(monitorErr)
+		return wakeOwnerObservation{State: wakeOwnerDead, monitor: monitor}, nil
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
+
+	result, err := recoverOwnerWake(root, "codex")
+	if !errors.Is(err, monitorErr) || result.Status != "refused" {
+		t.Fatalf("recover result = %#v err=%v, want monitor refusal", result, err)
+	}
+	lockAfter, err := os.ReadFile(lockPath)
+	if err != nil || !bytes.Equal(lockAfter, lockBefore) {
+		t.Fatalf("owner lock changed: err=%v before=%q after=%q", err, lockBefore, lockAfter)
+	}
+	targetAfter, err := os.ReadFile(targetPath)
+	if err != nil || !bytes.Equal(targetAfter, targetBefore) {
+		t.Fatalf("owner target changed: err=%v before=%q after=%q", err, targetBefore, targetAfter)
+	}
+}
+
 func TestRecoverOwnerUsesAuthoritativeLockEvidenceWhenTargetIsMissing(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -1304,6 +1420,137 @@ func TestRecoverOwnerUsesAuthoritativeLockEvidenceWhenTargetIsMissing(t *testing
 	}
 	if inspectWakeLock(root, "codex").Exists {
 		t.Fatal("missing-target recovery preserved authoritative lock")
+	}
+}
+
+func TestRecoverOwnerPreservesClaimWhenTargetIsMissingWithMatchingPreparedMarker(t *testing.T) {
+	testRecoverOwnerPreservesClaimWhenTargetIsMissingWithPreparedMarker(
+		t,
+		false,
+		"target snapshot is unavailable",
+	)
+}
+
+func TestRecoverOwnerPreservesClaimWhenTargetIsMissingAndPreparedSnapshotFails(t *testing.T) {
+	testRecoverOwnerPreservesClaimWhenTargetIsMissingWithPreparedMarker(
+		t,
+		true,
+		"wake prepared marker must be a regular 0600 file",
+	)
+}
+
+func testRecoverOwnerPreservesClaimWhenTargetIsMissingWithPreparedMarker(
+	t *testing.T,
+	failPreparedSnapshot bool,
+	wantReason string,
+) {
+	t.Helper()
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	injector := writeExecutableForTest(t, "owner-missing-target-prepared-injector")
+	owner := wakeOwner{
+		PID:          4242,
+		ProcessStart: "12345",
+		BootID:       "11111111-1111-1111-1111-111111111111",
+		SessionID:    99,
+	}
+	target := mustNewWakeTargetForTest(t, root, "codex", injector, nil)
+	target.Owner = &owner
+	lock := bindWakeLockToTarget(wakeLock{
+		PID:          5151,
+		TTY:          "unknown",
+		ProcessStart: "67890",
+		BootID:       owner.BootID,
+		Generation:   "owner-missing-target-prepared-generation",
+		OwnerSchema:  wakeOwnerLockSchema,
+		Owner:        &owner,
+	}, target)
+	lock.WakeMode = wakeOwnerWakeMode
+	lockPath := writeWakeLockForTest(t, root, "codex", lock)
+	if err := os.Chmod(lockPath, wakeOwnerLockFileMode); err != nil {
+		t.Fatal(err)
+	}
+	preparedPath := wakePreparedPath(root, "codex")
+	prepared := wakeReady{
+		Schema:       wakeReadySchema,
+		Generation:   lock.Generation,
+		TargetDigest: lock.TargetDigest,
+	}
+	if err := writeWakeGenerationFile(preparedPath, "wake prepared marker", prepared); err != nil {
+		t.Fatal(err)
+	}
+	if failPreparedSnapshot {
+		if err := os.Chmod(preparedPath, 0o400); err != nil {
+			t.Fatal(err)
+		}
+	}
+	beforeLock := inspectWakeLock(root, "codex")
+	if !beforeLock.Exists {
+		t.Fatal("authoritative lock is missing before recovery")
+	}
+	preparedInfo, err := os.Lstat(preparedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedData, err := os.ReadFile(preparedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid}
+	})
+	oldObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(wakeOwner) (wakeOwnerObservation, error) {
+		return wakeOwnerObservation{State: wakeOwnerDead}, nil
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
+	originalSync := syncWakeOwnerDirFD
+	syncCalls := 0
+	syncWakeOwnerDirFD = func(int) error {
+		syncCalls++
+		return nil
+	}
+	t.Cleanup(func() { syncWakeOwnerDirFD = originalSync })
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		result, err := recoverOwnerWake(root, "codex")
+		if err == nil || result.Status != "error" ||
+			!strings.Contains(result.Reason, wantReason) {
+			t.Fatalf("attempt %d result = %#v err=%v, want unchanged-state validation error", attempt, result, err)
+		}
+		if !sameWakeLockGeneration(beforeLock, inspectWakeLock(root, "codex")) {
+			t.Fatalf("attempt %d changed authoritative lock", attempt)
+		}
+		gotPreparedInfo, statErr := os.Lstat(preparedPath)
+		if statErr != nil {
+			t.Fatalf("attempt %d stat prepared marker: %v", attempt, statErr)
+		}
+		gotPreparedData, readErr := os.ReadFile(preparedPath)
+		if readErr != nil {
+			t.Fatalf("attempt %d read prepared marker: %v", attempt, readErr)
+		}
+		if !sameWakeFileIdentity(preparedInfo, gotPreparedInfo) ||
+			!bytes.Equal(preparedData, gotPreparedData) {
+			t.Fatalf("attempt %d changed prepared marker", attempt)
+		}
+		if _, exists, readErr := readWakeTarget(root, "codex"); readErr != nil || exists {
+			t.Fatalf("attempt %d missing target = exists=%v err=%v", attempt, exists, readErr)
+		}
+		tempMatches, globErr := filepath.Glob(filepath.Join(fsq.AgentBase(root, "codex"), ".wake*.tmp.*"))
+		if globErr != nil {
+			t.Fatal(globErr)
+		}
+		if len(tempMatches) != 0 {
+			t.Fatalf("attempt %d left temporary wake files: %v", attempt, tempMatches)
+		}
+	}
+	if syncCalls != 0 {
+		t.Fatalf("failed recoveries synced the wake owner directory %d times", syncCalls)
 	}
 }
 

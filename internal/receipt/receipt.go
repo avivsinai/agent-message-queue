@@ -142,6 +142,15 @@ func Read(path string) (Receipt, error) {
 	return parseReceipt(data)
 }
 
+// ReadDeliveryRoot reads a receipt through an already authorized queue root.
+func ReadDeliveryRoot(root *fsq.DeliveryRoot, path string) (Receipt, error) {
+	data, err := root.ReadRegularNoFollow(path)
+	if err != nil {
+		return Receipt{}, err
+	}
+	return parseReceipt(data)
+}
+
 func parseReceipt(data []byte) (Receipt, error) {
 	var r Receipt
 	if err := json.Unmarshal(data, &r); err != nil {

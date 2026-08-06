@@ -372,16 +372,32 @@ func writeWakeTargetGuardedAt(
 }
 
 func removeWakeTargetGuardedAt(dirfd int, agentDir *wakeAgentDir) error {
-	if err := unix.Unlinkat(dirfd, wakeTargetFileName, 0); err != nil {
-		if err == unix.ENOENT {
-			return nil
-		}
+	stateSnapshot, stateExists, err := readWakeStateRawSnapshotAt(dirfd, agentDir)
+	if err != nil {
+		continueAfterWakeStateProjectionError(newWakeStateProjectionError(err))
+		stateExists = false
+	}
+	removedTarget := false
+	if err := unix.Unlinkat(dirfd, wakeTargetFileName, 0); err != nil && err != unix.ENOENT {
 		return fmt.Errorf("remove wake target: %w", err)
+	} else if err == nil {
+		removedTarget = true
 	}
-	if err := syncWakeOwnerDirFD(dirfd); err != nil {
-		return fmt.Errorf("sync wake target removal: %w", err)
+	if removedTarget {
+		if err := syncWakeOwnerDirFD(dirfd); err != nil {
+			return fmt.Errorf("sync wake target removal: %w", err)
+		}
 	}
-	_ = agentDir
+	if _, err := removeWakeStateIfTargetAbsentAt(
+		dirfd,
+		agentDir,
+		stateSnapshot,
+		stateExists,
+	); err != nil {
+		if !continueAfterWakeStateProjectionError(err) {
+			return fmt.Errorf("remove wake state after target removal: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -513,7 +529,9 @@ func readWakeRepairMetadataAt(
 		return nil, nil, true, fmt.Errorf("re-stat %s: %w", label, statErr)
 	}
 	if !sameWakeFileIdentity(info, pathInfo) {
-		return nil, nil, true, fmt.Errorf("%s changed while opening", label)
+		return nil, nil, true, newWakeSnapshotReadChangedError(
+			fmt.Errorf("%s changed while opening", label),
+		)
 	}
 	return data, info, true, nil
 }

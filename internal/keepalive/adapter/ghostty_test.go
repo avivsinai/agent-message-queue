@@ -53,8 +53,8 @@ func TestParseGhosttyTerminalTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseGhosttyTerminalTarget() error = %v", err)
 	}
-	if id != "terminal-1" {
-		t.Fatalf("id = %q, want terminal-1", id)
+	if id != "TERMINAL-1" {
+		t.Fatalf("id = %q, want TERMINAL-1", id)
 	}
 }
 
@@ -63,8 +63,18 @@ func TestGhosttyNormalizeTargetTrimsTerminalID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NormalizeTarget() error = %v", err)
 	}
-	if target != "ghostty:terminal:terminal-1" {
+	if target != "ghostty:terminal:TERMINAL-1" {
 		t.Fatalf("target = %q, want canonical terminal target", target)
+	}
+}
+
+func TestGhosttyNormalizeTargetCanonicalizesTerminalIDCase(t *testing.T) {
+	target, err := (Ghostty{}).NormalizeTarget("ghostty:terminal:bede3893-ce56-4309-8aec-3d930f11225d")
+	if err != nil {
+		t.Fatalf("NormalizeTarget() error = %v", err)
+	}
+	if want := "ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D"; target != want {
+		t.Fatalf("target = %q, want %q", target, want)
 	}
 }
 
@@ -96,7 +106,7 @@ func TestGhosttyProbePassesTerminalIDAsArgument(t *testing.T) {
 		t.Fatalf("Probe() error = %v", err)
 	}
 	call := runner.calls[0]
-	if got := call.args[len(call.args)-1]; got != "terminal-1" {
+	if got := call.args[len(call.args)-1]; got != "TERMINAL-1" {
 		t.Fatalf("last osascript arg = %q, want terminal id", got)
 	}
 }
@@ -110,7 +120,7 @@ func TestGhosttyInjectPassesTerminalIDAndPayloadAsArguments(t *testing.T) {
 		t.Fatalf("Inject() error = %v", err)
 	}
 	call := runner.calls[0]
-	if got := call.args[len(call.args)-2]; got != "terminal-1" {
+	if got := call.args[len(call.args)-2]; got != "TERMINAL-1" {
 		t.Fatalf("target arg = %q, want terminal id", got)
 	}
 	if got := call.args[len(call.args)-1]; got != payload {
@@ -125,6 +135,31 @@ func TestGhosttyInjectPassesTerminalIDAndPayloadAsArguments(t *testing.T) {
 	for _, disallowed := range []string{"System Events", "the clipboard", "keystroke", "AXRaise", "activate"} {
 		if strings.Contains(call.args[1], disallowed) {
 			t.Fatalf("script still uses %q: %q", disallowed, call.args[1])
+		}
+	}
+}
+
+func TestGhosttyCaseAliasesUseTheSameAppleScriptTargetIdentity(t *testing.T) {
+	skipNonDarwin(t)
+	const lower = "ghostty:terminal:bede3893-ce56-4309-8aec-3d930f11225d"
+	const canonical = "BEDE3893-CE56-4309-8AEC-3D930F11225D"
+	for _, call := range []struct {
+		name string
+		run  func(Ghostty) error
+	}{
+		{"probe", func(g Ghostty) error { return g.Probe(context.Background(), lower) }},
+		{"inject", func(g Ghostty) error { return g.Inject(context.Background(), lower, "payload") }},
+	} {
+		runner := &fakeCommandRunner{output: []byte("ok\n")}
+		if err := call.run(Ghostty{Runner: runner}); err != nil {
+			t.Fatalf("%s() error = %v", call.name, err)
+		}
+		got := runner.calls[0].args[len(runner.calls[0].args)-1]
+		if call.name == "inject" {
+			got = runner.calls[0].args[len(runner.calls[0].args)-2]
+		}
+		if got != canonical {
+			t.Fatalf("%s target id = %q, want canonical %q", call.name, got, canonical)
 		}
 	}
 }

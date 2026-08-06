@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,7 @@ func TestSend_RejectsPositionalArgs(t *testing.T) {
 					t.Fatalf("EnsureAgentDirs: %v", err)
 				}
 			}
+			configureSendTestRoot(t, root, "alice", "bob")
 
 			args := append([]string{"--root", root}, tt.args...)
 			err := runSend(args)
@@ -68,6 +70,7 @@ func TestSendRootOnlyConfirmationUsesRootBasename(t *testing.T) {
 			t.Fatalf("EnsureAgentDirs: %v", err)
 		}
 	}
+	configureSendTestRoot(t, root, "lead", "qa")
 
 	output, err := captureEnvStdout(t, func() error {
 		return runSend([]string{"--root", root, "--me", "lead", "--to", "qa", "--subject", "x", "--body", "y"})
@@ -90,6 +93,7 @@ func TestSendRootOnlyJSONUsesRootBasenameAsSession(t *testing.T) {
 			t.Fatalf("EnsureAgentDirs: %v", err)
 		}
 	}
+	configureSendTestRoot(t, root, "lead", "qa")
 
 	output := runSendJSONForTest(t, "--root", root, "--me", "lead", "--to", "qa", "--subject", "x", "--body", "y", "--json")
 	if got := output["session"]; got != "clitest" {
@@ -107,6 +111,7 @@ func TestSendWaitTimeoutNamesDeliveryContextAndDoctor(t *testing.T) {
 			t.Fatalf("EnsureAgentDirs: %v", err)
 		}
 	}
+	configureSendTestRoot(t, root, "alice", "bob")
 	for _, key := range []string{envRoot, envBaseRoot, envSession} {
 		setOptionalEnv(t, key, "", false)
 	}
@@ -124,11 +129,55 @@ func TestSendWaitTimeoutNamesDeliveryContextAndDoctor(t *testing.T) {
 	if err == nil || GetExitCode(err) != ExitTimeout {
 		t.Fatalf("send wait should time out, got %v", err)
 	}
-	for _, want := range []string{root, "collab", "amq doctor --ops"} {
+	for _, want := range []string{root, "collab", "amq doctor --root", "--ops"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("timeout hint missing %q: %v", want, err)
 		}
 	}
+}
+
+func TestSendWaitTimeoutUsesSessionLocalConfigAuthority(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exact printed command execution uses the POSIX test shell")
+	}
+	base := filepath.Join(secureTempDirForTest(t), ".agent-mail")
+	root := filepath.Join(base, "collab")
+	if err := fsq.EnsureRootDirs(base); err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range []string{"alice", "bob"} {
+		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configureSendTestRoot(t, root, "alice", "bob")
+	pinSendSessionForTest(t, base, root, "collab")
+
+	_, _, err := captureEnvOutput(t, func() error {
+		return runSend([]string{
+			"--me", "alice",
+			"--to", "bob",
+			"--body", "timeout hint uses effective authority",
+			"--wait-for", "drained",
+			"--wait-timeout", "1ms",
+		})
+	})
+	if err == nil || GetExitCode(err) != ExitTimeout {
+		t.Fatalf("send wait should time out, got %v", err)
+	}
+	const prefix = "; run "
+	_, commandAndSuffix, ok := strings.Cut(err.Error(), prefix)
+	if !ok {
+		t.Fatalf("timeout error has no diagnostic command: %v", err)
+	}
+	command, _, ok := strings.Cut(commandAndSuffix, " to diagnose mailbox divergence")
+	if !ok || strings.TrimSpace(command) == "" {
+		t.Fatalf("timeout error has malformed diagnostic command: %v", err)
+	}
+	if strings.Contains(command, "--base-root") {
+		t.Fatalf("session-local diagnostic forced config-less base authority: %q", command)
+	}
+	executeAdvertisedAMQCommand(t, command)
 }
 
 func TestReply_RejectsPositionalArgs(t *testing.T) {

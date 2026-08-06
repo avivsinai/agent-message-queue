@@ -70,7 +70,9 @@ Leader prepares commit -> user approves -> push
 
 ## Interrupts
 
-- Urgent messages labeled `interrupt` trigger wake Ctrl+C injection + an interrupt notice (when wake is running).
+- Urgent messages labeled `interrupt` trigger an interrupt notice when wake is
+  running. The label never enables Ctrl+C by itself; real SIGINT requires the
+  explicit destructive opt-in `--interrupt-cmd ctrl-c`.
 - Input injection can activate a focused permission or approval dialog. Payload
   text alone may match single-key shortcuts, so removing Enter is not safe.
 - `--defer-while-input` reduces collisions with recent typing but cannot detect

@@ -71,7 +71,10 @@ Grok is opt-in. To provision mailboxes for all three engines explicitly:
 amq coop init --agents claude,codex,grok,user
 ```
 
-That's it. `coop exec` auto-initializes the project if needed, sets
+That's it. `coop exec` auto-initializes the project if needed. In a Git
+worktree with no eligible root it creates `.amqrc` and `.agent-mail` at that
+worktree's top, even from a subdirectory or with `--session`; it does not
+consult `~/.amqrc`. Use `--no-init` to keep the refusal instead. It then sets
 `AM_ROOT`/`AM_ME`, `AM_BASE_ROOT`, and the independent `AM_SESSION` identity,
 starts wake notifications, and execs into the agent. Without `--session` or
 `--root`, it defaults to `--session collab` (i.e.,
@@ -109,6 +112,12 @@ and set `AMQ_GLOBAL_ROOT` to one absolute base. Use `amq doctor --ops` when a
 delivery receipt times out; it can name divergent same-session roots when a
 peer has fresher presence in another worktree.
 
+Participating commands in a Git worktree or bare repository with no eligible
+root fail closed instead of implicitly using `~/.amqrc`. `coop init` explicitly
+initializes a worktree-local queue at the worktree top; `coop exec` does the
+same after root precedence finds no eligible root. A bare repository has no
+worktree to host that queue, so use a worktree or explicit `--root` there.
+
 For read-side access, prefer the named route:
 
 ```bash
@@ -117,19 +126,23 @@ amq drain --session auth --include-body
 ```
 
 When a terminal has a complete `AM_BASE_ROOT`/`AM_SESSION` pin, `read`, `drain`,
-`monitor`, `watch`, `reply`, and mutating DLQ commands refuse a conflicting raw
-`AM_ROOT`/`--root` before inspecting or moving mailbox state. Use `--session
-<name>` for sibling routing. For deliberate raw-root access,
-`--ignore-session-pin` requires a non-empty explicit `--root`; it never blesses
-an inherited `AM_ROOT`. `list` warns on a mismatch but remains available for
-non-destructive inspection. A missing mailbox is an error, not an empty inbox.
+`monitor`, `watch`, and all DLQ commands refuse a conflicting target before
+inspecting or moving mailbox state; `send` and `reply` apply the same check to
+their local source. Use `--session <name>` for sibling routing. For deliberate
+raw-root access, `--ignore-session-pin` requires a non-empty explicit `--root`;
+it never blesses an inherited `AM_ROOT`. `list` warns on a mismatch but remains
+available for non-destructive inspection. `doctor --root` also keeps inspection
+available with a mismatch warning, but `--fix-mailboxes` and
+`--ops --fix-wake-locks` require a matching pin unless that explicit root is
+paired with `--ignore-session-pin`. `--base-root` selects config authority and
+never waives the pin. A missing mailbox is an error, not an empty inbox.
 
 ### For Scripts/CI
 
 When you can't use `exec` (non-interactive environments):
 ```bash
 amq coop init
-eval "$(amq env --me claude)"
+amq_context="$(amq env --me claude)" && eval "$amq_context"
 ```
 
 All shell-mode `amq env` output replaces `AM_ROOT`, `AM_ME`, `AM_BASE_ROOT`,
@@ -139,11 +152,21 @@ and `AM_SESSION` as one context. For a base/sessionless root it sets
 `amq env` resolves the root with the full precedence chain:
 
 ```text
-flags > AM_ROOT > project .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
+explicit --root > AM_ROOT > project-local .amqrc > AMQ_GLOBAL_ROOT > implicit fallbacks
 ```
 
-Auto-detect covers the default `.agent-mail` layout in the current tree, including `.agent-mail/<session>` session roots without `.amqrc`. Custom root names still need `.amqrc`, explicit flags, or env vars.
+Inside a Git worktree or bare repository, the remaining eligible fallback is repo-local detected
+`.agent-mail`; outside Git, `~/.amqrc` precedes detected `.agent-mail`.
+Auto-detect covers the default `.agent-mail` layout in the current tree,
+including `.agent-mail/<session>` session roots without `.amqrc`. Custom root
+names still need `.amqrc`, explicit flags, or env vars.
 That matters when agents are launched by external orchestrators from outside the project root.
+
+An initialized cwd-local queue is also a routing safety signal. If the terminal
+is pinned to a different root, implicit participating commands refuse instead
+of silently following the pin. Repin to the cwd-local queue, route deliberately
+with `--session`/`--project`, or pass an explicit `--root` to confirm the active
+queue; ordinary pin checks still apply.
 
 ## External Orchestrators
 
@@ -162,7 +185,7 @@ Integration messages are self-delivered and carry `context.orchestrator` plus la
 
 `amq wake` uses TIOCSTI which may be unavailable on:
 - Hardened Linux (CONFIG_LEGACY_TIOCSTI=n)
-- Windows (use WSL)
+- Native Windows (`wake` is unavailable; use WSL with a Linux asset)
 
 If wake fails, configure the notify hook for desktop notifications:
 
@@ -271,6 +294,23 @@ amq reply --id "msg_123" --kind review_response --body "LGTM with minor suggesti
 
 > Co-op works without wake. `coop exec` starts it automatically.
 
+Before replacing or repairing a wake, inspect its exact capability:
+
+```bash
+amq wake check --me codex
+amq wake check --me codex --json
+```
+
+This command never changes wake state. `restart_capability=agent_safe` is the
+only result an automated agent may act on, using the returned `next_action`.
+For `operator_only`, leave the live wake running and hand the action to its
+owning terminal or supervisor. For `unavailable`, preserve the state and
+diagnose it. A process without a controlling TTY must not kill or replace a
+live raw wake, and TIOCSTI refusal must not be treated as permission to weaken
+delivery to attention-only. The result includes both the running wake image and
+the currently invoked AMQ image; legacy locks may report unknown image fields.
+`amq doctor --ops` shares these fields for discovered locks.
+
 `amq wake` uses TIOCSTI to inject notifications into your terminal by default.
 Pass `--baseline-existing` when starting a new wake after the agent already
 owns its terminal. Messages already present in `inbox/new` remain unread and do
@@ -279,6 +319,38 @@ add the flag to wakes they start. Reuse requires generation-bound proof that
 the live wake completed watcher preparation. It does not retroactively baseline
 that wake, so pending backlog can still notify; SessionStart draining mitigates
 that residual.
+
+For the first notification test, start both `coop exec` agents before sending
+the message. If a message was already waiting when the target wake started, it
+will not notify; it remains unread and visible to `amq drain --include-body`.
+
+Wake treats one transport execution only as a delivery attempt. While the same
+inbox cohort remains unread, it retries on its own capped backoff. The first
+notification is immediate. Attempts that inject the fixed doorbell start at 5
+seconds because they drive the agent; attention-only attempts start at 30
+seconds because they alert a human. Input attempts double to a 2-minute cap;
+attention-only attempts continue through 4 and 8 minutes to a 15-minute cap.
+Retries never give up while the cohort remains unread. Contextual peer headers
+appear only in terminal output or attention; terminal input always uses the
+fixed doorbell. The delay starts after the prior injector process exits or times
+out. Because an external injector is arbitrary local code, retries can duplicate
+its side effects. Added messages join the pending cohort and share its next
+notification without resetting the retry ladder. Input-delivery additions may
+pull a decayed deadline forward to the delivery floor 5 seconds after the last
+input attempt, or immediately if that floor has already passed; attention-only
+additions retain the cohort's current decayed deadline. Bursts within the
+debounce window remain consolidated.
+Removing or replacing any message is durable progress and immediately rearms
+the next notification.
+Owner-bound retries do not emit attention when terminal input succeeds.
+Transient foreground authority or input-quiet refusals keep the input retry
+armed while rate-limiting their separate attention output. Output-only delivery
+repeats on its slower cadence, and a short or failed attention write stays
+pending on that cadence instead of terminating the notifier. Recovery-required
+state never retries uncertain terminal input; it repeats the manual
+drain-and-restart notice on that same attention cadence until the unread cohort
+drains.
+
 For orchestrators or hardened environments without a controlling TTY, use an
 explicit external transport:
 
@@ -295,6 +367,12 @@ as the final argv element. This executes a local process for each notification,
 and the payload can include sanitized but message-derived header content such as
 sender and subject.
 
+The resolved executable plus the ordered fixed arguments are the injector's
+saved identity. Put any target identity needed to distinguish a pane, window,
+or session in `--inject-arg`. Ambient environment variables and provider
+configuration are invisible to repair and retire, so changing only those
+channels cannot select a different target safely.
+
 For permission-prompt workflows, use AMQ's fail-closed zero-input mode:
 
 ```bash
@@ -304,12 +382,24 @@ amq wake --me claude --inject-mode none --bell &
 amq coop exec --require-wake --wake-inject-mode none claude
 ```
 
-`none` writes notification text (and the optional bell) to wake's stderr and
-never writes terminal input. Urgent interrupt messages degrade to one bell plus
-the stderr notice instead of Ctrl+C. Because `--inject-via` is arbitrary local
+`none` never writes terminal input. `coop exec` gives its wake child separate
+process capabilities: full stdout/stderr diagnostics append to the private
+`agents/<agent>/.wake.log`, while notification attention uses a dedicated
+terminal descriptor. Codex and Claude receive only terminal-safe title, bell,
+and supported desktop-notification sequences on that descriptor, so runtime,
+cleanup, and top-level fatal diagnostics cannot overwrite the active composer.
+After `.wake.log` reaches 1 MiB, the next `coop exec` wake launch truncates it.
+`.wake.repair.log` is truncated only when the next eligible `amq wake repair`
+attempt opens replacement-wake diagnostics, before child start. One long-lived
+child can exceed either launch bound. Without a controlling terminal, attention
+is appended to the same durable log.
+Urgent interrupt messages degrade to terminal-safe attention instead of Ctrl+C.
+Because
+`--inject-via` is arbitrary local
 code and may itself inject terminal input, `none` rejects `--inject-via`,
-`--inject-arg`, and `--inject-cmd`. Stderr output shares the TUI terminal by
-default and may remain visible until the TUI redraws.
+`--inject-arg`, and `--inject-cmd`. A directly launched or externally
+supervised `amq wake` should likewise route stdout/stderr to a private log when
+it shares a terminal with an alternate-screen agent.
 
 ### Supervisor recipes
 
@@ -378,9 +468,10 @@ to one hour. It fails closed if multiple live cmux surface UUIDs alias the same
 TTY and repeats that check immediately before injection. Reattach persists a
 recoverable inactive reservation before starting a wake, while spawned wakes
 run in a separate Unix session and are never killed when the helper's readiness
-wait is canceled. Destructive retirement is disabled until AMQ exposes the
-positive identity-safe-retire capability tracked by #235: `retire-session` and
-`gc --apply` do not signal wakes or remove registry rows in this release.
+wait is canceled. `retire-session` and `gc --apply` delegate retirement to
+AMQ's identity-safe `wake retire` contract. They remove a registry row only
+after AMQ confirms the exact saved injector target was retired; refusals,
+ambiguous identity, and command failures preserve the row for a later retry.
 
 ```bash
 go build ./cmd/amq-keepalive
@@ -400,8 +491,8 @@ go build ./cmd/amq-keepalive
 - `--defer-while-input` / `--defer-while-input=false` - Best-effort quiet-window gate before non-interrupt injection
 - `--input-quiet-for 1200ms` - Required quiet window before deferred injection
 - `--input-poll-interval 200ms` - Poll interval while waiting for terminal input to quiet
-- `--input-max-hold 15s` - Maximum hold time for one deferred wake injection
-- `--interrupt` / `--interrupt=false` - Enable/disable Ctrl+C for urgent messages
+- `--input-max-hold 15s` - Maximum deferral; input still active at the deadline emits the notice out-of-band and skips synthetic input
+- `--interrupt` / `--interrupt=false` - Enable/disable urgent interrupt notices; Ctrl+C still requires `--interrupt-cmd ctrl-c`
 
 Every input-injecting mode can activate a focused permission or approval dialog:
 raw and paste payload bytes, `--inject-cmd`, external injectors, and urgent Ctrl+C
@@ -414,13 +505,16 @@ after a wake notification is pending. An idle approval dialog is
 indistinguishable from an idle composer. If the foreground app has already
 consumed a partially typed prompt and the user pauses longer than
 `--input-quiet-for`, wake can still inject and submit. Explicit urgent interrupt
-messages bypass this deferral. Use `none` when AMQ must guarantee zero synthetic
-input.
+messages bypass this deferral. If input stays active through
+`--input-max-hold`, wake emits the notice out-of-band and skips synthetic input;
+if input sampling is unavailable, injection remains best-effort. Use `none`
+when AMQ must guarantee zero synthetic input.
 
-**Platform support:**
-- macOS: Works
-- Linux: May be disabled by kernel hardening (CONFIG_LEGACY_TIOCSTI)
-- Windows: Not supported (use WSL)
+**Platform support:** `coop exec` and `wake` require macOS or Linux. Native
+Windows supports core queue commands and `coop init`, but not these two
+commands; use WSL with a Linux asset for the complete workflow. Linux raw TTY
+injection may be disabled by kernel hardening (`CONFIG_LEGACY_TIOCSTI`). See
+the [platform capability matrix](INSTALL.md#platform-capability-matrix).
 
 ## Message Format
 

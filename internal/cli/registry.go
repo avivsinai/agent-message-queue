@@ -29,6 +29,7 @@ func init() {
 		{Name: "list", Summary: "List inbox messages", Handler: runList},
 		{Name: "read", Summary: "Read a message by id", Handler: runRead},
 		{Name: "thread", Summary: "View a thread", Handler: runThread},
+		{Name: "trace", Summary: "Join current evidence for a message", Handler: runTrace},
 		{
 			Name:        "presence",
 			Summary:     "Set or list presence",
@@ -46,7 +47,7 @@ func init() {
 				{Name: "list", Summary: "List presence data", Handler: runPresenceList},
 			},
 		},
-		{Name: "cleanup", Summary: "Remove stale tmp files", Handler: runCleanup},
+		{Name: "cleanup", Summary: "Remove selected stale tmp or wake quarantine artifacts", Handler: runCleanup},
 		{Name: "watch", Summary: "Wait for new messages (uses fsnotify)", Handler: runWatch},
 		{Name: "drain", Summary: "Drain new messages (read, move to cur, emit receipts)", Handler: runDrain},
 		{Name: "monitor", Summary: "Combined watch+drain for co-op mode", Handler: runMonitor},
@@ -68,9 +69,10 @@ func init() {
 			Summary: "Background waker (TIOCSTI injection, experimental)",
 			Handler: runWake,
 			Children: []CommandInfo{
+				{Name: "check", Summary: "Inspect wake start and restart capability without mutation", Handler: runWake},
 				{Name: "repair", Summary: "Restart a proven-stale wake from a saved inject-via target", Handler: runWake},
 				{Name: "recover-owner", Summary: "Recover an exact owner-bound wake claim", Handler: runWake},
-				{Name: "retire", Summary: "Stop an exact managed inject-via wake", Handler: runWake},
+				{Name: "retire", Summary: "Retire an exact managed wake and its matching retained state", Handler: runWake},
 			},
 		},
 		{Name: "upgrade", Summary: "Upgrade amq to the latest release", Handler: runUpgradeRegistry},

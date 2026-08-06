@@ -46,27 +46,41 @@ printf ready > "$ready"
 	if err != nil {
 		t.Fatalf("read args log: %v", err)
 	}
-	args := string(data)
-	for _, want := range []string{
-		"wake\n",
-		"-root\n/tmp/amq-root\n",
-		"-me\ncodex\n",
-		"-inject-via\n/tmp/amq-keepalive\n",
-		"-inject-arg\ninject\n",
-		"-inject-arg\nghostty\n",
-		"-inject-arg\nghostty:terminal:abc\n",
-		"--accept-existing-wake\n",
-		"-ready-file\n",
-	} {
-		if !strings.Contains(args, want) {
-			t.Fatalf("args log missing %q:\n%s", want, args)
+	got := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	readyIndex := -1
+	for index, arg := range got {
+		if arg == "-ready-file" {
+			readyIndex = index
+			break
 		}
+	}
+	if readyIndex < 0 || readyIndex+1 >= len(got) {
+		t.Fatalf("argv has no ready-file value: %#v", got)
+	}
+	if !filepath.IsAbs(got[readyIndex+1]) {
+		t.Fatalf("ready-file path = %q, want absolute", got[readyIndex+1])
+	}
+	got[readyIndex+1] = "<ready-file>"
+	want := []string{
+		"wake",
+		"-root", "/tmp/amq-root",
+		"-me", "codex",
+		"-inject-via", "/tmp/amq-keepalive",
+		"-inject-arg", "inject",
+		"-inject-arg", "ghostty",
+		"-inject-arg", "ghostty:terminal:abc",
+		"--retry-until", "injected",
+		"--accept-existing-wake",
+		"-ready-file", "<ready-file>",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v\nwant %#v", got, want)
 	}
 	// keepalive starts a wake only when none is live, so mail already waiting in
 	// inbox/new arrived while nothing was notifying. Baselining it here made those
 	// downtime arrivals permanently silent, so the flag must be absent by default.
-	if strings.Contains(args, "--baseline-existing\n") {
-		t.Fatalf("args log must not baseline downtime arrivals by default:\n%s", args)
+	if strings.Contains(string(data), "--baseline-existing\n") {
+		t.Fatalf("args log must not baseline downtime arrivals by default:\n%s", data)
 	}
 }
 
@@ -381,6 +395,7 @@ printf '%s\n' '{"status":"retired","agent":"codex","pid":4242}'
 		"--inject-arg", "inject",
 		"--inject-arg", "cmux",
 		"--inject-arg", "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3",
+		"--retry-until", "injected",
 		"-json",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -401,6 +416,12 @@ func TestRetireWakeOutcomeMapping(t *testing.T) {
 			script:      `printf '%s\n' '{"status":"retired","agent":"codex","pid":7}'`,
 			wantRetired: true,
 			wantStatus:  "retired",
+		},
+		{
+			name:        "retired with residue",
+			script:      `printf '%s\n' '{"status":"retired_with_residue","agent":"codex","pid":7,"reason":"retirement succeeded; preserved residue: .wake.target"}'`,
+			wantRetired: true,
+			wantStatus:  "retired_with_residue",
 		},
 		{
 			name: "refused",

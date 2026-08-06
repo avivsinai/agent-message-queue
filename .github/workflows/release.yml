@@ -42,7 +42,7 @@ jobs:
       release_sha: ${{ steps.prepare.outputs.release_sha }}
       prerelease: ${{ steps.prepare.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -64,7 +64,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ needs.prepare.outputs.release_ref }}
@@ -80,7 +80,9 @@ jobs:
       - name: Build CLI
         run: VERSION=${{ needs.prepare.outputs.tag }} make build
       - name: Check embedded version
-        run: ./amq version | grep -Fx "${{ needs.prepare.outputs.tag }}"
+        run: |
+          ./amq version | grep -Fx "${{ needs.prepare.outputs.tag }}"
+          ./amq-keepalive --version | grep -Fx "${{ needs.prepare.outputs.tag }}"
 
   release:
     needs: [prepare, verify]
@@ -94,7 +96,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ needs.prepare.outputs.release_ref }}
@@ -156,6 +158,7 @@ jobs:
           )
           PY
       - name: Release
+        id: publish_release
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
@@ -187,42 +190,123 @@ jobs:
           subject-path: ${{ steps.attestation_subjects.outputs.subjects }}
 
       - name: Mark release pull request as tagged
-        if: github.event_name == 'push'
+        if: always() && steps.publish_release.outcome == 'success'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
-          release_prs="$(
-            gh api \
+          pull_pages="$(
+            gh api --paginate --slurp \
               --header "Accept: application/vnd.github+json" \
-              "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SHA}/pulls" \
-              --jq ".[] | select(.merged_at != null and .base.ref == \"main\" and .title == \"chore(release): v${VERSION}\") | .number"
+              "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SHA}/pulls?per_page=100"
           )"
-          release_pr_count="$(printf '%s\n' "$release_prs" | awk 'NF { count++ } END { print count + 0 }')"
-          if [[ "$release_pr_count" != "1" ]]; then
-            echo "::error::Expected one merged release PR for v${VERSION} at ${RELEASE_SHA}; found ${release_pr_count}: ${release_prs:-none}."
+          pull_state="$(
+            jq -e --arg version "$VERSION" --arg release_sha "$RELEASE_SHA" '
+              if type == "array" and all(.[]; type == "array") and
+                  all(.[][]; type == "object")
+              then
+                [.[][]] as $associated |
+                [
+                  $associated[] |
+                  .number as $number |
+                  select(
+                    .merged_at != null and
+                    .base.ref == "main" and
+                    .title == ("chore(release): v" + $version) and
+                    .merge_commit_sha == $release_sha and
+                    ($number | type == "number" and . > 0 and floor == .)
+                  ) |
+                  $number
+                ] as $exact |
+                {associated_count: ($associated | length), exact: $exact}
+              else error("malformed commit pulls response")
+              end
+            ' <<<"$pull_pages"
+          )"
+          associated_count="$(jq -er '.associated_count' <<<"$pull_state")"
+          release_pr_count="$(jq -er '.exact | length' <<<"$pull_state")"
+
+          if [[ "$associated_count" == "0" && "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "Historical dispatch has no associated release PR; label reconciliation is not applicable."
+            exit 0
+          fi
+          if [[ "$associated_count" != "1" || "$release_pr_count" != "1" ]]; then
+            echo "::error::Expected one unambiguous merged release PR for v${VERSION} at ${RELEASE_SHA}; found ${associated_count} associated and ${release_pr_count} exact."
             exit 1
           fi
-          release_pr="$(printf '%s\n' "$release_prs" | awk 'NF { print; exit }')"
+          release_pr="$(jq -er '.exact[0] | select(type == "number" and . > 0 and floor == .)' <<<"$pull_state")"
 
-          labels="$(gh pr view "$release_pr" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name')"
-          edit_args=()
-          if printf '%s\n' "$labels" | grep -Fxq 'autorelease: pending'; then
-            edit_args+=(--remove-label 'autorelease: pending')
-          fi
-          if ! printf '%s\n' "$labels" | grep -Fxq 'autorelease: tagged'; then
-            edit_args+=(--add-label 'autorelease: tagged')
+          read_labels() {
+            local response
+            if ! response="$(
+              gh api \
+                --header "Accept: application/vnd.github+json" \
+                "repos/${GITHUB_REPOSITORY}/issues/${release_pr}"
+            )"; then
+              return 1
+            fi
+            jq -e '
+              if type == "object" and (.labels | type == "array") and
+                  all(.labels[]; type == "object" and (.name | type == "string"))
+              then [.labels[].name]
+              else error("malformed labels response")
+              end
+            ' <<<"$response"
+          }
+
+          labels="$(read_labels)"
+          jq -e '
+            ([.[] | select(. == "autorelease: tagged")] | length) <= 1 and
+            ([.[] | select(. == "autorelease: pending")] | length) <= 1
+          ' >/dev/null <<<"$labels" || {
+            echo "::error::Release PR has duplicate lifecycle labels."
+            exit 1
+          }
+          if ! jq -e 'index("autorelease: tagged") != null' >/dev/null <<<"$labels"; then
+            if ! printf '%s\n' '{"labels":["autorelease: tagged"]}' |
+              gh api \
+                --method POST \
+                --header "Accept: application/vnd.github+json" \
+                --input - \
+                "repos/${GITHUB_REPOSITORY}/issues/${release_pr}/labels" \
+                >/dev/null; then
+              echo "::warning::Tagged label mutation returned nonzero; checking authoritative state."
+            fi
+            labels="$(read_labels)"
+            jq -e '
+              ([.[] | select(. == "autorelease: tagged")] | length) == 1 and
+              ([.[] | select(. == "autorelease: pending")] | length) <= 1
+            ' >/dev/null <<<"$labels" || {
+              echo "::error::Tagged label was not confirmed; pending label remains untouched."
+              exit 1
+            }
           fi
 
-          if [[ ${#edit_args[@]} -gt 0 ]]; then
-            gh pr edit "$release_pr" --repo "$GITHUB_REPOSITORY" "${edit_args[@]}"
+          if jq -e 'index("autorelease: pending") != null' >/dev/null <<<"$labels"; then
+            if ! gh api \
+              --method DELETE \
+              --header "Accept: application/vnd.github+json" \
+              "repos/${GITHUB_REPOSITORY}/issues/${release_pr}/labels/autorelease%3A%20pending" \
+              >/dev/null; then
+              echo "::warning::Pending label mutation returned nonzero; checking authoritative state."
+            fi
           else
             echo "Release PR #${release_pr} is already tagged."
           fi
+
+          labels="$(read_labels)"
+          jq -e '
+            ([.[] | select(. == "autorelease: tagged")] | length) == 1 and
+            ([.[] | select(. == "autorelease: pending")] | length) == 0
+          ' >/dev/null <<<"$labels" || {
+            echo "::error::Release PR lifecycle labels did not converge."
+            exit 1
+          }
 
   skill-publish:
     needs: [prepare, release]
@@ -235,7 +319,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ needs.prepare.outputs.tag }}
 

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
 // amqrc represents the .amqrc configuration file format.
@@ -19,7 +21,11 @@ type amqrc struct {
 	Peers   map[string]string `json:"peers,omitempty"`   // peer name → peer's base root path
 }
 
-var amqrcLstat = os.Lstat
+var (
+	amqrcLstat          = os.Lstat
+	globalAmqrcReadFile = os.ReadFile
+	gitMarkerLstat      = os.Lstat
+)
 
 // amqrcResult holds both the parsed config and the directory where it was found.
 type amqrcResult struct {
@@ -64,7 +70,9 @@ func runEnv(args []string) error {
 		"Outputs shell commands that replace the complete AMQ root/session context.",
 		"",
 		"Configuration precedence (highest to lowest):",
-		"  Root: flags > env (AM_ROOT) > .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect",
+		"  Root: flags > env (AM_ROOT) > project .amqrc > AMQ_GLOBAL_ROOT > implicit fallbacks",
+		"  Inside a Git worktree or bare repository: repo-local .agent-mail; ~/.amqrc is ineligible",
+		"  Outside Git: ~/.amqrc > detected .agent-mail",
 		"  Me:   flags > env (AM_ME)",
 		"",
 		"Note: .amqrc only configures 'root'. Agent identity ('me') is set",
@@ -72,10 +80,10 @@ func runEnv(args []string) error {
 		"different agents on the same project.",
 		"",
 		"Examples:",
-		"  eval \"$(amq env --me claude)\"                # Set up Claude and clear stale session context",
-		"  eval \"$(amq env --session feature-x --me claude --export)\"  # Pin this terminal to one session",
-		"  eval \"$(amq env --me codex --wake)\"          # Set up for Codex with wake",
-		"  eval \"$(amq env --session feature-x --me claude)\"  # Isolated session",
+		"  amq_context=\"$(amq env --me claude)\" && eval \"$amq_context\"",
+		"  amq_context=\"$(amq env --session feature-x --me claude --export)\" && eval \"$amq_context\"",
+		"  amq_context=\"$(amq env --me codex --wake)\" && eval \"$amq_context\"",
+		"  amq_context=\"$(amq env --session feature-x --me claude)\" && eval \"$amq_context\"",
 		"  amq env --json                                # Machine-readable output",
 		"  amq env --session-name                         # Print session name (for statusline)",
 	)
@@ -114,6 +122,9 @@ func runEnv(args []string) error {
 		}
 		base := ""
 		if pin.Present {
+			if err := validateLegacySessionPinRoot(pin); err != nil {
+				return err
+			}
 			if pin.IdentityPin {
 				ambient := strings.TrimSpace(os.Getenv(envRoot))
 				if ambient == "" {
@@ -149,10 +160,41 @@ func runEnv(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !contextExplicit {
-		if mismatch, checkErr := sessionPinMismatch(root); checkErr != nil {
+	if contextExplicit {
+		decision := sessionguard.Decide(sessionguard.Input{
+			Kind: sessionguard.KindEnv,
+			Pin:  sessionguard.PinAbsent, Relation: sessionguard.TargetUnbound,
+			Flags: sessionguard.Flags{ExplicitContext: true},
+		})
+		if decision.Verdict != sessionguard.Allow {
+			return ContextMismatchError("refusing env: explicit context replacement was not authorized")
+		}
+	} else {
+		pin, pinErr := loadSessionPin()
+		if pinErr != nil {
+			decision := sessionGuardDecisionForContext(
+				sessionguard.KindEnv,
+				sessionguard.ChannelExit5,
+				sessionguard.PinInvalid,
+				&SessionContextError{Message: pinErr.Error()},
+				sessionguard.Flags{},
+			)
+			if decision.Verdict == sessionguard.Allow {
+				return nil
+			}
+			return pinErr
+		}
+		mismatch, checkErr := sessionPinMismatchWithPin(root, pin)
+		decision := sessionGuardDecisionForContext(
+			sessionguard.KindEnv,
+			sessionguard.ChannelExit5,
+			sessionGuardPinStateFor(pin),
+			mismatch,
+			sessionguard.Flags{},
+		)
+		if checkErr != nil {
 			return checkErr
-		} else if mismatch != nil {
+		} else if decision.Verdict != sessionguard.Allow && mismatch != nil {
 			return ContextMismatchError("refusing env: %s. Use explicit --session <name> or --root <path> to repin", mismatch.Error())
 		}
 	}
@@ -286,7 +328,9 @@ const (
 
 // resolveEnvConfig resolves root and me with proper precedence.
 // Precedence:
-//   - Root: flags > env > .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
+//   - Root: flags > env > project .amqrc > AMQ_GLOBAL_ROOT > implicit fallbacks
+//   - Inside a Git worktree or bare repository: repo-local .agent-mail; ~/.amqrc is ineligible
+//   - Outside Git: ~/.amqrc > auto-detect
 //   - Me:   flags > env (NOT from .amqrc)
 func resolveEnvConfig(rootFlag, meFlag string) (string, string, error) {
 	root, _, me, err := resolveEnvConfigWithSource(rootFlag, meFlag)
@@ -318,29 +362,36 @@ func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, st
 	// 2. Try global root fallback (AMQ_GLOBAL_ROOT env var)
 	globalEnvRoot := strings.TrimSpace(os.Getenv(envGlobalRoot))
 
-	// 3. Try global ~/.amqrc
+	// 3. Establish whether home configuration is eligible. This uses only
+	// filesystem evidence and ignores GIT_* environment variables.
+	gitTop, insideGit := gitWorktreeRootFromCWD()
+
+	// 4. Try global ~/.amqrc outside Git worktrees only.
 	var globalRCRoot string
 	var globalRCErr error
-	globalResult, err := loadGlobalAmqrc()
-	if err == nil && globalResult.Config.Root != "" {
-		globalRCRoot = globalResult.Config.Root
-		if !filepath.IsAbs(globalRCRoot) {
-			globalRCRoot = filepath.Join(globalResult.Dir, globalRCRoot)
+	if !insideGit {
+		globalResult, err := loadGlobalAmqrc()
+		if err == nil && globalResult.Config.Root != "" {
+			globalRCRoot = globalResult.Config.Root
+			if !filepath.IsAbs(globalRCRoot) {
+				globalRCRoot = filepath.Join(globalResult.Dir, globalRCRoot)
+			}
+		} else if err != nil && !errors.Is(err, errAmqrcNotFound) {
+			globalRCErr = err
 		}
-	} else if err != nil && !errors.Is(err, errAmqrcNotFound) {
-		globalRCErr = err
 	}
 
-	// 4. Auto-detect .agent-mail/ directory
+	// 5. Auto-detect .agent-mail/ directory
 	autoRoot := detectAgentMailDir()
 
-	// 5. Environment variables
+	// 6. Environment variables
 	envRootVal := strings.TrimSpace(os.Getenv(envRoot))
 	envMeVal := strings.TrimSpace(os.Getenv(envMe))
 
-	// 6. Command-line flags (already have rootFlag, meFlag)
+	// 7. Command-line flags (already have rootFlag, meFlag)
 
-	// Apply precedence: flags > env > project .amqrc > AMQ_GLOBAL_ROOT > ~/.amqrc > auto-detect
+	// AMQ_GLOBAL_ROOT is explicit routing authority. Home configuration is only
+	// an implicit convenience outside Git worktrees.
 	switch {
 	case rootFlag != "":
 		root, source = rootFlag, rootSourceFlag
@@ -350,6 +401,8 @@ func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, st
 		root, source = rcRoot, rootSourceProjectRC
 	case globalEnvRoot != "":
 		root, source = globalEnvRoot, rootSourceGlobalEnv
+	case insideGit && autoRoot != "":
+		root, source = autoRoot, rootSourceAutoDetect
 	case globalRCRoot != "":
 		root, source = globalRCRoot, rootSourceGlobalRC
 	case autoRoot != "":
@@ -380,8 +433,18 @@ func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, st
 	}
 
 	if root == "" {
+		if insideGit {
+			return "", "", "", noEligibleRootInGitError(gitTop)
+		}
 		return "", "", "", fmt.Errorf("cannot determine root: no .amqrc found, no .agent-mail/ directory, AM_ROOT not set, and no global config (~/.amqrc or AMQ_GLOBAL_ROOT)")
 	}
+
+	// Canonicalize the winning root before pin validation, JSON/shell output,
+	// doctor inspection, or route planning. Participating commands use the same
+	// ancestor-aware resolver; returning a raw relative value here could
+	// authorize one existing parent queue but export a different cwd-relative
+	// path.
+	root = absPath(resolveRoot(root))
 
 	if me != "" {
 		normalized, err := normalizeHandle(me)
@@ -407,9 +470,12 @@ func loadGlobalAmqrc() (amqrcResult, error) {
 		}
 		return amqrcResult{}, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := globalAmqrcReadFile(path)
 	if err != nil {
-		return amqrcResult{}, errAmqrcNotFound
+		if errors.Is(err, os.ErrNotExist) {
+			return amqrcResult{}, errAmqrcNotFound
+		}
+		return amqrcResult{}, fmt.Errorf("cannot read ~/.amqrc at %s: %w", path, err)
 	}
 	if err := validateAmqrcFile(path); err != nil {
 		return amqrcResult{}, err
@@ -421,9 +487,9 @@ func loadGlobalAmqrc() (amqrcResult, error) {
 	return amqrcResult{Config: cfg, Dir: home, Path: path}, nil
 }
 
-// resolveBaseRoot returns the base root directory (without session suffix).
-// Tries project .amqrc first, then AMQ_GLOBAL_ROOT, then ~/.amqrc, then defaultCoopRoot.
-func resolveBaseRoot() string {
+// resolveDiscoveredBaseRoot returns the first configured or detected base root.
+// The boolean is false only when no project, repo-local, or global source exists.
+func resolveDiscoveredBaseRoot() (string, bool, error) {
 	// 1. Project .amqrc
 	result, err := findAndLoadAmqrc()
 	if err == nil && result.Config.Root != "" {
@@ -431,25 +497,243 @@ func resolveBaseRoot() string {
 		if !filepath.IsAbs(base) {
 			base = filepath.Join(result.Dir, base)
 		}
-		return base
+		return base, true, nil
+	}
+	if err != nil && !errors.Is(err, errAmqrcNotFound) {
+		return "", false, err
 	}
 
-	// 2. AMQ_GLOBAL_ROOT env var
+	// 2. Explicit global root.
 	if globalEnv := strings.TrimSpace(os.Getenv(envGlobalRoot)); globalEnv != "" {
-		return globalEnv
+		return globalEnv, true, nil
 	}
 
-	// 3. Global ~/.amqrc
+	// 3. Inside Git, only the repo-local default remains eligible.
+	gitTop, insideGit := gitWorktreeRootFromCWD()
+	if insideGit {
+		if local := detectAgentMailDir(); local != "" {
+			return local, true, nil
+		}
+		return "", false, noEligibleRootInGitError(gitTop)
+	}
+
+	// 4. Outside Git, preserve the historical ~/.amqrc-before-auto-detect
+	// fallback ordering.
 	globalResult, err := loadGlobalAmqrc()
 	if err == nil && globalResult.Config.Root != "" {
 		base := globalResult.Config.Root
 		if !filepath.IsAbs(base) {
 			base = filepath.Join(globalResult.Dir, base)
 		}
-		return base
+		return base, true, nil
+	}
+	if err != nil && !errors.Is(err, errAmqrcNotFound) {
+		return "", false, err
 	}
 
-	return defaultCoopRoot
+	// 5. Non-repository local layout.
+	if local := detectAgentMailDir(); local != "" {
+		return local, true, nil
+	}
+
+	return "", false, nil
+}
+
+// resolveDiscoveredBaseRootForBootstrap preserves ordinary root precedence but
+// turns an unconfigured Git worktree into a bootstrap target. Participating
+// commands must continue using resolveDiscoveredBaseRoot so they never create a
+// queue merely because cwd is inside a repository.
+func resolveDiscoveredBaseRootForBootstrap() (string, bool, error) {
+	base, found, err := resolveDiscoveredBaseRoot()
+	if err == nil || GetExitCode(err) != ExitContextMismatch {
+		return base, found, err
+	}
+
+	if top, ok := gitWorktreeTopFromCWD(); ok {
+		return filepath.Join(top, defaultCoopRoot), false, nil
+	}
+	return "", false, err
+}
+
+func noEligibleRootInGitError(top string) error {
+	return ContextMismatchError(
+		"cannot determine an eligible AMQ root while cwd is inside Git worktree or bare repository %s: no project .amqrc, repo-local .agent-mail, or explicit root was found; implicit ~/.amqrc is ineligible here; --session selects a session but does not authorize a base root; run 'amq coop init' (or 'amq coop exec <agent>') in this repository to create its queue; for a bare repository, cd into a worktree or pass --root explicitly; alternatively configure this repository, set AMQ_GLOBAL_ROOT or AM_ROOT, or pass --root explicitly",
+		top,
+	)
+}
+
+func gitWorktreeTopFromCWD() (string, bool) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(cwd); resolveErr == nil {
+		cwd = resolved
+	}
+	top, err := gitTopLevel(cwd)
+	if err != nil {
+		return "", false
+	}
+	markerInfo, err := gitMarkerLstat(filepath.Join(top, ".git"))
+	if err != nil || (!markerInfo.IsDir() && !markerInfo.Mode().IsRegular()) {
+		return "", false
+	}
+	boundary, insideGit := gitWorktreeRootFromCWD()
+	if !insideGit || !sameTreeIdentity(top, boundary) {
+		return "", false
+	}
+	return top, true
+}
+
+func gitWorktreeRootFromCWD() (string, bool) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(cwd); resolveErr == nil {
+		cwd = resolved
+	}
+	bareCandidate := ""
+	for dir := cwd; ; dir = filepath.Dir(dir) {
+		marker := filepath.Join(dir, ".git")
+		_, statErr := gitMarkerLstat(marker)
+		if statErr == nil {
+			return dir, true
+		}
+		if !os.IsNotExist(statErr) {
+			return dir, true
+		}
+		if bareCandidate == "" && bareGitRepositorySignal(dir) {
+			bareCandidate = dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			if bareCandidate != "" {
+				return bareCandidate, true
+			}
+			return "", false
+		}
+	}
+}
+
+func bareGitRepositorySignal(dir string) bool {
+	// A worktree's .git directory has the same internal shape as a bare
+	// repository, but it is not the routing boundary. Continue upward so the
+	// parent worktree's .git marker wins.
+	if filepath.Base(dir) == ".git" {
+		return false
+	}
+
+	head := bareGitHEADSignal(filepath.Join(dir, "HEAD"))
+	objects := bareGitTypedMarkerSignal(filepath.Join(dir, "objects"), true)
+	refs := bareGitReferenceStoreSignal(dir)
+
+	// Absence or a wrong marker type disproves the candidate. Once the other
+	// repository structure is present, an inspection failure remains a safety
+	// signal so permission errors cannot re-enable an implicit home route.
+	return head != bareGitMarkerAbsent &&
+		objects != bareGitMarkerAbsent &&
+		refs != bareGitMarkerAbsent
+}
+
+type bareGitMarkerSignal uint8
+
+const (
+	bareGitMarkerAbsent bareGitMarkerSignal = iota
+	bareGitMarkerPresent
+	bareGitMarkerUncertain
+)
+
+func bareGitHEADSignal(path string) bareGitMarkerSignal {
+	info, err := gitMarkerLstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return bareGitMarkerAbsent
+		}
+		return bareGitMarkerUncertain
+	}
+	if !info.Mode().IsRegular() || info.Size() > 4096 {
+		return bareGitMarkerAbsent
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return bareGitMarkerUncertain
+	}
+	head := strings.TrimSpace(string(data))
+	if strings.HasPrefix(head, "ref: ") {
+		ref := strings.TrimSpace(strings.TrimPrefix(head, "ref: "))
+		if ref != "" && !strings.ContainsAny(ref, " \t\r\n") {
+			return bareGitMarkerPresent
+		}
+		return bareGitMarkerAbsent
+	}
+	if len(head) != 40 && len(head) != 64 {
+		return bareGitMarkerAbsent
+	}
+	for _, char := range head {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", char) {
+			return bareGitMarkerAbsent
+		}
+	}
+	return bareGitMarkerPresent
+}
+
+func bareGitTypedMarkerSignal(path string, directory bool) bareGitMarkerSignal {
+	info, err := gitMarkerLstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return bareGitMarkerAbsent
+		}
+		return bareGitMarkerUncertain
+	}
+	if directory {
+		if info.IsDir() {
+			return bareGitMarkerPresent
+		}
+		return bareGitMarkerAbsent
+	}
+	if info.Mode().IsRegular() {
+		return bareGitMarkerPresent
+	}
+	return bareGitMarkerAbsent
+}
+
+func bareGitReferenceStoreSignal(dir string) bareGitMarkerSignal {
+	markers := []struct {
+		name      string
+		directory bool
+	}{
+		{name: "refs", directory: true},
+		{name: "packed-refs"},
+		{name: "reftable", directory: true},
+	}
+	uncertain := false
+	for _, marker := range markers {
+		switch bareGitTypedMarkerSignal(filepath.Join(dir, marker.name), marker.directory) {
+		case bareGitMarkerPresent:
+			return bareGitMarkerPresent
+		case bareGitMarkerUncertain:
+			uncertain = true
+		}
+	}
+	if uncertain {
+		return bareGitMarkerUncertain
+	}
+	return bareGitMarkerAbsent
+}
+
+// resolveBaseRoot returns the base root directory (without session suffix).
+// Tries project .amqrc first, then explicit AMQ_GLOBAL_ROOT, then
+// context-eligible implicit fallbacks, then defaultCoopRoot.
+func resolveBaseRoot() (string, error) {
+	base, found, err := resolveDiscoveredBaseRoot()
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return base, nil
+	}
+	return defaultCoopRoot, nil
 }
 
 // findAndLoadAmqrc searches for .amqrc in current and parent directories.
@@ -460,9 +744,20 @@ func findAndLoadAmqrc() (amqrcResult, error) {
 	if err != nil {
 		return amqrcResult{}, err
 	}
+	ceiling := ""
+	if top, insideGit := gitWorktreeRootFromCWD(); insideGit {
+		ceiling = top
+		if resolved, resolveErr := filepath.EvalSymlinks(cwd); resolveErr == nil {
+			cwd = resolved
+		}
+	}
 
 	dir := cwd
-	for {
+	// ~/.amqrc is a global fallback, not a project config. Loading it here
+	// mislabeled the global queue as project-local and let it shadow a repo's
+	// own .agent-mail. When HOME is itself the Git worktree root, however, the
+	// file is worktree-local authority and the inclusive Git ceiling wins.
+	for ceiling != "" || !isHomeConfigDir(dir) {
 		rcPath := filepath.Join(dir, ".amqrc")
 		// Refuse configuration whose provenance cannot be established. In
 		// particular, symlinks and group/world-writable files are attacker
@@ -480,7 +775,10 @@ func findAndLoadAmqrc() (amqrcResult, error) {
 		data, err := os.ReadFile(rcPath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				// Keep searching in parent directories
+				if ceiling != "" && sameCleanPath(dir, ceiling) {
+					break
+				}
+				// Keep searching in eligible parent directories.
 				parent := filepath.Dir(dir)
 				if parent == dir {
 					break
@@ -527,9 +825,19 @@ func detectAgentMailDir() string {
 	if err != nil {
 		return ""
 	}
+	ceiling := ""
+	if top, insideGit := gitWorktreeRootFromCWD(); insideGit {
+		ceiling = top
+		if resolved, resolveErr := filepath.EvalSymlinks(cwd); resolveErr == nil {
+			cwd = resolved
+		}
+	}
 
 	dir := cwd
-	for {
+	// A home-level .agent-mail is global state, not evidence that the current
+	// repository owns that queue. If HOME is the Git worktree root, it is local
+	// evidence and must be inspected at the inclusive ceiling.
+	for ceiling != "" || !isHomeConfigDir(dir) {
 		candidate := filepath.Join(dir, ".agent-mail")
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			// Return relative path if in cwd, absolute otherwise
@@ -537,6 +845,9 @@ func detectAgentMailDir() string {
 				return ".agent-mail"
 			}
 			return candidate
+		}
+		if ceiling != "" && sameCleanPath(dir, ceiling) {
+			break
 		}
 
 		parent := filepath.Dir(dir)
@@ -547,6 +858,39 @@ func detectAgentMailDir() string {
 	}
 
 	return ""
+}
+
+func sameCleanPath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return filepath.Clean(left) == filepath.Clean(right)
+	}
+	return filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
+}
+
+func isHomeConfigDir(dir string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return false
+	}
+	if dirInfo, dirErr := os.Stat(dir); dirErr == nil {
+		if homeInfo, homeErr := os.Stat(home); homeErr == nil {
+			return os.SameFile(dirInfo, homeInfo)
+		}
+	}
+	if resolvedDir, dirErr := filepath.EvalSymlinks(dir); dirErr == nil {
+		dir = resolvedDir
+	}
+	if resolvedHome, homeErr := filepath.EvalSymlinks(home); homeErr == nil {
+		home = resolvedHome
+	}
+	absDir, dirErr := filepath.Abs(dir)
+	absHome, homeErr := filepath.Abs(home)
+	if dirErr != nil || homeErr != nil {
+		return filepath.Clean(dir) == filepath.Clean(home)
+	}
+	return filepath.Clean(absDir) == filepath.Clean(absHome)
 }
 
 func isValidShell(shell string) bool {
@@ -722,9 +1066,9 @@ func isSimpleString(s string) bool {
 }
 
 // findAmqrcForRoot locates the .amqrc for the given root.
-// When root is provided (non-empty), lookup is scoped to root's ancestors only.
-// This ensures --root / AM_ROOT fully determines which project config is used,
-// even when cwd is inside a different project.
+// When root is provided (non-empty), project lookup is scoped to root's
+// ancestors. The global ~/.amqrc is eligible only when it configured that exact
+// base root or one of its direct sessions.
 func findAmqrcForRoot(root string) (amqrcResult, error) {
 	if root != "" {
 		absRoot, absErr := filepath.Abs(root)
@@ -732,7 +1076,7 @@ func findAmqrcForRoot(root string) (amqrcResult, error) {
 			return amqrcResult{}, absErr
 		}
 		dir := absRoot
-		for {
+		for !isHomeConfigDir(dir) {
 			rcPath := filepath.Join(dir, ".amqrc")
 			if info, statErr := amqrcLstat(rcPath); statErr == nil {
 				if err := validateAmqrcInfo(rcPath, info); err != nil {
@@ -763,6 +1107,16 @@ func findAmqrcForRoot(root string) (amqrcResult, error) {
 			}
 			dir = parent
 		}
+		globalResult, globalErr := loadGlobalAmqrc()
+		if globalErr == nil && strings.TrimSpace(globalResult.Config.Root) != "" {
+			globalRoot := globalResult.Config.Root
+			if !filepath.IsAbs(globalRoot) {
+				globalRoot = filepath.Join(globalResult.Dir, globalRoot)
+			}
+			if isBaseOrSessionRoot(absRoot, globalRoot) {
+				return globalResult, nil
+			}
+		}
 		return amqrcResult{}, errAmqrcNotFound
 	}
 	return findAndLoadAmqrc()
@@ -776,6 +1130,10 @@ func resolvePeer(root, project string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve peer %q: %w", project, err)
 	}
+	return resolvePeerFromAmqrcResult(result, project)
+}
+
+func resolvePeerFromAmqrcResult(result amqrcResult, project string) (string, error) {
 	if len(result.Config.Peers) == 0 {
 		return "", fmt.Errorf("no peers configured in .amqrc (looking for %q)", project)
 	}

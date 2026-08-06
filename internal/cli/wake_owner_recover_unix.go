@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"golang.org/x/sys/unix"
 )
 
 type wakeOwnerRecoverResult struct {
@@ -110,36 +109,93 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 	for {
 		var stopCapability *authoritativeWakeStopCapability
 		var stopAuthorization wakeOwnerReleaseAuthorization
-		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) (retErr error) {
 			inspection := inspectWakeLockForOwnerTransition(dirfd, agentDir, root, me)
 			result.PID = inspection.PID
 			switch classifyPersistedWakeClaim(inspection) {
 			case wakeClaimAbsent:
-				target, exists, err := readWakeTargetAt(dirfd, agentDir, root, me)
+				target, exists, err := readWakeTargetSnapshotAt(dirfd, agentDir, root, me)
 				if err != nil {
 					return refuse("orphan wake target is unverified: "+err.Error(), "inspect the target and retry")
 				}
 				if exists {
-					digest, err := wakeTargetDigest(target)
+					if err := validateAuthoritativeWakeTarget(target.Target, root, me); err != nil {
+						return refuse(
+							"orphan wake target is not a verified owner-bearing target: "+err.Error(),
+							"inspect the target; automatic owner recovery is unavailable",
+						)
+					}
+					owner := *target.Target.Owner
+					result.OwnerPID = owner.PID
+					result.OwnerSession = owner.SessionID
+					observation, err := observeAuthoritativeWakeOwner(owner)
 					if err != nil {
-						return refuse("orphan wake target digest is unavailable: "+err.Error(), "inspect the target and retry")
+						return errors.Join(
+							refuse("orphan target owner is unknown: "+err.Error(), "retry after owner identity inspection is available"),
+							observation.Close(),
+						)
 					}
-					current, currentExists, err := readWakeTargetAt(dirfd, agentDir, root, me)
+					if observation.State == wakeOwnerUnknown {
+						closeErr := observation.Close()
+						return errors.Join(refuse(
+							"orphan target owner is unknown: "+observation.Reason,
+							"retry after owner identity inspection is available",
+						), closeErr)
+					}
+					if observation.State == wakeOwnerSame {
+						closeErr := observation.Close()
+						return errors.Join(refuse(
+							"orphan target owner is still live",
+							fmt.Sprintf("exit or stop owner pid %d, then rerun amq wake recover-owner --me %s", owner.PID, me),
+						), closeErr)
+					}
+					if err := observation.Close(); err != nil {
+						return errors.Join(refuse(
+							"orphan target owner observation failed before recovery mutation: "+err.Error(),
+							"preserve the target and retry after owner monitoring is healthy",
+						), err)
+					}
+					stateSnapshot, stateExists, stateErr := readWakeStateRawSnapshotAt(dirfd, agentDir)
+					if stateErr != nil {
+						continueAfterWakeStateProjectionError(newWakeStateProjectionError(stateErr))
+						stateExists = false
+					}
+					removed, err := removeWakeTargetIfSnapshotMatchesAt(dirfd, agentDir, root, me, target)
 					if err != nil {
-						return refuse("orphan wake target changed while recovering: "+err.Error(), "retry")
+						return err
 					}
-					currentDigest, digestErr := wakeTargetDigest(current)
-					if digestErr != nil {
-						return refuse("orphan wake target digest changed while recovering: "+digestErr.Error(), "retry")
-					}
-					if !currentExists || currentDigest != digest {
-						return refuse("orphan wake target changed while recovering", "retry")
-					}
-					if err := unix.Unlinkat(dirfd, wakeTargetFileName, 0); err != nil && err != unix.ENOENT {
-						return fmt.Errorf("remove orphan wake target: %w", err)
+					if !removed {
+						return fmt.Errorf("owner-bearing orphan target disappeared before recovery")
 					}
 					if err := syncWakeOwnerDirFD(dirfd); err != nil {
-						return fmt.Errorf("sync orphan wake target removal: %w", err)
+						return fmt.Errorf("sync owner-bearing orphan target recovery: %w", err)
+					}
+					_, err = removeWakeStateIfTargetAbsentAt(
+						dirfd,
+						agentDir,
+						stateSnapshot,
+						stateExists,
+					)
+					if err != nil && !continueAfterWakeStateProjectionError(err) {
+						return fmt.Errorf("remove orphan wake state: %w", err)
+					}
+					result.Status = "recovered"
+					result.Reason = "dead owner-bearing orphan target removed"
+					return nil
+				}
+				stateSnapshot, stateExists, stateErr := readWakeStateRawSnapshotAt(dirfd, agentDir)
+				if stateErr != nil {
+					continueAfterWakeStateProjectionError(newWakeStateProjectionError(stateErr))
+					stateExists = false
+				}
+				if _, err := removeWakeStateIfTargetAbsentAt(
+					dirfd,
+					agentDir,
+					stateSnapshot,
+					stateExists,
+				); err != nil {
+					if !continueAfterWakeStateProjectionError(err) {
+						return fmt.Errorf("remove orphan wake state: %w", err)
 					}
 				}
 				result.Status = "recovered"
@@ -159,7 +215,17 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 			result.OwnerPID = owner.PID
 			result.OwnerSession = owner.SessionID
 			observation, err := observeAuthoritativeWakeOwner(owner)
-			defer func() { _ = observation.Close() }()
+			observationClosed := false
+			closeObservation := func() error {
+				if observationClosed {
+					return nil
+				}
+				observationClosed = true
+				return observation.Close()
+			}
+			defer func() {
+				retErr = errors.Join(retErr, closeObservation())
+			}()
 			if err != nil {
 				return refuse("wake owner is unknown: "+err.Error(), "retry after owner identity inspection is available")
 			}
@@ -198,6 +264,12 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 					"wake owner is unknown: "+observation.Reason,
 					"retry after owner identity inspection is available",
 				)
+			}
+			if err := closeObservation(); err != nil {
+				return errors.Join(refuse(
+					"wake owner observation failed before recovery mutation: "+err.Error(),
+					"preserve the claim and retry after owner monitoring is healthy",
+				), err)
 			}
 			wakeCapability, err := prepareAuthoritativeWakeStop(dirfd, agentDir, inspection)
 			if err != nil {

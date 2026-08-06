@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -112,6 +113,37 @@ func TestCoopExecUsageError(t *testing.T) {
 	}
 	if !containsStr(err.Error(), "command required") {
 		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestCoopExecForwardsCommandArguments(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+
+	sentinel := errors.New("exec sentinel")
+	var gotArgv []string
+	oldExec := coopExecProcess
+	coopExecProcess = func(_ string, argv []string, _ []string) error {
+		gotArgv = append([]string{}, argv...)
+		return sentinel
+	}
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err := runCoopExec([]string{
+		"--root", root,
+		"--me", "codex",
+		"--no-wake",
+		"sh", "-c", "echo ok",
+		"--", "--tail-flag",
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("coop exec error = %v, want sentinel", err)
+	}
+	wantArgv := []string{"sh", "-c", "echo ok", "--tail-flag"}
+	if !reflect.DeepEqual(gotArgv, wantArgv) {
+		t.Fatalf("argv = %#v, want %#v", gotArgv, wantArgv)
 	}
 }
 
@@ -356,6 +388,7 @@ func TestBuildCoopWakeArgsDisablesInterruptAndGenericReuse(t *testing.T) {
 		"--root", "/tmp/root",
 		"--baseline-existing",
 		"--interrupt-cmd", "none",
+		"--refuse-unverified-wake",
 		"--inject-mode", "none",
 		"--ready-file", "/tmp/ready",
 	}
@@ -603,6 +636,199 @@ func TestCoopExecSessionInvalidName(t *testing.T) {
 	}
 }
 
+func TestCoopInitProvisionsDefaultExecSession(t *testing.T) {
+	baseRoot := initCoopProjectForTest(t, "alice,bob")
+	sessionRoot := filepath.Join(baseRoot, defaultSessionName)
+
+	for _, agent := range []string{"alice", "bob"} {
+		for _, leaf := range fsq.RequiredMailboxLeaves() {
+			path := fsq.AgentMailboxPath(sessionRoot, agent, leaf)
+			if info, err := os.Stat(path); err != nil || !info.IsDir() {
+				t.Fatalf("coop init did not provision %s where default coop exec reads: info=%v err=%v", path, info, err)
+			}
+		}
+		if info, err := os.Stat(fsq.AgentInboxNew(baseRoot, agent)); err != nil || !info.IsDir() {
+			t.Fatalf("coop init did not preserve compatibility base mailbox for %q: info=%v err=%v", agent, info, err)
+		}
+	}
+
+	sentinel := errors.New("exec sentinel")
+	var execEnv []string
+	oldExec := coopExecProcess
+	coopExecProcess = func(_ string, _ []string, env []string) error {
+		execEnv = append([]string(nil), env...)
+		return sentinel
+	}
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err := runCoopExec([]string{"--no-wake", "--me", "alice", "sh"})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("coop exec error = %v, want sentinel", err)
+	}
+	if got := envValue(execEnv, envRoot); !sameTreeIdentity(got, sessionRoot) {
+		t.Fatalf("coop exec AM_ROOT = %q, want provisioned session root %q", got, sessionRoot)
+	}
+}
+
+func TestCoopInitBareSendListAndDrainAgree(t *testing.T) {
+	initCoopProjectForTest(t, "alice,bob")
+
+	sendOut, _, err := captureEnvOutput(t, func() error {
+		return runSend([]string{
+			"--me", "bob",
+			"--to", "alice",
+			"--subject", "first-run agreement",
+			"--body", "must remain readable",
+			"--json",
+		})
+	})
+	if err != nil {
+		t.Fatalf("bare send after coop init: %v", err)
+	}
+	if !strings.Contains(sendOut, `"id"`) {
+		t.Fatalf("bare send did not report success JSON: %q", sendOut)
+	}
+
+	listOut, _, err := captureEnvOutput(t, func() error {
+		return runList([]string{"--me", "alice", "--new", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("bare list after successful send: %v", err)
+	}
+	if !strings.Contains(listOut, `"subject": "first-run agreement"`) {
+		t.Fatalf("bare list did not return sent message: %q", listOut)
+	}
+
+	drainOut, _, err := captureEnvOutput(t, func() error {
+		return runDrain([]string{"--me", "alice", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("bare drain after successful send: %v", err)
+	}
+	if !strings.Contains(drainOut, `"count": 1`) {
+		t.Fatalf("bare drain did not consume sent message: %q", drainOut)
+	}
+}
+
+func TestCoopInitRejectsPreexistingDefaultSessionSymlink(t *testing.T) {
+	projectDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside target")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatalf("create outside target: %v", err)
+	}
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	baseRoot := filepath.Join(projectDir, defaultCoopRoot)
+	if err := os.Mkdir(baseRoot, 0o700); err != nil {
+		t.Fatalf("create base root: %v", err)
+	}
+	sessionRoot := filepath.Join(baseRoot, defaultSessionName)
+	if err := os.Symlink(outside, sessionRoot); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	_, err = captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--agents", "alice,bob", "--json", "--no-gitignore"}, false)
+	})
+	if err == nil ||
+		!strings.Contains(err.Error(), "is a symlink") ||
+		!strings.Contains(err.Error(), sessionRoot) ||
+		!strings.Contains(err.Error(), "remove it") {
+		t.Fatalf("coop init result = %v, want actionable session symlink refusal", err)
+	}
+	entries, readErr := os.ReadDir(outside)
+	if readErr != nil {
+		t.Fatalf("read outside target: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("coop init followed collab symlink and mutated outside target: %v", entries)
+	}
+	info, lstatErr := os.Lstat(sessionRoot)
+	if lstatErr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("collab symlink was changed: info=%v err=%v", info, lstatErr)
+	}
+}
+
+func TestCoopExecRejectsPreexistingDefaultSessionSymlink(t *testing.T) {
+	projectDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside target")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatalf("create outside target: %v", err)
+	}
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	baseRoot := filepath.Join(projectDir, defaultCoopRoot)
+	if err := fsq.EnsureRootDirs(baseRoot); err != nil {
+		t.Fatalf("create base root: %v", err)
+	}
+	cfg := config.Config{Version: 1, Agents: []string{"alice", "bob"}}
+	if err := config.WriteConfig(filepath.Join(baseRoot, "meta", "config.json"), cfg, false); err != nil {
+		t.Fatalf("write base config: %v", err)
+	}
+	amqrcData, err := json.Marshal(amqrc{Root: defaultCoopRoot})
+	if err != nil {
+		t.Fatalf("marshal .amqrc: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".amqrc"), amqrcData, 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+	sessionRoot := filepath.Join(baseRoot, defaultSessionName)
+	if err := os.Symlink(outside, sessionRoot); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	resolvedOutside, err := filepath.EvalSymlinks(outside)
+	if err != nil {
+		t.Fatalf("resolve outside target: %v", err)
+	}
+
+	execCalled := false
+	oldExec := coopExecProcess
+	coopExecProcess = func(string, []string, []string) error {
+		execCalled = true
+		return errors.New("unexpected exec")
+	}
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err = runCoopExec([]string{"--no-wake", "--me", "alice", "sh"})
+	if err == nil ||
+		!strings.Contains(err.Error(), "is a symlink") ||
+		!strings.Contains(err.Error(), sessionRoot) ||
+		!strings.Contains(err.Error(), "use: amq coop exec --root "+shellQuoteArg(resolvedOutside)+" --me alice sh") {
+		t.Fatalf("coop exec result = %v, want actionable session symlink refusal", err)
+	}
+	if execCalled {
+		t.Fatal("coop exec reached process replacement after session symlink refusal")
+	}
+	entries, readErr := os.ReadDir(outside)
+	if readErr != nil {
+		t.Fatalf("read outside target: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("coop exec followed collab symlink and mutated outside target: %v", entries)
+	}
+}
+
 func TestCoopInitDefaultIncludesUser(t *testing.T) {
 	projectDir := t.TempDir()
 	oldDir, err := os.Getwd()
@@ -642,9 +868,379 @@ func TestCoopInitDefaultIncludesUser(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Agents, want) {
 		t.Fatalf("config agents = %#v, want %#v", cfg.Agents, want)
 	}
-	if _, err := os.Stat(filepath.Join(projectDir, defaultCoopRoot, "agents", "user", "inbox", "new")); err != nil {
+	if _, err := os.Stat(filepath.Join(projectDir, defaultCoopRoot, defaultSessionName, "agents", "user", "inbox", "new")); err != nil {
 		t.Fatalf("user inbox should be created: %v", err)
 	}
+}
+
+func TestCoopInitRerunUsesConfiguredAgents(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	configBefore, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read initial config: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, defaultSessionName, "agents")); err != nil {
+		t.Fatalf("remove initial mailboxes: %v", err)
+	}
+	resetAmqrcCache()
+
+	output, stderr, err := captureEnvOutput(t, func() error {
+		return runCoopInitInternal([]string{"--json"}, false)
+	})
+	if err != nil {
+		t.Fatalf("rerun coop init: %v", err)
+	}
+	if stderr != "" {
+		t.Fatalf("rerun without explicit --agents wrote stderr: %q", stderr)
+	}
+	var result struct {
+		Agents []string `json:"agents"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal rerun output: %v (output: %s)", err, output)
+	}
+	want := []string{"alice", "bob"}
+	if !reflect.DeepEqual(result.Agents, want) {
+		t.Fatalf("rerun agents = %#v, want configured %#v", result.Agents, want)
+	}
+	for _, agent := range want {
+		if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", agent, "inbox", "new")); err != nil {
+			t.Fatalf("%s inbox was not restored: %v", agent, err)
+		}
+	}
+	for _, agent := range []string{"claude", "codex", "user"} {
+		if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", agent)); !os.IsNotExist(err) {
+			t.Fatalf("rerun created default agent %q, stat err=%v", agent, err)
+		}
+	}
+	configAfter, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config after rerun: %v", err)
+	}
+	if !bytes.Equal(configAfter, configBefore) {
+		t.Fatalf("non-force rerun rewrote config:\nbefore=%s\nafter=%s", configBefore, configAfter)
+	}
+}
+
+func TestCoopInitRerunWarnsWhenRequestedAgentsDifferWithoutForce(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	resetAmqrcCache()
+
+	output, stderr, err := captureEnvOutput(t, func() error {
+		return runCoopInitInternal([]string{"--agents", "carol,dave", "--json"}, false)
+	})
+	if err != nil {
+		t.Fatalf("non-force coop init: %v", err)
+	}
+	const wantWarning = "warning: using existing config agents alice,bob; use --force to overwrite\n"
+	if stderr != wantWarning {
+		t.Fatalf("non-force warning = %q, want %q", stderr, wantWarning)
+	}
+	var result struct {
+		Agents        []string `json:"agents"`
+		ConfigWritten bool     `json:"config_written"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal non-force output: %v (output: %s)", err, output)
+	}
+	want := []string{"alice", "bob"}
+	if !reflect.DeepEqual(result.Agents, want) || result.ConfigWritten {
+		t.Fatalf("non-force result = %#v, want configured agents %#v without config rewrite", result, want)
+	}
+	if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", "alice", "inbox", "new")); err != nil {
+		t.Fatalf("non-force rerun did not retain configured mailbox: %v", err)
+	}
+	for _, agent := range []string{"carol", "dave"} {
+		if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", agent)); !os.IsNotExist(err) {
+			t.Fatalf("non-force rerun created requested agent %q, stat err=%v", agent, err)
+		}
+	}
+}
+
+func TestCoopInitRerunDoesNotWarnWhenRequestedAgentsMatch(t *testing.T) {
+	_ = initCoopProjectForTest(t, "alice,bob")
+	resetAmqrcCache()
+
+	output, stderr, err := captureEnvOutput(t, func() error {
+		return runCoopInitInternal([]string{"--agents", "bob,alice,alice", "--json"}, false)
+	})
+	if err != nil {
+		t.Fatalf("non-force coop init: %v", err)
+	}
+	if stderr != "" {
+		t.Fatalf("matching explicit --agents wrote stderr: %q", stderr)
+	}
+	var result struct {
+		Agents        []string `json:"agents"`
+		ConfigWritten bool     `json:"config_written"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal non-force output: %v (output: %s)", err, output)
+	}
+	want := []string{"alice", "bob"}
+	if !reflect.DeepEqual(result.Agents, want) || result.ConfigWritten {
+		t.Fatalf("non-force result = %#v, want configured agents %#v without config rewrite", result, want)
+	}
+}
+
+func TestCoopInitRerunRejectsInvalidExplicitAgentsBeforeMailboxMutation(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	if err := os.RemoveAll(filepath.Join(root, defaultSessionName, "agents")); err != nil {
+		t.Fatalf("remove initial mailboxes: %v", err)
+	}
+	resetAmqrcCache()
+
+	_, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--agents", "../invalid-handle", "--json"}, false)
+	})
+	if err == nil || !strings.Contains(err.Error(), "slashes not allowed") {
+		t.Fatalf("invalid explicit agents result = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, defaultSessionName, "agents")); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid explicit agents mutated mailboxes, stat err=%v", statErr)
+	}
+}
+
+func TestCoopInitRerunWithoutConfigUsesRequestedAgents(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := os.Remove(cfgPath); err != nil {
+		t.Fatalf("remove initial config: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, defaultSessionName, "agents")); err != nil {
+		t.Fatalf("remove initial mailboxes: %v", err)
+	}
+	resetAmqrcCache()
+
+	output, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--agents", "carol,dave", "--json"}, false)
+	})
+	if err != nil {
+		t.Fatalf("missing-config coop init: %v", err)
+	}
+	var result struct {
+		Agents        []string `json:"agents"`
+		ConfigWritten bool     `json:"config_written"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal missing-config output: %v (output: %s)", err, output)
+	}
+	want := []string{"carol", "dave"}
+	if !reflect.DeepEqual(result.Agents, want) || !result.ConfigWritten {
+		t.Fatalf("missing-config result = %#v, want requested agents %#v with config rewrite", result, want)
+	}
+	cfg, err := config.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("load recreated config: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Agents, want) {
+		t.Fatalf("recreated config agents = %#v, want %#v", cfg.Agents, want)
+	}
+}
+
+func TestCoopInitForceUsesRequestedAgents(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	resetAmqrcCache()
+	output, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--force", "--agents", "carol,dave", "--json"}, false)
+	})
+	if err != nil {
+		t.Fatalf("forced coop init: %v", err)
+	}
+	var result struct {
+		Agents        []string `json:"agents"`
+		ConfigWritten bool     `json:"config_written"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal forced output: %v (output: %s)", err, output)
+	}
+	want := []string{"carol", "dave"}
+	if !reflect.DeepEqual(result.Agents, want) || !result.ConfigWritten {
+		t.Fatalf("forced result = %#v, want agents %#v with config_written", result, want)
+	}
+	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
+	if err != nil {
+		t.Fatalf("load forced config: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Agents, want) {
+		t.Fatalf("forced config agents = %#v, want %#v", cfg.Agents, want)
+	}
+	for _, agent := range want {
+		if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", agent, "inbox", "new")); err != nil {
+			t.Fatalf("%s inbox was not created: %v", agent, err)
+		}
+	}
+}
+
+func TestCoopInitRerunRejectsMalformedConfigBeforeMailboxMutation(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	const malformed = "{not-json\n"
+	if err := os.WriteFile(cfgPath, []byte(malformed), 0o600); err != nil {
+		t.Fatalf("write malformed config: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, defaultSessionName, "agents")); err != nil {
+		t.Fatalf("remove initial mailboxes: %v", err)
+	}
+	resetAmqrcCache()
+
+	_, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--json"}, false)
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to load existing config") {
+		t.Fatalf("malformed config result = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, defaultSessionName, "agents")); !os.IsNotExist(statErr) {
+		t.Fatalf("malformed rerun mutated mailboxes, stat err=%v", statErr)
+	}
+	data, readErr := os.ReadFile(cfgPath)
+	if readErr != nil {
+		t.Fatalf("read malformed config: %v", readErr)
+	}
+	if string(data) != malformed {
+		t.Fatalf("malformed config was rewritten: %q", data)
+	}
+}
+
+func TestCoopInitRerunRejectsInvalidConfiguredAgentsBeforeMailboxMutation(t *testing.T) {
+	tests := []struct {
+		name    string
+		agents  []string
+		wantErr string
+	}{
+		{name: "empty", wantErr: "existing config has no agents"},
+		{name: "invalid handle", agents: []string{"alice", "../escape"}, wantErr: "invalid agent in existing config"},
+		{name: "whitespace padded", agents: []string{" alice "}, wantErr: "invalid agent in existing config"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := initCoopProjectForTest(t, "alice,bob")
+			cfgPath := filepath.Join(root, "meta", "config.json")
+			cfg, err := config.LoadConfig(cfgPath)
+			if err != nil {
+				t.Fatalf("load initial config: %v", err)
+			}
+			cfg.Agents = test.agents
+			if err := config.WriteConfig(cfgPath, cfg, true); err != nil {
+				t.Fatalf("write invalid agents config: %v", err)
+			}
+			if err := os.RemoveAll(filepath.Join(root, defaultSessionName, "agents")); err != nil {
+				t.Fatalf("remove initial mailboxes: %v", err)
+			}
+			resetAmqrcCache()
+
+			_, err = captureEnvStdout(t, func() error {
+				return runCoopInitInternal([]string{"--json"}, false)
+			})
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("invalid agents config result = %v, want %q", err, test.wantErr)
+			}
+			if _, statErr := os.Stat(filepath.Join(root, defaultSessionName, "agents")); !os.IsNotExist(statErr) {
+				t.Fatalf("invalid agents rerun mutated mailboxes, stat err=%v", statErr)
+			}
+		})
+	}
+}
+
+func TestCoopInitRerunRejectsUnreadableConfigBeforeMailboxMutation(t *testing.T) {
+	root := initCoopProjectForTest(t, "alice,bob")
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := os.Remove(cfgPath); err != nil {
+		t.Fatalf("remove initial config: %v", err)
+	}
+	if err := os.Mkdir(cfgPath, 0o700); err != nil {
+		t.Fatalf("replace config with unreadable shape: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, defaultSessionName, "agents")); err != nil {
+		t.Fatalf("remove initial mailboxes: %v", err)
+	}
+	resetAmqrcCache()
+
+	_, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--json"}, false)
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to load existing config") {
+		t.Fatalf("unreadable config result = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, defaultSessionName, "agents")); !os.IsNotExist(statErr) {
+		t.Fatalf("unreadable rerun mutated mailboxes, stat err=%v", statErr)
+	}
+}
+
+func TestCoopInitRerunRejectsDanglingConfigSymlinkBeforeMailboxMutation(t *testing.T) {
+	projectDir := t.TempDir()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	root := filepath.Join(projectDir, defaultCoopRoot)
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		t.Fatalf("create config directory: %v", err)
+	}
+	const missingTarget = "missing-config-target.json"
+	if err := os.Symlink(missingTarget, cfgPath); err != nil {
+		t.Fatalf("create dangling config symlink: %v", err)
+	}
+
+	_, err = captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--agents", "carol", "--json"}, false)
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to load existing config") {
+		t.Fatalf("dangling config result = %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(root, defaultSessionName),
+		filepath.Join(root, "threads"),
+		filepath.Join(projectDir, ".amqrc"),
+		filepath.Join(projectDir, ".gitignore"),
+	} {
+		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("dangling-config init mutated %s, lstat err=%v", path, statErr)
+		}
+	}
+	info, lstatErr := os.Lstat(cfgPath)
+	if lstatErr != nil {
+		t.Fatalf("lstat config symlink: %v", lstatErr)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("config path mode = %v, want symlink", info.Mode())
+	}
+}
+
+func initCoopProjectForTest(t *testing.T, agents string) string {
+	t.Helper()
+	projectDir := t.TempDir()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	if _, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--agents", agents, "--json"}, false)
+	}); err != nil {
+		t.Fatalf("first coop init: %v", err)
+	}
+	return filepath.Join(projectDir, defaultCoopRoot)
 }
 
 func TestCoopInitNextStepsDefaultAgentsSkipsUser(t *testing.T) {
@@ -759,6 +1355,43 @@ func TestCoopInitNoGitignore(t *testing.T) {
 }
 
 func TestCoopExecAutoInitNoGitignore(t *testing.T) {
+	runCoopExecAutoInitNoGitignoreFixture(t)
+}
+
+func TestCoopExecAutoInitNoGitignoreLeavesInheritedCoopTreeUnchanged(t *testing.T) {
+	ambientBase, ambientRoot := makeCoopAmbientSessionForTest(t, "current")
+	rootID, baseRootID := treeIdentityTokens(ambientRoot, ambientBase)
+	if rootID == "" || baseRootID == "" {
+		t.Fatal("ambient fixture did not produce complete identity tokens")
+	}
+	t.Setenv(envRoot, ambientRoot)
+	t.Setenv(envRootID, rootID)
+	t.Setenv(envBaseRoot, ambientBase)
+	t.Setenv(envBaseRootID, baseRootID)
+	t.Setenv(envSession, "current")
+	t.Setenv(envGlobalRoot, ambientBase)
+	before := snapshotTreeDigest(t, ambientBase)
+
+	projectDir := runCoopExecAutoInitNoGitignoreFixture(t)
+
+	if after := snapshotTreeDigest(t, ambientBase); after != before {
+		t.Fatalf("inherited AMQ tree mutated: before=%s after=%s", before, after)
+	}
+	fixtureAgent := fsq.AgentBase(
+		filepath.Join(projectDir, defaultCoopRoot, defaultSessionName),
+		"definitely-missing-amq-test-binary",
+	)
+	if info, err := os.Stat(fixtureAgent); err != nil || !info.IsDir() {
+		t.Fatalf("isolated fixture mailbox missing: info=%v err=%v", info, err)
+	}
+}
+
+func runCoopExecAutoInitNoGitignoreFixture(t *testing.T) string {
+	t.Helper()
+	clearCoopSessionPinForTest(t)
+	setOptionalEnv(t, envRoot, "", false)
+	setOptionalEnv(t, envGlobalRoot, "", false)
+	t.Setenv("HOME", t.TempDir())
 	projectDir := t.TempDir()
 	oldDir, err := os.Getwd()
 	if err != nil {
@@ -794,6 +1427,7 @@ func TestCoopExecAutoInitNoGitignore(t *testing.T) {
 	if string(gitignoreAfter) != gitignoreBefore {
 		t.Fatalf(".gitignore changed with coop exec --no-gitignore:\n%s", gitignoreAfter)
 	}
+	return projectDir
 }
 
 func TestInitExplicitAgentsDoesNotInjectUser(t *testing.T) {

@@ -187,6 +187,11 @@ func (a App) registerWithOptions(ctx context.Context, opts registerOptions) erro
 		}
 	}
 	opts.Root, opts.BaseRoot = normalizeAMQPaths(opts.Root, opts.BaseRoot, opts.SessionName)
+	canonicalRoot, err := registry.CanonicalRoot(opts.Root)
+	if err != nil {
+		return fmt.Errorf("canonicalize AMQ root: %w", err)
+	}
+	opts.Root = canonicalRoot
 
 	adapters := a.adapterRegistry()
 	selected, err := adapters.Get(opts.AdapterName)
@@ -413,8 +418,14 @@ func checkPhysicalTargetAvailable(
 		if existing.Adapter != candidate.Adapter || existing.ID == candidate.ID {
 			continue
 		}
-		if ignoreSameRootAgent && existing.Root == candidate.Root && existing.Agent == candidate.Agent {
-			continue
+		if ignoreSameRootAgent {
+			sameOwner, err := sameCanonicalRootAgent(existing, candidate)
+			if err != nil {
+				return fmt.Errorf("canonicalize registered AMQ root for %s@%s: %w", existing.Agent, existing.Root, err)
+			}
+			if sameOwner {
+				continue
+			}
 		}
 		target, err := normalizedTarget(selected, existing.Target)
 		if err != nil {
@@ -438,6 +449,21 @@ func checkPhysicalTargetAvailable(
 	return nil
 }
 
+func sameCanonicalRootAgent(left, right registry.Entry) (bool, error) {
+	if left.Agent != right.Agent {
+		return false, nil
+	}
+	leftRoot, err := registry.CanonicalRoot(left.Root)
+	if err != nil {
+		return false, err
+	}
+	rightRoot, err := registry.CanonicalRoot(right.Root)
+	if err != nil {
+		return false, err
+	}
+	return leftRoot == rightRoot, nil
+}
+
 // recoverDetachedRegistration is the narrow recovery path for a recreated
 // terminal. It never retargets a live wake: the previously registered adapter
 // target must be independently proven absent. It first asks AMQ's atomic wake
@@ -457,7 +483,11 @@ func recoverDetachedRegistration(
 ) (registry.Entry, bool, error) {
 	matches := make([]registry.Entry, 0, 1)
 	for _, entry := range previousEntries {
-		if entry.Root == next.Root && entry.Agent == next.Agent {
+		sameOwner, err := sameCanonicalRootAgent(entry, next)
+		if err != nil {
+			return next, false, fmt.Errorf("canonicalize previous AMQ root for detached wake recovery: %w", err)
+		}
+		if sameOwner {
 			matches = append(matches, entry)
 		}
 	}

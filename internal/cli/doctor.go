@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/sessionguard"
 )
 
 type doctorCheck struct {
@@ -18,6 +21,8 @@ type doctorCheck struct {
 
 type doctorResult struct {
 	Checks               []doctorCheck               `json:"checks"`
+	Mailboxes            []fsq.MailboxInspection     `json:"mailboxes,omitempty"`
+	MailboxRepair        *fsq.MailboxRepairResult    `json:"mailbox_repair,omitempty"`
 	ExtensionManifests   []doctorExtensionManifest   `json:"extension_manifests,omitempty"`
 	ExtensionDiagnostics []doctorExtensionDiagnostic `json:"extension_diagnostics,omitempty"`
 	Summary              struct {
@@ -28,11 +33,23 @@ type doctorResult struct {
 	Ops *doctorOpsResult `json:"ops,omitempty"`
 }
 
+func wakeCheckTextValue(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "none"
+	}
+	return value
+}
+
 func runDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "Output as JSON")
+	jsonSchemaFlag := addJSONSchemaFlag(fs)
 	opsFlag := fs.Bool("ops", false, "Include runtime operational checks")
 	fixWakeLocksFlag := fs.Bool("fix-wake-locks", false, "With --ops, remove stale wake lock files")
+	fixMailboxesFlag := fs.Bool("fix-mailboxes", false, "Create missing required directories for configured mailboxes")
+	rootFlag := fs.String("root", "", "Exact AMQ root to inspect or repair")
+	baseRootFlag := fs.String("base-root", "", "Config-authority root for an explicit session --root")
+	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, allow repair outside the pinned session context")
 
 	usage := usageWithFlags(fs, "amq doctor [options]",
 		"Verify AMQ installation and configuration.",
@@ -59,8 +76,25 @@ func runDoctor(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if err := validateJSONSchemaFlag(fs, *jsonFlag, *jsonSchemaFlag); err != nil {
+		return err
+	}
 	if *fixWakeLocksFlag && !*opsFlag {
 		return UsageError("--fix-wake-locks requires --ops")
+	}
+	rootExplicit := flagWasVisited(fs, "root")
+	baseRootExplicit := flagWasVisited(fs, "base-root")
+	if rootExplicit && strings.TrimSpace(*rootFlag) == "" {
+		return UsageError("--root cannot be empty")
+	}
+	if baseRootExplicit && strings.TrimSpace(*baseRootFlag) == "" {
+		return UsageError("--base-root cannot be empty")
+	}
+	if baseRootExplicit && !rootExplicit {
+		return UsageError("--base-root requires an explicit --root")
+	}
+	if *ignoreSessionPinFlag && !rootExplicit {
+		return UsageError("--ignore-session-pin requires an explicit --root")
 	}
 
 	result := doctorResult{}
@@ -70,6 +104,23 @@ func runDoctor(args []string) error {
 
 	// Check 2: .amqrc
 	amqrcCheck, root := checkAmqrc()
+	if rootExplicit {
+		root = resolveRoot(*rootFlag)
+		amqrcCheck = doctorCheck{
+			Name:    "Root config",
+			Status:  "ok",
+			Message: fmt.Sprintf("queue root=%s (source: flag)", root),
+		}
+	}
+	baseRoot := ""
+	if baseRootExplicit {
+		baseRoot = resolveRoot(*baseRootFlag)
+	}
+	if baseRoot != "" {
+		if err := validateDoctorExplicitBaseRoot(root, baseRoot); err != nil {
+			return UsageError("%v", err)
+		}
+	}
 	result.Checks = append(result.Checks, amqrcCheck)
 
 	// Check 3: Root directory
@@ -85,12 +136,19 @@ func runDoctor(args []string) error {
 
 	// Check 4: Config.json
 	if root != "" {
-		result.Checks = append(result.Checks, checkConfig(root))
+		configRoot := root
+		if baseRoot != "" {
+			configRoot = baseRoot
+		}
+		result.Checks = append(result.Checks, checkConfig(configRoot))
 	}
 
 	// Check 5: Mailbox permissions
 	if root != "" {
-		result.Checks = append(result.Checks, checkMailboxes(root))
+		mailboxes, repair, check := inspectDoctorMailboxes(root, baseRoot, *fixMailboxesFlag, *ignoreSessionPinFlag)
+		result.Mailboxes = mailboxes
+		result.MailboxRepair = repair
+		result.Checks = append(result.Checks, check)
 	}
 
 	// Check 6: Extension metadata
@@ -110,8 +168,37 @@ func runDoctor(args []string) error {
 	// Ops checks (runtime health)
 	if *opsFlag && root != "" {
 		// Resolve root source once here; avoids re-resolving with empty flags in runOpsChecks.
-		_, source, _, _ := resolveEnvConfigWithSource("", "")
-		result.Ops = runOpsChecks(root, string(source), *fixWakeLocksFlag)
+		source := rootSourceFlag
+		if !rootExplicit {
+			_, source, _, _ = resolveEnvConfigWithSource("", "")
+		}
+		fixWakeLocks := *fixWakeLocksFlag
+		if fixWakeLocks {
+			decision, mismatch, pinErr := doctorRepairSessionGuard(root, *ignoreSessionPinFlag)
+			switch decision.Row {
+			case sessionguard.RowR13DoctorInvalidErr:
+				result.Checks = append(result.Checks, doctorCheck{
+					Name:    "Wake lock repair",
+					Status:  "error",
+					Message: fmt.Sprintf("refusing to repair %s: invalid AMQ session context: %v", root, pinErr),
+				})
+				fixWakeLocks = false
+			case sessionguard.RowR12DoctorMismatchErr:
+				result.Checks = append(result.Checks, doctorCheck{
+					Name:    "Wake lock repair",
+					Status:  "error",
+					Message: fmt.Sprintf("refusing to repair %s because it does not match the pinned session context: %s", root, mismatch.Message),
+				})
+				fixWakeLocks = false
+			}
+		}
+		result.Ops = runOpsChecksWithSchema(
+			root,
+			string(source),
+			fixWakeLocks,
+			*jsonSchemaFlag,
+			baseRoot,
+		)
 	}
 
 	// Calculate summary
@@ -127,6 +214,9 @@ func runDoctor(args []string) error {
 	}
 
 	if *jsonFlag {
+		if *jsonSchemaFlag == wakeCheckSchemaV2 {
+			return writeJSON(os.Stdout, renderDoctorResultV2(result))
+		}
 		return writeJSON(os.Stdout, result)
 	}
 
@@ -185,6 +275,14 @@ func runDoctor(args []string) error {
 			if a.PresenceSource != "" {
 				line += ", source " + a.PresenceSource
 			}
+			if a.NotifierStatus != "" {
+				line += fmt.Sprintf(
+					", ⚠ %s mode=%s reason=%s",
+					a.NotifierStatus,
+					a.NotifierMode,
+					a.NotifierReason,
+				)
+			}
 			if err := writeStdoutLine(line); err != nil {
 				return err
 			}
@@ -198,8 +296,60 @@ func runDoctor(args []string) error {
 				return err
 			}
 		}
+		quarantineLine := "  wake quarantine: scan unavailable: " + result.Ops.WakeQuarantine.Error
+		if result.Ops.WakeQuarantine.Error == "" {
+			quarantineLine = fmt.Sprintf("  wake quarantine: %d preserved", result.Ops.WakeQuarantine.Count)
+			if result.Ops.WakeQuarantine.NewestAgeSeconds != nil {
+				quarantineLine += fmt.Sprintf(", newest %.0fs", *result.Ops.WakeQuarantine.NewestAgeSeconds)
+			}
+		}
+		if err := writeStdoutLine(quarantineLine); err != nil {
+			return err
+		}
 		for _, wl := range result.Ops.WakeLocks {
 			if wl.Status == string(wakeLockValid) {
+				tty := wl.TTY
+				if tty == "" {
+					tty = "unknown"
+				}
+				started := wl.Started
+				if started == "" {
+					started = "unknown"
+				}
+				var line string
+				if wl.CurrentTerminal {
+					line = fmt.Sprintf(
+						"  wake for %s is live on the current terminal: pid=%d tty=%s started=%s root=%s",
+						wl.Agent,
+						wl.PID,
+						tty,
+						started,
+						wl.Root,
+					)
+				} else {
+					line = fmt.Sprintf(
+						"  wake for %s is owned by a live process: pid=%d tty=%s started=%s root=%s; "+
+							"no AMQ command can safely take over this live wake",
+						wl.Agent,
+						wl.PID,
+						tty,
+						started,
+						wl.Root,
+					)
+				}
+				line += fmt.Sprintf(
+					" running_image=%s running_version=%s current_image=%s current_version=%s image_status=%s restart=%s next=%s",
+					wakeCheckTextValue(wl.RunningImagePath),
+					wakeCheckTextValue(wl.RunningVersion),
+					wakeCheckTextValue(wl.CurrentImagePath),
+					wakeCheckTextValue(wl.CurrentVersion),
+					wakeCheckTextValue(wl.ImageStatus),
+					wakeCheckTextValue(wl.RestartCapability),
+					wakeCheckTextValue(wl.NextAction),
+				)
+				if err := writeStdoutLine(line); err != nil {
+					return err
+				}
 				continue
 			}
 			icon := statusIcons["warn"]
@@ -232,6 +382,18 @@ func runDoctor(args []string) error {
 			if wl.RepairAvailable && wl.Status == string(wakeLockStale) {
 				line += " repair=" + wl.Repair
 			}
+			if wl.RestartCapability != "" {
+				line += fmt.Sprintf(
+					" running_image=%s running_version=%s current_image=%s current_version=%s image_status=%s restart=%s next=%s",
+					wakeCheckTextValue(wl.RunningImagePath),
+					wakeCheckTextValue(wl.RunningVersion),
+					wakeCheckTextValue(wl.CurrentImagePath),
+					wakeCheckTextValue(wl.CurrentVersion),
+					wakeCheckTextValue(wl.ImageStatus),
+					wl.RestartCapability,
+					wakeCheckTextValue(wl.NextAction),
+				)
+			}
 			if err := writeStdoutLine(line); err != nil {
 				return err
 			}
@@ -247,6 +409,30 @@ func runDoctor(args []string) error {
 	return nil
 }
 
+func validateDoctorExplicitBaseRoot(root, baseRoot string) error {
+	if relateTrees(root, baseRoot) == TreeRelationSame {
+		return nil
+	}
+	if !isSessionRootUnderBase(root, baseRoot) {
+		return fmt.Errorf("explicit --root %s must be the base root or one direct child of --base-root %s", root, baseRoot)
+	}
+	baseIdentity, err := fsq.SnapshotDeliveryRoot(baseRoot)
+	if err != nil {
+		return fmt.Errorf("open explicit --base-root: %w", err)
+	}
+	baseCapability, err := fsq.OpenDeliveryRoot(baseRoot, baseIdentity)
+	if err != nil {
+		return fmt.Errorf("open explicit --base-root: %w", err)
+	}
+	defer func() { _ = baseCapability.Close() }()
+	child, err := baseCapability.OpenDirectChild(filepath.Base(resolveRoot(root)))
+	if err != nil {
+		return fmt.Errorf("open explicit --root under --base-root: %w", err)
+	}
+	defer func() { _ = child.Close() }()
+	return child.VerifyBase()
+}
+
 func checkSessionPinIdentity(root string) doctorCheck {
 	check := doctorCheck{Name: "Session identity pin"}
 	pin, err := loadSessionPin()
@@ -255,9 +441,9 @@ func checkSessionPinIdentity(root string) doctorCheck {
 		check.Message = err.Error()
 		return check
 	}
-	if !pin.IdentityPin {
-		check.Status = "ok"
-		check.Message = "legacy lexical pin (identity tokens absent)"
+	if err := validateLegacySessionPinRoot(pin); err != nil {
+		check.Status = "warn"
+		check.Message = err.Error()
 		return check
 	}
 	mismatch, err := sessionPinMismatch(root)
@@ -267,8 +453,22 @@ func checkSessionPinIdentity(root string) doctorCheck {
 		return check
 	}
 	if mismatch != nil {
+		if isPinnedBaseRoot(root) {
+			check.Status = "ok"
+			if pin.IdentityPin {
+				check.Message = "verified pinned base root"
+			} else {
+				check.Message = "legacy lexical pinned base root (identity tokens absent)"
+			}
+			return check
+		}
 		check.Status = "warn"
 		check.Message = mismatch.Error()
+		return check
+	}
+	if !pin.IdentityPin {
+		check.Status = "ok"
+		check.Message = "legacy lexical pin (identity tokens absent)"
 		return check
 	}
 	check.Status = "ok"
@@ -367,53 +567,276 @@ func checkConfig(root string) doctorCheck {
 	return check
 }
 
-func checkMailboxes(root string) doctorCheck {
+func doctorRepairSessionGuard(root string, ignoreSessionPins bool) (sessionguard.Decision, *SessionContextError, error) {
+	if ignoreSessionPins {
+		return sessionguard.Decide(sessionguard.Input{
+			Kind: sessionguard.KindDoctorRepair,
+			Pin:  sessionguard.PinInvalid, Relation: sessionguard.TargetMismatch,
+			Flags: sessionguard.Flags{ExplicitRoot: true, IgnorePin: true},
+		}), nil, nil
+	}
+	pin, pinErr := loadSessionPin()
+	if pinErr != nil {
+		return sessionGuardDecisionForContext(
+			sessionguard.KindDoctorRepair,
+			sessionguard.ChannelExit5,
+			sessionguard.PinInvalid,
+			&SessionContextError{Message: pinErr.Error()},
+			sessionguard.Flags{},
+		), nil, pinErr
+	}
+	mismatch, checkErr := sessionPinMismatchWithPin(root, pin)
+	if checkErr != nil {
+		return sessionGuardDecisionForContext(
+			sessionguard.KindDoctorRepair,
+			sessionguard.ChannelExit5,
+			sessionguard.PinInvalid,
+			&SessionContextError{Message: checkErr.Error()},
+			sessionguard.Flags{},
+		), nil, checkErr
+	}
+	if mismatch != nil && isPinnedBaseRootWithPin(root, pin) {
+		return sessionguard.Decide(sessionguard.Input{
+			Kind: sessionguard.KindDoctorRepair,
+			Pin:  sessionGuardPinStateFor(pin), Relation: sessionguard.TargetOwnPinnedBase,
+		}), mismatch, nil
+	}
+	return sessionGuardDecisionForContext(
+		sessionguard.KindDoctorRepair,
+		sessionguard.ChannelExit5,
+		sessionGuardPinStateFor(pin),
+		mismatch,
+		sessionguard.Flags{},
+	), mismatch, nil
+}
+
+func inspectDoctorMailboxes(root, explicitBaseRoot string, repair, ignoreSessionPins bool) ([]fsq.MailboxInspection, *fsq.MailboxRepairResult, doctorCheck) {
 	check := doctorCheck{Name: "Mailboxes"}
-
-	agentsDir := filepath.Join(root, "agents")
-	entries, err := os.ReadDir(agentsDir)
-	if os.IsNotExist(err) {
-		check.Status = "warn"
-		check.Message = "no agents directory"
-		return check
+	if repair {
+		decision, mismatch, pinErr := doctorRepairSessionGuard(root, ignoreSessionPins)
+		if decision.Row == sessionguard.RowR13DoctorInvalidErr {
+			check.Status = "error"
+			check.Message = fmt.Sprintf(
+				"refusing to repair %s: invalid AMQ session context: %v; re-run with a complete session context",
+				root,
+				pinErr,
+			)
+			return nil, nil, check
+		}
+		if decision.Row == sessionguard.RowR12DoctorMismatchErr {
+			check.Status = "error"
+			check.Message = fmt.Sprintf(
+				"refusing to repair %s because it does not match the pinned session context: %s; re-run from the intended session",
+				root,
+				mismatch.Message,
+			)
+			return nil, nil, check
+		}
 	}
-	if err != nil {
-		check.Status = "error"
-		check.Message = fmt.Sprintf("cannot read agents: %v", err)
-		return check
+
+	var deliveryRoot, explicitConfigRoot *fsq.DeliveryRoot
+	if explicitBaseRoot != "" {
+		baseIdentity, err := fsq.SnapshotDeliveryRoot(explicitBaseRoot)
+		if err != nil {
+			check.Status = "error"
+			check.Message = fmt.Sprintf("open explicit base root: %v", err)
+			return nil, nil, check
+		}
+		explicitConfigRoot, err = fsq.OpenDeliveryRoot(explicitBaseRoot, baseIdentity)
+		if err != nil {
+			check.Status = "error"
+			check.Message = fmt.Sprintf("open explicit base root: %v", err)
+			return nil, nil, check
+		}
+		defer func() { _ = explicitConfigRoot.Close() }()
+		if relateTrees(root, explicitBaseRoot) == TreeRelationSame {
+			deliveryRoot = explicitConfigRoot
+		} else {
+			if !isSessionRootUnderBase(root, explicitBaseRoot) {
+				check.Status = "error"
+				check.Message = fmt.Sprintf("explicit --root %s must be the base root or one direct child of --base-root %s", root, explicitBaseRoot)
+				return nil, nil, check
+			}
+			deliveryRoot, err = explicitConfigRoot.OpenDirectChild(filepath.Base(resolveRoot(root)))
+			if err != nil {
+				check.Status = "error"
+				check.Message = fmt.Sprintf("open explicit session root: %v", err)
+				return nil, nil, check
+			}
+			defer func() { _ = deliveryRoot.Close() }()
+		}
+	} else {
+		identity, err := fsq.SnapshotDeliveryRoot(root)
+		if err != nil {
+			check.Status = "error"
+			check.Message = err.Error()
+			return nil, nil, check
+		}
+		deliveryRoot, err = fsq.OpenDeliveryRoot(root, identity)
+		if err != nil {
+			check.Status = "error"
+			check.Message = err.Error()
+			return nil, nil, check
+		}
+		defer func() { _ = deliveryRoot.Close() }()
 	}
 
-	var agents []string
-	var issues []string
+	var (
+		inventory fsq.MailboxInventory
+		result    *fsq.MailboxRepairResult
+	)
+	configRoot := deliveryRoot
+	var baseConfigRoot *fsq.DeliveryRoot
+	repairBaseRoot := explicitBaseRoot
+	if explicitConfigRoot != nil {
+		configRoot = explicitConfigRoot
+	} else if _, configErr := deliveryRoot.ReadRegularNoFollow(filepath.Join("meta", "config.json")); os.IsNotExist(configErr) {
+		if base := classifyRoot(root); base != "" {
+			repairBaseRoot = base
+			baseIdentity, baseErr := fsq.SnapshotDeliveryRoot(base)
+			if baseErr != nil {
+				check.Status = "error"
+				check.Message = fmt.Sprintf("open base config root: %v", baseErr)
+				return nil, nil, check
+			}
+			baseConfigRoot, baseErr = fsq.OpenDeliveryRoot(base, baseIdentity)
+			if baseErr != nil {
+				check.Status = "error"
+				check.Message = fmt.Sprintf("open base config root: %v", baseErr)
+				return nil, nil, check
+			}
+			defer func() { _ = baseConfigRoot.Close() }()
+			configRoot = baseConfigRoot
+		}
+	}
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	authorization, authorizationInventory, authorizationErr := fsq.OpenMailboxConfigAuthorization(configRoot)
+	if authorizationErr != nil {
+		if inspected, err := fsq.InspectMailboxLayout(deliveryRoot); err == nil {
+			inspected.ActiveConfigStatus = authorizationInventory.ActiveConfigStatus
+			inspected.ActiveConfigIssue = authorizationInventory.ActiveConfigIssue
+			inspected.RepairAuthorized = false
+			authorizationInventory = inspected
+		}
+		if repair {
+			repairResult := fsq.MailboxRepairResult{
+				Status: "failed",
+				Failure: &fsq.MailboxRepairFailure{
+					Code:    "preflight_failed",
+					Stage:   "authorization",
+					Message: authorizationInventory.ActiveConfigIssue,
+				},
+				Inventory: authorizationInventory,
+			}
+			result = &repairResult
+			inventory = repairResult.Inventory
+			repairCommand := doctorMailboxRepairCommandForOS(root, repairBaseRoot, runtime.GOOS)
+			applyDoctorMailboxRemedies(&inventory, repairCommand)
+			check = checkMailboxInventory(inventory, result, repairCommand)
+			return inventory.Mailboxes, result, check
+		}
+		inventory = authorizationInventory
+		repairCommand := doctorMailboxRepairCommandForOS(root, repairBaseRoot, runtime.GOOS)
+		applyDoctorMailboxRemedies(&inventory, repairCommand)
+		check = checkMailboxInventory(inventory, nil, repairCommand)
+		return inventory.Mailboxes, nil, check
+	}
+	defer func() { _ = authorization.Close() }()
+	effectiveAgents := withReservedHumanHandle(authorization.ConfiguredAgents())
+
+	if repair {
+		repairResult := fsq.RepairMailboxLayoutForConfiguredAgentsWithAuthorization(
+			deliveryRoot,
+			authorization,
+			effectiveAgents,
+		)
+		result = &repairResult
+		inventory = repairResult.Inventory
+	} else {
+		inspected, err := fsq.InspectMailboxLayoutWithAuthorization(deliveryRoot, authorization, effectiveAgents...)
+		if err != nil {
+			check.Status = "error"
+			check.Message = err.Error()
+			return nil, nil, check
+		}
+		inventory = inspected
+	}
+	repairCommand := doctorMailboxRepairCommandForOS(root, repairBaseRoot, runtime.GOOS)
+	applyDoctorMailboxRemedies(&inventory, repairCommand)
+	check = checkMailboxInventory(inventory, result, repairCommand)
+	return inventory.Mailboxes, result, check
+}
+
+func applyDoctorMailboxRemedies(inventory *fsq.MailboxInventory, repairCommand string) {
+	for i := range inventory.Mailboxes {
+		mailbox := &inventory.Mailboxes[i]
+		if mailbox.Provenance != fsq.MailboxDiscovered || len(mailbox.Issues) == 0 {
 			continue
 		}
-		agent := entry.Name()
-		agents = append(agents, agent)
+		if err := fsq.ValidateHandle(mailbox.Handle); err != nil {
+			mailbox.Remedy = fmt.Sprintf(
+				"preserve any messages, then rename or remove invalid entry %q under agents/",
+				mailbox.Handle,
+			)
+			continue
+		}
+		mailbox.Remedy = fmt.Sprintf(
+			"add %q to agents in meta/config.json, then run %s; or preserve any messages and remove agents/%s if abandoned",
+			mailbox.Handle,
+			repairCommand,
+			mailbox.Handle,
+		)
+	}
+}
 
-		// Check inbox directories exist
-		inboxNew := fsq.AgentInboxNew(root, agent)
-		if _, err := os.Stat(inboxNew); os.IsNotExist(err) {
-			issues = append(issues, fmt.Sprintf("%s: inbox/new missing", agent))
+func checkMailboxInventory(inventory fsq.MailboxInventory, repair *fsq.MailboxRepairResult, repairCommand string) doctorCheck {
+	check := doctorCheck{Name: "Mailboxes", Status: "ok"}
+	var issues []string
+	if inventory.ActiveConfigStatus != "ok" {
+		check.Status = "error"
+		issues = append(issues, inventory.ActiveConfigIssue)
+	}
+	if inventory.AgentsIssue != "" {
+		check.Status = "error"
+		issues = append(issues, inventory.AgentsIssue)
+	}
+	for _, mailbox := range inventory.Mailboxes {
+		if mailbox.Status == "error" {
+			check.Status = "error"
+		} else if mailbox.Status == "warn" && check.Status == "ok" {
+			check.Status = "warn"
+		}
+		if len(mailbox.Issues) > 0 {
+			detail := mailbox.Handle + ": " + strings.Join(mailbox.Issues, ", ")
+			if mailbox.Remedy != "" {
+				detail += "; next: " + mailbox.Remedy
+			}
+			issues = append(issues, detail)
 		}
 	}
-
-	if len(agents) == 0 {
+	if repair != nil && repair.Failure != nil {
+		check.Status = "error"
+		issues = append(issues, "repair "+repair.Failure.Code+": "+repair.Failure.Message)
+	}
+	if len(inventory.Mailboxes) == 0 && len(issues) == 0 {
 		check.Status = "warn"
-		check.Message = "no agent mailboxes"
+		check.Message = "no configured or discovered mailboxes"
 		return check
 	}
-
+	check.Message = fmt.Sprintf("%d mailboxes", len(inventory.Mailboxes))
 	if len(issues) > 0 {
-		check.Status = "warn"
-		check.Message = fmt.Sprintf("%d agents, issues: %v", len(agents), issues)
-		return check
+		check.Message += "; " + strings.Join(issues, "; ")
 	}
-
-	check.Status = "ok"
-	check.Message = fmt.Sprintf("%d agents configured", len(agents))
+	if repair == nil {
+		for _, mailbox := range inventory.Mailboxes {
+			if mailbox.RepairEligible {
+				check.Message += "; repair: " + repairCommand
+				break
+			}
+		}
+	} else if len(repair.CreatedPaths) > 0 {
+		check.Message += "; created: " + strings.Join(repair.CreatedPaths, ", ")
+	}
 	return check
 }
 

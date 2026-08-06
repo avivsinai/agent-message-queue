@@ -26,13 +26,40 @@ type commonFlags struct {
 
 const reservedHumanHandle = "user"
 
+var implicitRootFlagsBySet sync.Map
+
 func addCommonFlags(fs *flag.FlagSet) *commonFlags {
 	flags := &commonFlags{flagSet: fs}
-	fs.StringVar(&flags.Root, "root", defaultRoot(), "Root directory for the queue")
+	registerImplicitRootFlag(fs, &flags.Root, "Root directory for the queue")
 	fs.StringVar(&flags.Me, "me", defaultMe(), "Agent handle (or AM_ME)")
 	fs.BoolVar(&flags.JSON, "json", false, "Emit JSON output")
 	fs.BoolVar(&flags.Strict, "strict", false, "Error on unknown handles (default: warn)")
 	return flags
+}
+
+// registerImplicitRootFlag gives commands a normal --root flag while retaining
+// enough information to resolve its implicit default after parsing. Flag
+// construction cannot return configuration errors; post-parse resolution can,
+// and also knows whether an explicit --root override was supplied.
+func registerImplicitRootFlag(fs *flag.FlagSet, target *string, usage string) {
+	fs.StringVar(target, "root", defaultRoot(), usage)
+	implicitRootFlagsBySet.Store(fs, target)
+}
+
+func resolveImplicitRootFlagDefault(fs *flag.FlagSet) error {
+	value, ok := implicitRootFlagsBySet.Load(fs)
+	if !ok {
+		return nil
+	}
+	if flagWasVisited(fs, "root") {
+		return nil
+	}
+	root, err := resolveDefaultRoot()
+	if err != nil {
+		return err
+	}
+	*value.(*string) = root
+	return nil
 }
 
 // rootExplicit reports whether --root was passed on the command line (as opposed
@@ -161,44 +188,40 @@ func resolveSessionNameForDisplay(root string) string {
 	return sessionName(root)
 }
 
-// cachedAmqrcRoot returns the literal root from .amqrc, cached via sync.Once.
-// Returns "" on any error (best-effort for defaulting, not validation).
-var amqrcOnce sync.Once
-var amqrcCachedRoot string
+// resetAmqrcCache remains as a test helper for older fixtures. Root discovery
+// is intentionally uncached so every command path uses the same live resolver.
+func resetAmqrcCache() {}
 
-func cachedAmqrcRoot() string {
-	amqrcOnce.Do(func() {
-		result, err := findAndLoadAmqrc()
-		if err != nil {
-			return
-		}
-		root := result.Config.Root
-		if root == "" {
-			return
-		}
-		if !filepath.IsAbs(root) {
-			root = filepath.Join(result.Dir, root)
-		}
-		amqrcCachedRoot = root
-	})
-	return amqrcCachedRoot
-}
-
-// resetAmqrcCache resets the sync.Once for testing.
-// Test-only; not safe for parallel tests.
-func resetAmqrcCache() {
-	amqrcOnce = sync.Once{}
-	amqrcCachedRoot = ""
+func resolveDefaultRoot() (string, error) {
+	if env := strings.TrimSpace(os.Getenv(envRoot)); env != "" {
+		return env, nil
+	}
+	root, found, err := resolveDiscoveredBaseRoot()
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return root, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine cwd for implicit AMQ root: %w", err)
+	}
+	// Keep the compatibility default local to cwd. Returning a relative path
+	// here would let resolveRoot re-enter legacy parent discovery and could
+	// select an otherwise ineligible ancestor queue.
+	return filepath.Join(cwd, defaultCoopRoot), nil
 }
 
 func defaultRoot() string {
-	if env := strings.TrimSpace(os.Getenv(envRoot)); env != "" {
-		return env
+	root, err := resolveDefaultRoot()
+	if err != nil {
+		// Flag defaults cannot return errors. Commands register their implicit
+		// root and resolve again after parsing, when explicit --root and
+		// AM_ROOT precedence are known and errors can be surfaced safely.
+		return ".agent-mail"
 	}
-	if root := cachedAmqrcRoot(); root != "" {
-		return root
-	}
-	return ".agent-mail"
+	return root
 }
 
 func resolveRoot(raw string) string {
@@ -470,9 +493,6 @@ func loadKnownAgentsWithRead(strict bool, read func() ([]byte, error)) ([]string
 }
 
 func withReservedHumanHandle(agents []string) []string {
-	if len(agents) == 0 {
-		return agents
-	}
 	for _, agent := range agents {
 		if agent == reservedHumanHandle {
 			return agents
@@ -561,26 +581,11 @@ func validateKnownHandlesFromAgents(agents []string, loadErr error, strict bool,
 
 func normalizeHandle(raw string) (string, error) {
 	handle := strings.TrimSpace(raw)
-	if handle == "" {
-		return "", errors.New("agent handle cannot be empty")
-	}
 	if strings.ContainsAny(handle, "/\\") {
 		return "", fmt.Errorf("invalid handle (slashes not allowed): %s", handle)
 	}
-	if handle != strings.ToLower(handle) {
-		return "", fmt.Errorf("handle must be lowercase: %s", handle)
-	}
-	for _, r := range handle {
-		if r >= 'a' && r <= 'z' {
-			continue
-		}
-		if r >= '0' && r <= '9' {
-			continue
-		}
-		if r == '-' || r == '_' {
-			continue
-		}
-		return "", fmt.Errorf("invalid handle (allowed: a-z, 0-9, -, _): %s", handle)
+	if err := fsq.ValidateHandle(handle); err != nil {
+		return "", err
 	}
 	return handle, nil
 }
@@ -722,6 +727,15 @@ func isHelp(arg string) bool {
 }
 
 func parseFlags(fs *flag.FlagSet, args []string, usage func()) (bool, error) {
+	return parseFlagsWithPositionals(fs, args, usage, false)
+}
+
+func parseFlagsAllowPositionals(fs *flag.FlagSet, args []string, usage func()) (bool, error) {
+	return parseFlagsWithPositionals(fs, args, usage, true)
+}
+
+func parseFlagsWithPositionals(fs *flag.FlagSet, args []string, usage func(), allowPositionals bool) (bool, error) {
+	defer implicitRootFlagsBySet.Delete(fs)
 	fs.SetOutput(io.Discard)
 	if usage != nil {
 		fs.Usage = usage
@@ -737,6 +751,18 @@ func parseFlags(fs *flag.FlagSet, args []string, usage func()) (bool, error) {
 			return false, UsageError("--%s cannot be empty", name)
 		}
 	}
+	if !allowPositionals {
+		if remaining := fs.Args(); len(remaining) > 0 {
+			message := fmt.Sprintf("%s does not accept positional arguments (got %q)", fs.Name(), strings.Join(remaining, " "))
+			if fs.Lookup("body") != nil {
+				message += "; use --body to pass message text"
+			}
+			return false, UsageError("%s", message)
+		}
+	}
+	if err := resolveImplicitRootFlagDefault(fs); err != nil {
+		return false, err
+	}
 	return false, nil
 }
 
@@ -751,16 +777,6 @@ func flagWasVisited(fs *flag.FlagSet, name string) bool {
 		}
 	})
 	return visited
-}
-
-// rejectPositionalArgs returns a UsageError if the flag set has any remaining
-// positional arguments after parsing. Commands that don't accept positional
-// args should call this immediately after parseFlags to prevent silent drops.
-func rejectPositionalArgs(fs *flag.FlagSet, cmdName string) error {
-	if remaining := fs.Args(); len(remaining) > 0 {
-		return UsageError("%s does not accept positional arguments (got %q); use --body to pass message text", cmdName, strings.Join(remaining, " "))
-	}
-	return nil
 }
 
 func usageWithFlags(fs *flag.FlagSet, usage string, notes ...string) func() {

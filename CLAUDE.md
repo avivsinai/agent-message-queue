@@ -21,11 +21,13 @@ AMQ owns agent-to-agent messaging, thread continuity, cross-project/session rout
 - PR titles must follow `type(scope): description`; the repository uses
   squash-only merges so the title becomes the conventional commit on `main`.
   Use `BEGIN_COMMIT_OVERRIDE` in a merged PR body or edit the release PR when a
-  change needs multiple or richer release-note entries.
+  change needs multiple or richer release-note entries. Each override entry
+  must be one conventional header of at most 72 characters, separated from
+  adjacent entries by a blank line.
 
 ## Operational Constraints
 
-- Handles must be lowercase and match `[a-z0-9_-]+`.
+- Handles must be lowercase, match `[a-z0-9_-]+`, and must not start with `-`.
 - Never edit queue files directly; use the CLI for all mailbox operations.
 - Cleanup is explicit via `amq cleanup`; do not add automatic deletion behavior.
 
@@ -112,16 +114,32 @@ Layer names must use lowercase ASCII letters, digits, hyphen, underscore, and do
 
 **Cross-tree send guard**: A direct `--root` is root *selection*, not federation routing. `send` refuses an explicit `--root` that targets a different base tree than the caller's own active session (`AM_ROOT`/`AM_BASE_ROOT`) when no routing dimension (`--project`/`--session`/`--from-session`) is given — such a message carries no sender-origin metadata, so the recipient could not reply and a naive reply would loop into their own tree. Replyable cross-tree messaging must use `--project`/`--session`, which stamp the routing headers. With no session env set (bare-root scripts/CI), the guard does not fire; a direct `--root` cross-tree send in that case can still produce an unreplyable message — the documented cost of keeping bare-root sends working.
 
-**Session-root guard**: `read`, `drain`, `monitor`, `watch`, and mutating DLQ commands compare their resolved target against the exact context pinned by `AM_BASE_ROOT`/`AM_SESSION` before inspecting or moving mailbox state; `send` and `reply` apply the same check to their local source. For named sessions `AM_BASE_ROOT` is the authorized parent; for sessionless contexts it is the exact root and `AM_SESSION` is empty. A mismatch exits with code 5; use `--session <name>` as the deliberate routing dimension. The raw-root escape hatch is `--ignore-session-pin`, which requires a non-empty explicit `--root`; explicitly blank `--root`/`--session` values are usage errors. Target routing never authorizes a mismatched source. `list` warns instead of refusing so it remains a non-destructive inspection path. With no positive session/tree evidence, scripts and CI remain fail-open. A missing mailbox is a not-found error. Empty `drain` and `list --new` results perform a shallow sibling-session scan and write exact `amq list --session <name> --me <handle> --new` inspection commands to stderr; `doctor --ops` reports the same condition as `sibling_backlog` hints. Known limitation: `send --from-session` remains a double-explicit legacy route from its supplied raw base; callers must ensure that base is intentional until the follow-up resolver work lands.
+**Session-root guard**: `read`, `drain`, `monitor`, `watch`, and all DLQ commands compare their resolved target against the exact context pinned by `AM_BASE_ROOT`/`AM_SESSION` before inspecting or moving mailbox state; `watch` and `monitor` revalidate the same guard during live waits and abort with the same exit-5 refusal if a repin appears mid-wait. `send` and `reply` apply the same check to their local source. For named sessions `AM_BASE_ROOT` is the authorized parent; for sessionless contexts it is the exact root and `AM_SESSION` is empty. A mismatch exits with code 5; use `--session <name>` as the deliberate routing dimension. An implicit participating command also refuses when its active pin conflicts with an initialized cwd-local queue discovered from a project `.amqrc` or repo-local `.agent-mail`; AMQ does not silently choose between them. The narrow exception is a live identity-bound sessionless pin: when both identity tokens authenticate its exact root, that explicit context outranks ambient cwd discovery. Named, legacy, incomplete, stale, or mismatched pins still refuse. Otherwise, repin to the cwd-local queue, use deliberate `--session`/`--project` routing, or pass an explicit `--root` to confirm the active queue. Explicit roots remain subject to the ordinary pin checks. The raw-root escape hatch is `--ignore-session-pin`, which requires a non-empty explicit `--root`; explicitly blank `--root`/`--session` values are usage errors. Target routing never authorizes a mismatched source. `list` warns instead of refusing so it remains a non-destructive inspection path. `doctor --root` likewise selects an exact inspection target without repinning the shell: inspection continues with a mismatch warning. Repair is allowed when the target is the authenticated pinned base root or the caller supplies `--ignore-session-pin`; other mismatches are reported as structured doctor errors, repair is skipped, and the doctor process continues with exit 0. `--base-root` supplies config authority only and never waives the pin. The exact base-backlog inspection command is quiet only when its explicit root is the current pin's own base root, identity-authenticated when tokens are present. With no positive session/tree evidence, scripts and CI remain fail-open. A missing mailbox is a not-found error. Empty `drain` and `list --new` results perform a shallow sibling-session scan and write exact `amq list --session <name> --me <handle> --new` inspection commands to stderr; `doctor --ops` reports the same condition as `sibling_backlog` hints. `doctor --ops --json` adds a structured `backlog` object to `base_backlog` hints with the target root, current session, agent, pending count, and exact command. Known limitation: `send --from-session` remains a double-explicit legacy route from its supplied raw base; callers must ensure that base is intentional until the follow-up resolver work lands.
+
+The same doctor mutation rule applies to `--ops --fix-wake-locks`: a target
+outside the authenticated pinned base is inspected but its wake locks are not
+changed; the structured refusal is reported with process exit 0 unless
+`--ignore-session-pin` is supplied.
 
 **Environment context replacement**: Every shell-mode `amq env` output replaces `AM_ROOT`, `AM_ME`, `AM_BASE_ROOT`, and `AM_SESSION` as one context. Sessionless output pins `AM_BASE_ROOT` to the exact root and emits an empty `AM_SESSION`; `--export` additionally prints a pin note. An ambient root that conflicts with an existing pin is rejected unless a non-empty `--root` or `--session` explicitly repins it. `amq env --session` routes from a valid existing pin base before consulting cwd configuration.
 
 **Session Configuration**: The `amq env` command outputs shell commands to set environment variables. It reads configuration from (highest to lowest precedence):
-- **Root**: flags > env (`AM_ROOT`) > project `.amqrc` > `AMQ_GLOBAL_ROOT` > `~/.amqrc` > auto-detect
+- **Root**: explicit `--root` > env (`AM_ROOT`) > project-local `.amqrc` > `AMQ_GLOBAL_ROOT` > implicit fallbacks. Inside Git, only repo-local `.agent-mail` is eligible; outside Git, `~/.amqrc` precedes detected `.agent-mail`.
 - **Me**: flags > env (`AM_ME`)
 
+That fail-closed rule applies to participating commands. `coop exec` honors root
+precedence before bootstrap; when no eligible root exists, it initializes
+`.agent-mail` at the worktree top, including explicit `--session <name>`.
+`coop init` is the explicit local-bootstrap command and also targets the Git
+top. `coop exec --no-init` keeps the refusal. Bare repositories cannot host
+this implicit bootstrap; use a worktree or `--root`.
+
 Note: `.amqrc` configures the root directory. Agent identity (`me`) is set per-terminal via `--me` or `AM_ME`.
-Auto-detect covers the default `.agent-mail` layout in the current tree; `.amqrc` is still required for custom root names and peer configuration.
+Auto-detect covers the default `.agent-mail` layout in the current tree. A
+project `.amqrc` is still required for custom root names and peer
+configuration. If a project `.amqrc` exists
+but cannot be read or parsed, AMQ refuses lower-precedence fallback routing;
+an explicit `--root` or `AM_ROOT` can intentionally override it.
 
 The `.amqrc` file is JSON:
 ```json
@@ -141,8 +159,8 @@ For cross-project federation, `.amqrc` can also include `project` and `peers`:
 
 Usage:
 ```bash
-eval "$(amq env --me claude --wake)"  # Set up for Claude
-eval "$(amq env --me codex --wake)"   # Set up for Codex
+amq_context="$(amq env --me claude --wake)" && eval "$amq_context"  # Set up for Claude
+amq_context="$(amq env --me codex --wake)" && eval "$amq_context"   # Set up for Codex
 amq env --shell fish                  # Fish shell syntax
 amq env --json                        # Machine-readable output
 ```
@@ -168,11 +186,12 @@ When `--kind` is set but `--priority` is not, priority defaults to `normal`.
 
 ```bash
 amq init --root <path> --agents a,b,c [--force]
-amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--refs <ids>] [--body <str|@file|-|stdin>] [--allow-empty] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--session <target-session>] [--from-session <source-session>] [--project <project>] [--ignore-session-pin] [--wait-for <stage>] [--wait-timeout <duration>]
+amq send --me <agent> --to <recipients> [--subject <str>] [--thread <id>] [--refs <ids>] [--body <str|@file|-|stdin>] [--allow-empty] [--allow-self] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--session <target-session>] [--from-session <source-session>] [--project <project>] [--ignore-session-pin] [--wait-for <stage>] [--wait-timeout <duration>]
 amq list --me <agent> [--session <name>] [--new | --cur] [--priority <p>] [--from <h>] [--kind <k>] [--label <l>...] [--limit N] [--offset N] [--json]
 amq read --me <agent> --id <msg_id> [--session <name>] [--ignore-session-pin] [--json]
 amq drain --me <agent> [--session <name>] [--ignore-session-pin] [--limit N] [--include-body] [--json]
 amq thread --id <thread_id> [--agents <a,b,c>] [--limit N] [--include-body] [--json]
+amq trace <message-id> [--root <path>] [--json]
 amq receipts list --me <agent> [--msg-id <id>] [--stage <stage>] [--json]
 amq receipts wait --me <agent> --msg-id <id> [--stage <stage>] [--timeout <duration>] [--poll-interval <duration>] [--json]
 amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
@@ -182,11 +201,12 @@ amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
 amq watch --me <agent> [--session <name>] [--ignore-session-pin] [--timeout <duration>] [--poll] [--json]
 amq monitor --me <agent> [--session <name>] [--ignore-session-pin] [--timeout <duration>] [--poll] [--limit N] [--include-body] [--peek] [--json]
 amq reply --me <agent> --id <msg_id> [--ignore-session-pin] [--subject <str>] [--body <str|@file|-|stdin>] [--allow-empty] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--wait-for <stage>] [--wait-timeout <duration>]
-amq dlq list --me <agent> [--new | --cur] [--json]
+amq dlq list --me <agent> [--session <name>] [--ignore-session-pin] [--new | --cur] [--json]
 amq dlq read --me <agent> --id <dlq_id> [--session <name>] [--ignore-session-pin] [--json]
 amq dlq retry --me <agent> --id <dlq_id> [--session <name>] [--ignore-session-pin] [--all] [--force]
 amq dlq purge --me <agent> [--session <name>] [--ignore-session-pin] [--older-than <duration>] [--dry-run] [--yes]
 amq wake --me <agent> [--baseline-existing] [--inject-cmd <cmd>] [--inject-mode <auto|raw|paste|none>] [--inject-via <absolute-executable>] [--inject-arg <arg>...] [--inject-timeout <duration>] [--bell] [--debounce <duration>] [--preview-len <n>] [--defer-while-input] [--input-quiet-for <duration>] [--input-poll-interval <duration>] [--input-max-hold <duration>] [--interrupt] [--interrupt-label <label>] [--interrupt-priority <p>] [--interrupt-cmd <ctrl-c|none>] [--interrupt-notice <str>] [--interrupt-cooldown <duration>] [--debug]
+amq wake check --me <agent> [--root <path>] [--strict] [--json] [--json-schema <1|2>]
 amq wake repair --me <agent> [--root <path>] [--json]
 amq wake retire --me <agent> --inject-via <absolute-executable> [--inject-arg <arg>...] [--root <path>] [--json]
 amq upgrade
@@ -207,10 +227,13 @@ amq integration symphony init [--workflow <path>] --me <agent> [--root <path>] [
 amq integration symphony emit --event <after_create|before_run|after_run|before_remove> --me <agent> [--root <path>] [--workspace <path>] [--identifier <key>] [--json]
 amq integration kanban bridge --me <agent> [--root <path>] [--url <ws://...>] [--workspace-id <id>] [--reconnect <duration>] [--json]
 amq who [--json]
-amq doctor [--ops] [--fix-wake-locks] [--json]
+amq doctor [--root <path>] [--base-root <path>] [--ignore-session-pin] [--ops] [--fix-wake-locks] [--fix-mailboxes] [--json] [--json-schema <1|2>]
 ```
 
-Common flags: `--root`, `--json`, `--strict` (error instead of warn on unknown handles or unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has its own flags and doesn't accept these.
+`--root` is accepted only where it is listed above. Participating commands may
+also accept `--json` and `--strict` (error instead of warn on unknown handles or
+unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has
+its own flags and doesn't accept these. `--json-schema` requires `--json`.
 
 **Body resolution (`send`/`reply`)**: `--body` resolves from `@file`, a literal string, or stdin. A bare `--body -`, `--body @-`, or an omitted `--body` reads stdin (standard CLI convention). A send whose resolved body is empty or whitespace-only **fails closed** with a usage error rather than delivering a blank message — pass `--allow-empty` to send a blank body intentionally. This prevents a dropped or mistyped body (e.g. `--body -` with nothing piped) from silently shipping an empty message.
 
@@ -326,6 +349,7 @@ Messages that fail to parse during `drain` or `monitor` are automatically moved 
 - `failure_reason`: `parse_error`
 - `failure_detail`: Specific error message
 - `retry_count`: Number of retry attempts (max 3 before permanent DLQ)
+- `retry_state`: `ready`, `pending`, `delivered`, or `indeterminate`
 
 **Commands**:
 - `amq dlq list` - List dead-lettered messages
@@ -334,13 +358,44 @@ Messages that fail to parse during `drain` or `monitor` are automatically moved 
 - `amq dlq retry --all` - Retry all DLQ messages
 - `amq dlq purge` - Permanently remove DLQ messages
 
-Use `--force` with retry to override the max retry limit.
+Successful retries retain a terminal audit in `dlq/cur` until purge.
+`delivered` is terminal and idempotent: retry reports `already_delivered` with
+`audit_finalized`, and `--force` cannot redeliver it. `pending` or
+legacy-`indeterminate` state without a visible inbox destination refuses retry,
+including with `--force`; the flag bypasses only the maximum retry count.
+Bulk JSON output separates `retried`, `already_delivered`, and `skipped`;
+`count` includes only newly retried messages.
 
 `amq read`, `amq drain`, and `amq monitor` now share the same strict header validation. If a message in `inbox/new` is corrupt or has malformed headers, the command moves it to DLQ and emits a `dlq` receipt instead of leaving it in place.
 
 ## Doctor / Ops
 
 `amq doctor` verifies installation, root configuration, permissions, config, and skill setup.
+
+`amq doctor --fix-mailboxes` repairs the base mailbox layout without requiring
+`--ops`: it creates only missing required directories for the effective
+configured roster (`config.json` agents plus the reserved human handle
+`user`). Filesystem-discovered mailboxes outside that effective roster are
+reported but are never repair eligible. Repair never edits, moves, overwrites,
+or deletes existing message files; symlinks, non-directories, unreadable
+paths, and concurrent layout changes fail closed. Inspection remains
+available when the target differs from the active session pin (reported
+separately as a warning); repair is also allowed for the authenticated pinned
+base root, while other mismatches produce a structured error check and leave
+the doctor process at exit 0 unless explicitly ignored.
+
+`amq doctor --root <path>` selects the exact inspection or repair target; it
+does not repin the shell or bypass an inherited session pin. Read-only
+inspection still runs on a mismatch and reports a `Session identity pin`
+warning. Mailbox repair refuses a mismatched target outside the authenticated
+pinned base unless the command also uses `--ignore-session-pin`, which
+requires an explicit non-empty `--root`; the refusal is a structured check and
+does not make `doctor` exit nonzero.
+For a base-config-only session, use
+`amq doctor --root <session> --base-root <base> --ignore-session-pin --fix-mailboxes`.
+`--base-root` requires `--root`, is used only as the retained config authority,
+and must be the same tree or the direct parent of the target; it never waives
+the session pin.
 
 `amq doctor --ops` adds runtime checks:
 
@@ -357,10 +412,19 @@ Wake lock states are intentionally conservative:
 - `stale`: AMQ proved the recorded PID is gone, mismatched, or not the same `amq wake`; `amq doctor --ops --fix-wake-locks` re-inspects and removes only these locks.
 - `unverified`: AMQ could not prove either ownership or staleness, so startup fails closed and doctor leaves the lock in place. Confirm the PID/root/agent manually before removing the `.wake.lock`.
 
-Live wake repair is explicit: `amq wake repair --me <agent>` may remove a
-proven-stale lock and start a fresh wake only when the stale lock was created
-for `--inject-via`, and `agents/<agent>/.wake.target` exists with a digest that
-matches the lock's repair metadata. `.wake.target` is mode `0600` and stores
+Before stopping or replacing a wake, run `amq wake check --me <agent>
+--json`. The probe is read-only and reports `restart_capability` as
+`agent_safe`, `operator_only`, or `unavailable`, with an exact next action.
+Only `agent_safe` authorizes an agent-side action. A non-TTY agent must leave a
+live wake running unless the probe reports `agent_safe`; `operator_only`
+requires the owning terminal or supervisor. The probe diagnoses restart
+capability but does not itself implement agent-safe restart.
+
+Live wake repair is explicit: `amq wake repair --me <agent>` may replace a
+proven-stale lock or supersede an unverified ownerless generic lock and start a
+fresh wake only when the lock was created for `--inject-via`, and
+`agents/<agent>/.wake.target` exists with a digest that matches the lock's
+repair metadata. `.wake.target` is mode `0600` and stores
 schema metadata, root, agent, creation time, `mode:"inject-via"`, an absolute
 executable path, and fixed argv. The private mode-`0600` `.wake.repair-floor`
 must also match the exact generation, target, physical root, boot, and owner
@@ -369,7 +433,9 @@ that wake, never message IDs. Repair hands that floor to the replacement rather
 than re-snapshotting `inbox/new`, so downtime arrivals and same-name DLQ retries
 remain eligible. Missing, corrupt, or mismatched floor state requires a normal
 wake restart. Raw TTY wake has no repair target; repair must refuse raw locks,
-leftover targets from old locks, and `unverified` locks.
+leftover targets from old locks, and unverified owner-bound or invalid claims.
+An unverified ownerless generic claim is superseded only after its target and
+continuity state pass the same fail-closed validation.
 Repaired wake stdout/stderr goes to
 `agents/<agent>/.wake.repair.log`; repair itself must not keep stdout/stderr
 pipes open after its JSON/text output exits. `doctor --ops` may report
@@ -397,11 +463,22 @@ another layer above daemon-free AMQ.
 
 Git worktree diagnostics stay in `doctor --ops`, never in the send routing
 path. Relative project roots and auto-detected roots are per-worktree; sharing
-requires the same absolute `.amqrc` root or `AMQ_GLOBAL_ROOT`. The deep check is
-best-effort and warns only when the same session exists under another worktree
-root with fresher peer presence. `send --wait-for` timeout text may name the
+requires the same absolute `.amqrc` root or `AMQ_GLOBAL_ROOT`. A local `.git`
+marker or bare-repository signature is also a routing safety signal: when any
+Git checkout or bare repository has no local AMQ configuration or queue,
+implicit `~/.amqrc` fallback is refused instead of
+silently selecting another project's mailbox. This check is local and does not
+scan sibling worktrees. The deep check remains best-effort in `doctor --ops`
+and warns only when the same session exists under another worktree root with
+fresher peer presence. `send --wait-for` timeout text may name the
 already-resolved delivery root/session and recommend `doctor --ops`, but must
 not scan git worktrees itself.
+
+When no higher-precedence root is eligible, the routing refusal does not block
+`coop exec`; it creates a fresh worktree-local queue at that worktree's top.
+`coop init` explicitly targets the same local top. Participating commands still
+refuse, `--no-init` declines creation, and bare repositories still require a
+worktree or explicit `--root`.
 
 Use `amq doctor --ops --json` for machine-readable health output.
 
@@ -423,7 +500,7 @@ Commands below assume `AM_ME` is set (e.g., `export AM_ME=claude`).
 | Waiting for reply | `amq watch --timeout 60s` | Blocks until message |
 | Quick peek only | `amq list --new` | Non-blocking, no side effects |
 | Filter messages | `amq list --new --priority urgent` | Show only urgent messages |
-| Background wake | `amq wake --me <agent> &` | Injects notification via TIOCSTI with best-effort input deferral, or via explicit external transport (experimental) |
+| Background wake | `amq wake --me <agent> --interrupt-cmd none &` | Injects notification via TIOCSTI with best-effort input deferral, or via explicit external transport (experimental), without Ctrl+C injection |
 | Reply to message | `amq reply --id <msg_id>` | Auto thread/refs handling |
 
 ## Co-op Mode (Claude <-> Codex, optional peers)
@@ -467,13 +544,14 @@ existing wake must already have repair metadata to be repairable.
 
 **For scripts/CI** (non-interactive):
 ```bash
-amq coop init && eval "$(amq env --me claude)"
+amq coop init && amq_context="$(amq env --me claude)" && eval "$amq_context"
 ```
 
 ### Message Priority Handling
 
 When you see a notification, run `amq drain --include-body`:
-- **urgent** → Interrupt current work, respond immediately (label `interrupt` enables wake Ctrl+C)
+- **urgent** → Interrupt current work and respond immediately. Label
+  `interrupt` enables an interrupt notice; it never enables Ctrl+C by itself.
 - **normal** → Add to TodoWrite, respond when current task done
 - **low** → Batch for end of session
 
@@ -546,11 +624,19 @@ See `.claude/skills/amq-cli/SKILL.md` for the agent-facing workflow.
 - **Task workflow**: `amq swarm join`, `amq swarm tasks`, `amq swarm claim`, `amq swarm complete`, `amq swarm fail`, `amq swarm block`
 - **Notifications**: `amq swarm bridge` watches the shared task list and delivers AMQ messages labeled `swarm` into the agent's inbox
 
-**Wake compatibility**: bridge notifications are standard AMQ inbox messages, so `amq wake` will detect them automatically. If you want swarm notifications to trigger wake interrupts, configure wake to match the bridge label and priority:
+**Wake compatibility**: bridge notifications are standard AMQ inbox messages,
+so `amq wake` detects them automatically. Bridge lifecycle events are hardcoded
+`priority=normal` plus label `swarm`; do not bind that combination to Ctrl+C.
+Use ordinary non-destructive wake:
 
 ```bash
-amq wake --me codex --interrupt-label swarm --interrupt-priority normal &
+amq wake --me codex --interrupt-cmd none &
 ```
+
+`--interrupt-cmd ctrl-c` is an explicit destructive opt-in: it sends a real
+SIGINT to the foreground process group and can interrupt or crash the agent. If
+process-level interruption is intentional, match a separate operator-controlled
+label/priority that the swarm bridge does not emit.
 
 **Direct messaging (A2A)**: the bridge only emits task lifecycle notifications.
 
@@ -564,7 +650,7 @@ amq send --me codex --to claude --thread swarm/my-team --labels swarm \
   --body "..."
 ```
 
-Leader loop options: periodic `amq drain --include-body`, tighter `amq monitor --include-body` (watch+drain), or `amq wake --me claude &` for terminal notifications.
+Leader loop options: periodic `amq drain --include-body`, tighter `amq monitor --include-body` (watch+drain), or `amq wake --me claude --interrupt-cmd none &` for terminal notifications.
 
 ## Testing
 
@@ -583,7 +669,7 @@ Key test files:
 - Files use 0600 permissions (owner read/write only)
 - Unknown handles trigger a warning by default; use `--strict` to error instead
 - With `--strict`, unreadable or corrupt `config.json` also causes an error
-- Handles must be lowercase: `[a-z0-9_-]+`
+- Handles must be lowercase, match `[a-z0-9_-]+`, and must not start with `-`.
 - Path traversal prevented via strict handle/ID validation
 
 ## Contributing

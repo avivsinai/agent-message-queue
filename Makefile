@@ -6,7 +6,7 @@ GOLANGCI_LINT_CACHE ?= $(CURDIR)/.golangci-cache
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" -o amq ./cmd/amq
-	go build -o amq-keepalive ./cmd/amq-keepalive
+	go build -ldflags "-X main.version=$(VERSION)" -o amq-keepalive ./cmd/amq-keepalive
 
 test:
 	go test ./...
@@ -24,14 +24,26 @@ lint:
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed. Install from https://golangci-lint.run/usage/install/"; exit 1; }
 	GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" golangci-lint run
 
+# Keep this hostile AMQ context tuple aligned with smoke-test.sh's startup scrub.
 smoke:
+	AM_ROOT=/smoke/inherited/root \
+	AM_ROOT_ID=smoke-inherited-root-id \
+	AM_ME=smoke-caller \
+	AM_BASE_ROOT=/smoke/inherited/base \
+	AM_BASE_ROOT_ID=smoke-inherited-base-root-id \
+	AM_SESSION=smoke-session \
+	AMQ_GLOBAL_ROOT=/smoke/inherited/global \
+	AMQ_WAKE_OWNER=smoke-inherited-wake-owner \
 	./scripts/smoke-test.sh
 
 ci: check-skills fmt-check vet lint test smoke contract-check
 
 contract-check:
 	@bash scripts/check-keepalive-amq-contract_test.sh
-	@bash scripts/check-keepalive-amq-contract.sh "$${AMQ_BIN:-amq}"
+	@candidate_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/amq-keepalive-candidate.XXXXXX")"; \
+		trap 'rm -rf "$$candidate_dir"' EXIT; \
+		go build -o "$$candidate_dir/amq" ./cmd/amq; \
+		bash scripts/check-keepalive-amq-contract.sh "$$candidate_dir/amq"
 
 # Skill integrity: skills/ is canonical, .claude/skills/ and .agents/skills/ are symlinks
 check-skills:

@@ -65,7 +65,7 @@ func TestInstallBothWritesScriptAndMergesConfigs(t *testing.T) {
 	if countCommand(codex, result.Commands[AgentCodex]) != 1 {
 		t.Fatalf("Codex command not installed exactly once:\n%s", mustMarshal(t, codex))
 	}
-	if !strings.Contains(mustMarshal(t, codex), `"timeout": 6000`) {
+	if !strings.Contains(mustMarshal(t, codex), `"timeout": 6`) {
 		t.Fatalf("Codex hook timeout missing or wrong:\n%s", mustMarshal(t, codex))
 	}
 }
@@ -147,6 +147,7 @@ func TestSessionStartScriptNormalizesInvalidTimeoutAndReturns(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
 		"AMQ_KEEPALIVE_LOG="+logPath,
+		"AMQ_KEEPALIVE_TARGET=ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D",
 		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=0",
 		"AMQ_KEEPALIVE_DEFAULT_TIMEOUT_SECONDS=1",
 		"AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS=1",
@@ -242,7 +243,8 @@ exit 7
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
 		"AMQ_KEEPALIVE_CAPTURE="+argsPath,
 		"AMQ_KEEPALIVE_LOG="+logPath,
-		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=2",
+		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=5",
+		"AMQ_KEEPALIVE_WAKE_TIMEOUT_MILLISECONDS=1000",
 		"CMUX_SURFACE_ID=F901D722-6789-4BBB-9818-C4E97F20BEB3",
 	)
 	var stdout bytes.Buffer
@@ -262,6 +264,7 @@ exit 7
 		"reattach\n",
 		"--adapter\ncmux\n",
 		"--wake-ready-timeout\n1000ms\n",
+		"--retire-detached\n",
 		"--target\ncmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3\n",
 	} {
 		if !strings.Contains(argsText, want) {
@@ -279,7 +282,7 @@ exit 7
 	}
 }
 
-func TestSessionStartScriptFallsBackToGhosttyOutsideCmux(t *testing.T) {
+func TestSessionStartScriptSkipsTargetlessGhostty(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
 	argsPath := filepath.Join(dir, "args.log")
@@ -302,16 +305,87 @@ printf '%s\n' "$@" > "$AMQ_KEEPALIVE_CAPTURE"
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("hook run error = %v", err)
 	}
+	if _, err := os.Stat(argsPath); !os.IsNotExist(err) {
+		t.Fatalf("targetless Ghostty invoked binary: stat error = %v", err)
+	}
+	logData, err := os.ReadFile(filepath.Join(dir, "session-start.log"))
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !strings.Contains(string(logData), "skip: no exact terminal target adapter=ghostty") {
+		t.Fatalf("missing targetless skip log:\n%s", logData)
+	}
+}
+
+func TestSessionStartScriptSkipsClearAndCompactSources(t *testing.T) {
+	for _, source := range []string{"clear", "compact"} {
+		t.Run(source, func(t *testing.T) {
+			dir := t.TempDir()
+			scriptPath := writeSessionStartScript(t, dir)
+			argsPath := filepath.Join(dir, "args.log")
+			logPath := filepath.Join(dir, "session-start.log")
+			binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), `#!/bin/sh
+printf '%s\n' "$@" > "$AMQ_KEEPALIVE_CAPTURE"
+`)
+
+			cmd := exec.Command("bash", scriptPath)
+			cmd.Stdin = strings.NewReader(`{"source":"` + source + `"}` + "\n")
+			cmd.Env = append(os.Environ(),
+				"AMQ_KEEPALIVE_BIN="+binaryPath,
+				"AMQ_KEEPALIVE_CAPTURE="+argsPath,
+				"AMQ_KEEPALIVE_LOG="+logPath,
+				"AMQ_KEEPALIVE_TARGET=ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D",
+			)
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("hook run error = %v", err)
+			}
+			if _, err := os.Stat(argsPath); !os.IsNotExist(err) {
+				t.Fatalf("source %q invoked binary: stat error = %v", source, err)
+			}
+			logData, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("read log: %v", err)
+			}
+			if !strings.Contains(string(logData), "skip: SessionStart source="+source) {
+				t.Fatalf("missing source skip log:\n%s", logData)
+			}
+		})
+	}
+}
+
+func TestSessionStartScriptUsesExplicitGhosttyTarget(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeSessionStartScript(t, dir)
+	argsPath := filepath.Join(dir, "args.log")
+	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), `#!/bin/sh
+printf '%s\n' "$@" > "$AMQ_KEEPALIVE_CAPTURE"
+`)
+
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Stdin = strings.NewReader(`{"source":"startup"}` + "\n")
+	cmd.Env = append(os.Environ(),
+		"AMQ_KEEPALIVE_BIN="+binaryPath,
+		"AMQ_KEEPALIVE_CAPTURE="+argsPath,
+		"AMQ_KEEPALIVE_LOG="+filepath.Join(dir, "session-start.log"),
+		"AMQ_KEEPALIVE_ADAPTER=ghostty",
+		"AMQ_KEEPALIVE_TARGET=ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D",
+	)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook run error = %v", err)
+	}
 	argsData, err := os.ReadFile(argsPath)
 	if err != nil {
 		t.Fatalf("read args: %v", err)
 	}
 	argsText := string(argsData)
-	if !strings.Contains(argsText, "--adapter\nghostty\n") {
-		t.Fatalf("args do not fall back to Ghostty:\n%s", argsText)
-	}
-	if strings.Contains(argsText, "--target\n") {
-		t.Fatalf("fallback unexpectedly supplied a target:\n%s", argsText)
+	for _, want := range []string{
+		"--adapter\nghostty\n",
+		"--retire-detached\n",
+		"--target\nghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D\n",
+	} {
+		if !strings.Contains(argsText, want) {
+			t.Fatalf("args missing %q:\n%s", want, argsText)
+		}
 	}
 }
 
@@ -330,8 +404,9 @@ printf '%s\n' "$@" > "$AMQ_KEEPALIVE_CAPTURE"
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
 		"AMQ_KEEPALIVE_CAPTURE="+argsPath,
 		"AMQ_KEEPALIVE_LOG="+logPath,
-		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=2",
-		"AMQ_KEEPALIVE_WAKE_TIMEOUT_MILLISECONDS=2000",
+		"AMQ_KEEPALIVE_TARGET=ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D",
+		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=3",
+		"AMQ_KEEPALIVE_WAKE_TIMEOUT_MILLISECONDS=3000",
 	)
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("hook run error = %v", err)
@@ -340,14 +415,14 @@ printf '%s\n' "$@" > "$AMQ_KEEPALIVE_CAPTURE"
 	if err != nil {
 		t.Fatalf("read args: %v", err)
 	}
-	if !strings.Contains(string(argsData), "--wake-ready-timeout\n1500ms\n") {
+	if !strings.Contains(string(argsData), "--wake-ready-timeout\n2500ms\n") {
 		t.Fatalf("inner timeout was not clamped below outer watchdog:\n%s", argsData)
 	}
 	logData, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
-	if !strings.Contains(string(logData), "wake timeout 2000ms must be shorter than outer 2000ms; using 1500ms") {
+	if !strings.Contains(string(logData), "wake timeout 3000ms must be shorter than outer 3000ms; using 2500ms") {
 		t.Fatalf("clamp was not logged:\n%s", logData)
 	}
 }

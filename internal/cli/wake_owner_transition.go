@@ -140,6 +140,14 @@ func validateGenericWakeLifecycleTransition(
 	if reason == "" {
 		reason = "persisted wake claim is not a valid ownerless generation"
 	}
+	if inspection.observationErr != nil {
+		return fmt.Errorf(
+			"wake state for %s is unverified; refusing generic %s: cannot read lock: %w",
+			inspection.Agent,
+			operation,
+			inspection.observationErr,
+		)
+	}
 	return fmt.Errorf(
 		"wake state for %s is unverified; refusing generic %s: %s",
 		inspection.Agent,

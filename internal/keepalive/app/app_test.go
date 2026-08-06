@@ -65,6 +65,25 @@ func TestNewPassProbeLeavesGhosttyOnDirectProbePath(t *testing.T) {
 	}
 }
 
+func TestSameCanonicalRootAgentRecognizesSymlinkAliases(t *testing.T) {
+	dir := t.TempDir()
+	realRoot := filepath.Join(dir, "real-root")
+	if err := os.Mkdir(realRoot, 0o700); err != nil {
+		t.Fatalf("Mkdir root: %v", err)
+	}
+	aliasRoot := filepath.Join(dir, "alias-root")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Fatalf("Symlink root alias: %v", err)
+	}
+	same, err := sameCanonicalRootAgent(
+		registry.Entry{Root: realRoot, Agent: "codex"},
+		registry.Entry{Root: aliasRoot, Agent: "codex"},
+	)
+	if err != nil || !same {
+		t.Fatalf("sameCanonicalRootAgent() = %v, %v; want true, nil", same, err)
+	}
+}
+
 func TestRegistrationTargetInventoryUsesGhosttyDirectProbe(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("Ghostty adapter requires macOS")
@@ -72,8 +91,8 @@ func TestRegistrationTargetInventoryUsesGhosttyDirectProbe(t *testing.T) {
 	calls := 0
 	selected := adapter.Ghostty{Runner: appCommandRunnerFunc(func(_ context.Context, name string, args ...string) ([]byte, error) {
 		calls++
-		if name != "osascript" || len(args) < 3 || args[len(args)-1] != "terminal-1" {
-			t.Fatalf("Probe call = %q %#v, want osascript terminal-1", name, args)
+		if name != "osascript" || len(args) < 3 || args[len(args)-1] != "TERMINAL-1" {
+			t.Fatalf("Probe call = %q %#v, want osascript canonical terminal ID TERMINAL-1", name, args)
 		}
 		return nil, nil
 	})}
@@ -100,6 +119,8 @@ func TestReattachReplacesCurrentSessionAdapterEntry(t *testing.T) {
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
 	otherTarget := filepath.Join(dir, "other-inbox.txt")
+	canonicalNewTarget := normalizedFileTarget(t, newTarget)
+	canonicalOtherTarget := normalizedFileTarget(t, otherTarget)
 
 	runApp(t, "attach",
 		"--registry", registryPath,
@@ -144,11 +165,97 @@ func TestReattachReplacesCurrentSessionAdapterEntry(t *testing.T) {
 	for _, entry := range loaded.Entries {
 		targets[entry.Agent] = entry.Target
 	}
-	if targets["codex"] != newTarget {
-		t.Fatalf("codex target = %q, want %q", targets["codex"], newTarget)
+	if targets["codex"] != canonicalNewTarget {
+		t.Fatalf("codex target = %q, want normalized %q", targets["codex"], canonicalNewTarget)
 	}
-	if targets["claude"] != otherTarget {
-		t.Fatalf("claude target = %q, want %q", targets["claude"], otherTarget)
+	if targets["claude"] != canonicalOtherTarget {
+		t.Fatalf("claude target = %q, want normalized %q", targets["claude"], canonicalOtherTarget)
+	}
+}
+
+func TestAttachRejectsSecondRegistrationForSameAMQRootAndAgent(t *testing.T) {
+	dir := t.TempDir()
+	registryPath := filepath.Join(dir, "registry.json")
+	firstTarget := filepath.Join(dir, "first-inbox.txt")
+	secondTarget := filepath.Join(dir, "second-inbox.txt")
+	canonicalFirstTarget, err := (adapter.File{}).NormalizeTarget(firstTarget)
+	if err != nil {
+		t.Fatalf("NormalizeTarget(first target): %v", err)
+	}
+	root := filepath.Join(dir, "amq-root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatalf("Mkdir root: %v", err)
+	}
+	runApp(t, "attach",
+		"--registry", registryPath,
+		"--adapter", "file",
+		"--target", firstTarget,
+		"--root", root,
+		"--base-root", dir,
+		"--session", "amq-root",
+		"--me", "codex",
+		"--no-start",
+	)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{
+		"attach", "--registry", registryPath, "--adapter", "file", "--target", secondTarget,
+		"--root", root, "--base-root", dir, "--session", "amq-root", "--me", "codex", "--no-start",
+	})
+	if code != 1 || !strings.Contains(stderr.String(), registry.ErrRegistrationOwned.Error()) {
+		t.Fatalf("second attach code=%d stderr=%s, want root-agent ownership refusal", code, stderr.String())
+	}
+	loaded, err := registry.New(registryPath).Load()
+	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Target != canonicalFirstTarget {
+		t.Fatalf("second attach poisoned registry: entries=%#v err=%v", loaded.Entries, err)
+	}
+}
+
+func TestAttachRejectsCanonicalRootAliasWithoutStartingWake(t *testing.T) {
+	dir := t.TempDir()
+	registryPath := filepath.Join(dir, "registry.json")
+	realRoot := filepath.Join(dir, "real-root")
+	if err := os.Mkdir(realRoot, 0o700); err != nil {
+		t.Fatalf("Mkdir root: %v", err)
+	}
+	aliasRoot := filepath.Join(dir, "alias-root")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Fatalf("Symlink root alias: %v", err)
+	}
+	canonicalRoot, err := registry.CanonicalRoot(realRoot)
+	if err != nil {
+		t.Fatalf("CanonicalRoot(real root): %v", err)
+	}
+	firstTarget := filepath.Join(dir, "first-inbox.txt")
+	secondTarget := filepath.Join(dir, "second-inbox.txt")
+	canonicalFirstTarget, err := (adapter.File{}).NormalizeTarget(firstTarget)
+	if err != nil {
+		t.Fatalf("NormalizeTarget(first target): %v", err)
+	}
+	runApp(t, "attach", "--registry", registryPath, "--adapter", "file", "--target", firstTarget,
+		"--root", realRoot, "--base-root", dir, "--session", "real-root", "--me", "codex", "--no-start")
+
+	amqCalls := filepath.Join(dir, "amq-calls.log")
+	fakeAMQ := filepath.Join(dir, "amq")
+	if err := os.WriteFile(fakeAMQ, []byte("#!/bin/sh\nprintf wake >> \"$AMQ_KEEPALIVE_AMQ_CALLS\"\nexit 7\n"), 0o700); err != nil {
+		t.Fatalf("write fake amq: %v", err)
+	}
+	t.Setenv("AMQ_KEEPALIVE_AMQ_CALLS", amqCalls)
+	var stderr bytes.Buffer
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Run(context.Background(), []string{
+		"attach", "--registry", registryPath, "--adapter", "file", "--target", secondTarget,
+		"--root", aliasRoot, "--base-root", dir, "--session", "real-root", "--me", "codex", "--amq", fakeAMQ,
+	})
+	if code != 1 || !strings.Contains(stderr.String(), registry.ErrRegistrationOwned.Error()) {
+		t.Fatalf("alias attach code=%d stderr=%s, want root-agent ownership refusal", code, stderr.String())
+	}
+	if _, err := os.Stat(amqCalls); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected second attach started a wake: stat err=%v", err)
+	}
+	loaded, err := registry.New(registryPath).Load()
+	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Root != canonicalRoot || loaded.Entries[0].Target != canonicalFirstTarget {
+		t.Fatalf("alias attach poisoned registry: entries=%#v err=%v", loaded.Entries, err)
 	}
 }
 
@@ -218,7 +325,7 @@ func TestReattachRejectsDifferentSurfaceAliasOnOwnedPhysicalTTY(t *testing.T) {
 	}
 }
 
-func TestReattachTrustsOnlyCurrentCmuxSurfaceAndEvictsCorpseAlias(t *testing.T) {
+func TestReattachDoesNotEvictUnknownCmuxAliasForCurrentSurface(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("cmux adapter requires macOS")
 	}
@@ -234,24 +341,13 @@ func TestReattachTrustsOnlyCurrentCmuxSurfaceAndEvictsCorpseAlias(t *testing.T) 
 	}
 
 	initialTree := []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"ttys011"},{"id":"B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2","tty":"ttys011"}]}]}]}]}`)
-	rebuiltTree := []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"amq-evicted-corpse"},{"id":"B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2","tty":"ttys011"}]}]}]}]}`)
 	var calls [][]string
 	runner := appCommandRunnerFunc(func(_ context.Context, _ string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string{}, args...))
-		switch len(calls) {
-		case 1:
-			return initialTree, nil
-		case 2:
-			if len(args) < 2 || args[1] != "surface.report_tty" {
-				t.Fatalf("call 2 args = %#v, want surface.report_tty", args)
-			}
-			return []byte(`{"ok":true}`), nil
-		case 3:
-			return rebuiltTree, nil
-		default:
+		if len(calls) != 1 {
 			t.Fatalf("unexpected cmux call %d: %#v", len(calls), args)
-			return nil, nil
 		}
+		return initialTree, nil
 	})
 	adapters := adapter.NewRegistry(adapter.Cmux{
 		Runner: runner,
@@ -263,8 +359,7 @@ func TestReattachTrustsOnlyCurrentCmuxSurfaceAndEvictsCorpseAlias(t *testing.T) 
 			return ""
 		},
 		LiveTTYOwnerCount: func(string) (int, error) {
-			t.Fatal("trusted registration candidate must not depend on kernel liveness")
-			return 0, errors.New("unreachable")
+			return 1, nil
 		},
 	})
 	var stderr bytes.Buffer
@@ -272,18 +367,18 @@ func TestReattachTrustsOnlyCurrentCmuxSurfaceAndEvictsCorpseAlias(t *testing.T) 
 		"reattach", "--registry", registryPath, "--adapter", "cmux", "--target", liveTarget,
 		"--root", "/tmp/second", "--base-root", "/tmp", "--session", "second", "--me", "claude", "--no-start",
 	})
-	if code != 0 {
-		t.Fatalf("code=%d stderr=%s, want trusted registration success", code, stderr.String())
+	if code != 1 || !strings.Contains(stderr.String(), "2 live surface aliases") {
+		t.Fatalf("code=%d stderr=%s, want fail-closed alias ambiguity", code, stderr.String())
 	}
-	if len(calls) != 3 {
-		t.Fatalf("cmux calls=%d, want tree, eviction, rebuilt tree", len(calls))
+	if len(calls) != 1 {
+		t.Fatalf("cmux calls=%d, want tree only and no eviction", len(calls))
 	}
 	loaded, err := store.Load()
 	if err != nil {
 		t.Fatalf("Load registry: %v", err)
 	}
-	if len(loaded.Entries) != 2 {
-		t.Fatalf("entries=%#v, want preserved corpse row plus new live row", loaded.Entries)
+	if len(loaded.Entries) != 1 || loaded.Entries[0].Target != corpseTarget {
+		t.Fatalf("entries=%#v, want existing row preserved without new alias", loaded.Entries)
 	}
 }
 
@@ -291,6 +386,7 @@ func TestConcurrentReattachClaimStartsOnlyWinningWake(t *testing.T) {
 	dir := t.TempDir()
 	registryPath := filepath.Join(dir, "registry.json")
 	target := filepath.Join(dir, "inbox.txt")
+	canonicalTarget := normalizedFileTarget(t, target)
 	if err := os.WriteFile(target, nil, 0o600); err != nil {
 		t.Fatalf("write target: %v", err)
 	}
@@ -335,7 +431,7 @@ sleep 0.1
 		t.Fatalf("wake calls=%q err=%v, want exactly one start", data, err)
 	}
 	loaded, err := registry.New(registryPath).Load()
-	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Target != target {
+	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Target != canonicalTarget {
 		t.Fatalf("winning registry entries=%#v err=%v", loaded.Entries, err)
 	}
 }
@@ -345,6 +441,7 @@ func TestReattachPreservesRegistryWhenWakeTargetCannotChange(t *testing.T) {
 	registryPath := filepath.Join(dir, "registry.json")
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
+	canonicalOldTarget := normalizedFileTarget(t, oldTarget)
 	runApp(t, "attach",
 		"--registry", registryPath,
 		"--adapter", "file",
@@ -383,7 +480,7 @@ func TestReattachPreservesRegistryWhenWakeTargetCannotChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if len(loaded.Entries) != 1 || loaded.Entries[0].Target != oldTarget {
+	if len(loaded.Entries) != 1 || loaded.Entries[0].Target != canonicalOldTarget {
 		t.Fatalf("entries = %#v, want old target restored", loaded.Entries)
 	}
 }
@@ -393,6 +490,8 @@ func TestReattachPersistsRecoverableReservationBeforeWakeReadiness(t *testing.T)
 	registryPath := filepath.Join(dir, "registry.json")
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
+	canonicalOldTarget := normalizedFileTarget(t, oldTarget)
+	canonicalNewTarget := normalizedFileTarget(t, newTarget)
 	runApp(t, "attach",
 		"--registry", registryPath,
 		"--adapter", "file",
@@ -440,7 +539,7 @@ exit 7
 	if err != nil {
 		t.Fatalf("Load(in-flight) error = %v", err)
 	}
-	if len(loaded.Entries) != 1 || loaded.Entries[0].Target != newTarget || loaded.Entries[0].State != registry.StateAttached {
+	if len(loaded.Entries) != 1 || loaded.Entries[0].Target != canonicalNewTarget || loaded.Entries[0].State != registry.StateAttached {
 		t.Fatalf("in-flight entries = %#v, want inactive candidate reservation", loaded.Entries)
 	}
 	if err := os.WriteFile(releasePath, []byte("release"), 0o600); err != nil {
@@ -453,7 +552,7 @@ exit 7
 	if err != nil {
 		t.Fatalf("Load(final) error = %v", err)
 	}
-	if len(loaded.Entries) != 1 || loaded.Entries[0].Target != oldTarget {
+	if len(loaded.Entries) != 1 || loaded.Entries[0].Target != canonicalOldTarget {
 		t.Fatalf("final entries = %#v, want old target preserved", loaded.Entries)
 	}
 }
@@ -463,6 +562,7 @@ func TestReattachPersistsCandidateOnlyAfterWakeReady(t *testing.T) {
 	registryPath := filepath.Join(dir, "registry.json")
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
+	canonicalNewTarget := normalizedFileTarget(t, newTarget)
 	runApp(t, "attach",
 		"--registry", registryPath,
 		"--adapter", "file",
@@ -501,7 +601,7 @@ printf ready > "$ready"
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if len(loaded.Entries) != 1 || loaded.Entries[0].Target != newTarget {
+	if len(loaded.Entries) != 1 || loaded.Entries[0].Target != canonicalNewTarget {
 		t.Fatalf("entries = %#v, want ready candidate persisted", loaded.Entries)
 	}
 	if loaded.Entries[0].State != registry.StateActive || loaded.Entries[0].LastSupervisorDecision != "ensured" {
@@ -514,6 +614,7 @@ func TestReattachCancellationPreservesReservationForLateReadyWake(t *testing.T) 
 	registryPath := filepath.Join(dir, "registry.json")
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
+	canonicalNewTarget := normalizedFileTarget(t, newTarget)
 	for _, path := range []string{oldTarget, newTarget} {
 		if err := os.WriteFile(path, nil, 0o600); err != nil {
 			t.Fatalf("write target %s: %v", path, err)
@@ -562,7 +663,7 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 		t.Fatalf("code=%d stderr=%s, want uncertain readiness with preserved reservation", code, stderr.String())
 	}
 	loaded, err := registry.New(registryPath).Load()
-	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Target != newTarget || loaded.Entries[0].State != registry.StateAttached {
+	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Target != canonicalNewTarget || loaded.Entries[0].State != registry.StateAttached {
 		t.Fatalf("late-ready reservation entries=%#v err=%v", loaded.Entries, err)
 	}
 	if err := os.WriteFile(allowReady, nil, 0o600); err != nil {
@@ -1534,6 +1635,15 @@ func runApp(t *testing.T, args ...string) {
 	if code != 0 {
 		t.Fatalf("Run(%v) = %d\nstdout:\n%s\nstderr:\n%s", args, code, stdout.String(), stderr.String())
 	}
+}
+
+func normalizedFileTarget(t *testing.T, target string) string {
+	t.Helper()
+	normalized, err := (adapter.File{}).NormalizeTarget(target)
+	if err != nil {
+		t.Fatalf("NormalizeTarget(%q): %v", target, err)
+	}
+	return normalized
 }
 
 func waitForPath(t *testing.T, path string, timeout time.Duration) {

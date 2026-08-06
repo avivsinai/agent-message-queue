@@ -56,6 +56,7 @@ type Store struct {
 
 var ErrCorrupt = errors.New("registry file is corrupt")
 var ErrTargetOwned = errors.New("adapter target is already owned")
+var ErrRegistrationOwned = errors.New("AMQ root and agent already have a wake registration")
 
 type EntryUpdate struct {
 	Before Entry
@@ -93,8 +94,34 @@ func DefaultPath() (string, error) {
 }
 
 func EntryID(root, agent, adapterName, target string) string {
-	sum := sha256.Sum256([]byte(root + "\x00" + agent + "\x00" + adapterName + "\x00" + target))
+	sum := sha256.Sum256([]byte(canonicalRoot(root) + "\x00" + agent + "\x00" + adapterName + "\x00" + target))
 	return hex.EncodeToString(sum[:])
+}
+
+// CanonicalRoot returns the stable filesystem identity used for AMQ wake
+// ownership. Existing roots are resolved through symlinks; a not-yet-created
+// root still receives an absolute, cleaned spelling so registration remains
+// deterministic before AMQ creates its layout.
+func CanonicalRoot(root string) (string, error) {
+	if strings.TrimSpace(root) == "" {
+		return "", errors.New("entry root is required")
+	}
+	abs, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return "", err
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real, nil
+	}
+	return abs, nil
+}
+
+func canonicalRoot(root string) string {
+	canonical, err := CanonicalRoot(root)
+	if err != nil {
+		return filepath.Clean(root)
+	}
+	return canonical
 }
 
 func (s *Store) Load() (File, error) {
@@ -253,6 +280,17 @@ func (s *Store) Upsert(entry Entry) (Entry, error) {
 		if err != nil {
 			return err
 		}
+		if owner, ok := conflictingRegistrationOwner(file.Entries, prepared); ok {
+			if sameRegistration(owner, prepared) {
+				for i := range file.Entries {
+					if file.Entries[i].ID == owner.ID {
+						file.Entries[i] = prepared
+						return s.saveUnlocked(file)
+					}
+				}
+			}
+			return registrationOwnedError(prepared, owner)
+		}
 		if owner, ok := conflictingTargetOwner(file.Entries, prepared, false); ok {
 			return targetOwnedError(prepared, owner)
 		}
@@ -291,7 +329,7 @@ func (s *Store) ReplaceSessionAdapter(entry Entry) (Entry, []Entry, error) {
 		for _, existing := range file.Entries {
 			// AMQ permits one wake process per root and agent. Reattach therefore
 			// replaces the old registration even when the terminal adapter changed.
-			if existing.Root == prepared.Root && existing.Agent == prepared.Agent {
+			if sameRootAgent(existing, prepared) {
 				removed = append(removed, existing)
 				continue
 			}
@@ -320,7 +358,7 @@ func (s *Store) RestoreSessionAdapterIfUnchanged(expected Entry, previous []Entr
 		}
 		index := -1
 		for i, entry := range file.Entries {
-			if entry.Root == expected.Root && entry.Agent == expected.Agent && entry.ID != expected.ID {
+			if sameRootAgent(entry, expected) && entry.ID != expected.ID {
 				return nil
 			}
 			if entry.ID == expected.ID {
@@ -369,9 +407,11 @@ func (s *Store) CheckTargetAvailable(entry Entry, ignoreSameRootAgent bool) erro
 
 func (s *Store) prepareEntry(entry Entry) (Entry, error) {
 	now := s.now()
-	if entry.Root == "" {
-		return Entry{}, errors.New("entry root is required")
+	root, err := CanonicalRoot(entry.Root)
+	if err != nil {
+		return Entry{}, err
 	}
+	entry.Root = root
 	if entry.Agent == "" {
 		return Entry{}, errors.New("entry agent is required")
 	}
@@ -550,7 +590,7 @@ func conflictingTargetOwner(entries []Entry, candidate Entry, ignoreSameRootAgen
 		if existing.ID == candidate.ID {
 			continue
 		}
-		if ignoreSameRootAgent && existing.Root == candidate.Root && existing.Agent == candidate.Agent {
+		if ignoreSameRootAgent && sameRootAgent(existing, candidate) {
 			continue
 		}
 		if existing.Adapter == candidate.Adapter && canonicalStoredTarget(existing.Adapter, existing.Target) == candidateTarget {
@@ -560,14 +600,58 @@ func conflictingTargetOwner(entries []Entry, candidate Entry, ignoreSameRootAgen
 	return Entry{}, false
 }
 
+func conflictingRegistrationOwner(entries []Entry, candidate Entry) (Entry, bool) {
+	for _, existing := range entries {
+		if existing.ID == candidate.ID {
+			continue
+		}
+		if sameRootAgent(existing, candidate) {
+			return existing, true
+		}
+	}
+	return Entry{}, false
+}
+
+func sameRegistration(left, right Entry) bool {
+	return sameRootAgent(left, right) &&
+		left.Adapter == right.Adapter &&
+		canonicalStoredTarget(left.Adapter, left.Target) == canonicalStoredTarget(right.Adapter, right.Target)
+}
+
+func sameRootAgent(left, right Entry) bool {
+	return left.Agent == right.Agent && canonicalRoot(left.Root) == canonicalRoot(right.Root)
+}
+
 func canonicalStoredTarget(adapterName, target string) string {
 	target = strings.TrimSpace(target)
-	if adapterName == "cmux" {
+	switch adapterName {
+	case "cmux", "ghostty":
 		// UUIDs are case-insensitive. This also protects new canonical writers
-		// from legacy registry rows which persisted lower-case cmux targets.
+		// from legacy registry rows which persisted lower-case terminal IDs.
 		return strings.ToLower(target)
+	case "file":
+		return canonicalStoredFileTarget(target)
 	}
 	return target
+}
+
+// canonicalStoredFileTarget mirrors the durable identity portion of the file
+// adapter's normalization without rejecting legacy rows that can no longer be
+// fully resolved. A visible target resolves through symlinks; for a not-yet-
+// created file, resolving its parent still prevents alias paths from claiming
+// the same future destination independently.
+func canonicalStoredFileTarget(target string) string {
+	abs, err := filepath.Abs(filepath.Clean(target))
+	if err != nil {
+		return filepath.Clean(target)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return filepath.Clean(resolved)
+	}
+	if parent, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		return filepath.Join(filepath.Clean(parent), filepath.Base(abs))
+	}
+	return abs
 }
 
 func targetOwnedError(candidate, owner Entry) error {
@@ -580,6 +664,20 @@ func targetOwnedError(candidate, owner Entry) error {
 		candidate.Root,
 		owner.Agent,
 		owner.Root,
+		owner.ID,
+	)
+}
+
+func registrationOwnedError(candidate, owner Entry) error {
+	return fmt.Errorf(
+		"%w: requested_adapter=%q requested_target=%q requested_by=%s@%s existing_adapter=%q existing_target=%q existing_id=%s",
+		ErrRegistrationOwned,
+		candidate.Adapter,
+		candidate.Target,
+		candidate.Agent,
+		candidate.Root,
+		owner.Adapter,
+		owner.Target,
 		owner.ID,
 	)
 }

@@ -90,18 +90,12 @@ func TestWakeRepairNotifiesMessageDeliveredDuringDowntime(t *testing.T) {
 		"--json",
 	)
 	repair.Env = wakeContinuityCLIEnv()
-	output, err := repair.CombinedOutput()
-	if err != nil {
-		t.Fatalf("repair wake: %v\noutput: %s", err, output)
-	}
 	var result wakeRepairResult
-	if err := json.Unmarshal(output, &result); err != nil {
-		t.Fatalf("decode repair result: %v\noutput: %s", err, output)
-	}
-	if result.Status != "repaired" {
-		t.Fatalf("repair result = %#v", result)
-	}
 	t.Cleanup(func() {
+		pid := result.PID
+		if pid <= 0 {
+			pid = inspectWakeLock(root, "codex").PID
+		}
 		retire := exec.Command(
 			helper,
 			"--no-update-check",
@@ -114,17 +108,27 @@ func TestWakeRepairNotifiesMessageDeliveredDuringDowntime(t *testing.T) {
 		)
 		retire.Env = wakeContinuityCLIEnv()
 		retireOutput, retireErr := retire.CombinedOutput()
-		if stopped := stopWakeContinuityHelper(result.PID, helper, root, "codex"); !stopped && retireErr != nil {
+		if stopped := stopWakeContinuityHelper(pid, helper, root, "codex"); !stopped && retireErr != nil {
 			t.Logf("stop repaired wake: retire=%v output=%s", retireErr, retireOutput)
 		}
 	})
-
-	deadline := time.Now().Add(2 * time.Second)
+	output, err := repair.CombinedOutput()
+	if err != nil {
+		t.Fatalf("repair wake: %v\noutput: %s", err, output)
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode repair result: %v\noutput: %s", err, output)
+	}
+	if result.Status != "repaired" {
+		t.Fatalf("repair result = %#v", result)
+	}
+	deadline := time.Now().Add(wakeDoorbellRetryBase + 2*time.Second)
 	for time.Now().Before(deadline) {
 		data, readErr := os.ReadFile(injectedPath)
-		if readErr == nil && strings.Contains(string(data), "urgent message delivered during downtime") {
-			if strings.Contains(string(data), "startup backlog") {
-				t.Fatalf("repaired wake re-notified the startup backlog: %q", data)
+		if readErr == nil && strings.Contains(string(data), coopWakeDoorbell) {
+			if strings.Contains(string(data), "urgent message delivered during downtime") ||
+				strings.Contains(string(data), "startup backlog") {
+				t.Fatalf("repaired wake injected peer-derived message text: %q", data)
 			}
 			return
 		}
@@ -134,10 +138,18 @@ func TestWakeRepairNotifiesMessageDeliveredDuringDowntime(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	data, _ := os.ReadFile(injectedPath)
-	t.Fatalf("repaired wake suppressed the downtime message; injected output: %q", data)
+	repairLog, _ := os.ReadFile(filepath.Join(fsq.AgentBase(root, "codex"), ".wake.repair.log"))
+	t.Fatalf(
+		"repaired wake suppressed the downtime message; injected output: %q\nrepair log:\n%s",
+		data,
+		repairLog,
+	)
 }
 
 func stopWakeContinuityHelper(pid int, helper, root, me string) bool {
+	if pid <= 0 {
+		return true
+	}
 	proc := inspectWakeProcessPlatform(pid)
 	if !proc.Running {
 		return true
