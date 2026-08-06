@@ -1970,7 +1970,7 @@ func awaitWakeAttentionFrom(
 	}
 }
 
-func TestRunWakeLoopRetriesPendingDoorbellWithoutOutputFlood(t *testing.T) {
+func TestRunWakeLoopRetriesPendingDoorbellWithSubmitOnlyNudge(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	message := format.Message{
@@ -1998,13 +1998,29 @@ func TestRunWakeLoopRetriesPendingDoorbellWithoutOutputFlood(t *testing.T) {
 	})
 	stubRawInjectSleep(t)
 	firstDoorbell := make(chan struct{}, 1)
-	extraDoorbell := make(chan struct{}, 1)
+	retypedDoorbell := make(chan struct{}, 1)
+	reminderSubmit := make(chan struct{}, 1)
 	attention := make(chan string, 1)
 	stop := make(chan struct{})
 	done := make(chan error, 1)
-	doorbells := 0
+	loopDone := make(chan struct{})
+	defer func() {
+		select {
+		case <-stop:
+		default:
+			close(stop)
+		}
+		select {
+		case <-loopDone:
+		case <-time.After(2 * time.Second):
+			t.Error("wake loop did not stop during cleanup")
+		}
+	}()
+	doorbellPayloads := 0
+	submitKeys := 0
 
 	go func() {
+		defer close(loopDone)
 		done <- runWakeLoop(wakeConfig{
 			root:        root,
 			me:          "codex",
@@ -2016,12 +2032,18 @@ func TestRunWakeLoopRetriesPendingDoorbellWithoutOutputFlood(t *testing.T) {
 				return nil
 			},
 			terminalWrite: func(text string) error {
-				if strings.Contains(text, coopWakeDoorbell) {
-					doorbells++
-					if doorbells == 1 {
+				if text == coopWakeDoorbell {
+					doorbellPayloads++
+					if doorbellPayloads == 1 {
 						firstDoorbell <- struct{}{}
 					} else {
-						extraDoorbell <- struct{}{}
+						retypedDoorbell <- struct{}{}
+					}
+				}
+				if text == "\r" {
+					submitKeys++
+					if submitKeys == 4 {
+						reminderSubmit <- struct{}{}
 					}
 				}
 				return nil
@@ -2043,11 +2065,11 @@ func TestRunWakeLoopRetriesPendingDoorbellWithoutOutputFlood(t *testing.T) {
 	}
 
 	select {
-	case <-extraDoorbell:
+	case <-reminderSubmit:
 	case err := <-done:
 		t.Fatalf("wake loop exited before retry: %v", err)
 	case <-time.After(wakeDoorbellRetryBase + 2*time.Second):
-		t.Fatal("pending doorbell was not retried on its own deadline")
+		t.Fatal("pending doorbell did not receive a submit-only nudge on its own deadline")
 	}
 	close(stop)
 	select {
@@ -2057,6 +2079,11 @@ func TestRunWakeLoopRetriesPendingDoorbellWithoutOutputFlood(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("wake loop did not stop")
+	}
+	select {
+	case <-retypedDoorbell:
+		t.Fatal("submit-only reminder retyped the fixed doorbell payload")
+	default:
 	}
 	select {
 	case output := <-attention:
