@@ -8,6 +8,29 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.53.0](https://github.com/avivsinai/agent-message-queue/compare/v0.52.6...v0.53.0) (2026-08-06)
+
+
+### Features
+
+* **wake:** enforce fail-closed bound-state reads ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** gate bound-lock mutations and document rollback ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** publish state-bound locks for new claims ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+
+
+### Bug Fixes
+
+* **doctor:** fail closed on root-wide wake quarantine scan errors ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** apply submit-only reminder nudge to all injecting wakes, not just owner-bound ([#449](https://github.com/avivsinai/agent-message-queue/issues/449)) ([a179217](https://github.com/avivsinai/agent-message-queue/commit/a1792171690aaf8480cf4e21943acb0c65df6c68))
+* **wake:** close P2b review contract gaps ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** name a runnable orphan-target remedy ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** quarantine orphan lifecycle artifacts ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** reconcile bound prepared projections ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** reject ambiguous lock JSON ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** retire exact claims durably ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** retry bound state observation failures ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+* **wake:** surface inconclusive doctor target reads ([82fc2ae](https://github.com/avivsinai/agent-message-queue/commit/82fc2ae57552eebcbebe6b935d896b3f37df4395))
+
 ## [0.52.6](https://github.com/avivsinai/agent-message-queue/compare/v0.52.5...v0.52.6) (2026-08-06)
 
 
