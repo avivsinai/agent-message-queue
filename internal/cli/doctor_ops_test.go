@@ -140,6 +140,23 @@ func TestRunOpsChecks_DoorbellParkedHintRequiresUnreadBacklog(t *testing.T) {
 	if err := os.Chtimes(messagePath, time.Now().Add(-90*time.Second), time.Now().Add(-90*time.Second)); err != nil {
 		t.Fatal(err)
 	}
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		ProcessStart: "verified-start",
+		BootID:       "verified-boot",
+		Executable:   "amq",
+		Args:         []string{"amq", "wake", "--root", root, "--me", "codex"},
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "verified-start",
+			BootID:     "verified-boot",
+			Executable: "/usr/local/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", "codex"},
+		}
+	})
 
 	parkedResult := runOpsChecks(root, "test", false)
 	hint, ok := findOpsHint(parkedResult.Hints, "doorbell_parked")
@@ -166,6 +183,17 @@ func TestRunOpsChecks_DoorbellParkedHintRequiresUnreadBacklog(t *testing.T) {
 		!parkedResult.Agents[0].DoorbellParked ||
 		parkedResult.Agents[0].DoorbellAttempts != 4 {
 		t.Fatalf("parked agent state = %#v", parkedResult.Agents)
+	}
+
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	stalePresenceResult := runOpsChecks(root, "test", false)
+	if hint, ok := findOpsHint(stalePresenceResult.Hints, "doorbell_parked"); ok {
+		t.Fatalf("parked presence without a live notifier emitted hint: %#v", hint)
+	}
+	if _, ok := findOpsHint(stalePresenceResult.Hints, "unread_backlog_no_notifier"); !ok {
+		t.Fatalf("absent notifier warning missing: %#v", stalePresenceResult.Hints)
 	}
 
 	activePresence := `{"schema":1,"handle":"codex","status":"active","last_seen":"2026-08-04T12:00:00Z"}`

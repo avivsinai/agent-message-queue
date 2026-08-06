@@ -40,13 +40,70 @@ func wakeControlSocketPath(root, me, generation string) string {
 	return filepath.Join(fsq.AgentBase(root, me), ".w."+hex.EncodeToString(sum[:8]))
 }
 
-func removeWakeLockIfUnchangedAt(dirfd int, agentDir *wakeAgentDir, inspection wakeLockInspection) error {
-	path := filepath.Join(agentDir.path, ".wake.lock")
-	return removeWakeLockIfUnchangedGuardedWithIO(
-		inspection,
-		func() ([]byte, os.FileInfo, error) { return readWakeLockFileAt(dirfd, path) },
-		func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
-	)
+const wakeControlInjectViaACKMaxBytes = 256
+
+func wakeControlResidueACK(err error) string {
+	residue := wakeLockRemovalResiduesFromError(err)
+	if len(residue) == 0 {
+		return "ACK RESIDUE\n"
+	}
+	tokens := make([]string, 0, len(residue))
+	for _, cause := range residue {
+		switch cause {
+		case wakeLockResidueDurability:
+			tokens = append(tokens, "durability")
+		case wakeLockResidueDetachedCleanup:
+			tokens = append(tokens, "detached-cleanup")
+		default:
+			return "ACK RESIDUE\n"
+		}
+	}
+	return "ACK RESIDUE " + strings.Join(tokens, ",") + "\n"
+}
+
+func parseWakeControlResidueACK(line string) ([]wakeLockRemovalResidue, error) {
+	response := strings.TrimSpace(line)
+	switch response {
+	case "ACK":
+		return nil, nil
+	case "ACK RESIDUE":
+		return []wakeLockRemovalResidue{wakeLockResidueCleanup}, nil
+	}
+	const prefix = "ACK RESIDUE "
+	if !strings.HasPrefix(response, prefix) {
+		return nil, fmt.Errorf("cooperative wake stop refused")
+	}
+	var residue []wakeLockRemovalResidue
+	for _, token := range strings.Split(strings.TrimPrefix(response, prefix), ",") {
+		var cause wakeLockRemovalResidue
+		switch token {
+		case "durability":
+			cause = wakeLockResidueDurability
+		case "detached-cleanup":
+			cause = wakeLockResidueDetachedCleanup
+		default:
+			return nil, fmt.Errorf("cooperative wake stop refused")
+		}
+		next := appendWakeLockRemovalResidue(residue, cause)
+		if len(next) == len(residue) {
+			return nil, fmt.Errorf("cooperative wake stop refused")
+		}
+		residue = next
+	}
+	return residue, nil
+}
+
+func wakeControlResidueError(cause wakeLockRemovalResidue) error {
+	var detail string
+	switch cause {
+	case wakeLockResidueDurability:
+		detail = "listener removed the exact wake lock but could not confirm its durability"
+	case wakeLockResidueDetachedCleanup:
+		detail = "listener removed the exact wake lock from detached retained authority; preserving detached wake artifacts"
+	default:
+		detail = "listener removed the exact wake lock but reported cleanup residue"
+	}
+	return newWakeLockResidueError(cause, errors.New(detail))
 }
 
 func withDarwinSocketDirFD(dirfd int, fn func() error) error {
@@ -307,6 +364,9 @@ func authorizeDarwinOwnerControlAt(
 		current.Lock.ControlSocket != expected.ControlSocket ||
 		request.Generation != expected.Generation {
 		return wakeLockInspection{}, nil, fmt.Errorf("authoritative wake generation changed")
+	}
+	if err := validateBoundWakeMutationAt(dirfd, agentDir, current); err != nil {
+		return wakeLockInspection{}, nil, err
 	}
 	if classifyPersistedWakeClaim(current) != wakeClaimAuthoritative {
 		return wakeLockInspection{}, nil, fmt.Errorf("wake control target is not an authoritative owner claim")
@@ -572,7 +632,7 @@ func startWakeControlListenerInDirOwned(
 					if !current.Exists || current.Lock.Generation != lock.Generation || current.Lock.ControlSocket != path {
 						return nil
 					}
-					if err := validateWakeLockOwnerlessMutation(current); err != nil {
+					if err := validateWakeLockOwnerlessMutationAt(dirfd, agentDir, current); err != nil {
 						return err
 					}
 					accepted = true
@@ -594,26 +654,29 @@ func startWakeControlListenerInDirOwned(
 				if testHooks != nil && testHooks.afterLoopStopped != nil {
 					testHooks.afterLoopStopped()
 				}
-				removed := false
+				var removal wakeLockRemovalOutcome
 				err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 					current := inspectWakeLockAt(dirfd, agentDir, root, me)
-					if !current.Exists || current.Lock.Generation != lock.Generation {
-						removed = true
+					if !current.Exists || current.Lock.Generation != lock.Generation ||
+						current.Lock.ControlSocket != path {
 						return nil
 					}
-					if current.Lock.ControlSocket != path {
-						return nil
-					}
-					if err := validateWakeLockOwnerlessMutation(current); err != nil {
+					if err := validateWakeLockOwnerlessMutationAt(dirfd, agentDir, current); err != nil {
 						return err
 					}
-					if err := removeWakeLockIfUnchangedAt(dirfd, agentDir, current); err != nil {
-						return err
-					}
-					removed = true
+					removal = removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+						dirfd,
+						agentDir,
+						current,
+						func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
+					)
 					return nil
 				})
-				if err != nil || !removed {
+				if err != nil || !removal.Committed {
+					return
+				}
+				if removal.Err != nil {
+					_, _ = conn.Write([]byte(wakeControlResidueACK(removal.Err)))
 					return
 				}
 				_, _ = conn.Write([]byte("ACK\n"))
@@ -682,17 +745,29 @@ func cooperativeStopInjectViaInDir(
 		return false, err
 	}
 	_ = conn.SetDeadline(time.Time{})
-	line, err := bufio.NewReader(conn).ReadString('\n')
-	if err != nil || strings.TrimSpace(line) != "ACK" {
+	line, err := bufio.NewReader(io.LimitReader(conn, wakeControlInjectViaACKMaxBytes+1)).ReadString('\n')
+	if err != nil || len(line) > wakeControlInjectViaACKMaxBytes {
 		return false, fmt.Errorf("cooperative wake stop refused")
 	}
-	var gone bool
+	residue, err := parseWakeControlResidueACK(line)
+	if err != nil {
+		return false, err
+	}
+	var postCommitErr error
+	for _, cause := range residue {
+		postCommitErr = errors.Join(postCommitErr, wakeControlResidueError(cause))
+	}
 	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		cur := inspectWakeLockAt(dirfd, agentDir, i.Root, i.Agent)
-		gone = !cur.Exists || cur.Lock.Generation != i.Lock.Generation
+		if cur.Exists {
+			postCommitErr = errors.Join(postCommitErr, newWakeLockResidueError(
+				wakeLockResidueReplacement,
+				errors.New("wake lock appeared after committed cooperative retirement; preserving replacement artifacts"),
+			))
+		}
 		return nil
 	})
-	return gone, err
+	return true, errors.Join(postCommitErr, err)
 }
 
 func cooperativeStopAuthoritativeWake(

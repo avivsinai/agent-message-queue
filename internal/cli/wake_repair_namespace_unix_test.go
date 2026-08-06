@@ -320,14 +320,21 @@ func TestRepairWakeParentRevalidatesNamespaceAfterChildAcknowledgement(t *testin
 	assertRepairLifecycleChildReapedWithoutClaim(t, fixture, child)
 	assertWakeRepairOutputAbsent(t, fixture.outputPath, "after rejected repair child reap")
 	for _, directory := range []struct {
-		label string
-		path  string
+		label       string
+		path        string
+		retainFloor bool
 	}{
 		{label: "canonical replacement", path: fsq.AgentBase(fixture.root, "codex")},
-		{label: "detached retained", path: detachedAgentPath},
+		{label: "detached retained", path: detachedAgentPath, retainFloor: true},
 	} {
 		for _, name := range []string{".wake.lock", wakeRepairFloorFileName} {
 			path := filepath.Join(directory.path, name)
+			if directory.retainFloor && name == wakeRepairFloorFileName {
+				if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+					t.Fatalf("%s private repair floor was not preserved: %v", directory.label, err)
+				}
+				continue
+			}
 			if _, err := os.Lstat(path); !os.IsNotExist(err) {
 				t.Fatalf("%s claim residue %s remains: %v", directory.label, path, err)
 			}
@@ -442,7 +449,19 @@ func TestRepairedWakeExitsWithoutInjectingDetachedNamespaceMessages(t *testing.T
 					output,
 				)
 			}
-			assertWakeRepairClaimResidueAbsent(t, authorities)
+			if test.name == "ancestor agent replacement" {
+				assertWakeRepairClaimResidueAbsent(t, authorities[:1])
+				detached := authorities[1]
+				if _, err := os.Lstat(filepath.Join(detached, ".wake.lock")); !os.IsNotExist(err) {
+					t.Fatalf("detached wake lock residue remains: %v", err)
+				}
+				floor := filepath.Join(detached, wakeRepairFloorFileName)
+				if info, err := os.Lstat(floor); err != nil || !info.Mode().IsRegular() {
+					t.Fatalf("detached private repair floor was not preserved: %v", err)
+				}
+			} else {
+				assertWakeRepairClaimResidueAbsent(t, authorities)
+			}
 		})
 	}
 }

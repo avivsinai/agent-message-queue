@@ -16,11 +16,18 @@ import (
 )
 
 type doctorOpsResult struct {
-	Root         opsRoot          `json:"root"`
-	Agents       []opsAgent       `json:"agents"`
-	OperatorGate *opsOperatorGate `json:"operator_gate,omitempty"`
-	WakeLocks    []opsWakeLock    `json:"wake_locks,omitempty"`
-	Hints        []opsHint        `json:"hints"`
+	Root           opsRoot           `json:"root"`
+	Agents         []opsAgent        `json:"agents"`
+	OperatorGate   *opsOperatorGate  `json:"operator_gate,omitempty"`
+	WakeLocks      []opsWakeLock     `json:"wake_locks,omitempty"`
+	WakeQuarantine opsWakeQuarantine `json:"wake_quarantine"`
+	Hints          []opsHint         `json:"hints"`
+}
+
+type opsWakeQuarantine struct {
+	Count            int      `json:"count"`
+	NewestAgeSeconds *float64 `json:"newest_age_seconds"`
+	Error            string   `json:"error,omitempty"`
 }
 
 type opsRoot struct {
@@ -147,6 +154,16 @@ func runOpsChecksWithSchema(
 		Path:   root,
 		Source: rootSource,
 	}
+	var quarantineErr error
+	result.WakeQuarantine, quarantineErr = checkWakeQuarantine(root, now)
+	if quarantineErr != nil {
+		result.WakeQuarantine.Error = quarantineErr.Error()
+		result.Hints = append(result.Hints, opsHint{
+			Code:    "wake_quarantine_scan_error",
+			Status:  "error",
+			Message: fmt.Sprintf("Cannot scan wake quarantine: %v", quarantineErr),
+		})
+	}
 	result.OperatorGate = checkOperatorGate(root, now)
 	result.Hints = append(result.Hints, checkLinkedWorktreeLocalHint(root, rootSource)...)
 
@@ -246,7 +263,8 @@ func runOpsChecksWithSchema(
 		agent.PresenceAgeSeconds = math.Round(agent.PresenceAgeSeconds)
 
 		result.Agents = append(result.Agents, agent)
-		if agent.DoorbellParked && agent.UnreadCount > 0 {
+		if agent.DoorbellParked && agent.UnreadCount > 0 &&
+			agent.PresenceSource == presenceSourceNotifierLive {
 			result.Hints = append(result.Hints, opsHint{
 				Code:   "doorbell_parked",
 				Status: "warn",
@@ -485,10 +503,10 @@ func assessWakeRepair(
 	var assessment wakeRepairAssessment
 	target, exists, targetErr := readTarget()
 	assessment.TargetPresent = exists
-	if exists {
-		if targetErr != nil {
-			assessment.TargetReason = targetErr.Error()
-		} else if err := validateWakeTarget(target, root, agent); err != nil {
+	if targetErr != nil {
+		assessment.TargetReason = targetErr.Error()
+	} else if exists {
+		if err := validateWakeTarget(target, root, agent); err != nil {
 			assessment.TargetReason = err.Error()
 		} else if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
 			assessment.TargetReason = err.Error()
@@ -585,15 +603,17 @@ func checkWakeLocksWithHintsSchema(
 			root,
 			agent,
 			inspection,
-			func() (wakeTarget, bool, error) { return readWakeTargetFromState(root, agent) },
+			func() (wakeTarget, bool, error) {
+				return readWakeTargetFromStateForInspection(root, agent, inspection)
+			},
 			func(target wakeTarget) error {
 				return validateWakeRepairFloorAvailable(root, agent, inspection, target)
 			},
 		)
+		lock.TargetReason = assessment.TargetReason
 		if assessment.TargetPresent {
 			lock.Target = wakeTargetPath(root, agent)
 			lock.TargetPresent = true
-			lock.TargetReason = assessment.TargetReason
 		}
 		if inspection.Status == wakeLockStale {
 			if ownerBound {
@@ -605,25 +625,12 @@ func checkWakeLocksWithHintsSchema(
 			lock.RepairReason = assessment.RepairReason
 			lock.Repair = assessment.Repair
 			if fix {
-				guardErr := withWakeLifecycleGuard(root, agent, func() error {
-					recheck := inspectWakeLock(root, agent)
-					sameGeneration := sameWakeLockGeneration(inspection, recheck)
-					inspection = recheck
-					if !sameGeneration || recheck.Status != wakeLockStale {
-						lock.Status = string(recheck.Status)
-						lock.Reason = "wake lock changed before fix"
-						return nil
-					}
-					if err := validateWakeLockStaleRemoval(recheck); err != nil {
-						return err
-					}
-					if err := removeWakeLockIfUnchangedGuarded(recheck); err != nil {
-						return err
-					}
-					lock.Status = "fixed"
-					lock.Removed = true
-					return nil
-				})
+				guardErr := fixStaleWakeLockForDoctor(root, agent, &inspection, &lock)
+				// The mutation helper may retain an agent-directory capability across
+				// a pathname replacement. Keep its mutation outcome, but classify the
+				// notifier from a fresh canonical inspection.
+				inspection = inspectWakeLock(root, agent)
+				staleBinary = false
 				lock.RepairAvailable = false
 				lock.Repair = ""
 				lock.RepairReason = ""
@@ -637,10 +644,6 @@ func checkWakeLocksWithHintsSchema(
 					Removed: lock.Removed,
 				}
 			}
-		}
-		if lock.Removed {
-			inspection = inspectWakeLock(root, agent)
-			staleBinary = false
 		}
 		appendLock(agent, lock, inspection, staleBinary)
 	}

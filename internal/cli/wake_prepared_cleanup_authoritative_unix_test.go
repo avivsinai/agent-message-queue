@@ -4,6 +4,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +37,69 @@ func TestAuthoritativeWakeCleanupRemovesExactPreparedMarker(t *testing.T) {
 	fixture.assertReleasedClaimMissing(t)
 	assertPathMissingForTest(t, fixture.preparedPath)
 	fixture.assertControlSocketMissing(t)
+}
+
+func TestAuthoritativeWakeAcquireDetachedDuringReleaseStopsWithoutReacquiring(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	names := []string{".wake.lock", wakeTargetFileName, wakeStateFileName, wakePreparedFileName}
+	claimBefore := snapshotDetachedWakeFiles(t, fixture.agentDir.path, names...)
+	detachedPath := fixture.agentDir.path + ".detached"
+	var successorBefore map[string]detachedWakeFileSnapshot
+	installAuthoritativeWakeFinalAuthorityInterleave(t, func() {
+		if err := os.Rename(fixture.agentDir.path, detachedPath); err != nil {
+			t.Fatalf("detach authoritative wake agent directory: %v", err)
+		}
+		if err := os.Mkdir(fixture.agentDir.path, 0o700); err != nil {
+			t.Fatalf("create authoritative successor wake agent directory: %v", err)
+		}
+		for name, snapshot := range claimBefore {
+			if err := os.WriteFile(
+				filepath.Join(fixture.agentDir.path, name),
+				snapshot.raw,
+				snapshot.info.Mode().Perm(),
+			); err != nil {
+				t.Fatalf("write authoritative successor %s: %v", name, err)
+			}
+		}
+		successorBefore = snapshotDetachedWakeFiles(t, fixture.agentDir.path, names...)
+	})
+
+	requestedOwner := *fixture.target.Owner
+	requestedOwner.SessionID++
+	requested := fixture.target
+	requested.Owner = &requestedOwner
+	originalObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(owner wakeOwner) (wakeOwnerObservation, error) {
+		if sameWakeOwner(&owner, fixture.target.Owner) {
+			return deadWakeOwnerObservation("old owner is dead"), nil
+		}
+		if sameWakeOwner(&owner, &requestedOwner) {
+			return wakeOwnerObservation{State: wakeOwnerSame}, nil
+		}
+		return wakeOwnerObservation{State: wakeOwnerUnknown, Reason: "unexpected owner"}, nil
+	}
+	t.Cleanup(func() { observeAuthoritativeWakeOwner = originalObserve })
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid}
+	})
+
+	cleanup, err := acquireAuthoritativeWakeLockWithOptionsInDir(
+		fixture.agentDir,
+		fixture.root,
+		fixture.me,
+		wakeLockAcquireOptions{target: &requested, wakeMode: wakeTargetInjectVia},
+	)
+	if cleanup != nil {
+		t.Fatal("detached authoritative acquisition returned cleanup authority")
+	}
+	var cleanupOnly *wakeDetachedCleanupOnlyError
+	if !errors.As(err, &cleanupOnly) {
+		t.Fatalf("authoritative detached release error = %v, want wakeDetachedCleanupOnlyError", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(detachedPath, ".wake.lock")); !os.IsNotExist(statErr) {
+		t.Fatalf("detached authoritative lock = %v, want absent", statErr)
+	}
+	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
 }
 
 func TestAuthoritativeWakeCleanupDeadOwnerExactPreparedAllowsFirstReacquire(t *testing.T) {
@@ -79,7 +143,7 @@ func TestAuthoritativeWakeCleanupDeadOwnerExactPreparedAllowsFirstReacquire(t *t
 		); err != nil {
 			return err
 		}
-		return writeWakeGenerationFileAt(
+		if err := writeWakeGenerationFileAt(
 			dirfd,
 			wakePreparedFileName,
 			"wake prepared marker",
@@ -88,7 +152,10 @@ func TestAuthoritativeWakeCleanupDeadOwnerExactPreparedAllowsFirstReacquire(t *t
 				Generation:   oldLock.Generation,
 				TargetDigest: oldLock.TargetDigest,
 			},
-		)
+		); err != nil {
+			return err
+		}
+		return reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +163,6 @@ func TestAuthoritativeWakeCleanupDeadOwnerExactPreparedAllowsFirstReacquire(t *t
 	if classifyPersistedWakeClaim(inspection) != wakeClaimAuthoritative {
 		t.Fatalf("old owner wake claim = %#v, want authoritative", inspection)
 	}
-
 	originalObserve := observeAuthoritativeWakeOwner
 	t.Cleanup(func() { observeAuthoritativeWakeOwner = originalObserve })
 	observeCalls := 0
@@ -177,13 +243,14 @@ func TestAuthoritativeWakeCleanupPreservesWrongPreparedMarker(t *testing.T) {
 				replacement,
 			)
 
-			if err := fixture.release(); err != nil {
-				t.Fatal(err)
+			before := snapshotWakeCheckTree(t, fixture.root)
+			err := fixture.release()
+			var inconclusive *wakeStateBoundInconclusiveError
+			if !errors.As(err, &inconclusive) {
+				t.Fatalf("release error = %v, want bound inconclusive", err)
 			}
-
-			fixture.assertReleasedClaimMissing(t)
+			assertWakeCheckTreeUnchanged(t, fixture.root, before)
 			assertFileRawForTest(t, fixture.preparedPath, replacementRaw)
-			fixture.assertControlSocketMissing(t)
 		})
 	}
 }
@@ -300,8 +367,26 @@ func TestAuthoritativeWakeCleanupReplacementLockPreservesPreparedAndTarget(t *te
 	fixture.assertControlSocketPresent(t)
 }
 
-func TestAuthoritativeWakeCleanupInvalidPreparedStillCleansExactClaim(t *testing.T) {
+func TestAuthoritativeWakeCleanupInvalidPreparedRefusesBoundMutation(t *testing.T) {
 	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	invalid := []byte("{not-json\n")
+	if err := os.WriteFile(fixture.preparedPath, invalid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	before := snapshotWakeCheckTree(t, fixture.root)
+	err := fixture.release()
+	var inconclusive *wakeStateBoundInconclusiveError
+	if !errors.As(err, &inconclusive) {
+		t.Fatalf("invalid prepared cleanup error = %v, want bound inconclusive", err)
+	}
+	assertWakeCheckTreeUnchanged(t, fixture.root, before)
+	assertFileRawForTest(t, fixture.preparedPath, invalid)
+}
+
+func TestUnboundP2aAuthoritativeWakeCleanupInvalidPreparedStillCleansExactClaim(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	unbindAuthoritativeWakePreparedFixtureForP2a(t, fixture)
 	invalid := []byte("{not-json\n")
 	if err := os.WriteFile(fixture.preparedPath, invalid, 0o600); err != nil {
 		t.Fatal(err)
@@ -475,6 +560,13 @@ func installAuthoritativeWakeCleanupInterleave(t *testing.T, fn func()) {
 	original := removeAuthoritativeWakeAfterLockRelease
 	removeAuthoritativeWakeAfterLockRelease = fn
 	t.Cleanup(func() { removeAuthoritativeWakeAfterLockRelease = original })
+}
+
+func installAuthoritativeWakeFinalAuthorityInterleave(t *testing.T, fn func()) {
+	t.Helper()
+	original := removeAuthoritativeWakeBeforeFinalAuthorityCheck
+	removeAuthoritativeWakeBeforeFinalAuthorityCheck = fn
+	t.Cleanup(func() { removeAuthoritativeWakeBeforeFinalAuthorityCheck = original })
 }
 
 func writeAuthoritativePreparedMarkerForTest(

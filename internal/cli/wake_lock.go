@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +32,8 @@ type wakeLock struct {
 	WakeMode             string               `json:"wake_mode,omitempty"`              // none, raw, paste, or inject-via; empty means a legacy pre-v0.44 lock
 	TargetDigest         string               `json:"target_digest,omitempty"`          // Binds .wake.target to this lock instance
 	Generation           string               `json:"generation,omitempty"`             // Random nonce binding readiness and exact cleanup to this instance
+	StateGeneration      string               `json:"state_generation,omitempty"`       // P2b binding to the state target section for this exact lock generation
+	StateDigest          string               `json:"state_digest,omitempty"`           // Durable P2b wire slot; equals TargetDigest in v1
 	SourceGeneration     string               `json:"source_generation,omitempty"`      // Dead generation inherited by a repaired wake
 	SourceFloorDigest    string               `json:"source_floor_digest,omitempty"`    // Exact repair floor inherited by a repaired wake
 	ControlSocket        string               `json:"control_socket,omitempty"`         // Generation-derived cooperative control endpoint
@@ -123,6 +127,7 @@ type wakeLockInspection struct {
 	raw               []byte
 	fileInfo          os.FileInfo
 	observationErr    error
+	decodeErr         error
 }
 
 var inspectWakeProcess = inspectWakeProcessPlatform
@@ -180,8 +185,21 @@ func readWakeLockMetadataWithReader(root, me, lockPath string, read wakeLockFile
 	inspection.Exists = true
 	inspection.raw = data
 	inspection.fileInfo = fileInfo
+	if json.Valid(data) {
+		if err := validateWakeLockStateBindingFieldsJSON(data); err != nil {
+			inspection.Status = wakeLockUnverified
+			inspection.Reason = err.Error()
+			return inspection
+		}
+	}
 	var existing wakeLock
 	if err := json.Unmarshal(data, &existing); err != nil {
+		if json.Valid(data) {
+			inspection.Status = wakeLockUnverified
+			inspection.Reason = fmt.Sprintf("wake lock JSON fields are malformed: %v", err)
+			inspection.decodeErr = err
+			return inspection
+		}
 		if fileInfo != nil && fileInfo.Mode().Perm() == wakeOwnerLockFileMode {
 			inspection.Status = wakeLockUnverified
 			inspection.Reason = "wake owner schema is malformed; owner-bound lock may be from a newer amq"
@@ -192,13 +210,18 @@ func readWakeLockMetadataWithReader(root, me, lockPath string, read wakeLockFile
 			inspection.Reason = "lock is being created"
 			return inspection
 		}
-		inspection.Status = wakeLockStale
-		inspection.Reason = "invalid lock json"
+		inspection.Status = wakeLockUnverified
+		inspection.Reason = fmt.Sprintf("wake lock JSON is malformed: %v", err)
 		return inspection
 	}
 
 	inspection.Lock = existing
 	inspection.PID = existing.PID
+	if err := validateWakeLockStateBindingJSON(data); err != nil {
+		inspection.Status = wakeLockUnverified
+		inspection.Reason = err.Error()
+		return inspection
+	}
 	return inspection
 }
 
@@ -302,6 +325,9 @@ func validateWakeLockFormat(lock wakeLock, info os.FileInfo) error {
 	if info == nil {
 		return fmt.Errorf("wake lock file identity unavailable")
 	}
+	if err := validateWakeLockStateBinding(lock); err != nil {
+		return err
+	}
 	switch info.Mode().Perm() {
 	case wakeOwnerLockFileMode:
 		if lock.OwnerSchema != wakeOwnerLockSchema {
@@ -333,6 +359,202 @@ func validateWakeLockFormat(lock wakeLock, info os.FileInfo) error {
 		return fmt.Errorf("wake lock mode %o unsupported", info.Mode().Perm())
 	}
 	return nil
+}
+
+func validateWakeLockStateBinding(lock wakeLock) error {
+	hasGeneration := lock.StateGeneration != ""
+	hasDigest := lock.StateDigest != ""
+	if hasGeneration != hasDigest {
+		return fmt.Errorf("wake state_generation and state_digest must be present together")
+	}
+	if !hasGeneration {
+		return nil
+	}
+	if !validWakeStateGeneration(lock.StateGeneration) {
+		return fmt.Errorf("wake state generation is invalid")
+	}
+	if !validWakeStateDigest(lock.StateDigest) {
+		return fmt.Errorf("wake state digest is invalid")
+	}
+	if lock.StateGeneration != lock.Generation {
+		return fmt.Errorf("wake state generation does not match lock generation")
+	}
+	if lock.TargetDigest == "" {
+		return fmt.Errorf("wake state binding requires a target digest")
+	}
+	if lock.StateDigest != lock.TargetDigest {
+		return fmt.Errorf("wake state digest does not match lock target digest")
+	}
+	if lock.WakeMode != wakeTargetInjectVia && lock.WakeMode != wakeOwnerWakeMode {
+		return fmt.Errorf("wake state binding requires a target-bearing lock")
+	}
+	return nil
+}
+
+// Wake-lock input trust is enforced jointly by the reader's syntax gate, the
+// occurrence-preserving scanner below, json.Unmarshal's known-field type
+// checks, and the envelope validators. Keep that complete family synchronized
+// with TestWakeLockJSONTrustMatrix: (1) raw parse failure; (2) non-object top
+// levels; (3) known-field wrong types at early and late byte positions;
+// (4) direct and folded known-field nulls; (5) top-level duplicate known keys
+// in both orders and through folded aliases; (6) nested colliding keys, which
+// are opaque; (7) single, duplicate, and null unknown fields, which remain
+// additive ABI; and (8) valid bound and unbound controls.
+func validateWakeLockStateBindingJSON(data []byte) error {
+	fields, err := decodeWakeLockJSONFields(data)
+	if err != nil {
+		return err
+	}
+	if err := validateWakeLockStateBindingFields(fields); err != nil {
+		return err
+	}
+	pid, exists := fields["pid"]
+	if !exists {
+		return fmt.Errorf("wake lock JSON is missing required field %q", "pid")
+	}
+	var decodedPID int
+	if bytes.Equal(bytes.TrimSpace(pid), []byte("null")) || json.Unmarshal(pid, &decodedPID) != nil {
+		return fmt.Errorf("wake lock JSON field %q must be an integer", "pid")
+	}
+	for _, name := range []string{"tty", "root", "started"} {
+		raw, exists := fields[name]
+		if !exists {
+			return fmt.Errorf("wake lock JSON is missing required field %q", name)
+		}
+		var value string
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &value) != nil {
+			return fmt.Errorf("wake lock JSON field %q must be a string", name)
+		}
+	}
+	return nil
+}
+
+func validateWakeLockStateBindingFieldsJSON(data []byte) error {
+	fields, err := decodeWakeLockJSONFields(data)
+	if err != nil {
+		return err
+	}
+	return validateWakeLockStateBindingFields(fields)
+}
+
+// decodeWakeLockJSONFields preserves top-level member occurrences before map
+// or struct decoding can collapse them. Only top-level known names are
+// uniqueness constrained; values and unknown fields remain opaque here.
+func decodeWakeLockJSONFields(data []byte) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	opening, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("wake lock JSON is malformed: %w", err)
+	}
+	if delimiter, ok := opening.(json.Delim); !ok || delimiter != '{' {
+		return nil, fmt.Errorf("wake lock JSON must be an object")
+	}
+
+	fields := make(map[string]json.RawMessage)
+	knownNames := make(map[string]string)
+	knownOrder := make([]string, 0, len(wakeLockKnownJSONFields))
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, fmt.Errorf("wake lock JSON is malformed: %w", err)
+		}
+		name, ok := token.(string)
+		if !ok {
+			return nil, fmt.Errorf("wake lock JSON field name is malformed")
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return nil, fmt.Errorf("wake lock JSON field %q is malformed: %w", name, err)
+		}
+
+		canonicalName, known := wakeLockJSONFieldCanonicalName(name)
+		if !known {
+			// Unknown additive fields are opaque. In particular, duplicate
+			// unknown names remain compatible with future serializers.
+			fields[name] = raw
+			continue
+		}
+		if previous, exists := knownNames[canonicalName]; exists {
+			return nil, fmt.Errorf("wake lock JSON field %q duplicates known field %q", name, previous)
+		}
+		knownNames[canonicalName] = name
+		knownOrder = append(knownOrder, canonicalName)
+		fields[canonicalName] = raw
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, fmt.Errorf("wake lock JSON is malformed: %w", err)
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("wake lock JSON has trailing data")
+		}
+		return nil, fmt.Errorf("wake lock JSON is malformed: %w", err)
+	}
+	for _, canonicalName := range knownOrder {
+		if bytes.Equal(bytes.TrimSpace(fields[canonicalName]), []byte("null")) {
+			return nil, fmt.Errorf("wake lock JSON field %q must not be null", knownNames[canonicalName])
+		}
+	}
+	return fields, nil
+}
+
+func validateWakeLockStateBindingFields(fields map[string]json.RawMessage) error {
+	generation, hasGeneration := fields["state_generation"]
+	digest, hasDigest := fields["state_digest"]
+	if hasGeneration != hasDigest {
+		return fmt.Errorf("wake state_generation and state_digest must be present together")
+	}
+	if hasGeneration {
+		if _, err := decodeWakeLockStateBindingString("state_generation", generation); err != nil {
+			return err
+		}
+		if _, err := decodeWakeLockStateBindingString("state_digest", digest); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateWakeLockInspectionStateBindingJSON(inspection wakeLockInspection) error {
+	if inspection.decodeErr != nil {
+		return fmt.Errorf("wake lock JSON fields are malformed: %w", inspection.decodeErr)
+	}
+	if inspection.Status == wakeLockCreating || inspection.raw == nil {
+		return nil
+	}
+	return validateWakeLockStateBindingJSON(inspection.raw)
+}
+
+var wakeLockKnownJSONFields = func() []string {
+	typ := reflect.TypeFor[wakeLock]()
+	fields := make([]string, 0, typ.NumField())
+	for index := 0; index < typ.NumField(); index++ {
+		name := strings.Split(typ.Field(index).Tag.Get("json"), ",")[0]
+		if name != "" && name != "-" {
+			fields = append(fields, name)
+		}
+	}
+	return fields
+}()
+
+func wakeLockJSONFieldCanonicalName(name string) (string, bool) {
+	for _, known := range wakeLockKnownJSONFields {
+		if strings.EqualFold(name, known) {
+			return known, true
+		}
+	}
+	return "", false
+}
+
+func decodeWakeLockStateBindingString(name string, raw json.RawMessage) (string, error) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", fmt.Errorf("wake %s must be a non-empty string", name)
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || value == "" {
+		return "", fmt.Errorf("wake %s must be a non-empty string", name)
+	}
+	return value, nil
 }
 
 func validateAuthoritativeWakeProcessIdentity(lock wakeLock) error {
@@ -374,6 +596,13 @@ func validateWakeLockRepairable(inspection wakeLockInspection) error {
 }
 
 func validateWakeLockStaleRemoval(inspection wakeLockInspection) error {
+	if _, err := readWakeStateSelectionForInspection(
+		inspection.Root,
+		inspection.Agent,
+		inspection,
+	); err != nil {
+		return err
+	}
 	if wakeLockHasOwnerMarkers(inspection) {
 		return fmt.Errorf("owner-bound wake claims require 'amq wake recover-owner --me %s'", inspection.Agent)
 	}
@@ -414,6 +643,13 @@ func removeWakeLockIfUnchanged(inspection wakeLockInspection) error {
 }
 
 func removeWakeLockIfUnchangedGuarded(inspection wakeLockInspection) error {
+	if _, err := readWakeStateSelectionForInspection(
+		inspection.Root,
+		inspection.Agent,
+		inspection,
+	); err != nil {
+		return err
+	}
 	return removeWakeLockIfUnchangedGuardedWithIO(
 		inspection,
 		func() ([]byte, os.FileInfo, error) { return readWakeLockFileWithInfo(inspection.LockPath) },
@@ -422,26 +658,42 @@ func removeWakeLockIfUnchangedGuarded(inspection wakeLockInspection) error {
 }
 
 func removeWakeLockIfUnchangedGuardedWithIO(inspection wakeLockInspection, read wakeLockFileReader, remove func() error) error {
+	_, err := removeWakeLockIfUnchangedGuardedWithIOStatus(inspection, read, remove)
+	return err
+}
+
+func removeWakeLockIfUnchangedGuardedWithIOStatus(
+	inspection wakeLockInspection,
+	read wakeLockFileReader,
+	remove func() error,
+) (bool, error) {
 	if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestMutate); err != nil {
-		return err
+		return false, err
 	}
 	current, currentInfo, err := read()
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("re-read wake lock before removal: %w", err)
+		return false, fmt.Errorf("re-read wake lock before removal: %w", err)
 	}
 	if !bytes.Equal(current, inspection.raw) {
-		return fmt.Errorf("wake lock changed while cleaning stale lock; retry")
+		return false, fmt.Errorf("wake lock changed while cleaning stale lock; retry")
 	}
 	if inspection.fileInfo == nil || currentInfo == nil || !sameWakeFileIdentity(inspection.fileInfo, currentInfo) {
-		return fmt.Errorf("wake lock generation changed while cleaning stale lock; retry")
+		return false, fmt.Errorf("wake lock generation changed while cleaning stale lock; retry")
 	}
-	if err := remove(); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove stale wake lock: %w", err)
+	// Pathname removal is safe under the lifecycle guard held by every
+	// cooperating writer; an unguarded same-UID writer is out of contract. A
+	// rename-and-verify alternative would expose lock absence to pre-P2b readers
+	// during a two-step removal, creating a real competing-authority hazard.
+	if err := remove(); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("remove stale wake lock: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 func sameWakeLockGeneration(first, second wakeLockInspection) bool {

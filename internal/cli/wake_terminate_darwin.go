@@ -7,6 +7,8 @@ import (
 	"os"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 var signalWakeProcess = func(pid int, sig os.Signal) error {
@@ -36,7 +38,7 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 		if !sameWakeLockInspection(inspection, recheck) {
 			return nil
 		}
-		return validateWakeLockOwnerlessMutation(recheck)
+		return validateWakeLockOwnerlessMutationAt(dirfd, agentDir, recheck)
 	}); err != nil {
 		return false, err
 	}
@@ -54,6 +56,9 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 		)
 	}
 	if recheck.Process.Running && recheck.Lock.WakeMode == wakeTargetInjectVia {
+		if recheck.Lock.ControlSocket == "" || recheck.Lock.Generation == "" {
+			return false, fmt.Errorf("live inject-via wake orphan has no cooperative control endpoint; stop the owning supervisor")
+		}
 		return cooperativeStopInjectViaInDir(agentDir, recheck)
 	}
 	if recheck.Process.Running {
@@ -79,14 +84,18 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 		if !sameWakeLockGeneration(recheck, current) {
 			return nil
 		}
-		if err := validateWakeLockStaleRemoval(current); err != nil {
+		if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, current); err != nil {
 			return err
 		}
-		if err := removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, current); err != nil {
-			return err
-		}
-		removed = true
-		return nil
+		var removeErr error
+		outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+			dirfd,
+			agentDir,
+			current,
+			func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
+		)
+		removed, removeErr = outcome.Committed, outcome.Err
+		return removeErr
 	})
 	return removed, err
 }

@@ -6327,6 +6327,176 @@ func TestRunWakeWithLoopRetriesWakeLockChangedWhileOpening(t *testing.T) {
 	}
 }
 
+func TestRunWakeWithLoopRetriesBoundInconclusiveState(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	for _, tc := range []struct {
+		name            string
+		retryAllowed    bool
+		wantDeadlineErr bool
+	}{
+		{name: "stabilizes", retryAllowed: true},
+		{name: "deadline expires", wantDeadlineErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			injector := writeExecutableForTest(t, "bound-inconclusive-retry-injector")
+			target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, nil)
+			cleanup, err := acquireWakeLockWithOptions(root, "orchestrator", wakeLockAcquireOptions{
+				target:   &target,
+				wakeMode: wakeTargetInjectVia,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(cleanup)
+			lock := inspectWakeLock(root, "orchestrator").Lock
+			lock.PID = wakePID
+			lock.TTY = "tty"
+			lock.ProcessStart = "start-1"
+			lock.BootID = "boot-1"
+			lock.Executable = "/opt/homebrew/bin/amq"
+			writeWakeLockForTest(t, root, "orchestrator", lock)
+			writeWakePreparedForTest(t, root, "orchestrator")
+
+			statePath := filepath.Join(fsq.AgentBase(root, "orchestrator"), wakeStateFileName)
+			stateRaw, err := os.ReadFile(statePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(statePath); err != nil {
+				t.Fatal(err)
+			}
+
+			originalRetry := waitForWakePreparedRetry
+			retryCalls := 0
+			waitForWakePreparedRetry = func(time.Time) bool {
+				retryCalls++
+				if tc.retryAllowed {
+					if err := os.WriteFile(statePath, stateRaw, 0o600); err != nil {
+						t.Fatalf("restore bound wake state: %v", err)
+					}
+				}
+				return tc.retryAllowed
+			}
+			t.Cleanup(func() { waitForWakePreparedRetry = originalRetry })
+
+			readyPath := filepath.Join(t.TempDir(), "wake.ready")
+			err = runWakeWithLoop([]string{
+				"--root", root,
+				"--me", "orchestrator",
+				"--inject-via", injector,
+				"--ready-file", readyPath,
+				"--accept-existing-wake",
+			}, func(cfg wakeConfig) error {
+				t.Fatalf("loop should not run with an existing wake: %#v", cfg)
+				return nil
+			})
+			if !tc.wantDeadlineErr {
+				if err != nil {
+					t.Fatalf("bound-inconclusive wake did not retry: %v", err)
+				}
+				if _, err := os.Stat(readyPath); err != nil {
+					t.Fatalf("ready file missing: %v", err)
+				}
+			} else {
+				wantPrefix := fmt.Sprintf("wake lock did not stabilize within %s:", wakeReadyTimeout)
+				if err == nil || !strings.HasPrefix(err.Error(), wantPrefix) {
+					t.Fatalf("deadline error = %v, want prefix %q", err, wantPrefix)
+				}
+				var inconclusive *wakeStateBoundInconclusiveError
+				if !errors.As(err, &inconclusive) {
+					t.Fatalf("deadline error lost typed bound-state cause: %v", err)
+				}
+				if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+					t.Fatalf("ready file should not exist, statErr=%v", statErr)
+				}
+			}
+			if retryCalls != 1 {
+				t.Fatalf("bound-inconclusive retry calls = %d, want 1", retryCalls)
+			}
+		})
+	}
+}
+
+func TestRunWakeWithLoopRetainedBoundReuseSkipsPathnameStateObservation(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "bound-observation-retry-injector")
+	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, nil)
+	cleanup, err := acquireWakeLockWithOptions(root, "orchestrator", wakeLockAcquireOptions{
+		target: &target, wakeMode: wakeTargetInjectVia,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+	lock := inspectWakeLock(root, "orchestrator").Lock
+	lock.PID = wakePID
+	lock.TTY = "tty"
+	lock.ProcessStart = "start-1"
+	lock.BootID = "boot-1"
+	lock.Executable = "/opt/homebrew/bin/amq"
+	writeWakeLockForTest(t, root, "orchestrator", lock)
+	writeWakePreparedForTest(t, root, "orchestrator")
+
+	originalOpen := openWakeStateInspectionDirectory
+	observationCalls := 0
+	openWakeStateInspectionDirectory = func(path, label string) (*wakeAgentDir, error) {
+		observationCalls++
+		return originalOpen(path, label)
+	}
+	t.Cleanup(func() { openWakeStateInspectionDirectory = originalOpen })
+
+	originalRetry := waitForWakePreparedRetry
+	retryCalls := 0
+	waitForWakePreparedRetry = func(time.Time) bool {
+		retryCalls++
+		return true
+	}
+	t.Cleanup(func() { waitForWakePreparedRetry = originalRetry })
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err = runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", injector,
+		"--ready-file", readyPath,
+		"--accept-existing-wake",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with an existing wake: %#v", cfg)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retained bound reuse failed: %v", err)
+	}
+	if _, err := os.Stat(readyPath); err != nil {
+		t.Fatalf("ready file missing: %v", err)
+	}
+	if observationCalls != 0 || retryCalls != 0 {
+		t.Fatalf("pathname observation calls=%d retry calls=%d, want 0 each", observationCalls, retryCalls)
+	}
+}
+
 func TestWakeSnapshotReadChangedErrorRequiresTypedCause(t *testing.T) {
 	cause := errors.New("wake lock changed while opening")
 	err := newWakeSnapshotReadChangedError(cause)
@@ -8280,8 +8450,11 @@ func TestWaitForWakeReadyRefusesTargetReplacement(t *testing.T) {
 	})
 
 	err = waitForWakeReadyWithWaiter(waiter, readyPath, root, "orchestrator", time.Second)
-	if err == nil || !strings.Contains(err.Error(), "does not match wake lock") {
-		t.Fatalf("expected replacement target refusal, got %v", err)
+	var inconclusive *wakeStateBoundInconclusiveError
+	var mismatch *wakeStateLegacyMismatchError
+	var changed *wakeSnapshotReadChangedError
+	if err == nil || !errors.As(err, &inconclusive) || !errors.As(err, &mismatch) || errors.As(err, &changed) {
+		t.Fatalf("expected bound legacy-mismatch refusal without snapshot race, got %v", err)
 	}
 }
 

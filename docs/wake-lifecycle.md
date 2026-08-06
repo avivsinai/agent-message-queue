@@ -1,9 +1,12 @@
 # Wake lifecycle state document
 
-Status: W3 P2a contract and implementation. W3.2 through W3.4 implement the
-legacy-authoritative `.wake.state` projection described here; they do not
-activate bound P2b mode or migration. The existing legacy files remain
-authoritative through P2a.
+Status: W3 P2a implemented; W3.5/P2b binding contract under review.
+W3.2 through W3.4 implement the legacy-authoritative `.wake.state`
+projection described here. This document additionally defines the W3.5/P2b
+binding contract implemented by the candidate under review; that is not a
+claim that the candidate is merged, released, or deployed, and it does not
+add migration. Legacy authority continues through P2a for existing unbound
+claims, which are never rewritten.
 
 The normative words MUST, MUST NOT, SHOULD, and MAY describe the contract that
 the W3 implementation and its tests must preserve.
@@ -145,6 +148,34 @@ or repair anything. P2a readers fall back to the self-consistent legacy pair
 as specified in section 6. P2b readers classify a lock/document binding
 failure as inconclusive and retry-only.
 
+Every present known `.wake.lock` field, including optional fields, MUST use
+its declared JSON type; `null` is not an encoding for omission. A known field
+MUST occur at most once, including names that match under Go JSON's
+case-insensitive field matching. Unknown lock fields, including duplicate
+unknown names and nested objects, remain opaque and tolerated for forward
+compatibility.
+
+### Digest-affecting target fields
+
+`state_digest` binds a lock to the digest of the target it published, so any
+change to the bytes covered by the target digest invalidates every binding
+published before that change. New target fields MUST therefore be additive in
+the byte sense:
+
+- A new field MUST be declared `omitempty` and MUST be left unset at its
+  default value, so that an otherwise unchanged target serializes
+  byte-identically before and after the field exists.
+- Normalization of such a field MAY be applied when comparing two values, but
+  MUST NOT be persisted. A legacy mutation that rewrites the target MUST pass
+  the stored value through unchanged rather than writing its normalized form.
+- A field whose default cannot be omitted is not an additive change. It
+  requires a state generation change and republication of every bound claim.
+
+A bound read has no legacy fallback. Persisting a normalized default would
+shift the target digest while the already-published lock retained the older
+`state_digest`, so every bound claim would become permanently inconclusive and
+retry-only after an upgrade.
+
 ## 3. Lifetime and authority table
 
 The sections have independent lifetime bindings. The document is a projection;
@@ -234,8 +265,12 @@ document disposable. The sequence for a guarded mutation is:
 If a mutation removes the last target, legacy removal is followed by guarded
 exact-snapshot removal of `.wake.state`; the state document must not survive a
 missing target. If a crash or error leaves an installed target with no lock,
-the target and any state document are reported/preserved according to their
-exact snapshots; no pathname-only cleanup is inferred.
+the target and any state document remain non-authoritative. A later targetless
+acquisition may quarantine an exact conclusively ownerless target and then,
+only after a fresh inspection, supersede corresponding stale projection state.
+A clean owner-bearing target instead requires dead-owner recovery; malformed
+ownership remains preserved for inspection. No pathname-only cleanup or
+ownership inference is permitted.
 
 **P2a must be abortable by simply deleting the doc.**
 
@@ -257,6 +292,55 @@ The following boundaries are observable and must remain safe:
 | After state rename, before state post-rename sync | Old or new state doc | In P2a, verify canonical bytes and all live legacy digests; a mismatch silently falls back to legacy. For a bound P2b claim, the same mismatch is typed inconclusive/retry-only and authorizes no mutation. |
 | After state post-rename sync and verification | New state projection | It is usable only while every current legacy digest and lifetime rule continues to match. |
 
+### 4.4 Quarantine preservation and explicit cleanup
+
+Acquisition may free a blocked live pathname only by preserving one of two
+exact artifacts:
+
+1. An aged syntax-invalid, empty, or truncated generic `.wake.lock` that is a
+   same-owner regular 0600 file. A fresh `creating` lock, a 0400 or
+   owner-shaped lock, an unreadable/oversized/special file, and valid JSON with
+   a wrong known-field type never qualify.
+2. With no lock, a targetless acquisition may preserve an exact readable
+   regular 0600 orphan `.wake.target` only when its bytes are conclusively
+   ownerless. Clean owner-bearing and malformed owner-shaped targets remain at
+   the live pathname. `recover-owner` may remove the clean form only after its
+   exact owner is conclusively dead; malformed ownership remains inspection-only.
+
+The mover holds the lifecycle guard and retained agent-directory FD, revalidates
+inode and raw bytes, performs a Darwin/Linux no-replace rename to
+`.wake.<lock|target>.quarantined.<UTC-nanosecond>`, syncs the directory, and
+reopens the destination to verify the same inode and bytes. Success forces a
+new acquisition loop; stale observations never authorize fresh lock
+publication. Any uncertainty, collision, or replacement preserves/refuses.
+
+`doctor --ops` scans those exact names independently of `.wake.lock` and
+reports `wake_quarantine` with `count` and nullable `newest_age_seconds` only
+after a complete scan. Any root or agent-directory open/validation failure is
+root-wide: doctor reports `wake_quarantine.error`, and explicit quarantine
+cleanup refuses instead of acting on a partial result.
+Quarantine is preservation. Only explicit
+`amq cleanup --wake-quarantine-older-than <duration>` may remove it; dry-run
+does not mutate, and actual cleanup revalidates identity/raw bytes under the
+lifecycle guard before `unlinkat` plus directory sync. Ordinary tmp cleanup
+never selects quarantine.
+
+### 4.5 Managed retirement commit and residue
+
+Every retirement effect uses the retained agent-directory FD. Before lock
+removal, any identity, target, generation, or bound-state uncertainty returns
+`refused` and preserves the claim. Exact lock removal is the commit point. Once
+it commits, retirement cannot be downgraded to refusal: complete target/state
+cleanup returns `retired`; failed or skipped cleanup returns exit-0 warning
+`retired_with_residue`.
+
+Post-commit cleanup removes only the exact captured target and its corresponding
+state. For unbound state, the target-section digest must match the retired
+target; a mismatch is preserved as residue. The mailbox and every replacement
+lock, target, or state artifact are always preserved. Residue converges
+automatically on the next acquisition only when it is conclusively ownerless.
+Owner-bearing residue follows the owner-recovery rules above.
+
 The sequence is intentionally legacy-first. A torn state projection can make
 the projection unusable, but it cannot make a torn legacy operation look safe.
 
@@ -267,13 +351,13 @@ document adds observations but does not weaken any existing required result.
 
 | Case | W3 geometry | Required observation | Mutation prohibition |
 | --- | --- | --- | --- |
-| Target commits before lock | `.wake.target` and possibly its target section are installed before `.wake.lock` links. | No authoritative lock exists. The target is reported/preserved as an installed snapshot; target alone never implies ownership, and no prepared section is current without the exact lock generation. | Do not create ownership, remove the installed target by pathname, or clean a different generation. Only an authorized exact-snapshot cleanup may act. |
+| Target commits before lock | `.wake.target` and possibly its target section are installed before `.wake.lock` links. | No authoritative lock exists. The target remains preserved state; target alone never implies ownership. A targetless acquisition may quarantine its exact inode/bytes only when conclusively ownerless, then must fresh-inspect before superseding matching projection state or publishing a lock. A clean owner-bearing target requires dead-owner recovery. | Do not create ownership from the shadow, remove it by pathname, or clean a different generation. |
 | Lock replacement during a reader | A reader may observe the lock, state, target, prepared marker, or their digest, then a replacement may occur before the final comparison. | Re-open and compare file identity/raw bytes. A legacy-artifact replacement is `wakeSnapshotReadChangedError`-family inconclusive evidence and must classify as unverified/retry-only. For a P2a shadow-document replacement or torn read, section 6.3 resolves the observation as silent legacy fallback; document retry-only classification applies only after P2b binding. | Do not use the old snapshot for cleanup, readiness, repair, or ownership. Preserve the replacement. |
 | Prepared marker generation | State and legacy may show four distinct observations: (a) absent marker / `prepared: null`; (b) stale-generation marker / object; (c) current-generation plus current target digest; or (d) current-generation plus a wrong target digest. | (a) is not-prepared. (b) is stale evidence and not-prepared. (c) is the only valid preparation. (d) is refused and is never treated as ready. | Do not promote absent, stale, or wrong-digest state into readiness or owner admission. |
 | Ready-file replacement during cleanup | Caller ready files remain external while the retained state projection is unchanged. | Cleanup compares the original ready publication's identity, bytes, and semantics, then preserves a replacement. | Do not remove or report a replacement as the original receipt. |
 | Guard release before waits | The guard covers bounded validation/publication only; waits happen after it is released. | Another participant can acquire the guard while a child, pidfd, or control wait is in progress; completion may reacquire it. | Do not hold the guard across a wait or encode a wait in `.wake.state`. |
 | Endpoint generation mismatch | Control/reload endpoints remain ephemeral and may be addressed with a wrong generation or replaced socket. | The request/refusal is tied to the expected generation/socket identity. A mismatch is refused without changing durable state. | Do not mutate state, lock, target, or floor from an unauthenticated endpoint/path. |
-| Crash at every publication point | Stop after temp creation, file sync, pre-rename directory sync, rename, post-rename sync, state verification, lock link, lock-temp removal, or final directory sync. Include the P2b target-state-before-lock geometry and the later prepared-legacy-before-state refresh gap. | Pre-lock states never claim ownership. Post-link lock states are committed even when later cleanup/sync reports an error. In P2a, state/doc mismatch falls back to live legacy. For a bound P2b claim, a torn/mismatched state document is typed inconclusive/retry-only until an authorized mutating path refreshes it; ambiguous installed artifacts are preserved. | Never let a document, temp name, stale marker, or pathname-only cleanup remove another generation or authorize a mutation. |
+| Crash at every publication point | Stop after temp creation, file sync, pre-rename directory sync, rename, post-rename sync, state verification, lock link, lock-temp removal, or final directory sync. Include the P2b target-state-before-lock geometry and the later prepared-legacy-before-state refresh gap. | Pre-lock states never claim ownership. Post-link lock states are committed even when later cleanup/sync reports an error. In P2a, state/doc mismatch falls back to live legacy. For a bound P2b claim, a torn/mismatched state document is typed inconclusive/retry-only until an authorized mutating path refreshes it. A subsequent targetless acquisition may quarantine an exact conclusively ownerless no-lock target and only then fresh-inspect before superseding matching projection residue; owner-bearing residue requires owner recovery or inspection. Before replacement, debug mode records the prior target and state digests. | Never let a document, temp name, stale marker, quarantine artifact, or pathname-only cleanup remove another generation or authorize a mutation. |
 
 The tests MUST exercise the state-specific versions of these cases, including
 crash hooks after every legacy and state boundary. The existing typed
@@ -419,6 +503,30 @@ document on that authorized mutating path, but a read-only inspection never
 performs migration. Existing live locks are never rewritten: a pre-P2b lock
 remains unbound and usable through P2a fallback until its wake restarts and
 republishes with the new fields.
+
+Recovery and rollback of a bound claim MUST validate the current binding under
+the lifecycle guard before stopping a wake or unlinking its lock. An
+inconclusive binding refuses and preserves the lock, target, prepared marker,
+and state document; it never falls back to a destructive legacy cleanup. A
+target/state shadow with no lock is likewise non-authoritative preservation; a
+targetless acquisition may move only an exact conclusively ownerless target
+into quarantine and must fresh-inspect before converging matching projection
+residue. Clean owner-bearing residue requires dead-owner recovery, while
+malformed ownership remains inspection-only. Here rollback
+means using an older binary or reader that remains compatible with the retained
+legacy artifacts; it does not rewrite a lock to remove P2b fields. Existing
+unbound claims remain P2a, and an older binary may still release its own exact
+claim.
+
+There is one narrow terminal-cleanup exception for a retained agent-directory
+descriptor. After selecting an exact unchanged lock snapshot, AMQ MAY remove
+only that lock from the retained directory when opening the canonical agent
+path succeeds and comparing directory identities proves that the retained
+directory was replaced by a different canonical directory. The operation MUST
+return a typed cleanup-only error and MUST NOT authorize any subsequent repair,
+publication, or other mutation through the detached descriptor. An absent or
+unopenable canonical path, or any failure to compare both identities, is
+inconclusive: preserve the residue and fail closed.
 
 The lock's exact-key ABI golden test MUST be updated in the same PR as the new
 fields, migration, state binding, and acceptance tests. P2b is held until
