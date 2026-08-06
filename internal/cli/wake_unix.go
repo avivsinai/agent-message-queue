@@ -102,12 +102,61 @@ type wakeLockAcquireOptions struct {
 	refuseUnverifiedGeneric bool
 	target                  *wakeTarget
 	wakeMode                string
+	debug                   bool
 	requestedOwner          *wakeOwner
 	repairLineage           *wakeRepairLineage
 	repairFloorAuthority    *wakeRepairFloorAuthority
 	// resumeEligible is startup policy, not authority. newWakeLock still requires
 	// the complete owner/process/control/image advertisement below.
 	resumeEligible bool
+}
+
+func debugWakeNoLockShadowReplacementAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	kind string,
+	enabled bool,
+) error {
+	if !enabled {
+		return nil
+	}
+	const (
+		absent      = "absent"
+		unavailable = "unavailable"
+	)
+	targetDigest := absent
+	target, targetExists, targetErr := readWakeTargetAt(dirfd, agentDir, root, me)
+	if targetErr != nil {
+		targetDigest = unavailable
+	} else if targetExists {
+		digest, err := wakeTargetDigest(target)
+		if err != nil {
+			targetDigest = unavailable
+		} else {
+			targetDigest = digest
+		}
+	}
+	stateDigest := absent
+	state, stateExists, stateErr := readWakeStateSnapshotAt(dirfd, agentDir)
+	if stateErr != nil {
+		stateDigest = unavailable
+	} else if stateExists && state.State.Target.TargetDigest != "" {
+		stateDigest = state.State.Target.TargetDigest
+	} else if stateExists {
+		stateDigest = unavailable
+	}
+	if !targetExists && !stateExists && targetErr == nil && stateErr == nil {
+		return nil
+	}
+	return writeWakeDiagnostic(
+		nil,
+		"amq wake [debug]: %s publication superseding no-lock wake shadow target_digest=%s state_target_digest=%s\n",
+		kind,
+		targetDigest,
+		stateDigest,
+	)
 }
 
 type wakeLockCreatingError struct{}
@@ -233,6 +282,7 @@ func acquireWakeLockWithOptionsInDir(
 	for {
 		var replace wakeLockInspection
 		var created wakeLockInspection
+		quarantined := false
 		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 			inspection := inspectWakeLockAt(dirfd, agentDir, root, me)
 			if options.repairLineage != nil && inspection.Exists {
@@ -245,6 +295,13 @@ func acquireWakeLockWithOptionsInDir(
 					inspection.Reason,
 					me,
 				)
+			}
+			if wakeLockEligibleForQuarantine(inspection, wakeQuarantineNow()) {
+				if _, err := quarantineMalformedWakeLockAt(dirfd, agentDir, inspection); err != nil {
+					return err
+				}
+				quarantined = true
+				return nil
 			}
 			if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestAcquire); err != nil {
 				return err
@@ -261,7 +318,10 @@ func acquireWakeLockWithOptionsInDir(
 			if inspection.Exists {
 				switch inspection.Status {
 				case wakeLockStale:
-					if err := validateWakeLockStaleRemoval(inspection); err != nil {
+					if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, inspection); err != nil {
+						return err
+					}
+					if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, inspection); err != nil {
 						return err
 					}
 					if err := removeWakeLockIfUnchangedGuardedAt(
@@ -283,12 +343,16 @@ func acquireWakeLockWithOptionsInDir(
 								me,
 							)
 						}
-						if err := requireWakeLockUsable(inspection, options.wakeMode, options.target); err != nil {
+						if err := requireWakeLockUsableAt(
+							dirfd, agentDir, inspection, options.wakeMode, options.target,
+						); err != nil {
 							return err
 						}
 						return wakeLockAlreadyRunningError(me, inspection)
 					}
-					replaceNeeded, replaceErr := wakeLockReplacementNeeded(inspection)
+					replaceNeeded, replaceErr := wakeLockReplacementNeededAt(
+						dirfd, agentDir, inspection,
+					)
 					if replaceErr != nil {
 						return replaceErr
 					}
@@ -313,6 +377,26 @@ func acquireWakeLockWithOptionsInDir(
 			}
 			if replace.Exists {
 				return nil
+			}
+			if !inspection.Exists && options.target == nil && options.repairLineage == nil {
+				orphan, exists, readErr := readWakeTargetSnapshotAt(dirfd, agentDir, root, me)
+				// Parse errors retain an exact snapshot; quarantineWakeTargetAt independently revalidates inode and raw bytes.
+				if readErr != nil && (orphan.FileInfo == nil || orphan.Raw == nil) {
+					return fmt.Errorf("orphan wake target is unverified before targetless acquisition: %w", readErr)
+				}
+				if readErr == nil && exists && orphan.Target.Owner != nil {
+					return fmt.Errorf("wake handle %s has an owner-bearing orphan target; run 'amq wake recover-owner --me %s'", me, me)
+				}
+				if readErr != nil && malformedWakeTargetLooksOwnerShaped(orphan.Raw) {
+					return fmt.Errorf("wake handle %s has an unverified owner-shaped orphan target; inspect the target because automatic owner recovery is unavailable", me)
+				}
+				if exists {
+					if _, err := quarantineWakeTargetAt(dirfd, agentDir, orphan); err != nil {
+						return err
+					}
+					quarantined = true
+					return nil
+				}
 			}
 			if orphan, exists, readErr := readWakeTargetAt(dirfd, agentDir, root, me); readErr != nil {
 				return fmt.Errorf("wake target for %s is unverified: %w", me, readErr)
@@ -347,16 +431,35 @@ func acquireWakeLockWithOptionsInDir(
 
 			// Stage target metadata first. The lock is the transaction commit point.
 			if options.target != nil {
+				if err := debugWakeNoLockShadowReplacementAt(
+					dirfd, agentDir, root, me, "generic", options.debug,
+				); err != nil {
+					return fmt.Errorf("write no-lock wake shadow diagnostic: %w", err)
+				}
 				if err := writeWakeTargetGuardedAt(dirfd, agentDir, root, me, *options.target); err != nil {
 					return err
 				}
-			} else if err := removeWakeTargetGuardedAt(dirfd, agentDir); err != nil {
-				return err
+			} else {
+				_, targetExists, err := readWakeTargetAt(dirfd, agentDir, root, me)
+				if err != nil {
+					return fmt.Errorf("orphan wake target is unverified before targetless acquisition: %w", err)
+				}
+				if targetExists {
+					return fmt.Errorf("orphan wake target is preserved because it may be an uncommitted bound-claim shadow")
+				}
+				if err := removeWakeTargetGuardedAt(dirfd, agentDir); err != nil {
+					return err
+				}
 			}
 
 			lock, err := newWakeLock(root, me, options)
 			if err != nil {
 				return err
+			}
+			if options.target != nil {
+				if err := publishWakeStateAndBindLockAt(dirfd, agentDir, root, me, &lock); err != nil {
+					return fmt.Errorf("publish wake state before generic wake lock: %w", err)
+				}
 			}
 			if options.repairLineage != nil {
 				err = createWakeRepairLockAt(
@@ -378,17 +481,17 @@ func acquireWakeLockWithOptionsInDir(
 				return fmt.Errorf("failed to verify created wake lock generation")
 			}
 			if options.target != nil {
-				if err := reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me); err != nil {
-					if continueAfterWakeStateProjectionError(err) {
-						return nil
-					}
-					return err
+				if err := validateWakeBoundStateAt(dirfd, agentDir, root, me, created.Lock); err != nil {
+					return fmt.Errorf("verify created generic wake binding: %w", err)
 				}
 			}
 			return nil
 		})
 		if err != nil {
 			return nil, err
+		}
+		if quarantined {
+			continue
 		}
 		if replace.Exists {
 			if _, err := terminateAndRemoveOrphanedWakeLockInDir(
@@ -429,6 +532,9 @@ func cleanupGenericWakeGenerationAt(
 	current := inspectWakeLockAt(dirfd, agentDir, root, me)
 	if !sameWakeLockGeneration(created, current) || !currentWakeLockMatches(current.Lock) {
 		return nil
+	}
+	if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, current); err != nil {
+		return err
 	}
 
 	preparedSnapshot, preparedSnapshotErr := freezeGenericWakePreparedCleanupAt(
@@ -638,7 +744,25 @@ func wakeLockReplacementNeeded(inspection wakeLockInspection) (bool, error) {
 	return wakeLockNeedsReplacement(inspection), nil
 }
 
+func wakeLockReplacementNeededAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+) (bool, error) {
+	if err := validateWakeLockOwnerlessMutationAt(dirfd, agentDir, inspection); err != nil {
+		return false, err
+	}
+	return wakeLockNeedsReplacement(inspection), nil
+}
+
 func validateWakeLockOwnerlessMutation(inspection wakeLockInspection) error {
+	if _, err := readWakeStateSelectionForInspection(
+		inspection.Root,
+		inspection.Agent,
+		inspection,
+	); err != nil {
+		return err
+	}
 	if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestMutate); err != nil {
 		return err
 	}
@@ -717,6 +841,41 @@ func wakeLockTerminalGone(inspection wakeLockInspection) bool {
 }
 
 func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, requestedTarget *wakeTarget) error {
+	return requireWakeLockUsableWithTargetReader(
+		inspection,
+		requiredMode,
+		requestedTarget,
+		func() (wakeTarget, bool, error) {
+			return readWakeTargetFromStateForInspection(
+				inspection.Root, inspection.Agent, inspection,
+			)
+		},
+	)
+}
+
+func requireWakeLockUsableAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	requiredMode string,
+	requestedTarget *wakeTarget,
+) error {
+	return requireWakeLockUsableWithTargetReader(
+		inspection,
+		requiredMode,
+		requestedTarget,
+		func() (wakeTarget, bool, error) {
+			return readWakeTargetForRetainedInspectionAt(dirfd, agentDir, inspection)
+		},
+	)
+}
+
+func requireWakeLockUsableWithTargetReader(
+	inspection wakeLockInspection,
+	requiredMode string,
+	requestedTarget *wakeTarget,
+	readTarget func() (wakeTarget, bool, error),
+) error {
 	if !inspection.Exists || inspection.Status != wakeLockValid || !inspection.IdentityConfirmed {
 		return fmt.Errorf("existing wake lock for %s is not a confirmed valid wake", inspection.Agent)
 	}
@@ -743,7 +902,7 @@ func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, r
 		if requestedTarget == nil {
 			return fmt.Errorf("existing inject-via wake for %s cannot be reused without a requested wake target", inspection.Agent)
 		}
-		persistedTarget, exists, err := readWakeTargetFromState(inspection.Root, inspection.Agent)
+		persistedTarget, exists, err := readTarget()
 		if err != nil {
 			return fmt.Errorf("existing inject-via wake target for %s is not usable: %w", inspection.Agent, err)
 		}
@@ -957,10 +1116,18 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 			result.Reason = fmt.Sprintf("wake lock status %q is not repairable", inspection.Status)
 			return errors.New(result.Reason)
 		}
+		if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, inspection); err != nil {
+			result.Status = "refused"
+			result.PID = inspection.PID
+			result.Reason = err.Error()
+			return err
+		}
 
 		var exists bool
 		var err error
-		target, exists, err = readWakeTargetFromStateAt(dirfd, agentDir, root, me)
+		target, exists, err = readWakeTargetFromStateForInspectionAt(
+			dirfd, agentDir, root, me, inspection,
+		)
 		if err != nil {
 			result.Status = "refused"
 			result.Reason = err.Error()
@@ -1057,6 +1224,11 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 			result.Status = "refused"
 			result.RepairAvailable = false
 			result.PID = inspectWakeLockAt(dirfd, agentDir, root, me).PID
+			var detachedCleanup *wakeDetachedCleanupOnlyError
+			if errors.As(removeErr, &detachedCleanup) {
+				result.Reason = removeErr.Error()
+				return removeErr
+			}
 			result.Reason = "wake lock changed before repair"
 			return errors.New(result.Reason)
 		}
@@ -1979,6 +2151,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 			refuseUnverifiedGeneric: *refuseUnverifiedWakeFlag,
 			target:                  target,
 			wakeMode:                lockWakeMode,
+			debug:                   *debugFlag,
 			requestedOwner:          requestedOwner,
 			repairLineage:           repairLineage,
 			resumeEligible:          resumeEligible,
@@ -1998,7 +2171,8 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 			continue
 		}
 		var snapshotChanged *wakeSnapshotReadChangedError
-		if acceptExistingWake && errors.As(err, &snapshotChanged) {
+		var boundInconclusive *wakeStateBoundInconclusiveError
+		if acceptExistingWake && (errors.As(err, &snapshotChanged) || errors.As(err, &boundInconclusive)) {
 			if !waitForWakePreparedRetry(acceptExistingDeadline) {
 				return fmt.Errorf(
 					"wake lock did not stabilize within %s: %w",

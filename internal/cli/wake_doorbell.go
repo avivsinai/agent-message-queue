@@ -32,6 +32,7 @@ const (
 type wakeDoorbellState struct {
 	phase                        wakeDoorbellPhase
 	cohort                       map[string]*wakeFileIdentity
+	presentationConfirmed        bool
 	attempts                     uint
 	reminderAttempts             uint
 	attemptBudget                uint
@@ -44,9 +45,11 @@ type wakeDoorbellState struct {
 }
 
 type wakeDoorbellPlan struct {
-	attempt  bool
-	prompt   string
-	progress bool
+	attempt       bool
+	prompt        string
+	submitOnly    bool
+	contentChange bool
+	progress      bool
 }
 
 func (state *wakeDoorbellState) plan(
@@ -72,9 +75,11 @@ func (state *wakeDoorbellState) plan(
 	}
 
 	progress := state.phase != wakeDoorbellIdle && wakeCohortProgressed(state.cohort, current)
+	contentChange := false
 	if progress {
 		state.reset()
 	} else if state.phase != wakeDoorbellIdle && wakeCohortExpanded(state.cohort, current) {
+		contentChange = true
 		// Additions extend the pending obligation without resetting its retry
 		// ladder, but pull its deadline forward to the delivery floor because
 		// the new information has not been announced yet. One outstanding
@@ -82,6 +87,7 @@ func (state *wakeDoorbellState) plan(
 		// unread messages do not need N doorbells.
 		if state.phase == wakeDoorbellParked {
 			state.cohort = snapshotWakeFileIdentities(current)
+			state.presentationConfirmed = false
 			if state.attemptBudget < wakeDoorbellLifetimeAttemptCap {
 				state.attemptBudget++
 				state.phase = wakeDoorbellRetrying
@@ -103,18 +109,25 @@ func (state *wakeDoorbellState) plan(
 	}
 
 	return wakeDoorbellPlan{
-		attempt:  true,
-		prompt:   coopWakeDoorbell,
-		progress: progress,
+		attempt:       true,
+		prompt:        coopWakeDoorbell,
+		submitOnly:    state.presentationConfirmed,
+		contentChange: contentChange,
+		progress:      progress,
 	}
 }
 
 func (state *wakeDoorbellState) arm(current map[string]os.FileInfo) {
 	state.phase = wakeDoorbellRetrying
 	state.cohort = snapshotWakeFileIdentities(current)
+	state.presentationConfirmed = false
 	if state.attemptBudget == 0 {
 		state.attemptBudget = wakeDoorbellInitialAttemptBudget
 	}
+}
+
+func (state *wakeDoorbellState) confirmPresentation() {
+	state.presentationConfirmed = true
 }
 
 func (state *wakeDoorbellState) recordAttempt(now time.Time) {

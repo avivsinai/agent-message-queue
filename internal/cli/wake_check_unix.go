@@ -133,17 +133,11 @@ func inspectWakeCheckSnapshot(root, me string) wakeCheckSnapshot {
 	root = canonicalWakeRoot(root)
 	first, firstErr := observeWakeCheck(root, me)
 	if firstErr != nil {
-		return wakeCheckSnapshot{
-			OpsLock:  opsWakeLockFromWakeCheckObservation(root, me, first),
-			Decision: unstableWakeCheckDecision(root, me, first.Inspection),
-		}
+		return wakeCheckObservationFailureSnapshot(root, me, first, firstErr)
 	}
 	second, secondErr := observeWakeCheck(root, me)
 	if secondErr != nil || !sameWakeCheckObservation(first, second) {
-		return wakeCheckSnapshot{
-			OpsLock:  opsWakeLockFromWakeCheckObservation(root, me, second),
-			Decision: unstableWakeCheckDecision(root, me, second.Inspection),
-		}
+		return wakeCheckObservationFailureSnapshot(root, me, second, secondErr)
 	}
 	opsLock := opsWakeLockFromWakeCheckObservation(root, me, second)
 	snapshot := wakeCheckSnapshot{
@@ -154,10 +148,7 @@ func inspectWakeCheckSnapshot(root, me string) wakeCheckSnapshot {
 	// so a PID reuse or lock generation change cannot inherit that conclusion.
 	third, thirdErr := observeWakeCheck(root, me)
 	if thirdErr != nil || !sameWakeCheckObservation(second, third) {
-		return wakeCheckSnapshot{
-			OpsLock:  opsWakeLockFromWakeCheckObservation(root, me, third),
-			Decision: unstableWakeCheckDecision(root, me, third.Inspection),
-		}
+		return wakeCheckObservationFailureSnapshot(root, me, third, thirdErr)
 	}
 	return snapshot
 }
@@ -181,28 +172,23 @@ func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
 
 	err = agentDir.withFD(func(dirfd int) error {
 		observation.Inspection = inspectWakeLockAt(dirfd, agentDir, root, me)
+		var boundSelectionErr error
 		observation.Repair = assessWakeRepair(
 			root,
 			me,
 			observation.Inspection,
 			func() (wakeTarget, bool, error) {
-				selection, err := readWakeStateSelectionAt(dirfd, agentDir, root, me)
-				observation.Target.Exists = selection.TargetPresent
-				if err != nil || !selection.TargetPresent {
-					return selection.Target, selection.TargetPresent, err
-				}
-				// Keep the public observation bound to legacy authority. Shadow-state
-				// replacement must not create diagnostic or retry drift in P2a.
-				fingerprint, err := newWakeCheckMetadataFingerprint(
-					selection.legacy.TargetPresent,
-					selection.legacy.Target.Raw,
-					selection.legacy.Target.FileInfo,
+				selection, err := readWakeStateSelectionForInspectionAt(
+					dirfd, agentDir, root, me, observation.Inspection,
 				)
-				if err != nil {
-					return selection.Target, selection.TargetPresent, err
+				fingerprintErr := recordWakeCheckSelectionTarget(&observation, selection)
+				if fingerprintErr != nil {
+					return selection.Target, selection.TargetPresent, fingerprintErr
 				}
-				observation.Target = fingerprint
-				return selection.Target, true, nil
+				if isWakeStateBoundInconclusive(err) {
+					boundSelectionErr = err
+				}
+				return selection.Target, selection.TargetPresent, err
 			},
 			func(target wakeTarget) error {
 				snapshot, exists, err := readWakeRepairFloorSnapshotAt(dirfd, agentDir)
@@ -230,6 +216,9 @@ func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
 				return validateWakeRepairFloorCurrentBoot(snapshot.Floor)
 			},
 		)
+		if boundSelectionErr != nil {
+			return boundSelectionErr
+		}
 		confirmed := inspectWakeLockAt(dirfd, agentDir, root, me)
 		// Catch a lock change that reverts before the outer observation comparison.
 		if !sameWakeCheckInspection(observation.Inspection, confirmed) {
@@ -244,6 +233,25 @@ func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
 		return observation, err
 	}
 	return observation, nil
+}
+
+func recordWakeCheckSelectionTarget(observation *wakeCheckObservation, selection wakeStateReadSelection) error {
+	observation.Target.Exists = selection.TargetPresent
+	if !selection.TargetPresent {
+		return nil
+	}
+	// Keep the public observation bound to legacy authority. Shadow-state
+	// replacement must not create diagnostic or retry drift in P2a.
+	fingerprint, err := newWakeCheckMetadataFingerprint(
+		selection.legacy.TargetPresent,
+		selection.legacy.Target.Raw,
+		selection.legacy.Target.FileInfo,
+	)
+	if err != nil {
+		return err
+	}
+	observation.Target = fingerprint
+	return nil
 }
 
 func newWakeCheckMetadataFingerprint(
@@ -337,6 +345,46 @@ func unstableWakeCheckDecision(root, me string, inspection wakeLockInspection) w
 	}
 	finalizeWakeCheckDecision(&decision)
 	return decision
+}
+
+func wakeCheckObservationFailureDecision(
+	root, me string,
+	inspection wakeLockInspection,
+	err error,
+) wakeCheckDecision {
+	decision := unstableWakeCheckDecision(root, me, inspection)
+	if !isWakeStateBoundInconclusive(err) {
+		return decision
+	}
+	decision.Wake.Status = string(wakeLockUnverified)
+	decision.Wake.Live = false
+	decision.Repair.InjectViaAvailable = false
+	return decision
+}
+
+func wakeCheckObservationFailureSnapshot(
+	root, me string,
+	observation wakeCheckObservation,
+	err error,
+) wakeCheckSnapshot {
+	opsLock := opsWakeLockFromWakeCheckObservation(root, me, observation)
+	if isWakeStateBoundInconclusive(err) && opsLock != nil {
+		opsLock.Target = ""
+		opsLock.TargetPresent = false
+		opsLock.TargetReason = ""
+		opsLock.Repair = ""
+		opsLock.RepairAvailable = false
+		opsLock.RepairReason = ""
+	}
+	return wakeCheckSnapshot{
+		OpsLock:  opsLock,
+		Decision: wakeCheckObservationFailureDecision(root, me, observation.Inspection, err),
+	}
+}
+
+func isWakeStateBoundInconclusive(err error) bool {
+	var bound *wakeStateBoundInconclusiveError
+	return errors.As(err, &bound)
 }
 
 func sameWakeCheckInspection(first, second wakeLockInspection) bool {

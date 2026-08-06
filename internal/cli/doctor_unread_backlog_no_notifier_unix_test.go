@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -328,6 +329,69 @@ func TestDoctorOpsV1ChangedBeforeFixDoesNotClaimNotifierAbsent(t *testing.T) {
 			}
 			if _, found := findOpsHint(result.Hints, "unread_backlog_no_notifier"); found {
 				t.Fatalf("replacement emitted no-notifier hint: %#v", result.Hints)
+			}
+		})
+	}
+}
+
+func TestDoctorOpsDetachedFixErrorUsesCanonicalNotifierState(t *testing.T) {
+	for _, schema := range []int{wakeCheckSchemaV1, wakeCheckSchemaV2} {
+		t.Run(fmt.Sprintf("schema-%d", schema), func(t *testing.T) {
+			root := healthyDoctorMailboxRoot(t, "alice")
+			writeUnreadBacklogForTest(t, root, 0)
+			writeWakeLockForTest(t, root, "alice", wakeLock{
+				PID:          4242,
+				ProcessStart: "stale-start",
+				BootID:       "stale-boot",
+				Executable:   "amq",
+				Args:         []string{"amq", "wake"},
+			})
+
+			detached := filepath.Join(root, "agents", "alice-detached")
+			calls := 0
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				calls++
+				if calls < 3 {
+					return wakeProcessInfo{PID: pid, Running: false}
+				}
+				if calls == 3 {
+					if err := os.Rename(fsq.AgentBase(root, "alice"), detached); err != nil {
+						t.Fatal(err)
+					}
+					if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+						t.Fatal(err)
+					}
+					writeWakeLockForTest(t, root, "alice", wakeLock{
+						PID:          4242,
+						ProcessStart: "live-start",
+						BootID:       "live-boot",
+						Executable:   "amq",
+						Args:         []string{"amq", "wake"},
+					})
+					if err := os.WriteFile(filepath.Join(detached, ".wake.lock"), []byte("{}"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					return wakeProcessInfo{PID: pid, Running: false}
+				}
+				return wakeProcessInfo{
+					PID:        pid,
+					Running:    true,
+					StartToken: "live-start",
+					BootID:     "live-boot",
+					Executable: "/usr/local/bin/amq",
+					Args:       []string{"amq", "wake"},
+				}
+			})
+
+			result := runOpsChecksWithSchema(root, "test", true, schema)
+			if len(result.WakeLocks) != 1 || result.WakeLocks[0].NotifierAbsent {
+				t.Fatalf("canonical live replacement classified absent: %#v", result.WakeLocks)
+			}
+			if result.WakeLocks[0].Mutation == nil || result.WakeLocks[0].Mutation.Status != "error" {
+				t.Fatalf("detached mutation outcome = %#v", result.WakeLocks)
+			}
+			if _, found := findOpsHint(result.Hints, "unread_backlog_no_notifier"); found {
+				t.Fatalf("canonical live replacement emitted no-notifier hint: %#v", result.Hints)
 			}
 		})
 	}

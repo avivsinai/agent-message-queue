@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,6 +17,28 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/sys/unix"
 )
+
+func TestLinuxStableOwnerStopRefusesBoundInconclusiveBeforePidfd(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	if err := os.Remove(filepath.Join(fixture.agentDir.path, wakeStateFileName)); err != nil {
+		t.Fatal(err)
+	}
+	originalOpen := linuxPidfdOpen
+	linuxPidfdOpen = func(int, int) (int, error) {
+		t.Fatal("bound-inconclusive stop opened a pidfd")
+		return -1, nil
+	}
+	t.Cleanup(func() { linuxPidfdOpen = originalOpen })
+
+	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		_, err := prepareAuthoritativeWakeStopPlatform(dirfd, fixture.agentDir, fixture.inspection)
+		return err
+	})
+	var inconclusive *wakeStateBoundInconclusiveError
+	if !errors.As(err, &inconclusive) {
+		t.Fatalf("stable-stop error = %v, want bound inconclusive", err)
+	}
+}
 
 func TestLinuxOwnerWakeChildRequestsPidfdAtProcessCreation(t *testing.T) {
 	oldOpen := linuxPidfdOpen

@@ -460,18 +460,18 @@ func TestMonitorRechecksSessionPinBeforePostWatchDrain(t *testing.T) {
 	t.Setenv("AM_BASE_ROOT", baseRoot)
 	t.Setenv("AM_SESSION", "session1")
 
-	delivered := make(chan error, 1)
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		if err := os.Setenv("AM_SESSION", "session2"); err != nil {
-			delivered <- err
-			return
+	var deliverErr error
+	oldPollingIdleHook := monitorPollingIdleForTest
+	monitorPollingIdleForTest = func() {
+		deliverErr = os.Setenv("AM_SESSION", "session2")
+		if deliverErr == nil {
+			deliverErr = deliverGuardMessageError(root, "alice", "after-pin-change")
 		}
-		delivered <- deliverGuardMessageError(root, "alice", "after-pin-change")
-	}()
+	}
+	t.Cleanup(func() { monitorPollingIdleForTest = oldPollingIdleHook })
 
 	err := runMonitor([]string{"--me", "alice", "--timeout", "2s", "--poll"})
-	if deliverErr := <-delivered; deliverErr != nil {
+	if deliverErr != nil {
 		t.Fatalf("deliver message: %v", deliverErr)
 	}
 	assertConsumeRefused(t, err, "monitor")

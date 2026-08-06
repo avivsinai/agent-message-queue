@@ -34,6 +34,10 @@ func TestCrashContractTargetPublicationFailureBeforeLockPreservesInstalledTarget
 	if readErr != nil || !exists || !sameWakeTarget(persisted, target) {
 		t.Fatalf("target-before-lock failure target=%#v exists=%v err=%v", persisted, exists, readErr)
 	}
+	state := readWakeStateAtPathForTest(t, root, "codex")
+	if !sameWakeTarget(state.State.Target.wakeTarget(), target) || state.State.Prepared != nil {
+		t.Fatalf("target-before-lock state shadow = %#v", state.State)
+	}
 }
 
 func TestCrashContractLockReplacementIsRejectedByEveryFDReader(t *testing.T) {
@@ -215,6 +219,10 @@ func TestCrashContractPublicationHooksLeaveRecoverableVisibleStates(t *testing.T
 		if !inspection.Exists || classifyPersistedWakeClaim(inspection) != wakeClaimAuthoritative {
 			t.Fatalf("lock-publication crash claim = %#v, want authoritative", inspection)
 		}
+		if inspection.Lock.StateGeneration != inspection.Lock.Generation ||
+			inspection.Lock.StateDigest != inspection.Lock.TargetDigest {
+			t.Fatalf("lock-publication crash lost state binding: %#v", inspection.Lock)
+		}
 		persisted, exists, err := readWakeTarget(root, "codex")
 		if err != nil || !exists || !sameWakeTarget(persisted, target) {
 			t.Fatalf("lock-publication crash target=%#v exists=%v err=%v", persisted, exists, err)
@@ -243,16 +251,11 @@ func TestCrashContractPublicationHooksLeaveRecoverableVisibleStates(t *testing.T
 	t.Run("final lock directory sync fails", func(t *testing.T) {
 		root, target, _ := newOwnerAcquisitionPublicationFixture(t)
 		syncFailure := errors.New("crash at final lock directory sync")
-		originalSync := syncWakeOwnerDirFD
-		syncCalls := 0
-		syncWakeOwnerDirFD = func(fd int) error {
-			syncCalls++
-			if syncCalls == 2 {
-				return syncFailure
-			}
-			return originalSync(fd)
+		originalSync := syncAuthoritativeWakeLockAfterCommitDirFD
+		syncAuthoritativeWakeLockAfterCommitDirFD = func(int) error {
+			return syncFailure
 		}
-		t.Cleanup(func() { syncWakeOwnerDirFD = originalSync })
+		t.Cleanup(func() { syncAuthoritativeWakeLockAfterCommitDirFD = originalSync })
 
 		_, err := acquireAuthoritativeWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
 			target: &target, wakeMode: wakeTargetInjectVia,
@@ -261,6 +264,10 @@ func TestCrashContractPublicationHooksLeaveRecoverableVisibleStates(t *testing.T
 		if !errors.Is(err, syncFailure) ||
 			!inspection.Exists || classifyPersistedWakeClaim(inspection) != wakeClaimAuthoritative {
 			t.Fatalf("final-sync failure err=%v claim=%#v", err, inspection)
+		}
+		if inspection.Lock.StateGeneration != inspection.Lock.Generation ||
+			inspection.Lock.StateDigest != inspection.Lock.TargetDigest {
+			t.Fatalf("final-sync crash lost state binding: %#v", inspection.Lock)
 		}
 		persisted, exists, readErr := readWakeTarget(root, "codex")
 		if readErr != nil || !exists || !sameWakeTarget(persisted, target) {

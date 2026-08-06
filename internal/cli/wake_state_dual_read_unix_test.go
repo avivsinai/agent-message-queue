@@ -272,6 +272,7 @@ func TestWakePreparedDualReadFallsBackFromIneligiblePreparedState(t *testing.T) 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+			unbindAuthoritativeWakePreparedFixtureForP2a(t, fixture)
 			statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
 			raw, err := os.ReadFile(statePath)
 			if err != nil {
@@ -410,6 +411,7 @@ func TestWakeStateDualReadPreservesTargetForStableInvalidPrepared(t *testing.T) 
 
 func TestWakeCheckAndDoctorGoldenBytesUnaffectedByWakeStatePresence(t *testing.T) {
 	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	unbindAuthoritativeWakePreparedFixtureForP2a(t, fixture)
 	wakeBefore := wakeCheckPublicBytesForDualReadTest(t, fixture.root, fixture.me)
 	locksBefore, hintsBefore := checkWakeLocksWithHintsSchema(
 		fixture.root,

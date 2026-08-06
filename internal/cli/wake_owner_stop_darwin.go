@@ -13,6 +13,9 @@ func prepareAuthoritativeWakeStopPlatform(
 	if !sameWakeLockGeneration(expected, current) {
 		return authoritativeWakeStopCapability{}, fmt.Errorf("authoritative wake generation changed before cooperative stop preparation")
 	}
+	if err := validateBoundWakeMutationAt(dirfd, agentDir, current); err != nil {
+		return authoritativeWakeStopCapability{}, err
+	}
 	if classifyPersistedWakeClaim(current) != wakeClaimAuthoritative {
 		return authoritativeWakeStopCapability{}, fmt.Errorf("wake claim is not authoritative during cooperative stop preparation")
 	}

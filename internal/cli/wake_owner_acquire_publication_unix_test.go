@@ -14,7 +14,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-func TestOwnerAcquisitionUnsupportedPublicationRemovesItsInstalledTarget(t *testing.T) {
+func TestOwnerAcquisitionUnsupportedPublicationLeavesUnboundTargetAndStateShadows(t *testing.T) {
 	root, target, owner := newOwnerAcquisitionPublicationFixture(t)
 
 	originalLink := publishAuthoritativeWakeLinkAt
@@ -33,8 +33,13 @@ func TestOwnerAcquisitionUnsupportedPublicationRemovesItsInstalledTarget(t *test
 	if inspection := inspectWakeLock(root, "codex"); inspection.Exists {
 		t.Fatalf("unsupported publication left a wake lock: %#v", inspection)
 	}
-	if _, exists, readErr := readWakeTarget(root, "codex"); readErr != nil || exists {
-		t.Fatalf("unsupported publication target exists=%v err=%v", exists, readErr)
+	persisted, exists, readErr := readWakeTarget(root, "codex")
+	if readErr != nil || !exists || !sameWakeTarget(persisted, target) {
+		t.Fatalf("unsupported publication target shadow=%#v exists=%v err=%v", persisted, exists, readErr)
+	}
+	state := readWakeStateAtPathForTest(t, root, "codex")
+	if !sameWakeTarget(state.State.Target.wakeTarget(), target) || state.State.Prepared != nil {
+		t.Fatalf("unsupported publication state shadow=%#v", state.State)
 	}
 	if !sameWakeOwner(target.Owner, &owner) {
 		t.Fatalf("unsupported publication mutated caller owner: %#v", target.Owner)
@@ -94,7 +99,7 @@ func TestOwnerAcquisitionUnsupportedPublicationPreservesChangedTarget(t *testing
 				target:   &target,
 				wakeMode: wakeTargetInjectVia,
 			})
-			if !errors.Is(err, syscall.EOPNOTSUPP) || !strings.Contains(err.Error(), "changed before cleanup") {
+			if !errors.Is(err, syscall.EOPNOTSUPP) {
 				t.Fatalf("owner acquisition error = %v, want unsupported publication plus preservation", err)
 			}
 			if inspection := inspectWakeLock(root, "codex"); inspection.Exists {
@@ -152,16 +157,11 @@ func TestOwnerPublicationPreservesReplacementInstalledImmediatelyAfterRename(t *
 func TestOwnerAcquisitionCommittedPublicationFailurePreservesExactClaim(t *testing.T) {
 	root, target, _ := newOwnerAcquisitionPublicationFixture(t)
 
-	originalSync := syncWakeOwnerDirFD
-	syncCalls := 0
-	syncWakeOwnerDirFD = func(fd int) error {
-		syncCalls++
-		if syncCalls == 2 {
-			return syscall.EIO
-		}
-		return originalSync(fd)
+	originalSync := syncAuthoritativeWakeLockAfterCommitDirFD
+	syncAuthoritativeWakeLockAfterCommitDirFD = func(int) error {
+		return syscall.EIO
 	}
-	t.Cleanup(func() { syncWakeOwnerDirFD = originalSync })
+	t.Cleanup(func() { syncAuthoritativeWakeLockAfterCommitDirFD = originalSync })
 
 	_, err := acquireAuthoritativeWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
 		target:   &target,
@@ -188,6 +188,50 @@ func TestOwnerAcquisitionCommittedPublicationFailurePreservesExactClaim(t *testi
 		return pairErr
 	}); verifyErr != nil {
 		t.Fatalf("committed claim pair is invalid: %v", verifyErr)
+	}
+}
+
+func TestOwnerAcquisitionLockTempUnlinkFailurePreservesExactClaim(t *testing.T) {
+	root, target, _ := newOwnerAcquisitionPublicationFixture(t)
+
+	originalUnlink := removeAuthoritativeWakeLockTempAfterCommitAt
+	removeAuthoritativeWakeLockTempAfterCommitAt = func(int, string, int) error {
+		return syscall.EIO
+	}
+	t.Cleanup(func() { removeAuthoritativeWakeLockTempAfterCommitAt = originalUnlink })
+
+	_, err := acquireAuthoritativeWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+		target:   &target,
+		wakeMode: wakeTargetInjectVia,
+	})
+	var publicationErr *wakeOwnerPublicationError
+	if !errors.Is(err, syscall.EIO) || !errors.As(err, &publicationErr) || !publicationErr.Committed {
+		t.Fatalf("owner acquisition error = %v, want committed unlink preservation", err)
+	}
+	inspection := inspectWakeLock(root, "codex")
+	if !inspection.Exists || classifyPersistedWakeClaim(inspection) != wakeClaimAuthoritative {
+		t.Fatalf("committed unlink-failure claim = %#v", inspection)
+	}
+	state := readWakeStateAtPathForTest(t, root, "codex")
+	if inspection.Lock.StateGeneration != inspection.Lock.Generation ||
+		inspection.Lock.StateDigest != state.State.Target.TargetDigest {
+		t.Fatalf("committed unlink-failure binding lock=%#v state=%#v", inspection.Lock, state.State.Target)
+	}
+	persisted, exists, readErr := readWakeTarget(root, "codex")
+	if readErr != nil || !exists || !sameWakeTarget(persisted, target) {
+		t.Fatalf("committed unlink-failure target=%#v exists=%v err=%v", persisted, exists, readErr)
+	}
+	if !sameWakeTarget(state.State.Target.wakeTarget(), target) || state.State.Prepared != nil {
+		t.Fatalf("committed unlink-failure state=%#v", state.State)
+	}
+	entries, readDirErr := os.ReadDir(fsq.AgentBase(root, "codex"))
+	if readDirErr != nil {
+		t.Fatal(readDirErr)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".wake-lock.tmp.") {
+			t.Fatalf("deferred cleanup left lock temp %q", entry.Name())
+		}
 	}
 }
 

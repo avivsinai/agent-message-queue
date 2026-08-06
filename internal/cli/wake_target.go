@@ -236,7 +236,7 @@ func validateWakeTarget(target wakeTarget, root, me string) error {
 			return fmt.Errorf("wake target inject arg contains NUL")
 		}
 	}
-	if _, err := normalizeWakeRetryUntil(target.RetryUntil); err != nil {
+	if err := validateStoredWakeRetryUntil(target.RetryUntil); err != nil {
 		return fmt.Errorf("wake target %w", err)
 	}
 	if target.Owner != nil {

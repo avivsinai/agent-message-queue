@@ -74,7 +74,7 @@ func writeWakeReadyFileAgainstOwnerInDir(
 			Generation:   current.Lock.Generation,
 			TargetDigest: current.Lock.TargetDigest,
 		}
-		if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, ready); err != nil {
+		if err := validateWakeReadyLockAndTargetForInspectionAt(dirfd, agentDir, root, me, current, ready); err != nil {
 			return err
 		}
 		if err := validateRequestedWakeOwnerForReadiness(current, requestedOwner); err != nil {
@@ -262,7 +262,7 @@ func validateWakeReadyLockAndSelectedTarget(
 	return validateWakeReadyTargetAndOwner(current, target)
 }
 
-func validateWakeReadyLockAndTargetAt(
+func validateWakeReadyLockAndTargetForInspectionAt(
 	dirfd int,
 	agentDir *wakeAgentDir,
 	root string,
@@ -270,7 +270,7 @@ func validateWakeReadyLockAndTargetAt(
 	current wakeLockInspection,
 	ready wakeReady,
 ) error {
-	selection, err := readWakeStateSelectionAt(dirfd, agentDir, root, me)
+	selection, err := readWakeStateSelectionForInspectionAt(dirfd, agentDir, root, me, current)
 	if err != nil {
 		return err
 	}
@@ -378,7 +378,7 @@ func validateWakeReadyFileAgainstOwnerInDir(
 			return err
 		}
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
-		if err := validateWakeReadyLockAndTargetAt(dirfd, agentDir, root, me, current, published); err != nil {
+		if err := validateWakeReadyLockAndTargetForInspectionAt(dirfd, agentDir, root, me, current, published); err != nil {
 			return err
 		}
 		if err := validateRequestedWakeOwnerForReadiness(current, requestedOwner); err != nil {

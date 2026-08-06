@@ -1974,7 +1974,7 @@ func awaitWakeAttentionFrom(
 	}
 }
 
-func TestRunWakeLoopRetriesPendingDoorbellWithoutOutputFlood(t *testing.T) {
+func TestRunWakeLoopRetriesPendingDoorbellWithSubmitOnlyNudge(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	message := format.Message{
@@ -2002,13 +2002,29 @@ func TestRunWakeLoopRetriesPendingDoorbellWithoutOutputFlood(t *testing.T) {
 	})
 	stubRawInjectSleep(t)
 	firstDoorbell := make(chan struct{}, 1)
-	extraDoorbell := make(chan struct{}, 1)
+	retypedDoorbell := make(chan struct{}, 1)
+	reminderSubmit := make(chan struct{}, 1)
 	attention := make(chan string, 1)
 	stop := make(chan struct{})
 	done := make(chan error, 1)
-	doorbells := 0
+	loopDone := make(chan struct{})
+	defer func() {
+		select {
+		case <-stop:
+		default:
+			close(stop)
+		}
+		select {
+		case <-loopDone:
+		case <-time.After(2 * time.Second):
+			t.Error("wake loop did not stop during cleanup")
+		}
+	}()
+	doorbellPayloads := 0
+	submitKeys := 0
 
 	go func() {
+		defer close(loopDone)
 		done <- runWakeLoop(wakeConfig{
 			root:        root,
 			me:          "codex",
@@ -2020,12 +2036,18 @@ func TestRunWakeLoopRetriesPendingDoorbellWithoutOutputFlood(t *testing.T) {
 				return nil
 			},
 			terminalWrite: func(text string) error {
-				if strings.Contains(text, coopWakeDoorbell) {
-					doorbells++
-					if doorbells == 1 {
+				if text == coopWakeDoorbell {
+					doorbellPayloads++
+					if doorbellPayloads == 1 {
 						firstDoorbell <- struct{}{}
 					} else {
-						extraDoorbell <- struct{}{}
+						retypedDoorbell <- struct{}{}
+					}
+				}
+				if text == "\r" {
+					submitKeys++
+					if submitKeys == 4 {
+						reminderSubmit <- struct{}{}
 					}
 				}
 				return nil
@@ -2047,11 +2069,11 @@ func TestRunWakeLoopRetriesPendingDoorbellWithoutOutputFlood(t *testing.T) {
 	}
 
 	select {
-	case <-extraDoorbell:
+	case <-reminderSubmit:
 	case err := <-done:
 		t.Fatalf("wake loop exited before retry: %v", err)
 	case <-time.After(wakeDoorbellRetryBase + 2*time.Second):
-		t.Fatal("pending doorbell was not retried on its own deadline")
+		t.Fatal("pending doorbell did not receive a submit-only nudge on its own deadline")
 	}
 	close(stop)
 	select {
@@ -2063,9 +2085,174 @@ func TestRunWakeLoopRetriesPendingDoorbellWithoutOutputFlood(t *testing.T) {
 		t.Fatal("wake loop did not stop")
 	}
 	select {
+	case <-retypedDoorbell:
+		t.Fatal("submit-only reminder retyped the fixed doorbell payload")
+	default:
+	}
+	select {
 	case output := <-attention:
 		t.Fatalf("retry emitted output-only attention: %q", output)
 	default:
+	}
+}
+
+func TestRunWakeLoopOwnerlessConfirmedPresentationUsesSubmitOnlyNudge(t *testing.T) {
+	root := secureTempDirForTest(t)
+	deliverPartialWakeMessageForTest(t, root, "codex", "ownerless-submit-only")
+	cleanup, err := acquireWakeLock(root, "codex", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	lock := inspectWakeLock(root, "codex")
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	stubRawInjectSleep(t)
+
+	start := time.Unix(1_800_000_000, 0)
+	var nowNanos atomic.Int64
+	nowNanos.Store(start.UnixNano())
+	var initialRawComplete atomic.Bool
+	var rawWrites atomic.Int64
+	initialAttemptRecorded := make(chan struct{}, 1)
+	writes := make(chan string, 8)
+	attention := make(chan string, 1)
+	ticks := make(chan time.Time)
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	loopDone := make(chan struct{})
+	defer func() {
+		select {
+		case <-stop:
+		default:
+			close(stop)
+		}
+		select {
+		case <-loopDone:
+		case <-time.After(2 * time.Second):
+			t.Error("wake loop did not stop during cleanup")
+		}
+	}()
+	stubTIOCSTIInject(t, func(text string) error {
+		writes <- text
+		if text == "\r" && rawWrites.Add(1) == 4 {
+			initialRawComplete.Store(true)
+		} else if text != "\r" {
+			rawWrites.Add(1)
+		}
+		return nil
+	})
+
+	cfg := wakeConfig{
+		root:               root,
+		me:                 "codex",
+		session:            "session1",
+		previewLen:         80,
+		injectMode:         wakeInjectModeRaw,
+		controlStop:        stop,
+		maintenanceTicks:   ticks,
+		terminalGeneration: lock.Lock.Generation,
+		terminalTTY:        lock.Lock.TTY,
+		doorbellNow: func() time.Time {
+			now := time.Unix(0, nowNanos.Load())
+			if initialRawComplete.Load() && now.Equal(start) {
+				select {
+				case initialAttemptRecorded <- struct{}{}:
+				default:
+				}
+			}
+			return now
+		},
+		preconditionCheck: func(*wakeConfig) error { return nil },
+		attentionIsTTY:    func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attention <- string(data)
+			return len(data), nil
+		},
+	}
+	if usesCoopDoorbell(&cfg) {
+		t.Error("ownerless generic wake loop selected the coop doorbell")
+	}
+
+	go func() {
+		defer close(loopDone)
+		done <- runWakeLoop(cfg)
+	}()
+
+	var payload string
+	select {
+	case payload = <-writes:
+		if payload != coopWakeDoorbell {
+			t.Fatalf("initial full raw payload = %q, want %q", payload, coopWakeDoorbell)
+		}
+	case err := <-done:
+		t.Fatalf("wake loop exited before first full presentation: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not write its first raw payload")
+	}
+	for _, want := range []string{"\n", "\r", "\r"} {
+		select {
+		case got := <-writes:
+			if got != want {
+				t.Fatalf("initial raw write = %q, want %q", got, want)
+			}
+		case err := <-done:
+			t.Fatalf("wake loop exited during first full presentation: %v", err)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("wake loop did not write initial raw chunk %q", want)
+		}
+	}
+	select {
+	case <-initialAttemptRecorded:
+	case err := <-done:
+		t.Fatalf("wake loop exited before recording first presentation: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not record the first full presentation")
+	}
+
+	nowNanos.Store(start.Add(wakeDoorbellRetryBase).UnixNano())
+	select {
+	case ticks <- time.Now():
+	case err := <-done:
+		t.Fatalf("wake loop exited before retry deadline: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not accept retry-deadline maintenance tick")
+	}
+	for _, want := range []string{"\n", "\r", "\r"} {
+		select {
+		case got := <-writes:
+			if got != want {
+				if got == payload {
+					t.Fatalf("submit-only reminder retyped first payload %q, want %q", got, want)
+				}
+				t.Fatalf("submit-only reminder write = %q, want %q", got, want)
+			}
+		case err := <-done:
+			t.Fatalf("wake loop exited during submit-only reminder: %v", err)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("wake loop did not write submit-only raw chunk %q", want)
+		}
+	}
+	select {
+	case got := <-writes:
+		t.Fatalf("submit-only reminder retyped payload %q", got)
+	default:
+	}
+	select {
+	case output := <-attention:
+		t.Fatalf("ownerless submit-only reminder emitted attention: %q", output)
+	default:
+	}
+
+	close(stop)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("wake loop stop: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not stop")
 	}
 }
 
@@ -2380,6 +2567,7 @@ func TestRunWakeLoopCoalescesAdditionThenRearmsAfterDrain(t *testing.T) {
 	decayedRetryAt := startedAt.Add(15 * time.Minute)
 	doorbells := make(chan struct{}, 3)
 	pending := make(chan struct{}, 1)
+	baselineReady := make(chan struct{})
 	stop := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
@@ -2399,6 +2587,10 @@ func TestRunWakeLoopCoalescesAdditionThenRearmsAfterDrain(t *testing.T) {
 				additionAttemptFloor: lastAttempt.Add(wakeDoorbellRetryBase),
 			},
 			preconditionCheck: func(*wakeConfig) error { return nil },
+			onBaselineReady: func(map[string]wakeFileIdentity) error {
+				close(baselineReady)
+				return nil
+			},
 			terminalWrite: func(text string) error {
 				if strings.Contains(text, coopWakeDoorbell) {
 					doorbells <- struct{}{}
@@ -2426,6 +2618,13 @@ func TestRunWakeLoopCoalescesAdditionThenRearmsAfterDrain(t *testing.T) {
 		}
 	}()
 
+	select {
+	case <-baselineReady:
+	case err := <-done:
+		t.Fatalf("wake loop exited before baseline readiness: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not publish baseline readiness")
+	}
 	deliverWakeWatcherMessageForTest(t, root, "codex", "b", "claude")
 	select {
 	case <-pending:
@@ -6132,6 +6331,176 @@ func TestRunWakeWithLoopRetriesWakeLockChangedWhileOpening(t *testing.T) {
 	}
 }
 
+func TestRunWakeWithLoopRetriesBoundInconclusiveState(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	for _, tc := range []struct {
+		name            string
+		retryAllowed    bool
+		wantDeadlineErr bool
+	}{
+		{name: "stabilizes", retryAllowed: true},
+		{name: "deadline expires", wantDeadlineErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := secureTempDirForTest(t)
+			injector := writeExecutableForTest(t, "bound-inconclusive-retry-injector")
+			target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, nil)
+			cleanup, err := acquireWakeLockWithOptions(root, "orchestrator", wakeLockAcquireOptions{
+				target:   &target,
+				wakeMode: wakeTargetInjectVia,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(cleanup)
+			lock := inspectWakeLock(root, "orchestrator").Lock
+			lock.PID = wakePID
+			lock.TTY = "tty"
+			lock.ProcessStart = "start-1"
+			lock.BootID = "boot-1"
+			lock.Executable = "/opt/homebrew/bin/amq"
+			writeWakeLockForTest(t, root, "orchestrator", lock)
+			writeWakePreparedForTest(t, root, "orchestrator")
+
+			statePath := filepath.Join(fsq.AgentBase(root, "orchestrator"), wakeStateFileName)
+			stateRaw, err := os.ReadFile(statePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(statePath); err != nil {
+				t.Fatal(err)
+			}
+
+			originalRetry := waitForWakePreparedRetry
+			retryCalls := 0
+			waitForWakePreparedRetry = func(time.Time) bool {
+				retryCalls++
+				if tc.retryAllowed {
+					if err := os.WriteFile(statePath, stateRaw, 0o600); err != nil {
+						t.Fatalf("restore bound wake state: %v", err)
+					}
+				}
+				return tc.retryAllowed
+			}
+			t.Cleanup(func() { waitForWakePreparedRetry = originalRetry })
+
+			readyPath := filepath.Join(t.TempDir(), "wake.ready")
+			err = runWakeWithLoop([]string{
+				"--root", root,
+				"--me", "orchestrator",
+				"--inject-via", injector,
+				"--ready-file", readyPath,
+				"--accept-existing-wake",
+			}, func(cfg wakeConfig) error {
+				t.Fatalf("loop should not run with an existing wake: %#v", cfg)
+				return nil
+			})
+			if !tc.wantDeadlineErr {
+				if err != nil {
+					t.Fatalf("bound-inconclusive wake did not retry: %v", err)
+				}
+				if _, err := os.Stat(readyPath); err != nil {
+					t.Fatalf("ready file missing: %v", err)
+				}
+			} else {
+				wantPrefix := fmt.Sprintf("wake lock did not stabilize within %s:", wakeReadyTimeout)
+				if err == nil || !strings.HasPrefix(err.Error(), wantPrefix) {
+					t.Fatalf("deadline error = %v, want prefix %q", err, wantPrefix)
+				}
+				var inconclusive *wakeStateBoundInconclusiveError
+				if !errors.As(err, &inconclusive) {
+					t.Fatalf("deadline error lost typed bound-state cause: %v", err)
+				}
+				if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+					t.Fatalf("ready file should not exist, statErr=%v", statErr)
+				}
+			}
+			if retryCalls != 1 {
+				t.Fatalf("bound-inconclusive retry calls = %d, want 1", retryCalls)
+			}
+		})
+	}
+}
+
+func TestRunWakeWithLoopRetainedBoundReuseSkipsPathnameStateObservation(t *testing.T) {
+	const wakePID = 4242
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1",
+				Executable: "/opt/homebrew/bin/amq",
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "bound-observation-retry-injector")
+	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, nil)
+	cleanup, err := acquireWakeLockWithOptions(root, "orchestrator", wakeLockAcquireOptions{
+		target: &target, wakeMode: wakeTargetInjectVia,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+	lock := inspectWakeLock(root, "orchestrator").Lock
+	lock.PID = wakePID
+	lock.TTY = "tty"
+	lock.ProcessStart = "start-1"
+	lock.BootID = "boot-1"
+	lock.Executable = "/opt/homebrew/bin/amq"
+	writeWakeLockForTest(t, root, "orchestrator", lock)
+	writeWakePreparedForTest(t, root, "orchestrator")
+
+	originalOpen := openWakeStateInspectionDirectory
+	observationCalls := 0
+	openWakeStateInspectionDirectory = func(path, label string) (*wakeAgentDir, error) {
+		observationCalls++
+		return originalOpen(path, label)
+	}
+	t.Cleanup(func() { openWakeStateInspectionDirectory = originalOpen })
+
+	originalRetry := waitForWakePreparedRetry
+	retryCalls := 0
+	waitForWakePreparedRetry = func(time.Time) bool {
+		retryCalls++
+		return true
+	}
+	t.Cleanup(func() { waitForWakePreparedRetry = originalRetry })
+
+	readyPath := filepath.Join(t.TempDir(), "wake.ready")
+	err = runWakeWithLoop([]string{
+		"--root", root,
+		"--me", "orchestrator",
+		"--inject-via", injector,
+		"--ready-file", readyPath,
+		"--accept-existing-wake",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with an existing wake: %#v", cfg)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retained bound reuse failed: %v", err)
+	}
+	if _, err := os.Stat(readyPath); err != nil {
+		t.Fatalf("ready file missing: %v", err)
+	}
+	if observationCalls != 0 || retryCalls != 0 {
+		t.Fatalf("pathname observation calls=%d retry calls=%d, want 0 each", observationCalls, retryCalls)
+	}
+}
+
 func TestWakeSnapshotReadChangedErrorRequiresTypedCause(t *testing.T) {
 	cause := errors.New("wake lock changed while opening")
 	err := newWakeSnapshotReadChangedError(cause)
@@ -8085,8 +8454,11 @@ func TestWaitForWakeReadyRefusesTargetReplacement(t *testing.T) {
 	})
 
 	err = waitForWakeReadyWithWaiter(waiter, readyPath, root, "orchestrator", time.Second)
-	if err == nil || !strings.Contains(err.Error(), "does not match wake lock") {
-		t.Fatalf("expected replacement target refusal, got %v", err)
+	var inconclusive *wakeStateBoundInconclusiveError
+	var mismatch *wakeStateLegacyMismatchError
+	var changed *wakeSnapshotReadChangedError
+	if err == nil || !errors.As(err, &inconclusive) || !errors.As(err, &mismatch) || errors.As(err, &changed) {
+		t.Fatalf("expected bound legacy-mismatch refusal without snapshot race, got %v", err)
 	}
 }
 

@@ -296,6 +296,16 @@ func runDoctor(args []string) error {
 				return err
 			}
 		}
+		quarantineLine := "  wake quarantine: scan unavailable: " + result.Ops.WakeQuarantine.Error
+		if result.Ops.WakeQuarantine.Error == "" {
+			quarantineLine = fmt.Sprintf("  wake quarantine: %d preserved", result.Ops.WakeQuarantine.Count)
+			if result.Ops.WakeQuarantine.NewestAgeSeconds != nil {
+				quarantineLine += fmt.Sprintf(", newest %.0fs", *result.Ops.WakeQuarantine.NewestAgeSeconds)
+			}
+		}
+		if err := writeStdoutLine(quarantineLine); err != nil {
+			return err
+		}
 		for _, wl := range result.Ops.WakeLocks {
 			if wl.Status == string(wakeLockValid) {
 				tty := wl.TTY

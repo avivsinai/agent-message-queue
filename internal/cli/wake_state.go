@@ -304,6 +304,10 @@ func validateWakeStateTarget(target wakeStateTarget) error {
 			return fmt.Errorf("wake state target inject arg contains NUL")
 		}
 	}
+	// Empty remains the drained compatibility default; stored values must be exact.
+	if err := validateStoredWakeRetryUntil(target.RetryUntil); err != nil {
+		return fmt.Errorf("wake state target %w", err)
+	}
 	if target.Owner != nil {
 		if err := validateAuthoritativeWakeOwner(*target.Owner); err != nil {
 			return fmt.Errorf("wake state target owner is invalid: %w", err)

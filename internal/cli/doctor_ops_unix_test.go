@@ -66,6 +66,195 @@ func TestRunOpsChecksReportsWakeRepairAvailabilityWithFloor(t *testing.T) {
 	}
 }
 
+func TestRunOpsChecksAlwaysReportsExactWakeQuarantineNamesWithoutLocks(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(root, "meta", "config.json")
+	if err := config.WriteConfig(cfgPath, config.Config{Agents: []string{"alice"}}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	empty := runOpsChecks(root, "flag", false)
+	if empty.WakeQuarantine.Count != 0 || empty.WakeQuarantine.NewestAgeSeconds != nil {
+		t.Fatalf("empty wake quarantine = %#v", empty.WakeQuarantine)
+	}
+
+	now := time.Now().UTC()
+	agentDir := filepath.Join(root, "agents", "alice")
+	for _, item := range []struct{ name string }{
+		{name: ".wake.lock.quarantined." + now.Add(-8*time.Second).Format(wakeQuarantineTimestampLayout)},
+		{name: ".wake.target.quarantined." + now.Add(-3*time.Second).Format(wakeQuarantineTimestampLayout)},
+	} {
+		if err := os.WriteFile(filepath.Join(agentDir, item.name), []byte("preserved"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, decoy := range []string{
+		".wake.lock.quarantined.",
+		".wake.lock.quarantined." + now.Format(wakeQuarantineTimestampLayout) + ".extra",
+		"wake.lock.quarantined." + now.Format(wakeQuarantineTimestampLayout),
+	} {
+		if err := os.WriteFile(filepath.Join(agentDir, decoy), []byte("decoy"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result := runOpsChecks(root, "flag", false)
+	if result.WakeQuarantine.Count != 2 || result.WakeQuarantine.NewestAgeSeconds == nil {
+		t.Fatalf("wake quarantine = %#v, want two exact artifacts", result.WakeQuarantine)
+	}
+	if age := *result.WakeQuarantine.NewestAgeSeconds; age < 2 || age > 8 {
+		t.Fatalf("newest wake quarantine age = %v, want about 3 seconds", age)
+	}
+	if len(result.WakeLocks) != 0 {
+		t.Fatalf("wake quarantine reporting depended on locks: %#v", result.WakeLocks)
+	}
+	v2 := renderDoctorResultV2(doctorResult{Ops: result})
+	if v2.Ops == nil || v2.Ops.WakeQuarantine.Count != 2 {
+		t.Fatalf("schema v2 wake quarantine = %#v", v2.Ops)
+	}
+}
+
+func TestWakeQuarantineScanFailureIsExplicitAndCleanupRefuses(t *testing.T) {
+	root := healthyDoctorMailboxRoot(t, "codex")
+	agentPath := filepath.Join(root, "agents", "codex")
+	if err := os.Chmod(agentPath, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runOpsChecks(root, "flag", false)
+	found := false
+	for _, hint := range result.Hints {
+		if hint.Code == "wake_quarantine_scan_error" && hint.Status == "error" &&
+			strings.Contains(hint.Message, "wake quarantine") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("doctor wake quarantine scan failure was silent: %#v", result)
+	}
+	if result.WakeQuarantine.Error == "" {
+		t.Fatalf("doctor wake quarantine result lacks explicit error: %#v", result.WakeQuarantine)
+	}
+	setDoctorIdentityPin(t, root)
+	output, err := captureEnvStdout(t, func() error {
+		return runDoctor([]string{"--root", root, "--ops"})
+	})
+	if err != nil {
+		t.Fatalf("doctor scan failure report: %v", err)
+	}
+	if !strings.Contains(output, "wake quarantine: scan unavailable:") ||
+		strings.Contains(output, "wake quarantine: 0 preserved") {
+		t.Fatalf("doctor scan failure output = %q", output)
+	}
+
+	_, err = captureEnvStdout(t, func() error {
+		return runCleanup([]string{
+			"--root", root,
+			"--wake-quarantine-older-than", "1h",
+			"--dry-run",
+		})
+	})
+	if err == nil || !strings.Contains(err.Error(), "wake quarantine") {
+		t.Fatalf("cleanup scan failure = %v, want explicit refusal", err)
+	}
+}
+
+func TestRunOpsChecksFixReconcilesPreparedPublicationGapMutationOnly(t *testing.T) {
+	fixture := newGenericWakePreparedCleanupFixture(t, true)
+	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
+	installWakeStateMutationForTest(t, statePath, func(state *wakeState) {
+		state.Prepared = nil
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+	beforeRaw, beforeInfo := snapshotWakeFileForTest(t, statePath)
+
+	inspection := runOpsChecks(fixture.root, "test_source", false)
+	if len(inspection.WakeLocks) != 1 || inspection.WakeLocks[0].Status != string(wakeLockStale) {
+		t.Fatalf("read-only doctor wake locks = %#v, want one stale lock", inspection.WakeLocks)
+	}
+	assertWakeFileSnapshotUnchangedForTest(t, statePath, beforeRaw, beforeInfo)
+
+	fixed := runOpsChecks(fixture.root, "test_source", true)
+	if len(fixed.WakeLocks) != 1 || fixed.WakeLocks[0].Status != "fixed" || !fixed.WakeLocks[0].Removed {
+		t.Fatalf("doctor fix wake locks = %#v, want fixed removal", fixed.WakeLocks)
+	}
+	state := readWakeStateAtPathForTest(t, fixture.root, fixture.me)
+	if state.State.Prepared == nil ||
+		state.State.Prepared.Generation != fixture.created.Lock.Generation ||
+		state.State.Prepared.TargetDigest != fixture.created.Lock.TargetDigest {
+		t.Fatalf("doctor-reconciled prepared projection = %#v", state.State.Prepared)
+	}
+}
+
+func TestRunOpsChecksDistinguishesBoundStateInconclusiveFromAbsentTarget(t *testing.T) {
+	t.Run("bound state inconclusive", func(t *testing.T) {
+		root, target, _ := newOwnerAcquisitionPublicationFixture(t)
+		cleanup, err := acquireAuthoritativeWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+			target:   &target,
+			wakeMode: wakeTargetInjectVia,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(cleanup)
+
+		inspection := inspectWakeLock(root, "codex")
+		lock := inspection.Lock
+		lock.PID = 999999999
+		lock.Executable = "/opt/homebrew/bin/amq"
+		lock.WakeMode = wakeTargetInjectVia
+		lock.Owner = nil
+		writeBoundReadLockForTest(t, root, lock)
+		if err := os.Remove(filepath.Join(fsq.AgentBase(root, "codex"), wakeStateFileName)); err != nil {
+			t.Fatal(err)
+		}
+
+		result := runOpsChecks(root, "test_source", false)
+		if len(result.WakeLocks) != 1 {
+			t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+		}
+		got := result.WakeLocks[0]
+		if got.TargetPresent {
+			t.Fatalf("target_present = true, want false: %#v", got)
+		}
+		if !strings.Contains(got.TargetReason, "bound wake state") {
+			t.Fatalf("target_reason = %q, want bound-state inconclusive reason", got.TargetReason)
+		}
+	})
+
+	t.Run("genuinely absent target", func(t *testing.T) {
+		root := secureTempDirForTest(t)
+		if err := fsq.EnsureRootDirs(root); err != nil {
+			t.Fatal(err)
+		}
+		if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+			t.Fatal(err)
+		}
+		writeWakeLockForTest(t, root, "codex", wakeLock{
+			PID:        999999999,
+			Executable: "/opt/homebrew/bin/amq",
+		})
+
+		result := runOpsChecks(root, "test_source", false)
+		if len(result.WakeLocks) != 1 {
+			t.Fatalf("wake lock count = %d, want 1", len(result.WakeLocks))
+		}
+		got := result.WakeLocks[0]
+		if got.TargetPresent || got.TargetReason != "" {
+			t.Fatalf("genuinely absent target reported as inconclusive: %#v", got)
+		}
+	})
+}
+
 func TestRunOpsChecksRejectsSymlinkAndFIFOWakeLocks(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

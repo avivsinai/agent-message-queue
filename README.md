@@ -348,9 +348,33 @@ can also appear. `stale` means AMQ proved the recorded owner is gone or is not
 the same wake process, so `--fix-wake-locks` can remove the lock after a fresh
 re-check. `unverified` means AMQ could not prove ownership either way, such as a
 legacy lock with a live PID but no process-start token, a hostname mismatch, or
-an unsupported platform. AMQ leaves `unverified` locks in place; inspect the PID
-and remove the named `.wake.lock` manually only after confirming no matching
-`amq wake` still owns that agent/root.
+an unsupported platform. Except for the narrow acquisition quarantine case
+below, AMQ leaves `unverified` locks in place; inspect the PID and remove the
+named `.wake.lock` manually only after confirming no matching `amq wake` still
+owns that agent/root.
+
+An aged, syntax-invalid/empty/truncated ownerless generic 0600 lock can block a
+new wake without carrying usable authority. During acquisition AMQ preserves
+only that narrow case by atomically moving the exact inode and bytes to
+`.wake.lock.quarantined.<UTC-nanosecond>` under the lifecycle guard, then starts
+again from a fresh inspection. A targetless acquisition similarly quarantines
+an exact readable regular 0600 orphan `.wake.target` only when it is
+conclusively generic. Clean owner-bearing targets and malformed owner-shaped
+targets remain untouched: clean targets direct the operator to owner recovery,
+while malformed targets require inspection because automatic recovery cannot
+authenticate their owner. Unreadable, oversized, and special targets also fail
+closed. Valid JSON targets with wrong known-field types are quarantined only
+when their retained bytes are conclusively ownerless. `doctor --ops` reports
+`wake_quarantine.count` and nullable
+`wake_quarantine.newest_age_seconds` when the complete scan succeeds. A scan
+failure instead produces `wake_quarantine.error` plus an error hint; explicit
+quarantine cleanup refuses rather than acting on a partial result.
+
+Quarantine is preservation, not deletion. Ordinary tmp cleanup never selects
+it. Removal requires the explicit selector
+`amq cleanup --wake-quarantine-older-than <duration>`; `--dry-run` is
+non-mutating, and actual cleanup revalidates exact identity and bytes under the
+lifecycle guard before unlinking and syncing the retained agent directory.
 
 `amq wake repair` is an explicit live-session repair path. It runs when the lock
 is proven `stale` or is an unverified ownerless generic claim, the lock was
@@ -377,7 +401,19 @@ claim from the same OS session, using the inherited `AMQ_WAKE_OWNER` token.
 When the exact owner is dead, recovery does not require that token. AMQ stops
 only an identity-confirmed wake, re-checks the claim after every wait, and
 fails closed without mutation when the owner or claim is unknown, legacy, or
-corrupt. There is no force mode. The ownerless `repair`, `retire`, and
+corrupt. A bound state/document mismatch is also a refusal before stop or
+unlink; AMQ preserves that claim and its artifacts. A conclusively generic
+target/state shadow with no lock carries no ownership: targetless acquisition
+may move the exact target into quarantine, then must inspect again before
+superseding stale projection state or creating a wake. An owner-bearing target,
+with no lock, can be removed by `recover-owner` only after its exact owner is
+conclusively dead; a live or unknown owner preserves it. A malformed target
+with a non-null owner marker remains preserved for inspection because automatic
+owner recovery cannot authenticate it.
+Rollback means returning to an older compatible binary or reader, not
+destructively rewriting a P2b lock; existing unbound claims remain P2a, and an
+older binary may release its own exact claim. There is no force mode. The
+ownerless `repair`, `retire`, and
 `doctor --ops --fix-wake-locks` paths refuse owner-bound claims.
 
 `amq wake retire` is the exact managed-shutdown path. It requires the caller's
@@ -385,13 +421,24 @@ expected `--inject-via` executable and ordered `--inject-arg` values. A live
 wake is retired only when its process identity, unchanged lock generation, and
 saved target all match: Linux signals through its pidfd capability and macOS
 uses the generation-bound cooperative control socket. An exactly-bound
-proven-stale lock may be removed without signaling. The mailbox and saved
-target are preserved in either case; raw and unverified wakes fail closed.
+proven-stale lock may be removed without signaling; raw and unverified wakes
+fail closed.
+Lock removal is the retirement commit point. After it commits, AMQ removes the
+exact captured target and its corresponding bound state. An unbound projection
+is removed only when its target-section digest matches that retired target. The
+mailbox and every replacement lock, target, or state artifact are preserved.
+Results are exactly `refused`, `retired`, or `retired_with_residue`.
+`retired_with_residue` is an exit-0 success warning: the lock is gone, but
+target/state cleanup failed or was skipped. That residue converges
+automatically on the next acquisition only when conclusively ownerless;
+owner-bearing residue follows owner recovery, and malformed ownership remains
+inspection-only.
 
 The lifecycle boundaries are:
 
 - repair = replace a proven-stale inject-via wake.
-- recover-owner = stop and release one exact owner-bound inject-via claim.
+- recover-owner = stop and release one exact owner-bound inject-via claim, or
+  remove a lockless clean owner-bearing target after proving its owner dead.
 - `doctor --ops --fix-wake-locks` = remove a proven-stale lock.
 - retire = stop an identity-confirmed live inject-via wake.
 - launchd, systemd, or the owning shell = stop a raw wake.
@@ -582,6 +629,7 @@ Canonical schema-selecting diagnostic forms:
 ```text
 amq wake check --me <agent> [--root <path>] [--strict] [--json] [--json-schema <1|2>]
 amq doctor [--root <path>] [--base-root <path>] [--ignore-session-pin] [--ops] [--fix-wake-locks] [--fix-mailboxes] [--json] [--json-schema <1|2>]
+amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--dry-run] [--yes]
 ```
 
 `--json-schema` requires `--json`.

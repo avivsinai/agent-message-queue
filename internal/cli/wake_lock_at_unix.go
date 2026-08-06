@@ -18,6 +18,9 @@ import (
 )
 
 var afterWakeLockAtRead = func() {}
+var syncWakeLockAfterCommitDirFD = func(fd int) error {
+	return syncWakeOwnerDirFD(fd)
+}
 
 func readWakeLockFileAt(dirfd int, path string) ([]byte, os.FileInfo, error) {
 	open := func() (*os.File, error) {
@@ -94,6 +97,9 @@ func createWakeLockAt(
 	if lock.Agent != me {
 		return fmt.Errorf("wake lock agent mismatch")
 	}
+	if err := validateWakeLockStateBinding(lock); err != nil {
+		return err
+	}
 	data, err := json.Marshal(lock)
 	if err != nil {
 		return fmt.Errorf("marshal wake lock: %w", err)
@@ -150,7 +156,10 @@ func createWakeLockAt(
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("failed to close wake lock: %w", err)
 	}
-	if err := syncWakeOwnerDirFD(dirfd); err != nil {
+	// O_EXCL made this lock name the no-replace ownership commit. Preserve the
+	// exact claim if the following durability confirmation reports an error.
+	committed = true
+	if err := syncWakeLockAfterCommitDirFD(dirfd); err != nil {
 		return fmt.Errorf("sync wake lock directory after commit: %w", err)
 	}
 	created := readWakeLockMetadataAt(dirfd, agentDir, root, me)
@@ -159,7 +168,6 @@ func createWakeLockAt(
 		!bytes.Equal(created.raw, data) {
 		return fmt.Errorf("failed to verify created wake lock generation")
 	}
-	committed = true
 	return nil
 }
 
@@ -182,12 +190,198 @@ func removeWakeLockIfUnchangedGuardedAt(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 ) error {
-	path := filepath.Join(agentDir.path, ".wake.lock")
-	return removeWakeLockIfUnchangedGuardedWithIO(
+	_, err := removeWakeLockIfUnchangedGuardedAtStatus(dirfd, agentDir, inspection)
+	return err
+}
+
+func removeWakeLockIfUnchangedGuardedAtStatus(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+) (bool, error) {
+	outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
+		dirfd,
+		agentDir,
 		inspection,
-		func() ([]byte, os.FileInfo, error) { return readWakeLockFileAt(dirfd, path) },
 		func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
 	)
+	return outcome.Committed, outcome.Err
+}
+
+type wakeLockRemovalOutcome struct {
+	Committed bool
+	Err       error
+}
+
+type wakeLockRemovalResidue string
+
+const (
+	wakeLockResidueDurability      wakeLockRemovalResidue = "wake lock durability"
+	wakeLockResidueDetachedCleanup wakeLockRemovalResidue = "detached wake cleanup"
+	wakeLockResidueReplacement     wakeLockRemovalResidue = "replacement wake lock"
+	wakeLockResiduePreservedClaim  wakeLockRemovalResidue = ".wake.lock"
+	wakeLockResidueCleanup         wakeLockRemovalResidue = "wake lock cleanup"
+)
+
+type wakeLockResidueError struct {
+	residue wakeLockRemovalResidue
+	err     error
+}
+
+func (err *wakeLockResidueError) Error() string { return err.err.Error() }
+func (err *wakeLockResidueError) Unwrap() error { return err.err }
+
+func newWakeLockResidueError(residue wakeLockRemovalResidue, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &wakeLockResidueError{residue: residue, err: err}
+}
+
+func removeWakeLockIfUnchangedGuardedAtOutcome(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	unlink func() error,
+) wakeLockRemovalOutcome {
+	var detachedValidationErr error
+	if err := validateBoundWakeMutationAt(dirfd, agentDir, inspection); err != nil {
+		// A retained directory capability can outlive replacement of its
+		// canonical pathname. Exact cleanup inside that proven-detached inode
+		// cannot signal or unlink the successor claim, so it may reap its own
+		// private residue even though canonical bound-state validation is no
+		// longer possible.
+		if !retainedWakeAgentDirIsDetached(agentDir) {
+			return wakeLockRemovalOutcome{Err: err}
+		}
+		detachedValidationErr = err
+	}
+	path := filepath.Join(agentDir.path, ".wake.lock")
+	committed, err := removeWakeLockIfUnchangedGuardedWithIOStatus(
+		inspection,
+		func() ([]byte, os.FileInfo, error) { return readWakeLockFileAt(dirfd, path) },
+		unlink,
+	)
+	if err != nil {
+		return wakeLockRemovalOutcome{Committed: committed, Err: err}
+	}
+	if !committed {
+		return wakeLockRemovalOutcome{}
+	}
+	outcome := wakeLockRemovalOutcome{Committed: true}
+	if detachedValidationErr != nil {
+		outcome.Err = newWakeDetachedCleanupOnlyError(detachedValidationErr)
+	}
+	return outcome
+}
+
+func removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	unlink func() error,
+) wakeLockRemovalOutcome {
+	outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
+		dirfd, agentDir, inspection, unlink,
+	)
+	if !outcome.Committed {
+		return outcome
+	}
+	if err := syncWakeLockAfterCommitDirFD(dirfd); err != nil {
+		outcome.Err = errors.Join(
+			outcome.Err,
+			newWakeLockResidueError(
+				wakeLockResidueDurability,
+				fmt.Errorf("sync wake lock directory after exact removal: %w", err),
+			),
+		)
+	}
+	return outcome
+}
+
+func appendWakeLockRemovalResidue(
+	residue []wakeLockRemovalResidue,
+	value wakeLockRemovalResidue,
+) []wakeLockRemovalResidue {
+	for _, existing := range residue {
+		if existing == value {
+			return residue
+		}
+	}
+	return append(residue, value)
+}
+
+func wakeLockRemovalResiduesFromError(err error) []wakeLockRemovalResidue {
+	var residue []wakeLockRemovalResidue
+	var collect func(error)
+	collect = func(current error) {
+		if current == nil {
+			return
+		}
+		if typed, ok := current.(*wakeLockResidueError); ok {
+			residue = appendWakeLockRemovalResidue(residue, typed.residue)
+			return
+		}
+		if _, ok := current.(*wakeDetachedCleanupOnlyError); ok {
+			residue = appendWakeLockRemovalResidue(residue, wakeLockResidueDetachedCleanup)
+			return
+		}
+		if joined, ok := current.(interface{ Unwrap() []error }); ok {
+			for _, child := range joined.Unwrap() {
+				collect(child)
+			}
+			return
+		}
+		if wrapped, ok := current.(interface{ Unwrap() error }); ok {
+			collect(wrapped.Unwrap())
+		}
+	}
+	collect(err)
+	return residue
+}
+
+// wakeDetachedCleanupOnlyError reports that a retained descriptor proved
+// detached from its canonical pathname. The exact old residue was removed,
+// but callers must not continue mutation through that detached capability.
+type wakeDetachedCleanupOnlyError struct {
+	err error
+}
+
+func (err *wakeDetachedCleanupOnlyError) Error() string {
+	return fmt.Sprintf("wake lock residue removed from detached directory; refusing further mutation: %v", err.err)
+}
+
+func (err *wakeDetachedCleanupOnlyError) Unwrap() error {
+	return err.err
+}
+
+func newWakeDetachedCleanupOnlyError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &wakeDetachedCleanupOnlyError{err: err}
+}
+
+func retainedWakeAgentDirIsDetached(agentDir *wakeAgentDir) bool {
+	if agentDir == nil || agentDir.file == nil {
+		return false
+	}
+	retainedInfo, err := agentDir.file.Stat()
+	if err != nil {
+		return false
+	}
+	fd, err := unix.Open(
+		agentDir.path,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
+	if err != nil {
+		return false
+	}
+	canonical := os.NewFile(uintptr(fd), agentDir.path)
+	defer func() { _ = canonical.Close() }()
+	canonicalInfo, err := canonical.Stat()
+	return err == nil && !os.SameFile(retainedInfo, canonicalInfo)
 }
 
 type wakeGenerationFileSnapshot struct {

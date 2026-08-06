@@ -9,6 +9,9 @@ func classifyWakeClaimForGenericTransition(inspection wakeLockInspection) wakeCl
 	if inspection.fileInfo == nil {
 		return wakeClaimInvalid
 	}
+	if err := validateWakeLockInspectionStateBindingJSON(inspection); err != nil {
+		return wakeClaimInvalid
+	}
 	if wakeLockHasOwnerMarkers(inspection) {
 		return wakeClaimAuthoritative
 	}

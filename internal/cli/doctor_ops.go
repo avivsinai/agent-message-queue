@@ -16,11 +16,18 @@ import (
 )
 
 type doctorOpsResult struct {
-	Root         opsRoot          `json:"root"`
-	Agents       []opsAgent       `json:"agents"`
-	OperatorGate *opsOperatorGate `json:"operator_gate,omitempty"`
-	WakeLocks    []opsWakeLock    `json:"wake_locks,omitempty"`
-	Hints        []opsHint        `json:"hints"`
+	Root           opsRoot           `json:"root"`
+	Agents         []opsAgent        `json:"agents"`
+	OperatorGate   *opsOperatorGate  `json:"operator_gate,omitempty"`
+	WakeLocks      []opsWakeLock     `json:"wake_locks,omitempty"`
+	WakeQuarantine opsWakeQuarantine `json:"wake_quarantine"`
+	Hints          []opsHint         `json:"hints"`
+}
+
+type opsWakeQuarantine struct {
+	Count            int      `json:"count"`
+	NewestAgeSeconds *float64 `json:"newest_age_seconds"`
+	Error            string   `json:"error,omitempty"`
 }
 
 type opsRoot struct {
@@ -69,6 +76,7 @@ type opsBacklog struct {
 type opsWakeBinaryHint struct {
 	Agent  string `json:"agent"`
 	PID    int    `json:"pid"`
+	Reason string `json:"reason,omitempty"`
 	Remedy string `json:"remedy"`
 }
 
@@ -108,6 +116,7 @@ type opsWakeLock struct {
 	RestartCapability        string `json:"restart_capability,omitempty"`
 	OperatorTerminalRequired bool   `json:"operator_terminal_required"`
 	NextAction               string `json:"next_action,omitempty"`
+	InspectionError          string `json:"inspection_error,omitempty"`
 	CurrentTerminal          bool   `json:"-"`
 	NotifierAbsent           bool   `json:"-"`
 
@@ -144,6 +153,16 @@ func runOpsChecksWithSchema(
 	result.Root = opsRoot{
 		Path:   root,
 		Source: rootSource,
+	}
+	var quarantineErr error
+	result.WakeQuarantine, quarantineErr = checkWakeQuarantine(root, now)
+	if quarantineErr != nil {
+		result.WakeQuarantine.Error = quarantineErr.Error()
+		result.Hints = append(result.Hints, opsHint{
+			Code:    "wake_quarantine_scan_error",
+			Status:  "error",
+			Message: fmt.Sprintf("Cannot scan wake quarantine: %v", quarantineErr),
+		})
 	}
 	result.OperatorGate = checkOperatorGate(root, now)
 	result.Hints = append(result.Hints, checkLinkedWorktreeLocalHint(root, rootSource)...)
@@ -244,12 +263,13 @@ func runOpsChecksWithSchema(
 		agent.PresenceAgeSeconds = math.Round(agent.PresenceAgeSeconds)
 
 		result.Agents = append(result.Agents, agent)
-		if agent.DoorbellParked && agent.UnreadCount > 0 {
+		if agent.DoorbellParked && agent.UnreadCount > 0 &&
+			agent.PresenceSource == presenceSourceNotifierLive {
 			result.Hints = append(result.Hints, opsHint{
 				Code:   "doorbell_parked",
 				Status: "warn",
 				Message: fmt.Sprintf(
-					"Agent %s doorbell is parked after %d attempts with unread messages (oldest unread %.0fs)",
+					"Agent %s doorbell is parked after %d attempts with unread messages (oldest unread %.0fs); input may be stranded at the agent prompt, and a manual Enter in its pane can recover it",
 					agent.Handle,
 					agent.DoorbellAttempts,
 					agent.OldestUnreadAgeSeconds,
@@ -483,10 +503,10 @@ func assessWakeRepair(
 	var assessment wakeRepairAssessment
 	target, exists, targetErr := readTarget()
 	assessment.TargetPresent = exists
-	if exists {
-		if targetErr != nil {
-			assessment.TargetReason = targetErr.Error()
-		} else if err := validateWakeTarget(target, root, agent); err != nil {
+	if targetErr != nil {
+		assessment.TargetReason = targetErr.Error()
+	} else if exists {
+		if err := validateWakeTarget(target, root, agent); err != nil {
 			assessment.TargetReason = err.Error()
 		} else if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
 			assessment.TargetReason = err.Error()
@@ -547,7 +567,10 @@ func checkWakeLocksWithHintsSchema(
 			continue
 		}
 		staleBinary := false
-		if hint, ok := checkStaleWakeBinaryHint(inspection); ok {
+		wakeBinaryInspectionError := ""
+		if hint, ok, err := checkStaleWakeBinaryHint(inspection); err != nil {
+			wakeBinaryInspectionError = err.Error()
+		} else if ok {
 			hints = append(hints, hint)
 			staleBinary = true
 		}
@@ -561,6 +584,7 @@ func checkWakeLocksWithHintsSchema(
 			TTY:             strings.TrimSpace(inspection.Lock.TTY),
 			Started:         strings.TrimSpace(inspection.Lock.Started),
 			Reason:          inspection.Reason,
+			InspectionError: wakeBinaryInspectionError,
 			CurrentTerminal: doctorWakeLockOnCurrentTerminal(inspection),
 		}
 		ownerBound := classifyWakeClaimForGenericTransition(inspection) == wakeClaimAuthoritative
@@ -579,15 +603,17 @@ func checkWakeLocksWithHintsSchema(
 			root,
 			agent,
 			inspection,
-			func() (wakeTarget, bool, error) { return readWakeTargetFromState(root, agent) },
+			func() (wakeTarget, bool, error) {
+				return readWakeTargetFromStateForInspection(root, agent, inspection)
+			},
 			func(target wakeTarget) error {
 				return validateWakeRepairFloorAvailable(root, agent, inspection, target)
 			},
 		)
+		lock.TargetReason = assessment.TargetReason
 		if assessment.TargetPresent {
 			lock.Target = wakeTargetPath(root, agent)
 			lock.TargetPresent = true
-			lock.TargetReason = assessment.TargetReason
 		}
 		if inspection.Status == wakeLockStale {
 			if ownerBound {
@@ -599,25 +625,12 @@ func checkWakeLocksWithHintsSchema(
 			lock.RepairReason = assessment.RepairReason
 			lock.Repair = assessment.Repair
 			if fix {
-				guardErr := withWakeLifecycleGuard(root, agent, func() error {
-					recheck := inspectWakeLock(root, agent)
-					sameGeneration := sameWakeLockGeneration(inspection, recheck)
-					inspection = recheck
-					if !sameGeneration || recheck.Status != wakeLockStale {
-						lock.Status = string(recheck.Status)
-						lock.Reason = "wake lock changed before fix"
-						return nil
-					}
-					if err := validateWakeLockStaleRemoval(recheck); err != nil {
-						return err
-					}
-					if err := removeWakeLockIfUnchangedGuarded(recheck); err != nil {
-						return err
-					}
-					lock.Status = "fixed"
-					lock.Removed = true
-					return nil
-				})
+				guardErr := fixStaleWakeLockForDoctor(root, agent, &inspection, &lock)
+				// The mutation helper may retain an agent-directory capability across
+				// a pathname replacement. Keep its mutation outcome, but classify the
+				// notifier from a fresh canonical inspection.
+				inspection = inspectWakeLock(root, agent)
+				staleBinary = false
 				lock.RepairAvailable = false
 				lock.Repair = ""
 				lock.RepairReason = ""
@@ -631,10 +644,6 @@ func checkWakeLocksWithHintsSchema(
 					Removed: lock.Removed,
 				}
 			}
-		}
-		if lock.Removed {
-			inspection = inspectWakeLock(root, agent)
-			staleBinary = false
 		}
 		appendLock(agent, lock, inspection, staleBinary)
 	}

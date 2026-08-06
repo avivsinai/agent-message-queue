@@ -19,6 +19,25 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
+func TestDarwinStableOwnerStopRefusesBoundInconclusiveBeforeControl(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	if err := os.Remove(filepath.Join(fixture.agentDir.path, wakeStateFileName)); err != nil {
+		t.Fatal(err)
+	}
+
+	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		capability, err := prepareAuthoritativeWakeStopPlatform(dirfd, fixture.agentDir, fixture.inspection)
+		if err == nil && capability.stop != nil {
+			t.Fatal("bound-inconclusive stop created a cooperative control capability")
+		}
+		return err
+	})
+	var inconclusive *wakeStateBoundInconclusiveError
+	if !errors.As(err, &inconclusive) {
+		t.Fatalf("stable-stop error = %v, want bound inconclusive", err)
+	}
+}
+
 func testDarwinControlLock(t *testing.T) (string, string, wakeLock) {
 	t.Helper()
 	root := secureTempDirForTest(t)
