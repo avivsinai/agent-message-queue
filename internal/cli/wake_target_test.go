@@ -87,7 +87,7 @@ func TestWakeTargetSerializedBytesAndDigestGoldens(t *testing.T) {
 }
 
 func TestValidateWakeTargetRejectsNoncanonicalRetryUntil(t *testing.T) {
-	root := canonicalWakeRoot(t.TempDir())
+	root := secureTempDirForTest(t)
 	injector := filepath.Join(root, "injector")
 	if err := os.WriteFile(injector, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
