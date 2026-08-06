@@ -265,6 +265,42 @@ func TestWakeStateRefusesMissingTargetAndPreparedWithoutTarget(t *testing.T) {
 	}
 }
 
+func TestValidateWakeStateTargetRejectsInvalidRetryUntil(t *testing.T) {
+	state, _ := validWakeStateFixture(t, false)
+	for _, ok := range []string{"", wakeRetryUntilDrained, wakeRetryUntilInjected} {
+		candidate := state.Target
+		candidate.RetryUntil = ok
+		digest, err := wakeTargetDigest(candidate.wakeTarget())
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidate.TargetDigest = digest
+		if err := validateWakeStateTarget(candidate); err != nil {
+			t.Fatalf("canonical RetryUntil %q refused: %v", ok, err)
+		}
+	}
+	for _, invalid := range []string{"replied", " INJECTED ", "Injected", " drained "} {
+		t.Run(invalid, func(t *testing.T) {
+			candidate := state.Target
+			candidate.RetryUntil = invalid
+			digest, err := wakeTargetDigest(candidate.wakeTarget())
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate.TargetDigest = digest
+			err = validateWakeStateTarget(candidate)
+			if err == nil || !strings.Contains(err.Error(), "retry-until") {
+				t.Fatalf("error = %v, want noncanonical retry-until refusal despite matching digest", err)
+			}
+			full := state
+			full.Target = candidate
+			if err := validateWakeState(full); err == nil || !strings.Contains(err.Error(), "retry-until") {
+				t.Fatalf("validateWakeState error = %v, want noncanonical retry-until refusal", err)
+			}
+		})
+	}
+}
+
 func validWakeStateFixture(t *testing.T, prepared bool) (wakeState, wakeStateLegacy) {
 	t.Helper()
 	root := canonicalWakeRoot(t.TempDir())

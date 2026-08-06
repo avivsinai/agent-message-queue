@@ -667,6 +667,7 @@ func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
 		"--root", root,
 		"--me", "orchestrator",
 		"--inject-via", injector,
+		"--retry-until", "injected",
 		"--inject-arg", "exec",
 		"--inject-arg", "Team Alpha",
 		"--inject-timeout", "250ms",
@@ -682,6 +683,9 @@ func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
 	}
 	if got.injectVia != injector {
 		t.Fatalf("expected inject executable with spaces, got %q", got.injectVia)
+	}
+	if got.retryUntil != wakeRetryUntilInjected {
+		t.Fatalf("retry until = %q, want %q", got.retryUntil, wakeRetryUntilInjected)
 	}
 	if strings.Join(got.injectArgs, "|") != "exec|Team Alpha" {
 		t.Fatalf("expected fixed inject args, got %#v", got.injectArgs)
@@ -8956,6 +8960,20 @@ func TestRunWakeWithLoopRejectsInjectArgWithoutInjectVia(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--inject-arg requires --inject-via") {
 		t.Fatalf("expected inject-arg usage error, got %v", err)
+	}
+}
+
+func TestRunWakeWithLoopRejectsInjectedRetryWithoutInjectVia(t *testing.T) {
+	err := runWakeWithLoop([]string{
+		"--root", t.TempDir(),
+		"--me", "orchestrator",
+		"--retry-until", "injected",
+	}, func(cfg wakeConfig) error {
+		t.Fatalf("loop should not run with invalid flags: %#v", cfg)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "--retry-until injected requires --inject-via") {
+		t.Fatalf("error = %v, want injected retry dependency refusal", err)
 	}
 }
 

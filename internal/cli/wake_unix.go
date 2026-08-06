@@ -1722,6 +1722,9 @@ func configureRepairWakeCommand(cmd *exec.Cmd, output *os.File) {
 
 func buildRepairWakeArgs(root, me string, target wakeTarget, generation, readyPath string) []string {
 	args := []string{"--no-update-check", "wake", "--me", me, "--root", root, "--repair-lineage", generation, "--inject-via", target.InjectVia}
+	if retryUntil, _ := normalizeWakeRetryUntil(target.RetryUntil); retryUntil == wakeRetryUntilInjected {
+		args = append(args, "--retry-until", retryUntil)
+	}
 	for _, arg := range target.InjectArgs {
 		args = append(args, "--inject-arg", arg)
 	}
@@ -1765,6 +1768,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	var injectArgFlags multiStringFlag
 	fs.Var(&injectArgFlags, "inject-arg", "Argument for --inject-via before the payload (repeatable)")
 	injectTimeoutFlag := fs.Duration("inject-timeout", defaultInjectTimeout, "Timeout for one --inject-via command")
+	retryUntilFlag := fs.String("retry-until", wakeRetryUntilDrained, "Doorbell acknowledgement: drained or injected")
 	bellFlag := fs.Bool("bell", false, "Ring terminal bell on new messages")
 	debounceFlag := fs.Duration("debounce", 250*time.Millisecond, "Debounce window for batching messages")
 	previewLenFlag := fs.Int("preview-len", 48, "Max subject preview length")
@@ -1803,6 +1807,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		"  the TIOCSTI/stdin-TTY startup requirement. Fixed arguments use repeatable",
 		"  --inject-arg; AMQ appends the sanitized notification payload as the",
 		"  final argv element. The command is not run through a shell.",
+		"  --retry-until drained (default) reannounces until inbox progress.",
+		"  --retry-until injected stops reannouncing an unchanged cohort after",
+		"  the external injector exits zero; failures remain retryable.",
 		"  Owner-bound co-op wakes retry after the prior command exits or times",
 		"  out; retries can repeat arbitrary injector-side effects. Standalone",
 		"  ownerless wakes execute the injector once per physical inbox cohort.",
@@ -1865,6 +1872,10 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		return UsageError("%v", err)
 	}
 	requestedInjectMode := injectMode
+	retryUntil, err := normalizeWakeRetryUntil(*retryUntilFlag)
+	if err != nil {
+		return UsageError("%v", err)
+	}
 
 	interruptLabel := strings.TrimSpace(*interruptLabelFlag)
 	interruptPriority := strings.ToLower(strings.TrimSpace(*interruptPriorityFlag))
@@ -1905,6 +1916,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	}
 	if injectVia == "" && len(injectArgFlags) > 0 {
 		return UsageError("--inject-arg requires --inject-via")
+	}
+	if retryUntil == wakeRetryUntilInjected && injectVia == "" {
+		return UsageError("--retry-until injected requires --inject-via")
 	}
 	readyFile := strings.TrimSpace(*readyFileFlag)
 	if *readyFileFlag != "" && readyFile == "" {
@@ -1993,6 +2007,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		value, err := newWakeTarget(root, me, injectVia, []string(injectArgFlags))
 		if err != nil {
 			return err
+		}
+		if retryUntil == wakeRetryUntilInjected {
+			value.RetryUntil = retryUntil
 		}
 		value.Owner = requestedOwner
 		if err := validateWakeTarget(value, root, me); err != nil {
@@ -2293,6 +2310,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		fallbackWarn:        true,
 		injectMode:          injectMode,
 		requestedInjectMode: requestedInjectMode,
+		retryUntil:          retryUntil,
 		debug:               *debugFlag,
 		deferWhileInput:     *deferWhileInputFlag,
 		inputQuietFor:       *inputQuietForFlag,

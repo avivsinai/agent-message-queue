@@ -31,6 +31,7 @@ type wakeConfig struct {
 	fallbackWarn                  bool
 	injectMode                    string // auto, raw, paste
 	requestedInjectMode           string
+	retryUntil                    string
 	legacyTIOCSTIDemoted          bool
 	debug                         bool
 	deferWhileInput               bool
@@ -217,10 +218,12 @@ type wakeTerminalAcceptedProgress interface {
 
 const defaultInjectTimeout = 5 * time.Second
 const (
-	wakeInjectModeAuto  = "auto"
-	wakeInjectModeRaw   = "raw"
-	wakeInjectModePaste = "paste"
-	wakeInjectModeNone  = "none"
+	wakeInjectModeAuto     = "auto"
+	wakeInjectModeRaw      = "raw"
+	wakeInjectModePaste    = "paste"
+	wakeInjectModeNone     = "none"
+	wakeRetryUntilDrained  = "drained"
+	wakeRetryUntilInjected = "injected"
 
 	coopWakeDoorbell = ": AMQ doorbell run amq drain --include-body then act on it"
 
@@ -252,6 +255,37 @@ const (
 	// heuristic (bracketed-paste markers only) and accepts any delay.
 	rawInjectSettleDelay = codexTUIEnterSuppressWindow + 30*time.Millisecond
 )
+
+func normalizeWakeRetryUntil(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return wakeRetryUntilDrained, nil
+	}
+	switch value {
+	case wakeRetryUntilDrained, wakeRetryUntilInjected:
+		return value, nil
+	default:
+		return "", fmt.Errorf(
+			"invalid retry-until %q (supported: drained, injected)",
+			raw,
+		)
+	}
+}
+
+// validateStoredWakeRetryUntil accepts only exact persisted wire values.
+// CLI input may still use normalizeWakeRetryUntil; stored .wake.target /
+// .wake.state bytes must be "", "drained", or "injected" with no whitespace/case folding.
+func validateStoredWakeRetryUntil(raw string) error {
+	switch raw {
+	case "", wakeRetryUntilDrained, wakeRetryUntilInjected:
+		return nil
+	default:
+		return fmt.Errorf(
+			"noncanonical retry-until %q (stored values: empty, drained, injected)",
+			raw,
+		)
+	}
+}
 
 var (
 	tiocstiInject          = func(text string) error { return tiocsti.Inject(text) }
@@ -677,6 +711,13 @@ func recordWakeAttempt(
 ) {
 	if len(cfg.doorbell.cohort) == 0 {
 		cfg.doorbell.arm(currentPending)
+	}
+	if cfg.retryUntil == wakeRetryUntilInjected &&
+		deliveryErr == nil &&
+		!cfg.lastAttemptAttention &&
+		!cfg.lastAttemptTransientAttention {
+		cfg.doorbell.recordInjected(currentPending)
+		return
 	}
 	var attentionErr *wakeAttentionDeliveryError
 	if cfg.lastAttemptTransientAttention {

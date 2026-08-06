@@ -2246,6 +2246,7 @@ func TestNotifyNewMessagesRetriesCoopInputAfterOutputOnlyFallback(t *testing.T) 
 		wakeOwner:      &wakeOwner{},
 		injectVia:      filepath.Join(root, "missing-injector"),
 		injectTimeout:  time.Second,
+		retryUntil:     wakeRetryUntilInjected,
 		doorbellNow:    func() time.Time { return now },
 		attentionIsTTY: func() bool { return false },
 	}
@@ -2326,6 +2327,85 @@ func TestNotifyNewMessagesRecordsInjectViaRetryAfterCompletion(t *testing.T) {
 	want := completed.Add(wakeDoorbellRetryBase)
 	if !cfg.doorbell.nextAttempt.Equal(want) {
 		t.Fatalf("next attempt = %s, want completion-relative %s", cfg.doorbell.nextAttempt, want)
+	}
+}
+
+func TestNotifyNewMessagesInjectedPolicyAcknowledgesSuccessfulInjectVia(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	writeMessage := func(filename, id string) {
+		t.Helper()
+		msg := format.Message{Header: format.Header{
+			Schema: 1, ID: id, From: "peer", To: []string{"codex"},
+			Thread: "p2p/codex__peer", Subject: id,
+			Created: "2026-08-03T08:00:00Z",
+		}}
+		data, err := msg.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "codex", filename, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	working, outputPath := injectViaCaptureConfig(t)
+	now := time.Unix(1_800_000_000, 0)
+	cfg := &wakeConfig{
+		me: "codex", root: root, session: "session1", wakeOwner: &wakeOwner{},
+		injectVia: working.injectVia, injectArgs: working.injectArgs,
+		injectTimeout: working.injectTimeout, retryUntil: wakeRetryUntilInjected,
+		doorbellNow: func() time.Time { return now },
+	}
+
+	writeMessage("first.md", "first")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first notify: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || string(got) != coopWakeDoorbell {
+		t.Fatalf("first injection = %q, err=%v", got, err)
+	}
+	if err := os.WriteFile(outputPath, []byte("not-called-again"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * wakeDoorbellRetryMax)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("unchanged notify: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || string(got) != "not-called-again" {
+		t.Fatalf("unchanged cohort reinjected = %q, err=%v", got, err)
+	}
+
+	writeMessage("second.md", "second")
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("expanded notify: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || string(got) != coopWakeDoorbell {
+		t.Fatalf("expanded cohort injection = %q, err=%v", got, err)
+	}
+}
+
+func TestNormalizeWakeRetryUntil(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: wakeRetryUntilDrained},
+		{input: "drained", want: wakeRetryUntilDrained},
+		{input: " INJECTED ", want: wakeRetryUntilInjected},
+	} {
+		got, err := normalizeWakeRetryUntil(tc.input)
+		if err != nil || got != tc.want {
+			t.Fatalf("normalizeWakeRetryUntil(%q) = %q, %v; want %q", tc.input, got, err, tc.want)
+		}
+	}
+	if _, err := normalizeWakeRetryUntil("replied"); err == nil {
+		t.Fatal("unknown retry-until value was accepted")
 	}
 }
 

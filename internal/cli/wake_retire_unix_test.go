@@ -82,11 +82,48 @@ func TestRetireWakeRefusesDifferentInjectTarget(t *testing.T) {
 	requested := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec", "terminal-b"})
 
 	result, err := retireWake(root, "codex", requested)
-	if err == nil || result.Status != "refused" || !strings.Contains(result.Reason, "different injector") {
+	if err == nil || result.Status != "refused" || !strings.Contains(result.Reason, "different injector identity") {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
 	if _, err := os.Stat(lockPath); err != nil {
 		t.Fatalf("mismatched wake lock changed: %v", err)
+	}
+}
+
+func TestRetireWakeRefusesRetryPolicyMismatch(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	persisted, _ := installRetireWakeFixture(t, root, "codex", injector, []string{"exec", "terminal-a"}, wakePID)
+	persisted.RetryUntil = wakeRetryUntilInjected
+	if err := writeWakeTarget(root, "codex", persisted); err != nil {
+		t.Fatalf("rewrite wake target with retry policy: %v", err)
+	}
+	// Rebind lock digest to the injected-policy target bytes.
+	lockPath := writeWakeLockForTest(t, root, "codex", bindWakeLockToTarget(wakeLock{
+		PID:          wakePID,
+		TTY:          "unknown",
+		ProcessStart: "wake-start",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+		Args:         []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex", "--inject-via", injector},
+		Generation:   "0123456789abcdef0123456789abcdef",
+	}, persisted))
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return matchingRetireWakeProcess(pid, root, "codex", injector)
+	})
+	// Requested/default is drained (empty RetryUntil); persisted is injected.
+	requested := mustNewWakeTargetForTest(t, root, "codex", injector, []string{"exec", "terminal-a"})
+
+	result, err := retireWake(root, "codex", requested)
+	if err == nil || result.Status != "refused" || !strings.Contains(result.Reason, "retry acknowledgement policy") {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("retry-policy mismatch changed lock: %v", err)
+	}
+	if _, err := os.Stat(wakeTargetPath(root, "codex")); err != nil {
+		t.Fatalf("retry-policy mismatch changed target: %v", err)
 	}
 }
 

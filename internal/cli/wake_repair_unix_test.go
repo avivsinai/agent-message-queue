@@ -1626,10 +1626,11 @@ func TestBuildRepairWakeArgsIncludesReadyFileAndTarget(t *testing.T) {
 	target := wakeTarget{
 		InjectVia:  "/abs/injector",
 		InjectArgs: []string{"exec", "target"},
+		RetryUntil: wakeRetryUntilInjected,
 	}
 	args := buildRepairWakeArgs("/tmp/root", "codex", target, "dead-generation", "/tmp/ready")
 	got := strings.Join(args, "|")
-	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--repair-lineage|dead-generation|--inject-via|/abs/injector|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready"
+	want := "--no-update-check|wake|--me|codex|--root|/tmp/root|--repair-lineage|dead-generation|--inject-via|/abs/injector|--retry-until|injected|--inject-arg|exec|--inject-arg|target|--ready-file|/tmp/ready"
 	if got != want {
 		t.Fatalf("args = %q, want %q", got, want)
 	}

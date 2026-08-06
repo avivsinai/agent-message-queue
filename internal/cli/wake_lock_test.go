@@ -423,7 +423,7 @@ func TestValidUnboundP2aWakeLockRemainsGeneric(t *testing.T) {
 	}
 }
 
-func TestSameWakeInjectorIdentityUsesOnlyPathAndOrderedArgs(t *testing.T) {
+func TestSameWakeInjectorIdentityUsesPathOrderedArgsAndRetryPolicy(t *testing.T) {
 	first := wakeTarget{
 		InjectVia:  "/opt/amq/injector",
 		InjectArgs: []string{"exec", "target"},
@@ -445,6 +445,16 @@ func TestSameWakeInjectorIdentityUsesOnlyPathAndOrderedArgs(t *testing.T) {
 	second.InjectVia = "/opt/amq/other-injector"
 	if sameWakeInjectorIdentity(first, second) {
 		t.Fatal("different injector paths were treated as the same identity")
+	}
+	second = first
+	second.RetryUntil = wakeRetryUntilInjected
+	if sameWakeInjectorIdentity(first, second) {
+		t.Fatal("different retry acknowledgement policies were treated as the same identity")
+	}
+	second = first
+	second.RetryUntil = wakeRetryUntilDrained
+	if !sameWakeInjectorIdentity(first, second) {
+		t.Fatal("omitted and explicit drained policies were treated as different identities")
 	}
 }
 

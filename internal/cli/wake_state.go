@@ -39,6 +39,7 @@ type wakeStateTarget struct {
 	Created       string     `json:"created"`
 	InjectVia     string     `json:"inject_via"`
 	InjectArgs    []string   `json:"inject_args,omitempty"`
+	RetryUntil    string     `json:"retry_until,omitempty"`
 	Owner         *wakeOwner `json:"owner,omitempty"`
 	LegacyPresent bool       `json:"legacy_present"`
 	TargetDigest  string     `json:"target_digest"`
@@ -141,6 +142,7 @@ func newWakeState(legacy wakeStateLegacy) (wakeState, error) {
 			Created:       legacy.Target.Created,
 			InjectVia:     legacy.Target.InjectVia,
 			InjectArgs:    append([]string(nil), legacy.Target.InjectArgs...),
+			RetryUntil:    legacy.Target.RetryUntil,
 			Owner:         cloneWakeStateOwner(legacy.Target.Owner),
 			LegacyPresent: true,
 			TargetDigest:  targetDigest,
@@ -302,6 +304,10 @@ func validateWakeStateTarget(target wakeStateTarget) error {
 			return fmt.Errorf("wake state target inject arg contains NUL")
 		}
 	}
+	// Empty remains the drained compatibility default; stored values must be exact.
+	if err := validateStoredWakeRetryUntil(target.RetryUntil); err != nil {
+		return fmt.Errorf("wake state target %w", err)
+	}
 	if target.Owner != nil {
 		if err := validateAuthoritativeWakeOwner(*target.Owner); err != nil {
 			return fmt.Errorf("wake state target owner is invalid: %w", err)
@@ -449,6 +455,7 @@ func (target wakeStateTarget) wakeTarget() wakeTarget {
 		Created:    target.Created,
 		InjectVia:  target.InjectVia,
 		InjectArgs: append([]string(nil), target.InjectArgs...),
+		RetryUntil: target.RetryUntil,
 		Owner:      cloneWakeStateOwner(target.Owner),
 	}
 }
