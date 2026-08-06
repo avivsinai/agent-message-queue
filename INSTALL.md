@@ -115,6 +115,45 @@ Download from [Releases](https://github.com/avivsinai/agent-message-queue/releas
 | Native Windows (x86_64) | `amq_*_windows_amd64.zip` |
 | WSL (x86_64) | `amq_*_linux_amd64.tar.gz` |
 
+The optional macOS wake supervisor is published separately as
+`amq-keepalive_*_darwin_arm64.tar.gz` or
+`amq-keepalive_*_darwin_amd64.tar.gz`. It is intentionally not installed by
+the Homebrew formula. AMQ saves the resolved injector executable as part of a
+wake's identity; a versioned Homebrew Cellar path can disappear during cleanup
+and prevent an exact retirement. Install the companion as a regular executable
+at a stable path instead:
+
+```bash
+# Replace X.Y.Z and darwin_arm64 for the release and this Mac.
+(
+set -e
+TAG=vX.Y.Z
+VERSION=X.Y.Z
+PLATFORM=darwin_arm64
+ASSET="amq-keepalive_${VERSION}_${PLATFORM}.tar.gz"
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "$WORK_DIR"' EXIT
+curl -fsSL "https://github.com/avivsinai/agent-message-queue/releases/download/${TAG}/${ASSET}" -o "$WORK_DIR/$ASSET"
+curl -fsSL "https://github.com/avivsinai/agent-message-queue/releases/download/${TAG}/checksums.txt" -o "$WORK_DIR/checksums.txt"
+CHECKSUM_LINE="$(awk -v asset="$ASSET" '
+  { candidate = $2; sub(/^\*/, "", candidate) }
+  candidate == asset { count++; line = $0 }
+  END { if (count != 1) exit 1; print line }
+' "$WORK_DIR/checksums.txt")"
+(cd "$WORK_DIR" && printf '%s\n' "$CHECKSUM_LINE" | shasum -a 256 -c -)
+tar -xzf "$WORK_DIR/$ASSET" -C "$WORK_DIR"
+mkdir -p "$HOME/.local/bin"
+install -m 0755 "$WORK_DIR/amq-keepalive" "$HOME/.local/bin/.amq-keepalive.new"
+mv -f "$HOME/.local/bin/.amq-keepalive.new" "$HOME/.local/bin/amq-keepalive"
+"$HOME/.local/bin/amq-keepalive" --version
+)
+```
+
+Use that same path for `attach`, `install-launchd`, and `install-hook`. Upgrades
+and rollbacks replace the file at the stable path, then rerun
+`amq-keepalive install-launchd` to restart the supervisor. The registry is
+retained; do not move the executable while registered wakes still identify it.
+
 ### Platform capability matrix
 
 | Platform | Core queue (`send`, `drain`, `read`, threads) | `coop init` | `coop exec` | `wake` notifications | Installer script |

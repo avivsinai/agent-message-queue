@@ -451,14 +451,34 @@ For the consumer plist, replace the command arguments after the executable with
 Route stdout/stderr to supervisor-managed logs and secure the unit/plist for the
 local user who owns the mailbox.
 
-If you prefer a supervisor that follows explicitly registered terminal sessions
-instead of fixed plists, [amq-keepalive](https://github.com/ohade/amq-keepalive)
-is a standalone companion tool that implements this recipe for macOS: it keeps a
-registry of attached terminal targets (Ghostty, cmux), keeps registered wakes
-supervised through sleep with a user LaunchAgent, and can install SessionStart
-hooks for Claude Code and Codex to reattach recreated sessions after reboot. It
-follows the same daemon-free contract and talks to AMQ only through the public
-`amq` CLI.
+On macOS, the separate `amq-keepalive` companion executable (built from
+`cmd/amq-keepalive`) packages this recipe for wake delivery that must follow a
+specific terminal session rather than a fixed plist. It keeps a private
+registry of explicitly attached terminal targets (Ghostty and cmux adapters),
+reattaches `wake` after reboot or sleep through a user LaunchAgent
+(`install-launchd`), and can register SessionStart reattach hooks for Claude
+Code and Codex (`install-hook`). It does not add keepalive behavior to the core
+`amq` command: the OS supervises the companion, it never parses AMQ mailbox,
+lock, presence, or target files, and it talks to AMQ only through the public
+CLI (target-aware `amq wake`, `amq env --json`).
+
+The supervisor inventories cmux once per due pass, checks active targets every
+five minutes, and exponentially backs detached targets off from five minutes
+to one hour. It fails closed if multiple live cmux surface UUIDs alias the same
+TTY and repeats that check immediately before injection. Reattach persists a
+recoverable inactive reservation before starting a wake, while spawned wakes
+run in a separate Unix session and are never killed when the helper's readiness
+wait is canceled. `retire-session` and `gc --apply` delegate retirement to
+AMQ's identity-safe `wake retire` contract. They remove a registry row only
+after AMQ confirms the exact saved injector target was retired; refusals,
+ambiguous identity, and command failures preserve the row for a later retry.
+
+```bash
+go build ./cmd/amq-keepalive
+./amq-keepalive attach --adapter ghostty --me claude
+./amq-keepalive install-launchd
+./amq-keepalive doctor
+```
 
 **Options:**
 - `--inject-mode auto|raw|paste|none` - Injection strategy; `none` enforces zero terminal input
