@@ -15,6 +15,12 @@ import (
 
 const testCmuxSurfaceID = "F901D722-6789-4BBB-9818-C4E97F20BEB3"
 
+type foreignTargetInventory struct{}
+
+func (foreignTargetInventory) Probe(string) error { return nil }
+
+func (foreignTargetInventory) OwnershipKey(string) (string, error) { return "foreign:key", nil }
+
 func TestCmuxDiscoverUsesExactSurfaceID(t *testing.T) {
 	skipCmuxNonDarwin(t)
 	adapter := Cmux{Getenv: func(key string) string {
@@ -161,9 +167,9 @@ func TestCmuxInventoryRejectsMultipleLiveAliasesForPhysicalTTY(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "2 live surface aliases") {
 			t.Fatalf("OwnershipKey(%q) error = %v, want alias ambiguity", target, err)
 		}
-		key, ok := DegradedOwnershipKey(err)
+		key, ok := CmuxDegradedOwnershipKey(inventory, err)
 		if !ok || key != "tty:/dev/ttys011" {
-			t.Fatalf("DegradedOwnershipKey(%q) = %q, %v; want canonical tty key", target, key, ok)
+			t.Fatalf("CmuxDegradedOwnershipKey(%q) = %q, %v; want canonical tty key", target, key, ok)
 		}
 	}
 	if len(runner.calls) != 1 {
@@ -263,8 +269,8 @@ func TestCmuxInventoryRejectsBlankTTYInsteadOfAssumingUUIDOwnership(t *testing.T
 	if err == nil || errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("Probe() error = %v, want ambiguous missing-tty failure", err)
 	}
-	if key, ok := DegradedOwnershipKey(err); ok || key != "" {
-		t.Fatalf("DegradedOwnershipKey(blank tty) = %q, %v; want unavailable", key, ok)
+	if key, ok := CmuxDegradedOwnershipKey(inventory, err); ok || key != "" {
+		t.Fatalf("CmuxDegradedOwnershipKey(blank tty) = %q, %v; want unavailable", key, ok)
 	}
 }
 
@@ -281,8 +287,69 @@ func TestCmuxInventoryRejectsNonPTYPathWithoutOwnershipKey(t *testing.T) {
 	if err == nil || !errors.Is(err, ErrTargetDegraded) || !strings.Contains(err.Error(), "not a macOS PTY") {
 		t.Fatalf("Probe() error = %v, want keyless non-PTY degradation", err)
 	}
-	if key, ok := DegradedOwnershipKey(err); ok || key != "" {
-		t.Fatalf("DegradedOwnershipKey(non-PTY) = %q, %v; want unavailable", key, ok)
+	if key, ok := CmuxDegradedOwnershipKey(inventory, err); ok || key != "" {
+		t.Fatalf("CmuxDegradedOwnershipKey(non-PTY) = %q, %v; want unavailable", key, ok)
+	}
+}
+
+func TestCanonicalCmuxTTYAcceptsOnlyDocumentedForms(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "basename", value: "ttys011", want: "/dev/ttys011"},
+		{name: "trimmed basename", value: " ttys012 ", want: "/dev/ttys012"},
+		{name: "absolute", value: "/dev/ttys013", want: "/dev/ttys013"},
+		{name: "eviction basename", value: cmuxEvictedTTYName, want: cmuxEvictedTTY},
+		{name: "eviction absolute", value: cmuxEvictedTTY, want: cmuxEvictedTTY},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := canonicalCmuxTTY(tt.value)
+			if err != nil || got != tt.want {
+				t.Fatalf("canonicalCmuxTTY(%q) = %q, %v; want %q, nil", tt.value, got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestCanonicalCmuxTTYRejectsAliasesAndNonPTYValues(t *testing.T) {
+	for _, value := range []string{
+		"../dev/ttys011",
+		"nested/ttys011",
+		"/tmp/../dev/ttys011",
+		"/dev//ttys011",
+		"/private/dev/ttys011",
+		"/dev/ttys",
+		"/dev/ttys-1",
+		"/dev/ttys01x",
+		"/dev/ptys011",
+	} {
+		t.Run(strings.ReplaceAll(value, "/", "_"), func(t *testing.T) {
+			if got, err := canonicalCmuxTTY(value); err == nil || got != "" {
+				t.Fatalf("canonicalCmuxTTY(%q) = %q, %v; want rejection", value, got, err)
+			}
+		})
+	}
+}
+
+func TestCmuxDegradedOwnershipKeyRejectsForeignInventory(t *testing.T) {
+	first := newCmuxInventory(nil, cmuxResolution{})
+	second := newCmuxInventory(nil, cmuxResolution{})
+	err := &cmuxDegradedOwnershipError{
+		inventoryToken: first.ownershipToken,
+		ownershipKey:   "tty:/dev/ttys011",
+		detail:         "ambiguous",
+	}
+	if key, ok := CmuxDegradedOwnershipKey(foreignTargetInventory{}, err); ok || key != "" {
+		t.Fatalf("CmuxDegradedOwnershipKey(foreign inventory) = %q, %v; want unavailable", key, ok)
+	}
+	if key, ok := CmuxDegradedOwnershipKey(second, err); ok || key != "" {
+		t.Fatalf("CmuxDegradedOwnershipKey(other cmux snapshot) = %q, %v; want unavailable", key, ok)
+	}
+	if key, ok := CmuxDegradedOwnershipKey(first, fmt.Errorf("wrapped: %w", ErrTargetDegraded)); ok || key != "" {
+		t.Fatalf("CmuxDegradedOwnershipKey(generic error) = %q, %v; want unavailable", key, ok)
 	}
 }
 

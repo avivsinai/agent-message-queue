@@ -436,7 +436,7 @@ func checkPhysicalTargetAvailable(
 			continue
 		}
 		if errors.Is(err, adapter.ErrTargetDegraded) {
-			degradedKey, ok := adapter.DegradedOwnershipKey(err)
+			degradedKey, ok := adapter.CmuxDegradedOwnershipKey(inventory, err)
 			if !ok {
 				return fmt.Errorf("resolve registered physical target ownership for %s@%s: %w", existing.Agent, existing.Root, err)
 			}
