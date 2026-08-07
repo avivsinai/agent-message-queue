@@ -114,6 +114,9 @@ type opsWakeLock struct {
 	CurrentVersion           string `json:"current_version,omitempty"`
 	ImageStatus              string `json:"image_status,omitempty"`
 	RestartCapability        string `json:"restart_capability,omitempty"`
+	RestartStagePath         string `json:"restart_stage_path,omitempty"`
+	RestartStageStatus       string `json:"restart_stage_status,omitempty"`
+	RestartStageReason       string `json:"restart_stage_reason,omitempty"`
 	OperatorTerminalRequired bool   `json:"operator_terminal_required"`
 	NextAction               string `json:"next_action,omitempty"`
 	InspectionError          string `json:"inspection_error,omitempty"`
@@ -540,7 +543,14 @@ func checkWakeLocksWithHintsSchema(
 ) ([]opsWakeLock, []opsHint) {
 	var locks []opsWakeLock
 	var hints []opsHint
-	appendLock := func(agent string, lock opsWakeLock, inspection wakeLockInspection, staleBinary bool) {
+	appendLock := func(
+		agent string,
+		lock opsWakeLock,
+		inspection wakeLockInspection,
+		staleBinary bool,
+		stage wakeRestartStageDiagnostic,
+	) {
+		fixCommand := lock.Fix
 		decorateOpsWakeLockWithWakeCheck(
 			root,
 			agent,
@@ -549,6 +559,12 @@ func checkWakeLocksWithHintsSchema(
 			staleBinary,
 			jsonSchema == wakeCheckSchemaV2,
 		)
+		lock.RestartStagePath = stage.Path
+		lock.RestartStageStatus = stage.Status
+		lock.RestartStageReason = stage.Reason
+		if stage.Status != "" && fixCommand != "" {
+			lock.Fix = fixCommand
+		}
 		if lock.WakeCheckDecision != nil && lock.WakeCheckDecision.Platform.WakeSupported {
 			status := lock.WakeCheckDecision.Wake.Status
 			lock.NotifierAbsent = status == string(wakeLockMissing) || status == string(wakeLockStale)
@@ -563,7 +579,39 @@ func checkWakeLocksWithHintsSchema(
 		}
 		mutationAuthorized := fsq.ValidateHandle(agent) == nil
 		inspection := inspectWakeLock(root, agent)
+		stage := diagnoseWakeRestartStage(root, agent, inspection)
 		if !inspection.Exists {
+			if stage.Status == "" {
+				continue
+			}
+			lock := opsWakeLock{
+				Status: string(wakeLockMissing),
+				Agent:  agent,
+				Root:   inspection.Root,
+				Lock:   inspection.LockPath,
+				Reason: inspection.Reason,
+				Fix:    doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks"),
+			}
+			if fix {
+				fixErr := fixWakeRestartResidueWithoutLock(root, agent)
+				inspection = inspectWakeLock(root, agent)
+				stage = diagnoseWakeRestartStage(root, agent, inspection)
+				if fixErr != nil {
+					lock.Status = "error"
+					lock.Reason = fixErr.Error()
+				} else {
+					lock.Fix = ""
+					lock.Status = "fixed"
+					lock.Reason = ""
+					lock.Removed = true
+				}
+				lock.Mutation = &opsWakeMutation{
+					Status:  lock.Status,
+					Reason:  lock.Reason,
+					Removed: lock.Removed,
+				}
+			}
+			appendLock(agent, lock, inspection, false, stage)
 			continue
 		}
 		staleBinary := false
@@ -596,7 +644,7 @@ func checkWakeLocksWithHintsSchema(
 			lock.Reason = "live raw wake orphan; stop the owning terminal or launchd supervisor"
 		}
 		if !mutationAuthorized {
-			appendLock(agent, lock, inspection, staleBinary)
+			appendLock(agent, lock, inspection, staleBinary, stage)
 			continue
 		}
 		assessment := assessWakeRepair(
@@ -617,7 +665,7 @@ func checkWakeLocksWithHintsSchema(
 		}
 		if inspection.Status == wakeLockStale {
 			if ownerBound {
-				appendLock(agent, lock, inspection, staleBinary)
+				appendLock(agent, lock, inspection, staleBinary, stage)
 				continue
 			}
 			lock.Fix = doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
@@ -645,7 +693,10 @@ func checkWakeLocksWithHintsSchema(
 				}
 			}
 		}
-		appendLock(agent, lock, inspection, staleBinary)
+		if fix {
+			stage = diagnoseWakeRestartStage(root, agent, inspection)
+		}
+		appendLock(agent, lock, inspection, staleBinary, stage)
 	}
 	return locks, hints
 }

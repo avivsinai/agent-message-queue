@@ -39,6 +39,13 @@ func bindWakeRestartCandidate(candidate wakeImageEvidenceV1) (*wakeRestartBoundI
 	return bindWakeRestartCandidatePlatform(candidate)
 }
 
+func bindWakeRestartCandidateForRecord(record wakeRestartRecord) (*wakeRestartBoundImage, error) {
+	if err := validateWakeRestartRecord(record); err != nil {
+		return nil, err
+	}
+	return bindWakeRestartCandidateForRecordPlatform(record)
+}
+
 func preflightBoundWakeRestartCandidate(
 	image *wakeRestartBoundImage,
 	argv []string,
@@ -119,11 +126,12 @@ func sameWakeImageEvidenceExceptMethodPath(first, second wakeImageEvidenceV1) bo
 // retained device/inode plus size and digest remain the binding authority.
 func sameDarwinStagedWakeImageEvidence(first, second wakeImageEvidenceV1) bool {
 	if first.Platform != "darwin" || second.Platform != "darwin" ||
-		first.Method != wakeImageMethodPathnameExecVerified ||
-		second.Method != wakeImageMethodPathnameExecVerified ||
+		!wakeImageMethodIsDarwinExecObserved(first.Method) ||
+		!wakeImageMethodIsDarwinExecObserved(second.Method) ||
 		first.ExecutionPath != second.ExecutionPath {
 		return first == second
 	}
+	first.Method = second.Method
 	first.CTimeNS = second.CTimeNS
 	return first == second
 }
@@ -138,7 +146,7 @@ func sameRequestedAndBoundWakeImageEvidence(first, second wakeImageEvidenceV1) b
 	}
 	switch first.Platform {
 	case "darwin":
-		if second.Method != wakeImageMethodPathnameExecVerified {
+		if !wakeImageMethodIsDarwinExecObserved(second.Method) {
 			return false
 		}
 		first.CTimeNS = second.CTimeNS

@@ -724,7 +724,7 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 			owner := *options.requestedOwner
 			candidate.ResumeSchema = wakeResumeSchemaV2
 			candidate.ResumeOwner = &owner
-			candidate.ResumeSignal = wakeResumeSignalUSR1
+			configureWakeRestartAdvertisementPlatform(&candidate, root, me)
 			candidate.RunningImageEvidence = evidence
 			candidate.Args = append([]string(nil), os.Args...)
 			candidate.ImagePath = evidence.ExecutionPath
@@ -1744,6 +1744,57 @@ func buildRepairWakeArgs(root, me string, target wakeTarget, generation, readyPa
 	return args
 }
 
+func cleanupWakeResumeStageBeforeLock(
+	cleanupStage func() error,
+	cleanupLock func(),
+	retainLock *bool,
+) error {
+	if retainLock == nil {
+		return fmt.Errorf("wake restart cleanup retention state is missing")
+	}
+	if cleanupStage != nil {
+		if err := cleanupStage(); err != nil {
+			*retainLock = true
+			return fmt.Errorf("cleanup resumed wake stage before lock release: %w", err)
+		}
+	}
+	if cleanupLock != nil && !*retainLock {
+		cleanupLock()
+	}
+	return nil
+}
+
+func newWakeRestartCleanupRetention(bootstrap *wakeResumeBootstrap) *bool {
+	retain := bootstrap != nil
+	return &retain
+}
+
+func commitWakeRestartReadiness(
+	agentDir *wakeAgentDir,
+	root, me string,
+	current wakeLockInspection,
+	bootstrap wakeResumeBootstrap,
+	retainLock *bool,
+	cleanupPrevious func(wakeResumeBootstrap) error,
+) error {
+	if retainLock == nil {
+		return fmt.Errorf("wake restart cleanup retention state is missing")
+	}
+	if cleanupPrevious == nil {
+		return fmt.Errorf("wake restart previous-stage cleanup is missing")
+	}
+	if err := cleanupPrevious(bootstrap); err != nil {
+		*retainLock = true
+		return fmt.Errorf("cleanup previous wake restart stage before readiness commit: %w", err)
+	}
+	if err := consumeWakeRestartAfterPrepared(agentDir, root, me, current, bootstrap); err != nil {
+		*retainLock = true
+		return err
+	}
+	*retainLock = false
+	return nil
+}
+
 func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	resumeBootstrap, err := wakeResumeBootstrapFromEnv()
 	if err != nil {
@@ -1975,7 +2026,13 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	if resumeContext == nil {
 		resumeContext = resumePreflight
 	}
+	var cleanup func()
 	var resumeImageEvidence *wakeImageEvidenceV1
+	var cleanupResumeStage func() error
+	resumeStageCleanupTransferred := false
+	// A resumed generation keeps its lock until the previous stage is reclaimed
+	// and the exact restart record is consumed at the readiness boundary.
+	retainLockOnRestartCleanupError := newWakeRestartCleanupRetention(resumeBootstrap)
 	if resumeContext != nil {
 		if repairGeneration != "" || repairHandoffPresent {
 			return fmt.Errorf("wake resume cannot inherit repair state")
@@ -1996,8 +2053,13 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		if resumeBootstrap != nil {
 			cleanupBootstrap := *resumeBootstrap
 			cleanupBootstrap.BoundImage = resumeImageEvidence
+			cleanupResumeStage = func() error {
+				return cleanupWakeResumeBoundImage(cleanupBootstrap)
+			}
 			defer func() {
-				returnErr = errors.Join(returnErr, cleanupWakeResumeBoundImage(cleanupBootstrap))
+				if !resumeStageCleanupTransferred {
+					returnErr = errors.Join(returnErr, cleanupResumeStage())
+				}
 			}()
 		}
 	}
@@ -2192,6 +2254,17 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		}
 		defer func() { _ = activeAgentDir.Close() }()
 	}
+	defer func() {
+		returnErr = errors.Join(
+			returnErr,
+			cleanupWakeResumeStageBeforeLock(
+				cleanupResumeStage,
+				cleanup,
+				retainLockOnRestartCleanupError,
+			),
+		)
+	}()
+	resumeStageCleanupTransferred = true
 
 	// Acquire lock to prevent duplicate wake processes
 	acceptExistingWake := readyFile != "" && *acceptExistingWakeFlag
@@ -2210,7 +2283,6 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		lockWakeMode,
 	)
 	reloadTransportEligible := resumeEligible && target == nil
-	var cleanup func()
 	var repairFloorAuthority wakeRepairFloorAuthority
 	for {
 		if requestedOwner != nil {
@@ -2320,7 +2392,6 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		}
 		return err
 	}
-	defer cleanup()
 	controlStop := privateStop
 	if requestedOwner != nil {
 		controlStop = mergeWakeStopChannels(controlStop, ownerObservation.Done())
@@ -2337,8 +2408,8 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		var stop <-chan struct{}
 		var markStopped func()
 		var controlErr error
-		controlCleanup, stop, markStopped, controlErr = startWakeControlListenerInDir(
-			activeAgentDir, root, me, currentWake.Lock,
+		controlCleanup, stop, markStopped, controlErr = startWakeControlListenerInDirWithRestart(
+			activeAgentDir, root, me, currentWake.Lock, restartSignals,
 		)
 		if controlErr != nil {
 			return controlErr
@@ -2527,15 +2598,14 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 				return err
 			}
 			if resumeBootstrap != nil {
-				if err := cleanupPreviousWakeResumeBoundImage(*resumeBootstrap); err != nil {
-					_ = writeStderr("amq wake: preserve prior restart stage after cleanup refusal: %v\n", err)
-				}
-				if err := consumeWakeRestartAfterPrepared(
+				if err := commitWakeRestartReadiness(
 					activeAgentDir,
 					root,
 					me,
 					currentWake,
 					*resumeBootstrap,
+					retainLockOnRestartCleanupError,
+					cleanupPreviousWakeResumeBoundImage,
 				); err != nil {
 					return err
 				}

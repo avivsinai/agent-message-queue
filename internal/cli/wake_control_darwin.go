@@ -30,13 +30,17 @@ const darwinXUCredVersion uint32 = 0
 
 type wakeControlOwnerRequest struct {
 	Generation string     `json:"generation"`
+	RequestID  string     `json:"request_id,omitempty"`
 	Owner      *wakeOwner `json:"owner,omitempty"`
 	Rollback   bool       `json:"rollback,omitempty"`
 	Operation  string     `json:"operation,omitempty"`
 }
 
+const wakeControlRestartOperation = "restart"
+
 func wakeControlSocketPath(root, me, generation string) string {
-	sum := sha256.Sum256([]byte(canonicalWakeRoot(root) + "\x00" + me + "\x00" + generation))
+	root = canonicalWakeRoot(root)
+	sum := sha256.Sum256([]byte(root + "\x00" + me + "\x00" + generation))
 	return filepath.Join(fsq.AgentBase(root, me), ".w."+hex.EncodeToString(sum[:8]))
 }
 
@@ -197,7 +201,9 @@ func dialDarwinUnixAt(agentDir *wakeAgentDir, name string, timeout time.Duration
 func darwinControlSocketName(agentDir *wakeAgentDir, path string) (string, error) {
 	cleanPath := filepath.Clean(path)
 	name := filepath.Base(cleanPath)
-	if filepath.Dir(cleanPath) != filepath.Clean(agentDir.path) || !strings.HasPrefix(name, ".w.") || name == ".w." {
+	if !filepath.IsAbs(cleanPath) ||
+		canonicalWakeRoot(filepath.Dir(cleanPath)) != canonicalWakeRoot(agentDir.path) ||
+		!strings.HasPrefix(name, ".w.") || name == ".w." {
 		return "", fmt.Errorf("wake control socket %s is outside authorized agent directory %s", path, agentDir.path)
 	}
 	return name, nil
@@ -495,6 +501,145 @@ func handleDarwinOwnerControl(
 	_, _ = conn.Write([]byte("ACK\n"))
 }
 
+func authorizeDarwinWakeRestartControlAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	expected wakeLock,
+	request wakeControlOwnerRequest,
+	peerPID int,
+	peerUID uint32,
+) (retErr error) {
+	canonicalRoot := canonicalWakeRoot(root)
+	if request.Operation != wakeControlRestartOperation {
+		return fmt.Errorf("wake restart control operation is unsupported")
+	}
+	if request.Rollback {
+		return fmt.Errorf("wake restart control refuses rollback authorization")
+	}
+	if peerUID != uint32(os.Geteuid()) {
+		return fmt.Errorf("wake restart control peer uid is not authorized")
+	}
+	if !validWakeReloadTransportGeneration(request.RequestID) {
+		return fmt.Errorf("wake restart control request id is malformed")
+	}
+	if request.Owner == nil {
+		return fmt.Errorf("wake restart control owner token is missing")
+	}
+	if err := validateAuthoritativeWakeOwner(*request.Owner); err != nil {
+		return fmt.Errorf("wake restart control owner token is invalid: %w", err)
+	}
+
+	current := inspectWakeLockAt(dirfd, agentDir, root, me)
+	if !current.Exists || current.Status != wakeLockValid || !current.IdentityConfirmed ||
+		expected.Root != canonicalRoot || expected.Agent != me ||
+		current.Lock.Root != canonicalRoot || current.Lock.Agent != me ||
+		current.Lock.PID != expected.PID ||
+		current.Lock.ProcessStart != expected.ProcessStart ||
+		current.Lock.BootID != expected.BootID ||
+		current.Lock.Generation != expected.Generation ||
+		request.Generation != expected.Generation ||
+		current.Lock.ControlSocket != expected.ControlSocket {
+		return fmt.Errorf("authoritative wake generation changed")
+	}
+	if expected.ControlSocket != wakeControlSocketPath(root, me, expected.Generation) ||
+		current.Lock.ControlSocket != wakeControlSocketPath(root, me, current.Lock.Generation) {
+		return fmt.Errorf("wake restart control socket does not match the exact root, agent, and generation")
+	}
+	if expected.ResumeSchema != wakeResumeSchemaV2 || current.Lock.ResumeSchema != wakeResumeSchemaV2 ||
+		expected.ResumeOwner == nil || current.Lock.ResumeOwner == nil {
+		return fmt.Errorf("wake restart control target is not resumable")
+	}
+	if err := validateAuthoritativeWakeOwner(*current.Lock.ResumeOwner); err != nil {
+		return fmt.Errorf("wake restart control advertised owner is invalid: %w", err)
+	}
+	if err := validateWakeRestartTransportPlatform(current.Lock, root, me); err != nil {
+		return err
+	}
+	if !sameWakeOwner(request.Owner, current.Lock.ResumeOwner) ||
+		!sameWakeOwner(expected.ResumeOwner, current.Lock.ResumeOwner) {
+		return fmt.Errorf("wake restart control owner token does not match the claim")
+	}
+
+	observation, err := observeAuthoritativeWakeOwner(*current.Lock.ResumeOwner)
+	defer func() {
+		if closeErr := observation.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, closeErr)
+		}
+	}()
+	if err != nil {
+		return err
+	}
+	if observation.State != wakeOwnerSame {
+		return fmt.Errorf("wake restart control owner is %s: %s", observation.State, observation.Reason)
+	}
+	peerSession, err := getWakeProcessSID(peerPID)
+	if err != nil {
+		return fmt.Errorf("wake restart control peer session unavailable: %w", err)
+	}
+	if peerSession != current.Lock.ResumeOwner.SessionID {
+		return fmt.Errorf(
+			"wake restart control peer session %d does not match owner session %d",
+			peerSession,
+			current.Lock.ResumeOwner.SessionID,
+		)
+	}
+
+	record, exists, err := readWakeRestartRecordAt(dirfd, agentDir)
+	if err != nil {
+		return err
+	}
+	if !exists || record.Status != wakeRestartPending ||
+		record.RequestID != request.RequestID ||
+		record.Generation != expected.Generation ||
+		record.Root != canonicalRoot || record.Agent != me ||
+		!sameWakeOwner(&record.Owner, current.Lock.ResumeOwner) {
+		return fmt.Errorf("wake restart control request does not match the exact pending record")
+	}
+	return nil
+}
+
+func handleDarwinWakeRestartControl(
+	conn *net.UnixConn,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	lock wakeLock,
+	request wakeControlOwnerRequest,
+	peerPID int,
+	peerUID uint32,
+	restartSignals chan<- os.Signal,
+) {
+	if restartSignals == nil {
+		return
+	}
+	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		if err := authorizeDarwinWakeRestartControlAt(
+			dirfd,
+			agentDir,
+			root,
+			me,
+			lock,
+			request,
+			peerPID,
+			peerUID,
+		); err != nil {
+			return err
+		}
+		select {
+		case restartSignals <- syscall.SIGUSR1:
+			return nil
+		default:
+			return fmt.Errorf("wake restart control signal queue is full")
+		}
+	})
+	if err != nil {
+		return
+	}
+	_, _ = conn.Write([]byte("ACK\n"))
+}
+
 func startWakeControlListener(
 	root, me string,
 	lock wakeLock,
@@ -517,12 +662,21 @@ func startWakeControlListener(
 	return cleanup, stop, markStopped, err
 }
 
-func startWakeControlListenerInDir(
+func startWakeControlListenerInDirWithRestart(
 	agentDir *wakeAgentDir,
 	root, me string,
 	lock wakeLock,
+	restartSignals chan<- os.Signal,
 ) (func(), <-chan struct{}, func(), error) {
-	return startWakeControlListenerInDirOwned(agentDir, root, me, lock, false, nil)
+	return startWakeControlListenerInDirOwnedWithRestart(
+		agentDir,
+		root,
+		me,
+		lock,
+		false,
+		nil,
+		restartSignals,
+	)
 }
 
 type darwinWakeControlTestHooks struct {
@@ -535,6 +689,25 @@ func startWakeControlListenerInDirOwned(
 	lock wakeLock,
 	closeAgentDir bool,
 	testHooks *darwinWakeControlTestHooks,
+) (func(), <-chan struct{}, func(), error) {
+	return startWakeControlListenerInDirOwnedWithRestart(
+		agentDir,
+		root,
+		me,
+		lock,
+		closeAgentDir,
+		testHooks,
+		nil,
+	)
+}
+
+func startWakeControlListenerInDirOwnedWithRestart(
+	agentDir *wakeAgentDir,
+	root, me string,
+	lock wakeLock,
+	closeAgentDir bool,
+	testHooks *darwinWakeControlTestHooks,
+	restartSignals chan<- os.Signal,
 ) (func(), <-chan struct{}, func(), error) {
 	path := lock.ControlSocket
 	if path == "" {
@@ -593,34 +766,49 @@ func startWakeControlListenerInDirOwned(
 				if err != nil || len(line) > 4096 {
 					return
 				}
-				if lock.WakeMode == wakeOwnerWakeMode {
+				if lock.WakeMode == wakeOwnerWakeMode ||
+					(lock.ResumeSchema == wakeResumeSchemaV2 && lock.ControlSocket != "") {
 					var request wakeControlOwnerRequest
 					if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &request); err != nil {
-						return
-					}
-					// Named operations are reserved for forward compatibility.
-					// Current owner control is only the empty-operation release
-					// request; fail closed on retired or unknown operations.
-					if request.Operation != "" {
 						return
 					}
 					peerPID, err := darwinPeerPID(conn)
 					if err != nil {
 						return
 					}
-					handleDarwinOwnerControl(
-						conn,
-						agentDir,
-						root,
-						me,
-						lock,
-						request,
-						peerPID,
-						uid,
-						stopRequest,
-						loopStopped,
-						testHooks,
-					)
+					switch request.Operation {
+					case "":
+						if lock.WakeMode != wakeOwnerWakeMode {
+							return
+						}
+						handleDarwinOwnerControl(
+							conn,
+							agentDir,
+							root,
+							me,
+							lock,
+							request,
+							peerPID,
+							uid,
+							stopRequest,
+							loopStopped,
+							testHooks,
+						)
+					case wakeControlRestartOperation:
+						handleDarwinWakeRestartControl(
+							conn,
+							agentDir,
+							root,
+							me,
+							lock,
+							request,
+							peerPID,
+							uid,
+							restartSignals,
+						)
+					default:
+						return
+					}
 					return
 				}
 				if strings.TrimSpace(line) != lock.Generation {

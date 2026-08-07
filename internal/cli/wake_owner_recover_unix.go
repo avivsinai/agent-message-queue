@@ -292,7 +292,7 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 			})
 			switch action {
 			case wakeOwnerActionRelease:
-				if err := removeAuthoritativeWakeClaimAt(dirfd, agentDir, inspection, target); err != nil {
+				if err := removeAuthoritativeWakeClaimAt(dirfd, agentDir, classified, target); err != nil {
 					return err
 				}
 				result.Status = "recovered"
@@ -300,7 +300,7 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 				return nil
 			case wakeOwnerActionStopAndRelease:
 				if wakeCapability.Absent {
-					if err := removeAuthoritativeWakeClaimAt(dirfd, agentDir, inspection, target); err != nil {
+					if err := removeAuthoritativeWakeClaimAt(dirfd, agentDir, classified, target); err != nil {
 						return err
 					}
 					result.Status = "recovered"

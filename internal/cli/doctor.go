@@ -347,6 +347,14 @@ func runDoctor(args []string) error {
 					wakeCheckTextValue(wl.RestartCapability),
 					wakeCheckTextValue(wl.NextAction),
 				)
+				if wl.RestartStageStatus != "" {
+					line += fmt.Sprintf(
+						" restart_stage=%s restart_stage_path=%s restart_stage_reason=%s",
+						wl.RestartStageStatus,
+						wakeCheckTextValue(wl.RestartStagePath),
+						wakeCheckTextValue(wl.RestartStageReason),
+					)
+				}
 				if err := writeStdoutLine(line); err != nil {
 					return err
 				}
@@ -367,7 +375,7 @@ func runDoctor(args []string) error {
 			if wl.Reason != "" {
 				line += " reason=" + wl.Reason
 			}
-			if wl.Fix != "" && wl.Status == string(wakeLockStale) {
+			if wl.Fix != "" && (wl.Status == string(wakeLockStale) || wl.RestartStageStatus != "") {
 				line += " fix=" + wl.Fix
 			}
 			if wl.TargetPresent {
@@ -392,6 +400,14 @@ func runDoctor(args []string) error {
 					wakeCheckTextValue(wl.ImageStatus),
 					wl.RestartCapability,
 					wakeCheckTextValue(wl.NextAction),
+				)
+			}
+			if wl.RestartStageStatus != "" {
+				line += fmt.Sprintf(
+					" restart_stage=%s restart_stage_path=%s restart_stage_reason=%s",
+					wl.RestartStageStatus,
+					wakeCheckTextValue(wl.RestartStagePath),
+					wakeCheckTextValue(wl.RestartStageReason),
 				)
 			}
 			if err := writeStdoutLine(line); err != nil {

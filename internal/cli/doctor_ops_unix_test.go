@@ -5,6 +5,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -117,6 +118,55 @@ func TestRunOpsChecksAlwaysReportsExactWakeQuarantineNamesWithoutLocks(t *testin
 	v2 := renderDoctorResultV2(doctorResult{Ops: result})
 	if v2.Ops == nil || v2.Ops.WakeQuarantine.Count != 2 {
 		t.Fatalf("schema v2 wake quarantine = %#v", v2.Ops)
+	}
+}
+
+func TestRunOpsChecksFailedNoLockRestartFixRetainsRemedy(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteConfig(
+		filepath.Join(root, "meta", "config.json"),
+		config.Config{Version: 1, Agents: []string{"alice"}},
+		true,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	agentDir := fsq.AgentBase(root, "alice")
+	restartPath := filepath.Join(agentDir, wakeRestartFileName)
+	raw := []byte(`{"schema":`)
+	if err := os.WriteFile(restartPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(restartPath, wakeLifecycleGuardPath(root, "alice")); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runOpsChecksWithSchema(root, "test", true, wakeCheckSchemaV2)
+	if len(result.WakeLocks) != 1 {
+		t.Fatalf("doctor wake diagnostics = %#v, want one failed restart fix", result.WakeLocks)
+	}
+	got := result.WakeLocks[0]
+	wantFix := doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+	if got.Status != string(wakeLockMissing) || got.Mutation == nil || got.Mutation.Status != "error" ||
+		!strings.Contains(got.Mutation.Reason, "lifecycle guard") || got.Fix != wantFix {
+		t.Fatalf("failed no-lock restart fix = %#v, want retained remedy %q", got, wantFix)
+	}
+	after, err := os.ReadFile(restartPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(raw) {
+		t.Fatalf("failed doctor fix mutated restart record: got %q, want %q", after, raw)
+	}
+	quarantined, err := filepath.Glob(restartPath + ".quarantined.*")
+	if err != nil || len(quarantined) != 0 {
+		t.Fatalf("failed doctor fix quarantined restart record: %v, err=%v", quarantined, err)
 	}
 }
 

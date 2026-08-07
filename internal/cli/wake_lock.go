@@ -651,6 +651,9 @@ func removeWakeLockIfUnchangedGuarded(inspection wakeLockInspection) error {
 	); err != nil {
 		return err
 	}
+	if err := reclaimWakeRestartStateForGuardedLockRemoval(inspection); err != nil {
+		return fmt.Errorf("reconcile wake restart ownership before lock removal: %w", err)
+	}
 	return removeWakeLockIfUnchangedGuardedWithIO(
 		inspection,
 		func() ([]byte, os.FileInfo, error) { return readWakeLockFileWithInfo(inspection.LockPath) },
