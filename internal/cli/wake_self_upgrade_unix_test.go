@@ -199,6 +199,31 @@ func TestProbeWakeSelfUpgradeLocatorRevalidatesUnresolvedOwner(t *testing.T) {
 	}
 }
 
+func TestProbeWakeSelfUpgradeLocatorRejectsReplacementDuringResolution(t *testing.T) {
+	dir := t.TempDir()
+	first := writeWakeSelfUpgradeCandidate(t, dir, "first")
+	second := writeWakeSelfUpgradeCandidate(t, dir, "second")
+	locator := filepath.Join(dir, "amq")
+	if err := os.Symlink(first, locator); err != nil {
+		t.Fatal(err)
+	}
+
+	previousEval := wakeSelfUpgradeEvalSymlinks
+	wakeSelfUpgradeEvalSymlinks = func(path string) (string, error) {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			replaceWakeSelfUpgradeLocator(t, locator, second)
+		}
+		return resolved, err
+	}
+	t.Cleanup(func() { wakeSelfUpgradeEvalSymlinks = previousEval })
+
+	if _, err := probeWakeSelfUpgradeLocator(locator); err == nil ||
+		!strings.Contains(err.Error(), "changed while resolving") {
+		t.Fatalf("probe error=%v, want locator-change refusal", err)
+	}
+}
+
 func TestMaintainWakeSelfUpgradeUsesLiveProcessImageOverRecordedEvidence(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	removeWakeRestartRecordForTest(t, fixture)

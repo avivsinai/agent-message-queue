@@ -108,6 +108,7 @@ var (
 	wakeSelfUpgradeNow            = time.Now
 	wakeSelfUpgradeLiveDifference = inspectWakeSelfUpgradeLiveDifference
 	wakeSelfUpgradeReadPublished  = readWakeRestartRecordAt
+	wakeSelfUpgradeInspectLockAt  = inspectWakeLockAt
 )
 
 func coopWakeLaunchLocator(argv0 string) string {
@@ -270,6 +271,13 @@ func probeWakeSelfUpgradeLocator(locator string) (wakeSelfUpgradeProbe, error) {
 	resolved, err := wakeSelfUpgradeEvalSymlinks(locator)
 	if err != nil {
 		return wakeSelfUpgradeProbe{}, err
+	}
+	confirmedLocatorInfo, err := wakeSelfUpgradeLstat(locator)
+	if err != nil {
+		return wakeSelfUpgradeProbe{}, err
+	}
+	if !sameWakeFileIdentity(locatorInfo, confirmedLocatorInfo) {
+		return wakeSelfUpgradeProbe{}, fmt.Errorf("launch locator changed while resolving")
 	}
 	resolved = strings.TrimSpace(resolved)
 	if resolved == "" || !filepath.IsAbs(resolved) || filepath.Clean(resolved) != resolved {

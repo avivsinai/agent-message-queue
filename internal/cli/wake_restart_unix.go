@@ -883,18 +883,31 @@ func retryWakeSelfUpgradeRefusal(
 	cfg *wakeConfig,
 	agentDir *wakeAgentDir,
 	pending wakeSelfUpgradeRefusalPending,
-) (resolved, persisted bool, returnErr error) {
+) (resolved, persisted, continueObservation bool, returnErr error) {
 	returnErr = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		currentLock := inspectWakeLockAt(
+		currentLock := wakeSelfUpgradeInspectLockAt(
 			dirfd,
 			agentDir,
 			canonicalWakeRoot(cfg.root),
 			cfg.me,
 		)
-		if !currentLock.Exists || currentLock.Status != wakeLockValid ||
-			!currentLock.IdentityConfirmed || currentLock.PID != os.Getpid() ||
+		if (!currentLock.Exists && currentLock.Status == wakeLockMissing) ||
+			currentLock.Status == wakeLockStale {
+			resolved = true
+			return nil
+		}
+		if currentLock.Status != wakeLockValid || !currentLock.IdentityConfirmed {
+			return fmt.Errorf(
+				"wake lock authority is inconclusive while refusal persistence is pending: %s",
+				currentLock.Reason,
+			)
+		}
+		if cfg.wakeOwner == nil {
+			return fmt.Errorf("wake owner authority is unavailable while refusal persistence is pending")
+		}
+		if currentLock.PID != os.Getpid() ||
 			currentLock.Lock.Generation != cfg.terminalGeneration ||
-			cfg.wakeOwner == nil || currentLock.Lock.ResumeOwner == nil ||
+			currentLock.Lock.ResumeOwner == nil ||
 			!sameWakeOwner(cfg.wakeOwner, currentLock.Lock.ResumeOwner) {
 			resolved = true
 			return nil
@@ -906,6 +919,7 @@ func retryWakeSelfUpgradeRefusal(
 		}
 		if !exists || !sameWakeRestartAttemptIdentity(pending.Record, current) {
 			resolved = true
+			continueObservation = true
 			return nil
 		}
 		if current.Status == wakeRestartRefused {
@@ -915,6 +929,7 @@ func retryWakeSelfUpgradeRefusal(
 		}
 		if current.Status != wakeRestartPending {
 			resolved = true
+			continueObservation = true
 			return nil
 		}
 
@@ -939,6 +954,7 @@ func retryWakeSelfUpgradeRefusal(
 		}
 		if !installedExists || !sameWakeRestartAttemptIdentity(pending.Record, installed) {
 			resolved = true
+			continueObservation = true
 			return nil
 		}
 		if installed.Status == wakeRestartRefused {
@@ -948,7 +964,7 @@ func retryWakeSelfUpgradeRefusal(
 		}
 		return persistErr
 	})
-	return resolved, persisted, returnErr
+	return resolved, persisted, continueObservation, returnErr
 }
 
 func refuseWakeRestartCreatorSnapshot(
@@ -1329,7 +1345,8 @@ func pendingWakeRestartForProcess(
 		if err != nil || !exists {
 			return err
 		}
-		if record.Status != wakeRestartPending || record.Root != root || record.Agent != me ||
+		if record.Schema != wakeRestartSchemaV1 || record.SuccessorGeneration != "" ||
+			record.Status != wakeRestartPending || record.Root != root || record.Agent != me ||
 			record.Generation != expectedGeneration || owner == nil || !sameWakeOwner(owner, &record.Owner) ||
 			!sameOptionalWakeImageEvidence(
 				record.PreviousBoundImage,
@@ -1340,6 +1357,45 @@ func pendingWakeRestartForProcess(
 		return nil
 	})
 	return record, exists, err
+}
+
+func pendingWakeSelfUpgradeForProcess(
+	cfg *wakeConfig,
+	agentDir *wakeAgentDir,
+) (wakeRestartRecord, bool, error) {
+	root := canonicalWakeRoot(cfg.root)
+	var record wakeRestartRecord
+	var adopt bool
+	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		current, exists, err := readWakeRestartRecordAt(dirfd, agentDir)
+		if err != nil || !exists {
+			return err
+		}
+		if current.Schema != wakeRestartSchemaV1 || current.Status != wakeRestartPending ||
+			current.Source != wakeRestartSourceSelf || current.Root != root ||
+			current.Agent != cfg.me || current.Generation != cfg.terminalGeneration ||
+			cfg.wakeOwner == nil || !sameWakeOwner(cfg.wakeOwner, &current.Owner) {
+			return nil
+		}
+		incumbent := wakeSelfUpgradeInspectLockAt(dirfd, agentDir, root, cfg.me)
+		if !incumbent.Exists || incumbent.Status != wakeLockValid ||
+			!incumbent.IdentityConfirmed || incumbent.PID != os.Getpid() ||
+			incumbent.Lock.Generation != cfg.terminalGeneration ||
+			incumbent.Lock.ResumeOwner == nil ||
+			!sameWakeOwner(cfg.wakeOwner, incumbent.Lock.ResumeOwner) {
+			return fmt.Errorf("wake self-upgrade incumbent changed before pending-record reconciliation")
+		}
+		if !sameOptionalWakeImageEvidence(
+			current.PreviousBoundImage,
+			previousDarwinWakeRestartStageForLock(incumbent.Lock),
+		) {
+			return nil
+		}
+		record = current
+		adopt = true
+		return nil
+	})
+	return record, adopt, err
 }
 
 func classifyWakeRestartAtLoopBoundary(
@@ -1420,7 +1476,11 @@ func handleWakeRestartAtLoopBoundary(
 		return
 	}
 	if pending := cfg.selfUpgrade.refusalPending; pending != nil {
-		resolved, persisted, retryErr := retryWakeSelfUpgradeRefusal(cfg, agentDir, *pending)
+		resolved, persisted, continueObservation, retryErr := retryWakeSelfUpgradeRefusal(
+			cfg,
+			agentDir,
+			*pending,
+		)
 		if resolved {
 			cfg.selfUpgrade.refusalPending = nil
 			cfg.selfUpgrade.restartPending = false
@@ -1445,7 +1505,7 @@ func handleWakeRestartAtLoopBoundary(
 				},
 			)
 		}
-		if persisted || !resolved {
+		if persisted || !resolved || !continueObservation {
 			return
 		}
 		// A conclusively replaced or removed record retires the old refusal debt.
@@ -1535,6 +1595,13 @@ func maintainWakeSelfUpgradeAtLoopBoundary(
 	terminalRetry, scanRetry bool,
 ) error {
 	if cfg.selfUpgrade.refusalPending != nil {
+		handleWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
+		return nil
+	}
+	if _, exists, pendingErr := pendingWakeSelfUpgradeForProcess(cfg, agentDir); pendingErr != nil {
+		return pendingErr
+	} else if exists {
+		cfg.selfUpgrade.restartPending = true
 		handleWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
 		return nil
 	}

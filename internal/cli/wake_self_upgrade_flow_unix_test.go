@@ -213,76 +213,143 @@ func TestWakeSelfUpgradePostPublicationQuiescenceRaceDefersPendingRecord(t *test
 }
 
 func TestWakeSelfUpgradePostWriteReadFailureAdoptsPersistedRecord(t *testing.T) {
-	fixture := newWakeRestartFixture(t)
-	removeWakeRestartRecordForTest(t, fixture)
-	candidate := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
-	state := selfUpgradeStateForCandidate(t, candidate)
-	stubWakeSelfUpgradeVersion(t, "0.57.0")
-
-	bindCalls := 0
-	previousBind := wakeRestartBind
-	wakeRestartBind = func(wakeRestartRecord) (*wakeRestartBoundImage, error) {
-		bindCalls++
-		return nil, errors.New("test bind refusal")
-	}
-	previousReadPublished := wakeSelfUpgradeReadPublished
-	wakeSelfUpgradeReadPublished = func(int, *wakeAgentDir) (wakeRestartRecord, bool, error) {
-		return wakeRestartRecord{}, false, errors.New("test post-write read failure")
-	}
-	t.Cleanup(func() {
-		wakeRestartBind = previousBind
-		wakeSelfUpgradeReadPublished = previousReadPublished
-	})
-
-	cfg := wakeConfig{
-		me:                   fixture.agent,
-		root:                 fixture.root,
-		injectMode:           wakeInjectModeNone,
-		wakeOwner:            &fixture.owner,
-		terminalGeneration:   fixture.lock.Lock.Generation,
-		terminalImageVersion: fixture.lock.Lock.ImageVersion,
-		retainedAgent:        fixture.agentDir,
-		retainedInbox:        fixture.inboxDir,
-		selfUpgrade:          state,
-		inspectTerminalGeneration: func() wakeLockInspection {
-			return inspectWakeLock(fixture.root, fixture.agent)
+	tests := []struct {
+		name          string
+		changeLocator func(*testing.T, string)
+		deferOnce     bool
+	}{
+		{
+			name: "locator replaced",
+			changeLocator: func(t *testing.T, locator string) {
+				replacement := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "replacement")
+				replaceWakeSelfUpgradeLocator(t, locator, replacement)
+			},
 		},
-		restartSignals: make(chan os.Signal, 1),
+		{
+			name: "locator missing across quiescence deferral",
+			changeLocator: func(t *testing.T, locator string) {
+				if err := os.Remove(locator); err != nil {
+					t.Fatal(err)
+				}
+			},
+			deferOnce: true,
+		},
 	}
-	watcher := fixedWakeAdmissionWatcher{errors: make(chan error)}
-	if err := maintainWakeSelfUpgradeAtLoopBoundary(
-		&cfg,
-		fixture.agentDir,
-		watcher,
-		false,
-		false,
-	); err == nil {
-		t.Fatal("post-write read failure was not reported")
-	}
-	if bindCalls != 0 || cfg.selfUpgrade.restartPending {
-		t.Fatalf("failed publication handled early: binds=%d pending=%v", bindCalls, cfg.selfUpgrade.restartPending)
-	}
-	assertWakeSelfUpgradeRecordStatus(t, fixture, wakeRestartPending)
 
-	wakeSelfUpgradeReadPublished = previousReadPublished
-	if err := maintainWakeSelfUpgradeAtLoopBoundary(
-		&cfg,
-		fixture.agentDir,
-		watcher,
-		false,
-		false,
-	); err != nil {
-		t.Fatal(err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newWakeRestartFixture(t)
+			removeWakeRestartRecordForTest(t, fixture)
+			candidate := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
+			state := selfUpgradeStateForCandidate(t, candidate)
+			stubWakeSelfUpgradeVersion(t, "0.57.0")
+
+			bindCalls := 0
+			var boundRecord wakeRestartRecord
+			previousBind := wakeRestartBind
+			wakeRestartBind = func(record wakeRestartRecord) (*wakeRestartBoundImage, error) {
+				bindCalls++
+				boundRecord = record
+				return nil, errors.New("test bind refusal")
+			}
+			previousReadPublished := wakeSelfUpgradeReadPublished
+			wakeSelfUpgradeReadPublished = func(int, *wakeAgentDir) (wakeRestartRecord, bool, error) {
+				return wakeRestartRecord{}, false, errors.New("test post-write read failure")
+			}
+			t.Cleanup(func() {
+				wakeRestartBind = previousBind
+				wakeSelfUpgradeReadPublished = previousReadPublished
+			})
+
+			cfg := wakeConfig{
+				me:                   fixture.agent,
+				root:                 fixture.root,
+				injectMode:           wakeInjectModeNone,
+				wakeOwner:            &fixture.owner,
+				terminalGeneration:   fixture.lock.Lock.Generation,
+				terminalImageVersion: fixture.lock.Lock.ImageVersion,
+				retainedAgent:        fixture.agentDir,
+				retainedInbox:        fixture.inboxDir,
+				selfUpgrade:          state,
+				inspectTerminalGeneration: func() wakeLockInspection {
+					return inspectWakeLock(fixture.root, fixture.agent)
+				},
+				restartSignals: make(chan os.Signal, 1),
+			}
+			watcher := fixedWakeAdmissionWatcher{errors: make(chan error)}
+			if err := maintainWakeSelfUpgradeAtLoopBoundary(
+				&cfg,
+				fixture.agentDir,
+				watcher,
+				false,
+				false,
+			); err == nil {
+				t.Fatal("post-write read failure was not reported")
+			}
+			if bindCalls != 0 || cfg.selfUpgrade.restartPending {
+				t.Fatalf(
+					"failed publication handled early: binds=%d pending=%v",
+					bindCalls,
+					cfg.selfUpgrade.restartPending,
+				)
+			}
+			assertWakeSelfUpgradeRecordStatus(t, fixture, wakeRestartPending)
+			published := readWakeSelfUpgradeRestartRecord(t, fixture)
+			test.changeLocator(t, cfg.selfUpgrade.Locator)
+			wakeSelfUpgradeReadPublished = previousReadPublished
+
+			if test.deferOnce {
+				cfg.inputDelivery = wakeInputDeliveryState{
+					phase:         wakeInputPrimarySubmitPending,
+					acceptedBytes: 1,
+				}
+				if err := maintainWakeSelfUpgradeAtLoopBoundary(
+					&cfg,
+					fixture.agentDir,
+					watcher,
+					false,
+					false,
+				); err != nil {
+					t.Fatal(err)
+				}
+				if bindCalls != 0 || !cfg.selfUpgrade.restartPending {
+					t.Fatalf(
+						"deferred adoption = binds=%d pending=%v",
+						bindCalls,
+						cfg.selfUpgrade.restartPending,
+					)
+				}
+				assertWakeSelfUpgradeRecordStatus(t, fixture, wakeRestartPending)
+				cfg.inputDelivery.reset()
+			}
+
+			if err := maintainWakeSelfUpgradeAtLoopBoundary(
+				&cfg,
+				fixture.agentDir,
+				watcher,
+				false,
+				false,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if bindCalls != 1 || cfg.selfUpgrade.restartPending || cfg.selfUpgrade.refusalPending != nil {
+				t.Fatalf(
+					"adopted publication = binds=%d pending=%v refusal=%#v",
+					bindCalls,
+					cfg.selfUpgrade.restartPending,
+					cfg.selfUpgrade.refusalPending,
+				)
+			}
+			if !sameWakeSelfUpgradeCandidateIdentity(boundRecord.Candidate, published.Candidate) {
+				t.Fatalf(
+					"bound candidate=%#v, want published candidate %#v",
+					boundRecord.Candidate,
+					published.Candidate,
+				)
+			}
+			assertWakeSelfUpgradeRecordStatus(t, fixture, wakeRestartRefused)
+		})
 	}
-	if bindCalls != 1 || cfg.selfUpgrade.restartPending || cfg.selfUpgrade.refusalPending != nil {
-		t.Fatalf(
-			"adopted publication = binds=%d pending=%v refusal=%#v",
-			bindCalls,
-			cfg.selfUpgrade.restartPending,
-			cfg.selfUpgrade.refusalPending,
-		)
-	}
-	assertWakeSelfUpgradeRecordStatus(t, fixture, wakeRestartRefused)
 }
 
 func TestPublishWakeSelfUpgradePendingAdoptsOnlyExactSelfRecord(t *testing.T) {
@@ -399,6 +466,206 @@ func TestPublishWakeSelfUpgradePendingAdoptsOnlyExactSelfRecord(t *testing.T) {
 	}
 }
 
+func TestPendingWakeSelfUpgradeForProcessAdoptsOnlyExactAuthority(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*testing.T, *wakeRestartRecord)
+		inspect    func(wakeRestartFixture) wakeLockInspection
+		noOwner    bool
+		wantAdopt  bool
+		wantErrSub string
+	}{
+		{name: "exact self pending", wantAdopt: true},
+		{
+			name: "foreign pending",
+			mutate: func(_ *testing.T, record *wakeRestartRecord) {
+				record.Source = wakeRestartSourceForeign
+			},
+		},
+		{
+			name: "claimed successor",
+			mutate: func(_ *testing.T, record *wakeRestartRecord) {
+				record.Schema = wakeRestartSchemaV2
+				record.SuccessorGeneration = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			},
+		},
+		{
+			name: "refused",
+			mutate: func(_ *testing.T, record *wakeRestartRecord) {
+				record.Status = wakeRestartRefused
+				record.Reason = "test refusal"
+			},
+		},
+		{
+			name: "different root",
+			mutate: func(_ *testing.T, record *wakeRestartRecord) {
+				record.Root += "-other"
+			},
+		},
+		{
+			name: "different agent",
+			mutate: func(_ *testing.T, record *wakeRestartRecord) {
+				record.Agent = "claude"
+			},
+		},
+		{
+			name: "different generation",
+			mutate: func(_ *testing.T, record *wakeRestartRecord) {
+				record.Generation = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			},
+		},
+		{
+			name: "different owner",
+			mutate: func(_ *testing.T, record *wakeRestartRecord) {
+				record.Owner.SessionID++
+			},
+		},
+		{
+			name: "different incumbent pid",
+			inspect: func(fixture wakeRestartFixture) wakeLockInspection {
+				lock := fixture.lock
+				lock.PID++
+				lock.Lock.PID = lock.PID
+				return lock
+			},
+			wantErrSub: "incumbent changed",
+		},
+		{
+			name: "different incumbent generation",
+			inspect: func(fixture wakeRestartFixture) wakeLockInspection {
+				lock := fixture.lock
+				lock.Lock.Generation = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+				return lock
+			},
+			wantErrSub: "incumbent changed",
+		},
+		{
+			name: "different incumbent resume owner",
+			inspect: func(fixture wakeRestartFixture) wakeLockInspection {
+				lock := fixture.lock
+				owner := fixture.owner
+				owner.SessionID++
+				lock.Lock.ResumeOwner = &owner
+				return lock
+			},
+			wantErrSub: "incumbent changed",
+		},
+		{
+			name: "missing incumbent resume owner",
+			inspect: func(fixture wakeRestartFixture) wakeLockInspection {
+				lock := fixture.lock
+				lock.Lock.ResumeOwner = nil
+				return lock
+			},
+			wantErrSub: "incumbent changed",
+		},
+		{
+			name:    "owner unavailable",
+			noOwner: true,
+		},
+		{
+			name: "unverified incumbent",
+			inspect: func(fixture wakeRestartFixture) wakeLockInspection {
+				return wakeLockInspection{
+					Exists: true,
+					Status: wakeLockUnverified,
+					Reason: "test transient lock read failure",
+					Root:   fixture.root,
+					Agent:  fixture.agent,
+				}
+			},
+			wantErrSub: "incumbent changed",
+		},
+	}
+	if runtime.GOOS == "darwin" {
+		tests = append(tests, struct {
+			name       string
+			mutate     func(*testing.T, *wakeRestartRecord)
+			inspect    func(wakeRestartFixture) wakeLockInspection
+			noOwner    bool
+			wantAdopt  bool
+			wantErrSub string
+		}{
+			name: "different previous bound image",
+			mutate: func(t *testing.T, record *wakeRestartRecord) {
+				previous := record.Candidate
+				stagePath, err := planWakeRestartStagePlatform(
+					previous,
+					"cccccccccccccccccccccccccccccccc",
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				previous.ExecutionPath = stagePath
+				previous.Method = wakeImageMethodPathnameExecObserved
+				record.PreviousBoundImage = &previous
+			},
+		})
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newWakeRestartFixture(t)
+			record := fixture.record
+			record.Source = wakeRestartSourceSelf
+			record.Status = wakeRestartPending
+			if test.mutate != nil {
+				test.mutate(t, &record)
+			}
+			writeWakeCheckSelfUpgradeRestartRecord(t, fixture, record)
+			recordPath := filepath.Join(fixture.agentDir.path, wakeRestartFileName)
+			before, err := os.ReadFile(recordPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			previousInspectLockAt := wakeSelfUpgradeInspectLockAt
+			if test.inspect != nil {
+				wakeSelfUpgradeInspectLockAt = func(
+					int,
+					*wakeAgentDir,
+					string,
+					string,
+				) wakeLockInspection {
+					return test.inspect(fixture)
+				}
+			}
+			t.Cleanup(func() { wakeSelfUpgradeInspectLockAt = previousInspectLockAt })
+
+			owner := &fixture.owner
+			if test.noOwner {
+				owner = nil
+			}
+			cfg := wakeConfig{
+				me:                 fixture.agent,
+				root:               fixture.root,
+				wakeOwner:          owner,
+				terminalGeneration: fixture.lock.Lock.Generation,
+			}
+			adoptedRecord, adopted, err := pendingWakeSelfUpgradeForProcess(&cfg, fixture.agentDir)
+			if test.wantErrSub == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.wantErrSub != "" && (err == nil || !strings.Contains(err.Error(), test.wantErrSub)) {
+				t.Fatalf("error=%v, want substring %q", err, test.wantErrSub)
+			}
+			if adopted != test.wantAdopt {
+				t.Fatalf("adopted=%v, want %v", adopted, test.wantAdopt)
+			}
+			if adopted && !sameWakeRestartAttemptIdentity(record, adoptedRecord) {
+				t.Fatalf("adopted record=%#v, want %#v", adoptedRecord, record)
+			}
+			after, err := os.ReadFile(recordPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Fatal("authority reconciliation mutated the restart record")
+			}
+		})
+	}
+}
+
 func TestWakeSelfUpgradePreInstallPublicationFailureRetriesCandidate(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	removeWakeRestartRecordForTest(t, fixture)
@@ -483,6 +750,7 @@ func TestWakeSelfUpgradeRefusalWriteFailureNeverReexecutes(t *testing.T) {
 	bindCalls := 0
 	previousBind := wakeRestartBind
 	previousSync := syncWakeOwnerDirFD
+	previousInspectLockAt := wakeSelfUpgradeInspectLockAt
 	failNextSync := false
 	wakeRestartBind = func(wakeRestartRecord) (*wakeRestartBoundImage, error) {
 		bindCalls++
@@ -499,6 +767,7 @@ func TestWakeSelfUpgradeRefusalWriteFailureNeverReexecutes(t *testing.T) {
 	t.Cleanup(func() {
 		wakeRestartBind = previousBind
 		syncWakeOwnerDirFD = previousSync
+		wakeSelfUpgradeInspectLockAt = previousInspectLockAt
 	})
 
 	cfg := wakeConfig{
@@ -524,6 +793,43 @@ func TestWakeSelfUpgradeRefusalWriteFailureNeverReexecutes(t *testing.T) {
 	handleWakeRestartAtLoopBoundary(&cfg, watcher, false, false)
 	if bindCalls != 1 || cfg.selfUpgrade.refusalPending == nil {
 		t.Fatalf("first refusal = binds=%d debt=%#v", bindCalls, cfg.selfUpgrade.refusalPending)
+	}
+	assertWakeSelfUpgradeRecordStatus(t, fixture, wakeRestartPending)
+	assertWakeSelfUpgradeDiagnosticAction(t, fixture, wakeSelfUpgradeActionRefusalPending)
+
+	transientLockRead := true
+	wakeSelfUpgradeInspectLockAt = func(
+		dirfd int,
+		agentDir *wakeAgentDir,
+		root, me string,
+	) wakeLockInspection {
+		if transientLockRead {
+			transientLockRead = false
+			return wakeLockInspection{
+				Exists:         true,
+				Status:         wakeLockUnverified,
+				Reason:         "test transient lock read failure",
+				observationErr: errors.New("test transient lock read failure"),
+			}
+		}
+		return previousInspectLockAt(dirfd, agentDir, root, me)
+	}
+	if err := maintainWakeSelfUpgradeAtLoopBoundary(
+		&cfg,
+		fixture.agentDir,
+		watcher,
+		false,
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if bindCalls != 1 || cfg.selfUpgrade.refusalPending == nil || !cfg.selfUpgrade.restartPending {
+		t.Fatalf(
+			"inconclusive lock retry = binds=%d debt=%#v pending=%v",
+			bindCalls,
+			cfg.selfUpgrade.refusalPending,
+			cfg.selfUpgrade.restartPending,
+		)
 	}
 	assertWakeSelfUpgradeRecordStatus(t, fixture, wakeRestartPending)
 	assertWakeSelfUpgradeDiagnosticAction(t, fixture, wakeSelfUpgradeActionRefusalPending)
@@ -562,6 +868,106 @@ func TestWakeSelfUpgradeRefusalWriteFailureNeverReexecutes(t *testing.T) {
 	}
 	assertWakeSelfUpgradeRecordStatus(t, fixture, wakeRestartRefused)
 	assertWakeSelfUpgradeDiagnosticAction(t, fixture, wakeSelfUpgradeActionRefused)
+}
+
+func TestWakeSelfUpgradeAuthorityLossConsumesDebtWithoutReexecution(t *testing.T) {
+	tests := []struct {
+		name       string
+		inspection func(wakeRestartFixture) wakeLockInspection
+	}{
+		{
+			name: "changed resume owner",
+			inspection: func(fixture wakeRestartFixture) wakeLockInspection {
+				lock := fixture.lock
+				changedOwner := fixture.owner
+				changedOwner.SessionID++
+				lock.Lock.ResumeOwner = &changedOwner
+				lock.IdentityConfirmed = true
+				return lock
+			},
+		},
+		{
+			name: "stale lock",
+			inspection: func(fixture wakeRestartFixture) wakeLockInspection {
+				return wakeLockInspection{
+					Exists: true,
+					Status: wakeLockStale,
+					Reason: "pid not running",
+					Root:   fixture.root,
+					Agent:  fixture.agent,
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newWakeRestartFixture(t)
+			record := fixture.record
+			record.Source = wakeRestartSourceSelf
+			record.Status = wakeRestartPending
+			writeWakeCheckSelfUpgradeRestartRecord(t, fixture, record)
+
+			bindCalls := 0
+			previousBind := wakeRestartBind
+			wakeRestartBind = func(wakeRestartRecord) (*wakeRestartBoundImage, error) {
+				bindCalls++
+				return nil, errors.New("old refusal debt was re-executed")
+			}
+			previousInspectLockAt := wakeSelfUpgradeInspectLockAt
+			wakeSelfUpgradeInspectLockAt = func(
+				int,
+				*wakeAgentDir,
+				string,
+				string,
+			) wakeLockInspection {
+				return test.inspection(fixture)
+			}
+			t.Cleanup(func() {
+				wakeRestartBind = previousBind
+				wakeSelfUpgradeInspectLockAt = previousInspectLockAt
+			})
+
+			cfg := wakeConfig{
+				me:                   fixture.agent,
+				root:                 fixture.root,
+				injectMode:           wakeInjectModeNone,
+				wakeOwner:            &fixture.owner,
+				terminalGeneration:   fixture.lock.Lock.Generation,
+				terminalImageVersion: fixture.lock.Lock.ImageVersion,
+				retainedAgent:        fixture.agentDir,
+				retainedInbox:        fixture.inboxDir,
+				selfUpgrade: wakeSelfUpgradeState{
+					Enabled:        true,
+					Eligible:       true,
+					restartPending: true,
+					refusalPending: &wakeSelfUpgradeRefusalPending{
+						Record: record,
+						Reason: "test refusal debt",
+					},
+				},
+				inspectTerminalGeneration: func() wakeLockInspection {
+					return inspectWakeLock(fixture.root, fixture.agent)
+				},
+				restartSignals: make(chan os.Signal, 1),
+			}
+			handleWakeRestartAtLoopBoundary(
+				&cfg,
+				fixedWakeAdmissionWatcher{errors: make(chan error)},
+				false,
+				false,
+			)
+			if bindCalls != 0 || cfg.selfUpgrade.refusalPending != nil || cfg.selfUpgrade.restartPending {
+				t.Fatalf(
+					"authority loss = binds=%d debt=%#v pending=%v",
+					bindCalls,
+					cfg.selfUpgrade.refusalPending,
+					cfg.selfUpgrade.restartPending,
+				)
+			}
+			assertWakeSelfUpgradeRecordStatus(t, fixture, wakeRestartPending)
+		})
+	}
 }
 
 func TestWakeSelfUpgradePostRenameRefusalErrorObservesInstalledRefusal(t *testing.T) {
@@ -804,6 +1210,76 @@ func TestWakeSelfUpgradeChangedRecordConsumesDebtThenHandlesReplacement(t *testi
 	if installed.RequestID != replacement.RequestID ||
 		installed.Source != wakeRestartSourceForeign || installed.Status != wakeRestartRefused {
 		t.Fatalf("replacement record=%#v", installed)
+	}
+}
+
+func TestWakeSelfUpgradeChangedRecordDoesNotExecuteClaimedSuccessor(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	debtRecord := fixture.record
+	debtRecord.Source = wakeRestartSourceSelf
+
+	replacement := debtRecord
+	replacement.RequestID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	replacement.Schema = wakeRestartSchemaV2
+	replacement.SuccessorGeneration = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	writeWakeCheckSelfUpgradeRestartRecord(t, fixture, replacement)
+	recordPath := filepath.Join(fixture.agentDir.path, wakeRestartFileName)
+	before, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bindCalls := 0
+	previousBind := wakeRestartBind
+	wakeRestartBind = func(wakeRestartRecord) (*wakeRestartBoundImage, error) {
+		bindCalls++
+		return nil, errors.New("claimed successor was re-executed")
+	}
+	t.Cleanup(func() { wakeRestartBind = previousBind })
+
+	cfg := wakeConfig{
+		me:                   fixture.agent,
+		root:                 fixture.root,
+		injectMode:           wakeInjectModeNone,
+		wakeOwner:            &fixture.owner,
+		terminalGeneration:   fixture.lock.Lock.Generation,
+		terminalImageVersion: fixture.lock.Lock.ImageVersion,
+		retainedAgent:        fixture.agentDir,
+		retainedInbox:        fixture.inboxDir,
+		selfUpgrade: wakeSelfUpgradeState{
+			Enabled:        true,
+			Eligible:       true,
+			restartPending: true,
+			refusalPending: &wakeSelfUpgradeRefusalPending{
+				Record: debtRecord,
+				Reason: "retired self-upgrade attempt",
+			},
+		},
+		inspectTerminalGeneration: func() wakeLockInspection {
+			return inspectWakeLock(fixture.root, fixture.agent)
+		},
+		restartSignals: make(chan os.Signal, 1),
+	}
+	handleWakeRestartAtLoopBoundary(
+		&cfg,
+		fixedWakeAdmissionWatcher{errors: make(chan error)},
+		false,
+		false,
+	)
+	if bindCalls != 0 || cfg.selfUpgrade.refusalPending != nil || cfg.selfUpgrade.restartPending {
+		t.Fatalf(
+			"claimed successor handling = binds=%d debt=%#v pending=%v",
+			bindCalls,
+			cfg.selfUpgrade.refusalPending,
+			cfg.selfUpgrade.restartPending,
+		)
+	}
+	after, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("claimed successor record was mutated")
 	}
 }
 
