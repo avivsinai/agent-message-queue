@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.59.1](https://github.com/avivsinai/agent-message-queue/compare/v0.59.0...v0.59.1) (2026-08-07)
+
+
+### Bug Fixes
+
+* **keepalive:** isolate degraded cmux ownership ([#473](https://github.com/avivsinai/agent-message-queue/issues/473)) ([38933f8](https://github.com/avivsinai/agent-message-queue/commit/38933f87661e5e2a5c07076b11fa50dc69828cb7))
+* **wake:** recover stalled self-upgrades ([#474](https://github.com/avivsinai/agent-message-queue/issues/474)) ([6f894a7](https://github.com/avivsinai/agent-message-queue/commit/6f894a7e39c01c8d065bc31e13eacdb5817098f1))
+
 ## [0.59.0](https://github.com/avivsinai/agent-message-queue/compare/v0.58.0...v0.59.0) (2026-08-07)
 
 
