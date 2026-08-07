@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.56.0](https://github.com/avivsinai/agent-message-queue/compare/v0.55.0...v0.56.0) (2026-08-07)
+
+
+### Features
+
+* **wake:** derive Darwin mapped image identity ([#454](https://github.com/avivsinai/agent-message-queue/issues/454)) ([bd23d70](https://github.com/avivsinai/agent-message-queue/commit/bd23d70288618d31987e7173068951d93232ba65))
+
+
+### Dependencies
+
+* bump actions/attest from 4.2.0 to 4.2.1 ([#455](https://github.com/avivsinai/agent-message-queue/issues/455)) ([edcede7](https://github.com/avivsinai/agent-message-queue/commit/edcede77ed9ebea215251c3caec5cce6a65c6495))
+
 ## [0.55.0](https://github.com/avivsinai/agent-message-queue/compare/v0.54.0...v0.55.0) (2026-08-06)
 
 
