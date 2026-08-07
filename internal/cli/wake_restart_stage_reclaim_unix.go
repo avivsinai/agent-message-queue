@@ -13,7 +13,7 @@ func reclaimWakeRestartStateForGuardedLockRemoval(inspection wakeLockInspection)
 	}
 	defer func() { _ = agentDir.Close() }()
 	return agentDir.withFD(func(dirfd int) error {
-		current := inspectWakeLockAt(
+		current := readWakeLockMetadataAt(
 			dirfd,
 			agentDir,
 			inspection.Root,
@@ -22,7 +22,7 @@ func reclaimWakeRestartStateForGuardedLockRemoval(inspection wakeLockInspection)
 		if !sameWakeLockGeneration(inspection, current) {
 			return fmt.Errorf("wake lock changed before restart-state reconciliation")
 		}
-		return reclaimWakeRestartStateForLockRemovalAt(dirfd, agentDir, current)
+		return reclaimWakeRestartStateForLockRemovalAt(dirfd, agentDir, inspection)
 	})
 }
 
