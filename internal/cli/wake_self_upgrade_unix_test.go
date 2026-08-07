@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -422,6 +423,314 @@ func TestMaintainWakeSelfUpgradeRefusedMemorySurvivesTicks(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("refused memory did not survive ticks: %v", err)
+	}
+}
+
+func TestPublishWakeSelfUpgradePendingCarriesLegacyRefusalMemory(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+	dir := t.TempDir()
+	pathA := writeWakeSelfUpgradeCandidate(t, dir, "candidate-a")
+	pathB := writeWakeSelfUpgradeCandidate(t, dir, "candidate-b")
+	evidenceA, err := captureWakeImageEvidence(pathA, "9.9.9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceB, err := captureWakeImageEvidence(pathB, "9.9.9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := wakeRestartRecord{
+		Schema:     wakeRestartSchemaV1,
+		Source:     wakeRestartSourceSelf,
+		RequestID:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Status:     wakeRestartRefused,
+		Root:       fixture.root,
+		Agent:      fixture.agent,
+		Generation: fixture.lock.Lock.Generation,
+		Owner:      fixture.owner,
+		Candidate:  evidenceA,
+		Reason:     "legacy refusal",
+	}
+	if err := fixture.agentDir.withFD(func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, legacy)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	quarantineCount := func() int {
+		t.Helper()
+		paths, err := filepath.Glob(filepath.Join(
+			fixture.agentDir.path,
+			wakeRestartFileName+".quarantined.*",
+		))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(paths)
+	}
+
+	sameA := legacy
+	sameA.RequestID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	sameA.Status = wakeRestartPending
+	sameA.Reason = ""
+	decision, err := publishWakeSelfUpgradePending(
+		fixture.agentDir,
+		fixture.lock,
+		sameA,
+		wakeSelfUpgradeDecision{},
+	)
+	if err != nil || decision.Action != wakeSelfUpgradeActionRefusedMemory {
+		t.Fatalf("legacy same-A decision=%#v err=%v", decision, err)
+	}
+	if got := quarantineCount(); got != 0 {
+		t.Fatalf("legacy same-A quarantine count=%d, want 0", got)
+	}
+	if got := readWakeSelfUpgradeRestartRecord(t, fixture); !sameWakeRestartRecord(got, legacy) {
+		t.Fatalf("legacy same-A changed active record: got=%#v want=%#v", got, legacy)
+	}
+
+	pendingB := sameA
+	pendingB.RequestID = "cccccccccccccccccccccccccccccccc"
+	pendingB.Candidate = evidenceB
+	decision, err = publishWakeSelfUpgradePending(
+		fixture.agentDir,
+		fixture.lock,
+		pendingB,
+		wakeSelfUpgradeDecision{},
+	)
+	if err != nil || decision.Action != wakeSelfUpgradeActionPending {
+		t.Fatalf("legacy A to B decision=%#v err=%v", decision, err)
+	}
+	installedB := readWakeSelfUpgradeRestartRecord(t, fixture)
+	if installedB.Status != wakeRestartPending || len(installedB.RefusedCandidates) != 1 ||
+		!wakeSelfUpgradeRefusedCandidatesContain(installedB.RefusedCandidates, evidenceA) ||
+		wakeSelfUpgradeRefusedCandidatesContain(installedB.RefusedCandidates, evidenceB) {
+		t.Fatalf("carried legacy refusal memory = %#v", installedB)
+	}
+	if got := quarantineCount(); got != 0 {
+		t.Fatalf("same-scope legacy A to B quarantine count=%d, want 0", got)
+	}
+	if err := refuseWakeRestartRecord(fixture.agentDir, installedB, "B failed"); err != nil {
+		t.Fatal(err)
+	}
+	refusedB := readWakeSelfUpgradeRestartRecord(t, fixture)
+	if len(refusedB.RefusedCandidates) != 2 ||
+		!wakeSelfUpgradeRefusedCandidatesContain(refusedB.RefusedCandidates, evidenceA) ||
+		!wakeSelfUpgradeRefusedCandidatesContain(refusedB.RefusedCandidates, evidenceB) {
+		t.Fatalf("B refusal memory = %#v", refusedB)
+	}
+}
+
+func TestPublishWakeSelfUpgradePendingResetsRefusalsForNewGeneration(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+	path := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate-a")
+	evidence, err := captureWakeImageEvidence(path, "9.9.9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := wakeRestartRecord{
+		Schema:     wakeRestartSchemaV1,
+		Source:     wakeRestartSourceSelf,
+		RequestID:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Status:     wakeRestartRefused,
+		Root:       fixture.root,
+		Agent:      fixture.agent,
+		Generation: fixture.lock.Lock.Generation,
+		Owner:      fixture.owner,
+		Candidate:  evidence,
+		RefusedCandidates: []wakeSelfUpgradeRefusedCandidate{
+			wakeSelfUpgradeRefusedCandidateFromEvidence(evidence),
+		},
+		Reason: "old generation refusal",
+	}
+	if err := fixture.agentDir.withFD(func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, old)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	nextLock := fixture.lock.Lock
+	nextLock.Generation = "dddddddddddddddddddddddddddddddd"
+	writeWakeLockForTest(t, fixture.root, fixture.agent, nextLock)
+	nextInspection := inspectWakeLock(fixture.root, fixture.agent)
+	if !nextInspection.IdentityConfirmed || nextInspection.Lock.Generation != nextLock.Generation {
+		t.Fatalf("next-generation lock = %#v", nextInspection)
+	}
+	next := wakeRestartRecord{
+		Schema:     wakeRestartSchemaV1,
+		Source:     wakeRestartSourceSelf,
+		RequestID:  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		Status:     wakeRestartPending,
+		Root:       fixture.root,
+		Agent:      fixture.agent,
+		Generation: nextLock.Generation,
+		Owner:      fixture.owner,
+		Candidate:  evidence,
+	}
+	decision, err := publishWakeSelfUpgradePending(
+		fixture.agentDir,
+		nextInspection,
+		next,
+		wakeSelfUpgradeDecision{},
+	)
+	if err != nil || decision.Action != wakeSelfUpgradeActionPending {
+		t.Fatalf("new-generation decision=%#v err=%v", decision, err)
+	}
+	installed := readWakeSelfUpgradeRestartRecord(t, fixture)
+	if installed.Generation != nextLock.Generation || len(installed.RefusedCandidates) != 0 {
+		t.Fatalf("new generation inherited refusal memory: %#v", installed)
+	}
+}
+
+func TestSameWakeSelfUpgradeRefusalScope(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	record := fixture.record
+	record.Source = wakeRestartSourceSelf
+	record.Status = wakeRestartRefused
+	record.Reason = "candidate refused"
+	record.PreviousBoundImage = previousDarwinWakeRestartStageForLock(fixture.lock.Lock)
+
+	if !sameWakeSelfUpgradeRefusalScope(record, fixture.lock) {
+		t.Fatal("matching refusal scope was rejected")
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*wakeRestartRecord)
+	}{
+		{name: "root", mutate: func(record *wakeRestartRecord) { record.Root += "-other" }},
+		{name: "agent", mutate: func(record *wakeRestartRecord) { record.Agent = "claude" }},
+		{name: "generation", mutate: func(record *wakeRestartRecord) { record.Generation = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }},
+		{name: "owner", mutate: func(record *wakeRestartRecord) { record.Owner.SessionID++ }},
+		{name: "previous bound image", mutate: func(record *wakeRestartRecord) {
+			if record.PreviousBoundImage == nil {
+				changed := fixture.candidate
+				record.PreviousBoundImage = &changed
+				return
+			}
+			changed := *record.PreviousBoundImage
+			changed.Inode++
+			record.PreviousBoundImage = &changed
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mismatched := record
+			test.mutate(&mismatched)
+			if sameWakeSelfUpgradeRefusalScope(mismatched, fixture.lock) {
+				t.Fatal("mismatched refusal scope was accepted")
+			}
+		})
+	}
+}
+
+func TestRememberWakeSelfUpgradeRefusalRetainsEightMostRecentDistinct(t *testing.T) {
+	template := newWakeRestartFixture(t).candidate
+	var remembered []wakeSelfUpgradeRefusedCandidate
+	var evidence []wakeImageEvidenceV1
+	for index := 0; index < wakeSelfUpgradeRefusalLimit+2; index++ {
+		candidate := template
+		candidate.Inode = uint64(index + 1)
+		evidence = append(evidence, candidate)
+		remembered = rememberWakeSelfUpgradeRefusal(remembered, candidate)
+	}
+	if len(remembered) != wakeSelfUpgradeRefusalLimit {
+		t.Fatalf("remembered=%d, want %d", len(remembered), wakeSelfUpgradeRefusalLimit)
+	}
+	for _, evicted := range evidence[:2] {
+		if wakeSelfUpgradeRefusedCandidatesContain(remembered, evicted) {
+			t.Fatalf("old refusal was not evicted: %#v", evicted)
+		}
+	}
+	for _, retained := range evidence[2:] {
+		if !wakeSelfUpgradeRefusedCandidatesContain(remembered, retained) {
+			t.Fatalf("recent refusal was not retained: %#v", retained)
+		}
+	}
+	remembered = rememberWakeSelfUpgradeRefusal(remembered, evidence[2])
+	if len(remembered) != wakeSelfUpgradeRefusalLimit ||
+		remembered[len(remembered)-1] != wakeSelfUpgradeRefusedCandidateFromEvidence(evidence[2]) {
+		t.Fatalf("repeat refusal did not move to most recent: %#v", remembered)
+	}
+}
+
+func TestValidateWakeRestartRecordRefusedCandidates(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	record := fixture.record
+	record.Source = wakeRestartSourceSelf
+	current := wakeSelfUpgradeRefusedCandidateFromEvidence(record.Candidate)
+	prior := current
+	prior.Inode++
+
+	valid := record
+	valid.RefusedCandidates = []wakeSelfUpgradeRefusedCandidate{prior}
+	if err := validateWakeRestartRecord(valid); err != nil {
+		t.Fatalf("valid pending history: %v", err)
+	}
+	encoded, err := json.Marshal(valid.RefusedCandidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"execution_path", "method", "ctime"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("path-free refusal identity contains %q: %s", forbidden, encoded)
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*wakeRestartRecord)
+	}{
+		{
+			name: "foreign source",
+			mutate: func(record *wakeRestartRecord) {
+				record.Source = wakeRestartSourceForeign
+			},
+		},
+		{
+			name: "duplicate",
+			mutate: func(record *wakeRestartRecord) {
+				record.RefusedCandidates = append(record.RefusedCandidates, prior)
+			},
+		},
+		{
+			name: "over limit",
+			mutate: func(record *wakeRestartRecord) {
+				record.RefusedCandidates = nil
+				for index := 0; index <= wakeSelfUpgradeRefusalLimit; index++ {
+					candidate := prior
+					candidate.Inode = uint64(index + 1)
+					record.RefusedCandidates = append(record.RefusedCandidates, candidate)
+				}
+			},
+		},
+		{
+			name: "pending current candidate",
+			mutate: func(record *wakeRestartRecord) {
+				record.RefusedCandidates = []wakeSelfUpgradeRefusedCandidate{current}
+			},
+		},
+		{
+			name: "refused current missing",
+			mutate: func(record *wakeRestartRecord) {
+				record.Status = wakeRestartRefused
+				record.Reason = "test refusal"
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := valid
+			candidate.RefusedCandidates = append(
+				[]wakeSelfUpgradeRefusedCandidate(nil),
+				valid.RefusedCandidates...,
+			)
+			test.mutate(&candidate)
+			if err := validateWakeRestartRecord(candidate); err == nil {
+				t.Fatalf("validateWakeRestartRecord(%s) error=nil", test.name)
+			}
+		})
 	}
 }
 

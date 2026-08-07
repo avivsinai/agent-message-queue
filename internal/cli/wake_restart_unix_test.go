@@ -402,6 +402,127 @@ func TestWakeRestartJoinsClaimedSuccessorWithoutRenotifying(t *testing.T) {
 	}
 }
 
+func TestWakeRestartCreatorNotifyFailurePreservesAdoptedPendingRecord(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+
+	type restartOutcome struct {
+		result wakeRestartResult
+		err    error
+	}
+
+	creatorNotifyStarted := make(chan struct{})
+	adopterNotified := make(chan struct{})
+	var releaseCreator sync.Once
+	var published wakeRestartRecord
+	var notifyCalls atomic.Int32
+	var preflightCalls atomic.Int32
+	var nowCalls atomic.Int32
+	creatorNotifyErr := errors.New("injected creator notification failure")
+
+	oldPreflight := wakeRestartPreflight
+	oldNotify := wakeRestartNotify
+	oldNow := wakeRestartNow
+	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
+		preflightCalls.Add(1)
+		return nil
+	}
+	wakeRestartNotify = func(
+		_ *wakeAgentDir,
+		_ wakeLockInspection,
+		record wakeRestartRecord,
+	) error {
+		switch notifyCalls.Add(1) {
+		case 1:
+			published = record
+			close(creatorNotifyStarted)
+			<-adopterNotified
+			return creatorNotifyErr
+		case 2:
+			defer releaseCreator.Do(func() { close(adopterNotified) })
+			if record.Schema != wakeRestartSchemaV1 ||
+				record.Status != wakeRestartPending ||
+				!sameWakeRestartRecord(record, published) {
+				return fmt.Errorf("adopter notification record = %#v, want published schema-1 pending record %#v", record, published)
+			}
+			return nil
+		default:
+			return errors.New("restart request notified more than twice")
+		}
+	}
+	baseNow := time.Unix(1_700_000_000, 0)
+	wakeRestartNow = func() time.Time {
+		if nowCalls.Add(1) == 1 {
+			return baseNow
+		}
+		return baseNow.Add(wakeRestartWaitTimeout + time.Second)
+	}
+	t.Cleanup(func() {
+		releaseCreator.Do(func() { close(adopterNotified) })
+		wakeRestartPreflight = oldPreflight
+		wakeRestartNotify = oldNotify
+		wakeRestartNow = oldNow
+	})
+
+	creatorDone := make(chan restartOutcome, 1)
+	go func() {
+		result, err := requestWakeRestart(fixture.root, fixture.agent)
+		creatorDone <- restartOutcome{result: result, err: err}
+	}()
+	select {
+	case <-creatorNotifyStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("creator did not publish and reach notification within 5s")
+	}
+
+	adopterDone := make(chan restartOutcome, 1)
+	go func() {
+		result, err := requestWakeRestart(fixture.root, fixture.agent)
+		adopterDone <- restartOutcome{result: result, err: err}
+	}()
+
+	wait := func(label string, done <-chan restartOutcome) restartOutcome {
+		t.Helper()
+		select {
+		case outcome := <-done:
+			return outcome
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not finish within 5s", label)
+			return restartOutcome{}
+		}
+	}
+	creator := wait("creator", creatorDone)
+	adopter := wait("adopter", adopterDone)
+	if !errors.Is(creator.err, creatorNotifyErr) {
+		t.Fatalf("creator outcome: result=%#v err=%v, want notification failure", creator.result, creator.err)
+	}
+	if adopter.err == nil || !strings.Contains(adopter.err.Error(), "did not complete") {
+		t.Fatalf("adopter outcome: result=%#v err=%v, want bounded wait timeout", adopter.result, adopter.err)
+	}
+	if preflightCalls.Load() != 1 || notifyCalls.Load() != 2 {
+		t.Fatalf(
+			"concurrent creator/adopter preflights=%d notifications=%d, want 1 and 2",
+			preflightCalls.Load(),
+			notifyCalls.Load(),
+		)
+	}
+
+	var current wakeRestartRecord
+	var exists bool
+	if err := fixture.agentDir.withFD(func(dirfd int) error {
+		var readErr error
+		current, exists, readErr = readWakeRestartRecordAt(dirfd, fixture.agentDir)
+		return readErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !exists || current.Schema != wakeRestartSchemaV1 ||
+		current.Status != wakeRestartPending ||
+		!sameWakeRestartRecord(current, published) {
+		t.Fatalf("restart record after creator failure = %#v, exists=%v; want unchanged published pending record %#v", current, exists, published)
+	}
+}
+
 func TestConcurrentWakeRestartCallersJoinSuccessorThroughReadinessCommit(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	bound := boundWakeImageEvidenceForTest(fixture.candidate)
@@ -1198,7 +1319,7 @@ func TestWakeRestartAdoptsPendingCurrentGenerationAndRenotifies(t *testing.T) {
 		if readErr != nil {
 			return readErr
 		}
-		if !exists || current != pending {
+		if !exists || !sameWakeRestartRecord(current, pending) {
 			return errors.New("pending restart record changed")
 		}
 		return nil
