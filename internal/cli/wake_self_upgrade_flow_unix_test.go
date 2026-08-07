@@ -36,6 +36,8 @@ func TestWakeSelfUpgradeRefusalMemoryBlocksABARetryWithinGeneration(t *testing.T
 	previousBoundPreflight := wakeRestartBoundPreflight
 	previousNotify := wakeRestartNotify
 	previousExec := wakeRestartExec
+	previousSync := syncWakeOwnerDirFD
+	supersedingFailurePhase := ""
 	wakeRestartBind = func(record wakeRestartRecord) (*wakeRestartBoundImage, error) {
 		switch {
 		case sameWakeSelfUpgradeCandidateIdentity(record.Candidate, evidenceA):
@@ -59,11 +61,39 @@ func TestWakeSelfUpgradeRefusalMemoryBlocksABARetryWithinGeneration(t *testing.T
 		execs++
 		return errors.New("unexpected exec")
 	}
+	syncWakeOwnerDirFD = func(fd int) error {
+		if supersedingFailurePhase != "" {
+			entries, err := os.ReadDir(fixture.agentDir.path)
+			if err != nil {
+				return err
+			}
+			tempPresent := false
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), ".wake.restart.tmp.") {
+					tempPresent = true
+					break
+				}
+			}
+			if supersedingFailurePhase == "pre-install" && tempPresent {
+				supersedingFailurePhase = ""
+				return errors.New("test superseding pre-install failure")
+			}
+			if supersedingFailurePhase == "post-rename" && !tempPresent {
+				raw, readErr := os.ReadFile(filepath.Join(fixture.agentDir.path, wakeRestartFileName))
+				if readErr == nil && strings.Contains(string(raw), evidenceB.SHA256) {
+					supersedingFailurePhase = ""
+					return errors.New("test superseding post-rename failure")
+				}
+			}
+		}
+		return previousSync(fd)
+	}
 	t.Cleanup(func() {
 		wakeRestartBind = previousBind
 		wakeRestartBoundPreflight = previousBoundPreflight
 		wakeRestartNotify = previousNotify
 		wakeRestartExec = previousExec
+		syncWakeOwnerDirFD = previousSync
 	})
 
 	cfg := wakeConfig{
@@ -110,12 +140,80 @@ func TestWakeSelfUpgradeRefusalMemoryBlocksABARetryWithinGeneration(t *testing.T
 	if binds["a"] != 1 || binds["b"] != 0 || preflights != 0 || notifies != 0 || execs != 0 {
 		t.Fatalf("A attempt counters: bind=%v preflight=%d notify=%d exec=%d", binds, preflights, notifies, execs)
 	}
+	refusedA := readWakeSelfUpgradeRestartRecord(t, fixture)
+	beforeSupersession := quarantineCount()
 	replaceWakeSelfUpgradeLocator(t, cfg.selfUpgrade.Locator, candidateB)
+	supersedingFailurePhase = "pre-install"
+	if err := maintainWakeSelfUpgradeAtLoopBoundary(
+		&cfg,
+		fixture.agentDir,
+		watcher,
+		false,
+		false,
+	); err == nil || !strings.Contains(err.Error(), "test superseding pre-install failure") {
+		t.Fatalf("superseding publication failure = %v", err)
+	}
+	if supersedingFailurePhase != "" {
+		t.Fatal("superseding publication failure was not injected")
+	}
+	if binds["a"] != 1 || binds["b"] != 0 || quarantineCount() != beforeSupersession {
+		t.Fatalf("failed B publication changed execution or quarantine: bind=%v quarantine=%d", binds, quarantineCount())
+	}
+	if got := readWakeSelfUpgradeRestartRecord(t, fixture); !sameWakeRestartRecord(got, refusedA) {
+		t.Fatalf("failed B publication lost A refusal: got=%#v want=%#v", got, refusedA)
+	}
+
+	supersedingFailurePhase = "post-rename"
+	if err := maintainWakeSelfUpgradeAtLoopBoundary(
+		&cfg,
+		fixture.agentDir,
+		watcher,
+		false,
+		false,
+	); err == nil || !strings.Contains(err.Error(), "test superseding post-rename failure") {
+		t.Fatalf("superseding post-rename failure = %v", err)
+	}
+	if supersedingFailurePhase != "" {
+		t.Fatal("superseding post-rename failure was not injected")
+	}
+	freshAgentDir, err := openWakeAgentDir(fixture.root, fixture.agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = freshAgentDir.Close() }()
+	var persistedB wakeRestartRecord
+	if err := freshAgentDir.withFD(func(dirfd int) error {
+		var exists bool
+		var readErr error
+		persistedB, exists, readErr = readWakeRestartRecordAt(dirfd, freshAgentDir)
+		if readErr != nil {
+			return readErr
+		}
+		if !exists {
+			return os.ErrNotExist
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if persistedB.Status != wakeRestartPending ||
+		!sameWakeSelfUpgradeCandidateIdentity(persistedB.Candidate, evidenceB) ||
+		len(persistedB.RefusedCandidates) != 1 ||
+		!wakeSelfUpgradeRefusedCandidatesContain(persistedB.RefusedCandidates, evidenceA) {
+		t.Fatalf("fresh read after B post-rename failure = %#v", persistedB)
+	}
+	if quarantineCount() != beforeSupersession {
+		t.Fatalf("post-rename B publication grew quarantine: before=%d after=%d", beforeSupersession, quarantineCount())
+	}
+
 	tick()
 	if binds["a"] != 1 || binds["b"] != 1 || preflights != 0 || notifies != 0 || execs != 0 {
 		t.Fatalf("B attempt counters: bind=%v preflight=%d notify=%d exec=%d", binds, preflights, notifies, execs)
 	}
 	beforeRememberedA := quarantineCount()
+	if beforeRememberedA != beforeSupersession {
+		t.Fatalf("same-scope A to B supersession grew quarantine: before=%d after=%d", beforeSupersession, beforeRememberedA)
+	}
 	refusedB := readWakeSelfUpgradeRestartRecord(t, fixture)
 	if refusedB.Status != wakeRestartRefused ||
 		!sameWakeSelfUpgradeCandidateIdentity(refusedB.Candidate, evidenceB) ||

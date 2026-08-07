@@ -640,7 +640,8 @@ func publishWakeSelfUpgradePending(
 				return nil
 			case existing.Record.Status == wakeRestartRefused &&
 				existing.Record.Source == wakeRestartSourceSelf:
-				if sameWakeSelfUpgradeRefusalScope(existing.Record, expected) {
+				sameScope := sameWakeSelfUpgradeRefusalScope(existing.Record, expected)
+				if sameScope {
 					remembered := wakeSelfUpgradeRefusalMemory(existing.Record)
 					if wakeSelfUpgradeRefusedCandidatesContain(remembered, record.Candidate) {
 						decision.Action = wakeSelfUpgradeActionRefusedMemory
@@ -652,8 +653,10 @@ func publishWakeSelfUpgradePending(
 				if err := reclaimWakeRestartStagePlatform(existing.Record); err != nil {
 					return fmt.Errorf("reclaim superseded self-upgrade attempt: %w", err)
 				}
-				if _, err := quarantineWakeRestartRecordAt(dirfd, agentDir, existing); err != nil {
-					return fmt.Errorf("quarantine superseded self-upgrade attempt: %w", err)
+				if !sameScope {
+					if _, err := quarantineWakeRestartRecordAt(dirfd, agentDir, existing); err != nil {
+						return fmt.Errorf("quarantine superseded self-upgrade attempt: %w", err)
+					}
 				}
 			default:
 				decision.Action = wakeSelfUpgradeActionRestartPresent

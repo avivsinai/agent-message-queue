@@ -507,8 +507,8 @@ func TestPublishWakeSelfUpgradePendingCarriesLegacyRefusalMemory(t *testing.T) {
 		wakeSelfUpgradeRefusedCandidatesContain(installedB.RefusedCandidates, evidenceB) {
 		t.Fatalf("carried legacy refusal memory = %#v", installedB)
 	}
-	if got := quarantineCount(); got != 1 {
-		t.Fatalf("legacy A to B quarantine count=%d, want 1", got)
+	if got := quarantineCount(); got != 0 {
+		t.Fatalf("same-scope legacy A to B quarantine count=%d, want 0", got)
 	}
 	if err := refuseWakeRestartRecord(fixture.agentDir, installedB, "B failed"); err != nil {
 		t.Fatal(err)
