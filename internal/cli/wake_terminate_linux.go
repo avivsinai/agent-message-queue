@@ -58,6 +58,8 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 		fd, err := linuxPidfdOpen(locked.PID, 0)
 		if err != nil {
 			if errors.Is(err, syscall.ESRCH) {
+				locked.Process = wakeProcessInfo{PID: locked.PID}
+				classifyWakeLock(locked.Root, locked.Agent, &locked)
 				var removeErr error
 				outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
 					dirfd,
@@ -207,6 +209,8 @@ func terminateAndRemoveOrphanedWakeLockWithRawConsent(
 		fd, err := linuxPidfdOpen(locked.PID, 0)
 		if err != nil {
 			if errors.Is(err, syscall.ESRCH) {
+				locked.Process = wakeProcessInfo{PID: locked.PID}
+				classifyWakeLock(locked.Root, locked.Agent, &locked)
 				provenGone = true
 				return removeWakeLockIfUnchangedGuarded(locked)
 			}

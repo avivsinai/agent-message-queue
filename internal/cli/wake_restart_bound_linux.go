@@ -58,6 +58,10 @@ func bindWakeRestartCandidatePlatform(candidate wakeImageEvidenceV1) (*wakeResta
 	return bound, nil
 }
 
+func bindWakeRestartCandidateForRecordPlatform(record wakeRestartRecord) (*wakeRestartBoundImage, error) {
+	return bindWakeRestartCandidatePlatform(record.Candidate)
+}
+
 func boundWakeRestartPreflightCommandPlatform(image *wakeRestartBoundImage) (string, []*os.File, error) {
 	if image == nil || image.file == nil {
 		return "", nil, fmt.Errorf("bound wake restart image is missing")

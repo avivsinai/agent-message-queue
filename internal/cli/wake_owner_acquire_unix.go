@@ -230,14 +230,14 @@ func acquireAuthoritativeWakeLockWithOptionsInDir(
 				case wakeOwnerActionReuse:
 					return wakeLockAlreadyRunningError(me, classified)
 				case wakeOwnerActionRelease:
-					if err := removeAuthoritativeWakeClaimAt(dirfd, agentDir, inspection, &persisted); err != nil {
+					if err := removeAuthoritativeWakeClaimAt(dirfd, agentDir, classified, &persisted); err != nil {
 						return err
 					}
 					retry = true
 					return nil
 				case wakeOwnerActionStopAndRelease:
 					if wakeCapability.Absent {
-						if err := removeAuthoritativeWakeClaimAt(dirfd, agentDir, inspection, &persisted); err != nil {
+						if err := removeAuthoritativeWakeClaimAt(dirfd, agentDir, classified, &persisted); err != nil {
 							return err
 						}
 						retry = true

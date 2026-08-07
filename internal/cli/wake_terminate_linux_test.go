@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -149,8 +150,52 @@ func TestTerminateTreatsPidfdESRCHAsProvenGone(t *testing.T) {
 	const wakePID = 4242
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
-		PID: wakePID, TTY: "missing", ProcessStart: "start-1", BootID: "boot-1", Executable: "/usr/bin/amq",
+		PID:          wakePID,
+		TTY:          "missing",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/usr/bin/amq",
+		Generation:   "abcdef0123456789abcdef0123456789",
 	})
+	metadata := readWakeLockMetadata(root, "codex")
+	if !metadata.Exists || metadata.Lock.Generation == "" {
+		t.Fatalf("wake lock metadata = %#v", metadata)
+	}
+	setCLIVersionForTest(t, "0.57.3-test")
+	candidate, err := captureCurrentWakeImageEvidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentDir, err := openWakeAgentDir(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	restart := wakeRestartRecord{
+		Schema:              wakeRestartSchemaV2,
+		RequestID:           "0123456789abcdef0123456789abcdef",
+		Status:              wakeRestartPending,
+		Root:                canonicalWakeRoot(root),
+		Agent:               "codex",
+		Generation:          metadata.Lock.Generation,
+		SuccessorGeneration: "fedcba9876543210fedcba9876543210",
+		Owner:               validWakeResumeOwnerForTest(),
+		Candidate:           candidate,
+	}
+	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, agentDir, restart)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restartPath := filepath.Join(agentDir.path, wakeRestartFileName)
+	restartRaw, err := os.ReadFile(restartPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartInfo, err := os.Lstat(restartPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	inspectCalls := 0
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		inspectCalls++
@@ -179,6 +224,16 @@ func TestTerminateTreatsPidfdESRCHAsProvenGone(t *testing.T) {
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("proven-gone lock was not removed: %v", err)
 	}
+	if _, err := os.Lstat(restartPath); !os.IsNotExist(err) {
+		t.Fatalf("proven-gone restart record was not reclaimed: %v", err)
+	}
+	assertExactWakeQuarantineForTest(
+		t,
+		agentDir.path,
+		wakeRestartFileName+".quarantined.",
+		restartRaw,
+		restartInfo,
+	)
 }
 
 func TestTerminateOpensPidfdBeforeIdentityInspectionAndReleasesGuardBeforeWait(t *testing.T) {
