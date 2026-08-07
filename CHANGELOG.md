@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.60.0](https://github.com/avivsinai/agent-message-queue/compare/v0.59.1...v0.60.0) (2026-08-07)
+
+
+### Features
+
+* **wake:** retain bounded refused self-upgrade history ([4290592](https://github.com/avivsinai/agent-message-queue/commit/4290592cbbdb761d28b38b6e7938968d4776089b))
+
+
+### Bug Fixes
+
+* **wake:** preserve pending restart after notify race ([4290592](https://github.com/avivsinai/agent-message-queue/commit/4290592cbbdb761d28b38b6e7938968d4776089b))
+
 ## [0.59.1](https://github.com/avivsinai/agent-message-queue/compare/v0.59.0...v0.59.1) (2026-08-07)
 
 
