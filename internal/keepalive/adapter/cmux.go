@@ -371,11 +371,13 @@ func (i cmuxTargetInventory) OwnershipKey(target string) (string, error) {
 
 func (i cmuxTargetInventory) ambiguityError(target, tty string) error {
 	owners := i.claimants[tty]
-	return fmt.Errorf(
-		"%w: cmux target %q physical identity is ambiguous: tty %q has %d live surface aliases: %s; inspect cmux aliases and existing wakes manually",
-		ErrTargetDegraded,
-		target, tty, len(owners), strings.Join(owners, ", "),
-	)
+	return &DegradedOwnershipError{
+		OwnershipKey: "tty:" + tty,
+		Detail: fmt.Sprintf(
+			"cmux target %q physical identity is ambiguous: tty %q has %d live surface aliases: %s; inspect cmux aliases and existing wakes manually",
+			target, tty, len(owners), strings.Join(owners, ", "),
+		),
+	}
 }
 
 func canonicalCmuxTTY(value string) (string, error) {
@@ -389,7 +391,30 @@ func canonicalCmuxTTY(value string) (string, error) {
 		}
 		tty = filepath.Join("/dev", tty)
 	}
-	return filepath.Clean(tty), nil
+	tty = filepath.Clean(tty)
+	if tty == cmuxEvictedTTY {
+		return tty, nil
+	}
+	if !isCmuxPTY(tty) {
+		return "", fmt.Errorf("system.tree surface tty %q is not a macOS PTY under /dev/ttys<digits>", value)
+	}
+	return tty, nil
+}
+
+func isCmuxPTY(tty string) bool {
+	if filepath.Dir(tty) != "/dev" {
+		return false
+	}
+	suffix := strings.TrimPrefix(filepath.Base(tty), "ttys")
+	if suffix == "" {
+		return false
+	}
+	for _, char := range suffix {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func sameCmuxSurfaceIdentity(left, right cmuxSurfaceIdentity) bool {

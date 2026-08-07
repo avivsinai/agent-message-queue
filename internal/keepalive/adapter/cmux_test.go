@@ -157,8 +157,13 @@ func TestCmuxInventoryRejectsMultipleLiveAliasesForPhysicalTTY(t *testing.T) {
 		t.Fatalf("Inventory() error = %v", err)
 	}
 	for _, target := range []string{"cmux:surface:" + testCmuxSurfaceID, "cmux:surface:" + second} {
-		if _, err := inventory.OwnershipKey(target); err == nil || !strings.Contains(err.Error(), "2 live surface aliases") {
+		_, err := inventory.OwnershipKey(target)
+		if err == nil || !strings.Contains(err.Error(), "2 live surface aliases") {
 			t.Fatalf("OwnershipKey(%q) error = %v, want alias ambiguity", target, err)
+		}
+		key, ok := DegradedOwnershipKey(err)
+		if !ok || key != "tty:/dev/ttys011" {
+			t.Fatalf("DegradedOwnershipKey(%q) = %q, %v; want canonical tty key", target, key, ok)
 		}
 	}
 	if len(runner.calls) != 1 {
@@ -254,8 +259,30 @@ func TestCmuxInventoryRejectsBlankTTYInsteadOfAssumingUUIDOwnership(t *testing.T
 	if err != nil {
 		t.Fatalf("Inventory() error = %v", err)
 	}
-	if err := inventory.Probe("cmux:surface:" + testCmuxSurfaceID); err == nil || errors.Is(err, ErrTargetNotFound) {
+	err = inventory.Probe("cmux:surface:" + testCmuxSurfaceID)
+	if err == nil || errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("Probe() error = %v, want ambiguous missing-tty failure", err)
+	}
+	if key, ok := DegradedOwnershipKey(err); ok || key != "" {
+		t.Fatalf("DegradedOwnershipKey(blank tty) = %q, %v; want unavailable", key, ok)
+	}
+}
+
+func TestCmuxInventoryRejectsNonPTYPathWithoutOwnershipKey(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "/dev/not-a-tty"},
+	)}
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("Inventory() error = %v", err)
+	}
+	err = inventory.Probe("cmux:surface:" + testCmuxSurfaceID)
+	if err == nil || !errors.Is(err, ErrTargetDegraded) || !strings.Contains(err.Error(), "not a macOS PTY") {
+		t.Fatalf("Probe() error = %v, want keyless non-PTY degradation", err)
+	}
+	if key, ok := DegradedOwnershipKey(err); ok || key != "" {
+		t.Fatalf("DegradedOwnershipKey(non-PTY) = %q, %v; want unavailable", key, ok)
 	}
 }
 

@@ -435,6 +435,20 @@ func checkPhysicalTargetAvailable(
 		if errors.Is(err, adapter.ErrTargetNotFound) {
 			continue
 		}
+		if errors.Is(err, adapter.ErrTargetDegraded) {
+			degradedKey, ok := adapter.DegradedOwnershipKey(err)
+			if !ok {
+				return fmt.Errorf("resolve registered physical target ownership for %s@%s: %w", existing.Agent, existing.Root, err)
+			}
+			if degradedKey != candidateKey {
+				// Preserve the uncertain registration for supervisor retry, but a
+				// physical key proven different by the same inventory cannot own the
+				// candidate's device.
+				continue
+			}
+			existingKey = degradedKey
+			err = nil
+		}
 		if err != nil {
 			return fmt.Errorf("resolve registered physical target ownership for %s@%s: %w", existing.Agent, existing.Root, err)
 		}

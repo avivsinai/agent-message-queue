@@ -14,6 +14,39 @@ var (
 	ErrTargetDegraded = errors.New("adapter target ownership degraded")
 )
 
+// DegradedOwnershipError reports uncertain ownership while retaining a
+// physical identity that the inventory established independently of the
+// uncertain owner. Callers may compare OwnershipKey with a successfully
+// resolved candidate key, but must stay fail-closed when no such key is
+// available.
+type DegradedOwnershipError struct {
+	OwnershipKey string
+	Detail       string
+}
+
+func (e *DegradedOwnershipError) Error() string {
+	if e.Detail == "" {
+		return ErrTargetDegraded.Error()
+	}
+	return ErrTargetDegraded.Error() + ": " + e.Detail
+}
+
+func (*DegradedOwnershipError) Unwrap() error {
+	return ErrTargetDegraded
+}
+
+// DegradedOwnershipKey returns a physical key only when an
+// ErrTargetDegraded value explicitly carries one. A false result means the
+// physical identity itself is uncertain and consumers must not infer that the
+// target is unrelated to another owner.
+func DegradedOwnershipKey(err error) (string, bool) {
+	var degraded *DegradedOwnershipError
+	if !errors.As(err, &degraded) || degraded.OwnershipKey == "" {
+		return "", false
+	}
+	return degraded.OwnershipKey, true
+}
+
 type Adapter interface {
 	Name() string
 	Probe(ctx context.Context, target string) error
@@ -30,7 +63,10 @@ type TargetNormalizer interface {
 
 // TargetInventory is a point-in-time existence snapshot. Implementations must
 // return ErrTargetNotFound only when absence is proven by the snapshot; parse,
-// transport, and permission failures remain ambiguous errors.
+// transport, and permission failures remain ambiguous errors. When ownership
+// is degraded but the physical identity is certain, implementations may return
+// DegradedOwnershipError so callers can compare that identity without treating
+// the uncertain target as healthy.
 type TargetInventory interface {
 	Probe(target string) error
 	OwnershipKey(target string) (string, error)
