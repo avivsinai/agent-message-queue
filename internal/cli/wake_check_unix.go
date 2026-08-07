@@ -62,10 +62,11 @@ type wakeCheckMetadataFingerprint struct {
 }
 
 type wakeCheckObservation struct {
-	Inspection wakeLockInspection
-	Target     wakeCheckMetadataFingerprint
-	Floor      wakeCheckMetadataFingerprint
-	Repair     wakeRepairAssessment
+	Inspection  wakeLockInspection
+	Target      wakeCheckMetadataFingerprint
+	Floor       wakeCheckMetadataFingerprint
+	Repair      wakeRepairAssessment
+	SelfUpgrade wakeCheckSelfUpgradeObservation
 }
 
 type wakeCheckSnapshot struct {
@@ -144,6 +145,7 @@ func inspectWakeCheckSnapshot(root, me string) wakeCheckSnapshot {
 		OpsLock:  opsLock,
 		Decision: buildWakeCheckDecision(root, me, second.Inspection, opsLock, true),
 	}
+	snapshot.Decision.SelfUpgrade = wakeCheckSelfUpgradeDecisionFromObservation(second.SelfUpgrade)
 	// Image probing occurs while building the decision. Re-observe afterwards
 	// so a PID reuse or lock generation change cannot inherit that conclusion.
 	third, thirdErr := observeWakeCheck(root, me)
@@ -172,6 +174,11 @@ func observeWakeCheck(root, me string) (wakeCheckObservation, error) {
 
 	err = agentDir.withFD(func(dirfd int) error {
 		observation.Inspection = inspectWakeLockAt(dirfd, agentDir, root, me)
+		observation.SelfUpgrade = observeWakeCheckSelfUpgradeAt(
+			dirfd,
+			agentDir,
+			observation.Inspection,
+		)
 		var boundSelectionErr error
 		observation.Repair = assessWakeRepair(
 			root,
@@ -276,7 +283,8 @@ func sameWakeCheckObservation(first, second wakeCheckObservation) bool {
 	return sameWakeCheckInspection(first.Inspection, second.Inspection) &&
 		first.Target == second.Target &&
 		first.Floor == second.Floor &&
-		first.Repair == second.Repair
+		first.Repair == second.Repair &&
+		sameWakeCheckSelfUpgradeObservation(first.SelfUpgrade, second.SelfUpgrade)
 }
 
 func opsWakeLockFromWakeCheckObservation(

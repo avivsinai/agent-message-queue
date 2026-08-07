@@ -123,6 +123,9 @@ func TestTopLevelUsageLines(t *testing.T) {
 	if !containsLine(lines, "AMQ_NO_UPDATE_CHECK") {
 		t.Fatal("topLevelUsageLines missing environment section")
 	}
+	if !containsLine(lines, "AMQ_WAKE_NO_SELF_UPGRADE") {
+		t.Fatal("topLevelUsageLines missing wake self-upgrade environment control")
+	}
 	if !containsLine(lines, `Use "amq <command> --help" for more information about a command.`) {
 		t.Fatal("topLevelUsageLines missing footer")
 	}

@@ -29,11 +29,14 @@ func fixStaleWakeLockForDoctor(
 		if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, recheck); err != nil {
 			return err
 		}
-		if err := removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, recheck); err != nil {
+		committed, err := removeWakeLockIfUnchangedGuardedAtStatus(dirfd, agentDir, recheck)
+		if committed {
+			lock.Removed = true
+		}
+		if err != nil {
 			return err
 		}
 		lock.Status = "fixed"
-		lock.Removed = true
 		return nil
 	})
 }

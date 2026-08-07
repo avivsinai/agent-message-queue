@@ -77,7 +77,8 @@ func inspectWakeBinaryStalenessPlatform(
 		}
 		return wakeBinaryStaleness{}, err
 	}
-	if recorded.ExecutionPath != running.Path {
+	restartStageAlias := sameDarwinWakeRestartStageAlias(recorded, running)
+	if !sameDarwinWakeImagePath(recorded.ExecutionPath, running.Path) && !restartStageAlias {
 		return wakeBinaryStaleness{}, fmt.Errorf("live wake image path disagrees with recorded image evidence")
 	}
 	comparisonEvidence.Running = wakeBinaryFileEvidenceFromIdentity(running.Identity)
@@ -92,7 +93,16 @@ func inspectWakeBinaryStalenessPlatform(
 			Evidence: comparisonEvidence,
 		}, nil
 	}
-	if running.Identity != currentIdentity || running.Size != current.Info.Size() {
+	// The restart-stage hardlink changes the shared inode's ctime, while
+	// proc_pidinfo may retain the mapped vnode's earlier snapshot. Only that
+	// validated owned alias gets a ctime exception; every ordinary pathname
+	// mismatch remains ambiguous.
+	if !restartStageAlias &&
+		(running.Identity.CTimeSec != currentIdentity.CTimeSec ||
+			running.Identity.CTimeNsec != currentIdentity.CTimeNsec) {
+		return wakeBinaryStaleness{}, fmt.Errorf("current wake image changed during comparison")
+	}
+	if running.Size != current.Info.Size() {
 		return wakeBinaryStaleness{}, fmt.Errorf("current wake image changed during comparison")
 	}
 	if staleByStarted {
@@ -108,6 +118,35 @@ func inspectWakeBinaryStalenessPlatform(
 		Method:   wakeBinaryComparisonDarwinProcessImage,
 		Evidence: comparisonEvidence,
 	}, nil
+}
+
+func sameDarwinWakeImagePath(recorded, running string) bool {
+	if recorded == running {
+		return true
+	}
+	resolvedRecorded, recordedErr := filepath.EvalSymlinks(recorded)
+	resolvedRunning, runningErr := filepath.EvalSymlinks(running)
+	return recordedErr == nil && runningErr == nil &&
+		filepath.Clean(resolvedRecorded) == filepath.Clean(resolvedRunning)
+}
+
+func sameDarwinWakeRestartStageAlias(
+	recorded wakeImageEvidenceV1,
+	running darwinMappedWakeImage,
+) bool {
+	if !validPreviousWakeRestartBoundImagePlatform(recorded) ||
+		running.Identity.Device != recorded.Device ||
+		running.Identity.Inode != recorded.Inode ||
+		running.Size != recorded.Size {
+		return false
+	}
+	info, err := os.Lstat(recorded.ExecutionPath)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
+		info.Size() != recorded.Size {
+		return false
+	}
+	identity, ok := captureWakeFileIdentity(info)
+	return ok && identity.Device == recorded.Device && identity.Inode == recorded.Inode
 }
 
 type darwinWakeProcessImage = darwinMappedWakeImage

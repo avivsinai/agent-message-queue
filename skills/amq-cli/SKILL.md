@@ -297,6 +297,15 @@ preserve the state and diagnose it. Never kill a live raw wake from a non-TTY
 process, and never accept an attention-only fallback as a replacement for
 full-strength input delivery.
 
+Current resume-eligible `coop exec` wakes automatically observe their stable
+AMQ launch symlink and adopt a strictly newer semantic version at a fully
+quiescent boundary, preserving PID, terminal ownership, and unread messages.
+Use `wake check --json --json-schema=2` to inspect `self_upgrade`; a refused
+candidate is attempted at most once until manual restart, lock replacement, or
+a new candidate. `--no-self-upgrade` and `AMQ_WAKE_NO_SELF_UPGRADE=1` disable
+this only for the launched wake. Ownerless, keepalive, repair, destructive
+interrupt, arbitrary-inject, and pinned-path wakes remain manual.
+
 Those consuming commands, `watch`, and all DLQ commands refuse a raw
 target that conflicts with a complete `AM_BASE_ROOT`/`AM_SESSION` pin before
 touching mailbox state. `send` and `reply` apply the same check to their source

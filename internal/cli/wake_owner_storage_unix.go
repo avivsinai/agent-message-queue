@@ -557,15 +557,28 @@ func removeAuthoritativeWakeClaimAt(
 			fmt.Errorf("sync authoritative wake lock release: %w", err),
 		)
 	}
+	cleanupErr := preparedSnapshotErr
+	cleaned := false
+	if err := removeWakeSelfUpgradeDiagnosticAt(dirfd); err != nil {
+		diagnosticCleanupErr := newWakeLockResidueError(
+			wakeLockResidueSelfUpgradeDiagnostic,
+			fmt.Errorf("remove wake self-upgrade diagnostic after authoritative lock release: %w", err),
+		)
+		_ = writeStderr(
+			"warning: removed authoritative wake lock for %s but left diagnostic-only self-upgrade residue: %v\n",
+			current.Agent,
+			diagnosticCleanupErr,
+		)
+	}
 	removeAuthoritativeWakeAfterLockRelease()
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 		if retainedWakeAgentDirIsDetached(agentDir) {
 			return errors.Join(
-				preparedSnapshotErr,
+				cleanupErr,
 				newWakeDetachedCleanupOnlyError(err),
 			)
 		}
-		return errors.Join(preparedSnapshotErr, err)
+		return errors.Join(cleanupErr, err)
 	}
 
 	// A replacement is never selected or cleaned. Cooperative writers cannot
@@ -573,17 +586,15 @@ func removeAuthoritativeWakeClaimAt(
 	replacement, err := unix.Openat(dirfd, ".wake.lock", unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err == nil {
 		_ = unix.Close(replacement)
-		return preparedSnapshotErr
+		return cleanupErr
 	}
 	if err != unix.ENOENT {
 		return errors.Join(
-			preparedSnapshotErr,
+			cleanupErr,
 			fmt.Errorf("check replacement wake lock after release: %w", err),
 		)
 	}
 
-	cleanupErr := preparedSnapshotErr
-	cleaned := false
 	if releaseTargetSnapshot != nil {
 		removed, err := removeWakeTargetIfSnapshotMatchesAt(
 			dirfd,

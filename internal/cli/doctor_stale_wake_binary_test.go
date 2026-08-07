@@ -68,7 +68,8 @@ func TestDoctorOpsReportsStructuredStaleWakeBinaryHintWithoutMutation(t *testing
 		t.Fatalf("wake_binary identity = %#v", hint.WakeBinary)
 	}
 	if hint.WakeBinary.Remedy == "" ||
-		!strings.Contains(hint.WakeBinary.Remedy, "restart") {
+		!strings.Contains(hint.WakeBinary.Remedy, "restart") ||
+		!strings.Contains(hint.WakeBinary.Remedy, "automatic self-upgrade state") {
 		t.Fatalf("wake_binary remedy = %q", hint.WakeBinary.Remedy)
 	}
 	if !strings.Contains(hint.Message, "different amq executable") {

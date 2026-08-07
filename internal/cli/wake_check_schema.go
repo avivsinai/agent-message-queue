@@ -85,6 +85,7 @@ type wakeCheckDecision struct {
 	Image                   wakeCheckImageDecision
 	Repair                  wakeCheckRepairDecision
 	Reload                  wakeCheckReloadDecision
+	SelfUpgrade             wakeCheckSelfUpgradeDecision
 	RestartCapability       string
 	Action                  wakeCheckActionDecision
 	legacyRestartCapability string
@@ -136,6 +137,29 @@ type wakeCheckReloadDecision struct {
 	ReasonCode string
 }
 
+// wakeCheckSelfUpgradeDecision is diagnostic-only state for a wake's optional
+// self-upgrade observer. Its zero value deliberately renders as an explicit,
+// disabled schema-v2 object so callers never need to infer field absence.
+type wakeCheckSelfUpgradeDecision struct {
+	Enabled       bool
+	Eligible      bool
+	Locator       *string
+	LastCandidate *wakeCheckSelfUpgradeCandidateDecision
+	LastDecision  *wakeCheckSelfUpgradeLastDecision
+	RefusedMemory bool
+}
+
+type wakeCheckSelfUpgradeCandidateDecision struct {
+	Identity string
+	Version  string
+}
+
+type wakeCheckSelfUpgradeLastDecision struct {
+	Action string
+	Reason string
+	At     string
+}
+
 type wakeCheckActionDecision struct {
 	Kind             string
 	Actor            string
@@ -151,17 +175,18 @@ type wakeCheckCommand struct {
 }
 
 type wakeCheckResultV2 struct {
-	Schema            int                 `json:"schema"`
-	Agent             string              `json:"agent"`
-	Root              string              `json:"root"`
-	Platform          wakeCheckPlatformV2 `json:"platform"`
-	Start             wakeCheckStartV2    `json:"start"`
-	Wake              wakeCheckWakeV2     `json:"wake"`
-	Image             wakeCheckImageV2    `json:"image"`
-	Repair            wakeCheckRepairV2   `json:"repair"`
-	Reload            wakeCheckReloadV2   `json:"reload"`
-	RestartCapability string              `json:"restart_capability"`
-	Action            wakeCheckActionV2   `json:"action"`
+	Schema            int                    `json:"schema"`
+	Agent             string                 `json:"agent"`
+	Root              string                 `json:"root"`
+	Platform          wakeCheckPlatformV2    `json:"platform"`
+	Start             wakeCheckStartV2       `json:"start"`
+	Wake              wakeCheckWakeV2        `json:"wake"`
+	Image             wakeCheckImageV2       `json:"image"`
+	Repair            wakeCheckRepairV2      `json:"repair"`
+	Reload            wakeCheckReloadV2      `json:"reload"`
+	SelfUpgrade       wakeCheckSelfUpgradeV2 `json:"self_upgrade"`
+	RestartCapability string                 `json:"restart_capability"`
+	Action            wakeCheckActionV2      `json:"action"`
 }
 
 type wakeCheckPlatformV2 struct {
@@ -205,6 +230,26 @@ type wakeCheckRepairV2 struct {
 type wakeCheckReloadV2 struct {
 	Status     string `json:"status"`
 	ReasonCode string `json:"reason_code"`
+}
+
+type wakeCheckSelfUpgradeV2 struct {
+	Enabled       bool                                `json:"enabled"`
+	Eligible      bool                                `json:"eligible"`
+	Locator       *string                             `json:"locator"`
+	LastCandidate *wakeCheckSelfUpgradeCandidateV2    `json:"last_candidate"`
+	LastDecision  *wakeCheckSelfUpgradeLastDecisionV2 `json:"last_decision"`
+	RefusedMemory bool                                `json:"refused_memory"`
+}
+
+type wakeCheckSelfUpgradeCandidateV2 struct {
+	Identity string `json:"identity"`
+	Version  string `json:"version"`
+}
+
+type wakeCheckSelfUpgradeLastDecisionV2 struct {
+	Action string `json:"action"`
+	Reason string `json:"reason"`
+	At     string `json:"at"`
 }
 
 type wakeCheckActionV2 struct {
@@ -255,6 +300,7 @@ func renderWakeCheckV2(decision wakeCheckDecision) wakeCheckResultV2 {
 			Status:     decision.Reload.Status,
 			ReasonCode: decision.Reload.ReasonCode,
 		},
+		SelfUpgrade:       renderWakeCheckSelfUpgradeV2(decision.SelfUpgrade),
 		RestartCapability: decision.RestartCapability,
 		Action: wakeCheckActionV2{
 			Kind:             decision.Action.Kind,
@@ -265,6 +311,29 @@ func renderWakeCheckV2(decision wakeCheckDecision) wakeCheckResultV2 {
 			Message:          decision.Action.Message,
 		},
 	}
+}
+
+func renderWakeCheckSelfUpgradeV2(decision wakeCheckSelfUpgradeDecision) wakeCheckSelfUpgradeV2 {
+	result := wakeCheckSelfUpgradeV2{
+		Enabled:       decision.Enabled,
+		Eligible:      decision.Eligible,
+		Locator:       decision.Locator,
+		RefusedMemory: decision.RefusedMemory,
+	}
+	if decision.LastCandidate != nil {
+		result.LastCandidate = &wakeCheckSelfUpgradeCandidateV2{
+			Identity: decision.LastCandidate.Identity,
+			Version:  decision.LastCandidate.Version,
+		}
+	}
+	if decision.LastDecision != nil {
+		result.LastDecision = &wakeCheckSelfUpgradeLastDecisionV2{
+			Action: decision.LastDecision.Action,
+			Reason: decision.LastDecision.Reason,
+			At:     decision.LastDecision.At,
+		}
+	}
+	return result
 }
 
 func addJSONSchemaFlag(fs *flag.FlagSet) *int {

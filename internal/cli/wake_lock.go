@@ -654,16 +654,22 @@ func removeWakeLockIfUnchangedGuarded(inspection wakeLockInspection) error {
 	if err := reclaimWakeRestartStateForGuardedLockRemoval(inspection); err != nil {
 		return fmt.Errorf("reconcile wake restart ownership before lock removal: %w", err)
 	}
-	return removeWakeLockIfUnchangedGuardedWithIO(
+	committed, err := removeWakeLockIfUnchangedGuardedWithIOStatus(
 		inspection,
 		func() ([]byte, os.FileInfo, error) { return readWakeLockFileWithInfo(inspection.LockPath) },
 		func() error { return os.Remove(inspection.LockPath) },
 	)
-}
-
-func removeWakeLockIfUnchangedGuardedWithIO(inspection wakeLockInspection, read wakeLockFileReader, remove func() error) error {
-	_, err := removeWakeLockIfUnchangedGuardedWithIOStatus(inspection, read, remove)
-	return err
+	if err != nil || !committed {
+		return err
+	}
+	if err := removeWakeSelfUpgradeDiagnosticGuarded(inspection.Root, inspection.Agent); err != nil {
+		_ = writeStderr(
+			"warning: removed wake lock for %s but left diagnostic-only self-upgrade residue: %v\n",
+			inspection.Agent,
+			err,
+		)
+	}
+	return nil
 }
 
 func removeWakeLockIfUnchangedGuardedWithIOStatus(
