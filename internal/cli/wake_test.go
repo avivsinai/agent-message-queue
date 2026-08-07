@@ -59,6 +59,35 @@ func (reader wakeStaticInboxReader) ReadHeader(name string) (format.Header, erro
 	return header, nil
 }
 
+func deliverPartialWakeMessageForTest(t *testing.T, root, me, id string) {
+	t.Helper()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, me); err != nil {
+		t.Fatalf("ensure mailbox: %v", err)
+	}
+	message := format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      id,
+			From:    "peer",
+			To:      []string{me},
+			Thread:  "p2p/peer__" + me,
+			Subject: id,
+			Created: "2026-07-30T08:00:00Z",
+		},
+		Body: "body",
+	}
+	data, err := message.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deliverToInboxForTest(t, root, me, id+".md", data); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestIsInterruptMessage(t *testing.T) {
 	cfg := &wakeConfig{
 		interrupt:         true,

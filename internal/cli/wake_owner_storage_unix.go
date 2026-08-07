@@ -534,6 +534,9 @@ func removeAuthoritativeWakeClaimAt(
 		))
 		releaseStateExists = false
 	}
+	if err := reclaimWakeRestartStateForLockRemovalAt(dirfd, agentDir, current); err != nil {
+		return fmt.Errorf("reconcile wake restart ownership before authoritative lock release: %w", err)
+	}
 
 	// Pathname unlink is safe under the lifecycle guard held by every
 	// cooperating writer; an unguarded same-UID writer is out of contract. A

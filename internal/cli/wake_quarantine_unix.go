@@ -40,9 +40,10 @@ type wakeQuarantineCleanupCandidate struct {
 }
 
 var beforeWakeQuarantineCleanupRevalidation = func(wakeQuarantineCleanupCandidate) {}
+var beforeWakeRestartQuarantineRevalidation = func(wakeRestartRecordSnapshot) {}
 
 func parseWakeQuarantineName(name string) (time.Time, bool) {
-	for _, source := range []string{".wake.lock", wakeTargetFileName} {
+	for _, source := range []string{".wake.lock", wakeTargetFileName, wakeRestartFileName} {
 		prefix := source + ".quarantined."
 		if !strings.HasPrefix(name, prefix) {
 			continue
@@ -337,7 +338,7 @@ func isJSONWhitespace(value byte) bool {
 }
 
 func wakeQuarantineName(source string, now time.Time) (string, error) {
-	if source != ".wake.lock" && source != wakeTargetFileName {
+	if source != ".wake.lock" && source != wakeTargetFileName && source != wakeRestartFileName {
 		return "", fmt.Errorf("unsupported wake quarantine source %q", source)
 	}
 	return source + ".quarantined." + now.UTC().Format(wakeQuarantineTimestampLayout), nil
@@ -472,6 +473,30 @@ func quarantineWakeTargetAt(
 		wakeTargetFileName,
 		"wake target",
 		current,
+	)
+}
+
+func quarantineWakeRestartRecordAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	expected wakeRestartRecordSnapshot,
+) (string, error) {
+	beforeWakeRestartQuarantineRevalidation(expected)
+	current, exists, err := readWakeRestartRecordSnapshotAt(dirfd, agentDir)
+	if err != nil && (!exists || current.Object.FileInfo == nil) {
+		return "", err
+	}
+	if !exists || !sameWakeRestartObjectSnapshot(expected, current) {
+		return "", newWakeSnapshotReadChangedError(
+			fmt.Errorf("wake restart request changed before quarantine"),
+		)
+	}
+	return moveWakeQuarantineAt(
+		dirfd,
+		agentDir,
+		wakeRestartFileName,
+		"wake restart request",
+		current.Object,
 	)
 }
 

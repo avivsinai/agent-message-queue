@@ -15,17 +15,20 @@ const (
 	wakeResumeSchemaV2        = 2
 	wakeImageEvidenceSchemaV1 = 1
 
-	wakeImageMethodFDExec               = "fd_exec"
-	wakeImageMethodPathnameObserved     = "pathname_observed"
-	wakeImageMethodPathnameExecVerified = "pathname_execve_verified"
-	wakeResumeSignalUSR1                = "SIGUSR1"
+	wakeImageMethodFDExec                     = "fd_exec"
+	wakeImageMethodPathnameObserved           = "pathname_observed"
+	wakeImageMethodPathnameExecObserved       = "pathname_exec_observed"
+	wakeImageMethodPathnameExecVerifiedLegacy = "pathname_execve_verified"
+	wakeImageMethodPathnameExecVerified       = wakeImageMethodPathnameExecVerifiedLegacy
+	wakeResumeSignalUSR1                      = "SIGUSR1"
 )
 
 // wakeImageEvidenceV1 records image metadata and its authority method.
 // pathname_observed is diagnostic on every platform. A resumed Darwin wake
-// publishes the exact private hardlink path it executed after successor-side
-// verification; a resumed Linux wake publishes evidence from its bound FD and
-// verifies the running image through /proc/self/exe before rotating generation.
+// publishes the private hardlink path observed by the successor after exec;
+// Darwin cannot atomically bind exec to an already-open descriptor. A resumed
+// Linux wake publishes evidence from its bound FD and verifies the running
+// image through /proc/self/exe before rotating generation.
 type wakeImageEvidenceV1 struct {
 	Schema          int    `json:"schema"`
 	Platform        string `json:"platform"`
@@ -142,7 +145,7 @@ func validateWakeImageEvidenceForPlatform(evidence wakeImageEvidenceV1, platform
 	}
 	if platform == "darwin" {
 		if evidence.Method != wakeImageMethodPathnameObserved &&
-			evidence.Method != wakeImageMethodPathnameExecVerified {
+			!wakeImageMethodIsDarwinExecObserved(evidence.Method) {
 			return fmt.Errorf("wake image method %q does not match a Darwin pathname evidence method", evidence.Method)
 		}
 	} else if platform == "linux" {
@@ -178,6 +181,11 @@ func validateWakeImageEvidenceForPlatform(evidence wakeImageEvidenceV1, platform
 		return fmt.Errorf("wake image embedded version is missing or non-canonical")
 	}
 	return nil
+}
+
+func wakeImageMethodIsDarwinExecObserved(method string) bool {
+	return method == wakeImageMethodPathnameExecObserved ||
+		method == wakeImageMethodPathnameExecVerifiedLegacy
 }
 
 func validWakeImageSHA256(value string) bool {

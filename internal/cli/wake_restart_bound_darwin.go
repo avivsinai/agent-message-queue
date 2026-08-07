@@ -12,6 +12,14 @@ import (
 )
 
 func bindWakeRestartCandidatePlatform(candidate wakeImageEvidenceV1) (*wakeRestartBoundImage, error) {
+	return bindWakeRestartCandidateAtPlatform(candidate, "")
+}
+
+func bindWakeRestartCandidateForRecordPlatform(record wakeRestartRecord) (*wakeRestartBoundImage, error) {
+	return bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
+}
+
+func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedStagePath string) (*wakeRestartBoundImage, error) {
 	sourceLstat, err := os.Lstat(candidate.ExecutionPath)
 	if err != nil {
 		return nil, fmt.Errorf("stat wake restart candidate: %w", err)
@@ -49,12 +57,23 @@ func bindWakeRestartCandidatePlatform(candidate wakeImageEvidenceV1) (*wakeResta
 		return nil, fmt.Errorf("wake restart candidate changed before Darwin staging")
 	}
 
-	stageDir, err := os.MkdirTemp(
-		filepath.Dir(candidate.ExecutionPath),
-		"."+filepath.Base(candidate.ExecutionPath)+".amq-restart-",
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create adjacent wake restart stage: %w", err)
+	var stageDir string
+	if plannedStagePath == "" {
+		stageDir, err = os.MkdirTemp(
+			filepath.Dir(candidate.ExecutionPath),
+			"."+filepath.Base(candidate.ExecutionPath)+".amq-restart-",
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create adjacent wake restart stage: %w", err)
+		}
+	} else {
+		stageDir = filepath.Dir(plannedStagePath)
+		if filepath.Base(plannedStagePath) != filepath.Base(candidate.ExecutionPath) {
+			return nil, fmt.Errorf("planned Darwin wake restart stage path is invalid")
+		}
+		if err := os.Mkdir(stageDir, 0o700); err != nil {
+			return nil, fmt.Errorf("create planned adjacent wake restart stage: %w", err)
+		}
 	}
 	stagePath := filepath.Join(stageDir, filepath.Base(candidate.ExecutionPath))
 	stageCreated := false
@@ -129,7 +148,7 @@ func bindWakeRestartCandidatePlatform(candidate wakeImageEvidenceV1) (*wakeResta
 		stage,
 		stagePath,
 		candidate.EmbeddedVersion,
-		wakeImageMethodPathnameExecVerified,
+		wakeImageMethodPathnameExecObserved,
 	)
 	if err != nil {
 		return nil, err
@@ -171,7 +190,7 @@ func revalidateBoundWakeRestartImagePlatform(image *wakeRestartBoundImage) error
 		image.file,
 		image.executionPath,
 		image.evidence.EmbeddedVersion,
-		wakeImageMethodPathnameExecVerified,
+		wakeImageMethodPathnameExecObserved,
 	)
 	if err != nil {
 		return err
@@ -199,7 +218,7 @@ func verifyWakeResumeBoundImagePlatform(bound wakeImageEvidenceV1) (wakeImageEvi
 	if err != nil {
 		return wakeImageEvidenceV1{}, err
 	}
-	actual.Method = wakeImageMethodPathnameExecVerified
+	actual.Method = wakeImageMethodPathnameExecObserved
 	if !sameDarwinStagedWakeImageEvidence(actual, bound) {
 		return wakeImageEvidenceV1{}, fmt.Errorf("running wake image does not match bound restart image")
 	}
@@ -218,7 +237,7 @@ func cleanupWakeResumeBoundImagePlatform(bound wakeImageEvidenceV1) error {
 }
 
 func validPreviousWakeRestartBoundImagePlatform(bound wakeImageEvidenceV1) bool {
-	if bound.Platform != "darwin" || bound.Method != wakeImageMethodPathnameExecVerified {
+	if bound.Platform != "darwin" || !wakeImageMethodIsDarwinExecObserved(bound.Method) {
 		return false
 	}
 	stagePath := bound.ExecutionPath
@@ -263,7 +282,7 @@ func cleanupDarwinWakeRestartStage(bound wakeImageEvidenceV1, allowNamespaceCTim
 		file,
 		stagePath,
 		bound.EmbeddedVersion,
-		wakeImageMethodPathnameExecVerified,
+		wakeImageMethodPathnameExecObserved,
 	)
 	if err != nil {
 		return err

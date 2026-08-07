@@ -499,7 +499,7 @@ func classifyWakeCheckReload(root, agent string, inspection wakeLockInspection) 
 		}
 		return unavailable(wakeReloadReasonAdvertisementInvalid)
 	}
-	if inspection.Lock.ResumeSignal == wakeResumeSignalUSR1 {
+	if err := validateWakeRestartTransportPlatform(inspection.Lock, root, agent); err == nil {
 		readiness, err := observeWakeRestartReadiness(root, agent, inspection)
 		if err != nil {
 			return unavailable(wakeReloadReasonNotPrepared)

@@ -3,6 +3,8 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +12,8 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -82,9 +86,9 @@ func newWakeRestartFixture(t *testing.T) wakeRestartFixture {
 		Generation:           "0123456789abcdef0123456789abcdef",
 		ResumeSchema:         wakeResumeSchemaV2,
 		ResumeOwner:          &owner,
-		ResumeSignal:         wakeResumeSignalUSR1,
 		RunningImageEvidence: &candidate,
 	}
+	configureWakeRestartAdvertisementPlatform(&lock, root, agent)
 	writeWakeLockForTest(t, root, agent, lock)
 	inspection := inspectWakeLock(root, agent)
 	if !inspection.IdentityConfirmed || inspection.Status != wakeLockValid {
@@ -148,6 +152,30 @@ func boundWakeImageEvidenceForTest(candidate wakeImageEvidenceV1) wakeImageEvide
 	return bound
 }
 
+func prepareWakeRestartRecordForBoundResumeTest(
+	t *testing.T,
+	fixture *wakeRestartFixture,
+	bound *wakeImageEvidenceV1,
+) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	stagePath, err := planWakeRestartStagePlatform(fixture.candidate, fixture.record.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound.ExecutionPath = stagePath
+	fixture.record.StagePath = stagePath
+	boundCopy := *bound
+	fixture.record.BoundImage = &boundCopy
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, fixture.record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRequestedAndBoundWakeImageEvidenceHasOnlyDarwinHardlinkCTimeException(t *testing.T) {
 	candidate, err := captureCurrentWakeImageEvidence()
 	if err != nil {
@@ -186,6 +214,7 @@ func TestRequestedAndBoundWakeImageEvidenceHasOnlyDarwinHardlinkCTimeException(t
 func TestAcquireWakeLockAfterResumeKeepsRequestUntilNewPreparedProof(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	bound := boundWakeImageEvidenceForTest(fixture.candidate)
+	prepareWakeRestartRecordForBoundResumeTest(t, &fixture, &bound)
 	if err := writeWakePreparedFileInDir(
 		fixture.agentDir,
 		fixture.root,
@@ -238,15 +267,21 @@ func TestAcquireWakeLockAfterResumeKeepsRequestUntilNewPreparedProof(t *testing.
 	if prepared {
 		t.Fatal("old generation prepared marker remained current after resume")
 	}
+	var restart wakeRestartRecord
 	var restartExists bool
 	if err := fixture.agentDir.withFD(func(dirfd int) error {
-		_, restartExists, err = readWakeRestartRecordAt(dirfd, fixture.agentDir)
+		restart, restartExists, err = readWakeRestartRecordAt(dirfd, fixture.agentDir)
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if !restartExists {
 		t.Fatal("restart request was consumed before successor readiness")
+	}
+	if restart.Schema != wakeRestartSchemaV2 ||
+		restart.Generation != fixture.record.Generation ||
+		restart.SuccessorGeneration != current.Lock.Generation {
+		t.Fatalf("restart successor claim = %#v", restart)
 	}
 	if err := writeWakePreparedFileInDir(
 		fixture.agentDir,
@@ -278,6 +313,551 @@ func TestAcquireWakeLockAfterResumeKeepsRequestUntilNewPreparedProof(t *testing.
 	if restartExists {
 		t.Fatal("ready successor did not consume restart request")
 	}
+}
+
+func TestWakeRestartJoinsClaimedSuccessorWithoutRenotifying(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	bound := boundWakeImageEvidenceForTest(fixture.candidate)
+	prepareWakeRestartRecordForBoundResumeTest(t, &fixture, &bound)
+	cleanup, err := acquireWakeLockAfterResumeInDir(
+		fixture.agentDir,
+		fixture.root,
+		fixture.agent,
+		wakeLockAcquireOptions{
+			wakeMode:            wakeInjectModeNone,
+			requestedOwner:      &fixture.owner,
+			resumeEligible:      true,
+			resumeImageEvidence: &bound,
+		},
+		wakeResumeBootstrap{
+			Schema:     wakeRestartSchemaV1,
+			RequestID:  fixture.record.RequestID,
+			Generation: fixture.record.Generation,
+			BoundImage: &bound,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	current := inspectWakeLock(fixture.root, fixture.agent)
+
+	oldPreflight := wakeRestartPreflight
+	oldNotify := wakeRestartNotify
+	oldSleep := wakeRestartSleep
+	preflightCalled := false
+	notifyCalled := false
+	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
+		preflightCalled = true
+		return nil
+	}
+	wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
+		notifyCalled = true
+		return nil
+	}
+	sleepCalls := 0
+	wakeRestartSleep = func(time.Duration) {
+		sleepCalls++
+		if sleepCalls != 1 {
+			return
+		}
+		if err := writeWakePreparedFileInDir(
+			fixture.agentDir,
+			fixture.root,
+			fixture.agent,
+			current,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := consumeWakeRestartAfterPrepared(
+			fixture.agentDir,
+			fixture.root,
+			fixture.agent,
+			current,
+			wakeResumeBootstrap{
+				Schema:     wakeRestartSchemaV1,
+				RequestID:  fixture.record.RequestID,
+				Generation: fixture.record.Generation,
+			},
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		wakeRestartPreflight = oldPreflight
+		wakeRestartNotify = oldNotify
+		wakeRestartSleep = oldSleep
+	})
+
+	result, err := requestWakeRestart(fixture.root, fixture.agent)
+	if err != nil {
+		t.Fatalf("join claimed successor: result=%#v err=%v", result, err)
+	}
+	if result.Status != "restarted" || result.PreviousGeneration != fixture.record.Generation ||
+		result.Generation != current.Lock.Generation {
+		t.Fatalf("join claimed successor result=%#v", result)
+	}
+	if preflightCalled || notifyCalled || sleepCalls == 0 {
+		t.Fatalf("join claimed successor preflight=%v notify=%v sleeps=%d", preflightCalled, notifyCalled, sleepCalls)
+	}
+}
+
+func TestConcurrentWakeRestartCallersJoinSuccessorThroughReadinessCommit(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	bound := boundWakeImageEvidenceForTest(fixture.candidate)
+	prepareWakeRestartRecordForBoundResumeTest(t, &fixture, &bound)
+
+	type restartOutcome struct {
+		result wakeRestartResult
+		err    error
+	}
+	type successorState struct {
+		inspection wakeLockInspection
+		record     wakeRestartRecord
+		cleanup    func()
+	}
+
+	successorClaimed := make(chan successorState, 1)
+	allowReadiness := make(chan struct{})
+	readinessCommitted := make(chan struct{})
+	caller2Waiting := make(chan struct{})
+	var caller2WaitingOnce sync.Once
+	var readinessCommittedOnce sync.Once
+	var notifyCalls atomic.Int32
+	var preflightCalls atomic.Int32
+
+	oldPreflight := wakeRestartPreflight
+	oldNotify := wakeRestartNotify
+	oldSleep := wakeRestartSleep
+	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
+		preflightCalls.Add(1)
+		return errors.New("concurrent restart unexpectedly replaced the canonical request")
+	}
+	wakeRestartNotify = func(
+		_ *wakeAgentDir,
+		expected wakeLockInspection,
+		record wakeRestartRecord,
+	) (returnErr error) {
+		if notifyCalls.Add(1) != 1 {
+			return errors.New("concurrent restart unexpectedly renotified the successor")
+		}
+		if !sameWakeLockInspection(expected, fixture.lock) ||
+			!sameWakeRestartRecord(record, fixture.record) {
+			return fmt.Errorf("first restart did not adopt the canonical request")
+		}
+		cleanup, err := acquireWakeLockAfterResumeInDir(
+			fixture.agentDir,
+			fixture.root,
+			fixture.agent,
+			wakeLockAcquireOptions{
+				wakeMode:            wakeInjectModeNone,
+				requestedOwner:      &fixture.owner,
+				resumeEligible:      true,
+				resumeImageEvidence: &bound,
+			},
+			wakeResumeBootstrap{
+				Schema:     wakeRestartSchemaV1,
+				RequestID:  fixture.record.RequestID,
+				Generation: fixture.record.Generation,
+				BoundImage: &bound,
+			},
+		)
+		if err != nil {
+			return err
+		}
+		keepSuccessor := false
+		defer func() {
+			if !keepSuccessor {
+				cleanup()
+			}
+		}()
+
+		current := inspectWakeLock(fixture.root, fixture.agent)
+		var claimed wakeRestartRecord
+		var exists bool
+		if err := fixture.agentDir.withFD(func(dirfd int) error {
+			var readErr error
+			claimed, exists, readErr = readWakeRestartRecordAt(dirfd, fixture.agentDir)
+			return readErr
+		}); err != nil {
+			return err
+		}
+		if !exists {
+			return errors.New("successor claim disappeared after lock rotation")
+		}
+		keepSuccessor = true
+		successorClaimed <- successorState{
+			inspection: current,
+			record:     claimed,
+			cleanup:    cleanup,
+		}
+
+		<-allowReadiness
+		defer readinessCommittedOnce.Do(func() { close(readinessCommitted) })
+		if err := writeWakePreparedFileInDir(
+			fixture.agentDir,
+			fixture.root,
+			fixture.agent,
+			current,
+		); err != nil {
+			return err
+		}
+		return consumeWakeRestartAfterPrepared(
+			fixture.agentDir,
+			fixture.root,
+			fixture.agent,
+			current,
+			wakeResumeBootstrap{
+				Schema:     wakeRestartSchemaV1,
+				RequestID:  fixture.record.RequestID,
+				Generation: fixture.record.Generation,
+			},
+		)
+	}
+	wakeRestartSleep = func(time.Duration) {
+		caller2WaitingOnce.Do(func() { close(caller2Waiting) })
+		<-readinessCommitted
+	}
+	t.Cleanup(func() {
+		wakeRestartPreflight = oldPreflight
+		wakeRestartNotify = oldNotify
+		wakeRestartSleep = oldSleep
+	})
+
+	caller1Done := make(chan restartOutcome, 1)
+	go func() {
+		result, err := requestWakeRestart(fixture.root, fixture.agent)
+		caller1Done <- restartOutcome{result: result, err: err}
+	}()
+
+	var successor successorState
+	select {
+	case successor = <-successorClaimed:
+		defer successor.cleanup()
+	case outcome := <-caller1Done:
+		t.Fatalf("caller 1 exited before successor claim: result=%#v err=%v", outcome.result, outcome.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("caller 1 did not claim and rotate to the successor within 5s")
+	}
+	if successor.inspection.Lock.Generation == fixture.record.Generation ||
+		successor.record.Schema != wakeRestartSchemaV2 ||
+		successor.record.RequestID != fixture.record.RequestID ||
+		successor.record.Generation != fixture.record.Generation ||
+		successor.record.SuccessorGeneration != successor.inspection.Lock.Generation {
+		t.Fatalf(
+			"successor state after claim/rotation: lock=%#v record=%#v",
+			successor.inspection,
+			successor.record,
+		)
+	}
+
+	caller2Done := make(chan restartOutcome, 1)
+	go func() {
+		result, err := requestWakeRestart(fixture.root, fixture.agent)
+		caller2Done <- restartOutcome{result: result, err: err}
+	}()
+	select {
+	case <-caller2Waiting:
+	case outcome := <-caller2Done:
+		t.Fatalf("caller 2 exited instead of joining successor: result=%#v err=%v", outcome.result, outcome.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("caller 2 did not join the claimed successor within 5s")
+	}
+
+	current := inspectWakeLock(fixture.root, fixture.agent)
+	var canonical wakeRestartRecord
+	var canonicalExists bool
+	if err := fixture.agentDir.withFD(func(dirfd int) error {
+		var readErr error
+		canonical, canonicalExists, readErr = readWakeRestartRecordAt(dirfd, fixture.agentDir)
+		return readErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !sameWakeLockInspection(successor.inspection, current) || !canonicalExists ||
+		!sameWakeRestartRecord(successor.record, canonical) {
+		t.Fatalf(
+			"caller 2 changed canonical successor state: lock=%#v exists=%v record=%#v",
+			current,
+			canonicalExists,
+			canonical,
+		)
+	}
+
+	close(allowReadiness)
+	await := func(label string, done <-chan restartOutcome) restartOutcome {
+		t.Helper()
+		select {
+		case outcome := <-done:
+			return outcome
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not finish within 5s", label)
+			return restartOutcome{}
+		}
+	}
+	caller1 := await("caller 1", caller1Done)
+	caller2 := await("caller 2", caller2Done)
+	for label, outcome := range map[string]restartOutcome{
+		"caller 1": caller1,
+		"caller 2": caller2,
+	} {
+		if outcome.err != nil || outcome.result.Status != "restarted" ||
+			outcome.result.PreviousGeneration != fixture.record.Generation ||
+			outcome.result.Generation != successor.inspection.Lock.Generation {
+			t.Fatalf("%s outcome: result=%#v err=%v", label, outcome.result, outcome.err)
+		}
+	}
+	if notifyCalls.Load() != 1 || preflightCalls.Load() != 0 {
+		t.Fatalf(
+			"concurrent callers notify=%d preflight=%d, want 1 and 0",
+			notifyCalls.Load(),
+			preflightCalls.Load(),
+		)
+	}
+	current = inspectWakeLock(fixture.root, fixture.agent)
+	if !sameWakeLockInspection(successor.inspection, current) {
+		t.Fatalf("readiness commit changed successor lock: %#v", current)
+	}
+	prepared, err := validateWakePreparedFileAgainstInspection(
+		fixture.root,
+		fixture.agent,
+		current,
+	)
+	if err != nil || !prepared {
+		t.Fatalf("successor readiness after concurrent callers: prepared=%v err=%v", prepared, err)
+	}
+	if err := fixture.agentDir.withFD(func(dirfd int) error {
+		_, canonicalExists, err = readWakeRestartRecordAt(dirfd, fixture.agentDir)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if canonicalExists {
+		t.Fatal("canonical restart request survived successor readiness commit")
+	}
+}
+
+func TestWakeRestartAckFailurePreservesClaimedSuccessor(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+
+	ackErr := errors.New("injected restart acknowledgement failure")
+	oldPreflight := wakeRestartPreflight
+	oldNotify := wakeRestartNotify
+	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
+		return nil
+	}
+	var successor wakeLockInspection
+	var successorCleanup func()
+	wakeRestartNotify = func(
+		_ *wakeAgentDir,
+		_ wakeLockInspection,
+		record wakeRestartRecord,
+	) error {
+		bound := boundWakeImageEvidenceForTest(record.Candidate)
+		if runtime.GOOS == "darwin" {
+			bound.ExecutionPath = record.StagePath
+			var err error
+			record, err = persistWakeRestartBoundImage(record, bound)
+			if err != nil {
+				return err
+			}
+		}
+		cleanup, err := acquireWakeLockAfterResumeInDir(
+			fixture.agentDir,
+			fixture.root,
+			fixture.agent,
+			wakeLockAcquireOptions{
+				wakeMode:            wakeInjectModeNone,
+				requestedOwner:      &fixture.owner,
+				resumeEligible:      true,
+				resumeImageEvidence: &bound,
+			},
+			wakeResumeBootstrap{
+				Schema:             wakeRestartSchemaV1,
+				RequestID:          record.RequestID,
+				Generation:         record.Generation,
+				BoundImage:         &bound,
+				PreviousBoundImage: record.PreviousBoundImage,
+			},
+		)
+		if err != nil {
+			return err
+		}
+		successorCleanup = cleanup
+		successor = inspectWakeLock(fixture.root, fixture.agent)
+		return ackErr
+	}
+	t.Cleanup(func() {
+		wakeRestartPreflight = oldPreflight
+		wakeRestartNotify = oldNotify
+		if successorCleanup != nil {
+			successorCleanup()
+		}
+	})
+
+	result, err := requestWakeRestart(fixture.root, fixture.agent)
+	if !errors.Is(err, ackErr) || !strings.Contains(result.Reason, ackErr.Error()) {
+		t.Fatalf("restart result = %#v err=%v, want acknowledgement failure", result, err)
+	}
+	var claimed wakeRestartRecord
+	var exists bool
+	if err := fixture.agentDir.withFD(func(dirfd int) error {
+		var readErr error
+		claimed, exists, readErr = readWakeRestartRecordAt(dirfd, fixture.agentDir)
+		return readErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !exists || claimed.Schema != wakeRestartSchemaV2 ||
+		claimed.Status != wakeRestartPending ||
+		claimed.SuccessorGeneration != successor.Lock.Generation {
+		t.Fatalf("claimed successor was changed by late refusal: exists=%v record=%#v", exists, claimed)
+	}
+	if err := writeWakePreparedFileInDir(
+		fixture.agentDir,
+		fixture.root,
+		fixture.agent,
+		successor,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := consumeWakeRestartAfterPrepared(
+		fixture.agentDir,
+		fixture.root,
+		fixture.agent,
+		successor,
+		wakeResumeBootstrap{
+			Schema:     wakeRestartSchemaV1,
+			RequestID:  claimed.RequestID,
+			Generation: claimed.Generation,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenericCleanupReconcilesPendingRestartOwnership(t *testing.T) {
+	t.Run("schema 1 stop wins before successor claim", func(t *testing.T) {
+		fixture := newWakeRestartFixture(t)
+		if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+			return cleanupGenericWakeGenerationAt(
+				dirfd,
+				fixture.agentDir,
+				fixture.root,
+				fixture.agent,
+				fixture.lock,
+				wakeLockAcquireOptions{wakeMode: wakeInjectModeNone},
+			)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if current := inspectWakeLock(fixture.root, fixture.agent); current.Exists {
+			t.Fatalf("schema-1 cleanup left wake lock: %#v", current)
+		}
+		restartPath := filepath.Join(fixture.agentDir.path, wakeRestartFileName)
+		if _, err := os.Lstat(restartPath); !os.IsNotExist(err) {
+			t.Fatalf("schema-1 cleanup left canonical restart record: %v", err)
+		}
+		quarantined, err := filepath.Glob(restartPath + ".quarantined.*")
+		if err != nil || len(quarantined) != 1 {
+			t.Fatalf("schema-1 cleanup quarantine = %v, err=%v", quarantined, err)
+		}
+	})
+
+	t.Run("future restart record is quarantined before lock removal", func(t *testing.T) {
+		fixture := newWakeRestartFixture(t)
+		restartPath := filepath.Join(fixture.agentDir.path, wakeRestartFileName)
+		if err := os.WriteFile(
+			restartPath,
+			[]byte("{\"schema\":99,\"request_id\":\"future\"}\n"),
+			0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+			return cleanupGenericWakeGenerationAt(
+				dirfd,
+				fixture.agentDir,
+				fixture.root,
+				fixture.agent,
+				fixture.lock,
+				wakeLockAcquireOptions{wakeMode: wakeInjectModeNone},
+			)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if current := inspectWakeLock(fixture.root, fixture.agent); current.Exists {
+			t.Fatalf("future-record cleanup left wake lock: %#v", current)
+		}
+		if _, err := os.Lstat(restartPath); !os.IsNotExist(err) {
+			t.Fatalf("future restart record survived canonical cleanup: %v", err)
+		}
+		quarantined, err := filepath.Glob(restartPath + ".quarantined.*")
+		if err != nil || len(quarantined) != 1 {
+			t.Fatalf("future restart quarantine = %v, err=%v", quarantined, err)
+		}
+	})
+
+	t.Run("schema 2 live handoff is preserved", func(t *testing.T) {
+		fixture := newWakeRestartFixture(t)
+		bound := boundWakeImageEvidenceForTest(fixture.candidate)
+		prepareWakeRestartRecordForBoundResumeTest(t, &fixture, &bound)
+		cleanup, err := acquireWakeLockAfterResumeInDir(
+			fixture.agentDir,
+			fixture.root,
+			fixture.agent,
+			wakeLockAcquireOptions{
+				wakeMode:            wakeInjectModeNone,
+				requestedOwner:      &fixture.owner,
+				resumeEligible:      true,
+				resumeImageEvidence: &bound,
+			},
+			wakeResumeBootstrap{
+				Schema:     wakeRestartSchemaV1,
+				RequestID:  fixture.record.RequestID,
+				Generation: fixture.record.Generation,
+				BoundImage: &bound,
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		current := inspectWakeLock(fixture.root, fixture.agent)
+		err = withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+			return cleanupGenericWakeGenerationAt(
+				dirfd,
+				fixture.agentDir,
+				fixture.root,
+				fixture.agent,
+				current,
+				wakeLockAcquireOptions{
+					wakeMode:       wakeInjectModeNone,
+					requestedOwner: &fixture.owner,
+				},
+			)
+		})
+		if err == nil || !strings.Contains(err.Error(), "live wake restart successor handoff") {
+			t.Fatalf("schema-2 cleanup error = %v, want handoff preservation", err)
+		}
+		if observed := inspectWakeLock(fixture.root, fixture.agent); !sameWakeLockGeneration(current, observed) {
+			t.Fatalf("schema-2 cleanup changed successor lock: %#v", observed)
+		}
+		if err := fixture.agentDir.withFD(func(dirfd int) error {
+			record, exists, readErr := readWakeRestartRecordAt(dirfd, fixture.agentDir)
+			if readErr != nil {
+				return readErr
+			}
+			if !exists || record.Schema != wakeRestartSchemaV2 ||
+				record.SuccessorGeneration != current.Lock.Generation {
+				return fmt.Errorf("live successor record changed: exists=%v record=%#v", exists, record)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestWakeRestartLoopRefusesInputDebtWithoutExec(t *testing.T) {
@@ -443,23 +1023,23 @@ func TestWakeRestartIncompatibleCandidatePreflightLeavesIncumbentLive(t *testing
 	}
 
 	oldCapture := captureCurrentWakeImageEvidence
-	oldSignal := wakeRestartSignal
+	oldNotify := wakeRestartNotify
 	captureCurrentWakeImageEvidence = func() (wakeImageEvidenceV1, error) { return candidate, nil }
-	signalCalled := false
-	wakeRestartSignal = func(*os.Process) error {
-		signalCalled = true
+	notifyCalled := false
+	wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
+		notifyCalled = true
 		return nil
 	}
 	t.Cleanup(func() {
 		captureCurrentWakeImageEvidence = oldCapture
-		wakeRestartSignal = oldSignal
+		wakeRestartNotify = oldNotify
 	})
 
 	result, restartErr := requestWakeRestart(fixture.root, fixture.agent)
 	if restartErr == nil || !strings.Contains(restartErr.Error(), "candidate preflight failed") {
 		t.Fatalf("incompatible restart result=%#v err=%v", result, restartErr)
 	}
-	if signalCalled {
+	if notifyCalled {
 		t.Fatal("incompatible candidate reached the incumbent signal boundary")
 	}
 	current := inspectWakeLock(fixture.root, fixture.agent)
@@ -477,7 +1057,7 @@ func TestWakeRestartIncompatibleCandidatePreflightLeavesIncumbentLive(t *testing
 	}
 }
 
-func TestWakeRestartRejectsControlOnlyIncumbentBeforePublication(t *testing.T) {
+func TestWakeRestartRequiresCurrentPlatformTransportBeforePublication(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	removeWakeRestartRecordForTest(t, fixture)
 	legacy := fixture.lock.Lock
@@ -489,31 +1069,35 @@ func TestWakeRestartRejectsControlOnlyIncumbentBeforePublication(t *testing.T) {
 	writeWakeLockForTest(t, fixture.root, fixture.agent, legacy)
 
 	preflightCalled := false
-	signalCalled := false
+	notifyCalled := false
 	oldPreflight := wakeRestartPreflight
-	oldSignal := wakeRestartSignal
+	oldNotify := wakeRestartNotify
 	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
 		preflightCalled = true
 		return nil
 	}
-	wakeRestartSignal = func(*os.Process) error {
-		signalCalled = true
-		return nil
+	notifyErr := errors.New("stop after safe platform notification")
+	wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
+		notifyCalled = true
+		return notifyErr
 	}
 	t.Cleanup(func() {
 		wakeRestartPreflight = oldPreflight
-		wakeRestartSignal = oldSignal
+		wakeRestartNotify = oldNotify
 	})
 
 	result, err := requestWakeRestart(fixture.root, fixture.agent)
-	if err == nil || !strings.Contains(err.Error(), "direct SIGUSR1 restart support") {
-		t.Fatalf("control-only restart result=%#v err=%v", result, err)
-	}
-	if preflightCalled || signalCalled {
-		t.Fatalf("control-only incumbent reached preflight=%v signal=%v", preflightCalled, signalCalled)
-	}
-	if _, statErr := os.Lstat(filepath.Join(fixture.agentDir.path, wakeRestartFileName)); !os.IsNotExist(statErr) {
-		t.Fatalf("control-only incumbent published restart record: %v", statErr)
+	if runtime.GOOS == "darwin" {
+		if !errors.Is(err, notifyErr) || !preflightCalled || !notifyCalled {
+			t.Fatalf("Darwin control restart result=%#v err=%v preflight=%v notify=%v", result, err, preflightCalled, notifyCalled)
+		}
+	} else {
+		if err == nil || !strings.Contains(err.Error(), "safe restart transport") || preflightCalled || notifyCalled {
+			t.Fatalf("Linux control restart result=%#v err=%v preflight=%v notify=%v", result, err, preflightCalled, notifyCalled)
+		}
+		if _, statErr := os.Lstat(filepath.Join(fixture.agentDir.path, wakeRestartFileName)); !os.IsNotExist(statErr) {
+			t.Fatalf("unsupported transport published restart record: %v", statErr)
+		}
 	}
 	current := inspectWakeLock(fixture.root, fixture.agent)
 	if !current.IdentityConfirmed || current.Lock.Generation != legacy.Generation || current.Lock.ResumeSignal != "" {
@@ -544,18 +1128,18 @@ func TestWakeRestartRejectsRegisteredOwnerlessInjectViaBeforeSignal(t *testing.T
 	preflightCalled := false
 	signalCalled := false
 	oldPreflight := wakeRestartPreflight
-	oldSignal := wakeRestartSignal
+	oldNotify := wakeRestartNotify
 	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
 		preflightCalled = true
 		return nil
 	}
-	wakeRestartSignal = func(*os.Process) error {
+	wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
 		signalCalled = true
 		return nil
 	}
 	t.Cleanup(func() {
 		wakeRestartPreflight = oldPreflight
-		wakeRestartSignal = oldSignal
+		wakeRestartNotify = oldNotify
 	})
 	before := snapshotWakeCheckTree(t, fixture.root)
 
@@ -572,7 +1156,7 @@ func TestWakeRestartRejectsRegisteredOwnerlessInjectViaBeforeSignal(t *testing.T
 	assertWakeCheckTreeUnchanged(t, fixture.root, before)
 }
 
-func TestWakeRestartRejectsPendingCurrentGenerationBeforePreflight(t *testing.T) {
+func TestWakeRestartAdoptsPendingCurrentGenerationAndRenotifies(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	pending := fixture.record
 	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
@@ -582,28 +1166,32 @@ func TestWakeRestartRejectsPendingCurrentGenerationBeforePreflight(t *testing.T)
 	}
 
 	preflightCalled := false
-	signalCalled := false
+	notifyCalled := false
 	oldPreflight := wakeRestartPreflight
-	oldSignal := wakeRestartSignal
+	oldNotify := wakeRestartNotify
 	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
 		preflightCalled = true
 		return nil
 	}
-	wakeRestartSignal = func(*os.Process) error {
-		signalCalled = true
-		return nil
+	notifyErr := errors.New("stop after adopted restart notification")
+	wakeRestartNotify = func(_ *wakeAgentDir, current wakeLockInspection, record wakeRestartRecord) error {
+		notifyCalled = true
+		if !sameWakeLockInspection(current, fixture.lock) || !sameWakeRestartRecord(record, pending) {
+			t.Fatalf("adopted notification current=%#v record=%#v", current, record)
+		}
+		return notifyErr
 	}
 	t.Cleanup(func() {
 		wakeRestartPreflight = oldPreflight
-		wakeRestartSignal = oldSignal
+		wakeRestartNotify = oldNotify
 	})
 
 	result, err := requestWakeRestart(fixture.root, fixture.agent)
-	if err == nil || !strings.Contains(err.Error(), "already pending for generation "+pending.Generation) {
-		t.Fatalf("second restart result=%#v err=%v", result, err)
+	if !errors.Is(err, notifyErr) {
+		t.Fatalf("adopted restart result=%#v err=%v", result, err)
 	}
-	if preflightCalled || signalCalled {
-		t.Fatalf("second restart reached preflight=%v signal=%v", preflightCalled, signalCalled)
+	if preflightCalled || !notifyCalled {
+		t.Fatalf("adopted restart preflight=%v notify=%v", preflightCalled, notifyCalled)
 	}
 	if err := fixture.agentDir.withFD(func(dirfd int) error {
 		current, exists, readErr := readWakeRestartRecordAt(dirfd, fixture.agentDir)
@@ -623,7 +1211,57 @@ func TestWakeRestartRejectsPendingCurrentGenerationBeforePreflight(t *testing.T)
 	}
 }
 
-func TestWakeRestartReplacesPendingOtherGenerationBeforeSignal(t *testing.T) {
+func TestWakeRestartPreservesClaimBeforeSuccessorPublication(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	claimed := fixture.record
+	claimed.Schema = wakeRestartSchemaV2
+	claimed.SuccessorGeneration = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, claimed)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPreflight := wakeRestartPreflight
+	oldNotify := wakeRestartNotify
+	preflightCalled := false
+	notifyCalled := false
+	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
+		preflightCalled = true
+		return nil
+	}
+	wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
+		notifyCalled = true
+		return nil
+	}
+	t.Cleanup(func() {
+		wakeRestartPreflight = oldPreflight
+		wakeRestartNotify = oldNotify
+	})
+
+	result, err := requestWakeRestart(fixture.root, fixture.agent)
+	if err == nil || !strings.Contains(err.Error(), "is preserved before successor publication") ||
+		!strings.Contains(result.Reason, wakeRestartCheckCommand(fixture.root, fixture.agent)) {
+		t.Fatalf("unstable claim result=%#v err=%v", result, err)
+	}
+	if preflightCalled || notifyCalled {
+		t.Fatalf("unstable claim reached preflight=%v notify=%v", preflightCalled, notifyCalled)
+	}
+	if err := fixture.agentDir.withFD(func(dirfd int) error {
+		current, exists, readErr := readWakeRestartRecordAt(dirfd, fixture.agentDir)
+		if readErr != nil {
+			return readErr
+		}
+		if !exists || !sameWakeRestartRecord(current, claimed) {
+			return fmt.Errorf("unstable claim changed: %#v exists=%v", current, exists)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWakeRestartPreservesPendingForeignGeneration(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	pending := fixture.record
 	pending.Generation = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -634,57 +1272,175 @@ func TestWakeRestartReplacesPendingOtherGenerationBeforeSignal(t *testing.T) {
 	}
 
 	preflightCalled := false
+	notifyCalled := false
 	oldPreflight := wakeRestartPreflight
-	oldSignal := wakeRestartSignal
+	oldNotify := wakeRestartNotify
 	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
 		preflightCalled = true
 		return nil
 	}
-	signalErr := errors.New("stop after stale request replacement")
-	wakeRestartSignal = func(*os.Process) error {
-		if err := fixture.agentDir.withFD(func(dirfd int) error {
-			current, exists, readErr := readWakeRestartRecordAt(dirfd, fixture.agentDir)
-			if readErr != nil {
-				return readErr
-			}
-			if !exists || current.Status != wakeRestartPending {
-				return fmt.Errorf("replacement restart record = %#v, exists=%v", current, exists)
-			}
-			if current.Generation != fixture.lock.Lock.Generation || current.RequestID == pending.RequestID {
-				return fmt.Errorf("replacement restart record did not supersede stale generation: %#v", current)
-			}
-			return nil
-		}); err != nil {
-			t.Error(err)
-		}
-		return signalErr
+	wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
+		notifyCalled = true
+		return nil
 	}
 	t.Cleanup(func() {
 		wakeRestartPreflight = oldPreflight
-		wakeRestartSignal = oldSignal
+		wakeRestartNotify = oldNotify
 	})
 
 	result, err := requestWakeRestart(fixture.root, fixture.agent)
-	if !errors.Is(err, signalErr) {
-		t.Fatalf("restart result=%#v err=%v, want signal error", result, err)
+	if err == nil || !strings.Contains(err.Error(), "is preserved because it does not match live generation") ||
+		!strings.Contains(result.Reason, wakeRestartCheckCommand(fixture.root, fixture.agent)) {
+		t.Fatalf("foreign pending restart result=%#v err=%v", result, err)
 	}
-	if !preflightCalled {
-		t.Fatal("replacement restart did not preflight candidate")
+	if preflightCalled || notifyCalled {
+		t.Fatalf("foreign pending reached preflight=%v notify=%v", preflightCalled, notifyCalled)
 	}
 	if err := fixture.agentDir.withFD(func(dirfd int) error {
 		current, exists, readErr := readWakeRestartRecordAt(dirfd, fixture.agentDir)
 		if readErr != nil {
 			return readErr
 		}
-		if !exists || current.Generation != fixture.lock.Lock.Generation ||
-			current.RequestID == pending.RequestID || current.Status != wakeRestartRefused ||
-			!strings.Contains(current.Reason, signalErr.Error()) ||
-			strings.Count(current.Reason, wakeRestartCheckCommand(fixture.root, fixture.agent)) != 1 {
-			return fmt.Errorf("post-signal replacement restart record = %#v, exists=%v", current, exists)
+		if !exists || !sameWakeRestartRecord(current, pending) {
+			return fmt.Errorf("foreign pending restart record = %#v, exists=%v", current, exists)
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWakeRestartQuarantinesExactInvalidRecordAndStops(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	raw := []byte(`{"schema":`)
+	removeWakeRestartRecordForTest(t, fixture)
+	path := filepath.Join(fixture.agentDir.path, wakeRestartFileName)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldNow := wakeQuarantineNow
+	oldPreflight := wakeRestartPreflight
+	oldNotify := wakeRestartNotify
+	wakeQuarantineNow = func() time.Time {
+		return time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	}
+	preflightCalled := false
+	notifyCalled := false
+	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
+		preflightCalled = true
+		return nil
+	}
+	wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
+		notifyCalled = true
+		return nil
+	}
+	t.Cleanup(func() {
+		wakeQuarantineNow = oldNow
+		wakeRestartPreflight = oldPreflight
+		wakeRestartNotify = oldNotify
+	})
+
+	result, restartErr := requestWakeRestart(fixture.root, fixture.agent)
+	if restartErr == nil || !strings.Contains(restartErr.Error(), "was preserved as .wake.restart.quarantined.") ||
+		!strings.Contains(result.Reason, wakeRestartCheckCommand(fixture.root, fixture.agent)) {
+		t.Fatalf("invalid restart result=%#v err=%v", result, restartErr)
+	}
+	if preflightCalled || notifyCalled {
+		t.Fatalf("invalid restart reached preflight=%v notify=%v", preflightCalled, notifyCalled)
+	}
+	if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid restart source remains: %v", statErr)
+	}
+	assertExactWakeQuarantineForTest(
+		t,
+		fixture.agentDir.path,
+		wakeRestartFileName+".quarantined.",
+		raw,
+		before,
+	)
+}
+
+func TestWakeRestartPreservesExactFutureSchemaRecordAndStops(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	future := fixture.record
+	future.Schema = wakeRestartSchemaV2 + 1
+	encoded, err := json.Marshal(future)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	document["request_id"] = map[string]any{"value": future.RequestID}
+	document["future_extension"] = map[string]any{"mode": "new"}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = append(raw, '\n')
+	removeWakeRestartRecordForTest(t, fixture)
+	path := filepath.Join(fixture.agentDir.path, wakeRestartFileName)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldPreflight := wakeRestartPreflight
+	oldNotify := wakeRestartNotify
+	preflightCalled := false
+	notifyCalled := false
+	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
+		preflightCalled = true
+		return nil
+	}
+	wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
+		notifyCalled = true
+		return nil
+	}
+	t.Cleanup(func() {
+		wakeRestartPreflight = oldPreflight
+		wakeRestartNotify = oldNotify
+	})
+
+	result, restartErr := requestWakeRestart(fixture.root, fixture.agent)
+	if restartErr == nil || !errors.Is(restartErr, errWakeRestartSchemaTooNew) ||
+		!strings.Contains(restartErr.Error(), "future-schema wake restart request is preserved") ||
+		!strings.Contains(restartErr.Error(), "newer AMQ") ||
+		!strings.Contains(result.Reason, wakeRestartCheckCommand(fixture.root, fixture.agent)) {
+		t.Fatalf("future restart result=%#v err=%v", result, restartErr)
+	}
+	if preflightCalled || notifyCalled {
+		t.Fatalf("future restart reached preflight=%v notify=%v", preflightCalled, notifyCalled)
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("future restart record identity changed")
+	}
+	afterRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, afterRaw) {
+		t.Fatal("future restart record content changed")
+	}
+	quarantined, err := filepath.Glob(path + ".quarantined.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quarantined) != 0 {
+		t.Fatalf("future restart record was quarantined: %v", quarantined)
 	}
 }
 
@@ -694,10 +1450,10 @@ func TestWakeRestartClientWaitsForPreparedRequestConsumption(t *testing.T) {
 	const nextGeneration = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 	oldPreflight := wakeRestartPreflight
-	oldSignal := wakeRestartSignal
+	oldNotify := wakeRestartNotify
 	oldSleep := wakeRestartSleep
 	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error { return nil }
-	wakeRestartSignal = func(*os.Process) error {
+	wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
 		restarted := fixture.lock.Lock
 		restarted.Generation = nextGeneration
 		bound := boundWakeImageEvidenceForTest(fixture.candidate)
@@ -723,7 +1479,7 @@ func TestWakeRestartClientWaitsForPreparedRequestConsumption(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		wakeRestartPreflight = oldPreflight
-		wakeRestartSignal = oldSignal
+		wakeRestartNotify = oldNotify
 		wakeRestartSleep = oldSleep
 	})
 
@@ -745,7 +1501,7 @@ func TestWakeRestartStraySignalWithoutRecordIsNoOp(t *testing.T) {
 	execCalled := false
 	oldBind := wakeRestartBind
 	oldExec := wakeRestartExec
-	wakeRestartBind = func(wakeImageEvidenceV1) (*wakeRestartBoundImage, error) {
+	wakeRestartBind = func(wakeRestartRecord) (*wakeRestartBoundImage, error) {
 		bindCalled = true
 		return nil, errors.New("unexpected bind")
 	}

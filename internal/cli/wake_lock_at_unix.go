@@ -256,6 +256,12 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 		}
 		detachedValidationErr = err
 	}
+	if err := reclaimWakeRestartStateForLockRemovalAt(dirfd, agentDir, inspection); err != nil {
+		return wakeLockRemovalOutcome{Err: fmt.Errorf(
+			"reconcile wake restart ownership before lock removal: %w",
+			err,
+		)}
+	}
 	path := filepath.Join(agentDir.path, ".wake.lock")
 	committed, err := removeWakeLockIfUnchangedGuardedWithIOStatus(
 		inspection,

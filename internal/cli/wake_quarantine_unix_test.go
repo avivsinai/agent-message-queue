@@ -5,6 +5,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +48,80 @@ func assertExactWakeQuarantineForTest(
 	}
 	if !bytes.Equal(gotRaw, wantRaw) || !os.SameFile(gotInfo, wantInfo) {
 		t.Fatal("quarantine artifact did not preserve exact inode/raw")
+	}
+}
+
+func TestWakeRestartQuarantineRefusesReplacedSnapshot(t *testing.T) {
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+	agentDir, err := openWakeAgentDir(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = agentDir.Close() })
+	path := filepath.Join(agentDir.path, wakeRestartFileName)
+	original := []byte(`{"schema":`)
+	replacement := []byte(`{"schema":99`)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var expected wakeRestartRecordSnapshot
+	if err := agentDir.withFD(func(dirfd int) error {
+		var exists bool
+		var readErr error
+		expected, exists, readErr = readWakeRestartRecordSnapshotAt(dirfd, agentDir)
+		if !exists || readErr == nil || expected.Object.FileInfo == nil {
+			return fmt.Errorf("initial restart snapshot exists=%v err=%v", exists, readErr)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldHook := beforeWakeRestartQuarantineRevalidation
+	beforeWakeRestartQuarantineRevalidation = func(wakeRestartRecordSnapshot) {
+		temp := path + ".replacement"
+		if err := os.WriteFile(temp, replacement, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(temp, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { beforeWakeRestartQuarantineRevalidation = oldHook })
+
+	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		_, quarantineErr := quarantineWakeRestartRecordAt(dirfd, agentDir, expected)
+		return quarantineErr
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed before quarantine") {
+		t.Fatalf("replacement quarantine error = %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, replacement) {
+		t.Fatalf("replacement restart raw=%q err=%v", got, err)
+	}
+	entries, err := os.ReadDir(agentDir.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), wakeRestartFileName+".quarantined.") {
+			t.Fatalf("replaced restart record was quarantined as %s", entry.Name())
+		}
+	}
+}
+
+func TestParseWakeRestartQuarantineName(t *testing.T) {
+	now := time.Date(2026, 8, 7, 12, 34, 56, 789, time.UTC)
+	name, err := wakeQuarantineName(wakeRestartFileName, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := parseWakeQuarantineName(name)
+	if !ok || !got.Equal(now) {
+		t.Fatalf("parse restart quarantine %q = %s ok=%v", name, got, ok)
 	}
 }
 
