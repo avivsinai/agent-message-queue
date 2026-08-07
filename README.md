@@ -332,6 +332,16 @@ They must leave a live wake running for `operator_only`, and must never turn a
 TIOCSTI refusal into an attention-only downgrade. `doctor --ops` exposes the
 same image and restart fields for every discovered wake lock.
 
+Resume-eligible wakes started by `coop exec` also follow the stable AMQ launch
+symlink. When an installer atomically points that locator at a strictly newer
+semantic version, the wake waits for a fully quiescent delivery boundary and
+replaces its image without changing PID, terminal ownership, or unread work.
+Pinned binaries, ownerless/keepalive wakes, repair flows, destructive
+interrupts, and arbitrary inject commands never self-upgrade. Disable the
+eligible default with `amq wake --no-self-upgrade` or
+`AMQ_WAKE_NO_SELF_UPGRADE=1`; schema-2 wake/doctor JSON reports the latest
+decision under `self_upgrade`.
+
 JSON schema 1 remains the byte-compatible default. Schema 2 is explicit with
 `--json-schema=2` and is available only with `--json`. It replaces prose
 parsing with a closed action kind, actor, reason code, and an argv command

@@ -35,11 +35,14 @@ const (
 	wakeRestartSchemaV2        = 2
 	wakeRestartPending         = "pending"
 	wakeRestartRefused         = "refused"
+	wakeRestartSourceForeign   = "foreign"
+	wakeRestartSourceSelf      = "self"
 	wakeRestartWaitTimeout     = 15 * time.Second
 )
 
 type wakeRestartRecord struct {
 	Schema              int                  `json:"schema"`
+	Source              string               `json:"source,omitempty"`
 	RequestID           string               `json:"request_id"`
 	Status              string               `json:"status"`
 	Root                string               `json:"root"`
@@ -578,6 +581,9 @@ func validateWakeRestartRecord(record wakeRestartRecord) error {
 	}
 	if record.Status != wakeRestartPending && record.Status != wakeRestartRefused {
 		return fmt.Errorf("wake restart status is invalid")
+	}
+	if record.Source != "" && record.Source != wakeRestartSourceForeign && record.Source != wakeRestartSourceSelf {
+		return fmt.Errorf("wake restart source is invalid")
 	}
 	if record.Status == wakeRestartPending && record.Reason != "" {
 		return fmt.Errorf("pending wake restart contains a refusal reason")
@@ -1159,7 +1165,12 @@ func persistWakeRestartBoundImage(
 	return persisted, err
 }
 
-func executeWakeRestart(record wakeRestartRecord, argv []string, restartSignals chan os.Signal) (returnErr error) {
+func executeWakeRestart(
+	record wakeRestartRecord,
+	argv []string,
+	incumbentVersion string,
+	restartSignals chan os.Signal,
+) (returnErr error) {
 	bootstrapValue := wakeResumeBootstrap{
 		Schema:             wakeRestartSchemaV1,
 		RequestID:          record.RequestID,
@@ -1177,6 +1188,11 @@ func executeWakeRestart(record wakeRestartRecord, argv []string, restartSignals 
 		return fmt.Errorf("persist wake restart bound stage: %w", err)
 	}
 	bootstrapValue.BoundImage = &boundEvidence
+	if record.Source == wakeRestartSourceSelf {
+		if err := probeBoundWakeSelfUpgradeVersion(bound, record, incumbentVersion); err != nil {
+			return fmt.Errorf("authorize bound wake self-upgrade: %w", err)
+		}
+	}
 	if err := wakeRestartBoundPreflight(bound, argv, bootstrapValue); err != nil {
 		return err
 	}
@@ -1316,23 +1332,121 @@ func handleWakeRestartAtLoopBoundary(
 		cfg.terminalGeneration,
 		cfg.wakeOwner,
 	)
-	if err != nil || !exists {
+	if err != nil {
 		return
+	}
+	if !exists {
+		cfg.selfUpgrade.restartPending = false
+		return
+	}
+	cfg.selfUpgrade.restartPending = record.Source == wakeRestartSourceSelf
+	recordSelfUpgradeDecision := func(action, reason string) {
+		if record.Source != wakeRestartSourceSelf || cfg.inspectTerminalGeneration == nil {
+			return
+		}
+		_ = recordWakeSelfUpgradeDecision(
+			agentDir,
+			cfg.inspectTerminalGeneration(),
+			cfg.selfUpgrade,
+			wakeSelfUpgradeDecision{
+				Action:    action,
+				Reason:    reason,
+				Candidate: wakeSelfUpgradeCandidateFromEvidence(record.Candidate),
+			},
+		)
 	}
 	decision := classifyWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
 	if decision.Disposition != wakeResumeProceed {
+		if record.Source == wakeRestartSourceSelf {
+			recordSelfUpgradeDecision(wakeSelfUpgradeActionDeferred, decision.Reason)
+			return
+		}
+		reason := wakeRestartReasonWithRemedy(decision.Reason, cfg.root, cfg.me)
 		_ = refuseWakeRestartRecord(
 			agentDir,
 			record,
-			wakeRestartReasonWithRemedy(decision.Reason, cfg.root, cfg.me),
+			reason,
 		)
+		recordSelfUpgradeDecision(wakeSelfUpgradeActionRefused, reason)
 		return
 	}
-	if err := executeWakeRestart(record, os.Args, cfg.restartSignals); err != nil {
-		_ = refuseWakeRestartRecord(
+	if err := executeWakeRestart(record, os.Args, cfg.terminalImageVersion, cfg.restartSignals); err != nil {
+		reason := wakeRestartReasonWithRemedy(err.Error(), cfg.root, cfg.me)
+		if record.Source == wakeRestartSourceSelf {
+			reason += "; candidate=" + wakeSelfUpgradeEvidenceIdentityString(record.Candidate)
+		}
+		refuseErr := refuseWakeRestartRecord(
 			agentDir,
 			record,
-			wakeRestartReasonWithRemedy(err.Error(), cfg.root, cfg.me),
+			reason,
 		)
+		if record.Source == wakeRestartSourceSelf && refuseErr == nil {
+			cfg.selfUpgrade.restartPending = false
+		}
+		recordSelfUpgradeDecision(wakeSelfUpgradeActionRefused, reason)
 	}
+}
+
+func maintainWakeSelfUpgradeAtLoopBoundary(
+	cfg *wakeConfig,
+	agentDir *wakeAgentDir,
+	watcher wakeAdmissionWatcher,
+	terminalRetry, scanRetry bool,
+) error {
+	if cfg.selfUpgrade.restartPending {
+		pending, exists, pendingErr := pendingWakeRestartForProcess(
+			agentDir,
+			canonicalWakeRoot(cfg.root),
+			cfg.me,
+			cfg.terminalGeneration,
+			cfg.wakeOwner,
+		)
+		if pendingErr != nil {
+			return pendingErr
+		}
+		if exists && pending.Source == wakeRestartSourceSelf {
+			handleWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
+			return nil
+		}
+		cfg.selfUpgrade.restartPending = false
+	}
+	if cfg.selfUpgrade.Enabled && cfg.selfUpgrade.Eligible {
+		probe, probeErr := probeWakeSelfUpgradeLocator(cfg.selfUpgrade.Locator)
+		if probeErr != nil {
+			return recordWakeSelfUpgradeDecision(
+				agentDir,
+				cfg.inspectTerminalGeneration(),
+				cfg.selfUpgrade,
+				wakeSelfUpgradeDecision{
+					Action: wakeSelfUpgradeActionNoCandidate,
+					Reason: "stable launch locator is unavailable; retrying next maintenance tick",
+				},
+			)
+		}
+		if sameWakeSelfUpgradeProbe(cfg.selfUpgrade.lastProbe, probe) {
+			return nil
+		}
+		quiescence := classifyWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
+		if quiescence.Disposition != wakeResumeProceed {
+			return recordWakeSelfUpgradeDecision(
+				agentDir,
+				cfg.inspectTerminalGeneration(),
+				cfg.selfUpgrade,
+				wakeSelfUpgradeDecision{
+					Action: wakeSelfUpgradeActionDeferred,
+					Reason: quiescence.Reason,
+				},
+			)
+		}
+	}
+	decision, err := maintainWakeSelfUpgrade(
+		&cfg.selfUpgrade,
+		agentDir,
+		cfg.inspectTerminalGeneration(),
+	)
+	if decision.Action == wakeSelfUpgradeActionPending {
+		cfg.selfUpgrade.restartPending = true
+		handleWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
+	}
+	return err
 }

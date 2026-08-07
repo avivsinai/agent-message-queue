@@ -201,6 +201,7 @@ var usageEnvironment = []string{
 	"  AM_SESSION          Pinned session identity (empty means exact-root context)",
 	"  AMQ_GLOBAL_ROOT     Global root fallback (for agents spawned by external orchestrators)",
 	"  AMQ_NO_UPDATE_CHECK  Disable update check (1/true/yes/on)",
+	"  AMQ_WAKE_NO_SELF_UPGRADE  Disable automatic wake self-upgrade (1/true/yes/on)",
 }
 
 func runUpgradeRegistry(args []string) error {

@@ -5,6 +5,7 @@ package cli
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -84,6 +85,31 @@ func TestPrepareCoopWakeLockRemovesProvenStaleWithoutPrompt(t *testing.T) {
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("stale lock remains: %v", err)
+	}
+}
+
+func TestPrepareCoopWakeLockProceedsAfterDiagnosticCleanupFailure(t *testing.T) {
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{PID: 66121, Generation: "stale"})
+	diagnosticPath := filepath.Join(filepath.Dir(lockPath), wakeSelfUpgradeFileName)
+	if err := os.Mkdir(diagnosticPath, 0o700); err != nil {
+		t.Fatalf("create unremovable diagnostic residue: %v", err)
+	}
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo { return wakeProcessInfo{PID: pid} })
+
+	stderr := captureWakeStderr(t, func() {
+		if err := prepareCoopWakeLock(root, "codex", false, "unused"); err != nil {
+			t.Fatalf("prepare stale wake lock with diagnostic residue: %v", err)
+		}
+	})
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("stale lock remains: %v", err)
+	}
+	if info, err := os.Stat(diagnosticPath); err != nil || !info.IsDir() {
+		t.Fatalf("diagnostic residue = (%v, %v), want retained directory", info, err)
+	}
+	if !strings.Contains(stderr, "left diagnostic-only self-upgrade residue") {
+		t.Fatalf("cleanup warning missing residue: %q", stderr)
 	}
 }
 

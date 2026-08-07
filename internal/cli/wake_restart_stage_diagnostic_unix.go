@@ -167,21 +167,28 @@ func fixWakeRestartResidueWithoutLock(root, agent string) error {
 		if current := inspectWakeLockAt(dirfd, agentDir, root, agent); current.Exists {
 			return fmt.Errorf("wake lock appeared before restart residue fix; preserving restart state")
 		}
+		var diagnosticErr error
+		if err := removeWakeSelfUpgradeDiagnosticAt(dirfd); err != nil {
+			diagnosticErr = newWakeLockResidueError(
+				wakeLockResidueSelfUpgradeDiagnostic,
+				fmt.Errorf("remove wake self-upgrade diagnostic after confirming no lock: %w", err),
+			)
+		}
 
 		snapshot, exists, readErr := readWakeRestartRecordSnapshotAt(dirfd, agentDir)
 		if readErr != nil {
 			if !exists || snapshot.Object.FileInfo == nil {
-				return fmt.Errorf("inspect wake restart record before fix: %w", readErr)
+				return errors.Join(diagnosticErr, fmt.Errorf("inspect wake restart record before fix: %w", readErr))
 			}
 		} else if !exists {
-			return nil
+			return diagnosticErr
 		} else if err := reclaimWakeRestartStagePlatform(snapshot.Record); err != nil {
-			return fmt.Errorf("reclaim wake restart stage before quarantine: %w", err)
+			return errors.Join(diagnosticErr, fmt.Errorf("reclaim wake restart stage before quarantine: %w", err))
 		}
 
 		if _, err := quarantineWakeRestartRecordAt(dirfd, agentDir, snapshot); err != nil {
-			return fmt.Errorf("quarantine wake restart record: %w", err)
+			return errors.Join(diagnosticErr, fmt.Errorf("quarantine wake restart record: %w", err))
 		}
-		return nil
+		return diagnosticErr
 	})
 }

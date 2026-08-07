@@ -382,10 +382,15 @@ func runCoopExec(args []string) error {
 		)
 	}
 	if !*noWakeFlag {
-		amqBin, binErr := os.Executable()
+		amqExecutable, binErr := os.Executable()
 		if binErr != nil {
-			amqBin = "amq"
+			return fmt.Errorf("resolve current amq executable: %w", binErr)
 		}
+		amqBin, binErr := coopWakeExecutionPath(amqExecutable)
+		if binErr != nil {
+			return binErr
+		}
+		wakeLaunchLocator := coopWakeLaunchLocator(os.Args[0])
 
 		captured, ownerErr := captureAuthoritativeCurrentWakeOwner()
 		if ownerErr != nil {
@@ -402,6 +407,12 @@ func runCoopExec(args []string) error {
 			cleanupWakeReady = cleanupReady
 			defer cleanupReady()
 			wakeCmd := exec.Command(amqBin, buildCoopWakeArgs(agentHandle, root, wakeInjectMode, wakeInjectVia, []string(wakeInjectArgFlags), readyPath)...)
+			if wakeLaunchLocator != "" {
+				// Execute the already-running image, but preserve the absolute,
+				// unresolved invocation locator as argv[0] so the child can safely
+				// validate and observe installer symlink flips without a launch TOCTOU.
+				wakeCmd.Args[0] = wakeLaunchLocator
+			}
 			// Set AM_ROOT in wake's env so the helper process resolves the same
 			// session root even if the parent shell inherited a different value.
 			wakeEnv, wakeEnvErr := wakeCommandEnv(baseEnv, root, earlyOwner)
