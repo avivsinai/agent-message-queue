@@ -185,7 +185,6 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 	defer func() { _ = agentDir.Close() }()
 
 	var expected wakeLockInspection
-	var creatorSnapshot wakeRestartRecordSnapshot
 	adopted := false
 	needsNotify := true
 	record := wakeRestartRecord{
@@ -288,7 +287,6 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 			if !created || !sameWakeRestartRecord(createdSnapshot.Record, record) {
 				return fmt.Errorf("wake restart request changed after creation")
 			}
-			creatorSnapshot = createdSnapshot
 		}
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !sameWakeLockInspection(expected, current) || !current.IdentityConfirmed {
@@ -305,9 +303,6 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 
 	if needsNotify {
 		if err := wakeRestartNotify(agentDir, expected, record); err != nil {
-			if !adopted {
-				_ = refuseWakeRestartCreatorSnapshot(agentDir, creatorSnapshot, err.Error())
-			}
 			result.Reason = err.Error()
 			return result, err
 		}
@@ -965,37 +960,6 @@ func retryWakeSelfUpgradeRefusal(
 		return persistErr
 	})
 	return resolved, persisted, continueObservation, returnErr
-}
-
-func refuseWakeRestartCreatorSnapshot(
-	agentDir *wakeAgentDir,
-	expected wakeRestartRecordSnapshot,
-	reason string,
-) error {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "restart refused"
-	}
-	if expected.Record.Schema != wakeRestartSchemaV1 ||
-		expected.Record.Status != wakeRestartPending {
-		return fmt.Errorf("created wake restart snapshot is not pending schema 1")
-	}
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		current, exists, err := readWakeRestartRecordSnapshotAt(dirfd, agentDir)
-		if err != nil || !exists {
-			return err
-		}
-		if current.Record.Schema != wakeRestartSchemaV1 ||
-			current.Record.Status != wakeRestartPending ||
-			!sameWakeRestartObjectSnapshot(expected, current) ||
-			!sameWakeRestartRecord(expected.Record, current.Record) {
-			return fmt.Errorf("created wake restart request changed before refusal")
-		}
-		refused := current.Record
-		refused.Status = wakeRestartRefused
-		refused.Reason = wakeRestartReasonWithRemedy(reason, refused.Root, refused.Agent)
-		return writeWakeRestartRecordAt(dirfd, agentDir, refused)
-	})
 }
 
 func encodeWakeResumeBootstrap(value wakeResumeBootstrap) (string, error) {
