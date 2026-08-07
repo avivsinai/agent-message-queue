@@ -82,12 +82,37 @@ type cmuxSurfaceIdentity struct {
 	ProcessAlive *bool
 }
 
+// Keep the token non-zero-sized so distinct snapshots cannot legally share an
+// address under Go's zero-size allocation rules.
+type cmuxOwnershipToken struct{ _ byte }
+
+// cmuxDegradedOwnershipError reports uncertain ownership while retaining a
+// physical identity established by one immutable cmux inventory snapshot.
+// Both the type and its snapshot token stay package-private.
+type cmuxDegradedOwnershipError struct {
+	inventoryToken *cmuxOwnershipToken
+	ownershipKey   string
+	detail         string
+}
+
+func (e *cmuxDegradedOwnershipError) Error() string {
+	if e.detail == "" {
+		return ErrTargetDegraded.Error()
+	}
+	return ErrTargetDegraded.Error() + ": " + e.detail
+}
+
+func (*cmuxDegradedOwnershipError) Unwrap() error {
+	return ErrTargetDegraded
+}
+
 // cmuxTargetInventory is a post-resolution snapshot. Physical ownership is
 // resolved once during the inventory build (liveness probes, corpse eviction,
 // and a single tree rebuild all happen there); OwnershipKey only reads the
 // resolved state below.
 type cmuxTargetInventory struct {
-	surfaces map[string]cmuxSurfaceIdentity
+	ownershipToken *cmuxOwnershipToken
+	surfaces       map[string]cmuxSurfaceIdentity
 	// claimants maps a canonical tty to its non-sentinel claimant surface ids
 	// after resolution (sorted). Used for ownership and for ambiguity messages.
 	claimants map[string][]string
@@ -371,11 +396,35 @@ func (i cmuxTargetInventory) OwnershipKey(target string) (string, error) {
 
 func (i cmuxTargetInventory) ambiguityError(target, tty string) error {
 	owners := i.claimants[tty]
-	return fmt.Errorf(
-		"%w: cmux target %q physical identity is ambiguous: tty %q has %d live surface aliases: %s; inspect cmux aliases and existing wakes manually",
-		ErrTargetDegraded,
-		target, tty, len(owners), strings.Join(owners, ", "),
-	)
+	return &cmuxDegradedOwnershipError{
+		inventoryToken: i.ownershipToken,
+		ownershipKey:   "tty:" + tty,
+		detail: fmt.Sprintf(
+			"cmux target %q physical identity is ambiguous: tty %q has %d live surface aliases: %s; inspect cmux aliases and existing wakes manually",
+			target, tty, len(owners), strings.Join(owners, ", "),
+		),
+	}
+}
+
+// CmuxDegradedOwnershipKey returns a physical key only when the error came
+// from the same concrete cmux inventory type used for the candidate lookup.
+// This prevents generic or third-party TargetInventory implementations from
+// turning ErrTargetDegraded into permission to skip an uncertain owner.
+func CmuxDegradedOwnershipKey(inventory TargetInventory, err error) (string, bool) {
+	var inventoryToken *cmuxOwnershipToken
+	switch typed := inventory.(type) {
+	case cmuxTargetInventory:
+		inventoryToken = typed.ownershipToken
+	case *cmuxTargetInventory:
+		inventoryToken = typed.ownershipToken
+	default:
+		return "", false
+	}
+	var degraded *cmuxDegradedOwnershipError
+	if inventoryToken == nil || !errors.As(err, &degraded) || degraded.inventoryToken != inventoryToken || degraded.ownershipKey == "" {
+		return "", false
+	}
+	return degraded.ownershipKey, true
 }
 
 func canonicalCmuxTTY(value string) (string, error) {
@@ -383,13 +432,39 @@ func canonicalCmuxTTY(value string) (string, error) {
 	if tty == "" {
 		return "", errors.New("system.tree surface tty is missing or blank")
 	}
-	if !filepath.IsAbs(tty) {
+	if tty == cmuxEvictedTTYName || tty == cmuxEvictedTTY {
+		return cmuxEvictedTTY, nil
+	}
+	if filepath.IsAbs(tty) {
+		if filepath.Clean(tty) != tty {
+			return "", fmt.Errorf("system.tree surface tty %q is not a canonical device path", value)
+		}
+	} else {
 		if filepath.Base(tty) != tty {
 			return "", fmt.Errorf("relative tty %q is not a device basename", value)
 		}
 		tty = filepath.Join("/dev", tty)
 	}
-	return filepath.Clean(tty), nil
+	if !isCmuxPTY(tty) {
+		return "", fmt.Errorf("system.tree surface tty %q is not a macOS PTY under /dev/ttys<digits>", value)
+	}
+	return tty, nil
+}
+
+func isCmuxPTY(tty string) bool {
+	if filepath.Dir(tty) != "/dev" {
+		return false
+	}
+	suffix, ok := strings.CutPrefix(filepath.Base(tty), "ttys")
+	if !ok || suffix == "" {
+		return false
+	}
+	for _, char := range suffix {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func sameCmuxSurfaceIdentity(left, right cmuxSurfaceIdentity) bool {
@@ -474,11 +549,12 @@ func (c Cmux) Inject(ctx context.Context, target string, payload string) error {
 
 func newCmuxInventory(surfaces map[string]cmuxSurfaceIdentity, res cmuxResolution) cmuxTargetInventory {
 	return cmuxTargetInventory{
-		surfaces:  surfaces,
-		claimants: res.claimants,
-		owner:     res.owner,
-		degraded:  res.degraded,
-		notFound:  res.notFound,
+		ownershipToken: &cmuxOwnershipToken{},
+		surfaces:       surfaces,
+		claimants:      res.claimants,
+		owner:          res.owner,
+		degraded:       res.degraded,
+		notFound:       res.notFound,
 	}
 }
 

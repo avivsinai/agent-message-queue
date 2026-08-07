@@ -327,6 +327,188 @@ func TestReattachRejectsDifferentSurfaceAliasOnOwnedPhysicalTTY(t *testing.T) {
 	}
 }
 
+func TestReattachIgnoresUnrelatedDegradedRegisteredCmuxTarget(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("cmux adapter requires macOS")
+	}
+	dir := t.TempDir()
+	registryPath := filepath.Join(dir, "registry.json")
+	degradedTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
+	degradedAlias := "cmux:surface:B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
+	candidateTarget := "cmux:surface:C71381D9-29D5-4D2D-A1C9-E101556BCB49"
+	store := registry.New(registryPath)
+	preservedEntry, err := store.Upsert(registry.Entry{Root: "/tmp/existing", Agent: "claude", Adapter: "cmux", Target: degradedTarget})
+	if err != nil {
+		t.Fatalf("Upsert degraded owner: %v", err)
+	}
+	runner := appCommandRunnerFunc(func(context.Context, string, ...string) ([]byte, error) {
+		return []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"ttys011"},{"id":"B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2","tty":"ttys011"},{"id":"C71381D9-29D5-4D2D-A1C9-E101556BCB49","tty":"ttys012"}]}]}]}]}`), nil
+	})
+	adapters := adapter.NewRegistry(adapter.Cmux{
+		Runner: runner,
+		Path:   "/fake/cmux",
+		Getenv: func(key string) string {
+			if key == "CMUX_SURFACE_ID" {
+				return strings.TrimPrefix(candidateTarget, "cmux:surface:")
+			}
+			return ""
+		},
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
+		},
+	})
+	amqCalls := filepath.Join(dir, "amq-calls.log")
+	fakeAMQ := filepath.Join(dir, "amq")
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`#!/bin/sh
+printf 'wake\n' >> "$AMQ_KEEPALIVE_AMQ_CALLS"
+ready=""
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "-ready-file" ]; then ready="$arg"; fi
+  previous="$arg"
+done
+[ -n "$ready" ] || exit 11
+printf ready > "$ready"
+sleep 0.1
+`), 0o700); err != nil {
+		t.Fatalf("write fake amq: %v", err)
+	}
+	t.Setenv("AMQ_KEEPALIVE_AMQ_CALLS", amqCalls)
+	var stderr bytes.Buffer
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
+		"reattach", "--registry", registryPath, "--adapter", "cmux", "--target", candidateTarget,
+		"--root", "/tmp/candidate", "--base-root", "/tmp", "--session", "candidate", "--me", "codex",
+		"--amq", fakeAMQ, "--self", "/bin/amq-keepalive",
+	})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s, want unrelated degraded target ignored", code, stderr.String())
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	targets := map[string]bool{}
+	var loadedPreserved registry.Entry
+	for _, entry := range loaded.Entries {
+		targets[entry.Target] = true
+		if entry.Target == degradedTarget {
+			loadedPreserved = entry
+		}
+	}
+	if len(loaded.Entries) != 2 || !targets[degradedTarget] || !targets[candidateTarget] || targets[degradedAlias] {
+		t.Fatalf("entries=%#v, want degraded owner preserved and candidate registered", loaded.Entries)
+	}
+	if !reflect.DeepEqual(loadedPreserved, preservedEntry) {
+		t.Fatalf("degraded entry changed: got=%#v want=%#v", loadedPreserved, preservedEntry)
+	}
+	data, err := os.ReadFile(amqCalls)
+	if err != nil || string(data) != "wake\n" {
+		t.Fatalf("amq calls=%q err=%v, want one candidate wake", data, err)
+	}
+}
+
+func TestReattachRejectsRegisteredCmuxTargetWithUnknownPhysicalKeyBeforeWake(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("cmux adapter requires macOS")
+	}
+	dir := t.TempDir()
+	registryPath := filepath.Join(dir, "registry.json")
+	unknownTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
+	candidateTarget := "cmux:surface:C71381D9-29D5-4D2D-A1C9-E101556BCB49"
+	store := registry.New(registryPath)
+	if _, err := store.Upsert(registry.Entry{Root: "/tmp/existing", Agent: "claude", Adapter: "cmux", Target: unknownTarget}); err != nil {
+		t.Fatalf("Upsert unknown owner: %v", err)
+	}
+	runner := appCommandRunnerFunc(func(context.Context, string, ...string) ([]byte, error) {
+		return []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"/dev/123"},{"id":"C71381D9-29D5-4D2D-A1C9-E101556BCB49","tty":"ttys012"}]}]}]}]}`), nil
+	})
+	adapters := adapter.NewRegistry(adapter.Cmux{
+		Runner: runner,
+		Path:   "/fake/cmux",
+		Getenv: func(key string) string {
+			if key == "CMUX_SURFACE_ID" {
+				return strings.TrimPrefix(candidateTarget, "cmux:surface:")
+			}
+			return ""
+		},
+	})
+	amqCalls := filepath.Join(dir, "amq-calls.log")
+	fakeAMQ := filepath.Join(dir, "amq")
+	if err := os.WriteFile(fakeAMQ, []byte("#!/bin/sh\nprintf wake >> \"$AMQ_KEEPALIVE_AMQ_CALLS\"\nexit 7\n"), 0o700); err != nil {
+		t.Fatalf("write fake amq: %v", err)
+	}
+	t.Setenv("AMQ_KEEPALIVE_AMQ_CALLS", amqCalls)
+	var stderr bytes.Buffer
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
+		"reattach", "--registry", registryPath, "--adapter", "cmux", "--target", candidateTarget,
+		"--root", "/tmp/candidate", "--base-root", "/tmp", "--session", "candidate", "--me", "codex",
+		"--amq", fakeAMQ,
+	})
+	if code != 1 || !strings.Contains(stderr.String(), "not a macOS PTY") {
+		t.Fatalf("code=%d stderr=%s, want unknown-key degradation refusal", code, stderr.String())
+	}
+	if _, err := os.Stat(amqCalls); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unknown-key refusal started a wake: stat err=%v", err)
+	}
+	loaded, err := store.Load()
+	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Target != unknownTarget {
+		t.Fatalf("unknown-key refusal changed registry: entries=%#v err=%v", loaded.Entries, err)
+	}
+}
+
+func TestReattachRejectsSamePhysicalKeyFromDegradedRegisteredTargetBeforeWake(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("cmux adapter requires macOS")
+	}
+	dir := t.TempDir()
+	registryPath := filepath.Join(dir, "registry.json")
+	degradedTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
+	candidateTarget := "cmux:surface:C71381D9-29D5-4D2D-A1C9-E101556BCB49"
+	store := registry.New(registryPath)
+	if _, err := store.Upsert(registry.Entry{Root: "/tmp/existing", Agent: "claude", Adapter: "cmux", Target: degradedTarget}); err != nil {
+		t.Fatalf("Upsert degraded owner: %v", err)
+	}
+	tree := []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"ttys012","process_alive":false},{"id":"C71381D9-29D5-4D2D-A1C9-E101556BCB49","tty":"ttys012","process_alive":true}]}]}]}]}`)
+	runner := appCommandRunnerFunc(func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[1] == "surface.report_tty" {
+			return nil, nil
+		}
+		return tree, nil
+	})
+	adapters := adapter.NewRegistry(adapter.Cmux{
+		Runner: runner,
+		Path:   "/fake/cmux",
+		Getenv: func(key string) string {
+			if key == "CMUX_SURFACE_ID" {
+				return strings.TrimPrefix(candidateTarget, "cmux:surface:")
+			}
+			return ""
+		},
+	})
+	amqCalls := filepath.Join(dir, "amq-calls.log")
+	fakeAMQ := filepath.Join(dir, "amq")
+	if err := os.WriteFile(fakeAMQ, []byte("#!/bin/sh\nprintf wake >> \"$AMQ_KEEPALIVE_AMQ_CALLS\"\nexit 7\n"), 0o700); err != nil {
+		t.Fatalf("write fake amq: %v", err)
+	}
+	t.Setenv("AMQ_KEEPALIVE_AMQ_CALLS", amqCalls)
+	var stderr bytes.Buffer
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
+		"reattach", "--registry", registryPath, "--adapter", "cmux", "--target", candidateTarget,
+		"--root", "/tmp/candidate", "--base-root", "/tmp", "--session", "candidate", "--me", "codex",
+		"--amq", fakeAMQ,
+	})
+	if code != 1 || !strings.Contains(stderr.String(), registry.ErrTargetOwned.Error()) || !strings.Contains(stderr.String(), "tty:/dev/ttys012") {
+		t.Fatalf("code=%d stderr=%s, want same-key ownership refusal", code, stderr.String())
+	}
+	if _, err := os.Stat(amqCalls); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("same-key refusal started a wake: stat err=%v", err)
+	}
+	loaded, err := store.Load()
+	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Target != degradedTarget {
+		t.Fatalf("same-key refusal changed registry: entries=%#v err=%v", loaded.Entries, err)
+	}
+}
+
 func TestReattachDoesNotEvictUnknownCmuxAliasForCurrentSurface(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("cmux adapter requires macOS")

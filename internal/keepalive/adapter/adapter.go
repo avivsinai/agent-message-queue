@@ -30,7 +30,11 @@ type TargetNormalizer interface {
 
 // TargetInventory is a point-in-time existence snapshot. Implementations must
 // return ErrTargetNotFound only when absence is proven by the snapshot; parse,
-// transport, and permission failures remain ambiguous errors.
+// transport, and permission failures remain ambiguous errors. When ownership
+// is degraded, callers remain fail-closed unless a concrete adapter-specific
+// capability proves that the same immutable inventory also established a
+// different physical identity. The generic interface deliberately exposes no
+// constructor for such a capability.
 type TargetInventory interface {
 	Probe(target string) error
 	OwnershipKey(target string) (string, error)
