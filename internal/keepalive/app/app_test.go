@@ -359,7 +359,7 @@ func TestReattachIgnoresUnrelatedDegradedRegisteredCmuxTarget(t *testing.T) {
 	})
 	amqCalls := filepath.Join(dir, "amq-calls.log")
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`#!/bin/sh
 printf 'wake\n' >> "$AMQ_KEEPALIVE_AMQ_CALLS"
 ready=""
 previous=""
