@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.57.1](https://github.com/avivsinai/agent-message-queue/compare/v0.57.0...v0.57.1) (2026-08-07)
+
+
+### Bug Fixes
+
+* **release:** enforce Skild alias ownership ([#463](https://github.com/avivsinai/agent-message-queue/issues/463)) ([8352211](https://github.com/avivsinai/agent-message-queue/commit/83522110a53b50acd88e4301ec9c4b76c49cba3f))
+
 ## [0.57.0](https://github.com/avivsinai/agent-message-queue/compare/v0.56.1...v0.57.0) (2026-08-07)
 
 
