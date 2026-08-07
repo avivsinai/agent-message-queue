@@ -32,6 +32,7 @@ const (
 	wakeSelfUpgradeActionRestartPresent   = "restart_present"
 	wakeSelfUpgradeActionPending          = "pending"
 	wakeSelfUpgradeActionDeferred         = "deferred"
+	wakeSelfUpgradeActionRefusalPending   = "refusal_pending"
 )
 
 // wakeSelfUpgradeState is process-local trigger state. The locator is captured
@@ -44,6 +45,12 @@ type wakeSelfUpgradeState struct {
 	Reason         string
 	lastProbe      wakeSelfUpgradeProbe
 	restartPending bool
+	refusalPending *wakeSelfUpgradeRefusalPending
+}
+
+type wakeSelfUpgradeRefusalPending struct {
+	Record wakeRestartRecord
+	Reason string
 }
 
 type wakeSelfUpgradeProbe struct {
@@ -100,6 +107,7 @@ var (
 	wakeSelfUpgradeRunVersion     = runWakeSelfUpgradeVersion
 	wakeSelfUpgradeNow            = time.Now
 	wakeSelfUpgradeLiveDifference = inspectWakeSelfUpgradeLiveDifference
+	wakeSelfUpgradeReadPublished  = readWakeRestartRecordAt
 )
 
 func coopWakeLaunchLocator(argv0 string) string {
@@ -252,6 +260,13 @@ func constrainWakeSelfUpgradeEligibility(
 }
 
 func probeWakeSelfUpgradeLocator(locator string) (wakeSelfUpgradeProbe, error) {
+	locatorInfo, err := wakeSelfUpgradeLstat(locator)
+	if err != nil {
+		return wakeSelfUpgradeProbe{}, err
+	}
+	if err := validateWakeSelfUpgradeLaunchLocator(locator, locatorInfo); err != nil {
+		return wakeSelfUpgradeProbe{}, err
+	}
 	resolved, err := wakeSelfUpgradeEvalSymlinks(locator)
 	if err != nil {
 		return wakeSelfUpgradeProbe{}, err
@@ -400,8 +415,8 @@ func maintainWakeSelfUpgrade(
 		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
 	}
 	decision.Candidate = wakeSelfUpgradeCandidateFromEvidence(evidence)
-	state.lastProbe = probe
 	if !wakeSelfUpgradeProbeMatchesEvidence(probe, evidence) {
+		state.lastProbe = probe
 		decision.Action = wakeSelfUpgradeActionRefused
 		decision.Reason = wakeRestartReasonWithRemedy(
 			"candidate image changed while capturing evidence",
@@ -412,6 +427,7 @@ func maintainWakeSelfUpgrade(
 	}
 	different, comparisonErr := wakeSelfUpgradeLiveDifference(inspection, probe)
 	if comparisonErr != nil || !different {
+		state.lastProbe = probe
 		decision.Action = wakeSelfUpgradeActionRefused
 		reason := "candidate image identity is not conclusively different from the live wake"
 		if comparisonErr != nil {
@@ -446,6 +462,10 @@ func maintainWakeSelfUpgrade(
 	if err != nil {
 		return decision, err
 	}
+	if decision.Action != wakeSelfUpgradeActionRestartPending &&
+		decision.Action != wakeSelfUpgradeActionRestartPresent {
+		state.lastProbe = probe
+	}
 	return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
 }
 
@@ -466,6 +486,23 @@ func publishWakeSelfUpgradePending(
 		}
 		if exists {
 			switch {
+			case existing.Record.Schema == wakeRestartSchemaV1 &&
+				existing.Record.Status == wakeRestartPending &&
+				existing.Record.Source == wakeRestartSourceSelf &&
+				existing.Record.Root == expected.Root &&
+				existing.Record.Agent == expected.Agent &&
+				existing.Record.Generation == expected.Lock.Generation &&
+				expected.Lock.ResumeOwner != nil &&
+				sameWakeOwner(&existing.Record.Owner, expected.Lock.ResumeOwner) &&
+				sameOptionalWakeImageEvidence(
+					existing.Record.PreviousBoundImage,
+					previousDarwinWakeRestartStageForLock(expected.Lock),
+				) &&
+				sameWakeSelfUpgradeCandidateIdentity(existing.Record.Candidate, record.Candidate):
+				decision.Action = wakeSelfUpgradeActionPending
+				decision.Reason = "existing self-upgrade restart request was adopted"
+				decision.Candidate = wakeSelfUpgradeCandidateFromEvidence(existing.Record.Candidate)
+				return nil
 			case existing.Record.Status == wakeRestartPending:
 				decision.Action = wakeSelfUpgradeActionRestartPending
 				decision.Reason = "an existing wake restart request is preserved"
@@ -493,7 +530,7 @@ func publishWakeSelfUpgradePending(
 		if err := writeWakeRestartRecordAt(dirfd, agentDir, record); err != nil {
 			return err
 		}
-		installed, installedExists, err := readWakeRestartRecordAt(dirfd, agentDir)
+		installed, installedExists, err := wakeSelfUpgradeReadPublished(dirfd, agentDir)
 		if err != nil || !installedExists || !sameWakeRestartRecord(record, installed) {
 			return fmt.Errorf("self-upgrade restart request changed after publication")
 		}

@@ -837,24 +837,118 @@ func removeWakeRestartRecordSnapshotAt(
 }
 
 func refuseWakeRestartRecord(agentDir *wakeAgentDir, expected wakeRestartRecord, reason string) error {
+	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		return refuseWakeRestartRecordAt(dirfd, agentDir, expected, reason)
+	})
+}
+
+func refuseWakeRestartRecordAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	expected wakeRestartRecord,
+	reason string,
+) error {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		reason = "restart refused"
 	}
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	current, exists, err := readWakeRestartRecordAt(dirfd, agentDir)
+	if err != nil || !exists {
+		return err
+	}
+	if expected.Schema != wakeRestartSchemaV1 || expected.Status != wakeRestartPending ||
+		current.Schema != wakeRestartSchemaV1 || current.Status != wakeRestartPending ||
+		!sameWakeRestartAttemptIdentity(expected, current) {
+		return fmt.Errorf("wake restart request changed before refusal")
+	}
+	current.Status = wakeRestartRefused
+	current.Reason = wakeRestartReasonWithRemedy(reason, current.Root, current.Agent)
+	return writeWakeRestartRecordAt(dirfd, agentDir, current)
+}
+
+func sameWakeRestartAttemptIdentity(expected, current wakeRestartRecord) bool {
+	return expected.Schema == current.Schema &&
+		expected.RequestID == current.RequestID &&
+		expected.Source == current.Source &&
+		expected.Root == current.Root &&
+		expected.Agent == current.Agent &&
+		expected.Generation == current.Generation &&
+		sameWakeOwner(&expected.Owner, &current.Owner) &&
+		sameWakeSelfUpgradeCandidateIdentity(expected.Candidate, current.Candidate) &&
+		expected.StagePath == current.StagePath &&
+		sameOptionalWakeImageEvidence(expected.PreviousBoundImage, current.PreviousBoundImage)
+}
+
+func retryWakeSelfUpgradeRefusal(
+	cfg *wakeConfig,
+	agentDir *wakeAgentDir,
+	pending wakeSelfUpgradeRefusalPending,
+) (resolved, persisted bool, returnErr error) {
+	returnErr = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		currentLock := inspectWakeLockAt(
+			dirfd,
+			agentDir,
+			canonicalWakeRoot(cfg.root),
+			cfg.me,
+		)
+		if !currentLock.Exists || currentLock.Status != wakeLockValid ||
+			!currentLock.IdentityConfirmed || currentLock.PID != os.Getpid() ||
+			currentLock.Lock.Generation != cfg.terminalGeneration ||
+			cfg.wakeOwner == nil || currentLock.Lock.ResumeOwner == nil ||
+			!sameWakeOwner(cfg.wakeOwner, currentLock.Lock.ResumeOwner) {
+			resolved = true
+			return nil
+		}
+
 		current, exists, err := readWakeRestartRecordAt(dirfd, agentDir)
-		if err != nil || !exists {
+		if err != nil {
 			return err
 		}
-		if expected.Schema != wakeRestartSchemaV1 || expected.Status != wakeRestartPending ||
-			current.Schema != wakeRestartSchemaV1 || current.Status != wakeRestartPending ||
-			current.RequestID != expected.RequestID || current.Generation != expected.Generation {
-			return fmt.Errorf("wake restart request changed before refusal")
+		if !exists || !sameWakeRestartAttemptIdentity(pending.Record, current) {
+			resolved = true
+			return nil
 		}
-		current.Status = wakeRestartRefused
-		current.Reason = wakeRestartReasonWithRemedy(reason, current.Root, current.Agent)
-		return writeWakeRestartRecordAt(dirfd, agentDir, current)
+		if current.Status == wakeRestartRefused {
+			resolved = true
+			persisted = true
+			return nil
+		}
+		if current.Status != wakeRestartPending {
+			resolved = true
+			return nil
+		}
+
+		persistErr := refuseWakeRestartRecordAt(
+			dirfd,
+			agentDir,
+			pending.Record,
+			pending.Reason,
+		)
+		if persistErr == nil {
+			resolved = true
+			persisted = true
+			return nil
+		}
+
+		// The metadata writer can report a post-rename sync or verification
+		// failure after the refusal is already authoritative. Re-observe under
+		// the same lifecycle guard before deciding whether refusal debt remains.
+		installed, installedExists, readErr := readWakeRestartRecordAt(dirfd, agentDir)
+		if readErr != nil {
+			return errors.Join(persistErr, readErr)
+		}
+		if !installedExists || !sameWakeRestartAttemptIdentity(pending.Record, installed) {
+			resolved = true
+			return nil
+		}
+		if installed.Status == wakeRestartRefused {
+			resolved = true
+			persisted = true
+			return nil
+		}
+		return persistErr
 	})
+	return resolved, persisted, returnErr
 }
 
 func refuseWakeRestartCreatorSnapshot(
@@ -1325,6 +1419,39 @@ func handleWakeRestartAtLoopBoundary(
 	if !ok || agentDir == nil {
 		return
 	}
+	if pending := cfg.selfUpgrade.refusalPending; pending != nil {
+		resolved, persisted, retryErr := retryWakeSelfUpgradeRefusal(cfg, agentDir, *pending)
+		if resolved {
+			cfg.selfUpgrade.refusalPending = nil
+			cfg.selfUpgrade.restartPending = false
+		}
+		if (persisted || !resolved) && pending.Record.Source == wakeRestartSourceSelf &&
+			cfg.inspectTerminalGeneration != nil {
+			action := wakeSelfUpgradeActionRefusalPending
+			reason := pending.Reason
+			if persisted {
+				action = wakeSelfUpgradeActionRefused
+			} else if retryErr != nil {
+				reason = fmt.Sprintf("%s; refusal persistence pending: %v", reason, retryErr)
+			}
+			_ = recordWakeSelfUpgradeDecision(
+				agentDir,
+				cfg.inspectTerminalGeneration(),
+				cfg.selfUpgrade,
+				wakeSelfUpgradeDecision{
+					Action:    action,
+					Reason:    reason,
+					Candidate: wakeSelfUpgradeCandidateFromEvidence(pending.Record.Candidate),
+				},
+			)
+		}
+		if persisted || !resolved {
+			return
+		}
+		// A conclusively replaced or removed record retires the old refusal debt.
+		// Continue this observation so a replacement request does not lose the
+		// only restart signal that announced it.
+	}
 	record, exists, err := pendingWakeRestartForProcess(
 		agentDir,
 		canonicalWakeRoot(cfg.root),
@@ -1374,14 +1501,28 @@ func handleWakeRestartAtLoopBoundary(
 		reason := wakeRestartReasonWithRemedy(err.Error(), cfg.root, cfg.me)
 		if record.Source == wakeRestartSourceSelf {
 			reason += "; candidate=" + wakeSelfUpgradeEvidenceIdentityString(record.Candidate)
+			cfg.selfUpgrade.refusalPending = &wakeSelfUpgradeRefusalPending{
+				Record: record,
+				Reason: reason,
+			}
 		}
 		refuseErr := refuseWakeRestartRecord(
 			agentDir,
 			record,
 			reason,
 		)
-		if record.Source == wakeRestartSourceSelf && refuseErr == nil {
-			cfg.selfUpgrade.restartPending = false
+		if record.Source == wakeRestartSourceSelf {
+			if refuseErr == nil {
+				cfg.selfUpgrade.refusalPending = nil
+				cfg.selfUpgrade.restartPending = false
+				recordSelfUpgradeDecision(wakeSelfUpgradeActionRefused, reason)
+			} else {
+				recordSelfUpgradeDecision(
+					wakeSelfUpgradeActionRefusalPending,
+					fmt.Sprintf("%s; refusal persistence pending: %v", reason, refuseErr),
+				)
+			}
+			return
 		}
 		recordSelfUpgradeDecision(wakeSelfUpgradeActionRefused, reason)
 	}
@@ -1393,6 +1534,10 @@ func maintainWakeSelfUpgradeAtLoopBoundary(
 	watcher wakeAdmissionWatcher,
 	terminalRetry, scanRetry bool,
 ) error {
+	if cfg.selfUpgrade.refusalPending != nil {
+		handleWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
+		return nil
+	}
 	if cfg.selfUpgrade.restartPending {
 		pending, exists, pendingErr := pendingWakeRestartForProcess(
 			agentDir,

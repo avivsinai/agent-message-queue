@@ -171,6 +171,34 @@ func TestCaptureWakeSelfUpgradeStartupStateDoesNotLosePreCaptureFlip(t *testing.
 	}
 }
 
+func TestProbeWakeSelfUpgradeLocatorRevalidatesUnresolvedOwner(t *testing.T) {
+	dir := t.TempDir()
+	target := writeWakeSelfUpgradeCandidate(t, dir, "candidate")
+	locator := filepath.Join(dir, "amq")
+	if err := os.Symlink(target, locator); err != nil {
+		t.Fatal(err)
+	}
+
+	previousCurrentUID := wakeTargetCurrentUID
+	previousOwnerUID := wakeTargetFileOwnerUID
+	previousEval := wakeSelfUpgradeEvalSymlinks
+	wakeTargetCurrentUID = func() (int, bool) { return 1000, true }
+	wakeTargetFileOwnerUID = func(os.FileInfo) (int, bool) { return 2000, true }
+	wakeSelfUpgradeEvalSymlinks = func(string) (string, error) {
+		t.Fatal("unsafe unresolved locator was followed")
+		return "", nil
+	}
+	t.Cleanup(func() {
+		wakeTargetCurrentUID = previousCurrentUID
+		wakeTargetFileOwnerUID = previousOwnerUID
+		wakeSelfUpgradeEvalSymlinks = previousEval
+	})
+
+	if _, err := probeWakeSelfUpgradeLocator(locator); err == nil || !strings.Contains(err.Error(), "owned by uid") {
+		t.Fatalf("probe error=%v, want unresolved-owner refusal", err)
+	}
+}
+
 func TestMaintainWakeSelfUpgradeUsesLiveProcessImageOverRecordedEvidence(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	removeWakeRestartRecordForTest(t, fixture)
@@ -250,6 +278,38 @@ func TestMaintainWakeSelfUpgradeRetriesTransientVersionFailure(t *testing.T) {
 	decision, err = maintainWakeSelfUpgrade(&state, fixture.agentDir, fixture.lock)
 	if err != nil || decision.Action != wakeSelfUpgradeActionPrefilterRefused || attempts != 2 {
 		t.Fatalf("retry decision=%#v attempts=%d err=%v", decision, attempts, err)
+	}
+}
+
+func TestMaintainWakeSelfUpgradeRetriesCandidateAfterForeignRecordClears(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	foreign := fixture.record
+	foreign.Source = wakeRestartSourceForeign
+	writeWakeCheckSelfUpgradeRestartRecord(t, fixture, foreign)
+
+	candidate := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
+	state := selfUpgradeStateForCandidate(t, candidate)
+	initialProbe := state.lastProbe
+	stubWakeSelfUpgradeVersion(t, "0.57.0")
+
+	decision, err := maintainWakeSelfUpgrade(&state, fixture.agentDir, fixture.lock)
+	if err != nil || decision.Action != wakeSelfUpgradeActionRestartPending {
+		t.Fatalf("foreign-record decision=%#v err=%v", decision, err)
+	}
+	if state.lastProbe != initialProbe {
+		t.Fatal("foreign restart record advanced the probe baseline")
+	}
+	removeWakeRestartRecordForTest(t, fixture)
+
+	decision, err = maintainWakeSelfUpgrade(&state, fixture.agentDir, fixture.lock)
+	if err != nil || decision.Action != wakeSelfUpgradeActionPending {
+		t.Fatalf("cleared-record decision=%#v err=%v", decision, err)
+	}
+	installed := readWakeSelfUpgradeRestartRecord(t, fixture)
+	installedCandidate := wakeSelfUpgradeCandidateFromEvidence(installed.Candidate)
+	if installed.Source != wakeRestartSourceSelf || decision.Candidate == nil ||
+		*installedCandidate != *decision.Candidate {
+		t.Fatalf("published record=%#v decision=%#v", installed, decision)
 	}
 }
 
