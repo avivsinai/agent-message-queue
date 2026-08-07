@@ -18,10 +18,10 @@ func configureWakeRestartAdvertisementPlatform(lock *wakeLock, _, _ string) {
 
 func validateWakeRestartTransportPlatform(lock wakeLock, _, _ string) error {
 	if lock.ResumeSignal != wakeResumeSignalUSR1 {
-		return fmt.Errorf("Linux wake restart requires direct SIGUSR1 delivery")
+		return fmt.Errorf("linux wake restart requires direct SIGUSR1 delivery")
 	}
 	if lock.ControlSocket != "" {
-		return fmt.Errorf("Linux wake restart refuses a control socket")
+		return fmt.Errorf("linux wake restart refuses a control socket")
 	}
 	return nil
 }
