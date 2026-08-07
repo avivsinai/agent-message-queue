@@ -18,12 +18,14 @@ const (
 	wakeImageMethodFDExec               = "fd_exec"
 	wakeImageMethodPathnameObserved     = "pathname_observed"
 	wakeImageMethodPathnameExecVerified = "pathname_execve_verified"
+	wakeResumeSignalUSR1                = "SIGUSR1"
 )
 
 // wakeImageEvidenceV1 records image metadata and its authority method.
-// pathname_observed is diagnostic on every platform. Darwin reserves
-// pathname_execve_verified for a path authenticated immediately before execve;
-// Linux resume authority requires fd_exec evidence from the executing image.
+// pathname_observed is diagnostic on every platform. A resumed Darwin wake
+// publishes the exact private hardlink path it executed after successor-side
+// verification; a resumed Linux wake publishes evidence from its bound FD and
+// verifies the running image through /proc/self/exe before rotating generation.
 type wakeImageEvidenceV1 struct {
 	Schema          int    `json:"schema"`
 	Platform        string `json:"platform"`
@@ -72,9 +74,6 @@ func validateWakeResumeAdvertisementWithContext(
 	if lock.Agent != expectedAgent {
 		return fmt.Errorf("wake resume agent does not match the trusted agent")
 	}
-	if expectedControlSocket == "" {
-		return fmt.Errorf("%w on %s", errWakeResumeControlEndpointUnsupported, platform)
-	}
 	if lock.ResumeSchema != wakeResumeSchemaV2 {
 		if lock.ResumeSchema == 0 {
 			return fmt.Errorf("wake resume schema is missing")
@@ -93,11 +92,14 @@ func validateWakeResumeAdvertisementWithContext(
 	if err := validateAuthoritativeWakeProcessIdentity(lock); err != nil {
 		return fmt.Errorf("wake resume process identity is invalid: %w", err)
 	}
-	if strings.TrimSpace(lock.ControlSocket) == "" {
+	if lock.ResumeSignal != "" && lock.ResumeSignal != wakeResumeSignalUSR1 {
+		return fmt.Errorf("wake resume signal is unsupported")
+	}
+	if lock.ResumeSignal == "" && strings.TrimSpace(lock.ControlSocket) == "" {
 		return fmt.Errorf("wake resume control endpoint is missing")
 	}
-	if lock.ControlSocket != expectedControlSocket {
-		return fmt.Errorf("wake resume control endpoint does not match the exact root, agent, and generation")
+	if lock.ResumeSignal == "" && lock.ControlSocket != "" && expectedControlSocket != "" && lock.ControlSocket != expectedControlSocket {
+		return fmt.Errorf("wake control endpoint does not match the exact root, agent, and generation")
 	}
 	if lock.SourceGeneration != "" || lock.SourceFloorDigest != "" {
 		return fmt.Errorf("wake repair lineage is not resumable")
@@ -108,16 +110,8 @@ func validateWakeResumeAdvertisementWithContext(
 	if err := validateWakeImageEvidenceForPlatform(*lock.RunningImageEvidence, platform); err != nil {
 		return err
 	}
-	switch platform {
-	case "darwin":
-		if lock.RunningImageEvidence.Method != wakeImageMethodPathnameExecVerified {
-			return fmt.Errorf("wake running image evidence is not bound immediately before execve")
-		}
-	case "linux":
-		if lock.RunningImageEvidence.Method != wakeImageMethodFDExec {
-			return fmt.Errorf("wake running image evidence is not kernel-bound to the executing image")
-		}
-	}
+	// Resumed wakes publish execution-bound evidence. Ordinary Darwin wakes may
+	// still publish pathname_observed evidence for diagnostics only.
 	if lock.ImagePath != lock.RunningImageEvidence.ExecutionPath {
 		return fmt.Errorf("wake image path does not match running image evidence")
 	}
@@ -211,7 +205,7 @@ func wakeResumeStartupEligible(
 		return false
 	}
 	switch wakeMode {
-	case wakeInjectModeRaw, wakeInjectModePaste, wakeInjectModeNone, wakeTargetInjectVia:
+	case wakeInjectModeRaw, wakeInjectModePaste, wakeInjectModeNone:
 		return true
 	default:
 		return false

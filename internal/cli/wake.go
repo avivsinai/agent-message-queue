@@ -46,6 +46,7 @@ type wakeConfig struct {
 	interruptCooldown             time.Duration
 	lastInterrupt                 time.Time
 	controlStop                   <-chan struct{}
+	restartSignals                chan os.Signal
 	beforeTerminalWrite           func() error
 	terminalWrite                 func(string) error
 	inspectTerminalGeneration     func() wakeLockInspection

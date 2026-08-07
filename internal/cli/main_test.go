@@ -8,7 +8,10 @@ import (
 	"testing"
 )
 
-const cliHelperEnv = "AMQ_TEST_CLI_HELPER"
+const (
+	cliHelperEnv                 = "AMQ_TEST_CLI_HELPER"
+	wakeRestartPTYOwnerHelperEnv = "AMQ_TEST_WAKE_RESTART_PTY_OWNER"
+)
 
 var cliSecureTempRoot string
 
@@ -30,7 +33,8 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	if os.Getenv(injectViaHelperEnv) == "1" {
+	if os.Getenv(injectViaHelperEnv) == "1" || os.Getenv(wakeRestartPTYOwnerHelperEnv) == "1" ||
+		os.Getenv("AMQ_TEST_WAKE_RESTART_BOUND_EXEC") != "" {
 		os.Exit(m.Run())
 	}
 
