@@ -499,6 +499,27 @@ func classifyWakeCheckReload(root, agent string, inspection wakeLockInspection) 
 		}
 		return unavailable(wakeReloadReasonAdvertisementInvalid)
 	}
+	if inspection.Lock.ResumeSignal == wakeResumeSignalUSR1 {
+		readiness, err := observeWakeRestartReadiness(root, agent, inspection)
+		if err != nil {
+			return unavailable(wakeReloadReasonNotPrepared)
+		}
+		if readiness.RecordExists && readiness.Record.Status == wakeRestartPending {
+			return unavailable(wakeReloadReasonRestartPending)
+		}
+		owner, err := wakeOwnerFromEnv()
+		if err != nil || owner == nil || inspection.Lock.ResumeOwner == nil ||
+			!sameWakeOwner(owner, inspection.Lock.ResumeOwner) {
+			return unavailable(wakeReloadReasonOwnerMismatch)
+		}
+		if !readiness.Prepared {
+			return unavailable(wakeReloadReasonNotPrepared)
+		}
+		return wakeCheckReloadDecision{
+			Status:     wakeReloadReady,
+			ReasonCode: wakeReloadReasonReady,
+		}
+	}
 	return wakeCheckReloadDecision{
 		Status:     wakeReloadAdvertised,
 		ReasonCode: wakeReloadReasonCommandUnavailable,
@@ -668,6 +689,10 @@ func classifyWakeCheckRestart(
 	startArgv := wakeCheckActionCommand(
 		"wake", "--root", decision.Root, "--me", decision.Agent,
 	)
+	retryCheckArgv := wakeCheckActionCommand(
+		"wake", "check", "--root", decision.Root, "--me", decision.Agent,
+		"--json", "--json-schema=2",
+	)
 	if !inspection.Exists {
 		switch {
 		case decision.Start.Available && decision.Start.Mode != wakeInjectModeNone:
@@ -700,6 +725,23 @@ func classifyWakeCheckRestart(
 		}
 		return
 	}
+	if decision.Wake.Live &&
+		(decision.Reload.ReasonCode == wakeReloadReasonNotPrepared ||
+			decision.Reload.ReasonCode == wakeReloadReasonRestartPending) {
+		message := "leave wake state unchanged and retry after restart preparation reaches a stable state"
+		if decision.Reload.ReasonCode == wakeReloadReasonRestartPending {
+			message = "leave wake state unchanged and retry after the pending wake restart reaches a stable state"
+		}
+		decision.RestartCapability = wakeRestartUnavailable
+		decision.Action = wakeCheckActionDecision{
+			Kind:       wakeActionWaitForStableState,
+			Actor:      wakeActionActorAgent,
+			ReasonCode: decision.Reload.ReasonCode,
+			Command:    retryCheckArgv,
+			Message:    message,
+		}
+		return
+	}
 	if decision.Repair.InjectViaAvailable && opsLock != nil {
 		decision.RestartCapability = wakeRestartAgentSafe
 		decision.Action = wakeCheckActionDecision{
@@ -714,6 +756,19 @@ func classifyWakeCheckRestart(
 		return
 	}
 	if decision.Wake.Live {
+		if decision.Reload.Status == wakeReloadReady {
+			decision.RestartCapability = wakeRestartAgentSafe
+			decision.Action = wakeCheckActionDecision{
+				Kind:       wakeActionRestartWake,
+				Actor:      wakeActionActorAgent,
+				ReasonCode: wakeReloadReasonReady,
+				Command: wakeCheckActionCommand(
+					"wake", "restart", "--root", decision.Root, "--me", decision.Agent,
+				),
+				Message: "ask the live wake to restart itself with amq wake restart",
+			}
+			return
+		}
 		decision.RestartCapability = wakeRestartOperatorOnly
 		terminalRequired :=
 			wakeCheckStringValue(decision.Wake.Mode, "") != wakeTargetInjectVia &&
@@ -780,8 +835,9 @@ func classifyWakeCheckRestart(
 		decision.RestartCapability = wakeRestartUnavailable
 		decision.Action = wakeCheckActionDecision{
 			Kind:       wakeActionWaitForStableState,
-			Actor:      wakeActionActorNone,
+			Actor:      wakeActionActorAgent,
 			ReasonCode: wakeReasonWakeStateCreating,
+			Command:    retryCheckArgv,
 			Message:    "leave wake state unchanged and retry after lock creation finishes",
 		}
 	default:

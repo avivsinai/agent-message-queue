@@ -45,6 +45,9 @@ func TestCaptureWakeImageEvidenceBindsStableRegularExecutable(t *testing.T) {
 }
 
 func TestLinuxFabricatedPathEvidenceCannotAuthorizeResume(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux pathname evidence invariant")
+	}
 	dir := secureTempDirForTest(t)
 	path := filepath.Join(dir, "fabricated-amq")
 	if err := os.WriteFile(path, []byte("not the running image\n"), 0o700); err != nil {
@@ -68,18 +71,31 @@ func TestLinuxFabricatedPathEvidenceCannotAuthorizeResume(t *testing.T) {
 	lock.RunningImageEvidence = &evidence
 	lock.ImagePath = evidence.ExecutionPath
 	lock.ImageVersion = evidence.EmbeddedVersion
-	controlSocket := filepath.Join(fsq.AgentBase(lock.Root, lock.Agent), ".w.test-linux-resume")
-	lock.ControlSocket = controlSocket
+	lock.ResumeSignal = wakeResumeSignalUSR1
+	lock.ControlSocket = ""
 
 	err = validateWakeResumeAdvertisementWithContext(
 		lock,
 		lock.Root,
 		lock.Agent,
 		"linux",
-		controlSocket,
+		"",
 	)
-	if err == nil || !strings.Contains(err.Error(), "kernel-bound") {
-		t.Fatalf("Linux fabricated path advertisement error = %v, want kernel-bound refusal", err)
+	if err != nil {
+		t.Fatalf("Linux persisted pathname diagnostics should remain a valid advertisement: %v", err)
+	}
+	bootstrap := wakeResumeBootstrap{
+		Schema:     wakeRestartSchemaV1,
+		RequestID:  "0123456789abcdef0123456789abcdef",
+		Generation: lock.Generation,
+	}
+	if err := preflightWakeRestartCandidate(evidence, []string{
+		evidence.ExecutionPath,
+		"wake",
+		"--root", lock.Root,
+		"--me", lock.Agent,
+	}, bootstrap); err == nil {
+		t.Fatal("persisted pathname evidence alone authorized executing a mismatched candidate")
 	}
 }
 
@@ -177,7 +193,7 @@ func validWakeResumeLockForTest() wakeLock {
 		BootID:               owner.BootID,
 		WakeMode:             wakeInjectModeRaw,
 		Generation:           generation,
-		ControlSocket:        wakeControlSocketPath(root, agent, generation),
+		ResumeSignal:         wakeResumeSignalUSR1,
 		ImagePath:            evidence.ExecutionPath,
 		ImageVersion:         evidence.EmbeddedVersion,
 		ResumeSchema:         wakeResumeSchemaV2,
@@ -229,14 +245,6 @@ func TestValidateWakeResumeAdvertisementBindsTrustedRootAndAgent(t *testing.T) {
 }
 
 func TestValidateWakeResumeAdvertisementAcceptsOnlyCompleteExactV2(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		lock := validWakeResumeLockForTest()
-		err := validateWakeResumeAdvertisement(lock, lock.Root, lock.Agent)
-		if err == nil || !strings.Contains(err.Error(), "unsupported") {
-			t.Fatalf("non-Darwin resume advertisement error = %v, want unsupported", err)
-		}
-		return
-	}
 	lock := validWakeResumeLockForTest()
 	if err := validateWakeResumeAdvertisement(lock, lock.Root, lock.Agent); err != nil {
 		t.Fatalf("valid resume advertisement rejected: %v", err)
@@ -254,23 +262,8 @@ func TestValidateWakeResumeAdvertisementAcceptsOnlyCompleteExactV2(t *testing.T)
 		{name: "missing generation", mutate: func(l *wakeLock) { l.Generation = "" }, want: "generation"},
 		{name: "missing wake process start", mutate: func(l *wakeLock) { l.ProcessStart = "" }, want: "process start"},
 		{name: "missing wake boot id", mutate: func(l *wakeLock) { l.BootID = "" }, want: "boot id"},
-		{name: "missing control endpoint", mutate: func(l *wakeLock) { l.ControlSocket = "" }, want: "control"},
-		{name: "relative control endpoint", mutate: func(l *wakeLock) { l.ControlSocket = ".w.relative" }, want: "control"},
-		{name: "outside-agent control endpoint", mutate: func(l *wakeLock) {
-			l.ControlSocket = filepath.Join(l.Root, ".w.outside")
-		}, want: "control"},
-		{name: "wrong-prefix control endpoint", mutate: func(l *wakeLock) {
-			l.ControlSocket = filepath.Join(fsq.AgentBase(l.Root, l.Agent), ".wake.sock")
-		}, want: "control"},
-		{name: "wrong-generation control endpoint", mutate: func(l *wakeLock) {
-			l.ControlSocket = wakeControlSocketPath(l.Root, l.Agent, "other-generation")
-		}, want: "control"},
-		{name: "wrong-agent control endpoint", mutate: func(l *wakeLock) {
-			l.ControlSocket = wakeControlSocketPath(l.Root, "other", l.Generation)
-		}, want: "control"},
-		{name: "wrong-root control endpoint", mutate: func(l *wakeLock) {
-			l.ControlSocket = wakeControlSocketPath(filepath.Join(l.Root, "other"), l.Agent, l.Generation)
-		}, want: "control"},
+		{name: "missing request endpoint", mutate: func(l *wakeLock) { l.ResumeSignal = "" }, want: "control"},
+		{name: "unsupported signal", mutate: func(l *wakeLock) { l.ResumeSignal = "SIGUSR2" }, want: "signal"},
 		{name: "repair lineage", mutate: func(l *wakeLock) { l.SourceGeneration = "dead-generation" }, want: "repair"},
 		{name: "missing evidence", mutate: func(l *wakeLock) { l.RunningImageEvidence = nil }, want: "image evidence"},
 		{name: "wrong evidence schema", mutate: func(l *wakeLock) { l.RunningImageEvidence.Schema++ }, want: "image evidence schema"},
@@ -314,6 +307,37 @@ func TestValidateWakeResumeAdvertisementAcceptsOnlyCompleteExactV2(t *testing.T)
 	}
 }
 
+func TestValidateWakeResumeAdvertisementRetainsLegacyControlEndpointValidation(t *testing.T) {
+	lock := validWakeResumeLockForTest()
+	lock.ResumeSignal = ""
+	lock.ControlSocket = "/queue/agents/codex/.w.resume-generation"
+	lock.RunningImageEvidence.Platform = "darwin"
+	lock.RunningImageEvidence.Method = wakeImageMethodPathnameExecVerified
+	lock.RunningImageEvidence.ExecutionPath = "/opt/homebrew/bin/amq"
+	lock.ImagePath = lock.RunningImageEvidence.ExecutionPath
+	expected := lock.ControlSocket
+	if err := validateWakeResumeAdvertisementWithContext(lock, lock.Root, lock.Agent, "darwin", expected); err != nil {
+		t.Fatalf("legacy control advertisement rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "missing", want: "control endpoint is missing"},
+		{name: "mismatched", path: expected + ".other", want: "control endpoint does not match"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := lock
+			candidate.ControlSocket = test.path
+			err := validateWakeResumeAdvertisementWithContext(candidate, lock.Root, lock.Agent, "darwin", expected)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("legacy control error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestWakeResumeMetadataRoundTripsWithoutChangingGenericClaim(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
@@ -341,19 +365,15 @@ func TestWakeResumeMetadataRoundTripsWithoutChangingGenericClaim(t *testing.T) {
 	if got := classifyWakeClaimForGenericTransition(inspection); got != wakeClaimGeneric {
 		t.Fatalf("claim = %v, want generic", got)
 	}
-	if err := validateWakeResumeAdvertisement(inspection.Lock, root, "codex"); runtime.GOOS == "darwin" {
-		if err != nil {
-			t.Fatalf("round-tripped advertisement invalid: %v", err)
-		}
-	} else if err == nil || !strings.Contains(err.Error(), "unsupported") {
-		t.Fatalf("non-Darwin round-tripped advertisement error = %v, want unsupported", err)
+	if err := validateWakeResumeAdvertisement(inspection.Lock, root, "codex"); err != nil {
+		t.Fatalf("round-tripped advertisement invalid: %v", err)
 	}
 
 	data, err := json.Marshal(inspection.Lock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"resume_schema", "resume_owner", "running_image_evidence"} {
+	for _, field := range []string{"resume_schema", "resume_owner", "resume_signal", "running_image_evidence"} {
 		if !strings.Contains(string(data), `"`+field+`"`) {
 			t.Fatalf("lock JSON missing %q: %s", field, data)
 		}
@@ -402,23 +422,32 @@ func TestNewWakeLockAdvertisesResumeOnlyWhenTheProtocolIsComplete(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS == "linux" {
-		// Wave 1 deliberately does not advertise the protocol before Wave 2
-		// supplies Linux's authenticated control endpoint.
-		if lock.ResumeSchema != 0 || lock.ResumeOwner != nil || lock.RunningImageEvidence != nil {
-			t.Fatalf("Linux advertised resume before its control transport exists: %#v", lock)
-		}
-		return
-	}
 	if lock.ResumeSchema != wakeResumeSchemaV2 || !sameWakeOwner(lock.ResumeOwner, &owner) ||
+		lock.ResumeSignal != wakeResumeSignalUSR1 || lock.ControlSocket != "" ||
 		lock.RunningImageEvidence == nil || *lock.RunningImageEvidence != evidence {
 		t.Fatalf("resume advertisement = %#v", lock)
 	}
-	if lock.ControlSocket == "" {
-		t.Fatal("Darwin resume advertisement has no control endpoint")
-	}
 	if err := validateWakeResumeAdvertisement(lock, "/queue", "codex"); err != nil {
 		t.Fatalf("new lock advertisement invalid: %v", err)
+	}
+
+	targetRoot := secureTempDirForTest(t)
+	injector := filepath.Join(targetRoot, "injector")
+	if err := os.WriteFile(injector, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := mustNewWakeTargetForTest(t, targetRoot, "codex", injector, nil)
+	targetLock, err := newWakeLock(targetRoot, "codex", wakeLockAcquireOptions{
+		target:         &target,
+		wakeMode:       wakeTargetInjectVia,
+		requestedOwner: &owner,
+		resumeEligible: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targetLock.ResumeSchema != 0 || targetLock.ResumeOwner != nil || targetLock.ResumeSignal != "" {
+		t.Fatalf("inject-via target advertised resume despite target guard: %#v", targetLock)
 	}
 
 	notEligible, err := newWakeLock("/queue", "codex", wakeLockAcquireOptions{
@@ -431,7 +460,8 @@ func TestNewWakeLockAdvertisesResumeOnlyWhenTheProtocolIsComplete(t *testing.T) 
 	if notEligible.ResumeSchema != 0 || notEligible.ResumeOwner != nil {
 		t.Fatalf("ineligible wake advertised resume: %#v", notEligible)
 	}
-	if notEligible.RunningImageEvidence == nil || *notEligible.RunningImageEvidence != evidence {
+	if runtime.GOOS == "darwin" &&
+		(notEligible.RunningImageEvidence == nil || *notEligible.RunningImageEvidence != evidence) {
 		t.Fatalf("ordinary Darwin wake omitted additive image evidence: %#v", notEligible)
 	}
 
@@ -465,7 +495,7 @@ func TestWakeResumeStartupEligibilityIsNarrowAndOwnerBound(t *testing.T) {
 		{name: "raw coop", owner: &owner, mode: wakeInjectModeRaw, want: true},
 		{name: "paste coop", owner: &owner, mode: wakeInjectModePaste, want: true},
 		{name: "none coop", owner: &owner, mode: wakeInjectModeNone, want: true},
-		{name: "ordinary inject via", owner: &owner, mode: wakeTargetInjectVia, want: true},
+		{name: "ordinary inject via", owner: &owner, mode: wakeTargetInjectVia},
 		{name: "ownerless", mode: wakeInjectModeRaw},
 		{name: "repair lineage", owner: &owner, mode: wakeTargetInjectVia, repair: true},
 		{name: "arbitrary inject command", owner: &owner, mode: wakeInjectModeRaw, injectCmd: "helper"},

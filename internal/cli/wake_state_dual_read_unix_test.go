@@ -774,6 +774,44 @@ func TestWakeTargetAndPreparedReopenFailuresAreTypedSnapshotChanges(t *testing.T
 	})
 }
 
+type wakeGenerationFileInfoOverride struct {
+	os.FileInfo
+	mode os.FileMode
+	size int64
+}
+
+func (info wakeGenerationFileInfoOverride) Mode() os.FileMode { return info.mode }
+func (info wakeGenerationFileInfoOverride) Size() int64       { return info.size }
+
+func TestWakeGenerationFileSnapshotFreezesModeAndSizeWhenCTimeAliases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "marker")
+	if err := os.WriteFile(path, []byte("marker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameIdentity := wakeGenerationFileInfoOverride{
+		FileInfo: base,
+		mode:     base.Mode(),
+		size:     base.Size(),
+	}
+	if !sameWakeGenerationFileSnapshot(base, sameIdentity) {
+		t.Fatal("identical generation file snapshot was rejected")
+	}
+	modeChanged := sameIdentity
+	modeChanged.mode = 0o640
+	if sameWakeGenerationFileSnapshot(base, modeChanged) {
+		t.Fatal("same-ctime mode change was accepted")
+	}
+	sizeChanged := sameIdentity
+	sizeChanged.size++
+	if sameWakeGenerationFileSnapshot(base, sizeChanged) {
+		t.Fatal("same-ctime size change was accepted")
+	}
+}
+
 func readWakeStateSelectionForTest(t *testing.T, fixture wakeStateUnixFixture) (wakeStateReadSelection, error) {
 	t.Helper()
 	var selection wakeStateReadSelection

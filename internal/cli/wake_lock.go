@@ -41,6 +41,7 @@ type wakeLock struct {
 	Owner                *wakeOwner           `json:"owner,omitempty"`                  // Exact owner identity for an authoritative owner-bound lock
 	ResumeSchema         int                  `json:"resume_schema,omitempty"`          // Agent-safe self-exec protocol; independent of OwnerSchema
 	ResumeOwner          *wakeOwner           `json:"resume_owner,omitempty"`           // Exact coop owner used only for reload authentication/lifetime
+	ResumeSignal         string               `json:"resume_signal,omitempty"`          // Same-process restart request signal advertised by resumable wakes
 	RunningImageEvidence *wakeImageEvidenceV1 `json:"running_image_evidence,omitempty"` // Serialized running-image authority
 }
 
