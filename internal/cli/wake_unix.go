@@ -108,7 +108,8 @@ type wakeLockAcquireOptions struct {
 	repairFloorAuthority    *wakeRepairFloorAuthority
 	// resumeEligible is startup policy, not authority. newWakeLock still requires
 	// the complete owner/process/control/image advertisement below.
-	resumeEligible bool
+	resumeEligible      bool
+	resumeImageEvidence *wakeImageEvidenceV1
 }
 
 func debugWakeNoLockShadowReplacementAt(
@@ -662,7 +663,15 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 		}
 	}
 	lock.ImageVersion = strings.TrimSpace(cliVersion)
-	if runtime.GOOS == "darwin" {
+	if options.resumeImageEvidence != nil {
+		evidence := *options.resumeImageEvidence
+		if err := validateWakeImageEvidence(evidence); err != nil {
+			return wakeLock{}, fmt.Errorf("wake resume image evidence is invalid: %w", err)
+		}
+		lock.RunningImageEvidence = &evidence
+		lock.ImagePath = evidence.ExecutionPath
+		lock.ImageVersion = evidence.EmbeddedVersion
+	} else if runtime.GOOS == "darwin" {
 		// Darwin has no retained executable FD. Capture the observed pathname
 		// identity for diagnostics, but do not treat it as agent-safe resume
 		// authority after exec.
@@ -700,13 +709,10 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 		lock.Executable = proc.Executable
 		lock.Args = proc.Args
 	}
-	if options.resumeEligible && options.requestedOwner != nil && options.repairLineage == nil {
+	if options.resumeEligible && options.target == nil && options.requestedOwner != nil && options.repairLineage == nil {
 		// Resume metadata is additive capability. Missing or inconsistent evidence
 		// keeps the ordinary notifier usable without advertising agent-safe reload.
 		candidate := lock
-		if candidate.ControlSocket == "" {
-			candidate.ControlSocket = wakeControlSocketPath(root, me, candidate.Generation)
-		}
 		evidence := lock.RunningImageEvidence
 		if evidence == nil {
 			captured, evidenceErr := captureCurrentWakeImageEvidence()
@@ -718,7 +724,9 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 			owner := *options.requestedOwner
 			candidate.ResumeSchema = wakeResumeSchemaV2
 			candidate.ResumeOwner = &owner
+			candidate.ResumeSignal = wakeResumeSignalUSR1
 			candidate.RunningImageEvidence = evidence
+			candidate.Args = append([]string(nil), os.Args...)
 			candidate.ImagePath = evidence.ExecutionPath
 			candidate.ImageVersion = evidence.EmbeddedVersion
 			if validateWakeResumeAdvertisement(candidate, root, me) == nil {
@@ -995,6 +1003,8 @@ func runWake(args []string) error {
 			return runWakeCheck(args[1:])
 		case "repair":
 			return runWakeRepair(args[1:])
+		case "restart":
+			return runWakeRestart(args[1:])
 		case "retire":
 			return runWakeRetire(args[1:])
 		case "recover-owner":
@@ -1735,6 +1745,23 @@ func buildRepairWakeArgs(root, me string, target wakeTarget, generation, readyPa
 }
 
 func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
+	resumeBootstrap, err := wakeResumeBootstrapFromEnv()
+	if err != nil {
+		return err
+	}
+	resumePreflight, err := wakeResumePreflightFromEnv()
+	if err != nil {
+		return err
+	}
+	if resumeBootstrap != nil && resumePreflight != nil {
+		return fmt.Errorf("wake resume bootstrap and preflight cannot be combined")
+	}
+	// Install restart delivery before a resumable generation can be published.
+	// SIGUSR1's default disposition is termination, so advertising first would
+	// create a small but real kill window.
+	restartSignals := make(chan os.Signal, 1)
+	signal.Notify(restartSignals, syscall.SIGUSR1)
+	defer signal.Stop(restartSignals)
 	privateStop, cleanupPrivateStop, err := authoritativeWakePrivateStopFromEnv()
 	if err != nil {
 		return err
@@ -1789,9 +1816,10 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	refuseUnverifiedWakeFlag := fs.Bool("refuse-unverified-wake", false, "Internal: refuse unverified wake locks instead of superseding them")
 	repairLineageFlag := fs.String("repair-lineage", "", "Internal: inherit the suppression floor from an exact dead wake generation")
 	baselineExistingFlag := fs.Bool("baseline-existing", false, "Ignore messages already waiting when this wake starts")
+	resumePreflightFlag := fs.Bool(wakeResumePreflightFlag, false, "Internal: validate an exact wake resume without starting")
 
 	usage := usageWithHiddenFlags(fs, "amq wake --me <agent> [options]",
-		[]string{"ready-file", "accept-existing-wake", "refuse-unverified-wake", "repair-lineage"},
+		[]string{"ready-file", "accept-existing-wake", "refuse-unverified-wake", "repair-lineage", wakeResumePreflightFlag},
 		"Background waker: injects terminal notification when messages arrive.",
 		"Run as background job before starting CLI: amq wake --me claude --interrupt-cmd none &",
 		"",
@@ -1844,6 +1872,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		return err
 	} else if handled {
 		return nil
+	}
+	if *resumePreflightFlag != (resumePreflight != nil) {
+		return fmt.Errorf("wake resume preflight flag and environment must be paired")
 	}
 	if *previewLenFlag < 0 {
 		return UsageError("--preview-len must be >= 0")
@@ -1940,10 +1971,53 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	if repairGeneration == "" && repairHandoffPresent {
 		return fmt.Errorf("wake repair handoff requires --repair-lineage")
 	}
+	resumeContext := resumeBootstrap
+	if resumeContext == nil {
+		resumeContext = resumePreflight
+	}
+	var resumeImageEvidence *wakeImageEvidenceV1
+	if resumeContext != nil {
+		if repairGeneration != "" || repairHandoffPresent {
+			return fmt.Errorf("wake resume cannot inherit repair state")
+		}
+		// Readiness files and startup baselines are one-shot launch inputs. A
+		// self-resume republishes readiness for its new generation and treats all
+		// durable inbox/new entries as pending.
+		readyFile = ""
+		*acceptExistingWakeFlag = false
+		*baselineExistingFlag = false
+		if resumeBootstrap != nil || resumeContext.BoundImage != nil {
+			verified, verifyErr := verifyWakeResumeBoundImage(*resumeContext)
+			if verifyErr != nil {
+				return verifyErr
+			}
+			resumeImageEvidence = &verified
+		}
+		if resumeBootstrap != nil {
+			cleanupBootstrap := *resumeBootstrap
+			cleanupBootstrap.BoundImage = resumeImageEvidence
+			defer func() {
+				returnErr = errors.Join(returnErr, cleanupWakeResumeBoundImage(cleanupBootstrap))
+			}()
+		}
+	}
 
 	requestedOwner, err := wakeOwnerFromEnv()
 	if err != nil {
 		return err
+	}
+	if resumePreflight != nil {
+		if requestedOwner == nil {
+			return fmt.Errorf("wake resume preflight requires the exact coop owner environment")
+		}
+		if len(args) == 0 || args[len(args)-1] != "--"+wakeResumePreflightFlag {
+			return fmt.Errorf("wake resume preflight must be the final internal argument")
+		}
+		preservedArgv := append([]string{os.Args[0], "wake"}, args[:len(args)-1]...)
+		if err := validateWakeRestartArgv(preservedArgv, canonicalWakeRoot(root), me); err != nil {
+			return err
+		}
+		return writeStdoutLine(wakeResumePreflightOK)
 	}
 	if repairGeneration != "" && requestedOwner != nil {
 		return fmt.Errorf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", me)
@@ -2128,7 +2202,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		lockWakeMode = effectiveInjectMode(&wakeConfig{me: me, injectMode: lockWakeMode})
 	}
 	acceptExistingDeadline := time.Now().Add(wakeReadyTimeout)
-	resumeEligible := wakeResumeStartupEligible(
+	resumeEligible := target == nil && wakeResumeStartupEligible(
 		requestedOwner,
 		repairLineage != nil,
 		*injectCmdFlag,
@@ -2155,13 +2229,27 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 			requestedOwner:          requestedOwner,
 			repairLineage:           repairLineage,
 			resumeEligible:          resumeEligible,
+			resumeImageEvidence:     resumeImageEvidence,
 		}
 		if repairLineage != nil {
 			options.repairFloorAuthority = &repairFloorAuthority
 		}
-		cleanup, err = acquireWakeLockWithOptionsInDir(activeAgentDir, root, me, options)
+		if resumeBootstrap != nil {
+			cleanup, err = acquireWakeLockAfterResumeInDir(
+				activeAgentDir,
+				root,
+				me,
+				options,
+				*resumeBootstrap,
+			)
+		} else {
+			cleanup, err = acquireWakeLockWithOptionsInDir(activeAgentDir, root, me, options)
+		}
 		if err == nil {
 			break
+		}
+		if resumeBootstrap != nil {
+			return err
 		}
 		var creating *wakeLockCreatingError
 		if acceptExistingWake && errors.As(err, &creating) {
@@ -2323,6 +2411,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		interruptNotice:     strings.TrimSpace(*interruptNoticeFlag),
 		interruptCooldown:   *interruptCooldownFlag,
 		controlStop:         controlStop,
+		restartSignals:      restartSignals,
 		inspectTerminalGeneration: func() wakeLockInspection {
 			return inspectWakeTerminalGeneration(root, me)
 		},
@@ -2437,6 +2526,20 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 			if err := writeWakePreparedFileInDir(activeAgentDir, root, me, currentWake); err != nil {
 				return err
 			}
+			if resumeBootstrap != nil {
+				if err := cleanupPreviousWakeResumeBoundImage(*resumeBootstrap); err != nil {
+					_ = writeStderr("amq wake: preserve prior restart stage after cleanup refusal: %v\n", err)
+				}
+				if err := consumeWakeRestartAfterPrepared(
+					activeAgentDir,
+					root,
+					me,
+					currentWake,
+					*resumeBootstrap,
+				); err != nil {
+					return err
+				}
+			}
 			return writeWakeReadyFileAgainstOwnerInDir(
 				activeAgentDir,
 				root,
@@ -2508,7 +2611,8 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	// Reload transport is additive capability. If this process cannot confirm
 	// the freshly published lock identity, keep the ordinary notifier running
 	// without opening the unadvertised endpoint.
-	if reloadTransportEligible && currentWake.IdentityConfirmed {
+	if reloadTransportEligible && currentWake.IdentityConfirmed &&
+		currentWake.Lock.ResumeSignal != wakeResumeSignalUSR1 {
 		if requestedOwner == nil {
 			return fmt.Errorf("wake reload transport requires an exact owner")
 		}
@@ -2936,6 +3040,13 @@ func runWakeLoop(cfg wakeConfig) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
+	restartCh := cfg.restartSignals
+	if restartCh == nil {
+		restartCh = make(chan os.Signal, 1)
+		signal.Notify(restartCh, syscall.SIGUSR1)
+		defer signal.Stop(restartCh)
+		cfg.restartSignals = restartCh
+	}
 	select {
 	case <-cfg.controlStop:
 		return nil
@@ -3563,6 +3674,13 @@ func runWakeLoop(cfg wakeConfig) error {
 		case <-sigCh:
 			// Clean exit on SIGHUP/SIGTERM
 			return nil
+		case <-restartCh:
+			handleWakeRestartAtLoopBoundary(
+				&cfg,
+				watcher,
+				terminalAuthorityRetryC != nil,
+				inboxScanRetryC != nil,
+			)
 
 		case event, ok := <-watcherEvents:
 			if !ok {

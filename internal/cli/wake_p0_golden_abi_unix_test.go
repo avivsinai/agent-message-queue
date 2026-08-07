@@ -197,6 +197,9 @@ func wakeABIWakeReasonCodes() map[string]bool {
 		"observation_changed":                 true,
 		"executable_identity_unavailable":     true,
 		"platform_unsupported":                true,
+		"reload_ready":                        true,
+		"reload_not_prepared":                 true,
+		"reload_restart_pending":              true,
 	}
 }
 
@@ -219,6 +222,10 @@ func wakeABIReloadReasonCodes() map[string]bool {
 		"reload_observation_changed":   true,
 		"reload_platform_unsupported":  true,
 		"reload_command_unavailable":   true,
+		"reload_ready":                 true,
+		"reload_owner_mismatch":        true,
+		"reload_not_prepared":          true,
+		"reload_restart_pending":       true,
 	}
 }
 
@@ -534,12 +541,12 @@ func TestWakeP0BinaryJSONFieldsAndEnums(t *testing.T) {
 		"missing": true, "valid": true, "stale": true, "creating": true, "unverified": true,
 	})
 	wakeABIAssertEnum(t, "image.status", image["status"], map[string]bool{"current": true, "different": true, "unknown": true})
-	wakeABIAssertEnum(t, "reload.status", reload["status"], map[string]bool{"advertised": true, "unavailable": true})
+	wakeABIAssertEnum(t, "reload.status", reload["status"], map[string]bool{"advertised": true, "ready": true, "unavailable": true})
 	wakeABIAssertEnum(t, "restart_capability", result["restart_capability"], map[string]bool{
 		"agent_safe": true, "operator_only": true, "unavailable": true,
 	})
 	wakeABIAssertEnum(t, "action.kind", action["kind"], map[string]bool{
-		"start_wake": true, "repair_wake": true, "recover_owner": true,
+		"start_wake": true, "repair_wake": true, "restart_wake": true, "recover_owner": true,
 		"preserve_live_wake": true, "inspect_unverified": true, "retry_check": true,
 		"configure_injector": true, "manual_stale_cleanup": true,
 		"wait_for_stable_state": true, "unsupported": true,

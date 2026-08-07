@@ -456,6 +456,11 @@ func recordWakeGenerationFileFailureAt(
 
 var afterWakeGenerationFileSnapshotDataRead = func(string) {}
 
+func sameWakeGenerationFileSnapshot(first, second os.FileInfo) bool {
+	return sameWakeFileIdentity(first, second) &&
+		first.Mode() == second.Mode() && first.Size() == second.Size()
+}
+
 func readWakeGenerationFileSnapshotAt(
 	dirfd int,
 	agentDir *wakeAgentDir,
@@ -515,7 +520,11 @@ func readWakeGenerationFileSnapshotAt(
 			fmt.Errorf("%s changed while restating: %w", label, statErr),
 		)
 	}
-	if !sameWakeFileIdentity(info, pathInfo) {
+	// Some Linux filesystems can report the same ctime for a same-timestamp
+	// chmod. Freeze the portable acceptance shape explicitly so a mid-read mode
+	// or size change is still classified as a changed snapshot, not as stable
+	// malformed state.
+	if !sameWakeGenerationFileSnapshot(info, pathInfo) {
 		return wakeGenerationFileSnapshot{}, true, newWakeSnapshotReadChangedError(
 			fmt.Errorf("%s changed while opening", label),
 		)

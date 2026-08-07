@@ -23,12 +23,14 @@ const (
 
 	wakeCheckUnknown      = "unknown"
 	wakeReloadAdvertised  = "advertised"
+	wakeReloadReady       = "ready"
 	wakeReloadUnavailable = "unavailable"
 )
 
 const (
 	wakeActionStartWake          = "start_wake"
 	wakeActionRepairWake         = "repair_wake"
+	wakeActionRestartWake        = "restart_wake"
 	wakeActionRecoverOwner       = "recover_owner"
 	wakeActionPreserveLiveWake   = "preserve_live_wake"
 	wakeActionInspectUnverified  = "inspect_unverified"
@@ -68,6 +70,10 @@ const (
 	wakeReloadReasonObservationChanged   = "reload_observation_changed"
 	wakeReloadReasonPlatformUnsupported  = "reload_platform_unsupported"
 	wakeReloadReasonCommandUnavailable   = "reload_command_unavailable"
+	wakeReloadReasonReady                = "reload_ready"
+	wakeReloadReasonOwnerMismatch        = "reload_owner_mismatch"
+	wakeReloadReasonNotPrepared          = "reload_not_prepared"
+	wakeReloadReasonRestartPending       = "reload_restart_pending"
 )
 
 type wakeCheckDecision struct {
@@ -327,7 +333,8 @@ func finalizeWakeCheckDecision(decision *wakeCheckDecision) {
 
 func wakeCheckActionRequiresExecutable(action wakeCheckActionDecision) bool {
 	switch action.Kind {
-	case wakeActionStartWake, wakeActionRepairWake, wakeActionRecoverOwner:
+	case wakeActionStartWake, wakeActionRepairWake, wakeActionRestartWake, wakeActionRecoverOwner,
+		wakeActionWaitForStableState:
 		return true
 	case wakeActionRetryCheck:
 		return action.ReasonCode == wakeReasonObservationChanged

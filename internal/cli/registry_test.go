@@ -85,7 +85,7 @@ func TestChildNames(t *testing.T) {
 	}{
 		{name: "presence", want: []string{"set", "list"}},
 		{name: "dlq", want: []string{"list", "read", "retry", "purge"}},
-		{name: "wake", want: []string{"check", "repair", "recover-owner", "retire"}},
+		{name: "wake", want: []string{"check", "repair", "restart", "recover-owner", "retire"}},
 		{name: "coop", want: []string{"init", "exec"}},
 		{name: "swarm", want: []string{"list", "join", "leave", "tasks", "claim", "complete", "fail", "block", "bridge"}},
 		{name: "receipts", want: []string{"list", "wait"}},

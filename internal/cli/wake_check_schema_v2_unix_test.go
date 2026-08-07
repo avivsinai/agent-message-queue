@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -503,8 +502,9 @@ func TestWakeCheckV2ClassifierActions(t *testing.T) {
 				d.Wake.Status = string(wakeLockCreating)
 				return wakeLockInspection{Exists: true, Status: wakeLockCreating}, nil
 			},
-			kind: wakeActionWaitForStableState, actor: wakeActionActorNone,
+			kind: wakeActionWaitForStableState, actor: wakeActionActorAgent,
 			reason: wakeReasonWakeStateCreating, restart: wakeRestartUnavailable,
+			args: []string{"wake", "check", "--root", "/queue with spaces", "--me", "codex", "--json", "--json-schema=2"},
 		},
 		{
 			name: "unverified wake",
@@ -637,23 +637,20 @@ func TestWakeCheckV2ReloadObservationChangeUsesExistingSnapshotRetry(t *testing.
 }
 
 func TestWakeCheckV2ReloadClassificationIsStructuralAndNonExecutable(t *testing.T) {
-	validLock := validWakeResumeLockForTest()
-	validStatus := wakeReloadAdvertised
-	validReason := wakeReloadReasonCommandUnavailable
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+	if err := writeWakePreparedFileInDir(
+		fixture.agentDir,
+		fixture.root,
+		fixture.agent,
+		fixture.lock,
+	); err != nil {
+		t.Fatal(err)
+	}
+	validStatus := wakeReloadReady
+	validReason := wakeReloadReasonReady
 	invalidAdvertisementReason := wakeReloadReasonAdvertisementInvalid
-	if runtime.GOOS != "darwin" {
-		validStatus = wakeReloadUnavailable
-		validReason = wakeReloadReasonPlatformUnsupported
-		invalidAdvertisementReason = wakeReloadReasonPlatformUnsupported
-	}
-	validInspection := wakeLockInspection{
-		Exists:            true,
-		Status:            wakeLockValid,
-		PID:               validLock.PID,
-		Lock:              validLock,
-		Process:           wakeProcessInfo{PID: validLock.PID, Running: true},
-		IdentityConfirmed: true,
-	}
+	validInspection := fixture.lock
 	tests := []struct {
 		name       string
 		mutate     func(*wakeLockInspection)
@@ -715,7 +712,7 @@ func TestWakeCheckV2ReloadClassificationIsStructuralAndNonExecutable(t *testing.
 			if test.mutate != nil {
 				test.mutate(&inspection)
 			}
-			got := classifyWakeCheckReload("/queue", "codex", inspection)
+			got := classifyWakeCheckReload(fixture.root, fixture.agent, inspection)
 			if got.Status != test.wantStatus || got.ReasonCode != test.wantReason {
 				t.Fatalf("reload decision = %#v, want status=%q reason=%q", got, test.wantStatus, test.wantReason)
 			}
@@ -723,13 +720,13 @@ func TestWakeCheckV2ReloadClassificationIsStructuralAndNonExecutable(t *testing.
 	}
 
 	stubWakeCheckRuntime(t, false, "0.50.1")
-	decision := buildWakeCheckDecision("/queue", "codex", validInspection, &opsWakeLock{}, false)
+	decision := buildWakeCheckDecision(fixture.root, fixture.agent, validInspection, &opsWakeLock{}, false)
 	if decision.Reload.Status != validStatus ||
 		decision.Reload.ReasonCode != validReason ||
-		decision.RestartCapability != wakeRestartOperatorOnly ||
-		decision.Action.Kind != wakeActionPreserveLiveWake ||
-		decision.Action.Command != nil {
-		t.Fatalf("advertised reload changed executable action semantics: %#v", decision)
+		decision.RestartCapability != wakeRestartAgentSafe ||
+		decision.Action.Kind != wakeActionRestartWake ||
+		decision.Action.Command == nil {
+		t.Fatalf("ready reload is not executable: %#v", decision)
 	}
 	rendered := renderWakeCheckV2(decision)
 	if rendered.Reload.Status != validStatus ||
@@ -819,22 +816,31 @@ func TestDoctorOpsV2UsesTrustedRosterAgentInsteadOfOuterRecord(t *testing.T) {
 		}
 	})
 	stubWakeCheckRuntime(t, false, "0.50.1")
+	ownerEnv, err := encodeWakeOwnerEnv(*lock.ResumeOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envWakeOwner, ownerEnv)
 
 	inspection := inspectWakeLock(root, "codex")
 	if inspection.Status != wakeLockValid {
 		t.Fatalf("initial inspection = %#v", inspection)
+	}
+	agentDir, err := openWakeAgentDir(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	if err := writeWakePreparedFileInDir(agentDir, root, "codex", inspection); err != nil {
+		t.Fatal(err)
 	}
 	opsLock := opsWakeLock{Agent: "claude"}
 	decorateOpsWakeLockWithWakeCheck(root, "codex", &opsLock, inspection, false, true)
 	if opsLock.Agent != "codex" || opsLock.WakeCheckDecision == nil {
 		t.Fatalf("doctor trusted-agent snapshot = %#v", opsLock)
 	}
-	wantStatus := wakeReloadAdvertised
-	wantReason := wakeReloadReasonCommandUnavailable
-	if runtime.GOOS == "linux" {
-		wantStatus = wakeReloadUnavailable
-		wantReason = wakeReloadReasonPlatformUnsupported
-	}
+	wantStatus := wakeReloadReady
+	wantReason := wakeReloadReasonReady
 	if reload := opsLock.WakeCheckDecision.Reload; reload.Status != wantStatus || reload.ReasonCode != wantReason {
 		t.Fatalf("doctor trusted-agent reload = %#v, want status=%q reason=%q", reload, wantStatus, wantReason)
 	}

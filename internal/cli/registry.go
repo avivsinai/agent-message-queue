@@ -71,6 +71,7 @@ func init() {
 			Children: []CommandInfo{
 				{Name: "check", Summary: "Inspect wake start and restart capability without mutation", Handler: runWake},
 				{Name: "repair", Summary: "Restart a proven-stale wake from a saved inject-via target", Handler: runWake},
+				{Name: "restart", Summary: "Ask a live owner-bound wake to replace itself", Handler: runWake},
 				{Name: "recover-owner", Summary: "Recover an exact owner-bound wake claim", Handler: runWake},
 				{Name: "retire", Summary: "Retire an exact managed wake and its matching retained state", Handler: runWake},
 			},

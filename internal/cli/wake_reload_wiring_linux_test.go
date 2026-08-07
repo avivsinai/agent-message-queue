@@ -28,7 +28,7 @@ func linuxWakeReloadSocketPathsForTest(t *testing.T, root, agent string) []strin
 	return paths
 }
 
-func TestRunWakeWithLoopStartsUnadvertisedLinuxReloadTransportForOrdinaryOwner(t *testing.T) {
+func TestRunWakeWithLoopAdvertisesSignalWithoutLinuxReloadTransport(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	ownerProcess := exec.Command("/bin/sh", "-c", "exec sleep 30")
@@ -64,7 +64,6 @@ func TestRunWakeWithLoopStartsUnadvertisedLinuxReloadTransportForOrdinaryOwner(t
 	}
 	t.Setenv(envWakeOwner, encoded)
 
-	var endpointPath string
 	err = runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "codex",
@@ -72,37 +71,26 @@ func TestRunWakeWithLoopStartsUnadvertisedLinuxReloadTransportForOrdinaryOwner(t
 		"--interrupt=false",
 	}, func(wakeConfig) error {
 		paths := linuxWakeReloadSocketPathsForTest(t, root, "codex")
-		if len(paths) != 1 {
-			t.Fatalf("Linux reload endpoint paths = %#v, want exactly one", paths)
-		}
-		endpointPath = paths[0]
-		info, err := os.Lstat(endpointPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 {
-			t.Fatalf("Linux reload endpoint mode = %v", info.Mode())
+		if len(paths) != 0 {
+			t.Fatalf("signal-capable Linux wake opened reload endpoints: %#v", paths)
 		}
 
 		inspection := inspectWakeLock(root, "codex")
-		if inspection.Lock.ResumeSchema != 0 || inspection.Lock.ResumeOwner != nil ||
-			inspection.Lock.ControlSocket != "" || inspection.Lock.RunningImageEvidence != nil {
-			t.Fatalf("Linux reload endpoint advertised resume metadata: %#v", inspection.Lock)
+		if inspection.Lock.ResumeSchema != wakeResumeSchemaV2 ||
+			!sameWakeOwner(inspection.Lock.ResumeOwner, &owner) ||
+			inspection.Lock.ResumeSignal != wakeResumeSignalUSR1 ||
+			inspection.Lock.ControlSocket != "" ||
+			inspection.Lock.RunningImageEvidence == nil {
+			t.Fatalf("Linux signal resume advertisement = %#v", inspection.Lock)
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if endpointPath == "" {
-		t.Fatal("Linux reload endpoint was not observed")
-	}
-	if _, err := os.Lstat(endpointPath); !os.IsNotExist(err) {
-		t.Fatalf("Linux reload endpoint survived wake cleanup: %v", err)
-	}
 }
 
-func TestRunWakeWithLoopClassifiesOptionalLinuxReloadTransportStartFailures(t *testing.T) {
+func TestRunWakeWithLoopSkipsObsoleteLinuxReloadTransportForSignalWake(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")
 	ownerProcess := exec.Command("/bin/sh", "-c", "exec sleep 30")
@@ -139,108 +127,37 @@ func TestRunWakeWithLoopClassifiesOptionalLinuxReloadTransportStartFailures(t *t
 	t.Setenv(envWakeOwner, encoded)
 
 	startCalled := false
-	startFailure := errors.New("test reload bind failure")
 	oldStart := startWakeReloadTransportForWake
 	startWakeReloadTransportForWake = func(
 		_ *wakeAgentDir,
-		gotRoot string,
-		gotAgent string,
-		inspection wakeLockInspection,
-		gotOwner wakeOwner,
+		_ string,
+		_ string,
+		_ wakeLockInspection,
+		_ wakeOwner,
 	) (func(), error) {
 		startCalled = true
-		if gotRoot != canonicalWakeRoot(root) || gotAgent != "codex" || gotOwner != owner {
-			t.Fatalf("reload start identity = root %q agent %q owner %#v", gotRoot, gotAgent, gotOwner)
-		}
-		if !inspection.IdentityConfirmed {
-			t.Fatal("reload start did not receive confirmed lock identity")
-		}
-		return nil, &wakeReloadTransportUnavailableError{err: startFailure}
+		return nil, errors.New("obsolete reload transport must not start")
 	}
 	t.Cleanup(func() { startWakeReloadTransportForWake = oldStart })
 
 	loopCalled := false
-	var runErr error
-	stderr := captureWakeStderr(t, func() {
-		runErr = runWakeWithLoop([]string{
-			"--root", root,
-			"--me", "codex",
-			"--inject-mode", wakeInjectModeNone,
-			"--interrupt=false",
-		}, func(wakeConfig) error {
-			loopCalled = true
-			if paths := linuxWakeReloadSocketPathsForTest(t, root, "codex"); len(paths) != 0 {
-				t.Fatalf("failed Linux reload endpoint paths = %#v", paths)
-			}
-			return nil
-		})
-	})
-	if runErr != nil {
-		t.Fatal(runErr)
-	}
-	if !startCalled || !loopCalled {
-		t.Fatalf("reload start called = %v, loop called = %v", startCalled, loopCalled)
-	}
-	if !strings.Contains(stderr, "reload transport unavailable: "+startFailure.Error()) ||
-		!strings.Contains(stderr, "continuing without reload transport") {
-		t.Fatalf("reload transport degradation note = %q", stderr)
-	}
-
-	authorityFailure := errors.New("wake reload owner exited during startup")
-	startCalled = false
-	loopCalled = false
-	startWakeReloadTransportForWake = func(
-		_ *wakeAgentDir,
-		_ string,
-		_ string,
-		_ wakeLockInspection,
-		_ wakeOwner,
-	) (func(), error) {
-		startCalled = true
-		return nil, authorityFailure
-	}
-	stderr = captureWakeStderr(t, func() {
-		runErr = runWakeWithLoop([]string{
-			"--root", root,
-			"--me", "codex",
-			"--inject-mode", wakeInjectModeNone,
-			"--interrupt=false",
-		}, func(wakeConfig) error {
-			loopCalled = true
-			return nil
-		})
-	})
-	if !errors.Is(runErr, authorityFailure) || !startCalled || loopCalled {
-		t.Fatalf("authority failure result = %v, start called = %v, loop called = %v", runErr, startCalled, loopCalled)
-	}
-	if strings.Contains(stderr, "continuing without reload transport") {
-		t.Fatalf("authority failure was narrated as degradable: %q", stderr)
-	}
-
-	startCalled = false
-	loopCalled = false
-	startWakeReloadTransportForWake = func(
-		_ *wakeAgentDir,
-		_ string,
-		_ string,
-		_ wakeLockInspection,
-		_ wakeOwner,
-	) (func(), error) {
-		startCalled = true
-		return nil, nil
-	}
-	runErr = runWakeWithLoop([]string{
+	runErr := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "codex",
 		"--inject-mode", wakeInjectModeNone,
 		"--interrupt=false",
 	}, func(wakeConfig) error {
 		loopCalled = true
+		if paths := linuxWakeReloadSocketPathsForTest(t, root, "codex"); len(paths) > 0 {
+			t.Fatalf("signal wake reload endpoint paths = %#v", paths)
+		}
 		return nil
 	})
-	if runErr == nil || !strings.Contains(runErr.Error(), "returned no cleanup") ||
-		!startCalled || loopCalled {
-		t.Fatalf("nil cleanup result = %v, start called = %v, loop called = %v", runErr, startCalled, loopCalled)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if startCalled || !loopCalled {
+		t.Fatalf("reload start called = %v, loop called = %v", startCalled, loopCalled)
 	}
 }
 
