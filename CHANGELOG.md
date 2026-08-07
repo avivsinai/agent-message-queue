@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.56.1](https://github.com/avivsinai/agent-message-queue/compare/v0.56.0...v0.56.1) (2026-08-07)
+
+
+### Bug Fixes
+
+* **wake:** skip Codex LF prelude for submit-only reminders ([#458](https://github.com/avivsinai/agent-message-queue/issues/458)) ([f28a298](https://github.com/avivsinai/agent-message-queue/commit/f28a298965e5018f6d968668cee0b44a4dcf91bf))
+
 ## [0.56.0](https://github.com/avivsinai/agent-message-queue/compare/v0.55.0...v0.56.0) (2026-08-07)
 
 
