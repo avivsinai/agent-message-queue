@@ -202,6 +202,7 @@ func TestDarwinWakeRestartRealPTYPreservesPIDAndUnreadWork(t *testing.T) {
 	}
 
 	agentPath := filepath.Join(root, "agents", "codex")
+	stagePattern := filepath.Join(newDir, ".amq.amq-restart-*")
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		remaining := make([]string, 0, 3)
@@ -212,16 +213,20 @@ func TestDarwinWakeRestartRealPTYPreservesPIDAndUnreadWork(t *testing.T) {
 				t.Fatal(statErr)
 			}
 		}
-		if len(remaining) == 0 {
+		stages, globErr := filepath.Glob(stagePattern)
+		if globErr != nil {
+			t.Fatal(globErr)
+		}
+		if len(remaining) == 0 && len(stages) == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("wake lifecycle files survived owner exit: %v", remaining)
+			t.Fatalf(
+				"wake cleanup survived owner exit: lifecycle=%v stages=%v",
+				remaining,
+				stages,
+			)
 		}
 		time.Sleep(25 * time.Millisecond)
-	}
-	stages, err := filepath.Glob(filepath.Join(newDir, ".amq.amq-restart-*"))
-	if err != nil || len(stages) != 0 {
-		t.Fatalf("Darwin restart stages survived owner exit: %v, err=%v", stages, err)
 	}
 }
