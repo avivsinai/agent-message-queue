@@ -12,9 +12,9 @@ import (
 	"testing"
 )
 
-const wakeSelfUpgradeHistoricalTag = "v0.57.3"
+const wakeSelfUpgradeHistoricalTag = "v0.58.0"
 
-func TestWakeSelfUpgradeRestartRecordIsCompatibleWithV0573Reader(t *testing.T) {
+func TestWakeSelfUpgradeRestartRecordIsCompatibleWithV0580Reader(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	record := fixture.record
 	record.Source = wakeRestartSourceSelf
@@ -23,7 +23,7 @@ func TestWakeSelfUpgradeRestartRecordIsCompatibleWithV0573Reader(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, sourceRoot := buildWakeSelfUpgradeHistoricalV0573(t)
+	sourceRoot := extractWakeSelfUpgradeHistoricalV0580(t)
 
 	generatedTest := historicalWakeSelfUpgradeSourceCompatibilityTest(string(raw))
 	generatedPath := filepath.Join(sourceRoot, "internal", "cli", "wake_self_upgrade_source_compat_test.go")
@@ -39,19 +39,19 @@ func TestWakeSelfUpgradeRestartRecordIsCompatibleWithV0573Reader(t *testing.T) {
 	)
 }
 
-func buildWakeSelfUpgradeHistoricalV0573(t *testing.T) (binary, sourceRoot string) {
+func extractWakeSelfUpgradeHistoricalV0580(t *testing.T) string {
 	t.Helper()
 	repoRootOutput, err := exec.Command("git", "rev-parse", "--show-toplevel").CombinedOutput()
 	if err != nil {
-		t.Skipf("mixed-version git history unavailable: %v", err)
+		t.Fatalf("mixed-version git history unavailable: %v", err)
 	}
 	repoRoot := strings.TrimSpace(string(repoRootOutput))
 	if output, err := exec.Command("git", "-C", repoRoot, "cat-file", "-e", wakeSelfUpgradeHistoricalTag+"^{commit}").CombinedOutput(); err != nil {
-		t.Skipf("historical tag %s unavailable: %v\n%s", wakeSelfUpgradeHistoricalTag, err, output)
+		t.Fatalf("historical tag %s unavailable: %v\n%s", wakeSelfUpgradeHistoricalTag, err, output)
 	}
 
 	buildRoot := t.TempDir()
-	sourceRoot = filepath.Join(buildRoot, "source")
+	sourceRoot := filepath.Join(buildRoot, "source")
 	if err := os.Mkdir(sourceRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -62,9 +62,7 @@ func buildWakeSelfUpgradeHistoricalV0573(t *testing.T) (binary, sourceRoot strin
 		"git", "archive", "--format=tar", "--output="+archivePath, wakeSelfUpgradeHistoricalTag,
 	)
 	commandOutputForOwnerFence(t, "", "tar", "-xf", archivePath, "-C", sourceRoot)
-	binary = filepath.Join(buildRoot, "amq-v0.57.3")
-	commandOutputForOwnerFence(t, sourceRoot, "go", "build", "-o", binary, "./cmd/amq")
-	return binary, sourceRoot
+	return sourceRoot
 }
 
 func historicalWakeSelfUpgradeSourceCompatibilityTest(record string) string {
