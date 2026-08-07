@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -393,7 +395,7 @@ func TestConcurrentReattachClaimStartsOnlyWinningWake(t *testing.T) {
 	calls := filepath.Join(dir, "amq-calls.log")
 	t.Setenv("AMQ_KEEPALIVE_AMQ_CALLS", calls)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`#!/bin/sh
 printf 'wake\n' >> "$AMQ_KEEPALIVE_AMQ_CALLS"
 ready=""
 previous=""
@@ -453,7 +455,7 @@ func TestReattachPreservesRegistryWhenWakeTargetCannotChange(t *testing.T) {
 		"--no-start",
 	)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte("#!/bin/sh\necho 'existing wake target differs' >&2\nexit 7\n"), 0o700); err != nil {
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript("#!/bin/sh\necho 'existing wake target differs' >&2\nexit 7\n"), 0o700); err != nil {
 		t.Fatalf("write fake AMQ: %v", err)
 	}
 	var stdout bytes.Buffer
@@ -504,17 +506,23 @@ func TestReattachPersistsRecoverableReservationBeforeWakeReadiness(t *testing.T)
 	)
 	startedPath := filepath.Join(dir, "wake-started")
 	releasePath := filepath.Join(dir, "wake-release")
+	exitedPath := filepath.Join(dir, "wake-exited")
+	pidFile := filepath.Join(dir, "wake-pid")
 	t.Setenv("AMQ_KEEPALIVE_TEST_STARTED", startedPath)
 	t.Setenv("AMQ_KEEPALIVE_TEST_RELEASE", releasePath)
+	t.Setenv("AMQ_KEEPALIVE_TEST_EXITED", exitedPath)
+	t.Setenv("AMQ_KEEPALIVE_TEST_PID", pidFile)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`#!/bin/sh
+printf '%s' "$$" > "$AMQ_KEEPALIVE_TEST_PID"
 : > "$AMQ_KEEPALIVE_TEST_STARTED"
 while [ ! -f "$AMQ_KEEPALIVE_TEST_RELEASE" ]; do sleep 0.01; done
+: > "$AMQ_KEEPALIVE_TEST_EXITED"
 exit 7
 `), 0o700); err != nil {
 		t.Fatalf("write fake AMQ: %v", err)
 	}
-	defer func() { _ = os.WriteFile(releasePath, []byte("release"), 0o600) }()
+	registerDetachedWakeCleanup(t, pidFile, releasePath)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -548,6 +556,7 @@ exit 7
 	if code := <-done; code != 1 {
 		t.Fatalf("reattach code = %d, want failure", code)
 	}
+	waitForPath(t, exitedPath, 2*time.Second)
 	loaded, err = registry.New(registryPath).Load()
 	if err != nil {
 		t.Fatalf("Load(final) error = %v", err)
@@ -574,7 +583,7 @@ func TestReattachPersistsCandidateOnlyAfterWakeReady(t *testing.T) {
 		"--no-start",
 	)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`#!/bin/sh
 ready=""
 previous=""
 for arg in "$@"; do
@@ -626,12 +635,17 @@ func TestReattachCancellationPreservesReservationForLateReadyWake(t *testing.T) 
 	allowReady := filepath.Join(dir, "allow-ready")
 	lateReady := filepath.Join(dir, "late-ready")
 	release := filepath.Join(dir, "release")
+	exited := filepath.Join(dir, "exited")
+	pidFile := filepath.Join(dir, "pid")
 	t.Setenv("AMQ_KEEPALIVE_STARTED", started)
 	t.Setenv("AMQ_KEEPALIVE_ALLOW_READY", allowReady)
 	t.Setenv("AMQ_KEEPALIVE_LATE_READY", lateReady)
 	t.Setenv("AMQ_KEEPALIVE_RELEASE", release)
+	t.Setenv("AMQ_KEEPALIVE_EXITED", exited)
+	t.Setenv("AMQ_KEEPALIVE_PID", pidFile)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`#!/bin/sh
+printf '%s' "$$" > "$AMQ_KEEPALIVE_PID"
 ready=""
 previous=""
 for arg in "$@"; do
@@ -644,10 +658,13 @@ while [ ! -f "$AMQ_KEEPALIVE_ALLOW_READY" ]; do sleep 0.01; done
 printf ready > "$ready"
 : > "$AMQ_KEEPALIVE_LATE_READY"
 while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
+: > "$AMQ_KEEPALIVE_EXITED"
 `), 0o700); err != nil {
 		t.Fatalf("write fake amq: %v", err)
 	}
+	registerDetachedWakeCleanup(t, pidFile, allowReady, release)
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	var stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
@@ -673,6 +690,7 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 	if err := os.WriteFile(release, nil, 0o600); err != nil {
 		t.Fatalf("release late wake: %v", err)
 	}
+	waitForPath(t, exited, 2*time.Second)
 
 	wake := &appCountingWake{}
 	if _, err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).superviseOnce(
@@ -714,7 +732,7 @@ func TestReattachRetireDetachedRetiresPreviousWakeThenStarts(t *testing.T) {
 	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
 	t.Setenv("AMQ_KEEPALIVE_FIRST_START", firstStart)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`#!/bin/sh
 printf 'CALL %s\n' "$*" >> "$AMQ_KEEPALIVE_ARGS_LOG"
 if [ "$1" = "wake" ] && [ "${2:-}" = "retire" ]; then
   echo '{"status":"retired","agent":"codex","pid":4242}'
@@ -800,7 +818,7 @@ func TestReattachRetireDetachedStartsWhenOldTargetMissingAndWakeLockAlreadyAbsen
 	argsLog := filepath.Join(dir, "amq-args.log")
 	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`#!/bin/sh
 printf 'CALL %s\n' "$*" >> "$AMQ_KEEPALIVE_ARGS_LOG"
 if [ "$1" = "wake" ] && [ "${2:-}" = "retire" ]; then
   echo '{"status":"refused","reason":"no wake lock present; wake process absence cannot be proven"}'
@@ -879,7 +897,7 @@ func TestReattachRetireDetachedLeavesOldRowWhenRetireRefused(t *testing.T) {
 	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
 	t.Setenv("AMQ_KEEPALIVE_FIRST_START", firstStart)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`#!/bin/sh
 printf 'CALL %s\n' "$*" >> "$AMQ_KEEPALIVE_ARGS_LOG"
 if [ "$1" = "wake" ] && [ "${2:-}" = "retire" ]; then
   echo '{"status":"refused","reason":"no wake lock present; wake process absence cannot be proven"}'
@@ -962,7 +980,7 @@ func TestReattachRetireDetachedNeverRetargetsLiveCmuxWake(t *testing.T) {
 	argsLog := filepath.Join(dir, "amq-args.log")
 	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte("#!/bin/sh\nprintf 'CALL %s\\n' \"$*\" >> \"$AMQ_KEEPALIVE_ARGS_LOG\"\necho 'existing wake target differs' >&2\nexit 7\n"), 0o700); err != nil {
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript("#!/bin/sh\nprintf 'CALL %s\\n' \"$*\" >> \"$AMQ_KEEPALIVE_ARGS_LOG\"\necho 'existing wake target differs' >&2\nexit 7\n"), 0o700); err != nil {
 		t.Fatalf("write fake AMQ: %v", err)
 	}
 	var stderr bytes.Buffer
@@ -1637,6 +1655,16 @@ func runApp(t *testing.T, args ...string) {
 	}
 }
 
+func fakeStartWakeScript(body string) []byte {
+	body = strings.TrimPrefix(body, "#!/bin/sh\n")
+	return []byte(`#!/bin/sh
+if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
+  printf '%s\n' '{"schema":1,"live_wake":false,"image_status":"unknown"}'
+  exit 0
+fi
+` + body)
+}
+
 func normalizedFileTarget(t *testing.T, target string) string {
 	t.Helper()
 	normalized, err := (adapter.File{}).NormalizeTarget(target)
@@ -1656,4 +1684,59 @@ func waitForPath(t *testing.T, path string, timeout time.Duration) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", path)
+}
+
+func registerDetachedWakeCleanup(t *testing.T, pidFile string, gates ...string) {
+	t.Helper()
+	t.Cleanup(func() {
+		for _, gate := range gates {
+			if err := os.WriteFile(gate, nil, 0o600); err != nil {
+				t.Errorf("release detached fake wake through %q: %v", gate, err)
+			}
+		}
+		pid, ok := waitForFakeWakePID(pidFile, 2*time.Second)
+		if !ok {
+			return
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			running, err := fakeWakeProcessRunning(pid)
+			if err != nil {
+				t.Errorf("inspect detached fake wake pid %d: %v", pid, err)
+				return
+			}
+			if !running {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Errorf("detached fake wake pid %d did not exit after cleanup", pid)
+	})
+}
+
+func fakeWakeProcessRunning(pid int) (bool, error) {
+	err := exec.Command("kill", "-0", strconv.Itoa(pid)).Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return false, nil
+	}
+	return false, err
+}
+
+func waitForFakeWakePID(path string, timeout time.Duration) (int, bool) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+			if parseErr == nil && pid > 0 {
+				return pid, true
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return 0, false
 }
