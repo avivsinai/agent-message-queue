@@ -51,30 +51,6 @@ func awaitWakeScan(t *testing.T, scans <-chan time.Time, done <-chan error) time
 	return time.Time{}
 }
 
-func deliverPartialWakeMessageForTest(t *testing.T, root, me, id string) {
-	t.Helper()
-	ensureCoopWakeMailboxForTest(t, root, me)
-	message := format.Message{
-		Header: format.Header{
-			Schema:  1,
-			ID:      id,
-			From:    "peer",
-			To:      []string{me},
-			Thread:  "p2p/peer__" + me,
-			Subject: id,
-			Created: "2026-07-30T08:00:00Z",
-		},
-		Body: "body",
-	}
-	data, err := message.Marshal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := deliverToInboxForTest(t, root, me, id+".md", data); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestNotifyNewMessagesForegroundPGRPResumesAtFirstMissingChunk(t *testing.T) {
 	tests := []struct {
 		name      string
