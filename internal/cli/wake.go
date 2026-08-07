@@ -1664,12 +1664,11 @@ func injectTerminalSubmitOnly(cfg *wakeConfig, mode string) (bool, error) {
 		return resumeWakeInputDelivery(cfg)
 	}
 
-	phase := wakeInputPrimarySubmitPending
-	if mode == wakeInjectModeRaw && rawSubmitPrelude(cfg.me) != "" {
-		phase = wakeInputRawPreludePending
-	}
+	// A submit-only reminder carries no fresh text and runs well after the
+	// target's paste-burst window. Reusing the Codex LF prelude here would put a
+	// literal blank line into an already-empty composer on every retry.
 	*state = wakeInputDeliveryState{
-		phase: phase,
+		phase: wakeInputPrimarySubmitPending,
 		mode:  mode,
 	}
 	return resumeWakeInputDelivery(cfg)

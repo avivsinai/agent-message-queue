@@ -659,6 +659,39 @@ func TestRawSubmitPreludePicksByTarget(t *testing.T) {
 	}
 }
 
+func TestInjectTerminalSubmitOnlyRawSkipsCodexPrelude(t *testing.T) {
+	stubRawInputDrained(t, func(time.Duration, time.Duration) (time.Duration, bool, error) {
+		return 0, true, nil
+	})
+	slept := stubRawInjectSleep(t)
+	var injected []string
+	cfg := &wakeConfig{
+		me:         "codex",
+		injectMode: wakeInjectModeRaw,
+		terminalWrite: func(text string) error {
+			injected = append(injected, text)
+			return nil
+		},
+	}
+
+	confirmed, err := injectTerminalSubmitOnly(cfg, wakeInjectModeRaw)
+	if err != nil {
+		t.Fatalf("inject submit-only reminder: %v", err)
+	}
+	if !confirmed {
+		t.Fatal("submit-only reminder was not confirmed")
+	}
+	if got, want := strings.Join(injected, ""), "\r\r"; got != want {
+		t.Fatalf("submit-only reminder bytes = %q, want %q", got, want)
+	}
+	if got := *slept; len(got) != 2 || got[0] != rawInjectSettleDelay || got[1] != rawInjectSettleDelay {
+		t.Fatalf("submit-only reminder sleeps = %v, want two %s delays", got, rawInjectSettleDelay)
+	}
+	if cfg.inputDelivery.pending() {
+		t.Fatalf("submit-only reminder retained state: %#v", cfg.inputDelivery)
+	}
+}
+
 func TestInjectNotificationRawInjectsLFPreludeForCodex(t *testing.T) {
 	// codex targets get a lone LF between the drained text and the settle: it
 	// routes through codex-tui's Ctrl-J binding, which flushes and clears
@@ -1965,7 +1998,7 @@ func TestNotifyNewMessagesReminderUsesSubmitOnlyAfterConfirmedPresentation(t *te
 			name:                   "raw-confirmed",
 			mode:                   wakeInjectModeRaw,
 			wantConfirmedInitially: true,
-			wantInjected:           coopWakeDoorbell + "\n\r\r\n\r\r",
+			wantInjected:           coopWakeDoorbell + "\n\r\r\r\r",
 		},
 		{
 			name:                   "paste-confirmed",
@@ -2785,7 +2818,7 @@ func TestNotifyNewMessagesGenericConfirmedCohortUsesSubmitOnly(t *testing.T) {
 			name:      "raw",
 			mode:      wakeInjectModeRaw,
 			firstWant: "\a" + coopWakeDoorbell + "\n\r\r",
-			retryWant: "\n\r\r",
+			retryWant: "\r\r",
 		},
 		{
 			name:      "paste",

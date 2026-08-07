@@ -2022,6 +2022,7 @@ func TestRunWakeLoopRetriesPendingDoorbellWithSubmitOnlyNudge(t *testing.T) {
 	}()
 	doorbellPayloads := 0
 	submitKeys := 0
+	preludeLFs := 0
 
 	go func() {
 		defer close(loopDone)
@@ -2049,6 +2050,9 @@ func TestRunWakeLoopRetriesPendingDoorbellWithSubmitOnlyNudge(t *testing.T) {
 					if submitKeys == 4 {
 						reminderSubmit <- struct{}{}
 					}
+				}
+				if text == "\n" {
+					preludeLFs++
 				}
 				return nil
 			},
@@ -2093,6 +2097,9 @@ func TestRunWakeLoopRetriesPendingDoorbellWithSubmitOnlyNudge(t *testing.T) {
 	case output := <-attention:
 		t.Fatalf("retry emitted output-only attention: %q", output)
 	default:
+	}
+	if preludeLFs != 1 {
+		t.Fatalf("raw LF preludes = %d, want exactly the initial full-presentation prelude", preludeLFs)
 	}
 }
 
@@ -2219,7 +2226,7 @@ func TestRunWakeLoopOwnerlessConfirmedPresentationUsesSubmitOnlyNudge(t *testing
 	case <-time.After(2 * time.Second):
 		t.Fatal("wake loop did not accept retry-deadline maintenance tick")
 	}
-	for _, want := range []string{"\n", "\r", "\r"} {
+	for _, want := range []string{"\r", "\r"} {
 		select {
 		case got := <-writes:
 			if got != want {
