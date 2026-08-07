@@ -18,6 +18,11 @@ func TestWakeSelfUpgradeRestartRecordIsCompatibleWithV0580Reader(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	record := fixture.record
 	record.Source = wakeRestartSourceSelf
+	prior := record.Candidate
+	prior.Inode++
+	record.RefusedCandidates = []wakeSelfUpgradeRefusedCandidate{
+		wakeSelfUpgradeRefusedCandidateFromEvidence(prior),
+	}
 	raw, err := json.Marshal(record)
 	if err != nil {
 		t.Fatal(err)

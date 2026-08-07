@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -41,20 +42,21 @@ const (
 )
 
 type wakeRestartRecord struct {
-	Schema              int                  `json:"schema"`
-	Source              string               `json:"source,omitempty"`
-	RequestID           string               `json:"request_id"`
-	Status              string               `json:"status"`
-	Root                string               `json:"root"`
-	Agent               string               `json:"agent"`
-	Generation          string               `json:"generation"`
-	SuccessorGeneration string               `json:"successor_generation,omitempty"`
-	Owner               wakeOwner            `json:"owner"`
-	Candidate           wakeImageEvidenceV1  `json:"candidate"`
-	StagePath           string               `json:"stage_path,omitempty"`
-	BoundImage          *wakeImageEvidenceV1 `json:"bound_image,omitempty"`
-	PreviousBoundImage  *wakeImageEvidenceV1 `json:"previous_bound_image,omitempty"`
-	Reason              string               `json:"reason,omitempty"`
+	Schema              int                               `json:"schema"`
+	Source              string                            `json:"source,omitempty"`
+	RequestID           string                            `json:"request_id"`
+	Status              string                            `json:"status"`
+	Root                string                            `json:"root"`
+	Agent               string                            `json:"agent"`
+	Generation          string                            `json:"generation"`
+	SuccessorGeneration string                            `json:"successor_generation,omitempty"`
+	Owner               wakeOwner                         `json:"owner"`
+	Candidate           wakeImageEvidenceV1               `json:"candidate"`
+	StagePath           string                            `json:"stage_path,omitempty"`
+	BoundImage          *wakeImageEvidenceV1              `json:"bound_image,omitempty"`
+	PreviousBoundImage  *wakeImageEvidenceV1              `json:"previous_bound_image,omitempty"`
+	RefusedCandidates   []wakeSelfUpgradeRefusedCandidate `json:"refused_candidates,omitempty"`
+	Reason              string                            `json:"reason,omitempty"`
 }
 
 type wakeResumeBootstrap struct {
@@ -419,17 +421,22 @@ func sameOptionalWakeImageEvidence(first, second *wakeImageEvidenceV1) bool {
 }
 
 func sameWakeRestartRecord(first, second wakeRestartRecord) bool {
+	if !sameWakeSelfUpgradeRefusedCandidates(first.RefusedCandidates, second.RefusedCandidates) {
+		return false
+	}
 	if !sameOptionalWakeImageEvidence(first.BoundImage, second.BoundImage) {
 		return false
 	}
 	if !sameOptionalWakeImageEvidence(first.PreviousBoundImage, second.PreviousBoundImage) {
 		return false
 	}
+	first.RefusedCandidates = nil
+	second.RefusedCandidates = nil
 	first.BoundImage = nil
 	second.BoundImage = nil
 	first.PreviousBoundImage = nil
 	second.PreviousBoundImage = nil
-	return first == second
+	return reflect.DeepEqual(first, second)
 }
 
 type wakeRestartPendingDisposition uint8
@@ -608,6 +615,9 @@ func validateWakeRestartRecord(record wakeRestartRecord) error {
 	}
 	if err := validateWakeImageEvidence(record.Candidate); err != nil {
 		return fmt.Errorf("wake restart candidate is invalid: %w", err)
+	}
+	if err := validateWakeSelfUpgradeRefusedCandidates(record); err != nil {
+		return err
 	}
 	if err := validateWakeRestartStageStatePlatform(record); err != nil {
 		return fmt.Errorf("wake restart stage state is invalid: %w", err)
@@ -856,6 +866,12 @@ func refuseWakeRestartRecordAt(
 		!sameWakeRestartAttemptIdentity(expected, current) {
 		return fmt.Errorf("wake restart request changed before refusal")
 	}
+	if current.Source == wakeRestartSourceSelf {
+		current.RefusedCandidates = rememberWakeSelfUpgradeRefusal(
+			current.RefusedCandidates,
+			current.Candidate,
+		)
+	}
 	current.Status = wakeRestartRefused
 	current.Reason = wakeRestartReasonWithRemedy(reason, current.Root, current.Agent)
 	return writeWakeRestartRecordAt(dirfd, agentDir, current)
@@ -871,7 +887,26 @@ func sameWakeRestartAttemptIdentity(expected, current wakeRestartRecord) bool {
 		sameWakeOwner(&expected.Owner, &current.Owner) &&
 		sameWakeSelfUpgradeCandidateIdentity(expected.Candidate, current.Candidate) &&
 		expected.StagePath == current.StagePath &&
+		sameWakeSelfUpgradeAttemptRefusalMemory(expected, current) &&
 		sameOptionalWakeImageEvidence(expected.PreviousBoundImage, current.PreviousBoundImage)
+}
+
+func sameWakeSelfUpgradeAttemptRefusalMemory(expected, current wakeRestartRecord) bool {
+	if sameWakeSelfUpgradeRefusedCandidates(
+		expected.RefusedCandidates,
+		current.RefusedCandidates,
+	) {
+		return true
+	}
+	if expected.Source != wakeRestartSourceSelf ||
+		expected.Status != wakeRestartPending ||
+		current.Status != wakeRestartRefused {
+		return false
+	}
+	return sameWakeSelfUpgradeRefusedCandidates(
+		rememberWakeSelfUpgradeRefusal(expected.RefusedCandidates, expected.Candidate),
+		current.RefusedCandidates,
+	)
 }
 
 func retryWakeSelfUpgradeRefusal(

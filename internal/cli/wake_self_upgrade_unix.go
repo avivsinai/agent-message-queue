@@ -20,6 +20,7 @@ const (
 	wakeSelfUpgradeFileName       = ".wake.selfupgrade"
 	wakeSelfUpgradeSchemaV1       = 1
 	wakeSelfUpgradeVersionTimeout = 5 * time.Second
+	wakeSelfUpgradeRefusalLimit   = 8
 
 	wakeSelfUpgradeActionDisabled         = "disabled"
 	wakeSelfUpgradeActionIneligible       = "ineligible"
@@ -63,6 +64,18 @@ type wakeSelfUpgradeCandidate struct {
 	Version  string           `json:"version"`
 }
 
+// wakeSelfUpgradeRefusedCandidate is the path-free identity used by the
+// generation-scoped refusal memory in .wake.restart. Execution paths, methods,
+// and ctimes are deliberately excluded because Darwin binding changes them.
+type wakeSelfUpgradeRefusedCandidate struct {
+	Platform        string `json:"platform"`
+	Device          uint64 `json:"device"`
+	Inode           uint64 `json:"inode"`
+	Size            int64  `json:"size"`
+	SHA256          string `json:"sha256"`
+	EmbeddedVersion string `json:"embedded_version"`
+}
+
 func wakeSelfUpgradeCandidateFromEvidence(evidence wakeImageEvidenceV1) *wakeSelfUpgradeCandidate {
 	return &wakeSelfUpgradeCandidate{
 		Identity: wakeFileIdentity{
@@ -73,6 +86,116 @@ func wakeSelfUpgradeCandidateFromEvidence(evidence wakeImageEvidenceV1) *wakeSel
 		},
 		Version: evidence.EmbeddedVersion,
 	}
+}
+
+func wakeSelfUpgradeRefusedCandidateFromEvidence(evidence wakeImageEvidenceV1) wakeSelfUpgradeRefusedCandidate {
+	return wakeSelfUpgradeRefusedCandidate{
+		Platform:        evidence.Platform,
+		Device:          evidence.Device,
+		Inode:           evidence.Inode,
+		Size:            evidence.Size,
+		SHA256:          evidence.SHA256,
+		EmbeddedVersion: evidence.EmbeddedVersion,
+	}
+}
+
+func sameWakeSelfUpgradeRefusedCandidates(
+	first, second []wakeSelfUpgradeRefusedCandidate,
+) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func wakeSelfUpgradeRefusedCandidatesContain(
+	candidates []wakeSelfUpgradeRefusedCandidate,
+	evidence wakeImageEvidenceV1,
+) bool {
+	want := wakeSelfUpgradeRefusedCandidateFromEvidence(evidence)
+	for _, candidate := range candidates {
+		if candidate == want {
+			return true
+		}
+	}
+	return false
+}
+
+// rememberWakeSelfUpgradeRefusal appends the current identity as the most
+// recent distinct refusal and retains at most the eight most recent entries.
+func rememberWakeSelfUpgradeRefusal(
+	candidates []wakeSelfUpgradeRefusedCandidate,
+	evidence wakeImageEvidenceV1,
+) []wakeSelfUpgradeRefusedCandidate {
+	current := wakeSelfUpgradeRefusedCandidateFromEvidence(evidence)
+	remembered := make([]wakeSelfUpgradeRefusedCandidate, 0, len(candidates)+1)
+	for _, candidate := range candidates {
+		if candidate != current {
+			remembered = append(remembered, candidate)
+		}
+	}
+	remembered = append(remembered, current)
+	if len(remembered) > wakeSelfUpgradeRefusalLimit {
+		remembered = append(
+			[]wakeSelfUpgradeRefusedCandidate(nil),
+			remembered[len(remembered)-wakeSelfUpgradeRefusalLimit:]...,
+		)
+	}
+	return remembered
+}
+
+func wakeSelfUpgradeRefusalMemory(record wakeRestartRecord) []wakeSelfUpgradeRefusedCandidate {
+	remembered := append([]wakeSelfUpgradeRefusedCandidate(nil), record.RefusedCandidates...)
+	if record.Status == wakeRestartRefused && len(remembered) == 0 {
+		remembered = rememberWakeSelfUpgradeRefusal(remembered, record.Candidate)
+	}
+	return remembered
+}
+
+func validateWakeSelfUpgradeRefusedCandidates(record wakeRestartRecord) error {
+	if len(record.RefusedCandidates) == 0 {
+		return nil
+	}
+	if record.Source != wakeRestartSourceSelf {
+		return fmt.Errorf("wake restart refused candidates require a self-upgrade source")
+	}
+	if len(record.RefusedCandidates) > wakeSelfUpgradeRefusalLimit {
+		return fmt.Errorf(
+			"wake restart refused candidates exceed the limit of %d",
+			wakeSelfUpgradeRefusalLimit,
+		)
+	}
+	seen := make(map[wakeSelfUpgradeRefusedCandidate]struct{}, len(record.RefusedCandidates))
+	for _, candidate := range record.RefusedCandidates {
+		if candidate.Platform != record.Candidate.Platform || candidate.Device == 0 ||
+			candidate.Inode == 0 || candidate.Size <= 0 ||
+			!validWakeImageSHA256(candidate.SHA256) ||
+			strings.TrimSpace(candidate.EmbeddedVersion) == "" ||
+			candidate.EmbeddedVersion != strings.TrimSpace(candidate.EmbeddedVersion) ||
+			strings.ContainsRune(candidate.EmbeddedVersion, 0) {
+			return fmt.Errorf("wake restart refused candidate identity is invalid")
+		}
+		if _, exists := seen[candidate]; exists {
+			return fmt.Errorf("wake restart refused candidates contain a duplicate identity")
+		}
+		seen[candidate] = struct{}{}
+	}
+	containsCurrent := wakeSelfUpgradeRefusedCandidatesContain(
+		record.RefusedCandidates,
+		record.Candidate,
+	)
+	if record.Status == wakeRestartPending && containsCurrent {
+		return fmt.Errorf("pending wake restart candidate is already in refusal memory")
+	}
+	if record.Status == wakeRestartRefused && !containsCurrent {
+		return fmt.Errorf("refused wake restart candidate is missing from refusal memory")
+	}
+	return nil
 }
 
 type wakeSelfUpgradeDecision struct {
@@ -516,13 +639,16 @@ func publishWakeSelfUpgradePending(
 				decision.Reason = "an existing wake restart request is preserved"
 				return nil
 			case existing.Record.Status == wakeRestartRefused &&
-				existing.Record.Source == wakeRestartSourceSelf &&
-				sameWakeSelfUpgradeCandidateIdentity(existing.Record.Candidate, record.Candidate):
-				decision.Action = wakeSelfUpgradeActionRefusedMemory
-				decision.Reason = "candidate was already refused for this wake generation"
-				return nil
-			case existing.Record.Status == wakeRestartRefused &&
 				existing.Record.Source == wakeRestartSourceSelf:
+				if sameWakeSelfUpgradeRefusalScope(existing.Record, expected) {
+					remembered := wakeSelfUpgradeRefusalMemory(existing.Record)
+					if wakeSelfUpgradeRefusedCandidatesContain(remembered, record.Candidate) {
+						decision.Action = wakeSelfUpgradeActionRefusedMemory
+						decision.Reason = "candidate was already refused for this wake generation"
+						return nil
+					}
+					record.RefusedCandidates = remembered
+				}
 				if err := reclaimWakeRestartStagePlatform(existing.Record); err != nil {
 					return fmt.Errorf("reclaim superseded self-upgrade attempt: %w", err)
 				}
@@ -547,6 +673,25 @@ func publishWakeSelfUpgradePending(
 		return nil
 	})
 	return decision, err
+}
+
+func sameWakeSelfUpgradeRefusalScope(
+	record wakeRestartRecord,
+	expected wakeLockInspection,
+) bool {
+	return record.Schema == wakeRestartSchemaV1 &&
+		record.SuccessorGeneration == "" &&
+		record.Status == wakeRestartRefused &&
+		record.Source == wakeRestartSourceSelf &&
+		record.Root == expected.Root &&
+		record.Agent == expected.Agent &&
+		record.Generation == expected.Lock.Generation &&
+		expected.Lock.ResumeOwner != nil &&
+		sameWakeOwner(&record.Owner, expected.Lock.ResumeOwner) &&
+		sameOptionalWakeImageEvidence(
+			record.PreviousBoundImage,
+			previousDarwinWakeRestartStageForLock(expected.Lock),
+		)
 }
 
 // Darwin staging necessarily changes the candidate inode ctime and execution

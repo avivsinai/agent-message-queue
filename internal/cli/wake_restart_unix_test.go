@@ -1319,7 +1319,7 @@ func TestWakeRestartAdoptsPendingCurrentGenerationAndRenotifies(t *testing.T) {
 		if readErr != nil {
 			return readErr
 		}
-		if !exists || current != pending {
+		if !exists || !sameWakeRestartRecord(current, pending) {
 			return errors.New("pending restart record changed")
 		}
 		return nil

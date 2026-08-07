@@ -336,8 +336,9 @@ Resume-eligible wakes started by `coop exec` also follow the stable AMQ launch
 symlink. When an installer atomically points that locator at a strictly newer
 self-reported semantic version, the wake waits for a fully quiescent delivery
 boundary and replaces its image without changing PID, terminal ownership, or unread work.
-Failed candidates are attempted at most once until a different candidate is
-observed; observing a new candidate resets that refusal memory.
+Failed candidates are attempted at most once per candidate within a wake
+generation, bounded to the 8 most recent distinct candidates. A new wake
+generation resets that refusal memory.
 Pinned binaries, ownerless/keepalive wakes, repair flows, destructive
 interrupts, and arbitrary inject commands never self-upgrade. Disable the
 eligible default with `amq wake --no-self-upgrade` or
