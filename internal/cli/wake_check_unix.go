@@ -818,7 +818,8 @@ func inspectWakeCheckImageStatus(
 	if comparison.Stale {
 		return wakeImageDifferent
 	}
-	if comparison.Method == wakeBinaryComparisonExactIdentity {
+	if comparison.Method == wakeBinaryComparisonExactIdentity ||
+		comparison.Method == wakeBinaryComparisonDarwinProcessImage {
 		return wakeImageCurrent
 	}
 	return wakeImageUnknown

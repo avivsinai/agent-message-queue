@@ -39,6 +39,7 @@ type wakeBinaryFileEvidence struct {
 }
 
 type resolvedWakeBinary struct {
+	Path string
 	Info os.FileInfo
 }
 
@@ -70,7 +71,7 @@ func resolveWakeBinary() (resolvedWakeBinary, error) {
 	if !info.Mode().IsRegular() {
 		return resolvedWakeBinary{}, fmt.Errorf("current amq executable is not a regular file")
 	}
-	return resolvedWakeBinary{Info: info}, nil
+	return resolvedWakeBinary{Path: path, Info: info}, nil
 }
 
 func checkStaleWakeBinaryHint(inspection wakeLockInspection) (opsHint, bool, error) {

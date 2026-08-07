@@ -3,11 +3,8 @@
 package cli
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -80,10 +77,13 @@ func inspectWakeBinaryStalenessPlatform(
 		}
 		return wakeBinaryStaleness{}, err
 	}
-	if !darwinRecordedImageMatches(recorded, running) {
-		return wakeBinaryStaleness{}, fmt.Errorf("live wake image disagrees with recorded image evidence")
+	if recorded.ExecutionPath != running.Path {
+		return wakeBinaryStaleness{}, fmt.Errorf("live wake image path disagrees with recorded image evidence")
 	}
 	comparisonEvidence.Running = wakeBinaryFileEvidenceFromIdentity(running.Identity)
+	if err := confirmResolvedDarwinWakeBinary(current, currentIdentity); err != nil {
+		return wakeBinaryStaleness{}, err
+	}
 
 	if running.Identity.Device != currentIdentity.Device || running.Identity.Inode != currentIdentity.Inode {
 		return wakeBinaryStaleness{
@@ -92,7 +92,7 @@ func inspectWakeBinaryStalenessPlatform(
 			Evidence: comparisonEvidence,
 		}, nil
 	}
-	if running.Identity != currentIdentity || running.Info.Size() != current.Info.Size() {
+	if running.Identity != currentIdentity || running.Size != current.Info.Size() {
 		return wakeBinaryStaleness{}, fmt.Errorf("current wake image changed during comparison")
 	}
 	if staleByStarted {
@@ -110,81 +110,26 @@ func inspectWakeBinaryStalenessPlatform(
 	}, nil
 }
 
-type darwinWakeProcessImage struct {
-	Path     string
-	Info     os.FileInfo
-	Identity wakeFileIdentity
-	SHA256   string
-}
+type darwinWakeProcessImage = darwinMappedWakeImage
 
-func inspectDarwinWakeProcessImage(pid int) (darwinWakeProcessImage, error) {
-	path, err := readDarwinProcessExecutablePath(pid)
+var inspectDarwinWakeProcessImage = inspectDarwinWakeMappedImage
+
+func confirmResolvedDarwinWakeBinary(current resolvedWakeBinary, expected wakeFileIdentity) error {
+	if !filepath.IsAbs(current.Path) || filepath.Clean(current.Path) != current.Path {
+		return fmt.Errorf("current amq executable path is not canonical and absolute")
+	}
+	confirmed, err := os.Stat(current.Path)
 	if err != nil {
-		return darwinWakeProcessImage{}, fmt.Errorf("resolve wake process executable: %w", err)
+		return fmt.Errorf("re-stat current amq executable: %w", err)
 	}
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return darwinWakeProcessImage{}, fmt.Errorf("wake process executable path is not canonical and absolute")
+	if !confirmed.Mode().IsRegular() {
+		return fmt.Errorf("current amq executable is no longer a regular file")
 	}
-
-	pathInfo, err := os.Lstat(path)
-	if err != nil {
-		return darwinWakeProcessImage{Path: path}, fmt.Errorf("stat wake process executable path: %w", err)
+	identity, ok := captureWakeFileIdentity(confirmed)
+	if !ok || identity != expected || confirmed.Size() != current.Info.Size() {
+		return fmt.Errorf("current amq executable changed during comparison")
 	}
-	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
-		return darwinWakeProcessImage{}, fmt.Errorf("wake process executable path is not a regular non-symlink file")
-	}
-	file, err := openWakeMetadataFile(path)
-	if err != nil {
-		return darwinWakeProcessImage{}, fmt.Errorf("open wake process executable: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-
-	openedInfo, err := file.Stat()
-	if err != nil {
-		return darwinWakeProcessImage{}, fmt.Errorf("stat opened wake process executable: %w", err)
-	}
-	if !sameWakeFileIdentity(pathInfo, openedInfo) || pathInfo.Size() != openedInfo.Size() {
-		return darwinWakeProcessImage{}, fmt.Errorf("wake process executable changed while opening")
-	}
-	identity, ok := captureWakeFileIdentity(openedInfo)
-	if !ok || identity.Device == 0 || identity.Inode == 0 {
-		return darwinWakeProcessImage{}, fmt.Errorf("wake process executable identity unavailable")
-	}
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, file); err != nil {
-		return darwinWakeProcessImage{}, fmt.Errorf("digest wake process executable: %w", err)
-	}
-	hashedInfo, err := file.Stat()
-	if err != nil || !sameWakeFileIdentity(openedInfo, hashedInfo) || openedInfo.Size() != hashedInfo.Size() {
-		return darwinWakeProcessImage{}, fmt.Errorf("wake process executable changed while hashing")
-	}
-
-	confirmedPath, err := readDarwinProcessExecutablePath(pid)
-	if err != nil || confirmedPath != path {
-		return darwinWakeProcessImage{}, fmt.Errorf("wake process executable path changed during inspection")
-	}
-	confirmedInfo, err := os.Lstat(path)
-	if err != nil || !sameWakeFileIdentity(hashedInfo, confirmedInfo) || hashedInfo.Size() != confirmedInfo.Size() {
-		return darwinWakeProcessImage{}, fmt.Errorf("wake process executable changed during inspection")
-	}
-	return darwinWakeProcessImage{
-		Path:     path,
-		Info:     hashedInfo,
-		Identity: identity,
-		SHA256:   "sha256:" + hex.EncodeToString(hasher.Sum(nil)),
-	}, nil
-}
-
-func darwinRecordedImageMatches(
-	recorded wakeImageEvidenceV1,
-	running darwinWakeProcessImage,
-) bool {
-	return recorded.ExecutionPath == running.Path &&
-		recorded.Device == running.Identity.Device &&
-		recorded.Inode == running.Identity.Inode &&
-		recorded.Size == running.Info.Size() &&
-		recorded.CTimeNS == running.Identity.CTimeSec*1_000_000_000+running.Identity.CTimeNsec &&
-		recorded.SHA256 == running.SHA256
+	return nil
 }
 
 func wakeBinaryFileEvidenceFromIdentity(identity wakeFileIdentity) wakeBinaryFileEvidence {
