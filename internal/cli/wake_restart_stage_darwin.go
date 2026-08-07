@@ -34,9 +34,9 @@ func validateWakeRestartStageStatePlatform(record wakeRestartRecord) error {
 			return fmt.Errorf("previous wake restart bound stage is not an owned Darwin stage")
 		}
 	}
-	// Records written before persisted stage ownership was introduced have no
-	// stage fields. They remain readable so an in-flight v0.57.2 restart can
-	// finish after the binary is upgraded.
+	// Records written before persisted stage ownership was introduced, and the
+	// schema-2 successor claims derived from them, have no stage fields. They
+	// remain readable so an in-flight v0.57.2 restart can finish after upgrade.
 	if record.StagePath == "" && record.BoundImage == nil {
 		return nil
 	}
@@ -131,6 +131,10 @@ func validateWakeRestartPersistedBoundPlatform(
 	bootstrap wakeImageEvidenceV1,
 ) error {
 	if record.BoundImage == nil {
+		if record.Schema == wakeRestartSchemaV1 && record.StagePath == "" &&
+			bootstrap.Method == wakeImageMethodPathnameExecVerified {
+			return nil
+		}
 		return fmt.Errorf("darwin wake restart record has no persisted bound stage")
 	}
 	if !sameDarwinStagedWakeImageEvidence(*record.BoundImage, bootstrap) {

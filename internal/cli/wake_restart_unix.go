@@ -79,6 +79,8 @@ type wakeRestartReadiness struct {
 }
 
 var (
+	errWakeRestartSchemaTooNew = errors.New("wake restart schema is newer than supported")
+
 	wakeRestartNow            = time.Now
 	wakeRestartSleep          = time.Sleep
 	wakeRestartNotify         = notifyWakeRestartPlatform
@@ -202,6 +204,13 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 		if readErr != nil {
 			if !exists || existing.Object.FileInfo == nil {
 				return readErr
+			}
+			if errors.Is(readErr, errWakeRestartSchemaTooNew) {
+				return fmt.Errorf(
+					"future-schema wake restart request is preserved at %s; retry with a newer AMQ: %w",
+					wakeRestartFileName,
+					readErr,
+				)
 			}
 			quarantined, quarantineErr := quarantineWakeRestartRecordAt(dirfd, agentDir, existing)
 			if quarantineErr != nil {
@@ -557,6 +566,9 @@ func sameWakeImageEvidence(first, second wakeImageEvidenceV1) bool {
 }
 
 func validateWakeRestartRecord(record wakeRestartRecord) error {
+	if record.Schema > wakeRestartSchemaV2 {
+		return fmt.Errorf("%w: wake restart schema %d unsupported", errWakeRestartSchemaTooNew, record.Schema)
+	}
 	if record.Schema != wakeRestartSchemaV1 && record.Schema != wakeRestartSchemaV2 {
 		return fmt.Errorf("wake restart schema %d unsupported", record.Schema)
 	}
@@ -636,6 +648,19 @@ func readWakeRestartRecordSnapshotAt(
 	snapshot := wakeRestartRecordSnapshot{Object: object}
 	if err != nil || !exists {
 		return snapshot, exists, err
+	}
+	var envelope struct {
+		Schema int `json:"schema"`
+	}
+	if err := json.Unmarshal(object.Raw, &envelope); err != nil {
+		return snapshot, true, fmt.Errorf("parse wake restart request: %w", err)
+	}
+	if envelope.Schema > wakeRestartSchemaV2 {
+		return snapshot, true, fmt.Errorf(
+			"%w: wake restart schema %d unsupported",
+			errWakeRestartSchemaTooNew,
+			envelope.Schema,
+		)
 	}
 	if err := json.Unmarshal(object.Raw, &snapshot.Record); err != nil {
 		return snapshot, true, fmt.Errorf("parse wake restart request: %w", err)

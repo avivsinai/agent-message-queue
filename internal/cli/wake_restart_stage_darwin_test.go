@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -704,5 +705,118 @@ func TestDarwinPostAcquireErrorRetainsLockBeforeReadinessCommit(t *testing.T) {
 	}
 	if lockCleaned {
 		t.Fatal("post-acquire failure removed the lock before readiness commit")
+	}
+}
+
+func TestDarwinAcquireWakeLockAfterLegacyRestartCompletesMixedVersionHandoff(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	bound := boundWakeImageEvidenceForTest(fixture.candidate)
+	if bound.Method != wakeImageMethodPathnameExecVerified ||
+		fixture.record.Schema != wakeRestartSchemaV1 ||
+		fixture.record.StagePath != "" || fixture.record.BoundImage != nil {
+		t.Fatalf("legacy v0.57.2 restart shape changed: record=%#v bound=%#v", fixture.record, bound)
+	}
+
+	cleanup, err := acquireWakeLockAfterResumeInDir(
+		fixture.agentDir,
+		fixture.root,
+		fixture.agent,
+		wakeLockAcquireOptions{
+			wakeMode:            wakeInjectModeNone,
+			requestedOwner:      &fixture.owner,
+			resumeEligible:      true,
+			resumeImageEvidence: &bound,
+		},
+		wakeResumeBootstrap{
+			Schema:     wakeRestartSchemaV1,
+			RequestID:  fixture.record.RequestID,
+			Generation: fixture.record.Generation,
+			BoundImage: &bound,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	current := inspectWakeLock(fixture.root, fixture.agent)
+	if !current.IdentityConfirmed || current.PID != fixture.lock.PID ||
+		current.Lock.ProcessStart != fixture.lock.Lock.ProcessStart ||
+		current.Lock.Generation == fixture.lock.Lock.Generation {
+		t.Fatalf("legacy resumed lock = %#v", current)
+	}
+	var claimed wakeRestartRecord
+	var exists bool
+	if err := fixture.agentDir.withFD(func(dirfd int) error {
+		claimed, exists, err = readWakeRestartRecordAt(dirfd, fixture.agentDir)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !exists || claimed.Schema != wakeRestartSchemaV2 ||
+		claimed.SuccessorGeneration != current.Lock.Generation ||
+		claimed.StagePath != "" || claimed.BoundImage != nil {
+		t.Fatalf("legacy successor claim = %#v, exists=%v", claimed, exists)
+	}
+	if err := writeWakePreparedFileInDir(
+		fixture.agentDir,
+		fixture.root,
+		fixture.agent,
+		current,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := consumeWakeRestartAfterPrepared(
+		fixture.agentDir,
+		fixture.root,
+		fixture.agent,
+		current,
+		wakeResumeBootstrap{
+			Schema:     wakeRestartSchemaV1,
+			RequestID:  fixture.record.RequestID,
+			Generation: fixture.record.Generation,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.agentDir.withFD(func(dirfd int) error {
+		_, exists, err = readWakeRestartRecordAt(dirfd, fixture.agentDir)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("legacy mixed-version handoff was not consumed")
+	}
+}
+
+func TestDarwinAcquireWakeLockAfterResumeRefusesUnpersistedCurrentStage(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	bound := boundWakeImageEvidenceForTest(fixture.candidate)
+	bound.Method = wakeImageMethodPathnameExecObserved
+
+	cleanup, err := acquireWakeLockAfterResumeInDir(
+		fixture.agentDir,
+		fixture.root,
+		fixture.agent,
+		wakeLockAcquireOptions{
+			wakeMode:            wakeInjectModeNone,
+			requestedOwner:      &fixture.owner,
+			resumeEligible:      true,
+			resumeImageEvidence: &bound,
+		},
+		wakeResumeBootstrap{
+			Schema:     wakeRestartSchemaV1,
+			RequestID:  fixture.record.RequestID,
+			Generation: fixture.record.Generation,
+			BoundImage: &bound,
+		},
+	)
+	if cleanup != nil || err == nil || !strings.Contains(err.Error(), "no persisted bound stage") {
+		t.Fatalf("unpersisted current stage cleanup=%v err=%v", cleanup != nil, err)
+	}
+	current := inspectWakeLock(fixture.root, fixture.agent)
+	if !sameWakeLockInspection(fixture.lock, current) {
+		t.Fatalf("unpersisted current stage changed incumbent: before=%#v after=%#v", fixture.lock, current)
 	}
 }

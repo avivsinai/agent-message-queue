@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1310,77 +1311,136 @@ func TestWakeRestartPreservesPendingForeignGeneration(t *testing.T) {
 }
 
 func TestWakeRestartQuarantinesExactInvalidRecordAndStops(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		future bool
-		second int
-	}{
-		{name: "malformed", second: 0},
-		{name: "future schema", future: true, second: 1},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := newWakeRestartFixture(t)
-			raw := []byte(`{"schema":`)
-			if test.future {
-				future := fixture.record
-				future.Schema = wakeRestartSchemaV2 + 1
-				encoded, err := json.Marshal(future)
-				if err != nil {
-					t.Fatal(err)
-				}
-				raw = append(encoded, '\n')
-			}
-			removeWakeRestartRecordForTest(t, fixture)
-			path := filepath.Join(fixture.agentDir.path, wakeRestartFileName)
-			if err := os.WriteFile(path, raw, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			before, err := os.Lstat(path)
-			if err != nil {
-				t.Fatal(err)
-			}
+	fixture := newWakeRestartFixture(t)
+	raw := []byte(`{"schema":`)
+	removeWakeRestartRecordForTest(t, fixture)
+	path := filepath.Join(fixture.agentDir.path, wakeRestartFileName)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-			oldNow := wakeQuarantineNow
-			oldPreflight := wakeRestartPreflight
-			oldNotify := wakeRestartNotify
-			wakeQuarantineNow = func() time.Time {
-				return time.Date(2026, 8, 7, 12, 0, test.second, 0, time.UTC)
-			}
-			preflightCalled := false
-			notifyCalled := false
-			wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
-				preflightCalled = true
-				return nil
-			}
-			wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
-				notifyCalled = true
-				return nil
-			}
-			t.Cleanup(func() {
-				wakeQuarantineNow = oldNow
-				wakeRestartPreflight = oldPreflight
-				wakeRestartNotify = oldNotify
-			})
+	oldNow := wakeQuarantineNow
+	oldPreflight := wakeRestartPreflight
+	oldNotify := wakeRestartNotify
+	wakeQuarantineNow = func() time.Time {
+		return time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	}
+	preflightCalled := false
+	notifyCalled := false
+	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
+		preflightCalled = true
+		return nil
+	}
+	wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
+		notifyCalled = true
+		return nil
+	}
+	t.Cleanup(func() {
+		wakeQuarantineNow = oldNow
+		wakeRestartPreflight = oldPreflight
+		wakeRestartNotify = oldNotify
+	})
 
-			result, restartErr := requestWakeRestart(fixture.root, fixture.agent)
-			if restartErr == nil || !strings.Contains(restartErr.Error(), "was preserved as .wake.restart.quarantined.") ||
-				!strings.Contains(result.Reason, wakeRestartCheckCommand(fixture.root, fixture.agent)) {
-				t.Fatalf("invalid restart result=%#v err=%v", result, restartErr)
-			}
-			if preflightCalled || notifyCalled {
-				t.Fatalf("invalid restart reached preflight=%v notify=%v", preflightCalled, notifyCalled)
-			}
-			if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
-				t.Fatalf("invalid restart source remains: %v", statErr)
-			}
-			assertExactWakeQuarantineForTest(
-				t,
-				fixture.agentDir.path,
-				wakeRestartFileName+".quarantined.",
-				raw,
-				before,
-			)
-		})
+	result, restartErr := requestWakeRestart(fixture.root, fixture.agent)
+	if restartErr == nil || !strings.Contains(restartErr.Error(), "was preserved as .wake.restart.quarantined.") ||
+		!strings.Contains(result.Reason, wakeRestartCheckCommand(fixture.root, fixture.agent)) {
+		t.Fatalf("invalid restart result=%#v err=%v", result, restartErr)
+	}
+	if preflightCalled || notifyCalled {
+		t.Fatalf("invalid restart reached preflight=%v notify=%v", preflightCalled, notifyCalled)
+	}
+	if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid restart source remains: %v", statErr)
+	}
+	assertExactWakeQuarantineForTest(
+		t,
+		fixture.agentDir.path,
+		wakeRestartFileName+".quarantined.",
+		raw,
+		before,
+	)
+}
+
+func TestWakeRestartPreservesExactFutureSchemaRecordAndStops(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	future := fixture.record
+	future.Schema = wakeRestartSchemaV2 + 1
+	encoded, err := json.Marshal(future)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	document["request_id"] = map[string]any{"value": future.RequestID}
+	document["future_extension"] = map[string]any{"mode": "new"}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = append(raw, '\n')
+	removeWakeRestartRecordForTest(t, fixture)
+	path := filepath.Join(fixture.agentDir.path, wakeRestartFileName)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldPreflight := wakeRestartPreflight
+	oldNotify := wakeRestartNotify
+	preflightCalled := false
+	notifyCalled := false
+	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
+		preflightCalled = true
+		return nil
+	}
+	wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
+		notifyCalled = true
+		return nil
+	}
+	t.Cleanup(func() {
+		wakeRestartPreflight = oldPreflight
+		wakeRestartNotify = oldNotify
+	})
+
+	result, restartErr := requestWakeRestart(fixture.root, fixture.agent)
+	if restartErr == nil || !errors.Is(restartErr, errWakeRestartSchemaTooNew) ||
+		!strings.Contains(restartErr.Error(), "future-schema wake restart request is preserved") ||
+		!strings.Contains(restartErr.Error(), "newer AMQ") ||
+		!strings.Contains(result.Reason, wakeRestartCheckCommand(fixture.root, fixture.agent)) {
+		t.Fatalf("future restart result=%#v err=%v", result, restartErr)
+	}
+	if preflightCalled || notifyCalled {
+		t.Fatalf("future restart reached preflight=%v notify=%v", preflightCalled, notifyCalled)
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("future restart record identity changed")
+	}
+	afterRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, afterRaw) {
+		t.Fatal("future restart record content changed")
+	}
+	quarantined, err := filepath.Glob(path + ".quarantined.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quarantined) != 0 {
+		t.Fatalf("future restart record was quarantined: %v", quarantined)
 	}
 }
 
