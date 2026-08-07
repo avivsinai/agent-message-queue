@@ -15,10 +15,17 @@ import (
 
 var ErrAlreadyRunning = errors.New("amq wake already running")
 var ErrWakeReadinessUncertain = errors.New("amq wake readiness is uncertain; child was left unsignaled")
+var ErrWakeImageIdentityInconclusive = errors.New("amq wake image identity is inconclusive")
 
 const defaultWakeReadyTimeout = 10 * time.Second
 const staleWakeReadyMarkerAge = 24 * time.Hour
 const keepaliveWakeRetryUntil = "injected"
+const wakeCheckSchemaV1 = 1
+
+const (
+	wakeImageCurrent   = "current"
+	wakeImageDifferent = "different"
+)
 
 type Env struct {
 	SchemaVersion int               `json:"schema_version"`
@@ -41,6 +48,18 @@ type StartWakeRequest struct {
 	Adapter   string
 	Target    string
 	Timeout   time.Duration
+}
+
+type wakeCheckResult struct {
+	Schema      int    `json:"schema"`
+	LiveWake    bool   `json:"live_wake"`
+	ImageStatus string `json:"image_status"`
+}
+
+type wakeCheckWireResult struct {
+	Schema      *int    `json:"schema"`
+	LiveWake    *bool   `json:"live_wake"`
+	ImageStatus *string `json:"image_status"`
 }
 
 // RetireWakeRequest names the exact inject-via identity that AMQ must match
@@ -106,6 +125,9 @@ func (c CLI) Env(ctx context.Context) (Env, error) {
 }
 
 func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
+	if req.Me == "" {
+		return errors.New("me is required")
+	}
 	if req.InjectVia == "" {
 		return errors.New("inject-via executable is required")
 	}
@@ -114,6 +136,9 @@ func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 	}
 	if req.Target == "" {
 		return errors.New("target is required")
+	}
+	if err := c.refreshWakeImage(ctx, req); err != nil {
+		return err
 	}
 
 	args := []string{"wake"}
@@ -215,6 +240,72 @@ func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 	return nil
 }
 
+// refreshWakeImage replaces a conclusively stale live wake before StartWake's
+// existing target-aware acquisition runs. The read-only check compares the
+// running image to this CLI's image; retirement then revalidates the exact
+// inject-via target before stopping anything. Unknown image identity is never
+// treated as stale or current.
+func (c CLI) refreshWakeImage(ctx context.Context, req StartWakeRequest) error {
+	check, err := c.checkWake(ctx, req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrWakeImageIdentityInconclusive, err)
+	}
+	if !check.LiveWake {
+		return nil
+	}
+
+	switch check.ImageStatus {
+	case wakeImageCurrent:
+		return nil
+	case wakeImageDifferent:
+		_, err := c.RetireWake(ctx, RetireWakeRequest{
+			Root:      req.Root,
+			Me:        req.Me,
+			InjectVia: req.InjectVia,
+			Adapter:   req.Adapter,
+			Target:    req.Target,
+		})
+		if err != nil {
+			return fmt.Errorf("retire stale amq wake image: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: live wake reported image status %q", ErrWakeImageIdentityInconclusive, check.ImageStatus)
+	}
+}
+
+func (c CLI) checkWake(ctx context.Context, req StartWakeRequest) (wakeCheckResult, error) {
+	args := []string{"wake", "check", "--me", req.Me}
+	if req.Root != "" {
+		args = append(args, "--root", req.Root)
+	}
+	args = append(args, "--json", "--json-schema", "1")
+
+	stdout, stderr, err := c.run(ctx, args...)
+	if err != nil {
+		detail := strings.TrimSpace(stderr)
+		if detail == "" {
+			detail = err.Error()
+		}
+		return wakeCheckResult{}, fmt.Errorf("amq wake check failed: %v: %s", err, detail)
+	}
+	var wire wakeCheckWireResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout), &wire); err != nil {
+		return wakeCheckResult{}, fmt.Errorf("parse amq wake check output: %w", err)
+	}
+	if wire.Schema == nil || wire.LiveWake == nil || wire.ImageStatus == nil {
+		return wakeCheckResult{}, errors.New("amq wake check omitted required schema, live_wake, or image_status field")
+	}
+	if *wire.Schema != wakeCheckSchemaV1 {
+		return wakeCheckResult{}, fmt.Errorf("amq wake check returned schema %d, want %d", *wire.Schema, wakeCheckSchemaV1)
+	}
+	return wakeCheckResult{
+		Schema:      *wire.Schema,
+		LiveWake:    *wire.LiveWake,
+		ImageStatus: *wire.ImageStatus,
+	}, nil
+}
+
 // RetireWake asks AMQ to stop an identity-confirmed live inject-via wake (or
 // remove its exactly-bound proven-stale lock) whose saved target matches the
 // requested adapter/target exactly. It returns nil only when AMQ reports
@@ -261,6 +352,16 @@ func (c CLI) RetireWake(ctx context.Context, req RetireWakeRequest) (RetireWakeR
 		}
 	}
 
+	if result.Retired() && runErr != nil {
+		detail := strings.TrimSpace(stderr)
+		if detail == "" {
+			detail = runErr.Error()
+		}
+		return RetireWakeResult{}, fmt.Errorf(
+			"%w: amq wake retire reported %q but exited unsuccessfully: %v: %s",
+			ErrWakeRetireNotConfirmed, result.Status, runErr, detail,
+		)
+	}
 	if result.Retired() {
 		return result, nil
 	}

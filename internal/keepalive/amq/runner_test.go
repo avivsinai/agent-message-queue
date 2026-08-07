@@ -15,7 +15,7 @@ func TestStartWakeWaitsForReadyFileAndPassesTarget(t *testing.T) {
 	dir := t.TempDir()
 	argsLog := filepath.Join(dir, "args.log")
 	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
-	fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
+	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
 printf '%s\n' "$@" > "$AMQ_KEEPALIVE_ARGS_LOG"
 ready=""
 previous=""
@@ -89,7 +89,7 @@ func TestStartWakeBaselinesExistingWhenOptedIn(t *testing.T) {
 	argsLog := filepath.Join(dir, "args.log")
 	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
 	t.Setenv("AMQ_KEEPALIVE_BASELINE_EXISTING", "1")
-	fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
+	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
 printf '%s\n' "$@" > "$AMQ_KEEPALIVE_ARGS_LOG"
 ready=""
 previous=""
@@ -132,9 +132,196 @@ printf ready > "$ready"
 	}
 }
 
+func TestStartWakeRefreshesOnlyConclusivelyDifferentLiveImages(t *testing.T) {
+	cases := []struct {
+		name          string
+		checkOutput   string
+		checkExit     string
+		retireOutput  string
+		retireExit    string
+		wantCalls     []string
+		wantErrIs     error
+		wantErrString string
+	}{
+		{
+			name:         "different image retires then starts",
+			checkOutput:  `{"schema":1,"live_wake":true,"image_status":"different"}`,
+			retireOutput: `{"status":"retired","agent":"codex","pid":4242}`,
+			wantCalls:    []string{"check", "retire", "start"},
+		},
+		{
+			name:        "current image starts without retire",
+			checkOutput: `{"schema":1,"live_wake":true,"image_status":"current"}`,
+			wantCalls:   []string{"check", "start"},
+		},
+		{
+			name:        "no live wake starts",
+			checkOutput: `{"schema":1,"live_wake":false,"image_status":"unknown"}`,
+			wantCalls:   []string{"check", "start"},
+		},
+		{
+			name:        "unknown live image preserves wake",
+			checkOutput: `{"schema":1,"live_wake":true,"image_status":"unknown"}`,
+			wantCalls:   []string{"check"},
+			wantErrIs:   ErrWakeImageIdentityInconclusive,
+		},
+		{
+			name:        "unrecognized live image status preserves wake",
+			checkOutput: `{"schema":1,"live_wake":true,"image_status":"future"}`,
+			wantCalls:   []string{"check"},
+			wantErrIs:   ErrWakeImageIdentityInconclusive,
+		},
+		{
+			name:        "schema mismatch is inconclusive",
+			checkOutput: `{"schema":2,"live_wake":true,"image_status":"different"}`,
+			wantCalls:   []string{"check"},
+			wantErrIs:   ErrWakeImageIdentityInconclusive,
+		},
+		{
+			name:          "missing schema is inconclusive",
+			checkOutput:   `{"live_wake":false,"image_status":"unknown"}`,
+			wantCalls:     []string{"check"},
+			wantErrIs:     ErrWakeImageIdentityInconclusive,
+			wantErrString: "omitted required",
+		},
+		{
+			name:          "missing live wake is inconclusive",
+			checkOutput:   `{"schema":1,"image_status":"unknown"}`,
+			wantCalls:     []string{"check"},
+			wantErrIs:     ErrWakeImageIdentityInconclusive,
+			wantErrString: "omitted required",
+		},
+		{
+			name:          "missing image status is inconclusive",
+			checkOutput:   `{"schema":1,"live_wake":false}`,
+			wantCalls:     []string{"check"},
+			wantErrIs:     ErrWakeImageIdentityInconclusive,
+			wantErrString: "omitted required",
+		},
+		{
+			name:          "malformed check is inconclusive",
+			checkOutput:   `not-json`,
+			wantCalls:     []string{"check"},
+			wantErrIs:     ErrWakeImageIdentityInconclusive,
+			wantErrString: "parse amq wake check output",
+		},
+		{
+			name:          "failed check is inconclusive",
+			checkExit:     "7",
+			wantCalls:     []string{"check"},
+			wantErrIs:     ErrWakeImageIdentityInconclusive,
+			wantErrString: "amq wake check failed",
+		},
+		{
+			name:          "retirement refusal does not start",
+			checkOutput:   `{"schema":1,"live_wake":true,"image_status":"different"}`,
+			retireOutput:  `{"status":"refused","reason":"target identity changed"}`,
+			retireExit:    "1",
+			wantCalls:     []string{"check", "retire"},
+			wantErrIs:     ErrWakeRetireNotConfirmed,
+			wantErrString: "target identity changed",
+		},
+		{
+			name:          "retired output with failed exit does not start",
+			checkOutput:   `{"schema":1,"live_wake":true,"image_status":"different"}`,
+			retireOutput:  `{"status":"retired","agent":"codex","pid":4242}`,
+			retireExit:    "1",
+			wantCalls:     []string{"check", "retire"},
+			wantErrIs:     ErrWakeRetireNotConfirmed,
+			wantErrString: "exited unsuccessfully",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			callsLog := filepath.Join(dir, "calls.log")
+			checkExit := tc.checkExit
+			if checkExit == "" {
+				checkExit = "0"
+			}
+			retireExit := tc.retireExit
+			if retireExit == "" {
+				retireExit = "0"
+			}
+			t.Setenv("AMQ_KEEPALIVE_CALLS_LOG", callsLog)
+			t.Setenv("AMQ_KEEPALIVE_CHECK_OUTPUT", tc.checkOutput)
+			t.Setenv("AMQ_KEEPALIVE_CHECK_EXIT", checkExit)
+			t.Setenv("AMQ_KEEPALIVE_RETIRE_OUTPUT", tc.retireOutput)
+			t.Setenv("AMQ_KEEPALIVE_RETIRE_EXIT", retireExit)
+			fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
+operation=start
+if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
+  operation=check
+elif [ "$1" = "wake" ] && [ "$2" = "retire" ]; then
+  operation=retire
+fi
+printf '%s\t%s\n' "$operation" "$*" >> "$AMQ_KEEPALIVE_CALLS_LOG"
+case "$operation" in
+  check)
+    printf '%s\n' "$AMQ_KEEPALIVE_CHECK_OUTPUT"
+    exit "$AMQ_KEEPALIVE_CHECK_EXIT"
+    ;;
+  retire)
+    printf '%s\n' "$AMQ_KEEPALIVE_RETIRE_OUTPUT"
+    exit "$AMQ_KEEPALIVE_RETIRE_EXIT"
+    ;;
+esac
+ready=""
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "-ready-file" ]; then ready="$arg"; fi
+  previous="$arg"
+done
+[ -n "$ready" ] || exit 11
+printf ready > "$ready"
+`)
+
+			err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
+				Root:      "/tmp/amq-root",
+				Me:        "codex",
+				InjectVia: "/tmp/amq-keepalive",
+				Adapter:   "ghostty",
+				Target:    "ghostty:terminal:abc",
+				Timeout:   5 * time.Second,
+			})
+			if tc.wantErrIs == nil && err != nil {
+				t.Fatalf("StartWake() error = %v, want nil", err)
+			}
+			if tc.wantErrIs != nil && !errors.Is(err, tc.wantErrIs) {
+				t.Fatalf("StartWake() error = %v, want errors.Is(%v)", err, tc.wantErrIs)
+			}
+			if tc.wantErrString != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrString)) {
+				t.Fatalf("StartWake() error = %v, want contains %q", err, tc.wantErrString)
+			}
+
+			data, readErr := os.ReadFile(callsLog)
+			if readErr != nil {
+				t.Fatalf("read calls log: %v", readErr)
+			}
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			gotCalls := make([]string, 0, len(lines))
+			for _, line := range lines {
+				operation, _, ok := strings.Cut(line, "\t")
+				if !ok {
+					t.Fatalf("malformed call log line %q", line)
+				}
+				gotCalls = append(gotCalls, operation)
+			}
+			if !reflect.DeepEqual(gotCalls, tc.wantCalls) {
+				t.Fatalf("call order = %#v, want %#v\n%s", gotCalls, tc.wantCalls, data)
+			}
+			wantCheck := "check\twake check --me codex --root /tmp/amq-root --json --json-schema 1"
+			if lines[0] != wantCheck {
+				t.Fatalf("wake check argv = %q, want %q", lines[0], wantCheck)
+			}
+		})
+	}
+}
+
 func TestStartWakeFailsWhenProcessExitsBeforeReady(t *testing.T) {
 	dir := t.TempDir()
-	fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
+	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
 exit 7
 `)
 
@@ -162,7 +349,7 @@ func TestStartWakeKeepsSharedReadyDirectoryForPostReadyWork(t *testing.T) {
 	t.Setenv("AMQ_KEEPALIVE_READY_PATH_LOG", readyPathLog)
 	t.Setenv("AMQ_KEEPALIVE_POST_READY", postReady)
 	t.Setenv("AMQ_KEEPALIVE_RELEASE", release)
-	fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
+	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
 ready=""
 previous=""
 for arg in "$@"; do
@@ -212,7 +399,7 @@ func TestStartWakeCancelAfterReadyDoesNotKillEstablishedWake(t *testing.T) {
 	t.Setenv("AMQ_KEEPALIVE_CHECK", check)
 	t.Setenv("AMQ_KEEPALIVE_ALIVE", alive)
 	t.Setenv("AMQ_KEEPALIVE_RELEASE", release)
-	fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
+	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
 ready=""
 previous=""
 for arg in "$@"; do
@@ -261,7 +448,7 @@ func TestStartWakeCancelBeforeReadyLeavesChildUnsignaled(t *testing.T) {
 	t.Setenv("AMQ_KEEPALIVE_ALLOW_READY", allowReady)
 	t.Setenv("AMQ_KEEPALIVE_LATE_READY", lateReady)
 	t.Setenv("AMQ_KEEPALIVE_RELEASE", release)
-	fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
+	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
 ready=""
 previous=""
 for arg in "$@"; do
@@ -300,7 +487,7 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 
 func TestStartWakeTimesOutWhenReadyFileNeverAppears(t *testing.T) {
 	dir := t.TempDir()
-	fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
+	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
 sleep 0.2
 `)
 
@@ -441,6 +628,12 @@ exit 1`,
 exit 7`,
 			wantErrContains: "amq wake retire failed",
 		},
+		{
+			name: "retired-non-zero-exit",
+			script: `printf '%s\n' '{"status":"retired","agent":"codex","pid":7}'
+exit 7`,
+			wantErrContains: "exited unsuccessfully",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -492,6 +685,17 @@ func TestRetireWakeValidatesRequiredFields(t *testing.T) {
 			}
 		})
 	}
+}
+
+func writeStartWakeExecutable(t *testing.T, path string, body string) string {
+	t.Helper()
+	body = strings.TrimPrefix(body, "#!/bin/sh\n")
+	return writeExecutable(t, path, `#!/bin/sh
+if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
+  printf '%s\n' '{"schema":1,"live_wake":false,"image_status":"unknown"}'
+  exit 0
+fi
+`+body)
 }
 
 func writeExecutable(t *testing.T, path string, body string) string {
