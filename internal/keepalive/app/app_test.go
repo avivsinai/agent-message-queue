@@ -420,7 +420,7 @@ func TestReattachRejectsRegisteredCmuxTargetWithUnknownPhysicalKeyBeforeWake(t *
 		t.Fatalf("Upsert unknown owner: %v", err)
 	}
 	runner := appCommandRunnerFunc(func(context.Context, string, ...string) ([]byte, error) {
-		return []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"/dev/not-a-tty"},{"id":"C71381D9-29D5-4D2D-A1C9-E101556BCB49","tty":"ttys012"}]}]}]}]}`), nil
+		return []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"/dev/123"},{"id":"C71381D9-29D5-4D2D-A1C9-E101556BCB49","tty":"ttys012"}]}]}]}]}`), nil
 	})
 	adapters := adapter.NewRegistry(adapter.Cmux{
 		Runner: runner,

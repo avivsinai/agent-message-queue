@@ -325,6 +325,8 @@ func TestCanonicalCmuxTTYRejectsAliasesAndNonPTYValues(t *testing.T) {
 		"/dev/ttys-1",
 		"/dev/ttys01x",
 		"/dev/ptys011",
+		"123",
+		"/dev/123",
 	} {
 		t.Run(strings.ReplaceAll(value, "/", "_"), func(t *testing.T) {
 			if got, err := canonicalCmuxTTY(value); err == nil || got != "" {

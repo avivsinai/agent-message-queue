@@ -455,8 +455,8 @@ func isCmuxPTY(tty string) bool {
 	if filepath.Dir(tty) != "/dev" {
 		return false
 	}
-	suffix := strings.TrimPrefix(filepath.Base(tty), "ttys")
-	if suffix == "" {
+	suffix, ok := strings.CutPrefix(filepath.Base(tty), "ttys")
+	if !ok || suffix == "" {
 		return false
 	}
 	for _, char := range suffix {
