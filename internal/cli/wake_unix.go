@@ -545,11 +545,16 @@ func cleanupGenericWakeGenerationAt(
 		me,
 		current,
 	)
-	if err := removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, current); err != nil {
+	committed, lockRemovalErr := removeWakeLockIfUnchangedGuardedAtStatus(dirfd, agentDir, current)
+	blockingRemovalErr, diagnosticRemovalErr := splitWakeSelfUpgradeDiagnosticResidue(lockRemovalErr)
+	if blockingRemovalErr != nil {
 		return errors.Join(
 			preparedSnapshotErr,
-			fmt.Errorf("remove exact generic wake lock: %w", err),
+			fmt.Errorf("remove exact generic wake lock: %w", lockRemovalErr),
 		)
+	}
+	if !committed {
+		return preparedSnapshotErr
 	}
 	var lockSyncErr error
 	if err := syncWakeOwnerDirFD(dirfd); err != nil {
@@ -601,6 +606,7 @@ func cleanupGenericWakeGenerationAt(
 	)
 	return errors.Join(
 		preparedSnapshotErr,
+		diagnosticRemovalErr,
 		lockSyncErr,
 		interleaveErr,
 		replacementErr,
@@ -1867,6 +1873,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	refuseUnverifiedWakeFlag := fs.Bool("refuse-unverified-wake", false, "Internal: refuse unverified wake locks instead of superseding them")
 	repairLineageFlag := fs.String("repair-lineage", "", "Internal: inherit the suppression floor from an exact dead wake generation")
 	baselineExistingFlag := fs.Bool("baseline-existing", false, "Ignore messages already waiting when this wake starts")
+	noSelfUpgradeFlag := fs.Bool("no-self-upgrade", false, "Disable automatic replacement by a newer installed AMQ image")
 	resumePreflightFlag := fs.Bool(wakeResumePreflightFlag, false, "Internal: validate an exact wake resume without starting")
 
 	usage := usageWithHiddenFlags(fs, "amq wake --me <agent> [options]",
@@ -1917,6 +1924,11 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		"Safety: raw, paste, --inject-cmd, --inject-via, and opt-in interrupt Ctrl+C",
 		"  can activate a focused permission/approval dialog. Use none when AMQ",
 		"  must enforce zero synthetic input; stderr output may scribble until redraw.",
+		"",
+		"Self-upgrade: eligible co-op wakes observe their stable launch symlink and",
+		"  replace the running image only with a strictly newer installed AMQ while",
+		"  preserving PID, terminal ownership, and unread work. Disable with",
+		"  --no-self-upgrade or AMQ_WAKE_NO_SELF_UPGRADE=1.",
 		"",
 		"EXPERIMENTAL: Uses TIOCSTI ioctl (macOS/Linux). May not work on all systems.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
@@ -2426,6 +2438,25 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 			return err
 		}
 	}
+	var runningImageEvidence wakeImageEvidenceV1
+	if currentWake.Lock.RunningImageEvidence != nil {
+		runningImageEvidence = *currentWake.Lock.RunningImageEvidence
+	}
+	selfUpgrade := constrainWakeSelfUpgradeEligibility(
+		captureWakeSelfUpgradeStartupState(
+			os.Args[0],
+			!*noSelfUpgradeFlag && !wakeSelfUpgradeDisabledByEnv(),
+			runningImageEvidence,
+		),
+		resumeEligible,
+	)
+	if strings.Contains(selfUpgrade.Reason, "pinned resolved image") {
+		selfUpgrade.Reason += fmt.Sprintf(
+			"; request a safe refresh with amq wake restart --root %s --me %s",
+			shellQuoteArg(root),
+			shellQuoteArg(me),
+		)
+	}
 
 	if err := setWakeNotifierStatusInDir(
 		activeAgentDir,
@@ -2486,11 +2517,13 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		inspectTerminalGeneration: func() wakeLockInspection {
 			return inspectWakeTerminalGeneration(root, me)
 		},
-		terminalGeneration: currentWake.Lock.Generation,
-		terminalTTY:        currentWake.Lock.TTY,
-		baselineRequested:  *baselineExistingFlag || repairLineage != nil,
-		baselineInherited:  repairLineage != nil,
-		retainedAgent:      activeAgentDir,
+		terminalGeneration:   currentWake.Lock.Generation,
+		terminalImageVersion: currentWake.Lock.ImageVersion,
+		terminalTTY:          currentWake.Lock.TTY,
+		selfUpgrade:          selfUpgrade,
+		baselineRequested:    *baselineExistingFlag || repairLineage != nil,
+		baselineInherited:    repairLineage != nil,
+		retainedAgent:        activeAgentDir,
 		recordNotifierStatus: func(status, mode, reason string) error {
 			return setWakeNotifierStatusInDir(activeAgentDir, me, status, mode, reason)
 		},
@@ -2718,6 +2751,29 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	defer func() {
 		_ = setWakeDoorbellStatusInDir(activeAgentDir, me, false, 0)
 	}()
+	initialSelfUpgradeDecision := wakeSelfUpgradeDecision{
+		Action: wakeSelfUpgradeActionUnchanged,
+		Reason: "stable launch locator is unchanged",
+	}
+	if !selfUpgrade.Enabled {
+		initialSelfUpgradeDecision.Action = wakeSelfUpgradeActionDisabled
+		initialSelfUpgradeDecision.Reason = selfUpgrade.Reason
+	} else if !selfUpgrade.Eligible {
+		initialSelfUpgradeDecision.Action = wakeSelfUpgradeActionIneligible
+		initialSelfUpgradeDecision.Reason = selfUpgrade.Reason
+	}
+	if err := recordWakeSelfUpgradeDecision(
+		activeAgentDir,
+		currentWake,
+		selfUpgrade,
+		initialSelfUpgradeDecision,
+	); err != nil {
+		_ = writeWakeDiagnostic(
+			&cfg,
+			"amq wake: record self-upgrade startup diagnostic: %v; continuing\n",
+			err,
+		)
+	}
 	return loop(cfg)
 }
 
@@ -3961,6 +4017,22 @@ func runWakeLoop(cfg wakeConfig) error {
 					"amq wake: maintenance precondition failed: %v; retrying\n",
 					preconditionErr,
 				)
+			}
+			if agentDir, ok := cfg.retainedAgent.(*wakeAgentDir); ok &&
+				agentDir != nil && cfg.inspectTerminalGeneration != nil {
+				if err := maintainWakeSelfUpgradeAtLoopBoundary(
+					&cfg,
+					agentDir,
+					watcher,
+					terminalAuthorityRetryC != nil,
+					inboxScanRetryC != nil,
+				); err != nil {
+					_ = writeWakeDiagnostic(
+						&cfg,
+						"amq wake: self-upgrade maintenance: %v; retrying\n",
+						err,
+					)
+				}
 			}
 			unreadableGenerationNotice.observe(&cfg)
 		}

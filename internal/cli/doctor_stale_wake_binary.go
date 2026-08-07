@@ -121,7 +121,7 @@ func checkStaleWakeBinaryHint(inspection wakeLockInspection) (opsHint, bool, err
 		return opsHint{}, false, nil
 	}
 
-	remedy := "restart this wake through its owning shell, launchd, systemd, or coop supervisor"
+	remedy := "inspect its automatic self-upgrade state with amq wake check --json --json-schema=2, then restart this wake through its owning shell, launchd, systemd, or coop supervisor"
 	message := fmt.Sprintf(
 		"Wake for agent %q (pid %d) is running a different amq executable; %s.",
 		inspection.Agent,

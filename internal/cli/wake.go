@@ -51,7 +51,9 @@ type wakeConfig struct {
 	terminalWrite                 func(string) error
 	inspectTerminalGeneration     func() wakeLockInspection
 	terminalGeneration            string
+	terminalImageVersion          string
 	terminalTTY                   string
+	selfUpgrade                   wakeSelfUpgradeState
 	baselineRequested             bool
 	baselineInherited             bool
 	baselineExisting              map[string]wakeFileIdentity

@@ -32,6 +32,36 @@ type testDarwinImageCaptureResult struct {
 	Error    string              `json:"error,omitempty"`
 }
 
+func TestSameDarwinWakeImagePathAcceptsSystemSymlinkSpelling(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "private")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(aliasDir, "amq")
+	if err := os.WriteFile(path, []byte("test"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameDarwinWakeImagePath(path, resolved) {
+		t.Fatalf("equivalent Darwin paths rejected: recorded=%q running=%q", path, resolved)
+	}
+	other := filepath.Join(t.TempDir(), "amq")
+	if err := os.WriteFile(other, []byte("test"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if sameDarwinWakeImagePath(path, other) {
+		t.Fatalf("different Darwin paths accepted: recorded=%q running=%q", path, other)
+	}
+}
+
 func TestDarwinSameVersionPathReplacementCannotReportCurrent(t *testing.T) {
 	if os.Getenv(testDarwinImageCaptureHelperEnv) == "1" {
 		runDarwinImageCaptureHelper(t)
@@ -274,6 +304,81 @@ func TestDarwinWakeBinaryComparisonReportsCurrentFromCorroboratedLiveImage(t *te
 	}
 	if !got.Evidence.Available || got.Evidence.Running != got.Evidence.Current {
 		t.Fatalf("corroborated evidence = %#v", got.Evidence)
+	}
+}
+
+func TestDarwinWakeBinaryComparisonRejectsOrdinaryMappedVnodeCTimeMismatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "amq")
+	if err := os.WriteFile(path, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := darwinWakeImageEvidenceForTest(t, path, info)
+	mapped := darwinMappedImageForTest(t, path, info)
+	mapped.Identity.CTimeSec--
+	stubDarwinProcessImage(t, mapped, nil)
+
+	got, err := inspectWakeBinaryStalenessPlatform(
+		wakeLockInspection{
+			PID: 4242,
+			Lock: wakeLock{
+				Started:              time.Now().UTC().Add(time.Second).Format(time.RFC3339),
+				ImagePath:            path,
+				ImageVersion:         evidence.EmbeddedVersion,
+				RunningImageEvidence: &evidence,
+			},
+		},
+		resolvedWakeBinary{Path: path, Info: info},
+	)
+	if err == nil || got.Stale || !strings.Contains(err.Error(), "changed during comparison") {
+		t.Fatalf("mapped vnode ctime comparison = %#v, %v; want unknown change error", got, err)
+	}
+}
+
+func TestDarwinWakeBinaryComparisonAcceptsOwnedRestartStageHardlinkAlias(t *testing.T) {
+	dir := t.TempDir()
+	publicPath := filepath.Join(dir, "amq")
+	if err := os.WriteFile(publicPath, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stageDir := filepath.Join(dir, ".amq.amq-restart-0123456789abcdef0123456789abcdef")
+	if err := os.Mkdir(stageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stagePath := filepath.Join(stageDir, "amq")
+	if err := os.Link(publicPath, stagePath); err != nil {
+		t.Fatal(err)
+	}
+	stageInfo, err := os.Stat(stagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicInfo, err := os.Stat(publicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := darwinWakeImageEvidenceForTest(t, stagePath, stageInfo)
+	mapped := darwinMappedImageForTest(t, publicPath, publicInfo)
+	mapped.Identity.CTimeSec--
+	stubDarwinProcessImage(t, mapped, nil)
+
+	got, err := inspectWakeBinaryStalenessPlatform(
+		wakeLockInspection{
+			PID: 4242,
+			Lock: wakeLock{
+				Started:              time.Now().UTC().Add(time.Second).Format(time.RFC3339),
+				ImagePath:            stagePath,
+				ImageVersion:         evidence.EmbeddedVersion,
+				RunningImageEvidence: &evidence,
+			},
+		},
+		resolvedWakeBinary{Path: publicPath, Info: publicInfo},
+	)
+	if err != nil || got.Stale || got.Method != wakeBinaryComparisonDarwinProcessImage {
+		t.Fatalf("restart stage hardlink alias comparison = %#v, %v; want current", got, err)
 	}
 }
 

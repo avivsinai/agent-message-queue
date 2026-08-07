@@ -90,6 +90,51 @@ func preflightBoundWakeRestartCandidate(
 	return revalidateBoundWakeRestartImagePlatform(image)
 }
 
+func probeBoundWakeSelfUpgradeVersion(
+	image *wakeRestartBoundImage,
+	record wakeRestartRecord,
+	incumbentVersion string,
+) error {
+	if image == nil || image.file == nil {
+		return fmt.Errorf("bound wake restart image is missing")
+	}
+	path, extraFiles, err := boundWakeRestartPreflightCommandPlatform(image)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wakeResumePreflightTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "--no-update-check", "--version")
+	cmd.ExtraFiles = extraFiles
+	cmd.Env = unsetEnvVar(unsetEnvVar(os.Environ(), envWakeResumeBootstrap), envWakeResumePreflight)
+	out, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("bound wake self-upgrade version probe timed out: %w", ctx.Err())
+		}
+		return fmt.Errorf("bound wake self-upgrade version probe failed: %w", err)
+	}
+	version := strings.TrimSpace(string(out))
+	if version == "" || version != record.Candidate.EmbeddedVersion {
+		return fmt.Errorf(
+			"bound candidate version %q does not match tentative version %q",
+			version,
+			record.Candidate.EmbeddedVersion,
+		)
+	}
+	if err := revalidateBoundWakeRestartImagePlatform(image); err != nil {
+		return err
+	}
+	if !wakeSelfUpgradeVersionStrictlyNewer(incumbentVersion, version) {
+		return fmt.Errorf(
+			"bound candidate version %q is not strictly newer than incumbent %q",
+			version,
+			incumbentVersion,
+		)
+	}
+	return nil
+}
+
 func verifyWakeResumeBoundImage(bootstrap wakeResumeBootstrap) (wakeImageEvidenceV1, error) {
 	if bootstrap.BoundImage == nil {
 		return wakeImageEvidenceV1{}, fmt.Errorf("wake resume bound image evidence is missing")

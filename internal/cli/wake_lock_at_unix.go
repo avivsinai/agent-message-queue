@@ -190,8 +190,19 @@ func removeWakeLockIfUnchangedGuardedAt(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 ) error {
-	_, err := removeWakeLockIfUnchangedGuardedAtStatus(dirfd, agentDir, inspection)
-	return err
+	committed, err := removeWakeLockIfUnchangedGuardedAtStatus(dirfd, agentDir, inspection)
+	if !committed {
+		return err
+	}
+	blocking, diagnostic := splitWakeSelfUpgradeDiagnosticResidue(err)
+	if diagnostic != nil {
+		_ = writeStderr(
+			"warning: removed wake lock for %s but left diagnostic-only self-upgrade residue: %v\n",
+			inspection.Agent,
+			diagnostic,
+		)
+	}
+	return blocking
 }
 
 func removeWakeLockIfUnchangedGuardedAtStatus(
@@ -216,11 +227,12 @@ type wakeLockRemovalOutcome struct {
 type wakeLockRemovalResidue string
 
 const (
-	wakeLockResidueDurability      wakeLockRemovalResidue = "wake lock durability"
-	wakeLockResidueDetachedCleanup wakeLockRemovalResidue = "detached wake cleanup"
-	wakeLockResidueReplacement     wakeLockRemovalResidue = "replacement wake lock"
-	wakeLockResiduePreservedClaim  wakeLockRemovalResidue = ".wake.lock"
-	wakeLockResidueCleanup         wakeLockRemovalResidue = "wake lock cleanup"
+	wakeLockResidueDurability            wakeLockRemovalResidue = "wake lock durability"
+	wakeLockResidueDetachedCleanup       wakeLockRemovalResidue = "detached wake cleanup"
+	wakeLockResidueReplacement           wakeLockRemovalResidue = "replacement wake lock"
+	wakeLockResiduePreservedClaim        wakeLockRemovalResidue = ".wake.lock"
+	wakeLockResidueCleanup               wakeLockRemovalResidue = "wake lock cleanup"
+	wakeLockResidueSelfUpgradeDiagnostic wakeLockRemovalResidue = "wake self-upgrade diagnostic"
 )
 
 type wakeLockResidueError struct {
@@ -236,6 +248,25 @@ func newWakeLockResidueError(residue wakeLockRemovalResidue, err error) error {
 		return nil
 	}
 	return &wakeLockResidueError{residue: residue, err: err}
+}
+
+func splitWakeSelfUpgradeDiagnosticResidue(err error) (blocking, diagnostic error) {
+	if err == nil {
+		return nil, nil
+	}
+	if typed, ok := err.(*wakeLockResidueError); ok && typed.residue == wakeLockResidueSelfUpgradeDiagnostic {
+		return nil, err
+	}
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return err, nil
+	}
+	for _, child := range joined.Unwrap() {
+		childBlocking, childDiagnostic := splitWakeSelfUpgradeDiagnosticResidue(child)
+		blocking = errors.Join(blocking, childBlocking)
+		diagnostic = errors.Join(diagnostic, childDiagnostic)
+	}
+	return blocking, diagnostic
 }
 
 func removeWakeLockIfUnchangedGuardedAtOutcome(
@@ -277,6 +308,15 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 	outcome := wakeLockRemovalOutcome{Committed: true}
 	if detachedValidationErr != nil {
 		outcome.Err = newWakeDetachedCleanupOnlyError(detachedValidationErr)
+	}
+	if err := removeWakeSelfUpgradeDiagnosticAt(dirfd); err != nil {
+		outcome.Err = errors.Join(
+			outcome.Err,
+			newWakeLockResidueError(
+				wakeLockResidueSelfUpgradeDiagnostic,
+				fmt.Errorf("remove wake self-upgrade diagnostic after lock removal: %w", err),
+			),
+		)
 	}
 	return outcome
 }
