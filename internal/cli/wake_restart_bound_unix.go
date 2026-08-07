@@ -14,7 +14,6 @@ type wakeRestartBoundImage struct {
 	file          *os.File
 	executionPath string
 	evidence      wakeImageEvidenceV1
-	stageDir      string
 }
 
 func (image *wakeRestartBoundImage) close() error {

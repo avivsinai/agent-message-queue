@@ -87,7 +87,7 @@ func TestDarwinWakeRestartBindingSurvivesPublicPathSwapAndCleansStage(t *testing
 		t.Fatal("Darwin hardlink ctime exception did not preserve exact stable evidence")
 	}
 	stagePath := bound.executionPath
-	stageDir := bound.stageDir
+	stageDir := filepath.Dir(stagePath)
 
 	binaryB, err := os.ReadFile("/usr/bin/false")
 	if err != nil {

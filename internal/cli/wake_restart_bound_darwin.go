@@ -97,7 +97,6 @@ func bindWakeRestartCandidatePlatform(candidate wakeImageEvidenceV1) (*wakeResta
 	bound := &wakeRestartBoundImage{
 		file:          stage,
 		executionPath: stagePath,
-		stageDir:      stageDir,
 	}
 	failed := true
 	defer func() {
@@ -208,7 +207,7 @@ func verifyWakeResumeBoundImagePlatform(bound wakeImageEvidenceV1) (wakeImageEvi
 }
 
 func cleanupBoundWakeRestartImagePlatform(image wakeRestartBoundImage) error {
-	if image.stageDir == "" || image.evidence.ExecutionPath == "" {
+	if image.evidence.ExecutionPath == "" {
 		return nil
 	}
 	return cleanupDarwinWakeRestartStage(image.evidence, true)
