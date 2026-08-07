@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -1700,18 +1700,30 @@ func registerDetachedWakeCleanup(t *testing.T, pidFile string, gates ...string) 
 		}
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
-			err := syscall.Kill(pid, 0)
-			if errors.Is(err, syscall.ESRCH) {
-				return
-			}
+			running, err := fakeWakeProcessRunning(pid)
 			if err != nil {
 				t.Errorf("inspect detached fake wake pid %d: %v", pid, err)
+				return
+			}
+			if !running {
 				return
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
 		t.Errorf("detached fake wake pid %d did not exit after cleanup", pid)
 	})
+}
+
+func fakeWakeProcessRunning(pid int) (bool, error) {
+	err := exec.Command("kill", "-0", strconv.Itoa(pid)).Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return false, nil
+	}
+	return false, err
 }
 
 func waitForFakeWakePID(path string, timeout time.Duration) (int, bool) {
