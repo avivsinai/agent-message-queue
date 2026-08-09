@@ -797,6 +797,16 @@ func wakeLockNeedsReplacement(inspection wakeLockInspection) bool {
 		return false
 	}
 
+	// External injectors do not depend on a controlling terminal. Supervisors
+	// deliberately detach these wakes so they outlive short-lived launchers; a
+	// missing TTY is therefore healthy and exact-target readiness reuse must
+	// continue. Readiness callers still verify the persisted target and injector
+	// identity after this replacement decision returns false.
+	if inspection.Lock.WakeMode == wakeTargetInjectVia ||
+		inspection.Lock.WakeMode == wakeOwnerWakeMode {
+		return false
+	}
+
 	// Process is a confirmed matching amq wake. If its TTY disappeared, stop
 	// that orphan before taking over; never signal an unconfirmed PID.
 	if wakeLockTerminalGone(inspection) {

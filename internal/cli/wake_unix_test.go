@@ -6758,6 +6758,36 @@ func TestRequireWakeLockUsableModeMatrix(t *testing.T) {
 	}
 }
 
+func TestWakeLockNeedsReplacementPreservesDetachedExternalInjectors(t *testing.T) {
+	for _, mode := range []string{wakeTargetInjectVia, wakeOwnerWakeMode} {
+		t.Run(mode, func(t *testing.T) {
+			inspection := wakeLockInspection{
+				IdentityConfirmed: true,
+				Lock:              wakeLock{WakeMode: mode},
+				Process: wakeProcessInfo{
+					ControllingTerminalKnown: true,
+					HasControllingTerminal:   false,
+				},
+			}
+			if wakeLockNeedsReplacement(inspection) {
+				t.Fatalf("detached external injector mode %q requires replacement", mode)
+			}
+		})
+	}
+
+	raw := wakeLockInspection{
+		IdentityConfirmed: true,
+		Lock:              wakeLock{WakeMode: wakeInjectModeRaw},
+		Process: wakeProcessInfo{
+			ControllingTerminalKnown: true,
+			HasControllingTerminal:   false,
+		},
+	}
+	if !wakeLockNeedsReplacement(raw) {
+		t.Fatal("detached raw wake should still require replacement")
+	}
+}
+
 func emptyAsLegacy(mode string) string {
 	if mode == "" {
 		return "legacy-empty"
@@ -6877,7 +6907,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsBlankOrUnknownTTY(t *testing.T)
 	}
 }
 
-func TestRunWakeWithLoopAcceptExistingWakeAcceptsInjectViaUnknownTTY(t *testing.T) {
+func TestRunWakeWithLoopAcceptExistingWakeAcceptsDetachedInjectVia(t *testing.T) {
 	const wakePID = 4242
 	root := secureTempDirForTest(t)
 	injector := writeExecutableForTest(t, "injector")
@@ -6885,12 +6915,14 @@ func TestRunWakeWithLoopAcceptExistingWakeAcceptsInjectViaUnknownTTY(t *testing.
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid == wakePID {
 			return wakeProcessInfo{
-				PID:        pid,
-				Running:    true,
-				StartToken: "start-1",
-				BootID:     "boot-1",
-				Executable: "/opt/homebrew/bin/amq",
-				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-via", injector},
+				PID:                      pid,
+				Running:                  true,
+				StartToken:               "start-1",
+				BootID:                   "boot-1",
+				Executable:               "/opt/homebrew/bin/amq",
+				Args:                     []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-via", injector},
+				ControllingTerminalKnown: true,
+				HasControllingTerminal:   false,
 			}
 		}
 		return wakeProcessInfo{PID: pid}
@@ -6937,12 +6969,14 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsDifferentInjector(t *testing.T)
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid == wakePID {
 			return wakeProcessInfo{
-				PID:        pid,
-				Running:    true,
-				StartToken: "start-1",
-				BootID:     "boot-1",
-				Executable: "/opt/homebrew/bin/amq",
-				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-via", existingInjector},
+				PID:                      pid,
+				Running:                  true,
+				StartToken:               "start-1",
+				BootID:                   "boot-1",
+				Executable:               "/opt/homebrew/bin/amq",
+				Args:                     []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-via", existingInjector},
+				ControllingTerminalKnown: true,
+				HasControllingTerminal:   false,
 			}
 		}
 		return wakeProcessInfo{PID: pid}
@@ -6989,8 +7023,9 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsDifferentInjector(t *testing.T)
 	}
 }
 
-func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *testing.T) {
+func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSessionForRawWake(t *testing.T) {
 	const wakePID = 4242
+	stubWakeTTYSupport(t)
 	ttyPath := filepath.Join(t.TempDir(), "amq-test-tty")
 	if err := os.WriteFile(ttyPath, []byte{}, 0o600); err != nil {
 		t.Fatalf("write fake tty path: %v", err)
@@ -7012,7 +7047,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *test
 				StartToken: "start-1",
 				BootID:     "boot-1",
 				Executable: "/opt/homebrew/bin/amq",
-				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator"},
+				Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-mode", wakeInjectModeRaw},
 			}
 		}
 		return wakeProcessInfo{PID: pid}
@@ -7024,15 +7059,14 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *test
 		ProcessStart: "start-1",
 		BootID:       "boot-1",
 		Executable:   "/opt/homebrew/bin/amq",
-		WakeMode:     wakeTargetInjectVia,
+		WakeMode:     wakeInjectModeRaw,
 	})
 
 	readyPath := filepath.Join(t.TempDir(), "wake.ready")
-	injector := writeExecutableForTest(t, "injector")
 	err := runWakeWithLoop([]string{
 		"--root", root,
 		"--me", "orchestrator",
-		"--inject-via", injector,
+		"--inject-mode", wakeInjectModeRaw,
 		"--ready-file", readyPath,
 		"--accept-existing-wake",
 	}, func(cfg wakeConfig) error {
