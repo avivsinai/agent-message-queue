@@ -11,6 +11,7 @@ import (
 const (
 	cliHelperEnv                 = "AMQ_TEST_CLI_HELPER"
 	wakeRestartPTYOwnerHelperEnv = "AMQ_TEST_WAKE_RESTART_PTY_OWNER"
+	wakeSIGPIPEHelperEnv         = "AMQ_TEST_WAKE_SIGPIPE_HELPER"
 )
 
 var cliSecureTempRoot string
@@ -24,6 +25,12 @@ var cliSecureTempRoot string
 func TestMain(m *testing.M) {
 	readTIOCSTILegacySysctl = func() ([]byte, error) {
 		return nil, os.ErrNotExist
+	}
+	if os.Getenv(wakeSIGPIPEHelperEnv) == "1" {
+		ignoreWakeBrokenPipe()
+		_, _ = fmt.Fprintln(os.Stderr, "broken-pipe-probe")
+		_, _ = fmt.Fprintln(os.Stdout, "survived")
+		os.Exit(0)
 	}
 
 	if os.Getenv(cliHelperEnv) == "1" {

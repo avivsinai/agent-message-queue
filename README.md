@@ -80,6 +80,30 @@ For installations made with the install script or another manual binary install:
 amq upgrade
 ```
 
+### Keepalive companion
+
+`amq-keepalive` is developed and released from this repository alongside AMQ.
+`make build` produces both binaries, and each AMQ release includes a separate
+`amq-keepalive` archive stamped with the same release version. Verify a build
+with any equivalent form:
+
+```bash
+amq-keepalive -v
+amq-keepalive --version
+amq-keepalive version
+```
+
+Keepalive-managed wakes deliberately discard an ambient `AMQ_WAKE_OWNER` token
+so they remain ownerless and can outlive the short launcher that registered
+them. During startup, keepalive captures at most 16 KiB of child stderr in a
+private regular file and includes it in a pre-readiness exit error. This keeps
+actionable AMQ diagnostics visible without attaching a long-lived wake to the
+caller's terminal or to a pipe whose reader exits first.
+
+See [docs/amq-keepalive.md](docs/amq-keepalive.md) for adapters, launcher
+ordering, supervision, retirement, owner recovery, and the detached stderr
+drain contract.
+
 ## Quick Start
 
 ### 1. Initialize Project
@@ -691,6 +715,7 @@ Building something on AMQ? Open an issue or PR to be listed here.
 ## Documentation
 
 - [INSTALL.md](INSTALL.md) — Alternative installation methods
+- [docs/amq-keepalive.md](docs/amq-keepalive.md) — Keepalive operations, lifecycle, and launcher integration
 - [docs/adapter-contract.md](docs/adapter-contract.md) — Formal v1 adapter contract for integration messages
 - [docs/adr-layer-extensions.md](docs/adr-layer-extensions.md) — ADR for stable layer extension surfaces
 - [COOP.md](COOP.md) — Co-op mode protocol & best practices

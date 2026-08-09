@@ -797,20 +797,13 @@ func wakeLockNeedsReplacement(inspection wakeLockInspection) bool {
 		return false
 	}
 
-	// External injectors do not depend on a controlling terminal. Supervisors
-	// deliberately detach these wakes so they outlive short-lived launchers; a
-	// missing TTY is therefore healthy and exact-target readiness reuse must
-	// continue. Readiness callers still verify the persisted target and injector
-	// identity after this replacement decision returns false.
-	if inspection.Lock.WakeMode == wakeTargetInjectVia ||
-		inspection.Lock.WakeMode == wakeOwnerWakeMode {
-		return false
-	}
-
 	// Process is a confirmed matching amq wake. If its TTY disappeared, stop
-	// that orphan before taking over; never signal an unconfirmed PID.
+	// that orphan before taking over; never signal an unconfirmed PID. A bound
+	// external injector is the exception: supervisors deliberately detach it so
+	// it can outlive a short launcher, and its target—not its TTY—is the usable
+	// notification path. Session-sharing remains a separate replacement signal.
 	if wakeLockTerminalGone(inspection) {
-		return true
+		return !wakeLockUsesBoundExternalInjector(inspection)
 	}
 
 	return wakeLockSharesCurrentTerminalDifferentSession(inspection)
@@ -950,8 +943,7 @@ func wakeLockHasUsableNotificationPath(inspection wakeLockInspection) bool {
 	if inspection.Lock.WakeMode == wakeInjectModeNone {
 		return true
 	}
-	if ((inspection.Lock.WakeMode == wakeTargetInjectVia || inspection.Lock.WakeMode == wakeOwnerWakeMode) &&
-		inspection.Lock.TargetDigest != "") || wakeArgsUseInjectVia(inspection.Process.Args) {
+	if wakeLockUsesBoundExternalInjector(inspection) || wakeArgsUseInjectVia(inspection.Process.Args) {
 		return true
 	}
 	switch wakeLockTerminalAttachment(inspection) {
@@ -965,6 +957,12 @@ func wakeLockHasUsableNotificationPath(inspection wakeLockInspection) bool {
 	// as unusable when attachment is undeterminable.
 	tty := strings.TrimSpace(inspection.Lock.TTY)
 	return tty != "" && tty != "unknown"
+}
+
+func wakeLockUsesBoundExternalInjector(inspection wakeLockInspection) bool {
+	return (inspection.Lock.WakeMode == wakeTargetInjectVia ||
+		inspection.Lock.WakeMode == wakeOwnerWakeMode) &&
+		inspection.Lock.TargetDigest != ""
 }
 
 func wakeArgsUseInjectVia(args []string) bool {
@@ -1812,6 +1810,12 @@ func commitWakeRestartReadiness(
 }
 
 func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
+	// The short-lived companion launcher owns the startup stderr reader. If its
+	// detached drain process later disappears, established wakes must receive
+	// EPIPE from diagnostic writes instead of being terminated by SIGPIPE.
+	restoreBrokenPipe := ignoreWakeBrokenPipe()
+	defer restoreBrokenPipe()
+
 	resumeBootstrap, err := wakeResumeBootstrapFromEnv()
 	if err != nil {
 		return err
@@ -2785,6 +2789,11 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		)
 	}
 	return loop(cfg)
+}
+
+func ignoreWakeBrokenPipe() func() {
+	signal.Ignore(syscall.SIGPIPE)
+	return func() { signal.Reset(syscall.SIGPIPE) }
 }
 
 var snapshotWakeDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {

@@ -36,6 +36,10 @@ func TestHelpWritesUsageToStdoutAndExitsZero(t *testing.T) {
 	if !strings.Contains(stdout.String(), "usage: amq-keepalive") {
 		t.Fatalf("stdout does not contain usage: %q", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "amq-keepalive <-v|--version>") ||
+		!strings.Contains(stdout.String(), "|version>") {
+		t.Fatalf("stdout does not advertise version spellings: %q", stdout.String())
+	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}

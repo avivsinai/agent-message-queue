@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/wakeprotocol"
 )
 
 // wakeLock represents the lock file content for wake process deduplication.
@@ -142,7 +143,7 @@ type wakeAlreadyRunningError struct {
 
 func (e *wakeAlreadyRunningError) Error() string {
 	lock := e.Inspection.Lock
-	return fmt.Sprintf("wake already running for %s (pid %d on %s since %s)",
+	return fmt.Sprintf(wakeprotocol.AlreadyRunningPrefix+"%s (pid %d on %s since %s)",
 		e.Agent, lock.PID, lock.TTY, lock.Started)
 }
 

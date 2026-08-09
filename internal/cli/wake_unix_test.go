@@ -51,6 +51,29 @@ func awaitWakeScan(t *testing.T, scans <-chan time.Time, done <-chan error) time
 	return time.Time{}
 }
 
+func TestWakeSurvivesClosedDiagnosticPipe(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), wakeSIGPIPEHelperEnv+"=1")
+	cmd.Stderr = writer
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = reader.Close()
+	_ = writer.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wake-style process died after diagnostic reader closed: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "survived" {
+		t.Fatalf("stdout = %q, want survived", got)
+	}
+}
+
 func TestNotifyNewMessagesForegroundPGRPResumesAtFirstMissingChunk(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -6763,7 +6786,10 @@ func TestWakeLockNeedsReplacementPreservesDetachedExternalInjectors(t *testing.T
 		t.Run(mode, func(t *testing.T) {
 			inspection := wakeLockInspection{
 				IdentityConfirmed: true,
-				Lock:              wakeLock{WakeMode: mode},
+				Lock: wakeLock{
+					WakeMode:     mode,
+					TargetDigest: "bound-target-digest",
+				},
 				Process: wakeProcessInfo{
 					ControllingTerminalKnown: true,
 					HasControllingTerminal:   false,
@@ -6773,6 +6799,18 @@ func TestWakeLockNeedsReplacementPreservesDetachedExternalInjectors(t *testing.T
 				t.Fatalf("detached external injector mode %q requires replacement", mode)
 			}
 		})
+	}
+
+	unbound := wakeLockInspection{
+		IdentityConfirmed: true,
+		Lock:              wakeLock{WakeMode: wakeTargetInjectVia},
+		Process: wakeProcessInfo{
+			ControllingTerminalKnown: true,
+			HasControllingTerminal:   false,
+		},
+	}
+	if !wakeLockNeedsReplacement(unbound) {
+		t.Fatal("detached inject-via wake without a bound target should require replacement")
 	}
 
 	raw := wakeLockInspection{
@@ -6785,6 +6823,37 @@ func TestWakeLockNeedsReplacementPreservesDetachedExternalInjectors(t *testing.T
 	}
 	if !wakeLockNeedsReplacement(raw) {
 		t.Fatal("detached raw wake should still require replacement")
+	}
+}
+
+func TestWakeLockNeedsReplacementKeepsSameTTYSessionCheckForExternalInjector(t *testing.T) {
+	const wakePID = 4242
+	ttyPath := filepath.Join(t.TempDir(), "amq-test-tty")
+	if err := os.WriteFile(ttyPath, nil, 0o600); err != nil {
+		t.Fatalf("write fake tty: %v", err)
+	}
+	stubWakeCurrentTTY(t, func() string { return ttyPath })
+	stubWakeProcessSID(t, func(pid int) (int, error) {
+		if pid == wakePID {
+			return 100, nil
+		}
+		return 200, nil
+	})
+	inspection := wakeLockInspection{
+		IdentityConfirmed: true,
+		Lock: wakeLock{
+			PID:          wakePID,
+			TTY:          ttyPath,
+			WakeMode:     wakeTargetInjectVia,
+			TargetDigest: "bound-target-digest",
+		},
+		Process: wakeProcessInfo{
+			ControllingTerminalKnown: true,
+			HasControllingTerminal:   true,
+		},
+	}
+	if !wakeLockNeedsReplacement(inspection) {
+		t.Fatal("same-TTY external injector from another session should require replacement")
 	}
 }
 

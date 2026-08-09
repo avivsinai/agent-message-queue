@@ -6,21 +6,36 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/wakeprotocol"
 )
 
+// ErrAlreadyRunning is a best-effort classification of AMQ's structured
+// ownership refusal. If bounded stderr capture is unavailable, callers still
+// receive the concrete wake start failure but may not receive this sentinel.
 var ErrAlreadyRunning = errors.New("amq wake already running")
 var ErrWakeReadinessUncertain = errors.New("amq wake readiness is uncertain; child was left unsignaled")
 var ErrWakeImageIdentityInconclusive = errors.New("amq wake image identity is inconclusive")
 
 const defaultWakeReadyTimeout = 10 * time.Second
 const staleWakeReadyMarkerAge = 24 * time.Hour
+const maxWakeStartupStderrBytes = 16 * 1024
 const keepaliveWakeRetryUntil = "injected"
 const wakeCheckSchemaV1 = 1
+
+// wakeProcessExitGrace gives exec.Wait a bounded window to publish a child
+// exit which raced the caller's timeout or cancellation. It is deliberately
+// short so cancellation remains prompt while preserving concrete diagnostics.
+const wakeProcessExitGrace = 100 * time.Millisecond
+const wakeStderrDrainExitGrace = 250 * time.Millisecond
+const maxWakeStderrDrainDiagnosticBytes = 4 * 1024
 
 const (
 	wakeImageCurrent   = "current"
@@ -105,6 +120,8 @@ type CLI struct {
 	Path string
 }
 
+var newWakeStartupStderrForStart = newWakeStartupStderr
+
 func NewCLI(path string) CLI {
 	if path == "" {
 		path = "amq"
@@ -137,14 +154,21 @@ func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 	if req.Target == "" {
 		return errors.New("target is required")
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := c.refreshWakeImage(ctx, req); err != nil {
 		return err
 	}
 
 	args := []string{"wake"}
-	_, readyFile, err := newWakeReadyPath()
+	readyDir, readyFile, err := newWakeReadyPath()
 	if err != nil {
 		return err
+	}
+	startupStderr, captureErr := newWakeStartupStderrForStart(readyDir)
+	if startupStderr != nil {
+		defer startupStderr.Close()
 	}
 
 	if req.Root != "" {
@@ -188,24 +212,43 @@ func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 	// supervisor receives SIGTERM. After spawning, cancellation never signals
 	// the child; a durable registry reservation lets a later pass converge.
 	cmd := exec.Command(c.Path, args...)
+	// keepalive owns this managed wake. A caller may itself be running under
+	// `amq coop exec` and therefore carry an AMQ_WAKE_OWNER token for a different
+	// agent/root. Forwarding that token would bind the new wake to the caller's
+	// lifecycle. Plain keepalive-managed wakes must remain ownerless.
+	cmd.Env = environmentWithout(os.Environ(), "AMQ_WAKE_OWNER")
 	configureWakeProcess(cmd)
+	// Capture bounded startup diagnostics without inheriting the caller's PTY.
+	// A detached drain process owns the pipe reader after this launcher returns,
+	// so later wake diagnostics cannot block, grow storage without bound, or
+	// terminate the wake with SIGPIPE.
+	if startupStderr != nil {
+		cmd.Stderr = startupStderr.writer
+	}
+	// Cancellation can race image refresh and diagnostic-helper setup. Recheck
+	// at the irreversible boundary so shutdown never creates a new durable,
+	// ownerless wake after the caller has stopped asking for one.
 	if err := ctx.Err(); err != nil {
 		_ = os.Remove(readyFile)
 		return err
 	}
 	if err := cmd.Start(); err != nil {
+		startupStderr.closeWriter()
 		_ = os.Remove(readyFile)
-		if strings.Contains(strings.ToLower(err.Error()), "already") {
-			return ErrAlreadyRunning
+		if captureErr != nil {
+			return errors.Join(err, fmt.Errorf("wake startup stderr capture unavailable: %w", captureErr))
 		}
 		return err
 	}
+	startupStderr.closeWriter()
 	done := make(chan wakeProcessResult, 1)
 	go func() {
 		err := cmd.Wait()
 		ready := wakeReadyFileExists(readyFile)
 		_ = os.Remove(readyFile)
-		done <- wakeProcessResult{Err: err, Ready: ready}
+		drainErr := startupStderr.waitForDrain(wakeStderrDrainExitGrace)
+		stderr := wakeStartupStderrDetail(startupStderr, captureErr, drainErr)
+		done <- wakeProcessResult{Err: err, Ready: ready, Stderr: stderr}
 	}()
 	if processDone, err := waitForWakeReady(ctx, done, readyFile, req.Timeout); err != nil {
 		// Readiness wins a cancellation/timeout race. Once AMQ has published the
@@ -218,10 +261,10 @@ func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 		if !processDone {
 			select {
 			case result := <-done:
-				processDone = true
 				if result.Ready {
 					return nil
 				}
+				return wakeProcessExitError(result)
 			default:
 			}
 		}
@@ -230,7 +273,11 @@ func (c CLI) StartWake(ctx context.Context, req StartWakeRequest) error {
 			// between lock acquisition and atomic ready-file publication; killing
 			// here could terminate an established or accepted wake. The durable
 			// registry reservation lets a later supervisor pass converge safely.
-			return fmt.Errorf("%w: %w", ErrWakeReadinessUncertain, err)
+			readinessErr := fmt.Errorf("%w: %w", ErrWakeReadinessUncertain, err)
+			if detail := wakeStartupStderrDetail(startupStderr, captureErr, nil); detail != "" {
+				return fmt.Errorf("%w; stderr: %s", readinessErr, detail)
+			}
+			return readinessErr
 		}
 		return err
 	}
@@ -454,8 +501,220 @@ func scavengeStaleWakeReadyMarkers(dir string, now time.Time) {
 }
 
 type wakeProcessResult struct {
-	Err   error
-	Ready bool
+	Err    error
+	Ready  bool
+	Stderr string
+}
+
+type wakeStartupStderr struct {
+	mu              sync.Mutex
+	file            *os.File
+	diagnosticFile  *os.File
+	writer          *os.File
+	closeWriterOnce sync.Once
+	drainResult     <-chan error
+}
+
+func newWakeStartupStderr(dir string) (_ *wakeStartupStderr, retErr error) {
+	return newWakeStartupStderrWithSetup(dir, wakeStderrSetup{
+		createTemp: os.CreateTemp,
+		chmod:      func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) },
+		pipe:       os.Pipe,
+		executable: os.Executable,
+		start:      func(cmd *exec.Cmd) error { return cmd.Start() },
+	})
+}
+
+type wakeStderrSetup struct {
+	createTemp func(string, string) (*os.File, error)
+	chmod      func(*os.File, os.FileMode) error
+	pipe       func() (*os.File, *os.File, error)
+	executable func() (string, error)
+	start      func(*exec.Cmd) error
+}
+
+func newWakeStartupStderrWithSetup(dir string, setup wakeStderrSetup) (_ *wakeStartupStderr, retErr error) {
+	var reader, writer, diagnosticFile *os.File
+	file, err := setup.createTemp(dir, "wake-stderr-*")
+	if err != nil {
+		return nil, fmt.Errorf("create wake startup stderr file: %w", err)
+	}
+	// Every failure below owns the same progressively-created resource set.
+	// One unwind point keeps future additions from leaking an fd or private
+	// diagnostic file on only one of several setup branches.
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		if diagnosticFile != nil {
+			_ = diagnosticFile.Close()
+			_ = os.Remove(diagnosticFile.Name())
+		}
+		if reader != nil {
+			_ = reader.Close()
+		}
+		if writer != nil {
+			_ = writer.Close()
+		}
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+	}()
+	if err := setup.chmod(file, 0o600); err != nil {
+		return nil, fmt.Errorf("secure wake startup stderr file: %w", err)
+	}
+	reader, writer, err = setup.pipe()
+	if err != nil {
+		return nil, fmt.Errorf("create wake startup stderr pipe: %w", err)
+	}
+	diagnosticFile, err = setup.createTemp(dir, "wake-stderr-drain-*")
+	if err != nil {
+		return nil, fmt.Errorf("create wake stderr drain diagnostic file: %w", err)
+	}
+	if err := setup.chmod(diagnosticFile, 0o600); err != nil {
+		return nil, fmt.Errorf("secure wake stderr drain diagnostic file: %w", err)
+	}
+	executable, err := setup.executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve wake stderr drain executable: %w", err)
+	}
+	drain := exec.Command(executable, "__wake-stderr-drain")
+	drain.Env = append(environmentWithout(os.Environ(), wakeStderrDrainMode), wakeStderrDrainMode+"=1")
+	drain.ExtraFiles = []*os.File{reader, file}
+	configureWakeProcess(drain)
+	// configureWakeProcess intentionally clears inherited stdio. Attach the
+	// private diagnostic destination afterwards so helper failures remain
+	// observable without retaining the caller's PTY.
+	drain.Stderr = diagnosticFile
+	if err := setup.start(drain); err != nil {
+		return nil, fmt.Errorf("start wake stderr drain: %w", err)
+	}
+	_ = reader.Close()
+	reader = nil
+	drainResult := make(chan error, 1)
+	go func() { drainResult <- drain.Wait() }()
+	return &wakeStartupStderr{
+		file: file, diagnosticFile: diagnosticFile, writer: writer, drainResult: drainResult,
+	}, nil
+}
+
+func (capture *wakeStartupStderr) closeWriter() {
+	if capture == nil {
+		return
+	}
+	capture.closeWriterOnce.Do(func() {
+		if capture.writer != nil {
+			_ = capture.writer.Close()
+		}
+	})
+}
+
+func (capture *wakeStartupStderr) waitForDrain(timeout time.Duration) error {
+	if capture == nil || capture.drainResult == nil {
+		return nil
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-capture.drainResult:
+		return err
+	case <-timer.C:
+		return fmt.Errorf("timed out after %s", timeout)
+	}
+}
+
+func (capture *wakeStartupStderr) Close() {
+	if capture == nil {
+		return
+	}
+	capture.closeWriter()
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	if capture.file == nil {
+		return
+	}
+	path := capture.file.Name()
+	diagnosticPath := capture.diagnosticFile.Name()
+	_ = capture.file.Close()
+	_ = os.Remove(path)
+	_ = capture.diagnosticFile.Close()
+	_ = os.Remove(diagnosticPath)
+	capture.file = nil
+	capture.diagnosticFile = nil
+}
+
+func wakeStartupStderrDetail(capture *wakeStartupStderr, captureErr, drainErr error) string {
+	detail := capture.String()
+	if captureErr != nil {
+		if detail != "" {
+			detail += "\n"
+		}
+		detail += fmt.Sprintf("[stderr capture unavailable: %v]", captureErr)
+	}
+	if drainErr != nil {
+		if detail != "" {
+			detail += "\n"
+		}
+		detail += fmt.Sprintf("[stderr capture incomplete: %v]", drainErr)
+	}
+	return detail
+}
+
+func (capture *wakeStartupStderr) String() string {
+	if capture == nil {
+		return ""
+	}
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	if capture.file == nil {
+		return "[stderr capture unavailable: capture is closed]"
+	}
+	text := readBoundedWakeDiagnostic(capture.file, maxWakeStartupStderrBytes, "stderr")
+	drainDiagnostic := readBoundedWakeDiagnostic(
+		capture.diagnosticFile, maxWakeStderrDrainDiagnosticBytes, "stderr drain diagnostic",
+	)
+	if drainDiagnostic == "" {
+		return text
+	}
+	if text == "" {
+		return drainDiagnostic
+	}
+	return text + "\n" + drainDiagnostic
+}
+
+func readBoundedWakeDiagnostic(file *os.File, limit int, label string) string {
+	if file == nil {
+		return ""
+	}
+	data := make([]byte, limit+1)
+	n, err := file.ReadAt(data, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Sprintf("[%s unavailable: %v]", label, err)
+	}
+	truncated := n > limit
+	if truncated {
+		n = limit
+	}
+	text := strings.TrimSpace(string(data[:n]))
+	if !truncated {
+		return text
+	}
+	marker := fmt.Sprintf("[%s truncated after %d bytes]", label, limit)
+	if text == "" {
+		return marker
+	}
+	return text + "\n" + marker
+}
+
+func environmentWithout(environment []string, name string) []string {
+	prefix := name + "="
+	filtered := make([]string, 0, len(environment))
+	for _, item := range environment {
+		if strings.HasPrefix(item, prefix) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
 }
 
 func (c CLI) run(ctx context.Context, args ...string) ([]byte, string, error) {
@@ -483,23 +742,95 @@ func waitForWakeReady(ctx context.Context, done <-chan wakeProcessResult, readyF
 		}
 		select {
 		case result := <-done:
-			if result.Ready || wakeReadyFileExists(readyFile) {
-				return true, nil
-			}
-			if result.Err == nil {
-				return true, errors.New("amq wake exited before becoming ready")
-			}
-			if strings.Contains(strings.ToLower(result.Err.Error()), "already") {
-				return true, ErrAlreadyRunning
-			}
-			return true, fmt.Errorf("amq wake exited before becoming ready: %w", result.Err)
+			return finishWakeProcess(result, readyFile)
 		case <-ctx.Done():
+			if processDone, err, observed := observeWakeDuringGrace(done, readyFile, wakeProcessExitGrace); observed {
+				return processDone, err
+			}
 			return false, ctx.Err()
 		case <-timer.C:
+			if processDone, err, observed := observeWakeDuringGrace(done, readyFile, wakeProcessExitGrace); observed {
+				return processDone, err
+			}
 			return false, fmt.Errorf("timed out after %s waiting for amq wake readiness", timeout)
 		case <-ticker.C:
 		}
 	}
+}
+
+func observeWakeDuringGrace(done <-chan wakeProcessResult, readyFile string, grace time.Duration) (bool, error, bool) {
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if wakeReadyFileExists(readyFile) {
+			return false, nil, true
+		}
+		select {
+		case result := <-done:
+			processDone, err := finishWakeProcess(result, readyFile)
+			return processDone, err, true
+		case <-timer.C:
+			if wakeReadyFileExists(readyFile) {
+				return false, nil, true
+			}
+			if result, ok := pollWakeProcess(done); ok {
+				processDone, err := finishWakeProcess(result, readyFile)
+				return processDone, err, true
+			}
+			return false, nil, false
+		case <-ticker.C:
+		}
+	}
+}
+
+func pollWakeProcess(done <-chan wakeProcessResult) (wakeProcessResult, bool) {
+	select {
+	case result := <-done:
+		return result, true
+	default:
+		return wakeProcessResult{}, false
+	}
+}
+
+func finishWakeProcess(result wakeProcessResult, readyFile string) (bool, error) {
+	if result.Ready || wakeReadyFileExists(readyFile) {
+		return true, nil
+	}
+	return true, wakeProcessExitError(result)
+}
+
+func wakeProcessExitError(result wakeProcessResult) error {
+	detail := strings.TrimSpace(result.Stderr)
+	if wakeStderrReportsAlreadyRunning(detail) {
+		ownershipErr := fmt.Errorf("%w: %s", ErrAlreadyRunning, detail)
+		if result.Err == nil {
+			return ownershipErr
+		}
+		return errors.Join(ownershipErr, result.Err)
+	}
+
+	var err error
+	if result.Err == nil {
+		err = errors.New("amq wake exited before becoming ready")
+	} else {
+		err = fmt.Errorf("amq wake exited before becoming ready: %w", result.Err)
+	}
+	if detail == "" {
+		return err
+	}
+	return fmt.Errorf("%w; stderr: %s", err, detail)
+}
+
+func wakeStderrReportsAlreadyRunning(detail string) bool {
+	for _, line := range strings.Split(detail, "\n") {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), wakeprotocol.AlreadyRunningPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func wakeReadyFileExists(path string) bool {
