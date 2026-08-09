@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -21,6 +22,11 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/fsnotify/fsnotify"
+)
+
+const (
+	wakeSIGPIPEHelperEnv = "AMQ_TEST_WAKE_SIGPIPE_HELPER"
+	wakeSIGPIPERootEnv   = "AMQ_TEST_WAKE_SIGPIPE_ROOT"
 )
 
 type wakeScriptedInboxReader struct {
@@ -77,7 +83,7 @@ func TestWakeSurvivesClosedDiagnosticPipe(t *testing.T) {
 		_ = readyWriter.Close()
 	})
 
-	cmd := exec.Command(os.Args[0])
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWakeSIGPIPEHelper$")
 	cmd.Env = append(
 		os.Environ(),
 		wakeSIGPIPEHelperEnv+"=1",
@@ -104,8 +110,54 @@ func TestWakeSurvivesClosedDiagnosticPipe(t *testing.T) {
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("production wake died after diagnostic reader closed: %v; stdout=%q", err, stdout.String())
 	}
-	if got := strings.TrimSpace(stdout.String()); got != "survived" {
-		t.Fatalf("stdout = %q, want survived", got)
+	if got := stdout.String(); !strings.Contains(got, "survived\n") {
+		t.Fatalf("stdout = %q, want survived marker", got)
+	}
+}
+
+func TestWakeSIGPIPEHelper(t *testing.T) {
+	if os.Getenv(wakeSIGPIPEHelperEnv) != "1" {
+		t.Skip("subprocess helper")
+	}
+
+	ignoredBefore := signal.Ignored(syscall.SIGPIPE)
+	gate := os.NewFile(3, "wake-sigpipe-gate")
+	ready := os.NewFile(4, "wake-sigpipe-ready")
+	helperDone := errors.New("wake SIGPIPE helper complete")
+	err := runWakeWithLoop(
+		[]string{
+			"--root", os.Getenv(wakeSIGPIPERootEnv),
+			"--me", "codex",
+			"--inject-mode", wakeInjectModeNone,
+			"--interrupt=false",
+		},
+		func(wakeConfig) error {
+			if _, err := ready.Write([]byte{1}); err != nil {
+				return fmt.Errorf("signal SIGPIPE test readiness: %w", err)
+			}
+			if _, err := io.ReadFull(gate, make([]byte, 1)); err != nil {
+				return fmt.Errorf("await closed diagnostic pipe: %w", err)
+			}
+			_, _ = fmt.Fprintln(os.Stderr, "broken-pipe-probe")
+			_, _ = fmt.Fprintln(os.Stdout, "survived")
+			return helperDone
+		},
+	)
+	if !errors.Is(err, helperDone) {
+		t.Fatal(err)
+	}
+	if ignoredAfter := signal.Ignored(syscall.SIGPIPE); ignoredAfter != ignoredBefore {
+		t.Fatalf("SIGPIPE ignored state after wake = %t, want baseline %t", ignoredAfter, ignoredBefore)
+	}
+	probeReader, probeWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = probeReader.Close()
+	_, err = probeWriter.Write([]byte{1})
+	_ = probeWriter.Close()
+	if !errors.Is(err, syscall.EPIPE) {
+		t.Fatalf("post-wake broken pipe error = %v, want EPIPE", err)
 	}
 }
 
