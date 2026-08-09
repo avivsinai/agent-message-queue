@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,22 +53,56 @@ func awaitWakeScan(t *testing.T, scans <-chan time.Time, done <-chan error) time
 }
 
 func TestWakeSurvivesClosedDiagnosticPipe(t *testing.T) {
-	reader, writer, err := os.Pipe()
+	root := secureTempDirForTest(t)
+	ensureCoopWakeMailboxForTest(t, root, "codex")
+
+	diagnosticReader, diagnosticWriter, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
+	gateReader, gateWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyReader, readyWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = diagnosticReader.Close()
+		_ = diagnosticWriter.Close()
+		_ = gateReader.Close()
+		_ = gateWriter.Close()
+		_ = readyReader.Close()
+		_ = readyWriter.Close()
+	})
+
 	cmd := exec.Command(os.Args[0])
-	cmd.Env = append(os.Environ(), wakeSIGPIPEHelperEnv+"=1")
-	cmd.Stderr = writer
+	cmd.Env = append(
+		os.Environ(),
+		wakeSIGPIPEHelperEnv+"=1",
+		wakeSIGPIPERootEnv+"="+root,
+	)
+	cmd.ExtraFiles = []*os.File{gateReader, readyWriter}
+	cmd.Stderr = diagnosticWriter
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	_ = reader.Close()
-	_ = writer.Close()
+	_ = gateReader.Close()
+	_ = readyWriter.Close()
+	_ = diagnosticWriter.Close()
+	if _, err := io.ReadFull(readyReader, make([]byte, 1)); err != nil {
+		t.Fatalf("wait for production wake loop: %v; stdout=%q", err, stdout.String())
+	}
+	_ = diagnosticReader.Close()
+	if _, err := gateWriter.Write([]byte{1}); err != nil {
+		t.Fatalf("release production wake loop: %v", err)
+	}
+	_ = gateWriter.Close()
 	if err := cmd.Wait(); err != nil {
-		t.Fatalf("wake-style process died after diagnostic reader closed: %v", err)
+		t.Fatalf("production wake died after diagnostic reader closed: %v; stdout=%q", err, stdout.String())
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "survived" {
 		t.Fatalf("stdout = %q, want survived", got)
@@ -6977,55 +7012,103 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsBlankOrUnknownTTY(t *testing.T)
 }
 
 func TestRunWakeWithLoopAcceptExistingWakeAcceptsDetachedInjectVia(t *testing.T) {
-	const wakePID = 4242
-	root := secureTempDirForTest(t)
-	injector := writeExecutableForTest(t, "injector")
-	target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"exec"})
-	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		if pid == wakePID {
-			return wakeProcessInfo{
-				PID:                      pid,
-				Running:                  true,
-				StartToken:               "start-1",
-				BootID:                   "boot-1",
-				Executable:               "/opt/homebrew/bin/amq",
-				Args:                     []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-via", injector},
-				ControllingTerminalKnown: true,
-				HasControllingTerminal:   false,
-			}
-		}
-		return wakeProcessInfo{PID: pid}
-	})
-	writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
-		PID:          wakePID,
-		TTY:          "unknown",
-		ProcessStart: "start-1",
-		BootID:       "boot-1",
-		Executable:   "/opt/homebrew/bin/amq",
-		Generation:   "11111111111111111111111111111111",
-	}, target))
-	if err := writeWakeTarget(root, "orchestrator", target); err != nil {
-		t.Fatalf("writeWakeTarget: %v", err)
+	tests := []struct {
+		name             string
+		mutatePersisted  func(t *testing.T, root string, target wakeTarget)
+		wantErrSubstring string
+	}{
+		{name: "matching target"},
+		{
+			name: "missing target",
+			mutatePersisted: func(t *testing.T, root string, _ wakeTarget) {
+				t.Helper()
+				if err := os.Remove(wakeTargetPath(root, "orchestrator")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErrSubstring: "target",
+		},
+		{
+			name: "target digest mismatch",
+			mutatePersisted: func(t *testing.T, root string, target wakeTarget) {
+				t.Helper()
+				target.Created = "2026-08-09T00:00:00Z"
+				if err := writeWakeTarget(root, "orchestrator", target); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErrSubstring: "target",
+		},
 	}
-	writeWakePreparedForTest(t, root, "orchestrator")
 
-	readyPath := filepath.Join(t.TempDir(), "wake.ready")
-	err := runWakeWithLoop([]string{
-		"--root", root,
-		"--me", "orchestrator",
-		"--inject-via", injector,
-		"--inject-arg", "exec",
-		"--ready-file", readyPath,
-		"--accept-existing-wake",
-	}, func(cfg wakeConfig) error {
-		t.Fatalf("loop should not run with an existing live wake lock: %#v", cfg)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("expected inject-via wake to satisfy ready file despite unknown tty, got %v", err)
-	}
-	if _, statErr := os.Stat(readyPath); statErr != nil {
-		t.Fatalf("ready file should exist, statErr=%v", statErr)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const wakePID = 4242
+			root := secureTempDirForTest(t)
+			injector := writeExecutableForTest(t, "injector")
+			target := mustNewWakeTargetForTest(t, root, "orchestrator", injector, []string{"exec"})
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				if pid == wakePID {
+					return wakeProcessInfo{
+						PID:                      pid,
+						Running:                  true,
+						StartToken:               "start-1",
+						BootID:                   "boot-1",
+						Executable:               "/opt/homebrew/bin/amq",
+						Args:                     []string{"/opt/homebrew/bin/amq", "wake", "--me", "orchestrator", "--inject-via", injector},
+						ControllingTerminalKnown: true,
+						HasControllingTerminal:   false,
+					}
+				}
+				return wakeProcessInfo{PID: pid}
+			})
+			writeWakeLockForTest(t, root, "orchestrator", bindWakeLockToTarget(wakeLock{
+				PID:          wakePID,
+				TTY:          "unknown",
+				ProcessStart: "start-1",
+				BootID:       "boot-1",
+				Executable:   "/opt/homebrew/bin/amq",
+				Generation:   "11111111111111111111111111111111",
+			}, target))
+			if err := writeWakeTarget(root, "orchestrator", target); err != nil {
+				t.Fatalf("writeWakeTarget: %v", err)
+			}
+			writeWakePreparedForTest(t, root, "orchestrator")
+			if test.mutatePersisted != nil {
+				test.mutatePersisted(t, root, target)
+				originalRetry := waitForWakePreparedRetry
+				waitForWakePreparedRetry = func(time.Time) bool { return false }
+				t.Cleanup(func() { waitForWakePreparedRetry = originalRetry })
+			}
+
+			readyPath := filepath.Join(t.TempDir(), "wake.ready")
+			err := runWakeWithLoop([]string{
+				"--root", root,
+				"--me", "orchestrator",
+				"--inject-via", injector,
+				"--inject-arg", "exec",
+				"--ready-file", readyPath,
+				"--accept-existing-wake",
+			}, func(cfg wakeConfig) error {
+				t.Fatalf("loop should not run with an existing live wake lock: %#v", cfg)
+				return nil
+			})
+			if test.wantErrSubstring == "" {
+				if err != nil {
+					t.Fatalf("expected inject-via wake to satisfy ready file despite unknown tty, got %v", err)
+				}
+				if _, statErr := os.Stat(readyPath); statErr != nil {
+					t.Fatalf("ready file should exist, statErr=%v", statErr)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErrSubstring) {
+				t.Fatalf("runWakeWithLoop() error = %v, want %q", err, test.wantErrSubstring)
+			}
+			if _, statErr := os.Stat(readyPath); !os.IsNotExist(statErr) {
+				t.Fatalf("ready file should not exist, statErr=%v", statErr)
+			}
+		})
 	}
 }
 

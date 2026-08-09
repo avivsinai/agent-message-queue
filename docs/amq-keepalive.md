@@ -116,11 +116,11 @@ up to 4 KiB of its own diagnostic output. Both temporary files are mode `0600`
 and are unlinked when the launcher finishes inspecting the pre-readiness result.
 If that best-effort unlink fails, the readiness-directory scavenger removes the
 `wake-*` residue after 24 hours.
-Failure to create this optional diagnostic channel does not prevent a wake from
-starting; if the wake itself fails, the capture setup error is joined to the
-real wake error. A pre-readiness child exit receives a short bounded grace
-period so its concrete stderr is reported instead of a generic readiness
-timeout.
+Failure to create the diagnostic channel aborts before AMQ starts. Keepalive
+cannot promise actionable readiness failures without a working bounded stderr
+path, so this setup is fail-closed rather than launching an undiagnosable wake.
+A pre-readiness child exit receives a short bounded grace period so its
+concrete stderr is reported instead of a generic readiness timeout.
 
 The capture channel is pre-readiness diagnostics only. If its detached reader
 unexpectedly exits after readiness, the established wake ignores `SIGPIPE` so

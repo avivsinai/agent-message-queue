@@ -116,28 +116,28 @@ printf ready > "$ready"
 	}
 }
 
-func TestStartWakeContinuesWhenStderrCaptureIsUnavailable(t *testing.T) {
+func TestStartWakeRefusesWhenStderrCaptureIsUnavailable(t *testing.T) {
 	dir := t.TempDir()
+	started := filepath.Join(dir, "started")
+	t.Setenv("AMQ_KEEPALIVE_STARTED", started)
 	original := newWakeStartupStderrForStart
 	newWakeStartupStderrForStart = func(string) (*wakeStartupStderr, error) {
 		return nil, errors.New("simulated capture setup failure")
 	}
 	t.Cleanup(func() { newWakeStartupStderrForStart = original })
 	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
-ready=""
-previous=""
-for arg in "$@"; do
-  if [ "$previous" = "-ready-file" ]; then ready="$arg"; fi
-  previous="$arg"
-done
-printf ready > "$ready"
+printf started > "$AMQ_KEEPALIVE_STARTED"
 `)
 
-	if err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
+	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
 		Root: "/tmp/amq-root", Me: "codex", InjectVia: "/tmp/amq-keepalive",
 		Adapter: "cmux", Target: "cmux:surface:ABC", Timeout: 5 * time.Second,
-	}); err != nil {
-		t.Fatalf("StartWake() error = %v, want diagnostics-only failure to degrade", err)
+	})
+	if err == nil || !strings.Contains(err.Error(), "prepare wake startup stderr capture: simulated capture setup failure") {
+		t.Fatalf("StartWake() error = %v, want fail-closed capture setup error", err)
+	}
+	if _, statErr := os.Stat(started); !os.IsNotExist(statErr) {
+		t.Fatalf("wake started without diagnostic capture: %v", statErr)
 	}
 }
 
@@ -402,31 +402,7 @@ exit 7
 	}
 }
 
-func TestStartWakeDetectsAlreadyOwnedFromCapturedStderr(t *testing.T) {
-	dir := t.TempDir()
-	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
-printf 'warning: legacy wake metadata observed\n' >&2
-printf 'wake already running for codex (pid 4242 on /dev/ttys043 since now)\n' >&2
-exit 7
-`)
-
-	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
-		Root: "/tmp/amq-root", Me: "codex", InjectVia: "/tmp/amq-keepalive",
-		Adapter: "ghostty", Target: "ghostty:terminal:abc", Timeout: 5 * time.Second,
-	})
-	if !errors.Is(err, ErrAlreadyRunning) {
-		t.Fatalf("StartWake() error = %v, want ErrAlreadyRunning", err)
-	}
-	if !strings.Contains(err.Error(), "wake already running for codex") {
-		t.Fatalf("error = %v, want captured ownership detail", err)
-	}
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("error = %v, want concrete child exit error preserved", err)
-	}
-}
-
-func TestStartWakeDoesNotMisclassifyUnrelatedAlreadyText(t *testing.T) {
+func TestStartWakePreservesAlreadyTextWithoutRelabelingFailure(t *testing.T) {
 	dir := t.TempDir()
 	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
 printf 'configuration was already migrated but target is invalid\n' >&2
@@ -437,11 +413,12 @@ exit 7
 		Root: "/tmp/amq-root", Me: "codex", InjectVia: "/tmp/amq-keepalive",
 		Adapter: "ghostty", Target: "ghostty:terminal:abc", Timeout: 5 * time.Second,
 	})
-	if errors.Is(err, ErrAlreadyRunning) {
-		t.Fatalf("StartWake() error = %v, must not classify ordinary 'already' text as ownership", err)
-	}
 	if err == nil || !strings.Contains(err.Error(), "target is invalid") {
 		t.Fatalf("StartWake() error = %v, want concrete stderr", err)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("error = %v, want concrete child exit error preserved", err)
 	}
 }
 
@@ -608,9 +585,15 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 
 func TestStartWakeTimesOutWhenReadyFileNeverAppears(t *testing.T) {
 	dir := t.TempDir()
+	release := filepath.Join(dir, "release")
+	pidFile := filepath.Join(dir, "pid")
+	t.Setenv("AMQ_KEEPALIVE_RELEASE", release)
+	t.Setenv("AMQ_KEEPALIVE_PID", pidFile)
 	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
-sleep 0.2
+printf '%s' "$$" > "$AMQ_KEEPALIVE_PID"
+while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 `)
+	registerDetachedWakeCleanup(t, pidFile, release)
 
 	start := time.Now()
 	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
@@ -717,13 +700,8 @@ exit 97
 	}
 }
 
-func TestStartWakeReportsProcessStartAndCaptureFailures(t *testing.T) {
+func TestStartWakeReportsProcessStartFailure(t *testing.T) {
 	dir := t.TempDir()
-	original := newWakeStartupStderrForStart
-	newWakeStartupStderrForStart = func(string) (*wakeStartupStderr, error) {
-		return nil, errors.New("simulated capture setup failure")
-	}
-	t.Cleanup(func() { newWakeStartupStderrForStart = original })
 	fakeAMQ := writeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
 if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
   rm "$0"
@@ -737,10 +715,7 @@ exit 98
 		Root: "/tmp/amq-root", Me: "codex", InjectVia: "/tmp/amq-keepalive",
 		Adapter: "cmux", Target: "cmux:surface:ABC", Timeout: time.Second,
 	})
-	if err == nil || !strings.Contains(err.Error(), "simulated capture setup failure") {
-		t.Fatalf("StartWake() error = %v, want joined capture setup failure", err)
-	}
-	if !strings.Contains(err.Error(), "no such file or directory") {
+	if err == nil || !strings.Contains(err.Error(), "no such file or directory") {
 		t.Fatalf("StartWake() error = %v, want concrete process start failure", err)
 	}
 }
@@ -878,6 +853,25 @@ func TestWaitForWakeReadyPrefersExitedChildOverTimeout(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "exit status 8") || !strings.Contains(err.Error(), "timeout-edge refusal") {
 		t.Fatalf("waitForWakeReady() error = %v, want actual child result", err)
+	}
+}
+
+func TestWaitForWakeReadyAllowsBoundedStderrDrainBeforeReportingTimeout(t *testing.T) {
+	done := make(chan wakeProcessResult, 1)
+	go func() {
+		// The child waiter publishes only after its bounded stderr drain. This
+		// delay is longer than the old 100ms process grace but remains within
+		// the drain bound used by StartWake.
+		time.Sleep(150 * time.Millisecond)
+		done <- wakeProcessResult{Err: errors.New("exit status 6"), Stderr: "late concrete refusal"}
+	}()
+
+	processDone, err := waitForWakeReady(context.Background(), done, filepath.Join(t.TempDir(), "missing"), time.Nanosecond)
+	if !processDone {
+		t.Fatal("waitForWakeReady() processDone = false, want concrete child exit after bounded drain")
+	}
+	if err == nil || !strings.Contains(err.Error(), "exit status 6") || !strings.Contains(err.Error(), "late concrete refusal") {
+		t.Fatalf("waitForWakeReady() error = %v, want delayed child exit and stderr", err)
 	}
 }
 
@@ -1035,15 +1029,15 @@ func TestNewWakeStartupStderrCleansEverySetupFailure(t *testing.T) {
 	}
 }
 
-func TestWakeStartupStderrDetailCombinesSetupAndDrainFailures(t *testing.T) {
-	got := wakeStartupStderrDetail(
-		nil,
-		errors.New("setup failed"),
-		errors.New("drain failed"),
-	)
-	if !strings.Contains(got, "stderr capture unavailable: setup failed") ||
-		!strings.Contains(got, "stderr capture incomplete: drain failed") {
-		t.Fatalf("wakeStartupStderrDetail() = %q, want both diagnostics", got)
+func TestWakeStartupStderrDetailReportsDrainFailure(t *testing.T) {
+	capture, err := newWakeStartupStderr(t.TempDir())
+	if err != nil {
+		t.Fatalf("newWakeStartupStderr() error = %v", err)
+	}
+	t.Cleanup(capture.Close)
+	got := wakeStartupStderrDetail(capture, errors.New("drain failed"))
+	if !strings.Contains(got, "stderr capture incomplete: drain failed") {
+		t.Fatalf("wakeStartupStderrDetail() = %q, want drain diagnostic", got)
 	}
 }
 

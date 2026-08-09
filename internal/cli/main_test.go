@@ -3,8 +3,11 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -12,6 +15,7 @@ const (
 	cliHelperEnv                 = "AMQ_TEST_CLI_HELPER"
 	wakeRestartPTYOwnerHelperEnv = "AMQ_TEST_WAKE_RESTART_PTY_OWNER"
 	wakeSIGPIPEHelperEnv         = "AMQ_TEST_WAKE_SIGPIPE_HELPER"
+	wakeSIGPIPERootEnv           = "AMQ_TEST_WAKE_SIGPIPE_ROOT"
 )
 
 var cliSecureTempRoot string
@@ -27,9 +31,49 @@ func TestMain(m *testing.M) {
 		return nil, os.ErrNotExist
 	}
 	if os.Getenv(wakeSIGPIPEHelperEnv) == "1" {
-		ignoreWakeBrokenPipe()
-		_, _ = fmt.Fprintln(os.Stderr, "broken-pipe-probe")
-		_, _ = fmt.Fprintln(os.Stdout, "survived")
+		ignoredBefore := signal.Ignored(syscall.SIGPIPE)
+		gate := os.NewFile(3, "wake-sigpipe-gate")
+		ready := os.NewFile(4, "wake-sigpipe-ready")
+		helperDone := errors.New("wake SIGPIPE helper complete")
+		err := runWakeWithLoop(
+			[]string{
+				"--root", os.Getenv(wakeSIGPIPERootEnv),
+				"--me", "codex",
+				"--inject-mode", wakeInjectModeNone,
+				"--interrupt=false",
+			},
+			func(wakeConfig) error {
+				if _, err := ready.Write([]byte{1}); err != nil {
+					return fmt.Errorf("signal SIGPIPE test readiness: %w", err)
+				}
+				if _, err := io.ReadFull(gate, make([]byte, 1)); err != nil {
+					return fmt.Errorf("await closed diagnostic pipe: %w", err)
+				}
+				_, _ = fmt.Fprintln(os.Stderr, "broken-pipe-probe")
+				_, _ = fmt.Fprintln(os.Stdout, "survived")
+				return helperDone
+			},
+		)
+		if !errors.Is(err, helperDone) {
+			_, _ = fmt.Fprintln(os.Stdout, err)
+			os.Exit(1)
+		}
+		if ignoredAfter := signal.Ignored(syscall.SIGPIPE); ignoredAfter != ignoredBefore {
+			_, _ = fmt.Fprintf(os.Stdout, "SIGPIPE ignored state after wake = %t, want baseline %t\n", ignoredAfter, ignoredBefore)
+			os.Exit(1)
+		}
+		probeReader, probeWriter, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			_, _ = fmt.Fprintln(os.Stdout, pipeErr)
+			os.Exit(1)
+		}
+		_ = probeReader.Close()
+		_, pipeErr = probeWriter.Write([]byte{1})
+		_ = probeWriter.Close()
+		if !errors.Is(pipeErr, syscall.EPIPE) {
+			_, _ = fmt.Fprintf(os.Stdout, "post-wake broken pipe error = %v, want EPIPE\n", pipeErr)
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 

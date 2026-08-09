@@ -41,6 +41,7 @@ type wakeStderrCapture interface {
 }
 
 func drainWakeStderr(reader io.Reader, output wakeStderrCapture, diagnostic io.Writer) error {
+	var diagnosticErr error
 	_, captureErr := io.CopyN(output, reader, maxWakeStartupStderrBytes)
 	if captureErr != nil && !errors.Is(captureErr, io.EOF) {
 		// Keep draining even when the diagnostic destination fails so the wake
@@ -52,7 +53,9 @@ func drainWakeStderr(reader io.Reader, output wakeStderrCapture, diagnostic io.W
 		probe := []byte{0}
 		n, probeErr := reader.Read(probe)
 		if n > 0 {
-			_, _ = fmt.Fprintf(diagnostic, "[stderr truncated after %d bytes]\n", maxWakeStartupStderrBytes)
+			if _, err := fmt.Fprintf(diagnostic, "[stderr truncated after %d bytes]\n", maxWakeStartupStderrBytes); err != nil {
+				diagnosticErr = fmt.Errorf("write wake stderr truncation diagnostic: %w", err)
+			}
 		}
 		if probeErr != nil && !errors.Is(probeErr, io.EOF) {
 			_, _ = io.Copy(io.Discard, reader)
@@ -71,5 +74,5 @@ func drainWakeStderr(reader io.Reader, output wakeStderrCapture, diagnostic io.W
 	if err := output.Sync(); err != nil {
 		return fmt.Errorf("sync wake stderr capture: %w", err)
 	}
-	return nil
+	return diagnosticErr
 }

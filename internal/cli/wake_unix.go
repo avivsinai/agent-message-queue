@@ -2792,8 +2792,20 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 }
 
 func ignoreWakeBrokenPipe() func() {
+	wasIgnored := signal.Ignored(syscall.SIGPIPE)
 	signal.Ignore(syscall.SIGPIPE)
-	return func() { signal.Reset(syscall.SIGPIPE) }
+	return func() {
+		if wasIgnored {
+			signal.Ignore(syscall.SIGPIPE)
+			return
+		}
+		// Reset alone does not clear os/signal's ignored bit for a signal the Go
+		// runtime owns. A temporary notification restores the runtime handler;
+		// Stop then returns it to the pre-Ignore, non-notifying state.
+		restore := make(chan os.Signal, 1)
+		signal.Notify(restore, syscall.SIGPIPE)
+		signal.Stop(restore)
+	}
 }
 
 var snapshotWakeDirEntryInfo = func(entry os.DirEntry) (os.FileInfo, error) {

@@ -126,17 +126,18 @@ func TestStartFreshStartsWithoutRepair(t *testing.T) {
 	}
 }
 
-func TestStartFreshDoesNotAcceptAlreadyRunningAsSuccess(t *testing.T) {
+func TestStartFreshDoesNotAcceptWakeStartFailureAsSuccess(t *testing.T) {
 	now := fixedNow()
-	wake := &fakeWake{startErr: amq.ErrAlreadyRunning}
+	startErr := errors.New("wake already running for codex")
+	wake := &fakeWake{startErr: startErr}
 
 	updated, result := testReconciler(wake, probeAdapter{}, now).StartFresh(context.Background(), testEntry())
 
 	if result.Action != ActionStartFailed {
 		t.Fatalf("action = %q, want %q", result.Action, ActionStartFailed)
 	}
-	if !errors.Is(result.Error, amq.ErrAlreadyRunning) {
-		t.Fatalf("error = %v, want ErrAlreadyRunning", result.Error)
+	if !errors.Is(result.Error, startErr) {
+		t.Fatalf("error = %v, want original wake failure", result.Error)
 	}
 	if updated.State != registry.StateAttached {
 		t.Fatalf("state = %q, want %q", updated.State, registry.StateAttached)
