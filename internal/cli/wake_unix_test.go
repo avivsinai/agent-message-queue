@@ -7011,7 +7011,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsBlankOrUnknownTTY(t *testing.T)
 	}
 }
 
-func TestRunWakeWithLoopAcceptExistingWakeAcceptsDetachedInjectVia(t *testing.T) {
+func TestRunWakeWithLoopAcceptExistingWakeAcceptsInjectViaUnknownTTY(t *testing.T) {
 	tests := []struct {
 		name             string
 		mutatePersisted  func(t *testing.T, root string, target wakeTarget)
@@ -7175,7 +7175,7 @@ func TestRunWakeWithLoopAcceptExistingWakeRejectsDifferentInjector(t *testing.T)
 	}
 }
 
-func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSessionForRawWake(t *testing.T) {
+func TestRunWakeWithLoopAcceptExistingWakeRejectsSameTTYDifferentSession(t *testing.T) {
 	const wakePID = 4242
 	stubWakeTTYSupport(t)
 	ttyPath := filepath.Join(t.TempDir(), "amq-test-tty")
