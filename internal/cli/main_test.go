@@ -25,7 +25,6 @@ func TestMain(m *testing.M) {
 	readTIOCSTILegacySysctl = func() ([]byte, error) {
 		return nil, os.ErrNotExist
 	}
-
 	if os.Getenv(cliHelperEnv) == "1" {
 		if err := Run(os.Args[1:], "test"); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)

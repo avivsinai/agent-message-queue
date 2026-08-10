@@ -1328,7 +1328,8 @@ func (a App) uninstallLaunchd(ctx context.Context, args []string) error {
 }
 
 func (a App) usage(writer io.Writer) {
-	_, _ = fmt.Fprintln(writer, "usage: amq-keepalive <attach|reattach|supervise|inject|doctor|gc|retire-session|forget|install-launchd|install-hook|uninstall> [options]")
+	_, _ = fmt.Fprintln(writer, "usage: amq-keepalive <attach|reattach|supervise|inject|doctor|gc|retire-session|forget|install-launchd|install-hook|uninstall|version> [options]")
+	_, _ = fmt.Fprintln(writer, "       amq-keepalive <-v|--version>")
 }
 
 func mustDefaultRegistryPath() string {

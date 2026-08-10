@@ -50,13 +50,24 @@ func TestWakeUpgradeRetireUnsupportedPidfdFailsClosed(t *testing.T) {
 
 func TestAcquireWakeLockLinuxDetachedValidReplacementUsesRetainedBoundState(t *testing.T) {
 	fixture := newGenericWakePreparedCleanupFixture(t, true)
+	ttyPath := filepath.Join(t.TempDir(), "amq-test-tty")
+	if err := os.WriteFile(ttyPath, nil, 0o600); err != nil {
+		t.Fatalf("write fake tty: %v", err)
+	}
+	stubWakeCurrentTTY(t, func() string { return ttyPath })
+	stubWakeProcessSID(t, func(pid int) (int, error) {
+		if pid == 4242 {
+			return 100, nil
+		}
+		return 200, nil
+	})
 	lock := fixture.created.Lock
 	lock.PID = 4242
 	lock.ProcessStart = "wake-start"
 	lock.BootID = "boot-1"
 	lock.Executable = "/usr/local/bin/amq"
 	lock.Args = []string{"/usr/local/bin/amq", "wake", "--root", fixture.root, "--me", fixture.me, "--inject-via", fixture.target.InjectVia}
-	lock.TTY = "/dev/amq-missing-detached-test-tty"
+	lock.TTY = ttyPath
 	writeWakeLockForTest(t, fixture.root, fixture.me, lock)
 	stopped := false
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
