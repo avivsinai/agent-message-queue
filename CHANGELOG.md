@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.60.1](https://github.com/avivsinai/agent-message-queue/compare/v0.60.0...v0.60.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* **wake:** reuse detached external injectors safely ([#478](https://github.com/avivsinai/agent-message-queue/issues/478)) ([9a343d5](https://github.com/avivsinai/agent-message-queue/commit/9a343d5c0817c99bcc3ad421c095c9acdea2e720))
+
 ## [0.60.0](https://github.com/avivsinai/agent-message-queue/compare/v0.59.1...v0.60.0) (2026-08-07)
 
 
