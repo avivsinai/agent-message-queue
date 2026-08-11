@@ -197,7 +197,7 @@ amq receipts wait --me <agent> --msg-id <id> [--stage <stage>] [--timeout <durat
 amq presence set --me <agent> --status <busy|idle|...> [--note <str>]
 amq presence list [--json]
 amq route explain --to <handle> [--project <project>] [--session <session>] [--from-root <path>] [--from-cwd <path>] [--me <handle>] --json
-amq cleanup --tmp-older-than <duration> [--dry-run] [--yes]
+amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--dry-run] [--yes]
 amq watch --me <agent> [--session <name>] [--ignore-session-pin] [--timeout <duration>] [--poll] [--json]
 amq monitor --me <agent> [--session <name>] [--ignore-session-pin] [--timeout <duration>] [--poll] [--limit N] [--include-body] [--peek] [--json]
 amq reply --me <agent> --id <msg_id> [--ignore-session-pin] [--subject <str>] [--body <str|@file|-|stdin>] [--allow-empty] [--priority <p>] [--kind <k>] [--labels <l>] [--context <json>] [--wait-for <stage>] [--wait-timeout <duration>]
@@ -209,6 +209,7 @@ amq wake --me <agent> [--baseline-existing] [--inject-cmd <cmd>] [--inject-mode 
 amq wake check --me <agent> [--root <path>] [--strict] [--json] [--json-schema <1|2>]
 amq wake repair --me <agent> [--root <path>] [--json]
 amq wake retire --me <agent> --inject-via <absolute-executable> [--inject-arg <arg>...] [--root <path>] [--json]
+amq wake recover-owner --me <agent> [--root <path>] [--strict] [--json]
 amq upgrade
 amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--export] [--session-name] [--json]
 amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>] [--grok-alias <name>]

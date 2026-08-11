@@ -125,44 +125,15 @@ amq coop exec codex
 ```
 
 Each command sets up the environment, starts wake notifications, and launches
-the agent. The wake child appends full diagnostics to the private
-`agents/<agent>/.wake.log`; a separate inherited descriptor carries only
-terminal-safe attention to the controlling terminal. This process boundary
-keeps runtime and fatal-error text out of Codex and Claude full-screen
-composers. Accumulated diagnostics are truncated when a new wake starts after
-the log reaches 1 MiB and checked again on the wake's 30-second maintenance
-tick, so long-lived ordinary and repair wakes bound their own logs.
-
-Wake defaults to treating terminal notification as an attempt, not delivery,
-and retries on a capped backoff until the inbox makes durable progress. The
-first notification is immediate. Attempts that inject the fixed doorbell start at 5 seconds because
-they drive the agent; attention-only attempts start at 30 seconds because they
-alert a human. Input attempts double to a 2-minute cap; attention-only attempts
-continue through 4 and 8 minutes to a 15-minute cap. Retries never give up while
-the cohort remains unread. Contextual peer headers appear only in terminal
-output or attention; terminal input always uses the fixed doorbell. The delay
-starts after the preceding injector process exits or times out. Because
-`--wake-inject-via` executes arbitrary local code, a retry can repeat
-injector-side effects. Added messages join the pending cohort and share its next
-notification without resetting the retry ladder. Input-delivery additions may
-pull a decayed deadline forward to the delivery floor 5 seconds after the last
-input attempt, or immediately if that floor has already passed; attention-only
-additions retain the cohort's current decayed deadline. Bursts within the
-debounce window remain one notification.
-Removals or replacements immediately rearm the cohort.
-A receipt-aware integration can select `--retry-until injected` together with
-`--inject-via`: exit zero then acknowledges the unchanged physical cohort and
-removes its retry deadline, while injector failure remains retryable and a new
-inbox member triggers one fresh doorbell. The default remains
-`--retry-until drained`. Injection acknowledgement never emits or replaces a
-`drained` receipt.
-A successful input attempt does not also emit attention. Transient foreground
-authority or input-quiet refusals keep the input retry armed while rate-limiting
-their separate attention output. Output-only delivery repeats on its slower
-cadence, and a short or failed attention write stays pending on that cadence
-instead of terminating the notifier. Recovery-required state never retries
-uncertain terminal input; it repeats the manual drain-and-restart notice on that
-same attention cadence until the unread cohort drains.
+the agent. Wake treats terminal notification as an attempt, not delivery, and
+retries on a capped backoff (starting at 5s for input, 30s for attention-only)
+until the inbox makes durable progress; full diagnostics go to the private
+`agents/<agent>/.wake.log`, never to the agent's terminal. A receipt-aware
+integration using `--inject-via` can opt into `--retry-until injected` so a
+successful external injector suppresses further doorbell retries for an
+unchanged cohort; the default `--retry-until drained` waits for actual inbox
+progress instead. See [docs/wake-doorbell-acknowledgement.md](docs/wake-doorbell-acknowledgement.md)
+for the full retry ladder and acknowledgement contract.
 
 > **First-message check:** start both agents before sending the test message.
 > A newly started wake deliberately baselines messages that were already
@@ -200,34 +171,22 @@ Run the appropriate append command once, then open a new terminal or source
 that startup file. Use the bare `eval` only when you intentionally want aliases
 in one already-open shell.
 
-In a Git worktree with no eligible root, `coop exec` initializes `.agent-mail` and
-`.amqrc` at the worktree top, even when invoked from a subdirectory or with
-`--session`. It never uses `~/.amqrc` for that bootstrap. Add `--no-gitignore`
-to leave `.gitignore` unchanged, or `--no-init` to refuse instead of creating
-the local queue.
-Managed launchers can add `--require-wake` to fail instead of launching the agent when the wake watcher cannot start.
-When `coop exec` starts a fresh wake, it baselines messages that were already
-waiting. Those messages remain unread, create no receipt, and do not trigger
-that wake. `coop exec` only reuses a compatible live wake that has already
-published generation-bound proof of watcher preparation. The existing wake is
-not retroactively baselined; pending backlog can still notify. SessionStart
-draining mitigates that residual. `--require-wake` requires a usable notifier,
-not a rebased reused wake.
-Launchers that use an external injector can add `--wake-inject-via /absolute/path/to/injector`
-and repeated `--wake-inject-arg` values. When that invocation starts a new wake,
-the wake is bound to the exact `coop exec` process identity and stores its
-injector target. The claim survives an ordinary wake exit so another process
-cannot silently take over the handle. If the owner or wake exits unexpectedly,
-use `amq wake recover-owner` instead of the ownerless repair path. When a
-required owner capability is conclusively unsupported before any claim exists,
-AMQ warns and starts one ownerless wake instead.
+`coop exec` auto-initializes `.agent-mail`/`.amqrc` at the worktree top when no
+eligible root exists (see [Global Root Fallback](#global-root-fallback) below);
+pass `--no-gitignore` or `--no-init` to opt out. Add `--require-wake` in
+managed launchers that should fail instead of launching the agent when the
+wake watcher cannot start — a fresh wake baselines messages already waiting
+(see the first-message check above), and `--require-wake` only accepts a wake
+that has proven itself ready, not merely reused.
 
-AMQ identifies an external injector by its resolved executable and ordered
-fixed arguments. Put any provider target identity needed to distinguish a pane,
-window, or session in `--wake-inject-arg` (`--inject-arg` when starting
-`amq wake` directly). Ambient environment variables and provider configuration
-are not part of this identity, so repair, recovery, and retirement cannot
-detect target changes made only through those channels.
+Launchers with a terminal-specific injector can add
+`--wake-inject-via /absolute/path/to/injector` plus repeated
+`--wake-inject-arg` values; the resulting claim survives an ordinary wake exit,
+so use `amq wake recover-owner` — not `amq wake repair` — if the owner process
+disappears unexpectedly. See
+[docs/wake-lifecycle.md](docs/wake-lifecycle.md) and
+[docs/wake-state-invariants.md](docs/wake-state-invariants.md) for the full
+injector-identity and ownership contract.
 
 ### 3. Send & Receive
 
@@ -347,151 +306,68 @@ amq wake retire --me codex --inject-via /absolute/injector \
   --retry-until injected --inject-arg exec --inject-arg terminal-id
 ```
 
-`amq wake check` is read-only. It reports whether the current process can start
-a full-strength wake, whether a saved inject-via target can repair the exact
-stale wake, and the running and current AMQ image path and version. Its
-`restart_capability` is one of `agent_safe`, `operator_only`, or `unavailable`,
-with an exact `next_action`. Automated agents may act only on `agent_safe`.
-They must leave a live wake running for `operator_only`, and must never turn a
-TIOCSTI refusal into an attention-only downgrade. `doctor --ops` exposes the
-same image and restart fields for every discovered wake lock.
+`amq wake check` is read-only: it reports whether this process can start or
+repair a wake, and a `restart_capability` of `agent_safe`, `operator_only`, or
+`unavailable` with an exact next action. Automated agents may act only on
+`agent_safe`; leave a live wake running otherwise, and never downgrade a
+TIOCSTI refusal to attention-only. `doctor --ops` reports the same fields for
+every discovered lock.
 
-Resume-eligible wakes started by `coop exec` also follow the stable AMQ launch
-symlink. When an installer atomically points that locator at a strictly newer
-self-reported semantic version, the wake waits for a fully quiescent delivery
-boundary and replaces its image without changing PID, terminal ownership, or unread work.
-Failed candidates are attempted at most once per candidate within a wake
-generation, bounded to the 8 most recent distinct candidates. A new wake
-generation resets that refusal memory.
-Pinned binaries, ownerless/keepalive wakes, repair flows, destructive
-interrupts, and arbitrary inject commands never self-upgrade. Disable the
-eligible default with `amq wake --no-self-upgrade` or
-`AMQ_WAKE_NO_SELF_UPGRADE=1`; schema-2 wake/doctor JSON reports the latest
-decision under `self_upgrade`.
+Wakes started by `coop exec` self-upgrade in place when a newer AMQ is
+installed, without changing PID, terminal ownership, or unread work; disable
+with `amq wake --no-self-upgrade` or `AMQ_WAKE_NO_SELF_UPGRADE=1`.
+`--json-schema=2` (requires `--json`) replaces prose parsing with a closed,
+machine-stable action/actor/reason contract; schema 1 remains the
+byte-compatible default. See
+[docs/wake-lifecycle.md](docs/wake-lifecycle.md#91-self-upgrade) for the
+candidate-bounding rules and the full schema-2 contract.
 
-JSON schema 1 remains the byte-compatible default. Schema 2 is explicit with
-`--json-schema=2` and is available only with `--json`. It replaces prose
-parsing with a closed action kind, actor, reason code, and an argv command
-object when one action is directly executable. Missing evidence is an explicit
-JSON `null`; `image.status="unknown"` remains a real classification. In doctor
-schema 2, each wake-lock entry contains the same decision under `wake_check`
-rather than duplicating the wake advice as flat fields. Check output is advice,
-not authority: every advertised mutating command revalidates current wake state
-before changing it.
+Wake locks are `stale` (AMQ proved the owner is gone or mismatched —
+`--fix-wake-locks` removes them after a re-check) or `unverified` (AMQ could
+not prove either way, so it leaves the lock in place; confirm manually before
+removing `.wake.lock`). Only a narrowly eligible artifact — an aged, malformed,
+conclusively ownerless lock or orphan target of the exact shapes the invariant
+doc permits — is moved to a timestamped `.quarantined` name so acquisition can
+proceed; every other shape is preserved in place. `doctor --ops` reports the
+count and newest age, and `amq cleanup --wake-quarantine-older-than <duration>`
+removes quarantined artifacts explicitly (`--dry-run` is non-mutating). See
+[docs/wake-state-invariants.md](docs/wake-state-invariants.md) for exactly
+which lock/target shapes qualify for each state.
 
-Wake locks reported by `doctor --ops` can be `stale`, `unverified`, or, in JSON
-output, any current lock state. With `--fix-wake-locks`, fixed and error states
-can also appear. `stale` means AMQ proved the recorded owner is gone or is not
-the same wake process, so `--fix-wake-locks` can remove the lock after a fresh
-re-check. `unverified` means AMQ could not prove ownership either way, such as a
-legacy lock with a live PID but no process-start token, a hostname mismatch, or
-an unsupported platform. Except for the narrow acquisition quarantine case
-below, AMQ leaves `unverified` locks in place; inspect the PID and remove the
-named `.wake.lock` manually only after confirming no matching `amq wake` still
-owns that agent/root.
+`amq wake repair` restarts an eligible `--inject-via` wake from its saved
+target after a proven-stale or unverified-ownerless lock, using continuity
+state (`.wake.repair-floor`) so messages that arrived while the notifier was
+down remain eligible to notify. It refuses raw terminal wakes and owner-bound
+claims; output goes to `agents/<agent>/.wake.repair.log`.
+`amq wake recover-owner` is the separate path for an owner-bound
+`--wake-inject-via` claim: a live owner releases its own claim (via the
+inherited `AMQ_WAKE_OWNER` token) from the same OS session, or AMQ removes a
+conclusively dead owner's claim outright — there is no force mode.
+`amq wake retire` stops only an identity-confirmed live `--inject-via` wake
+whose executable, arguments, and saved target all match (or removes an
+exactly-bound stale lock without signaling); results are exactly `refused`,
+`retired`, or `retired_with_residue` (an exit-0 warning that target/state
+cleanup was incomplete). See
+[docs/wake-lifecycle.md](docs/wake-lifecycle.md) and
+[docs/wake-state-invariants.md](docs/wake-state-invariants.md) for the
+repair-floor, ownership, and residue-convergence contracts.
 
-An aged, syntax-invalid/empty/truncated ownerless generic 0600 lock can block a
-new wake without carrying usable authority. During acquisition AMQ preserves
-only that narrow case by atomically moving the exact inode and bytes to
-`.wake.lock.quarantined.<UTC-nanosecond>` under the lifecycle guard, then starts
-again from a fresh inspection. A targetless acquisition similarly quarantines
-an exact readable regular 0600 orphan `.wake.target` only when it is
-conclusively generic. Clean owner-bearing targets and malformed owner-shaped
-targets remain untouched: clean targets direct the operator to owner recovery,
-while malformed targets require inspection because automatic recovery cannot
-authenticate their owner. Unreadable, oversized, and special targets also fail
-closed. Valid JSON targets with wrong known-field types are quarantined only
-when their retained bytes are conclusively ownerless. `doctor --ops` reports
-`wake_quarantine.count` and nullable
-`wake_quarantine.newest_age_seconds` when the complete scan succeeds. A scan
-failure instead produces `wake_quarantine.error` plus an error hint; explicit
-quarantine cleanup refuses rather than acting on a partial result.
-
-Quarantine is preservation, not deletion. Ordinary tmp cleanup never selects
-it. Removal requires the explicit selector
-`amq cleanup --wake-quarantine-older-than <duration>`; `--dry-run` is
-non-mutating, and actual cleanup revalidates exact identity and bytes under the
-lifecycle guard before unlinking and syncing the retained agent directory.
-
-`amq wake repair` is an explicit live-session repair path. It runs when the lock
-is proven `stale` or is an unverified ownerless generic claim, the lock was
-created for `--inject-via`, and the agent has a saved
-`agents/<agent>/.wake.target` whose digest matches the lock's repair metadata.
-It also requires AMQ's private `.wake.repair-floor` to match the exact dead
-generation, boot, physical queue root, owner state, and target.
-That floor carries only the existing-message identities already suppressed by
-the dead wake (device, inode, and ctime), never message IDs. A repaired wake
-inherits it instead of re-snapshotting `inbox/new`, so messages delivered while
-the notifier was down remain eligible to notify and same-name DLQ retries
-remain eligible when their file identity changes. Missing, corrupt, or
-mismatched continuity state fails closed and requires a normal wake restart.
-Repair refuses raw terminal wake targets, leftover targets from old locks, and
-unverified owner-bound or invalid claims. It supersedes an unverified ownerless
-generic claim only after the saved target and continuity state pass the same
-fail-closed validation. Repaired wake output goes to
-`agents/<agent>/.wake.repair.log`; `doctor --ops` can report whether repair is
-available, but it never starts a wake process.
-
-`amq wake recover-owner` is the separate recovery path for an owner-bound
-`coop exec --wake-inject-via` claim. A live owner may release only its exact
-claim from the same OS session, using the inherited `AMQ_WAKE_OWNER` token.
-When the exact owner is dead, recovery does not require that token. AMQ stops
-only an identity-confirmed wake, re-checks the claim after every wait, and
-fails closed without mutation when the owner or claim is unknown, legacy, or
-corrupt. A bound state/document mismatch is also a refusal before stop or
-unlink; AMQ preserves that claim and its artifacts. A conclusively generic
-target/state shadow with no lock carries no ownership: targetless acquisition
-may move the exact target into quarantine, then must inspect again before
-superseding stale projection state or creating a wake. An owner-bearing target,
-with no lock, can be removed by `recover-owner` only after its exact owner is
-conclusively dead; a live or unknown owner preserves it. A malformed target
-with a non-null owner marker remains preserved for inspection because automatic
-owner recovery cannot authenticate it.
-Rollback means returning to an older compatible binary or reader, not
-destructively rewriting a P2b lock; existing unbound claims remain P2a, and an
-older binary may release its own exact claim. There is no force mode. The
-ownerless `repair`, `retire`, and
-`doctor --ops --fix-wake-locks` paths refuse owner-bound claims.
-
-`amq wake retire` is the exact managed-shutdown path. It requires the caller's
-expected `--inject-via` executable and ordered `--inject-arg` values. A live
-wake is retired only when its process identity, unchanged lock generation, and
-saved target all match: Linux signals through its pidfd capability and macOS
-uses the generation-bound cooperative control socket. An exactly-bound
-proven-stale lock may be removed without signaling; raw and unverified wakes
-fail closed.
-Lock removal is the retirement commit point. After it commits, AMQ removes the
-exact captured target and its corresponding bound state. An unbound projection
-is removed only when its target-section digest matches that retired target. The
-mailbox and every replacement lock, target, or state artifact are preserved.
-Results are exactly `refused`, `retired`, or `retired_with_residue`.
-`retired_with_residue` is an exit-0 success warning: the lock is gone, but
-target/state cleanup failed or was skipped. That residue converges
-automatically on the next acquisition only when conclusively ownerless;
-owner-bearing residue follows owner recovery, and malformed ownership remains
-inspection-only.
-
-The lifecycle boundaries are:
+The lifecycle boundaries:
 
 - repair = replace a proven-stale inject-via wake.
-- recover-owner = stop and release one exact owner-bound inject-via claim, or
-  remove a lockless clean owner-bearing target after proving its owner dead.
+- recover-owner = stop/release one owner-bound inject-via claim/artifact.
 - `doctor --ops --fix-wake-locks` = remove a proven-stale lock.
 - retire = stop an identity-confirmed live inject-via wake.
-- launchd, systemd, or the owning shell = stop a raw wake.
-- retire neither unloads supervisors nor promises that they will not restart a wake.
+- launchd, systemd, or the owning shell = stop a raw wake (retire does not
+  unload supervisors or promise they won't restart a wake).
 
-`amq who` and `amq doctor --ops` distinguish two activity sources:
-
-- `notifier_live` means AMQ verified the process identity behind a valid
-  `amq wake` lock. It proves prompt notification is attached; it does **not**
-  prove messages are consumed.
-- `recent_activity` means `last_seen` was refreshed in the last 10 minutes,
-  without a verified live notifier.
-
-Consumption remains the job of `drain` or `monitor` and is evidenced by
-receipts. For long-running `wake` and `monitor` examples under systemd or
-launchd, see [Supervisor recipes](COOP.md#supervisor-recipes).
+`amq who` and `amq doctor --ops` distinguish `notifier_live` (a verified live
+wake lock — proves notification is attached, not that messages are consumed)
+from `recent_activity` (a fresh `last_seen` without that proof); see
+[CLAUDE.md](CLAUDE.md#doctor--ops) for the full semantics. Consumption itself
+is the job of `drain`/`monitor`, evidenced by receipts. For long-running
+`wake`/`monitor` under systemd or launchd, see
+[Supervisor recipes](COOP.md#supervisor-recipes).
 
 ## Message Kinds & Priority
 
@@ -716,8 +592,12 @@ Building something on AMQ? Open an issue or PR to be listed here.
 
 - [INSTALL.md](INSTALL.md) — Alternative installation methods
 - [docs/amq-keepalive.md](docs/amq-keepalive.md) — Keepalive operations, lifecycle, and launcher integration
+- [docs/wake-lifecycle.md](docs/wake-lifecycle.md) — Wake lock/target state contract, self-upgrade, log retention, JSON schema, injector identity
+- [docs/wake-doorbell-acknowledgement.md](docs/wake-doorbell-acknowledgement.md) — Wake retry ladder and `--retry-until` acknowledgement contract
+- [docs/wake-state-invariants.md](docs/wake-state-invariants.md) — Wake artifact ownership, lock states, and quarantine invariants
 - [docs/adapter-contract.md](docs/adapter-contract.md) — Formal v1 adapter contract for integration messages
 - [docs/adr-layer-extensions.md](docs/adr-layer-extensions.md) — ADR for stable layer extension surfaces
+- [docs/trace.md](docs/trace.md) — Read-only trace contract and evidence limits
 - [COOP.md](COOP.md) — Co-op mode protocol & best practices
 - [CLAUDE.md](CLAUDE.md) — Agent instructions, CLI reference, architecture
 

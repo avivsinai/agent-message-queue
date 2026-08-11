@@ -13,6 +13,14 @@ record binds the root and agent to a PID, process start token, boot ID,
 generation, wake mode, and, when applicable, cooperative owner and target
 digest.
 
+A cooperative owner claim is scoped to the OS session that created it. The
+live owner (typically `coop exec --wake-inject-via`) releases only its own
+exact claim by presenting the inherited `AMQ_WAKE_OWNER` token via
+`amq wake recover-owner`; `recover-owner` does not require that token when the
+recorded owner is conclusively dead. There is no force mode: an unknown, live,
+or legacy owner state is preserved rather than guessed at. The token is
+generated and consumed by AMQ and must never be set manually.
+
 **Commit domain:** the lock becomes authoritative when `.wake.lock` is linked
 into the retained agent directory. Readers verify both its content and file
 identity. Removal is conditional on the exact inspected claim still matching;
