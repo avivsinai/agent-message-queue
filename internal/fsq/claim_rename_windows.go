@@ -52,6 +52,9 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 
 	source, err := openClaimSource(windows.Handle(newDir.Fd()), filepath.Base(newPath))
 	if err != nil {
+		if errors.Is(err, windows.STATUS_DELETE_PENDING) {
+			return os.ErrNotExist
+		}
 		mapped := windowsClaimError(err)
 		if os.IsNotExist(mapped) {
 			return os.ErrNotExist
@@ -78,6 +81,14 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 	if statErr != nil {
 		if os.IsNotExist(statErr) {
 			return os.ErrNotExist
+		}
+		if os.IsPermission(statErr) {
+			probe, probeErr := openClaimSource(windows.Handle(newDir.Fd()), filepath.Base(newPath))
+			if probeErr == nil {
+				_ = windows.CloseHandle(probe)
+			} else if errors.Is(probeErr, windows.STATUS_DELETE_PENDING) {
+				return os.ErrNotExist
+			}
 		}
 		return fmt.Errorf("inspect claim source after collision: %w", statErr)
 	}
