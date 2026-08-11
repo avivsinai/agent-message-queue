@@ -86,7 +86,7 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 			probe, probeErr := openClaimSource(windows.Handle(newDir.Fd()), filepath.Base(newPath))
 			if probeErr == nil {
 				_ = windows.CloseHandle(probe)
-			} else if errors.Is(probeErr, windows.STATUS_DELETE_PENDING) {
+			} else if errors.Is(probeErr, windows.STATUS_DELETE_PENDING) || os.IsNotExist(windowsClaimError(probeErr)) {
 				return os.ErrNotExist
 			}
 		}
