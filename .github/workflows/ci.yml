@@ -66,3 +66,29 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: latest
+
+  # Native Windows leg for the exclusive drain-claim contract (issue #485).
+  # Cross-compilation cannot exercise the bug: os.Root.Rename on Windows is
+  # handle-based and lets every concurrent claimer succeed. Scope stays
+  # focused on the claim path; the broader suite has known unrelated Windows
+  # failures tracked separately.
+  windows-claim-test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Focused regex, not the full fsq suite: pristine v0.60.2 already fails
+      # unrelated Windows tests (e.g. TestRetryFromDLQEnvelopeUpdateFailure...),
+      # tracked separately from this claim-exclusivity gate. read/monitor/DLQ
+      # capture all claim through the same MoveNewToCur primitive proven here.
+      - name: Claim primitive and maildir contracts
+        run: go test ./internal/fsq -run '^TestMoveNewToCur|^TestClaimRename|^TestClaimCollision|^TestClaimPinnedRoot|^TestMaildir' -count=1
+      - name: Concurrent drain single-winner gate
+        run: go test ./internal/cli -run '^TestDrainInboxItemsConcurrentClaimsSingleWinner$' -count=50
+      - name: Drain claim path
+        run: go test ./internal/cli -run '^TestDrainInboxItems' -count=1

@@ -44,7 +44,21 @@ func MoveNewToCur(root *DeliveryRoot, agent, filename string) error {
 	if err := root.root.MkdirAll(curDir, 0o700); err != nil {
 		return err
 	}
-	if err := root.root.Rename(newPath, curPath); err != nil {
+	// claimRename is the exclusive-claim point: exactly one concurrent caller
+	// wins; losers observe os.IsNotExist. Windows cannot use os.Root.Rename
+	// here — it renames by handle and lets every contender succeed (#485).
+	if err := claimRename(root, newPath, curPath); err != nil {
+		var residue *claimCommittedResidueError
+		if errors.As(err, &residue) {
+			// The destination name exists and this caller owns the claim; the
+			// leftover source name is reconciled by a later claimer. Same
+			// contract as a post-rename sync failure: committed, not failed.
+			return &CommittedDurabilityError{
+				FinalPath: root.displayPath(curPath),
+				Recipient: agent,
+				Err:       residue.Err,
+			}
+		}
 		return err
 	}
 
