@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -172,12 +173,117 @@ func createGitWorktreeFixture(t *testing.T) (primary, linked string) {
 	return primary, linked
 }
 
+// gitRepoSelectionEnv lists the variables through which an enclosing git
+// process — a pre-push hook running `make ci`, most commonly — redirects git
+// away from the `-C` target. A leaked GIT_DIR pointed every fixture command
+// at the enclosing repository itself, committing fixture content onto real
+// branches and re-initializing the real repo as bare. Mirrors the unset list
+// in scripts/smoke-test.sh. The contract here is direct repo-selection
+// isolation only; scrubbing git's full local environment (config injection,
+// grafts, shallow files) is the generated pre-push hook's job.
+var gitRepoSelectionEnv = []string{
+	"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+	"GIT_COMMON_DIR", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+}
+
+func gitEnvForTest() []string {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		// GIT_CONFIG_NOSYSTEM is filtered too: git honors the first
+		// occurrence, so an inherited empty value would defeat the "=1"
+		// appended below.
+		if slices.Contains(gitRepoSelectionEnv, name) || name == "GIT_CONFIG_NOSYSTEM" {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, "GIT_CONFIG_NOSYSTEM=1")
+}
+
 func runGitForTest(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1")
+	cmd.Env = gitEnvForTest()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+}
+
+func gitOutputForTest(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = gitEnvForTest()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// TestRunGitForTestIsolatesEnclosingRepo executes the incident that motivated
+// gitEnvForTest: a pre-push hook leaked GIT_DIR into `make ci`, and every
+// fixture git command then mutated the enclosing repository — a fixture
+// commit landed on a real branch and `init --bare` flipped core.bare on the
+// real repo. Before the scrub, this test fails with the victim corrupted.
+func TestRunGitForTestIsolatesEnclosingRepo(t *testing.T) {
+	victim := t.TempDir()
+	runGitForTest(t, victim, "init")
+	runGitForTest(t, victim, "-c", "user.name=Victim", "-c", "user.email=victim@example.invalid",
+		"commit", "--allow-empty", "-m", "base")
+	victimHead := gitOutputForTest(t, victim, "rev-parse", "HEAD")
+
+	t.Setenv("GIT_DIR", filepath.Join(victim, ".git"))
+	t.Setenv("GIT_WORK_TREE", victim)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(victim, ".git", "index"))
+	t.Setenv("GIT_OBJECT_DIRECTORY", filepath.Join(victim, ".git", "objects"))
+	t.Setenv("GIT_COMMON_DIR", filepath.Join(victim, ".git"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "")
+
+	nosystem := 0
+	for _, entry := range gitEnvForTest() {
+		if strings.HasPrefix(entry, "GIT_CONFIG_NOSYSTEM=") {
+			nosystem++
+			if entry != "GIT_CONFIG_NOSYSTEM=1" {
+				t.Fatalf("gitEnvForTest emitted %q, want GIT_CONFIG_NOSYSTEM=1", entry)
+			}
+		}
+	}
+	if nosystem != 1 {
+		t.Fatalf("gitEnvForTest emitted GIT_CONFIG_NOSYSTEM %d times, want exactly once", nosystem)
+	}
+
+	// The incident sequence: fixture init, commit, worktree add, and a bare
+	// init, all under the hostile environment above.
+	fixture := filepath.Join(t.TempDir(), "primary")
+	if err := os.Mkdir(fixture, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture, "README.md"), []byte("fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, fixture, "init")
+	runGitForTest(t, fixture, "add", "README.md")
+	runGitForTest(t, fixture, "-c", "user.name=AMQ Test", "-c", "user.email=amq@example.invalid",
+		"commit", "-m", "fixture")
+	runGitForTest(t, fixture, "worktree", "add", "-b", "linked", filepath.Join(t.TempDir(), "linked"))
+	bare := filepath.Join(t.TempDir(), "bare")
+	if err := os.Mkdir(bare, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, bare, "init", "--bare")
+
+	if head := gitOutputForTest(t, victim, "rev-parse", "HEAD"); head != victimHead {
+		t.Fatalf("victim HEAD moved from %s to %s", victimHead, head)
+	}
+	if count := gitOutputForTest(t, victim, "rev-list", "--count", "HEAD"); count != "1" {
+		t.Fatalf("victim commit count = %s, want 1", count)
+	}
+	if bareFlag := gitOutputForTest(t, victim, "config", "core.bare"); bareFlag != "false" {
+		t.Fatalf("victim core.bare = %s, want false", bareFlag)
+	}
+	if subject := gitOutputForTest(t, victim, "log", "-1", "--format=%s"); subject != "base" {
+		t.Fatalf("victim HEAD subject = %q, want %q", subject, "base")
 	}
 }
 

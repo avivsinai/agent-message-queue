@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint ci smoke contract-check check-skills
+.PHONY: build test fmt fmt-check vet lint ci smoke contract-check check-skills hook-env-check
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -36,7 +36,10 @@ smoke:
 	AMQ_WAKE_OWNER=smoke-inherited-wake-owner \
 	./scripts/smoke-test.sh
 
-ci: check-skills fmt-check vet lint test smoke contract-check
+ci: check-skills fmt-check vet lint test smoke contract-check hook-env-check
+
+hook-env-check:
+	@sh scripts/test_pre_push_hook_env.sh
 
 contract-check:
 	@bash scripts/check-keepalive-amq-contract_test.sh

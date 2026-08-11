@@ -106,14 +106,41 @@ func TestBuiltBinaryRunsStderrDrainBeforeArgumentHandling(t *testing.T) {
 
 func TestBuiltBinaryReportsStderrDrainFailure(t *testing.T) {
 	binary := buildKeepaliveForTest(t)
+	// Construct the capture failure explicitly: fd 3 delivers real bytes and
+	// fd 4 is read-only, so the drain's capture write must fail. Relying on
+	// fd 3/4 being closed is not hermetic — an ancestor (git's pre-push hook
+	// chain, make) can leak a live descriptor without close-on-exec, and the
+	// drain then blocks reading it until the package times out.
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
+	readOnlyCapture, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = readOnlyCapture.Close() }()
+
 	cmd := exec.Command(binary, "__wake-stderr-drain")
 	cmd.Env = append(os.Environ(), stderrDrainModeForTest)
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("built drain unexpectedly succeeded; output=%q", output)
+	cmd.ExtraFiles = []*os.File{reader, readOnlyCapture}
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(output), "amq-keepalive stderr drain failed: capture wake stderr") {
-		t.Fatalf("output = %q, want concrete drain failure", output)
+	if _, err := writer.WriteString("diagnostic that cannot be captured\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = writer.Close()
+	if err := cmd.Wait(); err == nil {
+		t.Fatalf("built drain unexpectedly succeeded; output=%q", output.String())
+	}
+	if !strings.Contains(output.String(), "amq-keepalive stderr drain failed: capture wake stderr") {
+		t.Fatalf("output = %q, want concrete drain failure", output.String())
 	}
 }
 
