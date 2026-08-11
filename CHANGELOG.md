@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.60.3](https://github.com/avivsinai/agent-message-queue/compare/v0.60.2...v0.60.3) (2026-08-11)
+
+
+### Bug Fixes
+
+* **fsq:** make concurrent drain claims exclusive on Windows ([#486](https://github.com/avivsinai/agent-message-queue/issues/486)) ([60a819f](https://github.com/avivsinai/agent-message-queue/commit/60a819f1045be0a079d1598c281438ff00550769))
+
 ## [0.60.2](https://github.com/avivsinai/agent-message-queue/compare/v0.60.1...v0.60.2) (2026-08-11)
 
 
