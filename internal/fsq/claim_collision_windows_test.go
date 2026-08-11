@@ -68,11 +68,24 @@ func TestClaimPinnedRootIgnoresBaseAliasSwap(t *testing.T) {
 
 	root := openDeliveryRootForTest(t, base)
 
-	// Swap the lexical base for an impostor tree carrying a decoy message.
+	// Attempt the alias swap while the root is pinned. Windows normally
+	// refuses to rename a directory with open handles inside it — that
+	// refusal IS the pinned-root property, enforced by the OS itself, and is
+	// the expected branch. If a future Windows/Go semantic lets the rename
+	// through, fall through and require the claim to still land in the
+	// originally pinned tree while the impostor stays untouched.
 	moved := filepath.Join(parent, "root.moved")
 	if err := os.Rename(base, moved); err != nil {
-		t.Fatalf("alias-swap rename: %v", err)
+		if err := claimRename(root, newRel, curRel); err != nil {
+			t.Fatalf("claimRename through pinned root: %v", err)
+		}
+		got, readErr := os.ReadFile(filepath.Join(base, curRel))
+		if readErr != nil || string(got) != "pinned payload" {
+			t.Fatalf("pinned tree cur = %q, %v after refused swap", got, readErr)
+		}
+		return
 	}
+
 	if err := EnsureAgentDirs(base, "alice"); err != nil {
 		t.Fatalf("EnsureAgentDirs impostor: %v", err)
 	}
