@@ -52,13 +52,10 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 
 	source, err := openClaimSource(windows.Handle(newDir.Fd()), filepath.Base(newPath))
 	if err != nil {
-		if errors.Is(err, windows.STATUS_DELETE_PENDING) {
+		if claimTransitionAlreadyDone(err) {
 			return os.ErrNotExist
 		}
 		mapped := windowsClaimError(err)
-		if os.IsNotExist(mapped) {
-			return os.ErrNotExist
-		}
 		return fmt.Errorf("open claim source %s: %w", root.displayPath(newPath), mapped)
 	}
 	defer func() { _ = windows.CloseHandle(source) }()
@@ -71,7 +68,7 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 			}
 			return fmt.Errorf("claim %s: %w", root.displayPath(newPath), windowsClaimError(err))
 		}
-		if err := removeClaimSource(source); err != nil && !os.IsNotExist(windowsClaimError(err)) {
+		if err := removeClaimSource(source); err != nil && !claimTransitionAlreadyDone(err) {
 			return &claimCommittedResidueError{Err: windowsClaimError(err)}
 		}
 		return nil
@@ -86,7 +83,7 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 			probe, probeErr := openClaimSource(windows.Handle(newDir.Fd()), filepath.Base(newPath))
 			if probeErr == nil {
 				_ = windows.CloseHandle(probe)
-			} else if errors.Is(probeErr, windows.STATUS_DELETE_PENDING) || os.IsNotExist(windowsClaimError(probeErr)) {
+			} else if claimTransitionAlreadyDone(probeErr) {
 				return os.ErrNotExist
 			}
 		}
@@ -100,7 +97,7 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 		// A winner inserted curPath but has not yet removed newPath, or a prior
 		// process crashed between those operations. Reconcile that residue and
 		// report this caller as a loser rather than redelivering the message.
-		if err := removeClaimSource(source); err != nil && !os.IsNotExist(windowsClaimError(err)) {
+		if err := removeClaimSource(source); err != nil && !claimTransitionAlreadyDone(err) {
 			return fmt.Errorf("remove duplicate claim source %s: %w", root.displayPath(newPath), windowsClaimError(err))
 		}
 		return os.ErrNotExist
@@ -181,6 +178,14 @@ func windowsClaimLinkUnsupported(err error) bool {
 	return errors.Is(err, windows.STATUS_INVALID_DEVICE_REQUEST) ||
 		errors.Is(err, windows.STATUS_NOT_SUPPORTED) ||
 		errors.Is(err, windows.STATUS_NOT_SAME_DEVICE)
+}
+
+// claimTransitionAlreadyDone reports NT outcomes that prove another
+// cooperating claimant has removed, or is currently removing, the source
+// name. They are benign completion at cleanup sites and the ordinary loser
+// contract at acquisition sites.
+func claimTransitionAlreadyDone(err error) bool {
+	return errors.Is(err, windows.STATUS_DELETE_PENDING) || os.IsNotExist(windowsClaimError(err))
 }
 
 func windowsClaimError(err error) error {
