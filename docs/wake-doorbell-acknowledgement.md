@@ -40,6 +40,42 @@ digest compatibility with existing targets. A missing field MUST be read as
 `drained`. Repair, reuse, and retirement MUST compare the normalized policy;
 an `injected` wake cannot be silently reused or retired as a `drained` wake.
 
+## Retry ladder (default `drained` mode)
+
+Wake treats a terminal notification as an attempt, not delivery, and retries
+on a capped backoff until the inbox makes durable progress. There is no
+give-up while the cohort remains unread.
+
+- The first notification for a newly pending cohort is immediate.
+- Doorbell (input-injecting) attempts start at 5s and double up to a 2-minute
+  cap, because they drive the agent directly.
+- Attention-only attempts (terminal output, no input) start at 30s and
+  continue through 4 and 8 minutes to a 15-minute cap, because they alert a
+  human rather than act.
+- The delay is measured from when the preceding injector process exits or
+  times out, not from when the attempt was scheduled. Because `--inject-via`
+  runs arbitrary local code, a retry can repeat injector-side effects.
+- A new message added to a pending cohort joins it and shares the next
+  notification without resetting the ladder. An input-delivery addition may
+  pull a decayed deadline forward to a delivery floor 5s after the last input
+  attempt (or fire immediately if that floor already passed); an
+  attention-only addition keeps the cohort's current decayed deadline.
+  Removing or replacing a cohort member immediately rearms it.
+- Bursts within the debounce window collapse to one notification.
+- A successful input attempt does not also emit attention output. A transient
+  foreground-authority or input-quiet refusal keeps the input retry armed
+  while rate-limiting the separate attention output on its own slower
+  cadence. Recovery-required state (see `wake_check`) never retries uncertain
+  terminal input; it repeats the manual drain-and-restart notice on the
+  attention cadence until the unread cohort drains.
+- Contextual peer headers (sender/subject) appear only in terminal output or
+  attention notices; terminal input injection always uses the fixed doorbell
+  text, never message-derived content.
+
+`--retry-until injected` (below) changes only the owner-bound doorbell
+acknowledgement; the attention ladder and the unowned default cadence above
+are unaffected.
+
 ## State machine
 
 Owner-bound doorbell state adds an `announced` phase:

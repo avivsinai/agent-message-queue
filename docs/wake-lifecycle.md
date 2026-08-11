@@ -567,3 +567,60 @@ an older binary preserves a newer owner-bound claim. W3 extends that matrix to
 state-document absence, stale legacy digests, unbound transitions, and the
 P2b lock-reference ABI. A green matrix proves compatibility behavior only; it
 does not itself authorize landing, migration activation, release, or deploy.
+
+## 9. Operational surfaces outside the state document
+
+These behaviors sit next to the `.wake.state`/`.wake.lock`/`.wake.target`
+contract above rather than inside it, but they share the same generation and
+identity primitives, so they are recorded here rather than invented as a new
+document.
+
+### 9.1 Self-upgrade
+
+A resume-eligible wake started by `coop exec` follows the stable AMQ launch
+symlink. When an installer atomically points that locator at a strictly newer
+self-reported semantic version, the wake waits for a fully quiescent delivery
+boundary and replaces its running image without changing PID, terminal
+ownership, or unread work. A failed upgrade candidate is attempted at most
+once per candidate within one wake generation, bounded to the 8 most recent
+distinct candidates; a new generation resets that refusal memory. Pinned
+binaries, ownerless/keepalive wakes, repair flows, destructive interrupts, and
+arbitrary `--inject-cmd` wakes never self-upgrade. The eligible default is
+disabled with `amq wake --no-self-upgrade` or `AMQ_WAKE_NO_SELF_UPGRADE=1`;
+schema-2 wake/doctor JSON reports the latest decision under `self_upgrade`.
+
+### 9.2 `.wake.log` retention
+
+The wake child appends full runtime diagnostics to the private
+`agents/<agent>/.wake.log`; only terminal-safe attention output is inherited
+by the controlling terminal, keeping fatal-error text out of full-screen
+agent composers (see `docs/amq-keepalive.md` for the detached-launcher
+variant of this split). Accumulated diagnostics are truncated when a new wake
+starts after the log reaches 1 MiB, and rechecked again on the wake's
+30-second maintenance tick, so long-lived ordinary and repair wakes bound
+their own log growth.
+
+### 9.3 JSON schema 1 vs. schema 2
+
+Schema 1 is the byte-compatible default. Schema 2 is explicit with
+`--json-schema=2` and requires `--json`. It replaces prose parsing with a
+closed action kind, actor, reason code, and an argv command object when one
+action is directly executable. Missing evidence is an explicit JSON `null`;
+`image.status="unknown"` remains a real classification, not an error. In
+doctor schema 2, each wake-lock entry carries the same decision under
+`wake_check` rather than duplicating the wake advice as flat fields. Check
+output is advice, not authority: every advertised mutating command
+revalidates current wake state before changing it.
+
+### 9.4 External injector identity
+
+AMQ identifies an external injector (`--inject-via`/`--wake-inject-via`) by
+its resolved executable path and its ordered fixed arguments
+(`--inject-arg`/`--wake-inject-arg`), which is also what `.wake.target`
+stores under `inject_via`/`inject_args` (section 2.1). Put any provider
+target identity needed to distinguish a pane, window, or session in those
+fixed arguments. Ambient environment variables and external provider
+configuration are deliberately not part of this identity, so repair,
+recovery, and retirement cannot detect a target change made only through
+those channels — an operator who repoints a provider by environment alone
+must restart the wake.
