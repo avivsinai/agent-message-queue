@@ -21,10 +21,6 @@ const (
 	maxWakeRepairFloorFileBytes = 8 * 1024 * 1024
 )
 
-var currentWakeBootID = func() string {
-	return inspectWakeProcess(os.Getpid()).BootID
-}
-
 // wakeRepairFloor is private continuity state for one ownerless inject-via
 // lineage. Existing contains only the exact local file identities that the
 // running wake deliberately suppresses. It never records or compares message
