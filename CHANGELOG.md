@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.60.4](https://github.com/avivsinai/agent-message-queue/compare/v0.60.3...v0.60.4) (2026-08-12)
+
+
+### Bug Fixes
+
+* **fsq:** reconcile windows claim residue when the source name is already gone ([#490](https://github.com/avivsinai/agent-message-queue/issues/490)) ([037794a](https://github.com/avivsinai/agent-message-queue/commit/037794a69c8ec44cc318a53568b9cf49d21f02fc))
+* **wake:** verify lock machine identity instead of drifting hostname ([#488](https://github.com/avivsinai/agent-message-queue/issues/488)) ([449b49e](https://github.com/avivsinai/agent-message-queue/commit/449b49ed4270673db5131dd3fe67ed05e3b32bdf))
+
 ## [0.60.3](https://github.com/avivsinai/agent-message-queue/compare/v0.60.2...v0.60.3) (2026-08-11)
 
 
