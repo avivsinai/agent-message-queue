@@ -122,15 +122,6 @@ func stubStartWakeFromTarget(t *testing.T, fn wakeRepairTestStarter) {
 	})
 }
 
-func stubCurrentWakeBootID(t *testing.T, bootID string) {
-	t.Helper()
-	old := currentWakeBootID
-	currentWakeBootID = func() string { return bootID }
-	t.Cleanup(func() {
-		currentWakeBootID = old
-	})
-}
-
 func ensureWakeRepairLockIdentityForTest(t *testing.T, root, me string) wakeLock {
 	t.Helper()
 	path := filepath.Join(fsq.AgentBase(root, me), ".wake.lock")

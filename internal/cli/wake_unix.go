@@ -709,6 +709,7 @@ func newWakeLock(root, me string, options wakeLockAcquireOptions) (wakeLock, err
 	if hostname, err := os.Hostname(); err == nil {
 		lock.Hostname = hostname
 	}
+	lock.MachineID = currentWakeMachineID()
 	if proc := inspectWakeProcess(os.Getpid()); proc.Running {
 		lock.ProcessStart = proc.StartToken
 		lock.BootID = proc.BootID

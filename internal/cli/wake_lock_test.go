@@ -340,6 +340,7 @@ func TestInspectWakeLockRejectsMalformedWholeJSON(t *testing.T) {
 		{name: "tty wrong type", raw: []byte(`{"pid":4242,"tty":42,"root":"/tmp","started":"now"}`)},
 		{name: "root wrong type", raw: []byte(`{"pid":4242,"tty":"tty","root":42,"started":"now"}`)},
 		{name: "started wrong type", raw: []byte(`{"pid":4242,"tty":"tty","root":"/tmp","started":42}`)},
+		{name: "machine_id wrong type", raw: []byte(`{"pid":4242,"tty":"tty","root":"/tmp","started":"now","machine_id":42}`)},
 		{name: "truncated object", raw: []byte(`{"pid":`)},
 		{name: "null", raw: []byte(`null`)},
 		{name: "array", raw: []byte(`[]`)},
@@ -387,6 +388,7 @@ func TestDecodeWakeLockJSONFieldsWireScanner(t *testing.T) {
 		{name: "raw parse failure", raw: `{"pid":`, wantErr: true},
 		{name: "non-object", raw: `[]`, wantErr: true},
 		{name: "duplicate known", raw: `{"pid":null,"pid":7}`, wantErr: true},
+		{name: "duplicate machine_id", raw: `{"machine_id":null,"machine_id":"x"}`, wantErr: true},
 		{name: "duplicate unknown", raw: `{"future":null,"future":{"pid":null}}`},
 	}
 	for _, test := range tests {

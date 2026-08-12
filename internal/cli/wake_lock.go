@@ -21,7 +21,8 @@ type wakeLock struct {
 	TTY                  string               `json:"tty"`
 	Root                 string               `json:"root"`                             // Absolute path to disambiguate relative AM_ROOT
 	Agent                string               `json:"agent,omitempty"`                  // Agent handle that owns this lock
-	Hostname             string               `json:"hostname,omitempty"`               // Host that created the lock
+	Hostname             string               `json:"hostname,omitempty"`               // Host that created the lock; diagnostic, drifts with the network on macOS
+	MachineID            string               `json:"machine_id,omitempty"`             // Stable machine identity that created the lock
 	Started              string               `json:"started"`                          // Wall-clock diagnostic timestamp
 	ProcessStart         string               `json:"process_start,omitempty"`          // Kernel process start token, guards PID reuse
 	BootID               string               `json:"boot_id,omitempty"`                // Boot identity paired with ProcessStart when available
@@ -295,18 +296,10 @@ func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
 		inspection.Reason = "agent mismatch"
 		return
 	}
-	if lock.Hostname != "" {
-		hostname, err := os.Hostname()
-		if err != nil || hostname == "" {
-			inspection.Status = wakeLockUnverified
-			inspection.Reason = inspectionReason("hostname unavailable", err)
-			return
-		}
-		if lock.Hostname != hostname {
-			inspection.Status = wakeLockUnverified
-			inspection.Reason = "hostname mismatch"
-			return
-		}
+	if machineState, machineReason := classifyWakeLockMachine(lock); machineState != wakeMachineSame {
+		inspection.Status = wakeLockUnverified
+		inspection.Reason = machineReason
+		return
 	}
 
 	state, reason := classifyWakeIdentity(*inspection, inspection.Process)

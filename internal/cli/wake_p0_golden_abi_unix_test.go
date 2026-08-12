@@ -718,6 +718,11 @@ func TestWakeP0BinaryWakeLockJSONShape(t *testing.T) {
 		"started": true, "process_start": true, "boot_id": true, "executable": true,
 		"image_path": true, "image_version": true, "wake_mode": true, "generation": true,
 	}
+	// machine_id is best-effort: recorded when a stable machine identity is
+	// available, omitted otherwise. Both are valid lock ABI states.
+	if _, ok := lock["machine_id"]; ok {
+		expectedKeys["machine_id"] = true
+	}
 	if runtime.GOOS == "linux" {
 		expectedKeys["args"] = true
 	} else {
@@ -744,6 +749,11 @@ func TestWakeP0BinaryWakeLockJSONShape(t *testing.T) {
 	for _, key := range []string{"hostname", "process_start", "boot_id", "executable", "image_path", "image_version"} {
 		if strings.TrimSpace(wakeABIString(t, lock, key)) == "" {
 			t.Fatalf("wake lock %s is empty: %#v", key, lock)
+		}
+	}
+	if _, ok := lock["machine_id"]; ok {
+		if strings.TrimSpace(wakeABIString(t, lock, "machine_id")) == "" {
+			t.Fatalf("wake lock machine_id present but empty: %#v", lock)
 		}
 	}
 	if runtime.GOOS == "linux" {
