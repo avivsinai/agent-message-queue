@@ -69,7 +69,10 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 			return fmt.Errorf("claim %s: %w", root.displayPath(newPath), windowsClaimError(err))
 		}
 		if err := removeClaimSource(source); err != nil && !claimTransitionAlreadyDone(err) {
-			return &claimCommittedResidueError{Err: windowsClaimError(err)}
+			gone, recheckErr := claimSourceNameGone(root, newPath)
+			if !gone {
+				return &claimCommittedResidueError{Err: errors.Join(windowsClaimError(err), recheckErr)}
+			}
 		}
 		return nil
 	}
@@ -98,7 +101,10 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 		// process crashed between those operations. Reconcile that residue and
 		// report this caller as a loser rather than redelivering the message.
 		if err := removeClaimSource(source); err != nil && !claimTransitionAlreadyDone(err) {
-			return fmt.Errorf("remove duplicate claim source %s: %w", root.displayPath(newPath), windowsClaimError(err))
+			gone, recheckErr := claimSourceNameGone(root, newPath)
+			if !gone {
+				return fmt.Errorf("remove duplicate claim source %s: %w", root.displayPath(newPath), errors.Join(windowsClaimError(err), recheckErr))
+			}
 		}
 		return os.ErrNotExist
 	}
@@ -160,7 +166,12 @@ func linkClaimHandle(source, destinationDirectory windows.Handle, destinationNam
 	)
 }
 
-func removeClaimSource(source windows.Handle) error {
+// removeClaimSource is a var so tests can interleave a concurrent unlink with
+// a hostile NT status deterministically. setClaimSourceDisposition stays
+// reachable so those tests unlink through the real production primitive.
+var removeClaimSource = setClaimSourceDisposition
+
+func setClaimSourceDisposition(source windows.Handle) error {
 	info := fileDispositionInformationEx{
 		Flags: fileDispositionDelete | fileDispositionPosixSemantics,
 	}
@@ -172,6 +183,26 @@ func removeClaimSource(source windows.Handle) error {
 		uint32(unsafe.Sizeof(info)),
 		windows.FileDispositionInformationEx,
 	)
+}
+
+// claimSourceNameGone reports whether the claim source name has already been
+// removed from the directory. It adjudicates removal failures whose NT status
+// is not in claimTransitionAlreadyDone: concurrent claimants race their
+// POSIX-semantics disposition sets on the same file, and the loser of that
+// inner race can see a status such as ERROR_ACCESS_DENIED even though the
+// name is gone and its removal goal is met. Only proven absence is benign; a
+// still-present name (including out-of-contract recreation) or an inspection
+// failure keeps the loud error, with the inspection error returned so callers
+// can join both causes.
+func claimSourceNameGone(root *DeliveryRoot, newPath string) (bool, error) {
+	_, err := root.root.Lstat(newPath)
+	if err == nil {
+		return false, nil
+	}
+	if os.IsNotExist(err) {
+		return true, nil
+	}
+	return false, fmt.Errorf("recheck claim source after failed removal: %w", err)
 }
 
 func windowsClaimLinkUnsupported(err error) bool {
