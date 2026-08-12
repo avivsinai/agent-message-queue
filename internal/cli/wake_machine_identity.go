@@ -15,9 +15,11 @@ var currentWakeMachineID = sync.OnceValue(func() string {
 })
 
 // currentWakeBootID reports the boot identity of the running system, empty
-// when unavailable. Overridable for tests.
+// when unavailable. It reads the platform boot identity directly rather than
+// going through process inspection, which doctor and restart tests instrument
+// with scripted call counts. Overridable for tests.
 var currentWakeBootID = func() string {
-	return inspectWakeProcess(os.Getpid()).BootID
+	return readWakeBootIDPlatform()
 }
 
 // currentWakeHostname reports the kernel hostname. Overridable for tests.

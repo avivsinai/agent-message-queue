@@ -7,6 +7,14 @@ import (
 	"strings"
 )
 
+func readWakeBootIDPlatform() string {
+	data, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // readWakeMachineIDPlatform returns the machine id, the standard stable
 // machine identity on Linux.
 func readWakeMachineIDPlatform() string {

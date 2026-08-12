@@ -22,6 +22,11 @@ var darwinGethostuuid = func(uuid *[16]byte, timeout *unix.Timespec) syscall.Err
 	return errno
 }
 
+func readWakeBootIDPlatform() string {
+	bootID, _ := darwinBootIdentity()
+	return bootID
+}
+
 // readWakeMachineIDPlatform returns the hardware platform UUID via
 // gethostuuid(2), the kernel's stable identity for this machine (the same
 // value as IOPlatformUUID). The timeout must be finite: a zero timespec makes
