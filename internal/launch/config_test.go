@@ -37,6 +37,35 @@ func TestProjectConfigRoundTripAndStrictAuthority(t *testing.T) {
 	}
 }
 
+func TestProjectConfigNormalizesLegacyMinimalRoster(t *testing.T) {
+	parsed, err := ParseProjectConfig([]byte(`{"schema":1,"agents":[{"handle":"claude","command":["claude"]}]}`))
+	if err != nil {
+		t.Fatalf("ParseProjectConfig: %v", err)
+	}
+	if parsed.DefaultSession != DefaultSessionName || parsed.Layout.Type != LayoutColumns {
+		t.Fatalf("normalized project defaults = %#v", parsed)
+	}
+	agent := parsed.Agents[0]
+	if agent.Adapter != "claude" || agent.ResumePolicy != ResumeEnabled {
+		t.Fatalf("normalized agent defaults = %#v", agent)
+	}
+}
+
+func TestProjectConfigRejectsExplicitEmptyOptionalDefaults(t *testing.T) {
+	for _, raw := range []string{
+		`{"schema":1,"default_session":"","agents":[{"handle":"claude","command":["claude"]}]}`,
+		`{"schema":1,"default_session":null,"agents":[{"handle":"claude","command":["claude"]}]}`,
+		`{"schema":1,"agents":[{"handle":"claude","adapter":"","command":["claude"]}]}`,
+		`{"schema":1,"agents":[{"handle":"claude","adapter":null,"command":["claude"]}]}`,
+		`{"schema":1,"agents":[{"handle":"claude","command":["claude"],"resume_policy":""}]}`,
+		`{"schema":1,"agents":[{"handle":"claude","command":["claude"]}],"layout":{"type":""}}`,
+	} {
+		if _, err := ParseProjectConfig([]byte(raw)); err == nil {
+			t.Fatalf("explicit empty default accepted: %s", raw)
+		}
+	}
+}
+
 func TestLocalConfigRejectsAuthorityFields(t *testing.T) {
 	for _, field := range []string{"agents", "default_session", "argv", "env", "cwd", "bypass_args", "root"} {
 		raw := `{"schema":1,"launcher_preference":["commands"],"` + field + `":"forged"}`

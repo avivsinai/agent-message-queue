@@ -13,6 +13,7 @@ import (
 const (
 	ProjectConfigSchema = 1
 	LocalConfigSchema   = 1
+	DefaultSessionName  = "collab"
 	LayoutColumns       = "columns"
 	LauncherCMux        = "cmux"
 	LauncherGhostty     = "ghostty"
@@ -63,6 +64,28 @@ func ParseProjectConfig(data []byte) (ProjectConfig, error) {
 	var cfg ProjectConfig
 	if err := decodeStrictJSON(data, &cfg); err != nil {
 		return ProjectConfig{}, fmt.Errorf("decode launch config: %w", err)
+	}
+	var fields struct {
+		DefaultSession json.RawMessage              `json:"default_session"`
+		Agents         []map[string]json.RawMessage `json:"agents"`
+		Layout         json.RawMessage              `json:"layout"`
+	}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return ProjectConfig{}, fmt.Errorf("inspect launch config fields: %w", err)
+	}
+	if fields.DefaultSession == nil {
+		cfg.DefaultSession = DefaultSessionName
+	}
+	if fields.Layout == nil {
+		cfg.Layout.Type = LayoutColumns
+	}
+	for i, agentFields := range fields.Agents {
+		if _, ok := agentFields["adapter"]; !ok && len(cfg.Agents[i].Command) > 0 {
+			cfg.Agents[i].Adapter = cfg.Agents[i].Command[0]
+		}
+		if _, ok := agentFields["resume_policy"]; !ok {
+			cfg.Agents[i].ResumePolicy = ResumeEnabled
+		}
 	}
 	if err := cfg.Validate(); err != nil {
 		return ProjectConfig{}, err
