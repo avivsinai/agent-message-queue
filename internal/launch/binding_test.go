@@ -41,7 +41,8 @@ func TestBindingAtomicRoundTripAndMode(t *testing.T) {
 		t.Fatalf("BindingPath = %s, want core-owned %s", got, wantPath)
 	}
 	record := validBinding()
-	if err := WriteBinding(root, record); err != nil {
+	lease := mustAcquireLease(t, root)
+	if err := WriteBinding(root, lease, record); err != nil {
 		t.Fatal(err)
 	}
 	got, err := LoadBinding(root)
@@ -60,15 +61,24 @@ func TestBindingAtomicRoundTripAndMode(t *testing.T) {
 	}
 
 	record.LaunchNonce = "nonce-two"
-	if err := WriteBinding(root, record); err != nil {
+	if err := WriteBinding(root, lease, record); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(filepath.Dir(BindingPath(dir)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != bindingFilename {
-		t.Fatalf("atomic replace left unexpected entries: %v", entries)
+	foundBinding := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") && strings.Contains(entry.Name(), "tmp-") {
+			t.Fatalf("atomic replace left tmp file: %v", entries)
+		}
+		if entry.Name() == bindingFilename {
+			foundBinding = true
+		}
+	}
+	if !foundBinding {
+		t.Fatalf("binding.json missing after replace: %v", entries)
 	}
 }
 

@@ -73,9 +73,11 @@ func (record BindingRecord) Validate() error {
 	return nil
 }
 
-func WriteBinding(root *fsq.DeliveryRoot, record BindingRecord) error {
-	if root == nil {
-		return fmt.Errorf("missing pinned session root")
+// WriteBinding replaces the session binding. A live *Lease is required;
+// there is no lease-free write path.
+func WriteBinding(root *fsq.DeliveryRoot, lease *Lease, record BindingRecord) error {
+	if err := lease.authorizeWrite(root); err != nil {
+		return err
 	}
 	if err := record.Validate(); err != nil {
 		return err

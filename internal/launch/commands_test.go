@@ -95,7 +95,8 @@ func TestCommandsCreateCloseNeverInventSuccess(t *testing.T) {
 func TestCommandsInspectUnknownDoesNotMutate(t *testing.T) {
 	_, root := openTestRoot(t)
 	record := validBinding()
-	if err := WriteBinding(root, record); err != nil {
+	lease := mustAcquireLease(t, root)
+	if err := WriteBinding(root, lease, record); err != nil {
 		t.Fatal(err)
 	}
 	got, err := Commands{}.Inspect(InspectRequest{Root: root, Binding: record})

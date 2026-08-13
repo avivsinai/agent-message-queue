@@ -1,6 +1,7 @@
 package fsq
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -502,6 +503,39 @@ func (r *DeliveryRoot) Remove(name string) error {
 		return err
 	}
 	return r.root.Remove(name)
+}
+
+// OpenLockFile opens or creates a root-relative file for advisory locking.
+// The file is opened O_CREATE on its stable name and is never replaced, so
+// flock serializes on one inode. Callers must close the returned file.
+func (r *DeliveryRoot) OpenLockFile(dir, filename string, perm os.FileMode) (*os.File, error) {
+	if err := r.VerifyBase(); err != nil {
+		return nil, err
+	}
+	if err := r.root.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	name := filepath.Join(dir, filename)
+	file, err := r.root.OpenFile(name, os.O_CREATE|os.O_RDWR, perm)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := r.root.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+		file, err = r.root.OpenFile(name, os.O_CREATE|os.O_RDWR, perm)
+	}
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, fmt.Errorf("lock file %s is not a regular file", r.displayPath(name))
+	}
+	return file, nil
 }
 
 // SyncDir syncs a root-relative directory through the pinned capability.
