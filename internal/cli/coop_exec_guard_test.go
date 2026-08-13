@@ -168,6 +168,39 @@ func TestCoopExecInvalidSessionPrecedesMissingBinary(t *testing.T) {
 	}
 }
 
+// Selector-free exec with a missing binary must not auto-init anything: no
+// .amqrc, no queue tree. This is the new-contract twin of the old fixture
+// that asserted auto-init ran before binary resolution.
+func TestCoopExecSelectorFreeMissingBinaryPerformsZeroWrites(t *testing.T) {
+	clearCoopSessionPinForTest(t)
+	setOptionalEnv(t, envRoot, "", false)
+	setOptionalEnv(t, envGlobalRoot, "", false)
+	t.Setenv("HOME", t.TempDir())
+	projectDir := t.TempDir()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+		resetAmqrcCache()
+	})
+	resetAmqrcCache()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	err = runCoopExec([]string{"--no-gitignore", "--no-wake", "-y", "definitely-missing-agent-binary-xyz"})
+	if err == nil || !strings.Contains(err.Error(), "command not found") {
+		t.Fatalf("error = %v, want command-not-found", err)
+	}
+	for _, artifact := range []string{".amqrc", defaultCoopRoot} {
+		if _, statErr := os.Lstat(filepath.Join(projectDir, artifact)); !os.IsNotExist(statErr) {
+			t.Fatalf("%s created despite missing binary: %v", artifact, statErr)
+		}
+	}
+}
+
 // The alias-swap boundary: replacing the lexical root between classification
 // and provisioning must fail closed with zero writes to the impostor.
 func TestCoopExecAliasSwapBetweenClassifyAndProvisionFailsClosed(t *testing.T) {
