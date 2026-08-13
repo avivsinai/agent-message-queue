@@ -22,6 +22,10 @@ func (adapter *ClaudeAdapter) CommittedEnvKeys() []string {
 	return committedEnvKeys(claudeEnvRules())
 }
 
+func (adapter *ClaudeAdapter) ValidateCommittedConfig(request CommittedConfigRequest) error {
+	return validateCommittedConfig(request, claudeEnvRules(), claudeArgRules())
+}
+
 func (adapter *ClaudeAdapter) Capabilities(ctx context.Context) AdapterCapabilities {
 	result := AdapterCapabilities{Provider: ClaudeProvider, Mode: adapter.Mode()}
 	executable, err := adapter.probe.LookPath(adapter.executable)

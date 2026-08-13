@@ -297,3 +297,44 @@ func TestValidateAdapterCapabilitiesRejectsModeMisdeclaration(t *testing.T) {
 		}
 	}
 }
+
+func TestCommittedConfigValidationDoesNotRequireInstalledExecutable(t *testing.T) {
+	project := t.TempDir()
+	adapter := NewClaudeAdapter("definitely-not-installed-claude")
+	if err := ValidateCommittedConfig(adapter, CommittedConfigRequest{
+		ProjectRoot: project,
+		Args:        []string{"--no-chrome"},
+		EnvOverlay:  map[string]string{"TERM": "xterm-256color"},
+	}); err != nil {
+		t.Fatalf("safe committed config: %v", err)
+	}
+	for _, test := range []struct {
+		name    string
+		request CommittedConfigRequest
+		want    string
+	}{
+		{
+			name: "loader environment",
+			request: CommittedConfigRequest{ProjectRoot: project,
+				EnvOverlay: map[string]string{"NODE_OPTIONS": "--require ./evil.js"}},
+			want: "NODE_OPTIONS",
+		},
+		{
+			name:    "wrapper argv",
+			request: CommittedConfigRequest{ProjectRoot: project, Args: []string{"bash", "./agent-wrapper"}},
+			want:    "bash",
+		},
+		{
+			name:    "cwd escape",
+			request: CommittedConfigRequest{ProjectRoot: project, Cwd: filepath.Dir(project)},
+			want:    "inside the project",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateCommittedConfig(adapter, test.request)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
