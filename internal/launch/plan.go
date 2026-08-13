@@ -140,6 +140,11 @@ func (a AgentPlan) validate() error {
 	return nil
 }
 
+// Validate checks one backend-ready agent plan independently of its parent.
+func (a AgentPlan) Validate() error {
+	return a.validate()
+}
+
 type canonicalArgument struct {
 	Value   string         `json:"value,omitempty"`
 	Dynamic DynamicArgKind `json:"dynamic,omitempty"`
