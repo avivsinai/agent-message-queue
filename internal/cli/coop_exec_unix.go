@@ -215,6 +215,15 @@ func runCoopExec(args []string) error {
 		}
 	}
 
+	// Resolve the command binary after every pure flag/name validation but
+	// before the first provisioning mutation: a typo'd command must fail
+	// without minting roots, sessions, or mailboxes, while usage errors keep
+	// their established precedence over command-not-found.
+	binaryPath, err := exec.LookPath(cmdName)
+	if err != nil {
+		return fmt.Errorf("command not found: %s", cmdName)
+	}
+
 	// Explicit named sessions use the same direct-child creation boundary as
 	// coop init/default exec. In particular, never let MkdirAll traverse a
 	// pre-existing session symlink.
@@ -325,17 +334,15 @@ func runCoopExec(args []string) error {
 		return fmt.Errorf("resolve absolute session root: %w", err)
 	}
 
-	// Ensure agent mailbox exists.
+	// Ensure the agent mailbox exists — but only inside a tree that is
+	// provably a queue. A pre-existing directory is not a provisioning
+	// target just because it exists (dirExists said nothing about what it
+	// is), so classify the layout through a pinned capability first and keep
+	// that same capability for the writes.
 	if !sessionProvisioned {
-		if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
-			return fmt.Errorf("failed to ensure mailbox for %s: %w", agentHandle, err)
+		if err := provisionSelfMailboxInExistingRoot(root, agentHandle); err != nil {
+			return err
 		}
-	}
-
-	// Resolve command binary.
-	binaryPath, err := exec.LookPath(cmdName)
-	if err != nil {
-		return fmt.Errorf("command not found: %s", cmdName)
 	}
 	if !*noWakeFlag {
 		if err := prepareCoopWakeLock(
@@ -604,6 +611,53 @@ func runCoopExec(args []string) error {
 		execErr = fmt.Errorf("exec returned without replacing process")
 	}
 	return cleanupAfterError(execErr)
+}
+
+// coopProvisionAfterClassifyHook runs between layout classification and the
+// provisioning writes. Test-only seam for the alias-swap boundary proof.
+var coopProvisionAfterClassifyHook func()
+
+// provisionSelfMailboxInExistingRoot provisions one agent mailbox inside a
+// pre-existing root, refusing trees that are not queues. The pinned
+// capability opened for classification is retained through the writes, so the
+// lexical root cannot be aliased between validation and provisioning.
+func provisionSelfMailboxInExistingRoot(root, agentHandle string) error {
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		return fmt.Errorf("inspect root %q: %w", root, err)
+	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		return fmt.Errorf("open root %q: %w", root, err)
+	}
+	defer func() { _ = deliveryRoot.Close() }()
+
+	state, err := deliveryRoot.ClassifyLayout()
+	if err != nil {
+		return fmt.Errorf("refusing to provision in %q: %w", root, err)
+	}
+	if coopProvisionAfterClassifyHook != nil {
+		coopProvisionAfterClassifyHook()
+	}
+	switch state {
+	case fsq.LayoutForeign:
+		return NotFoundError(
+			"root %q exists but is not an initialized AMQ queue root (no agents/ directory); "+
+				"point --root at an existing queue, or create one with: amq init --root %s --agents %s",
+			root, shellQuoteArg(root), shellQuoteArg(agentHandle),
+		)
+	case fsq.LayoutEmpty, fsq.LayoutInitialized:
+		// Empty pre-made directories provision the same full tree a missing
+		// root gets today; initialized roots idempotently gain any missing
+		// top-level directories so a partial tree converges to a valid one.
+		if err := deliveryRoot.EnsureRootDirs(); err != nil {
+			return fmt.Errorf("failed to ensure root layout at %q: %w", root, err)
+		}
+	}
+	if err := deliveryRoot.EnsureAgentDirs(agentHandle); err != nil {
+		return fmt.Errorf("failed to ensure mailbox for %s: %w", agentHandle, err)
+	}
+	return nil
 }
 
 func exactCoopWakeHelperClaim(

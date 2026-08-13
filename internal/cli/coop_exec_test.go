@@ -1379,7 +1379,7 @@ func TestCoopExecAutoInitNoGitignoreLeavesInheritedCoopTreeUnchanged(t *testing.
 	}
 	fixtureAgent := fsq.AgentBase(
 		filepath.Join(projectDir, defaultCoopRoot, defaultSessionName),
-		"definitely-missing-amq-test-binary",
+		"fixtureagent",
 	)
 	if info, err := os.Stat(fixtureAgent); err != nil || !info.IsDir() {
 		t.Fatalf("isolated fixture mailbox missing: info=%v err=%v", info, err)
@@ -1410,12 +1410,13 @@ func runCoopExecAutoInitNoGitignoreFixture(t *testing.T) string {
 		t.Fatalf("write .gitignore: %v", err)
 	}
 
-	err = runCoopExec([]string{"--no-gitignore", "--no-wake", "-y", "definitely-missing-amq-test-binary"})
-	if err == nil {
-		t.Fatal("expected command lookup error")
-	}
-	if !containsStr(err.Error(), "command not found") {
-		t.Fatalf("unexpected error: %v", err)
+	// Auto-init requires a resolvable binary: the provisioning guard resolves
+	// the command before any filesystem effect, so the fixture runs a real
+	// binary with the exec stubbed to a sentinel.
+	sentinel := stubCoopExecSentinel(t)
+	err = runCoopExec([]string{"--no-gitignore", "--no-wake", "-y", "--me", "fixtureagent", "sh"})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("coop exec error = %v, want exec sentinel", err)
 	}
 	if _, err := os.Stat(filepath.Join(projectDir, ".amqrc")); err != nil {
 		t.Fatalf(".amqrc should be created by coop exec auto-init: %v", err)
