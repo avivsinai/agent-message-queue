@@ -1,0 +1,142 @@
+package launch
+
+import (
+	"encoding/json"
+	"fmt"
+	"slices"
+	"strings"
+)
+
+const (
+	CommandsBackendName       = "commands"
+	PlanOnlyInspectEvidence   = "plan_only backend has no query surface"
+	PlanOnlyCloseReason       = "plan_only backend owns no terminal resource"
+	commandsProfileVersion    = 1
+	commandsProfilePlatform   = "any"
+	commandsProfileVersionRng = "*"
+)
+
+// Commands is the plan_only backend. It emits exact coop-exec invocations
+// from a prebuilt plan and never owns a terminal resource.
+type Commands struct{}
+
+func CommandsProfile() Profile {
+	return Profile{
+		Backend:      CommandsBackendName,
+		Platform:     commandsProfilePlatform,
+		VersionRange: commandsProfileVersionRng,
+		Version:      commandsProfileVersion,
+		Capabilities: []Capability{CapPlanOnly},
+	}
+}
+
+func (Commands) Detect() DetectResult {
+	profile := CommandsProfile()
+	return DetectResult{
+		Available: true,
+		Profile:   profile,
+		Effective: slices.Clone(profile.Capabilities),
+	}
+}
+
+func (Commands) Create(req CreateRequest) (CreateResult, error) {
+	if strings.TrimSpace(req.Session) == "" {
+		return CreateResult{}, fmt.Errorf("session is required")
+	}
+	if err := req.Plan.Validate(); err != nil {
+		return CreateResult{}, err
+	}
+	amq := req.AMQPath
+	if strings.TrimSpace(amq) == "" {
+		amq = "amq"
+	}
+	planJSON, err := json.Marshal(req.Plan)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	commands := make([]EmittedCommand, 0, len(req.Plan.Agents))
+	for _, agent := range req.Plan.Agents {
+		argv := coopExecArgv(amq, req.Session, agent.Handle, agent.Argv)
+		env := cloneEnv(agent.EnvOverlay)
+		commands = append(commands, EmittedCommand{
+			Handle:      agent.Handle,
+			Argv:        argv,
+			Cwd:         agent.Cwd,
+			Env:         env,
+			LaunchNonce: agent.LaunchNonce,
+			Line:        commandLine(agent.Cwd, env, argv),
+		})
+	}
+	return CreateResult{
+		Outcome:        OutcomeCommandsEmitted,
+		ActionRequired: true,
+		Profile:        CommandsProfile().Identity(),
+		Commands:       commands,
+		Plan:           planJSON,
+	}, nil
+}
+
+func (Commands) Inspect(InspectRequest) (InspectResult, error) {
+	return InspectResult{
+		Status:         InspectUnknown,
+		Evidence:       PlanOnlyInspectEvidence,
+		ActionRequired: true,
+	}, nil
+}
+
+func (Commands) Close(CloseRequest) (CloseResult, error) {
+	return CloseResult{Outcome: OutcomeUnsupported, Reason: PlanOnlyCloseReason}, nil
+}
+
+// coopExecArgv is amq coop exec [options] <command> [-- <command-flags>].
+// The command positional is required; flags after -- are agent args. A lone
+// executable omits --.
+func coopExecArgv(amq, session, handle string, planArgv []string) []string {
+	argv := []string{amq, "coop", "exec", "--session", session, "--me", handle, planArgv[0]}
+	if len(planArgv) > 1 {
+		argv = append(argv, "--")
+		argv = append(argv, planArgv[1:]...)
+	}
+	return argv
+}
+
+func commandLine(cwd string, env map[string]string, argv []string) string {
+	parts := make([]string, 0, 4+len(env)+len(argv))
+	if cwd != "" {
+		parts = append(parts, "cd", shellQuote(cwd), "&&")
+	}
+	if len(env) != 0 {
+		parts = append(parts, "env")
+		keys := make([]string, 0, len(env))
+		for k := range env {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		for _, k := range keys {
+			parts = append(parts, k+"="+shellQuote(env[k]))
+		}
+	}
+	for _, arg := range argv {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.IndexFunc(value, func(r rune) bool {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return false
+		case strings.ContainsRune("@%_+=:,./-", r):
+			return false
+		default:
+			return true
+		}
+	}) == -1 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
