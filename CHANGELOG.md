@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.60.5](https://github.com/avivsinai/agent-message-queue/compare/v0.60.4...v0.60.5) (2026-08-13)
+
+
+### Bug Fixes
+
+* **coop:** refuse provisioning into non-queue roots and resolve the binary first ([#491](https://github.com/avivsinai/agent-message-queue/issues/491)) ([2b69010](https://github.com/avivsinai/agent-message-queue/commit/2b69010efcd7311f353818b4ab027d5bb837261d))
+
 ## [0.60.4](https://github.com/avivsinai/agent-message-queue/compare/v0.60.3...v0.60.4) (2026-08-12)
 
 
