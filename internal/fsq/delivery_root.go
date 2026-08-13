@@ -272,6 +272,47 @@ func (r *DeliveryRoot) EnsureAgentDirs(agent string) error {
 	return nil
 }
 
+// LayoutState classifies a pinned root's top-level queue layout.
+type LayoutState int
+
+const (
+	// LayoutInitialized: agents/ exists as a real directory — the minimum
+	// evidence that this tree is (or is becoming) an AMQ queue.
+	LayoutInitialized LayoutState = iota
+	// LayoutEmpty: the root directory has no entries at all.
+	LayoutEmpty
+	// LayoutForeign: the root has entries but no agents/ directory — it is
+	// some other directory, not a queue.
+	LayoutForeign
+)
+
+// ClassifyLayout inspects the pinned root without writes and reports whether
+// it is an initialized queue, an empty directory, or a foreign tree. An
+// agents/ entry that is not a real directory (symlink, file) is a hostile
+// shape and fails closed with an error.
+func (r *DeliveryRoot) ClassifyLayout() (LayoutState, error) {
+	entries, err := r.ReadDir(".")
+	if err != nil {
+		return LayoutForeign, err
+	}
+	if len(entries) == 0 {
+		return LayoutEmpty, nil
+	}
+	for _, entry := range entries {
+		if entry.Name() != "agents" {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
+			return LayoutForeign, fmt.Errorf(
+				"agents entry at %s is not a real directory; refusing to treat this tree as a queue root",
+				r.displayPath("agents"),
+			)
+		}
+		return LayoutInitialized, nil
+	}
+	return LayoutForeign, nil
+}
+
 // VerifyBase reports a lexical alias change after authorization. The open root
 // remains the security boundary even if an alias changes immediately after
 // this check; this verification makes a detected swap fail closed instead of
