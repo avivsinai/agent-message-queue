@@ -190,16 +190,8 @@ func runCoopInitInternal(args []string, printNextSteps bool) (returnErr error) {
 
 	// Keep the shared config at the base root, but provision the roster in the
 	// default session that coop exec actually selects.
-	if err := fsq.EnsureRootDirs(queueRoot); err != nil {
-		return fmt.Errorf("failed to create root directories: %w", err)
-	}
-	for _, agent := range agents {
-		if err := fsq.EnsureAgentDirs(queueRoot, agent); err != nil {
-			return fmt.Errorf("failed to create compatibility base mailbox for %s: %w", agent, err)
-		}
-	}
-	if _, err := provisionCoopSession(queueRoot, defaultSessionName, agents, "", ""); err != nil {
-		return fmt.Errorf("failed to create default session root: %w", err)
+	if err := provisionCoopBaseAndSession(queueRoot, defaultSessionName, agents); err != nil {
+		return err
 	}
 
 	configWritten := false
@@ -308,6 +300,24 @@ func runCoopInitInternal(args []string, printNextSteps bool) (returnErr error) {
 // the session through its ambient lexical path.
 func provisionCoopSession(base, session string, agents []string, execAgent, execCommand string) (string, error) {
 	return provisionCoopSessionChild(base, session, agents, execAgent, execCommand, false)
+}
+
+// provisionCoopBaseAndSession is the shared provisioning primitive used by
+// coop init plumbing and setup porcelain. It retains the established base
+// compatibility mailboxes and the pinned named-session creation path.
+func provisionCoopBaseAndSession(base, session string, agents []string) error {
+	if err := fsq.EnsureRootDirs(base); err != nil {
+		return fmt.Errorf("failed to create root directories: %w", err)
+	}
+	for _, agent := range agents {
+		if err := fsq.EnsureAgentDirs(base, agent); err != nil {
+			return fmt.Errorf("failed to create compatibility base mailbox for %s: %w", agent, err)
+		}
+	}
+	if _, err := provisionCoopSession(base, session, agents, "", ""); err != nil {
+		return fmt.Errorf("failed to create default session root: %w", err)
+	}
+	return nil
 }
 
 // provisionNewNamedSession is session create: exclusive child creation so a

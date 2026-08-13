@@ -11,6 +11,7 @@ import (
 func TestCommandNames(t *testing.T) {
 	want := []string{
 		"init",
+		"setup",
 		"send",
 		"list",
 		"read",

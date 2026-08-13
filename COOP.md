@@ -45,6 +45,17 @@ For swarm command reference, see [CLAUDE.md](CLAUDE.md).
    for the authoritative list. See [INSTALL.md](INSTALL.md) for the manual
    `~/.grok/skills` copy example.
 
+### Project Setup
+
+Run `amq setup` once per project. It probes supported agent CLIs and local
+launchers, lets you select any non-empty roster and the default session, then
+previews every change before it writes. The committed `.amq/launch.json` owns
+the roster, session default, resume policy, and layout intent. The ignored
+`.amq/launch.local.json` contains launcher preferences only. For automation,
+use `amq setup -y` after the caller accepts the recomputed preview.
+
+`amq coop init` remains the non-interactive provisioning primitive.
+
 ### Running Co-op Mode
 
 **Terminal 1 - Claude Code:**

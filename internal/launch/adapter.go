@@ -61,6 +61,31 @@ type ConversationIdentity struct {
 	ID       string `json:"id"`
 }
 
+// CommittedConfigRequest is the static, repository-controlled subset of an
+// adapter plan. Validation does not require the provider executable to be
+// installed, so setup can reject unsafe committed carriers on any machine.
+type CommittedConfigRequest struct {
+	ProjectRoot string
+	Cwd         string
+	Args        []string
+	EnvOverlay  map[string]string
+}
+
+// CommittedConfigValidator is implemented by adapters that can own committed
+// argv, environment, and cwd validation independently from live capability
+// probing and per-launch identity generation.
+type CommittedConfigValidator interface {
+	ValidateCommittedConfig(CommittedConfigRequest) error
+}
+
+func ValidateCommittedConfig(adapter HarnessAdapter, request CommittedConfigRequest) error {
+	validator, ok := adapter.(CommittedConfigValidator)
+	if !ok {
+		return fmt.Errorf("adapter %s does not validate committed configuration", adapter.Name())
+	}
+	return validator.ValidateCommittedConfig(request)
+}
+
 type commandProbe interface {
 	LookPath(string) (string, error)
 	Output(context.Context, string, ...string) ([]byte, error)
@@ -128,6 +153,22 @@ func validatePlanRequest(request PlanRequest, executable, provider string, envRu
 		return "", err
 	}
 	return resolvedExecutable, nil
+}
+
+func validateCommittedConfig(request CommittedConfigRequest, envRules map[string]valueRule, argRules map[string]argumentRule) error {
+	if err := validateCommittedArgs(request.Args, argRules); err != nil {
+		return err
+	}
+	if err := validateCommittedEnv(request.EnvOverlay, envRules); err != nil {
+		return err
+	}
+	cwd := request.Cwd
+	if strings.TrimSpace(cwd) == "" {
+		cwd = request.ProjectRoot
+	} else if !filepath.IsAbs(cwd) {
+		cwd = filepath.Join(request.ProjectRoot, cwd)
+	}
+	return validateWorkingDirectory(cwd, request.ProjectRoot)
 }
 
 func cloneEnv(overlay map[string]string) map[string]string {

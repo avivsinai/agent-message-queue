@@ -25,6 +25,7 @@ var commands []CommandInfo
 func init() {
 	commands = []CommandInfo{
 		{Name: "init", Summary: "Initialize the queue root and agent mailboxes", Handler: runInit},
+		{Name: "setup", Summary: "Configure project launch and session defaults", Handler: runSetup},
 		{Name: "send", Summary: "Send a message", Handler: runSend},
 		{Name: "list", Summary: "List inbox messages", Handler: runList},
 		{Name: "read", Summary: "Read a message by id", Handler: runRead},

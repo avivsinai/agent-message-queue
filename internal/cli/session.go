@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 func runSession(args []string) error {
@@ -234,29 +234,17 @@ func loadLaunchRosterHandles() ([]string, bool, error) {
 		}
 		return nil, false, err
 	}
-	var parsed struct {
-		Agents []struct {
-			Handle string `json:"handle"`
-		} `json:"agents"`
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
+	parsed, err := launch.ParseProjectConfig(data)
+	if err != nil {
 		return nil, false, fmt.Errorf("parse .amq/launch.json: %w", err)
 	}
 	handles := make([]string, 0, len(parsed.Agents))
-	seen := map[string]bool{}
 	for _, agent := range parsed.Agents {
 		handle := strings.TrimSpace(agent.Handle)
-		if handle == "" {
-			return nil, false, fmt.Errorf("launch.json roster handle is empty")
-		}
 		normalized, err := normalizeHandle(handle)
 		if err != nil {
 			return nil, false, fmt.Errorf("launch.json roster handle %q: %w", handle, err)
 		}
-		if seen[normalized] {
-			continue
-		}
-		seen[normalized] = true
 		handles = append(handles, normalized)
 	}
 	return handles, true, nil

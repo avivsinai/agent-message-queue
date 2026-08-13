@@ -109,10 +109,14 @@ drain contract.
 ### 1. Initialize Project
 
 ```bash
-amq coop init
+amq setup
 ```
 
-Creates `.amqrc`, mailboxes for `claude`, `codex`, and the reserved `user` operator handle, and updates `.gitignore`.
+Detects supported agent CLIs and launcher preferences, previews the project
+declaration, then creates `.amqrc`, `.amq/launch.json`, local preferences,
+the default session, and roster mailboxes. Use `amq setup -y` only after an
+automation caller has accepted that preview. `amq coop init` remains the
+scriptable low-level provisioning command.
 
 ### 2. Start Agent Sessions
 
@@ -533,7 +537,7 @@ Common command groups:
 | Area | Commands |
 |------|----------|
 | Core messaging | `init`, `send`, `list`, `read`, `drain`, `reply`, `thread`, `trace`, `watch`, `monitor`, `receipts` |
-| Collaboration | `coop init`, `coop exec`, `session create`, `session list`, `swarm list`, `swarm join`, `swarm tasks`, `swarm bridge` |
+| Collaboration | `setup`, `coop init`, `coop exec`, `session create`, `session list`, `swarm list`, `swarm join`, `swarm tasks`, `swarm bridge` |
 | Integrations | `integration symphony init`, `integration symphony emit`, `integration kanban bridge` |
 | Operations | `presence set`, `presence list`, `route explain`, `who`, `doctor`, `doctor --ops`, `wake check`, `wake repair`, `wake recover-owner`, `wake retire`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |
 

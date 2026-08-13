@@ -211,6 +211,7 @@ amq wake repair --me <agent> [--root <path>] [--json]
 amq wake retire --me <agent> --inject-via <absolute-executable> [--inject-arg <arg>...] [--root <path>] [--json]
 amq wake recover-owner --me <agent> [--root <path>] [--strict] [--json]
 amq upgrade
+amq setup [--root <path>] [--agents <a,b,c>] [--default-session <name>] [--launcher-preference <a,b,c>] [--layout columns] [--no-gitignore] [-y] [--json]
 amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--export] [--session-name] [--json]
 amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>] [--grok-alias <name>]
 amq coop init [--root <path>] [--agents <a,b,c>] [--no-gitignore] [--force] [--json]

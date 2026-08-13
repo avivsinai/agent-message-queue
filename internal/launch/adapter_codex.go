@@ -26,6 +26,10 @@ func (adapter *CodexAdapter) CommittedEnvKeys() []string {
 	return committedEnvKeys(codexEnvRules())
 }
 
+func (adapter *CodexAdapter) ValidateCommittedConfig(request CommittedConfigRequest) error {
+	return validateCommittedConfig(request, codexEnvRules(), codexArgRules())
+}
+
 func (adapter *CodexAdapter) Capabilities(ctx context.Context) AdapterCapabilities {
 	result := AdapterCapabilities{Provider: CodexProvider, Mode: adapter.Mode()}
 	executable, err := adapter.probe.LookPath(adapter.executable)
