@@ -261,11 +261,11 @@ func TestPrintGroupUsageSession(t *testing.T) {
 	if !strings.Contains(output, "list    List sessions under the base root") {
 		t.Fatalf("printGroupUsage(session) missing list:\n%s", output)
 	}
-	if strings.Contains(output, "resume") {
-		t.Fatalf("printGroupUsage(session) must not advertise resume:\n%s", output)
+	if !strings.Contains(output, "resume  Resume an existing session through launch reconciliation") {
+		t.Fatalf("printGroupUsage(session) missing resume:\n%s", output)
 	}
-	if findChild(findCommand("session"), "resume") != nil {
-		t.Fatal("session must not register a resume subcommand")
+	if findChild(findCommand("session"), "resume") == nil {
+		t.Fatal("session must register a resume subcommand")
 	}
 }
 
