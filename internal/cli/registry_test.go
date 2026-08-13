@@ -216,6 +216,12 @@ func TestPrintUsageRegistry(t *testing.T) {
 	if !strings.Contains(output, "swarm        Claude Code Agent Teams integration") {
 		t.Fatalf("printUsageRegistry output missing swarm command:\n%s", output)
 	}
+	if !strings.Contains(output, "Exit codes:") {
+		t.Fatalf("printUsageRegistry output missing Exit codes section:\n%s", output)
+	}
+	if !strings.Contains(output, "6  Action required") {
+		t.Fatalf("printUsageRegistry output missing exit code 6:\n%s", output)
+	}
 }
 
 func TestPrintGroupUsage(t *testing.T) {

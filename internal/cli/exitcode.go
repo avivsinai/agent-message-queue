@@ -24,6 +24,11 @@ const (
 	// ExitContextMismatch indicates a valid command was blocked because its
 	// resolved mailbox root conflicts with the pinned AMQ session context.
 	ExitContextMismatch = 5
+
+	// ExitActionRequired indicates the command cannot proceed without an
+	// operator action (stale conversation token, Inspect unknown, untrusted
+	// config digest, refused committed-command shape, blocked auto-rebind).
+	ExitActionRequired = 6
 )
 
 // SessionContextError identifies an unsafe or incoherent mailbox context.
@@ -102,5 +107,78 @@ func ContextMismatchError(format string, args ...any) error {
 	return &ExitCodeError{
 		Code: ExitContextMismatch,
 		Err:  &SessionContextError{Message: fmt.Sprintf(format, args...)},
+	}
+}
+
+// ActionRequiredError creates an error with ExitActionRequired code.
+func ActionRequiredError(format string, args ...any) error {
+	return &ExitCodeError{
+		Code: ExitActionRequired,
+		Err:  fmt.Errorf(format, args...),
+	}
+}
+
+// AgentDisposition classifies a per-agent launch/resume outcome.
+type AgentDisposition string
+
+const (
+	// AgentDispositionDisabled is an expected skip; it contributes 0.
+	AgentDispositionDisabled AgentDisposition = "disabled"
+	// AgentDispositionUnsupported is an expected capability skip; it contributes 0.
+	AgentDispositionUnsupported AgentDisposition = "unsupported"
+	// AgentDispositionFresh is a policy-consistent fresh start; it contributes 0.
+	AgentDispositionFresh AgentDisposition = "fresh"
+)
+
+// AgentOutcome is one agent's contribution to an aggregate process exit code.
+type AgentOutcome struct {
+	Code        int
+	Disposition AgentDisposition
+}
+
+// AggregateExitCode implements the §11 launch/resume exit contract.
+// A nonzero wholeCommand is a pre-launch failure and is returned as-is.
+// Once per-agent work begins (wholeCommand == 0), the aggregate is the
+// highest-precedence per-agent outcome: 6 > 4 > 1 > 0.
+// Expected dispositions (disabled, unsupported, policy-consistent fresh)
+// contribute 0 even when Code is set to a failure. A nonzero per-agent
+// code outside {6, 4, 1, 0} fails closed as ExitError.
+func AggregateExitCode(wholeCommand int, agents []AgentOutcome) int {
+	if wholeCommand != ExitSuccess {
+		return wholeCommand
+	}
+	best, bestRank := ExitSuccess, 0
+	for _, agent := range agents {
+		code := agent.contribution()
+		if rank := agentExitRank(code); rank > bestRank {
+			best, bestRank = code, rank
+		}
+	}
+	return best
+}
+
+func (o AgentOutcome) contribution() int {
+	switch o.Disposition {
+	case AgentDispositionDisabled, AgentDispositionUnsupported, AgentDispositionFresh:
+		return ExitSuccess
+	}
+	switch o.Code {
+	case ExitSuccess, ExitError, ExitTimeout, ExitActionRequired:
+		return o.Code
+	default:
+		return ExitError
+	}
+}
+
+func agentExitRank(code int) int {
+	switch code {
+	case ExitActionRequired:
+		return 3
+	case ExitTimeout:
+		return 2
+	case ExitError:
+		return 1
+	default:
+		return 0
 	}
 }
