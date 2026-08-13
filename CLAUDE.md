@@ -102,10 +102,10 @@ Layer names must use lowercase ASCII letters, digits, hyphen, underscore, and do
 
 **Environment Variables**: `AM_ROOT` (queue root, e.g., `.agent-mail/collab`), `AM_ME` (agent handle), `AM_BASE_ROOT` (authorized parent for named-session routing, or the exact root for a sessionless pin), `AM_SESSION` (independent session identity set by `coop exec` and every shell-mode `amq env`, empty for sessionless roots), `AMQ_GLOBAL_ROOT` (global root fallback for orchestrator-spawned agents), `AMQ_NO_UPDATE_CHECK` (disable update check), `AMQ_WAKE_NO_SELF_UPGRADE` (disable automatic wake self-upgrade with `1`, `true`, `yes`, or `on`)
 
-**Session Layout**: The default base root directory is `.agent-mail/`. `.amqrc` can configure that root explicitly, but the default `.agent-mail/<session>` layout is also recognized without `.amqrc`. `coop exec` defaults to `--session collab`, so agents get session isolation without explicit flags. Use `--session` to override:
+**Session Layout**: The default base root directory is `.agent-mail/`. `.amqrc` can configure that root explicitly, but the default `.agent-mail/<session>` layout is also recognized without `.amqrc`. Selector-free `coop exec` uses the declared `default_session` from `.amq/launch.json`, or `collab` when none is declared. Use `--session` to override:
 ```
 .agent-mail/              ← default base root (configurable in `.amqrc`)
-.agent-mail/collab/       ← default session (coop exec without --session or --root)
+.agent-mail/collab/       ← default session (coop exec without --session or --root, unless launch.json declares another)
 .agent-mail/auth/         ← isolated session (via --session auth)
 .agent-mail/api/          ← isolated session (via --session api)
 ```
@@ -130,9 +130,13 @@ changed; the structured refusal is reported with process exit 0 unless
 That fail-closed rule applies to participating commands. `coop exec` honors root
 precedence before bootstrap; when no eligible root exists, it initializes
 `.agent-mail` at the worktree top, including explicit `--session <name>`.
-`coop init` is the explicit local-bootstrap command and also targets the Git
-top. `coop exec --no-init` keeps the refusal. Bare repositories cannot host
-this implicit bootstrap; use a worktree or `--root`.
+Creating a missing named session or `--root` this way is deprecated and prints
+`warning: creating a missing session or root from coop exec is deprecated; use 'amq session create <name>' or 'amq init --root'. The next major release makes this exit 3.`
+Use `amq session create <name>` or `amq init --root` instead. Zero-config
+`collab` bootstrap in a repo with neither `.amqrc` nor `.amq/launch.json` does
+not warn. `coop init` is the explicit local-bootstrap command and also targets
+the Git top. `coop exec --no-init` keeps the refusal. Bare repositories cannot
+host this implicit bootstrap; use a worktree or `--root`.
 
 Note: `.amqrc` configures the root directory. Agent identity (`me`) is set per-terminal via `--me` or `AM_ME`.
 Auto-detect covers the default `.agent-mail` layout in the current tree. A
@@ -530,7 +534,10 @@ amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Same, with 
 amq coop exec grok  # Caller flags forwarded unchanged, no baked-in bypass
 ```
 
-Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
+Without `--session` or `--root`, `coop exec` uses the declared `default_session`
+from `.amq/launch.json`, or `collab` when none is declared. Creating a missing
+session or root from `coop exec` still works in this release but prints
+`warning: creating a missing session or root from coop exec is deprecated; use 'amq session create <name>' or 'amq init --root'. The next major release makes this exit 3.`
 
 Use `--session` for a different isolated session:
 ```bash

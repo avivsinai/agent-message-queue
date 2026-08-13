@@ -86,7 +86,7 @@ then bootstraps a worktree-local queue at the Git top when no eligible root
 exists; `coop exec --no-init` refuses. `coop init` explicitly targets that local
 Git top. Bare repositories require a worktree or an explicit `--root`.
 
-**Session pitfall**: `coop exec` defaults to `--session collab` (i.e., `.agent-mail/collab`). Outside `coop exec`, the base root is `.agent-mail` (no session suffix). These are different mailbox trees — don't mix them up.
+**Session pitfall**: Selector-free `coop exec` uses the declared `default_session` from `.amq/launch.json`, or `collab` (i.e., `.agent-mail/collab`). Outside `coop exec`, the base root is `.agent-mail` (no session suffix). These are different mailbox trees — don't mix them up.
 
 ### Root Resolution Truth-Table
 
@@ -156,7 +156,7 @@ amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Terminal 2
 amq coop exec grok  # Terminal 3 (optional peer) — caller flags forwarded unchanged, no baked-in bypass
 ```
 
-Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
+Without `--session` or `--root`, `coop exec` uses the declared `default_session` from `.amq/launch.json`, or `collab` when none is declared. Creating a missing session or root from `coop exec` is deprecated and prints `warning: creating a missing session or root from coop exec is deprecated; use 'amq session create <name>' or 'amq init --root'. The next major release makes this exit 3.`
 
 Add `--no-gitignore` when `coop exec` should auto-initialize the project without changing `.gitignore`.
 

@@ -11,7 +11,6 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 func runSession(args []string) error {
@@ -218,25 +217,9 @@ func loadSessionCreateAgents(base string) ([]string, error) {
 }
 
 func loadLaunchRosterHandles() ([]string, bool, error) {
-	// WA5-superseded peek: the authoritative launch.json parser lands with setup.
-	result, err := findAndLoadAmqrc()
-	if errors.Is(err, errAmqrcNotFound) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	path := filepath.Join(result.Dir, ".amq", "launch.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	parsed, err := launch.ParseProjectConfig(data)
-	if err != nil {
-		return nil, false, fmt.Errorf("parse .amq/launch.json: %w", err)
+	parsed, ok, err := loadProjectLaunchConfig()
+	if err != nil || !ok {
+		return nil, ok, err
 	}
 	handles := make([]string, 0, len(parsed.Agents))
 	for _, agent := range parsed.Agents {

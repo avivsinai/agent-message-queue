@@ -74,11 +74,12 @@ func runCoopExec(args []string) error {
 		"starts amq wake in background, then",
 		"replaces itself with the given command via exec.",
 		"",
-		"If neither --session nor --root is given, defaults to --session collab.",
+		"If neither --session nor --root is given, defaults to the declared",
+		"default_session from .amq/launch.json, or collab when none is declared.",
 		"The agent handle is derived from the command basename unless --me is set.",
 		"",
 		"Examples:",
-		"  amq coop exec claude                              # Exec into Claude Code (session=collab)",
+		"  amq coop exec claude                              # Exec into Claude Code (declared session or collab)",
 		"  amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox  # Codex with flags",
 		"  amq coop exec grok                                # Grok CLI, caller flags forwarded as-is",
 		"  amq coop exec --session feature-x claude          # Isolated session",
@@ -145,6 +146,12 @@ func runCoopExec(args []string) error {
 	if err != nil {
 		return fmt.Errorf("cannot derive agent handle from %q: %w (use --me to override)", cmdName, err)
 	}
+
+	rootRequested := flagWasVisited(fs, "root")
+	sessionRequested := *sessionFlag != ""
+	selectorFree := !rootRequested && !sessionRequested
+	defaultSession := defaultSessionName
+	var warnedCreation bool
 
 	// Resolve explicit --session (pure sugar for --root <base>/<session>).
 	// A fresh Git worktree has no base yet; remember that bootstrap is needed
@@ -224,6 +231,17 @@ func runCoopExec(args []string) error {
 		return fmt.Errorf("command not found: %s", cmdName)
 	}
 
+	if selectorFree {
+		defaultSession, err = declaredCoopExecSession()
+		if err != nil {
+			return err
+		}
+	}
+	creationDeprecated, err := hasBootstrapSuppressingDeclaration()
+	if err != nil {
+		return err
+	}
+
 	// Explicit named sessions use the same direct-child creation boundary as
 	// coop init/default exec. In particular, never let MkdirAll traverse a
 	// pre-existing session symlink.
@@ -238,6 +256,9 @@ func runCoopExec(args []string) error {
 			}
 		}
 		requestedRoot := root
+		if !dirExists(requestedRoot) {
+			warnCoopExecCreationDeprecated(&warnedCreation)
+		}
 		root, err = provisionCoopSession(base, *sessionFlag, []string{agentHandle}, agentHandle, cmdName)
 		if err != nil {
 			return fmt.Errorf("failed to create session root %q: %w", requestedRoot, err)
@@ -256,6 +277,9 @@ func runCoopExec(args []string) error {
 
 		if root != "" {
 			// We have a root (from --root, --session, or .amqrc) — create root + agent dirs.
+			if rootRequested {
+				warnCoopExecCreationDeprecated(&warnedCreation)
+			}
 			if err := fsq.EnsureRootDirs(root); err != nil {
 				return fmt.Errorf("failed to create root %q: %w", root, err)
 			}
@@ -306,6 +330,9 @@ func runCoopExec(args []string) error {
 			return fmt.Errorf("bootstrap resolved base %q, but coop init produced %q", bootstrapBase, base)
 		}
 		requestedRoot := filepath.Join(base, *sessionFlag)
+		if !dirExists(requestedRoot) {
+			warnCoopExecCreationDeprecated(&warnedCreation)
+		}
 		root, err = provisionCoopSession(base, *sessionFlag, []string{agentHandle}, agentHandle, cmdName)
 		if err != nil {
 			return fmt.Errorf("failed to create session root %q: %w", requestedRoot, err)
@@ -313,13 +340,17 @@ func runCoopExec(args []string) error {
 		sessionProvisioned = true
 	}
 
-	// Default to --session collab when neither --session nor --root was specified.
-	// This runs after auto-init so .amqrc exists and resolveBaseRoot() works.
-	if *sessionFlag == "" && *rootFlag == "" {
+	// Default to the declared session (or collab) when neither --session nor
+	// --root was specified. This runs after auto-init so .amqrc exists.
+	if selectorFree {
 		base := root // root is the literal .amqrc root (e.g., .agent-mail)
-		root, err = provisionCoopSession(base, defaultSessionName, []string{agentHandle}, agentHandle, cmdName)
+		requestedRoot := filepath.Join(base, defaultSession)
+		if creationDeprecated && !dirExists(requestedRoot) {
+			warnCoopExecCreationDeprecated(&warnedCreation)
+		}
+		root, err = provisionCoopSession(base, defaultSession, []string{agentHandle}, agentHandle, cmdName)
 		if err != nil {
-			return fmt.Errorf("failed to create session root %q: %w", filepath.Join(base, defaultSessionName), err)
+			return fmt.Errorf("failed to create session root %q: %w", requestedRoot, err)
 		}
 		sessionProvisioned = true
 	}
@@ -573,7 +604,11 @@ func runCoopExec(args []string) error {
 
 	// A named/default or session-shaped explicit root pins an identity
 	// independent of AM_ROOT. A custom sessionless --root clears inherited pins.
-	sessionIdentity := coopSessionIdentity(root, *sessionFlag, *rootFlag)
+	requestedSession := *sessionFlag
+	if selectorFree {
+		requestedSession = defaultSession
+	}
+	sessionIdentity := coopSessionIdentity(root, requestedSession, *rootFlag)
 	env := buildCoopExecEnvironment(baseEnv, root, agentHandle, sessionIdentity)
 
 	// Build argv: command name + agent args.
