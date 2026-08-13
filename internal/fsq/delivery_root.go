@@ -34,6 +34,20 @@ type pinnedBatchLease struct {
 	active atomic.Bool
 }
 
+// DirectChildExistsError is returned when CreateDirectChildExclusive finds the
+// name already present.
+type DirectChildExistsError struct {
+	Name string
+}
+
+func (e *DirectChildExistsError) Error() string {
+	return fmt.Sprintf("direct child %q already exists", e.Name)
+}
+
+// beforeCreateDirectChildExclusiveForTest runs after VerifyBase and before
+// Mkdir so tests can inject a racing creator.
+var beforeCreateDirectChildExclusiveForTest func(r *DeliveryRoot, name string)
+
 // SnapshotDeliveryRoot captures the physical directory identity at the
 // authorization boundary. The snapshot is intentionally opaque so callers
 // cannot forge or reinterpret it.
@@ -138,6 +152,42 @@ func (r *DeliveryRoot) OpenOrCreateDirectChild(name string, perm os.FileMode) (*
 		return nil, fmt.Errorf("%q is not a direct directory under delivery root", name)
 	}
 
+	return r.pinDirectChild(name, before)
+}
+
+// CreateDirectChildExclusive creates one direct, non-symlink child directory
+// and fails if the name already exists. Session create uses this so a racing
+// creator cannot silently open an existing session.
+func (r *DeliveryRoot) CreateDirectChildExclusive(name string, perm os.FileMode) (*DeliveryRoot, error) {
+	if r == nil || r.root == nil {
+		return nil, fmt.Errorf("delivery root is closed")
+	}
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return nil, fmt.Errorf("invalid direct child name %q", name)
+	}
+	if err := r.VerifyBase(); err != nil {
+		return nil, err
+	}
+	if beforeCreateDirectChildExclusiveForTest != nil {
+		beforeCreateDirectChildExclusiveForTest(r, name)
+	}
+	if err := r.root.Mkdir(name, perm); err != nil {
+		if os.IsExist(err) {
+			return nil, &DirectChildExistsError{Name: name}
+		}
+		return nil, err
+	}
+	before, err := r.root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%q is not a direct directory under delivery root", name)
+	}
+	return r.pinDirectChild(name, before)
+}
+
+func (r *DeliveryRoot) pinDirectChild(name string, before os.FileInfo) (*DeliveryRoot, error) {
 	childRoot, err := r.root.OpenRoot(name)
 	if err != nil {
 		return nil, err

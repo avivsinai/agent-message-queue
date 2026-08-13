@@ -30,6 +30,7 @@ func TestCommandNames(t *testing.T) {
 		"swarm",
 		"integration",
 		"receipts",
+		"session",
 		"who",
 		"route",
 		"doctor",
@@ -89,6 +90,7 @@ func TestChildNames(t *testing.T) {
 		{name: "coop", want: []string{"init", "exec"}},
 		{name: "swarm", want: []string{"list", "join", "leave", "tasks", "claim", "complete", "fail", "block", "bridge"}},
 		{name: "receipts", want: []string{"list", "wait"}},
+		{name: "session", want: []string{"create", "list"}},
 		{name: "route", want: []string{"explain"}},
 	}
 
@@ -216,6 +218,9 @@ func TestPrintUsageRegistry(t *testing.T) {
 	if !strings.Contains(output, "swarm        Claude Code Agent Teams integration") {
 		t.Fatalf("printUsageRegistry output missing swarm command:\n%s", output)
 	}
+	if !strings.Contains(output, "session") || !strings.Contains(output, "Create and list named AMQ sessions") {
+		t.Fatalf("printUsageRegistry output missing session command:\n%s", output)
+	}
 	if !strings.Contains(output, "Exit codes:") {
 		t.Fatalf("printUsageRegistry output missing Exit codes section:\n%s", output)
 	}
@@ -237,6 +242,28 @@ func TestPrintGroupUsage(t *testing.T) {
 	}
 	if !strings.Contains(output, `Use "amq coop <subcommand> --help" for details.`) {
 		t.Fatalf("printGroupUsage(coop) missing footer:\n%s", output)
+	}
+}
+
+func TestPrintGroupUsageSession(t *testing.T) {
+	output := captureRegistryStdout(t, func() error {
+		return printGroupUsage(findCommand("session"))
+	})
+
+	if !strings.Contains(output, "amq session - Named session lifecycle") {
+		t.Fatalf("printGroupUsage(session) missing header:\n%s", output)
+	}
+	if !strings.Contains(output, "create  Create a named session and its roster mailboxes") {
+		t.Fatalf("printGroupUsage(session) missing create:\n%s", output)
+	}
+	if !strings.Contains(output, "list    List sessions under the base root") {
+		t.Fatalf("printGroupUsage(session) missing list:\n%s", output)
+	}
+	if strings.Contains(output, "resume") {
+		t.Fatalf("printGroupUsage(session) must not advertise resume:\n%s", output)
+	}
+	if findChild(findCommand("session"), "resume") != nil {
+		t.Fatal("session must not register a resume subcommand")
 	}
 }
 

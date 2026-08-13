@@ -166,6 +166,24 @@ func init() {
 				{Name: "wait", Summary: "Wait for a receipt to appear", Handler: runReceiptsWait},
 			},
 		},
+		{
+			Name:        "session",
+			Summary:     "Create and list named AMQ sessions",
+			Description: "Named session lifecycle",
+			LongDescription: []string{
+				"session create provisions a canonical named session and its roster mailboxes.",
+				"session list reports canonical sessions and safe legacy roots. Attach ships with the launch engine.",
+			},
+			Examples: []string{
+				"amq session create feature-x",
+				"amq session list --json",
+			},
+			Handler: runSession,
+			Children: []CommandInfo{
+				{Name: "create", Summary: "Create a named session and its roster mailboxes", Handler: runSessionCreate},
+				{Name: "list", Summary: "List sessions under the base root", Handler: runSessionList},
+			},
+		},
 		{Name: "who", Summary: "Show sessions and agents in current project", Handler: runWho},
 		{
 			Name:        "route",

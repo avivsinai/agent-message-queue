@@ -307,6 +307,20 @@ func runCoopInitInternal(args []string, printNextSteps bool) (returnErr error) {
 // mailbox through the pinned child capability. No provisioning write reopens
 // the session through its ambient lexical path.
 func provisionCoopSession(base, session string, agents []string, execAgent, execCommand string) (string, error) {
+	return provisionCoopSessionChild(base, session, agents, execAgent, execCommand, false)
+}
+
+// provisionNewNamedSession is session create: exclusive child creation so a
+// racing creator cannot silently open an existing session.
+func provisionNewNamedSession(base, session string, agents []string) (string, error) {
+	return provisionCoopSessionChild(base, session, agents, "", "", true)
+}
+
+// sessionCreateBeforeExclusive runs after the base is pinned and before the
+// exclusive mkdir so tests can inject a racing creator.
+var sessionCreateBeforeExclusive func(base, name string)
+
+func provisionCoopSessionChild(base, session string, agents []string, execAgent, execCommand string, exclusive bool) (string, error) {
 	if err := validateSessionName(session); err != nil {
 		return "", err
 	}
@@ -327,8 +341,22 @@ func provisionCoopSession(base, session string, agents []string, execAgent, exec
 	}
 	defer func() { _ = baseRoot.Close() }()
 
-	sessionRoot, err := baseRoot.OpenOrCreateDirectChild(session, 0o700)
+	if exclusive && sessionCreateBeforeExclusive != nil {
+		sessionCreateBeforeExclusive(base, session)
+	}
+	var sessionRoot *fsq.DeliveryRoot
+	if exclusive {
+		sessionRoot, err = baseRoot.CreateDirectChildExclusive(session, 0o700)
+	} else {
+		sessionRoot, err = baseRoot.OpenOrCreateDirectChild(session, 0o700)
+	}
 	if err != nil {
+		if exclusive {
+			var exists *fsq.DirectChildExistsError
+			if errors.As(err, &exists) {
+				return "", err
+			}
+		}
 		sessionPath := filepath.Join(base, session)
 		if info, lstatErr := os.Lstat(sessionPath); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
 			message := fmt.Sprintf(

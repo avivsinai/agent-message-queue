@@ -68,6 +68,16 @@ func TestRunHelp_Routed(t *testing.T) {
 		t.Fatalf("Run(help presence set) returned error: %v", err)
 	}
 
+	err = Run([]string{"help", "session"}, "test")
+	if err != nil {
+		t.Fatalf("Run(help session) returned error: %v", err)
+	}
+
+	err = Run([]string{"help", "session", "create"}, "test")
+	if err != nil {
+		t.Fatalf("Run(help session create) returned error: %v", err)
+	}
+
 	// amq help upgrade should succeed
 	err = Run([]string{"help", "upgrade"}, "test")
 	if err != nil {
@@ -223,7 +233,7 @@ func TestCommandHelp_ExitZero(t *testing.T) {
 
 func TestSubcommandGroupHelp_ExitZero(t *testing.T) {
 	// Subcommand groups with no args should show help and exit 0
-	groups := []string{"dlq", "coop", "swarm", "presence"}
+	groups := []string{"dlq", "coop", "swarm", "presence", "session"}
 	for _, group := range groups {
 		t.Run(group, func(t *testing.T) {
 			err := Run([]string{group}, "test")

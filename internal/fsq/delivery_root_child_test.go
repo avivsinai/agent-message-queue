@@ -1,6 +1,7 @@
 package fsq
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,5 +120,42 @@ func TestDeliveryRootPinnedBatchChildExpiresAfterCallback(t *testing.T) {
 
 	if _, err := retainedChild.ReadDir("."); err == nil || !strings.Contains(err.Error(), "pinned delivery batch expired") {
 		t.Fatalf("retained child ReadDir error = %v, want expired batch refusal", err)
+	}
+}
+
+func TestCreateDirectChildExclusiveFailsIfNameExists(t *testing.T) {
+	base := t.TempDir()
+	if err := os.Mkdir(filepath.Join(base, "auth"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := openDeliveryRootForTest(t, base)
+	_, err := root.CreateDirectChildExclusive("auth", 0o700)
+	if err == nil {
+		t.Fatal("expected exists error")
+	}
+	var exists *DirectChildExistsError
+	if !errors.As(err, &exists) || exists.Name != "auth" {
+		t.Fatalf("error = %v, want DirectChildExistsError", err)
+	}
+}
+
+func TestCreateDirectChildExclusiveRaceIsLoud(t *testing.T) {
+	base := t.TempDir()
+	root := openDeliveryRootForTest(t, base)
+	old := beforeCreateDirectChildExclusiveForTest
+	beforeCreateDirectChildExclusiveForTest = func(r *DeliveryRoot, name string) {
+		if err := os.Mkdir(filepath.Join(r.Base(), name), 0o700); err != nil {
+			t.Fatalf("pre-create: %v", err)
+		}
+	}
+	t.Cleanup(func() { beforeCreateDirectChildExclusiveForTest = old })
+
+	_, err := root.CreateDirectChildExclusive("auth", 0o700)
+	if err == nil {
+		t.Fatal("racing creator was opened silently")
+	}
+	var exists *DirectChildExistsError
+	if !errors.As(err, &exists) {
+		t.Fatalf("error = %v, want DirectChildExistsError", err)
 	}
 }
