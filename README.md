@@ -118,7 +118,25 @@ the default session, and roster mailboxes. Use `amq setup -y` only after an
 automation caller has accepted that preview. `amq coop init` remains the
 scriptable low-level provisioning command.
 
-### 2. Start Agent Sessions
+### 2. Launch or Resume a Session
+
+```bash
+amq launch
+amq launch --session feature-x
+amq session resume feature-x
+```
+
+`launch` reads the committed roster, selects the declared default session when
+`--session` is absent, and resumes exact provider-qualified conversation IDs.
+It never uses a provider's "last" or "continue" heuristic. The first semantic
+plan, and each semantic plan change, requires an interactive trust
+confirmation stored outside the worktree. Non-interactive or `--json` calls
+exit `6` until that digest is trusted. An unknown `session resume` name exits
+`3` and writes nothing.
+
+Wave A ships the `commands` backend. It prints complete `coop exec` commands
+and exits `6` because executing them is the remaining operator action. Run the
+emitted commands in separate terminals:
 
 ```bash
 # Terminal 1 — Claude Code
@@ -537,7 +555,7 @@ Common command groups:
 | Area | Commands |
 |------|----------|
 | Core messaging | `init`, `send`, `list`, `read`, `drain`, `reply`, `thread`, `trace`, `watch`, `monitor`, `receipts` |
-| Collaboration | `setup`, `coop init`, `coop exec`, `session create`, `session list`, `swarm list`, `swarm join`, `swarm tasks`, `swarm bridge` |
+| Collaboration | `setup`, `launch`, `coop init`, `coop exec`, `session create`, `session list`, `session resume`, `swarm list`, `swarm join`, `swarm tasks`, `swarm bridge` |
 | Integrations | `integration symphony init`, `integration symphony emit`, `integration kanban bridge` |
 | Operations | `presence set`, `presence list`, `route explain`, `who`, `doctor`, `doctor --ops`, `wake check`, `wake repair`, `wake recover-owner`, `wake retire`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |
 

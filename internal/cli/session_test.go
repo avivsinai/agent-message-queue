@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -378,13 +379,32 @@ func TestSessionListReportsCanonicalAndLegacy(t *testing.T) {
 	}
 }
 
-func TestSessionResumeIsUnknownSubcommand(t *testing.T) {
-	err := runSession([]string{"resume", "collab"})
-	if err == nil {
-		t.Fatal("session resume should not ship as not-implemented")
+func TestSessionResumeUnknownNameIsNotFoundWithZeroWrites(t *testing.T) {
+	project := isolateSessionProject(t)
+	for _, key := range []string{envRoot, envBaseRoot, envRootID, envBaseRootID, envSession, envGlobalRoot} {
+		_ = os.Unsetenv(key)
 	}
-	if GetExitCode(err) != ExitUsage {
-		t.Fatalf("exit code = %d, want %d: %v", GetExitCode(err), ExitUsage, err)
+	oldCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(project); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldCWD) })
+	writeProjectAmqrc(t, project)
+	writeLaunchRoster(t, project, `{"schema":1,"agents":[{"handle":"claude","command":["claude"]}]}`)
+	base := filepath.Join(project, defaultCoopRoot)
+	if err := os.Mkdir(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := dirNames(t, base)
+	err = runSession([]string{"resume", "missing"})
+	if GetExitCode(err) != ExitNotFound {
+		t.Fatalf("exit code = %d, want %d: %v", GetExitCode(err), ExitNotFound, err)
+	}
+	if after := dirNames(t, base); !slices.Equal(after, before) {
+		t.Fatalf("unknown resume wrote state: before=%v after=%v", before, after)
 	}
 }
 
