@@ -92,7 +92,7 @@ func TestChildNames(t *testing.T) {
 		{name: "coop", want: []string{"init", "exec"}},
 		{name: "swarm", want: []string{"list", "join", "leave", "tasks", "claim", "complete", "fail", "block", "bridge"}},
 		{name: "receipts", want: []string{"list", "wait"}},
-		{name: "session", want: []string{"create", "list"}},
+		{name: "session", want: []string{"create", "list", "resume"}},
 		{name: "route", want: []string{"explain"}},
 	}
 
@@ -220,7 +220,7 @@ func TestPrintUsageRegistry(t *testing.T) {
 	if !strings.Contains(output, "swarm        Claude Code Agent Teams integration") {
 		t.Fatalf("printUsageRegistry output missing swarm command:\n%s", output)
 	}
-	if !strings.Contains(output, "session") || !strings.Contains(output, "Create and list named AMQ sessions") {
+	if !strings.Contains(output, "session") || !strings.Contains(output, "Create, list, and resume named AMQ sessions") {
 		t.Fatalf("printUsageRegistry output missing session command:\n%s", output)
 	}
 	if !strings.Contains(output, "Exit codes:") {
