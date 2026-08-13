@@ -204,6 +204,16 @@ var usageEnvironment = []string{
 	"  AMQ_WAKE_NO_SELF_UPGRADE  Disable automatic wake self-upgrade (1/true/yes/on)",
 }
 
+var usageExitCodes = []string{
+	"  0  Success",
+	"  1  General error",
+	"  2  Usage error",
+	"  3  Not found",
+	"  4  Timeout",
+	"  5  Context mismatch",
+	"  6  Action required",
+}
+
 func runUpgradeRegistry(args []string) error {
 	return runUpgrade(args, "dev")
 }
@@ -252,6 +262,11 @@ func topLevelUsageLines() []string {
 		"Environment:",
 	)
 	lines = append(lines, usageEnvironment...)
+	lines = append(lines,
+		"",
+		"Exit codes:",
+	)
+	lines = append(lines, usageExitCodes...)
 	lines = append(lines,
 		"",
 		`Use "amq <command> --help" for more information about a command.`,

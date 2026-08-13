@@ -559,12 +559,19 @@ AMQ exposes stable process exit codes for scripts and agent consumers:
 | `3` | Not found. A requested resource such as a mailbox, message, session, agent, or configuration does not exist. |
 | `4` | Timeout. A watch, monitor, receipt wait, or delivery wait reached its deadline. |
 | `5` | Context mismatch. A syntactically valid route was refused, including a pin conflict or an ineligible implicit root inside Git. |
+| `6` | Action required. The command cannot proceed without an operator action (stale conversation token, unknown backend inspect, untrusted config, blocked rebind). |
 
 The numeric meaning is the machine contract; stderr is human-readable context
 and should not be parsed as a stable discriminator. `--json` does not change
 these process exit codes. A read-only `list` on a mismatched session pin warns
 and continues; commands that consume or mutate mailbox state fail with code
 `5`.
+
+When a command reports per-agent outcomes, whole-command failures that precede
+any per-agent work keep codes `2`, `5`, and `3` and preempt mixed results. Once
+per-agent work begins, the process exit code is the highest-precedence per-agent
+outcome: `6` over `4` over `1` over `0`. Expected dispositions (`disabled`,
+`unsupported`, and policy-consistent `fresh`) contribute `0`.
 
 For the full CLI syntax, examples, and message schema, see [CLAUDE.md](CLAUDE.md).
 For the read-only trace contract and its evidence limits, see [docs/trace.md](docs/trace.md).
