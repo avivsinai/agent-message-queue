@@ -17,6 +17,13 @@ type Backend interface {
 	Close(CloseRequest) (CloseResult, error)
 }
 
+// BackendFocuser is the optional managed attach surface. It stays separate
+// from the four-method backend floor: plan_only backends do not own resources,
+// while a managed profile that declares CapFocus must implement this seam.
+type BackendFocuser interface {
+	Focus(FocusRequest) (FocusResult, error)
+}
+
 type Capability string
 
 const (
@@ -40,6 +47,7 @@ const (
 	OutcomeCommandsEmitted Outcome = "commands_emitted"
 	OutcomeActionRequired  Outcome = "action_required"
 	OutcomeUnsupported     Outcome = "unsupported"
+	OutcomeAttached        Outcome = "attached"
 )
 
 type InspectStatus string
@@ -76,10 +84,12 @@ type Degradation struct {
 }
 
 type DetectResult struct {
-	Available    bool          `json:"available"`
-	Profile      Profile       `json:"profile"`
-	Effective    []Capability  `json:"effective"`
-	Degradations []Degradation `json:"degradations,omitempty"`
+	Available        bool          `json:"available"`
+	Profile          Profile       `json:"profile"`
+	HostIdentity     string        `json:"host_identity,omitempty"`
+	InstanceIdentity string        `json:"instance_identity,omitempty"`
+	Effective        []Capability  `json:"effective"`
+	Degradations     []Degradation `json:"degradations,omitempty"`
 }
 
 func (d DetectResult) Validate() error {
@@ -135,12 +145,17 @@ type EmittedCommand struct {
 }
 
 type CreateResult struct {
-	Outcome        Outcome          `json:"outcome"`
-	ActionRequired bool             `json:"action_required"`
-	Profile        string           `json:"profile,omitempty"`
-	Commands       []EmittedCommand `json:"commands,omitempty"`
-	Plan           []byte           `json:"plan,omitempty"`
-	Reason         string           `json:"reason,omitempty"`
+	Outcome        Outcome `json:"outcome"`
+	ActionRequired bool    `json:"action_required"`
+	Profile        string  `json:"profile,omitempty"`
+	// Binding is a managed backend's candidate runtime record. The
+	// reconciliation engine is the only layer allowed to persist it under the
+	// session lease. plan_only backends leave it empty.
+	Binding         BindingRecord                `json:"binding,omitempty"`
+	CaptureEvidence map[string][]CaptureEvidence `json:"-"`
+	Commands        []EmittedCommand             `json:"commands,omitempty"`
+	Plan            []byte                       `json:"plan,omitempty"`
+	Reason          string                       `json:"reason,omitempty"`
 }
 
 type InspectRequest struct {
@@ -160,6 +175,16 @@ type CloseRequest struct {
 }
 
 type CloseResult struct {
+	Outcome Outcome `json:"outcome"`
+	Reason  string  `json:"reason,omitempty"`
+}
+
+type FocusRequest struct {
+	Binding BindingRecord
+	Root    *fsq.DeliveryRoot
+}
+
+type FocusResult struct {
 	Outcome Outcome `json:"outcome"`
 	Reason  string  `json:"reason,omitempty"`
 }

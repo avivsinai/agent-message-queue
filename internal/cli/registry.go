@@ -26,6 +26,7 @@ func init() {
 	commands = []CommandInfo{
 		{Name: "init", Summary: "Initialize the queue root and agent mailboxes", Handler: runInit},
 		{Name: "setup", Summary: "Configure project launch and session defaults", Handler: runSetup},
+		{Name: "launch", Summary: "Launch or resume a configured AMQ session", Handler: runLaunch},
 		{Name: "send", Summary: "Send a message", Handler: runSend},
 		{Name: "list", Summary: "List inbox messages", Handler: runList},
 		{Name: "read", Summary: "Read a message by id", Handler: runRead},
@@ -169,20 +170,23 @@ func init() {
 		},
 		{
 			Name:        "session",
-			Summary:     "Create and list named AMQ sessions",
+			Summary:     "Create, list, and resume named AMQ sessions",
 			Description: "Named session lifecycle",
 			LongDescription: []string{
 				"session create provisions a canonical named session and its roster mailboxes.",
-				"session list reports canonical sessions and safe legacy roots. Attach ships with the launch engine.",
+				"session list reports canonical sessions and safe legacy roots.",
+				"session resume uses the same fail-closed reconciliation engine as amq launch.",
 			},
 			Examples: []string{
 				"amq session create feature-x",
 				"amq session list --json",
+				"amq session resume feature-x --json",
 			},
 			Handler: runSession,
 			Children: []CommandInfo{
 				{Name: "create", Summary: "Create a named session and its roster mailboxes", Handler: runSessionCreate},
 				{Name: "list", Summary: "List sessions under the base root", Handler: runSessionList},
+				{Name: "resume", Summary: "Resume an existing session through launch reconciliation", Handler: runSession},
 			},
 		},
 		{Name: "who", Summary: "Show sessions and agents in current project", Handler: runWho},

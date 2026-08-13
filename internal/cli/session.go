@@ -22,9 +22,28 @@ func runSession(args []string) error {
 		return runSessionCreate(args[1:])
 	case "list":
 		return runSessionList(args[1:])
+	case "resume":
+		if len(args) == 1 || (len(args) > 1 && isHelp(args[1])) {
+			return runLaunchEngine([]string{"--help"}, launchCLIOptions{resumeOnly: true})
+		}
+		name, remaining, err := peelSessionResumeName(args[1:])
+		if err != nil {
+			return err
+		}
+		return runSessionResume(name, remaining)
 	default:
 		return formatUnknownSubcommand("session", args[0])
 	}
+}
+
+func peelSessionResumeName(args []string) (string, []string, error) {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return "", nil, UsageError("session name required (e.g., amq session resume feature-x)")
+	}
+	if err := validateSessionName(args[0]); err != nil {
+		return "", nil, UsageError("session name: %v", err)
+	}
+	return args[0], args[1:], nil
 }
 
 type sessionExistsError struct {

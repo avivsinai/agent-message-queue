@@ -42,6 +42,18 @@ func TestAcquireLeaseExclusiveAndRelease(t *testing.T) {
 	}
 }
 
+func TestAcquireLeaseGeneratedNonceIsAdapterCompatibleUUID(t *testing.T) {
+	_, root := harnessRoot(t)
+	lease, err := AcquireLease(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Release() }()
+	if !validUUID(lease.LaunchNonce()) {
+		t.Fatalf("generated launch nonce %q is not a UUID", lease.LaunchNonce())
+	}
+}
+
 func TestConcurrentAcquireExactlyOneWins(t *testing.T) {
 	const contenders = 8
 	dir := t.TempDir()

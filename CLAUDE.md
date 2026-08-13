@@ -55,6 +55,7 @@ internal/
 ├── config/        → Config management (meta/config.json)
 ├── receipt/       → Delivery receipt ledger (`drained`, `dlq`)
 ├── integration/   → Shared integration helpers plus Symphony and Kanban adapters
+├── launch/        → Launch plans, adapters, trust, leases, bindings, conversation refs, and reconciliation
 ├── swarm/         → Claude Code Agent Teams interop (team config, tasks, bridge, paths)
 ├── thread/        → Thread collection across mailboxes
 └── presence/      → Agent presence metadata
@@ -216,6 +217,10 @@ amq wake retire --me <agent> --inject-via <absolute-executable> [--inject-arg <a
 amq wake recover-owner --me <agent> [--root <path>] [--strict] [--json]
 amq upgrade
 amq setup [--root <path>] [--agents <a,b,c>] [--default-session <name>] [--launcher-preference <a,b,c>] [--layout columns] [--no-gitignore] [-y] [--json]
+amq launch [--session <name>] [--launcher <auto|commands>] [--fresh] [--allow-fresh-fallback] [--rebind] [--json]
+amq session create <name> [--root <path>] [--json]
+amq session list [--root <path>] [--json]
+amq session resume <name> [--launcher <auto|commands>] [--fresh] [--allow-fresh-fallback] [--rebind] [--json]
 amq env [--me <agent>] [--root <path>] [--session <name>] [--shell sh|bash|zsh|fish] [--wake] [--export] [--session-name] [--json]
 amq shell-setup [--shell bash|zsh|fish] [--claude-alias <name>] [--codex-alias <name>] [--grok-alias <name>]
 amq coop init [--root <path>] [--agents <a,b,c>] [--no-gitignore] [--force] [--json]

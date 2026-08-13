@@ -12,6 +12,7 @@ func TestCommandNames(t *testing.T) {
 	want := []string{
 		"init",
 		"setup",
+		"launch",
 		"send",
 		"list",
 		"read",
@@ -91,7 +92,7 @@ func TestChildNames(t *testing.T) {
 		{name: "coop", want: []string{"init", "exec"}},
 		{name: "swarm", want: []string{"list", "join", "leave", "tasks", "claim", "complete", "fail", "block", "bridge"}},
 		{name: "receipts", want: []string{"list", "wait"}},
-		{name: "session", want: []string{"create", "list"}},
+		{name: "session", want: []string{"create", "list", "resume"}},
 		{name: "route", want: []string{"explain"}},
 	}
 
@@ -219,7 +220,7 @@ func TestPrintUsageRegistry(t *testing.T) {
 	if !strings.Contains(output, "swarm        Claude Code Agent Teams integration") {
 		t.Fatalf("printUsageRegistry output missing swarm command:\n%s", output)
 	}
-	if !strings.Contains(output, "session") || !strings.Contains(output, "Create and list named AMQ sessions") {
+	if !strings.Contains(output, "session") || !strings.Contains(output, "Create, list, and resume named AMQ sessions") {
 		t.Fatalf("printUsageRegistry output missing session command:\n%s", output)
 	}
 	if !strings.Contains(output, "Exit codes:") {
@@ -260,11 +261,11 @@ func TestPrintGroupUsageSession(t *testing.T) {
 	if !strings.Contains(output, "list    List sessions under the base root") {
 		t.Fatalf("printGroupUsage(session) missing list:\n%s", output)
 	}
-	if strings.Contains(output, "resume") {
-		t.Fatalf("printGroupUsage(session) must not advertise resume:\n%s", output)
+	if !strings.Contains(output, "resume  Resume an existing session through launch reconciliation") {
+		t.Fatalf("printGroupUsage(session) missing resume:\n%s", output)
 	}
-	if findChild(findCommand("session"), "resume") != nil {
-		t.Fatal("session must not register a resume subcommand")
+	if findChild(findCommand("session"), "resume") == nil {
+		t.Fatal("session must register a resume subcommand")
 	}
 }
 

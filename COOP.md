@@ -56,6 +56,38 @@ use `amq setup -y` after the caller accepts the recomputed preview.
 
 `amq coop init` remains the non-interactive provisioning primitive.
 
+### Launch and Resume
+
+Use the reconciliation engine as the daily entry point:
+
+```bash
+amq launch
+amq launch --session auth
+amq session resume auth
+```
+
+Both command forms use the same engine. It loads `.amq/launch.json`, validates
+adapter-owned argv and environment rules, checks the out-of-worktree trust
+record, acquires the session launch lease and per-agent locks, then reconciles
+the saved backend binding and conversation refs under
+`<session-root>/meta/launch/`. Native resume uses only the exact
+provider-qualified ID saved for that session and handle.
+
+The engine fails closed:
+
+- An unknown `session resume` name exits `3` with zero writes.
+- An untrusted semantic plan, stale conversation ID, unknown backend
+  inspection, foreign binding, or blocked rebind exits `6`.
+- `--fresh` deliberately starts fresh. `--allow-fresh-fallback` permits fresh
+  only when a saved identity is stale.
+- `--launcher <other> --rebind` is interactive. A foreign resource can only be
+  left in place; it is never closed by local inference.
+
+Wave A includes the honest `commands` backend only. It emits executable
+`coop exec` commands without claiming a managed terminal resource, then exits
+`6` because the operator must run those commands. JSON output includes every
+per-agent conversation disposition and the aggregate exit code.
+
 ### Running Co-op Mode
 
 **Terminal 1 - Claude Code:**
