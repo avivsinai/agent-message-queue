@@ -49,7 +49,7 @@ Requires Go 1.25+ and optionally golangci-lint.
 ```
 cmd/amq/           → Entry point (delegates to cli.Run())
 internal/
-├── cli/           → Command handlers (send, list, read, drain, thread, presence, cleanup, init, watch, monitor, reply, dlq, wake, coop, swarm, integration, receipts, doctor)
+├── cli/           → Command handlers (send, list, read, drain, thread, presence, cleanup, init, setup, launch, session, watch, monitor, reply, dlq, wake, coop, swarm, integration, receipts, doctor)
 ├── fsq/           → File system queue (Maildir delivery, atomic ops, scanning)
 ├── format/        → Message serialization (JSON frontmatter + Markdown body)
 ├── config/        → Config management (meta/config.json)
@@ -217,7 +217,7 @@ amq wake retire --me <agent> --inject-via <absolute-executable> [--inject-arg <a
 amq wake recover-owner --me <agent> [--root <path>] [--strict] [--json]
 amq upgrade
 amq setup [--root <path>] [--agents <a,b,c>] [--default-session <name>] [--launcher-preference <a,b,c>] [--layout columns] [--no-gitignore] [-y] [--json]
-amq launch [--session <name>] [--launcher <auto|commands>] [--fresh] [--allow-fresh-fallback] [--rebind] [--json]
+amq launch [--session <name>] [--root <path>] [--launcher <auto|commands>] [--fresh] [--allow-fresh-fallback] [--rebind] [--json]
 amq session create <name> [--root <path>] [--json]
 amq session list [--root <path>] [--json]
 amq session resume <name> [--launcher <auto|commands>] [--fresh] [--allow-fresh-fallback] [--rebind] [--json]
@@ -241,10 +241,18 @@ amq who [--json]
 amq doctor [--root <path>] [--base-root <path>] [--ignore-session-pin] [--ops] [--fix-wake-locks] [--fix-mailboxes] [--json] [--json-schema <1|2>]
 ```
 
-`--root` is accepted only where it is listed above. Participating commands may
+`--root` is accepted only where it is listed above. `launch --root` selects an
+existing named session root; `session resume` takes the name as a positional
+and does not accept `--root`. Participating commands may
 also accept `--json` and `--strict` (error instead of warn on unknown handles or
 unreadable/corrupt config). Global option: `--no-update-check`. Note: `init` has
 its own flags and doesn't accept these. `--json-schema` requires `--json`.
+
+**Exit codes**: `0` success, `1` general error, `2` usage, `3` not found
+(including unknown `session resume`), `4` timeout, `5` context mismatch,
+`6` action required (untrusted launch plan, unknown backend inspect, stale
+conversation, blocked rebind, or Wave A `commands` emission that still needs
+the operator to run `coop exec`). `--json` does not change these codes.
 
 **Body resolution (`send`/`reply`)**: `--body` resolves from `@file`, a literal string, or stdin. A bare `--body -`, `--body @-`, or an omitted `--body` reads stdin (standard CLI convention). A send whose resolved body is empty or whitespace-only **fails closed** with a usage error rather than delivering a blank message — pass `--allow-empty` to send a blank body intentionally. This prevents a dropped or mistyped body (e.g. `--body -` with nothing piped) from silently shipping an empty message.
 
