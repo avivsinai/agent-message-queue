@@ -88,10 +88,23 @@ worktree's top, even from a subdirectory or with `--session`; it does not
 consult `~/.amqrc`. Use `--no-init` to keep the refusal instead. It then sets
 `AM_ROOT`/`AM_ME`, `AM_BASE_ROOT`, and the independent `AM_SESSION` identity,
 starts wake notifications, and execs into the agent. Without `--session` or
-`--root`, it defaults to `--session collab` (i.e.,
-`AM_ROOT=.agent-mail/collab`, `AM_SESSION=collab`). A session-shaped explicit
-root such as `.agent-mail/auth` pins the inferred session; a custom sessionless
-root clears `AM_SESSION`.
+`--root`, it uses the declared `default_session` from `.amq/launch.json`, or
+`collab` when none is declared (i.e., `AM_ROOT=.agent-mail/collab`,
+`AM_SESSION=collab` unless launch.json says otherwise). A session-shaped
+explicit root such as `.agent-mail/auth` pins the inferred session; a custom
+sessionless root clears `AM_SESSION`.
+
+Creating a missing named session (`--session`) or missing `--root` still works
+in this release, and so does creating a missing declared default session when
+`.amqrc` or `.amq/launch.json` is present. Each of those paths prints this
+single-line warning exactly once:
+
+```
+warning: creating a missing session or root from coop exec is deprecated; use 'amq session create <name>' or 'amq init --root'. The next major release makes this exit 3.
+```
+
+Use `amq session create <name>` or `amq init --root` instead. Existing sessions
+and the zero-config `collab` bootstrap in a repo with neither file do not warn.
 
 To disable auto-wake (e.g., in CI or non-TTY environments):
 ```bash
