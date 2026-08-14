@@ -8,6 +8,31 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.61.0](https://github.com/avivsinai/agent-message-queue/compare/v0.60.5...v0.61.0) (2026-08-14)
+
+
+### Features
+
+* **cli:** add amq launch and session resume reconciliation engine ([#502](https://github.com/avivsinai/agent-message-queue/issues/502)) ([2df983a](https://github.com/avivsinai/agent-message-queue/commit/2df983a6e19bfb1e2acff8382bdcb67865ebcfa2)), closes [#480](https://github.com/avivsinai/agent-message-queue/issues/480)
+* **cli:** add amq setup preview-then-commit porcelain ([#500](https://github.com/avivsinai/agent-message-queue/issues/500)) ([fb723fe](https://github.com/avivsinai/agent-message-queue/commit/fb723fe5d73552d93d511c575e39832b2adb88a9))
+* **cli:** add exit code 6 (action_required) and launch aggregate precedence ([#493](https://github.com/avivsinai/agent-message-queue/issues/493)) ([ca96060](https://github.com/avivsinai/agent-message-queue/commit/ca960605a3a1b430cbf4dd6f7f17b6f1a987192b))
+* **cli:** add session create and session list commands ([#496](https://github.com/avivsinai/agent-message-queue/issues/496)) ([cb96416](https://github.com/avivsinai/agent-message-queue/commit/cb964164104c0ff58de201939d541d32adee86c1))
+* **cli:** add stateless setup preview with digest-gated apply ([#513](https://github.com/avivsinai/agent-message-queue/issues/513)) ([01fd066](https://github.com/avivsinai/agent-message-queue/commit/01fd0667a4ba1148994516f4950a2df18d1505f2))
+* **coop:** honor declared default_session and deprecate exec creation paths ([#501](https://github.com/avivsinai/agent-message-queue/issues/501)) ([2cb22fa](https://github.com/avivsinai/agent-message-queue/commit/2cb22fa895a9ab48bcb9a0a86e38a56db713e3ee))
+* **launch:** add backend contract, commands plan_only backend, and conformance skeleton ([#498](https://github.com/avivsinai/agent-message-queue/issues/498)) ([5a5073a](https://github.com/avivsinai/agent-message-queue/commit/5a5073ad82f49c5932e78dd18885bf588f672427))
+* **launch:** add harness adapter contract and tier-1 identity adapters ([#497](https://github.com/avivsinai/agent-message-queue/issues/497)) ([84d0fa2](https://github.com/avivsinai/agent-message-queue/commit/84d0fa28f3a315f55b39dfc58ebad96f6396401f))
+* **launch:** add managed tmux backend with journal-backed recovery ([#514](https://github.com/avivsinai/agent-message-queue/issues/514)) ([5fd0750](https://github.com/avivsinai/agent-message-queue/commit/5fd0750193d18c3b809408a288d3659e91df5af6))
+* **launch:** add managed-create recovery journal and execution acknowledgement ([#510](https://github.com/avivsinai/agent-message-queue/issues/510)) ([26f6b6c](https://github.com/avivsinai/agent-message-queue/commit/26f6b6cfe113ee3b46beb495320fb379507151fc)), closes [#480](https://github.com/avivsinai/agent-message-queue/issues/480)
+* **launch:** add session launch lease with handle locks and lease-gated binding writes ([#499](https://github.com/avivsinai/agent-message-queue/issues/499)) ([64c232f](https://github.com/avivsinai/agent-message-queue/commit/64c232ff64d3a79eab5bc102e02014bb5aebc255))
+* **launch:** add versioned launch plan, binding, and trust contracts ([#495](https://github.com/avivsinai/agent-message-queue/issues/495)) ([1b9c0f3](https://github.com/avivsinai/agent-message-queue/commit/1b9c0f35c7b4df23fd4a79af6a312e80a5d0bb12))
+
+
+### Bug Fixes
+
+* **launch:** bind execution trust digest to session and root identity ([#511](https://github.com/avivsinai/agent-message-queue/issues/511)) ([7159908](https://github.com/avivsinai/agent-message-queue/commit/71599084ecc5daeebc9ebda821c6119485514070))
+* **launch:** gate capture-mode planning on declared capabilities ([#512](https://github.com/avivsinai/agent-message-queue/issues/512)) ([51d9218](https://github.com/avivsinai/agent-message-queue/commit/51d921895e11e9ec5ec1d562cdcb3d73eb02ac64))
+* **launch:** gate conversation continuity on execution evidence ([#508](https://github.com/avivsinai/agent-message-queue/issues/508)) ([6bf355e](https://github.com/avivsinai/agent-message-queue/commit/6bf355e788417e743c5a31a6ebbebe4e05533b5b))
+
 ## [0.60.5](https://github.com/avivsinai/agent-message-queue/compare/v0.60.4...v0.60.5) (2026-08-13)
 
 
