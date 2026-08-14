@@ -25,10 +25,18 @@ var (
 	launchIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 	launchInput      = func() *bufio.Reader { return bufio.NewReader(os.Stdin) }
 	launchStateDir   = defaultLaunchStateDir
-	launchAMQPath    = func() string { return "amq" }
-	launchAdapters   = defaultLaunchAdapters
-	launchBackends   = func() map[string]launch.Backend {
-		return map[string]launch.Backend{launch.LauncherCommands: launch.Commands{}}
+	launchAMQPath    = func() string {
+		if path, err := os.Executable(); err == nil {
+			return path
+		}
+		return "amq"
+	}
+	launchAdapters = defaultLaunchAdapters
+	launchBackends = func() map[string]launch.Backend {
+		return map[string]launch.Backend{
+			launch.LauncherCommands: launch.Commands{},
+			launch.LauncherTMux:     launch.NewTmuxBackend("tmux"),
+		}
 	}
 	launchHostname = os.Hostname
 )

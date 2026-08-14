@@ -145,7 +145,7 @@ func overlayLaunchEngine(t *testing.T) {
 	state := t.TempDir()
 	launchIsTerminal = func() bool { return false }
 	launchStateDir = func() (string, error) { return state, nil }
-	launchAMQPath = func() string { return "amq" }
+	launchAMQPath = func() string { path, _ := os.Executable(); return path }
 	launchAdapters = func(launch.ProjectConfig) map[string]launch.HarnessAdapter {
 		return map[string]launch.HarnessAdapter{"claude": launchFixtureAdapter{available: true}}
 	}
@@ -157,7 +157,7 @@ func overlayLaunchEngine(t *testing.T) {
 		launchIsTerminal = func() bool { return false }
 		launchInput = func() *bufio.Reader { return bufio.NewReader(os.Stdin) }
 		launchStateDir = defaultLaunchStateDir
-		launchAMQPath = func() string { return "amq" }
+		launchAMQPath = func() string { path, _ := os.Executable(); return path }
 		launchAdapters = defaultLaunchAdapters
 		launchBackends = func() map[string]launch.Backend {
 			return map[string]launch.Backend{launch.LauncherCommands: launch.Commands{}}

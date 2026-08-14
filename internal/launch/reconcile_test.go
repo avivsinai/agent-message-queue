@@ -937,6 +937,13 @@ func TestReconcileCreateFailureClassificationControlsJournalClear(t *testing.T) 
 			if !definite && journalErr != nil {
 				t.Fatalf("uncertain create failure lost journal: %v", journalErr)
 			}
+			_, ticketErr := LoadExecutionTicket(req.Root, "claude")
+			if definite && !errors.Is(ticketErr, os.ErrNotExist) {
+				t.Fatalf("definite pre-create failure retained execution ticket: %v", ticketErr)
+			}
+			if !definite && ticketErr != nil {
+				t.Fatalf("uncertain create failure lost execution ticket: %v", ticketErr)
+			}
 		})
 	}
 }
