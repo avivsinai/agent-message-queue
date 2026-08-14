@@ -157,12 +157,16 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 			plan.Agents = append(plan.Agents, agent.plan)
 		}
 	}
-	digest, err := plan.SemanticDigest()
+	planDigest, err := plan.SemanticDigest()
 	if err != nil {
 		return result, err
 	}
-	result.Plan, result.SemanticDigest = &plan, digest
-	trusted, err := ensurePlanTrust(request, plan, digest)
+	trustDigest, err := ExecutionTrustDigest(plan, request.Session, request.Root)
+	if err != nil {
+		return result, err
+	}
+	result.Plan, result.SemanticDigest = &plan, trustDigest
+	trusted, err := ensurePlanTrust(request, plan, trustDigest)
 	if err != nil {
 		markPlannedAgents(&result, planned, 6, "trust_state_unreadable")
 		result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, err.Error()
@@ -275,7 +279,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 
 	if !recoveredCreate {
 		if detect.Profile.Has(CapCreate) {
-			journal, err = NewLaunchJournal(request, backendName, detect, plan, digest, nonce, result.Agents, plannedConversations(planned), time.Now())
+			journal, err = NewLaunchJournal(request, backendName, detect, plan, planDigest, nonce, result.Agents, plannedConversations(planned), time.Now())
 			if err != nil {
 				return result, err
 			}
@@ -638,6 +642,13 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 		} else if !filepath.IsAbs(cwd) {
 			cwd = filepath.Join(request.ProjectRoot, cwd)
 		}
+		resolvedCwd, resolveErr := resolvedPath(cwd)
+		if resolveErr != nil {
+			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, "working_directory_unavailable"
+			result.Agents = append(result.Agents, item)
+			continue
+		}
+		cwd = resolvedCwd
 		policy := cfg.ResumePolicy
 		base := PlanRequest{
 			Handle: cfg.Handle, ProjectRoot: request.ProjectRoot, Cwd: cwd,

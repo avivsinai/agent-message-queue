@@ -222,6 +222,46 @@ func TestLaunchWithoutExecutionRemintsAndResumeJSONKeepsSchema(t *testing.T) {
 	}
 }
 
+func TestDefaultSessionChangeInvalidatesEmissionTrust(t *testing.T) {
+	project, _ := launchCLIFixture(t, "collab", "empty")
+	launchIsTerminal = func() bool { return true }
+	launchInput = func() *bufio.Reader { return bufio.NewReader(strings.NewReader("y\n")) }
+	if _, _, err := captureEnvOutput(t, func() error { return runLaunch(nil) }); GetExitCode(err) != ExitActionRequired {
+		t.Fatalf("initial trusted launch exit=%d err=%v", GetExitCode(err), err)
+	}
+
+	changed := launch.ProjectConfig{
+		Schema: launch.ProjectConfigSchema, DefaultSession: "empty", Layout: launch.LayoutIntent{Type: launch.LayoutColumns},
+		Agents: []launch.ProjectAgentConfig{{Handle: "claude", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: launch.ResumeEnabled}},
+	}
+	data, err := launch.MarshalProjectConfig(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, setupConfigPath), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launchIsTerminal = func() bool { return false }
+	stdout, _, err := captureEnvOutput(t, func() error { return runLaunch([]string{"--json"}) })
+	if GetExitCode(err) != ExitActionRequired {
+		t.Fatalf("changed default launch exit=%d err=%v output=%s", GetExitCode(err), err, stdout)
+	}
+	var result launch.ReconcileResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Session != "empty" || result.Reason != "launch plan requires local trust confirmation" || result.Plan == nil {
+		t.Fatalf("changed default result=%#v", result)
+	}
+	emptyRoot := filepath.Join(project, defaultCoopRoot, "empty")
+	if _, err := os.Stat(launch.ExecutionTicketPath(emptyRoot, "claude")); !os.IsNotExist(err) {
+		t.Fatalf("stale trust emitted an execution ticket: %v", err)
+	}
+	if _, err := os.Stat(launch.ConversationPath(emptyRoot, "claude")); !os.IsNotExist(err) {
+		t.Fatalf("stale trust wrote conversation state: %v", err)
+	}
+}
+
 func TestLaunchMissingBinaryIsStructuredDisposition(t *testing.T) {
 	launchCLIFixture(t, "collab")
 	launchAdapters = func(launch.ProjectConfig) map[string]launch.HarnessAdapter {

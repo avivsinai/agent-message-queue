@@ -5,11 +5,36 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 )
+
+func TestReconcileEmitsCanonicalResolvedWorkingDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows symlink creation requires host policy support")
+	}
+	req := reconcileFixture(t, Commands{})
+	alias := filepath.Join(t.TempDir(), "project-alias")
+	if err := os.Symlink(req.ProjectRoot, alias); err != nil {
+		t.Fatal(err)
+	}
+	req.ProjectRoot = alias
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Commands) != 1 || result.Commands[0].Cwd != resolved || result.Plan == nil || result.Plan.Agents[0].Cwd != resolved {
+		t.Fatalf("canonical cwd result=%#v, want %q", result, resolved)
+	}
+}
 
 type reconcileAdapter struct {
 	name      string
