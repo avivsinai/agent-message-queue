@@ -105,8 +105,52 @@ amq setup
 
 Detects supported agent CLIs and launcher preferences, previews the project
 declaration, then creates `.amqrc`, `.amq/launch.json`, local preferences,
-the default session, and roster mailboxes. Use `amq setup -y` only after an
-automation caller has accepted that preview.
+the default session, and roster mailboxes.
+
+Automation uses a stateless preview and applies only that approved digest. The
+first non-interactive setup must name the roster, default session, and launcher
+preference explicitly:
+
+```bash
+setup_args=(--agents claude,codex --default-session collab --launcher-preference commands)
+setup_preview="$(amq setup --preview --json "${setup_args[@]}")"
+setup_digest="$(printf '%s\n' "$setup_preview" | jq -r '.preview.digest')"
+amq setup --apply "$setup_digest" "${setup_args[@]}"
+```
+
+`--preview` performs zero writes. `--apply` recomputes the preview and exits `6`
+without writing if its `sha256:<hex>` digest differs. `-y` remains available
+for callers that already own an approval gate, but it cannot be combined with
+`--preview` or `--apply`.
+
+Provider arguments belong in the committed `.amq/launch.json`, so `launch`
+can validate and include them in its semantic trust digest. For example:
+
+```json
+{
+  "schema": 1,
+  "default_session": "collab",
+  "agents": [
+    {
+      "handle": "claude",
+      "adapter": "claude",
+      "command": ["claude", "--permission-mode", "acceptEdits"],
+      "resume_policy": "enabled"
+    },
+    {
+      "handle": "codex",
+      "adapter": "codex",
+      "command": ["codex", "--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+      "resume_policy": "enabled"
+    }
+  ],
+  "layout": {"type": "columns"}
+}
+```
+
+Dangerous permission-bypass flags are not valid committed arguments. Keep them
+in an operator-controlled direct `coop exec` invocation when that low-level
+path is intentionally required.
 
 ### 2. Launch or Resume a Session
 
@@ -127,16 +171,10 @@ exit `6` until that digest is trusted. An unknown `session resume` name exits
 see [Managed launch recovery](docs/launch-recovery.md).
 
 The `commands` backend prints complete `coop exec` commands and exits `6`
-because executing them is the remaining operator action. Run the emitted
-commands in separate terminals:
-
-```bash
-# Terminal 1 — Claude Code
-amq coop exec claude
-
-# Terminal 2 — Codex CLI
-amq coop exec codex
-```
+because executing them is the remaining operator action. Paste those emitted
+lines exactly, one per terminal. Do not reconstruct them from examples: they
+bind the selected session, launch nonce, provider arguments, and execution
+ticket.
 
 Each command sets up the session environment, starts wake notifications, and
 launches the agent. See [COOP.md](COOP.md#running-co-op-mode) for co-op
@@ -153,18 +191,9 @@ For isolated sessions (multiple pairs working on different features):
 ```bash
 amq session create feature-a
 amq launch --session feature-a
-
-# Run the emitted commands in separate terminals.
-amq coop exec --session feature-a claude
-amq coop exec --session feature-a codex
-amq coop exec --session feature-a grok     # Optional third peer
 ```
 
-Pass agent flags after `--`:
-```bash
-amq coop exec claude -- --dangerously-skip-permissions
-amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
-```
+Again, paste the complete commands emitted by `launch` into separate terminals.
 
 Optional aliases are a convenience, not part of the canonical quickstart.
 A bare `eval "$(amq shell-setup)"` affects only the current shell. To make
@@ -183,9 +212,10 @@ Run the appropriate append command once, then open a new terminal or source
 that startup file. Use the bare `eval` only when you intentionally want aliases
 in one already-open shell.
 
-`coop init` and direct `coop exec` provisioning remain available as low-level
-plumbing. See [COOP.md](COOP.md#low-level-provisioning) for those paths and
-advanced wake options; they are not a second project-onboarding flow.
+`coop init` and direct `coop exec` provisioning remain available as legacy
+low-level plumbing. See [COOP.md](COOP.md#low-level-provisioning) for those
+paths, operator-only bypass examples, and advanced wake options; they are not a
+second project-onboarding flow.
 
 ### 3. Send & Receive
 

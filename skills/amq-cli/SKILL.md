@@ -151,9 +151,14 @@ is the canonical human onboarding path. The commands below keep the agent
 workflow self-contained.
 
 ```bash
-# One-time project setup (preview, then write .amqrc, .amq/launch.json, default session)
+# Interactive one-time project setup
 amq setup
-amq setup -y   # automation only, after the caller accepted that preview
+
+# Non-interactive setup: re-pass the same explicit inputs on preview and apply
+setup_args=(--agents claude,codex --default-session collab --launcher-preference commands)
+setup_preview="$(amq setup --preview --json "${setup_args[@]}")"
+setup_digest="$(printf '%s\n' "$setup_preview" | jq -r '.preview.digest')"
+amq setup --apply "$setup_digest" "${setup_args[@]}"
 
 # Daily entry: reconcile the declared session (never creates an unknown name)
 amq launch
@@ -162,22 +167,35 @@ amq launch --session feature-x
 amq session resume feature-x
 ```
 
-The first semantic plan, and each plan change, needs an interactive trust
+`setup --preview` performs zero writes. On a fresh non-interactive setup,
+`--agents`, `--default-session`, and `--launcher-preference` are required.
+`--apply` recomputes the preview and exits `6` without writes unless the
+approved `sha256:<hex>` digest matches. It is mutually exclusive with `-y`;
+`--preview` is also mutually exclusive with `-y`.
+
+Put provider flags in the committed `.amq/launch.json` `command` arrays. The
+launcher validates them and includes them in the semantic trust digest. The
+first semantic plan, and each plan change, needs an interactive trust
 confirmation stored outside the worktree. Non-interactive or `--json` calls
 exit `6` until that digest is trusted. An unknown `session resume` name exits
 `3` and writes nothing. The `commands` backend prints complete `coop exec`
-commands and exits `6` because running them is the remaining operator action:
-
-```bash
-# Then run the emitted commands, one terminal each
-amq coop exec claude -- --dangerously-skip-permissions
-amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
-amq coop exec grok  # optional peer — caller flags forwarded unchanged
-```
+commands and exits `6` because running them is the remaining operator action.
+Paste the emitted lines exactly, one per terminal; do not reconstruct them from
+generic `coop exec` examples.
 
 Without `--session` or `--root`, `coop exec` uses the declared `default_session` from `.amq/launch.json`, or `collab` when none is declared. Creating a missing session or root from `coop exec` is deprecated and prints `warning: creating a missing session or root from coop exec is deprecated; use 'amq session create <name>' or 'amq init --root'. The next major release makes this exit 3.`
 
 Add `--no-gitignore` when `coop exec` should auto-initialize the project without changing `.gitignore`.
+
+Direct `coop exec` is legacy low-level plumbing. When an operator deliberately
+uses it, provider flags follow `--`; dangerous bypass flags belong only on this
+operator-controlled path and are rejected from committed launch arguments:
+
+```bash
+amq coop exec claude -- --dangerously-skip-permissions
+amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
+amq coop exec grok
+```
 
 ### Standalone wake interrupt safety
 
