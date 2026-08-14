@@ -2,7 +2,10 @@ package launch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -61,6 +64,7 @@ type reconcileBackend struct {
 	createGate  chan struct{}
 	createStart chan struct{}
 	capture     bool
+	invalidBind bool
 }
 
 func (b *reconcileBackend) Detect() DetectResult {
@@ -88,6 +92,9 @@ func (b *reconcileBackend) Create(req CreateRequest) (CreateResult, error) {
 		Profile: b.Detect().Profile.Identity(), LaunchNonce: req.Plan.Agents[0].LaunchNonce,
 		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{{OpaqueID: "resource:test"}}},
 	}}
+	if b.invalidBind {
+		result.Binding.Resources.Version = 0
+	}
 	if b.capture {
 		evidence, err := ParseCodexThreadStartedEvidence([]byte(`{"method":"thread/started","params":{"thread":{"id":"019c8a2f-2b13-7000-8000-000000000001","cliVersion":"test"}}}`), req.Plan.Agents[0].LaunchNonce, false)
 		if err != nil {
@@ -169,6 +176,13 @@ func writeReconcileConversation(t *testing.T, req ReconcileRequest, record Conve
 	}
 }
 
+func reconcileExecutionEvidence(backend *reconcileBackend, nonce string) *ConversationExecutionEvidence {
+	return &ConversationExecutionEvidence{
+		Backend: backend.name, Profile: backend.Detect().Profile.Identity(), Outcome: OutcomeCreated,
+		LaunchNonce: nonce, ConversationID: testConversationID,
+	}
+}
+
 func TestReconcileInspectUnknownMakesZeroBackendMutations(t *testing.T) {
 	backend := &reconcileBackend{name: "test", inspect: InspectUnknown}
 	req := reconcileFixture(t, backend)
@@ -188,6 +202,7 @@ func TestReconcilePresentCompatibleAttachesWithoutCreate(t *testing.T) {
 	writeReconcileConversation(t, req, ConversationRecord{
 		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
 		Identity: ConversationIdentity{Provider: "claude", ID: testConversationID}, LaunchNonce: testLaunchNonce,
+		ExecutionEvidence: reconcileExecutionEvidence(backend, testLaunchNonce),
 	})
 	writeReconcileBinding(t, req, backend, backend.Detect().Profile.Identity())
 	result, err := Reconcile(req)
@@ -321,18 +336,46 @@ func TestReconcileStaleHandleFailsClosedWhilePeerContinues(t *testing.T) {
 	})
 	writeReconcileConversation(t, req, ConversationRecord{
 		Version: ConversationVersion, Handle: "peer", State: CaptureReady,
-		Identity:    ConversationIdentity{Provider: "claude", ID: testConversationID},
-		LaunchNonce: testLaunchNonce,
+		Identity:          ConversationIdentity{Provider: "claude", ID: testConversationID},
+		LaunchNonce:       testLaunchNonce,
+		ExecutionEvidence: reconcileExecutionEvidence(backend, testLaunchNonce),
 	})
 	result, err := Reconcile(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.AggregateCode != 6 || backend.creates != 1 || result.Plan == nil || len(result.Plan.Agents) != 1 || result.Plan.Agents[0].Handle != "peer" {
+	if result.AggregateCode != 6 || result.Reason != ReasonStaleConversation || backend.creates != 1 || result.Plan == nil || len(result.Plan.Agents) != 1 || result.Plan.Agents[0].Handle != "peer" {
 		t.Fatalf("partial stale result=%#v creates=%d", result, backend.creates)
 	}
 	if result.Agents[0].Reason != "stale_conversation" || result.Agents[1].ConversationDisposition != DispositionResumed {
 		t.Fatalf("agent results=%#v", result.Agents)
+	}
+}
+
+func TestReconcileResumeDistinguishesNoSavedConversationFromStale(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	req.ResumeOnly = true
+	missing, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing.AggregateCode != 6 || missing.Outcome != OutcomeActionRequired || missing.Reason != ReasonNoSavedConversation ||
+		missing.Agents[0].ConversationDisposition != DispositionActionRequired || missing.Agents[0].Reason != ReasonNoSavedConversation || backend.creates != 0 {
+		t.Fatalf("missing result=%#v creates=%d", missing, backend.creates)
+	}
+
+	writeReconcileConversation(t, req, ConversationRecord{
+		Version: ConversationVersion, Handle: "claude", State: CaptureStale,
+		LaunchNonce: testLaunchNonce, Reason: CaptureReasonEvidenceMissing,
+	})
+	stale, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.AggregateCode != 6 || stale.Outcome != OutcomeActionRequired || stale.Reason != ReasonStaleConversation ||
+		stale.Agents[0].ConversationDisposition != DispositionDegraded || stale.Agents[0].Reason != ReasonStaleConversation || backend.creates != 0 {
+		t.Fatalf("stale result=%#v creates=%d", stale, backend.creates)
 	}
 }
 
@@ -351,6 +394,125 @@ func TestReconcileStaleAllowsExplicitFreshFallback(t *testing.T) {
 	}
 	if result.AggregateCode != 0 || result.Agents[0].ConversationDisposition != DispositionFreshAfterStale || backend.creates != 1 {
 		t.Fatalf("fallback result=%#v", result)
+	}
+}
+
+func TestReconcilePlanOnlyMintWithoutExecutionRemintsPending(t *testing.T) {
+	backend := Commands{}
+	req := reconcileFixture(t, backend)
+	first, err := Reconcile(req)
+	if err != nil || first.AggregateCode != 6 || first.Outcome != OutcomeCommandsEmitted || first.Plan == nil {
+		t.Fatalf("first result=%#v err=%v", first, err)
+	}
+	firstID := first.Plan.Agents[0].ConversationID
+	firstRecord, err := LoadConversation(req.Root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstRecord.State != CapturePending || firstRecord.Identity.ID != "" || firstRecord.ExecutionEvidence != nil || firstRecord.LaunchNonce != firstID {
+		t.Fatalf("first record=%#v, want pending nonce %q without evidence", firstRecord, firstID)
+	}
+	resumeReq := req
+	resumeReq.ResumeOnly = true
+	resume, err := Reconcile(resumeReq)
+	if err != nil || resume.AggregateCode != 6 || resume.Reason != ReasonStaleConversation || resume.Plan != nil {
+		t.Fatalf("resume pending result=%#v err=%v", resume, err)
+	}
+	unchanged, err := LoadConversation(req.Root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.LaunchNonce != firstID {
+		t.Fatalf("resume reminted pending record: got %q want %q", unchanged.LaunchNonce, firstID)
+	}
+
+	second, err := Reconcile(req)
+	if err != nil || second.AggregateCode != 6 || second.Outcome != OutcomeCommandsEmitted || second.Plan == nil {
+		t.Fatalf("second result=%#v err=%v", second, err)
+	}
+	secondID := second.Plan.Agents[0].ConversationID
+	if secondID == firstID || second.Agents[0].ConversationDisposition != DispositionFresh || second.Agents[0].Reason != ReasonPriorLaunchNotExecuted {
+		t.Fatalf("second result=%#v, first ID=%q second ID=%q", second, firstID, secondID)
+	}
+	secondRecord, err := LoadConversation(req.Root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondRecord.State != CapturePending || secondRecord.LaunchNonce != secondID || secondRecord.ExecutionEvidence != nil {
+		t.Fatalf("second record=%#v, want new pending nonce %q", secondRecord, secondID)
+	}
+}
+
+func TestReconcileMintExecutionEvidencePromotesThenResumesExactIdentity(t *testing.T) {
+	commands := Commands{}
+	req := reconcileFixture(t, commands)
+	first, err := Reconcile(req)
+	if err != nil || first.Plan == nil {
+		t.Fatalf("first result=%#v err=%v", first, err)
+	}
+	firstID := first.Plan.Agents[0].ConversationID
+
+	managed := &reconcileBackend{name: "managed", inspect: InspectAbsent}
+	req.Launcher = managed.name
+	req.Preferences = []string{managed.name}
+	req.Backends = map[string]Backend{managed.name: managed}
+	second, err := Reconcile(req)
+	if err != nil || second.AggregateCode != 0 || second.Plan == nil {
+		t.Fatalf("second result=%#v err=%v", second, err)
+	}
+	readyID := second.Plan.Agents[0].ConversationID
+	if readyID == firstID || second.Agents[0].Reason != ReasonPriorLaunchNotExecuted || second.Agents[0].ConversationDisposition != DispositionFresh {
+		t.Fatalf("second result=%#v, first ID=%q ready ID=%q", second, firstID, readyID)
+	}
+	record, err := LoadConversation(req.Root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.State != CaptureReady || record.Identity.ID != readyID || record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != managed.name {
+		t.Fatalf("promoted record=%#v", record)
+	}
+
+	third, err := Reconcile(req)
+	if err != nil || third.AggregateCode != 0 || third.Plan == nil {
+		t.Fatalf("third result=%#v err=%v", third, err)
+	}
+	if third.Agents[0].ConversationDisposition != DispositionResumed || third.Plan.Agents[0].ConversationID != readyID {
+		t.Fatalf("third result=%#v, want resumed ID %q", third, readyID)
+	}
+}
+
+func TestReconcileInvalidCreatedBindingCannotPromoteMint(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent, invalidBind: true}
+	req := reconcileFixture(t, backend)
+	if _, err := Reconcile(req); err == nil || !strings.Contains(err.Error(), "invalid binding") {
+		t.Fatalf("Reconcile error = %v", err)
+	}
+	if _, err := LoadConversation(req.Root, "claude"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid binding published conversation state: %v", err)
+	}
+}
+
+func TestReconcileReadyRecordWithoutExecutionEvidenceFailsClosed(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	req.ResumeOnly = true
+	data, err := json.Marshal(ConversationRecord{
+		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
+		Identity:    ConversationIdentity{Provider: "claude", ID: testConversationID},
+		LaunchNonce: testLaunchNonce,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := req.Root.WriteFileAtomic(conversationDir, "claude.json", append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AggregateCode != 6 || result.Outcome != OutcomeActionRequired || result.Agents[0].Reason != "conversation_state_unreadable" || backend.creates != 0 || result.Plan != nil {
+		t.Fatalf("result=%#v creates=%d", result, backend.creates)
 	}
 }
 
@@ -476,7 +638,7 @@ func TestReconcileCaptureEvidencePersistsExactIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.State != CaptureReady || record.Identity.Provider != CodexProvider || record.Identity.ID != "019c8a2f-2b13-7000-8000-000000000001" {
+	if record.State != CaptureReady || record.Identity.Provider != CodexProvider || record.Identity.ID != "019c8a2f-2b13-7000-8000-000000000001" || record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != backend.name {
 		t.Fatalf("record=%#v", record)
 	}
 }

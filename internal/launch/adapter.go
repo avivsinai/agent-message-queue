@@ -184,11 +184,16 @@ func cloneEnv(overlay map[string]string) map[string]string {
 
 func validateKnownExecutable(executable, projectRoot, provider string) (string, error) {
 	if !filepath.IsAbs(executable) {
-		resolvedPath, err := exec.LookPath(executable)
+		lookedUp, err := exec.LookPath(executable)
 		if err != nil {
 			return "", fmt.Errorf("resolve %s executable: %w", provider, err)
 		}
-		executable = resolvedPath
+		executable, err = filepath.Abs(lookedUp)
+		if err != nil {
+			return "", fmt.Errorf("make %s executable absolute: %w", provider, err)
+		}
+	} else {
+		executable = filepath.Clean(executable)
 	}
 	resolvedExecutable, err := filepath.EvalSymlinks(executable)
 	if err != nil {
@@ -218,7 +223,11 @@ func validateKnownExecutable(executable, projectRoot, provider string) (string, 
 	if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0) {
 		return "", fmt.Errorf("%s executable is not an executable regular file", provider)
 	}
-	return resolvedExecutable, nil
+	// Keep the stable pre-resolution path in the plan and semantic digest. The
+	// physical target is used only for the security and executability checks
+	// above; persisting it would freeze version-manager symlink targets and
+	// change trust digests on every tool update.
+	return executable, nil
 }
 
 func validateWorkingDirectory(cwd, projectRoot string) error {

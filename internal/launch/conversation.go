@@ -18,13 +18,26 @@ const (
 // ConversationRecord is provider-qualified runtime state for one
 // (session, handle). It carries no execution authority.
 type ConversationRecord struct {
-	Version         int                  `json:"version"`
-	Handle          string               `json:"handle"`
-	State           CaptureState         `json:"state"`
-	Identity        ConversationIdentity `json:"identity,omitempty"`
-	ProviderVersion string               `json:"provider_version,omitempty"`
-	LaunchNonce     string               `json:"launch_nonce"`
-	Reason          CaptureReason        `json:"reason,omitempty"`
+	Version           int                            `json:"version"`
+	Handle            string                         `json:"handle"`
+	State             CaptureState                   `json:"state"`
+	Identity          ConversationIdentity           `json:"identity,omitempty"`
+	ProviderVersion   string                         `json:"provider_version,omitempty"`
+	LaunchNonce       string                         `json:"launch_nonce"`
+	ExecutionEvidence *ConversationExecutionEvidence `json:"execution_evidence,omitempty"`
+	Reason            CaptureReason                  `json:"reason,omitempty"`
+}
+
+// ConversationExecutionEvidence records the managed backend result that
+// proves a planned agent process started. It does not grant execution
+// authority; it prevents a minted identity from becoming resumable from plan
+// output alone.
+type ConversationExecutionEvidence struct {
+	Backend        string  `json:"backend"`
+	Profile        string  `json:"profile"`
+	Outcome        Outcome `json:"outcome"`
+	LaunchNonce    string  `json:"launch_nonce"`
+	ConversationID string  `json:"conversation_id,omitempty"`
 }
 
 func (record ConversationRecord) Validate() error {
@@ -37,14 +50,34 @@ func (record ConversationRecord) Validate() error {
 	if !validUUID(record.LaunchNonce) {
 		return fmt.Errorf("conversation launch nonce must be a UUID")
 	}
+	if record.ExecutionEvidence != nil {
+		if strings.TrimSpace(record.ExecutionEvidence.Backend) == "" || strings.TrimSpace(record.ExecutionEvidence.Profile) == "" {
+			return fmt.Errorf("conversation execution evidence is incomplete")
+		}
+		if record.ExecutionEvidence.Outcome != OutcomeCreated {
+			return fmt.Errorf("conversation execution evidence outcome must be created")
+		}
+		if record.ExecutionEvidence.LaunchNonce != record.LaunchNonce {
+			return fmt.Errorf("conversation execution evidence launch nonce mismatch")
+		}
+	}
 	switch record.State {
 	case CapturePending:
 		if record.Identity.Provider != "" || record.Identity.ID != "" {
 			return fmt.Errorf("pending conversation must not contain an identity")
 		}
+		if record.ExecutionEvidence != nil {
+			return fmt.Errorf("pending conversation must not contain execution evidence")
+		}
 	case CaptureReady:
 		if strings.TrimSpace(record.Identity.Provider) == "" || !validUUID(record.Identity.ID) {
 			return fmt.Errorf("ready conversation requires a provider-qualified UUID")
+		}
+		if record.ExecutionEvidence == nil {
+			return fmt.Errorf("ready conversation requires execution evidence")
+		}
+		if record.ExecutionEvidence.ConversationID != record.Identity.ID {
+			return fmt.Errorf("conversation execution evidence identity mismatch")
 		}
 	case CaptureStale, CaptureUnsupported:
 		if record.Reason == "" {

@@ -2,6 +2,7 @@ package launch
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -12,6 +13,10 @@ func TestConversationRoundTripRequiresHandleLock(t *testing.T) {
 		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
 		Identity:    ConversationIdentity{Provider: ClaudeProvider, ID: testConversationID},
 		LaunchNonce: testLaunchNonce,
+		ExecutionEvidence: &ConversationExecutionEvidence{
+			Backend: "test", Profile: "test/any/v1", Outcome: OutcomeCreated,
+			LaunchNonce: testLaunchNonce, ConversationID: testConversationID,
+		},
 	}
 	if err := WriteConversation(root, lease, record); err == nil {
 		t.Fatal("WriteConversation without handle lock succeeded")
@@ -35,6 +40,17 @@ func TestConversationRoundTripRequiresHandleLock(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("conversation permissions = %04o", info.Mode().Perm())
+	}
+}
+
+func TestConversationRejectsReadyWithoutExecutionEvidence(t *testing.T) {
+	record := ConversationRecord{
+		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
+		Identity:    ConversationIdentity{Provider: ClaudeProvider, ID: testConversationID},
+		LaunchNonce: testLaunchNonce,
+	}
+	if err := record.Validate(); err == nil || !strings.Contains(err.Error(), "requires execution evidence") {
+		t.Fatalf("ready record without evidence error = %v", err)
 	}
 }
 

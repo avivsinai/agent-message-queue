@@ -234,6 +234,13 @@ func TestAdapterRejectsProjectExecutableAndProviderMismatch(t *testing.T) {
 	if _, err := adapter.PlanFresh(request); err == nil || !strings.Contains(err.Error(), "inside the project") {
 		t.Fatalf("project executable error = %v", err)
 	}
+	externalLink := filepath.Join(t.TempDir(), ClaudeProvider)
+	if err := os.Symlink(inside, externalLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewClaudeAdapter(externalLink).PlanFresh(request); err == nil || !strings.Contains(err.Error(), "inside the project") {
+		t.Fatalf("external symlink to project executable error = %v", err)
+	}
 
 	otherProject, codexExecutable := testExecutable(t, CodexProvider)
 	request = planRequest(otherProject, ClaudeProvider)
@@ -242,19 +249,65 @@ func TestAdapterRejectsProjectExecutableAndProviderMismatch(t *testing.T) {
 	}
 }
 
-func TestAdapterResolvesConfiguredExecutableFromPath(t *testing.T) {
-	project, executable := testExecutable(t, ClaudeProvider)
-	t.Setenv("PATH", filepath.Dir(executable))
-	plan, err := NewClaudeAdapter(ClaudeProvider).PlanFresh(planRequest(project, ClaudeProvider))
+func TestAdapterKeepsStableExecutableAcrossSymlinkRetarget(t *testing.T) {
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	bin := filepath.Join(base, "bin")
+	versions := filepath.Join(base, "versions")
+	for _, dir := range []string{project, bin, versions} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	versionA := filepath.Join(versions, "claude-a")
+	versionB := filepath.Join(versions, "claude-b")
+	for _, path := range []string{versionA, versionB} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executable := filepath.Join(bin, ClaudeProvider)
+	if err := os.Symlink(versionA, executable); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	request := planRequest(project, ClaudeProvider)
+	first, err := NewClaudeAdapter(ClaudeProvider).PlanFresh(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := filepath.EvalSymlinks(executable)
+	firstDigest, err := (Plan{Version: PlanVersion, Agents: []AgentPlan{first}}).SemanticDigest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Argv[0] != resolved {
-		t.Fatalf("resolved executable = %q, want %q", plan.Argv[0], resolved)
+	if err := os.Remove(executable); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(versionB, executable); err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewClaudeAdapter(ClaudeProvider).PlanFresh(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDigest, err := (Plan{Version: PlanVersion, Agents: []AgentPlan{second}}).SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Argv[0] != executable || second.Argv[0] != executable {
+		t.Fatalf("planned argv0 = %q then %q, want stable %q", first.Argv[0], second.Argv[0], executable)
+	}
+	if firstDigest != secondDigest {
+		t.Fatalf("symlink retarget changed semantic digest: %s != %s", firstDigest, secondDigest)
+	}
+	emitted, err := (Commands{}).Create(CreateRequest{
+		Session: "collab", AMQPath: "amq", Plan: Plan{Version: PlanVersion, Agents: []AgentPlan{second}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(emitted.Commands) != 1 || len(emitted.Commands[0].Argv) < 8 || emitted.Commands[0].Argv[7] != executable {
+		t.Fatalf("emitted command argv = %#v, want stable executable %q", emitted.Commands, executable)
 	}
 }
 
