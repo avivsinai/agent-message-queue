@@ -1,0 +1,66 @@
+package launchapi_test
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"testing"
+)
+
+func TestExternalConsumerCompileAndNegotiateV1(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve launchapi test source")
+	}
+	repositoryRoot := filepath.Dir(filepath.Dir(sourceFile))
+	consumer := t.TempDir()
+	goMod := fmt.Sprintf(`module example.com/amq-launch-consumer
+
+go 1.25.0
+
+require github.com/avivsinai/agent-message-queue v0.0.0
+
+replace github.com/avivsinai/agent-message-queue => %s
+`, filepath.ToSlash(repositoryRoot))
+	consumerTest := `package consumer
+
+import (
+    "testing"
+
+    "github.com/avivsinai/agent-message-queue/launchapi"
+)
+
+func TestContract(t *testing.T) {
+    intent := launchapi.LaunchIntentV1{
+        IntentVersion: launchapi.IntentVersionV1,
+        Participants: []launchapi.ParticipantV1{{Handle: "operator", Runnable: false}},
+    }
+    if err := intent.Validate(); err != nil {
+        t.Fatal(err)
+    }
+    negotiated, err := launchapi.Negotiate(launchapi.RequirementV1{
+        ContractSemver: ">=0.61.0 <0.62.0",
+        IntentVersion: 1,
+        ResultVersion: 1,
+        Features: []string{"launch_intent_v1"},
+    })
+    if err != nil || negotiated.ContractSemver != "0.61.0" {
+        t.Fatalf("negotiated=%#v err=%v", negotiated, err)
+    }
+}
+`
+	if err := os.WriteFile(filepath.Join(consumer, "go.mod"), []byte(goMod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(consumer, "contract_test.go"), []byte(consumerTest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("go", "test", "-mod=mod", "./...")
+	command.Dir = consumer
+	command.Env = append(os.Environ(), "GOWORK=off")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("external consumer compile: %v\n%s", err, output)
+	}
+}

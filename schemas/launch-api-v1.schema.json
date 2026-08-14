@@ -1,0 +1,378 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/avivsinai/agent-message-queue/schemas/launch-api-v1.schema.json",
+  "title": "AMQ Launch API v1",
+  "$ref": "#/$defs/LaunchIntentV1",
+  "$defs": {
+    "Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "LaunchIntentV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent_version", "participants"],
+      "properties": {
+        "intent_version": {"const": 1},
+        "participants": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/ParticipantV1"}
+        }
+      }
+    },
+    "ParticipantV1": {
+      "oneOf": [
+        {"$ref": "#/$defs/NonRunnableParticipantV1"},
+        {"$ref": "#/$defs/RunnableParticipantV1"}
+      ]
+    },
+    "NonRunnableParticipantV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handle", "runnable"],
+      "properties": {
+        "handle": {"$ref": "#/$defs/Handle"},
+        "runnable": {"const": false}
+      }
+    },
+    "RunnableParticipantV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handle", "runnable", "executable", "cwd", "resume_policy", "execution"],
+      "properties": {
+        "handle": {"$ref": "#/$defs/Handle"},
+        "runnable": {"const": true},
+        "executable": {"type": "string", "minLength": 1},
+        "args": {"type": "array", "items": {"type": "string"}},
+        "cwd": {"$ref": "#/$defs/WorkingDirectoryV1"},
+        "env_overlay": {
+          "type": "object",
+          "additionalProperties": {"type": "string"},
+          "propertyNames": {"pattern": "^[^=]+$"}
+        },
+        "resume_policy": {"enum": ["resume", "fresh", "disabled"]},
+        "execution": {"$ref": "#/$defs/ExecutionOptionsV1"}
+      }
+    },
+    "Handle": {
+      "type": "string",
+      "pattern": "^[a-z0-9_][a-z0-9_-]*$"
+    },
+    "WorkingDirectoryV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path"],
+      "properties": {
+        "kind": {"enum": ["relative", "absolute"]},
+        "path": {"type": "string", "minLength": 1}
+      }
+    },
+    "ExecutionOptionsV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["require_wake", "no_gitignore", "wake"],
+      "properties": {
+        "require_wake": {"type": "boolean"},
+        "no_gitignore": {"type": "boolean"},
+        "wake": {"$ref": "#/$defs/WakeOptionsV1"},
+        "integrations": {"$ref": "#/$defs/IntegrationsV1"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"wake": {"properties": {"mode": {"const": "disabled"}}}}},
+          "then": {"properties": {"require_wake": {"const": false}}}
+        }
+      ]
+    },
+    "WakeOptionsV1": {
+      "oneOf": [
+        {"$ref": "#/$defs/EnabledWakeOptionsV1"},
+        {"$ref": "#/$defs/DisabledWakeOptionsV1"}
+      ]
+    },
+    "EnabledWakeOptionsV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {"const": "enabled"},
+        "injector": {"$ref": "#/$defs/InjectorOptionsV1"}
+      }
+    },
+    "DisabledWakeOptionsV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "audit_reason"],
+      "properties": {
+        "mode": {"const": "disabled"},
+        "audit_reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "InjectorOptionsV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["auto", "raw", "paste", "none"]},
+        "via": {"type": "string", "minLength": 1},
+        "args": {"type": "array", "items": {"type": "string"}}
+      },
+      "allOf": [
+        {
+          "if": {"required": ["args"]},
+          "then": {"required": ["via"]}
+        },
+        {
+          "if": {"properties": {"mode": {"const": "none"}}, "required": ["mode"]},
+          "then": {"not": {"anyOf": [{"required": ["via"]}, {"required": ["args"]}]}}
+        }
+      ]
+    },
+    "IntegrationsV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "symphony": {"$ref": "#/$defs/SymphonyOptionsV1"}
+      }
+    },
+    "SymphonyOptionsV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["events"],
+      "properties": {
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["after_create", "before_run", "after_run", "before_remove"]}
+        },
+        "workspace_key": {"type": "string"}
+      }
+    },
+    "TargetV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_root", "session_root", "session"],
+      "properties": {
+        "project_root": {"type": "string", "minLength": 1},
+        "session_root": {"type": "string", "minLength": 1},
+        "session": {"type": "string", "pattern": "^[a-z0-9_][a-z0-9_-]*$"}
+      }
+    },
+    "PrepareRequestV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_version", "target", "launcher", "intent"],
+      "properties": {
+        "request_version": {"const": 1},
+        "target": {"$ref": "#/$defs/TargetV1"},
+        "launcher": {"type": "string", "minLength": 1},
+        "intent": {"$ref": "#/$defs/LaunchIntentV1"}
+      }
+    },
+    "RequiredActionV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action_id", "kind", "allowed_decisions", "reason_code"],
+      "properties": {
+        "action_id": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["trust_confirmation", "stale_conversation_decision", "rebind_confirmation", "unsupported_capability_ack"]},
+        "handles": {"type": "array", "items": {"$ref": "#/$defs/Handle"}},
+        "resources": {"type": "array", "items": {"type": "string"}},
+        "allowed_decisions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["trust_exact_subject", "deny", "fresh_once", "abort", "close_old", "leave_old", "accept_degraded"]}
+        },
+        "reason_code": {"type": "string", "minLength": 1}
+      }
+    },
+    "CommandV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["argv", "cwd"],
+      "properties": {
+        "argv": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "cwd": {"type": "string", "minLength": 1},
+        "env_overlay": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "RosterDriftV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["desired", "present", "missing", "extra"],
+      "properties": {
+        "desired": {"type": "array", "items": {"$ref": "#/$defs/Handle"}},
+        "present": {"type": "array", "items": {"$ref": "#/$defs/Handle"}},
+        "missing": {"type": "array", "items": {"$ref": "#/$defs/Handle"}},
+        "extra": {"type": "array", "items": {"$ref": "#/$defs/Handle"}}
+      }
+    },
+    "ParticipantPreviewV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handle", "runnable", "planned_outcome"],
+      "properties": {
+        "handle": {"$ref": "#/$defs/Handle"},
+        "runnable": {"type": "boolean"},
+        "provider": {"type": "string"},
+        "command": {"$ref": "#/$defs/CommandV1"},
+        "resume_policy": {"enum": ["resume", "fresh", "disabled"]},
+        "execution": {"$ref": "#/$defs/ExecutionOptionsV1"},
+        "planned_outcome": {"type": "string", "minLength": 1}
+      }
+    },
+    "PreviewV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "backend", "profile", "participants", "roster"],
+      "properties": {
+        "target": {"$ref": "#/$defs/TargetV1"},
+        "backend": {"type": "string"},
+        "profile": {"type": "string"},
+        "participants": {"type": "array", "items": {"$ref": "#/$defs/ParticipantPreviewV1"}},
+        "roster": {"$ref": "#/$defs/RosterDriftV1"}
+      }
+    },
+    "ParticipantObservationV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handle", "mailbox", "runnable", "conversation", "execution", "resource"],
+      "properties": {
+        "handle": {"$ref": "#/$defs/Handle"},
+        "mailbox": {"type": "string"},
+        "runnable": {"type": "boolean"},
+        "conversation": {"type": "string"},
+        "execution": {"type": "string"},
+        "resource": {"type": "string"},
+        "reason_code": {"type": "string"}
+      }
+    },
+    "PrepareResultV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result_version", "outcome", "subject_digest", "plan_digest", "trust_digest", "required_actions", "preview", "observations"],
+      "properties": {
+        "result_version": {"const": 1},
+        "outcome": {"type": "string", "minLength": 1},
+        "reason": {"type": "string"},
+        "subject_digest": {"$ref": "#/$defs/Digest"},
+        "plan_digest": {"$ref": "#/$defs/Digest"},
+        "trust_digest": {"$ref": "#/$defs/Digest"},
+        "required_actions": {"type": "array", "items": {"$ref": "#/$defs/RequiredActionV1"}},
+        "preview": {"$ref": "#/$defs/PreviewV1"},
+        "observations": {"type": "array", "items": {"$ref": "#/$defs/ParticipantObservationV1"}}
+      }
+    },
+    "DecisionV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action_id", "choice"],
+      "properties": {
+        "action_id": {"type": "string", "minLength": 1},
+        "choice": {"enum": ["trust_exact_subject", "deny", "fresh_once", "abort", "close_old", "leave_old", "accept_degraded"]}
+      }
+    },
+    "ApplyRequestV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_version", "prepare", "subject_digest", "decisions"],
+      "properties": {
+        "request_version": {"const": 1},
+        "prepare": {"$ref": "#/$defs/PrepareRequestV1"},
+        "subject_digest": {"$ref": "#/$defs/Digest"},
+        "decisions": {"type": "array", "items": {"$ref": "#/$defs/DecisionV1"}}
+      }
+    },
+    "EvidenceRefV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_version", "id", "kind", "sha256", "observed_at"],
+      "properties": {
+        "evidence_version": {"const": 1},
+        "id": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/Digest"},
+        "observed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "ApplyResultV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result_version", "outcome", "subject_digest", "plan_digest", "trust_digest", "semantic_digest", "backend", "profile", "roster", "observations"],
+      "properties": {
+        "result_version": {"const": 1},
+        "outcome": {"type": "string", "minLength": 1},
+        "reason_code": {"type": "string"},
+        "subject_digest": {"$ref": "#/$defs/Digest"},
+        "plan_digest": {"$ref": "#/$defs/Digest"},
+        "trust_digest": {"$ref": "#/$defs/Digest"},
+        "semantic_digest": {"$ref": "#/$defs/Digest"},
+        "backend": {"type": "string"},
+        "profile": {"type": "string"},
+        "roster": {"$ref": "#/$defs/RosterDriftV1"},
+        "observations": {"type": "array", "items": {"$ref": "#/$defs/ParticipantObservationV1"}},
+        "commands": {"type": "array", "items": {"$ref": "#/$defs/CommandV1"}},
+        "follow_ups": {"type": "array", "items": {"$ref": "#/$defs/RequiredActionV1"}},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/EvidenceRefV1"}}
+      }
+    },
+    "LifecycleRequestV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_version", "target"],
+      "properties": {
+        "request_version": {"const": 1},
+        "target": {"$ref": "#/$defs/TargetV1"}
+      }
+    },
+    "InspectRequestV1": {"$ref": "#/$defs/LifecycleRequestV1"},
+    "FocusRequestV1": {"$ref": "#/$defs/LifecycleRequestV1"},
+    "CloseRequestV1": {"$ref": "#/$defs/LifecycleRequestV1"},
+    "LifecycleResultV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result_version", "outcome", "backend", "profile", "state", "observations"],
+      "properties": {
+        "result_version": {"const": 1},
+        "outcome": {"type": "string", "minLength": 1},
+        "reason_code": {"type": "string"},
+        "backend": {"type": "string"},
+        "profile": {"type": "string"},
+        "state": {"enum": ["present", "absent", "unknown"]},
+        "observations": {"type": "array", "items": {"$ref": "#/$defs/ParticipantObservationV1"}},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/EvidenceRefV1"}}
+      }
+    },
+    "InspectResultV1": {"$ref": "#/$defs/LifecycleResultV1"},
+    "FocusResultV1": {"$ref": "#/$defs/LifecycleResultV1"},
+    "CloseResultV1": {"$ref": "#/$defs/LifecycleResultV1"},
+    "CompatibilityV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_semver", "intent_versions", "result_versions", "features"],
+      "properties": {
+        "contract_semver": {"type": "string", "minLength": 1},
+        "intent_versions": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+        "result_versions": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+        "features": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "RequirementV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_semver", "intent_version", "result_version", "features"],
+      "properties": {
+        "contract_semver": {"type": "string", "minLength": 1},
+        "intent_version": {"type": "integer", "minimum": 1},
+        "result_version": {"type": "integer", "minimum": 1},
+        "features": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "NegotiatedV1": {
+      "$ref": "#/$defs/RequirementV1"
+    }
+  }
+}

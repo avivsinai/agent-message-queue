@@ -86,6 +86,63 @@ func ValidateCommittedConfig(adapter HarnessAdapter, request CommittedConfigRequ
 	return validator.ValidateCommittedConfig(request)
 }
 
+// ValidateStaticProviderInput validates caller-owned provider argv and
+// environment without resolving runtime identity or generating a plan. The
+// executable selects one built-in adapter by basename. Operator bypass flags
+// remain explicit static input, but are accepted only from that adapter's
+// fixed allow-list.
+func ValidateStaticProviderInput(executable string, args []string, env map[string]string) (string, error) {
+	if executable == "" || strings.TrimSpace(executable) != executable || strings.ContainsRune(executable, 0) {
+		return "", fmt.Errorf("executable is invalid")
+	}
+	provider := strings.ToLower(filepath.Base(executable))
+	if runtime.GOOS == "windows" {
+		provider = strings.TrimSuffix(provider, ".exe")
+	}
+	var envRules map[string]valueRule
+	var argRules map[string]argumentRule
+	var bypassAllowed map[string]struct{}
+	switch provider {
+	case ClaudeProvider:
+		envRules, argRules, bypassAllowed = claudeEnvRules(), claudeArgRules(), claudeBypassArgs()
+	case CodexProvider:
+		envRules, argRules, bypassAllowed = codexEnvRules(), codexArgRules(), codexBypassArgs()
+	default:
+		return "", fmt.Errorf("executable %q does not select an adapter-known provider", executable)
+	}
+	if err := validateStaticProviderArgs(args, argRules, bypassAllowed); err != nil {
+		return "", err
+	}
+	if err := validateCommittedEnv(env, envRules); err != nil {
+		return "", err
+	}
+	return provider, nil
+}
+
+func validateStaticProviderArgs(args []string, rules map[string]argumentRule, bypassAllowed map[string]struct{}) error {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if _, ok := bypassAllowed[arg]; ok {
+			continue
+		}
+		rule, ok := rules[arg]
+		if !ok {
+			return fmt.Errorf("static argument %q is not allowed by adapter grammar", arg)
+		}
+		if !rule.value {
+			continue
+		}
+		if i+1 >= len(args) {
+			return fmt.Errorf("static argument %q requires a value", arg)
+		}
+		i++
+		if rule.validate != nil && !rule.validate(args[i]) {
+			return fmt.Errorf("static argument %q has invalid value %q", arg, args[i])
+		}
+	}
+	return nil
+}
+
 type commandProbe interface {
 	LookPath(string) (string, error)
 	Output(context.Context, string, ...string) ([]byte, error)
