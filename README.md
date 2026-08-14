@@ -93,16 +93,7 @@ amq-keepalive --version
 amq-keepalive version
 ```
 
-Keepalive-managed wakes deliberately discard an ambient `AMQ_WAKE_OWNER` token
-so they remain ownerless and can outlive the short launcher that registered
-them. During startup, keepalive captures at most 16 KiB of child stderr in a
-private regular file and includes it in a pre-readiness exit error. This keeps
-actionable AMQ diagnostics visible without attaching a long-lived wake to the
-caller's terminal or to a pipe whose reader exits first.
-
-See [docs/amq-keepalive.md](docs/amq-keepalive.md) for adapters, launcher
-ordering, supervision, retirement, owner recovery, and the detached stderr
-drain contract.
+See [COOP.md](COOP.md#supervisor-recipes) for the operational guide.
 
 ## Quick Start
 
@@ -115,13 +106,13 @@ amq setup
 Detects supported agent CLIs and launcher preferences, previews the project
 declaration, then creates `.amqrc`, `.amq/launch.json`, local preferences,
 the default session, and roster mailboxes. Use `amq setup -y` only after an
-automation caller has accepted that preview. `amq coop init` remains the
-scriptable low-level provisioning command.
+automation caller has accepted that preview.
 
 ### 2. Launch or Resume a Session
 
 ```bash
 amq launch
+amq session create feature-x   # once, before the first named-session launch
 amq launch --session feature-x
 amq session resume feature-x
 ```
@@ -134,9 +125,9 @@ confirmation stored outside the worktree. Non-interactive or `--json` calls
 exit `6` until that digest is trusted. An unknown `session resume` name exits
 `3` and writes nothing.
 
-Wave A ships the `commands` backend. It prints complete `coop exec` commands
-and exits `6` because executing them is the remaining operator action. Run the
-emitted commands in separate terminals:
+The `commands` backend prints complete `coop exec` commands and exits `6`
+because executing them is the remaining operator action. Run the emitted
+commands in separate terminals:
 
 ```bash
 # Terminal 1 — Claude Code
@@ -146,16 +137,10 @@ amq coop exec claude
 amq coop exec codex
 ```
 
-Each command sets up the environment, starts wake notifications, and launches
-the agent. Wake treats terminal notification as an attempt, not delivery, and
-retries on a capped backoff (starting at 5s for input, 30s for attention-only)
-until the inbox makes durable progress; full diagnostics go to the private
-`agents/<agent>/.wake.log`, never to the agent's terminal. A receipt-aware
-integration using `--inject-via` can opt into `--retry-until injected` so a
-successful external injector suppresses further doorbell retries for an
-unchanged cohort; the default `--retry-until drained` waits for actual inbox
-progress instead. See [docs/wake-doorbell-acknowledgement.md](docs/wake-doorbell-acknowledgement.md)
-for the full retry ladder and acknowledgement contract.
+Each command sets up the session environment, starts wake notifications, and
+launches the agent. See [COOP.md](COOP.md#running-co-op-mode) for co-op
+operations and [the wake acknowledgement contract](docs/wake-doorbell-acknowledgement.md)
+for notification retries.
 
 > **First-message check:** start both agents before sending the test message.
 > A newly started wake deliberately baselines messages that were already
@@ -165,6 +150,10 @@ for the full retry ladder and acknowledgement contract.
 For isolated sessions (multiple pairs working on different features):
 
 ```bash
+amq session create feature-a
+amq launch --session feature-a
+
+# Run the emitted commands in separate terminals.
 amq coop exec --session feature-a claude
 amq coop exec --session feature-a codex
 amq coop exec --session feature-a grok     # Optional third peer
@@ -193,22 +182,9 @@ Run the appropriate append command once, then open a new terminal or source
 that startup file. Use the bare `eval` only when you intentionally want aliases
 in one already-open shell.
 
-`coop exec` auto-initializes `.agent-mail`/`.amqrc` at the worktree top when no
-eligible root exists (see [Global Root Fallback](#global-root-fallback) below);
-pass `--no-gitignore` or `--no-init` to opt out. Add `--require-wake` in
-managed launchers that should fail instead of launching the agent when the
-wake watcher cannot start — a fresh wake baselines messages already waiting
-(see the first-message check above), and `--require-wake` only accepts a wake
-that has proven itself ready, not merely reused.
-
-Launchers with a terminal-specific injector can add
-`--wake-inject-via /absolute/path/to/injector` plus repeated
-`--wake-inject-arg` values; the resulting claim survives an ordinary wake exit,
-so use `amq wake recover-owner` — not `amq wake repair` — if the owner process
-disappears unexpectedly. See
-[docs/wake-lifecycle.md](docs/wake-lifecycle.md) and
-[docs/wake-state-invariants.md](docs/wake-state-invariants.md) for the full
-injector-identity and ownership contract.
+`coop init` and direct `coop exec` provisioning remain available as low-level
+plumbing. See [COOP.md](COOP.md#low-level-provisioning) for those paths and
+advanced wake options; they are not a second project-onboarding flow.
 
 ### 3. Send & Receive
 
@@ -242,74 +218,11 @@ amq receipts list --me codex --msg-id <msg_id>
 amq reply --id <msg_id> --kind review_response --body "LGTM with comments"
 ```
 
-`amq read`, `amq drain`, and `amq monitor` now share the same strict header validation. If a message in `inbox/new` is corrupt or has malformed headers, the command moves it to DLQ and emits a `dlq` receipt instead of leaving it in place.
-
-`coop exec` and every shell-mode `amq env` invocation pin the terminal's exact
-root context with `AM_BASE_ROOT` plus `AM_SESSION`. For named sessions,
-`AM_BASE_ROOT` is the authorized parent; for sessionless contexts, it is the
-exact root and `AM_SESSION` is empty. `read`, `drain`, `monitor`, `watch`,
-`send`, `reply`, and all DLQ commands refuse a raw root that conflicts
-with that pin before reading, moving, or delivering mailbox state. An implicit
-participating command also refuses when the active pin conflicts with an
-initialized cwd-local queue discovered from a project `.amqrc` or repo-local
-`.agent-mail`; AMQ does not silently choose between the two roots. The narrow
-exception is a live identity-bound sessionless pin: when both identity tokens
-authenticate its exact root, that explicit context outranks ambient cwd
-discovery. Named, legacy, incomplete, stale, or mismatched pins still refuse.
-Otherwise, repin to the cwd-local queue, use deliberate `--session`/`--project`
-routing, or pass an explicit `--root` to confirm the active queue. Explicit
-roots remain subject to the ordinary pin checks. For deliberate raw-root access,
-`--ignore-session-pin` is accepted only together with a non-empty explicit
-`--root`; blank `--root` and `--session` values are usage errors. `list`
-remains a non-destructive inspection path: it warns on a pin mismatch but
-still lists the resolved mailbox. The exact base-backlog inspection path is
-quieter: an explicit `--root` equal to the current pin's own base root does
-not warn (and is identity-authenticated when identity tokens are present).
-Implicit, sibling, foreign, stale, and malformed contexts still warn.
-Unpinned scripts and CI retain the existing fail-open behavior.
-
-`amq doctor --root <path>` follows the same inspection-versus-mutation split:
-the explicit root selects the exact target but does not repin the shell or
-waive its session pin. Read-only inspection continues with a mismatch warning.
-`--fix-mailboxes` and `--ops --fix-wake-locks` refuse a mismatched target unless
-`--ignore-session-pin` is also supplied; that override requires an explicit
-non-empty `--root`. For a session whose roster lives only in its base, use
-`amq doctor --root <session> --base-root <base> --ignore-session-pin --fix-mailboxes`.
-`--base-root` is config authority only, must be the target itself or its direct
-parent, and never overrides the session pin.
-
-A missing mailbox is an error, not an empty inbox. When `drain` or `list --new`
-finds an actually empty inbox, it prints a stderr-only note if the same handle
-has pending messages in a sibling session, including an exact non-destructive
-`amq list --session <name> --me <handle> --new` command. `doctor --ops` reports
-the same condition as a `sibling_backlog` warning. When the active root is a
-session, an empty `drain` or `list --new` also notes unread mail for the same
-handle in the base root, while `doctor --ops` reports it as a `base_backlog`
-warning. Both include an exact non-destructive `amq list --root ...` command.
-In JSON output, `base_backlog` hints also include a structured `backlog` object
-with `root`, `current_session`, `agent`, `pending`, and `command`.
-The pin is an operational safety check, not access control: a local process can
-still repin the environment or use the explicit override.
-
-Git worktrees are isolated by default when the project root is relative (for
-example `{"root":".agent-mail"}`): the same session name resolves beneath each
-worktree, so two agents can appear to share `collab` while reading different
-mailboxes. `amq doctor --ops` warns when a linked worktree uses this local
-layout and when a peer has fresher presence in the same session under another
-worktree root. A `send --wait-for` timeout names its delivery root/session and
-points to that diagnostic.
-
-If agents in several worktrees should share one mailbox, give all of them the
-same absolute base root. Use an absolute, machine-local `.amqrc` value such as
-`{"root":"/absolute/path/to/shared/.agent-mail"}`, or remove the project-relative
-`.amqrc` and export `AMQ_GLOBAL_ROOT=/absolute/path/to/shared/.agent-mail`.
-Per-worktree isolation remains the default when sharing is not intended. A Git
-worktree without an eligible root does not implicitly inherit
-`~/.amqrc`; participating commands refuse that ambiguous route so a global
-default cannot silently select a different project's mailbox. `coop init`
-explicitly creates the worktree-local queue at its top; `coop exec` does the
-same when no eligible root exists. Bare repositories still require a worktree
-or explicit `--root`.
+`read`, `drain`, and `monitor` apply the same strict message validation. Invalid
+messages move to DLQ and produce a `dlq` receipt. Participating shells also pin
+their exact session context and refuse mismatched mailbox operations. See
+[Session routing and safety](docs/session-routing.md) for routing, raw-root
+overrides, worktree isolation, doctor repair gates, and backlog discovery.
 
 ### 4. Inspect Health
 
@@ -620,14 +533,16 @@ Building something on AMQ? Open an issue or PR to be listed here.
 ## Documentation
 
 - [INSTALL.md](INSTALL.md) — Alternative installation methods
-- [docs/amq-keepalive.md](docs/amq-keepalive.md) — Keepalive operations, lifecycle, and launcher integration
+- [docs/amq-keepalive.md](docs/amq-keepalive.md) — Keepalive command and safety reference
+- [docs/session-routing.md](docs/session-routing.md) — Session selection, routing guards, and worktree behavior
+- [docs/wake-operations.md](docs/wake-operations.md) — Wake inspection, repair, recovery, and retirement
 - [docs/wake-lifecycle.md](docs/wake-lifecycle.md) — Wake lock/target state contract, self-upgrade, log retention, JSON schema, injector identity
 - [docs/wake-doorbell-acknowledgement.md](docs/wake-doorbell-acknowledgement.md) — Wake retry ladder and `--retry-until` acknowledgement contract
 - [docs/wake-state-invariants.md](docs/wake-state-invariants.md) — Wake artifact ownership, lock states, and quarantine invariants
 - [docs/adapter-contract.md](docs/adapter-contract.md) — Formal v1 adapter contract for integration messages
 - [docs/adr-layer-extensions.md](docs/adr-layer-extensions.md) — ADR for stable layer extension surfaces
 - [docs/trace.md](docs/trace.md) — Read-only trace contract and evidence limits
-- [COOP.md](COOP.md) — Co-op mode protocol & best practices
+- [COOP.md](COOP.md) — Co-op workflow and supervisor operations
 - [CLAUDE.md](CLAUDE.md) — Agent instructions, CLI reference, architecture
 
 ## Development
