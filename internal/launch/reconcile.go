@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -291,10 +292,23 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 				return result, err
 			}
 		}
-		create, err = backend.Create(CreateRequest{Session: request.Session, Plan: plan, AMQPath: request.AMQPath, Root: request.Root})
+		amqExecutable, err := resolveLaunchAMQExecutable(request.AMQPath)
+		if err != nil {
+			return result, err
+		}
+		if err := writeExecutionTickets(request, lease, planned, amqExecutable); err != nil {
+			return result, err
+		}
+		create, err = backend.Create(CreateRequest{
+			ProjectRoot: request.ProjectRoot, Session: request.Session, Plan: plan,
+			AMQPath: amqExecutable, Root: request.Root,
+		})
 		if err != nil {
 			var definite *DefinitePreCreateError
 			if journalActive && errors.As(err, &definite) {
+				if clearErr := removeExecutionTickets(request.Root, lease, planned); clearErr != nil {
+					return result, errors.Join(err, clearErr)
+				}
 				if clearErr := ClearJournal(request.Root, lease, journal); clearErr != nil {
 					return result, errors.Join(err, clearErr)
 				}
@@ -309,11 +323,6 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		}
 	}
 	result.Outcome, result.Commands = create.Outcome, create.Commands
-	if create.Outcome == OutcomeCommandsEmitted {
-		if err := writeExecutionTickets(request, lease, planned); err != nil {
-			return result, err
-		}
-	}
 	var candidate *BindingRecord
 	if create.Outcome == OutcomeCreated {
 		if journalActive && journal.Phase == JournalCreated {
@@ -583,11 +592,8 @@ func plannedConversations(planned []plannedAgent) []ConversationRecord {
 	return records
 }
 
-func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []plannedAgent) error {
-	amqPath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve current amq executable: %w", err)
-	}
+func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []plannedAgent, amqPath string) error {
+	written := make([]plannedAgent, 0, len(planned))
 	for _, agent := range planned {
 		ticket, err := NewExecutionTicket(ExecutionTicketRequest{
 			Handle: agent.plan.Handle, LaunchNonce: agent.plan.LaunchNonce,
@@ -597,13 +603,41 @@ func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []pla
 			TargetArgv: agent.plan.Argv, TargetEnv: agent.plan.EnvOverlay,
 		})
 		if err != nil {
-			return fmt.Errorf("build execution ticket for %s: %w", agent.plan.Handle, err)
+			return errors.Join(fmt.Errorf("build execution ticket for %s: %w", agent.plan.Handle, err), removeExecutionTickets(request.Root, lease, written))
 		}
 		if err := WriteExecutionTicket(request.Root, lease, ticket); err != nil {
-			return fmt.Errorf("write execution ticket for %s: %w", agent.plan.Handle, err)
+			return errors.Join(fmt.Errorf("write execution ticket for %s: %w", agent.plan.Handle, err), removeExecutionTickets(request.Root, lease, append(written, agent)))
 		}
+		written = append(written, agent)
 	}
 	return nil
+}
+
+func resolveLaunchAMQExecutable(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		path, err := os.Executable()
+		if err != nil {
+			return "", fmt.Errorf("resolve current amq executable: %w", err)
+		}
+		value = path
+	}
+	path, err := exec.LookPath(value)
+	if err != nil {
+		return "", fmt.Errorf("resolve amq executable: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve amq executable identity: %w", err)
+	}
+	return resolved, nil
+}
+
+func removeExecutionTickets(root *fsq.DeliveryRoot, lease *Lease, planned []plannedAgent) error {
+	var result error
+	for _, agent := range planned {
+		result = errors.Join(result, RemoveExecutionTicket(root, lease, agent.plan.Handle, agent.plan.LaunchNonce))
+	}
+	return result
 }
 
 func commitRecoveredJournal(request ReconcileRequest, lease *Lease, journal LaunchJournal) error {

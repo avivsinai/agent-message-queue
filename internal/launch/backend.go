@@ -58,6 +58,7 @@ const (
 	OutcomeActionRequired  Outcome = "action_required"
 	OutcomeUnsupported     Outcome = "unsupported"
 	OutcomeAttached        Outcome = "attached"
+	OutcomeClosed          Outcome = "closed"
 )
 
 type InspectStatus string
@@ -139,10 +140,11 @@ func (d DetectResult) Validate() error {
 }
 
 type CreateRequest struct {
-	Session string
-	Plan    Plan
-	AMQPath string
-	Root    *fsq.DeliveryRoot
+	ProjectRoot string
+	Session     string
+	Plan        Plan
+	AMQPath     string
+	Root        *fsq.DeliveryRoot
 }
 
 type EmittedCommand struct {

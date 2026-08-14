@@ -250,6 +250,28 @@ func LoadExecutionTicket(root *fsq.DeliveryRoot, handle string) (ExecutionTicket
 	return ticket, nil
 }
 
+// RemoveExecutionTicket removes only the exact pending generation while the
+// caller still holds both the launch lease and the handle lock.
+func RemoveExecutionTicket(root *fsq.DeliveryRoot, lease *Lease, handle, nonce string) error {
+	if err := lease.authorizeWrite(root); err != nil {
+		return err
+	}
+	if !lease.holdsHandle(handle) {
+		return fmt.Errorf("launch lease does not hold handle %q", handle)
+	}
+	ticket, err := LoadExecutionTicket(root, handle)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if ticket.LaunchNonce != nonce || nonce != lease.LaunchNonce() {
+		return fmt.Errorf("execution ticket generation changed before removal")
+	}
+	return root.Remove(filepath.Join(executionDirectory, handle+".json"))
+}
+
 // CompareAndSwapExecutionTicket changes one ticket state while the caller's
 // live lease and handle lock exclude competing launch/reconcile operations.
 func CompareAndSwapExecutionTicket(root *fsq.DeliveryRoot, lease *Lease, handle string, expected ExecutionState, next ExecutionState, reason string) (ExecutionTicket, error) {
