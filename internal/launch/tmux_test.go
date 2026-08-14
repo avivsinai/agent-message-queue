@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,11 +32,7 @@ func TestTmuxBackendLifecycleAndRecovery(t *testing.T) {
 	}}
 	backend := NewTmuxBackend("tmux")
 	backend.socketName = fmt.Sprintf("amq-test-%d-%d", os.Getpid(), time.Now().UnixNano())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
-		defer cancel()
-		_, _ = backend.run(ctx, backend.args("kill-server")...)
-	})
+	t.Cleanup(func() { stopTmuxTestServer(t, backend) })
 
 	detect := backend.Detect()
 	if !detect.Available {
@@ -121,11 +118,7 @@ func TestTmuxBackendConformance(t *testing.T) {
 	backend := NewTmuxBackend("tmux")
 	backend.socketName = fmt.Sprintf("amq-conformance-%d-%d", os.Getpid(), time.Now().UnixNano())
 	backend.focus = func(context.Context, string) error { return nil }
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
-		defer cancel()
-		_, _ = backend.run(ctx, backend.args("kill-server")...)
-	})
+	t.Cleanup(func() { stopTmuxTestServer(t, backend) })
 	RunConformance(t, backend)
 }
 
@@ -136,16 +129,14 @@ func TestTmuxReconcileCrashRestartThenRelaunchResumes(t *testing.T) {
 	backend := NewTmuxBackend("tmux")
 	backend.socketName = fmt.Sprintf("amq-restart-%d-%d", os.Getpid(), time.Now().UnixNano())
 	backend.focus = func(context.Context, string) error { return nil }
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
-		defer cancel()
-		_, _ = backend.run(ctx, backend.args("kill-server")...)
-	})
 	req := reconcileFixture(t, backend)
 	fakeAMQ := filepath.Join(t.TempDir(), "amq")
 	if err := os.WriteFile(fakeAMQ, []byte("#!/bin/sh\nexec /bin/sleep 60\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Register after every TempDir used by the live pane so process teardown
+	// runs before Go removes those directories.
+	t.Cleanup(func() { stopTmuxTestServer(t, backend) })
 	req.AMQPath = fakeAMQ
 	req.HostIdentity = backend.Detect().HostIdentity
 	crash := fmt.Errorf("injected process crash")
@@ -201,11 +192,7 @@ func TestTmuxBackendReclaimReportsExactPartialInventory(t *testing.T) {
 	}}
 	backend := NewTmuxBackend("tmux")
 	backend.socketName = fmt.Sprintf("amq-partial-%d-%d", os.Getpid(), time.Now().UnixNano())
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
-		defer cancel()
-		_, _ = backend.run(ctx, backend.args("kill-server")...)
-	})
+	t.Cleanup(func() { stopTmuxTestServer(t, backend) })
 	created, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: fakeAMQ, Root: root})
 	if err != nil {
 		t.Fatal(err)
@@ -308,4 +295,45 @@ func tmuxTestRoot(t *testing.T, handles ...string) *fsq.DeliveryRoot {
 		t.Fatalf("repair mailbox root: %#v", repaired)
 	}
 	return root
+}
+
+func stopTmuxTestServer(t *testing.T, backend *TmuxBackend) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	defer cancel()
+	output, err := backend.run(ctx, backend.args("list-panes", "-a", "-F", "#{pane_pid}")...)
+	if err != nil {
+		return
+	}
+	pids := make([]int, 0, 2)
+	for _, field := range strings.Fields(output) {
+		pid, parseErr := strconv.Atoi(field)
+		if parseErr != nil || pid <= 0 {
+			t.Fatalf("parse tmux test pane pid %q", field)
+		}
+		pids = append(pids, pid)
+	}
+	if len(pids) == 0 {
+		t.Fatal("tmux test server reported no panes")
+	}
+	if output, err := backend.run(ctx, backend.args("kill-server")...); err != nil {
+		t.Fatalf("kill tmux test server: %v\n%s", err, output)
+	}
+	deadline := time.Now().Add(tmuxCommandTimeout)
+	for {
+		live := pids[:0]
+		for _, pid := range pids {
+			if processAlive(pid) {
+				live = append(live, pid)
+			}
+		}
+		pids = live
+		if len(pids) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tmux test teardown left pane pids alive after %s: %v", tmuxCommandTimeout, pids)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
