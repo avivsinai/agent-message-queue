@@ -35,3 +35,23 @@ func StableTreeIdentityInfo(info os.FileInfo) (string, error) {
 	}
 	return platformStableTreeIdentity("", info)
 }
+
+// StableFileIdentity returns an opaque physical identity for one regular file.
+// It is used to pin executable targets across a delayed launch boundary.
+func StableFileIdentity(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("empty file path")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("file identity requires a regular file: %s", abs)
+	}
+	return platformStableTreeIdentity(abs, info)
+}

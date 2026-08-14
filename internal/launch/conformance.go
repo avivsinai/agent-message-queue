@@ -35,7 +35,7 @@ func RunConformance(t *testing.T, b Backend) {
 				switch cap {
 				case CapPlanOnly:
 					assertPlanOnlyCreate(t, b, root)
-				case CapCreate, CapInspect, CapClose, CapFocus:
+				case CapCreate, CapInspect, CapClose, CapFocus, CapReclaim:
 					t.Fatal("managed capability declared but this skeleton has no managed assertion yet")
 				default:
 					t.Fatalf("unknown declared capability %q", cap)

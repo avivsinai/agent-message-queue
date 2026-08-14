@@ -1,0 +1,120 @@
+//go:build darwin || linux
+
+package cli
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
+)
+
+func TestManagedLaunchReexecPreservesPIDAndTargetArgv(t *testing.T) {
+	sentinel := errors.New("exec sentinel")
+	old := coopExecProcess
+	t.Cleanup(func() { coopExecProcess = old })
+	var gotPath string
+	var gotArgv, gotEnv []string
+	coopExecProcess = func(path string, argv, env []string) error {
+		gotPath = path
+		gotArgv = slices.Clone(argv)
+		gotEnv = slices.Clone(env)
+		return sentinel
+	}
+	target := []string{"/opt/provider", "--resume", "conversation"}
+	env := []string{"AM_ROOT=/queue", "TOKEN=value"}
+	err := reexecManagedLaunchWrapper("/queue", "codex", "11111111-1111-4111-8111-111111111111", target[0], target, env)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("reexec error = %v, want sentinel", err)
+	}
+	if gotPath == "" || len(gotArgv) < 12 || gotArgv[1] != "__launch-exec" {
+		t.Fatalf("wrapper exec = path %q argv %#v", gotPath, gotArgv)
+	}
+	dash := slices.Index(gotArgv, "--")
+	if dash < 0 || !slices.Equal(gotArgv[dash+1:], target) {
+		t.Fatalf("wrapper target tail = %#v, want %#v", gotArgv[dash+1:], target)
+	}
+	if !slices.Equal(gotEnv, env) {
+		t.Fatalf("wrapper env = %#v, want %#v", gotEnv, env)
+	}
+}
+
+func TestPrivateLaunchWrapperAcknowledgesThenRevertsFailedExec(t *testing.T) {
+	project := t.TempDir()
+	session := filepath.Join(project, "session")
+	if err := fsq.EnsureRootDirs(session); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(session, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(session, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	provider := filepath.Join(t.TempDir(), "provider")
+	if err := os.WriteFile(provider, []byte("provider"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	amqExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := "77777777-7777-4777-8777-777777777777"
+	lease, err := launch.AcquireLease(root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("claude"); err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{
+		Handle: "claude", LaunchNonce: nonce, Mode: launch.AdapterModeMint,
+		Provider: launch.ClaudeProvider, ConversationID: nonce,
+		ProjectRoot: project, SessionRoot: session, Cwd: project,
+		ProviderExecutable: provider, AMQExecutable: amqExecutable, TargetArgv: []string{provider},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := launch.WriteExecutionTicket(root, lease, ticket); err != nil {
+		t.Fatal(err)
+	}
+	if err := launch.WriteConversation(root, lease, launch.ConversationRecord{
+		Version: launch.ConversationVersion, Handle: "claude", State: launch.CapturePending, LaunchNonce: nonce,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	oldCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(project); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldCwd) })
+	sentinel := errors.New("provider exec failed")
+	oldExec := launchExecProcess
+	launchExecProcess = func(string, []string, []string) error { return sentinel }
+	t.Cleanup(func() { launchExecProcess = oldExec })
+	err = runLaunchExec([]string{"--root", session, "--handle", "claude", "--nonce", nonce, "--target", provider, "--", provider})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("wrapper error = %v, want provider exec failure", err)
+	}
+	record, err := launch.LoadConversation(root, "claude")
+	if err != nil || record.State != launch.CapturePending || record.Reason != "spawn_failed" {
+		t.Fatalf("reverted record = %#v, %v", record, err)
+	}
+}

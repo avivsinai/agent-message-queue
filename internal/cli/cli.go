@@ -19,6 +19,11 @@ func Run(args []string, version string) error {
 		version = "dev"
 	}
 	cliVersion = version
+	// Private PID-preserving wrapper for commands emitted by amq launch. It is
+	// intentionally dispatched before help, registry, and update handling.
+	if len(args) > 0 && args[0] == "__launch-exec" {
+		return runLaunchExec(args[1:])
+	}
 
 	args, noUpdate := stripNoUpdateCheckArgs(args)
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {

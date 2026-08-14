@@ -59,6 +59,9 @@ func TestCommandsCreateEmitsCoopExecAndRoundTripsPlan(t *testing.T) {
 			t.Fatalf("command[%d] metadata = %#v", i, cmd)
 		}
 		assertCoopExecGrammar(t, cmd.Argv, agent.Handle, agent.Argv)
+		if cmd.Env[InternalLaunchNonceEnv] != agent.LaunchNonce {
+			t.Fatalf("command[%d] managed launch nonce = %q, want %q", i, cmd.Env[InternalLaunchNonceEnv], agent.LaunchNonce)
+		}
 		if !strings.Contains(cmd.Line, "coop exec") || !strings.Contains(cmd.Line, agent.Handle) {
 			t.Fatalf("command[%d] line missing coop exec: %s", i, cmd.Line)
 		}

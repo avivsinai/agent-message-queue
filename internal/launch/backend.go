@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"context"
 	"fmt"
 	"slices"
 
@@ -24,6 +25,13 @@ type BackendFocuser interface {
 	Focus(FocusRequest) (FocusResult, error)
 }
 
+// BackendReclaimer is the optional recovery surface for a managed resource
+// that may have been created before its authoritative binding was committed.
+// It must inspect only the exact journal generation and must not mutate it.
+type BackendReclaimer interface {
+	Reclaim(ReclaimRequest) (ReclaimResult, error)
+}
+
 type Capability string
 
 const (
@@ -38,6 +46,8 @@ const (
 	CapClose Capability = "close"
 	// CapFocus means the backend can attach to a present layout.
 	CapFocus Capability = "focus"
+	// CapReclaim means the backend can prove the state of a journaled create.
+	CapReclaim Capability = "reclaim"
 )
 
 type Outcome string
@@ -188,3 +198,36 @@ type FocusResult struct {
 	Outcome Outcome `json:"outcome"`
 	Reason  string  `json:"reason,omitempty"`
 }
+
+type ReclaimStatus string
+
+const (
+	ReclaimAbsent     ReclaimStatus = "absent"
+	ReclaimAdoptable  ReclaimStatus = "adoptable"
+	ReclaimIncomplete ReclaimStatus = "incomplete"
+	ReclaimUnknown    ReclaimStatus = "unknown"
+	ReclaimForeign    ReclaimStatus = "foreign"
+)
+
+type ReclaimRequest struct {
+	Context context.Context
+	Journal LaunchJournal
+	Root    *fsq.DeliveryRoot
+}
+
+type ReclaimResult struct {
+	Status          ReclaimStatus                `json:"status"`
+	Evidence        string                       `json:"evidence"`
+	Resources       []ResourceIdentity           `json:"resources"`
+	Binding         BindingRecord                `json:"binding,omitempty"`
+	CaptureEvidence map[string][]CaptureEvidence `json:"-"`
+}
+
+// DefinitePreCreateError means Create proved that it made no backend resource.
+// All other Create errors are uncertain and retain the journal for recovery.
+type DefinitePreCreateError struct{ Err error }
+
+func (e *DefinitePreCreateError) Error() string {
+	return fmt.Sprintf("create refused before resource creation: %v", e.Err)
+}
+func (e *DefinitePreCreateError) Unwrap() error { return e.Err }

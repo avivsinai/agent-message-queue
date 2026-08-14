@@ -103,6 +103,11 @@ from another or weaken an uncertain state. See [Wake operations](docs/wake-opera
 [wake state invariants](docs/wake-state-invariants.md), and the
 [doorbell acknowledgement policy](docs/wake-doorbell-acknowledgement.md).
 
+**Managed launch recovery**: A mode-0600 journal closes the create-before-binding
+crash window. A matching binding is authoritative; otherwise the backend must
+prove absent or adoptable state. Uncertain or partial state is action-required
+and preserved. See [Managed launch recovery](docs/launch-recovery.md).
+
 **Extension metadata**: Higher layers own data below
 `<AM_ROOT>/extensions/<layer>/` or
 `<AM_ROOT>/agents/<handle>/extensions/<layer>/`. AMQ does not execute extension
@@ -123,7 +128,7 @@ workflow for each surface.
 | Delivery proof | `receipts list`, `receipts wait` | Inspect consumer-local `drained` and `dlq` outcomes. |
 | Live waits | `watch`, `monitor` | Wait for arrivals; `monitor` also drains and emits receipts. |
 | Routing | `route explain`, `presence set`, `presence list` | Explain a route and publish or inspect advisory presence. |
-| Health | `doctor`, `cleanup`, `upgrade` | Diagnose, perform explicit safe cleanup, or update the binary. |
+| Health | `doctor`, `cleanup`, `upgrade` | Diagnose, perform explicit safe cleanup (including exact stuck launch journals), or update the binary. |
 | Wake | `wake`, `wake check`, `wake repair`, `wake recover-owner`, `wake retire` | Notify, inspect capability, and make identity-safe lifecycle changes. |
 | DLQ | `dlq list`, `dlq read`, `dlq retry`, `dlq purge` | Inspect and explicitly recover or purge corrupt messages. |
 | Low-level provisioning | `init`, `coop init`, `coop exec` | Create raw queues or enter an agent process. See [COOP.md](COOP.md). |

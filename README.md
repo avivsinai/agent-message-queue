@@ -123,7 +123,8 @@ It never uses a provider's "last" or "continue" heuristic. The first semantic
 plan, and each semantic plan change, requires an interactive trust
 confirmation stored outside the worktree. Non-interactive or `--json` calls
 exit `6` until that digest is trusted. An unknown `session resume` name exits
-`3` and writes nothing.
+`3` and writes nothing. Managed backends use a fail-closed recovery journal;
+see [Managed launch recovery](docs/launch-recovery.md).
 
 The `commands` backend prints complete `coop exec` commands and exits `6`
 because executing them is the remaining operator action. Run the emitted
@@ -477,7 +478,7 @@ Canonical schema-selecting diagnostic forms:
 ```text
 amq wake check --me <agent> [--root <path>] [--strict] [--json] [--json-schema <1|2>]
 amq doctor [--root <path>] [--base-root <path>] [--ignore-session-pin] [--ops] [--fix-wake-locks] [--fix-mailboxes] [--json] [--json-schema <1|2>]
-amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--dry-run] [--yes]
+amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--launch-journal --root <session-root>] [--dry-run] [--yes]
 ```
 
 `--json-schema` requires `--json`.
