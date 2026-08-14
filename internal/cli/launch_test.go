@@ -15,23 +15,37 @@ import (
 )
 
 type launchFixtureAdapter struct {
-	available bool
-	reason    string
+	name               string
+	mode               launch.AdapterMode
+	available          bool
+	captureUnsupported bool
+	reason             string
 }
 
-func (launchFixtureAdapter) Name() string               { return launch.ClaudeProvider }
-func (launchFixtureAdapter) Mode() launch.AdapterMode   { return launch.AdapterModeMint }
+func (a launchFixtureAdapter) Name() string {
+	if a.name != "" {
+		return a.name
+	}
+	return launch.ClaudeProvider
+}
+func (a launchFixtureAdapter) Mode() launch.AdapterMode {
+	if a.mode != "" {
+		return a.mode
+	}
+	return launch.AdapterModeMint
+}
 func (launchFixtureAdapter) CommittedEnvKeys() []string { return nil }
 func (a launchFixtureAdapter) Capabilities(context.Context) launch.AdapterCapabilities {
 	return launch.AdapterCapabilities{
-		Provider: launch.ClaudeProvider, Mode: launch.AdapterModeMint, Available: a.available,
-		ProviderVersion: "test", Fresh: a.available, Resume: a.available, Reason: a.reason,
+		Provider: a.Name(), Mode: a.Mode(), Available: a.available,
+		ProviderVersion: "test", Fresh: a.available, Resume: a.available,
+		Capture: a.available && a.Mode() == launch.AdapterModeCapture && !a.captureUnsupported, Reason: a.reason,
 	}
 }
-func (launchFixtureAdapter) PlanFresh(req launch.PlanRequest) (launch.AgentPlan, error) {
+func (a launchFixtureAdapter) PlanFresh(req launch.PlanRequest) (launch.AgentPlan, error) {
 	return launch.AgentPlan{
 		Handle: req.Handle, Argv: []string{"/usr/bin/true", req.LaunchNonce}, Cwd: req.Cwd,
-		AdapterMode: launch.AdapterModeMint, ResumePolicy: req.ResumePolicy,
+		AdapterMode: a.Mode(), ResumePolicy: req.ResumePolicy,
 		LaunchNonce: req.LaunchNonce, ConversationID: req.LaunchNonce,
 		DynamicArgv: []launch.DynamicArg{{Index: 1, Kind: launch.DynamicArgLaunchNonce}},
 	}, nil
@@ -237,6 +251,42 @@ func TestLaunchMissingBinaryIsStructuredDisposition(t *testing.T) {
 	}
 	if len(result.Agents) != 1 || result.Agents[0].ConversationDisposition != launch.DispositionUnsupported || result.Agents[0].Reason != "executable_not_found" {
 		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestLaunchCaptureUnsupportedIsActionRequiredBeforeEmission(t *testing.T) {
+	project, _ := launchCLIFixture(t, "collab")
+	root := filepath.Join(project, defaultCoopRoot, "collab")
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := launch.ProjectConfig{
+		Schema: launch.ProjectConfigSchema, DefaultSession: "collab", Layout: launch.LayoutIntent{Type: launch.LayoutColumns},
+		Agents: []launch.ProjectAgentConfig{{Handle: "codex", Adapter: launch.CodexProvider, Command: []string{launch.CodexProvider}, ResumePolicy: launch.ResumeEnabled}},
+	}
+	data, err := launch.MarshalProjectConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, setupConfigPath), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launchAdapters = func(launch.ProjectConfig) map[string]launch.HarnessAdapter {
+		return map[string]launch.HarnessAdapter{launch.CodexProvider: launchFixtureAdapter{
+			name: launch.CodexProvider, mode: launch.AdapterModeCapture, available: true,
+			captureUnsupported: true, reason: "capture_version_unsupported",
+		}}
+	}
+
+	stdout, _, err := captureEnvOutput(t, func() error { return runLaunch(nil) })
+	if GetExitCode(err) != ExitActionRequired {
+		t.Fatalf("exit=%d err=%v output=%s", GetExitCode(err), err, stdout)
+	}
+	if !strings.Contains(stdout, "codex: action_required (capture_version_unsupported)") || strings.Contains(stdout, "coop exec") {
+		t.Fatalf("capture refusal output=%q", stdout)
+	}
+	if _, err := os.Stat(launch.ConversationPath(root, "codex")); !os.IsNotExist(err) {
+		t.Fatalf("capture refusal wrote conversation state: %v", err)
 	}
 }
 

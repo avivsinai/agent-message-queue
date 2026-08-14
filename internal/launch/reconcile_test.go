@@ -12,10 +12,13 @@ import (
 )
 
 type reconcileAdapter struct {
-	name      string
-	mode      AdapterMode
-	available bool
-	reason    string
+	name               string
+	mode               AdapterMode
+	available          bool
+	reason             string
+	freshUnsupported   bool
+	resumeUnsupported  bool
+	captureUnsupported bool
 }
 
 func (a reconcileAdapter) Name() string               { return a.name }
@@ -24,10 +27,90 @@ func (a reconcileAdapter) CommittedEnvKeys() []string { return nil }
 func (a reconcileAdapter) Capabilities(context.Context) AdapterCapabilities {
 	return AdapterCapabilities{
 		Provider: a.name, Mode: a.mode, Available: a.available,
-		ProviderVersion: "test", Fresh: a.available, Resume: a.available,
-		Capture: a.available && a.mode == AdapterModeCapture, Reason: a.reason,
+		ProviderVersion: "test", Fresh: a.available && !a.freshUnsupported,
+		Resume:  a.available && !a.resumeUnsupported,
+		Capture: a.available && a.mode == AdapterModeCapture && !a.captureUnsupported, Reason: a.reason,
 	}
 }
+
+func TestReconcileCaptureFreshRequiresFreshAndCaptureCapabilities(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		adapter    reconcileAdapter
+		wantReason string
+	}{
+		{name: "fresh missing", adapter: reconcileAdapter{freshUnsupported: true}, wantReason: "fresh_capability_unsupported"},
+		{name: "capture missing", adapter: reconcileAdapter{captureUnsupported: true, reason: "capture_version_unsupported"}, wantReason: "capture_version_unsupported"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req := reconcileFixture(t, Commands{})
+			req.Config.Agents[0].Adapter = CodexProvider
+			req.Config.Agents[0].Command[0] = CodexProvider
+			test.adapter.name, test.adapter.mode, test.adapter.available = CodexProvider, AdapterModeCapture, true
+			req.Adapters = map[string]HarnessAdapter{CodexProvider: test.adapter}
+			result, err := Reconcile(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.AggregateCode != 6 || result.Outcome != OutcomeActionRequired || len(result.Commands) != 0 || len(result.Agents) != 1 ||
+				result.Agents[0].ConversationDisposition != DispositionActionRequired || result.Agents[0].Reason != test.wantReason {
+				t.Fatalf("unsupported capture result=%#v", result)
+			}
+			if _, err := LoadConversation(req.Root, "claude"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unsupported capture wrote conversation state: %v", err)
+			}
+			if _, err := LoadExecutionTicket(req.Root, "claude"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unsupported capture wrote execution ticket: %v", err)
+			}
+		})
+	}
+}
+
+func TestReconcileCaptureReadyResumeRequiresResumeAlone(t *testing.T) {
+	req := reconcileFixture(t, Commands{})
+	req.Config.Agents[0].Adapter = CodexProvider
+	req.Config.Agents[0].Command[0] = CodexProvider
+	req.Adapters = map[string]HarnessAdapter{CodexProvider: reconcileAdapter{
+		name: CodexProvider, mode: AdapterModeCapture, available: true,
+		captureUnsupported: true, reason: "capture_version_unsupported",
+	}}
+	writeReconcileConversation(t, req, ConversationRecord{
+		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
+		Identity: ConversationIdentity{Provider: CodexProvider, ID: testConversationID}, LaunchNonce: testLaunchNonce,
+		ExecutionEvidence: reconcileExecutionEvidence(&reconcileBackend{name: CommandsBackendName}, testLaunchNonce),
+	})
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AggregateCode != 6 || result.Outcome != OutcomeCommandsEmitted || len(result.Commands) != 1 ||
+		result.Agents[0].ConversationDisposition != DispositionResumed || result.Plan == nil || result.Plan.Agents[0].ConversationID != testConversationID {
+		t.Fatalf("resume-only capability result=%#v", result)
+	}
+}
+
+func TestReconcileCaptureReadyRefusesWithoutResumeCapability(t *testing.T) {
+	req := reconcileFixture(t, Commands{})
+	req.Config.Agents[0].Adapter = CodexProvider
+	req.Config.Agents[0].Command[0] = CodexProvider
+	req.Adapters = map[string]HarnessAdapter{CodexProvider: reconcileAdapter{
+		name: CodexProvider, mode: AdapterModeCapture, available: true, resumeUnsupported: true,
+	}}
+	writeReconcileConversation(t, req, ConversationRecord{
+		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
+		Identity: ConversationIdentity{Provider: CodexProvider, ID: testConversationID}, LaunchNonce: testLaunchNonce,
+		ExecutionEvidence: reconcileExecutionEvidence(&reconcileBackend{name: CommandsBackendName}, testLaunchNonce),
+	})
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AggregateCode != 6 || result.Outcome != OutcomeActionRequired || len(result.Commands) != 0 ||
+		result.Agents[0].ConversationDisposition != DispositionActionRequired || result.Agents[0].Reason != "resume_capability_unsupported" {
+		t.Fatalf("unsupported resume result=%#v", result)
+	}
+}
+
 func (a reconcileAdapter) PlanFresh(req PlanRequest) (AgentPlan, error) {
 	plan := AgentPlan{
 		Handle: req.Handle, Argv: []string{"/usr/bin/true", req.LaunchNonce}, Cwd: req.Cwd,
