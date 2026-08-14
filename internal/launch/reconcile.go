@@ -580,9 +580,9 @@ func plannedConversations(planned []plannedAgent) []ConversationRecord {
 }
 
 func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []plannedAgent) error {
-	amqPath := request.AMQPath
-	if strings.TrimSpace(amqPath) == "" {
-		amqPath = "amq"
+	amqPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve current amq executable: %w", err)
 	}
 	for _, agent := range planned {
 		ticket, err := NewExecutionTicket(ExecutionTicketRequest{
