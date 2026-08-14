@@ -22,6 +22,13 @@ const (
 	DispositionDisabled        ConversationDisposition = "disabled"
 	DispositionUnsupported     ConversationDisposition = "unsupported"
 	DispositionDegraded        ConversationDisposition = "degraded"
+	DispositionActionRequired  ConversationDisposition = "action_required"
+)
+
+const (
+	ReasonNoSavedConversation    = "no_saved_conversation"
+	ReasonPriorLaunchNotExecuted = "prior_launch_not_executed"
+	ReasonStaleConversation      = "stale_conversation"
 )
 
 type RebindDisposition string
@@ -60,19 +67,19 @@ type AgentReconcileResult struct {
 	Handle                  string                  `json:"handle"`
 	Code                    int                     `json:"code"`
 	ConversationDisposition ConversationDisposition `json:"conversation_disposition"`
-	Reason                  string                  `json:"reason,omitempty"`
+	Reason                  string                  `json:"reason"`
 }
 
 type ReconcileResult struct {
 	Session        string                 `json:"session"`
-	Backend        string                 `json:"backend,omitempty"`
-	Outcome        Outcome                `json:"outcome,omitempty"`
+	Backend        string                 `json:"backend"`
+	Outcome        Outcome                `json:"outcome"`
 	AggregateCode  int                    `json:"aggregate_code"`
-	Reason         string                 `json:"reason,omitempty"`
+	Reason         string                 `json:"reason"`
 	Agents         []AgentReconcileResult `json:"agents"`
-	Commands       []EmittedCommand       `json:"commands,omitempty"`
-	Plan           *Plan                  `json:"plan,omitempty"`
-	SemanticDigest string                 `json:"semantic_digest,omitempty"`
+	Commands       []EmittedCommand       `json:"commands"`
+	Plan           *Plan                  `json:"plan"`
+	SemanticDigest string                 `json:"semantic_digest"`
 }
 
 type plannedAgent struct {
@@ -85,7 +92,7 @@ type plannedAgent struct {
 }
 
 func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr error) {
-	result = ReconcileResult{Session: request.Session, Agents: []AgentReconcileResult{}}
+	result = ReconcileResult{Session: request.Session, Agents: []AgentReconcileResult{}, Commands: []EmittedCommand{}}
 	if request.Context == nil {
 		request.Context = context.Background()
 	}
@@ -108,6 +115,10 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	}
 	if len(planned) == 0 {
 		result.AggregateCode = aggregateReconcileCode(result.Agents)
+		if result.AggregateCode == 6 {
+			result.Outcome = OutcomeActionRequired
+			result.Reason = firstReconcileReason(result.Agents, 6)
+		}
 		return result, nil
 	}
 	plan := Plan{Version: PlanVersion, Agents: make([]AgentPlan, 0, len(planned))}
@@ -199,8 +210,31 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	if err := callCrashHook(request.CrashHook, "backend_created"); err != nil {
 		return result, err
 	}
+	var candidate *BindingRecord
+	var executionEvidence *ConversationExecutionEvidence
+	if create.Outcome == OutcomeCreated {
+		created := create.Binding
+		if created.Backend != backendName || created.Profile != detect.Profile.Identity() || created.LaunchNonce != nonce {
+			return result, fmt.Errorf("backend returned a binding outside the selected launch generation")
+		}
+		if err := created.Validate(); err != nil {
+			return result, fmt.Errorf("backend returned invalid binding: %w", err)
+		}
+		candidate = &created
+		executionEvidence = &ConversationExecutionEvidence{
+			Backend: backendName, Profile: detect.Profile.Identity(), Outcome: OutcomeCreated, LaunchNonce: nonce,
+		}
+	}
 	for i := range planned {
 		agent := &planned[i]
+		if agent.write && executionEvidence != nil {
+			evidence := *executionEvidence
+			agent.record.ExecutionEvidence = &evidence
+		}
+		if agent.plan.AdapterMode == AdapterModeMint && agent.write && executionEvidence != nil {
+			agent.record.State = CaptureReady
+			agent.record.Identity = ConversationIdentity{Provider: agent.adapter.Name(), ID: agent.plan.ConversationID}
+		}
 		if agent.plan.AdapterMode == AdapterModeCapture && agent.write {
 			capture := agent.adapter.CaptureIdentity(CaptureRequest{
 				LaunchNonce: agent.plan.LaunchNonce, ExpectedProviderVersion: agent.providerVersion,
@@ -217,6 +251,9 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 				result.Agents[agent.index].Reason = string(capture.Reason)
 			}
 		}
+		if agent.record.State == CaptureReady && agent.record.ExecutionEvidence != nil {
+			agent.record.ExecutionEvidence.ConversationID = agent.record.Identity.ID
+		}
 		if agent.write {
 			if err := WriteConversation(request.Root, lease, agent.record); err != nil {
 				return result, err
@@ -226,12 +263,8 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	if err := callCrashHook(request.CrashHook, "conversations_written"); err != nil {
 		return result, err
 	}
-	if create.Outcome == OutcomeCreated {
-		candidate := create.Binding
-		if candidate.Backend != backendName || candidate.Profile != detect.Profile.Identity() || candidate.LaunchNonce != nonce {
-			return result, fmt.Errorf("backend returned a binding outside the selected launch generation")
-		}
-		if err := WriteBinding(request.Root, lease, candidate); err != nil {
+	if candidate != nil {
+		if err := WriteBinding(request.Root, lease, *candidate); err != nil {
 			return result, err
 		}
 	}
@@ -239,7 +272,9 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		for _, agent := range planned {
 			if result.Agents[agent.index].Code == 0 {
 				result.Agents[agent.index].Code = 6
-				result.Agents[agent.index].Reason = "commands_emitted"
+				if result.Agents[agent.index].Reason == "" {
+					result.Agents[agent.index].Reason = "commands_emitted"
+				}
 			}
 		}
 		result.AggregateCode = 6
@@ -247,6 +282,9 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		return result, nil
 	}
 	result.AggregateCode = aggregateReconcileCode(result.Agents)
+	if result.AggregateCode != 0 && result.Reason == "" {
+		result.Reason = firstReconcileReason(result.Agents, result.AggregateCode)
+	}
 	return result, nil
 }
 
@@ -296,17 +334,34 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 		}
 		var agentPlan AgentPlan
 		var err error
-		if !forceFresh && hasConversation && conversation.State == CaptureReady {
+		planReason := ""
+		if request.ResumeOnly && !hasConversation {
+			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionActionRequired, ReasonNoSavedConversation
+			result.Agents = append(result.Agents, item)
+			continue
+		} else if request.ResumeOnly {
+			if conversation.State == CaptureReady {
+				agentPlan, err = adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity})
+				if err == nil {
+					disposition = DispositionResumed
+				}
+			} else {
+				err = fmt.Errorf("conversation identity is %s", conversation.State)
+			}
+		} else if !forceFresh && hasConversation && conversation.State == CaptureReady {
 			agentPlan, err = adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity})
 			if err == nil {
 				disposition = DispositionResumed
 			}
-		} else if !forceFresh && (request.ResumeOnly || hasConversation) {
+		} else if !forceFresh && hasConversation && conversation.State == CapturePending && adapter.Mode() == AdapterModeMint {
+			agentPlan, err = adapter.PlanFresh(base)
+			disposition, planReason = DispositionFresh, ReasonPriorLaunchNotExecuted
+		} else if !forceFresh && hasConversation {
 			err = fmt.Errorf("conversation identity is %s", conversation.State)
 		}
 		if err != nil && !forceFresh {
 			if !request.AllowFreshFallback {
-				item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, "stale_conversation"
+				item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, ReasonStaleConversation
 				result.Agents = append(result.Agents, item)
 				continue
 			}
@@ -329,15 +384,11 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			result.Agents = append(result.Agents, item)
 			continue
 		}
-		item.ConversationDisposition = disposition
+		item.ConversationDisposition, item.Reason = disposition, planReason
 		result.Agents = append(result.Agents, item)
 		record := ConversationRecord{
 			Version: ConversationVersion, Handle: cfg.Handle, State: CapturePending,
 			ProviderVersion: capabilities.ProviderVersion, LaunchNonce: nonce,
-		}
-		if agentPlan.AdapterMode == AdapterModeMint {
-			record.State = CaptureReady
-			record.Identity = ConversationIdentity{Provider: adapter.Name(), ID: agentPlan.ConversationID}
 		}
 		planned = append(planned, plannedAgent{
 			plan: agentPlan, record: record, write: disposition != DispositionResumed,
@@ -574,6 +625,15 @@ func aggregateReconcileCode(agents []AgentReconcileResult) int {
 		}
 	}
 	return best
+}
+
+func firstReconcileReason(agents []AgentReconcileResult, code int) string {
+	for _, agent := range agents {
+		if agent.Code == code && agent.Reason != "" {
+			return agent.Reason
+		}
+	}
+	return ""
 }
 
 func callCrashHook(hook func(string) error, stage string) error {
