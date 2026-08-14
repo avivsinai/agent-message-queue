@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -130,8 +131,10 @@ exec /bin/sleep 60
 		"HOME="+t.TempDir(), "XDG_STATE_HOME="+xdgState, "TMUX_TMPDIR="+socketDir,
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
-	t.Cleanup(func() { killHermeticTmuxServer(socketDir) })
+	serverRunning := false
+	t.Cleanup(func() { stopHermeticTmuxServer(t, socketDir, sessionRoot, "claude", serverRunning) })
 	firstOutput := runRealAMQ(t, amqBinary, project, env, "launch", "--launcher", "tmux", "--json")
+	serverRunning = true
 	var first launch.ReconcileResult
 	if err := json.Unmarshal(firstOutput, &first); err != nil || first.AggregateCode != 0 || first.Outcome != launch.OutcomeCreated {
 		t.Fatalf("fresh launch = %s, decode=%v", firstOutput, err)
@@ -150,7 +153,8 @@ exec /bin/sleep 60
 		t.Fatalf("fresh conversation = %s, decode=%v", recordData, err)
 	}
 
-	killHermeticTmuxServer(socketDir)
+	serverRunning = false
+	stopHermeticTmuxServer(t, socketDir, sessionRoot, "claude", true)
 	resumePlan, err := adapter.PlanResume(launch.ResumeRequest{
 		PlanRequest: launch.PlanRequest{
 			Handle: "claude", ProjectRoot: canonicalProject, Cwd: canonicalProject,
@@ -163,6 +167,7 @@ exec /bin/sleep 60
 	}
 	trustPlan(t, store, launch.Plan{Version: launch.PlanVersion, Agents: []launch.AgentPlan{resumePlan}}, root)
 	secondOutput := runRealAMQ(t, amqBinary, project, env, "session", "resume", "collab", "--launcher", "tmux", "--json")
+	serverRunning = true
 	var second launch.ReconcileResult
 	if err := json.Unmarshal(secondOutput, &second); err != nil || second.AggregateCode != 0 || second.Outcome != launch.OutcomeCreated ||
 		len(second.Agents) != 1 || second.Agents[0].ConversationDisposition != launch.DispositionResumed {
@@ -217,8 +222,93 @@ func waitForProviderLog(t *testing.T, path, needle string) {
 	t.Fatalf("provider did not record %q: %q", needle, data)
 }
 
-func killHermeticTmuxServer(socketDir string) {
-	cmd := exec.Command("tmux", "kill-server")
+type hermeticTmuxProcess struct {
+	pid  int
+	role string
+}
+
+func stopHermeticTmuxServer(t *testing.T, socketDir, sessionRoot, handle string, requireServer bool) {
+	t.Helper()
+	processes, serverFound, wakeFound, err := hermeticTmuxProcesses(socketDir, sessionRoot, handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requireServer && !serverFound {
+		t.Fatal("hermetic tmux server disappeared before teardown")
+	}
+	if serverFound {
+		cmd := exec.Command("tmux", "kill-server")
+		cmd.Env = append(os.Environ(), "TMUX_TMPDIR="+socketDir)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("kill hermetic tmux server: %v\n%s", err, output)
+		}
+	}
+	if err := waitForHermeticTmuxProcesses(processes, wakeProcessExitTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if requireServer && !wakeFound {
+		t.Fatalf("hermetic tmux pane had no wake lock for %s", handle)
+	}
+}
+
+func hermeticTmuxProcesses(socketDir, sessionRoot, handle string) ([]hermeticTmuxProcess, bool, bool, error) {
+	cmd := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_pid}")
 	cmd.Env = append(os.Environ(), "TMUX_TMPDIR="+socketDir)
-	_ = cmd.Run()
+	output, err := cmd.CombinedOutput()
+	serverFound := err == nil
+	processes := make([]hermeticTmuxProcess, 0, 2)
+	if serverFound {
+		for _, field := range strings.Fields(string(output)) {
+			pid, parseErr := strconv.Atoi(field)
+			if parseErr != nil || pid <= 0 {
+				return nil, true, false, fmt.Errorf("parse hermetic tmux pane pid %q", field)
+			}
+			processes = append(processes, hermeticTmuxProcess{pid: pid, role: "pane"})
+		}
+		if len(processes) == 0 {
+			return nil, true, false, fmt.Errorf("hermetic tmux server reported no panes")
+		}
+	}
+	wake := inspectWakeLock(sessionRoot, handle)
+	if wake.Exists {
+		if wake.PID <= 0 {
+			return nil, serverFound, true, fmt.Errorf("hermetic wake lock has invalid pid %d", wake.PID)
+		}
+		processes = append(processes, hermeticTmuxProcess{pid: wake.PID, role: "wake"})
+	}
+	return processes, serverFound, wake.Exists, nil
+}
+
+func waitForHermeticTmuxProcesses(processes []hermeticTmuxProcess, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		live := processes[:0]
+		for _, process := range processes {
+			if processAlive(process.pid) {
+				live = append(live, process)
+			}
+		}
+		processes = live
+		if len(processes) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			parts := make([]string, 0, len(processes))
+			for _, process := range processes {
+				parts = append(parts, fmt.Sprintf("%s pid %d", process.role, process.pid))
+			}
+			return fmt.Errorf("hermetic tmux teardown left processes alive after %s: %s", timeout, strings.Join(parts, ", "))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestWaitForHermeticTmuxProcessesReportsLeak(t *testing.T) {
+	err := waitForHermeticTmuxProcesses(
+		[]hermeticTmuxProcess{{pid: os.Getpid(), role: "test-owner"}},
+		20*time.Millisecond,
+	)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("test-owner pid %d", os.Getpid())) {
+		t.Fatalf("live-process wait error = %v", err)
+	}
 }
