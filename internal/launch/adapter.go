@@ -41,14 +41,19 @@ type AdapterCapabilities struct {
 }
 
 type PlanRequest struct {
-	Handle        string
-	ProjectRoot   string
-	Cwd           string
-	LaunchNonce   string
-	ResumePolicy  ResumePolicy
-	CommittedArgs []string
-	BypassArgs    []string
-	EnvOverlay    map[string]string
+	Handle      string
+	ProjectRoot string
+	Cwd         string
+	// AllowExternalCwd is reserved for the public intent compiler. Public
+	// intents can name an absolute sibling worktree after that path is
+	// canonicalized and physically identified. Committed project config keeps
+	// the historical project-contained rule.
+	AllowExternalCwd bool
+	LaunchNonce      string
+	ResumePolicy     ResumePolicy
+	CommittedArgs    []string
+	BypassArgs       []string
+	EnvOverlay       map[string]string
 }
 
 type ResumeRequest struct {
@@ -117,6 +122,42 @@ func ValidateStaticProviderInput(executable string, args []string, env map[strin
 		return "", err
 	}
 	return provider, nil
+}
+
+// PartitionStaticProviderArgs separates ordinary committed arguments from the
+// adapter's explicit operator-bypass arguments. Callers must first validate the
+// complete input with ValidateStaticProviderInput.
+func PartitionStaticProviderArgs(provider string, args []string) (committed, bypass []string, err error) {
+	var argRules map[string]argumentRule
+	var bypassAllowed map[string]struct{}
+	switch provider {
+	case ClaudeProvider:
+		argRules, bypassAllowed = claudeArgRules(), claudeBypassArgs()
+	case CodexProvider:
+		argRules, bypassAllowed = codexArgRules(), codexBypassArgs()
+	default:
+		return nil, nil, fmt.Errorf("unknown provider %q", provider)
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if _, ok := bypassAllowed[arg]; ok {
+			bypass = append(bypass, arg)
+			continue
+		}
+		rule, ok := argRules[arg]
+		if !ok {
+			return nil, nil, fmt.Errorf("static argument %q is not allowed by adapter grammar", arg)
+		}
+		committed = append(committed, arg)
+		if rule.value {
+			if i+1 >= len(args) {
+				return nil, nil, fmt.Errorf("static argument %q requires a value", arg)
+			}
+			i++
+			committed = append(committed, args[i])
+		}
+	}
+	return committed, bypass, nil
 }
 
 func validateStaticProviderArgs(args []string, rules map[string]argumentRule, bypassAllowed map[string]struct{}) error {
@@ -206,10 +247,31 @@ func validatePlanRequest(request PlanRequest, executable, provider string, envRu
 	if err := validateCommittedEnv(request.EnvOverlay, envRules); err != nil {
 		return "", err
 	}
-	if err := validateWorkingDirectory(request.Cwd, request.ProjectRoot); err != nil {
+	if err := validatePlanWorkingDirectory(request); err != nil {
 		return "", err
 	}
 	return resolvedExecutable, nil
+}
+
+func validatePlanWorkingDirectory(request PlanRequest) error {
+	if !request.AllowExternalCwd {
+		return validateWorkingDirectory(request.Cwd, request.ProjectRoot)
+	}
+	if !filepath.IsAbs(request.Cwd) {
+		return fmt.Errorf("external working directory must be absolute")
+	}
+	resolved, err := resolvedPath(request.Cwd)
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return fmt.Errorf("stat working directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("working directory is not a directory")
+	}
+	return nil
 }
 
 func validateCommittedConfig(request CommittedConfigRequest, envRules map[string]valueRule, argRules map[string]argumentRule) error {

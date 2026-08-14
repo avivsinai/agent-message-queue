@@ -163,7 +163,18 @@ type staticAgentPlan struct {
 // Fresh and resume argv shapes have different digests because only the resume
 // shape carries a conversation slot; each shape therefore requires trust once.
 func (p Plan) SemanticDigest() (string, error) {
-	if err := p.Validate(); err != nil {
+	return p.semanticDigest(false)
+}
+
+// PreparePlanDigest hashes the nonce-free static plan used by Prepare. Unlike
+// a backend execution Plan, it permits zero runnable agents so a participant-
+// only session still has one deterministic plan subject.
+func PreparePlanDigest(p Plan) (string, error) {
+	return p.semanticDigest(true)
+}
+
+func (p Plan) semanticDigest(allowEmpty bool) (string, error) {
+	if err := p.validateForDigest(allowEmpty); err != nil {
 		return "", err
 	}
 	agents := make([]staticAgentPlan, len(p.Agents))
@@ -190,6 +201,16 @@ func (p Plan) SemanticDigest() (string, error) {
 	}
 	sum := sha256.Sum256(canonical)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+func (p Plan) validateForDigest(allowEmpty bool) error {
+	if !allowEmpty || len(p.Agents) != 0 {
+		return p.Validate()
+	}
+	if p.Version != PlanVersion {
+		return fmt.Errorf("unsupported launch plan version %d", p.Version)
+	}
+	return nil
 }
 
 func DecodePlan(data []byte) (Plan, error) {

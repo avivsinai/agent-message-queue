@@ -61,7 +61,7 @@ func TmuxProfile() Profile {
 func (b *TmuxBackend) Detect() DetectResult {
 	profile := TmuxProfile()
 	result := DetectResult{Profile: profile}
-	path, err := exec.LookPath(b.binary)
+	_, err := exec.LookPath(b.binary)
 	if err != nil {
 		return result
 	}
@@ -75,7 +75,6 @@ func (b *TmuxBackend) Detect() DetectResult {
 	if err != nil || strings.TrimSpace(host) == "" {
 		return result
 	}
-	b.binary = path
 	result.Available = true
 	result.HostIdentity = host
 	result.InstanceIdentity = "tmux-socket:" + b.socketPath()

@@ -32,6 +32,30 @@ func TestExecutionTrustDigestBindsSessionAndPhysicalRoot(t *testing.T) {
 	}
 }
 
+func TestPrepareTrustDigestMatchesExistingTrustSubjectForPresentRoot(t *testing.T) {
+	_, root := openTestRoot(t)
+	plan := validPlan()
+	planDigest, err := plan.SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootIdentity, err := fsq.StableTreeIdentityInfo(root.FileInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareTrustDigest(planDigest, "collab", root.Base(), rootIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing, err := ExecutionTrustDigest(plan, "collab", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared != existing {
+		t.Fatalf("Prepare trust digest %q differs from existing execution trust digest %q", prepared, existing)
+	}
+}
+
 func TestExecutionTrustDigestRejectsSamePathRootReplacement(t *testing.T) {
 	parent := t.TempDir()
 	path := filepath.Join(parent, "session")

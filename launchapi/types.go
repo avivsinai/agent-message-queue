@@ -11,6 +11,12 @@ const (
 	ResultVersionV1  = 1
 )
 
+const (
+	PrepareOutcomeReady          = "ready"
+	PrepareOutcomeActionRequired = "action_required"
+	PrepareOutcomeUnsupported    = "unsupported"
+)
+
 type ResumePolicy string
 
 const (
@@ -113,13 +119,34 @@ type PrepareRequestV1 struct {
 	Intent         LaunchIntentV1 `json:"intent"`
 }
 
+type RequiredActionKindV1 string
+
+const (
+	RequiredActionTrustConfirmation     RequiredActionKindV1 = "trust_confirmation"
+	RequiredActionStaleConversation     RequiredActionKindV1 = "stale_conversation_decision"
+	RequiredActionRebindConfirmation    RequiredActionKindV1 = "rebind_confirmation"
+	RequiredActionUnsupportedCapability RequiredActionKindV1 = "unsupported_capability_ack"
+)
+
+type DecisionChoiceV1 string
+
+const (
+	DecisionTrustExactSubject DecisionChoiceV1 = "trust_exact_subject"
+	DecisionDeny              DecisionChoiceV1 = "deny"
+	DecisionFreshOnce         DecisionChoiceV1 = "fresh_once"
+	DecisionAbort             DecisionChoiceV1 = "abort"
+	DecisionCloseOld          DecisionChoiceV1 = "close_old"
+	DecisionLeaveOld          DecisionChoiceV1 = "leave_old"
+	DecisionAcceptDegraded    DecisionChoiceV1 = "accept_degraded"
+)
+
 type RequiredActionV1 struct {
-	ActionID         string   `json:"action_id"`
-	Kind             string   `json:"kind"`
-	Handles          []string `json:"handles,omitempty"`
-	Resources        []string `json:"resources,omitempty"`
-	AllowedDecisions []string `json:"allowed_decisions"`
-	ReasonCode       string   `json:"reason_code"`
+	ActionID         string               `json:"action_id"`
+	Kind             RequiredActionKindV1 `json:"kind"`
+	Handles          []string             `json:"handles,omitempty"`
+	Resources        []string             `json:"resources,omitempty"`
+	AllowedDecisions []DecisionChoiceV1   `json:"allowed_decisions"`
+	ReasonCode       string               `json:"reason_code"`
 }
 
 type CommandV1 struct {
@@ -176,8 +203,8 @@ type PrepareResultV1 struct {
 }
 
 type DecisionV1 struct {
-	ActionID string `json:"action_id"`
-	Choice   string `json:"choice"`
+	ActionID string           `json:"action_id"`
+	Choice   DecisionChoiceV1 `json:"choice"`
 }
 
 type ApplyRequestV1 struct {

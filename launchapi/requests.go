@@ -74,17 +74,17 @@ func (request ApplyRequestV1) Validate() error {
 		return fmt.Errorf("subject_digest: %w", err)
 	}
 	seen := make(map[string]struct{}, len(request.Decisions))
-	allowedChoices := []string{
-		"trust_exact_subject",
-		"deny",
-		"fresh_once",
-		"abort",
-		"close_old",
-		"leave_old",
-		"accept_degraded",
+	allowedChoices := []DecisionChoiceV1{
+		DecisionTrustExactSubject,
+		DecisionDeny,
+		DecisionFreshOnce,
+		DecisionAbort,
+		DecisionCloseOld,
+		DecisionLeaveOld,
+		DecisionAcceptDegraded,
 	}
 	for i, decision := range request.Decisions {
-		if strings.TrimSpace(decision.ActionID) == "" || strings.TrimSpace(decision.Choice) == "" {
+		if strings.TrimSpace(decision.ActionID) == "" || strings.TrimSpace(string(decision.Choice)) == "" {
 			return fmt.Errorf("decisions[%d] requires action_id and choice", i)
 		}
 		if _, ok := seen[decision.ActionID]; ok {

@@ -42,6 +42,30 @@ func ExecutionTrustDigest(plan Plan, session string, root *fsq.DeliveryRoot) (st
 	if err != nil {
 		return "", fmt.Errorf("resolve trust session-root identity: %w", err)
 	}
+	return executionTrustDigest(planDigest, session, rootPath, rootIdentity)
+}
+
+// PrepareTrustDigest binds a nonce-free plan digest to the canonical target
+// and its physical identity. For an absent session, rootIdentity is a stable
+// intended-child identity derived from the pinned parent and child name.
+func PrepareTrustDigest(planDigest, session, rootPath, rootIdentity string) (string, error) {
+	if !validDigest(planDigest) {
+		return "", fmt.Errorf("invalid prepare plan digest")
+	}
+	if !canonicalSessionPattern.MatchString(session) || strings.HasPrefix(session, "-") {
+		return "", fmt.Errorf("invalid trust session %q", session)
+	}
+	if strings.TrimSpace(rootPath) == "" || strings.TrimSpace(rootIdentity) == "" {
+		return "", fmt.Errorf("prepare trust target identity is incomplete")
+	}
+	canonicalRoot, err := resolvedPath(rootPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve prepare trust session root: %w", err)
+	}
+	return executionTrustDigest(planDigest, session, canonicalRoot, rootIdentity)
+}
+
+func executionTrustDigest(planDigest, session, rootPath, rootIdentity string) (string, error) {
 	canonical, err := json.Marshal(struct {
 		Version      int    `json:"version"`
 		PlanDigest   string `json:"plan_digest"`
