@@ -3703,6 +3703,11 @@ func runWakeLoop(cfg wakeConfig) error {
 	}
 	var unreadableGenerationNotice wakeUnreadableGenerationNoticeState
 	attemptNotification := func() error {
+		defer func() {
+			if cfg.onNotificationAttemptComplete != nil {
+				cfg.onNotificationAttemptComplete()
+			}
+		}()
 		if terminalAuthorityRetryC != nil || inboxScanRetryC != nil {
 			return nil
 		}
