@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -34,6 +35,7 @@ type setupChange struct {
 }
 
 type setupPreview struct {
+	Digest             string                      `json:"digest"`
 	ProjectRoot        string                      `json:"project_root"`
 	QueueRoot          string                      `json:"queue_root"`
 	DefaultSession     string                      `json:"default_session"`
@@ -102,6 +104,8 @@ func runSetup(args []string) (returnErr error) {
 	launchersFlag := fs.String("launcher-preference", "", "Comma-separated launcher preference")
 	layoutFlag := fs.String("layout", launch.LayoutColumns, "Advisory layout intent")
 	noGitignoreFlag := fs.Bool("no-gitignore", false, "Do not modify .gitignore")
+	previewFlag := fs.Bool("preview", false, "Preview changes without writing")
+	applyFlag := fs.String("apply", "", "Apply only when the recomputed preview matches this digest")
 	yesFlag := fs.Bool("y", false, "Accept the preview without prompting")
 	jsonFlag := fs.Bool("json", false, "Emit JSON output")
 	usage := usageWithFlags(fs, "amq setup [options]",
@@ -113,10 +117,24 @@ func runSetup(args []string) (returnErr error) {
 	} else if handled {
 		return nil
 	}
-	if *jsonFlag && !*yesFlag {
-		return UsageError("--json requires -y")
+	applyExplicit := flagWasVisited(fs, "apply")
+	if *previewFlag && *yesFlag {
+		return UsageError("--preview and -y are mutually exclusive")
 	}
-	if !*yesFlag && !setupIsTerminal() {
+	if *previewFlag && applyExplicit {
+		return UsageError("--preview and --apply are mutually exclusive")
+	}
+	if applyExplicit && *yesFlag {
+		return UsageError("--apply and -y are mutually exclusive")
+	}
+	if applyExplicit && !validSetupDigest(*applyFlag) {
+		return UsageError("--apply requires a sha256:<hex> digest")
+	}
+	nonInteractive := *previewFlag || applyExplicit || *yesFlag
+	if *jsonFlag && !nonInteractive {
+		return UsageError("--json requires --preview, --apply, or -y")
+	}
+	if !nonInteractive && !setupIsTerminal() {
 		return UsageError("non-interactive setup requires -y")
 	}
 	if *layoutFlag != launch.LayoutColumns {
@@ -147,7 +165,7 @@ func runSetup(args []string) (returnErr error) {
 	}
 
 	var input *bufio.Reader
-	if !*yesFlag {
+	if !nonInteractive {
 		input = bufio.NewReader(os.Stdin)
 	}
 	state, err := buildSetupState(setupOptions{
@@ -156,18 +174,30 @@ func runSetup(args []string) (returnErr error) {
 		agents: *agentsFlag, agentsExplicit: flagWasVisited(fs, "agents"),
 		defaultSession: *sessionFlag, sessionExplicit: flagWasVisited(fs, "default-session"),
 		launchers: *launchersFlag, launchersExplicit: flagWasVisited(fs, "launcher-preference"),
-		layout: *layoutFlag, noGitignore: *noGitignoreFlag, yes: *yesFlag, input: input,
+		layout: *layoutFlag, noGitignore: *noGitignoreFlag, nonInteractive: nonInteractive, input: input,
 	})
 	if err != nil {
 		return err
 	}
-	preview := state.preview()
+	preview, err := state.preview()
+	if err != nil {
+		return err
+	}
 	if !*jsonFlag {
 		if err := printSetupPreview(preview); err != nil {
 			return err
 		}
 	}
-	if !*yesFlag {
+	if *previewFlag {
+		if *jsonFlag {
+			return writeJSON(os.Stdout, setupResult{Status: "preview", Preview: preview, Written: []string{}})
+		}
+		return nil
+	}
+	if applyExplicit && *applyFlag != preview.Digest {
+		return ActionRequiredError("setup approval digest mismatch: approved %s, recomputed %s", *applyFlag, preview.Digest)
+	}
+	if !nonInteractive {
 		confirmed, err := setupConfirm(input, "Create this setup?")
 		if err != nil {
 			return err
@@ -200,7 +230,7 @@ type setupOptions struct {
 	launchers, layout                  string
 	rootExplicit, agentsExplicit       bool
 	sessionExplicit, launchersExplicit bool
-	noGitignore, yes                   bool
+	noGitignore, nonInteractive        bool
 	input                              *bufio.Reader
 }
 
@@ -215,6 +245,10 @@ func buildSetupState(options setupOptions) (setupState, error) {
 	existingLocal, existingLocalData, localExists, err := loadOptionalLocalConfig(setupLocalConfigPath)
 	if err != nil {
 		return setupState{}, err
+	}
+	if !projectExists && options.nonInteractive &&
+		(!options.agentsExplicit || !options.sessionExplicit || !options.launchersExplicit) {
+		return setupState{}, UsageError("first non-interactive setup requires explicit --agents, --default-session, and --launcher-preference")
 	}
 
 	root, amqrcData, amqrcExists, err := setupRoot(options.root, options.rootExplicit, options.projectRoot)
@@ -331,8 +365,8 @@ func (state *setupState) addChange(condition bool, path, action string) {
 	}
 }
 
-func (state setupState) preview() setupPreview {
-	return setupPreview{
+func (state setupState) preview() (setupPreview, error) {
+	preview := setupPreview{
 		ProjectRoot: state.projectRoot, QueueRoot: state.queueRoot,
 		DefaultSession:     state.projectConfig.DefaultSession,
 		Agents:             append([]launch.ProjectAgentConfig(nil), state.projectConfig.Agents...),
@@ -341,6 +375,46 @@ func (state setupState) preview() setupPreview {
 		AvailableLaunchers: append([]string(nil), state.available...),
 		Changes:            append(make([]setupChange, 0, len(state.changes)), state.changes...),
 	}
+	digest, err := setupPreviewDigest(preview)
+	if err != nil {
+		return setupPreview{}, err
+	}
+	preview.Digest = digest
+	return preview, nil
+}
+
+func setupPreviewDigest(preview setupPreview) (string, error) {
+	canonical, err := json.Marshal(struct {
+		Version            int                         `json:"version"`
+		ProjectRoot        string                      `json:"project_root"`
+		QueueRoot          string                      `json:"queue_root"`
+		DefaultSession     string                      `json:"default_session"`
+		Agents             []launch.ProjectAgentConfig `json:"agents"`
+		Layout             launch.LayoutIntent         `json:"layout"`
+		LauncherPreference []string                    `json:"launcher_preference"`
+		Changes            []setupChange               `json:"changes"`
+	}{
+		Version: 1, ProjectRoot: preview.ProjectRoot, QueueRoot: preview.QueueRoot,
+		DefaultSession: preview.DefaultSession, Agents: preview.Agents, Layout: preview.Layout,
+		LauncherPreference: preview.LauncherPreference, Changes: preview.Changes,
+	})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(canonical)
+	return fmt.Sprintf("sha256:%x", sum), nil
+}
+
+func validSetupDigest(value string) bool {
+	if !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+sha256.Size*2 {
+		return false
+	}
+	for _, char := range strings.TrimPrefix(value, "sha256:") {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func printSetupPreview(preview setupPreview) error {
@@ -360,14 +434,17 @@ func printSetupPreview(preview setupPreview) error {
 		return err
 	}
 	if len(preview.Changes) == 0 {
-		return writeStdoutLine("  (none)")
-	}
-	for _, change := range preview.Changes {
-		if err := writeStdout("  - %s: %s\n", change.Path, change.Action); err != nil {
+		if err := writeStdoutLine("  (none)"); err != nil {
 			return err
 		}
+	} else {
+		for _, change := range preview.Changes {
+			if err := writeStdout("  - %s: %s\n", change.Path, change.Action); err != nil {
+				return err
+			}
+		}
 	}
-	return nil
+	return writeStdout("\nApproval digest: %s\n", preview.Digest)
 }
 
 func detectSetupAgents(adapters []launch.HarnessAdapter) ([]launch.AdapterCapabilities, error) {
@@ -436,9 +513,9 @@ func chooseSetupAgents(options setupOptions, detected []launch.AdapterCapabiliti
 		if err != nil {
 			return nil, err
 		}
-	case exists && options.yes:
+	case exists && options.nonInteractive:
 		return append([]launch.ProjectAgentConfig(nil), existing.Agents...), nil
-	case options.yes:
+	case options.nonInteractive:
 		selected = names
 	default:
 		if len(names) == 0 {
@@ -484,7 +561,7 @@ func chooseSetupSession(options setupOptions, existing launch.ProjectConfig, exi
 	}
 	if options.sessionExplicit {
 		value = strings.TrimSpace(options.defaultSession)
-	} else if !options.yes {
+	} else if !options.nonInteractive {
 		line, err := setupPromptLine(options.input, "Default session", value)
 		if err != nil {
 			return "", err
@@ -505,7 +582,7 @@ func chooseSetupLaunchers(options setupOptions, detected []string, existing laun
 	var raw string
 	if options.launchersExplicit {
 		raw = options.launchers
-	} else if !options.yes {
+	} else if !options.nonInteractive {
 		line, err := setupPromptLine(options.input, "Launcher preference (comma-separated)", strings.Join(preference, ","))
 		if err != nil {
 			return nil, err

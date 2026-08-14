@@ -65,7 +65,7 @@ func TestSetupWritesAuthoritativeAndPreferenceScopesThenNoOps(t *testing.T) {
 	t.Cleanup(func() { setupLookPath = execLookPathForSetup })
 
 	if _, err := captureEnvStdout(t, func() error {
-		return runSetup([]string{"-y", "--agents", "claude,codex,grok", "--default-session", "work", "--json"})
+		return runSetup([]string{"-y", "--agents", "claude,codex,grok", "--default-session", "work", "--launcher-preference", "tmux", "--json"})
 	}); err != nil {
 		t.Fatalf("first setup: %v", err)
 	}
@@ -133,6 +133,100 @@ func TestSetupWritesAuthoritativeAndPreferenceScopesThenNoOps(t *testing.T) {
 	}
 }
 
+func TestSetupPreviewDigestBindsApplyWithoutWrites(t *testing.T) {
+	project := setupProjectFixture(t, "claude", "codex")
+	args := []string{
+		"--agents", "claude,codex", "--default-session", "collab",
+		"--launcher-preference", "commands",
+	}
+	before := setupTreeDigest(t, project)
+	steps := 0
+	setupCommitStepHook = func(string) error { steps++; return nil }
+
+	previewOutput, err := captureEnvStdout(t, func() error {
+		return runSetup(append([]string{"--preview", "--json"}, args...))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var previewResult setupResult
+	if err := json.Unmarshal([]byte(previewOutput), &previewResult); err != nil {
+		t.Fatal(err)
+	}
+	if previewResult.Status != "preview" || !validSetupDigest(previewResult.Preview.Digest) || len(previewResult.Written) != 0 {
+		t.Fatalf("preview result=%#v", previewResult)
+	}
+	if steps != 0 || before != setupTreeDigest(t, project) {
+		t.Fatalf("preview steps=%d changed=%t", steps, before != setupTreeDigest(t, project))
+	}
+
+	textOutput, err := captureEnvStdout(t, func() error {
+		return runSetup(append([]string{"--preview"}, args...))
+	})
+	if err != nil || !strings.Contains(textOutput, "Approval digest: "+previewResult.Preview.Digest) {
+		t.Fatalf("text preview output=%q err=%v", textOutput, err)
+	}
+	if steps != 0 || before != setupTreeDigest(t, project) {
+		t.Fatalf("text preview steps=%d changed=%t", steps, before != setupTreeDigest(t, project))
+	}
+
+	mismatchArgs := append([]string{"--apply", previewResult.Preview.Digest}, args...)
+	for i, value := range mismatchArgs {
+		if value == "collab" {
+			mismatchArgs[i] = "other"
+			break
+		}
+	}
+	_, err = captureEnvStdout(t, func() error { return runSetup(mismatchArgs) })
+	if GetExitCode(err) != ExitActionRequired || steps != 0 || before != setupTreeDigest(t, project) {
+		t.Fatalf("mismatch exit=%d err=%v steps=%d changed=%t", GetExitCode(err), err, steps, before != setupTreeDigest(t, project))
+	}
+
+	applyOutput, err := captureEnvStdout(t, func() error {
+		return runSetup(append([]string{"--apply", previewResult.Preview.Digest}, args...))
+	})
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, applyOutput)
+	}
+	if !strings.Contains(applyOutput, "Setup committed") || steps == 0 {
+		t.Fatalf("apply output=%q steps=%d", applyOutput, steps)
+	}
+	assertCompleteSetup(t, project, "claude", "codex")
+}
+
+func TestSetupPreviewAndApplyAcceptanceModesAreExclusive(t *testing.T) {
+	project := setupProjectFixture(t, "claude")
+	digest := "sha256:" + strings.Repeat("0", 64)
+	for _, args := range [][]string{
+		{"--preview", "-y"},
+		{"--apply", digest, "-y"},
+		{"--preview", "--apply", digest},
+		{"--apply", "not-a-digest"},
+	} {
+		if err := runSetup(args); GetExitCode(err) != ExitUsage {
+			t.Fatalf("args=%v exit=%d err=%v", args, GetExitCode(err), err)
+		}
+	}
+	if entries, err := os.ReadDir(project); err != nil || len(entries) != 0 {
+		t.Fatalf("usage refusals wrote project entries=%v err=%v", entries, err)
+	}
+}
+
+func TestSetupFirstNonInteractiveRunRequiresExplicitSemanticInputs(t *testing.T) {
+	project := setupProjectFixture(t, "claude")
+	before := setupTreeDigest(t, project)
+	_, err := captureEnvStdout(t, func() error {
+		return runSetup([]string{"--preview", "--json", "--agents", "claude"})
+	})
+	if GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), "--default-session") ||
+		!strings.Contains(err.Error(), "--launcher-preference") {
+		t.Fatalf("explicit-input refusal exit=%d err=%v", GetExitCode(err), err)
+	}
+	if before != setupTreeDigest(t, project) {
+		t.Fatal("explicit-input refusal changed project")
+	}
+}
+
 func TestSetupInterruptionPrefixesConverge(t *testing.T) {
 	steps := []string{"provision", "roster_compatible", "project_config", "local_config", "gitignore", "amqrc"}
 	for _, stop := range steps {
@@ -145,13 +239,17 @@ func TestSetupInterruptionPrefixesConverge(t *testing.T) {
 				}
 				return nil
 			}
-			_, err := captureEnvStdout(t, func() error { return runSetup([]string{"-y", "--agents", "claude"}) })
+			_, err := captureEnvStdout(t, func() error {
+				return runSetup([]string{"-y", "--agents", "claude", "--default-session", "collab", "--launcher-preference", "commands"})
+			})
 			if !errors.Is(err, injected) {
 				t.Fatalf("interrupted setup error = %v", err)
 			}
 			assertSetupPrefixValid(t, project)
 			setupCommitStepHook = nil
-			if _, err := captureEnvStdout(t, func() error { return runSetup([]string{"-y", "--agents", "claude"}) }); err != nil {
+			if _, err := captureEnvStdout(t, func() error {
+				return runSetup([]string{"-y", "--agents", "claude", "--default-session", "collab", "--launcher-preference", "commands"})
+			}); err != nil {
 				t.Fatalf("recovery rerun: %v", err)
 			}
 			assertCompleteSetup(t, project, "claude")
@@ -221,7 +319,7 @@ func TestSetupRefusesAdapterHostileCommittedConfigWithoutWrites(t *testing.T) {
 				}}
 			}
 			if _, err := captureEnvStdout(t, func() error {
-				return runSetup([]string{"-y", "--agents", "claude"})
+				return runSetup([]string{"-y", "--agents", "claude", "--default-session", "collab", "--launcher-preference", "commands"})
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -266,7 +364,7 @@ func TestSetupPreservesExternallyEditedValidConfigAsZeroWrite(t *testing.T) {
 		}}
 	}
 	if _, err := captureEnvStdout(t, func() error {
-		return runSetup([]string{"-y", "--agents", "claude"})
+		return runSetup([]string{"-y", "--agents", "claude", "--default-session", "collab", "--launcher-preference", "commands"})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +404,9 @@ func TestSetupRefusesLegacyDefaultSessionAuthorityInAmqrc(t *testing.T) {
 		t.Fatal(err)
 	}
 	resetAmqrcCache()
-	_, err := captureEnvStdout(t, func() error { return runSetup([]string{"-y", "--agents", "claude"}) })
+	_, err := captureEnvStdout(t, func() error {
+		return runSetup([]string{"-y", "--agents", "claude", "--default-session", "collab", "--launcher-preference", "commands"})
+	})
 	var conflict *launch.ConfigAuthorityConflictError
 	if !errors.As(err, &conflict) || conflict.Path != ".amqrc" || conflict.Field != "default_session" {
 		t.Fatalf("legacy authority error = %T %v", err, err)
@@ -321,7 +421,7 @@ func TestSetupRosterReplacementFinalizationRecovers(t *testing.T) {
 		t.Run(stop, func(t *testing.T) {
 			project := setupProjectFixture(t, "claude", "codex", "grok")
 			if _, err := captureEnvStdout(t, func() error {
-				return runSetup([]string{"-y", "--agents", "claude,codex"})
+				return runSetup([]string{"-y", "--agents", "claude,codex", "--default-session", "collab", "--launcher-preference", "commands"})
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -385,7 +485,7 @@ func TestSetupInteractiveAbortWritesNothing(t *testing.T) {
 func TestSetupInteractiveRerunCanChangeRosterAndSession(t *testing.T) {
 	project := setupProjectFixture(t, "claude", "codex")
 	if _, err := captureEnvStdout(t, func() error {
-		return runSetup([]string{"-y", "--agents", "claude,codex"})
+		return runSetup([]string{"-y", "--agents", "claude,codex", "--default-session", "collab", "--launcher-preference", "commands"})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +518,7 @@ func TestSetupNoGitignorePreservesExistingBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := captureEnvStdout(t, func() error {
-		return runSetup([]string{"-y", "--agents", "claude", "--no-gitignore"})
+		return runSetup([]string{"-y", "--agents", "claude", "--default-session", "collab", "--launcher-preference", "commands", "--no-gitignore"})
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -97,7 +97,10 @@ func TestWaveACloseEvidenceSetupLaunchResume(t *testing.T) {
 	project := setupProjectFixture(t, "claude")
 	clearPinnedSessionEnv(t)
 	setupOut, err := captureEnvStdout(t, func() error {
-		return runSetup([]string{"-y", "--agents", "claude", "--no-gitignore", "--json"})
+		return runSetup([]string{
+			"-y", "--agents", "claude", "--default-session", "collab",
+			"--launcher-preference", "commands", "--no-gitignore", "--json",
+		})
 	})
 	if err != nil {
 		t.Fatalf("setup -y: %v\n%s", err, setupOut)

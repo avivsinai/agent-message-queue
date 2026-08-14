@@ -22,24 +22,13 @@ step; it does not define a second setup path.
 
 ### Running Co-op Mode
 
-**Terminal 1 - Claude Code:**
-```bash
-amq coop exec claude -- --dangerously-skip-permissions
-```
+Paste each complete command emitted by `amq launch` into its own terminal. The
+emitted lines are the canonical execution surface: they include the exact
+session, launch nonce, execution ticket, and provider command declared in
+`.amq/launch.json`. Do not shorten or rebuild them from an example.
 
-**Terminal 2 - Codex CLI:**
-```bash
-amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
-```
-
-**Terminal 3 - Grok CLI (optional third peer):**
-```bash
-amq coop exec grok
-```
-
-Grok is a normal handle like any other — `coop exec` forwards caller flags to
-it unchanged (no baked-in permission bypass, unlike the Codex example above).
-Include Grok in the roster during `amq setup` when it should join the session.
+Include Grok in the setup roster when it should join the session. AMQ starts
+only adapters that pass their capability probe.
 
 To disable auto-wake (e.g., in CI or non-TTY environments):
 ```bash
@@ -55,6 +44,16 @@ creates `.amqrc` and `.agent-mail` at the worktree top; `--no-init` makes that
 condition an error instead. Without `--session` or `--root`, it uses the
 declared `default_session` from `.amq/launch.json`, or `collab` when none is
 declared.
+
+For a deliberate direct launch, provider flags follow `--`. Dangerous bypass
+flags are operator-controlled here and are rejected from committed
+`.amq/launch.json` arguments:
+
+```bash
+amq coop exec claude -- --dangerously-skip-permissions
+amq coop exec codex -- --dangerously-bypass-approvals-and-sandbox
+amq coop exec grok
+```
 
 Creating a missing named session, explicit root, or declared default session
 still works in this release and prints one deprecation warning. Use
@@ -72,15 +71,13 @@ commands in separate terminals:
 # Pair A: auth feature
 amq session create auth
 amq launch --session auth
-amq coop exec --session auth claude               # Terminal 1
-amq coop exec --session auth codex                # Terminal 2
 
 # Pair B: api refactor
 amq session create api
 amq launch --session api
-amq coop exec --session api claude                # Terminal 3
-amq coop exec --session api codex                 # Terminal 4
 ```
+
+Paste the commands emitted by each `launch` into separate terminals.
 
 Each pair has isolated inboxes and threads. Messages stay within their root.
 Equivalent explicit root form: `--root .agent-mail/<session>`.
