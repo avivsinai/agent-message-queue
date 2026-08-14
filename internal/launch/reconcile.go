@@ -662,12 +662,26 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			continue
 		}
 		forceFresh := request.Fresh || policy == ResumeFresh || policy == ResumeDisabled
+		freshAllowed := capabilities.Fresh && (adapter.Mode() != AdapterModeCapture || capabilities.Capture)
+		freshReason := capabilities.Reason
+		if freshReason == "" {
+			if !capabilities.Fresh {
+				freshReason = "fresh_capability_unsupported"
+			} else {
+				freshReason = "capture_capability_unsupported"
+			}
+		}
+		resumeReason := capabilities.Reason
+		if resumeReason == "" {
+			resumeReason = "resume_capability_unsupported"
+		}
 		disposition := DispositionFresh
 		if policy == ResumeDisabled {
 			disposition = DispositionDisabled
 		}
 		var agentPlan AgentPlan
 		var err error
+		capabilityRefusal := ""
 		planReason := ""
 		if request.ResumeOnly && !hasConversation {
 			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionActionRequired, ReasonNoSavedConversation
@@ -675,40 +689,71 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			continue
 		} else if request.ResumeOnly {
 			if conversation.State == CaptureReady {
-				agentPlan, err = adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity})
-				if err == nil {
-					disposition = DispositionResumed
+				if !capabilities.Resume {
+					err, capabilityRefusal = errors.New(resumeReason), resumeReason
+				} else {
+					agentPlan, err = adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity})
+					if err == nil {
+						disposition = DispositionResumed
+					}
 				}
 			} else {
 				err = fmt.Errorf("conversation identity is %s", conversation.State)
 			}
 		} else if !forceFresh && hasConversation && conversation.State == CaptureReady {
-			agentPlan, err = adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity})
-			if err == nil {
-				disposition = DispositionResumed
+			if !capabilities.Resume {
+				err, capabilityRefusal = errors.New(resumeReason), resumeReason
+			} else {
+				agentPlan, err = adapter.PlanResume(ResumeRequest{PlanRequest: base, Conversation: conversation.Identity})
+				if err == nil {
+					disposition = DispositionResumed
+				}
 			}
 		} else if !forceFresh && hasConversation && conversation.State == CapturePending && adapter.Mode() == AdapterModeMint {
-			agentPlan, err = adapter.PlanFresh(base)
-			disposition, planReason = DispositionFresh, ReasonPriorLaunchNotExecuted
+			if !freshAllowed {
+				err, capabilityRefusal = errors.New(freshReason), freshReason
+			} else {
+				agentPlan, err = adapter.PlanFresh(base)
+				disposition, planReason = DispositionFresh, ReasonPriorLaunchNotExecuted
+			}
 		} else if !forceFresh && hasConversation {
 			err = fmt.Errorf("conversation identity is %s", conversation.State)
 		}
 		if err != nil && !forceFresh {
 			if !request.AllowFreshFallback {
+				if capabilityRefusal != "" {
+					item.Code, item.ConversationDisposition, item.Reason = 6, DispositionActionRequired, capabilityRefusal
+					result.Agents = append(result.Agents, item)
+					continue
+				}
 				item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, ReasonStaleConversation
 				result.Agents = append(result.Agents, item)
 				continue
 			}
 			base.ResumePolicy = ResumeFresh
-			agentPlan, err = adapter.PlanFresh(base)
-			disposition = DispositionFreshAfterStale
+			if !freshAllowed {
+				err, capabilityRefusal = errors.New(freshReason), freshReason
+			} else {
+				capabilityRefusal = ""
+				agentPlan, err = adapter.PlanFresh(base)
+				disposition = DispositionFreshAfterStale
+			}
 		} else if forceFresh || !hasConversation {
 			if request.Fresh {
 				base.ResumePolicy = ResumeFresh
 			}
-			agentPlan, err = adapter.PlanFresh(base)
+			if !freshAllowed {
+				err, capabilityRefusal = errors.New(freshReason), freshReason
+			} else {
+				agentPlan, err = adapter.PlanFresh(base)
+			}
 		}
 		if err != nil {
+			if capabilityRefusal != "" {
+				item.Code, item.ConversationDisposition, item.Reason = 6, DispositionActionRequired, capabilityRefusal
+				result.Agents = append(result.Agents, item)
+				continue
+			}
 			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, err.Error()
 			result.Agents = append(result.Agents, item)
 			continue
