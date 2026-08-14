@@ -3001,9 +3001,10 @@ func TestRunWakeLoopForegroundAuthorityRetryDoesNotCompeteWithExpiredDoorbell(t 
 	nowNanos.Store(start.UnixNano())
 	var promptWrites atomic.Int64
 	initialSubmitted := make(chan struct{}, 1)
-	initialAttemptClockSampled := make(chan struct{}, 1)
+	initialAttemptCompleted := make(chan struct{}, 1)
 	refused := make(chan struct{}, 1)
 	extra := make(chan struct{}, 1)
+	ticks := make(chan time.Time)
 	stop := make(chan struct{})
 	stopped := false
 	stopLoop := func() {
@@ -3025,15 +3026,17 @@ func TestRunWakeLoopForegroundAuthorityRetryDoesNotCompeteWithExpiredDoorbell(t 
 			injectMode:  wakeInjectModePaste,
 			controlStop: stop,
 			doorbellNow: func() time.Time {
-				now := time.Unix(0, nowNanos.Load())
-				if promptWrites.Load() == 1 && now.Equal(start) {
+				return time.Unix(0, nowNanos.Load())
+			},
+			onNotificationAttemptComplete: func() {
+				if promptWrites.Load() == 1 {
 					select {
-					case initialAttemptClockSampled <- struct{}{}:
+					case initialAttemptCompleted <- struct{}{}:
 					default:
 					}
 				}
-				return now
 			},
+			maintenanceTicks: ticks,
 			preconditionCheck: func(*wakeConfig) error {
 				return nil
 			},
@@ -3072,14 +3075,14 @@ func TestRunWakeLoopForegroundAuthorityRetryDoesNotCompeteWithExpiredDoorbell(t 
 		t.Fatal("wake loop did not submit initial doorbell")
 	}
 	// terminalWrite reports the submit before deliverNewMessageNotification
-	// records the attempt. Wait until that record has sampled the old clock;
-	// the loop completes the state update before it can handle another event.
+	// commits the attempt. Wait for the committed retry state before advancing
+	// the fake clock or introducing the next cohort member.
 	select {
-	case <-initialAttemptClockSampled:
+	case <-initialAttemptCompleted:
 	case err := <-done:
 		t.Fatalf("wake loop exited before recording initial attempt: %v", err)
 	case <-time.After(2 * time.Second):
-		t.Fatal("wake loop did not sample the initial attempt clock")
+		t.Fatal("wake loop did not complete the initial attempt")
 	}
 	nowNanos.Store(start.Add(wakeDoorbellRetryBase).UnixNano())
 	message.Header.ID = "trigger-expired-foreground-retry"
@@ -3095,6 +3098,17 @@ func TestRunWakeLoopForegroundAuthorityRetryDoesNotCompeteWithExpiredDoorbell(t 
 		data,
 	); err != nil {
 		t.Fatal(err)
+	}
+	// Use a maintenance tick as a loop-boundary barrier. The send cannot
+	// complete until the initial notification has recorded its retry state,
+	// and maintenance scans the expanded cohort with the explicitly advanced
+	// clock. Do not depend on watcher delivery timing to trigger the retry.
+	select {
+	case ticks <- start.Add(wakeDoorbellRetryBase):
+	case err := <-done:
+		t.Fatalf("wake loop exited before expired foreground retry: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake loop did not accept expired foreground retry tick")
 	}
 
 	select {

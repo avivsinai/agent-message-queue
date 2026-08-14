@@ -72,6 +72,7 @@ type wakeConfig struct {
 	maintenanceOutputs            []*os.File
 	preconditionCheck             func(*wakeConfig) error
 	onPendingNotify               func()
+	onNotificationAttemptComplete func()
 	recordNotifierStatus          func(status, mode, reason string) error
 	pendingNotifierStatus         *wakeNotifierStatus
 	recordDoorbellStatus          func(parked bool, attempts uint) error
