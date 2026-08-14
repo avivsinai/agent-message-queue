@@ -1,0 +1,122 @@
+package launch
+
+import (
+	"errors"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestLaunchJournalRequiresLeaseAndClearsOnlyExactRecord(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	request := reconcileFixture(t, backend)
+	nonce := "019c8a2f-2b13-7000-8000-000000000010"
+	plan, agents, conversations := journalFixturePlan(nonce)
+	digest, err := plan.SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := NewLaunchJournal(request, backend.name, backend.Detect(), plan, digest, nonce, agents, conversations, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJournal(request.Root, nil, record); err == nil {
+		t.Fatal("WriteJournal without lease succeeded")
+	}
+	lease, err := AcquireLease(request.Root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJournal(request.Root, lease, record); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadJournal(request.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := record
+	changed.CreatedAt = changed.CreatedAt.Add(time.Second)
+	if err := ClearJournal(request.Root, lease, changed); err == nil {
+		t.Fatal("ClearJournal removed a different record")
+	}
+	if err := ClearJournal(request.Root, lease, loaded); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadJournal(request.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("journal after clear: %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLaunchJournalRejectsPlanRosterAndBindingDrift(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	request := reconcileFixture(t, backend)
+	nonce := "019c8a2f-2b13-7000-8000-000000000011"
+	plan, agents, conversations := journalFixturePlan(nonce)
+	digest, err := plan.SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := NewLaunchJournal(request, backend.name, backend.Detect(), plan, digest, nonce, agents, conversations, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	drifted := record
+	drifted.PlanDigest = "sha256:" + strings.Repeat("0", 64)
+	if err := drifted.Validate(); err == nil {
+		t.Fatal("journal accepted a different plan digest")
+	}
+	drifted = record
+	drifted.Conversations = nil
+	if err := drifted.Validate(); err == nil {
+		t.Fatal("journal accepted a different roster")
+	}
+	drifted = record
+	drifted.Phase = JournalCreated
+	drifted.Binding = &BindingRecord{
+		Version: BindingVersion, Backend: backend.name, HostIdentity: "host:test", InstanceIdentity: "instance:test",
+		Profile: backend.Detect().Profile.Identity(), LaunchNonce: testLaunchNonce,
+		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{{OpaqueID: "resource:test"}}},
+	}
+	if err := drifted.Validate(); err == nil {
+		t.Fatal("journal accepted a binding from a different launch generation")
+	}
+	originalProject := request.ProjectRoot + "-original"
+	if err := os.Rename(request.ProjectRoot, originalProject); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(originalProject) })
+	if err := os.Mkdir(request.ProjectRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := record.ValidateRequest(request); err == nil || !strings.Contains(err.Error(), "physical") {
+		t.Fatalf("journal accepted replacement project directory: %v", err)
+	}
+	if err := os.Remove(request.ProjectRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(originalProject, request.ProjectRoot); err != nil {
+		t.Fatal(err)
+	}
+	request.Config.Agents[0].Env = map[string]string{"LANG": "C"}
+	if err := record.ValidateRequest(request); err == nil {
+		t.Fatal("journal accepted roster drift")
+	}
+}
+
+func journalFixturePlan(nonce string) (Plan, []AgentReconcileResult, []ConversationRecord) {
+	plan := Plan{Version: PlanVersion, Agents: []AgentPlan{{
+		Handle: "claude", Argv: []string{"/usr/bin/true", nonce}, Cwd: "/tmp",
+		AdapterMode: AdapterModeMint, ResumePolicy: ResumeEnabled, LaunchNonce: nonce,
+		ConversationID: nonce, DynamicArgv: []DynamicArg{{Index: 1, Kind: DynamicArgLaunchNonce}},
+	}}}
+	agents := []AgentReconcileResult{{Handle: "claude", ConversationDisposition: DispositionFresh}}
+	conversations := []ConversationRecord{{
+		Version: ConversationVersion, Handle: "claude", State: CapturePending,
+		ProviderVersion: "test", LaunchNonce: nonce,
+	}}
+	return plan, agents, conversations
+}

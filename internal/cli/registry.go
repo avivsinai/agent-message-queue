@@ -49,7 +49,7 @@ func init() {
 				{Name: "list", Summary: "List presence data", Handler: runPresenceList},
 			},
 		},
-		{Name: "cleanup", Summary: "Remove selected stale tmp or wake quarantine artifacts", Handler: runCleanup},
+		{Name: "cleanup", Summary: "Remove selected tmp, wake quarantine, or launch recovery artifacts", Handler: runCleanup},
 		{Name: "watch", Summary: "Wait for new messages (uses fsnotify)", Handler: runWatch},
 		{Name: "drain", Summary: "Drain new messages (read, move to cur, emit receipts)", Handler: runDrain},
 		{Name: "monitor", Summary: "Combined watch+drain for co-op mode", Handler: runMonitor},

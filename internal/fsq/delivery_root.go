@@ -125,6 +125,16 @@ func (r *DeliveryRoot) Base() string {
 	return r.base
 }
 
+// FileInfo returns the physical directory snapshot captured when this root
+// capability was opened. Callers may derive an opaque identity token from it;
+// filesystem operations must still use the pinned capability.
+func (r *DeliveryRoot) FileInfo() os.FileInfo {
+	if r == nil {
+		return nil
+	}
+	return r.identity
+}
+
 // OpenOrCreateDirectChild pins one direct, non-symlink child directory beneath
 // the authorized root. The before/open/after identity checks prevent a child
 // swapped during validation from redirecting later writes through a symlink.

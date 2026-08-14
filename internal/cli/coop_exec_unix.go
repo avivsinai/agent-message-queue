@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
 )
 
@@ -50,6 +51,7 @@ func openCoopWakeAttention(output *os.File) (*os.File, error) {
 }
 
 func runCoopExec(args []string) error {
+	managedLaunchNonce := strings.TrimSpace(os.Getenv(launch.InternalLaunchNonceEnv))
 	// Split at "--" before flag parsing so agent flags aren't consumed.
 	amqArgs, agentArgs := splitDashDash(args)
 
@@ -397,7 +399,10 @@ func runCoopExec(args []string) error {
 	var earlyOwner *wakeOwner
 	baseEnv := unsetEnvVar(
 		unsetEnvVar(
-			unsetEnvVar(os.Environ(), envWakeOwner),
+			unsetEnvVar(
+				unsetEnvVar(os.Environ(), launch.InternalLaunchNonceEnv),
+				envWakeOwner,
+			),
 			envWakePrivateStopFD,
 		),
 		envWakeAttentionFD,
@@ -641,11 +646,36 @@ func runCoopExec(args []string) error {
 		return cleanupAfterError(fmt.Errorf("encode final wake owner: %w", ownerErr))
 	}
 	env = setEnvVar(unsetEnvVar(env, envWakeOwner), envWakeOwner, encodedOwner)
-	execErr := coopExecProcess(binaryPath, argv, env)
+	var execErr error
+	if managedLaunchNonce != "" {
+		execErr = reexecManagedLaunchWrapper(root, agentHandle, managedLaunchNonce, binaryPath, argv, env)
+	} else {
+		execErr = coopExecProcess(binaryPath, argv, env)
+	}
 	if execErr == nil {
 		execErr = fmt.Errorf("exec returned without replacing process")
 	}
 	return cleanupAfterError(execErr)
+}
+
+// reexecManagedLaunchWrapper preserves the coop exec PID while moving the
+// final trust revalidation and conversation acknowledgement directly next to
+// the provider exec boundary.
+func reexecManagedLaunchWrapper(root, handle, nonce, binaryPath string, argv, env []string) error {
+	current, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve current amq executable for managed launch: %w", err)
+	}
+	amqPath, err := coopWakeExecutionPath(current)
+	if err != nil {
+		return err
+	}
+	wrapperArgv := []string{
+		amqPath, "__launch-exec", "--root", root, "--handle", handle,
+		"--nonce", nonce, "--target", binaryPath, "--",
+	}
+	wrapperArgv = append(wrapperArgv, argv...)
+	return coopExecProcess(amqPath, wrapperArgv, env)
 }
 
 // coopProvisionAfterClassifyHook runs between layout classification and the

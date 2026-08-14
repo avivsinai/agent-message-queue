@@ -8,7 +8,10 @@ import (
 )
 
 const (
-	CommandsBackendName       = "commands"
+	CommandsBackendName = "commands"
+	// InternalLaunchNonceEnv marks a command emitted by the trusted launch
+	// reconciler. coop exec consumes it and never forwards it to the provider.
+	InternalLaunchNonceEnv    = "AMQ_INTERNAL_LAUNCH_NONCE"
 	PlanOnlyInspectEvidence   = "plan_only backend has no query surface"
 	PlanOnlyCloseReason       = "plan_only backend owns no terminal resource"
 	commandsProfileVersion    = 1
@@ -58,6 +61,10 @@ func (Commands) Create(req CreateRequest) (CreateResult, error) {
 	for _, agent := range req.Plan.Agents {
 		argv := coopExecArgv(amq, req.Session, agent.Handle, agent.Argv)
 		env := cloneEnv(agent.EnvOverlay)
+		if env == nil {
+			env = make(map[string]string, 1)
+		}
+		env[InternalLaunchNonceEnv] = agent.LaunchNonce
 		commands = append(commands, EmittedCommand{
 			Handle:      agent.Handle,
 			Argv:        argv,

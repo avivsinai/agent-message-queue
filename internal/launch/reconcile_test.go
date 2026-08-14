@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -65,10 +66,17 @@ type reconcileBackend struct {
 	createStart chan struct{}
 	capture     bool
 	invalidBind bool
+	reclaims    int
+	resourceUp  bool
+	reclaimAs   ReclaimStatus
+	reclaimList []ResourceIdentity
+	reclaimFlip bool
+	createErr   error
+	definiteErr bool
 }
 
 func (b *reconcileBackend) Detect() DetectResult {
-	profile := Profile{Backend: b.name, Platform: "test", VersionRange: "*", Version: 1, Capabilities: []Capability{CapCreate, CapInspect, CapClose, CapFocus}}
+	profile := Profile{Backend: b.name, Platform: "test", VersionRange: "*", Version: 1, Capabilities: []Capability{CapCreate, CapInspect, CapClose, CapFocus, CapReclaim}}
 	return DetectResult{
 		Available: true, Profile: profile, Effective: profile.Capabilities,
 		HostIdentity: "host:test", InstanceIdentity: "instance:test",
@@ -77,6 +85,15 @@ func (b *reconcileBackend) Detect() DetectResult {
 func (b *reconcileBackend) Create(req CreateRequest) (CreateResult, error) {
 	b.mu.Lock()
 	b.creates++
+	createErr, definiteErr := b.createErr, b.definiteErr
+	if createErr != nil {
+		b.mu.Unlock()
+		if definiteErr {
+			return CreateResult{}, &DefinitePreCreateError{Err: createErr}
+		}
+		return CreateResult{}, createErr
+	}
+	b.resourceUp = true
 	b.mu.Unlock()
 	if b.createStart != nil {
 		select {
@@ -118,6 +135,41 @@ func (b *reconcileBackend) Focus(FocusRequest) (FocusResult, error) {
 	b.focuses++
 	b.mu.Unlock()
 	return FocusResult{Outcome: OutcomeAttached}, nil
+}
+func (b *reconcileBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.reclaims++
+	if b.reclaimAs != "" && b.reclaimAs != ReclaimAdoptable {
+		return ReclaimResult{
+			Status: b.reclaimAs, Evidence: "test classified recovery",
+			Resources: slices.Clone(b.reclaimList),
+		}, nil
+	}
+	if !b.resourceUp {
+		return ReclaimResult{Status: ReclaimAbsent, Evidence: "test resource absent"}, nil
+	}
+	binding := BindingRecord{
+		Version: BindingVersion, Backend: b.name, HostIdentity: "host:test", InstanceIdentity: "instance:test",
+		Profile: b.Detect().Profile.Identity(), LaunchNonce: req.Journal.LaunchNonce,
+		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{{OpaqueID: "resource:test"}}},
+	}
+	result := ReclaimResult{
+		Status: ReclaimAdoptable, Evidence: "test name and nonce match", Binding: binding,
+		Resources: slices.Clone(binding.Resources.Resources),
+	}
+	if b.reclaimFlip && b.reclaims > 1 {
+		result.Binding.Resources.Resources[0].OpaqueID = "resource:replacement"
+		result.Resources = slices.Clone(result.Binding.Resources.Resources)
+	}
+	if b.capture {
+		evidence, err := ParseCodexThreadStartedEvidence([]byte(`{"method":"thread/started","params":{"thread":{"id":"019c8a2f-2b13-7000-8000-000000000001","cliVersion":"test"}}}`), req.Journal.LaunchNonce, false)
+		if err != nil {
+			return ReclaimResult{}, err
+		}
+		result.CaptureEvidence = map[string][]CaptureEvidence{req.Journal.Plan.Agents[0].Handle: {evidence}}
+	}
+	return result, nil
 }
 
 func reconcileFixture(t *testing.T, backend Backend) ReconcileRequest {
@@ -412,6 +464,10 @@ func TestReconcilePlanOnlyMintWithoutExecutionRemintsPending(t *testing.T) {
 	if firstRecord.State != CapturePending || firstRecord.Identity.ID != "" || firstRecord.ExecutionEvidence != nil || firstRecord.LaunchNonce != firstID {
 		t.Fatalf("first record=%#v, want pending nonce %q without evidence", firstRecord, firstID)
 	}
+	ticket, err := LoadExecutionTicket(req.Root, "claude")
+	if err != nil || ticket.State != ExecutionPending || ticket.LaunchNonce != firstID || !slices.Equal(ticket.TargetArgv, first.Plan.Agents[0].Argv) {
+		t.Fatalf("first execution ticket=%#v err=%v", ticket, err)
+	}
 	resumeReq := req
 	resumeReq.ResumeOnly = true
 	resume, err := Reconcile(resumeReq)
@@ -597,8 +653,142 @@ func TestReconcileUntrustedAndRosterDriftAreStructured(t *testing.T) {
 	}
 }
 
-func TestReconcileCrashAfterCreateReleasesLeaseForRecovery(t *testing.T) {
+func TestReconcileManagedCreateCrashMatrixConvergesWithoutDuplicateSpawn(t *testing.T) {
+	for _, stage := range []string{
+		"journal_written", "backend_created", "journal_created",
+		"conversations_written", "binding_written", "journal_cleared",
+	} {
+		t.Run(stage, func(t *testing.T) {
+			backend := &reconcileBackend{name: "test", inspect: InspectPresent}
+			req := reconcileFixture(t, backend)
+			crash := errors.New("injected crash")
+			fired := false
+			req.CrashHook = func(got string) error {
+				if got == stage && !fired {
+					fired = true
+					return crash
+				}
+				return nil
+			}
+			if _, err := Reconcile(req); !errors.Is(err, crash) {
+				t.Fatalf("crash error = %v", err)
+			}
+			inspection, err := InspectLease(req.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if inspection.State != LeaseMissing {
+				t.Fatalf("lease after crash = %#v", inspection)
+			}
+
+			req.CrashHook = nil
+			result, err := Reconcile(req)
+			if err != nil || result.AggregateCode != 0 {
+				t.Fatalf("recovery result=%#v err=%v", result, err)
+			}
+			if backend.creates != 1 {
+				t.Fatalf("backend creates=%d, want exactly one", backend.creates)
+			}
+			if _, err := LoadJournal(req.Root); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("journal after recovery: %v", err)
+			}
+			if _, err := LoadBinding(req.Root); err != nil {
+				t.Fatalf("binding after recovery: %v", err)
+			}
+			record, err := LoadConversation(req.Root, "claude")
+			if err != nil || record.State != CaptureReady || record.ExecutionEvidence == nil {
+				t.Fatalf("conversation after recovery=%#v err=%v", record, err)
+			}
+		})
+	}
+}
+
+func TestReconcileCrashRecoveryPreservesExistingConversationIdentity(t *testing.T) {
 	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	writeReconcileConversation(t, req, ConversationRecord{
+		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
+		Identity: ConversationIdentity{Provider: "claude", ID: testConversationID}, LaunchNonce: testLaunchNonce,
+		ExecutionEvidence: reconcileExecutionEvidence(backend, testLaunchNonce),
+	})
+	crash := errors.New("injected crash")
+	req.CrashHook = func(stage string) error {
+		if stage == "backend_created" {
+			return crash
+		}
+		return nil
+	}
+	first, err := Reconcile(req)
+	if !errors.Is(err, crash) || first.Plan == nil || first.Plan.Agents[0].ConversationID != testConversationID {
+		t.Fatalf("first result=%#v err=%v", first, err)
+	}
+	journal, err := LoadJournal(req.Root)
+	if err != nil || journal.Conversations[0].Identity.ID != testConversationID || journal.Conversations[0].LaunchNonce != testLaunchNonce {
+		t.Fatalf("journal=%#v err=%v", journal, err)
+	}
+	req.CrashHook = nil
+	result, err := Reconcile(req)
+	if err != nil || result.AggregateCode != 0 || backend.creates != 1 {
+		t.Fatalf("recovery result=%#v creates=%d err=%v", result, backend.creates, err)
+	}
+	record, err := LoadConversation(req.Root, "claude")
+	if err != nil || record.Identity.ID != testConversationID || record.LaunchNonce != testLaunchNonce {
+		t.Fatalf("conversation=%#v err=%v", record, err)
+	}
+}
+
+func TestReconcileJournalRequiresClassifiedReclaimAndPreservesInventory(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		wrap       bool
+		status     ReclaimStatus
+		wantReason string
+	}{
+		{name: "no_reclaim", wrap: true, wantReason: "launch_recovery_not_supported"},
+		{name: "incomplete", status: ReclaimIncomplete, wantReason: "launch_recovery_incomplete"},
+		{name: "unknown", status: ReclaimUnknown, wantReason: "launch_recovery_unknown"},
+		{name: "foreign", status: ReclaimForeign, wantReason: "launch_recovery_foreign"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend := &reconcileBackend{
+				name: "test", inspect: InspectAbsent, reclaimAs: test.status,
+				reclaimList: []ResourceIdentity{{OpaqueID: "resource:partial", Agent: "claude"}},
+			}
+			var selected Backend = backend
+			if test.wrap {
+				selected = noReclaimBackend{Backend: backend}
+			}
+			req := reconcileFixture(t, selected)
+			crash := errors.New("injected crash")
+			req.CrashHook = func(stage string) error {
+				if stage == "backend_created" {
+					return crash
+				}
+				return nil
+			}
+			if _, err := Reconcile(req); !errors.Is(err, crash) {
+				t.Fatalf("crash error = %v", err)
+			}
+			req.CrashHook = nil
+			result, err := Reconcile(req)
+			if err != nil || result.AggregateCode != 6 || result.Reason != test.wantReason || backend.creates != 1 {
+				t.Fatalf("result=%#v creates=%d err=%v", result, backend.creates, err)
+			}
+			if test.status != "" && (result.Recovery == nil || !slices.Equal(result.Recovery.Resources, backend.reclaimList)) {
+				t.Fatalf("recovery report=%#v, want exact inventory %#v", result.Recovery, backend.reclaimList)
+			}
+			if _, err := LoadJournal(req.Root); err != nil {
+				t.Fatalf("journal was not preserved: %v", err)
+			}
+			if _, err := LoadBinding(req.Root); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("recovery published binding: %v", err)
+			}
+		})
+	}
+}
+
+func TestReconcileRevalidatesAdoptionImmediatelyBeforeBinding(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent, reclaimFlip: true}
 	req := reconcileFixture(t, backend)
 	crash := errors.New("injected crash")
 	req.CrashHook = func(stage string) error {
@@ -610,19 +800,40 @@ func TestReconcileCrashAfterCreateReleasesLeaseForRecovery(t *testing.T) {
 	if _, err := Reconcile(req); !errors.Is(err, crash) {
 		t.Fatalf("crash error = %v", err)
 	}
-	inspection, err := InspectLease(req.Root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if inspection.State != LeaseMissing {
-		t.Fatalf("lease after crash = %#v", inspection)
-	}
 	req.CrashHook = nil
 	result, err := Reconcile(req)
-	if err != nil || result.AggregateCode != 0 {
-		t.Fatalf("recovery result=%#v err=%v", result, err)
+	if err != nil || result.AggregateCode != 6 || result.Reason != "launch_recovery_changed" || backend.reclaims != 2 {
+		t.Fatalf("result=%#v reclaims=%d err=%v", result, backend.reclaims, err)
+	}
+	if _, err := LoadBinding(req.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("changed adoption published binding: %v", err)
+	}
+	if _, err := LoadJournal(req.Root); err != nil {
+		t.Fatalf("changed adoption lost journal: %v", err)
 	}
 }
+
+func TestReconcileCreateFailureClassificationControlsJournalClear(t *testing.T) {
+	for _, definite := range []bool{true, false} {
+		t.Run(map[bool]string{true: "definite", false: "uncertain"}[definite], func(t *testing.T) {
+			backend := &reconcileBackend{name: "test", inspect: InspectAbsent, createErr: errors.New("create failed"), definiteErr: definite}
+			req := reconcileFixture(t, backend)
+			result, err := Reconcile(req)
+			if err != nil || result.AggregateCode != 1 {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			_, journalErr := LoadJournal(req.Root)
+			if definite && !errors.Is(journalErr, os.ErrNotExist) {
+				t.Fatalf("definite pre-create failure retained journal: %v", journalErr)
+			}
+			if !definite && journalErr != nil {
+				t.Fatalf("uncertain create failure lost journal: %v", journalErr)
+			}
+		})
+	}
+}
+
+type noReclaimBackend struct{ Backend }
 
 func TestReconcileCaptureEvidencePersistsExactIdentity(t *testing.T) {
 	backend := &reconcileBackend{name: "test", inspect: InspectAbsent, capture: true}
