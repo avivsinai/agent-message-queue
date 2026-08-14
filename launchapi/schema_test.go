@@ -1,6 +1,7 @@
 package launchapi
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"reflect"
@@ -63,6 +64,41 @@ func TestLaunchAPIV1SchemaContract(t *testing.T) {
 	}
 	if got := objectMap(t, applyProperties["semantic_digest"], "ApplyResultV1.semantic_digest")["$ref"]; got != "#/$defs/Digest" {
 		t.Errorf("ApplyResultV1.semantic_digest ref = %v", got)
+	}
+}
+
+func TestPrepareResultMatchesPublishedSchema(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, true)
+	result, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawSchema, err := os.ReadFile("../schemas/launch-api-v1.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schemaDocument any
+	if err := json.Unmarshal(rawSchema, &schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("launch-api-v1.schema.json", schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile("launch-api-v1.schema.json#/$defs/PrepareResultV1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawResult, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document any
+	if err := json.Unmarshal(rawResult, &document); err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(document); err != nil {
+		t.Fatalf("schema rejected live Prepare result: %v\n%s", err, rawResult)
 	}
 }
 

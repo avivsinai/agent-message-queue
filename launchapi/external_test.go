@@ -27,12 +27,20 @@ replace github.com/avivsinai/agent-message-queue => %s
 	consumerTest := `package consumer
 
 import (
-    "testing"
+	"context"
+	"testing"
 
     "github.com/avivsinai/agent-message-queue/launchapi"
 )
 
 func TestContract(t *testing.T) {
+	var prepare func(context.Context, launchapi.PrepareRequestV1) (launchapi.PrepareResultV1, error) = launchapi.Prepare
+	_ = prepare
+	var action launchapi.RequiredActionKindV1 = launchapi.RequiredActionTrustConfirmation
+	var choice launchapi.DecisionChoiceV1 = launchapi.DecisionTrustExactSubject
+	if action == "" || choice == "" {
+		t.Fatal("typed Prepare action contract is empty")
+	}
     intent := launchapi.LaunchIntentV1{
         IntentVersion: launchapi.IntentVersionV1,
         Participants: []launchapi.ParticipantV1{{Handle: "operator", Runnable: false}},

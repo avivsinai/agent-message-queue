@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -24,7 +23,7 @@ type launchCLIOptions struct {
 var (
 	launchIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 	launchInput      = func() *bufio.Reader { return bufio.NewReader(os.Stdin) }
-	launchStateDir   = defaultLaunchStateDir
+	launchStateDir   = launch.DefaultLaunchStateDir
 	launchAMQPath    = func() string {
 		if path, err := os.Executable(); err == nil {
 			return path
@@ -261,19 +260,5 @@ func outputLaunchResult(jsonOutput bool, result launch.ReconcileResult) error {
 }
 
 func defaultLaunchStateDir() (string, error) {
-	if value := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); value != "" {
-		return filepath.Join(value, "amq"), nil
-	}
-	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
-		base, err := os.UserConfigDir()
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(base, "amq", "state"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".local", "state", "amq"), nil
+	return launch.DefaultLaunchStateDir()
 }
