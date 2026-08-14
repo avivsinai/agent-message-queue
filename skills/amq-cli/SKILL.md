@@ -146,6 +146,10 @@ Before diving in, match the task to the right workflow — this avoids wasted ef
 
 ## Quick Start
 
+The repository [README Quick Start](https://github.com/avivsinai/agent-message-queue#quick-start)
+is the canonical human onboarding path. The commands below keep the agent
+workflow self-contained.
+
 ```bash
 # One-time project setup (preview, then write .amqrc, .amq/launch.json, default session)
 amq setup
@@ -153,6 +157,7 @@ amq setup -y   # automation only, after the caller accepted that preview
 
 # Daily entry: reconcile the declared session (never creates an unknown name)
 amq launch
+amq session create feature-x   # once, before the first named-session launch
 amq launch --session feature-x
 amq session resume feature-x
 ```
@@ -160,8 +165,8 @@ amq session resume feature-x
 The first semantic plan, and each plan change, needs an interactive trust
 confirmation stored outside the worktree. Non-interactive or `--json` calls
 exit `6` until that digest is trusted. An unknown `session resume` name exits
-`3` and writes nothing. Wave A prints complete `coop exec` commands and exits
-`6` because running them is the remaining operator action:
+`3` and writes nothing. The `commands` backend prints complete `coop exec`
+commands and exits `6` because running them is the remaining operator action:
 
 ```bash
 # Then run the emitted commands, one terminal each
@@ -577,7 +582,7 @@ Prose like `operator-held`, `pending operator`, or `manual approval` **inside an
 | `decision` | — | normal |
 | `todo` | — | normal |
 | `status` | — | low |
-| `brainstorm` | — | low |
+| `brainstorm` | — | normal |
 
 ## References
 

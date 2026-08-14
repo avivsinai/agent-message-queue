@@ -12,81 +12,13 @@ AMQ is the communication layer in this setup, not the coordinator. The initiator
 
 For swarm command reference, see [CLAUDE.md](CLAUDE.md).
 
-## Quick Start
+## Co-op Workflow
 
-### Prerequisites (One-Time)
-
-1. **Install amq CLI** ([releases](https://github.com/avivsinai/agent-message-queue/releases)):
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
-   ```
-
-2. **Install amq-cli skill** for your agents:
-
-   **Via skills** (recommended):
-   ```bash
-   npx skills add avivsinai/agent-message-queue -g -y
-   ```
-
-   **Or via skild:**
-   ```bash
-   npx skild install @avivsinai/amq-cli -t claude -y
-   ```
-
-   See [INSTALL.md](INSTALL.md) for manual installation or troubleshooting.
-
-   If pairing with Grok CLI as an optional peer, Grok discovers skills the
-   same general way Claude Code and Codex CLI do. Native locations include a
-   project-local `.grok/skills` directory, a user-level `~/.grok/skills`
-   directory, installed plugin skills, and explicitly configured skill paths;
-   Grok also reads Claude-compatible skill locations plus the user-level
-   `~/.agents/skills` directory — see the
-   [xAI skill discovery docs](https://docs.x.ai/build/features/skills-plugins-marketplaces)
-   for the authoritative list. See [INSTALL.md](INSTALL.md) for the manual
-   `~/.grok/skills` copy example.
-
-### Project Setup
-
-Run `amq setup` once per project. It probes supported agent CLIs and local
-launchers, lets you select any non-empty roster and the default session, then
-previews every change before it writes. The committed `.amq/launch.json` owns
-the roster, session default, resume policy, and layout intent. The ignored
-`.amq/launch.local.json` contains launcher preferences only. For automation,
-use `amq setup -y` after the caller accepts the recomputed preview.
-
-`amq coop init` remains the non-interactive provisioning primitive.
-
-### Launch and Resume
-
-Use the reconciliation engine as the daily entry point:
-
-```bash
-amq launch
-amq launch --session auth
-amq session resume auth
-```
-
-Both command forms use the same engine. It loads `.amq/launch.json`, validates
-adapter-owned argv and environment rules, checks the out-of-worktree trust
-record, acquires the session launch lease and per-agent locks, then reconciles
-the saved backend binding and conversation refs under
-`<session-root>/meta/launch/`. Native resume uses only the exact
-provider-qualified ID saved for that session and handle.
-
-The engine fails closed:
-
-- An unknown `session resume` name exits `3` with zero writes.
-- An untrusted semantic plan, stale conversation ID, unknown backend
-  inspection, foreign binding, or blocked rebind exits `6`.
-- `--fresh` deliberately starts fresh. `--allow-fresh-fallback` permits fresh
-  only when a saved identity is stale.
-- `--launcher <other> --rebind` is interactive. A foreign resource can only be
-  left in place; it is never closed by local inference.
-
-Wave A includes the honest `commands` backend only. It emits executable
-`coop exec` commands without claiming a managed terminal resource, then exits
-`6` because the operator must run those commands. JSON output includes every
-per-agent conversation disposition and the aggregate exit code.
+Use the [README Quick Start](README.md#quick-start) to install AMQ, configure
+the project with `amq setup`, and run `amq launch`. The `commands` backend
+prints one complete `coop exec` command for each configured agent and exits `6`
+until those commands are started. This document begins at that co-op-specific
+step; it does not define a second setup path.
 
 ### Running Co-op Mode
 
@@ -107,52 +39,45 @@ amq coop exec grok
 
 Grok is a normal handle like any other — `coop exec` forwards caller flags to
 it unchanged (no baked-in permission bypass, unlike the Codex example above).
-The default `coop init`/`coop exec` agent set stays `claude,codex,user`; adding
-Grok is opt-in. To provision mailboxes for all three engines explicitly:
-
-```bash
-amq coop init --agents claude,codex,grok,user
-```
-
-That's it. `coop exec` auto-initializes the project if needed. In a Git
-worktree with no eligible root it creates `.amqrc` and `.agent-mail` at that
-worktree's top, even from a subdirectory or with `--session`; it does not
-consult `~/.amqrc`. Use `--no-init` to keep the refusal instead. It then sets
-`AM_ROOT`/`AM_ME`, `AM_BASE_ROOT`, and the independent `AM_SESSION` identity,
-starts wake notifications, and execs into the agent. Without `--session` or
-`--root`, it uses the declared `default_session` from `.amq/launch.json`, or
-`collab` when none is declared (i.e., `AM_ROOT=.agent-mail/collab`,
-`AM_SESSION=collab` unless launch.json says otherwise). A session-shaped
-explicit root such as `.agent-mail/auth` pins the inferred session; a custom
-sessionless root clears `AM_SESSION`.
-
-Creating a missing named session (`--session`) or missing `--root` still works
-in this release, and so does creating a missing declared default session when
-`.amqrc` or `.amq/launch.json` is present. Each of those paths prints this
-single-line warning exactly once:
-
-```
-warning: creating a missing session or root from coop exec is deprecated; use 'amq session create <name>' or 'amq init --root'. The next major release makes this exit 3.
-```
-
-Use `amq session create <name>` or `amq init --root` instead. Existing sessions
-and the zero-config `collab` bootstrap in a repo with neither file do not warn.
+Include Grok in the roster during `amq setup` when it should join the session.
 
 To disable auto-wake (e.g., in CI or non-TTY environments):
 ```bash
 amq coop exec --no-wake claude
 ```
 
+### Low-level provisioning
+
+`amq coop init` is the non-interactive provisioning primitive. Direct
+`coop exec` provisioning also remains available for scripts and legacy flows,
+but it is not the canonical onboarding path. With no eligible root, `coop exec`
+creates `.amqrc` and `.agent-mail` at the worktree top; `--no-init` makes that
+condition an error instead. Without `--session` or `--root`, it uses the
+declared `default_session` from `.amq/launch.json`, or `collab` when none is
+declared.
+
+Creating a missing named session, explicit root, or declared default session
+still works in this release and prints one deprecation warning. Use
+`amq session create <name>` or `amq init --root` instead; the next major release
+makes those missing-target cases exit `3`. The zero-configuration `collab`
+bootstrap in a repo with neither `.amqrc` nor `.amq/launch.json` remains the
+documented exception.
+
 ### Multiple Pairs (Isolated Sessions)
 
-Run multiple agent pairs on different features using `--session`:
+Create each named session explicitly, reconcile it, then run the emitted
+commands in separate terminals:
 
 ```bash
 # Pair A: auth feature
+amq session create auth
+amq launch --session auth
 amq coop exec --session auth claude               # Terminal 1
 amq coop exec --session auth codex                # Terminal 2
 
 # Pair B: api refactor
+amq session create api
+amq launch --session api
 amq coop exec --session api claude                # Terminal 3
 amq coop exec --session api codex                 # Terminal 4
 ```
@@ -168,30 +93,18 @@ and set `AMQ_GLOBAL_ROOT` to one absolute base. Use `amq doctor --ops` when a
 delivery receipt times out; it can name divergent same-session roots when a
 peer has fresher presence in another worktree.
 
-Participating commands in a Git worktree or bare repository with no eligible
-root fail closed instead of implicitly using `~/.amqrc`. `coop init` explicitly
-initializes a worktree-local queue at the worktree top; `coop exec` does the
-same after root precedence finds no eligible root. A bare repository has no
-worktree to host that queue, so use a worktree or explicit `--root` there.
-
-For read-side access, prefer the named route:
+Participating commands fail closed when the active session pin conflicts with
+the selected queue. For read-side access, prefer the named route:
 
 ```bash
 amq list --session auth --new
 amq drain --session auth --include-body
 ```
 
-When a terminal has a complete `AM_BASE_ROOT`/`AM_SESSION` pin, `read`, `drain`,
-`monitor`, `watch`, and all DLQ commands refuse a conflicting target before
-inspecting or moving mailbox state; `send` and `reply` apply the same check to
-their local source. Use `--session <name>` for sibling routing. For deliberate
-raw-root access, `--ignore-session-pin` requires a non-empty explicit `--root`;
-it never blesses an inherited `AM_ROOT`. `list` warns on a mismatch but remains
-available for non-destructive inspection. `doctor --root` also keeps inspection
-available with a mismatch warning, but `--fix-mailboxes` and
-`--ops --fix-wake-locks` require a matching pin unless that explicit root is
-paired with `--ignore-session-pin`. `--base-root` selects config authority and
-never waives the pin. A missing mailbox is an error, not an empty inbox.
+Use `--session <name>` for sibling routing. Deliberate raw-root access requires
+an explicit root plus `--ignore-session-pin`. See
+[Session routing and safety](docs/session-routing.md) for the complete guard,
+doctor repair, fallback, and worktree contracts.
 
 ### For Scripts/CI
 
@@ -201,22 +114,8 @@ amq coop init
 amq_context="$(amq env --me claude)" && eval "$amq_context"
 ```
 
-All shell-mode `amq env` output replaces `AM_ROOT`, `AM_ME`, `AM_BASE_ROOT`,
-and `AM_SESSION` as one context. For a base/sessionless root it sets
-`AM_BASE_ROOT` to that exact root and `AM_SESSION` to the empty string.
-
-`amq env` resolves the root with the full precedence chain:
-
-```text
-explicit --root > AM_ROOT > project-local .amqrc > AMQ_GLOBAL_ROOT > implicit fallbacks
-```
-
-Inside a Git worktree or bare repository, the remaining eligible fallback is repo-local detected
-`.agent-mail`; outside Git, `~/.amqrc` precedes detected `.agent-mail`.
-Auto-detect covers the default `.agent-mail` layout in the current tree,
-including `.agent-mail/<session>` session roots without `.amqrc`. Custom root
-names still need `.amqrc`, explicit flags, or env vars.
-That matters when agents are launched by external orchestrators from outside the project root.
+`amq env` replaces the full shell context. For a sessionless root it sets
+`AM_BASE_ROOT` to that exact root and leaves `AM_SESSION` empty.
 
 An initialized cwd-local queue is also a routing safety signal. If the terminal
 is pinned to a different root, implicit participating commands refuse instead
@@ -535,6 +434,9 @@ go build ./cmd/amq-keepalive
 ./amq-keepalive install-launchd
 ./amq-keepalive doctor
 ```
+
+See [docs/amq-keepalive.md](docs/amq-keepalive.md) for the complete command and
+safety reference.
 
 **Options:**
 - `--inject-mode auto|raw|paste|none` - Injection strategy; `none` enforces zero terminal input
