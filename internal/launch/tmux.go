@@ -447,7 +447,7 @@ func (b *TmuxBackend) agentCommand(req CreateRequest, agent AgentPlan) string {
 		env = make(map[string]string, 1)
 	}
 	env[InternalLaunchNonceEnv] = agent.LaunchNonce
-	return commandLine(agent.Cwd, env, coopExecArgv(amq, req.Session, agent.Handle, agent.Argv))
+	return commandLine(agent.Cwd, env, coopExecArgv(amq, req.Root.Base(), agent.Handle, agent.Argv, agent.Execution))
 }
 
 func (b *TmuxBackend) args(args ...string) []string {

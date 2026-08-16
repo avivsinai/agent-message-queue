@@ -21,10 +21,14 @@ import (
 
 func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 	fixture := newPublicPrepareFixture(t, false)
+	injector := filepath.Join(t.TempDir(), "injector")
+	if err := os.WriteFile(injector, []byte("injector"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	runnable := fixture.request.Intent.Participants[0]
 	runnable.Execution = &ExecutionOptionsV1{
 		RequireWake: true, NoGitignore: true,
-		Wake: WakeOptionsV1{Mode: WakeEnabled, Injector: &InjectorOptionsV1{Mode: InjectorRaw, Via: "/opt/amq/inject", Args: []string{"send"}}},
+		Wake: WakeOptionsV1{Mode: WakeEnabled, Injector: &InjectorOptionsV1{Mode: InjectorRaw, Via: injector, Args: []string{"send"}}},
 		Integrations: IntegrationsV1{Symphony: &SymphonyOptionsV1{
 			Events: []SymphonyEvent{SymphonyAfterCreate, SymphonyBeforeRun, SymphonyAfterRun, SymphonyBeforeRemove}, WorkspaceKey: "team-17",
 		}},
@@ -74,6 +78,7 @@ func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 	}
 	defer func() { _ = root.Close() }()
 	wantOptions := toInternalExecutionOptions(*runnable.Execution)
+	wantOptions = internallaunch.CanonicalExecutionOptions(&wantOptions)
 	for _, handle := range []string{"claude", "reviewer"} {
 		ticket, err := internallaunch.LoadExecutionTicket(root, handle)
 		if err != nil {

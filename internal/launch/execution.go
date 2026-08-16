@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -19,6 +20,11 @@ import (
 const ExecutionTicketVersion = 1
 
 const executionDirectory = "meta/launch/executions"
+
+const (
+	executionLeaseRetryInterval = 50 * time.Millisecond
+	executionLeaseWaitTimeout   = 10 * time.Second
+)
 
 type ExecutionState string
 
@@ -51,6 +57,8 @@ type ExecutionTicket struct {
 	ProviderExecutableIdentity string `json:"provider_executable_identity"`
 	AMQExecutable              string `json:"amq_executable"`
 	AMQExecutableIdentity      string `json:"amq_executable_identity"`
+	InjectorExecutable         string `json:"injector_executable,omitempty"`
+	InjectorExecutableIdentity string `json:"injector_executable_identity,omitempty"`
 
 	TargetArgv []string                 `json:"target_argv"`
 	TargetEnv  map[string]string        `json:"target_env,omitempty"`
@@ -76,6 +84,7 @@ type ExecutionTicketRequest struct {
 type ExecutionEnvelope struct {
 	Cwd, AMQExecutable, ProviderExecutable string
 	TargetArgv, Environment                []string
+	Execution                              *PrepareExecutionOptions
 }
 
 func ExecutionTicketPath(sessionRoot, handle string) string {
@@ -117,6 +126,18 @@ func NewExecutionTicket(request ExecutionTicketRequest) (ExecutionTicket, error)
 	if err != nil {
 		return ExecutionTicket{}, fmt.Errorf("amq executable: %w", err)
 	}
+	execution := clonePrepareExecutionOptions(request.Execution)
+	if execution != nil {
+		canonical := CanonicalExecutionOptions(execution)
+		execution = &canonical
+	}
+	var injector, injectorID string
+	if execution != nil && execution.InjectorVia != "" {
+		injector, injectorID, err = canonicalFile(execution.InjectorVia)
+		if err != nil {
+			return ExecutionTicket{}, fmt.Errorf("injector executable: %w", err)
+		}
+	}
 	env := cloneExecutionEnv(request.TargetEnv)
 	digest, err := executionEnvDigest(env)
 	if err != nil {
@@ -129,7 +150,7 @@ func NewExecutionTicket(request ExecutionTicketRequest) (ExecutionTicket, error)
 		Cwd: cwd, CwdIdentity: cwdID, ProviderExecutable: provider, ProviderExecutableIdentity: providerID,
 		AMQExecutable: amq, AMQExecutableIdentity: amqID, TargetArgv: append([]string(nil), request.TargetArgv...),
 		TargetEnv: env, EnvDigest: digest, State: request.State, Reason: request.Reason,
-		Execution: clonePrepareExecutionOptions(request.Execution),
+		Execution: execution, InjectorExecutable: injector, InjectorExecutableIdentity: injectorID,
 	}
 	if ticket.State == "" {
 		ticket.State = ExecutionPending
@@ -163,6 +184,13 @@ func (ticket ExecutionTicket) Validate() error {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s is required", name)
 		}
+	}
+	if ticket.Execution != nil && ticket.Execution.InjectorVia != "" {
+		if ticket.InjectorExecutable == "" || ticket.InjectorExecutableIdentity == "" {
+			return fmt.Errorf("injector executable identity is required")
+		}
+	} else if ticket.InjectorExecutable != "" || ticket.InjectorExecutableIdentity != "" {
+		return fmt.Errorf("injector executable identity exists without injector via")
 	}
 	if len(ticket.TargetArgv) == 0 || strings.TrimSpace(ticket.TargetArgv[0]) == "" {
 		return fmt.Errorf("target argv is required")
@@ -317,7 +345,7 @@ func CompareAndSwapExecutionTicket(root *fsq.DeliveryRoot, lease *Lease, handle 
 // PrepareExecution performs the final envelope check and durable execution
 // acknowledgement under the exact launch nonce and handle lock.
 func PrepareExecution(root *fsq.DeliveryRoot, handle, nonce string, envelope ExecutionEnvelope) (ticket ExecutionTicket, returnErr error) {
-	lease, err := AcquireLease(root, nonce)
+	lease, err := acquireExecutionLease(root, nonce)
 	if err != nil {
 		return ticket, err
 	}
@@ -371,6 +399,29 @@ func PrepareExecution(root *fsq.DeliveryRoot, handle, nonce string, envelope Exe
 		return CompareAndSwapExecutionTicket(root, lease, handle, ExecutionSpawnAttempted, ExecutionAcknowledged, "child_spawn_acknowledged")
 	default:
 		return ticket, fmt.Errorf("execution mode %q cannot acknowledge a provider process", ticket.Mode)
+	}
+}
+
+func acquireExecutionLease(root *fsq.DeliveryRoot, nonce string) (*Lease, error) {
+	deadline := time.Now().Add(executionLeaseWaitTimeout)
+	for {
+		lease, err := AcquireLease(root, nonce)
+		if err == nil {
+			return lease, nil
+		}
+		var held *LeaseHeldError
+		if !errors.As(err, &held) || held.Nonce != nonce {
+			return nil, err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("wait for own launch lease: %w", err)
+		}
+		delay := executionLeaseRetryInterval
+		if remaining < delay {
+			delay = remaining
+		}
+		time.Sleep(delay)
 	}
 }
 
@@ -445,6 +496,9 @@ func ValidateExecutionEnvelope(root *fsq.DeliveryRoot, ticket ExecutionTicket, e
 	if !reflect.DeepEqual(envelope.TargetArgv, ticket.TargetArgv) {
 		return fmt.Errorf("provider argv changed")
 	}
+	if err := validateExecutionOptions(ticket, envelope.Execution); err != nil {
+		return err
+	}
 	actualEnv := make(map[string]string, len(envelope.Environment))
 	for _, item := range envelope.Environment {
 		if key, value, ok := strings.Cut(item, "="); ok {
@@ -457,6 +511,66 @@ func ValidateExecutionEnvelope(root *fsq.DeliveryRoot, ticket ExecutionTicket, e
 		}
 	}
 	return nil
+}
+
+// ValidateExecutionOptions performs the read-only ticket check required
+// before coop exec can use wake or injector settings. PrepareExecution repeats
+// the same check at the final provider boundary before changing ticket state.
+func ValidateExecutionOptions(root *fsq.DeliveryRoot, handle, nonce string, options *PrepareExecutionOptions) error {
+	if root == nil {
+		return fmt.Errorf("missing pinned session root")
+	}
+	if err := root.VerifyBase(); err != nil {
+		return err
+	}
+	ticket, err := LoadExecutionTicket(root, handle)
+	if err != nil {
+		return err
+	}
+	if ticket.LaunchNonce != nonce {
+		return fmt.Errorf("execution ticket nonce changed")
+	}
+	session, sessionID, err := canonicalDirectory(root.Base())
+	if err != nil || session != ticket.SessionRoot || sessionID != ticket.SessionIdentity {
+		return fmt.Errorf("session root identity changed")
+	}
+	return validateExecutionOptions(ticket, options)
+}
+
+func validateExecutionOptions(ticket ExecutionTicket, options *PrepareExecutionOptions) error {
+	if !reflect.DeepEqual(CanonicalExecutionOptions(options), CanonicalExecutionOptions(ticket.Execution)) {
+		return fmt.Errorf("execution options changed")
+	}
+	if ticket.Execution != nil && ticket.Execution.InjectorVia != "" {
+		injector, injectorID, err := canonicalFile(ticket.Execution.InjectorVia)
+		if err != nil || injector != ticket.InjectorExecutable || injectorID != ticket.InjectorExecutableIdentity {
+			return fmt.Errorf("injector executable identity changed")
+		}
+	}
+	return nil
+}
+
+// CanonicalExecutionOptions returns the normalized policy value used for
+// ticket equality. A missing policy and an explicit all-default policy are
+// equivalent; collection presence is not semantic.
+func CanonicalExecutionOptions(options *PrepareExecutionOptions) PrepareExecutionOptions {
+	var canonical PrepareExecutionOptions
+	if options != nil {
+		canonical = *clonePrepareExecutionOptions(options)
+	}
+	if canonical.WakeMode == "" {
+		canonical.WakeMode = "enabled"
+	}
+	if canonical.InjectorMode == "" {
+		canonical.InjectorMode = "none"
+	}
+	if len(canonical.InjectorArgs) == 0 {
+		canonical.InjectorArgs = nil
+	}
+	if len(canonical.SymphonyEvents) == 0 {
+		canonical.SymphonyEvents = nil
+	}
+	return canonical
 }
 
 func canonicalDirectory(path string) (string, string, error) { return canonicalPath(path, true) }

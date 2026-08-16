@@ -46,6 +46,12 @@ func (Commands) Create(req CreateRequest) (CreateResult, error) {
 	if strings.TrimSpace(req.Session) == "" {
 		return CreateResult{}, fmt.Errorf("session is required")
 	}
+	if req.Root == nil {
+		return CreateResult{}, fmt.Errorf("pinned session root is required")
+	}
+	if err := req.Root.VerifyBase(); err != nil {
+		return CreateResult{}, fmt.Errorf("verify pinned session root: %w", err)
+	}
 	if err := req.Plan.Validate(); err != nil {
 		return CreateResult{}, err
 	}
@@ -59,7 +65,7 @@ func (Commands) Create(req CreateRequest) (CreateResult, error) {
 	}
 	commands := make([]EmittedCommand, 0, len(req.Plan.Agents))
 	for _, agent := range req.Plan.Agents {
-		argv := coopExecArgv(amq, req.Session, agent.Handle, agent.Argv)
+		argv := coopExecArgv(amq, req.Root.Base(), agent.Handle, agent.Argv, agent.Execution)
 		env := cloneEnv(agent.EnvOverlay)
 		if env == nil {
 			env = make(map[string]string, 1)
@@ -98,13 +104,48 @@ func (Commands) Close(CloseRequest) (CloseResult, error) {
 // coopExecArgv is amq coop exec [options] <command> [-- <command-flags>].
 // The command positional is required; flags after -- are agent args. A lone
 // executable omits --.
-func coopExecArgv(amq, session, handle string, planArgv []string) []string {
-	argv := []string{amq, "coop", "exec", "--session", session, "--me", handle, planArgv[0]}
+func coopExecArgv(amq, sessionRoot, handle string, planArgv []string, options *PrepareExecutionOptions) []string {
+	argv := []string{amq, "coop", "exec", "--root", sessionRoot, "--me", handle}
+	argv = append(argv, coopExecOptionArgs(options)...)
+	argv = append(argv, planArgv[0])
 	if len(planArgv) > 1 {
 		argv = append(argv, "--")
 		argv = append(argv, planArgv[1:]...)
 	}
 	return argv
+}
+
+func coopExecOptionArgs(options *PrepareExecutionOptions) []string {
+	if options == nil {
+		return nil
+	}
+	args := make([]string, 0, 16)
+	if options.NoGitignore {
+		args = append(args, "--no-gitignore")
+	}
+	if options.WakeMode == "disabled" {
+		args = append(args, "--no-wake", "--managed-no-wake-reason", options.AuditReason)
+	} else {
+		if options.RequireWake {
+			args = append(args, "--require-wake")
+		}
+		if options.InjectorMode != "" {
+			args = append(args, "--wake-inject-mode", options.InjectorMode)
+		}
+		if options.InjectorVia != "" {
+			args = append(args, "--wake-inject-via", options.InjectorVia)
+			for _, arg := range options.InjectorArgs {
+				args = append(args, "--wake-inject-arg", arg)
+			}
+		}
+	}
+	for _, event := range options.SymphonyEvents {
+		args = append(args, "--managed-symphony-event", event)
+	}
+	if options.SymphonyWorkspaceKey != "" {
+		args = append(args, "--managed-symphony-workspace-key", options.SymphonyWorkspaceKey)
+	}
+	return args
 }
 
 func commandLine(cwd string, env map[string]string, argv []string) string {
