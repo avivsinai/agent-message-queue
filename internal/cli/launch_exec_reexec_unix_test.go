@@ -27,7 +27,8 @@ func TestManagedLaunchReexecPreservesPIDAndTargetArgv(t *testing.T) {
 	}
 	target := []string{"/opt/provider", "--resume", "conversation"}
 	env := []string{"AM_ROOT=/queue", "TOKEN=value"}
-	err := reexecManagedLaunchWrapper("/queue", "codex", "11111111-1111-4111-8111-111111111111", target[0], target, env)
+	options := &launch.PrepareExecutionOptions{WakeMode: "enabled", RequireWake: true}
+	err := reexecManagedLaunchWrapper("/queue", "codex", "11111111-1111-4111-8111-111111111111", target[0], target, env, options)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("reexec error = %v, want sentinel", err)
 	}
@@ -37,6 +38,14 @@ func TestManagedLaunchReexecPreservesPIDAndTargetArgv(t *testing.T) {
 	dash := slices.Index(gotArgv, "--")
 	if dash < 0 || !slices.Equal(gotArgv[dash+1:], target) {
 		t.Fatalf("wrapper target tail = %#v, want %#v", gotArgv[dash+1:], target)
+	}
+	optionsAt := slices.Index(gotArgv, "--"+managedExecutionOptionsFlag)
+	if optionsAt < 0 || optionsAt+1 >= dash {
+		t.Fatalf("private wrapper omitted execution options: %#v", gotArgv)
+	}
+	decoded, err := decodeManagedExecutionOptions(gotArgv[optionsAt+1])
+	if err != nil || !slices.Equal(decoded.InjectorArgs, options.InjectorArgs) || decoded.RequireWake != options.RequireWake || decoded.WakeMode != options.WakeMode {
+		t.Fatalf("private wrapper options = %#v, %v", decoded, err)
 	}
 	if !slices.Equal(gotEnv, env) {
 		t.Fatalf("wrapper env = %#v, want %#v", gotEnv, env)
@@ -65,6 +74,14 @@ func TestPrivateLaunchWrapperAcknowledgesThenRevertsFailedExec(t *testing.T) {
 	if err := os.WriteFile(provider, []byte("provider"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	injector := filepath.Join(t.TempDir(), "injector")
+	if err := os.WriteFile(injector, []byte("injector"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	options := &launch.PrepareExecutionOptions{
+		WakeMode: "enabled", InjectorMode: "raw", InjectorVia: injector,
+		InjectorArgs: []string{"--fixed", "ordered"},
+	}
 	amqExecutable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +98,7 @@ func TestPrivateLaunchWrapperAcknowledgesThenRevertsFailedExec(t *testing.T) {
 		Handle: "claude", LaunchNonce: nonce, Mode: launch.AdapterModeMint,
 		Provider: launch.ClaudeProvider, ConversationID: nonce,
 		ProjectRoot: project, SessionRoot: session, Cwd: project,
-		ProviderExecutable: provider, AMQExecutable: amqExecutable, TargetArgv: []string{provider},
+		ProviderExecutable: provider, AMQExecutable: amqExecutable, TargetArgv: []string{provider}, Execution: options,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +126,11 @@ func TestPrivateLaunchWrapperAcknowledgesThenRevertsFailedExec(t *testing.T) {
 	oldExec := launchExecProcess
 	launchExecProcess = func(string, []string, []string) error { return sentinel }
 	t.Cleanup(func() { launchExecProcess = oldExec })
-	err = runLaunchExec([]string{"--root", session, "--handle", "claude", "--nonce", nonce, "--target", provider, "--", provider})
+	encodedOptions, err := encodeManagedExecutionOptions(*options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runLaunchExec([]string{"--root", session, "--handle", "claude", "--nonce", nonce, "--target", provider, "--" + managedExecutionOptionsFlag, encodedOptions, "--", provider})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("wrapper error = %v, want provider exec failure", err)
 	}

@@ -300,8 +300,9 @@ func TestAdapterKeepsStableExecutableAcrossSymlinkRetarget(t *testing.T) {
 	if firstDigest != secondDigest {
 		t.Fatalf("symlink retarget changed semantic digest: %s != %s", firstDigest, secondDigest)
 	}
+	_, root := openTestRoot(t)
 	emitted, err := (Commands{}).Create(CreateRequest{
-		Session: "collab", AMQPath: "amq", Plan: Plan{Version: PlanVersion, Agents: []AgentPlan{second}},
+		Session: "collab", AMQPath: "amq", Plan: Plan{Version: PlanVersion, Agents: []AgentPlan{second}}, Root: root,
 	})
 	if err != nil {
 		t.Fatal(err)

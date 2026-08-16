@@ -67,6 +67,10 @@ func runCoopExec(args []string) error {
 	wakeInjectViaFlag := fs.String("wake-inject-via", "", "Start wake with this absolute --inject-via executable, enabling later amq wake repair")
 	var wakeInjectArgFlags multiStringFlag
 	fs.Var(&wakeInjectArgFlags, "wake-inject-arg", "Fixed argument for wake --inject-via before the payload (repeatable)")
+	managedNoWakeReasonFlag := fs.String("managed-no-wake-reason", "", "")
+	var managedSymphonyEventFlags multiStringFlag
+	fs.Var(&managedSymphonyEventFlags, "managed-symphony-event", "")
+	managedSymphonyWorkspaceFlag := fs.String("managed-symphony-workspace-key", "", "")
 	yesFlag := fs.Bool("y", false, "Skip confirmation prompts (including clearing a blocking wake)")
 
 	usage := usageWithFlags(fs, "amq coop exec [options] <command> [-- <command-flags>]",
@@ -101,10 +105,19 @@ func runCoopExec(args []string) error {
 	} else if handled {
 		return nil
 	}
+	if managedLaunchNonce != "" {
+		if !flagWasVisited(fs, "root") || strings.TrimSpace(*rootFlag) == "" || !filepath.IsAbs(*rootFlag) {
+			return ActionRequiredError("managed launch requires one explicit absolute --root")
+		}
+		if *sessionFlag != "" {
+			return ActionRequiredError("managed launch forbids --session; use the ticket-bound exact --root")
+		}
+	}
 	if *noWakeFlag && *requireWakeFlag {
 		return UsageError("--require-wake cannot be used with --no-wake")
 	}
-	wakeInjectVia := strings.TrimSpace(*wakeInjectViaFlag)
+	declaredWakeInjectVia := strings.TrimSpace(*wakeInjectViaFlag)
+	wakeInjectVia := declaredWakeInjectVia
 	wakeInjectMode, err := normalizeWakeInjectMode(*wakeInjectModeFlag)
 	if err != nil {
 		return UsageError("--wake-inject-mode: %v", err)
@@ -128,6 +141,41 @@ func runCoopExec(args []string) error {
 		}
 		wakeInjectVia = resolvedWakeInjectVia
 	}
+	managedOnlyOptions := flagWasVisited(fs, "managed-no-wake-reason") ||
+		flagWasVisited(fs, "managed-symphony-event") ||
+		flagWasVisited(fs, "managed-symphony-workspace-key")
+	if managedOnlyOptions && managedLaunchNonce == "" {
+		return UsageError("managed execution options require a trusted launch ticket")
+	}
+	var executionOptions *launch.PrepareExecutionOptions
+	if managedLaunchNonce != "" && (managedOnlyOptions ||
+		flagWasVisited(fs, "no-gitignore") || flagWasVisited(fs, "no-wake") ||
+		flagWasVisited(fs, "require-wake") || flagWasVisited(fs, "wake-inject-mode") ||
+		flagWasVisited(fs, "wake-inject-via") || flagWasVisited(fs, "wake-inject-arg")) {
+		wakeMode := "enabled"
+		if *noWakeFlag {
+			wakeMode = "disabled"
+		}
+		managedInjectorMode := ""
+		if flagWasVisited(fs, "wake-inject-mode") {
+			managedInjectorMode = wakeInjectMode
+		}
+		options := launch.PrepareExecutionOptions{
+			RequireWake:          *requireWakeFlag,
+			NoGitignore:          *noGitignoreFlag,
+			WakeMode:             wakeMode,
+			AuditReason:          *managedNoWakeReasonFlag,
+			InjectorMode:         managedInjectorMode,
+			InjectorVia:          declaredWakeInjectVia,
+			InjectorArgs:         append([]string(nil), wakeInjectArgFlags...),
+			SymphonyEvents:       append([]string(nil), managedSymphonyEventFlags...),
+			SymphonyWorkspaceKey: *managedSymphonyWorkspaceFlag,
+		}
+		if err := validateManagedExecutionOptions(options); err != nil {
+			return UsageError("managed execution options: %v", err)
+		}
+		executionOptions = &options
+	}
 
 	remaining := fs.Args()
 	if len(remaining) == 0 {
@@ -147,6 +195,14 @@ func runCoopExec(args []string) error {
 	agentHandle, err = normalizeHandle(agentHandle)
 	if err != nil {
 		return fmt.Errorf("cannot derive agent handle from %q: %w (use --me to override)", cmdName, err)
+	}
+	var managedGuard *managedExecutionGuard
+	if managedLaunchNonce != "" {
+		managedGuard, err = acquireManagedExecutionGuard(*rootFlag, agentHandle, managedLaunchNonce, executionOptions)
+		if err != nil {
+			return ActionRequiredError("refusing managed execution options before root mutation: %v", err)
+		}
+		defer func() { _ = managedGuard.Close() }()
 	}
 
 	rootRequested := flagWasVisited(fs, "root")
@@ -366,15 +422,20 @@ func runCoopExec(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve absolute session root: %w", err)
 	}
-
 	// Ensure the agent mailbox exists — but only inside a tree that is
 	// provably a queue. A pre-existing directory is not a provisioning
 	// target just because it exists (dirExists said nothing about what it
 	// is), so classify the layout through a pinned capability first and keep
 	// that same capability for the writes.
 	if !sessionProvisioned {
-		if err := provisionSelfMailboxInExistingRoot(root, agentHandle); err != nil {
-			return err
+		if managedGuard != nil {
+			if err := fsq.ValidateExistingMailboxLayout(managedGuard.root, agentHandle); err != nil {
+				return ActionRequiredError("refusing managed mailbox provisioning: %v", err)
+			}
+		} else {
+			if err := provisionSelfMailboxInExistingRoot(root, agentHandle); err != nil {
+				return err
+			}
 		}
 	}
 	if !*noWakeFlag {
@@ -482,6 +543,16 @@ func runCoopExec(args []string) error {
 			wakeChildCapability, err = configureAuthoritativeWakeChild(wakeCmd)
 			if err == nil && wakeChildCapability == nil {
 				return fmt.Errorf("prepare exact-owner amq wake supervision returned nil capability")
+			}
+			if err == nil && managedGuard != nil {
+				if validateErr := managedGuard.Revalidate(); validateErr != nil {
+					closeErr := wakeChildCapability.Close()
+					wakeChildCapability = nil
+					return ActionRequiredError(
+						"refusing changed managed execution options before wake start: %v",
+						errors.Join(validateErr, closeErr),
+					)
+				}
 			}
 			if err != nil {
 				var closeErr error
@@ -606,6 +677,11 @@ func runCoopExec(args []string) error {
 			}
 		}
 	}
+	if managedGuard != nil {
+		if err := managedGuard.Close(); err != nil {
+			return ActionRequiredError("release managed execution option guard after wake startup: %v", err)
+		}
+	}
 
 	// A named/default or session-shaped explicit root pins an identity
 	// independent of AM_ROOT. A custom sessionless --root clears inherited pins.
@@ -648,7 +724,7 @@ func runCoopExec(args []string) error {
 	env = setEnvVar(unsetEnvVar(env, envWakeOwner), envWakeOwner, encodedOwner)
 	var execErr error
 	if managedLaunchNonce != "" {
-		execErr = reexecManagedLaunchWrapper(root, agentHandle, managedLaunchNonce, binaryPath, argv, env)
+		execErr = reexecManagedLaunchWrapper(root, agentHandle, managedLaunchNonce, binaryPath, argv, env, executionOptions)
 	} else {
 		execErr = coopExecProcess(binaryPath, argv, env)
 	}
@@ -661,7 +737,7 @@ func runCoopExec(args []string) error {
 // reexecManagedLaunchWrapper preserves the coop exec PID while moving the
 // final trust revalidation and conversation acknowledgement directly next to
 // the provider exec boundary.
-func reexecManagedLaunchWrapper(root, handle, nonce, binaryPath string, argv, env []string) error {
+func reexecManagedLaunchWrapper(root, handle, nonce, binaryPath string, argv, env []string, options *launch.PrepareExecutionOptions) error {
 	current, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve current amq executable for managed launch: %w", err)
@@ -672,10 +748,61 @@ func reexecManagedLaunchWrapper(root, handle, nonce, binaryPath string, argv, en
 	}
 	wrapperArgv := []string{
 		amqPath, "__launch-exec", "--root", root, "--handle", handle,
-		"--nonce", nonce, "--target", binaryPath, "--",
+		"--nonce", nonce, "--target", binaryPath,
 	}
+	if options != nil {
+		encoded, err := encodeManagedExecutionOptions(*options)
+		if err != nil {
+			return fmt.Errorf("encode managed execution options: %w", err)
+		}
+		wrapperArgv = append(wrapperArgv, "--"+managedExecutionOptionsFlag, encoded)
+	}
+	wrapperArgv = append(wrapperArgv, "--")
 	wrapperArgv = append(wrapperArgv, argv...)
 	return coopExecProcess(amqPath, wrapperArgv, env)
+}
+
+type managedExecutionGuard struct {
+	root    *fsq.DeliveryRoot
+	handle  string
+	nonce   string
+	options *launch.PrepareExecutionOptions
+	closed  bool
+}
+
+func acquireManagedExecutionGuard(rootPath, handle, nonce string, options *launch.PrepareExecutionOptions) (*managedExecutionGuard, error) {
+	identity, err := fsq.SnapshotDeliveryRoot(rootPath)
+	if err != nil {
+		return nil, fmt.Errorf("open existing ticket-bound root: %w", err)
+	}
+	root, err := fsq.OpenDeliveryRoot(rootPath, identity)
+	if err != nil {
+		return nil, err
+	}
+	if err := fsq.ValidateExistingMailboxLayout(root, handle); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	guard := &managedExecutionGuard{root: root, handle: handle, nonce: nonce, options: options}
+	if err := guard.Revalidate(); err != nil {
+		return nil, errors.Join(err, guard.Close())
+	}
+	return guard, nil
+}
+
+func (guard *managedExecutionGuard) Revalidate() error {
+	if guard == nil || guard.closed || guard.root == nil {
+		return fmt.Errorf("managed execution guard is not active")
+	}
+	return launch.ValidateExecutionOptions(guard.root, guard.handle, guard.nonce, guard.options)
+}
+
+func (guard *managedExecutionGuard) Close() error {
+	if guard == nil || guard.closed {
+		return nil
+	}
+	guard.closed = true
+	return guard.root.Close()
 }
 
 // coopProvisionAfterClassifyHook runs between layout classification and the

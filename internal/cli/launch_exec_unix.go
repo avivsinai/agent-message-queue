@@ -24,8 +24,17 @@ func runLaunchExec(args []string) error {
 	handleFlag := fs.String("handle", "", "")
 	nonceFlag := fs.String("nonce", "", "")
 	targetFlag := fs.String("target", "", "")
+	executionOptionsFlag := fs.String(managedExecutionOptionsFlag, "", "")
 	if err := fs.Parse(amqArgs); err != nil || len(fs.Args()) != 0 || *rootFlag == "" || *handleFlag == "" || *nonceFlag == "" || *targetFlag == "" || len(targetArgv) == 0 {
 		return ActionRequiredError("refusing incomplete private launch wrapper invocation")
+	}
+	var executionOptions *launch.PrepareExecutionOptions
+	if *executionOptionsFlag != "" {
+		decoded, err := decodeManagedExecutionOptions(*executionOptionsFlag)
+		if err != nil {
+			return ActionRequiredError("refusing invalid managed execution options: %v", err)
+		}
+		executionOptions = &decoded
 	}
 	identity, err := fsq.SnapshotDeliveryRoot(*rootFlag)
 	if err != nil {
@@ -46,7 +55,7 @@ func runLaunchExec(args []string) error {
 	}
 	if _, err := launch.PrepareExecution(root, *handleFlag, *nonceFlag, launch.ExecutionEnvelope{
 		Cwd: cwd, AMQExecutable: amqExecutable, ProviderExecutable: *targetFlag,
-		TargetArgv: targetArgv, Environment: os.Environ(),
+		TargetArgv: targetArgv, Environment: os.Environ(), Execution: executionOptions,
 	}); err != nil {
 		return ActionRequiredError("refusing managed launch execution: %v", err)
 	}
