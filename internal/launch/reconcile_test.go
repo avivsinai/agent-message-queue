@@ -36,6 +36,32 @@ func TestReconcileEmitsCanonicalResolvedWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestReconcileUsesAndRetainsCallerHeldLease(t *testing.T) {
+	req := reconcileFixture(t, Commands{})
+	lease, err := AcquireLease(req.Root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.HeldLease = lease
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Plan == nil || len(result.Commands) != 1 {
+		t.Fatalf("held-lease reconciliation = %#v", result)
+	}
+	inspection, err := InspectLease(req.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.State != LeaseValid || inspection.Nonce != lease.LaunchNonce() {
+		t.Fatalf("caller-held lease after Reconcile = %#v", inspection)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type reconcileAdapter struct {
 	name               string
 	mode               AdapterMode

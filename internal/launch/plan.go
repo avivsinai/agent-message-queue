@@ -57,6 +57,9 @@ type AgentPlan struct {
 	LaunchNonce    string            `json:"launch_nonce,omitempty"`
 	ConversationID string            `json:"conversation_id,omitempty"`
 	DynamicArgv    []DynamicArg      `json:"dynamic_argv,omitempty"`
+	// Execution is the normalized coop-exec wrapper policy. Keeping it in the
+	// plan makes journal recovery lossless before the wrapper consumes it.
+	Execution *PrepareExecutionOptions `json:"execution,omitempty"`
 }
 
 // DynamicArg marks one runtime-generated argv value. Unmarked argv values are

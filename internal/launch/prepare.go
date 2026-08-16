@@ -703,8 +703,19 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 	if err != nil {
 		return prepared, observation, nil, actions, err
 	}
+	plan.Execution = clonePrepareExecutionOptions(&participant.Execution)
 	prepared.Command = previewStaticCommand(plan)
 	return prepared, observation, &plan, actions, nil
+}
+
+func clonePrepareExecutionOptions(options *PrepareExecutionOptions) *PrepareExecutionOptions {
+	if options == nil {
+		return nil
+	}
+	cloned := *options
+	cloned.InjectorArgs = slices.Clone(options.InjectorArgs)
+	cloned.SymphonyEvents = slices.Clone(options.SymphonyEvents)
+	return &cloned
 }
 
 func resolvePrepareCwd(projectRoot, cwd string) (string, error) {

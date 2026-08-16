@@ -1,6 +1,8 @@
 package fsq
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +50,11 @@ func (e *DirectChildExistsError) Error() string {
 // beforeCreateDirectChildExclusiveForTest runs after VerifyBase and before
 // Mkdir so tests can inject a racing creator.
 var beforeCreateDirectChildExclusiveForTest func(r *DeliveryRoot, name string)
+
+// beforePublishInitializedDirectChildForTest runs after staging is complete and
+// the final name is confirmed absent, immediately before publication.
+var beforePublishInitializedDirectChildForTest func(r *DeliveryRoot, name string)
+var afterPublishInitializedDirectChildForTest func(r *DeliveryRoot, name string)
 
 // SnapshotDeliveryRoot captures the physical directory identity at the
 // authorization boundary. The snapshot is intentionally opaque so callers
@@ -196,6 +203,118 @@ func (r *DeliveryRoot) CreateDirectChildExclusive(name string, perm os.FileMode)
 		return nil, fmt.Errorf("%q is not a direct directory under delivery root", name)
 	}
 	return r.pinDirectChild(name, before)
+}
+
+// PublishInitializedDirectChildExclusive builds a direct child under a hidden
+// sibling name and publishes it only after initialize succeeds. Publication
+// uses the platform's no-replace primitive, so even an uncooperative racing
+// creator can never be overwritten.
+func (r *DeliveryRoot) PublishInitializedDirectChildExclusive(name string, perm os.FileMode, initialize func(*DeliveryRoot) error) (*DeliveryRoot, error) {
+	if r == nil || r.root == nil {
+		return nil, fmt.Errorf("delivery root is closed")
+	}
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return nil, fmt.Errorf("invalid direct child name %q", name)
+	}
+	if initialize == nil {
+		return nil, fmt.Errorf("direct child initializer is missing")
+	}
+	if err := r.VerifyBase(); err != nil {
+		return nil, err
+	}
+	if _, err := r.root.Lstat(name); err == nil {
+		return nil, &DirectChildExistsError{Name: name}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	var random [12]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return nil, fmt.Errorf("generate direct child staging name: %w", err)
+	}
+	stagingName := ".amq-session-" + hex.EncodeToString(random[:])
+	if err := r.root.Mkdir(stagingName, perm); err != nil {
+		return nil, err
+	}
+	published := false
+	defer func() {
+		if !published {
+			_ = r.root.RemoveAll(stagingName)
+		}
+	}()
+	stagingInfo, err := r.root.Lstat(stagingName)
+	if err != nil {
+		return nil, err
+	}
+	staging, err := r.pinDirectChild(stagingName, stagingInfo)
+	if err != nil {
+		return nil, err
+	}
+	keepStagingOpen := false
+	defer func() {
+		if !keepStagingOpen {
+			_ = staging.Close()
+		}
+	}()
+	if err := initialize(staging); err != nil {
+		return nil, err
+	}
+	if err := staging.VerifyBase(); err != nil {
+		return nil, err
+	}
+	if err := syncInitializedTree(staging, "."); err != nil {
+		return nil, err
+	}
+	if _, err := r.root.Lstat(name); err == nil {
+		return nil, &DirectChildExistsError{Name: name}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if beforePublishInitializedDirectChildForTest != nil {
+		beforePublishInitializedDirectChildForTest(r, name)
+	}
+	if err := r.renameDirectChildNoReplace(stagingName, name); err != nil {
+		if _, statErr := r.root.Lstat(name); statErr == nil {
+			return nil, &DirectChildExistsError{Name: name}
+		}
+		return nil, err
+	}
+	published = true
+	staging.base = filepath.Join(r.base, name)
+	keepStagingOpen = true
+	if afterPublishInitializedDirectChildForTest != nil {
+		afterPublishInitializedDirectChildForTest(r, name)
+	}
+	after, err := r.root.Lstat(name)
+	if err != nil {
+		return staging, &CommittedDurabilityError{FinalPath: staging.Base(), Err: fmt.Errorf("inspect published direct child: %w", err)}
+	}
+	if !after.IsDir() || after.Mode()&os.ModeSymlink != 0 || !os.SameFile(stagingInfo, after) {
+		return staging, &CommittedDurabilityError{FinalPath: staging.Base(), Err: fmt.Errorf("published direct child %q changed identity", name)}
+	}
+	if err := r.SyncDir("."); err != nil {
+		return staging, &CommittedDurabilityError{FinalPath: staging.Base(), Err: err}
+	}
+	return staging, nil
+}
+
+func syncInitializedTree(root *DeliveryRoot, name string) error {
+	entries, err := root.ReadDir(name)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("initialized child contains symlink %q", filepath.Join(name, entry.Name()))
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		if err := syncInitializedTree(root, filepath.Join(name, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return root.SyncDir(name)
 }
 
 func (r *DeliveryRoot) pinDirectChild(name string, before os.FileInfo) (*DeliveryRoot, error) {

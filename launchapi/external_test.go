@@ -36,6 +36,8 @@ import (
 func TestContract(t *testing.T) {
 	var prepare func(context.Context, launchapi.PrepareRequestV1) (launchapi.PrepareResultV1, error) = launchapi.Prepare
 	_ = prepare
+	var apply func(context.Context, launchapi.ApplyRequestV1) (launchapi.ApplyResultV1, error) = launchapi.Apply
+	_ = apply
 	var action launchapi.RequiredActionKindV1 = launchapi.RequiredActionTrustConfirmation
 	var choice launchapi.DecisionChoiceV1 = launchapi.DecisionTrustExactSubject
 	if action == "" || choice == "" {

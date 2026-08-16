@@ -211,6 +211,25 @@ func (record LaunchJournal) ValidateRequest(request ReconcileRequest) error {
 	if record.RosterDigest != rosterDigest {
 		return fmt.Errorf("launch journal roster changed since resource creation")
 	}
+	seenExecution := make(map[string]struct{}, len(record.Plan.Agents))
+	for _, agent := range record.Plan.Agents {
+		seenExecution[agent.Handle] = struct{}{}
+		options, ok := request.ExecutionOptions[agent.Handle]
+		if !ok {
+			if agent.Execution != nil {
+				return fmt.Errorf("launch journal execution options changed for %q", agent.Handle)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(agent.Execution, clonePrepareExecutionOptions(&options)) {
+			return fmt.Errorf("launch journal execution options changed for %q", agent.Handle)
+		}
+	}
+	for handle := range request.ExecutionOptions {
+		if _, ok := seenExecution[handle]; !ok {
+			return fmt.Errorf("launch journal has no execution options carrier for %q", handle)
+		}
+	}
 	return nil
 }
 

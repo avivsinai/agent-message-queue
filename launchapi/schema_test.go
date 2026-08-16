@@ -102,6 +102,49 @@ func TestPrepareResultMatchesPublishedSchema(t *testing.T) {
 	}
 }
 
+func TestApplyResultMatchesPublishedSchema(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, false)
+	fixture.request.Intent.Participants = []ParticipantV1{{Handle: "operator", Runnable: false}}
+	prepared, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Apply(context.Background(), ApplyRequestV1{
+		RequestVersion: RequestVersionV1, Prepare: fixture.request,
+		SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawSchema, err := os.ReadFile("../schemas/launch-api-v1.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schemaDocument any
+	if err := json.Unmarshal(rawSchema, &schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("launch-api-v1.schema.json", schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile("launch-api-v1.schema.json#/$defs/ApplyResultV1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawResult, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document any
+	if err := json.Unmarshal(rawResult, &document); err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(document); err != nil {
+		t.Fatalf("schema rejected live Apply result: %v\n%s", err, rawResult)
+	}
+}
+
 func TestLaunchAPIV1SchemaAcceptsGoldenAndRejectsHostileFields(t *testing.T) {
 	raw, err := os.ReadFile("../schemas/launch-api-v1.schema.json")
 	if err != nil {

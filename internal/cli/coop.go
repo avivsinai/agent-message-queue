@@ -15,6 +15,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 const (
@@ -351,56 +352,62 @@ func provisionCoopSessionChild(base, session string, agents []string, execAgent,
 	}
 	defer func() { _ = baseRoot.Close() }()
 
-	if exclusive && sessionCreateBeforeExclusive != nil {
-		sessionCreateBeforeExclusive(base, session)
-	}
-	var sessionRoot *fsq.DeliveryRoot
-	if exclusive {
-		sessionRoot, err = baseRoot.CreateDirectChildExclusive(session, 0o700)
-	} else {
-		sessionRoot, err = baseRoot.OpenOrCreateDirectChild(session, 0o700)
-	}
-	if err != nil {
+	var result string
+	provision := func() error {
+		if exclusive && sessionCreateBeforeExclusive != nil {
+			sessionCreateBeforeExclusive(base, session)
+		}
+		var sessionRoot *fsq.DeliveryRoot
 		if exclusive {
-			var exists *fsq.DirectChildExistsError
-			if errors.As(err, &exists) {
-				return "", err
-			}
+			sessionRoot, err = baseRoot.CreateDirectChildExclusive(session, 0o700)
+		} else {
+			sessionRoot, err = baseRoot.OpenOrCreateDirectChild(session, 0o700)
 		}
-		sessionPath := filepath.Join(base, session)
-		if info, lstatErr := os.Lstat(sessionPath); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
-			message := fmt.Sprintf(
-				"session root %s is a symlink; refusing to provision through it; remove it to use the named session",
-				sessionPath,
-			)
-			if target, resolveErr := filepath.EvalSymlinks(sessionPath); resolveErr == nil &&
-				execAgent != "" && execCommand != "" {
-				message += fmt.Sprintf(
-					"; for intentional relocation, use: amq coop exec --root %s --me %s %s",
-					shellQuoteArg(target),
-					shellQuoteArg(execAgent),
-					shellQuoteArg(execCommand),
+		if err != nil {
+			if exclusive {
+				var exists *fsq.DirectChildExistsError
+				if errors.As(err, &exists) {
+					return err
+				}
+			}
+			sessionPath := filepath.Join(base, session)
+			if info, lstatErr := os.Lstat(sessionPath); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+				message := fmt.Sprintf(
+					"session root %s is a symlink; refusing to provision through it; remove it to use the named session",
+					sessionPath,
 				)
+				if target, resolveErr := filepath.EvalSymlinks(sessionPath); resolveErr == nil &&
+					execAgent != "" && execCommand != "" {
+					message += fmt.Sprintf(
+						"; for intentional relocation, use: amq coop exec --root %s --me %s %s",
+						shellQuoteArg(target), shellQuoteArg(execAgent), shellQuoteArg(execCommand),
+					)
+				}
+				return ContextMismatchError("%s", message)
 			}
-			return "", ContextMismatchError("%s", message)
+			return ContextMismatchError(
+				"refusing session %q: path %s is not a stable direct directory under base: %v",
+				session, sessionPath, err,
+			)
 		}
-		return "", ContextMismatchError(
-			"refusing session %q: path %s is not a stable direct directory under base: %v",
-			session,
-			sessionPath,
-			err,
-		)
-	}
-	defer func() { _ = sessionRoot.Close() }()
-	if err := sessionRoot.EnsureRootDirs(); err != nil {
-		return "", err
-	}
-	for _, agent := range agents {
-		if err := sessionRoot.EnsureAgentDirs(agent); err != nil {
-			return "", fmt.Errorf("failed to create mailbox for %s: %w", agent, err)
+		defer func() { _ = sessionRoot.Close() }()
+		if err := sessionRoot.EnsureRootDirs(); err != nil {
+			return err
 		}
+		for _, agent := range agents {
+			if err := sessionRoot.EnsureAgentDirs(agent); err != nil {
+				return fmt.Errorf("failed to create mailbox for %s: %w", agent, err)
+			}
+		}
+		result = sessionRoot.Base()
+		return nil
 	}
-	return sessionRoot.Base(), nil
+	if exclusive {
+		err = launch.WithSessionCreationLock(baseRoot, session, provision)
+	} else {
+		err = provision()
+	}
+	return result, err
 }
 
 func parseCoopInitAgents(raw string) ([]string, error) {

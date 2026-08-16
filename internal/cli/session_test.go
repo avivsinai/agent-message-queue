@@ -10,9 +10,52 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
+
+func TestSessionCreateUsesSharedCreationLock(t *testing.T) {
+	base := makeSessionBase(t)
+	identity, err := fsq.SnapshotDeliveryRoot(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(base, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	holder := make(chan error, 1)
+	go func() {
+		holder <- launch.WithSessionCreationLock(root, "auth", func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+	created := make(chan error, 1)
+	go func() {
+		_, createErr := provisionNewNamedSession(base, "auth", []string{"claude"})
+		created <- createErr
+	}()
+	select {
+	case err := <-created:
+		t.Fatalf("session create bypassed shared creation lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-holder; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-created; err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestSessionCreateExistingFailsLoudly(t *testing.T) {
 	base := makeSessionBase(t)

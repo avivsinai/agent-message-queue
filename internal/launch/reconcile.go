@@ -65,6 +65,16 @@ type ReconcileRequest struct {
 	Rebind             bool
 	HostIdentity       string
 	CrashHook          func(string) error
+	// HeldLease lets Apply retain session authority across its lease-held
+	// re-Prepare, roster provisioning, and the existing reconciliation crash
+	// contract. Reconcile validates but never releases a caller-owned lease.
+	HeldLease *Lease
+	// AllowExternalCwd is set only by the public intent seam, whose cwd identity
+	// was already bound by lease-held Prepare.
+	AllowExternalCwd bool
+	// ExecutionOptions carries normalized wrapper policy into the plan, journal,
+	// and ticket. The exact-root/options boundary owns later consumption.
+	ExecutionOptions map[string]PrepareExecutionOptions
 }
 
 type AgentReconcileResult struct {
@@ -135,7 +145,11 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 			return result, nil
 		}
 	} else {
-		nonce, err = generateNonce()
+		if request.HeldLease != nil {
+			nonce = request.HeldLease.LaunchNonce()
+		} else {
+			nonce, err = generateNonce()
+		}
 		if err == nil {
 			planned, err = buildReconcilePlan(request, nonce, &result)
 		}
@@ -181,19 +195,32 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		return result, nil
 	}
 
-	lease, err := AcquireLease(request.Root, nonce)
-	if err != nil {
-		markPlannedAgents(&result, planned, 6, "launch_lease_unavailable")
-		result.AggregateCode = 6
-		result.Outcome = OutcomeActionRequired
-		result.Reason = err.Error()
-		return result, nil
-	}
-	defer func() {
-		if err := lease.Release(); err != nil {
-			returnErr = errors.Join(returnErr, err)
+	lease := request.HeldLease
+	if lease == nil {
+		lease, err = AcquireLease(request.Root, nonce)
+		if err != nil {
+			markPlannedAgents(&result, planned, 6, "launch_lease_unavailable")
+			result.AggregateCode = 6
+			result.Outcome = OutcomeActionRequired
+			result.Reason = err.Error()
+			return result, nil
 		}
-	}()
+		defer func() {
+			if err := lease.Release(); err != nil {
+				returnErr = errors.Join(returnErr, err)
+			}
+		}()
+	} else {
+		if lease.LaunchNonce() != nonce {
+			return result, fmt.Errorf("held launch lease nonce does not match reconciliation generation")
+		}
+		if err := lease.authorizeWrite(request.Root); err != nil {
+			return result, fmt.Errorf("validate held launch lease: %w", err)
+		}
+		if len(lease.LockedHandles()) != 0 {
+			return result, fmt.Errorf("held launch lease already has handle locks")
+		}
+	}
 	handles := make([]string, 0, len(planned))
 	for _, agent := range planned {
 		handles = append(handles, agent.plan.Handle)
@@ -601,6 +628,7 @@ func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []pla
 			ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(), Cwd: agent.plan.Cwd,
 			ProviderExecutable: agent.plan.Argv[0], AMQExecutable: amqPath,
 			TargetArgv: agent.plan.Argv, TargetEnv: agent.plan.EnvOverlay,
+			Execution: agent.plan.Execution,
 		})
 		if err != nil {
 			return errors.Join(fmt.Errorf("build execution ticket for %s: %w", agent.plan.Handle, err), removeExecutionTickets(request.Root, lease, written))
@@ -684,9 +712,16 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 		}
 		cwd = resolvedCwd
 		policy := cfg.ResumePolicy
+		committedArgs, bypassArgs, partitionErr := PartitionStaticProviderArgs(capabilities.Provider, cfg.Command[1:])
+		if partitionErr != nil {
+			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionActionRequired, "provider_arguments_changed"
+			result.Agents = append(result.Agents, item)
+			continue
+		}
 		base := PlanRequest{
 			Handle: cfg.Handle, ProjectRoot: request.ProjectRoot, Cwd: cwd,
-			LaunchNonce: nonce, ResumePolicy: policy, CommittedArgs: cfg.Command[1:], EnvOverlay: cfg.Env,
+			LaunchNonce: nonce, ResumePolicy: policy, CommittedArgs: committedArgs, BypassArgs: bypassArgs,
+			EnvOverlay: cfg.Env, AllowExternalCwd: request.AllowExternalCwd,
 		}
 		conversation, loadErr := LoadConversation(request.Root, cfg.Handle)
 		hasConversation := loadErr == nil
@@ -796,6 +831,9 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, err.Error()
 			result.Agents = append(result.Agents, item)
 			continue
+		}
+		if execution, ok := request.ExecutionOptions[cfg.Handle]; ok {
+			agentPlan.Execution = clonePrepareExecutionOptions(&execution)
 		}
 		item.ConversationDisposition, item.Reason = disposition, planReason
 		result.Agents = append(result.Agents, item)

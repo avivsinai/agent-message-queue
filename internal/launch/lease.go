@@ -221,6 +221,19 @@ func (l *Lease) Release() error {
 	return err
 }
 
+// abandonCapability drops only the process-local capability when its pinned
+// root is no longer reachable through the authorized namespace. The caller
+// owns any remaining filesystem diagnosis or cleanup.
+func (l *Lease) abandonCapability() {
+	if l == nil || l.released {
+		return
+	}
+	l.unlockHandles()
+	l.released = true
+	liveLeaseSecrets.Delete(l.secret)
+	l.secret = 0
+}
+
 func (l *Lease) authorizeWrite(root *fsq.DeliveryRoot) error {
 	if err := l.authorizeLive(); err != nil {
 		return err
