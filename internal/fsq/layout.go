@@ -1109,6 +1109,40 @@ func RepairMailboxLayoutForAgentsWithAuthorization(root *DeliveryRoot, authoriza
 	return repairMailboxLayoutHandlesAuthorized(root, authorization, handles, false, mailboxRepairHooks{})
 }
 
+// RepairMailboxLayoutForAgentsWithAuthorizationAndWriteGuard is the
+// lease-bound variant used by launch Apply. writeGuard is revalidated before
+// each directory mutation and durability sync; a revoked authority therefore
+// stops the repair at the next owning write boundary.
+func RepairMailboxLayoutForAgentsWithAuthorizationAndWriteGuard(root *DeliveryRoot, authorization *MailboxConfigAuthorization, agents []string, writeGuard func() error) MailboxRepairResult {
+	if authorization == nil || authorization.pin == nil {
+		return MailboxRepairResult{
+			Status:  "failed",
+			Failure: &MailboxRepairFailure{Code: "preflight_failed", Stage: "authorization", Message: "mailbox config authorization is missing"},
+		}
+	}
+	if writeGuard == nil {
+		return MailboxRepairResult{
+			Status:  "failed",
+			Failure: &MailboxRepairFailure{Code: "preflight_failed", Stage: "authorization", Message: "mailbox write guard is missing"},
+		}
+	}
+	return repairMailboxLayoutHandlesAuthorizedWithConfig(
+		root,
+		authorization,
+		agents,
+		false,
+		authorization.pin.cfg,
+		mailboxRepairHooks{fail: func(stage, _ string) error {
+			switch stage {
+			case "mkdir", "chmod", "child_sync", "parent_sync":
+				return writeGuard()
+			default:
+				return nil
+			}
+		}},
+	)
+}
+
 // RepairMailboxLayoutForConfiguredAgentsWithAuthorization repairs an effective
 // configured roster, including caller-owned implicit handles, while retaining
 // the exact on-disk config authorization for mutation checks.

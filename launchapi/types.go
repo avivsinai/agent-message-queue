@@ -226,6 +226,8 @@ type ApplyResultV1 struct {
 	ResultVersion int    `json:"result_version"`
 	Outcome       string `json:"outcome"`
 	ReasonCode    string `json:"reason_code,omitempty"`
+	// SubjectDigest is the pre-mutation subject that this Apply request was
+	// authorized against, not a post-mutation Prepare snapshot.
 	SubjectDigest string `json:"subject_digest"`
 	PlanDigest    string `json:"plan_digest"`
 	TrustDigest   string `json:"trust_digest"`

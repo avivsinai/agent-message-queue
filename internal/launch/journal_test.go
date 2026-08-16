@@ -3,6 +3,7 @@ package launch
 import (
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,11 @@ func TestLaunchJournalRequiresLeaseAndClearsOnlyExactRecord(t *testing.T) {
 	request := reconcileFixture(t, backend)
 	nonce := "019c8a2f-2b13-7000-8000-000000000010"
 	plan, agents, conversations := journalFixturePlan(nonce)
+	plan.Agents[0].Execution = &PrepareExecutionOptions{
+		RequireWake: true, NoGitignore: true, WakeMode: "enabled",
+		InjectorMode: "raw", InjectorVia: "/opt/amq/inject", InjectorArgs: []string{"send"},
+		SymphonyEvents: []string{"after_create", "before_run", "after_run", "before_remove"}, SymphonyWorkspaceKey: "team-17",
+	}
 	digest, err := plan.SemanticDigest()
 	if err != nil {
 		t.Fatal(err)
@@ -34,6 +40,19 @@ func TestLaunchJournalRequiresLeaseAndClearsOnlyExactRecord(t *testing.T) {
 	loaded, err := LoadJournal(request.Root)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(loaded.Plan.Agents[0].Execution, plan.Agents[0].Execution) {
+		t.Fatalf("journal execution options = %#v, want %#v", loaded.Plan.Agents[0].Execution, plan.Agents[0].Execution)
+	}
+	request.ExecutionOptions = map[string]PrepareExecutionOptions{"claude": *plan.Agents[0].Execution}
+	if err := loaded.ValidateRequest(request); err != nil {
+		t.Fatalf("journal rejected matching execution options: %v", err)
+	}
+	changedOptions := request.ExecutionOptions["claude"]
+	changedOptions.NoGitignore = !changedOptions.NoGitignore
+	request.ExecutionOptions["claude"] = changedOptions
+	if err := loaded.ValidateRequest(request); err == nil || !strings.Contains(err.Error(), "execution options changed") {
+		t.Fatalf("journal accepted changed execution options: %v", err)
 	}
 	changed := record
 	changed.CreatedAt = changed.CreatedAt.Add(time.Second)

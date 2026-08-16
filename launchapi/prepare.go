@@ -18,24 +18,36 @@ func Prepare(ctx context.Context, request PrepareRequestV1) (PrepareResultV1, er
 	if err := request.Validate(); err != nil {
 		return PrepareResultV1{}, err
 	}
-	intentDigest, err := launchIntentDigest(request.Intent)
+	internalRequest, dependencies, err := prepareInputs(request)
 	if err != nil {
 		return PrepareResultV1{}, err
+	}
+	internalResult, err := internallaunch.Prepare(ctx, internalRequest, dependencies)
+	if err != nil {
+		return PrepareResultV1{}, err
+	}
+	return fromInternalPrepareResult(internalResult), nil
+}
+
+func prepareInputs(request PrepareRequestV1) (internallaunch.PrepareRequest, internallaunch.PrepareDependencies, error) {
+	intentDigest, err := launchIntentDigest(request.Intent)
+	if err != nil {
+		return internallaunch.PrepareRequest{}, internallaunch.PrepareDependencies{}, err
 	}
 	stateDir, err := internallaunch.DefaultLaunchStateDir()
 	if err != nil {
-		return PrepareResultV1{}, err
+		return internallaunch.PrepareRequest{}, internallaunch.PrepareDependencies{}, err
 	}
 	trustStore, err := internallaunch.OpenTrustStore(stateDir, request.Target.ProjectRoot)
 	if err != nil {
-		return PrepareResultV1{}, fmt.Errorf("open launch trust store: %w", err)
+		return internallaunch.PrepareRequest{}, internallaunch.PrepareDependencies{}, fmt.Errorf("open launch trust store: %w", err)
 	}
 	host, err := os.Hostname()
 	if err != nil {
-		return PrepareResultV1{}, fmt.Errorf("resolve host identity: %w", err)
+		return internallaunch.PrepareRequest{}, internallaunch.PrepareDependencies{}, fmt.Errorf("resolve host identity: %w", err)
 	}
 	if host == "" {
-		return PrepareResultV1{}, fmt.Errorf("resolve host identity: empty hostname")
+		return internallaunch.PrepareRequest{}, internallaunch.PrepareDependencies{}, fmt.Errorf("resolve host identity: empty hostname")
 	}
 	internalRequest := internallaunch.PrepareRequest{
 		Target: internallaunch.PrepareTarget{
@@ -52,16 +64,16 @@ func Prepare(ctx context.Context, request PrepareRequestV1) (PrepareResultV1, er
 		if participant.Runnable {
 			provider, err = internallaunch.ValidateStaticProviderInput(participant.Executable, participant.Args, participant.EnvOverlay)
 			if err != nil {
-				return PrepareResultV1{}, err
+				return internallaunch.PrepareRequest{}, internallaunch.PrepareDependencies{}, err
 			}
 			committedArgs, bypassArgs, err = internallaunch.PartitionStaticProviderArgs(provider, participant.Args)
 			if err != nil {
-				return PrepareResultV1{}, err
+				return internallaunch.PrepareRequest{}, internallaunch.PrepareDependencies{}, err
 			}
 		}
 		internalRequest.Participants = append(internalRequest.Participants, toInternalPrepareParticipant(participant, provider, committedArgs, bypassArgs))
 	}
-	internalResult, err := internallaunch.Prepare(ctx, internalRequest, internallaunch.PrepareDependencies{
+	dependencies := internallaunch.PrepareDependencies{
 		Backends: map[string]internallaunch.Backend{
 			internallaunch.LauncherCommands: internallaunch.Commands{},
 			internallaunch.LauncherTMux:     internallaunch.NewTmuxBackend("tmux"),
@@ -69,11 +81,8 @@ func Prepare(ctx context.Context, request PrepareRequestV1) (PrepareResultV1, er
 		AdapterFor:   defaultPrepareAdapter,
 		TrustStore:   trustStore,
 		HostIdentity: host,
-	})
-	if err != nil {
-		return PrepareResultV1{}, err
 	}
-	return fromInternalPrepareResult(internalResult), nil
+	return internalRequest, dependencies, nil
 }
 
 func defaultPrepareAdapter(provider, executable string) internallaunch.HarnessAdapter {

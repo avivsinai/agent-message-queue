@@ -3,6 +3,7 @@ package launch
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -19,6 +20,11 @@ func TestExecutionTicketRoundTripAndCAS(t *testing.T) {
 	if err := lease.LockHandles("claude"); err != nil {
 		t.Fatal(err)
 	}
+	execution := &PrepareExecutionOptions{
+		RequireWake: true, NoGitignore: true, WakeMode: "enabled",
+		InjectorMode: "raw", InjectorVia: "/opt/amq/inject", InjectorArgs: []string{"send"},
+		SymphonyEvents: []string{"after_create", "before_run", "after_run", "before_remove"}, SymphonyWorkspaceKey: "team-17",
+	}
 	ticket, err := NewExecutionTicket(ExecutionTicketRequest{
 		Handle: "claude", LaunchNonce: lease.LaunchNonce(), Mode: AdapterModeMint,
 		Provider: ClaudeProvider, ConversationID: lease.LaunchNonce(),
@@ -26,6 +32,7 @@ func TestExecutionTicketRoundTripAndCAS(t *testing.T) {
 		ProviderExecutable: fixture.provider, AMQExecutable: fixture.amq,
 		TargetArgv: []string{fixture.provider, "--session-id", lease.LaunchNonce()},
 		TargetEnv:  map[string]string{"LANG": "C", "NO_COLOR": "1"},
+		Execution:  execution,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +44,7 @@ func TestExecutionTicketRoundTripAndCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.State != ExecutionPending || loaded.TargetEnv["LANG"] != "C" || loaded.EnvDigest == "" {
+	if loaded.State != ExecutionPending || loaded.TargetEnv["LANG"] != "C" || loaded.EnvDigest == "" || !reflect.DeepEqual(loaded.Execution, execution) {
 		t.Fatalf("loaded ticket = %#v", loaded)
 	}
 	loaded, err = CompareAndSwapExecutionTicket(fixture.root, lease, "claude", ExecutionPending, ExecutionSpawnAttempted, "spawned")

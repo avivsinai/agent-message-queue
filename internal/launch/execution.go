@@ -52,11 +52,12 @@ type ExecutionTicket struct {
 	AMQExecutable              string `json:"amq_executable"`
 	AMQExecutableIdentity      string `json:"amq_executable_identity"`
 
-	TargetArgv []string          `json:"target_argv"`
-	TargetEnv  map[string]string `json:"target_env,omitempty"`
-	EnvDigest  string            `json:"env_digest"`
-	State      ExecutionState    `json:"state"`
-	Reason     string            `json:"reason,omitempty"`
+	TargetArgv []string                 `json:"target_argv"`
+	TargetEnv  map[string]string        `json:"target_env,omitempty"`
+	EnvDigest  string                   `json:"env_digest"`
+	State      ExecutionState           `json:"state"`
+	Reason     string                   `json:"reason,omitempty"`
+	Execution  *PrepareExecutionOptions `json:"execution,omitempty"`
 }
 
 type ExecutionTicketRequest struct {
@@ -69,6 +70,7 @@ type ExecutionTicketRequest struct {
 	TargetEnv                         map[string]string
 	State                             ExecutionState
 	Reason                            string
+	Execution                         *PrepareExecutionOptions
 }
 
 type ExecutionEnvelope struct {
@@ -127,6 +129,7 @@ func NewExecutionTicket(request ExecutionTicketRequest) (ExecutionTicket, error)
 		Cwd: cwd, CwdIdentity: cwdID, ProviderExecutable: provider, ProviderExecutableIdentity: providerID,
 		AMQExecutable: amq, AMQExecutableIdentity: amqID, TargetArgv: append([]string(nil), request.TargetArgv...),
 		TargetEnv: env, EnvDigest: digest, State: request.State, Reason: request.Reason,
+		Execution: clonePrepareExecutionOptions(request.Execution),
 	}
 	if ticket.State == "" {
 		ticket.State = ExecutionPending

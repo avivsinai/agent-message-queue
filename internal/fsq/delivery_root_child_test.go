@@ -159,3 +159,150 @@ func TestCreateDirectChildExclusiveRaceIsLoud(t *testing.T) {
 		t.Fatalf("error = %v, want DirectChildExistsError", err)
 	}
 }
+
+func TestPublishInitializedDirectChildExclusiveIsAllOrNothing(t *testing.T) {
+	base := t.TempDir()
+	root := openDeliveryRootForTest(t, base)
+	failure := errors.New("initializer failed")
+	if _, err := root.PublishInitializedDirectChildExclusive("collab", 0o700, func(child *DeliveryRoot) error {
+		if err := child.EnsureRootDirs(); err != nil {
+			return err
+		}
+		if err := child.EnsureAgentDirs("operator"); err != nil {
+			return err
+		}
+		return failure
+	}); !errors.Is(err, failure) {
+		t.Fatalf("failed publication error = %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(base, "collab")); !os.IsNotExist(err) {
+		t.Fatalf("failed publication exposed authoritative child: %v", err)
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed publication left staging entries: %v", entries)
+	}
+
+	child, err := root.PublishInitializedDirectChildExclusive("collab", 0o700, func(child *DeliveryRoot) error {
+		if err := child.EnsureRootDirs(); err != nil {
+			return err
+		}
+		return child.EnsureAgentDirs("operator")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = child.Close() }()
+	if err := child.VerifyBase(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range requiredMailboxLeaves {
+		if info, err := child.Stat(filepath.Join("agents", "operator", string(path))); err != nil || !info.IsDir() {
+			t.Fatalf("published mailbox path %s: info=%v err=%v", path, info, err)
+		}
+	}
+}
+
+func TestPublishInitializedDirectChildExclusiveNeverReplacesRacingEmptyChild(t *testing.T) {
+	base := t.TempDir()
+	root := openDeliveryRootForTest(t, base)
+	old := beforePublishInitializedDirectChildForTest
+	beforePublishInitializedDirectChildForTest = func(r *DeliveryRoot, name string) {
+		if err := os.Mkdir(filepath.Join(r.Base(), name), 0o711); err != nil {
+			t.Fatalf("create racing child: %v", err)
+		}
+	}
+	t.Cleanup(func() { beforePublishInitializedDirectChildForTest = old })
+
+	_, err := root.PublishInitializedDirectChildExclusive("collab", 0o700, func(child *DeliveryRoot) error {
+		if err := child.EnsureRootDirs(); err != nil {
+			return err
+		}
+		return child.EnsureAgentDirs("operator")
+	})
+	var exists *DirectChildExistsError
+	if !errors.As(err, &exists) {
+		t.Fatalf("publication error = %v, want DirectChildExistsError", err)
+	}
+	info, statErr := os.Stat(filepath.Join(base, "collab"))
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if info.Mode().Perm() != 0o711 {
+		t.Fatalf("racing child mode = %04o, want untouched 0711", info.Mode().Perm())
+	}
+	entries, readErr := os.ReadDir(filepath.Join(base, "collab"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("racing child was merged or replaced: %v", entries)
+	}
+}
+
+func TestPublishInitializedDirectChildExclusiveReportsCommittedDurabilityFailure(t *testing.T) {
+	base := t.TempDir()
+	root := openDeliveryRootForTest(t, base)
+	failure := errors.New("parent sync failed")
+	child, err := root.PublishInitializedDirectChildExclusive("collab", 0o700, func(child *DeliveryRoot) error {
+		if err := child.EnsureRootDirs(); err != nil {
+			return err
+		}
+		if err := child.EnsureAgentDirs("operator"); err != nil {
+			return err
+		}
+		// The staged child captured the prior nil hook. Only the final parent
+		// directory sync observes this injected failure.
+		root.syncDirForTest = func(string) error { return failure }
+		return nil
+	})
+	if child == nil {
+		t.Fatal("committed publication did not return its pinned child")
+	}
+	defer func() { _ = child.Close() }()
+	var committed *CommittedDurabilityError
+	if !errors.As(err, &committed) || !errors.Is(err, failure) {
+		t.Fatalf("publication error = %v, want committed durability failure", err)
+	}
+	if child.Base() != filepath.Join(base, "collab") {
+		t.Fatalf("committed child base = %q", child.Base())
+	}
+	if err := child.VerifyBase(); err != nil {
+		t.Fatal(err)
+	}
+	for _, leaf := range requiredMailboxLeaves {
+		if info, err := child.Stat(filepath.Join("agents", "operator", string(leaf))); err != nil || !info.IsDir() {
+			t.Fatalf("committed mailbox %s: info=%v err=%v", leaf, info, err)
+		}
+	}
+}
+
+func TestPublishInitializedDirectChildExclusiveReportsPostRenameIdentityLossAsCommitted(t *testing.T) {
+	base := t.TempDir()
+	root := openDeliveryRootForTest(t, base)
+	old := afterPublishInitializedDirectChildForTest
+	afterPublishInitializedDirectChildForTest = func(r *DeliveryRoot, name string) {
+		if err := os.Rename(filepath.Join(r.Base(), name), filepath.Join(r.Base(), "moved-away")); err != nil {
+			t.Fatalf("move published child: %v", err)
+		}
+	}
+	t.Cleanup(func() { afterPublishInitializedDirectChildForTest = old })
+
+	child, err := root.PublishInitializedDirectChildExclusive("collab", 0o700, func(child *DeliveryRoot) error {
+		return child.EnsureRootDirs()
+	})
+	if child == nil {
+		t.Fatal("post-rename identity loss did not return the committed capability")
+	}
+	defer func() { _ = child.Close() }()
+	var committed *CommittedDurabilityError
+	if !errors.As(err, &committed) {
+		t.Fatalf("post-rename identity error = %v, want committed error", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "moved-away", "agents")); err != nil {
+		t.Fatalf("published tree was not retained at racing location: %v", err)
+	}
+}
