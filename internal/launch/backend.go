@@ -57,6 +57,7 @@ const (
 	OutcomeCommandsEmitted Outcome = "commands_emitted"
 	OutcomeActionRequired  Outcome = "action_required"
 	OutcomeUnsupported     Outcome = "unsupported"
+	OutcomeNoAction        Outcome = "no_action"
 	OutcomeAttached        Outcome = "attached"
 	OutcomeClosed          Outcome = "closed"
 )

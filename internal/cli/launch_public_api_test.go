@@ -180,6 +180,7 @@ func TestPublicLaunchModeFlagRefusals(t *testing.T) {
 		{name: "mixed apply and plan", args: []string{"--apply", "apply.json", "--plan", "intent.json", "--json"}, want: "mutually exclusive"},
 		{name: "apply target override", args: []string{"--apply", "apply.json", "--session", "collab", "--json"}, want: "takes its target"},
 		{name: "legacy decision flag", args: []string{"--plan", "intent.json", "--fresh"}, want: "legacy launch decision flags"},
+		{name: "require agent is legacy only", args: []string{"--plan", "intent.json", "--require-agent"}, want: "legacy launch decision flags"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := runLaunch(test.args)

@@ -240,7 +240,7 @@ func applyUnderAuthority(ctx context.Context, request ApplyRequest, dependencies
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if reconciled.AggregateCode == 0 && reconciled.Outcome != "" {
+	if reconciled.AggregateCode == 0 && reconciled.Outcome != "" && reconciled.Outcome != OutcomeNoAction {
 		result.Outcome = ApplyOutcomeApplied
 		result.ReasonCode = ""
 	} else {

@@ -31,6 +31,7 @@ const (
 
 const (
 	ReasonNoSavedConversation    = "no_saved_conversation"
+	ReasonNoAgentLaunched        = "no_agent_launched"
 	ReasonPriorLaunchNotExecuted = "prior_launch_not_executed"
 	ReasonStaleConversation      = "stale_conversation"
 )
@@ -159,7 +160,10 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	}
 	if len(planned) == 0 {
 		result.AggregateCode = aggregateReconcileCode(result.Agents)
-		if result.AggregateCode == 6 {
+		switch result.AggregateCode {
+		case 0:
+			result.Outcome = OutcomeNoAction
+		case 6:
 			result.Outcome = OutcomeActionRequired
 			result.Reason = firstReconcileReason(result.Agents, 6)
 		}
