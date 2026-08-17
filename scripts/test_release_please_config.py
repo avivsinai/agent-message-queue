@@ -116,8 +116,11 @@ def test_release_please_workflow_is_pr_only_and_staged() -> None:
 def test_release_state_scripts_are_injection_safe() -> None:
     state = (ROOT / "scripts/check-release-please-state.sh").read_text()
     assert "RELEASE_VERSION_PATTERN=" in state
-    assert 'jq -e --arg tag "$tag"' in state
-    assert ".tag_name == $tag" in state
+    assert "gh api --include" in state
+    assert '"repos/${github_repository}/releases/tags/${tag}"' in state
+    assert 'jq -er --arg tag "$tag"' in state
+    assert ".tag_name != $tag" in state
+    assert "releases?per_page=" not in state
     assert "grep " not in state
     assert "printf 'version=%s\\n'" in state
     assert "printf 'released=%s\\n'" in state
