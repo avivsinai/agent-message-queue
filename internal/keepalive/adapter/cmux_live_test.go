@@ -147,13 +147,20 @@ func TestCmuxLiveDiscoverProbe(t *testing.T) {
 		t.Fatalf("Discover = %q, want throwaway surface %q (refusing to touch another surface)", target, surfaceID)
 	}
 	t.Logf("PASS Discover throwaway %s", target)
-	if err := cmuxLiveWaitForSurfaceTTY(t, path, surfaceID); err != nil {
+	entry, tty, err := cmuxLiveWaitForTerminalSurface(t, path, surfaceID)
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("throwaway system.tree entry=%s tty=%q", entry, tty)
 	if err := adapter.Probe(ctx, target); err != nil {
-		t.Fatalf("Probe() error = %v", err)
+		t.Fatalf("Probe() error = %v (null tty must still pass)", err)
 	}
 	t.Logf("PASS Probe throwaway %s", target)
+
+	missing := "cmux:surface:00000000-0000-4000-8000-000000000000"
+	if err := adapter.Probe(ctx, missing); !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("Probe missing UUID error = %v, want ErrTargetNotFound", err)
+	}
 
 	if _, err := cmuxLiveRun(path, 30*time.Second, "close-workspace", "--workspace", workspaceID); err != nil {
 		t.Fatalf("close throwaway: %v", err)
@@ -237,7 +244,7 @@ func cmuxLiveTerminalSurface(path, workspaceID string) (string, error) {
 	return "", errors.New("throwaway cmux workspace has no terminal surface")
 }
 
-func cmuxLiveWaitForSurfaceTTY(t *testing.T, path, surfaceID string) error {
+func cmuxLiveWaitForTerminalSurface(t *testing.T, path, surfaceID string) (json.RawMessage, string, error) {
 	t.Helper()
 	deadline := time.Now().Add(cmuxLiveInspectTimeout)
 	var lastEntry string
@@ -253,14 +260,12 @@ func cmuxLiveWaitForSurfaceTTY(t *testing.T, path, surfaceID string) error {
 				t.Logf("system.tree surface %s absent", surfaceID)
 			} else {
 				lastEntry = string(entry)
-				t.Logf("system.tree surface entry=%s", entry)
-				if cmuxLiveTTYReady(tty) {
-					return nil
-				}
+				t.Logf("system.tree surface entry=%s tty=%q", entry, tty)
+				return entry, tty, nil
 			}
 		}
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("throwaway surface %s never reported a tty in system.tree within %s: last entry=%s", surfaceID, cmuxLiveInspectTimeout, lastEntry)
+			return nil, "", fmt.Errorf("throwaway surface %s never appeared in system.tree within %s: last entry=%s", surfaceID, cmuxLiveInspectTimeout, lastEntry)
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
