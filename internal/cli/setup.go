@@ -89,8 +89,8 @@ var (
 			launch.NewCursorAdapter(launch.CursorProvider),
 		}
 	}
-	setupLookPath         = exec.LookPath
-	setupCmuxAvailable    = func() bool {
+	setupLookPath      = exec.LookPath
+	setupCmuxAvailable = func() bool {
 		return launch.NewCmuxBackend("").Detect().Available
 	}
 	setupGhosttyAvailable = func() bool {

@@ -105,12 +105,13 @@ func TestPrepareParticipantOnlyAbsentSessionDoesNotProvision(t *testing.T) {
 
 func TestPrepareUnavailableLauncherIsTypedAndDoesNotRequestTrust(t *testing.T) {
 	fixture := newPublicPrepareFixture(t, true)
-	fixture.request.Launcher = "ghostty"
+	launcher := unavailableManagedLauncher(t)
+	fixture.request.Launcher = launcher
 	result, err := Prepare(context.Background(), fixture.request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Outcome != PrepareOutcomeUnsupported || result.Reason != "launcher_not_available" || result.Preview.Backend != "ghostty" {
+	if result.Outcome != PrepareOutcomeUnsupported || result.Reason != "launcher_not_available" || result.Preview.Backend != launcher {
 		t.Fatalf("unavailable launcher result = %#v", result)
 	}
 	if len(result.RequiredActions) != 0 {
@@ -286,6 +287,18 @@ type publicPrepareFixture struct {
 	root       string
 	siblingCwd string
 	request    PrepareRequestV1
+}
+
+func unavailableManagedLauncher(t *testing.T) string {
+	t.Helper()
+	for _, name := range []string{internallaunch.LauncherCMux, internallaunch.LauncherGhostty} {
+		backend := internallaunch.DefaultBackends()[name]
+		if backend != nil && !backend.Detect().Available {
+			return name
+		}
+	}
+	t.Skip("cmux and ghostty are both available on this host")
+	return ""
 }
 
 func newPublicPrepareFixture(t *testing.T, existingSession bool) publicPrepareFixture {
