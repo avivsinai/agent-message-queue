@@ -177,6 +177,23 @@ func TestCodexPlansUseExactCaptureAndResumeShapes(t *testing.T) {
 		len(fresh.DynamicArgv) != 0 || !reflect.DeepEqual(fresh.Argv[len(fresh.Argv)-2:], []string{"-c", notify}) {
 		t.Fatalf("fresh plan = %#v", fresh)
 	}
+	otherRequest := request
+	otherRequest.LaunchNonce = "56565656-5656-4565-8565-565656565656"
+	otherFresh, err := adapter.PlanFresh(otherRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshDigest, err := (Plan{Version: PlanVersion, Agents: []AgentPlan{fresh}}).SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDigest, err := (Plan{Version: PlanVersion, Agents: []AgentPlan{otherFresh}}).SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freshDigest != otherDigest || fresh.Argv[len(fresh.Argv)-1] != otherFresh.Argv[len(otherFresh.Argv)-1] {
+		t.Fatalf("codex notify changed the static trust subject across launch nonces: %s != %s", freshDigest, otherDigest)
+	}
 	resume, err := adapter.PlanResume(ResumeRequest{
 		PlanRequest:  request,
 		Conversation: ConversationIdentity{Provider: CodexProvider, ID: testConversationID},

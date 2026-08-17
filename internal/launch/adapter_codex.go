@@ -141,7 +141,7 @@ func codexNotifyOverride(request PlanRequest) (string, error) {
 	}
 	command := []string{
 		amqExecutable, "__codex-notify", "--root", sessionRoot,
-		"--handle", request.Handle, "--nonce", request.LaunchNonce,
+		"--handle", request.Handle,
 	}
 	encoded, err := json.Marshal(command)
 	if err != nil {

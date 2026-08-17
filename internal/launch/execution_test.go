@@ -750,7 +750,7 @@ func TestCodexNotifyTicketRejectsAlteredStaticHook(t *testing.T) {
 	for _, argv := range [][]string{
 		{fixture.provider},
 		{fixture.provider, "-c", notify, "-c", notify},
-		{fixture.provider, "-c", strings.Replace(notify, nonce, testLaunchNonce, 1)},
+		{fixture.provider, "-c", strings.Replace(notify, `"codex"`, `"claude"`, 1)},
 		{fixture.provider, "-c", notify, "--config", "notify=[]"},
 	} {
 		_, err := NewExecutionTicket(ExecutionTicketRequest{

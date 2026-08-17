@@ -23,12 +23,16 @@ var (
 )
 
 func runCodexNotify(args []string) error {
-	if len(args) != 7 || args[0] != "--root" || args[2] != "--handle" || args[4] != "--nonce" ||
-		strings.TrimSpace(args[1]) == "" || strings.TrimSpace(args[3]) == "" || strings.TrimSpace(args[5]) == "" {
-		return fmt.Errorf("codex notify requires --root, --handle, --nonce, and one payload")
+	if len(args) != 5 || args[0] != "--root" || args[2] != "--handle" ||
+		strings.TrimSpace(args[1]) == "" || strings.TrimSpace(args[3]) == "" {
+		return fmt.Errorf("codex notify requires --root, --handle, and one payload")
 	}
-	rootPath, handle, nonce := args[1], args[3], args[5]
-	payload := []byte(args[6])
+	rootPath, handle := args[1], args[3]
+	nonce := strings.TrimSpace(os.Getenv(launch.InternalLaunchNonceEnv))
+	if nonce == "" {
+		return fmt.Errorf("codex notify requires %s", launch.InternalLaunchNonceEnv)
+	}
+	payload := []byte(args[4])
 	identity, err := fsq.SnapshotDeliveryRoot(rootPath)
 	if err != nil {
 		return fmt.Errorf("snapshot codex notify root: %w", err)

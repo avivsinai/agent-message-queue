@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -35,8 +36,17 @@ func TestCodexNotifyRecordsBeforeForwardAndIgnoresForwardFailure(t *testing.T) {
 		}
 		return wantForwardErr
 	}
-	if err := Run([]string{"__codex-notify", "--root", session, "--handle", "codex", "--nonce", nonce, string(payload)}, "test"); err != nil {
+	t.Setenv(launch.InternalLaunchNonceEnv, nonce)
+	if err := Run([]string{"__codex-notify", "--root", session, "--handle", "codex", string(payload)}, "test"); err != nil {
 		t.Fatalf("run notify with failed operator hook: %v", err)
+	}
+}
+
+func TestCodexNotifyRequiresManagedNonceEnvironment(t *testing.T) {
+	t.Setenv(launch.InternalLaunchNonceEnv, "")
+	err := runCodexNotify([]string{"--root", t.TempDir(), "--handle", "codex", `{}`})
+	if err == nil || !strings.Contains(err.Error(), launch.InternalLaunchNonceEnv) {
+		t.Fatalf("missing managed nonce error = %v", err)
 	}
 }
 
@@ -121,7 +131,7 @@ func seedCodexNotifyCLI(t *testing.T) (string, *fsq.DeliveryRoot, string, string
 		t.Fatal(err)
 	}
 	nonce := "78787878-7878-4787-8787-787878787878"
-	notifyArgv := []string{amq, "__codex-notify", "--root", session, "--handle", "codex", "--nonce", nonce}
+	notifyArgv := []string{amq, "__codex-notify", "--root", session, "--handle", "codex"}
 	encoded, err := json.Marshal(notifyArgv)
 	if err != nil {
 		t.Fatal(err)
