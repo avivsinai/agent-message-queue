@@ -468,6 +468,176 @@ func TestPrepareCaptureRecordsAttemptWithoutPromotingConversation(t *testing.T) 
 	}
 }
 
+type countingCursorAcquirer struct {
+	calls int
+	id    string
+}
+
+func (acquirer *countingCursorAcquirer) Acquire(ticket ExecutionTicket) (CaptureEvidence, error) {
+	acquirer.calls++
+	return ParseCursorCreateChatEvidence([]byte(acquirer.id+"\n"), ticket.LaunchNonce, ticket.Handle, ticket.ProviderVersion)
+}
+
+func TestPrepareCursorPreSpawnReusesAcquisitionAcrossCrashes(t *testing.T) {
+	for _, crashStage := range []string{"evidence_persisted", "identity_acquired", "spawn_attempted"} {
+		t.Run(crashStage, func(t *testing.T) {
+			fixture := newExecutionFixture(t)
+			nonce := "91919191-9191-4919-8919-919191919191"
+			ticket, envelope := seedPendingCursorExecution(t, fixture, nonce)
+			acquirer := &countingCursorAcquirer{id: testConversationID}
+			crash := errors.New("simulated crash")
+			_, err := prepareExecution(fixture.root, "cursor", nonce, envelope, acquirer, func(stage string) error {
+				if stage == crashStage {
+					return crash
+				}
+				return nil
+			})
+			if !errors.Is(err, crash) {
+				t.Fatalf("first prepare error = %v", err)
+			}
+			prepared, err := prepareExecution(fixture.root, "cursor", nonce, envelope, acquirer, nil)
+			if err != nil || prepared.State != ExecutionAcknowledged || acquirer.calls != 1 {
+				t.Fatalf("retry prepare = %#v, %v; acquisition calls = %d", prepared, err, acquirer.calls)
+			}
+			argv, err := ResolveExecutionArgv(prepared)
+			if err != nil || argv[ticket.DynamicArgv[0].Index] != testConversationID || argv[ticket.DynamicArgv[0].Index] == preSpawnConversationPlaceholder {
+				t.Fatalf("resolved argv = %#v, %v", argv, err)
+			}
+			record, err := LoadConversation(fixture.root, "cursor")
+			if err != nil || record.State != CaptureReady || record.Identity.Provider != CursorProvider ||
+				record.Identity.ID != testConversationID || len(record.EvidenceRefs) != 1 {
+				t.Fatalf("ready Cursor conversation = %#v, %v", record, err)
+			}
+		})
+	}
+}
+
+func TestRevertCursorExecutionRetainsAcquiredIdentity(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "92929292-9292-4929-8929-929292929292"
+	_, envelope := seedPendingCursorExecution(t, fixture, nonce)
+	acquirer := &countingCursorAcquirer{id: testConversationID}
+	prepared, err := prepareExecution(fixture.root, "cursor", nonce, envelope, acquirer, nil)
+	if err != nil || prepared.State != ExecutionAcknowledged {
+		t.Fatalf("prepare = %#v, %v", prepared, err)
+	}
+	if err := RevertExecution(fixture.root, "cursor", nonce); err != nil {
+		t.Fatal(err)
+	}
+	reverted, err := LoadExecutionTicket(fixture.root, "cursor")
+	if err != nil || reverted.State != ExecutionIdentityAcquired || reverted.ConversationID != testConversationID || len(reverted.EvidenceRefs) != 1 {
+		t.Fatalf("reverted Cursor ticket = %#v, %v", reverted, err)
+	}
+	if _, err := prepareExecution(fixture.root, "cursor", nonce, envelope, acquirer, nil); err != nil || acquirer.calls != 1 {
+		t.Fatalf("retry after revert = %v; acquisition calls = %d", err, acquirer.calls)
+	}
+}
+
+func TestPrepareCursorFailsClosedOnTamperedAcquisitionEvidence(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "93939393-9393-4939-8939-939393939393"
+	_, envelope := seedPendingCursorExecution(t, fixture, nonce)
+	acquirer := &countingCursorAcquirer{id: testConversationID}
+	crash := errors.New("stop after identity publication")
+	_, err := prepareExecution(fixture.root, "cursor", nonce, envelope, acquirer, func(stage string) error {
+		if stage == "identity_acquired" {
+			return crash
+		}
+		return nil
+	})
+	if !errors.Is(err, crash) {
+		t.Fatalf("prepare error = %v", err)
+	}
+	ticket, err := LoadExecutionTicket(fixture.root, "cursor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := EvidencePath(fixture.session, ticket.EvidenceRefs[0])
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[len(data)/2] ^= 1
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareExecution(fixture.root, "cursor", nonce, envelope, acquirer, nil); err == nil || !strings.Contains(err.Error(), "evidence_corrupt") {
+		t.Fatalf("tampered evidence error = %v", err)
+	}
+	if acquirer.calls != 1 {
+		t.Fatalf("tampered retry acquisition calls = %d, want 1", acquirer.calls)
+	}
+}
+
+func TestPrepareCursorRejectsValidEvidenceBoundToAnotherNonce(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "95959595-9595-4959-8959-959595959595"
+	_, envelope := seedPendingCursorExecution(t, fixture, nonce)
+	lease, err := AcquireLease(fixture.root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("cursor"); err != nil {
+		t.Fatal(err)
+	}
+	foreignNonce := "96969696-9696-4969-8969-969696969696"
+	foreign, err := ParseCursorCreateChatEvidence([]byte(testConversationID), foreignNonce, "cursor", cursorCaptureVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := persistProviderCaptureEvidence(fixture.root, lease, "cursor", []CaptureEvidence{foreign})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := LoadExecutionTicket(fixture.root, "cursor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket.State, ticket.Reason = ExecutionIdentityAcquired, "identity_acquired"
+	ticket.ConversationID, ticket.EvidenceRefs = testConversationID, refs
+	if err := WriteExecutionTicket(fixture.root, lease, ticket); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	acquirer := &countingCursorAcquirer{id: testConversationID}
+	if _, err := prepareExecution(fixture.root, "cursor", nonce, envelope, acquirer, nil); err == nil || !strings.Contains(err.Error(), "cursor execution evidence binding mismatch") {
+		t.Fatalf("foreign evidence error = %v", err)
+	}
+	loaded, err := LoadExecutionTicket(fixture.root, "cursor")
+	if err != nil || loaded.State != ExecutionIdentityAcquired || acquirer.calls != 0 {
+		t.Fatalf("ticket after foreign evidence refusal = %#v, %v; acquisition calls = %d", loaded, err, acquirer.calls)
+	}
+}
+
+func TestCursorOrphanEvidenceRejectsSameIdentityWithDifferentBytes(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "94949494-9494-4949-8949-949494949494"
+	lease, err := AcquireLease(fixture.root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Release() }()
+	if err := lease.LockHandles("cursor"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := ParseCursorCreateChatEvidence([]byte(testConversationID), nonce, "cursor", cursorCaptureVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ParseCursorCreateChatEvidence([]byte(testConversationID+"\n"), nonce, "cursor", cursorCaptureVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := persistProviderCaptureEvidence(fixture.root, lease, "cursor", []CaptureEvidence{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := findCursorCaptureEvidence(fixture.root, "cursor", nonce, cursorCaptureVersion); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous orphan evidence error = %v", err)
+	}
+}
+
 type executionFixture struct {
 	project, session, cwd, provider, amq, injector string
 	root                                           *fsq.DeliveryRoot
@@ -535,6 +705,45 @@ func seedPendingMintExecution(t *testing.T, fixture executionFixture, nonce stri
 	}
 	if err := WriteConversation(fixture.root, lease, ConversationRecord{
 		Version: ConversationVersion, Handle: "claude", State: CapturePending, LaunchNonce: nonce,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	return ticket, ExecutionEnvelope{
+		Cwd: fixture.cwd, AMQExecutable: fixture.amq, ProviderExecutable: fixture.provider,
+		TargetArgv: ticket.TargetArgv, Environment: []string{"LANG=C"},
+	}
+}
+
+func seedPendingCursorExecution(t *testing.T, fixture executionFixture, nonce string) (ExecutionTicket, ExecutionEnvelope) {
+	t.Helper()
+	lease, err := AcquireLease(fixture.root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("cursor"); err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := NewExecutionTicket(ExecutionTicketRequest{
+		Handle: "cursor", LaunchNonce: nonce, Mode: AdapterModeCapture, Provider: CursorProvider,
+		ProviderVersion: cursorCaptureVersion, PreSpawnAcquire: true,
+		Backend: CommandsBackendName, Profile: CommandsProfile().Identity(),
+		ProjectRoot: fixture.project, SessionRoot: fixture.session, Cwd: fixture.cwd,
+		ProviderExecutable: fixture.provider, AMQExecutable: fixture.amq,
+		TargetArgv:  []string{fixture.provider, "--resume", preSpawnConversationPlaceholder},
+		DynamicArgv: []DynamicArg{{Index: 2, Kind: DynamicArgConversationID}}, TargetEnv: map[string]string{"LANG": "C"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteExecutionTicket(fixture.root, lease, ticket); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteConversation(fixture.root, lease, ConversationRecord{
+		Version: ConversationVersion, Handle: "cursor", State: CapturePending,
+		ProviderVersion: cursorCaptureVersion, LaunchNonce: nonce,
 	}); err != nil {
 		t.Fatal(err)
 	}

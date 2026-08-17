@@ -50,6 +50,10 @@ does not replace committed project configuration.
 
 `resume_policy` accepts exactly `resume`, `fresh`, or `disabled`.
 
+The v1 adapter set supports Claude Code, Codex CLI, and Cursor CLI capture at
+exact version `2026.08.11-e8db854`. Grok and Pi are excluded because they have
+no provider CLI; Gemini CLI and OpenCode also remain outside this adapter set.
+
 ## Prepare and Apply
 
 Prepare is read-only. It returns the exact subject, plan, and trust digests, a

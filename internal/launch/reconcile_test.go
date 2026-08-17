@@ -72,6 +72,7 @@ type reconcileAdapter struct {
 	freshUnsupported   bool
 	resumeUnsupported  bool
 	captureUnsupported bool
+	preSpawnAcquire    bool
 }
 
 func (a reconcileAdapter) Name() string               { return a.name }
@@ -82,11 +83,16 @@ func (a reconcileAdapter) Capabilities(context.Context) AdapterCapabilities {
 	if a.capabilityProvider != "" {
 		provider = a.capabilityProvider
 	}
+	providerVersion := "test"
+	if a.preSpawnAcquire {
+		providerVersion = cursorCaptureVersion
+	}
 	return AdapterCapabilities{
 		Provider: provider, Mode: a.mode, Available: a.available,
-		ProviderVersion: "test", Fresh: a.available && !a.freshUnsupported,
-		Resume:  a.available && !a.resumeUnsupported,
-		Capture: a.available && a.mode == AdapterModeCapture && !a.captureUnsupported, Reason: a.reason,
+		ProviderVersion: providerVersion, Fresh: a.available && !a.freshUnsupported,
+		Resume:          a.available && !a.resumeUnsupported,
+		Capture:         a.available && a.mode == AdapterModeCapture && !a.captureUnsupported,
+		PreSpawnAcquire: a.available && a.preSpawnAcquire, Reason: a.reason,
 	}
 }
 
@@ -120,6 +126,29 @@ func TestReconcileCaptureFreshRequiresFreshAndCaptureCapabilities(t *testing.T) 
 				t.Fatalf("unsupported capture wrote execution ticket: %v", err)
 			}
 		})
+	}
+}
+
+func TestReconcileCursorPreSpawnLeavesPendingConversationForWrapper(t *testing.T) {
+	backend := &reconcileBackend{name: "cursor-test"}
+	req := reconcileFixture(t, backend)
+	req.Config.Agents[0].Adapter = CursorProvider
+	req.Config.Agents[0].Command = []string{CursorProvider}
+	req.Adapters = map[string]HarnessAdapter{CursorProvider: reconcileAdapter{
+		name: CursorProvider, mode: AdapterModeCapture, available: true, preSpawnAcquire: true,
+	}}
+	result, err := Reconcile(req)
+	if err != nil || result.AggregateCode != 0 || result.Outcome != OutcomeCreated {
+		t.Fatalf("Cursor reconcile = %#v, %v", result, err)
+	}
+	record, err := LoadConversation(req.Root, "claude")
+	if err != nil || record.State != CapturePending || record.ExecutionEvidence != nil || record.ProviderVersion != cursorCaptureVersion {
+		t.Fatalf("pending Cursor conversation = %#v, %v", record, err)
+	}
+	ticket, err := LoadExecutionTicket(req.Root, "claude")
+	if err != nil || !ticket.PreSpawnAcquire || ticket.State != ExecutionPending || ticket.Backend != backend.name ||
+		ticket.Profile != backend.Detect().Profile.Identity() || len(ticket.DynamicArgv) != 1 {
+		t.Fatalf("pending Cursor ticket = %#v, %v", ticket, err)
 	}
 }
 
@@ -169,6 +198,14 @@ func TestReconcileCaptureReadyRefusesWithoutResumeCapability(t *testing.T) {
 }
 
 func (a reconcileAdapter) PlanFresh(req PlanRequest) (AgentPlan, error) {
+	if a.preSpawnAcquire {
+		plan := AgentPlan{
+			Handle: req.Handle, Argv: []string{"/usr/bin/true", "--resume", preSpawnConversationPlaceholder}, Cwd: req.Cwd,
+			AdapterMode: a.mode, ResumePolicy: req.ResumePolicy, LaunchNonce: req.LaunchNonce, PreSpawnAcquire: true,
+			DynamicArgv: []DynamicArg{{Index: 2, Kind: DynamicArgConversationID}},
+		}
+		return plan, plan.Validate()
+	}
 	plan := AgentPlan{
 		Handle: req.Handle, Argv: []string{"/usr/bin/true", req.LaunchNonce}, Cwd: req.Cwd,
 		AdapterMode: a.mode, ResumePolicy: req.ResumePolicy, LaunchNonce: req.LaunchNonce,

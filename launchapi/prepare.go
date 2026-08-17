@@ -91,6 +91,8 @@ func defaultPrepareAdapter(provider, executable string) internallaunch.HarnessAd
 		return internallaunch.NewClaudeAdapter(executable)
 	case internallaunch.CodexProvider:
 		return internallaunch.NewCodexAdapter(executable)
+	case internallaunch.CursorProvider:
+		return internallaunch.NewCursorAdapter(executable)
 	default:
 		return nil
 	}

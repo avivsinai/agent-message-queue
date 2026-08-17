@@ -207,8 +207,19 @@ func EvidencePath(sessionRoot, id string) string {
 func persistProviderCaptureEvidence(root *fsq.DeliveryRoot, lease *Lease, handle string, evidence []CaptureEvidence) ([]string, error) {
 	refs := make([]string, 0, len(evidence))
 	for _, item := range evidence {
-		if !item.verified || item.source != CodexThreadStartedV2 || len(item.payload) == 0 {
+		if !item.verified || len(item.payload) == 0 {
 			return nil, fmt.Errorf("provider capture evidence is not persistable")
+		}
+		switch item.source {
+		case CodexThreadStartedV2:
+		case CursorCreateChatV1:
+			payload, err := decodeCursorCreateChatPayload(item.payload)
+			if err != nil || payload.Handle != handle || item.handle != handle || payload.LaunchNonce != item.launchNonce ||
+				payload.ConversationID != item.conversationID || payload.ProviderVersion != item.providerVersion {
+				return nil, fmt.Errorf("cursor provider capture evidence is not persistable")
+			}
+		default:
+			return nil, fmt.Errorf("provider capture evidence source is not persistable")
 		}
 		request := EvidenceWriteRequest{
 			Kind: EvidenceProviderCapture, Handle: handle, ObservedAt: item.observedAt, Payload: item.payload,
@@ -235,6 +246,57 @@ func persistProviderCaptureEvidence(root *fsq.DeliveryRoot, lease *Lease, handle
 		refs = append(refs, ref.ID)
 	}
 	return refs, nil
+}
+
+func findCursorCaptureEvidence(root *fsq.DeliveryRoot, handle, nonce, providerVersion string) (CaptureEvidence, string, bool, error) {
+	entries, err := root.ReadDir(evidenceDirectory)
+	if errors.Is(err, os.ErrNotExist) {
+		return CaptureEvidence{}, "", false, nil
+	}
+	if err != nil {
+		return CaptureEvidence{}, "", false, err
+	}
+	var found CaptureEvidence
+	foundID := ""
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		id := "sha256:" + strings.TrimSuffix(entry.Name(), ".json")
+		record, _, err := ReadEvidence(root, id)
+		if err != nil {
+			return CaptureEvidence{}, "", false, err
+		}
+		if record.Kind != EvidenceProviderCapture || record.Handle != handle {
+			continue
+		}
+		var envelope struct {
+			Source CaptureEvidenceSource `json:"source"`
+		}
+		if err := json.Unmarshal(record.Payload, &envelope); err != nil {
+			return CaptureEvidence{}, "", false, fmt.Errorf("decode provider capture source: %w", err)
+		}
+		if envelope.Source != CursorCreateChatV1 {
+			continue
+		}
+		payload, err := decodeCursorCreateChatPayload(record.Payload)
+		if err != nil {
+			return CaptureEvidence{}, "", false, err
+		}
+		if payload.Handle != handle || payload.LaunchNonce != nonce || payload.ProviderVersion != providerVersion {
+			continue
+		}
+		if foundID != "" && foundID != id {
+			return CaptureEvidence{}, "", false, fmt.Errorf("cursor acquisition evidence is ambiguous for handle %q", handle)
+		}
+		found = CaptureEvidence{
+			source: CursorCreateChatV1, provider: CursorProvider, providerVersion: payload.ProviderVersion,
+			launchNonce: payload.LaunchNonce, handle: payload.Handle, conversationID: payload.ConversationID,
+			verified: true, observedAt: record.ObservedAt, payload: bytes.Clone(record.Payload),
+		}
+		foundID = id
+	}
+	return found, foundID, foundID != "", nil
 }
 
 func CollectEvidenceRefs(root *fsq.DeliveryRoot, handles []string) ([]EvidenceRef, error) {

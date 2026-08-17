@@ -17,6 +17,8 @@ import (
 
 const PlanVersion = 1
 
+const preSpawnConversationPlaceholder = "__AMQ_CONVERSATION_ID__"
+
 type AdapterMode string
 
 const (
@@ -48,15 +50,16 @@ type Plan struct {
 }
 
 type AgentPlan struct {
-	Handle         string            `json:"handle"`
-	Argv           []string          `json:"argv"`
-	EnvOverlay     map[string]string `json:"env_overlay,omitempty"`
-	Cwd            string            `json:"cwd"`
-	AdapterMode    AdapterMode       `json:"adapter_mode"`
-	ResumePolicy   ResumePolicy      `json:"resume_policy"`
-	LaunchNonce    string            `json:"launch_nonce,omitempty"`
-	ConversationID string            `json:"conversation_id,omitempty"`
-	DynamicArgv    []DynamicArg      `json:"dynamic_argv,omitempty"`
+	Handle          string            `json:"handle"`
+	Argv            []string          `json:"argv"`
+	EnvOverlay      map[string]string `json:"env_overlay,omitempty"`
+	Cwd             string            `json:"cwd"`
+	AdapterMode     AdapterMode       `json:"adapter_mode"`
+	ResumePolicy    ResumePolicy      `json:"resume_policy"`
+	LaunchNonce     string            `json:"launch_nonce,omitempty"`
+	ConversationID  string            `json:"conversation_id,omitempty"`
+	DynamicArgv     []DynamicArg      `json:"dynamic_argv,omitempty"`
+	PreSpawnAcquire bool              `json:"pre_spawn_acquire,omitempty"`
 	// Execution is the normalized coop-exec wrapper policy. Keeping it in the
 	// plan makes journal recovery lossless before the wrapper consumes it.
 	Execution *PrepareExecutionOptions `json:"execution,omitempty"`
@@ -115,7 +118,11 @@ func (a AgentPlan) validate() error {
 			return fmt.Errorf("invalid environment key %q", key)
 		}
 	}
+	if a.PreSpawnAcquire && (a.AdapterMode != AdapterModeCapture || a.ConversationID != "") {
+		return fmt.Errorf("pre-spawn acquisition requires capture mode without a planned identity")
+	}
 	seenDynamic := make(map[int]struct{}, len(a.DynamicArgv))
+	conversationSlots := 0
 	for i, dynamic := range a.DynamicArgv {
 		if dynamic.Index < 0 || dynamic.Index >= len(a.Argv) {
 			return fmt.Errorf("dynamic_argv[%d]: index %d is outside argv", i, dynamic.Index)
@@ -132,13 +139,21 @@ func (a AgentPlan) validate() error {
 		case DynamicArgLaunchNonce:
 			expected = a.LaunchNonce
 		case DynamicArgConversationID:
+			conversationSlots++
 			expected = a.ConversationID
 		default:
 			return fmt.Errorf("dynamic_argv[%d]: invalid kind %q", i, dynamic.Kind)
 		}
+		if dynamic.Kind == DynamicArgConversationID && a.PreSpawnAcquire && a.AdapterMode == AdapterModeCapture &&
+			a.ConversationID == "" && a.Argv[dynamic.Index] == preSpawnConversationPlaceholder {
+			continue
+		}
 		if expected == "" || a.Argv[dynamic.Index] != expected {
 			return fmt.Errorf("dynamic_argv[%d]: argv value does not match %s", i, dynamic.Kind)
 		}
+	}
+	if a.PreSpawnAcquire && conversationSlots != 1 {
+		return fmt.Errorf("pre-spawn acquisition requires exactly one dynamic conversation slot")
 	}
 	return nil
 }
@@ -154,12 +169,13 @@ type canonicalArgument struct {
 }
 
 type staticAgentPlan struct {
-	Handle       string              `json:"handle"`
-	Argv         []canonicalArgument `json:"argv"`
-	EnvOverlay   map[string]string   `json:"env_overlay,omitempty"`
-	Cwd          string              `json:"cwd"`
-	AdapterMode  AdapterMode         `json:"adapter_mode"`
-	ResumePolicy ResumePolicy        `json:"resume_policy"`
+	Handle          string              `json:"handle"`
+	Argv            []canonicalArgument `json:"argv"`
+	EnvOverlay      map[string]string   `json:"env_overlay,omitempty"`
+	Cwd             string              `json:"cwd"`
+	AdapterMode     AdapterMode         `json:"adapter_mode"`
+	ResumePolicy    ResumePolicy        `json:"resume_policy"`
+	PreSpawnAcquire bool                `json:"pre_spawn_acquire,omitempty"`
 }
 
 // SemanticDigest hashes the adapter-normalized static execution template.
@@ -192,6 +208,7 @@ func (p Plan) semanticDigest(allowEmpty bool) (string, error) {
 		agents[i] = staticAgentPlan{
 			Handle: agent.Handle, Argv: argv, EnvOverlay: agent.EnvOverlay,
 			Cwd: agent.Cwd, AdapterMode: agent.AdapterMode, ResumePolicy: agent.ResumePolicy,
+			PreSpawnAcquire: agent.PreSpawnAcquire,
 		}
 	}
 	slices.SortFunc(agents, func(a, b staticAgentPlan) int { return strings.Compare(a.Handle, b.Handle) })
