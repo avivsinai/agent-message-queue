@@ -310,7 +310,7 @@ func provisionCoopBaseAndSession(base, session string, agents []string) error {
 	if err := fsq.EnsureRootDirs(base); err != nil {
 		return fmt.Errorf("failed to create root directories: %w", err)
 	}
-	for _, agent := range agents {
+	for _, agent := range withReservedHumanHandle(agents) {
 		if err := fsq.EnsureAgentDirs(base, agent); err != nil {
 			return fmt.Errorf("failed to create compatibility base mailbox for %s: %w", agent, err)
 		}
@@ -394,7 +394,7 @@ func provisionCoopSessionChild(base, session string, agents []string, execAgent,
 		if err := sessionRoot.EnsureRootDirs(); err != nil {
 			return err
 		}
-		for _, agent := range agents {
+		for _, agent := range withReservedHumanHandle(agents) {
 			if err := sessionRoot.EnsureAgentDirs(agent); err != nil {
 				return fmt.Errorf("failed to create mailbox for %s: %w", agent, err)
 			}

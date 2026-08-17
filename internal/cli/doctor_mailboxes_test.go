@@ -834,6 +834,22 @@ type doctorMailboxResultJSON struct {
 	Ops           *doctorOpsResult         `json:"ops"`
 }
 
+func TestFreshInitProvisionsReservedHumanMailboxForDoctor(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "queue")
+	if err := runInit([]string{"--root", root, "--agents", "alpha,beta"}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	result := runDoctorMailboxJSON(t, root)
+	if got := doctorCheckStatus(result.Checks, "Mailboxes"); got != "ok" {
+		t.Fatalf("Mailboxes status = %q, want ok; mailboxes=%#v", got, result.Mailboxes)
+	}
+	user := findDoctorMailboxTestEntry(t, result.Mailboxes, reservedHumanHandle)
+	if user.Status != "ok" || len(user.Issues) != 0 || user.Remedy != "" {
+		t.Fatalf("reserved human mailbox = %#v, want healthy without repair", user)
+	}
+}
+
 func runDoctorMailboxJSON(t *testing.T, root string) doctorMailboxResultJSON {
 	t.Helper()
 	return runDoctorMailboxJSONArgs(t, root, "--json")

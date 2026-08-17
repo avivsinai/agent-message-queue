@@ -909,10 +909,13 @@ func TestCoopInitRerunUsesConfiguredAgents(t *testing.T) {
 			t.Fatalf("%s inbox was not restored: %v", agent, err)
 		}
 	}
-	for _, agent := range []string{"claude", "codex", "user"} {
+	for _, agent := range []string{"claude", "codex"} {
 		if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", agent)); !os.IsNotExist(err) {
 			t.Fatalf("rerun created default agent %q, stat err=%v", agent, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", reservedHumanHandle, "inbox", "new")); err != nil {
+		t.Fatalf("rerun did not provision the reserved human inbox: %v", err)
 	}
 	configAfter, err := os.ReadFile(cfgPath)
 	if err != nil {
@@ -1431,7 +1434,7 @@ func runCoopExecAutoInitNoGitignoreFixture(t *testing.T) string {
 	return projectDir
 }
 
-func TestInitExplicitAgentsDoesNotInjectUser(t *testing.T) {
+func TestInitExplicitAgentsKeepsConfigLiteralAndProvisionsUser(t *testing.T) {
 	root := t.TempDir()
 	_, err := captureEnvStdout(t, func() error {
 		return runInit([]string{"--root", root, "--agents", "claude,codex"})
@@ -1448,8 +1451,8 @@ func TestInitExplicitAgentsDoesNotInjectUser(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Agents, want) {
 		t.Fatalf("config agents = %#v, want %#v", cfg.Agents, want)
 	}
-	if _, err := os.Stat(filepath.Join(root, "agents", "user")); !os.IsNotExist(err) {
-		t.Fatalf("user mailbox should not be created by explicit init, stat err=%v", err)
+	if _, err := os.Stat(filepath.Join(root, "agents", "user", "inbox", "new")); err != nil {
+		t.Fatalf("implicit user inbox should be created without changing config agents: %v", err)
 	}
 }
 

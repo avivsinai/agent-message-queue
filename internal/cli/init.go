@@ -40,7 +40,7 @@ func runInit(args []string) error {
 		return err
 	}
 
-	for _, agent := range agents {
+	for _, agent := range withReservedHumanHandle(agents) {
 		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
 			return err
 		}
