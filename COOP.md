@@ -15,17 +15,21 @@ For swarm command reference, see [CLAUDE.md](CLAUDE.md).
 ## Co-op Workflow
 
 Use the [README Quick Start](README.md#quick-start) to install AMQ, configure
-the project with `amq setup`, and run `amq launch`. The `commands` backend
-prints one complete `coop exec` command for each configured agent and exits `6`
-until those commands are started. This document begins at that co-op-specific
-step; it does not define a second setup path.
+the project with `amq setup`, and run `amq launch`. `--launcher auto` (the
+default) may select `tmux`, `cmux`, or `ghostty` and run the declared plan
+in-app. The `commands` backend prints one complete `coop exec` command for
+each configured agent and exits `6` until those commands are started. This
+document begins at that co-op-specific step; it does not define a second
+setup path.
 
 ### Running Co-op Mode
 
-Paste each complete command emitted by `amq launch` into its own terminal. The
-emitted lines are the canonical execution surface: they include the exact
-session, launch nonce, execution ticket, and provider command declared in
-`.amq/launch.json`. Do not shorten or rebuild them from an example.
+When launch uses the `commands` backend, paste each complete emitted command
+into its own terminal. The emitted lines are the canonical execution surface:
+they include the exact session, launch nonce, execution ticket, and provider
+command declared in `.amq/launch.json`. Do not shorten or rebuild them from
+an example. Managed `tmux`, `cmux`, and `ghostty` backends do not print those
+lines; they create the panes or windows themselves.
 
 Include Grok in the setup roster when it should join the session. AMQ starts
 only adapters that pass their capability probe.
@@ -64,8 +68,8 @@ documented exception.
 
 ### Multiple Pairs (Isolated Sessions)
 
-Create each named session explicitly, reconcile it, then run the emitted
-commands in separate terminals:
+Create each named session explicitly, then launch it. When launch uses the
+`commands` backend, run the emitted commands in separate terminals:
 
 ```bash
 # Pair A: auth feature
@@ -77,7 +81,8 @@ amq session create api
 amq launch --session api
 ```
 
-Paste the commands emitted by each `launch` into separate terminals.
+When launch uses the `commands` backend, paste the emitted commands into
+separate terminals.
 
 Each pair has isolated inboxes and threads. Messages stay within their root.
 Equivalent explicit root form: `--root .agent-mail/<session>`.

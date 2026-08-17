@@ -42,6 +42,14 @@ clipboard.
 The cmux CLI is resolved from `AMQ_KEEPALIVE_CMUX`,
 `CMUX_BUNDLED_CLI_PATH`, `PATH`, or the standard application bundle locations.
 
+Operator live discover probes skip unless the env is `1`. Run them from a
+shell inside the matching surface:
+
+```sh
+AMQ_CMUX_LIVE=1 go test ./internal/keepalive/adapter -run TestCmuxLiveDiscoverProbe -count=1 -v
+AMQ_GHOSTTY_LIVE=1 go test ./internal/keepalive/adapter -run TestGhosttyLiveDiscoverProbe -count=1 -v
+```
+
 ## Attach and reattach
 
 Register without starting a wake when another owner, such as `amq coop exec`,
