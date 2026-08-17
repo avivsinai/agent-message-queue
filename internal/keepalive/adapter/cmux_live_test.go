@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const cmuxLiveInspectTimeout = 15 * time.Second
+
 func TestCmuxLiveDiscoverProbe(t *testing.T) {
 	if os.Getenv("AMQ_CMUX_LIVE") != "1" {
 		t.Skip("AMQ_CMUX_LIVE=1 required; run from a shell inside a cmux surface")
@@ -21,9 +23,18 @@ func TestCmuxLiveDiscoverProbe(t *testing.T) {
 	if err != nil {
 		t.Skipf("cmux CLI unavailable: %v", err)
 	}
-	beforeRaw, err := cmuxLiveRun(path, 5*time.Second, "--id-format", "uuids", "--json", "list-workspaces")
+	precheckArgs := []string{"--id-format", "uuids", "--json", "list-workspaces"}
+	t.Logf("cmux precheck binary=%s args=%s", path, strings.Join(precheckArgs, " "))
+	start := time.Now()
+	beforeRaw, err := cmuxLiveRun(path, cmuxLiveInspectTimeout, precheckArgs...)
+	elapsed := time.Since(start)
+	t.Logf("cmux precheck duration=%s output=%q err=%v", elapsed, beforeRaw, err)
 	if err != nil {
-		t.Skipf("cmux list-workspaces denied or failed: %s", strings.TrimSpace(beforeRaw+": "+err.Error()))
+		detail := strings.TrimSpace(beforeRaw + ": " + err.Error())
+		if cmuxLiveSocketDenied(beforeRaw, err) {
+			t.Skipf("cmux socket denied: %s", detail)
+		}
+		t.Fatalf("cmux list-workspaces precheck failed: binary=%s args=%s duration=%s output=%q err=%v", path, strings.Join(precheckArgs, " "), elapsed, beforeRaw, err)
 	}
 	before, err := parseCmuxLiveWorkspaces(beforeRaw)
 	if err != nil {
@@ -52,7 +63,7 @@ func TestCmuxLiveDiscoverProbe(t *testing.T) {
 				t.Errorf("cleanup close %s: %v", id, closeErr)
 			}
 		}
-		afterRaw, afterErr := cmuxLiveRun(path, 5*time.Second, "--id-format", "uuids", "--json", "list-workspaces")
+		afterRaw, afterErr := cmuxLiveRun(path, cmuxLiveInspectTimeout, "--id-format", "uuids", "--json", "list-workspaces")
 		if afterErr != nil {
 			t.Errorf("cleanup recount: %s", strings.TrimSpace(afterRaw+": "+afterErr.Error()))
 			return
@@ -71,7 +82,7 @@ func TestCmuxLiveDiscoverProbe(t *testing.T) {
 		if cmuxLiveSelected(after) == beforeSelected {
 			return
 		}
-		if _, selErr := cmuxLiveRun(path, 5*time.Second, "select-workspace", "--workspace", beforeSelected); selErr != nil {
+		if _, selErr := cmuxLiveRun(path, cmuxLiveInspectTimeout, "select-workspace", "--workspace", beforeSelected); selErr != nil {
 			t.Errorf("cleanup restore selected %s: %v", beforeSelected, selErr)
 		}
 	})
@@ -85,7 +96,7 @@ func TestCmuxLiveDiscoverProbe(t *testing.T) {
 	if !strings.HasPrefix(strings.TrimSpace(ack), "OK workspace:") {
 		t.Fatalf("new-workspace ack = %q, want OK workspace:", ack)
 	}
-	listedRaw, err := cmuxLiveRun(path, 5*time.Second, "--id-format", "uuids", "--json", "list-workspaces")
+	listedRaw, err := cmuxLiveRun(path, cmuxLiveInspectTimeout, "--id-format", "uuids", "--json", "list-workspaces")
 	if err != nil {
 		t.Fatalf("list-workspaces after create: %s", strings.TrimSpace(listedRaw+": "+err.Error()))
 	}
@@ -187,7 +198,7 @@ func cmuxLiveSelected(records []cmuxLiveWorkspace) string {
 }
 
 func cmuxLiveTerminalSurface(path, workspaceID string) (string, error) {
-	raw, err := cmuxLiveRun(path, 5*time.Second, "--id-format", "uuids", "--json", "list-panes", "--workspace", workspaceID)
+	raw, err := cmuxLiveRun(path, cmuxLiveInspectTimeout, "--id-format", "uuids", "--json", "list-panes", "--workspace", workspaceID)
 	if err != nil {
 		return "", err
 	}
@@ -200,7 +211,7 @@ func cmuxLiveTerminalSurface(path, workspaceID string) (string, error) {
 		return "", err
 	}
 	for _, pane := range panes.Panes {
-		surfRaw, surfErr := cmuxLiveRun(path, 5*time.Second, "--id-format", "uuids", "--json", "list-pane-surfaces", "--workspace", workspaceID, "--pane", pane.ID)
+		surfRaw, surfErr := cmuxLiveRun(path, cmuxLiveInspectTimeout, "--id-format", "uuids", "--json", "list-pane-surfaces", "--workspace", workspaceID, "--pane", pane.ID)
 		if surfErr != nil {
 			return "", surfErr
 		}
@@ -228,6 +239,32 @@ func cmuxLiveRun(path string, timeout time.Duration, args ...string) (string, er
 	cmd := exec.CommandContext(ctx, path, args...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+func cmuxLiveSocketDenied(output string, err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(output + "\n" + err.Error()))
+	for _, needle := range []string{"operation not permitted", "permission denied", "access denied"} {
+		if strings.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCmuxLiveSocketDeniedClassification(t *testing.T) {
+	denied := errors.New("cmux: Operation not permitted")
+	if !cmuxLiveSocketDenied("connect: operation not permitted", denied) {
+		t.Fatal("access-denied text must skip")
+	}
+	if cmuxLiveSocketDenied("", errors.New("signal: killed")) {
+		t.Fatal("precheck timeout/kill must not skip when LIVE=1")
+	}
+	if cmuxLiveSocketDenied("", context.DeadlineExceeded) {
+		t.Fatal("deadline exceeded must not skip when LIVE=1")
+	}
 }
 
 func containsString(ids []string, want string) bool {
