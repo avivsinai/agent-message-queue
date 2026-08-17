@@ -2,11 +2,13 @@
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+# GoReleaser {{.Version}} is bare semver; strip one leading v from VERSION.
+EMBED_VERSION := $(patsubst v%,%,$(VERSION))
 GOLANGCI_LINT_CACHE ?= $(CURDIR)/.golangci-cache
 
 build:
-	go build -ldflags "-X main.version=$(VERSION)" -o amq ./cmd/amq
-	go build -ldflags "-X main.version=$(VERSION)" -o amq-keepalive ./cmd/amq-keepalive
+	go build -ldflags "-X main.version=$(EMBED_VERSION)" -o amq ./cmd/amq
+	go build -ldflags "-X main.version=$(EMBED_VERSION)" -o amq-keepalive ./cmd/amq-keepalive
 
 test:
 	go test ./...

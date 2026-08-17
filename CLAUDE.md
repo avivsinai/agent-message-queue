@@ -20,6 +20,8 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
 - Keep one version across `CHANGELOG.md`, `.release-please-manifest.json`, and
   skill/plugin metadata. After the release PR merges, `release.yml` validates
   that commit, creates the tag, and publishes GitHub and Homebrew artifacts.
+- `make build` and GoReleaser embed the same bare semver (for example `0.63.0`,
+  not `v0.63.0`); the Makefile strips one leading `v` from `VERSION`.
 - PR titles use `type(scope): description`. Squash merge makes the title the
   conventional commit on `main`. Use `BEGIN_COMMIT_OVERRIDE` in the PR body,
   or edit the release PR, when release notes need multiple entries. Each entry

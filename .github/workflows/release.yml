@@ -81,8 +81,8 @@ jobs:
         run: VERSION=${{ needs.prepare.outputs.tag }} make build
       - name: Check embedded version
         run: |
-          ./amq version | grep -Fx "${{ needs.prepare.outputs.tag }}"
-          ./amq-keepalive --version | grep -Fx "${{ needs.prepare.outputs.tag }}"
+          ./amq version | grep -Fx "${{ needs.prepare.outputs.version }}"
+          ./amq-keepalive --version | grep -Fx "${{ needs.prepare.outputs.version }}"
 
   release:
     needs: [prepare, verify]

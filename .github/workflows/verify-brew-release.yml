@@ -123,16 +123,9 @@ jobs:
       # Formula push and `brew update` can lag a few minutes behind the
       # GitHub release, so poll instead of failing on the first mismatch.
       #
-      # GoReleaser's ldflags use its own `.Version` template variable, which
-      # strips the leading "v" from the git tag (confirmed against the real
-      # v0.62.0 release: its asset filenames and the downloaded binary both
-      # print "0.62.0", not "v0.62.0"). release.yml's own "Check embedded
-      # version" step compares WITH the "v" prefix, but that checks a
-      # separate `make build` artifact whose Makefile ldflags pass the tag
-      # through verbatim — not the GoReleaser-built binary Homebrew actually
-      # installs. So the tag (with "v") stays the identity used for the
-      # head_sha binding above, but the installed binary's version never
-      # carries one.
+      # GoReleaser {{.Version}} and `make build` both embed bare semver
+      # (the Makefile strips one leading v from VERSION). Compare the
+      # Homebrew-installed binary to the tag with that prefix stripped.
       - name: Install amq, tolerating tap propagation lag
         env:
           EXPECTED_TAG: ${{ needs.gate.outputs.tag }}
