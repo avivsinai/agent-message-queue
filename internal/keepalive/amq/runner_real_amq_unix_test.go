@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,17 +28,75 @@ import (
 // becomes ready, mirroring the real-binary E2E pattern in
 // internal/cli/wake_p0_golden_abi_unix_test.go and wake_restart_e2e_unix_test.go.
 
+const (
+	realAMQBinaryBuildDirPrefix = "amq-keepalive-real-wake-bin-"
+	realAMQBinaryStaleAge       = time.Hour
+)
+
+var realAMQBinaryBuildDir string
+
+func TestMain(m *testing.M) {
+	sweepStaleRealAMQBinaryBuildDirs(os.TempDir(), time.Now(), os.Stderr)
+	code, err := withRealAMQBinaryBuildDir("", func(dir string) int {
+		realAMQBinaryBuildDir = dir
+		return m.Run()
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "amq keepalive test binary cleanup: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(code)
+}
+
+func sweepStaleRealAMQBinaryBuildDirs(tempRoot string, now time.Time, diagnostic io.Writer) {
+	entries, err := os.ReadDir(tempRoot)
+	if err != nil {
+		_, _ = fmt.Fprintf(diagnostic, "inspect stale real amq binary build directories: %v\n", err)
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), realAMQBinaryBuildDirPrefix) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			_, _ = fmt.Fprintf(diagnostic, "inspect stale real amq binary build directory %q: %v\n", entry.Name(), err)
+			continue
+		}
+		if now.Sub(info.ModTime()) < realAMQBinaryStaleAge {
+			continue
+		}
+		path := filepath.Join(tempRoot, entry.Name())
+		if err := os.RemoveAll(path); err != nil {
+			_, _ = fmt.Fprintf(diagnostic, "remove stale real amq binary build directory %q: %v\n", path, err)
+		}
+	}
+}
+
+func withRealAMQBinaryBuildDir(tempRoot string, run func(string) int) (code int, retErr error) {
+	dir, err := os.MkdirTemp(tempRoot, realAMQBinaryBuildDirPrefix)
+	if err != nil {
+		return 1, fmt.Errorf("create real amq binary build dir: %w", err)
+	}
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			code = 1
+			retErr = fmt.Errorf("remove real amq binary build dir %q: %w", dir, err)
+		}
+	}()
+	return run(dir), nil
+}
+
 var buildRealAMQBinaryOnce = sync.OnceValues(func() (string, error) {
 	_, testFile, _, ok := runtime.Caller(0)
 	if !ok {
 		return "", fmt.Errorf("resolve real amq test source path")
 	}
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "..", "..", ".."))
-	dir, err := os.MkdirTemp("", "amq-keepalive-real-wake-bin-")
-	if err != nil {
-		return "", fmt.Errorf("create real amq binary build dir: %w", err)
+	if realAMQBinaryBuildDir == "" {
+		return "", errors.New("real amq binary build directory is not initialized")
 	}
-	binary := filepath.Join(dir, "amq")
+	binary := filepath.Join(realAMQBinaryBuildDir, "amq")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", binary, "./cmd/amq")
@@ -52,6 +111,60 @@ var buildRealAMQBinaryOnce = sync.OnceValues(func() (string, error) {
 	}
 	return binary, nil
 })
+
+func TestRealAMQBinaryBuildDirIsRemoved(t *testing.T) {
+	tempRoot := t.TempDir()
+	var buildDir string
+	code, err := withRealAMQBinaryBuildDir(tempRoot, func(dir string) int {
+		buildDir = dir
+		if err := os.WriteFile(filepath.Join(dir, "amq"), []byte("fixture"), 0o700); err != nil {
+			t.Fatalf("write fixture binary: %v", err)
+		}
+		return 23
+	})
+	if err != nil || code != 23 {
+		t.Fatalf("withRealAMQBinaryBuildDir code=%d err=%v", code, err)
+	}
+	if _, err := os.Stat(buildDir); !os.IsNotExist(err) {
+		t.Fatalf("build directory still exists after run: %v", err)
+	}
+	entries, err := os.ReadDir(tempRoot)
+	if err != nil {
+		t.Fatalf("read temp root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temp root contains leftovers: %#v", entries)
+	}
+}
+
+func TestSweepStaleRealAMQBinaryBuildDirsPreservesFreshRun(t *testing.T) {
+	tempRoot := t.TempDir()
+	stale := filepath.Join(tempRoot, realAMQBinaryBuildDirPrefix+"stale")
+	fresh := filepath.Join(tempRoot, realAMQBinaryBuildDirPrefix+"fresh")
+	for _, dir := range []string{stale, fresh} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("Mkdir %s: %v", dir, err)
+		}
+	}
+	now := time.Now()
+	old := now.Add(-2 * realAMQBinaryStaleAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatalf("age stale directory: %v", err)
+	}
+
+	var diagnostic strings.Builder
+	sweepStaleRealAMQBinaryBuildDirs(tempRoot, now, &diagnostic)
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale directory still exists: %v", err)
+	}
+	if info, err := os.Stat(fresh); err != nil || !info.IsDir() {
+		t.Fatalf("fresh directory was removed: info=%v err=%v", info, err)
+	}
+	if diagnostic.Len() != 0 {
+		t.Fatalf("unexpected sweep diagnostic: %s", diagnostic.String())
+	}
+}
 
 func realAMQBinaryForTest(t *testing.T) string {
 	t.Helper()
