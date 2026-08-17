@@ -416,33 +416,17 @@ func TestTerminateWakePidfdKillsChildThatIgnoresSIGTERM(t *testing.T) {
 }
 
 func TestTerminateWakePidfdReportsRetiredWhenSIGKILLExitIsDelayed(t *testing.T) {
-	oldGrace := wakeTerminateGrace
-	oldConfirm := wakeTerminateKillConfirm
-	wakeTerminateGrace = 50 * time.Millisecond
-	wakeTerminateKillConfirm = 2 * time.Second
-	t.Cleanup(func() {
-		wakeTerminateGrace = oldGrace
-		wakeTerminateKillConfirm = oldConfirm
-	})
 	var timeouts []time.Duration
 	stubLinuxPidfd(t,
 		func(int, int) (int, error) { return 7, nil },
 		func(int, unix.Signal, *unix.Siginfo, int) error { return nil },
 		func(_ int, timeout time.Duration) (bool, error) {
 			timeouts = append(timeouts, timeout)
-			if timeout <= wakeTerminateGrace {
-				return false, nil
-			}
-			time.Sleep(500 * time.Millisecond)
-			return true, nil
+			return timeout == wakeTerminateKillConfirm, nil
 		},
 	)
-	start := time.Now()
 	if err := terminateWakePidfd(7); err != nil {
 		t.Fatalf("delayed SIGKILL exit should retire: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed < 500*time.Millisecond {
-		t.Fatalf("retired in %s, want to wait for the delayed SIGKILL exit", elapsed)
 	}
 	if len(timeouts) != 2 || timeouts[0] != wakeTerminateGrace || timeouts[1] != wakeTerminateKillConfirm {
 		t.Fatalf("pidfd poll timeouts = %v, want [%s %s]", timeouts, wakeTerminateGrace, wakeTerminateKillConfirm)
@@ -450,26 +434,27 @@ func TestTerminateWakePidfdReportsRetiredWhenSIGKILLExitIsDelayed(t *testing.T) 
 }
 
 func TestTerminateWakePidfdRefusesImmortalWithinKillConfirm(t *testing.T) {
-	oldGrace := wakeTerminateGrace
-	oldConfirm := wakeTerminateKillConfirm
-	wakeTerminateGrace = 20 * time.Millisecond
-	wakeTerminateKillConfirm = 200 * time.Millisecond
-	t.Cleanup(func() {
-		wakeTerminateGrace = oldGrace
-		wakeTerminateKillConfirm = oldConfirm
-	})
+	var timeouts []time.Duration
+	killPollReportedAlive := false
 	stubLinuxPidfd(t,
 		func(int, int) (int, error) { return 7, nil },
 		func(int, unix.Signal, *unix.Siginfo, int) error { return nil },
-		func(int, time.Duration) (bool, error) { return false, nil },
+		func(_ int, timeout time.Duration) (bool, error) {
+			timeouts = append(timeouts, timeout)
+			if timeout == wakeTerminateKillConfirm {
+				killPollReportedAlive = true
+			}
+			return false, nil
+		},
 	)
-	start := time.Now()
 	err := terminateWakePidfd(7)
-	elapsed := time.Since(start)
 	if err == nil || !strings.Contains(err.Error(), "still alive after SIGKILL") {
 		t.Fatalf("immortal process error = %v, want SIGKILL confirmation refusal", err)
 	}
-	if elapsed < 200*time.Millisecond || elapsed > time.Second {
-		t.Fatalf("immortal refusal took %s, want within the kill-confirm bound", elapsed)
+	if !killPollReportedAlive {
+		t.Fatal("refused before the SIGKILL poll reported not-exited")
+	}
+	if len(timeouts) != 2 || timeouts[0] != wakeTerminateGrace || timeouts[1] != wakeTerminateKillConfirm {
+		t.Fatalf("pidfd poll timeouts = %v, want [%s %s]", timeouts, wakeTerminateGrace, wakeTerminateKillConfirm)
 	}
 }
