@@ -342,20 +342,27 @@ func hermeticTmuxProcesses(socketDir, sessionRoot, handle string) ([]hermeticTmu
 	return processes, serverFound, wake.Exists, nil
 }
 
+const hermeticWakeLockPollInterval = 10 * time.Millisecond
+
 func waitForHermeticWakeLock(sessionRoot, handle string, timeout time.Duration) (wakeLockInspection, error) {
-	deadline := time.Now().Add(timeout)
+	return waitForHermeticWakeLockNow(sessionRoot, handle, timeout, time.Now, time.Sleep)
+}
+
+func waitForHermeticWakeLockNow(sessionRoot, handle string, timeout time.Duration, now func() time.Time, sleep func(time.Duration)) (wakeLockInspection, error) {
+	deadline := now().Add(timeout)
+	var wake wakeLockInspection
 	for {
-		wake := inspectWakeLock(sessionRoot, handle)
-		if wake.Exists {
-			if wake.PID <= 0 {
-				return wake, fmt.Errorf("hermetic wake lock has invalid pid %d", wake.PID)
-			}
+		wake = inspectWakeLock(sessionRoot, handle)
+		if wake.Exists && wake.PID > 0 {
 			return wake, nil
 		}
-		if time.Now().After(deadline) {
+		if now().After(deadline) {
+			if wake.Exists && wake.PID <= 0 {
+				return wake, fmt.Errorf("hermetic wake lock has invalid pid %d", wake.PID)
+			}
 			return wake, fmt.Errorf("hermetic tmux pane had no wake lock for %s", handle)
 		}
-		time.Sleep(10 * time.Millisecond)
+		sleep(hermeticWakeLockPollInterval)
 	}
 }
 
@@ -394,10 +401,18 @@ func TestWaitForHermeticTmuxProcessesReportsLeak(t *testing.T) {
 }
 
 func TestWaitForHermeticWakeLockReportsMissing(t *testing.T) {
-	_, err := waitForHermeticWakeLock(t.TempDir(), "claude", 20*time.Millisecond)
+	start := time.Date(2026, 8, 17, 19, 0, 0, 0, time.UTC)
+	now := start
+	timeout := 20 * time.Millisecond
+	_, err := waitForHermeticWakeLockNow(t.TempDir(), "claude", timeout, func() time.Time {
+		return now
+	}, func(d time.Duration) {
+		now = now.Add(d)
+	})
 	if err == nil || !strings.Contains(err.Error(), "hermetic tmux pane had no wake lock for claude") {
 		t.Fatalf("missing wake lock error = %v", err)
 	}
+	assertHermeticWaitBoundedByTimeout(t, start, now, timeout)
 }
 
 func TestWaitForHermeticWakeLockSeesLateLock(t *testing.T) {
@@ -422,5 +437,72 @@ func TestWaitForHermeticWakeLockSeesLateLock(t *testing.T) {
 	}
 	if out.wake.PID != os.Getpid() {
 		t.Fatalf("late wake lock pid = %d, want %d", out.wake.PID, os.Getpid())
+	}
+}
+
+func TestWaitForHermeticWakeLockDoesNotAcceptTornPidZero(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		wake wakeLockInspection
+		err  error
+	}
+	got := make(chan result, 1)
+	go func() {
+		wake, err := waitForHermeticWakeLock(root, "claude", time.Second)
+		got <- result{wake: wake, err: err}
+	}()
+	lockPath := filepath.Join(fsq.AgentBase(root, "claude"), ".wake.lock")
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatalf("write torn wake lock: %v", err)
+	}
+	select {
+	case out := <-got:
+		t.Fatalf("waiter returned during torn write: pid=%d err=%v", out.wake.PID, out.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	writeWakeLockForTest(t, root, "claude", wakeLock{PID: os.Getpid()})
+	out := <-got
+	if out.err != nil {
+		t.Fatal(out.err)
+	}
+	if out.wake.PID != os.Getpid() {
+		t.Fatalf("completed wake lock pid = %d, want %d", out.wake.PID, os.Getpid())
+	}
+}
+
+func TestWaitForHermeticWakeLockReportsInvalidPidAfterTimeout(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(fsq.AgentBase(root, "claude"), ".wake.lock")
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatalf("write torn wake lock: %v", err)
+	}
+	start := time.Date(2026, 8, 17, 19, 0, 0, 0, time.UTC)
+	now := start
+	timeout := 30 * time.Millisecond
+	wake, err := waitForHermeticWakeLockNow(root, "claude", timeout, func() time.Time {
+		return now
+	}, func(d time.Duration) {
+		now = now.Add(d)
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid pid 0") {
+		t.Fatalf("torn-lock timeout error = %v pid=%d, want invalid pid 0", err, wake.PID)
+	}
+	assertHermeticWaitBoundedByTimeout(t, start, now, timeout)
+}
+
+func assertHermeticWaitBoundedByTimeout(t *testing.T, start, stopped time.Time, timeout time.Duration) {
+	t.Helper()
+	elapsed := stopped.Sub(start)
+	if elapsed <= timeout {
+		t.Fatalf("waiter stopped at %s, want after timeout %s", elapsed, timeout)
+	}
+	if elapsed > timeout+hermeticWakeLockPollInterval {
+		t.Fatalf("waiter stopped at %s, want at most timeout+poll %s", elapsed, timeout+hermeticWakeLockPollInterval)
 	}
 }
