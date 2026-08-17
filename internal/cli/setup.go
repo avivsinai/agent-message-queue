@@ -89,7 +89,10 @@ var (
 			launch.NewCursorAdapter(launch.CursorProvider),
 		}
 	}
-	setupLookPath   = exec.LookPath
+	setupLookPath      = exec.LookPath
+	setupCmuxAvailable = func() bool {
+		return launch.NewCmuxBackend("").Detect().Available
+	}
 	setupIsTerminal = func() bool {
 		return term.IsTerminal(int(os.Stdin.Fd()))
 	}
@@ -607,11 +610,19 @@ func chooseSetupLaunchers(options setupOptions, detected []string, existing laun
 func detectSetupLaunchers() []string {
 	result := make([]string, 0, 4)
 	for _, name := range []string{launch.LauncherCMux, launch.LauncherGhostty, launch.LauncherTMux} {
-		if _, err := setupLookPath(name); err == nil {
+		if setupLauncherAvailable(name) {
 			result = append(result, name)
 		}
 	}
 	return append(result, launch.LauncherCommands)
+}
+
+func setupLauncherAvailable(name string) bool {
+	if name == launch.LauncherCMux {
+		return setupCmuxAvailable()
+	}
+	_, err := setupLookPath(name)
+	return err == nil
 }
 
 func setupPromptLine(reader *bufio.Reader, label, defaultValue string) (string, error) {

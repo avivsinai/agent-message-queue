@@ -49,12 +49,7 @@ func lifecycleDependencies() internallaunch.LifecycleDependencies {
 	return internallaunch.LifecycleDependencies{Backends: lifecycleBackends()}
 }
 
-var lifecycleBackends = func() map[string]internallaunch.Backend {
-	return map[string]internallaunch.Backend{
-		internallaunch.LauncherCommands: internallaunch.Commands{},
-		internallaunch.LauncherTMux:     internallaunch.NewTmuxBackend("tmux"),
-	}
-}
+var lifecycleBackends = internallaunch.DefaultBackends
 
 func lifecycleResult(result internallaunch.LifecycleResult) LifecycleResultV1 {
 	public := LifecycleResultV1{

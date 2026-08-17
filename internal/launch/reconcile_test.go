@@ -542,6 +542,56 @@ func TestReconcileInstanceReuseNeverClosesUnrelatedResource(t *testing.T) {
 	}
 }
 
+func TestReconcileAutoSelectsPreferenceWhenNotInsideCmux(t *testing.T) {
+	tmux := &reconcileBackend{name: LauncherTMux, inspect: InspectAbsent}
+	cmux := &reconcileBackend{name: LauncherCMux, inspect: InspectAbsent}
+	req := reconcileFixture(t, tmux)
+	req.Backends[LauncherCMux] = cmux
+	req.Launcher = LauncherAuto
+	req.Preferences = []string{LauncherTMux, LauncherCommands}
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Backend != LauncherTMux || tmux.creates != 1 || cmux.creates != 0 {
+		t.Fatalf("ping-live without inside-cmux selected %#v tmux=%d cmux=%d", result, tmux.creates, cmux.creates)
+	}
+}
+
+func TestReconcileAutoInsideCmuxPrependsCmux(t *testing.T) {
+	tmux := &reconcileBackend{name: LauncherTMux, inspect: InspectAbsent}
+	cmux := &reconcileBackend{name: LauncherCMux, inspect: InspectAbsent}
+	req := reconcileFixture(t, tmux)
+	req.Backends[LauncherCMux] = cmux
+	req.Launcher = LauncherAuto
+	req.Preferences = []string{LauncherTMux, LauncherCommands}
+	t.Setenv("CMUX_SURFACE_ID", "F901D722-6789-4BBB-9818-C4E97F20BEB3")
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Backend != LauncherCMux || cmux.creates != 1 || tmux.creates != 0 {
+		t.Fatalf("inside-cmux selected %#v tmux=%d cmux=%d", result, tmux.creates, cmux.creates)
+	}
+}
+
+func TestReconcileExplicitLauncherWinsInsideCmux(t *testing.T) {
+	tmux := &reconcileBackend{name: LauncherTMux, inspect: InspectAbsent}
+	cmux := &reconcileBackend{name: LauncherCMux, inspect: InspectAbsent}
+	req := reconcileFixture(t, tmux)
+	req.Backends[LauncherCMux] = cmux
+	req.Launcher = LauncherTMux
+	req.Preferences = []string{LauncherCMux, LauncherTMux}
+	t.Setenv("CMUX_SURFACE_ID", "F901D722-6789-4BBB-9818-C4E97F20BEB3")
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Backend != LauncherTMux || tmux.creates != 1 || cmux.creates != 0 {
+		t.Fatalf("explicit launcher = %#v tmux=%d cmux=%d", result, tmux.creates, cmux.creates)
+	}
+}
+
 func TestReconcileAbsentBindingAutoSelectsPreferredBackend(t *testing.T) {
 	old := &reconcileBackend{name: "old", inspect: InspectAbsent}
 	preferred := &reconcileBackend{name: "preferred", inspect: InspectAbsent}

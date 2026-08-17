@@ -529,8 +529,9 @@ func TestSetupNoGitignorePreservesExistingBytes(t *testing.T) {
 }
 
 var (
-	execLookPathForSetup = setupLookPath
-	setupTerminalDefault = setupIsTerminal
+	execLookPathForSetup      = setupLookPath
+	setupCmuxAvailableDefault = setupCmuxAvailable
+	setupTerminalDefault      = setupIsTerminal
 )
 
 func setupProjectFixture(t *testing.T, adapters ...string) string {
@@ -553,6 +554,7 @@ func setupProjectFixture(t *testing.T, adapters ...string) string {
 		return result
 	}
 	setupLookPath = func(string) (string, error) { return "", fs.ErrNotExist }
+	setupCmuxAvailable = func() bool { return false }
 	setupCommitStepHook = nil
 	t.Cleanup(func() {
 		_ = os.Chdir(oldCWD)
@@ -564,6 +566,7 @@ func setupProjectFixture(t *testing.T, adapters ...string) string {
 			}
 		}
 		setupLookPath = execLookPathForSetup
+		setupCmuxAvailable = setupCmuxAvailableDefault
 		setupIsTerminal = setupTerminalDefault
 		setupCommitStepHook = nil
 	})
@@ -635,6 +638,48 @@ func setupTreeDigest(t *testing.T, root string) [32]byte {
 	var result [32]byte
 	copy(result[:], hash.Sum(nil))
 	return result
+}
+
+func TestSetupCmuxAvailableUsesPingNotLookPath(t *testing.T) {
+	project := setupProjectFixture(t, "claude")
+	setupLookPath = func(name string) (string, error) {
+		if name == launch.LauncherCMux {
+			return "/usr/bin/cmux", nil
+		}
+		return "", fs.ErrNotExist
+	}
+	setupCmuxAvailable = func() bool { return false }
+	lookPathOnly, err := captureEnvStdout(t, func() error {
+		return runSetup([]string{"--preview", "--json", "--agents", "claude", "--default-session", "collab", "--launcher-preference", "commands"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(setupPreviewLaunchers(t, lookPathOnly), launch.LauncherCMux) {
+		t.Fatalf("LookPath-only cmux was treated as available: %s", lookPathOnly)
+	}
+
+	setupLookPath = func(string) (string, error) { return "", fs.ErrNotExist }
+	setupCmuxAvailable = func() bool { return true }
+	pingOnly, err := captureEnvStdout(t, func() error {
+		return runSetup([]string{"--preview", "--json", "--agents", "claude", "--default-session", "collab", "--launcher-preference", "commands"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(setupPreviewLaunchers(t, pingOnly), launch.LauncherCMux) {
+		t.Fatalf("ping-available bundle cmux was omitted: %s", pingOnly)
+	}
+	_ = project
+}
+
+func setupPreviewLaunchers(t *testing.T, raw string) []string {
+	t.Helper()
+	var result setupResult
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatalf("decode setup preview: %v\n%s", err, raw)
+	}
+	return result.Preview.AvailableLaunchers
 }
 
 func validateSetupMailbox(base, agent string) error {

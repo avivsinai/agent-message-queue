@@ -34,10 +34,7 @@ var (
 	}
 	launchAdapters = defaultLaunchAdapters
 	launchBackends = func() map[string]launch.Backend {
-		return map[string]launch.Backend{
-			launch.LauncherCommands: launch.Commands{},
-			launch.LauncherTMux:     launch.NewTmuxBackend("tmux"),
-		}
+		return launch.DefaultBackends()
 	}
 	launchHostname = os.Hostname
 )

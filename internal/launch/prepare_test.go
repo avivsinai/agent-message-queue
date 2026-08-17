@@ -212,6 +212,49 @@ func TestTmuxDetectDoesNotMutateBackend(t *testing.T) {
 	}
 }
 
+func TestPrepareAutoFollowsPreferenceOutsideCmux(t *testing.T) {
+	fixture := newInternalPrepareFixture(t)
+	fixture.request.Launcher = LauncherAuto
+	tmux := &prepareTestBackend{}
+	cmux := &prepareTestBackend{}
+	result, err := Prepare(context.Background(), fixture.request, PrepareDependencies{
+		Backends:    map[string]Backend{LauncherCMux: cmux, LauncherTMux: tmux},
+		Preferences: []string{LauncherTMux, LauncherCommands},
+		AdapterFor: func(provider, executable string) HarnessAdapter {
+			return prepareTestAdapter{provider: provider}
+		},
+		HostIdentity: "host:test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Backend != LauncherTMux {
+		t.Fatalf("outside backend = %q", result.Backend)
+	}
+}
+
+func TestPrepareAutoInsideCmuxPrependsCmux(t *testing.T) {
+	fixture := newInternalPrepareFixture(t)
+	fixture.request.Launcher = LauncherAuto
+	tmux := &prepareTestBackend{}
+	cmux := &prepareTestBackend{}
+	t.Setenv("CMUX_SURFACE_ID", "F901D722-6789-4BBB-9818-C4E97F20BEB3")
+	result, err := Prepare(context.Background(), fixture.request, PrepareDependencies{
+		Backends:    map[string]Backend{LauncherCMux: cmux, LauncherTMux: tmux},
+		Preferences: []string{LauncherTMux, LauncherCommands},
+		AdapterFor: func(provider, executable string) HarnessAdapter {
+			return prepareTestAdapter{provider: provider}
+		},
+		HostIdentity: "host:test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Backend != LauncherCMux {
+		t.Fatalf("inside-cmux backend = %q", result.Backend)
+	}
+}
+
 type internalPrepareFixture struct {
 	root        string
 	projectRoot string
