@@ -1152,16 +1152,3 @@ func redactCmuxArgs(args []string) []string {
 	}
 	return out
 }
-
-func prependInsideCmuxPreference(prefs []string) []string {
-	if strings.TrimSpace(os.Getenv("CMUX_SURFACE_ID")) == "" {
-		return prefs
-	}
-	out := []string{LauncherCMux}
-	for _, name := range prefs {
-		if name != LauncherCMux {
-			out = append(out, name)
-		}
-	}
-	return out
-}

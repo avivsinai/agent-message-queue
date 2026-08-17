@@ -524,7 +524,7 @@ func selectPrepareBackend(requested string, binding *BindingRecord, dependencies
 		}
 	}
 	if selected == LauncherAuto {
-		for _, name := range prependInsideCmuxPreference(preferences) {
+		for _, name := range prependInsideSurfacePreference(preferences) {
 			backend := dependencies.Backends[name]
 			if backend == nil {
 				continue

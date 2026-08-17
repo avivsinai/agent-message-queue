@@ -1051,7 +1051,7 @@ func chooseReconcileBackend(request ReconcileRequest, binding BindingRecord, has
 }
 
 func selectPreferredBackend(request ReconcileRequest) (string, Backend, DetectResult, bool, error) {
-	for _, name := range prependInsideCmuxPreference(request.Preferences) {
+	for _, name := range prependInsideSurfacePreference(request.Preferences) {
 		backend := request.Backends[name]
 		if backend == nil {
 			continue

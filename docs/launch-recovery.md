@@ -27,7 +27,9 @@ On the next launch, AMQ holds the session lease and follows these rules:
 
 `Create` failures preserve the journal unless the backend returns the typed
 definite-pre-create error that proves no resource was made. Partial creation is
-never adoptable.
+never adoptable. A Ghostty crash between window creation and binding persistence
+leaves that window for manual close; AMQ never treats the gap as proven absence
+and never creates a duplicate.
 
 Managed cmux Create puts the new workspace in the app-wide active window and
 does not retarget it.

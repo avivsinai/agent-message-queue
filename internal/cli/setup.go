@@ -89,9 +89,12 @@ var (
 			launch.NewCursorAdapter(launch.CursorProvider),
 		}
 	}
-	setupLookPath      = exec.LookPath
-	setupCmuxAvailable = func() bool {
+	setupLookPath         = exec.LookPath
+	setupCmuxAvailable    = func() bool {
 		return launch.NewCmuxBackend("").Detect().Available
+	}
+	setupGhosttyAvailable = func() bool {
+		return launch.NewGhosttyBackend().Detect().Available
 	}
 	setupIsTerminal = func() bool {
 		return term.IsTerminal(int(os.Stdin.Fd()))
@@ -618,8 +621,11 @@ func detectSetupLaunchers() []string {
 }
 
 func setupLauncherAvailable(name string) bool {
-	if name == launch.LauncherCMux {
+	switch name {
+	case launch.LauncherCMux:
 		return setupCmuxAvailable()
+	case launch.LauncherGhostty:
+		return setupGhosttyAvailable()
 	}
 	_, err := setupLookPath(name)
 	return err == nil
