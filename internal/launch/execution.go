@@ -450,7 +450,7 @@ func RevertExecution(root *fsq.DeliveryRoot, handle, nonce string) (returnErr er
 			return loadErr
 		}
 		if record.State == CaptureReady && record.LaunchNonce == nonce && record.ExecutionEvidence != nil && record.ExecutionEvidence.LaunchNonce == nonce {
-			record.State, record.Identity, record.ExecutionEvidence = CapturePending, ConversationIdentity{}, nil
+			record.State, record.Identity, record.ExecutionEvidence, record.EvidenceRefs = CapturePending, ConversationIdentity{}, nil, nil
 			record.Reason = CaptureReason("spawn_failed")
 			if err := WriteConversation(root, lease, record); err != nil {
 				return err

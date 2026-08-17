@@ -49,6 +49,7 @@ type ApplyResult struct {
 	Observations    []PrepareObservation
 	Commands        []EmittedCommand
 	RequiredActions []PrepareRequiredAction
+	Evidence        []EvidenceRef
 }
 
 var afterApplySessionPublishedForTest func()
@@ -234,6 +235,10 @@ func applyUnderAuthority(ctx context.Context, request ApplyRequest, dependencies
 	result.RequiredActions = nil
 	result.Commands = slices.Clone(reconciled.Commands)
 	result.Backend, result.TrustDigest = reconciled.Backend, reconciled.SemanticDigest
+	result.Evidence, err = CollectEvidenceRefs(root, handles)
+	if err != nil {
+		return ApplyResult{}, err
+	}
 	if reconciled.AggregateCode == 0 && reconciled.Outcome != "" {
 		result.Outcome = ApplyOutcomeApplied
 		result.ReasonCode = ""

@@ -355,8 +355,11 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		if journalActive && journal.Phase == JournalCreated {
 			candidate = journal.Binding
 		} else {
-			candidate, err = finalizeCreatedState(create, backendName, detect, nonce, planned, &result)
+			candidate, err = finalizeCreatedState(request.Root, lease, create, backendName, detect, nonce, planned, &result)
 			if err != nil {
+				return result, err
+			}
+			if err := callCrashHook(request.CrashHook, "evidence_written"); err != nil {
 				return result, err
 			}
 		}
@@ -566,7 +569,7 @@ func revalidateAdoption(request ReconcileRequest, backend Backend, journal Launc
 	return nil
 }
 
-func finalizeCreatedState(create CreateResult, backendName string, detect DetectResult, nonce string, planned []plannedAgent, result *ReconcileResult) (*BindingRecord, error) {
+func finalizeCreatedState(root *fsq.DeliveryRoot, lease *Lease, create CreateResult, backendName string, detect DetectResult, nonce string, planned []plannedAgent, result *ReconcileResult) (*BindingRecord, error) {
 	created := create.Binding
 	if created.Backend != backendName || created.Profile != detect.Profile.Identity() || created.LaunchNonce != nonce ||
 		created.HostIdentity != detect.HostIdentity || created.InstanceIdentity != detect.InstanceIdentity {
@@ -589,11 +592,19 @@ func finalizeCreatedState(create CreateResult, backendName string, detect Detect
 			agent.record.Identity = ConversationIdentity{Provider: agent.adapter.Name(), ID: agent.plan.ConversationID}
 		}
 		if agent.plan.AdapterMode == AdapterModeCapture && agent.write {
+			captureEvidence := create.CaptureEvidence[agent.plan.Handle]
 			capture := agent.adapter.CaptureIdentity(CaptureRequest{
 				LaunchNonce: agent.plan.LaunchNonce, ExpectedProviderVersion: agent.providerVersion,
-				Final: true, Evidence: create.CaptureEvidence[agent.plan.Handle],
+				Final: true, Evidence: captureEvidence,
 			})
 			agent.record.State, agent.record.Identity, agent.record.Reason = capture.State, capture.Identity, capture.Reason
+			if capture.CanPersist() {
+				refs, evidenceErr := persistProviderCaptureEvidence(root, lease, agent.plan.Handle, captureEvidence)
+				if evidenceErr != nil {
+					return nil, evidenceErr
+				}
+				agent.record.EvidenceRefs = refs
+			}
 			if !capture.CanPersist() {
 				result.Agents[agent.index].Code = 6
 				result.Agents[agent.index].ConversationDisposition = DispositionDegraded

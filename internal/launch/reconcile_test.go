@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -199,6 +200,7 @@ type reconcileBackend struct {
 	createGate  chan struct{}
 	createStart chan struct{}
 	capture     bool
+	captured    *CaptureEvidence
 	invalidBind bool
 	reclaims    int
 	resourceUp  bool
@@ -247,11 +249,14 @@ func (b *reconcileBackend) Create(req CreateRequest) (CreateResult, error) {
 		result.Binding.Resources.Version = 0
 	}
 	if b.capture {
-		evidence, err := ParseCodexThreadStartedEvidence([]byte(`{"method":"thread/started","params":{"thread":{"id":"019c8a2f-2b13-7000-8000-000000000001","cliVersion":"test"}}}`), req.Plan.Agents[0].LaunchNonce, false)
-		if err != nil {
-			return CreateResult{}, err
+		if b.captured == nil {
+			evidence, err := ParseCodexThreadStartedEvidence([]byte(`{"method":"thread/started","params":{"thread":{"id":"019c8a2f-2b13-7000-8000-000000000001","cliVersion":"test"}}}`), req.Plan.Agents[0].LaunchNonce, false)
+			if err != nil {
+				return CreateResult{}, err
+			}
+			b.captured = &evidence
 		}
-		result.CaptureEvidence = map[string][]CaptureEvidence{req.Plan.Agents[0].Handle: {evidence}}
+		result.CaptureEvidence = map[string][]CaptureEvidence{req.Plan.Agents[0].Handle: {*b.captured}}
 	}
 	return result, nil
 }
@@ -297,11 +302,14 @@ func (b *reconcileBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 		result.Resources = slices.Clone(result.Binding.Resources.Resources)
 	}
 	if b.capture {
-		evidence, err := ParseCodexThreadStartedEvidence([]byte(`{"method":"thread/started","params":{"thread":{"id":"019c8a2f-2b13-7000-8000-000000000001","cliVersion":"test"}}}`), req.Journal.LaunchNonce, false)
-		if err != nil {
-			return ReclaimResult{}, err
+		if b.captured == nil {
+			evidence, err := ParseCodexThreadStartedEvidence([]byte(`{"method":"thread/started","params":{"thread":{"id":"019c8a2f-2b13-7000-8000-000000000001","cliVersion":"test"}}}`), req.Journal.LaunchNonce, false)
+			if err != nil {
+				return ReclaimResult{}, err
+			}
+			b.captured = &evidence
 		}
-		result.CaptureEvidence = map[string][]CaptureEvidence{req.Journal.Plan.Agents[0].Handle: {evidence}}
+		result.CaptureEvidence = map[string][]CaptureEvidence{req.Journal.Plan.Agents[0].Handle: {*b.captured}}
 	}
 	return result, nil
 }
@@ -990,7 +998,72 @@ func TestReconcileCaptureEvidencePersistsExactIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.State != CaptureReady || record.Identity.Provider != CodexProvider || record.Identity.ID != "019c8a2f-2b13-7000-8000-000000000001" || record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != backend.name {
+	if record.State != CaptureReady || record.Identity.Provider != CodexProvider || record.Identity.ID != "019c8a2f-2b13-7000-8000-000000000001" || record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != backend.name || len(record.EvidenceRefs) != 1 {
 		t.Fatalf("record=%#v", record)
+	}
+	evidence, ref, err := ReadEvidence(req.Root, record.EvidenceRefs[0])
+	if err != nil || evidence.Kind != EvidenceProviderCapture || ref.ID != record.EvidenceRefs[0] {
+		t.Fatalf("capture evidence = %#v %#v, %v", evidence, ref, err)
+	}
+}
+
+func TestReconcileCaptureEvidencePublicationCrashRecovery(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		name := map[bool]string{false: "verified reuse", true: "corrupt collision"}[corrupt]
+		t.Run(name, func(t *testing.T) {
+			backend := &reconcileBackend{name: "test", inspect: InspectAbsent, capture: true}
+			req := reconcileFixture(t, backend)
+			req.Config.Agents[0].Adapter = CodexProvider
+			req.Config.Agents[0].Command = []string{CodexProvider}
+			req.Adapters = map[string]HarnessAdapter{CodexProvider: reconcileAdapter{name: CodexProvider, mode: AdapterModeCapture, available: true}}
+			crash := errors.New("injected crash after evidence publication")
+			req.CrashHook = func(stage string) error {
+				if stage == "evidence_written" {
+					return crash
+				}
+				return nil
+			}
+			if _, err := Reconcile(req); !errors.Is(err, crash) {
+				t.Fatalf("crash error = %v", err)
+			}
+			journalBefore, err := LoadJournal(req.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if backend.captured == nil {
+				t.Fatal("backend did not retain capture evidence")
+			}
+			_, expectedRef, _, err := prepareEvidence(EvidenceWriteRequest{
+				Kind: EvidenceProviderCapture, Handle: "claude", ObservedAt: backend.captured.observedAt, Payload: backend.captured.payload,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if corrupt {
+				if err := os.WriteFile(req.Root.DisplayPath(filepath.Join(evidenceDirectory, evidenceFilename(expectedRef.ID))), []byte(`{"different":true}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			req.CrashHook = nil
+			result, recoveryErr := Reconcile(req)
+			if corrupt {
+				var evidenceErr *EvidenceCorruptError
+				if !errors.As(recoveryErr, &evidenceErr) {
+					t.Fatalf("corrupt collision error = %v", recoveryErr)
+				}
+				journalAfter, err := LoadJournal(req.Root)
+				if err != nil || !reflect.DeepEqual(journalAfter, journalBefore) {
+					t.Fatalf("journal changed after corrupt collision: before=%#v after=%#v err=%v", journalBefore, journalAfter, err)
+				}
+				return
+			}
+			if recoveryErr != nil || result.AggregateCode != 0 || backend.creates != 1 {
+				t.Fatalf("recovery result=%#v creates=%d err=%v", result, backend.creates, recoveryErr)
+			}
+			record, err := LoadConversation(req.Root, "claude")
+			if err != nil || !reflect.DeepEqual(record.EvidenceRefs, []string{expectedRef.ID}) {
+				t.Fatalf("recovered conversation=%#v err=%v", record, err)
+			}
+		})
 	}
 }

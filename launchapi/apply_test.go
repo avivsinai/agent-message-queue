@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	internallaunch "github.com/avivsinai/agent-message-queue/internal/launch"
@@ -96,6 +97,17 @@ func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), ".amq-session-") {
 			t.Fatalf("Apply leaked staging child %q", entry.Name())
 		}
+	}
+}
+
+func TestApplyResultMapsEvidenceRefs(t *testing.T) {
+	observed := time.Date(2026, 8, 17, 3, 4, 5, 0, time.UTC)
+	result := fromInternalApplyResult(internallaunch.ApplyResult{Evidence: []internallaunch.EvidenceRef{{
+		EvidenceVersion: 1, ID: "sha256:" + strings.Repeat("a", 64), Kind: internallaunch.EvidenceProviderCapture,
+		SHA256: "sha256:" + strings.Repeat("a", 64), ObservedAt: observed,
+	}}})
+	if len(result.Evidence) != 1 || result.Evidence[0].Kind != "provider_capture" || result.Evidence[0].ObservedAt != observed || result.Evidence[0].ID != result.Evidence[0].SHA256 {
+		t.Fatalf("public evidence mapping = %#v", result.Evidence)
 	}
 }
 

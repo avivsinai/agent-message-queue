@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 type CaptureState string
@@ -52,6 +53,8 @@ type CaptureEvidence struct {
 	conversationID  string
 	activeElsewhere bool
 	verified        bool
+	observedAt      time.Time
+	payload         []byte
 }
 
 type CaptureResult struct {
@@ -101,7 +104,7 @@ func ParseCodexThreadStartedEvidence(raw []byte, launchNonce string, activeElsew
 		source: CodexThreadStartedV2, provider: CodexProvider,
 		providerVersion: event.Params.Thread.CLIVersion, launchNonce: launchNonce,
 		conversationID: event.Params.Thread.ID, activeElsewhere: activeElsewhere,
-		verified: true,
+		verified: true, observedAt: time.Now().UTC(), payload: bytes.Clone(raw),
 	}, nil
 }
 

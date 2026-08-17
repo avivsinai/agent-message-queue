@@ -597,6 +597,27 @@ func (r *DeliveryRoot) WriteFileAtomic(dir, filename string, data []byte, perm o
 	return committedPath, nil
 }
 
+// WriteFileExclusive publishes one immutable root-relative file. It never
+// replaces an existing final name; callers that use content-addressed names
+// must treat os.ErrExist as a collision or an explicit idempotence decision.
+func (r *DeliveryRoot) WriteFileExclusive(dir, filename string, data []byte, perm os.FileMode) (string, error) {
+	if err := r.VerifyBase(); err != nil {
+		return "", err
+	}
+	if err := r.root.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	finalPath := filepath.Join(dir, filename)
+	if err := r.writeAndSync(finalPath, data, perm); err != nil {
+		return "", err
+	}
+	committedPath := r.displayPath(finalPath)
+	if err := r.syncDir(dir); err != nil {
+		return committedPath, &CommittedDurabilityError{FinalPath: committedPath, Err: err}
+	}
+	return committedPath, nil
+}
+
 // ReadFile reads a root-relative file through the pinned capability.
 func (r *DeliveryRoot) ReadFile(name string) ([]byte, error) {
 	if err := r.VerifyBase(); err != nil {

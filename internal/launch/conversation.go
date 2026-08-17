@@ -25,6 +25,7 @@ type ConversationRecord struct {
 	ProviderVersion   string                         `json:"provider_version,omitempty"`
 	LaunchNonce       string                         `json:"launch_nonce"`
 	ExecutionEvidence *ConversationExecutionEvidence `json:"execution_evidence,omitempty"`
+	EvidenceRefs      []string                       `json:"evidence_refs,omitempty"`
 	Reason            CaptureReason                  `json:"reason,omitempty"`
 }
 
@@ -61,6 +62,16 @@ func (record ConversationRecord) Validate() error {
 			return fmt.Errorf("conversation execution evidence launch nonce mismatch")
 		}
 	}
+	seenEvidence := make(map[string]struct{}, len(record.EvidenceRefs))
+	for i, id := range record.EvidenceRefs {
+		if !validDigest(id) {
+			return fmt.Errorf("conversation evidence_refs[%d] is not a canonical digest", i)
+		}
+		if _, exists := seenEvidence[id]; exists {
+			return fmt.Errorf("duplicate conversation evidence ref %q", id)
+		}
+		seenEvidence[id] = struct{}{}
+	}
 	switch record.State {
 	case CapturePending:
 		if record.Identity.Provider != "" || record.Identity.ID != "" {
@@ -68,6 +79,9 @@ func (record ConversationRecord) Validate() error {
 		}
 		if record.ExecutionEvidence != nil {
 			return fmt.Errorf("pending conversation must not contain execution evidence")
+		}
+		if len(record.EvidenceRefs) != 0 {
+			return fmt.Errorf("pending conversation must not contain evidence refs")
 		}
 	case CaptureReady:
 		if strings.TrimSpace(record.Identity.Provider) == "" || !validUUID(record.Identity.ID) {
@@ -97,6 +111,9 @@ func WriteConversation(root *fsq.DeliveryRoot, lease *Lease, record Conversation
 		return fmt.Errorf("conversation handle %q is not locked by the session lease", record.Handle)
 	}
 	if err := record.Validate(); err != nil {
+		return err
+	}
+	if err := validateConversationEvidence(root, record); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(record, "", "  ")
@@ -134,10 +151,36 @@ func LoadConversation(root *fsq.DeliveryRoot, handle string) (ConversationRecord
 	if err := record.Validate(); err != nil {
 		return ConversationRecord{}, err
 	}
+	if err := validateConversationEvidence(root, record); err != nil {
+		return ConversationRecord{}, err
+	}
 	if record.Handle != handle {
 		return ConversationRecord{}, fmt.Errorf("conversation record handle %q does not match %q", record.Handle, handle)
 	}
 	return record, nil
+}
+
+func validateConversationEvidence(root *fsq.DeliveryRoot, record ConversationRecord) error {
+	if len(record.EvidenceRefs) == 0 {
+		return nil // Legacy ready records remain readable until their next capture.
+	}
+	providerCapture := false
+	for _, id := range record.EvidenceRefs {
+		evidence, _, err := ReadEvidence(root, id)
+		if err != nil {
+			return err
+		}
+		if evidence.Handle != record.Handle {
+			return fmt.Errorf("conversation evidence handle mismatch")
+		}
+		if evidence.Kind == EvidenceProviderCapture {
+			providerCapture = true
+		}
+	}
+	if record.Identity.Provider == CodexProvider && !providerCapture {
+		return fmt.Errorf("capture conversation requires provider_capture evidence")
+	}
+	return nil
 }
 
 func ConversationPath(sessionRoot, handle string) string {
