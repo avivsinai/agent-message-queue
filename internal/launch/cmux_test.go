@@ -194,7 +194,13 @@ if command == "focus-window":
 if command == "close-workspace":
     want = (flags.get("workspace") or "").lower()
     closed = next((ws for ws in state["workspaces"] if ws["id"].lower() == want), None)
-    state["workspaces"] = [ws for ws in state["workspaces"] if ws["id"].lower() != want]
+    remaining = [ws for ws in state["workspaces"] if ws["id"].lower() != want]
+    selected_id = next((ws["id"] for ws in remaining if ws.get("selected")), None)
+    if len(remaining) > 1 and selected_id:
+        steal = next(ws for ws in remaining if ws["id"] != selected_id)
+        for ws in remaining:
+            ws["selected"] = ws["id"] == steal["id"]
+    state["workspaces"] = remaining
     save(state)
     print("OK workspace:" + (closed or {}).get("ref", "1"))
     sys.exit(0)
@@ -977,6 +983,37 @@ func seedCmuxSelectedWorkspace(t *testing.T) string {
 	return id
 }
 
+func seedCmuxNeighborWorkspace(t *testing.T) {
+	t.Helper()
+	path := os.Getenv("AMQ_CMUX_FAKE_STATE")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	workspaces, _ := state["workspaces"].([]any)
+	workspaces = append(workspaces, map[string]any{
+		"id": "019c5a10-75d8-7eef-8db7-5ee77f70aaa4", "title": "neighbor-tab",
+		"window_id": "019c5a10-75d8-7eef-8db7-5ee77f70aaa0",
+		"cwd":       "", "selected": false, "ref": "neighbor",
+		"panes": []any{map[string]any{
+			"id":       "019c5a10-75d8-7eef-8db7-5ee77f70aaa5",
+			"surfaces": []any{map[string]any{"id": "019c5a10-75d8-7eef-8db7-5ee77f70aaa6"}},
+		}},
+	})
+	state["workspaces"] = workspaces
+	out, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func cmuxFakeSelectedWorkspace(t *testing.T) string {
 	t.Helper()
 	data, err := os.ReadFile(os.Getenv("AMQ_CMUX_FAKE_STATE"))
@@ -1217,8 +1254,9 @@ func TestCmuxSendFailureRestoresSelection(t *testing.T) {
 }
 
 func TestCmuxCloseRestoresPriorSelection(t *testing.T) {
-	backend, _ := newFakeCmuxBackend(t)
+	backend, logPath := newFakeCmuxBackend(t)
 	previous := seedCmuxSelectedWorkspace(t)
+	seedCmuxNeighborWorkspace(t)
 	project := t.TempDir()
 	root := tmuxTestRoot(t, "claude")
 	plan := cmuxTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eab4")
@@ -1227,12 +1265,35 @@ func TestCmuxCloseRestoresPriorSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got := cmuxFakeSelectedWorkspace(t); got != previous {
+		t.Fatalf("selected after Create = %q, want %q", got, previous)
+	}
 	closed, err := backend.Close(CloseRequest{Binding: created.Binding, Root: root})
 	if err != nil || closed.Outcome != OutcomeClosed {
 		t.Fatalf("Close = %#v, %v", closed, err)
 	}
 	if got := cmuxFakeSelectedWorkspace(t); got != previous {
 		t.Fatalf("selected workspace = %q, want restored %q after Close", got, previous)
+	}
+	var afterClose []string
+	sawClose := false
+	for _, argv := range readCmuxArgvLog(t, logPath) {
+		if len(argv) > 0 && argv[0] == "close-workspace" {
+			sawClose = true
+			afterClose = nil
+			continue
+		}
+		if !sawClose || len(argv) == 0 || argv[0] != "select-workspace" {
+			continue
+		}
+		for i, arg := range argv {
+			if arg == "--workspace" && i+1 < len(argv) {
+				afterClose = append(afterClose, strings.ToLower(argv[i+1]))
+			}
+		}
+	}
+	if len(afterClose) == 0 || afterClose[len(afterClose)-1] != previous {
+		t.Fatalf("Close select-workspace = %v, want restore to %s", afterClose, previous)
 	}
 }
 
