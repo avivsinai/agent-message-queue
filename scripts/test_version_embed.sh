@@ -35,3 +35,4 @@ got="$(./amq version)"
 got="$(./amq-keepalive --version)"
 [[ "$got" == "9.9.9" ]] || fail "amq-keepalive --version = ${got}, want 9.9.9"
 echo "version embed ok"
+make build
