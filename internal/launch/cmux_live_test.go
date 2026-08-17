@@ -15,7 +15,7 @@ func TestCmuxLive(t *testing.T) {
 	backend := NewCmuxBackend("")
 	detect := backend.Detect()
 	if !detect.Available {
-		t.Fatal("cmux ping failed; run this test from a shell inside a cmux surface")
+		t.Fatalf("cmux Detect unavailable: host=%q instance=%q degradations=%v", detect.HostIdentity, detect.InstanceIdentity, detect.Degradations)
 	}
 	var sent []string
 	inner := backend.run

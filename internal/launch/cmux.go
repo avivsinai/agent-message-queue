@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,7 @@ const (
 	cmuxProfileVersion      = 1
 	cmuxProfileVersionRange = ">=0.64.3 <1.0"
 	cmuxCommandTimeout      = 5 * time.Second
+	cmuxCreateTimeout       = 30 * time.Second
 	cmuxHealthTimeout       = 15 * time.Second
 	cmuxHealthPoll          = 100 * time.Millisecond
 	cmuxBundleCLI           = "/Applications/cmux.app/Contents/Resources/bin/cmux"
@@ -25,6 +27,7 @@ const (
 	cmuxWindowPrefix        = "cmux:v1:window:"
 	cmuxSurfacePrefix       = "cmux:v1:surface:"
 	cmuxInstancePrefix      = "cmux-socket:"
+	cmuxProtocolVersion     = 2
 )
 
 // CmuxBackend manages one cmux workspace per AMQ project/session generation.
@@ -37,6 +40,7 @@ type CmuxBackend struct {
 	userHomeDir   func() (string, error)
 	isExecutable  func(string) bool
 	sleep         func(context.Context, time.Duration) error
+	createTimeout time.Duration
 	healthTimeout time.Duration
 	healthPoll    time.Duration
 }
@@ -72,32 +76,57 @@ func (b *CmuxBackend) Detect() DetectResult {
 	}
 	raw, err := b.run(ctx, "--json", "capabilities")
 	if err != nil {
+		cmuxUnsupported(&result, "cmux capabilities: "+err.Error())
 		return result
 	}
 	caps, err := parseCmuxCapabilities(raw)
 	if err != nil {
+		cmuxUnsupported(&result, err.Error())
 		return result
 	}
 	host, err := b.hostname()
 	if err != nil || strings.TrimSpace(host) == "" {
+		cmuxUnsupported(&result, "cmux host identity is unavailable")
 		return result
 	}
 	socket, err := canonicalCmuxSocket(caps.SocketPath)
 	if err != nil {
+		cmuxUnsupported(&result, "cmux socket_path: "+err.Error())
 		return result
 	}
 	result.HostIdentity = host
 	result.InstanceIdentity = cmuxInstancePrefix + socket
-	if !supportedCmuxVersion(caps.Version) {
-		reason := fmt.Sprintf("cmux version %q is outside %s", caps.Version, cmuxProfileVersionRange)
-		for _, cap := range profile.Capabilities {
-			result.Degradations = append(result.Degradations, Degradation{Capability: cap, Reason: reason})
-		}
+	if !caps.ProtocolIsInt {
+		cmuxUnsupported(&result, "cmux capabilities.version must be protocol integer 2")
+		return result
+	}
+	if caps.ProtocolVersion != cmuxProtocolVersion {
+		cmuxUnsupported(&result, fmt.Sprintf("cmux protocol version %d is unsupported (want %d)", caps.ProtocolVersion, cmuxProtocolVersion))
+		return result
+	}
+	verRaw, err := b.run(ctx, "version")
+	if err != nil {
+		cmuxUnsupported(&result, "cmux version: "+err.Error())
+		return result
+	}
+	appVersion, err := parseCmuxCLIVersion(verRaw)
+	if err != nil {
+		cmuxUnsupported(&result, err.Error())
+		return result
+	}
+	if !supportedCmuxVersion(appVersion) {
+		cmuxUnsupported(&result, fmt.Sprintf("cmux version %q is outside %s", appVersion, cmuxProfileVersionRange))
 		return result
 	}
 	result.Available = true
 	result.Effective = append([]Capability(nil), profile.Capabilities...)
 	return result
+}
+
+func cmuxUnsupported(result *DetectResult, reason string) {
+	for _, cap := range result.Profile.Capabilities {
+		result.Degradations = append(result.Degradations, Degradation{Capability: cap, Reason: reason})
+	}
 }
 
 func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
@@ -125,8 +154,9 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	if err != nil {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}
 	}
-	ctx := context.Background()
-	existing, err := b.workspaceByName(ctx, name)
+	inspectCtx, inspectCancel := b.inspectCallContext()
+	existing, err := b.workspaceByName(inspectCtx, name)
+	inspectCancel()
 	if err != nil {
 		return CreateResult{}, err
 	}
@@ -134,43 +164,55 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 		return CreateResult{}, fmt.Errorf("cmux workspace %q already exists; journal recovery must classify it", name)
 	}
 
-	createRaw, err := b.runJSON(ctx, "new-workspace", "--name", name, "--cwd", req.ProjectRoot, "--focus", "true")
+	createCtx, createCancel := b.createCallContext()
+	createRaw, err := b.runJSON(createCtx, "new-workspace", "--name", name, "--cwd", req.ProjectRoot, "--focus", "true")
+	createCancel()
 	if err != nil {
-		return CreateResult{}, fmt.Errorf("create cmux workspace: %w", err)
+		return CreateResult{}, b.reconcileCreateFailure(name, false, fmt.Errorf("create cmux workspace: %w", err))
 	}
 	workspaceID, windowID, err := parseCmuxCreatedWorkspace(createRaw)
 	if err != nil {
-		return CreateResult{}, err
+		return CreateResult{}, b.reconcileCreateFailure(name, false, err)
 	}
-	firstSurfaces, err := b.workspaceSurfaces(ctx, workspaceID)
+	surfaceCtx, surfaceCancel := b.inspectCallContext()
+	firstSurfaces, err := b.workspaceSurfaces(surfaceCtx, workspaceID)
+	surfaceCancel()
 	if err != nil {
-		return CreateResult{}, err
+		return CreateResult{}, b.reconcileCreateFailure(name, false, err)
 	}
 	if len(firstSurfaces) != 1 {
-		return CreateResult{}, fmt.Errorf("cmux workspace created %d surfaces, want 1", len(firstSurfaces))
+		return CreateResult{}, b.reconcileCreateFailure(name, false, fmt.Errorf("cmux workspace created %d surfaces, want 1", len(firstSurfaces)))
 	}
 	surfaceIDs := []string{firstSurfaces[0]}
 	for _, agent := range req.Plan.Agents[1:] {
-		splitRaw, splitErr := b.runJSON(ctx, "new-split", "right", "--workspace", workspaceID, "--surface", surfaceIDs[len(surfaceIDs)-1], "--focus", "true")
+		splitCtx, splitCancel := b.createCallContext()
+		splitRaw, splitErr := b.runJSON(splitCtx, "new-split", "right", "--workspace", workspaceID, "--surface", surfaceIDs[len(surfaceIDs)-1], "--focus", "true")
+		splitCancel()
 		if splitErr != nil {
-			return CreateResult{}, fmt.Errorf("create cmux split for %s: %w", agent.Handle, splitErr)
+			return CreateResult{}, b.reconcileCreateFailure(name, false, fmt.Errorf("create cmux split for %s: %w", agent.Handle, splitErr))
 		}
 		surfaceID, splitErr := parseCmuxID(splitRaw)
 		if splitErr != nil {
-			return CreateResult{}, fmt.Errorf("cmux split for %s: %w", agent.Handle, splitErr)
+			return CreateResult{}, b.reconcileCreateFailure(name, false, fmt.Errorf("cmux split for %s: %w", agent.Handle, splitErr))
 		}
 		surfaceIDs = append(surfaceIDs, surfaceID)
 	}
-	if err := b.waitHealthy(ctx, workspaceID, surfaceIDs); err != nil {
-		return CreateResult{}, err
+	if err := b.waitHealthy(context.Background(), workspaceID, surfaceIDs); err != nil {
+		return CreateResult{}, b.reconcileCreateFailure(name, false, err)
 	}
 	for i, agent := range req.Plan.Agents {
 		line := b.agentCommand(req, agent)
-		if _, err := b.run(ctx, "send", "--surface", surfaceIDs[i], "--", line); err != nil {
-			return CreateResult{}, fmt.Errorf("send cmux command for %s: %w", agent.Handle, err)
+		sendCtx, sendCancel := b.inspectCallContext()
+		_, err := b.run(sendCtx, "send", "--surface", surfaceIDs[i], "--", line)
+		sendCancel()
+		if err != nil {
+			return CreateResult{}, b.reconcileCreateFailure(name, true, fmt.Errorf("send cmux command for %s: %w", agent.Handle, err))
 		}
-		if _, err := b.run(ctx, "send-key", "--surface", surfaceIDs[i], "enter"); err != nil {
-			return CreateResult{}, fmt.Errorf("submit cmux command for %s: %w", agent.Handle, err)
+		enterCtx, enterCancel := b.inspectCallContext()
+		_, err = b.run(enterCtx, "send-key", "--surface", surfaceIDs[i], "enter")
+		enterCancel()
+		if err != nil {
+			return CreateResult{}, b.reconcileCreateFailure(name, true, fmt.Errorf("submit cmux command for %s: %w", agent.Handle, err))
 		}
 	}
 	resources := cmuxBindingResources(workspaceID, windowID, nonce, req.Plan, surfaceIDs)
@@ -187,6 +229,55 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 		return CreateResult{}, err
 	}
 	return CreateResult{Outcome: OutcomeCreated, Profile: binding.Profile, Binding: binding}, nil
+}
+
+func (b *CmuxBackend) createOpTimeout() time.Duration {
+	if b.createTimeout > 0 {
+		return b.createTimeout
+	}
+	return cmuxCreateTimeout
+}
+
+func (b *CmuxBackend) createCallContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), b.createOpTimeout())
+}
+
+func (b *CmuxBackend) inspectCallContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), cmuxCommandTimeout)
+}
+
+func (b *CmuxBackend) reconcileCreateFailure(name string, inputSent bool, cause error) error {
+	if inputSent {
+		return cause
+	}
+	ctx, cancel := b.inspectCallContext()
+	defer cancel()
+	records, err := b.listWorkspaceRecords(ctx)
+	if err != nil {
+		return fmt.Errorf("%w (orphan workspace reconciliation failed: %v)", cause, err)
+	}
+	var matches []cmuxListedWorkspace
+	for _, workspace := range records {
+		if workspace.Title == name {
+			matches = append(matches, workspace)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return fmt.Errorf("%w (no cmux workspace named %q appeared)", cause, name)
+	case 1:
+		id := strings.ToLower(matches[0].ID)
+		if _, closeErr := b.run(ctx, "close-workspace", "--workspace", id); closeErr != nil {
+			return fmt.Errorf("%w (close orphan %s: %v)", cause, id, closeErr)
+		}
+		return fmt.Errorf("%w (closed orphan cmux workspace %s)", cause, id)
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, workspace := range matches {
+			ids = append(ids, strings.ToLower(workspace.ID))
+		}
+		return fmt.Errorf("%w (ambiguous cmux workspaces named %q: %s; unknown, never guessed)", cause, name, strings.Join(ids, ","))
+	}
 }
 
 func (b *CmuxBackend) Inspect(req InspectRequest) (InspectResult, error) {
@@ -563,8 +654,9 @@ func (b *CmuxBackend) doSleep(ctx context.Context, delay time.Duration) error {
 }
 
 type cmuxCapabilities struct {
-	SocketPath string `json:"socket_path"`
-	Version    string `json:"version"`
+	SocketPath      string
+	ProtocolVersion int
+	ProtocolIsInt   bool
 }
 
 type cmuxListedWorkspace struct {
@@ -583,13 +675,28 @@ type cmuxHealthSurface struct {
 }
 
 func parseCmuxCapabilities(raw string) (cmuxCapabilities, error) {
-	var caps cmuxCapabilities
-	if err := json.Unmarshal([]byte(raw), &caps); err != nil {
+	var parsed struct {
+		SocketPath string          `json:"socket_path"`
+		Version    json.RawMessage `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
 		return cmuxCapabilities{}, fmt.Errorf("parse cmux capabilities: %w", err)
 	}
-	if strings.TrimSpace(caps.SocketPath) == "" || strings.TrimSpace(caps.Version) == "" {
-		return cmuxCapabilities{}, fmt.Errorf("cmux capabilities missing socket_path or version")
+	if strings.TrimSpace(parsed.SocketPath) == "" {
+		return cmuxCapabilities{}, fmt.Errorf("cmux capabilities missing socket_path")
 	}
+	caps := cmuxCapabilities{SocketPath: parsed.SocketPath}
+	version := bytes.TrimSpace(parsed.Version)
+	if len(version) == 0 || string(version) == "null" {
+		return cmuxCapabilities{}, fmt.Errorf("cmux capabilities missing version")
+	}
+	if version[0] == '"' {
+		return caps, nil
+	}
+	if err := json.Unmarshal(version, &caps.ProtocolVersion); err != nil {
+		return cmuxCapabilities{}, fmt.Errorf("parse cmux capabilities version: %w", err)
+	}
+	caps.ProtocolIsInt = true
 	return caps, nil
 }
 
@@ -712,26 +819,57 @@ func canonicalCmuxSocket(path string) (string, error) {
 	return cleaned, nil
 }
 
-func supportedCmuxVersion(raw string) bool {
-	version := strings.TrimSpace(raw)
-	if fields := strings.Fields(version); len(fields) > 0 {
-		version = strings.TrimPrefix(fields[0], "cmux")
-		if version == "" && len(fields) > 1 {
-			version = fields[1]
-		}
-		version = strings.TrimSpace(strings.TrimPrefix(version, "-"))
+func parseCmuxCLIVersion(raw string) (string, error) {
+	if strings.Contains(strings.TrimSuffix(raw, "\n"), "\n") {
+		return "", fmt.Errorf("parse cmux version: extra line")
 	}
-	parts := strings.SplitN(version, ".", 3)
-	if len(parts) < 2 {
+	line := strings.TrimSpace(raw)
+	fields := strings.Fields(line)
+	if len(fields) < 2 || fields[0] != "cmux" {
+		return "", fmt.Errorf("parse cmux version: %q", line)
+	}
+	version := fields[1]
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("parse cmux version: %q", line)
+	}
+	for _, part := range parts {
+		if part == "" {
+			return "", fmt.Errorf("parse cmux version: %q", line)
+		}
+		if _, err := strconv.Atoi(part); err != nil {
+			return "", fmt.Errorf("parse cmux version: %q", line)
+		}
+	}
+	rest := fields[2:]
+	switch len(rest) {
+	case 0:
+		return version, nil
+	case 1:
+		if !strings.HasPrefix(rest[0], "(") || !strings.HasSuffix(rest[0], ")") {
+			return "", fmt.Errorf("parse cmux version: %q", line)
+		}
+		return version, nil
+	case 2:
+		if !strings.HasPrefix(rest[0], "(") || !strings.HasSuffix(rest[0], ")") ||
+			!strings.HasPrefix(rest[1], "[") || !strings.HasSuffix(rest[1], "]") {
+			return "", fmt.Errorf("parse cmux version: %q", line)
+		}
+		return version, nil
+	default:
+		return "", fmt.Errorf("parse cmux version: %q", line)
+	}
+}
+
+func supportedCmuxVersion(raw string) bool {
+	parts := strings.Split(strings.TrimSpace(raw), ".")
+	if len(parts) != 3 {
 		return false
 	}
 	major, errMajor := strconv.Atoi(parts[0])
-	minor, errMinor := strconv.Atoi(strings.TrimRightFunc(parts[1], func(r rune) bool { return r < '0' || r > '9' }))
-	patch := 0
-	if len(parts) > 2 {
-		patch, _ = strconv.Atoi(strings.TrimRightFunc(parts[2], func(r rune) bool { return r < '0' || r > '9' }))
-	}
-	if errMajor != nil || errMinor != nil || major != 0 {
+	minor, errMinor := strconv.Atoi(parts[1])
+	patch, errPatch := strconv.Atoi(parts[2])
+	if errMajor != nil || errMinor != nil || errPatch != nil || major != 0 {
 		return false
 	}
 	if minor > 64 {
