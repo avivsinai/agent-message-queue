@@ -135,13 +135,13 @@ can validate and include them in its semantic trust digest. For example:
       "handle": "claude",
       "adapter": "claude",
       "command": ["claude", "--permission-mode", "acceptEdits"],
-      "resume_policy": "enabled"
+      "resume_policy": "resume"
     },
     {
       "handle": "codex",
       "adapter": "codex",
       "command": ["codex", "--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
-      "resume_policy": "enabled"
+      "resume_policy": "resume"
     }
   ],
   "layout": {"type": "columns"}
@@ -175,6 +175,23 @@ because executing them is the remaining operator action. Paste those emitted
 lines exactly, one per terminal. Do not reconstruct them from examples: they
 bind the selected session, launch nonce, provider arguments, and execution
 ticket.
+
+Automation can use the versioned public launch contract instead of the
+interactive flow:
+
+```bash
+amq launch --plan intent.json --prepare --json --launcher commands > prepared.json
+# Review required_actions and construct an ApplyRequestV1 with exact decisions.
+amq launch --apply apply.json --json
+```
+
+`--prepare` is read-only. `--apply` accepts the complete serialized request, so
+it can run in a fresh process. A plain `--plan intent.json --json` applies only
+when Prepare reports no required actions. Otherwise it prints the Prepare
+result and exits `6`; it never invents a trust, stale-conversation, rebind, or
+degraded-capability decision. Launch configuration uses the resume vocabulary
+`resume`, `fresh`, or `disabled`. See the [public launch API guide](docs/launch-api.md)
+and the [v1 JSON schema](schemas/launch-api-v1.schema.json).
 
 Each command sets up the session environment, starts wake notifications, and
 launches the agent. See [COOP.md](COOP.md#running-co-op-mode) for co-op
@@ -511,6 +528,13 @@ amq doctor [--root <path>] [--base-root <path>] [--ignore-session-pin] [--ops] [
 amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--launch-journal --root <session-root>] [--dry-run] [--yes]
 ```
 
+Public launch forms:
+
+```text
+amq launch --plan <file|-> [--prepare] --json [--session <name>] [--launcher <name>]
+amq launch --apply <file|-> --json
+```
+
 `--json-schema` requires `--json`.
 
 ### Exit codes
@@ -573,6 +597,7 @@ Building something on AMQ? Open an issue or PR to be listed here.
 - [docs/adapter-contract.md](docs/adapter-contract.md) — Formal v1 adapter contract for integration messages
 - [docs/adr-layer-extensions.md](docs/adr-layer-extensions.md) — ADR for stable layer extension surfaces
 - [docs/trace.md](docs/trace.md) — Read-only trace contract and evidence limits
+- [docs/launch-api.md](docs/launch-api.md) — Public launch intent, Prepare/Apply flow, compatibility floor, and schema
 - [COOP.md](COOP.md) — Co-op workflow and supervisor operations
 - [CLAUDE.md](CLAUDE.md) — Agent instructions, CLI reference, architecture
 

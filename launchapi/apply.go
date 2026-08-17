@@ -33,7 +33,7 @@ func Apply(ctx context.Context, request ApplyRequestV1) (ApplyResultV1, error) {
 
 func fromInternalApplyResult(result internallaunch.ApplyResult) ApplyResultV1 {
 	public := ApplyResultV1{
-		ResultVersion: ResultVersionV1, Outcome: result.Outcome, ReasonCode: result.ReasonCode,
+		ResultVersion: ResultVersionV1, Outcome: result.Outcome, ReasonCode: result.ReasonCode, FailureDetail: result.FailureDetail,
 		SubjectDigest: result.SubjectDigest, PlanDigest: result.PlanDigest, TrustDigest: result.TrustDigest,
 		SemanticDigest: result.TrustDigest, Backend: result.Backend, Profile: result.Profile,
 		Roster: RosterDriftV1{

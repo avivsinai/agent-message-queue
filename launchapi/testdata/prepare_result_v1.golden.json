@@ -1,0 +1,61 @@
+{
+  "result_version": 1,
+  "outcome": "action_required",
+  "reason": "untrusted_config_digest",
+  "subject_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "plan_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "trust_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "required_actions": [
+    {
+      "action_id": "trust-example",
+      "kind": "trust_confirmation",
+      "handles": [
+        "claude"
+      ],
+      "resources": [
+        "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ],
+      "allowed_decisions": [
+        "trust_exact_subject",
+        "deny"
+      ],
+      "reason_code": "untrusted_config_digest"
+    }
+  ],
+  "preview": {
+    "target": {
+      "project_root": "/workspace/example",
+      "session_root": "/workspace/example/.agent-mail/collab",
+      "session": "collab"
+    },
+    "backend": "commands",
+    "profile": "commands/portable/v1",
+    "participants": [
+      {
+        "handle": "operator",
+        "runnable": false,
+        "planned_outcome": "observe_only"
+      }
+    ],
+    "roster": {
+      "desired": [
+        "operator"
+      ],
+      "present": [],
+      "missing": [
+        "operator"
+      ],
+      "extra": []
+    }
+  },
+  "observations": [
+    {
+      "handle": "operator",
+      "mailbox": "missing",
+      "runnable": false,
+      "conversation": "none",
+      "execution": "none",
+      "resource": ""
+    }
+  ]
+}

@@ -38,6 +38,11 @@ func TestManagedExecutionOptionsCodecRoundTripAndHostileInput(t *testing.T) {
 	if _, err := encodeManagedExecutionOptions(invalid); err == nil || !strings.Contains(err.Error(), "unknown symphony event") {
 		t.Fatalf("unknown event error = %v", err)
 	}
+	argsWithoutVia := want
+	argsWithoutVia.InjectorVia = ""
+	if _, err := encodeManagedExecutionOptions(argsWithoutVia); err == nil || !strings.Contains(err.Error(), "injector args require via") {
+		t.Fatalf("injector args without via error = %v", err)
+	}
 }
 
 func TestManagedExecutionOptionsDisabledWakeRequiresReason(t *testing.T) {

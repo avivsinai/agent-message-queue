@@ -20,6 +20,8 @@ type launchCLIOptions struct {
 	resumeOnly bool
 }
 
+const maxLaunchAPIDocumentBytes = 4 << 20
+
 var (
 	launchIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 	launchInput      = func() *bufio.Reader { return bufio.NewReader(os.Stdin) }
@@ -56,6 +58,9 @@ func runLaunchEngine(args []string, options launchCLIOptions) error {
 	freshFlag := fs.Bool("fresh", false, "Start fresh conversations for this launch")
 	allowFreshFlag := fs.Bool("allow-fresh-fallback", false, "Allow fresh conversations when saved identities are stale")
 	rebindFlag := fs.Bool("rebind", false, "Confirm a deliberate launcher binding change")
+	planFlag := fs.String("plan", "", "Public LaunchIntentV1 file, or - for stdin")
+	prepareFlag := fs.Bool("prepare", false, "Prepare the public launch intent without mutation (requires --plan and --json)")
+	applyFlag := fs.String("apply", "", "Public ApplyRequestV1 file, or - for stdin (requires --json)")
 	usageName := "amq launch [options]"
 	if options.resumeOnly {
 		usageName = "amq session resume <name> [options]"
@@ -67,6 +72,16 @@ func runLaunchEngine(args []string, options launchCLIOptions) error {
 		return err
 	} else if handled {
 		return nil
+	}
+	publicMode := flagWasVisited(fs, "plan") || flagWasVisited(fs, "prepare") || flagWasVisited(fs, "apply")
+	if publicMode {
+		if options.resumeOnly {
+			return UsageError("session resume does not accept --plan, --prepare, or --apply")
+		}
+		if flagWasVisited(fs, "fresh") || flagWasVisited(fs, "allow-fresh-fallback") || flagWasVisited(fs, "rebind") {
+			return UsageError("--plan, --prepare, and --apply do not accept legacy launch decision flags")
+		}
+		return runPublicLaunch(common, *sessionFlag, *launcherFlag, *planFlag, *prepareFlag, *applyFlag, fs)
 	}
 	if *freshFlag && *allowFreshFlag {
 		return UsageError("--fresh and --allow-fresh-fallback are mutually exclusive")

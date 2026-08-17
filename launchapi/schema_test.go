@@ -185,6 +185,34 @@ func TestLaunchAPIV1SchemaAcceptsGoldenAndRejectsHostileFields(t *testing.T) {
 	if err := schema.Validate(golden); err == nil {
 		t.Error("schema accepted non-runnable args smuggling")
 	}
+
+	for _, resultGolden := range []struct {
+		file       string
+		definition string
+	}{
+		{file: "prepare_result_v1.golden.json", definition: "PrepareResultV1"},
+		{file: "apply_result_v1.golden.json", definition: "ApplyResultV1"},
+	} {
+		data, err := os.ReadFile("testdata/" + resultGolden.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document map[string]any
+		if err := json.Unmarshal(data, &document); err != nil {
+			t.Fatal(err)
+		}
+		resultSchema, err := compiler.Compile("launch-api-v1.schema.json#/$defs/" + resultGolden.definition)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := resultSchema.Validate(document); err != nil {
+			t.Fatalf("schema rejected %s: %v", resultGolden.file, err)
+		}
+		document["caller_owned_backend_state"] = true
+		if err := resultSchema.Validate(document); err == nil {
+			t.Errorf("schema accepted hostile field in %s", resultGolden.file)
+		}
+	}
 }
 
 func assertSchemaPropertiesMatchType(t *testing.T, defs map[string]any, definition string, typ reflect.Type) {
