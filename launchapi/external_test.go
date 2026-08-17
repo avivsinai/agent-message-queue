@@ -38,6 +38,10 @@ func TestContract(t *testing.T) {
 	_ = prepare
 	var apply func(context.Context, launchapi.ApplyRequestV1) (launchapi.ApplyResultV1, error) = launchapi.Apply
 	_ = apply
+	var inspect func(context.Context, launchapi.InspectRequestV1) (launchapi.InspectResultV1, error) = launchapi.Inspect
+	var focus func(context.Context, launchapi.FocusRequestV1) (launchapi.FocusResultV1, error) = launchapi.Focus
+	var closeLaunch func(context.Context, launchapi.CloseRequestV1) (launchapi.CloseResultV1, error) = launchapi.Close
+	_, _, _ = inspect, focus, closeLaunch
 	var action launchapi.RequiredActionKindV1 = launchapi.RequiredActionTrustConfirmation
 	var choice launchapi.DecisionChoiceV1 = launchapi.DecisionTrustExactSubject
 	if action == "" || choice == "" {

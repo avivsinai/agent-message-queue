@@ -43,6 +43,10 @@ func fromInternalApplyResult(result internallaunch.ApplyResult) ApplyResultV1 {
 		Observations: make([]ParticipantObservationV1, 0, len(result.Observations)),
 		Commands:     make([]CommandV1, 0, len(result.Commands)),
 		FollowUps:    make([]RequiredActionV1, 0, len(result.RequiredActions)),
+		Evidence:     make([]EvidenceRefV1, 0, len(result.Evidence)),
+	}
+	for _, evidence := range result.Evidence {
+		public.Evidence = append(public.Evidence, fromInternalEvidenceRef(evidence))
 	}
 	for _, observation := range result.Observations {
 		public.Observations = append(public.Observations, ParticipantObservationV1{
