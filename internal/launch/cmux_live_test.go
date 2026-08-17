@@ -103,40 +103,68 @@ func TestCmuxLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cmuxSelectedWorkspaceID(afterCreate); got != beforeSelected {
-		t.Fatalf("Create changed selected workspace: before=%q after=%q", beforeSelected, got)
+	afterCreateSelected := cmuxSelectedWorkspaceID(afterCreate)
+	if afterCreateSelected != beforeSelected {
+		t.Fatalf("Create changed selected workspace: before=%q after=%q", beforeSelected, afterCreateSelected)
 	}
+	workspaceID, _, err := parseCmuxWorkspaceResource(created.Binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Create %s workspace=%s window=%s surfaces=%s", created.Outcome, workspaceID, cmuxWindowID(created.Binding), strings.Join(cmuxLiveBoundSurfaces(created.Binding), ","))
+	t.Logf("selected-id before=%s after-create=%s", beforeSelected, afterCreateSelected)
 	req.AMQPath = resolvedAMQ
 	for i, agent := range plan.Agents {
 		want := backend.agentCommand(req, agent)
 		if i >= len(sent) || sent[i] != want {
 			t.Fatalf("sent[%d] = %q, want exact commandLine %q (all=%q)", i, sent, want, sent)
 		}
+		t.Logf("sent %s commandLine %q", agent.Handle, sent[i])
 	}
 	inspection, err := backend.Inspect(InspectRequest{Binding: created.Binding, Root: root})
 	if err != nil || inspection.Status != InspectPresent {
 		t.Fatalf("Inspect present = %#v, %v", inspection, err)
 	}
+	t.Logf("Inspect present status=%s evidence=%q", inspection.Status, inspection.Evidence)
 	focused, err := backend.Focus(FocusRequest{Binding: created.Binding, Root: root})
 	if err != nil || focused.Outcome != OutcomeAttached {
 		t.Fatalf("Focus = %#v, %v", focused, err)
 	}
+	t.Logf("Focus outcome=%s reason=%q", focused.Outcome, focused.Reason)
 	closed, err := backend.Close(CloseRequest{Binding: created.Binding, Root: root})
 	if err != nil || closed.Outcome != OutcomeClosed {
 		t.Fatalf("Close = %#v, %v", closed, err)
 	}
+	t.Logf("Close outcome=%s reason=%q", closed.Outcome, closed.Reason)
 	absent, err := backend.Inspect(InspectRequest{Binding: created.Binding, Root: root})
 	if err != nil || absent.Status != InspectAbsent {
 		t.Fatalf("Inspect absent = %#v, %v", absent, err)
 	}
-	after, err := backend.listWorkspaces(context.Background())
+	t.Logf("Inspect absent status=%s evidence=%q", absent.Status, absent.Evidence)
+	afterRecords, err := backend.listWorkspaceRecords(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) != beforeCount {
-		t.Fatalf("live workspace/tab count changed: before=%d after=%d", beforeCount, len(after))
+	if len(afterRecords) != beforeCount {
+		t.Fatalf("live workspace/tab count changed: before=%d after=%d", beforeCount, len(afterRecords))
 	}
+	t.Logf("selected-id after-close=%s", cmuxSelectedWorkspaceID(afterRecords))
+	t.Logf("workspace count before=%d after=%d", beforeCount, len(afterRecords))
 	if !strings.HasPrefix(created.Binding.InstanceIdentity, "cmux-socket:") {
 		t.Fatalf("instance identity = %q", created.Binding.InstanceIdentity)
 	}
+}
+
+func cmuxLiveBoundSurfaces(binding BindingRecord) []string {
+	var ids []string
+	for _, resource := range binding.Resources.Resources {
+		if resource.Agent == "" {
+			continue
+		}
+		id, err := parseCmuxSurfaceResource(resource.OpaqueID)
+		if err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
