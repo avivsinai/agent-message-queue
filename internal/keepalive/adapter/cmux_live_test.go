@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -146,6 +147,9 @@ func TestCmuxLiveDiscoverProbe(t *testing.T) {
 		t.Fatalf("Discover = %q, want throwaway surface %q (refusing to touch another surface)", target, surfaceID)
 	}
 	t.Logf("PASS Discover throwaway %s", target)
+	if err := cmuxLiveWaitForSurfaceTTY(t, path, surfaceID); err != nil {
+		t.Fatal(err)
+	}
 	if err := adapter.Probe(ctx, target); err != nil {
 		t.Fatalf("Probe() error = %v", err)
 	}
@@ -231,6 +235,100 @@ func cmuxLiveTerminalSurface(path, workspaceID string) (string, error) {
 		}
 	}
 	return "", errors.New("throwaway cmux workspace has no terminal surface")
+}
+
+func cmuxLiveWaitForSurfaceTTY(t *testing.T, path, surfaceID string) error {
+	t.Helper()
+	deadline := time.Now().Add(cmuxLiveInspectTimeout)
+	var lastEntry string
+	for {
+		raw, err := cmuxLiveRun(path, cmuxLiveInspectTimeout, "rpc", "system.tree", cmuxSystemTreeParams)
+		if err != nil {
+			lastEntry = strings.TrimSpace(raw + ": " + err.Error())
+			t.Logf("system.tree poll error=%s", lastEntry)
+		} else {
+			entry, tty, found := cmuxLiveFindSurfaceEntry([]byte(raw), surfaceID)
+			if !found {
+				lastEntry = "<absent from system.tree>"
+				t.Logf("system.tree surface %s absent", surfaceID)
+			} else {
+				lastEntry = string(entry)
+				t.Logf("system.tree surface entry=%s", entry)
+				if cmuxLiveTTYReady(tty) {
+					return nil
+				}
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("throwaway surface %s never reported a tty in system.tree within %s: last entry=%s", surfaceID, cmuxLiveInspectTimeout, lastEntry)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func cmuxLiveFindSurfaceEntry(tree []byte, surfaceID string) (json.RawMessage, string, bool) {
+	want, err := normalizeCmuxSurfaceID(surfaceID)
+	if err != nil {
+		return nil, "", false
+	}
+	want = strings.ToUpper(want)
+	var parsed struct {
+		Windows []struct {
+			Workspaces []struct {
+				Panes []struct {
+					Surfaces []json.RawMessage `json:"surfaces"`
+				} `json:"panes"`
+			} `json:"workspaces"`
+		} `json:"windows"`
+	}
+	if err := json.Unmarshal(tree, &parsed); err != nil {
+		return nil, "", false
+	}
+	for _, window := range parsed.Windows {
+		for _, workspace := range window.Workspaces {
+			for _, pane := range workspace.Panes {
+				for _, entry := range pane.Surfaces {
+					var surface struct {
+						ID  string `json:"id"`
+						TTY string `json:"tty"`
+					}
+					if json.Unmarshal(entry, &surface) != nil {
+						continue
+					}
+					id, idErr := normalizeCmuxSurfaceID(surface.ID)
+					if idErr != nil || strings.ToUpper(id) != want {
+						continue
+					}
+					return entry, surface.TTY, true
+				}
+			}
+		}
+	}
+	return nil, "", false
+}
+
+func cmuxLiveTTYReady(tty string) bool {
+	canon, err := canonicalCmuxTTY(tty)
+	if err != nil {
+		return false
+	}
+	return isCmuxPTY(canon)
+}
+
+func TestCmuxLiveFindSurfaceEntryAndTTYReady(t *testing.T) {
+	blank := cmuxTreeWithSurfaceRecords(map[string]string{"id": testCmuxSurfaceID, "tty": ""})
+	entry, tty, ok := cmuxLiveFindSurfaceEntry(blank, testCmuxSurfaceID)
+	if !ok || len(entry) == 0 {
+		t.Fatalf("blank tree missing surface: ok=%v entry=%s", ok, entry)
+	}
+	if cmuxLiveTTYReady(tty) {
+		t.Fatal("blank tty must not be ready")
+	}
+	ready := cmuxTreeWithSurfaces(testCmuxSurfaceID)
+	_, tty, ok = cmuxLiveFindSurfaceEntry(ready, testCmuxSurfaceID)
+	if !ok || !cmuxLiveTTYReady(tty) {
+		t.Fatalf("populated tty ready=%v tty=%q", ok, tty)
+	}
 }
 
 func cmuxLiveRun(path string, timeout time.Duration, args ...string) (string, error) {
