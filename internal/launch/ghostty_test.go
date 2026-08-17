@@ -437,6 +437,16 @@ func TestGhosttyCreateTimeoutDoesNotCloseAmbiguousWindows(t *testing.T) {
 	}
 }
 
+func TestGhosttyDefaultCreateTimeoutExceedsInspectTimeout(t *testing.T) {
+	got := NewGhosttyBackend().createOpTimeout()
+	if got <= ghosttyCommandTimeout {
+		t.Fatalf("default create timeout %s is not greater than inspect timeout %s", got, ghosttyCommandTimeout)
+	}
+	if got < 30*time.Second {
+		t.Fatalf("default create timeout %s is below 30s", got)
+	}
+}
+
 func TestGhosttyCreateMissingAMQRefusesBeforeMutation(t *testing.T) {
 	backend, fake := newFakeGhosttyBackend(t)
 	project := t.TempDir()
