@@ -56,3 +56,35 @@ func TestDeliveryRootOpenLockFileStableInode(t *testing.T) {
 		t.Fatal("OpenLockFile replaced the lock inode")
 	}
 }
+
+func TestClassifyLayoutRejectsAgentsSymlink(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(base, "agents")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	root := openDeliveryRootForTest(t, base)
+	state, err := root.ClassifyLayout()
+	if err == nil || state == LayoutInitialized {
+		t.Fatalf("ClassifyLayout = %v, %v; want foreign and error", state, err)
+	}
+}
+
+func TestWriteFileExclusiveDoesNotReplace(t *testing.T) {
+	base := t.TempDir()
+	if err := EnsureAgentDirs(base, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	root := openDeliveryRootForTest(t, base)
+	dir := filepath.Join("agents", "alice", "receipts")
+	if _, err := root.WriteFileExclusive(dir, "once.json", []byte("first\n"), 0o600); err != nil {
+		t.Fatalf("first WriteFileExclusive: %v", err)
+	}
+	if _, err := root.WriteFileExclusive(dir, "once.json", []byte("second\n"), 0o600); err == nil {
+		t.Fatal("second WriteFileExclusive replaced an existing name")
+	}
+	data, err := os.ReadFile(filepath.Join(base, dir, "once.json"))
+	if err != nil || string(data) != "first\n" {
+		t.Fatalf("exclusive file contents = %q, %v", data, err)
+	}
+}

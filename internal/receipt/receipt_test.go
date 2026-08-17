@@ -195,3 +195,102 @@ func TestWaitForCrossRoot(t *testing.T) {
 		t.Fatalf("WaitFor(sourceRoot) error = %v, want deadline exceeded", err)
 	}
 }
+
+func TestEmitReceiptMode0600(t *testing.T) {
+	root := setupTestRoot(t)
+	r := New("msg_mode", "p2p/claude__codex", "claude", "codex", StageDrained, "")
+	if err := Emit(root, r); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(root, "agents", "codex", "receipts", r.filename()))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("receipt mode = %04o, want 0600", got)
+	}
+}
+
+func TestWaitForTimeoutZeroWaitsUntilReceipt(t *testing.T) {
+	root := setupTestRoot(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := WaitFor(root, "msg_zero", "codex", StageDrained, 0, 20*time.Millisecond)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("timeout 0 returned immediately: %v", err)
+	case <-time.After(80 * time.Millisecond):
+	}
+	r := New("msg_zero", "p2p/claude__codex", "claude", "codex", StageDrained, "")
+	if err := Emit(root, r); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WaitFor(timeout 0): %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitFor(timeout 0) did not observe the receipt")
+	}
+}
+
+func TestListFilterConsumerAndMsgIDDelimiter(t *testing.T) {
+	root := setupTestRoot(t)
+	for _, r := range []Receipt{
+		New("msg_01", "p2p/claude__codex", "claude", "codex", StageDrained, ""),
+		New("msg_010", "p2p/claude__codex", "claude", "codex", StageDrained, ""),
+	} {
+		if err := Emit(root, r); err != nil {
+			t.Fatalf("Emit %s: %v", r.MsgID, err)
+		}
+	}
+
+	got, err := List(root, "codex", ListFilter{MsgID: "msg_01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].MsgID != "msg_01" {
+		t.Fatalf("MsgID msg_01 filter = %+v, want only msg_01", got)
+	}
+
+	got, err = List(root, "codex", ListFilter{Consumer: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Consumer claude in codex mailbox = %+v, want empty", got)
+	}
+	got, err = List(root, "codex", ListFilter{Consumer: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Consumer codex filter = %d, want 2", len(got))
+	}
+}
+
+func TestListOrdersByEmittedAt(t *testing.T) {
+	root := setupTestRoot(t)
+	first := New("msg_early", "p2p/claude__codex", "claude", "codex", StageDrained, "")
+	if err := Emit(root, first); err != nil {
+		t.Fatalf("Emit first: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	second := New("msg_late", "p2p/claude__codex", "claude", "codex", StageDrained, "")
+	if err := Emit(root, second); err != nil {
+		t.Fatalf("Emit second: %v", err)
+	}
+	got, err := List(root, "codex", ListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].MsgID != "msg_early" || got[1].MsgID != "msg_late" {
+		t.Fatalf("List order = %+v, want msg_early then msg_late", got)
+	}
+	if got[0].EmittedAt >= got[1].EmittedAt {
+		t.Fatalf("EmittedAt not ascending: %q then %q", got[0].EmittedAt, got[1].EmittedAt)
+	}
+}

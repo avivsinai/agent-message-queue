@@ -16,6 +16,7 @@ func invalidMessageFilenames(t *testing.T) []string {
 		filepath.Join(os.TempDir(), "message.md"),
 		"message\x00.md",
 		"message.txt",
+		".attack.md",
 	}
 }
 
@@ -82,6 +83,24 @@ func TestMessageFilenameEntryPointsAcceptValidFilenames(t *testing.T) {
 	restoredPath := filepath.Join(AgentInboxNew(root, "alice"), "valid_dlq_source.md")
 	if _, err := os.Stat(restoredPath); err != nil {
 		t.Fatalf("expected retry to restore original filename unchanged: %v", err)
+	}
+}
+
+func TestFindMessagePrefersNewWhenBothBoxesExist(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	filename := "both.md"
+	if err := os.WriteFile(filepath.Join(AgentInboxNew(root, "alice"), filename), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(AgentInboxCur(root, "alice"), filename), []byte("cur"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path, box, err := FindMessage(root, "alice", filename)
+	if err != nil || box != BoxNew || path != filepath.Join(AgentInboxNew(root, "alice"), filename) {
+		t.Fatalf("FindMessage = %q %q %v, want inbox/new", path, box, err)
 	}
 }
 
