@@ -40,6 +40,7 @@ type ApplyDependencies struct {
 type ApplyResult struct {
 	Outcome         string
 	ReasonCode      string
+	FailureDetail   string
 	SubjectDigest   string
 	PlanDigest      string
 	TrustDigest     string
@@ -245,6 +246,7 @@ func applyUnderAuthority(ctx context.Context, request ApplyRequest, dependencies
 	} else {
 		result.Outcome = ApplyOutcomeActionRequired
 		result.ReasonCode = applyReconcileReasonCode(reconciled)
+		result.FailureDetail = reconciled.Reason
 	}
 	return result, nil
 }

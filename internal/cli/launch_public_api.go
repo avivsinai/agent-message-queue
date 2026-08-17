@@ -201,6 +201,11 @@ func publicApplyExit(result launchapi.ApplyResultV1) error {
 	if result.Outcome != "action_required" {
 		return nil
 	}
+	if result.FailureDetail != "" {
+		if err := writeStderr("amq launch: %s\n", result.FailureDetail); err != nil {
+			return err
+		}
+	}
 	reason := result.ReasonCode
 	if reason == "" {
 		reason = "launch apply requires action"

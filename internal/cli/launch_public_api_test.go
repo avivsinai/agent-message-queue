@@ -215,6 +215,26 @@ func TestCLIResultEncoderUsesPackageGoldens(t *testing.T) {
 	}
 }
 
+func TestPublicApplyFailureDetailIsStderrOnly(t *testing.T) {
+	result := launchapi.ApplyResultV1{
+		ResultVersion: launchapi.ResultVersionV1,
+		Outcome:       "action_required",
+		ReasonCode:    "backend_create_failed",
+		FailureDetail: "create tmux session: pane exited before inspection",
+	}
+	encoded, err := launchapi.MarshalResultV1(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "pane exited") || strings.Contains(string(encoded), "failure_detail") {
+		t.Fatalf("failure detail leaked into public JSON: %s", encoded)
+	}
+	_, stderr, err := captureEnvOutput(t, func() error { return publicApplyExit(result) })
+	if GetExitCode(err) != ExitActionRequired || !strings.Contains(stderr, result.FailureDetail) {
+		t.Fatalf("exit=%d err=%v stderr=%q", GetExitCode(err), err, stderr)
+	}
+}
+
 func dereferenceGoldenResult(result any) any {
 	switch value := result.(type) {
 	case *launchapi.PrepareResultV1:

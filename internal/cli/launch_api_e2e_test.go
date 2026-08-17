@@ -142,6 +142,9 @@ func TestCompatibilityFloorAndEndToEndMatrix(t *testing.T) {
 		}
 		fixture := newPublicLaunchE2EFixture(t, binDir, launch.LauncherTMux)
 		intent := fixture.intent(launchapi.ResumePolicyFresh, false)
+		intent.Participants[0].Execution = &launchapi.ExecutionOptionsV1{Wake: launchapi.WakeOptionsV1{
+			Mode: launchapi.WakeDisabled, AuditReason: "hermetic tmux matrix row",
+		}}
 		intentPath := writeLaunchIntentE2E(t, intent)
 		socketDir, err := os.MkdirTemp("/tmp", "amq-public-tmux-e2e-")
 		if err != nil {
@@ -149,8 +152,7 @@ func TestCompatibilityFloorAndEndToEndMatrix(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
 		env := append(fixture.env(), "TMUX_TMPDIR="+socketDir)
-		serverRunning := false
-		t.Cleanup(func() { stopHermeticTmuxServer(t, socketDir, fixture.sessionRoot, "claude", serverRunning) })
+		t.Cleanup(func() { stopHermeticTmuxServer(t, socketDir, fixture.sessionRoot, "claude", false) })
 
 		stdout, stderr, exit := runRealAMQWithExit(t, amqBinary, fixture.project, env,
 			"launch", "--plan", intentPath, "--prepare", "--json", "--launcher", "tmux")
@@ -165,11 +167,24 @@ func TestCompatibilityFloorAndEndToEndMatrix(t *testing.T) {
 		if exit != 0 {
 			t.Fatalf("tmux Apply exit=%d stderr=%s stdout=%s", exit, stderr, stdout)
 		}
-		serverRunning = true
 		var applied launchapi.ApplyResultV1
 		decodeRealLaunchJSON(t, stdout, &applied)
 		if applied.Outcome != "applied" || len(applied.Commands) != 0 {
 			t.Fatalf("tmux Apply = %#v", applied)
+		}
+		rootIdentity, err := fsq.SnapshotDeliveryRoot(fixture.sessionRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		root, err := fsq.OpenDeliveryRoot(fixture.sessionRoot, rootIdentity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = root.Close() }()
+		ticket, err := launch.LoadExecutionTicket(root, "claude")
+		if err != nil || ticket.Execution == nil || ticket.Execution.WakeMode != string(launchapi.WakeDisabled) ||
+			ticket.Execution.AuditReason != "hermetic tmux matrix row" {
+			t.Fatalf("tmux execution options = %#v, err=%v", ticket.Execution, err)
 		}
 		waitForProviderLog(t, fixture.providerLog, "--session-id ")
 
