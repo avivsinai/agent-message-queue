@@ -391,3 +391,85 @@ func matchingLinuxWakeProcess(pid int, root string) wakeProcessInfo {
 		Args: []string{"/usr/bin/amq", "wake", "--root", root, "--me", "codex"},
 	}
 }
+
+func TestTerminateWakePidfdKillsChildThatIgnoresSIGTERM(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "trap '' TERM; exec sleep 30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+	pidfd, err := linuxPidfdOpen(cmd.Process.Pid, 0)
+	if err != nil {
+		t.Fatalf("pidfd_open child: %v", err)
+	}
+	defer func() { _ = linuxPidfdClose(pidfd) }()
+	if err := terminateWakePidfd(pidfd); err != nil {
+		t.Fatalf("terminate TERM-immune child: %v", err)
+	}
+	_, _ = cmd.Process.Wait()
+	if err := linuxPidfdSendSignal(pidfd, unix.SIGTERM, nil, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("signal retained pidfd after exit = %v, want ESRCH", err)
+	}
+}
+
+func TestTerminateWakePidfdReportsRetiredWhenSIGKILLExitIsDelayed(t *testing.T) {
+	oldGrace := wakeTerminateGrace
+	oldConfirm := wakeTerminateKillConfirm
+	wakeTerminateGrace = 50 * time.Millisecond
+	wakeTerminateKillConfirm = 2 * time.Second
+	t.Cleanup(func() {
+		wakeTerminateGrace = oldGrace
+		wakeTerminateKillConfirm = oldConfirm
+	})
+	var timeouts []time.Duration
+	stubLinuxPidfd(t,
+		func(int, int) (int, error) { return 7, nil },
+		func(int, unix.Signal, *unix.Siginfo, int) error { return nil },
+		func(_ int, timeout time.Duration) (bool, error) {
+			timeouts = append(timeouts, timeout)
+			if timeout <= wakeTerminateGrace {
+				return false, nil
+			}
+			time.Sleep(500 * time.Millisecond)
+			return true, nil
+		},
+	)
+	start := time.Now()
+	if err := terminateWakePidfd(7); err != nil {
+		t.Fatalf("delayed SIGKILL exit should retire: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 500*time.Millisecond {
+		t.Fatalf("retired in %s, want to wait for the delayed SIGKILL exit", elapsed)
+	}
+	if len(timeouts) != 2 || timeouts[0] != wakeTerminateGrace || timeouts[1] != wakeTerminateKillConfirm {
+		t.Fatalf("pidfd poll timeouts = %v, want [%s %s]", timeouts, wakeTerminateGrace, wakeTerminateKillConfirm)
+	}
+}
+
+func TestTerminateWakePidfdRefusesImmortalWithinKillConfirm(t *testing.T) {
+	oldGrace := wakeTerminateGrace
+	oldConfirm := wakeTerminateKillConfirm
+	wakeTerminateGrace = 20 * time.Millisecond
+	wakeTerminateKillConfirm = 200 * time.Millisecond
+	t.Cleanup(func() {
+		wakeTerminateGrace = oldGrace
+		wakeTerminateKillConfirm = oldConfirm
+	})
+	stubLinuxPidfd(t,
+		func(int, int) (int, error) { return 7, nil },
+		func(int, unix.Signal, *unix.Siginfo, int) error { return nil },
+		func(int, time.Duration) (bool, error) { return false, nil },
+	)
+	start := time.Now()
+	err := terminateWakePidfd(7)
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "still alive after SIGKILL") {
+		t.Fatalf("immortal process error = %v, want SIGKILL confirmation refusal", err)
+	}
+	if elapsed < 200*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("immortal refusal took %s, want within the kill-confirm bound", elapsed)
+	}
+}
