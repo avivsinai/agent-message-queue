@@ -26,6 +26,7 @@ import (
 
 var (
 	wakeTerminateGrace              = 100 * time.Millisecond
+	wakeTerminateKillConfirm        = 3 * time.Second
 	wakeBaselineTimeout             = 5 * time.Second
 	wakeBaselineSettle              = 50 * time.Millisecond
 	wakeTerminalAuthorityRetryDelay = 250 * time.Millisecond

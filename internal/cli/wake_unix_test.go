@@ -627,11 +627,14 @@ func stubSignalWakeProcess(t *testing.T, fn func(pid int, sig os.Signal) error) 
 	t.Helper()
 	oldSignal := signalWakeProcess
 	oldGrace := wakeTerminateGrace
+	oldKillConfirm := wakeTerminateKillConfirm
 	signalWakeProcess = fn
 	wakeTerminateGrace = 0
+	wakeTerminateKillConfirm = 0
 	t.Cleanup(func() {
 		signalWakeProcess = oldSignal
 		wakeTerminateGrace = oldGrace
+		wakeTerminateKillConfirm = oldKillConfirm
 	})
 }
 
@@ -7984,6 +7987,111 @@ func TestShouldReplaceOrphanedWakeLockKeepsLockWhenKillDoesNotTerminate(t *testi
 	}
 	if _, statErr := os.Stat(lockPath); statErr != nil {
 		t.Fatalf("lock should remain after failed kill, stat=%v", statErr)
+	}
+}
+
+func TestTerminateWakeProcessReportsRetiredWhenSIGKILLExitIsDelayed(t *testing.T) {
+	requireBarePIDWakeTermination(t)
+	const wakePID = 5151
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		TTY:          "/dev/amq-missing-tty",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+	oldGrace := wakeTerminateGrace
+	oldConfirm := wakeTerminateKillConfirm
+	wakeTerminateGrace = 50 * time.Millisecond
+	wakeTerminateKillConfirm = 2 * time.Second
+	t.Cleanup(func() {
+		wakeTerminateGrace = oldGrace
+		wakeTerminateKillConfirm = oldConfirm
+	})
+	var killedAt time.Time
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		live := wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "start-1",
+			BootID:     "boot-1",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "codex", "--root", root},
+		}
+		if pid != wakePID {
+			return wakeProcessInfo{PID: pid}
+		}
+		if killedAt.IsZero() || time.Since(killedAt) < 500*time.Millisecond {
+			return live
+		}
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+	oldSignal := signalWakeProcess
+	signalWakeProcess = func(pid int, sig os.Signal) error {
+		if pid != wakePID {
+			t.Fatalf("signal pid = %d, want %d", pid, wakePID)
+		}
+		if sig == syscall.SIGKILL {
+			killedAt = time.Now()
+		}
+		return nil
+	}
+	t.Cleanup(func() { signalWakeProcess = oldSignal })
+
+	start := time.Now()
+	if err := terminateWakeProcess(inspectWakeLock(root, "codex")); err != nil {
+		t.Fatalf("delayed SIGKILL exit should retire: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 500*time.Millisecond {
+		t.Fatalf("retired in %s, want to wait for the ~500ms post-SIGKILL exit", elapsed)
+	}
+}
+
+func TestTerminateWakeProcessRefusesImmortalWithinKillConfirm(t *testing.T) {
+	requireBarePIDWakeTermination(t)
+	const wakePID = 5252
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		TTY:          "/dev/amq-missing-tty",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/opt/homebrew/bin/amq",
+	})
+	oldGrace := wakeTerminateGrace
+	oldConfirm := wakeTerminateKillConfirm
+	wakeTerminateGrace = 20 * time.Millisecond
+	wakeTerminateKillConfirm = 200 * time.Millisecond
+	t.Cleanup(func() {
+		wakeTerminateGrace = oldGrace
+		wakeTerminateKillConfirm = oldConfirm
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid != wakePID {
+			return wakeProcessInfo{PID: pid}
+		}
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    true,
+			StartToken: "start-1",
+			BootID:     "boot-1",
+			Executable: "/opt/homebrew/bin/amq",
+			Args:       []string{"/opt/homebrew/bin/amq", "wake", "--me", "codex", "--root", root},
+		}
+	})
+	oldSignal := signalWakeProcess
+	signalWakeProcess = func(int, os.Signal) error { return nil }
+	t.Cleanup(func() { signalWakeProcess = oldSignal })
+
+	start := time.Now()
+	err := terminateWakeProcess(inspectWakeLock(root, "codex"))
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "still alive after SIGKILL") {
+		t.Fatalf("immortal process error = %v, want SIGKILL confirmation refusal", err)
+	}
+	if elapsed < 200*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("immortal refusal took %s, want within the kill-confirm bound", elapsed)
 	}
 }
 

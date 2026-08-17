@@ -306,7 +306,7 @@ func terminateWakePidfd(pidfd int) error {
 		}
 		return fmt.Errorf("pidfd_send_signal SIGKILL: %w", err)
 	}
-	exited, err = linuxPidfdPoll(pidfd, wakeTerminateGrace)
+	exited, err = linuxPidfdPoll(pidfd, wakeTerminateKillConfirm)
 	if err != nil {
 		return fmt.Errorf("poll pidfd after SIGKILL: %w", err)
 	}

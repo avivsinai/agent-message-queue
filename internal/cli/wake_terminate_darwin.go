@@ -181,7 +181,7 @@ func terminateWakeProcess(inspection wakeLockInspection) error {
 	if err := signalWakeProcess(inspection.PID, syscall.SIGKILL); err != nil {
 		return fmt.Errorf("signal wake process SIGKILL: %w", err)
 	}
-	deadline := time.Now().Add(wakeTerminateGrace)
+	deadline := time.Now().Add(wakeTerminateKillConfirm)
 	for {
 		switch state := inspectWakeIdentity(inspection); state {
 		case wakeIdentityGoneOrDifferent:
@@ -219,7 +219,7 @@ func terminateWakeProcessInDir(
 	if err := signalWakeProcess(inspection.PID, syscall.SIGKILL); err != nil {
 		return fmt.Errorf("signal wake process SIGKILL: %w", err)
 	}
-	deadline := time.Now().Add(wakeTerminateGrace)
+	deadline := time.Now().Add(wakeTerminateKillConfirm)
 	for {
 		switch state := inspectWakeIdentity(inspection); state {
 		case wakeIdentityGoneOrDifferent:
