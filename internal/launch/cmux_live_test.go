@@ -31,6 +31,38 @@ func TestCmuxLive(t *testing.T) {
 		}
 		return inner(ctx, args...)
 	}
+	snapCtx, snapCancel := context.WithTimeout(context.Background(), cmuxCreateTimeout)
+	before, err := backend.listWorkspaces(snapCtx)
+	snapCancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeCount := len(before)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), cmuxCreateTimeout)
+		defer cancel()
+		listed, listErr := backend.listWorkspaces(ctx)
+		if listErr != nil {
+			t.Errorf("cleanup list workspaces: %v", listErr)
+			return
+		}
+		for _, id := range listed {
+			if cmuxContainsID(before, id) {
+				continue
+			}
+			if _, closeErr := backend.run(ctx, "close-workspace", "--workspace", id); closeErr != nil {
+				t.Errorf("cleanup close %s: %v", id, closeErr)
+			}
+		}
+		after, countErr := backend.listWorkspaces(ctx)
+		if countErr != nil {
+			t.Errorf("cleanup workspace count: %v", countErr)
+			return
+		}
+		if len(after) != beforeCount {
+			t.Errorf("live workspace/tab count not restored: before=%d after=%d", beforeCount, len(after))
+		}
+	})
 	project := t.TempDir()
 	root := tmuxTestRoot(t, "claude", "codex")
 	fakeAMQ := writeSleepAMQ(t)
@@ -45,9 +77,6 @@ func TestCmuxLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_, _ = backend.Close(CloseRequest{Binding: created.Binding, Root: root})
-	})
 	if created.Outcome != OutcomeCreated || countCmuxAgentResources(created.Binding) != 2 {
 		t.Fatalf("Create = %#v", created)
 	}
@@ -73,6 +102,13 @@ func TestCmuxLive(t *testing.T) {
 	absent, err := backend.Inspect(InspectRequest{Binding: created.Binding, Root: root})
 	if err != nil || absent.Status != InspectAbsent {
 		t.Fatalf("Inspect absent = %#v, %v", absent, err)
+	}
+	after, err := backend.listWorkspaces(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != beforeCount {
+		t.Fatalf("live workspace/tab count changed: before=%d after=%d", beforeCount, len(after))
 	}
 	if !strings.HasPrefix(created.Binding.InstanceIdentity, "cmux-socket:") {
 		t.Fatalf("instance identity = %q", created.Binding.InstanceIdentity)

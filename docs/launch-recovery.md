@@ -29,6 +29,9 @@ On the next launch, AMQ holds the session lease and follows these rules:
 definite-pre-create error that proves no resource was made. Partial creation is
 never adoptable.
 
+Managed cmux Create puts the new workspace in the app-wide active window and
+does not retarget it.
+
 If an operator chooses to abandon recovery evidence, first inspect the exact
 target without mutation:
 

@@ -87,66 +87,107 @@ if command == "capabilities":
           "methods": ["workspace.list"]})
     sys.exit(0)
 if command == "list-workspaces":
-    emit({"workspaces": [{"id": ws["id"], "window_id": ws.get("window_id", ""), "current_directory": ws.get("cwd", ""),
-                          "title": ws["title"]} for ws in state["workspaces"]]})
+    window_id = state.get("window_id", os.environ.get("AMQ_CMUX_FAKE_WINDOW", "019c5a10-75d8-7eef-8db7-5ee77f70aaa0"))
+    workspaces = []
+    for i, ws in enumerate(state["workspaces"]):
+        item = {
+            "id": ws["id"], "title": ws["title"], "current_directory": ws.get("cwd", ""),
+            "index": i + 1, "selected": bool(ws.get("selected")), "pinned": False,
+            "custom_color": None, "description": "", "listening_ports": [],
+            "remote": {},
+        }
+        if missing == "id":
+            del item["id"]
+        workspaces.append(item)
+    emit({"window_id": window_id, "workspaces": workspaces})
     sys.exit(0)
 if command == "new-workspace":
     ws_id = str(uuid.uuid4())
-    window_id = str(uuid.uuid4())
+    window_id = state.get("window_id") or str(uuid.uuid4())
     pane_id = str(uuid.uuid4())
     surface_id = str(uuid.uuid4())
+    ref = str(len(state["workspaces"]) + 1)
+    state["window_id"] = window_id
     state["workspaces"].append({
         "id": ws_id, "title": flags.get("name", ""), "window_id": window_id,
-        "cwd": flags.get("cwd", ""),
+        "cwd": flags.get("cwd", ""), "selected": False, "ref": ref,
         "panes": [{"id": pane_id, "surfaces": [{"id": surface_id}]}],
     })
     save(state)
-    created = {"id": ws_id, "window_id": window_id}
-    if missing == "id":
-        del created["id"]
-    emit(created)
+    print("OK workspace:" + ref)
     sys.exit(0)
 if command == "list-panes":
-    ws = next((item for item in state["workspaces"] if item["id"] == flags.get("workspace")), None)
-    emit({"panes": [{"id": pane["id"]} for pane in (ws["panes"] if ws else [])]})
+    ws = next((item for item in state["workspaces"] if item["id"].lower() == (flags.get("workspace") or "").lower()), None)
+    panes = []
+    for i, pane in enumerate(ws["panes"] if ws else []):
+        surface_ids = [surface["id"] for surface in pane.get("surfaces", [])]
+        panes.append({
+            "id": pane["id"], "index": i, "focused": False,
+            "selected_surface_id": surface_ids[0] if surface_ids else "",
+            "surface_ids": surface_ids, "surface_count": len(surface_ids),
+            "rows": 24, "columns": 80, "cell_width_px": 8, "cell_height_px": 16,
+            "pixel_frame": {},
+        })
+    emit({"container_frame": {}, "window_id": (ws or {}).get("window_id", ""),
+          "workspace_id": (ws or {}).get("id", ""), "panes": panes})
     sys.exit(0)
 if command == "list-pane-surfaces":
-    ws = next((item for item in state["workspaces"] if item["id"] == flags.get("workspace")), None)
+    ws = next((item for item in state["workspaces"] if item["id"].lower() == (flags.get("workspace") or "").lower()), None)
     pane = None
     if ws:
         pane = next((item for item in ws["panes"] if item["id"] == flags.get("pane")), None)
-    emit({"surfaces": [{"id": surface["id"]} for surface in (pane["surfaces"] if pane else [])]})
+    emit({"window_id": (ws or {}).get("window_id", ""), "workspace_id": (ws or {}).get("id", ""),
+          "pane_id": flags.get("pane", ""),
+          "surfaces": [{"id": surface["id"], "type": "terminal", "title": "", "index": i, "selected": i == 0}
+                       for i, surface in enumerate(pane["surfaces"] if pane else [])]})
     sys.exit(0)
 if command == "new-split":
-    ws = next((item for item in state["workspaces"] if item["id"] == flags.get("workspace")), None)
+    ws = next((item for item in state["workspaces"] if item["id"].lower() == (flags.get("workspace") or "").lower()), None)
     if ws is None:
         print("workspace not found", file=sys.stderr)
         sys.exit(1)
     surface_id = str(uuid.uuid4())
-    ws["panes"].append({"id": str(uuid.uuid4()), "surfaces": [{"id": surface_id}]})
+    pane_id = str(uuid.uuid4())
+    ws["panes"].append({"id": pane_id, "surfaces": [{"id": surface_id}]})
     save(state)
-    emit({"id": surface_id})
+    emit({"workspace_id": ws["id"], "surface_id": surface_id, "window_id": ws.get("window_id", ""),
+          "pane_id": pane_id, "type": "terminal"})
     sys.exit(0)
 if command == "surface-health":
-    ws = next((item for item in state["workspaces"] if item["id"] == flags.get("workspace")), None)
+    ws = next((item for item in state["workspaces"] if item["id"].lower() == (flags.get("workspace") or "").lower()), None)
+    require_select = os.environ.get("AMQ_CMUX_FAKE_REQUIRE_SELECT") == "1"
     surfaces = []
+    idx = 0
     if ws:
         for pane in ws["panes"]:
-            for surface in pane["surfaces"]:
-                item = {"id": surface["id"], "in_window": healthy}
+            for _surface in pane["surfaces"]:
+                in_window = healthy
+                if require_select:
+                    in_window = healthy and bool(ws.get("selected"))
+                item = {"index": idx, "ref": "surface:%d" % (idx + 1), "type": "terminal", "in_window": in_window}
                 if missing == "in_window":
                     del item["in_window"]
                 surfaces.append(item)
-    emit({"surfaces": surfaces})
+                idx += 1
+    emit({"window_ref": "window:1", "workspace_ref": "workspace:%s" % (ws or {}).get("ref", "1"),
+          "surfaces": surfaces})
     sys.exit(0)
-if command in ("send", "send-key", "select-workspace", "focus-window"):
+if command == "select-workspace":
+    want = (flags.get("workspace") or "").lower()
+    for ws in state["workspaces"]:
+        ws["selected"] = ws["id"].lower() == want
+    save(state)
+    print("OK workspace:" + next((ws.get("ref", "1") for ws in state["workspaces"] if ws["id"].lower() == want), "1"))
+    sys.exit(0)
+if command in ("send", "send-key", "focus-window"):
     emit({"ok": True})
     sys.exit(0)
 if command == "close-workspace":
-    before = len(state["workspaces"])
-    state["workspaces"] = [ws for ws in state["workspaces"] if ws["id"] != flags.get("workspace")]
+    want = (flags.get("workspace") or "").lower()
+    closed = next((ws for ws in state["workspaces"] if ws["id"].lower() == want), None)
+    state["workspaces"] = [ws for ws in state["workspaces"] if ws["id"].lower() != want]
     save(state)
-    emit({"ok": True, "closed": before - len(state["workspaces"])})
+    print("OK workspace:" + (closed or {}).get("ref", "1"))
     sys.exit(0)
 print("unknown command " + command, file=sys.stderr)
 sys.exit(2)
@@ -329,7 +370,7 @@ func TestCmuxMissingIDFailsClosed(t *testing.T) {
 	plan := cmuxTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eba5")
 	plan.Agents = plan.Agents[:1]
 	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root})
-	if err == nil || !strings.Contains(err.Error(), "not a UUID") && !strings.Contains(err.Error(), "new-workspace") {
+	if err == nil || !strings.Contains(err.Error(), "not a UUID") {
 		t.Fatalf("Create error = %v, want fail-closed uuid parse", err)
 	}
 }
@@ -359,8 +400,13 @@ func TestCmuxCreateTimeoutClosesSingleOrphanWorkspace(t *testing.T) {
 	backend, logPath := newFakeCmuxBackend(t)
 	backend.createTimeout = 20 * time.Millisecond
 	inner := backend.run
+	afterCreate := false
 	backend.run = func(ctx context.Context, args ...string) (string, error) {
+		if afterCreate {
+			assertCmuxOrphanCtxFresh(t, ctx, args)
+		}
 		if cmuxArgvHas(args, "new-workspace") {
+			afterCreate = true
 			if _, err := inner(context.Background(), args...); err != nil {
 				return "", err
 			}
@@ -416,6 +462,43 @@ func TestCmuxCreateTimeoutDoesNotCloseAmbiguousWorkspaces(t *testing.T) {
 	}
 	if cmuxFakeWorkspaceCount(t) != 2 {
 		t.Fatalf("ambiguous timeout closed workspaces: %d", cmuxFakeWorkspaceCount(t))
+	}
+}
+
+func TestCmuxCreateNonJSONClosesOrphanOnFreshContext(t *testing.T) {
+	backend, logPath := newFakeCmuxBackend(t)
+	backend.createTimeout = 20 * time.Millisecond
+	inner := backend.run
+	afterCreate := false
+	backend.run = func(ctx context.Context, args ...string) (string, error) {
+		if afterCreate {
+			assertCmuxOrphanCtxFresh(t, ctx, args)
+		}
+		if cmuxArgvHas(args, "new-workspace") {
+			afterCreate = true
+			if _, err := inner(context.Background(), args...); err != nil {
+				return "", err
+			}
+			return "Opened workspace", nil
+		}
+		return inner(ctx, args...)
+	}
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude")
+	plan := cmuxTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eaa3")
+	plan.Agents = plan.Agents[:1]
+	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root})
+	if err == nil || !strings.Contains(err.Error(), "parse cmux new-workspace") {
+		t.Fatalf("Create error = %v, want parse failure", err)
+	}
+	if !strings.Contains(err.Error(), "closed orphan cmux workspace") {
+		t.Fatalf("Create error = %v, want closed orphan after parse failure", err)
+	}
+	if indexOfCmuxCommand(readCmuxArgvLog(t, logPath), "close-workspace") < 0 {
+		t.Fatal("parse failure did not close the orphan workspace")
+	}
+	if cmuxFakeWorkspaceCount(t) != 0 {
+		t.Fatalf("parse failure left orphan workspaces: %d", cmuxFakeWorkspaceCount(t))
 	}
 }
 
@@ -725,6 +808,96 @@ func cmuxArgvHas(args []string, command string) bool {
 	return false
 }
 
+func assertCmuxOrphanCtxFresh(t *testing.T, ctx context.Context, args []string) {
+	t.Helper()
+	if !cmuxArgvHas(args, "list-workspaces") && !cmuxArgvHas(args, "close-workspace") {
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("%v used cancelled context: %v", args, err)
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatalf("%v missing deadline", args)
+	}
+	if remain := time.Until(deadline); remain < 20*time.Second {
+		t.Fatalf("%v leftover deadline %s, want a fresh create-timeout-scale bound", args, remain)
+	}
+}
+
+func assertCmuxFocusFalse(t *testing.T, calls [][]string) {
+	t.Helper()
+	seen := false
+	for _, argv := range calls {
+		if !cmuxArgvHas(argv, "new-workspace") && !cmuxArgvHas(argv, "new-split") {
+			continue
+		}
+		seen = true
+		focus := ""
+		for i, arg := range argv {
+			if arg == "--focus" && i+1 < len(argv) {
+				focus = argv[i+1]
+			}
+		}
+		if focus != "false" {
+			t.Fatalf("Create used --focus %q: %v", focus, argv)
+		}
+	}
+	if !seen {
+		t.Fatal("Create did not invoke new-workspace")
+	}
+}
+
+func seedCmuxSelectedWorkspace(t *testing.T) string {
+	t.Helper()
+	id := "019c5a10-75d8-7eef-8db7-5ee77f70aaa1"
+	state := map[string]any{
+		"socket_path": os.Getenv("AMQ_CMUX_FAKE_SOCKET"),
+		"window_id":   "019c5a10-75d8-7eef-8db7-5ee77f70aaa0",
+		"workspaces": []any{
+			map[string]any{
+				"id": id, "title": "operator-tab", "window_id": "019c5a10-75d8-7eef-8db7-5ee77f70aaa0",
+				"cwd": "", "selected": true, "ref": "1",
+				"panes": []any{map[string]any{
+					"id":       "019c5a10-75d8-7eef-8db7-5ee77f70aaa2",
+					"surfaces": []any{map[string]any{"id": "019c5a10-75d8-7eef-8db7-5ee77f70aaa3"}},
+				}},
+			},
+		},
+	}
+	out, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(os.Getenv("AMQ_CMUX_FAKE_STATE"), out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func cmuxFakeSelectedWorkspace(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(os.Getenv("AMQ_CMUX_FAKE_STATE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Workspaces []struct {
+			ID       string `json:"id"`
+			Selected bool   `json:"selected"`
+		} `json:"workspaces"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	for _, workspace := range state.Workspaces {
+		if workspace.Selected {
+			return strings.ToLower(workspace.ID)
+		}
+	}
+	return ""
+}
+
 func cmuxFakeWorkspaceCount(t *testing.T) int {
 	t.Helper()
 	data, err := os.ReadFile(os.Getenv("AMQ_CMUX_FAKE_STATE"))
@@ -763,6 +936,8 @@ func duplicateCmuxFakeNamedWorkspace(t *testing.T) {
 		"id":        "019c5a10-75d8-7eef-8db7-5ee77f70ffff",
 		"title":     first["title"],
 		"window_id": "019c5a10-75d8-7eef-8db7-5ee77f70fffe",
+		"selected":  first["selected"],
+		"ref":       "dup",
 		"panes":     first["panes"],
 	}
 	state["workspaces"] = append(workspaces, clone)
@@ -794,10 +969,73 @@ func TestCmuxArgvRecorderSeesCreateGrammar(t *testing.T) {
 	if _, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root}); err != nil {
 		t.Fatal(err)
 	}
-	joined := fmt.Sprint(readCmuxArgvLog(t, logPath))
-	for _, needle := range []string{"ping", "capabilities", "version", "new-workspace", "list-pane-surfaces", "surface-health", "send", "send-key"} {
+	calls := readCmuxArgvLog(t, logPath)
+	joined := fmt.Sprint(calls)
+	for _, needle := range []string{"ping", "capabilities", "version", "new-workspace", "list-workspaces", "list-panes", "surface-health", "send", "send-key"} {
 		if !strings.Contains(joined, needle) {
 			t.Fatalf("argv log missing %s: %s", needle, joined)
+		}
+	}
+	if strings.Contains(joined, "list-pane-surfaces") {
+		t.Fatalf("Create used list-pane-surfaces: %s", joined)
+	}
+	assertCmuxFocusFalse(t, calls)
+}
+
+func TestCmuxHealthyCreateDoesNotSelect(t *testing.T) {
+	backend, logPath := newFakeCmuxBackend(t)
+	previous := seedCmuxSelectedWorkspace(t)
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude")
+	plan := cmuxTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eab1")
+	plan.Agents = plan.Agents[:1]
+	if _, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root}); err != nil {
+		t.Fatal(err)
+	}
+	if indexOfCmuxCommand(readCmuxArgvLog(t, logPath), "select-workspace") >= 0 {
+		t.Fatal("healthy Create stole operator selection")
+	}
+	if got := cmuxFakeSelectedWorkspace(t); got != previous {
+		t.Fatalf("selected workspace = %q, want previous %q", got, previous)
+	}
+}
+
+func TestCmuxSelectsThenRestoresWhenInWindowFalse(t *testing.T) {
+	backend, logPath := newFakeCmuxBackend(t)
+	t.Setenv("AMQ_CMUX_FAKE_REQUIRE_SELECT", "1")
+	previous := seedCmuxSelectedWorkspace(t)
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude")
+	plan := cmuxTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eab2")
+	plan.Agents = plan.Agents[:1]
+	if _, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root}); err != nil {
+		t.Fatal(err)
+	}
+	var selected []string
+	for _, argv := range readCmuxArgvLog(t, logPath) {
+		if len(argv) > 0 && argv[0] == "select-workspace" {
+			for i, arg := range argv {
+				if arg == "--workspace" && i+1 < len(argv) {
+					selected = append(selected, strings.ToLower(argv[i+1]))
+				}
+			}
+		}
+	}
+	if len(selected) < 2 || selected[len(selected)-1] != previous {
+		t.Fatalf("select-workspace sequence = %v, want restore to %s", selected, previous)
+	}
+	if got := cmuxFakeSelectedWorkspace(t); got != previous {
+		t.Fatalf("selected workspace = %q, want restored %q", got, previous)
+	}
+}
+
+func TestParseCmuxOKWorkspaceAck(t *testing.T) {
+	if err := parseCmuxOKWorkspaceAck("OK workspace:5\n"); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{"{\"id\":\"019c5a10-75d8-7eef-8db7-5ee77f70e7a5\"}", "Opened workspace", "OK workspace:", "OK workspace:5\nextra"} {
+		if err := parseCmuxOKWorkspaceAck(raw); err == nil {
+			t.Errorf("parseCmuxOKWorkspaceAck(%q) succeeded, want error", raw)
 		}
 	}
 }

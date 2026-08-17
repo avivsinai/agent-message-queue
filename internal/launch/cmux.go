@@ -155,25 +155,42 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}
 	}
 	inspectCtx, inspectCancel := b.inspectCallContext()
-	existing, err := b.workspaceByName(inspectCtx, name)
+	before, err := b.listWorkspaceRecords(inspectCtx)
 	inspectCancel()
 	if err != nil {
 		return CreateResult{}, err
 	}
-	if existing != "" {
+	previousSelected := cmuxSelectedWorkspaceID(before)
+	if countNamedCmuxWorkspaces(before, name) > 0 {
 		return CreateResult{}, fmt.Errorf("cmux workspace %q already exists; journal recovery must classify it", name)
 	}
 
 	createCtx, createCancel := b.createCallContext()
-	createRaw, err := b.runJSON(createCtx, "new-workspace", "--name", name, "--cwd", req.ProjectRoot, "--focus", "true")
+	createRaw, err := b.runJSON(createCtx, "new-workspace", "--name", name, "--cwd", req.ProjectRoot, "--focus", "false")
 	createCancel()
 	if err != nil {
 		return CreateResult{}, b.reconcileCreateFailure(name, false, fmt.Errorf("create cmux workspace: %w", err))
 	}
-	workspaceID, windowID, err := parseCmuxCreatedWorkspace(createRaw)
+	if err := parseCmuxOKWorkspaceAck(createRaw); err != nil {
+		return CreateResult{}, b.reconcileCreateFailure(name, false, err)
+	}
+	resolveCtx, resolveCancel := b.inspectCallContext()
+	createdWS, err := b.uniqueWorkspaceByName(resolveCtx, name)
+	resolveCancel()
 	if err != nil {
 		return CreateResult{}, b.reconcileCreateFailure(name, false, err)
 	}
+	workspaceID := createdWS.ID
+	windowID := createdWS.WindowID
+	var didSelect bool
+	defer func() {
+		if !didSelect || previousSelected == "" || previousSelected == workspaceID {
+			return
+		}
+		ctx, cancel := b.inspectCallContext()
+		defer cancel()
+		_, _ = b.run(ctx, "select-workspace", "--workspace", previousSelected)
+	}()
 	surfaceCtx, surfaceCancel := b.inspectCallContext()
 	firstSurfaces, err := b.workspaceSurfaces(surfaceCtx, workspaceID)
 	surfaceCancel()
@@ -186,18 +203,20 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	surfaceIDs := []string{firstSurfaces[0]}
 	for _, agent := range req.Plan.Agents[1:] {
 		splitCtx, splitCancel := b.createCallContext()
-		splitRaw, splitErr := b.runJSON(splitCtx, "new-split", "right", "--workspace", workspaceID, "--surface", surfaceIDs[len(surfaceIDs)-1], "--focus", "true")
+		splitRaw, splitErr := b.runJSON(splitCtx, "new-split", "right", "--workspace", workspaceID, "--surface", surfaceIDs[len(surfaceIDs)-1], "--focus", "false")
 		splitCancel()
 		if splitErr != nil {
 			return CreateResult{}, b.reconcileCreateFailure(name, false, fmt.Errorf("create cmux split for %s: %w", agent.Handle, splitErr))
 		}
-		surfaceID, splitErr := parseCmuxID(splitRaw)
+		surfaceID, splitErr := parseCmuxSplitSurface(splitRaw)
 		if splitErr != nil {
 			return CreateResult{}, b.reconcileCreateFailure(name, false, fmt.Errorf("cmux split for %s: %w", agent.Handle, splitErr))
 		}
 		surfaceIDs = append(surfaceIDs, surfaceID)
 	}
-	if err := b.waitHealthy(context.Background(), workspaceID, surfaceIDs); err != nil {
+	selected, err := b.waitHealthy(context.Background(), workspaceID, len(surfaceIDs))
+	didSelect = selected
+	if err != nil {
 		return CreateResult{}, b.reconcileCreateFailure(name, false, err)
 	}
 	for i, agent := range req.Plan.Agents {
@@ -246,21 +265,19 @@ func (b *CmuxBackend) inspectCallContext() (context.Context, context.CancelFunc)
 	return context.WithTimeout(context.Background(), cmuxCommandTimeout)
 }
 
+func (b *CmuxBackend) orphanCallContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), cmuxCreateTimeout)
+}
+
 func (b *CmuxBackend) reconcileCreateFailure(name string, inputSent bool, cause error) error {
 	if inputSent {
 		return cause
 	}
-	ctx, cancel := b.inspectCallContext()
+	ctx, cancel := b.orphanCallContext()
 	defer cancel()
-	records, err := b.listWorkspaceRecords(ctx)
+	matches, err := b.namedWorkspaces(ctx, name)
 	if err != nil {
 		return fmt.Errorf("%w (orphan workspace reconciliation failed: %v)", cause, err)
-	}
-	var matches []cmuxListedWorkspace
-	for _, workspace := range records {
-		if workspace.Title == name {
-			matches = append(matches, workspace)
-		}
 	}
 	switch len(matches) {
 	case 0:
@@ -491,7 +508,7 @@ func (b *CmuxBackend) validateBindingContext(binding BindingRecord) error {
 	return nil
 }
 
-func (b *CmuxBackend) waitHealthy(parent context.Context, workspaceID string, surfaceIDs []string) error {
+func (b *CmuxBackend) waitHealthy(parent context.Context, workspaceID string, want int) (bool, error) {
 	timeout := b.healthTimeout
 	if timeout <= 0 {
 		timeout = cmuxHealthTimeout
@@ -501,25 +518,37 @@ func (b *CmuxBackend) waitHealthy(parent context.Context, workspaceID string, su
 		poll = cmuxHealthPoll
 	}
 	deadline := time.Now().Add(timeout)
+	didSelect := false
 	for {
 		ctx, cancel := context.WithTimeout(parent, cmuxCommandTimeout)
 		raw, err := b.runJSON(ctx, "surface-health", "--workspace", workspaceID)
-		cancel()
 		if err == nil {
-			if ready, readyErr := cmuxSurfacesHealthy(raw, surfaceIDs); readyErr != nil {
-				return readyErr
-			} else if ready {
-				return nil
+			ready, needSelect, readyErr := cmuxSurfacesHealthy(raw, want)
+			if readyErr != nil {
+				cancel()
+				return didSelect, readyErr
+			}
+			if ready {
+				cancel()
+				return didSelect, nil
+			}
+			if needSelect && !didSelect {
+				if _, selErr := b.run(ctx, "select-workspace", "--workspace", workspaceID); selErr != nil {
+					cancel()
+					return false, selErr
+				}
+				didSelect = true
 			}
 		}
+		cancel()
 		if time.Now().After(deadline) {
 			if err != nil {
-				return fmt.Errorf("cmux surface readiness timed out: %w", err)
+				return didSelect, fmt.Errorf("cmux surface readiness timed out: %w", err)
 			}
-			return fmt.Errorf("cmux surface readiness timed out before sending commands")
+			return didSelect, fmt.Errorf("cmux surface readiness timed out before sending commands")
 		}
 		if err := b.doSleep(parent, poll); err != nil {
-			return err
+			return didSelect, err
 		}
 	}
 }
@@ -529,39 +558,56 @@ func (b *CmuxBackend) workspaceSurfaces(ctx context.Context, workspaceID string)
 	if err != nil {
 		return nil, fmt.Errorf("list cmux panes: %w", err)
 	}
-	panes, err := parseCmuxIDList(raw, "panes")
+	surfaces, err := parseCmuxPaneSurfaceIDs(raw)
 	if err != nil {
 		return nil, err
 	}
-	if len(panes) == 0 {
-		return nil, fmt.Errorf("cmux workspace has no panes")
-	}
-	var surfaces []string
-	for _, pane := range panes {
-		paneRaw, paneErr := b.runJSON(ctx, "list-pane-surfaces", "--workspace", workspaceID, "--pane", pane)
-		if paneErr != nil {
-			return nil, fmt.Errorf("list cmux pane surfaces: %w", paneErr)
-		}
-		ids, paneErr := parseCmuxIDList(paneRaw, "surfaces")
-		if paneErr != nil {
-			return nil, paneErr
-		}
-		surfaces = append(surfaces, ids...)
+	if len(surfaces) == 0 {
+		return nil, fmt.Errorf("cmux workspace has no surfaces")
 	}
 	return surfaces, nil
 }
 
+func (b *CmuxBackend) uniqueWorkspaceByName(ctx context.Context, name string) (cmuxListedWorkspace, error) {
+	matches, err := b.namedWorkspaces(ctx, name)
+	if err != nil {
+		return cmuxListedWorkspace{}, err
+	}
+	switch len(matches) {
+	case 0:
+		return cmuxListedWorkspace{}, fmt.Errorf("no cmux workspace named %q appeared", name)
+	case 1:
+		return matches[0], nil
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, workspace := range matches {
+			ids = append(ids, strings.ToLower(workspace.ID))
+		}
+		return cmuxListedWorkspace{}, fmt.Errorf("ambiguous cmux workspaces named %q: %s; unknown, never guessed", name, strings.Join(ids, ","))
+	}
+}
+
+func (b *CmuxBackend) namedWorkspaces(ctx context.Context, name string) ([]cmuxListedWorkspace, error) {
+	records, err := b.listWorkspaceRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return namedCmuxWorkspaces(records, name), nil
+}
+
 func (b *CmuxBackend) workspaceByName(ctx context.Context, name string) (string, error) {
-	workspaces, err := b.listWorkspaceRecords(ctx)
+	matches, err := b.namedWorkspaces(ctx, name)
 	if err != nil {
 		return "", err
 	}
-	for _, workspace := range workspaces {
-		if workspace.Title == name {
-			return strings.ToLower(workspace.ID), nil
-		}
+	switch len(matches) {
+	case 0:
+		return "", nil
+	case 1:
+		return strings.ToLower(matches[0].ID), nil
+	default:
+		return "", fmt.Errorf("ambiguous cmux workspaces named %q", name)
 	}
-	return "", nil
 }
 
 func (b *CmuxBackend) listWorkspaces(ctx context.Context) ([]string, error) {
@@ -660,18 +706,14 @@ type cmuxCapabilities struct {
 }
 
 type cmuxListedWorkspace struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-}
-
-type cmuxCreatedWorkspace struct {
 	ID       string `json:"id"`
+	Title    string `json:"title"`
 	WindowID string `json:"window_id"`
+	Selected bool   `json:"selected"`
 }
 
 type cmuxHealthSurface struct {
-	ID       string `json:"id"`
-	InWindow *bool  `json:"in_window"`
+	InWindow *bool `json:"in_window"`
 }
 
 func parseCmuxCapabilities(raw string) (cmuxCapabilities, error) {
@@ -702,6 +744,7 @@ func parseCmuxCapabilities(raw string) (cmuxCapabilities, error) {
 
 func parseCmuxWorkspaceList(raw string) ([]cmuxListedWorkspace, error) {
 	var parsed struct {
+		WindowID   string                `json:"window_id"`
 		Workspaces []cmuxListedWorkspace `json:"workspaces"`
 	}
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
@@ -710,94 +753,139 @@ func parseCmuxWorkspaceList(raw string) ([]cmuxListedWorkspace, error) {
 	if parsed.Workspaces == nil {
 		return nil, fmt.Errorf("cmux workspaces list is missing")
 	}
+	envelopeWindow := strings.TrimSpace(parsed.WindowID)
+	if envelopeWindow != "" {
+		id, err := normalizeCmuxUUID(envelopeWindow)
+		if err != nil {
+			return nil, fmt.Errorf("cmux workspaces window_id: %w", err)
+		}
+		envelopeWindow = id
+	}
 	for i, workspace := range parsed.Workspaces {
 		id, err := normalizeCmuxUUID(workspace.ID)
 		if err != nil {
 			return nil, fmt.Errorf("cmux workspaces[%d]: %w", i, err)
 		}
 		parsed.Workspaces[i].ID = id
+		windowID := strings.TrimSpace(workspace.WindowID)
+		if windowID == "" {
+			parsed.Workspaces[i].WindowID = envelopeWindow
+			continue
+		}
+		windowID, err = normalizeCmuxUUID(windowID)
+		if err != nil {
+			return nil, fmt.Errorf("cmux workspaces[%d] window_id: %w", i, err)
+		}
+		parsed.Workspaces[i].WindowID = windowID
 	}
 	return parsed.Workspaces, nil
 }
 
-func parseCmuxCreatedWorkspace(raw string) (string, string, error) {
-	var parsed cmuxCreatedWorkspace
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return "", "", fmt.Errorf("parse cmux new-workspace: %w", err)
+func parseCmuxOKWorkspaceAck(raw string) error {
+	if strings.Contains(strings.TrimSuffix(raw, "\n"), "\n") {
+		return fmt.Errorf("parse cmux new-workspace: extra line")
 	}
-	id, err := normalizeCmuxUUID(parsed.ID)
-	if err != nil {
-		return "", "", fmt.Errorf("cmux new-workspace: %w", err)
+	line := strings.TrimSpace(raw)
+	if !strings.HasPrefix(line, "OK workspace:") {
+		return fmt.Errorf("parse cmux new-workspace: want OK workspace: ack, got %q", line)
 	}
-	windowID := strings.TrimSpace(parsed.WindowID)
-	if windowID != "" {
-		windowID, err = normalizeCmuxUUID(windowID)
-		if err != nil {
-			return "", "", fmt.Errorf("cmux new-workspace window_id: %w", err)
-		}
+	if strings.TrimSpace(strings.TrimPrefix(line, "OK workspace:")) == "" {
+		return fmt.Errorf("parse cmux new-workspace: missing workspace ref")
 	}
-	return id, windowID, nil
+	return nil
 }
 
-func parseCmuxID(raw string) (string, error) {
+func parseCmuxSplitSurface(raw string) (string, error) {
 	var parsed struct {
-		ID string `json:"id"`
+		SurfaceID string `json:"surface_id"`
 	}
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return "", fmt.Errorf("parse cmux id: %w", err)
+		return "", fmt.Errorf("parse cmux new-split: %w", err)
 	}
-	return normalizeCmuxUUID(parsed.ID)
+	id, err := normalizeCmuxUUID(parsed.SurfaceID)
+	if err != nil {
+		return "", fmt.Errorf("cmux new-split surface_id: %w", err)
+	}
+	return id, nil
 }
 
-func parseCmuxIDList(raw, field string) ([]string, error) {
-	var parsed map[string][]struct {
-		ID string `json:"id"`
+func parseCmuxPaneSurfaceIDs(raw string) ([]string, error) {
+	var parsed struct {
+		Panes []struct {
+			SurfaceIDs []string `json:"surface_ids"`
+		} `json:"panes"`
 	}
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return nil, fmt.Errorf("parse cmux %s: %w", field, err)
+		return nil, fmt.Errorf("parse cmux panes: %w", err)
 	}
-	items, ok := parsed[field]
-	if !ok || items == nil {
-		return nil, fmt.Errorf("cmux %s list is missing", field)
+	if parsed.Panes == nil {
+		return nil, fmt.Errorf("cmux panes list is missing")
 	}
-	ids := make([]string, 0, len(items))
-	for i, item := range items {
-		id, err := normalizeCmuxUUID(item.ID)
-		if err != nil {
-			return nil, fmt.Errorf("cmux %s[%d]: %w", field, i, err)
+	var ids []string
+	for i, pane := range parsed.Panes {
+		if pane.SurfaceIDs == nil {
+			return nil, fmt.Errorf("cmux panes[%d]: surface_ids is missing", i)
 		}
-		ids = append(ids, id)
+		for j, surfaceID := range pane.SurfaceIDs {
+			id, err := normalizeCmuxUUID(surfaceID)
+			if err != nil {
+				return nil, fmt.Errorf("cmux panes[%d].surface_ids[%d]: %w", i, j, err)
+			}
+			ids = append(ids, id)
+		}
 	}
 	return ids, nil
 }
 
-func cmuxSurfacesHealthy(raw string, want []string) (bool, error) {
+func cmuxSurfacesHealthy(raw string, want int) (bool, bool, error) {
 	var parsed struct {
 		Surfaces []cmuxHealthSurface `json:"surfaces"`
 	}
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return false, fmt.Errorf("parse cmux surface-health: %w", err)
+		return false, false, fmt.Errorf("parse cmux surface-health: %w", err)
 	}
 	if parsed.Surfaces == nil {
-		return false, fmt.Errorf("cmux surface-health list is missing")
+		return false, false, fmt.Errorf("cmux surface-health list is missing")
 	}
-	health := map[string]bool{}
+	if len(parsed.Surfaces) != want {
+		return false, false, nil
+	}
+	needSelect := false
 	for i, surface := range parsed.Surfaces {
-		id, err := normalizeCmuxUUID(surface.ID)
-		if err != nil {
-			return false, fmt.Errorf("cmux surface-health[%d]: %w", i, err)
-		}
 		if surface.InWindow == nil {
-			return false, fmt.Errorf("cmux surface-health[%d]: in_window is required", i)
+			return false, false, fmt.Errorf("cmux surface-health[%d]: in_window is required", i)
 		}
-		health[id] = *surface.InWindow
-	}
-	for _, id := range want {
-		if !health[id] {
-			return false, nil
+		if !*surface.InWindow {
+			needSelect = true
 		}
 	}
-	return true, nil
+	if needSelect {
+		return false, true, nil
+	}
+	return true, false, nil
+}
+
+func namedCmuxWorkspaces(records []cmuxListedWorkspace, name string) []cmuxListedWorkspace {
+	var matches []cmuxListedWorkspace
+	for _, workspace := range records {
+		if workspace.Title == name {
+			matches = append(matches, workspace)
+		}
+	}
+	return matches
+}
+
+func countNamedCmuxWorkspaces(records []cmuxListedWorkspace, name string) int {
+	return len(namedCmuxWorkspaces(records, name))
+}
+
+func cmuxSelectedWorkspaceID(records []cmuxListedWorkspace) string {
+	for _, workspace := range records {
+		if workspace.Selected {
+			return strings.ToLower(workspace.ID)
+		}
+	}
+	return ""
 }
 
 func normalizeCmuxUUID(id string) (string, error) {
