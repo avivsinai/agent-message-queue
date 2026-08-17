@@ -714,12 +714,36 @@ func (c CLI) run(ctx context.Context, args ...string) ([]byte, string, error) {
 	return stdout.Bytes(), stderr.String(), err
 }
 
+type wakeReadyTimer struct {
+	channel <-chan time.Time
+	stop    func()
+}
+
+type wakeReadyTimerFactory func(time.Duration) wakeReadyTimer
+type wakeGraceObserver func(<-chan wakeProcessResult, string, time.Duration) (bool, bool, error)
+
+func newRealWakeReadyTimer(timeout time.Duration) wakeReadyTimer {
+	timer := time.NewTimer(timeout)
+	return wakeReadyTimer{channel: timer.C, stop: func() { timer.Stop() }}
+}
+
 func waitForWakeReady(ctx context.Context, done <-chan wakeProcessResult, readyFile string, timeout time.Duration) (bool, error) {
+	return waitForWakeReadyWith(ctx, done, readyFile, timeout, newRealWakeReadyTimer, observeWakeDuringGrace)
+}
+
+func waitForWakeReadyWith(
+	ctx context.Context,
+	done <-chan wakeProcessResult,
+	readyFile string,
+	timeout time.Duration,
+	newTimer wakeReadyTimerFactory,
+	observe wakeGraceObserver,
+) (bool, error) {
 	if timeout <= 0 {
 		timeout = defaultWakeReadyTimeout
 	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	timer := newTimer(timeout)
+	defer timer.stop()
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -731,12 +755,12 @@ func waitForWakeReady(ctx context.Context, done <-chan wakeProcessResult, readyF
 		case result := <-done:
 			return finishWakeProcess(result, readyFile)
 		case <-ctx.Done():
-			if processDone, observed, err := observeWakeDuringGrace(done, readyFile, wakeProcessExitGrace); observed {
+			if processDone, observed, err := observe(done, readyFile, wakeProcessExitGrace); observed {
 				return processDone, err
 			}
 			return false, ctx.Err()
-		case <-timer.C:
-			if processDone, observed, err := observeWakeDuringGrace(done, readyFile, wakeProcessExitGrace); observed {
+		case <-timer.channel:
+			if processDone, observed, err := observe(done, readyFile, wakeProcessExitGrace); observed {
 				return processDone, err
 			}
 			return false, fmt.Errorf("timed out after %s waiting for amq wake readiness", timeout)

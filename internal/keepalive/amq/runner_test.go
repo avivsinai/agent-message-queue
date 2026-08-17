@@ -595,7 +595,6 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 `)
 	registerDetachedWakeCleanup(t, pidFile, release)
 
-	start := time.Now()
 	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
 		Root:      "/tmp/amq-root",
 		Me:        "codex",
@@ -610,8 +609,38 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 	if !strings.Contains(err.Error(), "timed out") || !errors.Is(err, ErrWakeReadinessUncertain) {
 		t.Fatalf("error = %v, want uncertain timeout", err)
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("StartWake took %s, want timeout branch to return promptly", elapsed)
+}
+
+func TestWaitForWakeReadyUsesRequestedTimeoutDeterministically(t *testing.T) {
+	timeoutSignal := make(chan time.Time, 1)
+	timeoutSignal <- time.Time{}
+	var requestedTimeout time.Duration
+	var observedGrace time.Duration
+	processDone, err := waitForWakeReadyWith(
+		context.Background(),
+		make(chan wakeProcessResult),
+		filepath.Join(t.TempDir(), "missing"),
+		50*time.Millisecond,
+		func(timeout time.Duration) wakeReadyTimer {
+			requestedTimeout = timeout
+			return wakeReadyTimer{channel: timeoutSignal, stop: func() {}}
+		},
+		func(_ <-chan wakeProcessResult, _ string, grace time.Duration) (bool, bool, error) {
+			observedGrace = grace
+			return false, false, nil
+		},
+	)
+	if processDone {
+		t.Fatal("waitForWakeReadyWith() processDone = true, want uncertain timeout")
+	}
+	if err == nil || !strings.Contains(err.Error(), "timed out after 50ms") {
+		t.Fatalf("waitForWakeReadyWith() error = %v, want exact timeout", err)
+	}
+	if requestedTimeout != 50*time.Millisecond {
+		t.Fatalf("timer duration = %s, want 50ms", requestedTimeout)
+	}
+	if observedGrace != wakeProcessExitGrace {
+		t.Fatalf("observation grace = %s, want %s", observedGrace, wakeProcessExitGrace)
 	}
 }
 
