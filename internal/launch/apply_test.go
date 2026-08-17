@@ -12,6 +12,61 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
+type applyUnavailableAdapter struct{ prepareTestAdapter }
+
+func (adapter applyUnavailableAdapter) Capabilities(context.Context) AdapterCapabilities {
+	return AdapterCapabilities{
+		Provider: adapter.provider, Mode: adapter.Mode(), Available: false,
+		ProviderVersion: "test", Reason: "executable_not_found",
+	}
+}
+
+func TestApplyDoesNotPromoteNoActionToApplied(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	base := filepath.Join(root, "mail")
+	for _, path := range []string{project, base} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := ApplyRequest{Prepare: PrepareRequest{
+		Target:   PrepareTarget{ProjectRoot: project, SessionRoot: filepath.Join(base, "collab"), Session: "collab"},
+		Launcher: "test", IntentDigest: "sha256:" + string(bytes.Repeat([]byte{'f'}, 64)),
+		Participants: []PrepareParticipant{{
+			Handle: "claude", Provider: ClaudeProvider, Executable: "claude", Runnable: true,
+			Cwd: project, ResumePolicy: ResumeDisabled,
+		}},
+	}}
+	backend := &prepareTestBackend{}
+	dependencies := ApplyDependencies{PrepareDependencies: PrepareDependencies{
+		Backends: map[string]Backend{"test": backend}, Preferences: []string{"test"},
+		AdapterFor: func(provider, executable string) HarnessAdapter {
+			return applyUnavailableAdapter{prepareTestAdapter{provider: provider}}
+		},
+		HostIdentity: "host:test",
+	}}
+	prepared, err := Prepare(context.Background(), request.Prepare, dependencies.PrepareDependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.SubjectDigest = prepared.SubjectDigest
+	for _, action := range prepared.RequiredActions {
+		request.Decisions = append(request.Decisions, ApplyDecision{ActionID: action.ActionID, Choice: "trust_exact_subject"})
+	}
+
+	result, err := Apply(context.Background(), request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != ApplyOutcomeActionRequired || result.ReasonCode != "launch_action_required" {
+		t.Fatalf("Apply result = %#v, want action_required without public no_action promotion", result)
+	}
+	if backend.creates != 0 {
+		t.Fatalf("unavailable adapter created backend resources: %d", backend.creates)
+	}
+}
+
 func TestApplyPublishedSessionCannotLoseLeaseTransitionRace(t *testing.T) {
 	root := t.TempDir()
 	project := filepath.Join(root, "project")

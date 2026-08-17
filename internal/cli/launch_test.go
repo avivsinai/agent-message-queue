@@ -165,6 +165,53 @@ func TestLaunchNonInteractiveUntrustedIsExit6AndNoRuntimeWrites(t *testing.T) {
 	}
 }
 
+func TestLaunchNoActionOutcomeAndRequireAgent(t *testing.T) {
+	_, _ = launchCLIFixture(t, "collab")
+	launchAdapters = func(launch.ProjectConfig) map[string]launch.HarnessAdapter {
+		return map[string]launch.HarnessAdapter{"claude": launchFixtureAdapter{
+			available: false, reason: "executable_not_found",
+		}}
+	}
+
+	stdout, _, err := captureEnvOutput(t, func() error { return runLaunch([]string{"--json"}) })
+	if err != nil {
+		t.Fatalf("default all-unsupported launch: %v\n%s", err, stdout)
+	}
+	var result launch.ReconcileResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != launch.OutcomeNoAction || result.AggregateCode != ExitSuccess ||
+		len(result.Agents) != 1 || result.Agents[0].ConversationDisposition != launch.DispositionUnsupported {
+		t.Fatalf("default all-unsupported result = %#v", result)
+	}
+
+	for _, test := range []struct {
+		name string
+		run  func() error
+	}{
+		{name: "launch", run: func() error { return runLaunch([]string{"--require-agent", "--json"}) }},
+		{name: "session resume", run: func() error {
+			return runSession([]string{"resume", "collab", "--require-agent", "--json"})
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stdout, _, err := captureEnvOutput(t, test.run)
+			if GetExitCode(err) != ExitActionRequired {
+				t.Fatalf("exit=%d err=%v\n%s", GetExitCode(err), err, stdout)
+			}
+			var result launch.ReconcileResult
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Outcome != launch.OutcomeNoAction || result.AggregateCode != ExitActionRequired ||
+				result.Reason != launch.ReasonNoAgentLaunched {
+				t.Fatalf("require-agent result = %#v", result)
+			}
+		})
+	}
+}
+
 func TestLaunchWithoutExecutionRemintsAndResumeJSONKeepsSchema(t *testing.T) {
 	project, _ := launchCLIFixture(t, "collab", "empty")
 	launchIsTerminal = func() bool { return true }

@@ -58,6 +58,7 @@ func runLaunchEngine(args []string, options launchCLIOptions) error {
 	freshFlag := fs.Bool("fresh", false, "Start fresh conversations for this launch")
 	allowFreshFlag := fs.Bool("allow-fresh-fallback", false, "Allow fresh conversations when saved identities are stale")
 	rebindFlag := fs.Bool("rebind", false, "Confirm a deliberate launcher binding change")
+	requireAgentFlag := fs.Bool("require-agent", false, "Require at least one agent to launch or attach")
 	planFlag := fs.String("plan", "", "Public LaunchIntentV1 file, or - for stdin")
 	prepareFlag := fs.Bool("prepare", false, "Prepare the public launch intent without mutation (requires --plan and --json)")
 	applyFlag := fs.String("apply", "", "Public ApplyRequestV1 file, or - for stdin (requires --json)")
@@ -78,7 +79,8 @@ func runLaunchEngine(args []string, options launchCLIOptions) error {
 		if options.resumeOnly {
 			return UsageError("session resume does not accept --plan, --prepare, or --apply")
 		}
-		if flagWasVisited(fs, "fresh") || flagWasVisited(fs, "allow-fresh-fallback") || flagWasVisited(fs, "rebind") {
+		if flagWasVisited(fs, "fresh") || flagWasVisited(fs, "allow-fresh-fallback") ||
+			flagWasVisited(fs, "rebind") || flagWasVisited(fs, "require-agent") {
 			return UsageError("--plan, --prepare, and --apply do not accept legacy launch decision flags")
 		}
 		return runPublicLaunch(common, *sessionFlag, *launcherFlag, *planFlag, *prepareFlag, *applyFlag, fs)
@@ -210,6 +212,10 @@ func runLaunchEngine(args []string, options launchCLIOptions) error {
 	result, err := launch.Reconcile(request)
 	if err != nil {
 		return err
+	}
+	if *requireAgentFlag && result.Outcome == launch.OutcomeNoAction && result.AggregateCode == ExitSuccess {
+		result.AggregateCode = ExitActionRequired
+		result.Reason = launch.ReasonNoAgentLaunched
 	}
 	if err := outputLaunchResult(common.JSON, result); err != nil {
 		return err

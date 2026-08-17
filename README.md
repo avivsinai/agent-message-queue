@@ -170,6 +170,10 @@ exit `6` until that digest is trusted. An unknown `session resume` name exits
 `3` and writes nothing. Managed backends use a fail-closed recovery journal;
 see [Managed launch recovery](docs/launch-recovery.md).
 
+The stable executable path before symlink resolution is the trusted identity;
+retargeting that symlink is machine-owner territory, in the same trust class
+as changing `PATH`.
+
 The `commands` backend prints complete `coop exec` commands and exits `6`
 because executing them is the remaining operator action. Paste those emitted
 lines exactly, one per terminal. Do not reconstruct them from examples: they

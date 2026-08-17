@@ -65,6 +65,7 @@ func TestReconcileUsesAndRetainsCallerHeldLease(t *testing.T) {
 
 type reconcileAdapter struct {
 	name               string
+	capabilityProvider string
 	mode               AdapterMode
 	available          bool
 	reason             string
@@ -77,8 +78,12 @@ func (a reconcileAdapter) Name() string               { return a.name }
 func (a reconcileAdapter) Mode() AdapterMode          { return a.mode }
 func (a reconcileAdapter) CommittedEnvKeys() []string { return nil }
 func (a reconcileAdapter) Capabilities(context.Context) AdapterCapabilities {
+	provider := a.name
+	if a.capabilityProvider != "" {
+		provider = a.capabilityProvider
+	}
 	return AdapterCapabilities{
-		Provider: a.name, Mode: a.mode, Available: a.available,
+		Provider: provider, Mode: a.mode, Available: a.available,
 		ProviderVersion: "test", Fresh: a.available && !a.freshUnsupported,
 		Resume:  a.available && !a.resumeUnsupported,
 		Capture: a.available && a.mode == AdapterModeCapture && !a.captureUnsupported, Reason: a.reason,
@@ -790,8 +795,20 @@ func TestReconcileUntrustedAndRosterDriftAreStructured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.AggregateCode != 0 || result.Agents[0].ConversationDisposition != DispositionUnsupported || backend.creates != 0 {
+	if result.AggregateCode != 0 || result.Outcome != OutcomeNoAction ||
+		result.Agents[0].ConversationDisposition != DispositionUnsupported || backend.creates != 0 {
 		t.Fatalf("roster drift result=%#v", result)
+	}
+	req.Adapters["claude"] = reconcileAdapter{
+		name: "claude", capabilityProvider: "wrong-provider", mode: AdapterModeMint, available: true,
+	}
+	result, err = Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AggregateCode != 1 || result.Outcome == OutcomeNoAction ||
+		result.Agents[0].ConversationDisposition != DispositionDegraded || backend.creates != 0 {
+		t.Fatalf("degraded result=%#v", result)
 	}
 }
 
