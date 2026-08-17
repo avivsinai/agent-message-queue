@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -130,6 +131,7 @@ exec /bin/sleep 60
 	env := append(os.Environ(),
 		"HOME="+t.TempDir(), "XDG_STATE_HOME="+xdgState, "TMUX_TMPDIR="+socketDir,
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"AMQ_NO_UPDATE_CHECK=1",
 	)
 	serverRunning := false
 	t.Cleanup(func() { stopHermeticTmuxServer(t, socketDir, sessionRoot, "claude", serverRunning) })
@@ -197,15 +199,72 @@ func trustPlan(t *testing.T, store *launch.TrustStore, plan launch.Plan, root *f
 
 func runRealAMQ(t *testing.T, binary, project string, env []string, args ...string) []byte {
 	t.Helper()
+	stdout, stderr, err := runRealAMQStreams(t, binary, project, env, args...)
+	if err != nil {
+		t.Fatalf("real amq %v: %v\nstdout=%s\nstderr=%s", args, err, stdout, stderr)
+	}
+	return stdout
+}
+
+func runRealAMQStreams(t *testing.T, binary, project string, env []string, args ...string) ([]byte, []byte, error) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir, cmd.Env = project, env
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("real amq %v: %v\n%s", args, err, output)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func TestRunRealAMQJSONParseIgnoresUpdateHintOnStderr(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and executes the real amq binary")
 	}
-	return output
+	repo, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	amqBinary := filepath.Join(t.TempDir(), "amq")
+	build := exec.Command("go", "build", "-ldflags", "-X main.version=0.62.1-99-gdeadbeef", "-o", amqBinary, "./cmd/amq")
+	build.Dir = repo
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build real amq: %v\n%s", err, output)
+	}
+	home := t.TempDir()
+	cachePayload := []byte(`{"checked_at":"2026-08-17T00:00:00Z","latest_version":"0.63.0"}`)
+	for _, cacheDir := range []string{
+		filepath.Join(home, "Library", "Caches", "amq"),
+		filepath.Join(home, ".cache", "amq"),
+	} {
+		if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cacheDir, "update.json"), cachePayload, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := []string{
+		"HOME=" + home,
+		"XDG_CACHE_HOME=" + filepath.Join(home, ".cache"),
+		"PATH=" + filepath.Dir(amqBinary) + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	root := t.TempDir()
+	if _, stderr, err := runRealAMQStreams(t, amqBinary, root, env, "init", "--root", root, "--agents", "claude"); err != nil {
+		t.Fatalf("real amq init: %v\nstderr=%s", err, stderr)
+	}
+	stdout, stderr, err := runRealAMQStreams(t, amqBinary, root, env, "env", "--root", root, "--json")
+	if err != nil {
+		t.Fatalf("real amq env --json: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	if !strings.Contains(string(stderr), "amq: update available") {
+		t.Fatalf("stderr missing update hint:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(stdout, &payload); err != nil {
+		t.Fatalf("stdout JSON parse failed with update hint on stderr: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
 }
 
 func waitForProviderLog(t *testing.T, path, needle string) {
@@ -236,6 +295,13 @@ func stopHermeticTmuxServer(t *testing.T, socketDir, sessionRoot, handle string,
 	if requireServer && !serverFound {
 		t.Fatal("hermetic tmux server disappeared before teardown")
 	}
+	if requireServer && !wakeFound {
+		wake, waitErr := waitForHermeticWakeLock(sessionRoot, handle, wakeProcessExitTimeout)
+		if waitErr != nil {
+			t.Fatal(waitErr)
+		}
+		processes = append(processes, hermeticTmuxProcess{pid: wake.PID, role: "wake"})
+	}
 	if serverFound {
 		cmd := exec.Command("tmux", "kill-server")
 		cmd.Env = append(os.Environ(), "TMUX_TMPDIR="+socketDir)
@@ -245,9 +311,6 @@ func stopHermeticTmuxServer(t *testing.T, socketDir, sessionRoot, handle string,
 	}
 	if err := waitForHermeticTmuxProcesses(processes, wakeProcessExitTimeout); err != nil {
 		t.Fatal(err)
-	}
-	if requireServer && !wakeFound {
-		t.Fatalf("hermetic tmux pane had no wake lock for %s", handle)
 	}
 }
 
@@ -277,6 +340,23 @@ func hermeticTmuxProcesses(socketDir, sessionRoot, handle string) ([]hermeticTmu
 		processes = append(processes, hermeticTmuxProcess{pid: wake.PID, role: "wake"})
 	}
 	return processes, serverFound, wake.Exists, nil
+}
+
+func waitForHermeticWakeLock(sessionRoot, handle string, timeout time.Duration) (wakeLockInspection, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		wake := inspectWakeLock(sessionRoot, handle)
+		if wake.Exists {
+			if wake.PID <= 0 {
+				return wake, fmt.Errorf("hermetic wake lock has invalid pid %d", wake.PID)
+			}
+			return wake, nil
+		}
+		if time.Now().After(deadline) {
+			return wake, fmt.Errorf("hermetic tmux pane had no wake lock for %s", handle)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func waitForHermeticTmuxProcesses(processes []hermeticTmuxProcess, timeout time.Duration) error {
@@ -310,5 +390,37 @@ func TestWaitForHermeticTmuxProcessesReportsLeak(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("test-owner pid %d", os.Getpid())) {
 		t.Fatalf("live-process wait error = %v", err)
+	}
+}
+
+func TestWaitForHermeticWakeLockReportsMissing(t *testing.T) {
+	_, err := waitForHermeticWakeLock(t.TempDir(), "claude", 20*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "hermetic tmux pane had no wake lock for claude") {
+		t.Fatalf("missing wake lock error = %v", err)
+	}
+}
+
+func TestWaitForHermeticWakeLockSeesLateLock(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		wake wakeLockInspection
+		err  error
+	}
+	got := make(chan result, 1)
+	go func() {
+		wake, err := waitForHermeticWakeLock(root, "claude", time.Second)
+		got <- result{wake: wake, err: err}
+	}()
+	time.Sleep(40 * time.Millisecond)
+	writeWakeLockForTest(t, root, "claude", wakeLock{PID: os.Getpid()})
+	out := <-got
+	if out.err != nil {
+		t.Fatal(out.err)
+	}
+	if out.wake.PID != os.Getpid() {
+		t.Fatalf("late wake lock pid = %d, want %d", out.wake.PID, os.Getpid())
 	}
 }
