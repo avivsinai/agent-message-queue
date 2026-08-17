@@ -165,7 +165,6 @@ func TestCmuxLiveDiscoverProbe(t *testing.T) {
 	if _, err := cmuxLiveRun(path, 30*time.Second, "close-workspace", "--workspace", workspaceID); err != nil {
 		t.Fatalf("close throwaway: %v", err)
 	}
-	workspaceID = ""
 	if err := adapter.Probe(ctx, target); !errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("Probe after close error = %v, want ErrTargetNotFound", err)
 	}
@@ -259,7 +258,6 @@ func cmuxLiveWaitForTerminalSurface(t *testing.T, path, surfaceID string) (json.
 				lastEntry = "<absent from system.tree>"
 				t.Logf("system.tree surface %s absent", surfaceID)
 			} else {
-				lastEntry = string(entry)
 				t.Logf("system.tree surface entry=%s tty=%q", entry, tty)
 				return entry, tty, nil
 			}

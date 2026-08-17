@@ -94,7 +94,6 @@ func TestGhosttyLiveDiscoverProbe(t *testing.T) {
 	if _, err := ghosttyLiveRun(30*time.Second, ghosttyLiveCloseWindowScript, windowID); err != nil {
 		t.Fatalf("close throwaway: %v", err)
 	}
-	windowID = ""
 	if err := adapter.Probe(ctx, target); !errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("Probe after close error = %v, want ErrTargetNotFound", err)
 	}
