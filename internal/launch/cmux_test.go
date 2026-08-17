@@ -502,6 +502,82 @@ func TestCmuxCreateNonJSONClosesOrphanOnFreshContext(t *testing.T) {
 	}
 }
 
+func TestCmuxCreateAmbiguousTitleAfterAckDoesNotBindOrClose(t *testing.T) {
+	backend, logPath := newFakeCmuxBackend(t)
+	inner := backend.run
+	pending := false
+	backend.run = func(ctx context.Context, args ...string) (string, error) {
+		if pending && cmuxArgvHas(args, "list-workspaces") {
+			duplicateCmuxFakeNamedWorkspace(t)
+			pending = false
+		}
+		out, err := inner(ctx, args...)
+		if cmuxArgvHas(args, "new-workspace") && err == nil {
+			pending = true
+		}
+		return out, err
+	}
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude")
+	plan := cmuxTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eac1")
+	plan.Agents = plan.Agents[:1]
+	created, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root})
+	if err == nil || created.Outcome == OutcomeCreated {
+		t.Fatalf("Create = %#v, %v, want ambiguous refusal", created, err)
+	}
+	if !strings.Contains(err.Error(), "ambiguous cmux workspaces") {
+		t.Fatalf("Create error = %v, want ambiguous title match", err)
+	}
+	if indexOfCmuxCommand(readCmuxArgvLog(t, logPath), "close-workspace") >= 0 {
+		t.Fatal("ambiguous title match guessed a workspace to close")
+	}
+	if indexOfCmuxCommand(readCmuxArgvLog(t, logPath), "send") >= 0 {
+		t.Fatal("ambiguous title match sent commands")
+	}
+	if cmuxFakeWorkspaceCount(t) != 2 {
+		t.Fatalf("ambiguous title match closed workspaces: %d", cmuxFakeWorkspaceCount(t))
+	}
+}
+
+func TestCmuxCreateZeroTitleMatchAfterAckNamesIt(t *testing.T) {
+	backend, logPath := newFakeCmuxBackend(t)
+	inner := backend.run
+	pending := false
+	backend.run = func(ctx context.Context, args ...string) (string, error) {
+		if pending && cmuxArgvHas(args, "list-workspaces") {
+			hideCmuxFakeWorkspaceTitles(t)
+			pending = false
+		}
+		out, err := inner(ctx, args...)
+		if cmuxArgvHas(args, "new-workspace") && err == nil {
+			pending = true
+		}
+		return out, err
+	}
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude")
+	nonce := "019c5a10-75d8-7eef-8db7-5ee77f70eac2"
+	plan := cmuxTestPlan(project, nonce)
+	plan.Agents = plan.Agents[:1]
+	name, err := cmuxWorkspaceName(project, "collab", nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root})
+	if err == nil || created.Outcome == OutcomeCreated {
+		t.Fatalf("Create = %#v, %v, want zero-match refusal", created, err)
+	}
+	if !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "no cmux workspace named") {
+		t.Fatalf("Create error = %v, want named zero-match for %q", err, name)
+	}
+	if indexOfCmuxCommand(readCmuxArgvLog(t, logPath), "close-workspace") >= 0 {
+		t.Fatal("zero title match guessed a workspace to close")
+	}
+	if indexOfCmuxCommand(readCmuxArgvLog(t, logPath), "send") >= 0 {
+		t.Fatal("zero title match sent commands")
+	}
+}
+
 func TestCmuxDefaultCreateTimeoutExceedsCommandTimeout(t *testing.T) {
 	got := NewCmuxBackend("").createOpTimeout()
 	if got <= cmuxCommandTimeout {
@@ -941,6 +1017,36 @@ func duplicateCmuxFakeNamedWorkspace(t *testing.T) {
 		"panes":     first["panes"],
 	}
 	state["workspaces"] = append(workspaces, clone)
+	out, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func hideCmuxFakeWorkspaceTitles(t *testing.T) {
+	t.Helper()
+	path := os.Getenv("AMQ_CMUX_FAKE_STATE")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	workspaces, _ := state["workspaces"].([]any)
+	if len(workspaces) == 0 {
+		t.Fatal("no cmux workspace to hide")
+	}
+	for i, item := range workspaces {
+		workspace, _ := item.(map[string]any)
+		workspace["title"] = "foreign-title"
+		workspaces[i] = workspace
+	}
+	state["workspaces"] = workspaces
 	out, err := json.Marshal(state)
 	if err != nil {
 		t.Fatal(err)
