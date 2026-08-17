@@ -3,7 +3,9 @@ package launch
 import (
 	"context"
 	"fmt"
+	"os"
 	"slices"
+	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -243,5 +245,28 @@ func DefaultBackends() map[string]Backend {
 		LauncherCommands: Commands{},
 		LauncherTMux:     NewTmuxBackend("tmux"),
 		LauncherCMux:     NewCmuxBackend(""),
+		LauncherGhostty:  NewGhosttyBackend(),
 	}
+}
+
+// prependInsideSurfacePreference puts the in-surface launcher first. Inside
+// cmux beats inside Ghostty. Selection still requires Detect availability.
+func prependInsideSurfacePreference(prefs []string) []string {
+	if strings.TrimSpace(os.Getenv("CMUX_SURFACE_ID")) != "" {
+		return prependLauncherPreference(prefs, LauncherCMux)
+	}
+	if strings.TrimSpace(os.Getenv("TERM_PROGRAM")) == "ghostty" {
+		return prependLauncherPreference(prefs, LauncherGhostty)
+	}
+	return prefs
+}
+
+func prependLauncherPreference(prefs []string, name string) []string {
+	out := []string{name}
+	for _, existing := range prefs {
+		if existing != name {
+			out = append(out, existing)
+		}
+	}
+	return out
 }

@@ -404,7 +404,7 @@ func TestApplyRequiresExactRequestLocalDecisions(t *testing.T) {
 
 func TestApplyUnsupportedLauncherRefusesBeforeRosterMutation(t *testing.T) {
 	fixture := newPublicPrepareFixture(t, true)
-	fixture.request.Launcher = "ghostty"
+	fixture.request.Launcher = unavailableManagedLauncher(t)
 	fixture.request.Intent.Participants = append(fixture.request.Intent.Participants, ParticipantV1{Handle: "reviewer", Runnable: false})
 	prepared, err := Prepare(context.Background(), fixture.request)
 	if err != nil {

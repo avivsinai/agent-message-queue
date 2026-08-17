@@ -794,11 +794,13 @@ func TestCmuxUnreachableSocketIsNotForeignContext(t *testing.T) {
 
 func TestCmuxInsidePreferencePrependsOnlyWhenInside(t *testing.T) {
 	prefs := []string{LauncherTMux, LauncherCommands}
-	if got := prependInsideCmuxPreference(prefs); !strings.EqualFold(strings.Join(got, ","), strings.Join(prefs, ",")) {
+	t.Setenv("TERM_PROGRAM", "")
+	t.Setenv("CMUX_SURFACE_ID", "")
+	if got := prependInsideSurfacePreference(prefs); !strings.EqualFold(strings.Join(got, ","), strings.Join(prefs, ",")) {
 		t.Fatalf("outside prepend = %v", got)
 	}
 	t.Setenv("CMUX_SURFACE_ID", "F901D722-6789-4BBB-9818-C4E97F20BEB3")
-	got := prependInsideCmuxPreference(prefs)
+	got := prependInsideSurfacePreference(prefs)
 	if len(got) != 3 || got[0] != LauncherCMux || got[1] != LauncherTMux {
 		t.Fatalf("inside prepend = %v", got)
 	}

@@ -21,6 +21,10 @@ const (
 	LauncherCommands    = "commands"
 )
 
+func knownLaunchers() []string {
+	return []string{LauncherCMux, LauncherGhostty, LauncherTMux, LauncherCommands}
+}
+
 type ProjectConfig struct {
 	Schema         int                  `json:"schema"`
 	DefaultSession string               `json:"default_session"`
@@ -165,7 +169,7 @@ func (cfg LocalConfig) Validate() error {
 	}
 	seen := make(map[string]struct{}, len(cfg.LauncherPreference))
 	for _, launcher := range cfg.LauncherPreference {
-		if !slices.Contains([]string{LauncherCMux, LauncherGhostty, LauncherTMux, LauncherCommands}, launcher) {
+		if !slices.Contains(knownLaunchers(), launcher) {
 			return fmt.Errorf("unsupported launcher preference %q", launcher)
 		}
 		if _, ok := seen[launcher]; ok {

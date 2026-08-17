@@ -529,9 +529,10 @@ func TestSetupNoGitignorePreservesExistingBytes(t *testing.T) {
 }
 
 var (
-	execLookPathForSetup      = setupLookPath
-	setupCmuxAvailableDefault = setupCmuxAvailable
-	setupTerminalDefault      = setupIsTerminal
+	execLookPathForSetup         = setupLookPath
+	setupCmuxAvailableDefault    = setupCmuxAvailable
+	setupGhosttyAvailableDefault = setupGhosttyAvailable
+	setupTerminalDefault         = setupIsTerminal
 )
 
 func setupProjectFixture(t *testing.T, adapters ...string) string {
@@ -555,6 +556,7 @@ func setupProjectFixture(t *testing.T, adapters ...string) string {
 	}
 	setupLookPath = func(string) (string, error) { return "", fs.ErrNotExist }
 	setupCmuxAvailable = func() bool { return false }
+	setupGhosttyAvailable = func() bool { return false }
 	setupCommitStepHook = nil
 	t.Cleanup(func() {
 		_ = os.Chdir(oldCWD)
@@ -567,6 +569,7 @@ func setupProjectFixture(t *testing.T, adapters ...string) string {
 		}
 		setupLookPath = execLookPathForSetup
 		setupCmuxAvailable = setupCmuxAvailableDefault
+		setupGhosttyAvailable = setupGhosttyAvailableDefault
 		setupIsTerminal = setupTerminalDefault
 		setupCommitStepHook = nil
 	})
@@ -671,6 +674,26 @@ func TestSetupCmuxAvailableUsesPingNotLookPath(t *testing.T) {
 		t.Fatalf("ping-available bundle cmux was omitted: %s", pingOnly)
 	}
 	_ = project
+}
+
+func TestSetupDetectGhosttyUsesPingNotLookPath(t *testing.T) {
+	_ = setupProjectFixture(t, "claude")
+	setupLookPath = func(name string) (string, error) {
+		if name == launch.LauncherGhostty {
+			return "/usr/bin/ghostty", nil
+		}
+		return "", fs.ErrNotExist
+	}
+	setupGhosttyAvailable = func() bool { return false }
+	got := detectSetupLaunchers()
+	if slices.Contains(got, launch.LauncherGhostty) {
+		t.Fatalf("LookPath without ping listed ghostty: %v", got)
+	}
+	setupGhosttyAvailable = func() bool { return true }
+	got = detectSetupLaunchers()
+	if !slices.Contains(got, launch.LauncherGhostty) {
+		t.Fatalf("ping did not list ghostty: %v", got)
+	}
 }
 
 func setupPreviewLaunchers(t *testing.T, raw string) []string {
