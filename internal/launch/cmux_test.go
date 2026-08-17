@@ -108,10 +108,13 @@ if command == "new-workspace":
     surface_id = str(uuid.uuid4())
     ref = str(len(state["workspaces"]) + 1)
     state["window_id"] = window_id
+    surfaces = [{"id": surface_id, "type": "terminal"}]
+    if os.environ.get("AMQ_CMUX_FAKE_BROWSER") == "1":
+        surfaces = [{"id": str(uuid.uuid4()), "type": "browser"}] + surfaces
     state["workspaces"].append({
         "id": ws_id, "title": flags.get("name", ""), "window_id": window_id,
         "cwd": flags.get("cwd", ""), "selected": False, "ref": ref,
-        "panes": [{"id": pane_id, "surfaces": [{"id": surface_id}]}],
+        "panes": [{"id": pane_id, "surfaces": surfaces}],
     })
     save(state)
     print("OK workspace:" + ref)
@@ -138,7 +141,7 @@ if command == "list-pane-surfaces":
         pane = next((item for item in ws["panes"] if item["id"] == flags.get("pane")), None)
     emit({"window_id": (ws or {}).get("window_id", ""), "workspace_id": (ws or {}).get("id", ""),
           "pane_id": flags.get("pane", ""),
-          "surfaces": [{"id": surface["id"], "type": "terminal", "title": "", "index": i, "selected": i == 0}
+          "surfaces": [{"id": surface["id"], "type": surface.get("type", "terminal"), "title": "", "index": i, "selected": i == 0}
                        for i, surface in enumerate(pane["surfaces"] if pane else [])]})
     sys.exit(0)
 if command == "new-split":
@@ -148,7 +151,7 @@ if command == "new-split":
         sys.exit(1)
     surface_id = str(uuid.uuid4())
     pane_id = str(uuid.uuid4())
-    ws["panes"].append({"id": pane_id, "surfaces": [{"id": surface_id}]})
+    ws["panes"].append({"id": pane_id, "surfaces": [{"id": surface_id, "type": "terminal"}]})
     save(state)
     emit({"workspace_id": ws["id"], "surface_id": surface_id, "window_id": ws.get("window_id", ""),
           "pane_id": pane_id, "type": "terminal"})
@@ -164,7 +167,7 @@ if command == "surface-health":
                 in_window = healthy
                 if require_select:
                     in_window = healthy and bool(ws.get("selected"))
-                item = {"index": idx, "ref": "surface:%d" % (idx + 1), "type": "terminal", "in_window": in_window}
+                item = {"index": idx, "ref": "surface:%d" % (idx + 1), "type": _surface.get("type", "terminal"), "in_window": in_window}
                 if missing == "in_window":
                     del item["in_window"]
                 surfaces.append(item)
@@ -179,7 +182,13 @@ if command == "select-workspace":
     save(state)
     print("OK workspace:" + next((ws.get("ref", "1") for ws in state["workspaces"] if ws["id"].lower() == want), "1"))
     sys.exit(0)
-if command in ("send", "send-key", "focus-window"):
+if command in ("send", "send-key"):
+    if flags.get("surface") and not flags.get("workspace"):
+        print("Error: invalid_params: Surface is not a terminal", file=sys.stderr)
+        sys.exit(1)
+    print("OK surface:11 workspace:7")
+    sys.exit(0)
+if command == "focus-window":
     emit({"ok": True})
     sys.exit(0)
 if command == "close-workspace":
@@ -924,6 +933,23 @@ func assertCmuxFocusFalse(t *testing.T, calls [][]string) {
 	}
 }
 
+func assertCmuxSendHasWorkspace(t *testing.T, calls [][]string) {
+	t.Helper()
+	seen := false
+	for _, argv := range calls {
+		if len(argv) == 0 || (argv[0] != "send" && argv[0] != "send-key") {
+			continue
+		}
+		seen = true
+		if !cmuxArgvHas(argv, "--workspace") || !cmuxArgvHas(argv, "--surface") {
+			t.Fatalf("%s missing --workspace/--surface: %v", argv[0], argv)
+		}
+	}
+	if !seen {
+		t.Fatal("Create did not send")
+	}
+}
+
 func seedCmuxSelectedWorkspace(t *testing.T) string {
 	t.Helper()
 	id := "019c5a10-75d8-7eef-8db7-5ee77f70aaa1"
@@ -969,6 +995,45 @@ func cmuxFakeSelectedWorkspace(t *testing.T) string {
 	for _, workspace := range state.Workspaces {
 		if workspace.Selected {
 			return strings.ToLower(workspace.ID)
+		}
+	}
+	return ""
+}
+
+func cmuxFakeTerminalSurfaceID(t *testing.T) string {
+	return cmuxFakeSurfaceIDByType(t, "terminal")
+}
+
+func cmuxFakeBrowserSurfaceID(t *testing.T) string {
+	return cmuxFakeSurfaceIDByType(t, "browser")
+}
+
+func cmuxFakeSurfaceIDByType(t *testing.T, wantType string) string {
+	t.Helper()
+	data, err := os.ReadFile(os.Getenv("AMQ_CMUX_FAKE_STATE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Workspaces []struct {
+			Panes []struct {
+				Surfaces []struct {
+					ID   string `json:"id"`
+					Type string `json:"type"`
+				} `json:"surfaces"`
+			} `json:"panes"`
+		} `json:"workspaces"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	for _, workspace := range state.Workspaces {
+		for _, pane := range workspace.Panes {
+			for _, surface := range pane.Surfaces {
+				if surface.Type == wantType {
+					return strings.ToLower(surface.ID)
+				}
+			}
 		}
 	}
 	return ""
@@ -1077,15 +1142,13 @@ func TestCmuxArgvRecorderSeesCreateGrammar(t *testing.T) {
 	}
 	calls := readCmuxArgvLog(t, logPath)
 	joined := fmt.Sprint(calls)
-	for _, needle := range []string{"ping", "capabilities", "version", "new-workspace", "list-workspaces", "list-panes", "surface-health", "send", "send-key"} {
+	for _, needle := range []string{"ping", "capabilities", "version", "new-workspace", "list-workspaces", "list-panes", "list-pane-surfaces", "surface-health", "send", "send-key"} {
 		if !strings.Contains(joined, needle) {
 			t.Fatalf("argv log missing %s: %s", needle, joined)
 		}
 	}
-	if strings.Contains(joined, "list-pane-surfaces") {
-		t.Fatalf("Create used list-pane-surfaces: %s", joined)
-	}
 	assertCmuxFocusFalse(t, calls)
+	assertCmuxSendHasWorkspace(t, calls)
 }
 
 func TestCmuxHealthyCreateDoesNotSelect(t *testing.T) {
@@ -1132,6 +1195,93 @@ func TestCmuxSelectsThenRestoresWhenInWindowFalse(t *testing.T) {
 	}
 	if got := cmuxFakeSelectedWorkspace(t); got != previous {
 		t.Fatalf("selected workspace = %q, want restored %q", got, previous)
+	}
+}
+
+func TestCmuxSendFailureRestoresSelection(t *testing.T) {
+	backend, _ := newFakeCmuxBackend(t)
+	t.Setenv("AMQ_CMUX_FAKE_REQUIRE_SELECT", "1")
+	t.Setenv("AMQ_CMUX_FAKE_FAIL", "send")
+	previous := seedCmuxSelectedWorkspace(t)
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude")
+	plan := cmuxTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eab3")
+	plan.Agents = plan.Agents[:1]
+	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root})
+	if err == nil || !strings.Contains(err.Error(), "send cmux command") {
+		t.Fatalf("Create error = %v, want send failure", err)
+	}
+	if got := cmuxFakeSelectedWorkspace(t); got != previous {
+		t.Fatalf("selected workspace = %q, want restored %q after send failure", got, previous)
+	}
+}
+
+func TestCmuxCloseRestoresPriorSelection(t *testing.T) {
+	backend, _ := newFakeCmuxBackend(t)
+	previous := seedCmuxSelectedWorkspace(t)
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude")
+	plan := cmuxTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eab4")
+	plan.Agents = plan.Agents[:1]
+	created, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed, err := backend.Close(CloseRequest{Binding: created.Binding, Root: root})
+	if err != nil || closed.Outcome != OutcomeClosed {
+		t.Fatalf("Close = %#v, %v", closed, err)
+	}
+	if got := cmuxFakeSelectedWorkspace(t); got != previous {
+		t.Fatalf("selected workspace = %q, want restored %q after Close", got, previous)
+	}
+}
+
+func TestCmuxSendWithoutWorkspaceRejected(t *testing.T) {
+	backend, _ := newFakeCmuxBackend(t)
+	for _, args := range [][]string{
+		{"send", "--surface", "07eee802-4dde-4788-9281-95dd9a4ce502", "--", "hi"},
+		{"send-key", "--surface", "07eee802-4dde-4788-9281-95dd9a4ce502", "enter"},
+	} {
+		_, err := backend.run(context.Background(), args...)
+		if err == nil || !strings.Contains(err.Error(), "Surface is not a terminal") {
+			t.Fatalf("%s without --workspace error = %v, want invalid_params", args[0], err)
+		}
+	}
+}
+
+func TestCmuxCreateSendsOnlyTerminalSurface(t *testing.T) {
+	backend, logPath := newFakeCmuxBackend(t)
+	t.Setenv("AMQ_CMUX_FAKE_BROWSER", "1")
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude")
+	plan := cmuxTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eab5")
+	plan.Agents = plan.Agents[:1]
+	if _, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root}); err != nil {
+		t.Fatal(err)
+	}
+	terminal := cmuxFakeTerminalSurfaceID(t)
+	browser := cmuxFakeBrowserSurfaceID(t)
+	if terminal == "" || browser == "" {
+		t.Fatal("fake did not record browser and terminal surfaces")
+	}
+	for _, argv := range readCmuxArgvLog(t, logPath) {
+		if len(argv) == 0 || argv[0] != "send" {
+			continue
+		}
+		joined := strings.Join(argv, " ")
+		if strings.Contains(joined, browser) {
+			t.Fatalf("send targeted browser surface: %v", argv)
+		}
+		if !strings.Contains(joined, terminal) {
+			t.Fatalf("send missed terminal surface %s: %v", terminal, argv)
+		}
+	}
+}
+
+func TestParseCmuxTerminalSurfaceIDs(t *testing.T) {
+	ids, err := parseCmuxTerminalSurfaceIDs(`{"surfaces":[{"id":"019c5a10-75d8-7eef-8db7-5ee77f70aaa1","type":"browser"},{"id":"019c5a10-75d8-7eef-8db7-5ee77f70aaa2","type":"terminal"}]}`)
+	if err != nil || len(ids) != 1 || ids[0] != "019c5a10-75d8-7eef-8db7-5ee77f70aaa2" {
+		t.Fatalf("parseCmuxTerminalSurfaceIDs = %v, %v", ids, err)
 	}
 }
 

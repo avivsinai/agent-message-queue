@@ -32,11 +32,13 @@ func TestCmuxLive(t *testing.T) {
 		return inner(ctx, args...)
 	}
 	snapCtx, snapCancel := context.WithTimeout(context.Background(), cmuxCreateTimeout)
-	before, err := backend.listWorkspaces(snapCtx)
+	beforeRecords, err := backend.listWorkspaceRecords(snapCtx)
 	snapCancel()
 	if err != nil {
 		t.Fatal(err)
 	}
+	before := cmuxWorkspaceIDs(beforeRecords)
+	beforeSelected := cmuxSelectedWorkspaceID(beforeRecords)
 	beforeCount := len(before)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), cmuxCreateTimeout)
@@ -54,13 +56,30 @@ func TestCmuxLive(t *testing.T) {
 				t.Errorf("cleanup close %s: %v", id, closeErr)
 			}
 		}
-		after, countErr := backend.listWorkspaces(ctx)
+		afterRecords, countErr := backend.listWorkspaceRecords(ctx)
 		if countErr != nil {
 			t.Errorf("cleanup workspace count: %v", countErr)
 			return
 		}
-		if len(after) != beforeCount {
-			t.Errorf("live workspace/tab count not restored: before=%d after=%d", beforeCount, len(after))
+		if len(afterRecords) != beforeCount {
+			t.Errorf("live workspace/tab count not restored: before=%d after=%d", beforeCount, len(afterRecords))
+		}
+		if beforeSelected == "" || !cmuxContainsID(cmuxWorkspaceIDs(afterRecords), beforeSelected) {
+			return
+		}
+		if cmuxSelectedWorkspaceID(afterRecords) != beforeSelected {
+			if _, selErr := backend.run(ctx, "select-workspace", "--workspace", beforeSelected); selErr != nil {
+				t.Errorf("cleanup restore selected %s: %v", beforeSelected, selErr)
+				return
+			}
+		}
+		restored, restoreErr := backend.listWorkspaceRecords(ctx)
+		if restoreErr != nil {
+			t.Errorf("cleanup list selected workspace: %v", restoreErr)
+			return
+		}
+		if got := cmuxSelectedWorkspaceID(restored); got != beforeSelected {
+			t.Errorf("live selected workspace = %q, want %q", got, beforeSelected)
 		}
 	})
 	project := t.TempDir()
@@ -79,6 +98,13 @@ func TestCmuxLive(t *testing.T) {
 	}
 	if created.Outcome != OutcomeCreated || countCmuxAgentResources(created.Binding) != 2 {
 		t.Fatalf("Create = %#v", created)
+	}
+	afterCreate, err := backend.listWorkspaceRecords(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cmuxSelectedWorkspaceID(afterCreate); got != beforeSelected {
+		t.Fatalf("Create changed selected workspace: before=%q after=%q", beforeSelected, got)
 	}
 	req.AMQPath = resolvedAMQ
 	for i, agent := range plan.Agents {
