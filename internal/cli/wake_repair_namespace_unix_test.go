@@ -112,6 +112,54 @@ func TestValidateWakeRepairChildAdmissionRejectsPendingWatcherRootLoss(t *testin
 	}
 }
 
+func TestValidateWakeRepairChildAdmissionRejectsReplacementWhenWatcherSilent(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	agentDir, err := openWakeAgentDir(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	inboxDir, err := openWakeRepairInboxDir(agentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = inboxDir.Close() }()
+	source := wakeRepairHandoffSource{
+		schema:             wakeRepairHandoffSchema,
+		root:               canonicalWakeRoot(root),
+		rootIdentity:       "v1:test:1:2",
+		agent:              "codex",
+		sourceGeneration:   "source-generation",
+		sourceTargetDigest: "sha256:" + strings.Repeat("1", 64),
+		sourceFloorDigest:  "sha256:" + strings.Repeat("2", 64),
+		bootID:             "boot-id",
+	}
+	if err := source.bindRetainedDirectories(agentDir, inboxDir); err != nil {
+		t.Fatal(err)
+	}
+
+	agentPath := fsq.AgentBase(root, "codex")
+	if err := os.Rename(agentPath, agentPath+".detached"); err != nil {
+		t.Fatalf("detach agent directory: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("create replacement agent directory: %v", err)
+	}
+
+	err = validateWakeRepairChildAdmission(
+		fixedWakeAdmissionWatcher{errors: make(chan error)},
+		root,
+		"codex",
+		source,
+	)
+	if err == nil || !strings.Contains(err.Error(), "canonical wake repair agent directory no longer matches retained authority") {
+		t.Fatalf("silent watcher admitted namespace replacement: %v", err)
+	}
+}
+
 func TestRepairWakeRefusesCanonicalInboxReplacementBeforeAdmission(t *testing.T) {
 	fixture := newWakeRepairLifecycleFixture(t)
 	var child *wakeRepairChild
@@ -166,6 +214,8 @@ func TestRepairWakeChildAdmissionRejectsNamespaceReplacementAfterParentValidatio
 			wants: []string{
 				"wake watcher failed before admission: retained wake agent directory was renamed or deleted",
 				"canonical wake repair agent directory no longer matches retained authority",
+				"retained wake directory namespace validation failed",
+				"canonical wake repair agent directory changed while opening",
 			},
 		},
 		{
@@ -177,6 +227,11 @@ func TestRepairWakeChildAdmissionRejectsNamespaceReplacementAfterParentValidatio
 			wants: []string{
 				"wake watcher failed before admission: retained wake inbox directory was renamed or deleted",
 				"canonical wake repair inbox directory no longer matches retained authority",
+				// Linux inotify: watcher validates canonical dirs and can lose
+				// the SameFile race in openValidatedWakeDirectoryAt (CI run
+				// 32046151181 attempt 1). Admission still rejects.
+				"retained wake directory namespace validation failed",
+				"canonical wake repair inbox directory changed while opening",
 			},
 		},
 	} {
