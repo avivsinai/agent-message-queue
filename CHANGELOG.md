@@ -8,6 +8,28 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.63.0](https://github.com/avivsinai/agent-message-queue/compare/v0.62.0...v0.63.0) (2026-08-17)
+
+
+### Features
+
+* **launch:** add cursor-agent capture adapter ([#526](https://github.com/avivsinai/agent-message-queue/issues/526)) ([3289365](https://github.com/avivsinai/agent-message-queue/commit/3289365eeec80eff6061021d9179158b0e000757))
+* **launch:** add managed cmux backend ([b505360](https://github.com/avivsinai/agent-message-queue/commit/b5053606afa600cdab50e2f0f8ecea32305d4716))
+* **launch:** add managed Ghostty backend ([083e43b](https://github.com/avivsinai/agent-message-queue/commit/083e43b87b224508307d85fd5482d7c87977ab2e))
+* **launch:** capture Codex identity through an adapter-owned notify hook ([#529](https://github.com/avivsinai/agent-message-queue/issues/529)) ([532c414](https://github.com/avivsinai/agent-message-queue/commit/532c4149d6dfd8dc18e63615c65e6529ea720d89))
+* **launch:** no_action aggregate and --require-agent; document symlink trust boundary ([#524](https://github.com/avivsinai/agent-message-queue/issues/524)) ([be5ae39](https://github.com/avivsinai/agent-message-queue/commit/be5ae3924243992c1998cf4ff2ef18b1ad8eda03))
+
+
+### Bug Fixes
+
+* **build:** embed the same bare semver as GoReleaser ([d837886](https://github.com/avivsinai/agent-message-queue/commit/d8378869ac13cc11b75d7f46320d4cb3ededde56))
+* **keepalive:** identify cmux surfaces by UUID when tty is absent ([056cc56](https://github.com/avivsinai/agent-message-queue/commit/056cc56f799775252925d1ea687be20601eaf575))
+* **launch:** close Ghostty create orphans and pin DefaultBackends ([083e43b](https://github.com/avivsinai/agent-message-queue/commit/083e43b87b224508307d85fd5482d7c87977ab2e))
+* **launch:** parse cmux OK workspace ack and keep operator focus ([b505360](https://github.com/avivsinai/agent-message-queue/commit/b5053606afa600cdab50e2f0f8ecea32305d4716))
+* **launch:** pin cmux protocol 2 and orphan-close on create timeout ([b505360](https://github.com/avivsinai/agent-message-queue/commit/b5053606afa600cdab50e2f0f8ecea32305d4716))
+* **launch:** send cmux input with workspace and restore selection ([b505360](https://github.com/avivsinai/agent-message-queue/commit/b5053606afa600cdab50e2f0f8ecea32305d4716))
+* **release:** look up the exact release tag instead of scanning the releases list ([#535](https://github.com/avivsinai/agent-message-queue/issues/535)) ([0317640](https://github.com/avivsinai/agent-message-queue/commit/03176403d3b967c4ad194e167075c5b076841c74))
+
 ## [0.62.0](https://github.com/avivsinai/agent-message-queue/compare/v0.61.0...v0.62.0) (2026-08-17)
 
 
