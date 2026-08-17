@@ -21,28 +21,37 @@ set -euo pipefail
 
 printf '%s\n' "$*" >>"${GH_CALL_LOG:?}"
 [[ "$1" == "api" ]]
-[[ " $* " == *" --paginate "* ]]
-[[ " $* " == *" --slurp "* ]]
-
-if [[ "${FAKE_RELEASE_MODE:?}" == "api-failure" ]]; then
-  exit 1
-fi
+[[ "$2" == "--include" ]]
+[[ "$3" == "repos/example/amq/releases/tags/${FAKE_RELEASE_TAG:?}" ]]
 
 python3 - "${FAKE_RELEASE_MODE:?}" "${FAKE_RELEASE_TAG:-}" <<'PY'
 import json
 import sys
 
 mode, tag = sys.argv[1:]
-if mode == "invalid-json":
-    print("not json")
-elif mode == "exact":
-    print(json.dumps([[{"draft": False, "published_at": "2026-07-27", "tag_name": tag}]]))
+status = "200 OK"
+body = {"draft": False, "published_at": "2026-07-27", "tag_name": tag}
+if mode == "not-found":
+    status = "404 Not Found"
+    body = {"message": "Not Found"}
+elif mode == "server-error":
+    status = "500 Internal Server Error"
+    body = {"message": "server error"}
+elif mode == "invalid-json":
+    body = "not json"
 elif mode == "draft":
-    print(json.dumps([[{"draft": True, "published_at": None, "tag_name": tag}]]))
-elif mode == "similar":
-    print(json.dumps([[{"draft": False, "published_at": "2026-07-27", "tag_name": tag + "0"}]]))
-else:
-    print(json.dumps([[]]))
+    body = {"draft": True, "published_at": "2026-07-27", "tag_name": tag}
+elif mode == "prerelease":
+    body["prerelease"] = True
+elif mode == "invalid-fields":
+    body["draft"] = "false"
+
+print(f"HTTP/2.0 {status}")
+print("Content-Type: application/json; charset=utf-8\r")
+print("\r")
+print(body if isinstance(body, str) else json.dumps(body))
+if status != "200 OK":
+    sys.exit(1)
 PY
 EOF
 chmod +x "$FAKE_BIN/gh"
@@ -85,13 +94,15 @@ run_state_check() {
 
 write_manifest "1.2.3"
 : >"$TEST_TMPDIR/gh-calls"
-run_state_check similar "v1.2.3"
+run_state_check not-found "v1.2.3"
 grep -Fx "version=1.2.3" "$TEST_TMPDIR/state-output" >/dev/null
 grep -Fx "released=false" "$TEST_TMPDIR/state-output" >/dev/null
 grep -Fx "main_sha=$STATE_SHA" "$TEST_TMPDIR/state-output" >/dev/null
+grep -Fx "api --include repos/example/amq/releases/tags/v1.2.3" \
+  "$TEST_TMPDIR/gh-calls" >/dev/null
 
 write_manifest "1.2.3-rc.1"
-run_state_check exact "v1.2.3-rc.1"
+run_state_check prerelease "v1.2.3-rc.1"
 grep -Fx "released=true" "$TEST_TMPDIR/state-output" >/dev/null
 
 write_manifest "1.2.3"
@@ -107,8 +118,15 @@ fi
 [[ ! -s "$TEST_TMPDIR/state-output" ]]
 
 : >"$TEST_TMPDIR/gh-calls"
-if run_state_check api-failure "v1.2.3"; then
-  echo "releases API failure unexpectedly accepted" >&2
+if run_state_check server-error "v1.2.3"; then
+  echo "release API server error unexpectedly accepted" >&2
+  exit 1
+fi
+[[ ! -s "$TEST_TMPDIR/state-output" ]]
+
+: >"$TEST_TMPDIR/gh-calls"
+if run_state_check invalid-fields "v1.2.3"; then
+  echo "invalid release response fields unexpectedly accepted" >&2
   exit 1
 fi
 [[ ! -s "$TEST_TMPDIR/state-output" ]]

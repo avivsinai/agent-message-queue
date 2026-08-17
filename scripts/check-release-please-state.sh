@@ -28,23 +28,56 @@ if [[ ! "$main_sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
 fi
 
 tag="v${version}"
-release_pages="$(
-  gh api --paginate --slurp \
-    "repos/${github_repository}/releases?per_page=100"
+set +e
+release_response="$(
+  gh api --include \
+    "repos/${github_repository}/releases/tags/${tag}" 2>&1
 )"
-released=false
-if jq -e --arg tag "$tag" \
-  'any(.[][]; .draft == false and .published_at != null and
-    (.tag_name | type == "string") and .tag_name == $tag)' \
-  >/dev/null <<<"$release_pages"; then
-  released=true
-else
-  jq_status=$?
-  if [[ "$jq_status" != "1" ]]; then
-    echo "::error::GitHub releases response was not valid paginated JSON."
-    exit "$jq_status"
-  fi
+gh_status=$?
+set -e
+
+release_response="${release_response//$'\r'/}"
+status_line="${release_response%%$'\n'*}"
+if [[ ! "$status_line" =~ ^HTTP/[^[:space:]]+[[:space:]]+([0-9]{3})([[:space:]]|$) ]]; then
+  echo "::error::GitHub release lookup did not return an HTTP status."
+  exit 1
 fi
+http_status="${BASH_REMATCH[1]}"
+
+case "$http_status" in
+  200)
+    if [[ "$gh_status" != "0" || "$release_response" != *$'\n\n'* ]]; then
+      echo "::error::GitHub release lookup returned an invalid HTTP 200 response."
+      exit 1
+    fi
+    release_body="${release_response#*$'\n\n'}"
+    if ! released="$(
+      jq -er --arg tag "$tag" '
+        if type != "object" or
+          (.tag_name | type) != "string" or .tag_name != $tag or
+          (.draft | type) != "boolean" or
+          ((.published_at | type) != "string" and .published_at != null)
+        then error("invalid release response fields")
+        else ((.draft == false and .published_at != null) | tostring)
+        end
+      ' <<<"$release_body"
+    )"; then
+      echo "::error::GitHub release lookup returned invalid JSON or response fields."
+      exit 1
+    fi
+    if [[ "$released" != "true" && "$released" != "false" ]]; then
+      echo "::error::GitHub release lookup returned multiple JSON values."
+      exit 1
+    fi
+    ;;
+  404)
+    released=false
+    ;;
+  *)
+    echo "::error::GitHub release lookup failed with HTTP ${http_status}."
+    exit 1
+    ;;
+esac
 
 {
   printf 'version=%s\n' "$version"
