@@ -656,6 +656,146 @@ func TestStoreCorruptRegistryReturnsTypedError(t *testing.T) {
 	}
 }
 
+func TestStoreLoadsSchemaZeroAsCurrent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	if err := os.WriteFile(path, []byte(`{"entries":[]}`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	loaded, err := New(path).Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.SchemaVersion != SchemaVersion {
+		t.Fatalf("schema = %d, want %d", loaded.SchemaVersion, SchemaVersion)
+	}
+}
+
+func TestStoreSaveReportsRenameFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("Mkdir registry destination: %v", err)
+	}
+	if err := New(path).Save(File{}); err == nil {
+		t.Fatal("Save error = nil, want rename failure for directory destination")
+	}
+}
+
+func TestStoreRestoreMissingReservationIsNoOp(t *testing.T) {
+	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	existing, err := store.Upsert(Entry{Root: "/tmp/root", Agent: "codex", Adapter: "file", Target: "/tmp/current"})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	missing := existing
+	missing.ID = "missing-reservation"
+	restored, err := store.RestoreSessionAdapterIfUnchanged(missing, nil)
+	if err != nil || restored {
+		t.Fatalf("RestoreSessionAdapterIfUnchanged restored=%v err=%v, want no-op", restored, err)
+	}
+	loaded, err := store.Load()
+	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0] != existing {
+		t.Fatalf("registry changed: entries=%#v err=%v", loaded.Entries, err)
+	}
+}
+
+func TestStoreUpdateEntriesRejectsEitherMissingID(t *testing.T) {
+	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	before := Entry{ID: "entry-1"}
+	after := before
+	for _, test := range []struct {
+		name   string
+		before Entry
+		after  Entry
+	}{
+		{name: "before", before: Entry{}, after: after},
+		{name: "after", before: before, after: Entry{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := store.UpdateEntries([]EntryUpdate{{Before: test.before, After: test.after}}); err == nil {
+				t.Fatal("UpdateEntries error = nil, want missing-ID refusal")
+			}
+		})
+	}
+}
+
+func TestStoreForgetIfUnchangedDoesNotRemoveAnotherEntry(t *testing.T) {
+	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	first, err := store.Upsert(Entry{Root: "/tmp/first", Agent: "codex", Adapter: "file", Target: "/tmp/first"})
+	if err != nil {
+		t.Fatalf("Upsert first: %v", err)
+	}
+	second, err := store.Upsert(Entry{Root: "/tmp/second", Agent: "claude", Adapter: "file", Target: "/tmp/second"})
+	if err != nil {
+		t.Fatalf("Upsert second: %v", err)
+	}
+	missing := second
+	missing.ID = "missing-entry"
+	removed, err := store.ForgetIfUnchanged(missing)
+	if err != nil || removed {
+		t.Fatalf("ForgetIfUnchanged removed=%v err=%v, want no-op", removed, err)
+	}
+	loaded, err := store.Load()
+	_, hasFirst := findTestEntry(loaded.Entries, first.ID)
+	_, hasSecond := findTestEntry(loaded.Entries, second.ID)
+	if err != nil || len(loaded.Entries) != 2 || !hasFirst || !hasSecond {
+		t.Fatalf("registry changed: entries=%#v err=%v", loaded.Entries, err)
+	}
+}
+
+func TestStoreForgetIfUnchangedRemovesExactLaterEntry(t *testing.T) {
+	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	first, err := store.Upsert(Entry{Root: "/tmp/first", Agent: "codex", Adapter: "file", Target: "/tmp/first"})
+	if err != nil {
+		t.Fatalf("Upsert first: %v", err)
+	}
+	second, err := store.Upsert(Entry{Root: "/tmp/second", Agent: "claude", Adapter: "file", Target: "/tmp/second"})
+	if err != nil {
+		t.Fatalf("Upsert second: %v", err)
+	}
+	removed, err := store.ForgetIfUnchanged(second)
+	if err != nil || !removed {
+		t.Fatalf("ForgetIfUnchanged removed=%v err=%v, want exact removal", removed, err)
+	}
+	loaded, err := store.Load()
+	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0] != first {
+		t.Fatalf("entries=%#v err=%v, want first only", loaded.Entries, err)
+	}
+}
+
+func TestStoreSortsEntriesByID(t *testing.T) {
+	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	if err := store.Save(File{Entries: []Entry{{ID: "z-entry"}, {ID: "a-entry"}}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.Entries) != 2 || loaded.Entries[0].ID != "a-entry" || loaded.Entries[1].ID != "z-entry" {
+		t.Fatalf("entries = %#v, want ascending IDs", loaded.Entries)
+	}
+}
+
+func TestStoreRegistrationOwnershipRequiresSameAdapterAndTarget(t *testing.T) {
+	for _, candidate := range []Entry{
+		{Root: "/tmp/root", Agent: "codex", Adapter: "file", Target: "/tmp/different"},
+		{Root: "/tmp/root", Agent: "codex", Adapter: "ghostty", Target: "/tmp/original"},
+	} {
+		store := New(filepath.Join(t.TempDir(), "registry.json"))
+		original, err := store.Upsert(Entry{Root: "/tmp/root", Agent: "codex", Adapter: "file", Target: "/tmp/original"})
+		if err != nil {
+			t.Fatalf("Upsert original: %v", err)
+		}
+		if _, err := store.Upsert(candidate); !errors.Is(err, ErrRegistrationOwned) {
+			t.Fatalf("Upsert(%+v) error = %v, want ErrRegistrationOwned", candidate, err)
+		}
+		loaded, err := store.Load()
+		if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0] != original {
+			t.Fatalf("registry changed: entries=%#v err=%v", loaded.Entries, err)
+		}
+	}
+}
+
 func findTestEntry(entries []Entry, id string) (Entry, bool) {
 	for _, entry := range entries {
 		if entry.ID == id {

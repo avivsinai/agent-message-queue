@@ -197,11 +197,57 @@ func TestDetachedTargetDoesNotTouchAMQ(t *testing.T) {
 	if updated.State != registry.StateDetached {
 		t.Fatalf("state = %q, want %q", updated.State, registry.StateDetached)
 	}
+	if updated.FailureCount != 1 {
+		t.Fatalf("FailureCount = %d, want 1", updated.FailureCount)
+	}
 	if !updated.DetachedSince.Equal(now) {
 		t.Fatalf("DetachedSince = %v, want %v", updated.DetachedSince, now)
 	}
 	if got, want := updated.BackoffUntil.Sub(now), defaultDetachedBackoffBase; got != want {
 		t.Fatalf("detached backoff = %v, want %v", got, want)
+	}
+}
+
+func TestBackoffDeadlineIsInclusive(t *testing.T) {
+	now := fixedNow()
+	wake := &fakeWake{}
+	entry := testEntry()
+	entry.BackoffUntil = now
+
+	_, result := testReconciler(wake, probeAdapter{}, now).Reconcile(context.Background(), entry)
+
+	if result.Action != ActionEnsured || len(wake.starts) != 1 {
+		t.Fatalf("result=%+v starts=%d, want ensure at exact backoff deadline", result, len(wake.starts))
+	}
+}
+
+func TestDefaultFailureBackoffAndExponentialCap(t *testing.T) {
+	now := fixedNow()
+	wake := &fakeWake{startErr: errors.New("wake failed")}
+	reconciler := Reconciler{
+		Wake:       wake,
+		Adapter:    probeAdapter{},
+		Now:        func() time.Time { return now },
+		BackoffMax: 8 * defaultFailureBackoffBase,
+		Jitter:     func(delay time.Duration) time.Duration { return delay },
+	}
+	entry := testEntry()
+
+	for i, want := range []time.Duration{
+		defaultFailureBackoffBase,
+		2 * defaultFailureBackoffBase,
+		4 * defaultFailureBackoffBase,
+		8 * defaultFailureBackoffBase,
+	} {
+		var result Result
+		entry, result = reconciler.Reconcile(context.Background(), entry)
+		if result.Action != ActionStartFailed {
+			t.Fatalf("attempt %d action = %q, want %q", i+1, result.Action, ActionStartFailed)
+		}
+		if got := entry.BackoffUntil.Sub(now); got != want {
+			t.Fatalf("attempt %d backoff = %v, want %v", i+1, got, want)
+		}
+		now = entry.BackoffUntil
 	}
 }
 

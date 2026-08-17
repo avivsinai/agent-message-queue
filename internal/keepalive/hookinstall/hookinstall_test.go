@@ -86,6 +86,9 @@ func TestInstallIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Install() error = %v", err)
 	}
+	if err := os.Chmod(opts.ScriptPath, 0o600); err != nil {
+		t.Fatalf("chmod script before repeat install: %v", err)
+	}
 	second, err := Install(opts)
 	if err != nil {
 		t.Fatalf("second Install() error = %v", err)
@@ -93,9 +96,72 @@ func TestInstallIsIdempotent(t *testing.T) {
 	if second.Configs[AgentClaude].Changed {
 		t.Fatal("second config install changed file, want idempotent no-op")
 	}
+	if second.Script.Changed {
+		t.Fatal("second script install changed identical bytes, want idempotent no-op")
+	}
+	scriptData, err := os.ReadFile(opts.ScriptPath)
+	if err != nil || string(scriptData) != SessionStartScript {
+		t.Fatalf("script bytes changed: err=%v bytes=%q", err, scriptData)
+	}
+	info, err := os.Stat(opts.ScriptPath)
+	if err != nil {
+		t.Fatalf("stat repeated script: %v", err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("script mode = %v, want 0755", info.Mode().Perm())
+	}
 	doc := readJSON(t, claudeConfig)
 	if countCommand(doc, first.Commands[AgentClaude]) != 1 {
 		t.Fatalf("command count != 1 after repeat install:\n%s", mustMarshal(t, doc))
+	}
+}
+
+func TestInstallCodexCreatesFirstSessionStartEntryWhenListIsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "hooks.json")
+	mustWrite(t, configPath, []byte(`{"hooks":{"SessionStart":[]}}`))
+
+	result, err := Install(Options{
+		Agent:       AgentCodex,
+		ScriptPath:  filepath.Join(dir, "hook.sh"),
+		BinaryPath:  writeExecutable(t, filepath.Join(dir, "amq-keepalive")),
+		CodexConfig: configPath,
+		Timeout:     time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	doc := readJSON(t, configPath)
+	if countCommand(doc, result.Commands[AgentCodex]) != 1 {
+		t.Fatalf("Codex command not installed into empty SessionStart list:\n%s", mustMarshal(t, doc))
+	}
+	hooks, ok := doc["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks = %#v, want object", doc["hooks"])
+	}
+	if entries := interfaceArray(hooks["SessionStart"]); len(entries) != 1 {
+		t.Fatalf("SessionStart entries = %d, want 1", len(entries))
+	}
+}
+
+func TestNormalizeOptionsTimeoutBoundary(t *testing.T) {
+	dir := t.TempDir()
+	base := Options{
+		Agent:        AgentBoth,
+		ScriptPath:   filepath.Join(dir, "hook.sh"),
+		BinaryPath:   writeExecutable(t, filepath.Join(dir, "amq-keepalive")),
+		ClaudeConfig: filepath.Join(dir, "claude.json"),
+		CodexConfig:  filepath.Join(dir, "codex.json"),
+	}
+	below := base
+	below.Timeout = time.Second - time.Millisecond
+	if _, err := NormalizeOptions(below); err == nil {
+		t.Fatal("NormalizeOptions accepted timeout below 1s")
+	}
+	atBoundary := base
+	atBoundary.Timeout = time.Second
+	if _, err := NormalizeOptions(atBoundary); err != nil {
+		t.Fatalf("NormalizeOptions rejected 1s timeout: %v", err)
 	}
 }
 

@@ -624,6 +624,105 @@ sleep 0.1
 	}
 }
 
+func TestAttachUsesDefaultWakeReadyTimeout(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "inbox.txt")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	fakeAMQ := filepath.Join(dir, "amq")
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`
+ready=""
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "-ready-file" ]; then ready="$arg"; fi
+  previous="$arg"
+done
+[ -n "$ready" ] || exit 11
+sleep 0.05
+printf ready > "$ready"
+`), 0o700); err != nil {
+		t.Fatalf("write fake AMQ: %v", err)
+	}
+	runApp(t, "attach",
+		"--registry", filepath.Join(dir, "registry.json"),
+		"--adapter", "file",
+		"--target", target,
+		"--root", "/tmp/amq-root",
+		"--base-root", "/tmp",
+		"--session", "amq-root",
+		"--me", "codex",
+		"--amq", fakeAMQ,
+		"--self", "/bin/amq-keepalive",
+	)
+}
+
+func TestRegisterResolvesEnvWhenAnyIdentityFieldIsMissing(t *testing.T) {
+	dir := t.TempDir()
+	envRoot := filepath.Join(dir, "env-root")
+	explicitRoot := filepath.Join(dir, "explicit-root")
+	for _, path := range []string{envRoot, explicitRoot} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatalf("Mkdir %s: %v", path, err)
+		}
+	}
+	target := filepath.Join(dir, "inbox.txt")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	calls := filepath.Join(dir, "env-calls")
+	t.Setenv("AMQ_KEEPALIVE_ENV_CALLS", calls)
+	fakeAMQ := filepath.Join(dir, "amq")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "env" ]; then
+  printf 'env\n' >> "$AMQ_KEEPALIVE_ENV_CALLS"
+  printf '%%s\n' '{"root":%q,"base_root":%q,"session_name":"env-session","me":"env-agent"}'
+  exit 0
+fi
+exit 12
+`, envRoot, dir)
+	if err := os.WriteFile(fakeAMQ, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake AMQ: %v", err)
+	}
+
+	base := registerOptions{
+		AdapterName: "file",
+		Target:      target,
+		Root:        explicitRoot,
+		BaseRoot:    dir,
+		SessionName: "explicit-session",
+		Me:          "codex",
+		AMQPath:     fakeAMQ,
+		NoStart:     true,
+	}
+	tests := []struct {
+		name   string
+		mutate func(*registerOptions)
+	}{
+		{name: "root", mutate: func(opts *registerOptions) { opts.Root = "" }},
+		{name: "base root", mutate: func(opts *registerOptions) { opts.BaseRoot = "" }},
+		{name: "session", mutate: func(opts *registerOptions) { opts.SessionName = "" }},
+		{name: "agent", mutate: func(opts *registerOptions) { opts.Me = "" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(calls, nil, 0o600); err != nil {
+				t.Fatalf("reset calls: %v", err)
+			}
+			opts := base
+			opts.RegistryPath = filepath.Join(t.TempDir(), "registry.json")
+			test.mutate(&opts)
+			if err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).registerWithOptions(context.Background(), opts); err != nil {
+				t.Fatalf("registerWithOptions: %v", err)
+			}
+			data, err := os.ReadFile(calls)
+			if err != nil || string(data) != "env\n" {
+				t.Fatalf("env calls = %q err=%v, want one", data, err)
+			}
+		})
+	}
+}
+
 func TestReattachPreservesRegistryWhenWakeTargetCannotChange(t *testing.T) {
 	dir := t.TempDir()
 	registryPath := filepath.Join(dir, "registry.json")
@@ -1423,7 +1522,11 @@ func (appFailingWake) StartWake(context.Context, amq.StartWakeRequest) error {
 func TestSuperviseWarnsOncePerPersistentFailureTransition(t *testing.T) {
 	dir := t.TempDir()
 	registryPath := filepath.Join(dir, "registry.json")
-	_, err := registry.New(registryPath).Upsert(registry.Entry{
+	canonicalRoot, err := registry.CanonicalRoot("/tmp/amq-root")
+	if err != nil {
+		t.Fatalf("CanonicalRoot: %v", err)
+	}
+	_, err = registry.New(registryPath).Upsert(registry.Entry{
 		Root:    "/tmp/amq-root",
 		Agent:   "codex",
 		Adapter: "file",
@@ -1441,7 +1544,7 @@ func TestSuperviseWarnsOncePerPersistentFailureTransition(t *testing.T) {
 	warning := stderr.String()
 	for _, want := range []string{
 		"action=start_failed",
-		`root="/tmp/amq-root"`,
+		`root="` + canonicalRoot + `"`,
 		`agent="codex"`,
 		`adapter="file"`,
 		`target="` + filepath.Join(dir, "inbox.txt") + `"`,
