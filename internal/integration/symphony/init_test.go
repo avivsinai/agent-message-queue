@@ -301,6 +301,43 @@ func TestHasManagedFragmentExtractsFirstBeginToFirstLaterEnd(t *testing.T) {
 	}
 }
 
+func TestInit_CheckModePartialManagedHooksAreNotFound(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestWorkflow(t, dir, `---
+hooks:
+  after_create: |
+    # BEGIN AMQ MANAGED
+    amq integration symphony emit --event after_create --me codex || true
+    # END AMQ MANAGED
+  after_run: |
+    # BEGIN AMQ MANAGED
+    amq integration symphony emit --event after_run --me codex || true
+    # END AMQ MANAGED
+  before_remove: |
+    # BEGIN AMQ MANAGED
+    amq integration symphony emit --event before_remove --me codex || true
+    # END AMQ MANAGED
+---
+
+Prompt.
+`)
+
+	result, err := Init(InitOptions{
+		WorkflowPath: path,
+		Me:           "codex",
+		Check:        true,
+	})
+	if err != nil {
+		t.Fatalf("Init check: %v", err)
+	}
+	if result.HooksFound {
+		t.Fatal("three of four managed hooks is not HooksFound")
+	}
+	if result.AlreadyOK {
+		t.Fatal("partial managed hooks must not be AlreadyOK")
+	}
+}
+
 func TestInit_NoExistingHooks(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTestWorkflow(t, dir, `---

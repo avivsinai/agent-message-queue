@@ -383,6 +383,34 @@ func TestReadHeaderFileRejectsSymlink(t *testing.T) {
 	}
 }
 
+func TestMarshalFillsZeroSchemaAndEmptyCreated(t *testing.T) {
+	msg := Message{
+		Header: Header{
+			ID:   "zero-schema",
+			From: "codex",
+			To:   []string{"claude"},
+		},
+		Body: "defaults\n",
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	parsed, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if parsed.Header.Schema != CurrentSchema {
+		t.Fatalf("schema = %d, want %d", parsed.Header.Schema, CurrentSchema)
+	}
+	if parsed.Header.Created == "" {
+		t.Fatal("created was left empty")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, parsed.Header.Created); err != nil {
+		t.Fatalf("created %q is not RFC3339Nano: %v", parsed.Header.Created, err)
+	}
+}
+
 func TestReadMessageFile_SizeLimit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "huge.md")
@@ -412,6 +440,68 @@ func TestSplitFrontmatter_SizeLimit(t *testing.T) {
 	}
 }
 
+func TestReadMessageFileAllowsExactMaxSize(t *testing.T) {
+	_, data := mustExactMaxSizeMessage(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "exact.md")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write exact message: %v", err)
+	}
+	parsed, err := ReadMessageFile(path)
+	if err != nil {
+		t.Fatalf("ReadMessageFile exact MaxMessageSize: %v", err)
+	}
+	if parsed.Header.ID != "exact-max" || !strings.HasPrefix(parsed.Body, "pad\n") {
+		t.Fatalf("parsed exact file = id=%q body[:8]=%q", parsed.Header.ID, parsed.Body)
+	}
+}
+
+func TestParseMessageAllowsExactMaxSize(t *testing.T) {
+	want, data := mustExactMaxSizeMessage(t)
+	if len(data) != MaxMessageSize {
+		t.Fatalf("padded size = %d, want %d", len(data), MaxMessageSize)
+	}
+	parsed, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage exact MaxMessageSize: %v", err)
+	}
+	if parsed.Header.ID != want.Header.ID || parsed.Header.From != want.Header.From {
+		t.Fatalf("header = %+v, want id=%q from=%q", parsed.Header, want.Header.ID, want.Header.From)
+	}
+	if !strings.HasPrefix(parsed.Body, "pad\n") {
+		t.Fatalf("body prefix = %q, want pad\\n", parsed.Body[:min(8, len(parsed.Body))])
+	}
+}
+
+func mustExactMaxSizeMessage(t *testing.T) (Message, []byte) {
+	t.Helper()
+	msg := Message{
+		Header: Header{
+			Schema:  CurrentSchema,
+			ID:      "exact-max",
+			From:    "codex",
+			To:      []string{"claude"},
+			Thread:  "p2p/claude__codex",
+			Subject: "exact",
+			Created: "2026-01-01T00:00:00.000000000Z",
+		},
+		Body: "pad\n",
+	}
+	seed, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if len(seed) > MaxMessageSize {
+		t.Fatalf("seed size %d exceeds MaxMessageSize", len(seed))
+	}
+	data := make([]byte, MaxMessageSize)
+	copy(data, seed)
+	for i := len(seed); i < MaxMessageSize; i++ {
+		data[i] = 'a'
+	}
+	return msg, data
+}
+
 func TestSortByTimestamp(t *testing.T) {
 	headers := []testTimestamped{
 		{id: "c", created: "2025-01-03T00:00:00Z", raw: time.Date(2025, 1, 3, 0, 0, 0, 0, time.UTC)},
@@ -427,6 +517,21 @@ func TestSortByTimestamp(t *testing.T) {
 		if h.id != expected[i] {
 			t.Errorf("position %d: expected %s, got %s", i, expected[i], h.id)
 		}
+	}
+}
+
+func TestSortByTimestampDoesNotCompareMixedZeroRawTimes(t *testing.T) {
+	earlyCreated := "2025-01-01T00:00:00Z"
+	lateCreated := "2025-01-02T00:00:00Z"
+	headers := []testTimestamped{
+		{id: "zero-raw-late-created", created: lateCreated},
+		{id: "raw-early", created: earlyCreated, raw: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)},
+	}
+
+	SortByTimestamp(headers)
+
+	if headers[0].id != "raw-early" || headers[1].id != "zero-raw-late-created" {
+		t.Fatalf("order = [%s, %s], want raw-early then created-string fallback", headers[0].id, headers[1].id)
 	}
 }
 

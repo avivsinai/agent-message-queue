@@ -80,6 +80,13 @@ func TestLaunchIntentNonRunnableIsHandleOnly(t *testing.T) {
 	}
 }
 
+func TestNonRunnableValidateRejectsSmuggledGoFields(t *testing.T) {
+	participant := ParticipantV1{Handle: "operator", Runnable: false, Executable: "codex"}
+	if err := participant.validate(); err == nil || !strings.Contains(err.Error(), "handle-only") {
+		t.Fatalf("validate error = %v, want handle-only refusal", err)
+	}
+}
+
 func TestLaunchIntentV1AcceptsSiblingWorktreeAndZeroRunnable(t *testing.T) {
 	intent, err := DecodeLaunchIntentV1([]byte(validIntentJSON(t)))
 	if err != nil {

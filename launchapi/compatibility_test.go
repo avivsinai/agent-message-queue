@@ -30,6 +30,13 @@ func TestCompatibilityAndNegotiateV1(t *testing.T) {
 	if !reflect.DeepEqual(negotiated.Features, []string{"launch_intent_v1", "managed_tmux_v1"}) {
 		t.Fatalf("negotiated features = %v", negotiated.Features)
 	}
+
+	if _, err := Negotiate(RequirementV1{ContractSemver: ">=0.61.0", IntentVersion: 1, ResultVersion: 1}); err != nil {
+		t.Fatalf(">=0.61.0 must include the current contract: %v", err)
+	}
+	if _, err := Negotiate(RequirementV1{ContractSemver: "<=0.61.0", IntentVersion: 1, ResultVersion: 1}); err != nil {
+		t.Fatalf("<=0.61.0 must include the current contract: %v", err)
+	}
 }
 
 func TestNegotiateV1FailsClosed(t *testing.T) {
@@ -44,6 +51,7 @@ func TestNegotiateV1FailsClosed(t *testing.T) {
 		{name: "result version", requirement: RequirementV1{ContractSemver: "0.61.0", IntentVersion: 1, ResultVersion: 2}, want: "result version"},
 		{name: "unknown feature", requirement: RequirementV1{ContractSemver: "0.61.0", IntentVersion: 1, ResultVersion: 1, Features: []string{"shell_hooks_v1"}}, want: "unsupported required feature"},
 		{name: "duplicate feature", requirement: RequirementV1{ContractSemver: "0.61.0", IntentVersion: 1, ResultVersion: 1, Features: []string{"launch_intent_v1", "launch_intent_v1"}}, want: "duplicate required feature"},
+		{name: "strict greater than current contract", requirement: RequirementV1{ContractSemver: ">0.61.0", IntentVersion: 1, ResultVersion: 1}, want: "does not include"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -51,5 +59,28 @@ func TestNegotiateV1FailsClosed(t *testing.T) {
 				t.Fatalf("Negotiate error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestCompareSemanticVersionsOrdersPatch(t *testing.T) {
+	left, ok := parseSemanticVersion("1.0.1")
+	if !ok {
+		t.Fatal("parse 1.0.1")
+	}
+	right, ok := parseSemanticVersion("1.0.2")
+	if !ok {
+		t.Fatal("parse 1.0.2")
+	}
+	if cmp := compareSemanticVersions(left, right); cmp >= 0 {
+		t.Fatalf("compare(1.0.1, 1.0.2) = %d, want negative", cmp)
+	}
+	if cmp := compareSemanticVersions(right, left); cmp <= 0 {
+		t.Fatalf("compare(1.0.2, 1.0.1) = %d, want positive", cmp)
+	}
+}
+
+func TestSemverRangeContainsRejectsRequirementWhitespace(t *testing.T) {
+	if semverRangeContains(" >=0.61.0", "0.61.0") {
+		t.Fatal("leading whitespace in the requirement must not match")
 	}
 }
