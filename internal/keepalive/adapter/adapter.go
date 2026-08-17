@@ -73,14 +73,14 @@ func NewRegistry(adapters ...Adapter) Registry {
 }
 
 func DefaultRegistry() Registry {
-	return NewRegistry(File{}, Ghostty{}, Cmux{})
+	return NewRegistry(File{}, Ghostty{}, Cmux{recorded: newCmuxOwnershipRecord()})
 }
 
 // DefaultRegistryWithLogf returns the production adapter set with non-fatal
 // adapter diagnostics wired to logf. Callers that do not own a diagnostic
 // stream can continue using DefaultRegistry.
 func DefaultRegistryWithLogf(logf func(format string, args ...any)) Registry {
-	return NewRegistry(File{}, Ghostty{}, Cmux{Logf: logf})
+	return NewRegistry(File{}, Ghostty{}, Cmux{Logf: logf, recorded: newCmuxOwnershipRecord()})
 }
 
 func (r Registry) Get(name string) (Adapter, error) {

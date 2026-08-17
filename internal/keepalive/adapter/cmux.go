@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -48,6 +49,10 @@ type Cmux struct {
 	// Logf receives non-fatal diagnostics (evictions, degraded fail-closed
 	// ttys). Nil is a no-op.
 	Logf func(format string, args ...any)
+	// recorded remembers the last successful OwnershipKey per surface UUID so
+	// a blank-tty surface:<uuid> key may promote to tty:<pty> once, while a
+	// later tty:<other> for the same UUID stays fail-closed.
+	recorded *cmuxOwnershipRecord
 }
 
 type cmuxSystemTree struct {
@@ -68,8 +73,9 @@ type cmuxPane struct {
 }
 
 type cmuxSurface struct {
-	ID  string `json:"id"`
-	TTY string `json:"tty"`
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	TTY  string `json:"tty"`
 	// ProcessAlive is forward-compat: a future cmux may report per-surface
 	// process liveness directly. Absent (nil) means unknown -> no effect.
 	// Explicit false marks the surface a corpse (a non-claimant, evictable).
@@ -77,9 +83,20 @@ type cmuxSurface struct {
 }
 
 type cmuxSurfaceIdentity struct {
+	Type         string
 	TTY          string
 	WorkspaceID  string
 	ProcessAlive *bool
+}
+
+// cmuxOwnershipRecord is the process-local last-key map for one Cmux adapter.
+type cmuxOwnershipRecord struct {
+	mu   sync.Mutex
+	keys map[string]string
+}
+
+func newCmuxOwnershipRecord() *cmuxOwnershipRecord {
+	return &cmuxOwnershipRecord{keys: map[string]string{}}
 }
 
 // Keep the token non-zero-sized so distinct snapshots cannot legally share an
@@ -124,6 +141,7 @@ type cmuxTargetInventory struct {
 	// notFound marks a canonical tty proven to have zero live owners; its
 	// surfaces resolve to ErrTargetNotFound.
 	notFound map[string]bool
+	recorded *cmuxOwnershipRecord
 }
 
 func (Cmux) Name() string {
@@ -183,7 +201,7 @@ func (c Cmux) buildInventory(ctx context.Context, path string) (cmuxTargetInvent
 	}
 	res := c.resolveOwners(surfaces, true)
 	if len(res.evictions) == 0 {
-		return newCmuxInventory(surfaces, res), nil
+		return c.snapshotInventory(surfaces, res), nil
 	}
 
 	failedTTYs, evicted := c.evict(ctx, path, res.evictions)
@@ -194,7 +212,7 @@ func (c Cmux) buildInventory(ctx context.Context, path string) (cmuxTargetInvent
 		for tty := range failedTTYs {
 			res.forceDegraded(tty)
 		}
-		return newCmuxInventory(surfaces, res), nil
+		return c.snapshotInventory(surfaces, res), nil
 	}
 
 	// At least one alias was retracted; rebuild once so the snapshot reflects
@@ -214,7 +232,7 @@ func (c Cmux) buildInventory(ctx context.Context, path string) (cmuxTargetInvent
 		res2.forceDegraded(tty)
 		c.logf("WARN cmux eviction incomplete, degraded to fail-closed: tty=%s", tty)
 	}
-	return newCmuxInventory(rebuilt, res2), nil
+	return c.snapshotInventory(rebuilt, res2), nil
 }
 
 // fetchSurfaces runs one system.tree RPC and parses it into a surface identity
@@ -251,7 +269,12 @@ func (c Cmux) fetchSurfaces(ctx context.Context, path string) (map[string]cmuxSu
 						return nil, fmt.Errorf("parse cmux system.tree surface id: %w", err)
 					}
 					id = strings.ToUpper(id)
+					typ := strings.TrimSpace(surface.Type)
+					if typ == "" {
+						typ = "terminal"
+					}
 					identity := cmuxSurfaceIdentity{
+						Type:         typ,
 						TTY:          strings.TrimSpace(surface.TTY),
 						WorkspaceID:  strings.TrimSpace(workspace.ID),
 						ProcessAlive: surface.ProcessAlive,
@@ -375,9 +398,15 @@ func (i cmuxTargetInventory) OwnershipKey(target string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if !isCmuxTerminalType(surface.Type) {
+		return "", fmt.Errorf("%w: cmux target %q has type %q, want terminal", ErrTargetDegraded, target, surface.Type)
+	}
 	tty, err := canonicalCmuxTTY(surface.TTY)
 	if err != nil {
-		return "", fmt.Errorf("%w: cmux target %q physical identity is ambiguous: %v", ErrTargetDegraded, target, err)
+		if strings.TrimSpace(surface.TTY) != "" {
+			return "", fmt.Errorf("%w: cmux target %q physical identity is ambiguous: %v", ErrTargetDegraded, target, err)
+		}
+		return i.commitOwnershipKey(id, "surface:"+id)
 	}
 	if tty == cmuxEvictedTTY {
 		return "", fmt.Errorf("%w: cmux target %q was retired as a stale tty alias", ErrTargetNotFound, target)
@@ -391,7 +420,35 @@ func (i cmuxTargetInventory) OwnershipKey(target string) (string, error) {
 	if owner, ok := i.owner[tty]; !ok || owner != id {
 		return "", i.ambiguityError(target, tty)
 	}
-	return "tty:" + tty, nil
+	return i.commitOwnershipKey(id, "tty:"+tty)
+}
+
+func (i cmuxTargetInventory) commitOwnershipKey(id, key string) (string, error) {
+	if err := i.recorded.accept(id, key); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+func (r *cmuxOwnershipRecord) accept(id, key string) error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.keys == nil {
+		r.keys = map[string]string{}
+	}
+	prev, ok := r.keys[id]
+	if !ok || prev == key {
+		r.keys[id] = key
+		return nil
+	}
+	if strings.HasPrefix(prev, "surface:") && strings.HasPrefix(key, "tty:") {
+		r.keys[id] = key
+		return nil
+	}
+	return fmt.Errorf("%w: cmux surface %s ownership key conflict: recorded %q now %q", ErrTargetDegraded, id, prev, key)
 }
 
 func (i cmuxTargetInventory) ambiguityError(target, tty string) error {
@@ -468,7 +525,7 @@ func isCmuxPTY(tty string) bool {
 }
 
 func sameCmuxSurfaceIdentity(left, right cmuxSurfaceIdentity) bool {
-	if left.WorkspaceID != right.WorkspaceID || !sameOptionalBool(left.ProcessAlive, right.ProcessAlive) {
+	if left.WorkspaceID != right.WorkspaceID || left.Type != right.Type || !sameOptionalBool(left.ProcessAlive, right.ProcessAlive) {
 		return false
 	}
 	leftTTY, leftErr := canonicalCmuxTTY(left.TTY)
@@ -556,6 +613,16 @@ func newCmuxInventory(surfaces map[string]cmuxSurfaceIdentity, res cmuxResolutio
 		degraded:       res.degraded,
 		notFound:       res.notFound,
 	}
+}
+
+func (c Cmux) snapshotInventory(surfaces map[string]cmuxSurfaceIdentity, res cmuxResolution) cmuxTargetInventory {
+	inventory := newCmuxInventory(surfaces, res)
+	inventory.recorded = c.recorded
+	return inventory
+}
+
+func isCmuxTerminalType(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), "terminal")
 }
 
 // evict retracts each corpse alias via surface.report_tty, writing the sentinel

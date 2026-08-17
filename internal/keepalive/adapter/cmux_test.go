@@ -256,7 +256,7 @@ func TestCmuxInventoryCanonicalizesBareTTYDeviceName(t *testing.T) {
 	}
 }
 
-func TestCmuxInventoryRejectsBlankTTYInsteadOfAssumingUUIDOwnership(t *testing.T) {
+func TestCmuxInventoryUsesSurfaceUUIDWhenTTYBlank(t *testing.T) {
 	skipCmuxNonDarwin(t)
 	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
 		map[string]string{"id": testCmuxSurfaceID, "tty": "  "},
@@ -265,12 +265,81 @@ func TestCmuxInventoryRejectsBlankTTYInsteadOfAssumingUUIDOwnership(t *testing.T
 	if err != nil {
 		t.Fatalf("Inventory() error = %v", err)
 	}
+	key, err := inventory.OwnershipKey("cmux:surface:" + testCmuxSurfaceID)
+	if err != nil || key != "surface:"+testCmuxSurfaceID {
+		t.Fatalf("OwnershipKey() = %q, %v, want surface UUID key", key, err)
+	}
+}
+
+func TestCmuxInventoryRejectsNonTerminalType(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "type": "browser", "tty": "ttys011"},
+	)}
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("Inventory() error = %v", err)
+	}
 	err = inventory.Probe("cmux:surface:" + testCmuxSurfaceID)
-	if err == nil || errors.Is(err, ErrTargetNotFound) {
-		t.Fatalf("Probe() error = %v, want ambiguous missing-tty failure", err)
+	if err == nil || errors.Is(err, ErrTargetNotFound) || !errors.Is(err, ErrTargetDegraded) {
+		t.Fatalf("Probe() error = %v, want degraded non-terminal type", err)
 	}
 	if key, ok := CmuxDegradedOwnershipKey(inventory, err); ok || key != "" {
-		t.Fatalf("CmuxDegradedOwnershipKey(blank tty) = %q, %v; want unavailable", key, ok)
+		t.Fatalf("CmuxDegradedOwnershipKey(non-terminal) = %q, %v; want unavailable", key, ok)
+	}
+}
+
+func TestCmuxOwnershipKeyPromotesBlankTTYToCanonicalTTYOnce(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	recorded := newCmuxOwnershipRecord()
+	blank := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": ""},
+	)}
+	blankInv, err := (Cmux{Runner: blank, Path: "/fake/cmux", recorded: recorded}).Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("blank Inventory() error = %v", err)
+	}
+	key, err := blankInv.OwnershipKey("cmux:surface:" + testCmuxSurfaceID)
+	if err != nil || key != "surface:"+testCmuxSurfaceID {
+		t.Fatalf("blank OwnershipKey() = %q, %v, want surface UUID", key, err)
+	}
+	present := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+	)}
+	presentInv, err := (Cmux{Runner: present, Path: "/fake/cmux", recorded: recorded}).Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("present Inventory() error = %v", err)
+	}
+	key, err = presentInv.OwnershipKey("cmux:surface:" + testCmuxSurfaceID)
+	if err != nil || key != "tty:/dev/ttys011" {
+		t.Fatalf("promoted OwnershipKey() = %q, %v, want tty", key, err)
+	}
+}
+
+func TestCmuxOwnershipKeyRejectsTTYChangeAfterRecordedTTY(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	recorded := newCmuxOwnershipRecord()
+	first := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+	)}
+	firstInv, err := (Cmux{Runner: first, Path: "/fake/cmux", recorded: recorded}).Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("first Inventory() error = %v", err)
+	}
+	key, err := firstInv.OwnershipKey("cmux:surface:" + testCmuxSurfaceID)
+	if err != nil || key != "tty:/dev/ttys011" {
+		t.Fatalf("first OwnershipKey() = %q, %v", key, err)
+	}
+	second := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys012"},
+	)}
+	secondInv, err := (Cmux{Runner: second, Path: "/fake/cmux", recorded: recorded}).Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("second Inventory() error = %v", err)
+	}
+	_, err = secondInv.OwnershipKey("cmux:surface:" + testCmuxSurfaceID)
+	if err == nil || !errors.Is(err, ErrTargetDegraded) || !strings.Contains(err.Error(), "ownership key conflict") {
+		t.Fatalf("second OwnershipKey() error = %v, want recorded tty conflict", err)
 	}
 }
 
@@ -971,6 +1040,9 @@ func cmuxTreeWithWorkspace(workspaceID string, surfaces ...map[string]string) []
 				continue
 			}
 			record[key] = value
+		}
+		if _, ok := record["type"]; !ok {
+			record["type"] = "terminal"
 		}
 		records = append(records, record)
 	}

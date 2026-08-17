@@ -33,9 +33,11 @@ The supported terminal target forms are:
 
 cmux short references such as `surface:2` are rejected because they can drift.
 cmux UUIDs are canonicalized before registration, and the adapter fails closed
-when a surface or its physical TTY identity is missing or ambiguous. Ghostty
-uses its native AppleScript interface and does not use titles, focus stealing,
-System Events, or the clipboard.
+when a surface UUID is missing, not `type==terminal`, or physically ambiguous.
+cmux 0.64.3 `system.tree` omits tty for most surfaces; identity is the surface
+UUID; tty corroborates when present. Ghostty uses its native AppleScript
+interface and does not use titles, focus stealing, System Events, or the
+clipboard.
 
 The cmux CLI is resolved from `AMQ_KEEPALIVE_CMUX`,
 `CMUX_BUNDLED_CLI_PATH`, `PATH`, or the standard application bundle locations.
