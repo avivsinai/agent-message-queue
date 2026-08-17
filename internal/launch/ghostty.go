@@ -20,6 +20,7 @@ const (
 	ghosttyProfileVersion      = 1
 	ghosttyProfileVersionRange = ">=1.3.0 <2.0"
 	ghosttyCommandTimeout      = 5 * time.Second
+	ghosttyCreateTimeout       = 30 * time.Second
 	ghosttyHealthTimeout       = 15 * time.Second
 	ghosttyHealthPoll          = 100 * time.Millisecond
 	ghosttyBundleID            = "com.mitchellh.ghostty"
@@ -36,6 +37,7 @@ type GhosttyBackend struct {
 	hostname      func() (string, error)
 	getenv        func(string) string
 	sleep         func(context.Context, time.Duration) error
+	createTimeout time.Duration
 	healthTimeout time.Duration
 	healthPoll    time.Duration
 	mu            sync.Mutex
@@ -108,42 +110,65 @@ func (b *GhosttyBackend) Create(req CreateRequest) (CreateResult, error) {
 		return CreateResult{}, &DefinitePreCreateError{Err: fmt.Errorf("ghostty %s is unavailable", ghosttyProfileVersionRange)}
 	}
 	nonce := req.Plan.Agents[0].LaunchNonce
-	ctx := context.Background()
-	if existing, err := b.generationWindow(ctx, nonce); err != nil {
+	inspectCtx, inspectCancel := b.inspectCallContext()
+	if existing, err := b.generationWindow(inspectCtx, nonce); err != nil {
+		inspectCancel()
 		return CreateResult{}, err
 	} else if existing != "" {
+		inspectCancel()
 		return CreateResult{}, fmt.Errorf("ghostty window for launch nonce %s already exists; journal recovery must classify it", nonce)
 	}
-	created, err := b.run(ctx, "new-window", req.ProjectRoot)
+	before, err := b.listWindowIDs(inspectCtx)
+	inspectCancel()
 	if err != nil {
-		return CreateResult{}, fmt.Errorf("create ghostty window: %w", err)
+		return CreateResult{}, &DefinitePreCreateError{Err: fmt.Errorf("snapshot ghostty windows before create: %w", err)}
+	}
+	createCtx, createCancel := b.createCallContext()
+	created, err := b.run(createCtx, "new-window", req.ProjectRoot)
+	createCancel()
+	if err != nil {
+		return CreateResult{}, b.reconcileCreateFailure(before, "", false, fmt.Errorf("create ghostty window: %w", err))
 	}
 	windowID, tabID, firstTerminal, err := parseGhosttyCreatedWindow(created)
 	if err != nil {
-		return CreateResult{}, err
+		return CreateResult{}, b.reconcileCreateFailure(before, "", false, err)
 	}
 	terminalIDs := []string{firstTerminal}
 	for _, agent := range req.Plan.Agents[1:] {
-		splitRaw, splitErr := b.run(ctx, "split", terminalIDs[len(terminalIDs)-1], req.ProjectRoot)
+		splitSnapCtx, splitSnapCancel := b.inspectCallContext()
+		splitBefore, snapErr := b.listWindowIDs(splitSnapCtx)
+		splitSnapCancel()
+		if snapErr != nil {
+			return CreateResult{}, b.reconcileCreateFailure(before, windowID, false, fmt.Errorf("snapshot ghostty windows before split: %w", snapErr))
+		}
+		splitCtx, splitCancel := b.createCallContext()
+		splitRaw, splitErr := b.run(splitCtx, "split", terminalIDs[len(terminalIDs)-1], req.ProjectRoot)
+		splitCancel()
 		if splitErr != nil {
-			return CreateResult{}, fmt.Errorf("create ghostty split for %s: %w", agent.Handle, splitErr)
+			return CreateResult{}, b.reconcileCreateFailure(splitBefore, windowID, false, fmt.Errorf("create ghostty split for %s: %w", agent.Handle, splitErr))
 		}
 		terminalID, splitErr := parseGhosttyTerminalID(splitRaw)
 		if splitErr != nil {
-			return CreateResult{}, fmt.Errorf("ghostty split for %s: %w", agent.Handle, splitErr)
+			return CreateResult{}, b.reconcileCreateFailure(splitBefore, windowID, false, fmt.Errorf("ghostty split for %s: %w", agent.Handle, splitErr))
 		}
 		terminalIDs = append(terminalIDs, terminalID)
 	}
-	if err := b.waitHealthy(ctx, terminalIDs); err != nil {
-		return CreateResult{}, err
+	if err := b.waitHealthy(context.Background(), terminalIDs); err != nil {
+		return CreateResult{}, b.reconcileCreateFailure(before, windowID, false, err)
 	}
 	for i, agent := range req.Plan.Agents {
 		line := b.agentCommand(req, agent)
-		if _, err := b.run(ctx, "input-text", terminalIDs[i], line); err != nil {
-			return CreateResult{}, fmt.Errorf("send ghostty command for %s: %w", agent.Handle, err)
+		inputCtx, inputCancel := b.inspectCallContext()
+		_, err := b.run(inputCtx, "input-text", terminalIDs[i], line)
+		inputCancel()
+		if err != nil {
+			return CreateResult{}, b.reconcileCreateFailure(before, windowID, true, fmt.Errorf("send ghostty command for %s: %w", agent.Handle, err))
 		}
-		if _, err := b.run(ctx, "send-key-enter", terminalIDs[i]); err != nil {
-			return CreateResult{}, fmt.Errorf("submit ghostty command for %s: %w", agent.Handle, err)
+		enterCtx, enterCancel := b.inspectCallContext()
+		_, err = b.run(enterCtx, "send-key-enter", terminalIDs[i])
+		enterCancel()
+		if err != nil {
+			return CreateResult{}, b.reconcileCreateFailure(before, windowID, true, fmt.Errorf("submit ghostty command for %s: %w", agent.Handle, err))
 		}
 	}
 	resources := ghosttyBindingResources(windowID, tabID, nonce, req.Plan, terminalIDs)
@@ -161,6 +186,72 @@ func (b *GhosttyBackend) Create(req CreateRequest) (CreateResult, error) {
 	}
 	b.rememberGeneration(nonce, windowID)
 	return CreateResult{Outcome: OutcomeCreated, Profile: binding.Profile, Binding: binding}, nil
+}
+
+func (b *GhosttyBackend) createOpTimeout() time.Duration {
+	if b.createTimeout > 0 {
+		return b.createTimeout
+	}
+	return ghosttyCreateTimeout
+}
+
+func (b *GhosttyBackend) createCallContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), b.createOpTimeout())
+}
+
+func (b *GhosttyBackend) inspectCallContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), ghosttyCommandTimeout)
+}
+
+func (b *GhosttyBackend) reconcileCreateFailure(before []string, knownWindowID string, inputSent bool, cause error) error {
+	if inputSent {
+		return cause
+	}
+	ctx, cancel := b.inspectCallContext()
+	defer cancel()
+	listed, err := b.listWindowIDs(ctx)
+	if err != nil {
+		return fmt.Errorf("%w (orphan window reconciliation failed: %v)", cause, err)
+	}
+	newIDs := ghosttyIDsNotIn(listed, before)
+	if knownWindowID != "" {
+		extras := make([]string, 0, len(newIDs))
+		for _, id := range newIDs {
+			if id != knownWindowID {
+				extras = append(extras, id)
+			}
+		}
+		if containsString(listed, knownWindowID) {
+			if _, closeErr := b.run(ctx, "close-window", knownWindowID); closeErr != nil {
+				return fmt.Errorf("%w (close orphan %s: %v)", cause, knownWindowID, closeErr)
+			}
+		}
+		if len(extras) > 0 {
+			return fmt.Errorf("%w (closed orphan %s; ambiguous extra windows %s, unknown, never guessed)", cause, knownWindowID, strings.Join(extras, ","))
+		}
+		return fmt.Errorf("%w (closed orphan ghostty window %s)", cause, knownWindowID)
+	}
+	switch len(newIDs) {
+	case 0:
+		return fmt.Errorf("%w (no new ghostty window appeared)", cause)
+	case 1:
+		if _, closeErr := b.run(ctx, "close-window", newIDs[0]); closeErr != nil {
+			return fmt.Errorf("%w (close orphan %s: %v)", cause, newIDs[0], closeErr)
+		}
+		return fmt.Errorf("%w (closed orphan ghostty window %s)", cause, newIDs[0])
+	default:
+		return fmt.Errorf("%w (ambiguous new ghostty windows %s; unknown, never guessed)", cause, strings.Join(newIDs, ","))
+	}
+}
+
+func ghosttyIDsNotIn(listed, before []string) []string {
+	out := make([]string, 0)
+	for _, id := range listed {
+		if !containsString(before, id) {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func (b *GhosttyBackend) Inspect(req InspectRequest) (InspectResult, error) {

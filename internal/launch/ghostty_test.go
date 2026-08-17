@@ -117,6 +117,18 @@ func (f *fakeGhostty) nextUUID() string {
 	return fmt.Sprintf("019C5A10-75D8-7EEF-8DB7-%012X", f.seq)
 }
 
+func (f *fakeGhostty) windowCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.windows)
+}
+
+func (f *fakeGhostty) addWindow(id, tabID, term string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.windows = append(f.windows, fakeGhosttyWindow{id: id, tabID: tabID, terminals: []string{term}})
+}
+
 func (f *fakeGhostty) ops() [][]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -271,12 +283,11 @@ func TestGhosttyHealthTimeoutDoesNotSend(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "readiness timed out") {
 		t.Fatalf("Create error = %v, want readiness timeout", err)
 	}
-	var definite *DefinitePreCreateError
-	if errors.As(err, &definite) {
-		t.Fatal("health timeout must retain the window for journal recovery")
-	}
 	if indexOfGhosttyOp(fake.ops(), "input-text") >= 0 {
 		t.Fatal("sent text after readiness failure")
+	}
+	if fake.windowCount() != 0 {
+		t.Fatalf("health timeout left orphan windows: %d", fake.windowCount())
 	}
 }
 
@@ -356,6 +367,73 @@ func TestGhosttyCrashAfterWindowIsUncertain(t *testing.T) {
 	var definite *DefinitePreCreateError
 	if err == nil || errors.As(err, &definite) {
 		t.Fatalf("Create error = %v, want uncertain post-create failure", err)
+	}
+	if fake.windowCount() != 0 {
+		t.Fatalf("split failure left orphan windows: %d", fake.windowCount())
+	}
+}
+
+func TestGhosttyCreateTimeoutClosesSingleOrphanWindow(t *testing.T) {
+	backend, fake := newFakeGhosttyBackend(t)
+	backend.createTimeout = 20 * time.Millisecond
+	inner := fake.run
+	backend.run = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "new-window" {
+			if _, err := inner(ctx, args...); err != nil {
+				return "", err
+			}
+			<-ctx.Done()
+			return "", fmt.Errorf("osascript new-window: %w", ctx.Err())
+		}
+		return inner(ctx, args...)
+	}
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude")
+	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eaa1")
+	plan.Agents = plan.Agents[:1]
+	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root})
+	if err == nil {
+		t.Fatal("Create succeeded after create-call timeout")
+	}
+	if !strings.Contains(err.Error(), "closed orphan ghostty window") {
+		t.Fatalf("Create error = %v, want closed orphan", err)
+	}
+	if fake.windowCount() != 0 {
+		t.Fatalf("timeout left orphan windows: %d", fake.windowCount())
+	}
+	if indexOfGhosttyOp(fake.ops(), "close-window") < 0 {
+		t.Fatal("timeout did not close the orphan window")
+	}
+}
+
+func TestGhosttyCreateTimeoutDoesNotCloseAmbiguousWindows(t *testing.T) {
+	backend, fake := newFakeGhosttyBackend(t)
+	backend.createTimeout = 20 * time.Millisecond
+	inner := fake.run
+	backend.run = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "new-window" {
+			if _, err := inner(ctx, args...); err != nil {
+				return "", err
+			}
+			fake.addWindow("tab-group-extra", "tab-extra", "019C5A10-75D8-7EEF-8DB7-0000000000EE")
+			<-ctx.Done()
+			return "", fmt.Errorf("osascript new-window: %w", ctx.Err())
+		}
+		return inner(ctx, args...)
+	}
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude")
+	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eaa2")
+	plan.Agents = plan.Agents[:1]
+	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root})
+	if err == nil || !strings.Contains(err.Error(), "ambiguous new ghostty windows") {
+		t.Fatalf("Create error = %v, want ambiguous unknown", err)
+	}
+	if fake.windowCount() != 2 {
+		t.Fatalf("ambiguous timeout closed windows: %d", fake.windowCount())
+	}
+	if indexOfGhosttyOp(fake.ops(), "close-window") >= 0 {
+		t.Fatal("ambiguous timeout guessed a window to close")
 	}
 }
 

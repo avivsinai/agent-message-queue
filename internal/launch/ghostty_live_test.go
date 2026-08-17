@@ -19,10 +19,6 @@ func TestGhosttyLive(t *testing.T) {
 	if !detect.Available {
 		t.Fatal("ghostty AppleScript ping failed; grant Automation permission and run inside Ghostty")
 	}
-	before, err := ghosttyLiveTerminalCount()
-	if err != nil {
-		t.Fatal(err)
-	}
 	var sent []string
 	inner := backend.run
 	backend.run = func(ctx context.Context, args ...string) (string, error) {
@@ -31,6 +27,39 @@ func TestGhosttyLive(t *testing.T) {
 		}
 		return inner(ctx, args...)
 	}
+	beforeWindows, err := backend.listWindowIDs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := ghosttyLiveTerminalCount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), ghosttyCreateTimeout)
+		defer cancel()
+		listed, listErr := backend.listWindowIDs(ctx)
+		if listErr != nil {
+			t.Errorf("cleanup list windows: %v", listErr)
+			return
+		}
+		for _, id := range listed {
+			if containsString(beforeWindows, id) {
+				continue
+			}
+			if _, closeErr := backend.run(ctx, "close-window", id); closeErr != nil {
+				t.Errorf("cleanup close %s: %v", id, closeErr)
+			}
+		}
+		after, countErr := ghosttyLiveTerminalCount()
+		if countErr != nil {
+			t.Errorf("cleanup terminal count: %v", countErr)
+			return
+		}
+		if after != before {
+			t.Errorf("live terminal count not restored: before=%d after=%d", before, after)
+		}
+	})
 	project := t.TempDir()
 	root := tmuxTestRoot(t, "claude", "codex")
 	fakeAMQ := writeGhosttySleepAMQ(t)
@@ -45,9 +74,6 @@ func TestGhosttyLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_, _ = backend.Close(CloseRequest{Binding: created.Binding, Root: root})
-	})
 	if created.Outcome != OutcomeCreated || countGhosttyAgentResources(created.Binding) != 2 {
 		t.Fatalf("Create = %#v", created)
 	}
