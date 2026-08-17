@@ -1,0 +1,41 @@
+{
+  "result_version": 1,
+  "outcome": "applied",
+  "subject_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "plan_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "trust_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "semantic_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "backend": "commands",
+  "profile": "commands/portable/v1",
+  "roster": {
+    "desired": [
+      "claude"
+    ],
+    "present": [
+      "claude"
+    ],
+    "missing": [],
+    "extra": []
+  },
+  "observations": [
+    {
+      "handle": "claude",
+      "mailbox": "present",
+      "runnable": true,
+      "conversation": "ready",
+      "execution": "acknowledged",
+      "resource": "commands:claude"
+    }
+  ],
+  "commands": [
+    {
+      "argv": [
+        "amq",
+        "coop",
+        "exec",
+        "claude"
+      ],
+      "cwd": "/workspace/example"
+    }
+  ]
+}
