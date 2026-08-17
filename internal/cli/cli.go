@@ -24,6 +24,9 @@ func Run(args []string, version string) error {
 	if len(args) > 0 && args[0] == "__launch-exec" {
 		return runLaunchExec(args[1:])
 	}
+	if len(args) > 0 && args[0] == "__codex-notify" {
+		return runCodexNotify(args[1:])
+	}
 
 	args, noUpdate := stripNoUpdateCheckArgs(args)
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {

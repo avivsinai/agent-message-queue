@@ -567,7 +567,7 @@ esac
 	var applied launchapi.ApplyResultV1
 	decodeRealLaunchJSON(t, stdout, &applied)
 	if len(applied.Commands) != 2 {
-		t.Fatalf("exact-root commands = %#v", applied.Commands)
+		t.Fatalf("exact-root Apply = %#v", applied)
 	}
 	commands := make(map[string]launchapi.CommandV1, len(applied.Commands))
 	for _, command := range applied.Commands {

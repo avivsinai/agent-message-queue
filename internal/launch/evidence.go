@@ -211,7 +211,12 @@ func persistProviderCaptureEvidence(root *fsq.DeliveryRoot, lease *Lease, handle
 			return nil, fmt.Errorf("provider capture evidence is not persistable")
 		}
 		switch item.source {
-		case CodexThreadStartedV2:
+		case CodexNotifyV1:
+			payload, err := decodeCodexNotifyPayload(item.payload)
+			if err != nil || payload.Handle != handle || item.handle != handle || payload.LaunchNonce != item.launchNonce ||
+				payload.ConversationID != item.conversationID || payload.ProviderVersion != item.providerVersion {
+				return nil, fmt.Errorf("codex provider capture evidence is not persistable")
+			}
 		case CursorCreateChatV1:
 			payload, err := decodeCursorCreateChatPayload(item.payload)
 			if err != nil || payload.Handle != handle || item.handle != handle || payload.LaunchNonce != item.launchNonce ||
@@ -248,7 +253,7 @@ func persistProviderCaptureEvidence(root *fsq.DeliveryRoot, lease *Lease, handle
 	return refs, nil
 }
 
-func findCursorCaptureEvidence(root *fsq.DeliveryRoot, handle, nonce, providerVersion string) (CaptureEvidence, string, bool, error) {
+func findProviderCaptureEvidence(root *fsq.DeliveryRoot, provider, handle, nonce, providerVersion string) (CaptureEvidence, string, bool, error) {
 	entries, err := root.ReadDir(evidenceDirectory)
 	if errors.Is(err, os.ErrNotExist) {
 		return CaptureEvidence{}, "", false, nil
@@ -276,27 +281,54 @@ func findCursorCaptureEvidence(root *fsq.DeliveryRoot, handle, nonce, providerVe
 		if err := json.Unmarshal(record.Payload, &envelope); err != nil {
 			return CaptureEvidence{}, "", false, fmt.Errorf("decode provider capture source: %w", err)
 		}
-		if envelope.Source != CursorCreateChatV1 {
-			continue
-		}
-		payload, err := decodeCursorCreateChatPayload(record.Payload)
-		if err != nil {
-			return CaptureEvidence{}, "", false, err
-		}
-		if payload.Handle != handle || payload.LaunchNonce != nonce || payload.ProviderVersion != providerVersion {
-			continue
+		var candidate CaptureEvidence
+		switch provider {
+		case CursorProvider:
+			if envelope.Source != CursorCreateChatV1 {
+				continue
+			}
+			payload, err := decodeCursorCreateChatPayload(record.Payload)
+			if err != nil {
+				return CaptureEvidence{}, "", false, err
+			}
+			if payload.Handle != handle || payload.LaunchNonce != nonce || payload.ProviderVersion != providerVersion {
+				continue
+			}
+			candidate = CaptureEvidence{
+				source: CursorCreateChatV1, provider: CursorProvider, providerVersion: payload.ProviderVersion,
+				launchNonce: payload.LaunchNonce, handle: payload.Handle, conversationID: payload.ConversationID,
+				verified: true, observedAt: record.ObservedAt, payload: bytes.Clone(record.Payload),
+			}
+		case CodexProvider:
+			if envelope.Source != CodexNotifyV1 {
+				continue
+			}
+			payload, err := decodeCodexNotifyPayload(record.Payload)
+			if err != nil {
+				return CaptureEvidence{}, "", false, err
+			}
+			if payload.Handle != handle || payload.LaunchNonce != nonce || payload.ProviderVersion != providerVersion {
+				continue
+			}
+			candidate = CaptureEvidence{
+				source: CodexNotifyV1, provider: CodexProvider, providerVersion: payload.ProviderVersion,
+				launchNonce: payload.LaunchNonce, handle: payload.Handle, conversationID: payload.ConversationID,
+				verified: true, observedAt: record.ObservedAt, payload: bytes.Clone(record.Payload),
+			}
+		default:
+			return CaptureEvidence{}, "", false, fmt.Errorf("pre-spawn capture provider %q is unsupported", provider)
 		}
 		if foundID != "" && foundID != id {
-			return CaptureEvidence{}, "", false, fmt.Errorf("cursor acquisition evidence is ambiguous for handle %q", handle)
+			return CaptureEvidence{}, "", false, fmt.Errorf("%s acquisition evidence is ambiguous for handle %q", provider, handle)
 		}
-		found = CaptureEvidence{
-			source: CursorCreateChatV1, provider: CursorProvider, providerVersion: payload.ProviderVersion,
-			launchNonce: payload.LaunchNonce, handle: payload.Handle, conversationID: payload.ConversationID,
-			verified: true, observedAt: record.ObservedAt, payload: bytes.Clone(record.Payload),
-		}
+		found = candidate
 		foundID = id
 	}
 	return found, foundID, foundID != "", nil
+}
+
+func findCursorCaptureEvidence(root *fsq.DeliveryRoot, handle, nonce, providerVersion string) (CaptureEvidence, string, bool, error) {
+	return findProviderCaptureEvidence(root, CursorProvider, handle, nonce, providerVersion)
 }
 
 func CollectEvidenceRefs(root *fsq.DeliveryRoot, handles []string) ([]EvidenceRef, error) {

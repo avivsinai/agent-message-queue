@@ -97,6 +97,7 @@ type PrepareDependencies struct {
 	Backends     map[string]Backend
 	Preferences  []string
 	AdapterFor   AdapterFactory
+	AMQPath      string
 	TrustStore   *TrustStore
 	HostIdentity string
 }
@@ -260,6 +261,11 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	if len(request.Participants) == 0 {
 		return PrepareResult{}, fmt.Errorf("prepare requires at least one participant")
 	}
+	amqPath, err := resolveLaunchAMQExecutable(dependencies.AMQPath)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	dependencies.AMQPath = amqPath
 	state, err := openPrepareTarget(request.Target)
 	if err != nil {
 		return PrepareResult{}, err
@@ -672,7 +678,8 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 	}
 
 	base := PlanRequest{
-		Handle: participant.Handle, ProjectRoot: state.target.ProjectRoot, Cwd: cwd, AllowExternalCwd: true,
+		Handle: participant.Handle, ProjectRoot: state.target.ProjectRoot, SessionRoot: state.target.SessionRoot,
+		AMQExecutable: dependencies.AMQPath, Cwd: cwd, AllowExternalCwd: true,
 		LaunchNonce: preparePlaceholderUUID, ResumePolicy: participant.ResumePolicy,
 		CommittedArgs: slices.Clone(participant.Args), BypassArgs: slices.Clone(participant.BypassArgs), EnvOverlay: cloneEnv(participant.EnvOverlay),
 	}

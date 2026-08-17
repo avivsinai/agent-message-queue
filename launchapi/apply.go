@@ -24,7 +24,7 @@ func Apply(ctx context.Context, request ApplyRequestV1) (ApplyResultV1, error) {
 	}
 	result, err := internallaunch.Apply(ctx, internallaunch.ApplyRequest{
 		Prepare: prepared, SubjectDigest: request.SubjectDigest, Decisions: decisions,
-	}, internallaunch.ApplyDependencies{PrepareDependencies: dependencies})
+	}, internallaunch.ApplyDependencies{PrepareDependencies: dependencies, AMQPath: dependencies.AMQPath})
 	if err != nil {
 		return ApplyResultV1{}, err
 	}

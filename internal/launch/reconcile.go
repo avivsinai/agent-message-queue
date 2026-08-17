@@ -127,6 +127,11 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	if err := request.Config.Validate(); err != nil {
 		return result, err
 	}
+	amqExecutable, err := resolveLaunchAMQExecutable(request.AMQPath)
+	if err != nil {
+		return result, err
+	}
+	request.AMQPath = amqExecutable
 	journal, hasJournal, err := loadOptionalJournal(request.Root)
 	if err != nil {
 		result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "launch_journal_unreadable"
@@ -322,10 +327,6 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 			if err := callCrashHook(request.CrashHook, "journal_written"); err != nil {
 				return result, err
 			}
-		}
-		amqExecutable, err := resolveLaunchAMQExecutable(request.AMQPath)
-		if err != nil {
-			return result, err
 		}
 		if err := writeExecutionTickets(request, lease, planned, amqExecutable, backendName, detect.Profile.Identity()); err != nil {
 			return result, err
@@ -646,7 +647,7 @@ func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []pla
 			TargetArgv: agent.plan.Argv, DynamicArgv: agent.plan.DynamicArgv, TargetEnv: agent.plan.EnvOverlay,
 			Execution: agent.plan.Execution,
 		}
-		if agent.plan.PreSpawnAcquire {
+		if agent.plan.PreSpawnAcquire || (agent.adapter.Name() == CodexProvider && agent.plan.AdapterMode == AdapterModeCapture) {
 			ticketRequest.Backend, ticketRequest.Profile = backend, profile
 		}
 		ticket, err := NewExecutionTicket(ticketRequest)
@@ -739,7 +740,8 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			continue
 		}
 		base := PlanRequest{
-			Handle: cfg.Handle, ProjectRoot: request.ProjectRoot, Cwd: cwd,
+			Handle: cfg.Handle, ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(),
+			AMQExecutable: request.AMQPath, Cwd: cwd,
 			LaunchNonce: nonce, ResumePolicy: policy, CommittedArgs: committedArgs, BypassArgs: bypassArgs,
 			EnvOverlay: cfg.Env, AllowExternalCwd: request.AllowExternalCwd,
 		}

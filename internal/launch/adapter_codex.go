@@ -2,11 +2,13 @@ package launch
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
-const CodexThreadStartedV2 CaptureEvidenceSource = "codex_app_server_thread_started_v2"
+const CodexNotifyV1 CaptureEvidenceSource = "codex_notify_v1"
 
 const codexCaptureVersion = "0.147.0"
 
@@ -44,11 +46,9 @@ func (adapter *CodexAdapter) Capabilities(ctx context.Context) AdapterCapabiliti
 	}
 	help, helpErr := adapter.probe.Output(ctx, executable, "--help")
 	resumeHelp, resumeErr := adapter.probe.Output(ctx, executable, "resume", "--help")
-	appServerHelp, appServerErr := adapter.probe.Output(ctx, executable, "app-server", "--help")
-	if helpErr != nil || resumeErr != nil || appServerErr != nil ||
+	if helpErr != nil || resumeErr != nil ||
 		!strings.Contains(string(help), "resume") ||
-		!strings.Contains(string(resumeHelp), "[SESSION_ID]") ||
-		!strings.Contains(string(appServerHelp), "generate-json-schema") {
+		!strings.Contains(string(resumeHelp), "[SESSION_ID]") {
 		result.Reason = "identity_contract_unsupported"
 		return result
 	}
@@ -75,8 +75,13 @@ func (adapter *CodexAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) {
 	if err != nil {
 		return AgentPlan{}, err
 	}
+	notify, err := codexNotifyOverride(request)
+	if err != nil {
+		return AgentPlan{}, err
+	}
 	argv := append([]string{executable}, request.CommittedArgs...)
 	argv = append(argv, request.BypassArgs...)
+	argv = append(argv, "-c", notify)
 	plan := AgentPlan{
 		Handle: request.Handle, Argv: argv, EnvOverlay: cloneEnv(request.EnvOverlay), Cwd: request.Cwd,
 		AdapterMode: AdapterModeCapture, ResumePolicy: request.ResumePolicy, LaunchNonce: request.LaunchNonce,
@@ -98,8 +103,13 @@ func (adapter *CodexAdapter) PlanResume(request ResumeRequest) (AgentPlan, error
 	if err != nil {
 		return AgentPlan{}, err
 	}
+	notify, err := codexNotifyOverride(request.PlanRequest)
+	if err != nil {
+		return AgentPlan{}, err
+	}
 	argv := append([]string{executable, "resume"}, request.CommittedArgs...)
 	argv = append(argv, request.BypassArgs...)
+	argv = append(argv, "-c", notify)
 	argv = append(argv, request.Conversation.ID)
 	plan := AgentPlan{
 		Handle: request.Handle, Argv: argv, EnvOverlay: cloneEnv(request.EnvOverlay), Cwd: request.Cwd,
@@ -111,6 +121,33 @@ func (adapter *CodexAdapter) PlanResume(request ResumeRequest) (AgentPlan, error
 		return AgentPlan{}, err
 	}
 	return plan, nil
+}
+
+func codexNotifyOverride(request PlanRequest) (string, error) {
+	if strings.TrimSpace(request.AMQExecutable) == "" || strings.TrimSpace(request.SessionRoot) == "" {
+		return "", fmt.Errorf("codex notify capture requires an AMQ executable and session root")
+	}
+	amqExecutable, err := filepath.EvalSymlinks(request.AMQExecutable)
+	if err != nil {
+		return "", fmt.Errorf("resolve codex notify AMQ executable: %w", err)
+	}
+	amqExecutable, err = filepath.Abs(amqExecutable)
+	if err != nil {
+		return "", fmt.Errorf("make codex notify AMQ executable absolute: %w", err)
+	}
+	sessionRoot, err := resolvedPath(request.SessionRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve codex notify session root: %w", err)
+	}
+	command := []string{
+		amqExecutable, "__codex-notify", "--root", sessionRoot,
+		"--handle", request.Handle,
+	}
+	encoded, err := json.Marshal(command)
+	if err != nil {
+		return "", fmt.Errorf("encode codex notify override: %w", err)
+	}
+	return "notify=" + string(encoded), nil
 }
 
 func (adapter *CodexAdapter) CaptureIdentity(request CaptureRequest) CaptureResult {

@@ -50,9 +50,43 @@ does not replace committed project configuration.
 
 `resume_policy` accepts exactly `resume`, `fresh`, or `disabled`.
 
-The v1 adapter set supports Claude Code, Codex CLI, and Cursor CLI capture at
-exact version `2026.08.11-e8db854`. Grok and Pi are excluded because they have
-no provider CLI; Gemini CLI and OpenCode also remain outside this adapter set.
+The v1 adapter set supports Claude Code, Codex CLI, and Cursor CLI. Claude Code
+mints its session ID from the launch nonce. Codex CLI `0.147.0` reports its
+provider-owned thread ID after a completed turn through its legacy `notify`
+hook. AMQ adds one static hook override that is bound to the session root,
+handle, launch nonce, and AMQ executable. The private hook validates the exact
+ticket and payload, persists immutable evidence, and only then publishes the
+conversation identity. It forwards the identical payload to the operator's
+configured Codex notify command after publication; a missing command is a
+no-op, and a forwarding failure cannot undo or fail the evidence path. An
+unused Codex launch remains pending and cannot be resumed. Cursor CLI acquires
+its provider-owned chat ID before process start through `create-chat` at exact
+version `2026.08.11-e8db854`.
+
+The tier-1 provider smokes are opt-in. The Codex smoke first proves that an
+unused launch stays pending and returns AMQ's typed stale-conversation action.
+It then sends one fixed prompt through the managed pane, waits for notify-backed
+identity publication, and performs one exact headless resume:
+
+```bash
+AMQ_CLAUDE_LIVE=1 go test ./internal/launch -run TestClaudeLiveManagedMintResumeAndCrashReuse -count=1 -v
+AMQ_CODEX_LIVE=1 go test ./internal/launch -run TestCodexLiveManagedAcquireResumeAndCrashReuse -count=1 -v
+```
+
+The smoke harness disables Claude tools with the CLI-equivalent single argument
+`--tools=` and uses
+`--permission-mode plan`; it runs Codex with `--sandbox read-only`. These are
+harness controls, not additions to the adapter's committed option contract.
+The smokes record the exact managed process arguments and provider IDs, require
+headless resume to return the requested ID, and stop at the first failure.
+Claude persists a minted `--session-id` only after its first turn. The live
+smoke proves that an unused mint returns AMQ's typed stale-conversation action,
+then bootstraps the same ID with a no-tools turn before it proves exact resume.
+It uses an already-trusted checkout as the Claude cwd and keeps its AMQ session
+root in a temporary directory; it never changes Claude trust state.
+
+Grok and Pi are excluded because they have no provider CLI; Gemini CLI and
+OpenCode also remain outside this adapter set.
 
 ## Prepare and Apply
 

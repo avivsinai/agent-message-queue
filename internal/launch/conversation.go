@@ -166,6 +166,7 @@ func validateConversationEvidence(root *fsq.DeliveryRoot, record ConversationRec
 	}
 	providerCapture := false
 	cursorCapture := false
+	codexCapture := false
 	for _, id := range record.EvidenceRefs {
 		evidence, _, err := ReadEvidence(root, id)
 		if err != nil {
@@ -176,7 +177,8 @@ func validateConversationEvidence(root *fsq.DeliveryRoot, record ConversationRec
 		}
 		if evidence.Kind == EvidenceProviderCapture {
 			providerCapture = true
-			if record.Identity.Provider == CursorProvider {
+			switch record.Identity.Provider {
+			case CursorProvider:
 				payload, decodeErr := decodeCursorCreateChatPayload(evidence.Payload)
 				if decodeErr != nil {
 					return decodeErr
@@ -187,10 +189,21 @@ func validateConversationEvidence(root *fsq.DeliveryRoot, record ConversationRec
 					return fmt.Errorf("cursor conversation evidence binding mismatch")
 				}
 				cursorCapture = true
+			case CodexProvider:
+				payload, decodeErr := decodeCodexNotifyPayload(evidence.Payload)
+				if decodeErr != nil {
+					return decodeErr
+				}
+				if payload.Handle != record.Handle || payload.LaunchNonce != record.LaunchNonce ||
+					payload.Provider != record.Identity.Provider || payload.ProviderVersion != record.ProviderVersion ||
+					payload.ConversationID != record.Identity.ID {
+					return fmt.Errorf("codex conversation evidence binding mismatch")
+				}
+				codexCapture = true
 			}
 		}
 	}
-	if record.Identity.Provider == CodexProvider && !providerCapture {
+	if record.Identity.Provider == CodexProvider && (!providerCapture || !codexCapture) {
 		return fmt.Errorf("capture conversation requires provider_capture evidence")
 	}
 	if record.Identity.Provider == CursorProvider && !cursorCapture {

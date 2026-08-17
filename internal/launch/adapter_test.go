@@ -53,6 +53,7 @@ func testExecutable(t *testing.T, name string) (string, string) {
 func planRequest(project, handle string) PlanRequest {
 	return PlanRequest{
 		Handle: handle, ProjectRoot: project, Cwd: project,
+		SessionRoot: project, AMQExecutable: "/usr/bin/true",
 		LaunchNonce: testLaunchNonce, ResumePolicy: ResumeEnabled,
 		EnvOverlay: map[string]string{"LANG": "en_US.UTF-8", "TERM": "xterm-256color"},
 	}
@@ -77,13 +78,12 @@ func TestAdapterCapabilitiesProbeExactIdentityContracts(t *testing.T) {
 
 	codex := NewCodexAdapter("codex")
 	codex.probe = fakeCommandProbe{path: "/bin/codex", outputs: map[string]string{
-		"--version":         "codex-cli 0.147.0\n",
-		"--help":            "commands: resume",
-		"resume --help":     "Usage: codex resume [OPTIONS] [SESSION_ID]",
-		"app-server --help": "generate-json-schema",
+		"--version":     "codex-cli 0.147.0\n",
+		"--help":        "commands: resume",
+		"resume --help": "Usage: codex resume [OPTIONS] [SESSION_ID]",
 	}}
 	gotCodex := codex.Capabilities(context.Background())
-	if !gotCodex.Available || !gotCodex.Fresh || !gotCodex.Resume || !gotCodex.Capture || gotCodex.Mode != AdapterModeCapture {
+	if !gotCodex.Available || !gotCodex.Fresh || !gotCodex.Resume || !gotCodex.Capture || gotCodex.PreSpawnAcquire || gotCodex.Mode != AdapterModeCapture {
 		t.Fatalf("Codex capabilities = %#v", gotCodex)
 	}
 	if gotCodex.ProviderVersion != "0.147.0" {
@@ -95,7 +95,7 @@ func TestAdapterCapabilitiesProbeExactIdentityContracts(t *testing.T) {
 
 	codex.probe = fakeCommandProbe{path: "/bin/codex", outputs: map[string]string{
 		"--version": "codex-cli 0.147.0\n", "--help": "commands: resume",
-		"resume --help": "--last only", "app-server --help": "generate-json-schema",
+		"resume --help": "--last only",
 	}}
 	unsupported := codex.Capabilities(context.Background())
 	if unsupported.Available || unsupported.Reason != "identity_contract_unsupported" {
@@ -103,10 +103,10 @@ func TestAdapterCapabilitiesProbeExactIdentityContracts(t *testing.T) {
 	}
 	codex.probe = fakeCommandProbe{path: "/bin/codex", outputs: map[string]string{
 		"--version": "codex-cli 0.148.0\n", "--help": "commands: resume",
-		"resume --help": "Usage: codex resume [OPTIONS] [SESSION_ID]", "app-server --help": "generate-json-schema",
+		"resume --help": "Usage: codex resume [OPTIONS] [SESSION_ID]",
 	}}
 	untestedVersion := codex.Capabilities(context.Background())
-	if !untestedVersion.Available || !untestedVersion.Fresh || !untestedVersion.Resume || untestedVersion.Capture || untestedVersion.Reason != "capture_version_unsupported" {
+	if !untestedVersion.Available || !untestedVersion.Fresh || !untestedVersion.Resume || untestedVersion.Capture || untestedVersion.PreSpawnAcquire || untestedVersion.Reason != "capture_version_unsupported" {
 		t.Fatalf("untested Codex version capabilities = %#v", untestedVersion)
 	}
 	if err := ValidateAdapterCapabilities(codex, untestedVersion); err != nil {
@@ -169,8 +169,30 @@ func TestCodexPlansUseExactCaptureAndResumeShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fresh.AdapterMode != AdapterModeCapture || fresh.ConversationID != "" || len(fresh.DynamicArgv) != 0 {
+	notify, err := codexNotifyOverride(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.AdapterMode != AdapterModeCapture || fresh.ConversationID != "" || fresh.PreSpawnAcquire ||
+		len(fresh.DynamicArgv) != 0 || !reflect.DeepEqual(fresh.Argv[len(fresh.Argv)-2:], []string{"-c", notify}) {
 		t.Fatalf("fresh plan = %#v", fresh)
+	}
+	otherRequest := request
+	otherRequest.LaunchNonce = "56565656-5656-4565-8565-565656565656"
+	otherFresh, err := adapter.PlanFresh(otherRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshDigest, err := (Plan{Version: PlanVersion, Agents: []AgentPlan{fresh}}).SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDigest, err := (Plan{Version: PlanVersion, Agents: []AgentPlan{otherFresh}}).SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freshDigest != otherDigest || fresh.Argv[len(fresh.Argv)-1] != otherFresh.Argv[len(otherFresh.Argv)-1] {
+		t.Fatalf("codex notify changed the static trust subject across launch nonces: %s != %s", freshDigest, otherDigest)
 	}
 	resume, err := adapter.PlanResume(ResumeRequest{
 		PlanRequest:  request,
@@ -221,6 +243,14 @@ func TestAdapterEnvAndArgGrammarFailsClosed(t *testing.T) {
 			}
 		})
 	}
+	t.Run("codex committed notify override", func(t *testing.T) {
+		codexProject, codexExecutable := testExecutable(t, CodexProvider)
+		request := planRequest(codexProject, CodexProvider)
+		request.CommittedArgs = []string{"-c", "notify=[]"}
+		if _, err := NewCodexAdapter(codexExecutable).PlanFresh(request); err == nil || !strings.Contains(err.Error(), "not allowed") {
+			t.Fatalf("PlanFresh error = %v, want committed notify refusal", err)
+		}
+	})
 }
 
 func TestAdapterRejectsProjectExecutableAndProviderMismatch(t *testing.T) {
