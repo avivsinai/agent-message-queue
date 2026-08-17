@@ -289,6 +289,21 @@ func TestCmuxInventoryRejectsNonTerminalType(t *testing.T) {
 	}
 }
 
+func TestCmuxInventoryAcceptsMixedCaseTerminalType(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "type": "Terminal", "tty": "ttys011"},
+	)}
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("Inventory() error = %v", err)
+	}
+	key, err := inventory.OwnershipKey("cmux:surface:" + testCmuxSurfaceID)
+	if err != nil || key != "tty:/dev/ttys011" {
+		t.Fatalf("OwnershipKey() = %q, %v, want tty for mixed-case Terminal type", key, err)
+	}
+}
+
 func TestCmuxOwnershipKeyPromotesBlankTTYToCanonicalTTYOnce(t *testing.T) {
 	skipCmuxNonDarwin(t)
 	recorded := newCmuxOwnershipRecord()
@@ -340,6 +355,46 @@ func TestCmuxOwnershipKeyRejectsTTYChangeAfterRecordedTTY(t *testing.T) {
 	_, err = secondInv.OwnershipKey("cmux:surface:" + testCmuxSurfaceID)
 	if err == nil || !errors.Is(err, ErrTargetDegraded) || !strings.Contains(err.Error(), "ownership key conflict") {
 		t.Fatalf("second OwnershipKey() error = %v, want recorded tty conflict", err)
+	}
+}
+
+func TestCmuxOwnershipKeyAcceptsRepeatedIdenticalTTY(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	recorded := newCmuxOwnershipRecord()
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+	)}
+	firstInv, err := (Cmux{Runner: runner, Path: "/fake/cmux", recorded: recorded}).Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("first Inventory() error = %v", err)
+	}
+	first, err := firstInv.OwnershipKey("cmux:surface:" + testCmuxSurfaceID)
+	if err != nil || first != "tty:/dev/ttys011" {
+		t.Fatalf("first OwnershipKey() = %q, %v", first, err)
+	}
+	secondInv, err := (Cmux{Runner: runner, Path: "/fake/cmux", recorded: recorded}).Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("second Inventory() error = %v", err)
+	}
+	second, err := secondInv.OwnershipKey("cmux:surface:" + testCmuxSurfaceID)
+	if err != nil || second != first {
+		t.Fatalf("repeated identical OwnershipKey() = %q, %v; want %q", second, err, first)
+	}
+}
+
+func TestCmuxInventoryRejectsDuplicateSurfaceIDWhenProcessAliveOmitted(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	runner := &fakeCommandRunner{output: []byte(`{
+		"windows":[{
+			"workspaces":[{"id":"WS-1","panes":[{"surfaces":[
+				{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"ttys011"},
+				{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"ttys011","process_alive":true}
+			]}]}]
+		}]
+	}`)}
+	_, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	if err == nil || !strings.Contains(err.Error(), "conflicting tty identities") {
+		t.Fatalf("Inventory() error = %v, want nil vs set process_alive conflict", err)
 	}
 }
 
@@ -633,6 +688,33 @@ func TestCmuxInjectEvictsProcessDeadAliasThenSendsText(t *testing.T) {
 	}
 	if evictParams["surface_id"] != corpse || evictParams["tty_name"] != cmuxEvictedTTYName {
 		t.Fatalf("report_tty params = %#v, want corpse retracted to sentinel", evictParams)
+	}
+}
+
+func TestCmuxEvictDoesNotReportTTYWhenWorkspaceIDEmpty(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	corpse := "B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
+	runner := &fakeCommandRunner{output: cmuxTreeWithWorkspace("",
+		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+		map[string]string{"id": corpse, "tty": "ttys011", "process_alive": "false"},
+	)}
+	liveness := &fakeTTYLiveness{count: 1}
+	err := (Cmux{
+		Runner:            runner,
+		Path:              "/fake/cmux",
+		LiveTTYOwnerCount: liveness.ownerCount,
+		Sleep:             func(context.Context, time.Duration) error { return nil },
+	}).Inject(context.Background(), "cmux:surface:"+testCmuxSurfaceID, "payload")
+	if err == nil {
+		t.Fatal("Inject() succeeded; empty workspace id must fail closed without report_tty")
+	}
+	for _, call := range runner.calls {
+		if len(call.args) >= 2 && call.args[1] == "surface.report_tty" {
+			t.Fatalf("report_tty with empty workspace id: %#v", call)
+		}
+	}
+	if len(runner.calls) != 1 || runner.calls[0].args[1] != "system.tree" {
+		t.Fatalf("calls = %#v, want inventory only", runner.calls)
 	}
 }
 

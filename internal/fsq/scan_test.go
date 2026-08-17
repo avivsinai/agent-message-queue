@@ -30,6 +30,7 @@ func TestFindTmpFilesOlderThan(t *testing.T) {
 	oldPath := filepath.Join(tmpDir, "old.tmp")
 	dlqOldPath := filepath.Join(dlqTmpDir, "dlq-old.tmp")
 	dotOldPath := filepath.Join(outboxDir, ".outbox.tmp-123")
+	dotNoisePath := filepath.Join(outboxDir, ".DS_Store")
 	newPath := filepath.Join(tmpDir, "new.tmp")
 	if err := os.WriteFile(oldPath, []byte("old"), 0o644); err != nil {
 		t.Fatalf("write old: %v", err)
@@ -39,6 +40,9 @@ func TestFindTmpFilesOlderThan(t *testing.T) {
 	}
 	if err := os.WriteFile(dotOldPath, []byte("old dot"), 0o644); err != nil {
 		t.Fatalf("write dot tmp: %v", err)
+	}
+	if err := os.WriteFile(dotNoisePath, []byte("finder"), 0o644); err != nil {
+		t.Fatalf("write dot noise: %v", err)
 	}
 	if err := os.WriteFile(newPath, []byte("new"), 0o644); err != nil {
 		t.Fatalf("write new: %v", err)
@@ -53,6 +57,9 @@ func TestFindTmpFilesOlderThan(t *testing.T) {
 	}
 	if err := os.Chtimes(dotOldPath, oldTime, oldTime); err != nil {
 		t.Fatalf("chtimes dot old: %v", err)
+	}
+	if err := os.Chtimes(dotNoisePath, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes dot noise: %v", err)
 	}
 
 	cutoff := time.Now().Add(-36 * time.Hour)
