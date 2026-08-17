@@ -104,6 +104,13 @@ func TestSessionGuardDecisionRows(t *testing.T) {
 			row: RowR06ListOwnBase, verdict: Allow,
 		},
 		{
+			name: "R06 does not allow list of own base without explicit root",
+			input: Input{
+				Kind: KindList, Pin: PinIdentity, Relation: TargetOwnPinnedBase,
+			},
+			row: RowR10ListMismatchWarn, verdict: WarnContinue,
+		},
+		{
 			name: "R07 doctor own pinned base allows repair",
 			input: Input{
 				Kind: KindDoctorRepair, Pin: PinIdentity, Relation: TargetOwnPinnedBase,

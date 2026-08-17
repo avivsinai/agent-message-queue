@@ -84,6 +84,27 @@ func TestListTasks_PerFile(t *testing.T) {
 	}
 }
 
+func TestListTasksIgnoresNonJSONFiles(t *testing.T) {
+	_, dir := setupTasksDir(t, "myteam")
+	writeTaskFile(t, dir, "task-a.json", map[string]any{"id": "a", "title": "Alpha", "status": "pending"})
+	writeTaskFile(t, dir, "sneaky.txt", map[string]any{"id": "sneaky", "title": "Hidden", "status": "pending"})
+
+	tasks, err := ListTasks("myteam")
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != "a" {
+		t.Fatalf("tasks = %#v, want only task-a.json", tasks)
+	}
+}
+
+func TestRequireTaskAssigneeFallsBackToHandleWhenAgentIDEmpty(t *testing.T) {
+	err := requireTaskAssignee("t1", map[string]any{"assigned_to": "other"}, "codex", "")
+	if err == nil || !strings.Contains(err.Error(), "codex") {
+		t.Fatalf("error = %v, want assigned-to-other naming the handle", err)
+	}
+}
+
 func TestListTasks_Empty(t *testing.T) {
 	setupTasksDir(t, "empty-team")
 

@@ -61,8 +61,8 @@ func Init(opts InitOptions) (*InitResult, error) {
 		fragments[event] = managedFragment(generateHookLine(event, opts.Me, opts.Root))
 	}
 
-	// Check current state. "HooksFound" means the markers exist. "AlreadyOK"
-	// means the managed fragment exactly matches the requested me/root.
+	// Check current state. "HooksFound" means each hook has an extractable
+	// managed fragment. "AlreadyOK" means that fragment matches me/root.
 	result.HooksFound = hasManagedFragment(hooks.AfterCreate) &&
 		hasManagedFragment(hooks.BeforeRun) &&
 		hasManagedFragment(hooks.AfterRun) &&
@@ -138,9 +138,25 @@ func managedFragment(line string) string {
 	return ManagedBegin + "\n" + line + "\n" + ManagedEnd
 }
 
-// hasManagedFragment returns true if the hook content contains the AMQ managed markers.
+// managedFragmentBounds returns the selected extractable span: the first
+// begin marker and the first end marker after it. A stray end before begin
+// is not part of the span.
+func managedFragmentBounds(hookContent string) (begin, end int, ok bool) {
+	begin = strings.Index(hookContent, ManagedBegin)
+	if begin == -1 {
+		return 0, 0, false
+	}
+	relEnd := strings.Index(hookContent[begin:], ManagedEnd)
+	if relEnd == -1 {
+		return 0, 0, false
+	}
+	end = begin + relEnd + len(ManagedEnd)
+	return begin, end, true
+}
+
 func hasManagedFragment(hookContent string) bool {
-	return strings.Contains(hookContent, ManagedBegin) && strings.Contains(hookContent, ManagedEnd)
+	_, _, ok := managedFragmentBounds(hookContent)
+	return ok
 }
 
 func managedFragmentMatches(hookContent, fragment string) bool {
@@ -152,16 +168,11 @@ func managedFragmentMatches(hookContent, fragment string) bool {
 }
 
 func extractManagedFragment(hookContent string) (string, bool) {
-	beginIdx := strings.Index(hookContent, ManagedBegin)
-	if beginIdx == -1 {
+	begin, end, ok := managedFragmentBounds(hookContent)
+	if !ok {
 		return "", false
 	}
-	endIdx := strings.Index(hookContent[beginIdx:], ManagedEnd)
-	if endIdx == -1 {
-		return "", false
-	}
-	endIdx += beginIdx + len(ManagedEnd)
-	return hookContent[beginIdx:endIdx], true
+	return hookContent[begin:end], true
 }
 
 // injectFragment inserts or replaces the AMQ managed fragment in the hook content.
@@ -171,19 +182,10 @@ func injectFragment(existing, fragment string) string {
 		return fragment + "\n"
 	}
 
-	// If there's already a managed fragment, replace it
-	if hasManagedFragment(existing) {
-		beginIdx := strings.Index(existing, ManagedBegin)
-		endIdx := strings.Index(existing, ManagedEnd) + len(ManagedEnd)
-
-		// Preserve content before and after the managed block
-		before := existing[:beginIdx]
-		after := existing[endIdx:]
-
-		return before + fragment + after
+	if begin, end, ok := managedFragmentBounds(existing); ok {
+		return existing[:begin] + fragment + existing[end:]
 	}
 
-	// No existing fragment: append after existing content
 	content := strings.TrimRight(existing, "\n")
 	return content + "\n" + fragment + "\n"
 }

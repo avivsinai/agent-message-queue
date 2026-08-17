@@ -265,6 +265,79 @@ Prompt.
 	}
 }
 
+func TestHasManagedFragmentRequiresBothMarkers(t *testing.T) {
+	if hasManagedFragment(ManagedBegin + "\ncmd\n") {
+		t.Fatal("begin marker without end is not a managed fragment")
+	}
+	if hasManagedFragment("cmd\n" + ManagedEnd) {
+		t.Fatal("end marker without begin is not a managed fragment")
+	}
+}
+
+func TestHasManagedFragmentRejectsReversedMarkers(t *testing.T) {
+	reversed := ManagedEnd + "\ncmd\n" + ManagedBegin
+	if hasManagedFragment(reversed) {
+		t.Fatal("end-before-begin is not a managed fragment")
+	}
+	if _, ok := extractManagedFragment(reversed); ok {
+		t.Fatal("extractManagedFragment must fail when end precedes begin")
+	}
+}
+
+func TestHasManagedFragmentExtractsFirstBeginToFirstLaterEnd(t *testing.T) {
+	nested := ManagedBegin + "\nouter-start\n" + ManagedBegin + "\ninner\n" + ManagedEnd + "\nouter-end\n" + ManagedEnd
+	got, ok := extractManagedFragment(nested)
+	if !ok {
+		t.Fatal("nested markers should extract the first begin-to-end span")
+	}
+	want := ManagedBegin + "\nouter-start\n" + ManagedBegin + "\ninner\n" + ManagedEnd
+	if got != want {
+		t.Fatalf("extracted %q, want first span %q", got, want)
+	}
+	duplicate := managedFragment("first") + "\n" + managedFragment("second")
+	got, ok = extractManagedFragment(duplicate)
+	if !ok || got != managedFragment("first") {
+		t.Fatalf("duplicate fragments extracted %q, want the first fragment", got)
+	}
+}
+
+func TestInit_CheckModePartialManagedHooksAreNotFound(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestWorkflow(t, dir, `---
+hooks:
+  after_create: |
+    # BEGIN AMQ MANAGED
+    amq integration symphony emit --event after_create --me codex || true
+    # END AMQ MANAGED
+  after_run: |
+    # BEGIN AMQ MANAGED
+    amq integration symphony emit --event after_run --me codex || true
+    # END AMQ MANAGED
+  before_remove: |
+    # BEGIN AMQ MANAGED
+    amq integration symphony emit --event before_remove --me codex || true
+    # END AMQ MANAGED
+---
+
+Prompt.
+`)
+
+	result, err := Init(InitOptions{
+		WorkflowPath: path,
+		Me:           "codex",
+		Check:        true,
+	})
+	if err != nil {
+		t.Fatalf("Init check: %v", err)
+	}
+	if result.HooksFound {
+		t.Fatal("three of four managed hooks is not HooksFound")
+	}
+	if result.AlreadyOK {
+		t.Fatal("partial managed hooks must not be AlreadyOK")
+	}
+}
+
 func TestInit_NoExistingHooks(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTestWorkflow(t, dir, `---
@@ -387,6 +460,21 @@ func TestInjectFragment_PreservesExisting(t *testing.T) {
 	}
 	if !strings.Contains(result, ManagedBegin) {
 		t.Error("expected managed begin marker")
+	}
+}
+
+func TestInjectFragmentReplacesSpanWhenStrayEndPrecedesFragment(t *testing.T) {
+	existing := ManagedEnd + "\nuser-before\n" + managedFragment("old-cmd") + "\nuser-after\n"
+	got := injectFragment(existing, managedFragment("new-cmd"))
+	want := ManagedEnd + "\nuser-before\n" + managedFragment("new-cmd") + "\nuser-after\n"
+	if got != want {
+		t.Fatalf("injectFragment stray-end =\n%q\nwant\n%q", got, want)
+	}
+	if strings.Contains(got, "old-cmd") {
+		t.Fatal("stray ManagedEnd must not keep the old managed block")
+	}
+	if strings.Count(got, "user-before") != 1 {
+		t.Fatalf("user-before copies = %d, want 1", strings.Count(got, "user-before"))
 	}
 }
 

@@ -191,6 +191,29 @@ func TestUnregisterMember(t *testing.T) {
 	}
 }
 
+func TestUnregisterMemberKeepsFollowingMembers(t *testing.T) {
+	home := setupTeamDir(t)
+	writeTeamJSON(t, home, "test-team", TeamConfig{
+		Name: "test-team",
+		Members: []Member{
+			{Name: "claude", AgentID: "cc-1", AgentType: AgentTypeClaudeCode},
+			{Name: "codex", AgentID: "ext_codex_123", AgentType: AgentTypeCodex},
+		},
+	})
+
+	if err := UnregisterMember("test-team", "cc-1"); err != nil {
+		t.Fatalf("UnregisterMember: %v", err)
+	}
+
+	got, err := LoadTeam("test-team")
+	if err != nil {
+		t.Fatalf("LoadTeam after unregister: %v", err)
+	}
+	if len(got.Members) != 1 || got.Members[0].AgentID != "ext_codex_123" {
+		t.Fatalf("members = %#v, want following member retained", got.Members)
+	}
+}
+
 func TestUnregisterMember_NotFound(t *testing.T) {
 	home := setupTeamDir(t)
 	writeTeamJSON(t, home, "test-team", TeamConfig{
