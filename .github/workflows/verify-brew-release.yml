@@ -1,0 +1,178 @@
+name: Verify Homebrew Release
+
+# Deliberately triggers on workflow_run rather than `release: types:
+# [published]`. GoReleaser publishes the GitHub release in release.yml using
+# the default GITHUB_TOKEN, and GitHub's own recursion-prevention rule does
+# not fire other workflows' `release` events for GITHUB_TOKEN-authored
+# releases (only workflow_dispatch and repository_dispatch are exempt). This
+# repo already works around the same limitation for release-please.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to verify (e.g. v0.61.0); default is the latest published release"
+        required: false
+        type: string
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-brew-release
+  cancel-in-progress: false
+
+jobs:
+  # release.yml runs on every push to main, but its `release` job is only
+  # non-skipped when the commit actually carried a version to publish; most
+  # main merges leave every job "skipped" while the workflow_run conclusion
+  # still reads "success". This job checks the triggering run's own `release`
+  # job conclusion so a routine merge doesn't get verified as if it were a
+  # release (which would just re-check a stale, already-verified version).
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      proceed: ${{ steps.decide.outputs.proceed }}
+      tag: ${{ steps.decide.outputs.tag }}
+    steps:
+      - name: Resolve release and decide whether to verify
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            if [[ "$RUN_CONCLUSION" != "success" ]]; then
+              echo "::notice::Release workflow run (head_sha ${RUN_HEAD_SHA}) did not succeed (conclusion: ${RUN_CONCLUSION}); skipping Homebrew verification."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            release_conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs" --jq '.jobs[] | select(.name=="release") | .conclusion')"
+            if [[ "$release_conclusion" != "success" ]]; then
+              echo "::notice::Release workflow run (head_sha ${RUN_HEAD_SHA}) completed without publishing a release (release job: ${release_conclusion:-absent}); skipping Homebrew verification."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          if [[ -n "${INPUT_TAG:-}" ]]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName -q .tagName)"
+          fi
+          if [[ -z "$tag" ]]; then
+            echo "::error::Could not resolve a release tag to verify."
+            exit 1
+          fi
+
+          release_json="$(gh release view "$tag" --repo "${GITHUB_REPOSITORY}" --json isDraft,isPrerelease)"
+          is_draft="$(jq -r '.isDraft' <<<"$release_json")"
+          is_prerelease="$(jq -r '.isPrerelease' <<<"$release_json")"
+          if [[ "$is_draft" == "true" || "$is_prerelease" == "true" ]]; then
+            echo "::notice::Release ${tag} is a draft or prerelease; skipping Homebrew verification."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Bind the resolved tag to the run that triggered us: "latest
+          # release" can drift from "the release this run just published" if
+          # another release lands in the gap, so a stale match must fail
+          # loudly rather than silently re-verify an older (already-verified)
+          # release under this run's identity.
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            tag_ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+            tag_object_sha="$(jq -r '.object.sha' <<<"$tag_ref_json")"
+            tag_object_type="$(jq -r '.object.type' <<<"$tag_ref_json")"
+            if [[ "$tag_object_type" == "tag" ]]; then
+              # Annotated tag: dereference the tag object to its target commit.
+              tag_object_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}" --jq '.object.sha')"
+            fi
+            if [[ "$tag_object_sha" != "$RUN_HEAD_SHA" ]]; then
+              echo "::error::Latest release ${tag} points at ${tag_object_sha}, not the triggering run's head_sha ${RUN_HEAD_SHA}; latest is not this run's release."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+          fi
+
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+  verify-brew-install:
+    needs: gate
+    if: needs.gate.result == 'success' && needs.gate.outputs.proceed == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Tap avivsinai/tap
+        run: brew tap avivsinai/tap
+
+      # Formula push and `brew update` can lag a few minutes behind the
+      # GitHub release, so poll instead of failing on the first mismatch.
+      #
+      # GoReleaser's ldflags use its own `.Version` template variable, which
+      # strips the leading "v" from the git tag (confirmed against the real
+      # v0.62.0 release: its asset filenames and the downloaded binary both
+      # print "0.62.0", not "v0.62.0"). release.yml's own "Check embedded
+      # version" step compares WITH the "v" prefix, but that checks a
+      # separate `make build` artifact whose Makefile ldflags pass the tag
+      # through verbatim — not the GoReleaser-built binary Homebrew actually
+      # installs. So the tag (with "v") stays the identity used for the
+      # head_sha binding above, but the installed binary's version never
+      # carries one.
+      - name: Install amq, tolerating tap propagation lag
+        env:
+          EXPECTED_TAG: ${{ needs.gate.outputs.tag }}
+        run: |
+          set -uo pipefail
+          expected_version="${EXPECTED_TAG#v}"
+          if [[ -z "${EXPECTED_TAG}" || -z "${expected_version}" ]]; then
+            echo "::error::Expected tag ('${EXPECTED_TAG}') did not resolve to a non-empty version."
+            exit 1
+          fi
+          max_attempts=6
+          actual=""
+          for attempt in $(seq 1 "$max_attempts"); do
+            echo "Attempt ${attempt}/${max_attempts}: refreshing tap and installing amq"
+            brew update --quiet
+            brew upgrade avivsinai/tap/amq || brew install avivsinai/tap/amq
+            actual="$(amq --version || true)"
+            echo "Installed version: ${actual:-<none>} (expect '${expected_version}', from release tag '${EXPECTED_TAG}')"
+            if [[ "${actual}" == "${expected_version}" ]]; then
+              echo "amq ${actual} matches expected release ${EXPECTED_TAG}."
+              exit 0
+            fi
+            if [[ "${attempt}" -lt "${max_attempts}" ]]; then
+              echo "Version mismatch (got '${actual}', want '${expected_version}' from tag '${EXPECTED_TAG}'); the tap may still be propagating. Retrying in 60s."
+              sleep 60
+            fi
+          done
+          echo "::error::Homebrew installed amq '${actual}', expected '${expected_version}' (from published release tag '${EXPECTED_TAG}') after ${max_attempts} attempts."
+          exit 1
+
+      - name: End-to-end smoke test on a real queue
+        run: |
+          set -euo pipefail
+          queue_root="${RUNNER_TEMP}/verify-queue"
+          amq init --root "${queue_root}" --agents alpha,beta
+          amq doctor --root "${queue_root}" --json
+          amq send --root "${queue_root}" --me alpha --to beta --body "hello"
+          output="$(amq drain --root "${queue_root}" --me beta --include-body)"
+          echo "${output}"
+          if ! grep -qF "hello" <<<"${output}"; then
+            echo "::error::amq drain did not show the message body sent from alpha to beta."
+            exit 1
+          fi

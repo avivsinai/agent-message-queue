@@ -25,6 +25,15 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
   or edit the release PR, when release notes need multiple entries. Each entry
   is one conventional header of at most 72 characters, separated by a blank
   line.
+- `verify-brew-release.yml` runs when `release.yml` actually publishes a
+  release, and on demand, to confirm the published release installs from the
+  real `avivsinai/tap/amq` formula. It ignores non-release merges (where
+  `release.yml` completes but its own `release` job stays skipped) and
+  drafts or prereleases. It retries the tap refresh and install for up to 6
+  attempts to absorb tap propagation lag, then requires `amq --version` to
+  match the released tag and runs an init/send/drain round trip against a
+  throwaway queue root to prove the installed binary works end to end. It
+  never writes to the tap.
 
 ## Operational Constraints
 
