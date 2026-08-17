@@ -121,7 +121,7 @@ func TestSessionCreateProvisionsRosterMailboxes(t *testing.T) {
 	if result.Name != "feature-x" {
 		t.Fatalf("name = %q, want feature-x", result.Name)
 	}
-	for _, agent := range []string{"claude", "codex"} {
+	for _, agent := range []string{"claude", "codex", reservedHumanHandle} {
 		if _, err := os.Stat(filepath.Join(result.Path, "agents", agent, "inbox", "new")); err != nil {
 			t.Fatalf("mailbox %s: %v", agent, err)
 		}

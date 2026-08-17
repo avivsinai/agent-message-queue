@@ -23,6 +23,17 @@ QUEUE_ROOT="$ROOT_DIR/agent-mail"
 
 "$BIN" init --root "$QUEUE_ROOT" --agents codex,claude
 
+doctor_out="$("$BIN" doctor --root "$QUEUE_ROOT")"
+printf '%s\n' "$doctor_out" | grep -q "✓ Mailboxes:"
+if printf '%s\n' "$doctor_out" | grep -q "repair: amq doctor --fix-mailboxes"; then
+  echo "fresh init doctor advertised mailbox repair"
+  exit 1
+fi
+if printf '%s\n' "$doctor_out" | grep -Eq 'Summary:.*[1-9][0-9]* errors'; then
+  echo "fresh init doctor reported errors"
+  exit 1
+fi
+
 send_json="$("$BIN" send --root "$QUEUE_ROOT" --me codex --to claude --body "hello" --json)"
 msg_id="$(printf '%s\n' "$send_json" | awk -F'"' '/"id":/ {print $4; exit}')"
 thread_id="$(printf '%s\n' "$send_json" | awk -F'"' '/"thread":/ {print $4; exit}')"

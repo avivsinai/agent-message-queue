@@ -1431,7 +1431,7 @@ func runCoopExecAutoInitNoGitignoreFixture(t *testing.T) string {
 	return projectDir
 }
 
-func TestInitExplicitAgentsDoesNotInjectUser(t *testing.T) {
+func TestInitExplicitAgentsKeepsConfigLiteralAndProvisionsUser(t *testing.T) {
 	root := t.TempDir()
 	_, err := captureEnvStdout(t, func() error {
 		return runInit([]string{"--root", root, "--agents", "claude,codex"})
@@ -1448,8 +1448,8 @@ func TestInitExplicitAgentsDoesNotInjectUser(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Agents, want) {
 		t.Fatalf("config agents = %#v, want %#v", cfg.Agents, want)
 	}
-	if _, err := os.Stat(filepath.Join(root, "agents", "user")); !os.IsNotExist(err) {
-		t.Fatalf("user mailbox should not be created by explicit init, stat err=%v", err)
+	if _, err := os.Stat(filepath.Join(root, "agents", "user", "inbox", "new")); err != nil {
+		t.Fatalf("implicit user inbox should be created without changing config agents: %v", err)
 	}
 }
 
