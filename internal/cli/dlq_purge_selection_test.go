@@ -337,6 +337,14 @@ func TestDLQPurgeStaleCandidateCannotDeleteConcurrentRetryAudit(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("concurrent retry winner: %v", err)
 	}
+	oldStat := statDLQPurgeCandidate
+	statDLQPurgeCandidate = func(deliveryRoot *fsq.DeliveryRoot, path string) (os.FileInfo, error) {
+		if path == curPath {
+			return candidate.identity, nil
+		}
+		return oldStat(deliveryRoot, path)
+	}
+	t.Cleanup(func() { statDLQPurgeCandidate = oldStat })
 	removed, err := removeSelectedDLQPurgeCandidate(purgeRoot, "alice", candidate)
 	if err != nil || removed {
 		t.Fatalf("stale purge removal = removed:%t err:%v, want no deletion", removed, err)

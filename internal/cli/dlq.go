@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,6 +22,10 @@ var removeDLQPurgeCandidate = func(root *fsq.DeliveryRoot, path string) error {
 	return root.Remove(path)
 }
 
+var statDLQPurgeCandidate = func(root *fsq.DeliveryRoot, path string) (os.FileInfo, error) {
+	return root.Stat(path)
+}
+
 var retryDLQMessage = fsq.RetryFromDLQ
 
 var inspectDLQMessage = fsq.InspectDLQEnvelope
@@ -32,6 +37,7 @@ var readDLQRetryDir = func(root *fsq.DeliveryRoot, dir string) ([]os.DirEntry, e
 type dlqPurgeCandidate struct {
 	path     string
 	identity os.FileInfo
+	digest   [sha256.Size]byte
 }
 
 func runDLQ(args []string) error {
@@ -733,14 +739,22 @@ func runDLQPurge(args []string) error {
 }
 
 func selectDLQPurgeCandidate(root *fsq.DeliveryRoot, path string, cutoff time.Time) (candidate dlqPurgeCandidate, selected bool, err error) {
-	identity, err := root.Stat(path)
+	identity, err := statDLQPurgeCandidate(root, path)
 	if err != nil {
 		if cutoff.IsZero() {
 			return candidate, false, fmt.Errorf("inspect DLQ message %s for purge: %w", root.DisplayPath(path), err)
 		}
 		return candidate, false, fmt.Errorf("inspect DLQ message %s for --older-than: %w", root.DisplayPath(path), err)
 	}
-	candidate = dlqPurgeCandidate{path: path, identity: identity}
+	raw, err := root.ReadRegularNoFollow(path)
+	if err != nil {
+		return candidate, false, fmt.Errorf("read DLQ message %s for purge: %w", root.DisplayPath(path), err)
+	}
+	candidate = dlqPurgeCandidate{
+		path:     path,
+		identity: identity,
+		digest:   sha256.Sum256(raw),
+	}
 	if cutoff.IsZero() {
 		return candidate, true, nil
 	}
@@ -758,11 +772,18 @@ func selectDLQPurgeCandidate(root *fsq.DeliveryRoot, path string, cutoff time.Ti
 func removeSelectedDLQPurgeCandidate(root *fsq.DeliveryRoot, me string, candidate dlqPurgeCandidate) (removed bool, err error) {
 	filename := filepath.Base(candidate.path)
 	err = root.WithDLQEnvelopeLock(me, filename, func(batch *fsq.DeliveryRoot) error {
-		current, statErr := batch.Stat(candidate.path)
+		current, statErr := statDLQPurgeCandidate(batch, candidate.path)
 		if statErr != nil {
 			return statErr
 		}
 		if !os.SameFile(candidate.identity, current) {
+			return nil
+		}
+		raw, readErr := batch.ReadRegularNoFollow(candidate.path)
+		if readErr != nil {
+			return readErr
+		}
+		if sha256.Sum256(raw) != candidate.digest {
 			return nil
 		}
 		if removeErr := removeDLQPurgeCandidate(batch, candidate.path); removeErr != nil {
