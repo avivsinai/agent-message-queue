@@ -342,6 +342,189 @@ echo "  hook log rotation: small log left in place"
 
 echo "claude-session-start.sh hook test ok"
 
+# --- DLQ: a corrupt delivered message routes to DLQ; list/retry/purge ---
+DLQ_DIR="$(mktemp -d)"
+dlq_cleanup() {
+  rm -rf "$DLQ_DIR"
+}
+trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup; hook_tmpdir_cleanup; hook_log_rotate_cleanup; dlq_cleanup' EXIT
+
+DLQ_ROOT="$DLQ_DIR/agent-mail"
+"$BIN" init --root "$DLQ_ROOT" --agents codex,claude
+
+dlq_send_json="$("$BIN" send --root "$DLQ_ROOT" --me codex --to claude --body "will be corrupted" --json)"
+dlq_msg_id="$(printf '%s\n' "$dlq_send_json" | awk -F'"' '/"id":/ {print $4; exit}')"
+if [[ -z "$dlq_msg_id" ]]; then
+  echo "dlq: failed to parse send output"
+  exit 1
+fi
+
+# Corrupt the delivered file directly (file writes only, never in-process):
+# break the "---" frontmatter/body separator so it can no longer be parsed.
+dlq_msg_file="$DLQ_ROOT/agents/claude/inbox/new/${dlq_msg_id}.md"
+test -f "$dlq_msg_file"
+sed 's/^---$/XXX-BROKEN-SEPARATOR/' "$dlq_msg_file" >"$dlq_msg_file.tmp"
+mv "$dlq_msg_file.tmp" "$dlq_msg_file"
+
+# read on the corrupt message fails and moves it to DLQ with a dlq receipt.
+set +e
+"$BIN" read --root "$DLQ_ROOT" --me claude --id "$dlq_msg_id" >/dev/null 2>&1
+dlq_read_rc=$?
+set -e
+if [[ "$dlq_read_rc" -ne 1 ]]; then
+  echo "dlq: expected exit 1 reading corrupt message, got $dlq_read_rc"
+  exit 1
+fi
+test ! -f "$dlq_msg_file"
+
+dlq_receipt_out="$("$BIN" receipts list --root "$DLQ_ROOT" --me claude --stage dlq)"
+printf '%s' "$dlq_receipt_out" | grep -q "$dlq_msg_id"
+echo "dlq: corrupt message routed to DLQ with a dlq receipt"
+
+dlq_list_json="$("$BIN" dlq list --root "$DLQ_ROOT" --me claude --json)"
+dlq_id="$(printf '%s\n' "$dlq_list_json" | awk -F'"' '/"id":/ {print $4; exit}')"
+if [[ -z "$dlq_id" ]]; then
+  echo "dlq: dlq list did not return an id"
+  exit 1
+fi
+"$BIN" dlq list --root "$DLQ_ROOT" --me claude | grep -q "$dlq_id"
+echo "dlq: dlq list shows the corrupt message"
+
+# Retry moves the still-corrupt content back to inbox/new; retry does not
+# re-validate the payload, it only recovers the delivery. This envelope's
+# retry is now terminal (retry_state=delivered).
+dlq_retry_json="$("$BIN" dlq retry --root "$DLQ_ROOT" --me claude --id "$dlq_id" --json)"
+printf '%s' "$dlq_retry_json" | grep -q "\"retried\": \"$dlq_id\""
+test -f "$dlq_msg_file"
+echo "dlq: retry redelivers the still-corrupt message to inbox"
+
+# Draining the redelivered message fails to parse the same broken content and
+# re-DLQs it under a fresh envelope, so a still-corrupt message effectively
+# re-DLQs on the next drain rather than being retried cleanly.
+set +e
+"$BIN" read --root "$DLQ_ROOT" --me claude --id "$dlq_msg_id" >/dev/null 2>&1
+dlq_reread_rc=$?
+set -e
+if [[ "$dlq_reread_rc" -ne 1 ]]; then
+  echo "dlq: expected exit 1 re-reading still-corrupt message, got $dlq_reread_rc"
+  exit 1
+fi
+dlq_relist_json="$("$BIN" dlq list --root "$DLQ_ROOT" --me claude --json)"
+printf '%s' "$dlq_relist_json" | grep -q '"retry_state": "delivered"'
+printf '%s' "$dlq_relist_json" | grep -q '"retry_state": "ready"'
+echo "dlq: re-corrupted message re-DLQ'd under a new envelope"
+
+# NEGATIVE: retrying the terminal (already-delivered) envelope again is
+# idempotent, not an error.
+dlq_retry2_json="$("$BIN" dlq retry --root "$DLQ_ROOT" --me claude --id "$dlq_id" --json)"
+printf '%s' "$dlq_retry2_json" | grep -q "\"already_delivered\": \"$dlq_id\""
+echo "dlq: retrying an already-delivered envelope is idempotent"
+
+# purge without --yes/--dry-run refuses (stdin closed -> defaults to No) and
+# leaves both remaining DLQ envelopes untouched.
+dlq_purge_refuse_out="$("$BIN" dlq purge --root "$DLQ_ROOT" --me claude </dev/null)"
+printf '%s' "$dlq_purge_refuse_out" | grep -q "Aborted."
+echo "dlq: purge without --yes refuses"
+
+# purge --yes removes every remaining DLQ envelope (the terminal retry and
+# the freshly re-DLQ'd one); a purge removing fewer than both would mean the
+# refused purge above silently deleted something.
+dlq_purge_json="$("$BIN" dlq purge --root "$DLQ_ROOT" --me claude --yes --json)"
+printf '%s' "$dlq_purge_json" | grep -q '"removed": 2'
+dlq_after_purge="$("$BIN" dlq list --root "$DLQ_ROOT" --me claude)"
+printf '%s' "$dlq_after_purge" | grep -q "No DLQ messages."
+echo "dlq: purge --yes removed all DLQ messages"
+
+# --- Receipts: send --wait-for drained, receipts wait, and its timeout ---
+RECEIPTS_DIR="$(mktemp -d)"
+receipts_cleanup() {
+  rm -rf "$RECEIPTS_DIR"
+}
+trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup; hook_tmpdir_cleanup; hook_log_rotate_cleanup; dlq_cleanup; receipts_cleanup' EXIT
+
+RECEIPTS_ROOT="$RECEIPTS_DIR/agent-mail"
+"$BIN" init --root "$RECEIPTS_ROOT" --agents codex,claude
+
+# send --wait-for drained blocks until the recipient drains the message it
+# just sent, so drive the drain concurrently from the foreground.
+(
+  "$BIN" send --root "$RECEIPTS_ROOT" --me codex --to claude --body "wait for drain" \
+    --wait-for drained --wait-timeout 10s --json >"$RECEIPTS_DIR/wait_send.json" 2>"$RECEIPTS_DIR/wait_send.err"
+  echo $? >"$RECEIPTS_DIR/wait_send.rc"
+) &
+wait_send_pid=$!
+
+receipts_msg_id=""
+for _ in $(seq 1 50); do
+  receipts_list_json="$("$BIN" list --root "$RECEIPTS_ROOT" --me claude --new --json 2>/dev/null)"
+  if [[ "$receipts_list_json" != "[]" ]]; then
+    receipts_msg_id="$(printf '%s\n' "$receipts_list_json" | awk -F'"' '/"id":/ {print $4; exit}')"
+    break
+  fi
+  sleep 0.1
+done
+if [[ -z "$receipts_msg_id" ]]; then
+  echo "receipts: message never arrived for wait-for test"
+  exit 1
+fi
+"$BIN" drain --root "$RECEIPTS_ROOT" --me claude >/dev/null
+
+wait "$wait_send_pid"
+wait_send_rc="$(cat "$RECEIPTS_DIR/wait_send.rc")"
+if [[ "$wait_send_rc" -ne 0 ]]; then
+  echo "send --wait-for drained failed: rc=$wait_send_rc"
+  cat "$RECEIPTS_DIR/wait_send.err"
+  exit 1
+fi
+grep -q '"event": "matched"' "$RECEIPTS_DIR/wait_send.json"
+echo "receipts: send --wait-for drained succeeded after the recipient drained"
+
+# receipts wait --stage drained on a known message id succeeds.
+"$BIN" receipts wait --root "$RECEIPTS_ROOT" --me claude --msg-id "$receipts_msg_id" --stage drained --timeout 5s >/dev/null
+echo "receipts: receipts wait matched a known drained receipt"
+
+# NEGATIVE: receipts wait on an unknown message id times out with exit code 4.
+set +e
+"$BIN" receipts wait --root "$RECEIPTS_ROOT" --me claude --msg-id "unknown-msg-id-does-not-exist" \
+  --stage drained --timeout 2s --poll-interval 1s >/dev/null 2>&1
+receipts_wait_rc=$?
+set -e
+if [[ "$receipts_wait_rc" -ne 4 ]]; then
+  echo "receipts wait on unknown id: expected exit 4, got $receipts_wait_rc"
+  exit 1
+fi
+echo "receipts: receipts wait on an unknown id times out with exit code 4"
+
+# --- Integration: symphony emit self-delivers a message the recipient can drain ---
+INTEGRATION_DIR="$(mktemp -d)"
+integration_cleanup() {
+  rm -rf "$INTEGRATION_DIR"
+}
+trap 'cleanup; amqrc_cleanup; exec_cleanup; iso_cleanup; hook_tmpdir_cleanup; hook_log_rotate_cleanup; dlq_cleanup; receipts_cleanup; integration_cleanup' EXIT
+
+INTEGRATION_ROOT="$INTEGRATION_DIR/agent-mail"
+"$BIN" init --root "$INTEGRATION_ROOT" --agents codex
+
+# Symphony's adapter contract (docs/adapter-contract.md) self-delivers
+# (from=to=me) on thread "task/<workspace-key>" with kind=status and labels
+# "orchestrator"/"orchestrator:<name>".
+symphony_emit_json="$("$BIN" integration symphony emit --root "$INTEGRATION_ROOT" --event after_run --me codex \
+  --workspace "$INTEGRATION_DIR/myworkspace" --identifier smoke-ws --json)"
+printf '%s' "$symphony_emit_json" | grep -q '"thread": "task/smoke-ws"'
+
+symphony_drain_json="$("$BIN" drain --root "$INTEGRATION_ROOT" --me codex --include-body --json)"
+printf '%s' "$symphony_drain_json" | grep -q '"kind": "status"'
+printf '%s' "$symphony_drain_json" | grep -q '"orchestrator:symphony"'
+printf '%s' "$symphony_drain_json" | grep -q '"name": "symphony"'
+echo "integration: symphony emit delivers a self-addressed message the recipient can drain"
+
+# kanban only exposes a long-lived websocket "bridge" subcommand (Cline
+# runtime), so it cannot run offline in a smoke test; verify its --help
+# contract instead of invoking it.
+kanban_help_out="$("$BIN" integration kanban --help 2>&1)"
+printf '%s' "$kanban_help_out" | grep -q "bridge  Run websocket bridge"
+echo "integration: kanban needs a live websocket workspace, skipping invocation (offline smoke test)"
+
 bash scripts/test_install_checksum.sh
 AMQ_TEST_BIN="$BIN" bash scripts/test_stop_hook.sh
 echo "smoke test ok"
