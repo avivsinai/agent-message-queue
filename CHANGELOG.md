@@ -8,6 +8,23 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.62.0](https://github.com/avivsinai/agent-message-queue/compare/v0.61.0...v0.62.0) (2026-08-17)
+
+
+### Features
+
+* **launchapi:** Apply with atomic roster provisioning and no-replace session publication ([#520](https://github.com/avivsinai/agent-message-queue/issues/520)) ([a9bbbeb](https://github.com/avivsinai/agent-message-queue/commit/a9bbbeb675a2d2fe6199ab628a771227c198ac00))
+* **launchapi:** public launch intent contract with fail-closed codecs ([#517](https://github.com/avivsinai/agent-message-queue/issues/517)) ([87050d6](https://github.com/avivsinai/agent-message-queue/commit/87050d6e3de017136a3418512e8cdab22cd24f3c))
+* **launchapi:** public lifecycle API and immutable capture evidence ([#522](https://github.com/avivsinai/agent-message-queue/issues/522)) ([0867c13](https://github.com/avivsinai/agent-message-queue/commit/0867c13f3014d748cb5248ffd08587d82368f903))
+* **launchapi:** zero-write Prepare with typed required actions ([#519](https://github.com/avivsinai/agent-message-queue/issues/519)) ([d8fb934](https://github.com/avivsinai/agent-message-queue/commit/d8fb934f8e43c5e8bf48ebf21bbb3150729b642e))
+* **launch:** exact-root coop exec emission with typed execution options ([#521](https://github.com/avivsinai/agent-message-queue/issues/521)) ([b17e8a7](https://github.com/avivsinai/agent-message-queue/commit/b17e8a7b2bd9b8ef6a56dee2f1e9018e220551a8))
+* **launch:** public CLI plan workflow, golden parity, and end-to-end matrix ([#523](https://github.com/avivsinai/agent-message-queue/issues/523)) ([fc89b1f](https://github.com/avivsinai/agent-message-queue/commit/fc89b1f819cd2fd5c81370ec0b48f505d1f223ac))
+
+
+### Dependencies
+
+* bump actions/attest from 4.2.1 to 4.2.2 ([#505](https://github.com/avivsinai/agent-message-queue/issues/505)) ([38aad4a](https://github.com/avivsinai/agent-message-queue/commit/38aad4ab5f391233708754c2084f92356939f1f3))
+
 ## [0.61.0](https://github.com/avivsinai/agent-message-queue/compare/v0.60.5...v0.61.0) (2026-08-14)
 
 
