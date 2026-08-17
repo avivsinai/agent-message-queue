@@ -36,6 +36,7 @@ func TestMain(m *testing.M) {
 		os.Getenv("AMQ_TEST_WAKE_RESTART_BOUND_EXEC") != "" {
 		os.Exit(m.Run())
 	}
+	guardTestProcessReplacement()
 
 	for _, k := range []string{"AM_ROOT", "AM_ROOT_ID", "AM_BASE_ROOT", "AM_BASE_ROOT_ID", "AM_SESSION", "AMQ_GLOBAL_ROOT", envWakeOwner, "AMQ_WAKE_PRIVATE_STOP_FD"} {
 		_ = os.Unsetenv(k)

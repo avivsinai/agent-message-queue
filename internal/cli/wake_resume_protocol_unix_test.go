@@ -422,8 +422,14 @@ func TestNewWakeLockAdvertisesResumeOnlyWhenTheProtocolIsComplete(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantSignal := wakeResumeSignalUSR1
+	wantControlSocket := ""
+	if runtime.GOOS == "darwin" {
+		wantSignal = ""
+		wantControlSocket = wakeControlSocketPath("/queue", "codex", lock.Generation)
+	}
 	if lock.ResumeSchema != wakeResumeSchemaV2 || !sameWakeOwner(lock.ResumeOwner, &owner) ||
-		lock.ResumeSignal != wakeResumeSignalUSR1 || lock.ControlSocket != "" ||
+		lock.ResumeSignal != wantSignal || lock.ControlSocket != wantControlSocket ||
 		lock.RunningImageEvidence == nil || *lock.RunningImageEvidence != evidence {
 		t.Fatalf("resume advertisement = %#v", lock)
 	}

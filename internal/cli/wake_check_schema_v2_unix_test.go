@@ -806,7 +806,8 @@ func TestDoctorOpsV2UsesTrustedRosterAgentInsteadOfOuterRecord(t *testing.T) {
 	}
 	lock := validWakeResumeLockForTest()
 	lock.Root = canonicalWakeRoot(root)
-	lock.ControlSocket = wakeControlSocketPath(lock.Root, lock.Agent, lock.Generation)
+	lock.Generation = "0123456789abcdef0123456789abcdef"
+	configureWakeRestartAdvertisementPlatform(&lock, lock.Root, lock.Agent)
 	writeWakeLockExactForTest(t, root, "codex", lock)
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return wakeProcessInfo{

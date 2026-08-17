@@ -637,8 +637,8 @@ func TestDarwinRestartRetryReclaimsAndQuarantinesRefusedOwnedStage(t *testing.T)
 		if readErr != nil {
 			return readErr
 		}
-		if !exists || current.Status != wakeRestartRefused || current.RequestID == refused.RequestID {
-			return fmt.Errorf("retry did not install an independent refused request: exists=%v record=%#v", exists, current)
+		if !exists || current.Status != wakeRestartPending || current.RequestID == refused.RequestID {
+			return fmt.Errorf("retry did not preserve an independent pending request: exists=%v record=%#v", exists, current)
 		}
 		return nil
 	}); err != nil {
