@@ -14,6 +14,7 @@ import (
 const (
 	ClaudeProvider = "claude"
 	CodexProvider  = "codex"
+	CursorProvider = "cursor-agent"
 )
 
 // HarnessAdapter owns conversation identity and produces backend-ready plans.
@@ -37,6 +38,7 @@ type AdapterCapabilities struct {
 	Fresh           bool        `json:"fresh"`
 	Resume          bool        `json:"resume"`
 	Capture         bool        `json:"capture"`
+	PreSpawnAcquire bool        `json:"pre_spawn_acquire"`
 	Reason          string      `json:"reason,omitempty"`
 }
 
@@ -112,11 +114,18 @@ func ValidateStaticProviderInput(executable string, args []string, env map[strin
 		envRules, argRules, bypassAllowed = claudeEnvRules(), claudeArgRules(), claudeBypassArgs()
 	case CodexProvider:
 		envRules, argRules, bypassAllowed = codexEnvRules(), codexArgRules(), codexBypassArgs()
+	case CursorProvider:
+		envRules, argRules, bypassAllowed = cursorEnvRules(), cursorArgRules(), cursorBypassArgs()
 	default:
 		return "", fmt.Errorf("executable %q does not select an adapter-known provider", executable)
 	}
 	if err := validateStaticProviderArgs(args, argRules, bypassAllowed); err != nil {
 		return "", err
+	}
+	if provider == CursorProvider {
+		if err := validateCursorBypassArgs(args, true); err != nil {
+			return "", err
+		}
 	}
 	if err := validateCommittedEnv(env, envRules); err != nil {
 		return "", err
@@ -135,6 +144,8 @@ func PartitionStaticProviderArgs(provider string, args []string) (committed, byp
 		argRules, bypassAllowed = claudeArgRules(), claudeBypassArgs()
 	case CodexProvider:
 		argRules, bypassAllowed = codexArgRules(), codexBypassArgs()
+	case CursorProvider:
+		argRules, bypassAllowed = cursorArgRules(), cursorBypassArgs()
 	default:
 		return nil, nil, fmt.Errorf("unknown provider %q", provider)
 	}
@@ -221,6 +232,9 @@ func ValidateAdapterCapabilities(adapter HarnessAdapter, capabilities AdapterCap
 	}
 	if capabilities.Capture && adapter.Mode() != AdapterModeCapture {
 		return fmt.Errorf("adapter %s capture capability conflicts with %q mode", adapter.Name(), adapter.Mode())
+	}
+	if capabilities.PreSpawnAcquire && (!capabilities.Capture || adapter.Mode() != AdapterModeCapture) {
+		return fmt.Errorf("adapter %s pre-spawn acquisition requires capture mode", adapter.Name())
 	}
 	return nil
 }

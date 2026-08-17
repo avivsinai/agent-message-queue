@@ -139,3 +139,90 @@ func TestPrivateLaunchWrapperAcknowledgesThenRevertsFailedExec(t *testing.T) {
 		t.Fatalf("reverted record = %#v, %v", record, err)
 	}
 }
+
+func TestPrivateCursorLaunchWrapperExecsOnlyResolvedConversationSlot(t *testing.T) {
+	project := t.TempDir()
+	session := filepath.Join(project, "session")
+	if err := fsq.EnsureRootDirs(session); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(session, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	conversationID := "018f1f2a-bc34-71bd-9056-23838e27f859"
+	provider := filepath.Join(t.TempDir(), "cursor-agent")
+	script := "#!/bin/sh\n[ \"$1\" = create-chat ] || exit 91\nprintf '%s\\n' " + conversationID + "\n"
+	if err := os.WriteFile(provider, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	amqExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := "79797979-7979-4797-8797-797979797979"
+	placeholder := "__AMQ_CONVERSATION_ID__"
+	targetArgv := []string{provider, "--resume", placeholder}
+	lease, err := launch.AcquireLease(root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("cursor"); err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{
+		Handle: "cursor", LaunchNonce: nonce, Mode: launch.AdapterModeCapture, Provider: launch.CursorProvider,
+		ProviderVersion: "2026.08.11-e8db854", PreSpawnAcquire: true,
+		Backend: launch.CommandsBackendName, Profile: launch.CommandsProfile().Identity(),
+		ProjectRoot: project, SessionRoot: session, Cwd: project,
+		ProviderExecutable: provider, AMQExecutable: amqExecutable, TargetArgv: targetArgv,
+		DynamicArgv: []launch.DynamicArg{{Index: 2, Kind: launch.DynamicArgConversationID}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := launch.WriteExecutionTicket(root, lease, ticket); err != nil {
+		t.Fatal(err)
+	}
+	if err := launch.WriteConversation(root, lease, launch.ConversationRecord{
+		Version: launch.ConversationVersion, Handle: "cursor", State: launch.CapturePending,
+		ProviderVersion: "2026.08.11-e8db854", LaunchNonce: nonce,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	oldCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(project); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldCwd) })
+	sentinel := errors.New("provider exec failed")
+	oldExec := launchExecProcess
+	var gotArgv []string
+	launchExecProcess = func(_ string, argv, _ []string) error {
+		gotArgv = slices.Clone(argv)
+		return sentinel
+	}
+	t.Cleanup(func() { launchExecProcess = oldExec })
+	err = runLaunchExec([]string{"--root", session, "--handle", "cursor", "--nonce", nonce, "--target", provider, "--", provider, "--resume", placeholder})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("wrapper error = %v, want provider exec failure", err)
+	}
+	if !slices.Equal(gotArgv, []string{provider, "--resume", conversationID}) {
+		t.Fatalf("provider argv = %#v", gotArgv)
+	}
+	loaded, err := launch.LoadExecutionTicket(root, "cursor")
+	if err != nil || loaded.State != launch.ExecutionIdentityAcquired || loaded.ConversationID != conversationID {
+		t.Fatalf("reverted Cursor ticket = %#v, %v", loaded, err)
+	}
+}

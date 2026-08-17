@@ -165,6 +165,7 @@ func validateConversationEvidence(root *fsq.DeliveryRoot, record ConversationRec
 		return nil // Legacy ready records remain readable until their next capture.
 	}
 	providerCapture := false
+	cursorCapture := false
 	for _, id := range record.EvidenceRefs {
 		evidence, _, err := ReadEvidence(root, id)
 		if err != nil {
@@ -175,10 +176,25 @@ func validateConversationEvidence(root *fsq.DeliveryRoot, record ConversationRec
 		}
 		if evidence.Kind == EvidenceProviderCapture {
 			providerCapture = true
+			if record.Identity.Provider == CursorProvider {
+				payload, decodeErr := decodeCursorCreateChatPayload(evidence.Payload)
+				if decodeErr != nil {
+					return decodeErr
+				}
+				if payload.Handle != record.Handle || payload.LaunchNonce != record.LaunchNonce ||
+					payload.Provider != record.Identity.Provider || payload.ProviderVersion != record.ProviderVersion ||
+					payload.ConversationID != record.Identity.ID {
+					return fmt.Errorf("cursor conversation evidence binding mismatch")
+				}
+				cursorCapture = true
+			}
 		}
 	}
 	if record.Identity.Provider == CodexProvider && !providerCapture {
 		return fmt.Errorf("capture conversation requires provider_capture evidence")
+	}
+	if record.Identity.Provider == CursorProvider && !cursorCapture {
+		return fmt.Errorf("cursor capture conversation requires bound provider_capture evidence")
 	}
 	return nil
 }

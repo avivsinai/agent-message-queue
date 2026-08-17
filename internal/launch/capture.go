@@ -7,6 +7,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 type CaptureState string
@@ -50,6 +52,7 @@ type CaptureEvidence struct {
 	provider        string
 	providerVersion string
 	launchNonce     string
+	handle          string
 	conversationID  string
 	activeElsewhere bool
 	verified        bool
@@ -62,6 +65,16 @@ type CaptureResult struct {
 	Identity ConversationIdentity
 	Degraded bool
 	Reason   CaptureReason
+}
+
+type cursorCreateChatPayload struct {
+	Source          CaptureEvidenceSource `json:"source"`
+	Provider        string                `json:"provider"`
+	ProviderVersion string                `json:"provider_version"`
+	LaunchNonce     string                `json:"launch_nonce"`
+	Handle          string                `json:"handle"`
+	ConversationID  string                `json:"conversation_id"`
+	Stdout          string                `json:"stdout"`
 }
 
 func (result CaptureResult) CanPersist() bool {
@@ -106,6 +119,58 @@ func ParseCodexThreadStartedEvidence(raw []byte, launchNonce string, activeElsew
 		conversationID: event.Params.Thread.ID, activeElsewhere: activeElsewhere,
 		verified: true, observedAt: time.Now().UTC(), payload: bytes.Clone(raw),
 	}, nil
+}
+
+// ParseCursorCreateChatEvidence validates the exact stdout returned by the
+// pinned cursor-agent create-chat command. The executing channel supplies the
+// nonce, handle, and version bindings; provider output is never authority for
+// those values.
+func ParseCursorCreateChatEvidence(raw []byte, launchNonce, handle, providerVersion string) (CaptureEvidence, error) {
+	if !validUUID(launchNonce) {
+		return CaptureEvidence{}, fmt.Errorf("launch nonce must be a UUID")
+	}
+	if err := fsq.ValidateHandle(handle); err != nil {
+		return CaptureEvidence{}, fmt.Errorf("invalid capture handle: %w", err)
+	}
+	if providerVersion != cursorCaptureVersion {
+		return CaptureEvidence{}, fmt.Errorf("cursor capture version %q is unsupported", providerVersion)
+	}
+	stdout := string(raw)
+	stdout = strings.TrimSuffix(stdout, "\n")
+	if stdout == "" || strings.ContainsAny(stdout, "\r\n") || stdout != strings.ToLower(stdout) || !validUUID(stdout) {
+		return CaptureEvidence{}, fmt.Errorf("cursor create-chat output must be one canonical UUID")
+	}
+	payload, err := json.Marshal(cursorCreateChatPayload{
+		Source: CursorCreateChatV1, Provider: CursorProvider, ProviderVersion: providerVersion,
+		LaunchNonce: launchNonce, Handle: handle, ConversationID: stdout, Stdout: string(raw),
+	})
+	if err != nil {
+		return CaptureEvidence{}, err
+	}
+	return CaptureEvidence{
+		source: CursorCreateChatV1, provider: CursorProvider, providerVersion: providerVersion,
+		launchNonce: launchNonce, handle: handle, conversationID: stdout,
+		verified: true, observedAt: time.Now().UTC(), payload: payload,
+	}, nil
+}
+
+func decodeCursorCreateChatPayload(raw []byte) (cursorCreateChatPayload, error) {
+	var payload cursorCreateChatPayload
+	if err := decodeStrict(raw, &payload); err != nil {
+		return payload, fmt.Errorf("decode cursor create-chat evidence: %w", err)
+	}
+	if payload.Source != CursorCreateChatV1 || payload.Provider != CursorProvider ||
+		payload.ProviderVersion != cursorCaptureVersion || !validUUID(payload.LaunchNonce) {
+		return payload, fmt.Errorf("cursor create-chat evidence metadata is invalid")
+	}
+	if err := fsq.ValidateHandle(payload.Handle); err != nil {
+		return payload, fmt.Errorf("cursor create-chat evidence handle: %w", err)
+	}
+	parsed, err := ParseCursorCreateChatEvidence([]byte(payload.Stdout), payload.LaunchNonce, payload.Handle, payload.ProviderVersion)
+	if err != nil || parsed.conversationID != payload.ConversationID {
+		return payload, fmt.Errorf("cursor create-chat evidence identity is invalid")
+	}
+	return payload, nil
 }
 
 func captureCodexIdentity(request CaptureRequest) CaptureResult {
@@ -154,6 +219,46 @@ func captureCodexIdentity(request CaptureRequest) CaptureResult {
 			State:    CaptureReady,
 			Identity: ConversationIdentity{Provider: CodexProvider, ID: id},
 		}
+	}
+	return degradedCapture(CaptureStale, CaptureReasonEvidenceMissing)
+}
+
+func captureCursorIdentity(request CaptureRequest) CaptureResult {
+	if !validUUID(request.LaunchNonce) {
+		return degradedCapture(CaptureStale, CaptureReasonLaunchNonceMismatch)
+	}
+	if request.ExpectedProviderVersion != cursorCaptureVersion {
+		return CaptureResult{State: CaptureUnsupported, Reason: CaptureReasonProviderVersion}
+	}
+	if len(request.Evidence) == 0 {
+		if !request.Final {
+			return CaptureResult{State: CapturePending}
+		}
+		return degradedCapture(CaptureStale, CaptureReasonEvidenceMissing)
+	}
+	identities := make(map[string]struct{}, len(request.Evidence))
+	for _, evidence := range request.Evidence {
+		switch {
+		case !evidence.verified:
+			return degradedCapture(CaptureStale, CaptureReasonEvidenceUnverified)
+		case evidence.source != CursorCreateChatV1:
+			return CaptureResult{State: CaptureUnsupported, Reason: CaptureReasonEvidenceSource}
+		case evidence.provider != CursorProvider:
+			return degradedCapture(CaptureStale, CaptureReasonProviderMismatch)
+		case evidence.providerVersion != request.ExpectedProviderVersion:
+			return CaptureResult{State: CaptureUnsupported, Reason: CaptureReasonProviderVersion}
+		case evidence.launchNonce != request.LaunchNonce:
+			return degradedCapture(CaptureStale, CaptureReasonLaunchNonceMismatch)
+		case !validUUID(evidence.conversationID):
+			return degradedCapture(CaptureStale, CaptureReasonInvalidIdentity)
+		}
+		identities[evidence.conversationID] = struct{}{}
+	}
+	if len(identities) != 1 {
+		return degradedCapture(CaptureStale, CaptureReasonEvidenceAmbiguous)
+	}
+	for id := range identities {
+		return CaptureResult{State: CaptureReady, Identity: ConversationIdentity{Provider: CursorProvider, ID: id}}
 	}
 	return degradedCapture(CaptureStale, CaptureReasonEvidenceMissing)
 }

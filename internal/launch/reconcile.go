@@ -327,7 +327,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		if err != nil {
 			return result, err
 		}
-		if err := writeExecutionTickets(request, lease, planned, amqExecutable); err != nil {
+		if err := writeExecutionTickets(request, lease, planned, amqExecutable, backendName, detect.Profile.Identity()); err != nil {
 			return result, err
 		}
 		create, err = backend.Create(CreateRequest{
@@ -587,7 +587,7 @@ func finalizeCreatedState(root *fsq.DeliveryRoot, lease *Lease, create CreateRes
 	}
 	for i := range planned {
 		agent := &planned[i]
-		if agent.write {
+		if agent.write && !agent.plan.PreSpawnAcquire {
 			evidence := executionEvidence
 			agent.record.ExecutionEvidence = &evidence
 		}
@@ -595,7 +595,7 @@ func finalizeCreatedState(root *fsq.DeliveryRoot, lease *Lease, create CreateRes
 			agent.record.State = CaptureReady
 			agent.record.Identity = ConversationIdentity{Provider: agent.adapter.Name(), ID: agent.plan.ConversationID}
 		}
-		if agent.plan.AdapterMode == AdapterModeCapture && agent.write {
+		if agent.plan.AdapterMode == AdapterModeCapture && agent.write && !agent.plan.PreSpawnAcquire {
 			captureEvidence := create.CaptureEvidence[agent.plan.Handle]
 			capture := agent.adapter.CaptureIdentity(CaptureRequest{
 				LaunchNonce: agent.plan.LaunchNonce, ExpectedProviderVersion: agent.providerVersion,
@@ -634,17 +634,22 @@ func plannedConversations(planned []plannedAgent) []ConversationRecord {
 	return records
 }
 
-func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []plannedAgent, amqPath string) error {
+func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []plannedAgent, amqPath, backend, profile string) error {
 	written := make([]plannedAgent, 0, len(planned))
 	for _, agent := range planned {
-		ticket, err := NewExecutionTicket(ExecutionTicketRequest{
+		ticketRequest := ExecutionTicketRequest{
 			Handle: agent.plan.Handle, LaunchNonce: agent.plan.LaunchNonce,
-			Mode: agent.plan.AdapterMode, Provider: agent.adapter.Name(), ConversationID: agent.plan.ConversationID,
+			Mode: agent.plan.AdapterMode, Provider: agent.adapter.Name(), ProviderVersion: agent.providerVersion,
+			ConversationID: agent.plan.ConversationID, PreSpawnAcquire: agent.plan.PreSpawnAcquire,
 			ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(), Cwd: agent.plan.Cwd,
 			ProviderExecutable: agent.plan.Argv[0], AMQExecutable: amqPath,
-			TargetArgv: agent.plan.Argv, TargetEnv: agent.plan.EnvOverlay,
+			TargetArgv: agent.plan.Argv, DynamicArgv: agent.plan.DynamicArgv, TargetEnv: agent.plan.EnvOverlay,
 			Execution: agent.plan.Execution,
-		})
+		}
+		if agent.plan.PreSpawnAcquire {
+			ticketRequest.Backend, ticketRequest.Profile = backend, profile
+		}
+		ticket, err := NewExecutionTicket(ticketRequest)
 		if err != nil {
 			return errors.Join(fmt.Errorf("build execution ticket for %s: %w", agent.plan.Handle, err), removeExecutionTickets(request.Root, lease, written))
 		}

@@ -86,6 +86,7 @@ var (
 		return []launch.HarnessAdapter{
 			launch.NewClaudeAdapter(launch.ClaudeProvider),
 			launch.NewCodexAdapter(launch.CodexProvider),
+			launch.NewCursorAdapter(launch.CursorProvider),
 		}
 	}
 	setupLookPath   = exec.LookPath
