@@ -264,7 +264,7 @@ func TestCoopExecBootstrapRequiresProvenGitWorktree(t *testing.T) {
 		marker := filepath.Join(project, ".git")
 		original := gitMarkerLstat
 		gitMarkerLstat = func(path string) (os.FileInfo, error) {
-			if sameCleanPath(path, marker) {
+			if sameTreeIdentity(path, marker) {
 				return nil, os.ErrPermission
 			}
 			return os.Lstat(path)

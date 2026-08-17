@@ -4,11 +4,18 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func guardTestProcessReplacement() {
+	coopExecProcess = func(path string, _ []string, _ []string) error {
+		return fmt.Errorf("test attempted unguarded process replacement with %q", path)
+	}
+}
 
 func stubCoopExecSentinel(t *testing.T) error {
 	t.Helper()
