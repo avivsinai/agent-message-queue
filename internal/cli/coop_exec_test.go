@@ -909,10 +909,13 @@ func TestCoopInitRerunUsesConfiguredAgents(t *testing.T) {
 			t.Fatalf("%s inbox was not restored: %v", agent, err)
 		}
 	}
-	for _, agent := range []string{"claude", "codex", "user"} {
+	for _, agent := range []string{"claude", "codex"} {
 		if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", agent)); !os.IsNotExist(err) {
 			t.Fatalf("rerun created default agent %q, stat err=%v", agent, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(root, defaultSessionName, "agents", reservedHumanHandle, "inbox", "new")); err != nil {
+		t.Fatalf("rerun did not provision the reserved human inbox: %v", err)
 	}
 	configAfter, err := os.ReadFile(cfgPath)
 	if err != nil {
