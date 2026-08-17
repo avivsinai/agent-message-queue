@@ -8,6 +8,15 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.63.1](https://github.com/avivsinai/agent-message-queue/compare/v0.63.0...v0.63.1) (2026-08-17)
+
+
+### Bug Fixes
+
+* **dlq:** verify purge content under the envelope lock ([#545](https://github.com/avivsinai/agent-message-queue/issues/545)) ([e499e67](https://github.com/avivsinai/agent-message-queue/commit/e499e67b053d5a6fcf8344bd988afaccbeda4f1f))
+* **init:** provision reserved user mailbox so fresh queue passes doctor ([#539](https://github.com/avivsinai/agent-message-queue/issues/539)) ([776a13d](https://github.com/avivsinai/agent-message-queue/commit/776a13dd6134e39198635a48c986aa5810f5f739))
+* **wake:** confirm SIGKILL with a 3s window, not 100ms SIGTERM grace ([#540](https://github.com/avivsinai/agent-message-queue/issues/540)) ([d77d8b1](https://github.com/avivsinai/agent-message-queue/commit/d77d8b1cd152000fbdbc166ecfc33df451b8d622))
+
 ## [0.63.0](https://github.com/avivsinai/agent-message-queue/compare/v0.62.0...v0.63.0) (2026-08-17)
 
 
