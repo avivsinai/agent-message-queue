@@ -31,8 +31,10 @@ never adoptable. A Ghostty crash between window creation and binding persistence
 leaves that window for manual close; AMQ never treats the gap as proven absence
 and never creates a duplicate.
 
-Managed cmux Create puts the new workspace in the app-wide active window and
-does not retarget it.
+Cmux Create uses `--focus false` and restores the previously selected workspace
+after Create, including on failure cleanup. Close restores the workspace that
+was selected at Close time, skipping the workspace being closed. Focus then
+Close can leave a neighbor workspace selected.
 
 If an operator chooses to abandon recovery evidence, first inspect the exact
 target without mutation:

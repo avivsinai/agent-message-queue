@@ -222,6 +222,11 @@ go test ./internal/sessionguard
 make check-skills
 ```
 
+Opt-in live proofs (`AMQ_CMUX_LIVE`, `AMQ_GHOSTTY_LIVE`, `AMQ_CLAUDE_LIVE`,
+`AMQ_CODEX_LIVE`, `AMQ_CURSOR_LIVE`) skip unless the env is `1`. They are not
+part of `make ci`. Operator commands are in
+[the public launch API guide](docs/launch-api.md).
+
 Tests must include a negative case that a plausible wrong implementation would
 fail. For concurrency, routing, wake, and filesystem work, exercise the actual
 hostile boundary rather than only a helper or mock.

@@ -61,16 +61,33 @@ configured Codex notify command after publication; a missing command is a
 no-op, and a forwarding failure cannot undo or fail the evidence path. An
 unused Codex launch remains pending and cannot be resumed. Cursor CLI acquires
 its provider-owned chat ID before process start through `create-chat` at exact
-version `2026.08.11-e8db854`.
+version `2026.08.11-e8db854`. Cursor's provider identity is `cursor-agent`.
 
-The tier-1 provider smokes are opt-in. The Codex smoke first proves that an
-unused launch stays pending and returns AMQ's typed stale-conversation action.
-It then sends one fixed prompt through the managed pane, waits for notify-backed
-identity publication, and performs one exact headless resume:
+The registered launcher backends are `commands`, `tmux`, `cmux`, and
+`ghostty`. `--launcher auto` walks the local preference; an explicit
+`--launcher <name>` wins. When `CMUX_SURFACE_ID` is set, auto prepends `cmux`
+ahead of `ghostty`; otherwise `TERM_PROGRAM=ghostty` prepends `ghostty`.
+Selection still requires Detect Available. Cmux Create uses `--focus false`
+and restores prior selection; see [Managed launch recovery](launch-recovery.md).
+
+The tier-1 provider smokes are opt-in and skip unless the env is `1`. The Codex
+smoke first proves that an unused launch stays pending and returns AMQ's typed
+stale-conversation action. It then sends one fixed prompt through the managed
+pane, waits for notify-backed identity publication, and performs one exact
+headless resume:
 
 ```bash
 AMQ_CLAUDE_LIVE=1 go test ./internal/launch -run TestClaudeLiveManagedMintResumeAndCrashReuse -count=1 -v
 AMQ_CODEX_LIVE=1 go test ./internal/launch -run TestCodexLiveManagedAcquireResumeAndCrashReuse -count=1 -v
+AMQ_CURSOR_LIVE=1 go test ./internal/launch -run TestCursorLiveResumeManagedExecutionAndCrashReuse -count=1 -v
+```
+
+Managed launcher live proofs skip unless the env is `1`. Run them from a shell
+inside the matching surface:
+
+```bash
+AMQ_CMUX_LIVE=1 go test ./internal/launch -run TestCmuxLive -count=1 -v
+AMQ_GHOSTTY_LIVE=1 go test ./internal/launch -run TestGhosttyLive -count=1 -v
 ```
 
 The smoke harness disables Claude tools with the CLI-equivalent single argument
