@@ -130,6 +130,7 @@ exec /bin/sleep 60
 	env := append(os.Environ(),
 		"HOME="+t.TempDir(), "XDG_STATE_HOME="+xdgState, "TMUX_TMPDIR="+socketDir,
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"AMQ_NO_UPDATE_CHECK=1",
 	)
 	serverRunning := false
 	t.Cleanup(func() { stopHermeticTmuxServer(t, socketDir, sessionRoot, "claude", serverRunning) })
@@ -236,6 +237,13 @@ func stopHermeticTmuxServer(t *testing.T, socketDir, sessionRoot, handle string,
 	if requireServer && !serverFound {
 		t.Fatal("hermetic tmux server disappeared before teardown")
 	}
+	if requireServer && !wakeFound {
+		wake, waitErr := waitForHermeticWakeLock(sessionRoot, handle, wakeProcessExitTimeout)
+		if waitErr != nil {
+			t.Fatal(waitErr)
+		}
+		processes = append(processes, hermeticTmuxProcess{pid: wake.PID, role: "wake"})
+	}
 	if serverFound {
 		cmd := exec.Command("tmux", "kill-server")
 		cmd.Env = append(os.Environ(), "TMUX_TMPDIR="+socketDir)
@@ -245,9 +253,6 @@ func stopHermeticTmuxServer(t *testing.T, socketDir, sessionRoot, handle string,
 	}
 	if err := waitForHermeticTmuxProcesses(processes, wakeProcessExitTimeout); err != nil {
 		t.Fatal(err)
-	}
-	if requireServer && !wakeFound {
-		t.Fatalf("hermetic tmux pane had no wake lock for %s", handle)
 	}
 }
 
@@ -277,6 +282,23 @@ func hermeticTmuxProcesses(socketDir, sessionRoot, handle string) ([]hermeticTmu
 		processes = append(processes, hermeticTmuxProcess{pid: wake.PID, role: "wake"})
 	}
 	return processes, serverFound, wake.Exists, nil
+}
+
+func waitForHermeticWakeLock(sessionRoot, handle string, timeout time.Duration) (wakeLockInspection, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		wake := inspectWakeLock(sessionRoot, handle)
+		if wake.Exists {
+			if wake.PID <= 0 {
+				return wake, fmt.Errorf("hermetic wake lock has invalid pid %d", wake.PID)
+			}
+			return wake, nil
+		}
+		if time.Now().After(deadline) {
+			return wake, fmt.Errorf("hermetic tmux pane had no wake lock for %s", handle)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func waitForHermeticTmuxProcesses(processes []hermeticTmuxProcess, timeout time.Duration) error {
@@ -310,5 +332,37 @@ func TestWaitForHermeticTmuxProcessesReportsLeak(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("test-owner pid %d", os.Getpid())) {
 		t.Fatalf("live-process wait error = %v", err)
+	}
+}
+
+func TestWaitForHermeticWakeLockReportsMissing(t *testing.T) {
+	_, err := waitForHermeticWakeLock(t.TempDir(), "claude", 20*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "hermetic tmux pane had no wake lock for claude") {
+		t.Fatalf("missing wake lock error = %v", err)
+	}
+}
+
+func TestWaitForHermeticWakeLockSeesLateLock(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		wake wakeLockInspection
+		err  error
+	}
+	got := make(chan result, 1)
+	go func() {
+		wake, err := waitForHermeticWakeLock(root, "claude", time.Second)
+		got <- result{wake: wake, err: err}
+	}()
+	time.Sleep(40 * time.Millisecond)
+	writeWakeLockForTest(t, root, "claude", wakeLock{PID: os.Getpid()})
+	out := <-got
+	if out.err != nil {
+		t.Fatal(out.err)
+	}
+	if out.wake.PID != os.Getpid() {
+		t.Fatalf("late wake lock pid = %d, want %d", out.wake.PID, os.Getpid())
 	}
 }
