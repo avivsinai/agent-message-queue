@@ -122,6 +122,20 @@ func acquireAuthoritativeWakeLockWithOptions(
 	me string,
 	options wakeLockAcquireOptions,
 ) (func(), error) {
+	return acquireAuthoritativeWakeLockWithOptionsAndStopPreparer(
+		root,
+		me,
+		options,
+		prepareAuthoritativeWakeStop,
+	)
+}
+
+func acquireAuthoritativeWakeLockWithOptionsAndStopPreparer(
+	root string,
+	me string,
+	options wakeLockAcquireOptions,
+	prepareStop authoritativeWakeStopPreparer,
+) (func(), error) {
 	if err := os.MkdirAll(fsq.AgentBase(root, me), 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create agent directory: %w", err)
 	}
@@ -130,7 +144,13 @@ func acquireAuthoritativeWakeLockWithOptions(
 		return nil, err
 	}
 	defer func() { _ = agentDir.Close() }()
-	return acquireAuthoritativeWakeLockWithOptionsInDir(agentDir, root, me, options)
+	return acquireAuthoritativeWakeLockWithOptionsInDirAndStopPreparer(
+		agentDir,
+		root,
+		me,
+		options,
+		prepareStop,
+	)
 }
 
 func acquireAuthoritativeWakeLockWithOptionsInDir(
@@ -138,6 +158,22 @@ func acquireAuthoritativeWakeLockWithOptionsInDir(
 	root string,
 	me string,
 	options wakeLockAcquireOptions,
+) (func(), error) {
+	return acquireAuthoritativeWakeLockWithOptionsInDirAndStopPreparer(
+		agentDir,
+		root,
+		me,
+		options,
+		prepareAuthoritativeWakeStop,
+	)
+}
+
+func acquireAuthoritativeWakeLockWithOptionsInDirAndStopPreparer(
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	options wakeLockAcquireOptions,
+	prepareStop authoritativeWakeStopPreparer,
 ) (func(), error) {
 	if agentDir == nil {
 		return nil, fmt.Errorf("wake agent directory capability is missing")
@@ -200,7 +236,7 @@ func acquireAuthoritativeWakeLockWithOptionsInDir(
 					}
 				}
 				ownersEqual := sameWakeOwner(inspection.Lock.Owner, requested.Owner)
-				wakeCapability, err := prepareAuthoritativeWakeStop(dirfd, agentDir, inspection)
+				wakeCapability, err := prepareStop(dirfd, agentDir, inspection)
 				if err != nil {
 					return fmt.Errorf("inspect authoritative wake through stable capability: %w", err)
 				}

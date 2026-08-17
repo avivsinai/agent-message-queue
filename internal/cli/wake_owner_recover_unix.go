@@ -79,6 +79,14 @@ func runWakeRecoverOwner(args []string) error {
 }
 
 func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
+	return recoverOwnerWakeWithStopPreparer(root, me, prepareAuthoritativeWakeStop)
+}
+
+func recoverOwnerWakeWithStopPreparer(
+	root string,
+	me string,
+	prepareStop authoritativeWakeStopPreparer,
+) (wakeOwnerRecoverResult, error) {
 	result := wakeOwnerRecoverResult{
 		Status: "unknown",
 		Agent:  me,
@@ -271,7 +279,7 @@ func recoverOwnerWake(root, me string) (wakeOwnerRecoverResult, error) {
 					"preserve the claim and retry after owner monitoring is healthy",
 				), err)
 			}
-			wakeCapability, err := prepareAuthoritativeWakeStop(dirfd, agentDir, inspection)
+			wakeCapability, err := prepareStop(dirfd, agentDir, inspection)
 			if err != nil {
 				return refuse("exact wake inspection is unavailable: "+err.Error(), "preserve the claim and retry")
 			}

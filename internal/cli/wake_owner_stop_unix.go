@@ -14,6 +14,12 @@ type authoritativeWakeStopCapability struct {
 	close      func() error
 }
 
+type authoritativeWakeStopPreparer func(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	expected wakeLockInspection,
+) (authoritativeWakeStopCapability, error)
+
 func (capability *authoritativeWakeStopCapability) Stop(auth wakeOwnerReleaseAuthorization) error {
 	if capability == nil || capability.Absent || capability.stop == nil {
 		return nil

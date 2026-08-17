@@ -16,6 +16,14 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
+func absentAuthoritativeWakeStopForTest(
+	_ int,
+	_ *wakeAgentDir,
+	expected wakeLockInspection,
+) (authoritativeWakeStopCapability, error) {
+	return authoritativeWakeStopCapability{Inspection: expected, Absent: true}, nil
+}
+
 func TestValidateAuthoritativeWakeOwnerSeparatesStrictClaimsFromLegacyParsing(t *testing.T) {
 	valid := wakeOwner{
 		PID:          4242,
@@ -904,10 +912,10 @@ func TestAcquireAuthoritativeWakeClaimReclaimsOnlyADeadOwnerWithAbsentWake(t *te
 		}
 	})
 
-	cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
+	cleanup, err := acquireAuthoritativeWakeLockWithOptionsAndStopPreparer(root, "codex", wakeLockAcquireOptions{
 		target:   &newTarget,
 		wakeMode: wakeTargetInjectVia,
-	})
+	}, absentAuthoritativeWakeStopForTest)
 	if err != nil {
 		t.Fatalf("dead-owner takeover: %v", err)
 	}
@@ -1281,7 +1289,11 @@ func TestRecoverOwnerRequiresExactTokenAndCallerSessionForLiveOwner(t *testing.T
 				t.Setenv(envWakeOwner, "")
 			}
 
-			result, err := recoverOwnerWake(root, "codex")
+			result, err := recoverOwnerWakeWithStopPreparer(
+				root,
+				"codex",
+				absentAuthoritativeWakeStopForTest,
+			)
 			if test.wantSuccess {
 				if err != nil || result.Status != "recovered" {
 					t.Fatalf("recover result = %#v err=%v", result, err)
@@ -1414,7 +1426,11 @@ func TestRecoverOwnerUsesAuthoritativeLockEvidenceWhenTargetIsMissing(t *testing
 	}
 	t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
 
-	result, err := recoverOwnerWake(root, "codex")
+	result, err := recoverOwnerWakeWithStopPreparer(
+		root,
+		"codex",
+		absentAuthoritativeWakeStopForTest,
+	)
 	if err != nil || result.Status != "recovered" {
 		t.Fatalf("missing-target recovery result = %#v err=%v", result, err)
 	}
@@ -1518,7 +1534,11 @@ func testRecoverOwnerPreservesClaimWhenTargetIsMissingWithPreparedMarker(
 	t.Cleanup(func() { syncWakeOwnerDirFD = originalSync })
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		result, err := recoverOwnerWake(root, "codex")
+		result, err := recoverOwnerWakeWithStopPreparer(
+			root,
+			"codex",
+			absentAuthoritativeWakeStopForTest,
+		)
 		if err == nil || result.Status != "error" ||
 			!strings.Contains(result.Reason, wantReason) {
 			t.Fatalf("attempt %d result = %#v err=%v, want unchanged-state validation error", attempt, result, err)
@@ -1690,7 +1710,11 @@ func TestRecoverOwnerPreservesUntrustedTargetButRejectsDifferentCompleteOwner(t 
 			}
 			t.Cleanup(func() { observeAuthoritativeWakeOwner = oldObserve })
 
-			result, err := recoverOwnerWake(root, "codex")
+			result, err := recoverOwnerWakeWithStopPreparer(
+				root,
+				"codex",
+				absentAuthoritativeWakeStopForTest,
+			)
 			if test.wantRecovered {
 				if err != nil || result.Status != "recovered" {
 					t.Fatalf("untrusted-target recovery = %#v err=%v", result, err)

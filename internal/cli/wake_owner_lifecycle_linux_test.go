@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -17,6 +18,94 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/sys/unix"
 )
+
+func TestLinuxConcurrentOwnerRecoveryWithInjectedStopNeverCallsPidfdOpen(t *testing.T) {
+	type fixture struct {
+		root  string
+		owner wakeOwner
+	}
+	fixtures := make([]fixture, 2)
+	for i := range fixtures {
+		root := secureTempDirForTest(t)
+		if err := fsq.EnsureRootDirs(root); err != nil {
+			t.Fatal(err)
+		}
+		if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+			t.Fatal(err)
+		}
+		owner := wakeOwner{
+			PID:          4242 + i,
+			ProcessStart: fmt.Sprintf("1234%d", i),
+			BootID:       "11111111-1111-1111-1111-111111111111",
+			SessionID:    99 + i,
+		}
+		injector := writeExecutableForTest(t, fmt.Sprintf("concurrent-owner-recovery-%d", i))
+		target := mustNewWakeTargetForTest(t, root, "codex", injector, nil)
+		target.Owner = &owner
+		if err := writeWakeTarget(root, "codex", target); err != nil {
+			t.Fatal(err)
+		}
+		lock := bindWakeLockToTarget(wakeLock{
+			PID:          5151 + i,
+			TTY:          "unknown",
+			ProcessStart: fmt.Sprintf("6789%d", i),
+			BootID:       owner.BootID,
+			Generation:   fmt.Sprintf("concurrent-owner-recovery-%d", i),
+			OwnerSchema:  wakeOwnerLockSchema,
+			Owner:        &owner,
+		}, target)
+		lock.WakeMode = wakeOwnerWakeMode
+		lockPath := writeWakeLockForTest(t, root, "codex", lock)
+		if err := os.Chmod(lockPath, wakeOwnerLockFileMode); err != nil {
+			t.Fatal(err)
+		}
+		fixtures[i] = fixture{root: root, owner: owner}
+	}
+
+	oldObserve := observeAuthoritativeWakeOwner
+	observeAuthoritativeWakeOwner = func(wakeOwner) (wakeOwnerObservation, error) {
+		return wakeOwnerObservation{State: wakeOwnerDead}, nil
+	}
+	oldOpen := linuxPidfdOpen
+	var pidfdOpenCalls atomic.Int32
+	linuxPidfdOpen = func(pid, flags int) (int, error) {
+		pidfdOpenCalls.Add(1)
+		return oldOpen(pid, flags)
+	}
+	t.Cleanup(func() {
+		observeAuthoritativeWakeOwner = oldObserve
+		linuxPidfdOpen = oldOpen
+	})
+
+	start := make(chan struct{})
+	errs := make(chan error, len(fixtures))
+	var workers sync.WaitGroup
+	for _, fixture := range fixtures {
+		fixture := fixture
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			result, err := recoverOwnerWakeWithStopPreparer(
+				fixture.root,
+				"codex",
+				absentAuthoritativeWakeStopForTest,
+			)
+			if err != nil || result.Status != "recovered" {
+				errs <- fmt.Errorf("owner %d recovery = %#v: %v", fixture.owner.PID, result, err)
+			}
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	if calls := pidfdOpenCalls.Load(); calls != 0 {
+		t.Fatalf("concurrent injected owner recovery made %d real pidfd_open calls", calls)
+	}
+}
 
 func TestLinuxStableOwnerStopRefusesBoundInconclusiveBeforePidfd(t *testing.T) {
 	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
