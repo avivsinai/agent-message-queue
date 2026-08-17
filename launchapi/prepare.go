@@ -74,10 +74,7 @@ func prepareInputs(request PrepareRequestV1) (internallaunch.PrepareRequest, int
 		internalRequest.Participants = append(internalRequest.Participants, toInternalPrepareParticipant(participant, provider, committedArgs, bypassArgs))
 	}
 	dependencies := internallaunch.PrepareDependencies{
-		Backends: map[string]internallaunch.Backend{
-			internallaunch.LauncherCommands: internallaunch.Commands{},
-			internallaunch.LauncherTMux:     internallaunch.NewTmuxBackend("tmux"),
-		},
+		Backends:     internallaunch.DefaultBackends(),
 		AdapterFor:   defaultPrepareAdapter,
 		TrustStore:   trustStore,
 		HostIdentity: host,

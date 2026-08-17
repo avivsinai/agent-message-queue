@@ -234,3 +234,14 @@ func (e *DefinitePreCreateError) Error() string {
 	return fmt.Sprintf("create refused before resource creation: %v", e.Err)
 }
 func (e *DefinitePreCreateError) Unwrap() error { return e.Err }
+
+// DefaultBackends is the production launcher map. Every CLI and public API
+// entry must use this set so a new managed backend cannot be omitted from one
+// facade.
+func DefaultBackends() map[string]Backend {
+	return map[string]Backend{
+		LauncherCommands: Commands{},
+		LauncherTMux:     NewTmuxBackend("tmux"),
+		LauncherCMux:     NewCmuxBackend(""),
+	}
+}

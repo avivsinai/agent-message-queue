@@ -105,12 +105,12 @@ func TestPrepareParticipantOnlyAbsentSessionDoesNotProvision(t *testing.T) {
 
 func TestPrepareUnavailableLauncherIsTypedAndDoesNotRequestTrust(t *testing.T) {
 	fixture := newPublicPrepareFixture(t, true)
-	fixture.request.Launcher = "cmux"
+	fixture.request.Launcher = "ghostty"
 	result, err := Prepare(context.Background(), fixture.request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Outcome != PrepareOutcomeUnsupported || result.Reason != "launcher_not_available" || result.Preview.Backend != "cmux" {
+	if result.Outcome != PrepareOutcomeUnsupported || result.Reason != "launcher_not_available" || result.Preview.Backend != "ghostty" {
 		t.Fatalf("unavailable launcher result = %#v", result)
 	}
 	if len(result.RequiredActions) != 0 {
