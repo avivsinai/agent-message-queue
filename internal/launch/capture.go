@@ -1,10 +1,8 @@
 package launch
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
@@ -77,48 +75,101 @@ type cursorCreateChatPayload struct {
 	Stdout          string                `json:"stdout"`
 }
 
+const CodexNotifyPayloadLimit = 1 << 20
+
+type codexNotifyEvent struct {
+	Type                 string   `json:"type"`
+	ThreadID             string   `json:"thread-id"`
+	TurnID               string   `json:"turn-id"`
+	Cwd                  string   `json:"cwd"`
+	Client               *string  `json:"client,omitempty"`
+	InputMessages        []string `json:"input-messages"`
+	LastAssistantMessage *string  `json:"last-assistant-message,omitempty"`
+}
+
+type codexNotifyPayload struct {
+	Source          CaptureEvidenceSource `json:"source"`
+	Provider        string                `json:"provider"`
+	ProviderVersion string                `json:"provider_version"`
+	LaunchNonce     string                `json:"launch_nonce"`
+	Handle          string                `json:"handle"`
+	ConversationID  string                `json:"conversation_id"`
+	Cwd             string                `json:"cwd"`
+	Notification    string                `json:"notification"`
+}
+
 func (result CaptureResult) CanPersist() bool {
 	return result.State == CaptureReady && !result.Degraded && result.Identity.Provider != "" && result.Identity.ID != ""
 }
 
-// ParseCodexThreadStartedEvidence verifies the provider event shape and binds
-// the observation to the launch generation of the channel that received it.
-// It does not scan the Codex session store or accept newest-file evidence.
-func ParseCodexThreadStartedEvidence(raw []byte, launchNonce string, activeElsewhere bool) (CaptureEvidence, error) {
+// ParseCodexNotifyEvidence verifies the pinned Codex legacy notify wire shape
+// and binds it to the exact managed launch generation. It does not scan the
+// Codex session store or accept newest-file evidence.
+func ParseCodexNotifyEvidence(raw []byte, launchNonce, handle, expectedVersion, expectedCwd string) (CaptureEvidence, error) {
+	if len(raw) == 0 || len(raw) > CodexNotifyPayloadLimit {
+		return CaptureEvidence{}, fmt.Errorf("codex notify payload size is invalid")
+	}
 	if !validUUID(launchNonce) {
 		return CaptureEvidence{}, fmt.Errorf("launch nonce must be a UUID")
 	}
-	var event struct {
-		Method string `json:"method"`
-		Params struct {
-			Thread struct {
-				ID         string `json:"id"`
-				CLIVersion string `json:"cliVersion"`
-			} `json:"thread"`
-		} `json:"params"`
+	if err := fsq.ValidateHandle(handle); err != nil {
+		return CaptureEvidence{}, fmt.Errorf("invalid capture handle: %w", err)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	if err := decoder.Decode(&event); err != nil {
-		return CaptureEvidence{}, fmt.Errorf("decode Codex capture evidence: %w", err)
+	if expectedVersion != codexCaptureVersion {
+		return CaptureEvidence{}, fmt.Errorf("codex capture version %q is unsupported", expectedVersion)
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return CaptureEvidence{}, fmt.Errorf("decode Codex capture evidence: trailing JSON value")
+	var event codexNotifyEvent
+	if err := decodeStrict(raw, &event); err != nil {
+		return CaptureEvidence{}, fmt.Errorf("decode Codex notify evidence: %w", err)
 	}
-	if event.Method != "thread/started" {
-		return CaptureEvidence{}, fmt.Errorf("codex capture evidence method is %q, want thread/started", event.Method)
+	if event.Type != "agent-turn-complete" {
+		return CaptureEvidence{}, fmt.Errorf("codex notify type is %q, want agent-turn-complete", event.Type)
 	}
-	if !validUUIDv7(event.Params.Thread.ID) {
-		return CaptureEvidence{}, fmt.Errorf("codex thread/started identity must be a UUIDv7")
+	if !validUUIDv7(event.ThreadID) {
+		return CaptureEvidence{}, fmt.Errorf("codex notify thread identity must be a UUIDv7")
 	}
-	if strings.TrimSpace(event.Params.Thread.CLIVersion) == "" {
-		return CaptureEvidence{}, fmt.Errorf("codex thread/started evidence has no CLI version")
+	if strings.TrimSpace(event.TurnID) == "" {
+		return CaptureEvidence{}, fmt.Errorf("codex notify turn identity is empty")
+	}
+	if event.Cwd != expectedCwd {
+		return CaptureEvidence{}, fmt.Errorf("codex notify cwd does not match execution ticket")
+	}
+	if event.InputMessages == nil {
+		return CaptureEvidence{}, fmt.Errorf("codex notify input-messages is missing")
+	}
+	payload, err := json.Marshal(codexNotifyPayload{
+		Source: CodexNotifyV1, Provider: CodexProvider, ProviderVersion: expectedVersion,
+		LaunchNonce: launchNonce, Handle: handle, ConversationID: event.ThreadID,
+		Cwd: expectedCwd, Notification: string(raw),
+	})
+	if err != nil {
+		return CaptureEvidence{}, err
 	}
 	return CaptureEvidence{
-		source: CodexThreadStartedV2, provider: CodexProvider,
-		providerVersion: event.Params.Thread.CLIVersion, launchNonce: launchNonce,
-		conversationID: event.Params.Thread.ID, activeElsewhere: activeElsewhere,
-		verified: true, observedAt: time.Now().UTC(), payload: bytes.Clone(raw),
+		source: CodexNotifyV1, provider: CodexProvider,
+		providerVersion: expectedVersion, launchNonce: launchNonce, handle: handle,
+		conversationID: event.ThreadID,
+		verified:       true, observedAt: time.Now().UTC(), payload: payload,
 	}, nil
+}
+
+func decodeCodexNotifyPayload(raw []byte) (codexNotifyPayload, error) {
+	var payload codexNotifyPayload
+	if err := decodeStrict(raw, &payload); err != nil {
+		return payload, fmt.Errorf("decode codex notify evidence: %w", err)
+	}
+	if payload.Source != CodexNotifyV1 || payload.Provider != CodexProvider ||
+		payload.ProviderVersion != codexCaptureVersion || !validUUID(payload.LaunchNonce) {
+		return payload, fmt.Errorf("codex notify evidence metadata is invalid")
+	}
+	if err := fsq.ValidateHandle(payload.Handle); err != nil {
+		return payload, fmt.Errorf("codex notify evidence handle: %w", err)
+	}
+	parsed, err := ParseCodexNotifyEvidence([]byte(payload.Notification), payload.LaunchNonce, payload.Handle, payload.ProviderVersion, payload.Cwd)
+	if err != nil || parsed.conversationID != payload.ConversationID {
+		return payload, fmt.Errorf("codex notify evidence identity is invalid")
+	}
+	return payload, nil
 }
 
 // ParseCursorCreateChatEvidence validates the exact stdout returned by the
@@ -191,7 +242,7 @@ func captureCodexIdentity(request CaptureRequest) CaptureResult {
 		if !evidence.verified {
 			return degradedCapture(CaptureStale, CaptureReasonEvidenceUnverified)
 		}
-		if evidence.source != CodexThreadStartedV2 {
+		if evidence.source != CodexNotifyV1 {
 			return CaptureResult{State: CaptureUnsupported, Reason: CaptureReasonEvidenceSource}
 		}
 		if evidence.provider != CodexProvider {

@@ -49,6 +49,10 @@ func prepareInputs(request PrepareRequestV1) (internallaunch.PrepareRequest, int
 	if host == "" {
 		return internallaunch.PrepareRequest{}, internallaunch.PrepareDependencies{}, fmt.Errorf("resolve host identity: empty hostname")
 	}
+	amqPath, err := os.Executable()
+	if err != nil {
+		return internallaunch.PrepareRequest{}, internallaunch.PrepareDependencies{}, fmt.Errorf("resolve AMQ executable: %w", err)
+	}
 	internalRequest := internallaunch.PrepareRequest{
 		Target: internallaunch.PrepareTarget{
 			ProjectRoot: request.Target.ProjectRoot,
@@ -76,6 +80,7 @@ func prepareInputs(request PrepareRequestV1) (internallaunch.PrepareRequest, int
 	dependencies := internallaunch.PrepareDependencies{
 		Backends:     internallaunch.DefaultBackends(),
 		AdapterFor:   defaultPrepareAdapter,
+		AMQPath:      amqPath,
 		TrustStore:   trustStore,
 		HostIdentity: host,
 	}

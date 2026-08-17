@@ -84,7 +84,9 @@ func (a reconcileAdapter) Capabilities(context.Context) AdapterCapabilities {
 		provider = a.capabilityProvider
 	}
 	providerVersion := "test"
-	if a.preSpawnAcquire {
+	if a.name == CodexProvider {
+		providerVersion = codexCaptureVersion
+	} else if a.preSpawnAcquire {
 		providerVersion = cursorCaptureVersion
 	}
 	return AdapterCapabilities{
@@ -162,7 +164,7 @@ func TestReconcileCaptureReadyResumeRequiresResumeAlone(t *testing.T) {
 	}}
 	writeReconcileConversation(t, req, ConversationRecord{
 		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
-		Identity: ConversationIdentity{Provider: CodexProvider, ID: testConversationID}, LaunchNonce: testLaunchNonce,
+		Identity: ConversationIdentity{Provider: CodexProvider, ID: testConversationID}, ProviderVersion: codexCaptureVersion, LaunchNonce: testLaunchNonce,
 		ExecutionEvidence: reconcileExecutionEvidence(&reconcileBackend{name: CommandsBackendName}, testLaunchNonce),
 	})
 	result, err := Reconcile(req)
@@ -184,7 +186,7 @@ func TestReconcileCaptureReadyRefusesWithoutResumeCapability(t *testing.T) {
 	}}
 	writeReconcileConversation(t, req, ConversationRecord{
 		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
-		Identity: ConversationIdentity{Provider: CodexProvider, ID: testConversationID}, LaunchNonce: testLaunchNonce,
+		Identity: ConversationIdentity{Provider: CodexProvider, ID: testConversationID}, ProviderVersion: codexCaptureVersion, LaunchNonce: testLaunchNonce,
 		ExecutionEvidence: reconcileExecutionEvidence(&reconcileBackend{name: CommandsBackendName}, testLaunchNonce),
 	})
 	result, err := Reconcile(req)
@@ -198,6 +200,17 @@ func TestReconcileCaptureReadyRefusesWithoutResumeCapability(t *testing.T) {
 }
 
 func (a reconcileAdapter) PlanFresh(req PlanRequest) (AgentPlan, error) {
+	if a.name == CodexProvider && a.mode == AdapterModeCapture {
+		notify, err := codexNotifyOverride(req)
+		if err != nil {
+			return AgentPlan{}, err
+		}
+		plan := AgentPlan{
+			Handle: req.Handle, Argv: []string{"/usr/bin/true", "-c", notify}, Cwd: req.Cwd,
+			AdapterMode: a.mode, ResumePolicy: req.ResumePolicy, LaunchNonce: req.LaunchNonce,
+		}
+		return plan, plan.Validate()
+	}
 	if a.preSpawnAcquire {
 		plan := AgentPlan{
 			Handle: req.Handle, Argv: []string{"/usr/bin/true", "--resume", preSpawnConversationPlaceholder}, Cwd: req.Cwd,
@@ -217,6 +230,18 @@ func (a reconcileAdapter) PlanFresh(req PlanRequest) (AgentPlan, error) {
 	return plan, plan.Validate()
 }
 func (a reconcileAdapter) PlanResume(req ResumeRequest) (AgentPlan, error) {
+	if a.name == CodexProvider && a.mode == AdapterModeCapture {
+		notify, err := codexNotifyOverride(req.PlanRequest)
+		if err != nil {
+			return AgentPlan{}, err
+		}
+		plan := AgentPlan{
+			Handle: req.Handle, Argv: []string{"/usr/bin/true", "resume", "-c", notify, req.Conversation.ID}, Cwd: req.Cwd,
+			AdapterMode: a.mode, ResumePolicy: ResumeEnabled, LaunchNonce: req.LaunchNonce, ConversationID: req.Conversation.ID,
+			DynamicArgv: []DynamicArg{{Index: 4, Kind: DynamicArgConversationID}},
+		}
+		return plan, plan.Validate()
+	}
 	plan := AgentPlan{
 		Handle: req.Handle, Argv: []string{"/usr/bin/true", req.Conversation.ID}, Cwd: req.Cwd,
 		AdapterMode: a.mode, ResumePolicy: ResumeEnabled, LaunchNonce: req.LaunchNonce,
@@ -292,7 +317,7 @@ func (b *reconcileBackend) Create(req CreateRequest) (CreateResult, error) {
 	}
 	if b.capture {
 		if b.captured == nil {
-			evidence, err := ParseCodexThreadStartedEvidence([]byte(`{"method":"thread/started","params":{"thread":{"id":"019c8a2f-2b13-7000-8000-000000000001","cliVersion":"test"}}}`), req.Plan.Agents[0].LaunchNonce, false)
+			evidence, err := ParseCodexNotifyEvidence(codexNotifyTestPayload("019c8a2f-2b13-7000-8000-000000000001", req.Plan.Agents[0].Cwd), req.Plan.Agents[0].LaunchNonce, req.Plan.Agents[0].Handle, codexCaptureVersion, req.Plan.Agents[0].Cwd)
 			if err != nil {
 				return CreateResult{}, err
 			}
@@ -345,7 +370,7 @@ func (b *reconcileBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 	}
 	if b.capture {
 		if b.captured == nil {
-			evidence, err := ParseCodexThreadStartedEvidence([]byte(`{"method":"thread/started","params":{"thread":{"id":"019c8a2f-2b13-7000-8000-000000000001","cliVersion":"test"}}}`), req.Journal.LaunchNonce, false)
+			evidence, err := ParseCodexNotifyEvidence(codexNotifyTestPayload("019c8a2f-2b13-7000-8000-000000000001", req.Journal.Plan.Agents[0].Cwd), req.Journal.LaunchNonce, req.Journal.Plan.Agents[0].Handle, codexCaptureVersion, req.Journal.Plan.Agents[0].Cwd)
 			if err != nil {
 				return ReclaimResult{}, err
 			}

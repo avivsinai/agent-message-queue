@@ -86,7 +86,7 @@ func TestLifecycleFacadeUsesOwnedBinding(t *testing.T) {
 	}
 	evidence, err := internallaunch.WriteEvidence(root, lease, internallaunch.EvidenceWriteRequest{
 		Kind: internallaunch.EvidenceProviderCapture, Handle: "claude", ObservedAt: time.Now().UTC(),
-		Payload: []byte(`{"method":"thread/started","params":{"thread":{"id":"019c8a2f-2b13-7000-8000-000000000001"}}}`),
+		Payload: []byte(`{"source":"codex_notify_v1","provider":"codex","provider_version":"0.147.0","launch_nonce":"76767676-7676-4676-8676-767676767676","handle":"claude","conversation_id":"019c8a2f-2b13-7000-8000-000000000001","cwd":"/tmp","notification":"{\"type\":\"agent-turn-complete\",\"thread-id\":\"019c8a2f-2b13-7000-8000-000000000001\",\"turn-id\":\"turn-1\",\"cwd\":\"/tmp\",\"input-messages\":[]}"}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -94,8 +94,8 @@ func TestLifecycleFacadeUsesOwnedBinding(t *testing.T) {
 	conversationID := "019c8a2f-2b13-7000-8000-000000000001"
 	if err := internallaunch.WriteConversation(root, lease, internallaunch.ConversationRecord{
 		Version: internallaunch.ConversationVersion, Handle: "claude", State: internallaunch.CaptureReady,
-		Identity:    internallaunch.ConversationIdentity{Provider: internallaunch.CodexProvider, ID: conversationID},
-		LaunchNonce: "76767676-7676-4676-8676-767676767676", EvidenceRefs: []string{evidence.ID},
+		Identity:        internallaunch.ConversationIdentity{Provider: internallaunch.CodexProvider, ID: conversationID},
+		ProviderVersion: "0.147.0", LaunchNonce: "76767676-7676-4676-8676-767676767676", EvidenceRefs: []string{evidence.ID},
 		ExecutionEvidence: &internallaunch.ConversationExecutionEvidence{
 			Backend: "test", Profile: detect.Profile.Identity(), Outcome: internallaunch.OutcomeCreated,
 			LaunchNonce: "76767676-7676-4676-8676-767676767676", ConversationID: conversationID,

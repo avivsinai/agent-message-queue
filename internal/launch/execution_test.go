@@ -638,6 +638,170 @@ func TestCursorOrphanEvidenceRejectsSameIdentityWithDifferentBytes(t *testing.T)
 	}
 }
 
+func TestCodexOrphanEvidenceRejectsSameIdentityWithDifferentBytes(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "99999999-9999-4999-8999-999999999999"
+	lease, err := AcquireLease(fixture.root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Release() }()
+	if err := lease.LockHandles("codex"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := ParseCodexNotifyEvidence(
+		codexNotifyTestPayload(testConversationID, fixture.cwd),
+		nonce, "codex", codexCaptureVersion, fixture.cwd,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRaw := []byte(strings.Replace(string(codexNotifyTestPayload(testConversationID, fixture.cwd)), `"last-assistant-message":"ok"`, `"last-assistant-message":"different"`, 1))
+	second, err := ParseCodexNotifyEvidence(
+		secondRaw, nonce, "codex", codexCaptureVersion, fixture.cwd,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := persistProviderCaptureEvidence(fixture.root, lease, "codex", []CaptureEvidence{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := findProviderCaptureEvidence(fixture.root, CodexProvider, "codex", nonce, codexCaptureVersion); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous Codex orphan evidence error = %v", err)
+	}
+}
+
+func TestRecordCodexNotifyPersistsBeforePromotionAndUsesTicketBackend(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "96969696-9696-4969-8969-969696969696"
+	ticket := seedPendingCodexNotifyExecution(t, fixture, nonce)
+	raw := codexNotifyTestPayload(testConversationID, ticket.Cwd)
+	result, err := RecordCodexNotify(fixture.root, "codex", nonce, fixture.amq, raw)
+	if err != nil || result.ConversationID != testConversationID || result.EvidenceRef == "" || result.AlreadyReady {
+		t.Fatalf("RecordCodexNotify = %#v, %v", result, err)
+	}
+	record, err := LoadConversation(fixture.root, "codex")
+	if err != nil || record.State != CaptureReady || record.Identity != (ConversationIdentity{Provider: CodexProvider, ID: testConversationID}) ||
+		record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != CommandsBackendName ||
+		record.ExecutionEvidence.Profile != CommandsProfile().Identity() || !reflect.DeepEqual(record.EvidenceRefs, []string{result.EvidenceRef}) {
+		t.Fatalf("ready conversation = %#v, %v", record, err)
+	}
+	if _, _, err := ReadEvidence(fixture.root, result.EvidenceRef); err != nil {
+		t.Fatal(err)
+	}
+	second, err := RecordCodexNotify(fixture.root, "codex", nonce, fixture.amq, raw)
+	if err != nil || !second.AlreadyReady || second.EvidenceRef != result.EvidenceRef {
+		t.Fatalf("idempotent notify = %#v, %v", second, err)
+	}
+}
+
+func TestRecordCodexNotifyRefusesPendingExecutionTicket(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "93939393-9393-4939-8939-939393939393"
+	ticket := seedPendingCodexNotifyExecution(t, fixture, nonce)
+	if err := RevertExecution(fixture.root, "codex", nonce); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecordCodexNotify(fixture.root, "codex", nonce, fixture.amq, codexNotifyTestPayload(testConversationID, ticket.Cwd)); err == nil || !strings.Contains(err.Error(), `state is "pending"`) {
+		t.Fatalf("pending notify error = %v", err)
+	}
+	record, err := LoadConversation(fixture.root, "codex")
+	if err != nil || record.State != CapturePending || record.Identity.ID != "" || len(record.EvidenceRefs) != 0 {
+		t.Fatalf("pending conversation after refused notify = %#v, %v", record, err)
+	}
+}
+
+func TestRecordCodexNotifyCrashRecoveryAndIdentityConflict(t *testing.T) {
+	for _, crashStage := range []string{"evidence_persisted", "conversation_promoted"} {
+		t.Run(crashStage, func(t *testing.T) {
+			fixture := newExecutionFixture(t)
+			nonce := "95959595-9595-4959-8959-959595959595"
+			ticket := seedPendingCodexNotifyExecution(t, fixture, nonce)
+			crash := errors.New("simulated crash")
+			_, err := recordCodexNotify(fixture.root, "codex", nonce, fixture.amq, codexNotifyTestPayload(testConversationID, ticket.Cwd), func(stage string) error {
+				if stage == crashStage {
+					return crash
+				}
+				return nil
+			})
+			if !errors.Is(err, crash) {
+				t.Fatalf("crash error = %v", err)
+			}
+			result, err := RecordCodexNotify(fixture.root, "codex", nonce, fixture.amq, codexNotifyTestPayload(testConversationID, ticket.Cwd))
+			if err != nil || result.ConversationID != testConversationID || (crashStage == "conversation_promoted" && !result.AlreadyReady) {
+				t.Fatalf("retry = %#v, %v", result, err)
+			}
+			_, err = RecordCodexNotify(fixture.root, "codex", nonce, fixture.amq, codexNotifyTestPayload("019c8a2f-2b13-7000-8000-000000000099", ticket.Cwd))
+			var conflict *CodexNotifyConflictError
+			if !errors.As(err, &conflict) || conflict.Existing != testConversationID {
+				t.Fatalf("identity conflict = %#v, %v", conflict, err)
+			}
+		})
+	}
+}
+
+func TestCodexNotifyTicketRejectsAlteredStaticHook(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "94949494-9494-4949-8949-949494949494"
+	notify, err := codexNotifyOverride(PlanRequest{AMQExecutable: fixture.amq, SessionRoot: fixture.session, Handle: "codex", LaunchNonce: nonce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, argv := range [][]string{
+		{fixture.provider},
+		{fixture.provider, "-c", notify, "-c", notify},
+		{fixture.provider, "-c", strings.Replace(notify, nonce, testLaunchNonce, 1)},
+		{fixture.provider, "-c", notify, "--config", "notify=[]"},
+	} {
+		_, err := NewExecutionTicket(ExecutionTicketRequest{
+			Handle: "codex", LaunchNonce: nonce, Mode: AdapterModeCapture, Provider: CodexProvider, ProviderVersion: codexCaptureVersion,
+			Backend: CommandsBackendName, Profile: CommandsProfile().Identity(), ProjectRoot: fixture.project, SessionRoot: fixture.session,
+			Cwd: fixture.cwd, ProviderExecutable: fixture.provider, AMQExecutable: fixture.amq, TargetArgv: argv,
+		})
+		if err == nil || !strings.Contains(err.Error(), "notify") {
+			t.Fatalf("altered static hook error = %v for %q", err, argv)
+		}
+	}
+}
+
+func seedPendingCodexNotifyExecution(t *testing.T, fixture executionFixture, nonce string) ExecutionTicket {
+	t.Helper()
+	notify, err := codexNotifyOverride(PlanRequest{
+		AMQExecutable: fixture.amq, SessionRoot: fixture.session, Handle: "codex", LaunchNonce: nonce,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := NewExecutionTicket(ExecutionTicketRequest{
+		Handle: "codex", LaunchNonce: nonce, Mode: AdapterModeCapture, Provider: CodexProvider, ProviderVersion: codexCaptureVersion,
+		Backend: CommandsBackendName, Profile: CommandsProfile().Identity(), ProjectRoot: fixture.project, SessionRoot: fixture.session,
+		Cwd: fixture.cwd, ProviderExecutable: fixture.provider, AMQExecutable: fixture.amq,
+		TargetArgv: []string{fixture.provider, "-c", notify}, State: ExecutionSpawnAttempted, Reason: "spawn_attempted",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := AcquireLease(fixture.root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("codex"); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteExecutionTicket(fixture.root, lease, ticket); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteConversation(fixture.root, lease, ConversationRecord{
+		Version: ConversationVersion, Handle: "codex", State: CapturePending, ProviderVersion: codexCaptureVersion, LaunchNonce: nonce,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	return ticket
+}
+
 type executionFixture struct {
 	project, session, cwd, provider, amq, injector string
 	root                                           *fsq.DeliveryRoot

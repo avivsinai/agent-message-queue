@@ -1,12 +1,19 @@
 package launch
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
 
+const testCodexCwd = "/tmp/codex-project"
+
+func codexNotifyTestPayload(conversationID, cwd string) []byte {
+	return []byte(fmt.Sprintf(`{"type":"agent-turn-complete","thread-id":%q,"turn-id":"turn-1","cwd":%q,"input-messages":["reply with ok"],"last-assistant-message":"ok"}`, conversationID, cwd))
+}
+
 func validCodexCapture() CaptureRequest {
-	evidence, err := ParseCodexThreadStartedEvidence([]byte(`{"method":"thread/started","params":{"thread":{"id":"`+testConversationID+`","cliVersion":"0.147.0","ignored_provider_field":true}}}`), testLaunchNonce, false)
+	evidence, err := ParseCodexNotifyEvidence(codexNotifyTestPayload(testConversationID, testCodexCwd), testLaunchNonce, "codex", codexCaptureVersion, testCodexCwd)
 	if err != nil {
 		panic(err)
 	}
@@ -73,23 +80,33 @@ func TestCodexCaptureRejectsAmbiguousOrForgedEvidence(t *testing.T) {
 	}
 }
 
-func TestParseCodexThreadStartedEvidenceRejectsForgedEvents(t *testing.T) {
+func TestParseCodexNotifyEvidenceRejectsForgedEvents(t *testing.T) {
+	valid := codexNotifyTestPayload(testConversationID, testCodexCwd)
+	if _, err := ParseCodexNotifyEvidence(valid, testLaunchNonce, "codex", "0.148.0", testCodexCwd); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("unsupported expected version error = %v", err)
+	}
+	if _, err := ParseCodexNotifyEvidence(valid, testLaunchNonce, "codex", codexCaptureVersion, "/wrong"); err == nil || !strings.Contains(err.Error(), "cwd") {
+		t.Fatalf("wrong cwd error = %v", err)
+	}
+
 	tests := []struct {
 		name string
 		raw  string
 		want string
 	}{
 		{"malformed", `{`, "decode"},
-		{"wrong method", `{"method":"thread/resumed","params":{"thread":{"id":"` + testConversationID + `","cliVersion":"codex-cli 0.147.0"}}}`, "thread/started"},
-		{"missing version", `{"method":"thread/started","params":{"thread":{"id":"` + testConversationID + `"}}}`, "no CLI version"},
-		{"invalid id", `{"method":"thread/started","params":{"thread":{"id":"newest","cliVersion":"codex-cli 0.147.0"}}}`, "must be a UUID"},
-		{"non-v7 id", `{"method":"thread/started","params":{"thread":{"id":"550e8400-e29b-41d4-a716-446655440000","cliVersion":"0.147.0"}}}`, "UUIDv7"},
-		{"trailing event", `{"method":"thread/started","params":{"thread":{"id":"` + testConversationID + `","cliVersion":"codex-cli 0.147.0"}}} {}`, "trailing"},
+		{"wrong type", `{"type":"turn-started","thread-id":"` + testConversationID + `","turn-id":"turn-1","cwd":"` + testCodexCwd + `","input-messages":[]}`, "agent-turn-complete"},
+		{"missing turn", `{"type":"agent-turn-complete","thread-id":"` + testConversationID + `","cwd":"` + testCodexCwd + `","input-messages":[]}`, "turn identity"},
+		{"invalid id", `{"type":"agent-turn-complete","thread-id":"newest","turn-id":"turn-1","cwd":"` + testCodexCwd + `","input-messages":[]}`, "UUIDv7"},
+		{"non-v7 id", `{"type":"agent-turn-complete","thread-id":"550e8400-e29b-41d4-a716-446655440000","turn-id":"turn-1","cwd":"` + testCodexCwd + `","input-messages":[]}`, "UUIDv7"},
+		{"missing messages", `{"type":"agent-turn-complete","thread-id":"` + testConversationID + `","turn-id":"turn-1","cwd":"` + testCodexCwd + `"}`, "input-messages"},
+		{"unknown field", `{"type":"agent-turn-complete","thread-id":"` + testConversationID + `","turn-id":"turn-1","cwd":"` + testCodexCwd + `","input-messages":[],"extra":true}`, "unknown field"},
+		{"trailing event", string(valid) + ` {}`, "multiple JSON values"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := ParseCodexThreadStartedEvidence([]byte(test.raw), testLaunchNonce, false); err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("ParseCodexThreadStartedEvidence error = %v, want %q", err, test.want)
+			if _, err := ParseCodexNotifyEvidence([]byte(test.raw), testLaunchNonce, "codex", codexCaptureVersion, testCodexCwd); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ParseCodexNotifyEvidence error = %v, want %q", err, test.want)
 			}
 		})
 	}

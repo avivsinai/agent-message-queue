@@ -197,12 +197,16 @@ func (ticket ExecutionTicket) Validate() error {
 		return fmt.Errorf("conversation identity must be a UUID")
 	}
 	if ticket.PreSpawnAcquire {
-		if ticket.Mode != AdapterModeCapture || ticket.Provider != CursorProvider || ticket.ProviderVersion == "" ||
+		if ticket.Mode != AdapterModeCapture || ticket.Provider != CursorProvider || ticket.ProviderVersion != cursorCaptureVersion ||
 			strings.TrimSpace(ticket.Backend) == "" || strings.TrimSpace(ticket.Profile) == "" {
 			return fmt.Errorf("pre-spawn identity acquisition requires a versioned cursor capture ticket")
 		}
-	} else if ticket.Backend != "" || ticket.Profile != "" {
-		return fmt.Errorf("execution backend identity exists without pre-spawn acquisition")
+	} else if (ticket.Backend == "") != (ticket.Profile == "") {
+		return fmt.Errorf("execution backend identity is incomplete")
+	} else if ticket.Mode == AdapterModeCapture && ticket.Provider == CodexProvider && ticket.ProviderVersion == codexCaptureVersion && ticket.Backend == "" {
+		return fmt.Errorf("codex notify capture requires execution backend identity")
+	} else if ticket.Backend != "" && (ticket.Mode != AdapterModeCapture || ticket.Provider != CodexProvider || ticket.ProviderVersion != codexCaptureVersion) {
+		return fmt.Errorf("execution backend identity is unsupported without pre-spawn acquisition")
 	}
 	for name, value := range map[string]string{"project root": ticket.ProjectRoot, "project identity": ticket.ProjectIdentity, "session root": ticket.SessionRoot, "session identity": ticket.SessionIdentity, "cwd": ticket.Cwd, "cwd identity": ticket.CwdIdentity, "provider executable": ticket.ProviderExecutable, "provider executable identity": ticket.ProviderExecutableIdentity, "amq executable": ticket.AMQExecutable, "amq executable identity": ticket.AMQExecutableIdentity, "environment digest": ticket.EnvDigest} {
 		if strings.TrimSpace(value) == "" {
@@ -222,6 +226,11 @@ func (ticket ExecutionTicket) Validate() error {
 	for i, arg := range ticket.TargetArgv {
 		if arg == "" || strings.ContainsRune(arg, 0) {
 			return fmt.Errorf("target argv[%d] is invalid", i)
+		}
+	}
+	if ticket.Mode == AdapterModeCapture && ticket.Provider == CodexProvider && ticket.ProviderVersion == codexCaptureVersion {
+		if err := validateCodexNotifyTargetArgv(ticket); err != nil {
+			return err
 		}
 	}
 	seenDynamic := make(map[int]struct{}, len(ticket.DynamicArgv))
@@ -285,6 +294,37 @@ func (ticket ExecutionTicket) Validate() error {
 		}
 	default:
 		return fmt.Errorf("invalid execution state %q", ticket.State)
+	}
+	return nil
+}
+
+func validateCodexNotifyTargetArgv(ticket ExecutionTicket) error {
+	expected, err := codexNotifyOverride(PlanRequest{
+		AMQExecutable: ticket.AMQExecutable,
+		SessionRoot:   ticket.SessionRoot,
+		Handle:        ticket.Handle,
+		LaunchNonce:   ticket.LaunchNonce,
+	})
+	if err != nil {
+		return err
+	}
+	count := 0
+	for i := 1; i < len(ticket.TargetArgv); i++ {
+		arg := ticket.TargetArgv[i]
+		if arg == "--config" || strings.HasPrefix(arg, "--config=") || strings.HasPrefix(arg, "notify=") {
+			return fmt.Errorf("codex notify override uses an unpinned configuration carrier")
+		}
+		if arg != "-c" {
+			continue
+		}
+		if i+1 >= len(ticket.TargetArgv) || ticket.TargetArgv[i+1] != expected {
+			return fmt.Errorf("codex notify override does not match the execution ticket")
+		}
+		count++
+		i++
+	}
+	if count != 1 {
+		return fmt.Errorf("codex execution ticket requires exactly one notify override")
 	}
 	return nil
 }
@@ -624,12 +664,12 @@ func promotePreSpawnConversation(root *fsq.DeliveryRoot, lease *Lease, ticket Ex
 			record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != ticket.Backend ||
 			record.ExecutionEvidence.Profile != ticket.Profile || record.ExecutionEvidence.LaunchNonce != ticket.LaunchNonce ||
 			record.ExecutionEvidence.ConversationID != ticket.ConversationID {
-			return fmt.Errorf("ready conversation does not match acquired cursor identity")
+			return fmt.Errorf("ready conversation does not match acquired provider identity")
 		}
 		return nil
 	}
 	if record.State != CapturePending || record.LaunchNonce != ticket.LaunchNonce {
-		return fmt.Errorf("pending conversation does not match acquired cursor generation")
+		return fmt.Errorf("pending conversation does not match acquired provider generation")
 	}
 	record.State = CaptureReady
 	record.Identity = ConversationIdentity{Provider: ticket.Provider, ID: ticket.ConversationID}
@@ -655,12 +695,114 @@ func validateCursorExecutionEvidence(root *fsq.DeliveryRoot, ticket ExecutionTic
 		return err
 	}
 	if record.Kind != EvidenceProviderCapture || record.Handle != ticket.Handle || payload.Handle != ticket.Handle ||
-		payload.Provider != ticket.Provider ||
-		payload.LaunchNonce != ticket.LaunchNonce || payload.ProviderVersion != ticket.ProviderVersion ||
-		payload.ConversationID != ticket.ConversationID {
+		payload.Provider != ticket.Provider || payload.LaunchNonce != ticket.LaunchNonce ||
+		payload.ProviderVersion != ticket.ProviderVersion || payload.ConversationID != ticket.ConversationID {
 		return fmt.Errorf("cursor execution evidence binding mismatch")
 	}
 	return nil
+}
+
+type CodexNotifyConflictError struct {
+	Existing string
+	Observed string
+}
+
+func (err *CodexNotifyConflictError) Error() string {
+	return fmt.Sprintf("codex_notify_identity_conflict: existing %s, observed %s", err.Existing, err.Observed)
+}
+
+type CodexNotifyResult struct {
+	ConversationID string
+	EvidenceRef    string
+	AlreadyReady   bool
+}
+
+// RecordCodexNotify binds one provider-owned turn-complete notification to
+// the exact managed launch, persists immutable evidence, and only then makes
+// the provider identity resumable.
+func RecordCodexNotify(root *fsq.DeliveryRoot, handle, nonce, amqExecutable string, raw []byte) (CodexNotifyResult, error) {
+	return recordCodexNotify(root, handle, nonce, amqExecutable, raw, nil)
+}
+
+func recordCodexNotify(root *fsq.DeliveryRoot, handle, nonce, amqExecutable string, raw []byte, hook prepareExecutionHook) (result CodexNotifyResult, returnErr error) {
+	lease, err := AcquireLease(root, nonce)
+	if err != nil {
+		return result, err
+	}
+	defer func() { returnErr = errors.Join(returnErr, lease.Release()) }()
+	if err := lease.LockHandles(handle); err != nil {
+		return result, err
+	}
+	ticket, err := LoadExecutionTicket(root, handle)
+	if err != nil {
+		return result, err
+	}
+	if ticket.LaunchNonce != nonce || ticket.Handle != handle || ticket.Mode != AdapterModeCapture ||
+		ticket.Provider != CodexProvider || ticket.ProviderVersion != codexCaptureVersion || ticket.PreSpawnAcquire {
+		return result, fmt.Errorf("codex notify execution ticket binding mismatch")
+	}
+	if ticket.State != ExecutionSpawnAttempted && ticket.State != ExecutionAcknowledged {
+		return result, fmt.Errorf("codex notify execution ticket state is %q", ticket.State)
+	}
+	_, amqIdentity, err := canonicalFile(amqExecutable)
+	if err != nil || amqIdentity != ticket.AMQExecutableIdentity {
+		return result, fmt.Errorf("codex notify AMQ executable identity mismatch")
+	}
+	evidence, err := ParseCodexNotifyEvidence(raw, nonce, handle, ticket.ProviderVersion, ticket.Cwd)
+	if err != nil {
+		return result, err
+	}
+	record, err := LoadConversation(root, handle)
+	if err != nil {
+		return result, err
+	}
+	if record.State == CaptureReady {
+		if record.LaunchNonce != nonce || record.ProviderVersion != ticket.ProviderVersion ||
+			record.Identity.Provider != CodexProvider || record.Identity.ID != evidence.conversationID {
+			return result, &CodexNotifyConflictError{Existing: record.Identity.ID, Observed: evidence.conversationID}
+		}
+		if len(record.EvidenceRefs) != 1 {
+			return result, fmt.Errorf("ready codex conversation does not have one evidence ref")
+		}
+		return CodexNotifyResult{ConversationID: record.Identity.ID, EvidenceRef: record.EvidenceRefs[0], AlreadyReady: true}, nil
+	}
+	if record.State != CapturePending || record.LaunchNonce != nonce || record.ProviderVersion != ticket.ProviderVersion {
+		return result, fmt.Errorf("pending codex conversation does not match notify generation")
+	}
+
+	stored, refID, found, err := findProviderCaptureEvidence(root, CodexProvider, handle, nonce, ticket.ProviderVersion)
+	if err != nil {
+		return result, err
+	}
+	if found {
+		if stored.conversationID != evidence.conversationID {
+			return result, &CodexNotifyConflictError{Existing: stored.conversationID, Observed: evidence.conversationID}
+		}
+	} else {
+		refs, persistErr := persistProviderCaptureEvidence(root, lease, handle, []CaptureEvidence{evidence})
+		if persistErr != nil {
+			return result, persistErr
+		}
+		refID = refs[0]
+	}
+	if err := callPrepareExecutionHook(hook, "evidence_persisted"); err != nil {
+		return result, err
+	}
+	record.State = CaptureReady
+	record.Identity = ConversationIdentity{Provider: CodexProvider, ID: evidence.conversationID}
+	record.EvidenceRefs = []string{refID}
+	record.ExecutionEvidence = &ConversationExecutionEvidence{
+		Backend: ticket.Backend, Profile: ticket.Profile, Outcome: OutcomeCreated,
+		LaunchNonce: nonce, ConversationID: evidence.conversationID,
+	}
+	record.Reason = ""
+	if err := WriteConversation(root, lease, record); err != nil {
+		return result, err
+	}
+	if err := callPrepareExecutionHook(hook, "conversation_promoted"); err != nil {
+		return result, err
+	}
+	return CodexNotifyResult{ConversationID: evidence.conversationID, EvidenceRef: refID}, nil
 }
 
 func callPrepareExecutionHook(hook prepareExecutionHook, stage string) error {

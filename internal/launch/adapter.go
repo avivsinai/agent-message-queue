@@ -43,9 +43,11 @@ type AdapterCapabilities struct {
 }
 
 type PlanRequest struct {
-	Handle      string
-	ProjectRoot string
-	Cwd         string
+	Handle        string
+	ProjectRoot   string
+	SessionRoot   string
+	AMQExecutable string
+	Cwd           string
 	// AllowExternalCwd is reserved for the public intent compiler. Public
 	// intents can name an absolute sibling worktree after that path is
 	// canonicalized and physically identified. Committed project config keeps
