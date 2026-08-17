@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -139,86 +138,10 @@ func (cwd WorkingDirectoryV1) validate() error {
 }
 
 func (options ExecutionOptionsV1) validate() error {
-	wake := options.Wake
-	switch wake.Mode {
-	case WakeDisabled:
-		if strings.TrimSpace(wake.AuditReason) == "" {
-			return fmt.Errorf("disabled wake requires an audit reason")
-		}
-		if options.RequireWake {
-			return fmt.Errorf("require_wake conflicts with disabled wake")
-		}
-		if wake.Injector != nil {
-			return fmt.Errorf("disabled wake forbids injector settings")
-		}
-	case WakeEnabled:
-		if wake.AuditReason != "" {
-			return fmt.Errorf("enabled wake forbids a disabled-wake audit reason")
-		}
-	default:
-		return fmt.Errorf("invalid wake mode %q", wake.Mode)
-	}
-	if wake.Injector != nil {
-		if err := wake.Injector.validate(); err != nil {
-			return err
-		}
-	}
-	if options.Integrations.Symphony != nil {
-		if err := options.Integrations.Symphony.validate(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (injector InjectorOptionsV1) validate() error {
-	switch injector.Mode {
-	case InjectorAuto, InjectorRaw, InjectorPaste, InjectorNone:
-	default:
-		return fmt.Errorf("invalid injector mode %q", injector.Mode)
-	}
-	if injector.Mode == InjectorNone && (injector.Via != "" || len(injector.Args) > 0) {
-		return fmt.Errorf("injector mode none forbids via and args")
-	}
-	if injector.Via != "" {
-		if !filepath.IsAbs(injector.Via) || filepath.Clean(injector.Via) != injector.Via || strings.ContainsRune(injector.Via, 0) {
-			return fmt.Errorf("injector via must be a clean absolute path")
-		}
-	} else if len(injector.Args) > 0 {
-		return fmt.Errorf("injector args require via")
-	}
-	for _, arg := range injector.Args {
-		if !utf8.ValidString(arg) || strings.ContainsRune(arg, 0) {
-			return fmt.Errorf("injector args contain an invalid value")
-		}
-	}
-	return nil
-}
-
-func (symphony SymphonyOptionsV1) validate() error {
-	if len(symphony.Events) == 0 {
-		return fmt.Errorf("symphony requires at least one event")
-	}
-	seen := make(map[SymphonyEvent]struct{}, len(symphony.Events))
-	allowed := []SymphonyEvent{
-		SymphonyAfterCreate,
-		SymphonyBeforeRun,
-		SymphonyAfterRun,
-		SymphonyBeforeRemove,
-	}
-	for _, event := range symphony.Events {
-		if !slices.Contains(allowed, event) {
-			return fmt.Errorf("unknown symphony event %q", event)
-		}
-		if _, ok := seen[event]; ok {
-			return fmt.Errorf("duplicate symphony event %q", event)
-		}
-		seen[event] = struct{}{}
-	}
-	if strings.ContainsRune(symphony.WorkspaceKey, 0) || !utf8.ValidString(symphony.WorkspaceKey) {
-		return fmt.Errorf("symphony workspace_key is invalid")
-	}
-	return nil
+	return internallaunch.ValidatePrepareExecutionOptionsGrammar(toInternalExecutionOptions(options), internallaunch.PrepareExecutionOptionsPresence{
+		Injector: options.Wake.Injector != nil,
+		Symphony: options.Integrations.Symphony != nil,
+	})
 }
 
 func requireLaunchIntentFields(data []byte) error {
