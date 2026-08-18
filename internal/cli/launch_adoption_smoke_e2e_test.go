@@ -370,6 +370,23 @@ func TestResolveRealAMQBinaryHonorsLiveBinaryEnv(t *testing.T) {
 	}
 }
 
+func TestResolveRealAMQBinaryRejectsDirectory(t *testing.T) {
+	if os.Getenv("AMQ_TEST_LIVE_BINARY_DIRECTORY") == "1" {
+		t.Setenv("AMQ_LAUNCH_LIVE_BINARY", t.TempDir())
+		resolveRealAMQBinary(t)
+		t.Fatal("directory AMQ_LAUNCH_LIVE_BINARY was accepted")
+	}
+	cmd := exec.Command(os.Args[0], "-test.run", "^TestResolveRealAMQBinaryRejectsDirectory$")
+	cmd.Env = append(os.Environ(), "AMQ_TEST_LIVE_BINARY_DIRECTORY=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("directory path did not fail:\n%s", out)
+	}
+	if !strings.Contains(string(out), "not a file") {
+		t.Fatalf("directory path error = %v\n%s", err, out)
+	}
+}
+
 func TestResolveRealAMQBinaryRejectsRelativePath(t *testing.T) {
 	if os.Getenv("AMQ_TEST_LIVE_BINARY_RELATIVE") == "1" {
 		t.Setenv("AMQ_LAUNCH_LIVE_BINARY", "amq")
