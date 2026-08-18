@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -790,31 +791,22 @@ func TestReattachPersistsRecoverableReservationBeforeWakeReadiness(t *testing.T)
 		"--me", "codex",
 		"--no-start",
 	)
-	startedPath := filepath.Join(dir, "wake-started")
-	releasePath := filepath.Join(dir, "wake-release")
-	exitedPath := filepath.Join(dir, "wake-exited")
-	pidFile := filepath.Join(dir, "wake-pid")
-	t.Setenv("AMQ_KEEPALIVE_TEST_STARTED", startedPath)
-	t.Setenv("AMQ_KEEPALIVE_TEST_RELEASE", releasePath)
-	t.Setenv("AMQ_KEEPALIVE_TEST_EXITED", exitedPath)
-	t.Setenv("AMQ_KEEPALIVE_TEST_PID", pidFile)
-	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`#!/bin/sh
-printf '%s' "$$" > "$AMQ_KEEPALIVE_TEST_PID"
-: > "$AMQ_KEEPALIVE_TEST_STARTED"
-while [ ! -f "$AMQ_KEEPALIVE_TEST_RELEASE" ]; do sleep 0.01; done
-: > "$AMQ_KEEPALIVE_TEST_EXITED"
-exit 7
-`), 0o700); err != nil {
-		t.Fatalf("write fake AMQ: %v", err)
+	wake := &appBlockingWake{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		err:     errors.New("amq wake exited before becoming ready (deterministic fake)"),
 	}
-	registerDetachedWakeCleanup(t, pidFile, releasePath)
+	t.Cleanup(wake.Release)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	done := make(chan int, 1)
 	go func() {
-		done <- (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).Run(ctx, []string{
+		done <- (App{
+			Stdout: &bytes.Buffer{},
+			Stderr: &bytes.Buffer{},
+			Wake:   wake,
+		}).Run(ctx, []string{
 			"reattach",
 			"--registry", registryPath,
 			"--adapter", "file",
@@ -823,11 +815,14 @@ exit 7
 			"--base-root", "/tmp",
 			"--session", "amq-root",
 			"--me", "codex",
-			"--amq", fakeAMQ,
 			"--wake-ready-timeout", "5s",
 		})
 	}()
-	waitForPath(t, startedPath, 2*time.Second)
+	select {
+	case <-wake.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for injected wake start")
+	}
 
 	loaded, err := registry.New(registryPath).Load()
 	if err != nil {
@@ -836,13 +831,10 @@ exit 7
 	if len(loaded.Entries) != 1 || loaded.Entries[0].Target != canonicalNewTarget || loaded.Entries[0].State != registry.StateAttached {
 		t.Fatalf("in-flight entries = %#v, want inactive candidate reservation", loaded.Entries)
 	}
-	if err := os.WriteFile(releasePath, []byte("release"), 0o600); err != nil {
-		t.Fatalf("release fake AMQ: %v", err)
-	}
+	wake.Release()
 	if code := <-done; code != 1 {
 		t.Fatalf("reattach code = %d, want failure", code)
 	}
-	waitForPath(t, exitedPath, 2*time.Second)
 	loaded, err = registry.New(registryPath).Load()
 	if err != nil {
 		t.Fatalf("Load(final) error = %v", err)
@@ -1518,6 +1510,60 @@ type appFailingWake struct{}
 
 func (appFailingWake) StartWake(context.Context, amq.StartWakeRequest) error {
 	return errors.New("unverified wake lock; refusing second injector")
+}
+
+type appBlockingWake struct {
+	started     chan struct{}
+	release     chan struct{}
+	err         error
+	startOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+func (w *appBlockingWake) StartWake(ctx context.Context, _ amq.StartWakeRequest) error {
+	w.startOnce.Do(func() { close(w.started) })
+	select {
+	case <-w.release:
+		return w.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (w *appBlockingWake) Release() {
+	w.releaseOnce.Do(func() { close(w.release) })
+}
+
+func TestSuperviseUsesInjectedClockOnWakeFailure(t *testing.T) {
+	dir := t.TempDir()
+	registryPath := filepath.Join(dir, "registry.json")
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if _, err := registry.New(registryPath).Upsert(registry.Entry{
+		Root: "/tmp/amq-root", Agent: "codex", Adapter: "file", Target: target,
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	fakeNow := time.Date(2031, 2, 3, 4, 5, 6, 7, time.UTC)
+	app := App{
+		Stdout: &bytes.Buffer{},
+		Stderr: &bytes.Buffer{},
+		Now:    func() time.Time { return fakeNow },
+	}
+	results, err := app.superviseOnce(context.Background(), registryPath, appFailingWake{}, "/bin/amq-keepalive", time.Second)
+	if err != nil || len(results) != 1 || results[0].Action != supervisor.ActionStartFailed {
+		t.Fatalf("results=%#v err=%v, want one start failure", results, err)
+	}
+	loaded, err := registry.New(registryPath).Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := loaded.Entries[0].BackoffUntil
+	if got.Before(fakeNow) || got.After(fakeNow.Add(2*time.Minute)) {
+		t.Fatalf("BackoffUntil=%s, want a failure backoff based on injected clock %s; entry=%+v results=%+v", got, fakeNow, loaded.Entries[0], results)
+	}
 }
 
 func TestSuperviseWarnsOncePerPersistentFailureTransition(t *testing.T) {

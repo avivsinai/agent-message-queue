@@ -25,6 +25,8 @@ type App struct {
 	Stdout   io.Writer
 	Stderr   io.Writer
 	Adapters *adapter.Registry
+	Wake     supervisor.WakeRunner
+	Now      func() time.Time
 
 	adapterLogState *adapterLogState
 }
@@ -229,8 +231,9 @@ func (a App) registerWithOptions(ctx context.Context, opts registerOptions) erro
 		State:       registry.StateAttached,
 	}
 	reconciler := supervisor.Reconciler{
-		Wake:        envCLI,
+		Wake:        a.wakeRunner(envCLI),
 		Adapter:     selected,
+		Now:         a.Now,
 		InjectVia:   opts.Self,
 		WakeTimeout: opts.WakeTimeout,
 	}
@@ -626,7 +629,7 @@ func (a App) superviseOnce(ctx context.Context, registryPath string, wake superv
 		adapters := a.adapterRegistry()
 		probes := passProbes(file.Entries, adapters)
 		conflicts := targetOwnershipConflicts(file, adapters)
-		if anyEntryDue(file.Entries, time.Now().UTC()) {
+		if anyEntryDue(file.Entries, a.now()) {
 			mergeOwnershipConflicts(conflicts, physicalOwnershipConflicts(ctx, file, probes))
 		}
 		results = make([]supervisor.Result, 0, len(file.Entries))
@@ -644,6 +647,7 @@ func (a App) superviseOnce(ctx context.Context, registryPath string, wake superv
 			reconciler := supervisor.Reconciler{
 				Wake:        wake,
 				Adapter:     probe,
+				Now:         a.Now,
 				InjectVia:   self,
 				WakeTimeout: wakeTimeout,
 			}
@@ -658,6 +662,20 @@ func (a App) superviseOnce(ctx context.Context, registryPath string, wake superv
 		return err
 	})
 	return results, err
+}
+
+func (a App) wakeRunner(fallback supervisor.WakeRunner) supervisor.WakeRunner {
+	if a.Wake != nil {
+		return a.Wake
+	}
+	return fallback
+}
+
+func (a App) now() time.Time {
+	if a.Now != nil {
+		return a.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (a App) logReconcileTransition(previous, updated registry.Entry, result supervisor.Result) {
