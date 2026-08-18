@@ -43,6 +43,7 @@ DEFAULT_TIMEOUT_SECONDS="${AMQ_KEEPALIVE_DEFAULT_TIMEOUT_SECONDS:-10}"
 TIMEOUT_SECONDS="${AMQ_KEEPALIVE_TIMEOUT_SECONDS:-$DEFAULT_TIMEOUT_SECONDS}"
 STDIN_TIMEOUT_SECONDS="${AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS:-1}"
 WAKE_TIMEOUT_MILLISECONDS="${AMQ_KEEPALIVE_WAKE_TIMEOUT_MILLISECONDS:-}"
+SLEEP_CMD="${AMQ_KEEPALIVE_SLEEP:-sleep}"
 
 if [[ -z "$ADAPTER" ]]; then
     if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
@@ -160,12 +161,12 @@ rm -f "$timeout_marker" 2>/dev/null || true
 ) 2>> "$LOG_PATH" &
 reattach_pid=$!
 (
-    sleep "$TIMEOUT_SECONDS"
+    "$SLEEP_CMD" "$TIMEOUT_SECONDS"
     if kill -0 "$reattach_pid" 2>/dev/null; then
         : > "$timeout_marker" 2>/dev/null || true
         pkill -TERM -P "$reattach_pid" 2>/dev/null || true
         kill -TERM "$reattach_pid" 2>/dev/null || true
-        sleep 1
+        "$SLEEP_CMD" 1
         pkill -KILL -P "$reattach_pid" 2>/dev/null || true
         kill -KILL "$reattach_pid" 2>/dev/null || true
     fi
