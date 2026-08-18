@@ -36,6 +36,9 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 	if flagWasVisited(fs, "placement") && !planExplicit {
 		return UsageError("--placement requires --plan")
 	}
+	if flagWasVisited(fs, "placement") && strings.TrimSpace(placementJSON) == "" {
+		return UsageError("--placement must be a PlacementV1 JSON object")
+	}
 	if planExplicit && strings.TrimSpace(planSource) == "" {
 		return UsageError("--plan must name a file or -")
 	}
@@ -81,7 +84,7 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 		Launcher:       strings.TrimSpace(launcher),
 		Intent:         intent,
 	}
-	if strings.TrimSpace(placementJSON) != "" {
+	if flagWasVisited(fs, "placement") {
 		placement, err := decodePublicPlacement(placementJSON)
 		if err != nil {
 			return err
@@ -183,6 +186,13 @@ func decodePublicPlacement(raw string) (*launchapi.PlacementV1, error) {
 	decoder.DisallowUnknownFields()
 	var placement launchapi.PlacementV1
 	if err := decoder.Decode(&placement); err != nil {
+		return nil, UsageError("placement: %v", err)
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, UsageError("placement: multiple JSON values")
+		}
 		return nil, UsageError("placement: %v", err)
 	}
 	if err := placement.Validate(); err != nil {
