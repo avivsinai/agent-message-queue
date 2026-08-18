@@ -18,6 +18,10 @@ func Apply(ctx context.Context, request ApplyRequestV1) (ApplyResultV1, error) {
 	if err != nil {
 		return ApplyResultV1{}, err
 	}
+	prepared.SubjectSchema = internallaunch.SubjectSchemaV1
+	if request.SubjectSchema != 0 {
+		prepared.SubjectSchema = request.SubjectSchema
+	}
 	decisions := make([]internallaunch.ApplyDecision, 0, len(request.Decisions))
 	for _, decision := range request.Decisions {
 		decisions = append(decisions, internallaunch.ApplyDecision{ActionID: decision.ActionID, Choice: string(decision.Choice)})
@@ -33,7 +37,7 @@ func Apply(ctx context.Context, request ApplyRequestV1) (ApplyResultV1, error) {
 
 func fromInternalApplyResult(result internallaunch.ApplyResult) ApplyResultV1 {
 	public := ApplyResultV1{
-		ResultVersion: ResultVersionV1, Outcome: result.Outcome, ReasonCode: result.ReasonCode, FailureDetail: result.FailureDetail,
+		ResultVersion: ResultVersionV1, SubjectSchema: result.SubjectSchema, Outcome: result.Outcome, ReasonCode: result.ReasonCode, FailureDetail: result.FailureDetail,
 		SubjectDigest: result.SubjectDigest, PlanDigest: result.PlanDigest, TrustDigest: result.TrustDigest,
 		SemanticDigest: result.TrustDigest, Backend: result.Backend, Profile: result.Profile,
 		Roster: RosterDriftV1{
@@ -44,6 +48,9 @@ func fromInternalApplyResult(result internallaunch.ApplyResult) ApplyResultV1 {
 		Commands:     make([]CommandV1, 0, len(result.Commands)),
 		FollowUps:    make([]RequiredActionV1, 0, len(result.RequiredActions)),
 		Evidence:     make([]EvidenceRefV1, 0, len(result.Evidence)),
+	}
+	if result.SubjectSchema == SubjectSchemaV1 {
+		public.Hints = []ResultHintV1{HintReprepareRecommended}
 	}
 	for _, evidence := range result.Evidence {
 		public.Evidence = append(public.Evidence, fromInternalEvidenceRef(evidence))

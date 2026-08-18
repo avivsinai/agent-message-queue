@@ -227,13 +227,35 @@
     "PreviewV1": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["target", "backend", "profile", "participants", "roster"],
+      "required": ["target", "backend", "profile", "participants", "roster", "capabilities"],
       "properties": {
         "target": {"$ref": "#/$defs/TargetV1"},
         "backend": {"type": "string"},
         "profile": {"type": "string"},
         "participants": {"type": "array", "items": {"$ref": "#/$defs/ParticipantPreviewV1"}},
-        "roster": {"$ref": "#/$defs/RosterDriftV1"}
+        "roster": {"$ref": "#/$defs/RosterDriftV1"},
+        "capabilities": {"type": "array", "items": {"$ref": "#/$defs/ProviderCapabilitiesV1"}}
+      }
+    },
+    "ConfigOverrideCapabilityV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "allowed_values"],
+      "properties": {
+        "key": {"type": "string", "minLength": 1},
+        "allowed_values": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}
+      }
+    },
+    "ProviderCapabilitiesV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "provider_version", "allowed_argument_forms", "config_overrides", "initial_input_kinds"],
+      "properties": {
+        "provider": {"type": "string", "minLength": 1},
+        "provider_version": {"type": "string", "minLength": 1},
+        "allowed_argument_forms": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "config_overrides": {"type": "array", "items": {"$ref": "#/$defs/ConfigOverrideCapabilityV1"}},
+        "initial_input_kinds": {"type": "array", "uniqueItems": true, "items": {"enum": ["argument", "stdin", "file"]}}
       }
     },
     "ParticipantObservationV1": {
@@ -253,9 +275,10 @@
     "PrepareResultV1": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["result_version", "outcome", "subject_digest", "plan_digest", "trust_digest", "required_actions", "preview", "observations"],
+      "required": ["result_version", "subject_schema", "outcome", "subject_digest", "plan_digest", "trust_digest", "required_actions", "preview", "observations"],
       "properties": {
         "result_version": {"const": 1},
+        "subject_schema": {"enum": [1, 2]},
         "outcome": {"type": "string", "minLength": 1},
         "reason": {"type": "string"},
         "subject_digest": {"$ref": "#/$defs/Digest"},
@@ -282,6 +305,7 @@
       "properties": {
         "request_version": {"const": 1},
         "prepare": {"$ref": "#/$defs/PrepareRequestV1"},
+        "subject_schema": {"enum": [1, 2]},
         "subject_digest": {"$ref": "#/$defs/Digest"},
         "decisions": {"type": "array", "items": {"$ref": "#/$defs/DecisionV1"}}
       }
@@ -301,11 +325,13 @@
     "ApplyResultV1": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["result_version", "outcome", "subject_digest", "plan_digest", "trust_digest", "semantic_digest", "backend", "profile", "roster", "observations"],
+      "required": ["result_version", "subject_schema", "outcome", "subject_digest", "plan_digest", "trust_digest", "semantic_digest", "backend", "profile", "roster", "observations"],
       "properties": {
         "result_version": {"const": 1},
+        "subject_schema": {"enum": [1, 2]},
         "outcome": {"type": "string", "minLength": 1},
         "reason_code": {"type": "string"},
+        "hints": {"type": "array", "uniqueItems": true, "items": {"enum": ["reprepare_recommended"]}},
         "subject_digest": {"$ref": "#/$defs/Digest"},
         "plan_digest": {"$ref": "#/$defs/Digest"},
         "trust_digest": {"$ref": "#/$defs/Digest"},

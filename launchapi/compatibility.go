@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const ContractSemverV1 = "0.61.0"
+const ContractSemverV1 = "0.61.1"
 
 var compatibilityFeaturesV1 = []string{
 	"launch_intent_v1",

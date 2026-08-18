@@ -1,6 +1,5 @@
 {
   "result_version": 1,
-  "subject_schema": 2,
   "outcome": "action_required",
   "reason": "untrusted_config_digest",
   "subject_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -47,8 +46,7 @@
         "operator"
       ],
       "extra": []
-    },
-    "capabilities": []
+    }
   },
   "observations": [
     {

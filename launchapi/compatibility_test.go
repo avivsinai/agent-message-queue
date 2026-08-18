@@ -2,13 +2,14 @@ package launchapi
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
 
 func TestCompatibilityAndNegotiateV1(t *testing.T) {
 	compatibility := Compatibility()
-	if compatibility.ContractSemver != "0.61.0" ||
+	if compatibility.ContractSemver != "0.61.1" ||
 		!reflect.DeepEqual(compatibility.IntentVersions, []int{1}) ||
 		!reflect.DeepEqual(compatibility.ResultVersions, []int{1}) {
 		t.Fatalf("Compatibility() = %#v", compatibility)
@@ -16,6 +17,14 @@ func TestCompatibilityAndNegotiateV1(t *testing.T) {
 	compatibility.Features[0] = "mutated"
 	if Compatibility().Features[0] != "launch_intent_v1" {
 		t.Fatal("Compatibility returned shared mutable feature storage")
+	}
+	for _, unfinished := range []string{
+		FeatureBaseRoot, FeatureOnLive, FeatureWrapper, FeaturePlacement,
+		FeatureInitialInput, FeatureCallerContext, FeatureExecutableIdentity,
+	} {
+		if slices.Contains(Compatibility().Features, unfinished) {
+			t.Fatalf("Compatibility advertised unfinished feature %q", unfinished)
+		}
 	}
 
 	negotiated, err := Negotiate(RequirementV1{
@@ -34,8 +43,8 @@ func TestCompatibilityAndNegotiateV1(t *testing.T) {
 	if _, err := Negotiate(RequirementV1{ContractSemver: ">=0.61.0", IntentVersion: 1, ResultVersion: 1}); err != nil {
 		t.Fatalf(">=0.61.0 must include the current contract: %v", err)
 	}
-	if _, err := Negotiate(RequirementV1{ContractSemver: "<=0.61.0", IntentVersion: 1, ResultVersion: 1}); err != nil {
-		t.Fatalf("<=0.61.0 must include the current contract: %v", err)
+	if _, err := Negotiate(RequirementV1{ContractSemver: "<=0.61.1", IntentVersion: 1, ResultVersion: 1}); err != nil {
+		t.Fatalf("<=0.61.1 must include the current contract: %v", err)
 	}
 }
 
@@ -47,11 +56,11 @@ func TestNegotiateV1FailsClosed(t *testing.T) {
 	}{
 		{name: "older contract", requirement: RequirementV1{ContractSemver: "<0.61.0", IntentVersion: 1, ResultVersion: 1}, want: "does not include"},
 		{name: "malformed range", requirement: RequirementV1{ContractSemver: "^0.61", IntentVersion: 1, ResultVersion: 1}, want: "does not include"},
-		{name: "intent version", requirement: RequirementV1{ContractSemver: "0.61.0", IntentVersion: 2, ResultVersion: 1}, want: "intent version"},
-		{name: "result version", requirement: RequirementV1{ContractSemver: "0.61.0", IntentVersion: 1, ResultVersion: 2}, want: "result version"},
-		{name: "unknown feature", requirement: RequirementV1{ContractSemver: "0.61.0", IntentVersion: 1, ResultVersion: 1, Features: []string{"shell_hooks_v1"}}, want: "unsupported required feature"},
-		{name: "duplicate feature", requirement: RequirementV1{ContractSemver: "0.61.0", IntentVersion: 1, ResultVersion: 1, Features: []string{"launch_intent_v1", "launch_intent_v1"}}, want: "duplicate required feature"},
-		{name: "strict greater than current contract", requirement: RequirementV1{ContractSemver: ">0.61.0", IntentVersion: 1, ResultVersion: 1}, want: "does not include"},
+		{name: "intent version", requirement: RequirementV1{ContractSemver: "0.61.1", IntentVersion: 2, ResultVersion: 1}, want: "intent version"},
+		{name: "result version", requirement: RequirementV1{ContractSemver: "0.61.1", IntentVersion: 1, ResultVersion: 2}, want: "result version"},
+		{name: "unknown feature", requirement: RequirementV1{ContractSemver: "0.61.1", IntentVersion: 1, ResultVersion: 1, Features: []string{"shell_hooks_v1"}}, want: "unsupported required feature"},
+		{name: "duplicate feature", requirement: RequirementV1{ContractSemver: "0.61.1", IntentVersion: 1, ResultVersion: 1, Features: []string{"launch_intent_v1", "launch_intent_v1"}}, want: "duplicate required feature"},
+		{name: "strict greater than current contract", requirement: RequirementV1{ContractSemver: ">0.61.1", IntentVersion: 1, ResultVersion: 1}, want: "does not include"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -46,7 +46,7 @@ func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 	decisions := decisionsForPreparedActions(prepared)
 	result, err := Apply(context.Background(), ApplyRequestV1{
 		RequestVersion: RequestVersionV1, Prepare: fixture.request,
-		SubjectDigest: prepared.SubjectDigest, Decisions: decisions,
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: decisions,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestConcurrentApplyPublishesOneInitializedSession(t *testing.T) {
 	}
 	request := ApplyRequestV1{
 		RequestVersion: RequestVersionV1, Prepare: fixture.request,
-		SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
 	}
 	start := make(chan struct{})
 	results := make(chan ApplyResultV1, 2)
@@ -186,7 +186,7 @@ func TestPrepareIsZeroWriteAndApplyRejectsStaleSubject(t *testing.T) {
 		before := applyTreeFingerprint(t, fixture.root, nil)
 		result, err := Apply(context.Background(), ApplyRequestV1{
 			RequestVersion: RequestVersionV1, Prepare: changed,
-			SubjectDigest: prepared.SubjectDigest, Decisions: decisionsForPreparedActions(prepared),
+			SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: decisionsForPreparedActions(prepared),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -219,7 +219,7 @@ func TestPrepareIsZeroWriteAndApplyRejectsStaleSubject(t *testing.T) {
 		before := applyTreeFingerprint(t, fixture.root, nil)
 		result, err := Apply(context.Background(), ApplyRequestV1{
 			RequestVersion: RequestVersionV1, Prepare: changed,
-			SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
+			SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -248,7 +248,7 @@ func TestActionRequiredSurvivesProcessRestart(t *testing.T) {
 	}
 	request := ApplyRequestV1{
 		RequestVersion: RequestVersionV1, Prepare: fixture.request,
-		SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
 	}
 	raw, err := json.Marshal(request)
 	if err != nil {
@@ -265,8 +265,62 @@ func TestActionRequiredSurvivesProcessRestart(t *testing.T) {
 	if result.Outcome != "provisioned_no_runnable" || result.SemanticDigest != result.TrustDigest {
 		t.Fatalf("fresh-process Apply result = %#v", result)
 	}
+	if result.SubjectSchema != SubjectSchemaV2 || len(result.Hints) != 0 {
+		t.Fatalf("current Apply schema migration fields = %#v", result)
+	}
 	if info, err := os.Stat(filepath.Join(fixture.request.Target.SessionRoot, "agents", "operator")); err != nil || !info.IsDir() {
 		t.Fatalf("participant-only mailbox: info=%v err=%v", info, err)
+	}
+}
+
+func TestApplyOmittedSubjectSchemaUsesV1AndRecommendsReprepare(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, false)
+	fixture.request.Intent.Participants = []ParticipantV1{{Handle: "operator", Runnable: false}}
+	internalRequest, dependencies, err := prepareInputs(fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	internalRequest.SubjectSchema = internallaunch.SubjectSchemaV1
+	legacyInternal, err := internallaunch.Prepare(context.Background(), internalRequest, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := fromInternalPrepareResult(legacyInternal)
+	if legacy.SubjectSchema != SubjectSchemaV1 {
+		t.Fatalf("legacy Prepare schema = %d", legacy.SubjectSchema)
+	}
+	raw, err := json.Marshal(struct {
+		RequestVersion int              `json:"request_version"`
+		Prepare        PrepareRequestV1 `json:"prepare"`
+		SubjectDigest  string           `json:"subject_digest"`
+		Decisions      []DecisionV1     `json:"decisions"`
+	}{RequestVersionV1, fixture.request, legacy.SubjectDigest, []DecisionV1{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := DecodeApplyRequestV1(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.SubjectSchema != 0 {
+		t.Fatalf("omitted subject_schema decoded as %d", request.SubjectSchema)
+	}
+	result, err := Apply(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome == "action_required" && result.ReasonCode == "subject_changed" {
+		t.Fatalf("legacy Apply spuriously changed subject: %#v", result)
+	}
+	if result.SubjectSchema != SubjectSchemaV1 || !reflect.DeepEqual(result.Hints, []ResultHintV1{HintReprepareRecommended}) {
+		t.Fatalf("legacy Apply migration result = %#v", result)
+	}
+	upgraded, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upgraded.SubjectSchema != SubjectSchemaV2 || upgraded.SubjectDigest == legacy.SubjectDigest {
+		t.Fatalf("re-Prepare did not upgrade schema: legacy=%#v upgraded=%#v", legacy, upgraded)
 	}
 }
 
@@ -299,7 +353,7 @@ func TestApplyReportsRosterDriftWithoutDeletingHistory(t *testing.T) {
 	}
 	result, err := Apply(context.Background(), ApplyRequestV1{
 		RequestVersion: RequestVersionV1, Prepare: fixture.request,
-		SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -330,7 +384,7 @@ func TestApplyMissingConfigPreservesDiscoveredRosterAuthority(t *testing.T) {
 	}
 	result, err := Apply(context.Background(), ApplyRequestV1{
 		RequestVersion: RequestVersionV1, Prepare: fixture.request,
-		SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -380,7 +434,7 @@ func TestApplyRequiresExactRequestLocalDecisions(t *testing.T) {
 			before := applyTreeFingerprint(t, fixture.root, nil)
 			result, err := Apply(context.Background(), ApplyRequestV1{
 				RequestVersion: RequestVersionV1, Prepare: fixture.request,
-				SubjectDigest: prepared.SubjectDigest, Decisions: test.decisions(prepared),
+				SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: test.decisions(prepared),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -413,7 +467,7 @@ func TestApplyUnsupportedLauncherRefusesBeforeRosterMutation(t *testing.T) {
 	before := applyTreeFingerprint(t, fixture.root, nil)
 	result, err := Apply(context.Background(), ApplyRequestV1{
 		RequestVersion: RequestVersionV1, Prepare: fixture.request,
-		SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -62,6 +62,11 @@ func TestApplyRequestV1RejectsDigestAndDecisionReplayShapes(t *testing.T) {
 	if err := request.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	request.SubjectSchema = 3
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "subject schema") {
+		t.Fatalf("invalid subject schema error = %v", err)
+	}
+	request.SubjectSchema = SubjectSchemaV2
 
 	request.SubjectDigest = "sha256:ABC"
 	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "canonical") {

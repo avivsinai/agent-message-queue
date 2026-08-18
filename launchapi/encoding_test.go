@@ -57,9 +57,37 @@ func TestResultV1GoldensRequireDigestAndAliasFields(t *testing.T) {
 	}
 }
 
+func TestV061ResultGoldensRemainDecodeCompatible(t *testing.T) {
+	for _, test := range []struct {
+		file   string
+		result any
+	}{
+		{file: "prepare_result_v0610.golden.json", result: &PrepareResultV1{}},
+		{file: "apply_result_v0610.golden.json", result: &ApplyResultV1{}},
+	} {
+		data, err := os.ReadFile(filepath.Join("testdata", test.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, test.result); err != nil {
+			t.Fatalf("decode v0.61.0 fixture %s: %v", test.file, err)
+		}
+		switch result := test.result.(type) {
+		case *PrepareResultV1:
+			if result.SubjectSchema != 0 || result.Preview.Capabilities != nil {
+				t.Fatalf("v0.61.0 Prepare defaults changed: %#v", result)
+			}
+		case *ApplyResultV1:
+			if result.SubjectSchema != 0 || result.Hints != nil {
+				t.Fatalf("v0.61.0 Apply defaults changed: %#v", result)
+			}
+		}
+	}
+}
+
 func goldenPrepareResultV1() PrepareResultV1 {
 	return PrepareResultV1{
-		ResultVersion: 1, Outcome: PrepareOutcomeActionRequired, Reason: "untrusted_config_digest",
+		ResultVersion: 1, SubjectSchema: SubjectSchemaV2, Outcome: PrepareOutcomeActionRequired, Reason: "untrusted_config_digest",
 		SubjectDigest: goldenDigest('a'), PlanDigest: goldenDigest('b'), TrustDigest: goldenDigest('c'),
 		RequiredActions: []RequiredActionV1{{
 			ActionID: "trust-example", Kind: RequiredActionTrustConfirmation, Handles: []string{"claude"},
@@ -71,6 +99,7 @@ func goldenPrepareResultV1() PrepareResultV1 {
 			Backend: "commands", Profile: "commands/portable/v1",
 			Participants: []ParticipantPreviewV1{{Handle: "operator", Runnable: false, PlannedOutcome: "observe_only"}},
 			Roster:       RosterDriftV1{Desired: []string{"operator"}, Present: []string{}, Missing: []string{"operator"}, Extra: []string{}},
+			Capabilities: []ProviderCapabilitiesV1{},
 		},
 		Observations: []ParticipantObservationV1{{Handle: "operator", Mailbox: "missing", Runnable: false, Conversation: "none", Execution: "none", Resource: ""}},
 	}
@@ -78,7 +107,7 @@ func goldenPrepareResultV1() PrepareResultV1 {
 
 func goldenApplyResultV1() ApplyResultV1 {
 	return ApplyResultV1{
-		ResultVersion: 1, Outcome: "applied", SubjectDigest: goldenDigest('a'), PlanDigest: goldenDigest('b'),
+		ResultVersion: 1, SubjectSchema: SubjectSchemaV2, Outcome: "applied", SubjectDigest: goldenDigest('a'), PlanDigest: goldenDigest('b'),
 		TrustDigest: goldenDigest('c'), SemanticDigest: goldenDigest('c'), Backend: "commands", Profile: "commands/portable/v1",
 		Roster: RosterDriftV1{Desired: []string{"claude"}, Present: []string{"claude"}, Missing: []string{}, Extra: []string{}},
 		Observations: []ParticipantObservationV1{{

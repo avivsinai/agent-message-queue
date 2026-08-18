@@ -46,6 +46,12 @@ func TestPrepareIsZeroWriteAndDeterministic(t *testing.T) {
 	if first.Outcome != PrepareOutcomeActionRequired || first.Reason != "untrusted_config_digest" {
 		t.Fatalf("outcome/reason = %q/%q", first.Outcome, first.Reason)
 	}
+	if first.SubjectSchema != SubjectSchemaV2 {
+		t.Fatalf("new Prepare subject schema = %d", first.SubjectSchema)
+	}
+	if first.Preview.Capabilities == nil || len(first.Preview.Capabilities) != 0 {
+		t.Fatalf("capability skeleton must be a deny-by-default empty array: %#v", first.Preview.Capabilities)
+	}
 	if len(first.RequiredActions) != 1 {
 		t.Fatalf("required actions = %#v", first.RequiredActions)
 	}
