@@ -806,6 +806,20 @@ func classifyWakeCheckRestart(
 			}
 			return
 		}
+		if wakeInspectionBinaryDirGone(inspection) {
+			fix := doctorRootCommandForOS(decision.Root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+			decision.RestartCapability = wakeRestartAgentSafe
+			decision.Action = wakeCheckActionDecision{
+				Kind:       wakeActionManualStaleCleanup,
+				Actor:      wakeActionActorAgent,
+				ReasonCode: wakeReasonBinaryDirGone,
+				Command: wakeCheckActionCommand(
+					"doctor", "--root", decision.Root, "--ops", "--fix-wake-locks",
+				),
+				Message: wakeBinaryDirGoneMessage + "; run " + fix,
+			}
+			return
+		}
 		if wakeCheckStringValue(decision.Wake.Mode, "") == wakeTargetInjectVia {
 			decision.RestartCapability = wakeRestartUnavailable
 			decision.Action = wakeCheckActionDecision{

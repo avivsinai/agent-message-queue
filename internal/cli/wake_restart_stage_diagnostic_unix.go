@@ -55,6 +55,13 @@ func diagnoseWakeRestartStage(
 	}
 	if exists && snapshot.Record.PreviousBoundImage != nil {
 		previous := *snapshot.Record.PreviousBoundImage
+		if wakeRecordedPathParentGone(previous.ExecutionPath) {
+			return wakeRestartStageDiagnostic{
+				Path:   previous.ExecutionPath,
+				Status: wakeRestartStageBinaryDirGone,
+				Reason: wakeBinaryDirGoneMessage,
+			}
+		}
 		if _, stageErr := os.Lstat(previous.ExecutionPath); stageErr != nil && !os.IsNotExist(stageErr) {
 			return wakeRestartStageDiagnostic{
 				Path:   previous.ExecutionPath,
@@ -90,8 +97,18 @@ func diagnoseWakeRestartStage(
 		}
 	}
 	if exists && snapshot.Record.StagePath != "" {
+		if wakeRestartRecordBinaryDirGone(snapshot.Record) {
+			return wakeRestartStageDiagnostic{
+				Path:   snapshot.Record.StagePath,
+				Status: wakeRestartStageBinaryDirGone,
+				Reason: wakeBinaryDirGoneMessage,
+			}
+		}
 		present, stageErr := wakeRestartStageExistsPlatform(snapshot.Record)
 		if stageErr != nil {
+			if errors.Is(stageErr, os.ErrNotExist) {
+				return wakeRestartStageDiagnostic{}
+			}
 			return wakeRestartStageDiagnostic{
 				Path:   snapshot.Record.StagePath,
 				Status: "inspection-error",
@@ -129,6 +146,13 @@ func diagnoseWakeRestartStage(
 	running := inspection.Lock.RunningImageEvidence
 	if running == nil || !validPreviousWakeRestartBoundImagePlatform(*running) {
 		return wakeRestartStageDiagnostic{}
+	}
+	if wakeRecordedPathParentGone(running.ExecutionPath) {
+		return wakeRestartStageDiagnostic{
+			Path:   running.ExecutionPath,
+			Status: wakeRestartStageBinaryDirGone,
+			Reason: wakeBinaryDirGoneMessage,
+		}
 	}
 	if _, err := os.Lstat(running.ExecutionPath); os.IsNotExist(err) {
 		return wakeRestartStageDiagnostic{}

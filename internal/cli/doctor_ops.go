@@ -562,7 +562,8 @@ func checkWakeLocksWithHintsSchema(
 		lock.RestartStagePath = stage.Path
 		lock.RestartStageStatus = stage.Status
 		lock.RestartStageReason = stage.Reason
-		if stage.Status != "" && fixCommand != "" {
+		applyWakeBinaryDirGoneOpsReason(&lock, inspection, stage)
+		if fixCommand != "" && (stage.Status != "" || lock.Reason == wakeReasonBinaryDirGone) {
 			lock.Fix = fixCommand
 		}
 		if lock.WakeCheckDecision != nil && lock.WakeCheckDecision.Platform.WakeSupported {

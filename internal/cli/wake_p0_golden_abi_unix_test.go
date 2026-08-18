@@ -192,6 +192,7 @@ func wakeABIWakeReasonCodes() map[string]bool {
 		"live_wake_preserve":                  true,
 		"owner_bound_stale_recovery_required": true,
 		"stale_lock_manual_cleanup_required":  true,
+		"binary_dir_gone":                     true,
 		"wake_state_creating":                 true,
 		"wake_state_unverified":               true,
 		"observation_changed":                 true,

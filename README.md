@@ -75,6 +75,10 @@ For Homebrew installations:
 brew upgrade amq
 ```
 
+Retire live wakes started by the previous Cellar binary first. If a leftover
+lock's image directory is gone, `wake check` reports `binary_dir_gone`; remove
+it with `amq doctor --ops --fix-wake-locks`.
+
 GitHub Actions `verify-brew-release` confirms a published tag installs from
 `avivsinai/tap/amq` and that `amq --version` matches that tag. It does not
 replace `brew upgrade` on an operator machine.

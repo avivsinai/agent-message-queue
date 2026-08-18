@@ -34,7 +34,14 @@ var wellKnownHomebrewPrefixes = []string{
 
 func runUpgrade(args []string, currentVersion string) error {
 	fs := flag.NewFlagSet("upgrade", flag.ContinueOnError)
-	usage := usageWithFlags(fs, "amq upgrade", "Downloads and installs the latest amq release from GitHub")
+	usage := usageWithFlags(
+		fs,
+		"amq upgrade",
+		"Downloads and installs the latest amq release from GitHub",
+		"",
+		"Retire live wakes started by the previous binary before its install directory is removed.",
+		"If wake check reports binary_dir_gone, run amq doctor --ops --fix-wake-locks.",
+	)
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {

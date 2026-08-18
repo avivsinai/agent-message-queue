@@ -53,6 +53,7 @@ const (
 	wakeReasonLiveWakePreserve           = "live_wake_preserve"
 	wakeReasonOwnerRecoveryRequired      = "owner_bound_stale_recovery_required"
 	wakeReasonStaleManualCleanupRequired = "stale_lock_manual_cleanup_required"
+	wakeReasonBinaryDirGone              = "binary_dir_gone"
 	wakeReasonWakeStateCreating          = "wake_state_creating"
 	wakeReasonWakeStateUnverified        = "wake_state_unverified"
 	wakeReasonObservationChanged         = "observation_changed"
