@@ -1387,3 +1387,34 @@ func assertWakeCheckTreeUnchanged(
 		}
 	}
 }
+
+func TestSameWakeCheckInspectionExistenceEachClause(t *testing.T) {
+	missing := wakeLockInspection{}
+	present := wakeLockInspection{Exists: true, Status: wakeLockValid}
+	if !sameWakeCheckInspection(missing, wakeLockInspection{}) {
+		t.Fatal("two missing inspections not equal")
+	}
+	if sameWakeCheckInspection(missing, present) || sameWakeCheckInspection(present, missing) {
+		t.Fatal("missing vs present inspections treated as equal")
+	}
+	other := present
+	other.Status = wakeLockStale
+	if sameWakeCheckInspection(present, other) {
+		t.Fatal("status mismatch treated as equal")
+	}
+}
+
+func TestInspectWakeCheckImageStatusRequiresPathAndVersion(t *testing.T) {
+	mismatch := wakeCheckResult{RunningVersion: "1.0.0", CurrentVersion: "2.0.0"}
+	if got := inspectWakeCheckImageStatus(wakeLockInspection{Lock: wakeLock{ImagePath: "/bin/amq"}}, mismatch); got != wakeImageUnknown {
+		t.Fatalf("empty version = %q, want unknown", got)
+	}
+	if got := inspectWakeCheckImageStatus(wakeLockInspection{Lock: wakeLock{ImageVersion: "1.0.0"}}, mismatch); got != wakeImageUnknown {
+		t.Fatalf("empty path = %q, want unknown", got)
+	}
+	if got := inspectWakeCheckImageStatus(wakeLockInspection{
+		Lock: wakeLock{ImagePath: "/bin/amq", ImageVersion: "1.0.0"},
+	}, mismatch); got != wakeImageDifferent {
+		t.Fatalf("path and version set = %q, want different", got)
+	}
+}

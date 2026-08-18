@@ -479,3 +479,42 @@ func TestDetectHomebrewPrefixForUpgradeFallsBackToExistingWellKnownBrew(t *testi
 		t.Fatalf("detectHomebrewPrefix() = %q, want %q", got, want)
 	}
 }
+
+func TestPathWithinDirectoryEachClause(t *testing.T) {
+	parent := t.TempDir()
+	inside := filepath.Join(parent, "bin", "amq")
+	if err := os.MkdirAll(filepath.Dir(inside), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !pathWithinDirectory(parent, parent) {
+		t.Fatal("directory not treated as within itself")
+	}
+	if !pathWithinDirectory(inside, parent) {
+		t.Fatal("nested file not treated as within parent")
+	}
+	if pathWithinDirectory(filepath.Dir(parent), parent) {
+		t.Fatal("parent of parent treated as within")
+	}
+	if pathWithinDirectory(filepath.Join(filepath.Dir(parent), "sibling"), parent) {
+		t.Fatal("sibling treated as within")
+	}
+}
+
+func TestHomebrewOwnsUpgradePathBinOrCellar(t *testing.T) {
+	prefix := t.TempDir()
+	binPath := filepath.Join(prefix, "bin", "amq")
+	cellarPath := filepath.Join(prefix, "Cellar", "amq", "0.65.0", "bin", "amq")
+	other := filepath.Join(t.TempDir(), "amq")
+	if !homebrewOwnsUpgradePath(prefix, binPath) {
+		t.Fatal("prefix/bin path not owned")
+	}
+	if !homebrewOwnsUpgradePath(prefix, cellarPath) {
+		t.Fatal("prefix/Cellar path not owned")
+	}
+	if homebrewOwnsUpgradePath(prefix, other) {
+		t.Fatal("unrelated path treated as Homebrew-owned")
+	}
+	if homebrewOwnsUpgradePath(prefix, "") {
+		t.Fatal("empty path treated as Homebrew-owned")
+	}
+}
