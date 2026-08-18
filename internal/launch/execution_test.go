@@ -398,6 +398,48 @@ func TestPrepareExecutionRejectsReplacedWrapperWithoutPromotion(t *testing.T) {
 	}
 }
 
+func TestValidateExecutionEnvelopeRejectsRetargetedWrapper(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "69696969-6969-4969-8969-696969696969"
+	dir := t.TempDir()
+	first, second := filepath.Join(dir, "wrapper-one"), filepath.Join(dir, "wrapper-two")
+	link := filepath.Join(dir, "wrapper")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(first, link); err != nil {
+		t.Fatal(err)
+	}
+	targetArgv := []string{link, "--profile", "lead", fixture.provider, "--session-id", nonce}
+	ticket, err := NewExecutionTicket(ExecutionTicketRequest{
+		Handle: "claude", LaunchNonce: nonce, Mode: AdapterModeMint, Provider: ClaudeProvider, ConversationID: nonce,
+		ProjectRoot: fixture.project, SessionRoot: fixture.session, Cwd: fixture.cwd,
+		ProviderExecutable: fixture.provider, AMQExecutable: fixture.amq,
+		TargetArgv: targetArgv, TargetEnv: map[string]string{"LANG": "C"}, Wrapper: &Wrapper{Executable: link, Args: []string{"--profile", "lead"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := ExecutionEnvelope{
+		Cwd: fixture.cwd, AMQExecutable: fixture.amq, ProviderExecutable: link,
+		TargetArgv: targetArgv, Environment: []string{"LANG=C"},
+	}
+	if err := ValidateExecutionEnvelope(fixture.root, ticket, envelope); err != nil {
+		t.Fatalf("unchanged wrapper rejected: %v", err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(second, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateExecutionEnvelope(fixture.root, ticket, envelope); err == nil || !strings.Contains(err.Error(), "wrapper executable identity changed") {
+		t.Fatalf("retargeted wrapper error = %v", err)
+	}
+}
+
 func TestPrepareExecutionRejectsRetargetedInjectorWithoutPromotion(t *testing.T) {
 	fixture := newExecutionFixture(t)
 	nonce := "67676767-6767-4767-8767-676767676767"
