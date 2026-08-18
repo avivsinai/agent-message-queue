@@ -229,6 +229,128 @@ func TestPrepareExplicitPlacementChangesSubjectDigest(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsUnauthorizedBaseRootRelationsWithoutWrites(t *testing.T) {
+	tests := []struct {
+		name  string
+		want  string
+		build func(t *testing.T, root string) (configuredRoot, baseRoot, sessionRoot string)
+	}{
+		{
+			name: "sibling base", want: "base_root_unauthorized",
+			build: func(t *testing.T, root string) (string, string, string) {
+				configured := filepath.Join(root, "configured")
+				sibling := filepath.Join(root, "sibling")
+				for _, path := range []string{configured, sibling} {
+					if err := os.Mkdir(path, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return configured, sibling, filepath.Join(sibling, "collab")
+			},
+		},
+		{
+			name: "missing configured root plus profile", want: "base_root_unauthorized",
+			build: func(_ *testing.T, root string) (string, string, string) {
+				configured := filepath.Join(root, "missing-configured")
+				profile := filepath.Join(configured, "profile-a")
+				return configured, profile, filepath.Join(profile, "collab")
+			},
+		},
+		{
+			name: "nested session", want: "base_root_relation_invalid",
+			build: func(t *testing.T, root string) (string, string, string) {
+				configured := filepath.Join(root, "configured")
+				profile := filepath.Join(configured, "profile-a")
+				if err := os.MkdirAll(profile, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return configured, profile, filepath.Join(profile, "nested", "collab")
+			},
+		},
+		{
+			name: "symlink profile escape", want: "base_root_relation_invalid",
+			build: func(t *testing.T, root string) (string, string, string) {
+				configured := filepath.Join(root, "configured")
+				escape := filepath.Join(root, "escape")
+				if err := os.Mkdir(configured, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(escape, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				profile := filepath.Join(configured, "profile-a")
+				if err := os.Symlink(escape, profile); err != nil {
+					t.Fatal(err)
+				}
+				return configured, profile, filepath.Join(profile, "collab")
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPublicPrepareFixture(t, false)
+			root, err := filepath.EvalSymlinks(fixture.root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project, err := filepath.EvalSymlinks(fixture.request.Target.ProjectRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			configured, base, session := test.build(t, root)
+			data, err := json.Marshal(map[string]string{"root": configured})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(project, ".amqrc"), append(data, '\n'), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fixture.request.Target = TargetV1{ProjectRoot: project, BaseRoot: base, SessionRoot: session, Session: "collab"}
+			fixture.request.Intent.Participants = []ParticipantV1{{Handle: "operator", Runnable: false}}
+			before := snapshotTestTree(t, fixture.root)
+
+			result, err := Prepare(context.Background(), fixture.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Outcome != PrepareOutcomeUnsupported || result.Reason != test.want {
+				t.Fatalf("refusal = %#v", result)
+			}
+			if len(result.PlannedWrites) != 0 || len(result.RequiredActions) != 0 {
+				t.Fatalf("refusal advertised mutations or decisions: %#v", result)
+			}
+			if after := snapshotTestTree(t, fixture.root); after != before {
+				t.Fatalf("Prepare refusal changed filesystem: before=%s after=%s", before, after)
+			}
+		})
+	}
+}
+
+func TestBaseRootOmittedMatchesV061ExactRoot(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, true)
+	unrelated := filepath.Join(fixture.root, "unrelated-mail")
+	if err := os.Mkdir(unrelated, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config, err := json.Marshal(map[string]string{"root": unrelated})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.request.Target.ProjectRoot, ".amqrc"), append(config, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	omitted, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if omitted.Outcome == PrepareOutcomeUnsupported || omitted.Reason == "base_root_unauthorized" || omitted.Reason == "base_root_relation_invalid" {
+		t.Fatalf("omitted base_root consulted new authority: %#v", omitted)
+	}
+	if len(omitted.PlannedWrites) != 0 || omitted.Preview.Target.BaseRoot != "" {
+		t.Fatalf("omitted base_root changed legacy result: %#v", omitted)
+	}
+}
+
 func TestPrepareUnavailableLauncherIsTypedAndDoesNotRequestTrust(t *testing.T) {
 	fixture := newPublicPrepareFixture(t, true)
 	launcher := unavailableManagedLauncher(t)

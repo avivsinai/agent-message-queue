@@ -47,25 +47,26 @@ type ConfirmTrustFunc func(Plan, string) (bool, error)
 type ConfirmRebindFunc func(BindingRecord, bool) (RebindDisposition, bool, error)
 
 type ReconcileRequest struct {
-	Context            context.Context
-	ProjectRoot        string
-	Session            string
-	AMQPath            string
-	Root               *fsq.DeliveryRoot
-	Config             ProjectConfig
-	Launcher           string
-	Preferences        []string
-	Backends           map[string]Backend
-	Adapters           map[string]HarnessAdapter
-	TrustStore         *TrustStore
-	ConfirmTrust       ConfirmTrustFunc
-	ConfirmRebind      ConfirmRebindFunc
-	Fresh              bool
-	AllowFreshFallback bool
-	ResumeOnly         bool
-	Rebind             bool
-	HostIdentity       string
-	CrashHook          func(string) error
+	Context              context.Context
+	ProjectRoot          string
+	Session              string
+	AMQPath              string
+	Root                 *fsq.DeliveryRoot
+	Config               ProjectConfig
+	Launcher             string
+	Preferences          []string
+	Backends             map[string]Backend
+	Adapters             map[string]HarnessAdapter
+	TrustStore           *TrustStore
+	TrustAuthorityDigest string
+	ConfirmTrust         ConfirmTrustFunc
+	ConfirmRebind        ConfirmRebindFunc
+	Fresh                bool
+	AllowFreshFallback   bool
+	ResumeOnly           bool
+	Rebind               bool
+	HostIdentity         string
+	CrashHook            func(string) error
 	// HeldLease lets Apply retain session authority across its lease-held
 	// re-Prepare, roster provisioning, and the existing reconciliation crash
 	// contract. Reconcile validates but never releases a caller-owned lease.
@@ -187,7 +188,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	if err != nil {
 		return result, err
 	}
-	trustDigest, err := ExecutionTrustDigest(plan, request.Session, request.Root)
+	trustDigest, err := ExecutionTrustDigestWithAuthority(plan, request.Session, request.Root, request.TrustAuthorityDigest)
 	if err != nil {
 		return result, err
 	}

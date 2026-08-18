@@ -115,6 +115,7 @@ type SymphonyOptionsV1 struct {
 
 type TargetV1 struct {
 	ProjectRoot string `json:"project_root"`
+	BaseRoot    string `json:"base_root,omitempty"`
 	SessionRoot string `json:"session_root"`
 	Session     string `json:"session"`
 }
@@ -256,6 +257,21 @@ type ParticipantObservationV1 struct {
 	ReasonCode   string `json:"reason_code,omitempty"`
 }
 
+type PlannedWriteKindV1 string
+
+const (
+	PlannedWriteCreateBaseRoot PlannedWriteKindV1 = "create_base_root"
+	PlannedWriteInitialInput   PlannedWriteKindV1 = "write_initial_input"
+)
+
+type PlannedWriteV1 struct {
+	WriteID string             `json:"write_id"`
+	Kind    PlannedWriteKindV1 `json:"kind"`
+	Path    string             `json:"path"`
+	Handle  string             `json:"handle,omitempty"`
+	SHA256  string             `json:"sha256,omitempty"`
+}
+
 type PrepareResultV1 struct {
 	ResultVersion   int                        `json:"result_version"`
 	SubjectSchema   int                        `json:"subject_schema"`
@@ -264,6 +280,7 @@ type PrepareResultV1 struct {
 	SubjectDigest   string                     `json:"subject_digest"`
 	PlanDigest      string                     `json:"plan_digest"`
 	TrustDigest     string                     `json:"trust_digest"`
+	PlannedWrites   []PlannedWriteV1           `json:"planned_writes"`
 	RequiredActions []RequiredActionV1         `json:"required_actions"`
 	Preview         PreviewV1                  `json:"preview"`
 	Observations    []ParticipantObservationV1 `json:"observations"`

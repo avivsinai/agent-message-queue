@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -116,16 +117,47 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 	})
 
 	t.Run("finding1_missing_profile_base_root", func(t *testing.T) {
-		fx := newAdoptionSmokeFixture(t, amqBinary, ".agent-mail/squad-v2-29-4", "v2-29-6")
-		intent := fx.legalSquadIntent()
-		stdout, stderr, exit := fx.prepare(t, intent, launch.LauncherCommands)
-		if exit == 0 {
-			t.Fatalf("missing profile base root succeeded: stdout=%s stderr=%s", stdout, stderr)
+		fx := newAdoptionSmokeFixture(t, amqBinary, ".agent-mail", "v2-29-6")
+		intent := launchapi.LaunchIntentV1{
+			IntentVersion: launchapi.IntentVersionV1,
+			Participants:  []launchapi.ParticipantV1{{Handle: "user", Runnable: false}},
 		}
-		combined := string(stdout) + string(stderr)
-		if !strings.Contains(combined, "squad-v2-29-4") && !strings.Contains(combined, "no such file") &&
-			!strings.Contains(combined, "stat delivery root") && !strings.Contains(combined, "not found") {
-			t.Fatalf("missing profile refusal = exit %d stdout=%s stderr=%s", exit, stdout, stderr)
+		baseRoot := filepath.Join(fx.project, ".agent-mail", "squad-v2-29-4")
+		sessionRoot := filepath.Join(baseRoot, fx.session)
+		request := launchapi.PrepareRequestV1{
+			RequestVersion: launchapi.RequestVersionV1,
+			Target: launchapi.TargetV1{
+				ProjectRoot: fx.project, BaseRoot: baseRoot, SessionRoot: sessionRoot, Session: fx.session,
+			},
+			Launcher: launch.LauncherCommands, Intent: intent,
+		}
+		prepared, err := launchapi.Prepare(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(prepared.PlannedWrites) != 1 || prepared.PlannedWrites[0].Kind != launchapi.PlannedWriteCreateBaseRoot || prepared.PlannedWrites[0].Path != baseRoot {
+			t.Fatalf("base-root planned writes = %#v", prepared.PlannedWrites)
+		}
+		if _, err := os.Lstat(baseRoot); !os.IsNotExist(err) {
+			t.Fatalf("Prepare created base root: %v", err)
+		}
+
+		applyPath := writeApplyRequestE2E(t, request, prepared)
+		stdout, stderr, exit := runRealAMQWithExit(t, fx.amqBinary, fx.project, fx.env,
+			"launch", "--apply", applyPath, "--json")
+		if exit != 0 {
+			t.Fatalf("base-root Apply exit=%d stdout=%s stderr=%s", exit, stdout, stderr)
+		}
+		var applied launchapi.ApplyResultV1
+		decodeRealLaunchJSON(t, stdout, &applied)
+		if applied.Outcome != "provisioned_no_runnable" {
+			t.Fatalf("base-root Apply = %#v", applied)
+		}
+		for _, path := range []string{baseRoot, sessionRoot} {
+			info, err := os.Stat(path)
+			if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+				t.Fatalf("created %s: info=%v err=%v", path, info, err)
+			}
 		}
 	})
 

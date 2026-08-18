@@ -96,6 +96,42 @@ func TestTrustStoreUsesPhysicalProjectIdentityAndDoesNotLeak(t *testing.T) {
 	}
 }
 
+func TestTrustStoreScopesExplicitBaseRoots(t *testing.T) {
+	state := t.TempDir()
+	project := t.TempDir()
+	baseA := filepath.Join(project, ".agent-mail", "profile-a")
+	baseB := filepath.Join(project, ".agent-mail", "profile-b")
+	legacy, err := OpenTrustStore(state, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	omitted, err := OpenTrustStoreForBase(state, project, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Path() != omitted.Path() {
+		t.Fatalf("omitted base_root changed legacy trust path: %s != %s", legacy.Path(), omitted.Path())
+	}
+	storeA, err := OpenTrustStoreForBase(state, project, baseA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeB, err := OpenTrustStoreForBase(state, project, baseB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storeA.Path() == storeB.Path() || storeA.Path() == legacy.Path() || storeB.Path() == legacy.Path() {
+		t.Fatalf("explicit base trust stores alias: legacy=%s a=%s b=%s", legacy.Path(), storeA.Path(), storeB.Path())
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	if err := storeA.Replace(TrustRecord{SemanticDigest: digest}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := storeB.LoadForDigest(digest); err != nil || found {
+		t.Fatalf("profile-b loaded profile-a trust: found=%v err=%v", found, err)
+	}
+}
+
 func TestTrustLoadFailsClosed(t *testing.T) {
 	store, _ := trustFixture(t)
 	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {

@@ -138,6 +138,9 @@ func (target TargetV1) validate() error {
 	if !cleanAbsolutePath(target.ProjectRoot) {
 		return fmt.Errorf("target project_root must be a clean absolute path")
 	}
+	if target.BaseRoot != "" && !cleanAbsolutePath(target.BaseRoot) {
+		return fmt.Errorf("target base_root must be a clean absolute path")
+	}
 	if !cleanAbsolutePath(target.SessionRoot) {
 		return fmt.Errorf("target session_root must be a clean absolute path")
 	}

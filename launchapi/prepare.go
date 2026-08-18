@@ -39,7 +39,7 @@ func prepareInputs(request PrepareRequestV1) (internallaunch.PrepareRequest, int
 	if err != nil {
 		return internallaunch.PrepareRequest{}, internallaunch.PrepareDependencies{}, err
 	}
-	trustStore, err := internallaunch.OpenTrustStore(stateDir, request.Target.ProjectRoot)
+	trustStore, err := internallaunch.OpenTrustStoreForBase(stateDir, request.Target.ProjectRoot, request.Target.BaseRoot)
 	if err != nil {
 		return internallaunch.PrepareRequest{}, internallaunch.PrepareDependencies{}, fmt.Errorf("open launch trust store: %w", err)
 	}
@@ -57,6 +57,7 @@ func prepareInputs(request PrepareRequestV1) (internallaunch.PrepareRequest, int
 	internalRequest := internallaunch.PrepareRequest{
 		Target: internallaunch.PrepareTarget{
 			ProjectRoot: request.Target.ProjectRoot,
+			BaseRoot:    request.Target.BaseRoot,
 			SessionRoot: request.Target.SessionRoot,
 			Session:     request.Target.Session,
 		},
@@ -143,9 +144,10 @@ func fromInternalPrepareResult(result internallaunch.PrepareResult) PrepareResul
 	public := PrepareResultV1{
 		ResultVersion: ResultVersionV1, SubjectSchema: result.SubjectSchema, Outcome: result.Outcome, Reason: result.Reason,
 		SubjectDigest: result.SubjectDigest, PlanDigest: result.PlanDigest, TrustDigest: result.TrustDigest,
+		PlannedWrites:   make([]PlannedWriteV1, 0, len(result.PlannedWrites)),
 		RequiredActions: make([]RequiredActionV1, 0, len(result.RequiredActions)),
 		Preview: PreviewV1{
-			Target:  TargetV1{ProjectRoot: result.Target.ProjectRoot, SessionRoot: result.Target.SessionRoot, Session: result.Target.Session},
+			Target:  TargetV1{ProjectRoot: result.Target.ProjectRoot, BaseRoot: result.Target.BaseRoot, SessionRoot: result.Target.SessionRoot, Session: result.Target.Session},
 			Backend: result.Backend, Profile: result.Profile,
 			Participants: make([]ParticipantPreviewV1, 0, len(result.Participants)),
 			Roster: RosterDriftV1{
@@ -158,6 +160,12 @@ func fromInternalPrepareResult(result internallaunch.PrepareResult) PrepareResul
 	}
 	placement := fromInternalPlacementPreview(result.Placement)
 	public.Preview.Placement = &placement
+	for _, write := range result.PlannedWrites {
+		public.PlannedWrites = append(public.PlannedWrites, PlannedWriteV1{
+			WriteID: write.WriteID, Kind: PlannedWriteKindV1(write.Kind), Path: write.Path,
+			Handle: write.Handle, SHA256: write.SHA256,
+		})
+	}
 	for _, action := range result.RequiredActions {
 		allowed := make([]DecisionChoiceV1, len(action.AllowedDecisions))
 		for i, choice := range action.AllowedDecisions {

@@ -27,6 +27,15 @@ func StableTreeIdentity(path string) (string, error) {
 	return platformStableTreeIdentity(abs, info)
 }
 
+// StableFileIdentityInfo returns the opaque identity for an already opened
+// regular-file snapshot.
+func StableFileIdentityInfo(info os.FileInfo) (string, error) {
+	if info == nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("file identity requires a regular file snapshot")
+	}
+	return platformStableTreeIdentity("", info)
+}
+
 // StableTreeIdentityInfo returns the same token from an already authorized
 // filesystem snapshot.
 func StableTreeIdentityInfo(info os.FileInfo) (string, error) {

@@ -364,6 +364,9 @@ func provisionCoopSessionChild(base, session string, agents []string, execAgent,
 			sessionRoot, err = baseRoot.OpenOrCreateDirectChild(session, 0o700)
 		}
 		if err != nil {
+			if sessionRoot != nil {
+				_ = sessionRoot.Close()
+			}
 			if exclusive {
 				var exists *fsq.DirectChildExistsError
 				if errors.As(err, &exists) {

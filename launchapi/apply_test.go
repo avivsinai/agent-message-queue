@@ -20,6 +20,198 @@ import (
 	internallaunch "github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
+func TestPrepareApplyCreatesAuthorizedProfileBaseRoot(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, false)
+	projectRoot, err := filepath.EvalSymlinks(fixture.request.Target.ProjectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.request.Target.ProjectRoot = projectRoot
+	configuredPath := filepath.Join(fixture.root, "configured-mail")
+	if err := os.Mkdir(configuredPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configuredRoot, err := filepath.EvalSymlinks(configuredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileRoot := filepath.Join(configuredRoot, "profile-a")
+	sessionRoot := filepath.Join(profileRoot, "collab")
+	amqrc, err := json.Marshal(map[string]string{"root": configuredRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.request.Target.ProjectRoot, ".amqrc"), append(amqrc, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.request.Target.BaseRoot = profileRoot
+	fixture.request.Target.SessionRoot = sessionRoot
+	fixture.request.Intent.Participants = []ParticipantV1{{Handle: "operator", Runnable: false}}
+	before := snapshotTestTree(t, fixture.root)
+
+	prepared, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := snapshotTestTree(t, fixture.root); after != before {
+		t.Fatalf("Prepare changed filesystem: before=%s after=%s", before, after)
+	}
+	if prepared.Outcome != PrepareOutcomeReady || len(prepared.RequiredActions) != 0 {
+		t.Fatalf("Prepare result = %#v", prepared)
+	}
+	if len(prepared.PlannedWrites) != 1 || prepared.PlannedWrites[0].Kind != PlannedWriteCreateBaseRoot || prepared.PlannedWrites[0].Path != profileRoot {
+		t.Fatalf("planned writes = %#v", prepared.PlannedWrites)
+	}
+
+	applied, err := Apply(context.Background(), ApplyRequestV1{
+		RequestVersion: RequestVersionV1,
+		Prepare:        fixture.request,
+		SubjectSchema:  prepared.SubjectSchema,
+		SubjectDigest:  prepared.SubjectDigest,
+		Decisions:      []DecisionV1{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Outcome != "provisioned_no_runnable" {
+		t.Fatalf("Apply result = %#v", applied)
+	}
+	for _, path := range []string{profileRoot, sessionRoot, filepath.Join(sessionRoot, "agents", "operator")} {
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			t.Fatalf("created path %s: info=%v err=%v", path, info, err)
+		}
+		if path != filepath.Join(sessionRoot, "agents", "operator") && info.Mode().Perm() != 0o700 {
+			t.Fatalf("created path %s mode = %o, want 0700", path, info.Mode().Perm())
+		}
+	}
+}
+
+func TestPrepareApplyCreatesMissingConfiguredBaseRoot(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, false)
+	project, err := filepath.EvalSymlinks(fixture.request.Target.ProjectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(fixture.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuredRoot := filepath.Join(canonicalRoot, "configured-mail")
+	config, err := json.Marshal(map[string]string{"root": configuredRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".amqrc"), append(config, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := fixture.request
+	request.Target = TargetV1{
+		ProjectRoot: project, BaseRoot: configuredRoot,
+		SessionRoot: filepath.Join(configuredRoot, "collab"), Session: "collab",
+	}
+	request.Intent.Participants = []ParticipantV1{{Handle: "operator", Runnable: false}}
+	prepared, err := Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.PlannedWrites) != 1 || prepared.PlannedWrites[0].Path != configuredRoot {
+		t.Fatalf("planned writes = %#v", prepared.PlannedWrites)
+	}
+	if _, err := os.Lstat(configuredRoot); !os.IsNotExist(err) {
+		t.Fatalf("Prepare created configured root: %v", err)
+	}
+	applied, err := Apply(context.Background(), ApplyRequestV1{
+		RequestVersion: RequestVersionV1, Prepare: request,
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Outcome != "provisioned_no_runnable" {
+		t.Fatalf("Apply = %#v", applied)
+	}
+	for _, path := range []string{configuredRoot, request.Target.SessionRoot} {
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+			t.Fatalf("created %s: info=%v err=%v", path, info, err)
+		}
+	}
+}
+
+func TestSameSessionLabelAcrossProfileRootsIsIsolated(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, false)
+	root, err := filepath.EvalSymlinks(fixture.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := filepath.EvalSymlinks(fixture.request.Target.ProjectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuredRoot := filepath.Join(root, "configured-mail")
+	if err := os.Mkdir(configuredRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configBytes, err := json.Marshal(map[string]string{"root": configuredRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".amqrc"), append(configBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := []TargetV1{
+		{ProjectRoot: project, BaseRoot: filepath.Join(configuredRoot, "profile-a"), SessionRoot: filepath.Join(configuredRoot, "profile-a", "collab"), Session: "collab"},
+		{ProjectRoot: project, BaseRoot: filepath.Join(configuredRoot, "profile-b"), SessionRoot: filepath.Join(configuredRoot, "profile-b", "collab"), Session: "collab"},
+	}
+	ticketBytes := make([][]byte, len(targets))
+	evidenceIDs := make(map[string]struct{})
+	for i, target := range targets {
+		request := fixture.request
+		request.Target = target
+		prepared, err := Prepare(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		applied, err := Apply(context.Background(), ApplyRequestV1{
+			RequestVersion: RequestVersionV1, Prepare: request,
+			SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest,
+			Decisions: decisionsForPreparedActions(prepared),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if applied.Outcome != "action_required" || applied.ReasonCode != "commands_emitted" {
+			t.Fatalf("profile %d Apply = %#v", i, applied)
+		}
+		ticketPath := filepath.Join(target.SessionRoot, "meta", "launch", "executions", "claude.json")
+		ticketBytes[i], err = os.ReadFile(ticketPath)
+		if err != nil {
+			t.Fatalf("profile %d ticket: %v", i, err)
+		}
+		if !bytes.Contains(ticketBytes[i], []byte(target.SessionRoot)) {
+			t.Fatalf("profile %d ticket does not bind its session root", i)
+		}
+		for _, evidence := range applied.Evidence {
+			if _, duplicate := evidenceIDs[evidence.ID]; duplicate {
+				t.Fatalf("evidence %q shared across profile roots", evidence.ID)
+			}
+			evidenceIDs[evidence.ID] = struct{}{}
+		}
+	}
+	if bytes.Equal(ticketBytes[0], ticketBytes[1]) {
+		t.Fatal("same-label profile tickets are byte-identical")
+	}
+	profileBBefore := snapshotTestTree(t, targets[1].SessionRoot)
+	if _, err := Inspect(context.Background(), InspectRequestV1{RequestVersion: RequestVersionV1, Target: targets[0]}); err != nil {
+		t.Fatal(err)
+	}
+	if after := snapshotTestTree(t, targets[1].SessionRoot); after != profileBBefore {
+		t.Fatalf("profile-a lifecycle read changed profile-b: before=%s after=%s", profileBBefore, after)
+	}
+}
+
 func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 	fixture := newPublicPrepareFixture(t, false)
 	injector := filepath.Join(t.TempDir(), "injector")
