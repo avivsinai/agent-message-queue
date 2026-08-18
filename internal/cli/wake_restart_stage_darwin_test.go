@@ -1144,3 +1144,144 @@ func TestDarwinAcquireWakeLockAfterResumeRefusesUnpersistedCurrentStage(t *testi
 		t.Fatalf("unpersisted current stage changed incumbent: before=%#v after=%#v", fixture.lock, current)
 	}
 }
+
+func TestWakeRestartPathWithinDirectoryEachClause(t *testing.T) {
+	parent := t.TempDir()
+	inside := filepath.Join(parent, "child")
+	if err := os.Mkdir(inside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(filepath.Dir(parent), "sibling")
+	if !wakeRestartPathWithinDirectory(parent, parent) {
+		t.Fatal("directory not treated as within itself")
+	}
+	if !wakeRestartPathWithinDirectory(inside, parent) {
+		t.Fatal("child not treated as within parent")
+	}
+	if wakeRestartPathWithinDirectory(filepath.Dir(parent), parent) {
+		t.Fatal("parent of parent treated as within")
+	}
+	if wakeRestartPathWithinDirectory(sibling, parent) {
+		t.Fatal("sibling treated as within")
+	}
+}
+
+func TestValidateWakeRestartStageStateEachLogicalClause(t *testing.T) {
+	t.Run("empty pre-ownership record", func(t *testing.T) {
+		record := newDarwinWakeRestartStageRecordForTest(t)
+		record.StagePath = ""
+		if err := validateWakeRestartStageStatePlatform(record); err != nil {
+			t.Fatalf("empty stage and bound image refused: %v", err)
+		}
+	})
+	t.Run("empty stage with bound image", func(t *testing.T) {
+		record := newDarwinWakeRestartStageRecordForTest(t)
+		bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = bound.close() })
+		evidence := bound.evidence
+		record.BoundImage = &evidence
+		record.StagePath = ""
+		if err := validateWakeRestartStageStatePlatform(record); err == nil {
+			t.Fatal("empty stage with bound image was accepted")
+		}
+	})
+	t.Run("stable planned path", func(t *testing.T) {
+		record := newDarwinWakeRestartStageRecordForTest(t)
+		if err := validateWakeRestartStageStatePlatform(record); err != nil {
+			t.Fatalf("stable planned path refused: %v", err)
+		}
+	})
+	t.Run("legacy planned path", func(t *testing.T) {
+		record := newLegacyDarwinWakeRestartStageRecordForTest(t)
+		if err := validateWakeRestartStageStatePlatform(record); err != nil {
+			t.Fatalf("legacy planned path refused: %v", err)
+		}
+	})
+	t.Run("unrelated stage path", func(t *testing.T) {
+		record := newDarwinWakeRestartStageRecordForTest(t)
+		record.StagePath = filepath.Join(t.TempDir(), "amq")
+		if err := validateWakeRestartStageStatePlatform(record); err == nil ||
+			!strings.Contains(err.Error(), "does not match the exact request") {
+			t.Fatalf("unrelated stage path = %v, want exact-request refusal", err)
+		}
+	})
+	t.Run("bound execution path mismatch", func(t *testing.T) {
+		record := newDarwinWakeRestartStageRecordForTest(t)
+		bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = bound.close() })
+		evidence := bound.evidence
+		evidence.ExecutionPath = filepath.Join(t.TempDir(), "other")
+		record.BoundImage = &evidence
+		if err := validateWakeRestartStageStatePlatform(record); err == nil ||
+			!strings.Contains(err.Error(), "does not match the planned request") {
+			t.Fatalf("bound path mismatch = %v, want planned-request refusal", err)
+		}
+	})
+	t.Run("previous and current share path", func(t *testing.T) {
+		record := newDarwinWakeRestartStageRecordForTest(t)
+		bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = bound.close() })
+		evidence := bound.evidence
+		record.BoundImage = &evidence
+		previous := evidence
+		record.PreviousBoundImage = &previous
+		if err := validateWakeRestartStageStatePlatform(record); err == nil ||
+			!strings.Contains(err.Error(), "same path") {
+			t.Fatalf("shared stage path = %v, want same-path refusal", err)
+		}
+	})
+}
+
+func TestStableDarwinWakeRestartStagePartsEachClause(t *testing.T) {
+	setDarwinWakeRestartStateHomeForTest(t, t.TempDir())
+	root, err := darwinWakeRestartStageRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := newDarwinWakeRestartStageRecordForTest(t)
+	parts, stable, err := stableDarwinWakeRestartStageParts(record.StagePath)
+	if err != nil || !stable || len(parts) != 4 {
+		t.Fatalf("valid stable path parts=%v stable=%v err=%v", parts, stable, err)
+	}
+	_, stable, err = stableDarwinWakeRestartStageParts(filepath.Dir(root))
+	if err != nil || stable {
+		t.Fatalf("path outside state root stable=%v err=%v", stable, err)
+	}
+	invalidHex := filepath.Join(root, strings.Repeat("g", sha256HexLength), "codex", "0123456789abcdef0123456789abcdef", "amq")
+	if _, _, err := stableDarwinWakeRestartStageParts(invalidHex); err == nil ||
+		!strings.Contains(err.Error(), "root identity is invalid") {
+		t.Fatalf("invalid hex = %v, want root-identity refusal", err)
+	}
+	invalidHandle := filepath.Join(root, parts[0], "BAD", parts[2], parts[3])
+	if _, _, err := stableDarwinWakeRestartStageParts(invalidHandle); err == nil ||
+		!strings.Contains(err.Error(), "stage path is invalid") {
+		t.Fatalf("invalid handle = %v, want stage-path refusal", err)
+	}
+}
+
+func TestValidPreviousWakeRestartBoundImageRequiresOwnedStage(t *testing.T) {
+	setDarwinWakeRestartStateHomeForTest(t, t.TempDir())
+	record := newDarwinWakeRestartStageRecordForTest(t)
+	bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bound.close() })
+	if !validPreviousWakeRestartBoundImagePlatform(bound.evidence) {
+		t.Fatal("stable owned stage not recognized")
+	}
+	foreign := bound.evidence
+	foreign.ExecutionPath = filepath.Join(t.TempDir(), "amq")
+	if validPreviousWakeRestartBoundImagePlatform(foreign) {
+		t.Fatal("path outside wake-stages treated as owned previous stage")
+	}
+}

@@ -873,6 +873,68 @@ func TestCoopInitDefaultIncludesUser(t *testing.T) {
 	}
 }
 
+func TestCoopInitSameDirectoryDifferentRootRequiresForce(t *testing.T) {
+	_ = initCoopProjectForTest(t, "alice,bob")
+	resetAmqrcCache()
+	err := runCoopInitInternal([]string{"--root", "other-mail", "--json", "--no-gitignore"}, false)
+	if err == nil || !strings.Contains(err.Error(), `already exists with root=".agent-mail"`) {
+		t.Fatalf("different root without force = %v, want existing-root refusal", err)
+	}
+	resetAmqrcCache()
+	if _, err := captureEnvStdout(t, func() error {
+		return runCoopInitInternal([]string{"--root", "other-mail", "--force", "--json", "--no-gitignore"}, false)
+	}); err != nil {
+		t.Fatalf("different root with force: %v", err)
+	}
+}
+
+func TestCoopInitParentDirectoryRequiresForce(t *testing.T) {
+	_ = initCoopProjectForTest(t, "alice,bob")
+	parent, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(parent, "nested")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(child); err != nil {
+		t.Fatal(err)
+	}
+	resetAmqrcCache()
+	err = runCoopInitInternal([]string{"--json", "--no-gitignore"}, false)
+	if err == nil || !strings.Contains(err.Error(), "already initialized in parent directory") {
+		t.Fatalf("nested init without force = %v, want parent refusal", err)
+	}
+}
+
+func TestProvisionCoopSessionSymlinkHintRequiresAgentAndCommand(t *testing.T) {
+	base := t.TempDir()
+	if err := fsq.EnsureRootDirs(base); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	sessionPath := filepath.Join(base, defaultSessionName)
+	if err := os.Symlink(outside, sessionPath); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	_, err := provisionCoopSession(base, defaultSessionName, []string{"alice"}, "alice", "")
+	if err == nil || !strings.Contains(err.Error(), "is a symlink") {
+		t.Fatalf("agent-only provision = %v, want symlink refusal", err)
+	}
+	if strings.Contains(err.Error(), "intentional relocation") {
+		t.Fatal("empty command advertised relocation")
+	}
+	_, err = provisionCoopSession(base, defaultSessionName, []string{"alice"}, "", "sh")
+	if err == nil || strings.Contains(err.Error(), "intentional relocation") {
+		t.Fatalf("command-only provision = %v, want symlink refusal without relocation", err)
+	}
+	_, err = provisionCoopSession(base, defaultSessionName, []string{"alice"}, "alice", "sh")
+	if err == nil || !strings.Contains(err.Error(), "intentional relocation") {
+		t.Fatalf("agent+command provision = %v, want relocation hint", err)
+	}
+}
+
 func TestCoopInitRerunUsesConfiguredAgents(t *testing.T) {
 	root := initCoopProjectForTest(t, "alice,bob")
 	cfgPath := filepath.Join(root, "meta", "config.json")

@@ -199,6 +199,70 @@ func TestWakeRecordedPathParentGone(t *testing.T) {
 	if wakeRecordedPathParentGone("amq") || wakeRecordedPathParentGone("") {
 		t.Fatal("relative or empty path treated as vanished parent")
 	}
+	blocked := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !wakeRecordedPathParentGone(filepath.Join(blocked, "bin", "amq")) {
+		t.Fatal("ENOTDIR parent path not detected")
+	}
+}
+
+func TestApplyWakeBinaryDirGoneOpsReasonEachClause(t *testing.T) {
+	t.Run("nil lock", func(t *testing.T) {
+		applyWakeBinaryDirGoneOpsReason(nil, wakeLockInspection{}, wakeRestartStageDiagnostic{})
+	})
+	t.Run("none", func(t *testing.T) {
+		lock := &opsWakeLock{Reason: "stale"}
+		applyWakeBinaryDirGoneOpsReason(lock, wakeLockInspection{}, wakeRestartStageDiagnostic{})
+		if lock.Reason != "stale" {
+			t.Fatalf("reason = %q, want unchanged", lock.Reason)
+		}
+	})
+	t.Run("inspection", func(t *testing.T) {
+		versionDir := filepath.Join(t.TempDir(), "Cellar", "amq", "0.63.3")
+		imagePath := filepath.Join(versionDir, "bin", "amq")
+		if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(imagePath, []byte("amq"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		imagePath, err := filepath.EvalSymlinks(imagePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		versionDir, err = filepath.EvalSymlinks(versionDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(versionDir); err != nil {
+			t.Fatal(err)
+		}
+		lock := &opsWakeLock{}
+		applyWakeBinaryDirGoneOpsReason(lock, wakeLockInspection{Lock: wakeLock{ImagePath: imagePath}}, wakeRestartStageDiagnostic{})
+		if lock.Reason != wakeReasonBinaryDirGone {
+			t.Fatalf("inspection clause reason = %q", lock.Reason)
+		}
+	})
+	t.Run("stage", func(t *testing.T) {
+		lock := &opsWakeLock{}
+		applyWakeBinaryDirGoneOpsReason(lock, wakeLockInspection{}, wakeRestartStageDiagnostic{Status: wakeRestartStageBinaryDirGone})
+		if lock.Reason != wakeReasonBinaryDirGone {
+			t.Fatalf("stage clause reason = %q", lock.Reason)
+		}
+	})
+	t.Run("decision", func(t *testing.T) {
+		lock := &opsWakeLock{
+			WakeCheckDecision: &wakeCheckDecision{
+				Action: wakeCheckActionDecision{ReasonCode: wakeReasonBinaryDirGone},
+			},
+		}
+		applyWakeBinaryDirGoneOpsReason(lock, wakeLockInspection{}, wakeRestartStageDiagnostic{})
+		if lock.Reason != wakeReasonBinaryDirGone {
+			t.Fatalf("decision clause reason = %q", lock.Reason)
+		}
+	})
 }
 
 type vanishedBinaryStaleLockFixture struct {
