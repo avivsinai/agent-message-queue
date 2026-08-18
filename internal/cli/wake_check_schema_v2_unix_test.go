@@ -497,6 +497,22 @@ func TestWakeCheckV2ClassifierActions(t *testing.T) {
 			terminal: true,
 		},
 		{
+			name: "stale vanished binary dir",
+			configure: func(d *wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
+				d.Wake.Status = string(wakeLockStale)
+				d.Wake.Mode = wakeCheckOptionalString(wakeInjectModeRaw)
+				image := filepath.Join(t.TempDir(), "Cellar", "amq", "0.61.0", "bin", "amq")
+				return wakeLockInspection{
+					Exists: true,
+					Status: wakeLockStale,
+					Lock:   wakeLock{ImagePath: image},
+				}, nil
+			},
+			kind: wakeActionManualStaleCleanup, actor: wakeActionActorAgent,
+			reason: wakeReasonBinaryDirGone, restart: wakeRestartAgentSafe,
+			args: []string{"doctor", "--root", "/queue with spaces", "--ops", "--fix-wake-locks"},
+		},
+		{
 			name: "creating wake",
 			configure: func(d *wakeCheckDecision) (wakeLockInspection, *opsWakeLock) {
 				d.Wake.Status = string(wakeLockCreating)

@@ -109,6 +109,7 @@ func TestRunUpgradeAlreadyCurrentReportsStaleWakesWithInvalidAmbientAgent(t *tes
 	}
 	for _, want := range []string{
 		"amq is already up to date (v0.49.9)",
+		upgradeLiveWakePreviousBinaryNote,
 		"Stale running wakes:",
 		staleRoot,
 		`agent "codex"`,

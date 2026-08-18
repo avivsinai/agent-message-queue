@@ -338,7 +338,10 @@ read-only and reports the running/current image path and version plus an exact
 running and hand off to its owning terminal or supervisor. For `unavailable`,
 preserve the state and diagnose it. Never kill a live raw wake from a non-TTY
 process, and never accept an attention-only fallback as a replacement for
-full-strength input delivery.
+full-strength input delivery. When the recorded image or restart stage lives
+under a directory that no longer exists, the check reports
+`reason_code=binary_dir_gone` and names `amq doctor --ops --fix-wake-locks`
+instead of a raw ENOENT.
 
 Current resume-eligible `coop exec` wakes automatically observe their stable
 AMQ launch symlink and adopt a strictly newer semantic version at a fully

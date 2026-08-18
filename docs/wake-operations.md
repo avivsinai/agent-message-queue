@@ -26,6 +26,10 @@ conservative problem states:
 
 - `stale`: AMQ proves that the recorded process is gone, mismatched, or not the
   same `amq wake`. `--fix-wake-locks` rechecks and removes only this exact lock.
+  When the lock's image or restart stage lives under a directory that no longer
+  exists, `wake check --json` and `doctor --ops` report `reason_code=binary_dir_gone`
+  and name `amq doctor --ops --fix-wake-locks` as the next action instead of a
+  raw ENOENT.
 - `unverified`: AMQ cannot prove ownership or staleness. Startup fails closed
   and doctor preserves the lock for operator inspection.
 
