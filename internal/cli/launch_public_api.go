@@ -15,9 +15,6 @@ import (
 
 func runPublicLaunch(common *commonFlags, session, launcher, planSource string, prepareOnly bool, applySource, placementJSON string, fs *flag.FlagSet) error {
 	planExplicit, applyExplicit := flagWasVisited(fs, "plan"), flagWasVisited(fs, "apply")
-	if prepareOnly && !planExplicit {
-		return UsageError("--prepare requires --plan")
-	}
 	if prepareOnly && !common.JSON {
 		return UsageError("--prepare requires --json")
 	}
@@ -26,6 +23,9 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 	}
 	if applyExplicit && (planExplicit || prepareOnly) {
 		return UsageError("--apply is mutually exclusive with --plan and --prepare")
+	}
+	if prepareOnly && !planExplicit {
+		return UsageError("--prepare requires --plan")
 	}
 	if applyExplicit && (flagWasVisited(fs, "session") || flagWasVisited(fs, "launcher") || common.rootExplicit()) {
 		return UsageError("--apply takes its target and launcher from ApplyRequestV1")
