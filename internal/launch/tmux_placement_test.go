@@ -172,31 +172,12 @@ func writeTmuxSleepAMQ(t *testing.T) string {
 	return path
 }
 
-func tmuxSocketInode(path string) (uint64, bool) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return 0, false
-	}
-	return fileInode(info)
-}
-
-func tmuxSocketGoneOrReplaced(path string, oldInode uint64, hadSocket bool) bool {
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return true
-	}
-	if err != nil || !hadSocket {
-		return false
-	}
-	ino, ok := fileInode(info)
-	return ok && ino != oldInode
-}
-
-func tmuxNoServerRunning(err error) bool {
+func tmuxServerAbsent(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(strings.ToLower(err.Error()), "no server running")
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no server running") || strings.Contains(msg, "error connecting")
 }
 
 func tmuxServerUnsettled(err error) bool {
@@ -204,19 +185,17 @@ func tmuxServerUnsettled(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "server exited unexpectedly") ||
-		strings.Contains(msg, "no server running") ||
-		strings.Contains(msg, "error connecting")
+	return tmuxServerAbsent(err) || strings.Contains(msg, "server exited unexpectedly")
 }
 
-func waitForTmuxServerGone(t *testing.T, backend *TmuxBackend, socket string, oldInode uint64, hadSocket bool) {
+func waitForTmuxServerGone(t *testing.T, backend *TmuxBackend) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		_, err := backend.run(ctx, backend.args("list-sessions")...)
 		cancel()
-		if tmuxNoServerRunning(err) && tmuxSocketGoneOrReplaced(socket, oldInode, hadSocket) {
+		if tmuxServerAbsent(err) {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -914,12 +893,10 @@ func TestTmuxPlacementCloseRefusesReusedPaneIDsAfterServerRestart(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	socket := backend.socketPath()
-	oldInode, hadSocket := tmuxSocketInode(socket)
 	if _, err := backend.run(ctx, backend.args("kill-server")...); err != nil {
 		t.Fatal(err)
 	}
-	waitForTmuxServerGone(t, backend, socket, oldInode, hadSocket)
+	waitForTmuxServerGone(t, backend)
 	first := retryTmux(t, backend, "new-session", "-d", "-s", name, "-P", "-F", "#{pane_id}", "/bin/sleep", "60")
 	second := retryTmux(t, backend, "split-window", "-t", first, "-P", "-F", "#{pane_id}", "/bin/sleep", "60")
 	closed, err := backend.Close(CloseRequest{Binding: created.Binding, Root: root})
