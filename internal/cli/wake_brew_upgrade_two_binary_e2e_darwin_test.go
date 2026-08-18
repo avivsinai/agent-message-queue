@@ -61,9 +61,6 @@ func TestTwoBinaryBrewUpgradeStaleLockRemoval(t *testing.T) {
 	})
 
 	t.Run("fixed B reclaims after dirA vanishes", func(t *testing.T) {
-		if strings.TrimSpace(gitHEADForTest(t, repoRoot)) == brewUpgradeENOENTBaseline {
-			t.Skip("rebase onto the amq-0ja reclaim fix before asserting binary B success")
-		}
 		fixture := newBrewUpgradeTwoBinaryFixture(t, repoRoot, repoRoot)
 		fixed := filepath.Join(t.TempDir(), "amq-fixed")
 		buildRepoAMQForTest(t, repoRoot, fixed, "0.64.0-fixed")
@@ -220,15 +217,6 @@ func runBrewUpgradeStaleRemoval(t *testing.T, binaryB, root string) ([]byte, []b
 	return runRealAMQWithExit(t, binaryB, filepath.Dir(root), wakeABICleanEnv(),
 		"doctor", "--root", root, "--ops", "--fix-wake-locks", "--json",
 	)
-}
-
-func gitHEADForTest(t *testing.T, repoRoot string) string {
-	t.Helper()
-	out, err := exec.Command("git", "-C", repoRoot, "rev-parse", "HEAD").Output()
-	if err != nil {
-		t.Fatalf("git rev-parse HEAD: %v", err)
-	}
-	return strings.TrimSpace(string(out))
 }
 
 func buildRepoAMQForTest(t *testing.T, sourceDir, dest, version string) {
