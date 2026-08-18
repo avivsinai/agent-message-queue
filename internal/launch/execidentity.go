@@ -133,6 +133,18 @@ func MarshalExecutableIdentity(identity ExecutableIdentity) ([]byte, error) {
 	return bytes.TrimSpace(buf.Bytes()), nil
 }
 
+func probeExecutableIdentityJSON(path string) (string, error) {
+	identity, err := ProbeExecutableIdentity(path)
+	if err != nil {
+		return "", err
+	}
+	raw, err := MarshalExecutableIdentity(identity)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
 // ConsultedExecutable is the Prepare-subject binding for one provider
 // executable. Requested is the caller string; Consulted is the PATH lookup or
 // absolute path that was probed. Identity is MarshalExecutableIdentity JSON.

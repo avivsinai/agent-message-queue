@@ -346,6 +346,58 @@ func TestPrepareExecutionRejectsRetargetedProviderWithoutPromotion(t *testing.T)
 	}
 }
 
+func TestPrepareExecutionRejectsReplacedWrapperWithoutPromotion(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "68686868-6868-4868-8868-686868686868"
+	wrapper := testWrapper(t)
+	targetArgv := []string{wrapper.Executable, "--profile", "lead", fixture.provider, "--session-id", nonce}
+	lease, err := AcquireLease(fixture.root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("claude"); err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := NewExecutionTicket(ExecutionTicketRequest{
+		Handle: "claude", LaunchNonce: nonce, Mode: AdapterModeMint, Provider: ClaudeProvider, ConversationID: nonce,
+		ProjectRoot: fixture.project, SessionRoot: fixture.session, Cwd: fixture.cwd,
+		ProviderExecutable: fixture.provider, AMQExecutable: fixture.amq,
+		TargetArgv: targetArgv, TargetEnv: map[string]string{"LANG": "C"}, Wrapper: wrapper,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteExecutionTicket(fixture.root, lease, ticket); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteConversation(fixture.root, lease, ConversationRecord{
+		Version: ConversationVersion, Handle: "claude", State: CapturePending, LaunchNonce: nonce,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	replacement := wrapper.Executable + ".replacement"
+	if err := os.WriteFile(replacement, []byte("replacement wrapper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, wrapper.Executable); err != nil {
+		t.Fatal(err)
+	}
+	_, err = PrepareExecution(fixture.root, "claude", nonce, ExecutionEnvelope{
+		Cwd: fixture.cwd, AMQExecutable: fixture.amq, ProviderExecutable: wrapper.Executable,
+		TargetArgv: targetArgv, Environment: []string{"LANG=C"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "wrapper executable identity changed") {
+		t.Fatalf("wrapper replacement error = %v", err)
+	}
+	record, loadErr := LoadConversation(fixture.root, "claude")
+	if loadErr != nil || record.State != CapturePending {
+		t.Fatalf("conversation mutated = %#v, %v", record, loadErr)
+	}
+}
+
 func TestPrepareExecutionRejectsRetargetedInjectorWithoutPromotion(t *testing.T) {
 	fixture := newExecutionFixture(t)
 	nonce := "67676767-6767-4767-8767-676767676767"

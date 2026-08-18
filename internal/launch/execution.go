@@ -68,6 +68,7 @@ type ExecutionTicket struct {
 	InjectorExecutable         string   `json:"injector_executable,omitempty"`
 	InjectorExecutableIdentity string   `json:"injector_executable_identity,omitempty"`
 	Wrapper                    *Wrapper `json:"wrapper,omitempty"`
+	WrapperExecutableIdentity  string   `json:"wrapper_executable_identity,omitempty"`
 
 	TargetArgv    []string                 `json:"target_argv"`
 	DynamicArgv   []DynamicArg             `json:"dynamic_argv,omitempty"`
@@ -158,6 +159,16 @@ func NewExecutionTicket(request ExecutionTicketRequest) (ExecutionTicket, error)
 			return ExecutionTicket{}, fmt.Errorf("injector executable: %w", err)
 		}
 	}
+	var wrapperIdentity string
+	if request.Wrapper != nil {
+		if err := validateWrapperFile(request.Wrapper); err != nil {
+			return ExecutionTicket{}, fmt.Errorf("wrapper: %w", err)
+		}
+		wrapperIdentity, err = probeExecutableIdentityJSON(request.Wrapper.Executable)
+		if err != nil {
+			return ExecutionTicket{}, fmt.Errorf("wrapper executable: %w", err)
+		}
+	}
 	env := cloneExecutionEnv(request.TargetEnv)
 	digest, err := executionEnvDigest(env)
 	if err != nil {
@@ -175,7 +186,8 @@ func NewExecutionTicket(request ExecutionTicketRequest) (ExecutionTicket, error)
 		InitialInput: clonePlannedInitialInput(request.InitialInput),
 		TargetEnv:    env, EnvDigest: digest, State: request.State, Reason: request.Reason,
 		Execution: execution, InjectorExecutable: injector, InjectorExecutableIdentity: injectorID,
-		CallerContext: cloneCallerContext(request.CallerContext), Wrapper: cloneWrapper(request.Wrapper),
+		WrapperExecutableIdentity: wrapperIdentity,
+		CallerContext:             cloneCallerContext(request.CallerContext), Wrapper: cloneWrapper(request.Wrapper),
 	}
 	if ticket.State == "" {
 		ticket.State = ExecutionPending
@@ -229,12 +241,18 @@ func (ticket ExecutionTicket) Validate() error {
 	} else if ticket.InjectorExecutable != "" || ticket.InjectorExecutableIdentity != "" {
 		return fmt.Errorf("injector executable identity exists without injector via")
 	}
+	if ticket.Wrapper == nil && ticket.WrapperExecutableIdentity != "" {
+		return fmt.Errorf("wrapper executable identity exists without wrapper")
+	}
 	if len(ticket.TargetArgv) == 0 || strings.TrimSpace(ticket.TargetArgv[0]) == "" {
 		return fmt.Errorf("target argv is required")
 	}
 	if ticket.Wrapper != nil {
 		if err := ticket.Wrapper.Validate(); err != nil {
 			return fmt.Errorf("wrapper: %w", err)
+		}
+		if strings.TrimSpace(ticket.WrapperExecutableIdentity) == "" {
+			return fmt.Errorf("wrapper executable identity is required")
 		}
 		prefix := append([]string{ticket.Wrapper.Executable}, ticket.Wrapper.Args...)
 		providerIndex := len(prefix)
@@ -1014,6 +1032,13 @@ func ValidateExecutionEnvelope(root *fsq.DeliveryRoot, ticket ExecutionTicket, e
 		targetProvider, targetProviderID, targetProviderErr := canonicalFile(ticket.TargetArgv[providerIndex])
 		if targetProviderErr != nil || targetProvider != ticket.ProviderExecutable || targetProviderID != ticket.ProviderExecutableIdentity {
 			return fmt.Errorf("provider target identity changed")
+		}
+		identity, identityErr := probeExecutableIdentityJSON(ticket.Wrapper.Executable)
+		if identityErr != nil || identity != ticket.WrapperExecutableIdentity {
+			if identityErr == nil {
+				identityErr = fmt.Errorf("identity tuple differs from the execution ticket")
+			}
+			return fmt.Errorf("wrapper executable identity changed: %w", identityErr)
 		}
 		if err := validateWrapperFile(ticket.Wrapper); err != nil {
 			return fmt.Errorf("wrapper executable changed: %w", err)
