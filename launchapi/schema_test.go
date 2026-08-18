@@ -25,7 +25,7 @@ func TestLaunchAPIV1SchemaContract(t *testing.T) {
 	for _, name := range []string{
 		"LaunchIntentV1", "ParticipantV1", "WorkingDirectoryV1", "ExecutionOptionsV1",
 		"WakeOptionsV1", "InjectorOptionsV1", "IntegrationsV1", "SymphonyOptionsV1",
-		"TargetV1", "PrepareRequestV1", "PrepareResultV1", "ApplyRequestV1", "ApplyResultV1",
+		"TargetV1", "PlacementV1", "PlacementPreviewV1", "PrepareRequestV1", "PrepareResultV1", "ApplyRequestV1", "ApplyResultV1",
 		"InitialInputV1", "ConfigOverrideCapabilityV1", "ProviderCapabilitiesV1",
 		"DecisionV1", "ParticipantObservationV1", "CompatibilityV1", "RequirementV1", "NegotiatedV1",
 		"InspectRequestV1", "FocusRequestV1", "CloseRequestV1",
@@ -43,6 +43,9 @@ func TestLaunchAPIV1SchemaContract(t *testing.T) {
 	}
 
 	assertSchemaPropertiesMatchType(t, defs, "LaunchIntentV1", reflect.TypeFor[LaunchIntentV1]())
+	assertSchemaPropertiesMatchType(t, defs, "PrepareRequestV1", reflect.TypeFor[PrepareRequestV1]())
+	assertSchemaPropertiesMatchType(t, defs, "PlacementV1", reflect.TypeFor[PlacementV1]())
+	assertSchemaPropertiesMatchType(t, defs, "PlacementPreviewV1", reflect.TypeFor[PlacementPreviewV1]())
 	assertSchemaPropertiesMatchType(t, defs, "PreviewV1", reflect.TypeFor[PreviewV1]())
 	assertSchemaPropertiesMatchType(t, defs, "ConfigOverrideCapabilityV1", reflect.TypeFor[ConfigOverrideCapabilityV1]())
 	assertSchemaPropertiesMatchType(t, defs, "ProviderCapabilitiesV1", reflect.TypeFor[ProviderCapabilitiesV1]())

@@ -28,6 +28,98 @@ func TestPrepareRejectsUnknownSubjectSchemaBeforeInspection(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsPlacementOnSubjectSchemaV1BeforeInspection(t *testing.T) {
+	_, err := Prepare(context.Background(), PrepareRequest{
+		IntentDigest:  "sha256:" + strings.Repeat("a", 64),
+		Participants:  []PrepareParticipant{{Handle: "operator"}},
+		SubjectSchema: SubjectSchemaV1,
+		Placement:     &Placement{Target: PlacementTargetSession, Layout: PlacementLayoutColumns},
+	}, PrepareDependencies{})
+	if err == nil || !strings.Contains(err.Error(), "placement requires subject schema") {
+		t.Fatalf("Prepare error = %v", err)
+	}
+}
+
+func TestPrepareRejectsInvalidPlacementBeforeInspection(t *testing.T) {
+	_, err := Prepare(context.Background(), PrepareRequest{
+		IntentDigest: "sha256:" + strings.Repeat("a", 64),
+		Participants: []PrepareParticipant{{Handle: "operator"}},
+		Placement:    &Placement{Target: PlacementTargetSession, Layout: PlacementLayoutColumns, LauncherPane: "%1"},
+	}, PrepareDependencies{})
+	if err == nil || !strings.Contains(err.Error(), "launcher_pane") {
+		t.Fatalf("Prepare error = %v", err)
+	}
+}
+
+func TestPrepareUnsupportedPlacementSkipsTrustAndCreate(t *testing.T) {
+	fixture := newInternalPrepareFixture(t)
+	fixture.request.Placement = &Placement{Target: PlacementTargetSession, Layout: PlacementLayoutColumns}
+	backend := &prepareTestBackend{}
+	before := prepareTreeSnapshot(t, fixture.root)
+	result, err := Prepare(context.Background(), fixture.request, fixture.dependencies(backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := prepareTreeSnapshot(t, fixture.root); after != before {
+		t.Fatalf("unsupported placement Prepare changed filesystem: before %s after %s", before, after)
+	}
+	if backend.creates != 0 {
+		t.Fatalf("Prepare created: %d", backend.creates)
+	}
+	if result.Outcome != PrepareOutcomeUnsupported || result.Reason != PlacementUnsupportedReason || len(result.RequiredActions) != 0 {
+		t.Fatalf("unsupported placement = %#v", result)
+	}
+	if result.Placement.Supported || result.Placement.ReasonCode != PlacementUnsupportedReason {
+		t.Fatalf("placement preview = %#v", result.Placement)
+	}
+}
+
+func TestPrepareV2SubjectDigestIncludesPlacement(t *testing.T) {
+	fixture := newInternalPrepareFixture(t)
+	omitted, err := Prepare(context.Background(), fixture.request, fixture.dependencies(&prepareTestBackend{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1Request := fixture.request
+	v1Request.SubjectSchema = SubjectSchemaV1
+	v1, err := Prepare(context.Background(), v1Request, fixture.dependencies(&prepareTestBackend{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if omitted.SubjectSchema != SubjectSchemaV2 || omitted.SubjectDigest == v1.SubjectDigest {
+		t.Fatalf("v2 omitted digest did not diverge from v1: v1=%s v2=%s", v1.SubjectDigest, omitted.SubjectDigest)
+	}
+	staggered := fixture.request
+	staggered.Launcher = LauncherTMux
+	staggered.Placement = &Placement{Target: PlacementTargetSession, Layout: PlacementLayoutColumns, StaggerMS: 250}
+	tmux := &prepareTestBackend{}
+	withStagger, err := Prepare(context.Background(), staggered, PrepareDependencies{
+		Backends: map[string]Backend{LauncherTMux: tmux}, Preferences: []string{LauncherTMux},
+		AdapterFor:   func(provider, executable string) HarnessAdapter { return prepareTestAdapter{provider: provider} },
+		HostIdentity: "host:test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := fixture.request
+	baseline.Launcher = LauncherTMux
+	baseline.Placement = &Placement{Target: PlacementTargetSession, Layout: PlacementLayoutColumns}
+	withoutStagger, err := Prepare(context.Background(), baseline, PrepareDependencies{
+		Backends: map[string]Backend{LauncherTMux: tmux}, Preferences: []string{LauncherTMux},
+		AdapterFor:   func(provider, executable string) HarnessAdapter { return prepareTestAdapter{provider: provider} },
+		HostIdentity: "host:test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withStagger.SubjectDigest == withoutStagger.SubjectDigest {
+		t.Fatal("stagger_ms did not enter the v2 subject digest")
+	}
+	if withStagger.Outcome == PrepareOutcomeUnsupported || withoutStagger.Outcome == PrepareOutcomeUnsupported {
+		t.Fatalf("tmux session placement unsupported: stagger=%#v baseline=%#v", withStagger, withoutStagger)
+	}
+}
+
 func TestPrepareSubjectSchemasProduceDistinctDigestsForSameState(t *testing.T) {
 	fixture := newInternalPrepareFixture(t)
 	v1Request := fixture.request

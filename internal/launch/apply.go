@@ -470,6 +470,7 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 		HostIdentity: dependencies.HostIdentity, AllowExternalCwd: true,
 		ExecutionOptions:   executionOptions,
 		AllowFreshFallback: decisions[ActionStaleConversation] == "fresh_once",
+		Placement:          prepared.Placement,
 	}
 	if choice := decisions[ActionTrustConfirmation]; choice == "trust_exact_subject" {
 		request.ConfirmTrust = func(plan Plan, actualTrustDigest string) (bool, error) {

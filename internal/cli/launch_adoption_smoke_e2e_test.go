@@ -27,7 +27,7 @@ import (
 //	finding1_missing_profile_base_root | 1 named-profile base root | missing .agent-mail/<profile> refuses (not found / stat delivery root) | Prepare planned write create_base_root; Apply creates the authorized base
 //	finding2_mixed_live_fresh_roster_refuses | 2 live-seat dispositions | whole binding refuses rather than keep-live + create-missing | on_live keep -> kept + created missing seats
 //	finding3_wrapper_unknown_field | 3 wrapper | strict decode unknown field "wrapper" | wrapper argv prepended to full provider argv
-//	finding4_squad_tmux_env_rejected | 4 placement | AMQ_SQUAD_TMUX_* env rejected as provider env | placement preview; unsupported tuple -> placement_unsupported
+//	finding4_placement_unsupported | 4 placement | AMQ_SQUAD_TMUX_* env rejected as provider env | placement preview; unsupported tuple -> placement_unsupported
 //	finding5_positional_bootstrap_prompt / finding5_claude_allowed_tools / finding5_codex_dash_c | 5 materialized argv | raw positional prompt rejected; exact --allowedTools and -c forms admitted | initial_input + --allowedTools / -c admitted
 //	finding6_caller_context_unknown_field | 6 caller correlation | strict decode unknown field "caller_context" | caller_context echoed on Apply/evidence/lifecycle
 //	finding7_same_path_inode_replacement_not_subject_changed | 7 physical identity | same-path inode replacement leaves subject/plan/trust digests identical | inode replacement -> subject_changed
@@ -69,15 +69,31 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 		assertAdoptionArgumentAdmitted(t, exit, stdout, stderr, "senior-dev", "-c", "model_reasoning_effort=high")
 	})
 
-	t.Run("finding4_squad_tmux_env_rejected", func(t *testing.T) {
+	t.Run("finding4_placement_unsupported", func(t *testing.T) {
 		fx := newAdoptionSmokeFixture(t, amqBinary, ".agent-mail", "collab")
-		intent := fx.legalSquadIntent()
-		intent.Participants[1].EnvOverlay = map[string]string{
-			"AMQ_SQUAD_TMUX_TARGET":        "current-window",
-			"AMQ_SQUAD_TMUX_LAUNCHER_PANE": "%323",
+		intentPath := filepath.Join(t.TempDir(), "intent.json")
+		if err := os.WriteFile(intentPath, fx.intentJSON(t, fx.legalSquadIntent()), 0o600); err != nil {
+			t.Fatal(err)
 		}
-		stdout, stderr, exit := fx.prepare(t, intent, launch.LauncherCommands)
-		assertAdoptionDecodeRejection(t, exit, stdout, stderr, "AMQ_SQUAD_TMUX_")
+		stdout, stderr, exit := runRealAMQWithExit(t, fx.amqBinary, fx.project, fx.env,
+			"launch", "--plan", intentPath, "--prepare", "--json", "--launcher", launch.LauncherCommands,
+			"--session", fx.session, "--placement", `{"target":"current_window","layout":"columns","launcher_pane":"%323"}`)
+		if exit != ExitActionRequired {
+			t.Fatalf("Prepare unsupported placement exit=%d stdout=%s stderr=%s", exit, stdout, stderr)
+		}
+		var prepared launchapi.PrepareResultV1
+		decodeRealLaunchJSON(t, stdout, &prepared)
+		if prepared.Outcome != launchapi.PrepareOutcomeUnsupported || prepared.Reason != launch.PlacementUnsupportedReason {
+			t.Fatalf("Prepare placement = %#v stderr=%s", prepared, stderr)
+		}
+		if prepared.Preview.Placement == nil || prepared.Preview.Placement.Supported ||
+			prepared.Preview.Placement.ReasonCode != launch.PlacementUnsupportedReason ||
+			prepared.Preview.Placement.Requested == nil || prepared.Preview.Placement.Requested.LauncherPane != "%323" {
+			t.Fatalf("placement preview = %#v", prepared.Preview.Placement)
+		}
+		if _, err := os.Stat(launch.BindingPath(fx.sessionRoot)); !os.IsNotExist(err) {
+			t.Fatalf("unsupported placement mutated binding: %v", err)
+		}
 	})
 
 	t.Run("finding3_wrapper_unknown_field", func(t *testing.T) {

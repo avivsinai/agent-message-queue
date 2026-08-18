@@ -119,10 +119,38 @@ type TargetV1 struct {
 	Session     string `json:"session"`
 }
 
+type PlacementTargetV1 string
+type PlacementLayoutV1 string
+
+const (
+	PlacementCurrentWindow PlacementTargetV1 = "current_window"
+	PlacementNewWindow     PlacementTargetV1 = "new_window"
+	PlacementSession       PlacementTargetV1 = "session"
+
+	PlacementColumns PlacementLayoutV1 = "columns"
+	PlacementRows    PlacementLayoutV1 = "rows"
+	PlacementTiled   PlacementLayoutV1 = "tiled"
+)
+
+type PlacementV1 struct {
+	Target       PlacementTargetV1 `json:"target"`
+	Layout       PlacementLayoutV1 `json:"layout"`
+	StaggerMS    int               `json:"stagger_ms,omitempty"`
+	LauncherPane string            `json:"launcher_pane,omitempty"`
+}
+
+type PlacementPreviewV1 struct {
+	Requested  *PlacementV1 `json:"requested,omitempty"`
+	Effective  PlacementV1  `json:"effective"`
+	Supported  bool         `json:"supported"`
+	ReasonCode string       `json:"reason_code,omitempty"`
+}
+
 type PrepareRequestV1 struct {
 	RequestVersion int            `json:"request_version"`
 	Target         TargetV1       `json:"target"`
 	Launcher       string         `json:"launcher"`
+	Placement      *PlacementV1   `json:"placement,omitempty"`
 	Intent         LaunchIntentV1 `json:"intent"`
 }
 
@@ -186,6 +214,7 @@ type PreviewV1 struct {
 	Participants []ParticipantPreviewV1   `json:"participants"`
 	Roster       RosterDriftV1            `json:"roster"`
 	Capabilities []ProviderCapabilitiesV1 `json:"capabilities"`
+	Placement    *PlacementPreviewV1      `json:"placement,omitempty"`
 }
 
 type InitialInputKindV1 string

@@ -99,6 +99,7 @@ type PrepareRequest struct {
 	IntentDigest  string
 	Participants  []PrepareParticipant
 	SubjectSchema int
+	Placement     *Placement
 }
 
 type AdapterFactory func(provider, executable string) HarnessAdapter
@@ -171,6 +172,7 @@ type PrepareResult struct {
 	Roster          PrepareRoster
 	RequiredActions []PrepareRequiredAction
 	Observations    []PrepareObservation
+	Placement       PlacementPreview
 }
 
 type prepareTargetState struct {
@@ -253,6 +255,7 @@ type prepareSubject struct {
 	Actions         []PrepareRequiredAction   `json:"actions"`
 	Participants    []PreparedParticipant     `json:"participants"`
 	Observations    []PrepareObservation      `json:"observations"`
+	Placement       *PlacementPreview         `json:"placement,omitempty"`
 }
 
 // Prepare compiles public caller intent and inspects current launch state. It
@@ -275,6 +278,14 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	subjectSchema, err := normalizeSubjectSchema(request.SubjectSchema)
 	if err != nil {
 		return PrepareResult{}, err
+	}
+	if request.Placement != nil {
+		if subjectSchema == SubjectSchemaV1 {
+			return PrepareResult{}, fmt.Errorf("placement requires subject schema %d", SubjectSchemaV2)
+		}
+		if err := request.Placement.Validate(); err != nil {
+			return PrepareResult{}, err
+		}
 	}
 	amqPath, err := resolveLaunchAMQExecutable(dependencies.AMQPath)
 	if err != nil {
@@ -344,6 +355,12 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	if detect.Profile.Backend != "" {
 		result.Profile = detect.Profile.Identity()
 	}
+	placement, err := ResolvePlacement(backendName, request.Placement)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	result.Placement = placement
+	placementUnsupported := request.Placement != nil && !placement.Supported
 
 	plan := Plan{Version: PlanVersion, Agents: []AgentPlan{}}
 	for _, participant := range request.Participants {
@@ -351,11 +368,16 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 		if participantErr != nil {
 			return PrepareResult{}, participantErr
 		}
+		if placementUnsupported && prepared.Runnable {
+			prepared.PlannedOutcome = "unsupported"
+		}
 		result.Participants = append(result.Participants, prepared)
 		result.Observations = append(result.Observations, observation)
-		result.RequiredActions = append(result.RequiredActions, actions...)
-		if agentPlan != nil {
-			plan.Agents = append(plan.Agents, *agentPlan)
+		if !placementUnsupported {
+			result.RequiredActions = append(result.RequiredActions, actions...)
+			if agentPlan != nil {
+				plan.Agents = append(plan.Agents, *agentPlan)
+			}
 		}
 	}
 	applyBindingResources(result.Observations, binding)
@@ -363,14 +385,16 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 		return PrepareResult{}, err
 	}
 
-	result.RequiredActions = append(result.RequiredActions, prepareRebindActions(binding, bindingObservation, boundDetect, backendName, result.Profile, dependencies.HostIdentity)...)
-	for i := range result.RequiredActions {
-		result.RequiredActions[i].ActionID, err = prepareActionID(result.RequiredActions[i])
-		if err != nil {
-			return PrepareResult{}, err
+	if !placementUnsupported {
+		result.RequiredActions = append(result.RequiredActions, prepareRebindActions(binding, bindingObservation, boundDetect, backendName, result.Profile, dependencies.HostIdentity)...)
+		for i := range result.RequiredActions {
+			result.RequiredActions[i].ActionID, err = prepareActionID(result.RequiredActions[i])
+			if err != nil {
+				return PrepareResult{}, err
+			}
 		}
+		slices.SortFunc(result.RequiredActions, comparePrepareActions)
 	}
-	slices.SortFunc(result.RequiredActions, comparePrepareActions)
 
 	result.PlanDigest, err = PreparePlanDigest(plan)
 	if err != nil {
@@ -384,7 +408,7 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	if detect.Available && len(plan.Agents) > 0 {
+	if !placementUnsupported && detect.Available && len(plan.Agents) > 0 {
 		trusted, trustErr := loadPrepareTrust(dependencies.TrustStore, result.TrustDigest)
 		if trustErr != nil {
 			return PrepareResult{}, trustErr
@@ -408,6 +432,8 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	}
 
 	switch {
+	case placementUnsupported:
+		result.Outcome, result.Reason = PrepareOutcomeUnsupported, PlacementUnsupportedReason
 	case firstInitialInputUnsupported(result.Observations) != "":
 		result.Outcome, result.Reason = PrepareOutcomeUnsupported, firstInitialInputUnsupported(result.Observations)
 	case len(result.RequiredActions) > 0:
@@ -425,12 +451,17 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	if err := ctx.Err(); err != nil {
 		return PrepareResult{}, err
 	}
-	result.SubjectDigest, err = digestCanonical(prepareSubject{
+	subject := prepareSubject{
 		Version: subjectSchema, IntentDigest: request.IntentDigest, PlanDigest: result.PlanDigest, TrustDigest: result.TrustDigest,
 		Target: state.target, ProjectIdentity: state.projectIdentity, SessionIdentity: state.sessionIdentity,
 		Backend: result.Backend, Profile: result.Profile, Detection: detect, Binding: bindingObservation, Roster: result.Roster,
 		Actions: result.RequiredActions, Participants: result.Participants, Observations: result.Observations,
-	})
+	}
+	if subjectSchema == SubjectSchemaV2 {
+		placement := result.Placement
+		subject.Placement = &placement
+	}
+	result.SubjectDigest, err = digestCanonical(subject)
 	if err != nil {
 		return PrepareResult{}, err
 	}

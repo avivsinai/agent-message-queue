@@ -18,16 +18,19 @@ func TestCompatibilityAndNegotiateV1(t *testing.T) {
 	if Compatibility().Features[0] != "launch_intent_v1" {
 		t.Fatal("Compatibility returned shared mutable feature storage")
 	}
+	if !slices.Contains(Compatibility().Features, FeaturePlacement) {
+		t.Fatal("Compatibility omitted advertised placement")
+	}
+	if !slices.Contains(Compatibility().Features, FeatureInitialInput) {
+		t.Fatal("Compatibility did not advertise the completed initial_input feature")
+	}
 	for _, unfinished := range []string{
-		FeatureBaseRoot, FeatureOnLive, FeatureWrapper, FeaturePlacement,
+		FeatureBaseRoot, FeatureOnLive, FeatureWrapper,
 		FeatureCallerContext, FeatureExecutableIdentity,
 	} {
 		if slices.Contains(Compatibility().Features, unfinished) {
 			t.Fatalf("Compatibility advertised unfinished feature %q", unfinished)
 		}
-	}
-	if !slices.Contains(Compatibility().Features, FeatureInitialInput) {
-		t.Fatal("Compatibility did not advertise the completed initial_input feature")
 	}
 
 	negotiated, err := Negotiate(RequirementV1{
@@ -41,6 +44,15 @@ func TestCompatibilityAndNegotiateV1(t *testing.T) {
 	}
 	if !reflect.DeepEqual(negotiated.Features, []string{"launch_intent_v1", "managed_tmux_v1"}) {
 		t.Fatalf("negotiated features = %v", negotiated.Features)
+	}
+	placed, err := Negotiate(RequirementV1{
+		ContractSemver: "0.61.1", IntentVersion: 1, ResultVersion: 1, Features: []string{FeaturePlacement},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(placed.Features, []string{FeaturePlacement}) {
+		t.Fatalf("negotiated placement = %v", placed.Features)
 	}
 
 	if _, err := Negotiate(RequirementV1{ContractSemver: ">=0.61.0", IntentVersion: 1, ResultVersion: 1}); err != nil {

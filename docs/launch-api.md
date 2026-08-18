@@ -21,10 +21,10 @@ if err != nil {
 _ = negotiated
 ```
 
-A `0.61.1` binary can advertise only a subset of the Wave B3 feature IDs while
-the remaining implementation beads are incomplete. A caller must require every
-feature it uses. Contract semver alone does not claim that an unadvertised
-feature is available.
+A `0.61.1` binary advertises `placement` and `initial_input` and can still omit
+later Wave B3 feature IDs while those beads are incomplete. A caller must
+require every feature it uses. Contract semver alone does not claim that an
+unadvertised feature is available.
 
 `PreviewV1.capabilities` reports the selected providers' static adapter grammar
 without executing a caller-supplied provider. `grammar_version` is the
@@ -135,6 +135,12 @@ accepts the original Prepare request, the returned subject schema and digest,
 and one explicit decision for each required action. It recomputes the subject
 under that schema and fails closed if state changed.
 
+Omitted `placement` keeps the selected backend's v0.61 layout and still appears
+on `PreviewV1.placement.effective`. An explicit tuple the backend cannot
+realize returns `outcome: unsupported` and `reason: placement_unsupported`
+with zero planned backend mutation. Subject schema 2 binds that preview into
+`subject_digest`; schema 1 rejects an explicit placement field.
+
 ```go
 request := launchapi.PrepareRequestV1{
 	RequestVersion: launchapi.RequestVersionV1,
@@ -143,8 +149,11 @@ request := launchapi.PrepareRequestV1{
 		SessionRoot: "/workspace/project/.agent-mail/collab",
 		Session:     "collab",
 	},
-	Launcher: "commands",
-	Intent:   intent,
+	Launcher: "tmux",
+	Placement: &launchapi.PlacementV1{
+		Target: launchapi.PlacementCurrentWindow, Layout: launchapi.PlacementColumns, LauncherPane: "%17",
+	},
+	Intent: intent,
 }
 
 prepared, err := launchapi.Prepare(ctx, request)
