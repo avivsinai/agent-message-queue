@@ -2,6 +2,7 @@ package launch
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -129,11 +130,11 @@ func TestWrapperChangesPlanAndTrustDigests(t *testing.T) {
 
 func TestPrepareWrapperExecutableIdentityBindsV2SubjectOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seat-wrapper")
-	writeExec(t, path, "#!/bin/sh\necho one\n")
+	writeWrapperFixture(t, path, "#!/bin/sh\necho one\n")
 	fixture := newInternalPrepareFixture(t)
 	fixture.request.Participants[0].Wrapper = &Wrapper{Executable: path, Args: []string{"--profile", "lead"}}
 
-	first := prepareFixture(t, fixture, SubjectSchemaV2)
+	first := prepareWrapperFixture(t, fixture, SubjectSchemaV2)
 	if len(first.Participants) != 1 || first.Participants[0].Wrapper == nil {
 		t.Fatalf("v2 subject omitted wrapper identity: %#v", first.Participants)
 	}
@@ -151,11 +152,11 @@ func TestPrepareWrapperExecutableIdentityBindsV2SubjectOnly(t *testing.T) {
 	}
 
 	replacement := path + ".next"
-	writeExec(t, replacement, "#!/bin/sh\necho two\n")
+	writeWrapperFixture(t, replacement, "#!/bin/sh\necho two\n")
 	if err := os.Rename(replacement, path); err != nil {
 		t.Fatal(err)
 	}
-	second := prepareFixture(t, fixture, SubjectSchemaV2)
+	second := prepareWrapperFixture(t, fixture, SubjectSchemaV2)
 	if first.SubjectDigest == second.SubjectDigest {
 		t.Fatal("same-path wrapper replacement kept v2 subject digest")
 	}
@@ -164,12 +165,12 @@ func TestPrepareWrapperExecutableIdentityBindsV2SubjectOnly(t *testing.T) {
 			first.PlanDigest, first.TrustDigest, second.PlanDigest, second.TrustDigest)
 	}
 
-	v1First := prepareFixture(t, fixture, SubjectSchemaV1)
-	writeExec(t, replacement, "#!/bin/sh\necho tri\n")
+	v1First := prepareWrapperFixture(t, fixture, SubjectSchemaV1)
+	writeWrapperFixture(t, replacement, "#!/bin/sh\necho tri\n")
 	if err := os.Rename(replacement, path); err != nil {
 		t.Fatal(err)
 	}
-	v1Second := prepareFixture(t, fixture, SubjectSchemaV1)
+	v1Second := prepareWrapperFixture(t, fixture, SubjectSchemaV1)
 	if v1First.SubjectDigest != v1Second.SubjectDigest || v1First.PlanDigest != v1Second.PlanDigest || v1First.TrustDigest != v1Second.TrustDigest {
 		t.Fatalf("v1 wrapper replacement changed digests first=%s/%s/%s second=%s/%s/%s",
 			v1First.SubjectDigest, v1First.PlanDigest, v1First.TrustDigest,
@@ -187,4 +188,22 @@ func testWrapper(t *testing.T) *Wrapper {
 		t.Fatal(err)
 	}
 	return &Wrapper{Executable: path, Args: []string{"--profile", "lead"}}
+}
+
+func writeWrapperFixture(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func prepareWrapperFixture(t *testing.T, fixture internalPrepareFixture, schema int) PrepareResult {
+	t.Helper()
+	request := fixture.request
+	request.SubjectSchema = schema
+	result, err := Prepare(context.Background(), request, fixture.dependencies(&prepareTestBackend{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
