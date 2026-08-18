@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -12,7 +13,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/launchapi"
 )
 
-func runPublicLaunch(common *commonFlags, session, launcher, planSource string, prepareOnly bool, applySource string, fs *flag.FlagSet) error {
+func runPublicLaunch(common *commonFlags, session, launcher, planSource string, prepareOnly bool, applySource, placementJSON string, fs *flag.FlagSet) error {
 	planExplicit, applyExplicit := flagWasVisited(fs, "plan"), flagWasVisited(fs, "apply")
 	if prepareOnly && !planExplicit {
 		return UsageError("--prepare requires --plan")
@@ -28,6 +29,15 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 	}
 	if applyExplicit && (flagWasVisited(fs, "session") || flagWasVisited(fs, "launcher") || common.rootExplicit()) {
 		return UsageError("--apply takes its target and launcher from ApplyRequestV1")
+	}
+	if applyExplicit && flagWasVisited(fs, "placement") {
+		return UsageError("--apply takes placement from ApplyRequestV1")
+	}
+	if flagWasVisited(fs, "placement") && !planExplicit {
+		return UsageError("--placement requires --plan")
+	}
+	if flagWasVisited(fs, "placement") && strings.TrimSpace(placementJSON) == "" {
+		return UsageError("--placement must be a PlacementV1 JSON object")
 	}
 	if planExplicit && strings.TrimSpace(planSource) == "" {
 		return UsageError("--plan must name a file or -")
@@ -73,6 +83,13 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 		Target:         target,
 		Launcher:       strings.TrimSpace(launcher),
 		Intent:         intent,
+	}
+	if flagWasVisited(fs, "placement") {
+		placement, err := decodePublicPlacement(placementJSON)
+		if err != nil {
+			return err
+		}
+		request.Placement = placement
 	}
 	prepared, err := launchapi.Prepare(ctx, request)
 	if err != nil {
@@ -162,6 +179,26 @@ func resolvePublicLaunchTarget(common *commonFlags, session string) (launchapi.T
 		return launchapi.TargetV1{}, err
 	}
 	return launchapi.TargetV1{ProjectRoot: filepath.Clean(projectRoot), SessionRoot: filepath.Clean(root), Session: session}, nil
+}
+
+func decodePublicPlacement(raw string) (*launchapi.PlacementV1, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var placement launchapi.PlacementV1
+	if err := decoder.Decode(&placement); err != nil {
+		return nil, UsageError("placement: %v", err)
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, UsageError("placement: multiple JSON values")
+		}
+		return nil, UsageError("placement: %v", err)
+	}
+	if err := placement.Validate(); err != nil {
+		return nil, UsageError("placement: %v", err)
+	}
+	return &placement, nil
 }
 
 func readLaunchAPIDocument(source string) ([]byte, error) {

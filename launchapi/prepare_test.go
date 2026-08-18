@@ -167,6 +167,68 @@ func TestPrepareParticipantOnlyAbsentSessionDoesNotProvision(t *testing.T) {
 	}
 }
 
+func TestPrepareOmittedPlacementExposesLegacyPreview(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, true)
+	result, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Preview.Placement == nil || result.Preview.Placement.Requested != nil || !result.Preview.Placement.Supported {
+		t.Fatalf("omitted placement preview = %#v", result.Preview.Placement)
+	}
+	if result.Preview.Placement.Effective != (PlacementV1{Target: PlacementSession, Layout: PlacementColumns}) {
+		t.Fatalf("commands legacy placement = %#v", result.Preview.Placement.Effective)
+	}
+}
+
+func TestPrepareUnsupportedPlacementIsTypedAndZeroWrite(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, true)
+	before := snapshotTestTree(t, fixture.root)
+	fixture.request.Placement = &PlacementV1{
+		Target: PlacementCurrentWindow, Layout: PlacementColumns, LauncherPane: "%323",
+	}
+	result, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := snapshotTestTree(t, fixture.root); after != before {
+		t.Fatalf("unsupported placement Prepare changed filesystem: before %s, after %s", before, after)
+	}
+	if result.Outcome != PrepareOutcomeUnsupported || result.Reason != internallaunch.PlacementUnsupportedReason {
+		t.Fatalf("unsupported placement result = %#v", result)
+	}
+	if len(result.RequiredActions) != 0 {
+		t.Fatalf("unsupported placement required actions = %#v", result.RequiredActions)
+	}
+	if result.Preview.Placement == nil || result.Preview.Placement.Supported ||
+		result.Preview.Placement.ReasonCode != internallaunch.PlacementUnsupportedReason ||
+		result.Preview.Placement.Requested == nil || result.Preview.Placement.Requested.LauncherPane != "%323" {
+		t.Fatalf("unsupported placement preview = %#v", result.Preview.Placement)
+	}
+	if result.Preview.Participants[0].PlannedOutcome != "unsupported" {
+		t.Fatalf("planned outcome = %q", result.Preview.Participants[0].PlannedOutcome)
+	}
+}
+
+func TestPrepareExplicitPlacementChangesSubjectDigest(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, true)
+	omitted, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.request.Placement = &PlacementV1{Target: PlacementSession, Layout: PlacementColumns}
+	explicit, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicit.Outcome != PrepareOutcomeUnsupported {
+		t.Fatalf("commands explicit placement outcome = %s", explicit.Outcome)
+	}
+	if omitted.SubjectDigest == explicit.SubjectDigest {
+		t.Fatal("explicit placement left the v2 subject digest unchanged")
+	}
+}
+
 func TestPrepareUnavailableLauncherIsTypedAndDoesNotRequestTrust(t *testing.T) {
 	fixture := newPublicPrepareFixture(t, true)
 	launcher := unavailableManagedLauncher(t)

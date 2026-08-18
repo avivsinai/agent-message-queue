@@ -61,6 +61,7 @@ func prepareInputs(request PrepareRequestV1) (internallaunch.PrepareRequest, int
 			Session:     request.Target.Session,
 		},
 		Launcher: request.Launcher, IntentDigest: intentDigest, SubjectSchema: internallaunch.SubjectSchemaV2,
+		Placement:    toInternalPlacement(request.Placement),
 		Participants: make([]internallaunch.PrepareParticipant, 0, len(request.Intent.Participants)),
 	}
 	for _, participant := range request.Intent.Participants {
@@ -155,6 +156,8 @@ func fromInternalPrepareResult(result internallaunch.PrepareResult) PrepareResul
 		},
 		Observations: make([]ParticipantObservationV1, 0, len(result.Observations)),
 	}
+	placement := fromInternalPlacementPreview(result.Placement)
+	public.Preview.Placement = &placement
 	for _, action := range result.RequiredActions {
 		allowed := make([]DecisionChoiceV1, len(action.AllowedDecisions))
 		for i, choice := range action.AllowedDecisions {

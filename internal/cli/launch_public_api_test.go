@@ -181,6 +181,10 @@ func TestPublicLaunchModeFlagRefusals(t *testing.T) {
 		{name: "apply target override", args: []string{"--apply", "apply.json", "--session", "collab", "--json"}, want: "takes its target"},
 		{name: "legacy decision flag", args: []string{"--plan", "intent.json", "--fresh"}, want: "legacy launch decision flags"},
 		{name: "require agent is legacy only", args: []string{"--plan", "intent.json", "--require-agent"}, want: "legacy launch decision flags"},
+		{name: "placement without plan", args: []string{"--placement", `{"target":"session","layout":"columns"}`, "--json"}, want: "--placement requires --plan"},
+		{name: "apply with placement flag", args: []string{"--apply", "apply.json", "--json", "--placement", `{"target":"session","layout":"columns"}`}, want: "takes placement"},
+		{name: "empty placement", args: []string{"--plan", "intent.json", "--prepare", "--json", "--placement", ""}, want: "--placement must be a PlacementV1 JSON object"},
+		{name: "whitespace placement", args: []string{"--plan", "intent.json", "--prepare", "--json", "--placement", " \t"}, want: "--placement must be a PlacementV1 JSON object"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := runLaunch(test.args)
@@ -188,6 +192,29 @@ func TestPublicLaunchModeFlagRefusals(t *testing.T) {
 				t.Fatalf("error = %v, want usage containing %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestPublicLaunchPlacementRejectsTrailingJSON(t *testing.T) {
+	launchCLIFixture(t, "collab")
+	intent := launchapi.LaunchIntentV1{
+		IntentVersion: launchapi.IntentVersionV1,
+		Participants:  []launchapi.ParticipantV1{{Handle: "operator", Runnable: false}},
+	}
+	data, err := launchapi.MarshalLaunchIntentV1(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "intent.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = runLaunch([]string{
+		"--plan", path, "--prepare", "--json", "--launcher", "commands",
+		"--placement", `{"target":"session","layout":"columns"} {"target":"new_window","layout":"rows"}`,
+	})
+	if GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), "multiple JSON values") {
+		t.Fatalf("trailing placement JSON error = %v", err)
 	}
 }
 

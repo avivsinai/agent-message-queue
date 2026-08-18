@@ -104,6 +104,33 @@ func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 	}
 }
 
+func TestApplyUnsupportedPlacementDoesNotPublishSession(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, false)
+	fixture.request.Placement = &PlacementV1{
+		Target: PlacementCurrentWindow, Layout: PlacementColumns, LauncherPane: "%323",
+	}
+	prepared, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Outcome != PrepareOutcomeUnsupported {
+		t.Fatalf("prepare = %#v", prepared)
+	}
+	result, err := Apply(context.Background(), ApplyRequestV1{
+		RequestVersion: RequestVersionV1, Prepare: fixture.request,
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ReasonCode != internallaunch.PlacementUnsupportedReason {
+		t.Fatalf("Apply unsupported placement = %#v", result)
+	}
+	if _, err := os.Stat(fixture.request.Target.SessionRoot); !os.IsNotExist(err) {
+		t.Fatalf("unsupported placement published a session: %v", err)
+	}
+}
+
 func TestApplyResultMapsEvidenceRefsAndNonContractFailureDetail(t *testing.T) {
 	observed := time.Date(2026, 8, 17, 3, 4, 5, 0, time.UTC)
 	result := fromInternalApplyResult(internallaunch.ApplyResult{FailureDetail: "create tmux session: pane exited", Evidence: []internallaunch.EvidenceRef{{

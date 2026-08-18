@@ -40,6 +40,17 @@ func TestPublicRequestCodecsRejectUnknownAndMalformedAuthority(t *testing.T) {
 	if _, err := DecodePrepareRequestV1(raw); err == nil || !strings.Contains(err.Error(), "clean absolute") {
 		t.Fatalf("relative project root error = %v", err)
 	}
+
+	prepare.Target.ProjectRoot = root
+	prepare.Placement = &PlacementV1{Target: PlacementSession, Layout: PlacementColumns, LauncherPane: "%1"}
+	raw, _ = json.Marshal(prepare)
+	if _, err := DecodePrepareRequestV1(raw); err == nil || !strings.Contains(err.Error(), "launcher_pane") {
+		t.Fatalf("session launcher_pane error = %v", err)
+	}
+	hostilePlacement := strings.Replace(string(raw), `"launcher_pane":"%1"`, `"launcher_pane":"%1","window":"@1"`, 1)
+	if _, err := DecodePrepareRequestV1([]byte(hostilePlacement)); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("hostile placement error = %v", err)
+	}
 }
 
 func TestApplyRequestV1RejectsDigestAndDecisionReplayShapes(t *testing.T) {

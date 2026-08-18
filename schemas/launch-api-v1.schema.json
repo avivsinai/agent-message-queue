@@ -170,6 +170,28 @@
         "session": {"type": "string", "pattern": "^[a-z0-9_][a-z0-9_-]*$"}
       }
     },
+    "PlacementV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "layout"],
+      "properties": {
+        "target": {"enum": ["current_window", "new_window", "session"]},
+        "layout": {"enum": ["columns", "rows", "tiled"]},
+        "stagger_ms": {"type": "integer", "minimum": 0, "maximum": 60000},
+        "launcher_pane": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "PlacementPreviewV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["effective", "supported"],
+      "properties": {
+        "requested": {"$ref": "#/$defs/PlacementV1"},
+        "effective": {"$ref": "#/$defs/PlacementV1"},
+        "supported": {"type": "boolean"},
+        "reason_code": {"type": "string", "minLength": 1}
+      }
+    },
     "PrepareRequestV1": {
       "type": "object",
       "additionalProperties": false,
@@ -178,6 +200,7 @@
         "request_version": {"const": 1},
         "target": {"$ref": "#/$defs/TargetV1"},
         "launcher": {"type": "string", "minLength": 1},
+        "placement": {"$ref": "#/$defs/PlacementV1"},
         "intent": {"$ref": "#/$defs/LaunchIntentV1"}
       }
     },
@@ -244,7 +267,8 @@
         "profile": {"type": "string"},
         "participants": {"type": "array", "items": {"$ref": "#/$defs/ParticipantPreviewV1"}},
         "roster": {"$ref": "#/$defs/RosterDriftV1"},
-        "capabilities": {"type": "array", "items": {"$ref": "#/$defs/ProviderCapabilitiesV1"}}
+        "capabilities": {"type": "array", "items": {"$ref": "#/$defs/ProviderCapabilitiesV1"}},
+        "placement": {"$ref": "#/$defs/PlacementPreviewV1"}
       }
     },
     "ConfigOverrideCapabilityV1": {
