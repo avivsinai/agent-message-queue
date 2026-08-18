@@ -427,10 +427,13 @@ func TestStartWakeKeepsSharedReadyDirectoryForPostReadyWork(t *testing.T) {
 	readyPathLog := filepath.Join(dir, "ready-path.log")
 	postReady := filepath.Join(dir, "post-ready")
 	release := filepath.Join(dir, "release")
+	pidFile := filepath.Join(dir, "pid")
 	t.Setenv("AMQ_KEEPALIVE_READY_PATH_LOG", readyPathLog)
 	t.Setenv("AMQ_KEEPALIVE_POST_READY", postReady)
 	t.Setenv("AMQ_KEEPALIVE_RELEASE", release)
+	t.Setenv("AMQ_KEEPALIVE_PID", pidFile)
 	fakeAMQ := writeStartWakeExecutable(t, filepath.Join(dir, "amq"), `#!/bin/sh
+printf '%s' "$$" > "$AMQ_KEEPALIVE_PID"
 ready=""
 previous=""
 for arg in "$@"; do
@@ -444,6 +447,7 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 [ -d "${ready%/*}" ] || exit 12
 : > "$AMQ_KEEPALIVE_POST_READY"
 `)
+	registerDetachedWakeCleanup(t, pidFile, release)
 
 	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
 		Root: "/tmp/amq-root", Me: "codex", InjectVia: "/tmp/amq-keepalive",
@@ -641,6 +645,35 @@ func TestWaitForWakeReadyUsesRequestedTimeoutDeterministically(t *testing.T) {
 	}
 	if observedGrace != wakeProcessExitGrace {
 		t.Fatalf("observation grace = %s, want %s", observedGrace, wakeProcessExitGrace)
+	}
+}
+
+func TestWaitForWakeReadyDefaultsNonPositiveTimeoutDeterministically(t *testing.T) {
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			timeoutSignal := make(chan time.Time, 1)
+			timeoutSignal <- time.Time{}
+			var requested time.Duration
+			_, err := waitForWakeReadyWith(
+				context.Background(),
+				make(chan wakeProcessResult),
+				filepath.Join(t.TempDir(), "missing"),
+				timeout,
+				func(got time.Duration) wakeReadyTimer {
+					requested = got
+					return wakeReadyTimer{channel: timeoutSignal, stop: func() {}}
+				},
+				func(_ <-chan wakeProcessResult, _ string, _ time.Duration) (bool, bool, error) {
+					return false, false, nil
+				},
+			)
+			if err == nil || !strings.Contains(err.Error(), defaultWakeReadyTimeout.String()) {
+				t.Fatalf("waitForWakeReadyWith() error = %v, want default timeout", err)
+			}
+			if requested != defaultWakeReadyTimeout {
+				t.Fatalf("timer duration = %s, want %s", requested, defaultWakeReadyTimeout)
+			}
+		})
 	}
 }
 
@@ -958,6 +991,58 @@ func TestWakeStartupStderrReportsReadFailure(t *testing.T) {
 	}
 }
 
+func TestWakeStartupStderrWaitForDrainAcceptsAbsentCapture(t *testing.T) {
+	var absent *wakeStartupStderr
+	if err := absent.waitForDrain(time.Second); err != nil {
+		t.Fatalf("nil capture waitForDrain() error = %v", err)
+	}
+	if err := (&wakeStartupStderr{}).waitForDrain(time.Second); err != nil {
+		t.Fatalf("nil drain result waitForDrain() error = %v", err)
+	}
+}
+
+func TestReadBoundedWakeDiagnosticMarksOnlyBytesBeyondLimit(t *testing.T) {
+	const limit = 8
+	for _, tc := range []struct {
+		name       string
+		data       string
+		want       string
+		wantMarker bool
+	}{
+		{name: "exact limit", data: strings.Repeat("x", limit)},
+		{name: "one byte beyond", data: strings.Repeat("x", limit+1), wantMarker: true},
+		{
+			name:       "whitespace beyond limit",
+			data:       strings.Repeat(" ", limit+1),
+			want:       "[test diagnostic truncated after 8 bytes]",
+			wantMarker: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file, err := os.CreateTemp(t.TempDir(), "diagnostic-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := file.Close(); err != nil {
+					t.Errorf("close diagnostic file: %v", err)
+				}
+			}()
+			if _, err := file.WriteString(tc.data); err != nil {
+				t.Fatal(err)
+			}
+			got := readBoundedWakeDiagnostic(file, limit, "test diagnostic")
+			marker := "[test diagnostic truncated after 8 bytes]"
+			if strings.Contains(got, marker) != tc.wantMarker {
+				t.Fatalf("diagnostic = %q, marker presence want %v", got, tc.wantMarker)
+			}
+			if tc.want != "" && got != tc.want {
+				t.Fatalf("diagnostic = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNewWakeStartupStderrReportsMissingDirectory(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing", "readiness")
 	if _, err := newWakeStartupStderr(missing); err == nil ||
@@ -1064,9 +1149,13 @@ func TestWakeStartupStderrDetailReportsDrainFailure(t *testing.T) {
 		t.Fatalf("newWakeStartupStderr() error = %v", err)
 	}
 	t.Cleanup(capture.Close)
+	if _, err := capture.file.WriteAt([]byte("startup failure"), 0); err != nil {
+		t.Fatal(err)
+	}
 	got := wakeStartupStderrDetail(capture, errors.New("drain failed"))
-	if !strings.Contains(got, "stderr capture incomplete: drain failed") {
-		t.Fatalf("wakeStartupStderrDetail() = %q, want drain diagnostic", got)
+	want := "startup failure\n[stderr capture incomplete: drain failed]"
+	if got != want {
+		t.Fatalf("wakeStartupStderrDetail() = %q, want %q", got, want)
 	}
 }
 
@@ -1079,15 +1168,33 @@ func TestNewWakeReadyPathScavengesOnlyStaleMarkers(t *testing.T) {
 	}
 	oldMarker := filepath.Join(dir, "wake-old")
 	recentMarker := filepath.Join(dir, "wake-recent")
-	for _, path := range []string{oldMarker, recentMarker} {
+	boundaryMarker := filepath.Join(dir, "wake-boundary")
+	unrelatedFile := filepath.Join(dir, "notes")
+	unrelatedDir := filepath.Join(dir, "wake-directory")
+	for _, path := range []string{oldMarker, recentMarker, boundaryMarker, unrelatedFile} {
 		if err := os.WriteFile(path, []byte("ready"), 0o600); err != nil {
 			t.Fatalf("write marker: %v", err)
 		}
 	}
-	oldTime := time.Now().Add(-staleWakeReadyMarkerAge - time.Hour)
-	if err := os.Chtimes(oldMarker, oldTime, oldTime); err != nil {
-		t.Fatalf("age old marker: %v", err)
+	if err := os.Mkdir(unrelatedDir, 0o700); err != nil {
+		t.Fatalf("create unrelated directory: %v", err)
 	}
+	boundaryTime := time.Now().Add(-staleWakeReadyMarkerAge)
+	if err := os.Chtimes(boundaryMarker, boundaryTime, boundaryTime); err != nil {
+		t.Fatalf("age boundary marker: %v", err)
+	}
+	boundaryInfo, err := os.Stat(boundaryMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := boundaryInfo.ModTime().Add(staleWakeReadyMarkerAge)
+	oldTime := now.Add(-staleWakeReadyMarkerAge - time.Hour)
+	for _, path := range []string{oldMarker, unrelatedFile, unrelatedDir} {
+		if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+			t.Fatalf("age readiness entry %q: %v", path, err)
+		}
+	}
+	scavengeStaleWakeReadyMarkers(dir, now)
 	_, reserved, err := newWakeReadyPath()
 	if err != nil {
 		t.Fatalf("newWakeReadyPath: %v", err)
@@ -1100,8 +1207,54 @@ func TestNewWakeReadyPathScavengesOnlyStaleMarkers(t *testing.T) {
 	if _, err := os.Stat(oldMarker); !os.IsNotExist(err) {
 		t.Fatalf("old marker was not scavenged: %v", err)
 	}
+	if _, err := os.Stat(boundaryMarker); !os.IsNotExist(err) {
+		t.Fatalf("boundary marker was not scavenged: %v", err)
+	}
 	if _, err := os.Stat(recentMarker); err != nil {
 		t.Fatalf("recent marker was scavenged: %v", err)
+	}
+	for _, path := range []string{unrelatedFile, unrelatedDir} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("unrelated readiness entry %q was scavenged: %v", path, err)
+		}
+	}
+}
+
+func TestNewWakeReadyPathRejectsSymlinkAndRegularFile(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		make func(*testing.T, string)
+	}{
+		{
+			name: "symlink",
+			make: func(t *testing.T, path string) {
+				target := t.TempDir()
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "regular file",
+			make: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cache := t.TempDir()
+			t.Setenv("AMQ_KEEPALIVE_CACHE_DIR", cache)
+			parent := filepath.Join(cache, "amq-keepalive")
+			if err := os.Mkdir(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tc.make(t, filepath.Join(parent, "readiness"))
+			if _, _, err := newWakeReadyPath(); err == nil {
+				t.Fatal("newWakeReadyPath() accepted non-directory readiness path")
+			}
+		})
 	}
 }
 
@@ -1302,21 +1455,50 @@ func registerDetachedWakeCleanup(t *testing.T, pidFile string, gates ...string) 
 		if !ok {
 			return
 		}
-		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) {
-			running, err := fakeWakeProcessRunning(pid)
-			if err != nil {
-				t.Errorf("inspect detached fake wake pid %d: %v", pid, err)
-				return
-			}
-			if !running {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
+		if exited, err := waitForFakeWakeExit(pid, 2*time.Second); err != nil {
+			t.Errorf("inspect detached fake wake pid %d: %v", pid, err)
+			return
+		} else if exited {
+			return
 		}
-		_ = exec.Command("kill", "-TERM", strconv.Itoa(pid)).Run()
-		t.Errorf("detached fake wake pid %d did not exit after cleanup", pid)
+		forceStopDetachedWakeForTest(t, pid)
 	})
+}
+
+func forceStopDetachedWakeForTest(t *testing.T, pid int) {
+	t.Helper()
+	t.Errorf("detached fake wake pid %d did not exit through cooperative cleanup", pid)
+	// StartWake intentionally detaches its child into a new session. Kill the
+	// complete test-owned session so a mutant cannot strand the shell or one
+	// of its sleep children after bypassing the cooperative release gates.
+	_ = exec.Command("kill", "-TERM", "-"+strconv.Itoa(pid)).Run()
+	if exited, err := waitForFakeWakeExit(pid, 500*time.Millisecond); err != nil {
+		t.Errorf("inspect detached fake wake pid %d after SIGTERM: %v", pid, err)
+		return
+	} else if exited {
+		return
+	}
+	_ = exec.Command("kill", "-KILL", "-"+strconv.Itoa(pid)).Run()
+	if exited, err := waitForFakeWakeExit(pid, 2*time.Second); err != nil {
+		t.Errorf("inspect detached fake wake pid %d after SIGKILL: %v", pid, err)
+	} else if !exited {
+		t.Errorf("detached fake wake pid %d survived unconditional cleanup", pid)
+	}
+}
+
+func waitForFakeWakeExit(pid int, timeout time.Duration) (bool, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		running, err := fakeWakeProcessRunning(pid)
+		if err != nil {
+			return false, err
+		}
+		if !running {
+			return true, nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false, nil
 }
 
 func fakeWakeProcessRunning(pid int) (bool, error) {

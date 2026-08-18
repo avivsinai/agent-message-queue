@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -351,8 +350,10 @@ func TestStartWakeRealAMQBinaryBecomesReadyAndMatchesTarget(t *testing.T) {
 	// This just guarantees no detached daemon survives if an earlier
 	// assertion aborts the test before that point.
 	t.Cleanup(func() {
-		if killErr := exec.Command("kill", "-0", strconv.Itoa(lock.PID)).Run(); killErr == nil {
-			_ = exec.Command("kill", "-TERM", strconv.Itoa(lock.PID)).Run()
+		if running, runErr := fakeWakeProcessRunning(lock.PID); runErr != nil {
+			t.Errorf("inspect real wake pid %d during cleanup: %v", lock.PID, runErr)
+		} else if running {
+			forceStopDetachedWakeForTest(t, lock.PID)
 		}
 	})
 

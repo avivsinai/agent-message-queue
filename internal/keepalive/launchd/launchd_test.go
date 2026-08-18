@@ -215,6 +215,101 @@ func TestUninstallRefusesForeignPlist(t *testing.T) {
 	}
 }
 
+func TestInstallAndUninstallRequireEveryOwnershipMarker(t *testing.T) {
+	const label = "com.example.amq-keepalive"
+	base := Options{
+		Label:        label,
+		BinaryPath:   "/bin/echo",
+		RegistryPath: "/tmp/registry.json",
+		AMQPath:      "/bin/echo",
+		Interval:     time.Second,
+		StdoutPath:   "/tmp/out.log",
+		StderrPath:   "/tmp/err.log",
+	}
+	owned := BuildPlist(base)
+	markers := []string{
+		"<key>Label</key>",
+		"<string>" + label + "</string>",
+		"<key>ProgramArguments</key>",
+		"<string>supervise</string>",
+		"<string>--registry</string>",
+		"<string>--amq</string>",
+		"<string>--self</string>",
+	}
+	for _, marker := range markers {
+		t.Run(marker, func(t *testing.T) {
+			foreign := bytes.Replace(owned, []byte(marker), nil, 1)
+			if bytes.Equal(foreign, owned) {
+				t.Fatalf("marker %q was not present in owned plist", marker)
+			}
+
+			installPath := filepath.Join(t.TempDir(), "install.plist")
+			if err := os.WriteFile(installPath, foreign, 0o644); err != nil {
+				t.Fatalf("WriteFile install fixture: %v", err)
+			}
+			installOpts := base
+			installOpts.PlistPath = installPath
+			if err := Install(context.Background(), installOpts); err == nil {
+				t.Fatalf("Install accepted plist missing %q", marker)
+			}
+			got, err := os.ReadFile(installPath)
+			if err != nil || !bytes.Equal(got, foreign) {
+				t.Fatalf("Install changed foreign plist: err=%v bytes=%q", err, got)
+			}
+
+			uninstallPath := filepath.Join(t.TempDir(), "uninstall.plist")
+			if err := os.WriteFile(uninstallPath, foreign, 0o644); err != nil {
+				t.Fatalf("WriteFile uninstall fixture: %v", err)
+			}
+			if err := Uninstall(context.Background(), label, uninstallPath, false); err == nil {
+				t.Fatalf("Uninstall accepted plist missing %q", marker)
+			}
+			got, err = os.ReadFile(uninstallPath)
+			if err != nil || !bytes.Equal(got, foreign) {
+				t.Fatalf("Uninstall changed foreign plist: err=%v bytes=%q", err, got)
+			}
+		})
+	}
+}
+
+func TestNormalizeOptionsFillsIndependentDefaults(t *testing.T) {
+	dir := t.TempDir()
+	amqPath := filepath.Join(dir, "amq")
+	if err := os.WriteFile(amqPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile amq: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	normalized, err := NormalizeOptions(Options{
+		BinaryPath:   "/bin/echo",
+		RegistryPath: filepath.Join(dir, "registry.json"),
+		StdoutPath:   filepath.Join(dir, "explicit.out"),
+	})
+	if err != nil {
+		t.Fatalf("NormalizeOptions: %v", err)
+	}
+	if normalized.Label != DefaultLabel || normalized.AMQPath != amqPath || normalized.Interval != time.Minute {
+		t.Fatalf("defaults = %+v", normalized)
+	}
+	if normalized.StdoutPath != filepath.Join(dir, "explicit.out") || normalized.StderrPath == "" {
+		t.Fatalf("log defaults = stdout %q stderr %q", normalized.StdoutPath, normalized.StderrPath)
+	}
+
+	explicitStderr := filepath.Join(dir, "explicit.err")
+	normalized, err = NormalizeOptions(Options{
+		BinaryPath:   "/bin/echo",
+		RegistryPath: filepath.Join(dir, "registry.json"),
+		AMQPath:      amqPath,
+		StderrPath:   explicitStderr,
+	})
+	if err != nil {
+		t.Fatalf("NormalizeOptions partial logs: %v", err)
+	}
+	if normalized.StdoutPath == "" || normalized.StderrPath != explicitStderr {
+		t.Fatalf("partial log defaults = stdout %q stderr %q", normalized.StdoutPath, normalized.StderrPath)
+	}
+}
+
 func TestServiceTargetUsesLaunchdLabelTarget(t *testing.T) {
 	want := "gui/" + strconv.Itoa(os.Getuid()) + "/com.example.amq-keepalive"
 	if got := serviceTarget("com.example.amq-keepalive"); got != want {
