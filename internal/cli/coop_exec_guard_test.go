@@ -12,8 +12,33 @@ import (
 )
 
 func guardTestProcessReplacement() {
-	coopExecProcess = func(path string, _ []string, _ []string) error {
-		return fmt.Errorf("test attempted unguarded process replacement with %q", path)
+	coopExecProcess = guardedTestProcessReplacement("coopExecProcess")
+	launchExecProcess = guardedTestProcessReplacement("launchExecProcess")
+	wakeRestartExec = guardedTestProcessReplacement("wakeRestartExec")
+}
+
+func guardedTestProcessReplacement(seam string) func(string, []string, []string) error {
+	return func(path string, _ []string, _ []string) error {
+		return fmt.Errorf("test attempted unguarded %s process replacement with %q", seam, path)
+	}
+}
+
+func TestProcessReplacementGuardCoversEveryExecSeam(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		exec func(string, []string, []string) error
+	}{
+		{name: "coopExecProcess", exec: coopExecProcess},
+		{name: "launchExecProcess", exec: launchExecProcess},
+		{name: "wakeRestartExec", exec: wakeRestartExec},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "must-not-exec")
+			err := tc.exec(path, []string{path}, os.Environ())
+			if err == nil || !strings.Contains(err.Error(), "test attempted unguarded "+tc.name+" process replacement") || !strings.Contains(err.Error(), path) {
+				t.Fatalf("unguarded %s error = %v, want loud test-process replacement refusal", tc.name, err)
+			}
+		})
 	}
 }
 
