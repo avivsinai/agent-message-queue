@@ -59,7 +59,7 @@ func prepareInputs(request PrepareRequestV1) (internallaunch.PrepareRequest, int
 			SessionRoot: request.Target.SessionRoot,
 			Session:     request.Target.Session,
 		},
-		Launcher: request.Launcher, IntentDigest: intentDigest,
+		Launcher: request.Launcher, IntentDigest: intentDigest, SubjectSchema: internallaunch.SubjectSchemaV2,
 		Participants: make([]internallaunch.PrepareParticipant, 0, len(request.Intent.Participants)),
 	}
 	for _, participant := range request.Intent.Participants {
@@ -136,7 +136,7 @@ func toInternalExecutionOptions(options ExecutionOptionsV1) internallaunch.Prepa
 
 func fromInternalPrepareResult(result internallaunch.PrepareResult) PrepareResultV1 {
 	public := PrepareResultV1{
-		ResultVersion: ResultVersionV1, Outcome: result.Outcome, Reason: result.Reason,
+		ResultVersion: ResultVersionV1, SubjectSchema: result.SubjectSchema, Outcome: result.Outcome, Reason: result.Reason,
 		SubjectDigest: result.SubjectDigest, PlanDigest: result.PlanDigest, TrustDigest: result.TrustDigest,
 		RequiredActions: make([]RequiredActionV1, 0, len(result.RequiredActions)),
 		Preview: PreviewV1{
@@ -147,6 +147,7 @@ func fromInternalPrepareResult(result internallaunch.PrepareResult) PrepareResul
 				Desired: slices.Clone(result.Roster.Desired), Present: slices.Clone(result.Roster.Present),
 				Missing: slices.Clone(result.Roster.Missing), Extra: slices.Clone(result.Roster.Extra),
 			},
+			Capabilities: make([]ProviderCapabilitiesV1, 0),
 		},
 		Observations: make([]ParticipantObservationV1, 0, len(result.Observations)),
 	}

@@ -42,6 +42,8 @@ const (
 	PrepareOutcomeReady          = "ready"
 	PrepareOutcomeActionRequired = "action_required"
 	PrepareOutcomeUnsupported    = "unsupported"
+	SubjectSchemaV1              = 1
+	SubjectSchemaV2              = 2
 )
 
 type RequiredActionKind string
@@ -85,10 +87,11 @@ type PrepareParticipant struct {
 }
 
 type PrepareRequest struct {
-	Target       PrepareTarget
-	Launcher     string
-	IntentDigest string
-	Participants []PrepareParticipant
+	Target        PrepareTarget
+	Launcher      string
+	IntentDigest  string
+	Participants  []PrepareParticipant
+	SubjectSchema int
 }
 
 type AdapterFactory func(provider, executable string) HarnessAdapter
@@ -150,6 +153,7 @@ type PrepareObservation struct {
 type PrepareResult struct {
 	Outcome         string
 	Reason          string
+	SubjectSchema   int
 	SubjectDigest   string
 	PlanDigest      string
 	TrustDigest     string
@@ -261,6 +265,10 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	if len(request.Participants) == 0 {
 		return PrepareResult{}, fmt.Errorf("prepare requires at least one participant")
 	}
+	subjectSchema, err := normalizeSubjectSchema(request.SubjectSchema)
+	if err != nil {
+		return PrepareResult{}, err
+	}
 	amqPath, err := resolveLaunchAMQExecutable(dependencies.AMQPath)
 	if err != nil {
 		return PrepareResult{}, err
@@ -322,7 +330,7 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 		return PrepareResult{}, err
 	}
 	result := PrepareResult{
-		Target: state.target, Backend: backendName, Roster: roster,
+		SubjectSchema: subjectSchema, Target: state.target, Backend: backendName, Roster: roster,
 		Participants: make([]PreparedParticipant, 0, len(request.Participants)),
 		Observations: make([]PrepareObservation, 0, len(request.Participants)+len(roster.Extra)),
 	}
@@ -405,7 +413,7 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 		return PrepareResult{}, err
 	}
 	result.SubjectDigest, err = digestCanonical(prepareSubject{
-		Version: 1, IntentDigest: request.IntentDigest, PlanDigest: result.PlanDigest, TrustDigest: result.TrustDigest,
+		Version: subjectSchema, IntentDigest: request.IntentDigest, PlanDigest: result.PlanDigest, TrustDigest: result.TrustDigest,
 		Target: state.target, ProjectIdentity: state.projectIdentity, SessionIdentity: state.sessionIdentity,
 		Backend: result.Backend, Profile: result.Profile, Detection: detect, Binding: bindingObservation, Roster: result.Roster,
 		Actions: result.RequiredActions, Participants: result.Participants, Observations: result.Observations,
@@ -414,6 +422,16 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 		return PrepareResult{}, err
 	}
 	return result, nil
+}
+
+func normalizeSubjectSchema(schema int) (int, error) {
+	if schema == 0 {
+		return SubjectSchemaV2, nil
+	}
+	if schema != SubjectSchemaV1 && schema != SubjectSchemaV2 {
+		return 0, fmt.Errorf("unsupported subject schema %d", schema)
+	}
+	return schema, nil
 }
 
 func openPrepareTarget(target PrepareTarget) (*prepareTargetState, error) {

@@ -41,6 +41,7 @@ type ApplyResult struct {
 	Outcome         string
 	ReasonCode      string
 	FailureDetail   string
+	SubjectSchema   int
 	SubjectDigest   string
 	PlanDigest      string
 	TrustDigest     string
@@ -559,7 +560,7 @@ func applyActionResult(prepared PrepareResult, reason string) ApplyResult {
 
 func applyResultFromPrepare(prepared PrepareResult) ApplyResult {
 	return ApplyResult{
-		SubjectDigest: prepared.SubjectDigest, PlanDigest: prepared.PlanDigest, TrustDigest: prepared.TrustDigest,
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, PlanDigest: prepared.PlanDigest, TrustDigest: prepared.TrustDigest,
 		Backend: prepared.Backend, Profile: prepared.Profile, Roster: prepared.Roster,
 		Observations: slices.Clone(prepared.Observations), RequiredActions: slices.Clone(prepared.RequiredActions),
 	}

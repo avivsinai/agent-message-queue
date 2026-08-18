@@ -9,7 +9,13 @@ const (
 	IntentVersionV1  = 1
 	RequestVersionV1 = 1
 	ResultVersionV1  = 1
+	SubjectSchemaV1  = 1
+	SubjectSchemaV2  = 2
 )
+
+type ResultHintV1 string
+
+const HintReprepareRecommended ResultHintV1 = "reprepare_recommended"
 
 const (
 	PrepareOutcomeReady          = "ready"
@@ -173,11 +179,33 @@ type ParticipantPreviewV1 struct {
 }
 
 type PreviewV1 struct {
-	Target       TargetV1               `json:"target"`
-	Backend      string                 `json:"backend"`
-	Profile      string                 `json:"profile"`
-	Participants []ParticipantPreviewV1 `json:"participants"`
-	Roster       RosterDriftV1          `json:"roster"`
+	Target       TargetV1                 `json:"target"`
+	Backend      string                   `json:"backend"`
+	Profile      string                   `json:"profile"`
+	Participants []ParticipantPreviewV1   `json:"participants"`
+	Roster       RosterDriftV1            `json:"roster"`
+	Capabilities []ProviderCapabilitiesV1 `json:"capabilities"`
+}
+
+type InitialInputKindV1 string
+
+const (
+	InitialInputArgument InitialInputKindV1 = "argument"
+	InitialInputStdin    InitialInputKindV1 = "stdin"
+	InitialInputFile     InitialInputKindV1 = "file"
+)
+
+type ConfigOverrideCapabilityV1 struct {
+	Key           string   `json:"key"`
+	AllowedValues []string `json:"allowed_values"`
+}
+
+type ProviderCapabilitiesV1 struct {
+	Provider             string                       `json:"provider"`
+	ProviderVersion      string                       `json:"provider_version"`
+	AllowedArgumentForms []string                     `json:"allowed_argument_forms"`
+	ConfigOverrides      []ConfigOverrideCapabilityV1 `json:"config_overrides"`
+	InitialInputKinds    []InitialInputKindV1         `json:"initial_input_kinds"`
 }
 
 type ParticipantObservationV1 struct {
@@ -192,6 +220,7 @@ type ParticipantObservationV1 struct {
 
 type PrepareResultV1 struct {
 	ResultVersion   int                        `json:"result_version"`
+	SubjectSchema   int                        `json:"subject_schema"`
 	Outcome         string                     `json:"outcome"`
 	Reason          string                     `json:"reason,omitempty"`
 	SubjectDigest   string                     `json:"subject_digest"`
@@ -210,6 +239,7 @@ type DecisionV1 struct {
 type ApplyRequestV1 struct {
 	RequestVersion int              `json:"request_version"`
 	Prepare        PrepareRequestV1 `json:"prepare"`
+	SubjectSchema  int              `json:"subject_schema,omitempty"`
 	SubjectDigest  string           `json:"subject_digest"`
 	Decisions      []DecisionV1     `json:"decisions"`
 }
@@ -223,9 +253,11 @@ type EvidenceRefV1 struct {
 }
 
 type ApplyResultV1 struct {
-	ResultVersion int    `json:"result_version"`
-	Outcome       string `json:"outcome"`
-	ReasonCode    string `json:"reason_code,omitempty"`
+	ResultVersion int            `json:"result_version"`
+	SubjectSchema int            `json:"subject_schema"`
+	Outcome       string         `json:"outcome"`
+	ReasonCode    string         `json:"reason_code,omitempty"`
+	Hints         []ResultHintV1 `json:"hints,omitempty"`
 	// FailureDetail is non-contract diagnostic prose for CLI stderr. It is
 	// deliberately excluded from the versioned JSON DTO.
 	FailureDetail string `json:"-"`
@@ -288,3 +320,13 @@ type NegotiatedV1 struct {
 	ResultVersion  int      `json:"result_version"`
 	Features       []string `json:"features"`
 }
+
+const (
+	FeatureBaseRoot           = "base_root"
+	FeatureOnLive             = "on_live"
+	FeatureWrapper            = "wrapper"
+	FeaturePlacement          = "placement"
+	FeatureInitialInput       = "initial_input"
+	FeatureCallerContext      = "caller_context"
+	FeatureExecutableIdentity = "executable_identity"
+)

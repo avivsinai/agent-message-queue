@@ -26,6 +26,7 @@ func TestLaunchAPIV1SchemaContract(t *testing.T) {
 		"LaunchIntentV1", "ParticipantV1", "WorkingDirectoryV1", "ExecutionOptionsV1",
 		"WakeOptionsV1", "InjectorOptionsV1", "IntegrationsV1", "SymphonyOptionsV1",
 		"TargetV1", "PrepareRequestV1", "PrepareResultV1", "ApplyRequestV1", "ApplyResultV1",
+		"ConfigOverrideCapabilityV1", "ProviderCapabilitiesV1",
 		"DecisionV1", "ParticipantObservationV1", "CompatibilityV1", "RequirementV1", "NegotiatedV1",
 		"InspectRequestV1", "FocusRequestV1", "CloseRequestV1",
 		"InspectResultV1", "FocusResultV1", "CloseResultV1",
@@ -42,6 +43,12 @@ func TestLaunchAPIV1SchemaContract(t *testing.T) {
 	}
 
 	assertSchemaPropertiesMatchType(t, defs, "LaunchIntentV1", reflect.TypeFor[LaunchIntentV1]())
+	assertSchemaPropertiesMatchType(t, defs, "PreviewV1", reflect.TypeFor[PreviewV1]())
+	assertSchemaPropertiesMatchType(t, defs, "ConfigOverrideCapabilityV1", reflect.TypeFor[ConfigOverrideCapabilityV1]())
+	assertSchemaPropertiesMatchType(t, defs, "ProviderCapabilitiesV1", reflect.TypeFor[ProviderCapabilitiesV1]())
+	assertSchemaPropertiesMatchType(t, defs, "PrepareResultV1", reflect.TypeFor[PrepareResultV1]())
+	assertSchemaPropertiesMatchType(t, defs, "ApplyRequestV1", reflect.TypeFor[ApplyRequestV1]())
+	assertSchemaPropertiesMatchType(t, defs, "ApplyResultV1", reflect.TypeFor[ApplyResultV1]())
 	runnableFields := jsonFieldNames(reflect.TypeFor[ParticipantV1]())
 	assertStringSetsEqual(t, schemaPropertyNames(t, defs, "RunnableParticipantV1"), runnableFields, "runnable participant fields")
 	assertStringSetsEqual(
@@ -111,7 +118,7 @@ func TestApplyResultMatchesPublishedSchema(t *testing.T) {
 	}
 	result, err := Apply(context.Background(), ApplyRequestV1{
 		RequestVersion: RequestVersionV1, Prepare: fixture.request,
-		SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
 	})
 	if err != nil {
 		t.Fatal(err)

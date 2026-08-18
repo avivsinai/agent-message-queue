@@ -11,10 +11,46 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
+
+func TestPrepareRejectsUnknownSubjectSchemaBeforeInspection(t *testing.T) {
+	_, err := Prepare(context.Background(), PrepareRequest{
+		IntentDigest:  "sha256:" + strings.Repeat("a", 64),
+		Participants:  []PrepareParticipant{{Handle: "operator"}},
+		SubjectSchema: 3,
+	}, PrepareDependencies{})
+	if err == nil || !strings.Contains(err.Error(), "unsupported subject schema") {
+		t.Fatalf("Prepare error = %v", err)
+	}
+}
+
+func TestPrepareSubjectSchemasProduceDistinctDigestsForSameState(t *testing.T) {
+	fixture := newInternalPrepareFixture(t)
+	v1Request := fixture.request
+	v1Request.SubjectSchema = SubjectSchemaV1
+	v1, err := Prepare(context.Background(), v1Request, fixture.dependencies(&prepareTestBackend{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2Request := fixture.request
+	v2Request.SubjectSchema = SubjectSchemaV2
+	v2, err := Prepare(context.Background(), v2Request, fixture.dependencies(&prepareTestBackend{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v1.SubjectSchema != SubjectSchemaV1 || v2.SubjectSchema != SubjectSchemaV2 {
+		t.Fatalf("subject schemas = %d/%d", v1.SubjectSchema, v2.SubjectSchema)
+	}
+	if v1.PlanDigest != v2.PlanDigest || v1.TrustDigest != v2.TrustDigest || v1.SubjectDigest == v2.SubjectDigest {
+		t.Fatalf("same-state digests: plan equal=%t trust equal=%t subject different=%t\nv1=%s\nv2=%s",
+			v1.PlanDigest == v2.PlanDigest, v1.TrustDigest == v2.TrustDigest, v1.SubjectDigest != v2.SubjectDigest,
+			v1.SubjectDigest, v2.SubjectDigest)
+	}
+}
 
 func TestPrepareOwningLayerIsZeroWriteAndBuildsTypedActions(t *testing.T) {
 	fixture := newInternalPrepareFixture(t)

@@ -21,6 +21,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/launchapi"
 )
 
+const launchContractV061BaselineCommit = "46fa8e03599f7e7d56b021f91752048838778bce"
+
 func TestCompatibilityFloorAndEndToEndMatrix(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and executes the real amq binary")
@@ -38,7 +40,7 @@ func TestCompatibilityFloorAndEndToEndMatrix(t *testing.T) {
 	}
 
 	t.Run("compatibility floor", func(t *testing.T) {
-		if launchapi.Compatibility().ContractSemver != "0.61.0" {
+		if launchapi.Compatibility().ContractSemver != "0.61.1" {
 			t.Fatalf("contract floor = %q", launchapi.Compatibility().ContractSemver)
 		}
 		if _, err := launchapi.Negotiate(launchapi.RequirementV1{
@@ -199,6 +201,109 @@ func TestCompatibilityFloorAndEndToEndMatrix(t *testing.T) {
 			t.Fatalf("tmux readback = %#v", readback)
 		}
 	})
+}
+
+func TestV061PrepareV0611ApplyCompatibility(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and executes two real amq binaries")
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	currentBinary := filepath.Join(binDir, "amq-v0611")
+	buildCurrent := exec.Command("go", "build", "-o", currentBinary, "./cmd/amq")
+	buildCurrent.Dir = repoRoot
+	if output, err := buildCurrent.CombinedOutput(); err != nil {
+		t.Fatalf("build v0.61.1 contract binary: %v\n%s", err, output)
+	}
+	legacyBinary := buildHistoricalLaunchBinary(t, repoRoot, binDir, launchContractV061BaselineCommit)
+
+	fixture := newPublicLaunchE2EFixture(t, binDir, launch.LauncherCommands)
+	intent := launchapi.LaunchIntentV1{
+		IntentVersion: launchapi.IntentVersionV1,
+		Participants:  []launchapi.ParticipantV1{{Handle: "operator", Runnable: false}},
+	}
+	intentPath := writeLaunchIntentE2E(t, intent)
+	env := fixture.env()
+	stdout, stderr, exit := runRealAMQWithExit(t, legacyBinary, fixture.project, env,
+		"launch", "--plan", intentPath, "--prepare", "--json", "--launcher", "commands")
+	if exit != 0 {
+		t.Fatalf("v0.61.0 Prepare exit=%d stderr=%s stdout=%s", exit, stderr, stdout)
+	}
+	var legacyPrepared struct {
+		SubjectDigest string `json:"subject_digest"`
+	}
+	if err := json.Unmarshal(stdout, &legacyPrepared); err != nil {
+		t.Fatalf("decode v0.61.0 Prepare: %v\n%s", err, stdout)
+	}
+	if legacyPrepared.SubjectDigest == "" || bytes.Contains(stdout, []byte(`"subject_schema"`)) {
+		t.Fatalf("legacy Prepare shape changed: %s", stdout)
+	}
+	request := fixture.request(intent, launch.LauncherCommands)
+	applyData, err := json.Marshal(struct {
+		RequestVersion int                        `json:"request_version"`
+		Prepare        launchapi.PrepareRequestV1 `json:"prepare"`
+		SubjectDigest  string                     `json:"subject_digest"`
+		Decisions      []launchapi.DecisionV1     `json:"decisions"`
+	}{
+		RequestVersion: launchapi.RequestVersionV1,
+		Prepare:        request,
+		SubjectDigest:  legacyPrepared.SubjectDigest,
+		Decisions:      []launchapi.DecisionV1{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPath := filepath.Join(t.TempDir(), "legacy-apply.json")
+	if err := os.WriteFile(applyPath, applyData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, exit = runRealAMQWithExit(t, currentBinary, fixture.project, env,
+		"launch", "--apply", applyPath, "--json")
+	if exit != 0 {
+		t.Fatalf("v0.61.1 Apply exit=%d stderr=%s stdout=%s", exit, stderr, stdout)
+	}
+	var applied launchapi.ApplyResultV1
+	decodeRealLaunchJSON(t, stdout, &applied)
+	if applied.ReasonCode == "subject_changed" || applied.SubjectSchema != launchapi.SubjectSchemaV1 ||
+		!slices.Equal(applied.Hints, []launchapi.ResultHintV1{launchapi.HintReprepareRecommended}) {
+		t.Fatalf("cross-version Apply = %#v", applied)
+	}
+
+	stdout, stderr, exit = runRealAMQWithExit(t, currentBinary, fixture.project, env,
+		"launch", "--plan", intentPath, "--prepare", "--json", "--launcher", "commands")
+	if exit != 0 {
+		t.Fatalf("v0.61.1 re-Prepare exit=%d stderr=%s stdout=%s", exit, stderr, stdout)
+	}
+	var upgraded launchapi.PrepareResultV1
+	decodeRealLaunchJSON(t, stdout, &upgraded)
+	if upgraded.SubjectSchema != launchapi.SubjectSchemaV2 || upgraded.SubjectDigest == legacyPrepared.SubjectDigest {
+		t.Fatalf("re-Prepare did not upgrade schema: legacy=%s upgraded=%#v", legacyPrepared.SubjectDigest, upgraded)
+	}
+}
+
+func buildHistoricalLaunchBinary(t *testing.T, repoRoot, binDir, commit string) string {
+	t.Helper()
+	archivePath := filepath.Join(t.TempDir(), "source.tar")
+	archive := exec.Command("git", "archive", "--format=tar", "--output", archivePath, commit)
+	archive.Dir = repoRoot
+	if output, err := archive.CombinedOutput(); err != nil {
+		t.Skipf("v0.61.0 contract commit %s unavailable: %v\n%s", commit, err, output)
+	}
+	sourceDir := t.TempDir()
+	extract := exec.Command("tar", "-xf", archivePath, "-C", sourceDir)
+	if output, err := extract.CombinedOutput(); err != nil {
+		t.Fatalf("extract v0.61.0 contract source: %v\n%s", err, output)
+	}
+	binary := filepath.Join(binDir, "amq-v0610")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/amq")
+	build.Dir = sourceDir
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build v0.61.0 contract binary: %v\n%s", err, output)
+	}
+	return binary
 }
 
 type publicLaunchE2EFixture struct {
@@ -368,7 +473,7 @@ func writeApplyRequestE2E(t *testing.T, request launchapi.PrepareRequestV1, prep
 	}
 	data, err := json.Marshal(launchapi.ApplyRequestV1{
 		RequestVersion: launchapi.RequestVersionV1, Prepare: request,
-		SubjectDigest: prepared.SubjectDigest, Decisions: decisions,
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: decisions,
 	})
 	if err != nil {
 		t.Fatal(err)

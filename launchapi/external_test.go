@@ -60,7 +60,7 @@ func TestContract(t *testing.T) {
         ResultVersion: 1,
         Features: []string{"launch_intent_v1"},
     })
-    if err != nil || negotiated.ContractSemver != "0.61.0" {
+    if err != nil || negotiated.ContractSemver != "0.61.1" {
         t.Fatalf("negotiated=%#v err=%v", negotiated, err)
     }
 }

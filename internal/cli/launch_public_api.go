@@ -93,6 +93,7 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 	result, err := launchapi.Apply(ctx, launchapi.ApplyRequestV1{
 		RequestVersion: launchapi.RequestVersionV1,
 		Prepare:        request,
+		SubjectSchema:  prepared.SubjectSchema,
 		SubjectDigest:  prepared.SubjectDigest,
 		Decisions:      []launchapi.DecisionV1{},
 	})

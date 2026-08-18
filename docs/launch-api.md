@@ -4,7 +4,7 @@ AMQ exposes a versioned launch contract for tools that must plan and apply a
 session without parsing human output. The Go package is `launchapi`. The JSON
 contract is [schemas/launch-api-v1.schema.json](../schemas/launch-api-v1.schema.json).
 
-The current compatibility floor is `0.61.0`. A caller must negotiate its
+The current contract is `0.61.1`. A caller must negotiate its
 required contract range, intent version, result version, and features before it
 depends on them:
 
@@ -20,6 +20,18 @@ if err != nil {
 }
 _ = negotiated
 ```
+
+A `0.61.1` binary can advertise only a subset of the Wave B3 feature IDs while
+the remaining implementation beads are incomplete. A caller must require every
+feature it uses. Contract semver alone does not claim that an unadvertised
+feature is available.
+
+`PreviewV1.capabilities` is present as a deny-by-default skeleton and is empty
+until the `initial_input` feature lands. `ProviderCapabilitiesV1` defines the
+carrier and configuration-override arrays that the owning bead will populate.
+The first Codex configuration-key candidate is
+`model_reasoning_effort`; its accepted values remain TBD and are not advertised
+by this bead.
 
 ## Intent
 
@@ -107,10 +119,11 @@ OpenCode also remain outside this adapter set.
 
 ## Prepare and Apply
 
-Prepare is read-only. It returns the exact subject, plan, and trust digests, a
-preview, current observations, and required actions. Apply accepts the original
-Prepare request, the returned subject digest, and one explicit decision for
-each required action. It recomputes the plan and fails closed if state changed.
+Prepare is read-only. It returns the exact subject schema, subject, plan, and
+trust digests, a preview, current observations, and required actions. Apply
+accepts the original Prepare request, the returned subject schema and digest,
+and one explicit decision for each required action. It recomputes the subject
+under that schema and fails closed if state changed.
 
 ```go
 request := launchapi.PrepareRequestV1{
@@ -144,10 +157,16 @@ for _, action := range prepared.RequiredActions {
 result, err := launchapi.Apply(ctx, launchapi.ApplyRequestV1{
 	RequestVersion: launchapi.RequestVersionV1,
 	Prepare:        request,
+	SubjectSchema:  prepared.SubjectSchema,
 	SubjectDigest:  prepared.SubjectDigest,
 	Decisions:      decisions,
 })
 ```
+
+New Prepare calls use subject schema `2`. Apply input serialized by a `0.61.0`
+caller has no `subject_schema`; `0.61.1` interprets that omission as schema `1`
+and reports `reprepare_recommended` in the result hints. A new caller must copy
+the returned schema. It must not omit the field to select legacy behavior.
 
 `reviewedChoiceFor` is intentionally caller-owned. AMQ does not choose trust,
 stale-conversation, rebind, or degraded-capability decisions for the caller.

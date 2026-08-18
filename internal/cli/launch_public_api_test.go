@@ -71,7 +71,7 @@ func TestPublicLaunchApplyReadsFullRequest(t *testing.T) {
 	}
 	apply := launchapi.ApplyRequestV1{
 		RequestVersion: launchapi.RequestVersionV1, Prepare: request,
-		SubjectDigest: prepared.SubjectDigest, Decisions: []launchapi.DecisionV1{},
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []launchapi.DecisionV1{},
 	}
 	data, err := json.Marshal(apply)
 	if err != nil {

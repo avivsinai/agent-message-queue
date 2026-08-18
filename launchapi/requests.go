@@ -70,6 +70,9 @@ func (request ApplyRequestV1) Validate() error {
 	if err := request.Prepare.Validate(); err != nil {
 		return fmt.Errorf("prepare: %w", err)
 	}
+	if request.SubjectSchema != 0 && request.SubjectSchema != SubjectSchemaV1 && request.SubjectSchema != SubjectSchemaV2 {
+		return fmt.Errorf("unsupported subject schema %d", request.SubjectSchema)
+	}
 	if err := ValidateDigest(request.SubjectDigest); err != nil {
 		return fmt.Errorf("subject_digest: %w", err)
 	}
