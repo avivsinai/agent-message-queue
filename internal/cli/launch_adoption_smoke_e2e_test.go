@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -26,7 +25,7 @@ import (
 //
 //	Row | Finding | Today | WB3 expected
 //	finding1_missing_profile_base_root | 1 named-profile base root | missing .agent-mail/<profile> refuses (not found / stat delivery root) | Prepare planned write create_base_root; Apply creates the authorized base
-//	finding2_mixed_live_fresh_roster_refuses | 2 live-seat dispositions | whole binding refuses rather than keep-live + create-missing | on_live keep -> kept + created missing seats
+//	finding2_mixed_live_fresh_keep_creates | 2 live-seat dispositions | on_live keep -> kept + created missing seats | omitted on_live still refuses
 //	finding3_wrapper_unknown_field | 3 wrapper | strict decode unknown field "wrapper" | wrapper argv prepended to full provider argv
 //	finding4_placement_unsupported | 4 placement | AMQ_SQUAD_TMUX_* env rejected as provider env | placement preview; unsupported tuple -> placement_unsupported
 //	finding5_positional_bootstrap_prompt / finding5_claude_allowed_tools / finding5_codex_dash_c | 5 materialized argv | raw positional prompt rejected; exact --allowedTools and -c forms admitted | initial_input + --allowedTools / -c admitted
@@ -161,12 +160,12 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 		}
 	})
 
-	t.Run("finding2_mixed_live_fresh_roster_refuses", func(t *testing.T) {
+	t.Run("finding2_mixed_live_fresh_keep_creates", func(t *testing.T) {
 		if _, err := exec.LookPath("tmux"); err != nil {
 			t.Skip("tmux is not installed")
 		}
 		fx := newAdoptionSmokeFixture(t, amqBinary, ".agent-mail", "collab")
-		socketDir, err := os.MkdirTemp("/tmp", "amq-ro9-tmux-")
+		socketDir, err := os.MkdirTemp("/tmp", "amq-09i-tmux-")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -195,39 +194,46 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 		mixed := fx.legalSquadIntent()
 		mixed.Participants[1].ResumePolicy = launchapi.ResumePolicyResume
 		mixed.Participants[1].Execution = disabledWakeExecution()
-		mixed.Participants[2].ResumePolicy = launchapi.ResumePolicyFresh
-		mixed.Participants[2].Execution = disabledWakeExecution()
-		mixed.Participants = mixed.Participants[:3] // user + live lead + fresh senior-dev
+		mixed.Participants[1].OnLive = launchapi.OnLiveKeep
+		// Create fullstack (Claude mint). Hermetic Codex never emits notify, so
+		// Apply cannot commit senior-dev in-process.
+		mixed.Participants[3].ResumePolicy = launchapi.ResumePolicyFresh
+		mixed.Participants[3].Execution = disabledWakeExecution()
+		mixed.Participants = []launchapi.ParticipantV1{
+			mixed.Participants[0], mixed.Participants[1], mixed.Participants[3],
+		}
 		stdout, stderr, exit = fx.prepare(t, mixed, launch.LauncherTMux)
-		if exit == 0 {
-			t.Fatalf("mixed roster Prepare succeeded: stdout=%s", stdout)
+		if exit != 0 && exit != ExitActionRequired {
+			t.Fatalf("mixed keep Prepare exit=%d stderr=%s stdout=%s", exit, stderr, stdout)
 		}
-		combined := string(stdout) + string(stderr)
-		if !strings.Contains(combined, "binding_present_without_resumable_conversation") &&
-			!strings.Contains(combined, "present_binding") {
-			var mixedPrepared launchapi.PrepareResultV1
-			decodeRealLaunchJSON(t, stdout, &mixedPrepared)
-			applyPath = writeApplyRequestE2E(t, fx.request(mixed, launch.LauncherTMux), mixedPrepared)
-			stdout, stderr, exit = runRealAMQWithExit(t, fx.amqBinary, fx.project, fx.env, "launch", "--apply", applyPath, "--json")
-			if exit == 0 {
-				t.Fatalf("mixed roster Apply succeeded: stdout=%s", stdout)
-			}
-			combined = string(stdout) + string(stderr)
-			if !strings.Contains(combined, "binding_present_without_resumable_conversation") &&
-				!strings.Contains(combined, "present_binding") {
-				t.Fatalf("mixed roster refusal = exit %d stdout=%s stderr=%s", exit, stdout, stderr)
-			}
+		var mixedPrepared launchapi.PrepareResultV1
+		decodeRealLaunchJSON(t, stdout, &mixedPrepared)
+		applyPath = writeApplyRequestE2E(t, fx.request(mixed, launch.LauncherTMux), mixedPrepared)
+		stdout, stderr, exit = runRealAMQWithExit(t, fx.amqBinary, fx.project, fx.env, "launch", "--apply", applyPath, "--json")
+		if exit != 0 {
+			t.Fatalf("mixed keep Apply exit=%d stderr=%s stdout=%s", exit, stderr, stdout)
 		}
+		var applied launchapi.ApplyResultV1
+		decodeRealLaunchJSON(t, stdout, &applied)
 		after := fx.liveSeatSnapshot(t, socketDir)
-		if after.Binding != before.Binding || after.LeadConversation != before.LeadConversation ||
-			after.SeniorConversation != before.SeniorConversation || after.Journal != before.Journal ||
-			after.Panes != before.Panes || after.SessionIDs != before.SessionIDs ||
-			!slices.Equal(after.LaunchTree, before.LaunchTree) {
-			t.Fatalf("mixed roster refusal mutated live seat snapshot\nbefore=%+v\nafter=%+v\nlaunch-tree diff:\n%s",
-				before, after, strings.Join(diffStrings(before.LaunchTree, after.LaunchTree), "\n"))
+		if after.LeadConversation != before.LeadConversation {
+			t.Fatalf("keep mutated lead conversation\nbefore=%s\nafter=%s", before.LeadConversation, after.LeadConversation)
 		}
-		if after.Panes != 1 || after.SessionIDs != 1 || after.SeniorConversation {
-			t.Fatalf("mixed roster refusal duplicated or created a live seat: %+v", after)
+		_, createdErr := os.Stat(launch.ConversationPath(fx.sessionRoot, "fullstack"))
+		if createdErr != nil || after.Panes != 2 || after.SessionIDs != 1 {
+			t.Fatalf("keep+create snapshot = %+v created=%v", after, createdErr)
+		}
+		kept, created := 0, 0
+		for _, observation := range applied.Observations {
+			switch observation.Disposition {
+			case launch.SeatKept:
+				kept++
+			case launch.SeatCreated:
+				created++
+			}
+		}
+		if kept != 1 || created != 1 {
+			t.Fatalf("dispositions kept=%d created=%d observations=%#v", kept, created, applied.Observations)
 		}
 	})
 
@@ -591,27 +597,6 @@ func snapshotLaunchTree(t *testing.T, sessionRoot string) []string {
 func snapshotTreeDigestBytes(data []byte) string {
 	sum := sha256.Sum256(data)
 	return fmt.Sprintf("%x", sum)
-}
-
-func diffStrings(before, after []string) []string {
-	seen := make(map[string]int, len(before)+len(after))
-	for _, row := range before {
-		seen[row]--
-	}
-	for _, row := range after {
-		seen[row]++
-	}
-	var diff []string
-	for row, n := range seen {
-		switch {
-		case n < 0:
-			diff = append(diff, "- "+row)
-		case n > 0:
-			diff = append(diff, "+ "+row)
-		}
-	}
-	slices.Sort(diff)
-	return diff
 }
 
 func countHermeticTmuxPanes(t *testing.T, socketDir string) int {

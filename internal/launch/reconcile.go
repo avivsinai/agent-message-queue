@@ -79,6 +79,8 @@ type ReconcileRequest struct {
 	ExecutionOptions map[string]PrepareExecutionOptions
 	// Placement is the caller-requested tuple. Nil preserves v0.61 Create.
 	Placement *Placement
+	// OnLive is the per-handle live-seat policy. Missing keys are refuse.
+	OnLive map[string]string
 }
 
 type AgentReconcileResult struct {
@@ -99,6 +101,7 @@ type ReconcileResult struct {
 	Plan           *Plan                  `json:"plan"`
 	SemanticDigest string                 `json:"semantic_digest"`
 	Recovery       *RecoveryReport        `json:"recovery"`
+	Seats          []SeatDisposition      `json:"-"`
 }
 
 type RecoveryReport struct {
@@ -254,6 +257,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	var backend Backend
 	var detect DetectResult
 	var create CreateResult
+	var joinBinding *BindingRecord
 	recoveredCreate := false
 	journalActive := hasJournal
 	if hasJournal {
@@ -293,32 +297,70 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 			journalActive = false
 		}
 	} else {
+		if hasBinding {
+			seats, join, reason := reconcileLiveSeats(request, binding)
+			result.Seats = seats
+			if reason != "" {
+				markPlannedAgents(&result, planned, 6, reason)
+				result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, reason
+				return result, nil
+			}
+			if join {
+				copied := binding
+				joinBinding = &copied
+				kept := make(map[string]bool, len(seats))
+				for _, seat := range seats {
+					if seat.Decision == SeatKept {
+						kept[seat.Handle] = true
+					}
+				}
+				for i := range planned {
+					if kept[planned[i].plan.Handle] {
+						planned[i].write = false
+					}
+				}
+			}
+		}
 		attachSafe := true
 		for _, agent := range planned {
 			attachSafe = attachSafe && !agent.write
 		}
-		var proceed bool
-		backendName, backend, detect, proceed, err = chooseReconcileBackend(request, binding, hasBinding, attachSafe, &result)
-		if err != nil || !proceed {
-			if err != nil {
-				code := reconcileErrorCode(err)
-				markPlannedAgents(&result, planned, code, "backend_reconciliation_failed")
-				result.AggregateCode, result.Reason = code, err.Error()
+		if joinBinding != nil {
+			backendName = binding.Backend
+			backend = request.Backends[backendName]
+			if backend == nil {
+				markPlannedAgents(&result, planned, 6, "bound_launcher_not_available")
+				result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "bound_launcher_not_available"
 				return result, nil
 			}
-			if result.Outcome == OutcomeAttached {
-				result.AggregateCode = aggregateReconcileCode(result.Agents)
+			detect = backend.Detect()
+			if err := detect.Validate(); err != nil {
+				return result, err
+			}
+		} else {
+			var proceed bool
+			backendName, backend, detect, proceed, err = chooseReconcileBackend(request, binding, hasBinding, attachSafe, &result)
+			if err != nil || !proceed {
+				if err != nil {
+					code := reconcileErrorCode(err)
+					markPlannedAgents(&result, planned, code, "backend_reconciliation_failed")
+					result.AggregateCode, result.Reason = code, err.Error()
+					return result, nil
+				}
+				if result.Outcome == OutcomeAttached {
+					result.AggregateCode = aggregateReconcileCode(result.Agents)
+					return result, nil
+				}
+				markPlannedAgents(&result, planned, 6, result.Reason)
+				result.AggregateCode = 6
 				return result, nil
 			}
-			markPlannedAgents(&result, planned, 6, result.Reason)
-			result.AggregateCode = 6
-			return result, nil
 		}
 	}
 	result.Backend = backendName
 
 	if !recoveredCreate {
-		if detect.Profile.Has(CapCreate) {
+		if detect.Profile.Has(CapCreate) && joinBinding == nil {
 			journal, err = NewLaunchJournal(request, backendName, detect, plan, planDigest, nonce, result.Agents, plannedConversations(planned), time.Now())
 			if err != nil {
 				return result, err
@@ -331,12 +373,22 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 				return result, err
 			}
 		}
-		if err := writeExecutionTickets(request, lease, planned, amqExecutable, backendName, detect.Profile.Identity()); err != nil {
+		if err := writeExecutionTickets(request, lease, ticketAgentsForCreate(planned, joinBinding), amqExecutable, backendName, detect.Profile.Identity()); err != nil {
 			return result, err
 		}
+		createPlan := plan
+		if joinBinding != nil {
+			createPlan = Plan{Version: PlanVersion, Agents: make([]AgentPlan, 0)}
+			for _, agent := range planned {
+				if agent.write {
+					createPlan.Agents = append(createPlan.Agents, agent.plan)
+				}
+			}
+		}
 		create, err = backend.Create(CreateRequest{
-			ProjectRoot: request.ProjectRoot, Session: request.Session, Plan: plan,
+			ProjectRoot: request.ProjectRoot, Session: request.Session, Plan: createPlan,
 			AMQPath: amqExecutable, Root: request.Root, Placement: request.Placement,
+			JoinBinding: joinBinding,
 		})
 		if err != nil {
 			var definite *DefinitePreCreateError
@@ -363,7 +415,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		if journalActive && journal.Phase == JournalCreated {
 			candidate = journal.Binding
 		} else {
-			candidate, err = finalizeCreatedState(request.Root, lease, create, backendName, detect, nonce, planned, &result)
+			candidate, err = finalizeCreatedState(request.Root, lease, create, backendName, detect, nonce, planned, &result, joinBinding)
 			if err != nil {
 				return result, err
 			}
@@ -577,9 +629,13 @@ func revalidateAdoption(request ReconcileRequest, backend Backend, journal Launc
 	return nil
 }
 
-func finalizeCreatedState(root *fsq.DeliveryRoot, lease *Lease, create CreateResult, backendName string, detect DetectResult, nonce string, planned []plannedAgent, result *ReconcileResult) (*BindingRecord, error) {
+func finalizeCreatedState(root *fsq.DeliveryRoot, lease *Lease, create CreateResult, backendName string, detect DetectResult, nonce string, planned []plannedAgent, result *ReconcileResult, joinBinding *BindingRecord) (*BindingRecord, error) {
 	created := create.Binding
-	if created.Backend != backendName || created.Profile != detect.Profile.Identity() || created.LaunchNonce != nonce ||
+	bindingNonce := nonce
+	if joinBinding != nil {
+		bindingNonce = joinBinding.LaunchNonce
+	}
+	if created.Backend != backendName || created.Profile != detect.Profile.Identity() || created.LaunchNonce != bindingNonce ||
 		created.HostIdentity != detect.HostIdentity || created.InstanceIdentity != detect.InstanceIdentity {
 		return nil, fmt.Errorf("backend returned a binding outside the selected launch generation")
 	}

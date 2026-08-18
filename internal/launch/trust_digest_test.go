@@ -43,7 +43,7 @@ func TestPrepareTrustDigestMatchesExistingTrustSubjectForPresentRoot(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := PrepareTrustDigest(planDigest, "collab", root.Base(), rootIdentity)
+	prepared, err := PrepareTrustDigest(planDigest, "collab", root.Base(), rootIdentity, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

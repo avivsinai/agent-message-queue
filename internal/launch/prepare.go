@@ -102,6 +102,7 @@ type PrepareParticipant struct {
 	ResumePolicy ResumePolicy
 	Execution    PrepareExecutionOptions
 	InitialInput *PrepareInitialInput
+	OnLive       string
 }
 
 type PrepareInitialInput struct {
@@ -153,6 +154,7 @@ type PreparedParticipant struct {
 	Execution      PrepareExecutionOptions `json:"execution,omitempty"`
 	PlannedOutcome string                  `json:"planned_outcome"`
 	CwdIdentity    string                  `json:"cwd_identity,omitempty"`
+	OnLive         string                  `json:"on_live,omitempty"`
 }
 
 type PrepareRoster struct {
@@ -172,6 +174,8 @@ type PrepareObservation struct {
 	ExecutionIdentityDigest    string `json:"execution_identity_digest"`
 	Resource                   string `json:"resource"`
 	ReasonCode                 string `json:"reason_code,omitempty"`
+	Disposition                string `json:"disposition,omitempty"`
+	StartMode                  string `json:"start_mode,omitempty"`
 }
 
 type PrepareResult struct {
@@ -320,6 +324,17 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 			return PrepareResult{}, err
 		}
 	}
+	for _, participant := range request.Participants {
+		switch participant.OnLive {
+		case "", OnLiveRefuse:
+		case OnLiveKeep:
+			if subjectSchema == SubjectSchemaV1 {
+				return PrepareResult{}, fmt.Errorf("on_live keep requires subject schema %d", SubjectSchemaV2)
+			}
+		default:
+			return PrepareResult{}, fmt.Errorf("invalid on_live %q", participant.OnLive)
+		}
+	}
 	amqPath, err := resolveLaunchAMQExecutable(dependencies.AMQPath)
 	if err != nil {
 		return PrepareResult{}, err
@@ -457,7 +472,7 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	result.TrustDigest, err = PrepareTrustDigestWithAuthority(trustPlanDigest, state.target.Session, state.target.SessionRoot, state.sessionIdentity, baseAuthorityDigest)
+	result.TrustDigest, err = PrepareTrustDigestWithAuthority(trustPlanDigest, state.target.Session, state.target.SessionRoot, state.sessionIdentity, baseAuthorityDigest, onLiveKeepHandles(request.Participants))
 	if err != nil {
 		return PrepareResult{}, err
 	}
@@ -848,6 +863,9 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 	prepared := PreparedParticipant{
 		Handle: participant.Handle, Runnable: participant.Runnable, Provider: participant.Provider,
 		ResumePolicy: participant.ResumePolicy, Execution: participant.Execution, PlannedOutcome: "participant_only",
+	}
+	if participant.OnLive == OnLiveKeep {
+		prepared.OnLive = OnLiveKeep
 	}
 	observation := PrepareObservation{
 		Handle: participant.Handle, Mailbox: mailbox, Runnable: participant.Runnable,

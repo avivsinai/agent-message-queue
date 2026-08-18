@@ -31,6 +31,13 @@ const (
 	ResumePolicyDisabled ResumePolicy = "disabled"
 )
 
+type OnLivePolicyV1 string
+
+const (
+	OnLiveRefuse OnLivePolicyV1 = "refuse"
+	OnLiveKeep   OnLivePolicyV1 = "keep"
+)
+
 type WorkingDirectoryKind string
 
 const (
@@ -78,6 +85,7 @@ type ParticipantV1 struct {
 	EnvOverlay   map[string]string   `json:"env_overlay,omitempty"`
 	ResumePolicy ResumePolicy        `json:"resume_policy,omitempty"`
 	Execution    *ExecutionOptionsV1 `json:"execution,omitempty"`
+	OnLive       OnLivePolicyV1      `json:"on_live,omitempty"`
 }
 
 type WorkingDirectoryV1 struct {
@@ -255,6 +263,8 @@ type ParticipantObservationV1 struct {
 	Execution    string `json:"execution"`
 	Resource     string `json:"resource"`
 	ReasonCode   string `json:"reason_code,omitempty"`
+	Disposition  string `json:"disposition,omitempty"`
+	StartMode    string `json:"start_mode,omitempty"`
 }
 
 type PlannedWriteKindV1 string

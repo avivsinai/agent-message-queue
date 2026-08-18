@@ -75,7 +75,8 @@ func (participant ParticipantV1) validate() error {
 	}
 	if !participant.Runnable {
 		if participant.Executable != "" || participant.Args != nil || participant.Cwd != nil ||
-			participant.InitialInput != nil || participant.EnvOverlay != nil || participant.ResumePolicy != "" || participant.Execution != nil {
+			participant.InitialInput != nil || participant.EnvOverlay != nil || participant.ResumePolicy != "" ||
+			participant.Execution != nil || participant.OnLive != "" {
 			return fmt.Errorf("non-runnable participant %q must be handle-only", participant.Handle)
 		}
 		return nil
@@ -93,6 +94,11 @@ func (participant ParticipantV1) validate() error {
 	case ResumePolicyResume, ResumePolicyFresh, ResumePolicyDisabled:
 	default:
 		return fmt.Errorf("runnable participant %q has invalid resume policy %q", participant.Handle, participant.ResumePolicy)
+	}
+	switch participant.OnLive {
+	case "", OnLiveRefuse, OnLiveKeep:
+	default:
+		return fmt.Errorf("runnable participant %q has invalid on_live %q", participant.Handle, participant.OnLive)
 	}
 	if participant.Execution == nil {
 		return fmt.Errorf("runnable participant %q requires execution options", participant.Handle)
@@ -201,7 +207,7 @@ func requireLaunchIntentFields(data []byte) error {
 			if err := requireObjectFields(fields["cwd"], fmt.Sprintf("participants[%d].cwd", i), "kind", "path"); err != nil {
 				return err
 			}
-			for _, optional := range []string{"args", "env_overlay"} {
+			for _, optional := range []string{"args", "env_overlay", "on_live"} {
 				if err := rejectExplicitNull(fields, optional, fmt.Sprintf("participants[%d]", i)); err != nil {
 					return err
 				}

@@ -80,6 +80,23 @@ func TestLaunchIntentNonRunnableIsHandleOnly(t *testing.T) {
 	}
 }
 
+func TestLaunchIntentOnLivePolicy(t *testing.T) {
+	base := `{"intent_version":1,"participants":[{"handle":"codex","runnable":true,"executable":"codex","cwd":{"kind":"relative","path":"."},"resume_policy":"fresh","execution":{"require_wake":false,"no_gitignore":false,"wake":{"mode":"enabled"}}%s}]}`
+	if _, err := DecodeLaunchIntentV1([]byte(fmt.Sprintf(base, `,"on_live":"keep"`))); err != nil {
+		t.Fatalf("keep rejected: %v", err)
+	}
+	if _, err := DecodeLaunchIntentV1([]byte(fmt.Sprintf(base, `,"on_live":"refuse"`))); err != nil {
+		t.Fatalf("refuse rejected: %v", err)
+	}
+	if _, err := DecodeLaunchIntentV1([]byte(fmt.Sprintf(base, `,"on_live":"resume"`))); err == nil || !strings.Contains(err.Error(), "on_live") {
+		t.Fatalf("invalid on_live error = %v", err)
+	}
+	hostile := `{"intent_version":1,"participants":[{"handle":"operator","runnable":false,"on_live":"keep"}]}`
+	if _, err := DecodeLaunchIntentV1([]byte(hostile)); err == nil || !strings.Contains(err.Error(), "exactly handle and runnable") {
+		t.Fatalf("non-runnable on_live error = %v", err)
+	}
+}
+
 func TestNonRunnableValidateRejectsSmuggledGoFields(t *testing.T) {
 	participant := ParticipantV1{Handle: "operator", Runnable: false, Executable: "codex"}
 	if err := participant.validate(); err == nil || !strings.Contains(err.Error(), "handle-only") {

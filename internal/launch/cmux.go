@@ -130,6 +130,9 @@ func cmuxUnsupported(result *DetectResult, reason string) {
 }
 
 func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
+	if req.JoinBinding != nil {
+		return CreateResult{}, &DefinitePreCreateError{Err: placementError(PlacementUnsupportedReason)}
+	}
 	preview, err := resolveCreatePlacement(LauncherCMux, req)
 	if err != nil {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}

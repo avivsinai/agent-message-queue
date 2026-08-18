@@ -90,6 +90,9 @@ func (b *GhosttyBackend) Detect() DetectResult {
 }
 
 func (b *GhosttyBackend) Create(req CreateRequest) (CreateResult, error) {
+	if req.JoinBinding != nil {
+		return CreateResult{}, &DefinitePreCreateError{Err: placementError(PlacementUnsupportedReason)}
+	}
 	preview, err := resolveCreatePlacement(LauncherGhostty, req)
 	if err != nil {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}

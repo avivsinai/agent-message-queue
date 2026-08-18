@@ -103,6 +103,14 @@ func Apply(ctx context.Context, request ApplyRequest, dependencies ApplyDependen
 		return ApplyResult{}, loadErr
 	} else if present {
 		nonce = journal.LaunchNonce
+	} else if !applyRequestsRebind(request) {
+		binding, hasBinding, bindErr := loadOptionalBinding(state.sessionRoot)
+		if bindErr != nil {
+			return ApplyResult{}, bindErr
+		}
+		if hasBinding {
+			nonce = binding.LaunchNonce
+		}
 	}
 	lease, err := acquireExistingApplyLease(state, nonce)
 	if err != nil {
@@ -266,6 +274,7 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 		result.ReasonCode = applyReconcileReasonCode(reconciled)
 		result.FailureDetail = reconciled.Reason
 	}
+	stampApplySeatDispositions(&result, reconciled.Seats)
 	return result, nil
 }
 
@@ -529,6 +538,7 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 		ExecutionOptions:   executionOptions,
 		AllowFreshFallback: decisions[ActionStaleConversation] == "fresh_once",
 		Placement:          prepared.Placement,
+		OnLive:             onLivePolicies(runnable),
 	}
 	if choice := decisions[ActionTrustConfirmation]; choice == "trust_exact_subject" {
 		request.ConfirmTrust = func(plan Plan, actualTrustDigest string) (bool, error) {
@@ -545,6 +555,7 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 			}
 			authorizedTrustDigest, err := PrepareTrustDigestWithAuthority(
 				trustPlanDigest, prepared.Target.Session, prepared.Target.SessionRoot, authorizedRootIdentity, snapshot.BaseAuthorityDigest,
+				onLiveKeepHandles(prepared.Participants),
 			)
 			if err != nil {
 				return false, err
@@ -613,6 +624,15 @@ func acquireExistingApplyLease(state *prepareTargetState, nonce string) (*Lease,
 	return lease, err
 }
 
+func applyRequestsRebind(request ApplyRequest) bool {
+	for _, decision := range request.Decisions {
+		if decision.Choice == "close_old" || decision.Choice == "leave_old" {
+			return true
+		}
+	}
+	return false
+}
+
 func applyCreationLockPath(session string) string {
 	sum := sha256.Sum256([]byte(session))
 	name := "create-" + hex.EncodeToString(sum[:12]) + ".lock"
@@ -631,5 +651,39 @@ func applyResultFromPrepare(prepared PrepareResult) ApplyResult {
 		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, PlanDigest: prepared.PlanDigest, TrustDigest: prepared.TrustDigest,
 		Backend: prepared.Backend, Profile: prepared.Profile, Roster: prepared.Roster,
 		Observations: slices.Clone(prepared.Observations), RequiredActions: slices.Clone(prepared.RequiredActions),
+	}
+}
+
+func onLivePolicies(participants []PrepareParticipant) map[string]string {
+	policies := make(map[string]string, len(participants))
+	for _, participant := range participants {
+		if participant.OnLive != "" {
+			policies[participant.Handle] = participant.OnLive
+		}
+	}
+	return policies
+}
+
+func stampApplySeatDispositions(result *ApplyResult, seats []SeatDisposition) {
+	if len(seats) == 0 {
+		return
+	}
+	byHandle := make(map[string]SeatDisposition, len(seats))
+	for _, seat := range seats {
+		byHandle[seat.Handle] = seat
+	}
+	for i := range result.Observations {
+		seat, ok := byHandle[result.Observations[i].Handle]
+		if !ok || !result.Observations[i].Runnable {
+			continue
+		}
+		result.Observations[i].Disposition = seat.Decision
+		if seat.Decision == SeatRefused {
+			result.Observations[i].ReasonCode = seat.ReasonCode
+			continue
+		}
+		if seat.Decision == SeatCreated {
+			result.Observations[i].StartMode = seat.StartMode
+		}
 	}
 }
