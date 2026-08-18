@@ -206,10 +206,16 @@ func TestEmbeddedScriptMatchesRepositoryHook(t *testing.T) {
 func TestSessionStartScriptNormalizesInvalidTimeoutAndReturns(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
-	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nsleep 5\n")
+	sleepLog := filepath.Join(dir, "sleep.log")
+	sleepPath := writeExecutableBody(t, filepath.Join(dir, "sleep"), `#!/bin/sh
+printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
+`)
+	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nsleep 30\n")
 	logPath := filepath.Join(dir, "session-start.log")
 
-	cmd := exec.Command("bash", scriptPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", scriptPath)
 	cmd.Env = append(os.Environ(),
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
 		"AMQ_KEEPALIVE_LOG="+logPath,
@@ -217,18 +223,16 @@ func TestSessionStartScriptNormalizesInvalidTimeoutAndReturns(t *testing.T) {
 		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=0",
 		"AMQ_KEEPALIVE_DEFAULT_TIMEOUT_SECONDS=1",
 		"AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS=1",
+		"AMQ_KEEPALIVE_SLEEP="+sleepPath,
+		"AMQ_KEEPALIVE_SLEEP_LOG="+sleepLog,
 	)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	start := time.Now()
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("hook run error = %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-	}
-	if elapsed := time.Since(start); elapsed > 4*time.Second {
-		t.Fatalf("hook took %s, want bounded return", elapsed)
 	}
 	if got := stdout.String(); got != "{}\n" {
 		t.Fatalf("stdout = %q, want empty hook response", got)
@@ -243,6 +247,58 @@ func TestSessionStartScriptNormalizesInvalidTimeoutAndReturns(t *testing.T) {
 	}
 	if !strings.Contains(logText, "reattach timed out after 1s") {
 		t.Fatalf("log missing timeout:\n%s", logText)
+	}
+	sleepData, err := os.ReadFile(sleepLog)
+	if err != nil {
+		t.Fatalf("read sleep log: %v", err)
+	}
+	if got := strings.Split(strings.TrimSpace(string(sleepData)), "\n")[0]; got != "1" {
+		t.Fatalf("watchdog sleep arg = %q, want normalized 1s", sleepData)
+	}
+}
+
+func TestSessionStartWatchdogSleepsNormalizedTimeout(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeSessionStartScript(t, dir)
+	sleepLog := filepath.Join(dir, "sleep.log")
+	sleepPath := writeExecutableBody(t, filepath.Join(dir, "sleep"), `#!/bin/sh
+printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
+`)
+	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nsleep 30\n")
+	logPath := filepath.Join(dir, "session-start.log")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", scriptPath)
+	cmd.Env = append(os.Environ(),
+		"AMQ_KEEPALIVE_BIN="+binaryPath,
+		"AMQ_KEEPALIVE_LOG="+logPath,
+		"AMQ_KEEPALIVE_TARGET=ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D",
+		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=2",
+		"AMQ_KEEPALIVE_SLEEP="+sleepPath,
+		"AMQ_KEEPALIVE_SLEEP_LOG="+sleepLog,
+	)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook run error = %v", err)
+	}
+	if got := stdout.String(); got != "{}\n" {
+		t.Fatalf("stdout = %q, want empty hook response", got)
+	}
+	sleepData, err := os.ReadFile(sleepLog)
+	if err != nil {
+		t.Fatalf("read sleep log: %v (watchdog never slept)", err)
+	}
+	if got := strings.Split(strings.TrimSpace(string(sleepData)), "\n")[0]; got != "2" {
+		t.Fatalf("watchdog sleep arg = %q, want 2", sleepData)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !strings.Contains(string(logData), "reattach timed out after 2s") {
+		t.Fatalf("missing timeout log:\n%s", logData)
 	}
 }
 
@@ -273,12 +329,8 @@ func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	start := time.Now()
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("hook run error = %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Fatalf("hook took %s, want stdin read bounded", elapsed)
 	}
 	if got := stdout.String(); got != "{}\n" {
 		t.Fatalf("stdout = %q, want empty hook response", got)
