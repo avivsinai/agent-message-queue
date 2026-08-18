@@ -3,10 +3,12 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -256,8 +258,8 @@ func cleanupDarwinWakeRestartStage(bound wakeImageEvidenceV1, allowNamespaceCTim
 	stageDir := filepath.Dir(stagePath)
 	lstat, err := os.Lstat(stagePath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+		if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENOTDIR) {
+			return removeEmptyDarwinWakeRestartStageDir(stagePath)
 		}
 		return fmt.Errorf("stat Darwin wake restart stage: %w", err)
 	}

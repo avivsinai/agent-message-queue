@@ -193,6 +193,106 @@ func TestDarwinCrashStageReclaimPreservesReplacement(t *testing.T) {
 	}
 }
 
+func TestPrepareCoopWakeLockReclaimsStaleDarwinStageAfterParentDisappears(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		replaceParent bool
+	}{
+		{name: "missing parent"},
+		{name: "non-directory parent", replaceParent: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record := newDarwinWakeRestartStageRecordForTest(t)
+			bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence := bound.evidence
+			if err := bound.file.Close(); err != nil {
+				t.Fatal(err)
+			}
+			bound.file = nil
+
+			root := secureTempDirForTest(t)
+			const agent = "codex"
+			lockPath := writeWakeLockForTest(t, root, agent, wakeLock{
+				PID:                  66121,
+				Executable:           "/opt/homebrew/bin/amq",
+				Generation:           "removed-cellar-stage",
+				RunningImageEvidence: &evidence,
+			})
+			stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+				return wakeProcessInfo{PID: pid, Running: false}
+			})
+
+			stageParent := filepath.Dir(filepath.Dir(record.StagePath))
+			if err := os.RemoveAll(stageParent); err != nil {
+				t.Fatal(err)
+			}
+			if test.replaceParent {
+				if err := os.WriteFile(stageParent, []byte("former Cellar directory"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := prepareCoopWakeLock(root, agent, true, "unused"); err != nil {
+				t.Fatalf("coop startup preflight: %v", err)
+			}
+			if _, err := os.Lstat(lockPath); !os.IsNotExist(err) {
+				t.Fatalf("stale wake lock survived coop startup preflight: %v", err)
+			}
+
+			agentDir, err := openWakeAgentDir(root, agent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = agentDir.Close() }()
+			cleanup, err := acquireWakeLockWithOptionsInDir(
+				agentDir,
+				root,
+				agent,
+				wakeLockAcquireOptions{wakeMode: wakeInjectModeNone},
+			)
+			if err != nil {
+				t.Fatalf("coop wake acquisition after stale removal: %v", err)
+			}
+			cleanup()
+		})
+	}
+}
+
+func TestDarwinPersistedStageCleanupRefusesReplacedStageDirectory(t *testing.T) {
+	record := newDarwinWakeRestartStageRecordForTest(t)
+	bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := bound.evidence
+	if err := bound.file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	bound.file = nil
+
+	stageDir := filepath.Dir(record.StagePath)
+	if err := os.Remove(record.StagePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(stageDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stageDir, []byte("hostile replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err = cleanupPersistedDarwinWakeRestartStage(evidence)
+	if err == nil || !strings.Contains(err.Error(), "refuse reclaim of replaced Darwin wake restart stage directory") {
+		t.Fatalf("cleanup replaced stage directory = %v, want explicit refusal", err)
+	}
+	if info, statErr := os.Lstat(stageDir); statErr != nil || !info.Mode().IsRegular() {
+		t.Fatalf("replacement stage directory changed: info=%v err=%v", info, statErr)
+	}
+}
+
 func TestDoctorDiagnosesCrashOrphanedDarwinRestartStage(t *testing.T) {
 	record := newDarwinWakeRestartStageRecordForTest(t)
 	bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
