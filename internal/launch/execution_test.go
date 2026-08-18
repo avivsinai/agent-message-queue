@@ -27,14 +27,16 @@ func TestExecutionTicketRoundTripAndCAS(t *testing.T) {
 		InjectorMode: "raw", InjectorVia: fixture.injector, InjectorArgs: []string{"send"},
 		SymphonyEvents: []string{"after_create", "before_run", "after_run", "before_remove"}, SymphonyWorkspaceKey: "team-17",
 	}
+	initialInput := &PlannedInitialInput{Kind: InitialInputArgument, SHA256: initialInputDigest("bootstrap"), ArgvIndex: 3}
 	ticket, err := NewExecutionTicket(ExecutionTicketRequest{
 		Handle: "claude", LaunchNonce: lease.LaunchNonce(), Mode: AdapterModeMint,
 		Provider: ClaudeProvider, ConversationID: lease.LaunchNonce(),
 		ProjectRoot: fixture.project, SessionRoot: fixture.session, Cwd: fixture.cwd,
 		ProviderExecutable: fixture.provider, AMQExecutable: fixture.amq,
-		TargetArgv: []string{fixture.provider, "--session-id", lease.LaunchNonce()},
-		TargetEnv:  map[string]string{"LANG": "C", "NO_COLOR": "1"},
-		Execution:  execution,
+		TargetArgv:   []string{fixture.provider, "--session-id", lease.LaunchNonce(), "bootstrap"},
+		InitialInput: initialInput,
+		TargetEnv:    map[string]string{"LANG": "C", "NO_COLOR": "1"},
+		Execution:    execution,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +48,8 @@ func TestExecutionTicketRoundTripAndCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.State != ExecutionPending || loaded.TargetEnv["LANG"] != "C" || loaded.EnvDigest == "" || !reflect.DeepEqual(loaded.Execution, execution) {
+	if loaded.State != ExecutionPending || loaded.TargetEnv["LANG"] != "C" || loaded.EnvDigest == "" ||
+		!reflect.DeepEqual(loaded.Execution, execution) || !reflect.DeepEqual(loaded.InitialInput, initialInput) {
 		t.Fatalf("loaded ticket = %#v", loaded)
 	}
 	loaded, err = CompareAndSwapExecutionTicket(fixture.root, lease, "claude", ExecutionPending, ExecutionSpawnAttempted, "spawned")
@@ -59,6 +62,28 @@ func TestExecutionTicketRoundTripAndCAS(t *testing.T) {
 	}
 	if _, err := CompareAndSwapExecutionTicket(fixture.root, lease, "claude", ExecutionPending, ExecutionSpawnAttempted, "late"); err == nil || !strings.Contains(err.Error(), "state") {
 		t.Fatalf("stale CAS error = %v", err)
+	}
+}
+
+func TestExecutionTicketAllowsEmptyArgOnlyForDeclaredInitialInput(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	base := ExecutionTicketRequest{
+		Handle: "claude", LaunchNonce: "12121212-1212-4212-8212-121212121212", Mode: AdapterModeMint,
+		Provider: ClaudeProvider, ConversationID: "12121212-1212-4212-8212-121212121212",
+		ProjectRoot: fixture.project, SessionRoot: fixture.session, Cwd: fixture.cwd,
+		ProviderExecutable: fixture.provider, AMQExecutable: fixture.amq,
+		TargetArgv: []string{fixture.provider, ""},
+	}
+	if _, err := NewExecutionTicket(base); err == nil || !strings.Contains(err.Error(), "target argv[1]") {
+		t.Fatalf("undeclared empty argv error = %v", err)
+	}
+	base.InitialInput = &PlannedInitialInput{Kind: InitialInputArgument, SHA256: initialInputDigest(""), ArgvIndex: 1}
+	if _, err := NewExecutionTicket(base); err != nil {
+		t.Fatalf("declared empty initial argument rejected: %v", err)
+	}
+	base.InitialInput.ArgvIndex = 0
+	if _, err := NewExecutionTicket(base); err == nil || !strings.Contains(err.Error(), "target argv[1]") {
+		t.Fatalf("misdeclared empty argv error = %v", err)
 	}
 }
 

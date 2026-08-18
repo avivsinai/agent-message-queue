@@ -45,6 +45,7 @@
         "runnable": {"const": true},
         "executable": {"type": "string", "minLength": 1},
         "args": {"type": "array", "items": {"type": "string"}},
+        "initial_input": {"$ref": "#/$defs/InitialInputV1"},
         "cwd": {"$ref": "#/$defs/WorkingDirectoryV1"},
         "env_overlay": {
           "type": "object",
@@ -53,6 +54,15 @@
         },
         "resume_policy": {"enum": ["resume", "fresh", "disabled"]},
         "execution": {"$ref": "#/$defs/ExecutionOptionsV1"}
+      }
+    },
+    "InitialInputV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "text"],
+      "properties": {
+        "kind": {"enum": ["argument", "stdin", "file"]},
+        "text": {"type": "string", "pattern": "^[^\\x00]*$"}
       }
     },
     "Handle": {
@@ -249,10 +259,11 @@
     "ProviderCapabilitiesV1": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["provider", "provider_version", "allowed_argument_forms", "config_overrides", "initial_input_kinds"],
+      "required": ["provider", "grammar_version", "verified_provider_version", "allowed_argument_forms", "config_overrides", "initial_input_kinds"],
       "properties": {
         "provider": {"type": "string", "minLength": 1},
-        "provider_version": {"type": "string", "minLength": 1},
+        "grammar_version": {"type": "integer", "minimum": 1},
+        "verified_provider_version": {"type": "string", "minLength": 1},
         "allowed_argument_forms": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "config_overrides": {"type": "array", "items": {"$ref": "#/$defs/ConfigOverrideCapabilityV1"}},
         "initial_input_kinds": {"type": "array", "uniqueItems": true, "items": {"enum": ["argument", "stdin", "file"]}}

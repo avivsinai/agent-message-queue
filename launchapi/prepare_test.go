@@ -49,8 +49,13 @@ func TestPrepareIsZeroWriteAndDeterministic(t *testing.T) {
 	if first.SubjectSchema != SubjectSchemaV2 {
 		t.Fatalf("new Prepare subject schema = %d", first.SubjectSchema)
 	}
-	if first.Preview.Capabilities == nil || len(first.Preview.Capabilities) != 0 {
-		t.Fatalf("capability skeleton must be a deny-by-default empty array: %#v", first.Preview.Capabilities)
+	wantCapabilities := []ProviderCapabilitiesV1{{
+		Provider: "claude", GrammarVersion: 1, VerifiedProviderVersion: "2.1.233",
+		AllowedArgumentForms: []string{"--allowedTools"}, ConfigOverrides: []ConfigOverrideCapabilityV1{},
+		InitialInputKinds: []InitialInputKindV1{InitialInputArgument},
+	}}
+	if !reflect.DeepEqual(first.Preview.Capabilities, wantCapabilities) {
+		t.Fatalf("static capabilities = %#v, want %#v", first.Preview.Capabilities, wantCapabilities)
 	}
 	if len(first.RequiredActions) != 1 {
 		t.Fatalf("required actions = %#v", first.RequiredActions)
@@ -78,6 +83,59 @@ func TestPrepareIsZeroWriteAndDeterministic(t *testing.T) {
 	}
 	if !slices.Equal(first.Preview.Roster.Present, []string{"claude"}) || len(first.Preview.Roster.Missing) != 0 {
 		t.Fatalf("roster = %#v", first.Preview.Roster)
+	}
+}
+
+func TestPrepareInitialArgumentIsFinalAndContentDoesNotChurnTrust(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, true)
+	fixture.request.Intent.Participants[0].InitialInput = &InitialInputV1{Kind: InitialInputArgument, Text: "bootstrap one"}
+	first, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := first.Preview.Participants[0].Command
+	if command == nil || command.Argv[len(command.Argv)-1] != "bootstrap one" {
+		t.Fatalf("initial argument is not the final provider argv element: %#v", command)
+	}
+
+	fixture.request.Intent.Participants[0].InitialInput.Text = "bootstrap two"
+	second, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.PlanDigest == second.PlanDigest || first.SubjectDigest == second.SubjectDigest {
+		t.Fatalf("content change did not change plan and subject: first=%#v second=%#v", first, second)
+	}
+	if first.TrustDigest != second.TrustDigest {
+		t.Fatalf("content change churned trust: %s != %s", first.TrustDigest, second.TrustDigest)
+	}
+}
+
+func TestPrepareUnsupportedInitialCarriersAndOversizeAreTypedAndZeroWrite(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input InitialInputV1
+		want  string
+	}{
+		{name: "stdin", input: InitialInputV1{Kind: InitialInputStdin, Text: "bootstrap"}, want: "initial_input_unsupported"},
+		{name: "file", input: InitialInputV1{Kind: InitialInputFile, Text: "bootstrap"}, want: "initial_input_unsupported"},
+		{name: "oversize", input: InitialInputV1{Kind: InitialInputArgument, Text: strings.Repeat("x", MaxInitialInputBytes+1)}, want: "initial_input_too_large"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPublicPrepareFixture(t, true)
+			fixture.request.Intent.Participants[0].InitialInput = &test.input
+			before := snapshotTestTree(t, fixture.root)
+			result, err := Prepare(context.Background(), fixture.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Outcome != PrepareOutcomeUnsupported || result.Reason != test.want {
+				t.Fatalf("unsupported result = %#v", result)
+			}
+			if after := snapshotTestTree(t, fixture.root); after != before {
+				t.Fatalf("Prepare changed the tree: before=%s after=%s", before, after)
+			}
+		})
 	}
 }
 

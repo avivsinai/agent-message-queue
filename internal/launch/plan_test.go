@@ -1,6 +1,8 @@
 package launch
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -21,6 +23,45 @@ func validPlan() Plan {
 			DynamicArgv: []DynamicArg{{Index: 2, Kind: DynamicArgLaunchNonce}},
 		},
 	}}
+}
+
+func TestInitialInputChangesPlanButNotTrustProjection(t *testing.T) {
+	makePlan := func(text string) Plan {
+		plan := validPlan()
+		sum := sha256.Sum256([]byte(text))
+		plan.Agents[0].Argv = append(plan.Agents[0].Argv, text)
+		plan.Agents[0].InitialInput = &PlannedInitialInput{
+			Kind: InitialInputArgument, SHA256: "sha256:" + hex.EncodeToString(sum[:]), ArgvIndex: len(plan.Agents[0].Argv) - 1,
+		}
+		return plan
+	}
+	first, second := makePlan("bootstrap one"), makePlan("bootstrap two")
+	firstPlan, err := first.SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPlan, err := second.SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstPlan == secondPlan {
+		t.Fatal("initial input content did not change plan digest")
+	}
+	firstTrust, err := first.TrustSemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTrust, err := second.TrustSemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstTrust != secondTrust {
+		t.Fatalf("initial input content changed trust digest: %s != %s", firstTrust, secondTrust)
+	}
+	second.Agents[0].InitialInput.Kind = InitialInputFile
+	if _, err := second.TrustSemanticDigest(); err == nil || !strings.Contains(err.Error(), "invalid initial input kind") {
+		t.Fatalf("unsupported carrier kind was accepted: %v", err)
+	}
 }
 
 func TestSemanticDigestCanonicalAndExcludesRuntimeValues(t *testing.T) {

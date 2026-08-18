@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -42,6 +43,41 @@ type AdapterCapabilities struct {
 	Reason          string      `json:"reason,omitempty"`
 }
 
+type ConfigOverrideCapability struct {
+	Key           string
+	AllowedValues []string
+}
+
+type StaticInputCapabilities struct {
+	GrammarVersion          int
+	VerifiedProviderVersion string
+	AllowedArgumentForms    []string
+	ConfigOverrides         []ConfigOverrideCapability
+	InitialInputKinds       []InitialInputKind
+}
+
+// ProviderStaticInputCapabilities is the single public-compiler projection of
+// the same deny-by-default tables used by validation.
+func ProviderStaticInputCapabilities(provider string) StaticInputCapabilities {
+	switch provider {
+	case ClaudeProvider:
+		return StaticInputCapabilities{
+			GrammarVersion: 1, VerifiedProviderVersion: "2.1.233",
+			AllowedArgumentForms: []string{"--allowedTools"}, InitialInputKinds: []InitialInputKind{InitialInputArgument},
+		}
+	case CodexProvider:
+		values := slices.Clone(codexReasoningEffortValues)
+		return StaticInputCapabilities{
+			GrammarVersion: 1, VerifiedProviderVersion: codexCaptureVersion,
+			AllowedArgumentForms: []string{"-c"},
+			ConfigOverrides:      []ConfigOverrideCapability{{Key: "model_reasoning_effort", AllowedValues: values}},
+			InitialInputKinds:    []InitialInputKind{InitialInputArgument},
+		}
+	default:
+		return StaticInputCapabilities{AllowedArgumentForms: []string{}, ConfigOverrides: []ConfigOverrideCapability{}, InitialInputKinds: []InitialInputKind{}}
+	}
+}
+
 type PlanRequest struct {
 	Handle        string
 	ProjectRoot   string
@@ -58,6 +94,28 @@ type PlanRequest struct {
 	CommittedArgs    []string
 	BypassArgs       []string
 	EnvOverlay       map[string]string
+	InitialInput     *InitialInputRequest
+}
+
+type InitialInputRequest struct {
+	Kind   InitialInputKind
+	Value  string
+	SHA256 string
+}
+
+func appendInitialInput(plan *AgentPlan, input *InitialInputRequest) error {
+	if input == nil {
+		return nil
+	}
+	if input.Kind != InitialInputArgument {
+		return fmt.Errorf("initial input kind %q is unsupported", input.Kind)
+	}
+	if !validDigest(input.SHA256) || strings.ContainsRune(input.Value, 0) {
+		return fmt.Errorf("initial input is invalid")
+	}
+	plan.Argv = append(plan.Argv, input.Value)
+	plan.InitialInput = &PlannedInitialInput{Kind: input.Kind, SHA256: input.SHA256, ArgvIndex: len(plan.Argv) - 1}
+	return nil
 }
 
 type ResumeRequest struct {
@@ -124,6 +182,16 @@ func ValidateStaticProviderInput(executable string, args []string, env map[strin
 	if err := validateStaticProviderArgs(args, argRules, bypassAllowed); err != nil {
 		return "", err
 	}
+	switch provider {
+	case ClaudeProvider:
+		if err := validateSingleStaticArgument(args, "--allowedTools"); err != nil {
+			return "", err
+		}
+	case CodexProvider:
+		if err := validateCodexConfigOverrides(args); err != nil {
+			return "", err
+		}
+	}
 	if provider == CursorProvider {
 		if err := validateCursorBypassArgs(args, true); err != nil {
 			return "", err
@@ -133,6 +201,19 @@ func ValidateStaticProviderInput(executable string, args []string, env map[strin
 		return "", err
 	}
 	return provider, nil
+}
+
+func validateSingleStaticArgument(args []string, name string) error {
+	count := 0
+	for _, arg := range args {
+		if arg == name {
+			count++
+		}
+	}
+	if count > 1 {
+		return fmt.Errorf("static argument %q is duplicated", name)
+	}
+	return nil
 }
 
 // PartitionStaticProviderArgs separates ordinary committed arguments from the
@@ -251,6 +332,11 @@ func validatePlanRequest(request PlanRequest, executable, provider string, envRu
 	resolvedExecutable, err := validateKnownExecutable(executable, request.ProjectRoot, provider)
 	if err != nil {
 		return "", err
+	}
+	if provider == CodexProvider {
+		if err := validateCodexConfigOverrides(request.CommittedArgs); err != nil {
+			return "", err
+		}
 	}
 	if err := validateCommittedArgs(request.CommittedArgs, argRules); err != nil {
 		return "", err

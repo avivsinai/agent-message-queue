@@ -27,6 +27,7 @@ func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	runnable := fixture.request.Intent.Participants[0]
+	runnable.InitialInput = &InitialInputV1{Kind: InitialInputArgument, Text: "generated bootstrap"}
 	runnable.Execution = &ExecutionOptionsV1{
 		RequireWake: true, NoGitignore: true,
 		Wake: WakeOptionsV1{Mode: WakeEnabled, Injector: &InjectorOptionsV1{Mode: InjectorRaw, Via: injector, Args: []string{"send"}}},
@@ -87,6 +88,9 @@ func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 		}
 		if !reflect.DeepEqual(ticket.Execution, &wantOptions) {
 			t.Fatalf("%s ticket execution options = %#v, want %#v", handle, ticket.Execution, wantOptions)
+		}
+		if len(ticket.TargetArgv) == 0 || ticket.TargetArgv[len(ticket.TargetArgv)-1] != "generated bootstrap" {
+			t.Fatalf("%s ticket did not preserve the final initial argument: %#v", handle, ticket.TargetArgv)
 		}
 	}
 	entries, err := os.ReadDir(filepath.Dir(fixture.request.Target.SessionRoot))

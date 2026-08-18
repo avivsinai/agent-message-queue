@@ -67,13 +67,14 @@ type ExecutionTicket struct {
 	InjectorExecutable         string `json:"injector_executable,omitempty"`
 	InjectorExecutableIdentity string `json:"injector_executable_identity,omitempty"`
 
-	TargetArgv  []string                 `json:"target_argv"`
-	DynamicArgv []DynamicArg             `json:"dynamic_argv,omitempty"`
-	TargetEnv   map[string]string        `json:"target_env,omitempty"`
-	EnvDigest   string                   `json:"env_digest"`
-	State       ExecutionState           `json:"state"`
-	Reason      string                   `json:"reason,omitempty"`
-	Execution   *PrepareExecutionOptions `json:"execution,omitempty"`
+	TargetArgv   []string                 `json:"target_argv"`
+	DynamicArgv  []DynamicArg             `json:"dynamic_argv,omitempty"`
+	InitialInput *PlannedInitialInput     `json:"initial_input,omitempty"`
+	TargetEnv    map[string]string        `json:"target_env,omitempty"`
+	EnvDigest    string                   `json:"env_digest"`
+	State        ExecutionState           `json:"state"`
+	Reason       string                   `json:"reason,omitempty"`
+	Execution    *PrepareExecutionOptions `json:"execution,omitempty"`
 }
 
 type ExecutionTicketRequest struct {
@@ -88,6 +89,7 @@ type ExecutionTicketRequest struct {
 	ProviderExecutable, AMQExecutable string
 	TargetArgv                        []string
 	DynamicArgv                       []DynamicArg
+	InitialInput                      *PlannedInitialInput
 	TargetEnv                         map[string]string
 	State                             ExecutionState
 	Reason                            string
@@ -164,8 +166,9 @@ func NewExecutionTicket(request ExecutionTicketRequest) (ExecutionTicket, error)
 		ProjectRoot: project, ProjectIdentity: projectID, SessionRoot: session, SessionIdentity: sessionID,
 		Cwd: cwd, CwdIdentity: cwdID, ProviderExecutable: provider, ProviderExecutableIdentity: providerID,
 		AMQExecutable: amq, AMQExecutableIdentity: amqID, TargetArgv: append([]string(nil), request.TargetArgv...),
-		DynamicArgv: append([]DynamicArg(nil), request.DynamicArgv...),
-		TargetEnv:   env, EnvDigest: digest, State: request.State, Reason: request.Reason,
+		DynamicArgv:  append([]DynamicArg(nil), request.DynamicArgv...),
+		InitialInput: clonePlannedInitialInput(request.InitialInput),
+		TargetEnv:    env, EnvDigest: digest, State: request.State, Reason: request.Reason,
 		Execution: execution, InjectorExecutable: injector, InjectorExecutableIdentity: injectorID,
 	}
 	if ticket.State == "" {
@@ -224,9 +227,12 @@ func (ticket ExecutionTicket) Validate() error {
 		return fmt.Errorf("target argv is required")
 	}
 	for i, arg := range ticket.TargetArgv {
-		if arg == "" || strings.ContainsRune(arg, 0) {
+		if strings.ContainsRune(arg, 0) || (arg == "" && !ticketInitialInputOwnsArg(ticket, i)) {
 			return fmt.Errorf("target argv[%d] is invalid", i)
 		}
+	}
+	if err := validateTicketInitialInput(ticket); err != nil {
+		return err
 	}
 	if ticket.Mode == AdapterModeCapture && ticket.Provider == CodexProvider && ticket.ProviderVersion == codexCaptureVersion {
 		if err := validateCodexNotifyTargetArgv(ticket); err != nil {
@@ -298,6 +304,45 @@ func (ticket ExecutionTicket) Validate() error {
 	return nil
 }
 
+func clonePlannedInitialInput(input *PlannedInitialInput) *PlannedInitialInput {
+	if input == nil {
+		return nil
+	}
+	cloned := *input
+	return &cloned
+}
+
+func ticketInitialInputOwnsArg(ticket ExecutionTicket, index int) bool {
+	return ticket.InitialInput != nil && ticket.InitialInput.Kind == InitialInputArgument &&
+		ticket.InitialInput.ArgvIndex == index
+}
+
+func validateTicketInitialInput(ticket ExecutionTicket) error {
+	input := ticket.InitialInput
+	if input == nil {
+		return nil
+	}
+	if input.Kind != InitialInputArgument {
+		return fmt.Errorf("execution ticket initial input kind %q is unsupported", input.Kind)
+	}
+	if input.ArgvIndex != len(ticket.TargetArgv)-1 || input.ArgvIndex <= 0 {
+		return fmt.Errorf("execution ticket initial input must be the final provider argument")
+	}
+	if !validDigest(input.SHA256) {
+		return fmt.Errorf("execution ticket initial input digest is invalid")
+	}
+	sum := sha256.Sum256([]byte(ticket.TargetArgv[input.ArgvIndex]))
+	if "sha256:"+hex.EncodeToString(sum[:]) != input.SHA256 {
+		return fmt.Errorf("execution ticket initial input digest does not match argument")
+	}
+	for _, dynamic := range ticket.DynamicArgv {
+		if dynamic.Index == input.ArgvIndex {
+			return fmt.Errorf("execution ticket initial input cannot use a dynamic argv slot")
+		}
+	}
+	return nil
+}
+
 func validateCodexNotifyTargetArgv(ticket ExecutionTicket) error {
 	expected, err := codexNotifyOverride(PlanRequest{
 		AMQExecutable: ticket.AMQExecutable,
@@ -317,10 +362,15 @@ func validateCodexNotifyTargetArgv(ticket ExecutionTicket) error {
 		if arg != "-c" {
 			continue
 		}
-		if i+1 >= len(ticket.TargetArgv) || ticket.TargetArgv[i+1] != expected {
+		if i+1 >= len(ticket.TargetArgv) {
 			return fmt.Errorf("codex notify override does not match the execution ticket")
 		}
-		count++
+		value := ticket.TargetArgv[i+1]
+		if value == expected {
+			count++
+		} else if !validCodexConfigOverride(value) {
+			return fmt.Errorf("codex notify execution ticket contains unsupported configuration override")
+		}
 		i++
 	}
 	if count != 1 {

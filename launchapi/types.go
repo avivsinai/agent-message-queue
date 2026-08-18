@@ -73,6 +73,7 @@ type ParticipantV1 struct {
 	Runnable     bool                `json:"runnable"`
 	Executable   string              `json:"executable,omitempty"`
 	Args         []string            `json:"args,omitempty"`
+	InitialInput *InitialInputV1     `json:"initial_input,omitempty"`
 	Cwd          *WorkingDirectoryV1 `json:"cwd,omitempty"`
 	EnvOverlay   map[string]string   `json:"env_overlay,omitempty"`
 	ResumePolicy ResumePolicy        `json:"resume_policy,omitempty"`
@@ -195,17 +196,25 @@ const (
 	InitialInputFile     InitialInputKindV1 = "file"
 )
 
+const MaxInitialInputBytes = 256 * 1024
+
+type InitialInputV1 struct {
+	Kind InitialInputKindV1 `json:"kind"`
+	Text string             `json:"text"`
+}
+
 type ConfigOverrideCapabilityV1 struct {
 	Key           string   `json:"key"`
 	AllowedValues []string `json:"allowed_values"`
 }
 
 type ProviderCapabilitiesV1 struct {
-	Provider             string                       `json:"provider"`
-	ProviderVersion      string                       `json:"provider_version"`
-	AllowedArgumentForms []string                     `json:"allowed_argument_forms"`
-	ConfigOverrides      []ConfigOverrideCapabilityV1 `json:"config_overrides"`
-	InitialInputKinds    []InitialInputKindV1         `json:"initial_input_kinds"`
+	Provider                string                       `json:"provider"`
+	GrammarVersion          int                          `json:"grammar_version"`
+	VerifiedProviderVersion string                       `json:"verified_provider_version"`
+	AllowedArgumentForms    []string                     `json:"allowed_argument_forms"`
+	ConfigOverrides         []ConfigOverrideCapabilityV1 `json:"config_overrides"`
+	InitialInputKinds       []InitialInputKindV1         `json:"initial_input_kinds"`
 }
 
 type ParticipantObservationV1 struct {

@@ -20,11 +20,14 @@ func TestCompatibilityAndNegotiateV1(t *testing.T) {
 	}
 	for _, unfinished := range []string{
 		FeatureBaseRoot, FeatureOnLive, FeatureWrapper, FeaturePlacement,
-		FeatureInitialInput, FeatureCallerContext, FeatureExecutableIdentity,
+		FeatureCallerContext, FeatureExecutableIdentity,
 	} {
 		if slices.Contains(Compatibility().Features, unfinished) {
 			t.Fatalf("Compatibility advertised unfinished feature %q", unfinished)
 		}
+	}
+	if !slices.Contains(Compatibility().Features, FeatureInitialInput) {
+		t.Fatal("Compatibility did not advertise the completed initial_input feature")
 	}
 
 	negotiated, err := Negotiate(RequirementV1{

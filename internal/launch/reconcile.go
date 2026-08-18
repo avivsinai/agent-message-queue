@@ -645,7 +645,7 @@ func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []pla
 			ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(), Cwd: agent.plan.Cwd,
 			ProviderExecutable: agent.plan.Argv[0], AMQExecutable: amqPath,
 			TargetArgv: agent.plan.Argv, DynamicArgv: agent.plan.DynamicArgv, TargetEnv: agent.plan.EnvOverlay,
-			Execution: agent.plan.Execution,
+			InitialInput: agent.plan.InitialInput, Execution: agent.plan.Execution,
 		}
 		if agent.plan.PreSpawnAcquire || (agent.adapter.Name() == CodexProvider && agent.plan.AdapterMode == AdapterModeCapture) {
 			ticketRequest.Backend, ticketRequest.Profile = backend, profile
@@ -743,7 +743,7 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			Handle: cfg.Handle, ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(),
 			AMQExecutable: request.AMQPath, Cwd: cwd,
 			LaunchNonce: nonce, ResumePolicy: policy, CommittedArgs: committedArgs, BypassArgs: bypassArgs,
-			EnvOverlay: cfg.Env, AllowExternalCwd: request.AllowExternalCwd,
+			EnvOverlay: cfg.Env, AllowExternalCwd: request.AllowExternalCwd, InitialInput: cfg.InitialInput,
 		}
 		conversation, loadErr := LoadConversation(request.Root, cfg.Handle)
 		hasConversation := loadErr == nil
