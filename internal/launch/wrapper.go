@@ -46,6 +46,9 @@ func validateWrapperFile(wrapper *Wrapper) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("executable must resolve to one regular file")
 	}
+	if err := validateWrapperExecutable(wrapper.Executable, info.Mode()); err != nil {
+		return err
+	}
 	return nil
 }
 
