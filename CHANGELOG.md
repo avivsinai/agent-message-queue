@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.65.2](https://github.com/avivsinai/agent-message-queue/compare/v0.65.1...v0.65.2) (2026-08-18)
+
+
+### Bug Fixes
+
+* **keepalive:** bound session-start watchdog by a sleep seam, not wall clock ([#582](https://github.com/avivsinai/agent-message-queue/issues/582)) ([38595d0](https://github.com/avivsinai/agent-message-queue/commit/38595d0f3ae7bb2a77753b64965186a21f07e02f))
+* **keepalive:** make reattach timing deterministic via seams ([#584](https://github.com/avivsinai/agent-message-queue/issues/584)) ([c68a135](https://github.com/avivsinai/agent-message-queue/commit/c68a135d7e71a62098d1b8ad429a269a84fde666))
+
 ## [0.65.1](https://github.com/avivsinai/agent-message-queue/compare/v0.65.0...v0.65.1) (2026-08-18)
 
 
