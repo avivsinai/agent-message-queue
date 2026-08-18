@@ -20,16 +20,15 @@ import (
 
 // Adoption-smoke oracle for Omri's seven #480/#557 findings (addendum
 // /private/tmp/amq-480-report/wb3-addendum-draft.md). Each named row asserts
-// TODAY's fail-closed outcome so CI stays green. A later WB3 bead flips
-// exactly one row to the addendum expected outcome; that flip is the
-// visible acceptance.
+// the current outcome so CI stays green. Each WB3 bead flips its rows to the
+// addendum expected outcome; that flip is the visible acceptance.
 //
 //	Row | Finding | Today | WB3 expected
 //	finding1_missing_profile_base_root | 1 named-profile base root | missing .agent-mail/<profile> refuses (not found / stat delivery root) | Prepare planned write create_base_root; Apply creates the authorized base
 //	finding2_mixed_live_fresh_roster_refuses | 2 live-seat dispositions | whole binding refuses rather than keep-live + create-missing | on_live keep -> kept + created missing seats
 //	finding3_wrapper_unknown_field | 3 wrapper | strict decode unknown field "wrapper" | wrapper argv prepended to full provider argv
 //	finding4_squad_tmux_env_rejected | 4 placement | AMQ_SQUAD_TMUX_* env rejected as provider env | placement preview; unsupported tuple -> placement_unsupported
-//	finding5_positional_bootstrap_prompt / finding5_claude_allowed_tools / finding5_codex_dash_c | 5 materialized argv | positional prompt, --allowedTools, and -c rejected by adapter grammar | initial_input + --allowedTools / -c admitted
+//	finding5_positional_bootstrap_prompt / finding5_claude_allowed_tools / finding5_codex_dash_c | 5 materialized argv | raw positional prompt rejected; exact --allowedTools and -c forms admitted | initial_input + --allowedTools / -c admitted
 //	finding6_caller_context_unknown_field | 6 caller correlation | strict decode unknown field "caller_context" | caller_context echoed on Apply/evidence/lifecycle
 //	finding7_same_path_inode_replacement_not_subject_changed | 7 physical identity | same-path inode replacement leaves subject/plan/trust digests identical | inode replacement -> subject_changed
 //
@@ -59,7 +58,7 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 		intent := fx.legalSquadIntent()
 		intent.Participants[1].Args = append(intent.Participants[1].Args, "--allowedTools", "Bash,Read,Write,Edit")
 		stdout, stderr, exit := fx.prepare(t, intent, launch.LauncherCommands)
-		assertAdoptionDecodeRejection(t, exit, stdout, stderr, "--allowedTools")
+		assertAdoptionArgumentAdmitted(t, exit, stdout, stderr, "lead", "--allowedTools", "Bash,Read,Write,Edit")
 	})
 
 	t.Run("finding5_codex_dash_c", func(t *testing.T) {
@@ -67,7 +66,7 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 		intent := fx.legalSquadIntent()
 		intent.Participants[2].Args = append(intent.Participants[2].Args, "-c", "model_reasoning_effort=high")
 		stdout, stderr, exit := fx.prepare(t, intent, launch.LauncherCommands)
-		assertAdoptionDecodeRejection(t, exit, stdout, stderr, "-c")
+		assertAdoptionArgumentAdmitted(t, exit, stdout, stderr, "senior-dev", "-c", "model_reasoning_effort=high")
 	})
 
 	t.Run("finding4_squad_tmux_env_rejected", func(t *testing.T) {
@@ -630,6 +629,37 @@ func assertAdoptionDecodeRejection(t *testing.T, exit int, stdout, stderr []byte
 	if !strings.Contains(combined, needle) {
 		t.Fatalf("decode rejection did not name %q: stdout=%s stderr=%s", needle, stdout, stderr)
 	}
+}
+
+func assertAdoptionArgumentAdmitted(t *testing.T, exit int, stdout, stderr []byte, handle, flag, value string) {
+	t.Helper()
+	if exit != ExitActionRequired {
+		t.Fatalf("admitted argument exit=%d want %d stdout=%s stderr=%s", exit, ExitActionRequired, stdout, stderr)
+	}
+	var result launchapi.PrepareResultV1
+	decodeRealLaunchJSON(t, stdout, &result)
+	if result.Outcome != "action_required" || result.Reason != "untrusted_config_digest" {
+		t.Fatalf("admitted argument did not reach trust gate: outcome=%q reason=%q", result.Outcome, result.Reason)
+	}
+	for _, participant := range result.Preview.Participants {
+		if participant.Handle != handle {
+			continue
+		}
+		if participant.Command == nil {
+			t.Fatalf("admitted argument participant %q has no command", handle)
+		}
+		matches := 0
+		for i := 0; i+1 < len(participant.Command.Argv); i++ {
+			if participant.Command.Argv[i] == flag && participant.Command.Argv[i+1] == value {
+				matches++
+			}
+		}
+		if matches != 1 {
+			t.Fatalf("admitted argument pair %q %q occurs %d times in %q", flag, value, matches, participant.Command.Argv)
+		}
+		return
+	}
+	t.Fatalf("admitted argument participant %q missing from preview", handle)
 }
 
 func assertAdoptionUnknownField(t *testing.T, exit int, stdout, stderr []byte, field string) {

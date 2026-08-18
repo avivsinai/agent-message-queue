@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 
 	internallaunch "github.com/avivsinai/agent-message-queue/internal/launch"
 )
@@ -106,6 +107,9 @@ func toInternalPrepareParticipant(participant ParticipantV1, provider string, co
 		Executable: participant.Executable, Args: slices.Clone(committedArgs), BypassArgs: slices.Clone(bypassArgs), EnvOverlay: cloneStringMap(participant.EnvOverlay),
 		ResumePolicy: internallaunch.ResumePolicy(participant.ResumePolicy),
 	}
+	if participant.InitialInput != nil {
+		result.InitialInput = &internallaunch.PrepareInitialInput{Kind: internallaunch.InitialInputKind(participant.InitialInput.Kind), Text: participant.InitialInput.Text}
+	}
 	if participant.Cwd != nil {
 		result.Cwd = participant.Cwd.Path
 	}
@@ -186,6 +190,39 @@ func fromInternalPrepareResult(result internallaunch.PrepareResult) PrepareResul
 			Resource: observation.Resource, ReasonCode: observation.ReasonCode,
 		})
 	}
+	seenProviders := make(map[string]struct{})
+	for _, participant := range result.Participants {
+		if !participant.Runnable || participant.Provider == "" {
+			continue
+		}
+		if _, ok := seenProviders[participant.Provider]; ok {
+			continue
+		}
+		seenProviders[participant.Provider] = struct{}{}
+		capability := internallaunch.ProviderStaticInputCapabilities(participant.Provider)
+		if capability.GrammarVersion == 0 || capability.VerifiedProviderVersion == "" {
+			continue
+		}
+		publicCapability := ProviderCapabilitiesV1{
+			Provider: participant.Provider, GrammarVersion: capability.GrammarVersion,
+			VerifiedProviderVersion: capability.VerifiedProviderVersion,
+			AllowedArgumentForms:    slices.Clone(capability.AllowedArgumentForms),
+			ConfigOverrides:         make([]ConfigOverrideCapabilityV1, 0, len(capability.ConfigOverrides)),
+			InitialInputKinds:       make([]InitialInputKindV1, 0, len(capability.InitialInputKinds)),
+		}
+		for _, override := range capability.ConfigOverrides {
+			publicCapability.ConfigOverrides = append(publicCapability.ConfigOverrides, ConfigOverrideCapabilityV1{
+				Key: override.Key, AllowedValues: slices.Clone(override.AllowedValues),
+			})
+		}
+		for _, kind := range capability.InitialInputKinds {
+			publicCapability.InitialInputKinds = append(publicCapability.InitialInputKinds, InitialInputKindV1(kind))
+		}
+		public.Preview.Capabilities = append(public.Preview.Capabilities, publicCapability)
+	}
+	slices.SortFunc(public.Preview.Capabilities, func(left, right ProviderCapabilitiesV1) int {
+		return strings.Compare(left.Provider, right.Provider)
+	})
 	return public
 }
 

@@ -16,6 +16,7 @@ var compatibilityFeaturesV1 = []string{
 	"lifecycle_v1",
 	"managed_tmux_v1",
 	"plan_only_commands_v1",
+	FeatureInitialInput,
 }
 
 func Compatibility() CompatibilityV1 {

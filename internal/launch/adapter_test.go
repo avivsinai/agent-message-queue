@@ -2,10 +2,13 @@ package launch
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -155,6 +158,66 @@ func TestClaudePlansUseExactMintAndResumeShapes(t *testing.T) {
 	}
 	if result := adapter.CaptureIdentity(CaptureRequest{}); result.State != CaptureUnsupported || result.Degraded || result.CanPersist() {
 		t.Fatalf("mint capture result = %#v", result)
+	}
+}
+
+func TestAdaptersAppendTypedInitialInputAfterOwnedArguments(t *testing.T) {
+	for _, provider := range []string{ClaudeProvider, CodexProvider} {
+		t.Run(provider, func(t *testing.T) {
+			project, executable := testExecutable(t, provider)
+			request := planRequest(project, provider)
+			text := "generated bootstrap"
+			sum := sha256.Sum256([]byte(text))
+			request.InitialInput = &InitialInputRequest{Kind: InitialInputArgument, Value: text, SHA256: "sha256:" + hex.EncodeToString(sum[:])}
+			var plan AgentPlan
+			var err error
+			switch provider {
+			case ClaudeProvider:
+				plan, err = NewClaudeAdapter(executable).PlanFresh(request)
+			case CodexProvider:
+				plan, err = NewCodexAdapter(executable).PlanFresh(request)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.Argv[len(plan.Argv)-1] != text || plan.InitialInput == nil || plan.InitialInput.ArgvIndex != len(plan.Argv)-1 {
+				t.Fatalf("initial input plan = %#v", plan)
+			}
+		})
+	}
+}
+
+func TestAdaptersDoNotRedeliverInitialInputOnResume(t *testing.T) {
+	for _, provider := range []string{ClaudeProvider, CodexProvider} {
+		t.Run(provider, func(t *testing.T) {
+			project, executable := testExecutable(t, provider)
+			request := planRequest(project, provider)
+			text := "generated bootstrap"
+			sum := sha256.Sum256([]byte(text))
+			request.InitialInput = &InitialInputRequest{Kind: InitialInputArgument, Value: text, SHA256: "sha256:" + hex.EncodeToString(sum[:])}
+			conversation := ConversationIdentity{Provider: provider, ID: testConversationID}
+			var plan AgentPlan
+			var err error
+			switch provider {
+			case ClaudeProvider:
+				plan, err = NewClaudeAdapter(executable).PlanResume(ResumeRequest{PlanRequest: request, Conversation: conversation})
+			case CodexProvider:
+				plan, err = NewCodexAdapter(executable).PlanResume(ResumeRequest{PlanRequest: request, Conversation: conversation})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.InitialInput != nil || slices.Contains(plan.Argv, text) {
+				t.Fatalf("resume redelivered initial input: %#v", plan)
+			}
+			if provider == ClaudeProvider {
+				if !slices.Equal(plan.Argv[len(plan.Argv)-2:], []string{"--resume", testConversationID}) {
+					t.Fatalf("Claude resume tail = %q", plan.Argv)
+				}
+			} else if plan.Argv[len(plan.Argv)-1] != testConversationID {
+				t.Fatalf("Codex resume identity is not final: %q", plan.Argv)
+			}
+		})
 	}
 }
 

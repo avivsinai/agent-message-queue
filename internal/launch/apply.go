@@ -447,9 +447,14 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 		key := participant.Executable
 		command := append([]string{participant.Executable}, participant.Args...)
 		command = append(command, participant.BypassArgs...)
+		var initial *InitialInputRequest
+		if participant.InitialInput != nil {
+			digest := initialInputDigest(participant.InitialInput.Text)
+			initial = &InitialInputRequest{Kind: participant.InitialInput.Kind, Value: participant.InitialInput.Text, SHA256: digest}
+		}
 		config.Agents = append(config.Agents, ProjectAgentConfig{
 			Handle: participant.Handle, Adapter: key, Command: command, Env: cloneEnv(participant.EnvOverlay),
-			Cwd: participant.Cwd, ResumePolicy: participant.ResumePolicy,
+			Cwd: participant.Cwd, ResumePolicy: participant.ResumePolicy, InitialInput: initial,
 		})
 		adapters[key] = adapter
 		executionOptions[participant.Handle] = *clonePrepareExecutionOptions(&participant.Execution)
@@ -475,8 +480,12 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 			if planDigest != snapshot.PlanDigest {
 				return false, fmt.Errorf("static plan changed after Apply authorization")
 			}
+			trustPlanDigest, err := plan.TrustSemanticDigest()
+			if err != nil {
+				return false, err
+			}
 			authorizedTrustDigest, err := PrepareTrustDigest(
-				planDigest, prepared.Target.Session, prepared.Target.SessionRoot, authorizedRootIdentity,
+				trustPlanDigest, prepared.Target.Session, prepared.Target.SessionRoot, authorizedRootIdentity,
 			)
 			if err != nil {
 				return false, err

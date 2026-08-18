@@ -26,7 +26,7 @@ func ExecutionTrustDigest(plan Plan, session string, root *fsq.DeliveryRoot) (st
 	if err := root.VerifyBase(); err != nil {
 		return "", err
 	}
-	planDigest, err := plan.SemanticDigest()
+	planDigest, err := plan.TrustSemanticDigest()
 	if err != nil {
 		return "", err
 	}

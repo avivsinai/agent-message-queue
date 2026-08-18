@@ -42,6 +42,20 @@ const (
 	DynamicArgConversationID DynamicArgKind = "conversation_id"
 )
 
+type InitialInputKind string
+
+const (
+	InitialInputArgument InitialInputKind = "argument"
+	InitialInputStdin    InitialInputKind = "stdin"
+	InitialInputFile     InitialInputKind = "file"
+)
+
+type PlannedInitialInput struct {
+	Kind      InitialInputKind `json:"kind"`
+	SHA256    string           `json:"sha256"`
+	ArgvIndex int              `json:"argv_index"`
+}
+
 // Plan is the public, backend-independent execution contract. Nonce and
 // ConversationID are per-launch values and are deliberately not trusted.
 type Plan struct {
@@ -62,7 +76,8 @@ type AgentPlan struct {
 	PreSpawnAcquire bool              `json:"pre_spawn_acquire,omitempty"`
 	// Execution is the normalized coop-exec wrapper policy. Keeping it in the
 	// plan makes journal recovery lossless before the wrapper consumes it.
-	Execution *PrepareExecutionOptions `json:"execution,omitempty"`
+	Execution    *PrepareExecutionOptions `json:"execution,omitempty"`
+	InitialInput *PlannedInitialInput     `json:"initial_input,omitempty"`
 }
 
 // DynamicArg marks one runtime-generated argv value. Unmarked argv values are
@@ -155,6 +170,24 @@ func (a AgentPlan) validate() error {
 	if a.PreSpawnAcquire && conversationSlots != 1 {
 		return fmt.Errorf("pre-spawn acquisition requires exactly one dynamic conversation slot")
 	}
+	if a.InitialInput != nil {
+		if a.InitialInput.Kind != InitialInputArgument {
+			return fmt.Errorf("invalid initial input kind %q", a.InitialInput.Kind)
+		}
+		if !validDigest(a.InitialInput.SHA256) {
+			return fmt.Errorf("initial input digest is invalid")
+		}
+		if a.InitialInput.ArgvIndex <= 0 || a.InitialInput.ArgvIndex >= len(a.Argv) {
+			return fmt.Errorf("initial input argv index is invalid")
+		}
+		if _, dynamic := seenDynamic[a.InitialInput.ArgvIndex]; dynamic {
+			return fmt.Errorf("initial input argv index is dynamic")
+		}
+		sum := sha256.Sum256([]byte(a.Argv[a.InitialInput.ArgvIndex]))
+		if "sha256:"+hex.EncodeToString(sum[:]) != a.InitialInput.SHA256 {
+			return fmt.Errorf("initial input digest does not match argument")
+		}
+	}
 	return nil
 }
 
@@ -169,30 +202,47 @@ type canonicalArgument struct {
 }
 
 type staticAgentPlan struct {
-	Handle          string              `json:"handle"`
-	Argv            []canonicalArgument `json:"argv"`
-	EnvOverlay      map[string]string   `json:"env_overlay,omitempty"`
-	Cwd             string              `json:"cwd"`
-	AdapterMode     AdapterMode         `json:"adapter_mode"`
-	ResumePolicy    ResumePolicy        `json:"resume_policy"`
-	PreSpawnAcquire bool                `json:"pre_spawn_acquire,omitempty"`
+	Handle          string                 `json:"handle"`
+	Argv            []canonicalArgument    `json:"argv"`
+	EnvOverlay      map[string]string      `json:"env_overlay,omitempty"`
+	Cwd             string                 `json:"cwd"`
+	AdapterMode     AdapterMode            `json:"adapter_mode"`
+	ResumePolicy    ResumePolicy           `json:"resume_policy"`
+	PreSpawnAcquire bool                   `json:"pre_spawn_acquire,omitempty"`
+	InitialInput    *canonicalInitialInput `json:"initial_input,omitempty"`
+}
+
+type canonicalInitialInput struct {
+	Kind      InitialInputKind `json:"kind"`
+	SHA256    string           `json:"sha256,omitempty"`
+	ArgvIndex int              `json:"argv_index"`
 }
 
 // SemanticDigest hashes the adapter-normalized static execution template.
 // Fresh and resume argv shapes have different digests because only the resume
 // shape carries a conversation slot; each shape therefore requires trust once.
 func (p Plan) SemanticDigest() (string, error) {
-	return p.semanticDigest(false)
+	return p.semanticDigest(false, false)
+}
+
+// TrustSemanticDigest excludes caller-generated initial-input content while
+// retaining the selected carrier kind and argv position.
+func (p Plan) TrustSemanticDigest() (string, error) {
+	return p.semanticDigest(false, true)
 }
 
 // PreparePlanDigest hashes the nonce-free static plan used by Prepare. Unlike
 // a backend execution Plan, it permits zero runnable agents so a participant-
 // only session still has one deterministic plan subject.
 func PreparePlanDigest(p Plan) (string, error) {
-	return p.semanticDigest(true)
+	return p.semanticDigest(true, false)
 }
 
-func (p Plan) semanticDigest(allowEmpty bool) (string, error) {
+func PrepareTrustPlanDigest(p Plan) (string, error) {
+	return p.semanticDigest(true, true)
+}
+
+func (p Plan) semanticDigest(allowEmpty, trustProjection bool) (string, error) {
 	if err := p.validateForDigest(allowEmpty); err != nil {
 		return "", err
 	}
@@ -205,10 +255,18 @@ func (p Plan) semanticDigest(allowEmpty bool) (string, error) {
 		for _, dynamic := range agent.DynamicArgv {
 			argv[dynamic.Index] = canonicalArgument{Dynamic: dynamic.Kind}
 		}
+		var initial *canonicalInitialInput
+		if agent.InitialInput != nil {
+			initial = &canonicalInitialInput{Kind: agent.InitialInput.Kind, SHA256: agent.InitialInput.SHA256, ArgvIndex: agent.InitialInput.ArgvIndex}
+			if trustProjection {
+				argv[agent.InitialInput.ArgvIndex] = canonicalArgument{Value: "${initial_input:" + string(agent.InitialInput.Kind) + "}"}
+				initial.SHA256 = ""
+			}
+		}
 		agents[i] = staticAgentPlan{
 			Handle: agent.Handle, Argv: argv, EnvOverlay: agent.EnvOverlay,
 			Cwd: agent.Cwd, AdapterMode: agent.AdapterMode, ResumePolicy: agent.ResumePolicy,
-			PreSpawnAcquire: agent.PreSpawnAcquire,
+			PreSpawnAcquire: agent.PreSpawnAcquire, InitialInput: initial,
 		}
 	}
 	slices.SortFunc(agents, func(a, b staticAgentPlan) int { return strings.Compare(a.Handle, b.Handle) })

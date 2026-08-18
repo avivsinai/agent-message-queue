@@ -75,7 +75,7 @@ func (participant ParticipantV1) validate() error {
 	}
 	if !participant.Runnable {
 		if participant.Executable != "" || participant.Args != nil || participant.Cwd != nil ||
-			participant.EnvOverlay != nil || participant.ResumePolicy != "" || participant.Execution != nil {
+			participant.InitialInput != nil || participant.EnvOverlay != nil || participant.ResumePolicy != "" || participant.Execution != nil {
 			return fmt.Errorf("non-runnable participant %q must be handle-only", participant.Handle)
 		}
 		return nil
@@ -100,12 +100,29 @@ func (participant ParticipantV1) validate() error {
 	if err := participant.Execution.validate(); err != nil {
 		return fmt.Errorf("runnable participant %q execution: %w", participant.Handle, err)
 	}
+	if participant.InitialInput != nil {
+		if err := participant.InitialInput.validate(); err != nil {
+			return fmt.Errorf("runnable participant %q initial_input: %w", participant.Handle, err)
+		}
+	}
 	if _, err := internallaunch.ValidateStaticProviderInput(
 		participant.Executable,
 		participant.Args,
 		participant.EnvOverlay,
 	); err != nil {
 		return fmt.Errorf("runnable participant %q: %w", participant.Handle, err)
+	}
+	return nil
+}
+
+func (input InitialInputV1) validate() error {
+	switch input.Kind {
+	case InitialInputArgument, InitialInputStdin, InitialInputFile:
+	default:
+		return fmt.Errorf("invalid kind %q", input.Kind)
+	}
+	if !utf8.ValidString(input.Text) || strings.ContainsRune(input.Text, 0) {
+		return fmt.Errorf("text must be valid UTF-8 without NUL")
 	}
 	return nil
 }
@@ -187,6 +204,14 @@ func requireLaunchIntentFields(data []byte) error {
 			for _, optional := range []string{"args", "env_overlay"} {
 				if err := rejectExplicitNull(fields, optional, fmt.Sprintf("participants[%d]", i)); err != nil {
 					return err
+				}
+				if raw := fields["initial_input"]; raw != nil {
+					if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+						return fmt.Errorf("participants[%d].initial_input must not be null", i)
+					}
+					if err := requireObjectFields(raw, fmt.Sprintf("participants[%d].initial_input", i), "kind", "text"); err != nil {
+						return err
+					}
 				}
 			}
 			var execution map[string]json.RawMessage

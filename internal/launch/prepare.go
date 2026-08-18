@@ -37,6 +37,7 @@ func DefaultLaunchStateDir() (string, error) {
 }
 
 const preparePlaceholderUUID = "00000000-0000-4000-8000-000000000000"
+const MaxInitialInputBytes = 256 * 1024
 
 const (
 	PrepareOutcomeReady          = "ready"
@@ -84,6 +85,12 @@ type PrepareParticipant struct {
 	EnvOverlay   map[string]string
 	ResumePolicy ResumePolicy
 	Execution    PrepareExecutionOptions
+	InitialInput *PrepareInitialInput
+}
+
+type PrepareInitialInput struct {
+	Kind InitialInputKind
+	Text string
 }
 
 type PrepareRequest struct {
@@ -369,7 +376,11 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	result.TrustDigest, err = PrepareTrustDigest(result.PlanDigest, state.target.Session, state.target.SessionRoot, state.sessionIdentity)
+	trustPlanDigest, err := PrepareTrustPlanDigest(plan)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	result.TrustDigest, err = PrepareTrustDigest(trustPlanDigest, state.target.Session, state.target.SessionRoot, state.sessionIdentity)
 	if err != nil {
 		return PrepareResult{}, err
 	}
@@ -397,6 +408,8 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	}
 
 	switch {
+	case firstInitialInputUnsupported(result.Observations) != "":
+		result.Outcome, result.Reason = PrepareOutcomeUnsupported, firstInitialInputUnsupported(result.Observations)
 	case len(result.RequiredActions) > 0:
 		result.Outcome, result.Reason = PrepareOutcomeActionRequired, result.RequiredActions[0].ReasonCode
 	case !detect.Available:
@@ -678,6 +691,11 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 	if !participant.Runnable {
 		return prepared, observation, nil, nil, nil
 	}
+	if reason := prepareInitialInputUnsupported(participant); reason != "" {
+		prepared.PlannedOutcome = "unsupported"
+		observation.ReasonCode = reason
+		return prepared, observation, nil, nil, nil
+	}
 	if dependencies.AdapterFor == nil {
 		return prepared, observation, nil, nil, fmt.Errorf("prepare adapter factory is missing")
 	}
@@ -700,6 +718,10 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 		AMQExecutable: dependencies.AMQPath, Cwd: cwd, AllowExternalCwd: true,
 		LaunchNonce: preparePlaceholderUUID, ResumePolicy: participant.ResumePolicy,
 		CommittedArgs: slices.Clone(participant.Args), BypassArgs: slices.Clone(participant.BypassArgs), EnvOverlay: cloneEnv(participant.EnvOverlay),
+	}
+	if participant.InitialInput != nil {
+		digest := initialInputDigest(participant.InitialInput.Text)
+		base.InitialInput = &InitialInputRequest{Kind: participant.InitialInput.Kind, Value: participant.InitialInput.Text, SHA256: digest}
 	}
 	var plan AgentPlan
 	var actions []PrepareRequiredAction
@@ -731,6 +753,33 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 	plan.Execution = clonePrepareExecutionOptions(&participant.Execution)
 	prepared.Command = previewStaticCommand(plan)
 	return prepared, observation, &plan, actions, nil
+}
+
+func initialInputDigest(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func prepareInitialInputUnsupported(participant PrepareParticipant) string {
+	if participant.InitialInput == nil {
+		return ""
+	}
+	if len([]byte(participant.InitialInput.Text)) > MaxInitialInputBytes {
+		return "initial_input_too_large"
+	}
+	if participant.InitialInput.Kind != InitialInputArgument || participant.Provider == CursorProvider {
+		return "initial_input_unsupported"
+	}
+	return ""
+}
+
+func firstInitialInputUnsupported(observations []PrepareObservation) string {
+	for _, observation := range observations {
+		if observation.ReasonCode == "initial_input_too_large" || observation.ReasonCode == "initial_input_unsupported" {
+			return observation.ReasonCode
+		}
+	}
+	return ""
 }
 
 func clonePrepareExecutionOptions(options *PrepareExecutionOptions) *PrepareExecutionOptions {

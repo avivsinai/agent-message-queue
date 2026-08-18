@@ -86,6 +86,9 @@ func (adapter *CodexAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) {
 		Handle: request.Handle, Argv: argv, EnvOverlay: cloneEnv(request.EnvOverlay), Cwd: request.Cwd,
 		AdapterMode: AdapterModeCapture, ResumePolicy: request.ResumePolicy, LaunchNonce: request.LaunchNonce,
 	}
+	if err := appendInitialInput(&plan, request.InitialInput); err != nil {
+		return AgentPlan{}, err
+	}
 	if err := ValidateAdapterPlan(adapter, plan); err != nil {
 		return AgentPlan{}, err
 	}
@@ -158,12 +161,62 @@ func codexEnvRules() map[string]valueRule { return commonCommittedEnvRules() }
 
 func codexArgRules() map[string]argumentRule {
 	return map[string]argumentRule{
+		"-c":                 {value: true, validate: validCodexConfigOverride},
 		"--ask-for-approval": {value: true, validate: oneOf("untrusted", "on-request")},
 		"--model":            {value: true, validate: safeArgumentValue},
 		"--no-alt-screen":    {},
 		"--sandbox":          {value: true, validate: oneOf("read-only", "workspace-write")},
 		"--search":           {},
 	}
+}
+
+var codexReasoningEffortValues = []string{"minimal", "low", "medium", "high", "xhigh"}
+
+var codexConfigOverrideValues = map[string]map[string]struct{}{
+	"model_reasoning_effort": valueSet(codexReasoningEffortValues),
+}
+
+func valueSet(values []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		result[value] = struct{}{}
+	}
+	return result
+}
+
+func validCodexConfigOverride(value string) bool {
+	key, configured, ok := strings.Cut(value, "=")
+	if !ok || key == "" || configured == "" {
+		return false
+	}
+	values, ok := codexConfigOverrideValues[key]
+	if !ok {
+		return false
+	}
+	_, ok = values[configured]
+	return ok
+}
+
+func validateCodexConfigOverrides(args []string) error {
+	seen := make(map[string]struct{})
+	for i := 0; i < len(args); i++ {
+		if args[i] != "-c" {
+			continue
+		}
+		if i+1 >= len(args) {
+			return fmt.Errorf("static argument %q requires a value", "-c")
+		}
+		key, _, ok := strings.Cut(args[i+1], "=")
+		if !ok || !validCodexConfigOverride(args[i+1]) {
+			return fmt.Errorf("codex configuration override %q is not allowed", args[i+1])
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("codex configuration key %q is duplicated", key)
+		}
+		seen[key] = struct{}{}
+		i++
+	}
+	return nil
 }
 
 func codexBypassArgs() map[string]struct{} {

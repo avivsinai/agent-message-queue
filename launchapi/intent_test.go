@@ -175,6 +175,34 @@ func TestLaunchIntentV1UsesAdapterDenyByDefaultGrammar(t *testing.T) {
 	}
 }
 
+func TestLaunchIntentV1InitialInputStrictShape(t *testing.T) {
+	base := `{"intent_version":1,"participants":[{"handle":"codex","runnable":true,"executable":"codex","cwd":{"kind":"relative","path":"."},"resume_policy":"fresh","execution":{"require_wake":false,"no_gitignore":false,"wake":{"mode":"enabled"}},"initial_input":%s}]}`
+	for _, test := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "null", input: `null`, want: "must not be null"},
+		{name: "unknown kind", input: `{"kind":"pipe","text":"hello"}`, want: "invalid kind"},
+		{name: "missing text", input: `{"kind":"stdin"}`, want: "requires text"},
+		{name: "unknown field", input: `{"kind":"file","text":"hello","path":"/tmp/pwn"}`, want: "unknown field"},
+		{name: "nul", input: `{"kind":"argument","text":"hello\u0000world"}`, want: "without NUL"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := DecodeLaunchIntentV1([]byte(fmt.Sprintf(base, test.input)))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("DecodeLaunchIntentV1 error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	for _, kind := range []string{"argument", "stdin", "file"} {
+		raw := fmt.Sprintf(base, fmt.Sprintf(`{"kind":%q,"text":"hello"}`, kind))
+		if _, err := DecodeLaunchIntentV1([]byte(raw)); err != nil {
+			t.Fatalf("kind %s rejected: %v", kind, err)
+		}
+	}
+}
+
 func TestLaunchIntentV1MarshalRoundTrip(t *testing.T) {
 	intent, err := DecodeLaunchIntentV1([]byte(validIntentJSON(t)))
 	if err != nil {

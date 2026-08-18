@@ -70,6 +70,9 @@ func (adapter *ClaudeAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) 
 		LaunchNonce: request.LaunchNonce, ConversationID: request.LaunchNonce,
 		DynamicArgv: []DynamicArg{{Index: len(argv) - 1, Kind: DynamicArgLaunchNonce}},
 	}
+	if err := appendInitialInput(&plan, request.InitialInput); err != nil {
+		return AgentPlan{}, err
+	}
 	if err := ValidateAdapterPlan(adapter, plan); err != nil {
 		return AgentPlan{}, err
 	}
@@ -110,6 +113,7 @@ func claudeEnvRules() map[string]valueRule { return commonCommittedEnvRules() }
 
 func claudeArgRules() map[string]argumentRule {
 	return map[string]argumentRule{
+		"--allowedTools":    {value: true, validate: validClaudeAllowedTools},
 		"--effort":          {value: true, validate: oneOf("low", "medium", "high", "xhigh", "max")},
 		"--model":           {value: true, validate: safeArgumentValue},
 		"--no-chrome":       {},
@@ -117,6 +121,22 @@ func claudeArgRules() map[string]argumentRule {
 		"--safe-mode":       {},
 		"--verbose":         {},
 	}
+}
+
+func validClaudeAllowedTools(value string) bool {
+	if value == "" || len(value) > 128 || strings.ContainsRune(value, 0) {
+		return false
+	}
+	parts := strings.Split(value, ",")
+	if len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || strings.TrimSpace(part) != part || !safeEnvironmentValue(part) {
+			return false
+		}
+	}
+	return true
 }
 
 func claudeBypassArgs() map[string]struct{} {

@@ -33,12 +33,13 @@ type ProjectConfig struct {
 }
 
 type ProjectAgentConfig struct {
-	Handle       string            `json:"handle"`
-	Adapter      string            `json:"adapter"`
-	Command      []string          `json:"command"`
-	Env          map[string]string `json:"env,omitempty"`
-	Cwd          string            `json:"cwd,omitempty"`
-	ResumePolicy ResumePolicy      `json:"resume_policy"`
+	Handle       string               `json:"handle"`
+	Adapter      string               `json:"adapter"`
+	Command      []string             `json:"command"`
+	Env          map[string]string    `json:"env,omitempty"`
+	Cwd          string               `json:"cwd,omitempty"`
+	ResumePolicy ResumePolicy         `json:"resume_policy"`
+	InitialInput *InitialInputRequest `json:"initial_input,omitempty"`
 }
 
 type LayoutIntent struct {
@@ -148,6 +149,14 @@ func (cfg ProjectConfig) Validate() error {
 		for _, arg := range agent.Command {
 			if arg == "" || strings.ContainsRune(arg, 0) {
 				return fmt.Errorf("agent %q command contains an invalid argument", agent.Handle)
+			}
+		}
+		if agent.InitialInput != nil {
+			if agent.InitialInput.Kind != InitialInputArgument && agent.InitialInput.Kind != InitialInputFile {
+				return fmt.Errorf("agent %q initial input kind is unsupported", agent.Handle)
+			}
+			if !validDigest(agent.InitialInput.SHA256) || strings.ContainsRune(agent.InitialInput.Value, 0) {
+				return fmt.Errorf("agent %q initial input is invalid", agent.Handle)
 			}
 		}
 		if agent.ResumePolicy != ResumeEnabled && agent.ResumePolicy != ResumeFresh && agent.ResumePolicy != ResumeDisabled {

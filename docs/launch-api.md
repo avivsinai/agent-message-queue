@@ -26,12 +26,22 @@ the remaining implementation beads are incomplete. A caller must require every
 feature it uses. Contract semver alone does not claim that an unadvertised
 feature is available.
 
-`PreviewV1.capabilities` is present as a deny-by-default skeleton and is empty
-until the `initial_input` feature lands. `ProviderCapabilitiesV1` defines the
-carrier and configuration-override arrays that the owning bead will populate.
-The first Codex configuration-key candidate is
-`model_reasoning_effort`; its accepted values remain TBD and are not advertised
-by this bead.
+`PreviewV1.capabilities` reports the selected providers' static adapter grammar
+without executing a caller-supplied provider. `grammar_version` is the
+adapter-owned version that consumers compare. It changes when the allowed
+argument forms, configuration overrides, or carrier support changes.
+`verified_provider_version` is informational and names the provider release on
+which that grammar was verified; it does not claim the installed version.
+Runtime provider identity is bound separately before Apply executes it.
+
+The initial-input carrier is typed. Claude and Codex currently advertise
+`argument`; AMQ appends its exact text as the final provider argv element.
+`stdin` and `file` remain typed but unadvertised and return
+`initial_input_unsupported`. Content is limited to 262,144 UTF-8 bytes without
+NUL. Content changes the plan and subject digests but not the trust digest.
+Claude admits one `--allowedTools <comma-separated-list>` pair. Codex admits
+ordered `-c model_reasoning_effort=<value>` pairs with values `minimal`, `low`,
+`medium`, `high`, or `xhigh`; duplicate keys and unknown keys or values reject.
 
 ## Intent
 
