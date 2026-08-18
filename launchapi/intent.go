@@ -75,7 +75,7 @@ func (participant ParticipantV1) validate() error {
 	}
 	if !participant.Runnable {
 		if participant.Executable != "" || participant.Args != nil || participant.Cwd != nil ||
-			participant.InitialInput != nil || participant.EnvOverlay != nil || participant.ResumePolicy != "" ||
+			participant.Wrapper != nil || participant.InitialInput != nil || participant.EnvOverlay != nil || participant.ResumePolicy != "" ||
 			participant.Execution != nil || participant.OnLive != "" {
 			return fmt.Errorf("non-runnable participant %q must be handle-only", participant.Handle)
 		}
@@ -83,6 +83,11 @@ func (participant ParticipantV1) validate() error {
 	}
 	if participant.Executable == "" {
 		return fmt.Errorf("runnable participant %q requires executable", participant.Handle)
+	}
+	if participant.Wrapper != nil {
+		if err := participant.Wrapper.validate(); err != nil {
+			return fmt.Errorf("runnable participant %q wrapper: %w", participant.Handle, err)
+		}
 	}
 	if participant.Cwd == nil {
 		return fmt.Errorf("runnable participant %q requires cwd", participant.Handle)
@@ -117,6 +122,24 @@ func (participant ParticipantV1) validate() error {
 		participant.EnvOverlay,
 	); err != nil {
 		return fmt.Errorf("runnable participant %q: %w", participant.Handle, err)
+	}
+	return nil
+}
+
+func (wrapper WrapperV1) validate() error {
+	if !utf8.ValidString(wrapper.Executable) || strings.ContainsRune(wrapper.Executable, 0) {
+		return fmt.Errorf("executable must be valid UTF-8 without NUL")
+	}
+	if !filepath.IsAbs(wrapper.Executable) || filepath.Clean(wrapper.Executable) != wrapper.Executable {
+		return fmt.Errorf("executable must be a clean absolute path")
+	}
+	for i, arg := range wrapper.Args {
+		if arg == "" {
+			return fmt.Errorf("args[%d] must not be empty", i)
+		}
+		if !utf8.ValidString(arg) || strings.ContainsRune(arg, 0) {
+			return fmt.Errorf("args[%d] must be valid UTF-8 without NUL", i)
+		}
 	}
 	return nil
 }

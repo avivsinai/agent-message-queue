@@ -600,6 +600,8 @@ func testSiblingWorktreeExactRoot(t *testing.T, amqBinary, binDir string) {
 	providerDir := t.TempDir()
 	claudeProvider := filepath.Join(providerDir, "claude")
 	codexProvider := filepath.Join(providerDir, "codex")
+	wrapperPath := filepath.Join(providerDir, "seat-wrapper")
+	wrapperRecord := filepath.Join(providerDir, "wrapper-argv")
 	proofScript := func(capabilities string) string {
 		return `#!/bin/sh
 set -eu
@@ -630,6 +632,17 @@ esac
 `)), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	wrapperScript := `#!/bin/sh
+set -eu
+printf '%s\n' "$@" > ` + shellQuoteArg(wrapperRecord) + `
+[ "${1:-}" = "--profile" ]
+[ "${2:-}" = "lead" ]
+shift 2
+exec "$@"
+`
+	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	disabledWake := func() *launchapi.ExecutionOptionsV1 {
 		return &launchapi.ExecutionOptionsV1{Wake: launchapi.WakeOptionsV1{
@@ -639,6 +652,8 @@ esac
 	intent := launchapi.LaunchIntentV1{IntentVersion: launchapi.IntentVersionV1, Participants: []launchapi.ParticipantV1{
 		{
 			Handle: "claude", Runnable: true, Executable: claudeProvider,
+			Args:         []string{"--allowedTools", "Read"},
+			Wrapper:      &launchapi.WrapperV1{Executable: wrapperPath, Args: []string{"--profile", "lead"}},
 			Cwd:          &launchapi.WorkingDirectoryV1{Kind: launchapi.WorkingDirectoryAbsolute, Path: canonicalRepo},
 			ResumePolicy: launchapi.ResumePolicyFresh, Execution: disabledWake(),
 		},
@@ -701,6 +716,19 @@ esac
 		if handle == "codex" && !strings.Contains(string(output), "exact-root-message") {
 			t.Fatalf("sibling command did not drain the real message:\n%s", output)
 		}
+	}
+	recorded, err := os.ReadFile(wrapperRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeNonce := commands["claude"].EnvOverlay[launch.InternalLaunchNonceEnv]
+	if claudeNonce == "" {
+		t.Fatal("emitted Claude command omitted managed launch nonce")
+	}
+	wantWrapperArgv := []string{"--profile", "lead", claudeProvider, "--allowedTools", "Read", "--session-id", claudeNonce}
+	gotWrapperArgv := strings.Split(strings.TrimSuffix(string(recorded), "\n"), "\n")
+	if !slices.Equal(gotWrapperArgv, wantWrapperArgv) {
+		t.Fatalf("real wrapper argv = %#v, want %#v", gotWrapperArgv, wantWrapperArgv)
 	}
 	if _, err := os.Stat(filepath.Join(canonicalSibling, defaultCoopRoot)); !os.IsNotExist(err) {
 		t.Fatalf("sibling-local queue exists under %s: %v", canonicalSibling, err)

@@ -36,12 +36,8 @@ func TestCompatibilityAndNegotiateV1(t *testing.T) {
 	if !slices.Contains(Compatibility().Features, FeatureExecutableIdentity) {
 		t.Fatal("Compatibility omitted advertised executable_identity")
 	}
-	for _, unfinished := range []string{
-		FeatureWrapper,
-	} {
-		if slices.Contains(Compatibility().Features, unfinished) {
-			t.Fatalf("Compatibility advertised unfinished feature %q", unfinished)
-		}
+	if !slices.Contains(Compatibility().Features, FeatureWrapper) {
+		t.Fatal("Compatibility did not advertise the completed wrapper feature")
 	}
 
 	negotiated, err := Negotiate(RequirementV1{

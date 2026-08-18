@@ -80,12 +80,18 @@ type ParticipantV1 struct {
 	Runnable     bool                `json:"runnable"`
 	Executable   string              `json:"executable,omitempty"`
 	Args         []string            `json:"args,omitempty"`
+	Wrapper      *WrapperV1          `json:"wrapper,omitempty"`
 	InitialInput *InitialInputV1     `json:"initial_input,omitempty"`
 	Cwd          *WorkingDirectoryV1 `json:"cwd,omitempty"`
 	EnvOverlay   map[string]string   `json:"env_overlay,omitempty"`
 	ResumePolicy ResumePolicy        `json:"resume_policy,omitempty"`
 	Execution    *ExecutionOptionsV1 `json:"execution,omitempty"`
 	OnLive       OnLivePolicyV1      `json:"on_live,omitempty"`
+}
+
+type WrapperV1 struct {
+	Executable string   `json:"executable"`
+	Args       []string `json:"args,omitempty"`
 }
 
 type WorkingDirectoryV1 struct {

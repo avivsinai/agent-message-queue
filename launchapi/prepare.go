@@ -113,6 +113,9 @@ func toInternalPrepareParticipant(participant ParticipantV1, provider string, co
 	if participant.InitialInput != nil {
 		result.InitialInput = &internallaunch.PrepareInitialInput{Kind: internallaunch.InitialInputKind(participant.InitialInput.Kind), Text: participant.InitialInput.Text}
 	}
+	if participant.Wrapper != nil {
+		result.Wrapper = &internallaunch.Wrapper{Executable: participant.Wrapper.Executable, Args: slices.Clone(participant.Wrapper.Args)}
+	}
 	if participant.Cwd != nil {
 		result.Cwd = participant.Cwd.Path
 	}

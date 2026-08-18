@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -172,6 +173,66 @@ func TestPrepareMintPromotesExactPendingAndExecFailureReverts(t *testing.T) {
 	record, err = LoadConversation(fixture.root, "claude")
 	if err != nil || record.State != CapturePending || record.Reason != "spawn_failed" {
 		t.Fatalf("reverted conversation = %#v, %v", record, err)
+	}
+}
+
+func TestPrepareExecutionAcceptsDeclaredWrapperTarget(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "56565656-5656-4565-8565-565656565656"
+	wrapper := testWrapper(t)
+	targetArgv := []string{wrapper.Executable, "--profile", "lead", fixture.provider, "--session-id", nonce}
+	ticket, err := NewExecutionTicket(ExecutionTicketRequest{
+		Handle: "claude", LaunchNonce: nonce, Mode: AdapterModeMint, Provider: ClaudeProvider, ConversationID: nonce,
+		ProjectRoot: fixture.project, SessionRoot: fixture.session, Cwd: fixture.cwd,
+		ProviderExecutable: fixture.provider, AMQExecutable: fixture.amq,
+		TargetArgv: targetArgv, TargetEnv: map[string]string{"LANG": "C"}, Wrapper: wrapper,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := AcquireLease(fixture.root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("claude"); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteExecutionTicket(fixture.root, lease, ticket); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteConversation(fixture.root, lease, ConversationRecord{
+		Version: ConversationVersion, Handle: "claude", State: CapturePending, LaunchNonce: nonce,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareExecution(fixture.root, "claude", nonce, ExecutionEnvelope{
+		Cwd: fixture.cwd, AMQExecutable: fixture.amq, ProviderExecutable: wrapper.Executable,
+		TargetArgv: targetArgv, Environment: []string{"LANG=C"},
+	})
+	if err != nil || prepared.State != ExecutionAcknowledged {
+		t.Fatalf("PrepareExecution = %#v, %v", prepared, err)
+	}
+	resolved, err := ResolveExecutionArgv(prepared)
+	if err != nil || !slices.Equal(resolved, targetArgv) {
+		t.Fatalf("ResolveExecutionArgv = %#v, %v", resolved, err)
+	}
+	changed := ExecutionEnvelope{
+		Cwd: fixture.cwd, AMQExecutable: fixture.amq, ProviderExecutable: fixture.provider,
+		TargetArgv: targetArgv, Environment: []string{"LANG=C"},
+	}
+	if err := ValidateExecutionEnvelope(fixture.root, prepared, changed); err == nil || !strings.Contains(err.Error(), "execution target changed") {
+		t.Fatalf("provider bypassed wrapper: %v", err)
+	}
+	tampered := prepared
+	tampered.TargetArgv = slices.Clone(prepared.TargetArgv)
+	tampered.TargetArgv[3] = wrapper.Executable
+	changed.ProviderExecutable = wrapper.Executable
+	changed.TargetArgv = tampered.TargetArgv
+	if err := ValidateExecutionEnvelope(fixture.root, tampered, changed); err == nil || !strings.Contains(err.Error(), "provider target identity changed") {
+		t.Fatalf("wrapper redirected inner provider: %v", err)
 	}
 }
 

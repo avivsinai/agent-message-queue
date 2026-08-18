@@ -103,6 +103,7 @@ type PrepareParticipant struct {
 	Execution    PrepareExecutionOptions
 	InitialInput *PrepareInitialInput
 	OnLive       string
+	Wrapper      *Wrapper
 }
 
 type PrepareInitialInput struct {
@@ -157,6 +158,7 @@ type PreparedParticipant struct {
 	CwdIdentity    string                  `json:"cwd_identity,omitempty"`
 	OnLive         string                  `json:"on_live,omitempty"`
 	Executable     *ConsultedExecutable    `json:"executable_identity,omitempty"`
+	Wrapper        *ConsultedExecutable    `json:"wrapper_executable_identity,omitempty"`
 }
 
 type PrepareRoster struct {
@@ -924,6 +926,24 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 		observation.ReasonCode = reason
 		return prepared, observation, nil, nil, nil
 	}
+	if err := validateWrapperFile(participant.Wrapper); err != nil {
+		return prepared, observation, nil, nil, fmt.Errorf("wrapper for %s: %w", participant.Handle, err)
+	}
+	if subjectSchema == SubjectSchemaV2 && participant.Wrapper != nil {
+		identity, err := ProbeExecutableIdentity(participant.Wrapper.Executable)
+		if err != nil {
+			return prepared, observation, nil, nil, fmt.Errorf("identify wrapper for %s: %w", participant.Handle, err)
+		}
+		raw, err := MarshalExecutableIdentity(identity)
+		if err != nil {
+			return prepared, observation, nil, nil, err
+		}
+		prepared.Wrapper = &ConsultedExecutable{
+			Requested: participant.Wrapper.Executable,
+			Consulted: participant.Wrapper.Executable,
+			Identity:  raw,
+		}
+	}
 	if dependencies.AdapterFor == nil {
 		return prepared, observation, nil, nil, fmt.Errorf("prepare adapter factory is missing")
 	}
@@ -977,6 +997,10 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 	}
 	if err != nil {
 		return prepared, observation, nil, actions, err
+	}
+	plan, err = applyWrapper(plan, participant.Wrapper)
+	if err != nil {
+		return prepared, observation, nil, actions, fmt.Errorf("wrapper for %s: %w", participant.Handle, err)
 	}
 	plan.Execution = clonePrepareExecutionOptions(&participant.Execution)
 	prepared.Command = previewStaticCommand(plan)

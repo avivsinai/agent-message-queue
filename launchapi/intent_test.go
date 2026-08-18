@@ -70,6 +70,7 @@ func TestLaunchIntentNonRunnableIsHandleOnly(t *testing.T) {
 		{name: "omitted participants", raw: `{"intent_version":1}`, want: "requires participants"},
 		{name: "extra executable", raw: `{"intent_version":1,"participants":[{"handle":"operator","runnable":false,"executable":"codex"}]}`, want: "exactly handle and runnable"},
 		{name: "extra empty args", raw: `{"intent_version":1,"participants":[{"handle":"operator","runnable":false,"args":[]}]}`, want: "exactly handle and runnable"},
+		{name: "extra wrapper", raw: `{"intent_version":1,"participants":[{"handle":"operator","runnable":false,"wrapper":{"executable":"/bin/wrapper"}}]}`, want: "exactly handle and runnable"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -225,6 +226,10 @@ func TestLaunchIntentV1MarshalRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	intent.Participants[1].Wrapper = &WrapperV1{
+		Executable: filepath.Join(t.TempDir(), "seat-wrapper"),
+		Args:       []string{"--profile", "lead"},
+	}
 	raw, err := MarshalLaunchIntentV1(intent)
 	if err != nil {
 		t.Fatal(err)
@@ -235,5 +240,38 @@ func TestLaunchIntentV1MarshalRoundTrip(t *testing.T) {
 	}
 	if len(decoded.Participants) != len(intent.Participants) {
 		t.Fatalf("round-trip participant count = %d, want %d", len(decoded.Participants), len(intent.Participants))
+	}
+	wrapper := decoded.Participants[1].Wrapper
+	if wrapper == nil || wrapper.Executable != intent.Participants[1].Wrapper.Executable ||
+		len(wrapper.Args) != 2 || wrapper.Args[0] != "--profile" || wrapper.Args[1] != "lead" {
+		t.Fatalf("round-trip wrapper = %#v", wrapper)
+	}
+}
+
+func TestWrapperV1SyntaxValidation(t *testing.T) {
+	valid := WrapperV1{Executable: filepath.Join(t.TempDir(), "seat-wrapper"), Args: []string{"--profile", "lead"}}
+	if err := valid.validate(); err != nil {
+		t.Fatalf("valid wrapper: %v", err)
+	}
+	for _, test := range []struct {
+		name    string
+		wrapper WrapperV1
+		want    string
+	}{
+		{name: "empty executable", wrapper: WrapperV1{}, want: "absolute path"},
+		{name: "PATH lookup", wrapper: WrapperV1{Executable: "seat-wrapper"}, want: "absolute path"},
+		{name: "shell fragment", wrapper: WrapperV1{Executable: "sh -c"}, want: "absolute path"},
+		{name: "unclean path", wrapper: WrapperV1{Executable: filepath.Join(t.TempDir(), "bin") + "/../seat-wrapper"}, want: "clean absolute"},
+		{name: "executable NUL", wrapper: WrapperV1{Executable: "/bin/wrap\x00per"}, want: "without NUL"},
+		{name: "invalid UTF-8 executable", wrapper: WrapperV1{Executable: "/bin/" + string([]byte{0xff})}, want: "valid UTF-8"},
+		{name: "empty arg", wrapper: WrapperV1{Executable: "/bin/wrapper", Args: []string{""}}, want: "must not be empty"},
+		{name: "arg NUL", wrapper: WrapperV1{Executable: "/bin/wrapper", Args: []string{"bad\x00arg"}}, want: "without NUL"},
+		{name: "invalid UTF-8 arg", wrapper: WrapperV1{Executable: "/bin/wrapper", Args: []string{string([]byte{0xff})}}, want: "valid UTF-8"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.wrapper.validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("WrapperV1.validate error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }

@@ -45,6 +45,7 @@
         "runnable": {"const": true},
         "executable": {"type": "string", "minLength": 1},
         "args": {"type": "array", "items": {"type": "string"}},
+        "wrapper": {"$ref": "#/$defs/WrapperV1"},
         "initial_input": {"$ref": "#/$defs/InitialInputV1"},
         "cwd": {"$ref": "#/$defs/WorkingDirectoryV1"},
         "env_overlay": {
@@ -55,6 +56,15 @@
         "resume_policy": {"enum": ["resume", "fresh", "disabled"]},
         "on_live": {"enum": ["keep", "refuse"]},
         "execution": {"$ref": "#/$defs/ExecutionOptionsV1"}
+      }
+    },
+    "WrapperV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executable"],
+      "properties": {
+        "executable": {"type": "string", "minLength": 1, "pattern": "^[^\\x00]*$"},
+        "args": {"type": "array", "items": {"type": "string", "minLength": 1, "pattern": "^[^\\x00]*$"}}
       }
     },
     "InitialInputV1": {

@@ -95,6 +95,7 @@ type PlanRequest struct {
 	BypassArgs       []string
 	EnvOverlay       map[string]string
 	InitialInput     *InitialInputRequest
+	Wrapper          *Wrapper
 }
 
 type InitialInputRequest struct {

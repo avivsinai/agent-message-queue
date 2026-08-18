@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,7 +27,7 @@ import (
 //	Row | Finding | Today | WB3 expected
 //	finding1_missing_profile_base_root | 1 named-profile base root | missing .agent-mail/<profile> refuses (not found / stat delivery root) | Prepare planned write create_base_root; Apply creates the authorized base
 //	finding2_mixed_live_fresh_keep_creates | 2 live-seat dispositions | on_live keep -> kept + created missing seats | omitted on_live still refuses
-//	finding3_wrapper_unknown_field | 3 wrapper | strict decode unknown field "wrapper" | wrapper argv prepended to full provider argv
+//	finding3_wrapper_argv | 3 wrapper | strict decode unknown field "wrapper" | wrapper argv prepended to full provider argv
 //	finding4_placement_unsupported | 4 placement | AMQ_SQUAD_TMUX_* env rejected as provider env | placement preview; unsupported tuple -> placement_unsupported
 //	finding5_positional_bootstrap_prompt / finding5_claude_allowed_tools / finding5_codex_dash_c | 5 materialized argv | raw positional prompt rejected; exact --allowedTools and -c forms admitted | initial_input + --allowedTools / -c admitted
 //	finding6_caller_context_bound_and_echoed | 6 caller correlation | caller_context is subject-bound and echoed on Apply/evidence/lifecycle
@@ -96,15 +97,30 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 		}
 	})
 
-	t.Run("finding3_wrapper_unknown_field", func(t *testing.T) {
+	t.Run("finding3_wrapper_argv", func(t *testing.T) {
 		fx := newAdoptionSmokeFixture(t, amqBinary, ".agent-mail", "collab")
-		raw := fx.intentJSON(t, fx.legalSquadIntent())
-		raw = injectParticipantJSONField(t, raw, 1, "wrapper", map[string]any{
-			"executable": "/opt/company/bin/seat-wrapper",
-			"args":       []string{"--profile", "lead"},
-		})
-		stdout, stderr, exit := fx.prepareJSON(t, raw, launch.LauncherCommands)
-		assertAdoptionUnknownField(t, exit, stdout, stderr, "wrapper")
+		wrapper := filepath.Join(t.TempDir(), "seat-wrapper")
+		if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		intent := fx.legalSquadIntent()
+		intent.Participants[1].Wrapper = &launchapi.WrapperV1{Executable: wrapper, Args: []string{"--profile", "lead"}}
+		stdout, stderr, exit := fx.prepare(t, intent, launch.LauncherCommands)
+		if exit != ExitActionRequired {
+			t.Fatalf("wrapper Prepare exit=%d stdout=%s stderr=%s", exit, stdout, stderr)
+		}
+		var result launchapi.PrepareResultV1
+		decodeRealLaunchJSON(t, stdout, &result)
+		for _, participant := range result.Preview.Participants {
+			if participant.Handle == "lead" && participant.Command != nil {
+				want := []string{wrapper, "--profile", "lead", fx.claudePath}
+				if len(participant.Command.Argv) < len(want) || !slices.Equal(participant.Command.Argv[:len(want)], want) {
+					t.Fatalf("wrapper argv = %#v, want prefix %#v", participant.Command.Argv, want)
+				}
+				return
+			}
+		}
+		t.Fatal("lead wrapper preview missing")
 	})
 
 	t.Run("finding6_caller_context_bound_and_echoed", func(t *testing.T) {
@@ -619,28 +635,6 @@ func countHermeticTmuxPanes(t *testing.T, socketDir string) int {
 	return len(strings.Fields(string(output)))
 }
 
-func injectParticipantJSONField(t *testing.T, intentJSON []byte, index int, key string, value any) []byte {
-	t.Helper()
-	var doc map[string]any
-	if err := json.Unmarshal(intentJSON, &doc); err != nil {
-		t.Fatal(err)
-	}
-	participants, ok := doc["participants"].([]any)
-	if !ok || index >= len(participants) {
-		t.Fatalf("participants[%d] missing", index)
-	}
-	participant, ok := participants[index].(map[string]any)
-	if !ok {
-		t.Fatalf("participants[%d] is not an object", index)
-	}
-	participant[key] = value
-	data, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return append(data, '\n')
-}
-
 func injectPrepareJSONField(t *testing.T, applyJSON []byte, key string, value any) []byte {
 	t.Helper()
 	var doc map[string]any
@@ -702,15 +696,4 @@ func assertAdoptionArgumentAdmitted(t *testing.T, exit int, stdout, stderr []byt
 		return
 	}
 	t.Fatalf("admitted argument participant %q missing from preview", handle)
-}
-
-func assertAdoptionUnknownField(t *testing.T, exit int, stdout, stderr []byte, field string) {
-	t.Helper()
-	if exit != ExitUsage {
-		t.Fatalf("unknown-field rejection exit=%d want %d stdout=%s stderr=%s", exit, ExitUsage, stdout, stderr)
-	}
-	combined := string(stdout) + string(stderr)
-	if !strings.Contains(combined, "unknown field") || !strings.Contains(combined, field) {
-		t.Fatalf("unknown-field rejection missing %q: stdout=%s stderr=%s", field, stdout, stderr)
-	}
 }

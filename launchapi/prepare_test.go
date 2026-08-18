@@ -160,6 +160,61 @@ func TestCallerContextCanonicalOrderChangesSubjectButNotPlanOrTrust(t *testing.T
 	}
 }
 
+func TestPrepareWrapperComposesVerbatimArgvAndChangesAllDigests(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, true)
+	baseline, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := writePublicTestWrapper(t)
+	runnable := &fixture.request.Intent.Participants[0]
+	runnable.Wrapper = &WrapperV1{Executable: wrapper, Args: []string{"--profile", "lead"}}
+	runnable.InitialInput = &InitialInputV1{Kind: InitialInputArgument, Text: "bootstrap"}
+	wrapped, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := wrapped.Preview.Participants[0].Command.Argv
+	if len(argv) < 5 || !slices.Equal(argv[:4], []string{wrapper, "--profile", "lead", runnable.Executable}) || argv[len(argv)-1] != "bootstrap" {
+		t.Fatalf("wrapped preview argv = %#v", argv)
+	}
+	if wrapped.PlanDigest == baseline.PlanDigest || wrapped.TrustDigest == baseline.TrustDigest || wrapped.SubjectDigest == baseline.SubjectDigest {
+		t.Fatalf("wrapper digest changes = plan:%t trust:%t subject:%t", wrapped.PlanDigest != baseline.PlanDigest, wrapped.TrustDigest != baseline.TrustDigest, wrapped.SubjectDigest != baseline.SubjectDigest)
+	}
+}
+
+func TestPrepareWrapperFileValidationAndStdinRefusalAreZeroWrite(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		wrapper    func(*testing.T) string
+		input      *InitialInputV1
+		wantErr    string
+		wantReason string
+	}{
+		{name: "missing", wrapper: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }, wantErr: "stat executable"},
+		{name: "directory", wrapper: func(t *testing.T) string { return t.TempDir() }, wantErr: "regular file"},
+		{name: "stdin", wrapper: writePublicTestWrapper, input: &InitialInputV1{Kind: InitialInputStdin, Text: "bootstrap"}, wantReason: "initial_input_unsupported"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPublicPrepareFixture(t, true)
+			fixture.request.Intent.Participants[0].Wrapper = &WrapperV1{Executable: test.wrapper(t)}
+			fixture.request.Intent.Participants[0].InitialInput = test.input
+			before := snapshotTestTree(t, fixture.root)
+			result, err := Prepare(context.Background(), fixture.request)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("Prepare error = %v, want %q", err, test.wantErr)
+				}
+			} else if err != nil || result.Outcome != PrepareOutcomeUnsupported || result.Reason != test.wantReason {
+				t.Fatalf("Prepare = %#v, %v; want reason %q", result, err, test.wantReason)
+			}
+			if after := snapshotTestTree(t, fixture.root); after != before {
+				t.Fatalf("Prepare changed tree: before=%s after=%s", before, after)
+			}
+		})
+	}
+}
+
 func TestPrepareUnsupportedInitialCarriersAndOversizeAreTypedAndZeroWrite(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -670,6 +725,15 @@ func main() {
 		t.Fatalf("build provider helper: %v\n%s", err, output)
 	}
 	return executable
+}
+
+func writePublicTestWrapper(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "seat-wrapper")
+	if err := os.WriteFile(path, []byte("wrapper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func snapshotTestTree(t *testing.T, root string) string {
