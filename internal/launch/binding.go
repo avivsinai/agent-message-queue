@@ -27,6 +27,7 @@ type BindingRecord struct {
 	Profile          string              `json:"profile"`
 	LaunchNonce      string              `json:"launch_nonce"`
 	Resources        ResourceIdentitySet `json:"resources"`
+	Placement        PlacementPreview    `json:"placement,omitempty"`
 }
 
 type ResourceIdentitySet struct {
@@ -69,6 +70,12 @@ func (record BindingRecord) Validate() error {
 			return fmt.Errorf("duplicate resource identity %q", resource.OpaqueID)
 		}
 		seen[resource.OpaqueID] = struct{}{}
+	}
+	if pane := strings.TrimSpace(record.Placement.Effective.LauncherPane); pane != "" {
+		owned := tmuxPaneResource(pane)
+		if _, ok := seen[owned]; ok {
+			return fmt.Errorf("launcher pane %q must not be an owned resource", pane)
+		}
 	}
 	return nil
 }

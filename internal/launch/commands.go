@@ -43,6 +43,9 @@ func (Commands) Detect() DetectResult {
 }
 
 func (Commands) Create(req CreateRequest) (CreateResult, error) {
+	if req.Placement != nil {
+		return CreateResult{}, &DefinitePreCreateError{Err: placementError(PlacementUnsupportedReason)}
+	}
 	if strings.TrimSpace(req.Session) == "" {
 		return CreateResult{}, fmt.Errorf("session is required")
 	}

@@ -44,6 +44,9 @@ func TestLaunchJournalRequiresLeaseAndClearsOnlyExactRecord(t *testing.T) {
 	if !reflect.DeepEqual(loaded.Plan.Agents[0].Execution, plan.Agents[0].Execution) {
 		t.Fatalf("journal execution options = %#v, want %#v", loaded.Plan.Agents[0].Execution, plan.Agents[0].Execution)
 	}
+	if loaded.Placement.Effective != LegacyPlacement(backend.name) || loaded.Placement.Requested != nil {
+		t.Fatalf("omitted journal placement = %#v", loaded.Placement)
+	}
 	request.ExecutionOptions = map[string]PrepareExecutionOptions{"claude": *plan.Agents[0].Execution}
 	if err := loaded.ValidateRequest(request); err != nil {
 		t.Fatalf("journal rejected matching execution options: %v", err)
@@ -138,4 +141,31 @@ func journalFixturePlan(nonce string) (Plan, []AgentReconcileResult, []Conversat
 		ProviderVersion: "test", LaunchNonce: nonce,
 	}}
 	return plan, agents, conversations
+}
+
+func TestLaunchJournalPersistsPlacementAndRejectsDrift(t *testing.T) {
+	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectAbsent}
+	request := reconcileFixture(t, backend)
+	request.Placement = &Placement{Target: PlacementTargetNewWindow, Layout: PlacementLayoutRows, StaggerMS: 250}
+	nonce := "019c8a2f-2b13-7000-8000-000000000012"
+	plan, agents, conversations := journalFixturePlan(nonce)
+	digest, err := plan.SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := NewLaunchJournal(request, backend.name, backend.Detect(), plan, digest, nonce, agents, conversations, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Placement.Requested == nil || record.Placement.Effective.Target != PlacementTargetNewWindow ||
+		record.Placement.Effective.Layout != PlacementLayoutRows || record.Placement.Effective.StaggerMS != 250 {
+		t.Fatalf("journal placement = %#v", record.Placement)
+	}
+	if err := record.ValidateRequest(request); err != nil {
+		t.Fatalf("matching placement rejected: %v", err)
+	}
+	request.Placement = &Placement{Target: PlacementTargetSession, Layout: PlacementLayoutColumns}
+	if err := record.ValidateRequest(request); err == nil || !strings.Contains(err.Error(), "placement changed") {
+		t.Fatalf("journal accepted placement drift: %v", err)
+	}
 }

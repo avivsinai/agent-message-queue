@@ -76,6 +76,8 @@ type ReconcileRequest struct {
 	// ExecutionOptions carries normalized wrapper policy into the plan, journal,
 	// and ticket. The exact-root/options boundary owns later consumption.
 	ExecutionOptions map[string]PrepareExecutionOptions
+	// Placement is the caller-requested tuple. Nil preserves v0.61 Create.
+	Placement *Placement
 }
 
 type AgentReconcileResult struct {
@@ -333,7 +335,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		}
 		create, err = backend.Create(CreateRequest{
 			ProjectRoot: request.ProjectRoot, Session: request.Session, Plan: plan,
-			AMQPath: amqExecutable, Root: request.Root,
+			AMQPath: amqExecutable, Root: request.Root, Placement: request.Placement,
 		})
 		if err != nil {
 			var definite *DefinitePreCreateError

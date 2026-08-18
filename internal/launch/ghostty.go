@@ -90,6 +90,10 @@ func (b *GhosttyBackend) Detect() DetectResult {
 }
 
 func (b *GhosttyBackend) Create(req CreateRequest) (CreateResult, error) {
+	preview, err := resolveCreatePlacement(LauncherGhostty, req)
+	if err != nil {
+		return CreateResult{}, &DefinitePreCreateError{Err: err}
+	}
 	if err := b.validateCreate(req); err != nil {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}
 	}
@@ -134,7 +138,10 @@ func (b *GhosttyBackend) Create(req CreateRequest) (CreateResult, error) {
 		return CreateResult{}, b.reconcileCreateFailure(before, "", false, err)
 	}
 	terminalIDs := []string{firstTerminal}
-	for _, agent := range req.Plan.Agents[1:] {
+	for i, agent := range req.Plan.Agents[1:] {
+		if err := b.staggerPlacement(preview, i+1); err != nil {
+			return CreateResult{}, err
+		}
 		splitSnapCtx, splitSnapCancel := b.inspectCallContext()
 		splitBefore, snapErr := b.listWindowIDs(splitSnapCtx)
 		splitSnapCancel()
@@ -142,7 +149,7 @@ func (b *GhosttyBackend) Create(req CreateRequest) (CreateResult, error) {
 			return CreateResult{}, b.reconcileCreateFailure(before, windowID, false, fmt.Errorf("snapshot ghostty windows before split: %w", snapErr))
 		}
 		splitCtx, splitCancel := b.createCallContext()
-		splitRaw, splitErr := b.run(splitCtx, "split", terminalIDs[len(terminalIDs)-1], req.ProjectRoot)
+		splitRaw, splitErr := b.run(splitCtx, "split", terminalIDs[len(terminalIDs)-1], req.ProjectRoot, ghosttySplitDirection(preview.Effective.Layout))
 		splitCancel()
 		if splitErr != nil {
 			return CreateResult{}, b.reconcileCreateFailure(splitBefore, windowID, false, fmt.Errorf("create ghostty split for %s: %w", agent.Handle, splitErr))
@@ -180,6 +187,7 @@ func (b *GhosttyBackend) Create(req CreateRequest) (CreateResult, error) {
 		InstanceIdentity: detect.InstanceIdentity, Profile: detect.Profile.Identity(),
 		LaunchNonce: nonce,
 		Resources:   ResourceIdentitySet{Version: ResourceSetVersion, Resources: resources},
+		Placement:   preview,
 	}
 	if err := binding.Validate(); err != nil {
 		return CreateResult{}, err
@@ -197,6 +205,16 @@ func (b *GhosttyBackend) createOpTimeout() time.Duration {
 
 func (b *GhosttyBackend) createCallContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), b.createOpTimeout())
+}
+
+func (b *GhosttyBackend) staggerPlacement(preview PlacementPreview, index int) error {
+	delay := placementStaggerDuration(&preview.Effective)
+	if delay <= 0 || index == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), delay+time.Second)
+	defer cancel()
+	return b.doSleep(ctx, delay)
 }
 
 func (b *GhosttyBackend) inspectCallContext() (context.Context, context.CancelFunc) {
@@ -274,18 +292,30 @@ func (b *GhosttyBackend) Close(req CloseRequest) (CloseResult, error) {
 	if inspection.Status == InspectAbsent {
 		return CloseResult{Outcome: OutcomeClosed, Reason: "ghostty window already absent"}, nil
 	}
-	if inspection.Status != InspectPresent {
-		return CloseResult{Outcome: OutcomeActionRequired, Reason: inspection.Evidence}, nil
+	terminals := ghosttyBoundTerminals(req.Binding)
+	if len(terminals) == 0 {
+		return CloseResult{Outcome: OutcomeActionRequired, Reason: "ghostty binding has no terminal identities"}, nil
 	}
 	windowID, _, err := parseGhosttyWindowResource(req.Binding)
 	if err != nil {
-		return CloseResult{Outcome: OutcomeActionRequired, Reason: err.Error()}, nil
+		windowID = ""
 	}
-	if _, err := b.run(ctx, "close-window", windowID); err != nil {
-		return CloseResult{}, fmt.Errorf("close ghostty window: %w", err)
+	for _, terminalID := range terminals {
+		if _, closeErr := b.run(ctx, "close-terminal", terminalID); closeErr != nil && !ghosttyTargetMissing(closeErr) {
+			return CloseResult{}, fmt.Errorf("close ghostty terminal %s: %w", terminalID, closeErr)
+		}
 	}
-	b.forgetGeneration(req.Binding.LaunchNonce, windowID)
-	return CloseResult{Outcome: OutcomeClosed, Reason: "ghostty window closed"}, nil
+	live, liveErr := b.countLiveTerminals(ctx, terminals)
+	if liveErr != nil {
+		return CloseResult{Outcome: OutcomeActionRequired, Reason: liveErr.Error()}, nil
+	}
+	if live > 0 {
+		return CloseResult{Outcome: OutcomeActionRequired, Reason: "owned ghostty terminal still alive after close"}, nil
+	}
+	if windowID != "" {
+		b.forgetGeneration(req.Binding.LaunchNonce, windowID)
+	}
+	return CloseResult{Outcome: OutcomeClosed, Reason: "ghostty terminals closed"}, nil
 }
 
 func (b *GhosttyBackend) Focus(req FocusRequest) (FocusResult, error) {
@@ -635,7 +665,13 @@ on run argv
 		set initial working directory of cfg to cwd
 		set matches to terminals whose id is targetID
 		if (count of matches) is not 1 then error "ghostty terminal not unique"
-		set newTerm to split (item 1 of matches) direction right with configuration cfg
+		set dir to "right"
+		if (count of argv) is greater than 2 then set dir to item 3 of argv
+		if dir is "down" then
+			set newTerm to split (item 1 of matches) direction down with configuration cfg
+		else
+			set newTerm to split (item 1 of matches) direction right with configuration cfg
+		end if
 		return id of newTerm
 	end tell
 end run
@@ -715,6 +751,17 @@ on run argv
 		set wins to windows whose id is winID
 		if (count of wins) is 0 then error "ghostty window is absent"
 		close window (item 1 of wins)
+	end tell
+end run
+`, nil
+	case "close-terminal":
+		return `
+on run argv
+	set termID to item 1 of argv
+	tell application "Ghostty"
+		set matches to terminals whose id is termID
+		if (count of matches) is 0 then return
+		close (item 1 of matches)
 	end tell
 end run
 `, nil
@@ -924,6 +971,14 @@ func containsString(ids []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func ghosttyTargetMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "absent") || strings.Contains(msg, "not unique") || strings.Contains(msg, "can't get")
 }
 
 func sameStringSet(left, right []string) bool {

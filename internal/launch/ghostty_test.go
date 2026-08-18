@@ -107,6 +107,26 @@ func (f *fakeGhostty) run(_ context.Context, args ...string) (string, error) {
 		}
 		f.windows = kept
 		return "ok", nil
+	case "close-terminal":
+		if len(args) < 2 {
+			return "", errors.New("close-terminal requires a terminal id")
+		}
+		want := strings.ToUpper(args[1])
+		keptWindows := f.windows[:0]
+		for _, window := range f.windows {
+			keptTerms := window.terminals[:0]
+			for _, id := range window.terminals {
+				if strings.ToUpper(id) != want {
+					keptTerms = append(keptTerms, id)
+				}
+			}
+			if len(keptTerms) > 0 {
+				window.terminals = keptTerms
+				keptWindows = append(keptWindows, window)
+			}
+		}
+		f.windows = keptWindows
+		return "ok", nil
 	default:
 		return "", fmt.Errorf("unknown ghostty op %q", op)
 	}
@@ -317,11 +337,16 @@ func TestGhosttyCloseRefusesWindowIDReuseWithOtherTerminals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if closed.Outcome != OutcomeActionRequired {
-		t.Fatalf("Close = %#v, want action-required", closed)
+	if closed.Outcome != OutcomeClosed {
+		t.Fatalf("Close = %#v, want closed because bound terminals are already gone", closed)
 	}
 	if indexOfGhosttyOp(fake.ops(), "close-window") >= 0 {
 		t.Fatalf("close-window invoked for reused window id: %v", fake.ops())
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.windows) != 1 || len(fake.windows[0].terminals) != 1 || fake.windows[0].terminals[0] != "019C5A10-75D8-7EEF-8DB7-FFFFFFFFFFFF" {
+		t.Fatalf("reused window terminals mutated: %#v", fake.windows)
 	}
 }
 
@@ -348,8 +373,8 @@ func TestGhosttyListWindowsErrorIsUnknownNotAbsent(t *testing.T) {
 	if closed.Outcome != OutcomeActionRequired {
 		t.Fatalf("Close = %#v, want action-required", closed)
 	}
-	if indexOfGhosttyOp(fake.ops()[before:], "close-window") >= 0 {
-		t.Fatalf("list-windows failure closed a window: %v", fake.ops()[before:])
+	if indexOfGhosttyOp(fake.ops()[before:], "close-window") >= 0 || indexOfGhosttyOp(fake.ops()[before:], "close-terminal") >= 0 {
+		t.Fatalf("list-windows failure closed a window or terminal: %v", fake.ops()[before:])
 	}
 	fake.fail = ""
 	present, err := backend.Inspect(InspectRequest{Binding: created.Binding, Root: root})
@@ -580,6 +605,73 @@ func TestGhosttyArgvRecorderSeesCreateGrammar(t *testing.T) {
 	}
 	if strings.Contains(joined, "command") {
 		t.Fatalf("create used configuration.command: %s", joined)
+	}
+}
+
+func TestGhosttyPlacementRowsPassesDown(t *testing.T) {
+	backend, fake := newFakeGhosttyBackend(t)
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude", "codex")
+	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eea6")
+	created, err := backend.Create(CreateRequest{
+		ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root,
+		Placement: &Placement{Target: PlacementTargetNewWindow, Layout: PlacementLayoutRows},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundDown := false
+	for _, argv := range fake.ops() {
+		if len(argv) > 0 && argv[0] == "split" {
+			if len(argv) < 4 || argv[3] != "down" {
+				t.Fatalf("rows split argv = %v, want direction down", argv)
+			}
+			foundDown = true
+		}
+	}
+	if !foundDown {
+		t.Fatalf("rows placement issued no split: %v", fake.ops())
+	}
+	if created.Binding.Placement.Effective.Layout != PlacementLayoutRows {
+		t.Fatalf("binding placement = %#v", created.Binding.Placement)
+	}
+	if _, err := backend.Create(CreateRequest{
+		ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root,
+		Placement: &Placement{Target: PlacementTargetCurrentWindow, Layout: PlacementLayoutColumns, LauncherPane: "%1"},
+	}); err == nil || !strings.Contains(err.Error(), PlacementUnsupportedReason) {
+		t.Fatalf("unsupported ghostty tuple error = %v", err)
+	}
+}
+
+func TestGhosttyPlacementStaggersBetweenSplits(t *testing.T) {
+	backend, _ := newFakeGhosttyBackend(t)
+	var sleeps []time.Duration
+	backend.sleep = func(ctx context.Context, delay time.Duration) error {
+		sleeps = append(sleeps, delay)
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude", "codex")
+	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eea7")
+	started := time.Now()
+	if _, err := backend.Create(CreateRequest{
+		ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root,
+		Placement: &Placement{Target: PlacementTargetNewWindow, Layout: PlacementLayoutColumns, StaggerMS: 250},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sleeps) != 1 || sleeps[0] != 250*time.Millisecond {
+		t.Fatalf("ghostty stagger sleeps = %v", sleeps)
+	}
+	if elapsed := time.Since(started); elapsed < 250*time.Millisecond {
+		t.Fatalf("ghostty stagger elapsed %s, want at least 250ms", elapsed)
 	}
 }
 

@@ -47,7 +47,7 @@ func TestTmuxBackendLifecycleAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Outcome != OutcomeCreated || len(created.Binding.Resources.Resources) != 3 {
+	if created.Outcome != OutcomeCreated || len(withoutTmuxEpoch(created.Binding.Resources.Resources)) != 3 {
 		t.Fatalf("Create = %#v", created)
 	}
 	inspection, err := backend.Inspect(InspectRequest{Binding: created.Binding, Root: root})
@@ -199,13 +199,21 @@ func TestTmuxBackendReclaimReportsExactPartialInventory(t *testing.T) {
 	}
 	var removed string
 	for _, resource := range created.Binding.Resources.Resources {
-		if resource.Agent == "codex" {
-			removed = strings.TrimPrefix(resource.OpaqueID, "tmux:v1:window:")
+		if resource.Agent != "codex" {
+			continue
 		}
+		if id, ok := parseTmuxPaneResource(resource.OpaqueID); ok {
+			removed = id
+			break
+		}
+		removed = strings.TrimPrefix(resource.OpaqueID, "tmux:v1:window:")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
 	defer cancel()
-	if _, err := backend.run(ctx, backend.args("kill-window", "-t", removed)...); err != nil {
+	if removed == "" {
+		t.Fatal("codex resource missing")
+	}
+	if _, err := backend.run(ctx, backend.args("kill-pane", "-t", removed)...); err != nil {
 		t.Fatal(err)
 	}
 	detect := backend.Detect()
