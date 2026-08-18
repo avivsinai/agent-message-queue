@@ -138,6 +138,8 @@ amq doctor --ops
 
 Integration messages are self-delivered and carry `context.orchestrator` plus labels such as `orchestrator:*`, `task-state:*`, `handoff`, and `blocking`, so they fit naturally into the same `amq drain` / `amq reply` workflow used for co-op.
 
+Orchestrators that compile public launch requests send `target.base_root` as the one profile child of the `.amqrc` root, `on_live: keep` only for a proven-live seat, mapped placement enums (`current-window` → `current_window`, `vertical` → `columns`, `horizontal` → `rows`), and bootstrap text through `initial_input`. The decoder accepts only those underscore enums. See [the public launch API](docs/launch-api.md).
+
 ### Fallback: Notify Hook (if wake unavailable)
 
 `amq wake` uses TIOCSTI which may be unavailable on:
