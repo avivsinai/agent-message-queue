@@ -653,3 +653,17 @@ func TestInspectWakeLockRejectsBootIDWithoutProcessStart(t *testing.T) {
 		t.Fatalf("inspection reason = %q", inspection.Reason)
 	}
 }
+
+func TestWakeArgsMatchRootAgentIgnoresDanglingFlags(t *testing.T) {
+	root := canonicalWakeRoot(secureTempDirForTest(t))
+	const me = "codex"
+	if !wakeArgsMatchRootAgent([]string{"amq", "wake", "--root", root, "--me", me}, root, me) {
+		t.Fatal("complete --root/--me should match")
+	}
+	if wakeArgsMatchRootAgent([]string{"amq", "wake", "--me", me, "--root"}, root, me) {
+		t.Fatal("dangling --root must not match (and must not index past argv)")
+	}
+	if wakeArgsMatchRootAgent([]string{"amq", "wake", "--root", root, "--me"}, root, me) {
+		t.Fatal("dangling --me must not match (and must not index past argv)")
+	}
+}

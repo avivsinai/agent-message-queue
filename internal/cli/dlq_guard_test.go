@@ -491,3 +491,79 @@ func snapshotDLQFileState(t *testing.T, root, agent string) map[string][]byte {
 	}
 	return state
 }
+
+func TestDLQListSkipsDotfilesEvenWhenTheyParse(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "alice")
+	visible := moveInvalidFixtureToDLQForRetryAll(t, root, "alice", "visible-dlq")
+	data, err := os.ReadFile(visible)
+	if err != nil {
+		t.Fatalf("read visible DLQ envelope: %v", err)
+	}
+	hidden := filepath.Join(fsq.AgentDLQNew(root, "alice"), ".hidden.md")
+	if err := os.WriteFile(hidden, data, 0o600); err != nil {
+		t.Fatalf("write hidden DLQ envelope: %v", err)
+	}
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runDLQList([]string{"--root", root, "--me", "alice", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("dlq list: %v", err)
+	}
+	var items []dlqListItem
+	if err := unmarshalJSONOutput(stdout, &items); err != nil {
+		t.Fatalf("decode dlq list: %v (output: %s)", err, stdout)
+	}
+	wantID := strings.TrimSuffix(filepath.Base(visible), ".md")
+	if len(items) != 1 || items[0].ID != wantID {
+		t.Fatalf("dlq list items = %#v, want only %s (dotfile skipped)", items, wantID)
+	}
+}
+
+func TestDLQListSortsByFailureTimeWithoutTreatingZeroSortKeyAsNewest(t *testing.T) {
+	t.Run("parsed newest first", func(t *testing.T) {
+		root := initializedSendMailboxRoot(t, "alice")
+		writeDLQEnvelopeWithFailureTime(t, root, "alice", "older-parsed.md", "2020-01-01T00:00:00Z")
+		writeDLQEnvelopeWithFailureTime(t, root, "alice", "newer-parsed.md", "2024-06-01T00:00:00Z")
+		stdout, _, err := captureEnvOutput(t, func() error {
+			return runDLQList([]string{"--root", root, "--me", "alice", "--new", "--json"})
+		})
+		if err != nil {
+			t.Fatalf("dlq list: %v", err)
+		}
+		var items []dlqListItem
+		if err := unmarshalJSONOutput(stdout, &items); err != nil {
+			t.Fatalf("decode: %v (output: %s)", err, stdout)
+		}
+		if len(items) != 2 || items[0].ID != "newer-parsed" || items[1].ID != "older-parsed" {
+			t.Fatalf("parsed order = %v, want newer-parsed then older-parsed", idsOf(items))
+		}
+	})
+
+	t.Run("unparsed string order beats zero SortKey", func(t *testing.T) {
+		root := initializedSendMailboxRoot(t, "alice")
+		writeDLQEnvelopeWithFailureTime(t, root, "alice", "parsed.md", "2020-01-01T00:00:00Z")
+		writeDLQEnvelopeWithFailureTime(t, root, "alice", "unparsed.md", "not-a-rfc3339-time")
+		stdout, _, err := captureEnvOutput(t, func() error {
+			return runDLQList([]string{"--root", root, "--me", "alice", "--new", "--json"})
+		})
+		if err != nil {
+			t.Fatalf("dlq list: %v", err)
+		}
+		var items []dlqListItem
+		if err := unmarshalJSONOutput(stdout, &items); err != nil {
+			t.Fatalf("decode: %v (output: %s)", err, stdout)
+		}
+		if len(items) != 2 || items[0].ID != "unparsed" || items[1].ID != "parsed" {
+			t.Fatalf("mixed order = %v, want unparsed then parsed (string compare, not zero-time After)", idsOf(items))
+		}
+	})
+}
+
+func idsOf(items []dlqListItem) []string {
+	ids := make([]string, len(items))
+	for i, item := range items {
+		ids[i] = item.ID
+	}
+	return ids
+}
