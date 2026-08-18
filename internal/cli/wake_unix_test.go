@@ -1348,12 +1348,22 @@ func TestRunWakeWithLoopAcceptExistingRejectsCanonicalAgentReplacement(t *testin
 			}
 
 			retryEntered := make(chan struct{}, 1)
+			retryRelease := make(chan struct{})
+			releaseRetry := func() {
+				select {
+				case <-retryRelease:
+				default:
+					close(retryRelease)
+				}
+			}
+			t.Cleanup(releaseRetry)
 			originalRetry := waitForWakePreparedRetry
 			waitForWakePreparedRetry = func(time.Time) bool {
 				select {
 				case retryEntered <- struct{}{}:
 				default:
 				}
+				<-retryRelease
 				return true
 			}
 			t.Cleanup(func() { waitForWakePreparedRetry = originalRetry })
@@ -1399,6 +1409,10 @@ func TestRunWakeWithLoopAcceptExistingRejectsCanonicalAgentReplacement(t *testin
 			); err != nil {
 				t.Fatal(err)
 			}
+			// The accept-existing retry must observe the complete replacement,
+			// not a transient state while the test moves the retained directory
+			// and publishes its prepared marker.
+			releaseRetry()
 			select {
 			case err := <-done:
 				if err == nil ||
