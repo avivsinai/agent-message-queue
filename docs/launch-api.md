@@ -33,16 +33,32 @@ adapter-owned version that consumers compare. It changes when the allowed
 argument forms, configuration overrides, or carrier support changes.
 `verified_provider_version` is informational and names the provider release on
 which that grammar was verified; it does not claim the installed version.
-Runtime provider identity is bound separately before Apply executes it.
+Runtime provider identity is bound into subject schema 2 before Apply executes
+it. Prepare records each runnable provider's consulted path (PATH lookup or
+absolute) plus the on-disk identity tuple, including symlink hops. Schema 1
+omits that binding. A same-path inode, mtime, symlink-hop, or PATH retarget
+changes `subject_digest`; Apply then returns `subject_changed` with no launch
+mutation. Plan and trust digests stay stable across those replacements.
 
 The initial-input carrier is typed. Claude and Codex currently advertise
 `argument`; AMQ appends its exact text as the final provider argv element.
 `stdin` and `file` remain typed but unadvertised and return
-`initial_input_unsupported`. Content is limited to 262,144 UTF-8 bytes without
-NUL. Content changes the plan and subject digests but not the trust digest.
+`initial_input_unsupported` until real stdin/file seams exist. Content is
+limited to 262,144 UTF-8 bytes without NUL. Content changes the plan and
+subject digests but not the trust digest.
 Claude admits one `--allowedTools <comma-separated-list>` pair. Codex admits
 ordered `-c model_reasoning_effort=<value>` pairs with values `minimal`, `low`,
 `medium`, `high`, or `xhigh`; duplicate keys and unknown keys or values reject.
+
+An optional participant `wrapper` contains a clean absolute `executable` path
+and static `args`. The path must resolve to one regular file; resolvable
+symlinks are accepted. AMQ executes the exact argv `wrapper executable + wrapper
+args + resolved provider executable + provider args`, without a shell. The
+declared wrapper path and arguments enter the plan, trust, subject, ticket, and
+command preview. An argument initial input stays the final inner-provider
+argument. Unsupported `stdin` and `file` carriers remain typed refusals when a
+wrapper is present. The `wrapper` feature is advertised when that composition is
+complete; until then a strict decode rejects the unknown field.
 
 ## Intent
 
@@ -165,6 +181,17 @@ keys reject. Canonical key ordering enters subject schema 2 and immutable
 evidence, but never the plan or trust digest. Apply echoes the request map.
 Inspect, Focus, and Close load it from the proven-owned binding; lifecycle
 requests cannot replace it.
+
+amq-squad compiles only its public request: it sends `target.base_root` as the
+one profile child of the `.amqrc` root; sends `on_live: keep` only for a seat
+it already knows to be proven live; maps placement spellings `current-window` to
+`current_window`, `vertical` to `columns`, and `horizontal` to `rows`; and sends
+the generated bootstrap prompt through `initial_input`. Those are compiler
+mappings, not contract aliases. The public decoder accepts only the underscore
+target enum and the `columns|rows|tiled` layout enum. One refused seat
+cohort-blocks creation of every missing seat. When a wrapper is present, stdin
+initial input is delivered to the wrapper, which owns forwarding it to the
+provider.
 
 ```go
 request := launchapi.PrepareRequestV1{

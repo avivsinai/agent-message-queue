@@ -292,14 +292,14 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 	})
 }
 
-func TestAdoptionSmokeLiveHomebrewBinary(t *testing.T) {
+func TestAdoptionSmokeLiveLocalBinary(t *testing.T) {
 	if os.Getenv("AMQ_LAUNCH_LIVE") != "1" {
-		t.Skip("AMQ_LAUNCH_LIVE=1 required; uses a released amq on PATH")
+		t.Skip("AMQ_LAUNCH_LIVE=1 required; uses a locally built amq with tmux on PATH")
 	}
-	amqBinary, err := exec.LookPath("amq")
-	if err != nil {
-		t.Fatalf("AMQ_LAUNCH_LIVE=1 but amq is not on PATH: %v", err)
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Fatalf("AMQ_LAUNCH_LIVE=1 requires tmux on PATH: %v", err)
 	}
+	amqBinary := buildAdoptionSmokeAMQ(t)
 	fx := newAdoptionSmokeFixture(t, amqBinary, ".agent-mail", "collab")
 	intent := fx.legalSquadIntent()
 	intent.Participants[1].Args = append(intent.Participants[1].Args, omriSquadBootstrapPrompt)

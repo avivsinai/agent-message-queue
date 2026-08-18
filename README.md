@@ -213,6 +213,17 @@ degraded-capability decision. Launch configuration uses the resume vocabulary
 `resume`, `fresh`, or `disabled`. See the [public launch API guide](docs/launch-api.md)
 and the [v1 JSON schema](schemas/launch-api-v1.schema.json).
 
+The public launch contract is `0.61.1`. A caller negotiates every feature it
+uses: `placement`, `initial_input` (argument only; `stdin` and `file` stay typed
+but return `initial_input_unsupported` until real seams exist), `base_root`,
+`on_live`, `caller_context`, and `executable_identity`. New Prepare calls use
+`subject_schema` 2. `PreviewV1.capabilities` reports adapter grammar without
+executing a caller-supplied provider. `wrapper` is a typed participant field
+and is advertised when argv composition is complete. amq-squad maps
+`current-window` to `current_window`, `vertical` to `columns`, and `horizontal`
+to `rows`; the decoder accepts only those underscore enums. Details live in
+[docs/launch-api.md](docs/launch-api.md).
+
 Each command sets up the session environment, starts wake notifications, and
 launches the agent. See [COOP.md](COOP.md#running-co-op-mode) for co-op
 operations and [the wake acknowledgement contract](docs/wake-doorbell-acknowledgement.md)
