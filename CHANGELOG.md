@@ -8,6 +8,19 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.65.0](https://github.com/avivsinai/agent-message-queue/compare/v0.64.1...v0.65.0) (2026-08-18)
+
+
+### Features
+
+* **wake:** classify a stale wake whose binary directory is gone ([#575](https://github.com/avivsinai/agent-message-queue/issues/575)) ([64408e4](https://github.com/avivsinai/agent-message-queue/commit/64408e4d55188029225cab16e2ec2590347bb2ed))
+* **wake:** stage darwin restart images under the machine-local state dir ([#577](https://github.com/avivsinai/agent-message-queue/issues/577)) ([2d599e8](https://github.com/avivsinai/agent-message-queue/commit/2d599e8fb3c09adb74a5e98d56c4f8b4095cde8b))
+
+
+### Bug Fixes
+
+* **launch:** bind wrapper identity into tickets and harden strict decode ([#578](https://github.com/avivsinai/agent-message-queue/issues/578)) ([fe23bc4](https://github.com/avivsinai/agent-message-queue/commit/fe23bc4254f83cf37927a62df28744ee1b8dc1f9))
+
 ## [0.64.1](https://github.com/avivsinai/agent-message-queue/compare/v0.64.0...v0.64.1) (2026-08-18)
 
 
