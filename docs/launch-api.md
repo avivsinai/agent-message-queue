@@ -22,10 +22,9 @@ _ = negotiated
 ```
 
 A `0.61.1` binary advertises `placement`, `initial_input`, `base_root`,
-`on_live`, `caller_context`, and `executable_identity`. It can still omit later
-Wave B3 feature IDs while those beads are incomplete. A caller must require
-every feature it uses. Contract semver alone does not claim that an unadvertised
-feature is available.
+`on_live`, `caller_context`, `executable_identity`, and `wrapper`. A caller must
+require every feature it uses. Contract semver alone does not claim that an
+unadvertised feature is available.
 
 `PreviewV1.capabilities` reports the selected providers' static adapter grammar
 without executing a caller-supplied provider. `grammar_version` is the
@@ -44,6 +43,15 @@ Claude admits one `--allowedTools <comma-separated-list>` pair. Codex admits
 ordered `-c model_reasoning_effort=<value>` pairs with values `minimal`, `low`,
 `medium`, `high`, or `xhigh`; duplicate keys and unknown keys or values reject.
 
+An optional participant `wrapper` contains a clean absolute `executable` path
+and static `args`. The path must resolve to one regular file; resolvable
+symlinks are accepted. AMQ executes the exact argv `wrapper executable + wrapper
+args + resolved provider executable + provider args`, without a shell. The
+declared wrapper path and arguments enter the plan, trust, subject, ticket, and
+command preview. An argument initial input stays the final inner-provider
+argument. Unsupported `stdin` and `file` carriers remain typed refusals when a
+wrapper is present.
+
 ## Intent
 
 The intent owns the desired participants. Discovery owns the project root,
@@ -58,6 +66,7 @@ does not replace committed project configuration.
       "handle": "claude",
       "runnable": true,
       "executable": "claude",
+      "wrapper": {"executable": "/opt/company/bin/seat-wrapper", "args": ["--profile", "lead"]},
       "cwd": {"kind": "relative", "path": "."},
       "resume_policy": "resume",
       "execution": {

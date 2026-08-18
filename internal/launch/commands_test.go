@@ -167,6 +167,28 @@ func TestCommandsCoopExecGrammarShape(t *testing.T) {
 	}
 }
 
+func TestCommandsWrapperUsesOneCoopExecBoundary(t *testing.T) {
+	wrapper := &Wrapper{Executable: "/opt/company/bin/seat-wrapper", Args: []string{"--profile", "lead"}}
+	plan := Plan{Version: PlanVersion, Agents: []AgentPlan{{
+		Handle: "claude", Wrapper: wrapper,
+		Argv: []string{wrapper.Executable, "--profile", "lead", "/usr/local/bin/claude", "--model", "opus"},
+		Cwd:  "/work/project", AdapterMode: AdapterModeUnsupported, ResumePolicy: ResumeDisabled,
+	}}}
+	_, root := openTestRoot(t)
+	result, err := Commands{}.Create(CreateRequest{Session: "collab", Plan: plan, Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Commands) != 1 {
+		t.Fatalf("commands = %d, want 1", len(result.Commands))
+	}
+	command := result.Commands[0]
+	assertCoopExecGrammar(t, command.Argv, root.Base(), "claude", plan.Agents[0].Argv)
+	if count := slices.Index(command.Argv, wrapper.Executable); count < 0 || strings.Count(command.Line, "coop exec") != 1 {
+		t.Fatalf("wrapper command crossed an invalid coop boundary: %#v line=%q", command.Argv, command.Line)
+	}
+}
+
 func TestCommandsCoopExecOldShapeFailsGrammar(t *testing.T) {
 	old := []string{"amq", "coop", "exec", "--session", "collab", "--me", "claude", "--", "/usr/local/bin/claude", "--model", "opus"}
 	if err := coopExecGrammarError(old, "/queue/collab", "claude", []string{"/usr/local/bin/claude", "--model", "opus"}); err == nil {

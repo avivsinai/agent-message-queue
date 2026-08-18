@@ -219,11 +219,16 @@ func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 		"task_generation": "3", "run_id": "run-42", "evidence_chain": "chain-9",
 	}
 	wantCallerContext := cloneStringMap(fixture.request.CallerContext)
+	wrapperPath := filepath.Join(t.TempDir(), "seat-wrapper")
+	if err := os.WriteFile(wrapperPath, []byte("wrapper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	injector := filepath.Join(t.TempDir(), "injector")
 	if err := os.WriteFile(injector, []byte("injector"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	runnable := fixture.request.Intent.Participants[0]
+	runnable.Wrapper = &WrapperV1{Executable: wrapperPath, Args: []string{"--profile", "lead"}}
 	runnable.InitialInput = &InitialInputV1{Kind: InitialInputArgument, Text: "generated bootstrap"}
 	runnable.Execution = &ExecutionOptionsV1{
 		RequireWake: true, NoGitignore: true,
@@ -298,6 +303,14 @@ func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 		}
 		if len(ticket.TargetArgv) == 0 || ticket.TargetArgv[len(ticket.TargetArgv)-1] != "generated bootstrap" {
 			t.Fatalf("%s ticket did not preserve the final initial argument: %#v", handle, ticket.TargetArgv)
+		}
+		canonicalProvider, err := filepath.EvalSymlinks(runnable.Executable)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ticket.ProviderExecutable != canonicalProvider || ticket.Wrapper == nil || ticket.Wrapper.Executable != wrapperPath ||
+			!slices.Equal(ticket.TargetArgv[:3], []string{wrapperPath, "--profile", "lead"}) || ticket.TargetArgv[3] != runnable.Executable {
+			t.Fatalf("%s ticket wrapper/provider boundary = %#v", handle, ticket)
 		}
 	}
 	entries, err := os.ReadDir(filepath.Dir(fixture.request.Target.SessionRoot))
@@ -470,6 +483,37 @@ func TestPrepareIsZeroWriteAndApplyRejectsStaleSubject(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(fixture.request.Target.SessionRoot, "meta", "launch", "lease.json")); !os.IsNotExist(err) {
 			t.Fatalf("stale Apply retained lease record: %v", err)
+		}
+	})
+
+	t.Run("changed wrapper", func(t *testing.T) {
+		fixture := newPublicPrepareFixture(t, true)
+		fixture.request.Intent.Participants[0].Wrapper = &WrapperV1{
+			Executable: writePublicTestWrapper(t), Args: []string{"--profile", "lead"},
+		}
+		prepared, err := Prepare(context.Background(), fixture.request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed := fixture.request
+		changed.Intent.Participants = slices.Clone(changed.Intent.Participants)
+		participant := changed.Intent.Participants[0]
+		participant.Wrapper = &WrapperV1{Executable: participant.Wrapper.Executable, Args: []string{"--profile", "reviewer"}}
+		changed.Intent.Participants[0] = participant
+		before := applyTreeFingerprint(t, fixture.root, nil)
+		result, err := Apply(context.Background(), ApplyRequestV1{
+			RequestVersion: RequestVersionV1, Prepare: changed,
+			SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: decisionsForPreparedActions(prepared),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Outcome != "action_required" || result.ReasonCode != "subject_changed" {
+			t.Fatalf("changed wrapper Apply = %#v", result)
+		}
+		allowed := map[string]bool{"mail/collab/meta/launch": true, "mail/collab/meta/launch/lease.lock": true}
+		if after := applyTreeFingerprint(t, fixture.root, allowed); before != after {
+			t.Fatalf("changed wrapper Apply mutated state: before=%s after=%s", before, after)
 		}
 	})
 

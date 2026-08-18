@@ -701,15 +701,19 @@ func plannedConversations(planned []plannedAgent) []ConversationRecord {
 func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []plannedAgent, amqPath, backend, profile string) error {
 	written := make([]plannedAgent, 0, len(planned))
 	for _, agent := range planned {
+		provider, err := providerExecutable(agent.plan)
+		if err != nil {
+			return errors.Join(fmt.Errorf("resolve provider executable for %s: %w", agent.plan.Handle, err), removeExecutionTickets(request.Root, lease, written))
+		}
 		ticketRequest := ExecutionTicketRequest{
 			Handle: agent.plan.Handle, LaunchNonce: agent.plan.LaunchNonce,
 			Mode: agent.plan.AdapterMode, Provider: agent.adapter.Name(), ProviderVersion: agent.providerVersion,
 			ConversationID: agent.plan.ConversationID, PreSpawnAcquire: agent.plan.PreSpawnAcquire,
 			ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(), Cwd: agent.plan.Cwd,
-			ProviderExecutable: agent.plan.Argv[0], AMQExecutable: amqPath,
+			ProviderExecutable: provider, AMQExecutable: amqPath,
 			TargetArgv: agent.plan.Argv, DynamicArgv: agent.plan.DynamicArgv, TargetEnv: agent.plan.EnvOverlay,
 			InitialInput: agent.plan.InitialInput, Execution: agent.plan.Execution,
-			CallerContext: cloneCallerContext(request.CallerContext),
+			CallerContext: cloneCallerContext(request.CallerContext), Wrapper: cloneWrapper(agent.plan.Wrapper),
 		}
 		if agent.plan.PreSpawnAcquire || (agent.adapter.Name() == CodexProvider && agent.plan.AdapterMode == AdapterModeCapture) {
 			ticketRequest.Backend, ticketRequest.Profile = backend, profile
@@ -807,7 +811,7 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			Handle: cfg.Handle, ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(),
 			AMQExecutable: request.AMQPath, Cwd: cwd,
 			LaunchNonce: nonce, ResumePolicy: policy, CommittedArgs: committedArgs, BypassArgs: bypassArgs,
-			EnvOverlay: cfg.Env, AllowExternalCwd: request.AllowExternalCwd, InitialInput: cfg.InitialInput,
+			EnvOverlay: cfg.Env, AllowExternalCwd: request.AllowExternalCwd, InitialInput: cfg.InitialInput, Wrapper: cloneWrapper(cfg.Wrapper),
 		}
 		conversation, loadErr := LoadConversation(request.Root, cfg.Handle)
 		hasConversation := loadErr == nil
@@ -914,6 +918,12 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			continue
 		}
 		if err := ValidateAdapterPlan(adapter, agentPlan); err != nil {
+			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, err.Error()
+			result.Agents = append(result.Agents, item)
+			continue
+		}
+		agentPlan, err = applyWrapper(agentPlan, cfg.Wrapper)
+		if err != nil {
 			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, err.Error()
 			result.Agents = append(result.Agents, item)
 			continue

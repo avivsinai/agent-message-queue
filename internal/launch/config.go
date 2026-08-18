@@ -40,6 +40,7 @@ type ProjectAgentConfig struct {
 	Cwd          string               `json:"cwd,omitempty"`
 	ResumePolicy ResumePolicy         `json:"resume_policy"`
 	InitialInput *InitialInputRequest `json:"initial_input,omitempty"`
+	Wrapper      *Wrapper             `json:"wrapper,omitempty"`
 }
 
 type LayoutIntent struct {
@@ -157,6 +158,11 @@ func (cfg ProjectConfig) Validate() error {
 			}
 			if !validDigest(agent.InitialInput.SHA256) || strings.ContainsRune(agent.InitialInput.Value, 0) {
 				return fmt.Errorf("agent %q initial input is invalid", agent.Handle)
+			}
+		}
+		if agent.Wrapper != nil {
+			if err := agent.Wrapper.Validate(); err != nil {
+				return fmt.Errorf("agent %q wrapper: %w", agent.Handle, err)
 			}
 		}
 		if agent.ResumePolicy != ResumeEnabled && agent.ResumePolicy != ResumeFresh && agent.ResumePolicy != ResumeDisabled {

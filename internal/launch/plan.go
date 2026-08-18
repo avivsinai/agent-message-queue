@@ -78,6 +78,7 @@ type AgentPlan struct {
 	// plan makes journal recovery lossless before the wrapper consumes it.
 	Execution    *PrepareExecutionOptions `json:"execution,omitempty"`
 	InitialInput *PlannedInitialInput     `json:"initial_input,omitempty"`
+	Wrapper      *Wrapper                 `json:"wrapper,omitempty"`
 }
 
 // DynamicArg marks one runtime-generated argv value. Unmarked argv values are
@@ -170,6 +171,15 @@ func (a AgentPlan) validate() error {
 	if a.PreSpawnAcquire && conversationSlots != 1 {
 		return fmt.Errorf("pre-spawn acquisition requires exactly one dynamic conversation slot")
 	}
+	if a.Wrapper != nil {
+		if err := a.Wrapper.Validate(); err != nil {
+			return fmt.Errorf("wrapper: %w", err)
+		}
+		prefix := append([]string{a.Wrapper.Executable}, a.Wrapper.Args...)
+		if len(a.Argv) <= len(prefix) || !slices.Equal(a.Argv[:len(prefix)], prefix) {
+			return fmt.Errorf("wrapper does not match argv prefix")
+		}
+	}
 	if a.InitialInput != nil {
 		if a.InitialInput.Kind != InitialInputArgument {
 			return fmt.Errorf("invalid initial input kind %q", a.InitialInput.Kind)
@@ -210,6 +220,7 @@ type staticAgentPlan struct {
 	ResumePolicy    ResumePolicy           `json:"resume_policy"`
 	PreSpawnAcquire bool                   `json:"pre_spawn_acquire,omitempty"`
 	InitialInput    *canonicalInitialInput `json:"initial_input,omitempty"`
+	Wrapper         *Wrapper               `json:"wrapper,omitempty"`
 }
 
 type canonicalInitialInput struct {
@@ -266,7 +277,7 @@ func (p Plan) semanticDigest(allowEmpty, trustProjection bool) (string, error) {
 		agents[i] = staticAgentPlan{
 			Handle: agent.Handle, Argv: argv, EnvOverlay: agent.EnvOverlay,
 			Cwd: agent.Cwd, AdapterMode: agent.AdapterMode, ResumePolicy: agent.ResumePolicy,
-			PreSpawnAcquire: agent.PreSpawnAcquire, InitialInput: initial,
+			PreSpawnAcquire: agent.PreSpawnAcquire, InitialInput: initial, Wrapper: cloneWrapper(agent.Wrapper),
 		}
 	}
 	slices.SortFunc(agents, func(a, b staticAgentPlan) int { return strings.Compare(a.Handle, b.Handle) })

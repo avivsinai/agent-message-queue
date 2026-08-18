@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -60,12 +61,13 @@ type ExecutionTicket struct {
 	Cwd             string `json:"cwd"`
 	CwdIdentity     string `json:"cwd_identity"`
 
-	ProviderExecutable         string `json:"provider_executable"`
-	ProviderExecutableIdentity string `json:"provider_executable_identity"`
-	AMQExecutable              string `json:"amq_executable"`
-	AMQExecutableIdentity      string `json:"amq_executable_identity"`
-	InjectorExecutable         string `json:"injector_executable,omitempty"`
-	InjectorExecutableIdentity string `json:"injector_executable_identity,omitempty"`
+	ProviderExecutable         string   `json:"provider_executable"`
+	ProviderExecutableIdentity string   `json:"provider_executable_identity"`
+	AMQExecutable              string   `json:"amq_executable"`
+	AMQExecutableIdentity      string   `json:"amq_executable_identity"`
+	InjectorExecutable         string   `json:"injector_executable,omitempty"`
+	InjectorExecutableIdentity string   `json:"injector_executable_identity,omitempty"`
+	Wrapper                    *Wrapper `json:"wrapper,omitempty"`
 
 	TargetArgv    []string                 `json:"target_argv"`
 	DynamicArgv   []DynamicArg             `json:"dynamic_argv,omitempty"`
@@ -96,6 +98,7 @@ type ExecutionTicketRequest struct {
 	Reason                            string
 	Execution                         *PrepareExecutionOptions
 	CallerContext                     map[string]string
+	Wrapper                           *Wrapper
 }
 
 type ExecutionEnvelope struct {
@@ -172,7 +175,7 @@ func NewExecutionTicket(request ExecutionTicketRequest) (ExecutionTicket, error)
 		InitialInput: clonePlannedInitialInput(request.InitialInput),
 		TargetEnv:    env, EnvDigest: digest, State: request.State, Reason: request.Reason,
 		Execution: execution, InjectorExecutable: injector, InjectorExecutableIdentity: injectorID,
-		CallerContext: cloneCallerContext(request.CallerContext),
+		CallerContext: cloneCallerContext(request.CallerContext), Wrapper: cloneWrapper(request.Wrapper),
 	}
 	if ticket.State == "" {
 		ticket.State = ExecutionPending
@@ -228,6 +231,16 @@ func (ticket ExecutionTicket) Validate() error {
 	}
 	if len(ticket.TargetArgv) == 0 || strings.TrimSpace(ticket.TargetArgv[0]) == "" {
 		return fmt.Errorf("target argv is required")
+	}
+	if ticket.Wrapper != nil {
+		if err := ticket.Wrapper.Validate(); err != nil {
+			return fmt.Errorf("wrapper: %w", err)
+		}
+		prefix := append([]string{ticket.Wrapper.Executable}, ticket.Wrapper.Args...)
+		providerIndex := len(prefix)
+		if len(ticket.TargetArgv) <= providerIndex || !slices.Equal(ticket.TargetArgv[:providerIndex], prefix) {
+			return fmt.Errorf("wrapper does not match target argv")
+		}
 	}
 	for i, arg := range ticket.TargetArgv {
 		if strings.ContainsRune(arg, 0) || (arg == "" && !ticketInitialInputOwnsArg(ticket, i)) {
@@ -989,9 +1002,30 @@ func ValidateExecutionEnvelope(root *fsq.DeliveryRoot, ticket ExecutionTicket, e
 	if err != nil || cwd != ticket.Cwd || cwdID != ticket.CwdIdentity {
 		return fmt.Errorf("working directory identity changed")
 	}
-	provider, providerID, err := canonicalFile(envelope.ProviderExecutable)
+	provider, providerID, err := canonicalFile(ticket.ProviderExecutable)
 	if err != nil || provider != ticket.ProviderExecutable || providerID != ticket.ProviderExecutableIdentity || pathWithin(provider, project) {
 		return fmt.Errorf("provider executable identity changed")
+	}
+	if ticket.Wrapper != nil {
+		providerIndex := len(ticket.Wrapper.Args) + 1
+		if providerIndex >= len(ticket.TargetArgv) {
+			return fmt.Errorf("provider target is missing")
+		}
+		targetProvider, targetProviderID, targetProviderErr := canonicalFile(ticket.TargetArgv[providerIndex])
+		if targetProviderErr != nil || targetProvider != ticket.ProviderExecutable || targetProviderID != ticket.ProviderExecutableIdentity {
+			return fmt.Errorf("provider target identity changed")
+		}
+		if err := validateWrapperFile(ticket.Wrapper); err != nil {
+			return fmt.Errorf("wrapper executable changed: %w", err)
+		}
+		if envelope.ProviderExecutable != ticket.Wrapper.Executable {
+			return fmt.Errorf("execution target changed")
+		}
+	} else {
+		target, targetID, targetErr := canonicalFile(envelope.ProviderExecutable)
+		if targetErr != nil || target != ticket.ProviderExecutable || targetID != ticket.ProviderExecutableIdentity {
+			return fmt.Errorf("provider executable identity changed")
+		}
 	}
 	amq, amqID, err := canonicalFile(envelope.AMQExecutable)
 	if err != nil || amq != ticket.AMQExecutable || amqID != ticket.AMQExecutableIdentity {
