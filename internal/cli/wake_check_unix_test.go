@@ -1390,16 +1390,16 @@ func assertWakeCheckTreeUnchanged(
 
 func TestSameWakeCheckInspectionExistenceEachClause(t *testing.T) {
 	missing := wakeLockInspection{}
-	present := wakeLockInspection{Exists: true, Status: wakeLockValid}
+	present := wakeLockInspection{Exists: true}
 	if !sameWakeCheckInspection(missing, wakeLockInspection{}) {
 		t.Fatal("two missing inspections not equal")
 	}
 	if sameWakeCheckInspection(missing, present) || sameWakeCheckInspection(present, missing) {
 		t.Fatal("missing vs present inspections treated as equal")
 	}
-	other := present
-	other.Status = wakeLockStale
-	if sameWakeCheckInspection(present, other) {
+	stale := wakeLockInspection{Exists: true, Status: wakeLockStale}
+	valid := wakeLockInspection{Exists: true, Status: wakeLockValid}
+	if sameWakeCheckInspection(valid, stale) {
 		t.Fatal("status mismatch treated as equal")
 	}
 }

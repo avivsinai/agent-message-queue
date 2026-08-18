@@ -184,6 +184,7 @@ func TestPublicLaunchModeFlagRefusals(t *testing.T) {
 		{name: "rebind is legacy only", args: []string{"--plan", "intent.json", "--rebind"}, want: "legacy launch decision flags"},
 		{name: "allow fresh is legacy only", args: []string{"--plan", "intent.json", "--allow-fresh-fallback"}, want: "legacy launch decision flags"},
 		{name: "mixed apply and prepare", args: []string{"--apply", "apply.json", "--prepare", "--plan", "intent.json", "--json"}, want: "mutually exclusive"},
+		{name: "apply and prepare without plan", args: []string{"--apply", "apply.json", "--prepare", "--json"}, want: "mutually exclusive"},
 		{name: "apply launcher override", args: []string{"--apply", "apply.json", "--launcher", "commands", "--json"}, want: "takes its target"},
 		{name: "placement without plan", args: []string{"--placement", `{"target":"session","layout":"columns"}`, "--json"}, want: "--placement requires --plan"},
 		{name: "apply with placement flag", args: []string{"--apply", "apply.json", "--json", "--placement", `{"target":"session","layout":"columns"}`}, want: "takes placement"},
