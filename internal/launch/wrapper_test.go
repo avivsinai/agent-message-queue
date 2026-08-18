@@ -69,6 +69,19 @@ func TestWrapperValidationAcceptsRegularFileAndResolvableSymlink(t *testing.T) {
 	}
 }
 
+func TestWrapperValidationRejectsNonExecutableRegularFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wrapper")
+	if err := os.WriteFile(path, []byte("not executable"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWrapperFile(&Wrapper{Executable: path}); err == nil || !strings.Contains(err.Error(), "execute") {
+		t.Fatalf("non-executable wrapper error = %v", err)
+	}
+}
+
 func TestWrapperValidateRejectsUnsafeSyntax(t *testing.T) {
 	for _, test := range []struct {
 		name    string

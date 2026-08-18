@@ -301,6 +301,9 @@ func requireObjectFields(raw json.RawMessage, context string, required ...string
 }
 
 func decodeStrictJSON(data []byte, target any) error {
+	if !utf8.Valid(data) {
+		return fmt.Errorf("invalid UTF-8")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

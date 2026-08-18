@@ -60,6 +60,14 @@ func TestLaunchIntentRejectsAMQOwnedFields(t *testing.T) {
 	}
 }
 
+func TestDecodeLaunchIntentRejectsInvalidUTF8(t *testing.T) {
+	raw := append([]byte(`{"intent_version":1,"participants":[{"handle":"operator","runnable":false,"note":"`), 0xff)
+	raw = append(raw, []byte(`"}]}`)...)
+	if _, err := DecodeLaunchIntentV1(raw); err == nil || !strings.Contains(err.Error(), "invalid UTF-8") {
+		t.Fatalf("DecodeLaunchIntentV1 error = %v", err)
+	}
+}
+
 func TestLaunchIntentNonRunnableIsHandleOnly(t *testing.T) {
 	tests := []struct {
 		name string
