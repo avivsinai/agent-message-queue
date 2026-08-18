@@ -8,6 +8,26 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.64.0](https://github.com/avivsinai/agent-message-queue/compare/v0.63.3...v0.64.0) (2026-08-18)
+
+
+### Features
+
+* **launchapi:** add base_root authority with planned base creation ([#564](https://github.com/avivsinai/agent-message-queue/issues/564)) ([fbe05b1](https://github.com/avivsinai/agent-message-queue/commit/fbe05b1e9d12ec2bd4965bff442e64b18371e3ca))
+* **launchapi:** add initial_input and tool-policy grammar ([#562](https://github.com/avivsinai/agent-message-queue/issues/562)) ([6cd6353](https://github.com/avivsinai/agent-message-queue/commit/6cd6353d8432e8fcc1c9cf72bf2722fce928c5f3))
+* **launchapi:** add on_live keep|refuse with per-member dispositions ([#565](https://github.com/avivsinai/agent-message-queue/issues/565)) ([2f91cf2](https://github.com/avivsinai/agent-message-queue/commit/2f91cf2987b13c248aa9c31120d794365e979818))
+* **launchapi:** add typed placement with negotiation and preview ([55287d4](https://github.com/avivsinai/agent-message-queue/commit/55287d45b217de1c46cd8611ed420fdd9afcbeab))
+* **launchapi:** add typed wrapper pre-exec with trust-bound argv ([#568](https://github.com/avivsinai/agent-message-queue/issues/568)) ([a6b8b8f](https://github.com/avivsinai/agent-message-queue/commit/a6b8b8f15ae70ee953c16e2380615ac7d5d8c989))
+* **launchapi:** bind and persist caller context in subject and evidence ([#566](https://github.com/avivsinai/agent-message-queue/issues/566)) ([0ef3371](https://github.com/avivsinai/agent-message-queue/commit/0ef3371ad0ad44b2d8c4ea49dedca51750937292))
+* **launchapi:** bind provider executable identity into prepare subject ([#567](https://github.com/avivsinai/agent-message-queue/issues/567)) ([a466fd5](https://github.com/avivsinai/agent-message-queue/commit/a466fd5fd567ef2d0c73e59d58abc9f3ef810859))
+* **launchapi:** record subject_schema and advertise contract 0.61.1 ([#559](https://github.com/avivsinai/agent-message-queue/issues/559)) ([0b00d9f](https://github.com/avivsinai/agent-message-queue/commit/0b00d9f29567b67b93123564ff4f8357a1ce953c))
+* **launch:** bind placement to owned resources with marker-auth close ([#561](https://github.com/avivsinai/agent-message-queue/issues/561)) ([b532f1c](https://github.com/avivsinai/agent-message-queue/commit/b532f1c7f698d4a79139ad1ba1f74bd1aa681bd7))
+
+
+### Bug Fixes
+
+* **cli:** reject trailing JSON on launch --placement ([55287d4](https://github.com/avivsinai/agent-message-queue/commit/55287d45b217de1c46cd8611ed420fdd9afcbeab))
+
 ## [0.63.3](https://github.com/avivsinai/agent-message-queue/compare/v0.63.2...v0.63.3) (2026-08-18)
 
 
