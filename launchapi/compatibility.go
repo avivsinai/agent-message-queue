@@ -18,6 +18,7 @@ var compatibilityFeaturesV1 = []string{
 	"plan_only_commands_v1",
 	FeatureInitialInput,
 	FeaturePlacement,
+	FeatureBaseRoot,
 }
 
 func Compatibility() CompatibilityV1 {

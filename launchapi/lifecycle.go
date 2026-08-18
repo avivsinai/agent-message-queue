@@ -41,7 +41,8 @@ func Close(ctx context.Context, request CloseRequestV1) (CloseResultV1, error) {
 
 func lifecycleRequest(request InspectRequestV1) internallaunch.LifecycleRequest {
 	return internallaunch.LifecycleRequest{Target: internallaunch.PrepareTarget{
-		ProjectRoot: request.Target.ProjectRoot, SessionRoot: request.Target.SessionRoot, Session: request.Target.Session,
+		ProjectRoot: request.Target.ProjectRoot, BaseRoot: request.Target.BaseRoot,
+		SessionRoot: request.Target.SessionRoot, Session: request.Target.Session,
 	}}
 }
 

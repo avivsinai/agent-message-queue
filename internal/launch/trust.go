@@ -43,6 +43,10 @@ type ArbitraryCommandGrant struct {
 }
 
 func OpenTrustStore(userStateDir, projectRoot string) (*TrustStore, error) {
+	return OpenTrustStoreForBase(userStateDir, projectRoot, "")
+}
+
+func OpenTrustStoreForBase(userStateDir, projectRoot, baseRoot string) (*TrustStore, error) {
 	if strings.TrimSpace(userStateDir) == "" {
 		return nil, fmt.Errorf("user state directory is required")
 	}
@@ -61,9 +65,18 @@ func OpenTrustStore(userStateDir, projectRoot string) (*TrustStore, error) {
 	if pathWithin(stateAbs, projectAbs) {
 		return nil, fmt.Errorf("trust state directory must be outside the project worktree")
 	}
-	sum := sha256.Sum256([]byte(identity))
+	projectSum := sha256.Sum256([]byte(identity))
+	dir := filepath.Join(stateAbs, "launch", "projects", hex.EncodeToString(projectSum[:]))
+	if baseRoot != "" {
+		baseAbs, err := resolvedPath(baseRoot)
+		if err != nil {
+			return nil, fmt.Errorf("resolve explicit base root trust scope: %w", err)
+		}
+		baseSum := sha256.Sum256([]byte(baseAbs))
+		dir = filepath.Join(dir, "bases", hex.EncodeToString(baseSum[:]))
+	}
 	return &TrustStore{
-		dir:             filepath.Join(stateAbs, "launch", "projects", hex.EncodeToString(sum[:])),
+		dir:             dir,
 		projectIdentity: identity,
 	}, nil
 }

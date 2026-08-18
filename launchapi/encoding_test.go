@@ -89,6 +89,7 @@ func goldenPrepareResultV1() PrepareResultV1 {
 	return PrepareResultV1{
 		ResultVersion: 1, SubjectSchema: SubjectSchemaV2, Outcome: PrepareOutcomeActionRequired, Reason: "untrusted_config_digest",
 		SubjectDigest: goldenDigest('a'), PlanDigest: goldenDigest('b'), TrustDigest: goldenDigest('c'),
+		PlannedWrites: []PlannedWriteV1{},
 		RequiredActions: []RequiredActionV1{{
 			ActionID: "trust-example", Kind: RequiredActionTrustConfirmation, Handles: []string{"claude"},
 			Resources: []string{goldenDigest('c')}, AllowedDecisions: []DecisionChoiceV1{DecisionTrustExactSubject, DecisionDeny},

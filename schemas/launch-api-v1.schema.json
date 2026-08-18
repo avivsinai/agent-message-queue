@@ -166,6 +166,7 @@
       "required": ["project_root", "session_root", "session"],
       "properties": {
         "project_root": {"type": "string", "minLength": 1},
+        "base_root": {"type": "string", "minLength": 1},
         "session_root": {"type": "string", "minLength": 1},
         "session": {"type": "string", "pattern": "^[a-z0-9_][a-z0-9_-]*$"}
       }
@@ -307,10 +308,22 @@
         "reason_code": {"type": "string"}
       }
     },
+    "PlannedWriteV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["write_id", "kind", "path"],
+      "properties": {
+        "write_id": {"$ref": "#/$defs/Digest"},
+        "kind": {"enum": ["create_base_root", "write_initial_input"]},
+        "path": {"type": "string", "minLength": 1},
+        "handle": {"$ref": "#/$defs/Handle"},
+        "sha256": {"$ref": "#/$defs/Digest"}
+      }
+    },
     "PrepareResultV1": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["result_version", "subject_schema", "outcome", "subject_digest", "plan_digest", "trust_digest", "required_actions", "preview", "observations"],
+      "required": ["result_version", "subject_schema", "outcome", "subject_digest", "plan_digest", "trust_digest", "planned_writes", "required_actions", "preview", "observations"],
       "properties": {
         "result_version": {"const": 1},
         "subject_schema": {"enum": [1, 2]},
@@ -319,6 +332,7 @@
         "subject_digest": {"$ref": "#/$defs/Digest"},
         "plan_digest": {"$ref": "#/$defs/Digest"},
         "trust_digest": {"$ref": "#/$defs/Digest"},
+        "planned_writes": {"type": "array", "items": {"$ref": "#/$defs/PlannedWriteV1"}},
         "required_actions": {"type": "array", "items": {"$ref": "#/$defs/RequiredActionV1"}},
         "preview": {"$ref": "#/$defs/PreviewV1"},
         "observations": {"type": "array", "items": {"$ref": "#/$defs/ParticipantObservationV1"}}

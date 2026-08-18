@@ -57,6 +57,8 @@ type ApplyResult struct {
 var afterApplySessionPublishedForTest func()
 var beforeApplySessionPublishForTest func()
 var beforeApplyRosterMutationForTest func()
+var beforeApplyBaseRootCreateForTest func()
+var afterApplyBaseRootCreatedForTest func() error
 var publishApplySession = func(base *fsq.DeliveryRoot, session string, initialize func(*fsq.DeliveryRoot) error) (*fsq.DeliveryRoot, error) {
 	return base.PublishInitializedDirectChildExclusive(session, 0o700, initialize)
 }
@@ -85,6 +87,9 @@ func Apply(ctx context.Context, request ApplyRequest, dependencies ApplyDependen
 	}
 	defer state.close()
 
+	if state.baseRoot == nil {
+		return applyMissingBaseRoot(ctx, request, dependencies, state)
+	}
 	if state.sessionRoot == nil {
 		err = WithSessionCreationLock(state.baseRoot, state.target.Session, func() error {
 			result, err = applyUnderAuthority(ctx, request, dependencies, state, nil)
@@ -112,21 +117,33 @@ func Apply(ctx context.Context, request ApplyRequest, dependencies ApplyDependen
 }
 
 func applyUnderAuthority(ctx context.Context, request ApplyRequest, dependencies ApplyDependencies, state *prepareTargetState, lease *Lease) (result ApplyResult, returnErr error) {
+	prepared, decisions, refusal, allowed, err := authorizeApply(ctx, request, dependencies)
+	if err != nil || !allowed {
+		return refusal, err
+	}
+	return applyPreparedUnderAuthority(ctx, request, dependencies, state, lease, prepared, decisions)
+}
+
+func authorizeApply(ctx context.Context, request ApplyRequest, dependencies ApplyDependencies) (PrepareResult, map[RequiredActionKind]string, ApplyResult, bool, error) {
 	prepared, err := Prepare(ctx, request.Prepare, dependencies.PrepareDependencies)
 	if err != nil {
-		return ApplyResult{}, err
+		return PrepareResult{}, nil, ApplyResult{}, false, err
 	}
 	if prepared.SubjectDigest != request.SubjectDigest {
-		return applyActionResult(prepared, "subject_changed"), nil
+		return prepared, nil, applyActionResult(prepared, "subject_changed"), false, nil
 	}
 	if prepared.Outcome == PrepareOutcomeUnsupported {
-		return applyActionResult(prepared, prepared.Reason), nil
+		return prepared, nil, applyActionResult(prepared, prepared.Reason), false, nil
 	}
 	decisions, reason := validateApplyDecisions(prepared.RequiredActions, request.Decisions)
 	if reason != "" {
-		return applyActionResult(prepared, reason), nil
+		return prepared, nil, applyActionResult(prepared, reason), false, nil
 	}
+	return prepared, decisions, ApplyResult{}, true, nil
+}
 
+func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, dependencies ApplyDependencies, state *prepareTargetState, lease *Lease, prepared PrepareResult, decisions map[RequiredActionKind]string) (result ApplyResult, returnErr error) {
+	var err error
 	handles := make([]string, 0, len(request.Prepare.Participants))
 	for _, participant := range request.Prepare.Participants {
 		handles = append(handles, participant.Handle)
@@ -250,6 +267,46 @@ func applyUnderAuthority(ctx context.Context, request ApplyRequest, dependencies
 		result.FailureDetail = reconciled.Reason
 	}
 	return result, nil
+}
+
+func applyMissingBaseRoot(ctx context.Context, request ApplyRequest, dependencies ApplyDependencies, state *prepareTargetState) (result ApplyResult, returnErr error) {
+	if state.baseAuthority == nil || !state.baseAuthority.baseMissing || state.baseAuthority.parentRoot == nil {
+		return ApplyResult{}, fmt.Errorf("missing base-root creation authority")
+	}
+	prepared, decisions, refusal, allowed, err := authorizeApply(ctx, request, dependencies)
+	if err != nil || !allowed {
+		return refusal, err
+	}
+	if beforeApplyBaseRootCreateForTest != nil {
+		beforeApplyBaseRootCreateForTest()
+	}
+	if err := state.verify(); err != nil {
+		return applyActionResult(prepared, "subject_changed"), nil
+	}
+	baseRoot, err := state.baseAuthority.parentRoot.CreateDirectChildExclusive(state.baseAuthority.baseName, 0o700)
+	if err != nil {
+		var committed *fsq.CommittedDurabilityError
+		if errors.As(err, &committed) && baseRoot != nil {
+			state.baseRoot = baseRoot
+			return applyActionResult(prepared, "base_root_creation_durability_uncertain"), nil
+		}
+		var exists *fsq.DirectChildExistsError
+		if errors.As(err, &exists) {
+			return applyActionResult(prepared, "subject_changed"), nil
+		}
+		return ApplyResult{}, err
+	}
+	state.baseRoot = baseRoot
+	if afterApplyBaseRootCreatedForTest != nil {
+		if err := afterApplyBaseRootCreatedForTest(); err != nil {
+			return ApplyResult{}, err
+		}
+	}
+	err = WithSessionCreationLock(baseRoot, state.target.Session, func() error {
+		result, err = applyPreparedUnderAuthority(ctx, request, dependencies, state, nil, prepared, decisions)
+		return err
+	})
+	return result, err
 }
 
 func applyReconcileReasonCode(result ReconcileResult) string {
@@ -467,7 +524,8 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 		AMQPath: dependencies.AMQPath, Root: root, Config: config, Launcher: prepared.Launcher,
 		Preferences: slices.Clone(dependencies.Preferences), Backends: dependencies.Backends,
 		Adapters: adapters, TrustStore: dependencies.TrustStore, HeldLease: lease,
-		HostIdentity: dependencies.HostIdentity, AllowExternalCwd: true,
+		TrustAuthorityDigest: snapshot.BaseAuthorityDigest,
+		HostIdentity:         dependencies.HostIdentity, AllowExternalCwd: true,
 		ExecutionOptions:   executionOptions,
 		AllowFreshFallback: decisions[ActionStaleConversation] == "fresh_once",
 		Placement:          prepared.Placement,
@@ -485,8 +543,8 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 			if err != nil {
 				return false, err
 			}
-			authorizedTrustDigest, err := PrepareTrustDigest(
-				trustPlanDigest, prepared.Target.Session, prepared.Target.SessionRoot, authorizedRootIdentity,
+			authorizedTrustDigest, err := PrepareTrustDigestWithAuthority(
+				trustPlanDigest, prepared.Target.Session, prepared.Target.SessionRoot, authorizedRootIdentity, snapshot.BaseAuthorityDigest,
 			)
 			if err != nil {
 				return false, err
@@ -494,7 +552,7 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 			if authorizedTrustDigest != snapshot.TrustDigest {
 				return false, fmt.Errorf("authorized trust subject changed after Apply authorization")
 			}
-			expectedActual, err := ExecutionTrustDigest(plan, prepared.Target.Session, root)
+			expectedActual, err := ExecutionTrustDigestWithAuthority(plan, prepared.Target.Session, root, snapshot.BaseAuthorityDigest)
 			if err != nil {
 				return false, err
 			}

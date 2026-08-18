@@ -3,6 +3,7 @@ package launch
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,170 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
+
+func TestApplyRejectsBaseRootAuthorityDriftBeforeCreation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(t *testing.T, project, configuredRoot string, configBytes []byte)
+	}{
+		{
+			name: "project config identity replacement",
+			mutate: func(t *testing.T, project, _ string, configBytes []byte) {
+				replacement := filepath.Join(project, ".amqrc.next")
+				if err := os.WriteFile(replacement, configBytes, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(replacement, filepath.Join(project, ".amqrc")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "base parent identity replacement",
+			mutate: func(t *testing.T, _ string, configuredRoot string, _ []byte) {
+				old := configuredRoot + ".old"
+				if err := os.Rename(configuredRoot, old); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(configuredRoot, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			project := filepath.Join(root, "project")
+			configuredRoot := filepath.Join(root, "configured")
+			for _, path := range []string{project, configuredRoot} {
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			configBytes, err := json.Marshal(map[string]string{"root": configuredRoot})
+			if err != nil {
+				t.Fatal(err)
+			}
+			configBytes = append(configBytes, '\n')
+			if err := os.WriteFile(filepath.Join(project, ".amqrc"), configBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			profileRoot := filepath.Join(configuredRoot, "profile-a")
+			sessionRoot := filepath.Join(profileRoot, "collab")
+			request := ApplyRequest{Prepare: PrepareRequest{
+				Target:   PrepareTarget{ProjectRoot: project, BaseRoot: profileRoot, SessionRoot: sessionRoot, Session: "collab"},
+				Launcher: LauncherCommands, IntentDigest: "sha256:" + string(bytes.Repeat([]byte{'d'}, 64)),
+				Participants: []PrepareParticipant{{Handle: "operator", Runnable: false}},
+			}}
+			dependencies := ApplyDependencies{PrepareDependencies: PrepareDependencies{
+				Backends: map[string]Backend{LauncherCommands: &prepareTestBackend{}},
+				AdapterFor: func(provider, executable string) HarnessAdapter {
+					return prepareTestAdapter{provider: provider}
+				},
+				HostIdentity: "host:test",
+			}}
+			prepared, err := Prepare(context.Background(), request.Prepare, dependencies.PrepareDependencies)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.SubjectDigest = prepared.SubjectDigest
+			request.Decisions = []ApplyDecision{}
+			beforeApplyBaseRootCreateForTest = func() { test.mutate(t, project, configuredRoot, configBytes) }
+			t.Cleanup(func() { beforeApplyBaseRootCreateForTest = nil })
+
+			result, err := Apply(context.Background(), request, dependencies)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Outcome != ApplyOutcomeActionRequired || result.ReasonCode != "subject_changed" {
+				t.Fatalf("Apply drift result = %#v", result)
+			}
+			if _, err := os.Lstat(profileRoot); !os.IsNotExist(err) {
+				t.Fatalf("authority drift created profile root: %v", err)
+			}
+			if _, err := os.Lstat(sessionRoot); !os.IsNotExist(err) {
+				t.Fatalf("authority drift created session root: %v", err)
+			}
+		})
+	}
+}
+
+func TestApplyRestartsAfterBaseCreationBeforeSessionPublication(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(root, "project")
+	configuredRoot := filepath.Join(root, "configured")
+	for _, path := range []string{project, configuredRoot} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configBytes, err := json.Marshal(map[string]string{"root": configuredRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".amqrc"), append(configBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profileRoot := filepath.Join(configuredRoot, "profile-a")
+	sessionRoot := filepath.Join(profileRoot, "collab")
+	request := ApplyRequest{Prepare: PrepareRequest{
+		Target:   PrepareTarget{ProjectRoot: project, BaseRoot: profileRoot, SessionRoot: sessionRoot, Session: "collab"},
+		Launcher: LauncherCommands, IntentDigest: "sha256:" + string(bytes.Repeat([]byte{'e'}, 64)),
+		Participants: []PrepareParticipant{{Handle: "operator", Runnable: false}},
+	}}
+	dependencies := ApplyDependencies{PrepareDependencies: PrepareDependencies{
+		Backends: map[string]Backend{LauncherCommands: &prepareTestBackend{}},
+		AdapterFor: func(provider, executable string) HarnessAdapter {
+			return prepareTestAdapter{provider: provider}
+		},
+		HostIdentity: "host:test",
+	}}
+	prepared, err := Prepare(context.Background(), request.Prepare, dependencies.PrepareDependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.SubjectDigest = prepared.SubjectDigest
+	request.Decisions = []ApplyDecision{}
+	crash := errors.New("crash after base creation")
+	afterApplyBaseRootCreatedForTest = func() error { return crash }
+	_, err = Apply(context.Background(), request, dependencies)
+	if !errors.Is(err, crash) {
+		t.Fatalf("Apply crash error = %v", err)
+	}
+	afterApplyBaseRootCreatedForTest = nil
+	t.Cleanup(func() { afterApplyBaseRootCreatedForTest = nil })
+	if info, err := os.Stat(profileRoot); err != nil || !info.IsDir() {
+		t.Fatalf("base root not committed before crash: info=%v err=%v", info, err)
+	}
+	if _, err := os.Stat(sessionRoot); !os.IsNotExist(err) {
+		t.Fatalf("session published before injected crash: %v", err)
+	}
+
+	reprepared, err := Prepare(context.Background(), request.Prepare, dependencies.PrepareDependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reprepared.PlannedWrites) != 0 {
+		t.Fatalf("restart still planned existing base root: %#v", reprepared.PlannedWrites)
+	}
+	request.SubjectDigest = reprepared.SubjectDigest
+	result, err := Apply(context.Background(), request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != ApplyOutcomeProvisionedNoRunnable {
+		t.Fatalf("restart Apply result = %#v", result)
+	}
+	if info, err := os.Stat(sessionRoot); err != nil || !info.IsDir() {
+		t.Fatalf("restart did not publish session: info=%v err=%v", info, err)
+	}
+}
 
 type applyUnavailableAdapter struct{ prepareTestAdapter }
 

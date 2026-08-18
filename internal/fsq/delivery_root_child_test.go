@@ -160,6 +160,34 @@ func TestCreateDirectChildExclusiveRaceIsLoud(t *testing.T) {
 	}
 }
 
+func TestCreateDirectChildExclusiveReportsCommittedDurabilityFailure(t *testing.T) {
+	base := t.TempDir()
+	identity, err := SnapshotDeliveryRoot(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := OpenDeliveryRoot(base, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	failure := errors.New("sync parent failed")
+	root.syncDirForTest = func(string) error { return failure }
+	child, err := root.CreateDirectChildExclusive("profile-a", 0o700)
+	if child == nil {
+		t.Fatal("committed child capability is missing")
+	}
+	defer func() { _ = child.Close() }()
+	var committed *CommittedDurabilityError
+	if !errors.As(err, &committed) || !errors.Is(err, failure) {
+		t.Fatalf("CreateDirectChildExclusive error = %v", err)
+	}
+	info, statErr := os.Stat(filepath.Join(root.Base(), "profile-a"))
+	if statErr != nil || !info.IsDir() {
+		t.Fatalf("committed child is not visible: info=%v err=%v", info, statErr)
+	}
+}
+
 func TestPublishInitializedDirectChildExclusiveIsAllOrNothing(t *testing.T) {
 	base := t.TempDir()
 	root := openDeliveryRootForTest(t, base)

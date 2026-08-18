@@ -202,7 +202,17 @@ func (r *DeliveryRoot) CreateDirectChildExclusive(name string, perm os.FileMode)
 	if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("%q is not a direct directory under delivery root", name)
 	}
-	return r.pinDirectChild(name, before)
+	child, err := r.pinDirectChild(name, before)
+	if err != nil {
+		return nil, err
+	}
+	if err := child.SyncDir("."); err != nil {
+		return child, &CommittedDurabilityError{FinalPath: child.Base(), Err: err}
+	}
+	if err := r.SyncDir("."); err != nil {
+		return child, &CommittedDurabilityError{FinalPath: child.Base(), Err: err}
+	}
+	return child, nil
 }
 
 // PublishInitializedDirectChildExclusive builds a direct child under a hidden

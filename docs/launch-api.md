@@ -21,8 +21,8 @@ if err != nil {
 _ = negotiated
 ```
 
-A `0.61.1` binary advertises `placement` and `initial_input` and can still omit
-later Wave B3 feature IDs while those beads are incomplete. A caller must
+A `0.61.1` binary advertises `placement`, `initial_input`, and `base_root` and
+can still omit later Wave B3 feature IDs while those beads are incomplete. A caller must
 require every feature it uses. Contract semver alone does not claim that an
 unadvertised feature is available.
 
@@ -141,12 +141,23 @@ realize returns `outcome: unsupported` and `reason: placement_unsupported`
 with zero planned backend mutation. Subject schema 2 binds that preview into
 `subject_digest`; schema 1 rejects an explicit placement field.
 
+Omitted `TargetV1.base_root` preserves the v0.61 exact-root behavior. When it
+is present, only the exact `project_root/.amqrc` authorizes it: the value must
+be the configured root or one direct child, and `session_root` must be the
+direct child named by `session`. Prepare does not create directories. A missing
+authorized base appears as a deterministic `create_base_root` entry in
+`planned_writes`; Apply revalidates the config and parent identity, then creates
+the base and session exclusively with mode `0700`. Siblings, nested roots,
+symlinks, alternate spellings, or changed authority return a typed refusal with
+no launch mutation.
+
 ```go
 request := launchapi.PrepareRequestV1{
 	RequestVersion: launchapi.RequestVersionV1,
 	Target: launchapi.TargetV1{
 		ProjectRoot: "/workspace/project",
-		SessionRoot: "/workspace/project/.agent-mail/collab",
+		BaseRoot:    "/workspace/project/.agent-mail/profile-a",
+		SessionRoot: "/workspace/project/.agent-mail/profile-a/collab",
 		Session:     "collab",
 	},
 	Launcher: "tmux",

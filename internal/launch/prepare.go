@@ -58,8 +58,24 @@ const (
 
 type PrepareTarget struct {
 	ProjectRoot string `json:"project_root"`
+	BaseRoot    string `json:"base_root,omitempty"`
 	SessionRoot string `json:"session_root"`
 	Session     string `json:"session"`
+}
+
+type PlannedWriteKind string
+
+const (
+	PlannedWriteCreateBaseRoot PlannedWriteKind = "create_base_root"
+	PlannedWriteInitialInput   PlannedWriteKind = "write_initial_input"
+)
+
+type PlannedWrite struct {
+	WriteID string           `json:"write_id"`
+	Kind    PlannedWriteKind `json:"kind"`
+	Path    string           `json:"path"`
+	Handle  string           `json:"handle,omitempty"`
+	SHA256  string           `json:"sha256,omitempty"`
 }
 
 type PrepareExecutionOptions struct {
@@ -159,20 +175,22 @@ type PrepareObservation struct {
 }
 
 type PrepareResult struct {
-	Outcome         string
-	Reason          string
-	SubjectSchema   int
-	SubjectDigest   string
-	PlanDigest      string
-	TrustDigest     string
-	Target          PrepareTarget
-	Backend         string
-	Profile         string
-	Participants    []PreparedParticipant
-	Roster          PrepareRoster
-	RequiredActions []PrepareRequiredAction
-	Observations    []PrepareObservation
-	Placement       PlacementPreview
+	Outcome             string
+	Reason              string
+	SubjectSchema       int
+	SubjectDigest       string
+	PlanDigest          string
+	TrustDigest         string
+	BaseAuthorityDigest string
+	PlannedWrites       []PlannedWrite
+	Target              PrepareTarget
+	Backend             string
+	Profile             string
+	Participants        []PreparedParticipant
+	Roster              PrepareRoster
+	RequiredActions     []PrepareRequiredAction
+	Observations        []PrepareObservation
+	Placement           PlacementPreview
 }
 
 type prepareTargetState struct {
@@ -183,6 +201,7 @@ type prepareTargetState struct {
 	baseRoot        *fsq.DeliveryRoot
 	sessionRoot     *fsq.DeliveryRoot
 	mailboxConfig   *fsq.MailboxConfigAuthorization
+	baseAuthority   *explicitBaseAuthority
 }
 
 func (state *prepareTargetState) close() {
@@ -198,6 +217,9 @@ func (state *prepareTargetState) close() {
 	if state.baseRoot != nil {
 		_ = state.baseRoot.Close()
 	}
+	if state.baseAuthority != nil {
+		state.baseAuthority.close()
+	}
 	if state.projectRoot != nil {
 		_ = state.projectRoot.Close()
 	}
@@ -212,13 +234,22 @@ func (state *prepareTargetState) verify() error {
 	if err := state.projectRoot.VerifyBase(); err != nil {
 		return fmt.Errorf("project root changed during Prepare: %w", err)
 	}
-	if err := state.baseRoot.VerifyBase(); err != nil {
-		return fmt.Errorf("session base root changed during Prepare: %w", err)
+	if state.baseAuthority != nil {
+		if err := state.baseAuthority.verify(state.projectRoot, state.baseRoot); err != nil {
+			return fmt.Errorf("base-root authority changed during Prepare: %w", err)
+		}
+	} else {
+		if err := state.baseRoot.VerifyBase(); err != nil {
+			return fmt.Errorf("session base root changed during Prepare: %w", err)
+		}
 	}
 	if state.sessionRoot != nil {
 		if err := state.sessionRoot.VerifyBase(); err != nil {
 			return fmt.Errorf("session root changed during Prepare: %w", err)
 		}
+		return nil
+	}
+	if state.baseRoot == nil {
 		return nil
 	}
 	child, err := state.baseRoot.OpenDirectChild(state.target.Session)
@@ -247,6 +278,8 @@ type prepareSubject struct {
 	Target          PrepareTarget             `json:"target"`
 	ProjectIdentity string                    `json:"project_identity"`
 	SessionIdentity string                    `json:"session_identity"`
+	BaseAuthority   string                    `json:"base_authority,omitempty"`
+	PlannedWrites   *[]PlannedWrite           `json:"planned_writes,omitempty"`
 	Backend         string                    `json:"backend"`
 	Profile         string                    `json:"profile"`
 	Detection       DetectResult              `json:"detection"`
@@ -294,6 +327,9 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	dependencies.AMQPath = amqPath
 	state, err := openPrepareTarget(request.Target)
 	if err != nil {
+		if reason := baseRootRefusalReason(err); reason != "" {
+			return prepareBaseRootRefusal(request, subjectSchema, reason)
+		}
 		return PrepareResult{}, err
 	}
 	defer state.close()
@@ -352,6 +388,23 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 		Participants: make([]PreparedParticipant, 0, len(request.Participants)),
 		Observations: make([]PrepareObservation, 0, len(request.Participants)+len(roster.Extra)),
 	}
+	baseAuthorityDigest := ""
+	if state.baseAuthority != nil {
+		baseAuthorityDigest = state.baseAuthority.authorityDigest
+		result.BaseAuthorityDigest = baseAuthorityDigest
+		if state.baseAuthority.baseMissing {
+			write := PlannedWrite{Kind: PlannedWriteCreateBaseRoot, Path: state.target.BaseRoot}
+			write.WriteID, err = digestCanonical(struct {
+				Kind      PlannedWriteKind `json:"kind"`
+				Target    PrepareTarget    `json:"target"`
+				Authority string           `json:"authority"`
+			}{write.Kind, state.target, baseAuthorityDigest})
+			if err != nil {
+				return PrepareResult{}, err
+			}
+			result.PlannedWrites = []PlannedWrite{write}
+		}
+	}
 	if detect.Profile.Backend != "" {
 		result.Profile = detect.Profile.Identity()
 	}
@@ -404,7 +457,7 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	result.TrustDigest, err = PrepareTrustDigest(trustPlanDigest, state.target.Session, state.target.SessionRoot, state.sessionIdentity)
+	result.TrustDigest, err = PrepareTrustDigestWithAuthority(trustPlanDigest, state.target.Session, state.target.SessionRoot, state.sessionIdentity, baseAuthorityDigest)
 	if err != nil {
 		return PrepareResult{}, err
 	}
@@ -454,10 +507,16 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	subject := prepareSubject{
 		Version: subjectSchema, IntentDigest: request.IntentDigest, PlanDigest: result.PlanDigest, TrustDigest: result.TrustDigest,
 		Target: state.target, ProjectIdentity: state.projectIdentity, SessionIdentity: state.sessionIdentity,
-		Backend: result.Backend, Profile: result.Profile, Detection: detect, Binding: bindingObservation, Roster: result.Roster,
+		BaseAuthority: baseAuthorityDigest,
+		Backend:       result.Backend, Profile: result.Profile, Detection: detect, Binding: bindingObservation, Roster: result.Roster,
 		Actions: result.RequiredActions, Participants: result.Participants, Observations: result.Observations,
 	}
 	if subjectSchema == SubjectSchemaV2 {
+		plannedWrites := slices.Clone(result.PlannedWrites)
+		if plannedWrites == nil {
+			plannedWrites = []PlannedWrite{}
+		}
+		subject.PlannedWrites = &plannedWrites
 		placement := result.Placement
 		subject.Placement = &placement
 	}
@@ -466,6 +525,54 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 		return PrepareResult{}, err
 	}
 	return result, nil
+}
+
+func prepareBaseRootRefusal(request PrepareRequest, subjectSchema int, reason string) (PrepareResult, error) {
+	result := PrepareResult{
+		Outcome: PrepareOutcomeUnsupported, Reason: reason, SubjectSchema: subjectSchema,
+		Target: request.Target, Backend: request.Launcher,
+		Participants:  make([]PreparedParticipant, 0, len(request.Participants)),
+		Observations:  make([]PrepareObservation, 0, len(request.Participants)),
+		PlannedWrites: []PlannedWrite{}, RequiredActions: []PrepareRequiredAction{},
+	}
+	for _, participant := range request.Participants {
+		result.Roster.Desired = append(result.Roster.Desired, participant.Handle)
+		result.Roster.Missing = append(result.Roster.Missing, participant.Handle)
+		result.Participants = append(result.Participants, PreparedParticipant{
+			Handle: participant.Handle, Runnable: participant.Runnable, Provider: participant.Provider,
+			ResumePolicy: participant.ResumePolicy, PlannedOutcome: "unsupported",
+		})
+		result.Observations = append(result.Observations, PrepareObservation{
+			Handle: participant.Handle, Mailbox: "unknown", Runnable: participant.Runnable,
+			Conversation: "none", Execution: "none", Resource: "none", ReasonCode: reason,
+		})
+	}
+	slices.Sort(result.Roster.Desired)
+	slices.Sort(result.Roster.Missing)
+	var err error
+	result.PlanDigest, err = digestCanonical(struct {
+		Version int           `json:"version"`
+		Reason  string        `json:"reason"`
+		Target  PrepareTarget `json:"target"`
+		Intent  string        `json:"intent_digest"`
+	}{1, reason, request.Target, request.IntentDigest})
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	result.TrustDigest, err = digestCanonical(struct {
+		Version int           `json:"version"`
+		Reason  string        `json:"reason"`
+		Target  PrepareTarget `json:"target"`
+	}{1, reason, request.Target})
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	result.SubjectDigest, err = digestCanonical(struct {
+		Version int    `json:"version"`
+		Plan    string `json:"plan_digest"`
+		Trust   string `json:"trust_digest"`
+	}{subjectSchema, result.PlanDigest, result.TrustDigest})
+	return result, err
 }
 
 func normalizeSubjectSchema(schema int) (int, error) {
@@ -498,6 +605,56 @@ func openPrepareTarget(target PrepareTarget) (*prepareTargetState, error) {
 	if err != nil {
 		_ = projectRoot.Close()
 		return nil, err
+	}
+
+	if target.BaseRoot != "" {
+		if project != target.ProjectRoot {
+			_ = projectRoot.Close()
+			return nil, fmt.Errorf("%s: project_root must be canonical", baseRootRelationInvalid)
+		}
+		authority, baseRoot, authorityErr := openExplicitBaseAuthority(projectRoot, target)
+		if authorityErr != nil {
+			_ = projectRoot.Close()
+			return nil, authorityErr
+		}
+		state := &prepareTargetState{
+			target:          PrepareTarget{ProjectRoot: project, BaseRoot: target.BaseRoot, SessionRoot: target.SessionRoot, Session: target.Session},
+			projectIdentity: projectIdentity, projectRoot: projectRoot, baseRoot: baseRoot, baseAuthority: authority,
+		}
+		if baseRoot == nil {
+			state.sessionIdentity = "intended-base-child:" + authority.parentIdentity + ":" + authority.baseName + ":" + target.Session
+			return state, nil
+		}
+		sessionRoot, openErr := baseRoot.OpenDirectChild(target.Session)
+		if openErr == nil {
+			exact, exactErr := hasExactDirectChildName(baseRoot, target.Session)
+			if exactErr != nil || !exact {
+				_ = sessionRoot.Close()
+				state.close()
+				if exactErr != nil {
+					return nil, exactErr
+				}
+				return nil, fmt.Errorf("%s: session uses an alternate direct-child spelling", baseRootRelationInvalid)
+			}
+			state.sessionRoot = sessionRoot
+			state.sessionIdentity, openErr = fsq.StableTreeIdentityInfo(sessionRoot.FileInfo())
+			if openErr != nil {
+				state.close()
+				return nil, openErr
+			}
+			return state, nil
+		}
+		if !errors.Is(openErr, os.ErrNotExist) {
+			state.close()
+			return nil, openErr
+		}
+		baseIdentity, identityErr := fsq.StableTreeIdentityInfo(baseRoot.FileInfo())
+		if identityErr != nil {
+			state.close()
+			return nil, identityErr
+		}
+		state.sessionIdentity = "intended-child:" + baseIdentity + ":" + target.Session
+		return state, nil
 	}
 
 	sessionPath := filepath.Clean(target.SessionRoot)
