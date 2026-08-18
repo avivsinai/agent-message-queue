@@ -27,16 +27,12 @@ func TestCompatibilityFloorAndEndToEndMatrix(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and executes the real amq binary")
 	}
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
 	binDir := t.TempDir()
-	amqBinary := filepath.Join(binDir, "amq")
-	build := exec.Command("go", "build", "-o", amqBinary, "./cmd/amq")
-	build.Dir = repoRoot
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build real amq: %v\n%s", err, output)
+	amqBinary := resolveRealAMQBinary(t)
+	if filepath.Dir(amqBinary) != binDir {
+		if err := os.Symlink(amqBinary, filepath.Join(binDir, "amq")); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	t.Run("compatibility floor", func(t *testing.T) {

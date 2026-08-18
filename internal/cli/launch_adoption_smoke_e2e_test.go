@@ -44,7 +44,7 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and executes the real amq binary")
 	}
-	amqBinary := buildAdoptionSmokeAMQ(t)
+	amqBinary := resolveRealAMQBinary(t)
 
 	t.Run("finding5_positional_bootstrap_prompt", func(t *testing.T) {
 		fx := newAdoptionSmokeFixture(t, amqBinary, ".agent-mail", "collab")
@@ -310,12 +310,12 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 
 func TestAdoptionSmokeLiveLocalBinary(t *testing.T) {
 	if os.Getenv("AMQ_LAUNCH_LIVE") != "1" {
-		t.Skip("AMQ_LAUNCH_LIVE=1 required; uses a locally built amq with tmux on PATH")
+		t.Skip("AMQ_LAUNCH_LIVE=1 required; uses AMQ_LAUNCH_LIVE_BINARY or a locally built amq, with tmux on PATH")
 	}
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Fatalf("AMQ_LAUNCH_LIVE=1 requires tmux on PATH: %v", err)
 	}
-	amqBinary := buildAdoptionSmokeAMQ(t)
+	amqBinary := resolveRealAMQBinary(t)
 	fx := newAdoptionSmokeFixture(t, amqBinary, ".agent-mail", "collab")
 	intent := fx.legalSquadIntent()
 	intent.Participants[1].Args = append(intent.Participants[1].Args, omriSquadBootstrapPrompt)
@@ -333,6 +333,58 @@ type adoptionSmokeFixture struct {
 	claudeLog   string
 	fullstack   string
 	env         []string
+}
+
+func resolveRealAMQBinary(t *testing.T) string {
+	t.Helper()
+	if path := strings.TrimSpace(os.Getenv("AMQ_LAUNCH_LIVE_BINARY")); path != "" {
+		if !filepath.IsAbs(path) {
+			t.Fatalf("AMQ_LAUNCH_LIVE_BINARY must be an absolute path, got %q", path)
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatalf("AMQ_LAUNCH_LIVE_BINARY %q: %v", path, err)
+		}
+		info, err := os.Stat(resolved)
+		if err != nil || info.IsDir() {
+			t.Fatalf("AMQ_LAUNCH_LIVE_BINARY %q is not a file", path)
+		}
+		return resolved
+	}
+	return buildAdoptionSmokeAMQ(t)
+}
+
+func TestResolveRealAMQBinaryHonorsLiveBinaryEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "released-amq")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMQ_LAUNCH_LIVE_BINARY", path)
+	got := resolveRealAMQBinary(t)
+	want, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("resolveRealAMQBinary = %q, want released path %q", got, want)
+	}
+}
+
+func TestResolveRealAMQBinaryRejectsRelativePath(t *testing.T) {
+	if os.Getenv("AMQ_TEST_LIVE_BINARY_RELATIVE") == "1" {
+		t.Setenv("AMQ_LAUNCH_LIVE_BINARY", "amq")
+		resolveRealAMQBinary(t)
+		t.Fatal("relative AMQ_LAUNCH_LIVE_BINARY was accepted")
+	}
+	cmd := exec.Command(os.Args[0], "-test.run", "^TestResolveRealAMQBinaryRejectsRelativePath$")
+	cmd.Env = append(os.Environ(), "AMQ_TEST_LIVE_BINARY_RELATIVE=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("relative path did not fail:\n%s", out)
+	}
+	if !strings.Contains(string(out), "absolute path") {
+		t.Fatalf("relative path error = %v\n%s", err, out)
+	}
 }
 
 func buildAdoptionSmokeAMQ(t *testing.T) string {
