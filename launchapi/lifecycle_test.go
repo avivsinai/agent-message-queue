@@ -1,9 +1,11 @@
 package launchapi
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -41,6 +43,7 @@ func TestLifecycleFacadeUsesOwnedBinding(t *testing.T) {
 		Resources: internallaunch.ResourceIdentitySet{Version: internallaunch.ResourceSetVersion, Resources: []internallaunch.ResourceIdentity{
 			{OpaqueID: "session:one"}, {OpaqueID: "window:one", Agent: "claude"},
 		}},
+		CallerContext: map[string]string{"run_id": "run-42", "task_generation": "3"},
 	}
 	lease, err := internallaunch.AcquireLease(root, "")
 	if err != nil {
@@ -62,6 +65,9 @@ func TestLifecycleFacadeUsesOwnedBinding(t *testing.T) {
 	if err != nil || inspected.ResultVersion != ResultVersionV1 || inspected.State != "present" || len(inspected.Observations) != 1 || inspected.Observations[0].Resource != "window:one" {
 		t.Fatalf("Inspect = %#v, %v", inspected, err)
 	}
+	if !reflect.DeepEqual(inspected.CallerContext, binding.CallerContext) {
+		t.Fatalf("Inspect caller context = %#v, want %#v", inspected.CallerContext, binding.CallerContext)
+	}
 	if after := snapshotTestTree(t, session); after != before {
 		t.Fatal("public Inspect mutated the session tree")
 	}
@@ -76,6 +82,22 @@ func TestLifecycleFacadeUsesOwnedBinding(t *testing.T) {
 	if _, err := internallaunch.LoadBinding(root); err != nil {
 		t.Fatalf("public Close removed AMQ binding: %v", err)
 	}
+	bindingPath := internallaunch.BindingPath(session)
+	bindingData, err := os.ReadFile(bindingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptBinding := bytes.Replace(bindingData, []byte("run-42"), bytes.Repeat([]byte("x"), internallaunch.MaxCallerContextValueBytes+1), 1)
+	if err := os.WriteFile(bindingPath, corruptBinding, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corruptContext, err := Inspect(context.Background(), request)
+	if err != nil || corruptContext.Outcome != "action_required" || corruptContext.ReasonCode != "caller_context_corrupt" {
+		t.Fatalf("corrupt binding caller context Inspect = %#v, %v", corruptContext, err)
+	}
+	if err := os.WriteFile(bindingPath, bindingData, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	lease, err = internallaunch.AcquireLease(root, "76767676-7676-4676-8676-767676767676")
 	if err != nil {
@@ -86,7 +108,8 @@ func TestLifecycleFacadeUsesOwnedBinding(t *testing.T) {
 	}
 	evidence, err := internallaunch.WriteEvidence(root, lease, internallaunch.EvidenceWriteRequest{
 		Kind: internallaunch.EvidenceProviderCapture, Handle: "claude", ObservedAt: time.Now().UTC(),
-		Payload: []byte(`{"source":"codex_notify_v1","provider":"codex","provider_version":"0.147.0","launch_nonce":"76767676-7676-4676-8676-767676767676","handle":"claude","conversation_id":"019c8a2f-2b13-7000-8000-000000000001","cwd":"/tmp","notification":"{\"type\":\"agent-turn-complete\",\"thread-id\":\"019c8a2f-2b13-7000-8000-000000000001\",\"turn-id\":\"turn-1\",\"cwd\":\"/tmp\",\"input-messages\":[]}"}`),
+		CallerContext: binding.CallerContext,
+		Payload:       []byte(`{"source":"codex_notify_v1","provider":"codex","provider_version":"0.147.0","launch_nonce":"76767676-7676-4676-8676-767676767676","handle":"claude","conversation_id":"019c8a2f-2b13-7000-8000-000000000001","cwd":"/tmp","notification":"{\"type\":\"agent-turn-complete\",\"thread-id\":\"019c8a2f-2b13-7000-8000-000000000001\",\"turn-id\":\"turn-1\",\"cwd\":\"/tmp\",\"input-messages\":[]}"}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -105,6 +128,11 @@ func TestLifecycleFacadeUsesOwnedBinding(t *testing.T) {
 	}
 	if err := lease.Release(); err != nil {
 		t.Fatal(err)
+	}
+	withEvidence, err := Inspect(context.Background(), request)
+	if err != nil || len(withEvidence.Evidence) != 1 || !reflect.DeepEqual(withEvidence.Evidence[0].CallerContext, binding.CallerContext) ||
+		!reflect.DeepEqual(withEvidence.CallerContext, binding.CallerContext) {
+		t.Fatalf("Inspect evidence caller context = %#v, %v", withEvidence, err)
 	}
 	evidencePath := internallaunch.EvidencePath(session, evidence.ID)
 	data, err := os.ReadFile(evidencePath)

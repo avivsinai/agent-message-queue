@@ -44,10 +44,11 @@ func fromInternalApplyResult(result internallaunch.ApplyResult) ApplyResultV1 {
 			Desired: slices.Clone(result.Roster.Desired), Present: slices.Clone(result.Roster.Present),
 			Missing: slices.Clone(result.Roster.Missing), Extra: slices.Clone(result.Roster.Extra),
 		},
-		Observations: make([]ParticipantObservationV1, 0, len(result.Observations)),
-		Commands:     make([]CommandV1, 0, len(result.Commands)),
-		FollowUps:    make([]RequiredActionV1, 0, len(result.RequiredActions)),
-		Evidence:     make([]EvidenceRefV1, 0, len(result.Evidence)),
+		Observations:  make([]ParticipantObservationV1, 0, len(result.Observations)),
+		Commands:      make([]CommandV1, 0, len(result.Commands)),
+		FollowUps:     make([]RequiredActionV1, 0, len(result.RequiredActions)),
+		Evidence:      make([]EvidenceRefV1, 0, len(result.Evidence)),
+		CallerContext: cloneStringMap(result.CallerContext),
 	}
 	if result.SubjectSchema == SubjectSchemaV1 {
 		public.Hints = []ResultHintV1{HintReprepareRecommended}

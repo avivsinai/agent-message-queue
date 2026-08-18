@@ -56,8 +56,9 @@ func lifecycleResult(result internallaunch.LifecycleResult) LifecycleResultV1 {
 	public := LifecycleResultV1{
 		ResultVersion: ResultVersionV1, Outcome: result.Outcome, ReasonCode: result.ReasonCode,
 		Backend: result.Backend, Profile: result.Profile, State: result.State,
-		Observations: make([]ParticipantObservationV1, 0, len(result.Observations)),
-		Evidence:     make([]EvidenceRefV1, 0, len(result.Evidence)),
+		Observations:  make([]ParticipantObservationV1, 0, len(result.Observations)),
+		Evidence:      make([]EvidenceRefV1, 0, len(result.Evidence)),
+		CallerContext: cloneStringMap(result.CallerContext),
 	}
 	for _, observation := range result.Observations {
 		public.Observations = append(public.Observations, ParticipantObservationV1{
@@ -76,5 +77,6 @@ func fromInternalEvidenceRef(evidence internallaunch.EvidenceRef) EvidenceRefV1 
 	return EvidenceRefV1{
 		EvidenceVersion: evidence.EvidenceVersion, ID: evidence.ID, Kind: string(evidence.Kind),
 		SHA256: evidence.SHA256, ObservedAt: evidence.ObservedAt,
+		CallerContext: cloneStringMap(evidence.CallerContext),
 	}
 }

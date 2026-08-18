@@ -117,6 +117,7 @@ type PrepareRequest struct {
 	Participants  []PrepareParticipant
 	SubjectSchema int
 	Placement     *Placement
+	CallerContext map[string]string
 }
 
 type AdapterFactory func(provider, executable string) HarnessAdapter
@@ -195,6 +196,7 @@ type PrepareResult struct {
 	RequiredActions     []PrepareRequiredAction
 	Observations        []PrepareObservation
 	Placement           PlacementPreview
+	CallerContext       map[string]string
 }
 
 type prepareTargetState struct {
@@ -293,6 +295,7 @@ type prepareSubject struct {
 	Participants    []PreparedParticipant     `json:"participants"`
 	Observations    []PrepareObservation      `json:"observations"`
 	Placement       *PlacementPreview         `json:"placement,omitempty"`
+	CallerContext   map[string]string         `json:"caller_context,omitempty"`
 }
 
 // Prepare compiles public caller intent and inspects current launch state. It
@@ -334,6 +337,12 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 		default:
 			return PrepareResult{}, fmt.Errorf("invalid on_live %q", participant.OnLive)
 		}
+	}
+	if len(request.CallerContext) > 0 && subjectSchema == SubjectSchemaV1 {
+		return PrepareResult{}, fmt.Errorf("caller_context requires subject schema %d", SubjectSchemaV2)
+	}
+	if err := ValidateCallerContext(request.CallerContext); err != nil {
+		return PrepareResult{}, err
 	}
 	amqPath, err := resolveLaunchAMQExecutable(dependencies.AMQPath)
 	if err != nil {
@@ -400,8 +409,9 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	}
 	result := PrepareResult{
 		SubjectSchema: subjectSchema, Target: state.target, Backend: backendName, Roster: roster,
-		Participants: make([]PreparedParticipant, 0, len(request.Participants)),
-		Observations: make([]PrepareObservation, 0, len(request.Participants)+len(roster.Extra)),
+		Participants:  make([]PreparedParticipant, 0, len(request.Participants)),
+		Observations:  make([]PrepareObservation, 0, len(request.Participants)+len(roster.Extra)),
+		CallerContext: cloneCallerContext(request.CallerContext),
 	}
 	baseAuthorityDigest := ""
 	if state.baseAuthority != nil {
@@ -527,19 +537,23 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 		Actions: result.RequiredActions, Participants: result.Participants, Observations: result.Observations,
 	}
 	if subjectSchema == SubjectSchemaV2 {
-		plannedWrites := slices.Clone(result.PlannedWrites)
-		if plannedWrites == nil {
-			plannedWrites = []PlannedWrite{}
-		}
-		subject.PlannedWrites = &plannedWrites
-		placement := result.Placement
-		subject.Placement = &placement
+		setPrepareSubjectV2Fields(&subject, result.PlannedWrites, result.Placement, request.CallerContext)
 	}
 	result.SubjectDigest, err = digestCanonical(subject)
 	if err != nil {
 		return PrepareResult{}, err
 	}
 	return result, nil
+}
+
+func setPrepareSubjectV2Fields(subject *prepareSubject, plannedWrites []PlannedWrite, placement PlacementPreview, callerContext map[string]string) {
+	writes := slices.Clone(plannedWrites)
+	if writes == nil {
+		writes = []PlannedWrite{}
+	}
+	subject.PlannedWrites = &writes
+	subject.Placement = &placement
+	subject.CallerContext = cloneCallerContext(callerContext)
 }
 
 func prepareBaseRootRefusal(request PrepareRequest, subjectSchema int, reason string) (PrepareResult, error) {

@@ -104,3 +104,36 @@ func TestApplyRequestV1RejectsDigestAndDecisionReplayShapes(t *testing.T) {
 		t.Fatalf("missing decisions error = %v", err)
 	}
 }
+
+func TestCallerContextJSONRejectsDuplicateNullInvalidAndUnknownAdjacentFields(t *testing.T) {
+	root := filepath.Clean(t.TempDir())
+	intent, err := DecodeLaunchIntentV1([]byte(validIntentJSON(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := PrepareRequestV1{
+		RequestVersion: 1,
+		Target:         TargetV1{ProjectRoot: root, SessionRoot: filepath.Join(root, ".agent-mail", "collab"), Session: "collab"},
+		Launcher:       "commands", CallerContext: map[string]string{"run_id": "run-42"}, Intent: intent,
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		raw  []byte
+		want string
+	}{
+		{name: "duplicate", raw: []byte(strings.Replace(string(raw), `"run_id":"run-42"`, `"run_id":"run-42","run_id":"other"`, 1)), want: "duplicate key"},
+		{name: "null", raw: []byte(strings.Replace(string(raw), `{"run_id":"run-42"}`, `null`, 1)), want: "must be an object"},
+		{name: "unknown adjacent", raw: []byte(strings.Replace(string(raw), `"caller_context":`, `"caller_context_policy":"opaque","caller_context":`, 1)), want: "unknown field"},
+		{name: "invalid UTF-8", raw: append(append([]byte(nil), raw[:len(raw)-1]...), 0xff, '}'), want: "invalid UTF-8"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := DecodePrepareRequestV1(test.raw); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("DecodePrepareRequestV1 error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}

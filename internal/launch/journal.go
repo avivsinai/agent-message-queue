@@ -53,6 +53,7 @@ type LaunchJournal struct {
 	Conversations    []ConversationRecord   `json:"conversations"`
 	Binding          *BindingRecord         `json:"binding,omitempty"`
 	Placement        PlacementPreview       `json:"placement,omitempty"`
+	CallerContext    map[string]string      `json:"caller_context,omitempty"`
 }
 
 func (record LaunchJournal) Validate() error {
@@ -82,6 +83,9 @@ func (record LaunchJournal) Validate() error {
 	}
 	if err := validateOptionalPlacement(record.Placement); err != nil {
 		return fmt.Errorf("launch journal placement: %w", err)
+	}
+	if err := ValidateCallerContext(record.CallerContext); err != nil {
+		return err
 	}
 	if !validUUID(record.LaunchNonce) {
 		return fmt.Errorf("launch journal nonce must be a UUID")
@@ -185,7 +189,8 @@ func NewLaunchJournal(request ReconcileRequest, backend string, detect DetectRes
 		InstanceIdentity: detect.InstanceIdentity, RosterDigest: rosterDigest,
 		PlanDigest: planDigest, LaunchNonce: nonce, CreatedAt: now.UTC(), Plan: plan,
 		Agents: slices.Clone(agents), Conversations: slices.Clone(conversations),
-		Placement: preview,
+		Placement:     preview,
+		CallerContext: cloneCallerContext(request.CallerContext),
 	}
 	record.ProjectPhysical, _ = fsq.StableTreeIdentity(projectIdentity)
 	record.RootPhysical, _ = fsq.StableTreeIdentityInfo(request.Root.FileInfo())
@@ -219,6 +224,9 @@ func (record LaunchJournal) ValidateRequest(request ReconcileRequest) error {
 	}
 	if record.RosterDigest != rosterDigest {
 		return fmt.Errorf("launch journal roster changed since resource creation")
+	}
+	if !reflect.DeepEqual(record.CallerContext, request.CallerContext) {
+		return fmt.Errorf("launch journal caller context changed")
 	}
 	if err := journalPlacementMatches(record, request); err != nil {
 		return err
@@ -338,7 +346,7 @@ func journalPlacementMatches(record LaunchJournal, request ReconcileRequest) err
 func journalMatchesBinding(journal LaunchJournal, binding BindingRecord) bool {
 	return binding.Backend == journal.Backend && binding.Profile == journal.Profile &&
 		binding.HostIdentity == journal.HostIdentity && binding.InstanceIdentity == journal.InstanceIdentity &&
-		binding.LaunchNonce == journal.LaunchNonce
+		binding.LaunchNonce == journal.LaunchNonce && reflect.DeepEqual(binding.CallerContext, journal.CallerContext)
 }
 
 func canonicalIdentity(path string) (string, error) {

@@ -214,6 +214,11 @@ func TestSameSessionLabelAcrossProfileRootsIsIsolated(t *testing.T) {
 
 func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 	fixture := newPublicPrepareFixture(t, false)
+	fixture.request.CallerContext = map[string]string{
+		"discovery_fingerprint": "sha256:abc", "namespace": "squad-v2", "policy_generation": "7",
+		"task_generation": "3", "run_id": "run-42", "evidence_chain": "chain-9",
+	}
+	wantCallerContext := cloneStringMap(fixture.request.CallerContext)
 	injector := filepath.Join(t.TempDir(), "injector")
 	if err := os.WriteFile(injector, []byte("injector"), 0o700); err != nil {
 		t.Fatal(err)
@@ -250,6 +255,13 @@ func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 	if result.SubjectDigest != prepared.SubjectDigest {
 		t.Fatalf("Apply authorization subject = %q, want accepted %q", result.SubjectDigest, prepared.SubjectDigest)
 	}
+	if !reflect.DeepEqual(result.CallerContext, wantCallerContext) {
+		t.Fatalf("Apply caller context = %#v, want %#v", result.CallerContext, wantCallerContext)
+	}
+	fixture.request.CallerContext["run_id"] = "mutated-after-apply"
+	if result.CallerContext["run_id"] != "run-42" {
+		t.Fatalf("Apply result aliases request caller context: %#v", result.CallerContext)
+	}
 	if !slices.Equal(result.Roster.Desired, []string{"claude", "operator", "reviewer"}) ||
 		!slices.Equal(result.Roster.Present, result.Roster.Desired) || len(result.Roster.Missing) != 0 || len(result.Roster.Extra) != 0 {
 		t.Fatalf("published Apply roster = %#v", result.Roster)
@@ -280,6 +292,9 @@ func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 		}
 		if !reflect.DeepEqual(ticket.Execution, &wantOptions) {
 			t.Fatalf("%s ticket execution options = %#v, want %#v", handle, ticket.Execution, wantOptions)
+		}
+		if !reflect.DeepEqual(ticket.CallerContext, wantCallerContext) {
+			t.Fatalf("%s ticket caller context = %#v, want %#v", handle, ticket.CallerContext, wantCallerContext)
 		}
 		if len(ticket.TargetArgv) == 0 || ticket.TargetArgv[len(ticket.TargetArgv)-1] != "generated bootstrap" {
 			t.Fatalf("%s ticket did not preserve the final initial argument: %#v", handle, ticket.TargetArgv)
@@ -320,6 +335,34 @@ func TestApplyUnsupportedPlacementDoesNotPublishSession(t *testing.T) {
 	}
 	if _, err := os.Stat(fixture.request.Target.SessionRoot); !os.IsNotExist(err) {
 		t.Fatalf("unsupported placement published a session: %v", err)
+	}
+}
+
+func TestApplyRejectsChangedCallerContextWithoutMutation(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, true)
+	fixture.request.CallerContext = map[string]string{"run_id": "run-42", "task_generation": "3"}
+	prepared, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := applyTreeFingerprint(t, fixture.root, nil)
+	fixture.request.CallerContext["task_generation"] = "4"
+	result, err := Apply(context.Background(), ApplyRequestV1{
+		RequestVersion: RequestVersionV1, Prepare: fixture.request,
+		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != "action_required" || result.ReasonCode != "subject_changed" || result.CallerContext["task_generation"] != "4" {
+		t.Fatalf("changed caller context Apply = %#v", result)
+	}
+	allowed := map[string]bool{
+		"mail/collab/meta/launch":            true,
+		"mail/collab/meta/launch/lease.lock": true,
+	}
+	if after := applyTreeFingerprint(t, fixture.root, allowed); after != before {
+		t.Fatalf("changed caller context mutated state: before %s after %s", before, after)
 	}
 }
 

@@ -30,9 +30,11 @@ func TestCompatibilityAndNegotiateV1(t *testing.T) {
 	if !slices.Contains(Compatibility().Features, FeatureOnLive) {
 		t.Fatal("Compatibility omitted advertised on_live")
 	}
+	if !slices.Contains(Compatibility().Features, FeatureCallerContext) {
+		t.Fatal("Compatibility did not advertise the completed caller_context feature")
+	}
 	for _, unfinished := range []string{
-		FeatureWrapper,
-		FeatureCallerContext, FeatureExecutableIdentity,
+		FeatureWrapper, FeatureExecutableIdentity,
 	} {
 		if slices.Contains(Compatibility().Features, unfinished) {
 			t.Fatalf("Compatibility advertised unfinished feature %q", unfinished)

@@ -111,6 +111,55 @@ func TestPrepareInitialArgumentIsFinalAndContentDoesNotChurnTrust(t *testing.T) 
 	}
 }
 
+func TestCallerContextCanonicalOrderChangesSubjectButNotPlanOrTrust(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, true)
+	fixture.request.CallerContext = map[string]string{
+		"run_id": "run-42", "discovery_fingerprint": "sha256:abc", "policy_generation": "7",
+	}
+	first, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.request.CallerContext = map[string]string{
+		"policy_generation": "7", "discovery_fingerprint": "sha256:abc", "run_id": "run-42",
+	}
+	reordered, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SubjectDigest != reordered.SubjectDigest || first.PlanDigest != reordered.PlanDigest || first.TrustDigest != reordered.TrustDigest {
+		t.Fatalf("map insertion order changed digests: first=%#v reordered=%#v", first, reordered)
+	}
+	fixture.request.CallerContext["policy_generation"] = "8"
+	changed, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SubjectDigest == changed.SubjectDigest {
+		t.Fatal("caller context value change did not change subject digest")
+	}
+	if first.PlanDigest != changed.PlanDigest || first.TrustDigest != changed.TrustDigest {
+		t.Fatalf("caller context changed plan or trust: first=%#v changed=%#v", first, changed)
+	}
+
+	fixture.request.CallerContext = map[string]string{"é": "value"}
+	composed, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.request.CallerContext = map[string]string{"e\u0301": "value"}
+	decomposed, err := Prepare(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if composed.SubjectDigest == decomposed.SubjectDigest {
+		t.Fatal("caller context normalized distinct UTF-8 key bytes")
+	}
+	if composed.PlanDigest != decomposed.PlanDigest || composed.TrustDigest != decomposed.TrustDigest {
+		t.Fatalf("UTF-8 key bytes changed plan or trust: composed=%#v decomposed=%#v", composed, decomposed)
+	}
+}
+
 func TestPrepareUnsupportedInitialCarriersAndOversizeAreTypedAndZeroWrite(t *testing.T) {
 	for _, test := range []struct {
 		name  string

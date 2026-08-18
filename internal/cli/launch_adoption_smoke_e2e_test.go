@@ -29,7 +29,7 @@ import (
 //	finding3_wrapper_unknown_field | 3 wrapper | strict decode unknown field "wrapper" | wrapper argv prepended to full provider argv
 //	finding4_placement_unsupported | 4 placement | AMQ_SQUAD_TMUX_* env rejected as provider env | placement preview; unsupported tuple -> placement_unsupported
 //	finding5_positional_bootstrap_prompt / finding5_claude_allowed_tools / finding5_codex_dash_c | 5 materialized argv | raw positional prompt rejected; exact --allowedTools and -c forms admitted | initial_input + --allowedTools / -c admitted
-//	finding6_caller_context_unknown_field | 6 caller correlation | strict decode unknown field "caller_context" | caller_context echoed on Apply/evidence/lifecycle
+//	finding6_caller_context_bound_and_echoed | 6 caller correlation | caller_context is subject-bound and echoed on Apply/evidence/lifecycle
 //	finding7_same_path_inode_replacement_not_subject_changed | 7 physical identity | same-path inode replacement leaves subject/plan/trust digests identical | inode replacement -> subject_changed
 //
 // Real bootstrap text from the squad-v2-29-4 compiler, not the placeholder in
@@ -107,12 +107,20 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 		assertAdoptionUnknownField(t, exit, stdout, stderr, "wrapper")
 	})
 
-	t.Run("finding6_caller_context_unknown_field", func(t *testing.T) {
+	t.Run("finding6_caller_context_bound_and_echoed", func(t *testing.T) {
 		fx := newAdoptionSmokeFixture(t, amqBinary, ".agent-mail", "collab")
 		raw := fx.applyEnvelopeJSON(t, fx.legalSquadIntent(), launch.LauncherCommands, "sha256:"+strings.Repeat("a", 64))
 		raw = injectPrepareJSONField(t, raw, "caller_context", map[string]any{"run_id": "v2-29-6"})
+		raw = []byte(strings.Replace(string(raw), `"subject_digest":`, `"subject_schema":2,"subject_digest":`, 1))
 		stdout, stderr, exit := fx.applyJSONBytes(t, raw)
-		assertAdoptionUnknownField(t, exit, stdout, stderr, "caller_context")
+		if exit != ExitActionRequired {
+			t.Fatalf("caller context Apply exit=%d stderr=%s stdout=%s", exit, stderr, stdout)
+		}
+		var result launchapi.ApplyResultV1
+		decodeRealLaunchJSON(t, stdout, &result)
+		if result.ReasonCode != "subject_changed" || len(result.CallerContext) != 1 || result.CallerContext["run_id"] != "v2-29-6" {
+			t.Fatalf("caller context Apply = %#v", result)
+		}
 	})
 
 	t.Run("finding1_missing_profile_base_root", func(t *testing.T) {

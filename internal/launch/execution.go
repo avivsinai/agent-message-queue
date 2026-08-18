@@ -67,14 +67,15 @@ type ExecutionTicket struct {
 	InjectorExecutable         string `json:"injector_executable,omitempty"`
 	InjectorExecutableIdentity string `json:"injector_executable_identity,omitempty"`
 
-	TargetArgv   []string                 `json:"target_argv"`
-	DynamicArgv  []DynamicArg             `json:"dynamic_argv,omitempty"`
-	InitialInput *PlannedInitialInput     `json:"initial_input,omitempty"`
-	TargetEnv    map[string]string        `json:"target_env,omitempty"`
-	EnvDigest    string                   `json:"env_digest"`
-	State        ExecutionState           `json:"state"`
-	Reason       string                   `json:"reason,omitempty"`
-	Execution    *PrepareExecutionOptions `json:"execution,omitempty"`
+	TargetArgv    []string                 `json:"target_argv"`
+	DynamicArgv   []DynamicArg             `json:"dynamic_argv,omitempty"`
+	InitialInput  *PlannedInitialInput     `json:"initial_input,omitempty"`
+	TargetEnv     map[string]string        `json:"target_env,omitempty"`
+	EnvDigest     string                   `json:"env_digest"`
+	State         ExecutionState           `json:"state"`
+	Reason        string                   `json:"reason,omitempty"`
+	Execution     *PrepareExecutionOptions `json:"execution,omitempty"`
+	CallerContext map[string]string        `json:"caller_context,omitempty"`
 }
 
 type ExecutionTicketRequest struct {
@@ -94,6 +95,7 @@ type ExecutionTicketRequest struct {
 	State                             ExecutionState
 	Reason                            string
 	Execution                         *PrepareExecutionOptions
+	CallerContext                     map[string]string
 }
 
 type ExecutionEnvelope struct {
@@ -170,6 +172,7 @@ func NewExecutionTicket(request ExecutionTicketRequest) (ExecutionTicket, error)
 		InitialInput: clonePlannedInitialInput(request.InitialInput),
 		TargetEnv:    env, EnvDigest: digest, State: request.State, Reason: request.Reason,
 		Execution: execution, InjectorExecutable: injector, InjectorExecutableIdentity: injectorID,
+		CallerContext: cloneCallerContext(request.CallerContext),
 	}
 	if ticket.State == "" {
 		ticket.State = ExecutionPending
@@ -232,6 +235,9 @@ func (ticket ExecutionTicket) Validate() error {
 		}
 	}
 	if err := validateTicketInitialInput(ticket); err != nil {
+		return err
+	}
+	if err := ValidateCallerContext(ticket.CallerContext); err != nil {
 		return err
 	}
 	if ticket.Mode == AdapterModeCapture && ticket.Provider == CodexProvider && ticket.ProviderVersion == codexCaptureVersion {
@@ -655,7 +661,7 @@ func preparePreSpawnCapture(root *fsq.DeliveryRoot, lease *Lease, ticket Executi
 			if !capture.CanPersist() || capture.Identity.Provider != ticket.Provider {
 				return ticket, fmt.Errorf("cursor create-chat did not yield persistable launch evidence")
 			}
-			refs, persistErr := persistProviderCaptureEvidence(root, lease, ticket.Handle, []CaptureEvidence{evidence})
+			refs, persistErr := persistProviderCaptureEvidenceWithContext(root, lease, ticket.Handle, ticket.CallerContext, []CaptureEvidence{evidence})
 			if persistErr != nil {
 				return ticket, persistErr
 			}
@@ -746,7 +752,8 @@ func validateCursorExecutionEvidence(root *fsq.DeliveryRoot, ticket ExecutionTic
 	}
 	if record.Kind != EvidenceProviderCapture || record.Handle != ticket.Handle || payload.Handle != ticket.Handle ||
 		payload.Provider != ticket.Provider || payload.LaunchNonce != ticket.LaunchNonce ||
-		payload.ProviderVersion != ticket.ProviderVersion || payload.ConversationID != ticket.ConversationID {
+		payload.ProviderVersion != ticket.ProviderVersion || payload.ConversationID != ticket.ConversationID ||
+		!reflect.DeepEqual(record.CallerContext, ticket.CallerContext) {
 		return fmt.Errorf("cursor execution evidence binding mismatch")
 	}
 	return nil
@@ -825,11 +832,15 @@ func recordCodexNotify(root *fsq.DeliveryRoot, handle, nonce, amqExecutable stri
 		return result, err
 	}
 	if found {
+		_, ref, readErr := ReadEvidence(root, refID)
+		if readErr != nil || !reflect.DeepEqual(ref.CallerContext, ticket.CallerContext) {
+			return result, fmt.Errorf("codex notify evidence caller context mismatch")
+		}
 		if stored.conversationID != evidence.conversationID {
 			return result, &CodexNotifyConflictError{Existing: stored.conversationID, Observed: evidence.conversationID}
 		}
 	} else {
-		refs, persistErr := persistProviderCaptureEvidence(root, lease, handle, []CaptureEvidence{evidence})
+		refs, persistErr := persistProviderCaptureEvidenceWithContext(root, lease, handle, ticket.CallerContext, []CaptureEvidence{evidence})
 		if persistErr != nil {
 			return result, persistErr
 		}

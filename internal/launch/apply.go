@@ -52,6 +52,7 @@ type ApplyResult struct {
 	Commands        []EmittedCommand
 	RequiredActions []PrepareRequiredAction
 	Evidence        []EvidenceRef
+	CallerContext   map[string]string
 }
 
 var afterApplySessionPublishedForTest func()
@@ -539,6 +540,7 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 		AllowFreshFallback: decisions[ActionStaleConversation] == "fresh_once",
 		Placement:          prepared.Placement,
 		OnLive:             onLivePolicies(runnable),
+		CallerContext:      cloneCallerContext(prepared.CallerContext),
 	}
 	if choice := decisions[ActionTrustConfirmation]; choice == "trust_exact_subject" {
 		request.ConfirmTrust = func(plan Plan, actualTrustDigest string) (bool, error) {
@@ -651,6 +653,7 @@ func applyResultFromPrepare(prepared PrepareResult) ApplyResult {
 		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, PlanDigest: prepared.PlanDigest, TrustDigest: prepared.TrustDigest,
 		Backend: prepared.Backend, Profile: prepared.Profile, Roster: prepared.Roster,
 		Observations: slices.Clone(prepared.Observations), RequiredActions: slices.Clone(prepared.RequiredActions),
+		CallerContext: cloneCallerContext(prepared.CallerContext),
 	}
 }
 

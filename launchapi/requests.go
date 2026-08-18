@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	internallaunch "github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -22,6 +25,9 @@ func ValidateDigest(digest string) error {
 }
 
 func DecodePrepareRequestV1(data []byte) (PrepareRequestV1, error) {
+	if err := validateCallerContextJSON(data); err != nil {
+		return PrepareRequestV1{}, fmt.Errorf("decode prepare request v1: %w", err)
+	}
 	var request PrepareRequestV1
 	if err := decodeStrictJSON(data, &request); err != nil {
 		return PrepareRequestV1{}, fmt.Errorf("decode prepare request v1: %w", err)
@@ -47,10 +53,25 @@ func (request PrepareRequestV1) Validate() error {
 			return err
 		}
 	}
+	if err := internallaunch.ValidateCallerContext(request.CallerContext); err != nil {
+		return err
+	}
 	return request.Intent.Validate()
 }
 
 func DecodeApplyRequestV1(data []byte) (ApplyRequestV1, error) {
+	if !utf8.Valid(data) {
+		return ApplyRequestV1{}, fmt.Errorf("decode apply request v1: invalid UTF-8")
+	}
+	prepare, present, err := rawObjectField(data, "prepare")
+	if err != nil {
+		return ApplyRequestV1{}, fmt.Errorf("decode apply request v1: %w", err)
+	}
+	if present {
+		if err := validateCallerContextJSON(prepare); err != nil {
+			return ApplyRequestV1{}, fmt.Errorf("decode apply request v1: prepare: %w", err)
+		}
+	}
 	var request ApplyRequestV1
 	if err := decodeStrictJSON(data, &request); err != nil {
 		return ApplyRequestV1{}, fmt.Errorf("decode apply request v1: %w", err)
@@ -66,6 +87,93 @@ func DecodeApplyRequestV1(data []byte) (ApplyRequestV1, error) {
 		return ApplyRequestV1{}, err
 	}
 	return request, nil
+}
+
+func validateCallerContextJSON(data []byte) error {
+	if !utf8.Valid(data) {
+		return fmt.Errorf("invalid UTF-8")
+	}
+	raw, present, err := rawObjectField(data, "caller_context")
+	if err != nil || !present {
+		return err
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return fmt.Errorf("caller_context must be an object")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("caller_context: %w", err)
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return fmt.Errorf("caller_context must be an object")
+	}
+	seen := make(map[string]struct{})
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("caller_context: %w", err)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return fmt.Errorf("caller_context key must be a string")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("caller_context contains duplicate key %q", key)
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return fmt.Errorf("caller_context[%q]: %w", key, err)
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return fmt.Errorf("caller_context: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("caller_context has trailing JSON")
+	}
+	return nil
+}
+
+func rawObjectField(data []byte, field string) (json.RawMessage, bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, false, err
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return nil, false, fmt.Errorf("request must be an object")
+	}
+	var found json.RawMessage
+	present := false
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, false, err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, false, fmt.Errorf("request field name must be a string")
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return nil, false, err
+		}
+		if key == field {
+			if present {
+				return nil, false, fmt.Errorf("duplicate field %q", field)
+			}
+			found, present = raw, true
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, false, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, false, fmt.Errorf("request has trailing JSON")
+	}
+	return found, present, nil
 }
 
 func (request ApplyRequestV1) Validate() error {

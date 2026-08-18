@@ -28,6 +28,7 @@ type BindingRecord struct {
 	LaunchNonce      string              `json:"launch_nonce"`
 	Resources        ResourceIdentitySet `json:"resources"`
 	Placement        PlacementPreview    `json:"placement,omitempty"`
+	CallerContext    map[string]string   `json:"caller_context,omitempty"`
 }
 
 type ResourceIdentitySet struct {
@@ -76,6 +77,9 @@ func (record BindingRecord) Validate() error {
 		if _, ok := seen[owned]; ok {
 			return fmt.Errorf("launcher pane %q must not be an owned resource", pane)
 		}
+	}
+	if err := ValidateCallerContext(record.CallerContext); err != nil {
+		return err
 	}
 	return nil
 }
