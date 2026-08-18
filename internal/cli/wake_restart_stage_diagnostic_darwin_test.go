@@ -200,7 +200,7 @@ func TestDoctorFixReclaimsValidDarwinRestartStageWithoutLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	record := newDarwinWakeRestartStageRecordForTest(t)
+	record := newDarwinWakeRestartStageRecordForRootTest(t, canonicalWakeRoot(root), "codex")
 	bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
 	if err != nil {
 		t.Fatal(err)
@@ -212,8 +212,6 @@ func TestDoctorFixReclaimsValidDarwinRestartStageWithoutLock(t *testing.T) {
 	bound.file = nil
 	record.Schema = wakeRestartSchemaV1
 	record.Status = wakeRestartPending
-	record.Root = canonicalWakeRoot(root)
-	record.Agent = "codex"
 	record.Generation = "abcdef0123456789abcdef0123456789"
 	record.Owner = validWakeResumeOwnerForTest()
 	record.BoundImage = &evidence
@@ -322,7 +320,7 @@ func futureWakeRestartRecordRawForDoctorTest(t *testing.T, root string) []byte {
 func TestDoctorReportsRefusedSurvivingDarwinStageAsCleanupFailed(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	removeWakeRestartRecordForTest(t, fixture)
-	record := newDarwinWakeRestartStageRecordForTest(t)
+	record := newDarwinWakeRestartStageRecordForRootTest(t, fixture.root, fixture.agent)
 	bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
 	if err != nil {
 		t.Fatal(err)
@@ -332,8 +330,6 @@ func TestDoctorReportsRefusedSurvivingDarwinStageAsCleanupFailed(t *testing.T) {
 	record.Schema = wakeRestartSchemaV1
 	record.Status = wakeRestartRefused
 	record.Reason = "restart execution refused"
-	record.Root = fixture.root
-	record.Agent = fixture.agent
 	record.Generation = fixture.lock.Lock.Generation
 	record.Owner = fixture.owner
 	evidence := bound.evidence

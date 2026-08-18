@@ -135,6 +135,7 @@ func TestDarwinWakeRestartRealPTYPreservesPIDAndUnreadWork(t *testing.T) {
 	}
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "..", ".."))
 	temp := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(temp, "state"))
 	oldDir := filepath.Join(temp, "old")
 	newDir := filepath.Join(temp, "new")
 	if err := os.MkdirAll(oldDir, 0o700); err != nil {

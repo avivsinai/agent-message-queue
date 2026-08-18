@@ -572,10 +572,6 @@ func maintainWakeSelfUpgrade(
 	if err != nil {
 		return wakeSelfUpgradeDecision{}, err
 	}
-	stagePath, err := planWakeRestartStagePlatform(evidence, requestID)
-	if err != nil {
-		return wakeSelfUpgradeDecision{}, err
-	}
 	record := wakeRestartRecord{
 		Schema:             wakeRestartSchemaV1,
 		RequestID:          requestID,
@@ -586,9 +582,13 @@ func maintainWakeSelfUpgrade(
 		Generation:         inspection.Lock.Generation,
 		Owner:              *inspection.Lock.ResumeOwner,
 		Candidate:          evidence,
-		StagePath:          stagePath,
 		PreviousBoundImage: previousDarwinWakeRestartStageForLock(inspection.Lock),
 	}
+	stagePath, err := planWakeRestartStageForRecordPlatform(record)
+	if err != nil {
+		return wakeSelfUpgradeDecision{}, err
+	}
+	record.StagePath = stagePath
 	decision, err = publishWakeSelfUpgradePending(agentDir, inspection, record, decision)
 	if err != nil {
 		return decision, err
