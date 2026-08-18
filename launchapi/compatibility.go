@@ -19,6 +19,7 @@ var compatibilityFeaturesV1 = []string{
 	FeatureInitialInput,
 	FeaturePlacement,
 	FeatureBaseRoot,
+	FeatureOnLive,
 }
 
 func Compatibility() CompatibilityV1 {

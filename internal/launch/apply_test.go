@@ -523,3 +523,87 @@ func TestApplyReturnsTypedOutcomeForCommittedRosterConfigDurabilityFailure(t *te
 		t.Fatalf("committed roster was not applied: %v", err)
 	}
 }
+
+func TestOnLiveOmittedMatchesV061Apply(t *testing.T) {
+	// Apply-path guard: omit matches explicit refuse (v0.61 whole-binding
+	// refusal). Digest stability is TestPrepareV2SubjectDigestIncludesOnLiveKeepOnly.
+	omitted := applyMixedLiveMissing(t, "")
+	refused := applyMixedLiveMissing(t, OnLiveRefuse)
+	if omitted.Outcome != ApplyOutcomeActionRequired || omitted.ReasonCode != "binding_present_without_resumable_conversation" {
+		t.Fatalf("omitted on_live Apply = %#v, want v0.61 whole-binding refusal", omitted)
+	}
+	if omitted.Outcome != refused.Outcome || omitted.ReasonCode != refused.ReasonCode {
+		t.Fatalf("omitted Apply diverged from explicit refuse: omit=%#v refuse=%#v", omitted, refused)
+	}
+	for _, result := range []ApplyResult{omitted, refused} {
+		for _, observation := range result.Observations {
+			if observation.Disposition == SeatKept || observation.Disposition == SeatCreated {
+				t.Fatalf("omitted/refuse stamped keep-or-create: %#v", result.Observations)
+			}
+		}
+	}
+	kept := applyMixedLiveMissing(t, OnLiveKeep)
+	if kept.ReasonCode == omitted.ReasonCode {
+		t.Fatalf("on_live keep used the v0.61 refusal path: %#v", kept)
+	}
+}
+
+func applyMixedLiveMissing(t *testing.T, onLive string) ApplyResult {
+	t.Helper()
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	base := filepath.Join(root, "mail")
+	session := filepath.Join(base, "collab")
+	for _, path := range []string{project, base} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := fsq.EnsureRootDirs(session); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(session, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	writePrepareBinding(t, session, prepareBinding("host:test", "instance:test", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"))
+	store, err := OpenTrustStore(t.TempDir(), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := ApplyRequest{Prepare: PrepareRequest{
+		Target:   PrepareTarget{ProjectRoot: project, SessionRoot: session, Session: "collab"},
+		Launcher: "test", IntentDigest: "sha256:" + string(bytes.Repeat([]byte{'a'}, 64)),
+		Participants: []PrepareParticipant{
+			{
+				Handle: "claude", Provider: ClaudeProvider, Executable: "claude", Runnable: true,
+				Cwd: project, ResumePolicy: ResumeEnabled, OnLive: onLive,
+			},
+			{
+				Handle: "codex", Provider: CodexProvider, Executable: "codex", Runnable: true,
+				Cwd: project, ResumePolicy: ResumeFresh, OnLive: onLive,
+			},
+		},
+	}}
+	backend := &prepareTestBackend{}
+	dependencies := ApplyDependencies{PrepareDependencies: PrepareDependencies{
+		Backends: map[string]Backend{"test": backend}, Preferences: []string{"test"},
+		AdapterFor: func(provider, executable string) HarnessAdapter { return prepareTestAdapter{provider: provider} },
+		TrustStore: store, HostIdentity: "host:test",
+	}}
+	prepared, err := Prepare(context.Background(), request.Prepare, dependencies.PrepareDependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.SubjectDigest = prepared.SubjectDigest
+	for _, action := range prepared.RequiredActions {
+		request.Decisions = append(request.Decisions, ApplyDecision{ActionID: action.ActionID, Choice: "trust_exact_subject"})
+	}
+	result, err := Apply(context.Background(), request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend.creates != 0 {
+		t.Fatalf("on_live %q created backend resources: %d result=%#v", onLive, backend.creates, result)
+	}
+	return result
+}

@@ -150,6 +150,9 @@ type CreateRequest struct {
 	Root        *fsq.DeliveryRoot
 	// Placement is the caller-requested tuple. Nil preserves v0.61 Create.
 	Placement *Placement
+	// JoinBinding, when set, adds Plan agents into this owned session instead
+	// of creating a new generation. Nil preserves create-from-absent.
+	JoinBinding *BindingRecord
 }
 
 type EmittedCommand struct {

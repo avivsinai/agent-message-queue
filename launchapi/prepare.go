@@ -108,6 +108,7 @@ func toInternalPrepareParticipant(participant ParticipantV1, provider string, co
 		Handle: participant.Handle, Runnable: participant.Runnable, Provider: provider,
 		Executable: participant.Executable, Args: slices.Clone(committedArgs), BypassArgs: slices.Clone(bypassArgs), EnvOverlay: cloneStringMap(participant.EnvOverlay),
 		ResumePolicy: internallaunch.ResumePolicy(participant.ResumePolicy),
+		OnLive:       string(participant.OnLive),
 	}
 	if participant.InitialInput != nil {
 		result.InitialInput = &internallaunch.PrepareInitialInput{Kind: internallaunch.InitialInputKind(participant.InitialInput.Kind), Text: participant.InitialInput.Text}

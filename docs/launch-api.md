@@ -21,10 +21,10 @@ if err != nil {
 _ = negotiated
 ```
 
-A `0.61.1` binary advertises `placement`, `initial_input`, and `base_root` and
-can still omit later Wave B3 feature IDs while those beads are incomplete. A caller must
-require every feature it uses. Contract semver alone does not claim that an
-unadvertised feature is available.
+A `0.61.1` binary advertises `placement`, `initial_input`, `base_root`, and
+`on_live` and can still omit later Wave B3 feature IDs while those beads are
+incomplete. A caller must require every feature it uses. Contract semver alone
+does not claim that an unadvertised feature is available.
 
 `PreviewV1.capabilities` reports the selected providers' static adapter grammar
 without executing a caller-supplied provider. `grammar_version` is the
@@ -150,6 +150,12 @@ authorized base appears as a deterministic `create_base_root` entry in
 the base and session exclusively with mode `0700`. Siblings, nested roots,
 symlinks, alternate spellings, or changed authority return a typed refusal with
 no launch mutation.
+
+`on_live` is `keep` or `refuse`. Omission and explicit `refuse` keep the v0.61
+whole-binding refusal. Explicit `keep` on a proven-owned live seat keeps that
+process and lets Apply create missing seats in the same tmux omitted-placement
+session. Hostile live resources refuse even with `keep`. Schema 1 rejects
+`on_live: keep`; omit and `refuse` stay digest-stable.
 
 ```go
 request := launchapi.PrepareRequestV1{

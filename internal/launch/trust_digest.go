@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -46,17 +47,18 @@ func ExecutionTrustDigestWithAuthority(plan Plan, session string, root *fsq.Deli
 	if err != nil {
 		return "", fmt.Errorf("resolve trust session-root identity: %w", err)
 	}
-	return executionTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, authorityDigest)
+	return executionTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, authorityDigest, nil)
 }
 
 // PrepareTrustDigest binds a nonce-free plan digest to the canonical target
 // and its physical identity. For an absent session, rootIdentity is a stable
 // intended-child identity derived from the pinned parent and child name.
-func PrepareTrustDigest(planDigest, session, rootPath, rootIdentity string) (string, error) {
-	return PrepareTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, "")
+// onLiveKeep is sorted handles with explicit keep; empty preserves the v0.61 digest.
+func PrepareTrustDigest(planDigest, session, rootPath, rootIdentity string, onLiveKeep []string) (string, error) {
+	return PrepareTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, "", onLiveKeep)
 }
 
-func PrepareTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, authorityDigest string) (string, error) {
+func PrepareTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, authorityDigest string, onLiveKeep []string) (string, error) {
 	if !validDigest(planDigest) {
 		return "", fmt.Errorf("invalid prepare plan digest")
 	}
@@ -70,11 +72,11 @@ func PrepareTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity
 	if err != nil {
 		return "", fmt.Errorf("resolve prepare trust session root: %w", err)
 	}
-	return executionTrustDigestWithAuthority(planDigest, session, canonicalRoot, rootIdentity, authorityDigest)
+	return executionTrustDigestWithAuthority(planDigest, session, canonicalRoot, rootIdentity, authorityDigest, onLiveKeep)
 }
 
-func executionTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, authorityDigest string) (string, error) {
-	legacy, err := executionTrustDigest(planDigest, session, rootPath, rootIdentity)
+func executionTrustDigestWithAuthority(planDigest, session, rootPath, rootIdentity, authorityDigest string, onLiveKeep []string) (string, error) {
+	legacy, err := executionTrustDigest(planDigest, session, rootPath, rootIdentity, onLiveKeep)
 	if err != nil || authorityDigest == "" {
 		return legacy, err
 	}
@@ -88,16 +90,20 @@ func executionTrustDigestWithAuthority(planDigest, session, rootPath, rootIdenti
 	}{Version: 2, LegacyDigest: legacy, AuthorityDigest: authorityDigest})
 }
 
-func executionTrustDigest(planDigest, session, rootPath, rootIdentity string) (string, error) {
+func executionTrustDigest(planDigest, session, rootPath, rootIdentity string, onLiveKeep []string) (string, error) {
+	keep := slices.Clone(onLiveKeep)
+	slices.Sort(keep)
 	canonical, err := json.Marshal(struct {
-		Version      int    `json:"version"`
-		PlanDigest   string `json:"plan_digest"`
-		Session      string `json:"session"`
-		RootPath     string `json:"root_path"`
-		RootIdentity string `json:"root_identity"`
+		Version      int      `json:"version"`
+		PlanDigest   string   `json:"plan_digest"`
+		Session      string   `json:"session"`
+		RootPath     string   `json:"root_path"`
+		RootIdentity string   `json:"root_identity"`
+		OnLiveKeep   []string `json:"on_live_keep,omitempty"`
 	}{
 		Version: executionTrustDigestVersion, PlanDigest: planDigest,
 		Session: session, RootPath: filepath.Clean(rootPath), RootIdentity: rootIdentity,
+		OnLiveKeep: keep,
 	})
 	if err != nil {
 		return "", err

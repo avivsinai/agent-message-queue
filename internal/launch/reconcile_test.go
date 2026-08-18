@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestReconcileEmitsCanonicalResolvedWorkingDirectory(t *testing.T) {
@@ -276,6 +278,9 @@ type reconcileBackend struct {
 	reclaimFlip bool
 	createErr   error
 	definiteErr bool
+	joined      bool
+	planNonce   string
+	planHandles []string
 }
 
 func (b *reconcileBackend) Detect() DetectResult {
@@ -297,6 +302,14 @@ func (b *reconcileBackend) Create(req CreateRequest) (CreateResult, error) {
 		return CreateResult{}, createErr
 	}
 	b.resourceUp = true
+	b.joined = req.JoinBinding != nil
+	b.planHandles = make([]string, 0, len(req.Plan.Agents))
+	for _, agent := range req.Plan.Agents {
+		b.planHandles = append(b.planHandles, agent.Handle)
+	}
+	if len(req.Plan.Agents) > 0 {
+		b.planNonce = req.Plan.Agents[0].LaunchNonce
+	}
 	b.mu.Unlock()
 	if b.createStart != nil {
 		select {
@@ -307,9 +320,13 @@ func (b *reconcileBackend) Create(req CreateRequest) (CreateResult, error) {
 	if b.createGate != nil {
 		<-b.createGate
 	}
+	bindingNonce := req.Plan.Agents[0].LaunchNonce
+	if req.JoinBinding != nil {
+		bindingNonce = req.JoinBinding.LaunchNonce
+	}
 	result := CreateResult{Outcome: OutcomeCreated, Profile: b.Detect().Profile.Identity(), Binding: BindingRecord{
 		Version: BindingVersion, Backend: b.name, HostIdentity: "host:test", InstanceIdentity: "instance:test",
-		Profile: b.Detect().Profile.Identity(), LaunchNonce: req.Plan.Agents[0].LaunchNonce,
+		Profile: b.Detect().Profile.Identity(), LaunchNonce: bindingNonce,
 		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{{OpaqueID: "resource:test"}}},
 	}}
 	if b.invalidBind {
@@ -498,6 +515,213 @@ func TestReconcilePresentWithoutConversationMakesNoBackendMutation(t *testing.T)
 	}
 	if result.AggregateCode != 6 || result.Reason != "binding_present_without_resumable_conversation" || backend.creates != 0 || backend.closes != 0 || backend.focuses != 0 {
 		t.Fatalf("result=%#v creates=%d closes=%d focuses=%d", result, backend.creates, backend.closes, backend.focuses)
+	}
+}
+
+func TestReconcileOnLiveKeepJoinWritesTicketsUnderLeaseNonce(t *testing.T) {
+	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectPresent}
+	req := reconcileFixture(t, backend)
+	req.Config.Agents = append(req.Config.Agents, ProjectAgentConfig{
+		Handle: "codex", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeFresh,
+	})
+	req.OnLive = map[string]string{"claude": OnLiveKeep, "codex": OnLiveKeep}
+	lease, err := AcquireLease(req.Root, testLaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := BindingRecord{
+		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: "host:test", InstanceIdentity: "instance:test",
+		Profile: backend.Detect().Profile.Identity(), LaunchNonce: testLaunchNonce,
+		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{
+			{OpaqueID: "resource:claude", Agent: "claude"},
+		}},
+	}
+	if err := WriteBinding(req.Root, lease, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	held, err := AcquireLease(req.Root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.HeldLease = held
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AggregateCode != 0 || result.Outcome != OutcomeCreated {
+		t.Fatalf("join result=%#v", result)
+	}
+	if backend.creates != 1 || !backend.joined {
+		t.Fatalf("join create=%d joined=%v", backend.creates, backend.joined)
+	}
+	if backend.planNonce != held.LaunchNonce() {
+		t.Fatalf("join plan nonce=%s lease=%s", backend.planNonce, held.LaunchNonce())
+	}
+	ticket, err := LoadExecutionTicket(req.Root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.LaunchNonce != held.LaunchNonce() {
+		t.Fatalf("created ticket nonce=%s lease=%s", ticket.LaunchNonce, held.LaunchNonce())
+	}
+	if _, err := LoadExecutionTicket(req.Root, "claude"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("kept seat wrote an execution ticket: %v", err)
+	}
+	published, err := LoadBinding(req.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published.LaunchNonce != testLaunchNonce {
+		t.Fatalf("join rebound generation to %s", published.LaunchNonce)
+	}
+	if err := held.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReconcileOnLiveKeepDoesNotRedeliverKeptSeat(t *testing.T) {
+	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectPresent}
+	req := reconcileFixture(t, backend)
+	req.Config.Agents = append(req.Config.Agents, ProjectAgentConfig{
+		Handle: "codex", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeFresh,
+	})
+	req.OnLive = map[string]string{"claude": OnLiveKeep, "codex": OnLiveKeep}
+	lease, err := AcquireLease(req.Root, testLaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("claude"); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := WriteEvidence(req.Root, lease, EvidenceWriteRequest{
+		Kind: EvidenceManual, Handle: "claude", ObservedAt: time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC),
+		Payload: []byte(`{"kept":true}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteConversation(req.Root, lease, ConversationRecord{
+		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
+		Identity: ConversationIdentity{Provider: "claude", ID: testConversationID}, LaunchNonce: testLaunchNonce,
+		ExecutionEvidence: reconcileExecutionEvidence(backend, testLaunchNonce),
+		EvidenceRefs:      []string{ref.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	binding := BindingRecord{
+		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: "host:test", InstanceIdentity: "instance:test",
+		Profile: backend.Detect().Profile.Identity(), LaunchNonce: testLaunchNonce,
+		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{
+			{OpaqueID: "resource:claude", Agent: "claude"},
+		}},
+	}
+	if err := WriteBinding(req.Root, lease, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	conversationBefore, err := os.ReadFile(ConversationPath(req.Root.Base(), "claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceBefore, err := os.ReadFile(EvidencePath(req.Root.Base(), ref.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := AcquireLease(req.Root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.HeldLease = held
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AggregateCode != 0 || backend.creates != 1 || !slices.Equal(backend.planHandles, []string{"codex"}) {
+		t.Fatalf("kept seat redelivered: result=%#v creates=%d handles=%v", result, backend.creates, backend.planHandles)
+	}
+	conversationAfter, err := os.ReadFile(ConversationPath(req.Root.Base(), "claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceAfter, err := os.ReadFile(EvidencePath(req.Root.Base(), ref.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(conversationBefore, conversationAfter) {
+		t.Fatalf("kept conversation mutated\nbefore=%s\nafter=%s", conversationBefore, conversationAfter)
+	}
+	if !bytes.Equal(evidenceBefore, evidenceAfter) {
+		t.Fatalf("kept evidence mutated")
+	}
+	if err := held.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReconcileOnLiveProfileMismatchRefusesCohortWithoutMutation(t *testing.T) {
+	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectPresent}
+	req := reconcileFixture(t, backend)
+	req.Config.Agents = append(req.Config.Agents, ProjectAgentConfig{
+		Handle: "codex", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeFresh,
+	})
+	req.OnLive = map[string]string{"claude": OnLiveKeep, "codex": OnLiveKeep}
+	lease, err := AcquireLease(req.Root, testLaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := BindingRecord{
+		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: "host:test", InstanceIdentity: "instance:test",
+		Profile: "tmux/test/v2", LaunchNonce: testLaunchNonce,
+		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{
+			{OpaqueID: "resource:claude", Agent: "claude"},
+		}},
+	}
+	if err := WriteBinding(req.Root, lease, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	bindingBefore, err := os.ReadFile(BindingPath(req.Root.Base()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AggregateCode != 6 || result.Reason != ReasonLiveParticipantRefused {
+		t.Fatalf("profile mismatch result=%#v", result)
+	}
+	if backend.creates != 0 || backend.closes != 0 || backend.focuses != 0 {
+		t.Fatalf("cohort refusal mutated backend creates=%d closes=%d focuses=%d", backend.creates, backend.closes, backend.focuses)
+	}
+	bindingAfter, err := os.ReadFile(BindingPath(req.Root.Base()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(bindingBefore, bindingAfter) {
+		t.Fatalf("cohort refusal mutated binding")
+	}
+	if _, err := LoadJournal(req.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cohort refusal wrote a journal: %v", err)
+	}
+	if _, err := LoadExecutionTicket(req.Root, "claude"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cohort refusal wrote a claude ticket: %v", err)
+	}
+	if _, err := LoadExecutionTicket(req.Root, "codex"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cohort refusal wrote a codex ticket: %v", err)
+	}
+	if _, err := os.Stat(ConversationPath(req.Root.Base(), "claude")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cohort refusal wrote a claude conversation")
+	}
+	if _, err := os.Stat(ConversationPath(req.Root.Base(), "codex")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cohort refusal wrote a codex conversation")
 	}
 }
 

@@ -53,6 +53,7 @@
           "propertyNames": {"pattern": "^[^=]+$"}
         },
         "resume_policy": {"enum": ["resume", "fresh", "disabled"]},
+        "on_live": {"enum": ["keep", "refuse"]},
         "execution": {"$ref": "#/$defs/ExecutionOptionsV1"}
       }
     },
@@ -305,7 +306,9 @@
         "conversation": {"type": "string"},
         "execution": {"type": "string"},
         "resource": {"type": "string"},
-        "reason_code": {"type": "string"}
+        "reason_code": {"type": "string"},
+        "disposition": {"enum": ["kept", "created", "refused"]},
+        "start_mode": {"enum": ["resumed", "fresh"]}
       }
     },
     "PlannedWriteV1": {

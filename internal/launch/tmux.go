@@ -132,6 +132,12 @@ func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	if !detect.Available {
 		return CreateResult{}, &DefinitePreCreateError{Err: fmt.Errorf("tmux %s is unavailable", tmuxProfileVersionRange)}
 	}
+	if req.JoinBinding != nil {
+		if req.Placement != nil {
+			return CreateResult{}, &DefinitePreCreateError{Err: placementError(PlacementUnsupportedReason)}
+		}
+		return b.joinExistingSession(req, detect)
+	}
 	if req.Placement != nil {
 		switch req.Placement.Target {
 		case PlacementTargetSession:
@@ -408,6 +414,59 @@ func (b *TmuxBackend) validateCreate(req CreateRequest) error {
 		return err
 	}
 	return nil
+}
+
+func (b *TmuxBackend) joinExistingSession(req CreateRequest, detect DetectResult) (CreateResult, error) {
+	sessionID, name, err := parseTmuxSessionResource(*req.JoinBinding)
+	if err != nil {
+		return CreateResult{}, &DefinitePreCreateError{Err: err}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	defer cancel()
+	present, err := b.hasSession(ctx, name)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	if !present {
+		return CreateResult{}, fmt.Errorf("tmux session %q is absent; keep cannot join", name)
+	}
+	nonce := req.JoinBinding.LaunchNonce
+	for _, agent := range req.Plan.Agents {
+		createdWindow, createErr := b.run(ctx, b.args("new-window", "-d", "-P", "-F", "#{window_id}\t#{pane_id}",
+			"-t", "="+name, "-n", agent.Handle, b.agentCommand(req, agent))...)
+		if createErr != nil {
+			return CreateResult{}, fmt.Errorf("join tmux window for %s: %w", agent.Handle, createErr)
+		}
+		windowFields := strings.Split(strings.TrimSpace(createdWindow), "\t")
+		if len(windowFields) != 2 || windowFields[0] == "" || !tmuxPaneID(windowFields[1]) {
+			return CreateResult{}, fmt.Errorf("tmux returned no window identity for %s", agent.Handle)
+		}
+		if err := b.markWindow(ctx, windowFields[0], agent.Handle); err != nil {
+			return CreateResult{}, err
+		}
+		if err := b.markPane(ctx, windowFields[1], agent.Handle, nonce); err != nil {
+			return CreateResult{}, err
+		}
+	}
+	resources, err := b.liveResources(ctx, name)
+	if err != nil {
+		return CreateResult{}, fmt.Errorf("revalidate joined tmux session: %w", err)
+	}
+	live := map[string]int{}
+	for _, resource := range resources {
+		if resource.Agent != "" {
+			live[resource.Agent]++
+		}
+	}
+	for _, agent := range req.Plan.Agents {
+		if live[agent.Handle] != 1 {
+			return CreateResult{}, fmt.Errorf("joined tmux inventory missing %s", agent.Handle)
+		}
+	}
+	if resources[0].OpaqueID != tmuxSessionResource(sessionID, name) {
+		return CreateResult{}, fmt.Errorf("joined tmux session identity changed before binding")
+	}
+	return b.createdBinding(detect, nonce, resources, req.JoinBinding.Placement)
 }
 
 func (b *TmuxBackend) inspect(ctx context.Context, binding BindingRecord) (InspectResult, error) {

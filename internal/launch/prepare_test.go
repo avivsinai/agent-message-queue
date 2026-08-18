@@ -74,6 +74,49 @@ func TestPrepareUnsupportedPlacementSkipsTrustAndCreate(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsOnLiveKeepOnSubjectSchemaV1BeforeInspection(t *testing.T) {
+	_, err := Prepare(context.Background(), PrepareRequest{
+		IntentDigest:  "sha256:" + strings.Repeat("a", 64),
+		Participants:  []PrepareParticipant{{Handle: "operator", OnLive: OnLiveKeep}},
+		SubjectSchema: SubjectSchemaV1,
+	}, PrepareDependencies{})
+	if err == nil || !strings.Contains(err.Error(), "on_live keep requires subject schema") {
+		t.Fatalf("Prepare error = %v", err)
+	}
+}
+
+func TestPrepareV2SubjectDigestIncludesOnLiveKeepOnly(t *testing.T) {
+	// Digest-stability guard: omit and explicit refuse share subject/trust
+	// digests; keep is the only on_live value that enters them.
+	fixture := newInternalPrepareFixture(t)
+	omitted, err := Prepare(context.Background(), fixture.request, fixture.dependencies(&prepareTestBackend{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := fixture.request
+	refused.Participants[0].OnLive = OnLiveRefuse
+	withRefuse, err := Prepare(context.Background(), refused, fixture.dependencies(&prepareTestBackend{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if omitted.SubjectDigest != withRefuse.SubjectDigest || omitted.TrustDigest != withRefuse.TrustDigest {
+		t.Fatalf("explicit refuse changed digests omit=%s/%s refuse=%s/%s",
+			omitted.SubjectDigest, omitted.TrustDigest, withRefuse.SubjectDigest, withRefuse.TrustDigest)
+	}
+	kept := fixture.request
+	kept.Participants[0].OnLive = OnLiveKeep
+	withKeep, err := Prepare(context.Background(), kept, fixture.dependencies(&prepareTestBackend{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withKeep.SubjectDigest == omitted.SubjectDigest {
+		t.Fatal("on_live keep did not enter the v2 subject digest")
+	}
+	if withKeep.TrustDigest == omitted.TrustDigest {
+		t.Fatal("on_live keep did not enter the trust digest")
+	}
+}
+
 func TestPrepareV2SubjectDigestIncludesPlacement(t *testing.T) {
 	fixture := newInternalPrepareFixture(t)
 	omitted, err := Prepare(context.Background(), fixture.request, fixture.dependencies(&prepareTestBackend{}))

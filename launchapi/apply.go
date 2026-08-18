@@ -60,6 +60,7 @@ func fromInternalApplyResult(result internallaunch.ApplyResult) ApplyResultV1 {
 			Handle: observation.Handle, Mailbox: observation.Mailbox, Runnable: observation.Runnable,
 			Conversation: observation.Conversation, Execution: observation.Execution,
 			Resource: observation.Resource, ReasonCode: observation.ReasonCode,
+			Disposition: observation.Disposition, StartMode: observation.StartMode,
 		})
 	}
 	for _, command := range result.Commands {
