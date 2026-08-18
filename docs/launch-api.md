@@ -22,9 +22,10 @@ _ = negotiated
 ```
 
 A `0.61.1` binary advertises `placement`, `initial_input`, `base_root`,
-`on_live`, and `caller_context`. It can still omit later Wave B3 feature IDs
-while those beads are incomplete. A caller must require every feature it uses.
-Contract semver alone does not claim that an unadvertised feature is available.
+`on_live`, `caller_context`, and `executable_identity`. It can still omit later
+Wave B3 feature IDs while those beads are incomplete. A caller must require
+every feature it uses. Contract semver alone does not claim that an unadvertised
+feature is available.
 
 `PreviewV1.capabilities` reports the selected providers' static adapter grammar
 without executing a caller-supplied provider. `grammar_version` is the

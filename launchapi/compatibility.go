@@ -21,6 +21,7 @@ var compatibilityFeaturesV1 = []string{
 	FeatureBaseRoot,
 	FeatureOnLive,
 	FeatureCallerContext,
+	FeatureExecutableIdentity,
 }
 
 func Compatibility() CompatibilityV1 {

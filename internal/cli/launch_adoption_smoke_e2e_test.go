@@ -30,7 +30,7 @@ import (
 //	finding4_placement_unsupported | 4 placement | AMQ_SQUAD_TMUX_* env rejected as provider env | placement preview; unsupported tuple -> placement_unsupported
 //	finding5_positional_bootstrap_prompt / finding5_claude_allowed_tools / finding5_codex_dash_c | 5 materialized argv | raw positional prompt rejected; exact --allowedTools and -c forms admitted | initial_input + --allowedTools / -c admitted
 //	finding6_caller_context_bound_and_echoed | 6 caller correlation | caller_context is subject-bound and echoed on Apply/evidence/lifecycle
-//	finding7_same_path_inode_replacement_not_subject_changed | 7 physical identity | same-path inode replacement leaves subject/plan/trust digests identical | inode replacement -> subject_changed
+//	finding7_same_path_inode_replacement_subject_changed | 7 physical identity | inode replacement -> subject_changed; plan/trust unchanged | (landed)
 //
 // Real bootstrap text from the squad-v2-29-4 compiler, not the placeholder in
 // #480 comment 5301600497. Finding 5's positional prompt is this string.
@@ -245,7 +245,7 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 		}
 	})
 
-	t.Run("finding7_same_path_inode_replacement_not_subject_changed", func(t *testing.T) {
+	t.Run("finding7_same_path_inode_replacement_subject_changed", func(t *testing.T) {
 		fx := newAdoptionSmokeFixture(t, amqBinary, ".agent-mail", "collab")
 		intent := fx.legalSquadIntent()
 		intent.Participants = intent.Participants[:2]
@@ -272,11 +272,12 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 		}
 		var second launchapi.PrepareResultV1
 		decodeRealLaunchJSON(t, stdout, &second)
-		if first.SubjectDigest != second.SubjectDigest || first.PlanDigest != second.PlanDigest ||
-			first.TrustDigest != second.TrustDigest {
-			t.Fatalf("inode replacement changed digests first=%s/%s/%s second=%s/%s/%s (WB3 wants subject_changed)",
-				first.SubjectDigest, first.PlanDigest, first.TrustDigest,
-				second.SubjectDigest, second.PlanDigest, second.TrustDigest)
+		if first.SubjectDigest == second.SubjectDigest {
+			t.Fatalf("inode replacement kept subject digest %s", first.SubjectDigest)
+		}
+		if first.PlanDigest != second.PlanDigest || first.TrustDigest != second.TrustDigest {
+			t.Fatalf("inode replacement churned plan/trust first=%s/%s second=%s/%s",
+				first.PlanDigest, first.TrustDigest, second.PlanDigest, second.TrustDigest)
 		}
 
 		stdout, stderr, exit = runRealAMQWithExit(t, fx.amqBinary, fx.project, fx.env, "launch", "--apply", firstApplyPath, "--json")
@@ -285,8 +286,8 @@ func TestAdoptionSmokeOmriSquadV2294(t *testing.T) {
 		}
 		var applied launchapi.ApplyResultV1
 		decodeRealLaunchJSON(t, stdout, &applied)
-		if applied.ReasonCode == "subject_changed" {
-			t.Fatalf("today inode replacement returned subject_changed; stdout=%s stderr=%s", stdout, stderr)
+		if applied.ReasonCode != "subject_changed" {
+			t.Fatalf("inode replacement Apply reason=%q want subject_changed stdout=%s stderr=%s", applied.ReasonCode, stdout, stderr)
 		}
 	})
 }
