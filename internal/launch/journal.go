@@ -52,6 +52,7 @@ type LaunchJournal struct {
 	Agents           []AgentReconcileResult `json:"agents"`
 	Conversations    []ConversationRecord   `json:"conversations"`
 	Binding          *BindingRecord         `json:"binding,omitempty"`
+	Placement        PlacementPreview       `json:"placement,omitempty"`
 }
 
 func (record LaunchJournal) Validate() error {
@@ -78,6 +79,9 @@ func (record LaunchJournal) Validate() error {
 	}
 	if !canonicalSessionPattern.MatchString(record.Session) || strings.HasPrefix(record.Session, "-") {
 		return fmt.Errorf("invalid launch journal session %q", record.Session)
+	}
+	if err := validateOptionalPlacement(record.Placement); err != nil {
+		return fmt.Errorf("launch journal placement: %w", err)
 	}
 	if !validUUID(record.LaunchNonce) {
 		return fmt.Errorf("launch journal nonce must be a UUID")
@@ -170,6 +174,10 @@ func NewLaunchJournal(request ReconcileRequest, backend string, detect DetectRes
 	if err != nil {
 		return LaunchJournal{}, err
 	}
+	preview, err := ResolvePlacement(backend, request.Placement)
+	if err != nil {
+		return LaunchJournal{}, err
+	}
 	record := LaunchJournal{
 		Version: JournalVersion, Phase: JournalIntent, ProjectIdentity: projectIdentity,
 		RootIdentity: rootIdentity, Session: request.Session, Backend: backend,
@@ -177,6 +185,7 @@ func NewLaunchJournal(request ReconcileRequest, backend string, detect DetectRes
 		InstanceIdentity: detect.InstanceIdentity, RosterDigest: rosterDigest,
 		PlanDigest: planDigest, LaunchNonce: nonce, CreatedAt: now.UTC(), Plan: plan,
 		Agents: slices.Clone(agents), Conversations: slices.Clone(conversations),
+		Placement: preview,
 	}
 	record.ProjectPhysical, _ = fsq.StableTreeIdentity(projectIdentity)
 	record.RootPhysical, _ = fsq.StableTreeIdentityInfo(request.Root.FileInfo())
@@ -210,6 +219,9 @@ func (record LaunchJournal) ValidateRequest(request ReconcileRequest) error {
 	}
 	if record.RosterDigest != rosterDigest {
 		return fmt.Errorf("launch journal roster changed since resource creation")
+	}
+	if err := journalPlacementMatches(record, request); err != nil {
+		return err
 	}
 	seenExecution := make(map[string]struct{}, len(record.Plan.Agents))
 	for _, agent := range record.Plan.Agents {
@@ -290,6 +302,37 @@ func ClearJournal(root *fsq.DeliveryRoot, lease *Lease, expected LaunchJournal) 
 
 func JournalPath(sessionRoot string) string {
 	return filepath.Join(sessionRoot, bindingDirectory, journalFilename)
+}
+
+func validateOptionalPlacement(preview PlacementPreview) error {
+	if preview.Requested == nil && preview.Effective.Target == "" && preview.Effective.Layout == "" {
+		return nil
+	}
+	if err := preview.Effective.Validate(); err != nil {
+		return err
+	}
+	if preview.Requested != nil {
+		return preview.Requested.Validate()
+	}
+	return nil
+}
+
+func journalPlacementMatches(record LaunchJournal, request ReconcileRequest) error {
+	legacy := record.Placement.Requested == nil && record.Placement.Effective.Target == ""
+	if legacy {
+		if request.Placement != nil {
+			return fmt.Errorf("launch journal placement changed since resource creation")
+		}
+		return nil
+	}
+	got, err := ResolvePlacement(record.Backend, request.Placement)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(got, record.Placement) {
+		return fmt.Errorf("launch journal placement changed since resource creation")
+	}
+	return nil
 }
 
 func journalMatchesBinding(journal LaunchJournal, binding BindingRecord) bool {

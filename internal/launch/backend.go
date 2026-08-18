@@ -148,6 +148,8 @@ type CreateRequest struct {
 	Plan        Plan
 	AMQPath     string
 	Root        *fsq.DeliveryRoot
+	// Placement is the caller-requested tuple. Nil preserves v0.61 Create.
+	Placement *Placement
 }
 
 type EmittedCommand struct {

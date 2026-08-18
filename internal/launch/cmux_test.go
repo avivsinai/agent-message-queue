@@ -204,6 +204,22 @@ if command == "close-workspace":
     save(state)
     print("OK workspace:" + (closed or {}).get("ref", "1"))
     sys.exit(0)
+if command == "close-surface":
+    want = (flags.get("surface") or "").lower()
+    remaining = []
+    for ws in state["workspaces"]:
+        panes = []
+        for pane in ws.get("panes", []):
+            pane["surfaces"] = [surface for surface in pane.get("surfaces", []) if surface["id"].lower() != want]
+            if pane["surfaces"]:
+                panes.append(pane)
+        ws["panes"] = panes
+        if any(pane.get("surfaces") for pane in panes):
+            remaining.append(ws)
+    state["workspaces"] = remaining
+    save(state)
+    print("OK surface:" + (flags.get("surface") or "1"))
+    sys.exit(0)
 print("unknown command " + command, file=sys.stderr)
 sys.exit(2)
 `
@@ -367,8 +383,8 @@ func TestCmuxCloseRefusesDifferentUUIDSameName(t *testing.T) {
 		t.Fatalf("Close mutated an unrelated workspace: %#v", closed)
 	}
 	for _, argv := range readCmuxArgvLog(t, logPath) {
-		if len(argv) > 0 && argv[0] == "close-workspace" {
-			t.Fatalf("close-workspace invoked for a missing uuid: %v", argv)
+		if len(argv) > 0 && (argv[0] == "close-workspace" || argv[0] == "close-surface" || argv[0] == "close-window") {
+			t.Fatalf("%s invoked for a missing uuid: %v", argv[0], argv)
 		}
 	}
 	present, err := backend.Inspect(InspectRequest{Binding: created.Binding, Root: root})
@@ -758,7 +774,7 @@ func TestCmuxListWorkspacesErrorIsUnknownNotAbsent(t *testing.T) {
 	}
 
 	calls := readCmuxArgvLog(t, logPath)
-	if indexOfCmuxCommand(calls, "new-workspace") >= 0 || indexOfCmuxCommand(calls, "close-workspace") >= 0 {
+	if indexOfCmuxCommand(calls, "new-workspace") >= 0 || indexOfCmuxCommand(calls, "close-workspace") >= 0 || indexOfCmuxCommand(calls, "close-surface") >= 0 {
 		t.Fatalf("list-workspaces failure mutated backend: %v", calls)
 	}
 
@@ -838,6 +854,73 @@ func writeSleepAMQ(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return fakeAMQ
+}
+
+func TestCmuxPlacementRowsUsesDownSplit(t *testing.T) {
+	backend, logPath := newFakeCmuxBackend(t)
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude", "codex")
+	plan := cmuxTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70e901")
+	created, err := backend.Create(CreateRequest{
+		ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root,
+		Placement: &Placement{Target: PlacementTargetCurrentWindow, Layout: PlacementLayoutRows},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundDown := false
+	for _, argv := range readCmuxArgvLog(t, logPath) {
+		if cmuxArgvHas(argv, "new-split") && cmuxArgvHas(argv, "down") {
+			foundDown = true
+		}
+		if cmuxArgvHas(argv, "new-split") && cmuxArgvHas(argv, "right") {
+			t.Fatalf("rows placement still split right: %v", argv)
+		}
+	}
+	if !foundDown {
+		t.Fatalf("rows placement did not split down: %v", readCmuxArgvLog(t, logPath))
+	}
+	if created.Binding.Placement.Effective.Layout != PlacementLayoutRows {
+		t.Fatalf("binding placement = %#v", created.Binding.Placement)
+	}
+	if _, err := backend.Create(CreateRequest{
+		ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root,
+		Placement: &Placement{Target: PlacementTargetSession, Layout: PlacementLayoutColumns},
+	}); err == nil || !strings.Contains(err.Error(), PlacementUnsupportedReason) {
+		t.Fatalf("unsupported cmux tuple error = %v", err)
+	}
+}
+
+func TestCmuxPlacementStaggersBetweenSplits(t *testing.T) {
+	backend, _ := newFakeCmuxBackend(t)
+	var sleeps []time.Duration
+	backend.sleep = func(ctx context.Context, delay time.Duration) error {
+		sleeps = append(sleeps, delay)
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude", "codex")
+	plan := cmuxTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70e902")
+	started := time.Now()
+	if _, err := backend.Create(CreateRequest{
+		ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root,
+		Placement: &Placement{Target: PlacementTargetCurrentWindow, Layout: PlacementLayoutColumns, StaggerMS: 250},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sleeps) != 1 || sleeps[0] != 250*time.Millisecond {
+		t.Fatalf("cmux stagger sleeps = %v", sleeps)
+	}
+	if elapsed := time.Since(started); elapsed < 250*time.Millisecond {
+		t.Fatalf("cmux stagger elapsed %s, want at least 250ms", elapsed)
+	}
 }
 
 func cmuxTestPlan(project, nonce string) Plan {
@@ -1275,27 +1358,14 @@ func TestCmuxCloseRestoresPriorSelection(t *testing.T) {
 		t.Fatalf("Close = %#v, %v", closed, err)
 	}
 	if got := cmuxFakeSelectedWorkspace(t); got != previous {
-		t.Fatalf("selected workspace = %q, want restored %q after Close", got, previous)
+		t.Fatalf("selected workspace = %q, want prior selection %q after Close", got, previous)
 	}
-	var afterClose []string
-	sawClose := false
-	for _, argv := range readCmuxArgvLog(t, logPath) {
-		if len(argv) > 0 && argv[0] == "close-workspace" {
-			sawClose = true
-			afterClose = nil
-			continue
-		}
-		if !sawClose || len(argv) == 0 || argv[0] != "select-workspace" {
-			continue
-		}
-		for i, arg := range argv {
-			if arg == "--workspace" && i+1 < len(argv) {
-				afterClose = append(afterClose, strings.ToLower(argv[i+1]))
-			}
-		}
+	calls := readCmuxArgvLog(t, logPath)
+	if indexOfCmuxCommand(calls, "close-workspace") >= 0 || indexOfCmuxCommand(calls, "close-window") >= 0 {
+		t.Fatalf("Close issued a workspace/window-wide close: %v", calls)
 	}
-	if len(afterClose) == 0 || afterClose[len(afterClose)-1] != previous {
-		t.Fatalf("Close select-workspace = %v, want restore to %s", afterClose, previous)
+	if indexOfCmuxCommand(calls, "close-surface") < 0 {
+		t.Fatalf("Close did not close owned surfaces: %v", calls)
 	}
 }
 

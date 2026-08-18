@@ -130,6 +130,10 @@ func cmuxUnsupported(result *DetectResult, reason string) {
 }
 
 func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
+	preview, err := resolveCreatePlacement(LauncherCMux, req)
+	if err != nil {
+		return CreateResult{}, &DefinitePreCreateError{Err: err}
+	}
 	if err := b.validateCreate(req); err != nil {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}
 	}
@@ -196,9 +200,12 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 		return CreateResult{}, b.reconcileCreateFailure(name, false, fmt.Errorf("cmux workspace created %d surfaces, want 1", len(firstSurfaces)))
 	}
 	surfaceIDs := []string{firstSurfaces[0]}
-	for _, agent := range req.Plan.Agents[1:] {
+	for i, agent := range req.Plan.Agents[1:] {
+		if err := b.staggerPlacement(preview, i+1); err != nil {
+			return CreateResult{}, err
+		}
 		splitCtx, splitCancel := b.createCallContext()
-		splitRaw, splitErr := b.runJSON(splitCtx, "new-split", "right", "--workspace", workspaceID, "--surface", surfaceIDs[len(surfaceIDs)-1], "--focus", "false")
+		splitRaw, splitErr := b.runJSON(splitCtx, "new-split", cmuxSplitDirection(preview.Effective.Layout), "--workspace", workspaceID, "--surface", surfaceIDs[len(surfaceIDs)-1], "--focus", "false")
 		splitCancel()
 		if splitErr != nil {
 			return CreateResult{}, b.reconcileCreateFailure(name, false, fmt.Errorf("create cmux split for %s: %w", agent.Handle, splitErr))
@@ -236,6 +243,7 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 		InstanceIdentity: detect.InstanceIdentity, Profile: detect.Profile.Identity(),
 		LaunchNonce: nonce,
 		Resources:   ResourceIdentitySet{Version: ResourceSetVersion, Resources: resources},
+		Placement:   preview,
 	}
 	if err := binding.Validate(); err != nil {
 		return CreateResult{}, err
@@ -252,6 +260,16 @@ func (b *CmuxBackend) createOpTimeout() time.Duration {
 
 func (b *CmuxBackend) createCallContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), b.createOpTimeout())
+}
+
+func (b *CmuxBackend) staggerPlacement(preview PlacementPreview, index int) error {
+	delay := placementStaggerDuration(&preview.Effective)
+	if delay <= 0 || index == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), delay+time.Second)
+	defer cancel()
+	return b.doSleep(ctx, delay)
 }
 
 func (b *CmuxBackend) inspectCallContext() (context.Context, context.CancelFunc) {
@@ -329,23 +347,27 @@ func (b *CmuxBackend) Close(req CloseRequest) (CloseResult, error) {
 	if inspection.Status == InspectAbsent {
 		return CloseResult{Outcome: OutcomeClosed, Reason: "cmux workspace already absent"}, nil
 	}
-	if inspection.Status != InspectPresent {
-		return CloseResult{Outcome: OutcomeActionRequired, Reason: inspection.Evidence}, nil
+	surfaces := cmuxOwnedSurfaceIDs(req.Binding)
+	if len(surfaces) == 0 {
+		return CloseResult{Outcome: OutcomeActionRequired, Reason: "cmux binding has no surface identities"}, nil
 	}
 	workspaceID, _, err := parseCmuxWorkspaceResource(req.Binding)
 	if err != nil {
 		return CloseResult{Outcome: OutcomeActionRequired, Reason: err.Error()}, nil
 	}
-	records, err := b.listWorkspaceRecords(ctx)
-	if err != nil {
-		return CloseResult{Outcome: OutcomeActionRequired, Reason: err.Error()}, nil
+	for _, surfaceID := range surfaces {
+		if _, closeErr := b.run(ctx, "close-surface", "--surface", surfaceID); closeErr != nil && !cmuxTargetMissing(closeErr) {
+			return CloseResult{}, fmt.Errorf("close cmux surface %s: %w", surfaceID, closeErr)
+		}
 	}
-	previousSelected := cmuxSelectedWorkspaceID(records)
-	if _, err := b.run(ctx, "close-workspace", "--workspace", workspaceID); err != nil {
-		return CloseResult{}, fmt.Errorf("close cmux workspace: %w", err)
+	live, liveErr := b.ownedCmuxSurfacesStillLive(ctx, workspaceID, surfaces)
+	if liveErr != nil {
+		return CloseResult{Outcome: OutcomeActionRequired, Reason: liveErr.Error()}, nil
 	}
-	b.restoreSelectedWorkspace(previousSelected, workspaceID)
-	return CloseResult{Outcome: OutcomeClosed, Reason: "cmux workspace closed"}, nil
+	if len(live) > 0 {
+		return CloseResult{Outcome: OutcomeActionRequired, Reason: "owned cmux surface still alive after close"}, nil
+	}
+	return CloseResult{Outcome: OutcomeClosed, Reason: "cmux surfaces closed"}, nil
 }
 
 func (b *CmuxBackend) Focus(req FocusRequest) (FocusResult, error) {
@@ -1088,6 +1110,64 @@ func parseCmuxSurfaceResource(opaqueID string) (string, error) {
 		return "", fmt.Errorf("invalid cmux surface identity %q", opaqueID)
 	}
 	return normalizeCmuxUUID(id)
+}
+
+func cmuxOwnedSurfaceIDs(binding BindingRecord) []string {
+	ids := make([]string, 0)
+	for _, resource := range binding.Resources.Resources {
+		if resource.Agent == "" {
+			continue
+		}
+		id, err := parseCmuxSurfaceResource(resource.OpaqueID)
+		if err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func (b *CmuxBackend) ownedCmuxSurfacesStillLive(ctx context.Context, workspaceID string, owned []string) ([]string, error) {
+	listed, err := b.listWorkspaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !cmuxContainsID(listed, workspaceID) {
+		return nil, nil
+	}
+	live, err := b.workspaceSurfaces(ctx, workspaceID)
+	if err != nil {
+		if cmuxEmptyWorkspace(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	liveSet := make(map[string]bool, len(live))
+	for _, id := range live {
+		liveSet[id] = true
+	}
+	remaining := make([]string, 0)
+	for _, id := range owned {
+		if liveSet[id] {
+			remaining = append(remaining, id)
+		}
+	}
+	return remaining, nil
+}
+
+func cmuxTargetMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") || strings.Contains(msg, "unknown") || strings.Contains(msg, "absent")
+}
+
+func cmuxEmptyWorkspace(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "has no panes") || strings.Contains(msg, "has no terminal surfaces")
 }
 
 func cmuxWindowID(binding BindingRecord) string {

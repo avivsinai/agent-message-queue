@@ -19,10 +19,19 @@ import (
 )
 
 const (
-	tmuxProfileVersion      = 1
-	tmuxProfileVersionRange = ">=3.2 <4.0"
-	tmuxNonceEnvironment    = "AMQ_LAUNCH_NONCE"
-	tmuxCommandTimeout      = 5 * time.Second
+	tmuxProfileVersion           = 1
+	tmuxProfileVersionRange      = ">=3.2 <4.0"
+	tmuxNonceEnvironment         = "AMQ_LAUNCH_NONCE"
+	tmuxPaneNonceOption          = "@amq_launch_nonce"
+	tmuxCommandTimeout           = 5 * time.Second
+	tmuxEpochPrefix              = "tmux:v1:epoch:"
+	ownedPaneIdentityUnavailable = "owned_pane_identity_unavailable"
+	tmuxServerEpochMismatch      = "tmux_server_epoch_mismatch"
+)
+
+var (
+	errOwnedPaneIdentityUnavailable = errors.New(ownedPaneIdentityUnavailable)
+	errTmuxServerEpochMismatch      = errors.New(tmuxServerEpochMismatch)
 )
 
 // TmuxBackend manages one deterministic tmux session per AMQ project/session.
@@ -36,6 +45,7 @@ type TmuxBackend struct {
 	hostname   func() (string, error)
 	getenv     func(string) string
 	uid        func() string
+	sleep      func(context.Context, time.Duration) error
 }
 
 func NewTmuxBackend(binary string) *TmuxBackend {
@@ -44,6 +54,19 @@ func NewTmuxBackend(binary string) *TmuxBackend {
 	}
 	b := &TmuxBackend{
 		binary: binary, hostname: os.Hostname, getenv: os.Getenv, uid: currentUserID,
+		sleep: func(ctx context.Context, delay time.Duration) error {
+			if delay <= 0 {
+				return nil
+			}
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		},
 	}
 	b.run = b.runCommand
 	b.focus = b.focusResource
@@ -83,6 +106,13 @@ func (b *TmuxBackend) Detect() DetectResult {
 }
 
 func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
+	preview, err := ResolvePlacement(LauncherTMux, req.Placement)
+	if err != nil {
+		return CreateResult{}, &DefinitePreCreateError{Err: err}
+	}
+	if req.Placement != nil && !preview.Supported {
+		return CreateResult{}, &DefinitePreCreateError{Err: placementError(PlacementUnsupportedReason)}
+	}
 	if err := b.validateCreate(req); err != nil {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}
 	}
@@ -102,6 +132,18 @@ func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	if !detect.Available {
 		return CreateResult{}, &DefinitePreCreateError{Err: fmt.Errorf("tmux %s is unavailable", tmuxProfileVersionRange)}
 	}
+	if req.Placement != nil {
+		switch req.Placement.Target {
+		case PlacementTargetSession:
+			return b.createSessionLayout(req, detect, preview)
+		case PlacementTargetNewWindow:
+			return b.createNewWindowLayout(req, detect, preview)
+		case PlacementTargetCurrentWindow:
+			return b.createCurrentWindowLayout(req, detect, preview)
+		default:
+			return CreateResult{}, &DefinitePreCreateError{Err: placementError(PlacementUnsupportedReason)}
+		}
+	}
 	name, err := tmuxSessionName(req.ProjectRoot, req.Session)
 	if err != nil {
 		return CreateResult{}, &DefinitePreCreateError{Err: err}
@@ -118,30 +160,36 @@ func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 
 	first := req.Plan.Agents[0]
 	firstLine := b.agentCommand(req, first)
-	out, err := b.run(ctx, b.args("new-session", "-d", "-P", "-F", "#{session_id}\t#{window_id}",
+	out, err := b.run(ctx, b.args("new-session", "-d", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}",
 		"-s", name, "-n", first.Handle, "-e", tmuxNonceEnvironment+"="+first.LaunchNonce, firstLine)...)
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("create tmux session: %w", err)
 	}
 	fields := strings.Split(strings.TrimSpace(out), "\t")
-	if len(fields) != 2 || fields[0] == "" || fields[1] == "" {
+	if len(fields) != 3 || fields[0] == "" || fields[1] == "" || !tmuxPaneID(fields[2]) {
 		return CreateResult{}, fmt.Errorf("tmux create returned invalid resource identities %q", strings.TrimSpace(out))
 	}
-	sessionID := fields[0]
-	if err := b.markWindow(ctx, fields[1], first.Handle); err != nil {
+	sessionID, windowID, paneID := fields[0], fields[1], fields[2]
+	if err := b.markWindow(ctx, windowID, first.Handle); err != nil {
+		return CreateResult{}, err
+	}
+	if err := b.markPane(ctx, paneID, first.Handle, first.LaunchNonce); err != nil {
 		return CreateResult{}, err
 	}
 	for _, agent := range req.Plan.Agents[1:] {
-		windowID, createErr := b.run(ctx, b.args("new-window", "-d", "-P", "-F", "#{window_id}",
+		createdWindow, createErr := b.run(ctx, b.args("new-window", "-d", "-P", "-F", "#{window_id}\t#{pane_id}",
 			"-t", "="+name, "-n", agent.Handle, b.agentCommand(req, agent))...)
 		if createErr != nil {
 			return CreateResult{}, fmt.Errorf("create tmux window for %s: %w", agent.Handle, createErr)
 		}
-		windowID = strings.TrimSpace(windowID)
-		if windowID == "" {
+		windowFields := strings.Split(strings.TrimSpace(createdWindow), "\t")
+		if len(windowFields) != 2 || windowFields[0] == "" || !tmuxPaneID(windowFields[1]) {
 			return CreateResult{}, fmt.Errorf("tmux returned no window identity for %s", agent.Handle)
 		}
-		if err := b.markWindow(ctx, windowID, agent.Handle); err != nil {
+		if err := b.markWindow(ctx, windowFields[0], agent.Handle); err != nil {
+			return CreateResult{}, err
+		}
+		if err := b.markPane(ctx, windowFields[1], agent.Handle, agent.LaunchNonce); err != nil {
 			return CreateResult{}, err
 		}
 	}
@@ -155,16 +203,7 @@ func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	if resources[0].OpaqueID != tmuxSessionResource(sessionID, name) {
 		return CreateResult{}, fmt.Errorf("created tmux session identity changed before binding")
 	}
-	binding := BindingRecord{
-		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: detect.HostIdentity,
-		InstanceIdentity: detect.InstanceIdentity, Profile: detect.Profile.Identity(),
-		LaunchNonce: first.LaunchNonce,
-		Resources:   ResourceIdentitySet{Version: ResourceSetVersion, Resources: resources},
-	}
-	if err := binding.Validate(); err != nil {
-		return CreateResult{}, err
-	}
-	return CreateResult{Outcome: OutcomeCreated, Profile: binding.Profile, Binding: binding}, nil
+	return b.createdBinding(detect, first.LaunchNonce, resources, preview)
 }
 
 func (b *TmuxBackend) Inspect(req InspectRequest) (InspectResult, error) {
@@ -180,24 +219,57 @@ func (b *TmuxBackend) Inspect(req InspectRequest) (InspectResult, error) {
 func (b *TmuxBackend) Close(req CloseRequest) (CloseResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
 	defer cancel()
-	inspection, err := b.inspect(ctx, req.Binding)
+	if err := req.Binding.Validate(); err != nil {
+		return CloseResult{Outcome: OutcomeActionRequired, Reason: err.Error()}, nil
+	}
+	if err := b.validateBindingContext(req.Binding); err != nil {
+		return CloseResult{Outcome: OutcomeActionRequired, Reason: err.Error()}, nil
+	}
+	inspection, inspectErr := b.inspect(ctx, req.Binding)
+	if inspectErr == nil && inspection.Status == InspectAbsent {
+		return CloseResult{Outcome: OutcomeClosed, Reason: "tmux resources already absent"}, nil
+	}
+	if err := b.checkBindingEpoch(ctx, req.Binding); err != nil {
+		reason := err.Error()
+		if errors.Is(err, errTmuxServerEpochMismatch) {
+			reason = tmuxServerEpochMismatch
+		}
+		return CloseResult{Outcome: OutcomeActionRequired, Reason: reason}, nil
+	}
+	owned, err := b.authorizedOwnedPanes(ctx, req.Binding)
+	if err != nil {
+		reason := err.Error()
+		if errors.Is(err, errOwnedPaneIdentityUnavailable) {
+			reason = ownedPaneIdentityUnavailable
+		}
+		return CloseResult{Outcome: OutcomeActionRequired, Reason: reason}, nil
+	}
+	if len(tmuxOwnedPaneIDs(req.Binding)) > 0 && len(owned) == 0 {
+		return CloseResult{Outcome: OutcomeActionRequired, Reason: ownedPaneIdentityUnavailable}, nil
+	}
+	if err := b.killAuthorizedPanes(ctx, req.Binding, owned); err != nil {
+		if errors.Is(err, errOwnedPaneIdentityUnavailable) {
+			return CloseResult{Outcome: OutcomeActionRequired, Reason: ownedPaneIdentityUnavailable}, nil
+		}
+		return CloseResult{}, err
+	}
+	leftover, err := b.anyOwnedPaneExists(ctx, owned)
 	if err != nil {
 		return CloseResult{Outcome: OutcomeActionRequired, Reason: err.Error()}, nil
 	}
-	if inspection.Status == InspectAbsent {
-		return CloseResult{Outcome: OutcomeClosed, Reason: "tmux session already absent"}, nil
+	if leftover {
+		return CloseResult{Outcome: OutcomeActionRequired, Reason: "owned pane still alive after close"}, nil
 	}
-	if inspection.Status != InspectPresent {
-		return CloseResult{Outcome: OutcomeActionRequired, Reason: inspection.Evidence}, nil
+	if launcher := req.Binding.Placement.Effective.LauncherPane; launcher != "" {
+		exists, launcherErr := b.paneExists(ctx, launcher)
+		if launcherErr != nil {
+			return CloseResult{Outcome: OutcomeActionRequired, Reason: launcherErr.Error()}, nil
+		}
+		if !exists {
+			return CloseResult{Outcome: OutcomeActionRequired, Reason: "launcher pane missing after close"}, nil
+		}
 	}
-	sessionID, _, err := parseTmuxSessionResource(req.Binding)
-	if err != nil {
-		return CloseResult{Outcome: OutcomeActionRequired, Reason: err.Error()}, nil
-	}
-	if _, err := b.run(ctx, b.args("kill-session", "-t", sessionID)...); err != nil {
-		return CloseResult{}, fmt.Errorf("close tmux session: %w", err)
-	}
-	return CloseResult{Outcome: OutcomeClosed, Reason: "tmux session closed"}, nil
+	return CloseResult{Outcome: OutcomeClosed, Reason: "tmux panes closed"}, nil
 }
 
 func (b *TmuxBackend) Focus(req FocusRequest) (FocusResult, error) {
@@ -212,7 +284,14 @@ func (b *TmuxBackend) Focus(req FocusRequest) (FocusResult, error) {
 	}
 	sessionID, _, err := parseTmuxSessionResource(req.Binding)
 	if err != nil {
-		return FocusResult{}, err
+		panes := tmuxOwnedPaneIDs(req.Binding)
+		if len(panes) == 0 {
+			return FocusResult{}, err
+		}
+		if _, focusErr := b.run(ctx, b.args("select-pane", "-t", panes[0])...); focusErr != nil {
+			return FocusResult{}, focusErr
+		}
+		return FocusResult{Outcome: OutcomeAttached}, nil
 	}
 	if err := b.focus(ctx, sessionID); err != nil {
 		return FocusResult{}, err
@@ -250,6 +329,11 @@ func (b *TmuxBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 			return ReclaimResult{Status: ReclaimForeign, Evidence: "journal session root identity changed"}, nil
 		}
 	}
+	target := journalLayoutTarget(req.Journal)
+	switch target {
+	case PlacementTargetNewWindow, PlacementTargetCurrentWindow:
+		return b.reclaimOwnedLayout(ctx, req, target)
+	}
 	name, err := tmuxSessionName(req.Journal.ProjectIdentity, req.Journal.Session)
 	if err != nil {
 		return ReclaimResult{}, err
@@ -268,6 +352,11 @@ func (b *TmuxBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 	if nonce != req.Journal.LaunchNonce {
 		return ReclaimResult{Status: ReclaimForeign, Evidence: "tmux session nonce does not match the journal"}, nil
 	}
+	if req.Journal.Binding != nil {
+		if err := b.checkBindingEpoch(ctx, *req.Journal.Binding); err != nil {
+			return ReclaimResult{Status: ReclaimUnknown, Evidence: tmuxServerEpochMismatch}, nil
+		}
+	}
 	resources, err := b.liveResources(ctx, name)
 	if err != nil {
 		return ReclaimResult{Status: ReclaimUnknown, Evidence: err.Error()}, nil
@@ -284,6 +373,7 @@ func (b *TmuxBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 		InstanceIdentity: req.Journal.InstanceIdentity, Profile: req.Journal.Profile,
 		LaunchNonce: req.Journal.LaunchNonce,
 		Resources:   ResourceIdentitySet{Version: ResourceSetVersion, Resources: resources},
+		Placement:   req.Journal.Placement,
 	}
 	host, hostErr := b.hostname()
 	instance := "tmux-socket:" + b.socketPath()
@@ -327,6 +417,9 @@ func (b *TmuxBackend) inspect(ctx context.Context, binding BindingRecord) (Inspe
 	if err := b.validateBindingContext(binding); err != nil {
 		return InspectResult{}, err
 	}
+	if _, _, err := parseTmuxSessionResource(binding); err != nil {
+		return b.inspectOwnedLayout(ctx, binding)
+	}
 	sessionID, name, err := parseTmuxSessionResource(binding)
 	if err != nil {
 		return InspectResult{}, err
@@ -345,18 +438,22 @@ func (b *TmuxBackend) inspect(ctx context.Context, binding BindingRecord) (Inspe
 	if nonce != binding.LaunchNonce {
 		return InspectResult{Status: InspectUnknown, Evidence: "tmux session nonce differs from binding", ActionRequired: true}, nil
 	}
+	if err := b.checkBindingEpoch(ctx, binding); err != nil {
+		return InspectResult{Status: InspectUnknown, Evidence: tmuxServerEpochMismatch, ActionRequired: true}, nil
+	}
 	resources, err := b.liveResources(ctx, name)
 	if err != nil {
 		return InspectResult{}, err
 	}
-	if len(resources) != len(binding.Resources.Resources) {
+	want := withoutTmuxEpoch(binding.Resources.Resources)
+	if len(resources) != len(want) {
 		return InspectResult{Status: InspectUnknown, Evidence: "tmux resource inventory differs from binding", ActionRequired: true}, nil
 	}
 	live := make(map[string]string, len(resources))
 	for _, resource := range resources {
 		live[resource.OpaqueID] = resource.Agent
 	}
-	for _, expected := range binding.Resources.Resources {
+	for _, expected := range want {
 		if live[expected.OpaqueID] != expected.Agent {
 			return InspectResult{Status: InspectUnknown, Evidence: "tmux resource identity differs from binding", ActionRequired: true}, nil
 		}
@@ -380,6 +477,13 @@ func (b *TmuxBackend) validateBindingContext(binding BindingRecord) error {
 }
 
 func (b *TmuxBackend) liveResources(ctx context.Context, name string) ([]ResourceIdentity, error) {
+	paneOut, paneErr := b.run(ctx, b.args("list-panes", "-s", "-t", "="+name, "-F", "#{session_id}\t#{session_name}\t#{pane_id}\t#{@amq_pane_agent}")...)
+	if paneErr == nil {
+		paneResources, parseErr := parseTmuxPaneInventory(strings.TrimSpace(paneOut), name)
+		if parseErr == nil && tmuxAgentCount(paneResources) > 0 {
+			return paneResources, nil
+		}
+	}
 	out, err := b.run(ctx, b.args("list-windows", "-t", "="+name, "-F", "#{session_id}\t#{session_name}\t#{window_id}\t#{@amq_agent}")...)
 	if err != nil {
 		return nil, fmt.Errorf("inspect tmux windows: %w", err)
@@ -435,6 +539,46 @@ func (b *TmuxBackend) markWindow(ctx context.Context, windowID, handle string) e
 		return fmt.Errorf("mark tmux window for %s: %w", handle, err)
 	}
 	return nil
+}
+
+func (b *TmuxBackend) markOwnedWindow(ctx context.Context, windowID, nonce string) error {
+	if _, err := b.run(ctx, b.args("set-option", "-w", "-t", windowID, tmuxPaneNonceOption, nonce)...); err != nil {
+		return fmt.Errorf("mark tmux owned window nonce: %w", err)
+	}
+	return nil
+}
+
+func (b *TmuxBackend) paneWindowID(ctx context.Context, paneID string) (string, error) {
+	out, err := b.run(ctx, b.args("display-message", "-p", "-t", paneID, "#{window_id}")...)
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(out)
+	if id == "" {
+		return "", fmt.Errorf("pane %s has no window identity", paneID)
+	}
+	return id, nil
+}
+
+func (b *TmuxBackend) windowsWithNonce(ctx context.Context, nonce string) ([]string, error) {
+	out, err := b.run(ctx, b.args("list-windows", "-a", "-F", "#{window_id}\t#{@amq_launch_nonce}")...)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("invalid tmux window inventory line %q", line)
+		}
+		if fields[1] == nonce && fields[0] != "" {
+			ids = append(ids, fields[0])
+		}
+	}
+	return ids, nil
 }
 
 func (b *TmuxBackend) agentCommand(req CreateRequest, agent AgentPlan) string {
@@ -547,6 +691,792 @@ func truncateTMuxPart(value string, max int) string {
 
 func tmuxSessionResource(id, name string) string { return "tmux:v1:session:" + id + ":" + name }
 func tmuxWindowResource(id string) string        { return "tmux:v1:window:" + id }
+func tmuxPaneResource(id string) string          { return "tmux:v1:pane:" + id }
+
+func parseTmuxPaneResource(opaque string) (string, bool) {
+	id := strings.TrimPrefix(opaque, "tmux:v1:pane:")
+	if id == opaque || !tmuxPaneID(id) {
+		return "", false
+	}
+	return id, true
+}
+
+func parseTmuxWindowOwned(binding BindingRecord) (string, bool) {
+	for _, resource := range binding.Resources.Resources {
+		if strings.HasPrefix(resource.OpaqueID, "tmux:v1:window:") && resource.Agent == "" {
+			return strings.TrimPrefix(resource.OpaqueID, "tmux:v1:window:"), true
+		}
+	}
+	for _, resource := range binding.Resources.Resources {
+		if strings.HasPrefix(resource.OpaqueID, "tmux:v1:window:") {
+			return strings.TrimPrefix(resource.OpaqueID, "tmux:v1:window:"), true
+		}
+	}
+	return "", false
+}
+
+func tmuxOwnedPaneIDs(binding BindingRecord) []string {
+	ids := make([]string, 0, len(binding.Resources.Resources))
+	for _, resource := range binding.Resources.Resources {
+		if id, ok := parseTmuxPaneResource(resource.OpaqueID); ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func tmuxAgentCount(resources []ResourceIdentity) int {
+	count := 0
+	for _, resource := range resources {
+		if resource.Agent != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func parseTmuxPaneInventory(out, name string) ([]ResourceIdentity, error) {
+	lines := strings.Split(out, "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
+		return nil, fmt.Errorf("tmux session has no panes")
+	}
+	resources := make([]ResourceIdentity, 0, len(lines)+1)
+	var sessionID string
+	for i, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 || fields[0] == "" || fields[1] != name || fields[2] == "" {
+			return nil, fmt.Errorf("invalid tmux pane inventory line %q", line)
+		}
+		if i == 0 {
+			sessionID = fields[0]
+			resources = append(resources, ResourceIdentity{OpaqueID: tmuxSessionResource(sessionID, name)})
+		} else if fields[0] != sessionID {
+			return nil, fmt.Errorf("tmux inventory crossed session identities")
+		}
+		if fields[3] != "" {
+			resources = append(resources, ResourceIdentity{OpaqueID: tmuxPaneResource(fields[2]), Agent: fields[3]})
+		}
+	}
+	return resources, nil
+}
+
+func (b *TmuxBackend) markPane(ctx context.Context, paneID, handle, nonce string) error {
+	if _, err := b.run(ctx, b.args("set-option", "-p", "-t", paneID, "@amq_pane_agent", handle)...); err != nil {
+		return fmt.Errorf("mark tmux pane for %s: %w", handle, err)
+	}
+	if _, err := b.run(ctx, b.args("set-option", "-p", "-t", paneID, tmuxPaneNonceOption, nonce)...); err != nil {
+		return fmt.Errorf("mark tmux pane nonce for %s: %w", handle, err)
+	}
+	return nil
+}
+
+func (b *TmuxBackend) paneExists(ctx context.Context, paneID string) (bool, error) {
+	out, err := b.run(ctx, b.args("display-message", "-p", "-t", paneID, "#{pane_id}")...)
+	if err != nil {
+		if tmuxTargetMissing(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return strings.TrimSpace(out) == paneID, nil
+}
+
+func (b *TmuxBackend) windowExists(ctx context.Context, windowID string) (bool, error) {
+	out, err := b.run(ctx, b.args("display-message", "-p", "-t", windowID, "#{window_id}")...)
+	if err != nil {
+		if tmuxTargetMissing(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return strings.TrimSpace(out) == windowID, nil
+}
+
+func (b *TmuxBackend) paneIDsInWindow(ctx context.Context, windowID string) (map[string]bool, error) {
+	out, err := b.run(ctx, b.args("list-panes", "-t", windowID, "-F", "#{pane_id}")...)
+	if err != nil {
+		return nil, err
+	}
+	return tmuxPaneIDSet(out), nil
+}
+
+func (b *TmuxBackend) authorizedOwnedPanes(ctx context.Context, binding BindingRecord) ([]string, error) {
+	launcher := binding.Placement.Effective.LauncherPane
+	expected := tmuxPersistedPaneHandles(binding)
+	agents := tmuxBindingAgents(binding)
+	candidates := make(map[string]string)
+	for id, handle := range expected {
+		if id != "" && id != launcher {
+			candidates[id] = handle
+		}
+	}
+	for _, windowID := range tmuxBoundWindowIDs(binding) {
+		live, err := b.paneIDsInWindow(ctx, windowID)
+		if err != nil {
+			if tmuxTargetMissing(err) {
+				continue
+			}
+			return nil, err
+		}
+		for id := range live {
+			if id == "" || id == launcher {
+				continue
+			}
+			if _, ok := candidates[id]; !ok {
+				candidates[id] = ""
+			}
+		}
+	}
+	owned := make([]string, 0, len(candidates))
+	for id, expectedHandle := range candidates {
+		handle, nonce, err := b.paneMarkers(ctx, id)
+		if err != nil {
+			if tmuxTargetMissing(err) {
+				continue
+			}
+			return nil, err
+		}
+		if handle == "" || nonce != binding.LaunchNonce {
+			continue
+		}
+		if expectedHandle != "" && handle != expectedHandle {
+			continue
+		}
+		if expectedHandle == "" && !agents[handle] {
+			continue
+		}
+		owned = append(owned, id)
+	}
+	if len(owned) == 0 && len(expected) == 0 {
+		return nil, errOwnedPaneIdentityUnavailable
+	}
+	return owned, nil
+}
+
+func (b *TmuxBackend) paneMarkers(ctx context.Context, paneID string) (string, string, error) {
+	out, err := b.run(ctx, b.args("display-message", "-p", "-t", paneID, "#{@amq_pane_agent}\t#{@amq_launch_nonce}")...)
+	if err != nil {
+		return "", "", err
+	}
+	fields := strings.Split(strings.TrimSpace(out), "\t")
+	handle, nonce := "", ""
+	if len(fields) > 0 {
+		handle = fields[0]
+	}
+	if len(fields) > 1 {
+		nonce = fields[1]
+	}
+	return handle, nonce, nil
+}
+
+func (b *TmuxBackend) paneAuthenticated(ctx context.Context, paneID, expectedHandle, nonce string) (bool, error) {
+	handle, liveNonce, err := b.paneMarkers(ctx, paneID)
+	if err != nil {
+		if tmuxTargetMissing(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if handle == "" || liveNonce != nonce {
+		return false, nil
+	}
+	if expectedHandle != "" && handle != expectedHandle {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (b *TmuxBackend) killAuthorizedPanes(ctx context.Context, binding BindingRecord, panes []string) error {
+	expected := tmuxPersistedPaneHandles(binding)
+	for _, pane := range panes {
+		ok, err := b.paneAuthenticated(ctx, pane, expected[pane], binding.LaunchNonce)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errOwnedPaneIdentityUnavailable
+		}
+		if _, err := b.run(ctx, b.args("kill-pane", "-t", pane)...); err != nil && !tmuxTargetMissing(err) {
+			return fmt.Errorf("close tmux pane %s: %w", pane, err)
+		}
+	}
+	return nil
+}
+
+func (b *TmuxBackend) checkBindingEpoch(ctx context.Context, binding BindingRecord) error {
+	want := parseTmuxEpoch(binding)
+	if want == "" {
+		return nil
+	}
+	got, err := b.serverEpoch(ctx)
+	if err != nil {
+		if tmuxTargetMissing(err) {
+			return errTmuxServerEpochMismatch
+		}
+		return err
+	}
+	if got != want {
+		return errTmuxServerEpochMismatch
+	}
+	return nil
+}
+
+func (b *TmuxBackend) serverEpoch(ctx context.Context) (string, error) {
+	out, err := b.run(ctx, b.args("display-message", "-p", "#{pid}")...)
+	if err != nil {
+		out, err = b.run(ctx, b.args("list-sessions", "-F", "#{pid}")...)
+		if err != nil {
+			return "", err
+		}
+	}
+	pid := strings.TrimSpace(out)
+	if i := strings.IndexByte(pid, '\n'); i >= 0 {
+		pid = strings.TrimSpace(pid[:i])
+	}
+	if pid == "" || pid == "0" {
+		return "", fmt.Errorf("tmux server pid is missing")
+	}
+	return pid, nil
+}
+
+func (b *TmuxBackend) withServerEpoch(ctx context.Context, resources []ResourceIdentity) ([]ResourceIdentity, error) {
+	if parseTmuxEpoch(BindingRecord{Resources: ResourceIdentitySet{Resources: resources}}) != "" {
+		return resources, nil
+	}
+	epoch, err := b.serverEpoch(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("persist tmux server epoch: %w", err)
+	}
+	return append(append([]ResourceIdentity(nil), resources...), ResourceIdentity{OpaqueID: tmuxEpochPrefix + epoch}), nil
+}
+
+func parseTmuxEpoch(binding BindingRecord) string {
+	for _, resource := range binding.Resources.Resources {
+		if resource.Agent != "" {
+			continue
+		}
+		if id, ok := strings.CutPrefix(resource.OpaqueID, tmuxEpochPrefix); ok && id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func withoutTmuxEpoch(resources []ResourceIdentity) []ResourceIdentity {
+	out := make([]ResourceIdentity, 0, len(resources))
+	for _, resource := range resources {
+		if resource.Agent == "" && strings.HasPrefix(resource.OpaqueID, tmuxEpochPrefix) {
+			continue
+		}
+		out = append(out, resource)
+	}
+	return out
+}
+
+func tmuxPersistedPaneHandles(binding BindingRecord) map[string]string {
+	handles := make(map[string]string)
+	for _, resource := range binding.Resources.Resources {
+		id, ok := parseTmuxPaneResource(resource.OpaqueID)
+		if !ok || resource.Agent == "" {
+			continue
+		}
+		handles[id] = resource.Agent
+	}
+	return handles
+}
+
+func tmuxBindingAgents(binding BindingRecord) map[string]bool {
+	agents := make(map[string]bool)
+	for _, resource := range binding.Resources.Resources {
+		if resource.Agent != "" {
+			agents[resource.Agent] = true
+		}
+	}
+	return agents
+}
+
+func tmuxBoundWindowIDs(binding BindingRecord) []string {
+	ids := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, resource := range binding.Resources.Resources {
+		if !strings.HasPrefix(resource.OpaqueID, "tmux:v1:window:") {
+			continue
+		}
+		id := strings.TrimPrefix(resource.OpaqueID, "tmux:v1:window:")
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func tmuxPaneIDSet(out string) map[string]bool {
+	ids := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		id := strings.TrimSpace(line)
+		if id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+func tmuxTargetMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "couldn't find") ||
+		strings.Contains(msg, "can't find") ||
+		strings.Contains(msg, "no server running")
+}
+
+func tmuxCreateTimeout(req CreateRequest) time.Duration {
+	includeFirst := req.Placement != nil && req.Placement.Target == PlacementTargetCurrentWindow
+	return tmuxCommandTimeout + placementStaggerBudget(req.Placement, len(req.Plan.Agents), includeFirst)
+}
+
+func (b *TmuxBackend) reclaimOwnedLayout(ctx context.Context, req ReclaimRequest, target string) (ReclaimResult, error) {
+	if req.Journal.Binding != nil {
+		if err := b.checkBindingEpoch(ctx, *req.Journal.Binding); err != nil {
+			return ReclaimResult{Status: ReclaimUnknown, Evidence: tmuxServerEpochMismatch}, nil
+		}
+	}
+	out, err := b.run(ctx, b.args("list-panes", "-a", "-F", "#{window_id}\t#{pane_id}\t#{@amq_pane_agent}\t#{@amq_launch_nonce}")...)
+	if err != nil {
+		return ReclaimResult{Status: ReclaimUnknown, Evidence: err.Error()}, nil
+	}
+	type markedPane struct {
+		window string
+		pane   string
+		agent  string
+	}
+	found := make([]markedPane, 0)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 {
+			return ReclaimResult{Status: ReclaimUnknown, Evidence: "invalid tmux pane inventory line " + line}, nil
+		}
+		if fields[3] != req.Journal.LaunchNonce || fields[2] == "" {
+			continue
+		}
+		found = append(found, markedPane{window: fields[0], pane: fields[1], agent: fields[2]})
+	}
+	resources := make([]ResourceIdentity, 0, len(found)+1)
+	for _, item := range found {
+		resources = append(resources, ResourceIdentity{OpaqueID: tmuxPaneResource(item.pane), Agent: item.agent})
+	}
+	if target == PlacementTargetNewWindow {
+		ownedWindows, winErr := b.windowsWithNonce(ctx, req.Journal.LaunchNonce)
+		if winErr != nil {
+			return ReclaimResult{Status: ReclaimUnknown, Evidence: winErr.Error(), Resources: resources}, nil
+		}
+		switch len(ownedWindows) {
+		case 0:
+			if len(found) == 0 {
+				return ReclaimResult{Status: ReclaimAbsent, Evidence: "tmux owned window and panes for this generation are absent"}, nil
+			}
+			return ReclaimResult{Status: ReclaimIncomplete, Evidence: "owned window is absent while panes remain", Resources: resources}, nil
+		case 1:
+			windowID := ownedWindows[0]
+			inWindow, paneErr := b.paneIDsInWindow(ctx, windowID)
+			if paneErr != nil {
+				return ReclaimResult{Status: ReclaimUnknown, Evidence: paneErr.Error(), Resources: resources}, nil
+			}
+			owned := make([]string, 0, len(found))
+			for _, item := range found {
+				owned = append(owned, item.pane)
+			}
+			status, evidence := tmuxWindowInventoryStatus(inWindow, owned, nil)
+			if status == InspectPresent {
+				resources = append([]ResourceIdentity{{OpaqueID: tmuxWindowResource(windowID)}}, resources...)
+				return b.adoptOwnedLayout(req, resources, 1, "tmux created window and nonce match the complete journal plan")
+			}
+			if status == InspectAbsent && len(found) == 0 {
+				return ReclaimResult{Status: ReclaimAbsent, Evidence: evidence, Resources: resources}, nil
+			}
+			return ReclaimResult{Status: ReclaimIncomplete, Evidence: evidence, Resources: resources}, nil
+		default:
+			return ReclaimResult{Status: ReclaimIncomplete, Evidence: "multiple windows carry this launch nonce", Resources: resources}, nil
+		}
+	}
+	launcher := req.Journal.Placement.Effective.LauncherPane
+	if launcher == "" {
+		return ReclaimResult{Status: ReclaimUnknown, Evidence: "current_window journal has no launcher pane", Resources: resources}, nil
+	}
+	exists, launcherErr := b.paneExists(ctx, launcher)
+	if launcherErr != nil {
+		return ReclaimResult{Status: ReclaimUnknown, Evidence: launcherErr.Error(), Resources: resources}, nil
+	}
+	if !exists {
+		if len(found) == 0 {
+			return ReclaimResult{Status: ReclaimAbsent, Evidence: "tmux launcher and owned panes for this generation are absent"}, nil
+		}
+		return ReclaimResult{Status: ReclaimIncomplete, Evidence: "launcher pane is absent while panes remain", Resources: resources}, nil
+	}
+	launcherWindow, windowErr := b.paneWindowID(ctx, launcher)
+	if windowErr != nil {
+		return ReclaimResult{Status: ReclaimUnknown, Evidence: windowErr.Error(), Resources: resources}, nil
+	}
+	inWindow, paneErr := b.paneIDsInWindow(ctx, launcherWindow)
+	if paneErr != nil {
+		return ReclaimResult{Status: ReclaimUnknown, Evidence: paneErr.Error(), Resources: resources}, nil
+	}
+	if len(found) == 0 {
+		return ReclaimResult{Status: ReclaimAbsent, Evidence: "tmux owned panes for this generation are absent"}, nil
+	}
+	owned := make([]string, 0, len(found))
+	for _, item := range found {
+		owned = append(owned, item.pane)
+	}
+	status, evidence := tmuxWindowInventoryStatus(inWindow, owned, []string{launcher})
+	if status == InspectPresent {
+		return b.adoptOwnedLayout(req, resources, 0, "tmux owned panes remain in the launcher window")
+	}
+	if status == InspectAbsent && len(found) == 0 {
+		return ReclaimResult{Status: ReclaimAbsent, Evidence: evidence, Resources: resources}, nil
+	}
+	if status == InspectAbsent {
+		evidence = "owned pane is not in the launcher window"
+	}
+	return ReclaimResult{Status: ReclaimIncomplete, Evidence: evidence, Resources: resources}, nil
+}
+
+func (b *TmuxBackend) adoptOwnedLayout(req ReclaimRequest, resources []ResourceIdentity, containers int, evidence string) (ReclaimResult, error) {
+	issues := tmuxAgentInventoryIssues(resources, req.Journal.Plan, containers)
+	if len(issues) != 0 {
+		return ReclaimResult{
+			Status:    ReclaimIncomplete,
+			Evidence:  "tmux pane inventory differs from plan: " + strings.Join(issues, ","),
+			Resources: resources,
+		}, nil
+	}
+	binding := BindingRecord{
+		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: req.Journal.HostIdentity,
+		InstanceIdentity: req.Journal.InstanceIdentity, Profile: req.Journal.Profile,
+		LaunchNonce: req.Journal.LaunchNonce,
+		Resources:   ResourceIdentitySet{Version: ResourceSetVersion, Resources: resources},
+		Placement:   req.Journal.Placement,
+	}
+	host, hostErr := b.hostname()
+	instance := "tmux-socket:" + b.socketPath()
+	if hostErr != nil || host != binding.HostIdentity || instance != binding.InstanceIdentity || TmuxProfile().Identity() != binding.Profile {
+		return ReclaimResult{Status: ReclaimForeign, Evidence: "tmux runtime identity changed", Resources: resources}, nil
+	}
+	return ReclaimResult{Status: ReclaimAdoptable, Evidence: evidence, Resources: resources, Binding: binding}, nil
+}
+
+func (b *TmuxBackend) stagger(ctx context.Context, req CreateRequest, index int) error {
+	if b.sleep == nil || req.Placement == nil || req.Placement.StaggerMS <= 0 {
+		return nil
+	}
+	if req.Placement.Target != PlacementTargetCurrentWindow && index == 0 {
+		return nil
+	}
+	return b.sleep(ctx, time.Duration(req.Placement.StaggerMS)*time.Millisecond)
+}
+
+func (b *TmuxBackend) createSessionLayout(req CreateRequest, detect DetectResult, preview PlacementPreview) (CreateResult, error) {
+	name, err := tmuxSessionName(req.ProjectRoot, req.Session)
+	if err != nil {
+		return CreateResult{}, &DefinitePreCreateError{Err: err}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCreateTimeout(req))
+	defer cancel()
+	present, err := b.hasSession(ctx, name)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	if present {
+		return CreateResult{}, fmt.Errorf("tmux session %q already exists; journal recovery must classify it", name)
+	}
+	first := req.Plan.Agents[0]
+	out, err := b.run(ctx, b.args("new-session", "-d", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}",
+		"-s", name, "-n", first.Handle, "-e", tmuxNonceEnvironment+"="+first.LaunchNonce, b.agentCommand(req, first))...)
+	if err != nil {
+		return CreateResult{}, fmt.Errorf("create tmux session: %w", err)
+	}
+	fields := strings.Split(strings.TrimSpace(out), "\t")
+	if len(fields) != 3 || fields[0] == "" || fields[1] == "" || fields[2] == "" {
+		return CreateResult{}, fmt.Errorf("tmux create returned invalid resource identities %q", strings.TrimSpace(out))
+	}
+	sessionID, windowID, paneID := fields[0], fields[1], fields[2]
+	if err := b.markPane(ctx, paneID, first.Handle, first.LaunchNonce); err != nil {
+		return CreateResult{}, err
+	}
+	panes := []ResourceIdentity{{OpaqueID: tmuxPaneResource(paneID), Agent: first.Handle}}
+	for i, agent := range req.Plan.Agents[1:] {
+		if err := b.stagger(ctx, req, i+1); err != nil {
+			return CreateResult{}, err
+		}
+		splitOut, splitErr := b.run(ctx, b.args("split-window", tmuxSplitFlag(req.Placement.Layout), "-t", paneID, "-P", "-F", "#{pane_id}", b.agentCommand(req, agent))...)
+		if splitErr != nil {
+			return CreateResult{}, fmt.Errorf("create tmux pane for %s: %w", agent.Handle, splitErr)
+		}
+		paneID = strings.TrimSpace(splitOut)
+		if !tmuxPaneID(paneID) {
+			return CreateResult{}, fmt.Errorf("tmux returned no pane identity for %s", agent.Handle)
+		}
+		if err := b.markPane(ctx, paneID, agent.Handle, agent.LaunchNonce); err != nil {
+			return CreateResult{}, err
+		}
+		panes = append(panes, ResourceIdentity{OpaqueID: tmuxPaneResource(paneID), Agent: agent.Handle})
+	}
+	if _, err := b.run(ctx, b.args("select-layout", "-t", windowID, tmuxSelectLayout(req.Placement.Layout))...); err != nil {
+		return CreateResult{}, fmt.Errorf("select tmux layout: %w", err)
+	}
+	resources := append([]ResourceIdentity{{OpaqueID: tmuxSessionResource(sessionID, name)}}, panes...)
+	if issues := tmuxInventoryIssues(resources, req.Plan); len(issues) != 0 {
+		return CreateResult{}, fmt.Errorf("created tmux inventory differs from plan: %s", strings.Join(issues, ","))
+	}
+	return b.createdBinding(detect, first.LaunchNonce, resources, preview)
+}
+
+func (b *TmuxBackend) createNewWindowLayout(req CreateRequest, detect DetectResult, preview PlacementPreview) (CreateResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCreateTimeout(req))
+	defer cancel()
+	sessionID, err := b.currentSessionID(ctx)
+	if err != nil {
+		return CreateResult{}, &DefinitePreCreateError{Err: err}
+	}
+	first := req.Plan.Agents[0]
+	out, err := b.run(ctx, b.args("new-window", "-d", "-P", "-F", "#{window_id}\t#{pane_id}",
+		"-t", sessionID, "-n", first.Handle, b.agentCommand(req, first))...)
+	if err != nil {
+		return CreateResult{}, fmt.Errorf("create tmux window: %w", err)
+	}
+	fields := strings.Split(strings.TrimSpace(out), "\t")
+	if len(fields) != 2 || fields[0] == "" || !tmuxPaneID(fields[1]) {
+		return CreateResult{}, fmt.Errorf("tmux create returned invalid window identities %q", strings.TrimSpace(out))
+	}
+	windowID, paneID := fields[0], fields[1]
+	if err := b.markOwnedWindow(ctx, windowID, first.LaunchNonce); err != nil {
+		return CreateResult{}, err
+	}
+	if err := b.markPane(ctx, paneID, first.Handle, first.LaunchNonce); err != nil {
+		return CreateResult{}, err
+	}
+	panes := []ResourceIdentity{{OpaqueID: tmuxPaneResource(paneID), Agent: first.Handle}}
+	for i, agent := range req.Plan.Agents[1:] {
+		if err := b.stagger(ctx, req, i+1); err != nil {
+			return CreateResult{}, err
+		}
+		splitOut, splitErr := b.run(ctx, b.args("split-window", tmuxSplitFlag(req.Placement.Layout), "-t", paneID, "-P", "-F", "#{pane_id}", b.agentCommand(req, agent))...)
+		if splitErr != nil {
+			return CreateResult{}, fmt.Errorf("create tmux pane for %s: %w", agent.Handle, splitErr)
+		}
+		paneID = strings.TrimSpace(splitOut)
+		if err := b.markPane(ctx, paneID, agent.Handle, agent.LaunchNonce); err != nil {
+			return CreateResult{}, err
+		}
+		panes = append(panes, ResourceIdentity{OpaqueID: tmuxPaneResource(paneID), Agent: agent.Handle})
+	}
+	if _, err := b.run(ctx, b.args("select-layout", "-t", windowID, tmuxSelectLayout(req.Placement.Layout))...); err != nil {
+		return CreateResult{}, err
+	}
+	resources := append([]ResourceIdentity{{OpaqueID: tmuxWindowResource(windowID)}}, panes...)
+	return b.createdBinding(detect, first.LaunchNonce, resources, preview)
+}
+
+func (b *TmuxBackend) createCurrentWindowLayout(req CreateRequest, detect DetectResult, preview PlacementPreview) (CreateResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCreateTimeout(req))
+	defer cancel()
+	launcher := req.Placement.LauncherPane
+	exists, err := b.paneExists(ctx, launcher)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	if !exists {
+		return CreateResult{}, &DefinitePreCreateError{Err: fmt.Errorf("launcher pane %s is absent", launcher)}
+	}
+	paneID := launcher
+	panes := make([]ResourceIdentity, 0, len(req.Plan.Agents))
+	for i, agent := range req.Plan.Agents {
+		if err := b.stagger(ctx, req, i); err != nil {
+			return CreateResult{}, err
+		}
+		splitOut, splitErr := b.run(ctx, b.args("split-window", tmuxSplitFlag(req.Placement.Layout), "-t", paneID, "-P", "-F", "#{pane_id}", b.agentCommand(req, agent))...)
+		if splitErr != nil {
+			return CreateResult{}, fmt.Errorf("create tmux pane for %s: %w", agent.Handle, splitErr)
+		}
+		paneID = strings.TrimSpace(splitOut)
+		if !tmuxPaneID(paneID) {
+			return CreateResult{}, fmt.Errorf("tmux returned no pane identity for %s", agent.Handle)
+		}
+		if err := b.markPane(ctx, paneID, agent.Handle, agent.LaunchNonce); err != nil {
+			return CreateResult{}, err
+		}
+		panes = append(panes, ResourceIdentity{OpaqueID: tmuxPaneResource(paneID), Agent: agent.Handle})
+	}
+	if _, err := b.run(ctx, b.args("select-layout", "-t", paneID, tmuxSelectLayout(req.Placement.Layout))...); err != nil {
+		return CreateResult{}, err
+	}
+	still, err := b.paneExists(ctx, launcher)
+	if err != nil || !still {
+		return CreateResult{}, fmt.Errorf("create moved or destroyed launcher pane %s", launcher)
+	}
+	return b.createdBinding(detect, req.Plan.Agents[0].LaunchNonce, panes, preview)
+}
+
+func (b *TmuxBackend) createdBinding(detect DetectResult, nonce string, resources []ResourceIdentity, preview PlacementPreview) (CreateResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+	defer cancel()
+	resources, err := b.withServerEpoch(ctx, resources)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	binding := BindingRecord{
+		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: detect.HostIdentity,
+		InstanceIdentity: detect.InstanceIdentity, Profile: detect.Profile.Identity(),
+		LaunchNonce: nonce,
+		Resources:   ResourceIdentitySet{Version: ResourceSetVersion, Resources: resources},
+		Placement:   preview,
+	}
+	if err := binding.Validate(); err != nil {
+		return CreateResult{}, err
+	}
+	return CreateResult{Outcome: OutcomeCreated, Profile: binding.Profile, Binding: binding}, nil
+}
+
+func (b *TmuxBackend) currentSessionID(ctx context.Context) (string, error) {
+	if strings.TrimSpace(b.getenv("TMUX")) != "" {
+		out, err := b.run(ctx, b.args("display-message", "-p", "#{session_id}")...)
+		if err != nil {
+			return "", fmt.Errorf("resolve current tmux session: %w", err)
+		}
+		id := strings.TrimSpace(out)
+		if id == "" {
+			return "", fmt.Errorf("current tmux session is empty")
+		}
+		return id, nil
+	}
+	out, err := b.run(ctx, b.args("list-sessions", "-F", "#{session_id}")...)
+	if err != nil {
+		return "", fmt.Errorf("list tmux sessions: %w", err)
+	}
+	ids := strings.Fields(out)
+	if len(ids) != 1 {
+		return "", fmt.Errorf("tmux new_window requires exactly one session on the socket, found %d", len(ids))
+	}
+	return ids[0], nil
+}
+
+func (b *TmuxBackend) inspectOwnedLayout(ctx context.Context, binding BindingRecord) (InspectResult, error) {
+	if err := b.checkBindingEpoch(ctx, binding); err != nil {
+		return InspectResult{Status: InspectUnknown, Evidence: tmuxServerEpochMismatch, ActionRequired: true}, nil
+	}
+	authorized, err := b.authorizedOwnedPanes(ctx, binding)
+	if err != nil && !errors.Is(err, errOwnedPaneIdentityUnavailable) {
+		return InspectResult{}, err
+	}
+	authSet := make(map[string]bool, len(authorized))
+	for _, id := range authorized {
+		authSet[id] = true
+	}
+	for _, pane := range tmuxOwnedPaneIDs(binding) {
+		if pane == binding.Placement.Effective.LauncherPane {
+			continue
+		}
+		exists, existErr := b.paneExists(ctx, pane)
+		if existErr != nil {
+			return InspectResult{}, existErr
+		}
+		if exists && !authSet[pane] {
+			return InspectResult{Status: InspectUnknown, Evidence: "persisted pane identity is not authenticated", ActionRequired: true}, nil
+		}
+	}
+	panes := tmuxOwnedPaneIDs(binding)
+	if len(panes) == 0 {
+		return InspectResult{}, fmt.Errorf("binding has no valid tmux session identity")
+	}
+	if windowID, ok := parseTmuxWindowOwned(binding); ok {
+		exists, err := b.windowExists(ctx, windowID)
+		if err != nil {
+			return InspectResult{}, err
+		}
+		if !exists {
+			for _, pane := range panes {
+				paneExists, paneErr := b.paneExists(ctx, pane)
+				if paneErr != nil {
+					return InspectResult{}, paneErr
+				}
+				if paneExists {
+					return InspectResult{Status: InspectUnknown, Evidence: "owned window is absent while panes remain", ActionRequired: true}, nil
+				}
+			}
+			return InspectResult{Status: InspectAbsent, Evidence: "tmux window is absent"}, nil
+		}
+		inWindow, err := b.paneIDsInWindow(ctx, windowID)
+		if err != nil {
+			return InspectResult{}, err
+		}
+		status, evidence := tmuxWindowInventoryStatus(inWindow, panes, nil)
+		if status == InspectAbsent {
+			if exists, existErr := b.anyOwnedPaneExists(ctx, panes); existErr != nil {
+				return InspectResult{}, existErr
+			} else if exists {
+				return InspectResult{Status: InspectUnknown, Evidence: "owned pane is not in the bound window", ActionRequired: true}, nil
+			}
+		}
+		if status != InspectPresent {
+			return InspectResult{Status: status, Evidence: evidence, ActionRequired: status == InspectUnknown}, nil
+		}
+	} else {
+		launcher := binding.Placement.Effective.LauncherPane
+		if launcher == "" {
+			return InspectResult{}, fmt.Errorf("binding has no launcher pane or owned window")
+		}
+		exists, err := b.paneExists(ctx, launcher)
+		if err != nil {
+			return InspectResult{}, err
+		}
+		if !exists {
+			for _, pane := range panes {
+				paneExists, paneErr := b.paneExists(ctx, pane)
+				if paneErr != nil {
+					return InspectResult{}, paneErr
+				}
+				if paneExists {
+					return InspectResult{Status: InspectUnknown, Evidence: "launcher pane is absent while panes remain", ActionRequired: true}, nil
+				}
+			}
+			return InspectResult{Status: InspectAbsent, Evidence: "tmux pane is absent"}, nil
+		}
+		launcherWindow, err := b.paneWindowID(ctx, launcher)
+		if err != nil {
+			return InspectResult{}, err
+		}
+		inWindow, err := b.paneIDsInWindow(ctx, launcherWindow)
+		if err != nil {
+			return InspectResult{}, err
+		}
+		status, evidence := tmuxWindowInventoryStatus(inWindow, panes, []string{launcher})
+		if status == InspectAbsent {
+			if exists, existErr := b.anyOwnedPaneExists(ctx, panes); existErr != nil {
+				return InspectResult{}, existErr
+			} else if exists {
+				return InspectResult{Status: InspectUnknown, Evidence: "owned pane is not in the launcher window", ActionRequired: true}, nil
+			}
+		}
+		if status != InspectPresent {
+			return InspectResult{Status: status, Evidence: evidence, ActionRequired: status == InspectUnknown}, nil
+		}
+	}
+	if launcher := binding.Placement.Effective.LauncherPane; launcher != "" {
+		exists, err := b.paneExists(ctx, launcher)
+		if err != nil {
+			return InspectResult{}, err
+		}
+		if !exists {
+			return InspectResult{Status: InspectUnknown, Evidence: "launcher pane is absent", ActionRequired: true}, nil
+		}
+	}
+	return InspectResult{Status: InspectPresent, Evidence: "tmux owned panes match"}, nil
+}
 
 func parseTmuxSessionResource(binding BindingRecord) (string, string, error) {
 	for _, resource := range binding.Resources.Resources {
@@ -560,7 +1490,66 @@ func parseTmuxSessionResource(binding BindingRecord) (string, string, error) {
 	return "", "", fmt.Errorf("binding has no valid tmux session identity")
 }
 
+func (b *TmuxBackend) anyOwnedPaneExists(ctx context.Context, panes []string) (bool, error) {
+	for _, pane := range panes {
+		exists, err := b.paneExists(ctx, pane)
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func tmuxInventoryIssues(resources []ResourceIdentity, plan Plan) []string {
+	return tmuxAgentInventoryIssues(resources, plan, 1)
+}
+
+func tmuxPaneSetDiff(live map[string]bool, expected []string) (missing, extra []string) {
+	want := make(map[string]bool, len(expected))
+	for _, id := range expected {
+		if id == "" {
+			continue
+		}
+		want[id] = true
+		if !live[id] {
+			missing = append(missing, id)
+		}
+	}
+	for id := range live {
+		if !want[id] {
+			extra = append(extra, id)
+		}
+	}
+	return missing, extra
+}
+
+func tmuxWindowInventoryStatus(live map[string]bool, owned, extras []string) (InspectStatus, string) {
+	expected := make([]string, 0, len(owned)+len(extras))
+	expected = append(expected, owned...)
+	expected = append(expected, extras...)
+	_, extra := tmuxPaneSetDiff(live, expected)
+	if len(extra) > 0 {
+		return InspectUnknown, "unowned pane is in the owned window"
+	}
+	ownedLive := 0
+	for _, id := range owned {
+		if live[id] {
+			ownedLive++
+		}
+	}
+	if ownedLive == len(owned) {
+		return InspectPresent, "tmux owned panes match"
+	}
+	if ownedLive == 0 {
+		return InspectAbsent, "tmux pane is absent"
+	}
+	return InspectUnknown, "owned window pane inventory is incomplete"
+}
+
+func tmuxAgentInventoryIssues(resources []ResourceIdentity, plan Plan, containers int) []string {
 	expected := make(map[string]bool, len(plan.Agents))
 	for _, agent := range plan.Agents {
 		expected[agent.Handle] = true
@@ -584,7 +1573,7 @@ func tmuxInventoryIssues(resources []ResourceIdentity, plan Plan) []string {
 			issues = append(issues, "duplicate:"+agent.Handle)
 		}
 	}
-	if len(resources) != len(plan.Agents)+1 {
+	if len(resources) != len(plan.Agents)+containers {
 		issues = append(issues, fmt.Sprintf("resource_count:%d", len(resources)))
 	}
 	return issues
