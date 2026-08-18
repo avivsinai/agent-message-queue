@@ -3,11 +3,14 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -15,6 +18,14 @@ import (
 
 func newDarwinWakeRestartStageRecordForTest(t *testing.T) wakeRestartRecord {
 	t.Helper()
+	return newDarwinWakeRestartStageRecordForRootTest(t, canonicalWakeRoot(t.TempDir()), "codex")
+}
+
+func newDarwinWakeRestartStageRecordForRootTest(t *testing.T, root, agent string) wakeRestartRecord {
+	t.Helper()
+	if os.Getenv("AMQ_TEST_DARWIN_WAKE_STAGE_STATE") == "" {
+		setDarwinWakeRestartStateHomeForTest(t, t.TempDir())
+	}
 	testBinary, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -33,9 +44,28 @@ func newDarwinWakeRestartStageRecordForTest(t *testing.T) wakeRestartRecord {
 	}
 	record := wakeRestartRecord{
 		RequestID: "0123456789abcdef0123456789abcdef",
+		Root:      root,
+		Agent:     agent,
 		Candidate: candidate,
 	}
-	record.StagePath, err = planWakeRestartStagePlatform(candidate, record.RequestID)
+	record.StagePath, err = planWakeRestartStageForRecordPlatform(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func setDarwinWakeRestartStateHomeForTest(t *testing.T, stateHome string) {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	t.Setenv("AMQ_TEST_DARWIN_WAKE_STAGE_STATE", stateHome)
+}
+
+func newLegacyDarwinWakeRestartStageRecordForTest(t *testing.T) wakeRestartRecord {
+	t.Helper()
+	record := newDarwinWakeRestartStageRecordForTest(t)
+	var err error
+	record.StagePath, err = planWakeRestartStagePlatform(record.Candidate, record.RequestID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +85,9 @@ type consecutiveDarwinWakeRestartFixture struct {
 
 func newConsecutiveDarwinWakeRestartFixture(t *testing.T) consecutiveDarwinWakeRestartFixture {
 	t.Helper()
-	previousRecord := newDarwinWakeRestartStageRecordForTest(t)
+	root := canonicalWakeRoot(t.TempDir())
+	const agent = "codex"
+	previousRecord := newDarwinWakeRestartStageRecordForRootTest(t, root, agent)
 	previousBound, err := bindWakeRestartCandidateAtPlatform(
 		previousRecord.Candidate,
 		previousRecord.StagePath,
@@ -69,7 +101,12 @@ func newConsecutiveDarwinWakeRestartFixture(t *testing.T) consecutiveDarwinWakeR
 	}
 	previousBound.file = nil
 
-	currentRecord := newDarwinWakeRestartStageRecordForTest(t)
+	currentRecord := newDarwinWakeRestartStageRecordForRootTest(t, root, agent)
+	currentRecord.RequestID = "fedcba9876543210fedcba9876543210"
+	currentRecord.StagePath, err = planWakeRestartStageForRecordPlatform(currentRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
 	currentBound, err := bindWakeRestartCandidateAtPlatform(
 		currentRecord.Candidate,
 		currentRecord.StagePath,
@@ -83,8 +120,6 @@ func newConsecutiveDarwinWakeRestartFixture(t *testing.T) consecutiveDarwinWakeR
 	}
 	currentBound.file = nil
 
-	root := canonicalWakeRoot(t.TempDir())
-	const agent = "codex"
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
 	}
@@ -94,8 +129,6 @@ func newConsecutiveDarwinWakeRestartFixture(t *testing.T) consecutiveDarwinWakeR
 	record := currentRecord
 	record.Schema = wakeRestartSchemaV2
 	record.Status = wakeRestartPending
-	record.Root = root
-	record.Agent = agent
 	record.Generation = "abcdef0123456789abcdef0123456789"
 	record.SuccessorGeneration = "fedcba9876543210fedcba9876543210"
 	record.Owner = validWakeResumeOwnerForTest()
@@ -193,6 +226,200 @@ func TestDarwinCrashStageReclaimPreservesReplacement(t *testing.T) {
 	}
 }
 
+func TestDarwinRestartStageUsesMachineLocalStateAndSurvivesCandidateRemoval(t *testing.T) {
+	stateHome := t.TempDir()
+	setDarwinWakeRestartStateHomeForTest(t, stateHome)
+	record := newDarwinWakeRestartStageRecordForTest(t)
+
+	wakeStages, err := darwinWakeRestartStageRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootIdentity, err := resolveTreeIdentityToken(record.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootDigest := sha256.Sum256([]byte(rootIdentity))
+	wantStagePath := filepath.Join(
+		wakeStages,
+		hex.EncodeToString(rootDigest[:]),
+		record.Agent,
+		record.RequestID,
+		filepath.Base(record.Candidate.ExecutionPath),
+	)
+	if record.StagePath != wantStagePath {
+		t.Fatalf("stage path = %q, want %q", record.StagePath, wantStagePath)
+	}
+	if strings.Contains(record.StagePath, record.Candidate.ExecutionPath) {
+		t.Fatalf("stage path remains derived from candidate path: %s", record.StagePath)
+	}
+
+	bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = bound.close() }()
+	if bound.evidence.Device != record.Candidate.Device || bound.evidence.Inode != record.Candidate.Inode {
+		t.Fatalf("same-filesystem stage was not a hardlink: candidate=%#v stage=%#v", record.Candidate, bound.evidence)
+	}
+	if err := os.RemoveAll(filepath.Dir(record.Candidate.ExecutionPath)); err != nil {
+		t.Fatal(err)
+	}
+	if err := revalidateBoundWakeRestartImagePlatform(bound); err != nil {
+		t.Fatalf("revalidate stage after candidate directory removal: %v", err)
+	}
+	for path := filepath.Dir(record.StagePath); path != wakeStages; path = filepath.Dir(path) {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.IsDir() || info.Mode().Perm() != 0o700 {
+			t.Fatalf("managed stage directory %s mode = %v, want directory 0700", path, info.Mode())
+		}
+	}
+}
+
+func TestDarwinRestartStageRefusesStateInsideAMRoot(t *testing.T) {
+	record := newDarwinWakeRestartStageRecordForTest(t)
+	setDarwinWakeRestartStateHomeForTest(t, filepath.Join(record.Root, "state"))
+
+	if _, err := planWakeRestartStageForRecordPlatform(record); err == nil ||
+		!strings.Contains(err.Error(), "outside AM_ROOT") {
+		t.Fatalf("plan with state inside AM_ROOT = %v, want refusal", err)
+	}
+}
+
+func TestDarwinRestartStageRefusesStateSymlinkedInsideAMRoot(t *testing.T) {
+	record := newDarwinWakeRestartStageRecordForTest(t)
+	inside := filepath.Join(record.Root, "local-state")
+	if err := os.Mkdir(inside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "state-alias")
+	if err := os.Symlink(inside, alias); err != nil {
+		t.Fatal(err)
+	}
+	setDarwinWakeRestartStateHomeForTest(t, alias)
+
+	if _, err := planWakeRestartStageForRecordPlatform(record); err == nil ||
+		!strings.Contains(err.Error(), "outside AM_ROOT") {
+		t.Fatalf("plan with state symlinked inside AM_ROOT = %v, want refusal", err)
+	}
+}
+
+func TestDarwinRestartStageCopiesAndSyncsOnCrossDeviceLink(t *testing.T) {
+	stateHome := t.TempDir()
+	setDarwinWakeRestartStateHomeForTest(t, stateHome)
+	record := newDarwinWakeRestartStageRecordForTest(t)
+
+	oldLink := linkDarwinWakeRestartStage
+	linkDarwinWakeRestartStage = func(string, string) error { return syscall.EXDEV }
+	t.Cleanup(func() { linkDarwinWakeRestartStage = oldLink })
+
+	bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
+	if err != nil {
+		t.Fatalf("bind with forced cross-device link: %v", err)
+	}
+	defer func() { _ = bound.close() }()
+	if bound.evidence.Device == record.Candidate.Device && bound.evidence.Inode == record.Candidate.Inode {
+		t.Fatal("copy fallback retained the source file identity")
+	}
+	if bound.evidence.SHA256 != record.Candidate.SHA256 ||
+		bound.evidence.Size != record.Candidate.Size ||
+		bound.evidence.EmbeddedVersion != record.Candidate.EmbeddedVersion {
+		t.Fatalf("copy fallback evidence = %#v, want source content evidence %#v", bound.evidence, record.Candidate)
+	}
+	if err := revalidateBoundWakeRestartImagePlatform(bound); err != nil {
+		t.Fatalf("revalidate copied stage: %v", err)
+	}
+}
+
+func TestDarwinRestartStageRejectsWrongBytesAfterCrossDeviceCopy(t *testing.T) {
+	stateHome := t.TempDir()
+	setDarwinWakeRestartStateHomeForTest(t, stateHome)
+	record := newDarwinWakeRestartStageRecordForTest(t)
+
+	oldLink := linkDarwinWakeRestartStage
+	linkDarwinWakeRestartStage = func(string, string) error { return syscall.EXDEV }
+	t.Cleanup(func() { linkDarwinWakeRestartStage = oldLink })
+	oldCopy := copyDarwinWakeRestartStageFn
+	copyDarwinWakeRestartStageFn = func(_ *os.File, stagePath string) error {
+		return os.WriteFile(stagePath, []byte("wrong staged bytes"), 0o700)
+	}
+	t.Cleanup(func() { copyDarwinWakeRestartStageFn = oldCopy })
+
+	if _, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath); err == nil ||
+		!strings.Contains(err.Error(), "copied Darwin wake restart stage content differs") {
+		t.Fatalf("wrong-byte cross-device copy error = %v", err)
+	}
+}
+
+func TestDarwinRestartStageSeparatesTwoRoots(t *testing.T) {
+	stateHome := t.TempDir()
+	setDarwinWakeRestartStateHomeForTest(t, stateHome)
+	rootOne := canonicalWakeRoot(t.TempDir())
+	rootTwo := canonicalWakeRoot(t.TempDir())
+	recordOne := newDarwinWakeRestartStageRecordForRootTest(t, rootOne, "codex")
+	recordTwo := newDarwinWakeRestartStageRecordForRootTest(t, rootTwo, "codex")
+
+	if recordOne.StagePath == recordTwo.StagePath {
+		t.Fatalf("two roots collided at stage path %q", recordOne.StagePath)
+	}
+	hashDirOne := filepath.Dir(filepath.Dir(filepath.Dir(recordOne.StagePath)))
+	hashDirTwo := filepath.Dir(filepath.Dir(filepath.Dir(recordTwo.StagePath)))
+	if hashDirOne == hashDirTwo {
+		t.Fatalf("two roots shared stage hierarchy %q", hashDirOne)
+	}
+	boundOne, err := bindWakeRestartCandidateAtPlatform(recordOne.Candidate, recordOne.StagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = boundOne.close() }()
+	boundTwo, err := bindWakeRestartCandidateAtPlatform(recordTwo.Candidate, recordTwo.StagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = boundTwo.close() }()
+	if _, err := os.Lstat(recordOne.StagePath); err != nil {
+		t.Fatalf("first root stage missing after second bind: %v", err)
+	}
+	if _, err := os.Lstat(recordTwo.StagePath); err != nil {
+		t.Fatalf("second root stage missing: %v", err)
+	}
+}
+
+func TestDarwinRestartStageCleanupPrunesEmptyStableHierarchy(t *testing.T) {
+	stateHome := t.TempDir()
+	setDarwinWakeRestartStateHomeForTest(t, stateHome)
+	record := newDarwinWakeRestartStageRecordForTest(t)
+	bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := bound.evidence
+	if err := bound.file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	bound.file = nil
+
+	if err := cleanupPersistedDarwinWakeRestartStage(evidence); err != nil {
+		t.Fatal(err)
+	}
+	stageDir := filepath.Dir(record.StagePath)
+	for _, path := range []string{stageDir, filepath.Dir(stageDir), filepath.Dir(filepath.Dir(stageDir))} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("empty stable stage hierarchy survived at %s: %v", path, err)
+		}
+	}
+	wakeStages, err := darwinWakeRestartStageRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(wakeStages); err != nil || !info.IsDir() {
+		t.Fatalf("shared wake-stages root was pruned: info=%v err=%v", info, err)
+	}
+}
+
 func TestPrepareCoopWakeLockReclaimsStaleDarwinStageAfterParentDisappears(t *testing.T) {
 	for _, test := range []struct {
 		name          string
@@ -202,7 +429,7 @@ func TestPrepareCoopWakeLockReclaimsStaleDarwinStageAfterParentDisappears(t *tes
 		{name: "non-directory parent", replaceParent: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			record := newDarwinWakeRestartStageRecordForTest(t)
+			record := newLegacyDarwinWakeRestartStageRecordForTest(t)
 			bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
 			if err != nil {
 				t.Fatal(err)
@@ -327,7 +554,8 @@ func TestDoctorDiagnosesCrashOrphanedDarwinRestartStage(t *testing.T) {
 }
 
 func TestDoctorFixRetriesExactPersistedDarwinRestartStageReclaim(t *testing.T) {
-	record := newDarwinWakeRestartStageRecordForTest(t)
+	root := canonicalWakeRoot(t.TempDir())
+	record := newDarwinWakeRestartStageRecordForRootTest(t, root, "codex")
 	bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)
 	if err != nil {
 		t.Fatal(err)
@@ -338,8 +566,6 @@ func TestDoctorFixRetriesExactPersistedDarwinRestartStageReclaim(t *testing.T) {
 	bound.file = nil
 	record.Schema = wakeRestartSchemaV1
 	record.Status = wakeRestartPending
-	record.Root = canonicalWakeRoot(t.TempDir())
-	record.Agent = "codex"
 	record.Generation = "abcdef0123456789abcdef0123456789"
 	record.Owner = validWakeResumeOwnerForTest()
 	evidence := bound.evidence
@@ -680,7 +906,7 @@ func TestDarwinPreviousCleanupFailurePreservesRecordAndSuccessorLock(t *testing.
 
 func TestDarwinRestartRetryReclaimsAndQuarantinesRefusedOwnedStage(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
-	refused := newDarwinWakeRestartStageRecordForTest(t)
+	refused := newDarwinWakeRestartStageRecordForRootTest(t, fixture.root, fixture.agent)
 	bound, err := bindWakeRestartCandidateAtPlatform(refused.Candidate, refused.StagePath)
 	if err != nil {
 		t.Fatal(err)
@@ -693,8 +919,6 @@ func TestDarwinRestartRetryReclaimsAndQuarantinesRefusedOwnedStage(t *testing.T)
 	refused.Schema = wakeRestartSchemaV1
 	refused.Status = wakeRestartRefused
 	refused.Reason = "prior cleanup refusal"
-	refused.Root = fixture.root
-	refused.Agent = fixture.agent
 	refused.Generation = fixture.lock.Lock.Generation
 	refused.Owner = fixture.owner
 	refused.BoundImage = &boundEvidence

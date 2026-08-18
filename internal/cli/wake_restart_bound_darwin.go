@@ -3,15 +3,21 @@
 package cli
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/sys/unix"
 )
+
+var linkDarwinWakeRestartStage = os.Link
+var copyDarwinWakeRestartStageFn = copyDarwinWakeRestartStage
 
 func bindWakeRestartCandidatePlatform(candidate wakeImageEvidenceV1) (*wakeRestartBoundImage, error) {
 	return bindWakeRestartCandidateAtPlatform(candidate, "")
@@ -73,8 +79,11 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 		if filepath.Base(plannedStagePath) != filepath.Base(candidate.ExecutionPath) {
 			return nil, fmt.Errorf("planned Darwin wake restart stage path is invalid")
 		}
+		if err := prepareStableDarwinWakeRestartStageParent(plannedStagePath); err != nil {
+			return nil, err
+		}
 		if err := os.Mkdir(stageDir, 0o700); err != nil {
-			return nil, fmt.Errorf("create planned adjacent wake restart stage: %w", err)
+			return nil, fmt.Errorf("create planned Darwin wake restart stage: %w", err)
 		}
 	}
 	stagePath := filepath.Join(stageDir, filepath.Base(candidate.ExecutionPath))
@@ -93,8 +102,14 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 			}
 		}
 	}()
-	if err := os.Link(candidate.ExecutionPath, stagePath); err != nil {
-		return nil, fmt.Errorf("hardlink wake restart candidate into adjacent stage: %w", err)
+	linked := true
+	if err := linkDarwinWakeRestartStage(candidate.ExecutionPath, stagePath); errors.Is(err, syscall.EXDEV) {
+		linked = false
+		if err := copyDarwinWakeRestartStageFn(source, stagePath); err != nil {
+			return nil, fmt.Errorf("copy cross-device wake restart candidate into stage: %w", err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("hardlink wake restart candidate into stage: %w", err)
 	}
 	stageCreated = true
 	stageLstat, err := os.Lstat(stagePath)
@@ -103,6 +118,9 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 	}
 	stageIdentity = stageLstat
 	stageIdentityKnown = true
+	if err := syncDarwinWakeRestartStageDirectory(stageDir); err != nil {
+		return nil, fmt.Errorf("sync Darwin wake restart stage directory: %w", err)
+	}
 	if stageLstat.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("staged wake restart image must not be a symlink")
 	}
@@ -133,8 +151,8 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 	if err != nil {
 		return nil, fmt.Errorf("re-stat linked wake restart source: %w", err)
 	}
-	if !os.SameFile(sourceOpened, postLinkSource) || !os.SameFile(postLinkSource, stageLstat) ||
-		!os.SameFile(stageLstat, stageOpened) {
+	if !os.SameFile(sourceOpened, postLinkSource) || !os.SameFile(stageLstat, stageOpened) ||
+		(linked && !os.SameFile(postLinkSource, stageLstat)) {
 		return nil, fmt.Errorf("darwin wake restart source and stage identities do not match")
 	}
 	postLinkSourceEvidence, err := captureWakeImageEvidenceFromOpenFile(
@@ -155,8 +173,11 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 	if err != nil {
 		return nil, err
 	}
-	if !sameWakeImageEvidenceExceptMethodPath(postLinkSourceEvidence, bound.evidence) {
+	if linked && !sameWakeImageEvidenceExceptMethodPath(postLinkSourceEvidence, bound.evidence) {
 		return nil, fmt.Errorf("darwin wake restart source and staged image changed while hashing")
+	}
+	if !linked && !sameWakeImageContent(postLinkSourceEvidence, bound.evidence) {
+		return nil, fmt.Errorf("copied Darwin wake restart stage content differs from source")
 	}
 	if !sameRequestedAndBoundWakeImageEvidence(candidate, bound.evidence) {
 		return nil, fmt.Errorf("darwin staged wake restart image differs from requested candidate")
@@ -164,6 +185,119 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 	stageCreated = false
 	failed = false
 	return bound, nil
+}
+
+func syncDarwinWakeRestartStageDirectory(stageDir string) error {
+	fd, err := unix.Open(stageDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	return unix.Fsync(fd)
+}
+
+func copyDarwinWakeRestartStage(source *os.File, stagePath string) error {
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind wake restart candidate for copy: %w", err)
+	}
+	fd, err := unix.Open(stagePath, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o700)
+	if err != nil {
+		return err
+	}
+	destination := os.NewFile(uintptr(fd), stagePath)
+	if destination == nil {
+		_ = unix.Close(fd)
+		return fmt.Errorf("bind copied Darwin wake restart stage")
+	}
+	published := false
+	defer func() {
+		_ = destination.Close()
+		if !published {
+			_ = os.Remove(stagePath)
+		}
+	}()
+	if _, err := io.Copy(destination, source); err != nil {
+		return err
+	}
+	if err := destination.Sync(); err != nil {
+		return err
+	}
+	if err := destination.Close(); err != nil {
+		return err
+	}
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind wake restart candidate after copy: %w", err)
+	}
+	published = true
+	return nil
+}
+
+func prepareStableDarwinWakeRestartStageParent(stagePath string) error {
+	parts, stable, err := stableDarwinWakeRestartStageParts(stagePath)
+	if err != nil || !stable {
+		return err
+	}
+	root, err := darwinWakeRestartStageRoot()
+	if err != nil {
+		return err
+	}
+	parent := filepath.Dir(filepath.Dir(stagePath))
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return fmt.Errorf("create stable Darwin wake restart stage hierarchy: %w", err)
+	}
+	for _, managed := range []string{
+		root,
+		filepath.Join(root, parts[0]),
+		parent,
+	} {
+		info, err := os.Lstat(managed)
+		if err != nil {
+			return fmt.Errorf("inspect stable Darwin wake restart stage hierarchy: %w", err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 ||
+			stat.Uid != uint32(os.Geteuid()) {
+			return fmt.Errorf("refuse unsafe stable Darwin wake restart stage hierarchy")
+		}
+	}
+	return nil
+}
+
+func stableDarwinWakeRestartStageParts(stagePath string) ([]string, bool, error) {
+	root, err := darwinWakeRestartStageRoot()
+	if err != nil {
+		return nil, false, err
+	}
+	rel, err := filepath.Rel(root, stagePath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, false, nil
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) != 4 || len(parts[0]) != sha256HexLength {
+		return nil, true, fmt.Errorf("planned stable Darwin wake restart stage path is invalid")
+	}
+	if _, err := hex.DecodeString(parts[0]); err != nil {
+		return nil, true, fmt.Errorf("planned stable Darwin wake restart root identity is invalid")
+	}
+	if err := fsq.ValidateHandle(parts[1]); err != nil || !validWakeReloadTransportGeneration(parts[2]) ||
+		parts[3] == "" || filepath.Base(parts[3]) != parts[3] {
+		return nil, true, fmt.Errorf("planned stable Darwin wake restart stage path is invalid")
+	}
+	return parts, true, nil
+}
+
+func wakeRestartStageUsesStableStatePlatform(stagePath string) (bool, error) {
+	_, stable, err := stableDarwinWakeRestartStageParts(stagePath)
+	return stable, err
+}
+
+func sameWakeImageContent(first, second wakeImageEvidenceV1) bool {
+	first.Method = second.Method
+	first.ExecutionPath = second.ExecutionPath
+	first.Device = second.Device
+	first.Inode = second.Inode
+	first.CTimeNS = second.CTimeNS
+	return first == second
 }
 
 func boundWakeRestartPreflightCommandPlatform(image *wakeRestartBoundImage) (string, []*os.File, error) {
@@ -246,8 +380,13 @@ func validPreviousWakeRestartBoundImagePlatform(bound wakeImageEvidenceV1) bool 
 	stageBase := filepath.Base(stagePath)
 	stageDirBase := filepath.Base(filepath.Dir(stagePath))
 	prefix := "." + stageBase + ".amq-restart-"
-	return stageBase != "." && stageBase != string(filepath.Separator) &&
+	legacy := stageBase != "." && stageBase != string(filepath.Separator) &&
 		strings.HasPrefix(stageDirBase, prefix) && len(stageDirBase) > len(prefix)
+	if legacy {
+		return true
+	}
+	_, stable, err := stableDarwinWakeRestartStageParts(stagePath)
+	return err == nil && stable
 }
 
 func cleanupDarwinWakeRestartStage(bound wakeImageEvidenceV1, allowNamespaceCTimeChange bool) error {
@@ -259,7 +398,10 @@ func cleanupDarwinWakeRestartStage(bound wakeImageEvidenceV1, allowNamespaceCTim
 	lstat, err := os.Lstat(stagePath)
 	if err != nil {
 		if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENOTDIR) {
-			return removeEmptyDarwinWakeRestartStageDir(stagePath)
+			if err := removeEmptyDarwinWakeRestartStageDir(stagePath); err != nil {
+				return err
+			}
+			return pruneEmptyStableDarwinWakeRestartStageHierarchy(stagePath)
 		}
 		return fmt.Errorf("stat Darwin wake restart stage: %w", err)
 	}
@@ -303,5 +445,5 @@ func cleanupDarwinWakeRestartStage(bound wakeImageEvidenceV1, allowNamespaceCTim
 	if err := os.Remove(stageDir); err != nil {
 		return fmt.Errorf("remove Darwin wake restart stage directory: %w", err)
 	}
-	return nil
+	return pruneEmptyStableDarwinWakeRestartStageHierarchy(stagePath)
 }

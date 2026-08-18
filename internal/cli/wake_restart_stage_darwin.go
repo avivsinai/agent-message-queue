@@ -3,15 +3,22 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
 )
+
+const sha256HexLength = sha256.Size * 2
 
 func planWakeRestartStagePlatform(candidate wakeImageEvidenceV1, requestID string) (string, error) {
 	if !validWakeReloadTransportGeneration(requestID) {
@@ -23,6 +30,81 @@ func planWakeRestartStagePlatform(candidate wakeImageEvidenceV1, requestID strin
 	base := filepath.Base(candidate.ExecutionPath)
 	dir := filepath.Join(filepath.Dir(candidate.ExecutionPath), "."+base+".amq-restart-"+requestID)
 	return filepath.Join(dir, base), nil
+}
+
+func planWakeRestartStageForRecordPlatform(record wakeRestartRecord) (string, error) {
+	if !validWakeReloadTransportGeneration(record.RequestID) {
+		return "", fmt.Errorf("wake restart stage request id is invalid")
+	}
+	if err := fsq.ValidateHandle(record.Agent); err != nil {
+		return "", fmt.Errorf("wake restart stage agent is invalid: %w", err)
+	}
+	if err := validateWakeImageEvidenceForPlatform(record.Candidate, "darwin"); err != nil {
+		return "", err
+	}
+	rootIdentity, err := resolveTreeIdentityToken(record.Root)
+	if err != nil {
+		return "", fmt.Errorf("resolve wake restart stage root identity: %w", err)
+	}
+	stateRoot, err := darwinWakeRestartStageRoot()
+	if err != nil {
+		return "", err
+	}
+	if wakeRestartPathWithinDirectory(stateRoot, record.Root) {
+		return "", fmt.Errorf("wake restart stage state directory must be outside AM_ROOT")
+	}
+	sum := sha256.Sum256([]byte(rootIdentity))
+	return filepath.Join(
+		stateRoot,
+		hex.EncodeToString(sum[:]),
+		record.Agent,
+		record.RequestID,
+		filepath.Base(record.Candidate.ExecutionPath),
+	), nil
+}
+
+func darwinWakeRestartStageRoot() (string, error) {
+	stateDir, err := launch.DefaultLaunchStateDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve Darwin wake restart state directory: %w", err)
+	}
+	stateDir, err = resolveDarwinWakeRestartStatePath(stateDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve physical Darwin wake restart state directory: %w", err)
+	}
+	return filepath.Join(stateDir, "wake-stages"), nil
+}
+
+func resolveDarwinWakeRestartStatePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	prefix := filepath.Clean(abs)
+	var tail []string
+	for {
+		resolved, err := filepath.EvalSymlinks(prefix)
+		if err == nil {
+			for i := len(tail) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, tail[i])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(prefix)
+		if parent == prefix {
+			return "", err
+		}
+		tail = append(tail, filepath.Base(prefix))
+		prefix = parent
+	}
+}
+
+func wakeRestartPathWithinDirectory(path, parent string) bool {
+	rel, err := filepath.Rel(parent, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func validateWakeRestartStageStatePlatform(record wakeRestartRecord) error {
@@ -40,11 +122,12 @@ func validateWakeRestartStageStatePlatform(record wakeRestartRecord) error {
 	if record.StagePath == "" && record.BoundImage == nil {
 		return nil
 	}
-	planned, err := planWakeRestartStagePlatform(record.Candidate, record.RequestID)
+	planned, err := planWakeRestartStageForRecordPlatform(record)
 	if err != nil {
 		return err
 	}
-	if record.StagePath != planned {
+	legacyPlanned, legacyErr := planWakeRestartStagePlatform(record.Candidate, record.RequestID)
+	if record.StagePath != planned && (legacyErr != nil || record.StagePath != legacyPlanned) {
 		return fmt.Errorf("wake restart stage path does not match the exact request")
 	}
 	if record.BoundImage == nil {
@@ -120,10 +203,35 @@ func reclaimWakeRestartStagePlatform(record wakeRestartRecord) error {
 }
 
 func cleanupPersistedDarwinWakeRestartStage(bound wakeImageEvidenceV1) error {
-	if err := cleanupDarwinWakeRestartStage(bound, true); err != nil {
+	return cleanupDarwinWakeRestartStage(bound, true)
+}
+
+func pruneEmptyStableDarwinWakeRestartStageHierarchy(stagePath string) error {
+	_, stable, err := stableDarwinWakeRestartStageParts(stagePath)
+	if err != nil || !stable {
 		return err
 	}
-	return removeEmptyDarwinWakeRestartStageDir(bound.ExecutionPath)
+	stageDir := filepath.Dir(stagePath)
+	for _, dir := range []string{filepath.Dir(stageDir), filepath.Dir(filepath.Dir(stageDir))} {
+		info, err := os.Lstat(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect stable Darwin wake restart stage hierarchy for pruning: %w", err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 ||
+			stat.Uid != uint32(os.Geteuid()) {
+			return fmt.Errorf("refuse pruning replaced stable Darwin wake restart stage hierarchy")
+		}
+		if err := os.Remove(dir); errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST) {
+			return nil
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("prune empty stable Darwin wake restart stage hierarchy: %w", err)
+		}
+	}
+	return nil
 }
 
 func validateWakeRestartPersistedBoundPlatform(

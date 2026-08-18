@@ -176,7 +176,7 @@ func prepareWakeRestartRecordForBoundResumeTest(
 	}
 }
 
-func TestRequestedAndBoundWakeImageEvidenceHasOnlyDarwinHardlinkCTimeException(t *testing.T) {
+func TestRequestedAndBoundWakeImageEvidenceAllowsDarwinStagedIdentity(t *testing.T) {
 	candidate, err := captureCurrentWakeImageEvidence()
 	if err != nil {
 		t.Fatal(err)
@@ -191,11 +191,12 @@ func TestRequestedAndBoundWakeImageEvidenceHasOnlyDarwinHardlinkCTimeException(t
 		t.Fatalf("ctime exception accepted=%v on %s", got, runtime.GOOS)
 	}
 	mutations := []struct {
-		name   string
-		mutate func(*wakeImageEvidenceV1)
+		name             string
+		acceptedOnDarwin bool
+		mutate           func(*wakeImageEvidenceV1)
 	}{
-		{name: "device", mutate: func(value *wakeImageEvidenceV1) { value.Device++ }},
-		{name: "inode", mutate: func(value *wakeImageEvidenceV1) { value.Inode++ }},
+		{name: "device", acceptedOnDarwin: true, mutate: func(value *wakeImageEvidenceV1) { value.Device++ }},
+		{name: "inode", acceptedOnDarwin: true, mutate: func(value *wakeImageEvidenceV1) { value.Inode++ }},
 		{name: "size", mutate: func(value *wakeImageEvidenceV1) { value.Size++ }},
 		{name: "digest", mutate: func(value *wakeImageEvidenceV1) { value.SHA256 = strings.Repeat("0", len(value.SHA256)) }},
 		{name: "version", mutate: func(value *wakeImageEvidenceV1) { value.EmbeddedVersion += ".other" }},
@@ -204,8 +205,9 @@ func TestRequestedAndBoundWakeImageEvidenceHasOnlyDarwinHardlinkCTimeException(t
 		t.Run(test.name, func(t *testing.T) {
 			changed := bound
 			test.mutate(&changed)
-			if sameRequestedAndBoundWakeImageEvidence(candidate, changed) {
-				t.Fatalf("%s delta was accepted", test.name)
+			want := runtime.GOOS == "darwin" && test.acceptedOnDarwin
+			if got := sameRequestedAndBoundWakeImageEvidence(candidate, changed); got != want {
+				t.Fatalf("%s delta accepted=%v, want %v", test.name, got, want)
 			}
 		})
 	}

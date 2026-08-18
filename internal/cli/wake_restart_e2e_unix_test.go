@@ -194,13 +194,14 @@ func TestWakeRestartRealPTYOwnerHelper(t *testing.T) {
 		if _, err := os.Lstat(firstRestartImagePath); !os.IsNotExist(err) {
 			t.Fatalf("first Darwin restart stage survived the second prepared restart: %v", err)
 		}
-		stagePattern := filepath.Join(
-			filepath.Dir(newBinary),
-			"."+filepath.Base(newBinary)+".amq-restart-*",
-		)
-		stages, globErr := filepath.Glob(stagePattern)
-		if globErr != nil || len(stages) != 1 || filepath.Dir(second.Lock.ImagePath) != stages[0] {
-			t.Fatalf("Darwin restart stages after second restart = %v, err=%v", stages, globErr)
+		if stable, err := wakeRestartStageUsesStableStatePlatform(second.Lock.ImagePath); err != nil || !stable {
+			t.Fatalf("second Darwin restart stage is not under stable state: path=%s err=%v", second.Lock.ImagePath, err)
+		}
+		agentStages := filepath.Dir(filepath.Dir(second.Lock.ImagePath))
+		stages, readErr := os.ReadDir(agentStages)
+		if readErr != nil || len(stages) != 1 || !stages[0].IsDir() ||
+			filepath.Join(agentStages, stages[0].Name()) != filepath.Dir(second.Lock.ImagePath) {
+			t.Fatalf("Darwin restart stages after second restart = %v, err=%v", stages, readErr)
 		}
 	}
 	after = second

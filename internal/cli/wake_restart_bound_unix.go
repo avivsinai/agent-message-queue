@@ -181,10 +181,9 @@ func sameDarwinStagedWakeImageEvidence(first, second wakeImageEvidenceV1) bool {
 	return first == second
 }
 
-// A Darwin hardlink necessarily changes the shared inode's ctime. This is the
-// only extra delta allowed between the requester's pre-link observation and
-// the post-link bound image; every stable identity, content, and version field
-// remains exact. Linux does not receive this exception.
+// A Darwin hardlink changes the shared inode's ctime. Cross-device staging
+// instead copies and fsyncs the image, so the bound evidence has the stage's
+// own device, inode, and ctime. Both paths require exact content and version.
 func sameRequestedAndBoundWakeImageEvidence(first, second wakeImageEvidenceV1) bool {
 	if first.Platform != second.Platform || first.Method != wakeImageMethodPathnameObserved {
 		return false
@@ -194,6 +193,8 @@ func sameRequestedAndBoundWakeImageEvidence(first, second wakeImageEvidenceV1) b
 		if !wakeImageMethodIsDarwinExecObserved(second.Method) {
 			return false
 		}
+		first.Device = second.Device
+		first.Inode = second.Inode
 		first.CTimeNS = second.CTimeNS
 	case "linux":
 		if second.Method != wakeImageMethodFDExec {

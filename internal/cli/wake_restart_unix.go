@@ -173,11 +173,21 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 		result.Reason = err.Error()
 		return result, err
 	}
-	stagePath, err := planWakeRestartStagePlatform(candidate, requestID)
+	record := wakeRestartRecord{
+		Schema:    wakeRestartSchemaV1,
+		RequestID: requestID,
+		Status:    wakeRestartPending,
+		Root:      root,
+		Agent:     me,
+		Owner:     *owner,
+		Candidate: candidate,
+	}
+	stagePath, err := planWakeRestartStageForRecordPlatform(record)
 	if err != nil {
 		result.Reason = err.Error()
 		return result, err
 	}
+	record.StagePath = stagePath
 
 	agentDir, err := openWakeAgentDir(root, me)
 	if err != nil {
@@ -189,16 +199,6 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 	var expected wakeLockInspection
 	adopted := false
 	needsNotify := true
-	record := wakeRestartRecord{
-		Schema:    wakeRestartSchemaV1,
-		RequestID: requestID,
-		Status:    wakeRestartPending,
-		Root:      root,
-		Agent:     me,
-		Owner:     *owner,
-		Candidate: candidate,
-		StagePath: stagePath,
-	}
 	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		expected = inspectWakeLockAt(dirfd, agentDir, root, me)
 		if err := validateWakeRestartIncumbent(expected, root, me, *owner); err != nil {
