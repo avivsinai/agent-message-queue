@@ -156,11 +156,12 @@ type PlacementPreviewV1 struct {
 }
 
 type PrepareRequestV1 struct {
-	RequestVersion int            `json:"request_version"`
-	Target         TargetV1       `json:"target"`
-	Launcher       string         `json:"launcher"`
-	Placement      *PlacementV1   `json:"placement,omitempty"`
-	Intent         LaunchIntentV1 `json:"intent"`
+	RequestVersion int               `json:"request_version"`
+	Target         TargetV1          `json:"target"`
+	Launcher       string            `json:"launcher"`
+	Placement      *PlacementV1      `json:"placement,omitempty"`
+	CallerContext  map[string]string `json:"caller_context,omitempty"`
+	Intent         LaunchIntentV1    `json:"intent"`
 }
 
 type RequiredActionKindV1 string
@@ -310,11 +311,12 @@ type ApplyRequestV1 struct {
 }
 
 type EvidenceRefV1 struct {
-	EvidenceVersion int       `json:"evidence_version"`
-	ID              string    `json:"id"`
-	Kind            string    `json:"kind"`
-	SHA256          string    `json:"sha256"`
-	ObservedAt      time.Time `json:"observed_at"`
+	EvidenceVersion int               `json:"evidence_version"`
+	ID              string            `json:"id"`
+	Kind            string            `json:"kind"`
+	SHA256          string            `json:"sha256"`
+	ObservedAt      time.Time         `json:"observed_at"`
+	CallerContext   map[string]string `json:"caller_context,omitempty"`
 }
 
 type ApplyResultV1 struct {
@@ -340,6 +342,7 @@ type ApplyResultV1 struct {
 	Commands       []CommandV1                `json:"commands,omitempty"`
 	FollowUps      []RequiredActionV1         `json:"follow_ups,omitempty"`
 	Evidence       []EvidenceRefV1            `json:"evidence,omitempty"`
+	CallerContext  map[string]string          `json:"caller_context,omitempty"`
 }
 
 type InspectRequestV1 struct {
@@ -359,6 +362,7 @@ type LifecycleResultV1 struct {
 	State         string                     `json:"state"`
 	Observations  []ParticipantObservationV1 `json:"observations"`
 	Evidence      []EvidenceRefV1            `json:"evidence,omitempty"`
+	CallerContext map[string]string          `json:"caller_context,omitempty"`
 }
 
 type InspectResultV1 = LifecycleResultV1

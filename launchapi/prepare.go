@@ -62,7 +62,7 @@ func prepareInputs(request PrepareRequestV1) (internallaunch.PrepareRequest, int
 			Session:     request.Target.Session,
 		},
 		Launcher: request.Launcher, IntentDigest: intentDigest, SubjectSchema: internallaunch.SubjectSchemaV2,
-		Placement:    toInternalPlacement(request.Placement),
+		Placement: toInternalPlacement(request.Placement), CallerContext: cloneStringMap(request.CallerContext),
 		Participants: make([]internallaunch.PrepareParticipant, 0, len(request.Intent.Participants)),
 	}
 	for _, participant := range request.Intent.Participants {

@@ -194,6 +194,13 @@
         "reason_code": {"type": "string", "minLength": 1}
       }
     },
+    "CallerContextV1": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {"minLength": 1, "maxLength": 64},
+      "patternProperties": {"^.+$": {"type": "string", "maxLength": 1024}},
+      "additionalProperties": false
+    },
     "PrepareRequestV1": {
       "type": "object",
       "additionalProperties": false,
@@ -203,6 +210,7 @@
         "target": {"$ref": "#/$defs/TargetV1"},
         "launcher": {"type": "string", "minLength": 1},
         "placement": {"$ref": "#/$defs/PlacementV1"},
+        "caller_context": {"$ref": "#/$defs/CallerContextV1"},
         "intent": {"$ref": "#/$defs/LaunchIntentV1"}
       }
     },
@@ -371,7 +379,8 @@
         "id": {"type": "string", "minLength": 1},
         "kind": {"type": "string", "minLength": 1},
         "sha256": {"$ref": "#/$defs/Digest"},
-        "observed_at": {"type": "string", "format": "date-time"}
+        "observed_at": {"type": "string", "format": "date-time"},
+        "caller_context": {"$ref": "#/$defs/CallerContextV1"}
       }
     },
     "ApplyResultV1": {
@@ -394,7 +403,8 @@
         "observations": {"type": "array", "items": {"$ref": "#/$defs/ParticipantObservationV1"}},
         "commands": {"type": "array", "items": {"$ref": "#/$defs/CommandV1"}},
         "follow_ups": {"type": "array", "items": {"$ref": "#/$defs/RequiredActionV1"}},
-        "evidence": {"type": "array", "items": {"$ref": "#/$defs/EvidenceRefV1"}}
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/EvidenceRefV1"}},
+        "caller_context": {"$ref": "#/$defs/CallerContextV1"}
       }
     },
     "LifecycleRequestV1": {
@@ -421,7 +431,8 @@
         "profile": {"type": "string"},
         "state": {"enum": ["present", "absent", "unknown"]},
         "observations": {"type": "array", "items": {"$ref": "#/$defs/ParticipantObservationV1"}},
-        "evidence": {"type": "array", "items": {"$ref": "#/$defs/EvidenceRefV1"}}
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/EvidenceRefV1"}},
+        "caller_context": {"$ref": "#/$defs/CallerContextV1"}
       }
     },
     "InspectResultV1": {"$ref": "#/$defs/LifecycleResultV1"},

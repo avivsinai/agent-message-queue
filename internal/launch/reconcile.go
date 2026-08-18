@@ -80,7 +80,8 @@ type ReconcileRequest struct {
 	// Placement is the caller-requested tuple. Nil preserves v0.61 Create.
 	Placement *Placement
 	// OnLive is the per-handle live-seat policy. Missing keys are refuse.
-	OnLive map[string]string
+	OnLive        map[string]string
+	CallerContext map[string]string
 }
 
 type AgentReconcileResult struct {
@@ -415,7 +416,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		if journalActive && journal.Phase == JournalCreated {
 			candidate = journal.Binding
 		} else {
-			candidate, err = finalizeCreatedState(request.Root, lease, create, backendName, detect, nonce, planned, &result, joinBinding)
+			candidate, err = finalizeCreatedState(request.Root, lease, create, backendName, detect, nonce, request.CallerContext, planned, &result, joinBinding)
 			if err != nil {
 				return result, err
 			}
@@ -583,6 +584,7 @@ func recoverJournal(request ReconcileRequest, journal LaunchJournal, binding Bin
 	case ReclaimAbsent:
 		return journal.Backend, backend, detect, CreateResult{}, false, nil
 	case ReclaimAdoptable:
+		reclaim.Binding.CallerContext = cloneCallerContext(journal.CallerContext)
 		if err := reclaim.Binding.Validate(); err != nil || !journalMatchesBinding(journal, reclaim.Binding) {
 			result.Outcome, result.Reason = OutcomeActionRequired, "launch_recovery_identity_mismatch"
 			return journal.Backend, backend, detect, CreateResult{}, false, nil
@@ -623,14 +625,16 @@ func revalidateAdoption(request ReconcileRequest, backend Backend, journal Launc
 	if err != nil {
 		return err
 	}
+	reclaim.Binding.CallerContext = cloneCallerContext(journal.CallerContext)
 	if reclaim.Status != ReclaimAdoptable || !reflect.DeepEqual(reclaim.Binding, candidate) {
 		return fmt.Errorf("journaled resource changed before binding commit")
 	}
 	return nil
 }
 
-func finalizeCreatedState(root *fsq.DeliveryRoot, lease *Lease, create CreateResult, backendName string, detect DetectResult, nonce string, planned []plannedAgent, result *ReconcileResult, joinBinding *BindingRecord) (*BindingRecord, error) {
+func finalizeCreatedState(root *fsq.DeliveryRoot, lease *Lease, create CreateResult, backendName string, detect DetectResult, nonce string, callerContext map[string]string, planned []plannedAgent, result *ReconcileResult, joinBinding *BindingRecord) (*BindingRecord, error) {
 	created := create.Binding
+	created.CallerContext = cloneCallerContext(callerContext)
 	bindingNonce := nonce
 	if joinBinding != nil {
 		bindingNonce = joinBinding.LaunchNonce
@@ -663,7 +667,7 @@ func finalizeCreatedState(root *fsq.DeliveryRoot, lease *Lease, create CreateRes
 			})
 			agent.record.State, agent.record.Identity, agent.record.Reason = capture.State, capture.Identity, capture.Reason
 			if capture.CanPersist() {
-				refs, evidenceErr := persistProviderCaptureEvidence(root, lease, agent.plan.Handle, captureEvidence)
+				refs, evidenceErr := persistProviderCaptureEvidenceWithContext(root, lease, agent.plan.Handle, callerContext, captureEvidence)
 				if evidenceErr != nil {
 					return nil, evidenceErr
 				}
@@ -705,6 +709,7 @@ func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []pla
 			ProviderExecutable: agent.plan.Argv[0], AMQExecutable: amqPath,
 			TargetArgv: agent.plan.Argv, DynamicArgv: agent.plan.DynamicArgv, TargetEnv: agent.plan.EnvOverlay,
 			InitialInput: agent.plan.InitialInput, Execution: agent.plan.Execution,
+			CallerContext: cloneCallerContext(request.CallerContext),
 		}
 		if agent.plan.PreSpawnAcquire || (agent.adapter.Name() == CodexProvider && agent.plan.AdapterMode == AdapterModeCapture) {
 			ticketRequest.Backend, ticketRequest.Profile = backend, profile

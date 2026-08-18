@@ -32,27 +32,30 @@ const (
 )
 
 type EvidenceRecord struct {
-	EvidenceVersion int             `json:"evidence_version"`
-	Kind            EvidenceKind    `json:"kind"`
-	Handle          string          `json:"handle"`
-	ObservedAt      time.Time       `json:"observed_at"`
-	PayloadSHA256   string          `json:"payload_sha256"`
-	Payload         json.RawMessage `json:"payload"`
+	EvidenceVersion int               `json:"evidence_version"`
+	Kind            EvidenceKind      `json:"kind"`
+	Handle          string            `json:"handle"`
+	ObservedAt      time.Time         `json:"observed_at"`
+	PayloadSHA256   string            `json:"payload_sha256"`
+	Payload         json.RawMessage   `json:"payload"`
+	CallerContext   map[string]string `json:"caller_context,omitempty"`
 }
 
 type EvidenceRef struct {
-	EvidenceVersion int          `json:"evidence_version"`
-	ID              string       `json:"id"`
-	Kind            EvidenceKind `json:"kind"`
-	SHA256          string       `json:"sha256"`
-	ObservedAt      time.Time    `json:"observed_at"`
+	EvidenceVersion int               `json:"evidence_version"`
+	ID              string            `json:"id"`
+	Kind            EvidenceKind      `json:"kind"`
+	SHA256          string            `json:"sha256"`
+	ObservedAt      time.Time         `json:"observed_at"`
+	CallerContext   map[string]string `json:"caller_context,omitempty"`
 }
 
 type EvidenceWriteRequest struct {
-	Kind       EvidenceKind
-	Handle     string
-	ObservedAt time.Time
-	Payload    []byte
+	Kind          EvidenceKind
+	Handle        string
+	ObservedAt    time.Time
+	Payload       []byte
+	CallerContext map[string]string
 }
 
 type EvidenceCorruptError struct {
@@ -100,6 +103,7 @@ func prepareEvidence(request EvidenceWriteRequest) (EvidenceRecord, EvidenceRef,
 	record := EvidenceRecord{
 		EvidenceVersion: EvidenceVersion, Kind: request.Kind, Handle: request.Handle,
 		ObservedAt: request.ObservedAt.UTC(), PayloadSHA256: payloadDigest, Payload: payload,
+		CallerContext: cloneCallerContext(request.CallerContext),
 	}
 	if err := record.Validate(); err != nil {
 		return EvidenceRecord{}, EvidenceRef{}, nil, err
@@ -169,6 +173,9 @@ func (record EvidenceRecord) Validate() error {
 	if record.PayloadSHA256 != digestBytes(payload) {
 		return fmt.Errorf("payload digest mismatch")
 	}
+	if err := ValidateCallerContext(record.CallerContext); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -190,7 +197,7 @@ func canonicalEvidencePayload(raw []byte) ([]byte, error) {
 }
 
 func evidenceRef(id string, record EvidenceRecord) EvidenceRef {
-	return EvidenceRef{EvidenceVersion: EvidenceVersion, ID: id, Kind: record.Kind, SHA256: id, ObservedAt: record.ObservedAt}
+	return EvidenceRef{EvidenceVersion: EvidenceVersion, ID: id, Kind: record.Kind, SHA256: id, ObservedAt: record.ObservedAt, CallerContext: cloneCallerContext(record.CallerContext)}
 }
 
 func evidenceFilename(id string) string { return strings.TrimPrefix(id, "sha256:") + ".json" }
@@ -205,6 +212,10 @@ func EvidencePath(sessionRoot, id string) string {
 }
 
 func persistProviderCaptureEvidence(root *fsq.DeliveryRoot, lease *Lease, handle string, evidence []CaptureEvidence) ([]string, error) {
+	return persistProviderCaptureEvidenceWithContext(root, lease, handle, nil, evidence)
+}
+
+func persistProviderCaptureEvidenceWithContext(root *fsq.DeliveryRoot, lease *Lease, handle string, callerContext map[string]string, evidence []CaptureEvidence) ([]string, error) {
 	refs := make([]string, 0, len(evidence))
 	for _, item := range evidence {
 		if !item.verified || len(item.payload) == 0 {
@@ -228,6 +239,7 @@ func persistProviderCaptureEvidence(root *fsq.DeliveryRoot, lease *Lease, handle
 		}
 		request := EvidenceWriteRequest{
 			Kind: EvidenceProviderCapture, Handle: handle, ObservedAt: item.observedAt, Payload: item.payload,
+			CallerContext: cloneCallerContext(callerContext),
 		}
 		ref, err := WriteEvidence(root, lease, request)
 		var exists *EvidenceExistsError

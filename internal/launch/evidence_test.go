@@ -30,7 +30,7 @@ func TestImmutableCaptureEvidenceReadback(t *testing.T) {
 	}
 	request := EvidenceWriteRequest{
 		Kind: EvidenceProviderCapture, Handle: "claude", ObservedAt: observed,
-		Payload: capture.payload,
+		Payload: capture.payload, CallerContext: map[string]string{"run_id": "run-42"},
 	}
 	providerRef, err := WriteEvidence(fixture.root, lease, request)
 	if err != nil {
@@ -43,6 +43,19 @@ func TestImmutableCaptureEvidenceReadback(t *testing.T) {
 		if !errors.As(err, &exists) || exists.ID != providerRef.ID {
 			t.Fatalf("duplicate evidence error = %v", err)
 		}
+	}
+	record, readRef, err := ReadEvidence(fixture.root, providerRef.ID)
+	if err != nil || !reflect.DeepEqual(record.CallerContext, request.CallerContext) || !reflect.DeepEqual(readRef.CallerContext, request.CallerContext) {
+		t.Fatalf("evidence caller context readback = record %#v ref %#v err %v", record.CallerContext, readRef.CallerContext, err)
+	}
+	changedContext := request
+	changedContext.CallerContext = map[string]string{"run_id": "run-43"}
+	changedRef, err := WriteEvidence(fixture.root, lease, changedContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedRef.ID == providerRef.ID {
+		t.Fatal("caller context did not enter immutable evidence digest")
 	}
 	manualRef, err := WriteEvidence(fixture.root, lease, EvidenceWriteRequest{
 		Kind: EvidenceManual, Handle: "claude", ObservedAt: observed.Add(time.Second), Payload: []byte(`{"claimed":"provider"}`),

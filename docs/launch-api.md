@@ -21,10 +21,10 @@ if err != nil {
 _ = negotiated
 ```
 
-A `0.61.1` binary advertises `placement`, `initial_input`, `base_root`, and
-`on_live` and can still omit later Wave B3 feature IDs while those beads are
-incomplete. A caller must require every feature it uses. Contract semver alone
-does not claim that an unadvertised feature is available.
+A `0.61.1` binary advertises `placement`, `initial_input`, `base_root`,
+`on_live`, and `caller_context`. It can still omit later Wave B3 feature IDs
+while those beads are incomplete. A caller must require every feature it uses.
+Contract semver alone does not claim that an unadvertised feature is available.
 
 `PreviewV1.capabilities` reports the selected providers' static adapter grammar
 without executing a caller-supplied provider. `grammar_version` is the
@@ -157,6 +157,14 @@ process and lets Apply create missing seats in the same tmux omitted-placement
 session. Hostile live resources refuse even with `keep`. Schema 1 rejects
 `on_live: keep`; omit and `refuse` stay digest-stable.
 
+`caller_context` is an opaque correlation map. It is limited to 32 entries;
+keys are 1 through 64 UTF-8 bytes, values are at most 1,024 UTF-8 bytes, and
+all keys plus values are at most 16 KiB. NUL, invalid UTF-8, and duplicate JSON
+keys reject. Canonical key ordering enters subject schema 2 and immutable
+evidence, but never the plan or trust digest. Apply echoes the request map.
+Inspect, Focus, and Close load it from the proven-owned binding; lifecycle
+requests cannot replace it.
+
 ```go
 request := launchapi.PrepareRequestV1{
 	RequestVersion: launchapi.RequestVersionV1,
@@ -169,6 +177,9 @@ request := launchapi.PrepareRequestV1{
 	Launcher: "tmux",
 	Placement: &launchapi.PlacementV1{
 		Target: launchapi.PlacementCurrentWindow, Layout: launchapi.PlacementColumns, LauncherPane: "%17",
+	},
+	CallerContext: map[string]string{
+		"run_id": "run-42", "task_generation": "3",
 	},
 	Intent: intent,
 }

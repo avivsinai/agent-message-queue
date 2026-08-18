@@ -17,13 +17,14 @@ type LifecycleRequest struct{ Target PrepareTarget }
 type LifecycleDependencies struct{ Backends map[string]Backend }
 
 type LifecycleResult struct {
-	Outcome      string
-	ReasonCode   string
-	Backend      string
-	Profile      string
-	State        string
-	Observations []PrepareObservation
-	Evidence     []EvidenceRef
+	Outcome       string
+	ReasonCode    string
+	Backend       string
+	Profile       string
+	State         string
+	Observations  []PrepareObservation
+	Evidence      []EvidenceRef
+	CallerContext map[string]string
 }
 
 var beforeLifecycleBackendMutationForTest func()
@@ -42,6 +43,10 @@ func InspectLifecycle(ctx context.Context, request LifecycleRequest, dependencie
 		return LifecycleResult{Outcome: LifecycleOutcomeInspected, State: string(InspectAbsent), ReasonCode: "binding_missing"}, nil
 	}
 	if err != nil {
+		var contextError *CallerContextValidationError
+		if errors.As(err, &contextError) {
+			return LifecycleResult{Outcome: string(OutcomeActionRequired), State: string(InspectUnknown), ReasonCode: "caller_context_corrupt"}, nil
+		}
 		return LifecycleResult{}, err
 	}
 	backend, detect, refusal, err := validateLifecycleBinding(binding, dependencies, CapInspect)
@@ -107,6 +112,10 @@ func mutateLifecycle(ctx context.Context, request LifecycleRequest, dependencies
 		return LifecycleResult{Outcome: string(OutcomeActionRequired), State: string(InspectAbsent), ReasonCode: "binding_missing"}, nil
 	}
 	if err != nil {
+		var contextError *CallerContextValidationError
+		if errors.As(err, &contextError) {
+			return LifecycleResult{Outcome: string(OutcomeActionRequired), State: string(InspectUnknown), ReasonCode: "caller_context_corrupt"}, nil
+		}
 		return LifecycleResult{}, err
 	}
 	backend, detect, refusal, err := validateLifecycleBinding(binding, dependencies, capability)
@@ -270,5 +279,5 @@ func lifecycleResultFromBinding(root *fsq.DeliveryRoot, binding BindingRecord) (
 	if err != nil {
 		return LifecycleResult{}, err
 	}
-	return LifecycleResult{Backend: binding.Backend, Profile: binding.Profile, Observations: observations, Evidence: evidence}, nil
+	return LifecycleResult{Backend: binding.Backend, Profile: binding.Profile, Observations: observations, Evidence: evidence, CallerContext: cloneCallerContext(binding.CallerContext)}, nil
 }

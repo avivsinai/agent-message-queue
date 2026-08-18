@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -160,6 +161,41 @@ func TestPrepareV2SubjectDigestIncludesPlacement(t *testing.T) {
 	}
 	if withStagger.Outcome == PrepareOutcomeUnsupported || withoutStagger.Outcome == PrepareOutcomeUnsupported {
 		t.Fatalf("tmux session placement unsupported: stagger=%#v baseline=%#v", withStagger, withoutStagger)
+	}
+}
+
+func TestCallerContextOmittedMatchesV061Digests(t *testing.T) {
+	subject := prepareSubject{
+		Version:      SubjectSchemaV2,
+		IntentDigest: "sha256:" + strings.Repeat("a", 64),
+		PlanDigest:   "sha256:" + strings.Repeat("b", 64),
+		TrustDigest:  "sha256:" + strings.Repeat("c", 64),
+		Target: PrepareTarget{
+			ProjectRoot: "/fixed/project", SessionRoot: "/fixed/mail/collab", Session: "collab",
+		},
+		ProjectIdentity: "project:fixed",
+		SessionIdentity: "session:fixed",
+		Backend:         LauncherCommands,
+		Profile:         "commands",
+	}
+	setPrepareSubjectV2Fields(&subject, nil, PlacementPreview{}, nil)
+	if subject.CallerContext != nil {
+		t.Fatalf("omitted caller_context normalized to %#v, want nil", subject.CallerContext)
+	}
+	encoded, err := json.Marshal(subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(`"caller_context"`)) {
+		t.Fatalf("omitted caller_context entered v0.61-compatible subject bytes: %s", encoded)
+	}
+	digest, err := digestCanonical(subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "sha256:a77730e6d4903a7cfc9e44fc4463307f3251de052e0de453fb23e100ca580e27"
+	if digest != want {
+		t.Fatalf("omitted caller_context subject digest = %s, want %s", digest, want)
 	}
 }
 
