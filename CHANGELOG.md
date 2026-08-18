@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.64.1](https://github.com/avivsinai/agent-message-queue/compare/v0.64.0...v0.64.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* **wake:** reclaim a darwin restart stage whose parent directory is gone ([#572](https://github.com/avivsinai/agent-message-queue/issues/572)) ([acd67b9](https://github.com/avivsinai/agent-message-queue/commit/acd67b982a6343e192ebe550ab943217bbf551ef))
+
 ## [0.64.0](https://github.com/avivsinai/agent-message-queue/compare/v0.63.3...v0.64.0) (2026-08-18)
 
 
