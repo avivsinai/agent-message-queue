@@ -21,17 +21,6 @@ func wakeInspectionBinaryDirGone(inspection wakeLockInspection) bool {
 	return wakeAnyRecordedPathParentGone(paths)
 }
 
-func wakeRestartRecordBinaryDirGone(record wakeRestartRecord) bool {
-	paths := []string{record.StagePath}
-	if record.BoundImage != nil {
-		paths = append(paths, record.BoundImage.ExecutionPath)
-	}
-	if record.PreviousBoundImage != nil {
-		paths = append(paths, record.PreviousBoundImage.ExecutionPath)
-	}
-	return wakeAnyRecordedPathParentGone(paths)
-}
-
 func wakeAnyRecordedPathParentGone(paths []string) bool {
 	for _, path := range paths {
 		if wakeRecordedPathParentGone(path) {
