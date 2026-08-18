@@ -6943,6 +6943,8 @@ func TestWakeLockNeedsReplacementKeepsSameTTYSessionCheckForExternalInjector(t *
 		}
 		return 200, nil
 	})
+	// The fake path has no portable terminal-device identity. Leave process
+	// terminal identity unknown so both platforms exercise the path fallback.
 	inspection := wakeLockInspection{
 		IdentityConfirmed: true,
 		Lock: wakeLock{
@@ -6951,13 +6953,15 @@ func TestWakeLockNeedsReplacementKeepsSameTTYSessionCheckForExternalInjector(t *
 			WakeMode:     wakeTargetInjectVia,
 			TargetDigest: "bound-target-digest",
 		},
-		Process: wakeProcessInfo{
-			ControllingTerminalKnown: true,
-			HasControllingTerminal:   true,
-		},
 	}
 	if !wakeLockNeedsReplacement(inspection) {
 		t.Fatal("same-TTY external injector from another session should require replacement")
+	}
+
+	differentTTY := inspection
+	differentTTY.Lock.TTY = filepath.Join(t.TempDir(), "different-tty")
+	if wakeLockNeedsReplacement(differentTTY) {
+		t.Fatal("different-TTY external injector should not require session-based replacement")
 	}
 }
 
