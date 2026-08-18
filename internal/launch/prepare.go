@@ -156,6 +156,7 @@ type PreparedParticipant struct {
 	PlannedOutcome string                  `json:"planned_outcome"`
 	CwdIdentity    string                  `json:"cwd_identity,omitempty"`
 	OnLive         string                  `json:"on_live,omitempty"`
+	Executable     *ConsultedExecutable    `json:"executable_identity,omitempty"`
 }
 
 type PrepareRoster struct {
@@ -442,7 +443,7 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 
 	plan := Plan{Version: PlanVersion, Agents: []AgentPlan{}}
 	for _, participant := range request.Participants {
-		prepared, observation, agentPlan, actions, participantErr := prepareOneParticipant(participant, state, dependencies, mailboxStates[participant.Handle])
+		prepared, observation, agentPlan, actions, participantErr := prepareOneParticipant(participant, state, dependencies, mailboxStates[participant.Handle], subjectSchema)
 		if participantErr != nil {
 			return PrepareResult{}, participantErr
 		}
@@ -873,7 +874,7 @@ func inspectPrepareRoster(root *fsq.DeliveryRoot, authorization *fsq.MailboxConf
 	return roster, states, nil
 }
 
-func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetState, dependencies PrepareDependencies, mailbox string) (PreparedParticipant, PrepareObservation, *AgentPlan, []PrepareRequiredAction, error) {
+func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetState, dependencies PrepareDependencies, mailbox string, subjectSchema int) (PreparedParticipant, PrepareObservation, *AgentPlan, []PrepareRequiredAction, error) {
 	prepared := PreparedParticipant{
 		Handle: participant.Handle, Runnable: participant.Runnable, Provider: participant.Provider,
 		ResumePolicy: participant.ResumePolicy, Execution: participant.Execution, PlannedOutcome: "participant_only",
@@ -910,6 +911,13 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 	}
 	if !participant.Runnable {
 		return prepared, observation, nil, nil, nil
+	}
+	if subjectSchema == SubjectSchemaV2 && strings.TrimSpace(participant.Executable) != "" {
+		consulted, execErr := ResolveConsultedExecutable(participant.Executable)
+		if execErr != nil {
+			return prepared, observation, nil, nil, fmt.Errorf("identify executable for %s: %w", participant.Handle, execErr)
+		}
+		prepared.Executable = &consulted
 	}
 	if reason := prepareInitialInputUnsupported(participant); reason != "" {
 		prepared.PlannedOutcome = "unsupported"
