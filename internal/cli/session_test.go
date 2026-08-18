@@ -501,3 +501,49 @@ func dirNames(t *testing.T, path string) []string {
 	sort.Strings(names)
 	return names
 }
+
+func TestPeelSessionResumeNameRejectsFlagAsName(t *testing.T) {
+	_, _, err := peelSessionResumeName([]string{"--json"})
+	if err == nil || GetExitCode(err) != ExitUsage {
+		t.Fatalf("peelSessionResumeName(--json) = %v, want usage", err)
+	}
+	if !strings.Contains(err.Error(), "session name required") {
+		t.Fatalf("error = %v, want session name required (not validateSessionName of --json)", err)
+	}
+}
+
+func TestSessionListSkipsRegularFileAgentsDir(t *testing.T) {
+	base := makeSessionBase(t)
+	sess := filepath.Join(base, "collab")
+	if err := os.Mkdir(sess, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sess, "agents"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := captureEnvStdout(t, func() error {
+		return runSessionList([]string{"--root", base, "--json"})
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var result sessionListResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode: %v (%s)", err, output)
+	}
+	for _, item := range result.Sessions {
+		if item.Name == "collab" {
+			t.Fatalf("regular-file agents dir listed as session: %#v", item)
+		}
+	}
+	found := false
+	for _, skipped := range result.Skipped {
+		if skipped.Name == "collab" && skipped.Reason == "not_a_session" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected collab skipped as not_a_session, got %#v", result.Skipped)
+	}
+}

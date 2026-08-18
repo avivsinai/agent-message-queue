@@ -226,6 +226,38 @@ func TestDLQPurgeDryRunDoesNotCreateDLQLocks(t *testing.T) {
 	}
 }
 
+func TestDLQPurgeSkipsDotfilesEvenWhenTheyParse(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "alice", "bob")
+	visible := writeOldValidDLQEnvelope(t, root, "alice", "visible-purge.md")
+	data, err := os.ReadFile(visible)
+	if err != nil {
+		t.Fatalf("read visible envelope: %v", err)
+	}
+	hidden := filepath.Join(fsq.AgentDLQNew(root, "alice"), ".hidden-purge.md")
+	if err := os.WriteFile(hidden, data, 0o600); err != nil {
+		t.Fatalf("write hidden envelope: %v", err)
+	}
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runDLQPurge([]string{"--root", root, "--me", "alice", "--yes", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	var result struct {
+		Removed int `json:"removed"`
+	}
+	if err := unmarshalJSONOutput(stdout, &result); err != nil {
+		t.Fatalf("decode purge: %v (output: %s)", err, stdout)
+	}
+	if result.Removed != 1 {
+		t.Fatalf("purge removed = %d, want 1 (dotfile skipped)", result.Removed)
+	}
+	if _, err := os.Stat(hidden); err != nil {
+		t.Fatalf("hidden DLQ envelope was purged: %v", err)
+	}
+}
+
 func TestDLQPurgeWithoutAgeFilterRemovesCorruptEnvelope(t *testing.T) {
 	root := initializedSendMailboxRoot(t, "alice", "bob")
 	path, _ := writeFreshCorruptDLQEnvelope(t, root, "alice", "corrupt-unconditional-purge.md")
@@ -356,6 +388,11 @@ func TestDLQPurgeStaleCandidateCannotDeleteConcurrentRetryAudit(t *testing.T) {
 
 func writeOldValidDLQEnvelope(t *testing.T, root, agent, filename string) string {
 	t.Helper()
+	return writeDLQEnvelopeWithFailureTime(t, root, agent, filename, time.Now().Add(-48*time.Hour).UTC().Format(time.RFC3339))
+}
+
+func writeDLQEnvelopeWithFailureTime(t *testing.T, root, agent, filename, failureTime string) string {
+	t.Helper()
 	env := fsq.DLQEnvelope{
 		Schema:        fsq.DLQSchemaVersion,
 		ID:            strings.TrimSuffix(filename, ".md"),
@@ -363,7 +400,7 @@ func writeOldValidDLQEnvelope(t *testing.T, root, agent, filename string) string
 		OriginalFile:  "original.md",
 		FailureReason: "test_failure",
 		FailureDetail: "old deterministic fixture",
-		FailureTime:   time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339),
+		FailureTime:   failureTime,
 		SourceDir:     fsq.BoxNew,
 	}
 	header, err := json.Marshal(env)

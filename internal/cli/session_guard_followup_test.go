@@ -186,6 +186,50 @@ func TestLoadSessionPinNamesIncompletePinEvidence(t *testing.T) {
 	}
 }
 
+func TestLoadSessionPinRequiresBothIdentityTokensWhenBaseRootIsSet(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv(envBaseRoot, base)
+	setOptionalEnv(t, envSession, "", false)
+	setOptionalEnv(t, envRootID, "v1:root-token-only", true)
+	setOptionalEnv(t, envBaseRootID, "", false)
+
+	_, err := loadSessionPin()
+	if err == nil || GetExitCode(err) != ExitContextMismatch {
+		t.Fatalf("one-sided identity pin should be context mismatch, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "incomplete AMQ identity pin") {
+		t.Fatalf("error = %v, want incomplete identity pin (not a silent success)", err)
+	}
+}
+
+func TestLoadSessionPinRejectsPresentEmptyIdentityToken(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv(envBaseRoot, base)
+	setOptionalEnv(t, envSession, "", false)
+
+	cases := []struct {
+		name       string
+		rootID     string
+		baseRootID string
+	}{
+		{name: "empty root token", rootID: "   ", baseRootID: "v1:base-token"},
+		{name: "empty base token", rootID: "v1:root-token", baseRootID: "   "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setOptionalEnv(t, envRootID, tc.rootID, true)
+			setOptionalEnv(t, envBaseRootID, tc.baseRootID, true)
+			_, err := loadSessionPin()
+			if err == nil || GetExitCode(err) != ExitContextMismatch {
+				t.Fatalf("empty present identity token should be context mismatch, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "incomplete AMQ identity pin") {
+				t.Fatalf("error = %v, want incomplete identity pin", err)
+			}
+		})
+	}
+}
+
 func pointerTo(value string) *string {
 	return &value
 }
