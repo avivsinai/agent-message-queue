@@ -18,6 +18,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/adapter"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/amq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
+	"github.com/avivsinai/agent-message-queue/internal/keepalive/supervisor"
 )
 
 type appCommandRunnerFunc func(context.Context, string, ...string) ([]byte, error)
@@ -1934,6 +1935,393 @@ exit 1
 	}
 }
 
+type boundaryAdapter struct {
+	name     string
+	probeErr error
+}
+
+func (a boundaryAdapter) Name() string { return a.name }
+
+func (a boundaryAdapter) Probe(context.Context, string) error { return a.probeErr }
+
+func (a boundaryAdapter) Inject(context.Context, string, string) error { return nil }
+
+type sequenceBoundaryAdapter struct {
+	boundaryAdapter
+	probeErrors []error
+	calls       int
+}
+
+func (a *sequenceBoundaryAdapter) Probe(context.Context, string) error {
+	index := a.calls
+	a.calls++
+	if index >= len(a.probeErrors) {
+		return nil
+	}
+	return a.probeErrors[index]
+}
+
+type discoveringBoundaryAdapter struct {
+	boundaryAdapter
+	discovered   string
+	discoverErr  error
+	normalized   string
+	normalizeErr error
+}
+
+func (a discoveringBoundaryAdapter) Discover(context.Context) (string, error) {
+	return a.discovered, a.discoverErr
+}
+
+func (a discoveringBoundaryAdapter) NormalizeTarget(string) (string, error) {
+	return a.normalized, a.normalizeErr
+}
+
+type nilInventoryBoundaryAdapter struct{ boundaryAdapter }
+
+func (a nilInventoryBoundaryAdapter) Inventory(context.Context, adapter.OwnershipContext) (adapter.TargetInventory, error) {
+	return nil, nil
+}
+
+type countingRetirer struct{ calls int }
+
+func (r *countingRetirer) RetireWake(context.Context, amq.RetireWakeRequest) (amq.RetireWakeResult, error) {
+	r.calls++
+	return amq.RetireWakeResult{}, nil
+}
+
+func TestRegisterEnvFailureDependsOnlyOnRequiredIdentity(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeAMQ := filepath.Join(dir, "amq")
+	if err := os.WriteFile(fakeAMQ, []byte("#!/bin/sh\nexit 12\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	base := registerOptions{
+		AdapterName: "file",
+		Target:      target,
+		Root:        filepath.Join(dir, "root"),
+		BaseRoot:    dir,
+		SessionName: "session",
+		Me:          "codex",
+		AMQPath:     fakeAMQ,
+		NoStart:     true,
+	}
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*registerOptions)
+		wantErr bool
+	}{
+		{name: "missing root", mutate: func(opts *registerOptions) { opts.Root = "" }, wantErr: true},
+		{name: "missing agent", mutate: func(opts *registerOptions) { opts.Me = "" }, wantErr: true},
+		{name: "missing optional base root", mutate: func(opts *registerOptions) { opts.BaseRoot = "" }},
+		{name: "missing optional session", mutate: func(opts *registerOptions) { opts.SessionName = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := base
+			opts.RegistryPath = filepath.Join(t.TempDir(), "registry.json")
+			tc.mutate(&opts)
+			err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).registerWithOptions(context.Background(), opts)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("registerWithOptions() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRegisterUsesEnvBaseRootAndSessionIndependently(t *testing.T) {
+	dir := t.TempDir()
+	envBase := filepath.Join(dir, ".agent-mail")
+	expectedRoot := filepath.Join(envBase, "session")
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeAMQ := filepath.Join(dir, "amq")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' '{\"root\":\"ignored\",\"base_root\":%q,\"session_name\":\"session\",\"me\":\"env-agent\"}'\n", envBase)
+	if err := os.WriteFile(fakeAMQ, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, missing := range []string{"base", "session"} {
+		t.Run(missing, func(t *testing.T) {
+			registryPath := filepath.Join(t.TempDir(), "registry.json")
+			opts := registerOptions{
+				RegistryPath: registryPath,
+				AdapterName:  "file",
+				Target:       target,
+				Root:         ".agent-mail/session",
+				BaseRoot:     envBase,
+				SessionName:  "session",
+				Me:           "codex",
+				AMQPath:      fakeAMQ,
+				NoStart:      true,
+			}
+			if missing == "base" {
+				opts.BaseRoot = ""
+			} else {
+				opts.SessionName = ""
+			}
+			if err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).registerWithOptions(context.Background(), opts); err != nil {
+				t.Fatalf("registerWithOptions: %v", err)
+			}
+			loaded, err := registry.New(registryPath).Load()
+			if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Root != expectedRoot {
+				t.Fatalf("entries=%#v err=%v, want root %q", loaded.Entries, err, expectedRoot)
+			}
+		})
+	}
+}
+
+func TestRegisterReturnsOnlyNonDetachedReconcileErrors(t *testing.T) {
+	dir := t.TempDir()
+	base := registerOptions{
+		Root: filepath.Join(dir, "root"), BaseRoot: dir, SessionName: "session", Me: "codex",
+		Target: "target", AMQPath: "/bin/false",
+	}
+	for _, tc := range []struct {
+		name     string
+		probeErr error
+		wantErr  bool
+	}{
+		{name: "proven detached", probeErr: adapter.ErrTargetNotFound},
+		{name: "ambiguous probe failure", probeErr: errors.New("probe uncertain"), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selected := &sequenceBoundaryAdapter{
+				boundaryAdapter: boundaryAdapter{name: "boundary"},
+				probeErrors:     []error{nil, tc.probeErr},
+			}
+			adapters := adapter.NewRegistry(selected)
+			opts := base
+			opts.RegistryPath = filepath.Join(t.TempDir(), "registry.json")
+			opts.AdapterName = "boundary"
+			err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &adapters}).registerWithOptions(context.Background(), opts)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("registerWithOptions() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestResolveRegistrationReadinessFailurePersistsRetryState(t *testing.T) {
+	store := registry.New(filepath.Join(t.TempDir(), "registry.json"))
+	reservation, err := store.Upsert(registry.Entry{Root: "/tmp/root", Agent: "codex", Adapter: "file", Target: "/tmp/target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := reservation
+	candidate.LastError = "retry later"
+	readinessErr := fmt.Errorf("%w: test boundary", amq.ErrWakeReadinessUncertain)
+	err = resolveRegistrationReadinessFailure(store, reservation, candidate, nil, readinessErr)
+	if !errors.Is(err, amq.ErrWakeReadinessUncertain) {
+		t.Fatalf("error = %v, want uncertain readiness", err)
+	}
+	loaded, loadErr := store.Load()
+	if loadErr != nil || len(loaded.Entries) != 1 || loaded.Entries[0] != candidate {
+		t.Fatalf("entries=%#v err=%v, want candidate retry state", loaded.Entries, loadErr)
+	}
+}
+
+func TestResolveRegistrationReadinessFailureReportsRestoreFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	readinessErr := errors.New("wake failed")
+	err := resolveRegistrationReadinessFailure(registry.New(path), registry.Entry{ID: "reservation"}, registry.Entry{ID: "reservation"}, nil, readinessErr)
+	if !errors.Is(err, readinessErr) || !strings.Contains(err.Error(), "restore previous registry entries") {
+		t.Fatalf("error = %v, want readiness and restore failures", err)
+	}
+}
+
+func TestRegistrationOwnershipContextFailsClosedAtEveryCMUXBoundary(t *testing.T) {
+	target := "cmux:surface:TARGET"
+	for _, tc := range []struct {
+		name     string
+		selected adapter.Adapter
+		want     adapter.OwnershipContext
+	}{
+		{name: "other adapter", selected: boundaryAdapter{name: "file"}},
+		{name: "cmux without discovery", selected: boundaryAdapter{name: "cmux"}},
+		{name: "discovery failure", selected: discoveringBoundaryAdapter{boundaryAdapter: boundaryAdapter{name: "cmux"}, discoverErr: errors.New("discover failed")}},
+		{name: "normalization failure", selected: discoveringBoundaryAdapter{boundaryAdapter: boundaryAdapter{name: "cmux"}, discovered: target, normalizeErr: errors.New("normalize failed")}},
+		{name: "different target", selected: discoveringBoundaryAdapter{boundaryAdapter: boundaryAdapter{name: "cmux"}, discovered: "other", normalized: "other"}},
+		{name: "trusted exact target", selected: discoveringBoundaryAdapter{boundaryAdapter: boundaryAdapter{name: "cmux"}, discovered: target, normalized: target}, want: adapter.OwnershipContext{TrustedTarget: target}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := registrationOwnershipContext(context.Background(), tc.selected, target); got != tc.want {
+				t.Fatalf("ownership context = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRecoverDetachedRegistrationSameTargetIsNoOp(t *testing.T) {
+	next := registry.Entry{Root: "/tmp/root", Agent: "codex", Adapter: "file", Target: "/tmp/target"}
+	retirer := &countingRetirer{}
+	got, changed, err := recoverDetachedRegistration(context.Background(), []registry.Entry{next}, adapter.Registry{}, supervisor.Reconciler{}, retirer, next)
+	if err != nil || changed || got != next || retirer.calls != 0 {
+		t.Fatalf("got=%+v changed=%v retireCalls=%d err=%v, want exact no-op", got, changed, retirer.calls, err)
+	}
+}
+
+func TestSuperviseRejectsNonPositiveInterval(t *testing.T) {
+	for _, interval := range []string{"0s", "-1ns"} {
+		var stderr bytes.Buffer
+		code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Run(context.Background(), []string{"supervise", "--interval", interval})
+		if code != 1 || !strings.Contains(stderr.String(), "--interval must be greater than zero") {
+			t.Fatalf("interval %s code=%d stderr=%q", interval, code, stderr.String())
+		}
+	}
+}
+
+func TestContinuousSuperviseLogsPersistentPassErrorsAndContinues(t *testing.T) {
+	registryPath := filepath.Join(t.TempDir(), "registry.json")
+	if err := os.Mkdir(registryPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	var stderr bytes.Buffer
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Run(ctx, []string{"supervise", "--registry", registryPath, "--interval", "1ms"})
+	if code != 0 || stderr.Len() == 0 || !strings.Contains(stderr.String(), "registry.json") {
+		t.Fatalf("code=%d stderr=%q, want logged pass failures until cancellation", code, stderr.String())
+	}
+}
+
+func TestLogReconcileTransitionEmitsWhenAnyRecordedFieldChanges(t *testing.T) {
+	previous := registry.Entry{State: registry.StateDetached, LastError: "old", LastSupervisorDecision: "old decision"}
+	for _, tc := range []struct {
+		name   string
+		update func(*registry.Entry)
+	}{
+		{name: "state", update: func(entry *registry.Entry) { entry.State = registry.StateActive }},
+		{name: "last error", update: func(entry *registry.Entry) { entry.LastError = "new" }},
+		{name: "decision", update: func(entry *registry.Entry) { entry.LastSupervisorDecision = "new decision" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			updated := previous
+			tc.update(&updated)
+			var stderr bytes.Buffer
+			(App{Stderr: &stderr}).logReconcileTransition(previous, updated, supervisor.Result{Action: supervisor.ActionStartFailed, Error: errors.New("transition")})
+			if !strings.Contains(stderr.String(), "transition") {
+				t.Fatalf("transition log missing for %s: %q", tc.name, stderr.String())
+			}
+		})
+	}
+	var unchanged bytes.Buffer
+	(App{Stderr: &unchanged}).logReconcileTransition(previous, previous, supervisor.Result{Error: errors.New("must not log")})
+	if unchanged.Len() != 0 {
+		t.Fatalf("unchanged entry logged: %q", unchanged.String())
+	}
+}
+
+func TestPassProbeRejectsNilInventory(t *testing.T) {
+	probe := &passProbe{selected: nilInventoryBoundaryAdapter{boundaryAdapter{name: "inventory"}}}
+	if _, err := probe.loadInventory(context.Background()); err == nil || !strings.Contains(err.Error(), "nil target inventory") {
+		t.Fatalf("loadInventory() error = %v, want nil-inventory refusal", err)
+	}
+}
+
+func TestAnyEntryDueHonorsExactHealthAndBackoffDeadlines(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	for _, tc := range []struct {
+		name  string
+		entry registry.Entry
+		want  bool
+	}{
+		{name: "health future", entry: registry.Entry{NextHealthCheck: now.Add(time.Nanosecond)}},
+		{name: "health exact", entry: registry.Entry{NextHealthCheck: now}, want: true},
+		{name: "backoff future", entry: registry.Entry{BackoffUntil: now.Add(time.Nanosecond)}},
+		{name: "backoff exact", entry: registry.Entry{BackoffUntil: now}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := anyEntryDue([]registry.Entry{tc.entry}, now); got != tc.want {
+				t.Fatalf("anyEntryDue() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRetireSessionMatchesRootAdapterAndAgentTogether(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	correct := registry.Entry{ID: "correct", Root: root, Agent: "codex", Adapter: "boundary", Target: "correct"}
+	wrongAdapter := registry.Entry{ID: "wrong-adapter", Root: root, Agent: "codex", Adapter: "other", Target: "wrong-adapter"}
+	wrongAgent := registry.Entry{ID: "wrong-agent", Root: root, Agent: "claude", Adapter: "boundary", Target: "wrong-agent"}
+	registryPath := filepath.Join(dir, "registry.json")
+	if err := registry.New(registryPath).Save(registry.File{Entries: []registry.Entry{correct, wrongAdapter, wrongAgent}}); err != nil {
+		t.Fatal(err)
+	}
+	fakeAMQ := filepath.Join(dir, "amq")
+	if err := os.WriteFile(fakeAMQ, []byte("#!/bin/sh\nprintf '%s\\n' '{\"status\":\"retired\",\"pid\":42}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	adapters := adapter.NewRegistry(
+		boundaryAdapter{name: "boundary", probeErr: adapter.ErrTargetNotFound},
+		boundaryAdapter{name: "other", probeErr: adapter.ErrTargetNotFound},
+	)
+	var stderr bytes.Buffer
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
+		"retire-session", "--registry", registryPath, "--root", root, "--adapter", "boundary",
+		"--agents", "codex", "--amq", fakeAMQ, "--self", "/bin/echo",
+	})
+	if code != 0 {
+		t.Fatalf("retire-session code=%d stderr=%q", code, stderr.String())
+	}
+	loaded, err := registry.New(registryPath).Load()
+	if err != nil || len(loaded.Entries) != 2 {
+		t.Fatalf("entries=%#v err=%v, want only exact match removed", loaded.Entries, err)
+	}
+	for _, entry := range loaded.Entries {
+		if entry.ID == correct.ID {
+			t.Fatalf("exact entry remained: %#v", loaded.Entries)
+		}
+	}
+}
+
+func TestNormalizeAMQPathsCoversIndependentPathBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	relativeBase := filepath.Join("relative", "base")
+	absRelativeBase, err := filepath.Abs(relativeBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absRoot := filepath.Join(dir, "absolute-root")
+	for _, tc := range []struct {
+		name, root, base, session string
+		wantRoot, wantBase        string
+	}{
+		{name: "relative base becomes absolute", root: absRoot, base: relativeBase, wantRoot: absRoot, wantBase: absRelativeBase},
+		{name: "empty root stays empty", root: "", base: dir, wantRoot: "", wantBase: dir},
+		{name: "absolute root stays absolute", root: absRoot, base: dir, wantRoot: absRoot, wantBase: dir},
+		{name: "session basename joins base", root: "session", base: dir, session: "session", wantRoot: filepath.Join(dir, "session"), wantBase: dir},
+		{name: "empty session does not capture other root", root: "other", base: dir, session: "", wantRoot: mustAbsPath(t, "other"), wantBase: dir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotRoot, gotBase := normalizeAMQPaths(tc.root, tc.base, tc.session)
+			if gotRoot != tc.wantRoot || gotBase != tc.wantBase {
+				t.Fatalf("normalizeAMQPaths() = (%q, %q), want (%q, %q)", gotRoot, gotBase, tc.wantRoot, tc.wantBase)
+			}
+		})
+	}
+}
+
+func mustAbsPath(t *testing.T, path string) string {
+	t.Helper()
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
+}
+
 func runApp(t *testing.T, args ...string) {
 	t.Helper()
 	var stdout bytes.Buffer
@@ -1987,20 +2375,42 @@ func registerDetachedWakeCleanup(t *testing.T, pidFile string, gates ...string) 
 		if !ok {
 			return
 		}
-		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) {
-			running, err := fakeWakeProcessRunning(pid)
-			if err != nil {
-				t.Errorf("inspect detached fake wake pid %d: %v", pid, err)
-				return
-			}
-			if !running {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
+		if exited, err := waitForFakeWakeExit(pid, 2*time.Second); err != nil {
+			t.Errorf("inspect detached fake wake pid %d: %v", pid, err)
+			return
+		} else if exited {
+			return
 		}
-		t.Errorf("detached fake wake pid %d did not exit after cleanup", pid)
+		t.Errorf("detached fake wake pid %d did not exit through cooperative cleanup", pid)
+		_ = exec.Command("kill", "-TERM", "-"+strconv.Itoa(pid)).Run()
+		if exited, err := waitForFakeWakeExit(pid, 500*time.Millisecond); err != nil {
+			t.Errorf("inspect detached fake wake pid %d after SIGTERM: %v", pid, err)
+			return
+		} else if exited {
+			return
+		}
+		_ = exec.Command("kill", "-KILL", "-"+strconv.Itoa(pid)).Run()
+		if exited, err := waitForFakeWakeExit(pid, 2*time.Second); err != nil {
+			t.Errorf("inspect detached fake wake pid %d after SIGKILL: %v", pid, err)
+		} else if !exited {
+			t.Errorf("detached fake wake pid %d survived unconditional cleanup", pid)
+		}
 	})
+}
+
+func waitForFakeWakeExit(pid int, timeout time.Duration) (bool, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		running, err := fakeWakeProcessRunning(pid)
+		if err != nil {
+			return false, err
+		}
+		if !running {
+			return true, nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false, nil
 }
 
 func fakeWakeProcessRunning(pid int) (bool, error) {
