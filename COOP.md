@@ -14,7 +14,7 @@ For swarm command reference, see [CLAUDE.md](CLAUDE.md).
 
 ## Co-op Workflow
 
-Use the [README Quick Start](README.md#quick-start) to install AMQ, configure
+Use the [README Getting started](README.md#getting-started) to install AMQ, configure
 the project with `amq setup`, and run `amq launch`. `--launcher auto` (the
 default) may select `tmux`, `cmux`, or `ghostty` and run the declared plan
 in-app. The `commands` backend prints one complete `coop exec` command for

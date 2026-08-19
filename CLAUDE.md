@@ -132,7 +132,7 @@ workflow for each surface.
 
 | Area | Commands | Contract |
 | --- | --- | --- |
-| Onboarding | `setup`, `launch` | Configure once, then reconcile and print or run the declared launch plan. The [README Quick Start](README.md#quick-start) is canonical. |
+| Onboarding | `setup`, `launch` | Configure once, then reconcile and print or run the declared launch plan. The [README Getting started](README.md#getting-started) is canonical. |
 | Sessions | `session create`, `session list`, `session resume` | Create explicitly, inspect available sessions, or resume stored conversations. |
 | Shell context | `env`, `who`, `shell-setup`, `completion` | Set or inspect a complete context and configure shell integration. |
 | Messaging | `send`, `reply`, `list`, `read`, `drain`, `thread`, `trace` | Deliver, ingest, inspect, and follow conversations. Prefer `drain --include-body` for handoffs. |
@@ -271,5 +271,5 @@ installations.
 
 Edit only the canonical directory, bump skill metadata when publishing, run
 `make check-skills`, and test the project-local skill. Do not create divergent
-copies. See the [README installation section](README.md#2-install-skill) for
+copies. See the [README skill install](README.md#2-install-skill) for
 installed-skill commands.

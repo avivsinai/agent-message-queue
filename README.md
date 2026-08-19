@@ -8,6 +8,8 @@
 
 AMQ manages the conversation: agent-to-agent messaging, thread continuity, cross-session and cross-project routing, handoff state, and operational visibility. It does not try to own task decomposition, worktree management, dependency scheduling, or scheduler execution; Claude Code teams, Codex, Kanban, Symphony, and similar orchestrators stay one layer above it.
 
+**Start here:** [Getting started](#getting-started) — install, start two agents, send one message.
+
 ## Why AMQ?
 
 Modern AI-assisted development often involves multiple agents working on the same codebase. But without coordination:
@@ -31,59 +33,148 @@ AMQ gives agents a **local interoperability bus**: they can send messages, reply
 
 ![AMQ Demo — Claude and Codex collaborating via split-pane terminal](docs/assets/demo.gif)
 
-## Installation
+<a id="quick-start"></a>
 
-### 1. Install Binary
+## Getting started
+
+About five minutes from install to the first delivered message. You need two
+agent CLIs on `PATH`. This walkthrough uses **Claude Code** (`claude`) and
+**Codex CLI** (`codex`) on one machine. `amq setup` also detects Cursor when
+`agent` is on `PATH` (or legacy `cursor-agent` if `agent` is absent).
+
+Native Windows can run the core queue from the Windows ZIP, but this
+walkthrough needs `coop exec` and `wake`, which are not supported natively.
+Use WSL with the Linux binary. See the
+[platform capability matrix](INSTALL.md#platform-capability-matrix).
+
+### 1. Install the binary
 
 **macOS (Homebrew):**
+
 ```bash
 brew install avivsinai/tap/amq
 ```
 
-**macOS/Linux (script):**
+**macOS / Linux (script):**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
 
-Installs to `~/.local/bin` or `~/go/bin` (no sudo required). Verify: `amq --version`
+The script installs to `~/.local/bin` or `~/go/bin` (no sudo). Review it
+before running. It fails unless `checksums.txt` has exactly one valid entry
+for the selected asset and `sha256sum` or `shasum` verifies it before
+extraction.
 
-**One-liner with skill:**
+Verify:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash -s -- --skill
+amq --version
 ```
 
-Review the script before running. Installation fails unless `checksums.txt` has exactly one valid entry for the selected asset and `sha256sum` or `shasum` verifies it before extraction.
+Manual download, Windows ZIP, and build-from-source are in
+[INSTALL.md](INSTALL.md).
 
 ### 2. Install Skill
 
-**Via skills** (recommended):
+So each agent knows the AMQ commands:
+
 ```bash
 npx skills add avivsinai/agent-message-queue -g -y
 ```
 
-**Or via skild:**
+Or install binary and skill together:
+
 ```bash
-npx skild install @avivsinai/amq-cli -t claude -y
+curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash -s -- --skill
 ```
 
-For manual installation or troubleshooting, see [INSTALL.md](INSTALL.md).
+Other skill methods (skild, marketplace, manual copy) are in
+[INSTALL.md](INSTALL.md). Restart the agent after installing.
+
+### 3. Set up the project
+
+In the repository the two agents will share:
+
+```bash
+amq setup
+```
+
+Setup probes for Claude and Codex (and Cursor when present), previews the
+roster and launcher preference, then writes `.amqrc`, `.amq/launch.json`,
+local preferences, the default session, and roster mailboxes. Confirm the
+preview.
+
+If setup reports `no supported agent CLI detected`, install `claude` and
+`codex`, put them on `PATH`, and run `amq setup` again.
+
+### 4. Start both agents
+
+```bash
+amq launch
+```
+
+The first launch asks you to trust the plan. That confirmation is stored
+outside the worktree.
+
+- If launch selects `tmux`, `cmux`, or `ghostty`, both agents start in that
+  app.
+- If launch selects the `commands` backend, it prints one complete
+  `coop exec` line per agent and exits `6`. Paste each emitted line into
+  its own terminal. Do not rewrite the lines: they bind the session, launch
+  nonce, provider arguments, and execution ticket.
+
+Start both agents before sending. A newly started wake baselines messages
+that were already waiting, so they stay unread but do not notify. If you
+sent first, run `amq drain --include-body` in the target agent.
+
+### 5. Send one message and see it arrive
+
+In the Claude terminal (`AM_ME` is already set):
+
+```bash
+amq send --to codex --subject "Hello" --body "Can you see this?"
+```
+
+In the Codex terminal:
+
+```bash
+amq list --new
+amq drain --include-body
+```
+
+You should see Claude's message, then the drained body. That is the loop:
+`send` on one side, `list` / `drain` on the other. Reply with
+`amq reply --id <msg_id> --body "..."` when you have a message ID.
+
+Roles, phases, and troubleshooting live in [COOP.md](COOP.md). Daily
+commands after this first message are in [Messaging](#messaging) below.
+
+## Installation
+
+The default install is in [Getting started](#getting-started). More methods
+(releases ZIP, checksums, source build, skill marketplace) are in
+[INSTALL.md](INSTALL.md).
 
 ### Updating
 
-For Homebrew installations:
+Homebrew:
+
 ```bash
 brew upgrade amq
 ```
 
 Retire live wakes started by the previous Cellar binary first. If a leftover
-lock's image directory is gone, `wake check` reports `binary_dir_gone`; remove
-it with `amq doctor --ops --fix-wake-locks`.
+lock's image directory is gone, `wake check` reports `binary_dir_gone`;
+remove it with `amq doctor --ops --fix-wake-locks`. See
+[Wake operations](docs/wake-operations.md).
 
 GitHub Actions `verify-brew-release` confirms a published tag installs from
 `avivsinai/tap/amq` and that `amq --version` matches that tag. It does not
 replace `brew upgrade` on an operator machine.
 
-For installations made with the install script or another manual binary install:
+Install-script or other manual binary installs:
+
 ```bash
 amq upgrade
 ```
@@ -103,37 +194,44 @@ amq-keepalive version
 
 See [COOP.md](COOP.md#supervisor-recipes) for the operational guide.
 
-## Quick Start
+## Setup and launch
 
-### 1. Initialize Project
+`amq setup` is the one-time project configuration. `amq launch` reconciles
+the committed roster and starts or resumes that session.
 
 ```bash
 amq setup
+amq launch
+amq session create feature-x   # once, before the first named-session launch
+amq launch --session feature-x
+amq session resume feature-x
 ```
 
-Detects supported agent CLIs and launcher preferences, previews the project
-declaration, then creates `.amqrc`, `.amq/launch.json`, local preferences,
-the default session, and roster mailboxes.
+`launch` reads the committed roster, selects the declared default session
+when `--session` is absent, and resumes exact provider-qualified conversation
+IDs. It never uses a provider's "last" or "continue" heuristic. The first
+semantic plan, and each semantic plan change, requires an interactive trust
+confirmation stored outside the worktree. Non-interactive or `--json` calls
+exit `6` until that digest is trusted. An unknown `session resume` name
+exits `3` and writes nothing. Managed backends use a fail-closed recovery
+journal; see [Managed launch recovery](docs/launch-recovery.md).
 
-For Cursor, setup uses the current `agent` command when it is on `PATH`; if it
-is absent, the preview explains that setup is falling back to legacy
-`cursor-agent`.
+Registered launchers are `commands`, `tmux`, `cmux` (envelope `>=0.64.3 <1.0`,
+protocol 2), and `ghostty` (AppleScript, envelope `>=1.3.0 <2.0`).
+`--launcher auto` is the default: it walks the local launcher preference and
+selects the first backend whose Detect reports Available. An explicit
+`--launcher <name>` wins. When `CMUX_SURFACE_ID` is set, auto prepends
+`cmux` ahead of `ghostty`; otherwise `TERM_PROGRAM=ghostty` prepends
+`ghostty`. Setup lists cmux and Ghostty in `available_launchers` only after
+their Detect ping succeeds, not from `LookPath` alone.
 
-Automation uses a stateless preview and applies only that approved digest. The
-first non-interactive setup must name the roster, default session, and launcher
-preference explicitly:
+The `commands` backend prints complete `coop exec` commands and exits `6`
+because executing them is the remaining operator action. Paste those emitted
+lines exactly, one per terminal. Managed `tmux`, `cmux`, and `ghostty`
+backends run the declared plan in-app instead of printing those lines.
 
-```bash
-setup_args=(--agents claude,codex --default-session collab --launcher-preference commands)
-setup_preview="$(amq setup --preview --json "${setup_args[@]}")"
-setup_digest="$(printf '%s\n' "$setup_preview" | jq -r '.preview.digest')"
-amq setup --apply "$setup_digest" "${setup_args[@]}"
-```
-
-`--preview` performs zero writes. `--apply` recomputes the preview and exits `6`
-without writing if its `sha256:<hex>` digest differs. `-y` remains available
-for callers that already own an approval gate, but it cannot be combined with
-`--preview` or `--apply`.
+Each launched agent gets a session environment and wake notifications. See
+[COOP.md](COOP.md#running-co-op-mode) for co-op operations.
 
 Provider arguments belong in the committed `.amq/launch.json`, so `launch`
 can validate and include them in its semantic trust digest. For example:
@@ -160,97 +258,13 @@ can validate and include them in its semantic trust digest. For example:
 }
 ```
 
-Dangerous permission-bypass flags are not valid committed arguments. Keep them
-in an operator-controlled direct `coop exec` invocation when that low-level
-path is intentionally required.
+Dangerous permission-bypass flags are not valid committed arguments. Keep
+them in an operator-controlled direct `coop exec` invocation when that
+low-level path is intentionally required.
 
-### 2. Launch or Resume a Session
+### Named sessions
 
-```bash
-amq launch
-amq session create feature-x   # once, before the first named-session launch
-amq launch --session feature-x
-amq session resume feature-x
-```
-
-`launch` reads the committed roster, selects the declared default session when
-`--session` is absent, and resumes exact provider-qualified conversation IDs.
-It never uses a provider's "last" or "continue" heuristic. The first semantic
-plan, and each semantic plan change, requires an interactive trust
-confirmation stored outside the worktree. Non-interactive or `--json` calls
-exit `6` until that digest is trusted. An unknown `session resume` name exits
-`3` and writes nothing. Managed backends use a fail-closed recovery journal;
-see [Managed launch recovery](docs/launch-recovery.md).
-
-Registered launchers are `commands`, `tmux`, `cmux` (envelope `>=0.64.3 <1.0`,
-protocol 2), and `ghostty` (AppleScript, envelope `>=1.3.0 <2.0`).
-`--launcher auto` is the default: it walks the local launcher preference and
-selects the first backend whose Detect reports Available. An explicit
-`--launcher <name>` wins. When `CMUX_SURFACE_ID` is set, auto prepends `cmux`
-ahead of `ghostty`; otherwise `TERM_PROGRAM=ghostty` prepends `ghostty`. Setup
-lists cmux and Ghostty in `available_launchers` only after their Detect ping
-succeeds, not from `LookPath` alone. Operator live proofs are in
-[the public launch API guide](docs/launch-api.md).
-
-Prepare records the requested and consulted executable paths plus their
-physical identity, including symlink hops. In subject schema 2, an inode,
-mtime, symlink-hop, or `PATH` retarget changes the subject before Apply. A
-provider, wrapper, or cwd replacement after authorization returns the typed
-`authorized_identity_changed` refusal before capability probing or ticket
-creation.
-
-The `commands` backend prints complete `coop exec` commands and exits `6`
-because executing them is the remaining operator action. When launch uses that
-backend, paste those emitted lines exactly, one per terminal. Do not
-reconstruct them from examples: they bind the selected session, launch nonce,
-provider arguments, and execution ticket. Managed `tmux`, `cmux`, and
-`ghostty` backends run the declared plan in-app instead of printing those
-lines.
-
-Automation can use the versioned public launch contract instead of the
-interactive flow:
-
-```bash
-amq launch --plan intent.json --prepare --json --launcher commands > prepared.json
-# Review required_actions and construct an ApplyRequestV1 with exact decisions.
-amq launch --apply apply.json --json
-```
-
-`--prepare` is read-only. `--apply` accepts the complete serialized request, so
-it can run in a fresh process. A plain `--plan intent.json --json` applies only
-when Prepare reports no required actions. Otherwise it prints the Prepare
-result and exits `6`; it never invents a trust, stale-conversation, rebind, or
-degraded-capability decision. Launch configuration uses the resume vocabulary
-`resume`, `fresh`, or `disabled`. See the [public launch API guide](docs/launch-api.md)
-and the [v1 JSON schema](schemas/launch-api-v1.schema.json).
-
-The public launch contract is `0.61.1`. A caller negotiates every feature it
-uses: `placement`, `initial_input` (argument only; `stdin` and `file` stay typed
-but return `initial_input_unsupported` until real seams exist), `base_root`,
-`on_live`, `caller_context`, `executable_identity`, and `wrapper`. New Prepare
-calls use `subject_schema` 2. `PreviewV1.capabilities` reports adapter grammar
-without executing a caller-supplied provider. `wrapper` is a typed participant
-field and is advertised. amq-squad maps
-`current-window` to `current_window`, `vertical` to `columns`, and `horizontal`
-to `rows`; the decoder accepts only those underscore enums. Details live in
-[docs/launch-api.md](docs/launch-api.md).
-
-Schema-1 Apply remains valid for participant-only requests. A runnable
-participant requires re-Prepare: Apply returns exit code `6` with
-`reason_code=reprepare_required` and performs no launch mutation. Re-Prepare
-and Apply with schema 2 before launching runnable participants.
-
-Each command sets up the session environment, starts wake notifications, and
-launches the agent. See [COOP.md](COOP.md#running-co-op-mode) for co-op
-operations and [the wake acknowledgement contract](docs/wake-doorbell-acknowledgement.md)
-for notification retries.
-
-> **First-message check:** start both agents before sending the test message.
-> A newly started wake deliberately baselines messages that were already
-> waiting, so they remain unread but do not trigger a notification. If you sent
-> first, run `amq drain --include-body` in the target agent.
-
-For isolated sessions (multiple pairs working on different features):
+For isolated pairs (multiple pairs on different features):
 
 ```bash
 amq session create feature-a
@@ -260,10 +274,30 @@ amq launch --session feature-a
 When launch uses the `commands` backend, paste the complete emitted commands
 into separate terminals.
 
-Optional aliases are a convenience, not part of the canonical quickstart.
+### Non-interactive setup
+
+Automation uses a stateless preview and applies only that approved digest.
+The first non-interactive setup must name the roster, default session, and
+launcher preference explicitly:
+
+```bash
+setup_args=(--agents claude,codex --default-session collab --launcher-preference commands)
+setup_preview="$(amq setup --preview --json "${setup_args[@]}")"
+setup_digest="$(printf '%s\n' "$setup_preview" | jq -r '.preview.digest')"
+amq setup --apply "$setup_digest" "${setup_args[@]}"
+```
+
+`--preview` performs zero writes. `--apply` recomputes the preview and exits
+`6` without writing if its `sha256:<hex>` digest differs. `-y` remains
+available for callers that already own an approval gate, but it cannot be
+combined with `--preview` or `--apply`.
+
+### Shell aliases
+
+Optional aliases are a convenience, not part of [Getting started](#getting-started).
 A bare `eval "$(amq shell-setup)"` affects only the current shell. To make
-aliases such as `amc`, `amx`, and `amg` available in future terminals, add the
-setup command to your shell startup file:
+aliases such as `amc`, `amx`, and `amg` available in future terminals, add
+the setup command to your shell startup file:
 
 ```bash
 # zsh
@@ -274,130 +308,72 @@ amq shell-setup --shell bash >> ~/.bashrc
 ```
 
 Run the appropriate append command once, then open a new terminal or source
-that startup file. Use the bare `eval` only when you intentionally want aliases
-in one already-open shell.
+that startup file. Use the bare `eval` only when you intentionally want
+aliases in one already-open shell.
 
 `coop init` and direct `coop exec` provisioning remain available as legacy
 low-level plumbing. See [COOP.md](COOP.md#low-level-provisioning) for those
-paths, operator-only bypass examples, and advanced wake options; they are not a
-second project-onboarding flow.
+paths, operator-only bypass examples, and advanced wake options; they are
+not a second project-onboarding flow.
 
-### 3. Send & Receive
+Scripts and orchestrators that must plan and apply a session without parsing
+human output should use the public launch contract in
+[docs/launch-api.md](docs/launch-api.md) and
+[schemas/launch-api-v1.schema.json](schemas/launch-api-v1.schema.json).
+
+## Messaging
+
+Inside a launched agent, identity and session are already set:
 
 ```bash
-# Send a message
 amq send --to codex --subject "Review needed" --kind review_request \
   --body "Please review internal/cli/send.go"
 
-# Check inbox
 amq list --new
-
-# Filter by priority or sender
 amq list --new --priority urgent
 amq list --new --from codex --kind review_request
 
-# Read all messages (one-shot, moves to cur, emits drained/dlq receipts)
 amq drain --include-body
 
-# Wait for delivery on a single-recipient handoff
 amq send --to codex --body "Please pick this up" \
   --wait-for drained --wait-timeout 60s
 
-# Send between known sessions before entering coop exec
-amq send --root .agent-mail --from-session feature-a --me claude \
-  --to codex --session feature-b --body "Please review the setup"
-
-# Inspect receipts for a message later
 amq receipts list --me codex --msg-id <msg_id>
 
-# Reply to a message
 amq reply --id <msg_id> --kind review_response --body "LGTM with comments"
 ```
 
-`read`, `drain`, and `monitor` apply the same strict message validation. Invalid
-messages move to DLQ and produce a `dlq` receipt. Participating shells also pin
-their exact session context and refuse mismatched mailbox operations. See
-[Session routing and safety](docs/session-routing.md) for routing, raw-root
-overrides, worktree isolation, doctor repair gates, and backlog discovery.
+To send between known sessions before entering `coop exec`:
 
-### 4. Inspect Health
+```bash
+amq send --root .agent-mail --from-session feature-a --me claude \
+  --to codex --session feature-b --body "Please review the setup"
+```
+
+`read`, `drain`, and `monitor` apply the same strict message validation.
+Invalid messages move to DLQ and produce a `dlq` receipt. Participating
+shells also pin their exact session context and refuse mismatched mailbox
+operations. See [Session routing and safety](docs/session-routing.md).
+
+## Health
 
 ```bash
 amq doctor
 amq doctor --ops
-amq doctor --ops --json
-amq wake check --me codex
-amq wake check --me codex --json
-amq wake check --me codex --json --json-schema=2
-amq doctor --ops --json --json-schema=2
-amq doctor --ops --fix-wake-locks
-amq wake repair --me codex
-amq wake recover-owner --me codex
-amq wake retire --me codex --inject-via /absolute/injector \
-  --retry-until injected --inject-arg exec --inject-arg terminal-id
+amq wake check --me <agent>
 ```
 
-`amq wake check` is read-only: it reports whether this process can start or
-repair a wake, and a `restart_capability` of `agent_safe`, `operator_only`, or
-`unavailable` with an exact next action. Automated agents may act only on
-`agent_safe`; leave a live wake running otherwise, and never downgrade a
-TIOCSTI refusal to attention-only. `doctor --ops` reports the same fields for
-every discovered lock.
+`amq wake check` is read-only. It reports whether this process can start or
+repair a wake, and a `restart_capability` of `agent_safe`, `operator_only`,
+or `unavailable` with an exact next action. Automated agents may act only on
+`agent_safe`; leave a live wake running otherwise.
 
-Wakes started by `coop exec` self-upgrade in place when a newer AMQ is
-installed, without changing PID, terminal ownership, or unread work; disable
-with `amq wake --no-self-upgrade` or `AMQ_WAKE_NO_SELF_UPGRADE=1`.
-`--json-schema=2` (requires `--json`) replaces prose parsing with a closed,
-machine-stable action/actor/reason contract; schema 1 remains the
-byte-compatible default. See
-[docs/wake-lifecycle.md](docs/wake-lifecycle.md#91-self-upgrade) for the
-candidate-bounding rules and the full schema-2 contract.
-
-Wake locks are `stale` (AMQ proved the owner is gone or mismatched —
-`--fix-wake-locks` removes them after a re-check) or `unverified` (AMQ could
-not prove either way, so it leaves the lock in place; confirm manually before
-removing `.wake.lock`). Only a narrowly eligible artifact — an aged, malformed,
-conclusively ownerless lock or orphan target of the exact shapes the invariant
-doc permits — is moved to a timestamped `.quarantined` name so acquisition can
-proceed; every other shape is preserved in place. `doctor --ops` reports the
-count and newest age, and `amq cleanup --wake-quarantine-older-than <duration>`
-removes quarantined artifacts explicitly (`--dry-run` is non-mutating). See
-[docs/wake-state-invariants.md](docs/wake-state-invariants.md) for exactly
-which lock/target shapes qualify for each state.
-
-`amq wake repair` restarts an eligible `--inject-via` wake from its saved
-target after a proven-stale or unverified-ownerless lock, using continuity
-state (`.wake.repair-floor`) so messages that arrived while the notifier was
-down remain eligible to notify. It refuses raw terminal wakes and owner-bound
-claims; output goes to `agents/<agent>/.wake.repair.log`.
-`amq wake recover-owner` is the separate path for an owner-bound
-`--wake-inject-via` claim: a live owner releases its own claim (via the
-inherited `AMQ_WAKE_OWNER` token) from the same OS session, or AMQ removes a
-conclusively dead owner's claim outright — there is no force mode.
-`amq wake retire` stops only an identity-confirmed live `--inject-via` wake
-whose executable, arguments, and saved target all match (or removes an
-exactly-bound stale lock without signaling); results are exactly `refused`,
-`retired`, or `retired_with_residue` (an exit-0 warning that target/state
-cleanup was incomplete). See
-[docs/wake-lifecycle.md](docs/wake-lifecycle.md) and
-[docs/wake-state-invariants.md](docs/wake-state-invariants.md) for the
-repair-floor, ownership, and residue-convergence contracts.
-
-The lifecycle boundaries:
-
-- repair = replace a proven-stale inject-via wake.
-- recover-owner = stop/release one owner-bound inject-via claim/artifact.
-- `doctor --ops --fix-wake-locks` = remove a proven-stale lock.
-- retire = stop an identity-confirmed live inject-via wake.
-- launchd, systemd, or the owning shell = stop a raw wake (retire does not
-  unload supervisors or promise they won't restart a wake).
-
-`amq who` and `amq doctor --ops` distinguish `notifier_live` (a verified live
-wake lock — proves notification is attached, not that messages are consumed)
-from `recent_activity` (a fresh `last_seen` without that proof); see
-[CLAUDE.md](CLAUDE.md#doctor--ops) for the full semantics. Consumption itself
-is the job of `drain`/`monitor`, evidenced by receipts. For long-running
-`wake`/`monitor` under systemd or launchd, see
+Wake lock states, JSON schema 2, repair, owner recovery, retirement, and
+quarantine rules are in [Wake operations](docs/wake-operations.md),
+[wake lifecycle](docs/wake-lifecycle.md), and
+[wake state invariants](docs/wake-state-invariants.md). Consumption itself
+is `drain` / `monitor`, evidenced by receipts. Long-running `wake` /
+`monitor` under systemd or launchd is in
 [Supervisor recipes](COOP.md#supervisor-recipes).
 
 ## Message Kinds & Priority
@@ -568,22 +544,11 @@ Common command groups:
 | Integrations | `integration symphony init`, `integration symphony emit`, `integration kanban bridge` |
 | Operations | `presence set`, `presence list`, `route explain`, `who`, `doctor`, `doctor --ops`, `wake check`, `wake repair`, `wake recover-owner`, `wake retire`, `cleanup`, `dlq *`, `upgrade`, `env`, `shell-setup` |
 
-Canonical schema-selecting diagnostic forms:
-
-```text
-amq wake check --me <agent> [--root <path>] [--strict] [--json] [--json-schema <1|2>]
-amq doctor [--root <path>] [--base-root <path>] [--ignore-session-pin] [--ops] [--fix-wake-locks] [--fix-mailboxes] [--json] [--json-schema <1|2>]
-amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--launch-journal --root <session-root>] [--dry-run] [--yes]
-```
-
-Public launch forms:
-
-```text
-amq launch --plan <file|-> [--prepare] --json [--session <name>] [--launcher <name>]
-amq launch --apply <file|-> --json
-```
-
-`--json-schema` requires `--json`.
+`--json-schema` requires `--json`. Diagnostic schema 2 and the public launch
+`--plan` / `--prepare` / `--apply` forms are in
+[docs/wake-lifecycle.md](docs/wake-lifecycle.md) and
+[docs/launch-api.md](docs/launch-api.md). Use `amq <command> --help` for
+exact flags.
 
 ### Exit codes
 
@@ -640,6 +605,7 @@ Building something on AMQ? Open an issue or PR to be listed here.
 
 ## Documentation
 
+- [Getting started](#getting-started) — Install, start two agents, send one message
 - [INSTALL.md](INSTALL.md) — Alternative installation methods
 - [docs/amq-keepalive.md](docs/amq-keepalive.md) — Keepalive command and safety reference
 - [docs/session-routing.md](docs/session-routing.md) — Session selection, routing guards, and worktree behavior
