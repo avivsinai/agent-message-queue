@@ -48,7 +48,10 @@ it. Prepare records each runnable provider's consulted path (PATH lookup or
 absolute) plus the on-disk identity tuple, including symlink hops. Schema 1
 omits that binding. A same-path inode, mtime, symlink-hop, or PATH retarget
 changes `subject_digest`; Apply then returns `subject_changed` with no launch
-mutation. Plan and trust digests stay stable across those replacements.
+mutation. If the provider, wrapper, or cwd changes after Apply authorization,
+Reconcile refuses before capability probing or ticket creation with the typed
+`authorized_identity_changed` result. Plan and trust digests stay stable across
+those replacements.
 
 The initial-input carrier is typed. Claude and Codex currently advertise
 `argument`; AMQ appends its exact text as the final provider argv element.

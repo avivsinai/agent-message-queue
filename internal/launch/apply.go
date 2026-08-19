@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -58,6 +59,10 @@ type ApplyResult struct {
 
 var afterApplySessionPublishedForTest func()
 var beforeApplySessionPublishForTest func()
+var beforeApplyAuthorizeApplyForTest func()
+var beforeApplyReconcileForTest func()
+var afterApplyReconcileForTest func()
+var openPrepareTargetForApply = openPrepareTarget
 var beforeApplyRosterMutationForTest func()
 var beforeApplyBaseRootCreateForTest func()
 var afterApplyBaseRootCreatedForTest func() error
@@ -83,7 +88,7 @@ func Apply(ctx context.Context, request ApplyRequest, dependencies ApplyDependen
 	if !validDigest(request.SubjectDigest) {
 		return ApplyResult{}, fmt.Errorf("invalid Apply subject digest")
 	}
-	state, err := openPrepareTarget(request.Prepare.Target)
+	state, err := openPrepareTargetForApply(request.Prepare.Target)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -127,16 +132,42 @@ func Apply(ctx context.Context, request ApplyRequest, dependencies ApplyDependen
 }
 
 func applyUnderAuthority(ctx context.Context, request ApplyRequest, dependencies ApplyDependencies, state *prepareTargetState, lease *Lease) (result ApplyResult, returnErr error) {
-	prepared, decisions, refusal, allowed, err := authorizeApply(ctx, request, dependencies)
+	if err := state.verify(); err != nil {
+		if lease != nil {
+			lease.abandonCapability()
+		}
+		if !isPrepareAuthorityDrift(err) {
+			return ApplyResult{}, err
+		}
+		return applyActionResult(PrepareResult{}, "subject_changed"), nil
+	}
+	if beforeApplyAuthorizeApplyForTest != nil {
+		beforeApplyAuthorizeApplyForTest()
+	}
+	prepared, decisions, refusal, allowed, err := authorizeApply(ctx, request, dependencies, state)
 	if err != nil || !allowed {
+		if !allowed && lease != nil {
+			if driftErr := state.verify(); isPrepareAuthorityDrift(driftErr) {
+				lease.abandonCapability()
+			}
+		}
 		return refusal, err
 	}
 	return applyPreparedUnderAuthority(ctx, request, dependencies, state, lease, prepared, decisions)
 }
 
-func authorizeApply(ctx context.Context, request ApplyRequest, dependencies ApplyDependencies) (PrepareResult, map[RequiredActionKind]string, ApplyResult, bool, error) {
-	prepared, err := Prepare(ctx, request.Prepare, dependencies.PrepareDependencies)
+func authorizeApply(ctx context.Context, request ApplyRequest, dependencies ApplyDependencies, state *prepareTargetState) (PrepareResult, map[RequiredActionKind]string, ApplyResult, bool, error) {
+	ctx, subjectSchema, prepareDependencies, err := validatePrepareRequest(ctx, request.Prepare, dependencies.PrepareDependencies)
 	if err != nil {
+		return PrepareResult{}, nil, ApplyResult{}, false, err
+	}
+	prepared, err := prepareAtTarget(ctx, request.Prepare, prepareDependencies, state, subjectSchema)
+	if err != nil {
+		if isPrepareAuthorityDrift(err) {
+			refusal := applyActionResult(PrepareResult{SubjectSchema: subjectSchema}, "subject_changed")
+			refusal.SubjectDigest = request.SubjectDigest
+			return PrepareResult{}, nil, refusal, false, nil
+		}
 		return PrepareResult{}, nil, ApplyResult{}, false, err
 	}
 	if prepared.SubjectDigest != request.SubjectDigest {
@@ -209,7 +240,7 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 			}
 			return ApplyResult{}, err
 		}
-		defer func() { _ = root.Close() }()
+		state.sessionRoot = root
 		if afterApplySessionPublishedForTest != nil {
 			afterApplySessionPublishedForTest()
 		}
@@ -238,8 +269,11 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 		}
 	}
 	if len(runnable) == 0 {
-		prepared, err = Prepare(ctx, request.Prepare, dependencies.PrepareDependencies)
+		prepared, err = prepareApplyStatus(ctx, request.Prepare, dependencies.PrepareDependencies, state)
 		if err != nil {
+			if isPrepareAuthorityDrift(err) {
+				return applyActionResult(prepared, "subject_changed"), nil
+			}
 			return ApplyResult{}, err
 		}
 		result := applyResultFromPrepare(prepared)
@@ -254,13 +288,28 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	if beforeApplyReconcileForTest != nil {
+		beforeApplyReconcileForTest()
+	}
 	reconciled, err := Reconcile(reconcileRequest)
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	finalPrepared, err := Prepare(ctx, request.Prepare, dependencies.PrepareDependencies)
+	if afterApplyReconcileForTest != nil {
+		afterApplyReconcileForTest()
+	}
+	finalPrepared, err := prepareApplyStatus(ctx, request.Prepare, dependencies.PrepareDependencies, state)
 	if err != nil {
+		if isPrepareAuthorityDrift(err) {
+			if lease != nil {
+				lease.abandonCapability()
+			}
+			return applyActionResult(prepared, "subject_changed"), nil
+		}
 		return ApplyResult{}, err
+	}
+	if reconciled.AggregateCode == 0 && reconciled.Outcome != "" && reconciled.Outcome != OutcomeNoAction && !authorizedIdentitiesEqual(prepared, finalPrepared) {
+		return applyActionResult(finalPrepared, "subject_changed"), nil
 	}
 	result = applyResultFromPrepare(finalPrepared)
 	result.SubjectDigest = request.SubjectDigest
@@ -283,11 +332,19 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 	return result, nil
 }
 
+func prepareApplyStatus(ctx context.Context, request PrepareRequest, dependencies PrepareDependencies, state *prepareTargetState) (PrepareResult, error) {
+	ctx, subjectSchema, dependencies, err := validatePrepareRequest(ctx, request, dependencies)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	return prepareAtTarget(ctx, request, dependencies, state, subjectSchema)
+}
+
 func applyMissingBaseRoot(ctx context.Context, request ApplyRequest, dependencies ApplyDependencies, state *prepareTargetState) (result ApplyResult, returnErr error) {
 	if state.baseAuthority == nil || !state.baseAuthority.baseMissing || state.baseAuthority.parentRoot == nil {
 		return ApplyResult{}, fmt.Errorf("missing base-root creation authority")
 	}
-	prepared, decisions, refusal, allowed, err := authorizeApply(ctx, request, dependencies)
+	prepared, decisions, refusal, allowed, err := authorizeApply(ctx, request, dependencies, state)
 	if err != nil || !allowed {
 		return refusal, err
 	}
@@ -311,6 +368,7 @@ func applyMissingBaseRoot(ctx context.Context, request ApplyRequest, dependencie
 		return ApplyResult{}, err
 	}
 	state.baseRoot = baseRoot
+	state.baseAuthority.baseMissing = false
 	if afterApplyBaseRootCreatedForTest != nil {
 		if err := afterApplyBaseRootCreatedForTest(); err != nil {
 			return ApplyResult{}, err
@@ -510,6 +568,17 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 	config := ProjectConfig{Schema: ProjectConfigSchema, DefaultSession: prepared.Target.Session, Layout: LayoutIntent{Type: LayoutColumns}}
 	adapters := make(map[string]HarnessAdapter, len(runnable))
 	executionOptions := make(map[string]PrepareExecutionOptions, len(runnable))
+	authorizedIdentities := make(map[string]AuthorizedParticipantIdentity, len(snapshot.Participants))
+	for _, participant := range snapshot.Participants {
+		if !participant.Runnable || (participant.Executable == nil && participant.Wrapper == nil && participant.CwdIdentity == "") {
+			continue
+		}
+		authorizedIdentities[participant.Handle] = AuthorizedParticipantIdentity{
+			Executable:  cloneConsultedExecutable(participant.Executable),
+			Wrapper:     cloneConsultedExecutable(participant.Wrapper),
+			CwdIdentity: participant.CwdIdentity,
+		}
+	}
 	for _, participant := range runnable {
 		adapter := dependencies.AdapterFor(participant.Provider, participant.Executable)
 		if adapter == nil {
@@ -540,11 +609,12 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 		Adapters: adapters, TrustStore: dependencies.TrustStore, HeldLease: lease,
 		TrustAuthorityDigest: snapshot.BaseAuthorityDigest,
 		HostIdentity:         dependencies.HostIdentity, AllowExternalCwd: true,
-		ExecutionOptions:   executionOptions,
-		AllowFreshFallback: decisions[ActionStaleConversation] == "fresh_once",
-		Placement:          prepared.Placement,
-		OnLive:             onLivePolicies(runnable),
-		CallerContext:      cloneCallerContext(prepared.CallerContext),
+		ExecutionOptions:     executionOptions,
+		AuthorizedIdentities: authorizedIdentities,
+		AllowFreshFallback:   decisions[ActionStaleConversation] == "fresh_once",
+		Placement:            prepared.Placement,
+		OnLive:               onLivePolicies(runnable),
+		CallerContext:        cloneCallerContext(prepared.CallerContext),
 	}
 	if choice := decisions[ActionTrustConfirmation]; choice == "trust_exact_subject" {
 		request.ConfirmTrust = func(plan Plan, actualTrustDigest string) (bool, error) {
@@ -593,6 +663,27 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 		}
 	}
 	return request, nil
+}
+
+func authorizedIdentitiesEqual(first, second PrepareResult) bool {
+	if len(first.Participants) != len(second.Participants) {
+		return false
+	}
+	for i := range first.Participants {
+		left, right := first.Participants[i], second.Participants[i]
+		if left.Handle != right.Handle || left.Runnable != right.Runnable || left.CwdIdentity != right.CwdIdentity ||
+			!consultedExecutableEqual(left.Executable, right.Executable) || !consultedExecutableEqual(left.Wrapper, right.Wrapper) {
+			return false
+		}
+	}
+	return true
+}
+
+func consultedExecutableEqual(first, second *ConsultedExecutable) bool {
+	if first == nil || second == nil {
+		return first == second
+	}
+	return first.Requested == second.Requested && first.Consulted == second.Consulted && bytes.Equal(first.Identity, second.Identity)
 }
 
 // WithSessionCreationLock serializes in-repository creators for one direct

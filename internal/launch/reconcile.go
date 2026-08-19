@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -77,11 +78,21 @@ type ReconcileRequest struct {
 	// ExecutionOptions carries normalized wrapper policy into the plan, journal,
 	// and ticket. The exact-root/options boundary owns later consumption.
 	ExecutionOptions map[string]PrepareExecutionOptions
+	// AuthorizedIdentities carries the physical provider, wrapper, and cwd
+	// identities captured by Apply's authorization Prepare. Reconcile checks
+	// these before any adapter capability probe or ticket creation.
+	AuthorizedIdentities map[string]AuthorizedParticipantIdentity
 	// Placement is the caller-requested tuple. Nil preserves v0.61 Create.
 	Placement *Placement
 	// OnLive is the per-handle live-seat policy. Missing keys are refuse.
 	OnLive        map[string]string
 	CallerContext map[string]string
+}
+
+type AuthorizedParticipantIdentity struct {
+	Executable  *ConsultedExecutable
+	Wrapper     *ConsultedExecutable
+	CwdIdentity string
 }
 
 type AgentReconcileResult struct {
@@ -517,6 +528,22 @@ func plannedFromJournal(request ReconcileRequest, journal LaunchJournal, result 
 		if !foundConfig {
 			return nil, fmt.Errorf("launch journal handle %q does not match current roster", plan.Handle)
 		}
+		resultIndex := -1
+		for j, agentResult := range journal.Agents {
+			if agentResult.Handle == plan.Handle {
+				resultIndex = j
+				break
+			}
+		}
+		if resultIndex < 0 {
+			return nil, fmt.Errorf("launch journal handle %q has no result", plan.Handle)
+		}
+		if err := verifyAuthorizedParticipantIdentity(request, cfg); err != nil {
+			result.Agents[resultIndex].Code = 6
+			result.Agents[resultIndex].ConversationDisposition = DispositionActionRequired
+			result.Agents[resultIndex].Reason = "authorized_identity_changed"
+			return nil, nil
+		}
 		adapter := request.Adapters[cfg.Adapter]
 		if adapter == nil || adapter.Mode() != plan.AdapterMode {
 			return nil, fmt.Errorf("launch journal adapter for %q is unavailable or changed", plan.Handle)
@@ -533,16 +560,6 @@ func plannedFromJournal(request ReconcileRequest, journal LaunchJournal, result 
 		}
 		if !capabilities.Available {
 			return nil, fmt.Errorf("launch journal adapter for %q is unavailable", plan.Handle)
-		}
-		resultIndex := -1
-		for j, agentResult := range journal.Agents {
-			if agentResult.Handle == plan.Handle {
-				resultIndex = j
-				break
-			}
-		}
-		if resultIndex < 0 {
-			return nil, fmt.Errorf("launch journal handle %q has no result", plan.Handle)
 		}
 		write := journal.Agents[resultIndex].ConversationDisposition != DispositionResumed
 		planned[i] = plannedAgent{
@@ -800,10 +817,66 @@ func commitRecoveredJournal(request ReconcileRequest, lease *Lease, journal Laun
 	return ClearJournal(request.Root, lease, journal)
 }
 
+func verifyAuthorizedParticipantIdentity(request ReconcileRequest, cfg ProjectAgentConfig) error {
+	expected, ok := request.AuthorizedIdentities[cfg.Handle]
+	if !ok {
+		return nil
+	}
+	if expected.Executable != nil {
+		if len(cfg.Command) == 0 {
+			return fmt.Errorf("provider executable is missing")
+		}
+		actual, err := ResolveConsultedExecutable(cfg.Command[0])
+		if err != nil {
+			return fmt.Errorf("resolve provider executable: %w", err)
+		}
+		if actual.Requested != expected.Executable.Requested || actual.Consulted != expected.Executable.Consulted || !bytes.Equal(actual.Identity, expected.Executable.Identity) {
+			return fmt.Errorf("provider executable identity changed")
+		}
+	}
+	if expected.Wrapper != nil {
+		if cfg.Wrapper == nil {
+			return fmt.Errorf("wrapper was removed")
+		}
+		actual, err := ResolveConsultedExecutable(cfg.Wrapper.Executable)
+		if err != nil {
+			return fmt.Errorf("resolve wrapper executable: %w", err)
+		}
+		if actual.Requested != expected.Wrapper.Requested || actual.Consulted != expected.Wrapper.Consulted || !bytes.Equal(actual.Identity, expected.Wrapper.Identity) {
+			return fmt.Errorf("wrapper executable identity changed")
+		}
+	} else if cfg.Wrapper != nil {
+		return fmt.Errorf("wrapper was added")
+	}
+	cwd := cfg.Cwd
+	if strings.TrimSpace(cwd) == "" {
+		cwd = request.ProjectRoot
+	} else if !filepath.IsAbs(cwd) {
+		cwd = filepath.Join(request.ProjectRoot, cwd)
+	}
+	resolvedCwd, err := resolvedPath(cwd)
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	cwdIdentity, err := fsq.StableTreeIdentity(resolvedCwd)
+	if err != nil {
+		return fmt.Errorf("identify working directory: %w", err)
+	}
+	if expected.CwdIdentity != "" && cwdIdentity != expected.CwdIdentity {
+		return fmt.Errorf("working directory identity changed")
+	}
+	return nil
+}
+
 func buildReconcilePlan(request ReconcileRequest, nonce string, result *ReconcileResult) ([]plannedAgent, error) {
 	planned := make([]plannedAgent, 0, len(request.Config.Agents))
 	for _, cfg := range request.Config.Agents {
 		item := AgentReconcileResult{Handle: cfg.Handle}
+		if err := verifyAuthorizedParticipantIdentity(request, cfg); err != nil {
+			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionActionRequired, "authorized_identity_changed"
+			result.Agents = append(result.Agents, item)
+			continue
+		}
 		adapter := request.Adapters[cfg.Adapter]
 		if adapter == nil {
 			item.ConversationDisposition, item.Reason = DispositionUnsupported, "adapter_not_registered"

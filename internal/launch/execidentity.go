@@ -154,6 +154,15 @@ type ConsultedExecutable struct {
 	Identity  json.RawMessage `json:"identity,omitempty"`
 }
 
+func cloneConsultedExecutable(value *ConsultedExecutable) *ConsultedExecutable {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	clone.Identity = append(json.RawMessage(nil), value.Identity...)
+	return &clone
+}
+
 // ResolveConsultedExecutable looks up requested on PATH when it is not
 // absolute, then probes the consulted path when it exists. Missing paths stay
 // identity-free so schema v2 stays stable for plan-only names.
