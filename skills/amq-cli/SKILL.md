@@ -173,6 +173,10 @@ amq session resume feature-x
 approved `sha256:<hex>` digest matches. It is mutually exclusive with `-y`;
 `--preview` is also mutually exclusive with `-y`.
 
+For Cursor, setup uses the current `agent` command when it is on `PATH`; if it
+is absent, the preview explains that setup is falling back to legacy
+`cursor-agent`.
+
 Put provider flags in the committed `.amq/launch.json` `command` arrays. The
 launcher validates them and includes them in the semantic trust digest. The
 first semantic plan, and each plan change, needs an interactive trust
@@ -294,6 +298,15 @@ Do not parse stderr prose as a stable discriminator. `--json` preserves the
 same process exit codes. A read-only `list` on a mismatched session pin warns
 and continues; commands that consume or mutate mailbox state fail with code
 `5`.
+
+When a command reports per-agent outcomes, whole-command failures that precede
+any per-agent work keep codes `2`, `5`, and `3` and preempt mixed results. Once
+per-agent work begins, the process exit code is the highest-precedence per-agent
+outcome: `6` over `4` over `1` over `0`. Expected dispositions (`disabled`,
+`unsupported`, and policy-consistent `fresh`) contribute `0`. Launch Apply and
+lifecycle JSON also carry a typed mutation disposition (`not_applied`,
+`committed`, or `uncertain`) for the backend binding; that field is not a
+process exit code.
 
 ## Delivery Receipts
 
