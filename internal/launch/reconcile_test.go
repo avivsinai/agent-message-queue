@@ -52,8 +52,33 @@ func TestReconcileRejectsProjectProviderBeforeCapabilities(t *testing.T) {
 	if result.AggregateCode != 6 || len(result.Agents) != 1 || !strings.Contains(result.Agents[0].Reason, "inside the project") {
 		t.Fatalf("project provider result = %#v, want typed containment refusal", result)
 	}
+	if !strings.Contains(result.Agents[0].Reason, ProviderProjectContainedCode) {
+		t.Fatalf("project provider reason = %q, want %s", result.Agents[0].Reason, ProviderProjectContainedCode)
+	}
 	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
 		t.Fatalf("project provider capability probe ran side effect: %v", err)
+	}
+}
+
+func TestReconcileRejectsProjectAMQBeforeCreateQuickly(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	amq := filepath.Join(req.ProjectRoot, "amq")
+	if err := os.WriteFile(amq, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	req.AMQPath = amq
+	started := time.Now()
+	_, err := Reconcile(req)
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("project-contained AMQ refusal took %s", elapsed)
+	}
+	var pathErr *LaunchPathError
+	if err == nil || !errors.As(err, &pathErr) || pathErr.Code != AMQProjectContainedCode {
+		t.Fatalf("AMQ refusal error = %v, want typed code %s", err, AMQProjectContainedCode)
+	}
+	if backend.creates != 0 {
+		t.Fatalf("project-contained AMQ refusal created %d resources", backend.creates)
 	}
 }
 

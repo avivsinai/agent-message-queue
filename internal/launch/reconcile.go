@@ -515,7 +515,7 @@ func plannedFromJournal(request ReconcileRequest, journal LaunchJournal, result 
 		if err := validateWrapperFileForProject(plan.Wrapper, request.ProjectRoot); err != nil {
 			return nil, fmt.Errorf("launch journal wrapper for %q: %w", plan.Handle, err)
 		}
-		if _, err := validateKnownExecutable(cfg.Command[0], request.ProjectRoot, adapter.Name()); err != nil {
+		if err := validateExecutableContainment(cfg.Command[0], request.ProjectRoot, adapter.Name()); err != nil {
 			return nil, fmt.Errorf("launch journal provider for %q: %w", plan.Handle, err)
 		}
 		capabilities := adapter.Capabilities(request.Context)
@@ -793,7 +793,7 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			result.Agents = append(result.Agents, item)
 			continue
 		}
-		if _, err := validateKnownExecutable(cfg.Command[0], request.ProjectRoot, adapter.Name()); err != nil {
+		if err := validateExecutableContainment(cfg.Command[0], request.ProjectRoot, adapter.Name()); err != nil {
 			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, err.Error()
 			result.Agents = append(result.Agents, item)
 			continue

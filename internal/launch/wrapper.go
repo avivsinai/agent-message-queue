@@ -15,8 +15,9 @@ type Wrapper struct {
 }
 
 const (
-	WrapperProjectContainedCode = "wrapper_project_contained"
-	AMQProjectContainedCode     = "amq_launcher_project_contained"
+	WrapperProjectContainedCode  = "wrapper_project_contained"
+	ProviderProjectContainedCode = "provider_project_contained"
+	AMQProjectContainedCode      = "amq_launcher_project_contained"
 )
 
 type LaunchPathError struct {
@@ -25,7 +26,7 @@ type LaunchPathError struct {
 }
 
 func (e *LaunchPathError) Error() string {
-	return fmt.Sprintf("%s: %s", e.Code, e.Path)
+	return fmt.Sprintf("%s: %s resolves inside the project", e.Code, e.Path)
 }
 
 func (wrapper Wrapper) Validate() error {
