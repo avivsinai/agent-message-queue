@@ -83,7 +83,8 @@ So each agent knows the AMQ commands:
 npx skills add avivsinai/agent-message-queue -g -y
 ```
 
-Or install binary and skill together:
+If you used the install script instead of Homebrew, you can do binary and
+skill in one step:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash -s -- --skill
