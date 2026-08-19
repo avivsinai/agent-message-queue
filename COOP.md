@@ -32,7 +32,9 @@ an example. Managed `tmux`, `cmux`, and `ghostty` backends do not print those
 lines; they create the panes or windows themselves.
 
 Include Grok in the setup roster when it should join the session. AMQ starts
-only adapters that pass their capability probe.
+only adapters that pass their capability probe. For Cursor, `amq setup` uses
+the current `agent` command when it is on `PATH`, and falls back to legacy
+`cursor-agent` only when `agent` is absent.
 
 To disable auto-wake (e.g., in CI or non-TTY environments):
 ```bash
