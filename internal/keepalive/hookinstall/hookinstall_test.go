@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -747,7 +746,7 @@ exit 0
 		t.Fatalf("success path logged a timeout:\n%s", logText)
 	}
 	pid := readPIDFile(t, wakePidPath)
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	t.Cleanup(func() { killPID(pid) })
 	if !processRunning(pid) {
 		t.Fatalf("already-ready wake pid %d was killed by watchdog cancel", pid)
 	}
@@ -779,10 +778,6 @@ func readPIDFile(t *testing.T, path string) int {
 		t.Fatalf("pid file %s = %q, want a pid", path, data)
 	}
 	return pid
-}
-
-func processRunning(pid int) bool {
-	return syscall.Kill(pid, 0) == nil
 }
 
 func writeExecutable(t *testing.T, path string) string {
