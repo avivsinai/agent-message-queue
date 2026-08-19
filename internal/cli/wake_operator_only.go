@@ -1,3 +1,5 @@
+//go:build darwin
+
 package cli
 
 // wakeOperatorOnlyError marks an action that AMQ will not take automatically.
