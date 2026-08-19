@@ -8,6 +8,11 @@ import (
 	"path/filepath"
 )
 
+var (
+	ErrTargetNotRegular = errors.New("file adapter target must be a regular file")
+	ErrTargetSymlink    = errors.New("file adapter target must not be a symlink")
+)
+
 type File struct{}
 
 func (File) Name() string {
@@ -91,24 +96,16 @@ func (File) Probe(ctx context.Context, target string) error {
 	return nil
 }
 
-func (File) Inject(ctx context.Context, target string, payload string) error {
+func prepareFileInject(ctx context.Context, target string) (string, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return "", err
 	}
 	clean, err := (File{}).NormalizeTarget(target)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := (File{}).Probe(ctx, clean); err != nil {
-		return err
+		return "", err
 	}
-	file, err := os.OpenFile(clean, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = file.Close() }()
-	if _, err := file.WriteString(payload + "\n"); err != nil {
-		return err
-	}
-	return file.Chmod(0o600)
+	return clean, ctx.Err()
 }
