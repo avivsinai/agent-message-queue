@@ -75,6 +75,14 @@ func DeliverToInboxes(root *DeliveryRoot, recipients []string, filename string, 
 	if len(recipients) == 0 {
 		return nil, fmt.Errorf("no recipients provided")
 	}
+	if err := ValidateMessageFilename(filename); err != nil {
+		return nil, err
+	}
+	for _, recipient := range recipients {
+		if err := ValidateHandle(recipient); err != nil {
+			return nil, err
+		}
+	}
 	if err := root.VerifyBase(); err != nil {
 		return nil, err
 	}
@@ -141,6 +149,12 @@ func DeliverToInboxes(root *DeliveryRoot, recipients []string, filename string, 
 // directories — the target inbox must already exist. This prevents a sender
 // from accidentally scaffolding structure in a peer project.
 func DeliverToExistingInbox(root *DeliveryRoot, agent, filename string, data []byte) (string, error) {
+	if err := ValidateHandle(agent); err != nil {
+		return "", err
+	}
+	if err := ValidateMessageFilename(filename); err != nil {
+		return "", err
+	}
 	if err := root.VerifyBase(); err != nil {
 		return "", err
 	}

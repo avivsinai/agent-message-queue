@@ -115,11 +115,15 @@ func setRetryState(env *DLQEnvelope, state string) {
 	env.RetryDelivered = state == RetryStateDelivered
 }
 
+var readRandom = rand.Read
+
 // GenerateDLQID creates a unique ID for a DLQ envelope.
-func GenerateDLQID() string {
+func GenerateDLQID() (string, error) {
 	b := make([]byte, 6)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("dlq_%d_%d_%s", time.Now().UnixNano(), os.Getpid(), hex.EncodeToString(b))
+	if _, err := readRandom(b); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("dlq_%d_%d_%s", time.Now().UnixNano(), os.Getpid(), hex.EncodeToString(b)), nil
 }
 
 var removeDLQSource = func(root *DeliveryRoot, path string) error {
@@ -261,10 +265,15 @@ func moveInboxMessageToDLQ(root *DeliveryRoot, agent, readDir, envelopeSourceDir
 		return "", fmt.Errorf("read original: %w", err)
 	}
 
+	dlqID, err := GenerateDLQID()
+	if err != nil {
+		return "", fmt.Errorf("generate dlq id: %w", err)
+	}
+
 	// Create envelope
 	envelope := DLQEnvelope{
 		Schema:        DLQSchemaVersion,
-		ID:            GenerateDLQID(),
+		ID:            dlqID,
 		OriginalID:    originalID,
 		OriginalFile:  filename,
 		FailureReason: failureReason,

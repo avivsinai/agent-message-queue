@@ -13,6 +13,9 @@ const (
 )
 
 func FindMessage(root, agent, filename string) (string, string, error) {
+	if err := ValidateHandle(agent); err != nil {
+		return "", "", err
+	}
 	if err := ValidateMessageFilename(filename); err != nil {
 		return "", "", err
 	}
@@ -32,6 +35,9 @@ func FindMessage(root, agent, filename string) (string, string, error) {
 }
 
 func MoveNewToCur(root *DeliveryRoot, agent, filename string) error {
+	if err := ValidateHandle(agent); err != nil {
+		return err
+	}
 	if err := ValidateMessageFilename(filename); err != nil {
 		return err
 	}
