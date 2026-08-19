@@ -60,6 +60,9 @@ type LaunchJournal struct {
 	JoinDeltas       []JoinDelta            `json:"join_deltas,omitempty"`
 	Placement        PlacementPreview       `json:"placement,omitempty"`
 	CallerContext    map[string]string      `json:"caller_context,omitempty"`
+	// CandidateBinding is an immutable backend marker for an exact resource
+	// discovered before reconciliation can publish the created phase.
+	CandidateBinding *BindingRecord `json:"candidate_binding,omitempty"`
 }
 
 // JoinDelta is the durable proof for one window added to an existing managed
@@ -204,7 +207,18 @@ func (record LaunchJournal) Validate() error {
 		if record.Binding != nil {
 			return fmt.Errorf("intent journal must not contain a binding")
 		}
+		if record.CandidateBinding != nil {
+			if err := record.CandidateBinding.Validate(); err != nil {
+				return fmt.Errorf("intent journal candidate binding: %w", err)
+			}
+			if !journalMatchesBinding(record, *record.CandidateBinding) {
+				return fmt.Errorf("intent journal candidate binding does not match its launch generation")
+			}
+		}
 		return nil
+	}
+	if record.CandidateBinding != nil {
+		return fmt.Errorf("created journal must not retain candidate binding")
 	}
 	if record.Binding == nil {
 		return fmt.Errorf("created journal requires a candidate binding")
