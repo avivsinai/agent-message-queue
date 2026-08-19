@@ -123,7 +123,7 @@ func TestRegistrationTargetInventoryUsesGhosttyDirectProbe(t *testing.T) {
 
 func TestReattachReplacesCurrentSessionAdapterEntry(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
 	otherTarget := filepath.Join(dir, "other-inbox.txt")
@@ -183,7 +183,7 @@ func TestReattachReplacesCurrentSessionAdapterEntry(t *testing.T) {
 
 func TestAttachRejectsSecondRegistrationForSameAMQRootAndAgent(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	firstTarget := filepath.Join(dir, "first-inbox.txt")
 	secondTarget := filepath.Join(dir, "second-inbox.txt")
 	canonicalFirstTarget, err := (adapter.File{}).NormalizeTarget(firstTarget)
@@ -222,7 +222,7 @@ func TestAttachRejectsSecondRegistrationForSameAMQRootAndAgent(t *testing.T) {
 
 func TestAttachRejectsCanonicalRootAliasWithoutStartingWake(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	realRoot := filepath.Join(dir, "real-root")
 	if err := os.Mkdir(realRoot, 0o700); err != nil {
 		t.Fatalf("Mkdir root: %v", err)
@@ -272,7 +272,7 @@ func TestAttachIsIdempotentForSamePhysicalCmuxOwner(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	runner := appCommandRunnerFunc(func(context.Context, string, ...string) ([]byte, error) {
 		return []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"ttys101"}]}]}]}]}`), nil
@@ -309,7 +309,7 @@ func TestReattachRejectsDifferentSurfaceAliasOnOwnedPhysicalTTY(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	firstTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	secondTarget := "cmux:surface:B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	store := registry.New(registryPath)
@@ -351,7 +351,7 @@ func TestReattachIgnoresUnrelatedDegradedRegisteredCmuxTarget(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	degradedTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	degradedAlias := "cmux:surface:B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	candidateTarget := "cmux:surface:C71381D9-29D5-4D2D-A1C9-E101556BCB49"
@@ -431,7 +431,7 @@ func TestReattachRejectsRegisteredCmuxTargetWithUnknownPhysicalKeyBeforeWake(t *
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	unknownTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	candidateTarget := "cmux:surface:C71381D9-29D5-4D2D-A1C9-E101556BCB49"
 	store := registry.New(registryPath)
@@ -483,7 +483,7 @@ func TestReattachRejectsSamePhysicalKeyFromDegradedRegisteredTargetBeforeWake(t 
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	degradedTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	candidateTarget := "cmux:surface:C71381D9-29D5-4D2D-A1C9-E101556BCB49"
 	store := registry.New(registryPath)
@@ -539,7 +539,7 @@ func TestReattachDoesNotEvictUnknownCmuxAliasForCurrentSurface(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	corpseID := "F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	liveID := "B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	corpseTarget := "cmux:surface:" + corpseID
@@ -593,7 +593,7 @@ func TestReattachDoesNotEvictUnknownCmuxAliasForCurrentSurface(t *testing.T) {
 
 func TestConcurrentReattachClaimStartsOnlyWinningWake(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	target := filepath.Join(dir, "inbox.txt")
 	canonicalTarget := normalizedFileTarget(t, target)
 	if err := os.WriteFile(target, nil, 0o600); err != nil {
@@ -666,7 +666,7 @@ printf ready > "$ready"
 		t.Fatalf("write fake AMQ: %v", err)
 	}
 	runApp(t, "attach",
-		"--registry", filepath.Join(dir, "registry.json"),
+		"--registry", testRegistryPath(t, dir),
 		"--adapter", "file",
 		"--target", target,
 		"--root", "/tmp/amq-root",
@@ -731,7 +731,7 @@ exit 12
 				t.Fatalf("reset calls: %v", err)
 			}
 			opts := base
-			opts.RegistryPath = filepath.Join(t.TempDir(), "registry.json")
+			opts.RegistryPath = testRegistryTempPath(t)
 			test.mutate(&opts)
 			if err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).registerWithOptions(context.Background(), opts); err != nil {
 				t.Fatalf("registerWithOptions: %v", err)
@@ -746,7 +746,7 @@ exit 12
 
 func TestReattachPreservesRegistryWhenWakeTargetCannotChange(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
 	canonicalOldTarget := normalizedFileTarget(t, oldTarget)
@@ -795,7 +795,7 @@ func TestReattachPreservesRegistryWhenWakeTargetCannotChange(t *testing.T) {
 
 func TestReattachPersistsRecoverableReservationBeforeWakeReadiness(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
 	canonicalOldTarget := normalizedFileTarget(t, oldTarget)
@@ -865,7 +865,7 @@ func TestReattachPersistsRecoverableReservationBeforeWakeReadiness(t *testing.T)
 
 func TestReattachPersistsCandidateOnlyAfterWakeReady(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
 	canonicalNewTarget := normalizedFileTarget(t, newTarget)
@@ -917,7 +917,7 @@ printf ready > "$ready"
 
 func TestReattachCancellationPreservesReservationForLateReadyWake(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
 	canonicalNewTarget := normalizedFileTarget(t, newTarget)
@@ -1009,7 +1009,7 @@ func TestReattachRetireDetachedRetiresPreviousWakeThenStarts(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	newTarget := "cmux:surface:B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	store := registry.New(registryPath)
@@ -1098,7 +1098,7 @@ func TestReattachRetireDetachedStartsWhenOldTargetMissingAndWakeLockAlreadyAbsen
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	newTarget := "cmux:surface:B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	store := registry.New(registryPath)
@@ -1176,7 +1176,7 @@ func TestReattachRetireDetachedLeavesOldRowWhenRetireRefused(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	newTarget := "cmux:surface:B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	store := registry.New(registryPath)
@@ -1265,7 +1265,7 @@ func TestReattachRetireDetachedNeverRetargetsLiveCmuxWake(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	newTarget := "cmux:surface:B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	store := registry.New(registryPath)
@@ -1325,7 +1325,7 @@ func TestRetireSessionRetiresConfirmedWakesAndRemovesRows(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	entries := []registry.Entry{
 		{Root: root, BaseRoot: dir, SessionName: "dashboard", Agent: "codex", Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3", State: registry.StateDetached},
@@ -1401,7 +1401,7 @@ func TestRetireSessionRefusesWhenTargetStillExists(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	for _, entry := range []registry.Entry{
 		{Root: root, Agent: "codex", Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3", State: registry.StateDetached},
@@ -1443,7 +1443,7 @@ func TestRetireSessionRemovesRetiredAndLeavesRefused(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	for _, entry := range []registry.Entry{
 		{Root: root, Agent: "codex", Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3", State: registry.StateDetached},
@@ -1560,7 +1560,7 @@ func (w *appBlockingWake) Release() {
 
 func TestSuperviseUsesInjectedClockOnWakeFailure(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, nil, 0o600); err != nil {
 		t.Fatalf("write target: %v", err)
@@ -1592,7 +1592,7 @@ func TestSuperviseUsesInjectedClockOnWakeFailure(t *testing.T) {
 
 func TestSuperviseWarnsOncePerPersistentFailureTransition(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	canonicalRoot, err := registry.CanonicalRoot("/tmp/amq-root")
 	if err != nil {
 		t.Fatalf("CanonicalRoot: %v", err)
@@ -1659,7 +1659,7 @@ func (w *appCancelingWake) StartWake(ctx context.Context, _ amq.StartWakeRequest
 
 func TestSuperviseCancellationStopsLaterStartsAndLeavesRegistryUnchanged(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	for index := 0; index < 2; index++ {
 		target := filepath.Join(dir, fmt.Sprintf("target-%d", index))
@@ -1698,7 +1698,7 @@ func TestSuperviseBatchesCmuxInventoryAndDefersHealthyEntries(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	targets := []string{
 		"cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3",
@@ -1749,7 +1749,7 @@ func TestSuperviseFailsClosedWhenOneRegisteredSurfaceHasLiveTTYAlias(t *testing.
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	if _, err := store.Upsert(registry.Entry{
 		Root: "/tmp/tty-owner", Agent: "codex", Adapter: "cmux",
@@ -1815,7 +1815,7 @@ func TestSuperviseRefusesCmuxTTYDriftAcrossRestart(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	store := registry.New(registryPath)
 	if _, err := store.Upsert(registry.Entry{
@@ -1877,7 +1877,7 @@ func TestSuperviseRefusesCmuxTTYDriftAcrossRestart(t *testing.T) {
 
 func TestSuperviseFailsClosedOnNormalizedTargetOwnershipCollision(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	upper := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	lower := strings.ToLower(upper)
 	entries := []registry.Entry{
@@ -1905,7 +1905,7 @@ func TestSuperviseFailsClosedOnNormalizedTargetOwnershipCollision(t *testing.T) 
 }
 
 func TestContinuousSuperviseDoesNotEmitPerPassJSON(t *testing.T) {
-	registryPath := filepath.Join(t.TempDir(), "registry.json")
+	registryPath := testRegistryTempPath(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
 	var stdout bytes.Buffer
@@ -1926,7 +1926,7 @@ func TestGCDryRunIsNonMutatingAndApplyRetiresCandidates(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	store := registry.New(registryPath)
 	entry, err := store.Upsert(registry.Entry{
@@ -1991,7 +1991,7 @@ func TestGCDryRunExcludesPhysicalTTYOwnershipCollisions(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	for index, target := range []string{
 		"cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3",
@@ -2030,7 +2030,7 @@ func TestGCApplyLeavesCandidateWhenRetireRefused(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	store := registry.New(registryPath)
 	entry, err := store.Upsert(registry.Entry{
@@ -2163,7 +2163,7 @@ func TestRegisterEnvFailureDependsOnlyOnRequiredIdentity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := base
-			opts.RegistryPath = filepath.Join(t.TempDir(), "registry.json")
+			opts.RegistryPath = testRegistryTempPath(t)
 			tc.mutate(&opts)
 			err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).registerWithOptions(context.Background(), opts)
 			if (err != nil) != tc.wantErr {
@@ -2188,7 +2188,7 @@ func TestRegisterUsesEnvBaseRootAndSessionIndependently(t *testing.T) {
 	}
 	for _, missing := range []string{"base", "session"} {
 		t.Run(missing, func(t *testing.T) {
-			registryPath := filepath.Join(t.TempDir(), "registry.json")
+			registryPath := testRegistryTempPath(t)
 			opts := registerOptions{
 				RegistryPath: registryPath,
 				AdapterName:  "file",
@@ -2237,7 +2237,7 @@ func TestRegisterReturnsOnlyNonDetachedReconcileErrors(t *testing.T) {
 			}
 			adapters := adapter.NewRegistry(selected)
 			opts := base
-			opts.RegistryPath = filepath.Join(t.TempDir(), "registry.json")
+			opts.RegistryPath = testRegistryTempPath(t)
 			opts.AdapterName = "boundary"
 			err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &adapters}).registerWithOptions(context.Background(), opts)
 			if (err != nil) != tc.wantErr {
@@ -2248,7 +2248,7 @@ func TestRegisterReturnsOnlyNonDetachedReconcileErrors(t *testing.T) {
 }
 
 func TestResolveRegistrationReadinessFailurePersistsRetryState(t *testing.T) {
-	store := registry.New(filepath.Join(t.TempDir(), "registry.json"))
+	store := registry.New(testRegistryTempPath(t))
 	reservation, err := store.Upsert(registry.Entry{Root: "/tmp/root", Agent: "codex", Adapter: "file", Target: "/tmp/target"})
 	if err != nil {
 		t.Fatal(err)
@@ -2267,7 +2267,7 @@ func TestResolveRegistrationReadinessFailurePersistsRetryState(t *testing.T) {
 }
 
 func TestResolveRegistrationReadinessFailureReportsRestoreFailure(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "registry.json")
+	path := testRegistryTempPath(t)
 	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -2320,7 +2320,7 @@ func TestSuperviseRejectsNonPositiveInterval(t *testing.T) {
 }
 
 func TestContinuousSuperviseLogsPersistentPassErrorsAndContinues(t *testing.T) {
-	registryPath := filepath.Join(t.TempDir(), "registry.json")
+	registryPath := testRegistryTempPath(t)
 	if err := os.Mkdir(registryPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -2393,10 +2393,16 @@ func TestRetireSessionMatchesRootAdapterAndAgentTogether(t *testing.T) {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	correct := registry.Entry{ID: "correct", Root: root, Agent: "codex", Adapter: "boundary", Target: "correct"}
-	wrongAdapter := registry.Entry{ID: "wrong-adapter", Root: root, Agent: "codex", Adapter: "other", Target: "wrong-adapter"}
-	wrongAgent := registry.Entry{ID: "wrong-agent", Root: root, Agent: "claude", Adapter: "boundary", Target: "wrong-agent"}
-	registryPath := filepath.Join(dir, "registry.json")
+	correct := registry.Entry{
+		ID: registry.EntryID(root, "codex", "boundary", "correct"), Root: root, Agent: "codex", Adapter: "boundary", Target: "correct",
+	}
+	wrongAdapter := registry.Entry{
+		ID: registry.EntryID(root, "codex", "other", "wrong-adapter"), Root: root, Agent: "codex", Adapter: "other", Target: "wrong-adapter",
+	}
+	wrongAgent := registry.Entry{
+		ID: registry.EntryID(root, "claude", "boundary", "wrong-agent"), Root: root, Agent: "claude", Adapter: "boundary", Target: "wrong-agent",
+	}
+	registryPath := testRegistryPath(t, dir)
 	if err := registry.New(registryPath).Save(registry.File{Entries: []registry.Entry{correct, wrongAdapter, wrongAgent}}); err != nil {
 		t.Fatal(err)
 	}
@@ -2425,6 +2431,19 @@ func TestRetireSessionMatchesRootAdapterAndAgentTogether(t *testing.T) {
 			t.Fatalf("exact entry remained: %#v", loaded.Entries)
 		}
 	}
+}
+
+func testRegistryPath(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("Chmod registry test dir: %v", err)
+	}
+	return filepath.Join(dir, "registry.json")
+}
+
+func testRegistryTempPath(t *testing.T) string {
+	t.Helper()
+	return testRegistryPath(t, t.TempDir())
 }
 
 func TestNormalizeAMQPathsCoversIndependentPathBoundaries(t *testing.T) {
