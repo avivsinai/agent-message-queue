@@ -365,7 +365,10 @@ func deliverToDLQ(root *DeliveryRoot, agent, filename string, data []byte) (stri
 		return "", err
 	}
 
-	tmpPath := filepath.Join(tmpDir, filename)
+	tmpPath, err := uniqueAttemptTmpPath(tmpDir, filename)
+	if err != nil {
+		return "", err
+	}
 	newPath := filepath.Join(newDir, filename)
 
 	if err := root.writeAndSync(tmpPath, data, 0o600); err != nil {
@@ -374,8 +377,8 @@ func deliverToDLQ(root *DeliveryRoot, agent, filename string, data []byte) (stri
 	if err := root.syncDir(tmpDir); err != nil {
 		return "", root.cleanupTemp(tmpPath, err)
 	}
-	if err := root.root.Rename(tmpPath, newPath); err != nil {
-		return "", root.cleanupTemp(tmpPath, err)
+	if err := root.publishTmpNoReplace(tmpPath, newPath, data); err != nil {
+		return "", err
 	}
 	committedPath := root.displayPath(newPath)
 	if err := root.syncDir(newDir); err != nil {
@@ -502,12 +505,19 @@ func retryFromDLQLocked(root *DeliveryRoot, agent, dlqFilename string, force boo
 
 	if envelope.RetryState == RetryStatePending || envelope.RetryState == RetryStateIndeterminate {
 		if originalPresentBox == "" {
-			return fmt.Errorf(
-				"%w: %s retry for %s has no visible inbox destination; do not retry blindly",
-				ErrDLQRetryIndeterminate,
-				envelope.RetryState,
-				envelope.OriginalFile,
-			)
+			recovered, recoverErr := recoverPendingInboxTmp(root, agent, envelope.OriginalFile, originalContent)
+			if recoverErr != nil {
+				return recoverErr
+			}
+			if !recovered {
+				return fmt.Errorf(
+					"%w: %s retry for %s has no visible inbox destination; do not retry blindly",
+					ErrDLQRetryIndeterminate,
+					envelope.RetryState,
+					envelope.OriginalFile,
+				)
+			}
+			originalPresentBox = BoxNew
 		}
 		setRetryState(envelope, RetryStateDelivered)
 		updatedData, err := serializeDLQMessage(*envelope, originalContent)
@@ -744,6 +754,45 @@ func reconcileDLQCurAuthorityLocked(root *DeliveryRoot, agent, filename string) 
 			Err:       durabilityErr,
 		}
 	}
+	return true, nil
+}
+
+func recoverPendingInboxTmp(root *DeliveryRoot, agent, filename string, want []byte) (bool, error) {
+	tmpDir := filepath.Join("agents", agent, "inbox", "tmp")
+	entries, err := root.ReadDir(tmpDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("list retained inbox tmp: %w", err)
+	}
+
+	var match string
+	for _, entry := range entries {
+		if entry.IsDir() || !attemptTmpMatches(filename, entry.Name()) {
+			continue
+		}
+		tmpPath := filepath.Join(tmpDir, entry.Name())
+		got, readErr := root.ReadRegularNoFollow(tmpPath)
+		if readErr != nil {
+			return false, fmt.Errorf("read retained inbox tmp: %w", readErr)
+		}
+		if bytes.Equal(got, want) {
+			match = tmpPath
+			break
+		}
+	}
+	if match == "" {
+		return false, nil
+	}
+
+	newDir := filepath.Join("agents", agent, "inbox", "new")
+	newPath := filepath.Join(newDir, filename)
+	if err := root.publishTmpNoReplace(match, newPath, want); err != nil {
+		return false, fmt.Errorf("complete retained inbox tmp: %w", err)
+	}
+	_ = root.syncDir(newDir)
+	_ = root.syncDir(tmpDir)
 	return true, nil
 }
 
