@@ -123,7 +123,7 @@ func TestRegistrationTargetInventoryUsesGhosttyDirectProbe(t *testing.T) {
 
 func TestReattachReplacesCurrentSessionAdapterEntry(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
 	otherTarget := filepath.Join(dir, "other-inbox.txt")
@@ -183,7 +183,7 @@ func TestReattachReplacesCurrentSessionAdapterEntry(t *testing.T) {
 
 func TestAttachRejectsSecondRegistrationForSameAMQRootAndAgent(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	firstTarget := filepath.Join(dir, "first-inbox.txt")
 	secondTarget := filepath.Join(dir, "second-inbox.txt")
 	canonicalFirstTarget, err := (adapter.File{}).NormalizeTarget(firstTarget)
@@ -222,7 +222,7 @@ func TestAttachRejectsSecondRegistrationForSameAMQRootAndAgent(t *testing.T) {
 
 func TestAttachRejectsCanonicalRootAliasWithoutStartingWake(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	realRoot := filepath.Join(dir, "real-root")
 	if err := os.Mkdir(realRoot, 0o700); err != nil {
 		t.Fatalf("Mkdir root: %v", err)
@@ -272,22 +272,35 @@ func TestAttachIsIdempotentForSamePhysicalCmuxOwner(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
-	fakeCmux := filepath.Join(dir, "cmux")
-	if err := os.WriteFile(fakeCmux, []byte("#!/bin/sh\nprintf '%s\\n' '{\"windows\":[{\"workspaces\":[{\"panes\":[{\"surfaces\":[{\"id\":\"F901D722-6789-4BBB-9818-C4E97F20BEB3\",\"tty\":\"ttys101\"}]}]}]}]}'\n"), 0o700); err != nil {
-		t.Fatalf("write fake cmux: %v", err)
-	}
-	t.Setenv("CMUX_BUNDLED_CLI_PATH", fakeCmux)
+	runner := appCommandRunnerFunc(func(context.Context, string, ...string) ([]byte, error) {
+		return []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"ttys101"}]}]}]}]}`), nil
+	})
+	adapters := adapter.NewRegistry(adapter.Cmux{
+		Runner: runner,
+		Path:   "/fake/cmux",
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
+		},
+	}.WithOwnershipRecord())
 	args := []string{
 		"attach", "--registry", registryPath, "--adapter", "cmux", "--target", target,
 		"--root", "/tmp/idempotent", "--base-root", "/tmp", "--session", "idempotent", "--me", "codex", "--no-start",
 	}
-	runApp(t, args...)
-	runApp(t, args...)
+	for i := 0; i < 2; i++ {
+		var stdout, stderr bytes.Buffer
+		code := (App{Stdout: &stdout, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), args)
+		if code != 0 {
+			t.Fatalf("attach pass %d code=%d stdout=%s stderr=%s", i+1, code, stdout.String(), stderr.String())
+		}
+	}
 	loaded, err := registry.New(registryPath).Load()
 	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Target != target {
 		t.Fatalf("idempotent attach entries=%#v err=%v", loaded.Entries, err)
+	}
+	if loaded.Entries[0].OwnershipKey != "tty:/dev/ttys101" {
+		t.Fatalf("ownership_key = %q, want persisted tty key", loaded.Entries[0].OwnershipKey)
 	}
 }
 
@@ -296,7 +309,7 @@ func TestReattachRejectsDifferentSurfaceAliasOnOwnedPhysicalTTY(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	firstTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	secondTarget := "cmux:surface:B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	store := registry.New(registryPath)
@@ -338,7 +351,7 @@ func TestReattachIgnoresUnrelatedDegradedRegisteredCmuxTarget(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	degradedTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	degradedAlias := "cmux:surface:B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	candidateTarget := "cmux:surface:C71381D9-29D5-4D2D-A1C9-E101556BCB49"
@@ -374,7 +387,8 @@ for arg in "$@"; do
   previous="$arg"
 done
 [ -n "$ready" ] || exit 11
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 sleep 0.1
 `), 0o700); err != nil {
 		t.Fatalf("write fake amq: %v", err)
@@ -418,7 +432,7 @@ func TestReattachRejectsRegisteredCmuxTargetWithUnknownPhysicalKeyBeforeWake(t *
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	unknownTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	candidateTarget := "cmux:surface:C71381D9-29D5-4D2D-A1C9-E101556BCB49"
 	store := registry.New(registryPath)
@@ -436,6 +450,9 @@ func TestReattachRejectsRegisteredCmuxTargetWithUnknownPhysicalKeyBeforeWake(t *
 				return strings.TrimPrefix(candidateTarget, "cmux:surface:")
 			}
 			return ""
+		},
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
 		},
 	})
 	amqCalls := filepath.Join(dir, "amq-calls.log")
@@ -467,7 +484,7 @@ func TestReattachRejectsSamePhysicalKeyFromDegradedRegisteredTargetBeforeWake(t 
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	degradedTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	candidateTarget := "cmux:surface:C71381D9-29D5-4D2D-A1C9-E101556BCB49"
 	store := registry.New(registryPath)
@@ -489,6 +506,9 @@ func TestReattachRejectsSamePhysicalKeyFromDegradedRegisteredTargetBeforeWake(t 
 				return strings.TrimPrefix(candidateTarget, "cmux:surface:")
 			}
 			return ""
+		},
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
 		},
 	})
 	amqCalls := filepath.Join(dir, "amq-calls.log")
@@ -520,7 +540,7 @@ func TestReattachDoesNotEvictUnknownCmuxAliasForCurrentSurface(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	corpseID := "F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	liveID := "B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	corpseTarget := "cmux:surface:" + corpseID
@@ -574,7 +594,7 @@ func TestReattachDoesNotEvictUnknownCmuxAliasForCurrentSurface(t *testing.T) {
 
 func TestConcurrentReattachClaimStartsOnlyWinningWake(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	target := filepath.Join(dir, "inbox.txt")
 	canonicalTarget := normalizedFileTarget(t, target)
 	if err := os.WriteFile(target, nil, 0o600); err != nil {
@@ -592,7 +612,8 @@ for arg in "$@"; do
   previous="$arg"
 done
 [ -n "$ready" ] || exit 11
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 sleep 0.1
 `), 0o700); err != nil {
 		t.Fatalf("write fake amq: %v", err)
@@ -642,12 +663,13 @@ for arg in "$@"; do
 done
 [ -n "$ready" ] || exit 11
 sleep 0.05
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 `), 0o700); err != nil {
 		t.Fatalf("write fake AMQ: %v", err)
 	}
 	runApp(t, "attach",
-		"--registry", filepath.Join(dir, "registry.json"),
+		"--registry", testRegistryPath(t, dir),
 		"--adapter", "file",
 		"--target", target,
 		"--root", "/tmp/amq-root",
@@ -712,7 +734,7 @@ exit 12
 				t.Fatalf("reset calls: %v", err)
 			}
 			opts := base
-			opts.RegistryPath = filepath.Join(t.TempDir(), "registry.json")
+			opts.RegistryPath = testRegistryTempPath(t)
 			test.mutate(&opts)
 			if err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).registerWithOptions(context.Background(), opts); err != nil {
 				t.Fatalf("registerWithOptions: %v", err)
@@ -727,7 +749,7 @@ exit 12
 
 func TestReattachPreservesRegistryWhenWakeTargetCannotChange(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
 	canonicalOldTarget := normalizedFileTarget(t, oldTarget)
@@ -776,7 +798,7 @@ func TestReattachPreservesRegistryWhenWakeTargetCannotChange(t *testing.T) {
 
 func TestReattachPersistsRecoverableReservationBeforeWakeReadiness(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
 	canonicalOldTarget := normalizedFileTarget(t, oldTarget)
@@ -846,7 +868,7 @@ func TestReattachPersistsRecoverableReservationBeforeWakeReadiness(t *testing.T)
 
 func TestReattachPersistsCandidateOnlyAfterWakeReady(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
 	canonicalNewTarget := normalizedFileTarget(t, newTarget)
@@ -869,7 +891,8 @@ for arg in "$@"; do
   previous="$arg"
 done
 [ -n "$ready" ] || exit 11
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 `), 0o700); err != nil {
 		t.Fatalf("write fake AMQ: %v", err)
 	}
@@ -898,7 +921,7 @@ printf ready > "$ready"
 
 func TestReattachCancellationPreservesReservationForLateReadyWake(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := filepath.Join(dir, "old-inbox.txt")
 	newTarget := filepath.Join(dir, "new-inbox.txt")
 	canonicalNewTarget := normalizedFileTarget(t, newTarget)
@@ -933,7 +956,8 @@ done
 [ -n "$ready" ] || exit 11
 : > "$AMQ_KEEPALIVE_STARTED"
 while [ ! -f "$AMQ_KEEPALIVE_ALLOW_READY" ]; do sleep 0.01; done
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 : > "$AMQ_KEEPALIVE_LATE_READY"
 while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 : > "$AMQ_KEEPALIVE_EXITED"
@@ -990,7 +1014,7 @@ func TestReattachRetireDetachedRetiresPreviousWakeThenStarts(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	newTarget := "cmux:surface:B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	store := registry.New(registryPath)
@@ -1023,7 +1047,7 @@ if [ ! -f "$AMQ_KEEPALIVE_FIRST_START" ]; then
 fi
 previous=""
 for arg in "$@"; do
-  if [ "$previous" = "-ready-file" ]; then printf ready > "$arg"; fi
+  if [ "$previous" = "-ready-file" ]; then umask 077; printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$arg"; fi
   previous="$arg"
 done
 `), 0o700); err != nil {
@@ -1033,8 +1057,9 @@ done
 	if err := os.WriteFile(fakeKeepalive, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write fake keepalive: %v", err)
 	}
+	adapters := hermeticCmuxRegistry(fakeCmux)
 	var stderr bytes.Buffer
-	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Run(context.Background(), []string{"reattach",
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{"reattach",
 		"--registry", registryPath,
 		"--adapter", "cmux",
 		"--target", newTarget,
@@ -1078,7 +1103,7 @@ func TestReattachRetireDetachedStartsWhenOldTargetMissingAndWakeLockAlreadyAbsen
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	newTarget := "cmux:surface:B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	store := registry.New(registryPath)
@@ -1104,7 +1129,7 @@ if [ "$1" = "wake" ] && [ "${2:-}" = "retire" ]; then
 fi
 previous=""
 for arg in "$@"; do
-  if [ "$previous" = "-ready-file" ]; then printf ready > "$arg"; fi
+  if [ "$previous" = "-ready-file" ]; then umask 077; printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$arg"; fi
   previous="$arg"
 done
 `), 0o700); err != nil {
@@ -1114,7 +1139,8 @@ done
 	if err := os.WriteFile(fakeKeepalive, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write fake keepalive: %v", err)
 	}
-	runApp(t, "reattach",
+	adapters := hermeticCmuxRegistry(fakeCmux)
+	runAppWith(t, App{Adapters: &adapters}, "reattach",
 		"--registry", registryPath,
 		"--adapter", "cmux",
 		"--target", newTarget,
@@ -1155,7 +1181,7 @@ func TestReattachRetireDetachedLeavesOldRowWhenRetireRefused(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	newTarget := "cmux:surface:B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	store := registry.New(registryPath)
@@ -1188,7 +1214,7 @@ if [ ! -f "$AMQ_KEEPALIVE_FIRST_START" ]; then
 fi
 previous=""
 for arg in "$@"; do
-  if [ "$previous" = "-ready-file" ]; then printf ready > "$arg"; fi
+  if [ "$previous" = "-ready-file" ]; then umask 077; printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$arg"; fi
   previous="$arg"
 done
 `), 0o700); err != nil {
@@ -1198,8 +1224,9 @@ done
 	if err := os.WriteFile(fakeKeepalive, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write fake keepalive: %v", err)
 	}
+	adapters := hermeticCmuxRegistry(fakeCmux)
 	var stderr bytes.Buffer
-	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Run(context.Background(), []string{"reattach",
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{"reattach",
 		"--registry", registryPath,
 		"--adapter", "cmux",
 		"--target", newTarget,
@@ -1243,7 +1270,7 @@ func TestReattachRetireDetachedNeverRetargetsLiveCmuxWake(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	oldTarget := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	newTarget := "cmux:surface:B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	store := registry.New(registryPath)
@@ -1261,8 +1288,9 @@ func TestReattachRetireDetachedNeverRetargetsLiveCmuxWake(t *testing.T) {
 	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript("#!/bin/sh\nprintf 'CALL %s\\n' \"$*\" >> \"$AMQ_KEEPALIVE_ARGS_LOG\"\necho 'existing wake target differs' >&2\nexit 7\n"), 0o700); err != nil {
 		t.Fatalf("write fake AMQ: %v", err)
 	}
+	adapters := hermeticCmuxRegistry(fakeCmux)
 	var stderr bytes.Buffer
-	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Run(context.Background(), []string{
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
 		"reattach", "--registry", registryPath, "--adapter", "cmux", "--target", newTarget,
 		"--root", root, "--base-root", dir, "--session", "active-room", "--me", "codex",
 		"--amq", fakeAMQ, "--self", filepath.Join(dir, "amq-keepalive"), "--retire-detached",
@@ -1302,7 +1330,7 @@ func TestRetireSessionRetiresConfirmedWakesAndRemovesRows(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	entries := []registry.Entry{
 		{Root: root, BaseRoot: dir, SessionName: "dashboard", Agent: "codex", Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3", State: registry.StateDetached},
@@ -1378,7 +1406,7 @@ func TestRetireSessionRefusesWhenTargetStillExists(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	for _, entry := range []registry.Entry{
 		{Root: root, Agent: "codex", Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3", State: registry.StateDetached},
@@ -1397,8 +1425,9 @@ func TestRetireSessionRefusesWhenTargetStillExists(t *testing.T) {
 	if err := os.WriteFile(fakeAMQ, []byte("#!/bin/sh\nexit 99\n"), 0o700); err != nil {
 		t.Fatalf("write fake AMQ: %v", err)
 	}
+	adapters := hermeticCmuxRegistry(fakeCmux)
 	var stderr bytes.Buffer
-	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Run(context.Background(), []string{
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
 		"retire-session", "--registry", registryPath, "--root", root, "--amq", fakeAMQ,
 	})
 	if code != 1 || !strings.Contains(stderr.String(), "still exists") {
@@ -1419,7 +1448,7 @@ func TestRetireSessionRemovesRetiredAndLeavesRefused(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll root: %v", err)
 	}
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	for _, entry := range []registry.Entry{
 		{Root: root, Agent: "codex", Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3", State: registry.StateDetached},
@@ -1536,7 +1565,7 @@ func (w *appBlockingWake) Release() {
 
 func TestSuperviseUsesInjectedClockOnWakeFailure(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, nil, 0o600); err != nil {
 		t.Fatalf("write target: %v", err)
@@ -1568,7 +1597,7 @@ func TestSuperviseUsesInjectedClockOnWakeFailure(t *testing.T) {
 
 func TestSuperviseWarnsOncePerPersistentFailureTransition(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	canonicalRoot, err := registry.CanonicalRoot("/tmp/amq-root")
 	if err != nil {
 		t.Fatalf("CanonicalRoot: %v", err)
@@ -1635,7 +1664,7 @@ func (w *appCancelingWake) StartWake(ctx context.Context, _ amq.StartWakeRequest
 
 func TestSuperviseCancellationStopsLaterStartsAndLeavesRegistryUnchanged(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	for index := 0; index < 2; index++ {
 		target := filepath.Join(dir, fmt.Sprintf("target-%d", index))
@@ -1674,7 +1703,7 @@ func TestSuperviseBatchesCmuxInventoryAndDefersHealthyEntries(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	targets := []string{
 		"cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3",
@@ -1696,7 +1725,13 @@ printf '%s\n' '{"windows":[{"workspaces":[{"panes":[{"surfaces":[{"id":"F901D722
 	}
 	t.Setenv("CMUX_BUNDLED_CLI_PATH", fakeCmux)
 	wake := &appCountingWake{}
-	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	adapters := adapter.NewRegistry(adapter.Cmux{
+		Path: fakeCmux,
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
+		},
+	}.WithOwnershipRecord())
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &adapters}
 	results, err := app.superviseOnce(context.Background(), registryPath, wake, "/bin/amq-keepalive", time.Second)
 	if err != nil || len(results) != 2 || len(wake.starts) != 2 {
 		t.Fatalf("first pass results=%#v starts=%d err=%v", results, len(wake.starts), err)
@@ -1719,7 +1754,7 @@ func TestSuperviseFailsClosedWhenOneRegisteredSurfaceHasLiveTTYAlias(t *testing.
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	if _, err := store.Upsert(registry.Entry{
 		Root: "/tmp/tty-owner", Agent: "codex", Adapter: "cmux",
@@ -1780,9 +1815,74 @@ func TestSuperviseFailsClosedWhenOneRegisteredSurfaceHasLiveTTYAlias(t *testing.
 	}
 }
 
+func TestSuperviseRefusesCmuxTTYDriftAcrossRestart(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("cmux adapter requires macOS")
+	}
+	dir := t.TempDir()
+	registryPath := testRegistryPath(t, dir)
+	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
+	store := registry.New(registryPath)
+	if _, err := store.Upsert(registry.Entry{
+		Root: "/tmp/drift", Agent: "codex", Adapter: "cmux", Target: target, State: registry.StateActive,
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	current := now
+	appNow := func() time.Time { return current }
+	tree := func(tty string) []byte {
+		return []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"` + tty + `"}]}]}]}]}`)
+	}
+	newAdapters := func(tty string) adapter.Registry {
+		reg := adapter.NewRegistry(adapter.Cmux{
+			Runner: appCommandRunnerFunc(func(context.Context, string, ...string) ([]byte, error) {
+				return tree(tty), nil
+			}),
+			Path: "/fake/cmux",
+			LiveTTYOwnerCount: func(string) (int, error) {
+				return 1, nil
+			},
+		}.WithOwnershipRecord())
+		return reg
+	}
+
+	wake := &appCountingWake{}
+	firstAdapters := newAdapters("ttys011")
+	results, err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &firstAdapters, Now: appNow}).superviseOnce(
+		context.Background(), registryPath, wake, "/bin/amq-keepalive", time.Second,
+	)
+	if err != nil || len(results) != 1 || results[0].Action != supervisor.ActionEnsured {
+		t.Fatalf("first pass results=%#v err=%v, want ensured", results, err)
+	}
+	loaded, err := store.Load()
+	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].OwnershipKey != "tty:/dev/ttys011" {
+		t.Fatalf("persisted ownership_key=%#v err=%v, want tty:/dev/ttys011", loaded.Entries, err)
+	}
+
+	current = now.Add(6 * time.Minute)
+	secondAdapters := newAdapters("ttys012")
+	results, err = (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &secondAdapters, Now: appNow}).superviseOnce(
+		context.Background(), registryPath, wake, "/bin/amq-keepalive", time.Second,
+	)
+	if err != nil || len(results) != 1 || results[0].Action != supervisor.ActionDeferred ||
+		results[0].Error == nil || !errors.Is(results[0].Error, adapter.ErrTargetDegraded) ||
+		!strings.Contains(results[0].Error.Error(), "ownership key conflict") {
+		t.Fatalf("restart pass results=%#v err=%v, want degraded tty drift", results, err)
+	}
+	if len(wake.starts) != 1 {
+		t.Fatalf("drift pass started extra wakes: %d", len(wake.starts))
+	}
+	loaded, err = store.Load()
+	if err != nil || loaded.Entries[0].OwnershipKey != "tty:/dev/ttys011" {
+		t.Fatalf("drift overwrote ownership_key: %#v err=%v", loaded.Entries, err)
+	}
+}
+
 func TestSuperviseFailsClosedOnNormalizedTargetOwnershipCollision(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	upper := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	lower := strings.ToLower(upper)
 	entries := []registry.Entry{
@@ -1810,7 +1910,7 @@ func TestSuperviseFailsClosedOnNormalizedTargetOwnershipCollision(t *testing.T) 
 }
 
 func TestContinuousSuperviseDoesNotEmitPerPassJSON(t *testing.T) {
-	registryPath := filepath.Join(t.TempDir(), "registry.json")
+	registryPath := testRegistryTempPath(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
 	var stdout bytes.Buffer
@@ -1831,7 +1931,7 @@ func TestGCDryRunIsNonMutatingAndApplyRetiresCandidates(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	store := registry.New(registryPath)
 	entry, err := store.Upsert(registry.Entry{
@@ -1896,7 +1996,7 @@ func TestGCDryRunExcludesPhysicalTTYOwnershipCollisions(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	store := registry.New(registryPath)
 	for index, target := range []string{
 		"cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3",
@@ -1935,7 +2035,7 @@ func TestGCApplyLeavesCandidateWhenRetireRefused(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	store := registry.New(registryPath)
 	entry, err := store.Upsert(registry.Entry{
@@ -1981,6 +2081,190 @@ exit 1
 	}
 }
 
+func TestGCApplyAndReattachSerializeNewGenerationSurvives(t *testing.T) {
+	dir := t.TempDir()
+	registryPath := testRegistryPath(t, dir)
+	liveRoot := filepath.Join(dir, "live-root")
+	staleRoot := filepath.Join(dir, "stale-root")
+	for _, root := range []string{liveRoot, staleRoot} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	presence := &presenceAdapter{name: "boundary", present: map[string]bool{}}
+	adapters := adapter.NewRegistry(presence)
+	store := registry.New(registryPath)
+	live, err := store.Upsert(registry.Entry{
+		Root: liveRoot, Agent: "codex", Adapter: "boundary", Target: "live-surface",
+		State: registry.StateDetached, DetachedSince: time.Now().Add(-48 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Upsert(live): %v", err)
+	}
+	stale, err := store.Upsert(registry.Entry{
+		Root: staleRoot, Agent: "stale-agent", Adapter: "boundary", Target: "stale-surface",
+		State: registry.StateDetached, DetachedSince: time.Now().Add(-48 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Upsert(stale): %v", err)
+	}
+
+	amqCalls := filepath.Join(dir, "amq-calls.log")
+	t.Setenv("AMQ_KEEPALIVE_AMQ_CALLS", amqCalls)
+	fakeAMQ := filepath.Join(dir, "amq")
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`#!/bin/sh
+me=""
+ready=""
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "--me" ] || [ "$previous" = "-me" ]; then me="$arg"; fi
+  if [ "$previous" = "-ready-file" ]; then ready="$arg"; fi
+  previous="$arg"
+done
+if [ "$1" = "wake" ] && [ "$2" = "retire" ]; then
+  printf 'RETIRE %s\n' "$me" >> "$AMQ_KEEPALIVE_AMQ_CALLS"
+  sleep 0.05
+  printf '%s\n' '{"status":"retired","agent":"'"$me"'","pid":1}'
+  exit 0
+fi
+printf 'START %s\n' "$me" >> "$AMQ_KEEPALIVE_AMQ_CALLS"
+[ -n "$ready" ] || exit 11
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
+`), 0o700); err != nil {
+		t.Fatalf("write fake amq: %v", err)
+	}
+
+	start := make(chan struct{})
+	reattachHoldsLock := make(chan struct{})
+	continueReattach := make(chan struct{})
+	gcLoad := make(chan struct{})
+	var releaseReattach sync.Once
+	releaseContinueReattach := func() {
+		releaseReattach.Do(func() { close(continueReattach) })
+	}
+	defer releaseContinueReattach()
+	t.Cleanup(func() {
+		afterReattachRegistrationLockHeldForTest = nil
+		beforeGCRegistryLoadForTest = nil
+	})
+	afterReattachRegistrationLockHeldForTest = func() {
+		select {
+		case <-reattachHoldsLock:
+		default:
+			close(reattachHoldsLock)
+		}
+		<-continueReattach
+		// Presence stays absent through the lock-held proof so gc cannot skip
+		// on a live probe. Reattach itself still needs the target after that.
+		presence.setPresent("live-surface")
+	}
+	beforeGCRegistryLoadForTest = func() {
+		select {
+		case <-gcLoad:
+		default:
+			close(gcLoad)
+		}
+	}
+
+	type outcome struct {
+		name string
+		code int
+		out  string
+		err  string
+	}
+	outcomes := make(chan outcome, 2)
+	go func() {
+		<-start
+		var stdout, stderr bytes.Buffer
+		code := (App{Stdout: &stdout, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
+			"reattach", "--registry", registryPath, "--adapter", "boundary", "--target", "live-surface",
+			"--root", liveRoot, "--base-root", dir, "--session", "live", "--me", "codex",
+			"--amq", fakeAMQ, "--self", "/bin/amq-keepalive",
+		})
+		outcomes <- outcome{name: "reattach", code: code, out: stdout.String(), err: stderr.String()}
+	}()
+	go func() {
+		<-reattachHoldsLock
+		var stdout, stderr bytes.Buffer
+		code := (App{Stdout: &stdout, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
+			"gc", "--registry", registryPath, "--min-detached-age", "0", "--apply",
+			"--amq", fakeAMQ, "--self", "/bin/amq-keepalive",
+		})
+		outcomes <- outcome{name: "gc", code: code, out: stdout.String(), err: stderr.String()}
+	}()
+	close(start)
+	select {
+	case <-reattachHoldsLock:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reattach did not acquire the registration lock")
+	}
+	select {
+	case <-gcLoad:
+		t.Fatal("gc loaded the registry while reattach held the registration lock")
+	case <-time.After(150 * time.Millisecond):
+	}
+	releaseContinueReattach()
+	first, second := <-outcomes, <-outcomes
+	var reattachOut, gcOut outcome
+	for _, item := range []outcome{first, second} {
+		switch item.name {
+		case "reattach":
+			reattachOut = item
+		case "gc":
+			gcOut = item
+		}
+	}
+	if reattachOut.code != 0 {
+		t.Fatalf("reattach code=%d stdout=%s stderr=%s", reattachOut.code, reattachOut.out, reattachOut.err)
+	}
+	if gcOut.code != 0 {
+		t.Fatalf("gc code=%d stdout=%s stderr=%s", gcOut.code, gcOut.out, gcOut.err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	foundLive, foundStale := false, false
+	for _, entry := range loaded.Entries {
+		switch entry.ID {
+		case live.ID:
+			foundLive = true
+			if entry.State != registry.StateActive && entry.State != registry.StateAttached {
+				t.Fatalf("live generation state=%q, want attached/active: %#v", entry.State, entry)
+			}
+		case stale.ID:
+			foundStale = true
+		}
+	}
+	if !foundLive {
+		t.Fatalf("new live generation was forgotten: entries=%#v", loaded.Entries)
+	}
+	if foundStale {
+		t.Fatalf("stale detached entry was not retired: entries=%#v", loaded.Entries)
+	}
+
+	data, err := os.ReadFile(amqCalls)
+	if err != nil {
+		t.Fatalf("read amq log: %v", err)
+	}
+	startedLive := false
+	for _, line := range strings.Split(string(data), "\n") {
+		switch line {
+		case "START codex":
+			startedLive = true
+		case "RETIRE codex":
+			if startedLive {
+				t.Fatalf("gc retired G2 after reattach started it: log=%q", data)
+			}
+		}
+	}
+	if !startedLive {
+		t.Fatalf("reattach did not start G2: log=%q gc=%s", data, gcOut.out)
+	}
+}
+
 type boundaryAdapter struct {
 	name     string
 	probeErr error
@@ -1991,6 +2275,37 @@ func (a boundaryAdapter) Name() string { return a.name }
 func (a boundaryAdapter) Probe(context.Context, string) error { return a.probeErr }
 
 func (a boundaryAdapter) Inject(context.Context, string, string) error { return nil }
+
+type presenceAdapter struct {
+	name    string
+	mu      sync.Mutex
+	present map[string]bool
+}
+
+func (a *presenceAdapter) Name() string { return a.name }
+
+func (a *presenceAdapter) Probe(ctx context.Context, target string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.present[target] {
+		return nil
+	}
+	return adapter.ErrTargetNotFound
+}
+
+func (a *presenceAdapter) Inject(context.Context, string, string) error { return nil }
+
+func (a *presenceAdapter) setPresent(target string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.present == nil {
+		a.present = map[string]bool{}
+	}
+	a.present[target] = true
+}
 
 type sequenceBoundaryAdapter struct {
 	boundaryAdapter
@@ -2068,7 +2383,7 @@ func TestRegisterEnvFailureDependsOnlyOnRequiredIdentity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := base
-			opts.RegistryPath = filepath.Join(t.TempDir(), "registry.json")
+			opts.RegistryPath = testRegistryTempPath(t)
 			tc.mutate(&opts)
 			err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).registerWithOptions(context.Background(), opts)
 			if (err != nil) != tc.wantErr {
@@ -2093,7 +2408,7 @@ func TestRegisterUsesEnvBaseRootAndSessionIndependently(t *testing.T) {
 	}
 	for _, missing := range []string{"base", "session"} {
 		t.Run(missing, func(t *testing.T) {
-			registryPath := filepath.Join(t.TempDir(), "registry.json")
+			registryPath := testRegistryTempPath(t)
 			opts := registerOptions{
 				RegistryPath: registryPath,
 				AdapterName:  "file",
@@ -2142,7 +2457,7 @@ func TestRegisterReturnsOnlyNonDetachedReconcileErrors(t *testing.T) {
 			}
 			adapters := adapter.NewRegistry(selected)
 			opts := base
-			opts.RegistryPath = filepath.Join(t.TempDir(), "registry.json")
+			opts.RegistryPath = testRegistryTempPath(t)
 			opts.AdapterName = "boundary"
 			err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &adapters}).registerWithOptions(context.Background(), opts)
 			if (err != nil) != tc.wantErr {
@@ -2153,7 +2468,7 @@ func TestRegisterReturnsOnlyNonDetachedReconcileErrors(t *testing.T) {
 }
 
 func TestResolveRegistrationReadinessFailurePersistsRetryState(t *testing.T) {
-	store := registry.New(filepath.Join(t.TempDir(), "registry.json"))
+	store := registry.New(testRegistryTempPath(t))
 	reservation, err := store.Upsert(registry.Entry{Root: "/tmp/root", Agent: "codex", Adapter: "file", Target: "/tmp/target"})
 	if err != nil {
 		t.Fatal(err)
@@ -2172,7 +2487,7 @@ func TestResolveRegistrationReadinessFailurePersistsRetryState(t *testing.T) {
 }
 
 func TestResolveRegistrationReadinessFailureReportsRestoreFailure(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "registry.json")
+	path := testRegistryTempPath(t)
 	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -2225,7 +2540,7 @@ func TestSuperviseRejectsNonPositiveInterval(t *testing.T) {
 }
 
 func TestContinuousSuperviseLogsPersistentPassErrorsAndContinues(t *testing.T) {
-	registryPath := filepath.Join(t.TempDir(), "registry.json")
+	registryPath := testRegistryTempPath(t)
 	if err := os.Mkdir(registryPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -2298,10 +2613,16 @@ func TestRetireSessionMatchesRootAdapterAndAgentTogether(t *testing.T) {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	correct := registry.Entry{ID: "correct", Root: root, Agent: "codex", Adapter: "boundary", Target: "correct"}
-	wrongAdapter := registry.Entry{ID: "wrong-adapter", Root: root, Agent: "codex", Adapter: "other", Target: "wrong-adapter"}
-	wrongAgent := registry.Entry{ID: "wrong-agent", Root: root, Agent: "claude", Adapter: "boundary", Target: "wrong-agent"}
-	registryPath := filepath.Join(dir, "registry.json")
+	correct := registry.Entry{
+		ID: registry.EntryID(root, "codex", "boundary", "correct"), Root: root, Agent: "codex", Adapter: "boundary", Target: "correct",
+	}
+	wrongAdapter := registry.Entry{
+		ID: registry.EntryID(root, "codex", "other", "wrong-adapter"), Root: root, Agent: "codex", Adapter: "other", Target: "wrong-adapter",
+	}
+	wrongAgent := registry.Entry{
+		ID: registry.EntryID(root, "claude", "boundary", "wrong-agent"), Root: root, Agent: "claude", Adapter: "boundary", Target: "wrong-agent",
+	}
+	registryPath := testRegistryPath(t, dir)
 	if err := registry.New(registryPath).Save(registry.File{Entries: []registry.Entry{correct, wrongAdapter, wrongAgent}}); err != nil {
 		t.Fatal(err)
 	}
@@ -2330,6 +2651,19 @@ func TestRetireSessionMatchesRootAdapterAndAgentTogether(t *testing.T) {
 			t.Fatalf("exact entry remained: %#v", loaded.Entries)
 		}
 	}
+}
+
+func testRegistryPath(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("Chmod registry test dir: %v", err)
+	}
+	return filepath.Join(dir, "registry.json")
+}
+
+func testRegistryTempPath(t *testing.T) string {
+	t.Helper()
+	return testRegistryPath(t, t.TempDir())
 }
 
 func TestNormalizeAMQPathsCoversIndependentPathBoundaries(t *testing.T) {
@@ -2370,12 +2704,28 @@ func mustAbsPath(t *testing.T, path string) string {
 
 func runApp(t *testing.T, args ...string) {
 	t.Helper()
+	runAppWith(t, App{}, args...)
+}
+
+func runAppWith(t *testing.T, app App, args ...string) {
+	t.Helper()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), args)
+	app.Stdout = &stdout
+	app.Stderr = &stderr
+	code := app.Run(context.Background(), args)
 	if code != 0 {
 		t.Fatalf("Run(%v) = %d\nstdout:\n%s\nstderr:\n%s", args, code, stdout.String(), stderr.String())
 	}
+}
+
+func hermeticCmuxRegistry(fakeCmuxPath string) adapter.Registry {
+	return adapter.NewRegistry(adapter.File{}, adapter.Ghostty{}, adapter.Cmux{
+		Path: fakeCmuxPath,
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
+		},
+	}.WithOwnershipRecord())
 }
 
 func fakeStartWakeScript(body string) []byte {

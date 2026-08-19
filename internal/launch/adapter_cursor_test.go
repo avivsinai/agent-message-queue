@@ -33,6 +33,56 @@ func TestCursorCapabilitiesRequireExactCaptureVersion(t *testing.T) {
 	}
 }
 
+func TestCursorRejectsUnknownProviderIdentity(t *testing.T) {
+	adapter := NewCursorAdapter("agent")
+	adapter.probe = cursorProbe("cursor-agent " + cursorCaptureVersion)
+	got := adapter.Capabilities(context.Background())
+	if !got.Available || got.Fresh || got.Capture || got.PreSpawnAcquire || got.Reason != "capture_version_unsupported" {
+		t.Fatalf("unknown Cursor provider identity was accepted: %#v", got)
+	}
+}
+
+func TestCursorPlansAcceptCurrentAgentExecutableAlias(t *testing.T) {
+	project, executable := testExecutable(t, "agent")
+	adapter := NewCursorAdapter(executable)
+	plan, err := adapter.PlanFresh(planRequest(project, CursorProvider))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Argv[0] != executable || plan.AdapterMode != AdapterModeCapture || !plan.PreSpawnAcquire {
+		t.Fatalf("current Cursor agent plan = %#v", plan)
+	}
+}
+
+func TestCursorLegacyExecutablePreservesArgvAndTrustDigest(t *testing.T) {
+	project, executable := testExecutable(t, CursorProvider)
+	adapter := NewCursorAdapter(executable)
+	request := planRequest(project, CursorProvider)
+
+	first, err := adapter.PlanFresh(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstTrust, err := (Plan{Version: PlanVersion, Agents: []AgentPlan{first}}).TrustSemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := adapter.PlanFresh(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTrust, err := (Plan{Version: PlanVersion, Agents: []AgentPlan{second}}).TrustSemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Argv[0] != executable || second.Argv[0] != executable {
+		t.Fatalf("legacy Cursor executable changed in plan: first=%q second=%q want=%q", first.Argv[0], second.Argv[0], executable)
+	}
+	if firstTrust == "" || firstTrust != secondTrust {
+		t.Fatalf("legacy Cursor trust digest unstable: first=%q second=%q", firstTrust, secondTrust)
+	}
+}
+
 func TestCursorPlansAcquireBeforeFreshResume(t *testing.T) {
 	project, executable := testExecutable(t, CursorProvider)
 	adapter := NewCursorAdapter(executable)

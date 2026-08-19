@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -77,11 +78,21 @@ type ReconcileRequest struct {
 	// ExecutionOptions carries normalized wrapper policy into the plan, journal,
 	// and ticket. The exact-root/options boundary owns later consumption.
 	ExecutionOptions map[string]PrepareExecutionOptions
+	// AuthorizedIdentities carries the physical provider, wrapper, and cwd
+	// identities captured by Apply's authorization Prepare. Reconcile checks
+	// these before any adapter capability probe or ticket creation.
+	AuthorizedIdentities map[string]AuthorizedParticipantIdentity
 	// Placement is the caller-requested tuple. Nil preserves v0.61 Create.
 	Placement *Placement
 	// OnLive is the per-handle live-seat policy. Missing keys are refuse.
 	OnLive        map[string]string
 	CallerContext map[string]string
+}
+
+type AuthorizedParticipantIdentity struct {
+	Executable  *ConsultedExecutable
+	Wrapper     *ConsultedExecutable
+	CwdIdentity string
 }
 
 type AgentReconcileResult struct {
@@ -120,6 +131,11 @@ type plannedAgent struct {
 	providerVersion string
 }
 
+type joinProgressCrashError struct{ err error }
+
+func (e *joinProgressCrashError) Error() string { return e.err.Error() }
+func (e *joinProgressCrashError) Unwrap() error { return e.err }
+
 func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr error) {
 	result = ReconcileResult{Session: request.Session, Agents: []AgentReconcileResult{}, Commands: []EmittedCommand{}}
 	if request.Context == nil {
@@ -134,7 +150,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	if err := request.Config.Validate(); err != nil {
 		return result, err
 	}
-	amqExecutable, err := resolveLaunchAMQExecutable(request.AMQPath)
+	amqExecutable, err := resolveLaunchAMQExecutable(request.AMQPath, request.ProjectRoot)
 	if err != nil {
 		return result, err
 	}
@@ -268,34 +284,57 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 			return result, nil
 		}
 		journal = current
-		backendName, backend, detect, create, recoveredCreate, err = recoverJournal(request, journal, binding, hasBinding, &result)
-		if err != nil {
-			return result, err
-		}
-		if result.Outcome == OutcomeActionRequired {
-			markPlannedAgents(&result, planned, 6, result.Reason)
-			result.AggregateCode = 6
-			return result, nil
-		}
-		if hasBinding && journalMatchesBinding(journal, binding) {
-			if journal.Phase != JournalCreated {
-				result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "launch_journal_incomplete"
+		if journal.JoinBinding != nil {
+			if !hasBinding || !reflect.DeepEqual(*journal.JoinBinding, binding) {
+				result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "launch_journal_binding_conflict"
 				return result, nil
 			}
-			if err := commitRecoveredJournal(request, lease, journal); err != nil {
+			copied := *journal.JoinBinding
+			joinBinding = &copied
+			backendName = journal.Backend
+			backend = request.Backends[backendName]
+			if backend == nil {
+				result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "journaled_launcher_not_available"
+				return result, nil
+			}
+			detect = backend.Detect()
+			if err := detect.Validate(); err != nil {
 				return result, err
 			}
-			result.Backend, result.Outcome = journal.Backend, OutcomeCreated
-			result.AggregateCode = aggregateReconcileCode(result.Agents)
-			return result, nil
-		}
-		if !recoveredCreate {
-			// Reclaim proved the old generation absent. Recreate the exact trusted
-			// plan under the existing resume policy and journal generation.
-			if err := ClearJournal(request.Root, lease, journal); err != nil {
+			if !detect.Available || detect.Profile.Identity() != journal.Profile || detect.HostIdentity != journal.HostIdentity || detect.InstanceIdentity != journal.InstanceIdentity {
+				result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "launch_journal_context_mismatch"
+				return result, nil
+			}
+		} else {
+			backendName, backend, detect, create, recoveredCreate, err = recoverJournal(request, journal, binding, hasBinding, &result)
+			if err != nil {
 				return result, err
 			}
-			journalActive = false
+			if result.Outcome == OutcomeActionRequired {
+				markPlannedAgents(&result, planned, 6, result.Reason)
+				result.AggregateCode = 6
+				return result, nil
+			}
+			if hasBinding && journalMatchesBinding(journal, binding) {
+				if journal.Phase != JournalCreated {
+					result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "launch_journal_incomplete"
+					return result, nil
+				}
+				if err := commitRecoveredJournal(request, lease, journal); err != nil {
+					return result, err
+				}
+				result.Backend, result.Outcome = journal.Backend, OutcomeCreated
+				result.AggregateCode = aggregateReconcileCode(result.Agents)
+				return result, nil
+			}
+			if !recoveredCreate {
+				// Reclaim proved the old generation absent. Recreate the exact trusted
+				// plan under the existing resume policy and journal generation.
+				if err := ClearJournal(request.Root, lease, journal); err != nil {
+					return result, err
+				}
+				journalActive = false
+			}
 		}
 	} else {
 		if hasBinding {
@@ -359,12 +398,20 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		}
 	}
 	result.Backend = backendName
+	tmuxJoinJournal := joinBinding != nil && backendName == LauncherTMux
+	if _, ok := backend.(*TmuxBackend); !ok {
+		tmuxJoinJournal = false
+	}
 
 	if !recoveredCreate {
-		if detect.Profile.Has(CapCreate) && joinBinding == nil {
-			journal, err = NewLaunchJournal(request, backendName, detect, plan, planDigest, nonce, result.Agents, plannedConversations(planned), time.Now())
+		if !journalActive && detect.Profile.Has(CapCreate) && (joinBinding == nil || tmuxJoinJournal) {
+			journal, err = NewLaunchJournal(request, backendName, detect, plan, planDigest, nonce, plannedAgentResults(result.Agents, planned), plannedConversations(planned), time.Now())
 			if err != nil {
 				return result, err
+			}
+			if tmuxJoinJournal {
+				copied := *joinBinding
+				journal.JoinBinding = &copied
 			}
 			if err := WriteJournal(request.Root, lease, journal); err != nil {
 				return result, err
@@ -374,7 +421,8 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 				return result, err
 			}
 		}
-		if err := writeExecutionTickets(request, lease, ticketAgentsForCreate(planned, joinBinding), amqExecutable, backendName, detect.Profile.Identity()); err != nil {
+		ticketAgents := ticketAgentsForCreate(planned, joinBinding)
+		if err := writeExecutionTickets(request, lease, ticketAgents, amqExecutable, backendName, detect.Profile.Identity()); err != nil {
 			return result, err
 		}
 		createPlan := plan
@@ -386,19 +434,39 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 				}
 			}
 		}
+		var joinProgress func(JoinDelta) error
+		if journalActive && tmuxJoinJournal {
+			joinProgress = func(delta JoinDelta) error {
+				journal.JoinDeltas = append(journal.JoinDeltas, delta)
+				if err := WriteJournal(request.Root, lease, journal); err != nil {
+					return err
+				}
+				if err := callCrashHook(request.CrashHook, "join_delta_written:"+delta.Handle); err != nil {
+					return &joinProgressCrashError{err: err}
+				}
+				return nil
+			}
+		}
 		create, err = backend.Create(CreateRequest{
 			ProjectRoot: request.ProjectRoot, Session: request.Session, Plan: createPlan,
 			AMQPath: amqExecutable, Root: request.Root, Placement: request.Placement,
 			JoinBinding: joinBinding,
+			JoinDeltas:  slices.Clone(journal.JoinDeltas), JoinProgress: joinProgress,
 		})
 		if err != nil {
+			var crashErr *joinProgressCrashError
+			if errors.As(err, &crashErr) {
+				return result, crashErr
+			}
 			var definite *DefinitePreCreateError
-			if journalActive && errors.As(err, &definite) {
-				if clearErr := removeExecutionTickets(request.Root, lease, planned); clearErr != nil {
+			if errors.As(err, &definite) {
+				if clearErr := removeExecutionTickets(request.Root, lease, ticketAgents); clearErr != nil {
 					return result, errors.Join(err, clearErr)
 				}
-				if clearErr := ClearJournal(request.Root, lease, journal); clearErr != nil {
-					return result, errors.Join(err, clearErr)
+				if journalActive {
+					if clearErr := ClearJournal(request.Root, lease, journal); clearErr != nil {
+						return result, errors.Join(err, clearErr)
+					}
 				}
 			}
 			code := reconcileErrorCode(err)
@@ -411,6 +479,15 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		}
 	}
 	result.Outcome, result.Commands = create.Outcome, create.Commands
+	if create.Outcome == OutcomeUnsupported {
+		reason := create.Reason
+		if reason == "" {
+			reason = "backend_unsupported"
+		}
+		markPlannedAgents(&result, planned, 6, reason)
+		result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, reason
+		return result, nil
+	}
 	var candidate *BindingRecord
 	if create.Outcome == OutcomeCreated {
 		if journalActive && journal.Phase == JournalCreated {
@@ -431,7 +508,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 			return result, nil
 		}
 		journal.Phase, journal.Binding = JournalCreated, candidate
-		journal.Agents, journal.Conversations = slices.Clone(result.Agents), plannedConversations(planned)
+		journal.Agents, journal.Conversations = plannedAgentResults(result.Agents, planned), plannedConversations(planned)
 		if err := WriteJournal(request.Root, lease, journal); err != nil {
 			return result, err
 		}
@@ -508,17 +585,6 @@ func plannedFromJournal(request ReconcileRequest, journal LaunchJournal, result 
 		if !foundConfig {
 			return nil, fmt.Errorf("launch journal handle %q does not match current roster", plan.Handle)
 		}
-		adapter := request.Adapters[cfg.Adapter]
-		if adapter == nil || adapter.Mode() != plan.AdapterMode {
-			return nil, fmt.Errorf("launch journal adapter for %q is unavailable or changed", plan.Handle)
-		}
-		capabilities := adapter.Capabilities(request.Context)
-		if err := ValidateAdapterCapabilities(adapter, capabilities); err != nil {
-			return nil, err
-		}
-		if !capabilities.Available {
-			return nil, fmt.Errorf("launch journal adapter for %q is unavailable", plan.Handle)
-		}
 		resultIndex := -1
 		for j, agentResult := range journal.Agents {
 			if agentResult.Handle == plan.Handle {
@@ -528,6 +594,29 @@ func plannedFromJournal(request ReconcileRequest, journal LaunchJournal, result 
 		}
 		if resultIndex < 0 {
 			return nil, fmt.Errorf("launch journal handle %q has no result", plan.Handle)
+		}
+		if err := verifyAuthorizedParticipantIdentity(request, cfg); err != nil {
+			result.Agents[resultIndex].Code = 6
+			result.Agents[resultIndex].ConversationDisposition = DispositionActionRequired
+			result.Agents[resultIndex].Reason = "authorized_identity_changed"
+			return nil, nil
+		}
+		adapter := request.Adapters[cfg.Adapter]
+		if adapter == nil || adapter.Mode() != plan.AdapterMode {
+			return nil, fmt.Errorf("launch journal adapter for %q is unavailable or changed", plan.Handle)
+		}
+		if err := validateWrapperFileForProject(plan.Wrapper, request.ProjectRoot); err != nil {
+			return nil, fmt.Errorf("launch journal wrapper for %q: %w", plan.Handle, err)
+		}
+		if err := validateExecutableContainment(cfg.Command[0], request.ProjectRoot, adapter.Name()); err != nil {
+			return nil, fmt.Errorf("launch journal provider for %q: %w", plan.Handle, err)
+		}
+		capabilities := adapter.Capabilities(request.Context)
+		if err := ValidateAdapterCapabilities(adapter, capabilities); err != nil {
+			return nil, err
+		}
+		if !capabilities.Available {
+			return nil, fmt.Errorf("launch journal adapter for %q is unavailable", plan.Handle)
 		}
 		write := journal.Agents[resultIndex].ConversationDisposition != DispositionResumed
 		planned[i] = plannedAgent{
@@ -651,13 +740,23 @@ func finalizeCreatedState(root *fsq.DeliveryRoot, lease *Lease, create CreateRes
 	}
 	for i := range planned {
 		agent := &planned[i]
-		if agent.write && !agent.plan.PreSpawnAcquire {
+		if agent.write && !agent.plan.PreSpawnAcquire && agent.plan.AdapterMode != AdapterModeMint {
 			evidence := executionEvidence
 			agent.record.ExecutionEvidence = &evidence
 		}
 		if agent.plan.AdapterMode == AdapterModeMint && agent.write {
-			agent.record.State = CaptureReady
-			agent.record.Identity = ConversationIdentity{Provider: agent.adapter.Name(), ID: agent.plan.ConversationID}
+			// A mint identity is resumable only after the execution wrapper has
+			// durably acknowledged provider start. Backend creation alone can
+			// succeed while the wrapper is killed before exec.
+			if ticket, ticketErr := LoadExecutionTicket(root, agent.plan.Handle); ticketErr == nil && ticket.State == ExecutionAcknowledged {
+				record, recordErr := LoadConversation(root, agent.plan.Handle)
+				if recordErr != nil {
+					return nil, recordErr
+				}
+				agent.record = record
+			} else if ticketErr != nil && !errors.Is(ticketErr, os.ErrNotExist) {
+				return nil, ticketErr
+			}
 		}
 		if agent.plan.AdapterMode == AdapterModeCapture && agent.write && !agent.plan.PreSpawnAcquire {
 			captureEvidence := create.CaptureEvidence[agent.plan.Handle]
@@ -698,6 +797,14 @@ func plannedConversations(planned []plannedAgent) []ConversationRecord {
 	return records
 }
 
+func plannedAgentResults(results []AgentReconcileResult, planned []plannedAgent) []AgentReconcileResult {
+	rows := make([]AgentReconcileResult, len(planned))
+	for i, agent := range planned {
+		rows[i] = results[agent.index]
+	}
+	return rows
+}
+
 func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []plannedAgent, amqPath, backend, profile string) error {
 	written := make([]plannedAgent, 0, len(planned))
 	for _, agent := range planned {
@@ -730,7 +837,7 @@ func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []pla
 	return nil
 }
 
-func resolveLaunchAMQExecutable(value string) (string, error) {
+func resolveLaunchAMQExecutable(value, projectRoot string) (string, error) {
 	if strings.TrimSpace(value) == "" {
 		path, err := os.Executable()
 		if err != nil {
@@ -745,6 +852,9 @@ func resolveLaunchAMQExecutable(value string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve amq executable identity: %w", err)
+	}
+	if err := rejectProjectContained(projectRoot, path, resolved, amqProjectContainedCode); err != nil {
+		return "", err
 	}
 	return resolved, nil
 }
@@ -766,13 +876,79 @@ func commitRecoveredJournal(request ReconcileRequest, lease *Lease, journal Laun
 	return ClearJournal(request.Root, lease, journal)
 }
 
+func verifyAuthorizedParticipantIdentity(request ReconcileRequest, cfg ProjectAgentConfig) error {
+	expected, ok := request.AuthorizedIdentities[cfg.Handle]
+	if !ok {
+		return nil
+	}
+	if expected.Executable != nil {
+		if len(cfg.Command) == 0 {
+			return fmt.Errorf("provider executable is missing")
+		}
+		actual, err := ResolveConsultedExecutable(cfg.Command[0])
+		if err != nil {
+			return fmt.Errorf("resolve provider executable: %w", err)
+		}
+		if actual.Requested != expected.Executable.Requested || actual.Consulted != expected.Executable.Consulted || !bytes.Equal(actual.Identity, expected.Executable.Identity) {
+			return fmt.Errorf("provider executable identity changed")
+		}
+	}
+	if expected.Wrapper != nil {
+		if cfg.Wrapper == nil {
+			return fmt.Errorf("wrapper was removed")
+		}
+		actual, err := ResolveConsultedExecutable(cfg.Wrapper.Executable)
+		if err != nil {
+			return fmt.Errorf("resolve wrapper executable: %w", err)
+		}
+		if actual.Requested != expected.Wrapper.Requested || actual.Consulted != expected.Wrapper.Consulted || !bytes.Equal(actual.Identity, expected.Wrapper.Identity) {
+			return fmt.Errorf("wrapper executable identity changed")
+		}
+	} else if cfg.Wrapper != nil {
+		return fmt.Errorf("wrapper was added")
+	}
+	cwd := cfg.Cwd
+	if strings.TrimSpace(cwd) == "" {
+		cwd = request.ProjectRoot
+	} else if !filepath.IsAbs(cwd) {
+		cwd = filepath.Join(request.ProjectRoot, cwd)
+	}
+	resolvedCwd, err := resolvedPath(cwd)
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	cwdIdentity, err := fsq.StableTreeIdentity(resolvedCwd)
+	if err != nil {
+		return fmt.Errorf("identify working directory: %w", err)
+	}
+	if expected.CwdIdentity != "" && cwdIdentity != expected.CwdIdentity {
+		return fmt.Errorf("working directory identity changed")
+	}
+	return nil
+}
+
 func buildReconcilePlan(request ReconcileRequest, nonce string, result *ReconcileResult) ([]plannedAgent, error) {
 	planned := make([]plannedAgent, 0, len(request.Config.Agents))
 	for _, cfg := range request.Config.Agents {
 		item := AgentReconcileResult{Handle: cfg.Handle}
+		if err := verifyAuthorizedParticipantIdentity(request, cfg); err != nil {
+			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionActionRequired, "authorized_identity_changed"
+			result.Agents = append(result.Agents, item)
+			continue
+		}
 		adapter := request.Adapters[cfg.Adapter]
 		if adapter == nil {
 			item.ConversationDisposition, item.Reason = DispositionUnsupported, "adapter_not_registered"
+			result.Agents = append(result.Agents, item)
+			continue
+		}
+		if err := validateExecutableContainment(cfg.Command[0], request.ProjectRoot, adapter.Name()); err != nil {
+			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, err.Error()
+			result.Agents = append(result.Agents, item)
+			continue
+		}
+		if err := validateWrapperFileForProject(cfg.Wrapper, request.ProjectRoot); err != nil {
+			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, err.Error()
 			result.Agents = append(result.Agents, item)
 			continue
 		}

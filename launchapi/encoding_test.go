@@ -110,6 +110,7 @@ func goldenApplyResultV1() ApplyResultV1 {
 	return ApplyResultV1{
 		ResultVersion: 1, SubjectSchema: SubjectSchemaV2, Outcome: "applied", SubjectDigest: goldenDigest('a'), PlanDigest: goldenDigest('b'),
 		TrustDigest: goldenDigest('c'), SemanticDigest: goldenDigest('c'), Backend: "commands", Profile: "commands/portable/v1",
+		Disposition: "committed", BindingGeneration: "75757575-7575-4575-8575-757575757575",
 		Roster: RosterDriftV1{Desired: []string{"claude"}, Present: []string{"claude"}, Missing: []string{}, Extra: []string{}},
 		Observations: []ParticipantObservationV1{{
 			Handle: "claude", Mailbox: "present", Runnable: true, Conversation: "ready", Execution: "acknowledged", Resource: "commands:claude",

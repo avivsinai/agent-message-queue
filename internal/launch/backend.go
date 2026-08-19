@@ -153,6 +153,10 @@ type CreateRequest struct {
 	// JoinBinding, when set, adds Plan agents into this owned session instead
 	// of creating a new generation. Nil preserves create-from-absent.
 	JoinBinding *BindingRecord
+	// JoinDeltas records windows already added to JoinBinding so a retry can
+	// skip them. JoinProgress is called after each added window is marked.
+	JoinDeltas   []JoinDelta
+	JoinProgress func(JoinDelta) error
 }
 
 type EmittedCommand struct {

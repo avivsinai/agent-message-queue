@@ -14,6 +14,10 @@ import (
 
 const deliveryRootChangedRemedy = "re-run the command against the current root"
 
+// ErrDeliveryRootChanged reports that an authorized directory was replaced
+// through its ambient path after the capability was opened.
+var ErrDeliveryRootChanged = errors.New("delivery root changed after authorization")
+
 // DeliveryRootIdentity is an opaque physical-identity snapshot taken at the
 // authorization boundary and consumed when the directory capability is opened.
 type DeliveryRootIdentity struct {
@@ -108,7 +112,7 @@ func OpenDeliveryRoot(base string, expected DeliveryRootIdentity) (*DeliveryRoot
 	}
 	if !os.SameFile(expected.info, identity) {
 		_ = root.Close()
-		return nil, fmt.Errorf("delivery root changed between authorization and capability open: %s", abs)
+		return nil, fmt.Errorf("%w between authorization and capability open: %s", ErrDeliveryRootChanged, abs)
 	}
 	return &DeliveryRoot{base: abs, root: root, identity: identity}, nil
 }
@@ -520,7 +524,8 @@ func (r *DeliveryRoot) VerifyBase() error {
 	current, err := os.Stat(r.base)
 	if err != nil {
 		return fmt.Errorf(
-			"delivery root changed after authorization: %s: %w; %s",
+			"%w: %s: %w; %s",
+			ErrDeliveryRootChanged,
 			r.base,
 			err,
 			deliveryRootChangedRemedy,
@@ -528,7 +533,8 @@ func (r *DeliveryRoot) VerifyBase() error {
 	}
 	if !os.SameFile(r.identity, current) {
 		return fmt.Errorf(
-			"delivery root changed after authorization: %s; %s",
+			"%w: %s; %s",
+			ErrDeliveryRootChanged,
 			r.base,
 			deliveryRootChangedRemedy,
 		)

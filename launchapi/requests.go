@@ -25,11 +25,11 @@ func ValidateDigest(digest string) error {
 }
 
 func DecodePrepareRequestV1(data []byte) (PrepareRequestV1, error) {
-	if err := validateCallerContextJSON(data); err != nil {
-		return PrepareRequestV1{}, fmt.Errorf("decode prepare request v1: %w", err)
-	}
 	var request PrepareRequestV1
 	if err := decodeStrictJSON(data, &request); err != nil {
+		return PrepareRequestV1{}, fmt.Errorf("decode prepare request v1: %w", err)
+	}
+	if err := validateCallerContextJSON(data); err != nil {
 		return PrepareRequestV1{}, fmt.Errorf("decode prepare request v1: %w", err)
 	}
 	if err := request.Validate(); err != nil {
@@ -63,6 +63,10 @@ func DecodeApplyRequestV1(data []byte) (ApplyRequestV1, error) {
 	if !utf8.Valid(data) {
 		return ApplyRequestV1{}, fmt.Errorf("decode apply request v1: invalid UTF-8")
 	}
+	var request ApplyRequestV1
+	if err := decodeStrictJSON(data, &request); err != nil {
+		return ApplyRequestV1{}, fmt.Errorf("decode apply request v1: %w", err)
+	}
 	prepare, present, err := rawObjectField(data, "prepare")
 	if err != nil {
 		return ApplyRequestV1{}, fmt.Errorf("decode apply request v1: %w", err)
@@ -71,10 +75,6 @@ func DecodeApplyRequestV1(data []byte) (ApplyRequestV1, error) {
 		if err := validateCallerContextJSON(prepare); err != nil {
 			return ApplyRequestV1{}, fmt.Errorf("decode apply request v1: prepare: %w", err)
 		}
-	}
-	var request ApplyRequestV1
-	if err := decodeStrictJSON(data, &request); err != nil {
-		return ApplyRequestV1{}, fmt.Errorf("decode apply request v1: %w", err)
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {

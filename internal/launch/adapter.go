@@ -18,6 +18,22 @@ const (
 	CursorProvider = "cursor-agent"
 )
 
+// ProviderForExecutable maps a configured executable basename to the stable
+// adapter/provider identity. Cursor's current CLI is "agent"; cursor-agent
+// remains a supported legacy executable alias.
+func ProviderForExecutable(executable string) string {
+	base := strings.ToLower(filepath.Base(executable))
+	base = strings.TrimSuffix(base, ".exe")
+	switch base {
+	case ClaudeProvider, CodexProvider:
+		return base
+	case "agent", CursorProvider:
+		return CursorProvider
+	default:
+		return ""
+	}
+}
+
 // HarnessAdapter owns conversation identity and produces backend-ready plans.
 // It must not create, inspect, focus, or close terminal resources.
 type HarnessAdapter interface {
@@ -178,10 +194,7 @@ func ValidateStaticProviderInput(executable string, args []string, env map[strin
 	if executable == "" || strings.TrimSpace(executable) != executable || strings.ContainsRune(executable, 0) {
 		return "", fmt.Errorf("executable is invalid")
 	}
-	provider := strings.ToLower(filepath.Base(executable))
-	if runtime.GOOS == "windows" {
-		provider = strings.TrimSuffix(provider, ".exe")
-	}
+	provider := ProviderForExecutable(executable)
 	var envRules map[string]valueRule
 	var argRules map[string]argumentRule
 	var bypassAllowed map[string]struct{}
@@ -436,11 +449,7 @@ func validateKnownExecutable(executable, projectRoot, provider string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("resolve %s executable: %w", provider, err)
 	}
-	base := strings.ToLower(filepath.Base(executable))
-	if runtime.GOOS == "windows" {
-		base = strings.TrimSuffix(base, ".exe")
-	}
-	if base != provider {
+	if ProviderForExecutable(executable) != provider {
 		return "", fmt.Errorf("adapter %s cannot execute %q", provider, resolvedExecutable)
 	}
 	if strings.TrimSpace(projectRoot) == "" {
@@ -450,8 +459,13 @@ func validateKnownExecutable(executable, projectRoot, provider string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("resolve project root: %w", err)
 	}
+	if raw, rawErr := rawExecutablePath(executable); rawErr != nil {
+		return "", fmt.Errorf("resolve %s executable: %w", provider, rawErr)
+	} else if pathWithin(raw, resolvedProject) {
+		return "", fmt.Errorf("%s: %s executable is inside the project", providerProjectContainedCode, provider)
+	}
 	if pathWithin(resolvedExecutable, resolvedProject) {
-		return "", fmt.Errorf("%s executable resolves inside the project", provider)
+		return "", fmt.Errorf("%s: %s executable is inside the project", providerProjectContainedCode, provider)
 	}
 	info, err := os.Stat(resolvedExecutable)
 	if err != nil {
@@ -465,6 +479,41 @@ func validateKnownExecutable(executable, projectRoot, provider string) (string, 
 	// above; persisting it would freeze version-manager symlink targets and
 	// change trust digests on every tool update.
 	return executable, nil
+}
+
+// validateExecutableContainment checks the property that must be established
+// before an adapter capability probe: a provider executable must not resolve
+// into the project. Availability and executable shape remain capability/plan
+// concerns; a missing command cannot be a project-contained process.
+func validateExecutableContainment(executable, projectRoot, provider string) error {
+	if strings.TrimSpace(executable) == "" || strings.TrimSpace(projectRoot) == "" {
+		return nil
+	}
+	if _, err := resolvedPath(projectRoot); err != nil {
+		return fmt.Errorf("resolve project root for %s executable: %w", provider, err)
+	}
+	candidate := executable
+	if !filepath.IsAbs(candidate) {
+		lookedUp, lookupErr := exec.LookPath(candidate)
+		if lookupErr != nil {
+			return nil
+		}
+		candidate = lookedUp
+	}
+	requested, err := filepath.Abs(candidate)
+	if err != nil {
+		return fmt.Errorf("make %s executable absolute: %w", provider, err)
+	}
+	resolved, err := resolvedPath(requested)
+	if err != nil {
+		// An unavailable executable is reported by the adapter capability
+		// probe. There is no executable identity to classify as contained.
+		return nil
+	}
+	if err := rejectProjectContained(projectRoot, requested, resolved, ProviderProjectContainedCode); err != nil {
+		return err
+	}
+	return nil
 }
 
 func validateWorkingDirectory(cwd, projectRoot string) error {

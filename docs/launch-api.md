@@ -26,6 +26,17 @@ A `0.61.1` binary advertises `placement`, `initial_input`, `base_root`,
 require every feature it uses. Contract semver alone does not claim that an
 unadvertised feature is available.
 
+The advertised feature set is derived from the callable platform
+implementation at build time:
+
+| Build platform | Advertised launch features |
+| --- | --- |
+| macOS, Linux (including WSL) | The full v1 set: `launch_intent_v1`, `prepare_apply_v1`, `lifecycle_v1`, `managed_tmux_v1`, `plan_only_commands_v1`, plus `initial_input`, `placement`, `base_root`, `on_live`, `caller_context`, `executable_identity`, and `wrapper`. |
+| Native Windows | `launch_intent_v1` and `plan_only_commands_v1` only. `prepare_apply_v1`, `lifecycle_v1`, and `managed_tmux_v1` are not callable and are rejected by negotiation. |
+
+WSL uses the Linux binary and therefore gets the Linux row. Negotiation fails
+closed for a feature that is not in the current build's advertised set.
+
 `PreviewV1.capabilities` reports the selected providers' static adapter grammar
 without executing a caller-supplied provider. `grammar_version` is the
 adapter-owned version that consumers compare. It changes when the allowed
@@ -37,7 +48,10 @@ it. Prepare records each runnable provider's consulted path (PATH lookup or
 absolute) plus the on-disk identity tuple, including symlink hops. Schema 1
 omits that binding. A same-path inode, mtime, symlink-hop, or PATH retarget
 changes `subject_digest`; Apply then returns `subject_changed` with no launch
-mutation. Plan and trust digests stay stable across those replacements.
+mutation. If the provider, wrapper, or cwd changes after Apply authorization,
+Reconcile refuses before capability probing or ticket creation with the typed
+`authorized_identity_changed` result. Plan and trust digests stay stable across
+those replacements.
 
 The initial-input carrier is typed. Claude and Codex currently advertise
 `argument`; AMQ appends its exact text as the final provider argv element.
@@ -57,6 +71,16 @@ ordered `-c model_reasoning_effort=<value>` pairs with values `minimal`, `low`,
 Every `env_overlay` key uses the POSIX environment grammar
 `[A-Za-z_][A-Za-z0-9_]*`; shell syntax such as `X;touch /tmp/pwn` is refused.
 
+Public JSON decoders perform a bounded structural pass before contract
+decoding. A structural refusal is returned as `*launchapi.StrictJSONError`;
+inspect its typed `Code` instead of parsing the message. The validation codes
+are `launchapi.StrictJSONDuplicateKey` (`duplicate_json_key`) for an exact
+duplicate object key and `launchapi.StrictJSONDepthExceeded` (`depth_exceeded`)
+when nesting exceeds `launchapi.StrictJSONMaxDepth` (256). Object keys are
+compared after JSON string decoding, so case- or whitespace-distinct keys are
+different keys. The error also carries the containing `Path` and duplicate
+`Key` where applicable.
+
 An optional participant `wrapper` contains a clean absolute `executable` path
 and static `args`. The path must resolve to one regular file; resolvable
 symlinks are accepted. AMQ executes the exact argv `wrapper executable + wrapper
@@ -66,6 +90,12 @@ command preview. An argument initial input stays the final inner-provider
 argument. Unsupported `stdin` and `file` carriers remain typed refusals when a
 wrapper is present. The `wrapper` feature is advertised, and a strict decode
 accepts the field.
+
+Executable containment refusals use stable typed codes: `provider_project_contained`
+for a provider path presented from the project, `wrapper_project_contained` for
+a wrapper path presented from the project, and `amq_launcher_project_contained` for the
+AMQ launcher path. Both the raw path and its resolved target are checked before
+the executable can be planned or ticketed.
 
 ## Intent
 
@@ -109,6 +139,8 @@ no-op, and a forwarding failure cannot undo or fail the evidence path. An
 unused Codex launch remains pending and cannot be resumed. Cursor CLI acquires
 its provider-owned chat ID before process start through `create-chat` at exact
 version `2026.08.11-e8db854`. Cursor's provider identity is `cursor-agent`.
+The current executable is `agent`; `cursor-agent` remains a supported legacy
+alias, including `.exe` variants.
 
 The registered launcher backends are `commands`, `tmux`, `cmux`, and
 `ghostty`. `--launcher auto` walks the local preference; an explicit
@@ -253,6 +285,12 @@ the returned schema. It must not omit the field to select legacy behavior.
 
 `reviewedChoiceFor` is intentionally caller-owned. AMQ does not choose trust,
 stale-conversation, rebind, or degraded-capability decisions for the caller.
+
+Apply and lifecycle results include a typed mutation disposition (`not_applied`,
+`committed`, or `uncertain`) and, after a launch commit, its binding generation;
+these fields describe the launch backend binding only, not session or roster
+durability codes. Post-commit failures remain action-required results with exit
+code `6`, not bare errors.
 
 The equivalent CLI split is:
 

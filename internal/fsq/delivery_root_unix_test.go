@@ -3,6 +3,7 @@
 package fsq
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,7 +39,7 @@ func TestOpenDeliveryRootRejectsSwapBetweenAuthorizationAndOpen(t *testing.T) {
 		_ = root.Close()
 		t.Fatal("OpenDeliveryRoot returned a capability for the swapped root")
 	}
-	if err == nil || !strings.Contains(err.Error(), "changed between authorization and capability open") {
+	if err == nil || !errors.Is(err, ErrDeliveryRootChanged) || !strings.Contains(err.Error(), "between authorization and capability open") {
 		t.Fatalf("OpenDeliveryRoot error = %v, want authorization/open mismatch", err)
 	}
 }

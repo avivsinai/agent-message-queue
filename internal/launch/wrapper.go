@@ -14,6 +14,21 @@ type Wrapper struct {
 	Args       []string `json:"args,omitempty"`
 }
 
+const (
+	WrapperProjectContainedCode  = "wrapper_project_contained"
+	ProviderProjectContainedCode = "provider_project_contained"
+	AMQProjectContainedCode      = "amq_launcher_project_contained"
+)
+
+type LaunchPathError struct {
+	Code string
+	Path string
+}
+
+func (e *LaunchPathError) Error() string {
+	return fmt.Sprintf("%s: %s resolves inside the project", e.Code, e.Path)
+}
+
 func (wrapper Wrapper) Validate() error {
 	if !utf8.ValidString(wrapper.Executable) || strings.ContainsRune(wrapper.Executable, 0) {
 		return fmt.Errorf("executable must be valid UTF-8 without NUL")
@@ -50,6 +65,20 @@ func validateWrapperFile(wrapper *Wrapper) error {
 		return err
 	}
 	return nil
+}
+
+func validateWrapperFileForProject(wrapper *Wrapper, projectRoot string) error {
+	if err := validateWrapperFile(wrapper); err != nil {
+		return err
+	}
+	if wrapper == nil {
+		return nil
+	}
+	resolved, err := filepath.EvalSymlinks(wrapper.Executable)
+	if err != nil {
+		return fmt.Errorf("resolve wrapper executable: %w", err)
+	}
+	return rejectProjectContained(projectRoot, wrapper.Executable, resolved, wrapperProjectContainedCode)
 }
 
 func cloneWrapper(wrapper *Wrapper) *Wrapper {

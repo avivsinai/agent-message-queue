@@ -136,16 +136,22 @@ func NewExecutionTicket(request ExecutionTicketRequest) (ExecutionTicket, error)
 	if err != nil {
 		return ExecutionTicket{}, fmt.Errorf("cwd: %w", err)
 	}
+	if err := rejectProjectContained(project, request.ProviderExecutable, "", providerProjectContainedCode); err != nil {
+		return ExecutionTicket{}, fmt.Errorf("provider executable: %w", err)
+	}
 	provider, providerID, err := canonicalFile(request.ProviderExecutable)
 	if err != nil {
 		return ExecutionTicket{}, fmt.Errorf("provider executable: %w", err)
 	}
 	if pathWithin(provider, project) {
-		return ExecutionTicket{}, fmt.Errorf("provider executable resolves inside the project")
+		return ExecutionTicket{}, fmt.Errorf("%s: provider executable is inside the project", providerProjectContainedCode)
 	}
 	amq, amqID, err := canonicalFile(request.AMQExecutable)
 	if err != nil {
 		return ExecutionTicket{}, fmt.Errorf("amq executable: %w", err)
+	}
+	if err := rejectProjectContained(project, request.AMQExecutable, amq, amqProjectContainedCode); err != nil {
+		return ExecutionTicket{}, fmt.Errorf("AMQ executable: %w", err)
 	}
 	execution := clonePrepareExecutionOptions(request.Execution)
 	if execution != nil {
@@ -161,7 +167,7 @@ func NewExecutionTicket(request ExecutionTicketRequest) (ExecutionTicket, error)
 	}
 	var wrapperIdentity string
 	if request.Wrapper != nil {
-		if err := validateWrapperFile(request.Wrapper); err != nil {
+		if err := validateWrapperFileForProject(request.Wrapper, request.ProjectRoot); err != nil {
 			return ExecutionTicket{}, fmt.Errorf("wrapper: %w", err)
 		}
 		wrapperIdentity, err = probeExecutableIdentityJSON(request.Wrapper.Executable)
@@ -1021,6 +1027,9 @@ func ValidateExecutionEnvelope(root *fsq.DeliveryRoot, ticket ExecutionTicket, e
 		return fmt.Errorf("working directory identity changed")
 	}
 	provider, providerID, err := canonicalFile(ticket.ProviderExecutable)
+	if containmentErr := rejectProjectContained(project, ticket.ProviderExecutable, provider, providerProjectContainedCode); containmentErr != nil {
+		return containmentErr
+	}
 	if err != nil || provider != ticket.ProviderExecutable || providerID != ticket.ProviderExecutableIdentity || pathWithin(provider, project) {
 		return fmt.Errorf("provider executable identity changed")
 	}
@@ -1040,7 +1049,7 @@ func ValidateExecutionEnvelope(root *fsq.DeliveryRoot, ticket ExecutionTicket, e
 			}
 			return fmt.Errorf("wrapper executable identity changed: %w", identityErr)
 		}
-		if err := validateWrapperFile(ticket.Wrapper); err != nil {
+		if err := validateWrapperFileForProject(ticket.Wrapper, ticket.ProjectRoot); err != nil {
 			return fmt.Errorf("wrapper executable changed: %w", err)
 		}
 		if envelope.ProviderExecutable != ticket.Wrapper.Executable {
@@ -1053,7 +1062,13 @@ func ValidateExecutionEnvelope(root *fsq.DeliveryRoot, ticket ExecutionTicket, e
 		}
 	}
 	amq, amqID, err := canonicalFile(envelope.AMQExecutable)
-	if err != nil || amq != ticket.AMQExecutable || amqID != ticket.AMQExecutableIdentity {
+	if err != nil {
+		return fmt.Errorf("amq executable identity changed")
+	}
+	if containmentErr := rejectProjectContained(project, envelope.AMQExecutable, amq, amqProjectContainedCode); containmentErr != nil {
+		return containmentErr
+	}
+	if amq != ticket.AMQExecutable || amqID != ticket.AMQExecutableIdentity {
 		return fmt.Errorf("amq executable identity changed")
 	}
 	if !reflect.DeepEqual(envelope.TargetArgv, ticket.TargetArgv) {

@@ -826,8 +826,3 @@ func wakeProcessExitError(result wakeProcessResult) error {
 	}
 	return fmt.Errorf("%w; stderr: %s", err, detail)
 }
-
-func wakeReadyFileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}

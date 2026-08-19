@@ -213,6 +213,27 @@ type prepareTargetState struct {
 	baseAuthority   *explicitBaseAuthority
 }
 
+var ErrPrepareAuthorityDrift = errors.New("prepare authority drift")
+
+type prepareAuthorityDriftError struct{ err error }
+
+func (err *prepareAuthorityDriftError) Error() string { return err.err.Error() }
+func (err *prepareAuthorityDriftError) Unwrap() error { return err.err }
+func (err *prepareAuthorityDriftError) Is(target error) bool {
+	return target == ErrPrepareAuthorityDrift || errors.Is(err.err, target)
+}
+
+func prepareAuthorityDrift(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &prepareAuthorityDriftError{err: err}
+}
+
+func isPrepareAuthorityDrift(err error) bool {
+	return errors.Is(err, ErrPrepareAuthorityDrift) || errors.Is(err, fsq.ErrDeliveryRootChanged)
+}
+
 func (state *prepareTargetState) close() {
 	if state == nil {
 		return
@@ -237,24 +258,24 @@ func (state *prepareTargetState) close() {
 func (state *prepareTargetState) verify() error {
 	if state.mailboxConfig != nil {
 		if err := state.mailboxConfig.Verify(); err != nil {
-			return fmt.Errorf("mailbox config changed during Prepare: %w", err)
+			return prepareAuthorityDrift(fmt.Errorf("mailbox config changed during Prepare: %w", err))
 		}
 	}
 	if err := state.projectRoot.VerifyBase(); err != nil {
-		return fmt.Errorf("project root changed during Prepare: %w", err)
+		return prepareAuthorityDrift(fmt.Errorf("project root changed during Prepare: %w", err))
 	}
 	if state.baseAuthority != nil {
 		if err := state.baseAuthority.verify(state.projectRoot, state.baseRoot); err != nil {
-			return fmt.Errorf("base-root authority changed during Prepare: %w", err)
+			return prepareAuthorityDrift(fmt.Errorf("base-root authority changed during Prepare: %w", err))
 		}
 	} else {
 		if err := state.baseRoot.VerifyBase(); err != nil {
-			return fmt.Errorf("session base root changed during Prepare: %w", err)
+			return prepareAuthorityDrift(fmt.Errorf("session base root changed during Prepare: %w", err))
 		}
 	}
 	if state.sessionRoot != nil {
 		if err := state.sessionRoot.VerifyBase(); err != nil {
-			return fmt.Errorf("session root changed during Prepare: %w", err)
+			return prepareAuthorityDrift(fmt.Errorf("session root changed during Prepare: %w", err))
 		}
 		return nil
 	}
@@ -264,10 +285,10 @@ func (state *prepareTargetState) verify() error {
 	child, err := state.baseRoot.OpenDirectChild(state.target.Session)
 	if err == nil {
 		_ = child.Close()
-		return fmt.Errorf("session root appeared during Prepare")
+		return prepareAuthorityDrift(fmt.Errorf("session root appeared during Prepare"))
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		return err
+		return prepareAuthorityDrift(err)
 	}
 	return nil
 }
@@ -306,52 +327,10 @@ type prepareSubject struct {
 // Focus, trust replacement, journal writer, or mailbox repair callback is
 // reachable from this function.
 func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDependencies) (PrepareResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return PrepareResult{}, err
-	}
-	if !validDigest(request.IntentDigest) {
-		return PrepareResult{}, fmt.Errorf("invalid intent digest")
-	}
-	if len(request.Participants) == 0 {
-		return PrepareResult{}, fmt.Errorf("prepare requires at least one participant")
-	}
-	subjectSchema, err := normalizeSubjectSchema(request.SubjectSchema)
+	ctx, subjectSchema, dependencies, err := validatePrepareRequest(ctx, request, dependencies)
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	if request.Placement != nil {
-		if subjectSchema == SubjectSchemaV1 {
-			return PrepareResult{}, fmt.Errorf("placement requires subject schema %d", SubjectSchemaV2)
-		}
-		if err := request.Placement.Validate(); err != nil {
-			return PrepareResult{}, err
-		}
-	}
-	for _, participant := range request.Participants {
-		switch participant.OnLive {
-		case "", OnLiveRefuse:
-		case OnLiveKeep:
-			if subjectSchema == SubjectSchemaV1 {
-				return PrepareResult{}, fmt.Errorf("on_live keep requires subject schema %d", SubjectSchemaV2)
-			}
-		default:
-			return PrepareResult{}, fmt.Errorf("invalid on_live %q", participant.OnLive)
-		}
-	}
-	if len(request.CallerContext) > 0 && subjectSchema == SubjectSchemaV1 {
-		return PrepareResult{}, fmt.Errorf("caller_context requires subject schema %d", SubjectSchemaV2)
-	}
-	if err := ValidateCallerContext(request.CallerContext); err != nil {
-		return PrepareResult{}, err
-	}
-	amqPath, err := resolveLaunchAMQExecutable(dependencies.AMQPath)
-	if err != nil {
-		return PrepareResult{}, err
-	}
-	dependencies.AMQPath = amqPath
 	state, err := openPrepareTarget(request.Target)
 	if err != nil {
 		if reason := baseRootRefusalReason(err); reason != "" {
@@ -360,7 +339,60 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 		return PrepareResult{}, err
 	}
 	defer state.close()
+	return prepareAtTarget(ctx, request, dependencies, state, subjectSchema)
+}
 
+func validatePrepareRequest(ctx context.Context, request PrepareRequest, dependencies PrepareDependencies) (context.Context, int, PrepareDependencies, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, PrepareDependencies{}, err
+	}
+	if !validDigest(request.IntentDigest) {
+		return nil, 0, PrepareDependencies{}, fmt.Errorf("invalid intent digest")
+	}
+	if len(request.Participants) == 0 {
+		return nil, 0, PrepareDependencies{}, fmt.Errorf("prepare requires at least one participant")
+	}
+	subjectSchema, err := normalizeSubjectSchema(request.SubjectSchema)
+	if err != nil {
+		return nil, 0, PrepareDependencies{}, err
+	}
+	if request.Placement != nil {
+		if subjectSchema == SubjectSchemaV1 {
+			return nil, 0, PrepareDependencies{}, fmt.Errorf("placement requires subject schema %d", SubjectSchemaV2)
+		}
+		if err := request.Placement.Validate(); err != nil {
+			return nil, 0, PrepareDependencies{}, err
+		}
+	}
+	for _, participant := range request.Participants {
+		switch participant.OnLive {
+		case "", OnLiveRefuse:
+		case OnLiveKeep:
+			if subjectSchema == SubjectSchemaV1 {
+				return nil, 0, PrepareDependencies{}, fmt.Errorf("on_live keep requires subject schema %d", SubjectSchemaV2)
+			}
+		default:
+			return nil, 0, PrepareDependencies{}, fmt.Errorf("invalid on_live %q", participant.OnLive)
+		}
+	}
+	if len(request.CallerContext) > 0 && subjectSchema == SubjectSchemaV1 {
+		return nil, 0, PrepareDependencies{}, fmt.Errorf("caller_context requires subject schema %d", SubjectSchemaV2)
+	}
+	if err := ValidateCallerContext(request.CallerContext); err != nil {
+		return nil, 0, PrepareDependencies{}, err
+	}
+	amqPath, err := resolveLaunchAMQExecutable(dependencies.AMQPath, request.Target.ProjectRoot)
+	if err != nil {
+		return nil, 0, PrepareDependencies{}, err
+	}
+	dependencies.AMQPath = amqPath
+	return ctx, subjectSchema, dependencies, nil
+}
+
+func prepareAtTarget(ctx context.Context, request PrepareRequest, dependencies PrepareDependencies, state *prepareTargetState, subjectSchema int) (PrepareResult, error) {
 	binding, bindingObservation, err := inspectPrepareBinding(state.sessionRoot)
 	if err != nil {
 		return PrepareResult{}, err
@@ -545,6 +577,10 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	result.SubjectDigest, err = digestCanonical(subject)
 	if err != nil {
 		return PrepareResult{}, err
+	}
+	if state.mailboxConfig != nil {
+		_ = state.mailboxConfig.Close()
+		state.mailboxConfig = nil
 	}
 	return result, nil
 }
@@ -926,7 +962,7 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 		observation.ReasonCode = reason
 		return prepared, observation, nil, nil, nil
 	}
-	if err := validateWrapperFile(participant.Wrapper); err != nil {
+	if err := validateWrapperFileForProject(participant.Wrapper, state.target.ProjectRoot); err != nil {
 		return prepared, observation, nil, nil, fmt.Errorf("wrapper for %s: %w", participant.Handle, err)
 	}
 	if subjectSchema == SubjectSchemaV2 && participant.Wrapper != nil {

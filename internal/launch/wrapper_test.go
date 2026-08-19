@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -79,6 +80,39 @@ func TestWrapperValidationRejectsNonExecutableRegularFile(t *testing.T) {
 	}
 	if err := validateWrapperFile(&Wrapper{Executable: path}); err == nil || !strings.Contains(err.Error(), "execute") {
 		t.Fatalf("non-executable wrapper error = %v", err)
+	}
+}
+
+func TestWrapperProjectContainmentRejectsProjectPathAndAcceptsOutside(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(project, "wrapper")
+	if err := os.WriteFile(inside, []byte("wrapper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := validateWrapperFileForProject(&Wrapper{Executable: inside}, project)
+	var pathErr *LaunchPathError
+	if !errors.As(err, &pathErr) || pathErr.Code != WrapperProjectContainedCode {
+		t.Fatalf("project wrapper error = %v, want %s", err, WrapperProjectContainedCode)
+	}
+	projectLink := filepath.Join(root, "project-link")
+	if err := os.Symlink(inside, projectLink); err != nil {
+		t.Fatal(err)
+	}
+	err = validateWrapperFileForProject(&Wrapper{Executable: projectLink}, project)
+	if !errors.As(err, &pathErr) || pathErr.Code != WrapperProjectContainedCode {
+		t.Fatalf("symlinked project wrapper error = %v, want %s", err, WrapperProjectContainedCode)
+	}
+
+	outside := filepath.Join(root, "wrapper")
+	if err := os.WriteFile(outside, []byte("wrapper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWrapperFileForProject(&Wrapper{Executable: outside}, project); err != nil {
+		t.Fatalf("outside wrapper rejected: %v", err)
 	}
 }
 

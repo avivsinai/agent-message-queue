@@ -11,9 +11,10 @@ import (
 
 // TestClaimCollisionPreservesBothCopies proves the loud-collision contract:
 // when inbox/new and inbox/cur both hold the claimed filename, the claim is
-// refused with *ClaimCollisionError and neither copy is modified. Unix
-// deliberately keeps rename-replace semantics (the state is unreachable
-// through AMQ's own flows), so this contract is Windows-only.
+// refused with *ClaimCollisionError and neither copy is modified. Unix uses
+// rename no-replace for the same refuse-to-replace contract; this file stays
+// Windows-only so the native hard-link claim gate in windows-claim-test keeps
+// exercising issue #485.
 func TestClaimCollisionPreservesBothCopies(t *testing.T) {
 	base := t.TempDir()
 	if err := EnsureAgentDirs(base, "alice"); err != nil {

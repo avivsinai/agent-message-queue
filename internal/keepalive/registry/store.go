@@ -33,6 +33,7 @@ type Entry struct {
 	Agent                  string    `json:"agent"`
 	Adapter                string    `json:"adapter"`
 	Target                 string    `json:"target"`
+	OwnershipKey           string    `json:"ownership_key,omitempty"`
 	State                  State     `json:"state"`
 	LastAttach             time.Time `json:"last_attach,omitempty"`
 	LastSeenBySupervisor   time.Time `json:"last_seen_by_supervisor,omitempty"`
@@ -57,6 +58,28 @@ type Store struct {
 var ErrCorrupt = errors.New("registry file is corrupt")
 var ErrTargetOwned = errors.New("adapter target is already owned")
 var ErrRegistrationOwned = errors.New("AMQ root and agent already have a wake registration")
+var ErrInvalidIdentity = errors.New("registry entry identity is invalid")
+
+// CommittedDurabilityError means the registry rename succeeded, but chmod or
+// parent-directory sync could not finish. The visible file at Path is already
+// the committed artifact; retrying with a new write may duplicate it.
+type CommittedDurabilityError struct {
+	Path string
+	Err  error
+}
+
+func (e *CommittedDurabilityError) Error() string {
+	return fmt.Sprintf("registry committed at %s, but durability is indeterminate: %v; do not retry blindly", e.Path, e.Err)
+}
+
+func (e *CommittedDurabilityError) Unwrap() error {
+	return e.Err
+}
+
+var finishCommittedRegistry = finishCommittedRegistryFile
+var chmodRegistryFile = os.Chmod
+var syncRegistryDir = syncDir
+var afterRegistryLockAcquired = func(_ *os.File, _ string) error { return nil }
 
 type EntryUpdate struct {
 	Before Entry
@@ -99,7 +122,8 @@ func EntryID(root, agent, adapterName, target string) string {
 }
 
 // CanonicalRoot returns the stable filesystem identity used for AMQ wake
-// ownership. Existing roots are resolved through symlinks; a not-yet-created
+// ownership. Existing roots are resolved through symlinks. EACCES and ELOOP
+// fail closed instead of falling back to a lexical spelling. A not-yet-created
 // root still receives an absolute, cleaned spelling so registration remains
 // deterministic before AMQ creates its layout.
 func CanonicalRoot(root string) (string, error) {
@@ -110,8 +134,12 @@ func CanonicalRoot(root string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if real, err := filepath.EvalSymlinks(abs); err == nil {
+	real, err := filepath.EvalSymlinks(abs)
+	if err == nil {
 		return real, nil
+	}
+	if uncertainSymlinkResolution(err) {
+		return "", fmt.Errorf("canonicalize root %q: %w", abs, err)
 	}
 	return abs, nil
 }
@@ -169,20 +197,25 @@ func (s *Store) WithRegistrationLockContext(ctx context.Context, fn func() error
 	if err := ensureRegistryDir(filepath.Dir(path)); err != nil {
 		return err
 	}
-	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := openPinnedLock(path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	if err := lock.Chmod(0o600); err != nil {
-		return err
-	}
 	for {
 		acquired, err := flockTryExclusive(lock)
 		if err != nil {
 			return err
 		}
 		if acquired {
+			if err := afterRegistryLockAcquired(lock, path); err != nil {
+				flockRelease(lock)
+				return err
+			}
+			if err := recheckLockIdentity(lock, path); err != nil {
+				flockRelease(lock)
+				return err
+			}
 			break
 		}
 		timer := time.NewTimer(25 * time.Millisecond)
@@ -218,6 +251,9 @@ func (s *Store) loadUnlocked() (File, error) {
 	if file.SchemaVersion != SchemaVersion {
 		return File{}, fmt.Errorf("unsupported registry schema version %d", file.SchemaVersion)
 	}
+	if err := validateFileIdentities(file); err != nil {
+		return File{}, fmt.Errorf("%w %q: %w", ErrCorrupt, s.Path, err)
+	}
 	sortEntries(file.Entries)
 	return file, nil
 }
@@ -233,6 +269,9 @@ func (s *Store) Save(file File) error {
 
 func (s *Store) saveUnlocked(file File) error {
 	file.SchemaVersion = SchemaVersion
+	if err := validateFileIdentities(file); err != nil {
+		return err
+	}
 	sortEntries(file.Entries)
 
 	dir := filepath.Dir(s.Path)
@@ -263,10 +302,17 @@ func (s *Store) saveUnlocked(file File) error {
 	if err := os.Rename(tmpName, s.Path); err != nil {
 		return err
 	}
-	if err := os.Chmod(s.Path, 0o600); err != nil {
-		return err
+	return finishCommittedRegistry(s.Path, dir)
+}
+
+func finishCommittedRegistryFile(path, dir string) error {
+	if err := chmodRegistryFile(path, 0o600); err != nil {
+		return &CommittedDurabilityError{Path: path, Err: err}
 	}
-	return syncDir(dir)
+	if err := syncRegistryDir(dir); err != nil {
+		return &CommittedDurabilityError{Path: path, Err: err}
+	}
+	return nil
 }
 
 func (s *Store) Upsert(entry Entry) (Entry, error) {
@@ -421,9 +467,11 @@ func (s *Store) prepareEntry(entry Entry) (Entry, error) {
 	if entry.Target == "" {
 		return Entry{}, errors.New("entry target is required")
 	}
-	if entry.ID == "" {
-		entry.ID = EntryID(entry.Root, entry.Agent, entry.Adapter, entry.Target)
+	wantID := EntryID(entry.Root, entry.Agent, entry.Adapter, entry.Target)
+	if entry.ID != "" && entry.ID != wantID {
+		return Entry{}, fmt.Errorf("%w: id %q does not match identity", ErrInvalidIdentity, entry.ID)
 	}
+	entry.ID = wantID
 	if entry.State == "" {
 		entry.State = StateAttached
 	}
@@ -441,6 +489,12 @@ func (s *Store) UpdateEntry(entry Entry) error {
 		}
 		for i := range file.Entries {
 			if file.Entries[i].ID == entry.ID {
+				if err := validateEntryIdentity(entry); err != nil {
+					return err
+				}
+				if !sameEntryIdentity(file.Entries[i], entry) {
+					return fmt.Errorf("%w: entry %q identity fields are immutable", ErrInvalidIdentity, entry.ID)
+				}
 				file.Entries[i] = entry
 				return s.saveUnlocked(file)
 			}
@@ -462,6 +516,9 @@ func (s *Store) UpdateEntries(updates []EntryUpdate) (UpdateResult, error) {
 		}
 		if update.Before.ID != update.After.ID {
 			return result, fmt.Errorf("batch update changes entry id from %q to %q", update.Before.ID, update.After.ID)
+		}
+		if !sameEntryIdentity(update.Before, update.After) {
+			return result, fmt.Errorf("%w: entry %q identity fields are immutable", ErrInvalidIdentity, update.Before.ID)
 		}
 		if _, ok := seen[update.Before.ID]; ok {
 			return result, fmt.Errorf("batch update contains duplicate entry %q", update.Before.ID)
@@ -489,6 +546,9 @@ func (s *Store) UpdateEntries(updates []EntryUpdate) (UpdateResult, error) {
 			}
 			if update.Before == update.After {
 				continue
+			}
+			if !sameEntryIdentity(file.Entries[i], update.After) {
+				return fmt.Errorf("%w: entry %q identity fields are immutable", ErrInvalidIdentity, update.After.ID)
 			}
 			file.Entries[i] = update.After
 			result.Updated++
@@ -618,8 +678,24 @@ func sameRegistration(left, right Entry) bool {
 		canonicalStoredTarget(left.Adapter, left.Target) == canonicalStoredTarget(right.Adapter, right.Target)
 }
 
+func sameEntryIdentity(left, right Entry) bool {
+	return left.ID == right.ID &&
+		left.Root == right.Root &&
+		left.Agent == right.Agent &&
+		left.Adapter == right.Adapter &&
+		left.Target == right.Target
+}
+
 func sameRootAgent(left, right Entry) bool {
-	return left.Agent == right.Agent && canonicalRoot(left.Root) == canonicalRoot(right.Root)
+	if left.Agent != right.Agent {
+		return false
+	}
+	leftRoot, leftErr := CanonicalRoot(left.Root)
+	rightRoot, rightErr := CanonicalRoot(right.Root)
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	return leftRoot == rightRoot
 }
 
 func canonicalStoredTarget(adapterName, target string) string {
@@ -700,34 +776,84 @@ func (s *Store) withLock(fn func() error) error {
 		return err
 	}
 
-	lock, err := os.OpenFile(s.Path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	lockPath := s.Path + ".lock"
+	lock, err := openPinnedLock(lockPath)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	if err := lock.Chmod(0o600); err != nil {
-		return err
-	}
 	if err := flockExclusive(lock); err != nil {
 		return err
 	}
 	defer flockRelease(lock)
+	if err := afterRegistryLockAcquired(lock, lockPath); err != nil {
+		return err
+	}
+	if err := recheckLockIdentity(lock, lockPath); err != nil {
+		return err
+	}
 
 	return fn()
 }
 
+func openPinnedLock(path string) (*os.File, error) {
+	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|lockNoFollow, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := lock.Chmod(0o600); err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	return lock, nil
+}
+
 func ensureRegistryDir(dir string) error {
-	_, err := os.Stat(dir)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
+		info, err = os.Lstat(dir)
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+	return validateRegistryDir(dir, info)
+}
+
+func validateFileIdentities(file File) error {
+	seen := make(map[string]struct{}, len(file.Entries))
+	for _, entry := range file.Entries {
+		if err := validateEntryIdentity(entry); err != nil {
+			return err
+		}
+		if _, ok := seen[entry.ID]; ok {
+			return fmt.Errorf("%w: duplicate entry id %q", ErrInvalidIdentity, entry.ID)
+		}
+		seen[entry.ID] = struct{}{}
 	}
-	return os.Chmod(dir, 0o700)
+	return nil
+}
+
+func validateEntryIdentity(entry Entry) error {
+	if entry.Agent == "" || entry.Adapter == "" || entry.Target == "" {
+		return fmt.Errorf("%w: entry %q is missing identity fields", ErrInvalidIdentity, entry.ID)
+	}
+	root, err := CanonicalRoot(entry.Root)
+	if err != nil {
+		return fmt.Errorf("%w: canonicalize entry %q root: %w", ErrInvalidIdentity, entry.ID, err)
+	}
+	want := EntryID(root, entry.Agent, entry.Adapter, entry.Target)
+	if entry.ID != want {
+		return fmt.Errorf("%w: entry id %q does not match identity", ErrInvalidIdentity, entry.ID)
+	}
+	return nil
 }
 
 func syncDir(dir string) error {

@@ -311,6 +311,40 @@ func TestDeliverToInboxesSyncFailureCountsRenamedStageOnlyAsDelivered(t *testing
 	}
 }
 
+func TestDeliverToInboxRetryAfterTmpFsyncConverges(t *testing.T) {
+	base := t.TempDir()
+	if err := EnsureAgentDirs(base, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	const filename = "retry.md"
+	staleSameName := filepath.Join(AgentInboxTmp(base, "codex"), filename)
+	staleUnique := filepath.Join(AgentInboxTmp(base, "codex"), "."+filename+".tmp-crash")
+	if err := os.WriteFile(staleSameName, []byte("stale same-name attempt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staleUnique, []byte("stale unique attempt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := []byte("fresh payload")
+	path, err := DeliverToInbox(openDeliveryRootForTest(t, base), "codex", filename, fresh)
+	if err != nil {
+		t.Fatalf("retry after tmp fsync = %v, want converge without EEXIST", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil || string(got) != string(fresh) {
+		t.Fatalf("published bytes = %q, %v", got, readErr)
+	}
+	got, readErr = os.ReadFile(staleSameName)
+	if readErr != nil || string(got) != "stale same-name attempt" {
+		t.Fatalf("same-name leftover = %q, %v; retry must not overwrite it", got, readErr)
+	}
+	got, readErr = os.ReadFile(staleUnique)
+	if readErr != nil || string(got) != "stale unique attempt" {
+		t.Fatalf("unique leftover = %q, %v; retry must not overwrite it", got, readErr)
+	}
+}
+
 func openDeliveryRootForTest(t testing.TB, base string) *DeliveryRoot {
 	t.Helper()
 	identity, err := SnapshotDeliveryRoot(base)

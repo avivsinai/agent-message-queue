@@ -30,7 +30,8 @@ done
 if [ -z "$ready" ]; then
   exit 11
 fi
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 `)
 
 	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
@@ -100,7 +101,8 @@ for arg in "$@"; do
   if [ "$previous" = "-ready-file" ]; then ready="$arg"; fi
   previous="$arg"
 done
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 `)
 
 	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
@@ -159,7 +161,8 @@ done
 if [ -z "$ready" ]; then
   exit 11
 fi
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 `)
 
 	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
@@ -331,7 +334,8 @@ for arg in "$@"; do
   previous="$arg"
 done
 [ -n "$ready" ] || exit 11
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 `)
 
 			err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
@@ -442,7 +446,8 @@ for arg in "$@"; do
 done
 [ -n "$ready" ] || exit 11
 printf '%s' "$ready" > "$AMQ_KEEPALIVE_READY_PATH_LOG"
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 [ -d "${ready%/*}" ] || exit 12
 : > "$AMQ_KEEPALIVE_POST_READY"
@@ -498,7 +503,8 @@ for arg in "$@"; do
 done
 [ -n "$ready" ] || exit 11
 printf '%s' "$ready" > "$AMQ_KEEPALIVE_READY_PATH_LOG"
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do
   if [ -f "$AMQ_KEEPALIVE_CHECK" ]; then : > "$AMQ_KEEPALIVE_ALIVE"; fi
   sleep 0.01
@@ -556,22 +562,24 @@ done
 [ -n "$ready" ] || exit 11
 : > "$AMQ_KEEPALIVE_STARTED"
 while [ ! -f "$AMQ_KEEPALIVE_ALLOW_READY" ]; do sleep 0.01; done
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 : > "$AMQ_KEEPALIVE_LATE_READY"
 while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 : > "$AMQ_KEEPALIVE_EXITED"
 `)
 	registerDetachedWakeCleanup(t, pidFile, allowReady, release)
+	budget := testWaitBudget(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	done := make(chan error, 1)
 	go func() {
 		done <- NewCLI(fakeAMQ).StartWake(ctx, StartWakeRequest{
 			Root: "/tmp/amq-root", Me: "codex", InjectVia: "/tmp/amq-keepalive",
-			Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3", Timeout: 5 * time.Second,
+			Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3", Timeout: budget,
 		})
 	}()
-	waitForFile(t, started, 2*time.Second)
+	waitForFile(t, started, testWaitBudget(t))
 	cancel()
 	err := <-done
 	if !errors.Is(err, ErrWakeReadinessUncertain) || !errors.Is(err, context.Canceled) {
@@ -580,11 +588,11 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 	if err := os.WriteFile(allowReady, nil, 0o600); err != nil {
 		t.Fatalf("allow late readiness: %v", err)
 	}
-	waitForFile(t, lateReady, 2*time.Second)
+	waitForFile(t, lateReady, testWaitBudget(t))
 	if err := os.WriteFile(release, nil, 0o600); err != nil {
 		t.Fatalf("release child: %v", err)
 	}
-	waitForFile(t, exited, 2*time.Second)
+	waitForFile(t, exited, testWaitBudget(t))
 }
 
 func TestStartWakeTimesOutWhenReadyFileNeverAppears(t *testing.T) {
@@ -801,7 +809,8 @@ for arg in "$@"; do
   previous="$arg"
 done
 [ -n "$ready" ] || exit 11
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 while [ ! -f "$AMQ_KEEPALIVE_TRIGGER" ]; do sleep 0.01; done
 printf 'post-launch diagnostic\n' >&2
 : > "$AMQ_KEEPALIVE_SURVIVED"
@@ -836,7 +845,8 @@ for arg in "$@"; do
   previous="$arg"
 done
 [ -n "$ready" ] || exit 11
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 while [ ! -f "$AMQ_KEEPALIVE_TRIGGER" ]; do sleep 0.01; done
 set -e
 dd if=/dev/zero bs=65536 count=4 >&2 2>/dev/null
@@ -1417,6 +1427,23 @@ func writeExecutable(t *testing.T, path string, body string) string {
 		t.Fatalf("write executable: %v", err)
 	}
 	return path
+}
+
+func testWaitBudget(t *testing.T) time.Duration {
+	t.Helper()
+	const reserve = 2 * time.Second
+	deadline, ok := t.Deadline()
+	if !ok {
+		return 30 * time.Second
+	}
+	remain := time.Until(deadline)
+	if remain > reserve {
+		return remain - reserve
+	}
+	if remain > 0 {
+		return remain
+	}
+	return time.Millisecond
 }
 
 func waitForFile(t *testing.T, path string, timeout time.Duration) {

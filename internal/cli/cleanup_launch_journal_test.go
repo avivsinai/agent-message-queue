@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -99,5 +100,85 @@ func TestCleanupLaunchJournalReportsExactTargetAndRequiresExplicitRoot(t *testin
 	}
 	if _, err := launch.LoadJournal(root); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("journal after cleanup: %v", err)
+	}
+}
+
+func TestReconcileUnreadableJournalIsActionRequiredAndCleanupRemovesExactRawJournal(t *testing.T) {
+	rootPath := t.TempDir()
+	identity, err := fsq.SnapshotDeliveryRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(rootPath, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	nonce := "019c8a2f-2b13-7000-8000-000000000021"
+	project := t.TempDir()
+	config := launch.ProjectConfig{
+		Schema: launch.ProjectConfigSchema, DefaultSession: "collab", Layout: launch.LayoutIntent{Type: launch.LayoutColumns},
+		Agents: []launch.ProjectAgentConfig{{Handle: "claude", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: launch.ResumeEnabled}},
+	}
+	plan := launch.Plan{Version: launch.PlanVersion, Agents: []launch.AgentPlan{{
+		Handle: "claude", Argv: []string{"/usr/bin/true", nonce}, Cwd: project,
+		AdapterMode: launch.AdapterModeMint, ResumePolicy: launch.ResumeEnabled,
+		LaunchNonce: nonce, ConversationID: nonce,
+		DynamicArgv: []launch.DynamicArg{{Index: 1, Kind: launch.DynamicArgLaunchNonce}},
+	}}}
+	digest, err := plan.SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := launch.NewLaunchJournal(
+		launch.ReconcileRequest{ProjectRoot: project, Session: "collab", Root: root, Config: config},
+		"test", launch.DetectResult{Available: true, Profile: launch.Profile{Backend: "test", Platform: "test", VersionRange: "*", Version: 1, Capabilities: []launch.Capability{launch.CapCreate}}, HostIdentity: "host:test", InstanceIdentity: "instance:test"},
+		plan, digest, nonce,
+		[]launch.AgentReconcileResult{{Handle: "claude", ConversationDisposition: launch.DispositionFresh}},
+		[]launch.ConversationRecord{{Version: launch.ConversationVersion, Handle: "claude", State: launch.CapturePending, ProviderVersion: "test", LaunchNonce: nonce}},
+		time.Now(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := launch.AcquireLease(root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := launch.WriteJournal(root, lease, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+
+	record.ProjectPhysical, record.RootPhysical = "", ""
+	raw, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = append(raw, '\n')
+	if err := os.WriteFile(launch.JournalPath(rootPath), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reconciled, err := launch.Reconcile(launch.ReconcileRequest{
+		Context: context.Background(), ProjectRoot: project, Session: "collab", Root: root,
+		Config: config, Launcher: "test", Preferences: []string{"test"},
+		Backends: map[string]launch.Backend{"test": launch.Commands{}},
+		Adapters: map[string]launch.HarnessAdapter{}, HostIdentity: "host:test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconciled.Outcome != launch.OutcomeActionRequired || reconciled.AggregateCode != 6 || reconciled.Reason != "launch_journal_unreadable" {
+		t.Fatalf("Reconcile unreadable journal = %#v, want action_required launch_journal_unreadable", reconciled)
+	}
+
+	if err := runCleanup([]string{"--launch-journal", "--root", rootPath, "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(launch.JournalPath(rootPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unreadable journal after cleanup: %v", err)
 	}
 }

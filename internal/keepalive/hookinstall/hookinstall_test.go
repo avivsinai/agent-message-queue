@@ -146,6 +146,120 @@ func TestInstallCodexCreatesFirstSessionStartEntryWhenListIsEmpty(t *testing.T) 
 	}
 }
 
+func TestInstallRefusesTrailingJSON(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "settings.json")
+	original := []byte("{\"hooks\":{}}\n{\"injected\":true}\n")
+	mustWrite(t, configPath, original)
+
+	_, err := Install(Options{
+		Agent:        AgentClaude,
+		ScriptPath:   filepath.Join(dir, "hook.sh"),
+		BinaryPath:   writeExecutable(t, filepath.Join(dir, "amq-keepalive")),
+		ClaudeConfig: configPath,
+		Timeout:      time.Second,
+	})
+	if err == nil {
+		t.Fatal("Install() error = nil, want trailing JSON refusal")
+	}
+	if !strings.Contains(err.Error(), "trailing JSON") {
+		t.Fatalf("Install() error = %v, want trailing JSON", err)
+	}
+	got, readErr := os.ReadFile(configPath)
+	if readErr != nil || !bytes.Equal(got, original) {
+		t.Fatalf("config changed after trailing JSON: err=%v bytes=%q", readErr, got)
+	}
+}
+
+func TestInstallCodexRefusesWrongTypeInnerHooks(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "hooks.json")
+	original := []byte(`{"hooks":{"SessionStart":[{"hooks":{"type":"command","command":"existing"}}]}}`)
+	mustWrite(t, configPath, original)
+
+	_, err := Install(Options{
+		Agent:       AgentCodex,
+		ScriptPath:  filepath.Join(dir, "hook.sh"),
+		BinaryPath:  writeExecutable(t, filepath.Join(dir, "amq-keepalive")),
+		CodexConfig: configPath,
+		Timeout:     time.Second,
+	})
+	if err == nil {
+		t.Fatal("Install() error = nil, want wrong-type inner hooks refusal")
+	}
+	if !strings.Contains(err.Error(), `"hooks" must be a JSON array`) {
+		t.Fatalf("Install() error = %v, want typed inner hooks", err)
+	}
+	got, readErr := os.ReadFile(configPath)
+	if readErr != nil || !bytes.Equal(got, original) {
+		t.Fatalf("wrong-type inner hooks were wiped: err=%v bytes=%q", readErr, got)
+	}
+}
+
+func TestInstallBothRefusesWhenSecondConfigFailsPreflight(t *testing.T) {
+	dir := t.TempDir()
+	claudeConfig := filepath.Join(dir, "claude", "settings.json")
+	claudeOriginal := []byte(`{"hooks":{"SessionStart":[]}}`)
+	mustWrite(t, claudeConfig, claudeOriginal)
+	codexConfig := filepath.Join(dir, "codex", "hooks.json")
+	if err := os.MkdirAll(codexConfig, 0o700); err != nil {
+		t.Fatalf("mkdir codex config path: %v", err)
+	}
+
+	_, err := Install(Options{
+		Agent:        AgentBoth,
+		ScriptPath:   filepath.Join(dir, "hook.sh"),
+		BinaryPath:   writeExecutable(t, filepath.Join(dir, "amq-keepalive")),
+		ClaudeConfig: claudeConfig,
+		CodexConfig:  codexConfig,
+		Timeout:      time.Second,
+	})
+	if err == nil {
+		t.Fatal("Install() error = nil, want second-config refusal")
+	}
+	if strings.Contains(err.Error(), "partial hookinstall commit") {
+		t.Fatalf("preflight failure committed Claude: %v", err)
+	}
+	got, readErr := os.ReadFile(claudeConfig)
+	if readErr != nil || !bytes.Equal(got, claudeOriginal) {
+		t.Fatalf("Claude config changed after Codex preflight failure: err=%v bytes=%q", readErr, got)
+	}
+}
+
+func TestBackupIfExistsUsesExclusiveSameSecondName(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "settings.json")
+	original := []byte(`{"keep":true}`)
+	mustWrite(t, src, original)
+	occupant := []byte("occupant\n")
+
+	for attempt := 0; attempt < 8; attempt++ {
+		ts := time.Now().UTC().Format("20060102T150405Z")
+		planted := fmt.Sprintf("%s.bak-%s", src, ts)
+		mustWrite(t, planted, occupant)
+		if time.Now().UTC().Format("20060102T150405Z") != ts {
+			continue
+		}
+		backup, err := backupIfExists(src)
+		if err != nil {
+			t.Fatalf("backupIfExists() error = %v", err)
+		}
+		if backup == planted {
+			t.Fatal("backup reused occupied same-second name")
+		}
+		gotOccupant, readErr := os.ReadFile(planted)
+		if readErr != nil || !bytes.Equal(gotOccupant, occupant) {
+			t.Fatalf("occupied backup changed: err=%v bytes=%q", readErr, gotOccupant)
+		}
+		got, readErr := os.ReadFile(backup)
+		if readErr != nil || !bytes.Equal(got, original) {
+			t.Fatalf("exclusive backup: err=%v bytes=%q", readErr, got)
+		}
+		return
+	}
+	t.Fatal("could not plant a same-second backup name")
+}
+
 func TestNormalizeOptionsTimeoutBoundary(t *testing.T) {
 	dir := t.TempDir()
 	base := Options{

@@ -165,6 +165,16 @@ func TestTmuxReconcileCrashRestartThenRelaunchResumes(t *testing.T) {
 	if _, err := LoadJournal(req.Root); !os.IsNotExist(err) {
 		t.Fatalf("journal after recovery: %v", err)
 	}
+	ticket, err := LoadExecutionTicket(req.Root, "claude")
+	if err != nil || ticket.State != ExecutionPending {
+		t.Fatalf("recovered execution ticket = %#v, %v", ticket, err)
+	}
+	if _, err := PrepareExecution(req.Root, "claude", ticket.LaunchNonce, ExecutionEnvelope{
+		Cwd: ticket.Cwd, AMQExecutable: ticket.AMQExecutable,
+		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv,
+	}); err != nil {
+		t.Fatalf("provider start acknowledgement = %v", err)
+	}
 	relaunched, err := Reconcile(req)
 	if err != nil || relaunched.AggregateCode != 0 || relaunched.Outcome != OutcomeAttached || relaunched.Agents[0].ConversationDisposition != DispositionResumed {
 		t.Fatalf("resume Reconcile = %#v, %v", relaunched, err)

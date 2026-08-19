@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,9 +17,18 @@ import (
 )
 
 const (
-	ApplyOutcomeApplied               = "applied"
-	ApplyOutcomeActionRequired        = "action_required"
-	ApplyOutcomeProvisionedNoRunnable = "provisioned_no_runnable"
+	ApplyOutcomeApplied                             = "applied"
+	ApplyOutcomeActionRequired                      = "action_required"
+	ApplyOutcomeProvisionedNoRunnable               = "provisioned_no_runnable"
+	ApplyReasonPrepareActionRequiredWithoutDecision = "prepare_action_required_without_decision"
+)
+
+type MutationDisposition string
+
+const (
+	MutationNotApplied MutationDisposition = "not_applied"
+	MutationCommitted  MutationDisposition = "committed"
+	MutationUncertain  MutationDisposition = "uncertain"
 )
 
 type ApplyDecision struct {
@@ -34,32 +44,41 @@ type ApplyRequest struct {
 
 type ApplyDependencies struct {
 	PrepareDependencies
-	AMQPath string
+	AMQPath   string
+	CrashHook func(string) error
 }
 
 type ApplyResult struct {
-	Outcome         string
-	ReasonCode      string
-	FailureDetail   string
-	SubjectSchema   int
-	SubjectDigest   string
-	PlanDigest      string
-	TrustDigest     string
-	Backend         string
-	Profile         string
-	Roster          PrepareRoster
-	Observations    []PrepareObservation
-	Commands        []EmittedCommand
-	RequiredActions []PrepareRequiredAction
-	Evidence        []EvidenceRef
-	CallerContext   map[string]string
+	Outcome           string
+	ReasonCode        string
+	FailureDetail     string
+	SubjectSchema     int
+	SubjectDigest     string
+	PlanDigest        string
+	TrustDigest       string
+	Backend           string
+	Profile           string
+	Disposition       MutationDisposition
+	BindingGeneration string
+	Roster            PrepareRoster
+	Observations      []PrepareObservation
+	Commands          []EmittedCommand
+	RequiredActions   []PrepareRequiredAction
+	Evidence          []EvidenceRef
+	CallerContext     map[string]string
 }
 
 var afterApplySessionPublishedForTest func()
 var beforeApplySessionPublishForTest func()
+var beforeApplyAuthorizeApplyForTest func()
+var beforeApplyReconcileForTest func()
+var afterApplyReconcileForTest func()
+var openPrepareTargetForApply = openPrepareTarget
 var beforeApplyRosterMutationForTest func()
 var beforeApplyBaseRootCreateForTest func()
 var afterApplyBaseRootCreatedForTest func() error
+var beforeApplyFinalPrepareForTest func()
+var collectApplyEvidenceRefs = CollectEvidenceRefs
 var publishApplySession = func(base *fsq.DeliveryRoot, session string, initialize func(*fsq.DeliveryRoot) error) (*fsq.DeliveryRoot, error) {
 	return base.PublishInitializedDirectChildExclusive(session, 0o700, initialize)
 }
@@ -82,7 +101,7 @@ func Apply(ctx context.Context, request ApplyRequest, dependencies ApplyDependen
 	if !validDigest(request.SubjectDigest) {
 		return ApplyResult{}, fmt.Errorf("invalid Apply subject digest")
 	}
-	state, err := openPrepareTarget(request.Prepare.Target)
+	state, err := openPrepareTargetForApply(request.Prepare.Target)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -126,16 +145,42 @@ func Apply(ctx context.Context, request ApplyRequest, dependencies ApplyDependen
 }
 
 func applyUnderAuthority(ctx context.Context, request ApplyRequest, dependencies ApplyDependencies, state *prepareTargetState, lease *Lease) (result ApplyResult, returnErr error) {
-	prepared, decisions, refusal, allowed, err := authorizeApply(ctx, request, dependencies)
+	if err := state.verify(); err != nil {
+		if lease != nil {
+			lease.abandonCapability()
+		}
+		if !isPrepareAuthorityDrift(err) {
+			return ApplyResult{}, err
+		}
+		return applyActionResult(PrepareResult{}, "subject_changed"), nil
+	}
+	if beforeApplyAuthorizeApplyForTest != nil {
+		beforeApplyAuthorizeApplyForTest()
+	}
+	prepared, decisions, refusal, allowed, err := authorizeApply(ctx, request, dependencies, state)
 	if err != nil || !allowed {
+		if !allowed && lease != nil {
+			if driftErr := state.verify(); isPrepareAuthorityDrift(driftErr) {
+				lease.abandonCapability()
+			}
+		}
 		return refusal, err
 	}
 	return applyPreparedUnderAuthority(ctx, request, dependencies, state, lease, prepared, decisions)
 }
 
-func authorizeApply(ctx context.Context, request ApplyRequest, dependencies ApplyDependencies) (PrepareResult, map[RequiredActionKind]string, ApplyResult, bool, error) {
-	prepared, err := Prepare(ctx, request.Prepare, dependencies.PrepareDependencies)
+func authorizeApply(ctx context.Context, request ApplyRequest, dependencies ApplyDependencies, state *prepareTargetState) (PrepareResult, map[RequiredActionKind]string, ApplyResult, bool, error) {
+	ctx, subjectSchema, prepareDependencies, err := validatePrepareRequest(ctx, request.Prepare, dependencies.PrepareDependencies)
 	if err != nil {
+		return PrepareResult{}, nil, ApplyResult{}, false, err
+	}
+	prepared, err := prepareAtTarget(ctx, request.Prepare, prepareDependencies, state, subjectSchema)
+	if err != nil {
+		if isPrepareAuthorityDrift(err) {
+			refusal := applyActionResult(PrepareResult{SubjectSchema: subjectSchema}, "subject_changed")
+			refusal.SubjectDigest = request.SubjectDigest
+			return PrepareResult{}, nil, refusal, false, nil
+		}
 		return PrepareResult{}, nil, ApplyResult{}, false, err
 	}
 	if prepared.SubjectDigest != request.SubjectDigest {
@@ -143,6 +188,9 @@ func authorizeApply(ctx context.Context, request ApplyRequest, dependencies Appl
 	}
 	if prepared.Outcome == PrepareOutcomeUnsupported {
 		return prepared, nil, applyActionResult(prepared, prepared.Reason), false, nil
+	}
+	if prepared.Outcome == PrepareOutcomeActionRequired && len(prepared.RequiredActions) == 0 {
+		return prepared, nil, applyActionResult(prepared, ApplyReasonPrepareActionRequiredWithoutDecision), false, nil
 	}
 	decisions, reason := validateApplyDecisions(prepared.RequiredActions, request.Decisions)
 	if reason != "" {
@@ -205,7 +253,7 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 			}
 			return ApplyResult{}, err
 		}
-		defer func() { _ = root.Close() }()
+		state.sessionRoot = root
 		if afterApplySessionPublishedForTest != nil {
 			afterApplySessionPublishedForTest()
 		}
@@ -234,8 +282,11 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 		}
 	}
 	if len(runnable) == 0 {
-		prepared, err = Prepare(ctx, request.Prepare, dependencies.PrepareDependencies)
+		prepared, err = prepareApplyStatus(ctx, request.Prepare, dependencies.PrepareDependencies, state)
 		if err != nil {
+			if isPrepareAuthorityDrift(err) {
+				return applyActionResult(prepared, "subject_changed"), nil
+			}
 			return ApplyResult{}, err
 		}
 		result := applyResultFromPrepare(prepared)
@@ -250,22 +301,44 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	if beforeApplyReconcileForTest != nil {
+		beforeApplyReconcileForTest()
+	}
 	reconciled, err := Reconcile(reconcileRequest)
 	if err != nil {
-		return ApplyResult{}, err
+		result := applyActionResult(prepared, "launch_reconcile_failed")
+		result.FailureDetail = err.Error()
+		return classifyApplyMutation(result, root), nil
 	}
-	finalPrepared, err := Prepare(ctx, request.Prepare, dependencies.PrepareDependencies)
+	if beforeApplyFinalPrepareForTest != nil {
+		beforeApplyFinalPrepareForTest()
+	}
+	if afterApplyReconcileForTest != nil {
+		afterApplyReconcileForTest()
+	}
+	finalPrepared, err := prepareApplyStatus(ctx, request.Prepare, dependencies.PrepareDependencies, state)
 	if err != nil {
-		return ApplyResult{}, err
+		if isPrepareAuthorityDrift(err) {
+			if lease != nil {
+				lease.abandonCapability()
+			}
+			return applyActionResult(prepared, "subject_changed"), nil
+		}
+		return applyPostCommitFailure(applyResultFromPrepare(prepared), request, root, reconciled, "post_commit_prepare_failed", err), nil
+	}
+	if reconciled.AggregateCode == 0 && reconciled.Outcome != "" && reconciled.Outcome != OutcomeNoAction && !authorizedIdentitiesEqual(prepared, finalPrepared) {
+		return applyActionResult(finalPrepared, "subject_changed"), nil
 	}
 	result = applyResultFromPrepare(finalPrepared)
 	result.SubjectDigest = request.SubjectDigest
 	result.RequiredActions = nil
 	result.Commands = slices.Clone(reconciled.Commands)
 	result.Backend, result.TrustDigest = reconciled.Backend, reconciled.SemanticDigest
-	result.Evidence, err = CollectEvidenceRefs(root, handles)
+	classified := classifyApplyMutation(result, root)
+	result.Disposition, result.BindingGeneration = classified.Disposition, classified.BindingGeneration
+	result.Evidence, err = collectApplyEvidenceRefs(root, handles)
 	if err != nil {
-		return ApplyResult{}, err
+		return applyPostCommitFailure(result, request, root, reconciled, "post_commit_evidence_failed", err), nil
 	}
 	if reconciled.AggregateCode == 0 && reconciled.Outcome != "" && reconciled.Outcome != OutcomeNoAction {
 		result.Outcome = ApplyOutcomeApplied
@@ -279,11 +352,19 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 	return result, nil
 }
 
+func prepareApplyStatus(ctx context.Context, request PrepareRequest, dependencies PrepareDependencies, state *prepareTargetState) (PrepareResult, error) {
+	ctx, subjectSchema, dependencies, err := validatePrepareRequest(ctx, request, dependencies)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	return prepareAtTarget(ctx, request, dependencies, state, subjectSchema)
+}
+
 func applyMissingBaseRoot(ctx context.Context, request ApplyRequest, dependencies ApplyDependencies, state *prepareTargetState) (result ApplyResult, returnErr error) {
 	if state.baseAuthority == nil || !state.baseAuthority.baseMissing || state.baseAuthority.parentRoot == nil {
 		return ApplyResult{}, fmt.Errorf("missing base-root creation authority")
 	}
-	prepared, decisions, refusal, allowed, err := authorizeApply(ctx, request, dependencies)
+	prepared, decisions, refusal, allowed, err := authorizeApply(ctx, request, dependencies, state)
 	if err != nil || !allowed {
 		return refusal, err
 	}
@@ -307,6 +388,7 @@ func applyMissingBaseRoot(ctx context.Context, request ApplyRequest, dependencie
 		return ApplyResult{}, err
 	}
 	state.baseRoot = baseRoot
+	state.baseAuthority.baseMissing = false
 	if afterApplyBaseRootCreatedForTest != nil {
 		if err := afterApplyBaseRootCreatedForTest(); err != nil {
 			return ApplyResult{}, err
@@ -506,6 +588,17 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 	config := ProjectConfig{Schema: ProjectConfigSchema, DefaultSession: prepared.Target.Session, Layout: LayoutIntent{Type: LayoutColumns}}
 	adapters := make(map[string]HarnessAdapter, len(runnable))
 	executionOptions := make(map[string]PrepareExecutionOptions, len(runnable))
+	authorizedIdentities := make(map[string]AuthorizedParticipantIdentity, len(snapshot.Participants))
+	for _, participant := range snapshot.Participants {
+		if !participant.Runnable || (participant.Executable == nil && participant.Wrapper == nil && participant.CwdIdentity == "") {
+			continue
+		}
+		authorizedIdentities[participant.Handle] = AuthorizedParticipantIdentity{
+			Executable:  cloneConsultedExecutable(participant.Executable),
+			Wrapper:     cloneConsultedExecutable(participant.Wrapper),
+			CwdIdentity: participant.CwdIdentity,
+		}
+	}
 	for _, participant := range runnable {
 		adapter := dependencies.AdapterFor(participant.Provider, participant.Executable)
 		if adapter == nil {
@@ -534,13 +627,15 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 		AMQPath: dependencies.AMQPath, Root: root, Config: config, Launcher: prepared.Launcher,
 		Preferences: slices.Clone(dependencies.Preferences), Backends: dependencies.Backends,
 		Adapters: adapters, TrustStore: dependencies.TrustStore, HeldLease: lease,
+		CrashHook:            dependencies.CrashHook,
 		TrustAuthorityDigest: snapshot.BaseAuthorityDigest,
 		HostIdentity:         dependencies.HostIdentity, AllowExternalCwd: true,
-		ExecutionOptions:   executionOptions,
-		AllowFreshFallback: decisions[ActionStaleConversation] == "fresh_once",
-		Placement:          prepared.Placement,
-		OnLive:             onLivePolicies(runnable),
-		CallerContext:      cloneCallerContext(prepared.CallerContext),
+		ExecutionOptions:     executionOptions,
+		AuthorizedIdentities: authorizedIdentities,
+		AllowFreshFallback:   decisions[ActionStaleConversation] == "fresh_once",
+		Placement:            prepared.Placement,
+		OnLive:               onLivePolicies(runnable),
+		CallerContext:        cloneCallerContext(prepared.CallerContext),
 	}
 	if choice := decisions[ActionTrustConfirmation]; choice == "trust_exact_subject" {
 		request.ConfirmTrust = func(plan Plan, actualTrustDigest string) (bool, error) {
@@ -589,6 +684,27 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 		}
 	}
 	return request, nil
+}
+
+func authorizedIdentitiesEqual(first, second PrepareResult) bool {
+	if len(first.Participants) != len(second.Participants) {
+		return false
+	}
+	for i := range first.Participants {
+		left, right := first.Participants[i], second.Participants[i]
+		if left.Handle != right.Handle || left.Runnable != right.Runnable || left.CwdIdentity != right.CwdIdentity ||
+			!consultedExecutableEqual(left.Executable, right.Executable) || !consultedExecutableEqual(left.Wrapper, right.Wrapper) {
+			return false
+		}
+	}
+	return true
+}
+
+func consultedExecutableEqual(first, second *ConsultedExecutable) bool {
+	if first == nil || second == nil {
+		return first == second
+	}
+	return first.Requested == second.Requested && first.Consulted == second.Consulted && bytes.Equal(first.Identity, second.Identity)
 }
 
 // WithSessionCreationLock serializes in-repository creators for one direct
@@ -645,6 +761,7 @@ func applyActionResult(prepared PrepareResult, reason string) ApplyResult {
 	result := applyResultFromPrepare(prepared)
 	result.Outcome = ApplyOutcomeActionRequired
 	result.ReasonCode = reason
+	result.Disposition = MutationNotApplied
 	return result
 }
 
@@ -654,7 +771,40 @@ func applyResultFromPrepare(prepared PrepareResult) ApplyResult {
 		Backend: prepared.Backend, Profile: prepared.Profile, Roster: prepared.Roster,
 		Observations: slices.Clone(prepared.Observations), RequiredActions: slices.Clone(prepared.RequiredActions),
 		CallerContext: cloneCallerContext(prepared.CallerContext),
+		Disposition:   MutationNotApplied,
 	}
+}
+
+func classifyApplyMutation(result ApplyResult, root *fsq.DeliveryRoot) ApplyResult {
+	binding, bindingErr := LoadBinding(root)
+	if bindingErr == nil {
+		result.Disposition = MutationCommitted
+		result.BindingGeneration = binding.LaunchNonce
+		return result
+	}
+	if journal, present, journalErr := loadOptionalJournal(root); present {
+		result.Disposition = MutationUncertain
+		result.BindingGeneration = journal.LaunchNonce
+		return result
+	} else if journalErr != nil && !errors.Is(journalErr, os.ErrNotExist) {
+		// A journal that exists but cannot be decoded is still evidence that
+		// reconciliation may have crossed the backend mutation boundary.
+		result.Disposition = MutationUncertain
+		return result
+	}
+	if !errors.Is(bindingErr, os.ErrNotExist) {
+		result.Disposition = MutationUncertain
+		return result
+	}
+	result.Disposition = MutationNotApplied
+	return result
+}
+
+func applyPostCommitFailure(result ApplyResult, request ApplyRequest, root *fsq.DeliveryRoot, reconciled ReconcileResult, reason string, err error) ApplyResult {
+	result.SubjectDigest = request.SubjectDigest
+	result.Backend, result.TrustDigest = reconciled.Backend, reconciled.SemanticDigest
+	result.Outcome, result.ReasonCode, result.FailureDetail = ApplyOutcomeActionRequired, reason, err.Error()
+	return classifyApplyMutation(result, root)
 }
 
 func onLivePolicies(participants []PrepareParticipant) map[string]string {

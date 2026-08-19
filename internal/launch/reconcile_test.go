@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -37,6 +39,143 @@ func TestReconcileEmitsCanonicalResolvedWorkingDirectory(t *testing.T) {
 	if len(result.Commands) != 1 || result.Commands[0].Cwd != resolved || result.Plan == nil || result.Plan.Agents[0].Cwd != resolved {
 		t.Fatalf("canonical cwd result=%#v, want %q", result, resolved)
 	}
+}
+
+func TestReconcileRejectsProjectProviderBeforeCapabilities(t *testing.T) {
+	req := reconcileFixture(t, Commands{})
+	provider, sentinel := writeProjectSideEffectingClaude(t, req.ProjectRoot)
+	t.Setenv("PATH", filepath.Dir(provider)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMQ_419_SENTINEL", sentinel)
+	req.Adapters = map[string]HarnessAdapter{ClaudeProvider: NewClaudeAdapter(ClaudeProvider)}
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AggregateCode != 6 || len(result.Agents) != 1 || !strings.Contains(result.Agents[0].Reason, "inside the project") {
+		t.Fatalf("project provider result = %#v, want typed containment refusal", result)
+	}
+	if !strings.Contains(result.Agents[0].Reason, ProviderProjectContainedCode) {
+		t.Fatalf("project provider reason = %q, want %s", result.Agents[0].Reason, ProviderProjectContainedCode)
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("project provider capability probe ran side effect: %v", err)
+	}
+}
+
+func TestReconcileRejectsProjectTrackedProviderSymlinkBeforeSentinelExec(t *testing.T) {
+	req := reconcileFixture(t, Commands{})
+	outside := t.TempDir()
+	provider := filepath.Join(outside, ClaudeProvider)
+	marker := filepath.Join(t.TempDir(), "provider-ran")
+	script := "#!/bin/sh\nprintf ran > \"$AMQ_419_SENTINEL\"\ncase \"$1\" in\n  --version) echo 2.1.233 ;;\n  --help) echo '--session-id <uuid> --resume [value]' ;;\nesac\n"
+	if err := os.WriteFile(provider, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tracked := filepath.Join(req.ProjectRoot, ClaudeProvider)
+	if err := os.Symlink(provider, tracked); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Dir(tracked)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMQ_419_SENTINEL", marker)
+	req.Adapters = map[string]HarnessAdapter{ClaudeProvider: NewClaudeAdapter(tracked)}
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AggregateCode != 6 || len(result.Agents) != 1 || !strings.Contains(result.Agents[0].Reason, ProviderProjectContainedCode) {
+		t.Fatalf("project-tracked provider result = %#v, want typed containment refusal", result)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("project-tracked provider sentinel ran: %v", err)
+	}
+}
+
+func TestReconcileRejectsProjectAMQBeforeCreateQuickly(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	amq := filepath.Join(req.ProjectRoot, "amq")
+	if err := os.WriteFile(amq, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	req.AMQPath = amq
+	started := time.Now()
+	_, err := Reconcile(req)
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("project-contained AMQ refusal took %s", elapsed)
+	}
+	var pathErr *LaunchPathError
+	if err == nil || !errors.As(err, &pathErr) || pathErr.Code != AMQProjectContainedCode {
+		t.Fatalf("AMQ refusal error = %v, want typed code %s", err, AMQProjectContainedCode)
+	}
+	if backend.creates != 0 {
+		t.Fatalf("project-contained AMQ refusal created %d resources", backend.creates)
+	}
+}
+
+func TestReconcileJournalRejectsProjectProviderBeforeCapabilities(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	provider, sentinel := writeProjectSideEffectingClaude(t, req.ProjectRoot)
+	t.Setenv("PATH", filepath.Dir(provider)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMQ_419_SENTINEL", sentinel)
+	nonce := "019c8a2f-2b13-7000-8000-000000000099"
+	plan, agents, conversations := journalFixturePlan(nonce)
+	plan.Agents[0].Argv[0] = provider
+	digest, err := plan.SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := NewLaunchJournal(req, backend.name, backend.Detect(), plan, digest, nonce, agents, conversations, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := AcquireLease(req.Root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJournal(req.Root, lease, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	req.Adapters = map[string]HarnessAdapter{ClaudeProvider: NewClaudeAdapter(ClaudeProvider)}
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AggregateCode != 6 || result.Reason != "launch_journal_plan_unavailable" {
+		t.Fatalf("project provider journal result = %#v, want plan refusal", result)
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("journal capability probe ran side effect: %v", err)
+	}
+}
+
+func TestResolveLaunchAMQExecutableRejectsProjectPath(t *testing.T) {
+	project := t.TempDir()
+	inside := filepath.Join(project, "amq")
+	if err := os.WriteFile(inside, []byte("amq"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveLaunchAMQExecutable(inside, project); err == nil || !strings.Contains(err.Error(), AMQProjectContainedCode) {
+		t.Fatalf("project-contained AMQ path error = %v, want %s", err, AMQProjectContainedCode)
+	}
+}
+
+func writeProjectSideEffectingClaude(t *testing.T, project string) (string, string) {
+	t.Helper()
+	bin := filepath.Join(project, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	provider := filepath.Join(bin, ClaudeProvider)
+	sentinel := filepath.Join(project, "capability-probe-ran")
+	script := "#!/bin/sh\nprintf touched > \"$AMQ_419_SENTINEL\"\n"
+	if err := os.WriteFile(provider, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return provider, sentinel
 }
 
 func TestReconcileUsesAndRetainsCallerHeldLease(t *testing.T) {
@@ -260,27 +399,51 @@ func (a reconcileAdapter) CaptureIdentity(request CaptureRequest) CaptureResult 
 }
 
 type reconcileBackend struct {
-	mu          sync.Mutex
-	name        string
-	inspect     InspectStatus
-	creates     int
-	closes      int
-	focuses     int
-	createGate  chan struct{}
-	createStart chan struct{}
-	capture     bool
-	captured    *CaptureEvidence
-	invalidBind bool
-	reclaims    int
-	resourceUp  bool
-	reclaimAs   ReclaimStatus
-	reclaimList []ResourceIdentity
-	reclaimFlip bool
-	createErr   error
-	definiteErr bool
-	joined      bool
-	planNonce   string
-	planHandles []string
+	mu                        sync.Mutex
+	name                      string
+	inspect                   InspectStatus
+	creates                   int
+	closes                    int
+	focuses                   int
+	createGate                chan struct{}
+	createStart               chan struct{}
+	capture                   bool
+	captured                  *CaptureEvidence
+	invalidBind               bool
+	reclaims                  int
+	resourceUp                bool
+	reclaimAs                 ReclaimStatus
+	reclaimList               []ResourceIdentity
+	reclaimFlip               bool
+	createErr                 error
+	definiteErr               bool
+	leaveJournalOnCreateError bool
+	joined                    bool
+	joinBindingSeen           bool
+	planNonce                 string
+	planHandles               []string
+}
+
+type unsupportedReconcileBackend struct{ reconcileBackend }
+
+func (backend *unsupportedReconcileBackend) Create(CreateRequest) (CreateResult, error) {
+	backend.creates++
+	return CreateResult{Outcome: OutcomeUnsupported, Reason: "test backend unsupported"}, nil
+}
+
+func TestReconcileMapsUnsupportedCreateToActionRequired(t *testing.T) {
+	backend := &unsupportedReconcileBackend{reconcileBackend: reconcileBackend{name: "unsupported"}}
+	request := reconcileFixture(t, backend)
+	result, err := Reconcile(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != OutcomeActionRequired || result.AggregateCode != 6 || result.Reason != "test backend unsupported" {
+		t.Fatalf("unsupported Create result = %#v, want action_required code 6", result)
+	}
+	if len(result.Agents) != 1 || result.Agents[0].Code != 6 || result.Agents[0].Reason != "test backend unsupported" {
+		t.Fatalf("unsupported Create agent result = %#v", result.Agents)
+	}
 }
 
 func (b *reconcileBackend) Detect() DetectResult {
@@ -293,9 +456,15 @@ func (b *reconcileBackend) Detect() DetectResult {
 func (b *reconcileBackend) Create(req CreateRequest) (CreateResult, error) {
 	b.mu.Lock()
 	b.creates++
-	createErr, definiteErr := b.createErr, b.definiteErr
+	createErr, definiteErr, leaveJournal := b.createErr, b.definiteErr, b.leaveJournalOnCreateError
+	b.joinBindingSeen = req.JoinBinding != nil
 	if createErr != nil {
 		b.mu.Unlock()
+		if leaveJournal {
+			if err := os.WriteFile(JournalPath(req.Root.Base()), []byte("join-create-error-sentinel"), 0o600); err != nil {
+				return CreateResult{}, errors.Join(createErr, err)
+			}
+		}
 		if definiteErr {
 			return CreateResult{}, &DefinitePreCreateError{Err: createErr}
 		}
@@ -579,6 +748,124 @@ func TestReconcileOnLiveKeepJoinWritesTicketsUnderLeaseNonce(t *testing.T) {
 	}
 	if err := held.Release(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReconcileTmuxJoinCrashJournalRetriesWithoutDuplicateWindow(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	project := t.TempDir()
+	_, root := harnessRoot(t)
+	backend := NewTmuxBackend("tmux")
+	backend.socketName = fmt.Sprintf("amq-reconcile-join-%d-%d", os.Getpid(), time.Now().UnixNano())
+	backend.focus = func(context.Context, string) error { return nil }
+	t.Cleanup(func() { stopTmuxTestServer(t, backend) })
+	store, err := OpenTrustStore(t.TempDir(), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := ReconcileRequest{
+		ProjectRoot: project, Session: "collab", Root: root, AMQPath: writeTmuxSleepAMQ(t),
+		Config: ProjectConfig{Schema: ProjectConfigSchema, DefaultSession: "collab", Layout: LayoutIntent{Type: LayoutColumns}, Agents: []ProjectAgentConfig{
+			{Handle: "claude", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeEnabled},
+		}},
+		Launcher: LauncherTMux, Preferences: []string{LauncherTMux}, Backends: map[string]Backend{LauncherTMux: backend},
+		Adapters:   map[string]HarnessAdapter{"claude": reconcileAdapter{name: "claude", mode: AdapterModeMint, available: true}},
+		TrustStore: store, ConfirmTrust: func(Plan, string) (bool, error) { return true, nil }, HostIdentity: backend.Detect().HostIdentity,
+	}
+	first, err := Reconcile(req)
+	if err != nil || first.AggregateCode != 0 {
+		t.Fatalf("initial tmux reconcile=%#v err=%v", first, err)
+	}
+	req.Config.Agents = append(req.Config.Agents, ProjectAgentConfig{Handle: "codex", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeFresh})
+	req.Adapters["codex"] = reconcileAdapter{name: "claude", mode: AdapterModeMint, available: true}
+	req.OnLive = map[string]string{"claude": OnLiveKeep, "codex": OnLiveKeep}
+	crash := errors.New("crash after join delta")
+	req.CrashHook = func(stage string) error {
+		if strings.HasPrefix(stage, "join_delta_written:") {
+			return crash
+		}
+		return nil
+	}
+	joinAttempt, err := Reconcile(req)
+	if !errors.Is(err, crash) {
+		t.Fatalf("join crash result=%#v error=%v", joinAttempt, err)
+	}
+	journal, err := LoadJournal(req.Root)
+	if err != nil || journal.JoinBinding == nil || len(journal.JoinDeltas) != 1 {
+		t.Fatalf("join journal=%#v err=%v", journal, err)
+	}
+	req.CrashHook = nil
+	recovered, err := Reconcile(req)
+	if err != nil || recovered.AggregateCode != 0 || recovered.Outcome != OutcomeCreated {
+		t.Fatalf("recovered tmux join=%#v err=%v", recovered, err)
+	}
+	if got := countLiveTmuxWindows(t, backend); got != 2 {
+		t.Fatalf("tmux windows after join recovery=%d, want exactly two", got)
+	}
+	if _, err := LoadJournal(req.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("join journal after recovery=%v", err)
+	}
+}
+
+func TestReconcileTmuxJoinDefiniteReplacementCleansPreCreateTickets(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	project := t.TempDir()
+	_, root := harnessRoot(t)
+	backend := NewTmuxBackend("tmux")
+	backend.socketName = fmt.Sprintf("amq-reconcile-join-clean-%d-%d", os.Getpid(), time.Now().UnixNano())
+	backend.focus = func(context.Context, string) error { return nil }
+	t.Cleanup(func() { stopTmuxTestServer(t, backend) })
+	store, err := OpenTrustStore(t.TempDir(), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := ReconcileRequest{
+		ProjectRoot: project, Session: "collab", Root: root, AMQPath: writeTmuxSleepAMQ(t),
+		Config: ProjectConfig{Schema: ProjectConfigSchema, DefaultSession: "collab", Layout: LayoutIntent{Type: LayoutColumns}, Agents: []ProjectAgentConfig{
+			{Handle: "claude", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeEnabled},
+		}},
+		Launcher: LauncherTMux, Preferences: []string{LauncherTMux}, Backends: map[string]Backend{LauncherTMux: backend},
+		Adapters:   map[string]HarnessAdapter{"claude": reconcileAdapter{name: "claude", mode: AdapterModeMint, available: true}},
+		TrustStore: store, ConfirmTrust: func(Plan, string) (bool, error) { return true, nil }, HostIdentity: backend.Detect().HostIdentity,
+	}
+	if result, err := Reconcile(req); err != nil || result.AggregateCode != 0 {
+		t.Fatalf("initial tmux reconcile=%#v err=%v", result, err)
+	}
+	req.Config.Agents = append(req.Config.Agents, ProjectAgentConfig{Handle: "codex", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeFresh})
+	req.Adapters["codex"] = reconcileAdapter{name: "claude", mode: AdapterModeMint, available: true}
+	req.OnLive = map[string]string{"claude": OnLiveKeep, "codex": OnLiveKeep}
+	req.CrashHook = func(stage string) error {
+		if stage != "journal_written" {
+			return nil
+		}
+		name, nameErr := tmuxSessionName(project, "collab")
+		if nameErr != nil {
+			return nameErr
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
+		defer cancel()
+		if _, killErr := backend.run(ctx, backend.args("kill-session", "-t", "="+name)...); killErr != nil {
+			return killErr
+		}
+		_, createErr := backend.run(ctx, backend.args("new-session", "-d", "-s", name, "-e", tmuxNonceEnvironment+"=foreign", "-P", "-F", "#{pane_id}", "/bin/sleep", "60")...)
+		return createErr
+	}
+	result, err := Reconcile(req)
+	if err != nil || result.AggregateCode == 0 {
+		t.Fatalf("replacement join result=%#v err=%v", result, err)
+	}
+	if _, err := LoadJournal(req.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("definite replacement retained journal: %v", err)
+	}
+	if _, err := LoadExecutionTicket(req.Root, "codex"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("definite replacement retained codex ticket: %v", err)
+	}
+	if got := countLiveTmuxWindows(t, backend); got != 1 {
+		t.Fatalf("foreign replacement windows=%d, want one", got)
 	}
 }
 
@@ -982,7 +1269,7 @@ func TestReconcilePlanOnlyMintWithoutExecutionRemintsPending(t *testing.T) {
 	}
 }
 
-func TestReconcileMintExecutionEvidencePromotesThenResumesExactIdentity(t *testing.T) {
+func TestReconcileMintStaysPendingUntilAcknowledgedThenResumesExactIdentity(t *testing.T) {
 	commands := Commands{}
 	req := reconcileFixture(t, commands)
 	first, err := Reconcile(req)
@@ -1007,8 +1294,28 @@ func TestReconcileMintExecutionEvidencePromotesThenResumesExactIdentity(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.State != CaptureReady || record.Identity.ID != readyID || record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != managed.name {
-		t.Fatalf("promoted record=%#v", record)
+	if record.State != CapturePending || record.Identity.ID != "" || record.ExecutionEvidence != nil {
+		t.Fatalf("backend creation made conversation resumable: %#v", record)
+	}
+	ticket, err := LoadExecutionTicket(req.Root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.State != ExecutionPending || ticket.LaunchNonce != readyID {
+		t.Fatalf("execution ticket=%#v, want pending generation %q", ticket, readyID)
+	}
+	if _, err := PrepareExecution(req.Root, "claude", ticket.LaunchNonce, ExecutionEnvelope{
+		Cwd: ticket.Cwd, AMQExecutable: ticket.AMQExecutable,
+		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	record, err = LoadConversation(req.Root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.State != CaptureReady || record.Identity.ID != readyID || record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != CommandsBackendName {
+		t.Fatalf("acknowledged record=%#v", record)
 	}
 
 	third, err := Reconcile(req)
@@ -1017,6 +1324,70 @@ func TestReconcileMintExecutionEvidencePromotesThenResumesExactIdentity(t *testi
 	}
 	if third.Agents[0].ConversationDisposition != DispositionResumed || third.Plan.Agents[0].ConversationID != readyID {
 		t.Fatalf("third result=%#v, want resumed ID %q", third, readyID)
+	}
+}
+
+func TestReconcileCrashAfterBackendCreatedAcknowledgedThenRecoversReady(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	crash := errors.New("injected crash after backend creation")
+	req.CrashHook = func(stage string) error {
+		if stage == "backend_created" {
+			return crash
+		}
+		return nil
+	}
+	first, err := Reconcile(req)
+	if !errors.Is(err, crash) {
+		t.Fatalf("first result=%#v err=%v, want backend_created crash", first, err)
+	}
+	ticket, err := LoadExecutionTicket(req.Root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.State != ExecutionPending {
+		t.Fatalf("pre-ack execution ticket=%#v, want pending", ticket)
+	}
+	journal, err := LoadJournal(req.Root)
+	if err != nil || len(journal.Conversations) != 1 {
+		t.Fatalf("crashed journal=%#v err=%v", journal, err)
+	}
+	lease, err := AcquireLease(req.Root, ticket.LaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("claude"); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteConversation(req.Root, lease, journal.Conversations[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	acknowledged, err := PrepareExecution(req.Root, "claude", ticket.LaunchNonce, ExecutionEnvelope{
+		Cwd: ticket.Cwd, AMQExecutable: ticket.AMQExecutable,
+		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acknowledged.State != ExecutionAcknowledged {
+		t.Fatalf("acknowledged execution ticket=%#v", acknowledged)
+	}
+	record, err := LoadConversation(req.Root, "claude")
+	if err != nil || record.State != CaptureReady || record.Identity.Provider != ClaudeProvider || record.Identity.ID != ticket.ConversationID || record.ExecutionEvidence == nil {
+		t.Fatalf("acknowledged conversation=%#v err=%v, want ready identity/evidence", record, err)
+	}
+
+	req.CrashHook = nil
+	recovered, err := Reconcile(req)
+	if err != nil || recovered.AggregateCode != 0 {
+		t.Fatalf("recovery result=%#v err=%v, want aggregate code 0", recovered, err)
+	}
+	recoveredRecord, err := LoadConversation(req.Root, "claude")
+	if err != nil || recoveredRecord.State != CaptureReady || recoveredRecord.Identity.ID != ticket.ConversationID || recoveredRecord.ExecutionEvidence == nil {
+		t.Fatalf("recovered conversation=%#v err=%v, want ready identity/evidence", recoveredRecord, err)
 	}
 }
 
@@ -1178,7 +1549,14 @@ func TestReconcileManagedCreateCrashMatrixConvergesWithoutDuplicateSpawn(t *test
 
 			req.CrashHook = nil
 			result, err := Reconcile(req)
-			if err != nil || result.AggregateCode != 0 {
+			wantCode := 0
+			if stage == "journal_cleared" {
+				// The binding and pending conversation are durable, but the
+				// provider was never acknowledged. Do not expose a resumable
+				// conversation or silently start a duplicate.
+				wantCode = 6
+			}
+			if err != nil || result.AggregateCode != wantCode {
 				t.Fatalf("recovery result=%#v err=%v", result, err)
 			}
 			if backend.creates != 1 {
@@ -1191,8 +1569,8 @@ func TestReconcileManagedCreateCrashMatrixConvergesWithoutDuplicateSpawn(t *test
 				t.Fatalf("binding after recovery: %v", err)
 			}
 			record, err := LoadConversation(req.Root, "claude")
-			if err != nil || record.State != CaptureReady || record.ExecutionEvidence == nil {
-				t.Fatalf("conversation after recovery=%#v err=%v", record, err)
+			if err != nil || record.State != CapturePending || record.Identity.ID != "" || record.ExecutionEvidence != nil {
+				t.Fatalf("conversation after recovery=%#v err=%v, want pending until execution acknowledgement", record, err)
 			}
 		})
 	}
@@ -1332,6 +1710,52 @@ func TestReconcileCreateFailureClassificationControlsJournalClear(t *testing.T) 
 				t.Fatalf("uncertain create failure lost execution ticket: %v", ticketErr)
 			}
 		})
+	}
+}
+
+func TestReconcileJoinDefiniteCreateFailureCleansTicketsWithoutClearingJournal(t *testing.T) {
+	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectPresent, createErr: errors.New("join create refused before mutation"), definiteErr: true, leaveJournalOnCreateError: true}
+	req := reconcileFixture(t, backend)
+	req.Config.Agents = append(req.Config.Agents, ProjectAgentConfig{
+		Handle: "codex", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeFresh,
+	})
+	req.Adapters["codex"] = reconcileAdapter{name: "claude", mode: AdapterModeMint, available: true}
+	req.OnLive = map[string]string{"claude": OnLiveKeep, "codex": OnLiveKeep}
+	lease, err := AcquireLease(req.Root, testLaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := BindingRecord{
+		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: "host:test", InstanceIdentity: "instance:test",
+		Profile: backend.Detect().Profile.Identity(), LaunchNonce: testLaunchNonce,
+		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{{OpaqueID: "resource:claude", Agent: "claude"}}},
+	}
+	if err := WriteBinding(req.Root, lease, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	held, err := AcquireLease(req.Root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.HeldLease = held
+	result, err := Reconcile(req)
+	if err := held.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err != nil || result.AggregateCode != 1 {
+		t.Fatalf("join definite failure result=%#v err=%v", result, err)
+	}
+	if !backend.joinBindingSeen {
+		t.Fatal("expected failed create to receive a join binding")
+	}
+	if got, err := os.ReadFile(JournalPath(req.Root.Base())); err != nil || string(got) != "join-create-error-sentinel" {
+		t.Fatalf("join create error journal sentinel = %q err=%v, want preserved because journalActive=false", got, err)
+	}
+	if _, err := LoadExecutionTicket(req.Root, "codex"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("join definite failure retained new-seat execution ticket: %v", err)
 	}
 }
 

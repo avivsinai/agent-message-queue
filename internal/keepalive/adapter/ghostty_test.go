@@ -119,22 +119,37 @@ func TestGhosttyInjectPassesTerminalIDAndPayloadAsArguments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inject() error = %v", err)
 	}
-	call := runner.calls[0]
-	if got := call.args[len(call.args)-2]; got != "TERMINAL-1" {
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %d, want text then enter", len(runner.calls))
+	}
+	textCall := runner.calls[0]
+	if got := textCall.args[len(textCall.args)-2]; got != "TERMINAL-1" {
 		t.Fatalf("target arg = %q, want terminal id", got)
 	}
-	if got := call.args[len(call.args)-1]; got != payload {
+	if got := textCall.args[len(textCall.args)-1]; got != payload {
 		t.Fatalf("payload arg = %q, want payload", got)
 	}
-	if !strings.Contains(call.args[1], "input text payload to targetTerminal") {
-		t.Fatalf("script does not use native Ghostty input: %q", call.args[1])
+	if !strings.Contains(textCall.args[1], "input text payload to targetTerminal") {
+		t.Fatalf("text script does not use native Ghostty input: %q", textCall.args[1])
 	}
-	if !strings.Contains(call.args[1], `send key "enter" to targetTerminal`) {
-		t.Fatalf("script does not send enter to target terminal: %q", call.args[1])
+	if strings.Contains(textCall.args[1], `send key "enter"`) {
+		t.Fatalf("text script still sends enter: %q", textCall.args[1])
 	}
-	for _, disallowed := range []string{"System Events", "the clipboard", "keystroke", "AXRaise", "activate"} {
-		if strings.Contains(call.args[1], disallowed) {
-			t.Fatalf("script still uses %q: %q", disallowed, call.args[1])
+	submitCall := runner.calls[1]
+	if got := submitCall.args[len(submitCall.args)-1]; got != "TERMINAL-1" {
+		t.Fatalf("submit target arg = %q, want terminal id", got)
+	}
+	if !strings.Contains(submitCall.args[1], `send key "enter" to targetTerminal`) {
+		t.Fatalf("submit script does not send enter: %q", submitCall.args[1])
+	}
+	if strings.Contains(submitCall.args[1], "input text") {
+		t.Fatalf("submit script still sends text: %q", submitCall.args[1])
+	}
+	for _, call := range runner.calls {
+		for _, disallowed := range []string{"System Events", "the clipboard", "keystroke", "AXRaise", "activate"} {
+			if strings.Contains(call.args[1], disallowed) {
+				t.Fatalf("script still uses %q: %q", disallowed, call.args[1])
+			}
 		}
 	}
 }
@@ -172,16 +187,24 @@ func TestGhosttyInjectTrimsTrailingLineBreaksBeforeEnter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inject() error = %v", err)
 	}
-	call := runner.calls[0]
-	if got, want := call.args[len(call.args)-1], "AMQ [team-upgrader_v3]: message from claude\nline two"; got != want {
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %d, want text then enter", len(runner.calls))
+	}
+	textCall := runner.calls[0]
+	if got, want := textCall.args[len(textCall.args)-1], "AMQ [team-upgrader_v3]: message from claude\nline two"; got != want {
 		t.Fatalf("payload arg = %q, want %q", got, want)
+	}
+	submitCall := runner.calls[1]
+	if !strings.Contains(submitCall.args[1], `send key "enter" to targetTerminal`) {
+		t.Fatalf("second call is not enter: %q", submitCall.args[1])
 	}
 }
 
 func TestGhosttyScriptsFailClosedOnTerminalIDs(t *testing.T) {
 	for name, script := range map[string]string{
 		"probe":  ghosttyProbeScript,
-		"inject": ghosttyInjectScript,
+		"text":   ghosttyInjectTextScript,
+		"submit": ghosttyInjectSubmitScript,
 	} {
 		if !strings.Contains(script, "matchCount") {
 			t.Fatalf("%s script does not count matching terminals", name)
@@ -192,6 +215,47 @@ func TestGhosttyScriptsFailClosedOnTerminalIDs(t *testing.T) {
 		if !strings.Contains(script, "ambiguous Ghostty terminal id") {
 			t.Fatalf("%s script does not fail on duplicate target", name)
 		}
+	}
+}
+
+func TestGhosttyInjectEnterFailureAfterTextIsUncertain(t *testing.T) {
+	skipNonDarwin(t)
+	runner := &fakeCommandRunner{results: []fakeCommandResult{
+		{},
+		{output: []byte("enter failed"), err: errors.New("exit status 1")},
+	}}
+	err := (Ghostty{Runner: runner}).Inject(context.Background(), "ghostty:terminal:terminal-1", "payload")
+	if !errors.Is(err, ErrInjectUncertain) {
+		t.Fatalf("Inject() error = %v, want ErrInjectUncertain", err)
+	}
+	if !strings.Contains(err.Error(), "enter failed") {
+		t.Fatalf("Inject() error = %v, want command output", err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %d, want text then failed enter", len(runner.calls))
+	}
+	if !strings.Contains(runner.calls[0].args[1], "input text payload to targetTerminal") {
+		t.Fatalf("first call is not text inject: %#v", runner.calls[0])
+	}
+	if !strings.Contains(runner.calls[1].args[1], `send key "enter" to targetTerminal`) {
+		t.Fatalf("second call is not enter: %#v", runner.calls[1])
+	}
+}
+
+func TestGhosttyInjectDoesNotSendEnterWhenTextFails(t *testing.T) {
+	skipNonDarwin(t)
+	runner := &fakeCommandRunner{results: []fakeCommandResult{
+		{output: []byte("text failed"), err: errors.New("exit status 1")},
+	}}
+	err := (Ghostty{Runner: runner}).Inject(context.Background(), "ghostty:terminal:terminal-1", "payload")
+	if err == nil || !strings.Contains(err.Error(), "text failed") {
+		t.Fatalf("Inject() error = %v, want command output", err)
+	}
+	if errors.Is(err, ErrInjectUncertain) {
+		t.Fatalf("text failure marked uncertain: %v", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls = %d, want failed text call only", len(runner.calls))
 	}
 }
 

@@ -12,6 +12,10 @@ var (
 	// ownership. Supervisors must retry without mutating durable registry
 	// bookkeeping because the uncertainty may be transient.
 	ErrTargetDegraded = errors.New("adapter target ownership degraded")
+	// ErrInjectUncertain means text already landed and Enter/submit failed.
+	// App.Run prints this to stderr so inject-via can map it without a typed
+	// error crossing the child process boundary. Never replay the payload.
+	ErrInjectUncertain = errors.New("AMQ_INJECT_PROGRESS=uncertain")
 )
 
 type Adapter interface {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -270,8 +271,20 @@ func Install(opts Options) (Result, error) {
 		DryRun:             normalized.DryRun,
 	}
 
+	if normalized.Agent == AgentClaude || normalized.Agent == AgentBoth {
+		result.Commands[AgentClaude] = command
+		result.Snippets[AgentClaude] = claudeSessionStartEntry(command, hookTimeoutSeconds)
+	}
+	if normalized.Agent == AgentCodex || normalized.Agent == AgentBoth {
+		result.Commands[AgentCodex] = command
+		result.Snippets[AgentCodex] = codexSessionStartEntry(command, hookTimeoutSeconds)
+	}
+
 	scriptResult := FileResult{Path: normalized.ScriptPath}
 	if !normalized.DryRun {
+		if err := preflightHookConfigs(normalized, command, hookTimeoutSeconds); err != nil {
+			return Result{}, err
+		}
 		changed, err := writeExecutableIfChanged(normalized.ScriptPath, []byte(SessionStartScript))
 		if err != nil {
 			return Result{}, err
@@ -280,31 +293,38 @@ func Install(opts Options) (Result, error) {
 	}
 	result.Script = scriptResult
 
-	if normalized.Agent == AgentClaude || normalized.Agent == AgentBoth {
-		snippet := claudeSessionStartEntry(command, hookTimeoutSeconds)
-		result.Commands[AgentClaude] = command
-		result.Snippets[AgentClaude] = snippet
-		if !normalized.DryRun {
-			fileResult, err := installClaudeHook(normalized.ClaudeConfig, command, hookTimeoutSeconds)
-			if err != nil {
-				return Result{}, err
-			}
-			result.Configs[AgentClaude] = fileResult
+	if !normalized.DryRun && (normalized.Agent == AgentClaude || normalized.Agent == AgentBoth) {
+		fileResult, err := installClaudeHook(normalized.ClaudeConfig, command, hookTimeoutSeconds)
+		if err != nil {
+			return result, err
 		}
+		result.Configs[AgentClaude] = fileResult
 	}
-	if normalized.Agent == AgentCodex || normalized.Agent == AgentBoth {
-		snippet := codexSessionStartEntry(command, hookTimeoutSeconds)
-		result.Commands[AgentCodex] = command
-		result.Snippets[AgentCodex] = snippet
-		if !normalized.DryRun {
-			fileResult, err := installCodexHook(normalized.CodexConfig, command, hookTimeoutSeconds)
-			if err != nil {
-				return Result{}, err
+	if !normalized.DryRun && (normalized.Agent == AgentCodex || normalized.Agent == AgentBoth) {
+		fileResult, err := installCodexHook(normalized.CodexConfig, command, hookTimeoutSeconds)
+		if err != nil {
+			if result.Configs[AgentClaude].Changed {
+				return result, fmt.Errorf("partial hookinstall commit: %s updated; %s failed: %w", AgentClaude, AgentCodex, err)
 			}
-			result.Configs[AgentCodex] = fileResult
+			return result, err
 		}
+		result.Configs[AgentCodex] = fileResult
 	}
 	return result, nil
+}
+
+func preflightHookConfigs(opts Options, command string, hookTimeoutSeconds int) error {
+	if opts.Agent == AgentClaude || opts.Agent == AgentBoth {
+		if _, _, err := prepareClaudeHook(opts.ClaudeConfig, command, hookTimeoutSeconds); err != nil {
+			return err
+		}
+	}
+	if opts.Agent == AgentCodex || opts.Agent == AgentBoth {
+		if _, _, err := prepareCodexHook(opts.CodexConfig, command, hookTimeoutSeconds); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func NormalizeOptions(opts Options) (Options, error) {
@@ -370,63 +390,83 @@ func NormalizeOptions(opts Options) (Options, error) {
 }
 
 func installClaudeHook(path, command string, hookTimeoutSeconds int) (FileResult, error) {
-	doc, err := loadJSONObject(path)
+	doc, changed, err := prepareClaudeHook(path, command, hookTimeoutSeconds)
 	if err != nil {
 		return FileResult{}, err
-	}
-	hooks, err := objectField(doc, "hooks")
-	if err != nil {
-		return FileResult{}, err
-	}
-	sessionStart, err := arrayField(hooks, "SessionStart")
-	if err != nil {
-		return FileResult{}, err
-	}
-	changed := false
-	if !claudeHasCommand(sessionStart, command) {
-		sessionStart = append(sessionStart, claudeSessionStartEntry(command, hookTimeoutSeconds))
-		hooks["SessionStart"] = sessionStart
-		doc["hooks"] = hooks
-		changed = true
 	}
 	return saveJSONIfChanged(path, doc, changed)
 }
 
 func installCodexHook(path, command string, hookTimeoutSeconds int) (FileResult, error) {
-	doc, err := loadJSONObject(path)
+	doc, changed, err := prepareCodexHook(path, command, hookTimeoutSeconds)
 	if err != nil {
 		return FileResult{}, err
+	}
+	return saveJSONIfChanged(path, doc, changed)
+}
+
+func prepareClaudeHook(path, command string, hookTimeoutSeconds int) (map[string]interface{}, bool, error) {
+	doc, err := loadJSONObject(path)
+	if err != nil {
+		return nil, false, err
 	}
 	hooks, err := objectField(doc, "hooks")
 	if err != nil {
-		return FileResult{}, err
+		return nil, false, err
 	}
 	sessionStart, err := arrayField(hooks, "SessionStart")
 	if err != nil {
-		return FileResult{}, err
+		return nil, false, err
 	}
-	changed := false
-	if !codexHasCommand(sessionStart, command) {
-		hook := codexHook(command, hookTimeoutSeconds)
-		if len(sessionStart) == 0 {
+	if err := validateSessionStartEntries(sessionStart); err != nil {
+		return nil, false, err
+	}
+	if claudeHasCommand(sessionStart, command) {
+		return doc, false, nil
+	}
+	sessionStart = append(sessionStart, claudeSessionStartEntry(command, hookTimeoutSeconds))
+	hooks["SessionStart"] = sessionStart
+	doc["hooks"] = hooks
+	return doc, true, nil
+}
+
+func prepareCodexHook(path, command string, hookTimeoutSeconds int) (map[string]interface{}, bool, error) {
+	doc, err := loadJSONObject(path)
+	if err != nil {
+		return nil, false, err
+	}
+	hooks, err := objectField(doc, "hooks")
+	if err != nil {
+		return nil, false, err
+	}
+	sessionStart, err := arrayField(hooks, "SessionStart")
+	if err != nil {
+		return nil, false, err
+	}
+	if err := validateSessionStartEntries(sessionStart); err != nil {
+		return nil, false, err
+	}
+	if codexHasCommand(sessionStart, command) {
+		return doc, false, nil
+	}
+	hook := codexHook(command, hookTimeoutSeconds)
+	if len(sessionStart) == 0 {
+		sessionStart = append(sessionStart, map[string]interface{}{"hooks": []interface{}{hook}})
+	} else {
+		first, ok := sessionStart[0].(map[string]interface{})
+		if !ok {
 			sessionStart = append(sessionStart, map[string]interface{}{"hooks": []interface{}{hook}})
 		} else {
-			first, ok := sessionStart[0].(map[string]interface{})
-			if !ok {
-				sessionStart = append(sessionStart, map[string]interface{}{"hooks": []interface{}{hook}})
-				hooks["SessionStart"] = sessionStart
-				doc["hooks"] = hooks
-				return saveJSONIfChanged(path, doc, true)
+			hookList, err := innerHookList(first)
+			if err != nil {
+				return nil, false, err
 			}
-			hookList := interfaceArray(first["hooks"])
-			hookList = append(hookList, hook)
-			first["hooks"] = hookList
+			first["hooks"] = append(hookList, hook)
 		}
-		hooks["SessionStart"] = sessionStart
-		doc["hooks"] = hooks
-		changed = true
 	}
-	return saveJSONIfChanged(path, doc, changed)
+	hooks["SessionStart"] = sessionStart
+	doc["hooks"] = hooks
+	return doc, true, nil
 }
 
 func claudeSessionStartEntry(command string, hookTimeoutSeconds int) map[string]interface{} {
@@ -496,6 +536,12 @@ func loadJSONObject(path string) (map[string]interface{}, error) {
 	if err := decoder.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("parse %s: trailing JSON value", path)
+		}
+		return nil, fmt.Errorf("parse %s: trailing JSON: %w", path, err)
+	}
 	if doc == nil {
 		doc = map[string]interface{}{}
 	}
@@ -531,11 +577,46 @@ func backupIfExists(path string) (string, error) {
 		}
 		return "", err
 	}
-	backup := fmt.Sprintf("%s.bak-%s", path, time.Now().UTC().Format("20060102T150405Z"))
-	if err := os.WriteFile(backup, data, 0o600); err != nil {
-		return "", err
+	ts := time.Now().UTC().Format("20060102T150405Z")
+	for i := 0; i < 100; i++ {
+		backup := fmt.Sprintf("%s.bak-%s", path, ts)
+		if i > 0 {
+			backup = fmt.Sprintf("%s.bak-%s-%d", path, ts, i)
+		}
+		err := writeExclusiveRegularFile(backup, data, 0o600)
+		if err == nil {
+			return backup, nil
+		}
+		if !os.IsExist(err) {
+			return "", err
+		}
 	}
-	return backup, nil
+	return "", fmt.Errorf("create backup %s.bak-%s: names exhausted", path, ts)
+}
+
+func writeExclusiveRegularFile(path string, data []byte, mode os.FileMode) (err error) {
+	file, err := os.OpenFile(path, exclusiveCreateFlags(), mode)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		cerr := file.Close()
+		if err != nil {
+			_ = os.Remove(path)
+			return
+		}
+		if cerr != nil {
+			_ = os.Remove(path)
+			err = cerr
+		}
+	}()
+	if err = file.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err = file.Write(data); err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
 func writeExecutableIfChanged(path string, data []byte) (bool, error) {
@@ -608,6 +689,31 @@ func interfaceArray(raw interface{}) []interface{} {
 		return values
 	}
 	return []interface{}{}
+}
+
+func validateSessionStartEntries(entries []interface{}) error {
+	for _, entry := range entries {
+		obj, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if _, err := innerHookList(obj); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func innerHookList(entry map[string]interface{}) ([]interface{}, error) {
+	raw, exists := entry["hooks"]
+	if !exists || raw == nil {
+		return []interface{}{}, nil
+	}
+	values, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("%q must be a JSON array", "hooks")
+	}
+	return values, nil
 }
 
 func buildHookCommand(binaryPath, scriptPath string, timeout time.Duration) string {

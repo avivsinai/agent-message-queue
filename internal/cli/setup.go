@@ -43,6 +43,7 @@ type setupPreview struct {
 	Layout             launch.LayoutIntent         `json:"layout"`
 	LauncherPreference []string                    `json:"launcher_preference"`
 	AvailableLaunchers []string                    `json:"available_launchers"`
+	Explanations       []string                    `json:"explanations,omitempty"`
 	Changes            []setupChange               `json:"changes"`
 }
 
@@ -78,6 +79,7 @@ type setupState struct {
 	needsProvision  bool
 	changes         []setupChange
 	available       []string
+	explanations    []string
 	noGitignore     bool
 }
 
@@ -86,7 +88,7 @@ var (
 		return []launch.HarnessAdapter{
 			launch.NewClaudeAdapter(launch.ClaudeProvider),
 			launch.NewCodexAdapter(launch.CodexProvider),
-			launch.NewCursorAdapter(launch.CursorProvider),
+			launch.NewCursorAdapter(setupCursorCommand()),
 		}
 	}
 	setupLookPath      = exec.LookPath
@@ -102,6 +104,23 @@ var (
 	// setupCommitStepHook is a fault-injection seam. Production leaves it nil.
 	setupCommitStepHook func(string) error
 )
+
+func setupCursorCommand() string {
+	if _, err := setupLookPath("agent"); err == nil {
+		return "agent"
+	}
+	return "cursor-agent"
+}
+
+func setupAgentExplanations(agents []launch.ProjectAgentConfig) []string {
+	for _, agent := range agents {
+		if launch.ProviderForExecutable(agent.Adapter) == launch.CursorProvider &&
+			len(agent.Command) > 0 && agent.Command[0] == "cursor-agent" && setupCursorCommand() == "cursor-agent" {
+			return []string{"Cursor CLI command 'agent' was not found on PATH; using legacy 'cursor-agent'."}
+		}
+	}
+	return nil
+}
 
 func runSetup(args []string) (returnErr error) {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
@@ -276,6 +295,7 @@ func buildSetupState(options setupOptions) (setupState, error) {
 	if err != nil {
 		return setupState{}, err
 	}
+	explanations := setupAgentExplanations(agents)
 	defaultSession, err := chooseSetupSession(options, existingProject, projectExists)
 	if err != nil {
 		return setupState{}, err
@@ -354,7 +374,7 @@ func buildSetupState(options setupOptions) (setupState, error) {
 		localConfig: localConfig, projectData: projectData, localData: localData,
 		amqrcData: amqrcData, gitignoreData: gitignoreData,
 		baseConfigData: baseConfigData, unionConfigData: unionConfigData,
-		needsProvision: needsProvision, available: availableLaunchers, noGitignore: options.noGitignore,
+		needsProvision: needsProvision, available: availableLaunchers, explanations: explanations, noGitignore: options.noGitignore,
 	}
 	state.addChange(needsProvision, filepath.Join(root, defaultSession), "ensure queue and roster mailboxes")
 	state.addChange(!bytes.Equal(currentBaseData, unionConfigData), filepath.Join(root, "meta", "config.json"), "update compatible roster")
@@ -380,6 +400,7 @@ func (state setupState) preview() (setupPreview, error) {
 		Layout:             state.projectConfig.Layout,
 		LauncherPreference: append([]string(nil), state.localConfig.LauncherPreference...),
 		AvailableLaunchers: append([]string(nil), state.available...),
+		Explanations:       append([]string(nil), state.explanations...),
 		Changes:            append(make([]setupChange, 0, len(state.changes)), state.changes...),
 	}
 	digest, err := setupPreviewDigest(preview)
@@ -399,11 +420,12 @@ func setupPreviewDigest(preview setupPreview) (string, error) {
 		Agents             []launch.ProjectAgentConfig `json:"agents"`
 		Layout             launch.LayoutIntent         `json:"layout"`
 		LauncherPreference []string                    `json:"launcher_preference"`
+		Explanations       []string                    `json:"explanations"`
 		Changes            []setupChange               `json:"changes"`
 	}{
 		Version: 1, ProjectRoot: preview.ProjectRoot, QueueRoot: preview.QueueRoot,
 		DefaultSession: preview.DefaultSession, Agents: preview.Agents, Layout: preview.Layout,
-		LauncherPreference: preview.LauncherPreference, Changes: preview.Changes,
+		LauncherPreference: preview.LauncherPreference, Explanations: preview.Explanations, Changes: preview.Changes,
 	})
 	if err != nil {
 		return "", err
@@ -436,6 +458,16 @@ func printSetupPreview(preview setupPreview) error {
 	}
 	if err := writeStdout("Launcher preference: %s\n", strings.Join(preview.LauncherPreference, ", ")); err != nil {
 		return err
+	}
+	for _, explanation := range preview.Explanations {
+		if err := writeStdout("Note: %s\n", explanation); err != nil {
+			return err
+		}
+	}
+	if len(preview.Explanations) > 0 {
+		if err := writeStdout("\n"); err != nil {
+			return err
+		}
 	}
 	if err := writeStdout("Queue root: %s\nLayout: %s\n\nChanges:\n", preview.QueueRoot, preview.Layout.Type); err != nil {
 		return err
@@ -475,6 +507,11 @@ func validateSetupCommittedConfig(cfg launch.ProjectConfig, projectRoot string, 
 	byName := make(map[string]launch.HarnessAdapter, len(adapters))
 	for _, adapter := range adapters {
 		byName[adapter.Name()] = adapter
+		if adapter.Name() == launch.CursorProvider {
+			byName["agent"] = adapter
+			byName["agent.exe"] = adapter
+			byName["cursor-agent.exe"] = adapter
+		}
 	}
 	for _, agent := range cfg.Agents {
 		adapter, ok := byName[agent.Adapter]
@@ -550,11 +587,19 @@ func chooseSetupAgents(options setupOptions, detected []launch.AdapterCapabiliti
 			agents = append(agents, agent)
 			continue
 		}
-		if _, ok := available[name]; !ok {
+		adapterName := name
+		if launch.ProviderForExecutable(name) == launch.CursorProvider {
+			adapterName = launch.CursorProvider
+		}
+		if _, ok := available[adapterName]; !ok {
 			return nil, UsageError("agent %q is not available through a supported adapter probe", name)
 		}
+		command := name
+		if adapterName == launch.CursorProvider {
+			command = setupCursorCommand()
+		}
 		agents = append(agents, launch.ProjectAgentConfig{
-			Handle: name, Adapter: name, Command: []string{name}, ResumePolicy: launch.ResumeEnabled,
+			Handle: name, Adapter: adapterName, Command: []string{command}, ResumePolicy: launch.ResumeEnabled,
 		})
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i].Handle < agents[j].Handle })

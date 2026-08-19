@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +22,9 @@ const (
 	JournalVersion  = 1
 	journalFilename = "journal.json"
 )
+
+var stableTreeIdentity = fsq.StableTreeIdentity
+var stableTreeIdentityInfo = fsq.StableTreeIdentityInfo
 
 type JournalPhase string
 
@@ -52,8 +56,22 @@ type LaunchJournal struct {
 	Agents           []AgentReconcileResult `json:"agents"`
 	Conversations    []ConversationRecord   `json:"conversations"`
 	Binding          *BindingRecord         `json:"binding,omitempty"`
+	JoinBinding      *BindingRecord         `json:"join_binding,omitempty"`
+	JoinDeltas       []JoinDelta            `json:"join_deltas,omitempty"`
 	Placement        PlacementPreview       `json:"placement,omitempty"`
 	CallerContext    map[string]string      `json:"caller_context,omitempty"`
+}
+
+// JoinDelta is the durable proof for one window added to an existing managed
+// tmux session. Its session identity is checked before the next mutation.
+type JoinDelta struct {
+	Handle       string `json:"handle"`
+	SessionID    string `json:"session_id"`
+	SessionName  string `json:"session_name"`
+	SessionNonce string `json:"session_nonce"`
+	Epoch        string `json:"epoch,omitempty"`
+	WindowID     string `json:"window_id"`
+	PaneID       string `json:"pane_id"`
 }
 
 func (record LaunchJournal) Validate() error {
@@ -78,6 +96,9 @@ func (record LaunchJournal) Validate() error {
 	if !filepath.IsAbs(record.RootIdentity) || filepath.Clean(record.RootIdentity) != record.RootIdentity {
 		return fmt.Errorf("root identity must be a canonical absolute path")
 	}
+	if strings.TrimSpace(record.ProjectPhysical) == "" || strings.TrimSpace(record.RootPhysical) == "" {
+		return fmt.Errorf("launch journal physical identities are required")
+	}
 	if !canonicalSessionPattern.MatchString(record.Session) || strings.HasPrefix(record.Session, "-") {
 		return fmt.Errorf("invalid launch journal session %q", record.Session)
 	}
@@ -86,6 +107,38 @@ func (record LaunchJournal) Validate() error {
 	}
 	if err := ValidateCallerContext(record.CallerContext); err != nil {
 		return err
+	}
+	if record.JoinBinding == nil && len(record.JoinDeltas) != 0 {
+		return fmt.Errorf("launch journal join deltas require a join binding")
+	}
+	if record.JoinBinding != nil {
+		if err := record.JoinBinding.Validate(); err != nil {
+			return fmt.Errorf("launch journal join binding: %w", err)
+		}
+		if record.JoinBinding.Backend != record.Backend || record.JoinBinding.Profile != record.Profile ||
+			record.JoinBinding.HostIdentity != record.HostIdentity || record.JoinBinding.InstanceIdentity != record.InstanceIdentity {
+			return fmt.Errorf("launch journal join binding context does not match")
+		}
+		sessionID, sessionName, err := parseTmuxSessionResource(*record.JoinBinding)
+		expectedSessionName, nameErr := tmuxSessionName(record.ProjectIdentity, record.Session)
+		if err != nil || nameErr != nil || sessionName != expectedSessionName {
+			return fmt.Errorf("launch journal join binding session does not match")
+		}
+		epoch := parseTmuxEpoch(*record.JoinBinding)
+		seenJoinHandles := make(map[string]struct{}, len(record.JoinDeltas))
+		for i, delta := range record.JoinDeltas {
+			if err := fsq.ValidateHandle(delta.Handle); err != nil {
+				return fmt.Errorf("launch journal join delta %d: %w", i, err)
+			}
+			if _, ok := seenJoinHandles[delta.Handle]; ok {
+				return fmt.Errorf("duplicate launch journal join delta handle %q", delta.Handle)
+			}
+			seenJoinHandles[delta.Handle] = struct{}{}
+			if delta.SessionID != sessionID || delta.SessionName != sessionName || delta.SessionNonce != record.JoinBinding.LaunchNonce ||
+				delta.Epoch != epoch || delta.WindowID == "" || !tmuxPaneID(delta.PaneID) {
+				return fmt.Errorf("launch journal join delta %q identity does not match its binding", delta.Handle)
+			}
+		}
 	}
 	if !validUUID(record.LaunchNonce) {
 		return fmt.Errorf("launch journal nonce must be a UUID")
@@ -111,7 +164,7 @@ func (record LaunchJournal) Validate() error {
 	if digest != record.PlanDigest {
 		return fmt.Errorf("launch journal plan digest mismatch")
 	}
-	if len(record.Agents) == 0 || len(record.Conversations) != len(record.Plan.Agents) {
+	if len(record.Agents) == 0 || len(record.Agents) != len(record.Plan.Agents) || len(record.Conversations) != len(record.Plan.Agents) {
 		return fmt.Errorf("launch journal roster lengths do not match")
 	}
 	agentHandles := make(map[string]struct{}, len(record.Agents))
@@ -192,8 +245,14 @@ func NewLaunchJournal(request ReconcileRequest, backend string, detect DetectRes
 		Placement:     preview,
 		CallerContext: cloneCallerContext(request.CallerContext),
 	}
-	record.ProjectPhysical, _ = fsq.StableTreeIdentity(projectIdentity)
-	record.RootPhysical, _ = fsq.StableTreeIdentityInfo(request.Root.FileInfo())
+	record.ProjectPhysical, err = stableTreeIdentity(projectIdentity)
+	if err != nil {
+		return LaunchJournal{}, fmt.Errorf("resolve project physical identity: %w", err)
+	}
+	record.RootPhysical, err = stableTreeIdentityInfo(request.Root.FileInfo())
+	if err != nil {
+		return LaunchJournal{}, fmt.Errorf("resolve session root physical identity: %w", err)
+	}
 	if err := record.Validate(); err != nil {
 		return LaunchJournal{}, err
 	}
@@ -216,8 +275,14 @@ func (record LaunchJournal) ValidateRequest(request ReconcileRequest) error {
 	if record.ProjectIdentity != projectIdentity || record.RootIdentity != rootIdentity || record.Session != request.Session {
 		return fmt.Errorf("launch journal belongs to a different project or session root")
 	}
-	projectPhysical, _ := fsq.StableTreeIdentity(projectIdentity)
-	rootPhysical, _ := fsq.StableTreeIdentityInfo(request.Root.FileInfo())
+	projectPhysical, err := stableTreeIdentity(projectIdentity)
+	if err != nil {
+		return fmt.Errorf("resolve project physical identity: %w", err)
+	}
+	rootPhysical, err := stableTreeIdentityInfo(request.Root.FileInfo())
+	if err != nil {
+		return fmt.Errorf("resolve session root physical identity: %w", err)
+	}
 	if (record.ProjectPhysical != "" && record.ProjectPhysical != projectPhysical) ||
 		(record.RootPhysical != "" && record.RootPhysical != rootPhysical) {
 		return fmt.Errorf("launch journal physical project or session root changed")
@@ -308,6 +373,23 @@ func ClearJournal(root *fsq.DeliveryRoot, lease *Lease, expected LaunchJournal) 
 	return root.Remove(filepath.Join(bindingDirectory, journalFilename))
 }
 
+// ClearJournalRaw removes a journal after an exact byte-for-byte compare. It
+// is reserved for operator cleanup of a journal whose semantic validation
+// fails, while retaining the same lease and replacement guard as ClearJournal.
+func ClearJournalRaw(root *fsq.DeliveryRoot, lease *Lease, expected []byte) error {
+	if err := lease.authorizeWrite(root); err != nil {
+		return err
+	}
+	current, err := root.ReadFile(filepath.Join(bindingDirectory, journalFilename))
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(current, expected) {
+		return fmt.Errorf("launch journal changed before clear")
+	}
+	return root.Remove(filepath.Join(bindingDirectory, journalFilename))
+}
+
 func JournalPath(sessionRoot string) string {
 	return filepath.Join(sessionRoot, bindingDirectory, journalFilename)
 }
@@ -344,9 +426,13 @@ func journalPlacementMatches(record LaunchJournal, request ReconcileRequest) err
 }
 
 func journalMatchesBinding(journal LaunchJournal, binding BindingRecord) bool {
+	launchNonce := journal.LaunchNonce
+	if journal.JoinBinding != nil {
+		launchNonce = journal.JoinBinding.LaunchNonce
+	}
 	return binding.Backend == journal.Backend && binding.Profile == journal.Profile &&
 		binding.HostIdentity == journal.HostIdentity && binding.InstanceIdentity == journal.InstanceIdentity &&
-		binding.LaunchNonce == journal.LaunchNonce && reflect.DeepEqual(binding.CallerContext, journal.CallerContext)
+		binding.LaunchNonce == launchNonce && reflect.DeepEqual(binding.CallerContext, journal.CallerContext)
 }
 
 func canonicalIdentity(path string) (string, error) {

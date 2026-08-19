@@ -129,6 +129,75 @@ func TestLaunchJournalRejectsPlanRosterAndBindingDrift(t *testing.T) {
 	}
 }
 
+func TestLaunchJournalRejectsExtraAgentRecord(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	request := reconcileFixture(t, backend)
+	nonce := "019c8a2f-2b13-7000-8000-000000000013"
+	plan, agents, conversations := journalFixturePlan(nonce)
+	digest, err := plan.SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := NewLaunchJournal(request, backend.name, backend.Detect(), plan, digest, nonce, agents, conversations, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Agents = append(record.Agents, AgentReconcileResult{Handle: "operator", ConversationDisposition: DispositionFresh})
+	if err := record.Validate(); err == nil || !strings.Contains(err.Error(), "roster lengths") {
+		t.Fatalf("journal accepted extra agent record: %v", err)
+	}
+}
+
+func TestNewLaunchJournalFailsClosedOnPhysicalIdentityProbeError(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	request := reconcileFixture(t, backend)
+	nonce := "019c8a2f-2b13-7000-8000-000000000014"
+	plan, agents, conversations := journalFixturePlan(nonce)
+	digest, err := plan.SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeErr := errors.New("injected physical identity failure")
+	oldTree := stableTreeIdentity
+	oldTreeInfo := stableTreeIdentityInfo
+	t.Cleanup(func() {
+		stableTreeIdentity = oldTree
+		stableTreeIdentityInfo = oldTreeInfo
+	})
+	stableTreeIdentity = func(string) (string, error) { return "", probeErr }
+	if _, err := NewLaunchJournal(request, backend.name, backend.Detect(), plan, digest, nonce, agents, conversations, time.Now()); !errors.Is(err, probeErr) {
+		t.Fatalf("NewLaunchJournal = %v, want physical identity failure", err)
+	}
+
+	stableTreeIdentity = oldTree
+	stableTreeIdentityInfo = func(os.FileInfo) (string, error) { return "", probeErr }
+	if _, err := NewLaunchJournal(request, backend.name, backend.Detect(), plan, digest, nonce, agents, conversations, time.Now()); !errors.Is(err, probeErr) {
+		t.Fatalf("NewLaunchJournal root probe = %v, want physical identity failure", err)
+	}
+}
+
+func TestLaunchJournalValidateRequestFailsClosedOnProjectPhysicalIdentityProbeError(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	request := reconcileFixture(t, backend)
+	nonce := "019c8a2f-2b13-7000-8000-000000000015"
+	plan, agents, conversations := journalFixturePlan(nonce)
+	digest, err := plan.SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := NewLaunchJournal(request, backend.name, backend.Detect(), plan, digest, nonce, agents, conversations, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeErr := errors.New("injected project physical identity failure")
+	oldTree := stableTreeIdentity
+	stableTreeIdentity = func(string) (string, error) { return "", probeErr }
+	t.Cleanup(func() { stableTreeIdentity = oldTree })
+	if err := record.ValidateRequest(request); !errors.Is(err, probeErr) || !strings.Contains(err.Error(), "resolve project physical identity") {
+		t.Fatalf("ValidateRequest = %v, want wrapped project physical identity error", err)
+	}
+}
+
 func journalFixturePlan(nonce string) (Plan, []AgentReconcileResult, []ConversationRecord) {
 	plan := Plan{Version: PlanVersion, Agents: []AgentPlan{{
 		Handle: "claude", Argv: []string{"/usr/bin/true", nonce}, Cwd: "/tmp",

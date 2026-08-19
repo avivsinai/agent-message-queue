@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -367,6 +368,33 @@ func TestAdapterRejectsProjectExecutableAndProviderMismatch(t *testing.T) {
 	request = planRequest(otherProject, ClaudeProvider)
 	if _, err := NewClaudeAdapter(codexExecutable).PlanFresh(request); err == nil || !strings.Contains(err.Error(), "cannot execute") {
 		t.Fatalf("provider executable error = %v", err)
+	}
+}
+
+func TestAdapterRejectsProjectTrackedProviderSymlinkBeforeSentinelExec(t *testing.T) {
+	project := t.TempDir()
+	outside := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "provider-ran")
+	provider := filepath.Join(outside, ClaudeProvider)
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\nprintf ran > \"$AMQ_SENTINEL\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tracked := filepath.Join(project, ClaudeProvider)
+	if err := os.Symlink(provider, tracked); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMQ_SENTINEL", marker)
+	request := planRequest(project, ClaudeProvider)
+	plan, err := NewClaudeAdapter(tracked).PlanFresh(request)
+	if err == nil {
+		_ = exec.Command(plan.Argv[0]).Run()
+		t.Fatal("project-tracked provider symlink was accepted")
+	}
+	if !strings.Contains(err.Error(), providerProjectContainedCode) {
+		t.Fatalf("project-tracked provider error = %v, want %s", err, providerProjectContainedCode)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("provider sentinel was executed: %v", statErr)
 	}
 }
 
