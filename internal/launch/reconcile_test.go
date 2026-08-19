@@ -283,6 +283,28 @@ type reconcileBackend struct {
 	planHandles []string
 }
 
+type unsupportedReconcileBackend struct{ reconcileBackend }
+
+func (backend *unsupportedReconcileBackend) Create(CreateRequest) (CreateResult, error) {
+	backend.creates++
+	return CreateResult{Outcome: OutcomeUnsupported, Reason: "test backend unsupported"}, nil
+}
+
+func TestReconcileMapsUnsupportedCreateToActionRequired(t *testing.T) {
+	backend := &unsupportedReconcileBackend{reconcileBackend: reconcileBackend{name: "unsupported"}}
+	request := reconcileFixture(t, backend)
+	result, err := Reconcile(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != OutcomeActionRequired || result.AggregateCode != 6 || result.Reason != "test backend unsupported" {
+		t.Fatalf("unsupported Create result = %#v, want action_required code 6", result)
+	}
+	if len(result.Agents) != 1 || result.Agents[0].Code != 6 || result.Agents[0].Reason != "test backend unsupported" {
+		t.Fatalf("unsupported Create agent result = %#v", result.Agents)
+	}
+}
+
 func (b *reconcileBackend) Detect() DetectResult {
 	profile := Profile{Backend: b.name, Platform: "test", VersionRange: "*", Version: 1, Capabilities: []Capability{CapCreate, CapInspect, CapClose, CapFocus, CapReclaim}}
 	return DetectResult{

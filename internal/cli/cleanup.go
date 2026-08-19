@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -184,6 +187,36 @@ type launchJournalCleanupReport struct {
 	ResourceEvidence string                    `json:"resource_evidence"`
 }
 
+const launchJournalRelativePath = "meta/launch/journal.json"
+
+func loadLaunchJournalForCleanup(root *fsq.DeliveryRoot) (launch.LaunchJournal, []byte, error) {
+	file, info, err := root.OpenRegularNoFollow(launchJournalRelativePath)
+	if err != nil {
+		return launch.LaunchJournal{}, nil, err
+	}
+	defer func() { _ = file.Close() }()
+	if info.Mode().Perm() != 0o600 {
+		return launch.LaunchJournal{}, nil, fmt.Errorf("launch journal permissions are %04o, want 0600", info.Mode().Perm())
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return launch.LaunchJournal{}, nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var record launch.LaunchJournal
+	if err := decoder.Decode(&record); err != nil {
+		return launch.LaunchJournal{}, nil, fmt.Errorf("decode launch journal: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return launch.LaunchJournal{}, nil, fmt.Errorf("decode launch journal: multiple JSON values")
+		}
+		return launch.LaunchJournal{}, nil, fmt.Errorf("decode launch journal: %w", err)
+	}
+	return record, data, nil
+}
+
 func cleanupLaunchJournal(root string, jsonOutput, dryRun, yes bool) error {
 	identity, err := fsq.SnapshotDeliveryRoot(root)
 	if err != nil {
@@ -194,7 +227,7 @@ func cleanupLaunchJournal(root string, jsonOutput, dryRun, yes bool) error {
 		return err
 	}
 	defer func() { _ = deliveryRoot.Close() }()
-	record, err := launch.LoadJournal(deliveryRoot)
+	record, raw, err := loadLaunchJournalForCleanup(deliveryRoot)
 	if err != nil {
 		return err
 	}
@@ -230,7 +263,7 @@ func cleanupLaunchJournal(root string, jsonOutput, dryRun, yes bool) error {
 		return err
 	}
 	defer func() { _ = lease.Release() }()
-	if err := launch.ClearJournal(deliveryRoot, lease, record); err != nil {
+	if err := launch.ClearJournalRaw(deliveryRoot, lease, raw); err != nil {
 		return err
 	}
 	if jsonOutput {

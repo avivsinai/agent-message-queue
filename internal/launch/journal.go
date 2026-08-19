@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +22,9 @@ const (
 	JournalVersion  = 1
 	journalFilename = "journal.json"
 )
+
+var stableTreeIdentity = fsq.StableTreeIdentity
+var stableTreeIdentityInfo = fsq.StableTreeIdentityInfo
 
 type JournalPhase string
 
@@ -78,6 +82,9 @@ func (record LaunchJournal) Validate() error {
 	if !filepath.IsAbs(record.RootIdentity) || filepath.Clean(record.RootIdentity) != record.RootIdentity {
 		return fmt.Errorf("root identity must be a canonical absolute path")
 	}
+	if strings.TrimSpace(record.ProjectPhysical) == "" || strings.TrimSpace(record.RootPhysical) == "" {
+		return fmt.Errorf("launch journal physical identities are required")
+	}
 	if !canonicalSessionPattern.MatchString(record.Session) || strings.HasPrefix(record.Session, "-") {
 		return fmt.Errorf("invalid launch journal session %q", record.Session)
 	}
@@ -111,7 +118,7 @@ func (record LaunchJournal) Validate() error {
 	if digest != record.PlanDigest {
 		return fmt.Errorf("launch journal plan digest mismatch")
 	}
-	if len(record.Agents) == 0 || len(record.Conversations) != len(record.Plan.Agents) {
+	if len(record.Agents) == 0 || len(record.Agents) != len(record.Plan.Agents) || len(record.Conversations) != len(record.Plan.Agents) {
 		return fmt.Errorf("launch journal roster lengths do not match")
 	}
 	agentHandles := make(map[string]struct{}, len(record.Agents))
@@ -192,8 +199,14 @@ func NewLaunchJournal(request ReconcileRequest, backend string, detect DetectRes
 		Placement:     preview,
 		CallerContext: cloneCallerContext(request.CallerContext),
 	}
-	record.ProjectPhysical, _ = fsq.StableTreeIdentity(projectIdentity)
-	record.RootPhysical, _ = fsq.StableTreeIdentityInfo(request.Root.FileInfo())
+	record.ProjectPhysical, err = stableTreeIdentity(projectIdentity)
+	if err != nil {
+		return LaunchJournal{}, fmt.Errorf("resolve project physical identity: %w", err)
+	}
+	record.RootPhysical, err = stableTreeIdentityInfo(request.Root.FileInfo())
+	if err != nil {
+		return LaunchJournal{}, fmt.Errorf("resolve session root physical identity: %w", err)
+	}
 	if err := record.Validate(); err != nil {
 		return LaunchJournal{}, err
 	}
@@ -216,8 +229,14 @@ func (record LaunchJournal) ValidateRequest(request ReconcileRequest) error {
 	if record.ProjectIdentity != projectIdentity || record.RootIdentity != rootIdentity || record.Session != request.Session {
 		return fmt.Errorf("launch journal belongs to a different project or session root")
 	}
-	projectPhysical, _ := fsq.StableTreeIdentity(projectIdentity)
-	rootPhysical, _ := fsq.StableTreeIdentityInfo(request.Root.FileInfo())
+	projectPhysical, err := stableTreeIdentity(projectIdentity)
+	if err != nil {
+		return fmt.Errorf("resolve project physical identity: %w", err)
+	}
+	rootPhysical, err := stableTreeIdentityInfo(request.Root.FileInfo())
+	if err != nil {
+		return fmt.Errorf("resolve session root physical identity: %w", err)
+	}
 	if (record.ProjectPhysical != "" && record.ProjectPhysical != projectPhysical) ||
 		(record.RootPhysical != "" && record.RootPhysical != rootPhysical) {
 		return fmt.Errorf("launch journal physical project or session root changed")
@@ -303,6 +322,23 @@ func ClearJournal(root *fsq.DeliveryRoot, lease *Lease, expected LaunchJournal) 
 		return err
 	}
 	if !reflect.DeepEqual(current, expected) {
+		return fmt.Errorf("launch journal changed before clear")
+	}
+	return root.Remove(filepath.Join(bindingDirectory, journalFilename))
+}
+
+// ClearJournalRaw removes a journal after an exact byte-for-byte compare. It
+// is reserved for operator cleanup of a journal whose semantic validation
+// fails, while retaining the same lease and replacement guard as ClearJournal.
+func ClearJournalRaw(root *fsq.DeliveryRoot, lease *Lease, expected []byte) error {
+	if err := lease.authorizeWrite(root); err != nil {
+		return err
+	}
+	current, err := root.ReadFile(filepath.Join(bindingDirectory, journalFilename))
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(current, expected) {
 		return fmt.Errorf("launch journal changed before clear")
 	}
 	return root.Remove(filepath.Join(bindingDirectory, journalFilename))
