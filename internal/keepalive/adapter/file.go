@@ -8,6 +8,11 @@ import (
 	"path/filepath"
 )
 
+var (
+	ErrTargetNotRegular = errors.New("file adapter target must be a regular file")
+	ErrTargetSymlink    = errors.New("file adapter target must not be a symlink")
+)
+
 type File struct{}
 
 func (File) Name() string {
@@ -69,6 +74,21 @@ func (File) Probe(ctx context.Context, target string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return fmt.Errorf("resolve file adapter target: %w", err)
+	}
+	abs = filepath.Clean(abs)
+	if info, err := os.Lstat(abs); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("file adapter target %q must not be a symlink: %w", abs, ErrTargetSymlink)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("file adapter target %q must be a regular file: %w", abs, ErrTargetNotRegular)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	clean, err := (File{}).NormalizeTarget(target)
 	if err != nil {
 		return err
@@ -81,34 +101,19 @@ func (File) Probe(ctx context.Context, target string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("target parent %q is not a directory", parent)
 	}
-	targetInfo, err := os.Stat(clean)
-	if err == nil && targetInfo.IsDir() {
-		return fmt.Errorf("target %q is a directory", clean)
-	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
 	return nil
 }
 
-func (File) Inject(ctx context.Context, target string, payload string) error {
+func prepareFileInject(ctx context.Context, target string) (string, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return "", err
 	}
 	clean, err := (File{}).NormalizeTarget(target)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := (File{}).Probe(ctx, clean); err != nil {
-		return err
+		return "", err
 	}
-	file, err := os.OpenFile(clean, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = file.Close() }()
-	if _, err := file.WriteString(payload + "\n"); err != nil {
-		return err
-	}
-	return file.Chmod(0o600)
+	return clean, ctx.Err()
 }
