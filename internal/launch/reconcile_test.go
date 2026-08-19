@@ -1113,7 +1113,7 @@ func TestReconcilePlanOnlyMintWithoutExecutionRemintsPending(t *testing.T) {
 	}
 }
 
-func TestReconcileMintExecutionEvidencePromotesThenResumesExactIdentity(t *testing.T) {
+func TestReconcileMintStaysPendingUntilAcknowledgedThenResumesExactIdentity(t *testing.T) {
 	commands := Commands{}
 	req := reconcileFixture(t, commands)
 	first, err := Reconcile(req)
@@ -1138,8 +1138,28 @@ func TestReconcileMintExecutionEvidencePromotesThenResumesExactIdentity(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.State != CaptureReady || record.Identity.ID != readyID || record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != managed.name {
-		t.Fatalf("promoted record=%#v", record)
+	if record.State != CapturePending || record.Identity.ID != "" || record.ExecutionEvidence != nil {
+		t.Fatalf("backend creation made conversation resumable: %#v", record)
+	}
+	ticket, err := LoadExecutionTicket(req.Root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.State != ExecutionPending || ticket.LaunchNonce != readyID {
+		t.Fatalf("execution ticket=%#v, want pending generation %q", ticket, readyID)
+	}
+	if _, err := PrepareExecution(req.Root, "claude", ticket.LaunchNonce, ExecutionEnvelope{
+		Cwd: ticket.Cwd, AMQExecutable: ticket.AMQExecutable,
+		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	record, err = LoadConversation(req.Root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.State != CaptureReady || record.Identity.ID != readyID || record.ExecutionEvidence == nil || record.ExecutionEvidence.Backend != CommandsBackendName {
+		t.Fatalf("acknowledged record=%#v", record)
 	}
 
 	third, err := Reconcile(req)
@@ -1148,6 +1168,70 @@ func TestReconcileMintExecutionEvidencePromotesThenResumesExactIdentity(t *testi
 	}
 	if third.Agents[0].ConversationDisposition != DispositionResumed || third.Plan.Agents[0].ConversationID != readyID {
 		t.Fatalf("third result=%#v, want resumed ID %q", third, readyID)
+	}
+}
+
+func TestReconcileCrashAfterBackendCreatedAcknowledgedThenRecoversReady(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	crash := errors.New("injected crash after backend creation")
+	req.CrashHook = func(stage string) error {
+		if stage == "backend_created" {
+			return crash
+		}
+		return nil
+	}
+	first, err := Reconcile(req)
+	if !errors.Is(err, crash) {
+		t.Fatalf("first result=%#v err=%v, want backend_created crash", first, err)
+	}
+	ticket, err := LoadExecutionTicket(req.Root, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.State != ExecutionPending {
+		t.Fatalf("pre-ack execution ticket=%#v, want pending", ticket)
+	}
+	journal, err := LoadJournal(req.Root)
+	if err != nil || len(journal.Conversations) != 1 {
+		t.Fatalf("crashed journal=%#v err=%v", journal, err)
+	}
+	lease, err := AcquireLease(req.Root, ticket.LaunchNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles("claude"); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteConversation(req.Root, lease, journal.Conversations[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	acknowledged, err := PrepareExecution(req.Root, "claude", ticket.LaunchNonce, ExecutionEnvelope{
+		Cwd: ticket.Cwd, AMQExecutable: ticket.AMQExecutable,
+		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acknowledged.State != ExecutionAcknowledged {
+		t.Fatalf("acknowledged execution ticket=%#v", acknowledged)
+	}
+	record, err := LoadConversation(req.Root, "claude")
+	if err != nil || record.State != CaptureReady || record.Identity.Provider != ClaudeProvider || record.Identity.ID != ticket.ConversationID || record.ExecutionEvidence == nil {
+		t.Fatalf("acknowledged conversation=%#v err=%v, want ready identity/evidence", record, err)
+	}
+
+	req.CrashHook = nil
+	recovered, err := Reconcile(req)
+	if err != nil || recovered.AggregateCode != 0 {
+		t.Fatalf("recovery result=%#v err=%v, want aggregate code 0", recovered, err)
+	}
+	recoveredRecord, err := LoadConversation(req.Root, "claude")
+	if err != nil || recoveredRecord.State != CaptureReady || recoveredRecord.Identity.ID != ticket.ConversationID || recoveredRecord.ExecutionEvidence == nil {
+		t.Fatalf("recovered conversation=%#v err=%v, want ready identity/evidence", recoveredRecord, err)
 	}
 }
 
@@ -1309,7 +1393,14 @@ func TestReconcileManagedCreateCrashMatrixConvergesWithoutDuplicateSpawn(t *test
 
 			req.CrashHook = nil
 			result, err := Reconcile(req)
-			if err != nil || result.AggregateCode != 0 {
+			wantCode := 0
+			if stage == "journal_cleared" {
+				// The binding and pending conversation are durable, but the
+				// provider was never acknowledged. Do not expose a resumable
+				// conversation or silently start a duplicate.
+				wantCode = 6
+			}
+			if err != nil || result.AggregateCode != wantCode {
 				t.Fatalf("recovery result=%#v err=%v", result, err)
 			}
 			if backend.creates != 1 {
@@ -1322,8 +1413,8 @@ func TestReconcileManagedCreateCrashMatrixConvergesWithoutDuplicateSpawn(t *test
 				t.Fatalf("binding after recovery: %v", err)
 			}
 			record, err := LoadConversation(req.Root, "claude")
-			if err != nil || record.State != CaptureReady || record.ExecutionEvidence == nil {
-				t.Fatalf("conversation after recovery=%#v err=%v", record, err)
+			if err != nil || record.State != CapturePending || record.Identity.ID != "" || record.ExecutionEvidence != nil {
+				t.Fatalf("conversation after recovery=%#v err=%v, want pending until execution acknowledgement", record, err)
 			}
 		})
 	}
