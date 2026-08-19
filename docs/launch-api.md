@@ -57,6 +57,16 @@ ordered `-c model_reasoning_effort=<value>` pairs with values `minimal`, `low`,
 Every `env_overlay` key uses the POSIX environment grammar
 `[A-Za-z_][A-Za-z0-9_]*`; shell syntax such as `X;touch /tmp/pwn` is refused.
 
+Public JSON decoders perform a bounded structural pass before contract
+decoding. A structural refusal is returned as `*launchapi.StrictJSONError`;
+inspect its typed `Code` instead of parsing the message. The validation codes
+are `launchapi.StrictJSONDuplicateKey` (`duplicate_json_key`) for an exact
+duplicate object key and `launchapi.StrictJSONDepthExceeded` (`depth_exceeded`)
+when nesting exceeds `launchapi.StrictJSONMaxDepth` (256). Object keys are
+compared after JSON string decoding, so case- or whitespace-distinct keys are
+different keys. The error also carries the containing `Path` and duplicate
+`Key` where applicable.
+
 An optional participant `wrapper` contains a clean absolute `executable` path
 and static `args`. The path must resolve to one regular file; resolvable
 symlinks are accepted. AMQ executes the exact argv `wrapper executable + wrapper
