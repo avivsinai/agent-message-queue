@@ -338,12 +338,19 @@ func runCoopExec(args []string) error {
 			if rootRequested {
 				warnCoopExecCreationDeprecated(&warnedCreation)
 			}
-			if err := fsq.EnsureRootDirs(root); err != nil {
+			delivery, err := fsq.CreateDirectoryPathExclusive(root)
+			if err != nil {
 				return fmt.Errorf("failed to create root %q: %w", root, err)
 			}
-			if err := fsq.EnsureAgentDirs(root, agentHandle); err != nil {
+			if err := delivery.EnsureRootDirs(); err != nil {
+				_ = delivery.Close()
+				return fmt.Errorf("failed to create root %q: %w", root, err)
+			}
+			if err := delivery.EnsureAgentDirs(agentHandle); err != nil {
+				_ = delivery.Close()
 				return fmt.Errorf("failed to create mailbox for %s at %q: %w", agentHandle, root, err)
 			}
+			_ = delivery.Close()
 		} else {
 			// No explicit, ambient, project, repo-local, or global root: run
 			// full coop init. In a Git worktree, coop init relocates this to
