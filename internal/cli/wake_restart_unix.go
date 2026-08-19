@@ -196,110 +196,55 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 	}
 	defer func() { _ = agentDir.Close() }()
 
-	var expected wakeLockInspection
-	adopted := false
-	needsNotify := true
+	state := wakeRestartPublicationState{
+		root:        root,
+		me:          me,
+		owner:       *owner,
+		agentDir:    agentDir,
+		record:      record,
+		requestID:   requestID,
+		candidate:   candidate,
+		needsNotify: true,
+	}
+	// Candidate preflight execs a child and can wait up to
+	// wakeResumePreflightTimeout. Hold the exclusive lifecycle guard only for
+	// snapshot and later exact lock-record CAS; never across the child wait.
+	var needPreflight bool
 	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		expected = inspectWakeLockAt(dirfd, agentDir, root, me)
-		if err := validateWakeRestartIncumbent(expected, root, me, *owner); err != nil {
-			return err
-		}
-		existing, exists, readErr := readWakeRestartRecordSnapshotAt(dirfd, agentDir)
-		if readErr != nil {
-			if !exists || existing.Object.FileInfo == nil {
-				return readErr
-			}
-			if errors.Is(readErr, errWakeRestartSchemaTooNew) {
-				return fmt.Errorf(
-					"future-schema wake restart request is preserved at %s; retry with a newer AMQ: %w",
-					wakeRestartFileName,
-					readErr,
-				)
-			}
-			quarantined, quarantineErr := quarantineWakeRestartRecordAt(dirfd, agentDir, existing)
-			if quarantineErr != nil {
-				return errors.Join(readErr, quarantineErr)
-			}
-			return fmt.Errorf(
-				"invalid wake restart request was preserved as %s; retry restart: %w",
-				quarantined,
-				readErr,
-			)
-		}
-		if exists && existing.Record.Status == wakeRestartPending {
-			disposition := classifyPendingWakeRestart(
-				existing.Record,
-				expected,
-				root,
-				me,
-				*owner,
-			)
-			if disposition == wakeRestartPendingPreserve {
-				return fmt.Errorf(
-					"pending wake restart for predecessor generation %s is preserved because it does not match live generation %s",
-					existing.Record.Generation,
-					expected.Lock.Generation,
-				)
-			}
-			if disposition == wakeRestartPendingClaimUnstable {
-				return fmt.Errorf(
-					"pending wake restart claim from generation %s to %s is preserved before successor publication",
-					existing.Record.Generation,
-					existing.Record.SuccessorGeneration,
-				)
-			}
-			record = existing.Record
-			requestID = record.RequestID
-			candidate = record.Candidate
-			adopted = true
-			needsNotify = disposition == wakeRestartPendingAdoptNotify
-		}
-		if exists && existing.Record.Status == wakeRestartRefused {
-			if err := reclaimWakeRestartStagePlatform(existing.Record); err != nil {
-				return fmt.Errorf("reclaim refused wake restart stage before retry: %w", err)
-			}
-			if _, err := quarantineWakeRestartRecordAt(dirfd, agentDir, existing); err != nil {
-				return fmt.Errorf("quarantine refused wake restart request before retry: %w", err)
-			}
-		}
-		if needsNotify {
-			if err := validateWakeRestartArgv(expected.Lock.Args, root, me); err != nil {
-				return err
-			}
-		}
-		if !adopted {
-			record.Generation = expected.Lock.Generation
-			record.PreviousBoundImage = previousDarwinWakeRestartStageForLock(expected.Lock)
-			bootstrap := wakeResumeBootstrap{
-				Schema:             wakeRestartSchemaV1,
-				RequestID:          record.RequestID,
-				Generation:         record.Generation,
-				PreviousBoundImage: record.PreviousBoundImage,
-			}
-			if err := wakeRestartPreflight(candidate, expected.Lock.Args, bootstrap); err != nil {
-				return fmt.Errorf("wake restart candidate preflight failed: %w", err)
-			}
-			if err := writeWakeRestartRecordAt(dirfd, agentDir, record); err != nil {
-				return err
-			}
-			createdSnapshot, created, readErr := readWakeRestartRecordSnapshotAt(dirfd, agentDir)
-			if readErr != nil {
-				return readErr
-			}
-			if !created || !sameWakeRestartRecord(createdSnapshot.Record, record) {
-				return fmt.Errorf("wake restart request changed after creation")
-			}
-		}
-		current := inspectWakeLockAt(dirfd, agentDir, root, me)
-		if !sameWakeLockInspection(expected, current) || !current.IdentityConfirmed {
-			return fmt.Errorf("wake changed while publishing restart request")
-		}
-		return nil
+		var recErr error
+		needPreflight, recErr = reconcileWakeRestartPublicationAt(dirfd, &state, false)
+		return recErr
 	})
 	if err != nil {
 		result.Reason = err.Error()
 		return result, err
 	}
+	if needPreflight {
+		bootstrap := wakeResumeBootstrap{
+			Schema:             wakeRestartSchemaV1,
+			RequestID:          state.record.RequestID,
+			Generation:         state.record.Generation,
+			PreviousBoundImage: state.record.PreviousBoundImage,
+		}
+		if err := wakeRestartPreflight(state.candidate, state.expected.Lock.Args, bootstrap); err != nil {
+			err = fmt.Errorf("wake restart candidate preflight failed: %w", err)
+			result.Reason = err.Error()
+			return result, err
+		}
+		err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+			_, recErr := reconcileWakeRestartPublicationAt(dirfd, &state, true)
+			return recErr
+		})
+		if err != nil {
+			result.Reason = err.Error()
+			return result, err
+		}
+	}
+	expected := state.expected
+	record = state.record
+	requestID = state.requestID
+	candidate = state.candidate
+	needsNotify := state.needsNotify
 	result.PID = expected.PID
 	result.PreviousGeneration = record.Generation
 
@@ -367,6 +312,139 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 	err = fmt.Errorf("wake restart did not complete within %s", wakeRestartWaitTimeout)
 	result.Reason = err.Error()
 	return result, err
+}
+
+type wakeRestartPublicationState struct {
+	root        string
+	me          string
+	owner       wakeOwner
+	agentDir    *wakeAgentDir
+	record      wakeRestartRecord
+	requestID   string
+	candidate   wakeImageEvidenceV1
+	expected    wakeLockInspection
+	adopted     bool
+	needsNotify bool
+}
+
+func reconcileWakeRestartPublicationAt(
+	dirfd int,
+	state *wakeRestartPublicationState,
+	publish bool,
+) (needPreflight bool, err error) {
+	current := inspectWakeLockAt(dirfd, state.agentDir, state.root, state.me)
+	if publish {
+		if !sameWakeLockInspection(state.expected, current) || !current.IdentityConfirmed {
+			return false, fmt.Errorf("wake changed while publishing restart request")
+		}
+	} else {
+		state.expected = current
+		if err := validateWakeRestartIncumbent(state.expected, state.root, state.me, state.owner); err != nil {
+			return false, err
+		}
+	}
+
+	existing, exists, readErr := readWakeRestartRecordSnapshotAt(dirfd, state.agentDir)
+	if readErr != nil {
+		if !exists || existing.Object.FileInfo == nil {
+			return false, readErr
+		}
+		if errors.Is(readErr, errWakeRestartSchemaTooNew) {
+			return false, fmt.Errorf(
+				"future-schema wake restart request is preserved at %s; retry with a newer AMQ: %w",
+				wakeRestartFileName,
+				readErr,
+			)
+		}
+		quarantined, quarantineErr := quarantineWakeRestartRecordAt(dirfd, state.agentDir, existing)
+		if quarantineErr != nil {
+			return false, errors.Join(readErr, quarantineErr)
+		}
+		return false, fmt.Errorf(
+			"invalid wake restart request was preserved as %s; retry restart: %w",
+			quarantined,
+			readErr,
+		)
+	}
+
+	adopted := false
+	needsNotify := true
+	record := state.record
+	requestID := state.requestID
+	candidate := state.candidate
+	if exists && existing.Record.Status == wakeRestartPending {
+		disposition := classifyPendingWakeRestart(
+			existing.Record,
+			state.expected,
+			state.root,
+			state.me,
+			state.owner,
+		)
+		if disposition == wakeRestartPendingPreserve {
+			return false, fmt.Errorf(
+				"pending wake restart for predecessor generation %s is preserved because it does not match live generation %s",
+				existing.Record.Generation,
+				state.expected.Lock.Generation,
+			)
+		}
+		if disposition == wakeRestartPendingClaimUnstable {
+			return false, fmt.Errorf(
+				"pending wake restart claim from generation %s to %s is preserved before successor publication",
+				existing.Record.Generation,
+				existing.Record.SuccessorGeneration,
+			)
+		}
+		record = existing.Record
+		requestID = record.RequestID
+		candidate = record.Candidate
+		adopted = true
+		needsNotify = disposition == wakeRestartPendingAdoptNotify
+	}
+	if exists && existing.Record.Status == wakeRestartRefused {
+		if err := reclaimWakeRestartStagePlatform(existing.Record); err != nil {
+			return false, fmt.Errorf("reclaim refused wake restart stage before retry: %w", err)
+		}
+		if _, err := quarantineWakeRestartRecordAt(dirfd, state.agentDir, existing); err != nil {
+			return false, fmt.Errorf("quarantine refused wake restart request before retry: %w", err)
+		}
+	}
+	if needsNotify {
+		if err := validateWakeRestartArgv(state.expected.Lock.Args, state.root, state.me); err != nil {
+			return false, err
+		}
+	}
+	if !adopted {
+		record.Generation = state.expected.Lock.Generation
+		record.PreviousBoundImage = previousDarwinWakeRestartStageForLock(state.expected.Lock)
+		if !publish {
+			state.record = record
+			state.requestID = requestID
+			state.candidate = candidate
+			state.adopted = false
+			state.needsNotify = needsNotify
+			return true, nil
+		}
+		if err := writeWakeRestartRecordAt(dirfd, state.agentDir, record); err != nil {
+			return false, err
+		}
+		createdSnapshot, created, readErr := readWakeRestartRecordSnapshotAt(dirfd, state.agentDir)
+		if readErr != nil {
+			return false, readErr
+		}
+		if !created || !sameWakeRestartRecord(createdSnapshot.Record, record) {
+			return false, fmt.Errorf("wake restart request changed after creation")
+		}
+	}
+	current = inspectWakeLockAt(dirfd, state.agentDir, state.root, state.me)
+	if !sameWakeLockInspection(state.expected, current) || !current.IdentityConfirmed {
+		return false, fmt.Errorf("wake changed while publishing restart request")
+	}
+	state.record = record
+	state.requestID = requestID
+	state.candidate = candidate
+	state.adopted = adopted
+	state.needsNotify = needsNotify
+	return false, nil
 }
 
 func newWakeRestartRequestID() (string, error) {

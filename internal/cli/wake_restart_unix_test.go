@@ -1180,6 +1180,188 @@ func TestWakeRestartIncompatibleCandidatePreflightLeavesIncumbentLive(t *testing
 	}
 }
 
+func TestWakeRestartPreflightReleasesLifecycleGuard(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	oldPreflight := wakeRestartPreflight
+	oldNotify := wakeRestartNotify
+	wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
+		close(entered)
+		<-release
+		return nil
+	}
+	notifyErr := errors.New("stop after publication")
+	wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
+		return notifyErr
+	}
+	t.Cleanup(func() {
+		wakeRestartPreflight = oldPreflight
+		wakeRestartNotify = oldNotify
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := requestWakeRestart(fixture.root, fixture.agent)
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart preflight was not reached")
+	}
+
+	guardDone := make(chan error, 1)
+	go func() {
+		guardDone <- withWakeLifecycleGuard(fixture.root, fixture.agent, func() error { return nil })
+	}()
+	select {
+	case err := <-guardDone:
+		if err != nil {
+			t.Fatalf("lifecycle op during restart preflight: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("lifecycle guard remained held during restart preflight")
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, notifyErr) {
+			t.Fatalf("restart after released preflight: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart did not finish after preflight released")
+	}
+}
+
+func TestWakeRestartPublicationFailsWhenLockChangesDuringPreflight(t *testing.T) {
+	t.Run("lock record changed", func(t *testing.T) {
+		fixture := newWakeRestartFixture(t)
+		removeWakeRestartRecordForTest(t, fixture)
+
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		oldPreflight := wakeRestartPreflight
+		oldNotify := wakeRestartNotify
+		wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
+			close(entered)
+			<-release
+			return nil
+		}
+		notifyCalled := false
+		wakeRestartNotify = func(*wakeAgentDir, wakeLockInspection, wakeRestartRecord) error {
+			notifyCalled = true
+			return nil
+		}
+		t.Cleanup(func() {
+			wakeRestartPreflight = oldPreflight
+			wakeRestartNotify = oldNotify
+		})
+
+		done := make(chan struct {
+			result wakeRestartResult
+			err    error
+		}, 1)
+		go func() {
+			result, err := requestWakeRestart(fixture.root, fixture.agent)
+			done <- struct {
+				result wakeRestartResult
+				err    error
+			}{result, err}
+		}()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("restart preflight was not reached")
+		}
+		changed := fixture.lock.Lock
+		changed.Generation = "cccccccccccccccccccccccccccccccc"
+		writeWakeLockForTest(t, fixture.root, fixture.agent, changed)
+		close(release)
+
+		var outcome struct {
+			result wakeRestartResult
+			err    error
+		}
+		select {
+		case outcome = <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("restart did not finish after lock replacement")
+		}
+		if outcome.err == nil || !strings.Contains(outcome.err.Error(), "wake changed while publishing restart request") {
+			t.Fatalf("changed lock result=%#v err=%v", outcome.result, outcome.err)
+		}
+		if notifyCalled {
+			t.Fatal("changed lock still notified the incumbent")
+		}
+		if _, err := os.Lstat(filepath.Join(fixture.agentDir.path, wakeRestartFileName)); !os.IsNotExist(err) {
+			t.Fatalf("changed lock published a restart record: %v", err)
+		}
+	})
+
+	t.Run("unchanged lock record still publishes", func(t *testing.T) {
+		fixture := newWakeRestartFixture(t)
+		removeWakeRestartRecordForTest(t, fixture)
+
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		oldPreflight := wakeRestartPreflight
+		oldNotify := wakeRestartNotify
+		wakeRestartPreflight = func(wakeImageEvidenceV1, []string, wakeResumeBootstrap) error {
+			close(entered)
+			<-release
+			return nil
+		}
+		notifyErr := errors.New("stop after unchanged publication")
+		wakeRestartNotify = func(_ *wakeAgentDir, current wakeLockInspection, record wakeRestartRecord) error {
+			if !sameWakeLockInspection(current, fixture.lock) ||
+				record.Generation != fixture.lock.Lock.Generation {
+				t.Fatalf("unchanged publication current=%#v record=%#v", current, record)
+			}
+			return notifyErr
+		}
+		t.Cleanup(func() {
+			wakeRestartPreflight = oldPreflight
+			wakeRestartNotify = oldNotify
+		})
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := requestWakeRestart(fixture.root, fixture.agent)
+			done <- err
+		}()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("restart preflight was not reached")
+		}
+		close(release)
+		select {
+		case err := <-done:
+			if !errors.Is(err, notifyErr) {
+				t.Fatalf("unchanged lock restart: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("restart did not finish after unchanged preflight")
+		}
+		if err := fixture.agentDir.withFD(func(dirfd int) error {
+			current, exists, readErr := readWakeRestartRecordAt(dirfd, fixture.agentDir)
+			if readErr != nil {
+				return readErr
+			}
+			if !exists || current.Status != wakeRestartPending ||
+				current.Generation != fixture.lock.Lock.Generation {
+				return fmt.Errorf("unchanged lock did not publish: exists=%v record=%#v", exists, current)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestWakeRestartRequiresCurrentPlatformTransportBeforePublication(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	removeWakeRestartRecordForTest(t, fixture)
