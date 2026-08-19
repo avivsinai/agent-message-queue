@@ -91,6 +91,12 @@ argument. Unsupported `stdin` and `file` carriers remain typed refusals when a
 wrapper is present. The `wrapper` feature is advertised, and a strict decode
 accepts the field.
 
+Executable containment refusals use stable typed codes: `provider_project_contained`
+for a provider path presented from the project, `wrapper_project_contained` for
+a wrapper path presented from the project, and `amq_launcher_project_contained` for the
+AMQ launcher path. Both the raw path and its resolved target are checked before
+the executable can be planned or ticketed.
+
 ## Intent
 
 The intent owns the desired participants. Discovery owns the project root,

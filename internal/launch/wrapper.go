@@ -68,28 +68,17 @@ func validateWrapperFile(wrapper *Wrapper) error {
 }
 
 func validateWrapperFileForProject(wrapper *Wrapper, projectRoot string) error {
-	if wrapper == nil {
-		return nil
-	}
 	if err := validateWrapperFile(wrapper); err != nil {
 		return err
 	}
-	project, err := resolvedPath(projectRoot)
-	if err != nil {
-		return fmt.Errorf("resolve project root for wrapper: %w", err)
+	if wrapper == nil {
+		return nil
 	}
-	requested, err := filepath.Abs(wrapper.Executable)
-	if err != nil {
-		return fmt.Errorf("resolve wrapper path: %w", err)
-	}
-	resolved, err := resolvedPath(wrapper.Executable)
+	resolved, err := filepath.EvalSymlinks(wrapper.Executable)
 	if err != nil {
 		return fmt.Errorf("resolve wrapper executable: %w", err)
 	}
-	if pathWithin(requested, project) || pathWithin(resolved, project) {
-		return &LaunchPathError{Code: WrapperProjectContainedCode, Path: wrapper.Executable}
-	}
-	return nil
+	return rejectProjectContained(projectRoot, wrapper.Executable, resolved, wrapperProjectContainedCode)
 }
 
 func cloneWrapper(wrapper *Wrapper) *Wrapper {

@@ -88,6 +88,67 @@ func TestExecutionTicketAllowsEmptyArgOnlyForDeclaredInitialInput(t *testing.T) 
 	}
 }
 
+func TestNewExecutionTicketRejectsProjectContainedExecutableSymlinks(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	providerLink := filepath.Join(fixture.project, "claude")
+	if err := os.Symlink(fixture.provider, providerLink); err != nil {
+		t.Fatal(err)
+	}
+	base := ExecutionTicketRequest{
+		Handle: "claude", LaunchNonce: "12121212-1212-4212-8212-121212121212", Mode: AdapterModeMint,
+		Provider: ClaudeProvider, ConversationID: "12121212-1212-4212-8212-121212121212",
+		ProjectRoot: fixture.project, SessionRoot: fixture.session, Cwd: fixture.cwd,
+		ProviderExecutable: fixture.provider, AMQExecutable: fixture.amq,
+		TargetArgv: []string{fixture.provider},
+	}
+	providerCase := base
+	providerCase.ProviderExecutable = providerLink
+	providerCase.TargetArgv = []string{providerLink}
+	if _, err := NewExecutionTicket(providerCase); err == nil || !strings.Contains(err.Error(), providerProjectContainedCode) {
+		t.Fatalf("provider project containment error = %v", err)
+	}
+
+	wrapperLink := filepath.Join(fixture.project, "wrapper")
+	if err := os.Symlink(fixture.provider, wrapperLink); err != nil {
+		t.Fatal(err)
+	}
+	wrapperCase := base
+	wrapperCase.Wrapper = &Wrapper{Executable: wrapperLink}
+	wrapperCase.TargetArgv = []string{wrapperLink, fixture.provider}
+	if _, err := NewExecutionTicket(wrapperCase); err == nil || !strings.Contains(err.Error(), wrapperProjectContainedCode) {
+		t.Fatalf("wrapper project containment error = %v", err)
+	}
+
+	amqLink := filepath.Join(fixture.project, "amq")
+	if err := os.Symlink(fixture.amq, amqLink); err != nil {
+		t.Fatal(err)
+	}
+	amqCase := base
+	amqCase.AMQExecutable = amqLink
+	if _, err := NewExecutionTicket(amqCase); err == nil || !strings.Contains(err.Error(), amqProjectContainedCode) {
+		t.Fatalf("AMQ project containment error = %v", err)
+	}
+	insideTarget := filepath.Join(fixture.project, "amq-target")
+	if err := os.WriteFile(insideTarget, []byte("amq"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rawOutsideLink := filepath.Join(t.TempDir(), "amq")
+	if err := os.Symlink(insideTarget, rawOutsideLink); err != nil {
+		t.Fatal(err)
+	}
+	amqCase.AMQExecutable = rawOutsideLink
+	if _, err := NewExecutionTicket(amqCase); err == nil || !strings.Contains(err.Error(), amqProjectContainedCode) {
+		t.Fatalf("raw-outside/resolved-inside AMQ containment error = %v", err)
+	}
+	ticket := mustExecutionTicket(t, fixture, "13131313-1313-4313-8313-131313131313")
+	if err := ValidateExecutionEnvelope(fixture.root, ticket, ExecutionEnvelope{
+		Cwd: fixture.cwd, AMQExecutable: rawOutsideLink, ProviderExecutable: fixture.provider,
+		TargetArgv: ticket.TargetArgv, Environment: nil, Execution: ticket.Execution,
+	}); err == nil || !strings.Contains(err.Error(), amqProjectContainedCode) {
+		t.Fatalf("raw-outside/resolved-inside envelope AMQ containment error = %v", err)
+	}
+}
+
 func TestExecutionTicketWritesRequireNonceAndHandleLock(t *testing.T) {
 	fixture := newExecutionFixture(t)
 	lease, err := AcquireLease(fixture.root, "22222222-2222-4222-8222-222222222222")
