@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -543,6 +546,235 @@ printf '%s\n' "$@" > "$AMQ_KEEPALIVE_CAPTURE"
 	if !strings.Contains(string(logData), "wake timeout 3000ms must be shorter than outer 3000ms; using 2500ms") {
 		t.Fatalf("clamp was not logged:\n%s", logData)
 	}
+}
+
+func TestSessionStartTimeoutMarkerDoesNotFollowPIDSymlink(t *testing.T) {
+	dir := t.TempDir()
+	tmpdir := t.TempDir()
+	scriptPath := writeSessionStartScript(t, dir)
+	victimPath := filepath.Join(dir, "victim")
+	victimBytes := []byte("do-not-truncate\n")
+	mustWrite(t, victimPath, victimBytes)
+	startedPath := filepath.Join(dir, "started")
+	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), `#!/bin/sh
+printf 'started\n' > "$AMQ_KEEPALIVE_STARTED"
+sleep 30
+`)
+	logPath := filepath.Join(dir, "session-start.log")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", scriptPath)
+	cmd.Stdin = strings.NewReader("{}\n")
+	cmd.Env = append(withoutEnv(os.Environ(),
+		"AMQ_KEEPALIVE_ADAPTER",
+		"AMQ_KEEPALIVE_TARGET",
+		"AMQ_KEEPALIVE_BIN",
+		"AMQ_KEEPALIVE_SLEEP",
+		"AMQ_KEEPALIVE_DISABLED",
+		"AMQ_KEEPALIVE_TIMEOUT_SECONDS",
+		"AMQ_KEEPALIVE_DEFAULT_TIMEOUT_SECONDS",
+		"AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS",
+		"AMQ_KEEPALIVE_WAKE_TIMEOUT_MILLISECONDS",
+		"CMUX_SURFACE_ID",
+		"TMPDIR",
+	),
+		"TMPDIR="+tmpdir,
+		"AMQ_KEEPALIVE_BIN="+binaryPath,
+		"AMQ_KEEPALIVE_LOG="+logPath,
+		"AMQ_KEEPALIVE_TARGET=ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D",
+		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=2",
+		"AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS=1",
+		"AMQ_KEEPALIVE_STARTED="+startedPath,
+	)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("hook start error = %v", err)
+	}
+	waitForFile(t, startedPath, 8*time.Second)
+
+	planted := filepath.Join(tmpdir, fmt.Sprintf("amq-keepalive-timeout.%d", cmd.Process.Pid))
+	if err := os.Symlink(victimPath, planted); err != nil {
+		t.Fatalf("plant pid-named symlink: %v", err)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("hook run error = %v", err)
+	}
+	if got := stdout.String(); got != "{}\n" {
+		t.Fatalf("stdout = %q, want empty hook response", got)
+	}
+	gotVictim, err := os.ReadFile(victimPath)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if !bytes.Equal(gotVictim, victimBytes) {
+		t.Fatalf("victim truncated via pid-named timeout path: got %q", gotVictim)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !strings.Contains(string(logData), "reattach timed out after 2s") {
+		t.Fatalf("missing timeout log:\n%s", logData)
+	}
+}
+
+func TestSessionStartTimeoutKillsReattachProcessGroup(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeSessionStartScript(t, dir)
+	grandchildPidPath := filepath.Join(dir, "grandchild.pid")
+	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), `#!/bin/sh
+sleep 60 &
+printf '%s\n' "$!" > "$AMQ_KEEPALIVE_GRANDCHILD_PID"
+wait
+`)
+	logPath := filepath.Join(dir, "session-start.log")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", scriptPath)
+	cmd.Stdin = strings.NewReader("{}\n")
+	cmd.Env = append(withoutEnv(os.Environ(),
+		"AMQ_KEEPALIVE_ADAPTER",
+		"AMQ_KEEPALIVE_TARGET",
+		"AMQ_KEEPALIVE_BIN",
+		"AMQ_KEEPALIVE_SLEEP",
+		"AMQ_KEEPALIVE_DISABLED",
+		"AMQ_KEEPALIVE_TIMEOUT_SECONDS",
+		"AMQ_KEEPALIVE_DEFAULT_TIMEOUT_SECONDS",
+		"AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS",
+		"AMQ_KEEPALIVE_WAKE_TIMEOUT_MILLISECONDS",
+		"CMUX_SURFACE_ID",
+		"TMPDIR",
+	),
+		"AMQ_KEEPALIVE_BIN="+binaryPath,
+		"AMQ_KEEPALIVE_LOG="+logPath,
+		"AMQ_KEEPALIVE_TARGET=ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D",
+		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=2",
+		"AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS=1",
+		"AMQ_KEEPALIVE_GRANDCHILD_PID="+grandchildPidPath,
+	)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("hook start error = %v", err)
+	}
+	pid := readPIDFile(t, grandchildPidPath)
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("hook run error = %v", err)
+	}
+	if got := stdout.String(); got != "{}\n" {
+		t.Fatalf("stdout = %q, want empty hook response", got)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !strings.Contains(string(logData), "reattach timed out after 2s") {
+		t.Fatalf("missing timeout log:\n%s", logData)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for processRunning(pid) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if processRunning(pid) {
+		t.Fatalf("grandchild pid %d still running after process-group timeout", pid)
+	}
+}
+
+func TestSessionStartSuccessDoesNotKillReadyWake(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := writeSessionStartScript(t, dir)
+	wakePidPath := filepath.Join(dir, "wake.pid")
+	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), `#!/bin/sh
+sleep 30 &
+printf '%s\n' "$!" > "$AMQ_KEEPALIVE_WAKE_PID"
+exit 0
+`)
+	logPath := filepath.Join(dir, "session-start.log")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", scriptPath)
+	cmd.Stdin = strings.NewReader("{}\n")
+	cmd.Env = append(withoutEnv(os.Environ(),
+		"AMQ_KEEPALIVE_ADAPTER",
+		"AMQ_KEEPALIVE_TARGET",
+		"AMQ_KEEPALIVE_BIN",
+		"AMQ_KEEPALIVE_SLEEP",
+		"AMQ_KEEPALIVE_DISABLED",
+		"AMQ_KEEPALIVE_TIMEOUT_SECONDS",
+		"AMQ_KEEPALIVE_DEFAULT_TIMEOUT_SECONDS",
+		"AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS",
+		"AMQ_KEEPALIVE_WAKE_TIMEOUT_MILLISECONDS",
+		"CMUX_SURFACE_ID",
+		"TMPDIR",
+	),
+		"AMQ_KEEPALIVE_BIN="+binaryPath,
+		"AMQ_KEEPALIVE_LOG="+logPath,
+		"AMQ_KEEPALIVE_TARGET=ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D",
+		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=3",
+		"AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS=1",
+		"AMQ_KEEPALIVE_WAKE_PID="+wakePidPath,
+	)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook run error = %v", err)
+	}
+	if got := stdout.String(); got != "{}\n" {
+		t.Fatalf("stdout = %q, want empty hook response", got)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "reattach ok") {
+		t.Fatalf("missing success log:\n%s", logText)
+	}
+	if strings.Contains(logText, "reattach timed out") {
+		t.Fatalf("success path logged a timeout:\n%s", logText)
+	}
+	pid := readPIDFile(t, wakePidPath)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	if !processRunning(pid) {
+		t.Fatalf("already-ready wake pid %d was killed by watchdog cancel", pid)
+	}
+}
+
+func waitForFile(t *testing.T, path string, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func readPIDFile(t *testing.T, path string) int {
+	t.Helper()
+	waitForFile(t, path, 8*time.Second)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read pid file: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		t.Fatalf("pid file %s = %q, want a pid", path, data)
+	}
+	return pid
+}
+
+func processRunning(pid int) bool {
+	return syscall.Kill(pid, 0) == nil
 }
 
 func writeExecutable(t *testing.T, path string) string {

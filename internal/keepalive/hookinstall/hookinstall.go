@@ -152,23 +152,30 @@ run_reattach() {
     "$BIN" "${args[@]}" >> "$LOG_PATH" 2>&1
 }
 
-timeout_marker="${TMPDIR:-/tmp}/amq-keepalive-timeout.$$"
-rm -f "$timeout_marker" 2>/dev/null || true
+# GOLDEN-CHANGE: private exclusive timeout marker (mktemp 0700 dir) and process-group kill.
+timeout_dir="$(mktemp -d "${TMPDIR:-/tmp}/amq-keepalive-timeout.XXXXXX" 2>/dev/null)" || {
+    log "timeout marker: mktemp failed"
+    printf '{}\n'
+    exit 0
+}
+chmod 0700 "$timeout_dir" 2>/dev/null || true
+timeout_marker="${timeout_dir}/flag"
+trap 'rm -rf -- "$timeout_dir"' EXIT
 
+set -m
 (
     trap 'exit 143' TERM
     run_reattach
 ) 2>> "$LOG_PATH" &
 reattach_pid=$!
+set +m
 (
     "$SLEEP_CMD" "$TIMEOUT_SECONDS"
     if kill -0 "$reattach_pid" 2>/dev/null; then
         : > "$timeout_marker" 2>/dev/null || true
-        pkill -TERM -P "$reattach_pid" 2>/dev/null || true
-        kill -TERM "$reattach_pid" 2>/dev/null || true
+        kill -TERM -- -"$reattach_pid" 2>/dev/null || true
         "$SLEEP_CMD" 1
-        pkill -KILL -P "$reattach_pid" 2>/dev/null || true
-        kill -KILL "$reattach_pid" 2>/dev/null || true
+        kill -KILL -- -"$reattach_pid" 2>/dev/null || true
     fi
 ) >/dev/null 2>&1 &
 watchdog_pid=$!
@@ -180,7 +187,6 @@ kill "$watchdog_pid" 2>/dev/null || true
 wait "$watchdog_pid" 2>/dev/null || true
 
 if [[ -f "$timeout_marker" ]]; then
-    rm -f "$timeout_marker" 2>/dev/null || true
     log "reattach timed out after ${TIMEOUT_SECONDS}s adapter=$ADAPTER target=${TARGET:-auto}"
     printf '{}\n'
     exit 0
