@@ -39,7 +39,7 @@ func TestListCanInspectFlagShapedLegacyMailboxButDrainRejectsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := deliverToInboxForTest(t, root, legacy, "legacy-message.md", data); err != nil {
+	if err := os.WriteFile(filepath.Join(fsq.AgentInboxNew(root, legacy), "legacy-message.md"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 

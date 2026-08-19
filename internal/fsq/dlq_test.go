@@ -65,6 +65,44 @@ func TestMoveToDLQ(t *testing.T) {
 	}
 }
 
+func TestMoveToDLQFailsWhenRandomReadFails(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	filename := "need_dlq.md"
+	if err := os.WriteFile(filepath.Join(AgentInboxNew(root, "alice"), filename), []byte("payload"), 0o600); err != nil {
+		t.Fatalf("write inbox message: %v", err)
+	}
+
+	injected := errors.New("injected rand.Read failure")
+	orig := readRandom
+	readRandom = func([]byte) (int, error) { return 0, injected }
+	t.Cleanup(func() { readRandom = orig })
+
+	dlqPath, err := MoveToDLQ(openDeliveryRootForTest(t, root), "alice", filename, "need_dlq", "parse_error", "bad")
+	if err == nil {
+		t.Fatal("MoveToDLQ error = nil, want RNG failure")
+	}
+	if !errors.Is(err, injected) {
+		t.Fatalf("MoveToDLQ error = %v, want injected rand.Read failure", err)
+	}
+	if dlqPath != "" {
+		t.Fatalf("dlqPath = %q, want empty", dlqPath)
+	}
+
+	for _, dir := range []string{AgentDLQNew(root, "alice"), AgentDLQTmp(root, "alice"), AgentDLQCur(root, "alice")} {
+		entries, readErr := os.ReadDir(dir)
+		if readErr != nil {
+			t.Fatalf("ReadDir %s: %v", dir, readErr)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("%s has files after RNG failure: %#v", dir, entries)
+		}
+	}
+}
+
 func TestMoveToDLQClaimsBeforeDLQDelivery(t *testing.T) {
 	root := t.TempDir()
 	if err := EnsureAgentDirs(root, "alice"); err != nil {
