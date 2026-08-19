@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	ApplyOutcomeApplied               = "applied"
-	ApplyOutcomeActionRequired        = "action_required"
-	ApplyOutcomeProvisionedNoRunnable = "provisioned_no_runnable"
+	ApplyOutcomeApplied                             = "applied"
+	ApplyOutcomeActionRequired                      = "action_required"
+	ApplyOutcomeProvisionedNoRunnable               = "provisioned_no_runnable"
+	ApplyReasonPrepareActionRequiredWithoutDecision = "prepare_action_required_without_decision"
 )
 
 type ApplyDecision struct {
@@ -143,6 +144,9 @@ func authorizeApply(ctx context.Context, request ApplyRequest, dependencies Appl
 	}
 	if prepared.Outcome == PrepareOutcomeUnsupported {
 		return prepared, nil, applyActionResult(prepared, prepared.Reason), false, nil
+	}
+	if prepared.Outcome == PrepareOutcomeActionRequired && len(prepared.RequiredActions) == 0 {
+		return prepared, nil, applyActionResult(prepared, ApplyReasonPrepareActionRequiredWithoutDecision), false, nil
 	}
 	decisions, reason := validateApplyDecisions(prepared.RequiredActions, request.Decisions)
 	if reason != "" {

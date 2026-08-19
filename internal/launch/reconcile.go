@@ -362,7 +362,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 
 	if !recoveredCreate {
 		if detect.Profile.Has(CapCreate) && joinBinding == nil {
-			journal, err = NewLaunchJournal(request, backendName, detect, plan, planDigest, nonce, result.Agents, plannedConversations(planned), time.Now())
+			journal, err = NewLaunchJournal(request, backendName, detect, plan, planDigest, nonce, plannedAgentResults(result.Agents, planned), plannedConversations(planned), time.Now())
 			if err != nil {
 				return result, err
 			}
@@ -411,6 +411,15 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		}
 	}
 	result.Outcome, result.Commands = create.Outcome, create.Commands
+	if create.Outcome == OutcomeUnsupported {
+		reason := create.Reason
+		if reason == "" {
+			reason = "backend_unsupported"
+		}
+		markPlannedAgents(&result, planned, 6, reason)
+		result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, reason
+		return result, nil
+	}
 	var candidate *BindingRecord
 	if create.Outcome == OutcomeCreated {
 		if journalActive && journal.Phase == JournalCreated {
@@ -431,7 +440,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 			return result, nil
 		}
 		journal.Phase, journal.Binding = JournalCreated, candidate
-		journal.Agents, journal.Conversations = slices.Clone(result.Agents), plannedConversations(planned)
+		journal.Agents, journal.Conversations = plannedAgentResults(result.Agents, planned), plannedConversations(planned)
 		if err := WriteJournal(request.Root, lease, journal); err != nil {
 			return result, err
 		}
@@ -702,6 +711,14 @@ func plannedConversations(planned []plannedAgent) []ConversationRecord {
 		records[i] = planned[i].record
 	}
 	return records
+}
+
+func plannedAgentResults(results []AgentReconcileResult, planned []plannedAgent) []AgentReconcileResult {
+	rows := make([]AgentReconcileResult, len(planned))
+	for i, agent := range planned {
+		rows[i] = results[agent.index]
+	}
+	return rows
 }
 
 func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []plannedAgent, amqPath, backend, profile string) error {

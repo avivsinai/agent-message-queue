@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -229,6 +230,109 @@ func TestApplyDoesNotPromoteNoActionToApplied(t *testing.T) {
 	}
 	if backend.creates != 0 {
 		t.Fatalf("unavailable adapter created backend resources: %d", backend.creates)
+	}
+}
+
+type applyInspectUnknownBackend struct{ prepareTestBackend }
+
+func (backend *applyInspectUnknownBackend) Inspect(InspectRequest) (InspectResult, error) {
+	backend.inspects++
+	return InspectResult{Status: InspectUnknown, Evidence: "test inspection unavailable", ActionRequired: true}, nil
+}
+
+func TestApplyRefusesActionRequiredWithoutDecisionBeforeRosterMutation(t *testing.T) {
+	fixture := newInternalPrepareFixture(t)
+	fixture.request.Participants[0] = PrepareParticipant{Handle: "claude", Runnable: false}
+	backend := &applyInspectUnknownBackend{}
+	writePrepareBinding(t, fixture.sessionRoot, prepareBinding("host:test", "instance:test", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"))
+	dependencies := PrepareDependencies{
+		Backends:     map[string]Backend{"test": backend},
+		Preferences:  []string{"test"},
+		AdapterFor:   func(provider, executable string) HarnessAdapter { return prepareTestAdapter{provider: provider} },
+		HostIdentity: "host:test",
+	}
+	prepared, err := Prepare(context.Background(), fixture.request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Outcome != PrepareOutcomeActionRequired || len(prepared.RequiredActions) != 0 {
+		t.Fatalf("Prepare = %#v, want action_required without decisions", prepared)
+	}
+	before := prepareTreeSnapshot(t, fixture.sessionRoot)
+	result, err := Apply(context.Background(), ApplyRequest{
+		Prepare:       fixture.request,
+		SubjectDigest: prepared.SubjectDigest,
+	}, ApplyDependencies{PrepareDependencies: dependencies})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != ApplyOutcomeActionRequired || result.ReasonCode != ApplyReasonPrepareActionRequiredWithoutDecision {
+		t.Fatalf("Apply = %#v, want typed action-required refusal", result)
+	}
+	if after := prepareTreeSnapshot(t, fixture.sessionRoot); after != before {
+		t.Fatalf("Apply mutated roster/config on action_required without decision: before=%s after=%s", before, after)
+	}
+}
+
+type applyUnsupportedNoCreateBackend struct{ reconcileBackend }
+
+func (backend *applyUnsupportedNoCreateBackend) Detect() DetectResult {
+	profile := Profile{Backend: backend.name, Platform: "test", VersionRange: "*", Version: 1, Capabilities: []Capability{CapInspect}}
+	return DetectResult{Available: true, Profile: profile, Effective: slices.Clone(profile.Capabilities), HostIdentity: "host:test", InstanceIdentity: "instance:test"}
+}
+
+func (backend *applyUnsupportedNoCreateBackend) Create(CreateRequest) (CreateResult, error) {
+	backend.creates++
+	return CreateResult{Outcome: OutcomeUnsupported, Reason: "test backend unsupported"}, nil
+}
+
+func applyF31Result(t *testing.T, backend Backend) ApplyResult {
+	t.Helper()
+	providerBin := t.TempDir()
+	providerPath := filepath.Join(providerBin, "claude")
+	if err := os.WriteFile(providerPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", providerBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	fixture := newInternalPrepareFixture(t)
+	store, err := OpenTrustStore(t.TempDir(), fixture.projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependencies := ApplyDependencies{PrepareDependencies: PrepareDependencies{
+		Backends: map[string]Backend{"test": backend}, Preferences: []string{"test"},
+		AdapterFor:   func(provider, executable string) HarnessAdapter { return prepareTestAdapter{provider: provider} },
+		HostIdentity: "host:test", TrustStore: store,
+	}}
+	prepared, err := Prepare(context.Background(), fixture.request, dependencies.PrepareDependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := ApplyRequest{Prepare: fixture.request, SubjectDigest: prepared.SubjectDigest}
+	for _, action := range prepared.RequiredActions {
+		request.Decisions = append(request.Decisions, ApplyDecision{ActionID: action.ActionID, Choice: "trust_exact_subject"})
+	}
+	result, err := Apply(context.Background(), request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func TestApplyMapsUnsupportedCreateToActionRequiredAndSupportedCreateToApplied(t *testing.T) {
+	unsupported := &applyUnsupportedNoCreateBackend{reconcileBackend: reconcileBackend{name: "test", inspect: InspectAbsent}}
+	unsupportedResult := applyF31Result(t, unsupported)
+	if unsupportedResult.Outcome != ApplyOutcomeActionRequired || unsupportedResult.ReasonCode != "test backend unsupported" {
+		t.Fatalf("unsupported Apply result = %#v, want action_required", unsupportedResult)
+	}
+	if unsupportedResult.Outcome == ApplyOutcomeApplied {
+		t.Fatal("unsupported Create was promoted to Applied")
+	}
+
+	supported := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	supportedResult := applyF31Result(t, supported)
+	if supportedResult.Outcome != ApplyOutcomeApplied {
+		t.Fatalf("supported Apply result = %#v, want applied", supportedResult)
 	}
 }
 
