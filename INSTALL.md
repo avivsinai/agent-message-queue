@@ -166,6 +166,9 @@ retained; do not move the executable while registered wakes still identify it.
 WSL is a Linux environment: install a Linux asset there, not the Windows ZIP.
 On native Windows, `doctor --ops` can report wake lock files but cannot verify
 live wake process identity or auto-fix `unverified` locks.
+The native Windows launch API advertises only `launch_intent_v1` and
+`plan_only_commands_v1`; managed Prepare/Apply, lifecycle, and tmux features
+are omitted and fail negotiation.
 
 For manual installs, verify the selected asset against `checksums.txt` before extracting it:
 

@@ -26,6 +26,17 @@ A `0.61.1` binary advertises `placement`, `initial_input`, `base_root`,
 require every feature it uses. Contract semver alone does not claim that an
 unadvertised feature is available.
 
+The advertised feature set is derived from the callable platform
+implementation at build time:
+
+| Build platform | Advertised launch features |
+| --- | --- |
+| macOS, Linux (including WSL) | The full v1 set: `launch_intent_v1`, `prepare_apply_v1`, `lifecycle_v1`, `managed_tmux_v1`, `plan_only_commands_v1`, plus `initial_input`, `placement`, `base_root`, `on_live`, `caller_context`, `executable_identity`, and `wrapper`. |
+| Native Windows | `launch_intent_v1` and `plan_only_commands_v1` only. `prepare_apply_v1`, `lifecycle_v1`, and `managed_tmux_v1` are not callable and are rejected by negotiation. |
+
+WSL uses the Linux binary and therefore gets the Linux row. Negotiation fails
+closed for a feature that is not in the current build's advertised set.
+
 `PreviewV1.capabilities` reports the selected providers' static adapter grammar
 without executing a caller-supplied provider. `grammar_version` is the
 adapter-owned version that consumers compare. It changes when the allowed
