@@ -740,13 +740,23 @@ func finalizeCreatedState(root *fsq.DeliveryRoot, lease *Lease, create CreateRes
 	}
 	for i := range planned {
 		agent := &planned[i]
-		if agent.write && !agent.plan.PreSpawnAcquire {
+		if agent.write && !agent.plan.PreSpawnAcquire && agent.plan.AdapterMode != AdapterModeMint {
 			evidence := executionEvidence
 			agent.record.ExecutionEvidence = &evidence
 		}
 		if agent.plan.AdapterMode == AdapterModeMint && agent.write {
-			agent.record.State = CaptureReady
-			agent.record.Identity = ConversationIdentity{Provider: agent.adapter.Name(), ID: agent.plan.ConversationID}
+			// A mint identity is resumable only after the execution wrapper has
+			// durably acknowledged provider start. Backend creation alone can
+			// succeed while the wrapper is killed before exec.
+			if ticket, ticketErr := LoadExecutionTicket(root, agent.plan.Handle); ticketErr == nil && ticket.State == ExecutionAcknowledged {
+				record, recordErr := LoadConversation(root, agent.plan.Handle)
+				if recordErr != nil {
+					return nil, recordErr
+				}
+				agent.record = record
+			} else if ticketErr != nil && !errors.Is(ticketErr, os.ErrNotExist) {
+				return nil, ticketErr
+			}
 		}
 		if agent.plan.AdapterMode == AdapterModeCapture && agent.write && !agent.plan.PreSpawnAcquire {
 			captureEvidence := create.CaptureEvidence[agent.plan.Handle]
