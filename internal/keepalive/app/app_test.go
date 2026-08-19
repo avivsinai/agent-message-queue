@@ -274,20 +274,33 @@ func TestAttachIsIdempotentForSamePhysicalCmuxOwner(t *testing.T) {
 	dir := t.TempDir()
 	registryPath := filepath.Join(dir, "registry.json")
 	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
-	fakeCmux := filepath.Join(dir, "cmux")
-	if err := os.WriteFile(fakeCmux, []byte("#!/bin/sh\nprintf '%s\\n' '{\"windows\":[{\"workspaces\":[{\"panes\":[{\"surfaces\":[{\"id\":\"F901D722-6789-4BBB-9818-C4E97F20BEB3\",\"tty\":\"ttys101\"}]}]}]}]}'\n"), 0o700); err != nil {
-		t.Fatalf("write fake cmux: %v", err)
-	}
-	t.Setenv("CMUX_BUNDLED_CLI_PATH", fakeCmux)
+	runner := appCommandRunnerFunc(func(context.Context, string, ...string) ([]byte, error) {
+		return []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"ttys101"}]}]}]}]}`), nil
+	})
+	adapters := adapter.NewRegistry(adapter.Cmux{
+		Runner: runner,
+		Path:   "/fake/cmux",
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
+		},
+	}.WithOwnershipRecord())
 	args := []string{
 		"attach", "--registry", registryPath, "--adapter", "cmux", "--target", target,
 		"--root", "/tmp/idempotent", "--base-root", "/tmp", "--session", "idempotent", "--me", "codex", "--no-start",
 	}
-	runApp(t, args...)
-	runApp(t, args...)
+	for i := 0; i < 2; i++ {
+		var stdout, stderr bytes.Buffer
+		code := (App{Stdout: &stdout, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), args)
+		if code != 0 {
+			t.Fatalf("attach pass %d code=%d stdout=%s stderr=%s", i+1, code, stdout.String(), stderr.String())
+		}
+	}
 	loaded, err := registry.New(registryPath).Load()
 	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Target != target {
 		t.Fatalf("idempotent attach entries=%#v err=%v", loaded.Entries, err)
+	}
+	if loaded.Entries[0].OwnershipKey != "tty:/dev/ttys101" {
+		t.Fatalf("ownership_key = %q, want persisted tty key", loaded.Entries[0].OwnershipKey)
 	}
 }
 
@@ -437,6 +450,9 @@ func TestReattachRejectsRegisteredCmuxTargetWithUnknownPhysicalKeyBeforeWake(t *
 			}
 			return ""
 		},
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
+		},
 	})
 	amqCalls := filepath.Join(dir, "amq-calls.log")
 	fakeAMQ := filepath.Join(dir, "amq")
@@ -489,6 +505,9 @@ func TestReattachRejectsSamePhysicalKeyFromDegradedRegisteredTargetBeforeWake(t 
 				return strings.TrimPrefix(candidateTarget, "cmux:surface:")
 			}
 			return ""
+		},
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
 		},
 	})
 	amqCalls := filepath.Join(dir, "amq-calls.log")
@@ -1033,8 +1052,9 @@ done
 	if err := os.WriteFile(fakeKeepalive, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write fake keepalive: %v", err)
 	}
+	adapters := hermeticCmuxRegistry(fakeCmux)
 	var stderr bytes.Buffer
-	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Run(context.Background(), []string{"reattach",
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{"reattach",
 		"--registry", registryPath,
 		"--adapter", "cmux",
 		"--target", newTarget,
@@ -1114,7 +1134,8 @@ done
 	if err := os.WriteFile(fakeKeepalive, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write fake keepalive: %v", err)
 	}
-	runApp(t, "reattach",
+	adapters := hermeticCmuxRegistry(fakeCmux)
+	runAppWith(t, App{Adapters: &adapters}, "reattach",
 		"--registry", registryPath,
 		"--adapter", "cmux",
 		"--target", newTarget,
@@ -1198,8 +1219,9 @@ done
 	if err := os.WriteFile(fakeKeepalive, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write fake keepalive: %v", err)
 	}
+	adapters := hermeticCmuxRegistry(fakeCmux)
 	var stderr bytes.Buffer
-	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Run(context.Background(), []string{"reattach",
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{"reattach",
 		"--registry", registryPath,
 		"--adapter", "cmux",
 		"--target", newTarget,
@@ -1261,8 +1283,9 @@ func TestReattachRetireDetachedNeverRetargetsLiveCmuxWake(t *testing.T) {
 	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript("#!/bin/sh\nprintf 'CALL %s\\n' \"$*\" >> \"$AMQ_KEEPALIVE_ARGS_LOG\"\necho 'existing wake target differs' >&2\nexit 7\n"), 0o700); err != nil {
 		t.Fatalf("write fake AMQ: %v", err)
 	}
+	adapters := hermeticCmuxRegistry(fakeCmux)
 	var stderr bytes.Buffer
-	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Run(context.Background(), []string{
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
 		"reattach", "--registry", registryPath, "--adapter", "cmux", "--target", newTarget,
 		"--root", root, "--base-root", dir, "--session", "active-room", "--me", "codex",
 		"--amq", fakeAMQ, "--self", filepath.Join(dir, "amq-keepalive"), "--retire-detached",
@@ -1397,8 +1420,9 @@ func TestRetireSessionRefusesWhenTargetStillExists(t *testing.T) {
 	if err := os.WriteFile(fakeAMQ, []byte("#!/bin/sh\nexit 99\n"), 0o700); err != nil {
 		t.Fatalf("write fake AMQ: %v", err)
 	}
+	adapters := hermeticCmuxRegistry(fakeCmux)
 	var stderr bytes.Buffer
-	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Run(context.Background(), []string{
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
 		"retire-session", "--registry", registryPath, "--root", root, "--amq", fakeAMQ,
 	})
 	if code != 1 || !strings.Contains(stderr.String(), "still exists") {
@@ -1696,7 +1720,13 @@ printf '%s\n' '{"windows":[{"workspaces":[{"panes":[{"surfaces":[{"id":"F901D722
 	}
 	t.Setenv("CMUX_BUNDLED_CLI_PATH", fakeCmux)
 	wake := &appCountingWake{}
-	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	adapters := adapter.NewRegistry(adapter.Cmux{
+		Path: fakeCmux,
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
+		},
+	}.WithOwnershipRecord())
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &adapters}
 	results, err := app.superviseOnce(context.Background(), registryPath, wake, "/bin/amq-keepalive", time.Second)
 	if err != nil || len(results) != 2 || len(wake.starts) != 2 {
 		t.Fatalf("first pass results=%#v starts=%d err=%v", results, len(wake.starts), err)
@@ -1777,6 +1807,71 @@ func TestSuperviseFailsClosedWhenOneRegisteredSurfaceHasLiveTTYAlias(t *testing.
 	)
 	if err != nil || len(results) != 1 || results[0].Action != "deferred" || calls != 2 {
 		t.Fatalf("retry results=%#v calls=%d err=%v, want immediate next-pass retry", results, calls, err)
+	}
+}
+
+func TestSuperviseRefusesCmuxTTYDriftAcrossRestart(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("cmux adapter requires macOS")
+	}
+	dir := t.TempDir()
+	registryPath := filepath.Join(dir, "registry.json")
+	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
+	store := registry.New(registryPath)
+	if _, err := store.Upsert(registry.Entry{
+		Root: "/tmp/drift", Agent: "codex", Adapter: "cmux", Target: target, State: registry.StateActive,
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	current := now
+	appNow := func() time.Time { return current }
+	tree := func(tty string) []byte {
+		return []byte(`{"windows":[{"workspaces":[{"id":"WS-1","panes":[{"surfaces":[{"id":"F901D722-6789-4BBB-9818-C4E97F20BEB3","tty":"` + tty + `"}]}]}]}]}`)
+	}
+	newAdapters := func(tty string) adapter.Registry {
+		reg := adapter.NewRegistry(adapter.Cmux{
+			Runner: appCommandRunnerFunc(func(context.Context, string, ...string) ([]byte, error) {
+				return tree(tty), nil
+			}),
+			Path: "/fake/cmux",
+			LiveTTYOwnerCount: func(string) (int, error) {
+				return 1, nil
+			},
+		}.WithOwnershipRecord())
+		return reg
+	}
+
+	wake := &appCountingWake{}
+	firstAdapters := newAdapters("ttys011")
+	results, err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &firstAdapters, Now: appNow}).superviseOnce(
+		context.Background(), registryPath, wake, "/bin/amq-keepalive", time.Second,
+	)
+	if err != nil || len(results) != 1 || results[0].Action != supervisor.ActionEnsured {
+		t.Fatalf("first pass results=%#v err=%v, want ensured", results, err)
+	}
+	loaded, err := store.Load()
+	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].OwnershipKey != "tty:/dev/ttys011" {
+		t.Fatalf("persisted ownership_key=%#v err=%v, want tty:/dev/ttys011", loaded.Entries, err)
+	}
+
+	current = now.Add(6 * time.Minute)
+	secondAdapters := newAdapters("ttys012")
+	results, err = (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &secondAdapters, Now: appNow}).superviseOnce(
+		context.Background(), registryPath, wake, "/bin/amq-keepalive", time.Second,
+	)
+	if err != nil || len(results) != 1 || results[0].Action != supervisor.ActionDeferred ||
+		results[0].Error == nil || !errors.Is(results[0].Error, adapter.ErrTargetDegraded) ||
+		!strings.Contains(results[0].Error.Error(), "ownership key conflict") {
+		t.Fatalf("restart pass results=%#v err=%v, want degraded tty drift", results, err)
+	}
+	if len(wake.starts) != 1 {
+		t.Fatalf("drift pass started extra wakes: %d", len(wake.starts))
+	}
+	loaded, err = store.Load()
+	if err != nil || loaded.Entries[0].OwnershipKey != "tty:/dev/ttys011" {
+		t.Fatalf("drift overwrote ownership_key: %#v err=%v", loaded.Entries, err)
 	}
 }
 
@@ -2370,12 +2465,28 @@ func mustAbsPath(t *testing.T, path string) string {
 
 func runApp(t *testing.T, args ...string) {
 	t.Helper()
+	runAppWith(t, App{}, args...)
+}
+
+func runAppWith(t *testing.T, app App, args ...string) {
+	t.Helper()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), args)
+	app.Stdout = &stdout
+	app.Stderr = &stderr
+	code := app.Run(context.Background(), args)
 	if code != 0 {
 		t.Fatalf("Run(%v) = %d\nstdout:\n%s\nstderr:\n%s", args, code, stdout.String(), stderr.String())
 	}
+}
+
+func hermeticCmuxRegistry(fakeCmuxPath string) adapter.Registry {
+	return adapter.NewRegistry(adapter.File{}, adapter.Ghostty{}, adapter.Cmux{
+		Path: fakeCmuxPath,
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 1, nil
+		},
+	}.WithOwnershipRecord())
 }
 
 func fakeStartWakeScript(body string) []byte {

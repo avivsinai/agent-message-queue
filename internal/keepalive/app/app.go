@@ -257,6 +257,9 @@ func (a App) registerWithOptions(ctx context.Context, opts registerOptions) erro
 			if err := checkPhysicalTargetAvailable(file, selected, inventory, next, opts.Replace); err != nil {
 				return err
 			}
+			if key, keyErr := inventory.OwnershipKey(next.Target); keyErr == nil {
+				next.OwnershipKey = key
+			}
 			reconciler.Adapter = targetInventoryProbe{inventory: inventory}
 		}
 
@@ -627,6 +630,7 @@ func (a App) superviseOnce(ctx context.Context, registryPath string, wake superv
 			return err
 		}
 		adapters := a.adapterRegistry()
+		seedAdapterOwnership(adapters, file.Entries)
 		probes := passProbes(file.Entries, adapters)
 		conflicts := targetOwnershipConflicts(file, adapters)
 		if anyEntryDue(file.Entries, a.now()) {
@@ -652,6 +656,11 @@ func (a App) superviseOnce(ctx context.Context, registryPath string, wake superv
 				WakeTimeout: wakeTimeout,
 			}
 			updated, result := reconciler.Reconcile(ctx, entry)
+			if result.Action == supervisor.ActionEnsured || result.Action == supervisor.ActionStartFailed {
+				if key := lookupOwnershipKey(ctx, probe, updated.Target); key != "" {
+					updated.OwnershipKey = key
+				}
+			}
 			if previous != updated {
 				updates = append(updates, registry.EntryUpdate{Before: previous, After: updated})
 			}
@@ -722,6 +731,39 @@ func (a App) adapterRegistry() adapter.Registry {
 		state = &adapterLogState{last: map[string]time.Time{}}
 	}
 	return adapter.DefaultRegistryWithLogf(a.rateLimitedAdapterLogf(state))
+}
+
+type ownershipRememberer interface {
+	RememberOwnership(target, key string)
+}
+
+func seedAdapterOwnership(adapters adapter.Registry, entries []registry.Entry) {
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.OwnershipKey) == "" {
+			continue
+		}
+		selected, err := adapters.Get(entry.Adapter)
+		if err != nil {
+			continue
+		}
+		remember, ok := selected.(ownershipRememberer)
+		if !ok {
+			continue
+		}
+		remember.RememberOwnership(entry.Target, entry.OwnershipKey)
+	}
+}
+
+func lookupOwnershipKey(ctx context.Context, probe supervisor.Adapter, target string) string {
+	op, ok := probe.(ownershipProbe)
+	if !ok {
+		return ""
+	}
+	key, err := op.OwnershipKey(ctx, target)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(key)
 }
 
 func (a App) rateLimitedAdapterLogf(state *adapterLogState) func(string, ...any) {
