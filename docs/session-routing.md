@@ -53,6 +53,12 @@ or delete message files; unsafe types, symlinks, unreadable paths, and
 concurrent layout changes fail closed. `--base-root` must name the target or
 its direct parent.
 
+Message publication uses a unique attempt file in `inbox/tmp` and a
+no-replace `tmp -> new` commit. An existing same-name `new` file is never
+overwritten: identical bytes are an idempotent success, while different bytes
+preserve both copies and return a collision. Claiming `new -> cur` also refuses
+to replace a retained same-name message.
+
 `send --from-session` is deliberately double-explicit and resolves its source
 from the supplied raw base; callers must verify that base. See
 [issue #104](https://github.com/avivsinai/agent-message-queue/issues/104).
