@@ -707,8 +707,13 @@ func liveWakeOwnerObservationForTest() wakeOwnerObservation {
 
 func writeExecutableForTest(t *testing.T, name string) string {
 	t.Helper()
+	return writeExecutableScriptForTest(t, name, "#!/bin/sh\nexit 0\n")
+}
+
+func writeExecutableScriptForTest(t *testing.T, name, script string) string {
+	t.Helper()
 	path := filepath.Join(secureTempDirForTest(t), name)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write executable: %v", err)
 	}
 	return path
@@ -6058,6 +6063,138 @@ func TestInjectViaRevalidatesExecutableBeforeExec(t *testing.T) {
 				t.Fatalf("expected %q rejection, got %v", tc.wantText, err)
 			}
 		})
+	}
+}
+
+func TestInjectViaMapsUncertainSentinel(t *testing.T) {
+	injector := writeExecutableScriptForTest(t, "uncertain-injector", `#!/bin/sh
+echo AMQ_INJECT_PROGRESS=uncertain >&2
+exit 1
+`)
+	err := injectVia(&wakeConfig{injectVia: injector, injectTimeout: time.Second}, "payload")
+	if !isWakeTerminalProgressUncertain(err) {
+		t.Fatalf("injectVia error = %v, want uncertain progress", err)
+	}
+}
+
+func TestInjectViaOrdinaryFailureIsNotUncertain(t *testing.T) {
+	injector := writeExecutableScriptForTest(t, "ordinary-fail-injector", `#!/bin/sh
+echo failed >&2
+exit 1
+`)
+	err := injectVia(&wakeConfig{injectVia: injector, injectTimeout: time.Second}, "payload")
+	if err == nil {
+		t.Fatal("injectVia error = nil, want failure")
+	}
+	if isWakeTerminalProgressUncertain(err) {
+		t.Fatalf("ordinary inject-via failure marked uncertain: %v", err)
+	}
+}
+
+func TestDeliverNewMessageNotificationInjectViaUncertainDoesNotReplay(t *testing.T) {
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	logPath := filepath.Join(secureTempDirForTest(t), "inject.log")
+	injector := writeExecutableScriptForTest(t, "uncertain-injector", fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$1" >> %q
+echo AMQ_INJECT_PROGRESS=uncertain >&2
+exit 1
+`, logPath))
+	attentionWrites := 0
+	cfg := &wakeConfig{
+		me:             "codex",
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModePaste,
+		injectVia:      injector,
+		injectTimeout:  time.Second,
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
+	}
+
+	err := deliverNewMessageNotification(
+		cfg,
+		peerWakeNotification("pending message"),
+		false,
+		current,
+	)
+	if err != nil {
+		t.Fatalf("delivery error = %v, want live recovery transition", err)
+	}
+	if !cfg.inputDelivery.acceptanceUncertain {
+		t.Fatalf("uncertain acceptance was not retained: %#v", cfg.inputDelivery)
+	}
+	if !cfg.inputRecoveryRequired {
+		t.Fatal("uncertain input did not enter recovery-required mode")
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("uncertain input emitted %d recovery alerts, want one", attentionWrites)
+	}
+	first, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read inject log: %v", readErr)
+	}
+	if got, want := string(first), coopWakeDoorbell+"\n"; got != want {
+		t.Fatalf("inject log = %q, want payload once (%q)", got, want)
+	}
+
+	if err := deliverNewMessageNotification(
+		cfg,
+		peerWakeNotification("pending message"),
+		false,
+		current,
+	); err != nil {
+		t.Fatalf("second delivery error = %v", err)
+	}
+	second, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read inject log after second delivery: %v", readErr)
+	}
+	if string(second) != string(first) {
+		t.Fatalf("second delivery replayed payload: first=%q second=%q", first, second)
+	}
+}
+
+func TestDeliverNewMessageNotificationInjectViaOrdinaryFailureFallsBack(t *testing.T) {
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	logPath := filepath.Join(secureTempDirForTest(t), "inject.log")
+	injector := writeExecutableScriptForTest(t, "ordinary-fail-injector", fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$1" >> %q
+echo failed >&2
+exit 1
+`, logPath))
+	attentionWrites := 0
+	cfg := &wakeConfig{
+		me:             "codex",
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModePaste,
+		injectVia:      injector,
+		injectTimeout:  time.Second,
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			attentionWrites++
+			return len(data), nil
+		},
+	}
+
+	err := deliverNewMessageNotification(
+		cfg,
+		peerWakeNotification("pending message"),
+		false,
+		current,
+	)
+	if err != nil {
+		t.Fatalf("ordinary inject-via failure error = %v, want attention fallback", err)
+	}
+	if cfg.inputDelivery.acceptanceUncertain {
+		t.Fatalf("ordinary inject-via failure marked uncertain: %#v", cfg.inputDelivery)
+	}
+	if cfg.inputRecoveryRequired {
+		t.Fatal("ordinary inject-via failure entered recovery")
+	}
+	if attentionWrites != 1 {
+		t.Fatalf("ordinary inject-via failure emitted %d attention writes, want one", attentionWrites)
 	}
 }
 

@@ -629,7 +629,7 @@ func (c Cmux) Inject(ctx context.Context, target string, payload string) error {
 	}
 
 	if err := c.sleep(ctx, c.settleDelay()); err != nil {
-		return fmt.Errorf("wait before submitting cmux target %q: %w", target, err)
+		return fmt.Errorf("%w: wait before submitting cmux target %q: %v", ErrInjectUncertain, target, err)
 	}
 
 	keyParams, err := json.Marshal(map[string]string{
@@ -640,7 +640,7 @@ func (c Cmux) Inject(ctx context.Context, target string, payload string) error {
 		return fmt.Errorf("encode cmux key parameters: %w", err)
 	}
 	if out, err := c.runner().Run(ctx, path, "rpc", "surface.send_key", string(keyParams)); err != nil {
-		return fmt.Errorf("submit cmux target %q: %w: %s", target, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%w: submit cmux target %q: %v: %s", ErrInjectUncertain, target, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

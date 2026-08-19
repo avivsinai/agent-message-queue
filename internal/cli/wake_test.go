@@ -534,6 +534,9 @@ func TestInjectViaTimeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("expected timeout error, got %v", err)
 	}
+	if isWakeTerminalProgressUncertain(err) {
+		t.Fatalf("timeout marked uncertain: %v", err)
+	}
 }
 
 func TestInjectViaTimeoutBoundsInheritedDescendantOutput(t *testing.T) {

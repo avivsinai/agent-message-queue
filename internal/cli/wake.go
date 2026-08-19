@@ -1147,11 +1147,16 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	}
 
 	// External injection: delegate to user-specified command instead of TIOCSTI.
-	// The command receives the notification text as its last argument. This
-	// transport does not participate in inputDelivery, so exit zero is its only
-	// presentation-confirmation evidence; an unchanged confirmed cohort therefore
-	// invokes the injector with a submit-only CR on its next reminder.
+	// The command receives the notification text as its last argument. Exit zero
+	// remains presentation-confirmation evidence. Post-text Enter/submit failure
+	// is encoded in child output as AMQ_INJECT_PROGRESS=uncertain; that path
+	// must not replay the payload.
 	if cfg.injectVia != "" {
+		if cfg.inputDelivery.acceptanceUncertain {
+			return &wakeInputDemotionBlockedError{
+				err: errors.New("a prior terminal write has uncertain acceptance"),
+			}
+		}
 		allowed, guardErr := authorizeTerminalWrite(cfg)
 		if guardErr != nil {
 			return deliverWakeAttentionAfterInputRefusal(
@@ -1164,6 +1169,13 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
 		if err := injectVia(cfg, plainText); err != nil {
+			var uncertain *wakeTerminalProgressUncertainError
+			if errors.As(err, &uncertain) {
+				cfg.inputDelivery.acceptanceUncertain = true
+				_ = writeWakeDiagnostic(cfg, "amq wake: warning: %v\n", uncertain)
+				cfg.fallbackWarn = false
+				return &wakeInputDemotionBlockedError{err: uncertain}
+			}
 			if cfg.fallbackWarn {
 				_ = writeWakeDiagnostic(cfg, "amq wake: --inject-via failed: %v\n", err)
 				_ = writeWakeDiagnostic(cfg, "amq wake: falling back to stderr notification\n")
@@ -1949,6 +1961,9 @@ func injectVia(cfg *wakeConfig, text string) error {
 	if runErr != nil {
 		if cfg.debug {
 			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via failed: %v (%s)\n", runErr, string(out))
+		}
+		if strings.Contains(string(out), "AMQ_INJECT_PROGRESS=uncertain") {
+			return &wakeTerminalProgressUncertainError{err: runErr}
 		}
 		return runErr
 	}

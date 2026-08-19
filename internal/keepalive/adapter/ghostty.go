@@ -79,9 +79,13 @@ func (g Ghostty) Inject(ctx context.Context, target string, payload string) erro
 		return err
 	}
 	payload = sanitizePayloadForSubmit(payload)
-	out, err := g.runner().Run(ctx, "osascript", "-e", ghosttyInjectScript, id, payload)
+	out, err := g.runner().Run(ctx, "osascript", "-e", ghosttyInjectTextScript, id, payload)
 	if err != nil {
-		return fmt.Errorf("inject into Ghostty target %q: %w: %s", target, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("inject text into Ghostty target %q: %w: %s", target, err, strings.TrimSpace(string(out)))
+	}
+	out, err = g.runner().Run(ctx, "osascript", "-e", ghosttyInjectSubmitScript, id)
+	if err != nil {
+		return fmt.Errorf("%w: submit Ghostty target %q: %v: %s", ErrInjectUncertain, target, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -140,7 +144,7 @@ on run argv
 end run
 `
 
-const ghosttyInjectScript = `
+const ghosttyInjectTextScript = `
 on run argv
 	set targetID to item 1 of argv
 	set payload to item 2 of argv
@@ -151,6 +155,19 @@ on run argv
 		if matchCount is greater than 1 then error "ambiguous Ghostty terminal id: " & targetID
 		set targetTerminal to item 1 of matches
 		input text payload to targetTerminal
+	end tell
+end run
+`
+
+const ghosttyInjectSubmitScript = `
+on run argv
+	set targetID to item 1 of argv
+	tell application "Ghostty"
+		set matches to terminals whose id is targetID
+		set matchCount to count of matches
+		if matchCount is 0 then error "no Ghostty terminal with id: " & targetID
+		if matchCount is greater than 1 then error "ambiguous Ghostty terminal id: " & targetID
+		set targetTerminal to item 1 of matches
 		send key "enter" to targetTerminal
 	end tell
 end run

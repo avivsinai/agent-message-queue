@@ -630,8 +630,41 @@ func TestCmuxInjectDoesNotSendEnterWhenTextFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "surface unavailable") {
 		t.Fatalf("Inject() error = %v, want command output", err)
 	}
+	if errors.Is(err, ErrInjectUncertain) {
+		t.Fatalf("text failure marked uncertain: %v", err)
+	}
 	if len(runner.calls) != 2 {
 		t.Fatalf("calls = %d, want inventory and failed text call only", len(runner.calls))
+	}
+}
+
+func TestCmuxInjectEnterFailureAfterTextIsUncertain(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	runner := &fakeCommandRunner{results: []fakeCommandResult{
+		{output: cmuxTreeWithSurfaces(testCmuxSurfaceID)},
+		{},
+		{output: []byte("enter failed"), err: errors.New("exit status 1")},
+	}}
+	adapter := Cmux{
+		Runner: runner,
+		Path:   "/fake/cmux",
+		Sleep:  func(context.Context, time.Duration) error { return nil },
+	}
+	err := adapter.Inject(context.Background(), "cmux:surface:"+testCmuxSurfaceID, "payload")
+	if !errors.Is(err, ErrInjectUncertain) {
+		t.Fatalf("Inject() error = %v, want ErrInjectUncertain", err)
+	}
+	if !strings.Contains(err.Error(), "enter failed") {
+		t.Fatalf("Inject() error = %v, want command output", err)
+	}
+	if len(runner.calls) != 3 {
+		t.Fatalf("calls = %d, want inventory, text, and failed enter", len(runner.calls))
+	}
+	if got := runner.calls[1].args[1]; got != "surface.send_text" {
+		t.Fatalf("text call = %#v, want surface.send_text", runner.calls[1])
+	}
+	if got := runner.calls[2].args[1]; got != "surface.send_key" {
+		t.Fatalf("key call = %#v, want surface.send_key", runner.calls[2])
 	}
 }
 
