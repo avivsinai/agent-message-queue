@@ -336,6 +336,59 @@ func TestApplyMapsUnsupportedCreateToActionRequiredAndSupportedCreateToApplied(t
 	}
 }
 
+func TestApplyV1RunnableParticipantsRequireReprepare(t *testing.T) {
+	fixture := newInternalPrepareFixture(t)
+	backend := &prepareTestBackend{}
+	request := fixture.request
+	request.SubjectSchema = SubjectSchemaV1
+	// Keep the requested runnable handle absent from the pre-existing roster.
+	// If the reprepare guard moves after roster provisioning, Apply must expose
+	// that mutant by creating reviewer and adding it to config.json.
+	request.Participants[0].Handle = "reviewer"
+	configPath := filepath.Join(fixture.sessionRoot, "meta", "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"version":1,"agents":["claude"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dependencies := ApplyDependencies{PrepareDependencies: fixture.dependencies(backend)}
+	prepared, err := Prepare(context.Background(), request, dependencies.PrepareDependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRoster := prepareTreeSnapshot(t, filepath.Join(fixture.sessionRoot, "agents"))
+
+	applyRequest := ApplyRequest{Prepare: request, SubjectDigest: prepared.SubjectDigest}
+	for _, action := range prepared.RequiredActions {
+		applyRequest.Decisions = append(applyRequest.Decisions, ApplyDecision{ActionID: action.ActionID, Choice: "trust_exact_subject"})
+	}
+	result, err := Apply(context.Background(), applyRequest, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != ApplyOutcomeActionRequired || result.ReasonCode != "reprepare_required" {
+		t.Fatalf("v1 runnable Apply result = %#v, want typed reprepare refusal", result)
+	}
+	if result.SubjectDigest != prepared.SubjectDigest || result.PlanDigest != prepared.PlanDigest || result.TrustDigest != prepared.TrustDigest {
+		t.Fatalf("reprepare result lost prepared digests: result=%#v prepared=%#v", result, prepared)
+	}
+	if backend.creates != 0 {
+		t.Fatalf("v1 reprepare refusal created backend resources: %d", backend.creates)
+	}
+	afterConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterConfig, beforeConfig) {
+		t.Fatalf("v1 reprepare refusal changed session config: before=%q after=%q", beforeConfig, afterConfig)
+	}
+	if afterRoster := prepareTreeSnapshot(t, filepath.Join(fixture.sessionRoot, "agents")); afterRoster != beforeRoster {
+		t.Fatalf("v1 reprepare refusal changed durable roster: before=%s after=%s", beforeRoster, afterRoster)
+	}
+}
+
 func TestApplyPublishedSessionCannotLoseLeaseTransitionRace(t *testing.T) {
 	root := t.TempDir()
 	project := filepath.Join(root, "project")

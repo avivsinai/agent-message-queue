@@ -283,6 +283,8 @@ caller has no `subject_schema`; `0.61.1` interprets that omission as schema `1`
 and reports `reprepare_recommended` in the result hints. A new caller must copy
 the returned schema. It must not omit the field to select legacy behavior.
 
+Apply with schema 1 remains compatible for participant-only requests; if any participant is runnable, it returns `action_required` with `reason_code` `reprepare_required` and performs no launch mutation, so the caller must re-Prepare and Apply with schema 2.
+
 `reviewedChoiceFor` is intentionally caller-owned. AMQ does not choose trust,
 stale-conversation, rebind, or degraded-capability decisions for the caller.
 
