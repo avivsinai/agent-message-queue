@@ -304,6 +304,36 @@ func moveReconcileFixtureToLifecycleSession(t *testing.T, request *ReconcileRequ
 	request.Root = root
 }
 
+func TestMissingBindingLifecycleMutationsAreNotApplied(t *testing.T) {
+	project := t.TempDir()
+	sessionPath := filepath.Join(project, ".agent-mail", "collab")
+	if err := fsq.EnsureRootDirs(sessionPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionPath, "meta", "config.json"), []byte(`{"version":1,"agents":["operator"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := LifecycleRequest{Target: PrepareTarget{ProjectRoot: project, SessionRoot: sessionPath, Session: "collab"}}
+	for _, test := range []struct {
+		name string
+		call func() (LifecycleResult, error)
+	}{
+		{name: "focus", call: func() (LifecycleResult, error) {
+			return FocusLifecycle(context.Background(), target, LifecycleDependencies{})
+		}},
+		{name: "close", call: func() (LifecycleResult, error) {
+			return CloseLifecycle(context.Background(), target, LifecycleDependencies{})
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := test.call()
+			if err != nil || result.Disposition != MutationNotApplied || result.ReasonCode != "binding_missing" || result.BindingGeneration != "" {
+				t.Fatalf("missing binding %s = %#v, %v", test.name, result, err)
+			}
+		})
+	}
+}
+
 type lifecycleCountingBackend struct {
 	*TmuxBackend
 	unknown             bool

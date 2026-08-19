@@ -17,6 +17,14 @@ type ResultHintV1 string
 
 const HintReprepareRecommended ResultHintV1 = "reprepare_recommended"
 
+type MutationDispositionV1 string
+
+const (
+	MutationDispositionNotAppliedV1 MutationDispositionV1 = "not_applied"
+	MutationDispositionCommittedV1  MutationDispositionV1 = "committed"
+	MutationDispositionUncertainV1  MutationDispositionV1 = "uncertain"
+)
+
 const (
 	PrepareOutcomeReady          = "ready"
 	PrepareOutcomeActionRequired = "action_required"
@@ -366,15 +374,17 @@ type ApplyResultV1 struct {
 	PlanDigest    string `json:"plan_digest"`
 	TrustDigest   string `json:"trust_digest"`
 	// SemanticDigest is a deprecated compatibility alias of TrustDigest.
-	SemanticDigest string                     `json:"semantic_digest"`
-	Backend        string                     `json:"backend"`
-	Profile        string                     `json:"profile"`
-	Roster         RosterDriftV1              `json:"roster"`
-	Observations   []ParticipantObservationV1 `json:"observations"`
-	Commands       []CommandV1                `json:"commands,omitempty"`
-	FollowUps      []RequiredActionV1         `json:"follow_ups,omitempty"`
-	Evidence       []EvidenceRefV1            `json:"evidence,omitempty"`
-	CallerContext  map[string]string          `json:"caller_context,omitempty"`
+	SemanticDigest    string                     `json:"semantic_digest"`
+	Backend           string                     `json:"backend"`
+	Profile           string                     `json:"profile"`
+	Disposition       MutationDispositionV1      `json:"disposition"`
+	BindingGeneration string                     `json:"binding_generation,omitempty"`
+	Roster            RosterDriftV1              `json:"roster"`
+	Observations      []ParticipantObservationV1 `json:"observations"`
+	Commands          []CommandV1                `json:"commands,omitempty"`
+	FollowUps         []RequiredActionV1         `json:"follow_ups,omitempty"`
+	Evidence          []EvidenceRefV1            `json:"evidence,omitempty"`
+	CallerContext     map[string]string          `json:"caller_context,omitempty"`
 }
 
 type InspectRequestV1 struct {
@@ -386,15 +396,17 @@ type FocusRequestV1 = InspectRequestV1
 type CloseRequestV1 = InspectRequestV1
 
 type LifecycleResultV1 struct {
-	ResultVersion int                        `json:"result_version"`
-	Outcome       string                     `json:"outcome"`
-	ReasonCode    string                     `json:"reason_code,omitempty"`
-	Backend       string                     `json:"backend"`
-	Profile       string                     `json:"profile"`
-	State         string                     `json:"state"`
-	Observations  []ParticipantObservationV1 `json:"observations"`
-	Evidence      []EvidenceRefV1            `json:"evidence,omitempty"`
-	CallerContext map[string]string          `json:"caller_context,omitempty"`
+	ResultVersion     int                        `json:"result_version"`
+	Outcome           string                     `json:"outcome"`
+	ReasonCode        string                     `json:"reason_code,omitempty"`
+	Backend           string                     `json:"backend"`
+	Profile           string                     `json:"profile"`
+	Disposition       MutationDispositionV1      `json:"disposition"`
+	BindingGeneration string                     `json:"binding_generation,omitempty"`
+	State             string                     `json:"state"`
+	Observations      []ParticipantObservationV1 `json:"observations"`
+	Evidence          []EvidenceRefV1            `json:"evidence,omitempty"`
+	CallerContext     map[string]string          `json:"caller_context,omitempty"`
 }
 
 type InspectResultV1 = LifecycleResultV1

@@ -396,7 +396,7 @@
     "ApplyResultV1": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["result_version", "subject_schema", "outcome", "subject_digest", "plan_digest", "trust_digest", "semantic_digest", "backend", "profile", "roster", "observations"],
+      "required": ["result_version", "subject_schema", "outcome", "subject_digest", "plan_digest", "trust_digest", "semantic_digest", "backend", "profile", "disposition", "roster", "observations"],
       "properties": {
         "result_version": {"const": 1},
         "subject_schema": {"enum": [1, 2]},
@@ -409,6 +409,8 @@
         "semantic_digest": {"$ref": "#/$defs/Digest"},
         "backend": {"type": "string"},
         "profile": {"type": "string"},
+        "disposition": {"enum": ["not_applied", "committed", "uncertain"]},
+        "binding_generation": {"type": "string", "minLength": 1},
         "roster": {"$ref": "#/$defs/RosterDriftV1"},
         "observations": {"type": "array", "items": {"$ref": "#/$defs/ParticipantObservationV1"}},
         "commands": {"type": "array", "items": {"$ref": "#/$defs/CommandV1"}},
@@ -432,13 +434,15 @@
     "LifecycleResultV1": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["result_version", "outcome", "backend", "profile", "state", "observations"],
+      "required": ["result_version", "outcome", "backend", "profile", "disposition", "state", "observations"],
       "properties": {
         "result_version": {"const": 1},
         "outcome": {"type": "string", "minLength": 1},
         "reason_code": {"type": "string"},
         "backend": {"type": "string"},
         "profile": {"type": "string"},
+        "disposition": {"enum": ["not_applied", "committed", "uncertain"]},
+        "binding_generation": {"type": "string", "minLength": 1},
         "state": {"enum": ["present", "absent", "unknown"]},
         "observations": {"type": "array", "items": {"$ref": "#/$defs/ParticipantObservationV1"}},
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/EvidenceRefV1"}},

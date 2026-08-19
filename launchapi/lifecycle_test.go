@@ -3,6 +3,7 @@ package launchapi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,68 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	internallaunch "github.com/avivsinai/agent-message-queue/internal/launch"
 )
+
+func TestLifecycleResultsMatchPublishedSchema(t *testing.T) {
+	project := t.TempDir()
+	session := filepath.Join(project, ".agent-mail", "collab")
+	if err := fsq.EnsureRootDirs(session); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(session, "meta", "config.json"), []byte(`{"version":1,"agents":["claude"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(session, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(session, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	backend := &publicLifecycleBackend{}
+	detect := backend.Detect()
+	binding := internallaunch.BindingRecord{
+		Version: internallaunch.BindingVersion, Backend: detect.Profile.Backend,
+		HostIdentity: detect.HostIdentity, InstanceIdentity: detect.InstanceIdentity,
+		Profile: detect.Profile.Identity(), LaunchNonce: "78787878-7878-4787-8787-787878787878",
+		Resources: internallaunch.ResourceIdentitySet{Version: internallaunch.ResourceSetVersion, Resources: []internallaunch.ResourceIdentity{
+			{OpaqueID: "session:one"}, {OpaqueID: "window:one", Agent: "claude"},
+		}},
+	}
+	lease, err := internallaunch.AcquireLease(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := internallaunch.WriteBinding(root, lease, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	previous := lifecycleBackends
+	lifecycleBackends = func() map[string]internallaunch.Backend { return map[string]internallaunch.Backend{"test": backend} }
+	t.Cleanup(func() { lifecycleBackends = previous })
+	request := InspectRequestV1{RequestVersion: RequestVersionV1, Target: TargetV1{ProjectRoot: project, SessionRoot: session, Session: "collab"}}
+	inspected, err := Inspect(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertLiveResultMatchesPublishedSchema(t, "InspectResultV1", inspected)
+	focused, err := Focus(context.Background(), FocusRequestV1(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertLiveResultMatchesPublishedSchema(t, "FocusResultV1", focused)
+	closed, err := Close(context.Background(), CloseRequestV1(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertLiveResultMatchesPublishedSchema(t, "CloseResultV1", closed)
+}
 
 func TestLifecycleFacadeUsesOwnedBinding(t *testing.T) {
 	project := t.TempDir()
@@ -65,6 +128,7 @@ func TestLifecycleFacadeUsesOwnedBinding(t *testing.T) {
 	if err != nil || inspected.ResultVersion != ResultVersionV1 || inspected.State != "present" || len(inspected.Observations) != 1 || inspected.Observations[0].Resource != "window:one" {
 		t.Fatalf("Inspect = %#v, %v", inspected, err)
 	}
+	assertLiveLifecycleResultMatchesPublishedSchema(t, "InspectResultV1", inspected)
 	if !reflect.DeepEqual(inspected.CallerContext, binding.CallerContext) {
 		t.Fatalf("Inspect caller context = %#v, want %#v", inspected.CallerContext, binding.CallerContext)
 	}
@@ -75,12 +139,26 @@ func TestLifecycleFacadeUsesOwnedBinding(t *testing.T) {
 	if err != nil || focused.Outcome != "attached" || backend.focuses != 1 {
 		t.Fatalf("Focus = %#v, %v focuses=%d", focused, err, backend.focuses)
 	}
+	assertLiveLifecycleResultMatchesPublishedSchema(t, "FocusResultV1", focused)
 	closed, err := Close(context.Background(), CloseRequestV1(request))
 	if err != nil || closed.Outcome != "closed" || backend.closes != 1 {
 		t.Fatalf("Close = %#v, %v closes=%d", closed, err, backend.closes)
 	}
+	assertLiveLifecycleResultMatchesPublishedSchema(t, "CloseResultV1", closed)
 	if _, err := internallaunch.LoadBinding(root); err != nil {
 		t.Fatalf("public Close removed AMQ binding: %v", err)
+	}
+	backend.failInspectCall = backend.inspectCalls + 2
+	postMutationFailure, err := Close(context.Background(), CloseRequestV1(request))
+	if err != nil || postMutationFailure.Outcome != "action_required" || postMutationFailure.ReasonCode != "post_mutation_inspect_failed" ||
+		postMutationFailure.Disposition != MutationDispositionCommittedV1 || postMutationFailure.BindingGeneration == "" {
+		t.Fatalf("post-mutation Inspect failure = %#v, %v", postMutationFailure, err)
+	}
+	backend.closeErr = errors.New("close mutation failed")
+	operationFailure, err := Close(context.Background(), CloseRequestV1(request))
+	if err != nil || operationFailure.Outcome != "action_required" || operationFailure.ReasonCode != "mutation_uncertain" ||
+		operationFailure.Disposition != MutationDispositionUncertainV1 || operationFailure.BindingGeneration == "" {
+		t.Fatalf("mutation failure = %#v, %v", operationFailure, err)
 	}
 	bindingPath := internallaunch.BindingPath(session)
 	bindingData, err := os.ReadFile(bindingPath)
@@ -144,15 +222,33 @@ func TestLifecycleFacadeUsesOwnedBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	corrupt, err := Inspect(context.Background(), request)
-	if err != nil || corrupt.Outcome != "action_required" || corrupt.ReasonCode != "evidence_corrupt" || backend.focuses != 1 || backend.closes != 1 {
+	if err != nil || corrupt.Outcome != "action_required" || corrupt.ReasonCode != "evidence_corrupt" || backend.focuses != 1 || backend.closes != 3 {
 		t.Fatalf("corrupt evidence Inspect = %#v, %v", corrupt, err)
+	}
+	if err := os.Remove(bindingPath); err != nil {
+		t.Fatal(err)
+	}
+	missingInspect, err := Inspect(context.Background(), request)
+	if err != nil || missingInspect.Disposition != MutationDispositionNotAppliedV1 || missingInspect.BindingGeneration != "" {
+		t.Fatalf("missing-binding Inspect = %#v, %v", missingInspect, err)
+	}
+	missingFocus, err := Focus(context.Background(), FocusRequestV1(request))
+	if err != nil || missingFocus.Disposition != MutationDispositionNotAppliedV1 || missingFocus.BindingGeneration != "" {
+		t.Fatalf("missing-binding Focus = %#v, %v", missingFocus, err)
+	}
+	missingClose, err := Close(context.Background(), CloseRequestV1(request))
+	if err != nil || missingClose.Disposition != MutationDispositionNotAppliedV1 || missingClose.BindingGeneration != "" {
+		t.Fatalf("missing-binding Close = %#v, %v", missingClose, err)
 	}
 }
 
 type publicLifecycleBackend struct {
-	focuses int
-	closes  int
-	closed  bool
+	focuses         int
+	closes          int
+	closed          bool
+	closeErr        error
+	inspectCalls    int
+	failInspectCall int
 }
 
 func (*publicLifecycleBackend) Detect() internallaunch.DetectResult {
@@ -170,6 +266,10 @@ func (*publicLifecycleBackend) Create(internallaunch.CreateRequest) (internallau
 }
 
 func (backend *publicLifecycleBackend) Inspect(internallaunch.InspectRequest) (internallaunch.InspectResult, error) {
+	backend.inspectCalls++
+	if backend.inspectCalls == backend.failInspectCall {
+		return internallaunch.InspectResult{}, errors.New("inspect timeout")
+	}
 	if backend.closed {
 		return internallaunch.InspectResult{Status: internallaunch.InspectAbsent, Evidence: "closed"}, nil
 	}
@@ -183,6 +283,9 @@ func (backend *publicLifecycleBackend) Focus(internallaunch.FocusRequest) (inter
 
 func (backend *publicLifecycleBackend) Close(internallaunch.CloseRequest) (internallaunch.CloseResult, error) {
 	backend.closes++
+	if backend.closeErr != nil {
+		return internallaunch.CloseResult{}, backend.closeErr
+	}
 	backend.closed = true
 	return internallaunch.CloseResult{Outcome: internallaunch.OutcomeClosed}, nil
 }

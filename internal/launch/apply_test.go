@@ -628,6 +628,192 @@ func TestApplyReturnsTypedOutcomeForCommittedRosterConfigDurabilityFailure(t *te
 	}
 }
 
+func TestApplyFinalPrepareFailureReturnsCommittedBinding(t *testing.T) {
+	request, dependencies, _ := committedRunnableApplyFixture(t)
+	beforeApplyFinalPrepareForTest = func() {
+		request.Prepare.Participants[0].Executable = "\x00"
+	}
+	t.Cleanup(func() { beforeApplyFinalPrepareForTest = nil })
+
+	result, err := Apply(context.Background(), request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != ApplyOutcomeActionRequired || result.ReasonCode != "post_commit_prepare_failed" ||
+		result.Disposition != MutationCommitted || result.BindingGeneration == "" || result.Backend != "test" {
+		t.Fatalf("post-commit Prepare result = %#v", result)
+	}
+}
+
+func TestApplyReconcileCrashAfterBindingReturnsCommittedGeneration(t *testing.T) {
+	request, dependencies, _ := committedRunnableApplyFixture(t)
+	crash := errors.New("crash after binding write")
+	dependencies.CrashHook = func(stage string) error {
+		if stage == "binding_written" {
+			return crash
+		}
+		return nil
+	}
+
+	result, err := Apply(context.Background(), request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != ApplyOutcomeActionRequired || result.Disposition != MutationCommitted || result.BindingGeneration == "" || result.Backend != "test" {
+		t.Fatalf("binding-written crash result = %#v", result)
+	}
+}
+
+func TestApplyReconcileCrashAfterJournalWrittenWithoutBindingIsUncertain(t *testing.T) {
+	request, dependencies, _ := committedRunnableApplyFixture(t)
+	crash := errors.New("crash after journal write")
+	dependencies.CrashHook = func(stage string) error {
+		if stage == "journal_written" {
+			return crash
+		}
+		return nil
+	}
+
+	result, err := Apply(context.Background(), request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != ApplyOutcomeActionRequired || result.Disposition != MutationUncertain || result.BindingGeneration == "" {
+		t.Fatalf("journal-written crash result = %#v", result)
+	}
+}
+
+func TestClassifyApplyMutationCorruptJournalWithoutBindingIsUncertain(t *testing.T) {
+	request, dependencies, _ := committedRunnableApplyFixture(t)
+	result, err := Apply(context.Background(), request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != ApplyOutcomeApplied || result.Disposition != MutationCommitted {
+		t.Fatalf("successful Apply = %#v", result)
+	}
+	if err := os.Remove(BindingPath(request.Prepare.Target.SessionRoot)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(JournalPath(request.Prepare.Target.SessionRoot), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(request.Prepare.Target.SessionRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(request.Prepare.Target.SessionRoot, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	classified := classifyApplyMutation(ApplyResult{Outcome: ApplyOutcomeActionRequired}, root)
+	if classified.Disposition != MutationUncertain {
+		t.Fatalf("corrupt journal classification = %#v, want uncertain", classified)
+	}
+}
+
+func TestApplyEvidenceFailureReturnsCommittedBinding(t *testing.T) {
+	request, dependencies, _ := committedRunnableApplyFixture(t)
+	collectApplyEvidenceRefs = func(*fsq.DeliveryRoot, []string) ([]EvidenceRef, error) {
+		return nil, errors.New("evidence read timeout")
+	}
+	t.Cleanup(func() { collectApplyEvidenceRefs = CollectEvidenceRefs })
+
+	result, err := Apply(context.Background(), request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != ApplyOutcomeActionRequired || result.ReasonCode != "post_commit_evidence_failed" ||
+		result.Disposition != MutationCommitted || result.BindingGeneration == "" || result.Backend != "test" {
+		t.Fatalf("post-commit evidence result = %#v", result)
+	}
+}
+
+func TestApplyDefinitePreMutationFailureIsNotApplied(t *testing.T) {
+	request, dependencies, backend := committedRunnableApplyFixture(t)
+	backend.createErr = errors.New("create refused before mutation")
+	backend.definiteErr = true
+
+	result, err := Apply(context.Background(), request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != ApplyOutcomeActionRequired || result.Disposition != MutationNotApplied || result.BindingGeneration != "" {
+		t.Fatalf("pre-mutation result = %#v", result)
+	}
+}
+
+func committedRunnableApplyFixture(t *testing.T) (ApplyRequest, ApplyDependencies, *reconcileBackend) {
+	t.Helper()
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	base := filepath.Join(root, "mail")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, executable := testExecutable(t, ClaudeProvider)
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	store, err := OpenTrustStore(filepath.Join(root, "state"), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := ApplyRequest{Prepare: PrepareRequest{
+		Target:   PrepareTarget{ProjectRoot: project, SessionRoot: filepath.Join(base, "collab"), Session: "collab"},
+		Launcher: "test", IntentDigest: "sha256:" + string(bytes.Repeat([]byte{'a'}, 64)),
+		Participants: []PrepareParticipant{{Handle: "claude", Provider: ClaudeProvider, Executable: executable, Runnable: true, Cwd: project, ResumePolicy: ResumeDisabled}},
+	}}
+	dependencies := ApplyDependencies{PrepareDependencies: PrepareDependencies{
+		Backends: map[string]Backend{"test": backend}, Preferences: []string{"test"}, TrustStore: store,
+		AdapterFor: func(provider, executable string) HarnessAdapter {
+			return reconcileAdapter{name: provider, mode: AdapterModeMint, available: true}
+		},
+		HostIdentity: "host:test",
+	}}
+	prepared, err := Prepare(context.Background(), request.Prepare, dependencies.PrepareDependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.SubjectDigest = prepared.SubjectDigest
+	for _, action := range prepared.RequiredActions {
+		request.Decisions = append(request.Decisions, ApplyDecision{ActionID: action.ActionID, Choice: "trust_exact_subject"})
+	}
+	return request, dependencies, backend
+}
+
+func TestClassifyApplyMutationUnreadableBindingWithoutJournalIsUncertain(t *testing.T) {
+	request, _, _ := committedRunnableApplyFixture(t)
+	session := request.Prepare.Target.SessionRoot
+	if err := fsq.EnsureRootDirs(session); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(BindingPath(session)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(BindingPath(session), []byte("{not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(JournalPath(session)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(session, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	classified := classifyApplyMutation(ApplyResult{Outcome: ApplyOutcomeActionRequired}, root)
+	if classified.Disposition != MutationUncertain {
+		t.Fatalf("unreadable binding classification = %#v, want uncertain", classified)
+	}
+}
+
 func TestOnLiveOmittedMatchesV061Apply(t *testing.T) {
 	// Apply-path guard: omit matches explicit refuse (v0.61 whole-binding
 	// refusal). Digest stability is TestPrepareV2SubjectDigestIncludesOnLiveKeepOnly.

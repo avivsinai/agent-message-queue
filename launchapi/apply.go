@@ -40,6 +40,7 @@ func fromInternalApplyResult(result internallaunch.ApplyResult) ApplyResultV1 {
 		ResultVersion: ResultVersionV1, SubjectSchema: result.SubjectSchema, Outcome: result.Outcome, ReasonCode: result.ReasonCode, FailureDetail: result.FailureDetail,
 		SubjectDigest: result.SubjectDigest, PlanDigest: result.PlanDigest, TrustDigest: result.TrustDigest,
 		SemanticDigest: result.TrustDigest, Backend: result.Backend, Profile: result.Profile,
+		Disposition: MutationDispositionV1(result.Disposition), BindingGeneration: result.BindingGeneration,
 		Roster: RosterDriftV1{
 			Desired: slices.Clone(result.Roster.Desired), Present: slices.Clone(result.Roster.Present),
 			Missing: slices.Clone(result.Roster.Missing), Extra: slices.Clone(result.Roster.Extra),

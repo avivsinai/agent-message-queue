@@ -17,14 +17,16 @@ type LifecycleRequest struct{ Target PrepareTarget }
 type LifecycleDependencies struct{ Backends map[string]Backend }
 
 type LifecycleResult struct {
-	Outcome       string
-	ReasonCode    string
-	Backend       string
-	Profile       string
-	State         string
-	Observations  []PrepareObservation
-	Evidence      []EvidenceRef
-	CallerContext map[string]string
+	Outcome           string
+	ReasonCode        string
+	Backend           string
+	Profile           string
+	Disposition       MutationDisposition
+	BindingGeneration string
+	State             string
+	Observations      []PrepareObservation
+	Evidence          []EvidenceRef
+	CallerContext     map[string]string
 }
 
 var beforeLifecycleBackendMutationForTest func()
@@ -33,33 +35,33 @@ var afterLifecycleSnapshotForTest func()
 func InspectLifecycle(ctx context.Context, request LifecycleRequest, dependencies LifecycleDependencies) (LifecycleResult, error) {
 	state, err := openLifecycleTarget(ctx, request.Target)
 	if err != nil {
-		return LifecycleResult{}, err
+		return LifecycleResult{Disposition: MutationNotApplied}, err
 	}
 	defer state.close()
 	if state.sessionRoot == nil {
-		return LifecycleResult{Outcome: LifecycleOutcomeInspected, State: string(InspectAbsent)}, nil
+		return LifecycleResult{Outcome: LifecycleOutcomeInspected, State: string(InspectAbsent), Disposition: MutationNotApplied}, nil
 	}
 	binding, err := LoadBinding(state.sessionRoot)
 	if errors.Is(err, os.ErrNotExist) {
-		return LifecycleResult{Outcome: LifecycleOutcomeInspected, State: string(InspectAbsent), ReasonCode: "binding_missing"}, nil
+		return LifecycleResult{Outcome: LifecycleOutcomeInspected, State: string(InspectAbsent), ReasonCode: "binding_missing", Disposition: MutationNotApplied}, nil
 	}
 	if err != nil {
 		var contextError *CallerContextValidationError
 		if errors.As(err, &contextError) {
-			return LifecycleResult{Outcome: string(OutcomeActionRequired), State: string(InspectUnknown), ReasonCode: "caller_context_corrupt"}, nil
+			return LifecycleResult{Outcome: string(OutcomeActionRequired), State: string(InspectUnknown), ReasonCode: "caller_context_corrupt", Disposition: MutationNotApplied}, nil
 		}
-		return LifecycleResult{}, err
+		return LifecycleResult{Disposition: MutationNotApplied, State: string(InspectUnknown)}, err
 	}
 	backend, detect, refusal, err := validateLifecycleBinding(binding, dependencies, CapInspect)
 	if err != nil {
-		return LifecycleResult{}, err
+		return lifecycleMetadata(binding), err
 	}
 	if refusal != "" {
 		return lifecycleRefusal(binding, detect, refusal), nil
 	}
 	inspection, err := backend.Inspect(InspectRequest{Binding: binding, Root: state.sessionRoot})
 	if err != nil {
-		return LifecycleResult{}, err
+		return lifecycleMetadata(binding), err
 	}
 	result, err := lifecycleResultFromBinding(state.sessionRoot, binding)
 	if err != nil {
@@ -67,7 +69,7 @@ func InspectLifecycle(ctx context.Context, request LifecycleRequest, dependencie
 		if errors.As(err, &corrupt) {
 			return lifecycleRefusal(binding, detect, "evidence_corrupt"), nil
 		}
-		return LifecycleResult{}, err
+		return lifecycleMetadata(binding), err
 	}
 	if afterLifecycleSnapshotForTest != nil {
 		afterLifecycleSnapshotForTest()
@@ -110,38 +112,38 @@ func CloseLifecycle(ctx context.Context, request LifecycleRequest, dependencies 
 func mutateLifecycle(ctx context.Context, request LifecycleRequest, dependencies LifecycleDependencies, capability Capability, operation func(Backend, BindingRecord, *fsq.DeliveryRoot) (Outcome, string, error)) (result LifecycleResult, returnErr error) {
 	state, err := openLifecycleTarget(ctx, request.Target)
 	if err != nil {
-		return LifecycleResult{}, err
+		return LifecycleResult{Disposition: MutationNotApplied}, err
 	}
 	defer state.close()
 	if state.sessionRoot == nil {
-		return LifecycleResult{Outcome: string(OutcomeActionRequired), State: string(InspectAbsent), ReasonCode: "binding_missing"}, nil
+		return LifecycleResult{Outcome: string(OutcomeActionRequired), State: string(InspectAbsent), ReasonCode: "binding_missing", Disposition: MutationNotApplied}, nil
 	}
 	lease, err := AcquireLease(state.sessionRoot, "")
 	if err != nil {
-		return LifecycleResult{Outcome: string(OutcomeActionRequired), State: string(InspectUnknown), ReasonCode: "launch_lease_unavailable"}, nil
+		return LifecycleResult{Outcome: string(OutcomeActionRequired), State: string(InspectUnknown), ReasonCode: "launch_lease_unavailable", Disposition: MutationNotApplied}, nil
 	}
 	defer func() { returnErr = errors.Join(returnErr, lease.Release()) }()
 	binding, err := LoadBinding(state.sessionRoot)
 	if errors.Is(err, os.ErrNotExist) {
-		return LifecycleResult{Outcome: string(OutcomeActionRequired), State: string(InspectAbsent), ReasonCode: "binding_missing"}, nil
+		return LifecycleResult{Outcome: string(OutcomeActionRequired), State: string(InspectAbsent), ReasonCode: "binding_missing", Disposition: MutationNotApplied}, nil
 	}
 	if err != nil {
 		var contextError *CallerContextValidationError
 		if errors.As(err, &contextError) {
-			return LifecycleResult{Outcome: string(OutcomeActionRequired), State: string(InspectUnknown), ReasonCode: "caller_context_corrupt"}, nil
+			return LifecycleResult{Outcome: string(OutcomeActionRequired), State: string(InspectUnknown), ReasonCode: "caller_context_corrupt", Disposition: MutationNotApplied}, nil
 		}
-		return LifecycleResult{}, err
+		return LifecycleResult{Disposition: MutationNotApplied, State: string(InspectUnknown)}, err
 	}
 	backend, detect, refusal, err := validateLifecycleBinding(binding, dependencies, capability)
 	if err != nil {
-		return LifecycleResult{}, err
+		return lifecycleMetadata(binding), err
 	}
 	if refusal != "" {
 		return lifecycleRefusal(binding, detect, refusal), nil
 	}
 	inspection, err := backend.Inspect(InspectRequest{Binding: binding, Root: state.sessionRoot})
 	if err != nil {
-		return LifecycleResult{}, err
+		return lifecycleMetadata(binding), err
 	}
 	if inspection.Status != InspectPresent && (capability != CapClose || inspection.Status != InspectAbsent) {
 		refusal := "inspect_unknown"
@@ -162,7 +164,7 @@ func mutateLifecycle(ctx context.Context, request LifecycleRequest, dependencies
 	}
 	currentBackend, currentDetect, refusal, err := validateLifecycleBinding(current, dependencies, capability)
 	if err != nil {
-		return LifecycleResult{}, err
+		return lifecycleMetadata(current), err
 	}
 	if refusal != "" || currentBackend != backend || !reflect.DeepEqual(currentDetect, detect) {
 		if refusal == "" {
@@ -176,18 +178,23 @@ func mutateLifecycle(ctx context.Context, request LifecycleRequest, dependencies
 		if errors.As(err, &corrupt) {
 			return lifecycleRefusal(current, currentDetect, "evidence_corrupt"), nil
 		}
-		return LifecycleResult{}, err
+		return lifecycleMetadata(current), err
 	}
+	result.Disposition = MutationNotApplied
+	result.BindingGeneration = current.LaunchNonce
 	outcome, _, err := operation(backend, current, state.sessionRoot)
 	if err != nil {
-		return LifecycleResult{}, err
+		result.Outcome, result.ReasonCode, result.Disposition, result.State = string(OutcomeActionRequired), "mutation_uncertain", MutationUncertain, string(InspectUnknown)
+		return result, nil
 	}
 	if outcome == OutcomeActionRequired || outcome == OutcomeUnsupported {
 		return lifecycleRefusal(current, currentDetect, "backend_refused"), nil
 	}
+	result.Disposition = MutationCommitted
 	postMutation, err := backend.Inspect(InspectRequest{Binding: current, Root: state.sessionRoot})
 	if err != nil {
-		return LifecycleResult{}, err
+		result.Outcome, result.ReasonCode, result.State = string(OutcomeActionRequired), "post_mutation_inspect_failed", string(InspectUnknown)
+		return result, nil
 	}
 	result.Outcome = string(outcome)
 	result.State = string(postMutation.Status)
@@ -240,7 +247,14 @@ func lifecycleRefusal(binding BindingRecord, detect DetectResult, reason string)
 	if detect.Profile.Backend != "" {
 		profile = detect.Profile.Identity()
 	}
-	return LifecycleResult{Outcome: string(OutcomeActionRequired), ReasonCode: reason, Backend: binding.Backend, Profile: profile, State: string(InspectUnknown)}
+	return LifecycleResult{Outcome: string(OutcomeActionRequired), ReasonCode: reason, Backend: binding.Backend, Profile: profile, Disposition: MutationNotApplied, BindingGeneration: binding.LaunchNonce, State: string(InspectUnknown)}
+}
+
+func lifecycleMetadata(binding BindingRecord) LifecycleResult {
+	return LifecycleResult{
+		Backend: binding.Backend, Profile: binding.Profile, Disposition: MutationNotApplied,
+		BindingGeneration: binding.LaunchNonce, State: string(InspectUnknown),
+	}
 }
 
 func lifecycleResultFromBinding(root *fsq.DeliveryRoot, binding BindingRecord) (LifecycleResult, error) {
@@ -261,7 +275,7 @@ func lifecycleResultFromBinding(root *fsq.DeliveryRoot, binding BindingRecord) (
 	}
 	_, mailboxes, err := inspectPrepareRoster(root, nil, participants)
 	if err != nil {
-		return LifecycleResult{}, err
+		return lifecycleMetadata(binding), err
 	}
 	observations := make([]PrepareObservation, 0, len(handles))
 	for _, handle := range handles {
@@ -273,25 +287,25 @@ func lifecycleResultFromBinding(root *fsq.DeliveryRoot, binding BindingRecord) (
 			observation.Conversation = string(conversation.State)
 			observation.ConversationIdentityDigest, err = digestCanonical(conversation)
 			if err != nil {
-				return LifecycleResult{}, err
+				return lifecycleMetadata(binding), err
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return LifecycleResult{}, err
+			return lifecycleMetadata(binding), err
 		}
 		if ticket, err := LoadExecutionTicket(root, handle); err == nil {
 			observation.Execution = string(ticket.State)
 			observation.ExecutionIdentityDigest, err = digestCanonical(ticket)
 			if err != nil {
-				return LifecycleResult{}, err
+				return lifecycleMetadata(binding), err
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return LifecycleResult{}, err
+			return lifecycleMetadata(binding), err
 		}
 		observations = append(observations, observation)
 	}
 	evidence, err := CollectEvidenceRefs(root, handles)
 	if err != nil {
-		return LifecycleResult{}, err
+		return lifecycleMetadata(binding), err
 	}
-	return LifecycleResult{Backend: binding.Backend, Profile: binding.Profile, Observations: observations, Evidence: evidence, CallerContext: cloneCallerContext(binding.CallerContext)}, nil
+	return LifecycleResult{Backend: binding.Backend, Profile: binding.Profile, BindingGeneration: binding.LaunchNonce, Disposition: MutationNotApplied, Observations: observations, Evidence: evidence, CallerContext: cloneCallerContext(binding.CallerContext)}, nil
 }
