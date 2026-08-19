@@ -16,6 +16,9 @@ func readWakeReadyFile(path string) (wakeReadyMarker, error) {
 	if err := validateWakeReadyFile(path, info); err != nil {
 		return wakeReadyMarker{}, err
 	}
+	if afterWakeReadyLstatForTest != nil {
+		afterWakeReadyLstatForTest(path)
+	}
 	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return wakeReadyMarker{}, fmt.Errorf("open wake ready file: %w", err)
@@ -37,6 +40,10 @@ func readWakeReadyFile(path string) (wakeReadyMarker, error) {
 	}
 	return decodeWakeReady(data)
 }
+
+// afterWakeReadyLstatForTest runs after Lstat+validate and before OpenFile so
+// tests can swap the path to a different inode.
+var afterWakeReadyLstatForTest func(path string)
 
 func validateWakeReadyFile(path string, info os.FileInfo) error {
 	if info.Mode()&os.ModeSymlink != 0 {

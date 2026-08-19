@@ -31,6 +31,15 @@ type App struct {
 	adapterLogState *adapterLogState
 }
 
+// afterReattachRegistrationLockHeldForTest runs after reattach/attach holds the
+// registration lease and before the transaction body. Tests pause here so gc
+// cannot Load until the lock is released.
+var afterReattachRegistrationLockHeldForTest func()
+
+// beforeGCRegistryLoadForTest runs after gc holds the registration lease and
+// immediately before Load. Tests use it to prove Load is lock-serialized.
+var beforeGCRegistryLoadForTest func()
+
 const adapterLogInterval = 5 * time.Minute
 
 type adapterLogState struct {
@@ -241,6 +250,9 @@ func (a App) registerWithOptions(ctx context.Context, opts registerOptions) erro
 	var entry registry.Entry
 	var removed []registry.Entry
 	err = store.WithRegistrationLockContext(ctx, func() error {
+		if afterReattachRegistrationLockHeldForTest != nil {
+			afterReattachRegistrationLockHeldForTest()
+		}
 		// Refresh existence and physical ownership only after acquiring the
 		// cross-process registration lease. The lease remains held through wake
 		// readiness and registry commit, so a racing claimant observes this
@@ -1041,6 +1053,9 @@ func (a App) gc(ctx context.Context, args []string) error {
 	result := gcResult{Applied: *apply, MinDetachedAge: minDetachedAge.String()}
 	var applyErrs []error
 	err := store.WithRegistrationLockContext(ctx, func() error {
+		if beforeGCRegistryLoadForTest != nil {
+			beforeGCRegistryLoadForTest()
+		}
 		file, err := store.Load()
 		if err != nil {
 			return err

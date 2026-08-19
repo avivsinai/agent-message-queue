@@ -21,11 +21,6 @@ func wakeReadyFileExists(path string) bool {
 	return err == nil
 }
 
-func wakeReadyFileMatches(path, generation, digest string) bool {
-	ready, err := readWakeReadyFile(path)
-	return err == nil && ready.Generation == generation && ready.TargetDigest == digest
-}
-
 func decodeWakeReady(data []byte) (wakeReadyMarker, error) {
 	var ready wakeReadyMarker
 	if err := json.Unmarshal(data, &ready); err != nil {

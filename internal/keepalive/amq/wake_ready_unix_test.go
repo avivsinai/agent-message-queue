@@ -21,8 +21,12 @@ func TestWakeReadyFileParseContract(t *testing.T) {
 	if !wakeReadyFileExists(correct) {
 		t.Fatal("correct marker is not ready")
 	}
-	if !wakeReadyFileMatches(correct, generation, digest) {
-		t.Fatal("correct marker did not match schema/generation/digest")
+	got, err := readWakeReadyFile(correct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Generation != generation || got.TargetDigest != digest {
+		t.Fatalf("correct marker = %#v, want generation/digest", got)
 	}
 
 	empty := filepath.Join(dir, "empty")
@@ -69,8 +73,12 @@ func TestWakeReadyFileParseContract(t *testing.T) {
 	writeWakeReadyMarker(t, wrongGeneration, wakeReadyMarker{
 		Schema: wakeReadySchema, Generation: "other-gen", TargetDigest: digest,
 	})
-	if wakeReadyFileMatches(wrongGeneration, generation, digest) {
-		t.Fatal("wrong generation matched expected marker")
+	got, err = readWakeReadyFile(wrongGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Generation == generation {
+		t.Fatal("wrong generation parsed as expected generation")
 	}
 
 	emptyGeneration := filepath.Join(dir, "empty-generation")
@@ -85,8 +93,48 @@ func TestWakeReadyFileParseContract(t *testing.T) {
 	writeWakeReadyMarker(t, wrongDigest, wakeReadyMarker{
 		Schema: wakeReadySchema, Generation: generation, TargetDigest: "other-digest",
 	})
-	if wakeReadyFileMatches(wrongDigest, generation, digest) {
-		t.Fatal("wrong digest matched expected marker")
+	got, err = readWakeReadyFile(wrongDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TargetDigest == digest {
+		t.Fatal("wrong digest parsed as expected digest")
+	}
+
+	mode0644 := filepath.Join(dir, "mode-0644")
+	writeWakeReadyMarker(t, mode0644, wakeReadyMarker{
+		Schema: wakeReadySchema, Generation: generation, TargetDigest: digest,
+	})
+	if err := os.Chmod(mode0644, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if wakeReadyFileExists(mode0644) {
+		t.Fatal("0644 marker is ready")
+	}
+
+	swapped := filepath.Join(dir, "swapped")
+	writeWakeReadyMarker(t, swapped, wakeReadyMarker{
+		Schema: wakeReadySchema, Generation: generation, TargetDigest: digest,
+	})
+	replacement := filepath.Join(dir, "replacement")
+	writeWakeReadyMarker(t, replacement, wakeReadyMarker{
+		Schema: wakeReadySchema, Generation: "other-gen", TargetDigest: digest,
+	})
+	t.Cleanup(func() { afterWakeReadyLstatForTest = nil })
+	afterWakeReadyLstatForTest = func(path string) {
+		if path != swapped {
+			return
+		}
+		if err := os.Remove(path); err != nil {
+			t.Errorf("remove swapped marker: %v", err)
+			return
+		}
+		if err := os.Rename(replacement, path); err != nil {
+			t.Errorf("swap marker inode: %v", err)
+		}
+	}
+	if _, err := readWakeReadyFile(swapped); err == nil {
+		t.Fatal("inode swap during open was accepted")
 	}
 }
 

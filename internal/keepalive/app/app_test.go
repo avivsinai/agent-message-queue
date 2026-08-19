@@ -2136,6 +2136,37 @@ printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-
 	}
 
 	start := make(chan struct{})
+	reattachHoldsLock := make(chan struct{})
+	continueReattach := make(chan struct{})
+	gcLoad := make(chan struct{})
+	var releaseReattach sync.Once
+	releaseContinueReattach := func() {
+		releaseReattach.Do(func() { close(continueReattach) })
+	}
+	defer releaseContinueReattach()
+	t.Cleanup(func() {
+		afterReattachRegistrationLockHeldForTest = nil
+		beforeGCRegistryLoadForTest = nil
+	})
+	afterReattachRegistrationLockHeldForTest = func() {
+		select {
+		case <-reattachHoldsLock:
+		default:
+			close(reattachHoldsLock)
+		}
+		<-continueReattach
+		// Presence stays absent through the lock-held proof so gc cannot skip
+		// on a live probe. Reattach itself still needs the target after that.
+		presence.setPresent("live-surface")
+	}
+	beforeGCRegistryLoadForTest = func() {
+		select {
+		case <-gcLoad:
+		default:
+			close(gcLoad)
+		}
+	}
+
 	type outcome struct {
 		name string
 		code int
@@ -2145,7 +2176,6 @@ printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-
 	outcomes := make(chan outcome, 2)
 	go func() {
 		<-start
-		presence.setPresent("live-surface")
 		var stdout, stderr bytes.Buffer
 		code := (App{Stdout: &stdout, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
 			"reattach", "--registry", registryPath, "--adapter", "boundary", "--target", "live-surface",
@@ -2155,7 +2185,7 @@ printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-
 		outcomes <- outcome{name: "reattach", code: code, out: stdout.String(), err: stderr.String()}
 	}()
 	go func() {
-		<-start
+		<-reattachHoldsLock
 		var stdout, stderr bytes.Buffer
 		code := (App{Stdout: &stdout, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
 			"gc", "--registry", registryPath, "--min-detached-age", "0", "--apply",
@@ -2164,6 +2194,17 @@ printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-
 		outcomes <- outcome{name: "gc", code: code, out: stdout.String(), err: stderr.String()}
 	}()
 	close(start)
+	select {
+	case <-reattachHoldsLock:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reattach did not acquire the registration lock")
+	}
+	select {
+	case <-gcLoad:
+		t.Fatal("gc loaded the registry while reattach held the registration lock")
+	case <-time.After(150 * time.Millisecond):
+	}
+	releaseContinueReattach()
 	first, second := <-outcomes, <-outcomes
 	var reattachOut, gcOut outcome
 	for _, item := range []outcome{first, second} {
