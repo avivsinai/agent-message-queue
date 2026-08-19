@@ -55,7 +55,7 @@ var lifecycleBackends = internallaunch.DefaultBackends
 func lifecycleResult(result internallaunch.LifecycleResult) LifecycleResultV1 {
 	public := LifecycleResultV1{
 		ResultVersion: ResultVersionV1, Outcome: result.Outcome, ReasonCode: result.ReasonCode,
-		Backend: result.Backend, Profile: result.Profile, State: result.State,
+		Backend: result.Backend, Profile: result.Profile, Disposition: MutationDispositionV1(result.Disposition), BindingGeneration: result.BindingGeneration, State: result.State,
 		Observations:  make([]ParticipantObservationV1, 0, len(result.Observations)),
 		Evidence:      make([]EvidenceRefV1, 0, len(result.Evidence)),
 		CallerContext: cloneStringMap(result.CallerContext),

@@ -23,6 +23,14 @@ const (
 	ApplyReasonPrepareActionRequiredWithoutDecision = "prepare_action_required_without_decision"
 )
 
+type MutationDisposition string
+
+const (
+	MutationNotApplied MutationDisposition = "not_applied"
+	MutationCommitted  MutationDisposition = "committed"
+	MutationUncertain  MutationDisposition = "uncertain"
+)
+
 type ApplyDecision struct {
 	ActionID string
 	Choice   string
@@ -36,25 +44,28 @@ type ApplyRequest struct {
 
 type ApplyDependencies struct {
 	PrepareDependencies
-	AMQPath string
+	AMQPath   string
+	CrashHook func(string) error
 }
 
 type ApplyResult struct {
-	Outcome         string
-	ReasonCode      string
-	FailureDetail   string
-	SubjectSchema   int
-	SubjectDigest   string
-	PlanDigest      string
-	TrustDigest     string
-	Backend         string
-	Profile         string
-	Roster          PrepareRoster
-	Observations    []PrepareObservation
-	Commands        []EmittedCommand
-	RequiredActions []PrepareRequiredAction
-	Evidence        []EvidenceRef
-	CallerContext   map[string]string
+	Outcome           string
+	ReasonCode        string
+	FailureDetail     string
+	SubjectSchema     int
+	SubjectDigest     string
+	PlanDigest        string
+	TrustDigest       string
+	Backend           string
+	Profile           string
+	Disposition       MutationDisposition
+	BindingGeneration string
+	Roster            PrepareRoster
+	Observations      []PrepareObservation
+	Commands          []EmittedCommand
+	RequiredActions   []PrepareRequiredAction
+	Evidence          []EvidenceRef
+	CallerContext     map[string]string
 }
 
 var afterApplySessionPublishedForTest func()
@@ -66,6 +77,8 @@ var openPrepareTargetForApply = openPrepareTarget
 var beforeApplyRosterMutationForTest func()
 var beforeApplyBaseRootCreateForTest func()
 var afterApplyBaseRootCreatedForTest func() error
+var beforeApplyFinalPrepareForTest func()
+var collectApplyEvidenceRefs = CollectEvidenceRefs
 var publishApplySession = func(base *fsq.DeliveryRoot, session string, initialize func(*fsq.DeliveryRoot) error) (*fsq.DeliveryRoot, error) {
 	return base.PublishInitializedDirectChildExclusive(session, 0o700, initialize)
 }
@@ -293,7 +306,12 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 	}
 	reconciled, err := Reconcile(reconcileRequest)
 	if err != nil {
-		return ApplyResult{}, err
+		result := applyActionResult(prepared, "launch_reconcile_failed")
+		result.FailureDetail = err.Error()
+		return classifyApplyMutation(result, root), nil
+	}
+	if beforeApplyFinalPrepareForTest != nil {
+		beforeApplyFinalPrepareForTest()
 	}
 	if afterApplyReconcileForTest != nil {
 		afterApplyReconcileForTest()
@@ -306,7 +324,7 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 			}
 			return applyActionResult(prepared, "subject_changed"), nil
 		}
-		return ApplyResult{}, err
+		return applyPostCommitFailure(applyResultFromPrepare(prepared), request, root, reconciled, "post_commit_prepare_failed", err), nil
 	}
 	if reconciled.AggregateCode == 0 && reconciled.Outcome != "" && reconciled.Outcome != OutcomeNoAction && !authorizedIdentitiesEqual(prepared, finalPrepared) {
 		return applyActionResult(finalPrepared, "subject_changed"), nil
@@ -316,9 +334,11 @@ func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, depe
 	result.RequiredActions = nil
 	result.Commands = slices.Clone(reconciled.Commands)
 	result.Backend, result.TrustDigest = reconciled.Backend, reconciled.SemanticDigest
-	result.Evidence, err = CollectEvidenceRefs(root, handles)
+	classified := classifyApplyMutation(result, root)
+	result.Disposition, result.BindingGeneration = classified.Disposition, classified.BindingGeneration
+	result.Evidence, err = collectApplyEvidenceRefs(root, handles)
 	if err != nil {
-		return ApplyResult{}, err
+		return applyPostCommitFailure(result, request, root, reconciled, "post_commit_evidence_failed", err), nil
 	}
 	if reconciled.AggregateCode == 0 && reconciled.Outcome != "" && reconciled.Outcome != OutcomeNoAction {
 		result.Outcome = ApplyOutcomeApplied
@@ -607,6 +627,7 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 		AMQPath: dependencies.AMQPath, Root: root, Config: config, Launcher: prepared.Launcher,
 		Preferences: slices.Clone(dependencies.Preferences), Backends: dependencies.Backends,
 		Adapters: adapters, TrustStore: dependencies.TrustStore, HeldLease: lease,
+		CrashHook:            dependencies.CrashHook,
 		TrustAuthorityDigest: snapshot.BaseAuthorityDigest,
 		HostIdentity:         dependencies.HostIdentity, AllowExternalCwd: true,
 		ExecutionOptions:     executionOptions,
@@ -740,6 +761,7 @@ func applyActionResult(prepared PrepareResult, reason string) ApplyResult {
 	result := applyResultFromPrepare(prepared)
 	result.Outcome = ApplyOutcomeActionRequired
 	result.ReasonCode = reason
+	result.Disposition = MutationNotApplied
 	return result
 }
 
@@ -749,7 +771,40 @@ func applyResultFromPrepare(prepared PrepareResult) ApplyResult {
 		Backend: prepared.Backend, Profile: prepared.Profile, Roster: prepared.Roster,
 		Observations: slices.Clone(prepared.Observations), RequiredActions: slices.Clone(prepared.RequiredActions),
 		CallerContext: cloneCallerContext(prepared.CallerContext),
+		Disposition:   MutationNotApplied,
 	}
+}
+
+func classifyApplyMutation(result ApplyResult, root *fsq.DeliveryRoot) ApplyResult {
+	binding, bindingErr := LoadBinding(root)
+	if bindingErr == nil {
+		result.Disposition = MutationCommitted
+		result.BindingGeneration = binding.LaunchNonce
+		return result
+	}
+	if journal, present, journalErr := loadOptionalJournal(root); present {
+		result.Disposition = MutationUncertain
+		result.BindingGeneration = journal.LaunchNonce
+		return result
+	} else if journalErr != nil && !errors.Is(journalErr, os.ErrNotExist) {
+		// A journal that exists but cannot be decoded is still evidence that
+		// reconciliation may have crossed the backend mutation boundary.
+		result.Disposition = MutationUncertain
+		return result
+	}
+	if !errors.Is(bindingErr, os.ErrNotExist) {
+		result.Disposition = MutationUncertain
+		return result
+	}
+	result.Disposition = MutationNotApplied
+	return result
+}
+
+func applyPostCommitFailure(result ApplyResult, request ApplyRequest, root *fsq.DeliveryRoot, reconciled ReconcileResult, reason string, err error) ApplyResult {
+	result.SubjectDigest = request.SubjectDigest
+	result.Backend, result.TrustDigest = reconciled.Backend, reconciled.SemanticDigest
+	result.Outcome, result.ReasonCode, result.FailureDetail = ApplyOutcomeActionRequired, reason, err.Error()
+	return classifyApplyMutation(result, root)
 }
 
 func onLivePolicies(participants []PrepareParticipant) map[string]string {

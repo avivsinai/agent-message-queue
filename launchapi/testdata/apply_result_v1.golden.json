@@ -8,6 +8,8 @@
   "semantic_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "backend": "commands",
   "profile": "commands/portable/v1",
+  "disposition": "committed",
+  "binding_generation": "75757575-7575-4575-8575-757575757575",
   "roster": {
     "desired": [
       "claude"

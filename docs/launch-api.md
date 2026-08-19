@@ -286,6 +286,12 @@ the returned schema. It must not omit the field to select legacy behavior.
 `reviewedChoiceFor` is intentionally caller-owned. AMQ does not choose trust,
 stale-conversation, rebind, or degraded-capability decisions for the caller.
 
+Apply and lifecycle results include a typed mutation disposition (`not_applied`,
+`committed`, or `uncertain`) and, after a launch commit, its binding generation;
+these fields describe the launch backend binding only, not session or roster
+durability codes. Post-commit failures remain action-required results with exit
+code `6`, not bare errors.
+
 The equivalent CLI split is:
 
 ```bash
