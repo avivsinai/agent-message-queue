@@ -210,6 +210,13 @@ func TestStartWakeRefreshesOnlyConclusivelyDifferentLiveImages(t *testing.T) {
 			wantCalls:    []string{"check", "retire", "start"},
 		},
 		{
+			name:          "different image without generation preserves wake",
+			checkOutput:   `{"schema":1,"live_wake":true,"image_status":"different"}`,
+			wantCalls:     []string{"check"},
+			wantErrIs:     ErrWakeImageIdentityInconclusive,
+			wantErrString: "omitted generation",
+		},
+		{
 			name:        "current image starts without retire",
 			checkOutput: `{"schema":1,"live_wake":true,"image_status":"current"}`,
 			wantCalls:   []string{"check", "start"},

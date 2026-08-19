@@ -2431,6 +2431,49 @@ func (r *countingRetirer) RetireWake(context.Context, amq.RetireWakeRequest) (am
 	return amq.RetireWakeResult{}, nil
 }
 
+func TestObserveWakeGenerationRefusesLiveWakeWithoutGeneration(t *testing.T) {
+	const generation = "0123456789abcdef0123456789abcdef"
+	cases := []struct {
+		name    string
+		check   amq.WakeCheckResult
+		wantErr bool
+		want    string
+	}{
+		{name: "live omitted", check: amq.WakeCheckResult{LiveWake: true}, wantErr: true},
+		{name: "live present", check: amq.WakeCheckResult{LiveWake: true, Generation: generation}, want: generation},
+		{name: "not live omitted", check: amq.WakeCheckResult{LiveWake: false}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			retirer := &recordingRetirer{check: tc.check}
+			got, err := observeWakeGeneration(context.Background(), retirer, "/tmp/root", "codex")
+			if tc.wantErr {
+				if err == nil || got != "" || retirer.retireCalls != 0 {
+					t.Fatalf("got=%q err=%v retire=%d, want refuse with no retire", got, err, retirer.retireCalls)
+				}
+				return
+			}
+			if err != nil || got != tc.want || retirer.retireCalls != 0 {
+				t.Fatalf("got=%q err=%v retire=%d, want %q with no retire", got, err, retirer.retireCalls, tc.want)
+			}
+		})
+	}
+}
+
+type recordingRetirer struct {
+	check       amq.WakeCheckResult
+	retireCalls int
+}
+
+func (r *recordingRetirer) CheckWake(context.Context, amq.StartWakeRequest) (amq.WakeCheckResult, error) {
+	return r.check, nil
+}
+
+func (r *recordingRetirer) RetireWake(context.Context, amq.RetireWakeRequest) (amq.RetireWakeResult, error) {
+	r.retireCalls++
+	return amq.RetireWakeResult{}, nil
+}
+
 func TestRegisterEnvFailureDependsOnlyOnRequiredIdentity(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target")
