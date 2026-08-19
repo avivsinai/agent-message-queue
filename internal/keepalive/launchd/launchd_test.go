@@ -310,6 +310,98 @@ func TestNormalizeOptionsFillsIndependentDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizeOptionsRefusesPathLabel(t *testing.T) {
+	dir := t.TempDir()
+	_, err := NormalizeOptions(Options{
+		Label:        "../x",
+		PlistPath:    filepath.Join(dir, "x.plist"),
+		BinaryPath:   "/bin/echo",
+		RegistryPath: filepath.Join(dir, "registry.json"),
+		AMQPath:      "/bin/echo",
+		StdoutPath:   filepath.Join(dir, "out.log"),
+		StderrPath:   filepath.Join(dir, "err.log"),
+	})
+	if err == nil {
+		t.Fatal("NormalizeOptions accepted path label ../x")
+	}
+	if !strings.Contains(err.Error(), "reverse-DNS") {
+		t.Fatalf("NormalizeOptions error = %v, want reverse-DNS refusal", err)
+	}
+}
+
+func TestDefaultPlistPathRefusesPathLabel(t *testing.T) {
+	path, err := DefaultPlistPath("../x")
+	if err == nil {
+		t.Fatalf("DefaultPlistPath(../x) path = %q, want refusal", path)
+	}
+	if !strings.Contains(err.Error(), "reverse-DNS") {
+		t.Fatalf("DefaultPlistPath error = %v, want reverse-DNS refusal", err)
+	}
+}
+
+func TestUnrelatedPlistWithMatchingSubstringsIsNotOwned(t *testing.T) {
+	const label = "com.example.amq-keepalive"
+	foreign := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.example.unrelated</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/true</string>
+	</array>
+	<key>Notes</key>
+	<array>
+		<string>supervise</string>
+		<string>--registry</string>
+		<string>--amq</string>
+		<string>--self</string>
+	</array>
+	<key>Also</key>
+	<string>com.example.amq-keepalive</string>
+</dict>
+</plist>
+`)
+	if !bytes.Contains(foreign, []byte("<key>Label</key>")) ||
+		!bytes.Contains(foreign, []byte("<string>"+label+"</string>")) ||
+		!bytes.Contains(foreign, []byte("<key>ProgramArguments</key>")) ||
+		!bytes.Contains(foreign, []byte("<string>supervise</string>")) {
+		t.Fatal("fixture missing substring markers that used to fool ownership")
+	}
+	if isOwnedPlist(foreign, label) {
+		t.Fatal("unrelated plist with matching substrings was treated as owned")
+	}
+
+	dir := t.TempDir()
+	plistPath := filepath.Join(dir, "unrelated.plist")
+	if err := os.WriteFile(plistPath, foreign, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	opts := Options{
+		Label:        label,
+		PlistPath:    plistPath,
+		BinaryPath:   "/bin/echo",
+		RegistryPath: filepath.Join(dir, "registry.json"),
+		AMQPath:      "/bin/echo",
+		Interval:     time.Second,
+		Load:         false,
+	}
+	if err := Install(context.Background(), opts); err == nil {
+		t.Fatal("Install() error = nil, want substring-only plist refusal")
+	}
+	got, err := os.ReadFile(plistPath)
+	if err != nil || !bytes.Equal(got, foreign) {
+		t.Fatalf("foreign plist was modified: err=%v bytes=%q", err, got)
+	}
+	if err := Uninstall(context.Background(), label, plistPath, false); err == nil {
+		t.Fatal("Uninstall() error = nil, want substring-only plist refusal")
+	}
+	got, err = os.ReadFile(plistPath)
+	if err != nil || !bytes.Equal(got, foreign) {
+		t.Fatalf("Uninstall modified foreign plist: err=%v bytes=%q", err, got)
+	}
+}
+
 func TestServiceTargetUsesLaunchdLabelTarget(t *testing.T) {
 	want := "gui/" + strconv.Itoa(os.Getuid()) + "/com.example.amq-keepalive"
 	if got := serviceTarget("com.example.amq-keepalive"); got != want {
