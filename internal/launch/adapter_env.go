@@ -9,6 +9,7 @@ import (
 type valueRule func(string) bool
 
 var safeEnvironmentValue = regexp.MustCompile(`^[A-Za-z0-9_.@+:-]{1,128}$`).MatchString
+var validPOSIXEnvironmentKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString
 
 func commonCommittedEnvRules() map[string]valueRule {
 	return map[string]valueRule{

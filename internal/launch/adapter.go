@@ -111,11 +111,26 @@ func appendInitialInput(plan *AgentPlan, input *InitialInputRequest) error {
 	if input.Kind != InitialInputArgument {
 		return fmt.Errorf("initial input kind %q is unsupported", input.Kind)
 	}
-	if !validDigest(input.SHA256) || strings.ContainsRune(input.Value, 0) {
+	if !validDigest(input.SHA256) {
 		return fmt.Errorf("initial input is invalid")
+	}
+	if err := validateInitialInputText(input.Value); err != nil {
+		return err
 	}
 	plan.Argv = append(plan.Argv, input.Value)
 	plan.InitialInput = &PlannedInitialInput{Kind: input.Kind, SHA256: input.SHA256, ArgvIndex: len(plan.Argv) - 1}
+	return nil
+}
+
+func validateInitialInputText(value string) error {
+	if strings.HasPrefix(value, "-") {
+		return fmt.Errorf("initial input must not begin with '-'")
+	}
+	for _, r := range value {
+		if r <= 0x1f || r == 0x7f {
+			return fmt.Errorf("initial input contains control character")
+		}
+	}
 	return nil
 }
 

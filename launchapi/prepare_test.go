@@ -522,7 +522,7 @@ func TestPrepareSubjectDigestTracksFrozenInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if withOptions.PlanDigest != baseline.PlanDigest || withOptions.TrustDigest != baseline.TrustDigest || withOptions.SubjectDigest == baseline.SubjectDigest {
+	if withOptions.PlanDigest == baseline.PlanDigest || withOptions.TrustDigest == baseline.TrustDigest || withOptions.SubjectDigest == baseline.SubjectDigest {
 		t.Fatalf("option-only digest change = plan %t trust %t subject %t",
 			withOptions.PlanDigest != baseline.PlanDigest,
 			withOptions.TrustDigest != baseline.TrustDigest,

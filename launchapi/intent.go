@@ -150,8 +150,16 @@ func (input InitialInputV1) validate() error {
 	default:
 		return fmt.Errorf("invalid kind %q", input.Kind)
 	}
-	if !utf8.ValidString(input.Text) || strings.ContainsRune(input.Text, 0) {
-		return fmt.Errorf("text must be valid UTF-8 without NUL")
+	if !utf8.ValidString(input.Text) {
+		return &InitialInputValidationError{Code: InitialInputInvalidUTF8, Detail: "text must be valid UTF-8"}
+	}
+	if strings.HasPrefix(input.Text, "-") {
+		return &InitialInputValidationError{Code: InitialInputLeadingDash, Detail: "text must not begin with '-'"}
+	}
+	for _, r := range input.Text {
+		if r <= 0x1f || r == 0x7f {
+			return &InitialInputValidationError{Code: InitialInputControl, Detail: "text must not contain C0, DEL, CR, or LF control characters"}
+		}
 	}
 	return nil
 }

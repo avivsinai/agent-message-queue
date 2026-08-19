@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -182,6 +183,33 @@ func TestAdaptersAppendTypedInitialInputAfterOwnedArguments(t *testing.T) {
 			}
 			if plan.Argv[len(plan.Argv)-1] != text || plan.InitialInput == nil || plan.InitialInput.ArgvIndex != len(plan.Argv)-1 {
 				t.Fatalf("initial input plan = %#v", plan)
+			}
+		})
+	}
+}
+
+func TestAdaptersRejectUnsafeInitialInputBeforePlanning(t *testing.T) {
+	for _, provider := range []string{ClaudeProvider, CodexProvider} {
+		t.Run(provider, func(t *testing.T) {
+			project, executable := testExecutable(t, provider)
+			for _, text := range []string{"-option", "line\nfeed", "tab\tvalue", "delete\x7f"} {
+				t.Run(fmt.Sprintf("%q", text), func(t *testing.T) {
+					request := planRequest(project, provider)
+					sum := sha256.Sum256([]byte(text))
+					request.InitialInput = &InitialInputRequest{
+						Kind: InitialInputArgument, Value: text, SHA256: "sha256:" + hex.EncodeToString(sum[:]),
+					}
+					var err error
+					switch provider {
+					case ClaudeProvider:
+						_, err = NewClaudeAdapter(executable).PlanFresh(request)
+					case CodexProvider:
+						_, err = NewCodexAdapter(executable).PlanFresh(request)
+					}
+					if err == nil || !strings.Contains(err.Error(), "initial input") {
+						t.Fatalf("unsafe initial input error = %v", err)
+					}
+				})
 			}
 		})
 	}
