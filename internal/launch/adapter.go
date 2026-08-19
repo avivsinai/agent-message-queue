@@ -18,6 +18,22 @@ const (
 	CursorProvider = "cursor-agent"
 )
 
+// ProviderForExecutable maps a configured executable basename to the stable
+// adapter/provider identity. Cursor's current CLI is "agent"; cursor-agent
+// remains a supported legacy executable alias.
+func ProviderForExecutable(executable string) string {
+	base := strings.ToLower(filepath.Base(executable))
+	base = strings.TrimSuffix(base, ".exe")
+	switch base {
+	case ClaudeProvider, CodexProvider:
+		return base
+	case "agent", CursorProvider:
+		return CursorProvider
+	default:
+		return ""
+	}
+}
+
 // HarnessAdapter owns conversation identity and produces backend-ready plans.
 // It must not create, inspect, focus, or close terminal resources.
 type HarnessAdapter interface {
@@ -178,10 +194,7 @@ func ValidateStaticProviderInput(executable string, args []string, env map[strin
 	if executable == "" || strings.TrimSpace(executable) != executable || strings.ContainsRune(executable, 0) {
 		return "", fmt.Errorf("executable is invalid")
 	}
-	provider := strings.ToLower(filepath.Base(executable))
-	if runtime.GOOS == "windows" {
-		provider = strings.TrimSuffix(provider, ".exe")
-	}
+	provider := ProviderForExecutable(executable)
 	var envRules map[string]valueRule
 	var argRules map[string]argumentRule
 	var bypassAllowed map[string]struct{}
@@ -436,11 +449,7 @@ func validateKnownExecutable(executable, projectRoot, provider string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("resolve %s executable: %w", provider, err)
 	}
-	base := strings.ToLower(filepath.Base(executable))
-	if runtime.GOOS == "windows" {
-		base = strings.TrimSuffix(base, ".exe")
-	}
-	if base != provider {
+	if ProviderForExecutable(executable) != provider {
 		return "", fmt.Errorf("adapter %s cannot execute %q", provider, resolvedExecutable)
 	}
 	if strings.TrimSpace(projectRoot) == "" {

@@ -120,6 +120,8 @@ no-op, and a forwarding failure cannot undo or fail the evidence path. An
 unused Codex launch remains pending and cannot be resumed. Cursor CLI acquires
 its provider-owned chat ID before process start through `create-chat` at exact
 version `2026.08.11-e8db854`. Cursor's provider identity is `cursor-agent`.
+The current executable is `agent`; `cursor-agent` remains a supported legacy
+alias, including `.exe` variants.
 
 The registered launcher backends are `commands`, `tmux`, `cmux`, and
 `ghostty`. `--launcher auto` walks the local preference; an explicit
