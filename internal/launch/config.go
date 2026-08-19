@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -144,7 +145,7 @@ func (cfg ProjectConfig) Validate() error {
 		if agent.Adapter == "" {
 			return fmt.Errorf("agent %q has no adapter", agent.Handle)
 		}
-		if len(agent.Command) == 0 || agent.Command[0] != agent.Adapter {
+		if len(agent.Command) == 0 || !adapterExecutableMatches(agent.Adapter, agent.Command[0]) {
 			return fmt.Errorf("agent %q command must select its adapter-known executable", agent.Handle)
 		}
 		for _, arg := range agent.Command {
@@ -173,6 +174,20 @@ func (cfg ProjectConfig) Validate() error {
 		return fmt.Errorf("unsupported layout intent %q", cfg.Layout.Type)
 	}
 	return nil
+}
+
+func adapterExecutableMatches(adapter, executable string) bool {
+	if executable == adapter {
+		return true
+	}
+	return cursorExecutableAlias(adapter) && cursorExecutableAlias(executable)
+}
+
+func cursorExecutableAlias(executable string) bool {
+	if filepath.Base(executable) != executable {
+		return false
+	}
+	return ProviderForExecutable(executable) == CursorProvider
 }
 
 func (cfg LocalConfig) Validate() error {

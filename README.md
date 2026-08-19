@@ -115,6 +115,10 @@ Detects supported agent CLIs and launcher preferences, previews the project
 declaration, then creates `.amqrc`, `.amq/launch.json`, local preferences,
 the default session, and roster mailboxes.
 
+For Cursor, setup uses the current `agent` command when it is on `PATH`; if it
+is absent, the preview explains that setup is falling back to legacy
+`cursor-agent`.
+
 Automation uses a stateless preview and applies only that approved digest. The
 first non-interactive setup must name the roster, default session, and launcher
 preference explicitly:

@@ -133,6 +133,41 @@ func TestSetupWritesAuthoritativeAndPreferenceScopesThenNoOps(t *testing.T) {
 	}
 }
 
+func TestSetupCursorCommandPrefersAgentAndExplainsLegacyFallback(t *testing.T) {
+	detected := []launch.AdapterCapabilities{{Provider: launch.CursorProvider, Fresh: true, Available: true}}
+	options := setupOptions{agents: launch.CursorProvider, agentsExplicit: true, nonInteractive: true}
+	setupLookPath = func(name string) (string, error) {
+		if name == "agent" {
+			return "/opt/cursor/agent", nil
+		}
+		return "", fs.ErrNotExist
+	}
+	t.Cleanup(func() { setupLookPath = execLookPathForSetup })
+	agents, err := chooseSetupAgents(options, detected, launch.ProjectConfig{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || !slices.Equal(agents[0].Command, []string{"agent"}) || agents[0].Adapter != launch.CursorProvider {
+		t.Fatalf("preferred Cursor setup agent = %#v", agents)
+	}
+	if notes := setupAgentExplanations(agents); len(notes) != 0 {
+		t.Fatalf("preferred Cursor setup explanation = %#v", notes)
+	}
+
+	setupLookPath = func(string) (string, error) { return "", fs.ErrNotExist }
+	agents, err = chooseSetupAgents(options, detected, launch.ProjectConfig{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || !slices.Equal(agents[0].Command, []string{"cursor-agent"}) {
+		t.Fatalf("legacy Cursor setup fallback = %#v", agents)
+	}
+	notes := setupAgentExplanations(agents)
+	if len(notes) != 1 || !strings.Contains(notes[0], "not found") {
+		t.Fatalf("legacy Cursor setup explanation = %#v", notes)
+	}
+}
+
 func TestSetupPreviewDigestBindsApplyWithoutWrites(t *testing.T) {
 	project := setupProjectFixture(t, "claude", "codex")
 	args := []string{

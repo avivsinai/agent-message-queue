@@ -28,6 +28,7 @@ func TestProjectConfigRoundTripAndStrictAuthority(t *testing.T) {
 	}
 	for _, hostile := range []string{
 		`{"schema":1,"default_session":"collab","agents":[{"handle":"claude","adapter":"claude","command":["bash","./agent"],"resume_policy":"resume"}],"layout":{"type":"columns"}}`,
+		`{"schema":1,"default_session":"collab","agents":[{"handle":"cursor","adapter":"cursor-agent","command":["/tmp/agent"],"resume_policy":"resume"}],"layout":{"type":"columns"}}`,
 		`{"schema":1,"default_session":"collab","agents":[{"handle":"claude","adapter":"claude","command":["claude"],"resume_policy":"resume"}],"layout":{"type":"columns"},"root":"elsewhere"}`,
 		`{"schema":1,"default_session":"../escape","agents":[{"handle":"claude","adapter":"claude","command":["claude"],"resume_policy":"resume"}],"layout":{"type":"columns"}}`,
 	} {
@@ -48,6 +49,16 @@ func TestProjectConfigNormalizesLegacyMinimalRoster(t *testing.T) {
 	agent := parsed.Agents[0]
 	if agent.Adapter != "claude" || agent.ResumePolicy != ResumeEnabled {
 		t.Fatalf("normalized agent defaults = %#v", agent)
+	}
+}
+
+func TestProjectConfigAcceptsCursorCurrentExecutableAlias(t *testing.T) {
+	parsed, err := ParseProjectConfig([]byte(`{"schema":1,"default_session":"collab","agents":[{"handle":"cursor","adapter":"cursor-agent","command":["agent"],"resume_policy":"resume"}],"layout":{"type":"columns"}}`))
+	if err != nil {
+		t.Fatalf("current Cursor executable alias rejected: %v", err)
+	}
+	if parsed.Agents[0].Adapter != CursorProvider || parsed.Agents[0].Command[0] != "agent" {
+		t.Fatalf("current Cursor config = %#v", parsed.Agents[0])
 	}
 }
 
