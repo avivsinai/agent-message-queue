@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -38,14 +39,16 @@ var (
 // The socket namespace is stable across tmux server restarts; resource IDs are
 // still live tmux IDs and are never reconstructed from display names.
 type TmuxBackend struct {
-	binary     string
-	socketName string
-	run        func(context.Context, ...string) (string, error)
-	focus      func(context.Context, string) error
-	hostname   func() (string, error)
-	getenv     func(string) string
-	uid        func() string
-	sleep      func(context.Context, time.Duration) error
+	binary          string
+	socketName      string
+	run             func(context.Context, ...string) (string, error)
+	focus           func(context.Context, string) error
+	hostname        func() (string, error)
+	getenv          func(string) string
+	uid             func() string
+	sleep           func(context.Context, time.Duration) error
+	socketOnce      sync.Once
+	socketPathValue string
 }
 
 func NewTmuxBackend(binary string) *TmuxBackend {
@@ -764,6 +767,9 @@ func (b *TmuxBackend) agentCommand(req CreateRequest, agent AgentPlan) string {
 
 func (b *TmuxBackend) args(args ...string) []string {
 	if b.socketName == "" || b.socketName == "default" {
+		if socketPath := b.socketPath(); socketPath != "" {
+			return append([]string{"-S", socketPath}, args...)
+		}
 		return args
 	}
 	return append([]string{"-L", b.socketName}, args...)
@@ -779,6 +785,13 @@ func (b *TmuxBackend) runCommand(ctx context.Context, args ...string) (string, e
 }
 
 func (b *TmuxBackend) socketPath() string {
+	b.socketOnce.Do(func() {
+		b.socketPathValue = b.resolveSocketPath()
+	})
+	return b.socketPathValue
+}
+
+func (b *TmuxBackend) resolveSocketPath() string {
 	if active := strings.TrimSpace(b.getenv("TMUX")); b.socketName == "" && active != "" {
 		if path, _, ok := strings.Cut(active, ","); ok && filepath.IsAbs(path) {
 			return filepath.Clean(path)

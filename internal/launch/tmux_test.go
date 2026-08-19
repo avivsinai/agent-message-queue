@@ -122,6 +122,32 @@ func TestTmuxBackendConformance(t *testing.T) {
 	RunConformance(t, backend)
 }
 
+func TestTmuxCloseUsesPinnedSocketAfterEnvironmentCleanup(t *testing.T) {
+	backend := NewTmuxBackend("tmux")
+	backend.socketName = ""
+	active := true
+	socket := filepath.Join(t.TempDir(), "tmux-agent-socket")
+	backend.getenv = func(key string) string {
+		if key == "TMUX" && active {
+			return socket + ",123,0"
+		}
+		return ""
+	}
+	pinned := backend.socketPath()
+	binding := BindingRecord{
+		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: "host",
+		InstanceIdentity: "tmux-socket:" + pinned, Profile: TmuxProfile().Identity(),
+		LaunchNonce: "019c5a10-75d8-7eef-8db7-5ee77f70e7a5",
+		Resources:   ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{{OpaqueID: "tmux:v1:session:$1:amq-session"}}},
+	}
+	backend.hostname = func() (string, error) { return "host", nil }
+	active = false
+	closed, err := backend.Close(CloseRequest{Binding: binding})
+	if err != nil || closed.Outcome != OutcomeClosed {
+		t.Fatalf("Close after TMUX cleanup = %#v, %v; want closed on the pinned socket", closed, err)
+	}
+}
+
 func TestTmuxReconcileCrashRestartThenRelaunchResumes(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed")
