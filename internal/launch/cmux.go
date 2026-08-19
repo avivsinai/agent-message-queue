@@ -180,16 +180,16 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	createRaw, err := b.runJSON(createCtx, "new-workspace", "--name", name, "--cwd", req.ProjectRoot, "--focus", "false")
 	createCancel()
 	if err != nil {
-		return CreateResult{}, b.reconcileCreateFailure(name, false, fmt.Errorf("create cmux workspace: %w", err))
+		return CreateResult{}, b.reconcileCreateFailure("", false, fmt.Errorf("create cmux workspace: %w", err))
 	}
 	if err := parseCmuxOKWorkspaceAck(createRaw); err != nil {
-		return CreateResult{}, b.reconcileCreateFailure(name, false, err)
+		return CreateResult{}, b.reconcileCreateFailure("", false, err)
 	}
 	resolveCtx, resolveCancel := b.inspectCallContext()
 	createdWS, err := b.uniqueWorkspaceByName(resolveCtx, name)
 	resolveCancel()
 	if err != nil {
-		return CreateResult{}, b.reconcileCreateFailure(name, false, err)
+		return CreateResult{}, b.reconcileCreateFailure("", false, err)
 	}
 	workspaceID = createdWS.ID
 	windowID := createdWS.WindowID
@@ -197,10 +197,10 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 	firstSurfaces, err := b.workspaceSurfaces(surfaceCtx, workspaceID)
 	surfaceCancel()
 	if err != nil {
-		return CreateResult{}, b.reconcileCreateFailure(name, false, err)
+		return CreateResult{}, b.reconcileCreateFailure(workspaceID, false, err)
 	}
 	if len(firstSurfaces) != 1 {
-		return CreateResult{}, b.reconcileCreateFailure(name, false, fmt.Errorf("cmux workspace created %d surfaces, want 1", len(firstSurfaces)))
+		return CreateResult{}, b.reconcileCreateFailure(workspaceID, false, fmt.Errorf("cmux workspace created %d surfaces, want 1", len(firstSurfaces)))
 	}
 	surfaceIDs := []string{firstSurfaces[0]}
 	for i, agent := range req.Plan.Agents[1:] {
@@ -211,16 +211,16 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 		splitRaw, splitErr := b.runJSON(splitCtx, "new-split", cmuxSplitDirection(preview.Effective.Layout), "--workspace", workspaceID, "--surface", surfaceIDs[len(surfaceIDs)-1], "--focus", "false")
 		splitCancel()
 		if splitErr != nil {
-			return CreateResult{}, b.reconcileCreateFailure(name, false, fmt.Errorf("create cmux split for %s: %w", agent.Handle, splitErr))
+			return CreateResult{}, b.reconcileCreateFailure(workspaceID, false, fmt.Errorf("create cmux split for %s: %w", agent.Handle, splitErr))
 		}
 		surfaceID, splitErr := parseCmuxSplitSurface(splitRaw)
 		if splitErr != nil {
-			return CreateResult{}, b.reconcileCreateFailure(name, false, fmt.Errorf("cmux split for %s: %w", agent.Handle, splitErr))
+			return CreateResult{}, b.reconcileCreateFailure(workspaceID, false, fmt.Errorf("cmux split for %s: %w", agent.Handle, splitErr))
 		}
 		surfaceIDs = append(surfaceIDs, surfaceID)
 	}
 	if _, err := b.waitHealthy(context.Background(), workspaceID, len(surfaceIDs)); err != nil {
-		return CreateResult{}, b.reconcileCreateFailure(name, false, err)
+		return CreateResult{}, b.reconcileCreateFailure(workspaceID, false, err)
 	}
 	for i, agent := range req.Plan.Agents {
 		line := b.agentCommand(req, agent)
@@ -228,13 +228,13 @@ func (b *CmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 		_, err := b.run(sendCtx, "send", "--workspace", workspaceID, "--surface", surfaceIDs[i], "--", line)
 		sendCancel()
 		if err != nil {
-			return CreateResult{}, b.reconcileCreateFailure(name, true, fmt.Errorf("send cmux command for %s: %w", agent.Handle, err))
+			return CreateResult{}, b.reconcileCreateFailure(workspaceID, true, fmt.Errorf("send cmux command for %s: %w", agent.Handle, err))
 		}
 		enterCtx, enterCancel := b.inspectCallContext()
 		_, err = b.run(enterCtx, "send-key", "--workspace", workspaceID, "--surface", surfaceIDs[i], "enter")
 		enterCancel()
 		if err != nil {
-			return CreateResult{}, b.reconcileCreateFailure(name, true, fmt.Errorf("submit cmux command for %s: %w", agent.Handle, err))
+			return CreateResult{}, b.reconcileCreateFailure(workspaceID, true, fmt.Errorf("submit cmux command for %s: %w", agent.Handle, err))
 		}
 	}
 	resources := cmuxBindingResources(workspaceID, windowID, nonce, req.Plan, surfaceIDs)
@@ -302,32 +302,27 @@ func (b *CmuxBackend) restoreSelectedWorkspace(previousSelected, skipID string) 
 	_, _ = b.run(ctx, "select-workspace", "--workspace", previousSelected)
 }
 
-func (b *CmuxBackend) reconcileCreateFailure(name string, inputSent bool, cause error) error {
+func (b *CmuxBackend) reconcileCreateFailure(knownWorkspaceID string, inputSent bool, cause error) error {
 	if inputSent {
 		return cause
 	}
+	if knownWorkspaceID == "" {
+		return fmt.Errorf("%w (cmux workspace ownership unknown, never guessed)", cause)
+	}
 	ctx, cancel := b.orphanCallContext()
 	defer cancel()
-	matches, err := b.namedWorkspaces(ctx, name)
+	records, err := b.listWorkspaceRecords(ctx)
 	if err != nil {
 		return fmt.Errorf("%w (orphan workspace reconciliation failed: %v)", cause, err)
 	}
-	switch len(matches) {
-	case 0:
-		return fmt.Errorf("%w (no cmux workspace named %q appeared)", cause, name)
-	case 1:
-		id := strings.ToLower(matches[0].ID)
-		if _, closeErr := b.run(ctx, "close-workspace", "--workspace", id); closeErr != nil {
-			return fmt.Errorf("%w (close orphan %s: %v)", cause, id, closeErr)
-		}
-		return fmt.Errorf("%w (closed orphan cmux workspace %s)", cause, id)
-	default:
-		ids := make([]string, 0, len(matches))
-		for _, workspace := range matches {
-			ids = append(ids, strings.ToLower(workspace.ID))
-		}
-		return fmt.Errorf("%w (ambiguous cmux workspaces named %q: %s; unknown, never guessed)", cause, name, strings.Join(ids, ","))
+	id := strings.ToLower(knownWorkspaceID)
+	if !cmuxContainsID(cmuxWorkspaceIDs(records), id) {
+		return fmt.Errorf("%w (acknowledged cmux workspace %s is absent)", cause, id)
 	}
+	if _, closeErr := b.run(ctx, "close-workspace", "--workspace", id); closeErr != nil {
+		return fmt.Errorf("%w (close orphan %s: %v)", cause, id, closeErr)
+	}
+	return fmt.Errorf("%w (closed orphan cmux workspace %s)", cause, id)
 }
 
 func (b *CmuxBackend) Inspect(req InspectRequest) (InspectResult, error) {
@@ -422,18 +417,31 @@ func (b *CmuxBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 	if err != nil {
 		return ReclaimResult{}, err
 	}
-	workspaceID, err := b.workspaceByName(ctx, name)
+	matches, err := b.namedWorkspaces(ctx, name)
 	if err != nil {
 		return ReclaimResult{Status: ReclaimUnknown, Evidence: err.Error()}, nil
 	}
-	if workspaceID == "" {
+	if req.Journal.Phase == JournalIntent {
+		if len(matches) == 0 {
+			return ReclaimResult{Status: ReclaimAbsent, Evidence: "deterministic cmux workspace is absent"}, nil
+		}
+		return ReclaimResult{Status: ReclaimForeign, Evidence: "journal intent must not adopt a same-name cmux workspace"}, nil
+	}
+	if len(matches) == 0 {
 		return ReclaimResult{Status: ReclaimAbsent, Evidence: "deterministic cmux workspace is absent"}, nil
 	}
-	surfaceIDs, err := b.workspaceSurfaces(ctx, workspaceID)
+	if len(matches) != 1 {
+		return ReclaimResult{Status: ReclaimUnknown, Evidence: fmt.Sprintf("ambiguous cmux workspaces named %q", name)}, nil
+	}
+	workspace := matches[0]
+	if workspace.WindowID == "" {
+		return ReclaimResult{Status: ReclaimIncomplete, Evidence: "cmux workspace has no window identity"}, nil
+	}
+	surfaceIDs, err := b.workspaceSurfaces(ctx, workspace.ID)
 	if err != nil {
 		return ReclaimResult{Status: ReclaimUnknown, Evidence: err.Error()}, nil
 	}
-	resources := cmuxBindingResources(workspaceID, "", req.Journal.LaunchNonce, req.Journal.Plan, surfaceIDs)
+	resources := cmuxBindingResources(workspace.ID, workspace.WindowID, req.Journal.LaunchNonce, req.Journal.Plan, surfaceIDs)
 	issues := cmuxInventoryIssues(resources, req.Journal.Plan)
 	if len(issues) != 0 {
 		return ReclaimResult{
@@ -447,6 +455,7 @@ func (b *CmuxBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 		InstanceIdentity: req.Journal.InstanceIdentity, Profile: req.Journal.Profile,
 		LaunchNonce: req.Journal.LaunchNonce,
 		Resources:   ResourceIdentitySet{Version: ResourceSetVersion, Resources: resources},
+		Placement:   req.Journal.Placement,
 	}
 	if !detect.Available || detect.HostIdentity != binding.HostIdentity ||
 		detect.InstanceIdentity != binding.InstanceIdentity || CmuxProfile().Identity() != binding.Profile {
@@ -651,21 +660,6 @@ func (b *CmuxBackend) namedWorkspaces(ctx context.Context, name string) ([]cmuxL
 		return nil, err
 	}
 	return namedCmuxWorkspaces(records, name), nil
-}
-
-func (b *CmuxBackend) workspaceByName(ctx context.Context, name string) (string, error) {
-	matches, err := b.namedWorkspaces(ctx, name)
-	if err != nil {
-		return "", err
-	}
-	switch len(matches) {
-	case 0:
-		return "", nil
-	case 1:
-		return strings.ToLower(matches[0].ID), nil
-	default:
-		return "", fmt.Errorf("ambiguous cmux workspaces named %q", name)
-	}
 }
 
 func (b *CmuxBackend) listWorkspaces(ctx context.Context) ([]string, error) {

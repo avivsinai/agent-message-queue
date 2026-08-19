@@ -235,34 +235,28 @@ func (b *GhosttyBackend) reconcileCreateFailure(before []string, knownWindowID s
 		return fmt.Errorf("%w (orphan window reconciliation failed: %v)", cause, err)
 	}
 	newIDs := ghosttyIDsNotIn(listed, before)
-	if knownWindowID != "" {
-		extras := make([]string, 0, len(newIDs))
-		for _, id := range newIDs {
-			if id != knownWindowID {
-				extras = append(extras, id)
-			}
+	if knownWindowID == "" {
+		if len(newIDs) == 0 {
+			return fmt.Errorf("%w (no new ghostty window appeared)", cause)
 		}
-		if containsString(listed, knownWindowID) {
-			if _, closeErr := b.run(ctx, "close-window", knownWindowID); closeErr != nil {
-				return fmt.Errorf("%w (close orphan %s: %v)", cause, knownWindowID, closeErr)
-			}
-		}
-		if len(extras) > 0 {
-			return fmt.Errorf("%w (closed orphan %s; ambiguous extra windows %s, unknown, never guessed)", cause, knownWindowID, strings.Join(extras, ","))
-		}
-		return fmt.Errorf("%w (closed orphan ghostty window %s)", cause, knownWindowID)
+		return fmt.Errorf("%w (unacknowledged ghostty windows %s; unknown, never guessed)", cause, strings.Join(newIDs, ","))
 	}
-	switch len(newIDs) {
-	case 0:
-		return fmt.Errorf("%w (no new ghostty window appeared)", cause)
-	case 1:
-		if _, closeErr := b.run(ctx, "close-window", newIDs[0]); closeErr != nil {
-			return fmt.Errorf("%w (close orphan %s: %v)", cause, newIDs[0], closeErr)
-		}
-		return fmt.Errorf("%w (closed orphan ghostty window %s)", cause, newIDs[0])
-	default:
-		return fmt.Errorf("%w (ambiguous new ghostty windows %s; unknown, never guessed)", cause, strings.Join(newIDs, ","))
+	if !containsString(listed, knownWindowID) {
+		return fmt.Errorf("%w (acknowledged ghostty window %s is absent)", cause, knownWindowID)
 	}
+	if _, closeErr := b.run(ctx, "close-window", knownWindowID); closeErr != nil {
+		return fmt.Errorf("%w (close orphan %s: %v)", cause, knownWindowID, closeErr)
+	}
+	extras := make([]string, 0, len(newIDs))
+	for _, id := range newIDs {
+		if id != knownWindowID {
+			extras = append(extras, id)
+		}
+	}
+	if len(extras) > 0 {
+		return fmt.Errorf("%w (closed orphan %s; ambiguous extra windows %s, unknown, never guessed)", cause, knownWindowID, strings.Join(extras, ","))
+	}
+	return fmt.Errorf("%w (closed orphan ghostty window %s)", cause, knownWindowID)
 }
 
 func ghosttyIDsNotIn(listed, before []string) []string {
@@ -383,7 +377,7 @@ func (b *GhosttyBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 		return ReclaimResult{Status: ReclaimUnknown, Evidence: "ghostty window id is absent while terminals remain"}, nil
 	}
 	if windowID == "" {
-		return ReclaimResult{Status: ReclaimUnknown, Evidence: "journal has no ghostty window identity"}, nil
+		return ReclaimResult{Status: ReclaimIncomplete, Evidence: "journal has no ghostty window identity"}, nil
 	}
 	live, err := b.windowTerminals(ctx, windowID)
 	if err != nil {
@@ -412,6 +406,7 @@ func (b *GhosttyBackend) Reclaim(req ReclaimRequest) (ReclaimResult, error) {
 		InstanceIdentity: req.Journal.InstanceIdentity, Profile: req.Journal.Profile,
 		LaunchNonce: req.Journal.LaunchNonce,
 		Resources:   ResourceIdentitySet{Version: ResourceSetVersion, Resources: resources},
+		Placement:   req.Journal.Placement,
 	}
 	if !detect.Available || detect.HostIdentity != binding.HostIdentity ||
 		detect.InstanceIdentity != binding.InstanceIdentity || GhosttyProfile().Identity() != binding.Profile {
