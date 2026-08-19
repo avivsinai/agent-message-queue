@@ -9,11 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
+
+var launchdLabelPattern = regexp.MustCompile(`^[A-Za-z0-9]+(-[A-Za-z0-9]+)*(\.[A-Za-z0-9]+(-[A-Za-z0-9]+)*)+$`)
 
 const DefaultLabel = "io.github.avivsinai.amq-keepalive"
 
@@ -37,6 +40,9 @@ func DefaultPlistPath(label string) (string, error) {
 	if label == "" {
 		label = DefaultLabel
 	}
+	if err := validateLaunchdLabel(label); err != nil {
+		return "", err
+	}
 	return filepath.Join(home, "Library", "LaunchAgents", label+".plist"), nil
 }
 
@@ -48,8 +54,18 @@ func DefaultLogPaths(label string) (stdoutPath, stderrPath string, err error) {
 	if label == "" {
 		label = DefaultLabel
 	}
+	if err := validateLaunchdLabel(label); err != nil {
+		return "", "", err
+	}
 	dir := filepath.Join(home, "Library", "Logs", "amq-keepalive")
 	return filepath.Join(dir, label+".out.log"), filepath.Join(dir, label+".err.log"), nil
+}
+
+func validateLaunchdLabel(label string) error {
+	if !launchdLabelPattern.MatchString(label) || len(label) > 253 || label != filepath.Base(label) {
+		return fmt.Errorf("launchd label %q must be reverse-DNS", label)
+	}
+	return nil
 }
 
 func ResolveExecutable(path string) (string, error) {
@@ -76,6 +92,9 @@ func ResolveExecutable(path string) (string, error) {
 func NormalizeOptions(opts Options) (Options, error) {
 	if opts.Label == "" {
 		opts.Label = DefaultLabel
+	}
+	if err := validateLaunchdLabel(opts.Label); err != nil {
+		return Options{}, err
 	}
 	if opts.BinaryPath == "" {
 		return Options{}, errors.New("binary path is required")
@@ -160,6 +179,9 @@ func Install(ctx context.Context, opts Options) error {
 func Uninstall(ctx context.Context, label string, plistPath string, unload bool) error {
 	if label == "" {
 		label = DefaultLabel
+	}
+	if err := validateLaunchdLabel(label); err != nil {
+		return err
 	}
 	if plistPath == "" {
 		path, err := DefaultPlistPath(label)
@@ -257,13 +279,159 @@ func ensureExistingPlistOwned(path, label string) error {
 }
 
 func isOwnedPlist(data []byte, label string) bool {
-	return bytes.Contains(data, []byte("<key>Label</key>")) &&
-		bytes.Contains(data, []byte("<string>"+label+"</string>")) &&
-		bytes.Contains(data, []byte("<key>ProgramArguments</key>")) &&
-		bytes.Contains(data, []byte("<string>supervise</string>")) &&
-		bytes.Contains(data, []byte("<string>--registry</string>")) &&
-		bytes.Contains(data, []byte("<string>--amq</string>")) &&
-		bytes.Contains(data, []byte("<string>--self</string>"))
+	dict, err := parsePlistRootDict(data)
+	if err != nil {
+		return false
+	}
+	gotLabel, _ := dict["Label"].(string)
+	if gotLabel != label {
+		return false
+	}
+	rawArgs, ok := dict["ProgramArguments"].([]any)
+	if !ok {
+		return false
+	}
+	have := make(map[string]bool, len(rawArgs))
+	for _, arg := range rawArgs {
+		text, ok := arg.(string)
+		if !ok {
+			return false
+		}
+		have[text] = true
+	}
+	for _, required := range []string{"supervise", "--registry", "--amq", "--self"} {
+		if !have[required] {
+			return false
+		}
+	}
+	return true
+}
+
+func parsePlistRootDict(data []byte) (map[string]any, error) {
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		start, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		switch start.Name.Local {
+		case "plist":
+			continue
+		case "dict":
+			return parsePlistDict(dec)
+		default:
+			return nil, fmt.Errorf("plist root must be a dict")
+		}
+	}
+}
+
+func parsePlistDict(dec *xml.Decoder) (map[string]any, error) {
+	out := make(map[string]any)
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		switch t := tok.(type) {
+		case xml.EndElement:
+			if t.Name.Local == "dict" {
+				return out, nil
+			}
+			return nil, fmt.Errorf("unexpected plist end element %s", t.Name.Local)
+		case xml.StartElement:
+			if t.Name.Local != "key" {
+				return nil, fmt.Errorf("plist dict expected key, got %s", t.Name.Local)
+			}
+			var key string
+			if err := dec.DecodeElement(&key, &t); err != nil {
+				return nil, err
+			}
+			if key == "" {
+				return nil, fmt.Errorf("plist dict key is empty")
+			}
+			if _, exists := out[key]; exists {
+				return nil, fmt.Errorf("plist dict duplicate key %q", key)
+			}
+			start, err := nextPlistStart(dec)
+			if err != nil {
+				return nil, err
+			}
+			value, err := parsePlistValue(dec, start)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = value
+		}
+	}
+}
+
+func parsePlistArray(dec *xml.Decoder) ([]any, error) {
+	var out []any
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		switch t := tok.(type) {
+		case xml.EndElement:
+			if t.Name.Local == "array" {
+				return out, nil
+			}
+			return nil, fmt.Errorf("unexpected plist end element %s", t.Name.Local)
+		case xml.StartElement:
+			value, err := parsePlistValue(dec, t)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, value)
+		}
+	}
+}
+
+func parsePlistValue(dec *xml.Decoder, start xml.StartElement) (any, error) {
+	switch start.Name.Local {
+	case "dict":
+		return parsePlistDict(dec)
+	case "array":
+		return parsePlistArray(dec)
+	case "string", "integer", "real", "date", "data":
+		var text string
+		if err := dec.DecodeElement(&text, &start); err != nil {
+			return nil, err
+		}
+		return text, nil
+	case "true":
+		if err := dec.Skip(); err != nil {
+			return nil, err
+		}
+		return true, nil
+	case "false":
+		if err := dec.Skip(); err != nil {
+			return nil, err
+		}
+		return false, nil
+	default:
+		return nil, fmt.Errorf("unsupported plist element %s", start.Name.Local)
+	}
+}
+
+func nextPlistStart(dec *xml.Decoder) (xml.StartElement, error) {
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return xml.StartElement{}, err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			return t, nil
+		case xml.EndElement:
+			return xml.StartElement{}, fmt.Errorf("plist value missing")
+		}
+	}
 }
 
 func runLaunchctl(ctx context.Context, args ...string) error {
