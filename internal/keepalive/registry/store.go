@@ -33,6 +33,7 @@ type Entry struct {
 	Agent                  string    `json:"agent"`
 	Adapter                string    `json:"adapter"`
 	Target                 string    `json:"target"`
+	OwnershipKey           string    `json:"ownership_key,omitempty"`
 	State                  State     `json:"state"`
 	LastAttach             time.Time `json:"last_attach,omitempty"`
 	LastSeenBySupervisor   time.Time `json:"last_seen_by_supervisor,omitempty"`

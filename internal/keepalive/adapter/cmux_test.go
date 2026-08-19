@@ -74,7 +74,7 @@ func TestCmuxNormalizeTargetCanonicalizesUUIDCase(t *testing.T) {
 func TestCmuxProbeUsesGlobalSystemTreeForExactSurface(t *testing.T) {
 	skipCmuxNonDarwin(t)
 	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaces(testCmuxSurfaceID)}
-	err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Probe(context.Background(), "cmux:surface:"+testCmuxSurfaceID)
+	err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Probe(context.Background(), "cmux:surface:"+testCmuxSurfaceID)
 	if err != nil {
 		t.Fatalf("Probe() error = %v", err)
 	}
@@ -106,7 +106,7 @@ func TestCmuxInventoryIncludesSurfaceInNonFocusedWindow(t *testing.T) {
 			}},
 		},
 	)}
-	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("Inventory() error = %v", err)
 	}
@@ -121,7 +121,7 @@ func TestCmuxInventoryIncludesSurfaceInNonFocusedWindow(t *testing.T) {
 func TestCmuxProbeClassifiesSurfaceAbsentFromGlobalTree(t *testing.T) {
 	skipCmuxNonDarwin(t)
 	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaces("B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2")}
-	err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Probe(context.Background(), "cmux:surface:"+testCmuxSurfaceID)
+	err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Probe(context.Background(), "cmux:surface:"+testCmuxSurfaceID)
 	if !errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("Probe() error = %v, want ErrTargetNotFound", err)
 	}
@@ -131,7 +131,7 @@ func TestCmuxInventoryAnswersManyTargetsFromOneChildProcess(t *testing.T) {
 	skipCmuxNonDarwin(t)
 	second := "B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaces(testCmuxSurfaceID, second)}
-	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("Inventory() error = %v", err)
 	}
@@ -207,24 +207,36 @@ func TestCmuxInventoryKeepsTrustedCandidateAmbiguousWithoutDeadProof(t *testing.
 }
 
 // assertCmuxEviction verifies exactly one surface.report_tty eviction of the
-// given surface plus exactly one tree rebuild (two system.tree calls total).
+// given surface plus inventory, CAS snapshot, and rebuild system.tree calls.
+// The extra tree is a CAS snapshot: report_tty is issued only when the corpse
+// still claims the same tty, so a live rebind cannot be overwritten.
 func assertCmuxEviction(t *testing.T, runner *fakeCommandRunner, corpseID string) {
 	t.Helper()
-	if len(runner.calls) != 3 {
-		t.Fatalf("calls = %d, want tree + report_tty + rebuild", len(runner.calls))
-	}
 	trees := 0
-	for _, call := range runner.calls {
-		if len(call.args) >= 2 && call.args[1] == "system.tree" {
+	var evict *commandCall
+	for i := range runner.calls {
+		call := &runner.calls[i]
+		if len(call.args) < 2 {
+			continue
+		}
+		switch call.args[1] {
+		case "system.tree":
 			trees++
+		case "surface.report_tty":
+			if evict != nil {
+				t.Fatalf("multiple report_tty calls: %#v", runner.calls)
+			}
+			evict = call
 		}
 	}
-	if trees != 2 {
-		t.Fatalf("system.tree calls = %d, want exactly one rebuild", trees)
+	if trees != 3 {
+		t.Fatalf("system.tree calls = %d, want inventory + cas + rebuild; calls=%#v", trees, runner.calls)
 	}
-	evict := runner.calls[1]
-	if len(evict.args) != 3 || evict.args[0] != "rpc" || evict.args[1] != "surface.report_tty" {
-		t.Fatalf("second call = %#v, want surface.report_tty RPC", evict)
+	if evict == nil {
+		t.Fatalf("missing surface.report_tty; calls=%#v", runner.calls)
+	}
+	if len(evict.args) != 3 || evict.args[0] != "rpc" {
+		t.Fatalf("evict call = %#v, want surface.report_tty RPC", *evict)
 	}
 	var params map[string]string
 	if err := json.Unmarshal([]byte(evict.args[2]), &params); err != nil {
@@ -246,7 +258,7 @@ func TestCmuxInventoryCanonicalizesBareTTYDeviceName(t *testing.T) {
 	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
 		map[string]string{"id": testCmuxSurfaceID, "tty": " ttys011 "},
 	)}
-	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("Inventory() error = %v", err)
 	}
@@ -261,7 +273,7 @@ func TestCmuxInventoryUsesSurfaceUUIDWhenTTYBlank(t *testing.T) {
 	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
 		map[string]string{"id": testCmuxSurfaceID, "tty": "  "},
 	)}
-	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("Inventory() error = %v", err)
 	}
@@ -276,7 +288,7 @@ func TestCmuxInventoryRejectsNonTerminalType(t *testing.T) {
 	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
 		map[string]string{"id": testCmuxSurfaceID, "type": "browser", "tty": "ttys011"},
 	)}
-	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("Inventory() error = %v", err)
 	}
@@ -294,7 +306,7 @@ func TestCmuxInventoryAcceptsMixedCaseTerminalType(t *testing.T) {
 	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
 		map[string]string{"id": testCmuxSurfaceID, "type": "Terminal", "tty": "ttys011"},
 	)}
-	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("Inventory() error = %v", err)
 	}
@@ -310,7 +322,7 @@ func TestCmuxOwnershipKeyPromotesBlankTTYToCanonicalTTYOnce(t *testing.T) {
 	blank := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
 		map[string]string{"id": testCmuxSurfaceID, "tty": ""},
 	)}
-	blankInv, err := (Cmux{Runner: blank, Path: "/fake/cmux", recorded: recorded}).Inventory(context.Background(), OwnershipContext{})
+	blankInv, err := (Cmux{Runner: blank, Path: "/fake/cmux", recorded: recorded, LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("blank Inventory() error = %v", err)
 	}
@@ -321,7 +333,7 @@ func TestCmuxOwnershipKeyPromotesBlankTTYToCanonicalTTYOnce(t *testing.T) {
 	present := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
 		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
 	)}
-	presentInv, err := (Cmux{Runner: present, Path: "/fake/cmux", recorded: recorded}).Inventory(context.Background(), OwnershipContext{})
+	presentInv, err := (Cmux{Runner: present, Path: "/fake/cmux", recorded: recorded, LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("present Inventory() error = %v", err)
 	}
@@ -337,7 +349,7 @@ func TestCmuxOwnershipKeyRejectsTTYChangeAfterRecordedTTY(t *testing.T) {
 	first := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
 		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
 	)}
-	firstInv, err := (Cmux{Runner: first, Path: "/fake/cmux", recorded: recorded}).Inventory(context.Background(), OwnershipContext{})
+	firstInv, err := (Cmux{Runner: first, Path: "/fake/cmux", recorded: recorded, LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("first Inventory() error = %v", err)
 	}
@@ -348,7 +360,7 @@ func TestCmuxOwnershipKeyRejectsTTYChangeAfterRecordedTTY(t *testing.T) {
 	second := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
 		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys012"},
 	)}
-	secondInv, err := (Cmux{Runner: second, Path: "/fake/cmux", recorded: recorded}).Inventory(context.Background(), OwnershipContext{})
+	secondInv, err := (Cmux{Runner: second, Path: "/fake/cmux", recorded: recorded, LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("second Inventory() error = %v", err)
 	}
@@ -364,7 +376,7 @@ func TestCmuxOwnershipKeyAcceptsRepeatedIdenticalTTY(t *testing.T) {
 	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
 		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
 	)}
-	firstInv, err := (Cmux{Runner: runner, Path: "/fake/cmux", recorded: recorded}).Inventory(context.Background(), OwnershipContext{})
+	firstInv, err := (Cmux{Runner: runner, Path: "/fake/cmux", recorded: recorded, LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("first Inventory() error = %v", err)
 	}
@@ -372,7 +384,7 @@ func TestCmuxOwnershipKeyAcceptsRepeatedIdenticalTTY(t *testing.T) {
 	if err != nil || first != "tty:/dev/ttys011" {
 		t.Fatalf("first OwnershipKey() = %q, %v", first, err)
 	}
-	secondInv, err := (Cmux{Runner: runner, Path: "/fake/cmux", recorded: recorded}).Inventory(context.Background(), OwnershipContext{})
+	secondInv, err := (Cmux{Runner: runner, Path: "/fake/cmux", recorded: recorded, LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("second Inventory() error = %v", err)
 	}
@@ -392,7 +404,7 @@ func TestCmuxInventoryRejectsDuplicateSurfaceIDWhenProcessAliveOmitted(t *testin
 			]}]}]
 		}]
 	}`)}
-	_, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	_, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err == nil || !strings.Contains(err.Error(), "conflicting tty identities") {
 		t.Fatalf("Inventory() error = %v, want nil vs set process_alive conflict", err)
 	}
@@ -403,7 +415,7 @@ func TestCmuxInventoryRejectsNonPTYPathWithoutOwnershipKey(t *testing.T) {
 	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
 		map[string]string{"id": testCmuxSurfaceID, "tty": "/dev/not-a-tty"},
 	)}
-	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	inventory, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("Inventory() error = %v", err)
 	}
@@ -485,7 +497,7 @@ func TestCmuxInventoryRejectsDuplicateSurfaceIDWithDifferentTTYs(t *testing.T) {
 		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
 		map[string]string{"id": strings.ToLower(testCmuxSurfaceID), "tty": "ttys012"},
 	)}
-	_, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	_, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err == nil || errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("Inventory() error = %v, want ambiguous duplicate identity failure", err)
 	}
@@ -501,7 +513,7 @@ func TestCmuxInventoryRejectsDuplicateSurfaceIDWithDifferentWorkspace(t *testing
 			]
 		}]
 	}`)}
-	_, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	_, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err == nil || !strings.Contains(err.Error(), "conflicting tty identities") {
 		t.Fatalf("Inventory() error = %v, want conflicting workspace identity failure", err)
 	}
@@ -517,7 +529,7 @@ func TestCmuxInventoryRejectsDuplicateSurfaceIDWithDifferentProcessAlive(t *test
 			]}]}]
 		}]
 	}`)}
-	_, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	_, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err == nil || !strings.Contains(err.Error(), "conflicting tty identities") {
 		t.Fatalf("Inventory() error = %v, want conflicting process liveness failure", err)
 	}
@@ -526,7 +538,7 @@ func TestCmuxInventoryRejectsDuplicateSurfaceIDWithDifferentProcessAlive(t *test
 func TestCmuxProbeDoesNotClassifyGenericFailureAsMissing(t *testing.T) {
 	skipCmuxNonDarwin(t)
 	runner := &fakeCommandRunner{output: []byte("cmux daemon unavailable"), err: errors.New("exit status 1")}
-	err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Probe(context.Background(), "cmux:surface:"+testCmuxSurfaceID)
+	err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Probe(context.Background(), "cmux:surface:"+testCmuxSurfaceID)
 	if err == nil || errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("Probe() error = %v, want non-missing failure", err)
 	}
@@ -535,7 +547,7 @@ func TestCmuxProbeDoesNotClassifyGenericFailureAsMissing(t *testing.T) {
 func TestCmuxInventoryRejectsMalformedTreeInsteadOfInferringAbsence(t *testing.T) {
 	skipCmuxNonDarwin(t)
 	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaces("not-a-uuid")}
-	_, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	_, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err == nil || errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("Inventory() error = %v, want ambiguous parse failure", err)
 	}
@@ -544,7 +556,7 @@ func TestCmuxInventoryRejectsMalformedTreeInsteadOfInferringAbsence(t *testing.T
 func TestCmuxInventoryRejectsMissingWindowsSchemaInsteadOfDetachingEverything(t *testing.T) {
 	skipCmuxNonDarwin(t)
 	runner := &fakeCommandRunner{output: []byte(`{"ok":true}`)}
-	_, err := (Cmux{Runner: runner, Path: "/fake/cmux"}).Inventory(context.Background(), OwnershipContext{})
+	_, err := (Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}).Inventory(context.Background(), OwnershipContext{})
 	if err == nil || errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("Inventory() error = %v, want ambiguous schema failure", err)
 	}
@@ -559,8 +571,9 @@ func TestCmuxInjectUsesRawRPCThenSettlesAndSendsEnter(t *testing.T) {
 	}}
 	var delays []time.Duration
 	adapter := Cmux{
-		Runner: runner,
-		Path:   "/fake/cmux",
+		Runner:            runner,
+		Path:              "/fake/cmux",
+		LiveTTYOwnerCount: liveOwner,
 		Sleep: func(_ context.Context, delay time.Duration) error {
 			delays = append(delays, delay)
 			return nil
@@ -612,7 +625,7 @@ func TestCmuxInjectDoesNotSendEnterWhenTextFails(t *testing.T) {
 		{output: cmuxTreeWithSurfaces(testCmuxSurfaceID)},
 		{output: []byte("surface unavailable"), err: errors.New("exit status 1")},
 	}}
-	adapter := Cmux{Runner: runner, Path: "/fake/cmux"}
+	adapter := Cmux{Runner: runner, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}
 	err := adapter.Inject(context.Background(), "cmux:surface:"+testCmuxSurfaceID, "payload")
 	if err == nil || !strings.Contains(err.Error(), "surface unavailable") {
 		t.Fatalf("Inject() error = %v, want command output", err)
@@ -655,6 +668,10 @@ func TestCmuxInjectEvictsProcessDeadAliasThenSendsText(t *testing.T) {
 			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
 			map[string]string{"id": corpse, "tty": "ttys011", "process_alive": "false"},
 		)},
+		{output: cmuxTreeWithSurfaceRecords(
+			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+			map[string]string{"id": corpse, "tty": "ttys011", "process_alive": "false"},
+		)}, // CAS snapshot: corpse still stale
 		{}, // surface.report_tty
 		{output: cmuxTreeWithSurfaceRecords(
 			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
@@ -673,7 +690,7 @@ func TestCmuxInjectEvictsProcessDeadAliasThenSendsText(t *testing.T) {
 	if err := adapter.Inject(context.Background(), "cmux:surface:"+testCmuxSurfaceID, "payload"); err != nil {
 		t.Fatalf("Inject() error = %v", err)
 	}
-	wantSequence := []string{"system.tree", "surface.report_tty", "system.tree", "surface.send_text", "surface.send_key"}
+	wantSequence := []string{"system.tree", "system.tree", "surface.report_tty", "system.tree", "surface.send_text", "surface.send_key"}
 	if len(runner.calls) != len(wantSequence) {
 		t.Fatalf("calls = %d, want %d (%v)", len(runner.calls), len(wantSequence), wantSequence)
 	}
@@ -683,7 +700,7 @@ func TestCmuxInjectEvictsProcessDeadAliasThenSendsText(t *testing.T) {
 		}
 	}
 	var evictParams map[string]string
-	if err := json.Unmarshal([]byte(runner.calls[1].args[2]), &evictParams); err != nil {
+	if err := json.Unmarshal([]byte(runner.calls[2].args[2]), &evictParams); err != nil {
 		t.Fatalf("report_tty params are not JSON: %v", err)
 	}
 	if evictParams["surface_id"] != corpse || evictParams["tty_name"] != cmuxEvictedTTYName {
@@ -713,8 +730,14 @@ func TestCmuxEvictDoesNotReportTTYWhenWorkspaceIDEmpty(t *testing.T) {
 			t.Fatalf("report_tty with empty workspace id: %#v", call)
 		}
 	}
-	if len(runner.calls) != 1 || runner.calls[0].args[1] != "system.tree" {
-		t.Fatalf("calls = %#v, want inventory only", runner.calls)
+	trees := 0
+	for _, call := range runner.calls {
+		if len(call.args) >= 2 && call.args[1] == "system.tree" {
+			trees++
+		}
+	}
+	if trees != 2 {
+		t.Fatalf("calls = %#v, want inventory + cas snapshot and no report_tty", runner.calls)
 	}
 }
 
@@ -757,6 +780,10 @@ func TestCmuxInventoryEvictsAllClaimantsWhenTTYHasNoLiveOwner(t *testing.T) {
 			map[string]string{"id": a, "tty": "ttys011"},
 			map[string]string{"id": b, "tty": "ttys011"},
 		)},
+		{output: cmuxTreeWithSurfaceRecords(
+			map[string]string{"id": a, "tty": "ttys011"},
+			map[string]string{"id": b, "tty": "ttys011"},
+		)}, // CAS: both claimants still stale
 		{}, // report_tty for first corpse
 		{}, // report_tty for second corpse
 		{output: cmuxTreeWithSurfaceRecords(
@@ -794,6 +821,10 @@ func TestCmuxInventoryEvictsProcessDeadAliasAndKeepsLiveOwner(t *testing.T) {
 			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
 			map[string]string{"id": corpse, "tty": "ttys011", "process_alive": "false"},
 		)},
+		{output: cmuxTreeWithSurfaceRecords(
+			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+			map[string]string{"id": corpse, "tty": "ttys011", "process_alive": "false"},
+		)}, // CAS: corpse still process_alive:false
 		{}, // report_tty
 		{output: cmuxTreeWithSurfaceRecords(
 			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
@@ -879,6 +910,10 @@ func TestCmuxInventoryPreservesAmbiguityWhenEvictionFails(t *testing.T) {
 			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
 			map[string]string{"id": corpse, "tty": "ttys011", "process_alive": "false"},
 		)},
+		{output: cmuxTreeWithSurfaceRecords(
+			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+			map[string]string{"id": corpse, "tty": "ttys011", "process_alive": "false"},
+		)}, // CAS
 		{output: []byte("surface gone"), err: errors.New("exit status 1")},
 	}}
 	liveness := &fakeTTYLiveness{count: 1}
@@ -895,8 +930,8 @@ func TestCmuxInventoryPreservesAmbiguityWhenEvictionFails(t *testing.T) {
 	if _, err := inventory.OwnershipKey("cmux:surface:" + testCmuxSurfaceID); !errors.Is(err, ErrTargetDegraded) {
 		t.Fatalf("OwnershipKey() error = %v, want degraded ownership after failed eviction", err)
 	}
-	if len(runner.calls) != 2 {
-		t.Fatalf("calls = %d, want tree + failed report_tty only (no rebuild loop)", len(runner.calls))
+	if len(runner.calls) != 3 {
+		t.Fatalf("calls = %d, want tree + cas + failed report_tty only (no rebuild loop)", len(runner.calls))
 	}
 	if !containsSubstring(logs, "cmux eviction failed") {
 		t.Fatalf("logs = %v, want eviction-failure WARN", logs)
@@ -919,6 +954,7 @@ func TestCmuxInventoryPartialEvictionFailureStaysFailClosedAndRetries(t *testing
 	)
 	onePass := []fakeCommandResult{
 		{output: initial},
+		{output: initial}, // CAS: remaining corpses still stale
 		{},
 		{},
 		{output: []byte("surface busy"), err: errors.New("exit status 1")},
@@ -958,6 +994,9 @@ func TestCmuxInventoryPartialEvictionFailureStaysFailClosedAndRetries(t *testing
 
 func TestCmuxInventoryWarnsWhenSuccessfulEvictionRebuildStaysAmbiguous(t *testing.T) {
 	skipCmuxNonDarwin(t)
+	// Explicit process_alive:false still queues the corpse without treating it as
+	// a live claimant. The remaining uncontested surface now requires kernel
+	// liveness (B28); that probe does not weaken the corpse-eviction contract.
 	corpse := "B8A8C4A7-3C88-4DAD-93BE-97E9701D07D2"
 	initial := cmuxTreeWithSurfaceRecords(
 		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
@@ -969,18 +1008,16 @@ func TestCmuxInventoryWarnsWhenSuccessfulEvictionRebuildStaysAmbiguous(t *testin
 	)
 	runner := &fakeCommandRunner{results: []fakeCommandResult{
 		{output: initial},
+		{output: initial}, // CAS: still the same corpse identity
 		{},
 		{output: rebuilt},
 	}}
 	var logs []string
 	inventory, err := (Cmux{
-		Runner: runner,
-		Path:   "/fake/cmux",
-		LiveTTYOwnerCount: func(string) (int, error) {
-			t.Fatal("explicit process_alive:false must not probe liveness")
-			return 0, nil
-		},
-		Logf: captureLogf(&logs),
+		Runner:            runner,
+		Path:              "/fake/cmux",
+		LiveTTYOwnerCount: liveOwner,
+		Logf:              captureLogf(&logs),
 	}).Inventory(context.Background(), OwnershipContext{})
 	if err != nil {
 		t.Fatalf("Inventory() error = %v", err)
@@ -1023,6 +1060,125 @@ func TestCmuxInventoryFailsClosedWhenLivenessProbeErrors(t *testing.T) {
 	}
 	if !containsSubstring(logs, "tty-liveness unavailable") {
 		t.Fatalf("logs = %v, want degraded WARN", logs)
+	}
+}
+
+func TestCmuxInventoryEvictsSingleStaleClaimant(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	runner := &fakeCommandRunner{results: []fakeCommandResult{
+		{output: cmuxTreeWithSurfaceRecords(
+			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+		)},
+		{output: cmuxTreeWithSurfaceRecords(
+			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+		)},
+		{},
+		{output: cmuxTreeWithSurfaceRecords(
+			map[string]string{"id": testCmuxSurfaceID, "tty": cmuxEvictedTTYName},
+		)},
+	}}
+	inventory, err := (Cmux{
+		Runner:            runner,
+		Path:              "/fake/cmux",
+		LiveTTYOwnerCount: staleOwner,
+	}).Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("Inventory() error = %v", err)
+	}
+	if _, err := inventory.OwnershipKey("cmux:surface:" + testCmuxSurfaceID); !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("OwnershipKey() error = %v, want ErrTargetNotFound", err)
+	}
+	assertCmuxEviction(t, runner, testCmuxSurfaceID)
+}
+
+func TestCmuxInventoryDegradesUncontestedClaimantWhenLivenessProbeErrors(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	runner := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+	)}
+	var logs []string
+	inventory, err := (Cmux{
+		Runner: runner,
+		Path:   "/fake/cmux",
+		LiveTTYOwnerCount: func(string) (int, error) {
+			return 0, errors.New("sysctl boom")
+		},
+		Logf: captureLogf(&logs),
+	}).Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("Inventory() error = %v", err)
+	}
+	if _, err := inventory.OwnershipKey("cmux:surface:" + testCmuxSurfaceID); !errors.Is(err, ErrTargetDegraded) {
+		t.Fatalf("OwnershipKey() error = %v, want ErrTargetDegraded", err)
+	}
+	for _, call := range runner.calls {
+		if len(call.args) >= 2 && call.args[1] == "surface.report_tty" {
+			t.Fatalf("unexpected eviction after liveness error: %#v", call)
+		}
+	}
+	if !containsSubstring(logs, "tty-liveness unavailable") {
+		t.Fatalf("logs = %v, want degraded WARN", logs)
+	}
+}
+
+func TestCmuxInventoryDoesNotOverwriteLiveRebindBeforeEvict(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	// Queued stale eviction must not report_tty after the surface rebinds to a
+	// different live PTY. There is no CAS RPC, so the confirmation snapshot is
+	// the compare: mismatch aborts and degrades.
+	runner := &fakeCommandRunner{results: []fakeCommandResult{
+		{output: cmuxTreeWithSurfaceRecords(
+			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+		)},
+		{output: cmuxTreeWithSurfaceRecords(
+			map[string]string{"id": testCmuxSurfaceID, "tty": "ttys012"},
+		)},
+	}}
+	inventory, err := (Cmux{
+		Runner:            runner,
+		Path:              "/fake/cmux",
+		LiveTTYOwnerCount: staleOwner,
+	}).Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("Inventory() error = %v", err)
+	}
+	if _, err := inventory.OwnershipKey("cmux:surface:" + testCmuxSurfaceID); !errors.Is(err, ErrTargetDegraded) {
+		t.Fatalf("OwnershipKey() error = %v, want degraded after live rebind", err)
+	}
+	for _, call := range runner.calls {
+		if len(call.args) >= 2 && call.args[1] == "surface.report_tty" {
+			t.Fatalf("report_tty overwrote a live rebind: %#v", call)
+		}
+	}
+}
+
+func TestCmuxRememberOwnershipRefusesTTYDriftOnFreshAdapter(t *testing.T) {
+	skipCmuxNonDarwin(t)
+	first := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys011"},
+	)}
+	firstCmux := Cmux{Runner: first, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}.WithOwnershipRecord()
+	firstInv, err := firstCmux.Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("first Inventory() error = %v", err)
+	}
+	key, err := firstInv.OwnershipKey("cmux:surface:" + testCmuxSurfaceID)
+	if err != nil || key != "tty:/dev/ttys011" {
+		t.Fatalf("first OwnershipKey() = %q, %v", key, err)
+	}
+
+	second := &fakeCommandRunner{output: cmuxTreeWithSurfaceRecords(
+		map[string]string{"id": testCmuxSurfaceID, "tty": "ttys012"},
+	)}
+	secondCmux := Cmux{Runner: second, Path: "/fake/cmux", LiveTTYOwnerCount: liveOwner}.WithOwnershipRecord()
+	secondCmux.RememberOwnership("cmux:surface:"+testCmuxSurfaceID, key)
+	secondInv, err := secondCmux.Inventory(context.Background(), OwnershipContext{})
+	if err != nil {
+		t.Fatalf("second Inventory() error = %v", err)
+	}
+	_, err = secondInv.OwnershipKey("cmux:surface:" + testCmuxSurfaceID)
+	if err == nil || !errors.Is(err, ErrTargetDegraded) || !strings.Contains(err.Error(), "ownership key conflict") {
+		t.Fatalf("second OwnershipKey() error = %v, want recorded tty conflict", err)
 	}
 }
 
@@ -1093,6 +1249,10 @@ func skipCmuxNonDarwin(t *testing.T) {
 		t.Skip("cmux adapter requires macOS")
 	}
 }
+
+func liveOwner(string) (int, error) { return 1, nil }
+
+func staleOwner(string) (int, error) { return 0, nil }
 
 const testCmuxWorkspaceID = "WS-TEST-0001"
 
