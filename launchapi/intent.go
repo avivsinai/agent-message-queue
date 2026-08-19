@@ -24,7 +24,7 @@ func DecodeLaunchIntentV1(data []byte) (LaunchIntentV1, error) {
 func (intent *LaunchIntentV1) UnmarshalJSON(data []byte) error {
 	type wireLaunchIntentV1 LaunchIntentV1
 	var decoded wireLaunchIntentV1
-	if err := decodeStrictJSON(data, &decoded); err != nil {
+	if err := decodeStrictJSONValue(data, &decoded); err != nil {
 		return err
 	}
 	if err := requireLaunchIntentFields(data); err != nil {
@@ -308,10 +308,66 @@ func requireObjectFields(raw json.RawMessage, context string, required ...string
 	return nil
 }
 
+// StrictJSONMaxDepth bounds the recursive structural scan performed before a
+// public JSON document is decoded into a contract type.
+const StrictJSONMaxDepth = 256
+
+// StrictJSONErrorCode identifies a structural error found before decoding a
+// public JSON document into its contract type.
+type StrictJSONErrorCode string
+
+const (
+	StrictJSONDuplicateKey  StrictJSONErrorCode = "duplicate_json_key"
+	StrictJSONDepthExceeded StrictJSONErrorCode = "depth_exceeded"
+)
+
+// StrictJSONError reports a structural JSON error with a stable machine code.
+// Path and Key are retained as structured data so callers do not need to parse
+// the human-readable error string.
+type StrictJSONError struct {
+	Code StrictJSONErrorCode
+	Path string
+	Key  string
+}
+
+func (e *StrictJSONError) Error() string {
+	if e == nil {
+		return "strict JSON decoding failed"
+	}
+	switch e.Code {
+	case StrictJSONDuplicateKey:
+		return fmt.Sprintf("duplicate key %q at %s (code=%s)", e.Key, e.Path, e.Code)
+	case StrictJSONDepthExceeded:
+		return fmt.Sprintf("JSON nesting exceeds maximum depth %d at %s (code=%s)", StrictJSONMaxDepth, e.Path, e.Code)
+	default:
+		return fmt.Sprintf("strict JSON decoding failed at %s (code=%s)", e.Path, e.Code)
+	}
+}
+
+type strictJSONPathSegment struct {
+	key   string
+	index int
+	array bool
+}
+
 func decodeStrictJSON(data []byte, target any) error {
 	if !utf8.Valid(data) {
 		return fmt.Errorf("invalid UTF-8")
 	}
+	scanner := json.NewDecoder(bytes.NewReader(data))
+	if err := rejectDuplicateJSONKeys(scanner); err != nil {
+		return err
+	}
+	if err := scanner.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return decodeStrictJSONValue(data, target)
+}
+
+func decodeStrictJSONValue(data []byte, target any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
@@ -324,4 +380,86 @@ func decodeStrictJSON(data []byte, target any) error {
 		return err
 	}
 	return nil
+}
+
+// rejectDuplicateJSONKeys walks the complete JSON token stream. Decoder's
+// struct handling silently keeps the last value for duplicate object keys, so
+// this pass must happen before the contract decode and must recurse through
+// arrays as well as objects. It carries path segments and renders them only
+// when returning a typed error, keeping deeply nested failures linear.
+func rejectDuplicateJSONKeys(decoder *json.Decoder) error {
+	return rejectDuplicateJSONValue(decoder, nil, 0)
+}
+
+func rejectDuplicateJSONValue(decoder *json.Decoder, path []strictJSONPathSegment, depth int) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	switch delimiter := token.(type) {
+	case json.Delim:
+		if depth >= StrictJSONMaxDepth {
+			return &StrictJSONError{Code: StrictJSONDepthExceeded, Path: renderStrictJSONPath(path)}
+		}
+		switch delimiter {
+		case '{':
+			seen := make(map[string]struct{})
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return fmt.Errorf("JSON object key at %s is not a string", renderStrictJSONPath(path))
+				}
+				if _, duplicate := seen[key]; duplicate {
+					return &StrictJSONError{Code: StrictJSONDuplicateKey, Path: renderStrictJSONPath(path), Key: key}
+				}
+				seen[key] = struct{}{}
+				childPath := append(path, strictJSONPathSegment{key: key})
+				if err := rejectDuplicateJSONValue(decoder, childPath, depth+1); err != nil {
+					return err
+				}
+			}
+			end, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			if end != json.Delim('}') {
+				return fmt.Errorf("JSON object at %s is not closed", renderStrictJSONPath(path))
+			}
+		case '[':
+			for index := 0; decoder.More(); index++ {
+				childPath := append(path, strictJSONPathSegment{index: index, array: true})
+				if err := rejectDuplicateJSONValue(decoder, childPath, depth+1); err != nil {
+					return err
+				}
+			}
+			end, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			if end != json.Delim(']') {
+				return fmt.Errorf("JSON array at %s is not closed", renderStrictJSONPath(path))
+			}
+		default:
+			return fmt.Errorf("unexpected JSON delimiter %q at %s", delimiter, renderStrictJSONPath(path))
+		}
+	}
+	return nil
+}
+
+func renderStrictJSONPath(path []strictJSONPathSegment) string {
+	var builder strings.Builder
+	builder.WriteByte('$')
+	for _, segment := range path {
+		if segment.array {
+			fmt.Fprintf(&builder, "[%d]", segment.index)
+			continue
+		}
+		builder.WriteByte('.')
+		builder.WriteString(segment.key)
+	}
+	return builder.String()
 }
