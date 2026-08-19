@@ -2083,7 +2083,7 @@ exit 1
 
 func TestGCApplyAndReattachSerializeNewGenerationSurvives(t *testing.T) {
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	liveRoot := filepath.Join(dir, "live-root")
 	staleRoot := filepath.Join(dir, "stale-root")
 	for _, root := range []string{liveRoot, staleRoot} {
