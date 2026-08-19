@@ -60,6 +60,34 @@ func TestReconcileRejectsProjectProviderBeforeCapabilities(t *testing.T) {
 	}
 }
 
+func TestReconcileRejectsProjectTrackedProviderSymlinkBeforeSentinelExec(t *testing.T) {
+	req := reconcileFixture(t, Commands{})
+	outside := t.TempDir()
+	provider := filepath.Join(outside, ClaudeProvider)
+	marker := filepath.Join(t.TempDir(), "provider-ran")
+	script := "#!/bin/sh\nprintf ran > \"$AMQ_419_SENTINEL\"\ncase \"$1\" in\n  --version) echo 2.1.233 ;;\n  --help) echo '--session-id <uuid> --resume [value]' ;;\nesac\n"
+	if err := os.WriteFile(provider, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tracked := filepath.Join(req.ProjectRoot, ClaudeProvider)
+	if err := os.Symlink(provider, tracked); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Dir(tracked)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMQ_419_SENTINEL", marker)
+	req.Adapters = map[string]HarnessAdapter{ClaudeProvider: NewClaudeAdapter(tracked)}
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AggregateCode != 6 || len(result.Agents) != 1 || !strings.Contains(result.Agents[0].Reason, ProviderProjectContainedCode) {
+		t.Fatalf("project-tracked provider result = %#v, want typed containment refusal", result)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("project-tracked provider sentinel ran: %v", err)
+	}
+}
+
 func TestReconcileRejectsProjectAMQBeforeCreateQuickly(t *testing.T) {
 	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
 	req := reconcileFixture(t, backend)

@@ -450,8 +450,13 @@ func validateKnownExecutable(executable, projectRoot, provider string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("resolve project root: %w", err)
 	}
+	if raw, rawErr := rawExecutablePath(executable); rawErr != nil {
+		return "", fmt.Errorf("resolve %s executable: %w", provider, rawErr)
+	} else if pathWithin(raw, resolvedProject) {
+		return "", fmt.Errorf("%s: %s executable is inside the project", providerProjectContainedCode, provider)
+	}
 	if pathWithin(resolvedExecutable, resolvedProject) {
-		return "", fmt.Errorf("%s executable resolves inside the project", provider)
+		return "", fmt.Errorf("%s: %s executable is inside the project", providerProjectContainedCode, provider)
 	}
 	info, err := os.Stat(resolvedExecutable)
 	if err != nil {
@@ -475,8 +480,7 @@ func validateExecutableContainment(executable, projectRoot, provider string) err
 	if strings.TrimSpace(executable) == "" || strings.TrimSpace(projectRoot) == "" {
 		return nil
 	}
-	project, err := resolvedPath(projectRoot)
-	if err != nil {
+	if _, err := resolvedPath(projectRoot); err != nil {
 		return fmt.Errorf("resolve project root for %s executable: %w", provider, err)
 	}
 	candidate := executable
@@ -491,17 +495,14 @@ func validateExecutableContainment(executable, projectRoot, provider string) err
 	if err != nil {
 		return fmt.Errorf("make %s executable absolute: %w", provider, err)
 	}
-	if pathWithin(filepath.Clean(requested), project) {
-		return &LaunchPathError{Code: ProviderProjectContainedCode, Path: executable}
-	}
 	resolved, err := resolvedPath(requested)
 	if err != nil {
 		// An unavailable executable is reported by the adapter capability
 		// probe. There is no executable identity to classify as contained.
 		return nil
 	}
-	if pathWithin(resolved, project) {
-		return &LaunchPathError{Code: ProviderProjectContainedCode, Path: executable}
+	if err := rejectProjectContained(projectRoot, requested, resolved, ProviderProjectContainedCode); err != nil {
+		return err
 	}
 	return nil
 }

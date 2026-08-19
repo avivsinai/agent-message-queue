@@ -769,16 +769,8 @@ func resolveLaunchAMQExecutable(value, projectRoot string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve amq executable identity: %w", err)
 	}
-	project, err := resolvedPath(projectRoot)
-	if err != nil {
-		return "", fmt.Errorf("resolve project root for amq executable: %w", err)
-	}
-	requested, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("resolve amq executable path: %w", err)
-	}
-	if pathWithin(requested, project) || pathWithin(resolved, project) {
-		return "", &LaunchPathError{Code: AMQProjectContainedCode, Path: path}
+	if err := rejectProjectContained(projectRoot, path, resolved, amqProjectContainedCode); err != nil {
+		return "", err
 	}
 	return resolved, nil
 }
