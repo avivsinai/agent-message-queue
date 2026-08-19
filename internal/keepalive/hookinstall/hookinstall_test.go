@@ -649,6 +649,7 @@ wait
 		"CMUX_SURFACE_ID",
 		"TMPDIR",
 	),
+		"TMPDIR="+dir,
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
 		"AMQ_KEEPALIVE_LOG="+logPath,
 		"AMQ_KEEPALIVE_TARGET=ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D",
@@ -681,6 +682,13 @@ wait
 	}
 	if processRunning(pid) {
 		t.Fatalf("grandchild pid %d still running after process-group timeout", pid)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(dir, "amq-keepalive-timeout.*"))
+	if err != nil {
+		t.Fatalf("glob timeout_dir: %v", err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("timeout_dir leftover: %v", leftovers)
 	}
 }
 
