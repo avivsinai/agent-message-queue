@@ -28,6 +28,7 @@ type LifecycleResult struct {
 }
 
 var beforeLifecycleBackendMutationForTest func()
+var afterLifecycleSnapshotForTest func()
 
 func InspectLifecycle(ctx context.Context, request LifecycleRequest, dependencies LifecycleDependencies) (LifecycleResult, error) {
 	state, err := openLifecycleTarget(ctx, request.Target)
@@ -67,6 +68,19 @@ func InspectLifecycle(ctx context.Context, request LifecycleRequest, dependencie
 			return lifecycleRefusal(binding, detect, "evidence_corrupt"), nil
 		}
 		return LifecycleResult{}, err
+	}
+	if afterLifecycleSnapshotForTest != nil {
+		afterLifecycleSnapshotForTest()
+	}
+	current, err := LoadBinding(state.sessionRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return lifecycleRefusal(binding, detect, "binding_changed"), nil
+	}
+	if err != nil {
+		return lifecycleRefusal(binding, detect, "binding_changed"), nil
+	}
+	if !reflect.DeepEqual(current, binding) {
+		return lifecycleRefusal(current, DetectResult{}, "binding_changed"), nil
 	}
 	result.Outcome, result.State = LifecycleOutcomeInspected, string(inspection.Status)
 	if inspection.Status == InspectUnknown || inspection.ActionRequired {

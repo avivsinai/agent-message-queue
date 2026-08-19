@@ -162,6 +162,148 @@ func TestInspectMissingBindingCreatesNothing(t *testing.T) {
 	}
 }
 
+func TestInspectLifecycleRefusesBindingChangeDuringSnapshot(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectPresent}
+	request := reconcileFixture(t, backend)
+	moveReconcileFixtureToLifecycleSession(t, &request)
+	writeReconcileBinding(t, request, backend, backend.Detect().Profile.Identity())
+	changed := BindingRecord{
+		Version: BindingVersion, Backend: backend.name, HostIdentity: "host:test", InstanceIdentity: "instance:test",
+		Profile: backend.Detect().Profile.Identity(), LaunchNonce: testLaunchNonce,
+		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{{OpaqueID: "resource:changed"}}},
+	}
+	previousHook := afterLifecycleSnapshotForTest
+	afterLifecycleSnapshotForTest = func() { writeLifecycleBindingRaw(t, request.Root.Base(), changed) }
+	t.Cleanup(func() { afterLifecycleSnapshotForTest = previousHook })
+
+	result, err := InspectLifecycle(context.Background(), LifecycleRequest{Target: PrepareTarget{
+		ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(), Session: request.Session,
+	}}, LifecycleDependencies{Backends: map[string]Backend{backend.name: backend}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != string(OutcomeActionRequired) || result.ReasonCode != "binding_changed" || result.State != string(InspectUnknown) {
+		t.Fatalf("changed binding Inspect = %#v", result)
+	}
+	if result.Profile != changed.Profile {
+		t.Fatalf("changed binding profile = %q, want current %q", result.Profile, changed.Profile)
+	}
+}
+
+func TestInspectLifecycleRefusesDifferentBackendBindingDuringSnapshot(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectPresent}
+	other := &reconcileBackend{name: "other", inspect: InspectPresent}
+	request := reconcileFixture(t, backend)
+	moveReconcileFixtureToLifecycleSession(t, &request)
+	writeReconcileBinding(t, request, backend, backend.Detect().Profile.Identity())
+	changed := BindingRecord{
+		Version: BindingVersion, Backend: other.name, HostIdentity: "host:test", InstanceIdentity: "instance:test",
+		Profile: other.Detect().Profile.Identity(), LaunchNonce: testLaunchNonce,
+		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{{OpaqueID: "resource:other"}}},
+	}
+	previousHook := afterLifecycleSnapshotForTest
+	afterLifecycleSnapshotForTest = func() { writeLifecycleBindingRaw(t, request.Root.Base(), changed) }
+	t.Cleanup(func() { afterLifecycleSnapshotForTest = previousHook })
+
+	result, err := InspectLifecycle(context.Background(), LifecycleRequest{Target: PrepareTarget{
+		ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(), Session: request.Session,
+	}}, LifecycleDependencies{Backends: map[string]Backend{backend.name: backend, other.name: other}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != string(OutcomeActionRequired) || result.ReasonCode != "binding_changed" ||
+		result.Backend != other.name || result.Profile != changed.Profile {
+		t.Fatalf("different backend binding Inspect = %#v, want backend=%q profile=%q", result, other.name, changed.Profile)
+	}
+}
+
+func TestInspectLifecycleRefusesBindingDisappearanceDuringSnapshot(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectPresent}
+	request := reconcileFixture(t, backend)
+	moveReconcileFixtureToLifecycleSession(t, &request)
+	writeReconcileBinding(t, request, backend, backend.Detect().Profile.Identity())
+	previousHook := afterLifecycleSnapshotForTest
+	afterLifecycleSnapshotForTest = func() {
+		if err := os.Remove(BindingPath(request.Root.Base())); err != nil {
+			t.Fatalf("remove binding in hook: %v", err)
+		}
+	}
+	t.Cleanup(func() { afterLifecycleSnapshotForTest = previousHook })
+
+	result, err := InspectLifecycle(context.Background(), LifecycleRequest{Target: PrepareTarget{
+		ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(), Session: request.Session,
+	}}, LifecycleDependencies{Backends: map[string]Backend{backend.name: backend}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != string(OutcomeActionRequired) || result.ReasonCode != "binding_changed" {
+		t.Fatalf("disappeared binding Inspect = %#v", result)
+	}
+}
+
+func TestInspectLifecycleRefusesBindingRereadCorruptionDuringSnapshot(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectPresent}
+	request := reconcileFixture(t, backend)
+	moveReconcileFixtureToLifecycleSession(t, &request)
+	writeReconcileBinding(t, request, backend, backend.Detect().Profile.Identity())
+	previousHook := afterLifecycleSnapshotForTest
+	afterLifecycleSnapshotForTest = func() {
+		if err := os.WriteFile(BindingPath(request.Root.Base()), []byte("{"), 0o600); err != nil {
+			t.Fatalf("corrupt binding in hook: %v", err)
+		}
+	}
+	t.Cleanup(func() { afterLifecycleSnapshotForTest = previousHook })
+
+	result, err := InspectLifecycle(context.Background(), LifecycleRequest{Target: PrepareTarget{
+		ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(), Session: request.Session,
+	}}, LifecycleDependencies{Backends: map[string]Backend{backend.name: backend}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != string(OutcomeActionRequired) || result.ReasonCode != "binding_changed" {
+		t.Fatalf("corrupt binding Inspect = %#v", result)
+	}
+}
+
+func TestInspectLifecycleStableBindingReturnsCoherentSnapshot(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectPresent}
+	request := reconcileFixture(t, backend)
+	moveReconcileFixtureToLifecycleSession(t, &request)
+	writeReconcileBinding(t, request, backend, backend.Detect().Profile.Identity())
+	previousHook := afterLifecycleSnapshotForTest
+	afterLifecycleSnapshotForTest = nil
+	t.Cleanup(func() { afterLifecycleSnapshotForTest = previousHook })
+
+	result, err := InspectLifecycle(context.Background(), LifecycleRequest{Target: PrepareTarget{
+		ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(), Session: request.Session,
+	}}, LifecycleDependencies{Backends: map[string]Backend{backend.name: backend}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != LifecycleOutcomeInspected || result.State != string(InspectPresent) {
+		t.Fatalf("stable binding Inspect = %#v", result)
+	}
+}
+
+func moveReconcileFixtureToLifecycleSession(t *testing.T, request *ReconcileRequest) {
+	t.Helper()
+	base := request.Root.Base()
+	session := filepath.Join(base, request.Session)
+	if err := fsq.EnsureRootDirs(session); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(session, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = request.Root.Close()
+	request.Root = root
+}
+
 type lifecycleCountingBackend struct {
 	*TmuxBackend
 	unknown             bool
