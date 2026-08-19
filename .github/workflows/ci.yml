@@ -92,3 +92,5 @@ jobs:
         run: go test ./internal/cli -run '^TestDrainInboxItemsConcurrentClaimsSingleWinner$' -count=50
       - name: Drain claim path
         run: go test ./internal/cli -run '^TestDrainInboxItems' -count=1
+      - name: Windows launch API compatibility
+        run: go test ./launchapi -run '^TestWindowsCompatibilityAdvertisesOnlyCallableLaunchSurface$' -count=1

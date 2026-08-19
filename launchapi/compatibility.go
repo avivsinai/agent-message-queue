@@ -10,20 +10,7 @@ import (
 
 const ContractSemverV1 = "0.61.1"
 
-var compatibilityFeaturesV1 = []string{
-	"launch_intent_v1",
-	"prepare_apply_v1",
-	"lifecycle_v1",
-	"managed_tmux_v1",
-	"plan_only_commands_v1",
-	FeatureInitialInput,
-	FeaturePlacement,
-	FeatureBaseRoot,
-	FeatureOnLive,
-	FeatureCallerContext,
-	FeatureExecutableIdentity,
-	FeatureWrapper,
-}
+var compatibilityFeaturesV1 = platformCompatibilityFeaturesV1()
 
 func Compatibility() CompatibilityV1 {
 	return CompatibilityV1{
