@@ -387,7 +387,8 @@ for arg in "$@"; do
   previous="$arg"
 done
 [ -n "$ready" ] || exit 11
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 sleep 0.1
 `), 0o700); err != nil {
 		t.Fatalf("write fake amq: %v", err)
@@ -611,7 +612,8 @@ for arg in "$@"; do
   previous="$arg"
 done
 [ -n "$ready" ] || exit 11
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 sleep 0.1
 `), 0o700); err != nil {
 		t.Fatalf("write fake amq: %v", err)
@@ -661,7 +663,8 @@ for arg in "$@"; do
 done
 [ -n "$ready" ] || exit 11
 sleep 0.05
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 `), 0o700); err != nil {
 		t.Fatalf("write fake AMQ: %v", err)
 	}
@@ -888,7 +891,8 @@ for arg in "$@"; do
   previous="$arg"
 done
 [ -n "$ready" ] || exit 11
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 `), 0o700); err != nil {
 		t.Fatalf("write fake AMQ: %v", err)
 	}
@@ -952,7 +956,8 @@ done
 [ -n "$ready" ] || exit 11
 : > "$AMQ_KEEPALIVE_STARTED"
 while [ ! -f "$AMQ_KEEPALIVE_ALLOW_READY" ]; do sleep 0.01; done
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 : > "$AMQ_KEEPALIVE_LATE_READY"
 while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 : > "$AMQ_KEEPALIVE_EXITED"
@@ -1042,7 +1047,7 @@ if [ ! -f "$AMQ_KEEPALIVE_FIRST_START" ]; then
 fi
 previous=""
 for arg in "$@"; do
-  if [ "$previous" = "-ready-file" ]; then printf ready > "$arg"; fi
+  if [ "$previous" = "-ready-file" ]; then umask 077; printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$arg"; fi
   previous="$arg"
 done
 `), 0o700); err != nil {
@@ -1124,7 +1129,7 @@ if [ "$1" = "wake" ] && [ "${2:-}" = "retire" ]; then
 fi
 previous=""
 for arg in "$@"; do
-  if [ "$previous" = "-ready-file" ]; then printf ready > "$arg"; fi
+  if [ "$previous" = "-ready-file" ]; then umask 077; printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$arg"; fi
   previous="$arg"
 done
 `), 0o700); err != nil {
@@ -1209,7 +1214,7 @@ if [ ! -f "$AMQ_KEEPALIVE_FIRST_START" ]; then
 fi
 previous=""
 for arg in "$@"; do
-  if [ "$previous" = "-ready-file" ]; then printf ready > "$arg"; fi
+  if [ "$previous" = "-ready-file" ]; then umask 077; printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$arg"; fi
   previous="$arg"
 done
 `), 0o700); err != nil {
@@ -2076,6 +2081,190 @@ exit 1
 	}
 }
 
+func TestGCApplyAndReattachSerializeNewGenerationSurvives(t *testing.T) {
+	dir := t.TempDir()
+	registryPath := filepath.Join(dir, "registry.json")
+	liveRoot := filepath.Join(dir, "live-root")
+	staleRoot := filepath.Join(dir, "stale-root")
+	for _, root := range []string{liveRoot, staleRoot} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	presence := &presenceAdapter{name: "boundary", present: map[string]bool{}}
+	adapters := adapter.NewRegistry(presence)
+	store := registry.New(registryPath)
+	live, err := store.Upsert(registry.Entry{
+		Root: liveRoot, Agent: "codex", Adapter: "boundary", Target: "live-surface",
+		State: registry.StateDetached, DetachedSince: time.Now().Add(-48 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Upsert(live): %v", err)
+	}
+	stale, err := store.Upsert(registry.Entry{
+		Root: staleRoot, Agent: "stale-agent", Adapter: "boundary", Target: "stale-surface",
+		State: registry.StateDetached, DetachedSince: time.Now().Add(-48 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Upsert(stale): %v", err)
+	}
+
+	amqCalls := filepath.Join(dir, "amq-calls.log")
+	t.Setenv("AMQ_KEEPALIVE_AMQ_CALLS", amqCalls)
+	fakeAMQ := filepath.Join(dir, "amq")
+	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`#!/bin/sh
+me=""
+ready=""
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "--me" ] || [ "$previous" = "-me" ]; then me="$arg"; fi
+  if [ "$previous" = "-ready-file" ]; then ready="$arg"; fi
+  previous="$arg"
+done
+if [ "$1" = "wake" ] && [ "$2" = "retire" ]; then
+  printf 'RETIRE %s\n' "$me" >> "$AMQ_KEEPALIVE_AMQ_CALLS"
+  sleep 0.05
+  printf '%s\n' '{"status":"retired","agent":"'"$me"'","pid":1}'
+  exit 0
+fi
+printf 'START %s\n' "$me" >> "$AMQ_KEEPALIVE_AMQ_CALLS"
+[ -n "$ready" ] || exit 11
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
+`), 0o700); err != nil {
+		t.Fatalf("write fake amq: %v", err)
+	}
+
+	start := make(chan struct{})
+	reattachHoldsLock := make(chan struct{})
+	continueReattach := make(chan struct{})
+	gcLoad := make(chan struct{})
+	var releaseReattach sync.Once
+	releaseContinueReattach := func() {
+		releaseReattach.Do(func() { close(continueReattach) })
+	}
+	defer releaseContinueReattach()
+	t.Cleanup(func() {
+		afterReattachRegistrationLockHeldForTest = nil
+		beforeGCRegistryLoadForTest = nil
+	})
+	afterReattachRegistrationLockHeldForTest = func() {
+		select {
+		case <-reattachHoldsLock:
+		default:
+			close(reattachHoldsLock)
+		}
+		<-continueReattach
+		// Presence stays absent through the lock-held proof so gc cannot skip
+		// on a live probe. Reattach itself still needs the target after that.
+		presence.setPresent("live-surface")
+	}
+	beforeGCRegistryLoadForTest = func() {
+		select {
+		case <-gcLoad:
+		default:
+			close(gcLoad)
+		}
+	}
+
+	type outcome struct {
+		name string
+		code int
+		out  string
+		err  string
+	}
+	outcomes := make(chan outcome, 2)
+	go func() {
+		<-start
+		var stdout, stderr bytes.Buffer
+		code := (App{Stdout: &stdout, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
+			"reattach", "--registry", registryPath, "--adapter", "boundary", "--target", "live-surface",
+			"--root", liveRoot, "--base-root", dir, "--session", "live", "--me", "codex",
+			"--amq", fakeAMQ, "--self", "/bin/amq-keepalive",
+		})
+		outcomes <- outcome{name: "reattach", code: code, out: stdout.String(), err: stderr.String()}
+	}()
+	go func() {
+		<-reattachHoldsLock
+		var stdout, stderr bytes.Buffer
+		code := (App{Stdout: &stdout, Stderr: &stderr, Adapters: &adapters}).Run(context.Background(), []string{
+			"gc", "--registry", registryPath, "--min-detached-age", "0", "--apply",
+			"--amq", fakeAMQ, "--self", "/bin/amq-keepalive",
+		})
+		outcomes <- outcome{name: "gc", code: code, out: stdout.String(), err: stderr.String()}
+	}()
+	close(start)
+	select {
+	case <-reattachHoldsLock:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reattach did not acquire the registration lock")
+	}
+	select {
+	case <-gcLoad:
+		t.Fatal("gc loaded the registry while reattach held the registration lock")
+	case <-time.After(150 * time.Millisecond):
+	}
+	releaseContinueReattach()
+	first, second := <-outcomes, <-outcomes
+	var reattachOut, gcOut outcome
+	for _, item := range []outcome{first, second} {
+		switch item.name {
+		case "reattach":
+			reattachOut = item
+		case "gc":
+			gcOut = item
+		}
+	}
+	if reattachOut.code != 0 {
+		t.Fatalf("reattach code=%d stdout=%s stderr=%s", reattachOut.code, reattachOut.out, reattachOut.err)
+	}
+	if gcOut.code != 0 {
+		t.Fatalf("gc code=%d stdout=%s stderr=%s", gcOut.code, gcOut.out, gcOut.err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	foundLive, foundStale := false, false
+	for _, entry := range loaded.Entries {
+		switch entry.ID {
+		case live.ID:
+			foundLive = true
+			if entry.State != registry.StateActive && entry.State != registry.StateAttached {
+				t.Fatalf("live generation state=%q, want attached/active: %#v", entry.State, entry)
+			}
+		case stale.ID:
+			foundStale = true
+		}
+	}
+	if !foundLive {
+		t.Fatalf("new live generation was forgotten: entries=%#v", loaded.Entries)
+	}
+	if foundStale {
+		t.Fatalf("stale detached entry was not retired: entries=%#v", loaded.Entries)
+	}
+
+	data, err := os.ReadFile(amqCalls)
+	if err != nil {
+		t.Fatalf("read amq log: %v", err)
+	}
+	startedLive := false
+	for _, line := range strings.Split(string(data), "\n") {
+		switch line {
+		case "START codex":
+			startedLive = true
+		case "RETIRE codex":
+			if startedLive {
+				t.Fatalf("gc retired G2 after reattach started it: log=%q", data)
+			}
+		}
+	}
+	if !startedLive {
+		t.Fatalf("reattach did not start G2: log=%q gc=%s", data, gcOut.out)
+	}
+}
+
 type boundaryAdapter struct {
 	name     string
 	probeErr error
@@ -2086,6 +2275,37 @@ func (a boundaryAdapter) Name() string { return a.name }
 func (a boundaryAdapter) Probe(context.Context, string) error { return a.probeErr }
 
 func (a boundaryAdapter) Inject(context.Context, string, string) error { return nil }
+
+type presenceAdapter struct {
+	name    string
+	mu      sync.Mutex
+	present map[string]bool
+}
+
+func (a *presenceAdapter) Name() string { return a.name }
+
+func (a *presenceAdapter) Probe(ctx context.Context, target string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.present[target] {
+		return nil
+	}
+	return adapter.ErrTargetNotFound
+}
+
+func (a *presenceAdapter) Inject(context.Context, string, string) error { return nil }
+
+func (a *presenceAdapter) setPresent(target string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.present == nil {
+		a.present = map[string]bool{}
+	}
+	a.present[target] = true
+}
 
 type sequenceBoundaryAdapter struct {
 	boundaryAdapter
