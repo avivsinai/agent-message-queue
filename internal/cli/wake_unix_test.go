@@ -6156,6 +6156,33 @@ exit 1
 	}
 }
 
+func TestDeliverWakeNotificationUncertainSkipsInjectViaWithoutRecoveryShortCircuit(t *testing.T) {
+	logPath := filepath.Join(secureTempDirForTest(t), "inject.log")
+	injector := writeExecutableScriptForTest(t, "must-not-run", fmt.Sprintf(`#!/bin/sh
+printf 'ran\n' >> %q
+exit 0
+`, logPath))
+	cfg := &wakeConfig{
+		me:             "codex",
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModePaste,
+		injectVia:      injector,
+		injectTimeout:  time.Second,
+		inputDelivery:  wakeInputDeliveryState{acceptanceUncertain: true},
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			return len(data), nil
+		},
+	}
+	err := deliverWakeNotification(cfg, peerWakeNotification("pending message"), false)
+	if !isWakeInputDemotionBlocked(err) {
+		t.Fatalf("error = %v, want demotion blocked", err)
+	}
+	if _, statErr := os.Stat(logPath); !os.IsNotExist(statErr) {
+		t.Fatalf("injector ran; log stat = %v", statErr)
+	}
+}
+
 func TestDeliverNewMessageNotificationInjectViaOrdinaryFailureFallsBack(t *testing.T) {
 	current := wakeDoorbellTestFiles(t, "pending.md")
 	logPath := filepath.Join(secureTempDirForTest(t), "inject.log")
