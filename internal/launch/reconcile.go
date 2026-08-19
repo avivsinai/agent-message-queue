@@ -134,7 +134,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	if err := request.Config.Validate(); err != nil {
 		return result, err
 	}
-	amqExecutable, err := resolveLaunchAMQExecutable(request.AMQPath)
+	amqExecutable, err := resolveLaunchAMQExecutable(request.AMQPath, request.ProjectRoot)
 	if err != nil {
 		return result, err
 	}
@@ -512,6 +512,12 @@ func plannedFromJournal(request ReconcileRequest, journal LaunchJournal, result 
 		if adapter == nil || adapter.Mode() != plan.AdapterMode {
 			return nil, fmt.Errorf("launch journal adapter for %q is unavailable or changed", plan.Handle)
 		}
+		if err := validateWrapperFileForProject(plan.Wrapper, request.ProjectRoot); err != nil {
+			return nil, fmt.Errorf("launch journal wrapper for %q: %w", plan.Handle, err)
+		}
+		if err := validateExecutableContainment(cfg.Command[0], request.ProjectRoot, adapter.Name()); err != nil {
+			return nil, fmt.Errorf("launch journal provider for %q: %w", plan.Handle, err)
+		}
 		capabilities := adapter.Capabilities(request.Context)
 		if err := ValidateAdapterCapabilities(adapter, capabilities); err != nil {
 			return nil, err
@@ -730,7 +736,7 @@ func writeExecutionTickets(request ReconcileRequest, lease *Lease, planned []pla
 	return nil
 }
 
-func resolveLaunchAMQExecutable(value string) (string, error) {
+func resolveLaunchAMQExecutable(value, projectRoot string) (string, error) {
 	if strings.TrimSpace(value) == "" {
 		path, err := os.Executable()
 		if err != nil {
@@ -745,6 +751,17 @@ func resolveLaunchAMQExecutable(value string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve amq executable identity: %w", err)
+	}
+	project, err := resolvedPath(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve project root for amq executable: %w", err)
+	}
+	requested, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve amq executable path: %w", err)
+	}
+	if pathWithin(requested, project) || pathWithin(resolved, project) {
+		return "", &LaunchPathError{Code: AMQProjectContainedCode, Path: path}
 	}
 	return resolved, nil
 }
@@ -773,6 +790,16 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 		adapter := request.Adapters[cfg.Adapter]
 		if adapter == nil {
 			item.ConversationDisposition, item.Reason = DispositionUnsupported, "adapter_not_registered"
+			result.Agents = append(result.Agents, item)
+			continue
+		}
+		if err := validateExecutableContainment(cfg.Command[0], request.ProjectRoot, adapter.Name()); err != nil {
+			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, err.Error()
+			result.Agents = append(result.Agents, item)
+			continue
+		}
+		if err := validateWrapperFileForProject(cfg.Wrapper, request.ProjectRoot); err != nil {
+			item.Code, item.ConversationDisposition, item.Reason = 6, DispositionDegraded, err.Error()
 			result.Agents = append(result.Agents, item)
 			continue
 		}

@@ -467,6 +467,45 @@ func validateKnownExecutable(executable, projectRoot, provider string) (string, 
 	return executable, nil
 }
 
+// validateExecutableContainment checks the property that must be established
+// before an adapter capability probe: a provider executable must not resolve
+// into the project. Availability and executable shape remain capability/plan
+// concerns; a missing command cannot be a project-contained process.
+func validateExecutableContainment(executable, projectRoot, provider string) error {
+	if strings.TrimSpace(executable) == "" || strings.TrimSpace(projectRoot) == "" {
+		return nil
+	}
+	project, err := resolvedPath(projectRoot)
+	if err != nil {
+		return fmt.Errorf("resolve project root for %s executable: %w", provider, err)
+	}
+	candidate := executable
+	if !filepath.IsAbs(candidate) {
+		lookedUp, lookupErr := exec.LookPath(candidate)
+		if lookupErr != nil {
+			return nil
+		}
+		candidate = lookedUp
+	}
+	requested, err := filepath.Abs(candidate)
+	if err != nil {
+		return fmt.Errorf("make %s executable absolute: %w", provider, err)
+	}
+	if pathWithin(filepath.Clean(requested), project) {
+		return &LaunchPathError{Code: ProviderProjectContainedCode, Path: executable}
+	}
+	resolved, err := resolvedPath(requested)
+	if err != nil {
+		// An unavailable executable is reported by the adapter capability
+		// probe. There is no executable identity to classify as contained.
+		return nil
+	}
+	if pathWithin(resolved, project) {
+		return &LaunchPathError{Code: ProviderProjectContainedCode, Path: executable}
+	}
+	return nil
+}
+
 func validateWorkingDirectory(cwd, projectRoot string) error {
 	resolvedProject, err := resolvedPath(projectRoot)
 	if err != nil {

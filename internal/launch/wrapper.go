@@ -14,6 +14,21 @@ type Wrapper struct {
 	Args       []string `json:"args,omitempty"`
 }
 
+const (
+	WrapperProjectContainedCode  = "wrapper_project_contained"
+	ProviderProjectContainedCode = "provider_project_contained"
+	AMQProjectContainedCode      = "amq_launcher_project_contained"
+)
+
+type LaunchPathError struct {
+	Code string
+	Path string
+}
+
+func (e *LaunchPathError) Error() string {
+	return fmt.Sprintf("%s: %s resolves inside the project", e.Code, e.Path)
+}
+
 func (wrapper Wrapper) Validate() error {
 	if !utf8.ValidString(wrapper.Executable) || strings.ContainsRune(wrapper.Executable, 0) {
 		return fmt.Errorf("executable must be valid UTF-8 without NUL")
@@ -48,6 +63,31 @@ func validateWrapperFile(wrapper *Wrapper) error {
 	}
 	if err := validateWrapperExecutable(wrapper.Executable, info.Mode()); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateWrapperFileForProject(wrapper *Wrapper, projectRoot string) error {
+	if wrapper == nil {
+		return nil
+	}
+	if err := validateWrapperFile(wrapper); err != nil {
+		return err
+	}
+	project, err := resolvedPath(projectRoot)
+	if err != nil {
+		return fmt.Errorf("resolve project root for wrapper: %w", err)
+	}
+	requested, err := filepath.Abs(wrapper.Executable)
+	if err != nil {
+		return fmt.Errorf("resolve wrapper path: %w", err)
+	}
+	resolved, err := resolvedPath(wrapper.Executable)
+	if err != nil {
+		return fmt.Errorf("resolve wrapper executable: %w", err)
+	}
+	if pathWithin(requested, project) || pathWithin(resolved, project) {
+		return &LaunchPathError{Code: WrapperProjectContainedCode, Path: wrapper.Executable}
 	}
 	return nil
 }

@@ -161,7 +161,7 @@ func NewExecutionTicket(request ExecutionTicketRequest) (ExecutionTicket, error)
 	}
 	var wrapperIdentity string
 	if request.Wrapper != nil {
-		if err := validateWrapperFile(request.Wrapper); err != nil {
+		if err := validateWrapperFileForProject(request.Wrapper, request.ProjectRoot); err != nil {
 			return ExecutionTicket{}, fmt.Errorf("wrapper: %w", err)
 		}
 		wrapperIdentity, err = probeExecutableIdentityJSON(request.Wrapper.Executable)
@@ -1040,7 +1040,7 @@ func ValidateExecutionEnvelope(root *fsq.DeliveryRoot, ticket ExecutionTicket, e
 			}
 			return fmt.Errorf("wrapper executable identity changed: %w", identityErr)
 		}
-		if err := validateWrapperFile(ticket.Wrapper); err != nil {
+		if err := validateWrapperFileForProject(ticket.Wrapper, ticket.ProjectRoot); err != nil {
 			return fmt.Errorf("wrapper executable changed: %w", err)
 		}
 		if envelope.ProviderExecutable != ticket.Wrapper.Executable {

@@ -347,7 +347,7 @@ func Prepare(ctx context.Context, request PrepareRequest, dependencies PrepareDe
 	if err := ValidateCallerContext(request.CallerContext); err != nil {
 		return PrepareResult{}, err
 	}
-	amqPath, err := resolveLaunchAMQExecutable(dependencies.AMQPath)
+	amqPath, err := resolveLaunchAMQExecutable(dependencies.AMQPath, request.Target.ProjectRoot)
 	if err != nil {
 		return PrepareResult{}, err
 	}
@@ -926,7 +926,7 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 		observation.ReasonCode = reason
 		return prepared, observation, nil, nil, nil
 	}
-	if err := validateWrapperFile(participant.Wrapper); err != nil {
+	if err := validateWrapperFileForProject(participant.Wrapper, state.target.ProjectRoot); err != nil {
 		return prepared, observation, nil, nil, fmt.Errorf("wrapper for %s: %w", participant.Handle, err)
 	}
 	if subjectSchema == SubjectSchemaV2 && participant.Wrapper != nil {

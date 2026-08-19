@@ -39,6 +39,115 @@ func TestReconcileEmitsCanonicalResolvedWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestReconcileRejectsProjectProviderBeforeCapabilities(t *testing.T) {
+	req := reconcileFixture(t, Commands{})
+	provider, sentinel := writeProjectSideEffectingClaude(t, req.ProjectRoot)
+	t.Setenv("PATH", filepath.Dir(provider)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMQ_419_SENTINEL", sentinel)
+	req.Adapters = map[string]HarnessAdapter{ClaudeProvider: NewClaudeAdapter(ClaudeProvider)}
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AggregateCode != 6 || len(result.Agents) != 1 || !strings.Contains(result.Agents[0].Reason, "inside the project") {
+		t.Fatalf("project provider result = %#v, want typed containment refusal", result)
+	}
+	if !strings.Contains(result.Agents[0].Reason, ProviderProjectContainedCode) {
+		t.Fatalf("project provider reason = %q, want %s", result.Agents[0].Reason, ProviderProjectContainedCode)
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("project provider capability probe ran side effect: %v", err)
+	}
+}
+
+func TestReconcileRejectsProjectAMQBeforeCreateQuickly(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	amq := filepath.Join(req.ProjectRoot, "amq")
+	if err := os.WriteFile(amq, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	req.AMQPath = amq
+	started := time.Now()
+	_, err := Reconcile(req)
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("project-contained AMQ refusal took %s", elapsed)
+	}
+	var pathErr *LaunchPathError
+	if err == nil || !errors.As(err, &pathErr) || pathErr.Code != AMQProjectContainedCode {
+		t.Fatalf("AMQ refusal error = %v, want typed code %s", err, AMQProjectContainedCode)
+	}
+	if backend.creates != 0 {
+		t.Fatalf("project-contained AMQ refusal created %d resources", backend.creates)
+	}
+}
+
+func TestReconcileJournalRejectsProjectProviderBeforeCapabilities(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
+	req := reconcileFixture(t, backend)
+	provider, sentinel := writeProjectSideEffectingClaude(t, req.ProjectRoot)
+	t.Setenv("PATH", filepath.Dir(provider)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AMQ_419_SENTINEL", sentinel)
+	nonce := "019c8a2f-2b13-7000-8000-000000000099"
+	plan, agents, conversations := journalFixturePlan(nonce)
+	plan.Agents[0].Argv[0] = provider
+	digest, err := plan.SemanticDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := NewLaunchJournal(req, backend.name, backend.Detect(), plan, digest, nonce, agents, conversations, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := AcquireLease(req.Root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJournal(req.Root, lease, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	req.Adapters = map[string]HarnessAdapter{ClaudeProvider: NewClaudeAdapter(ClaudeProvider)}
+	result, err := Reconcile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AggregateCode != 6 || result.Reason != "launch_journal_plan_unavailable" {
+		t.Fatalf("project provider journal result = %#v, want plan refusal", result)
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("journal capability probe ran side effect: %v", err)
+	}
+}
+
+func TestResolveLaunchAMQExecutableRejectsProjectPath(t *testing.T) {
+	project := t.TempDir()
+	inside := filepath.Join(project, "amq")
+	if err := os.WriteFile(inside, []byte("amq"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveLaunchAMQExecutable(inside, project); err == nil || !strings.Contains(err.Error(), AMQProjectContainedCode) {
+		t.Fatalf("project-contained AMQ path error = %v, want %s", err, AMQProjectContainedCode)
+	}
+}
+
+func writeProjectSideEffectingClaude(t *testing.T, project string) (string, string) {
+	t.Helper()
+	bin := filepath.Join(project, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	provider := filepath.Join(bin, ClaudeProvider)
+	sentinel := filepath.Join(project, "capability-probe-ran")
+	script := "#!/bin/sh\nprintf touched > \"$AMQ_419_SENTINEL\"\n"
+	if err := os.WriteFile(provider, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return provider, sentinel
+}
+
 func TestReconcileUsesAndRetainsCallerHeldLease(t *testing.T) {
 	req := reconcileFixture(t, Commands{})
 	lease, err := AcquireLease(req.Root, "")
