@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -215,10 +216,10 @@ func TestGhosttyBackendLifecycleAndRecovery(t *testing.T) {
 	}
 
 	journal := LaunchJournal{
-		ProjectIdentity: project, Session: "collab", Plan: plan, LaunchNonce: nonce,
+		Phase: JournalCreated, ProjectIdentity: project, Session: "collab", Plan: plan, LaunchNonce: nonce,
 		HostIdentity: detect.HostIdentity, InstanceIdentity: detect.InstanceIdentity,
 		Backend: LauncherGhostty, Profile: detect.Profile.Identity(),
-		Binding: &created.Binding,
+		Binding: &created.Binding, Placement: created.Binding.Placement,
 	}
 	journal.RootIdentity, err = canonicalIdentity(root.Base())
 	if err != nil {
@@ -228,6 +229,20 @@ func TestGhosttyBackendLifecycleAndRecovery(t *testing.T) {
 	reclaimed, err := backend.Reclaim(ReclaimRequest{Context: context.Background(), Journal: journal, Root: root})
 	if err != nil || reclaimed.Status != ReclaimAdoptable || countGhosttyAgentResources(BindingRecord{Resources: ResourceIdentitySet{Resources: reclaimed.Resources}}) != 2 {
 		t.Fatalf("Reclaim = %#v, %v", reclaimed, err)
+	}
+	createdWindow, _, err := parseGhosttyWindowResource(created.Binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reclaimedWindow, _, err := parseGhosttyWindowResource(reclaimed.Binding)
+	if err != nil || reclaimedWindow != createdWindow {
+		t.Fatalf("Reclaim window = %q, %v, want %q", reclaimedWindow, err, createdWindow)
+	}
+	if !reflect.DeepEqual(reclaimed.Binding.Placement, created.Binding.Placement) {
+		t.Fatalf("Reclaim placement = %#v, want %#v", reclaimed.Binding.Placement, created.Binding.Placement)
+	}
+	if !reflect.DeepEqual(reclaimed.Binding.Resources, created.Binding.Resources) {
+		t.Fatalf("Reclaim resources = %#v, want %#v", reclaimed.Binding.Resources, created.Binding.Resources)
 	}
 
 	intent := journal
@@ -398,7 +413,7 @@ func TestGhosttyCrashAfterWindowIsUncertain(t *testing.T) {
 	}
 }
 
-func TestGhosttyCreateTimeoutClosesSingleOrphanWindow(t *testing.T) {
+func TestGhosttyCreateTimeoutDoesNotCloseUnackedWindow(t *testing.T) {
 	backend, fake := newFakeGhosttyBackend(t)
 	backend.createTimeout = 20 * time.Millisecond
 	inner := fake.run
@@ -420,14 +435,40 @@ func TestGhosttyCreateTimeoutClosesSingleOrphanWindow(t *testing.T) {
 	if err == nil {
 		t.Fatal("Create succeeded after create-call timeout")
 	}
-	if !strings.Contains(err.Error(), "closed orphan ghostty window") {
-		t.Fatalf("Create error = %v, want closed orphan", err)
+	if !strings.Contains(err.Error(), "never guessed") {
+		t.Fatalf("Create error = %v, want unacknowledged unknown", err)
 	}
-	if fake.windowCount() != 0 {
-		t.Fatalf("timeout left orphan windows: %d", fake.windowCount())
+	if fake.windowCount() != 1 {
+		t.Fatalf("timeout closed unacked window: %d", fake.windowCount())
 	}
-	if indexOfGhosttyOp(fake.ops(), "close-window") < 0 {
-		t.Fatal("timeout did not close the orphan window")
+	if indexOfGhosttyOp(fake.ops(), "close-window") >= 0 {
+		t.Fatal("timeout closed an unacknowledged window")
+	}
+}
+
+func TestGhosttyCreateDoesNotCloseForeignInferredWindow(t *testing.T) {
+	backend, fake := newFakeGhosttyBackend(t)
+	inner := fake.run
+	backend.run = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "new-window" {
+			fake.addWindow("foreign-window", "tab-foreign", "019C5A10-75D8-7EEF-8DB7-0000000000FF")
+			return "", errors.New("injected failure")
+		}
+		return inner(ctx, args...)
+	}
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude")
+	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eaa0")
+	plan.Agents = plan.Agents[:1]
+	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root})
+	if err == nil || !strings.Contains(err.Error(), "never guessed") {
+		t.Fatalf("Create error = %v, want unacknowledged unknown", err)
+	}
+	if fake.windowCount() != 1 {
+		t.Fatalf("inferred cleanup destroyed foreign window: %d", fake.windowCount())
+	}
+	if indexOfGhosttyOp(fake.ops(), "close-window") >= 0 {
+		t.Fatal("close-window invoked for an inferred foreign id")
 	}
 }
 
@@ -451,8 +492,8 @@ func TestGhosttyCreateTimeoutDoesNotCloseAmbiguousWindows(t *testing.T) {
 	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eaa2")
 	plan.Agents = plan.Agents[:1]
 	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root})
-	if err == nil || !strings.Contains(err.Error(), "ambiguous new ghostty windows") {
-		t.Fatalf("Create error = %v, want ambiguous unknown", err)
+	if err == nil || !strings.Contains(err.Error(), "never guessed") {
+		t.Fatalf("Create error = %v, want unacknowledged unknown", err)
 	}
 	if fake.windowCount() != 2 {
 		t.Fatalf("ambiguous timeout closed windows: %d", fake.windowCount())

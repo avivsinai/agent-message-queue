@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -258,9 +259,10 @@ func TestCmuxBackendLifecycleAndRecovery(t *testing.T) {
 	}
 
 	journal := LaunchJournal{
-		ProjectIdentity: project, Session: "collab", Plan: plan, LaunchNonce: nonce,
+		Phase: JournalCreated, ProjectIdentity: project, Session: "collab", Plan: plan, LaunchNonce: nonce,
 		HostIdentity: detect.HostIdentity, InstanceIdentity: detect.InstanceIdentity,
 		Backend: LauncherCMux, Profile: detect.Profile.Identity(),
+		Binding: &created.Binding, Placement: created.Binding.Placement,
 	}
 	journal.RootIdentity, err = canonicalIdentity(root.Base())
 	if err != nil {
@@ -270,6 +272,15 @@ func TestCmuxBackendLifecycleAndRecovery(t *testing.T) {
 	reclaimed, err := backend.Reclaim(ReclaimRequest{Context: context.Background(), Journal: journal, Root: root})
 	if err != nil || reclaimed.Status != ReclaimAdoptable || countCmuxAgentResources(BindingRecord{Resources: ResourceIdentitySet{Resources: reclaimed.Resources}}) != 2 {
 		t.Fatalf("Reclaim = %#v, %v", reclaimed, err)
+	}
+	if cmuxWindowID(reclaimed.Binding) == "" || cmuxWindowID(reclaimed.Binding) != cmuxWindowID(created.Binding) {
+		t.Fatalf("Reclaim window = %q, want %q", cmuxWindowID(reclaimed.Binding), cmuxWindowID(created.Binding))
+	}
+	if !reflect.DeepEqual(reclaimed.Binding.Placement, created.Binding.Placement) {
+		t.Fatalf("Reclaim placement = %#v, want %#v", reclaimed.Binding.Placement, created.Binding.Placement)
+	}
+	if !reflect.DeepEqual(reclaimed.Binding.Resources, created.Binding.Resources) {
+		t.Fatalf("Reclaim resources = %#v, want %#v", reclaimed.Binding.Resources, created.Binding.Resources)
 	}
 
 	if _, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: fakeAMQ, Root: root}); err == nil {
@@ -406,6 +417,109 @@ func TestCmuxMissingIDFailsClosed(t *testing.T) {
 	}
 }
 
+func TestCmuxCreateDoesNotCloseInterleavedForeignWorkspace(t *testing.T) {
+	backend, logPath := newFakeCmuxBackend(t)
+	t.Setenv("AMQ_CMUX_FAKE_FAIL", "new-split")
+	foreign := seedCmuxSelectedWorkspace(t)
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude", "codex")
+	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: cmuxTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eca6"), AMQPath: writeSleepAMQ(t), Root: root})
+	if err == nil {
+		t.Fatal("Create succeeded after split failure")
+	}
+	if !strings.Contains(err.Error(), "closed orphan cmux workspace") {
+		t.Fatalf("Create error = %v, want closed orphan", err)
+	}
+	closed := false
+	for _, argv := range readCmuxArgvLog(t, logPath) {
+		if len(argv) == 0 || argv[0] != "close-workspace" {
+			continue
+		}
+		closed = true
+		joined := strings.Join(argv, " ")
+		if strings.Contains(strings.ToLower(joined), foreign) {
+			t.Fatalf("close-workspace targeted foreign workspace %s: %v", foreign, argv)
+		}
+	}
+	if !closed {
+		t.Fatal("split failure did not close the acknowledged orphan")
+	}
+	if !cmuxFakeContainsWorkspace(t, foreign) {
+		t.Fatal("cleanup closed the interleaved foreign workspace")
+	}
+	if cmuxFakeWorkspaceCount(t) != 1 {
+		t.Fatalf("cleanup closed extra workspaces: %d", cmuxFakeWorkspaceCount(t))
+	}
+}
+
+func TestCmuxJournalIntentDoesNotAdoptSameNameWorkspace(t *testing.T) {
+	backend, _ := newFakeCmuxBackend(t)
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude", "codex")
+	nonce := "019c5a10-75d8-7eef-8db7-5ee77f70ead1"
+	plan := cmuxTestPlan(project, nonce)
+	created, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detect := backend.Detect()
+	journal := LaunchJournal{
+		Phase: JournalIntent, ProjectIdentity: project, Session: "collab", Plan: plan, LaunchNonce: nonce,
+		HostIdentity: detect.HostIdentity, InstanceIdentity: detect.InstanceIdentity,
+		Backend: LauncherCMux, Profile: detect.Profile.Identity(),
+		Placement: created.Binding.Placement,
+	}
+	journal.RootIdentity, err = canonicalIdentity(root.Base())
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.RootPhysical, _ = fsq.StableTreeIdentityInfo(root.FileInfo())
+	reclaimed, err := backend.Reclaim(ReclaimRequest{Context: context.Background(), Journal: journal, Root: root})
+	if err != nil || reclaimed.Status != ReclaimForeign {
+		t.Fatalf("JournalIntent Reclaim = %#v, %v, want foreign", reclaimed, err)
+	}
+	if reclaimed.Binding.LaunchNonce != "" {
+		t.Fatalf("JournalIntent adopted a binding: %#v", reclaimed.Binding)
+	}
+	present, err := backend.Inspect(InspectRequest{Binding: created.Binding, Root: root})
+	if err != nil || present.Status != InspectPresent {
+		t.Fatalf("JournalIntent reclaim mutated live workspace: %#v, %v", present, err)
+	}
+}
+
+func TestCmuxReclaimMissingWindowIDIsIncomplete(t *testing.T) {
+	backend, _ := newFakeCmuxBackend(t)
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude")
+	nonce := "019c5a10-75d8-7eef-8db7-5ee77f70ead2"
+	plan := cmuxTestPlan(project, nonce)
+	plan.Agents = plan.Agents[:1]
+	created, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearCmuxFakeWindowIDs(t)
+	detect := backend.Detect()
+	journal := LaunchJournal{
+		Phase: JournalCreated, ProjectIdentity: project, Session: "collab", Plan: plan, LaunchNonce: nonce,
+		HostIdentity: detect.HostIdentity, InstanceIdentity: detect.InstanceIdentity,
+		Backend: LauncherCMux, Profile: detect.Profile.Identity(),
+		Binding: &created.Binding, Placement: created.Binding.Placement,
+	}
+	journal.RootIdentity, err = canonicalIdentity(root.Base())
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.RootPhysical, _ = fsq.StableTreeIdentityInfo(root.FileInfo())
+	reclaimed, err := backend.Reclaim(ReclaimRequest{Context: context.Background(), Journal: journal, Root: root})
+	if err != nil || reclaimed.Status != ReclaimIncomplete {
+		t.Fatalf("Reclaim = %#v, %v, want incomplete without window identity", reclaimed, err)
+	}
+	if reclaimed.Binding.LaunchNonce != "" {
+		t.Fatalf("missing WindowID adopted a binding: %#v", reclaimed.Binding)
+	}
+}
+
 func TestCmuxCrashAfterWorkspaceIsUncertain(t *testing.T) {
 	backend, logPath := newFakeCmuxBackend(t)
 	t.Setenv("AMQ_CMUX_FAKE_FAIL", "new-split")
@@ -427,17 +541,12 @@ func TestCmuxCrashAfterWorkspaceIsUncertain(t *testing.T) {
 	}
 }
 
-func TestCmuxCreateTimeoutClosesSingleOrphanWorkspace(t *testing.T) {
+func TestCmuxCreateTimeoutDoesNotCloseUnackedWorkspace(t *testing.T) {
 	backend, logPath := newFakeCmuxBackend(t)
 	backend.createTimeout = 20 * time.Millisecond
 	inner := backend.run
-	afterCreate := false
 	backend.run = func(ctx context.Context, args ...string) (string, error) {
-		if afterCreate {
-			assertCmuxOrphanCtxFresh(t, ctx, args)
-		}
 		if cmuxArgvHas(args, "new-workspace") {
-			afterCreate = true
 			if _, err := inner(context.Background(), args...); err != nil {
 				return "", err
 			}
@@ -454,14 +563,14 @@ func TestCmuxCreateTimeoutClosesSingleOrphanWorkspace(t *testing.T) {
 	if err == nil {
 		t.Fatal("Create succeeded after create-call timeout")
 	}
-	if !strings.Contains(err.Error(), "closed orphan cmux workspace") {
-		t.Fatalf("Create error = %v, want closed orphan", err)
+	if !strings.Contains(err.Error(), "never guessed") {
+		t.Fatalf("Create error = %v, want unacknowledged unknown", err)
 	}
-	if indexOfCmuxCommand(readCmuxArgvLog(t, logPath), "close-workspace") < 0 {
-		t.Fatal("timeout did not close the orphan workspace")
+	if indexOfCmuxCommand(readCmuxArgvLog(t, logPath), "close-workspace") >= 0 {
+		t.Fatal("timeout closed an unacknowledged workspace")
 	}
-	if cmuxFakeWorkspaceCount(t) != 0 {
-		t.Fatalf("timeout left orphan workspaces: %d", cmuxFakeWorkspaceCount(t))
+	if cmuxFakeWorkspaceCount(t) != 1 {
+		t.Fatalf("timeout closed unacked workspaces: %d", cmuxFakeWorkspaceCount(t))
 	}
 }
 
@@ -485,8 +594,8 @@ func TestCmuxCreateTimeoutDoesNotCloseAmbiguousWorkspaces(t *testing.T) {
 	plan := cmuxTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eaa2")
 	plan.Agents = plan.Agents[:1]
 	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeSleepAMQ(t), Root: root})
-	if err == nil || !strings.Contains(err.Error(), "ambiguous cmux workspaces") {
-		t.Fatalf("Create error = %v, want ambiguous unknown", err)
+	if err == nil || !strings.Contains(err.Error(), "never guessed") {
+		t.Fatalf("Create error = %v, want unacknowledged unknown", err)
 	}
 	if indexOfCmuxCommand(readCmuxArgvLog(t, logPath), "close-workspace") >= 0 {
 		t.Fatal("ambiguous timeout guessed a workspace to close")
@@ -496,17 +605,11 @@ func TestCmuxCreateTimeoutDoesNotCloseAmbiguousWorkspaces(t *testing.T) {
 	}
 }
 
-func TestCmuxCreateNonJSONClosesOrphanOnFreshContext(t *testing.T) {
+func TestCmuxCreateNonJSONDoesNotCloseUnackedWorkspace(t *testing.T) {
 	backend, logPath := newFakeCmuxBackend(t)
-	backend.createTimeout = 20 * time.Millisecond
 	inner := backend.run
-	afterCreate := false
 	backend.run = func(ctx context.Context, args ...string) (string, error) {
-		if afterCreate {
-			assertCmuxOrphanCtxFresh(t, ctx, args)
-		}
 		if cmuxArgvHas(args, "new-workspace") {
-			afterCreate = true
 			if _, err := inner(context.Background(), args...); err != nil {
 				return "", err
 			}
@@ -522,14 +625,14 @@ func TestCmuxCreateNonJSONClosesOrphanOnFreshContext(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "parse cmux new-workspace") {
 		t.Fatalf("Create error = %v, want parse failure", err)
 	}
-	if !strings.Contains(err.Error(), "closed orphan cmux workspace") {
-		t.Fatalf("Create error = %v, want closed orphan after parse failure", err)
+	if !strings.Contains(err.Error(), "never guessed") {
+		t.Fatalf("Create error = %v, want unacknowledged unknown", err)
 	}
-	if indexOfCmuxCommand(readCmuxArgvLog(t, logPath), "close-workspace") < 0 {
-		t.Fatal("parse failure did not close the orphan workspace")
+	if indexOfCmuxCommand(readCmuxArgvLog(t, logPath), "close-workspace") >= 0 {
+		t.Fatal("parse failure closed an unacknowledged workspace")
 	}
-	if cmuxFakeWorkspaceCount(t) != 0 {
-		t.Fatalf("parse failure left orphan workspaces: %d", cmuxFakeWorkspaceCount(t))
+	if cmuxFakeWorkspaceCount(t) != 1 {
+		t.Fatalf("parse failure closed unacked workspaces: %d", cmuxFakeWorkspaceCount(t))
 	}
 }
 
@@ -984,23 +1087,6 @@ func cmuxArgvHas(args []string, command string) bool {
 	return false
 }
 
-func assertCmuxOrphanCtxFresh(t *testing.T, ctx context.Context, args []string) {
-	t.Helper()
-	if !cmuxArgvHas(args, "list-workspaces") && !cmuxArgvHas(args, "close-workspace") {
-		return
-	}
-	if err := ctx.Err(); err != nil {
-		t.Fatalf("%v used cancelled context: %v", args, err)
-	}
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		t.Fatalf("%v missing deadline", args)
-	}
-	if remain := time.Until(deadline); remain < 20*time.Second {
-		t.Fatalf("%v leftover deadline %s, want a fresh create-timeout-scale bound", args, remain)
-	}
-}
-
 func assertCmuxFocusFalse(t *testing.T, calls [][]string) {
 	t.Helper()
 	seen := false
@@ -1177,6 +1263,58 @@ func cmuxFakeWorkspaceCount(t *testing.T) int {
 		t.Fatal(err)
 	}
 	return len(state.Workspaces)
+}
+
+func cmuxFakeContainsWorkspace(t *testing.T, id string) bool {
+	t.Helper()
+	want := strings.ToLower(id)
+	data, err := os.ReadFile(os.Getenv("AMQ_CMUX_FAKE_STATE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Workspaces []struct {
+			ID string `json:"id"`
+		} `json:"workspaces"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	for _, workspace := range state.Workspaces {
+		if strings.ToLower(workspace.ID) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func clearCmuxFakeWindowIDs(t *testing.T) {
+	t.Helper()
+	t.Setenv("AMQ_CMUX_FAKE_WINDOW", "")
+	path := os.Getenv("AMQ_CMUX_FAKE_STATE")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["window_id"] = ""
+	workspaces, _ := state["workspaces"].([]any)
+	for i, item := range workspaces {
+		workspace, _ := item.(map[string]any)
+		workspace["window_id"] = ""
+		workspaces[i] = workspace
+	}
+	state["workspaces"] = workspaces
+	out, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func duplicateCmuxFakeNamedWorkspace(t *testing.T) {
