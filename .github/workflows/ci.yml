@@ -87,7 +87,7 @@ jobs:
       # tracked separately from this claim-exclusivity gate. read/monitor/DLQ
       # capture all claim through the same MoveNewToCur primitive proven here.
       - name: Claim primitive and maildir contracts
-        run: go test ./internal/fsq -run '^TestMoveNewToCur|^TestClaimRename|^TestClaimCollision|^TestClaimPinnedRoot|^TestMaildir' -count=1
+        run: go test ./internal/fsq -run '^TestMoveNewToCur|^TestClaimRename|^TestClaimCollision|^TestClaimPinnedRoot|^TestMaildir|^TestWindowsNoReplace' -count=1
       - name: Concurrent drain single-winner gate
         run: go test ./internal/cli -run '^TestDrainInboxItemsConcurrentClaimsSingleWinner$' -count=50
       - name: Drain claim path

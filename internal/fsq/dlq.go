@@ -665,6 +665,8 @@ func FindDLQMessage(root *DeliveryRoot, agent, filename string) (string, string,
 }
 
 // MoveDLQNewToCur moves a DLQ message from new to cur (marks as inspected).
+var beforeMoveDLQNewToCurRenameForTest func(*DeliveryRoot, string, string)
+
 func MoveDLQNewToCur(root *DeliveryRoot, agent, filename string) error {
 	return root.WithDLQEnvelopeLock(agent, filename, func(batch *DeliveryRoot) error {
 		return moveDLQNewToCurLocked(batch, agent, filename)
@@ -689,7 +691,10 @@ func moveDLQNewToCurLocked(root *DeliveryRoot, agent, filename string) error {
 	} else if reconciled {
 		return nil
 	}
-	if err := root.root.Rename(newPath, curPath); err != nil {
+	if beforeMoveDLQNewToCurRenameForTest != nil {
+		beforeMoveDLQNewToCurRenameForTest(root, newPath, curPath)
+	}
+	if err := root.renameNoReplace(newPath, curPath); err != nil {
 		return err
 	}
 	var durabilityErr error
