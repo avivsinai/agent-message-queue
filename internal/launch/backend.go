@@ -157,6 +157,10 @@ type CreateRequest struct {
 	// skip them. JoinProgress is called after each added window is marked.
 	JoinDeltas   []JoinDelta
 	JoinProgress func(JoinDelta) error
+	// PersistCandidate stores an exact managed binding before Create returns.
+	// Backends use it as an immutable crash marker; nil means the caller does
+	// not own a journaled create transaction.
+	PersistCandidate func(BindingRecord) error
 }
 
 type EmittedCommand struct {

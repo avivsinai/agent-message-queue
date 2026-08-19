@@ -402,6 +402,23 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 	if _, ok := backend.(*TmuxBackend); !ok {
 		tmuxJoinJournal = false
 	}
+	persistCandidate := func(candidate BindingRecord) error {
+		candidate.CallerContext = cloneCallerContext(request.CallerContext)
+		if err := candidate.Validate(); err != nil {
+			return fmt.Errorf("backend returned invalid candidate binding: %w", err)
+		}
+		if !journalMatchesBinding(journal, candidate) {
+			return fmt.Errorf("backend returned candidate outside the journaled launch generation")
+		}
+		if journal.CandidateBinding != nil {
+			if !reflect.DeepEqual(*journal.CandidateBinding, candidate) {
+				return fmt.Errorf("backend changed its immutable candidate binding")
+			}
+			return nil
+		}
+		journal.CandidateBinding = &candidate
+		return WriteJournal(request.Root, lease, journal)
+	}
 
 	if !recoveredCreate {
 		if !journalActive && detect.Profile.Has(CapCreate) && (joinBinding == nil || tmuxJoinJournal) {
@@ -447,11 +464,16 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 				return nil
 			}
 		}
+		candidateHook := persistCandidate
+		if !journalActive {
+			candidateHook = nil
+		}
 		create, err = backend.Create(CreateRequest{
 			ProjectRoot: request.ProjectRoot, Session: request.Session, Plan: createPlan,
 			AMQPath: amqExecutable, Root: request.Root, Placement: request.Placement,
 			JoinBinding: joinBinding,
 			JoinDeltas:  slices.Clone(journal.JoinDeltas), JoinProgress: joinProgress,
+			PersistCandidate: candidateHook,
 		})
 		if err != nil {
 			var crashErr *joinProgressCrashError
@@ -507,7 +529,7 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 			result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "managed_create_not_completed"
 			return result, nil
 		}
-		journal.Phase, journal.Binding = JournalCreated, candidate
+		journal.Phase, journal.Binding, journal.CandidateBinding = JournalCreated, candidate, nil
 		journal.Agents, journal.Conversations = plannedAgentResults(result.Agents, planned), plannedConversations(planned)
 		if err := WriteJournal(request.Root, lease, journal); err != nil {
 			return result, err
@@ -678,6 +700,10 @@ func recoverJournal(request ReconcileRequest, journal LaunchJournal, binding Bin
 			result.Outcome, result.Reason = OutcomeActionRequired, "launch_recovery_identity_mismatch"
 			return journal.Backend, backend, detect, CreateResult{}, false, nil
 		}
+		if journal.CandidateBinding != nil && !reflect.DeepEqual(*journal.CandidateBinding, reclaim.Binding) {
+			result.Outcome, result.Reason = OutcomeActionRequired, "launch_recovery_candidate_changed"
+			return journal.Backend, backend, detect, CreateResult{}, false, nil
+		}
 		if journal.Phase == JournalCreated && (journal.Binding == nil || !reflect.DeepEqual(*journal.Binding, reclaim.Binding)) {
 			result.Outcome, result.Reason = OutcomeActionRequired, "launch_recovery_identity_mismatch"
 			return journal.Backend, backend, detect, CreateResult{}, false, nil
@@ -692,7 +718,12 @@ func recoverJournal(request ReconcileRequest, journal LaunchJournal, binding Bin
 	case ReclaimForeign:
 		result.Outcome, result.Reason = OutcomeActionRequired, "launch_recovery_foreign"
 	case ReclaimUnknown:
-		result.Outcome, result.Reason = OutcomeActionRequired, "launch_recovery_unknown"
+		result.Outcome = OutcomeActionRequired
+		if journal.Backend == LauncherGhostty {
+			result.Reason = "ghostty_orphan_unclassified"
+		} else {
+			result.Reason = "launch_recovery_unknown"
+		}
 	default:
 		return journal.Backend, backend, detect, CreateResult{}, false, fmt.Errorf("backend reclaim returned invalid status %q", reclaim.Status)
 	}

@@ -195,6 +195,11 @@ func (b *GhosttyBackend) Create(req CreateRequest) (CreateResult, error) {
 	if err := binding.Validate(); err != nil {
 		return CreateResult{}, err
 	}
+	if req.PersistCandidate != nil {
+		if err := req.PersistCandidate(binding); err != nil {
+			return CreateResult{}, fmt.Errorf("persist ghostty candidate binding: %w", err)
+		}
+	}
 	b.rememberGeneration(nonce, windowID)
 	return CreateResult{Outcome: OutcomeCreated, Profile: binding.Profile, Binding: binding}, nil
 }
@@ -877,21 +882,29 @@ func firstGhosttyTerminalID(binding BindingRecord) string {
 }
 
 func ghosttyJournalTerminals(journal LaunchJournal) ([]string, string, error) {
-	if journal.Binding == nil {
+	binding := journal.Binding
+	if binding == nil {
+		binding = journal.CandidateBinding
+	}
+	if binding == nil {
 		return nil, "", nil
 	}
-	windowID, _, err := parseGhosttyWindowResource(*journal.Binding)
+	windowID, _, err := parseGhosttyWindowResource(*binding)
 	if err != nil {
 		windowID = ""
 	}
-	return ghosttyBoundTerminals(*journal.Binding), windowID, nil
+	return ghosttyBoundTerminals(*binding), windowID, nil
 }
 
 func ghosttyJournalTab(journal LaunchJournal) string {
-	if journal.Binding == nil {
+	binding := journal.Binding
+	if binding == nil {
+		binding = journal.CandidateBinding
+	}
+	if binding == nil {
 		return ""
 	}
-	for _, resource := range journal.Binding.Resources.Resources {
+	for _, resource := range binding.Resources.Resources {
 		id, ok := strings.CutPrefix(resource.OpaqueID, ghosttyTabPrefix)
 		if ok && resource.Agent == "" {
 			if parsed, err := parseGhosttyOpaqueID(id); err == nil {

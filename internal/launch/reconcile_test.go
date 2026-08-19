@@ -422,6 +422,7 @@ type reconcileBackend struct {
 	joinBindingSeen           bool
 	planNonce                 string
 	planHandles               []string
+	persistCandidate          bool
 }
 
 type unsupportedReconcileBackend struct{ reconcileBackend }
@@ -510,6 +511,11 @@ func (b *reconcileBackend) Create(req CreateRequest) (CreateResult, error) {
 			b.captured = &evidence
 		}
 		result.CaptureEvidence = map[string][]CaptureEvidence{req.Plan.Agents[0].Handle: {*b.captured}}
+	}
+	if b.persistCandidate && req.PersistCandidate != nil {
+		if err := req.PersistCandidate(result.Binding); err != nil {
+			return CreateResult{}, err
+		}
 	}
 	return result, nil
 }
@@ -1683,6 +1689,51 @@ func TestReconcileRevalidatesAdoptionImmediatelyBeforeBinding(t *testing.T) {
 	}
 	if _, err := LoadJournal(req.Root); err != nil {
 		t.Fatalf("changed adoption lost journal: %v", err)
+	}
+}
+
+func TestReconcileRecoveryRejectsChangedCandidateBinding(t *testing.T) {
+	backend := &reconcileBackend{name: "test", inspect: InspectAbsent, persistCandidate: true}
+	req := reconcileFixture(t, backend)
+	crash := errors.New("injected crash after immutable candidate")
+	req.CrashHook = func(stage string) error {
+		if stage == "backend_created" {
+			return crash
+		}
+		return nil
+	}
+	if _, err := Reconcile(req); !errors.Is(err, crash) {
+		t.Fatalf("initial reconcile error = %v", err)
+	}
+	journ, err := LoadJournal(req.Root)
+	if err != nil || journ.CandidateBinding == nil {
+		t.Fatalf("candidate marker journal=%#v err=%v", journ, err)
+	}
+	journ.CandidateBinding.Resources.Resources[0].OpaqueID = "resource:tampered"
+	lease, err := AcquireLease(req.Root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJournal(req.Root, lease, journ); err != nil {
+		_ = lease.Release()
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	req.CrashHook = nil
+	result, err := Reconcile(req)
+	if err != nil || result.AggregateCode != 6 || result.Outcome != OutcomeActionRequired || result.Reason != "launch_recovery_candidate_changed" {
+		t.Fatalf("changed candidate recovery result=%#v err=%v", result, err)
+	}
+	if backend.reclaims != 1 {
+		t.Fatalf("reclaim calls=%d, want one immutable-marker comparison", backend.reclaims)
+	}
+	if _, err := LoadBinding(req.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("changed candidate published binding: %v", err)
+	}
+	if _, err := LoadJournal(req.Root); err != nil {
+		t.Fatalf("changed candidate lost journal: %v", err)
 	}
 }
 

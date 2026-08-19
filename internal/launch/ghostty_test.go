@@ -269,6 +269,87 @@ func TestGhosttyBackendLifecycleAndRecovery(t *testing.T) {
 	}
 }
 
+func TestGhosttyCreatePersistsExactCandidateBeforeReturn(t *testing.T) {
+	backend, _ := newFakeGhosttyBackend(t)
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude", "codex")
+	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70e8b5")
+	var persisted BindingRecord
+	var calls int
+	created, err := backend.Create(CreateRequest{
+		ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root,
+		PersistCandidate: func(candidate BindingRecord) error {
+			calls++
+			persisted = candidate
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || !reflect.DeepEqual(persisted, created.Binding) || countGhosttyAgentResources(persisted) != len(plan.Agents) {
+		t.Fatalf("persisted candidate=%#v calls=%d created=%#v", persisted, calls, created)
+	}
+}
+
+func TestGhosttyManagedCreateCrashHooksNeverSilentlyOrphan(t *testing.T) {
+	for _, stage := range []string{
+		"journal_written", "backend_created", "evidence_written", "journal_created",
+		"conversations_written", "binding_written", "journal_cleared",
+	} {
+		t.Run(stage, func(t *testing.T) {
+			backend, fake := newFakeGhosttyBackend(t)
+			req := reconcileFixture(t, backend)
+			req.HostIdentity = ""
+			crash := errors.New("injected crash")
+			fired := false
+			req.CrashHook = func(got string) error {
+				if got == stage && !fired {
+					fired = true
+					return crash
+				}
+				return nil
+			}
+			if _, err := Reconcile(req); !errors.Is(err, crash) {
+				t.Fatalf("first reconcile error=%v", err)
+			}
+			journal, journalErr := LoadJournal(req.Root)
+			if stage == "journal_written" {
+				if journalErr != nil || journal.CandidateBinding != nil || fake.windowCount() != 0 {
+					t.Fatalf("pre-create crash journal=%#v err=%v windows=%d", journal, journalErr, fake.windowCount())
+				}
+			} else if stage == "backend_created" {
+				if journalErr != nil || journal.CandidateBinding == nil || countGhosttyAgentResources(*journal.CandidateBinding) != 1 {
+					t.Fatalf("backend-created marker journal=%#v err=%v", journal, journalErr)
+				}
+			} else if journalErr != nil && stage != "journal_cleared" {
+				t.Fatalf("journal after %s: %v", stage, journalErr)
+			}
+
+			req.CrashHook = nil
+			result, err := Reconcile(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stage == "journal_written" {
+				if result.AggregateCode != 6 || result.Outcome != OutcomeActionRequired || result.Reason != "ghostty_orphan_unclassified" {
+					t.Fatalf("unclassified orphan result=%#v", result)
+				}
+				return
+			}
+			if stage == "journal_cleared" {
+				if result.AggregateCode != 6 || result.Reason != "binding_present_without_resumable_conversation" {
+					t.Fatalf("journal-cleared recovery result=%#v", result)
+				}
+				return
+			}
+			if result.AggregateCode != 0 {
+				t.Fatalf("recovery result=%#v", result)
+			}
+		})
+	}
+}
+
 func TestGhosttyBackendConformance(t *testing.T) {
 	backend, _ := newFakeGhosttyBackend(t)
 	RunConformance(t, backend)
