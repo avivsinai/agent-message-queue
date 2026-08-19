@@ -146,7 +146,7 @@ Before diving in, match the task to the right workflow — this avoids wasted ef
 
 ## Quick Start
 
-The repository [README Quick Start](https://github.com/avivsinai/agent-message-queue#quick-start)
+The repository [README Getting started](https://github.com/avivsinai/agent-message-queue#getting-started)
 is the canonical human onboarding path. The commands below keep the agent
 workflow self-contained.
 
