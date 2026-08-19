@@ -2278,7 +2278,7 @@ func TestGCApplyPassesObservedGenerationWhenLaterCheckWouldSeeReplacement(t *tes
 		replacement = "fedcba9876543210fedcba9876543210"
 	)
 	dir := t.TempDir()
-	registryPath := filepath.Join(dir, "registry.json")
+	registryPath := testRegistryPath(t, dir)
 	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	store := registry.New(registryPath)
 	if _, err := store.Upsert(registry.Entry{
