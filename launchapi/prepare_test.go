@@ -183,6 +183,23 @@ func TestPrepareWrapperComposesVerbatimArgvAndChangesAllDigests(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsProjectContainedWrapperAndAcceptsOutside(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, true)
+	inside := filepath.Join(fixture.request.Target.ProjectRoot, "wrapper")
+	if err := os.WriteFile(inside, []byte("wrapper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixture.request.Intent.Participants[0].Wrapper = &WrapperV1{Executable: inside}
+	if _, err := Prepare(context.Background(), fixture.request); err == nil || !strings.Contains(err.Error(), internallaunch.WrapperProjectContainedCode) {
+		t.Fatalf("project-contained wrapper error = %v, want %s", err, internallaunch.WrapperProjectContainedCode)
+	}
+
+	fixture.request.Intent.Participants[0].Wrapper = &WrapperV1{Executable: writePublicTestWrapper(t)}
+	if _, err := Prepare(context.Background(), fixture.request); err != nil {
+		t.Fatalf("outside wrapper rejected: %v", err)
+	}
+}
+
 func TestPrepareWrapperFileValidationAndStdinRefusalAreZeroWrite(t *testing.T) {
 	for _, test := range []struct {
 		name       string
