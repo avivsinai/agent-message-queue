@@ -167,10 +167,17 @@ func inspectWakeLockWithReader(root, me, lockPath string, read wakeLockFileReade
 func readWakeLockMetadataWithReader(root, me, lockPath string, read wakeLockFileReader) wakeLockInspection {
 	inspection := wakeLockInspection{
 		Status:   wakeLockMissing,
-		Root:     canonicalWakeRoot(root),
 		Agent:    me,
 		LockPath: lockPath,
 	}
+	canonicalRoot, err := canonicalizeWakeRoot(root)
+	if err != nil {
+		inspection.Status = wakeLockUnverified
+		inspection.Reason = fmt.Sprintf("canonicalize root: %v", err)
+		inspection.observationErr = err
+		return inspection
+	}
+	inspection.Root = canonicalRoot
 
 	data, fileInfo, err := read()
 	if err != nil {
@@ -286,7 +293,19 @@ func classifyWakeLock(root, me string, inspection *wakeLockInspection) {
 		inspection.Reason = "lock root missing"
 		return
 	}
-	if canonicalWakeRoot(lock.Root) != canonicalWakeRoot(root) {
+	lockRoot, err := canonicalizeWakeRoot(lock.Root)
+	if err != nil {
+		inspection.Status = wakeLockUnverified
+		inspection.Reason = fmt.Sprintf("canonicalize lock root: %v", err)
+		return
+	}
+	inspectRoot, err := canonicalizeWakeRoot(root)
+	if err != nil {
+		inspection.Status = wakeLockUnverified
+		inspection.Reason = fmt.Sprintf("canonicalize root: %v", err)
+		return
+	}
+	if lockRoot != inspectRoot {
 		inspection.Status = wakeLockStale
 		inspection.Reason = "root mismatch"
 		return
@@ -730,14 +749,26 @@ func currentWakeLockMatches(lock wakeLock) bool {
 }
 
 func canonicalWakeRoot(root string) string {
+	canonical, err := canonicalizeWakeRoot(root)
+	if err != nil {
+		return ""
+	}
+	return canonical
+}
+
+func canonicalizeWakeRoot(root string) (string, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		absRoot = root
+		return "", err
 	}
-	if realRoot, err := filepath.EvalSymlinks(absRoot); err == nil {
-		absRoot = realRoot
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err == nil {
+		return filepath.Clean(realRoot), nil
 	}
-	return filepath.Clean(absRoot)
+	if isUncertainSymlinkResolution(err) {
+		return "", fmt.Errorf("canonicalize wake root %q: %w", absRoot, err)
+	}
+	return filepath.Clean(absRoot), nil
 }
 
 func wakeLockAlreadyRunningError(me string, inspection wakeLockInspection) error {

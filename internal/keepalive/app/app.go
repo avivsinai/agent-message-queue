@@ -1276,14 +1276,7 @@ func (a App) retireSession(ctx context.Context, args []string) error {
 }
 
 func canonicalExistingPath(path string) (string, error) {
-	abs, err := filepath.Abs(filepath.Clean(path))
-	if err != nil {
-		return "", err
-	}
-	if real, err := filepath.EvalSymlinks(abs); err == nil {
-		return real, nil
-	}
-	return abs, nil
+	return registry.CanonicalRoot(path)
 }
 
 func parseRequiredAgents(raw string) ([]string, error) {

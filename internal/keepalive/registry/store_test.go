@@ -66,7 +66,7 @@ func TestStoreUpsertRoundTripAndPermissions(t *testing.T) {
 }
 
 func TestStoreForget(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "registry.json")
+	path := registryTestPath(t)
 	store := New(path)
 	entry, err := store.Upsert(Entry{
 		Root:    "/tmp/amq-root",
@@ -95,7 +95,7 @@ func TestStoreForget(t *testing.T) {
 }
 
 func TestStoreForgetManyRemovesRequestedEntriesInOneSave(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "registry.json")
+	path := registryTestPath(t)
 	store := New(path)
 	var ids []string
 	for _, agent := range []string{"codex", "claude", "observer"} {
@@ -119,7 +119,7 @@ func TestStoreForgetManyRemovesRequestedEntriesInOneSave(t *testing.T) {
 }
 
 func TestStoreForgetManyRefusesPartialMatchWithoutRemovingAnything(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "registry.json")
+	path := registryTestPath(t)
 	store := New(path)
 	entry, err := store.Upsert(Entry{Root: "/tmp/amq-root", Agent: "codex", Adapter: "file", Target: "/tmp/codex"})
 	if err != nil {
@@ -136,7 +136,7 @@ func TestStoreForgetManyRefusesPartialMatchWithoutRemovingAnything(t *testing.T)
 }
 
 func TestStoreRejectsSecondOwnerForSameAdapterTarget(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	store := New(registryTestPath(t))
 	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	if _, err := store.Upsert(Entry{Root: "/tmp/first", Agent: "codex", Adapter: "cmux", Target: target}); err != nil {
 		t.Fatalf("Upsert(first) error = %v", err)
@@ -152,7 +152,7 @@ func TestStoreRejectsSecondOwnerForSameAdapterTarget(t *testing.T) {
 }
 
 func TestStoreRejectsSecondRegistrationForSameRootAndAgentAcrossAdapters(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	store := New(registryTestPath(t))
 	first, err := store.Upsert(Entry{Root: "/tmp/amq-root", Agent: "codex", Adapter: "file", Target: "/tmp/first.txt"})
 	if err != nil {
 		t.Fatalf("Upsert(first) error = %v", err)
@@ -169,6 +169,9 @@ func TestStoreRejectsSecondRegistrationForSameRootAndAgentAcrossAdapters(t *test
 
 func TestStoreUsesCanonicalRootForRegistrationOwnershipAndReattach(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	realRoot := filepath.Join(dir, "real-root")
 	if err := os.Mkdir(realRoot, 0o700); err != nil {
 		t.Fatalf("Mkdir real root: %v", err)
@@ -209,6 +212,9 @@ func TestStoreUsesCanonicalRootForRegistrationOwnershipAndReattach(t *testing.T)
 
 func TestStoreUpsertRewritesEquivalentLegacyRootAlias(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	realRoot := filepath.Join(dir, "real-root")
 	if err := os.Mkdir(realRoot, 0o700); err != nil {
 		t.Fatalf("Mkdir real root: %v", err)
@@ -223,7 +229,7 @@ func TestStoreUpsertRewritesEquivalentLegacyRootAlias(t *testing.T) {
 	}
 	target := filepath.Join(dir, "inbox.txt")
 	legacy := Entry{
-		ID:      "legacy-alias-id",
+		ID:      EntryID(aliasRoot, "codex", "file", target),
 		Root:    aliasRoot,
 		Agent:   "codex",
 		Adapter: "file",
@@ -245,7 +251,7 @@ func TestStoreUpsertRewritesEquivalentLegacyRootAlias(t *testing.T) {
 }
 
 func TestStoreRejectsCanonicalCmuxTargetOwnedByLegacyLowercaseRow(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	store := New(registryTestPath(t))
 	lower := "cmux:surface:f901d722-6789-4bbb-9818-c4e97f20beb3"
 	legacy := Entry{
 		ID: EntryID("/tmp/first", "codex", "cmux", lower), Root: "/tmp/first", Agent: "codex",
@@ -266,9 +272,9 @@ func TestStoreRejectsCanonicalCmuxTargetOwnedByLegacyLowercaseRow(t *testing.T) 
 }
 
 func TestStoreRejectsCanonicalGhosttyTargetOwnedByLegacyLowercaseRow(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	store := New(registryTestPath(t))
 	legacy := Entry{
-		ID: "legacy-ghostty-id", Root: "/tmp/first", Agent: "codex",
+		ID: EntryID("/tmp/first", "codex", "ghostty", "ghostty:terminal:terminal-1"), Root: "/tmp/first", Agent: "codex",
 		Adapter: "ghostty", Target: "ghostty:terminal:terminal-1", State: StateActive,
 	}
 	if err := store.Save(File{Entries: []Entry{legacy}}); err != nil {
@@ -286,6 +292,9 @@ func TestStoreRejectsCanonicalGhosttyTargetOwnedByLegacyLowercaseRow(t *testing.
 
 func TestStoreRejectsFileTargetOwnedByLegacySymlinkAlias(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	realParent := filepath.Join(dir, "real")
 	if err := os.Mkdir(realParent, 0o700); err != nil {
 		t.Fatalf("Mkdir real parent: %v", err)
@@ -295,7 +304,7 @@ func TestStoreRejectsFileTargetOwnedByLegacySymlinkAlias(t *testing.T) {
 		t.Fatalf("Symlink file target parent: %v", err)
 	}
 	legacy := Entry{
-		ID: "legacy-file-id", Root: "/tmp/first", Agent: "codex",
+		ID: EntryID("/tmp/first", "codex", "file", filepath.Join(aliasParent, "inbox.txt")), Root: "/tmp/first", Agent: "codex",
 		Adapter: "file", Target: filepath.Join(aliasParent, "inbox.txt"), State: StateActive,
 	}
 	store := New(filepath.Join(dir, "registry.json"))
@@ -315,7 +324,7 @@ func TestStoreRejectsFileTargetOwnedByLegacySymlinkAlias(t *testing.T) {
 }
 
 func TestRegistrationLockWaitHonorsContextCancellation(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	store := New(registryTestPath(t))
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan error, 1)
@@ -344,7 +353,7 @@ func TestRegistrationLockWaitHonorsContextCancellation(t *testing.T) {
 }
 
 func TestStoreReplacePreflightRejectsTargetOwnedByDifferentSession(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	store := New(registryTestPath(t))
 	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
 	if _, err := store.Upsert(Entry{Root: "/tmp/first", Agent: "codex", Adapter: "cmux", Target: target}); err != nil {
 		t.Fatalf("Upsert(first) error = %v", err)
@@ -356,7 +365,7 @@ func TestStoreReplacePreflightRejectsTargetOwnedByDifferentSession(t *testing.T)
 }
 
 func TestStoreBatchUpdateCASPreservesConcurrentChangesAndNewEntries(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	store := New(registryTestPath(t))
 	first, err := store.Upsert(Entry{Root: "/tmp/first", Agent: "codex", Adapter: "file", Target: "/tmp/first.txt"})
 	if err != nil {
 		t.Fatalf("Upsert(first): %v", err)
@@ -413,7 +422,7 @@ func TestStoreBatchUpdateCASPreservesConcurrentChangesAndNewEntries(t *testing.T
 }
 
 func TestStoreForgetIfUnchangedSkipsNewerState(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	store := New(registryTestPath(t))
 	entry, err := store.Upsert(Entry{Root: "/tmp/root", Agent: "codex", Adapter: "file", Target: "/tmp/inbox.txt"})
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
@@ -429,35 +438,8 @@ func TestStoreForgetIfUnchangedSkipsNewerState(t *testing.T) {
 	}
 }
 
-func TestStoreDoesNotChmodExistingCustomRegistryDir(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "custom")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	if err := os.Chmod(dir, 0o755); err != nil {
-		t.Fatalf("Chmod() error = %v", err)
-	}
-	store := New(filepath.Join(dir, "registry.json"))
-	_, err := store.Upsert(Entry{
-		Root:    "/tmp/amq-root",
-		Agent:   "codex",
-		Adapter: "file",
-		Target:  "/tmp/inbox.txt",
-	})
-	if err != nil {
-		t.Fatalf("Upsert() error = %v", err)
-	}
-	info, err := os.Stat(dir)
-	if err != nil {
-		t.Fatalf("Stat() error = %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o755 {
-		t.Fatalf("dir mode = %v, want existing 0755 preserved", got)
-	}
-}
-
 func TestStoreReplaceSessionAdapterRemovesAllEntriesForRootAndAgent(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "registry.json")
+	path := registryTestPath(t)
 	store := New(path)
 
 	replaceMe, err := store.Upsert(Entry{
@@ -479,6 +461,7 @@ func TestStoreReplaceSessionAdapterRemovesAllEntriesForRootAndAgent(t *testing.T
 		t.Fatalf("Upsert(keepDifferentAgent) error = %v", err)
 	}
 	replaceDifferentAdapter := Entry{
+		ID:      EntryID("/tmp/amq-root", "codex", "ghostty", "ghostty:terminal:old"),
 		Root:    "/tmp/amq-root",
 		Agent:   "codex",
 		Adapter: "ghostty",
@@ -536,7 +519,7 @@ func TestStoreReplaceSessionAdapterRemovesAllEntriesForRootAndAgent(t *testing.T
 }
 
 func TestStoreRestoresPreviousRowsOnlyWhileReservationIsUnchanged(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	store := New(registryTestPath(t))
 	previous, err := store.Upsert(Entry{Root: "/tmp/root", Agent: "codex", Adapter: "file", Target: "/tmp/old"})
 	if err != nil {
 		t.Fatalf("Upsert previous: %v", err)
@@ -574,7 +557,7 @@ func TestStoreRestoresPreviousRowsOnlyWhileReservationIsUnchanged(t *testing.T) 
 }
 
 func TestStoreConcurrentUpsertsDoNotLoseEntries(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "registry.json")
+	path := registryTestPath(t)
 	store := New(path)
 
 	var wg sync.WaitGroup
@@ -605,7 +588,7 @@ func TestStoreConcurrentUpsertsDoNotLoseEntries(t *testing.T) {
 }
 
 func TestStoreConcurrentSameTargetReplacementsConverge(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "registry.json")
+	path := registryTestPath(t)
 	store := New(path)
 	if _, err := store.Upsert(Entry{
 		Root:    "/tmp/amq-root",
@@ -644,7 +627,7 @@ func TestStoreConcurrentSameTargetReplacementsConverge(t *testing.T) {
 }
 
 func TestStoreCorruptRegistryReturnsTypedError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "registry.json")
+	path := registryTestPath(t)
 	if err := os.WriteFile(path, []byte("{not-json"), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -657,7 +640,7 @@ func TestStoreCorruptRegistryReturnsTypedError(t *testing.T) {
 }
 
 func TestStoreLoadsSchemaZeroAsCurrent(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "registry.json")
+	path := registryTestPath(t)
 	if err := os.WriteFile(path, []byte(`{"entries":[]}`), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -671,7 +654,7 @@ func TestStoreLoadsSchemaZeroAsCurrent(t *testing.T) {
 }
 
 func TestStoreSaveReportsRenameFailure(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "registry.json")
+	path := registryTestPath(t)
 	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatalf("Mkdir registry destination: %v", err)
 	}
@@ -680,8 +663,66 @@ func TestStoreSaveReportsRenameFailure(t *testing.T) {
 	}
 }
 
+func TestStoreSaveReportsCommittedDurabilityError(t *testing.T) {
+	previous := finishCommittedRegistry
+	t.Cleanup(func() { finishCommittedRegistry = previous })
+	finishCommittedRegistry = func(path, _ string) error {
+		return &CommittedDurabilityError{Path: path, Err: errors.New("sync failed")}
+	}
+	path := registryTestPath(t)
+	err := New(path).Save(File{})
+	var committed *CommittedDurabilityError
+	if !errors.As(err, &committed) || committed.Path != path {
+		t.Fatalf("Save error = %T %v, want CommittedDurabilityError for %q", err, err, path)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("committed registry missing after durability error: %v", statErr)
+	}
+}
+
+func TestStoreSaveWrapsPostRenameChmodAndSyncFailures(t *testing.T) {
+	previousChmod, previousSync := chmodRegistryFile, syncRegistryDir
+	t.Cleanup(func() {
+		chmodRegistryFile = previousChmod
+		syncRegistryDir = previousSync
+	})
+
+	for _, test := range []struct {
+		name  string
+		setup func()
+	}{
+		{
+			name: "chmod",
+			setup: func() {
+				chmodRegistryFile = func(string, os.FileMode) error { return errors.New("chmod failed") }
+				syncRegistryDir = previousSync
+			},
+		},
+		{
+			name: "sync",
+			setup: func() {
+				chmodRegistryFile = previousChmod
+				syncRegistryDir = func(string) error { return errors.New("sync failed") }
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.setup()
+			path := registryTestPath(t)
+			err := New(path).Save(File{})
+			var committed *CommittedDurabilityError
+			if !errors.As(err, &committed) || committed.Path != path {
+				t.Fatalf("Save error = %T %v, want committed durability error for %q", err, err, path)
+			}
+			if _, statErr := os.Stat(path); statErr != nil {
+				t.Fatalf("committed registry missing after %s failure: %v", test.name, statErr)
+			}
+		})
+	}
+}
+
 func TestStoreRestoreMissingReservationIsNoOp(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	store := New(registryTestPath(t))
 	existing, err := store.Upsert(Entry{Root: "/tmp/root", Agent: "codex", Adapter: "file", Target: "/tmp/current"})
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
@@ -699,7 +740,7 @@ func TestStoreRestoreMissingReservationIsNoOp(t *testing.T) {
 }
 
 func TestStoreUpdateEntriesRejectsEitherMissingID(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	store := New(registryTestPath(t))
 	before := Entry{ID: "entry-1"}
 	after := before
 	for _, test := range []struct {
@@ -718,8 +759,33 @@ func TestStoreUpdateEntriesRejectsEitherMissingID(t *testing.T) {
 	}
 }
 
+func TestStoreUpdatesRejectIdentityFieldChanges(t *testing.T) {
+	store := New(registryTestPath(t))
+	entry, err := store.Upsert(Entry{Root: "/tmp/root", Agent: "codex", Adapter: "file", Target: "/tmp/inbox"})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	changed := entry
+	changed.Agent = "claude"
+	if err := store.UpdateEntry(changed); !errors.Is(err, ErrInvalidIdentity) {
+		t.Fatalf("UpdateEntry identity change error = %v, want ErrInvalidIdentity", err)
+	}
+
+	changed = entry
+	changed.Target = "/tmp/other"
+	result, err := store.UpdateEntries([]EntryUpdate{{Before: entry, After: changed}})
+	if !errors.Is(err, ErrInvalidIdentity) || result.Updated != 0 {
+		t.Fatalf("UpdateEntries identity change result=%+v err=%v, want immutable identity refusal", result, err)
+	}
+	loaded, err := store.Load()
+	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0] != entry {
+		t.Fatalf("identity change mutated registry: entries=%#v err=%v", loaded.Entries, err)
+	}
+}
+
 func TestStoreForgetIfUnchangedDoesNotRemoveAnotherEntry(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	store := New(registryTestPath(t))
 	first, err := store.Upsert(Entry{Root: "/tmp/first", Agent: "codex", Adapter: "file", Target: "/tmp/first"})
 	if err != nil {
 		t.Fatalf("Upsert first: %v", err)
@@ -743,7 +809,7 @@ func TestStoreForgetIfUnchangedDoesNotRemoveAnotherEntry(t *testing.T) {
 }
 
 func TestStoreForgetIfUnchangedRemovesExactLaterEntry(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
+	store := New(registryTestPath(t))
 	first, err := store.Upsert(Entry{Root: "/tmp/first", Agent: "codex", Adapter: "file", Target: "/tmp/first"})
 	if err != nil {
 		t.Fatalf("Upsert first: %v", err)
@@ -763,16 +829,28 @@ func TestStoreForgetIfUnchangedRemovesExactLaterEntry(t *testing.T) {
 }
 
 func TestStoreSortsEntriesByID(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "registry.json"))
-	if err := store.Save(File{Entries: []Entry{{ID: "z-entry"}, {ID: "a-entry"}}}); err != nil {
-		t.Fatalf("Save: %v", err)
+	store := New(registryTestPath(t))
+	second, err := store.Upsert(Entry{Root: "/tmp/z", Agent: "codex", Adapter: "file", Target: "/tmp/z"})
+	if err != nil {
+		t.Fatalf("Upsert second: %v", err)
+	}
+	first, err := store.Upsert(Entry{Root: "/tmp/a", Agent: "claude", Adapter: "file", Target: "/tmp/a"})
+	if err != nil {
+		t.Fatalf("Upsert first: %v", err)
 	}
 	loaded, err := store.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(loaded.Entries) != 2 || loaded.Entries[0].ID != "a-entry" || loaded.Entries[1].ID != "z-entry" {
+	if len(loaded.Entries) != 2 {
+		t.Fatalf("entries = %#v, want 2", loaded.Entries)
+	}
+	if loaded.Entries[0].ID > loaded.Entries[1].ID {
 		t.Fatalf("entries = %#v, want ascending IDs", loaded.Entries)
+	}
+	seen := map[string]bool{loaded.Entries[0].ID: true, loaded.Entries[1].ID: true}
+	if !seen[first.ID] || !seen[second.ID] {
+		t.Fatalf("entries = %#v, want IDs %q and %q", loaded.Entries, first.ID, second.ID)
 	}
 }
 
@@ -781,7 +859,7 @@ func TestStoreRegistrationOwnershipRequiresSameAdapterAndTarget(t *testing.T) {
 		{Root: "/tmp/root", Agent: "codex", Adapter: "file", Target: "/tmp/different"},
 		{Root: "/tmp/root", Agent: "codex", Adapter: "ghostty", Target: "/tmp/original"},
 	} {
-		store := New(filepath.Join(t.TempDir(), "registry.json"))
+		store := New(registryTestPath(t))
 		original, err := store.Upsert(Entry{Root: "/tmp/root", Agent: "codex", Adapter: "file", Target: "/tmp/original"})
 		if err != nil {
 			t.Fatalf("Upsert original: %v", err)
@@ -803,4 +881,13 @@ func findTestEntry(entries []Entry, id string) (Entry, bool) {
 		}
 	}
 	return Entry{}, false
+}
+
+func registryTestPath(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), ".amq-keepalive")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("Mkdir registry test dir: %v", err)
+	}
+	return filepath.Join(dir, "registry.json")
 }
