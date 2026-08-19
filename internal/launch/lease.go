@@ -105,6 +105,13 @@ var inspectProcess = inspectProcessPlatform
 
 var liveLeaseSecrets sync.Map
 
+// These seams keep failure handling testable without changing the filesystem
+// capability contract. Production calls use the standard implementations.
+var leaseRandomRead = rand.Read
+var removeLeaseRecord = func(root *fsq.DeliveryRoot) error {
+	return root.Remove(filepath.Join(bindingDirectory, leaseFilename))
+}
+
 type LeaseInspection struct {
 	State    LeaseState
 	Evidence string
@@ -130,6 +137,7 @@ func AcquireLease(root *fsq.DeliveryRoot, nonce string) (*Lease, error) {
 			return nil, err
 		}
 	}
+	var secret uint64
 	if err := withLeaseInterlock(root, func() error {
 		inspection, inspectErr := inspectLeaseLocked(root)
 		if inspectErr != nil {
@@ -141,15 +149,25 @@ func AcquireLease(root *fsq.DeliveryRoot, nonce string) (*Lease, error) {
 		case LeaseUnverified:
 			return &LeaseUnverifiedError{Evidence: inspection.Evidence}
 		case LeaseStale, LeaseMissing:
-			return writeLeaseRecord(root, leaseRecord{Version: LeaseVersion, Holder: holder, LaunchNonce: nonce})
+			secret, err = newSecret()
+			if err != nil {
+				return err
+			}
+			if _, loaded := liveLeaseSecrets.LoadOrStore(secret, struct{}{}); loaded {
+				return fmt.Errorf("lease secret collision")
+			}
+			if err := writeLeaseRecord(root, leaseRecord{Version: LeaseVersion, Holder: holder, LaunchNonce: nonce}); err != nil {
+				liveLeaseSecrets.Delete(secret)
+				return err
+			}
+			return nil
 		default:
 			return fmt.Errorf("unknown lease state %q", inspection.State)
 		}
 	}); err != nil {
 		return nil, err
 	}
-	lease := &Lease{root: root, nonce: nonce, holder: holder, secret: newSecret()}
-	liveLeaseSecrets.Store(lease.secret, struct{}{})
+	lease := &Lease{root: root, nonce: nonce, holder: holder, secret: secret}
 	return lease, nil
 }
 
@@ -213,11 +231,13 @@ func (l *Lease) Release() error {
 		if inspection.State != LeaseValid || inspection.Nonce != l.nonce {
 			return fmt.Errorf("launch lease is no longer held by this process")
 		}
-		return l.root.Remove(filepath.Join(bindingDirectory, leaseFilename))
+		return removeLeaseRecord(l.root)
 	})
-	l.released = true
-	liveLeaseSecrets.Delete(l.secret)
-	l.secret = 0
+	if err == nil {
+		l.released = true
+		liveLeaseSecrets.Delete(l.secret)
+		l.secret = 0
+	}
 	return err
 }
 
@@ -394,16 +414,23 @@ func generateNonce() (string, error) {
 		buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16]), nil
 }
 
-func newSecret() uint64 {
+func newSecret() (uint64, error) {
 	var buf [8]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return 1
+	n, err := leaseRandomRead(buf[:])
+	if err != nil {
+		return 0, fmt.Errorf("generate lease secret: %w", err)
+	}
+	if n != len(buf) {
+		return 0, fmt.Errorf("generate lease secret: short random read: got %d bytes, want %d", n, len(buf))
 	}
 	secret := binary.BigEndian.Uint64(buf[:])
 	if secret == 0 {
-		return 1
+		return 0, fmt.Errorf("generate lease secret: zero value")
 	}
-	return secret
+	if _, loaded := liveLeaseSecrets.Load(secret); loaded {
+		return 0, fmt.Errorf("generate lease secret: collision")
+	}
+	return secret, nil
 }
 
 func evidenceOr(base string, err error) string {

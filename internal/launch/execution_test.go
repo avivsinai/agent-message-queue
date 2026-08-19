@@ -292,6 +292,99 @@ func TestPrepareExecutionRefusesDifferentLauncherLeaseImmediately(t *testing.T) 
 	}
 }
 
+func TestRecordCodexNotifyWaitsForOwnLeaseAndIsIdempotent(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "58585858-5858-4858-8858-585858585858"
+	ticket := seedPendingCodexNotifyExecution(t, fixture, nonce)
+	blocker, err := AcquireLease(fixture.root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		notify CodexNotifyResult
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		notify, notifyErr := RecordCodexNotify(fixture.root, "codex", nonce, fixture.amq, codexNotifyTestPayload(testConversationID, ticket.Cwd))
+		done <- result{notify: notify, err: notifyErr}
+	}()
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case early := <-done:
+		t.Fatalf("notify returned before own lease release: %#v", early)
+	default:
+	}
+	if err := blocker.Release(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if got.err != nil || got.notify.ConversationID != testConversationID {
+			t.Fatalf("notify after own lease release = %#v, %v", got.notify, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("notify did not acquire the released own lease")
+	}
+	second, err := RecordCodexNotify(fixture.root, "codex", nonce, fixture.amq, codexNotifyTestPayload(testConversationID, ticket.Cwd))
+	if err != nil || !second.AlreadyReady {
+		t.Fatalf("idempotent notify = %#v, %v", second, err)
+	}
+}
+
+func TestRevertExecutionWaitsForOwnLeaseAndRefusesForeignLease(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	nonce := "59595959-5959-4959-8959-595959595959"
+	_, envelope := seedPendingMintExecution(t, fixture, nonce)
+	if prepared, err := PrepareExecution(fixture.root, "claude", nonce, envelope); err != nil || prepared.State != ExecutionAcknowledged {
+		t.Fatalf("prepare before revert = %#v, %v", prepared, err)
+	}
+	blocker, err := AcquireLease(fixture.root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- RevertExecution(fixture.root, "claude", nonce) }()
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case early := <-done:
+		t.Fatalf("revert returned before own lease release: %v", early)
+	default:
+	}
+	if err := blocker.Release(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("revert after own lease release = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("revert did not acquire the released own lease")
+	}
+	if got, err := LoadExecutionTicket(fixture.root, "claude"); err != nil || got.State != ExecutionPending {
+		t.Fatalf("reverted execution ticket = %#v, %v", got, err)
+	}
+
+	foreignFixture := newExecutionFixture(t)
+	foreignNonce := "60606060-6060-4060-8060-606060606060"
+	seedPendingMintExecution(t, foreignFixture, foreignNonce)
+	foreign, err := AcquireLease(foreignFixture.root, "foreign-nonce")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = foreign.Release() }()
+	started := time.Now()
+	err = RevertExecution(foreignFixture.root, "claude", foreignNonce)
+	var held *LeaseHeldError
+	if !errors.As(err, &held) || held.Nonce != "foreign-nonce" {
+		t.Fatalf("foreign lease refusal = %v, want LeaseHeldError for foreign nonce", err)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("foreign lease refusal took %s, want immediate", elapsed)
+	}
+}
+
 func TestPrepareExecutionRejectsRetargetedProviderWithoutPromotion(t *testing.T) {
 	fixture := newExecutionFixture(t)
 	nonce := "66666666-6666-4666-8666-666666666666"
