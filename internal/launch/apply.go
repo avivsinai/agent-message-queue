@@ -183,6 +183,9 @@ func authorizeApply(ctx context.Context, request ApplyRequest, dependencies Appl
 		}
 		return PrepareResult{}, nil, ApplyResult{}, false, err
 	}
+	if request.Prepare.SubjectSchema == SubjectSchemaV1 && hasRunnableParticipants(request.Prepare.Participants) {
+		return prepared, nil, applyActionResult(prepared, "reprepare_required"), false, nil
+	}
 	if prepared.SubjectDigest != request.SubjectDigest {
 		return prepared, nil, applyActionResult(prepared, "subject_changed"), false, nil
 	}
@@ -197,6 +200,15 @@ func authorizeApply(ctx context.Context, request ApplyRequest, dependencies Appl
 		return prepared, nil, applyActionResult(prepared, reason), false, nil
 	}
 	return prepared, decisions, ApplyResult{}, true, nil
+}
+
+func hasRunnableParticipants(participants []PrepareParticipant) bool {
+	for _, participant := range participants {
+		if participant.Runnable {
+			return true
+		}
+	}
+	return false
 }
 
 func applyPreparedUnderAuthority(ctx context.Context, request ApplyRequest, dependencies ApplyDependencies, state *prepareTargetState, lease *Lease, prepared PrepareResult, decisions map[RequiredActionKind]string) (result ApplyResult, returnErr error) {

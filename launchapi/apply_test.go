@@ -634,6 +634,81 @@ func TestApplyOmittedSubjectSchemaUsesV1AndRecommendsReprepare(t *testing.T) {
 	}
 }
 
+func TestApplyV1RunnableParticipantRequiresReprepare(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, false)
+	internalRequest, dependencies, err := prepareInputs(fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	internalRequest.SubjectSchema = internallaunch.SubjectSchemaV1
+	legacy, err := internallaunch.Prepare(context.Background(), internalRequest, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPublic := fromInternalPrepareResult(legacy)
+	decisions := make([]DecisionV1, 0, len(legacyPublic.RequiredActions))
+	for _, action := range legacyPublic.RequiredActions {
+		decisions = append(decisions, DecisionV1{ActionID: action.ActionID, Choice: DecisionTrustExactSubject})
+	}
+	result, err := Apply(context.Background(), ApplyRequestV1{
+		RequestVersion: RequestVersionV1,
+		Prepare:        fixture.request,
+		SubjectSchema:  SubjectSchemaV1,
+		SubjectDigest:  legacy.SubjectDigest,
+		Decisions:      decisions,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != "action_required" || result.ReasonCode != "reprepare_required" {
+		t.Fatalf("v1 runnable Apply result = %#v, want typed reprepare refusal", result)
+	}
+	if result.SubjectSchema != SubjectSchemaV1 || !slices.Contains(result.Hints, HintReprepareRecommended) {
+		t.Fatalf("v1 reprepare result migration fields = %#v", result)
+	}
+	if result.SubjectDigest != legacy.SubjectDigest || result.PlanDigest != legacy.PlanDigest || result.TrustDigest != legacy.TrustDigest {
+		t.Fatalf("v1 reprepare result lost legacy digests: result=%#v legacy=%#v", result, legacy)
+	}
+	if _, err := os.Stat(fixture.request.Target.SessionRoot); !os.IsNotExist(err) {
+		t.Fatalf("v1 reprepare refusal mutated session: %v", err)
+	}
+}
+
+func TestApplyV1ParticipantOnlyNonRunnableSucceeds(t *testing.T) {
+	fixture := newPublicPrepareFixture(t, false)
+	fixture.request.Intent.Participants = []ParticipantV1{{Handle: "operator", Runnable: false}}
+	internalRequest, dependencies, err := prepareInputs(fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	internalRequest.SubjectSchema = internallaunch.SubjectSchemaV1
+	legacy, err := internallaunch.Prepare(context.Background(), internalRequest, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPublic := fromInternalPrepareResult(legacy)
+	decisions := make([]DecisionV1, 0, len(legacyPublic.RequiredActions))
+	for _, action := range legacyPublic.RequiredActions {
+		decisions = append(decisions, DecisionV1{ActionID: action.ActionID, Choice: DecisionTrustExactSubject})
+	}
+	result, err := Apply(context.Background(), ApplyRequestV1{
+		RequestVersion: RequestVersionV1,
+		Prepare:        fixture.request,
+		SubjectSchema:  SubjectSchemaV1,
+		SubjectDigest:  legacy.SubjectDigest,
+		Decisions:      decisions,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != "provisioned_no_runnable" {
+		t.Fatalf("v1 participant-only Apply result = %#v, want provisioned success", result)
+	}
+	if info, err := os.Stat(filepath.Join(fixture.request.Target.SessionRoot, "agents", "operator")); err != nil || !info.IsDir() {
+		t.Fatalf("v1 participant-only mailbox: info=%v err=%v", info, err)
+	}
+}
+
 func TestApplyReportsRosterDriftWithoutDeletingHistory(t *testing.T) {
 	fixture := newPublicPrepareFixture(t, true)
 	if err := fsq.EnsureAgentDirs(fixture.request.Target.SessionRoot, "operator"); err != nil {
