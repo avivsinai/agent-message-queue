@@ -192,9 +192,12 @@ lists cmux and Ghostty in `available_launchers` only after their Detect ping
 succeeds, not from `LookPath` alone. Operator live proofs are in
 [the public launch API guide](docs/launch-api.md).
 
-The stable executable path before symlink resolution is the trusted identity;
-retargeting that symlink is machine-owner territory, in the same trust class
-as changing `PATH`.
+Prepare records the requested and consulted executable paths plus their
+physical identity, including symlink hops. In subject schema 2, an inode,
+mtime, symlink-hop, or `PATH` retarget changes the subject before Apply. A
+provider, wrapper, or cwd replacement after authorization returns the typed
+`authorized_identity_changed` refusal before capability probing or ticket
+creation.
 
 The `commands` backend prints complete `coop exec` commands and exits `6`
 because executing them is the remaining operator action. When launch uses that
@@ -231,6 +234,11 @@ field and is advertised. amq-squad maps
 `current-window` to `current_window`, `vertical` to `columns`, and `horizontal`
 to `rows`; the decoder accepts only those underscore enums. Details live in
 [docs/launch-api.md](docs/launch-api.md).
+
+Schema-1 Apply remains valid for participant-only requests. A runnable
+participant requires re-Prepare: Apply returns exit code `6` with
+`reason_code=reprepare_required` and performs no launch mutation. Re-Prepare
+and Apply with schema 2 before launching runnable participants.
 
 Each command sets up the session environment, starts wake notifications, and
 launches the agent. See [COOP.md](COOP.md#running-co-op-mode) for co-op
@@ -610,10 +618,15 @@ For the read-only trace contract and its evidence limits, see [docs/trace.md](do
 
 AMQ uses the battle-tested [Maildir](https://cr.yp.to/proto/maildir.html) format:
 
-1. **Write** — Message written to `tmp/` directory
+1. **Write** — Message written to a unique attempt file in `tmp/`
 2. **Sync** — File fsynced to disk
-3. **Deliver** — Atomic rename to `new/` (never partial)
+3. **Deliver** — No-replace publication to `new/` (never overwrites a retained
+   same-name message; identical bytes are idempotent)
 4. **Process** — Reader moves to `cur/` after reading
+
+If a different same-name message is already in `new/`, AMQ preserves both
+copies and reports a collision. A claim never replaces a retained same-name
+message in `cur/`.
 
 This guarantees crash-safety: if the process dies mid-write, no corrupt message appears in the inbox. See [CLAUDE.md](CLAUDE.md) for the full directory layout.
 

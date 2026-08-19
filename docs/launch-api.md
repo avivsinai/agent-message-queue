@@ -292,6 +292,11 @@ these fields describe the launch backend binding only, not session or roster
 durability codes. Post-commit failures remain action-required results with exit
 code `6`, not bare errors.
 
+Apply with schema 1 remains compatible for participant-only requests. If any
+participant is runnable, it returns `action_required` with
+`reason_code=reprepare_required` before launch mutation; re-Prepare and Apply
+with schema 2. A participant-only schema-1 Apply remains provisionable.
+
 The equivalent CLI split is:
 
 ```bash

@@ -11,6 +11,13 @@ creation time. It can also retain the validated candidate binding and final
 conversation records needed to finish an interrupted commit. It contains no
 message data and is never a launcher binding.
 
+For a managed tmux join, the journal also records the authorized session
+binding and one identity-checked delta per added window. Each delta carries
+the session ID, name, nonce, epoch, window, and pane identity; AMQ revalidates
+that session before the next window mutation. A crash after a delta is written
+replays only the remaining deltas, so it cannot duplicate an added window or
+write to a replacement session.
+
 On the next launch, AMQ holds the session lease and follows these rules:
 
 - A valid binding from the same launch generation is authoritative. AMQ
@@ -26,7 +33,8 @@ On the next launch, AMQ holds the session lease and follows these rules:
   exact resource inventory known to the backend.
 
 `Create` failures preserve the journal unless the backend returns the typed
-definite-pre-create error that proves no resource was made. Partial creation is
+definite-pre-create error that proves no resource was made. That definite
+pre-create path also removes the pending execution tickets. Partial creation is
 never adoptable. A Ghostty crash between window creation and binding persistence
 leaves that window for manual close; AMQ never treats the gap as proven absence
 and never creates a duplicate.
