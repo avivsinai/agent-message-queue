@@ -43,11 +43,19 @@ The initial-input carrier is typed. Claude and Codex currently advertise
 `argument`; AMQ appends its exact text as the final provider argv element.
 `stdin` and `file` remain typed but unadvertised and return
 `initial_input_unsupported` until real stdin/file seams exist. Content is
-limited to 262,144 UTF-8 bytes without NUL. Content changes the plan and
-subject digests but not the trust digest.
+limited to 262,144 UTF-8 bytes without C0 controls, DEL, CR, or LF, and must
+not begin with `-`; invalid text returns a typed `initial_input_control` or
+`initial_input_leading_dash` validation code before Prepare inspects the
+target. Content changes the plan and subject digests but not the trust digest.
+Initial input is a one-time bootstrap carrier: a resume plan never appends it
+again. The normalized execution and wake policy enters both the plan and trust
+digests, so any non-default execution, wake, or injector policy is
+trust-bearing and requires fresh trust for the exact policy.
 Claude admits one `--allowedTools <comma-separated-list>` pair. Codex admits
 ordered `-c model_reasoning_effort=<value>` pairs with values `minimal`, `low`,
 `medium`, `high`, or `xhigh`; duplicate keys and unknown keys or values reject.
+Every `env_overlay` key uses the POSIX environment grammar
+`[A-Za-z_][A-Za-z0-9_]*`; shell syntax such as `X;touch /tmp/pwn` is refused.
 
 An optional participant `wrapper` contains a clean absolute `executable` path
 and static `args`. The path must resolve to one regular file; resolvable

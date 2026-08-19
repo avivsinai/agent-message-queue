@@ -248,6 +248,32 @@ type InitialInputV1 struct {
 	Text string             `json:"text"`
 }
 
+type InitialInputErrorCode string
+
+const (
+	InitialInputInvalidUTF8 InitialInputErrorCode = "initial_input_invalid_utf8"
+	InitialInputControl     InitialInputErrorCode = "initial_input_control"
+	InitialInputLeadingDash InitialInputErrorCode = "initial_input_leading_dash"
+)
+
+// InitialInputValidationError is returned before Prepare inspects or mutates
+// any target state when bootstrap text cannot be safely carried as one argv
+// argument.
+type InitialInputValidationError struct {
+	Code   InitialInputErrorCode
+	Detail string
+}
+
+func (e *InitialInputValidationError) Error() string {
+	if e == nil {
+		return "initial input validation failed"
+	}
+	if e.Detail == "" {
+		return string(e.Code)
+	}
+	return string(e.Code) + ": " + e.Detail
+}
+
 type ConfigOverrideCapabilityV1 struct {
 	Key           string   `json:"key"`
 	AllowedValues []string `json:"allowed_values"`

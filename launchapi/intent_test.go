@@ -2,11 +2,44 @@ package launchapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestInitialInputValidationReturnsTypedCodes(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		text string
+		code InitialInputErrorCode
+	}{
+		{name: "nul", text: "before\x00after", code: InitialInputControl},
+		{name: "control", text: "before\tafter", code: InitialInputControl},
+		{name: "delete", text: "before\x7fafter", code: InitialInputControl},
+		{name: "carriage return", text: "before\rafter", code: InitialInputControl},
+		{name: "line feed", text: "before\nafter", code: InitialInputControl},
+		{name: "leading dash", text: "-danger", code: InitialInputLeadingDash},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			intent := LaunchIntentV1{
+				IntentVersion: IntentVersionV1,
+				Participants: []ParticipantV1{{
+					Handle: "codex", Runnable: true, Executable: "codex",
+					Cwd:          &WorkingDirectoryV1{Kind: WorkingDirectoryAbsolute, Path: t.TempDir()},
+					ResumePolicy: ResumePolicyFresh,
+					Execution:    &ExecutionOptionsV1{Wake: WakeOptionsV1{Mode: WakeEnabled}},
+					InitialInput: &InitialInputV1{Kind: InitialInputArgument, Text: test.text},
+				}},
+			}
+			var typed *InitialInputValidationError
+			if err := intent.Validate(); !errors.As(err, &typed) || typed.Code != test.code {
+				t.Fatalf("Validate error = %v, typed=%#v; want code %q", err, typed, test.code)
+			}
+		})
+	}
+}
 
 func validIntentJSON(t *testing.T) string {
 	t.Helper()
@@ -212,7 +245,7 @@ func TestLaunchIntentV1InitialInputStrictShape(t *testing.T) {
 		{name: "unknown kind", input: `{"kind":"pipe","text":"hello"}`, want: "invalid kind"},
 		{name: "missing text", input: `{"kind":"stdin"}`, want: "requires text"},
 		{name: "unknown field", input: `{"kind":"file","text":"hello","path":"/tmp/pwn"}`, want: "unknown field"},
-		{name: "nul", input: `{"kind":"argument","text":"hello\u0000world"}`, want: "without NUL"},
+		{name: "nul", input: `{"kind":"argument","text":"hello\u0000world"}`, want: "initial_input_control"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := DecodeLaunchIntentV1([]byte(fmt.Sprintf(base, test.input)))

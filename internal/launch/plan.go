@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -130,7 +131,7 @@ func (a AgentPlan) validate() error {
 		return fmt.Errorf("invalid resume policy %q", a.ResumePolicy)
 	}
 	for key := range a.EnvOverlay {
-		if key == "" || strings.ContainsRune(key, '=') {
+		if !validPOSIXEnvironmentKey(key) {
 			return fmt.Errorf("invalid environment key %q", key)
 		}
 	}
@@ -193,6 +194,9 @@ func (a AgentPlan) validate() error {
 		if _, dynamic := seenDynamic[a.InitialInput.ArgvIndex]; dynamic {
 			return fmt.Errorf("initial input argv index is dynamic")
 		}
+		if err := validateInitialInputText(a.Argv[a.InitialInput.ArgvIndex]); err != nil {
+			return err
+		}
 		sum := sha256.Sum256([]byte(a.Argv[a.InitialInput.ArgvIndex]))
 		if "sha256:"+hex.EncodeToString(sum[:]) != a.InitialInput.SHA256 {
 			return fmt.Errorf("initial input digest does not match argument")
@@ -212,15 +216,16 @@ type canonicalArgument struct {
 }
 
 type staticAgentPlan struct {
-	Handle          string                 `json:"handle"`
-	Argv            []canonicalArgument    `json:"argv"`
-	EnvOverlay      map[string]string      `json:"env_overlay,omitempty"`
-	Cwd             string                 `json:"cwd"`
-	AdapterMode     AdapterMode            `json:"adapter_mode"`
-	ResumePolicy    ResumePolicy           `json:"resume_policy"`
-	PreSpawnAcquire bool                   `json:"pre_spawn_acquire,omitempty"`
-	InitialInput    *canonicalInitialInput `json:"initial_input,omitempty"`
-	Wrapper         *Wrapper               `json:"wrapper,omitempty"`
+	Handle          string                   `json:"handle"`
+	Argv            []canonicalArgument      `json:"argv"`
+	EnvOverlay      map[string]string        `json:"env_overlay,omitempty"`
+	Cwd             string                   `json:"cwd"`
+	AdapterMode     AdapterMode              `json:"adapter_mode"`
+	ResumePolicy    ResumePolicy             `json:"resume_policy"`
+	PreSpawnAcquire bool                     `json:"pre_spawn_acquire,omitempty"`
+	Execution       *PrepareExecutionOptions `json:"execution,omitempty"`
+	InitialInput    *canonicalInitialInput   `json:"initial_input,omitempty"`
+	Wrapper         *Wrapper                 `json:"wrapper,omitempty"`
 }
 
 type canonicalInitialInput struct {
@@ -277,7 +282,8 @@ func (p Plan) semanticDigest(allowEmpty, trustProjection bool) (string, error) {
 		agents[i] = staticAgentPlan{
 			Handle: agent.Handle, Argv: argv, EnvOverlay: agent.EnvOverlay,
 			Cwd: agent.Cwd, AdapterMode: agent.AdapterMode, ResumePolicy: agent.ResumePolicy,
-			PreSpawnAcquire: agent.PreSpawnAcquire, InitialInput: initial, Wrapper: cloneWrapper(agent.Wrapper),
+			PreSpawnAcquire: agent.PreSpawnAcquire, Execution: canonicalPlanExecution(agent.Execution),
+			InitialInput: initial, Wrapper: cloneWrapper(agent.Wrapper),
 		}
 	}
 	slices.SortFunc(agents, func(a, b staticAgentPlan) int { return strings.Compare(a.Handle, b.Handle) })
@@ -290,6 +296,18 @@ func (p Plan) semanticDigest(allowEmpty, trustProjection bool) (string, error) {
 	}
 	sum := sha256.Sum256(canonical)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+func canonicalPlanExecution(options *PrepareExecutionOptions) *PrepareExecutionOptions {
+	if options == nil {
+		return nil
+	}
+	canonical := CanonicalExecutionOptions(options)
+	defaults := CanonicalExecutionOptions(nil)
+	if reflect.DeepEqual(canonical, defaults) {
+		return nil
+	}
+	return &canonical
 }
 
 func (p Plan) validateForDigest(allowEmpty bool) error {
