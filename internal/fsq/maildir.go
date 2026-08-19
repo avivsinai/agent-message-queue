@@ -1,6 +1,8 @@
 package fsq
 
 import (
+	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -8,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // DeliverToInbox writes a message using Maildir semantics (tmp -> new).
@@ -96,7 +99,10 @@ func DeliverToInboxes(root *DeliveryRoot, recipients []string, filename string, 
 		if err := root.root.MkdirAll(newDir, 0o700); err != nil {
 			return nil, cleanupStagedTmp(root, stages, err)
 		}
-		tmpPath := filepath.Join(tmpDir, filename)
+		tmpPath, err := uniqueAttemptTmpPath(tmpDir, filename)
+		if err != nil {
+			return nil, cleanupStagedTmp(root, stages, err)
+		}
 		newPath := filepath.Join(newDir, filename)
 		if err := root.writeAndSync(tmpPath, data, 0o600); err != nil {
 			return nil, cleanupStagedTmp(root, stages, err)
@@ -114,7 +120,7 @@ func DeliverToInboxes(root *DeliveryRoot, recipients []string, filename string, 
 	}
 
 	for i, stage := range stages {
-		if err := root.root.Rename(stage.tmpPath, stage.newPath); err != nil {
+		if err := root.publishTmpNoReplace(stage.tmpPath, stage.newPath, data); err != nil {
 			if errors.Is(err, syscall.EXDEV) {
 				err = fmt.Errorf("rename tmp->new for %s: different filesystems: %w", stage.recipient, err)
 			} else {
@@ -172,7 +178,10 @@ func DeliverToExistingInbox(root *DeliveryRoot, agent, filename string, data []b
 		return "", fmt.Errorf("peer inbox new dir does not exist: %s", root.displayPath(newDir))
 	}
 
-	tmpPath := filepath.Join(tmpDir, filename)
+	tmpPath, err := uniqueAttemptTmpPath(tmpDir, filename)
+	if err != nil {
+		return "", err
+	}
 	newPath := filepath.Join(newDir, filename)
 
 	if err := root.writeAndSync(tmpPath, data, 0o600); err != nil {
@@ -181,8 +190,8 @@ func DeliverToExistingInbox(root *DeliveryRoot, agent, filename string, data []b
 	if err := root.syncDir(tmpDir); err != nil {
 		return "", root.cleanupTemp(tmpPath, err)
 	}
-	if err := root.root.Rename(tmpPath, newPath); err != nil {
-		return "", root.cleanupTemp(tmpPath, fmt.Errorf("rename tmp->new for %s: %w", agent, err))
+	if err := root.publishTmpNoReplace(tmpPath, newPath, data); err != nil {
+		return "", fmt.Errorf("rename tmp->new for %s: %w", agent, err)
 	}
 	committedPath := root.displayPath(newPath)
 	if err := root.syncDir(newDir); err != nil {
@@ -215,9 +224,13 @@ func partialDeliveryError(root *DeliveryRoot, committed []stagedDelivery, failed
 		pendingRecipients = append(pendingRecipients, stage.recipient)
 	}
 
-	undelivered := make([]stagedDelivery, 0, 1+len(pending))
-	undelivered = append(undelivered, failed)
-	undelivered = append(undelivered, pending...)
+	// A no-replace collision must keep the failed attempt so both copies survive.
+	undelivered := pending
+	if !errors.Is(primary, os.ErrExist) {
+		undelivered = make([]stagedDelivery, 0, 1+len(pending))
+		undelivered = append(undelivered, failed)
+		undelivered = append(undelivered, pending...)
+	}
 	if cleanupErr := cleanupTmpStages(root, undelivered); cleanupErr != nil {
 		primary = fmt.Errorf("%w (cleanup: %v)", primary, cleanupErr)
 	}
@@ -260,4 +273,51 @@ func cleanupTmpStages(root *DeliveryRoot, stages []stagedDelivery) error {
 		}
 	}
 	return cleanupErr
+}
+
+func uniqueAttemptTmpPath(tmpDir, filename string) (string, error) {
+	name, err := uniqueAttemptTmpName(filename)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(tmpDir, name), nil
+}
+
+func uniqueAttemptTmpName(filename string) (string, error) {
+	var b [6]byte
+	if _, err := readRandom(b[:]); err != nil {
+		return "", fmt.Errorf("generate unique tmp name: %w", err)
+	}
+	return fmt.Sprintf(".%s.tmp-%d-%d-%s", filename, time.Now().UnixNano(), os.Getpid(), hex.EncodeToString(b[:])), nil
+}
+
+func attemptTmpMatches(filename, name string) bool {
+	if name == filename {
+		return true
+	}
+	return strings.HasPrefix(name, "."+filename+".tmp-")
+}
+
+func (r *DeliveryRoot) publishTmpNoReplace(tmpPath, newPath string, data []byte) error {
+	if err := r.renameNoReplace(tmpPath, newPath); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return r.resolvePublishCollision(tmpPath, newPath, data, err)
+		}
+		return r.cleanupTemp(tmpPath, err)
+	}
+	return nil
+}
+
+func (r *DeliveryRoot) resolvePublishCollision(tmpPath, newPath string, data []byte, renameErr error) error {
+	existing, err := r.ReadRegularNoFollow(newPath)
+	if err != nil {
+		return fmt.Errorf("%w (inspect dest: %v)", renameErr, err)
+	}
+	if bytes.Equal(existing, data) {
+		if removeErr := r.root.Remove(tmpPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("remove idempotent tmp after collision: %w", removeErr)
+		}
+		return nil
+	}
+	return renameErr
 }

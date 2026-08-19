@@ -304,6 +304,67 @@ func TestRetryFromDLQCrashRecoveryRefusesPendingRetryWithoutDestination(t *testi
 	}
 }
 
+func TestRetryFromDLQPendingRetainedTmpCompletesAfterByteCompare(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := EnsureAgentDirs(rootPath, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	const filename = "retained-tmp.md"
+	content := []byte("original body")
+	dlqPath := createDLQMessage(t, rootPath, "alice", filename, content)
+	env, body, err := ReadDLQEnvelopePath(dlqPath)
+	if err != nil {
+		t.Fatalf("read envelope: %v", err)
+	}
+	env.RetryCount = 1
+	setRetryState(env, RetryStatePending)
+	data, err := serializeDLQMessage(*env, body)
+	if err != nil {
+		t.Fatalf("serialize pending envelope: %v", err)
+	}
+	if err := os.WriteFile(dlqPath, data, 0o600); err != nil {
+		t.Fatalf("write pending envelope: %v", err)
+	}
+
+	tmpDir := AgentInboxTmp(rootPath, "alice")
+	mismatch := filepath.Join(tmpDir, "."+filename+".tmp-mismatch")
+	match := filepath.Join(tmpDir, "."+filename+".tmp-retained")
+	if err := os.WriteFile(mismatch, []byte("wrong bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(match, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RetryFromDLQ(openDeliveryRootForTest(t, rootPath), "alice", filepath.Base(dlqPath), false); !errors.Is(err, ErrDLQRetryDelivered) {
+		t.Fatalf("pending retained tmp = %v, want terminal delivered result", err)
+	}
+	got, readErr := os.ReadFile(filepath.Join(AgentInboxNew(rootPath, "alice"), filename))
+	if readErr != nil || string(got) != string(content) {
+		t.Fatalf("recovered new/ = %q, %v", got, readErr)
+	}
+	if _, statErr := os.Stat(match); !os.IsNotExist(statErr) {
+		t.Fatalf("matching tmp still present after completion: %v", statErr)
+	}
+	got, readErr = os.ReadFile(mismatch)
+	if readErr != nil || string(got) != "wrong bytes" {
+		t.Fatalf("mismatched tmp = %q, %v; byte-compare must leave it", got, readErr)
+	}
+	curPath := filepath.Join(AgentDLQCur(rootPath, "alice"), filepath.Base(dlqPath))
+	resumed, _, err := ReadDLQEnvelopePath(curPath)
+	if err != nil {
+		t.Fatalf("read resumed envelope: %v", err)
+	}
+	if resumed.RetryCount != 1 || resumed.RetryPending || !resumed.RetryDelivered {
+		t.Fatalf(
+			"resumed retry = count:%d pending:%t delivered:%t, want count 1 terminal",
+			resumed.RetryCount,
+			resumed.RetryPending,
+			resumed.RetryDelivered,
+		)
+	}
+}
+
 func TestRetryFromDLQPendingFinalizeFailureIsNotTerminal(t *testing.T) {
 	const (
 		agent    = "alice"
