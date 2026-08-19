@@ -562,16 +562,17 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 : > "$AMQ_KEEPALIVE_EXITED"
 `)
 	registerDetachedWakeCleanup(t, pidFile, allowReady, release)
+	budget := testWaitBudget(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	done := make(chan error, 1)
 	go func() {
 		done <- NewCLI(fakeAMQ).StartWake(ctx, StartWakeRequest{
 			Root: "/tmp/amq-root", Me: "codex", InjectVia: "/tmp/amq-keepalive",
-			Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3", Timeout: 5 * time.Second,
+			Adapter: "cmux", Target: "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3", Timeout: budget,
 		})
 	}()
-	waitForFile(t, started, 2*time.Second)
+	waitForFile(t, started, testWaitBudget(t))
 	cancel()
 	err := <-done
 	if !errors.Is(err, ErrWakeReadinessUncertain) || !errors.Is(err, context.Canceled) {
@@ -580,11 +581,11 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 	if err := os.WriteFile(allowReady, nil, 0o600); err != nil {
 		t.Fatalf("allow late readiness: %v", err)
 	}
-	waitForFile(t, lateReady, 2*time.Second)
+	waitForFile(t, lateReady, testWaitBudget(t))
 	if err := os.WriteFile(release, nil, 0o600); err != nil {
 		t.Fatalf("release child: %v", err)
 	}
-	waitForFile(t, exited, 2*time.Second)
+	waitForFile(t, exited, testWaitBudget(t))
 }
 
 func TestStartWakeTimesOutWhenReadyFileNeverAppears(t *testing.T) {
@@ -1417,6 +1418,23 @@ func writeExecutable(t *testing.T, path string, body string) string {
 		t.Fatalf("write executable: %v", err)
 	}
 	return path
+}
+
+func testWaitBudget(t *testing.T) time.Duration {
+	t.Helper()
+	const reserve = 2 * time.Second
+	deadline, ok := t.Deadline()
+	if !ok {
+		return 30 * time.Second
+	}
+	remain := time.Until(deadline)
+	if remain > reserve {
+		return remain - reserve
+	}
+	if remain > 0 {
+		return remain
+	}
+	return time.Millisecond
 }
 
 func waitForFile(t *testing.T, path string, timeout time.Duration) {

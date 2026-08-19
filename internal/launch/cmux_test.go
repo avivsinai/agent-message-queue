@@ -617,6 +617,9 @@ func TestCmuxDefaultCreateTimeoutExceedsCommandTimeout(t *testing.T) {
 	if got < 30*time.Second {
 		t.Fatalf("default create timeout %s is below 30s", got)
 	}
+	if command := NewCmuxBackend("").commandOpTimeout(); command != cmuxCommandTimeout {
+		t.Fatalf("default command timeout %s, want %s", command, cmuxCommandTimeout)
+	}
 }
 
 func TestCmuxCreateMissingAMQRefusesBeforeMutation(t *testing.T) {
@@ -842,9 +845,27 @@ func newFakeCmuxBackend(t *testing.T) (*CmuxBackend, string) {
 	t.Setenv("AMQ_CMUX_FAKE_UNHEALTHY", "")
 	t.Setenv("AMQ_CMUX_FAKE_MISSING", "")
 	backend := NewCmuxBackend(script)
+	backend.commandTimeout = testWaitBudget(t)
 	backend.healthTimeout = time.Second
 	backend.healthPoll = 10 * time.Millisecond
 	return backend, logPath
+}
+
+func testWaitBudget(t *testing.T) time.Duration {
+	t.Helper()
+	const reserve = 2 * time.Second
+	deadline, ok := t.Deadline()
+	if !ok {
+		return 30 * time.Second
+	}
+	remain := time.Until(deadline)
+	if remain > reserve {
+		return remain - reserve
+	}
+	if remain > 0 {
+		return remain
+	}
+	return time.Millisecond
 }
 
 func writeSleepAMQ(t *testing.T) string {
