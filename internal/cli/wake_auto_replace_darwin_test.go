@@ -5,19 +5,18 @@ package cli
 import (
 	"errors"
 	"os"
-	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
 )
 
-func TestAcquireWakeLockAutomaticallyReplacesTerminalGoneRawWake(t *testing.T) {
+func TestAcquireWakeLockTerminalGoneRawWakeFailsClosedWithoutSignal(t *testing.T) {
 	testAcquireWakeLockAutomaticallyReplacesRawWake(t, wakeProcessInfo{
 		ControllingTerminalKnown: true,
 	})
 }
 
-func TestAcquireWakeLockAutomaticallyReplacesSameTerminalDifferentSessionRawWake(t *testing.T) {
+func TestAcquireWakeLockSameTerminalDifferentSessionRawWakeFailsClosedWithoutSignal(t *testing.T) {
 	const (
 		wakePID = 66121
 		tdev    = 268435464
@@ -136,12 +135,8 @@ func testAcquireWakeLockAutomaticallyReplacesRawWake(
 		WakeMode:     wakeInjectModeRaw,
 		Generation:   "automatic-replacement",
 	})
-	stopped := false
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		if pid != wakePID {
-			return wakeProcessInfo{PID: pid}
-		}
-		if stopped {
 			return wakeProcessInfo{PID: pid}
 		}
 		terminal.PID = pid
@@ -153,38 +148,30 @@ func testAcquireWakeLockAutomaticallyReplacesRawWake(
 		return terminal
 	})
 	var signals []os.Signal
-	stubSignalWakeProcess(t, func(pid int, signal os.Signal) error {
-		if pid != wakePID {
-			t.Fatalf("signal pid = %d, want %d", pid, wakePID)
-		}
-		signals = append(signals, signal)
-		if signal == syscall.SIGTERM {
-			stopped = true
-		}
+	stubSignalWakeProcess(t, func(int, os.Signal) error {
+		t.Fatal("darwin must not signal a raw wake by numeric PID")
 		return nil
 	})
 
 	cleanup, err := acquireWakeLockWithOptions(root, "codex", wakeLockAcquireOptions{
 		wakeMode: wakeInjectModeRaw,
 	})
-	if err != nil {
-		t.Fatalf("automatic raw-wake replacement: %v", err)
+	if cleanup != nil {
+		cleanup()
+		t.Fatal("automatic raw-wake replacement returned cleanup")
 	}
-	if cleanup == nil {
-		t.Fatal("automatic raw-wake replacement returned nil cleanup")
+	var operatorOnly *wakeOperatorOnlyError
+	if !errors.As(err, &operatorOnly) || operatorOnly.RestartCapability() != wakeRestartOperatorOnly {
+		t.Fatalf("automatic raw-wake replacement error = %T %v, want typed operator_only", err, err)
 	}
-	if len(signals) != 1 || signals[0] != syscall.SIGTERM {
-		t.Fatalf("signals = %v, want exact SIGTERM", signals)
+	if len(signals) != 0 {
+		t.Fatalf("signals = %v, want none", signals)
 	}
 	current := inspectWakeLock(root, "codex")
-	if !current.Exists ||
-		current.Lock.PID != os.Getpid() ||
-		current.Lock.Generation == "automatic-replacement" {
-		t.Fatalf("replacement lock = %#v", current)
+	if !current.Exists || current.Lock.Generation != "automatic-replacement" {
+		t.Fatalf("raw wake was mutated: %#v", current)
 	}
-
-	cleanup()
-	if _, statErr := os.Stat(lockPath); !os.IsNotExist(statErr) {
-		t.Fatalf("replacement cleanup left lock: %v", statErr)
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("raw wake lock removed: %v", statErr)
 	}
 }

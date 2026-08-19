@@ -214,7 +214,8 @@ func TestWakeCheckJSONSchemaV2DirectStartUsesExplicitNullsAndArgv(t *testing.T) 
 	}
 	wake := requireJSONObject(t, got, "wake")
 	if wake["status"] != string(wakeLockMissing) || wake["live"] != false ||
-		wake["pid"] != nil || wake["mode"] != nil || wake["owner_bound"] != false {
+		wake["pid"] != nil || wake["mode"] != nil || wake["owner_bound"] != false ||
+		wake["generation"] != nil || wake["target_digest"] != nil {
 		t.Fatalf("wake = %#v", wake)
 	}
 	image := requireJSONObject(t, got, "image")
@@ -1433,6 +1434,39 @@ func TestWakeCheckV2AdvertisedRepairRevalidatesChangedGeneration(t *testing.T) {
 		t.Fatal("repair unexpectedly accepted changed generation")
 	}
 	assertWakeCheckTreeUnchanged(t, root, before)
+}
+
+func TestWakeCheckV2ReportsLiveLockGenerationAndTargetDigest(t *testing.T) {
+	const generation = "0123456789abcdef0123456789abcdef"
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	requested, _ := installRetireWakeFixture(t, root, "codex", injector, []string{"exec", "terminal-a"}, 4242)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return matchingRetireWakeProcess(pid, root, "codex", injector)
+	})
+	stubWakeCheckRuntime(t, false, "0.49.14")
+	wantDigest, err := wakeTargetDigest(requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := captureEnvStdout(t, func() error {
+		return runWake([]string{"check", "--root", root, "--me", "codex", "--json", "--json-schema=2"})
+	})
+	if err != nil {
+		t.Fatalf("wake check v2: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("decode: %v\n%s", err, output)
+	}
+	wake := requireJSONObject(t, got, "wake")
+	if wake["generation"] != generation {
+		t.Fatalf("wake.generation = %#v, want %q", wake["generation"], generation)
+	}
+	if wake["target_digest"] != wantDigest {
+		t.Fatalf("wake.target_digest = %#v, want %q", wake["target_digest"], wantDigest)
+	}
 }
 
 func requireJSONObject(t *testing.T, object map[string]any, key string) map[string]any {

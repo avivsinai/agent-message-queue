@@ -61,28 +61,33 @@ type StartWakeRequest struct {
 	Timeout   time.Duration
 }
 
-type wakeCheckResult struct {
+type WakeCheckResult struct {
 	Schema      int    `json:"schema"`
 	LiveWake    bool   `json:"live_wake"`
 	ImageStatus string `json:"image_status"`
+	Generation  string `json:"wake_generation"`
 }
 
 type wakeCheckWireResult struct {
 	Schema      *int    `json:"schema"`
 	LiveWake    *bool   `json:"live_wake"`
 	ImageStatus *string `json:"image_status"`
+	Generation  *string `json:"wake_generation"`
 }
 
 // RetireWakeRequest names the exact inject-via identity that AMQ must match
 // before it stops a wake. Root, Me, Adapter, and Target reproduce the fixed
 // argv the wake was started with (inject <adapter> <target>), so AMQ retires
-// only a wake whose saved target is identical.
+// only a wake whose saved target is identical. Generation is the CAS token
+// from amq wake check; when set, AMQ refuses if a replacement generation was
+// published in between.
 type RetireWakeRequest struct {
-	Root      string
-	Me        string
-	InjectVia string
-	Adapter   string
-	Target    string
+	Root       string
+	Me         string
+	InjectVia  string
+	Adapter    string
+	Target     string
+	Generation string
 }
 
 // RetireWakeResult mirrors `amq wake retire -json`. Both "retired" and
@@ -298,12 +303,16 @@ func (c CLI) refreshWakeImage(ctx context.Context, req StartWakeRequest) error {
 	case wakeImageCurrent:
 		return nil
 	case wakeImageDifferent:
+		if check.Generation == "" {
+			return fmt.Errorf("%w: live wake omitted generation", ErrWakeImageIdentityInconclusive)
+		}
 		_, err := c.RetireWake(ctx, RetireWakeRequest{
-			Root:      req.Root,
-			Me:        req.Me,
-			InjectVia: req.InjectVia,
-			Adapter:   req.Adapter,
-			Target:    req.Target,
+			Root:       req.Root,
+			Me:         req.Me,
+			InjectVia:  req.InjectVia,
+			Adapter:    req.Adapter,
+			Target:     req.Target,
+			Generation: check.Generation,
 		})
 		if err != nil {
 			return fmt.Errorf("retire stale amq wake image: %w", err)
@@ -314,7 +323,11 @@ func (c CLI) refreshWakeImage(ctx context.Context, req StartWakeRequest) error {
 	}
 }
 
-func (c CLI) checkWake(ctx context.Context, req StartWakeRequest) (wakeCheckResult, error) {
+func (c CLI) CheckWake(ctx context.Context, req StartWakeRequest) (WakeCheckResult, error) {
+	return c.checkWake(ctx, req)
+}
+
+func (c CLI) checkWake(ctx context.Context, req StartWakeRequest) (WakeCheckResult, error) {
 	args := []string{"wake", "check", "--me", req.Me}
 	if req.Root != "" {
 		args = append(args, "--root", req.Root)
@@ -327,23 +340,27 @@ func (c CLI) checkWake(ctx context.Context, req StartWakeRequest) (wakeCheckResu
 		if detail == "" {
 			detail = err.Error()
 		}
-		return wakeCheckResult{}, fmt.Errorf("amq wake check failed: %v: %s", err, detail)
+		return WakeCheckResult{}, fmt.Errorf("amq wake check failed: %v: %s", err, detail)
 	}
 	var wire wakeCheckWireResult
 	if err := json.Unmarshal(bytes.TrimSpace(stdout), &wire); err != nil {
-		return wakeCheckResult{}, fmt.Errorf("parse amq wake check output: %w", err)
+		return WakeCheckResult{}, fmt.Errorf("parse amq wake check output: %w", err)
 	}
 	if wire.Schema == nil || wire.LiveWake == nil || wire.ImageStatus == nil {
-		return wakeCheckResult{}, errors.New("amq wake check omitted required schema, live_wake, or image_status field")
+		return WakeCheckResult{}, errors.New("amq wake check omitted required schema, live_wake, or image_status field")
 	}
 	if *wire.Schema != wakeCheckSchemaV1 {
-		return wakeCheckResult{}, fmt.Errorf("amq wake check returned schema %d, want %d", *wire.Schema, wakeCheckSchemaV1)
+		return WakeCheckResult{}, fmt.Errorf("amq wake check returned schema %d, want %d", *wire.Schema, wakeCheckSchemaV1)
 	}
-	return wakeCheckResult{
+	result := WakeCheckResult{
 		Schema:      *wire.Schema,
 		LiveWake:    *wire.LiveWake,
 		ImageStatus: *wire.ImageStatus,
-	}, nil
+	}
+	if wire.Generation != nil {
+		result.Generation = strings.TrimSpace(*wire.Generation)
+	}
+	return result, nil
 }
 
 // RetireWake asks AMQ to stop an identity-confirmed live inject-via wake (or
@@ -376,6 +393,11 @@ func (c CLI) RetireWake(ctx context.Context, req RetireWakeRequest) (RetireWakeR
 		"--inject-arg", "inject",
 		"--inject-arg", req.Adapter,
 		"--inject-arg", req.Target,
+	)
+	if req.Generation != "" {
+		args = append(args, "--if-generation", req.Generation)
+	}
+	args = append(args,
 		"--retry-until", keepaliveWakeRetryUntil,
 		"-json",
 	)
