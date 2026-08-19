@@ -1014,10 +1014,13 @@ type gcResult struct {
 	Entries        []gcEntryResult `json:"entries"`
 }
 
-// gc classifies proven-detached registry entries. With --apply it retires each
-// candidate's exact previous inject-via wake via amq wake retire and forgets
-// only the entries AMQ positively confirmed retired; any refusal leaves the
-// entry in place for the next pass and surfaces an error.
+// gc classifies proven-detached registry entries. Load, probe, retire, and
+// forget run under the registration lease so a concurrent reattach cannot
+// start a new generation and then have this pass retire it from a stale
+// snapshot. With --apply it retires each candidate's exact previous inject-via
+// wake via amq wake retire and forgets only the entries AMQ positively
+// confirmed retired; any refusal leaves the entry in place for the next pass
+// and surfaces an error.
 func (a App) gc(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
@@ -1035,98 +1038,104 @@ func (a App) gc(ctx context.Context, args []string) error {
 
 	var retirer wakeRetirer = amq.NewCLI(*amqPath)
 	store := registry.New(*registryPath)
-	file, err := store.Load()
-	if err != nil {
-		return err
-	}
-	adapters := a.adapterRegistry()
-	probes := passProbes(file.Entries, adapters)
-	conflicts := targetOwnershipConflicts(file, adapters)
-	mergeOwnershipConflicts(conflicts, physicalOwnershipConflicts(ctx, file, probes))
-	now := time.Now().UTC()
 	result := gcResult{Applied: *apply, MinDetachedAge: minDetachedAge.String()}
 	var applyErrs []error
-	for _, entry := range file.Entries {
-		item := gcEntryResult{
-			ID: entry.ID, Root: entry.Root, Agent: entry.Agent, Adapter: entry.Adapter,
-			Target: entry.Target, DetachedSince: entry.DetachedSince,
+	err := store.WithRegistrationLockContext(ctx, func() error {
+		file, err := store.Load()
+		if err != nil {
+			return err
 		}
-		result.Entries = append(result.Entries, item)
-		index := len(result.Entries) - 1
-		if entry.State != registry.StateDetached {
-			result.Entries[index].Status = "skipped"
-			result.Entries[index].Reason = "entry is not detached"
-			continue
+		adapters := a.adapterRegistry()
+		probes := passProbes(file.Entries, adapters)
+		conflicts := targetOwnershipConflicts(file, adapters)
+		mergeOwnershipConflicts(conflicts, physicalOwnershipConflicts(ctx, file, probes))
+		now := time.Now().UTC()
+		for _, entry := range file.Entries {
+			item := gcEntryResult{
+				ID: entry.ID, Root: entry.Root, Agent: entry.Agent, Adapter: entry.Adapter,
+				Target: entry.Target, DetachedSince: entry.DetachedSince,
+			}
+			result.Entries = append(result.Entries, item)
+			index := len(result.Entries) - 1
+			if entry.State != registry.StateDetached {
+				result.Entries[index].Status = "skipped"
+				result.Entries[index].Reason = "entry is not detached"
+				continue
+			}
+			if entry.DetachedSince.IsZero() {
+				result.Entries[index].Status = "skipped"
+				result.Entries[index].Reason = "detached_since is not yet established by the fixed supervisor"
+				continue
+			}
+			if age := now.Sub(entry.DetachedSince); age < *minDetachedAge {
+				result.Entries[index].Status = "skipped"
+				result.Entries[index].Reason = fmt.Sprintf("detached for %s; minimum is %s", age.Round(time.Second), minDetachedAge.String())
+				continue
+			}
+			if conflictErr, ok := conflicts[entry.ID]; ok {
+				result.Entries[index].Status = "skipped"
+				result.Entries[index].Reason = conflictErr.Error()
+				continue
+			}
+			selected, selectErr := adapters.Get(entry.Adapter)
+			if selectErr != nil {
+				result.Entries[index].Status = "skipped"
+				result.Entries[index].Reason = selectErr.Error()
+				continue
+			}
+			target, normalizeErr := normalizedTarget(selected, entry.Target)
+			if normalizeErr != nil {
+				result.Entries[index].Status = "skipped"
+				result.Entries[index].Reason = normalizeErr.Error()
+				continue
+			}
+			probeErr := probes[entry.Adapter].Probe(ctx, target)
+			if probeErr == nil {
+				result.Entries[index].Status = "skipped"
+				result.Entries[index].Reason = "adapter target currently exists"
+				continue
+			}
+			if !errors.Is(probeErr, adapter.ErrTargetNotFound) {
+				result.Entries[index].Status = "skipped"
+				result.Entries[index].Reason = "target absence is ambiguous: " + probeErr.Error()
+				continue
+			}
+			result.Entries[index].Status = "candidate"
+			if !*apply {
+				continue
+			}
+			// Retire the exact previous inject-via identity. AMQ acts only on an
+			// identity-confirmed live wake with this saved target (or its
+			// exactly-bound proven-stale lock); any refusal leaves the entry.
+			if _, retireErr := retirer.RetireWake(ctx, amq.RetireWakeRequest{
+				Root:      entry.Root,
+				Me:        entry.Agent,
+				InjectVia: *self,
+				Adapter:   entry.Adapter,
+				Target:    target,
+			}); retireErr != nil {
+				result.Entries[index].Status = "error"
+				result.Entries[index].Reason = retireErr.Error()
+				applyErrs = append(applyErrs, fmt.Errorf("retire %s@%s wake: %w", entry.Agent, entry.Root, retireErr))
+				continue
+			}
+			removed, forgetErr := store.ForgetIfUnchanged(entry)
+			switch {
+			case forgetErr != nil:
+				result.Entries[index].Status = "error"
+				result.Entries[index].Reason = "wake retired but registry forget failed: " + forgetErr.Error()
+				applyErrs = append(applyErrs, fmt.Errorf("forget %s@%s registry entry after retire: %w", entry.Agent, entry.Root, forgetErr))
+			case !removed:
+				result.Entries[index].Status = "retired"
+				result.Entries[index].Reason = "wake retired; registry entry changed concurrently and was left in place"
+			default:
+				result.Entries[index].Status = "retired"
+			}
 		}
-		if entry.DetachedSince.IsZero() {
-			result.Entries[index].Status = "skipped"
-			result.Entries[index].Reason = "detached_since is not yet established by the fixed supervisor"
-			continue
-		}
-		if age := now.Sub(entry.DetachedSince); age < *minDetachedAge {
-			result.Entries[index].Status = "skipped"
-			result.Entries[index].Reason = fmt.Sprintf("detached for %s; minimum is %s", age.Round(time.Second), minDetachedAge.String())
-			continue
-		}
-		if conflictErr, ok := conflicts[entry.ID]; ok {
-			result.Entries[index].Status = "skipped"
-			result.Entries[index].Reason = conflictErr.Error()
-			continue
-		}
-		selected, selectErr := adapters.Get(entry.Adapter)
-		if selectErr != nil {
-			result.Entries[index].Status = "skipped"
-			result.Entries[index].Reason = selectErr.Error()
-			continue
-		}
-		target, normalizeErr := normalizedTarget(selected, entry.Target)
-		if normalizeErr != nil {
-			result.Entries[index].Status = "skipped"
-			result.Entries[index].Reason = normalizeErr.Error()
-			continue
-		}
-		probeErr := probes[entry.Adapter].Probe(ctx, target)
-		if probeErr == nil {
-			result.Entries[index].Status = "skipped"
-			result.Entries[index].Reason = "adapter target currently exists"
-			continue
-		}
-		if !errors.Is(probeErr, adapter.ErrTargetNotFound) {
-			result.Entries[index].Status = "skipped"
-			result.Entries[index].Reason = "target absence is ambiguous: " + probeErr.Error()
-			continue
-		}
-		result.Entries[index].Status = "candidate"
-		if !*apply {
-			continue
-		}
-		// Retire the exact previous inject-via identity. AMQ acts only on an
-		// identity-confirmed live wake with this saved target (or its
-		// exactly-bound proven-stale lock); any refusal leaves the entry.
-		if _, retireErr := retirer.RetireWake(ctx, amq.RetireWakeRequest{
-			Root:      entry.Root,
-			Me:        entry.Agent,
-			InjectVia: *self,
-			Adapter:   entry.Adapter,
-			Target:    target,
-		}); retireErr != nil {
-			result.Entries[index].Status = "error"
-			result.Entries[index].Reason = retireErr.Error()
-			applyErrs = append(applyErrs, fmt.Errorf("retire %s@%s wake: %w", entry.Agent, entry.Root, retireErr))
-			continue
-		}
-		removed, forgetErr := store.ForgetIfUnchanged(entry)
-		switch {
-		case forgetErr != nil:
-			result.Entries[index].Status = "error"
-			result.Entries[index].Reason = "wake retired but registry forget failed: " + forgetErr.Error()
-			applyErrs = append(applyErrs, fmt.Errorf("forget %s@%s registry entry after retire: %w", entry.Agent, entry.Root, forgetErr))
-		case !removed:
-			result.Entries[index].Status = "retired"
-			result.Entries[index].Reason = "wake retired; registry entry changed concurrently and was left in place"
-		default:
-			result.Entries[index].Status = "retired"
-		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	if err := printJSON(a.Stdout, result); err != nil {
 		return err

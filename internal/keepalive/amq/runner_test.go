@@ -30,7 +30,8 @@ done
 if [ -z "$ready" ]; then
   exit 11
 fi
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 `)
 
 	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
@@ -100,7 +101,8 @@ for arg in "$@"; do
   if [ "$previous" = "-ready-file" ]; then ready="$arg"; fi
   previous="$arg"
 done
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 `)
 
 	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
@@ -159,7 +161,8 @@ done
 if [ -z "$ready" ]; then
   exit 11
 fi
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 `)
 
 	err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
@@ -331,7 +334,8 @@ for arg in "$@"; do
   previous="$arg"
 done
 [ -n "$ready" ] || exit 11
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 `)
 
 			err := NewCLI(fakeAMQ).StartWake(context.Background(), StartWakeRequest{
@@ -442,7 +446,8 @@ for arg in "$@"; do
 done
 [ -n "$ready" ] || exit 11
 printf '%s' "$ready" > "$AMQ_KEEPALIVE_READY_PATH_LOG"
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 [ -d "${ready%/*}" ] || exit 12
 : > "$AMQ_KEEPALIVE_POST_READY"
@@ -498,7 +503,8 @@ for arg in "$@"; do
 done
 [ -n "$ready" ] || exit 11
 printf '%s' "$ready" > "$AMQ_KEEPALIVE_READY_PATH_LOG"
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do
   if [ -f "$AMQ_KEEPALIVE_CHECK" ]; then : > "$AMQ_KEEPALIVE_ALIVE"; fi
   sleep 0.01
@@ -556,7 +562,8 @@ done
 [ -n "$ready" ] || exit 11
 : > "$AMQ_KEEPALIVE_STARTED"
 while [ ! -f "$AMQ_KEEPALIVE_ALLOW_READY" ]; do sleep 0.01; done
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 : > "$AMQ_KEEPALIVE_LATE_READY"
 while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 : > "$AMQ_KEEPALIVE_EXITED"
@@ -801,7 +808,8 @@ for arg in "$@"; do
   previous="$arg"
 done
 [ -n "$ready" ] || exit 11
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 while [ ! -f "$AMQ_KEEPALIVE_TRIGGER" ]; do sleep 0.01; done
 printf 'post-launch diagnostic\n' >&2
 : > "$AMQ_KEEPALIVE_SURVIVED"
@@ -836,7 +844,8 @@ for arg in "$@"; do
   previous="$arg"
 done
 [ -n "$ready" ] || exit 11
-printf ready > "$ready"
+umask 077
+printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 while [ ! -f "$AMQ_KEEPALIVE_TRIGGER" ]; do sleep 0.01; done
 set -e
 dd if=/dev/zero bs=65536 count=4 >&2 2>/dev/null
