@@ -32,17 +32,18 @@ const (
 
 // CmuxBackend manages one cmux workspace per AMQ project/session generation.
 type CmuxBackend struct {
-	binary        string
-	run           func(context.Context, ...string) (string, error)
-	hostname      func() (string, error)
-	getenv        func(string) string
-	lookPath      func(string) (string, error)
-	userHomeDir   func() (string, error)
-	isExecutable  func(string) bool
-	sleep         func(context.Context, time.Duration) error
-	createTimeout time.Duration
-	healthTimeout time.Duration
-	healthPoll    time.Duration
+	binary         string
+	run            func(context.Context, ...string) (string, error)
+	hostname       func() (string, error)
+	getenv         func(string) string
+	lookPath       func(string) (string, error)
+	userHomeDir    func() (string, error)
+	isExecutable   func(string) bool
+	sleep          func(context.Context, time.Duration) error
+	createTimeout  time.Duration
+	commandTimeout time.Duration
+	healthTimeout  time.Duration
+	healthPoll     time.Duration
 }
 
 func NewCmuxBackend(binary string) *CmuxBackend {
@@ -69,12 +70,15 @@ func (b *CmuxBackend) Detect() DetectResult {
 	if _, err := b.resolveExecutable(); err != nil {
 		return result
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), cmuxCommandTimeout)
-	defer cancel()
-	if _, err := b.run(ctx, "ping"); err != nil {
+	probe := func(args ...string) (string, error) {
+		ctx, cancel := b.commandCallContext()
+		defer cancel()
+		return b.run(ctx, args...)
+	}
+	if _, err := probe("ping"); err != nil {
 		return result
 	}
-	raw, err := b.run(ctx, "--json", "capabilities")
+	raw, err := probe("--json", "capabilities")
 	if err != nil {
 		cmuxUnsupported(&result, "cmux capabilities: "+err.Error())
 		return result
@@ -104,7 +108,7 @@ func (b *CmuxBackend) Detect() DetectResult {
 		cmuxUnsupported(&result, fmt.Sprintf("cmux protocol version %d is unsupported (want %d)", caps.ProtocolVersion, cmuxProtocolVersion))
 		return result
 	}
-	verRaw, err := b.run(ctx, "version")
+	verRaw, err := probe("version")
 	if err != nil {
 		cmuxUnsupported(&result, "cmux version: "+err.Error())
 		return result
@@ -259,6 +263,17 @@ func (b *CmuxBackend) createOpTimeout() time.Duration {
 		return b.createTimeout
 	}
 	return cmuxCreateTimeout
+}
+
+func (b *CmuxBackend) commandOpTimeout() time.Duration {
+	if b.commandTimeout > 0 {
+		return b.commandTimeout
+	}
+	return cmuxCommandTimeout
+}
+
+func (b *CmuxBackend) commandCallContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), b.commandOpTimeout())
 }
 
 func (b *CmuxBackend) createCallContext() (context.Context, context.CancelFunc) {
