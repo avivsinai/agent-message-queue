@@ -74,6 +74,21 @@ func (File) Probe(ctx context.Context, target string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return fmt.Errorf("resolve file adapter target: %w", err)
+	}
+	abs = filepath.Clean(abs)
+	if info, err := os.Lstat(abs); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("file adapter target %q must not be a symlink: %w", abs, ErrTargetSymlink)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("file adapter target %q must be a regular file: %w", abs, ErrTargetNotRegular)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	clean, err := (File{}).NormalizeTarget(target)
 	if err != nil {
 		return err
@@ -85,13 +100,6 @@ func (File) Probe(ctx context.Context, target string) error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("target parent %q is not a directory", parent)
-	}
-	targetInfo, err := os.Stat(clean)
-	if err == nil && targetInfo.IsDir() {
-		return fmt.Errorf("target %q is a directory", clean)
-	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
 	}
 	return nil
 }
