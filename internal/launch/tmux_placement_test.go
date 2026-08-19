@@ -67,6 +67,105 @@ func TestTmuxPlacementSessionLayouts(t *testing.T) {
 	}
 }
 
+func TestTmuxJoinCrashAfterEachWindowRetriesWithoutDuplicates(t *testing.T) {
+	for _, crashAfter := range []int{1, 2} {
+		t.Run(fmt.Sprintf("window_%d", crashAfter), func(t *testing.T) {
+			backend, project, root, allPlan := newTmuxPlacementFixture(t, "claude", "codex", "operator")
+			initialPlan := Plan{Version: PlanVersion, Agents: []AgentPlan{allPlan.Agents[0]}}
+			created, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: initialPlan, AMQPath: writeTmuxSleepAMQ(t), Root: root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			nonce := created.Binding.LaunchNonce
+			joinPlan := Plan{Version: PlanVersion, Agents: []AgentPlan{
+				{Handle: "codex", Argv: []string{"/bin/sleep", "60"}, Cwd: project, AdapterMode: AdapterModeMint, ResumePolicy: ResumeFresh, LaunchNonce: nonce, ConversationID: "019c5a10-75d8-7eef-8db7-5ee77f70e901"},
+				{Handle: "operator", Argv: []string{"/bin/sleep", "60"}, Cwd: project, AdapterMode: AdapterModeMint, ResumePolicy: ResumeFresh, LaunchNonce: nonce, ConversationID: "019c5a10-75d8-7eef-8db7-5ee77f70e902"},
+			}}
+			var deltas []JoinDelta
+			calls := 0
+			crash := errors.New("crash after joined window")
+			first, err := backend.Create(CreateRequest{
+				ProjectRoot: project, Session: "collab", Plan: joinPlan, AMQPath: writeTmuxSleepAMQ(t), Root: root,
+				JoinBinding: &created.Binding, JoinProgress: func(delta JoinDelta) error {
+					calls++
+					deltas = append(deltas, delta)
+					if calls == crashAfter {
+						return crash
+					}
+					return nil
+				},
+			})
+			if !errors.Is(err, crash) || first.Outcome != "" || len(deltas) != crashAfter {
+				t.Fatalf("crashed join result=%#v err=%v deltas=%#v", first, err, deltas)
+			}
+			second, err := backend.Create(CreateRequest{
+				ProjectRoot: project, Session: "collab", Plan: joinPlan, AMQPath: writeTmuxSleepAMQ(t), Root: root,
+				JoinBinding: &created.Binding, JoinDeltas: deltas,
+				JoinProgress: func(delta JoinDelta) error { deltas = append(deltas, delta); return nil },
+			})
+			if err != nil || second.Outcome != OutcomeCreated || len(deltas) != 2 {
+				t.Fatalf("recovered join result=%#v err=%v deltas=%#v", second, err, deltas)
+			}
+			if got := countLiveTmuxWindows(t, backend); got != 3 {
+				t.Fatalf("joined windows=%d, want original plus two unique additions", got)
+			}
+			inspection, err := backend.Inspect(InspectRequest{Binding: second.Binding, Root: root})
+			if err != nil || inspection.Status != InspectPresent {
+				t.Fatalf("joined inspection=%#v err=%v", inspection, err)
+			}
+		})
+	}
+}
+
+func TestTmuxJoinReplacementBeforeEachMutationWritesNoForeignWindow(t *testing.T) {
+	for _, phase := range []string{"new-window", "mark-window", "mark-pane"} {
+		t.Run(phase, func(t *testing.T) {
+			backend, project, root, allPlan := newTmuxPlacementFixture(t, "claude", "codex")
+			initialPlan := Plan{Version: PlanVersion, Agents: []AgentPlan{allPlan.Agents[0]}}
+			created, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: initialPlan, AMQPath: writeTmuxSleepAMQ(t), Root: root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			name, err := tmuxSessionName(project, "collab")
+			if err != nil {
+				t.Fatal(err)
+			}
+			realRun := backend.run
+			replaced := false
+			listSessionsCalls := 0
+			backend.run = func(ctx context.Context, args ...string) (string, error) {
+				command := strings.Join(args, " ")
+				if strings.Contains(command, "list-sessions") {
+					listSessionsCalls++
+				}
+				targetCall := map[string]int{"new-window": 1, "mark-window": 2, "mark-pane": 3}[phase]
+				matches := strings.Contains(command, "list-sessions") && listSessionsCalls == targetCall
+				if !replaced && matches {
+					replaced = true
+					if _, killErr := realRun(ctx, backend.args("kill-session", "-t", "="+name)...); killErr != nil {
+						return "", killErr
+					}
+					if _, createErr := realRun(ctx, backend.args("new-session", "-d", "-s", name, "-e", tmuxNonceEnvironment+"=foreign", "-P", "-F", "#{pane_id}", "/bin/sleep", "60")...); createErr != nil {
+						return "", createErr
+					}
+				}
+				return realRun(ctx, args...)
+			}
+			joinPlan := Plan{Version: PlanVersion, Agents: []AgentPlan{{
+				Handle: "codex", Argv: []string{"/bin/sleep", "60"}, Cwd: project, AdapterMode: AdapterModeMint, ResumePolicy: ResumeFresh,
+				LaunchNonce: created.Binding.LaunchNonce, ConversationID: "019c5a10-75d8-7eef-8db7-5ee77f70e911",
+			}}}
+			_, err = backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: joinPlan, AMQPath: writeTmuxSleepAMQ(t), Root: root, JoinBinding: &created.Binding})
+			if !replaced {
+				t.Fatalf("replacement hook did not fire for %s", phase)
+			}
+			if got := countLiveTmuxWindows(t, backend); got != 1 {
+				t.Fatalf("replacement session windows=%d after %s (err=%v), want one foreign window", got, phase, err)
+			}
+		})
+	}
+}
+
 func TestTmuxPlacementCurrentWindowCloseLeavesLauncher(t *testing.T) {
 	backend, project, root, plan := newTmuxPlacementFixture(t, "claude", "codex")
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)

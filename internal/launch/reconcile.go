@@ -120,6 +120,11 @@ type plannedAgent struct {
 	providerVersion string
 }
 
+type joinProgressCrashError struct{ err error }
+
+func (e *joinProgressCrashError) Error() string { return e.err.Error() }
+func (e *joinProgressCrashError) Unwrap() error { return e.err }
+
 func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr error) {
 	result = ReconcileResult{Session: request.Session, Agents: []AgentReconcileResult{}, Commands: []EmittedCommand{}}
 	if request.Context == nil {
@@ -268,34 +273,57 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 			return result, nil
 		}
 		journal = current
-		backendName, backend, detect, create, recoveredCreate, err = recoverJournal(request, journal, binding, hasBinding, &result)
-		if err != nil {
-			return result, err
-		}
-		if result.Outcome == OutcomeActionRequired {
-			markPlannedAgents(&result, planned, 6, result.Reason)
-			result.AggregateCode = 6
-			return result, nil
-		}
-		if hasBinding && journalMatchesBinding(journal, binding) {
-			if journal.Phase != JournalCreated {
-				result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "launch_journal_incomplete"
+		if journal.JoinBinding != nil {
+			if !hasBinding || !reflect.DeepEqual(*journal.JoinBinding, binding) {
+				result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "launch_journal_binding_conflict"
 				return result, nil
 			}
-			if err := commitRecoveredJournal(request, lease, journal); err != nil {
+			copied := *journal.JoinBinding
+			joinBinding = &copied
+			backendName = journal.Backend
+			backend = request.Backends[backendName]
+			if backend == nil {
+				result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "journaled_launcher_not_available"
+				return result, nil
+			}
+			detect = backend.Detect()
+			if err := detect.Validate(); err != nil {
 				return result, err
 			}
-			result.Backend, result.Outcome = journal.Backend, OutcomeCreated
-			result.AggregateCode = aggregateReconcileCode(result.Agents)
-			return result, nil
-		}
-		if !recoveredCreate {
-			// Reclaim proved the old generation absent. Recreate the exact trusted
-			// plan under the existing resume policy and journal generation.
-			if err := ClearJournal(request.Root, lease, journal); err != nil {
+			if !detect.Available || detect.Profile.Identity() != journal.Profile || detect.HostIdentity != journal.HostIdentity || detect.InstanceIdentity != journal.InstanceIdentity {
+				result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "launch_journal_context_mismatch"
+				return result, nil
+			}
+		} else {
+			backendName, backend, detect, create, recoveredCreate, err = recoverJournal(request, journal, binding, hasBinding, &result)
+			if err != nil {
 				return result, err
 			}
-			journalActive = false
+			if result.Outcome == OutcomeActionRequired {
+				markPlannedAgents(&result, planned, 6, result.Reason)
+				result.AggregateCode = 6
+				return result, nil
+			}
+			if hasBinding && journalMatchesBinding(journal, binding) {
+				if journal.Phase != JournalCreated {
+					result.AggregateCode, result.Outcome, result.Reason = 6, OutcomeActionRequired, "launch_journal_incomplete"
+					return result, nil
+				}
+				if err := commitRecoveredJournal(request, lease, journal); err != nil {
+					return result, err
+				}
+				result.Backend, result.Outcome = journal.Backend, OutcomeCreated
+				result.AggregateCode = aggregateReconcileCode(result.Agents)
+				return result, nil
+			}
+			if !recoveredCreate {
+				// Reclaim proved the old generation absent. Recreate the exact trusted
+				// plan under the existing resume policy and journal generation.
+				if err := ClearJournal(request.Root, lease, journal); err != nil {
+					return result, err
+				}
+				journalActive = false
+			}
 		}
 	} else {
 		if hasBinding {
@@ -359,12 +387,20 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 		}
 	}
 	result.Backend = backendName
+	tmuxJoinJournal := joinBinding != nil && backendName == LauncherTMux
+	if _, ok := backend.(*TmuxBackend); !ok {
+		tmuxJoinJournal = false
+	}
 
 	if !recoveredCreate {
-		if detect.Profile.Has(CapCreate) && joinBinding == nil {
+		if !journalActive && detect.Profile.Has(CapCreate) && (joinBinding == nil || tmuxJoinJournal) {
 			journal, err = NewLaunchJournal(request, backendName, detect, plan, planDigest, nonce, plannedAgentResults(result.Agents, planned), plannedConversations(planned), time.Now())
 			if err != nil {
 				return result, err
+			}
+			if tmuxJoinJournal {
+				copied := *joinBinding
+				journal.JoinBinding = &copied
 			}
 			if err := WriteJournal(request.Root, lease, journal); err != nil {
 				return result, err
@@ -374,7 +410,8 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 				return result, err
 			}
 		}
-		if err := writeExecutionTickets(request, lease, ticketAgentsForCreate(planned, joinBinding), amqExecutable, backendName, detect.Profile.Identity()); err != nil {
+		ticketAgents := ticketAgentsForCreate(planned, joinBinding)
+		if err := writeExecutionTickets(request, lease, ticketAgents, amqExecutable, backendName, detect.Profile.Identity()); err != nil {
 			return result, err
 		}
 		createPlan := plan
@@ -386,19 +423,39 @@ func Reconcile(request ReconcileRequest) (result ReconcileResult, returnErr erro
 				}
 			}
 		}
+		var joinProgress func(JoinDelta) error
+		if journalActive && tmuxJoinJournal {
+			joinProgress = func(delta JoinDelta) error {
+				journal.JoinDeltas = append(journal.JoinDeltas, delta)
+				if err := WriteJournal(request.Root, lease, journal); err != nil {
+					return err
+				}
+				if err := callCrashHook(request.CrashHook, "join_delta_written:"+delta.Handle); err != nil {
+					return &joinProgressCrashError{err: err}
+				}
+				return nil
+			}
+		}
 		create, err = backend.Create(CreateRequest{
 			ProjectRoot: request.ProjectRoot, Session: request.Session, Plan: createPlan,
 			AMQPath: amqExecutable, Root: request.Root, Placement: request.Placement,
 			JoinBinding: joinBinding,
+			JoinDeltas:  slices.Clone(journal.JoinDeltas), JoinProgress: joinProgress,
 		})
 		if err != nil {
+			var crashErr *joinProgressCrashError
+			if errors.As(err, &crashErr) {
+				return result, crashErr
+			}
 			var definite *DefinitePreCreateError
-			if journalActive && errors.As(err, &definite) {
-				if clearErr := removeExecutionTickets(request.Root, lease, planned); clearErr != nil {
+			if errors.As(err, &definite) {
+				if clearErr := removeExecutionTickets(request.Root, lease, ticketAgents); clearErr != nil {
 					return result, errors.Join(err, clearErr)
 				}
-				if clearErr := ClearJournal(request.Root, lease, journal); clearErr != nil {
-					return result, errors.Join(err, clearErr)
+				if journalActive {
+					if clearErr := ClearJournal(request.Root, lease, journal); clearErr != nil {
+						return result, errors.Join(err, clearErr)
+					}
 				}
 			}
 			code := reconcileErrorCode(err)
