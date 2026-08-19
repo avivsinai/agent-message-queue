@@ -8,6 +8,42 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.65.3](https://github.com/avivsinai/agent-message-queue/compare/v0.65.2...v0.65.3) (2026-08-19)
+
+
+### Bug Fixes
+
+* **cli:** bootstrap absent coop roots fail-closed with exclusive nofollow creation ([#613](https://github.com/avivsinai/agent-message-queue/issues/613)) ([6b98e87](https://github.com/avivsinai/agent-message-queue/commit/6b98e877fa97c832d95bd2b11de5132262e65138))
+* **fsq:** make windows publication and dlq moves no-replace ([#614](https://github.com/avivsinai/agent-message-queue/issues/614)) ([d0516d6](https://github.com/avivsinai/agent-message-queue/commit/d0516d618385ea2e18225e3335bfd207bde4539c))
+* **fsq:** no-replace publication and claim on unix with unique tmp attempts and DLQ byte-compare recovery ([#604](https://github.com/avivsinai/agent-message-queue/issues/604)) ([872f395](https://github.com/avivsinai/agent-message-queue/commit/872f395dcc2e79fcc8429860cbd6ab8bd189bf0c))
+* **fsq:** validate mailbox entrypoints, keep destinations on rename failure, fail closed on DLQ id RNG error ([#588](https://github.com/avivsinai/agent-message-queue/issues/588)) ([a168ba2](https://github.com/avivsinai/agent-message-queue/commit/a168ba2eb69da20440295854662d698af8db327f))
+* **keepalive:** fail closed on cmux liveness and persist tty ownership across supervisor restarts ([#594](https://github.com/avivsinai/agent-message-queue/issues/594)) ([e228470](https://github.com/avivsinai/agent-message-queue/commit/e2284709ce6237ee18ca49288decb59ad90fe58e))
+* **keepalive:** fail closed on hook config rewrites and launchd plist identity ([#609](https://github.com/avivsinai/agent-message-queue/issues/609)) ([0ba702e](https://github.com/avivsinai/agent-message-queue/commit/0ba702e54f610e0a8052762550821f7c82d3f4fe))
+* **keepalive:** give the gc serialization test fixture a 0700 registry dir ([#615](https://github.com/avivsinai/agent-message-queue/issues/615)) ([f44fef8](https://github.com/avivsinai/agent-message-queue/commit/f44fef8fce1b8ad5a6d5e84fc90af5df800a4d71))
+* **keepalive:** harden registry identity, locks, and canonicalization ([#611](https://github.com/avivsinai/agent-message-queue/issues/611)) ([f275472](https://github.com/avivsinai/agent-message-queue/commit/f2754722bca5dadce47b1b904a39914767a81ee9))
+* **keepalive:** open file adapter targets nofollow/nonblock and refuse non-regular files ([#590](https://github.com/avivsinai/agent-message-queue/issues/590)) ([f464b3a](https://github.com/avivsinai/agent-message-queue/commit/f464b3aa126309239d02a0362e28edf54c291241))
+* **keepalive:** run gc under the registration lock and parse ready markers strictly ([#612](https://github.com/avivsinai/agent-message-queue/issues/612)) ([da3aeee](https://github.com/avivsinai/agent-message-queue/commit/da3aeee311dbec42850321117c55e9ba597d2ef4))
+* **keepalive:** use a private exclusive timeout marker and process-group termination in the session hook ([#589](https://github.com/avivsinai/agent-message-queue/issues/589)) ([715e364](https://github.com/avivsinai/agent-message-queue/commit/715e3640c97683980349df0cdab8f2503fbeaf27))
+* **launchapi:** advertise only platform-callable compatibility features ([#593](https://github.com/avivsinai/agent-message-queue/issues/593)) ([5f29ec3](https://github.com/avivsinai/agent-message-queue/commit/5f29ec3127ddff6a381e904c88a6b7875c94df2b))
+* **launchapi:** reject duplicate JSON keys at every depth with a bounded typed strict decoder ([#595](https://github.com/avivsinai/agent-message-queue/issues/595)) ([da2720d](https://github.com/avivsinai/agent-message-queue/commit/da2720dc98b6dfbac65133f7a820970dcbd5515f))
+* **launch:** bind apply authorization and reconcile to the authorized target and identities ([#596](https://github.com/avivsinai/agent-message-queue/issues/596)) ([94e2112](https://github.com/avivsinai/agent-message-queue/commit/94e2112c43934a790316545d019464f95d058d6a))
+* **launch:** check raw and resolved paths for amq executable containment ([#605](https://github.com/avivsinai/agent-message-queue/issues/605)) ([5363654](https://github.com/avivsinai/agent-message-queue/commit/53636540eb323a24a4b576d07d359ff0567ef414))
+* **launch:** close only exact acknowledged backend resources and reconstruct full reclaim identity ([#606](https://github.com/avivsinai/agent-message-queue/issues/606)) ([8a4b2e1](https://github.com/avivsinai/agent-message-queue/commit/8a4b2e1f4127a7f4b3815e3c2a7b4c9aeb41b017))
+* **launch:** contain wrappers and the amq launcher to non-project paths and validate before capabilities ([#592](https://github.com/avivsinai/agent-message-queue/issues/592)) ([a028344](https://github.com/avivsinai/agent-message-queue/commit/a0283441d1aed3cd6e1c554e046f5e66cb51f54b))
+* **launch:** journal managed tmux joins and always clean tickets on definite pre-create failure ([#600](https://github.com/avivsinai/agent-message-queue/issues/600)) ([3fab628](https://github.com/avivsinai/agent-message-queue/commit/3fab628714cfcb6dbf817fd5b509966ac952fede))
+* **launch:** keep mint conversations pending until provider start is acknowledged ([#602](https://github.com/avivsinai/agent-message-queue/issues/602)) ([2a187c8](https://github.com/avivsinai/agent-message-queue/commit/2a187c848fae5da6dff1e91e3f0c120797508ae9))
+* **launch:** make execution policy trust-bearing and reject unsafe initial input ([#587](https://github.com/avivsinai/agent-message-queue/issues/587)) ([40fa964](https://github.com/avivsinai/agent-message-queue/commit/40fa964abf34fa68af6278bc1abbdcd8474ef64d))
+* **launch:** make lease release retryable and notify/revert lease-bounded ([#585](https://github.com/avivsinai/agent-message-queue/issues/585)) ([71bef84](https://github.com/avivsinai/agent-message-queue/commit/71bef84ac8708a020978d0809847fb7cb02b8bf1))
+* **launch:** persist exact ghostty candidates and refuse changed recovery markers ([#601](https://github.com/avivsinai/agent-message-queue/issues/601)) ([13f91cf](https://github.com/avivsinai/agent-message-queue/commit/13f91cf1de01fca8c94fa7792ee7eb09cd143a46))
+* **launch:** refuse undecided apply, map unsupported create, and require exact journal identities ([#591](https://github.com/avivsinai/agent-message-queue/issues/591)) ([1efb5e8](https://github.com/avivsinai/agent-message-queue/commit/1efb5e8e163c0798229fec2eaacc94ba362fd372))
+* **launch:** report committed/uncertain mutation dispositions for apply and lifecycle ([#598](https://github.com/avivsinai/agent-message-queue/issues/598)) ([d20ac7f](https://github.com/avivsinai/agent-message-queue/commit/d20ac7fe90934681640dcfbf659e18127b7e5430))
+* **launch:** require reprepare for schema-1 apply with runnable participants ([#603](https://github.com/avivsinai/agent-message-queue/issues/603)) ([3a56076](https://github.com/avivsinai/agent-message-queue/commit/3a56076f71c620134b06a20c1418f549eaf153f3))
+* **launch:** return a coherent snapshot when the lifecycle binding changes during inspect ([#597](https://github.com/avivsinai/agent-message-queue/issues/597)) ([5d316aa](https://github.com/avivsinai/agent-message-queue/commit/5d316aaeb34c4cbb0d2867e9ce50e31d8a40a3f6))
+* **setup:** default the Cursor command to agent with cursor-agent as legacy alias ([#599](https://github.com/avivsinai/agent-message-queue/issues/599)) ([8f4144c](https://github.com/avivsinai/agent-message-queue/commit/8f4144ccbb45e50e75db02a21a2f0b18e53ab86d))
+* **wake:** generation CAS for retire and fail-closed darwin signaling ([#616](https://github.com/avivsinai/agent-message-queue/issues/616)) ([10ee1ec](https://github.com/avivsinai/agent-message-queue/commit/10ee1eca7c60761c56c85fb9995645b09b954f5b))
+* **wake:** report uncertain terminal progress after text lands instead of replaying ([#607](https://github.com/avivsinai/agent-message-queue/issues/607)) ([7ae3acf](https://github.com/avivsinai/agent-message-queue/commit/7ae3acf8209c35da770de6daba24a69424e569ac))
+* **wake:** run restart preflight outside the lifecycle guard with CAS republication ([#610](https://github.com/avivsinai/agent-message-queue/issues/610)) ([47ebb27](https://github.com/avivsinai/agent-message-queue/commit/47ebb27781a1b736e48c39e66e54025e4a7acccf))
+
 ## [0.65.2](https://github.com/avivsinai/agent-message-queue/compare/v0.65.1...v0.65.2) (2026-08-18)
 
 
