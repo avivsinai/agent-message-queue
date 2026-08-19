@@ -813,7 +813,7 @@ func RecordCodexNotify(root *fsq.DeliveryRoot, handle, nonce, amqExecutable stri
 }
 
 func recordCodexNotify(root *fsq.DeliveryRoot, handle, nonce, amqExecutable string, raw []byte, hook prepareExecutionHook) (result CodexNotifyResult, returnErr error) {
-	lease, err := AcquireLease(root, nonce)
+	lease, err := acquireExecutionLease(root, nonce)
 	if err != nil {
 		return result, err
 	}
@@ -957,7 +957,7 @@ func acquireExecutionLease(root *fsq.DeliveryRoot, nonce string) (*Lease, error)
 // mint generation created by this exact ticket; an older resumed identity is
 // retained.
 func RevertExecution(root *fsq.DeliveryRoot, handle, nonce string) (returnErr error) {
-	lease, err := AcquireLease(root, nonce)
+	lease, err := acquireExecutionLease(root, nonce)
 	if err != nil {
 		return err
 	}

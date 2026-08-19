@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"os"
@@ -39,6 +40,80 @@ func TestAcquireLeaseExclusiveAndRelease(t *testing.T) {
 	}
 	if err := second.Release(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLeaseReleaseRetriesAfterRemovalFailure(t *testing.T) {
+	dir, root := openTestRoot(t)
+	lease, err := AcquireLease(root, "retry-release")
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected lease removal failure")
+	oldRemove := removeLeaseRecord
+	calls := 0
+	removeLeaseRecord = func(root *fsq.DeliveryRoot) error {
+		calls++
+		if calls == 1 {
+			return injected
+		}
+		return oldRemove(root)
+	}
+	t.Cleanup(func() { removeLeaseRecord = oldRemove })
+
+	if err := lease.Release(); !errors.Is(err, injected) {
+		t.Fatalf("first Release = %v, want injected failure", err)
+	}
+	if lease.released || lease.secret == 0 {
+		t.Fatalf("failed Release discarded capability: released=%v secret=%d", lease.released, lease.secret)
+	}
+	if _, err := os.Stat(LeasePath(dir)); err != nil {
+		t.Fatalf("lease record after failed Release = %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("second Release = %v", err)
+	}
+	if _, err := os.Stat(LeasePath(dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lease record after successful retry = %v, want absent", err)
+	}
+}
+
+func TestAcquireLeaseRNGFailureDoesNotPublishLease(t *testing.T) {
+	dir, root := openTestRoot(t)
+	injected := errors.New("injected RNG failure")
+	oldRandomRead := leaseRandomRead
+	leaseRandomRead = func([]byte) (int, error) { return 0, injected }
+	t.Cleanup(func() { leaseRandomRead = oldRandomRead })
+
+	if _, err := AcquireLease(root, "rng-failure"); !errors.Is(err, injected) {
+		t.Fatalf("AcquireLease = %v, want injected RNG failure", err)
+	}
+	if _, err := os.Stat(LeasePath(dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lease record after RNG failure = %v, want absent", err)
+	}
+}
+
+func TestNewSecretRejectsZeroAndCollision(t *testing.T) {
+	oldRandomRead := leaseRandomRead
+	t.Cleanup(func() { leaseRandomRead = oldRandomRead })
+
+	leaseRandomRead = func(buf []byte) (int, error) {
+		clear(buf)
+		return len(buf), nil
+	}
+	if _, err := newSecret(); err == nil || !strings.Contains(err.Error(), "zero") {
+		t.Fatalf("zero secret = %v, want zero-value error", err)
+	}
+
+	const secret = uint64(0x0102030405060708)
+	liveLeaseSecrets.Store(secret, struct{}{})
+	t.Cleanup(func() { liveLeaseSecrets.Delete(secret) })
+	leaseRandomRead = func(buf []byte) (int, error) {
+		binary.BigEndian.PutUint64(buf, secret)
+		return len(buf), nil
+	}
+	if _, err := newSecret(); err == nil || !strings.Contains(err.Error(), "collision") {
+		t.Fatalf("colliding secret = %v, want collision error", err)
 	}
 }
 
