@@ -77,6 +77,16 @@ malformed owner state is preserved.
 ordered fixed arguments. It stops only an identity-confirmed live inject-via
 wake with an unchanged saved target, using Linux pidfd signaling or the Darwin
 control socket. It can also remove an exactly bound proven-stale lock.
+`--if-generation` is a compare-and-swap against the generation from
+`amq wake check`: schema 1 reports `wake_generation` and `wake_target_digest`
+(omitted when empty); schema 2 reports `wake.generation` and
+`wake.target_digest` (JSON null when absent). A replacement published after
+that check is refused and preserved.
+
+Darwin does not signal by numeric PID. A process that appears between the last
+identity recheck and TERM/KILL is never signaled; raw numeric signaling is
+`operator_only`. Live inject-via retirement uses the cooperative control
+socket. Raw wakes are stopped from the owning terminal or supervisor.
 
 Retirement preserves mailbox contents. Exact lock removal is its commit point:
 a failure before that point is `refused`; a later target or state cleanup

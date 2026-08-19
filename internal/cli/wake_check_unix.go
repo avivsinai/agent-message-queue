@@ -26,6 +26,8 @@ type wakeCheckResult struct {
 	WakePID                  int    `json:"wake_pid,omitempty"`
 	WakeMode                 string `json:"wake_mode,omitempty"`
 	OwnerBound               bool   `json:"owner_bound"`
+	WakeGeneration           string `json:"wake_generation,omitempty"`
+	WakeTargetDigest         string `json:"wake_target_digest,omitempty"`
 	RunningImagePath         string `json:"running_image_path"`
 	RunningVersion           string `json:"running_version"`
 	CurrentImagePath         string `json:"current_image_path"`
@@ -436,10 +438,12 @@ func buildWakeCheckDecision(
 			Detail:     startDetail,
 		},
 		Wake: wakeCheckWakeDecision{
-			Status:     wakeStatus,
-			PID:        wakeCheckOptionalInt(inspection.PID),
-			Mode:       wakeCheckOptionalString(inspection.Lock.WakeMode),
-			OwnerBound: ownerBound,
+			Status:       wakeStatus,
+			PID:          wakeCheckOptionalInt(inspection.PID),
+			Mode:         wakeCheckOptionalString(inspection.Lock.WakeMode),
+			OwnerBound:   ownerBound,
+			Generation:   wakeCheckOptionalString(inspection.Lock.Generation),
+			TargetDigest: wakeCheckOptionalString(inspection.Lock.TargetDigest),
 		},
 		Image: wakeCheckImageDecision{
 			Current: wakeCheckImageEvidenceDecision{
@@ -547,6 +551,8 @@ func renderWakeCheckV1(decision wakeCheckDecision) wakeCheckResult {
 		WakePID:                  wakeCheckIntValue(decision.Wake.PID),
 		WakeMode:                 wakeCheckStringValue(decision.Wake.Mode, ""),
 		OwnerBound:               decision.Wake.OwnerBound,
+		WakeGeneration:           wakeCheckStringValue(decision.Wake.Generation, ""),
+		WakeTargetDigest:         wakeCheckStringValue(decision.Wake.TargetDigest, ""),
 		RunningImagePath:         wakeCheckStringValue(decision.Image.Running.Path, wakeCheckUnknown),
 		RunningVersion:           wakeCheckStringValue(decision.Image.Running.Version, wakeCheckUnknown),
 		CurrentImagePath:         wakeCheckStringValue(decision.Image.Current.Path, wakeCheckUnknown),

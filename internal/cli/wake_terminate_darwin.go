@@ -5,19 +5,20 @@ package cli
 import (
 	"fmt"
 	"os"
-	"syscall"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-var signalWakeProcess = func(pid int, sig os.Signal) error {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return err
+var (
+	signalWakeProcess = func(pid int, sig os.Signal) error {
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			return err
+		}
+		return proc.Signal(sig)
 	}
-	return proc.Signal(sig)
-}
+	afterDarwinWakeSignalValidation = func() {}
+)
 
 func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
 	return terminateAndRemoveOrphanedWakeLockWithRawConsent(inspection, false)
@@ -165,35 +166,13 @@ func terminateWakeProcess(inspection wakeLockInspection) error {
 	if !sameConfirmedWakeLock(inspection) {
 		return fmt.Errorf("wake process identity changed before SIGTERM")
 	}
-	if err := signalWakeProcess(inspection.PID, syscall.SIGTERM); err != nil {
-		return fmt.Errorf("signal wake process SIGTERM: %w", err)
-	}
-	time.Sleep(wakeTerminateGrace)
-	switch state := inspectWakeIdentity(inspection); state {
-	case wakeIdentityGoneOrDifferent:
-		return nil
-	case wakeIdentityUnknown:
-		return fmt.Errorf("wake process identity is unknown after SIGTERM; preserving wake lock")
-	}
-	if !sameConfirmedWakeLock(inspection) {
-		return fmt.Errorf("wake process identity changed before SIGKILL")
-	}
-	if err := signalWakeProcess(inspection.PID, syscall.SIGKILL); err != nil {
-		return fmt.Errorf("signal wake process SIGKILL: %w", err)
-	}
-	deadline := time.Now().Add(wakeTerminateKillConfirm)
-	for {
-		switch state := inspectWakeIdentity(inspection); state {
-		case wakeIdentityGoneOrDifferent:
-			return nil
-		case wakeIdentityUnknown:
-			return fmt.Errorf("wake process identity is unknown after SIGKILL; preserving wake lock")
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("wake process still alive after SIGKILL")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	afterDarwinWakeSignalValidation()
+	// Darwin has no pidfd. kill(pid) after the last identity recheck can hit a
+	// recycled PID. Cooperative control is the only agent-safe stop; raw numeric
+	// signaling is operator_only.
+	return newWakeOperatorOnlyError(
+		"darwin raw numeric signaling is operator_only; stop the wake from its owning terminal or supervisor",
+	)
 }
 
 func terminateWakeProcessInDir(
@@ -203,35 +182,10 @@ func terminateWakeProcessInDir(
 	if !sameConfirmedWakeLockInDir(agentDir, inspection) {
 		return fmt.Errorf("wake process identity changed before SIGTERM")
 	}
-	if err := signalWakeProcess(inspection.PID, syscall.SIGTERM); err != nil {
-		return fmt.Errorf("signal wake process SIGTERM: %w", err)
-	}
-	time.Sleep(wakeTerminateGrace)
-	switch state := inspectWakeIdentity(inspection); state {
-	case wakeIdentityGoneOrDifferent:
-		return nil
-	case wakeIdentityUnknown:
-		return fmt.Errorf("wake process identity is unknown after SIGTERM; preserving wake lock")
-	}
-	if !sameConfirmedWakeLockInDir(agentDir, inspection) {
-		return fmt.Errorf("wake process identity changed before SIGKILL")
-	}
-	if err := signalWakeProcess(inspection.PID, syscall.SIGKILL); err != nil {
-		return fmt.Errorf("signal wake process SIGKILL: %w", err)
-	}
-	deadline := time.Now().Add(wakeTerminateKillConfirm)
-	for {
-		switch state := inspectWakeIdentity(inspection); state {
-		case wakeIdentityGoneOrDifferent:
-			return nil
-		case wakeIdentityUnknown:
-			return fmt.Errorf("wake process identity is unknown after SIGKILL; preserving wake lock")
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("wake process still alive after SIGKILL")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	afterDarwinWakeSignalValidation()
+	return newWakeOperatorOnlyError(
+		"darwin raw numeric signaling is operator_only; stop the wake from its owning terminal or supervisor",
+	)
 }
 
 func sameConfirmedWakeLockInDir(

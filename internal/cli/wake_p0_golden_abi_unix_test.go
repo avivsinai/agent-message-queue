@@ -563,7 +563,7 @@ func TestWakeP0BinaryJSONFieldsAndEnums(t *testing.T) {
 	if start["mode"] != startMode || start["reason_code"] != startReason || start["detail"] != startDetail {
 		t.Fatalf("start missing-lock decision = %#v, want mode=%q reason=%q detail=%q", start, startMode, startReason, startDetail)
 	}
-	if wake["status"] != "missing" || wake["live"] != false || wake["owner_bound"] != false || wake["pid"] != nil || wake["mode"] != nil {
+	if wake["status"] != "missing" || wake["live"] != false || wake["owner_bound"] != false || wake["pid"] != nil || wake["mode"] != nil || wake["generation"] != nil || wake["target_digest"] != nil {
 		t.Fatalf("wake missing-lock decision = %#v", wake)
 	}
 	if image["status"] != "unknown" {

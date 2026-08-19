@@ -1351,7 +1351,7 @@ func TestRetireSessionRetiresConfirmedWakesAndRemovesRows(t *testing.T) {
 	argsLog := filepath.Join(dir, "amq-args.log")
 	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
+	if err := os.WriteFile(fakeAMQ, fakeAMQWakeCheckThen(`
 printf 'RETIRE %s\n' "$*" >> "$AMQ_KEEPALIVE_ARGS_LOG"
 printf '{"status":"retired","pid":4242}\n'
 `), 0o700); err != nil {
@@ -1422,7 +1422,7 @@ func TestRetireSessionRefusesWhenTargetStillExists(t *testing.T) {
 	}
 	t.Setenv("CMUX_BUNDLED_CLI_PATH", fakeCmux)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte("#!/bin/sh\nexit 99\n"), 0o700); err != nil {
+	if err := os.WriteFile(fakeAMQ, fakeAMQWakeCheckThen("exit 99\n"), 0o700); err != nil {
 		t.Fatalf("write fake AMQ: %v", err)
 	}
 	adapters := hermeticCmuxRegistry(fakeCmux)
@@ -1466,7 +1466,7 @@ func TestRetireSessionRemovesRetiredAndLeavesRefused(t *testing.T) {
 	argsLog := filepath.Join(dir, "amq-args.log")
 	t.Setenv("AMQ_KEEPALIVE_ARGS_LOG", argsLog)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
+	if err := os.WriteFile(fakeAMQ, fakeAMQWakeCheckThen(`
 printf 'RETIRE %s\n' "$*" >> "$AMQ_KEEPALIVE_ARGS_LOG"
 agent=""
 previous=""
@@ -1963,7 +1963,7 @@ func TestGCDryRunIsNonMutatingAndApplyRetiresCandidates(t *testing.T) {
 	amqCalls := filepath.Join(dir, "amq-calls.log")
 	t.Setenv("AMQ_KEEPALIVE_AMQ_CALLS", amqCalls)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
+	if err := os.WriteFile(fakeAMQ, fakeAMQWakeCheckThen(`
 printf '%s\n' "$*" >> "$AMQ_KEEPALIVE_AMQ_CALLS"
 printf '%s\n' '{"status":"retired","agent":"codex","pid":4242}'
 `), 0o700); err != nil {
@@ -2053,7 +2053,7 @@ func TestGCApplyLeavesCandidateWhenRetireRefused(t *testing.T) {
 	amqCalls := filepath.Join(dir, "amq-calls.log")
 	t.Setenv("AMQ_KEEPALIVE_AMQ_CALLS", amqCalls)
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
+	if err := os.WriteFile(fakeAMQ, fakeAMQWakeCheckThen(`
 printf '%s\n' "$*" >> "$AMQ_KEEPALIVE_AMQ_CALLS"
 printf '%s\n' '{"status":"refused","reason":"owner-bound wake claims require recover-owner"}'
 exit 1
@@ -2121,6 +2121,10 @@ for arg in "$@"; do
   if [ "$previous" = "-ready-file" ]; then ready="$arg"; fi
   previous="$arg"
 done
+if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
+  printf '%s\n' '{"schema":1,"live_wake":true,"image_status":"current","wake_generation":"0123456789abcdef0123456789abcdef"}'
+  exit 0
+fi
 if [ "$1" = "wake" ] && [ "$2" = "retire" ]; then
   printf 'RETIRE %s\n' "$me" >> "$AMQ_KEEPALIVE_AMQ_CALLS"
   sleep 0.05
@@ -2265,6 +2269,78 @@ printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-
 	}
 }
 
+func TestGCApplyPassesObservedGenerationWhenLaterCheckWouldSeeReplacement(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("cmux adapter requires macOS")
+	}
+	const (
+		observed    = "0123456789abcdef0123456789abcdef"
+		replacement = "fedcba9876543210fedcba9876543210"
+	)
+	dir := t.TempDir()
+	registryPath := filepath.Join(dir, "registry.json")
+	target := "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3"
+	store := registry.New(registryPath)
+	if _, err := store.Upsert(registry.Entry{
+		Root: "/tmp/old-session", Agent: "codex", Adapter: "cmux", Target: target,
+		State: registry.StateDetached, DetachedSince: time.Now().Add(-48 * time.Hour),
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	fakeCmux := filepath.Join(dir, "cmux")
+	if err := os.WriteFile(fakeCmux, []byte("#!/bin/sh\nprintf '%s\\n' '{\"windows\":[]}'\n"), 0o700); err != nil {
+		t.Fatalf("write fake cmux: %v", err)
+	}
+	t.Setenv("CMUX_BUNDLED_CLI_PATH", fakeCmux)
+	amqCalls := filepath.Join(dir, "amq-calls.log")
+	checkCount := filepath.Join(dir, "check-count")
+	t.Setenv("AMQ_KEEPALIVE_AMQ_CALLS", amqCalls)
+	t.Setenv("AMQ_KEEPALIVE_CHECK_COUNT", checkCount)
+	fakeAMQ := filepath.Join(dir, "amq")
+	if err := os.WriteFile(fakeAMQ, []byte(`#!/bin/sh
+printf '%s\n' "$*" >> "$AMQ_KEEPALIVE_AMQ_CALLS"
+if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
+  n=0
+  if [ -f "$AMQ_KEEPALIVE_CHECK_COUNT" ]; then
+    n=$(cat "$AMQ_KEEPALIVE_CHECK_COUNT")
+  fi
+  printf '%s\n' "$((n + 1))" > "$AMQ_KEEPALIVE_CHECK_COUNT"
+  if [ "$n" = "0" ]; then
+    printf '%s\n' '{"schema":1,"live_wake":true,"image_status":"current","wake_generation":"0123456789abcdef0123456789abcdef"}'
+  else
+    printf '%s\n' '{"schema":1,"live_wake":true,"image_status":"current","wake_generation":"fedcba9876543210fedcba9876543210"}'
+  fi
+  exit 0
+fi
+printf '%s\n' '{"status":"retired","agent":"codex","pid":4242}'
+`), 0o700); err != nil {
+		t.Fatalf("write fake amq: %v", err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{
+		"gc", "--registry", registryPath, "--min-detached-age", "0", "--apply",
+		"--amq", fakeAMQ, "--self", "/bin/amq-keepalive",
+	})
+	if code != 0 {
+		t.Fatalf("gc apply code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	data, err := os.ReadFile(amqCalls)
+	if err != nil {
+		t.Fatalf("read amq calls: %v", err)
+	}
+	log := string(data)
+	if !strings.Contains(log, "wake check") || !strings.Contains(log, "wake retire") {
+		t.Fatalf("gc apply calls = %q, want check then retire", log)
+	}
+	if !strings.Contains(log, "--if-generation "+observed) {
+		t.Fatalf("retire used a later check: %q, want observed %s", log, observed)
+	}
+	if strings.Contains(log, "--if-generation "+replacement) {
+		t.Fatalf("retire used replacement generation: %q", log)
+	}
+}
+
 type boundaryAdapter struct {
 	name     string
 	probeErr error
@@ -2345,6 +2421,10 @@ func (a nilInventoryBoundaryAdapter) Inventory(context.Context, adapter.Ownershi
 }
 
 type countingRetirer struct{ calls int }
+
+func (r *countingRetirer) CheckWake(context.Context, amq.StartWakeRequest) (amq.WakeCheckResult, error) {
+	return amq.WakeCheckResult{Generation: "0123456789abcdef0123456789abcdef"}, nil
+}
 
 func (r *countingRetirer) RetireWake(context.Context, amq.RetireWakeRequest) (amq.RetireWakeResult, error) {
 	r.calls++
@@ -2627,7 +2707,7 @@ func TestRetireSessionMatchesRootAdapterAndAgentTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakeAMQ := filepath.Join(dir, "amq")
-	if err := os.WriteFile(fakeAMQ, []byte("#!/bin/sh\nprintf '%s\\n' '{\"status\":\"retired\",\"pid\":42}'\n"), 0o700); err != nil {
+	if err := os.WriteFile(fakeAMQ, fakeAMQWakeCheckThen("printf '%s\\n' '{\"status\":\"retired\",\"pid\":42}'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	adapters := adapter.NewRegistry(
@@ -2729,10 +2809,14 @@ func hermeticCmuxRegistry(fakeCmuxPath string) adapter.Registry {
 }
 
 func fakeStartWakeScript(body string) []byte {
+	return fakeAMQWakeCheckThen(body)
+}
+
+func fakeAMQWakeCheckThen(body string) []byte {
 	body = strings.TrimPrefix(body, "#!/bin/sh\n")
 	return []byte(`#!/bin/sh
 if [ "$1" = "wake" ] && [ "$2" = "check" ]; then
-  printf '%s\n' '{"schema":1,"live_wake":false,"image_status":"unknown"}'
+  printf '%s\n' '{"schema":1,"live_wake":true,"image_status":"current","wake_generation":"0123456789abcdef0123456789abcdef"}'
   exit 0
 fi
 ` + body)

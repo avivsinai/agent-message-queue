@@ -47,6 +47,7 @@ func runWakeRetire(args []string) error {
 	fs := flag.NewFlagSet("wake retire", flag.ContinueOnError)
 	common := addCommonFlags(fs)
 	injectViaFlag := fs.String("inject-via", "", "Expected external injection executable")
+	ifGenerationFlag := fs.String("if-generation", "", "Retire only if the current lock generation still matches this exact value")
 	retryUntilFlag := fs.String("retry-until", wakeRetryUntilDrained, "Expected doorbell acknowledgement: drained or injected")
 	var injectArgFlags multiStringFlag
 	fs.Var(&injectArgFlags, "inject-arg", "Expected fixed injection argument (repeatable)")
@@ -54,6 +55,7 @@ func runWakeRetire(args []string) error {
 		"Stop an identity-confirmed live inject-via wake or remove its exactly-bound proven-stale lock.",
 		"",
 		"The expected executable and ordered arguments must exactly match the saved target.",
+		"Pass --if-generation with the generation from amq wake check so a replacement published after that check is refused.",
 		"Retirement preserves the mailbox, removes the exact saved target and coupled state projection, and never stops raw wakes.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
@@ -85,7 +87,7 @@ func runWakeRetire(args []string) error {
 	if retryUntil == wakeRetryUntilInjected {
 		requested.RetryUntil = retryUntil
 	}
-	result, retireErr := retireWake(root, me, requested)
+	result, retireErr := retireWakeIfGeneration(root, me, requested, strings.TrimSpace(*ifGenerationFlag))
 	if common.JSON {
 		if err := writeJSON(os.Stdout, result); err != nil {
 			return err
@@ -106,6 +108,10 @@ func runWakeRetire(args []string) error {
 }
 
 func retireWake(root, me string, requested wakeTarget) (wakeRetireResult, error) {
+	return retireWakeIfGeneration(root, me, requested, "")
+}
+
+func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration string) (wakeRetireResult, error) {
 	result := wakeRetireResult{
 		Status: "refused",
 		Agent:  me,
@@ -123,6 +129,9 @@ func retireWake(root, me string, requested wakeTarget) (wakeRetireResult, error)
 		return refuse("no wake lock present; wake process absence cannot be proven")
 	}
 	result.PID = inspection.PID
+	if ifGeneration != "" && inspection.Lock.Generation != ifGeneration {
+		return refuse("wake generation changed before retirement")
+	}
 	if wakeLockHasOwnerMarkers(inspection) {
 		return refuse(fmt.Sprintf("owner-bound wake claims require 'amq wake recover-owner --me %s'", me))
 	}
@@ -147,6 +156,9 @@ func retireWake(root, me string, requested wakeTarget) (wakeRetireResult, error)
 			confirmed = inspectWakeLockAt(dirfd, agentDir, root, me)
 			if !sameWakeLockInspection(inspection, confirmed) || !confirmed.IdentityConfirmed {
 				return errors.New("wake lock changed before retirement")
+			}
+			if ifGeneration != "" && confirmed.Lock.Generation != ifGeneration {
+				return errors.New("wake generation changed before retirement")
 			}
 			var snapshotErr error
 			artifacts, snapshotErr = snapshotWakeRetireArtifactsAt(
@@ -192,6 +204,9 @@ func retireWake(root, me string, requested wakeTarget) (wakeRetireResult, error)
 			current := inspectWakeLockAt(dirfd, agentDir, root, me)
 			if !sameWakeLockGeneration(inspection, current) || current.Status != wakeLockStale {
 				return errors.New("wake lock changed before retirement")
+			}
+			if ifGeneration != "" && current.Lock.Generation != ifGeneration {
+				return errors.New("wake generation changed before retirement")
 			}
 			if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, current); err != nil {
 				return err

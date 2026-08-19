@@ -205,7 +205,7 @@ func TestStartWakeRefreshesOnlyConclusivelyDifferentLiveImages(t *testing.T) {
 	}{
 		{
 			name:         "different image retires then starts",
-			checkOutput:  `{"schema":1,"live_wake":true,"image_status":"different"}`,
+			checkOutput:  `{"schema":1,"live_wake":true,"image_status":"different","wake_generation":"0123456789abcdef0123456789abcdef"}`,
 			retireOutput: `{"status":"retired","agent":"codex","pid":4242}`,
 			wantCalls:    []string{"check", "retire", "start"},
 		},
@@ -274,7 +274,7 @@ func TestStartWakeRefreshesOnlyConclusivelyDifferentLiveImages(t *testing.T) {
 		},
 		{
 			name:          "retirement refusal does not start",
-			checkOutput:   `{"schema":1,"live_wake":true,"image_status":"different"}`,
+			checkOutput:   `{"schema":1,"live_wake":true,"image_status":"different","wake_generation":"0123456789abcdef0123456789abcdef"}`,
 			retireOutput:  `{"status":"refused","reason":"target identity changed"}`,
 			retireExit:    "1",
 			wantCalls:     []string{"check", "retire"},
@@ -283,7 +283,7 @@ func TestStartWakeRefreshesOnlyConclusivelyDifferentLiveImages(t *testing.T) {
 		},
 		{
 			name:          "retired output with failed exit does not start",
-			checkOutput:   `{"schema":1,"live_wake":true,"image_status":"different"}`,
+			checkOutput:   `{"schema":1,"live_wake":true,"image_status":"different","wake_generation":"0123456789abcdef0123456789abcdef"}`,
 			retireOutput:  `{"status":"retired","agent":"codex","pid":4242}`,
 			retireExit:    "1",
 			wantCalls:     []string{"check", "retire"},
@@ -1278,11 +1278,12 @@ printf '%s\n' '{"status":"retired","agent":"codex","pid":4242}'
 `)
 
 	result, err := NewCLI(fakeAMQ).RetireWake(context.Background(), RetireWakeRequest{
-		Root:      "/tmp/amq-root",
-		Me:        "codex",
-		InjectVia: "/tmp/amq-keepalive",
-		Adapter:   "cmux",
-		Target:    "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3",
+		Root:       "/tmp/amq-root",
+		Me:         "codex",
+		InjectVia:  "/tmp/amq-keepalive",
+		Adapter:    "cmux",
+		Target:     "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3",
+		Generation: "0123456789abcdef0123456789abcdef",
 	})
 	if err != nil {
 		t.Fatalf("RetireWake() error = %v", err)
@@ -1304,6 +1305,7 @@ printf '%s\n' '{"status":"retired","agent":"codex","pid":4242}'
 		"--inject-arg", "inject",
 		"--inject-arg", "cmux",
 		"--inject-arg", "cmux:surface:F901D722-6789-4BBB-9818-C4E97F20BEB3",
+		"--if-generation", "0123456789abcdef0123456789abcdef",
 		"--retry-until", "injected",
 		"-json",
 	}

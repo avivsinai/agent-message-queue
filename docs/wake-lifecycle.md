@@ -602,10 +602,13 @@ their own log growth.
 
 ### 9.3 JSON schema 1 vs. schema 2
 
-Schema 1 is the byte-compatible default. Schema 2 is explicit with
+Schema 1 is the byte-compatible default for a missing lock. Live or stale
+locks additionally report `wake_generation` and `wake_target_digest` when
+those values exist (omitted when empty). Schema 2 is explicit with
 `--json-schema=2` and requires `--json`. It replaces prose parsing with a
 closed action kind, actor, reason code, and an argv command object when one
-action is directly executable. Missing evidence is an explicit JSON `null`;
+action is directly executable. Missing evidence is an explicit JSON `null`,
+including `wake.generation` and `wake.target_digest`;
 `image.status="unknown"` remains a real classification, not an error. In
 doctor schema 2, each wake-lock entry carries the same decision under
 `wake_check` rather than duplicating the wake advice as flat fields. Check

@@ -214,7 +214,8 @@ func TestWakeCheckJSONSchemaV2DirectStartUsesExplicitNullsAndArgv(t *testing.T) 
 	}
 	wake := requireJSONObject(t, got, "wake")
 	if wake["status"] != string(wakeLockMissing) || wake["live"] != false ||
-		wake["pid"] != nil || wake["mode"] != nil || wake["owner_bound"] != false {
+		wake["pid"] != nil || wake["mode"] != nil || wake["owner_bound"] != false ||
+		wake["generation"] != nil || wake["target_digest"] != nil {
 		t.Fatalf("wake = %#v", wake)
 	}
 	image := requireJSONObject(t, got, "image")

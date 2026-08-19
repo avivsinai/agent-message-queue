@@ -52,7 +52,20 @@ type adapterLogState struct {
 // concrete implementation is amq.CLI; the interface keeps the app callers
 // testable with the same fake amq executables used across this package.
 type wakeRetirer interface {
+	CheckWake(ctx context.Context, req amq.StartWakeRequest) (amq.WakeCheckResult, error)
 	RetireWake(ctx context.Context, req amq.RetireWakeRequest) (amq.RetireWakeResult, error)
+}
+
+func observeWakeGeneration(ctx context.Context, retirer wakeRetirer, root, me string) (string, error) {
+	check, err := retirer.CheckWake(ctx, amq.StartWakeRequest{Root: root, Me: me})
+	if err != nil {
+		return "", fmt.Errorf("observe wake generation: %w", err)
+	}
+	generation := strings.TrimSpace(check.Generation)
+	if check.LiveWake && generation == "" {
+		return "", errors.New("live wake omitted generation")
+	}
+	return generation, nil
 }
 
 func (a App) Run(ctx context.Context, args []string) int {
@@ -551,6 +564,11 @@ func recoverDetachedRegistration(
 		return next, false, fmt.Errorf("refusing detached wake recovery for %s because target absence is not proven: %w", previous.Agent, probeErr)
 	}
 
+	generation, err := observeWakeGeneration(ctx, retirer, next.Root, next.Agent)
+	if err != nil {
+		return next, false, fmt.Errorf("recover detached %s wake: %w", previous.Agent, err)
+	}
+
 	updated, initialStart := reconciler.StartFresh(ctx, next)
 	if initialStart.Error == nil {
 		return updated, true, nil
@@ -565,11 +583,12 @@ func recoverDetachedRegistration(
 	// live wake with an unchanged matching saved target, or removes its
 	// exactly-bound proven-stale lock; it refuses anything else.
 	if _, retireErr := retirer.RetireWake(ctx, amq.RetireWakeRequest{
-		Root:      next.Root,
-		Me:        next.Agent,
-		InjectVia: reconciler.InjectVia,
-		Adapter:   previous.Adapter,
-		Target:    previous.Target,
+		Root:       next.Root,
+		Me:         next.Agent,
+		InjectVia:  reconciler.InjectVia,
+		Adapter:    previous.Adapter,
+		Target:     previous.Target,
+		Generation: generation,
 	}); retireErr != nil {
 		return next, false, fmt.Errorf(
 			"recover detached %s wake: exact-target start failed (%v) and retiring the previous wake was not confirmed: %w",
@@ -1104,6 +1123,16 @@ func (a App) gc(ctx context.Context, args []string) error {
 				result.Entries[index].Reason = normalizeErr.Error()
 				continue
 			}
+			var generation string
+			if *apply {
+				observed, observeErr := observeWakeGeneration(ctx, retirer, entry.Root, entry.Agent)
+				if observeErr != nil {
+					result.Entries[index].Status = "skipped"
+					result.Entries[index].Reason = observeErr.Error()
+					continue
+				}
+				generation = observed
+			}
 			probeErr := probes[entry.Adapter].Probe(ctx, target)
 			if probeErr == nil {
 				result.Entries[index].Status = "skipped"
@@ -1123,11 +1152,12 @@ func (a App) gc(ctx context.Context, args []string) error {
 			// identity-confirmed live wake with this saved target (or its
 			// exactly-bound proven-stale lock); any refusal leaves the entry.
 			if _, retireErr := retirer.RetireWake(ctx, amq.RetireWakeRequest{
-				Root:      entry.Root,
-				Me:        entry.Agent,
-				InjectVia: *self,
-				Adapter:   entry.Adapter,
-				Target:    target,
+				Root:       entry.Root,
+				Me:         entry.Agent,
+				InjectVia:  *self,
+				Adapter:    entry.Adapter,
+				Target:     target,
+				Generation: generation,
 			}); retireErr != nil {
 				result.Entries[index].Status = "error"
 				result.Entries[index].Reason = retireErr.Error()
@@ -1254,7 +1284,14 @@ func (a App) retireSession(ctx context.Context, args []string) error {
 		// post-retire forget matches exactly; normalized targets feed the probe
 		// and the retire identity.
 		targets := make([]string, len(entries))
+		generations := make([]string, len(entries))
+		var retirer wakeRetirer = amq.NewCLI(*amqPath)
 		for i := range entries {
+			generation, observeErr := observeWakeGeneration(ctx, retirer, entries[i].Root, entries[i].Agent)
+			if observeErr != nil {
+				return fmt.Errorf("observe %s wake generation: %w", entries[i].Agent, observeErr)
+			}
+			generations[i] = generation
 			target := entries[i].Target
 			if normalizer, ok := selected.(adapter.TargetNormalizer); ok {
 				normalized, normalizeErr := normalizer.NormalizeTarget(target)
@@ -1275,15 +1312,15 @@ func (a App) retireSession(ctx context.Context, args []string) error {
 
 		// Retire each identity-confirmed wake and forget only the rows AMQ
 		// confirmed retired. A refusal leaves that row for the next pass.
-		var retirer wakeRetirer = amq.NewCLI(*amqPath)
 		var retireErrs []error
 		for i := range entries {
 			if _, retireErr := retirer.RetireWake(ctx, amq.RetireWakeRequest{
-				Root:      entries[i].Root,
-				Me:        entries[i].Agent,
-				InjectVia: *self,
-				Adapter:   entries[i].Adapter,
-				Target:    targets[i],
+				Root:       entries[i].Root,
+				Me:         entries[i].Agent,
+				InjectVia:  *self,
+				Adapter:    entries[i].Adapter,
+				Target:     targets[i],
+				Generation: generations[i],
 			}); retireErr != nil {
 				retireErrs = append(retireErrs, fmt.Errorf("retire %s wake: %w", entries[i].Agent, retireErr))
 				continue

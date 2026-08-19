@@ -409,6 +409,7 @@ func TestStartWakeRealAMQBinaryBecomesReadyAndMatchesTarget(t *testing.T) {
 	const wantMismatchReason = "saved wake target uses a different injector identity or retry acknowledgement policy"
 	mismatched, mismatchErr := NewCLI(binary).RetireWake(context.Background(), RetireWakeRequest{
 		Root: root, Me: handle, InjectVia: injector, Adapter: adapter, Target: target + "-wrong",
+		Generation: check.Generation,
 	})
 	if mismatched.Retired() {
 		t.Fatalf("RetireWake() with a mismatched target retired the real wake: %+v", mismatched)
@@ -430,6 +431,7 @@ func TestStartWakeRealAMQBinaryBecomesReadyAndMatchesTarget(t *testing.T) {
 	// returned JSON claiming "retired" is not sufficient proof on its own.
 	result, retireErr := NewCLI(binary).RetireWake(context.Background(), RetireWakeRequest{
 		Root: root, Me: handle, InjectVia: injector, Adapter: adapter, Target: target,
+		Generation: check.Generation,
 	})
 	if retireErr != nil || !result.Retired() {
 		t.Fatalf("RetireWake() with the exact StartWake identity = %+v, err = %v, want retired", result, retireErr)
