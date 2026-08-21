@@ -60,9 +60,11 @@ The command reads only that regular, non-symlink file. It loads the local
 `destination_maildir_committed` receipt under `<AMQ root>/bridge/receipts/`.
 Repeating the same file is an idempotent replay; the same transfer key with a
 different payload is a conflict. Unsigned or forged envelopes, foreign
-destinations, symlinks, and files outside `bridge/drop` are rejected. This
-path does not provide reverse Mac-to-G communication and does not create a
-public locker.
+destinations, symlinks, and files outside `bridge/drop` are rejected. The
+same command on the peer host applies the reverse hop. It does not create a
+public locker. Run `scripts/amq-bot-envelope-hop-probe.sh` to sign a drop
+file; set `AMQ_BOT_ENVELOPE_HOP_THREAD` when the payload must keep an
+existing opaque thread id.
 
 One bounded bidirectional cycle on the Mac uses a **local** receive alias and
 a **remote** send alias. Do not poll a foreign dest alias into this root:

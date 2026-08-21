@@ -13,6 +13,7 @@ mac_root=${AMQ_BOT_ENVELOPE_HOP_MAC_ROOT:-}
 source_host=${AMQ_BOT_ENVELOPE_HOP_SOURCE_HOST:-grok}
 source_handle=${AMQ_BOT_ENVELOPE_HOP_SOURCE_HANDLE:-codex}
 dest_alias=${AMQ_BOT_ENVELOPE_HOP_DEST_ALIAS:-mac/claude}
+thread_id=${AMQ_BOT_ENVELOPE_HOP_THREAD:-}
 
 usage() {
 	cat >&2 <<'EOF'
@@ -111,14 +112,26 @@ write_probe() {
 	transfer_id=xfer-probe-$nonce
 	valid_transfer_id "$transfer_id" || unproven 'generated invalid transfer id'
 	target=$g_dir/envelope-$transfer_id.json
-	output=$(run_writer \
-		--root "$g_root" \
-		--output "$target" \
-		--transfer-id "$transfer_id" \
-		--source-host "$source_host" \
-		--source-handle "$source_handle" \
-		--dest-alias "$dest_alias") ||
-		unproven "cannot create signed envelope $target"
+	if [ -n "$thread_id" ]; then
+		output=$(run_writer \
+			--root "$g_root" \
+			--output "$target" \
+			--transfer-id "$transfer_id" \
+			--source-host "$source_host" \
+			--source-handle "$source_handle" \
+			--dest-alias "$dest_alias" \
+			--thread "$thread_id") ||
+			unproven "cannot create signed envelope $target"
+	else
+		output=$(run_writer \
+			--root "$g_root" \
+			--output "$target" \
+			--transfer-id "$transfer_id" \
+			--source-host "$source_host" \
+			--source-handle "$source_handle" \
+			--dest-alias "$dest_alias") ||
+			unproven "cannot create signed envelope $target"
+	fi
 	mode=$(file_mode "$target") || unproven "cannot inspect mode on $target"
 	case "$mode" in
 		600|0600) ;;

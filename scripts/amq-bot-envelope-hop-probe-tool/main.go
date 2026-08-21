@@ -43,6 +43,7 @@ func runWrite(args []string) error {
 	sourceHostFlag := fs.String("source-host", defaultSourceHost, "source host alias")
 	sourceHandleFlag := fs.String("source-handle", defaultSourceHandle, "source AMQ handle")
 	destAliasFlag := fs.String("dest-alias", defaultDestAlias, "receiver-owned destination alias")
+	threadFlag := fs.String("thread", "", "opaque AMQ thread id; default probe/<transfer-id>")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -96,7 +97,10 @@ func runWrite(args []string) error {
 		return fmt.Errorf("transfer id: %w", err)
 	}
 	messageID := "probe-message-" + strings.TrimPrefix(transferID, "xfer-probe-")
-	threadID := "probe/" + transferID
+	threadID := strings.TrimSpace(*threadFlag)
+	if threadID == "" {
+		threadID = "probe/" + transferID
+	}
 	payload, err := probeMessage(messageID, threadID, sourceHandle, destAgent, transferID)
 	if err != nil {
 		return fmt.Errorf("marshal probe payload: %w", err)
