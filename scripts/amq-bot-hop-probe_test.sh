@@ -31,6 +31,32 @@ cp "$source" "$mac_dir/hop-$nonce.nonce"
 chmod 600 "$mac_dir/hop-$nonce.nonce"
 AMQ_BOT_HOP_MAC_DIR=$mac_dir sh "$probe" check "$nonce" >/dev/null || fail "check failed after a faithful copy"
 
+chmod 644 "$mac_dir/hop-$nonce.nonce"
+mode_output=$(AMQ_BOT_HOP_MAC_DIR=$mac_dir sh "$probe" check "$nonce") || fail "check failed for a mode-644 faithful copy"
+case "$mode_output" in
+	*'mode=644') ;;
+	*) fail "mode-644 check did not report mode=644" ;;
+esac
+
+chmod 640 "$mac_dir/hop-$nonce.nonce"
+if AMQ_BOT_HOP_MAC_DIR=$mac_dir sh "$probe" check "$nonce" >/dev/null 2>&1; then
+	fail "check succeeded for an unsupported mode"
+fi
+
+chmod 644 "$mac_dir/hop-$nonce.nonce"
+printf 'wrong\n' >"$mac_dir/hop-$nonce.nonce"
+if AMQ_BOT_HOP_MAC_DIR=$mac_dir sh "$probe" check "$nonce" >/dev/null 2>&1; then
+	fail "check succeeded for wrong contents"
+fi
+
+cp "$source" "$mac_dir/real-$nonce.nonce"
+chmod 644 "$mac_dir/real-$nonce.nonce"
+rm -f "$mac_dir/hop-$nonce.nonce"
+ln -s "real-$nonce.nonce" "$mac_dir/hop-$nonce.nonce"
+if AMQ_BOT_HOP_MAC_DIR=$mac_dir sh "$probe" check "$nonce" >/dev/null 2>&1; then
+	fail "check succeeded for a symlink"
+fi
+
 if AMQ_BOT_HOP_MAC_DIR=$mac_dir sh "$probe" check 00000000000000000000000000000000 >/dev/null 2>&1; then
 	fail "check succeeded for a missing nonce"
 fi

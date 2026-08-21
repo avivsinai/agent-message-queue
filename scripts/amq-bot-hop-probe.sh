@@ -86,8 +86,8 @@ check_probe() {
 	fi
 	mode=$(file_mode "$target") || unproven "cannot inspect mode on $target"
 	case "$mode" in
-		600|0600) ;;
-		*) unproven "Mac copy $target has mode $mode, want 0600" ;;
+		600|0600|644|0644) ;;
+		*) unproven "Mac copy $target has mode $mode, want 0600 or 0644" ;;
 	esac
 
 	expected=$(printf 'amq-bot-hop-probe-v1\nnonce=%s' "$nonce")
