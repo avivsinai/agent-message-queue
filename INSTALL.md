@@ -94,7 +94,7 @@ mkdir -p ~/.grok/skills
 cp -r /tmp/amq/.agents/skills/amq-cli ~/.grok/skills/
 rm -rf /tmp/amq
 ```
-A project-local copy under `.grok/skills/amq-cli` in the repo works the same way if you prefer per-project installs. Inside a checkout of this repository, Grok discovers the bundled `.claude/skills/amq-cli` through its Claude Code compatibility with no copying at all; it also supports user-level `~/.agents/skills`. See the [xAI skill discovery docs](https://docs.x.ai/build/features/skills-plugins-marketplaces) for the authoritative list of paths Grok CLI checks.
+This repository ships `.grok/skills/amq-cli` as a symlink to the canonical skill, so Grok Build loads it without copying. Grok also discovers `.agents/skills` and `.claude/skills`. See the [xAI skill discovery docs](https://docs.x.ai/build/features/skills-plugins-marketplaces) for the authoritative list of paths Grok CLI checks.
 
 Restart your agent after installing.
 

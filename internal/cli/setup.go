@@ -137,7 +137,7 @@ func runSetup(args []string) (returnErr error) {
 	jsonFlag := fs.Bool("json", false, "Emit JSON output")
 	usage := usageWithFlags(fs, "amq setup [options]",
 		"Configure this project after previewing every change.",
-		"Detects Claude and Codex through their adapter capability probes.",
+		"Detects Claude, Codex, Cursor, and Grok through their adapter capability probes.",
 		"Launcher detection is probe-only; setup never calls a launcher backend.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err

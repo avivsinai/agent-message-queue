@@ -52,15 +52,8 @@ contract-check:
 		go build -o "$$candidate_dir/amq" ./cmd/amq; \
 		bash scripts/check-keepalive-amq-contract.sh "$$candidate_dir/amq"
 
-# Skill integrity: skills/ is canonical, .claude/skills/ and .agents/skills/ are symlinks
+# Skill integrity: skills/ is canonical; .claude, .agents, and .grok skills are symlinks.
+# The negative fixture must run first so a fail-open checker cannot hide behind a later live pass.
 check-skills:
-	@echo "Checking skill symlinks..."
-	@for skill in amq-cli amq-spec; do \
-		test -L .claude/skills/$$skill || (echo "❌ .claude/skills/$$skill is not a symlink" && exit 1); \
-		test -L .agents/skills/$$skill || (echo "❌ .agents/skills/$$skill is not a symlink" && exit 1); \
-		test "$$(readlink .claude/skills/$$skill)" = "../../skills/$$skill" || (echo "❌ .claude/skills/$$skill target wrong" && exit 1); \
-		test "$$(readlink .agents/skills/$$skill)" = "../../skills/$$skill" || (echo "❌ .agents/skills/$$skill target wrong" && exit 1); \
-	done
-	@diff -rq skills/amq-cli .claude/skills/amq-cli || (echo "❌ amq-cli content mismatch" && exit 1)
-	@diff -rq skills/amq-spec .claude/skills/amq-spec || (echo "❌ amq-spec content mismatch" && exit 1)
-	@echo "✓ Skill symlinks valid"
+	@bash scripts/test_check_skills.sh
+	@bash scripts/check-skills.sh

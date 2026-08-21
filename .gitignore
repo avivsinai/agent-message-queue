@@ -23,6 +23,9 @@ __pycache__/
 .agents/**
 !.agents/skills/
 !.agents/skills/**
+.grok/**
+!.grok/skills/
+!.grok/skills/**
 .agent-mail/
 
 # Added by ggshield

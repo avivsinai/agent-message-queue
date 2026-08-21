@@ -55,8 +55,9 @@ Cross-host mail is companion `amq-bridge` (send / local apply / reply), not Core
 
 About five minutes from install to the first delivered message. You need two
 agent CLIs on `PATH`. This walkthrough uses **Claude Code** (`claude`) and
-**Codex CLI** (`codex`) on one machine. `amq setup` also detects Cursor when
-`agent` is on `PATH` (or legacy `cursor-agent` if `agent` is absent).
+**Codex CLI** (`codex`) on one machine. `amq setup` also detects Grok Build
+(`grok`) and Cursor when `agent` is on `PATH` (or legacy `cursor-agent` if
+`agent` is absent).
 
 Native Windows can run the core queue from the Windows ZIP, but this
 walkthrough needs `coop exec` and `wake`, which are not supported natively.
@@ -117,7 +118,7 @@ In the repository the two agents will share:
 amq setup
 ```
 
-Setup probes for Claude and Codex (and Cursor when present), previews the
+Setup probes for Claude, Codex, and Grok (and Cursor when present), previews the
 roster and launcher preference, then writes `.amqrc`, `.amq/launch.json`,
 local preferences, the default session, and roster mailboxes. Confirm the
 preview.

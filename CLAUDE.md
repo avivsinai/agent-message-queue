@@ -272,9 +272,9 @@ hostile boundary rather than only a helper or mock.
 ## Skill Development
 
 Canonical skills live in `skills/amq-cli/` and `skills/amq-spec/`.
-`.claude/skills/` and `.agents/skills/` are symlinks to those directories so
-local runs use repository changes. Project skills take precedence over user
-installations.
+`.claude/skills/`, `.agents/skills/`, and `.grok/skills/` are symlinks to those
+directories so local runs use repository changes. Project skills take
+precedence over user installations.
 
 Edit only the canonical directory, bump skill metadata when publishing, run
 `make check-skills`, and test the project-local skill. Do not create divergent
