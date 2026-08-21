@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -102,6 +103,22 @@ func LoadHostID(root string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("bridge host-id: %w", err)
 	}
+	return parseHostID(path, data)
+}
+
+// LoadHostIDFromDeliveryRoot reads host-id through an already-authorized
+// delivery-root capability so the identity used for routing cannot be
+// replaced through the ambient root path after authorization.
+func LoadHostIDFromDeliveryRoot(root *fsq.DeliveryRoot) (string, error) {
+	const rel = "bridge/host-id"
+	data, err := readPrivateKeyRootFile(root, rel)
+	if err != nil {
+		return "", fmt.Errorf("bridge host-id: %w", err)
+	}
+	return parseHostID(root.DisplayPath(rel), data)
+}
+
+func parseHostID(path string, data []byte) (string, error) {
 	host := strings.TrimSpace(string(data))
 	if err := fsq.ValidateHandle(host); err != nil {
 		return "", fmt.Errorf("bridge host-id: %w", err)
@@ -163,6 +180,33 @@ func LoadTrusted(root, host string) (ed25519.PublicKey, string, error) {
 	return ed25519.PublicKey(pub), fields["generation"], nil
 }
 
+// LoadTrustedFromDeliveryRoot reads a trusted public key through an
+// already-authorized delivery-root capability. The source host remains an
+// envelope claim until this exact trusted file is loaded and signature
+// verification succeeds.
+func LoadTrustedFromDeliveryRoot(root *fsq.DeliveryRoot, host string) (ed25519.PublicKey, string, error) {
+	if err := fsq.ValidateHandle(host); err != nil {
+		return nil, "", fmt.Errorf("trusted source host: %w", err)
+	}
+	rel := filepath.Join("bridge", TrustedDirName, host)
+	data, err := readPrivateKeyRootFile(root, rel)
+	if err != nil {
+		return nil, "", fmt.Errorf("trusted host %s: %w", host, err)
+	}
+	fields, err := parseKeyFields(root.DisplayPath(rel), data, "public")
+	if err != nil {
+		return nil, "", fmt.Errorf("trusted host %s: %w", host, err)
+	}
+	pub, err := hex.DecodeString(fields["public"])
+	if err != nil {
+		return nil, "", fmt.Errorf("trusted host %s public key: %w", host, err)
+	}
+	if len(pub) != ed25519.PublicKeySize {
+		return nil, "", fmt.Errorf("trusted host %s public key must be %d bytes", host, ed25519.PublicKeySize)
+	}
+	return ed25519.PublicKey(pub), fields["generation"], nil
+}
+
 func WriteTrusted(root, host string, pub ed25519.PublicKey, generation string) error {
 	if err := fsq.ValidateHandle(host); err != nil {
 		return fmt.Errorf("trusted source host: %w", err)
@@ -186,6 +230,10 @@ func readKeyFields(path, secretField string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseKeyFields(path, data, secretField)
+}
+
+func parseKeyFields(path string, data []byte, secretField string) (map[string]string, error) {
 	fields := map[string]string{}
 	for i, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(line), " ")
@@ -210,21 +258,52 @@ func readKeyFields(path, secretField string) (map[string]string, error) {
 	return fields, nil
 }
 
+func readPrivateKeyRootFile(root *fsq.DeliveryRoot, rel string) ([]byte, error) {
+	if root == nil {
+		return nil, fmt.Errorf("delivery root is required")
+	}
+	file, info, err := root.OpenRegularNoFollow(rel)
+	if err != nil {
+		return nil, err
+	}
+	path := root.DisplayPath(rel)
+	if err := validatePrivateKeyInfo(path, info); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return data, nil
+}
+
 func readPrivateKeyFile(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("%s must not be a symlink", path)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s must be a regular file", path)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		return nil, fmt.Errorf("%s mode is %o, want 0600", path, got)
+	if err := validatePrivateKeyInfo(path, info); err != nil {
+		return nil, err
 	}
 	return fsq.ReadRegularNoFollow(path)
+}
+
+func validatePrivateKeyInfo(path string, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s must not be a symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s must be a regular file", path)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		return fmt.Errorf("%s mode is %o, want 0600", path, got)
+	}
+	return nil
 }
 
 func writePrivateFile(path string, data []byte) error {

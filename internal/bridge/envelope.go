@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -41,6 +42,13 @@ func UnmarshalEnvelope(raw []byte) (Envelope, error) {
 	var env Envelope
 	if err := dec.Decode(&env); err != nil {
 		return Envelope{}, fmt.Errorf("bridge envelope: %w", err)
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return Envelope{}, fmt.Errorf("bridge envelope has trailing JSON")
+		}
+		return Envelope{}, fmt.Errorf("bridge envelope trailer: %w", err)
 	}
 	if err := ValidateEnvelope(env); err != nil {
 		return Envelope{}, err

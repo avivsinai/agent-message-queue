@@ -796,6 +796,10 @@ func (c *Courier) existingReceipt(root *fsq.DeliveryRoot, env bridge.Envelope, s
 }
 
 func (c *Courier) writeReceipt(root *fsq.DeliveryRoot, receipt Receipt) error {
+	return writeBridgeReceipt(root, c.receiptRelDir, receipt)
+}
+
+func writeBridgeReceipt(root *fsq.DeliveryRoot, receiptRelDir string, receipt Receipt) error {
 	if receipt.EmittedAt == "" {
 		receipt.EmittedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
@@ -805,8 +809,8 @@ func (c *Courier) writeReceipt(root *fsq.DeliveryRoot, receipt Receipt) error {
 	}
 	data = append(data, '\n')
 	filename := receiptFilename(receipt.TransferID, receipt.Stage)
-	path := filepath.Join(c.receiptRelDir, filename)
-	if _, err := root.WriteFileExclusive(c.receiptRelDir, filename, data, 0o600); err == nil {
+	path := filepath.Join(receiptRelDir, filename)
+	if _, err := root.WriteFileExclusive(receiptRelDir, filename, data, 0o600); err == nil {
 		return nil
 	} else if !errors.Is(err, os.ErrExist) {
 		return err

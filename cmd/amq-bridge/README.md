@@ -40,6 +40,30 @@ rendezvous is an untrusted blob store; `--allow-source-host` is only an exact
 routing allowlist and does not authenticate the peer. The courier verifies the
 Ed25519 signature before applying a polled envelope.
 
+## Local file apply
+
+For a Bot-local handoff without a public rendezvous, drop one complete JSON
+`internal/bridge.Envelope` under the ignored local queue path
+`<AMQ root>/bridge/drop/`, then run:
+
+```sh
+amq-bridge apply-file \
+  --root "$AM_ROOT" \
+  --file "$AM_ROOT/bridge/drop/envelope.json"
+```
+
+The command reads only that regular, non-symlink file. It loads the local
+`bridge/host-id` and the trusted public key selected by the envelope's
+`source_host`, verifies the Ed25519 signature and payload digest, requires the
+`dest_alias` host to match the local host-id, and then calls the same
+`ApplyEnvelope` Maildir path as the courier. It prints and durably records a
+`destination_maildir_committed` receipt under `<AMQ root>/bridge/receipts/`.
+Repeating the same file is an idempotent replay; the same transfer key with a
+different payload is a conflict. Unsigned or forged envelopes, foreign
+destinations, symlinks, and files outside `bridge/drop` are rejected. This
+path does not provide reverse Mac-to-G communication and does not create a
+public locker.
+
 One bounded bidirectional cycle on the Mac uses a **local** receive alias and
 a **remote** send alias. Do not poll a foreign dest alias into this root:
 
