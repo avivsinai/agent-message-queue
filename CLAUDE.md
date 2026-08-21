@@ -48,7 +48,7 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
 ## Build and Development Commands
 
 ```bash
-make build          # go build -o amq ./cmd/amq
+make build          # go build amq, amq-keepalive, amq-bridge, amq-acp
 make test           # go test ./...
 make fmt            # gofmt -w
 make vet            # go vet
@@ -65,7 +65,8 @@ required by `make lint` and `make ci`.
 ```text
 cmd/amq/             CLI entry point
 cmd/amq-keepalive/   macOS wake supervisor companion
-cmd/amq-bridge/      Cross-host HTTPS courier companion (not Core)
+cmd/amq-bridge/      Cross-host courier companion (apply-file + HTTPS, not Core)
+cmd/amq-acp/         Preview ACP v1 stdio companion (not Core)
 internal/cli/        Command handlers and routing policy
 internal/fsq/        Maildir delivery, atomic operations, and scans
 internal/format/     JSON frontmatter plus Markdown message serialization
@@ -74,6 +75,8 @@ internal/receipt/    Consumer-local drained and DLQ receipts
 internal/integration Shared adapter support for Symphony and Kanban
 internal/launch/     Plans, adapters, trust, leases, bindings, and resume state
 internal/keepalive/  Companion registry, adapters, hooks, and supervision
+internal/bridge/     Envelope, auth, and crash-idempotent local apply
+internal/acp/        ACP v1 session and prompt delivery
 internal/sessionguard Shared fail-closed session decision table
 internal/swarm/      Claude Code Agent Teams interoperability
 internal/thread/     Cross-mailbox thread collection
@@ -87,6 +90,7 @@ Mailbox layout:
 <root>/agents/<agent>/outbox/sent/
 <root>/agents/<agent>/receipts/
 <root>/agents/<agent>/dlq/{tmp,new,cur}/
+<root>/bridge/{host-id,identity,trusted/<host>,outbox,drop,receipts}/
 ```
 
 ## Core Concepts
@@ -128,9 +132,11 @@ code and cleanup does not remove extension data. See
 
 Two-host fleets, alias routing, and the v1 kill-list are
 [the two-host fleets ADR](docs/adr-two-host-fleets.md). Companion `amq-bridge`
-wire format is [the bridge protocol ADR](docs/adr-bridge-protocol.md). Wake
-capability (no silent downgrade) is
-[the wake capability-vector ADR](docs/adr-wake-capability-vector.md).
+wire format is [the bridge protocol ADR](docs/adr-bridge-protocol.md); the
+proven hop is `apply-file`, and HTTPS needs an operator-provided rendezvous.
+Wake capability (no silent downgrade) is
+[the wake capability-vector ADR](docs/adr-wake-capability-vector.md). Preview
+ACP v1 is [the amq-acp companion](cmd/amq-acp/README.md).
 
 ## CLI Commands
 

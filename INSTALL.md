@@ -154,6 +154,14 @@ and rollbacks replace the file at the stable path, then rerun
 `amq-keepalive install-launchd` to restart the supervisor. The registry is
 retained; do not move the executable while registered wakes still identify it.
 
+The optional cross-host courier is published separately as
+`amq-bridge_*_{linux,darwin}_{amd64,arm64}.tar.gz`. Homebrew does not install
+it. Install it next to `amq` at a stable path using the same checksum dance
+as keepalive, substituting the `amq-bridge` asset name and the host's
+platform (`linux_amd64` on Grok computer, `darwin_arm64` on Apple Silicon).
+See [amq-bridge](cmd/amq-bridge/README.md). `amq-acp` is a preview companion
+built by `make build`; it is not a release asset.
+
 ### Platform capability matrix
 
 | Platform | Core queue (`send`, `drain`, `read`, threads) | `coop init` | `coop exec` | `wake` notifications | Installer script |

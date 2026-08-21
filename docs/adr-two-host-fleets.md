@@ -60,13 +60,12 @@ Bidirectional v1 means all of:
    as an opaque correlation key, not as routing authority.
 
 Both bridge nodes dial out. Host G accepts no inbound SSH. Reachability is
-operator-provided. Transport is HTTPS store-and-forward as frozen in the
-protocol ADR.
-
-Protocol, envelope, and transport for `amq-bridge` are
-[the companion bridge protocol ADR](adr-bridge-protocol.md). That ADR keeps
-outbound-only HTTPS store-and-forward, not git-by-default, and no sockets in
-Core.
+operator-provided. The signed envelope and local apply path are frozen in
+[the companion bridge protocol ADR](adr-bridge-protocol.md). Proven
+bidirectional hops use `amq-bridge apply-file` on the destination host.
+HTTPS store-and-forward remains the courier class when an operator
+provisions a rendezvous; AMQ does not ship a hosted relay. Git is not the
+default cross-host transport. Core has no sockets.
 
 ### Routing aliases
 
@@ -147,16 +146,14 @@ v1 does not:
   optional and alias-only.
 - Skills and launch plans teach receiver-owned `<host>/<agent>` aliases, not
   foreign `--root` values and not remote drain.
-- Companion `amq-bridge` may exist beside `amq`, as `amq-keepalive` does.
+- Companion `amq-bridge` exists beside `amq`, as `amq-keepalive` does.
   Core stays a local CLI.
 - Receipt APIs and docs name transport, destination commit, and consumer
   evidence separately. Callers that need destination commit wait for
   `destination_maildir_committed`, not for `transport_accepted`.
 - Adapters continue to emit local messages. They do not become a remote
   workflow engine or a foreign-host drain.
-- Bridge wire format, auth material, and transport selection wait for the
-  protocol ADR. This freeze already rules out inbound-SSH-to-G, git-by-default,
-  and sockets in Core.
+- Inbound SSH to G, git-by-default, and sockets in Core stay out.
 - Wake adapters, when specified elsewhere, advertise real capability. They
   do not substitute a weaker path and do not drive GUI automation from prompt
   text.
