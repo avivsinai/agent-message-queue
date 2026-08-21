@@ -177,6 +177,13 @@ For Cursor, setup uses the current `agent` command when it is on `PATH`; if it
 is absent, the preview explains that setup is falling back to legacy
 `cursor-agent`.
 
+Grok Build is supported by the managed launch adapter. It mints an exact
+`--session-id` from the AMQ launch nonce and resumes only with the stored
+`--resume <UUID>`; `--continue`, `--always-approve`, and `--yolo` are rejected
+from committed launch arguments. Grok tool policy uses its canonical
+`--tools` and `--disallowed-tools` flags; do not translate those values through
+Claude's `--allowedTools` grammar.
+
 Put provider flags in the committed `.amq/launch.json` `command` arrays. The
 launcher validates them and includes them in the semantic trust digest. The
 first semantic plan, and each plan change, needs an interactive trust

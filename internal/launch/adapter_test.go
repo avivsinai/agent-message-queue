@@ -81,6 +81,22 @@ func TestAdapterCapabilitiesProbeExactIdentityContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	grok := NewGrokAdapter("grok")
+	grok.probe = fakeCommandProbe{path: "/bin/grok", outputs: map[string]string{
+		"--version": "Grok Build 1.0.5\n",
+		"--help":    "-s, --session-id <UUID> -r, --resume [<ID>]",
+	}}
+	gotGrok := grok.Capabilities(context.Background())
+	if !gotGrok.Available || !gotGrok.Fresh || !gotGrok.Resume || gotGrok.Capture || gotGrok.Mode != AdapterModeMint {
+		t.Fatalf("Grok capabilities = %#v", gotGrok)
+	}
+	if gotGrok.ProviderVersion != grokBuildVersion {
+		t.Fatalf("Grok provider version = %q", gotGrok.ProviderVersion)
+	}
+	if err := ValidateAdapterCapabilities(grok, gotGrok); err != nil {
+		t.Fatal(err)
+	}
+
 	codex := NewCodexAdapter("codex")
 	codex.probe = fakeCommandProbe{path: "/bin/codex", outputs: map[string]string{
 		"--version":     "codex-cli 0.147.0\n",
@@ -163,8 +179,101 @@ func TestClaudePlansUseExactMintAndResumeShapes(t *testing.T) {
 	}
 }
 
+func TestGrokPlansUseExactMintAndResumeShapes(t *testing.T) {
+	project, executable := testExecutable(t, GrokProvider)
+	adapter := NewGrokAdapter(executable)
+	request := planRequest(project, GrokProvider)
+	request.CommittedArgs = []string{
+		"--model", "grok-4.5", "--effort", "high", "--no-auto-update",
+		"--tools", "shell,custom-provider-tool", "--disallowed-tools", "legacy_tool",
+	}
+
+	fresh, err := adapter.PlanFresh(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFreshTail := []string{"--session-id", testLaunchNonce}
+	if !reflect.DeepEqual(fresh.Argv[len(fresh.Argv)-2:], wantFreshTail) {
+		t.Fatalf("fresh argv = %q", fresh.Argv)
+	}
+	if fresh.AdapterMode != AdapterModeMint || fresh.ConversationID != testLaunchNonce ||
+		len(fresh.DynamicArgv) != 1 || fresh.DynamicArgv[0].Kind != DynamicArgLaunchNonce {
+		t.Fatalf("fresh plan = %#v", fresh)
+	}
+
+	resume, err := adapter.PlanResume(ResumeRequest{
+		PlanRequest:  request,
+		Conversation: ConversationIdentity{Provider: GrokProvider, ID: testConversationID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantResumeTail := []string{"--resume", testConversationID}
+	if !reflect.DeepEqual(resume.Argv[len(resume.Argv)-2:], wantResumeTail) {
+		t.Fatalf("resume argv = %q", resume.Argv)
+	}
+	if resume.DynamicArgv[0].Kind != DynamicArgConversationID {
+		t.Fatalf("resume dynamic argv = %#v", resume.DynamicArgv)
+	}
+
+	resume.Argv[resume.DynamicArgv[0].Index] = testLaunchNonce
+	if err := ValidateAdapterPlan(adapter, resume); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("slot laundering error = %v", err)
+	}
+	if result := adapter.CaptureIdentity(CaptureRequest{}); result.State != CaptureUnsupported || result.Degraded || result.CanPersist() {
+		t.Fatalf("mint capture result = %#v", result)
+	}
+}
+
+func TestGrokCommittedConfigRejectsDuplicateToolFlags(t *testing.T) {
+	project := t.TempDir()
+	adapter := NewGrokAdapter("definitely-not-installed-grok")
+	for _, args := range [][]string{
+		{"--tools", "shell", "--tools", "computer"},
+		{"--disallowed-tools", "legacy_tool", "--disallowed-tools", "shell"},
+	} {
+		err := ValidateCommittedConfig(adapter, CommittedConfigRequest{ProjectRoot: project, Args: args})
+		if err == nil || !strings.Contains(err.Error(), "duplicated") {
+			t.Fatalf("ValidateCommittedConfig(%q) error = %v, want duplicated", args, err)
+		}
+	}
+}
+
+func TestGrokPlansForwardOpaqueToolNames(t *testing.T) {
+	project, executable := testExecutable(t, GrokProvider)
+	adapter := NewGrokAdapter(executable)
+	request := planRequest(project, GrokProvider)
+	request.CommittedArgs = []string{"--tools", "run_terminal_cmd(Agent);custom"}
+	fresh, err := adapter.PlanFresh(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fresh.Argv[1:3], []string{"--tools", "run_terminal_cmd(Agent);custom"}) {
+		t.Fatalf("opaque tool argv = %q", fresh.Argv)
+	}
+}
+
+func TestGrokPlansRejectContinueIdentityAndBypassFlags(t *testing.T) {
+	project, executable := testExecutable(t, GrokProvider)
+	adapter := NewGrokAdapter(executable)
+	for _, args := range [][]string{
+		{"--continue"},
+		{"--always-approve"},
+		{"--yolo"},
+		{"--allowedTools", "Bash,Read,Write"},
+		{"--session-id", testConversationID},
+		{"--resume", testConversationID},
+	} {
+		request := planRequest(project, GrokProvider)
+		request.CommittedArgs = args
+		if _, err := adapter.PlanFresh(request); err == nil || !strings.Contains(err.Error(), "not allowed") {
+			t.Fatalf("PlanFresh(%q) error = %v, want deny-by-default refusal", args, err)
+		}
+	}
+}
+
 func TestAdaptersAppendTypedInitialInputAfterOwnedArguments(t *testing.T) {
-	for _, provider := range []string{ClaudeProvider, CodexProvider} {
+	for _, provider := range []string{ClaudeProvider, CodexProvider, GrokProvider} {
 		t.Run(provider, func(t *testing.T) {
 			project, executable := testExecutable(t, provider)
 			request := planRequest(project, provider)
@@ -178,6 +287,8 @@ func TestAdaptersAppendTypedInitialInputAfterOwnedArguments(t *testing.T) {
 				plan, err = NewClaudeAdapter(executable).PlanFresh(request)
 			case CodexProvider:
 				plan, err = NewCodexAdapter(executable).PlanFresh(request)
+			case GrokProvider:
+				plan, err = NewGrokAdapter(executable).PlanFresh(request)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -190,7 +301,7 @@ func TestAdaptersAppendTypedInitialInputAfterOwnedArguments(t *testing.T) {
 }
 
 func TestAdaptersRejectUnsafeInitialInputBeforePlanning(t *testing.T) {
-	for _, provider := range []string{ClaudeProvider, CodexProvider} {
+	for _, provider := range []string{ClaudeProvider, CodexProvider, GrokProvider} {
 		t.Run(provider, func(t *testing.T) {
 			project, executable := testExecutable(t, provider)
 			for _, text := range []string{"-option", "line\nfeed", "tab\tvalue", "delete\x7f"} {
@@ -206,6 +317,8 @@ func TestAdaptersRejectUnsafeInitialInputBeforePlanning(t *testing.T) {
 						_, err = NewClaudeAdapter(executable).PlanFresh(request)
 					case CodexProvider:
 						_, err = NewCodexAdapter(executable).PlanFresh(request)
+					case GrokProvider:
+						_, err = NewGrokAdapter(executable).PlanFresh(request)
 					}
 					if err == nil || !strings.Contains(err.Error(), "initial input") {
 						t.Fatalf("unsafe initial input error = %v", err)
@@ -217,7 +330,7 @@ func TestAdaptersRejectUnsafeInitialInputBeforePlanning(t *testing.T) {
 }
 
 func TestAdaptersDoNotRedeliverInitialInputOnResume(t *testing.T) {
-	for _, provider := range []string{ClaudeProvider, CodexProvider} {
+	for _, provider := range []string{ClaudeProvider, CodexProvider, GrokProvider} {
 		t.Run(provider, func(t *testing.T) {
 			project, executable := testExecutable(t, provider)
 			request := planRequest(project, provider)
@@ -232,6 +345,8 @@ func TestAdaptersDoNotRedeliverInitialInputOnResume(t *testing.T) {
 				plan, err = NewClaudeAdapter(executable).PlanResume(ResumeRequest{PlanRequest: request, Conversation: conversation})
 			case CodexProvider:
 				plan, err = NewCodexAdapter(executable).PlanResume(ResumeRequest{PlanRequest: request, Conversation: conversation})
+			case GrokProvider:
+				plan, err = NewGrokAdapter(executable).PlanResume(ResumeRequest{PlanRequest: request, Conversation: conversation})
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -239,9 +354,9 @@ func TestAdaptersDoNotRedeliverInitialInputOnResume(t *testing.T) {
 			if plan.InitialInput != nil || slices.Contains(plan.Argv, text) {
 				t.Fatalf("resume redelivered initial input: %#v", plan)
 			}
-			if provider == ClaudeProvider {
+			if provider == ClaudeProvider || provider == GrokProvider {
 				if !slices.Equal(plan.Argv[len(plan.Argv)-2:], []string{"--resume", testConversationID}) {
-					t.Fatalf("Claude resume tail = %q", plan.Argv)
+					t.Fatalf("%s resume tail = %q", provider, plan.Argv)
 				}
 			} else if plan.Argv[len(plan.Argv)-1] != testConversationID {
 				t.Fatalf("Codex resume identity is not final: %q", plan.Argv)

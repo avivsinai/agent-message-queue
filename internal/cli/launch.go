@@ -245,6 +245,8 @@ func defaultLaunchAdapters(cfg launch.ProjectConfig) map[string]launch.HarnessAd
 			adapters[agent.Adapter] = launch.NewCodexAdapter(agent.Command[0])
 		case launch.CursorProvider:
 			adapters[agent.Adapter] = launch.NewCursorAdapter(agent.Command[0])
+		case launch.GrokProvider:
+			adapters[agent.Adapter] = launch.NewGrokAdapter(agent.Command[0])
 		}
 	}
 	return adapters

@@ -89,6 +89,7 @@ var (
 			launch.NewClaudeAdapter(launch.ClaudeProvider),
 			launch.NewCodexAdapter(launch.CodexProvider),
 			launch.NewCursorAdapter(setupCursorCommand()),
+			launch.NewGrokAdapter(launch.GrokProvider),
 		}
 	}
 	setupLookPath      = exec.LookPath

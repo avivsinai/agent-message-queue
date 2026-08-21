@@ -98,6 +98,58 @@ func TestDeliverToExistingInbox(t *testing.T) {
 	}
 }
 
+func TestDeliverToExistingInboxBridgeApplyReplayAndConflict(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	delivery := openDeliveryRootForTest(t, root)
+	// Stable transfer filename: same (source_host, transfer_id) maps to one id.md.
+	const filename = "xfer-grok-host-T1.md"
+	payload := []byte("digest-aaaa")
+	conflict := []byte("digest-bbbb")
+
+	path, err := DeliverToExistingInbox(delivery, "claude", filename, payload)
+	if err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	if got, readErr := os.ReadFile(path); readErr != nil || string(got) != string(payload) {
+		t.Fatalf("first apply bytes = %q, %v", got, readErr)
+	}
+
+	replay, err := DeliverToExistingInbox(delivery, "claude", filename, payload)
+	if err != nil {
+		t.Fatalf("lost-ACK replay of same digest: %v", err)
+	}
+	if replay != path {
+		t.Fatalf("replay path = %q, want %q", replay, path)
+	}
+	if got, readErr := os.ReadFile(path); readErr != nil || string(got) != string(payload) {
+		t.Fatalf("replay must not rewrite dest: %q, %v", got, readErr)
+	}
+
+	if _, err := DeliverToExistingInbox(delivery, "claude", filename, conflict); err == nil || !errors.Is(err, os.ErrExist) {
+		t.Fatalf("same key, other digest = %v, want os.ErrExist", err)
+	}
+	if got, readErr := os.ReadFile(path); readErr != nil || string(got) != string(payload) {
+		t.Fatalf("conflict overwrote dest: %q, %v", got, readErr)
+	}
+
+	stale := filepath.Join(AgentInboxTmp(root, "claude"), "."+filename+".tmp-crash-before-rename")
+	if err := os.WriteFile(stale, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DeliverToExistingInbox(delivery, "claude", filename, payload); err != nil {
+		t.Fatalf("replay with leftover crash tmp: %v", err)
+	}
+	if got, readErr := os.ReadFile(stale); readErr != nil || string(got) != string(payload) {
+		t.Fatalf("crash tmp overwritten: %q, %v", got, readErr)
+	}
+}
+
 func TestDeliverToExistingInboxNoDir(t *testing.T) {
 	root := t.TempDir()
 	// Do NOT create agent dirs — inbox doesn't exist.

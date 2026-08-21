@@ -1,6 +1,8 @@
 .DS_Store
 /amq
 /amq-keepalive
+/amq-bridge
+/amq-acp
 /.agent-mail/
 /bin/
 /dist/
@@ -22,3 +24,6 @@ __pycache__/
 !.agents/skills/
 !.agents/skills/**
 .agent-mail/
+
+# Added by ggshield
+.cache_ggshield
