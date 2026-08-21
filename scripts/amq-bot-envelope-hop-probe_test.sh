@@ -77,6 +77,27 @@ printf '%s\n' "$first_check" | grep -Fq 'BOT_ENVELOPE_HOP_PROVEN transfer_id=' |
 first_payload="$mac_root/agents/claude/inbox/new/xfer-grok-$first_id.md"
 [[ -s "$first_payload" ]] || fail "faithful envelope did not commit a payload"
 
+reply_dir="$work/reply-hop"
+reply_write="$(
+  AMQ_BOT_ENVELOPE_HOP_G_ROOT="$g_root" \
+  AMQ_BOT_ENVELOPE_HOP_G_DIR="$reply_dir" \
+  AMQ_BOT_ENVELOPE_HOP_SOURCE_HOST=grok \
+  AMQ_BOT_ENVELOPE_HOP_SOURCE_HANDLE=codex \
+  AMQ_BOT_ENVELOPE_HOP_DEST_ALIAS=mac/claude \
+  AMQ_BOT_ENVELOPE_HOP_THREAD="probe/$first_id" \
+  sh "$probe" write
+)"
+reply_id="$(printf '%s\n' "$reply_write" | sed -n 's/^BOT_ENVELOPE_HOP_TRANSFER_ID=//p')"
+reply_source="$(printf '%s\n' "$reply_write" | sed -n 's/^BOT_ENVELOPE_HOP_SOURCE=//p')"
+[[ -f "$reply_source" ]] || fail "threaded write did not create $reply_source"
+python3 - "$reply_source" "probe/$first_id" <<'PY' || fail "threaded write did not keep the inbound thread"
+import json, sys
+path, want = sys.argv[1], sys.argv[2]
+envelope = json.load(open(path, encoding="utf-8"))
+if envelope.get("thread_id") != want:
+    raise SystemExit(f"thread_id={envelope.get('thread_id')!r} want {want!r}")
+PY
+
 second_write="$(write_probe)"
 second_id="$(printf '%s\n' "$second_write" | sed -n 's/^BOT_ENVELOPE_HOP_TRANSFER_ID=//p')"
 second_source="$(printf '%s\n' "$second_write" | sed -n 's/^BOT_ENVELOPE_HOP_SOURCE=//p')"
