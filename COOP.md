@@ -8,6 +8,7 @@ AMQ is the communication layer in this setup, not the coordinator. The initiator
 
 - **Co-op**: lightweight, peer-to-peer messaging between agents via AMQ threads (`p2p/...`).
 - **Swarm**: join Claude Code Agent Teams and coordinate via the shared task list (`amq swarm ...`).
+- **Two-host**: two machines, two AMQ roots; only companion `amq-bridge` crosses the hosts. See [amq-bridge](cmd/amq-bridge/README.md). Same-machine co-op does not replace that path.
 - **Messaging**: swarm bridge delivers task notifications only. Claude Code teammates can `amq send` to external agents, but external agents cannot DM a specific Claude Code teammate directly. External -> team messages must go to the leader's AMQ inbox, then the leader drains and forwards via Claude Code internal messaging.
 
 For swarm command reference, see [CLAUDE.md](CLAUDE.md).

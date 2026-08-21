@@ -12,13 +12,13 @@ Accepted.
 
 [Two-host fleets](adr-two-host-fleets.md) freeze identity: host M and host G
 each run local AMQ; cross-host mail is a companion, not Core. This ADR freezes
-the `amq-bridge` wire, transport, and threat model before courier code.
+the `amq-bridge` wire, transport, and threat model.
 
-The Grok Bot computer spike (`amq-hws`) is docs-only so far: no live G host
-from the Mac. Public xAI material supports outbound HTTPS and rejects hosted
-MCP to localhost. It does not prove git, inbound SSH, or process supervision.
-That is enough to choose a transport. It is not enough to close the live-G
-operational spike.
+Host G is a live Linux AMQ host. Durable queue state lives under a path that
+survives Bot client close (`/workspace` is the proven layout). Hosted MCP to
+localhost is rejected, so the Bot client is a fixed local CLI wrapper, not a
+remote plugin. Git, inbound SSH, and process supervision are still not
+transport.
 
 ## Decision
 
@@ -30,16 +30,23 @@ existing Maildir `publishTmpNoReplace` on a stable transfer filename.
 
 ### Transport
 
-v1 transport is **HTTPS store-and-forward**. Both nodes dial out. Host G
-accepts no inbound connection. The rendezvous is an opaque blob store with
-lease, retry, backoff, and bounded batches. It never reads AMQ handles or
-Maildir state.
+The wire unit is the signed envelope below. Local apply is the same
+`ApplyEnvelope` path in every hop.
+
+v1 hops without a public locker use **`amq-bridge apply-file`**: the operator
+moves one envelope into `<root>/bridge/drop/` on the destination host; that
+host verifies and commits it. The reverse hop is the same command on the
+peer. This is the proven bidirectional path.
+
+The courier class remains **HTTPS store-and-forward**. Both nodes dial out.
+Host G accepts no inbound connection. The rendezvous is an opaque blob store
+with lease, retry, backoff, and bounded batches. It never reads AMQ handles
+or Maildir state. AMQ does not ship a hosted relay. A public rendezvous is
+operator-provided; until one exists, do not treat HTTPS poll/push as the live
+hop.
 
 Not v1: git, Maildir sync, reverse tunnels, inbound SSH to G, remote drain,
 or sockets inside `amq`.
-
-Live G may change the rendezvous URL, idle timeout, and whether a courier
-survives Bot-client close. It does not change this transport class.
 
 ### Envelope
 
@@ -75,7 +82,7 @@ Keep three layers distinct:
 
 | State | Meaning |
 | --- | --- |
-| `transport_accepted` | The courier accepted the envelope for HTTPS. |
+| `transport_accepted` | The HTTPS courier accepted the envelope. `apply-file` does not emit this stage. |
 | `destination_maildir_committed` | `publishTmpNoReplace` committed `xfer-<transfer_id>.md`. |
 | consumer-local drain/start/complete | Optional; may stay on the consuming host. |
 
@@ -117,7 +124,7 @@ v1 Bot→AMQ is a fixed, audited local CLI wrapper. Not a general plugin. Not
 hosted remote MCP (that requires a public URL and cannot target localhost).
 The wrapper must not take prompt-controlled roots, argv, env, or endpoints.
 
-Mac `Grok Bot.app` (this machine, 2026-08-20) is the operator UI, not host G:
+Mac `Grok Bot.app` is the operator UI, not host G:
 
 - Bundle `com.anysphere.sand`, Team `DCNK4UB866`, Electron 0.20.0
 - URL schemes `grokbot` and `sand`
@@ -127,17 +134,17 @@ Mac `Grok Bot.app` (this machine, 2026-08-20) is the operator UI, not host G:
 - Support files include an encrypted gateway descriptor; do not treat that
   blob as a rendezvous URL or as proof of the cloud computer layout
 
-Live `amq-hws` still requires a shell **on G** (`/workspace`, `~/.grok`,
-courier vs routine, two Bot seats vs one host principal). The Mac app being
-open does not close that spike.
+The Mac app being open does not make this machine host G. G update/reset and
+a second Bot seat on the same VM remain untested; treat G as one host
+principal until a live test proves isolation.
 
 ## Consequences
 
 - Courier code implements this envelope and HTTPS poll/push. It does not add
   listeners to `amq`.
-- Mac node (`amq-baj.1`) can be built and tested against a fake rendezvous
-  before live G exists.
-- G node (`amq-baj.2`) still waits on live `amq-hws` for install layout and
-  how Bot actually invokes the wrapper.
-- Operators provision a public HTTPS rendezvous. AMQ does not ship a hosted
-  relay as Core.
+- `amq-bridge apply-file` is the proven bidirectional hop: same envelope,
+  same local apply, no public locker.
+- Operators may provision a public HTTPS rendezvous. AMQ does not ship a
+  hosted relay as Core.
+- G is a normal AMQ install. Pin `AM_ROOT` in operator config, never in Bot
+  chat. Durable state belongs under a path that survives Bot client close.

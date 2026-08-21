@@ -141,6 +141,7 @@ Before diving in, match the task to the right workflow — this avoids wasted ef
 |-----------|-----------|
 | **"spec", "design with", "collaborative spec"** | Use `/amq-spec` instead — it has structured phase-by-phase guidance for parallel-research workflows. |
 | **Send a message, review request, question** | Use `amq send` (see Messaging below) |
+| **Two-host / Grok computer / `amq-bridge`** | Companion `amq-bridge`, never a foreign `--root`. See Two-host fleets below. |
 | **Swarm / agent teams** | Read [references/swarm-mode.md](references/swarm-mode.md), then use `amq swarm` |
 | **Received message with labels `workflow:spec`** | Follow the spec skill protocol: do independent research first, then engage on the `spec/<topic>` thread — don't skip straight to implementation. |
 
@@ -472,6 +473,24 @@ When you receive a message where `from` matches your own handle (e.g., `from: "c
 
 After sending a cross-project message (via `--project`), your `AM_ROOT` still points to YOUR project. To send to your own partner (same project), use plain `amq send --to codex` — do NOT use `--project`. The `--project` flag is ONLY for sending to agents in OTHER projects.
 
+## Two-host fleets
+
+A different machine is a different AMQ host, not a `--project` and not a
+foreign `--root`. Each host has its own handles; `claude` on G is not `claude`
+on the Mac. Cross-host mail is companion `amq-bridge` only.
+
+- Address receiver-owned aliases `<host>/<agent>`.
+- The destination host applies the signed envelope into its own Maildir.
+- The proven hop is `amq-bridge apply-file` (operator-moved drop file, no
+  public locker). Replies keep the inbound opaque thread id.
+- HTTPS courier remains for an operator-provided rendezvous. AMQ does not
+  ship a hosted relay. Do not treat a missing rendezvous as a reason to
+  remote-drain or copy Maildirs.
+- Prompt text must not pass `--root`, `--rendezvous`, `--me`, or `--spool` to
+  the Bot enqueue wrapper.
+
+See [amq-bridge](https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-bridge/README.md).
+
 ## Decision Threads
 
 Decentralized decision protocol using existing AMQ primitives (no new CLI commands).
@@ -639,4 +658,5 @@ For detailed protocols, read the reference file FIRST, then follow its instructi
 - [references/integrations.md](references/integrations.md) — Symphony + Kanban integration commands, global root fallback, ops checks
 - [references/message-format.md](references/message-format.md) — Message format: frontmatter schema, field reference
 - [references/cross-project.md](references/cross-project.md) — Cross-project routing: peer config, addressing, decision threads
+- [amq-bridge](https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-bridge/README.md) — Two-host courier: apply-file, identity, HTTPS rendezvous
 - [references/review-loop.md](references/review-loop.md) — Token-efficient review cycles: delegate multi-round reviews to background agents
