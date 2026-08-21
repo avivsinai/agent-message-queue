@@ -65,6 +65,7 @@ required by `make lint` and `make ci`.
 ```text
 cmd/amq/             CLI entry point
 cmd/amq-keepalive/   macOS wake supervisor companion
+cmd/amq-bridge/      Cross-host HTTPS courier companion (not Core)
 internal/cli/        Command handlers and routing policy
 internal/fsq/        Maildir delivery, atomic operations, and scans
 internal/format/     JSON frontmatter plus Markdown message serialization
@@ -124,6 +125,12 @@ and preserved. See [Managed launch recovery](docs/launch-recovery.md).
 `<AM_ROOT>/agents/<handle>/extensions/<layer>/`. AMQ does not execute extension
 code and cleanup does not remove extension data. See
 [the layer extension ADR](docs/adr-layer-extensions.md).
+
+Two-host fleets, alias routing, and the v1 kill-list are
+[the two-host fleets ADR](docs/adr-two-host-fleets.md). Companion `amq-bridge`
+wire format is [the bridge protocol ADR](docs/adr-bridge-protocol.md). Wake
+capability (no silent downgrade) is
+[the wake capability-vector ADR](docs/adr-wake-capability-vector.md).
 
 ## CLI Commands
 

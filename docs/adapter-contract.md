@@ -6,7 +6,7 @@ This document defines the **v1 adapter contract** for AMQ integrations.
 
 AMQ's canonical transport is the **message**.
 
-Adapters do not turn AMQ into a remote workflow engine. They convert external lifecycle or task events into normal AMQ messages so agents can consume them with the same primitives they already use for peer-to-peer coordination:
+Adapters emit messages; they are not a remote workflow engine and not a drain of a foreign host (see [two-host fleets](adr-two-host-fleets.md)). They convert external lifecycle or task events into normal AMQ messages so agents can consume them with the same primitives they already use for peer-to-peer coordination:
 
 - `amq drain`
 - `amq reply`

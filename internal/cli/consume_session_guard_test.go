@@ -784,7 +784,6 @@ func TestEnvRejectsAmbientRootLaundering(t *testing.T) {
 
 func TestEnvExplicitRepinReplacesFullContext(t *testing.T) {
 	project := t.TempDir()
-	baseRoot := filepath.Join(project, ".agent-mail")
 	if err := os.WriteFile(filepath.Join(project, ".amqrc"), []byte(`{"root":".agent-mail"}`), 0o600); err != nil {
 		t.Fatalf("write .amqrc: %v", err)
 	}
@@ -802,7 +801,7 @@ func TestEnvExplicitRepinReplacesFullContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolved getwd: %v", err)
 	}
-	baseRoot = filepath.Join(resolvedProject, ".agent-mail")
+	baseRoot := filepath.Join(resolvedProject, ".agent-mail")
 
 	t.Setenv("AM_ROOT", filepath.Join(baseRoot, "session1"))
 	t.Setenv("AM_BASE_ROOT", baseRoot)

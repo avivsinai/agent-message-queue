@@ -16,6 +16,7 @@ const (
 	ClaudeProvider = "claude"
 	CodexProvider  = "codex"
 	CursorProvider = "cursor-agent"
+	GrokProvider   = "grok"
 )
 
 // ProviderForExecutable maps a configured executable basename to the stable
@@ -25,7 +26,7 @@ func ProviderForExecutable(executable string) string {
 	base := strings.ToLower(filepath.Base(executable))
 	base = strings.TrimSuffix(base, ".exe")
 	switch base {
-	case ClaudeProvider, CodexProvider:
+	case ClaudeProvider, CodexProvider, GrokProvider:
 		return base
 	case "agent", CursorProvider:
 		return CursorProvider
@@ -88,6 +89,11 @@ func ProviderStaticInputCapabilities(provider string) StaticInputCapabilities {
 			AllowedArgumentForms: []string{"-c"},
 			ConfigOverrides:      []ConfigOverrideCapability{{Key: "model_reasoning_effort", AllowedValues: values}},
 			InitialInputKinds:    []InitialInputKind{InitialInputArgument},
+		}
+	case GrokProvider:
+		return StaticInputCapabilities{
+			GrammarVersion: 1, VerifiedProviderVersion: grokBuildVersion,
+			AllowedArgumentForms: []string{"--tools", "--disallowed-tools"}, InitialInputKinds: []InitialInputKind{InitialInputArgument},
 		}
 	default:
 		return StaticInputCapabilities{AllowedArgumentForms: []string{}, ConfigOverrides: []ConfigOverrideCapability{}, InitialInputKinds: []InitialInputKind{}}
@@ -205,6 +211,8 @@ func ValidateStaticProviderInput(executable string, args []string, env map[strin
 		envRules, argRules, bypassAllowed = codexEnvRules(), codexArgRules(), codexBypassArgs()
 	case CursorProvider:
 		envRules, argRules, bypassAllowed = cursorEnvRules(), cursorArgRules(), cursorBypassArgs()
+	case GrokProvider:
+		envRules, argRules, bypassAllowed = grokEnvRules(), grokArgRules(), grokBypassArgs()
 	default:
 		return "", fmt.Errorf("executable %q does not select an adapter-known provider", executable)
 	}
@@ -219,6 +227,12 @@ func ValidateStaticProviderInput(executable string, args []string, env map[strin
 	case CodexProvider:
 		if err := validateCodexConfigOverrides(args); err != nil {
 			return "", err
+		}
+	case GrokProvider:
+		for _, name := range []string{"--tools", "--disallowed-tools"} {
+			if err := validateSingleStaticArgument(args, name); err != nil {
+				return "", err
+			}
 		}
 	}
 	if provider == CursorProvider {
@@ -258,6 +272,8 @@ func PartitionStaticProviderArgs(provider string, args []string) (committed, byp
 		argRules, bypassAllowed = codexArgRules(), codexBypassArgs()
 	case CursorProvider:
 		argRules, bypassAllowed = cursorArgRules(), cursorBypassArgs()
+	case GrokProvider:
+		argRules, bypassAllowed = grokArgRules(), grokBypassArgs()
 	default:
 		return nil, nil, fmt.Errorf("unknown provider %q", provider)
 	}

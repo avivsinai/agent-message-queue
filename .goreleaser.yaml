@@ -37,6 +37,23 @@ builds:
       post:
         - sh -ceu 'codesign --force --sign - --identifier io.github.avivsinai.amq-keepalive "$1"' _ "{{ .Path }}"
 
+  - id: amq-bridge
+    main: ./cmd/amq-bridge
+    binary: amq-bridge
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    hooks:
+      post:
+        - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq-bridge "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
+
 archives:
   - id: amq
     ids: [amq]
@@ -50,6 +67,11 @@ archives:
     ids: [amq-keepalive]
     formats: [tar.gz]
     name_template: "amq-keepalive_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  - id: amq-bridge
+    ids: [amq-bridge]
+    formats: [tar.gz]
+    name_template: "amq-bridge_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: "checksums.txt"

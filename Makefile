@@ -9,6 +9,8 @@ GOLANGCI_LINT_CACHE ?= $(CURDIR)/.golangci-cache
 build:
 	go build -ldflags "-X main.version=$(EMBED_VERSION)" -o amq ./cmd/amq
 	go build -ldflags "-X main.version=$(EMBED_VERSION)" -o amq-keepalive ./cmd/amq-keepalive
+	go build -ldflags "-X main.version=$(EMBED_VERSION)" -o amq-bridge ./cmd/amq-bridge
+	go build -ldflags "-X main.version=$(EMBED_VERSION)" -o amq-acp ./cmd/amq-acp
 
 test:
 	go test ./...

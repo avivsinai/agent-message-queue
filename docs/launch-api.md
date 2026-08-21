@@ -53,8 +53,9 @@ Reconcile refuses before capability probing or ticket creation with the typed
 `authorized_identity_changed` result. Plan and trust digests stay stable across
 those replacements.
 
-The initial-input carrier is typed. Claude and Codex currently advertise
-`argument`; AMQ appends its exact text as the final provider argv element.
+The initial-input carrier is typed. Claude, Codex, and Grok currently
+advertise `argument`; AMQ appends its exact text as the final provider argv
+element.
 `stdin` and `file` remain typed but unadvertised and return
 `initial_input_unsupported` until real stdin/file seams exist. Content is
 limited to 262,144 UTF-8 bytes without C0 controls, DEL, CR, or LF, and must
@@ -65,7 +66,10 @@ Initial input is a one-time bootstrap carrier: a resume plan never appends it
 again. The normalized execution and wake policy enters both the plan and trust
 digests, so any non-default execution, wake, or injector policy is
 trust-bearing and requires fresh trust for the exact policy.
-Claude admits one `--allowedTools <comma-separated-list>` pair. Codex admits
+Claude admits one `--allowedTools <comma-separated-list>` pair. Grok Build uses
+the canonical `--tools <list>` and `--disallowed-tools <list>` flags; their
+values are opaque Grok tool names and are not compiled through Claude's
+`--allowedTools` validator. Codex admits
 ordered `-c model_reasoning_effort=<value>` pairs with values `minimal`, `low`,
 `medium`, `high`, or `xhigh`; duplicate keys and unknown keys or values reject.
 Every `env_overlay` key uses the POSIX environment grammar
@@ -127,8 +131,8 @@ does not replace committed project configuration.
 
 `resume_policy` accepts exactly `resume`, `fresh`, or `disabled`.
 
-The v1 adapter set supports Claude Code, Codex CLI, and Cursor CLI. Claude Code
-mints its session ID from the launch nonce. Codex CLI `0.147.0` reports its
+The v1 adapter set supports Claude Code, Codex CLI, Cursor CLI, and Grok Build.
+Claude Code and Grok Build mint their session IDs from the launch nonce. Codex CLI `0.147.0` reports its
 provider-owned thread ID after a completed turn through its legacy `notify`
 hook. AMQ adds one static hook override that is bound to the session root,
 handle, launch nonce, and AMQ executable. The private hook validates the exact
@@ -159,6 +163,7 @@ headless resume:
 AMQ_CLAUDE_LIVE=1 go test ./internal/launch -run TestClaudeLiveManagedMintResumeAndCrashReuse -count=1 -v
 AMQ_CODEX_LIVE=1 go test ./internal/launch -run TestCodexLiveManagedAcquireResumeAndCrashReuse -count=1 -v
 AMQ_CURSOR_LIVE=1 go test ./internal/launch -run TestCursorLiveResumeManagedExecutionAndCrashReuse -count=1 -v
+AMQ_GROK_LIVE=1 go test ./internal/launch -run TestGrokLiveMintExitAndExactResume -count=1 -v
 ```
 
 Managed launcher live proofs skip unless the env is `1`. Run them from a shell
@@ -181,8 +186,8 @@ then bootstraps the same ID with a no-tools turn before it proves exact resume.
 It uses an already-trusted checkout as the Claude cwd and keeps its AMQ session
 root in a temporary directory; it never changes Claude trust state.
 
-Grok and Pi are excluded because they have no provider CLI; Gemini CLI and
-OpenCode also remain outside this adapter set.
+Pi is excluded because it has no provider CLI; Gemini CLI and OpenCode also
+remain outside this adapter set.
 
 ## Prepare and Apply
 

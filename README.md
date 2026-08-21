@@ -31,6 +31,22 @@ AMQ gives agents a **local interoperability bus**: they can send messages, reply
 - **Optional adapters** — Lightweight Symphony hooks and an experimental Kanban bridge can emit normal AMQ messages with structured metadata.
 - **Operational diagnostics** — `amq doctor --ops` shows queue depth, sibling-session backlogs, DLQ state, presence freshness, and integration hints.
 
+### v1 will not
+
+AMQ Core stays a local CLI. These stay out of the `amq` binary and out of v1
+product claims (see [two-host fleets](docs/adr-two-host-fleets.md) and
+[bridge protocol](docs/adr-bridge-protocol.md)):
+
+- sockets or listeners in `amq`
+- Maildir sync or remote drain of a foreign mailbox
+- git as the cross-host relay
+- OAuth MCP inside `amq`, ACP v2, or `--always-approve` in committed launch plans
+- prompt-selected `--root` / argv / env / executable
+- AMQ holding a Buzz nsec; Mac mailbox files on the Grok Bot VM
+- silent inject→notify or submit→prefill; Accessibility scraping of ChatGPT
+
+Cross-host mail is companion `amq-bridge` (send / local apply / reply), not Core.
+
 ![AMQ Demo — Claude and Codex collaborating via split-pane terminal](docs/assets/demo.gif)
 
 <a id="quick-start"></a>
@@ -230,6 +246,12 @@ The `commands` backend prints complete `coop exec` commands and exits `6`
 because executing them is the remaining operator action. Paste those emitted
 lines exactly, one per terminal. Managed `tmux`, `cmux`, and `ghostty`
 backends run the declared plan in-app instead of printing those lines.
+
+Grok Build is also supported by the managed launch adapter. It mints an exact
+`--session-id` from the AMQ launch nonce and resumes only with the stored
+`--resume <UUID>`; `--continue`, `--always-approve`, and `--yolo` are rejected
+from committed launch arguments. Grok uses `--tools` / `--disallowed-tools`
+with opaque provider names (not Claude `--allowedTools`).
 
 Each launched agent gets a session environment and wake notifications. See
 [COOP.md](COOP.md#running-co-op-mode) for co-op operations.

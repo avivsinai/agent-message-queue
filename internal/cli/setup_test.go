@@ -600,6 +600,8 @@ func setupProjectFixture(t *testing.T, adapters ...string) string {
 			return []launch.HarnessAdapter{
 				launch.NewClaudeAdapter(launch.ClaudeProvider),
 				launch.NewCodexAdapter(launch.CodexProvider),
+				launch.NewCursorAdapter(setupCursorCommand()),
+				launch.NewGrokAdapter(launch.GrokProvider),
 			}
 		}
 		setupLookPath = execLookPathForSetup
