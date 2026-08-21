@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.66.1](https://github.com/avivsinai/agent-message-queue/compare/v0.66.0...v0.66.1) (2026-08-21)
+
+
+### Bug Fixes
+
+* **bridge:** keep opaque thread id on Bot hop replies ([#626](https://github.com/avivsinai/agent-message-queue/issues/626)) ([81e8266](https://github.com/avivsinai/agent-message-queue/commit/81e82663556673359d3de7ef64acab41b21d3bd4))
+
 ## [0.66.0](https://github.com/avivsinai/agent-message-queue/compare/v0.65.3...v0.66.0) (2026-08-21)
 
 
