@@ -60,7 +60,7 @@ func runDoctor(args []string) error {
 		"  - Mailbox directory permissions",
 		"  - Agent configuration (config.json)",
 		"  - Extension metadata manifests and diagnostics",
-		"  - Skill installation (Claude Code / Codex)",
+		"  - Skill installation (Claude Code / Codex / Grok Build)",
 		"",
 		"With --ops, also checks runtime health:",
 		"  - Queue depth and oldest unread per agent",
@@ -159,11 +159,10 @@ func runDoctor(args []string) error {
 		result.Checks = append(result.Checks, checkExtensions(manifests, diagnostics))
 	}
 
-	// Check 7: Claude Code skill
+	// Check 7-9: Claude Code, Codex, and Grok Build skills
 	result.Checks = append(result.Checks, checkSkill("claude"))
-
-	// Check 8: Codex skill
 	result.Checks = append(result.Checks, checkSkill("codex"))
+	result.Checks = append(result.Checks, checkSkill("grok"))
 
 	// Ops checks (runtime health)
 	if *opsFlag && root != "" {
@@ -859,7 +858,9 @@ func checkMailboxInventory(inventory fsq.MailboxInventory, repair *fsq.MailboxRe
 func checkSkill(agent string) doctorCheck {
 	check := doctorCheck{Name: fmt.Sprintf("%s skill", agent)}
 
-	if agent != "claude" && agent != "codex" {
+	switch agent {
+	case "claude", "codex", "grok":
+	default:
 		check.Status = "warn"
 		check.Message = "unknown agent"
 		return check
