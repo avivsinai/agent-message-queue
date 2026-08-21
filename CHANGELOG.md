@@ -8,6 +8,16 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.66.0](https://github.com/avivsinai/agent-message-queue/compare/v0.65.3...v0.66.0) (2026-08-21)
+
+
+### Features
+
+* **acp:** add truthful ACP v1 stdio companion ([adbf598](https://github.com/avivsinai/agent-message-queue/commit/adbf5985709e431ce6ed0804608e3854ed8b468c))
+* **bridge:** add amq-bridge companion courier with Ed25519 host auth ([adbf598](https://github.com/avivsinai/agent-message-queue/commit/adbf5985709e431ce6ed0804608e3854ed8b468c))
+* **bridge:** apply Bot-dropped envelopes into local Maildir ([#624](https://github.com/avivsinai/agent-message-queue/issues/624)) ([a1a2767](https://github.com/avivsinai/agent-message-queue/commit/a1a2767d08abfea368f7d526fd5d818419efd906))
+* **cli:** treat Grok Build as a first-class skill peer ([#623](https://github.com/avivsinai/agent-message-queue/issues/623)) ([d3707ba](https://github.com/avivsinai/agent-message-queue/commit/d3707baa458f068fc8e93b15d5b6b17e3ec6ed12))
+
 ## [0.65.3](https://github.com/avivsinai/agent-message-queue/compare/v0.65.2...v0.65.3) (2026-08-19)
 
 
