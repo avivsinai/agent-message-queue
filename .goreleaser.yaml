@@ -54,6 +54,23 @@ builds:
       post:
         - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq-bridge "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
 
+  - id: amq-acp
+    main: ./cmd/amq-acp
+    binary: amq-acp
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    hooks:
+      post:
+        - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq-acp "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
+
 archives:
   - id: amq
     ids: [amq]
@@ -72,6 +89,11 @@ archives:
     ids: [amq-bridge]
     formats: [tar.gz]
     name_template: "amq-bridge_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  - id: amq-acp
+    ids: [amq-acp]
+    formats: [tar.gz]
+    name_template: "amq-acp_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: "checksums.txt"

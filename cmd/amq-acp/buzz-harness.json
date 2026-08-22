@@ -1,0 +1,8 @@
+{
+  "id": "amq_acp",
+  "label": "AMQ ACP v1",
+  "command": "amq-acp",
+  "args": [],
+  "installInstructionsUrl": "https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-acp/README.md",
+  "installHint": "Install the amq-acp release asset next to amq. Pin AM_ROOT, AM_ME, and AMQ_ACP_TO in this file's env on the machine; do not pass them from chat."
+}

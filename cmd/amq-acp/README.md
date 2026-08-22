@@ -46,6 +46,24 @@ all refuse with exit code 5 before any message is written.
 AM_ROOT="$AM_ROOT" AM_ME=cursor AMQ_ACP_TO=codex amq-acp
 ```
 
+Pin those values in operator config or in a local Buzz harness copy. Chat and
+prompt text must not pass `--root`, recipients, or argv.
+
+Install the binary from the matching `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz`
+release asset; Homebrew does not install it. See [INSTALL.md](../../INSTALL.md).
+
+## Buzz BYOH
+
+This is a Tier-3 custom harness, not a Buzz preset. Copy
+[`buzz-harness.json`](buzz-harness.json) to Buzz Desktop
+`custom_harnesses/amq_acp.json`. Then add `env` on **that machine copy** with
+`AM_ROOT`, `AM_ME`, and `AMQ_ACP_TO`. The committed example has empty `args` and
+no env: Buzz's default `BUZZ_ACP_AGENT_ARGS=acp` would be extra argv and
+`amq-acp` would refuse.
+
+ACP pool workers must not drain AMQ mailboxes. `amq-acp` only writes
+`inbox/new`. A separate Edge owner drains with `amq drain`.
+
 ## Limitations
 
 - A prompt is **queued**, not consumed. `session/prompt` reports

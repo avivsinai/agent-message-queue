@@ -321,6 +321,21 @@ func TestBinaryRejectsUnknownFlag(t *testing.T) {
 	}
 }
 
+func TestBinaryRejectsBuzzDefaultACPArg(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real binary end-to-end")
+	}
+	_, amqACP := binaries(t)
+
+	code, stderr := runACPExpectingFailure(t, amqACP, []string{"acp"}, "AM_ROOT=/tmp", "AM_ME="+testMe, "AMQ_ACP_TO="+testTo)
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitUsage, stderr)
+	}
+	if !strings.Contains(stderr, "unexpected arguments") {
+		t.Fatalf("stderr = %q, want unexpected arguments", stderr)
+	}
+}
+
 func TestBinaryPrintsVersion(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real binary end-to-end")
