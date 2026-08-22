@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.67.2](https://github.com/avivsinai/agent-message-queue/compare/v0.67.1...v0.67.2) (2026-08-22)
+
+
+### Bug Fixes
+
+* **wake:** self-upgrade after Homebrew Cellar unlink ([#634](https://github.com/avivsinai/agent-message-queue/issues/634)) ([8094f26](https://github.com/avivsinai/agent-message-queue/commit/8094f26cd35241e58e0a8e3fe79c41428c8ee6f7))
+
 ## [0.67.1](https://github.com/avivsinai/agent-message-queue/compare/v0.67.0...v0.67.1) (2026-08-22)
 
 
