@@ -161,9 +161,10 @@ type initializeResult struct {
 }
 
 // agentCapabilities advertises the smallest honest v1 surface. Omitting
-// mcpCapabilities declares no MCP support, and every prompt capability is false
-// because only text blocks are accepted. Filesystem and terminal access are
-// client capabilities this companion never calls.
+// mcpCapabilities declares no MCP support. Every prompt capability is false:
+// those flags gate image, audio, and embedded context, while text and
+// resource_link are the v1 baseline every agent must accept. Filesystem and
+// terminal access are client capabilities this companion never calls.
 type agentCapabilities struct {
 	LoadSession        bool               `json:"loadSession"`
 	PromptCapabilities promptCapabilities `json:"promptCapabilities"`
@@ -237,8 +238,11 @@ type promptParams struct {
 }
 
 type contentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type  string `json:"type"`
+	Text  string `json:"text"`
+	URI   string `json:"uri"`
+	Name  string `json:"name"`
+	Title string `json:"title"`
 }
 
 type promptResult struct {
@@ -288,22 +292,35 @@ func (s *Server) prompt(params json.RawMessage) (any, *rpcError) {
 	}, nil
 }
 
-// promptText joins the text blocks of a prompt. Any other block type is refused
-// rather than silently dropped, because initialize advertised text only.
+// promptText renders the v1 baseline block types: text passes through and
+// resource_link becomes a markdown link. Any other block type is refused rather
+// than silently dropped, because the false promptCapabilities declared image,
+// audio, and embedded context unsupported.
 func promptText(blocks []contentBlock) (string, *rpcError) {
 	if len(blocks) == 0 {
-		return "", newRPCError(codeInvalidParams, "prompt must contain at least one text content block")
+		return "", newRPCError(codeInvalidParams, "prompt must contain at least one content block")
 	}
 	parts := make([]string, 0, len(blocks))
 	for _, block := range blocks {
-		if block.Type != "text" {
+		switch block.Type {
+		case "text":
+			parts = append(parts, block.Text)
+		case "resource_link":
+			if strings.TrimSpace(block.URI) == "" || strings.TrimSpace(block.Name) == "" {
+				return "", newRPCError(codeInvalidParams, "resource_link block requires non-empty uri and name")
+			}
+			label := strings.TrimSpace(block.Title)
+			if label == "" {
+				label = block.Name
+			}
+			parts = append(parts, fmt.Sprintf("[%s](%s)", label, block.URI))
+		default:
 			return "", newRPCError(
 				codeInvalidParams,
-				"content block type %q is not supported; this companion advertises text-only prompts",
+				"content block type %q is not supported; this companion accepts text and resource_link only",
 				block.Type,
 			)
 		}
-		parts = append(parts, block.Text)
 	}
 	return strings.Join(parts, "\n"), nil
 }

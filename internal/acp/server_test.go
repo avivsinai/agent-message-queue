@@ -330,6 +330,85 @@ func TestSessionPromptRefusesNonTextContent(t *testing.T) {
 	assertNoDeliveredMessages(t, cfg.Root)
 }
 
+// TestSessionPromptDeliversResourceLink proves a resource_link block renders as
+// a markdown link in the delivered body, labeled by name or by title when set.
+func TestSessionPromptDeliversResourceLink(t *testing.T) {
+	for _, tc := range []struct {
+		block string
+		want  string
+	}{
+		{`{"type":"resource_link","uri":"file:///tmp/report.md","name":"report.md"}`, "[report.md](file:///tmp/report.md)"},
+		{`{"type":"resource_link","uri":"file:///tmp/report.md","name":"report.md","title":"Weekly Report"}`, "[Weekly Report](file:///tmp/report.md)"},
+	} {
+		cfg := testConfig(t)
+		server, sessionID := initializedServer(t, cfg)
+
+		line := serveOne(t, server, `{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[`+tc.block+`]}}`)
+		result := decodeResult[struct {
+			Meta struct {
+				AMQ struct {
+					MessageID string `json:"messageId"`
+				} `json:"amq"`
+			} `json:"_meta"`
+		}](t, line)
+
+		path := filepath.Join(cfg.Root, "agents", testTo, "inbox", "new", result.Meta.AMQ.MessageID+".md")
+		message, err := format.ReadMessageFile(path)
+		if err != nil {
+			t.Fatalf("read delivered message %s: %v", path, err)
+		}
+		if got := strings.TrimSpace(message.Body); got != tc.want {
+			t.Errorf("delivered body = %q, want %q", got, tc.want)
+		}
+	}
+}
+
+// TestSessionPromptJoinsTextAndResourceLink proves mixed baseline blocks join
+// with a newline in prompt order.
+func TestSessionPromptJoinsTextAndResourceLink(t *testing.T) {
+	cfg := testConfig(t)
+	server, sessionID := initializedServer(t, cfg)
+
+	line := serveOne(t, server, `{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"please review"},{"type":"resource_link","uri":"file:///tmp/diff.patch","name":"diff.patch"}]}}`)
+	result := decodeResult[struct {
+		Meta struct {
+			AMQ struct {
+				MessageID string `json:"messageId"`
+			} `json:"amq"`
+		} `json:"_meta"`
+	}](t, line)
+
+	path := filepath.Join(cfg.Root, "agents", testTo, "inbox", "new", result.Meta.AMQ.MessageID+".md")
+	message, err := format.ReadMessageFile(path)
+	if err != nil {
+		t.Fatalf("read delivered message %s: %v", path, err)
+	}
+	want := "please review\n[diff.patch](file:///tmp/diff.patch)"
+	if got := strings.TrimSpace(message.Body); got != want {
+		t.Errorf("delivered body = %q, want %q", got, want)
+	}
+}
+
+// TestSessionPromptRefusesIncompleteResourceLink refuses a resource_link that
+// is missing either required field, with no delivery.
+func TestSessionPromptRefusesIncompleteResourceLink(t *testing.T) {
+	for _, block := range []string{
+		`{"type":"resource_link","name":"report.md"}`,
+		`{"type":"resource_link","uri":"file:///tmp/report.md"}`,
+		`{"type":"resource_link","uri":"   ","name":"report.md"}`,
+		`{"type":"resource_link","uri":"file:///tmp/report.md","name":"  "}`,
+	} {
+		cfg := testConfig(t)
+		server, sessionID := initializedServer(t, cfg)
+
+		line := serveOne(t, server, `{"jsonrpc":"2.0","id":12,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[`+block+`]}}`)
+		if code := decodeError(t, line).Code; code != codeInvalidParams {
+			t.Errorf("error code = %d for %s, want %d", code, block, codeInvalidParams)
+		}
+		assertNoDeliveredMessages(t, cfg.Root)
+	}
+}
+
 func TestSessionPromptRefusesEmptyPrompt(t *testing.T) {
 	cfg := testConfig(t)
 	server, sessionID := initializedServer(t, cfg)

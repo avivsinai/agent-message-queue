@@ -22,9 +22,11 @@ Implemented methods:
 | `session/cancel` | Acknowledged. Prompt turns complete synchronously, so nothing is ever in flight to abort. |
 
 Everything else returns JSON-RPC `-32601`. There is no `session/load`, no
-`fs/*`, no `terminal/*`, and no tool calling. `promptCapabilities` are all
-false, so only `text` content blocks are accepted; any other block type is
-refused rather than silently dropped.
+`fs/*`, no `terminal/*`, and no tool calling. The v1 baseline block types are
+accepted: `text` passes through and `resource_link` is rendered into the AMQ
+body as a markdown link (`[title-or-name](uri)`). `promptCapabilities` are all
+false, so `image`, `audio`, and embedded `resource` blocks are refused rather
+than silently dropped.
 
 ## Configuration
 
