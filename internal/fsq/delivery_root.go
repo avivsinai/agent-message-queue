@@ -557,6 +557,22 @@ func (r *DeliveryRoot) dirExists(name string) bool {
 	return err == nil && info.IsDir()
 }
 
+// CreateExclusiveFile writes a root-relative regular file and refuses if the
+// path already exists. Callers that treat existence as idempotence must check
+// os.ErrExist rather than replacing the file.
+func (r *DeliveryRoot) CreateExclusiveFile(relPath string, data []byte, perm os.FileMode) error {
+	if err := r.VerifyBase(); err != nil {
+		return err
+	}
+	dir := filepath.Dir(relPath)
+	if dir != "." && dir != "" {
+		if err := r.root.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	return r.writeAndSync(relPath, data, perm)
+}
+
 func (r *DeliveryRoot) writeAndSync(name string, data []byte, perm os.FileMode) (err error) {
 	file, err := r.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {

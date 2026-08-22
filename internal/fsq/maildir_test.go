@@ -397,6 +397,28 @@ func TestDeliverToInboxRetryAfterTmpFsyncConverges(t *testing.T) {
 	}
 }
 
+func TestCreateExclusiveFileRefusesReplacement(t *testing.T) {
+	base := t.TempDir()
+	if err := EnsureRootDirs(base); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	root := openDeliveryRootForTest(t, base)
+	path := "agents/cursor/outbox/acp-events/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+	if err := root.CreateExclusiveFile(path, []byte("first\n"), 0o600); err != nil {
+		t.Fatalf("first CreateExclusiveFile: %v", err)
+	}
+	if err := root.CreateExclusiveFile(path, []byte("second\n"), 0o600); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("replacement error = %v, want os.ErrExist", err)
+	}
+	got, err := root.ReadRegularNoFollow(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "first\n" {
+		t.Fatalf("file = %q, want the first write", got)
+	}
+}
+
 func openDeliveryRootForTest(t testing.TB, base string) *DeliveryRoot {
 	t.Helper()
 	identity, err := SnapshotDeliveryRoot(base)

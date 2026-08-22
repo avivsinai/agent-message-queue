@@ -63,8 +63,18 @@ This is a Tier-3 custom harness, not a Buzz preset. Copy
 no env: Buzz's default `BUZZ_ACP_AGENT_ARGS=acp` would be extra argv and
 `amq-acp` would refuse.
 
-ACP pool workers must not drain AMQ mailboxes. `amq-acp` only writes
-`inbox/new`. A separate Edge owner drains with `amq drain`.
+- ACP pool workers must not drain AMQ mailboxes. `amq-acp` only writes
+  `inbox/new`. A separate Edge owner drains with `amq drain`.
+- `amq-acp` refuses `BUZZ_ACP_AGENTS` other than `1` and `BUZZ_ACP_RESPOND_TO`
+  other than `owner-only`, then unsets every `BUZZ_*` variable so a leaked
+  nsec cannot enter AMQ messages. A deployment lease is an upstream Buzz
+  capability; this companion does not invent one.
+- When `_meta.nostr.eventId` (or `_meta.triggeringEventIds`) names one 64-hex
+  Nostr event, that id is the idempotency key. A second prompt with the same
+  id is a no-op. Two ids in one prompt are refused: one event, one AMQ job.
+- `_meta.amq` reports independent facts: `committed`, `drained`, `started`,
+  `completed`, and `egress` (`confirmed` or `uncertain`). Queued is not
+  drained. Uncertain egress is not retried.
 
 ## Limitations
 
