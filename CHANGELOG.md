@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.68.0](https://github.com/avivsinai/agent-message-queue/compare/v0.67.2...v0.68.0) (2026-08-22)
+
+
+### Features
+
+* **acp:** add Buzz remote-task safety to amq-acp ([#637](https://github.com/avivsinai/agent-message-queue/issues/637)) ([cb8b011](https://github.com/avivsinai/agent-message-queue/commit/cb8b0113bc1ab37aaf5a0c7e8c57370d6228aa27))
+
 ## [0.67.2](https://github.com/avivsinai/agent-message-queue/compare/v0.67.1...v0.67.2) (2026-08-22)
 
 
