@@ -636,7 +636,7 @@ Building something on AMQ? Open an issue or PR to be listed here.
 - [cmd/amq-bridge/README.md](cmd/amq-bridge/README.md) — Two-host courier: identity, apply-file, HTTPS rendezvous
 - [docs/adr-two-host-fleets.md](docs/adr-two-host-fleets.md) — Two-host identity, aliases, receipts, v1 kill-list
 - [docs/adr-bridge-protocol.md](docs/adr-bridge-protocol.md) — Bridge envelope, auth, and transport
-- [cmd/amq-acp/README.md](cmd/amq-acp/README.md) — Preview ACP v1 stdio companion
+- [cmd/amq-acp/README.md](cmd/amq-acp/README.md) — Preview ACP v1 stdio companion and Buzz BYOH JSON
 - [docs/session-routing.md](docs/session-routing.md) — Session selection, routing guards, and worktree behavior
 - [docs/wake-operations.md](docs/wake-operations.md) — Wake inspection, repair, recovery, and retirement
 - [docs/wake-lifecycle.md](docs/wake-lifecycle.md) — Wake lock/target state contract, self-upgrade, log retention, JSON schema, injector identity
