@@ -581,7 +581,12 @@ A resume-eligible wake started by `coop exec` follows the stable AMQ launch
 symlink. When an installer atomically points that locator at a strictly newer
 self-reported semantic version, the wake waits for a fully quiescent delivery
 boundary and replaces its running image without changing PID, terminal
-ownership, or unread work. A failed upgrade candidate is attempted at most
+ownership, or unread work. An inconclusive live-image comparison defers and
+retries on the next maintenance tick; it does not consume refusal memory.
+Darwin treats a still-running, identity-confirmed wake whose recorded path is
+gone (`proc_pidpath` ENOENT or ESRCH after an installer unlink) as a
+conclusive deleted image, so Homebrew Cellar replacement can exec in place.
+A failed upgrade candidate is attempted at most
 once per candidate within one wake generation, bounded to the 8 most recent
 distinct candidates; a new generation resets that refusal memory. Pinned
 binaries, ownerless/keepalive wakes, repair flows, destructive interrupts, and

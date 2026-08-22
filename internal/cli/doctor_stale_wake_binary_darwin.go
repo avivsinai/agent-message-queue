@@ -9,11 +9,21 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const wakeStartedTimestampUncertainty = time.Second
 
 const deletedWakeImageReason = "wake is running a deleted image; restart it"
+
+// darwinWakeMappedImageGone reports whether Darwin could not name the live
+// process image because the vnode is already gone. Homebrew Cellar unlinks
+// produce ESRCH from proc_pidpath while the wake is still running; ENOENT is
+// the same class. Other inspection failures stay unknown.
+func darwinWakeMappedImageGone(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ESRCH)
+}
 
 func inspectWakeBinaryStalenessPlatform(
 	inspection wakeLockInspection,
@@ -59,7 +69,7 @@ func inspectWakeBinaryStalenessPlatform(
 
 	running, err := inspectDarwinWakeProcessImage(inspection.PID)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) && inspection.IdentityConfirmed && inspection.Process.Running {
+		if darwinWakeMappedImageGone(err) && inspection.IdentityConfirmed && inspection.Process.Running {
 			imagePath := running.Path
 			if imagePath == "" {
 				imagePath = recorded.ExecutionPath

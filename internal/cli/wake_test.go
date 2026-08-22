@@ -3297,7 +3297,7 @@ func TestNotifyNewMessagesResumesExactTIOCSTISuffix(t *testing.T) {
 	}
 }
 
-func TestNotifyNewMessagesFinishesPartialPayloadAfterInboxDrain(t *testing.T) {
+func TestNotifyNewMessagesDiscardsPartialPayloadAfterInboxDrain(t *testing.T) {
 	for _, mode := range []string{wakeInjectModeRaw, wakeInjectModePaste} {
 		t.Run(mode, func(t *testing.T) {
 			root := secureTempDirForTest(t)
@@ -3369,12 +3369,9 @@ func TestNotifyNewMessagesFinishesPartialPayloadAfterInboxDrain(t *testing.T) {
 				t.Fatalf("empty-inbox reconciliation: %v", err)
 			}
 
-			want := firstPayload + "\r"
-			if mode == wakeInjectModeRaw {
-				want = firstPayload + "\n\r\r"
-			}
-			if got := accepted.String(); got != want {
-				t.Fatalf("accepted bytes = %q, want exact reconciled sequence %q", got, want)
+			partial := firstPayload[:len(firstPayload)/2]
+			if got := accepted.String(); got != partial {
+				t.Fatalf("accepted bytes after empty inbox = %q, want discarded partial %q", got, partial)
 			}
 			if cfg.inputDelivery.pending() {
 				t.Fatalf("input delivery remained pending: %#v", cfg.inputDelivery)
@@ -3405,8 +3402,12 @@ func TestNotifyNewMessagesFinishesPartialPayloadAfterInboxDrain(t *testing.T) {
 			if len(laterWrites) == 0 {
 				t.Fatal("later notify wrote no terminal input")
 			}
+			joined := strings.Join(laterWrites, "")
+			if !strings.Contains(joined, coopWakeDoorbell) {
+				t.Fatalf("later notify missing fresh doorbell: %q", laterWrites)
+			}
 			staleSuffix := firstPayload[len(firstPayload)/2:]
-			if strings.HasPrefix(strings.Join(laterWrites, ""), staleSuffix) {
+			if strings.HasPrefix(joined, staleSuffix) {
 				t.Fatalf("later notify replayed stale suffix %q: %q", staleSuffix, laterWrites)
 			}
 		})

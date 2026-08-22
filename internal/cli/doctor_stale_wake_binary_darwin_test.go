@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const testDarwinCorroboratedImageMethod wakeBinaryComparisonMethod = "darwin_process_image"
@@ -486,50 +488,71 @@ func TestDarwinWakeBinaryComparisonReportsDeletedLiveImageStale(t *testing.T) {
 
 func TestDarwinWakeBinaryComparisonReportsDeletedRecordedImageWhenProcPIDPathReturnsENOENT(t *testing.T) {
 	started := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
-	dir := t.TempDir()
-	runningPath := filepath.Join(dir, "Cellar", "amq", "0.52.0", "bin", "amq")
-	currentPath := filepath.Join(dir, "Cellar", "amq", "0.52.3", "bin", "amq")
-	for _, path := range []string{runningPath, currentPath} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	runningInfo, err := os.Stat(runningPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	currentInfo, err := os.Stat(currentPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	evidence := darwinWakeImageEvidenceForTest(t, runningPath, runningInfo)
-	stubDarwinProcessImage(t, darwinWakeProcessImage{}, os.ErrNotExist)
-	if err := os.Remove(runningPath); err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range []struct {
+		name     string
+		inspect  error
+		remove   bool
+		wantGone bool
+	}{
+		{name: "ENOENT deleted path", inspect: os.ErrNotExist, remove: true, wantGone: true},
+		{name: "ESRCH deleted path", inspect: fmt.Errorf("resolve wake process executable: proc_pidpath pid %d: %w", 4242, unix.ESRCH), remove: true, wantGone: true},
+		{name: "ESRCH path still present", inspect: fmt.Errorf("resolve wake process executable: proc_pidpath pid %d: %w", 4242, unix.ESRCH), remove: false, wantGone: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			runningPath := filepath.Join(dir, "Cellar", "amq", "old", "bin", "amq")
+			currentPath := filepath.Join(dir, "Cellar", "amq", "new", "bin", "amq")
+			for _, path := range []string{runningPath, currentPath} {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runningInfo, err := os.Stat(runningPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			currentInfo, err := os.Stat(currentPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence := darwinWakeImageEvidenceForTest(t, runningPath, runningInfo)
+			stubDarwinProcessImage(t, darwinWakeProcessImage{}, tc.inspect)
+			if tc.remove {
+				if err := os.Remove(runningPath); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-	got, err := inspectWakeBinaryStalenessPlatform(
-		wakeLockInspection{
-			PID:               4242,
-			IdentityConfirmed: true,
-			Process:           wakeProcessInfo{PID: 4242, Running: true},
-			Lock: wakeLock{
-				Started:              started.Format(time.RFC3339),
-				ImagePath:            runningPath,
-				ImageVersion:         evidence.EmbeddedVersion,
-				RunningImageEvidence: &evidence,
-			},
-		},
-		resolvedWakeBinary{Path: currentPath, Info: currentInfo},
-	)
-	if err != nil {
-		t.Fatalf("compare deleted recorded image after proc_pidpath ENOENT: %v", err)
-	}
-	if !got.Stale || got.Method != wakeBinaryComparisonDarwinDeletedImage || got.Reason != deletedWakeImageReason {
-		t.Fatalf("deleted recorded image comparison = %#v, want proven stale", got)
+			got, err := inspectWakeBinaryStalenessPlatform(
+				wakeLockInspection{
+					PID:               4242,
+					IdentityConfirmed: true,
+					Process:           wakeProcessInfo{PID: 4242, Running: true},
+					Lock: wakeLock{
+						Started:              started.Format(time.RFC3339),
+						ImagePath:            runningPath,
+						ImageVersion:         evidence.EmbeddedVersion,
+						RunningImageEvidence: &evidence,
+					},
+				},
+				resolvedWakeBinary{Path: currentPath, Info: currentInfo},
+			)
+			if tc.wantGone {
+				if err != nil {
+					t.Fatalf("compare deleted recorded image: %v", err)
+				}
+				if !got.Stale || got.Method != wakeBinaryComparisonDarwinDeletedImage || got.Reason != deletedWakeImageReason {
+					t.Fatalf("deleted recorded image comparison = %#v, want proven stale", got)
+				}
+				return
+			}
+			if err == nil || got.Stale {
+				t.Fatalf("live image still present = %#v, %v; want unknown error", got, err)
+			}
+		})
 	}
 }
 
