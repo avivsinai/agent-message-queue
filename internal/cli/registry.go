@@ -68,7 +68,7 @@ func init() {
 		},
 		{
 			Name:    "wake",
-			Summary: "Background waker (TIOCSTI injection, experimental)",
+			Summary: "Background waker (TIOCSTI injection)",
 			Handler: runWake,
 			Children: []CommandInfo{
 				{Name: "check", Summary: "Inspect wake start and restart capability without mutation", Handler: runWake},

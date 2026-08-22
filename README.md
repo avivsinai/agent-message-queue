@@ -24,7 +24,7 @@ AMQ gives agents a **local interoperability bus**: they can send messages, reply
 - **Zero infrastructure** — Pure file-based. No server, no daemon, no database. Works anywhere files work.
 - **Crash-safe** — Atomic Maildir delivery (tmp→new→cur). Messages are never partially written or lost.
 - **Human-readable** — JSON frontmatter + Markdown body. Inspect with `cat`, debug with `grep`, version with `git`.
-- **Real-time notifications** — `amq wake` injects terminal notifications when messages arrive (experimental).
+- **Real-time notifications** — `amq wake` injects terminal notifications when messages arrive.
 - **Built for agents** — Priority levels, message kinds, threading, delivery receipts, and waitable handoffs.
 - **Cross-project federation** — Route messages across peer repos, preserve reply routing, and run decision threads that span projects.
 - **Swarm mode** — Join Claude Code Agent Teams, claim tasks, and bridge task notifications into AMQ.
