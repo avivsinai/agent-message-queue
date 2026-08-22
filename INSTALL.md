@@ -159,7 +159,7 @@ The optional cross-host courier is published separately as
 it. Install it next to `amq` at a stable path using the same checksum dance
 as keepalive, substituting the `amq-bridge` asset name and the host's
 platform (`linux_amd64` on Grok computer, `darwin_arm64` on Apple Silicon).
-See [amq-bridge](cmd/amq-bridge/README.md). The preview ACP v1 companion is
+See [amq-bridge](cmd/amq-bridge/README.md). The ACP v2 companion is
 published as `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz`. Homebrew does
 not install it. Install it the same way, then see
 [amq-acp](cmd/amq-acp/README.md).

@@ -1,7 +1,6 @@
-// Package acp implements a preview Agent Client Protocol (ACP) version 1
-// companion. It speaks ACP over stdio and turns each prompt into an ordinary
-// AMQ message. It never opens a socket, never executes tools, and never
-// advertises ACP version 2.
+// Package acp implements the Agent Client Protocol (ACP) v2 AMQ bridge. It
+// speaks ACP over stdio, keeps prompt turns open for live AMQ replies, and
+// never opens a socket or executes tools.
 package acp
 
 import (
@@ -9,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -17,13 +17,25 @@ import (
 // the same ones amq itself honors. This companion authenticates them and
 // refuses on a mismatch instead of restating the CLI's routing policy.
 const (
-	EnvRoot       = "AM_ROOT"
-	EnvMe         = "AM_ME"
-	EnvTo         = "AMQ_ACP_TO"
-	EnvBaseRoot   = "AM_BASE_ROOT"
-	EnvSession    = "AM_SESSION"
-	EnvRootID     = "AM_ROOT_ID"
-	EnvBaseRootID = "AM_BASE_ROOT_ID"
+	EnvRoot              = "AM_ROOT"
+	EnvMe                = "AM_ME"
+	EnvTo                = "AMQ_ACP_TO"
+	EnvBaseRoot          = "AM_BASE_ROOT"
+	EnvSession           = "AM_SESSION"
+	EnvRootID            = "AM_ROOT_ID"
+	EnvBaseRootID        = "AM_BASE_ROOT_ID"
+	EnvStateDir          = "AMQ_ACP_STATE_DIR"
+	EnvTurnTimeout       = "AMQ_ACP_TURN_TIMEOUT"
+	EnvIdleTimeout       = "AMQ_ACP_IDLE_TIMEOUT"
+	EnvPollInterval      = "AMQ_ACP_POLL_INTERVAL"
+	EnvHeartbeatInterval = "AMQ_ACP_HEARTBEAT_INTERVAL"
+)
+
+const (
+	defaultTurnTimeout       = 10 * time.Minute
+	defaultIdleTimeout       = 15 * time.Minute
+	defaultPollInterval      = 100 * time.Millisecond
+	defaultHeartbeatInterval = 15 * time.Second
 )
 
 // ContextError marks a fail-closed routing refusal so the caller can report the
@@ -42,9 +54,14 @@ func contextError(format string, args ...any) error {
 
 // Config is the resolved routing context for one amq-acp process.
 type Config struct {
-	Root string
-	Me   string
-	To   string
+	Root              string
+	Me                string
+	To                string
+	StateDir          string
+	TurnTimeout       time.Duration
+	IdleTimeout       time.Duration
+	PollInterval      time.Duration
+	HeartbeatInterval time.Duration
 }
 
 // LoadConfig resolves the routing context from the environment. An absent root,
@@ -72,7 +89,75 @@ func LoadConfig() (Config, error) {
 	if err := verifySessionPin(root); err != nil {
 		return Config{}, err
 	}
-	return Config{Root: root, Me: me, To: to}, nil
+
+	stateDir, err := resolveStateDir(root)
+	if err != nil {
+		return Config{}, err
+	}
+	turnTimeout, err := durationEnv(EnvTurnTimeout, defaultTurnTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	idleTimeout, err := durationEnv(EnvIdleTimeout, defaultIdleTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	pollInterval, err := durationEnv(EnvPollInterval, defaultPollInterval)
+	if err != nil {
+		return Config{}, err
+	}
+	heartbeatInterval, err := durationEnv(EnvHeartbeatInterval, defaultHeartbeatInterval)
+	if err != nil {
+		return Config{}, err
+	}
+	return Config{
+		Root:              root,
+		Me:                me,
+		To:                to,
+		StateDir:          stateDir,
+		TurnTimeout:       turnTimeout,
+		IdleTimeout:       idleTimeout,
+		PollInterval:      pollInterval,
+		HeartbeatInterval: heartbeatInterval,
+	}, nil
+}
+
+func resolveStateDir(root string) (string, error) {
+	stateDir := strings.TrimSpace(os.Getenv(EnvStateDir))
+	if stateDir == "" {
+		return filepath.Join(root, "meta", "acp"), nil
+	}
+	if !filepath.IsAbs(stateDir) {
+		return "", contextError("invalid %s=%q: state directory must be absolute", EnvStateDir, stateDir)
+	}
+	stateDir = filepath.Clean(stateDir)
+	if !pathWithin(root, stateDir) {
+		return "", contextError("invalid %s=%q: state directory must remain under %s", EnvStateDir, stateDir, EnvRoot)
+	}
+	return stateDir, nil
+}
+
+func pathWithin(root, child string) bool {
+	rel, err := filepath.Rel(root, child)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+func durationEnv(name string, fallback time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil || duration <= 0 {
+		if err == nil {
+			err = fmt.Errorf("must be positive")
+		}
+		return 0, contextError("invalid %s=%q: %v", name, raw, err)
+	}
+	return duration, nil
 }
 
 // verifySessionPin authenticates an inherited pin against the target root. Pin

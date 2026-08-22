@@ -66,7 +66,7 @@ required by `make lint` and `make ci`.
 cmd/amq/             CLI entry point
 cmd/amq-keepalive/   macOS wake supervisor companion
 cmd/amq-bridge/      Cross-host courier companion (apply-file + HTTPS, not Core)
-cmd/amq-acp/         Preview ACP v1 stdio companion (not Core)
+cmd/amq-acp/         ACP v2 stdio AMQ bridge (not Core)
 internal/cli/        Command handlers and routing policy
 internal/fsq/        Maildir delivery, atomic operations, and scans
 internal/format/     JSON frontmatter plus Markdown message serialization
@@ -76,7 +76,7 @@ internal/integration Shared adapter support for Symphony and Kanban
 internal/launch/     Plans, adapters, trust, leases, bindings, and resume state
 internal/keepalive/  Companion registry, adapters, hooks, and supervision
 internal/bridge/     Envelope, auth, and crash-idempotent local apply
-internal/acp/        ACP v1 session and prompt delivery
+internal/acp/        ACP v2 live sessions, steering, and prompt delivery
 internal/sessionguard Shared fail-closed session decision table
 internal/swarm/      Claude Code Agent Teams interoperability
 internal/thread/     Cross-mailbox thread collection
@@ -136,7 +136,7 @@ wire format is [the bridge protocol ADR](docs/adr-bridge-protocol.md); the
 proven hop is `apply-file`, and HTTPS needs an operator-provided rendezvous.
 Wake capability (no silent downgrade) is
 [the wake capability-vector ADR](docs/adr-wake-capability-vector.md). Preview
-ACP v1 is [the amq-acp companion](cmd/amq-acp/README.md).
+ACP v2 is [the amq-acp companion](cmd/amq-acp/README.md).
 
 ## CLI Commands
 

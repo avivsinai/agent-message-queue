@@ -15,6 +15,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 const (
@@ -90,7 +93,8 @@ func cleanEnv() []string {
 		}
 		switch name {
 		case "AM_ROOT", "AM_ROOT_ID", "AM_BASE_ROOT", "AM_BASE_ROOT_ID", "AM_SESSION", "AM_ME",
-			"AMQ_ACP_TO", "AMQ_GLOBAL_ROOT", "AMQ_WAKE_OWNER":
+			"AMQ_ACP_TO", "AMQ_ACP_STATE_DIR", "AMQ_ACP_TURN_TIMEOUT", "AMQ_ACP_IDLE_TIMEOUT",
+			"AMQ_ACP_POLL_INTERVAL", "AMQ_ACP_HEARTBEAT_INTERVAL", "AMQ_GLOBAL_ROOT", "AMQ_WAKE_OWNER":
 			continue
 		}
 		env = append(env, entry)
@@ -150,24 +154,30 @@ func (s *acpSession) call(request string) map[string]json.RawMessage {
 	if _, err := fmt.Fprintln(s.stdin, request); err != nil {
 		s.t.Fatalf("write request: %v (stderr: %s)", err, s.stderr)
 	}
-	line, err := s.stdout.ReadString('\n')
-	if err != nil {
-		s.t.Fatalf("read response: %v (stderr: %s)", err, s.stderr)
+	for {
+		line, err := s.stdout.ReadString('\n')
+		if err != nil {
+			s.t.Fatalf("read response: %v (stderr: %s)", err, s.stderr)
+		}
+		var envelope struct {
+			Method string                     `json:"method"`
+			Result map[string]json.RawMessage `json:"result"`
+			Error  *struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(line), &envelope); err != nil {
+			s.t.Fatalf("decode response %q: %v", line, err)
+		}
+		if envelope.Method != "" && envelope.Error == nil && envelope.Result == nil {
+			continue
+		}
+		if envelope.Error != nil {
+			s.t.Fatalf("request %s failed: %d %s", request, envelope.Error.Code, envelope.Error.Message)
+		}
+		return envelope.Result
 	}
-	var envelope struct {
-		Result map[string]json.RawMessage `json:"result"`
-		Error  *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(line), &envelope); err != nil {
-		s.t.Fatalf("decode response %q: %v", line, err)
-	}
-	if envelope.Error != nil {
-		s.t.Fatalf("request %s failed: %d %s", request, envelope.Error.Code, envelope.Error.Message)
-	}
-	return envelope.Result
 }
 
 func (s *acpSession) closeAndWait() {
@@ -182,7 +192,7 @@ func (s *acpSession) closeAndWait() {
 
 // TestACPPromptIsDrainableByRealAMQ is the end-to-end proof: a prompt sent
 // through the real amq-acp binary becomes a message the real amq drain command
-// consumes, body included.
+// consumes, and a real AMQ reply completes the ACP turn.
 func TestACPPromptIsDrainableByRealAMQ(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real binary end-to-end")
@@ -192,19 +202,25 @@ func TestACPPromptIsDrainableByRealAMQ(t *testing.T) {
 
 	session := startACP(t, amqACP, "AM_ROOT="+root, "AM_ME="+testMe, "AMQ_ACP_TO="+testTo)
 
-	initialized := session.call(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":true}}}`)
-	if version := string(initialized["protocolVersion"]); version != "1" {
-		t.Fatalf("protocolVersion = %s over real stdio, want 1", version)
+	initialized := session.call(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":true}}}`)
+	if version := string(initialized["protocolVersion"]); version != "2" {
+		t.Fatalf("protocolVersion = %s over real stdio, want 2", version)
 	}
 
-	created := session.call(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"` + root + `","mcpServers":[]}}`)
+	created := session.call(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"` + root + `","mcpServers":[],"_meta":{"channelId":"cockpit-e2e"}}}`)
 	sessionID := unquote(t, created["sessionId"])
 	if sessionID == "" {
 		t.Fatal("session/new returned no sessionId")
 	}
 
 	const body = "acp preview handoff: review internal/acp"
-	prompted := session.call(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"` + body + `"}]}}`)
+	promptedCh := make(chan map[string]json.RawMessage, 1)
+	go func() {
+		promptedCh <- session.call(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"` + body + `"}]}}`)
+	}()
+	promptMessage := waitForMessage(t, root, testTo, "ACP cockpit prompt")
+	deliverReply(t, root, testTo, testMe, promptMessage.Header.Thread, "acknowledged by the real AMQ path")
+	prompted := <-promptedCh
 	if reason := unquote(t, prompted["stopReason"]); reason != "end_turn" {
 		t.Fatalf("stopReason = %q, want end_turn", reason)
 	}
@@ -221,8 +237,8 @@ func TestACPPromptIsDrainableByRealAMQ(t *testing.T) {
 	if item.From != testMe {
 		t.Errorf("drained from = %q, want %q", item.From, testMe)
 	}
-	if item.Thread != "p2p/codex__cursor" {
-		t.Errorf("drained thread = %q, want p2p/codex__cursor", item.Thread)
+	if item.Thread != "cockpit/cockpit-e2e" {
+		t.Errorf("drained thread = %q, want cockpit/cockpit-e2e", item.Thread)
 	}
 	if !item.MovedToCur {
 		t.Error("drained message was not moved to cur")
@@ -259,6 +275,63 @@ func drainJSON(t *testing.T, amq, root, me string) drainOutput {
 		t.Fatalf("decode drain output %q: %v", output, err)
 	}
 	return result
+}
+
+func waitForMessage(t *testing.T, root, agent, subject string) format.Message {
+	t.Helper()
+	mailbox := fsq.AgentInboxNew(root, agent)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(mailbox)
+		if err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+					continue
+				}
+				message, err := format.ReadMessageFile(filepath.Join(mailbox, entry.Name()))
+				if err == nil && message.Header.Subject == subject {
+					return message
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s in %s", subject, mailbox)
+	return format.Message{}
+}
+
+func deliverReply(t *testing.T, root, from, to, thread, body string) {
+	t.Helper()
+	now := time.Now()
+	id, err := format.NewMessageID(now)
+	if err != nil {
+		t.Fatalf("new reply id: %v", err)
+	}
+	message := format.Message{Header: format.Header{
+		Schema:  format.CurrentSchema,
+		ID:      id,
+		From:    from,
+		To:      []string{to},
+		Thread:  thread,
+		Subject: "reply",
+		Created: now.UTC().Format(time.RFC3339Nano),
+	}, Body: body}
+	data, err := message.Marshal()
+	if err != nil {
+		t.Fatalf("marshal reply: %v", err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		t.Fatalf("snapshot reply root: %v", err)
+	}
+	deliveryRoot, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		t.Fatalf("open reply root: %v", err)
+	}
+	defer func() { _ = deliveryRoot.Close() }()
+	if _, err := fsq.DeliverToInboxes(deliveryRoot, []string{to}, id+".md", data); err != nil {
+		t.Fatalf("deliver reply: %v", err)
+	}
 }
 
 // TestBinaryRefusesMissingRoot proves the companion fails closed instead of

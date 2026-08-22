@@ -1,12 +1,12 @@
-// Command amq-acp is a preview Agent Client Protocol (ACP) version 1 companion
-// for AMQ. It speaks ACP over stdio, turns each prompt into an ordinary AMQ
-// message addressed to AMQ_ACP_TO, and exits when stdin closes. It is a
+// Command amq-acp is an Agent Client Protocol (ACP) version 2 bridge for AMQ.
+// It speaks ACP over stdio, turns prompts and steering into messages on a
+// durable AMQ cockpit thread, and waits for a bounded live reply. It is a
 // separate binary on purpose: amq itself gains no protocol server and no
 // listening socket.
 //
-// This companion speaks ACP version 1 only. It runs no model, executes no
-// tools, and reads no files on behalf of a client. Queuing a message is not
-// proof that the recipient consumed it; use amq receipts for that.
+// This companion runs no model, executes no tools, and reads no files on
+// behalf of a client. AMQ delivery and reply polling use the pinned context;
+// a timeout is returned as a typed no-reply refusal.
 package main
 
 import (
@@ -72,11 +72,11 @@ func run(args []string) int {
 	return 0
 }
 
-const usage = `amq-acp speaks Agent Client Protocol version 1 over stdio and delivers each
-prompt as an AMQ message. It never listens on a socket.
+const usage = `amq-acp speaks Agent Client Protocol version 2 over stdio and bridges
+ACP prompts and steering to a durable AMQ cockpit thread. It never listens on a socket.
 
 Usage:
-  amq-acp            serve ACP v1 on stdin and stdout
+  amq-acp            serve ACP v2 on stdin and stdout
   amq-acp --version  print the binary version
 
 Environment:
@@ -87,6 +87,11 @@ Environment:
   AM_SESSION       pinned session name
   AM_ROOT_ID       identity token authenticating AM_ROOT
   AM_BASE_ROOT_ID  identity token authenticating AM_BASE_ROOT
+  AMQ_ACP_STATE_DIR durable channel/thread state directory under AM_ROOT
+  AMQ_ACP_TURN_TIMEOUT bounded reply wait (default 10m)
+  AMQ_ACP_IDLE_TIMEOUT idle runtime expiry (default 15m)
+  AMQ_ACP_POLL_INTERVAL reply poll interval (default 100ms)
+  AMQ_ACP_HEARTBEAT_INTERVAL session/update heartbeat interval (default 15s)
 
 A session pin that cannot be authenticated is refused with exit code 5.
 `

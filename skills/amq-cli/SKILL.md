@@ -661,5 +661,5 @@ For detailed protocols, read the reference file FIRST, then follow its instructi
 - [references/message-format.md](references/message-format.md) — Message format: frontmatter schema, field reference
 - [references/cross-project.md](references/cross-project.md) — Cross-project routing: peer config, addressing, decision threads
 - [amq-bridge](https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-bridge/README.md) — Two-host courier: apply-file, identity, HTTPS rendezvous
-- [amq-acp](https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-acp/README.md) — ACP v1 stdio companion and Buzz BYOH JSON
+- [amq-acp](https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-acp/README.md) — ACP v2 stdio bridge and Buzz BYOH JSON
 - [references/review-loop.md](references/review-loop.md) — Token-efficient review cycles: delegate multi-round reviews to background agents
