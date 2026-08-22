@@ -557,14 +557,25 @@ func maintainWakeSelfUpgrade(
 		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
 	}
 	different, comparisonErr := wakeSelfUpgradeLiveDifference(inspection, probe)
-	if comparisonErr != nil || !different {
+	if comparisonErr != nil {
+		// Inconclusive identity is transient (Homebrew Cellar unlink, proc_pidpath
+		// ESRCH). Do not remember the probe or write refusal memory; retry next tick.
+		decision.Action = wakeSelfUpgradeActionDeferred
+		decision.Reason = wakeRestartReasonWithRemedy(
+			"live wake image identity is unknown or ambiguous: "+comparisonErr.Error(),
+			inspection.Root,
+			inspection.Agent,
+		)
+		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
+	}
+	if !different {
 		state.lastProbe = probe
 		decision.Action = wakeSelfUpgradeActionRefused
-		reason := "candidate image identity is not conclusively different from the live wake"
-		if comparisonErr != nil {
-			reason = "live wake image identity is unknown or ambiguous: " + comparisonErr.Error()
-		}
-		decision.Reason = wakeRestartReasonWithRemedy(reason, inspection.Root, inspection.Agent)
+		decision.Reason = wakeRestartReasonWithRemedy(
+			"candidate image identity is not conclusively different from the live wake",
+			inspection.Root,
+			inspection.Agent,
+		)
 		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
 	}
 

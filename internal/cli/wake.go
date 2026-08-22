@@ -1617,12 +1617,10 @@ func reconcileWakeInputAfterInboxDrain(cfg *wakeConfig) error {
 		return nil
 	}
 	if cfg.inputDelivery.phase == wakeInputPayloadPending {
-		if cfg.inputDelivery.acceptedBytes == 0 {
-			// No terminal byte was confirmed, so there is no stale composer input
-			// to finish after the inbox made progress.
-			clearWakeInputState(cfg)
-			return nil
-		}
+		// Inbox is empty: never finish or repeat doorbell text. A queued submit
+		// may still complete so an already-presented prompt does not sit idle.
+		clearWakeInputState(cfg)
+		return nil
 	}
 	_, err := resumeWakeInputDelivery(cfg)
 	return err

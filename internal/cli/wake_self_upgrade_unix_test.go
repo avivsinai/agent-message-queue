@@ -256,11 +256,12 @@ func TestMaintainWakeSelfUpgradeUsesLiveProcessImageOverRecordedEvidence(t *test
 	}
 }
 
-func TestMaintainWakeSelfUpgradeRefusesUnknownLiveProcessImage(t *testing.T) {
+func TestMaintainWakeSelfUpgradeDefersUnknownLiveProcessImage(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	removeWakeRestartRecordForTest(t, fixture)
 	candidate := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
 	state := selfUpgradeStateForCandidate(t, candidate)
+	initialProbe := state.lastProbe
 	stubWakeSelfUpgradeVersion(t, "99.0.0")
 	fixture.lock.PID = 1 << 30
 
@@ -268,12 +269,26 @@ func TestMaintainWakeSelfUpgradeRefusesUnknownLiveProcessImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Action != wakeSelfUpgradeActionRefused ||
+	if decision.Action != wakeSelfUpgradeActionDeferred ||
 		!strings.Contains(decision.Reason, "unknown or ambiguous") {
-		t.Fatalf("unknown live image decision = %#v, want refused", decision)
+		t.Fatalf("unknown live image decision = %#v, want deferred", decision)
+	}
+	if state.lastProbe != initialProbe {
+		t.Fatal("unknown live image advanced the probe baseline")
 	}
 	if _, err := os.Lstat(filepath.Join(fixture.agentDir.path, wakeRestartFileName)); !os.IsNotExist(err) {
 		t.Fatalf("unknown live image created restart record: %v", err)
+	}
+
+	decision, err = maintainWakeSelfUpgrade(&state, fixture.agentDir, fixture.lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Action != wakeSelfUpgradeActionDeferred {
+		t.Fatalf("retry after unknown live image = %#v, want deferred not unchanged/refused", decision)
+	}
+	if state.lastProbe != initialProbe {
+		t.Fatal("retry after unknown live image advanced the probe baseline")
 	}
 }
 
