@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.67.0](https://github.com/avivsinai/agent-message-queue/compare/v0.66.1...v0.67.0) (2026-08-22)
+
+
+### Features
+
+* **acp:** publish amq-acp asset and Buzz BYOH harness ([#629](https://github.com/avivsinai/agent-message-queue/issues/629)) ([4ffbaed](https://github.com/avivsinai/agent-message-queue/commit/4ffbaed70714f9e3c53350cd3294a2090d0915a3))
+
 ## [0.66.1](https://github.com/avivsinai/agent-message-queue/compare/v0.66.0...v0.66.1) (2026-08-21)
 
 
