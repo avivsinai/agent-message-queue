@@ -141,7 +141,7 @@ Before diving in, match the task to the right workflow — this avoids wasted ef
 |-----------|-----------|
 | **"spec", "design with", "collaborative spec"** | Use `/amq-spec` instead — it has structured phase-by-phase guidance for parallel-research workflows. |
 | **Send a message, review request, question** | Use `amq send` (see Messaging below) |
-| **Buzz / ACP / `amq-acp`** | Companion `amq-acp` queues to `AMQ_ACP_TO`; pool workers must not drain. Chat must not pass `--root`, recipients, or argv. See [`cmd/amq-acp/README.md`](../../cmd/amq-acp/README.md). |
+| **Buzz / ACP / `amq-acp`** | Companion `amq-acp` queues to `AMQ_ACP_TO`; pool workers must not drain. Chat must not pass `--root`, recipients, or argv. `[Context]` is not routing. See [`cmd/amq-acp/README.md`](../../cmd/amq-acp/README.md). |
 | **Two-host / Grok computer / `amq-bridge`** | Companion `amq-bridge`, never a foreign `--root`. See Two-host fleets below. |
 | **Swarm / agent teams** | Read [references/swarm-mode.md](references/swarm-mode.md), then use `amq swarm` |
 | **Received message with labels `workflow:spec`** | Follow the spec skill protocol: do independent research first, then engage on the `spec/<topic>` thread — don't skip straight to implementation. |

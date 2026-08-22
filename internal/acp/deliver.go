@@ -1,7 +1,9 @@
 package acp
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -19,15 +21,42 @@ type Delivery struct {
 	MessageID string
 	To        string
 	Thread    string
+	EventID   string
+	State     string
+	Committed bool
+	Drained   bool
+	Started   bool
+	Completed bool
+	Egress    string
+	Duplicate bool
 }
 
 // DeliverPrompt writes the prompt text into the destination inbox using the
 // ordinary Maildir tmp -> new delivery, so amq list and amq drain observe it
-// exactly like any other message.
-func DeliverPrompt(cfg Config, body string) (Delivery, error) {
+// exactly like any other message. Recipient and root always come from Config;
+// prompt text, including a Buzz [Context] section, is never treated as
+// authentication or a routing override.
+func DeliverPrompt(cfg Config, body, eventID string) (Delivery, error) {
 	body = strings.TrimRight(body, "\n")
 	if strings.TrimSpace(body) == "" {
 		return Delivery{}, fmt.Errorf("prompt contains no text content")
+	}
+
+	if eventID != "" {
+		if existing, ok, err := loadEventRecord(cfg, eventID); err != nil {
+			return Delivery{}, err
+		} else if ok {
+			out := existing.delivery()
+			out.EventID = existing.EventID
+			out.State = DeliveryDuplicate
+			out.Committed = existing.Committed
+			out.Drained = existing.Drained
+			out.Started = existing.Started
+			out.Completed = existing.Completed
+			out.Egress = existing.Egress
+			out.Duplicate = true
+			return out, nil
+		}
 	}
 
 	now := time.Now()
@@ -36,6 +65,10 @@ func DeliverPrompt(cfg Config, body string) (Delivery, error) {
 		return Delivery{}, err
 	}
 	thread := p2pThread(cfg.Me, cfg.To)
+	labels := []string{"acp"}
+	if eventID != "" {
+		labels = append(labels, "nostr:"+eventID)
+	}
 	message := format.Message{
 		Header: format.Header{
 			Schema:  format.CurrentSchema,
@@ -45,7 +78,7 @@ func DeliverPrompt(cfg Config, body string) (Delivery, error) {
 			Thread:  thread,
 			Subject: PromptSubject,
 			Created: now.UTC().Format(time.RFC3339Nano),
-			Labels:  []string{"acp"},
+			Labels:  labels,
 		},
 		Body: body,
 	}
@@ -67,10 +100,47 @@ func DeliverPrompt(cfg Config, body string) (Delivery, error) {
 	}
 	defer func() { _ = root.Close() }()
 
-	if _, err := fsq.DeliverToInboxes(root, []string{cfg.To}, id+".md", data); err != nil {
-		return Delivery{}, err
+	_, err = fsq.DeliverToInboxes(root, []string{cfg.To}, id+".md", data)
+	egress := EgressConfirmed
+	if err != nil {
+		var uncertain *fsq.CommittedDurabilityError
+		if !errors.As(err, &uncertain) {
+			return Delivery{}, err
+		}
+		egress = EgressUncertain
 	}
-	return Delivery{MessageID: id, To: cfg.To, Thread: thread}, nil
+
+	out := Delivery{
+		MessageID: id,
+		To:        cfg.To,
+		Thread:    thread,
+		EventID:   eventID,
+		State:     DeliveryStateQueued,
+		Committed: true,
+		Drained:   false,
+		Started:   false,
+		Completed: false,
+		Egress:    egress,
+	}
+	if eventID == "" {
+		return out, nil
+	}
+	rec := eventRecord{
+		Schema:    1,
+		EventID:   eventID,
+		MessageID: id,
+		To:        cfg.To,
+		Thread:    thread,
+		Committed: true,
+		Drained:   false,
+		Started:   false,
+		Completed: false,
+		Egress:    egress,
+	}
+	if rememberErr := rememberEvent(cfg, rec); rememberErr != nil && !errors.Is(rememberErr, os.ErrExist) {
+		return Delivery{}, rememberErr
+	}
+	return out, nil
 }
 
 // p2pThread builds the documented canonical peer thread name so replies sent

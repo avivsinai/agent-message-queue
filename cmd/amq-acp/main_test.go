@@ -353,6 +353,53 @@ func TestBinaryPrintsVersion(t *testing.T) {
 	}
 }
 
+func TestBinaryRefusesParallelAgents(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real binary end-to-end")
+	}
+	_, amqACP := binaries(t)
+	code, stderr := runACPExpectingFailure(t, amqACP, nil,
+		"AM_ROOT=/tmp",
+		"AM_ME="+testMe,
+		"AMQ_ACP_TO="+testTo,
+		"BUZZ_ACP_AGENTS=4",
+	)
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitUsage, stderr)
+	}
+	if !strings.Contains(stderr, "agents=1") {
+		t.Errorf("stderr %q does not name agents=1", stderr)
+	}
+}
+
+func TestBinaryDoesNotCopyBuzzSecretIntoMailbox(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real binary end-to-end")
+	}
+	amq, amqACP := binaries(t)
+	root := initQueue(t, amq)
+	const secret = "nsec-must-not-reach-mailbox"
+	session := startACP(t, amqACP,
+		"AM_ROOT="+root,
+		"AM_ME="+testMe,
+		"AMQ_ACP_TO="+testTo,
+		"BUZZ_PRIVATE_KEY="+secret,
+	)
+	session.call(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}`)
+	created := session.call(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"` + root + `","mcpServers":[]}}`)
+	sessionID := unquote(t, created["sessionId"])
+	session.call(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"handoff without secrets"}]}}`)
+	session.closeAndWait()
+
+	drained := drainJSON(t, amq, root, testTo)
+	if drained.Count != 1 {
+		t.Fatalf("drain count %d, want 1", drained.Count)
+	}
+	if strings.Contains(drained.Drained[0].Body, secret) {
+		t.Fatal("delivered body contains BUZZ_PRIVATE_KEY material")
+	}
+}
+
 // runACPExpectingFailure runs the companion with an empty stdin and returns its
 // exit code and stderr.
 func runACPExpectingFailure(t *testing.T, binary string, args []string, env ...string) (int, string) {

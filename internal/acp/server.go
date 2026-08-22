@@ -259,6 +259,13 @@ type amqDelivery struct {
 	To        string `json:"to"`
 	Thread    string `json:"thread"`
 	State     string `json:"state"`
+	EventID   string `json:"eventId,omitempty"`
+	Committed bool   `json:"committed"`
+	Drained   bool   `json:"drained"`
+	Started   bool   `json:"started"`
+	Completed bool   `json:"completed"`
+	Egress    string `json:"egress"`
+	Duplicate bool   `json:"duplicate,omitempty"`
 }
 
 func (s *Server) prompt(params json.RawMessage) (any, *rpcError) {
@@ -277,7 +284,11 @@ func (s *Server) prompt(params json.RawMessage) (any, *rpcError) {
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
-	delivery, err := DeliverPrompt(s.cfg, text)
+	eventID, rpcErr := resolveEventID(parsed.Meta)
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
+	delivery, err := DeliverPrompt(s.cfg, text, eventID)
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "deliver prompt to %s: %v", s.cfg.To, err)
 	}
@@ -287,7 +298,14 @@ func (s *Server) prompt(params json.RawMessage) (any, *rpcError) {
 			MessageID: delivery.MessageID,
 			To:        delivery.To,
 			Thread:    delivery.Thread,
-			State:     DeliveryStateQueued,
+			State:     delivery.State,
+			EventID:   delivery.EventID,
+			Committed: delivery.Committed,
+			Drained:   delivery.Drained,
+			Started:   delivery.Started,
+			Completed: delivery.Completed,
+			Egress:    delivery.Egress,
+			Duplicate: delivery.Duplicate,
 		}},
 	}, nil
 }

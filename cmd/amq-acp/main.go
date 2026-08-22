@@ -55,6 +55,11 @@ func run(args []string) int {
 		return exitUsage
 	}
 
+	if err := acp.PrepareWorkerEnv(); err != nil {
+		fmt.Fprintln(os.Stderr, "amq-acp:", err)
+		return exitUsage
+	}
+
 	cfg, err := acp.LoadConfig()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp:", err)
@@ -87,6 +92,10 @@ Environment:
   AM_SESSION       pinned session name
   AM_ROOT_ID       identity token authenticating AM_ROOT
   AM_BASE_ROOT_ID  identity token authenticating AM_BASE_ROOT
+
+BUZZ_* variables are read only to refuse agents!=1 and non-owner inbound, then
+stripped before any message is written. A deployment lease is upstream; this
+binary does not treat an env string as one.
 
 A session pin that cannot be authenticated is refused with exit code 5.
 `
