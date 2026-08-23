@@ -135,3 +135,15 @@ brews:
     license: "MIT"
     test: |
       system "#{bin}/amq", "--version"
+
+scoops:
+  - name: amq
+    ids: [amq]
+    repository:
+      owner: avivsinai
+      name: scoop-bucket
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: bucket
+    homepage: "https://github.com/avivsinai/agent-message-queue"
+    description: "Agent Message Queue - file-based inter-agent messaging for Claude Code and Codex CLI"
+    license: "MIT"
