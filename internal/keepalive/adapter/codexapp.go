@@ -60,11 +60,11 @@ func parseCodexAppTarget(target string) (string, error) {
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return "", fmt.Errorf("Codex app target is missing a tab identity")
+		return "", fmt.Errorf("codex app target is missing a tab identity")
 	}
 	for _, char := range id {
 		if unicode.IsSpace(char) || unicode.IsControl(char) {
-			return "", fmt.Errorf("Codex app target contains unsafe tab identity")
+			return "", fmt.Errorf("codex app target contains unsafe tab identity")
 		}
 	}
 	return id, nil
