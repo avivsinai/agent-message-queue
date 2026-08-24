@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.69.0](https://github.com/avivsinai/agent-message-queue/compare/v0.68.0...v0.69.0) (2026-08-24)
+
+
+### Features
+
+* **coop:** add opt-in --named flag for CLI session naming ([#642](https://github.com/avivsinai/agent-message-queue/issues/642)) ([d860af6](https://github.com/avivsinai/agent-message-queue/commit/d860af6bc5a894bea915388f82cdf29ab7d93e8d))
+
 ## [0.68.0](https://github.com/avivsinai/agent-message-queue/compare/v0.67.2...v0.68.0) (2026-08-22)
 
 
