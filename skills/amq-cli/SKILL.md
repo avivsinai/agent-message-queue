@@ -203,6 +203,9 @@ Managed `tmux`, `cmux`, and `ghostty` backends run the plan in-app instead.
 
 Without `--session` or `--root`, `coop exec` uses the declared `default_session` from `.amq/launch.json`, or `collab` when none is declared. Creating a missing session or root from `coop exec` is deprecated and prints `warning: creating a missing session or root from coop exec is deprecated; use 'amq session create <name>' or 'amq init --root'. The next major release makes this exit 3.`
 
+Add `--named` to stamp `AM_ME` onto the CLI conversation title (`claude`/`pi`
+get `--name`; Codex and Cursor `agent` get a best-effort `/rename` on Unix).
+
 Add `--no-gitignore` when `coop exec` should auto-initialize the project without changing `.gitignore`.
 
 Direct `coop exec` is legacy low-level plumbing. When an operator deliberately

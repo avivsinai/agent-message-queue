@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -144,6 +145,255 @@ func TestCoopExecForwardsCommandArguments(t *testing.T) {
 	wantArgv := []string{"sh", "-c", "echo ok", "--tail-flag"}
 	if !reflect.DeepEqual(gotArgv, wantArgv) {
 		t.Fatalf("argv = %#v, want %#v", gotArgv, wantArgv)
+	}
+}
+
+func putBareCommandOnPATH(t *testing.T, name string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestAgentArgsHasNameFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "empty", args: nil, want: false},
+		{name: "short flag", args: []string{"-n", "foo"}, want: true},
+		{name: "long flag", args: []string{"--name", "foo"}, want: true},
+		{name: "long equals", args: []string{"--name=foo"}, want: true},
+		{name: "other flags", args: []string{"--model", "gpt"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := agentArgsHasNameFlag(tt.args); got != tt.want {
+				t.Fatalf("agentArgsHasNameFlag(%#v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInjectCoopNamedArgv(t *testing.T) {
+	tests := []struct {
+		name      string
+		cmd       string
+		args      []string
+		me        string
+		want      []string
+		unchanged bool
+	}{
+		{
+			name: "claude injects name",
+			cmd:  "claude",
+			me:   "coder1",
+			want: []string{"--name", "coder1"},
+		},
+		{
+			name: "pi injects before flags",
+			cmd:  "pi",
+			args: []string{"--foo"},
+			me:   "coder1",
+			want: []string{"--name", "coder1", "--foo"},
+		},
+		{
+			name:      "skips existing name",
+			cmd:       "claude",
+			args:      []string{"--name", "custom"},
+			me:        "coder1",
+			unchanged: true,
+		},
+		{
+			name:      "skips existing short name",
+			cmd:       "pi",
+			args:      []string{"-n", "custom"},
+			me:        "coder1",
+			unchanged: true,
+		},
+		{
+			name:      "codex unchanged",
+			cmd:       "codex",
+			args:      []string{"--foo"},
+			me:        "coder1",
+			unchanged: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := injectCoopNamedArgv(tt.cmd, append([]string{}, tt.args...), tt.me)
+			if tt.unchanged {
+				if !reflect.DeepEqual(got, tt.args) {
+					t.Fatalf("got %#v, want unchanged %#v", got, tt.args)
+				}
+				return
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("got %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCoopExecNamedInjectsArgv(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	putBareCommandOnPATH(t, "pi")
+
+	sentinel := errors.New("exec sentinel")
+	var gotArgv []string
+	oldExec := coopExecProcess
+	coopExecProcess = func(_ string, argv []string, _ []string) error {
+		gotArgv = append([]string{}, argv...)
+		return sentinel
+	}
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err := runCoopExec([]string{
+		"--root", root,
+		"--me", "coder1",
+		"--named",
+		"--no-wake",
+		"pi",
+		"--",
+		"--foo",
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("coop exec error = %v, want sentinel", err)
+	}
+	wantArgv := []string{"pi", "--name", "coder1", "--foo"}
+	if !reflect.DeepEqual(gotArgv, wantArgv) {
+		t.Fatalf("argv = %#v, want %#v", gotArgv, wantArgv)
+	}
+}
+
+func TestCoopExecNamedWithoutFlagDoesNotInject(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	putBareCommandOnPATH(t, "claude")
+
+	sentinel := errors.New("exec sentinel")
+	var gotArgv []string
+	oldExec := coopExecProcess
+	coopExecProcess = func(_ string, argv []string, _ []string) error {
+		gotArgv = append([]string{}, argv...)
+		return sentinel
+	}
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err := runCoopExec([]string{
+		"--root", root,
+		"--me", "coder1",
+		"--no-wake",
+		"claude",
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("coop exec error = %v, want sentinel", err)
+	}
+	wantArgv := []string{"claude"}
+	if !reflect.DeepEqual(gotArgv, wantArgv) {
+		t.Fatalf("argv = %#v, want %#v", gotArgv, wantArgv)
+	}
+}
+
+func TestCoopNamedTUICommand(t *testing.T) {
+	if got := coopNamedTUICommand("codex", "coder1"); got != "/rename coder1" {
+		t.Fatalf("codex command = %q", got)
+	}
+	if got := coopNamedTUICommand("agent", "coder1"); got != "/rename coder1" {
+		t.Fatalf("agent command = %q", got)
+	}
+	if got := coopNamedTUICommand("pi", "coder1"); got != "/name coder1" {
+		t.Fatalf("pi fallback command = %q", got)
+	}
+}
+
+func TestInjectCoopNamedSlashCommand(t *testing.T) {
+	oldInject := tiocstiInject
+	oldSleep := rawInjectSleep
+	oldReady := coopNamedTTYReady
+	t.Cleanup(func() {
+		tiocstiInject = oldInject
+		rawInjectSleep = oldSleep
+		coopNamedTTYReady = oldReady
+	})
+	rawInjectSleep = func(time.Duration) {}
+	coopNamedTTYReady = func() bool { return true }
+
+	var injected []string
+	tiocstiInject = func(text string) error {
+		injected = append(injected, text)
+		return nil
+	}
+
+	if err := injectCoopNamedSlashCommand("coder1", "codex"); err != nil {
+		t.Fatalf("injectCoopNamedSlashCommand: %v", err)
+	}
+	want := []string{"/rename coder1", "\r"}
+	if !reflect.DeepEqual(injected, want) {
+		t.Fatalf("injected = %#v, want %#v", injected, want)
+	}
+}
+
+func TestApplyCoopNamedStartsTUIInjector(t *testing.T) {
+	var started bool
+	oldStart := startCoopNamedTUIInjector
+	startCoopNamedTUIInjector = func(me, cmdName string) error {
+		started = true
+		if me != "coder1" || cmdName != "codex" {
+			t.Fatalf("startCoopNamedTUIInjector me=%q cmd=%q", me, cmdName)
+		}
+		return nil
+	}
+	t.Cleanup(func() { startCoopNamedTUIInjector = oldStart })
+
+	args, err := applyCoopNamedBeforeExec(true, "codex", []string{"--foo"}, "coder1")
+	if err != nil {
+		t.Fatalf("applyCoopNamedBeforeExec: %v", err)
+	}
+	if !started {
+		t.Fatal("expected TUI injector to start for codex")
+	}
+	if !reflect.DeepEqual(args, []string{"--foo"}) {
+		t.Fatalf("args = %#v, want unchanged agent flags", args)
+	}
+}
+
+func TestApplyCoopNamedTUIInjectorFailureIsBestEffort(t *testing.T) {
+	oldStart := startCoopNamedTUIInjector
+	startCoopNamedTUIInjector = func(me, cmdName string) error {
+		return errors.New("inject helper unavailable")
+	}
+	t.Cleanup(func() { startCoopNamedTUIInjector = oldStart })
+
+	args, err := applyCoopNamedBeforeExec(true, "codex", []string{"--foo"}, "coder1")
+	if err != nil {
+		t.Fatalf("applyCoopNamedBeforeExec: %v, want best-effort continue", err)
+	}
+	if !reflect.DeepEqual(args, []string{"--foo"}) {
+		t.Fatalf("args = %#v, want unchanged agent flags", args)
+	}
+}
+
+func TestApplyCoopNamedUnknownBinaryLeavesArgs(t *testing.T) {
+	args, err := applyCoopNamedBeforeExec(true, "bash", []string{"-lc", "true"}, "coder1")
+	if err != nil {
+		t.Fatalf("applyCoopNamedBeforeExec: %v", err)
+	}
+	if !reflect.DeepEqual(args, []string{"-lc", "true"}) {
+		t.Fatalf("args = %#v, want unchanged", args)
+	}
+	reminder := coopNamedUnknownReminder("coder1", "/bin/bash")
+	if !strings.Contains(reminder, "coder1") || !strings.Contains(reminder, "bash") {
+		t.Fatalf("reminder = %q", reminder)
 	}
 }
 

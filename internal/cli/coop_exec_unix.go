@@ -72,6 +72,7 @@ func runCoopExec(args []string) error {
 	fs.Var(&managedSymphonyEventFlags, "managed-symphony-event", "")
 	managedSymphonyWorkspaceFlag := fs.String("managed-symphony-workspace-key", "", "")
 	yesFlag := fs.Bool("y", false, "Skip confirmation prompts (including clearing a blocking wake)")
+	namedFlag := fs.Bool("named", false, "Stamp AM_ME onto the spawned CLI session name (opt-in)")
 
 	usage := usageWithFlags(fs, "amq coop exec [options] <command> [-- <command-flags>]",
 		"Set up co-op mode and exec into the agent (replaces this process).",
@@ -93,6 +94,7 @@ func runCoopExec(args []string) error {
 		"  amq coop exec --require-wake --wake-inject-mode none claude  # Zero-input wake",
 		"  amq coop exec --wake-inject-via /path/to/injector codex",
 		"  amq coop exec --me myagent bash                   # Debug shell with AMQ env",
+		"  amq coop exec --named --me coder1 pi            # Exec pi --name coder1",
 		"",
 		"Wake readiness:",
 		"  Coop never reuses a generic wake because it has no persisted",
@@ -698,6 +700,12 @@ func runCoopExec(args []string) error {
 	}
 	sessionIdentity := coopSessionIdentity(root, requestedSession, *rootFlag)
 	env := buildCoopExecEnvironment(baseEnv, root, agentHandle, sessionIdentity)
+
+	// Optional --named: argv injection for claude/pi, TUI inject for codex/agent.
+	agentArgs, err = applyCoopNamedBeforeExec(*namedFlag, cmdName, agentArgs, agentHandle)
+	if err != nil {
+		return err
+	}
 
 	// Build argv: command name + agent args.
 	argv := append([]string{cmdName}, agentArgs...)
