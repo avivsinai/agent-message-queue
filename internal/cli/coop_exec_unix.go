@@ -66,6 +66,7 @@ func runCoopExec(args []string) error {
 	var wakeInjectArgFlags multiStringFlag
 	fs.Var(&wakeInjectArgFlags, "wake-inject-arg", "Fixed argument for wake --inject-via before the payload (repeatable)")
 	yesFlag := fs.Bool("y", false, "Skip confirmation prompts (including clearing a blocking wake)")
+	namedFlag := fs.Bool("named", false, "Stamp AM_ME onto the spawned CLI session name (opt-in)")
 
 	usage := usageWithFlags(fs, "amq coop exec [options] <command> [-- <command-flags>]",
 		"Set up co-op mode and exec into the agent (replaces this process).",
@@ -86,6 +87,7 @@ func runCoopExec(args []string) error {
 		"  amq coop exec --require-wake --wake-inject-mode none claude  # Zero-input wake",
 		"  amq coop exec --wake-inject-via /path/to/injector codex",
 		"  amq coop exec --me myagent bash                   # Debug shell with AMQ env",
+		"  amq coop exec --named --me coder1 pi            # Exec pi --name coder1",
 		"",
 		"Wake readiness:",
 		"  Coop never reuses a generic wake because it has no persisted",
@@ -568,6 +570,12 @@ func runCoopExec(args []string) error {
 	// independent of AM_ROOT. A custom sessionless --root clears inherited pins.
 	sessionIdentity := coopSessionIdentity(root, *sessionFlag, *rootFlag)
 	env := buildCoopExecEnvironment(baseEnv, root, agentHandle, sessionIdentity)
+
+	// Optional --named: argv injection for claude/pi, TUI inject for codex/agent.
+	agentArgs, err = applyCoopNamedBeforeExec(*namedFlag, cmdName, agentArgs, agentHandle)
+	if err != nil {
+		return err
+	}
 
 	// Build argv: command name + agent args.
 	argv := append([]string{cmdName}, agentArgs...)
