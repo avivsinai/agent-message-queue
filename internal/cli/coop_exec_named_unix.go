@@ -52,6 +52,10 @@ func startCoopNamedTUIInjectorProcess(me, cmdName string) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start coop named inject helper: %w", err)
 	}
+	// Detach from Wait so the helper is not a tracked child of the agent after exec.
+	if err := cmd.Process.Release(); err != nil {
+		return fmt.Errorf("release coop named inject helper: %w", err)
+	}
 	return nil
 }
 
@@ -107,25 +111,8 @@ func injectCoopNamedSlashCommand(me, binaryBase string) error {
 	if err := tiocstiInject(command); err != nil {
 		return err
 	}
-	if prelude := coopNamedSubmitPrelude(binaryBase); prelude != "" {
-		rawInjectSleep(rawInjectSettleDelay)
-		if err := tiocstiInject(prelude); err != nil {
-			return err
-		}
-	}
-	rawInjectSleep(rawInjectSettleDelay)
-	if err := tiocstiInject("\r"); err != nil {
-		return err
-	}
+	// One Enter to submit the slash command. Extra newlines can land in the
+	// composer as a blank user message if the TUI is already at a prompt.
 	rawInjectSleep(rawInjectSettleDelay)
 	return tiocstiInject("\r")
-}
-
-func coopNamedSubmitPrelude(binaryBase string) string {
-	switch strings.ToLower(filepath.Base(binaryBase)) {
-	case "codex", "agent":
-		return "\n"
-	default:
-		return ""
-	}
 }

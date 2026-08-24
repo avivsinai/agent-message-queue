@@ -4,10 +4,10 @@ package cli
 
 import "errors"
 
-func startCoopNamedTUIInjector(me, cmdName string) error {
+var startCoopNamedTUIInjector = func(me, cmdName string) error {
 	_ = me
 	_ = cmdName
-	return nil
+	return errors.New("coop named TUI inject requires macOS or Linux")
 }
 
 func runCoopNamedInject(_ []string) error {

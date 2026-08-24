@@ -158,6 +158,9 @@ amq coop exec grok  # Terminal 3 (optional peer) — caller flags forwarded unch
 
 Without `--session` or `--root`, `coop exec` defaults to `--session collab`.
 
+Add `--named` to stamp `AM_ME` onto the CLI conversation title (`claude`/`pi`
+get `--name`; Codex and Cursor `agent` get a best-effort `/rename` on Unix).
+
 Add `--no-gitignore` when `coop exec` should auto-initialize the project without changing `.gitignore`.
 
 ### Standalone wake interrupt safety

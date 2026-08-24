@@ -325,7 +325,7 @@ func TestInjectCoopNamedSlashCommand(t *testing.T) {
 	if err := injectCoopNamedSlashCommand("coder1", "codex"); err != nil {
 		t.Fatalf("injectCoopNamedSlashCommand: %v", err)
 	}
-	want := []string{"/rename coder1", "\n", "\r", "\r"}
+	want := []string{"/rename coder1", "\r"}
 	if !reflect.DeepEqual(injected, want) {
 		t.Fatalf("injected = %#v, want %#v", injected, want)
 	}
@@ -368,6 +368,20 @@ func TestApplyCoopNamedTUIInjectorFailureIsBestEffort(t *testing.T) {
 	}
 	if !reflect.DeepEqual(args, []string{"--foo"}) {
 		t.Fatalf("args = %#v, want unchanged agent flags", args)
+	}
+}
+
+func TestApplyCoopNamedUnknownBinaryLeavesArgs(t *testing.T) {
+	args, err := applyCoopNamedBeforeExec(true, "bash", []string{"-lc", "true"}, "coder1")
+	if err != nil {
+		t.Fatalf("applyCoopNamedBeforeExec: %v", err)
+	}
+	if !reflect.DeepEqual(args, []string{"-lc", "true"}) {
+		t.Fatalf("args = %#v, want unchanged", args)
+	}
+	reminder := coopNamedUnknownReminder("coder1", "/bin/bash")
+	if !strings.Contains(reminder, "coder1") || !strings.Contains(reminder, "bash") {
+		t.Fatalf("reminder = %q", reminder)
 	}
 }
 
