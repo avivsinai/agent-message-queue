@@ -46,6 +46,7 @@ hook-env-check:
 	@sh scripts/test_pre_push_hook_env.sh
 
 contract-check:
+	@sh scripts/probe-codex-app-execute-javascript_test.sh
 	@bash scripts/check-keepalive-amq-contract_test.sh
 	@candidate_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/amq-keepalive-candidate.XXXXXX")"; \
 		trap 'rm -rf "$$candidate_dir"' EXIT; \
