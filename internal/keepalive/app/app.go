@@ -136,11 +136,92 @@ type registerOptions struct {
 	NoStart        bool
 	Replace        bool
 	RetireDetached bool
+	MinCapability  adapter.Capability
 }
 
 type registerResult struct {
 	Entry          registry.Entry   `json:"entry"`
 	RemovedEntries []registry.Entry `json:"removed_entries,omitempty"`
+}
+
+// parseMinCapability translates the --min-delivery / --min-session /
+// --accept-requires-human flags into a Capability minimum. A zero value (the
+// default) preserves today's behavior: only the strongest unattended seats
+// satisfy it, so a human-required prefill seat like claude-desktop is refused
+// unless the caller explicitly opts into it.
+func parseMinCapability(delivery, session string, acceptRequiresHuman bool) (adapter.Capability, error) {
+	d, err := parseDeliveryFlag(delivery)
+	if err != nil {
+		return adapter.Capability{}, err
+	}
+	s, err := parseSessionFlag(session)
+	if err != nil {
+		return adapter.Capability{}, err
+	}
+	return adapter.Capability{
+		Delivery:      d,
+		Session:       s,
+		RequiresHuman: acceptRequiresHuman,
+	}, nil
+}
+
+func parseDeliveryFlag(s string) (adapter.Delivery, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "none":
+		return adapter.DeliveryNone, nil
+	case "prefilled":
+		return adapter.DeliveryPrefilled, nil
+	case "submitted":
+		return adapter.DeliverySubmitted, nil
+	default:
+		return 0, fmt.Errorf("invalid --min-delivery %q: want none|prefilled|submitted", s)
+	}
+}
+
+func parseSessionFlag(s string) (adapter.SessionScope, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "none":
+		return adapter.SessionNone, nil
+	case "new":
+		return adapter.SessionNew, nil
+	case "existing-exact":
+		return adapter.SessionExistingExact, nil
+	default:
+		return 0, fmt.Errorf("invalid --min-session %q: want none|new|existing-exact", s)
+	}
+}
+
+func minCapabilityLabel(d adapter.Delivery) string {
+	switch d {
+	case adapter.DeliveryPrefilled:
+		return "prefilled"
+	case adapter.DeliverySubmitted:
+		return "submitted"
+	default:
+		return "none"
+	}
+}
+
+func sessionLabel(s adapter.SessionScope) string {
+	switch s {
+	case adapter.SessionNew:
+		return "new"
+	case adapter.SessionExistingExact:
+		return "existing-exact"
+	default:
+		return "none"
+	}
+}
+
+func activationLabel(a adapter.Activation) string {
+	switch a {
+	case adapter.ActivationLaunch:
+		return "launch"
+	case adapter.ActivationForeground:
+		return "foreground"
+	default:
+		return "none"
+	}
 }
 
 func (a App) attach(ctx context.Context, args []string) error {
@@ -170,7 +251,14 @@ func (a App) register(ctx context.Context, args []string, replace bool) error {
 	wakeTimeout := fs.Duration("wake-ready-timeout", 10*time.Second, "maximum time to wait for amq wake readiness")
 	noStart := fs.Bool("no-start", false, "register without starting/reconciling wake")
 	retireDetached := fs.Bool("retire-detached", false, "on a recreated terminal, retire the proven-absent previous wake via amq wake retire before converging on the exact new target")
+	minDelivery := fs.String("min-delivery", "none", "minimum delivery capability required from the adapter: none|prefilled|submitted")
+	minSession := fs.String("min-session", "none", "minimum session capability required from the adapter: none|new|existing-exact")
+	acceptRequiresHuman := fs.Bool("accept-requires-human", false, "accept an adapter that requires a human to send the prompt (prefill-only seats)")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	minCapability, err := parseMinCapability(*minDelivery, *minSession, *acceptRequiresHuman)
+	if err != nil {
 		return err
 	}
 	return a.registerWithOptions(ctx, registerOptions{
@@ -187,6 +275,7 @@ func (a App) register(ctx context.Context, args []string, replace bool) error {
 		NoStart:        *noStart,
 		Replace:        replace,
 		RetireDetached: *retireDetached,
+		MinCapability:  minCapability,
 	})
 }
 
@@ -239,6 +328,28 @@ func (a App) registerWithOptions(ctx context.Context, opts registerOptions) erro
 			return err
 		}
 		opts.Target = normalized
+	}
+	// Capability gate runs AFTER target normalization so a target-aware adapter
+	// can declare a per-target vector (e.g. new vs existing-exact). A target
+	// normalization error has already failed above. Prefer
+	// CapabilityForTarget(target) when implemented; else Capability(); else
+	// UnknownCapability() (weakest + requires a human). An adapter that forgets
+	// to declare any Capability is refused unless the caller explicitly
+	// tolerates a human-required seat — fail-closed, not fail-open.
+	var declared adapter.Capability
+	if td, ok := selected.(adapter.TargetCapabilityDeclarer); ok {
+		c, err := td.CapabilityForTarget(opts.Target)
+		if err != nil {
+			return fmt.Errorf("adapter %s target %q: %w", opts.AdapterName, opts.Target, err)
+		}
+		declared = c
+	} else if d, ok := selected.(adapter.CapabilityDeclarer); ok {
+		declared = d.Capability()
+	} else {
+		declared = adapter.UnknownCapability()
+	}
+	if !declared.Satisfies(opts.MinCapability) {
+		return fmt.Errorf("adapter %s does not satisfy the requested capability (declared: activation=%s delivery=%s session=%s requires_human=%t; min: activation=%s delivery=%s session=%s requires_human=%t); refusing without substitution", opts.AdapterName, activationLabel(declared.Activation), minCapabilityLabel(declared.Delivery), sessionLabel(declared.Session), declared.RequiresHuman, activationLabel(opts.MinCapability.Activation), minCapabilityLabel(opts.MinCapability.Delivery), sessionLabel(opts.MinCapability.Session), opts.MinCapability.RequiresHuman)
 	}
 	ownershipContext := registrationOwnershipContext(ctx, selected, opts.Target)
 	store := registry.New(opts.RegistryPath)

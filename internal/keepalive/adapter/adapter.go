@@ -36,6 +36,27 @@ type TargetNormalizer interface {
 	NormalizeTarget(target string) (string, error)
 }
 
+// CapabilityDeclarer lets an adapter publish its honest delivery vector. An
+// adapter that does not implement it is treated as UnknownCapability()
+// (weakest on every ordered axis and requires a human), so it is refused
+// unless the caller explicitly tolerates a human-required seat. This keeps an
+// adapter that forgets to declare a Capability from masquerading as an
+// unattended full-strength seat.
+type CapabilityDeclarer interface {
+	Capability() Capability
+}
+
+// TargetCapabilityDeclarer is implemented by adapters whose capability vector
+// depends on the resolved target (for example, a deep-link adapter that can
+// prefill either a new session or an exact existing conversation). When an
+// adapter implements this, the registration gate prefers
+// CapabilityForTarget(target) over the target-blind Capability() so a caller
+// requesting an existing-exact session is refused a new-only target rather
+// than silently downgraded. An error from CapabilityForTarget fails closed.
+type TargetCapabilityDeclarer interface {
+	CapabilityForTarget(target string) (Capability, error)
+}
+
 // TargetInventory is a point-in-time existence snapshot. Implementations must
 // return ErrTargetNotFound only when absence is proven by the snapshot; parse,
 // transport, and permission failures remain ambiguous errors. When ownership
@@ -81,17 +102,22 @@ func NewRegistry(adapters ...Adapter) Registry {
 }
 
 func DefaultRegistry() Registry {
-	// GUI adapters remain deliberately unregistered until the task-0 Codex app
-	// Apple Events gate is proven on the target Mac. Do not turn a skeleton or a
-	// prefill fallback into a submitted wake by adding them here early.
-	return NewRegistry(File{}, Ghostty{}, Cmux{recorded: newCmuxOwnershipRecord()})
+	// claude-desktop and codex-app are registered and reachable behind the
+	// capability gate in app.registerWithOptions: a caller gets one only by
+	// explicitly accepting a requires-human seat (--accept-requires-human) with
+	// delivery/session minima at or below what the target declares. With the
+	// default zero-value minimum both are refused automatically, and a
+	// submitted/unattended caller is refused too. (The Codex app's dead
+	// execute-javascript path stays dead — issue #640 — but its live codex://
+	// deep-link prefill seat is shipped here.)
+	return NewRegistry(File{}, Ghostty{}, Cmux{recorded: newCmuxOwnershipRecord()}, ClaudeDesktop{}, CodexApp{})
 }
 
 // DefaultRegistryWithLogf returns the production adapter set with non-fatal
 // adapter diagnostics wired to logf. Callers that do not own a diagnostic
 // stream can continue using DefaultRegistry.
 func DefaultRegistryWithLogf(logf func(format string, args ...any)) Registry {
-	return NewRegistry(File{}, Ghostty{}, Cmux{Logf: logf, recorded: newCmuxOwnershipRecord()})
+	return NewRegistry(File{}, Ghostty{}, Cmux{Logf: logf, recorded: newCmuxOwnershipRecord()}, ClaudeDesktop{}, CodexApp{})
 }
 
 func (r Registry) Get(name string) (Adapter, error) {

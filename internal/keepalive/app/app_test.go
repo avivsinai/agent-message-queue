@@ -747,6 +747,240 @@ exit 12
 	}
 }
 
+func TestRegisterCapabilityGateRefusesClaudeDesktopUnderWeakMinimum(t *testing.T) {
+	// The capability gate must refuse a requires-human prefill seat under the
+	// default zero-value minimum (today's implicit unattended minimum) and
+	// under a submitted/unattended minimum. No substitution, no fallback.
+	base := registerOptions{
+		AdapterName:  "claude-desktop",
+		Target:       "claude-desktop:new",
+		Root:         "/tmp/amq-root",
+		BaseRoot:     "/tmp",
+		SessionName:  "amq-root",
+		Me:           "codex",
+		NoStart:      true,
+		RegistryPath: testRegistryTempPath(t),
+	}
+	for _, tc := range []struct {
+		name string
+		min  adapter.Capability
+	}{
+		{name: "zero-value default minimum", min: adapter.Capability{}},
+		{name: "submitted unattended minimum", min: adapter.Capability{Delivery: adapter.DeliverySubmitted, RequiresHuman: false}},
+		{name: "existing-exact minimum", min: adapter.Capability{Session: adapter.SessionExistingExact}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			callCount := 0
+			trackingRunner := appCommandRunnerFunc(func(_ context.Context, name string, _ ...string) ([]byte, error) {
+				callCount++
+				return []byte("com.anthropic.claudefordesktop\n"), nil
+			})
+			trackingAdapters := adapter.NewRegistry(adapter.ClaudeDesktop{Runner: trackingRunner})
+			registryPath := testRegistryTempPath(t)
+			opts := base
+			opts.RegistryPath = registryPath
+			opts.MinCapability = tc.min
+			app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &trackingAdapters}
+			err := app.registerWithOptions(context.Background(), opts)
+			if err == nil {
+				t.Fatalf("registerWithOptions succeeded under %s; want capability refusal", tc.name)
+			}
+			if !strings.Contains(err.Error(), "does not satisfy") {
+				t.Fatalf("error = %v, want a capability refusal naming the shortfall", err)
+			}
+			// FIX-5: a refusal must happen before discovery/injection, so the
+			// runner is never invoked and the registry file is left untouched.
+			if callCount != 0 {
+				t.Fatalf("runner called %d time(s) on refusal; want 0 (gate fires before any command)", callCount)
+			}
+			if info, statErr := os.Stat(registryPath); !os.IsNotExist(statErr) {
+				t.Fatalf("registry file exists after refusal (stat=%v %v); want it never written", info, statErr)
+			}
+		})
+	}
+}
+
+func TestRegisterCapabilityGateAcceptsClaudeDesktopUnderExplicitHumanHandoff(t *testing.T) {
+	// Only an explicit human-handoff caller (min accepts requires-human and
+	// only needs prefill+new) is accepted. Inject must then launch the deep-link
+	// prefill-only (the fake runner records the open call; no submit step).
+	var openArgs []string
+	runner := appCommandRunnerFunc(func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name == "open" {
+			openArgs = append([]string{}, args...)
+		}
+		return []byte("com.anthropic.claudefordesktop\n"), nil
+	})
+	adapters := adapter.NewRegistry(adapter.ClaudeDesktop{Runner: runner})
+	opts := registerOptions{
+		AdapterName:  "claude-desktop",
+		Target:       "claude-desktop:new",
+		Root:         "/tmp/amq-root",
+		BaseRoot:     "/tmp",
+		SessionName:  "amq-root",
+		Me:           "codex",
+		NoStart:      true,
+		RegistryPath: testRegistryTempPath(t),
+		MinCapability: adapter.Capability{
+			Delivery:      adapter.DeliveryPrefilled,
+			Session:       adapter.SessionNew,
+			RequiresHuman: true,
+		},
+	}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &adapters}
+	if err := app.registerWithOptions(context.Background(), opts); err != nil {
+		t.Fatalf("registerWithOptions under explicit human handoff failed: %v", err)
+	}
+	// FIX-5: registration with NoStart does not itself inject, so no open call
+	// is expected here — the exact-escaped-URL assertion lives at the adapter
+	// layer in TestClaudeDesktopInjectPrefillsOnlyWithEscapedURL (it asserts
+	// `claude://code/new?q=hello+world+%26+q%3Dx`). Here we just confirm the
+	// gate accepted and the runner was not asked to inject during registration.
+	if len(openArgs) != 0 {
+		t.Fatalf("registration invoked open with %#v; NoStart must not inject", openArgs)
+	}
+}
+
+// undeclaredAdapter implements adapter.Adapter but NOT CapabilityDeclarer, so
+// it is treated as UnknownCapability() (weakest on every ordered axis and
+// requires a human). This is the FIX-A regression: such an adapter must NOT
+// bypass the gate — it is refused under the default zero-value minimum (which
+// is unattended) and under a submitted minimum, and accepted only when the
+// caller explicitly tolerates a human-required seat.
+type undeclaredAdapter struct{}
+
+func (undeclaredAdapter) Name() string                                 { return "undeclared" }
+func (undeclaredAdapter) Probe(context.Context, string) error          { return nil }
+func (undeclaredAdapter) Inject(context.Context, string, string) error { return nil }
+
+func TestRegisterCapabilityGateTreatsUndeclaredAdapterAsUnknown(t *testing.T) {
+	// An undeclared adapter is treated as UnknownCapability(): weakest on
+	// every ordered axis and requires a human. It is REFUSED under the default
+	// zero-value minimum (which is unattended) AND under a submitted minimum,
+	// and ACCEPTED only when the caller explicitly tolerates a human-required
+	// seat. This is the FIX-A regression: an unknown adapter must never
+	// masquerade as unattended full-strength.
+	adapters := adapter.NewRegistry(undeclaredAdapter{})
+	base := registerOptions{
+		AdapterName:  "undeclared",
+		Target:       "claude-desktop:new",
+		Root:         "/tmp/amq-root",
+		BaseRoot:     "/tmp",
+		SessionName:  "amq-root",
+		Me:           "codex",
+		NoStart:      true,
+		RegistryPath: testRegistryTempPath(t),
+	}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &adapters}
+	for _, tc := range []struct {
+		name string
+		min  adapter.Capability
+	}{
+		{name: "zero-value default minimum", min: adapter.Capability{}},
+		{name: "submitted unattended minimum", min: adapter.Capability{Delivery: adapter.DeliverySubmitted, RequiresHuman: false}},
+	} {
+		t.Run(tc.name+" refuses", func(t *testing.T) {
+			opts := base
+			opts.RegistryPath = testRegistryTempPath(t)
+			opts.MinCapability = tc.min
+			if err := app.registerWithOptions(context.Background(), opts); err == nil {
+				t.Fatalf("undeclared adapter accepted under %s; want refusal", tc.name)
+			} else if !strings.Contains(err.Error(), "does not satisfy") {
+				t.Fatalf("error = %v, want a capability refusal", err)
+			}
+		})
+	}
+	// Accepted only when the caller explicitly tolerates a human-required seat.
+	acceptOpts := base
+	acceptOpts.RegistryPath = testRegistryTempPath(t)
+	acceptOpts.MinCapability = adapter.Capability{RequiresHuman: true}
+	if err := app.registerWithOptions(context.Background(), acceptOpts); err != nil {
+		t.Fatalf("undeclared adapter under explicit requires-human min failed: %v", err)
+	}
+}
+
+func TestRegisterCapabilityGateRefusalShowsActivationShortfall(t *testing.T) {
+	// FIX-B: the refusal error must include activation for both declared and
+	// min, so an activation-only shortfall is distinguishable. claude-desktop
+	// (ActivationLaunch) vs a foreground minimum must be refused and the
+	// message must show activation=launch vs activation=foreground.
+	runner := appCommandRunnerFunc(func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return []byte("com.anthropic.claudefordesktop\n"), nil
+	})
+	adapters := adapter.NewRegistry(adapter.ClaudeDesktop{Runner: runner})
+	opts := registerOptions{
+		AdapterName:  "claude-desktop",
+		Target:       "claude-desktop:new",
+		Root:         "/tmp/amq-root",
+		BaseRoot:     "/tmp",
+		SessionName:  "amq-root",
+		Me:           "codex",
+		NoStart:      true,
+		RegistryPath: testRegistryTempPath(t),
+		MinCapability: adapter.Capability{
+			Activation:    adapter.ActivationForeground,
+			Delivery:      adapter.DeliveryPrefilled,
+			Session:       adapter.SessionNew,
+			RequiresHuman: true,
+		},
+	}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &adapters}
+	err := app.registerWithOptions(context.Background(), opts)
+	if err == nil {
+		t.Fatal("registerWithOptions succeeded under foreground min for a launch seat; want refusal")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "does not satisfy") {
+		t.Fatalf("error = %v, want a capability refusal", err)
+	}
+	if !strings.Contains(msg, "activation=launch") {
+		t.Fatalf("error %q does not show the declared activation=launch", msg)
+	}
+	if !strings.Contains(msg, "activation=foreground") {
+		t.Fatalf("error %q does not show the min activation=foreground", msg)
+	}
+}
+
+func TestRegisterCapabilityGatePrefersTargetCapabilityForCodexApp(t *testing.T) {
+	// The codex-app adapter implements TargetCapabilityDeclarer: its two
+	// targets differ on session scope (new vs existing-exact). The gate must
+	// prefer CapabilityForTarget(target) so a caller requesting existing-exact
+	// is refused the new-only target rather than silently downgraded, and
+	// accepted for the thread target under the same min.
+	runner := appCommandRunnerFunc(func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return []byte("com.openai.codex\n"), nil
+	})
+	adapters := adapter.NewRegistry(adapter.CodexApp{Runner: runner})
+	base := registerOptions{
+		Root: "/tmp/amq-root", BaseRoot: "/tmp", SessionName: "amq-root", Me: "codex",
+		AMQPath: "/bin/false", NoStart: true,
+		MinCapability: adapter.Capability{
+			Delivery:      adapter.DeliveryPrefilled,
+			Session:       adapter.SessionExistingExact,
+			RequiresHuman: true,
+		},
+	}
+	// codex-app:thread:<uuid> satisfies an existing-exact+prefill+RH-tolerant min.
+	acceptOpts := base
+	acceptOpts.RegistryPath = testRegistryTempPath(t)
+	acceptOpts.AdapterName = "codex-app"
+	acceptOpts.Target = "codex-app:thread:01a01f5f-69d6-7dd0-868f-9376f3d2c0a1"
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &adapters}
+	if err := app.registerWithOptions(context.Background(), acceptOpts); err != nil {
+		t.Fatalf("codex-app:thread under existing-exact min failed: %v", err)
+	}
+	// codex-app:new does NOT satisfy an existing-exact min (no new→existing downgrade).
+	refuseOpts := base
+	refuseOpts.RegistryPath = testRegistryTempPath(t)
+	refuseOpts.AdapterName = "codex-app"
+	refuseOpts.Target = "codex-app:new"
+	if err := app.registerWithOptions(context.Background(), refuseOpts); err == nil {
+		t.Fatal("codex-app:new under existing-exact min succeeded; want refusal (no downgrade)")
+	} else if !strings.Contains(err.Error(), "does not satisfy") {
+		t.Fatalf("error = %v, want a capability refusal", err)
+	}
+}
+
 func TestReattachPreservesRegistryWhenWakeTargetCannotChange(t *testing.T) {
 	dir := t.TempDir()
 	registryPath := testRegistryPath(t, dir)
@@ -2348,6 +2582,17 @@ type boundaryAdapter struct {
 
 func (a boundaryAdapter) Name() string { return a.name }
 
+// boundaryAdapter is a stand-in for a real adapter in behavioral tests, so it
+// declares the full-strength unattended vector real TTY/file seats declare.
+func (boundaryAdapter) Capability() adapter.Capability {
+	return adapter.Capability{
+		Activation:    adapter.ActivationNone,
+		Delivery:      adapter.DeliverySubmitted,
+		Session:       adapter.SessionExistingExact,
+		RequiresHuman: false,
+	}
+}
+
 func (a boundaryAdapter) Probe(context.Context, string) error { return a.probeErr }
 
 func (a boundaryAdapter) Inject(context.Context, string, string) error { return nil }
@@ -2359,6 +2604,17 @@ type presenceAdapter struct {
 }
 
 func (a *presenceAdapter) Name() string { return a.name }
+
+// presenceAdapter is a stand-in for a real adapter in presence/inventory
+// tests, so it declares the full-strength unattended vector real seats declare.
+func (*presenceAdapter) Capability() adapter.Capability {
+	return adapter.Capability{
+		Activation:    adapter.ActivationNone,
+		Delivery:      adapter.DeliverySubmitted,
+		Session:       adapter.SessionExistingExact,
+		RequiresHuman: false,
+	}
+}
 
 func (a *presenceAdapter) Probe(ctx context.Context, target string) error {
 	if err := ctx.Err(); err != nil {
