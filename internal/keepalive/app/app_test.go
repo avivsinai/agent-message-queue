@@ -801,6 +801,9 @@ func TestRegisterCapabilityGateRefusesClaudeDesktopUnderWeakMinimum(t *testing.T
 }
 
 func TestRegisterCapabilityGateAcceptsClaudeDesktopUnderExplicitHumanHandoff(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("claude-desktop adapter requires macOS")
+	}
 	// Only an explicit human-handoff caller (min accepts requires-human and
 	// only needs prefill+new) is accepted. Inject must then launch the deep-link
 	// prefill-only (the fake runner records the open call; no submit step).
@@ -942,6 +945,9 @@ func TestRegisterCapabilityGateRefusalShowsActivationShortfall(t *testing.T) {
 }
 
 func TestRegisterCapabilityGatePrefersTargetCapabilityForCodexApp(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("codex-app adapter requires macOS")
+	}
 	// The codex-app adapter implements TargetCapabilityDeclarer: its two
 	// targets differ on session scope (new vs existing-exact). The gate must
 	// prefer CapabilityForTarget(target) so a caller requesting existing-exact
