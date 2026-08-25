@@ -19,6 +19,19 @@ func (File) Name() string {
 	return "file"
 }
 
+// Capability declares the file seat as full-strength on delivery and session:
+// Inject appends the payload (with a trailing newline) to an exact, resolved
+// target path with no human in the loop. Activation is None — appending to a
+// file path does not foreground or raise any surface.
+func (File) Capability() Capability {
+	return Capability{
+		Activation:    ActivationNone,
+		Delivery:      DeliverySubmitted,
+		Session:       SessionExistingExact,
+		RequiresHuman: false,
+	}
+}
+
 // NormalizeTarget resolves a file target to its stable absolute pathname.
 // Registration persists this value, so a later launchd invocation cannot
 // reinterpret a relative target from a different working directory. Resolving

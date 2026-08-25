@@ -29,6 +29,21 @@ func (Ghostty) Name() string {
 	return "ghostty"
 }
 
+// Capability declares the full-strength TTY seat on delivery and session:
+// the adapter submits the payload (text + Enter) into an exact existing
+// terminal surface with no human in the loop. Activation is None because
+// Inject types into a pinned terminal id WITHOUT raising/focusing it
+// (`activate`/`AXRaise` are banned in adapter scripts); it does not claim to
+// bring the surface to the foreground.
+func (Ghostty) Capability() Capability {
+	return Capability{
+		Activation:    ActivationNone,
+		Delivery:      DeliverySubmitted,
+		Session:       SessionExistingExact,
+		RequiresHuman: false,
+	}
+}
+
 func (Ghostty) NormalizeTarget(target string) (string, error) {
 	id, err := parseGhosttyTerminalTarget(target)
 	if err != nil {

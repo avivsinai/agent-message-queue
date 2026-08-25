@@ -148,6 +148,20 @@ func (Cmux) Name() string {
 	return "cmux"
 }
 
+// Capability declares the full-strength TTY seat on delivery and session:
+// the adapter submits the payload (text + Enter) into an exact existing cmux
+// surface with no human in the loop. Activation is None — Inject sends text
+// and Enter via cmux RPC (surface.send_text / surface.send_key) WITHOUT
+// raising/focusing the surface.
+func (Cmux) Capability() Capability {
+	return Capability{
+		Activation:    ActivationNone,
+		Delivery:      DeliverySubmitted,
+		Session:       SessionExistingExact,
+		RequiresHuman: false,
+	}
+}
+
 func (c Cmux) Discover(_ context.Context) (string, error) {
 	if err := requireCmuxPlatform(); err != nil {
 		return "", err
