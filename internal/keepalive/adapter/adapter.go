@@ -16,6 +16,10 @@ var (
 	// App.Run prints this to stderr so inject-via can map it without a typed
 	// error crossing the child process boundary. Never replay the payload.
 	ErrInjectUncertain = errors.New("AMQ_INJECT_PROGRESS=uncertain")
+	// ErrGUIAdapterNotReady keeps GUI seats out of the generic wake path until
+	// their capability gate has live evidence. A refusal is not a weaker
+	// delivery claim.
+	ErrGUIAdapterNotReady = errors.New("GUI wake adapter is not ready")
 )
 
 type Adapter interface {
@@ -77,6 +81,9 @@ func NewRegistry(adapters ...Adapter) Registry {
 }
 
 func DefaultRegistry() Registry {
+	// GUI adapters remain deliberately unregistered until the task-0 Codex app
+	// Apple Events gate is proven on the target Mac. Do not turn a skeleton or a
+	// prefill fallback into a submitted wake by adding them here early.
 	return NewRegistry(File{}, Ghostty{}, Cmux{recorded: newCmuxOwnershipRecord()})
 }
 
