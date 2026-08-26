@@ -343,6 +343,41 @@ func TestInjectCoopNamedSlashCommand(t *testing.T) {
 	}
 }
 
+func TestCoopNamedHasControllingTTYUsesDevTTY(t *testing.T) {
+	oldOpen := openCoopNamedTTY
+	t.Cleanup(func() { openCoopNamedTTY = oldOpen })
+
+	opened := false
+	openCoopNamedTTY = func() (*os.File, error) {
+		opened = true
+		return os.Open(os.DevNull)
+	}
+	if !coopNamedHasControllingTTY() {
+		t.Fatal("expected controlling TTY probe to succeed when /dev/tty opens")
+	}
+	if !opened {
+		t.Fatal("did not open /dev/tty")
+	}
+
+	openCoopNamedTTY = func() (*os.File, error) {
+		return nil, os.ErrNotExist
+	}
+	if coopNamedHasControllingTTY() {
+		t.Fatal("expected false when /dev/tty cannot be opened")
+	}
+}
+
+func TestInjectCoopNamedSlashCommandRequiresControllingTTY(t *testing.T) {
+	oldReady := coopNamedTTYReady
+	t.Cleanup(func() { coopNamedTTYReady = oldReady })
+	coopNamedTTYReady = func() bool { return false }
+
+	err := injectCoopNamedSlashCommand("coder1", "agent")
+	if err == nil || !strings.Contains(err.Error(), "no controlling terminal") {
+		t.Fatalf("error = %v, want controlling terminal failure", err)
+	}
+}
+
 func TestApplyCoopNamedStartsTUIInjector(t *testing.T) {
 	var started bool
 	oldStart := startCoopNamedTUIInjector
