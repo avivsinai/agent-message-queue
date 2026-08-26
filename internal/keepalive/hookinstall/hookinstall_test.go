@@ -1319,3 +1319,114 @@ func TestScriptPathFromAMQCommandRoundTrip(t *testing.T) {
 		t.Errorf("4th-token command should not parse: %q", extra)
 	}
 }
+
+// TestScriptPathFromAMQCommandRejectsNonFixedShape is the B1 contract: a command
+// that has the AMQ prefix but is not the exact fixed shape buildHookCommand
+// emits must NOT parse, so self-heal preserves it and the doctor does not
+// report it stale. Cases: missing AMQ_KEEPALIVE_TIMEOUT_SECONDS= prefix; a
+// non-digit timeout token.
+func TestScriptPathFromAMQCommandRejectsNonFixedShape(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "missing timeout prefix",
+			command: "AMQ_KEEPALIVE_BIN='/b' 'not-timeout' '/dead.sh'",
+		},
+		{
+			name:    "non-digit timeout",
+			command: "AMQ_KEEPALIVE_BIN='/b' AMQ_KEEPALIVE_TIMEOUT_SECONDS='abc' '/dead.sh'",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := scriptPathFromAMQCommand(tc.command); ok {
+				t.Fatalf("command parsed but is not the fixed shape: %q", tc.command)
+			}
+		})
+	}
+}
+
+// TestSelfHealPreservesNonFixedShapeAMQCommand is the B1 self-heal side: a
+// non-fixed-shape owned command is preserved verbatim (not pruned) and not
+// reported stale by the doctor, because it is owned-but-unparseable.
+func TestSelfHealPreservesNonFixedShapeAMQCommand(t *testing.T) {
+	withIsolatedHome(t, func(t *testing.T) {
+		dir := t.TempDir()
+		scriptPath := filepath.Join(dir, "hook.sh")
+		binaryPath := writeExecutable(t, filepath.Join(dir, "amq-keepalive"))
+		claudeConfig := filepath.Join(dir, "settings.json")
+		// Missing the AMQ_KEEPALIVE_TIMEOUT_SECONDS= prefix: owned but unparseable.
+		nonFixed := "AMQ_KEEPALIVE_BIN='" + binaryPath + "' 'not-timeout' '/nonexistent/dead.sh'"
+		mustWrite(t, claudeConfig, []byte(fmt.Sprintf(`{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":%q}]}]}}`, nonFixed)))
+
+		_, err := Install(Options{
+			Agent:        AgentClaude,
+			ScriptPath:   scriptPath,
+			BinaryPath:   binaryPath,
+			ClaudeConfig: claudeConfig,
+			Timeout:      time.Second,
+		})
+		if err != nil {
+			t.Fatalf("Install() error = %v", err)
+		}
+		doc := readJSON(t, claudeConfig)
+		if countCommand(doc, nonFixed) != 1 {
+			t.Fatalf("non-fixed-shape owned command was pruned by self-heal:\n%s", mustMarshal(t, doc))
+		}
+		stale, err := StaleSessionStartHooks(claudeConfig, AgentClaude)
+		if err != nil {
+			t.Fatalf("StaleSessionStartHooks error = %v", err)
+		}
+		if len(stale) != 0 {
+			t.Fatalf("non-fixed-shape command reported as stale: %#v", stale)
+		}
+	})
+}
+
+// TestSelfHealDedupKeysOnFullCommand is the B3 contract: duplicate collapse
+// keys on the exact full command string, not the decoded script path. Two LIVE
+// owned hooks that share a script path but differ in timeout are distinct
+// commands and must both be preserved; only byte-identical commands collapse to
+// one.
+func TestSelfHealDedupKeysOnFullCommand(t *testing.T) {
+	withIsolatedHome(t, func(t *testing.T) {
+		dir := t.TempDir()
+		liveScript := filepath.Join(dir, "hooks", "amq-keepalive-session-start.sh")
+		binaryPath := writeExecutable(t, filepath.Join(dir, "amq-keepalive"))
+		codexConfig := filepath.Join(dir, "codex", "hooks.json")
+		mustWrite(t, liveScript, []byte(SessionStartScript))
+		if err := os.Chmod(liveScript, 0o755); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		// Two live AMQ hooks, same script, different timeout -> distinct commands.
+		cmdTimeout1 := buildHookCommand(binaryPath, liveScript, 1*time.Second)
+		cmdTimeout2 := buildHookCommand(binaryPath, liveScript, 2*time.Second)
+		// A byte-identical duplicate of cmdTimeout1 -> should collapse to one.
+		seed := fmt.Sprintf(`{"hooks":{"SessionStart":[{"hooks":[`+
+			`{"type":"command","command":%q,"timeout":6},`+
+			`{"type":"command","command":%q,"timeout":6},`+
+			`{"type":"command","command":%q,"timeout":6}`+
+			`]}]}}`, cmdTimeout1, cmdTimeout2, cmdTimeout1)
+		mustWrite(t, codexConfig, []byte(seed))
+
+		if _, err := Install(Options{
+			Agent:       AgentCodex,
+			ScriptPath:  liveScript,
+			BinaryPath:  binaryPath,
+			CodexConfig: codexConfig,
+			Timeout:     time.Second,
+		}); err != nil {
+			t.Fatalf("Install() error = %v", err)
+		}
+		doc := readJSON(t, codexConfig)
+		// Both distinct-timeout live hooks preserved.
+		if countCommand(doc, cmdTimeout1) != 1 {
+			t.Fatalf("timeout-1 live hook not preserved exactly once:\n%s", mustMarshal(t, doc))
+		}
+		if countCommand(doc, cmdTimeout2) != 1 {
+			t.Fatalf("timeout-2 live hook not preserved exactly once:\n%s", mustMarshal(t, doc))
+		}
+	})
+}

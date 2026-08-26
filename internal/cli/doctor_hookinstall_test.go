@@ -146,6 +146,13 @@ func TestCheckHookConfigsSurfacesCorruptJSON(t *testing.T) {
 	if !strings.Contains(got.Message, "codex") {
 		t.Fatalf("message does not name the agent: %q", got.Message)
 	}
+	// B2: a corrupt-JSON warning must name a concrete remedy.
+	if !strings.Contains(got.Message, ".bak-* backup") {
+		t.Fatalf("message does not name the restore-from-backup remedy: %q", got.Message)
+	}
+	if !strings.Contains(got.Message, "install-hook --agent codex") {
+		t.Fatalf("message does not name the re-install remedy: %q", got.Message)
+	}
 }
 
 // writeDoctorHookBinary writes a minimal executable at path and returns it.
@@ -213,5 +220,37 @@ func TestCheckHookConfigsReportsStaleAndCorruptTogether(t *testing.T) {
 	// The corrupt claude config warning must also be present.
 	if !strings.Contains(got.Message, claudeConfig) {
 		t.Fatalf("message missing corrupt claude config warning: %q", got.Message)
+	}
+}
+
+// TestCheckHookConfigsPermissionErrorRemedy is the B2 permission case: a config
+// file that exists but is unreadable (permission denied) is surfaced as a
+// warning with a chmod remedy, not silently skipped.
+func TestCheckHookConfigsPermissionErrorRemedy(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions; cannot reproduce EACCES")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	claudeConfig := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(claudeConfig), 0o700); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	// Valid JSON but unreadable.
+	if err := os.WriteFile(claudeConfig, []byte(`{"hooks":{"SessionStart":[]}}`), 0o000); err != nil {
+		t.Fatalf("write unreadable claude config: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(claudeConfig, 0o600) })
+
+	got := checkHookConfigs()
+	if got.Status != "warn" {
+		t.Fatalf("status = %q, want warn; message=%q", got.Status, got.Message)
+	}
+	if !strings.Contains(got.Message, claudeConfig) {
+		t.Fatalf("message does not name the unreadable config path: %q", got.Message)
+	}
+	if !strings.Contains(got.Message, "chmod u+rw") {
+		t.Fatalf("message does not name the chmod remedy: %q", got.Message)
 	}
 }

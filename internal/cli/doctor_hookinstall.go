@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -46,10 +47,10 @@ func checkHookConfigs() doctorCheck {
 		if err != nil {
 			// A missing config file is not an error: AMQ hooks may not be
 			// installed. Any other error (corrupt JSON, permission denied) is
-			// surfaced as a warning naming the path and the error so it is not
-			// silently swallowed.
+			// surfaced as a warning naming the path, the error, and a remedy so it
+			// is not silently swallowed.
 			if !os.IsNotExist(err) {
-				warnings = append(warnings, fmt.Sprintf("%s config %s: %v", c.agent, c.path, err))
+				warnings = append(warnings, fmt.Sprintf("%s config %s: %v; %s", c.agent, c.path, err, hookConfigErrorRemedy(c.path, c.agent, err)))
 			}
 			continue
 		}
@@ -118,4 +119,23 @@ func uniqueNonEmpty(values []string) []string {
 		out = append(out, v)
 	}
 	return out
+}
+
+// hookConfigErrorRemedy returns a concrete remedy for a hook config read error.
+// A JSON parse error points at restoring the newest backup or fixing the JSON;
+// a permission error points at chmod. Other errors get a generic re-install
+// remedy.
+func hookConfigErrorRemedy(path, agent string, err error) string {
+	msg := err.Error()
+	if errors.Is(err, os.ErrPermission) || strings.Contains(msg, "permission denied") {
+		return fmt.Sprintf("chmod u+rw %s", path)
+	}
+	// loadJSONObject wraps JSON decode failures with a "parse <path>:" prefix;
+	// the underlying json error mentions syntax/invalid/unexpected characters.
+	if strings.Contains(msg, "parse ") || strings.Contains(msg, "invalid") ||
+		strings.Contains(msg, "unexpected") || strings.Contains(msg, "JSON") ||
+		strings.Contains(msg, "syntax") {
+		return fmt.Sprintf("restore from the newest %s.bak-* backup or fix the JSON by hand, then rerun amq-keepalive install-hook --agent %s", path, agent)
+	}
+	return fmt.Sprintf("rerun amq-keepalive install-hook --agent %s", agent)
 }

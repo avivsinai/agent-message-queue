@@ -588,9 +588,9 @@ func classifyHook(hookObj map[string]interface{}) hookClass {
 func scriptPathFromAMQCommand(command string) (string, bool) {
 	s := command
 	// Token 1: AMQ_KEEPALIVE_BIN=<quoted>, then a space.
-	rest := strings.TrimPrefix(s, amqOwnedCommandPrefix)
-	if len(rest) == len(s) {
-		return "", false // prefix guard already passed in isAMQOwnedCommand
+	rest, ok := strings.CutPrefix(s, amqOwnedCommandPrefix)
+	if !ok {
+		return "", false
 	}
 	token1, rest, ok := shellUnquoteToken(rest)
 	if !ok || token1 == "" {
@@ -600,11 +600,18 @@ func scriptPathFromAMQCommand(command string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	// Token 2: AMQ_KEEPALIVE_TIMEOUT_SECONDS=<quoted>, then a space. The
-	// "AMQ_KEEPALIVE_TIMEOUT_SECONDS=" prefix precedes the second quoted token.
-	rest = strings.TrimPrefix(rest, "AMQ_KEEPALIVE_TIMEOUT_SECONDS=")
-	_, rest, ok = shellUnquoteToken(rest)
+	// Token 2: AMQ_KEEPALIVE_TIMEOUT_SECONDS=<quoted>, then a space. The prefix
+	// must be present exactly (CutPrefix, not TrimPrefix) and the decoded token
+	// must be all digits, because buildHookCommand emits shellQuote(fmt.Sprintf("%d",...)).
+	rest, ok = strings.CutPrefix(rest, "AMQ_KEEPALIVE_TIMEOUT_SECONDS=")
 	if !ok {
+		return "", false
+	}
+	timeoutToken, rest, ok := shellUnquoteToken(rest)
+	if !ok || timeoutToken == "" {
+		return "", false
+	}
+	if !isAllDigits(timeoutToken) {
 		return "", false
 	}
 	rest, ok = consumeSingleSpace(rest)
@@ -621,6 +628,21 @@ func scriptPathFromAMQCommand(command string) (string, bool) {
 		return "", false
 	}
 	return path, true
+}
+
+// isAllDigits reports whether s is non-empty and consists only of ASCII digits,
+// matching the shape buildHookCommand emits for the timeout (an int seconds
+// value rendered by fmt.Sprintf("%d", ...)).
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // shellUnquoteToken consumes one single-quoted token from the start of s and
@@ -706,6 +728,10 @@ func selfHealSessionStart(sessionStart []interface{}) ([]interface{}, bool) {
 // are preserved, not dropped. Uses classifyHook so it agrees with the doctor
 // scan.
 func pruneStaleAMQHooks(hooks []interface{}) ([]interface{}, bool) {
+	// Duplicate collapse keys on the exact full command string, the same
+	// identity the installer's claudeHasCommand uses: two LIVE owned hooks that
+	// share a script path but differ in AMQ_KEEPALIVE_BIN or timeout are distinct
+	// commands and must both be preserved; only byte-identical commands collapse.
 	seen := make(map[string]bool)
 	filtered := make([]interface{}, 0, len(hooks))
 	changed := false
@@ -725,7 +751,8 @@ func pruneStaleAMQHooks(hooks []interface{}) ([]interface{}, bool) {
 			filtered = append(filtered, hook)
 			continue
 		}
-		if seen[class.scriptPath] {
+		command := strings.TrimSpace(fmt.Sprint(hookObj["command"]))
+		if seen[command] {
 			changed = true
 			continue
 		}
@@ -733,7 +760,7 @@ func pruneStaleAMQHooks(hooks []interface{}) ([]interface{}, bool) {
 			changed = true
 			continue
 		}
-		seen[class.scriptPath] = true
+		seen[command] = true
 		filtered = append(filtered, hook)
 	}
 	return filtered, changed
