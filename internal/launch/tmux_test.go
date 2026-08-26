@@ -122,6 +122,21 @@ func TestTmuxBackendConformance(t *testing.T) {
 	RunConformance(t, backend)
 }
 
+func TestTmuxTargetMissingClassifiesExitedServer(t *testing.T) {
+	for _, message := range []string{
+		"tmux display-message: server exited unexpectedly",
+		"tmux display-message: no server running",
+		"tmux display-message: couldn't find pane: %%%%1",
+	} {
+		if !tmuxTargetMissing(errors.New(message)) {
+			t.Fatalf("tmuxTargetMissing(%q) = false, want true", message)
+		}
+	}
+	if tmuxTargetMissing(errors.New("tmux display-message: permission denied")) {
+		t.Fatal("tmuxTargetMissing classified an unrelated error as a missing target")
+	}
+}
+
 func TestTmuxCloseUsesPinnedSocketAfterEnvironmentCleanup(t *testing.T) {
 	backend := NewTmuxBackend("tmux")
 	backend.socketName = ""
