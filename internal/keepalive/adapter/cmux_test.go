@@ -646,9 +646,10 @@ func TestCmuxInjectEnterFailureAfterTextIsUncertain(t *testing.T) {
 		{output: []byte("enter failed"), err: errors.New("exit status 1")},
 	}}
 	adapter := Cmux{
-		Runner: runner,
-		Path:   "/fake/cmux",
-		Sleep:  func(context.Context, time.Duration) error { return nil },
+		Runner:            runner,
+		Path:              "/fake/cmux",
+		LiveTTYOwnerCount: liveOwner,
+		Sleep:             func(context.Context, time.Duration) error { return nil },
 	}
 	err := adapter.Inject(context.Background(), "cmux:surface:"+testCmuxSurfaceID, "payload")
 	if !errors.Is(err, ErrInjectUncertain) {
