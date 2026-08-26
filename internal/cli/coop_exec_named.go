@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 type coopNamedMode int
@@ -31,10 +33,12 @@ type coopNamedHarness struct {
 }
 
 var coopNamedHarnesses = map[string]coopNamedHarness{
-	"claude": {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags},
-	"pi":     {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags},
-	"codex":  {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCodex},
-	"agent":  {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor},
+	launch.ClaudeProvider: {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags},
+	"pi":                  {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags},
+	launch.CodexProvider:  {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCodex},
+	"agent":               {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor},
+	launch.CursorProvider: {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor},
+	launch.GrokProvider:   {mode: coopNamedModeUnknown, resumeSyntax: coopNamedResumeFlags},
 }
 
 func coopNamedHarnessFor(binary string) (coopNamedHarness, bool) {

@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 const (
@@ -46,10 +48,10 @@ type coopNamedStoreReader interface {
 }
 
 func coopNamedStoreReaderFor(binary string) (coopNamedStoreReader, bool) {
-	switch strings.ToLower(filepath.Base(binary)) {
-	case "codex":
+	switch launch.ProviderForExecutable(binary) {
+	case launch.CodexProvider:
 		return codexNamedStoreReader{}, true
-	case "agent":
+	case launch.CursorProvider:
 		return cursorNamedStoreReader{}, true
 	default:
 		return nil, false
