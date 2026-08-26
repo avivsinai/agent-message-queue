@@ -212,7 +212,7 @@ func TestTmuxReconcileCrashRestartThenRelaunchResumes(t *testing.T) {
 	}
 	if _, err := PrepareExecution(req.Root, "claude", ticket.LaunchNonce, ExecutionEnvelope{
 		Cwd: ticket.Cwd, AMQExecutable: ticket.AMQExecutable,
-		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv,
+		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv, Execution: ticket.Execution,
 	}); err != nil {
 		t.Fatalf("provider start acknowledgement = %v", err)
 	}

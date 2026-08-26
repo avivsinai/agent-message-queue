@@ -179,6 +179,108 @@ func TestClaudePlansUseExactMintAndResumeShapes(t *testing.T) {
 	}
 }
 
+func TestClaudeNamedFreshPlanIsTicketBoundAndResumeStable(t *testing.T) {
+	project, executable := testExecutable(t, ClaudeProvider)
+	adapter := NewClaudeAdapter(executable)
+	request := planRequest(project, ClaudeProvider)
+	request.CommittedArgs = []string{"--model", "opus"}
+	request.Session = "session1"
+
+	unnamed, err := adapter.PlanFresh(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUnnamed := []string{executable, "--model", "opus", "--session-id", testLaunchNonce}
+	if !slices.Equal(unnamed.Argv, wantUnnamed) {
+		t.Fatalf("unnamed fresh argv = %#v, want %#v", unnamed.Argv, wantUnnamed)
+	}
+	legacyRequest := request
+	legacyRequest.Session = ""
+	legacy, err := adapter.PlanFresh(legacyRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(legacy, unnamed) {
+		t.Fatalf("unnamed fresh plan changed when session was supplied: legacy=%#v unnamed=%#v", legacy, unnamed)
+	}
+	namedRequest := request
+	namedRequest.Named = true
+	named, err := adapter.PlanFresh(namedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(named.Argv[len(named.Argv)-4:], []string{"--name", "session1/claude", "--session-id", testLaunchNonce}) {
+		t.Fatalf("named fresh argv = %#v", named.Argv)
+	}
+	if countClaudeNameFlags(named.Argv) != 1 {
+		t.Fatalf("named fresh argv has duplicate name flags: %#v", named.Argv)
+	}
+	planDigest := func(plan AgentPlan) (string, string) {
+		t.Helper()
+		container := Plan{Version: PlanVersion, Agents: []AgentPlan{plan}}
+		semantic, semanticErr := container.SemanticDigest()
+		if semanticErr != nil {
+			t.Fatal(semanticErr)
+		}
+		trust, trustErr := container.TrustSemanticDigest()
+		if trustErr != nil {
+			t.Fatal(trustErr)
+		}
+		return semantic, trust
+	}
+	unnamedDigest, unnamedTrust := planDigest(unnamed)
+	namedDigest, namedTrust := planDigest(named)
+	if unnamedDigest == namedDigest || unnamedTrust == namedTrust {
+		t.Fatalf("name did not change plan and trust digests: %q/%q", namedDigest, namedTrust)
+	}
+
+	resume, err := adapter.PlanResume(ResumeRequest{
+		PlanRequest:  namedRequest,
+		Conversation: ConversationIdentity{Provider: ClaudeProvider, ID: testConversationID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countClaudeNameFlags(resume.Argv) != 0 {
+		t.Fatalf("resume added a generated name: %#v", resume.Argv)
+	}
+
+	committed := namedRequest
+	committed.CommittedArgs = []string{"-n", "custom"}
+	committedPlan, err := adapter.PlanFresh(committed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countClaudeNameFlags(committedPlan.Argv) != 1 || slices.Contains(committedPlan.Argv, "--name") {
+		t.Fatalf("committed short name was duplicated or rewritten: %#v", committedPlan.Argv)
+	}
+
+	inline := namedRequest
+	inline.CommittedArgs = []string{"--name=custom"}
+	inlinePlan, err := adapter.PlanFresh(inline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countClaudeNameFlags(inlinePlan.Argv) != 1 {
+		t.Fatalf("committed inline name was duplicated: %#v", inlinePlan.Argv)
+	}
+	invalid := namedRequest
+	invalid.CommittedArgs = []string{"--name", "bad/name/extra"}
+	if _, err := adapter.PlanFresh(invalid); err == nil || !strings.Contains(err.Error(), "invalid value") {
+		t.Fatalf("invalid committed name error = %v", err)
+	}
+}
+
+func countClaudeNameFlags(argv []string) int {
+	count := 0
+	for _, arg := range argv {
+		if arg == "-n" || arg == "--name" || strings.HasPrefix(arg, "--name=") {
+			count++
+		}
+	}
+	return count
+}
+
 func TestGrokPlansUseExactMintAndResumeShapes(t *testing.T) {
 	project, executable := testExecutable(t, GrokProvider)
 	adapter := NewGrokAdapter(executable)

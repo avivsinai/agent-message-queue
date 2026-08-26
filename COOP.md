@@ -70,8 +70,10 @@ for example `codex resume session1/codex`. Cursor `agent` resumes through its
 picker only; resume-by-name is unproven. Disable this with `--named=false`,
 `AMQ_COOP_NAMED=0`, or `"named": false` in `.amq/launch.json`. Existing names
 and resume or continue flags are preserved, including `codex resume` and
-`agent --resume`. Managed launches keep naming disabled until their
-provider-name contract is available.
+`agent --resume`. Committed managed launches apply the same policy to Claude
+fresh plans: `agents[].named` overrides top-level `named` (default true), and
+the ticket owns `--name`. Resume plans never add it. Codex, Cursor, and Grok
+remain unnamed under managed launch; Pi remains direct-only.
 
 Creating a missing named session, explicit root, or declared default session
 still works in this release and prints one deprecation warning. Use

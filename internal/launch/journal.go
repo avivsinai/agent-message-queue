@@ -315,12 +315,19 @@ func (record LaunchJournal) ValidateRequest(request ReconcileRequest) error {
 		seenExecution[agent.Handle] = struct{}{}
 		options, ok := request.ExecutionOptions[agent.Handle]
 		if !ok {
-			if agent.Execution != nil {
+			if !executionOptionsOnlyName(agent.Execution) {
 				return fmt.Errorf("launch journal execution options changed for %q", agent.Handle)
 			}
 			continue
 		}
-		if !reflect.DeepEqual(agent.Execution, clonePrepareExecutionOptions(&options)) {
+		// Named is deliberately not part of execution-option identity: its effect
+		// is the --name argv element, which the plan and trust digests already
+		// cover. Keeping it out preserves legacy journal bindings and V1 comparisons.
+		expected := CanonicalExecutionOptions(agent.Execution)
+		actual := CanonicalExecutionOptions(&options)
+		expected.Named = false
+		actual.Named = false
+		if !reflect.DeepEqual(expected, actual) {
 			return fmt.Errorf("launch journal execution options changed for %q", agent.Handle)
 		}
 	}
@@ -330,6 +337,18 @@ func (record LaunchJournal) ValidateRequest(request ReconcileRequest) error {
 		}
 	}
 	return nil
+}
+
+func executionOptionsOnlyName(options *PrepareExecutionOptions) bool {
+	// Named is deliberately not part of execution-option identity: its effect is
+	// the --name argv element, which the plan and trust digests already cover.
+	if options == nil {
+		return true
+	}
+	return !options.RequireWake && !options.NoGitignore &&
+		(options.WakeMode == "" || options.WakeMode == "enabled") && options.AuditReason == "" &&
+		(options.InjectorMode == "" || options.InjectorMode == "none") && options.InjectorVia == "" &&
+		len(options.InjectorArgs) == 0 && len(options.SymphonyEvents) == 0 && options.SymphonyWorkspaceKey == ""
 }
 
 func WriteJournal(root *fsq.DeliveryRoot, lease *Lease, record LaunchJournal) error {

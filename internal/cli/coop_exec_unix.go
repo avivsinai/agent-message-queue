@@ -111,14 +111,21 @@ func runCoopExec(args []string) error {
 	if err != nil {
 		return err
 	}
-	if managedLaunchNonce != "" && flagWasVisited(fs, "named") && *namedFlag {
-		return UsageError("--named is not supported under a managed launch; declare the name in the launch plan instead")
-	}
 	if managedLaunchNonce != "" {
-		// Managed launches have no trusted provider-name field until the
-		// managed naming contract lands. Keep the existing launch boundary
-		// fail-closed while the direct path defaults to named sessions.
+		// Managed launches use the ticket's exact provider argv for naming.
 		namedEnabled = false
+	}
+	remaining := fs.Args()
+	if len(remaining) == 0 {
+		return UsageError("command required (e.g., 'claude', 'codex', 'bash')")
+	}
+	cmdName := remaining[0]
+	// Extra positional args before "--" are appended to agent args.
+	if len(remaining) > 1 {
+		agentArgs = append(remaining[1:], agentArgs...)
+	}
+	if managedLaunchNonce != "" && flagWasVisited(fs, "named") && *namedFlag && !launch.ArgsHaveNameFlag(agentArgs) {
+		return UsageError("--named is not supported under a managed launch; declare the name in the launch plan instead")
 	}
 	if managedLaunchNonce != "" {
 		if !flagWasVisited(fs, "root") || strings.TrimSpace(*rootFlag) == "" || !filepath.IsAbs(*rootFlag) {
@@ -163,7 +170,7 @@ func runCoopExec(args []string) error {
 		return UsageError("managed execution options require a trusted launch ticket")
 	}
 	var executionOptions *launch.PrepareExecutionOptions
-	if managedLaunchNonce != "" && (managedOnlyOptions ||
+	if managedLaunchNonce != "" && (managedOnlyOptions || flagWasVisited(fs, "named") ||
 		flagWasVisited(fs, "no-gitignore") || flagWasVisited(fs, "no-wake") ||
 		flagWasVisited(fs, "require-wake") || flagWasVisited(fs, "wake-inject-mode") ||
 		flagWasVisited(fs, "wake-inject-via") || flagWasVisited(fs, "wake-inject-arg")) {
@@ -178,6 +185,7 @@ func runCoopExec(args []string) error {
 		options := launch.PrepareExecutionOptions{
 			RequireWake:          *requireWakeFlag,
 			NoGitignore:          *noGitignoreFlag,
+			Named:                flagWasVisited(fs, "named") && *namedFlag,
 			WakeMode:             wakeMode,
 			AuditReason:          *managedNoWakeReasonFlag,
 			InjectorMode:         managedInjectorMode,
@@ -190,16 +198,6 @@ func runCoopExec(args []string) error {
 			return UsageError("managed execution options: %v", err)
 		}
 		executionOptions = &options
-	}
-
-	remaining := fs.Args()
-	if len(remaining) == 0 {
-		return UsageError("command required (e.g., 'claude', 'codex', 'bash')")
-	}
-	cmdName := remaining[0]
-	// Extra positional args before "--" are appended to agent args.
-	if len(remaining) > 1 {
-		agentArgs = append(remaining[1:], agentArgs...)
 	}
 
 	// Derive agent handle from command basename (or --me override).

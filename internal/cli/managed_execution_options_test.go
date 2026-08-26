@@ -13,7 +13,7 @@ import (
 
 func TestManagedExecutionOptionsCodecRoundTripAndHostileInput(t *testing.T) {
 	want := launch.PrepareExecutionOptions{
-		RequireWake: true, NoGitignore: true, WakeMode: "enabled",
+		RequireWake: true, NoGitignore: true, Named: true, WakeMode: "enabled",
 		InjectorMode: "paste", InjectorVia: "/opt/amq/injector", InjectorArgs: []string{"--fixed", "value"},
 		SymphonyEvents: []string{"after_create", "before_run"}, SymphonyWorkspaceKey: "workspace-7",
 	}

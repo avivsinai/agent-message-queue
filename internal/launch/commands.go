@@ -126,6 +126,9 @@ func coopExecOptionArgs(options *PrepareExecutionOptions) []string {
 		return nil
 	}
 	args := make([]string, 0, 16)
+	if options.Named {
+		args = append(args, "--named")
+	}
 	if options.NoGitignore {
 		args = append(args, "--no-gitignore")
 	}

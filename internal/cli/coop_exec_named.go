@@ -19,12 +19,12 @@ const (
 	coopNamedModeUnknown
 )
 
-type coopNamedResumeSyntax uint8
+type coopNamedResumeSyntax = launch.ResumeSyntax
 
 const (
-	coopNamedResumeFlags coopNamedResumeSyntax = iota
-	coopNamedResumeCodex
-	coopNamedResumeCursor
+	coopNamedResumeFlags  = launch.ResumeSyntaxFlags
+	coopNamedResumeCodex  = launch.ResumeSyntaxCodex
+	coopNamedResumeCursor = launch.ResumeSyntaxCursor
 )
 
 type coopNamedHarness struct {
@@ -54,20 +54,7 @@ func coopNamedModeFor(binary string) coopNamedMode {
 }
 
 func agentArgsHasNameFlag(args []string) bool {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			return false
-		}
-		if coopNamedValueFlag(arg) {
-			i++
-			continue
-		}
-		if arg == "-n" || arg == "--name" || strings.HasPrefix(arg, "--name=") {
-			return true
-		}
-	}
-	return false
+	return launch.ArgsHaveNameFlag(args)
 }
 
 func agentArgsPreventAutoName(args []string) bool {
@@ -83,67 +70,7 @@ func agentArgsPreventAutoNameFor(cmdName string, args []string) bool {
 }
 
 func agentArgsHaveResume(args []string, syntax coopNamedResumeSyntax) bool {
-	switch syntax {
-	case coopNamedResumeCodex:
-		return agentArgsHaveCodexResume(args)
-	case coopNamedResumeCursor:
-		return agentArgsHaveResumeFlags(args, false)
-	default:
-		return agentArgsHaveResumeFlags(args, true)
-	}
-}
-
-func agentArgsHaveResumeFlags(args []string, allowContinue bool) bool {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			return false
-		}
-		if coopNamedValueFlag(arg) {
-			i++
-			continue
-		}
-		if arg == "-r" || arg == "--resume" || strings.HasPrefix(arg, "--resume=") ||
-			allowContinue && (arg == "-c" || arg == "--continue" || strings.HasPrefix(arg, "--continue=")) {
-			return true
-		}
-	}
-	return false
-}
-
-func agentArgsHaveCodexResume(args []string) bool {
-	var firstPositional string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			return false
-		}
-		if coopNamedValueFlag(arg) {
-			i++
-			continue
-		}
-		if strings.HasPrefix(arg, "-") {
-			continue
-		}
-		if firstPositional == "" {
-			firstPositional = arg
-			if arg == "resume" {
-				return true
-			}
-			continue
-		}
-		return firstPositional == "exec" && arg == "resume"
-	}
-	return false
-}
-
-func coopNamedValueFlag(arg string) bool {
-	switch arg {
-	case "--model", "-m", "--config", "--cwd", "--output-format", "--permission-mode", "--settings", "--system-prompt", "--append-system-prompt", "--session":
-		return true
-	default:
-		return false
-	}
+	return launch.ArgsHaveResume(args, syntax)
 }
 
 func injectCoopNamedArgv(cmdName string, agentArgs []string, me string) []string {

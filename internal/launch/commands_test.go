@@ -198,7 +198,7 @@ func TestCommandsCoopExecOldShapeFailsGrammar(t *testing.T) {
 
 func TestTypedExecutionOptionsRoundTripAndSingleCoopExec(t *testing.T) {
 	options := &PrepareExecutionOptions{
-		RequireWake: true, NoGitignore: true, WakeMode: "enabled",
+		RequireWake: true, NoGitignore: true, Named: true, WakeMode: "enabled",
 		InjectorMode: "raw", InjectorVia: "/opt/amq/injector", InjectorArgs: []string{"--fixed", "value with space"},
 		SymphonyEvents: []string{"after_create", "before_run", "after_run", "before_remove"}, SymphonyWorkspaceKey: "workspace-7",
 	}
@@ -235,6 +235,9 @@ func TestTypedExecutionOptionsRoundTripAndSingleCoopExec(t *testing.T) {
 	}
 	if !slices.Contains(argv, "--require-wake") || !slices.Contains(argv, "--no-gitignore") || slices.Contains(argv, "--session") {
 		t.Fatalf("typed option or exact-root transport mismatch: %#v", argv)
+	}
+	if !slices.Contains(argv, "--named") {
+		t.Fatalf("named option was not transported: %#v", argv)
 	}
 }
 

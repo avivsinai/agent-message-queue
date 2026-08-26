@@ -79,6 +79,44 @@ func TestProjectConfigAcceptsOptionalNamedPreference(t *testing.T) {
 	}
 }
 
+func TestProjectConfigResolvesPerAgentNamedPrecedence(t *testing.T) {
+	boolPointer := func(value bool) *bool { return &value }
+	for _, test := range []struct {
+		name    string
+		project *bool
+		agent   *bool
+		want    bool
+	}{
+		{name: "default enabled", want: true},
+		{name: "project false", project: boolPointer(false), want: false},
+		{name: "agent true overrides project false", project: boolPointer(false), agent: boolPointer(true), want: true},
+		{name: "agent false overrides project true", project: boolPointer(true), agent: boolPointer(false), want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := ProjectConfig{Named: test.project}
+			agent := ProjectAgentConfig{Named: test.agent}
+			if got := cfg.EffectiveAgentNamed(agent); got != test.want {
+				t.Fatalf("effective named = %v, want %v", got, test.want)
+			}
+		})
+	}
+
+	parsed, err := ParseProjectConfig([]byte(`{"schema":1,"named":false,"agents":[{"handle":"claude","command":["claude"],"named":true}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Agents[0].Named == nil || !*parsed.Agents[0].Named || !parsed.EffectiveAgentNamed(parsed.Agents[0]) {
+		t.Fatalf("per-agent named override = %#v", parsed.Agents[0].Named)
+	}
+	data, err := MarshalProjectConfig(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"named": true`) {
+		t.Fatalf("marshaled config omitted per-agent named override: %s", data)
+	}
+}
+
 func TestProjectConfigRejectsExplicitEmptyOptionalDefaults(t *testing.T) {
 	for _, raw := range []string{
 		`{"schema":1,"default_session":"","agents":[{"handle":"claude","command":["claude"]}]}`,

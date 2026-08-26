@@ -1312,7 +1312,7 @@ func TestReconcileMintStaysPendingUntilAcknowledgedThenResumesExactIdentity(t *t
 	}
 	if _, err := PrepareExecution(req.Root, "claude", ticket.LaunchNonce, ExecutionEnvelope{
 		Cwd: ticket.Cwd, AMQExecutable: ticket.AMQExecutable,
-		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv,
+		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv, Execution: ticket.Execution,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1373,7 +1373,7 @@ func TestReconcileCrashAfterBackendCreatedAcknowledgedThenRecoversReady(t *testi
 	}
 	acknowledged, err := PrepareExecution(req.Root, "claude", ticket.LaunchNonce, ExecutionEnvelope{
 		Cwd: ticket.Cwd, AMQExecutable: ticket.AMQExecutable,
-		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv,
+		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv, Execution: ticket.Execution,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -38,11 +38,26 @@ type ProjectAgentConfig struct {
 	Handle       string               `json:"handle"`
 	Adapter      string               `json:"adapter"`
 	Command      []string             `json:"command"`
+	Named        *bool                `json:"named,omitempty"`
 	Env          map[string]string    `json:"env,omitempty"`
 	Cwd          string               `json:"cwd,omitempty"`
 	ResumePolicy ResumePolicy         `json:"resume_policy"`
 	InitialInput *InitialInputRequest `json:"initial_input,omitempty"`
 	Wrapper      *Wrapper             `json:"wrapper,omitempty"`
+}
+
+func ResolveAgentNamed(agent, project *bool) bool {
+	if agent != nil {
+		return *agent
+	}
+	if project != nil {
+		return *project
+	}
+	return true
+}
+
+func (cfg ProjectConfig) EffectiveAgentNamed(agent ProjectAgentConfig) bool {
+	return ResolveAgentNamed(agent.Named, cfg.Named)
 }
 
 type LayoutIntent struct {
