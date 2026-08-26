@@ -136,6 +136,9 @@ v1 does not:
 - claim ACP v2
 - put `--always-approve` in committed launch plans
 - hold a Buzz nsec inside AMQ
+  - The `amq-acp` companion instead gates inbound `BUZZ_ACP_AGENTS`/`RESPOND_TO`
+    on the harness holding a Buzz NIP-PL kind:30350 lease with a quota-1
+    deployment-identity profile (block/buzz#5667); it does not invent one.
 - silently downgrade inject→notify or submit→prefill
 - scrape ChatGPT through Accessibility
 - run generic `osascript` from prompt text

@@ -94,8 +94,9 @@ Environment:
   AM_BASE_ROOT_ID  identity token authenticating AM_BASE_ROOT
 
 BUZZ_* variables are read only to refuse agents!=1 and non-owner inbound, then
-stripped before any message is written. A deployment lease is upstream; this
-binary does not treat an env string as one.
+stripped before any message is written. The gate waits for the harness to hold
+a Buzz NIP-PL kind:30350 lease with a quota-1 deployment-identity profile
+(block/buzz#5667); this binary does not treat an env string as one.
 
 A session pin that cannot be authenticated is refused with exit code 5.
 `

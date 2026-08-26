@@ -67,8 +67,10 @@ no env: Buzz's default `BUZZ_ACP_AGENT_ARGS=acp` would be extra argv and
   `inbox/new`. A separate Edge owner drains with `amq drain`.
 - `amq-acp` refuses `BUZZ_ACP_AGENTS` other than `1` and `BUZZ_ACP_RESPOND_TO`
   other than `owner-only`, then unsets every `BUZZ_*` variable so a leaked
-  nsec cannot enter AMQ messages. A deployment lease is an upstream Buzz
-  capability; this companion does not invent one.
+  nsec cannot enter AMQ messages. The gate waits for the harness to hold a
+  Buzz NIP-PL kind:30350 lease with a quota-1 deployment-identity profile
+  (block/buzz#5667); this companion does not invent a lease, it gates inbound
+  on that lease once the profile ships.
 - When `_meta.nostr.eventId` (or `_meta.triggeringEventIds`) names one 64-hex
   Nostr event, that id is the idempotency key. A second prompt with the same
   id is a no-op. Two ids in one prompt are refused: one event, one AMQ job.
