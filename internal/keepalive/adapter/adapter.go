@@ -110,14 +110,18 @@ func DefaultRegistry() Registry {
 	// submitted/unattended caller is refused too. (The Codex app's dead
 	// execute-javascript path stays dead — issue #640 — but its live codex://
 	// deep-link prefill seat is shipped here.)
-	return NewRegistry(File{}, Ghostty{}, Cmux{recorded: newCmuxOwnershipRecord()}, ClaudeDesktop{}, CodexApp{})
+	//
+	// codex-queue is the honest submitted GUI/TUI seat: it enqueues into a
+	// thread that already has an active writer. It satisfies a submitted +
+	// existing-exact unattended minimum without --accept-requires-human.
+	return NewRegistry(File{}, Ghostty{}, Cmux{recorded: newCmuxOwnershipRecord()}, ClaudeDesktop{}, CodexApp{}, CodexQueue{})
 }
 
 // DefaultRegistryWithLogf returns the production adapter set with non-fatal
 // adapter diagnostics wired to logf. Callers that do not own a diagnostic
 // stream can continue using DefaultRegistry.
 func DefaultRegistryWithLogf(logf func(format string, args ...any)) Registry {
-	return NewRegistry(File{}, Ghostty{}, Cmux{Logf: logf, recorded: newCmuxOwnershipRecord()}, ClaudeDesktop{}, CodexApp{})
+	return NewRegistry(File{}, Ghostty{}, Cmux{Logf: logf, recorded: newCmuxOwnershipRecord()}, ClaudeDesktop{}, CodexApp{}, CodexQueue{})
 }
 
 func (r Registry) Get(name string) (Adapter, error) {

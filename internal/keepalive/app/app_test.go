@@ -987,6 +987,67 @@ func TestRegisterCapabilityGatePrefersTargetCapabilityForCodexApp(t *testing.T) 
 	}
 }
 
+type heldWriterLock struct{}
+
+func (heldWriterLock) Held(context.Context, string) (bool, error) { return true, nil }
+
+func TestRegisterCapabilityGateAcceptsCodexQueueSubmittedSeat(t *testing.T) {
+	const uuid = "01a01f5f-69d6-7dd0-868f-9376f3d2c0a1"
+	home := t.TempDir()
+	sess := filepath.Join(home, "sessions", "2026", "08", "26")
+	if err := os.MkdirAll(sess, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sess, "rollout-x-"+uuid+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := appCommandRunnerFunc(func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return []byte("Usage: codex queue --thread <THREAD> --message <TEXT>\n"), nil
+	})
+	q := adapter.CodexQueue{
+		Runner:            runner,
+		LookPath:          func(string) (string, error) { return bin, nil },
+		InspectWriterLock: heldWriterLock{},
+		Home:              home,
+	}
+	adapters := adapter.NewRegistry(q)
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &adapters}
+	acceptOpts := registerOptions{
+		AdapterName:  "codex-queue",
+		Target:       "codex-queue:thread:" + uuid,
+		Root:         "/tmp/amq-root",
+		BaseRoot:     "/tmp",
+		SessionName:  "amq-root",
+		Me:           "codex",
+		AMQPath:      "/bin/false",
+		NoStart:      true,
+		RegistryPath: testRegistryTempPath(t),
+		MinCapability: adapter.Capability{
+			Delivery: adapter.DeliverySubmitted,
+			Session:  adapter.SessionExistingExact,
+		},
+	}
+	if err := app.registerWithOptions(context.Background(), acceptOpts); err != nil {
+		t.Fatalf("codex-queue under submitted+existing-exact min failed: %v", err)
+	}
+	refuseOpts := acceptOpts
+	refuseOpts.RegistryPath = testRegistryTempPath(t)
+	refuseOpts.MinCapability = adapter.Capability{
+		Activation: adapter.ActivationForeground,
+		Delivery:   adapter.DeliverySubmitted,
+		Session:    adapter.SessionExistingExact,
+	}
+	if err := app.registerWithOptions(context.Background(), refuseOpts); err == nil {
+		t.Fatal("codex-queue under foreground min succeeded; want refusal (activation none)")
+	} else if !strings.Contains(err.Error(), "does not satisfy") {
+		t.Fatalf("error = %v, want a capability refusal", err)
+	}
+}
+
 func TestReattachPreservesRegistryWhenWakeTargetCannotChange(t *testing.T) {
 	dir := t.TempDir()
 	registryPath := testRegistryPath(t, dir)

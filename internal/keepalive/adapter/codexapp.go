@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strings"
 )
 
@@ -22,11 +21,6 @@ const (
 	codexAppTargetNew          = "codex-app:new"
 	codexAppTargetThreadPrefix = "codex-app:thread:"
 )
-
-// codexAppThreadUUIDRe matches an exact lowercase uuidv7 (8-4-4-4-12 hex). It
-// is anchored so no path-segment, query, or extra-component smuggling can
-// reach the URL built from the target.
-var codexAppThreadUUIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // CodexApp implements the honest deep-link seat for the Codex app
 // (com.openai.codex): `codex://threads/new?prompt=<text>` prefills a NEW
@@ -179,7 +173,7 @@ func parseCodexAppThreadUUID(target string) (string, error) {
 		return "", fmt.Errorf("unsupported Codex app target %q; use %q or %s<uuid>", target, codexAppTargetNew, codexAppTargetThreadPrefix)
 	}
 	id = strings.TrimSpace(id)
-	if !codexAppThreadUUIDRe.MatchString(id) {
+	if !lowercaseThreadUUIDRe.MatchString(id) {
 		return "", fmt.Errorf("invalid Codex app thread uuid %q; want an exact lowercase 8-4-4-4-12 hex uuid", id)
 	}
 	return id, nil
