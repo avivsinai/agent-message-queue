@@ -469,6 +469,90 @@ func TestDarwinWakeRestartLoopRefusesReplacedCandidate(t *testing.T) {
 	}
 }
 
+func TestDarwinWakeSelfUpgradeDefersHashTimeCTimeThenBindsOnRetry(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	candidatePath := writeWakeRestartLoopCandidateCopy(t, &fixture)
+	requestID, err := newWakeRestartRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagePath, err := planWakeRestartStagePlatform(fixture.candidate, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.record.RequestID = requestID
+	fixture.record.Source = wakeRestartSourceSelf
+	fixture.record.StagePath = stagePath
+	fixture.record.PreviousBoundImage = previousDarwinWakeRestartStageForLock(fixture.lock.Lock)
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, fixture.record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { wakeImageHashMutator = nil })
+	wakeImageHashMutator = func() {
+		extra := candidatePath + ".ctime-probe"
+		if err := os.Link(candidatePath, extra); err != nil {
+			t.Errorf("hash-time hardlink: %v", err)
+			return
+		}
+		if err := os.Remove(extra); err != nil {
+			t.Errorf("hash-time unlink: %v", err)
+		}
+	}
+
+	cfg := wakeRestartLoopConfigForTest(fixture)
+	handleWakeRestartAtLoopBoundary(&cfg, fixedWakeAdmissionWatcher{errors: make(chan error)}, false, false)
+
+	record, exists, err := readPendingWakeRestartForTest(t, fixture)
+	if err != nil || !exists {
+		t.Fatalf("after hash-time ctime: exists=%v err=%v", exists, err)
+	}
+	if record.Status != wakeRestartPending || len(record.RefusedCandidates) != 0 {
+		t.Fatalf("hash-time ctime refused the record: %#v", record)
+	}
+	assertWakeSelfUpgradeDiagnosticAction(t, fixture, wakeSelfUpgradeActionDeferred)
+
+	decision, err := publishWakeSelfUpgradePending(
+		fixture.agentDir,
+		fixture.lock,
+		wakeRestartRecord{
+			Schema:     wakeRestartSchemaV1,
+			RequestID:  "0123456789abcdef0123456789abcdef",
+			Status:     wakeRestartPending,
+			Source:     wakeRestartSourceSelf,
+			Root:       fixture.root,
+			Agent:      fixture.agent,
+			Generation: fixture.lock.Lock.Generation,
+			Owner:      fixture.owner,
+			Candidate:  fixture.candidate,
+		},
+		wakeSelfUpgradeDecision{},
+	)
+	if err != nil || decision.Action != wakeSelfUpgradeActionPending {
+		t.Fatalf("next-tick adopt = %#v err=%v; want pending", decision, err)
+	}
+
+	wakeImageHashMutator = nil
+	realBind := wakeRestartBind
+	boundOnRetry := false
+	wakeRestartBind = func(record wakeRestartRecord) (*wakeRestartBoundImage, error) {
+		bound, err := realBind(record)
+		if err != nil {
+			return nil, err
+		}
+		boundOnRetry = true
+		_ = bound.close()
+		return nil, errors.New("test bound successfully; stop before version probe")
+	}
+	t.Cleanup(func() { wakeRestartBind = realBind })
+	handleWakeRestartAtLoopBoundary(&cfg, fixedWakeAdmissionWatcher{errors: make(chan error)}, false, false)
+	if !boundOnRetry {
+		t.Fatal("retry tick did not bind after hash-time ctime deferral")
+	}
+}
+
 func writeWakeRestartLoopCandidateCopy(t *testing.T, fixture *wakeRestartFixture) string {
 	t.Helper()
 	exe, err := os.Executable()
@@ -499,7 +583,12 @@ func writeWakeRestartLoopCandidateCopy(t *testing.T, fixture *wakeRestartFixture
 
 func runWakeRestartLoopForTest(t *testing.T, fixture wakeRestartFixture) {
 	t.Helper()
-	cfg := wakeConfig{
+	cfg := wakeRestartLoopConfigForTest(fixture)
+	handleWakeRestartAtLoopBoundary(&cfg, fixedWakeAdmissionWatcher{errors: make(chan error)}, false, false)
+}
+
+func wakeRestartLoopConfigForTest(fixture wakeRestartFixture) wakeConfig {
+	return wakeConfig{
 		me:                 fixture.agent,
 		root:               fixture.root,
 		injectMode:         wakeInjectModeNone,
@@ -512,7 +601,6 @@ func runWakeRestartLoopForTest(t *testing.T, fixture wakeRestartFixture) {
 		},
 		restartSignals: make(chan os.Signal, 1),
 	}
-	handleWakeRestartAtLoopBoundary(&cfg, fixedWakeAdmissionWatcher{errors: make(chan error)}, false, false)
 }
 
 func readPendingWakeRestartForTest(t *testing.T, fixture wakeRestartFixture) (wakeRestartRecord, bool, error) {

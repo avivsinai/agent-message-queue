@@ -5,6 +5,7 @@ package cli
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,12 @@ import (
 	"runtime"
 	"strings"
 )
+
+var errWakeImageChangedWhileHashing = errors.New("wake image changed while hashing")
+
+// Tests may set this to mutate the image between the before-hash and after-hash
+// stats. Production leaves it nil.
+var wakeImageHashMutator func()
 
 var captureCurrentWakeImageEvidence = captureCurrentWakeImageEvidenceDefault
 
@@ -80,8 +87,8 @@ func captureWakeImageEvidence(path, embeddedVersion string) (wakeImageEvidenceV1
 	if err != nil {
 		return wakeImageEvidenceV1{}, fmt.Errorf("re-stat wake image: %w", err)
 	}
-	if !sameWakeImageStableAcrossHash(before, confirmed) {
-		return wakeImageEvidenceV1{}, fmt.Errorf("wake image changed while hashing")
+	if !sameWakeFileIdentity(before, confirmed) || before.Size() != confirmed.Size() {
+		return wakeImageEvidenceV1{}, errWakeImageChangedWhileHashing
 	}
 	return evidence, nil
 }
@@ -115,6 +122,9 @@ func captureWakeImageEvidenceFromOpenFile(
 	}
 
 	hasher := sha256.New()
+	if wakeImageHashMutator != nil {
+		wakeImageHashMutator()
+	}
 	if _, err := io.Copy(hasher, file); err != nil {
 		return wakeImageEvidenceV1{}, fmt.Errorf("digest wake image: %w", err)
 	}
@@ -122,8 +132,8 @@ func captureWakeImageEvidenceFromOpenFile(
 	if err != nil {
 		return wakeImageEvidenceV1{}, fmt.Errorf("re-stat wake image: %w", err)
 	}
-	if !sameWakeImageStableAcrossHash(before, after) {
-		return wakeImageEvidenceV1{}, fmt.Errorf("wake image changed while hashing")
+	if !sameWakeFileIdentity(before, after) || before.Size() != after.Size() {
+		return wakeImageEvidenceV1{}, errWakeImageChangedWhileHashing
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return wakeImageEvidenceV1{}, fmt.Errorf("rewind wake image: %w", err)

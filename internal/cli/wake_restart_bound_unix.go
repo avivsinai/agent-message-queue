@@ -167,12 +167,12 @@ func sameWakeImageEvidenceExceptMethodPath(first, second wakeImageEvidenceV1) bo
 
 // Link and unlink operations on any name of a Darwin hardlink mutate the
 // shared inode ctime. A ctime-only difference on the same inode is not an image
-// change: link/unlink on any name of a hardlinked inode changes ctime, while an
-// in-place write changes mtime/size and a replacement changes the inode.
-// Method and ExecutionPath describe how and where the image was captured, not
-// what it is, so when the stable identity fields agree they do not affect
-// identity. This lets two wakes staging the same brew candidate on nearby ticks
-// tolerate the ctime mutation each other's hardlink imposes.
+// change when SHA256 agrees: the digest is the content proof. An in-place
+// rewrite is not guaranteed to change mtime or size. Method and ExecutionPath
+// describe how and where the image was captured, not what it is, so when the
+// stable identity fields agree they do not affect identity. This lets two
+// wakes staging the same brew candidate on nearby ticks tolerate the ctime
+// mutation each other's hardlink imposes.
 //
 // Path-sensitive callers do not rely on this helper to detect a different name:
 // revalidate uses SameFile(held fd, Lstat(executionPath)); verify compares

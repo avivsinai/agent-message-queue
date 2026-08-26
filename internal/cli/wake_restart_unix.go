@@ -1651,6 +1651,13 @@ func handleWakeRestartAtLoopBoundary(
 		return
 	}
 	if err := executeWakeRestart(record, os.Args, cfg.terminalImageVersion, cfg.restartSignals); err != nil {
+		if errors.Is(err, errWakeImageChangedWhileHashing) && record.Source == wakeRestartSourceSelf {
+			recordSelfUpgradeDecision(
+				wakeSelfUpgradeActionDeferred,
+				"candidate image changed while hashing (ctime); retrying at the next maintenance tick",
+			)
+			return
+		}
 		reason := wakeRestartReasonWithRemedy(err.Error(), cfg.root, cfg.me)
 		if record.Source == wakeRestartSourceSelf {
 			reason += "; candidate=" + wakeSelfUpgradeEvidenceIdentityString(record.Candidate)

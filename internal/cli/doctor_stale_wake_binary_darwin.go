@@ -104,17 +104,10 @@ func inspectWakeBinaryStalenessPlatform(
 		}, nil
 	}
 	// The restart-stage hardlink changes the shared inode's ctime, while
-	// proc_pidinfo may retain the mapped vnode's earlier snapshot. A ctime-only
-	// difference on the same inode is not an image change: link/unlink on any
-	// name of a hardlinked inode changes ctime, while an in-place write changes
-	// mtime/size and a replacement changes the inode. So either a validated
-	// owned restart-stage alias OR a same-dev/ino/size ctime-only relink is
-	// treated as current; every other pathname/identity mismatch remains
-	// ambiguous.
-	ctimeOnlyRetimeLink := running.Identity.Device == currentIdentity.Device &&
-		running.Identity.Inode == currentIdentity.Inode &&
-		running.Size == current.Info.Size()
-	if !restartStageAlias && !ctimeOnlyRetimeLink &&
+	// proc_pidinfo may retain the mapped vnode's earlier snapshot. Only that
+	// validated owned alias gets a ctime exception; every ordinary pathname
+	// mismatch remains ambiguous.
+	if !restartStageAlias &&
 		(running.Identity.CTimeSec != currentIdentity.CTimeSec ||
 			running.Identity.CTimeNsec != currentIdentity.CTimeNsec) {
 		return wakeBinaryStaleness{}, fmt.Errorf("current wake image changed during comparison")
