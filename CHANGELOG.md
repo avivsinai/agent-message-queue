@@ -21,6 +21,7 @@ editing the release PR.
 
 * **coop:** refuse --named under a managed launch ([#659](https://github.com/avivsinai/agent-message-queue/issues/659)) ([4280e7f](https://github.com/avivsinai/agent-message-queue/commit/4280e7f2d3932a1dafa028e93d89c207e9ccadda))
 * **launch:** classify an exited tmux server as a missing target ([#665](https://github.com/avivsinai/agent-message-queue/issues/665)) ([8e24caa](https://github.com/avivsinai/agent-message-queue/commit/8e24caa59f78ae154f265952290b71849c36e6b1))
+* **wake:** tolerate ctime-only staging races and supersede refused restart records ([#654](https://github.com/avivsinai/agent-message-queue/issues/654)) ([e7b5144](https://github.com/avivsinai/agent-message-queue/commit/e7b5144fc613abe2bb06acbd5fb5e4fb2642d713))
 
 ## [0.71.0](https://github.com/avivsinai/agent-message-queue/compare/v0.70.0...v0.71.0) (2026-08-26)
 
