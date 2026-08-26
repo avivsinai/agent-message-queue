@@ -1211,7 +1211,8 @@ func tmuxTargetMissing(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "couldn't find") ||
 		strings.Contains(msg, "can't find") ||
-		strings.Contains(msg, "no server running")
+		strings.Contains(msg, "no server running") ||
+		strings.Contains(msg, "server exited unexpectedly")
 }
 
 func tmuxCreateTimeout(req CreateRequest) time.Duration {
