@@ -26,7 +26,8 @@ func TestProcLocksSeesFlockWithoutAcquiring(t *testing.T) {
 		t.Fatalf("procLocksHeld: %v", err)
 	}
 	if !held {
-		t.Fatal("/proc/locks did not see a FLOCK ADVISORY WRITE on the temp file")
+		dump, _ := os.ReadFile("/proc/locks")
+		t.Fatalf("/proc/locks did not see a FLOCK ADVISORY WRITE on the temp file; /proc/locks=\n%s", dump)
 	}
 	idle := t.TempDir() + "/idle.lock"
 	if err := os.WriteFile(idle, nil, 0o600); err != nil {

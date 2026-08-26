@@ -45,7 +45,8 @@ func procLocksHeld(path string) (bool, error) {
 		}
 		return false, err
 	}
-	want := fmt.Sprintf("%d:%d:%d", unix.Major(st.Dev), unix.Minor(st.Dev), st.Ino)
+	// fs/locks.c prints "%02x:%02x:%lu" — hex major/minor, decimal inode.
+	want := fmt.Sprintf("%02x:%02x:%d", unix.Major(st.Dev), unix.Minor(st.Dev), st.Ino)
 	f, err := os.Open("/proc/locks")
 	if err != nil {
 		return false, err
@@ -57,6 +58,8 @@ func procLocksHeld(path string) (bool, error) {
 		if len(fields) < 6 {
 			continue
 		}
+		// Codex takes flock LOCK_EX, which /proc/locks reports as WRITE.
+		// LOCK_SH is not an exclusive writer; do not treat it as a live seat.
 		if fields[1] != "FLOCK" || fields[2] != "ADVISORY" || fields[3] != "WRITE" {
 			continue
 		}
