@@ -295,8 +295,8 @@ resume by name, for example `codex resume session1/codex`. Cursor `agent`
 resumes through its picker only; resume-by-name is unproven. Set
 `--named=false`, `AMQ_COOP_NAMED=0`, or `"named": false` in `.amq/launch.json`
 to disable it. Explicit provider names and resume or continue flags remain
-unchanged. Managed launches keep naming disabled until their provider-name
-contract is available.
+unchanged, including `codex resume` and `agent --resume`. Managed launches keep
+naming disabled until their provider-name contract is available.
 
 ### Named sessions
 

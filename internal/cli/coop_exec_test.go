@@ -254,6 +254,29 @@ func TestInjectCoopNamedArgv(t *testing.T) {
 	}
 }
 
+func TestAgentArgsPreventAutoNameForHarness(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		binary string
+		args   []string
+		want   bool
+	}{
+		{name: "codex resume", binary: "codex", args: []string{"resume", "thread"}, want: true},
+		{name: "codex exec resume", binary: "codex", args: []string{"exec", "resume", "thread"}, want: true},
+		{name: "codex plain", binary: "codex", args: []string{"exec"}},
+		{name: "cursor resume", binary: "agent", args: []string{"--resume", "chat"}, want: true},
+		{name: "cursor resume equals", binary: "agent", args: []string{"--resume=chat"}, want: true},
+		{name: "claude continue", binary: "claude", args: []string{"--continue"}, want: true},
+		{name: "pi resume", binary: "pi", args: []string{"-r", "thread"}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := agentArgsPreventAutoNameFor(test.binary, test.args); got != test.want {
+				t.Fatalf("agentArgsPreventAutoNameFor(%q, %#v) = %v, want %v", test.binary, test.args, got, test.want)
+			}
+		})
+	}
+}
+
 func TestCoopExecNamedInjectsArgv(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -572,6 +595,42 @@ func TestApplyCoopNamedStartsTUIInjector(t *testing.T) {
 	}
 	if !reflect.DeepEqual(args, []string{"--foo"}) {
 		t.Fatalf("args = %#v, want unchanged agent flags", args)
+	}
+}
+
+func TestApplyCoopNamedSuppressesTUIInjectorForExistingSession(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "codex resume", args: []string{"resume", "thread"}},
+		{name: "codex exec resume", args: []string{"exec", "resume", "thread"}},
+		{name: "cursor resume", args: []string{"--resume", "chat"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			started := false
+			oldStart := startCoopNamedTUIInjector
+			startCoopNamedTUIInjector = func(string, string, time.Time) error {
+				started = true
+				return nil
+			}
+			t.Cleanup(func() { startCoopNamedTUIInjector = oldStart })
+
+			binary := "codex"
+			if strings.Contains(test.name, "cursor") {
+				binary = "agent"
+			}
+			args, err := applyCoopNamedBeforeExecAt(true, binary, test.args, "feature/"+binary, time.Now())
+			if err != nil {
+				t.Fatalf("applyCoopNamedBeforeExecAt: %v", err)
+			}
+			if started {
+				t.Fatal("TUI injector started for an existing session")
+			}
+			if !reflect.DeepEqual(args, test.args) {
+				t.Fatalf("args = %#v, want unchanged %#v", args, test.args)
+			}
+		})
 	}
 }
 

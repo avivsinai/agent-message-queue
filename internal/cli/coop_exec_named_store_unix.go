@@ -12,7 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -22,6 +22,8 @@ const (
 	// an unknown store and must not be used for automatic naming.
 	codexStateFilename           = "state_5.sqlite"
 	codexThreadsQuery            = "SELECT cwd, name, title, rollout_path FROM threads"
+	codexRolloutTimestampLayout  = "2006-01-02T15-04-05"
+	coopNamedStoreClockSlack     = 2 * time.Second
 	coopNamedTUIReadbackInterval = 500 * time.Millisecond
 )
 
@@ -55,9 +57,6 @@ func coopNamedStoreReaderFor(binary string) (coopNamedStoreReader, bool) {
 }
 
 func selectCoopNamedStoreCandidate(candidates []coopNamedStoreCandidate, description string) (coopNamedStoreCandidate, error) {
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return candidates[i].modTime.After(candidates[j].modTime)
-	})
 	switch len(candidates) {
 	case 0:
 		return coopNamedStoreCandidate{}, fmt.Errorf("no new %s store candidate", description)
@@ -86,6 +85,7 @@ func (codexNamedStoreReader) locate(cwd string, execStart time.Time) (coopNamedS
 	if err != nil {
 		return coopNamedStoreCandidate{}, err
 	}
+	windowStart := execStart.Add(-coopNamedStoreClockSlack)
 	candidates := make([]coopNamedStoreCandidate, 0, 1)
 	for _, row := range rows {
 		if row.CWD != cwd || row.RolloutPath == "" {
@@ -98,7 +98,8 @@ func (codexNamedStoreReader) locate(cwd string, execStart time.Time) (coopNamedS
 			}
 			return coopNamedStoreCandidate{}, fmt.Errorf("stat Codex rollout %q: %w", row.RolloutPath, statErr)
 		}
-		if info.ModTime().Before(execStart) {
+		createdAt, ok := codexRolloutCreationTime(row.RolloutPath, execStart.Location())
+		if !ok || createdAt.Before(windowStart) {
 			continue
 		}
 		candidates = append(candidates, coopNamedStoreCandidate{
@@ -109,6 +110,24 @@ func (codexNamedStoreReader) locate(cwd string, execStart time.Time) (coopNamedS
 		})
 	}
 	return selectCoopNamedStoreCandidate(candidates, "Codex thread")
+}
+
+func codexRolloutCreationTime(path string, location *time.Location) (time.Time, bool) {
+	base := filepath.Base(path)
+	const prefix = "rollout-"
+	if !strings.HasPrefix(base, prefix) || !strings.HasSuffix(base, ".jsonl") {
+		return time.Time{}, false
+	}
+	stampStart := len(prefix)
+	stampEnd := stampStart + len(codexRolloutTimestampLayout)
+	if len(base) <= stampEnd || base[stampEnd] != '-' {
+		return time.Time{}, false
+	}
+	createdAt, err := time.ParseInLocation(codexRolloutTimestampLayout, base[stampStart:stampEnd], location)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return createdAt, true
 }
 
 func (codexNamedStoreReader) readName(candidate coopNamedStoreCandidate) (string, error) {
@@ -192,8 +211,10 @@ func runCodexSQLiteQueryProcess(dbPath string) ([]byte, error) {
 }
 
 type cursorChatMeta struct {
-	Title string `json:"title"`
-	CWD   string `json:"cwd"`
+	Title       string          `json:"title"`
+	CWD         string          `json:"cwd"`
+	CreatedAt   json.RawMessage `json:"createdAt"`
+	CreatedAtMs json.RawMessage `json:"createdAtMs"`
 }
 
 type cursorNamedStoreReader struct{}
@@ -204,6 +225,7 @@ func (cursorNamedStoreReader) locate(cwd string, execStart time.Time) (coopNamed
 		return coopNamedStoreCandidate{}, fmt.Errorf("resolve Cursor home: %w", err)
 	}
 	root := filepath.Join(home, ".cursor", "chats")
+	windowStart := execStart.Add(-coopNamedStoreClockSlack)
 	var candidates []coopNamedStoreCandidate
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -216,7 +238,7 @@ func (cursorNamedStoreReader) locate(cwd string, execStart time.Time) (coopNamed
 		if infoErr != nil {
 			return infoErr
 		}
-		if !info.Mode().IsRegular() || info.ModTime().Before(execStart) {
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 		data, readErr := os.ReadFile(path)
@@ -228,6 +250,13 @@ func (cursorNamedStoreReader) locate(cwd string, execStart time.Time) (coopNamed
 			return fmt.Errorf("decode Cursor metadata %q: %w", path, err)
 		}
 		if meta.CWD != cwd {
+			return nil
+		}
+		createdAt, hasCreationTime, creationErr := cursorChatCreationTime(path, meta)
+		if creationErr != nil {
+			return fmt.Errorf("read Cursor chat creation time %q: %w", path, creationErr)
+		}
+		if !hasCreationTime || createdAt.Before(windowStart) {
 			return nil
 		}
 		candidates = append(candidates, coopNamedStoreCandidate{
@@ -256,4 +285,47 @@ func (cursorNamedStoreReader) readName(candidate coopNamedStoreCandidate) (strin
 		return "", fmt.Errorf("decode Cursor metadata %q: %w", candidate.storePath, err)
 	}
 	return meta.Title, nil
+}
+
+func cursorChatCreationTime(metaPath string, meta cursorChatMeta) (time.Time, bool, error) {
+	for _, value := range []struct {
+		field string
+		raw   json.RawMessage
+	}{
+		{field: "createdAtMs", raw: meta.CreatedAtMs},
+		{field: "createdAt", raw: meta.CreatedAt},
+	} {
+		if raw := bytes.TrimSpace(value.raw); len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+			continue
+		}
+		createdAt, err := parseCursorCreationValue(value.raw, value.field)
+		if err != nil {
+			return time.Time{}, false, err
+		}
+		return createdAt, true, nil
+	}
+	return cursorChatDirectoryBirthTime(metaPath)
+}
+
+func parseCursorCreationValue(raw json.RawMessage, field string) (time.Time, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) != 0 && raw[0] == '"' {
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return time.Time{}, fmt.Errorf("decode %s: %w", field, err)
+		}
+		if createdAt, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			return createdAt, nil
+		}
+		millis, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("parse %s %q: %w", field, value, err)
+		}
+		return time.UnixMilli(millis), nil
+	}
+	var millis int64
+	if err := json.Unmarshal(raw, &millis); err != nil {
+		return time.Time{}, fmt.Errorf("decode %s: %w", field, err)
+	}
+	return time.UnixMilli(millis), nil
 }

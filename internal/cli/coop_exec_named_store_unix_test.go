@@ -8,10 +8,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+func codexTestRolloutPath(dir string, createdAt time.Time, suffix string) string {
+	return filepath.Join(dir, "rollout-"+createdAt.Format(codexRolloutTimestampLayout)+"-"+suffix+".jsonl")
+}
 
 func TestCoopNamedSessionLabel(t *testing.T) {
 	for _, test := range []struct {
@@ -104,7 +110,8 @@ func TestResolveCoopNamedEnabledUsesLaunchConfig(t *testing.T) {
 func TestCodexNamedStoreReaderUsesReadOnlyStoreAndFiltersWindow(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
-	rollout := filepath.Join(home, "rollout.jsonl")
+	start := time.Now()
+	rollout := codexTestRolloutPath(home, start, "test")
 	if err := os.WriteFile(rollout, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +130,6 @@ func TestCodexNamedStoreReaderUsesReadOnlyStoreAndFiltersWindow(t *testing.T) {
   "rollout_path": "` + rollout + `"
 }]`), nil
 	}
-	start := time.Now().Add(-time.Second)
 	candidate, err := (codexNamedStoreReader{}).locate(cwd, start)
 	if err != nil {
 		t.Fatalf("locate Codex candidate: %v", err)
@@ -134,13 +140,9 @@ func TestCodexNamedStoreReaderUsesReadOnlyStoreAndFiltersWindow(t *testing.T) {
 	if gotDB != candidate.storePath {
 		t.Fatalf("sqlite database = %q, want %q", gotDB, candidate.storePath)
 	}
+	second := codexTestRolloutPath(home, start, "second")
 	runCodexSQLiteQuery = func(string) ([]byte, error) {
-		return []byte(`[{
-  "cwd": "` + cwd + `",
-  "name": "",
-  "title": "feature/codex",
-  "rollout_path": "` + rollout + `"
-}]`), nil
+		return []byte(`[{"cwd":"` + cwd + `","name":"","title":"feature/codex","rollout_path":"` + rollout + `"},{"cwd":"` + cwd + `","name":"other","rollout_path":"` + second + `"}]`), nil
 	}
 	if got, err := (codexNamedStoreReader{}).readName(candidate); err != nil || got != "feature/codex" {
 		t.Fatalf("legacy Codex title readback = %q, %v", got, err)
@@ -154,10 +156,9 @@ func TestCodexNamedStoreReaderUsesReadOnlyStoreAndFiltersWindow(t *testing.T) {
 }, {
   "cwd": "` + cwd + `",
   "name": "other",
-  "rollout_path": "` + rollout + ".second" + `"
+  "rollout_path": "` + second + `"
 }]`), nil
 	}
-	second := rollout + ".second"
 	if err := os.WriteFile(second, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -174,15 +175,15 @@ func TestCodexNamedStoreReaderSkipsCWDAndOldRollouts(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	current := filepath.Join(home, "current.jsonl")
-	other := filepath.Join(home, "other.jsonl")
-	old := filepath.Join(home, "old.jsonl")
+	current := codexTestRolloutPath(home, start, "current")
+	other := codexTestRolloutPath(home, start, "other")
+	old := codexTestRolloutPath(home, start.Add(-3*time.Second), "old")
 	for _, path := range []string{current, other, old} {
 		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	oldTime := start.Add(-time.Second)
+	oldTime := time.Now()
 	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
@@ -203,6 +204,50 @@ func TestCodexNamedStoreReaderSkipsCWDAndOldRollouts(t *testing.T) {
 	}
 	if candidate.key != current {
 		t.Fatalf("candidate = %#v, want current rollout", candidate)
+	}
+}
+
+func TestCodexNamedStoreReaderAcceptsClockSlackButFiltersOlderRollouts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	withinCreated := start.Add(-time.Second)
+	oldCreated := start.Add(-3 * time.Second)
+	within := codexTestRolloutPath(home, withinCreated, "within")
+	old := codexTestRolloutPath(home, oldCreated, "old")
+	for _, path := range []string{within, old} {
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withinTime := time.Now()
+	oldTime := withinTime
+	if err := os.Chtimes(within, withinTime, withinTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := json.Marshal([]codexThreadRow{
+		{CWD: cwd, RolloutPath: within},
+		{CWD: cwd, RolloutPath: old},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldQuery := runCodexSQLiteQuery
+	t.Cleanup(func() { runCodexSQLiteQuery = oldQuery })
+	runCodexSQLiteQuery = func(string) ([]byte, error) { return rows, nil }
+	candidate, err := (codexNamedStoreReader{}).locate(cwd, start)
+	if err != nil {
+		t.Fatalf("locate Codex candidate with clock slack: %v", err)
+	}
+	if candidate.key != within {
+		t.Fatalf("candidate = %#v, want rollout within clock slack", candidate)
 	}
 }
 
@@ -264,14 +309,16 @@ func TestCursorNamedStoreReaderFiltersCWDAndWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	start := time.Now()
+	createdAt := strconv.FormatInt(start.UnixMilli(), 10)
 	metaPath := filepath.Join(home, ".cursor", "chats", "workspace", "chat", "meta.json")
 	if err := os.MkdirAll(filepath.Dir(metaPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(metaPath, []byte(`{"title":"","cwd":"`+cwd+`"}`), 0o600); err != nil {
+	if err := os.WriteFile(metaPath, []byte(`{"title":"","createdAtMs":`+createdAt+`,"cwd":"`+cwd+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	candidate, err := (cursorNamedStoreReader{}).locate(cwd, time.Now().Add(-time.Second))
+	candidate, err := (cursorNamedStoreReader{}).locate(cwd, start)
 	if err != nil {
 		t.Fatalf("locate Cursor candidate: %v", err)
 	}
@@ -286,11 +333,88 @@ func TestCursorNamedStoreReaderFiltersCWDAndWindow(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(other), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(other, []byte(`{"title":"other","cwd":"`+cwd+`"}`), 0o600); err != nil {
+	if err := os.WriteFile(other, []byte(`{"title":"other","createdAtMs":`+createdAt+`,"cwd":"`+cwd+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (cursorNamedStoreReader{}).locate(cwd, time.Now().Add(-time.Second)); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+	if _, err := (cursorNamedStoreReader{}).locate(cwd, start); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("multiple Cursor candidates error = %v", err)
+	}
+}
+
+func TestCursorNamedStoreReaderAcceptsClockSlackButFiltersOlderChats(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	withinCreated := start.Add(-time.Second)
+	oldCreated := start.Add(-3 * time.Second)
+	within := filepath.Join(home, ".cursor", "chats", "workspace", "within", "meta.json")
+	old := filepath.Join(home, ".cursor", "chats", "workspace", "old", "meta.json")
+	for _, test := range []struct {
+		path      string
+		createdAt time.Time
+	}{
+		{path: within, createdAt: withinCreated},
+		{path: old, createdAt: oldCreated},
+	} {
+		path := test.path
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"title":"","createdAtMs":`+strconv.FormatInt(test.createdAt.UnixMilli(), 10)+`,"cwd":"`+cwd+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withinTime := time.Now()
+	oldTime := withinTime
+	if err := os.Chtimes(within, withinTime, withinTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := (cursorNamedStoreReader{}).locate(cwd, start)
+	if err != nil {
+		t.Fatalf("locate Cursor candidate with clock slack: %v", err)
+	}
+	if candidate.storePath != within {
+		t.Fatalf("candidate = %#v, want chat within clock slack", candidate)
+	}
+}
+
+func TestCursorNamedStoreReaderWithoutCreationEvidenceSkips(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux has no supported Cursor chat birth-time fallback")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metaPath := filepath.Join(home, ".cursor", "chats", "workspace", "chat", "meta.json")
+	if err := os.MkdirAll(filepath.Dir(metaPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metaPath, []byte(`{"title":"","cwd":"`+cwd+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldInject := coopNamedTTYInject
+	t.Cleanup(func() { coopNamedTTYInject = oldInject })
+	injections := 0
+	coopNamedTTYInject = func(string, string) error {
+		injections++
+		return nil
+	}
+	_, stderr, err := captureEnvOutput(t, func() error {
+		reader := cursorNamedStoreReader{}
+		return runCoopNamedTUI(&reader, "feature/agent", "agent", cwd, time.Now())
+	})
+	if err != nil || injections != 0 || !strings.Contains(stderr, "manually") {
+		t.Fatalf("missing Cursor creation evidence: err=%v injections=%d stderr=%q", err, injections, stderr)
 	}
 }
 

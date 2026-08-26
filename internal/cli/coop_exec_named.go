@@ -17,15 +17,36 @@ const (
 	coopNamedModeUnknown
 )
 
+type coopNamedResumeSyntax uint8
+
+const (
+	coopNamedResumeFlags coopNamedResumeSyntax = iota
+	coopNamedResumeCodex
+	coopNamedResumeCursor
+)
+
+type coopNamedHarness struct {
+	mode         coopNamedMode
+	resumeSyntax coopNamedResumeSyntax
+}
+
+var coopNamedHarnesses = map[string]coopNamedHarness{
+	"claude": {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags},
+	"pi":     {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags},
+	"codex":  {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCodex},
+	"agent":  {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor},
+}
+
+func coopNamedHarnessFor(binary string) (coopNamedHarness, bool) {
+	harness, ok := coopNamedHarnesses[strings.ToLower(filepath.Base(binary))]
+	return harness, ok
+}
+
 func coopNamedModeFor(binary string) coopNamedMode {
-	switch strings.ToLower(filepath.Base(binary)) {
-	case "claude", "pi":
-		return coopNamedModeArgv
-	case "codex", "agent":
-		return coopNamedModeTUI
-	default:
-		return coopNamedModeUnknown
+	if harness, ok := coopNamedHarnessFor(binary); ok {
+		return harness.mode
 	}
+	return coopNamedModeUnknown
 }
 
 func agentArgsHasNameFlag(args []string) bool {
@@ -46,6 +67,29 @@ func agentArgsHasNameFlag(args []string) bool {
 }
 
 func agentArgsPreventAutoName(args []string) bool {
+	return agentArgsPreventAutoNameFor("", args)
+}
+
+func agentArgsPreventAutoNameFor(cmdName string, args []string) bool {
+	resumeSyntax := coopNamedResumeFlags
+	if harness, ok := coopNamedHarnessFor(cmdName); ok {
+		resumeSyntax = harness.resumeSyntax
+	}
+	return agentArgsHasNameFlag(args) || agentArgsHaveResume(args, resumeSyntax)
+}
+
+func agentArgsHaveResume(args []string, syntax coopNamedResumeSyntax) bool {
+	switch syntax {
+	case coopNamedResumeCodex:
+		return agentArgsHaveCodexResume(args)
+	case coopNamedResumeCursor:
+		return agentArgsHaveResumeFlags(args, false)
+	default:
+		return agentArgsHaveResumeFlags(args, true)
+	}
+}
+
+func agentArgsHaveResumeFlags(args []string, allowContinue bool) bool {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
@@ -55,11 +99,36 @@ func agentArgsPreventAutoName(args []string) bool {
 			i++
 			continue
 		}
-		if arg == "-n" || arg == "--name" || strings.HasPrefix(arg, "--name=") ||
-			arg == "-r" || arg == "--resume" || strings.HasPrefix(arg, "--resume=") ||
-			arg == "-c" || arg == "--continue" || strings.HasPrefix(arg, "--continue=") {
+		if arg == "-r" || arg == "--resume" || strings.HasPrefix(arg, "--resume=") ||
+			allowContinue && (arg == "-c" || arg == "--continue" || strings.HasPrefix(arg, "--continue=")) {
 			return true
 		}
+	}
+	return false
+}
+
+func agentArgsHaveCodexResume(args []string) bool {
+	var firstPositional string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return false
+		}
+		if coopNamedValueFlag(arg) {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if firstPositional == "" {
+			firstPositional = arg
+			if arg == "resume" {
+				return true
+			}
+			continue
+		}
+		return firstPositional == "exec" && arg == "resume"
 	}
 	return false
 }
@@ -74,7 +143,7 @@ func coopNamedValueFlag(arg string) bool {
 }
 
 func injectCoopNamedArgv(cmdName string, agentArgs []string, me string) []string {
-	if coopNamedModeFor(cmdName) != coopNamedModeArgv || agentArgsPreventAutoName(agentArgs) {
+	if coopNamedModeFor(cmdName) != coopNamedModeArgv || agentArgsPreventAutoNameFor(cmdName, agentArgs) {
 		return agentArgs
 	}
 	return append([]string{"--name", me}, agentArgs...)
@@ -145,6 +214,9 @@ func applyCoopNamedBeforeExecAt(
 	execStart time.Time,
 ) ([]string, error) {
 	if !named {
+		return agentArgs, nil
+	}
+	if agentArgsPreventAutoNameFor(cmdName, agentArgs) {
 		return agentArgs, nil
 	}
 	switch coopNamedModeFor(cmdName) {

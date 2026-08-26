@@ -69,8 +69,9 @@ finds one newly created session for the spawn directory. Codex resumes by name,
 for example `codex resume session1/codex`. Cursor `agent` resumes through its
 picker only; resume-by-name is unproven. Disable this with `--named=false`,
 `AMQ_COOP_NAMED=0`, or `"named": false` in `.amq/launch.json`. Existing names
-and resume or continue flags are preserved. Managed launches keep naming
-disabled until their provider-name contract is available.
+and resume or continue flags are preserved, including `codex resume` and
+`agent --resume`. Managed launches keep naming disabled until their
+provider-name contract is available.
 
 Creating a missing named session, explicit root, or declared default session
 still works in this release and prints one deprecation warning. Use

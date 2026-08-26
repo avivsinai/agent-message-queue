@@ -209,7 +209,8 @@ get `--name`; Codex and Cursor `agent` get a best-effort TUI rename after the
 new session store is verified. Codex resumes by name, for example `codex resume
 session1/codex`. Cursor `agent` resumes through its picker only; resume-by-name
 is unproven. Existing names and `--resume`, `-r`, `--continue`, or `-c` flags
-are preserved. Disable naming with `--named=false`, `AMQ_COOP_NAMED=0`, or
+are preserved, including `codex resume` and `agent --resume`. Disable naming
+with `--named=false`, `AMQ_COOP_NAMED=0`, or
 `"named": false` in `.amq/launch.json`. Managed launches keep naming disabled
 until their provider-name contract is available; explicit `--named` remains
 refused there.
