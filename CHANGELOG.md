@@ -8,6 +8,20 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.71.0](https://github.com/avivsinai/agent-message-queue/compare/v0.70.0...v0.71.0) (2026-08-26)
+
+
+### Features
+
+* **keepalive:** add claude-print submitted seat for existing Claude sessions ([#653](https://github.com/avivsinai/agent-message-queue/issues/653)) ([b1c7455](https://github.com/avivsinai/agent-message-queue/commit/b1c745560e1cc64ecc011b2f3692161e99936061))
+* **keepalive:** add codex-queue submitted seat for live Codex threads ([#651](https://github.com/avivsinai/agent-message-queue/issues/651)) ([7a7fbc6](https://github.com/avivsinai/agent-message-queue/commit/7a7fbc6ce9b7218b59dffa117c27590e2f13569b))
+
+
+### Bug Fixes
+
+* **coop:** detect named inject TTY via /dev/tty ([#649](https://github.com/avivsinai/agent-message-queue/issues/649)) ([a32c500](https://github.com/avivsinai/agent-message-queue/commit/a32c5006b9c528912babc124c3d496cc0515f69c))
+* **keepalive:** isolate hookinstall tests from HOME and self-heal stale hooks ([#652](https://github.com/avivsinai/agent-message-queue/issues/652)) ([5340ad0](https://github.com/avivsinai/agent-message-queue/commit/5340ad018a20c1d390c8276c061d33b06726657b))
+
 ## [0.70.0](https://github.com/avivsinai/agent-message-queue/compare/v0.69.0...v0.70.0) (2026-08-25)
 
 
