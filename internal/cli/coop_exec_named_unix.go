@@ -16,8 +16,11 @@ import (
 const coopNamedTUIStartupDelay = 3 * time.Second
 
 var (
+	openCoopNamedTTY = func() (*os.File, error) {
+		return os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	}
 	coopNamedTTYReady = func() bool {
-		return tiocsti.Available() && tiocsti.IsTTY()
+		return tiocsti.Available() && coopNamedHasControllingTTY()
 	}
 	coopNamedTTYInject = func(me, binaryBase string) error {
 		return injectCoopNamedSlashCommand(me, binaryBase)
@@ -46,6 +49,8 @@ func startCoopNamedTUIInjectorProcess(me, cmdName string) error {
 		"--me", me,
 		"--binary", filepath.Base(cmdName),
 	)
+	// Leave stdin/stdout on the null device so the helper does not steal the
+	// agent's TTY fds. Injection opens the controlling terminal via /dev/tty.
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = os.Stderr
@@ -57,6 +62,15 @@ func startCoopNamedTUIInjectorProcess(me, cmdName string) error {
 		return fmt.Errorf("release coop named inject helper: %w", err)
 	}
 	return nil
+}
+
+func coopNamedHasControllingTTY() bool {
+	tty, err := openCoopNamedTTY()
+	if err != nil {
+		return false
+	}
+	_ = tty.Close()
+	return true
 }
 
 func runCoopNamedInject(args []string) error {
