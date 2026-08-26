@@ -341,6 +341,23 @@ func TestCursorNamedStoreReaderFiltersCWDAndWindow(t *testing.T) {
 	}
 }
 
+func TestCoopNamedStoreReaderRecognizesCursorAliases(t *testing.T) {
+	current, currentOK := coopNamedStoreReaderFor("agent")
+	if !currentOK {
+		t.Fatal("current Cursor executable does not use the Cursor named store reader")
+	}
+	if _, ok := current.(cursorNamedStoreReader); !ok {
+		t.Fatal("current Cursor executable returned the wrong named store reader")
+	}
+	legacy, legacyOK := coopNamedStoreReaderFor("cursor-agent")
+	if !legacyOK {
+		t.Fatal("legacy Cursor executable does not use the Cursor named store reader")
+	}
+	if _, ok := legacy.(cursorNamedStoreReader); !ok {
+		t.Fatal("legacy Cursor executable returned the wrong named store reader")
+	}
+}
+
 func TestCursorNamedStoreReaderAcceptsClockSlackButFiltersOlderChats(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

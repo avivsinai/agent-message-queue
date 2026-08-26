@@ -500,6 +500,42 @@ func TestCoopExecNamedDisabledByFlag(t *testing.T) {
 	}
 }
 
+func TestCoopNamedHarnessesMatchLaunchProviderSet(t *testing.T) {
+	want := make(map[string]struct{})
+	for _, executable := range []string{
+		launch.ClaudeProvider,
+		launch.CodexProvider,
+		"agent",
+		launch.CursorProvider,
+		launch.GrokProvider,
+	} {
+		provider := launch.ProviderForExecutable(executable)
+		if provider == "" {
+			t.Fatalf("launch.ProviderForExecutable(%q) returned an empty provider", executable)
+		}
+		want[provider] = struct{}{}
+	}
+
+	got := make(map[string]struct{})
+	for executable := range coopNamedHarnesses {
+		if provider := launch.ProviderForExecutable(executable); provider != "" {
+			got[provider] = struct{}{}
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("named harness providers = %#v, want launch providers %#v", got, want)
+	}
+
+	agentHarness, agentOK := coopNamedHarnessFor("agent")
+	cursorHarness, cursorOK := coopNamedHarnessFor(launch.CursorProvider)
+	if !agentOK || !cursorOK || agentHarness != cursorHarness {
+		t.Fatalf("Cursor aliases do not share a harness: agent=%#v/%v cursor-agent=%#v/%v", agentHarness, agentOK, cursorHarness, cursorOK)
+	}
+	if got := coopNamedModeFor(launch.GrokProvider); got != coopNamedModeUnknown {
+		t.Fatalf("Grok named mode = %d, want unknown", got)
+	}
+}
+
 func TestCoopNamedTUICommand(t *testing.T) {
 	if got := coopNamedTUICommand("codex", "coder1"); got != "/rename coder1" {
 		t.Fatalf("codex command = %q", got)
@@ -661,6 +697,24 @@ func TestApplyCoopNamedUnknownBinaryLeavesArgs(t *testing.T) {
 	reminder := coopNamedUnknownReminder("coder1", "/bin/bash")
 	if !strings.Contains(reminder, "coder1") || !strings.Contains(reminder, "bash") {
 		t.Fatalf("reminder = %q", reminder)
+	}
+}
+
+func TestApplyCoopNamedGrokPrintsUnknownReminder(t *testing.T) {
+	var gotArgs []string
+	_, stderr, err := captureEnvOutput(t, func() error {
+		var err error
+		gotArgs, err = applyCoopNamedBeforeExec(true, launch.GrokProvider, []string{"--model", "grok-4.5"}, "feature/grok")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("applyCoopNamedBeforeExec: %v", err)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"--model", "grok-4.5"}) {
+		t.Fatalf("args = %#v, want unchanged", gotArgs)
+	}
+	if !strings.Contains(stderr, `name this CLI session "feature/grok" manually`) || !strings.Contains(stderr, `unknown binary "grok"`) {
+		t.Fatalf("Grok reminder = %q", stderr)
 	}
 }
 
