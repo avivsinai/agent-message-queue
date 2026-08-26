@@ -239,6 +239,25 @@ func TestGrokCommittedConfigRejectsDuplicateToolFlags(t *testing.T) {
 	}
 }
 
+// TestGrokCommittedConfigRejectsBypassFlagAsToolValue confirms the leading-dash
+// guard in validGrokToolList refuses a flag-looking value smuggled into
+// --tools or --disallowed-tools (e.g. the Grok bypass flag), mirroring the
+// Claude strictness-inversion fix in issue #648 item 2.
+func TestGrokCommittedConfigRejectsBypassFlagAsToolValue(t *testing.T) {
+	project := t.TempDir()
+	adapter := NewGrokAdapter("definitely-not-installed-grok")
+	for _, args := range [][]string{
+		{"--tools", "--dangerously-bypass-approvals-and-sandbox"},
+		{"--disallowed-tools", "--dangerously-bypass-approvals-and-sandbox"},
+		{"--tools", "--verbose"},
+	} {
+		err := ValidateCommittedConfig(adapter, CommittedConfigRequest{ProjectRoot: project, Args: args})
+		if err == nil || !strings.Contains(err.Error(), "invalid value") {
+			t.Fatalf("ValidateCommittedConfig(%q) error = %v, want invalid value", args, err)
+		}
+	}
+}
+
 func TestGrokPlansForwardOpaqueToolNames(t *testing.T) {
 	project, executable := testExecutable(t, GrokProvider)
 	adapter := NewGrokAdapter(executable)

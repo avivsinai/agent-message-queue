@@ -60,6 +60,7 @@ func runLaunchEngine(args []string, options launchCLIOptions) error {
 	prepareFlag := fs.Bool("prepare", false, "Prepare the public launch intent without mutation (requires --plan and --json)")
 	applyFlag := fs.String("apply", "", "Public ApplyRequestV1 file, or - for stdin (requires --json)")
 	placementFlag := fs.String("placement", "", "Public PlacementV1 JSON object (with --plan)")
+	requestFlag := fs.String("request", "", "Public PrepareRequestV1 file, or - for stdin (requires --json)")
 	usageName := "amq launch [options]"
 	if options.resumeOnly {
 		usageName = "amq session resume <name> [options]"
@@ -72,16 +73,16 @@ func runLaunchEngine(args []string, options launchCLIOptions) error {
 	} else if handled {
 		return nil
 	}
-	publicMode := flagWasVisited(fs, "plan") || flagWasVisited(fs, "prepare") || flagWasVisited(fs, "apply") || flagWasVisited(fs, "placement")
+	publicMode := flagWasVisited(fs, "plan") || flagWasVisited(fs, "prepare") || flagWasVisited(fs, "apply") || flagWasVisited(fs, "placement") || flagWasVisited(fs, "request")
 	if publicMode {
 		if options.resumeOnly {
-			return UsageError("session resume does not accept --plan, --prepare, or --apply")
+			return UsageError("session resume does not accept --plan, --prepare, --apply, or --request")
 		}
 		if flagWasVisited(fs, "fresh") || flagWasVisited(fs, "allow-fresh-fallback") ||
 			flagWasVisited(fs, "rebind") || flagWasVisited(fs, "require-agent") {
-			return UsageError("--plan, --prepare, and --apply do not accept legacy launch decision flags")
+			return UsageError("--plan, --prepare, --apply, and --request do not accept legacy launch decision flags")
 		}
-		return runPublicLaunch(common, *sessionFlag, *launcherFlag, *planFlag, *prepareFlag, *applyFlag, *placementFlag, fs)
+		return runPublicLaunch(common, *sessionFlag, *launcherFlag, *planFlag, *prepareFlag, *applyFlag, *placementFlag, *requestFlag, fs)
 	}
 	if *freshFlag && *allowFreshFlag {
 		return UsageError("--fresh and --allow-fresh-fallback are mutually exclusive")

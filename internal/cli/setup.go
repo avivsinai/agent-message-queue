@@ -135,6 +135,7 @@ func runSetup(args []string) (returnErr error) {
 	applyFlag := fs.String("apply", "", "Apply only when the recomputed preview matches this digest")
 	yesFlag := fs.Bool("y", false, "Accept the preview without prompting")
 	jsonFlag := fs.Bool("json", false, "Emit JSON output")
+	projectRootFlag := fs.String("project-root", "", "Directory treated as the project root (writes .amqrc, .amq, and .gitignore there)")
 	usage := usageWithFlags(fs, "amq setup [options]",
 		"Configure this project after previewing every change.",
 		"Detects Claude, Codex, Cursor, and Grok through their adapter capability probes.",
@@ -167,20 +168,40 @@ func runSetup(args []string) (returnErr error) {
 	if *layoutFlag != launch.LayoutColumns {
 		return UsageError("unsupported --layout %q", *layoutFlag)
 	}
+	projectRootExplicit := flagWasVisited(fs, "project-root")
+	if projectRootExplicit && strings.TrimSpace(*projectRootFlag) == "" {
+		return UsageError("--project-root must not be blank")
+	}
 
 	originalCWD, err := os.Getwd()
 	if err != nil {
 		return err
 	}
+	// An existing explicit project config in cwd is authority: a nested
+	// directory that already owns .amq/launch.json is the project root without
+	// --project-root, so upward base discovery cannot redirect writes into a
+	// parent repo's live base root.
+	cwdOwnsProjectConfig := projectConfigExistsInDir(originalCWD)
 	projectRoot := originalCWD
-	if top, worktree := gitWorktreeTopFromCWD(); worktree {
-		projectRoot = top
-	} else if boundary, insideGit := gitWorktreeRootFromCWD(); insideGit {
-		return noEligibleRootInGitError(boundary)
+	if projectRootExplicit {
+		resolved, resolveErr := resolveSetupProjectRoot(*projectRootFlag, originalCWD)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		projectRoot = resolved
+	} else if !cwdOwnsProjectConfig {
+		// Without an explicit root or a local config, preserve the v0.61
+		// behavior: a Git worktree top is the project root, and a plain Git
+		// repo without a worktree refuses.
+		if top, worktree := gitWorktreeTopFromCWD(); worktree {
+			projectRoot = top
+		} else if boundary, insideGit := gitWorktreeRootFromCWD(); insideGit {
+			return noEligibleRootInGitError(boundary)
+		}
 	}
 	if !sameTreeIdentity(originalCWD, projectRoot) {
 		if err := os.Chdir(projectRoot); err != nil {
-			return fmt.Errorf("enter Git worktree top %q: %w", projectRoot, err)
+			return fmt.Errorf("enter project root %q: %w", projectRoot, err)
 		}
 		resetAmqrcCache()
 		defer func() {
@@ -196,8 +217,8 @@ func runSetup(args []string) (returnErr error) {
 		input = bufio.NewReader(os.Stdin)
 	}
 	state, err := buildSetupState(setupOptions{
-		projectRoot: projectRoot,
-		root:        *rootFlag, rootExplicit: flagWasVisited(fs, "root"),
+		projectRoot: projectRoot, projectRootExplicit: projectRootExplicit || cwdOwnsProjectConfig,
+		root: *rootFlag, rootExplicit: flagWasVisited(fs, "root"),
 		agents: *agentsFlag, agentsExplicit: flagWasVisited(fs, "agents"),
 		defaultSession: *sessionFlag, sessionExplicit: flagWasVisited(fs, "default-session"),
 		launchers: *launchersFlag, launchersExplicit: flagWasVisited(fs, "launcher-preference"),
@@ -257,6 +278,7 @@ type setupOptions struct {
 	launchers, layout                  string
 	rootExplicit, agentsExplicit       bool
 	sessionExplicit, launchersExplicit bool
+	projectRootExplicit                bool
 	noGitignore, nonInteractive        bool
 	input                              *bufio.Reader
 }
@@ -278,7 +300,7 @@ func buildSetupState(options setupOptions) (setupState, error) {
 		return setupState{}, UsageError("first non-interactive setup requires explicit --agents, --default-session, and --launcher-preference")
 	}
 
-	root, amqrcData, amqrcExists, err := setupRoot(options.root, options.rootExplicit, options.projectRoot)
+	root, amqrcData, amqrcExists, err := setupRoot(options.root, options.rootExplicit, options.projectRoot, options.projectRootExplicit)
 	if err != nil {
 		return setupState{}, err
 	}
@@ -721,27 +743,85 @@ func splitSetupList(raw string) []string {
 	return result
 }
 
-func setupRoot(requested string, explicit bool, projectRoot string) (string, []byte, bool, error) {
+// projectConfigExistsInDir reports whether dir contains the committed
+// project launch config (.amq/launch.json). An existing explicit config is
+// authority: setup treats such a directory as the project root without
+// --project-root, so upward base discovery cannot redirect writes into a
+// parent repo's live base root.
+func projectConfigExistsInDir(dir string) bool {
+	info, err := os.Lstat(filepath.Join(dir, setupConfigPath))
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return false
+	}
+	return true
+}
+
+// resolveSetupProjectRoot resolves a --project-root value to an absolute,
+// real directory. A relative path is interpreted against the original cwd so
+// the flag composes with `cd` in a shell. The directory must exist and be a
+// real directory (not a symlink) so setup writes land exactly where the
+// operator named: a symlinked --project-root is refused rather than
+// silently following the link outside the caller-intended root.
+func resolveSetupProjectRoot(value, originalCWD string) (string, error) {
+	resolved := strings.TrimSpace(value)
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(originalCWD, resolved)
+	}
+	abs, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve --project-root: %w", err)
+	}
+	// Lstat the user-supplied path (not its target): a symlink at the named
+	// path is refused so setup never writes through the link into a directory
+	// the operator did not name.
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return "", UsageError("--project-root %q does not exist", value)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", UsageError("--project-root %q is a symlink; pass the real directory", value)
+	}
+	if !info.IsDir() {
+		return "", UsageError("--project-root %q is not a directory", value)
+	}
+	// Canonicalize parent components only; the leaf is already verified as a
+	// real directory above, so EvalSymlinks is not applied to it.
+	return filepath.Clean(abs), nil
+}
+
+func setupRoot(requested string, explicit bool, projectRoot string, projectRootExplicit bool) (string, []byte, bool, error) {
 	result, err := findAndLoadAmqrc()
 	if err == nil {
 		if !sameTreeIdentity(result.Dir, projectRoot) {
-			return "", nil, false, fmt.Errorf("project setup resolved parent .amqrc at %s", result.Path)
+			if projectRootExplicit {
+				// Explicit beats inferred: an explicit --project-root (or a
+				// cwd that owns .amq/launch.json) suppresses upward base
+				// discovery. A parent .amqrc found above the project root is
+				// ignored, not adopted, so setup writes into the project root
+				// and the parent tree stays byte-identical. The implicit case
+				// still refuses an upward-discovered parent .amqrc.
+				err = errAmqrcNotFound
+			} else {
+				return "", nil, false, fmt.Errorf("project setup resolved parent .amqrc at %s", result.Path)
+			}
 		}
-		raw, readErr := os.ReadFile(result.Path)
-		if readErr != nil {
-			return "", nil, false, readErr
+		if err == nil {
+			raw, readErr := os.ReadFile(result.Path)
+			if readErr != nil {
+				return "", nil, false, readErr
+			}
+			var fields map[string]json.RawMessage
+			if jsonErr := json.Unmarshal(raw, &fields); jsonErr != nil {
+				return "", nil, false, jsonErr
+			}
+			if _, conflict := fields["default_session"]; conflict {
+				return "", nil, false, &launch.ConfigAuthorityConflictError{Path: ".amqrc", Field: "default_session"}
+			}
+			if explicit && requested != result.Config.Root {
+				return "", nil, false, fmt.Errorf(".amqrc already selects root %q", result.Config.Root)
+			}
+			return result.Config.Root, raw, true, nil
 		}
-		var fields map[string]json.RawMessage
-		if jsonErr := json.Unmarshal(raw, &fields); jsonErr != nil {
-			return "", nil, false, jsonErr
-		}
-		if _, conflict := fields["default_session"]; conflict {
-			return "", nil, false, &launch.ConfigAuthorityConflictError{Path: ".amqrc", Field: "default_session"}
-		}
-		if explicit && requested != result.Config.Root {
-			return "", nil, false, fmt.Errorf(".amqrc already selects root %q", result.Config.Root)
-		}
-		return result.Config.Root, raw, true, nil
 	}
 	if !errors.Is(err, errAmqrcNotFound) {
 		return "", nil, false, err
