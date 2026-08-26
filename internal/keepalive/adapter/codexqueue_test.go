@@ -102,12 +102,16 @@ func TestCodexQueueInjectUsesArgvOnlyAndPreservesPayload(t *testing.T) {
 		t.Fatalf("calls = %d (%#v), want help + queue", len(runner.calls), runner.calls)
 	}
 	help := runner.calls[0]
-	if help.name != bin || len(help.args) != 2 || help.args[0] != "queue" || help.args[1] != "--help" {
-		t.Fatalf("probe help call = %#v", help)
+	resolved, err := filepath.EvalSymlinks(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if help.name != resolved || len(help.args) != 2 || help.args[0] != "queue" || help.args[1] != "--help" {
+		t.Fatalf("probe help call = %#v, want resolved %q", help, resolved)
 	}
 	enqueue := runner.calls[1]
-	if enqueue.name != bin {
-		t.Fatalf("enqueue executable = %q, want %q", enqueue.name, bin)
+	if enqueue.name != resolved {
+		t.Fatalf("enqueue executable = %q, want %q", enqueue.name, resolved)
 	}
 	wantArgs := []string{"queue", "--thread", testQueueUUID, "--message", payload}
 	if strings.Join(enqueue.args, "\x00") != strings.Join(wantArgs, "\x00") {
@@ -174,7 +178,11 @@ func TestCodexQueueHelpWithoutThreadIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("Probe() succeeded without --thread in help")
 	}
-	if !strings.Contains(err.Error(), bin) || !strings.Contains(err.Error(), "put a codex >= 0.149 first in PATH") {
+	resolved, resErr := filepath.EvalSymlinks(bin)
+	if resErr != nil {
+		t.Fatal(resErr)
+	}
+	if !strings.Contains(err.Error(), resolved) || !strings.Contains(err.Error(), "put a codex >= 0.149 first in PATH") {
 		t.Fatalf("error = %v, want resolved path and PATH remedy", err)
 	}
 	for _, c := range runner.calls {
@@ -210,5 +218,59 @@ func TestCodexQueueNonZeroExitAfterEnqueueIsUncertain(t *testing.T) {
 	err := q.Inject(context.Background(), codexQueueTargetThreadPrefix+testQueueUUID, "payload")
 	if !errors.Is(err, ErrInjectUncertain) {
 		t.Fatalf("Inject() error = %v, want ErrInjectUncertain", err)
+	}
+}
+
+func TestCodexQueueInspectorErrorRefusesWithoutQueueCall(t *testing.T) {
+	home, bin := writeCodexQueueFixture(t, testQueueUUID)
+	runner := &fakeCommandRunner{output: []byte("Usage: --thread --message\n")}
+	q := testCodexQueue(home, bin, runner, stubWriterLock{err: errors.New("F_GETLK failed")})
+	err := q.Inject(context.Background(), codexQueueTargetThreadPrefix+testQueueUUID, "payload")
+	if err == nil {
+		t.Fatal("Inject() succeeded on inspector error; want fail-closed")
+	}
+	if !strings.Contains(err.Error(), "F_GETLK failed") {
+		t.Fatalf("error = %v, want inspector error text", err)
+	}
+	if !strings.Contains(err.Error(), "codex resume") {
+		t.Fatalf("error = %v, want a runnable remedy", err)
+	}
+	for _, c := range runner.calls {
+		if len(c.args) >= 2 && c.args[0] == "queue" && c.args[1] == "--thread" {
+			t.Fatalf("inspector error issued a queue inject call: %#v", c)
+		}
+	}
+}
+
+func TestCodexQueueExecutesResolvedSymlinkTarget(t *testing.T) {
+	home, _ := writeCodexQueueFixture(t, testQueueUUID)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "codex-real")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(dir, "codex")
+	if err := os.Symlink(target, shim); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(shim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeCommandRunner{results: []fakeCommandResult{
+		{output: []byte("Usage: --thread --message\n")},
+		{},
+	}}
+	q := testCodexQueue(home, shim, runner, stubWriterLock{held: true})
+	if err := q.Inject(context.Background(), codexQueueTargetThreadPrefix+testQueueUUID, "payload"); err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %#v, want help + queue", runner.calls)
+	}
+	for i, c := range runner.calls {
+		if c.name != resolved {
+			t.Fatalf("call %d executable = %q, want resolved %q", i, c.name, resolved)
+		}
 	}
 }

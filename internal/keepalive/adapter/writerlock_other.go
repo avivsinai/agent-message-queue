@@ -2,21 +2,14 @@
 
 package adapter
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"runtime"
+)
 
-// platformWriterLockInspector falls back to lsof on platforms without a
-// native flock inspector.
-type platformWriterLockInspector struct {
-	Runner CommandRunner
-}
+type platformWriterLockInspector struct{}
 
-func (i platformWriterLockInspector) Held(ctx context.Context, path string) (bool, error) {
-	return lsofLockHeld(ctx, i.runner(), path)
-}
-
-func (i platformWriterLockInspector) runner() CommandRunner {
-	if i.Runner != nil {
-		return i.Runner
-	}
-	return ExecRunner{}
+func (platformWriterLockInspector) Held(_ context.Context, _ string) (bool, error) {
+	return false, fmt.Errorf("codex-queue writer-lock inspection is unsupported on %s; run on darwin or linux", runtime.GOOS)
 }

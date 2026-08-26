@@ -16,25 +16,13 @@ import (
 // platformWriterLockInspector reads /proc/locks. On Linux, flock(2) and
 // fcntl(F_GETLK) are independent lock types (except over NFS), and Codex's
 // writer lock is an flock, so F_GETLK would always report idle. Match FLOCK
-// ADVISORY WRITE rows whose maj:min:ino equals the lock file. lsof -t is only
-// the fallback if /proc/locks cannot be inspected.
-type platformWriterLockInspector struct {
-	Runner CommandRunner
-}
+// ADVISORY WRITE rows whose maj:min:ino equals the lock file. Inspection
+// errors fail closed; lsof is not a lock inspector (an open fd is not a held
+// flock).
+type platformWriterLockInspector struct{}
 
-func (i platformWriterLockInspector) Held(ctx context.Context, path string) (bool, error) {
-	held, err := procLocksHeld(path)
-	if err == nil {
-		return held, nil
-	}
-	return lsofLockHeld(ctx, i.runner(), path)
-}
-
-func (i platformWriterLockInspector) runner() CommandRunner {
-	if i.Runner != nil {
-		return i.Runner
-	}
-	return ExecRunner{}
+func (platformWriterLockInspector) Held(_ context.Context, path string) (bool, error) {
+	return procLocksHeld(path)
 }
 
 func procLocksHeld(path string) (bool, error) {

@@ -117,7 +117,7 @@ func (c CodexQueue) probe(ctx context.Context, target string) (uuid, codexPath s
 	lockPath := filepath.Join(home, "thread-writer-locks", uuid+".lock")
 	held, err := c.lockInspector().Held(ctx, lockPath)
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("inspect writer lock for thread %s: %w; open it in the Codex app or `codex resume %s` and retry", uuid, err, uuid)
 	}
 	if !held {
 		return "", "", fmt.Errorf("%w: thread %s has no active writer; open it in the Codex app or `codex resume %s` and retry", ErrTargetDegraded, uuid, uuid)
@@ -157,12 +157,12 @@ func (c CodexQueue) pinExecutable(ctx context.Context) (string, error) {
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 		return "", fmt.Errorf("codex at %s is not an executable regular file; put a codex >= 0.149 first in PATH", resolved)
 	}
-	out, err := c.runner().Run(ctx, looked, "queue", "--help")
+	out, err := c.runner().Run(ctx, resolved, "queue", "--help")
 	help := string(out)
 	if err != nil || !strings.Contains(help, "--thread") || !strings.Contains(help, "--message") {
-		return "", fmt.Errorf("codex at %s lacks `queue`; put a codex >= 0.149 first in PATH", looked)
+		return "", fmt.Errorf("codex at %s lacks `queue`; put a codex >= 0.149 first in PATH", resolved)
 	}
-	return looked, nil
+	return resolved, nil
 }
 
 func (c CodexQueue) codexHome() (string, error) {
@@ -190,7 +190,7 @@ func (c CodexQueue) lockInspector() WriterLockInspector {
 	if c.InspectWriterLock != nil {
 		return c.InspectWriterLock
 	}
-	return platformWriterLockInspector{Runner: c.runner()}
+	return platformWriterLockInspector{}
 }
 
 func parseCodexQueueThreadUUID(target string) (string, error) {
