@@ -165,20 +165,34 @@ func sameWakeImageEvidenceExceptMethodPath(first, second wakeImageEvidenceV1) bo
 	return first == second
 }
 
-// Link and unlink operations on any name for a Darwin hardlink mutate the
-// shared inode ctime. Once both values identify the same private staged path,
-// ctime cannot distinguish a public-name swap from an image mutation; the
-// retained device/inode plus size and digest remain the binding authority.
+// Link and unlink operations on any name of a Darwin hardlink mutate the
+// shared inode ctime. A ctime-only difference on the same inode is not an image
+// change when SHA256 agrees: the digest is the content proof. An in-place
+// rewrite is not guaranteed to change mtime or size. Method and ExecutionPath
+// describe how and where the image was captured, not what it is, so when the
+// stable identity fields agree they do not affect identity. This lets two
+// wakes staging the same brew candidate on nearby ticks tolerate the ctime
+// mutation each other's hardlink imposes.
+//
+// Path-sensitive callers do not rely on this helper to detect a different name:
+// revalidate uses SameFile(held fd, Lstat(executionPath)); verify compares
+// os.Executable() to bound.ExecutionPath before calling this; persisted-bound
+// validation requires BoundImage.ExecutionPath == StagePath; cleanup deletes
+// bound.ExecutionPath after opening that path. Device/inode/size/sha256/version
+// is sufficient authority here.
 func sameDarwinStagedWakeImageEvidence(first, second wakeImageEvidenceV1) bool {
-	if first.Platform != "darwin" || second.Platform != "darwin" ||
-		!wakeImageMethodIsDarwinExecObserved(first.Method) ||
-		!wakeImageMethodIsDarwinExecObserved(second.Method) ||
-		first.ExecutionPath != second.ExecutionPath {
+	if first.Platform != "darwin" || second.Platform != "darwin" {
 		return first == second
 	}
-	first.Method = second.Method
-	first.CTimeNS = second.CTimeNS
-	return first == second
+	if first.Schema != second.Schema ||
+		first.Device != second.Device ||
+		first.Inode != second.Inode ||
+		first.Size != second.Size ||
+		first.SHA256 != second.SHA256 ||
+		first.EmbeddedVersion != second.EmbeddedVersion {
+		return false
+	}
+	return true
 }
 
 // A Darwin hardlink changes the shared inode's ctime. Cross-device staging

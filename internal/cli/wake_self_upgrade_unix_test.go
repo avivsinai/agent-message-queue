@@ -815,3 +815,178 @@ func TestWakeSelfUpgradeDisabledByEnv(t *testing.T) {
 		})
 	}
 }
+
+// TestMaintainWakeSelfUpgradeSupersedesRefusedOperatorRecord is the M2 contract:
+// a refused record with an empty (operator) source is terminal; a new self
+// candidate reclaims and quarantines it and publishes a self pending record,
+// rather than preserving it as restart_present and re-probing forever.
+func TestMaintainWakeSelfUpgradeSupersedesRefusedOperatorRecord(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	foreign := fixture.record
+	foreign.Source = "" // operator `amq wake restart` refused record has an empty source
+	foreign.Status = wakeRestartRefused
+	foreign.Reason = "operator restart refused"
+	writeWakeCheckSelfUpgradeRestartRecord(t, fixture, foreign)
+
+	candidate := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
+	state := selfUpgradeStateForCandidate(t, candidate)
+	stubWakeSelfUpgradeVersion(t, "0.57.0")
+
+	decision, err := maintainWakeSelfUpgrade(&state, fixture.agentDir, fixture.lock)
+	if err != nil {
+		t.Fatalf("maintainWakeSelfUpgrade error = %v", err)
+	}
+	if decision.Action == wakeSelfUpgradeActionRestartPresent {
+		t.Fatalf("refused operator record was preserved (restart_present) instead of superseded: %#v", decision)
+	}
+	// A new self candidate must publish a self pending record.
+	installed := readWakeSelfUpgradeRestartRecord(t, fixture)
+	if installed.Source != wakeRestartSourceSelf || installed.Status != wakeRestartPending {
+		t.Fatalf("published record = %#v; want self/pending", installed)
+	}
+	quarantined, err := filepath.Glob(filepath.Join(fixture.agentDir.path, wakeRestartFileName+".quarantined.*"))
+	if err != nil || len(quarantined) != 1 {
+		t.Fatalf("quarantine paths=%v err=%v; want 1", quarantined, err)
+	}
+}
+
+// TestMaintainWakeSelfUpgradeSupersedesRefusedForeignRecord is the M2 contract
+// for an explicit foreign source: a refused foreign record is also superseded
+// (not preserved), and no refusal memory is inherited from it.
+func TestMaintainWakeSelfUpgradeSupersedesRefusedForeignRecord(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	foreign := fixture.record
+	foreign.Source = wakeRestartSourceForeign
+	foreign.Status = wakeRestartRefused
+	foreign.Reason = "foreign restart refused"
+	writeWakeCheckSelfUpgradeRestartRecord(t, fixture, foreign)
+
+	candidate := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
+	state := selfUpgradeStateForCandidate(t, candidate)
+	stubWakeSelfUpgradeVersion(t, "0.57.0")
+
+	decision, err := maintainWakeSelfUpgrade(&state, fixture.agentDir, fixture.lock)
+	if err != nil {
+		t.Fatalf("maintainWakeSelfUpgrade error = %v", err)
+	}
+	if decision.Action == wakeSelfUpgradeActionRestartPresent {
+		t.Fatalf("refused foreign record was preserved (restart_present) instead of superseded: %#v", decision)
+	}
+	installed := readWakeSelfUpgradeRestartRecord(t, fixture)
+	if installed.Source != wakeRestartSourceSelf || installed.Status != wakeRestartPending {
+		t.Fatalf("published record = %#v; want self/pending", installed)
+	}
+	// No refusal memory inherited from a non-self record.
+	if len(installed.RefusedCandidates) != 0 {
+		t.Fatalf("refusal memory inherited from a foreign record: %#v", installed.RefusedCandidates)
+	}
+	quarantined, err := filepath.Glob(filepath.Join(fixture.agentDir.path, wakeRestartFileName+".quarantined.*"))
+	if err != nil || len(quarantined) != 1 {
+		t.Fatalf("quarantine paths=%v err=%v; want 1", quarantined, err)
+	}
+}
+
+// TestMaintainWakeSelfUpgradePreservesPendingForeignRecord is the M2 negative:
+// a PENDING foreign record is still preserved (restart_present), untouched —
+// only refused records of any source are superseded.
+func TestMaintainWakeSelfUpgradePreservesPendingForeignRecord(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	foreign := fixture.record
+	foreign.Source = wakeRestartSourceForeign
+	foreign.Status = wakeRestartPending
+	writeWakeCheckSelfUpgradeRestartRecord(t, fixture, foreign)
+
+	candidate := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
+	state := selfUpgradeStateForCandidate(t, candidate)
+	initialProbe := state.lastProbe
+	stubWakeSelfUpgradeVersion(t, "0.57.0")
+
+	decision, err := maintainWakeSelfUpgrade(&state, fixture.agentDir, fixture.lock)
+	if err != nil || decision.Action != wakeSelfUpgradeActionRestartPending {
+		t.Fatalf("pending foreign record decision=%#v err=%v; want restart_pending", decision, err)
+	}
+	if state.lastProbe != initialProbe {
+		t.Fatal("pending foreign restart record advanced the probe baseline")
+	}
+	untouched := readWakeSelfUpgradeRestartRecord(t, fixture)
+	if untouched.Source != wakeRestartSourceForeign || untouched.Status != wakeRestartPending {
+		t.Fatalf("pending foreign record mutated: %#v", untouched)
+	}
+}
+
+func TestMaintainWakeSelfUpgradePreservesClaimedSchema2Record(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	claimed := fixture.record
+	claimed.Schema = wakeRestartSchemaV2
+	claimed.Status = wakeRestartPending
+	claimed.SuccessorGeneration = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	writeWakeCheckSelfUpgradeRestartRecord(t, fixture, claimed)
+
+	candidate := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
+	state := selfUpgradeStateForCandidate(t, candidate)
+	initialProbe := state.lastProbe
+	stubWakeSelfUpgradeVersion(t, "0.57.0")
+
+	decision, err := maintainWakeSelfUpgrade(&state, fixture.agentDir, fixture.lock)
+	if err != nil || decision.Action != wakeSelfUpgradeActionRestartPending {
+		t.Fatalf("claimed schema-2 record decision=%#v err=%v; want restart_pending", decision, err)
+	}
+	if state.lastProbe != initialProbe {
+		t.Fatal("claimed schema-2 record advanced the probe baseline")
+	}
+	untouched := readWakeSelfUpgradeRestartRecord(t, fixture)
+	if untouched.Schema != wakeRestartSchemaV2 || untouched.Status != wakeRestartPending ||
+		untouched.SuccessorGeneration != claimed.SuccessorGeneration {
+		t.Fatalf("claimed schema-2 record mutated: %#v", untouched)
+	}
+}
+
+// TestRefuseWakeRestartRecordNeverProducesSchema2 is the L1 contract:
+// refuseWakeRestartRecord only operates on schema-1 pending records and the
+// refused record it writes stays schema 1. Schema 2 is a reserved (accepted on
+// read, never emitted) combination.
+func TestRefuseWakeRestartRecordNeverProducesSchema2(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+	candidatePath := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
+	candidate, err := captureWakeImageEvidence(candidatePath, "0.57.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID, err := newWakeRestartRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagePath, err := planWakeRestartStagePlatform(candidate, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := wakeRestartRecord{
+		Schema:             wakeRestartSchemaV1,
+		RequestID:          requestID,
+		Status:             wakeRestartPending,
+		Source:             wakeRestartSourceSelf,
+		Root:               fixture.root,
+		Agent:              fixture.agent,
+		Generation:         fixture.lock.Lock.Generation,
+		Owner:              fixture.owner,
+		Candidate:          candidate,
+		StagePath:          stagePath,
+		PreviousBoundImage: previousDarwinWakeRestartStageForLock(fixture.lock.Lock),
+	}
+	if err := fixture.agentDir.withFD(func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseWakeRestartRecord(fixture.agentDir, record, "L1 schema probe"); err != nil {
+		t.Fatal(err)
+	}
+	refused := readWakeSelfUpgradeRestartRecord(t, fixture)
+	if refused.Schema != wakeRestartSchemaV1 {
+		t.Fatalf("refused record schema = %d; want %d (schema 2 is reserved, never emitted)", refused.Schema, wakeRestartSchemaV1)
+	}
+	if refused.Status != wakeRestartRefused {
+		t.Fatalf("refused record status = %q; want refused", refused.Status)
+	}
+}

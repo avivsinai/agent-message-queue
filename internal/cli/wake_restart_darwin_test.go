@@ -4,6 +4,8 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +33,11 @@ func TestDarwinStagedWakeImageCTimeExceptionDoesNotWeakenIdentityOrContent(t *te
 	ctimeOnly.CTimeNS++
 	if !sameDarwinStagedWakeImageEvidence(base, ctimeOnly) {
 		t.Fatal("staged Darwin ctime-only namespace mutation was rejected")
+	}
+	pathDiffers := ctimeOnly
+	pathDiffers.ExecutionPath = filepath.Join(t.TempDir(), "other-stage", "amq")
+	if !sameDarwinStagedWakeImageEvidence(base, pathDiffers) {
+		t.Fatal("ctime-only same inode with a different staged path was rejected")
 	}
 	mutations := []struct {
 		name   string
@@ -230,4 +237,392 @@ func TestDarwinWakeRestartRealPTYPreservesPIDAndUnreadWork(t *testing.T) {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+// TestDarwinWakeRestartTwoBindersShareOneCandidateInode is the M1 regression:
+// two binders staging the SAME brew candidate inode on nearby ticks must both
+// succeed. Binder A links its stage; during A's link (before A's cleanup),
+// binder B runs a full bind that links and removes a THIRD hardlink on the same
+// candidate inode, mutating the shared inode ctime. Before the fix, A's
+// post-link ctime-sensitive compare failed and the bind was refused. Now a
+// ctime-only difference on the same inode is not an image change, so both binds
+// succeed and both bound evidences pass sameRequestedAndBoundWakeImageEvidence.
+func TestDarwinWakeRestartTwoBindersShareOneCandidateInode(t *testing.T) {
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binaryBytes, err := os.ReadFile(testBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	candidatePath := filepath.Join(dir, "amq")
+	if err := os.WriteFile(candidatePath, binaryBytes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := captureWakeImageEvidence(candidatePath, "two-binder-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cross a timestamp boundary so the ctime mutation is observable.
+	time.Sleep(1100 * time.Millisecond)
+
+	originalLink := linkDarwinWakeRestartStage
+	binderBRan := false
+	t.Cleanup(func() { linkDarwinWakeRestartStage = originalLink })
+	// Interpose binder B inside A's link: when A links its stage, run a full
+	// independent bind of the same candidate (which links and removes its own
+	// stage hardlink on the shared inode, mutating ctime) before A continues.
+	linkDarwinWakeRestartStage = func(oldName, newName string) error {
+		if err := originalLink(oldName, newName); err != nil {
+			return err
+		}
+		if !binderBRan {
+			binderBRan = true
+			boundB, err := bindWakeRestartCandidate(candidate)
+			if err != nil {
+				return fmt.Errorf("concurrent binder B failed: %w", err)
+			}
+			if !sameRequestedAndBoundWakeImageEvidence(candidate, boundB.evidence) {
+				_ = boundB.close()
+				return fmt.Errorf("concurrent binder B bound evidence does not match candidate")
+			}
+			if err := boundB.close(); err != nil {
+				return fmt.Errorf("concurrent binder B cleanup: %w", err)
+			}
+		}
+		return nil
+	}
+
+	boundA, err := bindWakeRestartCandidate(candidate)
+	if err != nil {
+		t.Fatalf("binder A failed under concurrent ctime mutation: %v", err)
+	}
+	defer func() { _ = boundA.close() }()
+	if !binderBRan {
+		t.Fatal("interposed binder B never ran; test does not exercise the race")
+	}
+	if !sameRequestedAndBoundWakeImageEvidence(candidate, boundA.evidence) {
+		t.Fatalf("binder A bound evidence does not match candidate after concurrent ctime mutation:\ncandidate=%#v\nboundA=%#v", candidate, boundA.evidence)
+	}
+}
+
+func TestDarwinWakeRestartBindFailsWhenCandidateReplacedDuringLink(t *testing.T) {
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binaryBytes, err := os.ReadFile(testBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	candidatePath := filepath.Join(dir, "amq")
+	if err := os.WriteFile(candidatePath, binaryBytes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := captureWakeImageEvidence(candidatePath, "replaced-inode-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+
+	originalLink := linkDarwinWakeRestartStage
+	replaced := false
+	t.Cleanup(func() { linkDarwinWakeRestartStage = originalLink })
+	linkDarwinWakeRestartStage = func(oldName, newName string) error {
+		if !replaced {
+			replaced = true
+			next := filepath.Join(dir, "amq.next")
+			if err := os.WriteFile(next, append(binaryBytes, []byte("mutated")...), 0o700); err != nil {
+				return err
+			}
+			if err := os.Rename(next, candidatePath); err != nil {
+				return err
+			}
+		}
+		return originalLink(oldName, newName)
+	}
+
+	bound, err := bindWakeRestartCandidate(candidate)
+	if bound != nil {
+		_ = bound.close()
+	}
+	if err == nil {
+		t.Fatal("bind succeeded after the candidate inode was replaced; want failure")
+	}
+	if !replaced {
+		t.Fatal("replacement interposition never ran")
+	}
+}
+
+func TestVerifyWakeResumeBoundImageRejectsSameInodeDifferentPath(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe = filepath.Clean(exe)
+	bound, err := captureWakeImageEvidence(exe, "path-must-matter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound.Method = wakeImageMethodPathnameExecObserved
+	bound.ExecutionPath = exe + ".other-stage"
+	_, err = verifyWakeResumeBoundImagePlatform(bound)
+	if err == nil || !strings.Contains(err.Error(), "running wake path does not match bound restart path") {
+		t.Fatalf("verify error = %v; want explicit path mismatch (same inode is not enough)", err)
+	}
+}
+
+func TestDarwinWakeRestartLoopDoesNotRefuseCTimeOnlyRelink(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	candidatePath := writeWakeRestartLoopCandidateCopy(t, &fixture)
+	originalLink := linkDarwinWakeRestartStage
+	t.Cleanup(func() { linkDarwinWakeRestartStage = originalLink })
+	linkDarwinWakeRestartStage = func(oldName, newName string) error {
+		if err := originalLink(oldName, newName); err != nil {
+			return err
+		}
+		extra := candidatePath + ".ctime-probe"
+		if err := originalLink(oldName, extra); err != nil {
+			return err
+		}
+		return os.Remove(extra)
+	}
+	pendingAtPreflight := false
+	oldPreflight := wakeRestartBoundPreflight
+	oldExec := wakeRestartExec
+	wakeRestartBoundPreflight = func(*wakeRestartBoundImage, []string, wakeResumeBootstrap) error {
+		rec, exists, err := readPendingWakeRestartForTest(t, fixture)
+		if err != nil || !exists {
+			t.Errorf("preflight restart record exists=%v err=%v", exists, err)
+			return err
+		}
+		pendingAtPreflight = rec.Status == wakeRestartPending && len(rec.RefusedCandidates) == 0
+		return nil
+	}
+	sentinel := errors.New("test exec after successful ctime-tolerant bind")
+	wakeRestartExec = func(string, []string, []string) error { return sentinel }
+	t.Cleanup(func() {
+		wakeRestartBoundPreflight = oldPreflight
+		wakeRestartExec = oldExec
+	})
+	runWakeRestartLoopForTest(t, fixture)
+	if !pendingAtPreflight {
+		t.Fatal("ctime-only relink refused at bind; record should still be pending at preflight")
+	}
+	record := readRefusedWakeRestartForTest(t, fixture)
+	if !strings.Contains(record.Reason, sentinel.Error()) {
+		t.Fatalf("refusal reason = %q; want exec sentinel, not a bind/ctime identity error", record.Reason)
+	}
+	if strings.Contains(record.Reason, "changed before Darwin staging") ||
+		strings.Contains(record.Reason, "changed while hashing") {
+		t.Fatalf("ctime relink was blamed for refusal: %q", record.Reason)
+	}
+	if len(record.RefusedCandidates) != 0 {
+		t.Fatalf("RefusedCandidates = %#v; want empty", record.RefusedCandidates)
+	}
+}
+
+func TestDarwinWakeRestartLoopRefusesReplacedCandidate(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	candidatePath := writeWakeRestartLoopCandidateCopy(t, &fixture)
+	originalLink := linkDarwinWakeRestartStage
+	t.Cleanup(func() { linkDarwinWakeRestartStage = originalLink })
+	linkDarwinWakeRestartStage = func(oldName, newName string) error {
+		next := candidatePath + ".next"
+		current, err := os.ReadFile(oldName)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(next, append(current, []byte("mutated")...), 0o700); err != nil {
+			return err
+		}
+		if err := os.Rename(next, oldName); err != nil {
+			return err
+		}
+		return originalLink(oldName, newName)
+	}
+	oldPreflight := wakeRestartBoundPreflight
+	oldExec := wakeRestartExec
+	wakeRestartBoundPreflight = func(*wakeRestartBoundImage, []string, wakeResumeBootstrap) error {
+		t.Error("preflight ran; replaced candidate should have failed at bind")
+		return nil
+	}
+	wakeRestartExec = func(string, []string, []string) error {
+		t.Error("exec ran; replaced candidate should have failed at bind")
+		return nil
+	}
+	t.Cleanup(func() {
+		wakeRestartBoundPreflight = oldPreflight
+		wakeRestartExec = oldExec
+	})
+	runWakeRestartLoopForTest(t, fixture)
+	record := readRefusedWakeRestartForTest(t, fixture)
+	if !strings.Contains(record.Reason, "bind wake restart candidate") {
+		t.Fatalf("refusal reason = %q; want bind failure", record.Reason)
+	}
+}
+
+func TestDarwinWakeSelfUpgradeDefersHashTimeCTimeThenBindsOnRetry(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	candidatePath := writeWakeRestartLoopCandidateCopy(t, &fixture)
+	requestID, err := newWakeRestartRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagePath, err := planWakeRestartStagePlatform(fixture.candidate, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.record.RequestID = requestID
+	fixture.record.Source = wakeRestartSourceSelf
+	fixture.record.StagePath = stagePath
+	fixture.record.PreviousBoundImage = previousDarwinWakeRestartStageForLock(fixture.lock.Lock)
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, fixture.record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { wakeImageHashMutator = nil })
+	wakeImageHashMutator = func() {
+		extra := candidatePath + ".ctime-probe"
+		if err := os.Link(candidatePath, extra); err != nil {
+			t.Errorf("hash-time hardlink: %v", err)
+			return
+		}
+		if err := os.Remove(extra); err != nil {
+			t.Errorf("hash-time unlink: %v", err)
+		}
+	}
+
+	cfg := wakeRestartLoopConfigForTest(fixture)
+	handleWakeRestartAtLoopBoundary(&cfg, fixedWakeAdmissionWatcher{errors: make(chan error)}, false, false)
+
+	record, exists, err := readPendingWakeRestartForTest(t, fixture)
+	if err != nil || !exists {
+		t.Fatalf("after hash-time ctime: exists=%v err=%v", exists, err)
+	}
+	if record.Status != wakeRestartPending || len(record.RefusedCandidates) != 0 {
+		t.Fatalf("hash-time ctime refused the record: %#v", record)
+	}
+	assertWakeSelfUpgradeDiagnosticAction(t, fixture, wakeSelfUpgradeActionDeferred)
+
+	decision, err := publishWakeSelfUpgradePending(
+		fixture.agentDir,
+		fixture.lock,
+		wakeRestartRecord{
+			Schema:     wakeRestartSchemaV1,
+			RequestID:  "0123456789abcdef0123456789abcdef",
+			Status:     wakeRestartPending,
+			Source:     wakeRestartSourceSelf,
+			Root:       fixture.root,
+			Agent:      fixture.agent,
+			Generation: fixture.lock.Lock.Generation,
+			Owner:      fixture.owner,
+			Candidate:  fixture.candidate,
+		},
+		wakeSelfUpgradeDecision{},
+	)
+	if err != nil || decision.Action != wakeSelfUpgradeActionPending {
+		t.Fatalf("next-tick adopt = %#v err=%v; want pending", decision, err)
+	}
+
+	wakeImageHashMutator = nil
+	realBind := wakeRestartBind
+	boundOnRetry := false
+	wakeRestartBind = func(record wakeRestartRecord) (*wakeRestartBoundImage, error) {
+		bound, err := realBind(record)
+		if err != nil {
+			return nil, err
+		}
+		boundOnRetry = true
+		_ = bound.close()
+		return nil, errors.New("test bound successfully; stop before version probe")
+	}
+	t.Cleanup(func() { wakeRestartBind = realBind })
+	handleWakeRestartAtLoopBoundary(&cfg, fixedWakeAdmissionWatcher{errors: make(chan error)}, false, false)
+	if !boundOnRetry {
+		t.Fatal("retry tick did not bind after hash-time ctime deferral")
+	}
+}
+
+func writeWakeRestartLoopCandidateCopy(t *testing.T, fixture *wakeRestartFixture) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "amq")
+	if err := os.WriteFile(path, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := captureWakeImageEvidence(path, fixture.candidate.EmbeddedVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.candidate = candidate
+	fixture.record.Candidate = candidate
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, fixture.record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func runWakeRestartLoopForTest(t *testing.T, fixture wakeRestartFixture) {
+	t.Helper()
+	cfg := wakeRestartLoopConfigForTest(fixture)
+	handleWakeRestartAtLoopBoundary(&cfg, fixedWakeAdmissionWatcher{errors: make(chan error)}, false, false)
+}
+
+func wakeRestartLoopConfigForTest(fixture wakeRestartFixture) wakeConfig {
+	return wakeConfig{
+		me:                 fixture.agent,
+		root:               fixture.root,
+		injectMode:         wakeInjectModeNone,
+		wakeOwner:          &fixture.owner,
+		terminalGeneration: fixture.lock.Lock.Generation,
+		retainedAgent:      fixture.agentDir,
+		retainedInbox:      fixture.inboxDir,
+		inspectTerminalGeneration: func() wakeLockInspection {
+			return inspectWakeLock(fixture.root, fixture.agent)
+		},
+		restartSignals: make(chan os.Signal, 1),
+	}
+}
+
+func readPendingWakeRestartForTest(t *testing.T, fixture wakeRestartFixture) (wakeRestartRecord, bool, error) {
+	t.Helper()
+	var record wakeRestartRecord
+	var exists bool
+	err := fixture.agentDir.withFD(func(dirfd int) error {
+		var readErr error
+		record, exists, readErr = readWakeRestartRecordAt(dirfd, fixture.agentDir)
+		return readErr
+	})
+	return record, exists, err
+}
+
+func readRefusedWakeRestartForTest(t *testing.T, fixture wakeRestartFixture) wakeRestartRecord {
+	t.Helper()
+	record, exists, err := readPendingWakeRestartForTest(t, fixture)
+	if err != nil || !exists {
+		t.Fatalf("restart record exists=%v err=%v", exists, err)
+	}
+	if record.Status != wakeRestartRefused {
+		t.Fatalf("restart record = %#v; want refused", record)
+	}
+	return record
 }

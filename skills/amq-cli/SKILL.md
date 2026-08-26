@@ -371,9 +371,10 @@ instead of a raw ENOENT.
 Current resume-eligible `coop exec` wakes automatically observe their stable
 AMQ launch symlink and adopt a strictly newer semantic version at a fully
 quiescent boundary, preserving PID, terminal ownership, and unread messages.
-Use `wake check --json --json-schema=2` to inspect `self_upgrade`; a refused
-candidate is attempted at most once until manual restart, lock replacement, or
-a new candidate. `--no-self-upgrade` and `AMQ_WAKE_NO_SELF_UPGRADE=1` disable
+Use `wake check --json --json-schema=2` to inspect `self_upgrade`; a failed
+upgrade candidate is attempted at most once per candidate within one wake
+generation, bounded to the 8 most recent distinct candidates, and a new
+generation resets that refusal memory. `--no-self-upgrade` and `AMQ_WAKE_NO_SELF_UPGRADE=1` disable
 this only for the launched wake. Ownerless, keepalive, repair, destructive
 interrupt, arbitrary-inject, and pinned-path wakes remain manual.
 

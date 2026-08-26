@@ -649,6 +649,22 @@ func sameWakeImageEvidence(first, second wakeImageEvidenceV1) bool {
 }
 
 func validateWakeRestartRecord(record wakeRestartRecord) error {
+	// Validation accepts any structurally-valid record so that a record written
+	// by a different AMQ version can be read without turning into quarantine or
+	// data loss. Not every accepted combination is emitted by this version:
+	//
+	//   Emitted by this version:
+	//     - schema 1, pending, source ""       (operator `amq wake restart`)
+	//     - schema 1, pending, source "self"   (self-upgrade candidate)
+	//     - schema 1, refused, source ""       (operator restart refused)
+	//     - schema 1, refused, source "self"   (self-upgrade refusal)
+	//     - schema 2, pending (claimed handoff, source is the incumbent)
+	//
+	//   Reserved (accepted on read, never emitted by this version):
+	//     - schema 2, refused                 (refuseWakeRestartRecordAt only
+	//                                          operates on schema 1 records)
+	//     - source "foreign"                  (no emitter; accepted so a record
+	//                                          another version wrote survives)
 	if record.Schema > wakeRestartSchemaV2 {
 		return fmt.Errorf("%w: wake restart schema %d unsupported", errWakeRestartSchemaTooNew, record.Schema)
 	}
@@ -1635,6 +1651,13 @@ func handleWakeRestartAtLoopBoundary(
 		return
 	}
 	if err := executeWakeRestart(record, os.Args, cfg.terminalImageVersion, cfg.restartSignals); err != nil {
+		if errors.Is(err, errWakeImageChangedWhileHashing) && record.Source == wakeRestartSourceSelf {
+			recordSelfUpgradeDecision(
+				wakeSelfUpgradeActionDeferred,
+				"candidate image changed while hashing (ctime); retrying at the next maintenance tick",
+			)
+			return
+		}
 		reason := wakeRestartReasonWithRemedy(err.Error(), cfg.root, cfg.me)
 		if record.Source == wakeRestartSourceSelf {
 			reason += "; candidate=" + wakeSelfUpgradeEvidenceIdentityString(record.Candidate)

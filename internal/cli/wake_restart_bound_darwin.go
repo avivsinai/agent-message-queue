@@ -61,7 +61,7 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 	if err != nil {
 		return nil, err
 	}
-	if requestedSource != candidate {
+	if !sameDarwinStagedWakeImageEvidence(requestedSource, candidate) {
 		return nil, fmt.Errorf("wake restart candidate changed before Darwin staging")
 	}
 
@@ -173,7 +173,7 @@ func bindWakeRestartCandidateAtPlatform(candidate wakeImageEvidenceV1, plannedSt
 	if err != nil {
 		return nil, err
 	}
-	if linked && !sameWakeImageEvidenceExceptMethodPath(postLinkSourceEvidence, bound.evidence) {
+	if linked && !sameDarwinStagedWakeImageEvidence(postLinkSourceEvidence, bound.evidence) {
 		return nil, fmt.Errorf("darwin wake restart source and staged image changed while hashing")
 	}
 	if !linked && !sameWakeImageContent(postLinkSourceEvidence, bound.evidence) {
