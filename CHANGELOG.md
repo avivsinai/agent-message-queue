@@ -20,7 +20,6 @@ editing the release PR.
 ### Bug Fixes
 
 * **coop:** detect named inject TTY via /dev/tty ([#649](https://github.com/avivsinai/agent-message-queue/issues/649)) ([a32c500](https://github.com/avivsinai/agent-message-queue/commit/a32c5006b9c528912babc124c3d496cc0515f69c))
-* **keepalive:** isolate hookinstall tests from HOME and self-heal stale ([5340ad0](https://github.com/avivsinai/agent-message-queue/commit/5340ad018a20c1d390c8276c061d33b06726657b))
 * **keepalive:** isolate hookinstall tests from HOME and self-heal stale hooks ([#652](https://github.com/avivsinai/agent-message-queue/issues/652)) ([5340ad0](https://github.com/avivsinai/agent-message-queue/commit/5340ad018a20c1d390c8276c061d33b06726657b))
 
 ## [0.70.0](https://github.com/avivsinai/agent-message-queue/compare/v0.69.0...v0.70.0) (2026-08-25)
