@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,24 +18,7 @@ func buildVersionedWakeRestartBinary(
 	repoRoot, destination, version string,
 ) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(
-		ctx,
-		"go", "build",
-		"-ldflags", "-X main.version="+version,
-		"-o", destination,
-		"./cmd/amq",
-	)
-	cmd.Dir = repoRoot
-	cmd.Env = wakeABICleanEnv()
-	output, err := cmd.CombinedOutput()
-	if ctx.Err() != nil {
-		t.Fatalf("build %s timed out: %v\n%s", version, ctx.Err(), output)
-	}
-	if err != nil {
-		t.Fatalf("build %s: %v\n%s", version, err, output)
-	}
+	buildTestAMQ(t, repoRoot, destination, "-ldflags", "-X main.version="+version)
 }
 
 func runWakeRestartPTYCommand(t *testing.T, binary string, args ...string) string {

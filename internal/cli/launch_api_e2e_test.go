@@ -209,11 +209,7 @@ func TestV061PrepareV0611ApplyCompatibility(t *testing.T) {
 	}
 	binDir := t.TempDir()
 	currentBinary := filepath.Join(binDir, "amq-v0611")
-	buildCurrent := exec.Command("go", "build", "-o", currentBinary, "./cmd/amq")
-	buildCurrent.Dir = repoRoot
-	if output, err := buildCurrent.CombinedOutput(); err != nil {
-		t.Fatalf("build v0.61.1 contract binary: %v\n%s", err, output)
-	}
+	buildTestAMQ(t, repoRoot, currentBinary)
 	legacyBinary := buildHistoricalLaunchBinary(t, repoRoot, binDir, launchContractV061BaselineCommit)
 
 	fixture := newPublicLaunchE2EFixture(t, binDir, launch.LauncherCommands)
@@ -294,11 +290,7 @@ func buildHistoricalLaunchBinary(t *testing.T, repoRoot, binDir, commit string) 
 		t.Fatalf("extract v0.61.0 contract source: %v\n%s", err, output)
 	}
 	binary := filepath.Join(binDir, "amq-v0610")
-	build := exec.Command("go", "build", "-o", binary, "./cmd/amq")
-	build.Dir = sourceDir
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build v0.61.0 contract binary: %v\n%s", err, output)
-	}
+	buildTestAMQ(t, sourceDir, binary)
 	return binary
 }
 

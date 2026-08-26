@@ -37,17 +37,11 @@ func TestLinuxWakeRestartBoundExecHelper(t *testing.T) {
 }
 
 func TestLinuxWakeRestartBindingSurvivesPublicPathSwap(t *testing.T) {
-	testBinary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	binaryA, err := os.ReadFile(testBinary)
-	if err != nil {
-		t.Fatal(err)
-	}
 	dir := t.TempDir()
 	publicPath := filepath.Join(dir, "amq")
-	if err := os.WriteFile(publicPath, binaryA, 0o700); err != nil {
+	copyTestAMQ(t, publicPath)
+	testBinary, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
 	candidate, err := captureWakeImageEvidence(publicPath, "bound-swap-test")

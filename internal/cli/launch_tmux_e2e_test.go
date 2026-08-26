@@ -32,11 +32,7 @@ func TestTmuxRealBinaryFreshServerRestartResumeLoop(t *testing.T) {
 	}
 	binDir := t.TempDir()
 	amqBinary := filepath.Join(binDir, "amq")
-	build := exec.Command("go", "build", "-o", amqBinary, "./cmd/amq")
-	build.Dir = repo
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build real amq: %v\n%s", err, output)
-	}
+	buildTestAMQ(t, repo, amqBinary)
 
 	project := t.TempDir()
 	canonicalProject, err := filepath.EvalSymlinks(project)
@@ -227,11 +223,7 @@ func TestRunRealAMQJSONParseIgnoresUpdateHintOnStderr(t *testing.T) {
 		t.Fatal(err)
 	}
 	amqBinary := filepath.Join(t.TempDir(), "amq")
-	build := exec.Command("go", "build", "-ldflags", "-X main.version=0.62.1-99-gdeadbeef", "-o", amqBinary, "./cmd/amq")
-	build.Dir = repo
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build real amq: %v\n%s", err, output)
-	}
+	buildTestAMQ(t, repo, amqBinary, "-ldflags", "-X main.version=0.62.1-99-gdeadbeef")
 	home := t.TempDir()
 	cachePayload := []byte(`{"checked_at":"2026-08-17T00:00:00Z","latest_version":"0.63.0"}`)
 	for _, cacheDir := range []string{

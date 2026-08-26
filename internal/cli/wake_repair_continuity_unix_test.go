@@ -175,14 +175,8 @@ func stopWakeContinuityHelper(pid int, helper, root, me string) bool {
 
 func copyTestBinaryForWakeContinuity(t *testing.T) string {
 	t.Helper()
-	data, err := os.ReadFile(os.Args[0])
-	if err != nil {
-		t.Fatalf("read test binary: %v", err)
-	}
 	path := filepath.Join(secureTempDirForTest(t), "amq")
-	if err := os.WriteFile(path, data, 0o700); err != nil {
-		t.Fatalf("write test helper: %v", err)
-	}
+	copyTestAMQ(t, path)
 	return path
 }
 

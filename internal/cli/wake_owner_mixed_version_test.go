@@ -50,7 +50,7 @@ func TestOwnerFencePreservesClaimAgainstExactE370Binary(t *testing.T) {
 	)
 	commandOutputForOwnerFence(t, "", "tar", "-xf", archivePath, "-C", sourceRoot)
 	legacyBinary := filepath.Join(buildRoot, "amq-e37067a")
-	commandOutputForOwnerFence(t, sourceRoot, "go", "build", "-o", legacyBinary, "./cmd/amq")
+	buildTestAMQ(t, sourceRoot, legacyBinary)
 
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -638,7 +638,7 @@ func buildHistoricalAMQForWakeStateTest(t *testing.T, commit string) string {
 	commandOutputForOwnerFence(t, repoRoot, "git", "archive", "--format=tar", "--output="+archivePath, commit)
 	commandOutputForOwnerFence(t, "", "tar", "-xf", archivePath, "-C", sourceRoot)
 	binary := filepath.Join(buildRoot, "amq-legacy-state-writer")
-	commandOutputForOwnerFence(t, sourceRoot, "go", "build", "-o", binary, "./cmd/amq")
+	buildTestAMQ(t, sourceRoot, binary)
 	return binary
 }
 

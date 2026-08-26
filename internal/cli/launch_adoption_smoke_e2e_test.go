@@ -411,11 +411,7 @@ func buildAdoptionSmokeAMQ(t *testing.T) string {
 		t.Fatal(err)
 	}
 	amqBinary := filepath.Join(t.TempDir(), "amq")
-	build := exec.Command("go", "build", "-o", amqBinary, "./cmd/amq")
-	build.Dir = repoRoot
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build real amq: %v\n%s", err, output)
-	}
+	buildTestAMQ(t, repoRoot, amqBinary)
 	return amqBinary
 }
 

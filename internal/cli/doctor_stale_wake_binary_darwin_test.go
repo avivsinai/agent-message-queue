@@ -71,16 +71,10 @@ func TestDarwinSameVersionPathReplacementCannotReportCurrent(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	testImage, err := os.ReadFile(os.Args[0])
-	if err != nil {
-		t.Fatal(err)
-	}
 	executionPath := filepath.Join(dir, "amq-test")
 	replacementPath := filepath.Join(dir, "amq-replacement")
 	for _, path := range []string{executionPath, replacementPath} {
-		if err := os.WriteFile(path, testImage, 0o700); err != nil {
-			t.Fatal(err)
-		}
+		copyTestAMQ(t, path)
 		old := time.Now().Add(-time.Hour)
 		if err := os.Chtimes(path, old, old); err != nil {
 			t.Fatal(err)

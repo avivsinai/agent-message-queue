@@ -581,13 +581,7 @@ func advertisedPeerRepairCommand(t *testing.T, err error) string {
 func executeAdvertisedAMQCommand(t *testing.T, commandText string) {
 	t.Helper()
 	binDir := t.TempDir()
-	helperBinary, absErr := filepath.Abs(os.Args[0])
-	if absErr != nil {
-		t.Fatal(absErr)
-	}
-	if linkErr := os.Symlink(helperBinary, filepath.Join(binDir, "amq")); linkErr != nil {
-		t.Fatal(linkErr)
-	}
+	copyTestAMQ(t, filepath.Join(binDir, "amq"))
 	command := exec.Command("/bin/sh", "-c", commandText)
 	command.Env = append(os.Environ(),
 		cliHelperEnv+"=1",

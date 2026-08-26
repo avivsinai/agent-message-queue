@@ -224,12 +224,8 @@ func buildRepoAMQForTest(t *testing.T, sourceDir, dest, version string) {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "build", "-ldflags", "-X main.version="+version, "-o", dest, "./cmd/amq")
-	cmd.Dir = sourceDir
-	cmd.Env = wakeABICleanEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build %s: %v\n%s", dest, err, output)
-	}
+	// AMQ_* variables do not affect go build; keep the inherited build environment.
+	buildTestAMQ(t, sourceDir, dest, "-ldflags", "-X main.version="+version)
 }
 
 func buildCommitAMQForTest(t *testing.T, repoRoot, commit, dest, version string) {

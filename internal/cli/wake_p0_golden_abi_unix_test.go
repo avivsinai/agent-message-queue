@@ -50,18 +50,7 @@ func buildWakeABIBinary(t *testing.T) (string, string) {
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "..", ".."))
 
 	binary := filepath.Join(t.TempDir(), "amq")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", binary, "./cmd/amq")
-	cmd.Dir = repoRoot
-	cmd.Env = wakeABICleanEnv()
-	output, err := cmd.CombinedOutput()
-	if ctx.Err() != nil {
-		t.Fatalf("build amq timed out: %v\n%s", ctx.Err(), output)
-	}
-	if err != nil {
-		t.Fatalf("build amq: %v\n%s", err, output)
-	}
+	buildTestAMQ(t, repoRoot, binary)
 	return binary, repoRoot
 }
 

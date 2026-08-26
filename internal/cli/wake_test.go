@@ -222,14 +222,8 @@ func injectViaCaptureConfig(t *testing.T, fixedArgs ...string) (*wakeConfig, str
 func copyTestBinaryForInjectVia(t *testing.T) string {
 	t.Helper()
 
-	data, err := os.ReadFile(os.Args[0])
-	if err != nil {
-		t.Fatalf("read test binary: %v", err)
-	}
 	path := filepath.Join(secureTempDirForTest(t), "inject-via-helper")
-	if err := os.WriteFile(path, data, 0o700); err != nil {
-		t.Fatalf("write inject-via helper: %v", err)
-	}
+	copyTestAMQ(t, path)
 	return path
 }
 
