@@ -65,7 +65,7 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: latest
+          version: v2.13.1
 
   # Native Windows leg for the exclusive drain-claim contract (issue #485).
   # Cross-compilation cannot exercise the bug: os.Root.Rename on Windows is
