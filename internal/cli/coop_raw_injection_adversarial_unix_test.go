@@ -311,21 +311,11 @@ done
 	if err := os.WriteFile(agentPath, []byte(agentScript), 0o700); err != nil {
 		t.Fatalf("write public coop agent: %v", err)
 	}
-	testBinary, err := os.Executable()
-	if err != nil {
-		t.Fatalf("resolve test binary: %v", err)
-	}
 	// Wake identity validation intentionally requires an executable named amq.
 	// Preserve the compiled package-test entry point while giving the public
 	// subprocess the same executable identity as a shipped binary.
 	amqBinary := filepath.Join(dir, "amq")
-	testData, err := os.ReadFile(testBinary)
-	if err != nil {
-		t.Fatalf("read compiled test binary: %v", err)
-	}
-	if err := os.WriteFile(amqBinary, testData, 0o700); err != nil {
-		t.Fatalf("write hermetic amq binary: %v", err)
-	}
+	copyTestAMQ(t, amqBinary)
 	commandScript := `printf '%s\n' "$$" > "$1"
 shift
 exec "$@"

@@ -26,18 +26,8 @@ func newDarwinWakeRestartStageRecordForRootTest(t *testing.T, root, agent string
 	if os.Getenv("AMQ_TEST_DARWIN_WAKE_STAGE_STATE") == "" {
 		setDarwinWakeRestartStateHomeForTest(t, t.TempDir())
 	}
-	testBinary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(testBinary)
-	if err != nil {
-		t.Fatal(err)
-	}
 	path := filepath.Join(t.TempDir(), "amq")
-	if err := os.WriteFile(path, raw, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	copyTestAMQ(t, path)
 	candidate, err := captureWakeImageEvidence(path, "stage-reclaim-test")
 	if err != nil {
 		t.Fatal(err)

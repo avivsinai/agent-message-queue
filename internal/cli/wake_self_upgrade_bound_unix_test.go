@@ -202,6 +202,7 @@ func main() {
 	if err != nil {
 		t.Fatalf("build bound probe helper: %v\n%s", err, output)
 	}
+	signTestAMQ(t, binary)
 	if err := os.Chmod(binary, 0o700); err != nil {
 		t.Fatal(err)
 	}

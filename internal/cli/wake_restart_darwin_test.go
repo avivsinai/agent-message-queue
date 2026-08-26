@@ -60,19 +60,9 @@ func TestDarwinStagedWakeImageCTimeExceptionDoesNotWeakenIdentityOrContent(t *te
 }
 
 func TestDarwinWakeRestartBindingSurvivesPublicPathSwapAndCleansStage(t *testing.T) {
-	testBinary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	binaryA, err := os.ReadFile(testBinary)
-	if err != nil {
-		t.Fatal(err)
-	}
 	dir := t.TempDir()
 	publicPath := filepath.Join(dir, "amq")
-	if err := os.WriteFile(publicPath, binaryA, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	copyTestAMQ(t, publicPath)
 	candidate, err := captureWakeImageEvidence(publicPath, "bound-swap-test")
 	if err != nil {
 		t.Fatal(err)
@@ -96,13 +86,8 @@ func TestDarwinWakeRestartBindingSurvivesPublicPathSwapAndCleansStage(t *testing
 	stagePath := bound.executionPath
 	stageDir := filepath.Dir(stagePath)
 
-	binaryB, err := os.ReadFile("/usr/bin/false")
-	if err != nil {
-		_ = bound.close()
-		t.Fatal(err)
-	}
 	replacement := filepath.Join(dir, "amq.replacement")
-	if err := os.WriteFile(replacement, binaryB, 0o700); err != nil {
+	if err := os.Symlink("/usr/bin/false", replacement); err != nil {
 		_ = bound.close()
 		t.Fatal(err)
 	}
@@ -248,19 +233,9 @@ func TestDarwinWakeRestartRealPTYPreservesPIDAndUnreadWork(t *testing.T) {
 // ctime-only difference on the same inode is not an image change, so both binds
 // succeed and both bound evidences pass sameRequestedAndBoundWakeImageEvidence.
 func TestDarwinWakeRestartTwoBindersShareOneCandidateInode(t *testing.T) {
-	testBinary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	binaryBytes, err := os.ReadFile(testBinary)
-	if err != nil {
-		t.Fatal(err)
-	}
 	dir := t.TempDir()
 	candidatePath := filepath.Join(dir, "amq")
-	if err := os.WriteFile(candidatePath, binaryBytes, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	copyTestAMQ(t, candidatePath)
 	candidate, err := captureWakeImageEvidence(candidatePath, "two-binder-test")
 	if err != nil {
 		t.Fatal(err)
@@ -309,19 +284,9 @@ func TestDarwinWakeRestartTwoBindersShareOneCandidateInode(t *testing.T) {
 }
 
 func TestDarwinWakeRestartBindFailsWhenCandidateReplacedDuringLink(t *testing.T) {
-	testBinary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	binaryBytes, err := os.ReadFile(testBinary)
-	if err != nil {
-		t.Fatal(err)
-	}
 	dir := t.TempDir()
 	candidatePath := filepath.Join(dir, "amq")
-	if err := os.WriteFile(candidatePath, binaryBytes, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	copyTestAMQ(t, candidatePath)
 	candidate, err := captureWakeImageEvidence(candidatePath, "replaced-inode-test")
 	if err != nil {
 		t.Fatal(err)
@@ -335,6 +300,10 @@ func TestDarwinWakeRestartBindFailsWhenCandidateReplacedDuringLink(t *testing.T)
 		if !replaced {
 			replaced = true
 			next := filepath.Join(dir, "amq.next")
+			binaryBytes, err := os.ReadFile(candidatePath)
+			if err != nil {
+				return err
+			}
 			if err := os.WriteFile(next, append(binaryBytes, []byte("mutated")...), 0o700); err != nil {
 				return err
 			}
@@ -555,18 +524,8 @@ func TestDarwinWakeSelfUpgradeDefersHashTimeCTimeThenBindsOnRetry(t *testing.T) 
 
 func writeWakeRestartLoopCandidateCopy(t *testing.T, fixture *wakeRestartFixture) string {
 	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	binary, err := os.ReadFile(exe)
-	if err != nil {
-		t.Fatal(err)
-	}
 	path := filepath.Join(t.TempDir(), "amq")
-	if err := os.WriteFile(path, binary, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	copyTestAMQ(t, path)
 	candidate, err := captureWakeImageEvidence(path, fixture.candidate.EmbeddedVersion)
 	if err != nil {
 		t.Fatal(err)
