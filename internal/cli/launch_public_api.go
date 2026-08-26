@@ -13,19 +13,32 @@ import (
 	"github.com/avivsinai/agent-message-queue/launchapi"
 )
 
-func runPublicLaunch(common *commonFlags, session, launcher, planSource string, prepareOnly bool, applySource, placementJSON string, fs *flag.FlagSet) error {
+func runPublicLaunch(common *commonFlags, session, launcher, planSource string, prepareOnly bool, applySource, placementJSON, requestSource string, fs *flag.FlagSet) error {
 	planExplicit, applyExplicit := flagWasVisited(fs, "plan"), flagWasVisited(fs, "apply")
+	requestExplicit := flagWasVisited(fs, "request")
 	if prepareOnly && !common.JSON {
 		return UsageError("--prepare requires --json")
 	}
 	if applyExplicit && !common.JSON {
 		return UsageError("--apply requires --json")
 	}
+	if requestExplicit && !common.JSON {
+		return UsageError("--request requires --json")
+	}
 	if applyExplicit && (planExplicit || prepareOnly) {
 		return UsageError("--apply is mutually exclusive with --plan and --prepare")
 	}
-	if prepareOnly && !planExplicit {
-		return UsageError("--prepare requires --plan")
+	if requestExplicit && (planExplicit || applyExplicit) {
+		return UsageError("--request is mutually exclusive with --plan and --apply")
+	}
+	if requestExplicit && flagWasVisited(fs, "placement") {
+		return UsageError("--request is mutually exclusive with --placement")
+	}
+	if requestExplicit && (flagWasVisited(fs, "session") || flagWasVisited(fs, "launcher") || common.rootExplicit()) {
+		return UsageError("--request takes its target and launcher from PrepareRequestV1")
+	}
+	if prepareOnly && !planExplicit && !requestExplicit {
+		return UsageError("--prepare requires --plan or --request")
 	}
 	if applyExplicit && (flagWasVisited(fs, "session") || flagWasVisited(fs, "launcher") || common.rootExplicit()) {
 		return UsageError("--apply takes its target and launcher from ApplyRequestV1")
@@ -44,6 +57,9 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 	}
 	if applyExplicit && strings.TrimSpace(applySource) == "" {
 		return UsageError("--apply must name a file or -")
+	}
+	if requestExplicit && strings.TrimSpace(requestSource) == "" {
+		return UsageError("--request must name a file or -")
 	}
 
 	ctx := context.Background()
@@ -64,6 +80,18 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 			return err
 		}
 		return publicApplyExit(result)
+	}
+
+	if requestExplicit {
+		data, err := readLaunchAPIDocument(requestSource)
+		if err != nil {
+			return err
+		}
+		prepareRequest, err := launchapi.DecodePrepareRequestV1(data)
+		if err != nil {
+			return UsageError("%v", err)
+		}
+		return runPublicPrepareThenApply(ctx, prepareRequest, prepareOnly)
 	}
 
 	target, err := resolvePublicLaunchTarget(common, session)
@@ -91,6 +119,19 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 		}
 		request.Placement = placement
 	}
+	return runPublicPrepareThenApply(ctx, request, prepareOnly)
+}
+
+func outputPublicLaunchResult(result any) error {
+	return launchapi.EncodeResultV1(os.Stdout, result)
+}
+
+// runPublicPrepareThenApply runs the shared Prepare (and, unless prepareOnly,
+// Apply) flow for a PrepareRequestV1. The --plan and --request paths both
+// decode their document into a PrepareRequestV1 and delegate here, so the
+// outcome handling, action-required mapping, and Apply construction live in
+// one place. With prepareOnly, the result is emitted with no mutation.
+func runPublicPrepareThenApply(ctx context.Context, request launchapi.PrepareRequestV1, prepareOnly bool) error {
 	prepared, err := launchapi.Prepare(ctx, request)
 	if err != nil {
 		return err
@@ -121,10 +162,6 @@ func runPublicLaunch(common *commonFlags, session, launcher, planSource string, 
 		return err
 	}
 	return publicApplyExit(result)
-}
-
-func outputPublicLaunchResult(result any) error {
-	return launchapi.EncodeResultV1(os.Stdout, result)
 }
 
 func resolvePublicLaunchTarget(common *commonFlags, session string) (launchapi.TargetV1, error) {

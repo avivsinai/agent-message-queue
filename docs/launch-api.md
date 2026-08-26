@@ -105,7 +105,18 @@ the executable can be planned or ticketed.
 
 The intent owns the desired participants. Discovery owns the project root,
 default session, session root, and local launcher preference. A public intent
-does not replace committed project configuration.
+does not replace committed project configuration. `amq setup --project-root
+<dir>` overrides discovery: the named directory, with parent components
+canonicalized, is the project root, `.amqrc`, `.amq/launch.json`, and
+`.gitignore` are written there, and upward base discovery does not redirect
+writes into a parent repo's live base root. A symlinked leaf is refused; a
+symlinked parent component is canonicalized (followed). An existing
+`.amq/launch.json` in cwd is authority without the flag, so a nested
+directory that already owns its config is the project root. A parent `.amqrc`
+found above an explicit project root (or a cwd that owns its config) is
+ignored, not adopted, so the parent tree stays byte-identical; the implicit
+case still refuses an upward-discovered parent `.amqrc` with the parent path
+named.
 
 ```json
 {
@@ -309,10 +320,24 @@ The equivalent CLI split is:
 ```bash
 amq launch --plan intent.json --prepare --json --launcher commands
 amq launch --apply apply-request.json --json
+amq launch --request prepare-request.json --json
 ```
 
-Both commands accept `-` for standard input. The Apply document contains the
-complete target and launcher, so `--session`, `--root`, and `--launcher` are not
-valid with `--apply`. Exit code `6` means the JSON result requires an operator
+All three commands accept `-` for standard input. `--plan` is the intent-only
+convenience: discovery resolves the target (project root, default session,
+session root, and local launcher preference) from the committed project
+config, and `--plan` carries only the `LaunchIntentV1`. `--apply` and
+`--request` carry the complete target and launcher in the document itself, so
+`--session`, `--root`, `--launcher`, and `--placement` are not valid with
+either. `--request` decodes a full `PrepareRequestV1` (including
+`target.base_root` and `caller_context`) through `DecodePrepareRequestV1` and
+runs the same Prepare/Apply path as `--plan`; it is mutually exclusive with
+`--plan`, `--apply`, and `--placement`. `--prepare` pairs with `--plan` or
+`--request` to run prepare-only with no mutation, so a consumer can read the
+subject digest before Apply. With `--request`, the CLI and the Go package
+share one contract: every field a package caller can set on
+`PrepareRequestV1` is reachable from the CLI.
+`--plan` remains the intent-only convenience for callers that rely on
+committed discovery. Exit code `6` means the JSON result requires an operator
 action. JSON on stdout remains the machine contract; stderr is for people and
 must not be parsed.
