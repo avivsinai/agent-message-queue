@@ -30,6 +30,7 @@ The supported target forms are:
 - `cmux:surface:<uuid>` for an exact cmux surface UUID;
 - `ghostty:terminal:<id>` for an exact Ghostty terminal id;
 - `codex-queue:thread:<uuid>` for a live Codex GUI/TUI thread with an active writer (`codex queue --thread --message`);
+- `claude-print:session:<uuid>` for an existing Claude Code session (`claude -p --resume` stream-json; submitted when the child echoes the payload with `isReplay`);
 - `file` targets for deterministic development and tests.
 
 cmux short references such as `surface:2` are rejected because they can drift.
@@ -49,6 +50,7 @@ shell inside the matching surface:
 ```sh
 AMQ_CMUX_LIVE=1 go test ./internal/keepalive/adapter -run TestCmuxLiveDiscoverProbe -count=1 -v
 AMQ_GHOSTTY_LIVE=1 go test ./internal/keepalive/adapter -run TestGhosttyLiveDiscoverProbe -count=1 -v
+AMQ_CLAUDE_LIVE=1 go test ./internal/keepalive/adapter -run TestClaudePrintLiveResumeAck -count=1 -v
 ```
 
 ## Attach and reattach
