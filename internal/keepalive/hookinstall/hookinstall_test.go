@@ -14,6 +14,35 @@ import (
 	"time"
 )
 
+// TestMain isolates HOME (and USERPROFILE) to a fresh temp dir for the whole
+// package before any test runs. DefaultScriptPath/DefaultClaudeConfig/
+// DefaultCodexConfig resolve via os.UserHomeDir, which honors HOME, so this
+// guarantees no test in the package can write to the real ~/.codex/hooks.json
+// or ~/.claude/settings.json under ANY mutation — not only the two named
+// tests. Tests that need their own sentinel HOME (the negative case) still set
+// it via t.Setenv inside the run.
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "amq-hookinstall-home-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hookinstall TestMain: temp home: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("HOME", home); err != nil {
+		fmt.Fprintf(os.Stderr, "hookinstall TestMain: set HOME: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("USERPROFILE", home); err != nil {
+		fmt.Fprintf(os.Stderr, "hookinstall TestMain: set USERPROFILE: %v\n", err)
+		os.Exit(1)
+	}
+	// os.Exit skips defers, so clean up before exiting with the real code.
+	code := m.Run()
+	if err := os.RemoveAll(home); err != nil {
+		fmt.Fprintf(os.Stderr, "hookinstall TestMain: remove temp home: %v\n", err)
+	}
+	os.Exit(code)
+}
+
 func TestInstallBothWritesScriptAndMergesConfigs(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "hooks", "amq-keepalive-session-start.sh")
@@ -977,4 +1006,427 @@ func mustMarshal(t *testing.T, v interface{}) string {
 		t.Fatalf("marshal: %v", err)
 	}
 	return string(data)
+}
+
+// withIsolatedHome runs fn with HOME (and USERPROFILE) pointed at a fresh temp
+// dir. TestMain already isolates HOME for the whole package; this helper is for
+// tests that need a SECOND, distinct sentinel HOME inside the run (the negative
+// case that asserts a different home tree is byte-identical before/after).
+func withIsolatedHome(t *testing.T, fn func(t *testing.T)) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// Some platforms consult USERPROFILE; set it too so the isolation is robust
+	// when the suite runs under mutation testing or a cross-platform harness.
+	t.Setenv("USERPROFILE", home)
+	fn(t)
+}
+
+// TestInstallDoesNotTouchRealHomeWhenDefaultsResolve asserts the regression at
+// the core of WP-646: when a caller omits CodexConfig (so NormalizeOptions
+// resolves it via DefaultCodexConfig -> os.UserHomeDir), install writes only
+// into the isolated HOME's tree and never touches a second sentinel HOME.
+func TestInstallDoesNotTouchRealHomeWhenDefaultsResolve(t *testing.T) {
+	// First, capture a sentinel representing "the real user home" and pre-seed
+	// its ~/.codex/hooks.json so we can assert byte-identity after install.
+	sentinelHome := t.TempDir()
+	mustWrite(t, filepath.Join(sentinelHome, ".codex", "hooks.json"),
+		[]byte(`{"hooks":{"SessionStart":[]}}`))
+	before, err := os.ReadFile(filepath.Join(sentinelHome, ".codex", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read sentinel before: %v", err)
+	}
+
+	// Run install under an isolated HOME that is NOT the sentinel. Omit
+	// CodexConfig so the default resolution path is exercised.
+	withIsolatedHome(t, func(t *testing.T) {
+		dir := t.TempDir()
+		binaryPath := writeExecutable(t, filepath.Join(dir, "amq-keepalive"))
+		scriptPath := filepath.Join(dir, "hook.sh")
+		claudeConfig := filepath.Join(dir, "settings.json")
+
+		result, err := Install(Options{
+			Agent:        AgentBoth,
+			ScriptPath:   scriptPath,
+			BinaryPath:   binaryPath,
+			ClaudeConfig: claudeConfig,
+			// CodexConfig intentionally omitted: exercises DefaultCodexConfig.
+			Timeout: time.Second,
+		})
+		if err != nil {
+			t.Fatalf("Install() error = %v", err)
+		}
+		// The default codex config resolved under the isolated HOME, so it must
+		// exist there and contain exactly one AMQ command.
+		resolvedCodex := filepath.Join(os.Getenv("HOME"), ".codex", "hooks.json")
+		codexDoc := readJSON(t, resolvedCodex)
+		if countCommand(codexDoc, result.Commands[AgentCodex]) != 1 {
+			t.Fatalf("default CodexConfig not installed exactly once:\n%s", mustMarshal(t, codexDoc))
+		}
+	})
+
+	// Negative assertion: the sentinel HOME's ~/.codex/hooks.json is byte-identical.
+	after, err := os.ReadFile(filepath.Join(sentinelHome, ".codex", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read sentinel after: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("sentinel ~/.codex/hooks.json was mutated by install: before=%s after=%s", before, after)
+	}
+}
+
+// TestSelfHealPrunesStaleAMQHooksAndPreservesForeign is the WP-646 self-heal
+// contract: a config seeded with 3 dead AMQ entries + 1 foreign entry + 1 live
+// AMQ entry results, after install, in the foreign entry preserved verbatim,
+// exactly one live AMQ entry, and all dead entries gone.
+func TestSelfHealPrunesStaleAMQHooksAndPreservesForeign(t *testing.T) {
+	withIsolatedHome(t, func(t *testing.T) {
+		dir := t.TempDir()
+		liveScript := filepath.Join(dir, "hooks", "amq-keepalive-session-start.sh")
+		binaryPath := writeExecutable(t, filepath.Join(dir, "amq-keepalive"))
+		codexConfig := filepath.Join(dir, "codex", "hooks.json")
+
+		// Build three dead AMQ commands pointing at nonexistent scripts, plus a
+		// foreign entry and one live AMQ entry (script exists on disk).
+		dead1 := buildHookCommand(binaryPath, "/nonexistent/gremlins-1/hook.sh", time.Second)
+		dead2 := buildHookCommand(binaryPath, "/nonexistent/gremlins-2/hook.sh", time.Second)
+		dead3 := buildHookCommand(binaryPath, filepath.Join(dir, "also-missing.sh"), time.Second)
+		live := buildHookCommand(binaryPath, liveScript, time.Second)
+		foreign := `echo "not amq"`
+		seed := fmt.Sprintf(`{"hooks":{"SessionStart":[{"hooks":[`+
+			`{"type":"command","command":%q,`+`"timeout":6},`+
+			`{"type":"command","command":%q,`+`"timeout":6},`+
+			`{"type":"command","command":%q,`+`"timeout":6},`+
+			`{"type":"command","command":%q,`+`"timeout":6},`+
+			`{"type":"command","command":%q,`+`"timeout":6}`+
+			`]}]}}`, dead1, dead2, dead3, foreign, live)
+		mustWrite(t, codexConfig, []byte(seed))
+		// Create the live script on disk so the live entry survives pruning.
+		mustWrite(t, liveScript, []byte(SessionStartScript))
+		if err := os.Chmod(liveScript, 0o755); err != nil {
+			t.Fatalf("chmod live script: %v", err)
+		}
+
+		result, err := Install(Options{
+			Agent:       AgentCodex,
+			ScriptPath:  liveScript,
+			BinaryPath:  binaryPath,
+			CodexConfig: codexConfig,
+			Timeout:     time.Second,
+		})
+		if err != nil {
+			t.Fatalf("Install() error = %v", err)
+		}
+
+		doc := readJSON(t, codexConfig)
+		// Foreign entry preserved verbatim.
+		if countCommand(doc, foreign) != 1 {
+			t.Fatalf("foreign hook not preserved verbatim:\n%s", mustMarshal(t, doc))
+		}
+		// Exactly one live AMQ entry (the install command equals the live one,
+		// so self-heal keeps it and install does not append a duplicate).
+		if countCommand(doc, result.Commands[AgentCodex]) != 1 {
+			t.Fatalf("live AMQ command count != 1 after install:\n%s", mustMarshal(t, doc))
+		}
+		// All dead entries gone.
+		if countCommand(doc, dead1) != 0 || countCommand(doc, dead2) != 0 || countCommand(doc, dead3) != 0 {
+			t.Fatalf("dead AMQ entries survived self-heal:\n%s", mustMarshal(t, doc))
+		}
+	})
+}
+
+// TestSelfHealPreservesForeignWhenNoAMQEntryExists confirms the self-heal pass
+// touches only AMQ-owned hooks: a foreign-only config is rewritten only by the
+// normal install append, never by pruning.
+func TestSelfHealPreservesForeignWhenNoAMQEntryExists(t *testing.T) {
+	withIsolatedHome(t, func(t *testing.T) {
+		dir := t.TempDir()
+		scriptPath := filepath.Join(dir, "hook.sh")
+		binaryPath := writeExecutable(t, filepath.Join(dir, "amq-keepalive"))
+		claudeConfig := filepath.Join(dir, "settings.json")
+		foreign := `echo foreign-tool`
+		mustWrite(t, claudeConfig, []byte(`{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"`+foreign+`"}]}]}}`))
+
+		_, err := Install(Options{
+			Agent:        AgentClaude,
+			ScriptPath:   scriptPath,
+			BinaryPath:   binaryPath,
+			ClaudeConfig: claudeConfig,
+			Timeout:      time.Second,
+		})
+		if err != nil {
+			t.Fatalf("Install() error = %v", err)
+		}
+		doc := readJSON(t, claudeConfig)
+		if countCommand(doc, foreign) != 1 {
+			t.Fatalf("foreign hook altered when no stale AMQ hook present:\n%s", mustMarshal(t, doc))
+		}
+	})
+}
+
+// TestStaleSessionStartHooksDetectsDeadAMQEntries exercises the read-only scan
+// used by amq doctor: it reports AMQ-owned commands whose script is missing and
+// ignores foreign and live entries.
+func TestStaleSessionStartHooksDetectsDeadAMQEntries(t *testing.T) {
+	withIsolatedHome(t, func(t *testing.T) {
+		dir := t.TempDir()
+		liveScript := filepath.Join(dir, "live.sh")
+		mustWrite(t, liveScript, []byte("#!/bin/sh\nexit 0\n"))
+		if err := os.Chmod(liveScript, 0o755); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		binaryPath := writeExecutable(t, filepath.Join(dir, "amq-keepalive"))
+		dead := buildHookCommand(binaryPath, "/nonexistent/dead.sh", time.Second)
+		live := buildHookCommand(binaryPath, liveScript, time.Second)
+		codexConfig := filepath.Join(dir, "codex", "hooks.json")
+		mustWrite(t, codexConfig, []byte(fmt.Sprintf(`{"hooks":{"SessionStart":[{"hooks":[`+
+			`{"type":"command","command":%q,"timeout":6},`+
+			`{"type":"command","command":"echo foreign","timeout":6},`+
+			`{"type":"command","command":%q,"timeout":6}`+
+			`]}]}}`, dead, live)))
+
+		stale, err := StaleSessionStartHooks(codexConfig, AgentCodex)
+		if err != nil {
+			t.Fatalf("StaleSessionStartHooks error = %v", err)
+		}
+		if len(stale) != 1 {
+			t.Fatalf("want 1 stale hook, got %d: %#v", len(stale), stale)
+		}
+		if stale[0].ScriptPath != "/nonexistent/dead.sh" {
+			t.Fatalf("stale script path = %q, want /nonexistent/dead.sh", stale[0].ScriptPath)
+		}
+		if stale[0].Agent != AgentCodex {
+			t.Fatalf("stale agent = %q, want %s", stale[0].Agent, AgentCodex)
+		}
+	})
+}
+
+// TestIsAMQOwnedCommandRejectsForeignEchoOfEnvVar is the R2 negative: a foreign
+// hook that merely echoes the AMQ env var name (e.g. `echo AMQ_KEEPALIVE_BIN=x`)
+// must NOT be classified as AMQ-owned, so it is preserved verbatim by self-heal
+// and never reported stale by the doctor scan. isAMQOwnedCommand matches the
+// prefix at the start of the command, not anywhere inside it.
+func TestIsAMQOwnedCommandRejectsForeignEchoOfEnvVar(t *testing.T) {
+	withIsolatedHome(t, func(t *testing.T) {
+		dir := t.TempDir()
+		scriptPath := filepath.Join(dir, "hook.sh")
+		binaryPath := writeExecutable(t, filepath.Join(dir, "amq-keepalive"))
+		claudeConfig := filepath.Join(dir, "settings.json")
+		foreign := `echo AMQ_KEEPALIVE_BIN=x`
+		// Seed only the foreign echo; install must not prune it and must add the
+		// real AMQ command alongside it.
+		mustWrite(t, claudeConfig, []byte(`{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"`+foreign+`"}]}]}}`))
+
+		result, err := Install(Options{
+			Agent:        AgentClaude,
+			ScriptPath:   scriptPath,
+			BinaryPath:   binaryPath,
+			ClaudeConfig: claudeConfig,
+			Timeout:      time.Second,
+		})
+		if err != nil {
+			t.Fatalf("Install() error = %v", err)
+		}
+		doc := readJSON(t, claudeConfig)
+		if countCommand(doc, foreign) != 1 {
+			t.Fatalf("foreign echo of env var was pruned or duplicated:\n%s", mustMarshal(t, doc))
+		}
+		if countCommand(doc, result.Commands[AgentClaude]) != 1 {
+			t.Fatalf("AMQ command not installed exactly once:\n%s", mustMarshal(t, doc))
+		}
+		// Doctor scan must not report the foreign echo as stale.
+		stale, err := StaleSessionStartHooks(claudeConfig, AgentClaude)
+		if err != nil {
+			t.Fatalf("StaleSessionStartHooks error = %v", err)
+		}
+		for _, s := range stale {
+			if s.ScriptPath == "x" || strings.Contains(s.ScriptPath, "AMQ_KEEPALIVE_BIN") {
+				t.Fatalf("foreign echo reported as stale: %#v", s)
+			}
+		}
+	})
+}
+
+// TestSelfHealPreservesUnparseableAMQCommand is the R4 contract: an AMQ-owned
+// command whose script path cannot be parsed (here: a malformed command missing
+// the trailing single quote that buildHookCommand always emits) is preserved
+// verbatim, never deleted. Self-heal only drops a hook when the path parsed and
+// os.Stat reports it missing.
+func TestSelfHealPreservesUnparseableAMQCommand(t *testing.T) {
+	withIsolatedHome(t, func(t *testing.T) {
+		dir := t.TempDir()
+		scriptPath := filepath.Join(dir, "hook.sh")
+		binaryPath := writeExecutable(t, filepath.Join(dir, "amq-keepalive"))
+		claudeConfig := filepath.Join(dir, "settings.json")
+		// Malformed AMQ-owned command: has the prefix but no closing single quote
+		// on the final token, so scriptPathFromAMQCommand cannot parse it.
+		unparseable := "AMQ_KEEPALIVE_BIN='" + binaryPath + "' AMQ_KEEPALIVE_TIMEOUT_SECONDS='1' '/nonexistent/missing-trailing-quote"
+		mustWrite(t, claudeConfig, []byte(fmt.Sprintf(`{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":%q}]}]}}`, unparseable)))
+
+		_, err := Install(Options{
+			Agent:        AgentClaude,
+			ScriptPath:   scriptPath,
+			BinaryPath:   binaryPath,
+			ClaudeConfig: claudeConfig,
+			Timeout:      time.Second,
+		})
+		if err != nil {
+			t.Fatalf("Install() error = %v", err)
+		}
+		doc := readJSON(t, claudeConfig)
+		if countCommand(doc, unparseable) != 1 {
+			t.Fatalf("unparseable AMQ-owned command was dropped by self-heal:\n%s", mustMarshal(t, doc))
+		}
+		// Doctor scan must not report an unparseable command as stale.
+		stale, err := StaleSessionStartHooks(claudeConfig, AgentClaude)
+		if err != nil {
+			t.Fatalf("StaleSessionStartHooks error = %v", err)
+		}
+		if len(stale) != 0 {
+			t.Fatalf("unparseable command reported as stale: %#v", stale)
+		}
+	})
+}
+
+// TestScriptPathFromAMQCommandRoundTrip is the R8 contract: for paths with
+// plain bytes, spaces, embedded quotes, multibyte runes, and trailing quotes,
+// scriptPathFromAMQCommand must exactly invert buildHookCommand. A command
+// carrying a 4th token must not parse.
+func TestScriptPathFromAMQCommandRoundTrip(t *testing.T) {
+	bin := "/bin/amq-keepalive"
+	cases := []string{
+		"/plain/path.sh",
+		"/with space/hook.sh",
+		"/it's/a.sh",
+		"/ünïcode/路径/hook.sh",
+		"/trailing'quote/a.sh",
+	}
+	for _, p := range cases {
+		cmd := buildHookCommand(bin, p, time.Second)
+		got, ok := scriptPathFromAMQCommand(cmd)
+		if !ok {
+			t.Errorf("path=%q: not parseable from %q", p, cmd)
+			continue
+		}
+		if got != p {
+			t.Errorf("path=%q: decoded %q from %q", p, got, cmd)
+		}
+	}
+	// Negative: a 4th token after the script path is not the buildHookCommand
+	// shape, so it must not parse.
+	extra := "AMQ_KEEPALIVE_BIN='/b' AMQ_KEEPALIVE_TIMEOUT_SECONDS='1' '/p.sh' extra"
+	if _, ok := scriptPathFromAMQCommand(extra); ok {
+		t.Errorf("4th-token command should not parse: %q", extra)
+	}
+}
+
+// TestScriptPathFromAMQCommandRejectsNonFixedShape is the B1 contract: a command
+// that has the AMQ prefix but is not the exact fixed shape buildHookCommand
+// emits must NOT parse, so self-heal preserves it and the doctor does not
+// report it stale. Cases: missing AMQ_KEEPALIVE_TIMEOUT_SECONDS= prefix; a
+// non-digit timeout token.
+func TestScriptPathFromAMQCommandRejectsNonFixedShape(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "missing timeout prefix",
+			command: "AMQ_KEEPALIVE_BIN='/b' 'not-timeout' '/dead.sh'",
+		},
+		{
+			name:    "non-digit timeout",
+			command: "AMQ_KEEPALIVE_BIN='/b' AMQ_KEEPALIVE_TIMEOUT_SECONDS='abc' '/dead.sh'",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := scriptPathFromAMQCommand(tc.command); ok {
+				t.Fatalf("command parsed but is not the fixed shape: %q", tc.command)
+			}
+		})
+	}
+}
+
+// TestSelfHealPreservesNonFixedShapeAMQCommand is the B1 self-heal side: a
+// non-fixed-shape owned command is preserved verbatim (not pruned) and not
+// reported stale by the doctor, because it is owned-but-unparseable.
+func TestSelfHealPreservesNonFixedShapeAMQCommand(t *testing.T) {
+	withIsolatedHome(t, func(t *testing.T) {
+		dir := t.TempDir()
+		scriptPath := filepath.Join(dir, "hook.sh")
+		binaryPath := writeExecutable(t, filepath.Join(dir, "amq-keepalive"))
+		claudeConfig := filepath.Join(dir, "settings.json")
+		// Missing the AMQ_KEEPALIVE_TIMEOUT_SECONDS= prefix: owned but unparseable.
+		nonFixed := "AMQ_KEEPALIVE_BIN='" + binaryPath + "' 'not-timeout' '/nonexistent/dead.sh'"
+		mustWrite(t, claudeConfig, []byte(fmt.Sprintf(`{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":%q}]}]}}`, nonFixed)))
+
+		_, err := Install(Options{
+			Agent:        AgentClaude,
+			ScriptPath:   scriptPath,
+			BinaryPath:   binaryPath,
+			ClaudeConfig: claudeConfig,
+			Timeout:      time.Second,
+		})
+		if err != nil {
+			t.Fatalf("Install() error = %v", err)
+		}
+		doc := readJSON(t, claudeConfig)
+		if countCommand(doc, nonFixed) != 1 {
+			t.Fatalf("non-fixed-shape owned command was pruned by self-heal:\n%s", mustMarshal(t, doc))
+		}
+		stale, err := StaleSessionStartHooks(claudeConfig, AgentClaude)
+		if err != nil {
+			t.Fatalf("StaleSessionStartHooks error = %v", err)
+		}
+		if len(stale) != 0 {
+			t.Fatalf("non-fixed-shape command reported as stale: %#v", stale)
+		}
+	})
+}
+
+// TestSelfHealDedupKeysOnFullCommand is the B3 contract: duplicate collapse
+// keys on the exact full command string, not the decoded script path. Two LIVE
+// owned hooks that share a script path but differ in timeout are distinct
+// commands and must both be preserved; only byte-identical commands collapse to
+// one.
+func TestSelfHealDedupKeysOnFullCommand(t *testing.T) {
+	withIsolatedHome(t, func(t *testing.T) {
+		dir := t.TempDir()
+		liveScript := filepath.Join(dir, "hooks", "amq-keepalive-session-start.sh")
+		binaryPath := writeExecutable(t, filepath.Join(dir, "amq-keepalive"))
+		codexConfig := filepath.Join(dir, "codex", "hooks.json")
+		mustWrite(t, liveScript, []byte(SessionStartScript))
+		if err := os.Chmod(liveScript, 0o755); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		// Two live AMQ hooks, same script, different timeout -> distinct commands.
+		cmdTimeout1 := buildHookCommand(binaryPath, liveScript, 1*time.Second)
+		cmdTimeout2 := buildHookCommand(binaryPath, liveScript, 2*time.Second)
+		// A byte-identical duplicate of cmdTimeout1 -> should collapse to one.
+		seed := fmt.Sprintf(`{"hooks":{"SessionStart":[{"hooks":[`+
+			`{"type":"command","command":%q,"timeout":6},`+
+			`{"type":"command","command":%q,"timeout":6},`+
+			`{"type":"command","command":%q,"timeout":6}`+
+			`]}]}}`, cmdTimeout1, cmdTimeout2, cmdTimeout1)
+		mustWrite(t, codexConfig, []byte(seed))
+
+		if _, err := Install(Options{
+			Agent:       AgentCodex,
+			ScriptPath:  liveScript,
+			BinaryPath:  binaryPath,
+			CodexConfig: codexConfig,
+			Timeout:     time.Second,
+		}); err != nil {
+			t.Fatalf("Install() error = %v", err)
+		}
+		doc := readJSON(t, codexConfig)
+		// Both distinct-timeout live hooks preserved.
+		if countCommand(doc, cmdTimeout1) != 1 {
+			t.Fatalf("timeout-1 live hook not preserved exactly once:\n%s", mustMarshal(t, doc))
+		}
+		if countCommand(doc, cmdTimeout2) != 1 {
+			t.Fatalf("timeout-2 live hook not preserved exactly once:\n%s", mustMarshal(t, doc))
+		}
+	})
 }

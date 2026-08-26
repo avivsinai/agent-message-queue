@@ -19,6 +19,12 @@ const (
 	AgentCodex  = "codex"
 
 	DefaultTimeout = 10 * time.Second
+
+	// amqOwnedCommandPrefix marks every SessionStart hook command the AMQ
+	// keepalive installer writes. buildHookCommand stamps each command with an
+	// AMQ_KEEPALIVE_BIN= env assignment, so its presence is a reliable ownership
+	// signal that does not require a separate marker file.
+	amqOwnedCommandPrefix = "AMQ_KEEPALIVE_BIN="
 )
 
 const SessionStartScript = `#!/usr/bin/env bash
@@ -421,8 +427,11 @@ func prepareClaudeHook(path, command string, hookTimeoutSeconds int) (map[string
 	if err := validateSessionStartEntries(sessionStart); err != nil {
 		return nil, false, err
 	}
+	sessionStart, healed := selfHealSessionStart(sessionStart)
+	hooks["SessionStart"] = sessionStart
+	doc["hooks"] = hooks
 	if claudeHasCommand(sessionStart, command) {
-		return doc, false, nil
+		return doc, healed, nil
 	}
 	sessionStart = append(sessionStart, claudeSessionStartEntry(command, hookTimeoutSeconds))
 	hooks["SessionStart"] = sessionStart
@@ -446,8 +455,11 @@ func prepareCodexHook(path, command string, hookTimeoutSeconds int) (map[string]
 	if err := validateSessionStartEntries(sessionStart); err != nil {
 		return nil, false, err
 	}
+	sessionStart, healed := selfHealSessionStart(sessionStart)
+	hooks["SessionStart"] = sessionStart
+	doc["hooks"] = hooks
 	if codexHasCommand(sessionStart, command) {
-		return doc, false, nil
+		return doc, healed, nil
 	}
 	hook := codexHook(command, hookTimeoutSeconds)
 	if len(sessionStart) == 0 {
@@ -517,6 +529,291 @@ func claudeHasCommand(entries []interface{}, command string) bool {
 
 func codexHasCommand(entries []interface{}, command string) bool {
 	return claudeHasCommand(entries, command)
+}
+
+// isAMQOwnedCommand reports whether a SessionStart hook command was written by
+// the AMQ keepalive installer, by detecting the AMQ_KEEPALIVE_BIN= env prefix
+// that buildHookCommand stamps on every command it emits. The prefix is
+// matched at the start of the command so a foreign hook that merely echoes the
+// env var name (e.g. `echo AMQ_KEEPALIVE_BIN=x`) is not misclassified as owned.
+func isAMQOwnedCommand(command string) bool {
+	return strings.HasPrefix(strings.TrimSpace(command), amqOwnedCommandPrefix)
+}
+
+// hookClass is the shared classification of a single hook command used by both
+// the install-time self-heal and the read-only doctor scan so the two never
+// disagree. owned is true for AMQ-written commands; scriptPath is the parsed
+// installed script path (empty when the command could not be parsed); stale is
+// true only when the path parsed and the script does not exist on disk. An
+// owned command that cannot be parsed is NOT stale: self-heal and doctor never
+// delete or report what they cannot read.
+type hookClass struct {
+	owned      bool
+	scriptPath string
+	stale      bool
+}
+
+// classifyHook inspects a single hook object and returns its classification.
+// It is the single source of truth for ownership, path extraction, and
+// staleness shared by pruneStaleAMQHooks (install-time self-heal) and
+// StaleSessionStartHooks (doctor scan).
+func classifyHook(hookObj map[string]interface{}) hookClass {
+	command := strings.TrimSpace(fmt.Sprint(hookObj["command"]))
+	if !isAMQOwnedCommand(command) {
+		return hookClass{}
+	}
+	scriptPath, ok := scriptPathFromAMQCommand(command)
+	if !ok || scriptPath == "" {
+		// Owned but unparseable: preserve, do not report stale.
+		return hookClass{owned: true}
+	}
+	_, err := os.Stat(scriptPath)
+	stale := os.IsNotExist(err)
+	// An unreadable path (e.g. EACCES) is not stale: unreadable is not the
+	// same as missing, so we do not prune or report it.
+	return hookClass{owned: true, scriptPath: scriptPath, stale: stale}
+}
+
+// scriptPathFromAMQCommand extracts the installed script path from an AMQ-owned
+// SessionStart hook command. buildHookCommand emits a fixed layout of three
+// single-quoted tokens: AMQ_KEEPALIVE_BIN=<q> AMQ_KEEPALIVE_TIMEOUT_SECONDS=<q>
+// <q>, where the third token is the script path. This is a forward decoder of
+// that fixed shape: it consumes one single-quoted token at a time (decoding the
+// 4-byte escaped-quote sequence that shellQuote emits for an embedded quote), skips the
+// single space separators, and returns the third token. Any leftover non-space
+// bytes after the third token, or the wrong number of tokens, means the command
+// does not match the shape buildHookCommand produces and is not parseable.
+// Returns the unescaped path and true on success; false (without dropping
+// anything) otherwise.
+func scriptPathFromAMQCommand(command string) (string, bool) {
+	s := command
+	// Token 1: AMQ_KEEPALIVE_BIN=<quoted>, then a space.
+	rest, ok := strings.CutPrefix(s, amqOwnedCommandPrefix)
+	if !ok {
+		return "", false
+	}
+	token1, rest, ok := shellUnquoteToken(rest)
+	if !ok || token1 == "" {
+		return "", false
+	}
+	rest, ok = consumeSingleSpace(rest)
+	if !ok {
+		return "", false
+	}
+	// Token 2: AMQ_KEEPALIVE_TIMEOUT_SECONDS=<quoted>, then a space. The prefix
+	// must be present exactly (CutPrefix, not TrimPrefix) and the decoded token
+	// must be all digits, because buildHookCommand emits shellQuote(fmt.Sprintf("%d",...)).
+	rest, ok = strings.CutPrefix(rest, "AMQ_KEEPALIVE_TIMEOUT_SECONDS=")
+	if !ok {
+		return "", false
+	}
+	timeoutToken, rest, ok := shellUnquoteToken(rest)
+	if !ok || timeoutToken == "" {
+		return "", false
+	}
+	if !isAllDigits(timeoutToken) {
+		return "", false
+	}
+	rest, ok = consumeSingleSpace(rest)
+	if !ok {
+		return "", false
+	}
+	// Token 3: the script path.
+	path, left, ok := shellUnquoteToken(rest)
+	if !ok {
+		return "", false
+	}
+	// Any leftover non-space bytes mean a 4th token is present: not parseable.
+	if strings.TrimSpace(left) != "" {
+		return "", false
+	}
+	return path, true
+}
+
+// isAllDigits reports whether s is non-empty and consists only of ASCII digits,
+// matching the shape buildHookCommand emits for the timeout (an int seconds
+// value rendered by fmt.Sprintf("%d", ...)).
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// shellUnquoteToken consumes one single-quoted token from the start of s and
+// returns its decoded value, the unconsumed remainder, and ok. It is the exact
+// inverse of shellQuote, which produces a token of the form '<value>' where
+// every embedded single quote is encoded as a 4-byte close-escape-reopen
+// sequence: close the quote, a backslash-escaped quote, reopen the quote.
+// Decoding therefore strips the outer quotes and replaces each such sequence
+// with a literal single quote.
+// ok is false if s does not begin with a complete, well-formed token.
+func shellUnquoteToken(s string) (token, rest string, ok bool) {
+	if len(s) == 0 || s[0] != '\'' {
+		return "", s, false
+	}
+	// Find the closing quote that ends this token. A token is a run of
+	// '<...>' segments joined by escaped-quote sequences; the token ends at the
+	// first single quote that is not followed by the rest of an escape.
+	i := 1
+	for i < len(s) {
+		if s[i] != '\'' {
+			i++
+			continue
+		}
+		// s[i] == quote. If this is the start of an escaped-quote sequence (close,
+		// backslash, quote, reopen), skip the 4 bytes and continue inside the token.
+		if i+3 < len(s) && s[i+1] == '\\' && s[i+2] == '\'' && s[i+3] == '\'' {
+			i += 4
+			continue
+		}
+		// This quote closes the token.
+		break
+	}
+	if i >= len(s) {
+		return "", s, false // unterminated quote
+	}
+	// s[1:i] is the raw token body; decode escaped-quote sequences back to
+	// single quotes.
+	raw := s[1:i]
+	token = strings.ReplaceAll(raw, "'\\''", "'")
+	return token, s[i+1:], true
+}
+
+// consumeSingleSpace consumes exactly one ASCII space from the start of s. It
+// returns the remainder and ok; ok is false if s does not start with a space.
+func consumeSingleSpace(s string) (rest string, ok bool) {
+	if len(s) == 0 || s[0] != ' ' {
+		return s, false
+	}
+	return s[1:], true
+}
+
+// selfHealSessionStart prunes stale AMQ-owned hooks from every SessionStart
+// entry. Foreign hooks are preserved verbatim. AMQ-owned hooks whose script
+// path does not exist are dropped, and duplicate AMQ-owned hooks referencing
+// the same existing script path are de-duplicated to the first occurrence.
+// Owned hooks that cannot be parsed are preserved (never deleted unread).
+// Returns the (possibly same) slice and whether any entry changed.
+func selfHealSessionStart(sessionStart []interface{}) ([]interface{}, bool) {
+	changed := false
+	for i, entry := range sessionStart {
+		obj, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		inner, err := innerHookList(obj)
+		if err != nil || len(inner) == 0 {
+			continue
+		}
+		pruned, entryChanged := pruneStaleAMQHooks(inner)
+		if entryChanged {
+			obj["hooks"] = pruned
+			sessionStart[i] = obj
+			changed = true
+		}
+	}
+	return sessionStart, changed
+}
+
+// pruneStaleAMQHooks filters the inner hooks list of a single SessionStart
+// entry. Non-AMQ hooks are preserved verbatim. AMQ-owned hooks whose script
+// path is missing are dropped; duplicates referencing the same existing script
+// path are collapsed to the first occurrence. Owned hooks that cannot be parsed
+// are preserved, not dropped. Uses classifyHook so it agrees with the doctor
+// scan.
+func pruneStaleAMQHooks(hooks []interface{}) ([]interface{}, bool) {
+	// Duplicate collapse keys on the exact full command string, the same
+	// identity the installer's claudeHasCommand uses: two LIVE owned hooks that
+	// share a script path but differ in AMQ_KEEPALIVE_BIN or timeout are distinct
+	// commands and must both be preserved; only byte-identical commands collapse.
+	seen := make(map[string]bool)
+	filtered := make([]interface{}, 0, len(hooks))
+	changed := false
+	for _, hook := range hooks {
+		hookObj, ok := hook.(map[string]interface{})
+		if !ok {
+			filtered = append(filtered, hook)
+			continue
+		}
+		class := classifyHook(hookObj)
+		if !class.owned {
+			filtered = append(filtered, hook)
+			continue
+		}
+		if class.scriptPath == "" {
+			// Owned but unparseable: preserve verbatim.
+			filtered = append(filtered, hook)
+			continue
+		}
+		command := strings.TrimSpace(fmt.Sprint(hookObj["command"]))
+		if seen[command] {
+			changed = true
+			continue
+		}
+		if class.stale {
+			changed = true
+			continue
+		}
+		seen[command] = true
+		filtered = append(filtered, hook)
+	}
+	return filtered, changed
+}
+
+// StaleSessionStartHook describes an AMQ-owned SessionStart hook command whose
+// script path does not exist. It is used by amq doctor to flag dead hooks.
+type StaleSessionStartHook struct {
+	ConfigPath string `json:"config_path"`
+	Agent      string `json:"agent"`
+	ScriptPath string `json:"script_path"`
+}
+
+// StaleSessionStartHooks scans a Claude or Codex hook config file for AMQ-owned
+// SessionStart hook commands whose script path does not exist. It does not
+// modify the file. Returns one entry per stale hook. Uses classifyHook so it
+// agrees with the install-time self-heal. Owned hooks that cannot be parsed are
+// not reported (they are preserved, not stale).
+func StaleSessionStartHooks(configPath, agent string) ([]StaleSessionStartHook, error) {
+	doc, err := loadJSONObject(configPath)
+	if err != nil {
+		return nil, err
+	}
+	hooks, ok := doc["hooks"].(map[string]interface{})
+	if !ok {
+		return nil, nil
+	}
+	sessionStart, ok := hooks["SessionStart"].([]interface{})
+	if !ok {
+		return nil, nil
+	}
+	var stale []StaleSessionStartHook
+	for _, entry := range sessionStart {
+		obj, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for _, hook := range interfaceArray(obj["hooks"]) {
+			hookObj, ok := hook.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			class := classifyHook(hookObj)
+			if class.owned && class.stale {
+				stale = append(stale, StaleSessionStartHook{
+					ConfigPath: configPath,
+					Agent:      agent,
+					ScriptPath: class.scriptPath,
+				})
+			}
+		}
+	}
+	return stale, nil
 }
 
 func loadJSONObject(path string) (map[string]interface{}, error) {
