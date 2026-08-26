@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.70.0](https://github.com/avivsinai/agent-message-queue/compare/v0.69.0...v0.70.0) (2026-08-25)
+
+
+### Features
+
+* **wake:** add gated GUI app seat scaffolds ([#644](https://github.com/avivsinai/agent-message-queue/issues/644)) ([30d0180](https://github.com/avivsinai/agent-message-queue/commit/30d018035656902810ddb9c1897ee3ef23e4022b))
+* **wake:** ship gated GUI deep-link prefill seats ([#647](https://github.com/avivsinai/agent-message-queue/issues/647)) ([108211c](https://github.com/avivsinai/agent-message-queue/commit/108211ce2dcc72207711f53fcfe1373bf17d4616))
+
 ## [0.69.0](https://github.com/avivsinai/agent-message-queue/compare/v0.68.0...v0.69.0) (2026-08-24)
 
 
