@@ -37,7 +37,7 @@ const (
 //
 // Claude CLI does not enforce a one-owner mutex (a second -p --resume appends
 // to the same jsonl). AMQ takes flock on inject.lock before the owner scan.
-// Probe refuses unreadable/malformed/pid-mismatched owner files, or a matching
+// Probe refuses unreadable/malformed/non-positive/pid-mismatched owner files, or a matching
 // uuid whose filename pid is alive. Stale pid files are ignored, never deleted.
 type ClaudePrint struct {
 	Runner   CommandRunner
@@ -384,7 +384,7 @@ func (c ClaudePrint) refuseLiveOwner(configDir, uuid string) error {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !isPIDJSON(name) {
+		if e.IsDir() || (!isPIDJSON(name) && !isSignedPIDJSON(name)) {
 			continue
 		}
 		raw, readErr := os.ReadFile(filepath.Join(dir, name))
@@ -400,7 +400,7 @@ func (c ClaudePrint) refuseLiveOwner(configDir, uuid string) error {
 			continue
 		}
 		filePID, convErr := strconv.Atoi(strings.TrimSuffix(name, ".json"))
-		if convErr != nil || rec.PID == 0 || rec.PID != filePID {
+		if convErr != nil || !isPIDJSON(name) || rec.PID <= 0 || filePID <= 0 || rec.PID != filePID {
 			return fmt.Errorf("%w: inspect or remove %s if the process is gone (pid field %d does not match filename)", ErrTargetDegraded, filePath, rec.PID)
 		}
 		alive, aliveErr := pidAlive(filePID)
@@ -428,8 +428,28 @@ func isPIDJSON(name string) bool {
 	if !ok || base == "" {
 		return false
 	}
-	_, err := strconv.Atoi(base)
-	return err == nil
+	for i := 0; i < len(base); i++ {
+		if base[i] < '0' || base[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isSignedPIDJSON(name string) bool {
+	base, ok := strings.CutSuffix(name, ".json")
+	if !ok || len(base) < 2 {
+		return false
+	}
+	if base[0] != '-' && base[0] != '+' {
+		return false
+	}
+	for i := 1; i < len(base); i++ {
+		if base[i] < '0' || base[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 type claudeSessionOwner struct {

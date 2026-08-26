@@ -673,3 +673,24 @@ func TestClaudePrintPidMismatchOwnerRefusesZeroSpawns(t *testing.T) {
 		t.Fatalf("spawns = %d, want 0", len(spawner.calls))
 	}
 }
+
+func TestClaudePrintNegativePidOwnerRefusesZeroSpawns(t *testing.T) {
+	cwd := t.TempDir()
+	configDir, stateDir, bin := writeClaudePrintFixture(t, testClaudeUUID, cwd)
+	if err := os.WriteFile(filepath.Join(configDir, "sessions", "-1.json"), []byte(`{"pid":-1,"sessionId":"`+testClaudeUUID+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeCommandRunner{output: []byte("Usage: --resume --output-format --replay-user-messages\n")}
+	spawner := &fakeSpawner{}
+	a := testClaudePrint(configDir, stateDir, bin, runner, spawner)
+	err := a.Inject(context.Background(), claudePrintTargetSessionPrefix+testClaudeUUID, "payload")
+	if !errors.Is(err, ErrTargetDegraded) {
+		t.Fatalf("Inject() error = %v, want ErrTargetDegraded", err)
+	}
+	if !strings.Contains(err.Error(), filepath.Join(configDir, "sessions", "-1.json")) {
+		t.Fatalf("Inject() error = %v, want named owner file", err)
+	}
+	if len(spawner.calls) != 0 {
+		t.Fatalf("spawns = %d, want 0", len(spawner.calls))
+	}
+}
