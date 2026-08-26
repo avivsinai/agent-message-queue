@@ -173,6 +173,13 @@ func sameWakeImageEvidenceExceptMethodPath(first, second wakeImageEvidenceV1) bo
 // what it is, so when the stable identity fields agree they do not affect
 // identity. This lets two wakes staging the same brew candidate on nearby ticks
 // tolerate the ctime mutation each other's hardlink imposes.
+//
+// Path-sensitive callers do not rely on this helper to detect a different name:
+// revalidate uses SameFile(held fd, Lstat(executionPath)); verify compares
+// os.Executable() to bound.ExecutionPath before calling this; persisted-bound
+// validation requires BoundImage.ExecutionPath == StagePath; cleanup deletes
+// bound.ExecutionPath after opening that path. Device/inode/size/sha256/version
+// is sufficient authority here.
 func sameDarwinStagedWakeImageEvidence(first, second wakeImageEvidenceV1) bool {
 	if first.Platform != "darwin" || second.Platform != "darwin" {
 		return first == second

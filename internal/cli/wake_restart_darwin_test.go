@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -354,4 +355,186 @@ func TestDarwinWakeRestartBindFailsWhenCandidateReplacedDuringLink(t *testing.T)
 	if !replaced {
 		t.Fatal("replacement interposition never ran")
 	}
+}
+
+func TestVerifyWakeResumeBoundImageRejectsSameInodeDifferentPath(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe = filepath.Clean(exe)
+	bound, err := captureWakeImageEvidence(exe, "path-must-matter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound.Method = wakeImageMethodPathnameExecObserved
+	bound.ExecutionPath = exe + ".other-stage"
+	_, err = verifyWakeResumeBoundImagePlatform(bound)
+	if err == nil || !strings.Contains(err.Error(), "running wake path does not match bound restart path") {
+		t.Fatalf("verify error = %v; want explicit path mismatch (same inode is not enough)", err)
+	}
+}
+
+func TestDarwinWakeRestartLoopDoesNotRefuseCTimeOnlyRelink(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	candidatePath := writeWakeRestartLoopCandidateCopy(t, &fixture)
+	originalLink := linkDarwinWakeRestartStage
+	t.Cleanup(func() { linkDarwinWakeRestartStage = originalLink })
+	linkDarwinWakeRestartStage = func(oldName, newName string) error {
+		if err := originalLink(oldName, newName); err != nil {
+			return err
+		}
+		extra := candidatePath + ".ctime-probe"
+		if err := originalLink(oldName, extra); err != nil {
+			return err
+		}
+		return os.Remove(extra)
+	}
+	pendingAtPreflight := false
+	oldPreflight := wakeRestartBoundPreflight
+	oldExec := wakeRestartExec
+	wakeRestartBoundPreflight = func(*wakeRestartBoundImage, []string, wakeResumeBootstrap) error {
+		rec, exists, err := readPendingWakeRestartForTest(t, fixture)
+		if err != nil || !exists {
+			t.Errorf("preflight restart record exists=%v err=%v", exists, err)
+			return err
+		}
+		pendingAtPreflight = rec.Status == wakeRestartPending && len(rec.RefusedCandidates) == 0
+		return nil
+	}
+	sentinel := errors.New("test exec after successful ctime-tolerant bind")
+	wakeRestartExec = func(string, []string, []string) error { return sentinel }
+	t.Cleanup(func() {
+		wakeRestartBoundPreflight = oldPreflight
+		wakeRestartExec = oldExec
+	})
+	runWakeRestartLoopForTest(t, fixture)
+	if !pendingAtPreflight {
+		t.Fatal("ctime-only relink refused at bind; record should still be pending at preflight")
+	}
+	record := readRefusedWakeRestartForTest(t, fixture)
+	if !strings.Contains(record.Reason, sentinel.Error()) {
+		t.Fatalf("refusal reason = %q; want exec sentinel, not a bind/ctime identity error", record.Reason)
+	}
+	if strings.Contains(record.Reason, "changed before Darwin staging") ||
+		strings.Contains(record.Reason, "changed while hashing") {
+		t.Fatalf("ctime relink was blamed for refusal: %q", record.Reason)
+	}
+	if len(record.RefusedCandidates) != 0 {
+		t.Fatalf("RefusedCandidates = %#v; want empty", record.RefusedCandidates)
+	}
+}
+
+func TestDarwinWakeRestartLoopRefusesReplacedCandidate(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	candidatePath := writeWakeRestartLoopCandidateCopy(t, &fixture)
+	originalLink := linkDarwinWakeRestartStage
+	t.Cleanup(func() { linkDarwinWakeRestartStage = originalLink })
+	linkDarwinWakeRestartStage = func(oldName, newName string) error {
+		next := candidatePath + ".next"
+		current, err := os.ReadFile(oldName)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(next, append(current, []byte("mutated")...), 0o700); err != nil {
+			return err
+		}
+		if err := os.Rename(next, oldName); err != nil {
+			return err
+		}
+		return originalLink(oldName, newName)
+	}
+	oldPreflight := wakeRestartBoundPreflight
+	oldExec := wakeRestartExec
+	wakeRestartBoundPreflight = func(*wakeRestartBoundImage, []string, wakeResumeBootstrap) error {
+		t.Error("preflight ran; replaced candidate should have failed at bind")
+		return nil
+	}
+	wakeRestartExec = func(string, []string, []string) error {
+		t.Error("exec ran; replaced candidate should have failed at bind")
+		return nil
+	}
+	t.Cleanup(func() {
+		wakeRestartBoundPreflight = oldPreflight
+		wakeRestartExec = oldExec
+	})
+	runWakeRestartLoopForTest(t, fixture)
+	record := readRefusedWakeRestartForTest(t, fixture)
+	if !strings.Contains(record.Reason, "bind wake restart candidate") {
+		t.Fatalf("refusal reason = %q; want bind failure", record.Reason)
+	}
+}
+
+func writeWakeRestartLoopCandidateCopy(t *testing.T, fixture *wakeRestartFixture) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "amq")
+	if err := os.WriteFile(path, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := captureWakeImageEvidence(path, fixture.candidate.EmbeddedVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.candidate = candidate
+	fixture.record.Candidate = candidate
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, fixture.record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func runWakeRestartLoopForTest(t *testing.T, fixture wakeRestartFixture) {
+	t.Helper()
+	cfg := wakeConfig{
+		me:                 fixture.agent,
+		root:               fixture.root,
+		injectMode:         wakeInjectModeNone,
+		wakeOwner:          &fixture.owner,
+		terminalGeneration: fixture.lock.Lock.Generation,
+		retainedAgent:      fixture.agentDir,
+		retainedInbox:      fixture.inboxDir,
+		inspectTerminalGeneration: func() wakeLockInspection {
+			return inspectWakeLock(fixture.root, fixture.agent)
+		},
+		restartSignals: make(chan os.Signal, 1),
+	}
+	handleWakeRestartAtLoopBoundary(&cfg, fixedWakeAdmissionWatcher{errors: make(chan error)}, false, false)
+}
+
+func readPendingWakeRestartForTest(t *testing.T, fixture wakeRestartFixture) (wakeRestartRecord, bool, error) {
+	t.Helper()
+	var record wakeRestartRecord
+	var exists bool
+	err := fixture.agentDir.withFD(func(dirfd int) error {
+		var readErr error
+		record, exists, readErr = readWakeRestartRecordAt(dirfd, fixture.agentDir)
+		return readErr
+	})
+	return record, exists, err
+}
+
+func readRefusedWakeRestartForTest(t *testing.T, fixture wakeRestartFixture) wakeRestartRecord {
+	t.Helper()
+	record, exists, err := readPendingWakeRestartForTest(t, fixture)
+	if err != nil || !exists {
+		t.Fatalf("restart record exists=%v err=%v", exists, err)
+	}
+	if record.Status != wakeRestartRefused {
+		t.Fatalf("restart record = %#v; want refused", record)
+	}
+	return record
 }
