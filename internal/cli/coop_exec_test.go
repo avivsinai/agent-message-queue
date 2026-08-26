@@ -16,6 +16,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 func TestSplitDashDash(t *testing.T) {
@@ -271,6 +272,133 @@ func TestCoopExecNamedInjectsArgv(t *testing.T) {
 	if !reflect.DeepEqual(gotArgv, wantArgv) {
 		t.Fatalf("argv = %#v, want %#v", gotArgv, wantArgv)
 	}
+}
+
+func TestCoopExecNamedRefusedUnderManagedLaunch(t *testing.T) {
+	const wantMessage = "--named is not supported under a managed launch; declare the name in the launch plan instead"
+
+	for _, cmdName := range []string{"pi", "codex"} {
+		t.Run(cmdName, func(t *testing.T) {
+			putBareCommandOnPATH(t, cmdName)
+			t.Setenv(launch.InternalLaunchNonceEnv, "11111111-1111-4111-8111-111111111111")
+
+			t.Run("with --named refuses", func(t *testing.T) {
+				execCalled := false
+				oldExec := coopExecProcess
+				coopExecProcess = func(string, []string, []string) error {
+					execCalled = true
+					return errors.New("exec sentinel")
+				}
+				t.Cleanup(func() { coopExecProcess = oldExec })
+
+				tuiInjectorCalled := false
+				oldTUIInjector := startCoopNamedTUIInjector
+				startCoopNamedTUIInjector = func(string, string) error {
+					tuiInjectorCalled = true
+					return nil
+				}
+				t.Cleanup(func() { startCoopNamedTUIInjector = oldTUIInjector })
+
+				err := runCoopExec([]string{"--named", cmdName})
+				if err == nil || GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), wantMessage) {
+					t.Fatalf("error = %v, want usage refusal containing %q", err, wantMessage)
+				}
+				if execCalled {
+					t.Fatal("coopExecProcess called after managed --named refusal")
+				}
+				if tuiInjectorCalled {
+					t.Fatal("startCoopNamedTUIInjector called after managed --named refusal")
+				}
+			})
+
+			t.Run("without --named proceeds", func(t *testing.T) {
+				root := seedManagedCoopExecTicket(t, cmdName, os.Getenv(launch.InternalLaunchNonceEnv))
+				sentinel := errors.New("exec sentinel")
+				oldExec := coopExecProcess
+				var execCalled bool
+				coopExecProcess = func(string, []string, []string) error {
+					execCalled = true
+					return sentinel
+				}
+				t.Cleanup(func() { coopExecProcess = oldExec })
+
+				self := os.Getpid()
+				owner := wakeOwner{PID: self, ProcessStart: "12345", BootID: "11111111-1111-1111-1111-111111111111", SessionID: 99}
+				stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+					return wakeProcessInfo{PID: pid, Running: pid == self, StartToken: owner.ProcessStart, BootID: owner.BootID}
+				})
+				stubWakeProcessSID(t, func(int) (int, error) { return owner.SessionID, nil })
+
+				err := runCoopExec([]string{
+					"--root", root,
+					"--me", cmdName,
+					"--no-wake",
+					"--managed-no-wake-reason", "test",
+					cmdName,
+				})
+				if !errors.Is(err, sentinel) {
+					t.Fatalf("error = %v, want coopExecProcess sentinel", err)
+				}
+				if !execCalled {
+					t.Fatal("coopExecProcess was not called without managed --named")
+				}
+			})
+		})
+	}
+}
+
+func seedManagedCoopExecTicket(t *testing.T, handle, nonce string) string {
+	t.Helper()
+	project := t.TempDir()
+	session := filepath.Join(project, "session")
+	if err := fsq.EnsureRootDirs(session); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(session, handle); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(session, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	lease, err := launch.AcquireLease(root, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.LockHandles(handle); err != nil {
+		t.Fatal(err)
+	}
+	amqExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{
+		Handle: handle, LaunchNonce: nonce, Mode: launch.AdapterModeMint, Provider: "test",
+		ProjectRoot: project, SessionRoot: session, Cwd: project,
+		ProviderExecutable: "/usr/bin/true", AMQExecutable: amqExecutable,
+		TargetArgv: []string{"/usr/bin/true"},
+		Execution:  &launch.PrepareExecutionOptions{WakeMode: "disabled", AuditReason: "test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := launch.WriteExecutionTicket(root, lease, ticket); err != nil {
+		t.Fatal(err)
+	}
+	if err := launch.WriteConversation(root, lease, launch.ConversationRecord{
+		Version: launch.ConversationVersion, Handle: handle, State: launch.CapturePending, LaunchNonce: nonce,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	return session
 }
 
 func TestCoopExecNamedWithoutFlagDoesNotInject(t *testing.T) {

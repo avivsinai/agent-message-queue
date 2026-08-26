@@ -205,6 +205,8 @@ Without `--session` or `--root`, `coop exec` uses the declared `default_session`
 
 Add `--named` to stamp `AM_ME` onto the CLI conversation title (`claude`/`pi`
 get `--name`; Codex and Cursor `agent` get a best-effort `/rename` on Unix).
+`--named` is not supported under a managed launch; declare the name in the
+launch plan instead.
 
 Add `--no-gitignore` when `coop exec` should auto-initialize the project without changing `.gitignore`.
 

@@ -72,7 +72,7 @@ func runCoopExec(args []string) error {
 	fs.Var(&managedSymphonyEventFlags, "managed-symphony-event", "")
 	managedSymphonyWorkspaceFlag := fs.String("managed-symphony-workspace-key", "", "")
 	yesFlag := fs.Bool("y", false, "Skip confirmation prompts (including clearing a blocking wake)")
-	namedFlag := fs.Bool("named", false, "Stamp AM_ME onto the spawned CLI session name (opt-in)")
+	namedFlag := fs.Bool("named", false, "Stamp AM_ME onto the spawned CLI session name (opt-in; not under a managed launch)")
 
 	usage := usageWithFlags(fs, "amq coop exec [options] <command> [-- <command-flags>]",
 		"Set up co-op mode and exec into the agent (replaces this process).",
@@ -106,6 +106,9 @@ func runCoopExec(args []string) error {
 		return err
 	} else if handled {
 		return nil
+	}
+	if managedLaunchNonce != "" && *namedFlag {
+		return UsageError("--named is not supported under a managed launch; declare the name in the launch plan instead")
 	}
 	if managedLaunchNonce != "" {
 		if !flagWasVisited(fs, "root") || strings.TrimSpace(*rootFlag) == "" || !filepath.IsAbs(*rootFlag) {
