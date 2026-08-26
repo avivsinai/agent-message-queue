@@ -19,6 +19,10 @@ func TestValidClaudeAllowedToolsGrammar(t *testing.T) {
 		"Bash(ls)",
 		"Bash(ls:*)",
 		"Bash(gh pr create:*)",
+		"Bash(gh pr view:*,gh pr create:*)",
+		"Bash(a,b)",
+		"Bash(gh pr view:*,gh pr create:*),Read",
+		"Bash(git -C x:*)",
 	}
 	for _, value := range accept {
 		t.Run("accept/"+value, func(t *testing.T) {
@@ -32,6 +36,9 @@ func TestValidClaudeAllowedToolsGrammar(t *testing.T) {
 		"Bash:*",
 		"--dangerously-skip-permissions",
 		"--verbose",
+		"Bash(--dangerously-skip-permissions)",
+		"Bash(--verbose)",
+		"Bash(-la)",
 		"Bash(",
 		"Bash()",
 		"Bash(a)b",

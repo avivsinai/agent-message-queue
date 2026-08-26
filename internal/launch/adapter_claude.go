@@ -143,7 +143,8 @@ const claudeAllowedToolsMaxBytes = 512
 // and commas, so scoped grants like `Bash(gh pr view:*,gh pr create:*)` parse.
 // Entries are split on commas at paren depth 0 only. An entry must not
 // start with '-', and each entry must have no leading or trailing
-// whitespace. A bare name followed by `:*` (e.g. `Bash:*`) rejects because
+// whitespace. A spec must not start with '-' either (no legitimate scoped
+// pattern begins with a dash; a dash elsewhere is fine). A bare name followed by `:*` (e.g. `Bash:*`) rejects because
 // the name part fails the name regex; a scoped pattern requires the
 // parentheses. The grammar accepts real Claude tool-pattern syntax and
 // rejects flag-looking values such as `--dangerously-skip-permissions`,
@@ -201,6 +202,13 @@ func validClaudeAllowedTools(value string) bool {
 		}
 		specBody := spec[:len(spec)-1]
 		if specBody == "" || strings.ContainsRune(specBody, '(') || strings.ContainsRune(specBody, ')') {
+			return false
+		}
+		// A spec must not start with '-': there is no legitimate scoped pattern
+		// that begins with a dash, and refusing it keeps a flag-looking value
+		// such as Bash(--dangerously-skip-permissions) from passing. A dash
+		// elsewhere in the spec (e.g. Bash(git -C x:*)) is fine.
+		if specBody[0] == '-' {
 			return false
 		}
 		if containsControlByte(specBody) {
