@@ -164,6 +164,9 @@ func runDoctor(args []string) error {
 	result.Checks = append(result.Checks, checkSkill("codex"))
 	result.Checks = append(result.Checks, checkSkill("grok"))
 
+	// Hook config health: flag AMQ-owned SessionStart hooks whose script is gone.
+	result.Checks = append(result.Checks, checkHookConfigs())
+
 	// Ops checks (runtime health)
 	if *opsFlag && root != "" {
 		// Resolve root source once here; avoids re-resolving with empty flags in runOpsChecks.
