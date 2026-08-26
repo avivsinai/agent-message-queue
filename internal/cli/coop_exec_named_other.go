@@ -2,11 +2,15 @@
 
 package cli
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
-var startCoopNamedTUIInjector = func(me, cmdName string) error {
-	_ = me
+var startCoopNamedTUIInjector = func(name, cmdName string, execStart time.Time) error {
+	_ = name
 	_ = cmdName
+	_ = execStart
 	return errors.New("coop named TUI inject requires macOS or Linux")
 }
 

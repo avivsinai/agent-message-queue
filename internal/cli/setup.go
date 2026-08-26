@@ -311,6 +311,9 @@ func buildSetupState(options setupOptions) (setupState, error) {
 		Schema: launch.ProjectConfigSchema, DefaultSession: defaultSession, Agents: agents,
 		Layout: launch.LayoutIntent{Type: options.layout},
 	}
+	if projectExists {
+		projectConfig.Named = existingProject.Named
+	}
 	projectData, err := launch.MarshalProjectConfig(projectConfig)
 	if err != nil {
 		return setupState{}, err

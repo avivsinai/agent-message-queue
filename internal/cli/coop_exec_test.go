@@ -217,6 +217,20 @@ func TestInjectCoopNamedArgv(t *testing.T) {
 			unchanged: true,
 		},
 		{
+			name:      "skips resume",
+			cmd:       "claude",
+			args:      []string{"--resume", "thread"},
+			me:        "coder1",
+			unchanged: true,
+		},
+		{
+			name: "ignores name-looking model value",
+			cmd:  "claude",
+			args: []string{"--model", "--name"},
+			me:   "coder1",
+			want: []string{"--name", "coder1", "--model", "--name"},
+		},
+		{
 			name:      "codex unchanged",
 			cmd:       "codex",
 			args:      []string{"--foo"},
@@ -293,7 +307,7 @@ func TestCoopExecNamedRefusedUnderManagedLaunch(t *testing.T) {
 
 				tuiInjectorCalled := false
 				oldTUIInjector := startCoopNamedTUIInjector
-				startCoopNamedTUIInjector = func(string, string) error {
+				startCoopNamedTUIInjector = func(string, string, time.Time) error {
 					tuiInjectorCalled = true
 					return nil
 				}
@@ -401,7 +415,7 @@ func seedManagedCoopExecTicket(t *testing.T, handle, nonce string) string {
 	return session
 }
 
-func TestCoopExecNamedWithoutFlagDoesNotInject(t *testing.T) {
+func TestCoopExecNamedDefaultsOn(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
@@ -426,9 +440,40 @@ func TestCoopExecNamedWithoutFlagDoesNotInject(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("coop exec error = %v, want sentinel", err)
 	}
-	wantArgv := []string{"claude"}
+	wantArgv := []string{"claude", "--name", "coder1"}
 	if !reflect.DeepEqual(gotArgv, wantArgv) {
 		t.Fatalf("argv = %#v, want %#v", gotArgv, wantArgv)
+	}
+}
+
+func TestCoopExecNamedDisabledByFlag(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	putBareCommandOnPATH(t, "claude")
+
+	sentinel := errors.New("exec sentinel")
+	var gotArgv []string
+	oldExec := coopExecProcess
+	coopExecProcess = func(_ string, argv []string, _ []string) error {
+		gotArgv = append([]string{}, argv...)
+		return sentinel
+	}
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err := runCoopExec([]string{
+		"--root", root,
+		"--me", "coder1",
+		"--named=false",
+		"--no-wake",
+		"claude",
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("coop exec error = %v, want sentinel", err)
+	}
+	if !reflect.DeepEqual(gotArgv, []string{"claude"}) {
+		t.Fatalf("argv = %#v, want naming disabled", gotArgv)
 	}
 }
 
@@ -509,7 +554,7 @@ func TestInjectCoopNamedSlashCommandRequiresControllingTTY(t *testing.T) {
 func TestApplyCoopNamedStartsTUIInjector(t *testing.T) {
 	var started bool
 	oldStart := startCoopNamedTUIInjector
-	startCoopNamedTUIInjector = func(me, cmdName string) error {
+	startCoopNamedTUIInjector = func(me, cmdName string, _ time.Time) error {
 		started = true
 		if me != "coder1" || cmdName != "codex" {
 			t.Fatalf("startCoopNamedTUIInjector me=%q cmd=%q", me, cmdName)
@@ -532,7 +577,7 @@ func TestApplyCoopNamedStartsTUIInjector(t *testing.T) {
 
 func TestApplyCoopNamedTUIInjectorFailureIsBestEffort(t *testing.T) {
 	oldStart := startCoopNamedTUIInjector
-	startCoopNamedTUIInjector = func(me, cmdName string) error {
+	startCoopNamedTUIInjector = func(me, cmdName string, _ time.Time) error {
 		return errors.New("inject helper unavailable")
 	}
 	t.Cleanup(func() { startCoopNamedTUIInjector = oldStart })
