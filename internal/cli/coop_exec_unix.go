@@ -72,7 +72,7 @@ func runCoopExec(args []string) error {
 	fs.Var(&managedSymphonyEventFlags, "managed-symphony-event", "")
 	managedSymphonyWorkspaceFlag := fs.String("managed-symphony-workspace-key", "", "")
 	yesFlag := fs.Bool("y", false, "Skip confirmation prompts (including clearing a blocking wake)")
-	namedFlag := fs.Bool("named", false, "Stamp AM_ME onto the spawned CLI session name (opt-in; not under a managed launch)")
+	namedFlag := fs.Bool("named", true, "Stamp the session and AM_ME onto the spawned CLI session name")
 
 	usage := usageWithFlags(fs, "amq coop exec [options] <command> [-- <command-flags>]",
 		"Set up co-op mode and exec into the agent (replaces this process).",
@@ -94,7 +94,7 @@ func runCoopExec(args []string) error {
 		"  amq coop exec --require-wake --wake-inject-mode none claude  # Zero-input wake",
 		"  amq coop exec --wake-inject-via /path/to/injector codex",
 		"  amq coop exec --me myagent bash                   # Debug shell with AMQ env",
-		"  amq coop exec --named --me coder1 pi            # Exec pi --name coder1",
+		"  amq coop exec --named=false claude              # Disable automatic session naming",
 		"",
 		"Wake readiness:",
 		"  Coop never reuses a generic wake because it has no persisted",
@@ -107,8 +107,18 @@ func runCoopExec(args []string) error {
 	} else if handled {
 		return nil
 	}
-	if managedLaunchNonce != "" && *namedFlag {
+	namedEnabled, err := resolveCoopNamedEnabled(flagWasVisited(fs, "named"), *namedFlag)
+	if err != nil {
+		return err
+	}
+	if managedLaunchNonce != "" && flagWasVisited(fs, "named") && *namedFlag {
 		return UsageError("--named is not supported under a managed launch; declare the name in the launch plan instead")
+	}
+	if managedLaunchNonce != "" {
+		// Managed launches have no trusted provider-name field until the
+		// managed naming contract lands. Keep the existing launch boundary
+		// fail-closed while the direct path defaults to named sessions.
+		namedEnabled = false
 	}
 	if managedLaunchNonce != "" {
 		if !flagWasVisited(fs, "root") || strings.TrimSpace(*rootFlag) == "" || !filepath.IsAbs(*rootFlag) {
@@ -704,8 +714,11 @@ func runCoopExec(args []string) error {
 	sessionIdentity := coopSessionIdentity(root, requestedSession, *rootFlag)
 	env := buildCoopExecEnvironment(baseEnv, root, agentHandle, sessionIdentity)
 
-	// Optional --named: argv injection for claude/pi, TUI inject for codex/agent.
-	agentArgs, err = applyCoopNamedBeforeExec(*namedFlag, cmdName, agentArgs, agentHandle)
+	// Automatic naming uses the resolved session identity. A custom sessionless
+	// root has no session prefix and therefore uses only the agent handle.
+	namedLabel := coopNamedSessionLabel(sessionIdentity, agentHandle)
+	execStart := time.Now()
+	agentArgs, err = applyCoopNamedBeforeExecAt(namedEnabled, cmdName, agentArgs, namedLabel, execStart)
 	if err != nil {
 		return err
 	}

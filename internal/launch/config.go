@@ -29,6 +29,7 @@ func knownLaunchers() []string {
 type ProjectConfig struct {
 	Schema         int                  `json:"schema"`
 	DefaultSession string               `json:"default_session"`
+	Named          *bool                `json:"named,omitempty"`
 	Agents         []ProjectAgentConfig `json:"agents"`
 	Layout         LayoutIntent         `json:"layout"`
 }
@@ -107,7 +108,7 @@ func ParseLocalConfig(path string, data []byte) (LocalConfig, error) {
 	}
 	for _, field := range []string{
 		"agents", "default_session", "layout", "resume_policy", "command",
-		"argv", "env", "cwd", "bypass_args", "trust", "root",
+		"argv", "env", "cwd", "bypass_args", "trust", "root", "named",
 	} {
 		if _, ok := fields[field]; ok {
 			return LocalConfig{}, &ConfigAuthorityConflictError{Path: path, Field: field}

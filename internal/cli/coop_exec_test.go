@@ -217,6 +217,20 @@ func TestInjectCoopNamedArgv(t *testing.T) {
 			unchanged: true,
 		},
 		{
+			name:      "skips resume",
+			cmd:       "claude",
+			args:      []string{"--resume", "thread"},
+			me:        "coder1",
+			unchanged: true,
+		},
+		{
+			name: "ignores name-looking model value",
+			cmd:  "claude",
+			args: []string{"--model", "--name"},
+			me:   "coder1",
+			want: []string{"--name", "coder1", "--model", "--name"},
+		},
+		{
 			name:      "codex unchanged",
 			cmd:       "codex",
 			args:      []string{"--foo"},
@@ -235,6 +249,29 @@ func TestInjectCoopNamedArgv(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("got %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAgentArgsPreventAutoNameForHarness(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		binary string
+		args   []string
+		want   bool
+	}{
+		{name: "codex resume", binary: "codex", args: []string{"resume", "thread"}, want: true},
+		{name: "codex exec resume", binary: "codex", args: []string{"exec", "resume", "thread"}, want: true},
+		{name: "codex plain", binary: "codex", args: []string{"exec"}},
+		{name: "cursor resume", binary: "agent", args: []string{"--resume", "chat"}, want: true},
+		{name: "cursor resume equals", binary: "agent", args: []string{"--resume=chat"}, want: true},
+		{name: "claude continue", binary: "claude", args: []string{"--continue"}, want: true},
+		{name: "pi resume", binary: "pi", args: []string{"-r", "thread"}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := agentArgsPreventAutoNameFor(test.binary, test.args); got != test.want {
+				t.Fatalf("agentArgsPreventAutoNameFor(%q, %#v) = %v, want %v", test.binary, test.args, got, test.want)
 			}
 		})
 	}
@@ -293,7 +330,7 @@ func TestCoopExecNamedRefusedUnderManagedLaunch(t *testing.T) {
 
 				tuiInjectorCalled := false
 				oldTUIInjector := startCoopNamedTUIInjector
-				startCoopNamedTUIInjector = func(string, string) error {
+				startCoopNamedTUIInjector = func(string, string, time.Time) error {
 					tuiInjectorCalled = true
 					return nil
 				}
@@ -401,7 +438,7 @@ func seedManagedCoopExecTicket(t *testing.T, handle, nonce string) string {
 	return session
 }
 
-func TestCoopExecNamedWithoutFlagDoesNotInject(t *testing.T) {
+func TestCoopExecNamedDefaultsOn(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
@@ -426,9 +463,40 @@ func TestCoopExecNamedWithoutFlagDoesNotInject(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("coop exec error = %v, want sentinel", err)
 	}
-	wantArgv := []string{"claude"}
+	wantArgv := []string{"claude", "--name", "coder1"}
 	if !reflect.DeepEqual(gotArgv, wantArgv) {
 		t.Fatalf("argv = %#v, want %#v", gotArgv, wantArgv)
+	}
+}
+
+func TestCoopExecNamedDisabledByFlag(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	putBareCommandOnPATH(t, "claude")
+
+	sentinel := errors.New("exec sentinel")
+	var gotArgv []string
+	oldExec := coopExecProcess
+	coopExecProcess = func(_ string, argv []string, _ []string) error {
+		gotArgv = append([]string{}, argv...)
+		return sentinel
+	}
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err := runCoopExec([]string{
+		"--root", root,
+		"--me", "coder1",
+		"--named=false",
+		"--no-wake",
+		"claude",
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("coop exec error = %v, want sentinel", err)
+	}
+	if !reflect.DeepEqual(gotArgv, []string{"claude"}) {
+		t.Fatalf("argv = %#v, want naming disabled", gotArgv)
 	}
 }
 
@@ -509,7 +577,7 @@ func TestInjectCoopNamedSlashCommandRequiresControllingTTY(t *testing.T) {
 func TestApplyCoopNamedStartsTUIInjector(t *testing.T) {
 	var started bool
 	oldStart := startCoopNamedTUIInjector
-	startCoopNamedTUIInjector = func(me, cmdName string) error {
+	startCoopNamedTUIInjector = func(me, cmdName string, _ time.Time) error {
 		started = true
 		if me != "coder1" || cmdName != "codex" {
 			t.Fatalf("startCoopNamedTUIInjector me=%q cmd=%q", me, cmdName)
@@ -530,9 +598,45 @@ func TestApplyCoopNamedStartsTUIInjector(t *testing.T) {
 	}
 }
 
+func TestApplyCoopNamedSuppressesTUIInjectorForExistingSession(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "codex resume", args: []string{"resume", "thread"}},
+		{name: "codex exec resume", args: []string{"exec", "resume", "thread"}},
+		{name: "cursor resume", args: []string{"--resume", "chat"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			started := false
+			oldStart := startCoopNamedTUIInjector
+			startCoopNamedTUIInjector = func(string, string, time.Time) error {
+				started = true
+				return nil
+			}
+			t.Cleanup(func() { startCoopNamedTUIInjector = oldStart })
+
+			binary := "codex"
+			if strings.Contains(test.name, "cursor") {
+				binary = "agent"
+			}
+			args, err := applyCoopNamedBeforeExecAt(true, binary, test.args, "feature/"+binary, time.Now())
+			if err != nil {
+				t.Fatalf("applyCoopNamedBeforeExecAt: %v", err)
+			}
+			if started {
+				t.Fatal("TUI injector started for an existing session")
+			}
+			if !reflect.DeepEqual(args, test.args) {
+				t.Fatalf("args = %#v, want unchanged %#v", args, test.args)
+			}
+		})
+	}
+}
+
 func TestApplyCoopNamedTUIInjectorFailureIsBestEffort(t *testing.T) {
 	oldStart := startCoopNamedTUIInjector
-	startCoopNamedTUIInjector = func(me, cmdName string) error {
+	startCoopNamedTUIInjector = func(me, cmdName string, _ time.Time) error {
 		return errors.New("inject helper unavailable")
 	}
 	t.Cleanup(func() { startCoopNamedTUIInjector = oldStart })

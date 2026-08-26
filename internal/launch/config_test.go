@@ -62,6 +62,23 @@ func TestProjectConfigAcceptsCursorCurrentExecutableAlias(t *testing.T) {
 	}
 }
 
+func TestProjectConfigAcceptsOptionalNamedPreference(t *testing.T) {
+	parsed, err := ParseProjectConfig([]byte(`{"schema":1,"named":false,"agents":[{"handle":"claude","command":["claude"]}]}`))
+	if err != nil {
+		t.Fatalf("ParseProjectConfig: %v", err)
+	}
+	if parsed.Named == nil || *parsed.Named {
+		t.Fatalf("named preference = %#v, want false", parsed.Named)
+	}
+	data, err := MarshalProjectConfig(parsed)
+	if err != nil {
+		t.Fatalf("MarshalProjectConfig: %v", err)
+	}
+	if !strings.Contains(string(data), `"named": false`) {
+		t.Fatalf("marshaled config omitted named preference: %s", data)
+	}
+}
+
 func TestProjectConfigRejectsExplicitEmptyOptionalDefaults(t *testing.T) {
 	for _, raw := range []string{
 		`{"schema":1,"default_session":"","agents":[{"handle":"claude","command":["claude"]}]}`,
@@ -78,7 +95,7 @@ func TestProjectConfigRejectsExplicitEmptyOptionalDefaults(t *testing.T) {
 }
 
 func TestLocalConfigRejectsAuthorityFields(t *testing.T) {
-	for _, field := range []string{"agents", "default_session", "argv", "env", "cwd", "bypass_args", "root"} {
+	for _, field := range []string{"agents", "default_session", "argv", "env", "cwd", "bypass_args", "root", "named"} {
 		raw := `{"schema":1,"launcher_preference":["commands"],"` + field + `":"forged"}`
 		_, err := ParseLocalConfig(".amq/launch.local.json", []byte(raw))
 		var conflict *ConfigAuthorityConflictError

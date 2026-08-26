@@ -287,6 +287,17 @@ Dangerous permission-bypass flags are not valid committed arguments. Keep
 them in an operator-controlled direct `coop exec` invocation when that
 low-level path is intentionally required.
 
+Direct `coop exec` names the provider session by default as
+`<session>/<handle>` (or `<handle>` for a sessionless root). Claude and Pi
+receive the name in their argv. Codex and Cursor `agent` receive a best-effort
+TUI rename after AMQ verifies the newly created session. Codex supports direct
+resume by name, for example `codex resume session1/codex`. Cursor `agent`
+resumes through its picker only; resume-by-name is unproven. Set
+`--named=false`, `AMQ_COOP_NAMED=0`, or `"named": false` in `.amq/launch.json`
+to disable it. Explicit provider names and resume or continue flags remain
+unchanged, including `codex resume` and `agent --resume`. Managed launches keep
+naming disabled until their provider-name contract is available.
+
 ### Named sessions
 
 For isolated pairs (multiple pairs on different features):
