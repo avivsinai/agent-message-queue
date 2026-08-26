@@ -57,6 +57,9 @@ make ci             # fmt-check, vet, lint, test, smoke checks
 make check-skills   # validate canonical and symlinked skill content
 ```
 
+Formatting and lint use the toolchain pinned in `go.mod` and the golangci-lint
+version in the Makefile; other versions are refused.
+
 Go 1.25+ is required. `golangci-lint` is optional for local development and
 required by `make lint` and `make ci`.
 

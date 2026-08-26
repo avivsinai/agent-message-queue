@@ -63,12 +63,13 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 		return cooperativeStopInjectViaInDir(agentDir, recheck)
 	}
 	if recheck.Process.Running {
-		if err := terminateWakeProcessInDir(agentDir, recheck); err != nil {
-			if !sameConfirmedWakeLockInDir(agentDir, recheck) {
-				return true, nil
-			}
-			return false, err
+		// Darwin raw signaling is operator_only, so terminate* always errors here.
+		// The lock-removal path below is reachable only through the cooperative stop.
+		err := terminateWakeProcessInDir(agentDir, recheck)
+		if !sameConfirmedWakeLockInDir(agentDir, recheck) {
+			return true, nil
 		}
+		return false, err
 	}
 	removed := false
 	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
@@ -136,9 +137,9 @@ func terminateAndRemoveOrphanedWakeLockWithRawConsent(
 	}
 	// Process termination can wait. It must happen after releasing the guard.
 	if recheck.Process.Running {
-		if err := terminateWakeProcess(recheck); err != nil {
-			return resolveMissingWakeLockAfterTermination(recheck, err)
-		}
+		// Darwin raw signaling is operator_only, so terminate* always errors here.
+		// The lock-removal path below is reachable only through the cooperative stop.
+		return resolveMissingWakeLockAfterTermination(recheck, terminateWakeProcess(recheck))
 	}
 	removed := false
 	err := withWakeLifecycleGuard(inspection.Root, inspection.Agent, func() error {

@@ -5,6 +5,11 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 # GoReleaser {{.Version}} is bare semver; strip one leading v from VERSION.
 EMBED_VERSION := $(patsubst v%,%,$(VERSION))
 GOLANGCI_LINT_CACHE ?= $(CURDIR)/.golangci-cache
+# Keep this in lockstep with the version pinned in .github/workflows/ci.yml.
+GOLANGCI_LINT_VERSION := 2.13.1
+# Use go.mod's toolchain so direct gofmt does not drift from setup-go.
+GO_TOOLCHAIN := $(shell sed -n 's/^toolchain //p' go.mod)
+GOFMT := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN) go env GOROOT)/bin/gofmt
 
 build:
 	go build -ldflags "-X main.version=$(EMBED_VERSION)" -o amq ./cmd/amq
@@ -16,16 +21,21 @@ test:
 	go test ./...
 
 fmt:
-	gofmt -w $(GO_FILES)
+	$(GOFMT) -w $(GO_FILES)
 
 fmt-check:
-	@test -z "$(shell gofmt -l $(GO_FILES))"
+	@test -z "$(shell $(GOFMT) -l $(GO_FILES))"
 
 vet:
 	go vet ./...
 
 lint:
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed. Install from https://golangci-lint.run/usage/install/"; exit 1; }
+	@actual="$$(golangci-lint version --short 2>/dev/null || true)"; \
+	if [ "$$actual" != "$(GOLANGCI_LINT_VERSION)" ]; then \
+		echo "golangci-lint $(GOLANGCI_LINT_VERSION) required (found $${actual:-unknown}); install that version from https://golangci-lint.run/usage/install/"; \
+		exit 1; \
+	fi
 	GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" golangci-lint run
 
 # Keep this hostile AMQ context tuple aligned with smoke-test.sh's startup scrub.
