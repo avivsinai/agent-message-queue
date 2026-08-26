@@ -588,7 +588,10 @@ gone (`proc_pidpath` ENOENT or ESRCH after an installer unlink) as a
 conclusive deleted image, so Homebrew Cellar replacement can exec in place.
 A failed upgrade candidate is attempted at most
 once per candidate within one wake generation, bounded to the 8 most recent
-distinct candidates; a new generation resets that refusal memory. Pinned
+distinct candidates; a new generation resets that refusal memory. A refused
+wake restart record from any source is terminal and is superseded by the next
+self-upgrade candidate, which reclaims and quarantines it instead of preserving
+it and re-probing every maintenance tick. Pinned
 binaries, ownerless/keepalive wakes, repair flows, destructive interrupts, and
 arbitrary `--inject-cmd` wakes never self-upgrade. The eligible default is
 disabled with `amq wake --no-self-upgrade` or `AMQ_WAKE_NO_SELF_UPGRADE=1`;

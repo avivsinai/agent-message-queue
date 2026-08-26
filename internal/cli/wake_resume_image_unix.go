@@ -80,7 +80,7 @@ func captureWakeImageEvidence(path, embeddedVersion string) (wakeImageEvidenceV1
 	if err != nil {
 		return wakeImageEvidenceV1{}, fmt.Errorf("re-stat wake image: %w", err)
 	}
-	if !sameWakeFileIdentity(before, confirmed) || before.Size() != confirmed.Size() {
+	if !sameWakeImageStableAcrossHash(before, confirmed) {
 		return wakeImageEvidenceV1{}, fmt.Errorf("wake image changed while hashing")
 	}
 	return evidence, nil
@@ -122,7 +122,7 @@ func captureWakeImageEvidenceFromOpenFile(
 	if err != nil {
 		return wakeImageEvidenceV1{}, fmt.Errorf("re-stat wake image: %w", err)
 	}
-	if !sameWakeFileIdentity(before, after) || before.Size() != after.Size() {
+	if !sameWakeImageStableAcrossHash(before, after) {
 		return wakeImageEvidenceV1{}, fmt.Errorf("wake image changed while hashing")
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {

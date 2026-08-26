@@ -649,9 +649,15 @@ func publishWakeSelfUpgradePending(
 				decision.Action = wakeSelfUpgradeActionRestartPending
 				decision.Reason = "an existing wake restart request is preserved"
 				return nil
-			case existing.Record.Status == wakeRestartRefused &&
-				existing.Record.Source == wakeRestartSourceSelf:
-				sameScope := sameWakeSelfUpgradeRefusalScope(existing.Record, expected)
+			case existing.Record.Status == wakeRestartRefused:
+				// A refused record of ANY source is terminal; a new self candidate
+				// reclaims and quarantines it exactly as a refused-self out-of-scope
+				// record does. Only a self-sourced refusal can carry refusal memory
+				// (validateWakeSelfUpgradeRefusedCandidates rejects candidates on a
+				// non-self source), so a foreign/empty-source refusal contributes no
+				// remembered candidates and is simply superseded.
+				sameScope := existing.Record.Source == wakeRestartSourceSelf &&
+					sameWakeSelfUpgradeRefusalScope(existing.Record, expected)
 				if sameScope {
 					remembered := wakeSelfUpgradeRefusalMemory(existing.Record)
 					if wakeSelfUpgradeRefusedCandidatesContain(remembered, record.Candidate) {

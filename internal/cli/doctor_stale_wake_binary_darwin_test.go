@@ -309,7 +309,7 @@ func TestDarwinWakeBinaryComparisonReportsCurrentFromCorroboratedLiveImage(t *te
 	}
 }
 
-func TestDarwinWakeBinaryComparisonRejectsOrdinaryMappedVnodeCTimeMismatch(t *testing.T) {
+func TestDarwinWakeBinaryComparisonAcceptsCTimeOnlyRetimeLinkAsCurrent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "amq")
 	if err := os.WriteFile(path, []byte("binary"), 0o700); err != nil {
 		t.Fatal(err)
@@ -320,6 +320,9 @@ func TestDarwinWakeBinaryComparisonRejectsOrdinaryMappedVnodeCTimeMismatch(t *te
 	}
 	evidence := darwinWakeImageEvidenceForTest(t, path, info)
 	mapped := darwinMappedImageForTest(t, path, info)
+	// A ctime-only relink on the same inode: link/unlink on any name of a
+	// hardlinked inode changes ctime but not dev/ino/size/mtime. This is current,
+	// not a change during comparison.
 	mapped.Identity.CTimeSec--
 	stubDarwinProcessImage(t, mapped, nil)
 
@@ -335,8 +338,17 @@ func TestDarwinWakeBinaryComparisonRejectsOrdinaryMappedVnodeCTimeMismatch(t *te
 		},
 		resolvedWakeBinary{Path: path, Info: info},
 	)
-	if err == nil || got.Stale || !strings.Contains(err.Error(), "changed during comparison") {
-		t.Fatalf("mapped vnode ctime comparison = %#v, %v; want unknown change error", got, err)
+	if err != nil {
+		t.Fatalf("ctime-only relink comparison error = %v; want current", err)
+	}
+	if got.Stale {
+		t.Fatalf("ctime-only relink comparison = %#v; want not stale (current)", got)
+	}
+	// The verdict is current; the recorded evidence ctime fields legitimately
+	// differ (the mapped vnode snapshot retains the pre-relink ctime), so we do
+	// not assert Running == Current here — only that staleness is false.
+	if !got.Evidence.Available {
+		t.Fatalf("ctime-only relink evidence unavailable: %#v", got.Evidence)
 	}
 }
 
@@ -659,7 +671,52 @@ func TestDarwinWakeBinaryComparisonDoesNotTreatRecordedDigestAsMappedAuthority(t
 	}
 }
 
-func TestDarwinWakeBinaryComparisonCurrentRelinkBecomesUnknown(t *testing.T) {
+func TestDarwinWakeBinaryComparisonCurrentRelinkStaysCurrent(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "amq")
+	if err := os.WriteFile(currentPath, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	currentInfo, err := os.Stat(currentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := darwinWakeImageEvidenceForTest(t, currentPath, currentInfo)
+	alias := filepath.Join(dir, "alias")
+	if err := os.Link(currentPath, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(currentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapped := darwinMappedImageForTest(t, currentPath, currentInfo)
+	stubDarwinProcessImage(t, mapped, nil)
+
+	got, err := inspectWakeBinaryStalenessPlatform(
+		wakeLockInspection{
+			PID: 42,
+			Lock: wakeLock{
+				Started:              time.Now().UTC().Format(time.RFC3339Nano),
+				ImagePath:            currentPath,
+				ImageVersion:         evidence.EmbeddedVersion,
+				RunningImageEvidence: &evidence,
+			},
+		},
+		resolvedWakeBinary{Path: currentPath, Info: after},
+	)
+	if err != nil {
+		t.Fatalf("ctime-only relink comparison error = %v; want current", err)
+	}
+	if got.Stale {
+		t.Fatalf("ctime-only relink comparison = %#v; want current", got)
+	}
+}
+
+func TestDarwinWakeBinaryComparisonReplacementDuringCompareIsUnknown(t *testing.T) {
 	dir := t.TempDir()
 	currentPath := filepath.Join(dir, "amq")
 	replacementPath := filepath.Join(dir, "replacement")
@@ -691,7 +748,7 @@ func TestDarwinWakeBinaryComparisonCurrentRelinkBecomesUnknown(t *testing.T) {
 		resolvedWakeBinary{Path: currentPath, Info: currentInfo},
 	)
 	if err == nil || got.Stale || !strings.Contains(err.Error(), "changed during comparison") {
-		t.Fatalf("current relink comparison = %#v, %v; want unknown change error", got, err)
+		t.Fatalf("replacement during compare = %#v, %v; want unknown change error", got, err)
 	}
 }
 

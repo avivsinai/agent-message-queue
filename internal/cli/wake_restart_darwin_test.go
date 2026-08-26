@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +32,11 @@ func TestDarwinStagedWakeImageCTimeExceptionDoesNotWeakenIdentityOrContent(t *te
 	ctimeOnly.CTimeNS++
 	if !sameDarwinStagedWakeImageEvidence(base, ctimeOnly) {
 		t.Fatal("staged Darwin ctime-only namespace mutation was rejected")
+	}
+	pathDiffers := ctimeOnly
+	pathDiffers.ExecutionPath = filepath.Join(t.TempDir(), "other-stage", "amq")
+	if !sameDarwinStagedWakeImageEvidence(base, pathDiffers) {
+		t.Fatal("ctime-only same inode with a different staged path was rejected")
 	}
 	mutations := []struct {
 		name   string
@@ -229,5 +235,123 @@ func TestDarwinWakeRestartRealPTYPreservesPIDAndUnreadWork(t *testing.T) {
 			)
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// TestDarwinWakeRestartTwoBindersShareOneCandidateInode is the M1 regression:
+// two binders staging the SAME brew candidate inode on nearby ticks must both
+// succeed. Binder A links its stage; during A's link (before A's cleanup),
+// binder B runs a full bind that links and removes a THIRD hardlink on the same
+// candidate inode, mutating the shared inode ctime. Before the fix, A's
+// post-link ctime-sensitive compare failed and the bind was refused. Now a
+// ctime-only difference on the same inode is not an image change, so both binds
+// succeed and both bound evidences pass sameRequestedAndBoundWakeImageEvidence.
+func TestDarwinWakeRestartTwoBindersShareOneCandidateInode(t *testing.T) {
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binaryBytes, err := os.ReadFile(testBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	candidatePath := filepath.Join(dir, "amq")
+	if err := os.WriteFile(candidatePath, binaryBytes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := captureWakeImageEvidence(candidatePath, "two-binder-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cross a timestamp boundary so the ctime mutation is observable.
+	time.Sleep(1100 * time.Millisecond)
+
+	originalLink := linkDarwinWakeRestartStage
+	binderBRan := false
+	t.Cleanup(func() { linkDarwinWakeRestartStage = originalLink })
+	// Interpose binder B inside A's link: when A links its stage, run a full
+	// independent bind of the same candidate (which links and removes its own
+	// stage hardlink on the shared inode, mutating ctime) before A continues.
+	linkDarwinWakeRestartStage = func(oldName, newName string) error {
+		if err := originalLink(oldName, newName); err != nil {
+			return err
+		}
+		if !binderBRan {
+			binderBRan = true
+			boundB, err := bindWakeRestartCandidate(candidate)
+			if err != nil {
+				return fmt.Errorf("concurrent binder B failed: %w", err)
+			}
+			if !sameRequestedAndBoundWakeImageEvidence(candidate, boundB.evidence) {
+				_ = boundB.close()
+				return fmt.Errorf("concurrent binder B bound evidence does not match candidate")
+			}
+			if err := boundB.close(); err != nil {
+				return fmt.Errorf("concurrent binder B cleanup: %w", err)
+			}
+		}
+		return nil
+	}
+
+	boundA, err := bindWakeRestartCandidate(candidate)
+	if err != nil {
+		t.Fatalf("binder A failed under concurrent ctime mutation: %v", err)
+	}
+	defer func() { _ = boundA.close() }()
+	if !binderBRan {
+		t.Fatal("interposed binder B never ran; test does not exercise the race")
+	}
+	if !sameRequestedAndBoundWakeImageEvidence(candidate, boundA.evidence) {
+		t.Fatalf("binder A bound evidence does not match candidate after concurrent ctime mutation:\ncandidate=%#v\nboundA=%#v", candidate, boundA.evidence)
+	}
+}
+
+func TestDarwinWakeRestartBindFailsWhenCandidateReplacedDuringLink(t *testing.T) {
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binaryBytes, err := os.ReadFile(testBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	candidatePath := filepath.Join(dir, "amq")
+	if err := os.WriteFile(candidatePath, binaryBytes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := captureWakeImageEvidence(candidatePath, "replaced-inode-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+
+	originalLink := linkDarwinWakeRestartStage
+	replaced := false
+	t.Cleanup(func() { linkDarwinWakeRestartStage = originalLink })
+	linkDarwinWakeRestartStage = func(oldName, newName string) error {
+		if !replaced {
+			replaced = true
+			next := filepath.Join(dir, "amq.next")
+			if err := os.WriteFile(next, append(binaryBytes, []byte("mutated")...), 0o700); err != nil {
+				return err
+			}
+			if err := os.Rename(next, candidatePath); err != nil {
+				return err
+			}
+		}
+		return originalLink(oldName, newName)
+	}
+
+	bound, err := bindWakeRestartCandidate(candidate)
+	if bound != nil {
+		_ = bound.close()
+	}
+	if err == nil {
+		t.Fatal("bind succeeded after the candidate inode was replaced; want failure")
+	}
+	if !replaced {
+		t.Fatal("replacement interposition never ran")
 	}
 }
