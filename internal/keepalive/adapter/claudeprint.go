@@ -36,12 +36,17 @@ const (
 // the first matching isReplay user event is submitted.
 //
 // Claude CLI does not enforce a one-owner mutex (a second -p --resume appends
-// to the same jsonl). Probe refuses when ~/.claude/sessions/<pid>.json names
-// this uuid and that pid is alive. Stale pid files are ignored, never deleted.
+// to the same jsonl). AMQ takes flock on inject.lock before the owner scan.
+// Probe refuses unreadable/malformed/pid-mismatched owner files, or a matching
+// uuid whose filename pid is alive. Stale pid files are ignored, never deleted.
 type ClaudePrint struct {
 	Runner   CommandRunner
 	LookPath func(string) (string, error)
 	Spawner  processSpawner
+	// Lock takes an exclusive non-blocking lock on path. Tests swap in an
+	// in-process locker because flock/fcntl are per-process. Production is
+	// flock LOCK_EX|LOCK_NB.
+	Lock func(path string) (unlock func(), err error)
 	// ConfigDir is CLAUDE_CONFIG_DIR (default ~/.claude). Ambient, not part of
 	// injector identity (docs/wake-lifecycle.md §9.4).
 	ConfigDir string
@@ -82,7 +87,16 @@ func (c ClaudePrint) Probe(ctx context.Context, target string) error {
 }
 
 func (c ClaudePrint) Inject(ctx context.Context, target string, payload string) error {
-	uuid, claudePath, cwd, err := c.probe(ctx, target)
+	uuid, err := parseClaudePrintSessionUUID(target)
+	if err != nil {
+		return fmt.Errorf("inject Claude print: %w", err)
+	}
+	unlock, err := c.lockInject(uuid)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	_, claudePath, cwd, err := c.probe(ctx, target)
 	if err != nil {
 		return fmt.Errorf("inject Claude print: %w", err)
 	}
@@ -324,6 +338,28 @@ func (c ClaudePrint) spawner() processSpawner {
 	return platformProcessSpawner{}
 }
 
+func (c ClaudePrint) lockInject(uuid string) (func(), error) {
+	root, err := c.stateDir()
+	if err != nil {
+		return nil, fmt.Errorf("inject Claude print: %w", err)
+	}
+	path := filepath.Join(root, "claude-print", uuid, "inject.lock")
+	locker := c.Lock
+	if locker == nil {
+		locker = tryFlockExclusive
+	}
+	unlock, err := locker(path)
+	if err != nil {
+		if errors.Is(err, errInjectBusy) {
+			return nil, fmt.Errorf("%w: another claude-print inject for session %s is in progress; retry after it acks", ErrTargetDegraded, uuid)
+		}
+		return nil, fmt.Errorf("inject Claude print: lock %s: %w", path, err)
+	}
+	return unlock, nil
+}
+
+var errInjectBusy = errors.New("inject lock busy")
+
 func abortAfterKill(proc startedProcess, logPath, payload, why string) error {
 	_ = proc.KillGroup()
 	matched, err := claudePrintAckSeen(logPath, payload)
@@ -352,19 +388,24 @@ func (c ClaudePrint) refuseLiveOwner(configDir, uuid string) error {
 			continue
 		}
 		raw, readErr := os.ReadFile(filepath.Join(dir, name))
+		filePath := filepath.Join(dir, name)
 		if readErr != nil {
-			continue
+			return fmt.Errorf("%w: inspect or remove %s if the process is gone (%v)", ErrTargetDegraded, filePath, readErr)
 		}
 		var rec claudeSessionOwner
 		if json.Unmarshal(raw, &rec) != nil {
-			continue
+			return fmt.Errorf("%w: inspect or remove %s if the process is gone (malformed owner record)", ErrTargetDegraded, filePath)
 		}
 		if rec.SessionID != uuid {
 			continue
 		}
-		alive, aliveErr := pidAlive(rec.PID)
+		filePID, convErr := strconv.Atoi(strings.TrimSuffix(name, ".json"))
+		if convErr != nil || rec.PID == 0 || rec.PID != filePID {
+			return fmt.Errorf("%w: inspect or remove %s if the process is gone (pid field %d does not match filename)", ErrTargetDegraded, filePath, rec.PID)
+		}
+		alive, aliveErr := pidAlive(filePID)
 		if aliveErr != nil {
-			return fmt.Errorf("inspect live owner pid %d: %w", rec.PID, aliveErr)
+			return fmt.Errorf("inspect live owner pid %d: %w", filePID, aliveErr)
 		}
 		if !alive {
 			continue
@@ -377,7 +418,7 @@ func (c ClaudePrint) refuseLiveOwner(configDir, uuid string) error {
 		if ep == "" {
 			ep = "unknown"
 		}
-		return fmt.Errorf("%w: session %s has a live owner pid %d (%s/%s); use the TTY seat for a live terminal, or wait for the turn to finish", ErrTargetDegraded, uuid, rec.PID, kind, ep)
+		return fmt.Errorf("%w: session %s has a live owner pid %d (%s/%s); use the TTY seat for a live terminal, or wait for the turn to finish", ErrTargetDegraded, uuid, filePID, kind, ep)
 	}
 	return nil
 }
@@ -473,6 +514,12 @@ func scanJSONLCwd(r io.Reader, dropPartialFirstLine bool) (string, error) {
 }
 
 func claudePrintAckSeen(logPath, payload string) (bool, error) {
+	// Submitted = the post-init isReplay echo of THIS child's stdin line.
+	// Live 2026-08-26 Claude 2.1.246: resume a session whose jsonl already
+	// contained text T, then stdin the same T with --replay-user-messages.
+	// stdout had exactly one isReplay user event (the stdin line), not a
+	// replay of the historical turn. Post-init payload match is enough;
+	// we do not snapshot jsonl uuids.
 	f, err := os.Open(logPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -483,6 +530,7 @@ func claudePrintAckSeen(logPath, payload string) (bool, error) {
 	defer func() { _ = f.Close() }()
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	seenInit := false
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
@@ -490,6 +538,13 @@ func claudePrintAckSeen(logPath, payload string) (bool, error) {
 		}
 		var ev claudeStreamEvent
 		if json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+		if ev.Type == "system" && ev.Subtype == "init" {
+			seenInit = true
+			continue
+		}
+		if !seenInit {
 			continue
 		}
 		if ev.Type != "user" || !ev.IsReplay {

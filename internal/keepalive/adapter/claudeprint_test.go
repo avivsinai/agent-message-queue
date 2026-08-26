@@ -97,9 +97,50 @@ func testClaudePrint(configDir, stateDir, bin string, runner CommandRunner, spaw
 		Runner:    runner,
 		LookPath:  func(string) (string, error) { return bin, nil },
 		Spawner:   spawner,
+		Lock:      newMemoryLock(),
 		ConfigDir: configDir,
 		StateDir:  stateDir,
 		AckWait:   2 * time.Second,
+	}
+}
+
+func newMemoryLock() func(string) (func(), error) {
+	var mu sync.Mutex
+	held := map[string]struct{}{}
+	return func(path string) (func(), error) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, err
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		_ = f.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		if _, ok := held[path]; ok {
+			return nil, errInjectBusy
+		}
+		held[path] = struct{}{}
+		return func() {
+			mu.Lock()
+			delete(held, path)
+			mu.Unlock()
+		}, nil
+	}
+}
+
+func writeInitThenAck(t *testing.T, path, payload string, beforeInit ...string) {
+	t.Helper()
+	var b strings.Builder
+	for _, line := range beforeInit {
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	b.WriteString(`{"type":"system","subtype":"init"}` + "\n")
+	b.WriteString(`{"type":"user","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":` + mustJSONString(payload) + `}]}}` + "\n")
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Errorf("write ack log: %v", err)
 	}
 }
 
@@ -153,10 +194,7 @@ func TestClaudePrintInjectUsesArgvOnlyAndKeepsPayloadOffArgv(t *testing.T) {
 	payload := "hello & ; `quotes`\nnewline"
 	runner := &fakeCommandRunner{output: []byte("Usage: --resume --output-format --replay-user-messages\n")}
 	spawner := &fakeSpawner{onStart: func(spec processSpec) {
-		ack := `{"type":"user","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":` + mustJSONString(payload) + `}]}}` + "\n"
-		if err := os.WriteFile(spec.LogPath, []byte(ack), 0o600); err != nil {
-			t.Errorf("write ack: %v", err)
-		}
+		writeInitThenAck(t, spec.LogPath, payload)
 	}}
 	a := testClaudePrint(configDir, stateDir, bin, runner, spawner)
 	if err := a.Inject(context.Background(), claudePrintTargetSessionPrefix+testClaudeUUID, payload); err != nil {
@@ -287,10 +325,7 @@ func TestClaudePrintStaleOwnerPidIsIgnored(t *testing.T) {
 	}
 	runner := &fakeCommandRunner{output: []byte("Usage: --resume --output-format --replay-user-messages\n")}
 	spawner := &fakeSpawner{onStart: func(spec processSpec) {
-		ack := `{"type":"user","isReplay":true,"message":{"role":"user","content":"payload"}}` + "\n"
-		if err := os.WriteFile(spec.LogPath, []byte(ack), 0o600); err != nil {
-			t.Errorf("write ack: %v", err)
-		}
+		writeInitThenAck(t, spec.LogPath, "payload")
 	}}
 	a := testClaudePrint(configDir, stateDir, bin, runner, spawner)
 	if err := a.Inject(context.Background(), claudePrintTargetSessionPrefix+testClaudeUUID, "payload"); err != nil {
@@ -367,6 +402,9 @@ func TestClaudePrintAckDuringKillIsUncertain(t *testing.T) {
 	proc := &ackOnKillProcess{fakeProcess: inner, payload: "payload"}
 	spawner := &fakeSpawner{proc: proc, onStart: func(spec processSpec) {
 		proc.logPath = spec.LogPath
+		if err := os.WriteFile(spec.LogPath, []byte(`{"type":"system","subtype":"init"}`+"\n"), 0o600); err != nil {
+			t.Errorf("write init: %v", err)
+		}
 	}}
 	a := testClaudePrint(configDir, stateDir, bin, runner, spawner)
 	a.AckWait = 50 * time.Millisecond
@@ -519,10 +557,7 @@ func TestClaudePrintExecutesResolvedSymlinkTarget(t *testing.T) {
 	}
 	runner := &fakeCommandRunner{output: []byte("Usage: --resume --output-format --replay-user-messages\n")}
 	spawner := &fakeSpawner{onStart: func(spec processSpec) {
-		ack := `{"type":"user","isReplay":true,"message":{"role":"user","content":"x"}}` + "\n"
-		if err := os.WriteFile(spec.LogPath, []byte(ack), 0o600); err != nil {
-			t.Errorf("write ack: %v", err)
-		}
+		writeInitThenAck(t, spec.LogPath, "x")
 	}}
 	a := testClaudePrint(configDir, stateDir, shim, runner, spawner)
 	if err := a.Inject(context.Background(), claudePrintTargetSessionPrefix+testClaudeUUID, "x"); err != nil {
@@ -530,5 +565,111 @@ func TestClaudePrintExecutesResolvedSymlinkTarget(t *testing.T) {
 	}
 	if runner.calls[0].name != resolved || spawner.calls[0].Path != resolved {
 		t.Fatalf("help=%q spawn=%q, want resolved %q", runner.calls[0].name, spawner.calls[0].Path, resolved)
+	}
+}
+
+func TestClaudePrintBusyInjectLockRefusesSecondSpawn(t *testing.T) {
+	cwd := t.TempDir()
+	configDir, stateDir, bin := writeClaudePrintFixture(t, testClaudeUUID, cwd)
+	runner := &fakeCommandRunner{output: []byte("Usage: --resume --output-format --replay-user-messages\n")}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	proc := newFakeProcess(1)
+	spawner := &fakeSpawner{proc: proc, onStart: func(spec processSpec) {
+		writeInitThenAck(t, spec.LogPath, "payload")
+		close(started)
+		<-release
+	}}
+	a := testClaudePrint(configDir, stateDir, bin, runner, spawner)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- a.Inject(context.Background(), claudePrintTargetSessionPrefix+testClaudeUUID, "payload")
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Inject() did not reach spawn")
+	}
+	err := a.Inject(context.Background(), claudePrintTargetSessionPrefix+testClaudeUUID, "other")
+	if !errors.Is(err, ErrTargetDegraded) {
+		t.Fatalf("second Inject() error = %v, want ErrTargetDegraded", err)
+	}
+	if !strings.Contains(err.Error(), "in progress") {
+		t.Fatalf("second Inject() error = %v, want in progress", err)
+	}
+	if len(spawner.calls) != 1 {
+		t.Fatalf("spawns = %d, want 1 (busy inject must not spawn)", len(spawner.calls))
+	}
+	close(release)
+	if err := <-errCh; err != nil {
+		t.Fatalf("first Inject() error = %v", err)
+	}
+}
+
+func TestClaudePrintReplayBeforeInitIsNotAck(t *testing.T) {
+	cwd := t.TempDir()
+	configDir, stateDir, bin := writeClaudePrintFixture(t, testClaudeUUID, cwd)
+	runner := &fakeCommandRunner{output: []byte("Usage: --resume --output-format --replay-user-messages\n")}
+	spawner := &fakeSpawner{onStart: func(spec processSpec) {
+		if err := os.WriteFile(spec.LogPath, []byte(
+			`{"type":"user","message":{"content":[{"type":"text","text":"payload"}]},"isReplay":true}`+"\n"+
+				`{"type":"system","subtype":"init"}`+"\n",
+		), 0o600); err != nil {
+			t.Errorf("write log: %v", err)
+		}
+	}}
+	a := testClaudePrint(configDir, stateDir, bin, runner, spawner)
+	a.AckWait = 80 * time.Millisecond
+	err := a.Inject(context.Background(), claudePrintTargetSessionPrefix+testClaudeUUID, "payload")
+	if err == nil {
+		t.Fatal("Inject() treated a pre-init isReplay as ack")
+	}
+	if errors.Is(err, ErrInjectUncertain) {
+		t.Fatalf("Inject() = %v, want timeout not uncertain", err)
+	}
+	if !strings.Contains(err.Error(), "ack timeout") {
+		t.Fatalf("error = %v, want ack timeout", err)
+	}
+}
+
+func TestClaudePrintMalformedOwnerFileRefusesZeroSpawns(t *testing.T) {
+	cwd := t.TempDir()
+	configDir, stateDir, bin := writeClaudePrintFixture(t, testClaudeUUID, cwd)
+	if err := os.WriteFile(filepath.Join(configDir, "sessions", "424242.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeCommandRunner{output: []byte("Usage: --resume --output-format --replay-user-messages\n")}
+	spawner := &fakeSpawner{}
+	a := testClaudePrint(configDir, stateDir, bin, runner, spawner)
+	err := a.Inject(context.Background(), claudePrintTargetSessionPrefix+testClaudeUUID, "payload")
+	if !errors.Is(err, ErrTargetDegraded) {
+		t.Fatalf("Inject() error = %v, want ErrTargetDegraded", err)
+	}
+	if !strings.Contains(err.Error(), filepath.Join(configDir, "sessions", "424242.json")) {
+		t.Fatalf("Inject() error = %v, want named owner file", err)
+	}
+	if len(spawner.calls) != 0 {
+		t.Fatalf("spawns = %d, want 0", len(spawner.calls))
+	}
+}
+
+func TestClaudePrintPidMismatchOwnerRefusesZeroSpawns(t *testing.T) {
+	cwd := t.TempDir()
+	configDir, stateDir, bin := writeClaudePrintFixture(t, testClaudeUUID, cwd)
+	if err := os.WriteFile(filepath.Join(configDir, "sessions", "9.json"), []byte(`{"pid":8,"sessionId":"`+testClaudeUUID+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeCommandRunner{output: []byte("Usage: --resume --output-format --replay-user-messages\n")}
+	spawner := &fakeSpawner{}
+	a := testClaudePrint(configDir, stateDir, bin, runner, spawner)
+	err := a.Inject(context.Background(), claudePrintTargetSessionPrefix+testClaudeUUID, "payload")
+	if !errors.Is(err, ErrTargetDegraded) {
+		t.Fatalf("Inject() error = %v, want ErrTargetDegraded", err)
+	}
+	if !strings.Contains(err.Error(), filepath.Join(configDir, "sessions", "9.json")) {
+		t.Fatalf("Inject() error = %v, want named owner file", err)
+	}
+	if len(spawner.calls) != 0 {
+		t.Fatalf("spawns = %d, want 0", len(spawner.calls))
 	}
 }

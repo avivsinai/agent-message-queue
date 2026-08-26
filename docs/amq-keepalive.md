@@ -30,7 +30,7 @@ The supported target forms are:
 - `cmux:surface:<uuid>` for an exact cmux surface UUID;
 - `ghostty:terminal:<id>` for an exact Ghostty terminal id;
 - `codex-queue:thread:<uuid>` for a live Codex GUI/TUI thread with an active writer (`codex queue --thread --message`);
-- `claude-print:session:<uuid>` for an existing Claude Code session (`claude -p --resume` stream-json; submitted when the child echoes the payload with `isReplay`);
+- `claude-print:session:<uuid>` for an existing Claude Code session (`claude -p --resume` stream-json; submitted when the child echoes this inject's stdin with `isReplay` after `system/init`);
 - `file` targets for deterministic development and tests.
 
 cmux short references such as `surface:2` are rejected because they can drift.

@@ -17,3 +17,7 @@ func (platformProcessSpawner) Start(context.Context, processSpec) (startedProces
 func pidAlive(pid int) (bool, error) {
 	return false, fmt.Errorf("claude-print live-owner inspect is unsupported on %s", runtime.GOOS)
 }
+
+func tryFlockExclusive(path string) (func(), error) {
+	return nil, fmt.Errorf("claude-print inject lock is unsupported on %s", runtime.GOOS)
+}
