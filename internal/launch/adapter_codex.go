@@ -172,8 +172,18 @@ func codexArgRules() map[string]argumentRule {
 
 var codexReasoningEffortValues = []string{"minimal", "low", "medium", "high", "xhigh"}
 
+// codexApprovalsReviewerValues is the allowlist for the `-c approvals_reviewer`
+// config override. codex-cli 0.149.1 parses the value as TOML and accepts
+// exactly these variants; an unknown value errors with `unknown variant '<x>',
+// expected one of 'user', 'auto_review', 'guardian_subagent'`. Both quoted
+// (`approvals_reviewer="auto_review"`) and bare
+// (`approvals_reviewer=auto_review`) forms parse, so validCodexConfigOverride
+// strips one surrounding quote pair before the allowlist lookup.
+var codexApprovalsReviewerValues = []string{"user", "auto_review", "guardian_subagent"}
+
 var codexConfigOverrideValues = map[string]map[string]struct{}{
 	"model_reasoning_effort": valueSet(codexReasoningEffortValues),
+	"approvals_reviewer":     valueSet(codexApprovalsReviewerValues),
 }
 
 func valueSet(values []string) map[string]struct{} {
@@ -193,8 +203,29 @@ func validCodexConfigOverride(value string) bool {
 	if !ok {
 		return false
 	}
-	_, ok = values[configured]
+	// codex-cli parses `-c key=value` as TOML, so the squad's live emission
+	// carries a literal surrounding quote pair
+	// (`approvals_reviewer="auto_review"`). Normalize exactly one pair: a
+	// value with unbalanced or inner quotes rejects rather than being
+	// silently trimmed.
+	normalized := stripOneSurroundingQuotePair(configured)
+	_, ok = values[normalized]
 	return ok
+}
+
+// stripOneSurroundingQuotePair removes a single leading and trailing double
+// quote from value when both are present and no inner quote remains. It leaves
+// unbalanced quotes and embedded quotes intact so the allowlist lookup fails
+// for those cases.
+func stripOneSurroundingQuotePair(value string) string {
+	if len(value) < 2 || value[0] != '"' || value[len(value)-1] != '"' {
+		return value
+	}
+	body := value[1 : len(value)-1]
+	if strings.ContainsRune(body, '"') {
+		return value
+	}
+	return body
 }
 
 func validateCodexConfigOverrides(args []string) error {

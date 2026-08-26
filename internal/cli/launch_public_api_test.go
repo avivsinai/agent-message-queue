@@ -167,6 +167,166 @@ func TestPublicLaunchPlanAppliesWithEmptyDecisionsWhenReady(t *testing.T) {
 	}
 }
 
+func TestPublicLaunchRequestRunsPrepareApplyFromFullRequest(t *testing.T) {
+	project, _ := launchCLIFixture(t, "collab")
+	// Resolve macOS /var -> /private/var symlinks: openPrepareTarget requires
+	// target.project_root to be canonical when base_root is set.
+	resolvedProject, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = resolvedProject
+	// Authorize a profile base root under the project's configured root so the
+	// request's target.base_root flows through Prepare/Apply exactly as the
+	// package path does (issue #648 item 1(b)).
+	configuredRoot := filepath.Join(project, defaultCoopRoot)
+	profileRoot := filepath.Join(configuredRoot, "profile-a")
+	sessionRoot := filepath.Join(profileRoot, "collab")
+	amqrc, err := json.Marshal(map[string]string{"root": configuredRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".amqrc"), append(amqrc, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := launchapi.PrepareRequestV1{
+		RequestVersion: launchapi.RequestVersionV1,
+		Target: launchapi.TargetV1{
+			ProjectRoot: project,
+			BaseRoot:    profileRoot,
+			SessionRoot: sessionRoot,
+			Session:     "collab",
+		},
+		Launcher: "commands",
+		CallerContext: map[string]string{
+			"run_id": "run-42", "task_generation": "3",
+		},
+		Intent: launchapi.LaunchIntentV1{IntentVersion: launchapi.IntentVersionV1, Participants: []launchapi.ParticipantV1{{
+			Handle: "operator", Runnable: false,
+		}}},
+	}
+	data, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "prepare.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The pre-existing session root under the configured root is the parent
+	// base; the profile base root must be created fresh and leave the parent
+	// untouched.
+	parentSessionRoot := filepath.Join(configuredRoot, "collab")
+	parentBefore := strings.Join(snapshotTree(t, parentSessionRoot), "\n")
+
+	stdout, _, cliErr := captureEnvOutput(t, func() error { return runLaunch([]string{"--request", path, "--json"}) })
+	if cliErr != nil {
+		t.Fatalf("CLI --request: %v\n%s", cliErr, stdout)
+	}
+	var result launchapi.ApplyResultV1
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != "provisioned_no_runnable" || result.SemanticDigest != result.TrustDigest || len(result.Roster.Desired) != 1 || result.Roster.Desired[0] != "operator" {
+		t.Fatalf("CLI --request result = %#v", result)
+	}
+	// The session lands under the nested profile base root.
+	if _, statErr := os.Stat(filepath.Join(sessionRoot, "agents", "operator")); statErr != nil {
+		t.Fatalf("--request did not create the nested session: %v", statErr)
+	}
+	// The parent base root session is byte-for-byte unchanged.
+	if after := strings.Join(snapshotTree(t, parentSessionRoot), "\n"); after != parentBefore {
+		t.Fatalf("--request changed the parent session root\nbefore:\n%s\nafter:\n%s", parentBefore, after)
+	}
+}
+
+func TestPublicLaunchRequestRejectsPrepareRequestV1ThroughPlan(t *testing.T) {
+	launchCLIFixture(t, "collab")
+	// A full PrepareRequestV1 (with request_version) fed to --plan must still
+	// reject with the unknown-field error the issue cites, confirming --request
+	// is the path that owns the full request and --plan stays intent-only.
+	request := launchapi.PrepareRequestV1{
+		RequestVersion: launchapi.RequestVersionV1,
+		Target:         launchapi.TargetV1{ProjectRoot: "/tmp/project", SessionRoot: "/tmp/project/.agent-mail/collab", Session: "collab"},
+		Launcher:       "commands",
+		Intent:         launchapi.LaunchIntentV1{IntentVersion: launchapi.IntentVersionV1, Participants: []launchapi.ParticipantV1{{Handle: "operator", Runnable: false}}},
+	}
+	data, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "prepare.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = runLaunch([]string{"--plan", path, "--prepare", "--json"})
+	if GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), "request_version") {
+		t.Fatalf("--plan on a PrepareRequestV1 error = %v (exit=%d), want usage mentioning request_version", err, GetExitCode(err))
+	}
+}
+
+// TestPublicLaunchRequestPrepareOnlyPerformsNoMutation covers issue #648 item
+// 1(b) + review R3: --request combined with --prepare runs prepare-only, so a
+// consumer can read the subject digest before Apply. The PrepareResultV1 is
+// emitted and the nested session is NOT created (no mutation).
+func TestPublicLaunchRequestPrepareOnlyPerformsNoMutation(t *testing.T) {
+	project, _ := launchCLIFixture(t, "collab")
+	resolvedProject, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = resolvedProject
+	configuredRoot := filepath.Join(project, defaultCoopRoot)
+	profileRoot := filepath.Join(configuredRoot, "profile-b")
+	sessionRoot := filepath.Join(profileRoot, "collab")
+	amqrc, err := json.Marshal(map[string]string{"root": configuredRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".amqrc"), append(amqrc, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := launchapi.PrepareRequestV1{
+		RequestVersion: launchapi.RequestVersionV1,
+		Target: launchapi.TargetV1{
+			ProjectRoot: project,
+			BaseRoot:    profileRoot,
+			SessionRoot: sessionRoot,
+			Session:     "collab",
+		},
+		Launcher: "commands",
+		Intent: launchapi.LaunchIntentV1{IntentVersion: launchapi.IntentVersionV1, Participants: []launchapi.ParticipantV1{{
+			Handle: "operator", Runnable: false,
+		}}},
+	}
+	data, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "prepare.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, cliErr := captureEnvOutput(t, func() error { return runLaunch([]string{"--request", path, "--prepare", "--json"}) })
+	if cliErr != nil {
+		t.Fatalf("CLI --request --prepare: %v\n%s", cliErr, stdout)
+	}
+	var result launchapi.PrepareResultV1
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("--request --prepare must emit a PrepareResultV1: %v\n%s", err, stdout)
+	}
+	if result.Outcome != launchapi.PrepareOutcomeReady {
+		t.Fatalf("--request --prepare outcome = %v, want %s", result.Outcome, launchapi.PrepareOutcomeReady)
+	}
+	if result.SubjectDigest == "" {
+		t.Fatal("--request --prepare did not surface a subject digest")
+	}
+	// Prepare-only performs no mutation: the nested session is not created.
+	if _, statErr := os.Stat(filepath.Join(sessionRoot, "agents", "operator")); !os.IsNotExist(statErr) {
+		t.Fatalf("--request --prepare mutated the session root: %v", statErr)
+	}
+}
+
 func TestPublicLaunchModeFlagRefusals(t *testing.T) {
 	launchCLIFixture(t, "collab")
 	for _, test := range []struct {
@@ -174,7 +334,7 @@ func TestPublicLaunchModeFlagRefusals(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "prepare without plan", args: []string{"--prepare", "--json"}, want: "--prepare requires --plan"},
+		{name: "prepare without plan", args: []string{"--prepare", "--json"}, want: "--prepare requires --plan or --request"},
 		{name: "prepare without json", args: []string{"--plan", "intent.json", "--prepare"}, want: "--prepare requires --json"},
 		{name: "apply without json", args: []string{"--apply", "apply.json"}, want: "--apply requires --json"},
 		{name: "mixed apply and plan", args: []string{"--apply", "apply.json", "--plan", "intent.json", "--json"}, want: "mutually exclusive"},
@@ -190,6 +350,12 @@ func TestPublicLaunchModeFlagRefusals(t *testing.T) {
 		{name: "apply with placement flag", args: []string{"--apply", "apply.json", "--json", "--placement", `{"target":"session","layout":"columns"}`}, want: "takes placement"},
 		{name: "empty placement", args: []string{"--plan", "intent.json", "--prepare", "--json", "--placement", ""}, want: "--placement must be a PlacementV1 JSON object"},
 		{name: "whitespace placement", args: []string{"--plan", "intent.json", "--prepare", "--json", "--placement", " \t"}, want: "--placement must be a PlacementV1 JSON object"},
+		{name: "request without json", args: []string{"--request", "prepare.json"}, want: "--request requires --json"},
+		{name: "request with plan", args: []string{"--request", "prepare.json", "--plan", "intent.json", "--json"}, want: "mutually exclusive"},
+		{name: "request with apply", args: []string{"--request", "prepare.json", "--apply", "apply.json", "--json"}, want: "mutually exclusive"},
+		{name: "request with placement", args: []string{"--request", "prepare.json", "--json", "--placement", `{"target":"session","layout":"columns"}`}, want: "mutually exclusive"},
+		{name: "request target override", args: []string{"--request", "prepare.json", "--session", "collab", "--json"}, want: "takes its target"},
+		{name: "request launcher override", args: []string{"--request", "prepare.json", "--launcher", "commands", "--json"}, want: "takes its target"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := runLaunch(test.args)

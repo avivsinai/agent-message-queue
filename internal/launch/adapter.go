@@ -83,12 +83,16 @@ func ProviderStaticInputCapabilities(provider string) StaticInputCapabilities {
 			AllowedArgumentForms: []string{"--allowedTools"}, InitialInputKinds: []InitialInputKind{InitialInputArgument},
 		}
 	case CodexProvider:
-		values := slices.Clone(codexReasoningEffortValues)
+		reasoningValues := slices.Clone(codexReasoningEffortValues)
+		reviewerValues := slices.Clone(codexApprovalsReviewerValues)
 		return StaticInputCapabilities{
 			GrammarVersion: 1, VerifiedProviderVersion: codexCaptureVersion,
 			AllowedArgumentForms: []string{"-c"},
-			ConfigOverrides:      []ConfigOverrideCapability{{Key: "model_reasoning_effort", AllowedValues: values}},
-			InitialInputKinds:    []InitialInputKind{InitialInputArgument},
+			ConfigOverrides: []ConfigOverrideCapability{
+				{Key: "model_reasoning_effort", AllowedValues: reasoningValues},
+				{Key: "approvals_reviewer", AllowedValues: reviewerValues},
+			},
+			InitialInputKinds: []InitialInputKind{InitialInputArgument},
 		}
 	case GrokProvider:
 		return StaticInputCapabilities{

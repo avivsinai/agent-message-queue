@@ -123,20 +123,94 @@ func claudeArgRules() map[string]argumentRule {
 	}
 }
 
+// claudeAllowedToolsMaxBytes caps the total byte length of a --allowedTools
+// value. 512 accommodates a realistic scoped list such as
+// `Bash(gh pr create:*),Read,Edit` and a handful of mcp__owner__tool entries
+// without admitting an unbounded attacker-controlled blob. The previous cap
+// of 128 rejected that real shape (issue #648 item 2), forcing consumers to
+// either widen to blanket `Bash` or drop the grant.
+const claudeAllowedToolsMaxBytes = 512
+
+// validClaudeAllowedTools validates Claude's --allowedTools value against a
+// single scoped-pattern grammar:
+//
+//	entry := name [ "(" spec ")" ]
+//	list  := entry ( "," entry )*
+//
+// name matches ^[A-Za-z][A-Za-z0-9_]*$ (Bash, Read, mcp__x__y). The optional
+// parenthesized spec is 1..N bytes with no control byte (anything < 0x20)
+// and no nested parentheses; it may carry spaces, ':', '*', '-', '/', '.'
+// so scoped grants like `Bash(gh pr create:*)` parse. An entry must not
+// start with '-', and each entry must have no leading or trailing
+// whitespace. A bare name followed by `:*` (e.g. `Bash:*`) rejects because
+// the name part fails the name regex; a scoped pattern requires the
+// parentheses. The grammar accepts real Claude tool-pattern syntax and
+// rejects flag-looking values such as `--dangerously-skip-permissions`,
+// closing the prior strictness inversion where the latter was admitted while
+// the former was rejected.
 func validClaudeAllowedTools(value string) bool {
-	if value == "" || len(value) > 128 || strings.ContainsRune(value, 0) {
+	if value == "" || len(value) > claudeAllowedToolsMaxBytes || strings.ContainsRune(value, 0) || strings.ContainsAny(value, "\r\n") {
 		return false
 	}
-	parts := strings.Split(value, ",")
-	if len(parts) == 0 {
-		return false
-	}
-	for _, part := range parts {
-		if part == "" || strings.TrimSpace(part) != part || !safeEnvironmentValue(part) {
+	for _, part := range strings.Split(value, ",") {
+		if part == "" || part != strings.TrimSpace(part) || strings.HasPrefix(part, "-") {
+			return false
+		}
+		name, spec, hasSpec := strings.Cut(part, "(")
+		if !validClaudeToolName(name) {
+			return false
+		}
+		if !hasSpec {
+			continue
+		}
+		// A scoped entry is exactly name(spec) with one balanced pair and no
+		// trailing bytes after the closing paren.
+		if !strings.HasSuffix(spec, ")") {
+			return false
+		}
+		specBody := spec[:len(spec)-1]
+		if specBody == "" || strings.ContainsRune(specBody, '(') || strings.ContainsRune(specBody, ')') {
+			return false
+		}
+		if containsControlByte(specBody) {
+			return false
+		}
+		if strings.TrimSpace(specBody) != specBody {
 			return false
 		}
 	}
 	return true
+}
+
+func validClaudeToolName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case i == 0:
+			isAlpha := (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')
+			if !isAlpha {
+				return false
+			}
+		case r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// containsControlByte reports whether s contains any byte below 0x20 (NUL,
+// tab, newline, CR, and other C0 control bytes). A scoped-tool spec is a
+// single-line value, so any control byte rejects.
+func containsControlByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeBypassArgs() map[string]struct{} {
