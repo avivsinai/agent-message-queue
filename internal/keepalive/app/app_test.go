@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1043,6 +1044,71 @@ func TestRegisterCapabilityGateAcceptsCodexQueueSubmittedSeat(t *testing.T) {
 	}
 	if err := app.registerWithOptions(context.Background(), refuseOpts); err == nil {
 		t.Fatal("codex-queue under foreground min succeeded; want refusal (activation none)")
+	} else if !strings.Contains(err.Error(), "does not satisfy") {
+		t.Fatalf("error = %v, want a capability refusal", err)
+	}
+}
+
+func TestRegisterCapabilityGateAcceptsClaudePrintSubmittedSeat(t *testing.T) {
+	const uuid = "a616af69-92db-495e-9691-c512c80c4bd6"
+	cwd := t.TempDir()
+	configDir := t.TempDir()
+	proj := filepath.Join(configDir, "projects", "-tmp-scratch")
+	if err := os.MkdirAll(proj, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := json.Marshal(map[string]string{"type": "user", "cwd": cwd, "sessionId": uuid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, uuid+".jsonl"), append(rec, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(configDir, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := appCommandRunnerFunc(func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return []byte("Usage: --resume --output-format --replay-user-messages\n"), nil
+	})
+	seat := adapter.ClaudePrint{
+		Runner:    runner,
+		LookPath:  func(string) (string, error) { return bin, nil },
+		ConfigDir: configDir,
+		StateDir:  t.TempDir(),
+	}
+	adapters := adapter.NewRegistry(seat)
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Adapters: &adapters}
+	acceptOpts := registerOptions{
+		AdapterName:  "claude-print",
+		Target:       "claude-print:session:" + uuid,
+		Root:         "/tmp/amq-root",
+		BaseRoot:     "/tmp",
+		SessionName:  "amq-root",
+		Me:           "claude",
+		AMQPath:      "/bin/false",
+		NoStart:      true,
+		RegistryPath: testRegistryTempPath(t),
+		MinCapability: adapter.Capability{
+			Delivery: adapter.DeliverySubmitted,
+			Session:  adapter.SessionExistingExact,
+		},
+	}
+	if err := app.registerWithOptions(context.Background(), acceptOpts); err != nil {
+		t.Fatalf("claude-print under submitted+existing-exact min failed: %v", err)
+	}
+	refuseOpts := acceptOpts
+	refuseOpts.RegistryPath = testRegistryTempPath(t)
+	refuseOpts.MinCapability = adapter.Capability{
+		Activation: adapter.ActivationForeground,
+		Delivery:   adapter.DeliverySubmitted,
+		Session:    adapter.SessionExistingExact,
+	}
+	if err := app.registerWithOptions(context.Background(), refuseOpts); err == nil {
+		t.Fatal("claude-print under foreground min succeeded; want refusal (activation none)")
 	} else if !strings.Contains(err.Error(), "does not satisfy") {
 		t.Fatalf("error = %v, want a capability refusal", err)
 	}

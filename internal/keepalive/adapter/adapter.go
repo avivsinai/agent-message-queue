@@ -114,14 +114,18 @@ func DefaultRegistry() Registry {
 	// codex-queue is the honest submitted GUI/TUI seat: it enqueues into a
 	// thread that already has an active writer. It satisfies a submitted +
 	// existing-exact unattended minimum without --accept-requires-human.
-	return NewRegistry(File{}, Ghostty{}, Cmux{recorded: newCmuxOwnershipRecord()}, ClaudeDesktop{}, CodexApp{}, CodexQueue{})
+	// claude-print is the honest submitted CLI seat into an exact existing
+	// Claude Code session. It satisfies a submitted + existing-exact
+	// unattended minimum without --accept-requires-human. CLAUDE_CONFIG_DIR
+	// is ambient (docs/wake-lifecycle.md §9.4).
+	return NewRegistry(File{}, Ghostty{}, Cmux{recorded: newCmuxOwnershipRecord()}, ClaudeDesktop{}, CodexApp{}, CodexQueue{}, ClaudePrint{})
 }
 
 // DefaultRegistryWithLogf returns the production adapter set with non-fatal
 // adapter diagnostics wired to logf. Callers that do not own a diagnostic
 // stream can continue using DefaultRegistry.
 func DefaultRegistryWithLogf(logf func(format string, args ...any)) Registry {
-	return NewRegistry(File{}, Ghostty{}, Cmux{Logf: logf, recorded: newCmuxOwnershipRecord()}, ClaudeDesktop{}, CodexApp{}, CodexQueue{})
+	return NewRegistry(File{}, Ghostty{}, Cmux{Logf: logf, recorded: newCmuxOwnershipRecord()}, ClaudeDesktop{}, CodexApp{}, CodexQueue{}, ClaudePrint{})
 }
 
 func (r Registry) Get(name string) (Adapter, error) {
