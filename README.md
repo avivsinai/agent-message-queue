@@ -183,6 +183,11 @@ Homebrew:
 brew upgrade amq
 ```
 
+`amq upgrade` detects a Homebrew install from the resolved executable path
+and delegates to `brew update && brew upgrade amq` instead of overwriting
+the Cellar; pass `amq upgrade -y` to run the delegate without prompting.
+Scoop installs on Windows delegate to `scoop update amq` the same way.
+
 Retire live wakes started by the previous Cellar binary first. If a leftover
 lock's image directory is gone, `wake check` reports `binary_dir_gone`;
 remove it with `amq doctor --ops --fix-wake-locks`. See
@@ -192,11 +197,33 @@ GitHub Actions `verify-brew-release` confirms a published tag installs from
 `avivsinai/tap/amq` and that `amq --version` matches that tag. It does not
 replace `brew upgrade` on an operator machine.
 
-Install-script or other manual binary installs:
+Install-script or other manual binary installs keep the direct download and
+atomic-replace path:
 
 ```bash
 amq upgrade
 ```
+
+Upgrade the companion binaries (`amq-keepalive`, `amq-bridge`, `amq-acp`)
+that sit next to a direct-install `amq` or in `~/.local/bin` from the same
+release tag, with checksum verification:
+
+```bash
+amq upgrade --all
+```
+
+A running `amq-keepalive` is never killed: the atomic rename swaps the path
+while the running process keeps the old image, and `amq upgrade --all`
+notes that a running supervisor picks up the new image on its next supervise
+pass (self-upgrade); a supervisor started with `--no-self-upgrade` is restarted
+with `amq-keepalive install-launchd`.
+Missing companions are skipped with a line. Companions are direct-installed
+only; the Homebrew formula and Scoop manifest ship `amq` itself, so `--all`
+under a package-managed install is a no-op with an explanatory line.
+
+`AMQ_CACHE_DIR` overrides the update-check cache location for `amq upgrade`;
+when unset, the platform cache (`~/Library/Caches` on macOS, `XDG_CACHE_HOME`
+or `~/.cache` elsewhere) is used.
 
 ### Keepalive companion
 

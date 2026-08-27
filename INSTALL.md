@@ -150,8 +150,10 @@ mv -f "$HOME/.local/bin/.amq-keepalive.new" "$HOME/.local/bin/amq-keepalive"
 ```
 
 Use that same path for `attach`, `install-launchd`, and `install-hook`. Upgrades
-and rollbacks replace the file at the stable path, then rerun
-`amq-keepalive install-launchd` to restart the supervisor. The registry is
+and rollbacks replace the file at the stable path; a running supervisor picks
+up the new image on its next supervise pass (self-upgrade), and a supervisor
+started with `--no-self-upgrade` is restarted with
+`amq-keepalive install-launchd`. The registry is
 retained; do not move the executable while registered wakes still identify it.
 
 The optional cross-host courier is published separately as
@@ -163,6 +165,18 @@ See [amq-bridge](cmd/amq-bridge/README.md). The preview ACP v1 companion is
 published as `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz`. Homebrew does
 not install it. Install it the same way, then see
 [amq-acp](cmd/amq-acp/README.md).
+
+Once the companions sit next to a direct-install `amq` or in `~/.local/bin`,
+`amq upgrade --all` refreshes every present companion from the same release
+tag with checksum verification, and skips any that are absent with a line. A
+running `amq-keepalive` is never killed: the atomic rename swaps the path
+while the running process keeps the old image, and a running supervisor picks
+up the new image on its next supervise pass (self-upgrade); a supervisor
+started with `--no-self-upgrade` is restarted with `amq-keepalive install-launchd`.
+`amq upgrade` itself detects a Homebrew or Scoop install of `amq` and
+delegates to the package manager (`brew upgrade amq` / `scoop update amq`;
+`-y` runs the delegate) instead of overwriting it, so the companions upgrade
+through `--all` only from a direct `amq` install.
 
 ### Platform capability matrix
 

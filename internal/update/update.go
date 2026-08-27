@@ -30,7 +30,40 @@ const (
 	ChecksumsFilename    = "checksums.txt"
 	DefaultCheckInterval = 24 * time.Hour
 	EnvNoUpdateCheck     = "AMQ_NO_UPDATE_CHECK"
+	// EnvCacheDir overrides the update-check cache directory. It takes
+	// precedence over os.UserCacheDir so tests (and operators) can redirect
+	// the cache on platforms where UserCacheDir ignores HOME (darwin's
+	// ~/Library/Caches). When unset, production behavior is unchanged.
+	EnvCacheDir = "AMQ_CACHE_DIR"
 )
+
+// CompanionBinaries are the amq-adjacent binaries published from the same
+// release but not packaged by the Homebrew formula or Scoop manifest: only
+// amq itself goes through a package manager. They are direct-installed at a
+// stable path (~/.local/bin or next to amq) and upgraded in place.
+var CompanionBinaries = []string{"amq-keepalive", "amq-bridge", "amq-acp"}
+
+// InstallKind classifies how a resolved executable path was installed.
+type InstallKind int
+
+const (
+	// InstallDirect is a manually-placed binary (~/.local/bin, a versions
+	// dir, etc.); amq upgrade owns the download+checksum+atomic-replace path.
+	InstallDirect InstallKind = iota
+	// InstallHomebrew means the resolved path lives under a Homebrew Cellar
+	// or prefix bin dir; amq upgrade delegates to brew so it does not corrupt
+	// brew bookkeeping. Companions are never Homebrew-owned.
+	InstallHomebrew
+	// InstallScoop means the resolved path lives under the Scoop apps dir on
+	// Windows; amq upgrade delegates to scoop. Companions are never Scoop-owned.
+	InstallScoop
+)
+
+// IsPackageManaged reports whether the kind delegates to an external package
+// manager rather than self-replacing.
+func (k InstallKind) IsPackageManaged() bool {
+	return k == InstallHomebrew || k == InstallScoop
+}
 
 var (
 	ErrUnsupportedOS   = errors.New("unsupported operating system")
@@ -209,9 +242,22 @@ func NormalizeVersion(version string) string {
 }
 
 func AssetName(tag, goos, goarch string) (string, error) {
+	return AssetNameFor(BinaryName, tag, goos, goarch)
+}
+
+// AssetNameFor returns the release archive asset name for a given binary
+// (amq, amq-keepalive, amq-bridge, amq-acp). The archive name template is
+// <binary>_<version>_<os>_<arch>.<ext>, matching .goreleaser.yaml's
+// name_template per build. Only amq publishes a Windows zip; companions are
+// darwin/linux tar.gz, but this function does not enforce that — the caller
+// picks the asset for a binary the release actually publishes.
+func AssetNameFor(binaryName, tag, goos, goarch string) (string, error) {
 	version := strings.TrimSpace(strings.TrimPrefix(tag, "v"))
 	if version == "" {
 		return "", errors.New("invalid release tag")
+	}
+	if strings.TrimSpace(binaryName) == "" {
+		return "", errors.New("binary name is required")
 	}
 	osName, err := normalizeOS(goos)
 	if err != nil {
@@ -225,7 +271,7 @@ func AssetName(tag, goos, goarch string) (string, error) {
 	if osName == "windows" {
 		ext = "zip"
 	}
-	return fmt.Sprintf("%s_%s_%s_%s.%s", BinaryName, version, osName, archName, ext), nil
+	return fmt.Sprintf("%s_%s_%s_%s.%s", binaryName, version, osName, archName, ext), nil
 }
 
 func normalizeOS(goos string) (string, error) {
@@ -263,6 +309,17 @@ func ExecutablePath() (string, string, error) {
 }
 
 func ExtractBinaryFromTarGz(archivePath, destDir string) (string, error) {
+	return ExtractBinaryFromTarGzNamed(BinaryName, archivePath, destDir)
+}
+
+// ExtractBinaryFromTarGzNamed extracts the named binary (without any .exe
+// suffix) from a tar.gz release archive into destDir and returns its path.
+// It accepts both the bare name and the name with a .exe suffix so a single
+// reader handles Windows archives carried in a tar.gz.
+func ExtractBinaryFromTarGzNamed(binaryName, archivePath, destDir string) (string, error) {
+	if strings.TrimSpace(binaryName) == "" {
+		binaryName = BinaryName
+	}
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return "", err
@@ -291,7 +348,7 @@ func ExtractBinaryFromTarGz(archivePath, destDir string) (string, error) {
 			continue
 		}
 		name := filepath.Base(hdr.Name)
-		if name != BinaryName && name != BinaryName+".exe" {
+		if name != binaryName && name != binaryName+".exe" {
 			continue
 		}
 		outPath := filepath.Join(destDir, name)
@@ -320,6 +377,15 @@ func ExtractBinaryFromTarGz(archivePath, destDir string) (string, error) {
 }
 
 func ExtractBinaryFromZip(archivePath, destDir string) (string, error) {
+	return ExtractBinaryFromZipNamed(BinaryName, archivePath, destDir)
+}
+
+// ExtractBinaryFromZipNamed extracts the named binary (without any .exe
+// suffix) from a zip release archive into destDir and returns its path.
+func ExtractBinaryFromZipNamed(binaryName, archivePath, destDir string) (string, error) {
+	if strings.TrimSpace(binaryName) == "" {
+		binaryName = BinaryName
+	}
 	reader, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return "", err
@@ -331,7 +397,7 @@ func ExtractBinaryFromZip(archivePath, destDir string) (string, error) {
 			continue
 		}
 		name := filepath.Base(file.Name)
-		if name != BinaryName && name != BinaryName+".exe" {
+		if name != binaryName && name != binaryName+".exe" {
 			continue
 		}
 		rc, err := file.Open()
@@ -598,6 +664,11 @@ func SaveCache(path string, cache *Cache) error {
 }
 
 func DefaultCachePath() (string, error) {
+	if dir := strings.TrimSpace(os.Getenv(EnvCacheDir)); dir != "" {
+		if abs, err := filepath.Abs(dir); err == nil {
+			return filepath.Join(filepath.Clean(abs), "amq", "update.json"), nil
+		}
+	}
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
 		home, err := os.UserHomeDir()
@@ -689,4 +760,57 @@ func IsNoUpdateCheckEnv() bool {
 	default:
 		return false
 	}
+}
+
+// ClassifyInstall determines how the binary at resolvedPath was installed.
+// The path must be the RESOLVED path (EvalSymlinks applied) so a symlink
+// into the Cellar is classified by where it lands, not by the link itself.
+// homebrewPrefix is the detected Homebrew prefix (empty if none); the path
+// is Homebrew-owned when it lives under <prefix>/bin or <prefix>/Cellar.
+// On Windows the path is Scoop-owned when it lives under a scoop apps dir
+// (~/scoop/apps or $SCOOP/apps). Anything else is a direct install.
+func ClassifyInstall(resolvedPath, homebrewPrefix string) InstallKind {
+	if resolvedPath == "" {
+		return InstallDirect
+	}
+	path := filepath.Clean(resolvedPath)
+	if homebrewPrefix != "" {
+		prefix := filepath.Clean(homebrewPrefix)
+		if pathWithinPrefix(path, filepath.Join(prefix, "bin")) ||
+			pathWithinPrefix(path, filepath.Join(prefix, "Cellar")) {
+			return InstallHomebrew
+		}
+	}
+	if appsDir := scoopAppsDir(); appsDir != "" {
+		if pathWithinPrefix(path, appsDir) {
+			return InstallScoop
+		}
+	}
+	return InstallDirect
+}
+
+// pathWithinPrefix reports whether path is equal to or nested inside prefix.
+func pathWithinPrefix(path, prefix string) bool {
+	rel, err := filepath.Rel(filepath.Clean(prefix), path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// scoopAppsDir returns the Scoop apps directory when Scoop is in use, else "".
+// Scoop honors $SCOOP; otherwise it defaults to ~/scoop.
+func scoopAppsDir() string {
+	if scoop := strings.TrimSpace(os.Getenv("SCOOP")); scoop != "" {
+		if abs, err := filepath.Abs(scoop); err == nil {
+			return filepath.Join(filepath.Clean(abs), "apps")
+		}
+	}
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, "scoop", "apps")
+	}
+	return ""
 }

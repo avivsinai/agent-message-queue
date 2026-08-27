@@ -3,18 +3,21 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/update"
 )
 
 func TestRunUpgradeAlreadyCurrentReportsStaleWakesWithInvalidAmbientAgent(t *testing.T) {
@@ -139,7 +142,7 @@ func TestUpgradeDiagnosticRootsIncludesValidUnderscoreSession(t *testing.T) {
 	}
 }
 
-func TestRunUpgradeRefusesHomebrewSymlinkBeforeDownload(t *testing.T) {
+func TestRunUpgradeDelegatesHomebrewInstall(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(base, "homebrew", "Cellar", "amq", "0.49.6", "bin", "amq")
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -169,6 +172,14 @@ func TestRunUpgradeRefusesHomebrewSymlinkBeforeDownload(t *testing.T) {
 	oldDetect := detectHomebrewPrefixForUpgrade
 	detectHomebrewPrefixForUpgrade = func() string { return filepath.Join(base, "homebrew") }
 	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
+	// The classifier is authoritative: a Homebrew install delegates to brew,
+	// so the /private symlink-resolution mismatch in the temp fixture does
+	// not change the outcome.
+	oldClassify := classifyInstallForUpgrade
+	classifyInstallForUpgrade = func(string, string) update.InstallKind {
+		return update.InstallHomebrew
+	}
+	t.Cleanup(func() { classifyInstallForUpgrade = oldClassify })
 	oldFetchLatestTag := fetchLatestTagForUpgrade
 	fetchCalls := 0
 	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) {
@@ -178,19 +189,19 @@ func TestRunUpgradeRefusesHomebrewSymlinkBeforeDownload(t *testing.T) {
 	t.Cleanup(func() { fetchLatestTagForUpgrade = oldFetchLatestTag })
 
 	err = runUpgrade(nil, "v0.0.0")
-	const want = "amq is installed via Homebrew; run brew update && brew upgrade amq"
+	const want = "amq is installed via Homebrew; run brew update && brew upgrade amq (or amq upgrade -y)"
 	if err == nil || err.Error() != want {
 		t.Fatalf("runUpgrade error = %v, want %q", err, want)
 	}
 	got, err := os.ReadFile(target)
 	if err != nil {
-		t.Fatalf("read Cellar binary after refusal: %v", err)
+		t.Fatalf("read Cellar binary after delegate: %v", err)
 	}
 	if string(got) != original {
 		t.Fatalf("Cellar binary mutated: got %q, want %q", got, original)
 	}
 	if fetchCalls != 0 {
-		t.Fatalf("release lookups = %d, want 0 before Homebrew refusal", fetchCalls)
+		t.Fatalf("release lookups = %d, want 0 before Homebrew delegate", fetchCalls)
 	}
 }
 
@@ -325,7 +336,7 @@ func TestSelectUpgradeDestinationRefusesHomebrewOwnedPaths(t *testing.T) {
 		}
 	})
 
-	t.Run("dangling Cellar symlink refuses before resolution", func(t *testing.T) {
+	t.Run("dangling Cellar symlink is not refused here (classifier owns it)", func(t *testing.T) {
 		if err := os.Remove(binPath); err != nil {
 			t.Fatalf("remove regular prefix binary: %v", err)
 		}
@@ -334,13 +345,19 @@ func TestSelectUpgradeDestinationRefusesHomebrewOwnedPaths(t *testing.T) {
 			t.Fatalf("create dangling Cellar symlink: %v", err)
 		}
 
-		_, err := selectUpgradeDestination(binPath, binPath, func(string) error { return nil })
-		if err == nil || !strings.Contains(err.Error(), "brew update && brew upgrade amq") {
-			t.Fatalf("selectUpgradeDestination error = %v, want update and upgrade remedy", err)
+		// selectUpgradeDestination only guards the severed-binary corruption;
+		// a Cellar symlink (healthy or dangling) is delegated by the
+		// classifier upstream, so this function returns the dest cleanly.
+		got, err := selectUpgradeDestination(binPath, binPath, func(string) error { return nil })
+		if err != nil {
+			t.Fatalf("selectUpgradeDestination error = %v, want no refusal (classifier owns Homebrew delegation)", err)
+		}
+		if got != binPath {
+			t.Fatalf("destination = %q, want %q", got, binPath)
 		}
 	})
 
-	t.Run("healthy Cellar symlink refuses", func(t *testing.T) {
+	t.Run("healthy Cellar symlink is not refused here (classifier owns it)", func(t *testing.T) {
 		if err := os.Remove(binPath); err != nil {
 			t.Fatalf("remove dangling symlink: %v", err)
 		}
@@ -348,9 +365,12 @@ func TestSelectUpgradeDestinationRefusesHomebrewOwnedPaths(t *testing.T) {
 			t.Fatalf("create healthy Cellar symlink: %v", err)
 		}
 
-		_, err := selectUpgradeDestination(binPath, cellarPath, func(string) error { return nil })
-		if err == nil || !strings.Contains(err.Error(), "brew update && brew upgrade amq") {
-			t.Fatalf("selectUpgradeDestination error = %v, want update and upgrade remedy", err)
+		got, err := selectUpgradeDestination(binPath, cellarPath, func(string) error { return nil })
+		if err != nil {
+			t.Fatalf("selectUpgradeDestination error = %v, want no refusal (classifier owns Homebrew delegation)", err)
+		}
+		if got != cellarPath {
+			t.Fatalf("destination = %q, want %q", got, cellarPath)
 		}
 	})
 }
@@ -517,4 +537,380 @@ func TestHomebrewOwnsUpgradePathBinOrCellar(t *testing.T) {
 	if homebrewOwnsUpgradePath(prefix, "") {
 		t.Fatal("empty path treated as Homebrew-owned")
 	}
+}
+
+// stubUpgradeNetwork replaces the network-touching indirection vars with
+// in-memory fakes that succeed for any asset and return a fixed checksum. It
+// returns a cleanup func and a counter of how many binaries were replaced.
+func stubUpgradeNetwork(t *testing.T) (replaced *[]string) {
+	t.Helper()
+	replacedList := []string{}
+	replaced = &replacedList
+	oldDownload := downloadReleaseAssetForUpgrade
+	downloadReleaseAssetForUpgrade = func(_ context.Context, _ *http.Client, _, _, destPath string) error {
+		return os.WriteFile(destPath, []byte("archive"), 0o600)
+	}
+	t.Cleanup(func() { downloadReleaseAssetForUpgrade = oldDownload })
+	oldChecksums := fetchChecksumsForUpgrade
+	fetchChecksumsForUpgrade = func(context.Context, *http.Client, string) (map[string]string, error) {
+		// Return a checksum for every asset name the upgrade loop can request
+		// (amq + each companion) so the lookup always hits regardless of OS.
+		m := map[string]string{}
+		for _, name := range append([]string{update.BinaryName}, update.CompanionBinaries...) {
+			if asset, err := update.AssetNameFor(name, "v0.0.0-test", runtime.GOOS, runtime.GOARCH); err == nil {
+				m[asset] = "checksum"
+			}
+		}
+		return m, nil
+	}
+	t.Cleanup(func() { fetchChecksumsForUpgrade = oldChecksums })
+	oldVerify := updateVerifySHA256ForUpgrade
+	updateVerifySHA256ForUpgrade = func(string, string) error { return nil }
+	t.Cleanup(func() { updateVerifySHA256ForUpgrade = oldVerify })
+	oldExtract := extractBinaryForUpgrade
+	extractBinaryForUpgrade = func(name, _, destDir string, _ bool) (string, error) {
+		p := filepath.Join(destDir, name)
+		return p, os.WriteFile(p, []byte("new-"+name), 0o755)
+	}
+	t.Cleanup(func() { extractBinaryForUpgrade = oldExtract })
+	oldReplace := replaceBinaryForUpgrade
+	replaceBinaryForUpgrade = func(_, destPath string) (bool, error) {
+		replacedList = append(replacedList, destPath)
+		return false, nil
+	}
+	t.Cleanup(func() { replaceBinaryForUpgrade = oldReplace })
+	oldSaveCache := saveUpgradeCacheForUpgrade
+	saveUpgradeCacheForUpgrade = func(string) {}
+	t.Cleanup(func() { saveUpgradeCacheForUpgrade = oldSaveCache })
+	return replaced
+}
+
+func TestRunUpgradeDirectInstallReplacesBinary(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "amq")
+	if err := os.WriteFile(bin, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldExecutablePath := executablePathForUpgrade
+	executablePathForUpgrade = func() (string, string, error) { return bin, bin, nil }
+	t.Cleanup(func() { executablePathForUpgrade = oldExecutablePath })
+	oldDetect := detectHomebrewPrefixForUpgrade
+	detectHomebrewPrefixForUpgrade = func() string { return "" }
+	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
+	oldFetch := fetchLatestTagForUpgrade
+	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) { return "v0.0.0-test", nil }
+	t.Cleanup(func() { fetchLatestTagForUpgrade = oldFetch })
+	replaced := stubUpgradeNetwork(t)
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runUpgrade(nil, "dev")
+	})
+	if err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+	if len(*replaced) != 1 || (*replaced)[0] != bin {
+		t.Fatalf("replaced = %#v, want [%s]", *replaced, bin)
+	}
+	if !strings.Contains(stdout, "Upgrading to v0.0.0-test") || !strings.Contains(stdout, "amq upgrade complete.") {
+		t.Fatalf("upgrade output missing expected lines:\n%s", stdout)
+	}
+}
+
+func TestRunUpgradeHomebrewDelegatesWithYes(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "amq")
+	if err := os.WriteFile(bin, []byte("homebrew"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldExecutablePath := executablePathForUpgrade
+	executablePathForUpgrade = func() (string, string, error) { return bin, bin, nil }
+	t.Cleanup(func() { executablePathForUpgrade = oldExecutablePath })
+	oldClassify := classifyInstallForUpgrade
+	classifyInstallForUpgrade = func(string, string) update.InstallKind { return update.InstallHomebrew }
+	t.Cleanup(func() { classifyInstallForUpgrade = oldClassify })
+	var delegateRan []string
+	oldDelegate := runDelegateForUpgrade
+	runDelegateForUpgrade = func(argv []string) error { delegateRan = append(delegateRan, strings.Join(argv, " ")); return nil }
+	t.Cleanup(func() { runDelegateForUpgrade = oldDelegate })
+	oldFetch := fetchLatestTagForUpgrade
+	fetchCalls := 0
+	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) {
+		fetchCalls++
+		return "", errors.New("unexpected release lookup")
+	}
+	t.Cleanup(func() { fetchLatestTagForUpgrade = oldFetch })
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runUpgrade([]string{"-y"}, "v0.0.0")
+	})
+	if err != nil {
+		t.Fatalf("runUpgrade -y: %v", err)
+	}
+	if len(delegateRan) != 2 || delegateRan[0] != "brew update" || delegateRan[1] != "brew upgrade amq" {
+		t.Fatalf("delegate ran %#v, want [brew update, brew upgrade amq]", delegateRan)
+	}
+	if fetchCalls != 0 {
+		t.Fatalf("release lookups = %d, want 0 for a delegated upgrade", fetchCalls)
+	}
+	if !strings.Contains(stdout, "Running:") {
+		t.Fatalf("output missing 'Running:' line:\n%s", stdout)
+	}
+	// The Homebrew binary is never overwritten by amq.
+	got, _ := os.ReadFile(bin)
+	if string(got) != "homebrew" {
+		t.Fatalf("homebrew binary mutated: %q", got)
+	}
+}
+
+// TestRunUpgradeClassifiesUserSymlinkToHomebrew covers Y2: a user-made
+// ~/bin/amq -> /opt/homebrew/bin/amq link must classify as Homebrew from the
+// pre-resolution path (the link itself sits in <prefix>/bin), so the upgrade
+// delegates to brew rather than self-replacing through the link.
+func TestRunUpgradeClassifiesUserSymlinkToHomebrew(t *testing.T) {
+	prefix := filepath.Join(t.TempDir(), "homebrew")
+	cellarTarget := filepath.Join(prefix, "Cellar", "amq", "0.73.0", "bin", "amq")
+	if err := os.MkdirAll(filepath.Dir(cellarTarget), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cellarTarget, []byte("homebrew"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The pre-resolution path is a user bin link into the Cellar; the resolved
+	// path lands in the Cellar too. Either way it must delegate.
+	userBin := filepath.Join(prefix, "bin", "amq")
+	if err := os.MkdirAll(filepath.Dir(userBin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(cellarTarget, userBin); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(userBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldExecutablePath := executablePathForUpgrade
+	executablePathForUpgrade = func() (string, string, error) { return userBin, resolved, nil }
+	t.Cleanup(func() { executablePathForUpgrade = oldExecutablePath })
+	oldDetect := detectHomebrewPrefixForUpgrade
+	detectHomebrewPrefixForUpgrade = func() string { return prefix }
+	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
+	var delegateRan []string
+	oldDelegate := runDelegateForUpgrade
+	runDelegateForUpgrade = func(argv []string) error { delegateRan = append(delegateRan, strings.Join(argv, " ")); return nil }
+	t.Cleanup(func() { runDelegateForUpgrade = oldDelegate })
+	oldFetch := fetchLatestTagForUpgrade
+	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) {
+		return "", errors.New("unexpected release lookup")
+	}
+	t.Cleanup(func() { fetchLatestTagForUpgrade = oldFetch })
+
+	if _, _, err := captureEnvOutput(t, func() error { return runUpgrade([]string{"-y"}, "dev") }); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+	if len(delegateRan) != 2 || delegateRan[0] != "brew update" || delegateRan[1] != "brew upgrade amq" {
+		t.Fatalf("delegate ran %#v, want [brew update, brew upgrade amq]", delegateRan)
+	}
+}
+
+func TestRunUpgradeAllReplacesPresentCompanionsSkipsMissing(t *testing.T) {
+	binDir := t.TempDir()
+	amqBin := filepath.Join(binDir, "amq")
+	if err := os.WriteFile(amqBin, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Two companions present next to amq; amq-acp absent.
+	keepalive := filepath.Join(binDir, "amq-keepalive")
+	bridge := filepath.Join(binDir, "amq-bridge")
+	for _, p := range []string{keepalive, bridge} {
+		if err := os.WriteFile(p, []byte("old"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldExecutablePath := executablePathForUpgrade
+	executablePathForUpgrade = func() (string, string, error) { return amqBin, amqBin, nil }
+	t.Cleanup(func() { executablePathForUpgrade = oldExecutablePath })
+	oldDetect := detectHomebrewPrefixForUpgrade
+	detectHomebrewPrefixForUpgrade = func() string { return "" }
+	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
+	// Isolate companion search from the operator's real ~/.local/bin.
+	fakeHome := t.TempDir()
+	oldHome := homeDirForUpgrade
+	homeDirForUpgrade = func() (string, error) { return fakeHome, nil }
+	t.Cleanup(func() { homeDirForUpgrade = oldHome })
+	oldFetch := fetchLatestTagForUpgrade
+	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) { return "v0.0.0-test", nil }
+	t.Cleanup(func() { fetchLatestTagForUpgrade = oldFetch })
+	replaced := stubUpgradeNetwork(t)
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runUpgrade([]string{"--all"}, "dev")
+	})
+	if err != nil {
+		t.Fatalf("runUpgrade --all: %v", err)
+	}
+	// amq + keepalive + bridge replaced; amq-acp skipped.
+	want := map[string]bool{amqBin: false, keepalive: false, bridge: false}
+	for _, p := range *replaced {
+		if _, ok := want[p]; ok {
+			want[p] = true
+		}
+	}
+	for p, seen := range want {
+		if !seen {
+			t.Fatalf("companion %s not replaced; replaced=%#v", p, *replaced)
+		}
+	}
+	if !strings.Contains(stdout, "amq-acp not found; skipping.") {
+		t.Fatalf("output missing amq-acp skip line:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "amq-keepalive: a running supervisor picks up the new image") {
+		t.Fatalf("output missing keepalive self-upgrade remedy:\n%s", stdout)
+	}
+}
+
+// TestRunUpgradeAllReplacesSymlinkedCompanionAtTarget covers Y4: a symlinked
+// companion (~/.local/bin/amq-keepalive -> /stable/amq-keepalive) is upgraded
+// at its resolved TARGET, not by replacing the link, so the operator's link
+// structure survives and the backing file is the new image.
+func TestRunUpgradeAllReplacesSymlinkedCompanionAtTarget(t *testing.T) {
+	binDir := t.TempDir()
+	amqBin := filepath.Join(binDir, "amq")
+	if err := os.WriteFile(amqBin, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A stable target the link points at.
+	stableDir := t.TempDir()
+	keepaliveTarget := filepath.Join(stableDir, "amq-keepalive")
+	if err := os.WriteFile(keepaliveTarget, []byte("old-keepalive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The companion found next to amq is a symlink to the stable target.
+	keepaliveLink := filepath.Join(binDir, "amq-keepalive")
+	if err := os.Symlink(keepaliveTarget, keepaliveLink); err != nil {
+		t.Fatal(err)
+	}
+	oldExecutablePath := executablePathForUpgrade
+	executablePathForUpgrade = func() (string, string, error) { return amqBin, amqBin, nil }
+	t.Cleanup(func() { executablePathForUpgrade = oldExecutablePath })
+	oldDetect := detectHomebrewPrefixForUpgrade
+	detectHomebrewPrefixForUpgrade = func() string { return "" }
+	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
+	fakeHome := t.TempDir()
+	oldHome := homeDirForUpgrade
+	homeDirForUpgrade = func() (string, error) { return fakeHome, nil }
+	t.Cleanup(func() { homeDirForUpgrade = oldHome })
+	oldFetch := fetchLatestTagForUpgrade
+	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) { return "v0.0.0-test", nil }
+	t.Cleanup(func() { fetchLatestTagForUpgrade = oldFetch })
+	replaced := stubUpgradeNetwork(t)
+
+	if _, _, err := captureEnvOutput(t, func() error { return runUpgrade([]string{"--all"}, "dev") }); err != nil {
+		t.Fatalf("runUpgrade --all: %v", err)
+	}
+	// The resolved TARGET was replaced, not the link path. Canonicalize the
+	// target the way EvalSymlinks does so /var and /private/var agree on macOS.
+	canonicalTarget, err := filepath.EvalSymlinks(keepaliveTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundTarget := false
+	for _, p := range *replaced {
+		if p == canonicalTarget {
+			foundTarget = true
+		}
+		if p == keepaliveLink {
+			t.Fatalf("companion link path %q was replaced instead of its target", p)
+		}
+	}
+	if !foundTarget {
+		t.Fatalf("symlinked companion target %q not replaced; replaced=%#v", canonicalTarget, *replaced)
+	}
+	// The link still resolves to the target (structure preserved).
+	if resolved, err := filepath.EvalSymlinks(keepaliveLink); err != nil || resolved != canonicalTarget {
+		t.Fatalf("link %q no longer resolves to %q (got %q, err=%v)", keepaliveLink, canonicalTarget, resolved, err)
+	}
+}
+
+// TestUpgradeDoesNotTouchRealCacheWhenIsolated is the WP-646 sentinel for the
+// update cache: it pre-seeds the REAL cache path (the one DefaultCachePath
+// resolves to when AMQ_CACHE_DIR is unset) with a sentinel, then runs an
+// upgrade under the TestMain-isolated AMQ_CACHE_DIR, and asserts the real
+// sentinel is byte-identical afterward. This catches a regression where a
+// test path writes through to ~/Library/Caches/amq/update.json.
+func TestUpgradeDoesNotTouchRealCacheWhenIsolated(t *testing.T) {
+	// Resolve the REAL cache path by ignoring the TestMain override.
+	realCachePath := realDefaultCachePath(t)
+	if err := os.MkdirAll(filepath.Dir(realCachePath), 0o700); err != nil {
+		t.Fatalf("mkdir real cache dir: %v", err)
+	}
+	// Save any pre-existing real cache content so the test restores the
+	// developer's actual cache state rather than deleting it.
+	preExisting, _ := os.ReadFile(realCachePath)
+	sentinel := []byte(`{"checked_at":"2026-01-01T00:00:00Z","latest_version":"v0.0.0-sentinel"}`)
+	if err := os.WriteFile(realCachePath, sentinel, 0o600); err != nil {
+		t.Fatalf("seed sentinel cache: %v", err)
+	}
+	t.Cleanup(func() {
+		if len(preExisting) > 0 {
+			_ = os.WriteFile(realCachePath, preExisting, 0o600)
+		} else {
+			_ = os.Remove(realCachePath)
+		}
+	})
+
+	// Confirm the isolated cache dir is distinct from the real one (TestMain
+	// sets AMQ_CACHE_DIR); an upgrade must write only there.
+	isolatedPath, err := update.DefaultCachePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isolatedPath == realCachePath {
+		t.Fatalf("TestMain did not isolate the cache: isolated path == real path %s", realCachePath)
+	}
+
+	bin := filepath.Join(t.TempDir(), "amq")
+	if err := os.WriteFile(bin, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldExecutablePath := executablePathForUpgrade
+	executablePathForUpgrade = func() (string, string, error) { return bin, bin, nil }
+	t.Cleanup(func() { executablePathForUpgrade = oldExecutablePath })
+	oldDetect := detectHomebrewPrefixForUpgrade
+	detectHomebrewPrefixForUpgrade = func() string { return "" }
+	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
+	oldFetch := fetchLatestTagForUpgrade
+	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) {
+		return "v0.0.0-test", nil
+	}
+	t.Cleanup(func() { fetchLatestTagForUpgrade = oldFetch })
+	stubUpgradeNetwork(t)
+
+	if _, _, err := captureEnvOutput(t, func() error { return runUpgrade(nil, "dev") }); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+
+	after, err := os.ReadFile(realCachePath)
+	if err != nil {
+		t.Fatalf("read sentinel after upgrade: %v", err)
+	}
+	if !bytes.Equal(sentinel, after) {
+		t.Fatalf("real cache sentinel was mutated by upgrade: before=%s after=%s", sentinel, after)
+	}
+}
+
+// realDefaultCachePath computes DefaultCachePath as it would resolve in
+// production (AMQ_CACHE_DIR unset), restoring the override immediately so the
+// rest of the test runs under TestMain's isolated cache.
+func realDefaultCachePath(t *testing.T) string {
+	t.Helper()
+	saved := os.Getenv(update.EnvCacheDir)
+	_ = os.Unsetenv(update.EnvCacheDir)
+	path, err := update.DefaultCachePath()
+	if saved != "" {
+		_ = os.Setenv(update.EnvCacheDir, saved)
+	} else {
+		_ = os.Unsetenv(update.EnvCacheDir)
+	}
+	if err != nil {
+		t.Fatalf("resolve real cache path: %v", err)
+	}
+	return path
 }

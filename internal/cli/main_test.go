@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/update"
 )
 
 const (
@@ -64,6 +66,20 @@ func TestMain(m *testing.M) {
 	}
 
 	cliSecureTempRoot = tempRoot
+
+	// Isolate the update-check cache (issue #646 class) so tests that drive
+	// runUpgrade / the update Notifier never write through to the developer's
+	// real ~/Library/Caches/amq. AMQ_CACHE_DIR is the authoritative override
+	// (darwin's os.UserCacheDir ignores HOME); XDG_CACHE_HOME covers any code
+	// path that consults it directly.
+	testCacheDir := filepath.Join(tempRoot, "cache")
+	if err := os.MkdirAll(testCacheDir, 0o700); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "create test cache dir: %v\n", err)
+		os.Exit(1)
+	}
+	_ = os.Setenv(update.EnvCacheDir, testCacheDir)
+	_ = os.Setenv("XDG_CACHE_HOME", testCacheDir)
+
 	exitCode := m.Run()
 	cliSecureTempRoot = ""
 	if err := os.RemoveAll(tempRoot); err != nil {
