@@ -384,7 +384,38 @@ func TestCoopExecNamedRefusedUnderManagedLaunch(t *testing.T) {
 	}
 }
 
+func TestCoopExecNamedTicketArgvAllowsManagedName(t *testing.T) {
+	nonce := "11111111-1111-4111-8111-111111111111"
+	t.Setenv(launch.InternalLaunchNonceEnv, nonce)
+	execution := &launch.PrepareExecutionOptions{Named: true, WakeMode: "disabled", AuditReason: "test"}
+	root := seedManagedCoopExecTicketWithTarget(t, "claude", nonce, []string{"/usr/bin/true", "--name", "session1/claude"}, execution)
+
+	var gotArgv []string
+	sentinel := errors.New("exec sentinel")
+	oldExec := coopExecProcess
+	coopExecProcess = func(_ string, argv []string, _ []string) error {
+		gotArgv = append([]string{}, argv...)
+		return sentinel
+	}
+	t.Cleanup(func() { coopExecProcess = oldExec })
+
+	err := runCoopExec([]string{
+		"--root", root, "--me", "claude", "--named", "--no-wake", "--managed-no-wake-reason", "test",
+		"/usr/bin/true", "--", "--name", "session1/claude",
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("error = %v, want coopExecProcess sentinel", err)
+	}
+	if len(gotArgv) < 5 || !reflect.DeepEqual(gotArgv[len(gotArgv)-3:], []string{"/usr/bin/true", "--name", "session1/claude"}) {
+		t.Fatalf("managed wrapper target argv = %#v", gotArgv)
+	}
+}
+
 func seedManagedCoopExecTicket(t *testing.T, handle, nonce string) string {
+	return seedManagedCoopExecTicketWithTarget(t, handle, nonce, []string{"/usr/bin/true"}, &launch.PrepareExecutionOptions{WakeMode: "disabled", AuditReason: "test"})
+}
+
+func seedManagedCoopExecTicketWithTarget(t *testing.T, handle, nonce string, targetArgv []string, execution *launch.PrepareExecutionOptions) string {
 	t.Helper()
 	project := t.TempDir()
 	session := filepath.Join(project, "session")
@@ -415,11 +446,10 @@ func seedManagedCoopExecTicket(t *testing.T, handle, nonce string) string {
 		t.Fatal(err)
 	}
 	ticket, err := launch.NewExecutionTicket(launch.ExecutionTicketRequest{
-		Handle: handle, LaunchNonce: nonce, Mode: launch.AdapterModeMint, Provider: "test",
+		Handle: handle, LaunchNonce: nonce, Mode: launch.AdapterModeMint, Provider: launch.ClaudeProvider,
 		ProjectRoot: project, SessionRoot: session, Cwd: project,
 		ProviderExecutable: "/usr/bin/true", AMQExecutable: amqExecutable,
-		TargetArgv: []string{"/usr/bin/true"},
-		Execution:  &launch.PrepareExecutionOptions{WakeMode: "disabled", AuditReason: "test"},
+		TargetArgv: targetArgv, Execution: execution,
 	})
 	if err != nil {
 		t.Fatal(err)

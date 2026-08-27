@@ -223,6 +223,50 @@ func TestPrepareSubjectSchemasProduceDistinctDigestsForSameState(t *testing.T) {
 	}
 }
 
+func TestPrepareV1KeepsClaudeNameOutOfLegacyPlan(t *testing.T) {
+	fixture := newInternalPrepareFixture(t)
+	_, executable := testExecutable(t, ClaudeProvider)
+	adapter := NewClaudeAdapter(executable)
+	request := fixture.request
+	request.SubjectSchema = SubjectSchemaV1
+	request.Participants = append([]PrepareParticipant(nil), fixture.request.Participants...)
+	request.Participants[0].Executable = executable
+	request.Participants[0].Execution.Named = true
+	dependencies := fixture.dependencies(&prepareTestBackend{})
+	dependencies.AdapterFor = func(_, _ string) HarnessAdapter { return adapter }
+	result, err := Prepare(context.Background(), request, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Participants) != 1 || result.Participants[0].Command == nil {
+		t.Fatalf("v1 prepared participant = %#v", result.Participants)
+	}
+	expected, err := adapter.PlanFresh(PlanRequest{
+		Handle: "claude", Session: "collab", ProjectRoot: fixture.projectRoot, SessionRoot: fixture.sessionRoot,
+		Cwd: fixture.cwd, AllowExternalCwd: true, LaunchNonce: preparePlaceholderUUID, ResumePolicy: ResumeEnabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(result.Participants[0].Command.Argv, previewStaticCommand(expected).Argv) {
+		t.Fatalf("v1 named plan argv = %#v, want %#v", result.Participants[0].Command.Argv, expected.Argv)
+	}
+	if slices.Contains(result.Participants[0].Command.Argv, "--name") {
+		t.Fatalf("v1 plan added --name: %#v", result.Participants[0].Command.Argv)
+	}
+
+	legacyRequest := request
+	legacyRequest.Participants = append([]PrepareParticipant(nil), request.Participants...)
+	legacyRequest.Participants[0].Execution.Named = false
+	legacyResult, err := Prepare(context.Background(), legacyRequest, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SubjectDigest != legacyResult.SubjectDigest || result.PlanDigest != legacyResult.PlanDigest || result.TrustDigest != legacyResult.TrustDigest {
+		t.Fatalf("v1 named preference changed legacy digests: named=%#v legacy=%#v", result, legacyResult)
+	}
+}
+
 func TestPrepareOwningLayerIsZeroWriteAndBuildsTypedActions(t *testing.T) {
 	fixture := newInternalPrepareFixture(t)
 	writePrepareConversation(t, fixture.sessionRoot, ConversationRecord{

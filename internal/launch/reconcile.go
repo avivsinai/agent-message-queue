@@ -1014,10 +1014,11 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			result.Agents = append(result.Agents, item)
 			continue
 		}
+		named := request.Config.EffectiveAgentNamed(cfg) && supportsManagedPlanNaming(adapter.Name())
 		base := PlanRequest{
-			Handle: cfg.Handle, ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(),
+			Handle: cfg.Handle, Session: request.Session, ProjectRoot: request.ProjectRoot, SessionRoot: request.Root.Base(),
 			AMQExecutable: request.AMQPath, Cwd: cwd,
-			LaunchNonce: nonce, ResumePolicy: policy, CommittedArgs: committedArgs, BypassArgs: bypassArgs,
+			LaunchNonce: nonce, Named: named, ResumePolicy: policy, CommittedArgs: committedArgs, BypassArgs: bypassArgs,
 			EnvOverlay: cfg.Env, AllowExternalCwd: request.AllowExternalCwd, InitialInput: cfg.InitialInput, Wrapper: cloneWrapper(cfg.Wrapper),
 		}
 		conversation, loadErr := LoadConversation(request.Root, cfg.Handle)
@@ -1135,9 +1136,9 @@ func buildReconcilePlan(request ReconcileRequest, nonce string, result *Reconcil
 			result.Agents = append(result.Agents, item)
 			continue
 		}
-		if execution, ok := request.ExecutionOptions[cfg.Handle]; ok {
-			agentPlan.Execution = clonePrepareExecutionOptions(&execution)
-		}
+		execution := request.ExecutionOptions[cfg.Handle]
+		execution.Named = named && disposition != DispositionResumed
+		agentPlan.Execution = clonePrepareExecutionOptions(&execution)
 		item.ConversationDisposition, item.Reason = disposition, planReason
 		result.Agents = append(result.Agents, item)
 		record := ConversationRecord{

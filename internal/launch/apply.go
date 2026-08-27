@@ -624,9 +624,10 @@ func buildApplyReconcileRequest(ctx context.Context, prepared PrepareRequest, ru
 			digest := initialInputDigest(participant.InitialInput.Text)
 			initial = &InitialInputRequest{Kind: participant.InitialInput.Kind, Value: participant.InitialInput.Text, SHA256: digest}
 		}
+		named := participant.Execution.Named
 		config.Agents = append(config.Agents, ProjectAgentConfig{
 			Handle: participant.Handle, Adapter: key, Command: command, Env: cloneEnv(participant.EnvOverlay),
-			Cwd: participant.Cwd, ResumePolicy: participant.ResumePolicy, InitialInput: initial, Wrapper: cloneWrapper(participant.Wrapper),
+			Named: &named, Cwd: participant.Cwd, ResumePolicy: participant.ResumePolicy, InitialInput: initial, Wrapper: cloneWrapper(participant.Wrapper),
 		})
 		adapters[key] = adapter
 		executionOptions[participant.Handle] = *clonePrepareExecutionOptions(&participant.Execution)

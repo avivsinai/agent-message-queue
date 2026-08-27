@@ -111,12 +111,13 @@ exec /bin/sleep 60
 	}
 	adapter := launch.NewClaudeAdapter(launch.ClaudeProvider)
 	freshPlan, err := adapter.PlanFresh(launch.PlanRequest{
-		Handle: "claude", ProjectRoot: canonicalProject, Cwd: canonicalProject,
-		LaunchNonce: "019c5a10-75d8-7eef-8db7-5ee77f70e8a1", ResumePolicy: launch.ResumeEnabled,
+		Handle: "claude", Session: "collab", ProjectRoot: canonicalProject, Cwd: canonicalProject,
+		LaunchNonce: "019c5a10-75d8-7eef-8db7-5ee77f70e8a1", Named: true, ResumePolicy: launch.ResumeEnabled,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	freshPlan.Execution = &launch.PrepareExecutionOptions{Named: true}
 	trustPlan(t, store, launch.Plan{Version: launch.PlanVersion, Agents: []launch.AgentPlan{freshPlan}}, root)
 
 	socketDir, err := os.MkdirTemp("/tmp", "amq-tmux-e2e-")

@@ -81,6 +81,7 @@ type PlannedWrite struct {
 type PrepareExecutionOptions struct {
 	RequireWake          bool     `json:"require_wake"`
 	NoGitignore          bool     `json:"no_gitignore"`
+	Named                bool     `json:"named,omitempty"`
 	WakeMode             string   `json:"wake_mode"`
 	AuditReason          string   `json:"audit_reason,omitempty"`
 	InjectorMode         string   `json:"injector_mode,omitempty"`
@@ -913,9 +914,13 @@ func inspectPrepareRoster(root *fsq.DeliveryRoot, authorization *fsq.MailboxConf
 }
 
 func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetState, dependencies PrepareDependencies, mailbox string, subjectSchema int) (PreparedParticipant, PrepareObservation, *AgentPlan, []PrepareRequiredAction, error) {
+	preparedExecution := participant.Execution
+	if subjectSchema == SubjectSchemaV1 {
+		preparedExecution.Named = false
+	}
 	prepared := PreparedParticipant{
 		Handle: participant.Handle, Runnable: participant.Runnable, Provider: participant.Provider,
-		ResumePolicy: participant.ResumePolicy, Execution: participant.Execution, PlannedOutcome: "participant_only",
+		ResumePolicy: participant.ResumePolicy, Execution: preparedExecution, PlannedOutcome: "participant_only",
 	}
 	if participant.OnLive == OnLiveKeep {
 		prepared.OnLive = OnLiveKeep
@@ -997,10 +1002,14 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 		return prepared, observation, nil, nil, fmt.Errorf("provider %q has no adapter", participant.Provider)
 	}
 
+	execution := participant.Execution
+	// V1 subjects must reproduce the pre-naming plan for existing callers
+	// (amq-squad); naming is a V2 capability.
+	execution.Named = execution.Named && subjectSchema == SubjectSchemaV2 && supportsManagedPlanNaming(participant.Provider)
 	base := PlanRequest{
-		Handle: participant.Handle, ProjectRoot: state.target.ProjectRoot, SessionRoot: state.target.SessionRoot,
+		Handle: participant.Handle, Session: state.target.Session, ProjectRoot: state.target.ProjectRoot, SessionRoot: state.target.SessionRoot,
 		AMQExecutable: dependencies.AMQPath, Cwd: cwd, AllowExternalCwd: true,
-		LaunchNonce: preparePlaceholderUUID, ResumePolicy: participant.ResumePolicy,
+		LaunchNonce: preparePlaceholderUUID, Named: execution.Named, ResumePolicy: participant.ResumePolicy,
 		CommittedArgs: slices.Clone(participant.Args), BypassArgs: slices.Clone(participant.BypassArgs), EnvOverlay: cloneEnv(participant.EnvOverlay),
 	}
 	if participant.InitialInput != nil {
@@ -1034,11 +1043,12 @@ func prepareOneParticipant(participant PrepareParticipant, state *prepareTargetS
 	if err != nil {
 		return prepared, observation, nil, actions, err
 	}
+	execution.Named = execution.Named && !useResume
 	plan, err = applyWrapper(plan, participant.Wrapper)
 	if err != nil {
 		return prepared, observation, nil, actions, fmt.Errorf("wrapper for %s: %w", participant.Handle, err)
 	}
-	plan.Execution = clonePrepareExecutionOptions(&participant.Execution)
+	plan.Execution = clonePrepareExecutionOptions(&execution)
 	prepared.Command = previewStaticCommand(plan)
 	return prepared, observation, &plan, actions, nil
 }

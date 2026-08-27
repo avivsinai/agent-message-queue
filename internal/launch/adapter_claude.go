@@ -63,6 +63,16 @@ func (adapter *ClaudeAdapter) PlanFresh(request PlanRequest) (AgentPlan, error) 
 	}
 	argv := append([]string{executable}, request.CommittedArgs...)
 	argv = append(argv, request.BypassArgs...)
+	if request.Named && !ArgsHaveNameFlag(request.CommittedArgs) {
+		name := request.Handle
+		if request.Session != "" {
+			name = request.Session + "/" + request.Handle
+		}
+		if !validSessionLabel(name) {
+			return AgentPlan{}, fmt.Errorf("generated session name %q is invalid", name)
+		}
+		argv = append(argv, "--name", name)
+	}
 	argv = append(argv, "--session-id", request.LaunchNonce)
 	plan := AgentPlan{
 		Handle: request.Handle, Argv: argv, EnvOverlay: cloneEnv(request.EnvOverlay), Cwd: request.Cwd,
@@ -116,6 +126,8 @@ func claudeArgRules() map[string]argumentRule {
 		"--allowedTools":    {value: true, validate: validClaudeAllowedTools},
 		"--effort":          {value: true, validate: oneOf("low", "medium", "high", "xhigh", "max")},
 		"--model":           {value: true, validate: safeArgumentValue},
+		"-n":                {value: true, validate: validSessionLabel},
+		"--name":            {value: true, validate: validSessionLabel},
 		"--no-chrome":       {},
 		"--permission-mode": {value: true, validate: oneOf("acceptEdits", "auto", "manual", "dontAsk", "plan")},
 		"--safe-mode":       {},

@@ -50,8 +50,8 @@ func TestPrepareIsZeroWriteAndDeterministic(t *testing.T) {
 		t.Fatalf("new Prepare subject schema = %d", first.SubjectSchema)
 	}
 	wantCapabilities := []ProviderCapabilitiesV1{{
-		Provider: "claude", GrammarVersion: 1, VerifiedProviderVersion: "2.1.233",
-		AllowedArgumentForms: []string{"--allowedTools"}, ConfigOverrides: []ConfigOverrideCapabilityV1{},
+		Provider: "claude", GrammarVersion: 2, VerifiedProviderVersion: "2.1.233",
+		AllowedArgumentForms: []string{"--allowedTools", "-n", "--name"}, ConfigOverrides: []ConfigOverrideCapabilityV1{},
 		InitialInputKinds: []InitialInputKindV1{InitialInputArgument},
 	}}
 	if !reflect.DeepEqual(first.Preview.Capabilities, wantCapabilities) {

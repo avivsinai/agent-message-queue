@@ -79,8 +79,8 @@ func ProviderStaticInputCapabilities(provider string) StaticInputCapabilities {
 	switch provider {
 	case ClaudeProvider:
 		return StaticInputCapabilities{
-			GrammarVersion: 1, VerifiedProviderVersion: "2.1.233",
-			AllowedArgumentForms: []string{"--allowedTools"}, InitialInputKinds: []InitialInputKind{InitialInputArgument},
+			GrammarVersion: 2, VerifiedProviderVersion: "2.1.233",
+			AllowedArgumentForms: []string{"--allowedTools", "-n", "--name"}, InitialInputKinds: []InitialInputKind{InitialInputArgument},
 		}
 	case CodexProvider:
 		reasoningValues := slices.Clone(codexReasoningEffortValues)
@@ -106,6 +106,7 @@ func ProviderStaticInputCapabilities(provider string) StaticInputCapabilities {
 
 type PlanRequest struct {
 	Handle        string
+	Session       string
 	ProjectRoot   string
 	SessionRoot   string
 	AMQExecutable string
@@ -116,6 +117,7 @@ type PlanRequest struct {
 	// the historical project-contained rule.
 	AllowExternalCwd bool
 	LaunchNonce      string
+	Named            bool
 	ResumePolicy     ResumePolicy
 	CommittedArgs    []string
 	BypassArgs       []string
@@ -287,12 +289,12 @@ func PartitionStaticProviderArgs(provider string, args []string) (committed, byp
 			bypass = append(bypass, arg)
 			continue
 		}
-		rule, ok := argRules[arg]
+		rule, _, inline, ok := argumentRuleFor(arg, argRules)
 		if !ok {
 			return nil, nil, fmt.Errorf("static argument %q is not allowed by adapter grammar", arg)
 		}
 		committed = append(committed, arg)
-		if rule.value {
+		if rule.value && !inline {
 			if i+1 >= len(args) {
 				return nil, nil, fmt.Errorf("static argument %q requires a value", arg)
 			}
@@ -309,11 +311,17 @@ func validateStaticProviderArgs(args []string, rules map[string]argumentRule, by
 		if _, ok := bypassAllowed[arg]; ok {
 			continue
 		}
-		rule, ok := rules[arg]
+		rule, inlineValue, inline, ok := argumentRuleFor(arg, rules)
 		if !ok {
 			return fmt.Errorf("static argument %q is not allowed by adapter grammar", arg)
 		}
 		if !rule.value {
+			continue
+		}
+		if inline {
+			if rule.validate != nil && !rule.validate(inlineValue) {
+				return fmt.Errorf("static argument %q has invalid value %q", arg, inlineValue)
+			}
 			continue
 		}
 		if i+1 >= len(args) {
@@ -563,14 +571,33 @@ type argumentRule struct {
 	validate valueRule
 }
 
+func argumentRuleFor(arg string, rules map[string]argumentRule) (rule argumentRule, inlineValue string, inline bool, ok bool) {
+	if rule, ok := rules[arg]; ok {
+		return rule, "", false, true
+	}
+	if value, found := strings.CutPrefix(arg, "--name="); found {
+		rule, ok := rules["--name"]
+		if ok && rule.value {
+			return rule, value, true, true
+		}
+	}
+	return argumentRule{}, "", false, false
+}
+
 func validateCommittedArgs(args []string, rules map[string]argumentRule) error {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		rule, ok := rules[arg]
+		rule, inlineValue, inline, ok := argumentRuleFor(arg, rules)
 		if !ok {
 			return fmt.Errorf("committed argument %q is not allowed by adapter grammar", arg)
 		}
 		if !rule.value {
+			continue
+		}
+		if inline {
+			if rule.validate != nil && !rule.validate(inlineValue) {
+				return fmt.Errorf("committed argument %q has invalid value %q", arg, inlineValue)
+			}
 			continue
 		}
 		if i+1 >= len(args) {
@@ -588,6 +615,23 @@ var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[
 
 func safeArgumentValue(value string) bool {
 	return !strings.HasPrefix(value, "-") && safeEnvironmentValue(value)
+}
+
+func validSessionLabel(value string) bool {
+	parts := strings.Split(value, "/")
+	if len(parts) > 2 {
+		return false
+	}
+	for _, part := range parts {
+		if !canonicalSessionPattern.MatchString(part) || strings.HasPrefix(part, "-") {
+			return false
+		}
+	}
+	return value != ""
+}
+
+func supportsManagedPlanNaming(provider string) bool {
+	return provider == ClaudeProvider
 }
 
 func validUUID(value string) bool {

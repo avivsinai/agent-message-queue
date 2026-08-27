@@ -74,6 +74,8 @@ ordered `-c model_reasoning_effort=<value>` pairs with values `minimal`, `low`,
 `medium`, `high`, or `xhigh`; duplicate keys and unknown keys or values reject.
 Every `env_overlay` key uses the POSIX environment grammar
 `[A-Za-z_][A-Za-z0-9_]*`; shell syntax such as `X;touch /tmp/pwn` is refused.
+Claude's GrammarVersion is 2: it covers the scoped `--allowedTools` grammar
+(`entry := name["("spec")"]`) and `-n`, `--name`, and `--name=` session labels.
 
 Public JSON decoders perform a bounded structural pass before contract
 decoding. A structural refusal is returned as `*launchapi.StrictJSONError`;
@@ -197,8 +199,13 @@ then bootstraps the same ID with a no-tools turn before it proves exact resume.
 It uses an already-trusted checkout as the Claude cwd and keeps its AMQ session
 root in a temporary directory; it never changes Claude trust state.
 
-Pi is excluded because it has no provider CLI; Gemini CLI and OpenCode also
-remain outside this adapter set.
+Pi remains direct-only because it has no launch API adapter; Gemini CLI and
+OpenCode also remain outside this adapter set. In committed
+`.amq/launch.json`, `agents[].named` overrides the top-level `named` setting,
+and naming defaults to enabled. Managed Claude fresh plans carry
+`--name <session>/<handle>` in the ticket and trust digest. Resume plans never
+add or rename a session. Codex, Cursor, and Grok remain unnamed under managed
+launch in this release.
 
 ## Prepare and Apply
 
