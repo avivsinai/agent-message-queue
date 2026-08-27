@@ -597,6 +597,8 @@ binaries, ownerless/keepalive wakes, repair flows, destructive interrupts, and
 arbitrary `--inject-cmd` wakes never self-upgrade. The eligible default is
 disabled with `amq wake --no-self-upgrade` or `AMQ_WAKE_NO_SELF_UPGRADE=1`;
 schema-2 wake/doctor JSON reports the latest decision under `self_upgrade`.
+The separate `amq-keepalive` supervisor has its own direct-image self-upgrade
+contract documented in `docs/amq-keepalive.md`.
 
 ### 9.2 `.wake.log` retention
 

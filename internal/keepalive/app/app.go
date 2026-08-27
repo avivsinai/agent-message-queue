@@ -27,6 +27,10 @@ type App struct {
 	Adapters *adapter.Registry
 	Wake     supervisor.WakeRunner
 	Now      func() time.Time
+	// SelfVersion is the version embedded in the running keepalive binary.
+	// The command entry point supplies it; tests and library callers may leave
+	// it empty to keep self-upgrade disabled.
+	SelfVersion string
 
 	adapterLogState *adapterLogState
 }
@@ -725,15 +729,20 @@ func (a App) supervise(ctx context.Context, args []string) error {
 	fs.SetOutput(a.Stderr)
 	registryPath := fs.String("registry", mustDefaultRegistryPath(), "registry file path")
 	amqPath := fs.String("amq", "amq", "amq executable path")
-	self := fs.String("self", executablePath(), "amq-keepalive executable path for --inject-via")
+	self := fs.String("self", selfUpgradeDefaultLocator(), "amq-keepalive executable path for --inject-via")
 	once := fs.Bool("once", false, "run one supervisor pass")
 	interval := fs.Duration("interval", time.Minute, "supervisor interval")
 	wakeTimeout := fs.Duration("wake-ready-timeout", 10*time.Second, "maximum time to wait for amq wake readiness")
+	noSelfUpgrade := fs.Bool("no-self-upgrade", false, "disable automatic replacement by a newer keepalive image")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *interval <= 0 {
 		return errors.New("--interval must be greater than zero")
+	}
+	selfUpgrade := newSelfUpgradeController(*registryPath, *self, a.SelfVersion, !*noSelfUpgrade)
+	if selfUpgrade.enabled && !selfUpgrade.eligible && selfUpgrade.reason != "" {
+		_, _ = fmt.Fprintf(a.Stderr, "amq-keepalive self-upgrade unavailable: %s\n", selfUpgrade.reason)
 	}
 
 	runOnce := func(emitJSON bool) error {
@@ -750,7 +759,10 @@ func (a App) supervise(ctx context.Context, args []string) error {
 		return runOnce(true)
 	}
 	for {
-		if err := runOnce(false); err != nil {
+		passErr := runOnce(false)
+		if passErr != nil {
+			_, _ = fmt.Fprintln(a.Stderr, passErr)
+		} else if err := selfUpgrade.maintain(ctx); err != nil {
 			_, _ = fmt.Fprintln(a.Stderr, err)
 		}
 		timer := time.NewTimer(*interval)

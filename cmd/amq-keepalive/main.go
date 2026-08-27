@@ -56,7 +56,7 @@ func main() {
 		signal.Stop(signals)
 		cancel()
 	}()
-	code := app.App{}.Run(ctx, os.Args[1:])
+	code := (app.App{SelfVersion: getVersion()}).Run(ctx, os.Args[1:])
 	signal.Stop(signals)
 	cancel()
 	os.Exit(code)
