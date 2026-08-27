@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 )
 
 type wakeRestartBoundImage struct {
@@ -160,9 +162,7 @@ func cleanupPreviousWakeResumeBoundImage(bootstrap wakeResumeBootstrap) error {
 }
 
 func sameWakeImageEvidenceExceptMethodPath(first, second wakeImageEvidenceV1) bool {
-	first.Method = second.Method
-	first.ExecutionPath = second.ExecutionPath
-	return first == second
+	return selfupgrade.SameImageEvidenceExceptMethodPath(first, second)
 }
 
 // Link and unlink operations on any name of a Darwin hardlink mutate the
@@ -181,18 +181,7 @@ func sameWakeImageEvidenceExceptMethodPath(first, second wakeImageEvidenceV1) bo
 // bound.ExecutionPath after opening that path. Device/inode/size/sha256/version
 // is sufficient authority here.
 func sameDarwinStagedWakeImageEvidence(first, second wakeImageEvidenceV1) bool {
-	if first.Platform != "darwin" || second.Platform != "darwin" {
-		return first == second
-	}
-	if first.Schema != second.Schema ||
-		first.Device != second.Device ||
-		first.Inode != second.Inode ||
-		first.Size != second.Size ||
-		first.SHA256 != second.SHA256 ||
-		first.EmbeddedVersion != second.EmbeddedVersion {
-		return false
-	}
-	return true
+	return selfupgrade.SameDarwinStagedImageEvidence(first, second)
 }
 
 // A Darwin hardlink changes the shared inode's ctime. Cross-device staging
