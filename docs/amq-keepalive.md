@@ -116,6 +116,39 @@ amq-keepalive gc --min-detached-age 24h --apply
 minimum age and whose target is again proven absent. AMQ must confirm the exact
 wake retirement before the registry row is forgotten.
 
+### Self-upgrade
+
+The continuous supervisor watches the direct executable path named by its
+launch arguments. After each completed supervisor pass, and before the next
+interval wait, it probes that path for a strictly newer self-reported semantic
+version. A candidate must also have different bytes from the running image and
+must pass the same ownership, mode, identity, and hash checks used by wake
+self-upgrade.
+
+On Darwin, the private `0700` PID-scoped stage is re-verified immediately
+before pathname exec because Darwin has no `fexecve`; same-UID races in that
+narrow window are outside AMQ's threat model, as for wake self-upgrade.
+
+The `register` and `attach` commands keep `executablePath()` as their default
+injector path. Only `supervise` derives its default self-upgrade locator from
+the launch `argv[0]` or `PATH`, because launchd and direct invocations name the
+stable file that a sibling-and-rename install replaces.
+
+When the candidate is accepted, keepalive calls `execve` in place. The process
+PID, command arguments, and environment are preserved. The new image re-reads
+the registry and reinitializes supervisor state; open descriptors remain open
+only when they are not marked close-on-exec. Registry reconciliation must
+finish before this check; an uncertain pass or candidate identity defers the
+upgrade.
+
+Candidate version probes that fail or time out defer and are retried after a
+later pass. Exec failures fail closed and are recorded in the private
+`.selfupgrade.json` sidecar next to the registry; each exec-attempted candidate
+is refused at most once per generation. A new process generation starts with
+an empty refusal set. The sidecar is mode `0600`; a corrupt or unsafe sidecar
+disables self-upgrade for that process. Use `supervise --no-self-upgrade` to
+opt out.
+
 ### Detached wake stderr protocol
 
 The short-lived launcher cannot leave the wake writing to a pipe whose reader
