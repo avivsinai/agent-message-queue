@@ -622,6 +622,16 @@ schema-2 wake/doctor JSON reports the latest decision under `self_upgrade`.
 The separate `amq-keepalive` supervisor has its own direct-image self-upgrade
 contract documented in `docs/amq-keepalive.md`.
 
+Before the in-place exec, wake writes a private `.wake.selfupgrade.attempt`
+sidecar. If wake exits after the exec before its first quiescent maintenance
+boundary, a later wake that reaches maintenance refuses the matching image for
+24 hours in that wake generation. The guard cannot help when the new image dies
+before any replacement wake reaches the maintenance code. Its 24-hour memory is
+scoped to the wake agent directory. Wake has no KeepAlive supervisor and does
+not retry or roll back the replacement automatically. The first quiescent
+boundary from the attempted image settles the attempt; an operator or package
+manager must restore a known-good image after a refusal.
+
 AMQ does not write the executable or retain the previous image, so neither wake
 self-upgrade path has an in-process rollback. Recovery from a bad installed
 image is an operator or package-manager action, such as reinstalling or

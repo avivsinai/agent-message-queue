@@ -2466,6 +2466,15 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		),
 		resumeEligible,
 	)
+	if err := loadWakeSelfUpgradeAttemptAtStartup(
+		&selfUpgrade,
+		activeAgentDir,
+		currentWake,
+		runningImageEvidence,
+	); err != nil {
+		selfUpgrade.Eligible = false
+		selfUpgrade.Reason = "wake self-upgrade attempt state is unavailable: " + err.Error()
+	}
 	if strings.Contains(selfUpgrade.Reason, "pinned resolved image") {
 		selfUpgrade.Reason += fmt.Sprintf(
 			"; request a safe refresh with amq wake restart --root %s --me %s",
@@ -2777,6 +2786,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	} else if !selfUpgrade.Eligible {
 		initialSelfUpgradeDecision.Action = wakeSelfUpgradeActionIneligible
 		initialSelfUpgradeDecision.Reason = selfUpgrade.Reason
+	} else if selfUpgrade.startupRefusalReason != "" {
+		initialSelfUpgradeDecision.Action = wakeSelfUpgradeActionRefusedMemory
+		initialSelfUpgradeDecision.Reason = selfUpgrade.startupRefusalReason
 	}
 	if err := recordWakeSelfUpgradeDecision(
 		activeAgentDir,

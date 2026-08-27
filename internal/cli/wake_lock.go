@@ -674,7 +674,7 @@ func removeWakeLockIfUnchangedGuarded(inspection wakeLockInspection) error {
 	if err != nil || !committed {
 		return err
 	}
-	if err := removeWakeSelfUpgradeDiagnosticGuarded(inspection.Root, inspection.Agent); err != nil {
+	if err := removeWakeSelfUpgradeArtifactsGuarded(inspection.Root, inspection.Agent); err != nil {
 		_ = writeStderr(
 			"warning: removed wake lock for %s but left diagnostic-only self-upgrade residue: %v\n",
 			inspection.Agent,

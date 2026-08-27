@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 	"golang.org/x/sys/unix"
 )
 
@@ -1650,6 +1651,17 @@ func handleWakeRestartAtLoopBoundary(
 		recordSelfUpgradeDecision(wakeSelfUpgradeActionRefused, reason)
 		return
 	}
+	if record.Source == wakeRestartSourceSelf {
+		attempt, attemptErr := persistWakeSelfUpgradeAttemptAtBoundary(agentDir, cfg.inspectTerminalGeneration(), record)
+		if attemptErr != nil {
+			recordSelfUpgradeDecision(
+				wakeSelfUpgradeActionDeferred,
+				"replacement attempt was not persisted: "+attemptErr.Error(),
+			)
+			return
+		}
+		cfg.selfUpgrade.attempt = &attempt
+	}
 	if err := executeWakeRestart(record, os.Args, cfg.terminalImageVersion, cfg.restartSignals); err != nil {
 		if errors.Is(err, errWakeImageChangedWhileHashing) && record.Source == wakeRestartSourceSelf {
 			recordSelfUpgradeDecision(
@@ -1723,6 +1735,35 @@ func maintainWakeSelfUpgradeAtLoopBoundary(
 		cfg.selfUpgrade.restartPending = false
 	}
 	if cfg.selfUpgrade.Enabled && cfg.selfUpgrade.Eligible {
+		attemptPending := cfg.selfUpgrade.attempt != nil &&
+			cfg.selfUpgrade.attempt.Status == selfupgrade.AttemptStatusAttempt
+		if attemptPending {
+			quiescence := classifyWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
+			if quiescence.Disposition != wakeResumeProceed {
+				return recordWakeSelfUpgradeDecision(
+					agentDir,
+					cfg.inspectTerminalGeneration(),
+					cfg.selfUpgrade,
+					wakeSelfUpgradeDecision{
+						Action: wakeSelfUpgradeActionDeferred,
+						Reason: quiescence.Reason,
+					},
+				)
+			}
+			inspection := cfg.inspectTerminalGeneration()
+			var running wakeImageEvidenceV1
+			if inspection.Lock.RunningImageEvidence != nil {
+				running = *inspection.Lock.RunningImageEvidence
+			}
+			if err := settleWakeSelfUpgradeAttemptAtBoundary(
+				&cfg.selfUpgrade,
+				agentDir,
+				inspection,
+				running,
+			); err != nil {
+				return err
+			}
+		}
 		probe, probeErr := probeWakeSelfUpgradeLocator(cfg.selfUpgrade.Locator)
 		if probeErr != nil {
 			return recordWakeSelfUpgradeDecision(
@@ -1738,17 +1779,19 @@ func maintainWakeSelfUpgradeAtLoopBoundary(
 		if sameWakeSelfUpgradeProbe(cfg.selfUpgrade.lastProbe, probe) {
 			return nil
 		}
-		quiescence := classifyWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
-		if quiescence.Disposition != wakeResumeProceed {
-			return recordWakeSelfUpgradeDecision(
-				agentDir,
-				cfg.inspectTerminalGeneration(),
-				cfg.selfUpgrade,
-				wakeSelfUpgradeDecision{
-					Action: wakeSelfUpgradeActionDeferred,
-					Reason: quiescence.Reason,
-				},
-			)
+		if !attemptPending {
+			quiescence := classifyWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
+			if quiescence.Disposition != wakeResumeProceed {
+				return recordWakeSelfUpgradeDecision(
+					agentDir,
+					cfg.inspectTerminalGeneration(),
+					cfg.selfUpgrade,
+					wakeSelfUpgradeDecision{
+						Action: wakeSelfUpgradeActionDeferred,
+						Reason: quiescence.Reason,
+					},
+				)
+			}
 		}
 	}
 	decision, err := maintainWakeSelfUpgrade(

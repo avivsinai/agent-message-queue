@@ -192,10 +192,10 @@ func fixWakeRestartResidueWithoutLock(root, agent string) error {
 			return fmt.Errorf("wake lock appeared before restart residue fix; preserving restart state")
 		}
 		var diagnosticErr error
-		if err := removeWakeSelfUpgradeDiagnosticAt(dirfd); err != nil {
+		if err := removeWakeSelfUpgradeArtifactsAt(dirfd); err != nil {
 			diagnosticErr = newWakeLockResidueError(
 				wakeLockResidueSelfUpgradeDiagnostic,
-				fmt.Errorf("remove wake self-upgrade diagnostic after confirming no lock: %w", err),
+				fmt.Errorf("remove wake self-upgrade metadata after confirming no lock: %w", err),
 			)
 		}
 

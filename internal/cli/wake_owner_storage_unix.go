@@ -559,10 +559,10 @@ func removeAuthoritativeWakeClaimAt(
 	}
 	cleanupErr := preparedSnapshotErr
 	cleaned := false
-	if err := removeWakeSelfUpgradeDiagnosticAt(dirfd); err != nil {
+	if err := removeWakeSelfUpgradeArtifactsAt(dirfd); err != nil {
 		diagnosticCleanupErr := newWakeLockResidueError(
 			wakeLockResidueSelfUpgradeDiagnostic,
-			fmt.Errorf("remove wake self-upgrade diagnostic after authoritative lock release: %w", err),
+			fmt.Errorf("remove wake self-upgrade metadata after authoritative lock release: %w", err),
 		)
 		_ = writeStderr(
 			"warning: removed authoritative wake lock for %s but left diagnostic-only self-upgrade residue: %v\n",

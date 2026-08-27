@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 )
@@ -38,19 +39,22 @@ var (
 	selfUpgradeStateRemove      = os.Remove
 	selfUpgradeStateWrite       = io.WriteString
 	selfUpgradeSyncDir          = syncSelfUpgradeDir
+	selfUpgradeNow              = time.Now
 )
 
 type selfUpgradeController struct {
-	enabled         bool
-	eligible        bool
-	reason          string
-	locator         string
-	incumbent       selfupgrade.ImageEvidence
-	generation      string
-	statePath       string
-	refused         []selfupgrade.RefusedCandidate
-	statePublished  bool
-	lastObservation *selfUpgradeObservation
+	enabled              bool
+	eligible             bool
+	reason               string
+	locator              string
+	incumbent            selfupgrade.ImageEvidence
+	generation           string
+	statePath            string
+	refused              []selfupgrade.RefusedCandidate
+	attempt              *selfupgrade.Attempt
+	startupRefusalReason string
+	statePublished       bool
+	lastObservation      *selfUpgradeObservation
 }
 
 type selfUpgradeObservation struct {
@@ -64,6 +68,7 @@ type selfUpgradeStateFile struct {
 	IncumbentVersion  string                         `json:"incumbent_version"`
 	IncumbentSHA256   string                         `json:"incumbent_sha256"`
 	RefusedCandidates []selfupgrade.RefusedCandidate `json:"refused_candidates,omitempty"`
+	Attempt           *selfupgrade.Attempt           `json:"attempt,omitempty"`
 }
 
 func newSelfUpgradeController(registryPath, locator, version string, enabled bool) *selfUpgradeController {
@@ -214,8 +219,22 @@ func loadSelfUpgradeState(controller *selfUpgradeController) error {
 	if err := validateSelfUpgradeRefusals(state.RefusedCandidates); err != nil {
 		return err
 	}
+	if state.Attempt != nil {
+		if err := selfupgrade.ValidateAttempt(*state.Attempt); err != nil {
+			return err
+		}
+		attempt := *state.Attempt
+		controller.attempt = &attempt
+	}
 	if state.Generation == controller.generation {
 		controller.refused = append([]selfupgrade.RefusedCandidate(nil), state.RefusedCandidates...)
+	}
+	if controller.attempt != nil && controller.attempt.Status == selfupgrade.AttemptStatusAttempt &&
+		controller.attempt.IsFresh(selfUpgradeNow()) && controller.attempt.Matches(controller.incumbent) {
+		controller.startupRefusalReason = fmt.Sprintf(
+			"refused unsettled self-upgrade image for 24h after a replacement attempt (candidate=%s)",
+			selfUpgradeEvidenceIdentityString(controller.incumbent),
+		)
 	}
 	return nil
 }
@@ -265,6 +284,7 @@ func (controller *selfUpgradeController) saveState() error {
 		IncumbentVersion:  controller.incumbent.EmbeddedVersion,
 		IncumbentSHA256:   controller.incumbent.SHA256,
 		RefusedCandidates: append([]selfupgrade.RefusedCandidate(nil), controller.refused...),
+		Attempt:           controller.attempt,
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -347,6 +367,10 @@ func (controller *selfUpgradeController) maintain(ctx context.Context) error {
 		controller.lastObservation.action = selfUpgradeActionUnchanged
 		return nil
 	}
+	if controller.attempt != nil && controller.attempt.Status == selfupgrade.AttemptStatusAttempt &&
+		controller.attempt.IsFresh(selfUpgradeNow()) && controller.attempt.Matches(candidate) {
+		return controller.refuse(candidate, errors.New(controller.attempt.RefusalReason()))
+	}
 	if selfupgrade.RefusedCandidatesContain(controller.refused, candidate) {
 		controller.lastObservation.action = selfUpgradeActionRefused
 		return nil
@@ -360,10 +384,46 @@ func (controller *selfUpgradeController) maintain(ctx context.Context) error {
 	}
 	argv := append([]string(nil), os.Args...)
 	env := append([]string(nil), os.Environ()...)
+	if err := controller.recordAttempt(candidate); err != nil {
+		return fmt.Errorf("self-upgrade deferred: persist replacement attempt: %w", err)
+	}
 	if err := selfUpgradeExecImage(candidate, argv, env); err != nil {
+		controller.attempt = nil
 		return controller.refuse(candidate, fmt.Errorf("exec newer self-upgrade image: %w", err))
 	}
 	controller.lastObservation.action = selfUpgradeActionExec
+	return nil
+}
+
+func (controller *selfUpgradeController) recordAttempt(candidate selfupgrade.ImageEvidence) error {
+	attempt := selfupgrade.NewAttempt(candidate, selfUpgradeNow())
+	if err := selfupgrade.ValidateAttempt(attempt); err != nil {
+		return err
+	}
+	controller.attempt = &attempt
+	if err := controller.saveState(); err != nil {
+		controller.attempt = nil
+		return err
+	}
+	return nil
+}
+
+func (controller *selfUpgradeController) markSettled() error {
+	if controller == nil || controller.attempt == nil ||
+		controller.attempt.Status != selfupgrade.AttemptStatusAttempt {
+		return nil
+	}
+	if !controller.attempt.Matches(controller.incumbent) {
+		return nil
+	}
+	previous := *controller.attempt
+	settled := previous
+	settled.Status = selfupgrade.AttemptStatusSettled
+	controller.attempt = &settled
+	if err := controller.saveState(); err != nil {
+		controller.attempt = &previous
+		return fmt.Errorf("persist settled self-upgrade attempt: %w", err)
+	}
 	return nil
 }
 
@@ -385,4 +445,16 @@ func sameSelfUpgradeContent(first, second selfupgrade.ImageEvidence) bool {
 func sameSelfUpgradeFileIdentity(first, second selfupgrade.ImageEvidence) bool {
 	return sameSelfUpgradeContent(first, second) &&
 		first.Device == second.Device && first.Inode == second.Inode
+}
+
+func selfUpgradeEvidenceIdentityString(evidence selfupgrade.ImageEvidence) string {
+	return fmt.Sprintf(
+		"platform=%s,dev=%d,ino=%d,size=%d,sha256=%s,version=%s",
+		evidence.Platform,
+		evidence.Device,
+		evidence.Inode,
+		evidence.Size,
+		evidence.SHA256,
+		evidence.EmbeddedVersion,
+	)
 }

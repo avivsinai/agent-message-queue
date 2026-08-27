@@ -1962,6 +1962,26 @@ func TestSuperviseUsesInjectedClockOnWakeFailure(t *testing.T) {
 	}
 }
 
+func TestSelfUpgradeHealthyPassRequiresEnsuredResults(t *testing.T) {
+	tests := []struct {
+		name    string
+		results []supervisor.Result
+		want    bool
+	}{
+		{name: "empty", want: true},
+		{name: "ensured", results: []supervisor.Result{{Action: supervisor.ActionEnsured}}, want: true},
+		{name: "deferred", results: []supervisor.Result{{Action: supervisor.ActionDeferred}}, want: false},
+		{name: "failed", results: []supervisor.Result{{Action: supervisor.ActionStartFailed, Error: errors.New("start failed")}}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := selfUpgradeHealthyPass(test.results); got != test.want {
+				t.Fatalf("selfUpgradeHealthyPass(%#v) = %t, want %t", test.results, got, test.want)
+			}
+		})
+	}
+}
+
 func TestSuperviseWarnsOncePerPersistentFailureTransition(t *testing.T) {
 	dir := t.TempDir()
 	registryPath := testRegistryPath(t, dir)

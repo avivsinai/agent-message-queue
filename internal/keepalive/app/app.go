@@ -744,11 +744,19 @@ func (a App) supervise(ctx context.Context, args []string) error {
 	if selfUpgrade.enabled && !selfUpgrade.eligible && selfUpgrade.reason != "" {
 		_, _ = fmt.Fprintf(a.Stderr, "amq-keepalive self-upgrade unavailable: %s\n", selfUpgrade.reason)
 	}
+	if selfUpgrade.startupRefusalReason != "" {
+		_, _ = fmt.Fprintf(a.Stderr, "amq-keepalive self-upgrade refused: %s\n", selfUpgrade.startupRefusalReason)
+	}
 
 	runOnce := func(emitJSON bool) error {
 		results, err := a.superviseOnce(ctx, *registryPath, amq.NewCLI(*amqPath), *self, *wakeTimeout)
 		if err != nil {
 			return err
+		}
+		if selfUpgradeHealthyPass(results) {
+			if err := selfUpgrade.markSettled(); err != nil {
+				return err
+			}
 		}
 		if emitJSON {
 			return printJSON(a.Stdout, results)
@@ -773,6 +781,15 @@ func (a App) supervise(ctx context.Context, args []string) error {
 		case <-timer.C:
 		}
 	}
+}
+
+func selfUpgradeHealthyPass(results []supervisor.Result) bool {
+	for _, result := range results {
+		if result.Error != nil || result.Action != supervisor.ActionEnsured {
+			return false
+		}
+	}
+	return true
 }
 
 func (a App) superviseOnce(ctx context.Context, registryPath string, wake supervisor.WakeRunner, self string, wakeTimeout time.Duration) ([]supervisor.Result, error) {

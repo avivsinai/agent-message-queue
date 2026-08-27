@@ -12,6 +12,6 @@ func newWakeLockResidueError(_ wakeLockRemovalResidue, err error) error {
 	return err
 }
 
-func removeWakeSelfUpgradeDiagnosticGuarded(string, string) error {
+func removeWakeSelfUpgradeArtifactsGuarded(string, string) error {
 	return nil
 }

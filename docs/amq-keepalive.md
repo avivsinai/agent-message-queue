@@ -154,6 +154,15 @@ only when they are not marked close-on-exec. Registry reconciliation must
 finish before this check; an uncertain pass or candidate identity defers the
 upgrade.
 
+Before `execve`, keepalive records the candidate as an unsettled replacement
+attempt in `.selfupgrade.json`. If a later process reaches maintenance with a
+candidate matching that unsettled attempt, it refuses the candidate for 24 hours
+to prevent an immediate crash loop. A healthy pass from the attempted image
+settles the attempt. The guard cannot help when the new image dies before any
+replacement process reaches maintenance code. Its 24-hour memory is scoped to
+the keepalive install/state path and its `.selfupgrade.json` sidecar; it does
+not roll back the installed executable.
+
 AMQ does not write the executable or retain the previous image, so it cannot
 roll back a successful replacement. Recovery from a bad installed image is an
 operator or package-manager action, such as reinstalling or selecting a known
