@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.73.0](https://github.com/avivsinai/agent-message-queue/compare/v0.72.0...v0.73.0) (2026-08-27)
+
+
+### Features
+
+* **launch:** name managed Claude sessions from the plan ([#668](https://github.com/avivsinai/agent-message-queue/issues/668)) ([c83e997](https://github.com/avivsinai/agent-message-queue/commit/c83e997e54add35ac6c666db08a5526fa0ce0193))
+
+
+### Bug Fixes
+
+* **coop:** unify the harness naming table with the launch provider set ([#666](https://github.com/avivsinai/agent-message-queue/issues/666)) ([a76c0e9](https://github.com/avivsinai/agent-message-queue/commit/a76c0e9aabd798867ea496ec09d463ccf08f6320))
+
 ## [0.72.0](https://github.com/avivsinai/agent-message-queue/compare/v0.71.0...v0.72.0) (2026-08-26)
 
 
