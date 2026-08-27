@@ -125,6 +125,10 @@ version. A candidate must also have different bytes from the running image and
 must pass the same ownership, mode, identity, and hash checks used by wake
 self-upgrade.
 
+On Darwin, the private `0700` PID-scoped stage is re-verified immediately
+before pathname exec because Darwin has no `fexecve`; same-UID races in that
+narrow window are outside AMQ's threat model, as for wake self-upgrade.
+
 The `register` and `attach` commands keep `executablePath()` as their default
 injector path. Only `supervise` derives its default self-upgrade locator from
 the launch `argv[0]` or `PATH`, because launchd and direct invocations name the
@@ -139,11 +143,11 @@ upgrade.
 
 Candidate version probes that fail or time out defer and are retried after a
 later pass. Exec failures fail closed and are recorded in the private
-`.selfupgrade.json` sidecar next to the registry; each fully identified
-candidate is attempted at most once in the current supervisor generation. A
-new process generation starts with an empty refusal set. The sidecar is mode
-`0600`; a corrupt or unsafe sidecar disables self-upgrade for that process. Use
-`supervise --no-self-upgrade` to opt out.
+`.selfupgrade.json` sidecar next to the registry; each exec-attempted candidate
+is refused at most once per generation. A new process generation starts with
+an empty refusal set. The sidecar is mode `0600`; a corrupt or unsafe sidecar
+disables self-upgrade for that process. Use `supervise --no-self-upgrade` to
+opt out.
 
 ### Detached wake stderr protocol
 

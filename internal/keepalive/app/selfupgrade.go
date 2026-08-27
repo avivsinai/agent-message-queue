@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -21,6 +22,7 @@ const (
 	selfUpgradeStateSchema       = 1
 	selfUpgradeStateFileName     = ".selfupgrade.json"
 	selfUpgradeVersionProbeLimit = 5 * time.Second
+	selfUpgradeVersionMaxOutput  = 4 * 1024
 	selfUpgradeActionUnchanged   = "unchanged"
 	selfUpgradeActionRefused     = "refused"
 	selfUpgradeActionExec        = "exec"
@@ -74,6 +76,10 @@ func newSelfUpgradeController(registryPath, locator, version string, enabled boo
 	controller := &selfUpgradeController{enabled: enabled}
 	if !enabled {
 		controller.reason = "disabled by --no-self-upgrade"
+		return controller
+	}
+	if !selfupgrade.ExecSupported() {
+		controller.reason = fmt.Sprintf("self-upgrade is unsupported on %s", runtime.GOOS)
 		return controller
 	}
 	if strings.TrimSpace(version) == "" || strings.TrimSpace(version) != version {
@@ -380,17 +386,41 @@ func (controller *selfUpgradeController) refuse(candidate selfupgrade.ImageEvide
 	return cause
 }
 
+type selfUpgradeVersionOutput struct {
+	buffer    bytes.Buffer
+	remaining int64
+	overflow  bool
+}
+
+func (output *selfUpgradeVersionOutput) Write(data []byte) (int, error) {
+	if int64(len(data)) > output.remaining {
+		output.overflow = true
+	}
+	limited := io.LimitReader(bytes.NewReader(data), output.remaining)
+	written, err := io.Copy(&output.buffer, limited)
+	output.remaining -= written
+	return len(data), err
+}
+
 func runSelfUpgradeVersion(path string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), selfUpgradeVersionProbeLimit)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "--version").Output()
-	if err != nil {
+	command := exec.CommandContext(ctx, path, "--version")
+	command.WaitDelay = selfUpgradeVersionProbeLimit
+	configureSelfUpgradeVersionProbe(command)
+	output := &selfUpgradeVersionOutput{remaining: selfUpgradeVersionMaxOutput}
+	command.Stdout = output
+	command.Stderr = io.Discard
+	if err := command.Run(); err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", fmt.Errorf("%w: %v", errSelfUpgradeVersionProbeTimeout, ctx.Err())
 		}
 		return "", err
 	}
-	version := strings.TrimSpace(string(out))
+	if output.overflow {
+		return "", errors.New("candidate version probe returned too much output")
+	}
+	version := strings.TrimSpace(output.buffer.String())
 	if version == "" || strings.ContainsAny(version, "\r\n\t ") {
 		return "", errors.New("candidate version probe returned a malformed version")
 	}

@@ -11,6 +11,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func execSupportedPlatform() bool { return true }
+
 func execImagePlatform(candidate ImageEvidence, argv, env []string) error {
 	lstat, err := os.Lstat(candidate.ExecutionPath)
 	if err != nil {

@@ -13,6 +13,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func execSupportedPlatform() bool { return true }
+
 func execImagePlatform(candidate ImageEvidence, argv, env []string) error {
 	if candidate.ExecutionPath == "" {
 		return errors.New("self-upgrade candidate path is empty")
@@ -94,5 +96,9 @@ func execImagePlatform(candidate ImageEvidence, argv, env []string) error {
 	if !SameDarwinStagedImageEvidence(staged, candidate) {
 		return errors.New("self-upgrade stage changed while binding")
 	}
+	// Darwin cannot exec an open file descriptor. The private 0700 stage
+	// directory named with our PID is re-verified immediately before exec;
+	// same-UID races in that window are outside AMQ's threat model, as for wake
+	// self-upgrade.
 	return syscall.Exec(stagePath, argv, env)
 }

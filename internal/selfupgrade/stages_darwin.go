@@ -12,6 +12,10 @@ import (
 	"syscall"
 )
 
+func selfUpgradeStagePrefix(locator string) string {
+	return "." + filepath.Base(locator) + ".amq-self-upgrade-"
+}
+
 func cleanupImageStagesPlatform(locator string) error {
 	dir := filepath.Dir(locator)
 	prefix := selfUpgradeStagePrefix(locator)

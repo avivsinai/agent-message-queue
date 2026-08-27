@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -176,7 +175,7 @@ func waitForKeepaliveVersion(t *testing.T, statePath, want string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	data, _ := os.ReadFile(statePath)
-	t.Fatalf("keepalive did not publish incumbent version %q at %s: %s", want, statePath, fmt.Sprint(data))
+	t.Fatalf("keepalive did not publish incumbent version %q at %s: %s", want, statePath, string(data))
 }
 
 func keepaliveAppRepoRoot(t *testing.T) string {

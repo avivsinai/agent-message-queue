@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -36,7 +37,7 @@ func TestSelfUpgradeExecsStrictlyNewerImageAtQuiescentBoundary(t *testing.T) {
 		return nil
 	}
 
-	if err := controller.maintain(nil); err != nil {
+	if err := controller.maintain(context.Background()); err != nil {
 		t.Fatalf("maintain() error = %v", err)
 	}
 	if got.EmbeddedVersion != "1.1.0" {
@@ -76,7 +77,7 @@ func TestSelfUpgradeDoesNotExecIdenticalBytesWithDifferentVersion(t *testing.T) 
 		return nil
 	}
 
-	if err := controller.maintain(nil); err != nil {
+	if err := controller.maintain(context.Background()); err != nil {
 		t.Fatalf("maintain() error = %v", err)
 	}
 	if controller.lastObservation == nil || controller.lastObservation.action != selfUpgradeActionUnchanged {
@@ -109,10 +110,10 @@ func TestSelfUpgradeDefersFailedCandidateVersionProbe(t *testing.T) {
 		return nil
 	}
 
-	if err := controller.maintain(nil); err == nil || !strings.Contains(err.Error(), "deferred for candidate "+candidatePath) {
+	if err := controller.maintain(context.Background()); err == nil || !strings.Contains(err.Error(), "deferred for candidate "+candidatePath) {
 		t.Fatalf("first maintain() error = %v, want deferred probe error", err)
 	}
-	if err := controller.maintain(nil); err == nil || !strings.Contains(err.Error(), "deferred for candidate "+candidatePath) {
+	if err := controller.maintain(context.Background()); err == nil || !strings.Contains(err.Error(), "deferred for candidate "+candidatePath) {
 		t.Fatalf("second maintain() error = %v, want deferred probe error", err)
 	}
 	if versionCalls != 2 {
@@ -146,10 +147,10 @@ func TestSelfUpgradeDoesNotReprobeSameCandidateIdentity(t *testing.T) {
 	}
 	selfUpgradeExecImage = func(selfupgrade.ImageEvidence, []string, []string) error { return nil }
 
-	if err := controller.maintain(nil); err != nil {
+	if err := controller.maintain(context.Background()); err != nil {
 		t.Fatalf("first maintain() error = %v", err)
 	}
-	if err := controller.maintain(nil); err != nil {
+	if err := controller.maintain(context.Background()); err != nil {
 		t.Fatalf("second maintain() error = %v", err)
 	}
 	if versionCalls != 1 {
@@ -179,10 +180,10 @@ func TestSelfUpgradeExecFailureIsRememberedOnce(t *testing.T) {
 		return errors.New("exec denied")
 	}
 
-	if err := controller.maintain(nil); err == nil || !strings.Contains(err.Error(), "exec newer self-upgrade image") {
+	if err := controller.maintain(context.Background()); err == nil || !strings.Contains(err.Error(), "exec newer self-upgrade image") {
 		t.Fatalf("first maintain() error = %v, want exec refusal", err)
 	}
-	if err := controller.maintain(nil); err != nil {
+	if err := controller.maintain(context.Background()); err != nil {
 		t.Fatalf("second maintain() error = %v, want cached refusal", err)
 	}
 	if execCalls != 1 || len(controller.refused) != 1 {
@@ -205,7 +206,7 @@ func TestSelfUpgradeTimeoutDoesNotConsumeRefusalMemory(t *testing.T) {
 		return "", fmt.Errorf("%w: test timeout", errSelfUpgradeVersionProbeTimeout)
 	}
 
-	if err := controller.maintain(nil); err != nil {
+	if err := controller.maintain(context.Background()); err != nil {
 		t.Fatalf("maintain() error = %v, want defer", err)
 	}
 	if len(controller.refused) != 0 {
@@ -235,7 +236,7 @@ func TestSelfUpgradeOptOutDoesNotPublishOrProbe(t *testing.T) {
 		return nil
 	}
 
-	if err := controller.maintain(nil); err != nil {
+	if err := controller.maintain(context.Background()); err != nil {
 		t.Fatalf("maintain() error = %v", err)
 	}
 	if _, err := os.Stat(controller.statePath); !errors.Is(err, os.ErrNotExist) {
