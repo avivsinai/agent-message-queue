@@ -118,7 +118,9 @@ directory that already owns its config is the project root. A parent `.amqrc`
 found above an explicit project root (or a cwd that owns its config) is
 ignored, not adopted, so the parent tree stays byte-identical; the implicit
 case still refuses an upward-discovered parent `.amqrc` with the parent path
-named.
+named. A nested or linked Git worktree is the same ceiling without the flag:
+discovery uses that worktree's own config or fails closed, and does not adopt
+the parent live base root.
 
 ```json
 {

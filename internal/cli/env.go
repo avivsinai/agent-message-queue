@@ -590,11 +590,27 @@ func gitWorktreeRootFromCWD() (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if resolved, resolveErr := filepath.EvalSymlinks(cwd); resolveErr == nil {
-		cwd = resolved
+	return gitWorktreeRootFrom(cwd)
+}
+
+// gitWorktreeRootFrom returns the innermost Git worktree or bare-repository
+// boundary that contains path. A nested or linked worktree is its own
+// ceiling, so a parent checkout's .amqrc or .agent-mail is not inferred.
+func gitWorktreeRootFrom(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", false
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	path = abs
+	if resolved, resolveErr := filepath.EvalSymlinks(path); resolveErr == nil {
+		path = resolved
 	}
 	bareCandidate := ""
-	for dir := cwd; ; dir = filepath.Dir(dir) {
+	for dir := path; ; dir = filepath.Dir(dir) {
 		marker := filepath.Join(dir, ".git")
 		_, statErr := gitMarkerLstat(marker)
 		if statErr == nil {
@@ -1075,8 +1091,15 @@ func findAmqrcForRoot(root string) (amqrcResult, error) {
 		if absErr != nil {
 			return amqrcResult{}, absErr
 		}
+		ceiling := ""
+		if top, insideGit := gitWorktreeRootFrom(absRoot); insideGit {
+			ceiling = top
+			if resolved, resolveErr := filepath.EvalSymlinks(absRoot); resolveErr == nil {
+				absRoot = resolved
+			}
+		}
 		dir := absRoot
-		for !isHomeConfigDir(dir) {
+		for ceiling != "" || !isHomeConfigDir(dir) {
 			rcPath := filepath.Join(dir, ".amqrc")
 			if info, statErr := amqrcLstat(rcPath); statErr == nil {
 				if err := validateAmqrcInfo(rcPath, info); err != nil {
@@ -1100,6 +1123,9 @@ func findAmqrcForRoot(root string) (amqrcResult, error) {
 			if !os.IsNotExist(readErr) {
 				// Permission or I/O error — report it, don't mask it.
 				return amqrcResult{}, fmt.Errorf("cannot read .amqrc at %s: %w", rcPath, readErr)
+			}
+			if ceiling != "" && sameCleanPath(dir, ceiling) {
+				break
 			}
 			parent := filepath.Dir(dir)
 			if parent == dir {
