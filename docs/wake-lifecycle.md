@@ -579,11 +579,19 @@ document.
 
 A resume-eligible wake started by `coop exec` follows the stable AMQ launch
 symlink. When an installer atomically points that locator at a strictly newer
-self-reported semantic version, the wake waits for a fully quiescent delivery
-boundary and replaces its running image without changing PID, terminal
-ownership, or unread work. An inconclusive live-image comparison or a
-hash-time identity change defers and retries on the next maintenance tick; it
-does not consume refusal memory.
+image whose embedded Go build metadata supplies a semantic version, the wake
+waits for a fully quiescent delivery boundary and replaces its running image
+without changing PID, terminal ownership, or unread work. The candidate is not
+executed to discover its version; a truncated, non-Go, or otherwise unknown
+image defers. An inconclusive live-image comparison or a hash-time identity
+change defers and retries on the next maintenance tick; it does not consume
+refusal memory.
+
+The later bound-image resume preflight still executes the already verified
+image to confirm the exact wake argv, bootstrap, and recorded version. That
+preflight has a bounded process-group lifetime and does not discover a version
+from an untrusted candidate.
+
 Darwin treats a still-running, identity-confirmed wake whose recorded path is
 gone (`proc_pidpath` ENOENT or ESRCH after an installer unlink) as a
 conclusive deleted image, so Homebrew Cellar replacement can exec in place.
@@ -599,6 +607,11 @@ disabled with `amq wake --no-self-upgrade` or `AMQ_WAKE_NO_SELF_UPGRADE=1`;
 schema-2 wake/doctor JSON reports the latest decision under `self_upgrade`.
 The separate `amq-keepalive` supervisor has its own direct-image self-upgrade
 contract documented in `docs/amq-keepalive.md`.
+
+AMQ does not write the executable or retain the previous image, so neither wake
+self-upgrade path has an in-process rollback. Recovery from a bad installed
+image is an operator or package-manager action, such as reinstalling or
+selecting a known-good package version.
 
 ### 9.2 `.wake.log` retention
 

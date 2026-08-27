@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -13,22 +12,17 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 )
 
 const (
-	selfUpgradeStateSchema       = 1
-	selfUpgradeStateFileName     = ".selfupgrade.json"
-	selfUpgradeVersionProbeLimit = 5 * time.Second
-	selfUpgradeVersionMaxOutput  = 4 * 1024
-	selfUpgradeActionUnchanged   = "unchanged"
-	selfUpgradeActionRefused     = "refused"
-	selfUpgradeActionExec        = "exec"
+	selfUpgradeStateSchema     = 1
+	selfUpgradeStateFileName   = ".selfupgrade.json"
+	selfUpgradeActionUnchanged = "unchanged"
+	selfUpgradeActionRefused   = "refused"
+	selfUpgradeActionExec      = "exec"
 )
-
-var errSelfUpgradeVersionProbeTimeout = errors.New("self-upgrade candidate version probe timed out")
 
 var (
 	selfUpgradeExecutable      = os.Executable
@@ -338,9 +332,6 @@ func (controller *selfUpgradeController) maintain(ctx context.Context) error {
 	version, err := selfUpgradeRunVersion(controller.locator)
 	if err != nil {
 		controller.lastObservation = nil
-		if errors.Is(err, errSelfUpgradeVersionProbeTimeout) {
-			return nil
-		}
 		return fmt.Errorf("self-upgrade deferred for candidate %s: version probe: %w", controller.locator, err)
 	}
 	candidate, err := selfUpgradeCaptureImage(controller.locator, version)
@@ -386,45 +377,8 @@ func (controller *selfUpgradeController) refuse(candidate selfupgrade.ImageEvide
 	return cause
 }
 
-type selfUpgradeVersionOutput struct {
-	buffer    bytes.Buffer
-	remaining int64
-	overflow  bool
-}
-
-func (output *selfUpgradeVersionOutput) Write(data []byte) (int, error) {
-	if int64(len(data)) > output.remaining {
-		output.overflow = true
-	}
-	limited := io.LimitReader(bytes.NewReader(data), output.remaining)
-	written, err := io.Copy(&output.buffer, limited)
-	output.remaining -= written
-	return len(data), err
-}
-
 func runSelfUpgradeVersion(path string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), selfUpgradeVersionProbeLimit)
-	defer cancel()
-	command := exec.CommandContext(ctx, path, "--version")
-	command.WaitDelay = selfUpgradeVersionProbeLimit
-	configureSelfUpgradeVersionProbe(command)
-	output := &selfUpgradeVersionOutput{remaining: selfUpgradeVersionMaxOutput}
-	command.Stdout = output
-	command.Stderr = io.Discard
-	if err := command.Run(); err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("%w: %v", errSelfUpgradeVersionProbeTimeout, ctx.Err())
-		}
-		return "", err
-	}
-	if output.overflow {
-		return "", errors.New("candidate version probe returned too much output")
-	}
-	version := strings.TrimSpace(output.buffer.String())
-	if version == "" || strings.ContainsAny(version, "\r\n\t ") {
-		return "", errors.New("candidate version probe returned a malformed version")
-	}
-	return version, nil
+	return selfupgrade.ReadEmbeddedVersion(path)
 }
 
 func sameSelfUpgradeContent(first, second selfupgrade.ImageEvidence) bool {

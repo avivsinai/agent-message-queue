@@ -120,10 +120,11 @@ wake retirement before the registry row is forgotten.
 
 The continuous supervisor watches the direct executable path named by its
 launch arguments. After each completed supervisor pass, and before the next
-interval wait, it probes that path for a strictly newer self-reported semantic
-version. A candidate must also have different bytes from the running image and
-must pass the same ownership, mode, identity, and hash checks used by wake
-self-upgrade.
+interval wait, it reads that path's embedded Go build metadata for a strictly
+newer semantic version without executing the candidate. A candidate must also
+have different bytes from the running image and must pass the same ownership,
+mode, identity, and hash checks used by wake self-upgrade. A truncated, non-Go,
+or otherwise unknown image defers the upgrade.
 
 On Darwin, the private `0700` PID-scoped stage is re-verified immediately
 before pathname exec because Darwin has no `fexecve`; same-UID races in that
@@ -141,13 +142,18 @@ only when they are not marked close-on-exec. Registry reconciliation must
 finish before this check; an uncertain pass or candidate identity defers the
 upgrade.
 
-Candidate version probes that fail or time out defer and are retried after a
-later pass. Exec failures fail closed and are recorded in the private
-`.selfupgrade.json` sidecar next to the registry; each exec-attempted candidate
-is refused at most once per generation. A new process generation starts with
-an empty refusal set. The sidecar is mode `0600`; a corrupt or unsafe sidecar
-disables self-upgrade for that process. Use `supervise --no-self-upgrade` to
-opt out.
+AMQ does not write the executable or retain the previous image, so it cannot
+roll back a successful replacement. Recovery from a bad installed image is an
+operator or package-manager action, such as reinstalling or selecting a known
+good package version.
+
+Embedded version reads that fail or produce unknown metadata defer and are
+retried after a later pass. Exec failures fail closed and are recorded in the
+private `.selfupgrade.json` sidecar next to the registry; each exec-attempted
+candidate is refused at most once per generation. A new process generation
+starts with an empty refusal set. The sidecar is mode `0600`; a corrupt or
+unsafe sidecar disables self-upgrade for that process. Use
+`supervise --no-self-upgrade` to opt out.
 
 ### Detached wake stderr protocol
 

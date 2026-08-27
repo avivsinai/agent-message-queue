@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -188,29 +187,6 @@ func TestSelfUpgradeExecFailureIsRememberedOnce(t *testing.T) {
 	}
 	if execCalls != 1 || len(controller.refused) != 1 {
 		t.Fatalf("exec calls=%d refusal memory=%d, want 1 and 1", execCalls, len(controller.refused))
-	}
-}
-
-func TestSelfUpgradeTimeoutDoesNotConsumeRefusalMemory(t *testing.T) {
-	dir := t.TempDir()
-	incumbentPath := filepath.Join(dir, "incumbent")
-	candidatePath := filepath.Join(dir, "candidate")
-	writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
-	writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
-	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
-	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
-
-	previousVersion := selfUpgradeRunVersion
-	t.Cleanup(func() { selfUpgradeRunVersion = previousVersion })
-	selfUpgradeRunVersion = func(string) (string, error) {
-		return "", fmt.Errorf("%w: test timeout", errSelfUpgradeVersionProbeTimeout)
-	}
-
-	if err := controller.maintain(context.Background()); err != nil {
-		t.Fatalf("maintain() error = %v, want defer", err)
-	}
-	if len(controller.refused) != 0 {
-		t.Fatalf("timeout consumed refusal memory: %#v", controller.refused)
 	}
 }
 

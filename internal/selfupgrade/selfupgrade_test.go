@@ -52,6 +52,7 @@ func TestVersionStrictlyNewer(t *testing.T) {
 		{incumbent: "1.2.3", candidate: "1.2.3", want: false},
 		{incumbent: "1.2.3", candidate: "1.2.2", want: false},
 		{incumbent: "1.2.3-rc.1", candidate: "1.2.3", want: true},
+		{incumbent: "0.69.0-5-g7a7fbc6", candidate: "0.70.0", want: true},
 		{incumbent: "1.2.3", candidate: "1.2.3+build.1", want: false},
 		{incumbent: "unknown", candidate: "9.9.9", want: false},
 	}

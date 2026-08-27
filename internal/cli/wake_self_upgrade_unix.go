@@ -3,12 +3,12 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -17,11 +17,10 @@ import (
 )
 
 const (
-	envWakeNoSelfUpgrade          = "AMQ_WAKE_NO_SELF_UPGRADE"
-	wakeSelfUpgradeFileName       = ".wake.selfupgrade"
-	wakeSelfUpgradeSchemaV1       = 1
-	wakeSelfUpgradeVersionTimeout = 5 * time.Second
-	wakeSelfUpgradeRefusalLimit   = selfupgrade.RefusalLimit
+	envWakeNoSelfUpgrade        = "AMQ_WAKE_NO_SELF_UPGRADE"
+	wakeSelfUpgradeFileName     = ".wake.selfupgrade"
+	wakeSelfUpgradeSchemaV1     = 1
+	wakeSelfUpgradeRefusalLimit = selfupgrade.RefusalLimit
 
 	wakeSelfUpgradeActionDisabled         = "disabled"
 	wakeSelfUpgradeActionIneligible       = "ineligible"
@@ -416,20 +415,7 @@ func inspectWakeSelfUpgradeLiveDifference(
 }
 
 func runWakeSelfUpgradeVersion(path string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), wakeSelfUpgradeVersionTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "--version").Output()
-	if err != nil {
-		if ctx.Err() != nil {
-			return "", fmt.Errorf("candidate version probe timed out: %w", ctx.Err())
-		}
-		return "", fmt.Errorf("candidate version probe: %w", err)
-	}
-	version := strings.TrimSpace(string(out))
-	if version == "" || strings.ContainsAny(version, "\r\n\t ") {
-		return "", fmt.Errorf("candidate version probe returned a malformed version")
-	}
-	return version, nil
+	return selfupgrade.ReadEmbeddedVersion(path)
 }
 
 // maintainWakeSelfUpgrade performs one maintenance-tick decision. It never
@@ -445,6 +431,11 @@ func maintainWakeSelfUpgrade(
 	}
 	decision := wakeSelfUpgradeDecision{Action: wakeSelfUpgradeActionDisabled, Reason: state.Reason}
 	if !state.Enabled {
+		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
+	}
+	if !selfupgrade.ExecSupported() {
+		decision.Action = wakeSelfUpgradeActionIneligible
+		decision.Reason = fmt.Sprintf("self-upgrade is unsupported on %s", runtime.GOOS)
 		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
 	}
 	if !state.Eligible {

@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
@@ -72,14 +71,14 @@ func preflightBoundWakeRestartCandidate(
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, path, preflightArgs...)
-	cmd.ExtraFiles = extraFiles
-	cmd.Env = setEnvVar(
-		unsetEnvVar(unsetEnvVar(os.Environ(), envWakeResumeBootstrap), envWakeResumePreflight),
-		envWakeResumePreflight,
-		encodedBootstrap,
-	)
-	out, err := cmd.Output()
+	out, err := selfupgrade.RunBoundedProbe(ctx, path, preflightArgs, selfupgrade.BoundedProbeOptions{
+		ExtraFiles: extraFiles,
+		Env: setEnvVar(
+			unsetEnvVar(unsetEnvVar(os.Environ(), envWakeResumeBootstrap), envWakeResumePreflight),
+			envWakeResumePreflight,
+			encodedBootstrap,
+		),
+	})
 	if err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("wake resume preflight timed out: %w", ctx.Err())
@@ -92,6 +91,9 @@ func preflightBoundWakeRestartCandidate(
 	return revalidateBoundWakeRestartImagePlatform(image)
 }
 
+// probeBoundWakeSelfUpgradeVersion is a bounded post-bind preflight of the
+// exact image already verified for wake. It confirms the tentative version
+// before exec; it does not discover a version from an untrusted candidate.
 func probeBoundWakeSelfUpgradeVersion(
 	image *wakeRestartBoundImage,
 	record wakeRestartRecord,
@@ -106,10 +108,15 @@ func probeBoundWakeSelfUpgradeVersion(
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), wakeResumePreflightTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "--no-update-check", "--version")
-	cmd.ExtraFiles = extraFiles
-	cmd.Env = unsetEnvVar(unsetEnvVar(os.Environ(), envWakeResumeBootstrap), envWakeResumePreflight)
-	out, err := cmd.Output()
+	out, err := selfupgrade.RunBoundedProbe(
+		ctx,
+		path,
+		[]string{"--no-update-check", "--version"},
+		selfupgrade.BoundedProbeOptions{
+			ExtraFiles: extraFiles,
+			Env:        unsetEnvVar(unsetEnvVar(os.Environ(), envWakeResumeBootstrap), envWakeResumePreflight),
+		},
+	)
 	if err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("bound wake self-upgrade version probe timed out: %w", ctx.Err())

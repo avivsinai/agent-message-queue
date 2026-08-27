@@ -18,6 +18,7 @@ const (
 	wakeSelfUpgradeBoundProbeModeEnv    = "AMQ_TEST_WAKE_SELF_UPGRADE_BOUND_PROBE_MODE"
 	wakeSelfUpgradeBoundProbeFailMode   = "fail"
 	wakeSelfUpgradeBoundProbeMutateMode = "mutate-after-version"
+	wakeSelfUpgradeBoundProbeForkMode   = "fork-with-stdout"
 )
 
 func TestProbeBoundWakeSelfUpgradeVersion(t *testing.T) {
@@ -38,6 +39,7 @@ func TestProbeBoundWakeSelfUpgradeVersion(t *testing.T) {
 		{name: "invalid semantic version", tentativeVersion: "not-a-semantic-version", probeVersion: "not-a-semantic-version", wantError: "not strictly newer"},
 		{name: "probe failure", tentativeVersion: "1.2.0", probeVersion: "1.2.0", mode: wakeSelfUpgradeBoundProbeFailMode, wantError: "version probe failed"},
 		{name: "post probe revalidation", tentativeVersion: "1.3.0", probeVersion: "1.3.0", mode: wakeSelfUpgradeBoundProbeMutateMode, wantError: "changed during preflight"},
+		{name: "inherited stdout process", tentativeVersion: "1.4.0", probeVersion: "1.4.0", mode: wakeSelfUpgradeBoundProbeForkMode, wantError: "timed out"},
 	}
 
 	for _, test := range tests {
@@ -55,7 +57,12 @@ func TestProbeBoundWakeSelfUpgradeVersion(t *testing.T) {
 
 			t.Setenv(wakeSelfUpgradeBoundProbeVersionEnv, test.probeVersion)
 			t.Setenv(wakeSelfUpgradeBoundProbeModeEnv, test.mode)
+			started := time.Now()
 			err = probeBoundWakeSelfUpgradeVersion(bound, record, incumbentVersion)
+			if test.mode == wakeSelfUpgradeBoundProbeForkMode &&
+				time.Since(started) > wakeResumePreflightTimeout+2*time.Second {
+				t.Fatalf("bounded probe took too long: %v", time.Since(started))
+			}
 			if test.wantError == "" {
 				if err != nil {
 					t.Fatalf("probe bound newer candidate: %v", err)
@@ -157,6 +164,7 @@ func buildWakeSelfUpgradeBoundProbeBinary(t *testing.T) string {
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 )
@@ -169,7 +177,8 @@ func main() {
 		os.Exit(92)
 	}
 	version := os.Getenv("AMQ_TEST_WAKE_SELF_UPGRADE_BOUND_PROBE_VERSION")
-	if os.Getenv("AMQ_TEST_WAKE_SELF_UPGRADE_BOUND_PROBE_MODE") == "mutate-after-version" {
+	mode := os.Getenv("AMQ_TEST_WAKE_SELF_UPGRADE_BOUND_PROBE_MODE")
+	if mode == "mutate-after-version" {
 		path, err := os.Executable()
 		if err != nil {
 			os.Exit(93)
@@ -185,6 +194,19 @@ func main() {
 		} else if err := os.Chmod(path, 0o500); err != nil {
 			os.Exit(96)
 		}
+	}
+	if mode == "fork-with-stdout" {
+		child := exec.Command("sleep", "60")
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(97)
+		}
+		fmt.Println(version)
+		if err := child.Wait(); err != nil {
+			os.Exit(98)
+		}
+		return
 	}
 	fmt.Println(version)
 }
