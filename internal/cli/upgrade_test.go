@@ -897,17 +897,25 @@ func TestUpgradeDoesNotTouchRealCacheWhenIsolated(t *testing.T) {
 }
 
 // realDefaultCachePath computes DefaultCachePath as it would resolve in
-// production (AMQ_CACHE_DIR unset), restoring the override immediately so the
-// rest of the test runs under TestMain's isolated cache.
+// production (AMQ_CACHE_DIR and XDG_CACHE_HOME unset, so os.UserCacheDir
+// returns the true platform default), restoring the overrides immediately so
+// the rest of the test runs under TestMain's isolated cache.
 func realDefaultCachePath(t *testing.T) string {
 	t.Helper()
-	saved := os.Getenv(update.EnvCacheDir)
+	savedCacheDir := os.Getenv(update.EnvCacheDir)
+	savedXDG := os.Getenv("XDG_CACHE_HOME")
 	_ = os.Unsetenv(update.EnvCacheDir)
+	_ = os.Unsetenv("XDG_CACHE_HOME")
 	path, err := update.DefaultCachePath()
-	if saved != "" {
-		_ = os.Setenv(update.EnvCacheDir, saved)
+	if savedCacheDir != "" {
+		_ = os.Setenv(update.EnvCacheDir, savedCacheDir)
 	} else {
 		_ = os.Unsetenv(update.EnvCacheDir)
+	}
+	if savedXDG != "" {
+		_ = os.Setenv("XDG_CACHE_HOME", savedXDG)
+	} else {
+		_ = os.Unsetenv("XDG_CACHE_HOME")
 	}
 	if err != nil {
 		t.Fatalf("resolve real cache path: %v", err)
