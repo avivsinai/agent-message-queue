@@ -27,6 +27,20 @@ func TestCaptureImageEvidence(t *testing.T) {
 	}
 }
 
+func TestCaptureImageEvidenceWithEmbeddedVersion(t *testing.T) {
+	path := buildVersionReaderFixture(t, "1.2.3", true)
+	evidence, err := CaptureImageEvidenceWithEmbeddedVersion(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.EmbeddedVersion != "1.2.3" {
+		t.Fatalf("embedded version = %q, want 1.2.3", evidence.EmbeddedVersion)
+	}
+	if evidence.SHA256 == "" {
+		t.Fatal("image evidence has no digest")
+	}
+}
+
 func TestCaptureImageEvidenceRejectsHashTimeMutation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "amq")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
@@ -51,8 +65,11 @@ func TestVersionStrictlyNewer(t *testing.T) {
 		{incumbent: "1.2.3", candidate: "1.2.4", want: true},
 		{incumbent: "1.2.3", candidate: "1.2.3", want: false},
 		{incumbent: "1.2.3", candidate: "1.2.2", want: false},
-		{incumbent: "1.2.3-rc.1", candidate: "1.2.3", want: true},
+		{incumbent: "1.2.3-rc.1", candidate: "1.2.3", want: false},
+		{incumbent: "0.69.0-5-gX", candidate: "0.69.0", want: false},
+		{incumbent: "0.69.0-10-gB", candidate: "0.69.0-9-gA", want: false},
 		{incumbent: "0.69.0-5-g7a7fbc6", candidate: "0.70.0", want: true},
+		{incumbent: "0.69.0", candidate: "0.70.0-rc1", want: true},
 		{incumbent: "1.2.3", candidate: "1.2.3+build.1", want: false},
 		{incumbent: "unknown", candidate: "9.9.9", want: false},
 	}

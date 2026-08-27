@@ -21,6 +21,19 @@ func TestReadEmbeddedVersionFromReleaseBinary(t *testing.T) {
 	if version != "1.2.3" {
 		t.Fatalf("ReadEmbeddedVersion() = %q, want 1.2.3", version)
 	}
+
+	image, err := os.Open(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = image.Close() }()
+	version, err = ReadEmbeddedVersionFromOpenFile(image)
+	if err != nil {
+		t.Fatalf("ReadEmbeddedVersionFromOpenFile() error = %v", err)
+	}
+	if version != "1.2.3" {
+		t.Fatalf("ReadEmbeddedVersionFromOpenFile() = %q, want 1.2.3", version)
+	}
 }
 
 func TestReadEmbeddedVersionDefersTruncatedImage(t *testing.T) {
@@ -75,6 +88,25 @@ func TestEmbeddedVersionFromBuildInfoRequiresLinkerVersion(t *testing.T) {
 	}
 }
 
+func TestEmbeddedVersionFromBuildInfoUsesLastUnambiguousAssignment(t *testing.T) {
+	info := &buildinfo.BuildInfo{Settings: []debug.BuildSetting{
+		{Key: "-ldflags", Value: "-X main.version=1.0.0"},
+		{Key: "-ldflags", Value: "-X main.version=1.2.3"},
+	}}
+	version, ok := embeddedVersionFromBuildInfo(info)
+	if !ok || version != "1.2.3" {
+		t.Fatalf("embeddedVersionFromBuildInfo() = %q, %t; want 1.2.3, true", version, ok)
+	}
+
+	info.Settings = append(info.Settings, debug.BuildSetting{
+		Key:   "-ldflags",
+		Value: "other/pkg=-X -X main.version=1.3.0",
+	})
+	if version, ok := embeddedVersionFromBuildInfo(info); ok || version != "" {
+		t.Fatalf("embeddedVersionFromBuildInfo() with ambiguous setting = %q, %t; want unknown", version, ok)
+	}
+}
+
 func TestEmbeddedVersionFromBuildInfoRejectsUnknownVersion(t *testing.T) {
 	for _, info := range []*buildinfo.BuildInfo{
 		nil,
@@ -97,6 +129,9 @@ func TestEmbeddedVersionFromLDFlagsParsesSupportedForms(t *testing.T) {
 		{flags: "-s -w -X main.version=1.2.3", want: "1.2.3"},
 		{flags: "-Xmain.version=1.2.3", want: "1.2.3"},
 		{flags: "-X=main.version=1.2.3", want: "1.2.3"},
+		{flags: "-X main.version=1.0.0 -X main.version=1.2.3", want: "1.2.3"},
+		{flags: `'-X' 'main.version=1.2.3'`, want: "1.2.3"},
+		{flags: `"-X=main.version=1.2.3"`, want: "1.2.3"},
 	} {
 		got, ok := embeddedVersionFromLDFlags(test.flags)
 		if !ok || got != test.want {
@@ -105,6 +140,21 @@ func TestEmbeddedVersionFromLDFlagsParsesSupportedForms(t *testing.T) {
 	}
 	if _, ok := embeddedVersionFromLDFlags("-s -w"); ok {
 		t.Fatal("embeddedVersionFromLDFlags() accepted flags without main.version")
+	}
+	for _, flags := range []string{
+		"other/pkg=-X -X main.version=1.2.3",
+		"-X other/pkg=-X",
+		"-X main.version=1.2.3 -X main.version=",
+		`"-X main.version=1.2.3"`,
+		`-X"main.version=1.2.3"`,
+		`-X main.version='1.2.3'`,
+		"-X main.version=1.2.3\\ ",
+		"-X main.version=1.2.3\u00a0",
+		`"-X main.version=1.2.3`,
+	} {
+		if version, ok := embeddedVersionFromLDFlags(flags); ok {
+			t.Errorf("embeddedVersionFromLDFlags(%q) = %q, true; want unknown", flags, version)
+		}
 	}
 }
 
@@ -115,9 +165,11 @@ func buildVersionReaderFixture(t *testing.T, version string, release bool) strin
 	binary := filepath.Join(dir, "version-reader")
 	program := `package main
 
+import "fmt"
+
 var version = "dev"
 
-func main() {}
+func main() { fmt.Print(version) }
 `
 	if err := os.WriteFile(source, []byte(program), 0o600); err != nil {
 		t.Fatal(err)

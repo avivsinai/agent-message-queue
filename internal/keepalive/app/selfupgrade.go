@@ -25,19 +25,19 @@ const (
 )
 
 var (
-	selfUpgradeExecutable      = os.Executable
-	selfUpgradeEvalSymlinks    = filepath.EvalSymlinks
-	selfUpgradeCaptureImage    = selfupgrade.CaptureImageEvidence
-	selfUpgradeRunVersion      = runSelfUpgradeVersion
-	selfUpgradeExecImage       = selfupgrade.ExecImage
-	selfUpgradeGeneration      = newSelfUpgradeGeneration
-	selfUpgradeStateFileInfo   = os.Lstat
-	selfUpgradeStateReadFile   = os.ReadFile
-	selfUpgradeStateCreateTemp = os.CreateTemp
-	selfUpgradeStateRename     = os.Rename
-	selfUpgradeStateRemove     = os.Remove
-	selfUpgradeStateWrite      = io.WriteString
-	selfUpgradeSyncDir         = syncSelfUpgradeDir
+	selfUpgradeExecutable       = os.Executable
+	selfUpgradeEvalSymlinks     = filepath.EvalSymlinks
+	selfUpgradeCaptureImage     = selfupgrade.CaptureImageEvidence
+	selfUpgradeCaptureCandidate = selfupgrade.CaptureImageEvidenceWithEmbeddedVersion
+	selfUpgradeExecImage        = selfupgrade.ExecImage
+	selfUpgradeGeneration       = newSelfUpgradeGeneration
+	selfUpgradeStateFileInfo    = os.Lstat
+	selfUpgradeStateReadFile    = os.ReadFile
+	selfUpgradeStateCreateTemp  = os.CreateTemp
+	selfUpgradeStateRename      = os.Rename
+	selfUpgradeStateRemove      = os.Remove
+	selfUpgradeStateWrite       = io.WriteString
+	selfUpgradeSyncDir          = syncSelfUpgradeDir
 )
 
 type selfUpgradeController struct {
@@ -329,13 +329,12 @@ func (controller *selfUpgradeController) maintain(ctx context.Context) error {
 		controller.lastObservation = &selfUpgradeObservation{evidence: preflight, action: selfUpgradeActionUnchanged}
 		return nil
 	}
-	version, err := selfUpgradeRunVersion(controller.locator)
+	candidate, err := selfUpgradeCaptureCandidate(controller.locator)
 	if err != nil {
 		controller.lastObservation = nil
-		return fmt.Errorf("self-upgrade deferred for candidate %s: version probe: %w", controller.locator, err)
+		return fmt.Errorf("self-upgrade deferred for candidate %s: build info: %w", controller.locator, err)
 	}
-	candidate, err := selfUpgradeCaptureImage(controller.locator, version)
-	if err != nil || !sameSelfUpgradeFileIdentity(preflight, candidate) {
+	if !sameSelfUpgradeFileIdentity(preflight, candidate) {
 		controller.lastObservation = nil
 		return nil
 	}
@@ -375,10 +374,6 @@ func (controller *selfUpgradeController) refuse(candidate selfupgrade.ImageEvide
 		return errors.Join(cause, fmt.Errorf("persist self-upgrade refusal: %w", err))
 	}
 	return cause
-}
-
-func runSelfUpgradeVersion(path string) (string, error) {
-	return selfupgrade.ReadEmbeddedVersion(path)
 }
 
 func sameSelfUpgradeContent(first, second selfupgrade.ImageEvidence) bool {

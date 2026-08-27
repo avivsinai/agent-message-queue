@@ -15,10 +15,16 @@ func configureBoundedProbe(command *exec.Cmd) {
 		if command.Process == nil {
 			return nil
 		}
-		if err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); err != nil &&
-			!errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
-			return err
-		}
-		return nil
+		return cleanupBoundedProbeProcessGroup(command.Process.Pid)
 	}
+}
+
+// A descendant that calls setsid can escape this process group; that remains
+// an explicit limitation of bounded probe cleanup.
+func cleanupBoundedProbeProcessGroup(pid int) error {
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil &&
+		!errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
 }

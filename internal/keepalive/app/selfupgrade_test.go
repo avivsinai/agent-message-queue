@@ -20,13 +20,15 @@ func TestSelfUpgradeExecsStrictlyNewerImageAtQuiescentBoundary(t *testing.T) {
 	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
 	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
 
-	previousVersion := selfUpgradeRunVersion
+	previousCandidate := selfUpgradeCaptureCandidate
 	previousExec := selfUpgradeExecImage
 	t.Cleanup(func() {
-		selfUpgradeRunVersion = previousVersion
+		selfUpgradeCaptureCandidate = previousCandidate
 		selfUpgradeExecImage = previousExec
 	})
-	selfUpgradeRunVersion = func(string) (string, error) { return "1.1.0", nil }
+	selfUpgradeCaptureCandidate = func(path string) (selfupgrade.ImageEvidence, error) {
+		return captureSelfUpgradeTestImage(t, path, "1.1.0"), nil
+	}
 	var got selfupgrade.ImageEvidence
 	var gotArgv, gotEnv []string
 	selfUpgradeExecImage = func(candidate selfupgrade.ImageEvidence, argv, env []string) error {
@@ -61,15 +63,15 @@ func TestSelfUpgradeDoesNotExecIdenticalBytesWithDifferentVersion(t *testing.T) 
 	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
 	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
 
-	previousVersion := selfUpgradeRunVersion
+	previousCandidate := selfUpgradeCaptureCandidate
 	previousExec := selfUpgradeExecImage
 	t.Cleanup(func() {
-		selfUpgradeRunVersion = previousVersion
+		selfUpgradeCaptureCandidate = previousCandidate
 		selfUpgradeExecImage = previousExec
 	})
-	selfUpgradeRunVersion = func(string) (string, error) {
-		t.Fatal("identical image should not require a version probe")
-		return "", nil
+	selfUpgradeCaptureCandidate = func(string) (selfupgrade.ImageEvidence, error) {
+		t.Fatal("identical image should not require candidate capture")
+		return selfupgrade.ImageEvidence{}, nil
 	}
 	selfUpgradeExecImage = func(selfupgrade.ImageEvidence, []string, []string) error {
 		t.Fatal("identical image must not be executed")
@@ -84,7 +86,7 @@ func TestSelfUpgradeDoesNotExecIdenticalBytesWithDifferentVersion(t *testing.T) 
 	}
 }
 
-func TestSelfUpgradeDefersFailedCandidateVersionProbe(t *testing.T) {
+func TestSelfUpgradeDefersFailedCandidateBuildInfoRead(t *testing.T) {
 	dir := t.TempDir()
 	incumbentPath := filepath.Join(dir, "incumbent")
 	candidatePath := filepath.Join(dir, "candidate")
@@ -93,16 +95,16 @@ func TestSelfUpgradeDefersFailedCandidateVersionProbe(t *testing.T) {
 	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
 	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
 
-	previousVersion := selfUpgradeRunVersion
+	previousCandidate := selfUpgradeCaptureCandidate
 	previousExec := selfUpgradeExecImage
 	t.Cleanup(func() {
-		selfUpgradeRunVersion = previousVersion
+		selfUpgradeCaptureCandidate = previousCandidate
 		selfUpgradeExecImage = previousExec
 	})
-	versionCalls := 0
-	selfUpgradeRunVersion = func(string) (string, error) {
-		versionCalls++
-		return "", errors.New("candidate exited unsuccessfully")
+	captureCalls := 0
+	selfUpgradeCaptureCandidate = func(string) (selfupgrade.ImageEvidence, error) {
+		captureCalls++
+		return selfupgrade.ImageEvidence{}, errors.New("candidate build info unavailable")
 	}
 	selfUpgradeExecImage = func(selfupgrade.ImageEvidence, []string, []string) error {
 		t.Fatal("corrupt candidate must not be executed")
@@ -110,13 +112,13 @@ func TestSelfUpgradeDefersFailedCandidateVersionProbe(t *testing.T) {
 	}
 
 	if err := controller.maintain(context.Background()); err == nil || !strings.Contains(err.Error(), "deferred for candidate "+candidatePath) {
-		t.Fatalf("first maintain() error = %v, want deferred probe error", err)
+		t.Fatalf("first maintain() error = %v, want deferred build-info error", err)
 	}
 	if err := controller.maintain(context.Background()); err == nil || !strings.Contains(err.Error(), "deferred for candidate "+candidatePath) {
-		t.Fatalf("second maintain() error = %v, want deferred probe error", err)
+		t.Fatalf("second maintain() error = %v, want deferred build-info error", err)
 	}
-	if versionCalls != 2 {
-		t.Fatalf("version probe calls = %d, want retry after deferred failure", versionCalls)
+	if captureCalls != 2 {
+		t.Fatalf("candidate capture calls = %d, want retry after deferred failure", captureCalls)
 	}
 	if len(controller.refused) != 0 {
 		t.Fatalf("refusal memory length = %d, want no refusal for an inconclusive probe", len(controller.refused))
@@ -133,16 +135,16 @@ func TestSelfUpgradeDoesNotReprobeSameCandidateIdentity(t *testing.T) {
 	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
 	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
 
-	previousVersion := selfUpgradeRunVersion
+	previousCandidate := selfUpgradeCaptureCandidate
 	previousExec := selfUpgradeExecImage
 	t.Cleanup(func() {
-		selfUpgradeRunVersion = previousVersion
+		selfUpgradeCaptureCandidate = previousCandidate
 		selfUpgradeExecImage = previousExec
 	})
-	versionCalls := 0
-	selfUpgradeRunVersion = func(string) (string, error) {
-		versionCalls++
-		return "1.1.0", nil
+	captureCalls := 0
+	selfUpgradeCaptureCandidate = func(path string) (selfupgrade.ImageEvidence, error) {
+		captureCalls++
+		return captureSelfUpgradeTestImage(t, path, "1.1.0"), nil
 	}
 	selfUpgradeExecImage = func(selfupgrade.ImageEvidence, []string, []string) error { return nil }
 
@@ -152,8 +154,8 @@ func TestSelfUpgradeDoesNotReprobeSameCandidateIdentity(t *testing.T) {
 	if err := controller.maintain(context.Background()); err != nil {
 		t.Fatalf("second maintain() error = %v", err)
 	}
-	if versionCalls != 1 {
-		t.Fatalf("version probe calls = %d, want one for one candidate identity", versionCalls)
+	if captureCalls != 1 {
+		t.Fatalf("candidate capture calls = %d, want one for one candidate identity", captureCalls)
 	}
 }
 
@@ -166,13 +168,15 @@ func TestSelfUpgradeExecFailureIsRememberedOnce(t *testing.T) {
 	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
 	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
 
-	previousVersion := selfUpgradeRunVersion
+	previousCandidate := selfUpgradeCaptureCandidate
 	previousExec := selfUpgradeExecImage
 	t.Cleanup(func() {
-		selfUpgradeRunVersion = previousVersion
+		selfUpgradeCaptureCandidate = previousCandidate
 		selfUpgradeExecImage = previousExec
 	})
-	selfUpgradeRunVersion = func(string) (string, error) { return "1.1.0", nil }
+	selfUpgradeCaptureCandidate = func(path string) (selfupgrade.ImageEvidence, error) {
+		return captureSelfUpgradeTestImage(t, path, "1.1.0"), nil
+	}
 	execCalls := 0
 	selfUpgradeExecImage = func(selfupgrade.ImageEvidence, []string, []string) error {
 		execCalls++
@@ -197,15 +201,15 @@ func TestSelfUpgradeOptOutDoesNotPublishOrProbe(t *testing.T) {
 		eligible:  false,
 		statePath: filepath.Join(dir, selfUpgradeStateFileName),
 	}
-	previousVersion := selfUpgradeRunVersion
+	previousCandidate := selfUpgradeCaptureCandidate
 	previousExec := selfUpgradeExecImage
 	t.Cleanup(func() {
-		selfUpgradeRunVersion = previousVersion
+		selfUpgradeCaptureCandidate = previousCandidate
 		selfUpgradeExecImage = previousExec
 	})
-	selfUpgradeRunVersion = func(string) (string, error) {
+	selfUpgradeCaptureCandidate = func(string) (selfupgrade.ImageEvidence, error) {
 		t.Fatal("opt-out should not probe the candidate")
-		return "", nil
+		return selfupgrade.ImageEvidence{}, nil
 	}
 	selfUpgradeExecImage = func(selfupgrade.ImageEvidence, []string, []string) error {
 		t.Fatal("opt-out should not exec a candidate")

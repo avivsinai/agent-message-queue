@@ -310,12 +310,12 @@ func TestWakeSelfUpgradeUnchangedProbeSkipsQuiescence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	previousVersion := wakeSelfUpgradeRunVersion
-	wakeSelfUpgradeRunVersion = func(string) (string, error) {
-		t.Fatal("unchanged locator ran the version probe")
-		return "", nil
+	previousCandidate := wakeSelfUpgradeCaptureCandidate
+	wakeSelfUpgradeCaptureCandidate = func(string) (wakeImageEvidenceV1, error) {
+		t.Fatal("unchanged locator ran candidate capture")
+		return wakeImageEvidenceV1{}, nil
 	}
-	t.Cleanup(func() { wakeSelfUpgradeRunVersion = previousVersion })
+	t.Cleanup(func() { wakeSelfUpgradeCaptureCandidate = previousCandidate })
 
 	cfg := wakeConfig{
 		me:                 fixture.agent,

@@ -48,8 +48,23 @@ func RunBoundedProbe(
 	output := &boundedProbeOutput{remaining: boundedProbeMaxOutput}
 	command.Stdout = output
 	command.Stderr = io.Discard
-	if err := command.Run(); err != nil {
+	if err := command.Start(); err != nil {
 		return nil, err
+	}
+	pid := command.Process.Pid
+	waitErr := command.Wait()
+	cleanupErr := cleanupBoundedProbeProcessGroup(pid)
+	if waitErr != nil {
+		if cleanupErr != nil {
+			return nil, errors.Join(
+				waitErr,
+				fmt.Errorf("bounded probe process-group cleanup: %w", cleanupErr),
+			)
+		}
+		return nil, waitErr
+	}
+	if cleanupErr != nil {
+		return nil, fmt.Errorf("bounded probe process-group cleanup: %w", cleanupErr)
 	}
 	if output.overflow {
 		return nil, fmt.Errorf("bounded probe output exceeds %d bytes", boundedProbeMaxOutput)

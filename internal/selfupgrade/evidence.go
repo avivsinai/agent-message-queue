@@ -108,42 +108,49 @@ func CaptureImageEvidence(path, embeddedVersion string) (ImageEvidence, error) {
 	return CaptureImageEvidenceWithMutator(path, embeddedVersion, nil)
 }
 
+// CaptureImageEvidenceWithEmbeddedVersion reads the candidate version and
+// captures its evidence from the same opened file.
+func CaptureImageEvidenceWithEmbeddedVersion(path string) (ImageEvidence, error) {
+	path = strings.TrimSpace(path)
+	file, before, err := openImageEvidenceFile(path)
+	if err != nil {
+		return ImageEvidence{}, err
+	}
+	defer func() { _ = file.Close() }()
+
+	version, err := ReadEmbeddedVersionFromOpenFile(file)
+	if err != nil {
+		return ImageEvidence{}, fmt.Errorf("read wake image version: %w", err)
+	}
+	evidence, err := CaptureImageEvidenceFromOpenFile(
+		file,
+		path,
+		version,
+		ImageMethodPathnameObserved,
+	)
+	if err != nil {
+		return ImageEvidence{}, err
+	}
+	confirmed, err := file.Stat()
+	if err != nil {
+		return ImageEvidence{}, fmt.Errorf("re-stat wake image: %w", err)
+	}
+	if !sameImageFileIdentity(before, confirmed) || before.Size() != confirmed.Size() {
+		return ImageEvidence{}, ErrImageChangedWhileHashing
+	}
+	return evidence, nil
+}
+
 // CaptureImageEvidenceWithMutator exists for race tests that mutate the file
 // between the before-hash and after-hash observations.
 func CaptureImageEvidenceWithMutator(path, embeddedVersion string, mutator func()) (ImageEvidence, error) {
 	path = strings.TrimSpace(path)
-	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return ImageEvidence{}, fmt.Errorf("wake image path must be a canonical absolute path")
-	}
-	lstat, err := os.Lstat(path)
+	file, before, err := openImageEvidenceFile(path)
 	if err != nil {
-		return ImageEvidence{}, fmt.Errorf("stat wake image: %w", err)
-	}
-	if lstat.Mode()&os.ModeSymlink != 0 {
-		return ImageEvidence{}, fmt.Errorf("wake image must not be a symlink")
-	}
-	file, err := openImageMetadataFile(path)
-	if err != nil {
-		return ImageEvidence{}, fmt.Errorf("open wake image: %w", err)
+		return ImageEvidence{}, err
 	}
 	defer func() { _ = file.Close() }()
 
-	before, err := file.Stat()
-	if err != nil {
-		return ImageEvidence{}, fmt.Errorf("stat opened wake image: %w", err)
-	}
-	if !sameImageFileIdentity(lstat, before) {
-		return ImageEvidence{}, fmt.Errorf("wake image changed while opening")
-	}
-	if !before.Mode().IsRegular() {
-		return ImageEvidence{}, fmt.Errorf("wake image must be a regular file")
-	}
-	if before.Mode().Perm()&0o111 == 0 {
-		return ImageEvidence{}, fmt.Errorf("wake image is not executable")
-	}
-	if err := validateImagePathOwnership("wake image", path, before); err != nil {
-		return ImageEvidence{}, err
-	}
 	evidence, err := CaptureImageEvidenceFromOpenFileWithMutator(
 		file,
 		path,
@@ -162,4 +169,46 @@ func CaptureImageEvidenceWithMutator(path, embeddedVersion string, mutator func(
 		return ImageEvidence{}, ErrImageChangedWhileHashing
 	}
 	return evidence, nil
+}
+
+func openImageEvidenceFile(path string) (*os.File, os.FileInfo, error) {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, nil, fmt.Errorf("wake image path must be a canonical absolute path")
+	}
+	lstat, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("stat wake image: %w", err)
+	}
+	if lstat.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, fmt.Errorf("wake image must not be a symlink")
+	}
+	file, err := openImageMetadataFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open wake image: %w", err)
+	}
+	closeOnError := true
+	defer func() {
+		if closeOnError {
+			_ = file.Close()
+		}
+	}()
+
+	before, err := file.Stat()
+	if err != nil {
+		return nil, nil, fmt.Errorf("stat opened wake image: %w", err)
+	}
+	if !sameImageFileIdentity(lstat, before) {
+		return nil, nil, fmt.Errorf("wake image changed while opening")
+	}
+	if !before.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("wake image must be a regular file")
+	}
+	if before.Mode().Perm()&0o111 == 0 {
+		return nil, nil, fmt.Errorf("wake image is not executable")
+	}
+	if err := validateImagePathOwnership("wake image", path, before); err != nil {
+		return nil, nil, err
+	}
+	closeOnError = false
+	return file, before, nil
 }
