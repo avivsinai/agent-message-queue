@@ -133,10 +133,12 @@ and an absent or unparsable incumbent version disables self-upgrade. Versioned
 omits the recorded `-ldflags` metadata required for discovery. A candidate must
 also have different bytes from the running image and must pass the same
 ownership, mode, identity, and hash checks used by wake self-upgrade. An image
-whose build-info region cannot be read defers; readable metadata does not prove
-that the rest of the executable is intact. Universal or fat Mach-O input is
-read from its first slice; AMQ release output is single-slice, and supporting
-other slices is a non-goal.
+whose build-info region cannot be read, including a truncated, non-Go, or
+otherwise unknown image, defers the upgrade; readable metadata does not prove
+that the rest of the executable is intact. Keepalive does not invoke the
+candidate with `--version` to discover its version. Universal or fat Mach-O
+input is read from its first slice; AMQ release output is single-slice, and
+supporting other slices is a non-goal.
 
 On Darwin, the private `0700` PID-scoped stage is re-verified immediately
 before pathname exec because Darwin has no `fexecve`; same-UID races in that
