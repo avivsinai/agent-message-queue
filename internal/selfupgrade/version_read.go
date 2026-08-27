@@ -91,6 +91,9 @@ func parseEmbeddedVersionFromLDFlags(raw string) (string, bool, bool) {
 	for index := 0; index < len(fields); index++ {
 		field := fields[index]
 		switch {
+		case field == "-s", field == "-w":
+			// These are the only supported argument-free linker options.
+			continue
 		case field == "-X":
 			if index+1 >= len(fields) {
 				return "", false, true
@@ -120,18 +123,10 @@ func parseEmbeddedVersionFromLDFlags(raw string) (string, bool, bool) {
 				version = value
 				found = true
 			}
-		case strings.HasPrefix(field, "-X"):
-			target, value, valid := parseLinkerAssignment(strings.TrimPrefix(field, "-X"))
-			if !valid {
-				return "", false, true
-			}
-			if target == "main.version" {
-				if !validEmbeddedVersionText(value) {
-					return "", false, true
-				}
-				version = value
-				found = true
-			}
+		case strings.HasPrefix(field, "-"):
+			// An unknown option may consume the next token as its value. Do not
+			// inspect later tokens because they may not be independent flags.
+			return "", false, true
 		default:
 			// A non-flag token containing '=' is a per-package setting, not a
 			// linker option. It can change which -X assignment is effective.

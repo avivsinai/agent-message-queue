@@ -127,7 +127,6 @@ func TestEmbeddedVersionFromLDFlagsParsesSupportedForms(t *testing.T) {
 		want  string
 	}{
 		{flags: "-s -w -X main.version=1.2.3", want: "1.2.3"},
-		{flags: "-Xmain.version=1.2.3", want: "1.2.3"},
 		{flags: "-X=main.version=1.2.3", want: "1.2.3"},
 		{flags: "-X main.version=1.0.0 -X main.version=1.2.3", want: "1.2.3"},
 		{flags: `'-X' 'main.version=1.2.3'`, want: "1.2.3"},
@@ -145,6 +144,8 @@ func TestEmbeddedVersionFromLDFlagsParsesSupportedForms(t *testing.T) {
 		"other/pkg=-X -X main.version=1.2.3",
 		"-X other/pkg=-X",
 		"-X main.version=1.2.3 -X main.version=",
+		"-Xmain.version=1.2.3",
+		"-buildid -X=main.version=9.9.9",
 		`"-X main.version=1.2.3"`,
 		`-X"main.version=1.2.3"`,
 		`-X main.version='1.2.3'`,
@@ -158,7 +159,43 @@ func TestEmbeddedVersionFromLDFlagsParsesSupportedForms(t *testing.T) {
 	}
 }
 
+func TestReadEmbeddedVersionDefersUnknownLinkerOptionFromRealBinary(t *testing.T) {
+	binary := buildVersionReaderFixtureWithLDFlags(
+		t,
+		"-X main.version=1.0.0 -buildid -X=main.version=9.9.9",
+	)
+	if got := runVersionReaderFixture(t, binary); got != "1.0.0" {
+		t.Fatalf("version-reader output = %q, want 1.0.0", got)
+	}
+	if version, err := ReadEmbeddedVersion(binary); err == nil {
+		t.Fatalf("ReadEmbeddedVersion() = %q, nil; want deferred metadata", version)
+	}
+}
+
+func TestReadEmbeddedVersionAcceptsAllowlistedLinkerOptionsFromRealBinary(t *testing.T) {
+	binary := buildVersionReaderFixtureWithLDFlags(t, "-s -w -X main.version=1.2.3")
+	if got := runVersionReaderFixture(t, binary); got != "1.2.3" {
+		t.Fatalf("version-reader output = %q, want 1.2.3", got)
+	}
+	version, err := ReadEmbeddedVersion(binary)
+	if err != nil {
+		t.Fatalf("ReadEmbeddedVersion() error = %v", err)
+	}
+	if version != "1.2.3" {
+		t.Fatalf("ReadEmbeddedVersion() = %q, want 1.2.3", version)
+	}
+}
+
 func buildVersionReaderFixture(t *testing.T, version string, release bool) string {
+	t.Helper()
+	var ldflags string
+	if release {
+		ldflags = "-s -w -X main.version=" + version
+	}
+	return buildVersionReaderFixtureWithLDFlags(t, ldflags)
+}
+
+func buildVersionReaderFixtureWithLDFlags(t *testing.T, ldflags string) string {
 	t.Helper()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "version-reader.go")
@@ -177,8 +214,8 @@ func main() { fmt.Print(version) }
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	args := []string{"build"}
-	if release {
-		args = append(args, "-ldflags", "-s -w -X main.version="+version)
+	if ldflags != "" {
+		args = append(args, "-ldflags", ldflags)
 	}
 	args = append(args, "-o", binary, source)
 	cmd := exec.CommandContext(ctx, "go", args...)
@@ -193,4 +230,19 @@ func main() { fmt.Print(version) }
 		t.Fatal(err)
 	}
 	return binary
+}
+
+func runVersionReaderFixture(t *testing.T, binary string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("run version reader timed out: %v\n%s", ctx.Err(), output)
+	}
+	if err != nil {
+		t.Fatalf("run version reader: %v\n%s", err, output)
+	}
+	return string(output)
 }

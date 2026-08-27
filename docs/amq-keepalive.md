@@ -122,15 +122,21 @@ The continuous supervisor watches the direct executable path named by its
 launch arguments. After each completed supervisor pass, and before the next
 interval wait, it reads the `-X main.version` linker assignment recorded in Go
 build metadata for a strictly newer semantic version without executing the
-candidate. The last assignment wins; only unambiguous `-ldflags` settings are
-accepted, and ambiguity defers the upgrade. The version is candidate-controlled
-metadata, not a release manifest. A candidate must also have different bytes
-from the running image and must pass the same ownership, mode, identity, and
-hash checks used by wake self-upgrade. An image whose build-info region cannot
-be read defers; readable metadata does not prove that the rest of the
-executable is intact. Universal or fat Mach-O input is read from its first
-slice; AMQ release output is single-slice, and supporting other slices is a
-non-goal.
+candidate. The last assignment wins over an allowlisted flag set. The parser
+accepts only the argument-free `-s` and `-w` flags plus the separate
+`-X main.version=...` and `-X=main.version=...` forms; any unrecognized linker
+option defers the upgrade. The version is candidate-controlled metadata, not a
+release manifest. Excluding `Main.Version` is a candidate-side rule: the
+incumbent may still use its `Main.Version` fallback, including for `dev` builds,
+and an absent or unparsable incumbent version disables self-upgrade. Versioned
+`go install` and `-trimpath` builds are unsupported candidates; `-trimpath`
+omits the recorded `-ldflags` metadata required for discovery. A candidate must
+also have different bytes from the running image and must pass the same
+ownership, mode, identity, and hash checks used by wake self-upgrade. An image
+whose build-info region cannot be read defers; readable metadata does not prove
+that the rest of the executable is intact. Universal or fat Mach-O input is
+read from its first slice; AMQ release output is single-slice, and supporting
+other slices is a non-goal.
 
 On Darwin, the private `0700` PID-scoped stage is re-verified immediately
 before pathname exec because Darwin has no `fexecve`; same-UID races in that
