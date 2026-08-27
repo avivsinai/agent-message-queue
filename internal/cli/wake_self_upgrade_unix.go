@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 	"golang.org/x/sys/unix"
 )
 
@@ -20,7 +21,7 @@ const (
 	wakeSelfUpgradeFileName       = ".wake.selfupgrade"
 	wakeSelfUpgradeSchemaV1       = 1
 	wakeSelfUpgradeVersionTimeout = 5 * time.Second
-	wakeSelfUpgradeRefusalLimit   = 8
+	wakeSelfUpgradeRefusalLimit   = selfupgrade.RefusalLimit
 
 	wakeSelfUpgradeActionDisabled         = "disabled"
 	wakeSelfUpgradeActionIneligible       = "ineligible"
@@ -67,14 +68,7 @@ type wakeSelfUpgradeCandidate struct {
 // wakeSelfUpgradeRefusedCandidate is the path-free identity used by the
 // generation-scoped refusal memory in .wake.restart. Execution paths, methods,
 // and ctimes are deliberately excluded because Darwin binding changes them.
-type wakeSelfUpgradeRefusedCandidate struct {
-	Platform        string `json:"platform"`
-	Device          uint64 `json:"device"`
-	Inode           uint64 `json:"inode"`
-	Size            int64  `json:"size"`
-	SHA256          string `json:"sha256"`
-	EmbeddedVersion string `json:"embedded_version"`
-}
+type wakeSelfUpgradeRefusedCandidate = selfupgrade.RefusedCandidate
 
 func wakeSelfUpgradeCandidateFromEvidence(evidence wakeImageEvidenceV1) *wakeSelfUpgradeCandidate {
 	return &wakeSelfUpgradeCandidate{
@@ -89,41 +83,20 @@ func wakeSelfUpgradeCandidateFromEvidence(evidence wakeImageEvidenceV1) *wakeSel
 }
 
 func wakeSelfUpgradeRefusedCandidateFromEvidence(evidence wakeImageEvidenceV1) wakeSelfUpgradeRefusedCandidate {
-	return wakeSelfUpgradeRefusedCandidate{
-		Platform:        evidence.Platform,
-		Device:          evidence.Device,
-		Inode:           evidence.Inode,
-		Size:            evidence.Size,
-		SHA256:          evidence.SHA256,
-		EmbeddedVersion: evidence.EmbeddedVersion,
-	}
+	return selfupgrade.RefusedCandidateFromEvidence(evidence)
 }
 
 func sameWakeSelfUpgradeRefusedCandidates(
 	first, second []wakeSelfUpgradeRefusedCandidate,
 ) bool {
-	if len(first) != len(second) {
-		return false
-	}
-	for index := range first {
-		if first[index] != second[index] {
-			return false
-		}
-	}
-	return true
+	return selfupgrade.SameRefusedCandidates(first, second)
 }
 
 func wakeSelfUpgradeRefusedCandidatesContain(
 	candidates []wakeSelfUpgradeRefusedCandidate,
 	evidence wakeImageEvidenceV1,
 ) bool {
-	want := wakeSelfUpgradeRefusedCandidateFromEvidence(evidence)
-	for _, candidate := range candidates {
-		if candidate == want {
-			return true
-		}
-	}
-	return false
+	return selfupgrade.RefusedCandidatesContain(candidates, evidence)
 }
 
 // rememberWakeSelfUpgradeRefusal appends the current identity as the most
@@ -132,21 +105,7 @@ func rememberWakeSelfUpgradeRefusal(
 	candidates []wakeSelfUpgradeRefusedCandidate,
 	evidence wakeImageEvidenceV1,
 ) []wakeSelfUpgradeRefusedCandidate {
-	current := wakeSelfUpgradeRefusedCandidateFromEvidence(evidence)
-	remembered := make([]wakeSelfUpgradeRefusedCandidate, 0, len(candidates)+1)
-	for _, candidate := range candidates {
-		if candidate != current {
-			remembered = append(remembered, candidate)
-		}
-	}
-	remembered = append(remembered, current)
-	if len(remembered) > wakeSelfUpgradeRefusalLimit {
-		remembered = append(
-			[]wakeSelfUpgradeRefusedCandidate(nil),
-			remembered[len(remembered)-wakeSelfUpgradeRefusalLimit:]...,
-		)
-	}
-	return remembered
+	return selfupgrade.RememberRefusal(candidates, evidence)
 }
 
 func wakeSelfUpgradeRefusalMemory(record wakeRestartRecord) []wakeSelfUpgradeRefusedCandidate {
@@ -718,9 +677,7 @@ func sameWakeSelfUpgradeRefusalScope(
 // path. Failed-attempt memory therefore keys the stable image identity, not
 // those binding-method artifacts.
 func sameWakeSelfUpgradeCandidateIdentity(first, second wakeImageEvidenceV1) bool {
-	return first.Platform == second.Platform && first.Device == second.Device &&
-		first.Inode == second.Inode && first.Size == second.Size &&
-		first.SHA256 == second.SHA256 && first.EmbeddedVersion == second.EmbeddedVersion
+	return selfupgrade.SameCandidateIdentity(first, second)
 }
 
 func wakeSelfUpgradeEvidenceIdentityString(evidence wakeImageEvidenceV1) string {

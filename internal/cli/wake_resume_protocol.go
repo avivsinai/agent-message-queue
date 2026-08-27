@@ -1,46 +1,30 @@
 package cli
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 )
 
 const (
-	wakeResumeSchemaV2        = 2
-	wakeImageEvidenceSchemaV1 = 1
-
-	wakeImageMethodFDExec                     = "fd_exec"
-	wakeImageMethodPathnameObserved           = "pathname_observed"
-	wakeImageMethodPathnameExecObserved       = "pathname_exec_observed"
-	wakeImageMethodPathnameExecVerifiedLegacy = "pathname_execve_verified"
-	wakeImageMethodPathnameExecVerified       = wakeImageMethodPathnameExecVerifiedLegacy
-	wakeResumeSignalUSR1                      = "SIGUSR1"
+	wakeResumeSchemaV2   = 2
+	wakeResumeSignalUSR1 = "SIGUSR1"
 )
 
-// wakeImageEvidenceV1 records image metadata and its authority method.
-// pathname_observed is diagnostic on every platform. A resumed Darwin wake
-// publishes the private hardlink path observed by the successor after exec;
-// Darwin cannot atomically bind exec to an already-open descriptor. A resumed
-// Linux wake publishes evidence from its bound FD and verifies the running
-// image through /proc/self/exe before rotating generation.
-type wakeImageEvidenceV1 struct {
-	Schema          int    `json:"schema"`
-	Platform        string `json:"platform"`
-	Method          string `json:"method"`
-	ExecutionPath   string `json:"execution_path"`
-	Device          uint64 `json:"device"`
-	Inode           uint64 `json:"inode"`
-	Size            int64  `json:"size"`
-	CTimeNS         int64  `json:"ctime_ns"`
-	SHA256          string `json:"sha256"`
-	EmbeddedVersion string `json:"embedded_version"`
-}
+type wakeImageEvidenceV1 = selfupgrade.ImageEvidence
+
+const (
+	wakeImageEvidenceSchemaV1                 = selfupgrade.ImageEvidenceSchemaV1
+	wakeImageMethodFDExec                     = selfupgrade.ImageMethodFDExec
+	wakeImageMethodPathnameObserved           = selfupgrade.ImageMethodPathnameObserved
+	wakeImageMethodPathnameExecObserved       = selfupgrade.ImageMethodPathnameExecObserved
+	wakeImageMethodPathnameExecVerified       = selfupgrade.ImageMethodPathnameExecVerified
+	wakeImageMethodPathnameExecVerifiedLegacy = selfupgrade.ImageMethodPathnameExecVerifiedLegacy
+)
 
 var errWakeResumeControlEndpointUnsupported = errors.New("wake resume control endpoint is unsupported")
 
@@ -133,72 +117,19 @@ func validateWakeResumeAdvertisementWithContext(
 }
 
 func validateWakeImageEvidence(evidence wakeImageEvidenceV1) error {
-	return validateWakeImageEvidenceForPlatform(evidence, runtime.GOOS)
+	return selfupgrade.ValidateImageEvidence(evidence)
 }
 
 func validateWakeImageEvidenceForPlatform(evidence wakeImageEvidenceV1, platform string) error {
-	if evidence.Schema != wakeImageEvidenceSchemaV1 {
-		return fmt.Errorf("wake image evidence schema %d unsupported", evidence.Schema)
-	}
-	if evidence.Platform != platform {
-		return fmt.Errorf("wake image platform %q does not match %q", evidence.Platform, platform)
-	}
-	if platform == "darwin" {
-		if evidence.Method != wakeImageMethodPathnameObserved &&
-			!wakeImageMethodIsDarwinExecObserved(evidence.Method) {
-			return fmt.Errorf("wake image method %q does not match a Darwin pathname evidence method", evidence.Method)
-		}
-	} else if platform == "linux" {
-		if evidence.Method != wakeImageMethodPathnameObserved &&
-			evidence.Method != wakeImageMethodFDExec {
-			return fmt.Errorf("wake image method %q does not match a Linux image evidence method", evidence.Method)
-		}
-	} else if evidence.Method != wakeImageMethodFDExec {
-		return fmt.Errorf("wake image method %q does not match platform method %q", evidence.Method, wakeImageMethodFDExec)
-	}
-	path := strings.TrimSpace(evidence.ExecutionPath)
-	if path == "" || path != evidence.ExecutionPath || strings.ContainsRune(path, 0) ||
-		!filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return fmt.Errorf("wake image execution path must be a canonical absolute path")
-	}
-	if evidence.Device == 0 {
-		return fmt.Errorf("wake image device is missing")
-	}
-	if evidence.Inode == 0 {
-		return fmt.Errorf("wake image inode is missing")
-	}
-	if evidence.Size <= 0 {
-		return fmt.Errorf("wake image size must be positive")
-	}
-	if evidence.CTimeNS <= 0 {
-		return fmt.Errorf("wake image ctime is missing")
-	}
-	if !validWakeImageSHA256(evidence.SHA256) {
-		return fmt.Errorf("wake image sha256 is malformed")
-	}
-	version := strings.TrimSpace(evidence.EmbeddedVersion)
-	if version == "" || strings.ContainsRune(version, 0) || version != evidence.EmbeddedVersion {
-		return fmt.Errorf("wake image embedded version is missing or non-canonical")
-	}
-	return nil
+	return selfupgrade.ValidateImageEvidenceForPlatform(evidence, platform)
 }
 
 func wakeImageMethodIsDarwinExecObserved(method string) bool {
-	return method == wakeImageMethodPathnameExecObserved ||
-		method == wakeImageMethodPathnameExecVerifiedLegacy
+	return selfupgrade.IsDarwinExecObserved(method)
 }
 
 func validWakeImageSHA256(value string) bool {
-	const prefix = "sha256:"
-	if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+64 {
-		return false
-	}
-	digest := value[len(prefix):]
-	if strings.ToLower(digest) != digest {
-		return false
-	}
-	decoded, err := hex.DecodeString(digest)
-	return err == nil && len(decoded) == 32
+	return selfupgrade.ValidSHA256(value)
 }
 
 func wakeResumeStartupEligible(
