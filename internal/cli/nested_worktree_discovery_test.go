@@ -96,6 +96,52 @@ func TestNestedWorktreeDoesNotAdoptParentLiveBaseRoot(t *testing.T) {
 		assertDoesNotAdoptParentLiveRoot(t, parent, parentMail, nested)
 	})
 
+	t.Run("symlinked path into nested worktree does not adopt parent", func(t *testing.T) {
+		parent, parentMail, nested := seedParentWithNestedIndependentWorktree(t)
+		if err := os.MkdirAll(filepath.Join(nested, defaultCoopRoot, "agents"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		alias := filepath.Join(parent, "alias")
+		if err := os.Symlink(nested, alias); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		aliasAbs, err := filepath.Abs(alias)
+		if err != nil {
+			t.Fatal(err)
+		}
+		enterIsolatedDiscoveryCwd(t, alias)
+		t.Setenv("PWD", aliasAbs)
+
+		cwd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sameCleanPath(cwd, nested) {
+			t.Fatalf("os.Getwd resolved the alias to %s; need logical $PWD to exercise the ceiling comparison", cwd)
+		}
+
+		if got := resolveRoot(defaultCoopRoot); sameTreeIdentity(got, parentMail) {
+			t.Fatalf("resolveRoot(%q) from symlinked cwd adopted parent live queue %s", defaultCoopRoot, parentMail)
+		}
+		if found, ok := findRootInParents(cwd, defaultCoopRoot); ok && sameTreeIdentity(found, parentMail) {
+			t.Fatalf("findRootInParents via symlinked path escaped the ceiling: %s", found)
+		}
+		root, _, _, err := resolveEnvConfigWithSource("", "")
+		if err != nil {
+			t.Fatalf("resolveEnvConfigWithSource from alias: %v", err)
+		}
+		expectSamePath(t, root, filepath.Join(nested, defaultCoopRoot))
+		if sameTreeIdentity(root, parentMail) {
+			t.Fatalf("adopted parent live base root %s via symlink", parentMail)
+		}
+		if result, findErr := findAmqrcForRoot(filepath.Join(cwd, defaultCoopRoot)); findErr == nil {
+			t.Fatalf("findAmqrcForRoot via symlinked path adopted %s", result.Path)
+		} else if !errors.Is(findErr, errAmqrcNotFound) {
+			t.Fatalf("findAmqrcForRoot via symlink = %v, want errAmqrcNotFound", findErr)
+		}
+		assertParentMailUnchanged(t, parent, parentMail)
+	})
+
 	t.Run("relative .agent-mail does not walk into parent live queue", func(t *testing.T) {
 		parent, parentMail, nested := seedParentWithNestedIndependentWorktree(t)
 		enterIsolatedDiscoveryCwd(t, nested)

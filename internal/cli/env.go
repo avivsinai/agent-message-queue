@@ -1094,6 +1094,9 @@ func findAmqrcForRoot(root string) (amqrcResult, error) {
 		ceiling := ""
 		if top, insideGit := gitWorktreeRootFrom(absRoot); insideGit {
 			ceiling = top
+			if resolved, resolveErr := filepath.EvalSymlinks(absRoot); resolveErr == nil {
+				absRoot = resolved
+			}
 		}
 		dir := absRoot
 		for ceiling != "" || !isHomeConfigDir(dir) {
