@@ -10,9 +10,11 @@ exact root and `AM_SESSION` is empty. Do not set the identity tokens manually.
 
 Root precedence is explicit `--root`, `AM_ROOT`, project `.amqrc`,
 `AMQ_GLOBAL_ROOT`, then eligible implicit fallbacks. Within a Git checkout,
-only repo-local implicit state is eligible. An unreadable or invalid project
-`.amqrc` blocks lower-precedence fallback; an explicit `--root` or `AM_ROOT`
-can override it intentionally.
+only repo-local implicit state is eligible. A nested or linked Git worktree
+is its own discovery ceiling: a parent checkout's `.amqrc` or `.agent-mail`
+is not adopted. An unreadable or invalid project `.amqrc` blocks
+lower-precedence fallback; an explicit `--root` or `AM_ROOT` can override it
+intentionally.
 
 A direct `--root` selects a queue. It is not a federation route. `send` refuses
 an explicit root in a different base tree when the caller has an active

@@ -105,7 +105,9 @@ Equivalent explicit root form: `--root .agent-mail/<session>`.
 
 That isolation also applies across git worktrees. A relative project root such
 as `{"root":".agent-mail"}` resolves separately inside every worktree, even when
-the session names match. To share a mailbox intentionally, configure the same
+the session names match. A nested or linked worktree under a parent that
+already has `.amqrc` uses its own config or fails closed; it does not adopt
+the parent live queue. To share a mailbox intentionally, configure the same
 absolute `.amqrc` root in each worktree, or remove the relative project config
 and set `AMQ_GLOBAL_ROOT` to one absolute base. Use `amq doctor --ops` when a
 delivery receipt times out; it can name divergent same-session roots when a

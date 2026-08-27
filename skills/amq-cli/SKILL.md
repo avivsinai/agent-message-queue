@@ -131,7 +131,10 @@ worktree's machine-local `.amqrc`, or remove the project-relative `.amqrc` and
 set `AMQ_GLOBAL_ROOT` to one absolute base. Keep the relative default when
 per-worktree isolation is intended. A Git worktree with neither local
 configuration nor a local queue fails closed instead of inheriting
-`~/.amqrc`; this prevents accidental cross-project delivery.
+`~/.amqrc`; this prevents accidental cross-project delivery. A nested or
+linked worktree under a parent that already has `.amqrc` is the same
+fail-closed ceiling: it uses its own config or refuses, and does not adopt
+the parent live queue.
 
 ## Task Routing
 

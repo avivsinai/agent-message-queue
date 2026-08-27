@@ -417,10 +417,17 @@ func absPath(path string) string {
 
 func findRootInParents(startDir, relative string) (string, bool) {
 	dir := startDir
+	ceiling := ""
+	if top, insideGit := gitWorktreeRootFrom(startDir); insideGit {
+		ceiling = top
+	}
 	for {
 		candidate := filepath.Join(dir, relative)
 		if dirExists(candidate) {
 			return absPath(candidate), true
+		}
+		if ceiling != "" && sameCleanPath(dir, ceiling) {
+			break
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
