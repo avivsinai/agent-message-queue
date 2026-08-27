@@ -128,11 +128,9 @@ func parseEmbeddedVersionFromLDFlags(raw string) (string, bool, bool) {
 			// inspect later tokens because they may not be independent flags.
 			return "", false, true
 		default:
-			// A non-flag token containing '=' is a per-package setting, not a
-			// linker option. It can change which -X assignment is effective.
-			if strings.ContainsRune(field, '=') && !strings.HasPrefix(field, "-") {
-				return "", false, true
-			}
+			// Go splits non-flag tokens as package patterns at the first '='.
+			// Any token outside the supported grammar is therefore ambiguous.
+			return "", false, true
 		}
 	}
 	if !found {

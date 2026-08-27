@@ -146,6 +146,7 @@ func TestEmbeddedVersionFromLDFlagsParsesSupportedForms(t *testing.T) {
 		"-X main.version=1.2.3 -X main.version=",
 		"-Xmain.version=1.2.3",
 		"-buildid -X=main.version=9.9.9",
+		"nomatch -X main.version=9.9.9",
 		`"-X main.version=1.2.3"`,
 		`-X"main.version=1.2.3"`,
 		`-X main.version='1.2.3'`,
@@ -166,6 +167,16 @@ func TestReadEmbeddedVersionDefersUnknownLinkerOptionFromRealBinary(t *testing.T
 	)
 	if got := runVersionReaderFixture(t, binary); got != "1.0.0" {
 		t.Fatalf("version-reader output = %q, want 1.0.0", got)
+	}
+	if version, err := ReadEmbeddedVersion(binary); err == nil {
+		t.Fatalf("ReadEmbeddedVersion() = %q, nil; want deferred metadata", version)
+	}
+}
+
+func TestReadEmbeddedVersionDefersUnmatchedPackagePatternFromRealBinary(t *testing.T) {
+	binary := buildVersionReaderFixtureWithLDFlags(t, "nomatch -X main.version=9.9.9")
+	if got := runVersionReaderFixture(t, binary); got != "dev" {
+		t.Fatalf("version-reader output = %q, want dev", got)
 	}
 	if version, err := ReadEmbeddedVersion(binary); err == nil {
 		t.Fatalf("ReadEmbeddedVersion() = %q, nil; want deferred metadata", version)
