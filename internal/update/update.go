@@ -66,8 +66,10 @@ func (k InstallKind) IsPackageManaged() bool {
 }
 
 var (
-	ErrUnsupportedOS   = errors.New("unsupported operating system")
-	ErrUnsupportedArch = errors.New("unsupported architecture")
+	ErrUnsupportedOS      = errors.New("unsupported operating system")
+	ErrUnsupportedArch    = errors.New("unsupported architecture")
+	userCacheDirForUpdate = os.UserCacheDir
+	absPathForCacheDir    = filepath.Abs
 )
 
 type Cache struct {
@@ -252,12 +254,12 @@ func AssetName(tag, goos, goarch string) (string, error) {
 // darwin/linux tar.gz, but this function does not enforce that — the caller
 // picks the asset for a binary the release actually publishes.
 func AssetNameFor(binaryName, tag, goos, goarch string) (string, error) {
-	version := strings.TrimSpace(strings.TrimPrefix(tag, "v"))
-	if version == "" {
-		return "", errors.New("invalid release tag")
+	if err := validateBinaryName(binaryName); err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(binaryName) == "" {
-		return "", errors.New("binary name is required")
+	version, err := validateReleaseVersion(tag)
+	if err != nil {
+		return "", err
 	}
 	osName, err := normalizeOS(goos)
 	if err != nil {
@@ -271,7 +273,66 @@ func AssetNameFor(binaryName, tag, goos, goarch string) (string, error) {
 	if osName == "windows" {
 		ext = "zip"
 	}
-	return fmt.Sprintf("%s_%s_%s_%s.%s", binaryName, version, osName, archName, ext), nil
+	assetName := fmt.Sprintf("%s_%s_%s_%s.%s", binaryName, version, osName, archName, ext)
+	if err := validateAssetName(assetName); err != nil {
+		return "", err
+	}
+	return assetName, nil
+}
+
+func validateBinaryName(binaryName string) error {
+	switch binaryName {
+	case BinaryName, "amq-keepalive", "amq-bridge", "amq-acp":
+		return nil
+	default:
+		return fmt.Errorf("invalid binary name: %q", binaryName)
+	}
+}
+
+func validateReleaseVersion(tag string) (string, error) {
+	version := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(tag), "v"))
+	if version == "" || filepath.Base(version) != version || filepath.VolumeName(version) != "" ||
+		strings.ContainsAny(version, `/\\`) {
+		return "", fmt.Errorf("invalid release tag: %q", tag)
+	}
+
+	core := version
+	if cut := strings.IndexAny(core, "+-"); cut >= 0 {
+		suffix := core[cut+1:]
+		if suffix == "" {
+			return "", fmt.Errorf("invalid release tag: %q", tag)
+		}
+		for _, char := range suffix {
+			if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
+				(char < '0' || char > '9') && char != '.' && char != '-' {
+				return "", fmt.Errorf("invalid release tag: %q", tag)
+			}
+		}
+		core = core[:cut]
+	}
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("invalid release tag: %q", tag)
+	}
+	for _, part := range parts {
+		if part == "" || (len(part) > 1 && part[0] == '0') {
+			return "", fmt.Errorf("invalid release tag: %q", tag)
+		}
+		for _, char := range part {
+			if char < '0' || char > '9' {
+				return "", fmt.Errorf("invalid release tag: %q", tag)
+			}
+		}
+	}
+	return version, nil
+}
+
+func validateAssetName(assetName string) error {
+	if assetName == "" || filepath.Base(assetName) != assetName || filepath.VolumeName(assetName) != "" ||
+		strings.ContainsAny(assetName, `/\\`) {
+		return fmt.Errorf("invalid release asset name: %q", assetName)
+	}
+	return nil
 }
 
 func normalizeOS(goos string) (string, error) {
@@ -319,6 +380,9 @@ func ExtractBinaryFromTarGz(archivePath, destDir string) (string, error) {
 func ExtractBinaryFromTarGzNamed(binaryName, archivePath, destDir string) (string, error) {
 	if strings.TrimSpace(binaryName) == "" {
 		binaryName = BinaryName
+	}
+	if err := validateBinaryName(binaryName); err != nil {
+		return "", err
 	}
 	file, err := os.Open(archivePath)
 	if err != nil {
@@ -385,6 +449,9 @@ func ExtractBinaryFromZip(archivePath, destDir string) (string, error) {
 func ExtractBinaryFromZipNamed(binaryName, archivePath, destDir string) (string, error) {
 	if strings.TrimSpace(binaryName) == "" {
 		binaryName = BinaryName
+	}
+	if err := validateBinaryName(binaryName); err != nil {
+		return "", err
 	}
 	reader, err := zip.OpenReader(archivePath)
 	if err != nil {
@@ -547,6 +614,12 @@ func FetchLatestTag(ctx context.Context, client *http.Client) (string, error) {
 }
 
 func DownloadReleaseAsset(ctx context.Context, client *http.Client, tag, assetName, destPath string) error {
+	if err := validateAssetName(assetName); err != nil {
+		return err
+	}
+	if _, err := validateReleaseVersion(tag); err != nil {
+		return err
+	}
 	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", RepoSlug, tag, assetName)
 	// Use a simple GET request without API headers for binary downloads
 	// GitHub redirects to blob storage which doesn't need Accept: application/vnd.github+json
@@ -664,12 +737,21 @@ func SaveCache(path string, cache *Cache) error {
 }
 
 func DefaultCachePath() (string, error) {
-	if dir := strings.TrimSpace(os.Getenv(EnvCacheDir)); dir != "" {
-		if abs, err := filepath.Abs(dir); err == nil {
-			return filepath.Join(filepath.Clean(abs), "amq", "update.json"), nil
+	if rawDir := os.Getenv(EnvCacheDir); rawDir != "" {
+		dir := strings.TrimSpace(rawDir)
+		if dir == "" {
+			return "", fmt.Errorf("resolve %s: path is empty", EnvCacheDir)
 		}
+		abs, err := absPathForCacheDir(dir)
+		if err != nil {
+			return "", fmt.Errorf("resolve %s: %w", EnvCacheDir, err)
+		}
+		if !filepath.IsAbs(abs) {
+			return "", fmt.Errorf("resolve %s: path is not absolute", EnvCacheDir)
+		}
+		return filepath.Join(filepath.Clean(abs), "amq", "update.json"), nil
 	}
-	cacheDir, err := os.UserCacheDir()
+	cacheDir, err := userCacheDirForUpdate()
 	if err != nil {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -762,31 +844,80 @@ func IsNoUpdateCheckEnv() bool {
 	}
 }
 
-// ClassifyInstall determines how the binary at resolvedPath was installed.
-// The path must be the RESOLVED path (EvalSymlinks applied) so a symlink
-// into the Cellar is classified by where it lands, not by the link itself.
-// homebrewPrefix is the detected Homebrew prefix (empty if none); the path
-// is Homebrew-owned when it lives under <prefix>/bin or <prefix>/Cellar.
-// On Windows the path is Scoop-owned when it lives under a scoop apps dir
-// (~/scoop/apps or $SCOOP/apps). Anything else is a direct install.
+// ClassifyInstall determines how a binary was installed using one Homebrew
+// prefix. It remains as a compatibility wrapper; callers that have more than
+// one candidate prefix should use ClassifyInstallAgainstPrefixes.
 func ClassifyInstall(resolvedPath, homebrewPrefix string) InstallKind {
+	return ClassifyInstallAgainstPrefixes(resolvedPath, []string{homebrewPrefix})
+}
+
+// ClassifyInstallAgainstPrefixes classifies a binary against every known
+// Homebrew prefix. A path in <prefix>/Cellar is package-managed. A path in
+// <prefix>/bin is package-managed only when the object is a symlink that
+// resolves into that same prefix's Cellar; a regular file there remains an
+// ambiguous direct install for the CLI's final safety guard.
+func ClassifyInstallAgainstPrefixes(resolvedPath string, homebrewPrefixes []string) InstallKind {
 	if resolvedPath == "" {
 		return InstallDirect
 	}
-	path := filepath.Clean(resolvedPath)
-	if homebrewPrefix != "" {
-		prefix := filepath.Clean(homebrewPrefix)
-		if pathWithinPrefix(path, filepath.Join(prefix, "bin")) ||
-			pathWithinPrefix(path, filepath.Join(prefix, "Cellar")) {
+	rawPath := filepath.Clean(resolvedPath)
+	path := canonicalPath(rawPath)
+	for _, homebrewPrefix := range homebrewPrefixes {
+		if homebrewPrefix == "" {
+			continue
+		}
+		prefix := canonicalPrefix(homebrewPrefix)
+		cellar := filepath.Join(prefix, "Cellar")
+		if pathWithinPrefix(path, cellar) {
+			return InstallHomebrew
+		}
+		if pathWithinPrefix(rawPath, filepath.Join(prefix, "bin")) && isSymlinkToCellar(rawPath, cellar) {
 			return InstallHomebrew
 		}
 	}
 	if appsDir := scoopAppsDir(); appsDir != "" {
-		if pathWithinPrefix(path, appsDir) {
+		if pathWithinPrefix(path, canonicalPath(appsDir)) {
 			return InstallScoop
 		}
 	}
 	return InstallDirect
+}
+
+func canonicalPrefix(prefix string) string {
+	return canonicalPath(prefix)
+}
+
+func isSymlinkToCellar(path, cellar string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	return err == nil && pathWithinPrefix(filepath.Clean(resolved), cellar)
+}
+
+func canonicalPath(path string) string {
+	path = filepath.Clean(path)
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	current := path
+	suffix := make([]string, 0, 4)
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			resolved = filepath.Clean(resolved)
+			for index := len(suffix) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, suffix[index])
+			}
+			return filepath.Clean(resolved)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return path
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
 }
 
 // pathWithinPrefix reports whether path is equal to or nested inside prefix.
@@ -801,16 +932,22 @@ func pathWithinPrefix(path, prefix string) bool {
 // scoopAppsDir returns the Scoop apps directory when Scoop is in use, else "".
 // Scoop honors $SCOOP; otherwise it defaults to ~/scoop.
 func scoopAppsDir() string {
+	if runtime.GOOS != "windows" {
+		return ""
+	}
 	if scoop := strings.TrimSpace(os.Getenv("SCOOP")); scoop != "" {
 		if abs, err := filepath.Abs(scoop); err == nil {
 			return filepath.Join(filepath.Clean(abs), "apps")
 		}
 	}
-	if runtime.GOOS != "windows" {
-		return ""
-	}
 	if home, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(home, "scoop", "apps")
 	}
 	return ""
+}
+
+// ScoopAppsDir returns the active Scoop apps directory on Windows. It is
+// empty on other operating systems and can be used by replacement guards.
+func ScoopAppsDir() string {
+	return scoopAppsDir()
 }

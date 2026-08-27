@@ -1,9 +1,13 @@
 package update
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 )
 
 func TestCompareVersions(t *testing.T) {
@@ -136,6 +140,16 @@ func TestAssetNameForCompanions(t *testing.T) {
 	if _, err := AssetNameFor("amq", "", "darwin", "arm64"); err == nil {
 		t.Fatal("AssetNameFor(empty tag) want error")
 	}
+	for _, binary := range []string{"../amq", `amq\escape`, "amq/escape", "amq.exe"} {
+		if _, err := AssetNameFor(binary, "v0.1.0", "darwin", "arm64"); err == nil {
+			t.Fatalf("AssetNameFor(%q) want invalid binary error", binary)
+		}
+	}
+	for _, tag := range []string{"../../victim", "v0.1", "v01.2.3", "v0.1.0/escape", "v0.1.0?bad"} {
+		if _, err := AssetNameFor("amq", tag, "darwin", "arm64"); err == nil {
+			t.Fatalf("AssetNameFor tag %q want invalid release error", tag)
+		}
+	}
 }
 
 func TestClassifyInstall(t *testing.T) {
@@ -151,7 +165,7 @@ func TestClassifyInstall(t *testing.T) {
 		want   InstallKind
 	}{
 		{"cellar binary", cellarPath, prefix, InstallHomebrew},
-		{"prefix bin", binPath, prefix, InstallHomebrew},
+		{"regular prefix bin remains ambiguous", binPath, prefix, InstallDirect},
 		{"manual install", manualPath, prefix, InstallDirect},
 		{"manual install no prefix", manualPath, "", InstallDirect},
 		{"empty path", "", prefix, InstallDirect},
@@ -200,7 +214,40 @@ func TestClassifyInstallResolvesSymlinkIntoCellar(t *testing.T) {
 	}
 }
 
+func TestClassifyInstallAgainstPrefixesFindsAnyCellar(t *testing.T) {
+	first := t.TempDir()
+	second := t.TempDir()
+	path := filepath.Join(second, "Cellar", "amq", "0.73.0", "bin", "amq")
+	if got := ClassifyInstallAgainstPrefixes(path, []string{first, second}); got != InstallHomebrew {
+		t.Fatalf("ClassifyInstallAgainstPrefixes(%q)=%v want %v", path, got, InstallHomebrew)
+	}
+}
+
+func TestClassifyInstallDoesNotTreatDirectSymlinkInHomebrewBinAsOwned(t *testing.T) {
+	prefix := t.TempDir()
+	target := filepath.Join(t.TempDir(), "versions", "amq")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("direct"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(prefix, "bin", "amq")
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if got := ClassifyInstall(link, prefix); got != InstallDirect {
+		t.Fatalf("ClassifyInstall(%q, %q)=%v want direct", link, prefix, got)
+	}
+}
+
 func TestClassifyInstallScoop(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Scoop classification is Windows-only")
+	}
 	home := t.TempDir()
 	t.Setenv("SCOOP", home)
 	appsDir := filepath.Join(home, "apps", "amq", "current")
@@ -222,8 +269,76 @@ func TestClassifyInstallLinuxbrew(t *testing.T) {
 			t.Fatalf("ClassifyInstall(%q, %q)=%v want %v", cellarPath, prefix, got, InstallHomebrew)
 		}
 		binPath := filepath.Join(prefix, "bin", "amq")
-		if got := ClassifyInstall(binPath, prefix); got != InstallHomebrew {
-			t.Fatalf("ClassifyInstall(%q, %q)=%v want %v", binPath, prefix, got, InstallHomebrew)
+		if got := ClassifyInstall(binPath, prefix); got != InstallDirect {
+			t.Fatalf("ClassifyInstall(%q, %q)=%v want %v for a regular-file path", binPath, prefix, got, InstallDirect)
 		}
+	}
+}
+
+func TestDefaultCachePathUsesAMQCacheDirPrecedence(t *testing.T) {
+	override := t.TempDir()
+	t.Setenv(EnvCacheDir, override)
+	oldUserCacheDir := userCacheDirForUpdate
+	userCacheDirForUpdate = func() (string, error) {
+		t.Fatal("DefaultCachePath consulted the platform cache despite AMQ_CACHE_DIR")
+		return "", nil
+	}
+	t.Cleanup(func() { userCacheDirForUpdate = oldUserCacheDir })
+
+	got, err := DefaultCachePath()
+	if err != nil {
+		t.Fatalf("DefaultCachePath: %v", err)
+	}
+	want := filepath.Join(override, "amq", "update.json")
+	if got != want {
+		t.Fatalf("DefaultCachePath()=%q want %q", got, want)
+	}
+}
+
+func TestDefaultCachePathRefusesInvalidAMQCacheDir(t *testing.T) {
+	t.Run("abs failure", func(t *testing.T) {
+		t.Setenv(EnvCacheDir, "relative-cache")
+		oldAbs := absPathForCacheDir
+		absPathForCacheDir = func(string) (string, error) { return "", errors.New("working directory is unavailable") }
+		t.Cleanup(func() { absPathForCacheDir = oldAbs })
+
+		if _, err := DefaultCachePath(); err == nil {
+			t.Fatal("DefaultCachePath accepted an unresolvable AMQ_CACHE_DIR")
+		}
+	})
+	t.Run("whitespace", func(t *testing.T) {
+		t.Setenv(EnvCacheDir, " ")
+		if _, err := DefaultCachePath(); err == nil {
+			t.Fatal("DefaultCachePath accepted a whitespace AMQ_CACHE_DIR")
+		}
+	})
+}
+
+func TestSaveCacheWritesToIsolatedDefaultPath(t *testing.T) {
+	override := t.TempDir()
+	t.Setenv(EnvCacheDir, override)
+	path, err := DefaultCachePath()
+	if err != nil {
+		t.Fatalf("DefaultCachePath: %v", err)
+	}
+	want := &Cache{CheckedAt: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC), LatestVersion: "v0.1.0"}
+	if err := SaveCache(path, want); err != nil {
+		t.Fatalf("SaveCache: %v", err)
+	}
+	got, err := LoadCache(path)
+	if err != nil {
+		t.Fatalf("LoadCache: %v", err)
+	}
+	if got == nil || !got.CheckedAt.Equal(want.CheckedAt) || got.LatestVersion != want.LatestVersion {
+		t.Fatalf("cache = %#v want %#v", got, want)
+	}
+}
+
+func TestDownloadReleaseAssetRejectsUnsafeAssetBeforeNetwork(t *testing.T) {
+	if err := DownloadReleaseAsset(context.Background(), nil, "v0.1.0", "../victim", filepath.Join(t.TempDir(), "asset")); err == nil {
+		t.Fatal("DownloadReleaseAsset accepted a traversal asset name")
+	}
+	if err := DownloadReleaseAsset(context.Background(), nil, "v0.1.0/escape", "amq_0.1.0_darwin_arm64.tar.gz", filepath.Join(t.TempDir(), "asset")); err == nil {
+		t.Fatal("DownloadReleaseAsset accepted a traversal release tag")
 	}
 }

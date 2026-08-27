@@ -183,10 +183,11 @@ Homebrew:
 brew upgrade amq
 ```
 
-`amq upgrade` detects a Homebrew install from the resolved executable path
-and delegates to `brew update && brew upgrade amq` instead of overwriting
-the Cellar; pass `amq upgrade -y` to run the delegate without prompting.
-Scoop installs on Windows delegate to `scoop update amq` the same way.
+`amq upgrade` checks the resolved executable against all known Homebrew
+prefixes and delegates to the matched Homebrew executable instead of
+overwriting the Cellar; pass `amq upgrade -y` to run the delegate without an
+AMQ prompt. The package manager may still prompt. Scoop installs on Windows
+delegate to the matched `scoop` executable in the same way.
 
 Retire live wakes started by the previous Cellar binary first. If a leftover
 lock's image directory is gone, `wake check` reports `binary_dir_gone`;
@@ -212,18 +213,22 @@ release tag, with checksum verification:
 amq upgrade --all
 ```
 
-A running `amq-keepalive` is never killed: the atomic rename swaps the path
-while the running process keeps the old image, and `amq upgrade --all`
-notes that a running supervisor picks up the new image on its next supervise
-pass (self-upgrade); a supervisor started with `--no-self-upgrade` is restarted
-with `amq-keepalive install-launchd`.
-Missing companions are skipped with a line. Companions are direct-installed
-only; the Homebrew formula and Scoop manifest ship `amq` itself, so `--all`
-under a package-managed install is a no-op with an explanatory line.
+The command upgrades one distinct canonical target for each companion. Missing
+companions are skipped with a line; multiple distinct copies refuse the
+upgrade and list their paths. A running `amq-keepalive` is never killed: the
+atomic rename swaps the path while the running process keeps the old image.
+When the upgraded path is the supervisor's path, `amq upgrade --all` notes
+that self-upgrade can pick up the new image on its next supervise pass; a
+supervisor started with `--no-self-upgrade` is restarted with
+`amq-keepalive install-launchd`. Companions are direct-installed only; the
+Homebrew formula and Scoop manifest ship `amq` itself, so `--all` under a
+package-managed install is a no-op with an explanatory line.
 
-`AMQ_CACHE_DIR` overrides the update-check cache location for `amq upgrade`;
-when unset, the platform cache (`~/Library/Caches` on macOS, `XDG_CACHE_HOME`
-or `~/.cache` elsewhere) is used.
+`AMQ_CACHE_DIR` overrides the update cache location used by `amq upgrade` and
+the background update notifier. When unset, the platform cache
+(`~/Library/Caches` on macOS, `XDG_CACHE_HOME` or `~/.cache` elsewhere) is
+used. A set override must resolve to an absolute path; AMQ fails rather than
+silently falling back to the platform cache.
 
 ### Keepalive companion
 
