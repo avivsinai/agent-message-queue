@@ -3,17 +3,51 @@
 package selfupgrade
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
 
+const darwinCodeSignProbeTimeout = 5 * time.Second
+
+var (
+	selfUpgradeCodesignLookPath = exec.LookPath
+	selfUpgradeDarwinExec       = syscall.Exec
+)
+
 func execSupportedPlatform() bool { return true }
+
+func verifyDarwinCodeSignature(stagePath string) error {
+	codesignPath, err := selfUpgradeCodesignLookPath("codesign")
+	if err != nil {
+		return fmt.Errorf(
+			"verify Darwin code signature: codesign is unavailable; install Xcode Command Line Tools with xcode-select --install: %w",
+			err,
+		)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), darwinCodeSignProbeTimeout)
+	defer cancel()
+	if _, err := RunBoundedProbe(
+		ctx,
+		codesignPath,
+		[]string{"--verify", "--strict", stagePath},
+		BoundedProbeOptions{Env: os.Environ()},
+	); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("verify Darwin code signature: codesign probe timed out: %w", ctx.Err())
+		}
+		return fmt.Errorf("verify Darwin code signature for %s: %w", stagePath, err)
+	}
+	return nil
+}
 
 func execImagePlatform(candidate ImageEvidence, argv, env []string) error {
 	if candidate.ExecutionPath == "" {
@@ -96,9 +130,12 @@ func execImagePlatform(candidate ImageEvidence, argv, env []string) error {
 	if !SameDarwinStagedImageEvidence(staged, candidate) {
 		return errors.New("self-upgrade stage changed while binding")
 	}
+	if err := verifyDarwinCodeSignature(stagePath); err != nil {
+		return err
+	}
 	// Darwin cannot exec an open file descriptor. The private 0700 stage
 	// directory named with our PID is re-verified immediately before exec;
 	// same-UID races in that window are outside AMQ's threat model, as for wake
 	// self-upgrade.
-	return syscall.Exec(stagePath, argv, env)
+	return selfUpgradeDarwinExec(stagePath, argv, env)
 }
