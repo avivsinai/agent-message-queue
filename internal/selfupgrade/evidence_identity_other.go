@@ -5,7 +5,11 @@ package selfupgrade
 import "os"
 
 type imageFileIdentity struct {
-	FileInfo os.FileInfo
+	Device    uint64
+	Inode     uint64
+	CTimeSec  int64
+	CTimeNsec int64
+	FileInfo  os.FileInfo
 }
 
 func sameImageFileIdentity(a, b os.FileInfo) bool { return os.SameFile(a, b) }
