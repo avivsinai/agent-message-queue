@@ -54,6 +54,9 @@ jobs:
           GOOS=windows GOARCH=amd64 go vet ./...
           GOOS=windows go build ./...
           GOOS=freebsd go build ./...
+          # A syscall.Mkfifo in a test file compiles under vet but not as a
+          # Windows test binary; fail fast here instead of in the windows leg.
+          GOOS=windows go test -c ./internal/cli -o /dev/null
       - name: Govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -94,3 +97,26 @@ jobs:
         run: go test ./internal/cli -run '^TestDrainInboxItems' -count=1
       - name: Windows launch API compatibility
         run: go test ./launchapi -run '^TestWindowsCompatibilityAdvertisesOnlyCallableLaunchSurface$' -count=1
+
+  # Darwin test leg. Linux + a windows claim job run elsewhere; this gates the
+  # defect class where a test passes on Linux but fails on macOS (e.g. macOS
+  # resolves /var -> /private/var). Live/PTY/cmux/ghostty paths are env-gated
+  # (AMQ_*_LIVE) and skip by default, so plain `go test ./...` is sufficient.
+  # Not wired into branch protection yet; deliberately optional while we gauge
+  # runtime.
+  macos-test:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: TestWakeSelfUpgradeRestartRecordIsCompatibleWithV0580Reader
+          # shells out to `git cat-file -e v0.58.0^{commit}`, mirroring the build job.
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./...
