@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -1299,21 +1299,22 @@ func TestReattachCancellationPreservesReservationForLateReadyWake(t *testing.T) 
 	}
 	runApp(t, "attach", "--registry", registryPath, "--adapter", "file", "--target", oldTarget,
 		"--root", "/tmp/amq-root", "--base-root", "/tmp", "--session", "amq-root", "--me", "codex", "--no-start")
-	started := filepath.Join(dir, "started")
 	allowReady := filepath.Join(dir, "allow-ready")
 	lateReady := filepath.Join(dir, "late-ready")
 	release := filepath.Join(dir, "release")
-	exited := filepath.Join(dir, "exited")
+	reaped := filepath.Join(dir, "reaped")
 	pidFile := filepath.Join(dir, "pid")
-	t.Setenv("AMQ_KEEPALIVE_STARTED", started)
 	t.Setenv("AMQ_KEEPALIVE_ALLOW_READY", allowReady)
 	t.Setenv("AMQ_KEEPALIVE_LATE_READY", lateReady)
 	t.Setenv("AMQ_KEEPALIVE_RELEASE", release)
-	t.Setenv("AMQ_KEEPALIVE_EXITED", exited)
+	t.Setenv("AMQ_KEEPALIVE_REAPED", reaped)
 	t.Setenv("AMQ_KEEPALIVE_PID", pidFile)
 	fakeAMQ := filepath.Join(dir, "amq")
 	if err := os.WriteFile(fakeAMQ, fakeStartWakeScript(`#!/bin/sh
-printf '%s' "$$" > "$AMQ_KEEPALIVE_PID"
+printf '%s\n' "$$" > "$AMQ_KEEPALIVE_PID.tmp"
+mv "$AMQ_KEEPALIVE_PID.tmp" "$AMQ_KEEPALIVE_PID"
+/bin/sleep 60 &
+child=$!
 ready=""
 previous=""
 for arg in "$@"; do
@@ -1321,17 +1322,19 @@ for arg in "$@"; do
   previous="$arg"
 done
 [ -n "$ready" ] || exit 11
-: > "$AMQ_KEEPALIVE_STARTED"
-while [ ! -f "$AMQ_KEEPALIVE_ALLOW_READY" ]; do sleep 0.01; done
+while [ ! -f "$AMQ_KEEPALIVE_ALLOW_READY" ]; do /bin/sleep 0.01; done
 umask 077
 printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 : > "$AMQ_KEEPALIVE_LATE_READY"
-while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
-: > "$AMQ_KEEPALIVE_EXITED"
+while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do /bin/sleep 0.01; done
+kill "$child" 2>/dev/null || true
+wait "$child" 2>/dev/null || true
+printf 'reaped\n' > "$AMQ_KEEPALIVE_REAPED.tmp"
+mv "$AMQ_KEEPALIVE_REAPED.tmp" "$AMQ_KEEPALIVE_REAPED"
 `), 0o700); err != nil {
 		t.Fatalf("write fake amq: %v", err)
 	}
-	registerDetachedWakeCleanup(t, pidFile, allowReady, release)
+	registerDetachedWakeCleanup(t, pidFile, reaped, allowReady, release)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	var stderr bytes.Buffer
@@ -1343,23 +1346,29 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 			"--amq", fakeAMQ, "--self", "/bin/amq-keepalive", "--wake-ready-timeout", "5s",
 		})
 	}()
-	waitForPath(t, started, 2*time.Second)
+	_ = readPIDFile(t, pidFile)
 	cancel()
-	if code := <-done; code != 1 || !strings.Contains(stderr.String(), "reservation was preserved") {
-		t.Fatalf("code=%d stderr=%s, want uncertain readiness with preserved reservation", code, stderr.String())
+	select {
+	case code := <-done:
+		if code != 1 || !strings.Contains(stderr.String(), "reservation was preserved") {
+			t.Fatalf("code=%d stderr=%s, want uncertain readiness with preserved reservation", code, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reattach did not return after cancellation")
 	}
 	loaded, err := registry.New(registryPath).Load()
 	if err != nil || len(loaded.Entries) != 1 || loaded.Entries[0].Target != canonicalNewTarget || loaded.Entries[0].State != registry.StateAttached {
 		t.Fatalf("late-ready reservation entries=%#v err=%v", loaded.Entries, err)
 	}
+
 	if err := os.WriteFile(allowReady, nil, 0o600); err != nil {
 		t.Fatalf("allow late ready: %v", err)
 	}
-	waitForPath(t, lateReady, 2*time.Second)
+	waitForFileContents(t, lateReady, nil, 5*time.Second)
 	if err := os.WriteFile(release, nil, 0o600); err != nil {
 		t.Fatalf("release late wake: %v", err)
 	}
-	waitForPath(t, exited, 2*time.Second)
+	waitForFileContents(t, reaped, []byte("reaped\n"), 5*time.Second)
 
 	wake := &appCountingWake{}
 	if _, err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).superviseOnce(
@@ -2529,7 +2538,9 @@ printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-
 	start := make(chan struct{})
 	reattachHoldsLock := make(chan struct{})
 	continueReattach := make(chan struct{})
+	reattachDone := make(chan struct{})
 	gcLoad := make(chan struct{})
+	var gcLoadOnce sync.Once
 	var releaseReattach sync.Once
 	releaseContinueReattach := func() {
 		releaseReattach.Do(func() { close(continueReattach) })
@@ -2552,10 +2563,11 @@ printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-
 	}
 	beforeGCRegistryLoadForTest = func() {
 		select {
-		case <-gcLoad:
+		case <-reattachDone:
 		default:
-			close(gcLoad)
+			t.Errorf("gc loaded the registry before reattach released the registration lock")
 		}
+		gcLoadOnce.Do(func() { close(gcLoad) })
 	}
 
 	type outcome struct {
@@ -2590,11 +2602,7 @@ printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-
 	case <-time.After(5 * time.Second):
 		t.Fatal("reattach did not acquire the registration lock")
 	}
-	select {
-	case <-gcLoad:
-		t.Fatal("gc loaded the registry while reattach held the registration lock")
-	case <-time.After(150 * time.Millisecond):
-	}
+	close(reattachDone)
 	releaseContinueReattach()
 	first, second := <-outcomes, <-outcomes
 	var reattachOut, gcOut outcome
@@ -2611,6 +2619,11 @@ printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-
 	}
 	if gcOut.code != 0 {
 		t.Fatalf("gc code=%d stdout=%s stderr=%s", gcOut.code, gcOut.out, gcOut.err)
+	}
+	select {
+	case <-gcLoad:
+	default:
+		t.Fatal("gc did not reach the registry load barrier")
 	}
 
 	loaded, err := store.Load()
@@ -3090,15 +3103,61 @@ func TestSuperviseOnceNoSelfUpgradePublishesJSONWithoutState(t *testing.T) {
 	}
 }
 
+type writeBarrier struct {
+	mu        sync.Mutex
+	writer    io.Writer
+	threshold int
+	writes    int
+	reached   chan struct{}
+	once      sync.Once
+}
+
+func (w *writeBarrier) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if err != nil {
+		return n, err
+	}
+	w.mu.Lock()
+	w.writes++
+	reached := w.writes >= w.threshold
+	w.mu.Unlock()
+	if reached {
+		w.once.Do(func() { close(w.reached) })
+	}
+	return n, nil
+}
+
 func TestContinuousSuperviseLogsPersistentPassErrorsAndContinues(t *testing.T) {
 	registryPath := testRegistryTempPath(t)
 	if err := os.Mkdir(registryPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var stderr bytes.Buffer
-	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr}).Run(ctx, []string{"supervise", "--registry", registryPath, "--interval", "1ms"})
+	stderrBarrier := &writeBarrier{
+		writer:    &stderr,
+		threshold: 2,
+		reached:   make(chan struct{}),
+	}
+	done := make(chan int, 1)
+	go func() {
+		done <- (App{Stdout: &bytes.Buffer{}, Stderr: stderrBarrier}).Run(ctx, []string{
+			"supervise", "--registry", registryPath, "--interval", "1ms",
+		})
+	}()
+	select {
+	case <-stderrBarrier.reached:
+		cancel()
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor did not log two failed passes")
+	}
+	var code int
+	select {
+	case code = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor did not stop after cancellation")
+	}
 	if code != 0 || stderr.Len() == 0 || !strings.Contains(stderr.String(), "registry.json") {
 		t.Fatalf("code=%d stderr=%q, want logged pass failures until cancellation", code, stderr.String())
 	}
@@ -3302,19 +3361,50 @@ func normalizedFileTarget(t *testing.T, target string) string {
 	return normalized
 }
 
-func waitForPath(t *testing.T, path string, timeout time.Duration) {
+func readPIDFile(t *testing.T, path string) int {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return
+	deadline := time.Now().Add(8 * time.Second)
+	var lastData []byte
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			lastData = data
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+			if parseErr == nil && pid > 0 {
+				return pid
+			}
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("read pid file %s: %v", path, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for valid pid file %s: %q", path, lastData)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %s", path)
 }
 
-func registerDetachedWakeCleanup(t *testing.T, pidFile string, gates ...string) {
+func waitForFileContents(t *testing.T, path string, want []byte, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastData []byte
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			lastData = data
+			if bytes.Equal(data, want) {
+				return
+			}
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s contents %q; got %q", path, want, lastData)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func registerDetachedWakeCleanup(t *testing.T, pidFile, reapedPath string, gates ...string) {
 	t.Helper()
 	t.Cleanup(func() {
 		for _, gate := range gates {
@@ -3322,71 +3412,12 @@ func registerDetachedWakeCleanup(t *testing.T, pidFile string, gates ...string) 
 				t.Errorf("release detached fake wake through %q: %v", gate, err)
 			}
 		}
-		pid, ok := waitForFakeWakePID(pidFile, 2*time.Second)
-		if !ok {
+		if _, err := os.Stat(pidFile); os.IsNotExist(err) {
+			return
+		} else if err != nil {
+			t.Errorf("inspect detached fake wake pid file %s: %v", pidFile, err)
 			return
 		}
-		if exited, err := waitForFakeWakeExit(pid, 2*time.Second); err != nil {
-			t.Errorf("inspect detached fake wake pid %d: %v", pid, err)
-			return
-		} else if exited {
-			return
-		}
-		t.Errorf("detached fake wake pid %d did not exit through cooperative cleanup", pid)
-		_ = exec.Command("kill", "-TERM", "-"+strconv.Itoa(pid)).Run()
-		if exited, err := waitForFakeWakeExit(pid, 500*time.Millisecond); err != nil {
-			t.Errorf("inspect detached fake wake pid %d after SIGTERM: %v", pid, err)
-			return
-		} else if exited {
-			return
-		}
-		_ = exec.Command("kill", "-KILL", "-"+strconv.Itoa(pid)).Run()
-		if exited, err := waitForFakeWakeExit(pid, 2*time.Second); err != nil {
-			t.Errorf("inspect detached fake wake pid %d after SIGKILL: %v", pid, err)
-		} else if !exited {
-			t.Errorf("detached fake wake pid %d survived unconditional cleanup", pid)
-		}
+		waitForFileContents(t, reapedPath, []byte("reaped\n"), 8*time.Second)
 	})
-}
-
-func waitForFakeWakeExit(pid int, timeout time.Duration) (bool, error) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		running, err := fakeWakeProcessRunning(pid)
-		if err != nil {
-			return false, err
-		}
-		if !running {
-			return true, nil
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return false, nil
-}
-
-func fakeWakeProcessRunning(pid int) (bool, error) {
-	err := exec.Command("kill", "-0", strconv.Itoa(pid)).Run()
-	if err == nil {
-		return true, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return false, nil
-	}
-	return false, err
-}
-
-func waitForFakeWakePID(path string, timeout time.Duration) (int, bool) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
-			if parseErr == nil && pid > 0 {
-				return pid, true
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return 0, false
 }
