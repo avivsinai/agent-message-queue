@@ -629,11 +629,16 @@ Before the in-place exec, wake writes a private `.wake.selfupgrade.attempt`
 sidecar. If wake exits after the exec before its first quiescent maintenance
 boundary, a later wake that reaches maintenance refuses the matching image for
 24 hours in that wake generation. The guard cannot help when the new image dies
-before any replacement wake reaches the maintenance code. Its 24-hour memory is
-scoped to the wake agent directory. Wake has no KeepAlive supervisor and does
-not retry or roll back the replacement automatically. The first quiescent
-boundary from the attempted image settles the attempt; an operator or package
-manager must restore a known-good image after a refusal.
+before any replacement wake reaches the maintenance code. Its bounded
+eight-entry ledger is scoped to the wake agent directory. The wake itself has
+no in-process rollback or retry; an external supervisor may restart it. The
+first quiescent boundary from the attempted image settles the attempt; an
+operator or package manager must restore a known-good image after a refusal.
+
+The wake attempt sidecar accepts the single-attempt schema 1 as migration input
+and writes the bounded ledger schema 2. A pre-feature wake ignores this marker,
+so mixed-version operation does not provide the new crash-loop protection on
+both faces until both faces run the upgraded code.
 
 AMQ does not write the executable or retain the previous image, so neither wake
 self-upgrade path has an in-process rollback. Recovery from a bad installed

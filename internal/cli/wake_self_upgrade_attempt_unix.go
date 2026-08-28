@@ -15,38 +15,44 @@ import (
 const (
 	wakeSelfUpgradeAttemptFileName = ".wake.selfupgrade.attempt"
 	wakeSelfUpgradeAttemptSchemaV1 = 1
+	wakeSelfUpgradeAttemptSchema   = 2
 )
 
 type wakeSelfUpgradeAttemptFile struct {
-	Schema    int                          `json:"schema"`
-	Status    string                       `json:"status"`
-	Candidate selfupgrade.RefusedCandidate `json:"candidate"`
-	UnixTime  int64                        `json:"unix_time"`
+	Schema    int                           `json:"schema"`
+	Attempts  []selfupgrade.Attempt         `json:"attempts,omitempty"`
+	Status    string                        `json:"status,omitempty"`
+	Candidate *selfupgrade.RefusedCandidate `json:"candidate,omitempty"`
+	UnixTime  int64                         `json:"unix_time,omitempty"`
 }
 
-func wakeSelfUpgradeAttemptFileFromAttempt(attempt selfupgrade.Attempt) wakeSelfUpgradeAttemptFile {
+func wakeSelfUpgradeAttemptFileFromAttempts(attempts []selfupgrade.Attempt) wakeSelfUpgradeAttemptFile {
 	return wakeSelfUpgradeAttemptFile{
-		Schema:    wakeSelfUpgradeAttemptSchemaV1,
-		Status:    attempt.Status,
-		Candidate: attempt.Candidate,
-		UnixTime:  attempt.UnixTime,
+		Schema:   wakeSelfUpgradeAttemptSchema,
+		Attempts: append([]selfupgrade.Attempt(nil), attempts...),
 	}
 }
 
-func (file wakeSelfUpgradeAttemptFile) attempt() selfupgrade.Attempt {
-	return selfupgrade.Attempt{
-		Status:    file.Status,
-		Candidate: file.Candidate,
-		UnixTime:  file.UnixTime,
+func (file wakeSelfUpgradeAttemptFile) attempts() []selfupgrade.Attempt {
+	if file.Schema == wakeSelfUpgradeAttemptSchemaV1 {
+		if file.Status == "" || file.Candidate == nil {
+			return nil
+		}
+		return []selfupgrade.Attempt{{
+			Status:    file.Status,
+			Candidate: *file.Candidate,
+			UnixTime:  file.UnixTime,
+		}}
 	}
+	return append([]selfupgrade.Attempt(nil), file.Attempts...)
 }
 
 func readWakeSelfUpgradeAttemptAt(
 	dirfd int,
 	agentDir *wakeAgentDir,
-) (selfupgrade.Attempt, bool, error) {
+) ([]selfupgrade.Attempt, bool, error) {
 	if agentDir == nil {
-		return selfupgrade.Attempt{}, false, errors.New("wake self-upgrade attempt agent directory is missing")
+		return nil, false, errors.New("wake self-upgrade attempt agent directory is missing")
 	}
 	path := filepath.Join(agentDir.path, wakeSelfUpgradeAttemptFileName)
 	raw, _, exists, err := readWakeRepairMetadataAt(
@@ -57,31 +63,41 @@ func readWakeSelfUpgradeAttemptAt(
 		maxWakeMetadataFileBytes,
 	)
 	if err != nil || !exists {
-		return selfupgrade.Attempt{}, exists, err
+		return nil, exists, err
 	}
 	var file wakeSelfUpgradeAttemptFile
 	if err := json.Unmarshal(raw, &file); err != nil {
-		return selfupgrade.Attempt{}, true, fmt.Errorf("parse wake self-upgrade attempt: %w", err)
+		return nil, true, fmt.Errorf("parse wake self-upgrade attempt: %w", err)
 	}
-	if file.Schema != wakeSelfUpgradeAttemptSchemaV1 {
-		return selfupgrade.Attempt{}, true, fmt.Errorf("wake self-upgrade attempt schema %d is unsupported", file.Schema)
+	if file.Schema != wakeSelfUpgradeAttemptSchemaV1 && file.Schema != wakeSelfUpgradeAttemptSchema {
+		return nil, true, fmt.Errorf("wake self-upgrade attempt schema %d is unsupported", file.Schema)
 	}
-	attempt := file.attempt()
-	if err := selfupgrade.ValidateAttempt(attempt); err != nil {
-		return selfupgrade.Attempt{}, true, err
+	if file.Schema == wakeSelfUpgradeAttemptSchemaV1 && len(file.Attempts) != 0 {
+		return nil, true, errors.New("wake self-upgrade attempt schema 1 contains a ledger")
 	}
-	return attempt, true, nil
+	attempts := file.attempts()
+	if file.Schema == wakeSelfUpgradeAttemptSchemaV1 && len(attempts) == 0 {
+		return nil, true, errors.New("wake self-upgrade attempt schema 1 is missing an attempt")
+	}
+	if file.Schema == wakeSelfUpgradeAttemptSchema &&
+		(file.Status != "" || file.Candidate != nil || file.UnixTime != 0) {
+		return nil, true, errors.New("wake self-upgrade attempt schema 2 contains legacy fields")
+	}
+	if err := selfupgrade.ValidateAttempts(attempts); err != nil {
+		return nil, true, err
+	}
+	return attempts, true, nil
 }
 
 func writeWakeSelfUpgradeAttemptAt(
 	dirfd int,
 	agentDir *wakeAgentDir,
-	attempt selfupgrade.Attempt,
+	attempts []selfupgrade.Attempt,
 ) error {
-	if err := selfupgrade.ValidateAttempt(attempt); err != nil {
+	if err := selfupgrade.ValidateAttempts(attempts); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(wakeSelfUpgradeAttemptFileFromAttempt(attempt), "", "  ")
+	data, err := json.MarshalIndent(wakeSelfUpgradeAttemptFileFromAttempts(attempts), "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal wake self-upgrade attempt: %w", err)
 	}
@@ -110,10 +126,7 @@ func removeWakeSelfUpgradeAttemptAt(dirfd int) error {
 }
 
 func removeWakeSelfUpgradeArtifactsAt(dirfd int) error {
-	return errors.Join(
-		removeWakeSelfUpgradeDiagnosticAt(dirfd),
-		removeWakeSelfUpgradeAttemptAt(dirfd),
-	)
+	return removeWakeSelfUpgradeDiagnosticAt(dirfd)
 }
 
 func removeWakeSelfUpgradeArtifactsGuarded(root, agent string) error {
@@ -141,17 +154,31 @@ func loadWakeSelfUpgradeAttemptAtStartup(
 		if !sameWakeLockInspection(expected, current) || !current.IdentityConfirmed {
 			return fmt.Errorf("wake changed before self-upgrade attempt inspection")
 		}
-		attempt, exists, err := readWakeSelfUpgradeAttemptAt(dirfd, agentDir)
+		attempts, exists, err := readWakeSelfUpgradeAttemptAt(dirfd, agentDir)
 		if err != nil || !exists {
 			return err
 		}
-		state.attempt = &attempt
-		if attempt.Status == selfupgrade.AttemptStatusAttempt &&
-			attempt.IsFresh(wakeSelfUpgradeNow()) && attempt.Matches(running) {
-			state.startupRefusalReason = fmt.Sprintf(
-				"refused unsettled wake self-upgrade image for 24h after a replacement attempt (candidate=%s)",
-				wakeSelfUpgradeEvidenceIdentityString(running),
-			)
+		pruned := selfupgrade.PruneExpiredAttempts(attempts, wakeSelfUpgradeNow())
+		if len(pruned) != len(attempts) {
+			if err := writeWakeSelfUpgradeAttemptAt(dirfd, agentDir, pruned); err != nil {
+				return err
+			}
+		}
+		state.attempts = pruned
+		for _, attempt := range pruned {
+			if attempt.Status == selfupgrade.AttemptStatusAttempt && attempt.IsFutureUncertain(wakeSelfUpgradeNow()) {
+				state.Eligible = false
+				state.Reason = "self-upgrade unavailable: replacement attempt timestamp is uncertain"
+				continue
+			}
+			if attempt.Status == selfupgrade.AttemptStatusAttempt &&
+				attempt.IsFresh(wakeSelfUpgradeNow()) && attempt.Matches(running) {
+				state.startupRefusalReason = fmt.Sprintf(
+					"refused unsettled wake self-upgrade image for 24h after a replacement attempt (candidate=%s)",
+					wakeSelfUpgradeEvidenceIdentityString(running),
+				)
+				break
+			}
 		}
 		return nil
 	})
@@ -161,14 +188,15 @@ func persistWakeSelfUpgradeAttemptAtBoundary(
 	agentDir *wakeAgentDir,
 	expected wakeLockInspection,
 	record wakeRestartRecord,
-) (selfupgrade.Attempt, error) {
+) ([]selfupgrade.Attempt, error) {
 	if record.Source != wakeRestartSourceSelf {
-		return selfupgrade.Attempt{}, errors.New("wake self-upgrade attempt requires a self restart record")
+		return nil, errors.New("wake self-upgrade attempt requires a self restart record")
 	}
 	attempt := selfupgrade.NewAttempt(record.Candidate, wakeSelfUpgradeNow())
 	if err := selfupgrade.ValidateAttempt(attempt); err != nil {
-		return selfupgrade.Attempt{}, err
+		return nil, err
 	}
+	var installedAttempts []selfupgrade.Attempt
 	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
 		if !sameWakeLockInspection(expected, current) || !current.IdentityConfirmed {
@@ -181,22 +209,33 @@ func persistWakeSelfUpgradeAttemptAtBoundary(
 		if !exists || !sameWakeRestartRecord(record, currentRecord) {
 			return fmt.Errorf("wake restart request changed before self-upgrade attempt publication")
 		}
-		if err := writeWakeSelfUpgradeAttemptAt(dirfd, agentDir, attempt); err != nil {
+		currentAttempts, exists, err := readWakeSelfUpgradeAttemptAt(dirfd, agentDir)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			currentAttempts = nil
+		}
+		installedAttempts, err = selfupgrade.AddAttempt(currentAttempts, attempt, wakeSelfUpgradeNow())
+		if err != nil {
+			return err
+		}
+		if err := writeWakeSelfUpgradeAttemptAt(dirfd, agentDir, installedAttempts); err != nil {
 			return err
 		}
 		installed, installedExists, err := readWakeSelfUpgradeAttemptAt(dirfd, agentDir)
 		if err != nil {
 			return err
 		}
-		if !installedExists || installed != attempt {
+		if !installedExists || !sameSelfUpgradeAttempts(installed, installedAttempts) {
 			return fmt.Errorf("wake self-upgrade attempt changed after publication")
 		}
 		return nil
 	})
 	if err != nil {
-		return selfupgrade.Attempt{}, err
+		return nil, err
 	}
-	return attempt, nil
+	return installedAttempts, nil
 }
 
 func settleWakeSelfUpgradeAttemptAtBoundary(
@@ -208,44 +247,59 @@ func settleWakeSelfUpgradeAttemptAtBoundary(
 	if state == nil || agentDir == nil || !state.Enabled || !state.Eligible {
 		return nil
 	}
-	var settled *selfupgrade.Attempt
+	var settled []selfupgrade.Attempt
 	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
 		if !sameWakeLockInspection(expected, current) || !current.IdentityConfirmed {
 			return fmt.Errorf("wake changed before self-upgrade attempt settlement")
 		}
-		attempt, exists, err := readWakeSelfUpgradeAttemptAt(dirfd, agentDir)
+		attempts, exists, err := readWakeSelfUpgradeAttemptAt(dirfd, agentDir)
 		if err != nil {
 			return err
 		}
 		if !exists {
 			return nil
 		}
-		if attempt.Status == selfupgrade.AttemptStatusAttempt {
-			if !attempt.Matches(running) {
-				settled = &attempt
-				return nil
+		originalAttempts := append([]selfupgrade.Attempt(nil), attempts...)
+		attempts = selfupgrade.PruneExpiredAttempts(attempts, wakeSelfUpgradeNow())
+		for index := range attempts {
+			if attempts[index].Status == selfupgrade.AttemptStatusAttempt &&
+				attempts[index].Matches(running) {
+				attempts[index].Status = selfupgrade.AttemptStatusSettled
 			}
-			attempt.Status = selfupgrade.AttemptStatusSettled
-			if err := writeWakeSelfUpgradeAttemptAt(dirfd, agentDir, attempt); err != nil {
+		}
+		if !sameSelfUpgradeAttempts(originalAttempts, attempts) {
+			if err := writeWakeSelfUpgradeAttemptAt(dirfd, agentDir, attempts); err != nil {
 				return err
 			}
 			installed, installedExists, err := readWakeSelfUpgradeAttemptAt(dirfd, agentDir)
 			if err != nil {
 				return err
 			}
-			if !installedExists || installed != attempt {
+			if !installedExists || !sameSelfUpgradeAttempts(installed, attempts) {
 				return fmt.Errorf("settled wake self-upgrade attempt changed after publication")
 			}
 		}
-		settled = &attempt
+		settled = attempts
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 	if settled != nil {
-		state.attempt = settled
+		state.attempts = settled
 	}
 	return nil
+}
+
+func sameSelfUpgradeAttempts(first, second []selfupgrade.Attempt) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
 }

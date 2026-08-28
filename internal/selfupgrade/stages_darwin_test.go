@@ -72,11 +72,11 @@ func TestSelfUpgradeStagePIDLiveClassifiesProcess(t *testing.T) {
 	}
 
 	previousKill := selfUpgradeStagePIDKill
-	previousLookPath := selfUpgradeStagePSLookPath
+	previousToolLstat := selfUpgradeDarwinToolLstat
 	previousProbe := selfUpgradeStageRunBoundedProbe
 	t.Cleanup(func() {
 		selfUpgradeStagePIDKill = previousKill
-		selfUpgradeStagePSLookPath = previousLookPath
+		selfUpgradeDarwinToolLstat = previousToolLstat
 		selfUpgradeStageRunBoundedProbe = previousProbe
 	})
 
@@ -84,22 +84,22 @@ func TestSelfUpgradeStagePIDLiveClassifiesProcess(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			const pid = 12345
 			probeCalls := 0
-			lookPathCalls := 0
+			toolLstatCalls := 0
 			selfUpgradeStagePIDKill = func(gotPID int, signal syscall.Signal) error {
 				if gotPID != pid || signal != 0 {
 					t.Fatalf("Kill(%d, %d), want Kill(%d, 0)", gotPID, signal, pid)
 				}
 				return tt.killErr
 			}
-			selfUpgradeStagePSLookPath = func(name string) (string, error) {
-				lookPathCalls++
-				if name != "ps" {
-					t.Fatalf("LookPath(%q), want ps", name)
+			selfUpgradeDarwinToolLstat = func(path string) (os.FileInfo, error) {
+				toolLstatCalls++
+				if path != "/bin/ps" {
+					t.Fatalf("Lstat(%q), want /bin/ps", path)
 				}
 				if tt.lookPathErr != nil {
-					return "", tt.lookPathErr
+					return nil, tt.lookPathErr
 				}
-				return "/bin/ps", nil
+				return os.Lstat("/bin/ps")
 			}
 			selfUpgradeStageRunBoundedProbe = func(
 				ctx context.Context,
@@ -125,8 +125,8 @@ func TestSelfUpgradeStagePIDLiveClassifiesProcess(t *testing.T) {
 			if got != tt.wantLive {
 				t.Fatalf("selfUpgradeStagePIDLive(%d) = %t, want %t", pid, got, tt.wantLive)
 			}
-			if got := lookPathCalls > 0; got != tt.wantPS {
-				t.Fatalf("ps lookup called = %t, want %t", got, tt.wantPS)
+			if got := toolLstatCalls > 0; got != tt.wantPS {
+				t.Fatalf("ps validation called = %t, want %t", got, tt.wantPS)
 			}
 			wantProbeCalls := 0
 			if tt.wantPS && tt.lookPathErr == nil {
@@ -160,11 +160,11 @@ func TestCleanupStagesRemovesDeadAndForeignStages(t *testing.T) {
 	}
 
 	previousKill := selfUpgradeStagePIDKill
-	previousLookPath := selfUpgradeStagePSLookPath
+	previousToolLstat := selfUpgradeDarwinToolLstat
 	previousProbe := selfUpgradeStageRunBoundedProbe
 	t.Cleanup(func() {
 		selfUpgradeStagePIDKill = previousKill
-		selfUpgradeStagePSLookPath = previousLookPath
+		selfUpgradeDarwinToolLstat = previousToolLstat
 		selfUpgradeStageRunBoundedProbe = previousProbe
 	})
 	selfUpgradeStagePIDKill = func(pid int, _ syscall.Signal) error {
@@ -178,11 +178,11 @@ func TestCleanupStagesRemovesDeadAndForeignStages(t *testing.T) {
 			return syscall.ESRCH
 		}
 	}
-	selfUpgradeStagePSLookPath = func(name string) (string, error) {
-		if name != "ps" {
-			t.Fatalf("LookPath(%q), want ps", name)
+	selfUpgradeDarwinToolLstat = func(path string) (os.FileInfo, error) {
+		if path != "/bin/ps" {
+			t.Fatalf("Lstat(%q), want /bin/ps", path)
 		}
-		return "/bin/ps", nil
+		return os.Lstat(path)
 	}
 	selfUpgradeStageRunBoundedProbe = func(
 		_ context.Context,

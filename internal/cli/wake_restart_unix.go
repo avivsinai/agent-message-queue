@@ -86,6 +86,7 @@ type wakeRestartReadiness struct {
 
 var (
 	errWakeRestartSchemaTooNew = errors.New("wake restart schema is newer than supported")
+	errWakeImageRefused        = errors.New("wake restart image refused")
 
 	wakeRestartNow            = time.Now
 	wakeRestartSleep          = time.Sleep
@@ -1409,6 +1410,12 @@ func executeWakeRestart(
 	// bootstrap installs Notify before it rotates and advertises the successor
 	// generation. If exec fails, restore delivery to the incumbent loop.
 	signal.Ignore(syscall.SIGUSR1)
+	if err := verifyWakeRestartBoundImagePlatform(bound); err != nil {
+		if restartSignals != nil {
+			signal.Notify(restartSignals, syscall.SIGUSR1)
+		}
+		return fmt.Errorf("%w: verify wake restart image signature: %w", errWakeImageRefused, err)
+	}
 	err = wakeRestartExec(bound.executionPath, append([]string(nil), argv...), env)
 	if restartSignals != nil {
 		signal.Notify(restartSignals, syscall.SIGUSR1)
@@ -1652,7 +1659,7 @@ func handleWakeRestartAtLoopBoundary(
 		return
 	}
 	if record.Source == wakeRestartSourceSelf {
-		attempt, attemptErr := persistWakeSelfUpgradeAttemptAtBoundary(agentDir, cfg.inspectTerminalGeneration(), record)
+		attempts, attemptErr := persistWakeSelfUpgradeAttemptAtBoundary(agentDir, cfg.inspectTerminalGeneration(), record)
 		if attemptErr != nil {
 			recordSelfUpgradeDecision(
 				wakeSelfUpgradeActionDeferred,
@@ -1660,7 +1667,7 @@ func handleWakeRestartAtLoopBoundary(
 			)
 			return
 		}
-		cfg.selfUpgrade.attempt = &attempt
+		cfg.selfUpgrade.attempts = attempts
 	}
 	if err := executeWakeRestart(record, os.Args, cfg.terminalImageVersion, cfg.restartSignals); err != nil {
 		if errors.Is(err, errWakeImageChangedWhileHashing) && record.Source == wakeRestartSourceSelf {
@@ -1735,8 +1742,28 @@ func maintainWakeSelfUpgradeAtLoopBoundary(
 		cfg.selfUpgrade.restartPending = false
 	}
 	if cfg.selfUpgrade.Enabled && cfg.selfUpgrade.Eligible {
-		attemptPending := cfg.selfUpgrade.attempt != nil &&
-			cfg.selfUpgrade.attempt.Status == selfupgrade.AttemptStatusAttempt
+		for _, attempt := range cfg.selfUpgrade.attempts {
+			if attempt.Status == selfupgrade.AttemptStatusAttempt && attempt.IsFutureUncertain(wakeSelfUpgradeNow()) {
+				cfg.selfUpgrade.Eligible = false
+				cfg.selfUpgrade.Reason = "self-upgrade unavailable: replacement attempt timestamp is uncertain"
+				return recordWakeSelfUpgradeDecision(
+					agentDir,
+					cfg.inspectTerminalGeneration(),
+					cfg.selfUpgrade,
+					wakeSelfUpgradeDecision{
+						Action: wakeSelfUpgradeActionIneligible,
+						Reason: cfg.selfUpgrade.Reason,
+					},
+				)
+			}
+		}
+		attemptPending := false
+		for _, attempt := range cfg.selfUpgrade.attempts {
+			if attempt.Status == selfupgrade.AttemptStatusAttempt {
+				attemptPending = true
+				break
+			}
+		}
 		if attemptPending {
 			quiescence := classifyWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
 			if quiescence.Disposition != wakeResumeProceed {

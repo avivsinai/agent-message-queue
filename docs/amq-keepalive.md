@@ -161,9 +161,14 @@ attempt in `.selfupgrade.json`. If a later process reaches maintenance with a
 candidate matching that unsettled attempt, it refuses the candidate for 24 hours
 to prevent an immediate crash loop. A healthy pass from the attempted image
 settles the attempt. The guard cannot help when the new image dies before any
-replacement process reaches maintenance code. Its 24-hour memory is scoped to
-the keepalive install/state path and its `.selfupgrade.json` sidecar; it does
-not roll back the installed executable.
+replacement process reaches maintenance code. Its bounded eight-entry ledger
+is scoped to the registry directory (`filepath.Dir(registryPath)`) and its
+`.selfupgrade.json` sidecar; it does not roll back the installed executable.
+
+The sidecar schema is version 2. New code accepts schema 1 as migration input
+and publishes schema 2 before a protected replacement exec. Older readers fail
+closed on the schema mismatch, so mixed-version operation can still require
+operator or package-manager recovery.
 
 AMQ does not write the executable or retain the previous image, so it cannot
 roll back a successful replacement. Recovery from a bad installed image is an
@@ -173,9 +178,9 @@ good package version.
 Reads of the candidate's `-X main.version` linker assignment that fail or
 produce unknown metadata defer and are retried after a later pass. Exec
 failures fail closed and are recorded in the private `.selfupgrade.json`
-sidecar next to the registry; each exec-attempted candidate is refused at most
-once per generation. A new process generation starts with an empty refusal
-set. The sidecar is mode `0600`; a corrupt or unsafe sidecar disables
+sidecar next to the registry; each replacement-attempted candidate is refused
+at most once per generation. A new process generation starts with an empty
+refusal set. The sidecar is mode `0600`; a corrupt or unsafe sidecar disables
 self-upgrade for that process. Use
 `supervise --no-self-upgrade` to opt out.
 

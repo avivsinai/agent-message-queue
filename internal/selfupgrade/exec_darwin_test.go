@@ -18,22 +18,12 @@ func TestExecImagePlatformRejectsModifiedDarwinCodeSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	codesignPath, err := exec.LookPath("codesign")
-	if err != nil {
-		t.Fatal(err)
-	}
-	previousLookPath := selfUpgradeCodesignLookPath
+	previousPath := selfUpgradeCodesignPath
 	previousExec := selfUpgradeDarwinExec
 	t.Cleanup(func() {
-		selfUpgradeCodesignLookPath = previousLookPath
+		selfUpgradeCodesignPath = previousPath
 		selfUpgradeDarwinExec = previousExec
 	})
-	selfUpgradeCodesignLookPath = func(name string) (string, error) {
-		if name != "codesign" {
-			t.Fatalf("looked up %q, want codesign", name)
-		}
-		return codesignPath, nil
-	}
 	execCalls := 0
 	selfUpgradeDarwinExec = func(string, []string, []string) error {
 		execCalls++
@@ -55,22 +45,12 @@ func TestExecImagePlatformAcceptsIntactDarwinCodeSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	codesignPath, err := exec.LookPath("codesign")
-	if err != nil {
-		t.Fatal(err)
-	}
-	previousLookPath := selfUpgradeCodesignLookPath
+	previousPath := selfUpgradeCodesignPath
 	previousExec := selfUpgradeDarwinExec
 	t.Cleanup(func() {
-		selfUpgradeCodesignLookPath = previousLookPath
+		selfUpgradeCodesignPath = previousPath
 		selfUpgradeDarwinExec = previousExec
 	})
-	selfUpgradeCodesignLookPath = func(name string) (string, error) {
-		if name != "codesign" {
-			t.Fatalf("looked up %q, want codesign", name)
-		}
-		return codesignPath, nil
-	}
 	wantExecErr := errors.New("stop before replacement")
 	execCalls := 0
 	selfUpgradeDarwinExec = func(string, []string, []string) error {
@@ -97,13 +77,13 @@ func TestExecImagePlatformReportsMissingDarwinCodeSignatureTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	previousLookPath := selfUpgradeCodesignLookPath
+	previousPath := selfUpgradeCodesignPath
 	previousExec := selfUpgradeDarwinExec
 	t.Cleanup(func() {
-		selfUpgradeCodesignLookPath = previousLookPath
+		selfUpgradeCodesignPath = previousPath
 		selfUpgradeDarwinExec = previousExec
 	})
-	selfUpgradeCodesignLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	selfUpgradeCodesignPath = filepath.Join(dir, "missing-codesign")
 	execCalls := 0
 	selfUpgradeDarwinExec = func(string, []string, []string) error {
 		execCalls++
@@ -133,10 +113,7 @@ func signedDarwinCandidate(t *testing.T) string {
 	if err := os.WriteFile(candidatePath, data, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	codesignPath, err := exec.LookPath("codesign")
-	if err != nil {
-		t.Fatalf("look up codesign for signed fixture: %v", err)
-	}
+	codesignPath := "/usr/bin/codesign"
 	output, err := exec.Command(
 		codesignPath,
 		"--force",

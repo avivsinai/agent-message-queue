@@ -7,9 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,15 +19,18 @@ import (
 const darwinCodeSignProbeTimeout = 5 * time.Second
 
 var (
-	selfUpgradeCodesignLookPath = exec.LookPath
-	selfUpgradeDarwinExec       = syscall.Exec
+	selfUpgradeCodesignPath  = "/usr/bin/codesign"
+	selfUpgradeCodesignProbe = RunBoundedProbe
+	selfUpgradeDarwinExec    = syscall.Exec
 )
 
 func execSupportedPlatform() bool { return true }
 
 func verifyDarwinCodeSignature(stagePath string) error {
-	codesignPath, err := selfUpgradeCodesignLookPath("codesign")
-	if err != nil {
+	if err := verifyDarwinSystemTool(selfUpgradeCodesignPath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("verify Darwin code signature tool: %w", err)
+		}
 		return fmt.Errorf(
 			"verify Darwin code signature: codesign is unavailable; install Xcode Command Line Tools with xcode-select --install: %w",
 			err,
@@ -35,18 +38,29 @@ func verifyDarwinCodeSignature(stagePath string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), darwinCodeSignProbeTimeout)
 	defer cancel()
-	if _, err := RunBoundedProbe(
+	out, err := selfUpgradeCodesignProbe(
 		ctx,
-		codesignPath,
+		selfUpgradeCodesignPath,
 		[]string{"--verify", "--strict", stagePath},
 		BoundedProbeOptions{Env: os.Environ()},
-	); err != nil {
+	)
+	if err != nil {
 		if ctx.Err() != nil {
-			return fmt.Errorf("verify Darwin code signature: codesign probe timed out: %w", ctx.Err())
+			return fmt.Errorf(
+				"verify Darwin code signature: codesign probe timed out: %w",
+				errors.Join(ctx.Err(), err),
+			)
 		}
 		return fmt.Errorf("verify Darwin code signature for %s: %w", stagePath, err)
 	}
+	if diagnostic := strings.TrimSpace(string(out)); diagnostic != "" {
+		return fmt.Errorf("verify Darwin code signature for %s: ambiguous codesign output %q", stagePath, diagnostic)
+	}
 	return nil
+}
+
+func VerifyDarwinCodeSignature(stagePath string) error {
+	return verifyDarwinCodeSignature(stagePath)
 }
 
 func execImagePlatform(candidate ImageEvidence, argv, env []string) error {

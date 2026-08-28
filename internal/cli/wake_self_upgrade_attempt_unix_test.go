@@ -3,6 +3,8 @@
 package cli
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +12,136 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 )
+
+func TestWakeSelfUpgradeAttemptSurvivesStaleLockReclaimAndRefusesOldWake(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+	candidatePath := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
+	candidate, err := captureWakeImageEvidence(candidatePath, "0.57.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := fixture.record
+	record.Source = wakeRestartSourceSelf
+	record.Candidate = candidate
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_001, 0)
+	setWakeSelfUpgradeAttemptClock(t, now)
+	if _, err := persistWakeSelfUpgradeAttemptAtBoundary(fixture.agentDir, fixture.lock, record); err != nil {
+		t.Fatalf("persist replacement attempt: %v", err)
+	}
+	if got := readWakeSelfUpgradeAttemptForTest(t, fixture); got.Status != selfupgrade.AttemptStatusAttempt ||
+		!got.Matches(candidate) {
+		t.Fatalf("persisted attempt = %#v, want unsettled candidate B", got)
+	}
+
+	staleLock := fixture.lock.Lock
+	staleLock.PID = 66121
+	staleLock.ProcessStart = "stale-process"
+	staleLock.BootID = "stale-boot"
+	writeWakeLockForTest(t, fixture.root, fixture.agent, staleLock)
+	staleInspection := inspectWakeLock(fixture.root, fixture.agent)
+	if staleInspection.Status != wakeLockStale {
+		t.Fatalf("stale lock inspection = %#v, want stale", staleInspection)
+	}
+
+	newAgentDir, newCleanup, err := acquireWakeLockWithOptionsRetained(
+		fixture.root,
+		fixture.agent,
+		wakeLockAcquireOptions{
+			wakeMode:       wakeInjectModeNone,
+			resumeEligible: true,
+			requestedOwner: &fixture.owner,
+		},
+	)
+	if err != nil {
+		t.Fatalf("new old-image wake reclaiming stale lock: %v", err)
+	}
+	defer func() {
+		newCleanup()
+		_ = newAgentDir.Close()
+	}()
+	if got := readWakeSelfUpgradeAttemptForTest(t, fixture); got.Status != selfupgrade.AttemptStatusAttempt ||
+		!got.Matches(candidate) {
+		t.Fatalf("attempt after stale-lock reclaim = %#v, want preserved candidate B", got)
+	}
+	newInspection := inspectWakeLock(fixture.root, fixture.agent)
+	if !newInspection.IdentityConfirmed || newInspection.Status != wakeLockValid {
+		t.Fatalf("new wake inspection = %#v, want valid identity-confirmed wake", newInspection)
+	}
+	if newInspection.Lock.RunningImageEvidence == nil ||
+		!sameWakeImageEvidence(*newInspection.Lock.RunningImageEvidence, fixture.candidate) {
+		t.Fatalf("new wake running image = %#v, want old image A", newInspection.Lock.RunningImageEvidence)
+	}
+
+	state := selfUpgradeStateForCandidate(t, candidatePath)
+	stubWakeSelfUpgradeVersion(t, "0.57.0")
+	if err := loadWakeSelfUpgradeAttemptAtStartup(
+		&state,
+		newAgentDir,
+		newInspection,
+		*newInspection.Lock.RunningImageEvidence,
+	); err != nil {
+		t.Fatalf("load preserved attempt in new wake: %v", err)
+	}
+	if len(state.attempts) != 1 || state.attempts[0].Status != selfupgrade.AttemptStatusAttempt ||
+		!state.attempts[0].Matches(candidate) {
+		t.Fatalf("new wake attempt state = %#v, want candidate B", state.attempts)
+	}
+
+	newInboxDir, err := openWakeRepairInboxDir(newAgentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = newInboxDir.Close() }()
+	execCalls := 0
+	previousExec := wakeRestartExec
+	wakeRestartExec = func(string, []string, []string) error {
+		execCalls++
+		return errors.New("unexpected exec")
+	}
+	t.Cleanup(func() { wakeRestartExec = previousExec })
+	cfg := wakeConfig{
+		me:                   fixture.agent,
+		root:                 fixture.root,
+		injectMode:           wakeInjectModeNone,
+		wakeOwner:            newInspection.Lock.ResumeOwner,
+		terminalGeneration:   newInspection.Lock.Generation,
+		terminalImageVersion: newInspection.Lock.ImageVersion,
+		retainedAgent:        newAgentDir,
+		retainedInbox:        newInboxDir,
+		selfUpgrade:          state,
+		inspectTerminalGeneration: func() wakeLockInspection {
+			return inspectWakeLock(fixture.root, fixture.agent)
+		},
+		restartSignals: make(chan os.Signal, 1),
+	}
+	if err := maintainWakeSelfUpgradeAtLoopBoundary(
+		&cfg,
+		newAgentDir,
+		fixedWakeAdmissionWatcher{errors: make(chan error)},
+		false,
+		false,
+	); err != nil {
+		t.Fatalf("maintenance after stale-lock reclaim: %v", err)
+	}
+	if execCalls != 0 {
+		t.Fatalf("exec calls = %d, want zero after attempt refusal", execCalls)
+	}
+	if !wakeSelfUpgradeRefusedCandidatesContain(cfg.selfUpgrade.refused, candidate) {
+		t.Fatalf("refusal memory = %#v, want candidate B", cfg.selfUpgrade.refused)
+	}
+	if got := readWakeSelfUpgradeAttemptForTest(t, fixture); got.Status != selfupgrade.AttemptStatusAttempt {
+		t.Fatalf("attempt after maintenance = %#v, want unsettled diagnostic record", got)
+	}
+	if _, err := os.Lstat(filepath.Join(newAgentDir.path, wakeRestartFileName)); !os.IsNotExist(err) {
+		t.Fatalf("maintenance created restart record after refusal: %v", err)
+	}
+}
 
 func TestWakeSelfUpgradeAttemptPersistsBeforeRestartExec(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
@@ -23,16 +155,16 @@ func TestWakeSelfUpgradeAttemptPersistsBeforeRestartExec(t *testing.T) {
 	}
 	setWakeSelfUpgradeAttemptClock(t, time.Unix(1_700_000_000, 0))
 
-	attempt, err := persistWakeSelfUpgradeAttemptAtBoundary(fixture.agentDir, fixture.lock, record)
+	attempts, err := persistWakeSelfUpgradeAttemptAtBoundary(fixture.agentDir, fixture.lock, record)
 	if err != nil {
 		t.Fatalf("persistWakeSelfUpgradeAttemptAtBoundary() error = %v", err)
 	}
-	if attempt.Status != selfupgrade.AttemptStatusAttempt || !attempt.Matches(record.Candidate) {
-		t.Fatalf("attempt = %#v, want current candidate attempt", attempt)
+	if len(attempts) != 1 || attempts[0].Status != selfupgrade.AttemptStatusAttempt || !attempts[0].Matches(record.Candidate) {
+		t.Fatalf("attempts = %#v, want current candidate attempt", attempts)
 	}
 	installed := readWakeSelfUpgradeAttemptForTest(t, fixture)
-	if installed != attempt {
-		t.Fatalf("installed attempt = %#v, want %#v", installed, attempt)
+	if installed != attempts[0] {
+		t.Fatalf("installed attempt = %#v, want %#v", installed, attempts[0])
 	}
 	info, err := os.Stat(filepath.Join(fixture.agentDir.path, wakeSelfUpgradeAttemptFileName))
 	if err != nil {
@@ -64,7 +196,7 @@ func TestWakeSelfUpgradeAttemptSettlesAtFirstQuiescentBoundary(t *testing.T) {
 		Eligible:  true,
 		Locator:   locator,
 		lastProbe: probe,
-		attempt:   &attempt,
+		attempts:  []selfupgrade.Attempt{attempt},
 	}
 	cfg := wakeConfig{
 		me:                   fixture.agent,
@@ -94,8 +226,8 @@ func TestWakeSelfUpgradeAttemptSettlesAtFirstQuiescentBoundary(t *testing.T) {
 	if installed.Status != selfupgrade.AttemptStatusSettled {
 		t.Fatalf("installed attempt status = %q, want settled", installed.Status)
 	}
-	if cfg.selfUpgrade.attempt == nil || cfg.selfUpgrade.attempt.Status != selfupgrade.AttemptStatusSettled {
-		t.Fatalf("state attempt = %#v, want settled", cfg.selfUpgrade.attempt)
+	if len(cfg.selfUpgrade.attempts) != 1 || cfg.selfUpgrade.attempts[0].Status != selfupgrade.AttemptStatusSettled {
+		t.Fatalf("state attempts = %#v, want one settled attempt", cfg.selfUpgrade.attempts)
 	}
 }
 
@@ -110,8 +242,8 @@ func TestLoadWakeSelfUpgradeUnsettledAttemptRefusesMatchingImage(t *testing.T) {
 	if err := loadWakeSelfUpgradeAttemptAtStartup(&state, fixture.agentDir, fixture.lock, fixture.candidate); err != nil {
 		t.Fatalf("loadWakeSelfUpgradeAttemptAtStartup() error = %v", err)
 	}
-	if state.attempt == nil || state.attempt.Status != selfupgrade.AttemptStatusAttempt {
-		t.Fatalf("loaded attempt = %#v, want unsettled attempt", state.attempt)
+	if len(state.attempts) != 1 || state.attempts[0].Status != selfupgrade.AttemptStatusAttempt {
+		t.Fatalf("loaded attempts = %#v, want one unsettled attempt", state.attempts)
 	}
 	if len(state.refused) != 0 {
 		t.Fatalf("startup refusal memory = %#v, want diagnostic-only load", state.refused)
@@ -136,11 +268,58 @@ func TestLoadWakeSelfUpgradeSettledAttemptDoesNotRefuseMatchingImage(t *testing.
 	if err := loadWakeSelfUpgradeAttemptAtStartup(&state, fixture.agentDir, fixture.lock, fixture.candidate); err != nil {
 		t.Fatalf("loadWakeSelfUpgradeAttemptAtStartup() error = %v", err)
 	}
-	if state.attempt == nil || state.attempt.Status != selfupgrade.AttemptStatusSettled {
-		t.Fatalf("loaded attempt = %#v, want settled attempt", state.attempt)
+	if len(state.attempts) != 1 || state.attempts[0].Status != selfupgrade.AttemptStatusSettled {
+		t.Fatalf("loaded attempts = %#v, want one settled attempt", state.attempts)
 	}
 	if len(state.refused) != 0 || state.startupRefusalReason != "" {
 		t.Fatalf("settled startup state = %#v, want no refusal", state)
+	}
+}
+
+func TestLoadWakeSelfUpgradeSchema1AttemptAsLedger(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+	now := time.Unix(1_700_000_001, 0)
+	setWakeSelfUpgradeAttemptClock(t, now)
+	attempt := selfupgrade.NewAttempt(fixture.candidate, now.Add(-time.Second))
+	legacy := wakeSelfUpgradeAttemptFile{
+		Schema:    wakeSelfUpgradeAttemptSchemaV1,
+		Status:    attempt.Status,
+		Candidate: &attempt.Candidate,
+		UnixTime:  attempt.UnixTime,
+	}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.agentDir.path, wakeSelfUpgradeAttemptFileName), append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := wakeSelfUpgradeState{Enabled: true, Eligible: true}
+	if err := loadWakeSelfUpgradeAttemptAtStartup(&state, fixture.agentDir, fixture.lock, fixture.candidate); err != nil {
+		t.Fatalf("load schema 1 attempt: %v", err)
+	}
+	if len(state.attempts) != 1 || state.attempts[0] != attempt {
+		t.Fatalf("loaded attempts = %#v, want %#v", state.attempts, attempt)
+	}
+}
+
+func TestLoadWakeSelfUpgradeFutureAttemptDisablesEligibility(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+	now := time.Unix(1_700_000_001, 0)
+	setWakeSelfUpgradeAttemptClock(t, now)
+	attempt := selfupgrade.NewAttempt(fixture.candidate, now.Add(selfupgrade.AttemptFutureSkew+time.Second))
+	writeWakeSelfUpgradeAttemptForTest(t, fixture, attempt)
+	state := wakeSelfUpgradeState{Enabled: true, Eligible: true}
+	if err := loadWakeSelfUpgradeAttemptAtStartup(&state, fixture.agentDir, fixture.lock, fixture.candidate); err != nil {
+		t.Fatalf("load future attempt: %v", err)
+	}
+	if state.Eligible || state.Reason != "self-upgrade unavailable: replacement attempt timestamp is uncertain" {
+		t.Fatalf("future attempt state = %#v, want unavailable", state)
+	}
+	if len(state.attempts) != 1 || state.attempts[0] != attempt {
+		t.Fatalf("future attempt ledger = %#v, want preserved record", state.attempts)
 	}
 }
 
@@ -182,7 +361,7 @@ func TestWakeSelfUpgradeMaintenanceRefusesUnsettledAttemptMatchingCandidate(t *t
 	}
 	setWakeSelfUpgradeAttemptClock(t, time.Unix(1_700_000_001, 0))
 	attempt := selfupgrade.NewAttempt(evidence, time.Unix(1_700_000_000, 0))
-	state.attempt = &attempt
+	state.attempts = []selfupgrade.Attempt{attempt}
 
 	decision, err := maintainWakeSelfUpgrade(&state, fixture.agentDir, fixture.lock)
 	if err != nil {
@@ -194,8 +373,8 @@ func TestWakeSelfUpgradeMaintenanceRefusesUnsettledAttemptMatchingCandidate(t *t
 	if !wakeSelfUpgradeRefusedCandidatesContain(state.refused, evidence) {
 		t.Fatalf("refusal memory = %#v, want candidate", state.refused)
 	}
-	if state.attempt == nil || state.attempt.Status != selfupgrade.AttemptStatusAttempt {
-		t.Fatalf("attempt state = %#v, want unsettled attempt", state.attempt)
+	if len(state.attempts) != 1 || state.attempts[0].Status != selfupgrade.AttemptStatusAttempt {
+		t.Fatalf("attempt state = %#v, want one unsettled attempt", state.attempts)
 	}
 	if _, err := os.Lstat(filepath.Join(fixture.agentDir.path, wakeRestartFileName)); !os.IsNotExist(err) {
 		t.Fatalf("unsettled-attempt refusal created restart record: %v", err)
@@ -227,7 +406,7 @@ func TestWakeSelfUpgradeAttemptDoesNotSettleDifferentRunningImage(t *testing.T) 
 		Eligible:  true,
 		Locator:   locator,
 		lastProbe: probe,
-		attempt:   &attempt,
+		attempts:  []selfupgrade.Attempt{attempt},
 	}
 	cfg := wakeConfig{
 		me:                   fixture.agent,
@@ -257,8 +436,8 @@ func TestWakeSelfUpgradeAttemptDoesNotSettleDifferentRunningImage(t *testing.T) 
 	if installed.Status != selfupgrade.AttemptStatusAttempt {
 		t.Fatalf("installed attempt status = %q, want unsettled", installed.Status)
 	}
-	if cfg.selfUpgrade.attempt == nil || cfg.selfUpgrade.attempt.Status != selfupgrade.AttemptStatusAttempt {
-		t.Fatalf("state attempt = %#v, want unsettled", cfg.selfUpgrade.attempt)
+	if len(cfg.selfUpgrade.attempts) != 1 || cfg.selfUpgrade.attempts[0].Status != selfupgrade.AttemptStatusAttempt {
+		t.Fatalf("state attempts = %#v, want one unsettled attempt", cfg.selfUpgrade.attempts)
 	}
 }
 
@@ -276,6 +455,14 @@ func TestWakeSelfUpgradeAttemptCleanupAfterLockRemoval(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Lstat(filepath.Join(fixture.agentDir.path, wakeSelfUpgradeAttemptFileName)); err != nil {
+		t.Fatalf("self-upgrade attempt after generic lock removal = %v, want preserved", err)
+	}
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return removeWakeSelfUpgradeAttemptAt(dirfd)
+	}); err != nil {
+		t.Fatalf("explicit wake retire attempt removal: %v", err)
+	}
 	assertPathMissingForTest(t, filepath.Join(fixture.agentDir.path, wakeSelfUpgradeAttemptFileName))
 }
 
@@ -289,7 +476,7 @@ func setWakeSelfUpgradeAttemptClock(t *testing.T, now time.Time) {
 func writeWakeSelfUpgradeAttemptForTest(t *testing.T, fixture wakeRestartFixture, attempt selfupgrade.Attempt) {
 	t.Helper()
 	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeSelfUpgradeAttemptAt(dirfd, fixture.agentDir, attempt)
+		return writeWakeSelfUpgradeAttemptAt(dirfd, fixture.agentDir, []selfupgrade.Attempt{attempt})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -297,11 +484,11 @@ func writeWakeSelfUpgradeAttemptForTest(t *testing.T, fixture wakeRestartFixture
 
 func readWakeSelfUpgradeAttemptForTest(t *testing.T, fixture wakeRestartFixture) selfupgrade.Attempt {
 	t.Helper()
-	var attempt selfupgrade.Attempt
+	var attempts []selfupgrade.Attempt
 	if err := fixture.agentDir.withFD(func(dirfd int) error {
 		var exists bool
 		var err error
-		attempt, exists, err = readWakeSelfUpgradeAttemptAt(dirfd, fixture.agentDir)
+		attempts, exists, err = readWakeSelfUpgradeAttemptAt(dirfd, fixture.agentDir)
 		if err != nil {
 			return err
 		}
@@ -312,7 +499,10 @@ func readWakeSelfUpgradeAttemptForTest(t *testing.T, fixture wakeRestartFixture)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return attempt
+	if len(attempts) != 1 {
+		t.Fatalf("attempt ledger = %#v, want one attempt", attempts)
+	}
+	return attempts[0]
 }
 
 func writeWakeSelfUpgradeAttemptForGenericCleanupTest(
@@ -322,7 +512,7 @@ func writeWakeSelfUpgradeAttemptForGenericCleanupTest(
 ) {
 	t.Helper()
 	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeSelfUpgradeAttemptAt(dirfd, fixture.agentDir, attempt)
+		return writeWakeSelfUpgradeAttemptAt(dirfd, fixture.agentDir, []selfupgrade.Attempt{attempt})
 	}); err != nil {
 		t.Fatal(err)
 	}

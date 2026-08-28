@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,7 +18,7 @@ const selfUpgradeStagePIDProbeTimeout = 5 * time.Second
 
 var (
 	selfUpgradeStagePIDKill         = syscall.Kill
-	selfUpgradeStagePSLookPath      = exec.LookPath
+	selfUpgradeStagePSPath          = "/bin/ps"
 	selfUpgradeStageRunBoundedProbe = RunBoundedProbe
 )
 
@@ -113,15 +112,14 @@ func selfUpgradeStagePIDLive(pid int) bool {
 }
 
 func selfUpgradeStagePIDComm(pid int) (string, error) {
-	psPath, err := selfUpgradeStagePSLookPath("ps")
-	if err != nil {
-		return "", fmt.Errorf("find ps for self-upgrade stage PID %d: %w", pid, err)
+	if err := verifyDarwinSystemTool(selfUpgradeStagePSPath); err != nil {
+		return "", fmt.Errorf("verify ps for self-upgrade stage PID %d: %w", pid, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), selfUpgradeStagePIDProbeTimeout)
 	defer cancel()
 	out, err := selfUpgradeStageRunBoundedProbe(
 		ctx,
-		psPath,
+		selfUpgradeStagePSPath,
 		[]string{"-o", "comm=", "-p", strconv.Itoa(pid)},
 		BoundedProbeOptions{Env: os.Environ()},
 	)

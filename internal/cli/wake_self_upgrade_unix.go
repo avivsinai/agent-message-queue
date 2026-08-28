@@ -46,7 +46,7 @@ type wakeSelfUpgradeState struct {
 	Reason               string
 	lastProbe            wakeSelfUpgradeProbe
 	refused              []wakeSelfUpgradeRefusedCandidate
-	attempt              *selfupgrade.Attempt
+	attempts             []selfupgrade.Attempt
 	startupRefusalReason string
 	restartPending       bool
 	refusalPending       *wakeSelfUpgradeRefusalPending
@@ -441,6 +441,15 @@ func maintainWakeSelfUpgrade(
 		decision.Action = wakeSelfUpgradeActionIneligible
 		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
 	}
+	for _, attempt := range state.attempts {
+		if attempt.Status == selfupgrade.AttemptStatusAttempt && attempt.IsFutureUncertain(wakeSelfUpgradeNow()) {
+			state.Eligible = false
+			state.Reason = "self-upgrade unavailable: replacement attempt timestamp is uncertain"
+			decision.Action = wakeSelfUpgradeActionIneligible
+			decision.Reason = state.Reason
+			return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
+		}
+	}
 	if agentDir == nil {
 		return wakeSelfUpgradeDecision{}, fmt.Errorf("wake self-upgrade agent directory capability is missing")
 	}
@@ -497,13 +506,15 @@ func maintainWakeSelfUpgrade(
 		)
 		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
 	}
-	if state.attempt != nil && state.attempt.Status == selfupgrade.AttemptStatusAttempt &&
-		state.attempt.IsFresh(wakeSelfUpgradeNow()) && state.attempt.Matches(evidence) {
-		state.refused = rememberWakeSelfUpgradeRefusal(state.refused, evidence)
-		state.lastProbe = probe
-		decision.Action = wakeSelfUpgradeActionRefusedMemory
-		decision.Reason = state.attempt.RefusalReason()
-		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
+	for _, attempt := range state.attempts {
+		if attempt.Status == selfupgrade.AttemptStatusAttempt &&
+			attempt.IsFresh(wakeSelfUpgradeNow()) && attempt.Matches(evidence) {
+			state.refused = rememberWakeSelfUpgradeRefusal(state.refused, evidence)
+			state.lastProbe = probe
+			decision.Action = wakeSelfUpgradeActionRefusedMemory
+			decision.Reason = attempt.RefusalReason()
+			return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
+		}
 	}
 	if wakeSelfUpgradeRefusedCandidatesContain(state.refused, evidence) {
 		state.lastProbe = probe

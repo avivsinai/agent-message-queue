@@ -387,6 +387,12 @@ func removeWakeRetireArtifactsAt(
 			Err:     expected.StateSnapshotErr,
 		}
 	}
+	if err := removeWakeSelfUpgradeAttemptAt(dirfd); err != nil {
+		return wakeRetireCleanupOutcome{
+			Residue: []string{wakeSelfUpgradeAttemptFileName},
+			Err:     fmt.Errorf("remove retired wake self-upgrade attempt: %w", err),
+		}
+	}
 	if err := syncWakeOwnerDirFD(dirfd); err != nil {
 		return wakeRetireCleanupOutcome{
 			Residue: []string{"wake artifact durability"},
