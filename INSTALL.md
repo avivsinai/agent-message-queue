@@ -150,9 +150,14 @@ mv -f "$HOME/.local/bin/.amq-keepalive.new" "$HOME/.local/bin/amq-keepalive"
 ```
 
 Use that same path for `attach`, `install-launchd`, and `install-hook`. Upgrades
-and rollbacks replace the file at the stable path, then rerun
-`amq-keepalive install-launchd` to restart the supervisor. The registry is
-retained; do not move the executable while registered wakes still identify it.
+and rollbacks replace the file at the stable path. A running supervisor picks
+up a strictly newer image on its next supervise pass (self-upgrade); it does
+not pick up an older rollback or an equal-version replacement. Restart a
+supervisor through its service manager for those cases, or when it was started
+with `--no-self-upgrade`. On macOS use `amq-keepalive install-launchd`; on
+Linux restart the service unit, for example
+`systemctl --user restart amq-keepalive.service`. The registry is retained; do
+not move the executable while registered wakes still identify it.
 
 The optional cross-host courier is published separately as
 `amq-bridge_*_{linux,darwin}_{amd64,arm64}.tar.gz`. Homebrew does not install
@@ -163,6 +168,36 @@ See [amq-bridge](cmd/amq-bridge/README.md). The preview ACP v1 companion is
 published as `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz`. Homebrew does
 not install it. Install it the same way, then see
 [amq-acp](cmd/amq-acp/README.md).
+
+Once the companions sit in the raw or resolved executable directory of a
+direct-install `amq`, or in `~/.local/bin`,
+`amq upgrade --all` plans one verified target per companion, unique across all
+companions, before any companion replacement. It verifies each target's Go
+build identity, uses the same release tag with checksum verification, and
+skips any absent companion with a line. Cross-companion aliases, wrong builds,
+and multiple distinct targets refuse the companion upgrade and give a repair
+action. Same-name symlink aliases to one canonical target are accepted;
+same-name hardlinks refuse. A running
+`amq-keepalive` is never killed: the atomic rename swaps the path while the
+running process keeps the old image, and a running supervisor picks up a
+strictly newer image on its next supervise pass (self-upgrade). A supervisor started with
+`--no-self-upgrade` must be restarted through its service manager; on macOS
+use `amq-keepalive install-launchd`, and on Linux restart the service unit, for
+example `systemctl --user restart amq-keepalive.service`.
+`amq upgrade` itself detects a Homebrew or Scoop install of `amq` and delegates
+to the matched package-manager executable (`brew update && brew upgrade amq` /
+`scoop update amq` for user scope / `scoop update -g amq` for global scope;
+`-y` runs the delegate without an AMQ prompt, while the package manager may
+still prompt) instead of overwriting it, so companions upgrade through
+`--all` only from a direct `amq` install. Scoop user scope comes from `$SCOOP`
+or the default `%USERPROFILE%\scoop`; global scope comes from
+`$SCOOP_GLOBAL` or `C:\ProgramData\scoop`. The version cache is refreshed
+after an authoritative direct check confirms the latest version (already
+current, or after a successful immediate replacement). A scheduled replacement
+is refreshed on the next successful check (best-effort). On Windows, `--all`
+skips companions because they are not published there, then continues with the
+core upgrade. Companion links are revalidated by their primary path; a
+secondary same-name alias repointed during download is not detected.
 
 ### Platform capability matrix
 

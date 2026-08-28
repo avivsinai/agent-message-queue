@@ -26,15 +26,82 @@ const (
 	RepoOwner            = "avivsinai"
 	RepoName             = "agent-message-queue"
 	RepoSlug             = RepoOwner + "/" + RepoName
+	ModulePath           = "github.com/avivsinai/agent-message-queue"
 	BinaryName           = "amq"
 	ChecksumsFilename    = "checksums.txt"
 	DefaultCheckInterval = 24 * time.Hour
 	EnvNoUpdateCheck     = "AMQ_NO_UPDATE_CHECK"
+	// EnvCacheDir overrides the update-check cache directory. It takes
+	// precedence over os.UserCacheDir so tests (and operators) can redirect
+	// the cache on platforms where UserCacheDir ignores HOME (darwin's
+	// ~/Library/Caches). When unset, production behavior is unchanged.
+	EnvCacheDir = "AMQ_CACHE_DIR"
 )
 
+// CompanionBinaries are the amq-adjacent binaries published from the same
+// release but not packaged by the Homebrew formula or Scoop manifest: only
+// amq itself goes through a package manager. They are direct-installed at a
+// stable path (~/.local/bin or next to amq) and upgraded in place.
+var CompanionBinaries = []string{"amq-keepalive", "amq-bridge", "amq-acp"}
+
+// InstallKind classifies how a resolved executable path was installed.
+type InstallKind int
+
+const (
+	// InstallDirect is a manually-placed binary (~/.local/bin, a versions
+	// dir, etc.); amq upgrade owns the download+checksum+atomic-replace path.
+	InstallDirect InstallKind = iota
+	// InstallHomebrew means the resolved path lives under a Homebrew Cellar
+	// or prefix bin dir; amq upgrade delegates to brew so it does not corrupt
+	// brew bookkeeping. Companions are never Homebrew-owned.
+	InstallHomebrew
+	// InstallScoop means the resolved path lives under the Scoop apps dir on
+	// Windows user scope; amq upgrade delegates to scoop. Companions are never
+	// Scoop-owned.
+	InstallScoop
+	// InstallScoopGlobal means the resolved path lives under Scoop's global apps
+	// dir on Windows; the delegate must include Scoop's global flag.
+	InstallScoopGlobal
+	// InstallScoopUnknown means the path looks like a Scoop apps path but is not
+	// under a configured user or global Scoop root. It must never self-replace.
+	InstallScoopUnknown
+)
+
+// IsPackageManaged reports whether the kind delegates to an external package
+// manager rather than self-replacing.
+func (k InstallKind) IsPackageManaged() bool {
+	return k == InstallHomebrew || k.IsScoop()
+}
+
+// IsScoop reports whether the kind came from a Scoop-shaped installation.
+func (k InstallKind) IsScoop() bool {
+	return k == InstallScoop || k == InstallScoopGlobal || k == InstallScoopUnknown
+}
+
+// IsScoopGlobal reports whether the kind is a known global Scoop install.
+func (k InstallKind) IsScoopGlobal() bool {
+	return k == InstallScoopGlobal
+}
+
+// ScoopScope identifies the Scoop installation scope for a configured root.
+type ScoopScope string
+
+const (
+	ScoopScopeUser   ScoopScope = "user"
+	ScoopScopeGlobal ScoopScope = "global"
+)
+
+// ScoopInstallRoot describes one Scoop apps directory and its installation
+// scope. Paths are absolute where the platform can make them absolute.
+type ScoopInstallRoot struct {
+	Path  string
+	Scope ScoopScope
+}
+
 var (
-	ErrUnsupportedOS   = errors.New("unsupported operating system")
-	ErrUnsupportedArch = errors.New("unsupported architecture")
+	ErrUnsupportedOS      = errors.New("unsupported operating system")
+	ErrUnsupportedArch    = errors.New("unsupported architecture")
+	userCacheDirForUpdate = os.UserCacheDir
 )
 
 type Cache struct {
@@ -209,9 +276,22 @@ func NormalizeVersion(version string) string {
 }
 
 func AssetName(tag, goos, goarch string) (string, error) {
-	version := strings.TrimSpace(strings.TrimPrefix(tag, "v"))
-	if version == "" {
-		return "", errors.New("invalid release tag")
+	return AssetNameFor(BinaryName, tag, goos, goarch)
+}
+
+// AssetNameFor returns the release archive asset name for a given binary
+// (amq, amq-keepalive, amq-bridge, amq-acp). The archive name template is
+// <binary>_<version>_<os>_<arch>.<ext>, matching .goreleaser.yaml's
+// name_template per build. Only amq publishes a Windows zip; companions are
+// darwin/linux tar.gz, but this function does not enforce that — the caller
+// picks the asset for a binary the release actually publishes.
+func AssetNameFor(binaryName, tag, goos, goarch string) (string, error) {
+	if err := validateBinaryName(binaryName); err != nil {
+		return "", err
+	}
+	version, err := validateReleaseVersion(tag)
+	if err != nil {
+		return "", err
 	}
 	osName, err := normalizeOS(goos)
 	if err != nil {
@@ -225,7 +305,66 @@ func AssetName(tag, goos, goarch string) (string, error) {
 	if osName == "windows" {
 		ext = "zip"
 	}
-	return fmt.Sprintf("%s_%s_%s_%s.%s", BinaryName, version, osName, archName, ext), nil
+	assetName := fmt.Sprintf("%s_%s_%s_%s.%s", binaryName, version, osName, archName, ext)
+	if err := validateAssetName(assetName); err != nil {
+		return "", err
+	}
+	return assetName, nil
+}
+
+func validateBinaryName(binaryName string) error {
+	switch binaryName {
+	case BinaryName, "amq-keepalive", "amq-bridge", "amq-acp":
+		return nil
+	default:
+		return fmt.Errorf("invalid binary name: %q", binaryName)
+	}
+}
+
+func validateReleaseVersion(tag string) (string, error) {
+	version := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(tag), "v"))
+	if version == "" || filepath.Base(version) != version || filepath.VolumeName(version) != "" ||
+		strings.ContainsAny(version, `/\\`) {
+		return "", fmt.Errorf("invalid release tag: %q", tag)
+	}
+
+	core := version
+	if cut := strings.IndexAny(core, "+-"); cut >= 0 {
+		suffix := core[cut+1:]
+		if suffix == "" {
+			return "", fmt.Errorf("invalid release tag: %q", tag)
+		}
+		for _, char := range suffix {
+			if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
+				(char < '0' || char > '9') && char != '.' && char != '-' {
+				return "", fmt.Errorf("invalid release tag: %q", tag)
+			}
+		}
+		core = core[:cut]
+	}
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("invalid release tag: %q", tag)
+	}
+	for _, part := range parts {
+		if part == "" || (len(part) > 1 && part[0] == '0') {
+			return "", fmt.Errorf("invalid release tag: %q", tag)
+		}
+		for _, char := range part {
+			if char < '0' || char > '9' {
+				return "", fmt.Errorf("invalid release tag: %q", tag)
+			}
+		}
+	}
+	return version, nil
+}
+
+func validateAssetName(assetName string) error {
+	if assetName == "" || filepath.Base(assetName) != assetName || filepath.VolumeName(assetName) != "" ||
+		strings.ContainsAny(assetName, `/\\`) {
+		return fmt.Errorf("invalid release asset name: %q", assetName)
+	}
+	return nil
 }
 
 func normalizeOS(goos string) (string, error) {
@@ -263,6 +402,20 @@ func ExecutablePath() (string, string, error) {
 }
 
 func ExtractBinaryFromTarGz(archivePath, destDir string) (string, error) {
+	return ExtractBinaryFromTarGzNamed(BinaryName, archivePath, destDir)
+}
+
+// ExtractBinaryFromTarGzNamed extracts the named binary (without any .exe
+// suffix) from a tar.gz release archive into destDir and returns its path.
+// It accepts both the bare name and the name with a .exe suffix so a single
+// reader handles Windows archives carried in a tar.gz.
+func ExtractBinaryFromTarGzNamed(binaryName, archivePath, destDir string) (string, error) {
+	if strings.TrimSpace(binaryName) == "" {
+		binaryName = BinaryName
+	}
+	if err := validateBinaryName(binaryName); err != nil {
+		return "", err
+	}
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return "", err
@@ -291,7 +444,7 @@ func ExtractBinaryFromTarGz(archivePath, destDir string) (string, error) {
 			continue
 		}
 		name := filepath.Base(hdr.Name)
-		if name != BinaryName && name != BinaryName+".exe" {
+		if name != binaryName && name != binaryName+".exe" {
 			continue
 		}
 		outPath := filepath.Join(destDir, name)
@@ -320,6 +473,18 @@ func ExtractBinaryFromTarGz(archivePath, destDir string) (string, error) {
 }
 
 func ExtractBinaryFromZip(archivePath, destDir string) (string, error) {
+	return ExtractBinaryFromZipNamed(BinaryName, archivePath, destDir)
+}
+
+// ExtractBinaryFromZipNamed extracts the named binary (without any .exe
+// suffix) from a zip release archive into destDir and returns its path.
+func ExtractBinaryFromZipNamed(binaryName, archivePath, destDir string) (string, error) {
+	if strings.TrimSpace(binaryName) == "" {
+		binaryName = BinaryName
+	}
+	if err := validateBinaryName(binaryName); err != nil {
+		return "", err
+	}
 	reader, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return "", err
@@ -331,7 +496,7 @@ func ExtractBinaryFromZip(archivePath, destDir string) (string, error) {
 			continue
 		}
 		name := filepath.Base(file.Name)
-		if name != BinaryName && name != BinaryName+".exe" {
+		if name != binaryName && name != binaryName+".exe" {
 			continue
 		}
 		rc, err := file.Open()
@@ -481,6 +646,12 @@ func FetchLatestTag(ctx context.Context, client *http.Client) (string, error) {
 }
 
 func DownloadReleaseAsset(ctx context.Context, client *http.Client, tag, assetName, destPath string) error {
+	if err := validateAssetName(assetName); err != nil {
+		return err
+	}
+	if _, err := validateReleaseVersion(tag); err != nil {
+		return err
+	}
 	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", RepoSlug, tag, assetName)
 	// Use a simple GET request without API headers for binary downloads
 	// GitHub redirects to blob storage which doesn't need Accept: application/vnd.github+json
@@ -598,7 +769,24 @@ func SaveCache(path string, cache *Cache) error {
 }
 
 func DefaultCachePath() (string, error) {
-	cacheDir, err := os.UserCacheDir()
+	if rawDir, set := os.LookupEnv(EnvCacheDir); set {
+		if rawDir == "" || !filepath.IsAbs(rawDir) {
+			return "", fmt.Errorf("resolve %s: unset %s or set it to an absolute cache directory", EnvCacheDir, EnvCacheDir)
+		}
+		return filepath.Join(filepath.Clean(rawDir), "amq", "update.json"), nil
+	}
+	cacheDir, err := DefaultCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(cacheDir, "amq", "update.json"), nil
+}
+
+// DefaultCacheDir returns the platform user-cache directory. It is shared by
+// update files and keepalive readiness files so platform cache discovery stays
+// in one package.
+func DefaultCacheDir() (string, error) {
+	cacheDir, err := userCacheDirForUpdate()
 	if err != nil {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -606,7 +794,7 @@ func DefaultCachePath() (string, error) {
 		}
 		cacheDir = filepath.Join(home, ".cache")
 	}
-	return filepath.Join(cacheDir, "amq", "update.json"), nil
+	return cacheDir, nil
 }
 
 func writeUpdateHint(w io.Writer, current, latest string) error {
@@ -689,4 +877,202 @@ func IsNoUpdateCheckEnv() bool {
 	default:
 		return false
 	}
+}
+
+// ClassifyInstall determines how a binary was installed using one Homebrew
+// prefix. It remains as a compatibility wrapper; callers that have more than
+// one candidate prefix should use ClassifyInstallAgainstPrefixes.
+func ClassifyInstall(resolvedPath, homebrewPrefix string) InstallKind {
+	return ClassifyInstallAgainstPrefixes(resolvedPath, []string{homebrewPrefix})
+}
+
+// ClassifyInstallAgainstPrefixes classifies a binary against every known
+// Homebrew prefix. A path in <prefix>/Cellar is package-managed. A path in
+// <prefix>/bin is package-managed only when the object is a symlink that
+// resolves into that same prefix's Cellar; a regular file there remains an
+// ambiguous direct install for the CLI's final safety guard.
+func ClassifyInstallAgainstPrefixes(resolvedPath string, homebrewPrefixes []string) InstallKind {
+	return classifyInstallAgainstPrefixesAndScoopRoots(
+		resolvedPath,
+		homebrewPrefixes,
+		ScoopInstallRoots(),
+		runtime.GOOS == "windows",
+	)
+}
+
+func classifyInstallAgainstPrefixesAndScoopRoots(
+	resolvedPath string,
+	homebrewPrefixes []string,
+	scoopRoots []ScoopInstallRoot,
+	scoopEnabled bool,
+) InstallKind {
+	if resolvedPath == "" {
+		return InstallDirect
+	}
+	rawPath := filepath.Clean(resolvedPath)
+	path := CanonicalPath(rawPath)
+	for _, homebrewPrefix := range homebrewPrefixes {
+		if homebrewPrefix == "" {
+			continue
+		}
+		prefix := canonicalPrefix(homebrewPrefix)
+		cellar := filepath.Join(prefix, "Cellar")
+		if pathWithinPrefix(path, cellar) {
+			return InstallHomebrew
+		}
+		if pathWithinPrefix(rawPath, filepath.Join(prefix, "bin")) && isSymlinkToCellar(rawPath, cellar) {
+			return InstallHomebrew
+		}
+	}
+	if scoopEnabled {
+		// A global root wins if an operator configures overlapping roots. That
+		// keeps the delegate conservative and preserves the global scope.
+		for _, scope := range []ScoopScope{ScoopScopeGlobal, ScoopScopeUser} {
+			for _, root := range scoopRoots {
+				if root.Scope != scope || root.Path == "" {
+					continue
+				}
+				if pathWithinPrefix(path, CanonicalPath(root.Path)) {
+					if scope == ScoopScopeGlobal {
+						return InstallScoopGlobal
+					}
+					return InstallScoop
+				}
+			}
+		}
+		if isScoopShapedPath(rawPath) {
+			return InstallScoopUnknown
+		}
+	}
+	return InstallDirect
+}
+
+func canonicalPrefix(prefix string) string {
+	return CanonicalPath(prefix)
+}
+
+func isSymlinkToCellar(path, cellar string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	return err == nil && pathWithinPrefix(filepath.Clean(resolved), cellar)
+}
+
+// CanonicalPath resolves the existing portion of path and preserves any
+// non-existent suffix below it.
+func CanonicalPath(path string) string {
+	path = filepath.Clean(path)
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	current := path
+	suffix := make([]string, 0, 4)
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			resolved = filepath.Clean(resolved)
+			for index := len(suffix) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, suffix[index])
+			}
+			return filepath.Clean(resolved)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return path
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
+}
+
+// pathWithinPrefix reports whether path is equal to or nested inside prefix.
+func pathWithinPrefix(path, prefix string) bool {
+	rel, err := filepath.Rel(filepath.Clean(prefix), path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+const defaultScoopGlobalRoot = `C:\ProgramData\scoop`
+
+// ScoopInstallRoots returns the configured user and global Scoop apps
+// directories on Windows. Scoop honors $SCOOP and $SCOOP_GLOBAL; the default
+// roots are ~/scoop and C:\ProgramData\scoop.
+func ScoopInstallRoots() []ScoopInstallRoot {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	home, _ := os.UserHomeDir()
+	return scoopInstallRootsFor(
+		runtime.GOOS,
+		strings.TrimSpace(os.Getenv("SCOOP")),
+		strings.TrimSpace(os.Getenv("SCOOP_GLOBAL")),
+		home,
+	)
+}
+
+func scoopInstallRootsFor(goos, scoop, scoopGlobal, home string) []ScoopInstallRoot {
+	if goos != "windows" {
+		return nil
+	}
+	roots := make([]ScoopInstallRoot, 0, 2)
+	seen := make(map[string]struct{}, 2)
+	add := func(root string, scope ScoopScope) {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			return
+		}
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+		apps := filepath.Join(filepath.Clean(root), "apps")
+		key := CanonicalPath(apps)
+		if _, ok := seen[key+"\x00"+string(scope)]; ok {
+			return
+		}
+		seen[key+"\x00"+string(scope)] = struct{}{}
+		roots = append(roots, ScoopInstallRoot{Path: apps, Scope: scope})
+	}
+
+	if scoop == "" && home != "" {
+		scoop = filepath.Join(home, "scoop")
+	}
+	if scoopGlobal == "" {
+		scoopGlobal = defaultScoopGlobalRoot
+	}
+	add(scoop, ScoopScopeUser)
+	add(scoopGlobal, ScoopScopeGlobal)
+	return roots
+}
+
+// ScoopAppsDir returns the user-scope Scoop apps directory on Windows. It is
+// empty on other operating systems and remains for callers that need only the
+// historical single-root view.
+func ScoopAppsDir() string {
+	for _, root := range ScoopInstallRoots() {
+		if root.Scope == ScoopScopeUser {
+			return root.Path
+		}
+	}
+	return ""
+}
+
+// IsScoopShapedPath reports whether path contains the conventional Scoop
+// root/apps layout on Windows.
+func IsScoopShapedPath(path string) bool {
+	return runtime.GOOS == "windows" && isScoopShapedPath(path)
+}
+
+func isScoopShapedPath(path string) bool {
+	parts := strings.FieldsFunc(filepath.Clean(path), func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	for index := 0; index+1 < len(parts); index++ {
+		if strings.EqualFold(parts[index], "scoop") && strings.EqualFold(parts[index+1], "apps") {
+			return true
+		}
+	}
+	return false
 }
