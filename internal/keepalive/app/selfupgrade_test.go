@@ -767,6 +767,60 @@ func TestSelfUpgradeRecordAttemptHonorsAuthoritativeRefusal(t *testing.T) {
 	}
 }
 
+func TestSelfUpgradeSettledCandidateExecsWithoutRearmingAttempt(t *testing.T) {
+	dir := t.TempDir()
+	incumbentPath := filepath.Join(dir, "incumbent")
+	candidatePath := filepath.Join(dir, "candidate")
+	writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
+	writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
+	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
+	candidate := captureSelfUpgradeTestImage(t, candidatePath, "1.1.0")
+	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
+	settled := selfupgrade.NewAttempt(candidate, time.Now().Add(-time.Minute))
+	settled.Status = selfupgrade.AttemptStatusSettled
+	controller.attempts = []selfupgrade.Attempt{settled}
+	if err := controller.saveState(); err != nil {
+		t.Fatalf("save settled attempt: %v", err)
+	}
+	before, err := os.ReadFile(controller.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	previousCandidate := selfUpgradeCaptureCandidate
+	previousExec := selfUpgradeExecImage
+	selfUpgradeCaptureCandidate = func(string) (selfupgrade.ImageEvidence, error) {
+		return candidate, nil
+	}
+	execCalls := 0
+	selfUpgradeExecImage = func(selfupgrade.ImageEvidence, []string, []string) error {
+		execCalls++
+		return nil
+	}
+	t.Cleanup(func() {
+		selfUpgradeCaptureCandidate = previousCandidate
+		selfUpgradeExecImage = previousExec
+	})
+
+	if err := controller.maintain(context.Background()); err != nil {
+		t.Fatalf("maintain() error = %v", err)
+	}
+	if execCalls != 1 {
+		t.Fatalf("exec calls = %d, want one settled-candidate exec", execCalls)
+	}
+	after, err := os.ReadFile(controller.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("settled state changed during exec:\nbefore=%safter=%s", before, after)
+	}
+	state := readSelfUpgradeStateForTest(t, controller.statePath)
+	if len(state.Attempts) != 1 || state.Attempts[0].Status != selfupgrade.AttemptStatusSettled {
+		t.Fatalf("settled state = %#v, want unchanged settled entry", state)
+	}
+}
+
 func TestSelfUpgradeRetriesAfterTransientAttemptPublicationFailure(t *testing.T) {
 	dir := t.TempDir()
 	incumbentPath := filepath.Join(dir, "incumbent")
@@ -873,6 +927,23 @@ func TestSelfUpgradeUnsettledAttemptMatchingCandidateRefusesAndStaysPending(t *t
 	}
 	if !selfupgrade.RefusedCandidatesContain(state.RefusedCandidates, candidate) {
 		t.Fatalf("persisted refusals = %#v, want candidate", state.RefusedCandidates)
+	}
+}
+
+func TestSelfUpgradeMarkSettledNoOpsWhenUnavailable(t *testing.T) {
+	controllers := []*selfUpgradeController{
+		{enabled: false, eligible: true, statePath: filepath.Join(t.TempDir(), selfUpgradeStateFileName)},
+		{enabled: true, eligible: false, statePath: filepath.Join(t.TempDir(), selfUpgradeStateFileName)},
+		{enabled: true, eligible: true},
+	}
+	for index, controller := range controllers {
+		if err := controller.markSettled(); err != nil {
+			t.Fatalf("controller %d markSettled() error = %v, want no-op", index, err)
+		}
+	}
+	var nilController *selfUpgradeController
+	if err := nilController.markSettled(); err != nil {
+		t.Fatalf("nil markSettled() error = %v, want no-op", err)
 	}
 }
 

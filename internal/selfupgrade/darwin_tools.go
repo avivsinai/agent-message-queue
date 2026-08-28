@@ -21,7 +21,8 @@ func verifyDarwinSystemTool(path string) error {
 		return err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || stat.Uid != 0 {
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 ||
+		info.Mode().Perm()&0o022 != 0 || stat.Uid != 0 {
 		return fmt.Errorf("darwin system tool %s is not a root-owned executable regular file", path)
 	}
 	return nil

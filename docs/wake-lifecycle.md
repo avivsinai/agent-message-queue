@@ -627,8 +627,9 @@ contract documented in `docs/amq-keepalive.md`.
 
 Before the in-place exec, wake writes a private `.wake.selfupgrade.attempt`
 sidecar. If wake exits after the exec before its first quiescent maintenance
-boundary, a later wake that reaches maintenance refuses the matching image for
-24 hours in that wake agent directory. The guard cannot help when the new image dies
+boundary, a later wake that reaches maintenance refuses the matching image while
+the attempt is fresh relative to its recorded timestamp under the current wall
+clock. The guard cannot help when the new image dies
 before any replacement wake reaches the maintenance code. Its bounded
 eight-entry ledger is scoped to the wake agent directory. The wake itself has
 no in-process rollback or retry; an external supervisor may restart it. The
@@ -638,8 +639,8 @@ operator or package manager must restore a known-good image after a refusal.
 On Darwin, the bound wake stage is checked with the root-owned
 `/usr/bin/codesign --verify --strict`; a missing, unsafe, or failing verifier
 refuses the restart. Cleanup uses the root-owned `/bin/ps` with a conservative
-command-name check. The expensive signature probe runs while `SIGUSR1` remains
-delivered, followed by a small final bound-image revalidation before exec.
+command-name check. The signature probe runs before wake ignores `SIGUSR1`,
+followed by a small final bound-image revalidation before exec.
 
 The wake attempt sidecar accepts the single-attempt schema 1 as migration input
 and writes the bounded ledger schema 2. A pre-feature wake ignores this marker,

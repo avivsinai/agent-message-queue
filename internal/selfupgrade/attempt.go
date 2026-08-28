@@ -80,7 +80,7 @@ func (attempt Attempt) Matches(evidence ImageEvidence) bool {
 
 func (attempt Attempt) RefusalReason() string {
 	return fmt.Sprintf(
-		"replacement attempt was armed at %s and did not settle; refusing for 24h",
+		"replacement attempt was armed at %s and did not settle; refusing while the attempt is fresh relative to the recorded timestamp",
 		time.Unix(attempt.UnixTime, 0).UTC().Format(time.RFC3339),
 	)
 }
@@ -135,6 +135,9 @@ func AddAttempt(attempts []Attempt, addition Attempt, now time.Time) ([]Attempt,
 	current := PruneExpiredAttempts(attempts, now)
 	for index, attempt := range current {
 		if attempt.Candidate == addition.Candidate {
+			if attempt.IsFutureUncertain(now) {
+				return nil, fmt.Errorf("self-upgrade attempt timestamp is uncertain")
+			}
 			current = append(current[:index], current[index+1:]...)
 			break
 		}

@@ -18,6 +18,19 @@ const (
 	wakeSelfUpgradeAttemptSchema   = 2
 )
 
+var (
+	errWakeSelfUpgradeAttemptTimestampUncertain = errors.New("wake self-upgrade attempt timestamp is uncertain")
+	errWakeSelfUpgradeAttemptNotFresh           = errors.New("wake self-upgrade attempt is not fresh")
+)
+
+type wakeSelfUpgradeAttemptRefusalError struct {
+	attempt selfupgrade.Attempt
+}
+
+func (err wakeSelfUpgradeAttemptRefusalError) Error() string {
+	return err.attempt.RefusalReason()
+}
+
 type wakeSelfUpgradeAttemptFile struct {
 	Schema    int                           `json:"schema"`
 	Attempts  []selfupgrade.Attempt         `json:"attempts,omitempty"`
@@ -174,7 +187,7 @@ func loadWakeSelfUpgradeAttemptAtStartup(
 			if attempt.Status == selfupgrade.AttemptStatusAttempt &&
 				attempt.IsFresh(wakeSelfUpgradeNow()) && attempt.Matches(running) {
 				state.startupRefusalReason = fmt.Sprintf(
-					"refused unsettled wake self-upgrade image for 24h after a replacement attempt (candidate=%s)",
+					"refused unsettled wake self-upgrade image while the attempt is fresh relative to its recorded timestamp under the current wall clock (candidate=%s)",
 					wakeSelfUpgradeEvidenceIdentityString(running),
 				)
 				break
@@ -192,10 +205,6 @@ func persistWakeSelfUpgradeAttemptAtBoundary(
 	if record.Source != wakeRestartSourceSelf {
 		return nil, errors.New("wake self-upgrade attempt requires a self restart record")
 	}
-	attempt := selfupgrade.NewAttempt(record.Candidate, wakeSelfUpgradeNow())
-	if err := selfupgrade.ValidateAttempt(attempt); err != nil {
-		return nil, err
-	}
 	var installedAttempts []selfupgrade.Attempt
 	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
@@ -206,7 +215,8 @@ func persistWakeSelfUpgradeAttemptAtBoundary(
 		if err != nil {
 			return err
 		}
-		if !exists || !sameWakeRestartRecord(record, currentRecord) {
+		if !exists || record.Status != wakeRestartPending || currentRecord.Status != wakeRestartPending ||
+			!sameWakeRestartAttemptIdentity(record, currentRecord) {
 			return fmt.Errorf("wake restart request changed before self-upgrade attempt publication")
 		}
 		currentAttempts, exists, err := readWakeSelfUpgradeAttemptAt(dirfd, agentDir)
@@ -216,7 +226,34 @@ func persistWakeSelfUpgradeAttemptAtBoundary(
 		if !exists {
 			currentAttempts = nil
 		}
-		installedAttempts, err = selfupgrade.AddAttempt(currentAttempts, attempt, wakeSelfUpgradeNow())
+		now := wakeSelfUpgradeNow()
+		for _, existing := range currentAttempts {
+			if existing.Status == selfupgrade.AttemptStatusAttempt && existing.IsFutureUncertain(now) {
+				return fmt.Errorf("%w: refusing to modify the wake attempt ledger", errWakeSelfUpgradeAttemptTimestampUncertain)
+			}
+		}
+		for _, existing := range currentAttempts {
+			if !existing.Matches(record.Candidate) {
+				continue
+			}
+			switch existing.Status {
+			case selfupgrade.AttemptStatusSettled:
+				installedAttempts = append([]selfupgrade.Attempt(nil), currentAttempts...)
+				return nil
+			case selfupgrade.AttemptStatusAttempt:
+				if existing.IsFresh(now) {
+					return wakeSelfUpgradeAttemptRefusalError{attempt: existing}
+				}
+			}
+		}
+		attempt := selfupgrade.NewAttempt(record.Candidate, now)
+		if err := selfupgrade.ValidateAttempt(attempt); err != nil {
+			return err
+		}
+		if !attempt.IsFresh(now) {
+			return fmt.Errorf("%w: refusing to publish an expired attempt", errWakeSelfUpgradeAttemptNotFresh)
+		}
+		installedAttempts, err = selfupgrade.AddAttempt(currentAttempts, attempt, now)
 		if err != nil {
 			return err
 		}
@@ -260,8 +297,17 @@ func settleWakeSelfUpgradeAttemptAtBoundary(
 		if !exists {
 			return nil
 		}
+		now := wakeSelfUpgradeNow()
+		for _, attempt := range attempts {
+			if attempt.Status == selfupgrade.AttemptStatusAttempt && attempt.IsFutureUncertain(now) {
+				state.Eligible = false
+				state.Reason = "self-upgrade unavailable: replacement attempt timestamp is uncertain"
+				settled = append([]selfupgrade.Attempt(nil), attempts...)
+				return nil
+			}
+		}
 		originalAttempts := append([]selfupgrade.Attempt(nil), attempts...)
-		attempts = selfupgrade.PruneExpiredAttempts(attempts, wakeSelfUpgradeNow())
+		attempts = selfupgrade.PruneExpiredAttempts(attempts, now)
 		for index := range attempts {
 			if attempts[index].Status == selfupgrade.AttemptStatusAttempt &&
 				attempts[index].Matches(running) {

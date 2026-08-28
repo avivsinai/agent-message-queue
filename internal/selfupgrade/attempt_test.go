@@ -88,6 +88,27 @@ func TestAddAttemptDoesNotEvictFutureUncertainEntry(t *testing.T) {
 	}
 }
 
+func TestAddAttemptDoesNotDeleteMatchingFutureUncertainEntry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	candidate := ImageEvidence{
+		Platform:        runtime.GOOS,
+		Device:          1,
+		Inode:           1,
+		Size:            1,
+		SHA256:          "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		EmbeddedVersion: "1.0.0",
+	}
+	future := NewAttempt(candidate, now.Add(AttemptFutureSkew+time.Second))
+	addition := NewAttempt(candidate, now)
+	attempts := []Attempt{future}
+	if _, err := AddAttempt(attempts, addition, now); err == nil {
+		t.Fatal("AddAttempt() succeeded with a matching future-uncertain entry")
+	}
+	if len(attempts) != 1 || attempts[0] != future {
+		t.Fatalf("input ledger = %#v, want matching future entry preserved", attempts)
+	}
+}
+
 func TestMergeAttemptsDoesNotReopenSettledEntry(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	evidence := ImageEvidence{

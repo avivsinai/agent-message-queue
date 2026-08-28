@@ -32,7 +32,7 @@ func verifyDarwinCodeSignature(stagePath string) error {
 			return fmt.Errorf("verify Darwin code signature tool: %w", err)
 		}
 		return fmt.Errorf(
-			"verify Darwin code signature: codesign is unavailable; install Xcode Command Line Tools with xcode-select --install: %w",
+			"verify Darwin code signature: /usr/bin/codesign must exist and pass validation; otherwise replacement is refused: %w",
 			err,
 		)
 	}
@@ -148,8 +148,8 @@ func execImagePlatform(candidate ImageEvidence, argv, env []string) error {
 		return err
 	}
 	// Darwin cannot exec an open file descriptor. The private 0700 stage
-	// directory named with our PID is re-verified immediately before exec;
-	// same-UID races in that window are outside AMQ's threat model, as for wake
-	// self-upgrade.
+	// directory named with our PID is signature-verified before pathname exec;
+	// same-UID races after that validation are outside AMQ's threat model, as for
+	// wake self-upgrade.
 	return selfUpgradeDarwinExec(stagePath, argv, env)
 }

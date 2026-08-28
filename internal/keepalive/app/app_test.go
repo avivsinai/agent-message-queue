@@ -3071,6 +3071,25 @@ func TestSuperviseRejectsNonPositiveInterval(t *testing.T) {
 	}
 }
 
+func TestSuperviseOnceNoSelfUpgradePublishesJSONWithoutState(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registryPath := filepath.Join(dir, "registry.json")
+	var stdout, stderr bytes.Buffer
+	code := (App{Stdout: &stdout, Stderr: &stderr}).Run(
+		context.Background(),
+		[]string{"supervise", "--registry", registryPath, "--once", "--no-self-upgrade"},
+	)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q, want successful one-shot pass", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "[]" {
+		t.Fatalf("stdout=%q, want empty JSON results", got)
+	}
+}
+
 func TestContinuousSuperviseLogsPersistentPassErrorsAndContinues(t *testing.T) {
 	registryPath := testRegistryTempPath(t)
 	if err := os.Mkdir(registryPath, 0o700); err != nil {

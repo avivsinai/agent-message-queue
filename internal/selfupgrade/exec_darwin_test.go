@@ -91,7 +91,7 @@ func TestExecImagePlatformReportsMissingDarwinCodeSignatureTool(t *testing.T) {
 	}
 
 	err = execImagePlatform(candidate, []string{candidatePath}, os.Environ())
-	if err == nil || !strings.Contains(err.Error(), "xcode-select --install") {
+	if err == nil || !strings.Contains(err.Error(), "/usr/bin/codesign must exist and pass validation") {
 		t.Fatalf("execImagePlatform() error = %v, want installation remedy", err)
 	}
 	if execCalls != 0 {

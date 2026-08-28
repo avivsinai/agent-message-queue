@@ -1377,6 +1377,7 @@ func executeWakeRestart(
 	argv []string,
 	incumbentVersion string,
 	restartSignals chan os.Signal,
+	armSelfUpgradeAttempt func(wakeRestartRecord) error,
 ) (returnErr error) {
 	bootstrapValue := wakeResumeBootstrap{
 		Schema:             wakeRestartSchemaV1,
@@ -1422,6 +1423,16 @@ func executeWakeRestart(
 			wakeRestartSignalNotify(restartSignals, syscall.SIGUSR1)
 		}
 		return fmt.Errorf("%w: revalidate wake restart image: %w", errWakeImageRefused, err)
+	}
+	// Bind/hash failures must not arm durable crash-loop debt. Arm only after
+	// bound-image validation completes, immediately before process replacement.
+	if armSelfUpgradeAttempt != nil {
+		if err := armSelfUpgradeAttempt(record); err != nil {
+			if restartSignals != nil {
+				wakeRestartSignalNotify(restartSignals, syscall.SIGUSR1)
+			}
+			return fmt.Errorf("arm wake self-upgrade attempt: %w", err)
+		}
 	}
 	err = wakeRestartExec(bound.executionPath, append([]string(nil), argv...), env)
 	if restartSignals != nil {
@@ -1665,18 +1676,70 @@ func handleWakeRestartAtLoopBoundary(
 		recordSelfUpgradeDecision(wakeSelfUpgradeActionRefused, reason)
 		return
 	}
-	if record.Source == wakeRestartSourceSelf {
-		attempts, attemptErr := persistWakeSelfUpgradeAttemptAtBoundary(agentDir, cfg.inspectTerminalGeneration(), record)
-		if attemptErr != nil {
-			recordSelfUpgradeDecision(
-				wakeSelfUpgradeActionDeferred,
-				"replacement attempt was not persisted: "+attemptErr.Error(),
-			)
-			return
+	if record.Source == wakeRestartSourceSelf &&
+		(!cfg.selfUpgrade.Enabled || !cfg.selfUpgrade.Eligible) {
+		reason := cfg.selfUpgrade.Reason
+		if reason == "" {
+			reason = "self-upgrade is unavailable"
 		}
-		cfg.selfUpgrade.attempts = attempts
+		recordSelfUpgradeDecision(wakeSelfUpgradeActionIneligible, reason)
+		return
 	}
-	if err := executeWakeRestart(record, os.Args, cfg.terminalImageVersion, cfg.restartSignals); err != nil {
+	var armSelfUpgradeAttempt func(wakeRestartRecord) error
+	if record.Source == wakeRestartSourceSelf {
+		armSelfUpgradeAttempt = func(boundRecord wakeRestartRecord) error {
+			attempts, err := persistWakeSelfUpgradeAttemptAtBoundary(
+				agentDir,
+				cfg.inspectTerminalGeneration(),
+				boundRecord,
+			)
+			if err == nil {
+				cfg.selfUpgrade.attempts = attempts
+			}
+			return err
+		}
+	}
+	if err := executeWakeRestart(
+		record,
+		os.Args,
+		cfg.terminalImageVersion,
+		cfg.restartSignals,
+		armSelfUpgradeAttempt,
+	); err != nil {
+		if record.Source == wakeRestartSourceSelf {
+			var refusal wakeSelfUpgradeAttemptRefusalError
+			if errors.As(err, &refusal) {
+				reason := wakeRestartReasonWithRemedy(refusal.Error(), cfg.root, cfg.me)
+				refuseErr := refuseWakeRestartRecord(agentDir, record, reason)
+				if refuseErr == nil {
+					cfg.selfUpgrade.refusalPending = nil
+					cfg.selfUpgrade.restartPending = false
+					recordSelfUpgradeDecision(wakeSelfUpgradeActionRefused, reason)
+				} else {
+					cfg.selfUpgrade.refusalPending = &wakeSelfUpgradeRefusalPending{
+						Record: record,
+						Reason: reason,
+					}
+					recordSelfUpgradeDecision(
+						wakeSelfUpgradeActionRefusalPending,
+						fmt.Sprintf("%s; refusal persistence pending: %v", reason, refuseErr),
+					)
+				}
+				return
+			}
+			if errors.Is(err, errWakeSelfUpgradeAttemptTimestampUncertain) {
+				cfg.selfUpgrade.Eligible = false
+				cfg.selfUpgrade.Reason = "self-upgrade unavailable: replacement attempt timestamp is uncertain"
+				recordSelfUpgradeDecision(wakeSelfUpgradeActionIneligible, cfg.selfUpgrade.Reason)
+				return
+			}
+			if errors.Is(err, errWakeSelfUpgradeAttemptNotFresh) {
+				cfg.selfUpgrade.Eligible = false
+				cfg.selfUpgrade.Reason = "self-upgrade unavailable: replacement attempt is not fresh"
+				recordSelfUpgradeDecision(wakeSelfUpgradeActionIneligible, cfg.selfUpgrade.Reason)
+				return
+			}
+		}
 		if errors.Is(err, errWakeImageChangedWhileHashing) && record.Source == wakeRestartSourceSelf {
 			recordSelfUpgradeDecision(
 				wakeSelfUpgradeActionDeferred,

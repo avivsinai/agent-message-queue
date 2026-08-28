@@ -612,6 +612,10 @@ func wakeRestartLoopConfigForTest(fixture wakeRestartFixture) wakeConfig {
 		terminalGeneration: fixture.lock.Lock.Generation,
 		retainedAgent:      fixture.agentDir,
 		retainedInbox:      fixture.inboxDir,
+		selfUpgrade: wakeSelfUpgradeState{
+			Enabled:  true,
+			Eligible: true,
+		},
 		inspectTerminalGeneration: func() wakeLockInspection {
 			return inspectWakeLock(fixture.root, fixture.agent)
 		},

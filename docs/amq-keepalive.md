@@ -140,13 +140,11 @@ candidate with `--version` to discover its version. Universal or fat Mach-O
 input is read from its first slice; AMQ release output is single-slice, and
 supporting other slices is a non-goal.
 
-On Darwin, the private `0700` PID-scoped stage is re-verified immediately
-before pathname exec because Darwin has no `fexecve`; same-UID races in that
-narrow window are outside AMQ's threat model, as for wake self-upgrade.
-The bound stage is also checked before AMQ changes the `SIGUSR1` disposition
-with root-owned `/usr/bin/codesign --verify --strict`; a missing, unsafe, or
-failing verifier refuses the replacement. A small final bound-image
-revalidation runs inside the ignored window immediately before exec.
+On Darwin, keepalive stages the candidate in a private `0700` PID-scoped
+directory because Darwin has no `fexecve`. It verifies the bound stage with
+root-owned `/usr/bin/codesign --verify --strict` before pathname exec; a
+missing, unsafe, or failing verifier refuses the replacement. Same-UID races
+after this validation remain outside AMQ's threat model.
 
 The `register` and `attach` commands keep `executablePath()` as their default
 injector path. Only `supervise` derives its default self-upgrade locator from
@@ -163,12 +161,13 @@ upgrade.
 Before `execve`, keepalive records the candidate as an unsettled replacement
 attempt in `.selfupgrade.json` and mirrors the bounded attempt ledger in the
 separate `.selfupgrade.attempts` sidecar. If a later process reaches maintenance
-with a candidate matching that unsettled attempt, it refuses the candidate for
-24 hours to prevent an immediate crash loop. A healthy pass from the attempted
-image settles the attempt. The guard cannot help when the new image dies before
-any replacement process reaches maintenance code. Its bounded eight-entry ledger
-is scoped to the registry directory (`filepath.Dir(registryPath)`) and its
-attempt sidecars; it does not roll back the installed executable.
+with a candidate matching that unsettled attempt, it refuses the candidate while
+the attempt is fresh relative to the recorded timestamp under the current wall
+clock. A healthy pass from the attempted image settles the attempt. The guard
+cannot help when the new image dies before any replacement process reaches
+maintenance code. Its bounded eight-entry ledger is scoped to the registry
+directory (`filepath.Dir(registryPath)`); it does not roll back the installed
+executable.
 
 The primary state-file schema is version 2. New code accepts schema 1 as
 migration input and publishes schema 2 before a protected replacement exec. The
@@ -185,13 +184,13 @@ good package version.
 Reads of the candidate's `-X main.version` linker assignment that fail or
 produce unknown metadata defer and are retried after a later pass. Exec
 failures fail closed and are recorded in the private state files next to the
-registry; each replacement-attempted candidate is refused at most once per
-registry directory during the 24-hour attempt window. A new process generation
-starts with an empty refusal cache. Both state files are mode `0600`; a corrupt
-or unsafe state file is unavailable, disabling self-upgrade at startup and
-deferring a later refresh. Use `supervise --no-self-upgrade` to opt out. The
-durable attempt guard applies per registry directory; the process-local refusal
-cache is separate.
+registry. The durable attempt ledger is bounded per registry directory; an
+unsettled attempt is refused while it is fresh relative to its recorded
+timestamp under the current wall clock. A new process generation starts with
+an empty refusal cache. Both state files are mode `0600`; a corrupt or unsafe
+state file is unavailable, disabling self-upgrade at startup and deferring a
+later refresh. Use `supervise --no-self-upgrade` to opt out. The process-local
+refusal cache is separate from the durable attempt guard.
 
 ### Detached wake stderr protocol
 

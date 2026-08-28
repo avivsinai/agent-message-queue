@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -67,12 +68,14 @@ type selfUpgradeController struct {
 	attempts             []selfupgrade.Attempt
 	startupRefusalReason string
 	statePublished       bool
+	ledgerVersion        string
 	lastObservation      *selfUpgradeObservation
 }
 
 type selfUpgradeObservation struct {
-	evidence selfupgrade.ImageEvidence
-	action   string
+	evidence      selfupgrade.ImageEvidence
+	action        string
+	ledgerVersion string
 }
 
 type selfUpgradeAttemptRefusalError struct {
@@ -243,6 +246,7 @@ func (controller *selfUpgradeController) applySelfUpgradeState(
 		controller.attempts = nil
 		controller.refused = nil
 		controller.statePublished = false
+		controller.ledgerVersion = selfUpgradeLedgerVersion(controller.generation, nil, nil)
 		return nil
 	}
 	now := selfUpgradeNow()
@@ -252,6 +256,7 @@ func (controller *selfUpgradeController) applySelfUpgradeState(
 	} else {
 		controller.refused = nil
 	}
+	controller.ledgerVersion = selfUpgradeLedgerVersion(state.Generation, controller.refused, controller.attempts)
 	controller.statePublished = state.Schema == selfUpgradeStateSchema &&
 		state.Generation == controller.generation &&
 		state.attemptsSidecarExists &&
@@ -266,7 +271,7 @@ func (controller *selfUpgradeController) applySelfUpgradeState(
 			attempt.Status == selfupgrade.AttemptStatusAttempt &&
 			attempt.IsFresh(now) && attempt.Matches(controller.incumbent) {
 			controller.startupRefusalReason = fmt.Sprintf(
-				"refused unsettled self-upgrade image for 24h after a replacement attempt (candidate=%s)",
+				"refused unsettled self-upgrade image while the attempt is fresh relative to its recorded timestamp under the current wall clock (candidate=%s)",
 				selfUpgradeEvidenceIdentityString(controller.incumbent),
 			)
 		}
@@ -275,6 +280,7 @@ func (controller *selfUpgradeController) applySelfUpgradeState(
 }
 
 func (controller *selfUpgradeController) refreshSelfUpgradeState() error {
+	previousVersion := controller.ledgerVersion
 	release, err := selfUpgradeAcquireLock(controller.statePath)
 	if err != nil {
 		return err
@@ -282,6 +288,10 @@ func (controller *selfUpgradeController) refreshSelfUpgradeState() error {
 	state, exists, readErr := readSelfUpgradeStateFile(controller.statePath)
 	if readErr == nil {
 		readErr = controller.applySelfUpgradeState(state, exists, false)
+		if readErr == nil && controller.lastObservation != nil &&
+			previousVersion != controller.ledgerVersion {
+			controller.lastObservation = nil
+		}
 	}
 	releaseErr := release()
 	return errors.Join(readErr, releaseErr)
@@ -481,12 +491,21 @@ func (controller *selfUpgradeController) publishStateLocked(mutator func(*selfUp
 	controller.refused = append([]selfupgrade.RefusedCandidate(nil), state.RefusedCandidates...)
 	controller.attempts = append([]selfupgrade.Attempt(nil), state.Attempts...)
 	controller.statePublished = true
+	controller.ledgerVersion = selfUpgradeLedgerVersion(state.Generation, state.RefusedCandidates, state.Attempts)
 	return nil
 }
 
 func (controller *selfUpgradeController) mergeState(
 	current selfUpgradeStateFile,
 	exists bool,
+) (selfUpgradeStateFile, error) {
+	return controller.mergeStateAt(current, exists, selfUpgradeNow())
+}
+
+func (controller *selfUpgradeController) mergeStateAt(
+	current selfUpgradeStateFile,
+	exists bool,
+	now time.Time,
 ) (selfUpgradeStateFile, error) {
 	desired := selfUpgradeStateFile{
 		Schema:            selfUpgradeStateSchema,
@@ -496,7 +515,6 @@ func (controller *selfUpgradeController) mergeState(
 		RefusedCandidates: append([]selfupgrade.RefusedCandidate(nil), controller.refused...),
 		Attempts:          append([]selfupgrade.Attempt(nil), controller.attempts...),
 	}
-	now := selfUpgradeNow()
 	if err := validateSelfUpgradeAttemptTimes(desired.Attempts, now); err != nil {
 		return selfUpgradeStateFile{}, err
 	}
@@ -556,6 +574,35 @@ func nilIfEmptySelfUpgradeRefusals(candidates []selfupgrade.RefusedCandidate) []
 		return nil
 	}
 	return candidates
+}
+
+func selfUpgradeLedgerVersion(
+	generation string,
+	refused []selfupgrade.RefusedCandidate,
+	attempts []selfupgrade.Attempt,
+) string {
+	data, _ := json.Marshal(struct {
+		Generation string                         `json:"generation"`
+		Refused    []selfupgrade.RefusedCandidate `json:"refused"`
+		Attempts   []selfupgrade.Attempt          `json:"attempts"`
+	}{
+		Generation: generation,
+		Refused:    refused,
+		Attempts:   attempts,
+	})
+	digest := sha256.Sum256(data)
+	return string(digest[:])
+}
+
+func (controller *selfUpgradeController) observe(
+	evidence selfupgrade.ImageEvidence,
+	action string,
+) *selfUpgradeObservation {
+	return &selfUpgradeObservation{
+		evidence:      evidence,
+		action:        action,
+		ledgerVersion: controller.ledgerVersion,
+	}
 }
 
 func (controller *selfUpgradeController) writeState(state selfUpgradeStateFile) error {
@@ -659,11 +706,12 @@ func (controller *selfUpgradeController) maintain(ctx context.Context) error {
 		return nil
 	}
 	if controller.lastObservation != nil &&
+		controller.lastObservation.ledgerVersion == controller.ledgerVersion &&
 		sameSelfUpgradeFileIdentity(controller.lastObservation.evidence, preflight) {
 		return nil
 	}
 	if sameSelfUpgradeContent(controller.incumbent, preflight) {
-		controller.lastObservation = &selfUpgradeObservation{evidence: preflight, action: selfUpgradeActionUnchanged}
+		controller.lastObservation = controller.observe(preflight, selfUpgradeActionUnchanged)
 		return nil
 	}
 	candidate, err := selfUpgradeCaptureCandidate(controller.locator)
@@ -675,7 +723,7 @@ func (controller *selfUpgradeController) maintain(ctx context.Context) error {
 		controller.lastObservation = nil
 		return nil
 	}
-	controller.lastObservation = &selfUpgradeObservation{evidence: candidate}
+	controller.lastObservation = controller.observe(candidate, "")
 	if sameSelfUpgradeContent(controller.incumbent, candidate) {
 		controller.lastObservation.action = selfUpgradeActionUnchanged
 		return nil
@@ -699,23 +747,18 @@ func (controller *selfUpgradeController) maintain(ctx context.Context) error {
 	env := append([]string(nil), os.Environ()...)
 	release, err := controller.recordAttempt(candidate)
 	if err != nil {
-		controller.lastObservation = nil
 		var refusal selfUpgradeAttemptRefusalError
 		if errors.As(err, &refusal) {
-			return controller.refuse(candidate, refusal)
+			controller.lastObservation = controller.observe(candidate, selfUpgradeActionRefused)
+			return err
 		}
+		controller.lastObservation = nil
 		if errors.Is(err, errSelfUpgradeCandidateRefused) {
-			controller.lastObservation = &selfUpgradeObservation{
-				evidence: candidate,
-				action:   selfUpgradeActionRefused,
-			}
+			controller.lastObservation = controller.observe(candidate, selfUpgradeActionRefused)
 			return nil
 		}
 		if errors.Is(err, errSelfUpgradeAttemptSettled) {
-			controller.lastObservation = &selfUpgradeObservation{
-				evidence: candidate,
-				action:   selfUpgradeActionUnchanged,
-			}
+			controller.lastObservation = controller.observe(candidate, selfUpgradeActionUnchanged)
 			return nil
 		}
 		if errors.Is(err, errSelfUpgradeAttemptTimestampUncertain) {
@@ -725,6 +768,7 @@ func (controller *selfUpgradeController) maintain(ctx context.Context) error {
 		}
 		return fmt.Errorf("self-upgrade deferred: persist replacement attempt: %w", err)
 	}
+	controller.lastObservation.ledgerVersion = controller.ledgerVersion
 	execErr := selfUpgradeExecImage(candidate, argv, env)
 	releaseErr := release()
 	if releaseErr != nil {
@@ -744,53 +788,91 @@ func (controller *selfUpgradeController) maintain(ctx context.Context) error {
 }
 
 func (controller *selfUpgradeController) recordAttempt(candidate selfupgrade.ImageEvidence) (func() error, error) {
-	attempt := selfupgrade.NewAttempt(candidate, selfUpgradeNow())
-	if err := selfupgrade.ValidateAttempt(attempt); err != nil {
-		return nil, err
-	}
 	release, err := selfUpgradeAcquireLock(controller.statePath)
 	if err != nil {
 		return nil, err
 	}
-	if err := controller.publishStateLocked(func(state *selfUpgradeStateFile) error {
-		now := selfUpgradeNow()
-		if selfupgrade.RefusedCandidatesContain(state.RefusedCandidates, candidate) {
-			return errSelfUpgradeCandidateRefused
-		}
-		for _, existing := range state.Attempts {
-			if !existing.Matches(candidate) {
-				continue
-			}
-			switch existing.Status {
-			case selfupgrade.AttemptStatusAttempt:
-				if existing.IsFresh(now) {
-					return selfUpgradeAttemptRefusalError{attempt: existing}
-				}
-			case selfupgrade.AttemptStatusSettled:
-				return errSelfUpgradeAttemptSettled
-			}
-		}
-		attempts, err := selfupgrade.AddAttempt(state.Attempts, attempt, now)
-		if err != nil {
-			return err
-		}
-		if err := validateSelfUpgradeAttemptTimes(attempts, now); err != nil {
-			return err
-		}
-		state.Attempts = attempts
-		return nil
-	}); err != nil {
+	releaseWithError := func(failure error) (func() error, error) {
 		releaseErr := release()
 		if releaseErr != nil {
-			return nil, errors.Join(err, fmt.Errorf("release self-upgrade state lock: %w", releaseErr))
+			return nil, errors.Join(failure, fmt.Errorf("release self-upgrade state lock: %w", releaseErr))
 		}
-		return nil, err
+		return nil, failure
+	}
+	current, exists, err := readSelfUpgradeStateFile(controller.statePath)
+	if err != nil {
+		return releaseWithError(err)
+	}
+	now := selfUpgradeNow()
+	attempt := selfupgrade.NewAttempt(candidate, now)
+	if err := selfupgrade.ValidateAttempt(attempt); err != nil {
+		return releaseWithError(err)
+	}
+	state, err := controller.mergeStateAt(current, exists, now)
+	if err != nil {
+		return releaseWithError(err)
+	}
+	for _, existing := range state.Attempts {
+		if existing.Status != selfupgrade.AttemptStatusSettled || !existing.Matches(candidate) {
+			continue
+		}
+		controller.refused = append([]selfupgrade.RefusedCandidate(nil), state.RefusedCandidates...)
+		controller.attempts = append([]selfupgrade.Attempt(nil), state.Attempts...)
+		controller.ledgerVersion = selfUpgradeLedgerVersion(state.Generation, state.RefusedCandidates, state.Attempts)
+		return release, nil
+	}
+	if selfupgrade.RefusedCandidatesContain(state.RefusedCandidates, candidate) {
+		return releaseWithError(errSelfUpgradeCandidateRefused)
+	}
+	var refusal *selfUpgradeAttemptRefusalError
+	for _, existing := range state.Attempts {
+		if existing.Status != selfupgrade.AttemptStatusAttempt || !existing.Matches(candidate) {
+			continue
+		}
+		if existing.IsFresh(now) {
+			state.RefusedCandidates = selfupgrade.RememberRefusal(state.RefusedCandidates, candidate)
+			candidateRefusal := selfUpgradeAttemptRefusalError{attempt: existing}
+			refusal = &candidateRefusal
+		}
+		if refusal != nil {
+			break
+		}
+	}
+	if refusal == nil {
+		attempts, err := selfupgrade.AddAttempt(state.Attempts, attempt, now)
+		if err != nil {
+			return releaseWithError(err)
+		}
+		if err := validateSelfUpgradeAttemptTimes(attempts, now); err != nil {
+			return releaseWithError(err)
+		}
+		state.Attempts = attempts
+	}
+	state.Schema = selfUpgradeStateSchema
+	state.Attempt = nil
+	state.Attempts = nilIfEmptySelfUpgradeAttempts(state.Attempts)
+	state.RefusedCandidates = nilIfEmptySelfUpgradeRefusals(state.RefusedCandidates)
+	if err := validateSelfUpgradeRefusals(state.RefusedCandidates); err != nil {
+		return releaseWithError(err)
+	}
+	if err := selfupgrade.ValidateAttempts(state.Attempts); err != nil {
+		return releaseWithError(err)
+	}
+	if err := controller.writeState(state); err != nil {
+		return releaseWithError(err)
+	}
+	controller.refused = append([]selfupgrade.RefusedCandidate(nil), state.RefusedCandidates...)
+	controller.attempts = append([]selfupgrade.Attempt(nil), state.Attempts...)
+	controller.statePublished = true
+	controller.ledgerVersion = selfUpgradeLedgerVersion(state.Generation, state.RefusedCandidates, state.Attempts)
+	if refusal != nil {
+		return releaseWithError(*refusal)
 	}
 	return release, nil
 }
 
 func (controller *selfUpgradeController) markSettled() error {
-	if controller == nil {
+	if controller == nil || !controller.enabled || !controller.eligible || controller.statePath == "" {
 		return nil
 	}
 	if err := controller.publishState(func(state *selfUpgradeStateFile) error {
@@ -831,7 +913,7 @@ func (controller *selfUpgradeController) refuse(candidate selfupgrade.ImageEvide
 		}
 		return errors.Join(cause, fmt.Errorf("persist self-upgrade refusal: %w", err))
 	}
-	controller.lastObservation = &selfUpgradeObservation{evidence: candidate, action: selfUpgradeActionRefused}
+	controller.lastObservation = controller.observe(candidate, selfUpgradeActionRefused)
 	return cause
 }
 

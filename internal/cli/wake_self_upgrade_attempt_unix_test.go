@@ -175,6 +175,89 @@ func TestWakeSelfUpgradeAttemptPersistsBeforeRestartExec(t *testing.T) {
 	}
 }
 
+func TestWakeSelfUpgradeSettledCandidateDoesNotRearmAttempt(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+	record := fixture.record
+	record.Source = wakeRestartSourceSelf
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0).UTC()
+	setWakeSelfUpgradeAttemptClock(t, now)
+	settled := selfupgrade.NewAttempt(record.Candidate, now.Add(-time.Second))
+	settled.Status = selfupgrade.AttemptStatusSettled
+	writeWakeSelfUpgradeAttemptForTest(t, fixture, settled)
+	before, err := os.ReadFile(filepath.Join(fixture.agentDir.path, wakeSelfUpgradeAttemptFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attempts, err := persistWakeSelfUpgradeAttemptAtBoundary(fixture.agentDir, fixture.lock, record)
+	if err != nil {
+		t.Fatalf("persistWakeSelfUpgradeAttemptAtBoundary() error = %v", err)
+	}
+	if len(attempts) != 1 || attempts[0] != settled {
+		t.Fatalf("attempts = %#v, want unchanged settled entry", attempts)
+	}
+	after, err := os.ReadFile(filepath.Join(fixture.agentDir.path, wakeSelfUpgradeAttemptFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("settled wake attempt changed during classification:\nbefore=%safter=%s", before, after)
+	}
+}
+
+func TestWakeSelfUpgradeAttemptBoundaryPreservesFutureUncertainEntry(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+	record := fixture.record
+	record.Source = wakeRestartSourceSelf
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0).UTC()
+	setWakeSelfUpgradeAttemptClock(t, now)
+	future := selfupgrade.NewAttempt(record.Candidate, now.Add(selfupgrade.AttemptFutureSkew+time.Second))
+	writeWakeSelfUpgradeAttemptForTest(t, fixture, future)
+
+	if _, err := persistWakeSelfUpgradeAttemptAtBoundary(fixture.agentDir, fixture.lock, record); !errors.Is(err, errWakeSelfUpgradeAttemptTimestampUncertain) {
+		t.Fatalf("persistWakeSelfUpgradeAttemptAtBoundary() error = %v, want timestamp uncertainty", err)
+	}
+	if got := readWakeSelfUpgradeAttemptForTest(t, fixture); got != future {
+		t.Fatalf("future attempt = %#v, want preserved entry", got)
+	}
+}
+
+func TestWakeSelfUpgradeSettlementPreservesFutureUncertainEntry(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	setWakeSelfUpgradeAttemptClock(t, now)
+	future := selfupgrade.NewAttempt(fixture.candidate, now.Add(selfupgrade.AttemptFutureSkew+time.Second))
+	writeWakeSelfUpgradeAttemptForTest(t, fixture, future)
+	state := wakeSelfUpgradeState{
+		Enabled:  true,
+		Eligible: true,
+		attempts: []selfupgrade.Attempt{future},
+	}
+
+	if err := settleWakeSelfUpgradeAttemptAtBoundary(&state, fixture.agentDir, fixture.lock, fixture.candidate); err != nil {
+		t.Fatalf("settleWakeSelfUpgradeAttemptAtBoundary() error = %v", err)
+	}
+	if state.Eligible || state.Reason != "self-upgrade unavailable: replacement attempt timestamp is uncertain" {
+		t.Fatalf("state = %#v, want unavailable", state)
+	}
+	if got := readWakeSelfUpgradeAttemptForTest(t, fixture); got != future {
+		t.Fatalf("future attempt after settlement = %#v, want preserved entry", got)
+	}
+}
+
 func TestWakeSelfUpgradeAttemptSettlesAtFirstQuiescentBoundary(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	removeWakeRestartRecordForTest(t, fixture)
