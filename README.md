@@ -183,11 +183,12 @@ Homebrew:
 brew upgrade amq
 ```
 
-`amq upgrade` checks the resolved executable against all known Homebrew
-prefixes and delegates to the matched Homebrew executable instead of
-overwriting the Cellar; pass `amq upgrade -y` to run the delegate without an
-AMQ prompt. The package manager may still prompt. Scoop installs on Windows
-delegate to the matched `scoop` executable in the same way.
+`amq upgrade` checks the raw and resolved executable paths against every
+evidenced or executable-derived Homebrew prefix and delegates to the matched
+Homebrew executable instead of overwriting the Cellar; pass `amq upgrade -y`
+to run the delegate without an AMQ prompt. The package manager may still
+prompt. Scoop installs on Windows delegate to the matched `scoop` executable
+in the same way.
 
 Retire live wakes started by the previous Cellar binary first. If a leftover
 lock's image directory is gone, `wake check` reports `binary_dir_gone`;
@@ -198,8 +199,8 @@ GitHub Actions `verify-brew-release` confirms a published tag installs from
 `avivsinai/tap/amq` and that `amq --version` matches that tag. It does not
 replace `brew upgrade` on an operator machine.
 
-Install-script or other manual binary installs keep the direct download and
-atomic-replace path:
+Install-script or other manual binary installs outside an evidenced Homebrew
+prefix keep the direct download and atomic-replace path:
 
 ```bash
 amq upgrade
@@ -213,10 +214,12 @@ release tag, with checksum verification:
 amq upgrade --all
 ```
 
-The command upgrades one distinct canonical target for each companion. Missing
-companions are skipped with a line; multiple distinct copies refuse the
-upgrade and list their paths. A running `amq-keepalive` is never killed: the
-atomic rename swaps the path while the running process keeps the old image.
+The command plans one verified target per companion, unique across all
+companions, before any replacement. It verifies each target's Go build
+identity. Missing companions are skipped with a line; aliases, wrong builds,
+and multiple distinct copies refuse the upgrade and give a repair action. A
+running `amq-keepalive` is never killed: the atomic rename swaps the path
+while the running process keeps the old image.
 When the upgraded path is the supervisor's path, `amq upgrade --all` notes
 that self-upgrade can pick up the new image on its next supervise pass; a
 supervisor started with `--no-self-upgrade` is restarted with
@@ -227,8 +230,15 @@ package-managed install is a no-op with an explanatory line.
 `AMQ_CACHE_DIR` overrides the update cache location used by `amq upgrade` and
 the background update notifier. When unset, the platform cache
 (`~/Library/Caches` on macOS, `XDG_CACHE_HOME` or `~/.cache` elsewhere) is
-used. A set override must resolve to an absolute path; AMQ fails rather than
-silently falling back to the platform cache.
+used. For the direct-upgrade cache-writing path, a set override must resolve
+to an absolute path; AMQ fails before replacement rather than silently
+falling back to the platform cache. The version cache is written only after
+the core `amq` replacement succeeds; a later companion failure still leaves
+that cache truthful.
+
+On Windows, `amq upgrade --all` prints a skip line for companions because
+companion binaries are not published for Windows, then continues with the
+core upgrade.
 
 ### Keepalive companion
 

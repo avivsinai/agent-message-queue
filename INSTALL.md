@@ -167,19 +167,23 @@ not install it. Install it the same way, then see
 [amq-acp](cmd/amq-acp/README.md).
 
 Once the companions sit next to a direct-install `amq` or in `~/.local/bin`,
-`amq upgrade --all` upgrades one distinct canonical target for each companion
-from the same release tag with checksum verification, and skips any that are
-absent with a line. Multiple distinct copies refuse the companion upgrade and
-list their paths. A running `amq-keepalive` is never killed: the atomic rename
-swaps the path while the running process keeps the old image, and a running
-supervisor picks up the new image on its next supervise pass (self-upgrade); a
-supervisor started with `--no-self-upgrade` is restarted with
-`amq-keepalive install-launchd`. `amq upgrade` itself detects a Homebrew or
-Scoop install of `amq` and delegates to the matched package-manager executable
-(`brew update && brew upgrade amq` / `scoop update amq`; `-y` runs the
-delegate without an AMQ prompt, while the package manager may still prompt)
-instead of overwriting it, so companions upgrade through `--all` only from a
-direct `amq` install.
+`amq upgrade --all` plans one verified target per companion, unique across all
+companions, before any replacement. It verifies each target's Go build identity,
+uses the same release tag with checksum verification, and skips any absent
+companion with a line. Aliases, wrong builds, and multiple distinct copies
+refuse the companion upgrade and give a repair action. A running
+`amq-keepalive` is never killed: the atomic rename swaps the path while the
+running process keeps the old image, and a running supervisor picks up the new
+image on its next supervise pass (self-upgrade); a supervisor started with
+`--no-self-upgrade` is restarted with `amq-keepalive install-launchd`.
+`amq upgrade` itself detects a Homebrew or Scoop install of `amq` and delegates
+to the matched package-manager executable (`brew update && brew upgrade amq` /
+`scoop update amq`; `-y` runs the delegate without an AMQ prompt, while the
+package manager may still prompt) instead of overwriting it, so companions
+upgrade through `--all` only from a direct `amq` install. The version cache is
+written only after the core `amq` replacement succeeds; a later companion
+failure still leaves that cache truthful. On Windows, `--all` skips companions
+because they are not published there, then continues with the core upgrade.
 
 ### Platform capability matrix
 

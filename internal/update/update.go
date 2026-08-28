@@ -26,6 +26,7 @@ const (
 	RepoOwner            = "avivsinai"
 	RepoName             = "agent-message-queue"
 	RepoSlug             = RepoOwner + "/" + RepoName
+	ModulePath           = "github.com/avivsinai/agent-message-queue"
 	BinaryName           = "amq"
 	ChecksumsFilename    = "checksums.txt"
 	DefaultCheckInterval = 24 * time.Hour

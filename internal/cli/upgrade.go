@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	debugbuildinfo "debug/buildinfo"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	runtimedebug "runtime/debug"
 	"strings"
 	"time"
 
@@ -26,6 +28,7 @@ var (
 	lookPathForDelegateForUpgrade         = exec.LookPath
 	runBrewPrefixForHomebrewUpgrade       = runBrewPrefix
 	homebrewBrewExistsForUpgrade          = homebrewBrewExists
+	homebrewCellarExistsForUpgrade        = homebrewCellarExists
 	classifyInstallForUpgrade             = update.ClassifyInstall
 	runDelegateForUpgrade                 = runDelegateCommand
 	companionBinariesForUpgrade           = update.CompanionBinaries
@@ -33,6 +36,7 @@ var (
 	downloadReleaseAssetForUpgrade        = update.DownloadReleaseAsset
 	fetchChecksumsForUpgrade              = update.FetchChecksums
 	extractBinaryForUpgrade               = extractBinaryFromArchive
+	readBuildInfoForUpgrade               = debugbuildinfo.ReadFile
 	replaceBinaryForUpgrade               = update.ReplaceBinary
 	updateVerifySHA256ForUpgrade          = update.VerifySHA256
 	saveUpgradeCacheForUpgrade            = saveUpgradeCache
@@ -41,6 +45,23 @@ var (
 type homebrewInstallation struct {
 	prefix     string
 	executable string
+}
+
+type derivedHomebrewPrefix struct {
+	prefix     string
+	fromCellar bool
+}
+
+type companionTarget struct {
+	name   string
+	link   string
+	target string
+	info   os.FileInfo
+}
+
+type preparedUpgrade struct {
+	binaryPath string
+	destPath   string
 }
 
 // saveUpgradeCache writes the latest-known-version cache for the amq binary
@@ -84,6 +105,9 @@ func runUpgrade(args []string, currentVersion string) error {
 	} else if handled {
 		return nil
 	}
+	if err := skipUnavailableCompanionsOnWindows(allFlag, runtime.GOOS); err != nil {
+		return err
+	}
 
 	path, resolved, err := executablePathForUpgrade()
 	if err != nil {
@@ -91,11 +115,21 @@ func runUpgrade(args []string, currentVersion string) error {
 	}
 
 	homebrewInstallations := homebrewInstallationsForUpgrade()
+	homebrewInstallations, err = addDerivedHomebrewInstallations(path, resolved, homebrewInstallations)
+	if err != nil {
+		return err
+	}
 	homebrewPrefixes := homebrewPrefixesFromInstallations(homebrewInstallations)
 	kind, managerPath := classifyPackageInstall(path, resolved, homebrewPrefixes, homebrewInstallations)
 	if kind.IsPackageManaged() {
 		if managerPath == "" {
-			return fmt.Errorf("%s executable not found; refusing package-manager delegation", packageManagerName(kind))
+			if kind == update.InstallHomebrew {
+				for _, prefix := range homebrewPrefixes {
+					brewPath := filepath.Join(canonicalHomebrewPrefix(prefix), "bin", "brew")
+					return fmt.Errorf("amq is installed via Homebrew but no brew executable was found at %s; run %s upgrade amq from that installation, or reinstall amq under ~/.local/bin for direct upgrades", brewPath, brewPath)
+				}
+			}
+			return fmt.Errorf("%s executable not found; refusing package-manager delegation; install the package manager or repoint amq to a direct install", packageManagerName(kind))
 		}
 		return runManagedUpgradeWithManager(kind, managerPath, *yesFlag, *allFlag)
 	}
@@ -279,42 +313,34 @@ func validateUpgradeCachePath() error {
 	return nil
 }
 
-// runDirectUpgradeWithProtection performs the final package-manager guard
-// immediately before replacement. Classification happens earlier, but this
-// independent check protects against a missed Homebrew prefix or a path race.
-func runDirectUpgradeWithProtection(
+func prepareDirectUpgradeWithProtection(
 	ctx context.Context,
 	client *http.Client,
-	binaryName, latestTag, latest, destPath string,
+	binaryName, latestTag, destPath string,
 	homebrewPrefixes []string,
 	scoopApps string,
-) (directUpgradeResult, error) {
+	tmpDir string,
+) (preparedUpgrade, error) {
 	assetName, err := update.AssetNameFor(binaryName, latestTag, runtime.GOOS, runtime.GOARCH)
 	if err != nil {
-		return directUpgradeResult{}, err
+		return preparedUpgrade{}, err
 	}
-
-	tmpDir, err := os.MkdirTemp("", "amq-upgrade-")
-	if err != nil {
-		return directUpgradeResult{}, err
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	archivePath := filepath.Join(tmpDir, assetName)
 	if err := downloadReleaseAssetForUpgrade(ctx, client, latestTag, assetName, archivePath); err != nil {
-		return directUpgradeResult{}, err
+		return preparedUpgrade{}, err
 	}
 
 	checksums, err := fetchChecksumsForUpgrade(ctx, client, latestTag)
 	if err != nil {
-		return directUpgradeResult{}, err
+		return preparedUpgrade{}, err
 	}
 	checksum, ok := checksums[assetName]
 	if !ok {
-		return directUpgradeResult{}, fmt.Errorf("checksum entry not found for %s", assetName)
+		return preparedUpgrade{}, fmt.Errorf("checksum entry not found for %s", assetName)
 	}
 	if err := updateVerifySHA256ForUpgrade(archivePath, checksum); err != nil {
-		return directUpgradeResult{}, err
+		return preparedUpgrade{}, err
 	}
 
 	var binaryPath string
@@ -324,13 +350,20 @@ func runDirectUpgradeWithProtection(
 		binaryPath, err = extractBinaryForUpgrade(binaryName, archivePath, tmpDir, false)
 	}
 	if err != nil {
-		return directUpgradeResult{}, err
+		return preparedUpgrade{}, err
 	}
 
+	// This independent check protects against a path race. Path-derived
+	// Homebrew prefixes are added before classification, so a missed prefix
+	// does not become a direct replacement.
 	if err := refusePackageManagedDestination(destPath, homebrewPrefixes, scoopApps); err != nil {
-		return directUpgradeResult{}, err
+		return preparedUpgrade{}, err
 	}
-	scheduled, err := replaceBinaryForUpgrade(binaryPath, destPath)
+	return preparedUpgrade{binaryPath: binaryPath, destPath: destPath}, nil
+}
+
+func replacePreparedUpgrade(binaryName string, prepared preparedUpgrade) (directUpgradeResult, error) {
+	scheduled, err := replaceBinaryForUpgrade(prepared.binaryPath, prepared.destPath)
 	if err != nil {
 		return directUpgradeResult{}, err
 	}
@@ -346,6 +379,37 @@ func runDirectUpgradeWithProtection(
 	return directUpgradeResult{}, nil
 }
 
+// runDirectUpgradeWithProtection prepares one release and then replaces its
+// destination after the independent package-manager guard succeeds.
+func runDirectUpgradeWithProtection(
+	ctx context.Context,
+	client *http.Client,
+	binaryName, latestTag, latest, destPath string,
+	homebrewPrefixes []string,
+	scoopApps string,
+) (directUpgradeResult, error) {
+	tmpDir, err := os.MkdirTemp("", "amq-upgrade-")
+	if err != nil {
+		return directUpgradeResult{}, err
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	prepared, err := prepareDirectUpgradeWithProtection(
+		ctx,
+		client,
+		binaryName,
+		latestTag,
+		destPath,
+		homebrewPrefixes,
+		scoopApps,
+		tmpDir,
+	)
+	if err != nil {
+		return directUpgradeResult{}, err
+	}
+	return replacePreparedUpgrade(binaryName, prepared)
+}
+
 func upgradeCompanionsWithProtection(
 	ctx context.Context,
 	client *http.Client,
@@ -354,33 +418,64 @@ func upgradeCompanionsWithProtection(
 	scoopApps string,
 ) error {
 	searchDirs := companionSearchDirs(amqDest)
+	plan, err := discoverCompanionPlan(companionBinariesForUpgrade, searchDirs, amqDest, homebrewPrefixes, scoopApps)
+	if err != nil {
+		return err
+	}
+
+	prepared := make([]struct {
+		name string
+		item preparedUpgrade
+	}, 0, len(plan))
 	for _, name := range companionBinariesForUpgrade {
-		matches, err := findCompanionMatches(name, searchDirs, amqDest, homebrewPrefixes, scoopApps)
-		if err != nil {
-			return err
-		}
-		if len(matches) == 0 {
+		_, ok := plan[name]
+		if !ok {
 			if err := writeStdoutLine(name + " not found; skipping."); err != nil {
 				return err
 			}
 			continue
 		}
-		if len(matches) > 1 {
-			return fmt.Errorf("%s found at multiple distinct targets: %s", name, strings.Join(matches, ", "))
+	}
+	if len(plan) == 0 {
+		return nil
+	}
+
+	tmpDir, err := os.MkdirTemp("", "amq-upgrade-companions-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	for _, name := range companionBinariesForUpgrade {
+		target, ok := plan[name]
+		if !ok {
+			continue
 		}
-		result, err := runDirectUpgradeWithProtection(
+		item, err := prepareDirectUpgradeWithProtection(
 			ctx,
 			client,
 			name,
 			latestTag,
-			latest,
-			matches[0],
+			target.target,
 			homebrewPrefixes,
 			scoopApps,
+			tmpDir,
 		)
 		if err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
+		prepared = append(prepared, struct {
+			name string
+			item preparedUpgrade
+		}{name: name, item: item})
+	}
+
+	for _, item := range prepared {
+		result, err := replacePreparedUpgrade(item.name, item.item)
+		if err != nil {
+			return fmt.Errorf("%s: %w", item.name, err)
+		}
+		name := item.name
 		if name == "amq-keepalive" {
 			if result.scheduled {
 				if err := writeStdoutLine("amq-keepalive: replacement scheduled; version cache updates on next run"); err != nil {
@@ -411,7 +506,7 @@ func companionSearchDirs(amqDest string) []string {
 	return dirs
 }
 
-func findCompanionMatches(name string, dirs []string, amqDest string, homebrewPrefixes []string, scoopApps string) ([]string, error) {
+func discoverCompanionPlan(names []string, dirs []string, amqDest string, homebrewPrefixes []string, scoopApps string) (map[string]companionTarget, error) {
 	var amqInfo os.FileInfo
 	var err error
 	if amqDest != "" {
@@ -420,60 +515,158 @@ func findCompanionMatches(name string, dirs []string, amqDest string, homebrewPr
 			return nil, fmt.Errorf("cannot inspect amq destination %s: %w", amqDest, err)
 		}
 	}
-	matches := make([]string, 0, len(dirs))
-	seen := make(map[string]struct{}, len(dirs))
-	for _, dir := range dirs {
-		candidate := filepath.Join(dir, name)
-		if runtime.GOOS == "windows" {
-			candidate += ".exe"
-		}
-		linkInfo, err := os.Lstat(candidate)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("cannot inspect companion %s: %w", candidate, err)
-		}
 
-		var target string
-		switch {
-		case linkInfo.Mode().IsRegular():
-			target, err = filepath.EvalSymlinks(candidate)
-			if err != nil {
-				return nil, fmt.Errorf("cannot resolve companion %s: %w", candidate, err)
+	byName := make(map[string][]companionTarget, len(names))
+	byCanonicalTarget := make(map[string]companionTarget)
+	allTargets := make([]companionTarget, 0, len(names))
+	for _, name := range names {
+		for _, dir := range dirs {
+			candidate := filepath.Join(dir, name)
+			if runtime.GOOS == "windows" {
+				candidate += ".exe"
 			}
-		case linkInfo.Mode()&os.ModeSymlink != 0:
-			target, err = filepath.EvalSymlinks(candidate)
+			item, found, err := inspectCompanionCandidate(name, candidate, amqInfo, homebrewPrefixes, scoopApps)
 			if err != nil {
-				return nil, fmt.Errorf("cannot resolve companion symlink %s: %w", candidate, err)
+				return nil, err
 			}
-		default:
-			return nil, fmt.Errorf("refusing companion %s: object is not a regular file or symlink", candidate)
-		}
+			if !found {
+				continue
+			}
 
-		target = filepath.Clean(target)
-		targetInfo, statErr := os.Stat(target)
-		if statErr != nil {
-			return nil, fmt.Errorf("cannot inspect companion target %s: %w", target, statErr)
-		}
-		if !targetInfo.Mode().IsRegular() {
-			return nil, fmt.Errorf("refusing companion %s: target %s is not a regular file", candidate, target)
-		}
-		if amqInfo != nil {
-			if os.SameFile(targetInfo, amqInfo) {
-				return nil, fmt.Errorf("refusing companion %s: target %s is the amq executable", candidate, target)
+			canonicalTarget := update.CanonicalPath(item.target)
+			if existing, ok := byCanonicalTarget[canonicalTarget]; ok {
+				if existing.name != name {
+					return nil, companionAliasError(item, existing)
+				}
+				continue
 			}
+			duplicate := false
+			for _, existing := range allTargets {
+				if !os.SameFile(existing.info, item.info) {
+					continue
+				}
+				if existing.name != name {
+					return nil, companionAliasError(item, existing)
+				}
+				duplicate = true
+				break
+			}
+			if duplicate {
+				continue
+			}
+			byCanonicalTarget[canonicalTarget] = item
+			allTargets = append(allTargets, item)
+			byName[name] = append(byName[name], item)
 		}
-		if isUnderProtectedRoot(target, homebrewPrefixes, scoopApps) {
-			return nil, fmt.Errorf("refusing companion %s: target %s is package-managed", candidate, target)
-		}
-		if _, ok := seen[target]; ok {
-			continue
-		}
-		seen[target] = struct{}{}
-		matches = append(matches, target)
 	}
-	return matches, nil
+	for _, item := range allTargets {
+		if err := verifyCompanionBuild(item); err != nil {
+			return nil, err
+		}
+	}
+
+	plan := make(map[string]companionTarget, len(byName))
+	for _, name := range names {
+		matches := byName[name]
+		if len(matches) == 0 {
+			continue
+		}
+		if len(matches) > 1 {
+			targets := make([]string, 0, len(matches))
+			for _, match := range matches {
+				targets = append(targets, match.target)
+			}
+			return nil, fmt.Errorf("%s found at multiple distinct targets: %s; remove or consolidate one: %s", name, strings.Join(targets, ", "), strings.Join(targets, ", "))
+		}
+		plan[name] = matches[0]
+	}
+	return plan, nil
+}
+
+func findCompanionMatches(name string, dirs []string, amqDest string, homebrewPrefixes []string, scoopApps string) ([]string, error) {
+	plan, err := discoverCompanionPlan([]string{name}, dirs, amqDest, homebrewPrefixes, scoopApps)
+	if err != nil {
+		return nil, err
+	}
+	item, ok := plan[name]
+	if !ok {
+		return nil, nil
+	}
+	return []string{item.target}, nil
+}
+
+func inspectCompanionCandidate(name, candidate string, amqInfo os.FileInfo, homebrewPrefixes []string, scoopApps string) (companionTarget, bool, error) {
+	linkInfo, err := os.Lstat(candidate)
+	if errors.Is(err, os.ErrNotExist) {
+		return companionTarget{}, false, nil
+	}
+	if err != nil {
+		return companionTarget{}, false, fmt.Errorf("cannot inspect companion %s: %w; remove %s or fix its target", candidate, err, candidate)
+	}
+
+	var target string
+	switch {
+	case linkInfo.Mode().IsRegular():
+		target, err = filepath.EvalSymlinks(candidate)
+		if err != nil {
+			return companionTarget{}, false, fmt.Errorf("cannot resolve companion %s: %w; remove %s or fix its target", candidate, err, candidate)
+		}
+	case linkInfo.Mode()&os.ModeSymlink != 0:
+		target, err = filepath.EvalSymlinks(candidate)
+		if err != nil {
+			return companionTarget{}, false, fmt.Errorf("cannot resolve companion symlink %s: %w; remove %s or fix its target", candidate, err, candidate)
+		}
+	default:
+		return companionTarget{}, false, fmt.Errorf("refusing companion %s: object is not a regular file or symlink; remove %s or fix its target", candidate, candidate)
+	}
+
+	target = filepath.Clean(target)
+	targetInfo, statErr := os.Stat(target)
+	if statErr != nil {
+		return companionTarget{}, false, fmt.Errorf("cannot inspect companion target %s: %w; remove %s or fix its target", target, statErr, candidate)
+	}
+	if !targetInfo.Mode().IsRegular() {
+		return companionTarget{}, false, fmt.Errorf("refusing companion %s: target %s is not a regular file; remove %s or fix its target", candidate, target, candidate)
+	}
+	if amqInfo != nil {
+		if os.SameFile(targetInfo, amqInfo) {
+			return companionTarget{}, false, fmt.Errorf("refusing companion %s: target %s is the amq executable; repair the %s symlink to point at a real %s binary", candidate, target, name, name)
+		}
+	}
+	if isUnderProtectedRoot(target, homebrewPrefixes, scoopApps) {
+		return companionTarget{}, false, fmt.Errorf("refusing companion %s: target %s is package-managed; upgrade it with the package manager or repoint the companion link to a direct install", candidate, target)
+	}
+	return companionTarget{name: name, link: candidate, target: target, info: targetInfo}, true, nil
+}
+
+func verifyCompanionBuild(item companionTarget) error {
+	info, buildErr := readBuildInfoForUpgrade(item.target)
+	expected := expectedCompanionBuildPath(item.name)
+	if buildErr != nil || info == nil {
+		return fmt.Errorf("%s is not an %s build (found non-Go binary); remove or repoint it", item.target, item.name)
+	}
+	found := strings.TrimSpace(info.Path)
+	if found == "" {
+		found = "unknown"
+	}
+	if found != expected {
+		return fmt.Errorf("%s is not an %s build (found %s); remove or repoint it", item.target, item.name, found)
+	}
+	return nil
+}
+
+func expectedCompanionBuildPath(name string) string {
+	modulePath := update.ModulePath
+	if info, ok := runtimedebug.ReadBuildInfo(); ok && info != nil {
+		if mainPath := strings.TrimSpace(info.Main.Path); mainPath != "" && mainPath != "command-line-arguments" {
+			modulePath = mainPath
+		}
+	}
+	return modulePath + "/cmd/" + name
+}
+
+func companionAliasError(item, existing companionTarget) error {
+	return fmt.Errorf("refusing companion %s: target %s aliases %s at %s; repoint %s to a dedicated %s binary or remove it", item.name, item.target, existing.name, existing.link, item.link, item.name)
 }
 
 func classifyPackageInstall(path, resolved string, homebrewPrefixes []string, installations []homebrewInstallation) (update.InstallKind, string) {
@@ -560,10 +753,92 @@ func homebrewInstallationsForUpgrade() []homebrewInstallation {
 	})
 }
 
+func addDerivedHomebrewInstallations(path, resolved string, installations []homebrewInstallation) ([]homebrewInstallation, error) {
+	derived := derivedHomebrewPrefixes(path, resolved)
+	if len(derived) == 0 {
+		return installations, nil
+	}
+
+	result := append([]homebrewInstallation(nil), installations...)
+	known := make(map[string]struct{}, len(result)+len(derived))
+	for _, installation := range result {
+		if prefix := canonicalHomebrewPrefix(installation.prefix); prefix != "" {
+			known[prefix] = struct{}{}
+		}
+	}
+	for _, candidate := range derived {
+		prefix := canonicalHomebrewPrefix(candidate.prefix)
+		if prefix == "" {
+			continue
+		}
+		brewPath := filepath.Join(prefix, "bin", "brew")
+		if candidate.fromCellar && !homebrewBrewExistsForUpgrade(brewPath) {
+			cellarPath := resolved
+			if cellarPath == "" {
+				cellarPath = path
+			}
+			return nil, fmt.Errorf("amq lives in a Homebrew Cellar at %s but no brew executable was found at %s; run %s upgrade amq from that installation, or reinstall amq under ~/.local/bin for direct upgrades", filepath.Clean(cellarPath), brewPath, brewPath)
+		}
+		if _, ok := known[prefix]; ok {
+			continue
+		}
+		known[prefix] = struct{}{}
+		result = append(result, homebrewInstallation{prefix: prefix, executable: brewPath})
+	}
+	return result, nil
+}
+
+func derivedHomebrewPrefixes(path, resolved string) []derivedHomebrewPrefix {
+	result := make([]derivedHomebrewPrefix, 0, 2)
+	seen := make(map[string]struct{}, 2)
+	add := func(prefix string, fromCellar bool) {
+		prefix = canonicalHomebrewPrefix(prefix)
+		if prefix == "" {
+			return
+		}
+		if _, exists := seen[prefix]; exists {
+			return
+		}
+		seen[prefix] = struct{}{}
+		result = append(result, derivedHomebrewPrefix{prefix: prefix, fromCellar: fromCellar})
+	}
+
+	for _, candidate := range []string{resolved} {
+		if prefix := homebrewCellarPrefix(candidate); prefix != "" {
+			add(prefix, true)
+		}
+	}
+
+	rawPath := filepath.Clean(path)
+	if filepath.Base(filepath.Dir(rawPath)) == "bin" {
+		prefix := filepath.Dir(filepath.Dir(rawPath))
+		if homebrewCellarExistsForUpgrade(filepath.Join(prefix, "Cellar")) {
+			add(prefix, false)
+		}
+	}
+	return result
+}
+
+func homebrewCellarPrefix(path string) string {
+	if path == "" {
+		return ""
+	}
+	clean := filepath.Clean(path)
+	marker := string(filepath.Separator) + "Cellar" + string(filepath.Separator)
+	index := strings.Index(clean, marker)
+	if index <= 0 {
+		return ""
+	}
+	return clean[:index]
+}
+
 func detectHomebrewInstallations() []homebrewInstallation {
 	installations := make([]homebrewInstallation, 0, len(wellKnownHomebrewPrefixes)+3)
 	seen := make(map[string]struct{})
-	add := func(prefix, executable string) {
+	add := func(prefix, executable string, evidenced bool) {
+		if !evidenced {
+			return
+		}
 		prefix = cleanHomebrewPrefix(prefix)
 		if prefix == "" {
 			return
@@ -587,17 +862,20 @@ func detectHomebrewInstallations() []homebrewInstallation {
 		output, runErr := runBrewPrefixForHomebrewUpgrade(ctx, brewPath)
 		cancel()
 		if runErr == nil {
-			add(strings.TrimSpace(string(output)), brewPath)
+			add(strings.TrimSpace(string(output)), brewPath, true)
 		}
 	}
 	if prefix := cleanHomebrewPrefix(os.Getenv("HOMEBREW_PREFIX")); prefix != "" {
-		add(prefix, filepath.Join(prefix, "bin", "brew"))
+		add(prefix, filepath.Join(prefix, "bin", "brew"), true)
 	}
 	for _, prefix := range wellKnownHomebrewPrefixes {
-		add(prefix, filepath.Join(prefix, "bin", "brew"))
+		brewPath := filepath.Join(prefix, "bin", "brew")
+		add(prefix, brewPath, homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExistsForUpgrade(filepath.Join(prefix, "Cellar")))
 	}
 	if home, err := homeDirForUpgrade(); err == nil {
-		add(filepath.Join(home, ".linuxbrew"), filepath.Join(home, ".linuxbrew", "bin", "brew"))
+		prefix := filepath.Join(home, ".linuxbrew")
+		brewPath := filepath.Join(prefix, "bin", "brew")
+		add(prefix, brewPath, homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExistsForUpgrade(filepath.Join(prefix, "Cellar")))
 	}
 	return installations
 }
@@ -619,6 +897,11 @@ func isSymlinkToHomebrewCellar(path, cellar string) bool {
 // performs the last package-manager safety check before any download starts.
 func selectUpgradeDestination(path, resolved string, writable func(string) error) (string, error) {
 	installations := homebrewInstallationsForUpgrade()
+	var err error
+	installations, err = addDerivedHomebrewInstallations(path, resolved, installations)
+	if err != nil {
+		return "", err
+	}
 	return selectUpgradeDestinationWithRoots(
 		path,
 		resolved,
@@ -626,6 +909,17 @@ func selectUpgradeDestination(path, resolved string, writable func(string) error
 		homebrewPrefixesFromInstallations(installations),
 		update.ScoopAppsDir(),
 	)
+}
+
+func skipUnavailableCompanionsOnWindows(all *bool, goos string) error {
+	if all == nil || !*all || goos != "windows" {
+		return nil
+	}
+	if err := writeStdoutLine("--all: companion binaries are not published for Windows; skipping"); err != nil {
+		return err
+	}
+	*all = false
+	return nil
 }
 
 func selectUpgradeDestinationWithRoots(path, resolved string, writable func(string) error, homebrewPrefixes []string, scoopApps string) (string, error) {
@@ -661,9 +955,9 @@ func refusePackageManagedDestination(path string, homebrewPrefixes []string, sco
 			continue
 		}
 		cellar := filepath.Join(prefix, "Cellar")
-		// This is intentionally independent from install classification. A
-		// missed prefix or a path race must not turn a Cellar replacement into
-		// a direct install.
+		// This is intentionally independent from install classification. A path
+		// race must not turn a package-managed replacement into a direct install;
+		// executable-derived prefixes cover prefixes missed during discovery.
 		if pathWithinDirectory(canonical, cellar) {
 			return fmt.Errorf("amq is installed via Homebrew; run brew update && brew upgrade amq")
 		}
@@ -673,21 +967,21 @@ func refusePackageManagedDestination(path string, homebrewPrefixes []string, sco
 				if errors.Is(err, os.ErrNotExist) {
 					continue
 				}
-				return fmt.Errorf("cannot inspect possible Homebrew destination %s: %w", path, err)
+				return fmt.Errorf("cannot inspect possible Homebrew destination %s: %w; remove %s or fix its target", path, err, path)
 			}
 			switch {
 			case info.Mode().IsRegular():
-				return fmt.Errorf("amq is in a Homebrew prefix but is not a managed symlink; run brew reinstall amq or brew update && brew upgrade amq")
+				return fmt.Errorf("amq is in an evidenced Homebrew prefix but is not a managed symlink; brew reinstall amq (if Homebrew owns it) or move the binary to ~/.local/bin and rerun amq upgrade (if you installed it manually)")
 			case info.Mode()&os.ModeSymlink != 0:
 				resolved, resolveErr := filepath.EvalSymlinks(path)
 				if resolveErr != nil {
-					return fmt.Errorf("amq is in a Homebrew prefix but its symlink cannot be resolved; run brew reinstall amq or brew update && brew upgrade amq: %w", resolveErr)
+					return fmt.Errorf("amq is in a Homebrew prefix but its symlink cannot be resolved; remove %s or fix its target: %w", path, resolveErr)
 				}
 				if pathWithinDirectory(filepath.Clean(resolved), cellar) {
 					return fmt.Errorf("amq is installed via Homebrew; run brew update && brew upgrade amq")
 				}
 			default:
-				return fmt.Errorf("refusing possible Homebrew destination %s; run brew reinstall amq or brew update && brew upgrade amq", path)
+				return fmt.Errorf("refusing possible Homebrew destination %s; remove %s or fix its target", path, path)
 			}
 		}
 	}
@@ -701,7 +995,8 @@ func isUnderProtectedRoot(path string, homebrewPrefixes []string, scoopApps stri
 	canonical := update.CanonicalPath(path)
 	for _, prefix := range homebrewPrefixes {
 		prefix = canonicalHomebrewPrefix(prefix)
-		if prefix != "" && pathWithinDirectory(canonical, filepath.Join(prefix, "Cellar")) {
+		if prefix != "" && (pathWithinDirectory(canonical, filepath.Join(prefix, "Cellar")) ||
+			pathWithinDirectory(canonical, filepath.Join(prefix, "bin"))) {
 			return true
 		}
 	}
@@ -725,7 +1020,8 @@ func detectHomebrewPrefix() string {
 	}
 
 	for _, prefix := range wellKnownHomebrewPrefixes {
-		if homebrewBrewExistsForUpgrade(filepath.Join(prefix, "bin", "brew")) {
+		brewPath := filepath.Join(prefix, "bin", "brew")
+		if homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExistsForUpgrade(filepath.Join(prefix, "Cellar")) {
 			return filepath.Clean(prefix)
 		}
 	}
@@ -733,7 +1029,8 @@ func detectHomebrewPrefix() string {
 	// path, so it is checked separately from the well-known prefix list).
 	if home, err := homeDirForUpgrade(); err == nil {
 		userLinuxbrew := filepath.Join(home, ".linuxbrew")
-		if homebrewBrewExistsForUpgrade(filepath.Join(userLinuxbrew, "bin", "brew")) {
+		brewPath := filepath.Join(userLinuxbrew, "bin", "brew")
+		if homebrewBrewExistsForUpgrade(brewPath) || homebrewCellarExistsForUpgrade(filepath.Join(userLinuxbrew, "Cellar")) {
 			return userLinuxbrew
 		}
 	}
@@ -747,6 +1044,11 @@ func runBrewPrefix(ctx context.Context, brewPath string) ([]byte, error) {
 func homebrewBrewExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+func homebrewCellarExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 func cleanHomebrewPrefix(prefix string) string {
