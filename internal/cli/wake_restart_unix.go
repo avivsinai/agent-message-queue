@@ -97,6 +97,11 @@ var (
 	wakeRestartBoundPreflight = preflightBoundWakeRestartCandidate
 	wakeRestartIgnore         = signal.Ignore
 	wakeRestartSignalNotify   = signal.Notify
+	// Test seams for the readiness/record readers in the requestWakeRestart
+	// poll loop. Production wires them to the real readers; tests swap them to
+	// inject transient wakeSnapshotReadChangedError and refused records.
+	wakeRestartObserveReadiness = observeWakeRestartReadinessInDir
+	wakeRestartReadRecord       = readWakeRestartRecordAt
 )
 
 func runWakeRestart(args []string) error {
@@ -272,13 +277,25 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 				result.Reason = err.Error()
 				return result, err
 			}
-			readiness, readinessErr := observeWakeRestartReadinessInDir(
+			readiness, readinessErr := wakeRestartObserveReadiness(
 				agentDir,
 				root,
 				me,
 				current,
 			)
 			if readinessErr != nil {
+				// The owner rewrites the restart record by atomic rename during
+				// handoff, so the snapshot identity check (Dev+Ino+Ctimespec on
+				// Darwin) can transiently observe a different inode between the
+				// reader's two opens. That is a retryable race in the read path,
+				// not corruption: keep polling until the owner publishes a stable
+				// restarted generation. The snapshot check itself stays strict.
+				var changed *wakeSnapshotReadChangedError
+				if errors.As(readinessErr, &changed) {
+					result.Reason = readinessErr.Error()
+					wakeRestartSleep(25 * time.Millisecond)
+					continue
+				}
 				result.Reason = readinessErr.Error()
 				return result, readinessErr
 			}
@@ -293,10 +310,20 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 		var exists bool
 		readErr := agentDir.withFD(func(dirfd int) error {
 			var err error
-			observed, exists, err = readWakeRestartRecordAt(dirfd, agentDir)
+			observed, exists, err = wakeRestartReadRecord(dirfd, agentDir)
 			return err
 		})
 		if readErr != nil {
+			// Same transient race as the readiness read above: the record file
+			// is rewritten by rename during handoff and the double-open identity
+			// check can observe a changed inode. Retry; refused and vanished
+			// records still terminate below.
+			var changed *wakeSnapshotReadChangedError
+			if errors.As(readErr, &changed) {
+				result.Reason = readErr.Error()
+				wakeRestartSleep(25 * time.Millisecond)
+				continue
+			}
 			result.Reason = readErr.Error()
 			return result, readErr
 		}
