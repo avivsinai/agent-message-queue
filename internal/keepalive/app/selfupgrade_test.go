@@ -287,6 +287,148 @@ func TestSelfUpgradePublicationMergesConcurrentAttemptAndRefusalLedgers(t *testi
 	}
 }
 
+func TestSelfUpgradeRecordAttemptRefusesFreshCandidateUnderLock(t *testing.T) {
+	dir := t.TempDir()
+	incumbentPath := filepath.Join(dir, "incumbent")
+	candidatePath := filepath.Join(dir, "candidate")
+	writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
+	writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
+	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
+	candidate := captureSelfUpgradeTestImage(t, candidatePath, "1.1.0")
+	first := testSelfUpgradeController(dir, candidatePath, incumbent)
+	second := testSelfUpgradeController(dir, candidatePath, incumbent)
+	previousNow := selfUpgradeNow
+	selfUpgradeNow = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+	t.Cleanup(func() { selfUpgradeNow = previousNow })
+
+	release, err := first.recordAttempt(candidate)
+	if err != nil {
+		t.Fatalf("record first attempt: %v", err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		secondRelease, secondErr := second.recordAttempt(candidate)
+		if secondRelease != nil {
+			secondErr = errors.Join(secondErr, secondRelease())
+		}
+		result <- secondErr
+	}()
+	select {
+	case secondErr := <-result:
+		t.Fatalf("second recordAttempt completed while first held the lock: %v", secondErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := release(); err != nil {
+		t.Fatalf("release first attempt lock: %v", err)
+	}
+	select {
+	case secondErr := <-result:
+		var refusal selfUpgradeAttemptRefusalError
+		if !errors.As(secondErr, &refusal) {
+			t.Fatalf("second recordAttempt error = %v, want authoritative refusal", secondErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second recordAttempt did not finish after lock release")
+	}
+	state := readSelfUpgradeStateForTest(t, first.statePath)
+	if len(state.Attempts) != 1 || state.Attempts[0].UnixTime != 1_700_000_000 {
+		t.Fatalf("attempt ledger = %#v, want one original attempt", state.Attempts)
+	}
+}
+
+func TestSelfUpgradeAttemptSidecarSurvivesLegacyStateWriter(t *testing.T) {
+	dir := t.TempDir()
+	incumbentPath := filepath.Join(dir, "incumbent")
+	candidatePath := filepath.Join(dir, "candidate")
+	writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
+	writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
+	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
+	candidate := captureSelfUpgradeTestImage(t, candidatePath, "1.1.0")
+	writer := testSelfUpgradeController(dir, candidatePath, incumbent)
+	release, err := writer.recordAttempt(candidate)
+	if err != nil {
+		t.Fatalf("record attempt: %v", err)
+	}
+	if err := release(); err != nil {
+		t.Fatalf("release attempt lock: %v", err)
+	}
+
+	legacy := selfUpgradeStateFile{
+		Schema:           selfUpgradeStateSchemaV1,
+		Generation:       "legacy-generation",
+		IncumbentVersion: incumbent.EmbeddedVersion,
+		IncumbentSHA256:  incumbent.SHA256,
+	}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(writer.statePath, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := testSelfUpgradeController(dir, candidatePath, incumbent)
+	if err := loadSelfUpgradeState(reader); err != nil {
+		t.Fatalf("load state after legacy writer: %v", err)
+	}
+	if len(reader.attempts) != 1 || !reader.attempts[0].Matches(candidate) {
+		t.Fatalf("attempts after legacy writer = %#v, want preserved candidate", reader.attempts)
+	}
+	if err := reader.ensureStatePublished(); err != nil {
+		t.Fatalf("republish migrated state: %v", err)
+	}
+	state := readSelfUpgradeStateForTest(t, reader.statePath)
+	if state.Schema != selfUpgradeStateSchema || len(state.Attempts) != 1 || !state.Attempts[0].Matches(candidate) {
+		t.Fatalf("republished state = %#v, want preserved attempt", state)
+	}
+	info, err := os.Stat(selfUpgradeAttemptsPath(reader.statePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("attempt sidecar mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestSelfUpgradeExistingSchema2StateGetsAttemptSidecar(t *testing.T) {
+	dir := t.TempDir()
+	incumbentPath := filepath.Join(dir, "incumbent")
+	candidatePath := filepath.Join(dir, "candidate")
+	writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
+	writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
+	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
+	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
+	state := selfUpgradeStateFile{
+		Schema:           selfUpgradeStateSchema,
+		Generation:       controller.generation,
+		IncumbentVersion: incumbent.EmbeddedVersion,
+		IncumbentSHA256:  incumbent.SHA256,
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(controller.statePath, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadSelfUpgradeState(controller); err != nil {
+		t.Fatalf("load schema 2 state without sidecar: %v", err)
+	}
+	if controller.statePublished {
+		t.Fatal("schema 2 state without an attempt sidecar was treated as fully published")
+	}
+	if err := controller.ensureStatePublished(); err != nil {
+		t.Fatalf("publish missing attempt sidecar: %v", err)
+	}
+	info, err := os.Stat(selfUpgradeAttemptsPath(controller.statePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("attempt sidecar mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
 func TestSelfUpgradeFutureAttemptTimestampDisablesEligibility(t *testing.T) {
 	dir := t.TempDir()
 	incumbentPath := filepath.Join(dir, "incumbent")
@@ -323,6 +465,148 @@ func TestSelfUpgradeFutureAttemptTimestampDisablesEligibility(t *testing.T) {
 	}
 	if len(controller.attempts) != 1 || controller.attempts[0] != future {
 		t.Fatalf("future attempt ledger = %#v, want preserved record", controller.attempts)
+	}
+}
+
+func TestSelfUpgradeFutureAttemptAfterMatchingAttemptDisablesEligibility(t *testing.T) {
+	dir := t.TempDir()
+	incumbentPath := filepath.Join(dir, "incumbent")
+	candidatePath := filepath.Join(dir, "candidate")
+	writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
+	writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
+	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
+	candidate := captureSelfUpgradeTestImage(t, candidatePath, "1.1.0")
+	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	state := selfUpgradeStateFile{
+		Schema:           selfUpgradeStateSchema,
+		Generation:       controller.generation,
+		IncumbentVersion: incumbent.EmbeddedVersion,
+		IncumbentSHA256:  incumbent.SHA256,
+		Attempts: []selfupgrade.Attempt{
+			selfupgrade.NewAttempt(incumbent, now.Add(-time.Minute)),
+			selfupgrade.NewAttempt(candidate, now.Add(selfupgrade.AttemptFutureSkew+time.Second)),
+		},
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(controller.statePath, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousNow := selfUpgradeNow
+	selfUpgradeNow = func() time.Time { return now }
+	t.Cleanup(func() { selfUpgradeNow = previousNow })
+
+	if err := loadSelfUpgradeState(controller); err != nil {
+		t.Fatalf("load ordered attempts: %v", err)
+	}
+	if controller.eligible || !strings.Contains(controller.reason, "timestamp is uncertain") {
+		t.Fatalf("ordered future attempt controller = %#v, want unavailable", controller)
+	}
+	if len(controller.attempts) != 2 {
+		t.Fatalf("ordered attempt ledger = %#v, want both attempts preserved", controller.attempts)
+	}
+}
+
+func TestSelfUpgradeRefreshRejectsFutureAttemptAddedAfterStartup(t *testing.T) {
+	dir := t.TempDir()
+	incumbentPath := filepath.Join(dir, "incumbent")
+	candidatePath := filepath.Join(dir, "candidate")
+	writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
+	writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
+	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
+	candidate := captureSelfUpgradeTestImage(t, candidatePath, "1.1.0")
+	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	future := selfupgrade.NewAttempt(candidate, now.Add(selfupgrade.AttemptFutureSkew+time.Second))
+	previousNow := selfUpgradeNow
+	selfUpgradeNow = func() time.Time { return now }
+	t.Cleanup(func() { selfUpgradeNow = previousNow })
+	state := selfUpgradeStateFile{
+		Schema:           selfUpgradeStateSchema,
+		Generation:       controller.generation,
+		IncumbentVersion: incumbent.EmbeddedVersion,
+		IncumbentSHA256:  incumbent.SHA256,
+		Attempts:         []selfupgrade.Attempt{future},
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(controller.statePath, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousCandidate := selfUpgradeCaptureCandidate
+	selfUpgradeCaptureCandidate = func(string) (selfupgrade.ImageEvidence, error) {
+		t.Fatal("future attempt should stop maintenance before candidate capture")
+		return selfupgrade.ImageEvidence{}, nil
+	}
+	t.Cleanup(func() { selfUpgradeCaptureCandidate = previousCandidate })
+	previousExec := selfUpgradeExecImage
+	selfUpgradeExecImage = func(selfupgrade.ImageEvidence, []string, []string) error {
+		t.Fatal("future attempt must not execute a candidate")
+		return nil
+	}
+	t.Cleanup(func() { selfUpgradeExecImage = previousExec })
+
+	if err := controller.maintain(context.Background()); err != nil {
+		t.Fatalf("maintain() with future attempt: %v", err)
+	}
+	if controller.eligible || !strings.Contains(controller.reason, "timestamp is uncertain") {
+		t.Fatalf("refreshed future attempt controller = %#v, want unavailable", controller)
+	}
+}
+
+func TestSelfUpgradeFutureSidecarCannotBeHiddenByPrimaryAttempt(t *testing.T) {
+	dir := t.TempDir()
+	incumbentPath := filepath.Join(dir, "incumbent")
+	candidatePath := filepath.Join(dir, "candidate")
+	writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
+	writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
+	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
+	candidate := captureSelfUpgradeTestImage(t, candidatePath, "1.1.0")
+	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	current := selfupgrade.NewAttempt(candidate, now)
+	future := selfupgrade.NewAttempt(candidate, now.Add(selfupgrade.AttemptFutureSkew+time.Second))
+	state := selfUpgradeStateFile{
+		Schema:           selfUpgradeStateSchema,
+		Generation:       controller.generation,
+		IncumbentVersion: incumbent.EmbeddedVersion,
+		IncumbentSHA256:  incumbent.SHA256,
+		Attempts:         []selfupgrade.Attempt{current},
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(controller.statePath, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	attemptsRaw, err := json.Marshal(selfUpgradeAttemptsFile{
+		Schema:   selfUpgradeAttemptsSchema,
+		Attempts: []selfupgrade.Attempt{future},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(selfUpgradeAttemptsPath(controller.statePath), append(attemptsRaw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousNow := selfUpgradeNow
+	selfUpgradeNow = func() time.Time { return now }
+	t.Cleanup(func() { selfUpgradeNow = previousNow })
+
+	if err := loadSelfUpgradeState(controller); err != nil {
+		t.Fatalf("load future sidecar: %v", err)
+	}
+	if controller.eligible || !strings.Contains(controller.reason, "timestamp is uncertain") {
+		t.Fatalf("future sidecar controller = %#v, want unavailable", controller)
+	}
+	if len(controller.attempts) != 1 || controller.attempts[0] != future {
+		t.Fatalf("future sidecar attempts = %#v, want future entry preserved", controller.attempts)
 	}
 }
 
@@ -428,6 +712,109 @@ func TestSelfUpgradeRecordsAttemptBeforeExecAndSettles(t *testing.T) {
 	state = readSelfUpgradeStateForTest(t, controller.statePath)
 	if len(state.Attempts) != 1 || state.Attempts[0].Status != selfupgrade.AttemptStatusSettled {
 		t.Fatalf("settled state = %#v, want settled attempt", state)
+	}
+}
+
+func TestSelfUpgradeMarkSettledReadsAuthoritativeState(t *testing.T) {
+	dir := t.TempDir()
+	incumbentPath := filepath.Join(dir, "incumbent")
+	candidatePath := filepath.Join(dir, "candidate")
+	writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
+	writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
+	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
+	writer := testSelfUpgradeController(dir, candidatePath, incumbent)
+	reader := testSelfUpgradeController(dir, candidatePath, incumbent)
+	previousNow := selfUpgradeNow
+	now := time.Unix(1_700_000_001, 0).UTC()
+	selfUpgradeNow = func() time.Time { return now }
+	t.Cleanup(func() { selfUpgradeNow = previousNow })
+	writer.attempts = []selfupgrade.Attempt{selfupgrade.NewAttempt(incumbent, now.Add(-time.Second))}
+	if err := writer.saveState(); err != nil {
+		t.Fatalf("publish attempt: %v", err)
+	}
+	if len(reader.attempts) != 0 {
+		t.Fatalf("reader local attempts = %#v, want stale empty view", reader.attempts)
+	}
+	if err := reader.markSettled(); err != nil {
+		t.Fatalf("markSettled() = %v", err)
+	}
+	state := readSelfUpgradeStateForTest(t, reader.statePath)
+	if len(state.Attempts) != 1 || state.Attempts[0].Status != selfupgrade.AttemptStatusSettled {
+		t.Fatalf("settled state = %#v, want authoritative attempt settled", state)
+	}
+}
+
+func TestSelfUpgradeRecordAttemptHonorsAuthoritativeRefusal(t *testing.T) {
+	dir := t.TempDir()
+	incumbentPath := filepath.Join(dir, "incumbent")
+	candidatePath := filepath.Join(dir, "candidate")
+	writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
+	writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
+	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
+	candidate := captureSelfUpgradeTestImage(t, candidatePath, "1.1.0")
+	writer := testSelfUpgradeController(dir, candidatePath, incumbent)
+	writer.refused = []selfupgrade.RefusedCandidate{selfupgrade.RefusedCandidateFromEvidence(candidate)}
+	if err := writer.saveState(); err != nil {
+		t.Fatalf("publish refusal: %v", err)
+	}
+	reader := testSelfUpgradeController(dir, candidatePath, incumbent)
+	if _, err := reader.recordAttempt(candidate); !errors.Is(err, errSelfUpgradeCandidateRefused) {
+		t.Fatalf("recordAttempt() error = %v, want authoritative refusal", err)
+	}
+	state := readSelfUpgradeStateForTest(t, reader.statePath)
+	if len(state.Attempts) != 0 {
+		t.Fatalf("attempts after authoritative refusal = %#v, want none", state.Attempts)
+	}
+}
+
+func TestSelfUpgradeRetriesAfterTransientAttemptPublicationFailure(t *testing.T) {
+	dir := t.TempDir()
+	incumbentPath := filepath.Join(dir, "incumbent")
+	candidatePath := filepath.Join(dir, "candidate")
+	writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
+	writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
+	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
+	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
+	if err := controller.saveState(); err != nil {
+		t.Fatalf("publish initial state: %v", err)
+	}
+	previousLock := selfUpgradeAcquireLock
+	previousCandidate := selfUpgradeCaptureCandidate
+	previousExec := selfUpgradeExecImage
+	lockCalls := 0
+	selfUpgradeAcquireLock = func(path string) (func() error, error) {
+		lockCalls++
+		if lockCalls == 2 {
+			return nil, errors.New("temporary self-upgrade lock failure")
+		}
+		return previousLock(path)
+	}
+	selfUpgradeCaptureCandidate = func(path string) (selfupgrade.ImageEvidence, error) {
+		return captureSelfUpgradeTestImage(t, path, "1.1.0"), nil
+	}
+	execCalls := 0
+	selfUpgradeExecImage = func(selfupgrade.ImageEvidence, []string, []string) error {
+		execCalls++
+		return nil
+	}
+	t.Cleanup(func() {
+		selfUpgradeAcquireLock = previousLock
+		selfUpgradeCaptureCandidate = previousCandidate
+		selfUpgradeExecImage = previousExec
+	})
+
+	if err := controller.maintain(context.Background()); err == nil || !strings.Contains(err.Error(), "temporary self-upgrade lock failure") {
+		t.Fatalf("first maintain() error = %v, want transient publication failure", err)
+	}
+	if controller.lastObservation != nil {
+		t.Fatalf("last observation = %#v, want deferred publication not cached", controller.lastObservation)
+	}
+	selfUpgradeAcquireLock = previousLock
+	if err := controller.maintain(context.Background()); err != nil {
+		t.Fatalf("second maintain() error = %v, want retry", err)
+	}
+	if execCalls != 1 {
+		t.Fatalf("exec calls = %d, want retry after transient failure", execCalls)
 	}
 }
 

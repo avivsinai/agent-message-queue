@@ -37,6 +37,8 @@ func TestDarwinWakeRestartVerifiesBoundStageBeforeExec(t *testing.T) {
 	previousVerify := verifyWakeRestartBoundImage
 	previousPreflight := wakeRestartBoundPreflight
 	previousExec := wakeRestartExec
+	previousIgnore := wakeRestartIgnore
+	ignoreCalls := 0
 	verifyWakeRestartBoundImage = func(bound *wakeRestartBoundImage) error {
 		verificationCalls++
 		if bound == nil || bound.executionPath == "" {
@@ -51,10 +53,12 @@ func TestDarwinWakeRestartVerifiesBoundStageBeforeExec(t *testing.T) {
 		execCalls++
 		return errors.New("unexpected exec")
 	}
+	wakeRestartIgnore = func(...os.Signal) { ignoreCalls++ }
 	t.Cleanup(func() {
 		verifyWakeRestartBoundImage = previousVerify
 		wakeRestartBoundPreflight = previousPreflight
 		wakeRestartExec = previousExec
+		wakeRestartIgnore = previousIgnore
 	})
 	runWakeRestartLoopForTest(t, fixture)
 	if verificationCalls != 1 {
@@ -62,6 +66,9 @@ func TestDarwinWakeRestartVerifiesBoundStageBeforeExec(t *testing.T) {
 	}
 	if execCalls != 0 {
 		t.Fatalf("exec calls = %d, want zero after signature refusal", execCalls)
+	}
+	if ignoreCalls != 0 {
+		t.Fatalf("signal ignore calls = %d, want verifier to run before ignored window", ignoreCalls)
 	}
 	record := readRefusedWakeRestartForTest(t, fixture)
 	if !strings.Contains(record.Reason, sentinel.Error()) {

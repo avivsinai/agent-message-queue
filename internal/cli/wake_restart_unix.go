@@ -95,6 +95,8 @@ var (
 	wakeRestartPreflight      = preflightWakeRestartCandidate
 	wakeRestartBind           = bindWakeRestartCandidateForRecord
 	wakeRestartBoundPreflight = preflightBoundWakeRestartCandidate
+	wakeRestartIgnore         = signal.Ignore
+	wakeRestartSignalNotify   = signal.Notify
 )
 
 func runWakeRestart(args []string) error {
@@ -1406,19 +1408,24 @@ func executeWakeRestart(
 		return err
 	}
 	env := setEnvVar(unsetEnvVar(os.Environ(), envWakeResumeBootstrap), envWakeResumeBootstrap, bootstrap)
+	if err := verifyWakeRestartBoundImagePlatform(bound); err != nil {
+		return fmt.Errorf("%w: verify wake restart image signature: %w", errWakeImageRefused, err)
+	}
 	// An ignored disposition survives exec, unlike a caught disposition. The
 	// bootstrap installs Notify before it rotates and advertises the successor
-	// generation. If exec fails, restore delivery to the incumbent loop.
-	signal.Ignore(syscall.SIGUSR1)
-	if err := verifyWakeRestartBoundImagePlatform(bound); err != nil {
+	// generation. Keep the expensive platform probe outside the ignored window;
+	// only the final bound-image revalidation runs before exec. If exec fails,
+	// restore delivery to the incumbent loop.
+	wakeRestartIgnore(syscall.SIGUSR1)
+	if err := revalidateBoundWakeRestartImagePlatform(bound); err != nil {
 		if restartSignals != nil {
-			signal.Notify(restartSignals, syscall.SIGUSR1)
+			wakeRestartSignalNotify(restartSignals, syscall.SIGUSR1)
 		}
-		return fmt.Errorf("%w: verify wake restart image signature: %w", errWakeImageRefused, err)
+		return fmt.Errorf("%w: revalidate wake restart image: %w", errWakeImageRefused, err)
 	}
 	err = wakeRestartExec(bound.executionPath, append([]string(nil), argv...), env)
 	if restartSignals != nil {
-		signal.Notify(restartSignals, syscall.SIGUSR1)
+		wakeRestartSignalNotify(restartSignals, syscall.SIGUSR1)
 	}
 	if err != nil {
 		return fmt.Errorf("exec wake restart candidate: %w", err)

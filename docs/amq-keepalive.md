@@ -143,6 +143,10 @@ supporting other slices is a non-goal.
 On Darwin, the private `0700` PID-scoped stage is re-verified immediately
 before pathname exec because Darwin has no `fexecve`; same-UID races in that
 narrow window are outside AMQ's threat model, as for wake self-upgrade.
+The bound stage is also checked before AMQ changes the `SIGUSR1` disposition
+with root-owned `/usr/bin/codesign --verify --strict`; a missing, unsafe, or
+failing verifier refuses the replacement. A small final bound-image
+revalidation runs inside the ignored window immediately before exec.
 
 The `register` and `attach` commands keep `executablePath()` as their default
 injector path. Only `supervise` derives its default self-upgrade locator from
@@ -157,18 +161,21 @@ finish before this check; an uncertain pass or candidate identity defers the
 upgrade.
 
 Before `execve`, keepalive records the candidate as an unsettled replacement
-attempt in `.selfupgrade.json`. If a later process reaches maintenance with a
-candidate matching that unsettled attempt, it refuses the candidate for 24 hours
-to prevent an immediate crash loop. A healthy pass from the attempted image
-settles the attempt. The guard cannot help when the new image dies before any
-replacement process reaches maintenance code. Its bounded eight-entry ledger
+attempt in `.selfupgrade.json` and mirrors the bounded attempt ledger in the
+separate `.selfupgrade.attempts` sidecar. If a later process reaches maintenance
+with a candidate matching that unsettled attempt, it refuses the candidate for
+24 hours to prevent an immediate crash loop. A healthy pass from the attempted
+image settles the attempt. The guard cannot help when the new image dies before
+any replacement process reaches maintenance code. Its bounded eight-entry ledger
 is scoped to the registry directory (`filepath.Dir(registryPath)`) and its
-`.selfupgrade.json` sidecar; it does not roll back the installed executable.
+attempt sidecars; it does not roll back the installed executable.
 
-The sidecar schema is version 2. New code accepts schema 1 as migration input
-and publishes schema 2 before a protected replacement exec. Older readers fail
-closed on the schema mismatch, so mixed-version operation can still require
-operator or package-manager recovery.
+The primary state-file schema is version 2. New code accepts schema 1 as
+migration input and publishes schema 2 before a protected replacement exec. The
+separate attempt sidecar is written by new code only. An already-running
+schema-1 writer cannot erase an unsettled attempt marker when it rewrites the primary
+file. Older readers fail closed when they reopen schema 2, so mixed-version
+operation can still require operator or package-manager recovery.
 
 AMQ does not write the executable or retain the previous image, so it cannot
 roll back a successful replacement. Recovery from a bad installed image is an
@@ -177,12 +184,14 @@ good package version.
 
 Reads of the candidate's `-X main.version` linker assignment that fail or
 produce unknown metadata defer and are retried after a later pass. Exec
-failures fail closed and are recorded in the private `.selfupgrade.json`
-sidecar next to the registry; each replacement-attempted candidate is refused
-at most once per generation. A new process generation starts with an empty
-refusal set. The sidecar is mode `0600`; a corrupt or unsafe sidecar disables
-self-upgrade for that process. Use
-`supervise --no-self-upgrade` to opt out.
+failures fail closed and are recorded in the private state files next to the
+registry; each replacement-attempted candidate is refused at most once per
+registry directory during the 24-hour attempt window. A new process generation
+starts with an empty refusal cache. Both state files are mode `0600`; a corrupt
+or unsafe state file is unavailable, disabling self-upgrade at startup and
+deferring a later refresh. Use `supervise --no-self-upgrade` to opt out. The
+durable attempt guard applies per registry directory; the process-local refusal
+cache is separate.
 
 ### Detached wake stderr protocol
 

@@ -151,7 +151,7 @@ func AddAttempt(attempts []Attempt, addition Attempt, now time.Time) ([]Attempt,
 		}
 		if evict == -1 {
 			for index, attempt := range current {
-				if attempt.Status != AttemptStatusAttempt || attempt.IsFresh(now) {
+				if attempt.Status != AttemptStatusAttempt || attempt.IsFresh(now) || attempt.IsFutureUncertain(now) {
 					continue
 				}
 				if evict == -1 || attempt.UnixTime < current[evict].UnixTime {
@@ -183,9 +183,17 @@ func MergeAttempts(current, desired []Attempt, now time.Time) ([]Attempt, error)
 		mergedExisting := false
 		for index, existing := range merged {
 			if existing.Candidate == attempt.Candidate {
-				if existing.Status == AttemptStatusSettled {
+				switch {
+				case existing.IsFutureUncertain(now):
+					if !attempt.IsFutureUncertain(now) || attempt.UnixTime <= existing.UnixTime {
+						attempt = existing
+					}
+				case attempt.IsFutureUncertain(now):
+					// Preserve an uncertain timestamp so the caller can fail closed.
+				case existing.Status == AttemptStatusSettled ||
+					(attempt.Status == AttemptStatusSettled && attempt.UnixTime < existing.UnixTime):
 					attempt = existing
-				} else if attempt.Status != AttemptStatusSettled {
+				case attempt.Status != AttemptStatusSettled && attempt.UnixTime <= existing.UnixTime:
 					attempt = existing
 				}
 				merged[index] = attempt
