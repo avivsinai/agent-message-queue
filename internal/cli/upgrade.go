@@ -74,6 +74,9 @@ type preparedCompanionUpgrade struct {
 // (not companions). It is best-effort: a cache write failure does not fail
 // the upgrade.
 func saveUpgradeCache(latest string) {
+	if update.IsUnpublishedTestVersion(latest) {
+		return
+	}
 	cachePath, err := update.DefaultCachePath()
 	if err != nil {
 		return

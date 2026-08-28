@@ -788,12 +788,12 @@ func stubUpgradeNetwork(t *testing.T) (replaced *[]string) {
 	}
 	t.Cleanup(func() { downloadReleaseAssetForUpgrade = oldDownload })
 	oldChecksums := fetchChecksumsForUpgrade
-	fetchChecksumsForUpgrade = func(context.Context, *http.Client, string) (map[string]string, error) {
+	fetchChecksumsForUpgrade = func(_ context.Context, _ *http.Client, tag string) (map[string]string, error) {
 		// Return a checksum for every asset name the upgrade loop can request
 		// (amq + each companion) so the lookup always hits regardless of OS.
 		m := map[string]string{}
 		for _, name := range append([]string{update.BinaryName}, update.CompanionBinaries...) {
-			if asset, err := update.AssetNameFor(name, "v0.0.0-test", runtime.GOOS, runtime.GOARCH); err == nil {
+			if asset, err := update.AssetNameFor(name, tag, runtime.GOOS, runtime.GOARCH); err == nil {
 				m[asset] = "checksum"
 			}
 		}
@@ -879,6 +879,25 @@ func TestRunUpgradeDirectInstallReplacesBinary(t *testing.T) {
 	}
 }
 
+func TestSaveUpgradeCacheSkipsUnpublishedTestVersion(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv(update.EnvCacheDir, cacheDir)
+	path, err := update.DefaultCachePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, latest := range []string{"v9.9.9", "9.9.9", "v0.0.0-test"} {
+		saveUpgradeCache(latest)
+		cache, err := update.LoadCache(path)
+		if err != nil {
+			t.Fatalf("LoadCache after %q: %v", latest, err)
+		}
+		if cache != nil {
+			t.Fatalf("saveUpgradeCache(%q) wrote %#v", latest, cache)
+		}
+	}
+}
+
 func TestRunUpgradeWritesCacheToOverride(t *testing.T) {
 	cacheDir := t.TempDir()
 	t.Setenv(update.EnvCacheDir, cacheDir)
@@ -893,7 +912,7 @@ func TestRunUpgradeWritesCacheToOverride(t *testing.T) {
 	detectHomebrewPrefixForUpgrade = func() string { return "" }
 	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
 	oldFetch := fetchLatestTagForUpgrade
-	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) { return "v0.0.0-test", nil }
+	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) { return "v0.73.0", nil }
 	t.Cleanup(func() { fetchLatestTagForUpgrade = oldFetch })
 	stubUpgradeNetwork(t)
 	oldSave := saveUpgradeCacheForUpgrade
@@ -911,8 +930,8 @@ func TestRunUpgradeWritesCacheToOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCache: %v", err)
 	}
-	if cache == nil || cache.LatestVersion != "v0.0.0-test" {
-		t.Fatalf("cache = %#v, want latest v0.0.0-test under %s", cache, cacheDir)
+	if cache == nil || cache.LatestVersion != "v0.73.0" {
+		t.Fatalf("cache = %#v, want latest v0.73.0 under %s", cache, cacheDir)
 	}
 }
 
@@ -976,7 +995,7 @@ func TestRunUpgradeScheduledCacheRepairsOnNextRun(t *testing.T) {
 	detectHomebrewPrefixForUpgrade = func() string { return "" }
 	t.Cleanup(func() { detectHomebrewPrefixForUpgrade = oldDetect })
 	oldFetch := fetchLatestTagForUpgrade
-	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) { return "v0.0.0-test", nil }
+	fetchLatestTagForUpgrade = func(context.Context, *http.Client) (string, error) { return "v0.73.0", nil }
 	t.Cleanup(func() { fetchLatestTagForUpgrade = oldFetch })
 	stubUpgradeNetwork(t)
 	oldReplace := replaceBinaryForUpgrade
@@ -1001,14 +1020,14 @@ func TestRunUpgradeScheduledCacheRepairsOnNextRun(t *testing.T) {
 		t.Fatalf("cache after scheduled replacement = %#v, want stale value preserved", first)
 	}
 
-	if _, _, err := captureEnvOutput(t, func() error { return runUpgrade(nil, "v0.0.0-test") }); err != nil {
+	if _, _, err := captureEnvOutput(t, func() error { return runUpgrade(nil, "v0.73.0") }); err != nil {
 		t.Fatalf("already-current runUpgrade: %v", err)
 	}
 	second, err := update.LoadCache(cachePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second == nil || second.LatestVersion != "v0.0.0-test" {
+	if second == nil || second.LatestVersion != "v0.73.0" {
 		t.Fatalf("cache after next run = %#v, want repaired latest version", second)
 	}
 	if replaceCalls != 1 {

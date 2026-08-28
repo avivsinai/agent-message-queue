@@ -1,7 +1,12 @@
 package update
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +14,208 @@ import (
 	"testing"
 	"time"
 )
+
+func TestIsUnpublishedTestVersion(t *testing.T) {
+	cases := []struct {
+		version string
+		want    bool
+	}{
+		{"9.9.9", true},
+		{"v9.9.9", true},
+		{"V9.9.9", true},
+		{" 9.9.9 ", true},
+		{"v9.9.9-rc.1", true},
+		{"9.9.9+build", true},
+		{"0.0.0-test", true},
+		{"v0.0.0-test", true},
+		{"V0.0.0-TEST", true},
+		{"0.73.0", false},
+		{"v0.73.0", false},
+		{"v0.70.0", false},
+		{"9.9.8", false},
+		{"9.9.90", false},
+		{"19.9.9", false},
+		{"0.0.0", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := IsUnpublishedTestVersion(tc.version); got != tc.want {
+			t.Fatalf("IsUnpublishedTestVersion(%q)=%v want %v", tc.version, got, tc.want)
+		}
+	}
+}
+
+func TestIsUpdateAvailableRejectsUnpublishedLatest(t *testing.T) {
+	if !IsUpdateAvailable("v0.70.0", "v0.73.0") {
+		t.Fatal("published newer latest must still be advertised")
+	}
+	if IsUpdateAvailable("v0.70.0", "v9.9.9") {
+		t.Fatal("sentinel 9.9.9 must not be advertised; CompareVersions would treat it as newer")
+	}
+	if IsUpdateAvailable("v0.70.0", "9.9.9") {
+		t.Fatal("bare sentinel 9.9.9 must not be advertised")
+	}
+	if IsUpdateAvailable("v0.70.0", "v0.0.0-test") {
+		t.Fatal("documented test latest 0.0.0-test must not be advertised")
+	}
+}
+
+func TestFetchLatestTagRejectsUnpublishedTestVersion(t *testing.T) {
+	for _, tag := range []string{"v9.9.9", "9.9.9", "v0.0.0-test"} {
+		t.Run(tag, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(map[string]string{"tag_name": tag}); err != nil {
+					t.Errorf("encode: %v", err)
+				}
+			}))
+			t.Cleanup(server.Close)
+			oldURL := latestReleaseAPIURL
+			latestReleaseAPIURL = func() string { return server.URL }
+			t.Cleanup(func() { latestReleaseAPIURL = oldURL })
+
+			got, err := FetchLatestTag(context.Background(), server.Client())
+			if err == nil || !strings.Contains(err.Error(), "unpublished test version") {
+				t.Fatalf("FetchLatestTag(%q) err=%v got=%q, want unpublished test version error", tag, err, got)
+			}
+			if got != "" {
+				t.Fatalf("FetchLatestTag(%q) returned %q, want empty", tag, got)
+			}
+		})
+	}
+}
+
+func TestFetchLatestTagAcceptsPublishedVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{"tag_name": "v0.73.0"}); err != nil {
+			t.Errorf("encode: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+	oldURL := latestReleaseAPIURL
+	latestReleaseAPIURL = func() string { return server.URL }
+	t.Cleanup(func() { latestReleaseAPIURL = oldURL })
+
+	got, err := FetchLatestTag(context.Background(), server.Client())
+	if err != nil {
+		t.Fatalf("FetchLatestTag: %v", err)
+	}
+	if got != "v0.73.0" {
+		t.Fatalf("FetchLatestTag=%q want v0.73.0", got)
+	}
+}
+
+func TestNotifierStartDoesNotAdvertiseCachedSentinel(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "update.json")
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	if err := SaveCache(cachePath, &Cache{CheckedAt: now, LatestVersion: "v9.9.9"}); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	n := Notifier{
+		CurrentVersion: "v0.70.0",
+		CachePath:      cachePath,
+		CheckInterval:  24 * time.Hour,
+		Now:            func() time.Time { return now },
+		Stderr:         &stderr,
+		FetchLatest: func(context.Context, *http.Client) (string, error) {
+			t.Fatal("fresh sentinel cache must not refresh")
+			return "", nil
+		},
+	}
+	n.Start(context.Background())
+	if strings.Contains(stderr.String(), "9.9.9") || strings.Contains(stderr.String(), "update available") {
+		t.Fatalf("advertised sentinel from cache:\n%s", stderr.String())
+	}
+}
+
+func TestNotifierStartAdvertisesPublishedCachedLatestOnStderr(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "update.json")
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	if err := SaveCache(cachePath, &Cache{CheckedAt: now, LatestVersion: "v0.73.0"}); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	n := Notifier{
+		CurrentVersion: "v0.70.0",
+		CachePath:      cachePath,
+		CheckInterval:  24 * time.Hour,
+		Now:            func() time.Time { return now },
+		Stderr:         &stderr,
+		FetchLatest: func(context.Context, *http.Client) (string, error) {
+			t.Fatal("fresh published cache must not refresh")
+			return "", nil
+		},
+	}
+	n.Start(context.Background())
+	want := "amq: update available (v0.70.0 -> v0.73.0). Run 'amq upgrade' to install.\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr=%q want %q", stderr.String(), want)
+	}
+}
+
+func TestNotifierRefreshLatestDoesNotPersistOrAdvertiseSentinel(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "update.json")
+	var stderr bytes.Buffer
+	n := Notifier{
+		CurrentVersion: "v0.70.0",
+		Stderr:         &stderr,
+		Now:            func() time.Time { return time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC) },
+		FetchLatest: func(context.Context, *http.Client) (string, error) {
+			return "v9.9.9", nil
+		},
+	}
+	n.refreshLatest(context.Background(), cachePath, "v0.70.0", false)
+	cache, err := LoadCache(cachePath)
+	if err != nil {
+		t.Fatalf("LoadCache: %v", err)
+	}
+	if cache != nil {
+		t.Fatalf("cache = %#v, want sentinel omitted from latest", cache)
+	}
+	if strings.Contains(stderr.String(), "9.9.9") || strings.Contains(stderr.String(), "update available") {
+		t.Fatalf("advertised fetched sentinel:\n%s", stderr.String())
+	}
+}
+
+func TestNotifierRefreshLatestPersistsPublishedVersion(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "update.json")
+	var stderr bytes.Buffer
+	now := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
+	n := Notifier{
+		CurrentVersion: "v0.70.0",
+		Stderr:         &stderr,
+		Now:            func() time.Time { return now },
+		FetchLatest: func(context.Context, *http.Client) (string, error) {
+			return "v0.73.0", nil
+		},
+	}
+	n.refreshLatest(context.Background(), cachePath, "v0.70.0", false)
+	cache, err := LoadCache(cachePath)
+	if err != nil {
+		t.Fatalf("LoadCache: %v", err)
+	}
+	if cache == nil || cache.LatestVersion != "v0.73.0" || !cache.CheckedAt.Equal(now) {
+		t.Fatalf("cache = %#v, want latest v0.73.0", cache)
+	}
+	if !strings.Contains(stderr.String(), "v0.70.0 -> v0.73.0") {
+		t.Fatalf("stderr missing published update hint:\n%s", stderr.String())
+	}
+}
+
+func TestWriteUpdateHintWritesToProvidedWriter(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeUpdateHint(&buf, "v0.70.0", "v0.73.0"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(buf.String(), "\n") {
+		t.Fatalf("hint missing trailing newline: %q", buf.String())
+	}
+	if err := writeUpdateHint(io.Discard, "v0.70.0", "v0.73.0"); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestCompareVersions(t *testing.T) {
 	cases := []struct {
@@ -18,6 +225,7 @@ func TestCompareVersions(t *testing.T) {
 		ok      bool
 	}{
 		{"v1.2.3", "v1.2.3", 0, true},
+		{"v0.70.0", "v9.9.9", -1, true},
 		{"v1.2.3", "v1.2.4", -1, true},
 		{"1.2.3", "v1.2.4", -1, true},
 		{"v2.0.0", "v1.9.9", 1, true},
