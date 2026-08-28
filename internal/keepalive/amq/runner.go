@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/update"
 )
 
 var ErrWakeReadinessUncertain = errors.New("amq wake readiness is uncertain; child was left unsignaled")
@@ -463,7 +465,7 @@ func newWakeReadyPath() (string, string, error) {
 	cacheDir := strings.TrimSpace(os.Getenv("AMQ_KEEPALIVE_CACHE_DIR"))
 	if cacheDir == "" {
 		var err error
-		cacheDir, err = os.UserCacheDir()
+		cacheDir, err = update.DefaultCacheDir()
 		if err != nil {
 			return "", "", fmt.Errorf("resolve user cache directory for wake readiness: %w", err)
 		}

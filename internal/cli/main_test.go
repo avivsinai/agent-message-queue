@@ -77,8 +77,18 @@ func TestMain(m *testing.M) {
 		_, _ = fmt.Fprintf(os.Stderr, "create test cache dir: %v\n", err)
 		os.Exit(1)
 	}
-	_ = os.Setenv(update.EnvCacheDir, testCacheDir)
-	_ = os.Setenv("XDG_CACHE_HOME", testCacheDir)
+	for _, env := range []struct {
+		key   string
+		value string
+	}{
+		{key: update.EnvCacheDir, value: testCacheDir},
+		{key: "XDG_CACHE_HOME", value: testCacheDir},
+	} {
+		if err := os.Setenv(env.key, env.value); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "set %s for tests: %v\n", env.key, err)
+			os.Exit(1)
+		}
+	}
 
 	exitCode := m.Run()
 	cliSecureTempRoot = ""

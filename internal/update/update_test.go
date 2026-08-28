@@ -2,10 +2,10 @@ package update
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -296,22 +296,37 @@ func TestDefaultCachePathUsesAMQCacheDirPrecedence(t *testing.T) {
 }
 
 func TestDefaultCachePathRefusesInvalidAMQCacheDir(t *testing.T) {
-	t.Run("abs failure", func(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		t.Setenv(EnvCacheDir, "")
+		if _, err := DefaultCachePath(); err == nil || !strings.Contains(err.Error(), "unset AMQ_CACHE_DIR or set it to an absolute cache directory") {
+			t.Fatalf("DefaultCachePath error = %v, want actionable empty-value refusal", err)
+		}
+	})
+	t.Run("relative", func(t *testing.T) {
 		t.Setenv(EnvCacheDir, "relative-cache")
-		oldAbs := absPathForCacheDir
-		absPathForCacheDir = func(string) (string, error) { return "", errors.New("working directory is unavailable") }
-		t.Cleanup(func() { absPathForCacheDir = oldAbs })
-
-		if _, err := DefaultCachePath(); err == nil {
-			t.Fatal("DefaultCachePath accepted an unresolvable AMQ_CACHE_DIR")
+		if _, err := DefaultCachePath(); err == nil || !strings.Contains(err.Error(), "unset AMQ_CACHE_DIR or set it to an absolute cache directory") {
+			t.Fatalf("DefaultCachePath error = %v, want actionable relative-value refusal", err)
 		}
 	})
 	t.Run("whitespace", func(t *testing.T) {
 		t.Setenv(EnvCacheDir, " ")
-		if _, err := DefaultCachePath(); err == nil {
-			t.Fatal("DefaultCachePath accepted a whitespace AMQ_CACHE_DIR")
+		if _, err := DefaultCachePath(); err == nil || !strings.Contains(err.Error(), "unset AMQ_CACHE_DIR or set it to an absolute cache directory") {
+			t.Fatalf("DefaultCachePath error = %v, want actionable whitespace-value refusal", err)
 		}
 	})
+}
+
+func TestDefaultCachePathPreservesSpacesInAbsoluteOverride(t *testing.T) {
+	override := filepath.Join(t.TempDir(), "cache with trailing space ")
+	t.Setenv(EnvCacheDir, override)
+	got, err := DefaultCachePath()
+	if err != nil {
+		t.Fatalf("DefaultCachePath: %v", err)
+	}
+	want := filepath.Join(override, "amq", "update.json")
+	if got != want {
+		t.Fatalf("DefaultCachePath()=%q want %q", got, want)
+	}
 }
 
 func TestSaveCacheWritesToIsolatedDefaultPath(t *testing.T) {

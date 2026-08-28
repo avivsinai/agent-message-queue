@@ -70,7 +70,6 @@ var (
 	ErrUnsupportedOS      = errors.New("unsupported operating system")
 	ErrUnsupportedArch    = errors.New("unsupported architecture")
 	userCacheDirForUpdate = os.UserCacheDir
-	absPathForCacheDir    = filepath.Abs
 )
 
 type Cache struct {
@@ -738,20 +737,23 @@ func SaveCache(path string, cache *Cache) error {
 }
 
 func DefaultCachePath() (string, error) {
-	if rawDir := os.Getenv(EnvCacheDir); rawDir != "" {
-		dir := strings.TrimSpace(rawDir)
-		if dir == "" {
-			return "", fmt.Errorf("resolve %s: path is empty", EnvCacheDir)
+	if rawDir, set := os.LookupEnv(EnvCacheDir); set {
+		if rawDir == "" || !filepath.IsAbs(rawDir) {
+			return "", fmt.Errorf("resolve %s: unset %s or set it to an absolute cache directory", EnvCacheDir, EnvCacheDir)
 		}
-		abs, err := absPathForCacheDir(dir)
-		if err != nil {
-			return "", fmt.Errorf("resolve %s: %w", EnvCacheDir, err)
-		}
-		if !filepath.IsAbs(abs) {
-			return "", fmt.Errorf("resolve %s: path is not absolute", EnvCacheDir)
-		}
-		return filepath.Join(filepath.Clean(abs), "amq", "update.json"), nil
+		return filepath.Join(filepath.Clean(rawDir), "amq", "update.json"), nil
 	}
+	cacheDir, err := DefaultCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(cacheDir, "amq", "update.json"), nil
+}
+
+// DefaultCacheDir returns the platform user-cache directory. It is shared by
+// update files and keepalive readiness files so platform cache discovery stays
+// in one package.
+func DefaultCacheDir() (string, error) {
 	cacheDir, err := userCacheDirForUpdate()
 	if err != nil {
 		home, err := os.UserHomeDir()
@@ -760,7 +762,7 @@ func DefaultCachePath() (string, error) {
 		}
 		cacheDir = filepath.Join(home, ".cache")
 	}
-	return filepath.Join(cacheDir, "amq", "update.json"), nil
+	return cacheDir, nil
 }
 
 func writeUpdateHint(w io.Writer, current, latest string) error {
