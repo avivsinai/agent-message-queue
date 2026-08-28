@@ -767,10 +767,25 @@ func TestSessionStartTimeoutKillsReattachProcessGroup(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
 	grandchildPidPath := filepath.Join(dir, "grandchild.pid")
+	grandchildReadyPath := filepath.Join(dir, "grandchild.ready")
+	grandchildReapedPath := filepath.Join(dir, "grandchild.reaped")
+	sleepPath := writeExecutableBody(t, filepath.Join(dir, "sleep"), `#!/bin/sh
+if [ "$1" = "2" ]; then
+  while [ ! -f "$AMQ_KEEPALIVE_GRANDCHILD_READY" ]; do
+    /bin/sleep 0.01
+  done
+fi
+/bin/sleep "$1"
+`)
 	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), `#!/bin/sh
 sleep 60 &
-printf '%s\n' "$!" > "$AMQ_KEEPALIVE_GRANDCHILD_PID"
-wait
+grandchild_pid=$!
+printf '%s\n' "$grandchild_pid" > "$AMQ_KEEPALIVE_GRANDCHILD_PID.tmp"
+mv "$AMQ_KEEPALIVE_GRANDCHILD_PID.tmp" "$AMQ_KEEPALIVE_GRANDCHILD_PID"
+printf 'ready\n' > "$AMQ_KEEPALIVE_GRANDCHILD_READY.tmp"
+mv "$AMQ_KEEPALIVE_GRANDCHILD_READY.tmp" "$AMQ_KEEPALIVE_GRANDCHILD_READY"
+trap 'wait "$grandchild_pid"; printf "reaped\n" > "$AMQ_KEEPALIVE_GRANDCHILD_REAPED.tmp"; mv "$AMQ_KEEPALIVE_GRANDCHILD_REAPED.tmp" "$AMQ_KEEPALIVE_GRANDCHILD_REAPED"; exit 143' TERM
+wait "$grandchild_pid"
 `)
 	logPath := filepath.Join(dir, "session-start.log")
 
@@ -790,6 +805,9 @@ wait
 		"AMQ_KEEPALIVE_WAKE_TIMEOUT_MILLISECONDS",
 		"CMUX_SURFACE_ID",
 		"TMPDIR",
+		"AMQ_KEEPALIVE_GRANDCHILD_PID",
+		"AMQ_KEEPALIVE_GRANDCHILD_READY",
+		"AMQ_KEEPALIVE_GRANDCHILD_REAPED",
 	),
 		"TMPDIR="+dir,
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
@@ -797,14 +815,17 @@ wait
 		"AMQ_KEEPALIVE_TARGET=ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D",
 		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=2",
 		"AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS=1",
+		"AMQ_KEEPALIVE_SLEEP="+sleepPath,
 		"AMQ_KEEPALIVE_GRANDCHILD_PID="+grandchildPidPath,
+		"AMQ_KEEPALIVE_GRANDCHILD_READY="+grandchildReadyPath,
+		"AMQ_KEEPALIVE_GRANDCHILD_REAPED="+grandchildReapedPath,
 	)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("hook start error = %v", err)
 	}
-	pid := readPIDFile(t, grandchildPidPath)
+	readPIDFile(t, grandchildPidPath)
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("hook run error = %v", err)
 	}
@@ -818,13 +839,7 @@ wait
 	if !strings.Contains(string(logData), "reattach timed out after 2s") {
 		t.Fatalf("missing timeout log:\n%s", logData)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for processRunning(pid) && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if processRunning(pid) {
-		t.Fatalf("grandchild pid %d still running after process-group timeout", pid)
-	}
+	waitForFileContents(t, grandchildReapedPath, []byte("reaped\n"), 2*time.Second)
 	leftovers, err := filepath.Glob(filepath.Join(dir, "amq-keepalive-timeout.*"))
 	if err != nil {
 		t.Fatalf("glob timeout_dir: %v", err)
@@ -911,16 +926,42 @@ func waitForFile(t *testing.T, path string, d time.Duration) {
 
 func readPIDFile(t *testing.T, path string) int {
 	t.Helper()
-	waitForFile(t, path, 8*time.Second)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read pid file: %v", err)
+	deadline := time.Now().Add(8 * time.Second)
+	var lastData []byte
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			lastData = data
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+			if parseErr == nil && pid > 0 {
+				return pid
+			}
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("read pid file: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for valid pid file %s: %q", path, lastData)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		t.Fatalf("pid file %s = %q, want a pid", path, data)
+}
+
+func waitForFileContents(t *testing.T, path string, want []byte, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil && bytes.Equal(data, want) {
+			return
+		}
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s contents %q; got %q", path, want, data)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	return pid
 }
 
 func writeExecutable(t *testing.T, path string) string {
