@@ -74,6 +74,10 @@ rejected unless a non-empty `--root` or `--session` explicitly repins it.
 `amq env --session` routes from a valid pinned base before it checks project
 configuration.
 
+Exported and persisted roots are physical canonical paths with symlinks
+resolved; for example, macOS `/var` becomes `/private/var`. Complete pins from
+`amq env` remain valid across this change.
+
 ## Creation and backlog discovery
 
 Create named sessions explicitly with `amq session create <name>`. `coop exec`

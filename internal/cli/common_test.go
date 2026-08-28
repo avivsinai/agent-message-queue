@@ -783,7 +783,7 @@ func TestRelativeHighPrecedenceRootsCanonicalizeBeforeEnvSendAndDoctor(t *testin
 			targetRoot := filepath.Join(repo, defaultCoopRoot)
 			configureSendTestRoot(t, targetRoot, "alice", "bob")
 			t.Setenv("HOME", fakeHome)
-			test.setup(t, targetRoot)
+			test.setup(t, canonicalTestPath(t, targetRoot))
 			t.Chdir(nested)
 			resetAmqrcCache()
 
@@ -811,7 +811,7 @@ func TestRelativeHighPrecedenceRootsCanonicalizeBeforeEnvSendAndDoctor(t *testin
 			if err != nil {
 				t.Fatalf("env shell: %v", err)
 			}
-			if want := "export AM_ROOT=" + shellQuotePosix(targetRoot) + "\n"; !strings.Contains(stdout, want) {
+			if want := "export AM_ROOT=" + shellQuotePosix(canonicalTestPath(t, targetRoot)) + "\n"; !strings.Contains(stdout, want) {
 				t.Fatalf("env shell omitted canonical root %q:\n%s", want, stdout)
 			}
 

@@ -195,7 +195,7 @@ func runEnv(args []string) error {
 		if checkErr != nil {
 			return checkErr
 		} else if decision.Verdict != sessionguard.Allow && mismatch != nil {
-			return ContextMismatchError("refusing env: %s. Use explicit --session <name> or --root <path> to repin", mismatch.Error())
+			return ContextMismatchError("refusing env: %s. Run 'amq env --session <name>' or 'amq env --root <path>' to repin", mismatch.Error())
 		}
 	}
 
