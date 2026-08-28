@@ -8,6 +8,25 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.74.0](https://github.com/avivsinai/agent-message-queue/compare/v0.73.0...v0.74.0) (2026-08-28)
+
+
+### Features
+
+* **keepalive:** re-exec a strictly newer supervisor image in place ([#672](https://github.com/avivsinai/agent-message-queue/issues/672)) ([dc15276](https://github.com/avivsinai/agent-message-queue/commit/dc15276d62bdb9077c82639c511a44817a7f1b7e))
+* **selfupgrade:** crash-loop guard and darwin stage identity checks ([#677](https://github.com/avivsinai/agent-message-queue/issues/677)) ([3e7deca](https://github.com/avivsinai/agent-message-queue/commit/3e7deca27ca52df883a4382897662476c3981bd1))
+* **upgrade:** package-manager-aware amq upgrade with companion --all ([#674](https://github.com/avivsinai/agent-message-queue/issues/674)) ([7eaec7f](https://github.com/avivsinai/agent-message-queue/commit/7eaec7f4e4d1b58fcf84c6f60c29f09fa9903869))
+
+
+### Bug Fixes
+
+* **bridge:** prefer GNU stat for enqueue config mode ([#686](https://github.com/avivsinai/agent-message-queue/issues/686)) ([71a2379](https://github.com/avivsinai/agent-message-queue/commit/71a2379719a4b91c345cb6a326a8232b4d766f9a))
+* **cli:** assert physical canonical roots in env test ([#678](https://github.com/avivsinai/agent-message-queue/issues/678)) ([ecccfee](https://github.com/avivsinai/agent-message-queue/commit/ecccfee71f208381ac7fc49540e6db5883b44add))
+* **cli:** isolate nested worktree root discovery ([#676](https://github.com/avivsinai/agent-message-queue/issues/676)) ([c7e73ae](https://github.com/avivsinai/agent-message-queue/commit/c7e73aed9239f81895f366a401bd0d6108332cab))
+* **selfupgrade:** read candidate versions from build info ([#675](https://github.com/avivsinai/agent-message-queue/issues/675)) ([79cb14c](https://github.com/avivsinai/agent-message-queue/commit/79cb14c759df7262b199050149e4f4880d374cba))
+* **update:** reject unpublished sentinel latest versions ([#685](https://github.com/avivsinai/agent-message-queue/issues/685)) ([cf0ada9](https://github.com/avivsinai/agent-message-queue/commit/cf0ada91809a54b101f7b36f19e37b4fec73b74a))
+* **wake:** retry restart readiness when the record changes while opening ([#683](https://github.com/avivsinai/agent-message-queue/issues/683)) ([fc85bea](https://github.com/avivsinai/agent-message-queue/commit/fc85beaf9783510235d559769cb486074727810e))
+
 ## [0.73.0](https://github.com/avivsinai/agent-message-queue/compare/v0.72.0...v0.73.0) (2026-08-27)
 
 
