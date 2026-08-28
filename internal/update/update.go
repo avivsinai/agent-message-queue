@@ -117,6 +117,9 @@ type Notifier struct {
 	Client         *http.Client
 	CachePath      string
 	CheckInterval  time.Duration
+	// FetchLatest overrides FetchLatestTag. Tests inject it so a sentinel
+	// GitHub payload can be exercised without a network round trip.
+	FetchLatest func(context.Context, *http.Client) (string, error)
 }
 
 func (n Notifier) Start(ctx context.Context) {
@@ -145,34 +148,79 @@ func (n Notifier) Start(ctx context.Context) {
 	}
 
 	if cache == nil || n.now().Sub(cache.CheckedAt) >= n.interval() {
-		go func(alreadyHinted bool) {
-			refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
-			latest, err := FetchLatestTag(refreshCtx, n.client())
-			if err != nil {
-				return
-			}
-			latest = normalizeVersion(latest)
-			if latest == "" {
-				return
-			}
-			if !alreadyHinted && IsUpdateAvailable(current, latest) {
-				_ = writeUpdateHint(n.stderr(), current, latest)
-			}
-			_ = SaveCache(cachePath, &Cache{
-				CheckedAt:     n.now().UTC(),
-				LatestVersion: latest,
-			})
-		}(hinted)
+		go n.refreshLatest(ctx, cachePath, current, hinted)
 	}
 }
 
+func (n Notifier) refreshLatest(ctx context.Context, cachePath, current string, alreadyHinted bool) {
+	refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	latest, err := n.fetchLatest(refreshCtx)
+	if err != nil {
+		return
+	}
+	latest = normalizeVersion(latest)
+	if latest == "" || isUnpublishedTestVersion(latest) {
+		return
+	}
+	if !alreadyHinted && IsUpdateAvailable(current, latest) {
+		_ = writeUpdateHint(n.stderr(), current, latest)
+	}
+	_ = SaveCache(cachePath, &Cache{
+		CheckedAt:     n.now().UTC(),
+		LatestVersion: latest,
+	})
+}
+
+func (n Notifier) fetchLatest(ctx context.Context) (string, error) {
+	if n.FetchLatest != nil {
+		return n.FetchLatest(ctx, n.client())
+	}
+	return FetchLatestTag(ctx, n.client())
+}
+
 func IsUpdateAvailable(current, latest string) bool {
+	if isUnpublishedTestVersion(latest) {
+		return false
+	}
 	cmp, ok := CompareVersions(current, latest)
 	if !ok {
 		return false
 	}
 	return cmp < 0
+}
+
+// unpublishedTestCores are fixture versions used by scripts and tests.
+// Production latest-version paths must never advertise or persist them.
+var unpublishedTestCores = map[string]struct{}{
+	"9.9.9": {},
+}
+
+var unpublishedTestExact = map[string]struct{}{
+	"0.0.0-test": {},
+}
+
+func isUnpublishedTestVersion(version string) bool {
+	version = strings.ToLower(strings.TrimSpace(version))
+	version = strings.TrimPrefix(version, "v")
+	if version == "" {
+		return false
+	}
+	if _, ok := unpublishedTestExact[version]; ok {
+		return true
+	}
+	core := version
+	if cut := strings.IndexAny(core, "+-"); cut >= 0 {
+		core = core[:cut]
+	}
+	_, ok := unpublishedTestCores[core]
+	return ok
+}
+
+// IsUnpublishedTestVersion reports whether version is a documented test
+// sentinel (9.9.9 or 0.0.0-test) rather than a publishable latest.
+func IsUnpublishedTestVersion(version string) bool {
+	return isUnpublishedTestVersion(version)
 }
 
 func CompareVersions(current, latest string) (int, bool) {
@@ -631,8 +679,14 @@ func ParseChecksums(data []byte) (map[string]string, error) {
 	return checksums, nil
 }
 
+var latestReleaseAPIURL = defaultLatestReleaseAPIURL
+
+func defaultLatestReleaseAPIURL() string {
+	return fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", RepoSlug)
+}
+
 func FetchLatestTag(ctx context.Context, client *http.Client) (string, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", RepoSlug)
+	url := latestReleaseAPIURL()
 	var release struct {
 		TagName string `json:"tag_name"`
 	}
@@ -641,6 +695,9 @@ func FetchLatestTag(ctx context.Context, client *http.Client) (string, error) {
 	}
 	if strings.TrimSpace(release.TagName) == "" {
 		return "", errors.New("latest release missing tag_name")
+	}
+	if isUnpublishedTestVersion(release.TagName) {
+		return "", fmt.Errorf("latest release tag %q is an unpublished test version", release.TagName)
 	}
 	return release.TagName, nil
 }
