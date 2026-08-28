@@ -41,7 +41,9 @@ config=${AMQ_BRIDGE_ENQUEUE_CONFIG:-}
 [[ -e "$config" ]] || refuse "AMQ_BRIDGE_ENQUEUE_CONFIG not found: $config"
 [[ -f "$config" ]] || refuse "AMQ_BRIDGE_ENQUEUE_CONFIG must be a regular file: $config"
 
-config_mode=$(stat -f '%OLp' "$config" 2>/dev/null || stat -c '%a' "$config")
+# Prefer GNU `stat -c '%a'`. BSD-first `stat -f` is `--file-system` on GNU
+# coreutils and dumps filesystem info into the compared mode string.
+config_mode=$(stat -c '%a' "$config" 2>/dev/null || stat -f '%OLp' "$config")
 [[ "$config_mode" == "600" ]] \
   || refuse "AMQ_BRIDGE_ENQUEUE_CONFIG mode is $config_mode, want 600"
 

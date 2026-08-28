@@ -101,7 +101,16 @@ ENQUEUE_CONFIG="$symlink_config" run_refused "symlink config" --dest-alias grok/
 loose_config="$tmp_dir/loose-config.json"
 cp "$config" "$loose_config"
 chmod 0644 "$loose_config"
-ENQUEUE_CONFIG="$loose_config" run_refused "mode-0644 config" --dest-alias grok/claude
+loose_out=$(AMQ_BRIDGE_ENQUEUE_CONFIG="$loose_config" PATH="$tmp_dir:$PATH" \
+  "$wrapper" --dest-alias grok/claude <<<"$(make_message)" 2>&1) && status=0 || status=$?
+[[ "$status" -ne 0 ]] || fail "mode-0644 config: expected refusal"
+if [[ "$loose_out" == *"$body_marker"* ]]; then
+  fail "mode-0644 config: refusal printed the message body"
+fi
+# Named check: reject with a numeric mode, not a GNU `stat -f` filesystem dump.
+printf '%s\n' "$loose_out" | grep -Fq 'AMQ_BRIDGE_ENQUEUE_CONFIG mode is 644, want 600' \
+  || fail "mode-0644 config: expected numeric mode error, got: $loose_out"
+printf 'ok: mode-0644 config rejected\n'
 
 run_refused "extra positional argument" --dest-alias grok/claude extra
 run_refused "wrong flag name" --to grok/claude
@@ -121,12 +130,17 @@ if [[ "$(count_spool)" -ne "$before_count" ]]; then
   fail "a refused call wrote a spool file"
 fi
 
-# PATH resolution: amq-bridge found via PATH.
+# Named check: a real mode-600 config must pass (GNU `stat -c '%a'`, not a
+# BSD-first `stat -f` filesystem dump). PATH resolution: amq-bridge via PATH.
 out=$(AMQ_BRIDGE_ENQUEUE_CONFIG="$config" PATH="$tmp_dir:$PATH" \
-  "$wrapper" --dest-alias grok/claude <<<"$(make_message)")
+  "$wrapper" --dest-alias grok/claude <<<"$(make_message)" 2>&1) && status=0 || status=$?
+if [[ "$status" -ne 0 ]]; then
+  fail "mode-600 config: expected accept, got exit $status (output: $out)"
+fi
 [[ "$out" == "$spool_dir"/*.md ]] || fail "PATH resolution: unexpected output: $out"
 [[ -f "$out" ]] || fail "PATH resolution: spool file missing: $out"
 grep -Fq "$body_marker" "$out" || fail "PATH resolution: spool file missing body"
+printf 'ok: mode-600 config accepted\n'
 dest_sidecar="${out%.md}.dest"
 [[ -f "$dest_sidecar" ]] || fail "PATH resolution: missing .dest sidecar"
 [[ "$(cat "$dest_sidecar")" == "grok/claude" ]] || fail "PATH resolution: wrong .dest sidecar content"
