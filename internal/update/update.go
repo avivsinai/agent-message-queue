@@ -861,7 +861,7 @@ func ClassifyInstallAgainstPrefixes(resolvedPath string, homebrewPrefixes []stri
 		return InstallDirect
 	}
 	rawPath := filepath.Clean(resolvedPath)
-	path := canonicalPath(rawPath)
+	path := CanonicalPath(rawPath)
 	for _, homebrewPrefix := range homebrewPrefixes {
 		if homebrewPrefix == "" {
 			continue
@@ -876,7 +876,7 @@ func ClassifyInstallAgainstPrefixes(resolvedPath string, homebrewPrefixes []stri
 		}
 	}
 	if appsDir := scoopAppsDir(); appsDir != "" {
-		if pathWithinPrefix(path, canonicalPath(appsDir)) {
+		if pathWithinPrefix(path, CanonicalPath(appsDir)) {
 			return InstallScoop
 		}
 	}
@@ -884,7 +884,7 @@ func ClassifyInstallAgainstPrefixes(resolvedPath string, homebrewPrefixes []stri
 }
 
 func canonicalPrefix(prefix string) string {
-	return canonicalPath(prefix)
+	return CanonicalPath(prefix)
 }
 
 func isSymlinkToCellar(path, cellar string) bool {
@@ -896,7 +896,9 @@ func isSymlinkToCellar(path, cellar string) bool {
 	return err == nil && pathWithinPrefix(filepath.Clean(resolved), cellar)
 }
 
-func canonicalPath(path string) string {
+// CanonicalPath resolves the existing portion of path and preserves any
+// non-existent suffix below it.
+func CanonicalPath(path string) string {
 	path = filepath.Clean(path)
 	if abs, err := filepath.Abs(path); err == nil {
 		path = abs

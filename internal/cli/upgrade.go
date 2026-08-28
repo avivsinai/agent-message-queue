@@ -501,7 +501,7 @@ func matchingHomebrewManager(candidate, rawPath string, installations []homebrew
 			if path == "" {
 				continue
 			}
-			canonical := canonicalExistingPath(path)
+			canonical := update.CanonicalPath(path)
 			if pathWithinDirectory(canonical, cellar) ||
 				(pathWithinDirectory(filepath.Clean(path), filepath.Join(prefix, "bin")) && isSymlinkToHomebrewCellar(path, cellar)) {
 				if installation.executable != "" {
@@ -603,31 +603,7 @@ func detectHomebrewInstallations() []homebrewInstallation {
 }
 
 func canonicalHomebrewPrefix(prefix string) string {
-	return canonicalExistingPath(cleanHomebrewPrefix(prefix))
-}
-
-func canonicalExistingPath(path string) string {
-	path = filepath.Clean(path)
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	current := path
-	suffix := make([]string, 0, 4)
-	for {
-		if resolved, err := filepath.EvalSymlinks(current); err == nil {
-			resolved = filepath.Clean(resolved)
-			for index := len(suffix) - 1; index >= 0; index-- {
-				resolved = filepath.Join(resolved, suffix[index])
-			}
-			return filepath.Clean(resolved)
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return path
-		}
-		suffix = append(suffix, filepath.Base(current))
-		current = parent
-	}
+	return update.CanonicalPath(cleanHomebrewPrefix(prefix))
 }
 
 func isSymlinkToHomebrewCellar(path, cellar string) bool {
@@ -678,7 +654,7 @@ func selectUpgradeDestinationWithRoots(path, resolved string, writable func(stri
 
 func refusePackageManagedDestination(path string, homebrewPrefixes []string, scoopApps string) error {
 	path = filepath.Clean(path)
-	canonical := canonicalExistingPath(path)
+	canonical := update.CanonicalPath(path)
 	for _, prefix := range homebrewPrefixes {
 		prefix = canonicalHomebrewPrefix(prefix)
 		if prefix == "" {
@@ -715,21 +691,21 @@ func refusePackageManagedDestination(path string, homebrewPrefixes []string, sco
 			}
 		}
 	}
-	if scoopApps != "" && pathWithinDirectory(canonical, canonicalExistingPath(scoopApps)) {
+	if scoopApps != "" && pathWithinDirectory(canonical, update.CanonicalPath(scoopApps)) {
 		return fmt.Errorf("amq is installed via Scoop; run scoop update amq")
 	}
 	return nil
 }
 
 func isUnderProtectedRoot(path string, homebrewPrefixes []string, scoopApps string) bool {
-	canonical := canonicalExistingPath(path)
+	canonical := update.CanonicalPath(path)
 	for _, prefix := range homebrewPrefixes {
 		prefix = canonicalHomebrewPrefix(prefix)
 		if prefix != "" && pathWithinDirectory(canonical, filepath.Join(prefix, "Cellar")) {
 			return true
 		}
 	}
-	return scoopApps != "" && pathWithinDirectory(canonical, canonicalExistingPath(scoopApps))
+	return scoopApps != "" && pathWithinDirectory(canonical, update.CanonicalPath(scoopApps))
 }
 
 func detectHomebrewPrefix() string {
@@ -784,7 +760,7 @@ func homebrewOwnsUpgradePath(prefix, path string) bool {
 	if path == "" {
 		return false
 	}
-	path = canonicalExistingPath(path)
+	path = update.CanonicalPath(path)
 	prefix = canonicalHomebrewPrefix(prefix)
 	return pathWithinDirectory(path, filepath.Join(prefix, "bin")) ||
 		pathWithinDirectory(path, filepath.Join(prefix, "Cellar"))
