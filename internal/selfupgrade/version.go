@@ -16,6 +16,11 @@ func VersionStrictlyNewer(incumbent, candidate string) bool {
 	if !ok {
 		return false
 	}
+	if len(current.prerelease) > 0 || len(next.prerelease) > 0 {
+		// Git-describe suffixes are build snapshots, not ordered SemVer
+		// prereleases. Require a strictly newer core whenever either exists.
+		return compareSemanticCore(current, next) < 0
+	}
 	return compareSemanticVersion(current, next) < 0
 }
 
@@ -91,21 +96,8 @@ func numericIdentifier(raw string) bool {
 }
 
 func compareSemanticVersion(first, second semanticVersion) int {
-	for index := range first.core {
-		left := first.core[index]
-		right := second.core[index]
-		if len(left) != len(right) {
-			if len(left) < len(right) {
-				return -1
-			}
-			return 1
-		}
-		if left < right {
-			return -1
-		}
-		if left > right {
-			return 1
-		}
+	if core := compareSemanticCore(first, second); core != 0 {
+		return core
 	}
 	if len(first.prerelease) == 0 && len(second.prerelease) == 0 {
 		return 0
@@ -151,6 +143,26 @@ func compareSemanticVersion(first, second semanticVersion) int {
 	}
 	if len(first.prerelease) > len(second.prerelease) {
 		return 1
+	}
+	return 0
+}
+
+func compareSemanticCore(first, second semanticVersion) int {
+	for index := range first.core {
+		left := first.core[index]
+		right := second.core[index]
+		if len(left) != len(right) {
+			if len(left) < len(right) {
+				return -1
+			}
+			return 1
+		}
+		if left < right {
+			return -1
+		}
+		if left > right {
+			return 1
+		}
 	}
 	return 0
 }

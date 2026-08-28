@@ -3,12 +3,12 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -17,11 +17,10 @@ import (
 )
 
 const (
-	envWakeNoSelfUpgrade          = "AMQ_WAKE_NO_SELF_UPGRADE"
-	wakeSelfUpgradeFileName       = ".wake.selfupgrade"
-	wakeSelfUpgradeSchemaV1       = 1
-	wakeSelfUpgradeVersionTimeout = 5 * time.Second
-	wakeSelfUpgradeRefusalLimit   = selfupgrade.RefusalLimit
+	envWakeNoSelfUpgrade        = "AMQ_WAKE_NO_SELF_UPGRADE"
+	wakeSelfUpgradeFileName     = ".wake.selfupgrade"
+	wakeSelfUpgradeSchemaV1     = 1
+	wakeSelfUpgradeRefusalLimit = selfupgrade.RefusalLimit
 
 	wakeSelfUpgradeActionDisabled         = "disabled"
 	wakeSelfUpgradeActionIneligible       = "ineligible"
@@ -182,15 +181,15 @@ type wakeSelfUpgradeDiagnosticDecision struct {
 }
 
 var (
-	wakeSelfUpgradeLookPath       = exec.LookPath
-	wakeSelfUpgradeEvalSymlinks   = filepath.EvalSymlinks
-	wakeSelfUpgradeLstat          = os.Lstat
-	wakeSelfUpgradeStat           = os.Stat
-	wakeSelfUpgradeRunVersion     = runWakeSelfUpgradeVersion
-	wakeSelfUpgradeNow            = time.Now
-	wakeSelfUpgradeLiveDifference = inspectWakeSelfUpgradeLiveDifference
-	wakeSelfUpgradeReadPublished  = readWakeRestartRecordAt
-	wakeSelfUpgradeInspectLockAt  = inspectWakeLockAt
+	wakeSelfUpgradeLookPath         = exec.LookPath
+	wakeSelfUpgradeEvalSymlinks     = filepath.EvalSymlinks
+	wakeSelfUpgradeLstat            = os.Lstat
+	wakeSelfUpgradeStat             = os.Stat
+	wakeSelfUpgradeCaptureCandidate = selfupgrade.CaptureImageEvidenceWithEmbeddedVersion
+	wakeSelfUpgradeNow              = time.Now
+	wakeSelfUpgradeLiveDifference   = inspectWakeSelfUpgradeLiveDifference
+	wakeSelfUpgradeReadPublished    = readWakeRestartRecordAt
+	wakeSelfUpgradeInspectLockAt    = inspectWakeLockAt
 )
 
 func coopWakeLaunchLocator(argv0 string) string {
@@ -415,23 +414,6 @@ func inspectWakeSelfUpgradeLiveDifference(
 	}
 }
 
-func runWakeSelfUpgradeVersion(path string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), wakeSelfUpgradeVersionTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "--version").Output()
-	if err != nil {
-		if ctx.Err() != nil {
-			return "", fmt.Errorf("candidate version probe timed out: %w", ctx.Err())
-		}
-		return "", fmt.Errorf("candidate version probe: %w", err)
-	}
-	version := strings.TrimSpace(string(out))
-	if version == "" || strings.ContainsAny(version, "\r\n\t ") {
-		return "", fmt.Errorf("candidate version probe returned a malformed version")
-	}
-	return version, nil
-}
-
 // maintainWakeSelfUpgrade performs one maintenance-tick decision. It never
 // binds, notifies, preflights, or execs: those remain record-owned restart
 // control-plane responsibilities.
@@ -445,6 +427,11 @@ func maintainWakeSelfUpgrade(
 	}
 	decision := wakeSelfUpgradeDecision{Action: wakeSelfUpgradeActionDisabled, Reason: state.Reason}
 	if !state.Enabled {
+		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
+	}
+	if !selfupgrade.ExecSupported() {
+		decision.Action = wakeSelfUpgradeActionIneligible
+		decision.Reason = fmt.Sprintf("self-upgrade is unsupported on %s", runtime.GOOS)
 		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
 	}
 	if !state.Eligible {
@@ -475,26 +462,7 @@ func maintainWakeSelfUpgrade(
 	if sameWakeSelfUpgradeProbe(state.lastProbe, probe) {
 		return wakeSelfUpgradeDecision{Action: wakeSelfUpgradeActionUnchanged}, nil
 	}
-	version, err := wakeSelfUpgradeRunVersion(probe.Path)
-	if err != nil {
-		decision.Action = wakeSelfUpgradeActionNoCandidate
-		decision.Reason = err.Error()
-		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
-	}
-	candidate := &wakeSelfUpgradeCandidate{Identity: probe.Identity, Version: version}
-	decision.Candidate = candidate
-	if !wakeSelfUpgradeVersionStrictlyNewer(inspection.Lock.ImageVersion, version) {
-		state.lastProbe = probe
-		decision.Action = wakeSelfUpgradeActionPrefilterRefused
-		decision.Reason = wakeRestartReasonWithRemedy(
-			"candidate version is not strictly newer than the running wake",
-			inspection.Root,
-			inspection.Agent,
-		)
-		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
-	}
-
-	evidence, err := captureWakeImageEvidence(probe.Path, version)
+	evidence, err := wakeSelfUpgradeCaptureCandidate(probe.Path)
 	if err != nil {
 		decision.Action = wakeSelfUpgradeActionNoCandidate
 		decision.Reason = wakeRestartReasonWithRemedy(
@@ -504,7 +472,8 @@ func maintainWakeSelfUpgrade(
 		)
 		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
 	}
-	decision.Candidate = wakeSelfUpgradeCandidateFromEvidence(evidence)
+	candidate := wakeSelfUpgradeCandidateFromEvidence(evidence)
+	decision.Candidate = candidate
 	if !wakeSelfUpgradeProbeMatchesEvidence(probe, evidence) {
 		state.lastProbe = probe
 		decision.Action = wakeSelfUpgradeActionRefused
@@ -515,6 +484,17 @@ func maintainWakeSelfUpgrade(
 		)
 		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
 	}
+	if !wakeSelfUpgradeVersionStrictlyNewer(inspection.Lock.ImageVersion, candidate.Version) {
+		state.lastProbe = probe
+		decision.Action = wakeSelfUpgradeActionPrefilterRefused
+		decision.Reason = wakeRestartReasonWithRemedy(
+			"candidate version is not strictly newer than the running wake",
+			inspection.Root,
+			inspection.Agent,
+		)
+		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
+	}
+
 	different, comparisonErr := wakeSelfUpgradeLiveDifference(inspection, probe)
 	if comparisonErr != nil {
 		// Inconclusive identity is transient (Homebrew Cellar unlink, proc_pidpath

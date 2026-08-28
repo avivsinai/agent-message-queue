@@ -579,11 +579,33 @@ document.
 
 A resume-eligible wake started by `coop exec` follows the stable AMQ launch
 symlink. When an installer atomically points that locator at a strictly newer
-self-reported semantic version, the wake waits for a fully quiescent delivery
-boundary and replaces its running image without changing PID, terminal
-ownership, or unread work. An inconclusive live-image comparison or a
-hash-time identity change defers and retries on the next maintenance tick; it
+image whose Go build metadata records a `-X main.version` linker assignment
+that supplies a semantic version, the wake waits for a fully quiescent
+delivery boundary and replaces its running image without changing PID,
+terminal ownership, or unread work. The last assignment wins over an
+allowlisted flag set. The parser accepts only the argument-free `-s` and `-w`
+flags plus the separate `-X main.version=...` and `-X=main.version=...` forms;
+any unrecognized linker option defers. The version is candidate-controlled
+metadata, not a release manifest. Excluding `Main.Version` is a candidate-side
+rule: the incumbent may still use its `Main.Version` fallback, including for
+`dev` builds, and an absent or unparsable incumbent version disables
+self-upgrade. Versioned `go install` and `-trimpath` builds are unsupported
+candidates; `-trimpath` omits the recorded `-ldflags` metadata required for
+discovery. The candidate is not executed to discover its version; an image
+whose build-info region cannot be read defers, while readable metadata does not
+prove that the rest of the executable is intact. Universal or fat Mach-O input
+is read from its first slice; AMQ release output is single-slice, and
+supporting other slices is a non-goal. An inconclusive live-image comparison or
+a hash-time identity change defers and retries on the next maintenance tick; it
 does not consume refusal memory.
+
+Two child executions remain on the wake side: a post-bind `--version`
+preflight and a launch-contract preflight. Both have a bounded process-group lifetime
+and run only after the image is bound and verified; neither discovers a
+version from an untrusted candidate. A descendant that leaves the process group
+(setsid or setpgid) can escape it, which remains an explicit limitation of
+bounded probe cleanup.
+
 Darwin treats a still-running, identity-confirmed wake whose recorded path is
 gone (`proc_pidpath` ENOENT or ESRCH after an installer unlink) as a
 conclusive deleted image, so Homebrew Cellar replacement can exec in place.
@@ -599,6 +621,11 @@ disabled with `amq wake --no-self-upgrade` or `AMQ_WAKE_NO_SELF_UPGRADE=1`;
 schema-2 wake/doctor JSON reports the latest decision under `self_upgrade`.
 The separate `amq-keepalive` supervisor has its own direct-image self-upgrade
 contract documented in `docs/amq-keepalive.md`.
+
+AMQ does not write the executable or retain the previous image, so neither wake
+self-upgrade path has an in-process rollback. Recovery from a bad installed
+image is an operator or package-manager action, such as reinstalling or
+selecting a known-good package version.
 
 ### 9.2 `.wake.log` retention
 

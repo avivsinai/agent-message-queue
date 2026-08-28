@@ -14,14 +14,14 @@ func TestWakeSelfUpgradeStartupEligibilityRejectsUnsafeWakeShapes(t *testing.T) 
 	locator, running := wakeSelfUpgradeStableLocatorForEligibilityTest(t)
 	owner := fixture.owner
 
-	previousVersion := wakeSelfUpgradeRunVersion
+	previousCandidate := wakeSelfUpgradeCaptureCandidate
 	previousLiveDifference := wakeSelfUpgradeLiveDifference
 	previousBind := wakeRestartBind
-	versionCalls := 0
+	captureCalls := 0
 	bindCalls := 0
-	wakeSelfUpgradeRunVersion = func(string) (string, error) {
-		versionCalls++
-		return "999.0.0", nil
+	wakeSelfUpgradeCaptureCandidate = func(path string) (wakeImageEvidenceV1, error) {
+		captureCalls++
+		return captureWakeImageEvidence(path, "999.0.0")
 	}
 	wakeSelfUpgradeLiveDifference = func(wakeLockInspection, wakeSelfUpgradeProbe) (bool, error) {
 		return false, nil
@@ -31,7 +31,7 @@ func TestWakeSelfUpgradeStartupEligibilityRejectsUnsafeWakeShapes(t *testing.T) 
 		return nil, os.ErrPermission
 	}
 	t.Cleanup(func() {
-		wakeSelfUpgradeRunVersion = previousVersion
+		wakeSelfUpgradeCaptureCandidate = previousCandidate
 		wakeSelfUpgradeLiveDifference = previousLiveDifference
 		wakeRestartBind = previousBind
 	})
@@ -110,7 +110,7 @@ func TestWakeSelfUpgradeStartupEligibilityRejectsUnsafeWakeShapes(t *testing.T) 
 				t.Fatalf("startup state = %#v, want enabled=%v eligible=%v", state, wantEnabled, wantEligible)
 			}
 
-			versionBefore, bindBefore := versionCalls, bindCalls
+			captureBefore, bindBefore := captureCalls, bindCalls
 			decision, err := maintainWakeSelfUpgrade(&state, fixture.agentDir, fixture.lock)
 			if err != nil {
 				t.Fatal(err)
@@ -124,8 +124,8 @@ func TestWakeSelfUpgradeStartupEligibilityRejectsUnsafeWakeShapes(t *testing.T) 
 			if decision.Action != wantAction {
 				t.Fatalf("startup decision = %#v, want action %q", decision, wantAction)
 			}
-			if versionCalls != versionBefore || bindCalls != bindBefore {
-				t.Fatalf("unsafe shape performed version/bind work: versions=%d binds=%d", versionCalls-versionBefore, bindCalls-bindBefore)
+			if captureCalls != captureBefore || bindCalls != bindBefore {
+				t.Fatalf("unsafe shape performed candidate-capture/bind work: captures=%d binds=%d", captureCalls-captureBefore, bindCalls-bindBefore)
 			}
 			if _, err := os.Lstat(filepath.Join(fixture.agentDir.path, wakeRestartFileName)); !os.IsNotExist(err) {
 				t.Fatalf("startup shape published a restart record: %v (decision=%#v)", err, decision)

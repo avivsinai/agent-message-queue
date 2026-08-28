@@ -53,9 +53,11 @@ func selfUpgradeStateForCandidate(t *testing.T, target string) wakeSelfUpgradeSt
 
 func stubWakeSelfUpgradeVersion(t *testing.T, version string) {
 	t.Helper()
-	previous := wakeSelfUpgradeRunVersion
-	wakeSelfUpgradeRunVersion = func(string) (string, error) { return version, nil }
-	t.Cleanup(func() { wakeSelfUpgradeRunVersion = previous })
+	previous := wakeSelfUpgradeCaptureCandidate
+	wakeSelfUpgradeCaptureCandidate = func(path string) (wakeImageEvidenceV1, error) {
+		return captureWakeImageEvidence(path, version)
+	}
+	t.Cleanup(func() { wakeSelfUpgradeCaptureCandidate = previous })
 }
 
 func TestMaintainWakeSelfUpgradePrefilterRejectsEqualAndDowngrade(t *testing.T) {
@@ -298,16 +300,16 @@ func TestMaintainWakeSelfUpgradeRetriesTransientVersionFailure(t *testing.T) {
 	candidate := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
 	state := selfUpgradeStateForCandidate(t, candidate)
 	initialProbe := state.lastProbe
-	previous := wakeSelfUpgradeRunVersion
+	previous := wakeSelfUpgradeCaptureCandidate
 	attempts := 0
-	wakeSelfUpgradeRunVersion = func(string) (string, error) {
+	wakeSelfUpgradeCaptureCandidate = func(path string) (wakeImageEvidenceV1, error) {
 		attempts++
 		if attempts == 1 {
-			return "", os.ErrNotExist
+			return wakeImageEvidenceV1{}, os.ErrNotExist
 		}
-		return fixture.lock.Lock.ImageVersion, nil
+		return captureWakeImageEvidence(path, fixture.lock.Lock.ImageVersion)
 	}
-	t.Cleanup(func() { wakeSelfUpgradeRunVersion = previous })
+	t.Cleanup(func() { wakeSelfUpgradeCaptureCandidate = previous })
 
 	decision, err := maintainWakeSelfUpgrade(&state, fixture.agentDir, fixture.lock)
 	if err != nil || decision.Action != wakeSelfUpgradeActionNoCandidate {

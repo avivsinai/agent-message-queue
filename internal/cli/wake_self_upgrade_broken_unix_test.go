@@ -113,11 +113,13 @@ import (
 	"os"
 )
 
+var version = "dev"
+
 func main() {
 	args := os.Args[1:]
 	if len(args) == 1 && args[0] == "--version" ||
 		len(args) == 2 && args[0] == "--no-update-check" && args[1] == "--version" {
-		fmt.Println("` + wakeSelfUpgradeBrokenCandidateVersion + `")
+		fmt.Println(version)
 		return
 	}
 	for _, arg := range args {
@@ -134,7 +136,16 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", binary, source)
+	cmd := exec.CommandContext(
+		ctx,
+		"go",
+		"build",
+		"-ldflags",
+		"-X main.version="+wakeSelfUpgradeBrokenCandidateVersion,
+		"-o",
+		binary,
+		source,
+	)
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("build broken candidate timed out: %v\n%s", ctx.Err(), output)
