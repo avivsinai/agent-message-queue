@@ -1000,6 +1000,46 @@ func TestRunEnvSessionRejectsAMRootOutsideLegacyPin(t *testing.T) {
 	}
 }
 
+func TestRunEnvIncompleteLegacyPinNamesRepinRemedy(t *testing.T) {
+	repo := t.TempDir()
+	nested := filepath.Join(repo, "nested")
+	baseRoot := filepath.Join(repo, defaultCoopRoot)
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o700); err != nil {
+		t.Fatalf("mkdir git marker: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(baseRoot, "current"), 0o700); err != nil {
+		t.Fatalf("mkdir session root: %v", err)
+	}
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatalf("mkdir nested cwd: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".amqrc"), []byte(`{"root": ".agent-mail"}`), 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+
+	t.Chdir(nested)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(envRoot, "")
+	t.Setenv(envBaseRoot, baseRoot)
+	t.Setenv(envSession, "current")
+	t.Setenv(envGlobalRoot, "")
+	setOptionalEnv(t, envRootID, "", false)
+	setOptionalEnv(t, envBaseRootID, "", false)
+	resetAmqrcCache()
+	t.Cleanup(resetAmqrcCache)
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runEnv([]string{"--me", "codex", "--json"})
+	})
+	if err == nil || GetExitCode(err) != ExitContextMismatch ||
+		!strings.Contains(err.Error(), "amq env --session <name>") {
+		t.Fatalf("runEnv error = %v, want exit-5 repin remedy", err)
+	}
+	if stdout != "" {
+		t.Fatalf("runEnv emitted a replacement context after mismatch: %q", stdout)
+	}
+}
+
 func TestRunEnvNonExportSessionEmitsFullContext(t *testing.T) {
 	root := t.TempDir()
 	rcContent := `{"root": ".agent-mail"}`
