@@ -187,8 +187,10 @@ brew upgrade amq
 evidenced or executable-derived Homebrew prefix and delegates to the matched
 Homebrew executable instead of overwriting the Cellar; pass `amq upgrade -y`
 to run the delegate without an AMQ prompt. The package manager may still
-prompt. Scoop installs on Windows delegate to the matched `scoop` executable
-in the same way.
+prompt. Scoop installs on Windows are scoped as user (`$SCOOP` or the default
+`%USERPROFILE%\scoop`) or global (`$SCOOP_GLOBAL` or `C:\ProgramData\scoop`);
+the matched `scoop` executable receives `scoop update amq` for user scope or
+`scoop update -g amq` for global scope.
 
 Retire live wakes started by the previous Cellar binary first. If a leftover
 lock's image directory is gone, `wake check` reports `binary_dir_gone`;
@@ -207,8 +209,9 @@ amq upgrade
 ```
 
 Upgrade the companion binaries (`amq-keepalive`, `amq-bridge`, `amq-acp`)
-that sit next to a direct-install `amq` or in `~/.local/bin` from the same
-release tag, with checksum verification:
+that sit in the raw or resolved executable directory of a direct-install
+`amq`, or in `~/.local/bin`, from the same release tag, with checksum
+verification:
 
 ```bash
 amq upgrade --all
@@ -230,7 +233,9 @@ restart the service unit, for example
 `systemctl --user restart amq-keepalive.service`. Companions are
 direct-installed only; the
 Homebrew formula and Scoop manifest ship `amq` itself, so `--all` under a
-package-managed install is a no-op with an explanatory line.
+package-managed install is a no-op with an explanatory line. Companion links
+are revalidated by their primary path; a secondary same-name alias repointed
+during download is not detected.
 
 `AMQ_CACHE_DIR` overrides the update cache location used by `amq upgrade` and
 the background update notifier. When unset, the platform cache
@@ -239,9 +244,11 @@ other Unix systems, and the user's Local AppData cache on Windows) is used.
 `internal/update.DefaultCachePath` is the sole authority for the platform
 update-cache path. For the direct-upgrade cache-writing path, a set override
 must resolve to an absolute path; AMQ fails before replacement rather than
-silently falling back to the platform cache. The version cache is written
-only after the core `amq` replacement succeeds; a later companion failure
-still leaves that cache truthful.
+silently falling back to the platform cache. The version cache is refreshed
+after an authoritative direct check confirms the latest version (already
+current, or after a successful immediate replacement). A later companion
+failure does not change that result. A scheduled replacement is reflected when
+the next successful check refreshes the cache (best-effort).
 
 On Windows, `amq upgrade --all` prints a skip line for companions because
 companion binaries are not published for Windows, then continues with the

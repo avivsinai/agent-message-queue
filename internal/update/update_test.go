@@ -262,6 +262,54 @@ func TestClassifyInstallScoop(t *testing.T) {
 	}
 }
 
+func TestClassifyInstallScoopScopesWithInjectedRoots(t *testing.T) {
+	userRoot := filepath.Join(t.TempDir(), "user", "apps")
+	globalRoot := filepath.Join(t.TempDir(), "global", "apps")
+	if err := os.MkdirAll(userRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(globalRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roots := []ScoopInstallRoot{
+		{Path: userRoot, Scope: ScoopScopeUser},
+		{Path: globalRoot, Scope: ScoopScopeGlobal},
+	}
+	cases := []struct {
+		name string
+		path string
+		want InstallKind
+	}{
+		{"user", filepath.Join(userRoot, "amq", "current", "amq.exe"), InstallScoop},
+		{"global", filepath.Join(globalRoot, "amq", "current", "amq.exe"), InstallScoopGlobal},
+		{"unknown scoop-shaped", filepath.Join(t.TempDir(), "scoop", "apps", "amq", "current", "amq.exe"), InstallScoopUnknown},
+		{"outside", filepath.Join(t.TempDir(), "bin", "amq.exe"), InstallDirect},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyInstallAgainstPrefixesAndScoopRoots(tc.path, nil, roots, true)
+			if got != tc.want {
+				t.Fatalf("classifyInstall(%q)=%v want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestScoopInstallRootsForWindowsUsesConfiguredScopes(t *testing.T) {
+	userRoot := filepath.Join(t.TempDir(), "user-scoop")
+	globalRoot := filepath.Join(t.TempDir(), "global-scoop")
+	roots := scoopInstallRootsFor("windows", userRoot, globalRoot, t.TempDir())
+	if len(roots) != 2 {
+		t.Fatalf("Scoop roots = %#v, want user and global roots", roots)
+	}
+	if roots[0].Path != filepath.Join(userRoot, "apps") || roots[0].Scope != ScoopScopeUser {
+		t.Fatalf("user Scoop root = %#v", roots[0])
+	}
+	if roots[1].Path != filepath.Join(globalRoot, "apps") || roots[1].Scope != ScoopScopeGlobal {
+		t.Fatalf("global Scoop root = %#v", roots[1])
+	}
+}
+
 func TestClassifyInstallLinuxbrew(t *testing.T) {
 	for _, prefix := range []string{"/home/linuxbrew/.linuxbrew", "/home/u/.linuxbrew"} {
 		cellarPath := filepath.Join(prefix, "Cellar", "amq", "0.73.0", "bin", "amq")

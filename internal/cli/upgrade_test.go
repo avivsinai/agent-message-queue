@@ -946,7 +946,7 @@ func TestRunUpgradeScheduledSkipsVersionCache(t *testing.T) {
 	if cacheWrites != 0 {
 		t.Fatalf("scheduled replacement wrote version cache %d times", cacheWrites)
 	}
-	if !strings.Contains(stdout, "replacement scheduled; version cache updates on next run") {
+	if !strings.Contains(stdout, "replacement scheduled; version cache is refreshed on the next successful check (best-effort)") {
 		t.Fatalf("scheduled output missing cache timing: %s", stdout)
 	}
 }
@@ -1609,5 +1609,99 @@ func TestRunUpgradeAllReplacesSymlinkedCompanionAtTarget(t *testing.T) {
 	// The link still resolves to the target (structure preserved).
 	if resolved, err := filepath.EvalSymlinks(keepaliveLink); err != nil || resolved != canonicalTarget {
 		t.Fatalf("link %q no longer resolves to %q (got %q, err=%v)", keepaliveLink, canonicalTarget, resolved, err)
+	}
+}
+
+func TestDelegateUpgradeCommandWithManagerScoopGlobal(t *testing.T) {
+	commands, remedy := delegateUpgradeCommandWithManager(update.InstallScoopGlobal, "scoop")
+	if len(commands) != 1 || strings.Join(commands[0], " ") != "scoop update -g amq" {
+		t.Fatalf("global Scoop commands = %#v, want [scoop update -g amq]", commands)
+	}
+	if !strings.Contains(remedy, "Scoop (global scope)") || !strings.Contains(remedy, "scoop update -g amq") {
+		t.Fatalf("global Scoop remedy = %q", remedy)
+	}
+}
+
+func TestRefusePackageManagedDestinationScoopGlobal(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "scoop", "apps")
+	dest := filepath.Join(root, "amq", "current", "amq.exe")
+	err := refusePackageManagedDestinationWithScoopRoots(
+		dest,
+		nil,
+		[]update.ScoopInstallRoot{
+			{Path: root, Scope: update.ScoopScopeUser},
+			{Path: root, Scope: update.ScoopScopeGlobal},
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "Scoop (global scope)") || !strings.Contains(err.Error(), "scoop update -g amq") {
+		t.Fatalf("global Scoop guard error = %v", err)
+	}
+}
+
+func TestCompanionSearchDirsIncludesRawAndResolvedDirectories(t *testing.T) {
+	rawDir := t.TempDir()
+	resolvedDir := t.TempDir()
+	aliasParent := t.TempDir()
+	rawAlias := filepath.Join(aliasParent, "raw")
+	if err := os.Symlink(rawDir, rawAlias); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	oldHome := homeDirForUpgrade
+	homeDirForUpgrade = func() (string, error) { return home, nil }
+	t.Cleanup(func() { homeDirForUpgrade = oldHome })
+
+	dirs, err := companionSearchDirsForUpgrade(
+		filepath.Join(rawAlias, "amq"),
+		filepath.Join(resolvedDir, "amq"),
+	)
+	if err != nil {
+		t.Fatalf("companionSearchDirsForUpgrade: %v", err)
+	}
+	want := []string{rawAlias, resolvedDir, filepath.Join(home, ".local", "bin")}
+	if len(dirs) != len(want) {
+		t.Fatalf("companion search dirs = %#v, want %#v", dirs, want)
+	}
+	for index := range want {
+		if dirs[index] != want[index] {
+			t.Fatalf("companion search dirs[%d] = %q, want %q", index, dirs[index], want[index])
+		}
+	}
+	seen := make(map[string]struct{}, len(dirs))
+	for _, dir := range dirs {
+		canonical := update.CanonicalPath(dir)
+		if _, ok := seen[canonical]; ok {
+			t.Fatalf("companion search dirs contain canonical duplicate: %#v", dirs)
+		}
+		seen[canonical] = struct{}{}
+	}
+}
+
+func TestUpgradeCompanionsWarnsWhenHomeDirectoryFails(t *testing.T) {
+	oldHome := homeDirForUpgrade
+	homeDirForUpgrade = func() (string, error) { return "", errors.New("home unavailable") }
+	t.Cleanup(func() { homeDirForUpgrade = oldHome })
+	oldCompanions := companionBinariesForUpgrade
+	companionBinariesForUpgrade = nil
+	t.Cleanup(func() { companionBinariesForUpgrade = oldCompanions })
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return upgradeCompanionsWithScoopRoots(
+			context.Background(),
+			nil,
+			"v0.0.0-test",
+			"v0.0.0-test",
+			"",
+			"",
+			nil,
+			nil,
+		)
+	})
+	if err != nil {
+		t.Fatalf("upgradeCompanionsWithScoopRoots: %v", err)
+	}
+	if !strings.Contains(stdout, "warning: cannot resolve user home directory for companion search") ||
+		!strings.Contains(stdout, "home unavailable") {
+		t.Fatalf("home lookup warning missing: %q", stdout)
 	}
 }

@@ -169,7 +169,8 @@ published as `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz`. Homebrew does
 not install it. Install it the same way, then see
 [amq-acp](cmd/amq-acp/README.md).
 
-Once the companions sit next to a direct-install `amq` or in `~/.local/bin`,
+Once the companions sit in the raw or resolved executable directory of a
+direct-install `amq`, or in `~/.local/bin`,
 `amq upgrade --all` plans one verified target per companion, unique across all
 companions, before any companion replacement. It verifies each target's Go
 build identity, uses the same release tag with checksum verification, and
@@ -185,12 +186,18 @@ use `amq-keepalive install-launchd`, and on Linux restart the service unit, for
 example `systemctl --user restart amq-keepalive.service`.
 `amq upgrade` itself detects a Homebrew or Scoop install of `amq` and delegates
 to the matched package-manager executable (`brew update && brew upgrade amq` /
-`scoop update amq`; `-y` runs the delegate without an AMQ prompt, while the
-package manager may still prompt) instead of overwriting it, so companions
-upgrade through `--all` only from a direct `amq` install. The version cache is
-written only after the core `amq` replacement succeeds; a later companion
-failure still leaves that cache truthful. On Windows, `--all` skips companions
-because they are not published there, then continues with the core upgrade.
+`scoop update amq` for user scope / `scoop update -g amq` for global scope;
+`-y` runs the delegate without an AMQ prompt, while the package manager may
+still prompt) instead of overwriting it, so companions upgrade through
+`--all` only from a direct `amq` install. Scoop user scope comes from `$SCOOP`
+or the default `%USERPROFILE%\scoop`; global scope comes from
+`$SCOOP_GLOBAL` or `C:\ProgramData\scoop`. The version cache is refreshed
+after an authoritative direct check confirms the latest version (already
+current, or after a successful immediate replacement). A scheduled replacement
+is refreshed on the next successful check (best-effort). On Windows, `--all`
+skips companions because they are not published there, then continues with the
+core upgrade. Companion links are revalidated by their primary path; a
+secondary same-name alias repointed during download is not detected.
 
 ### Platform capability matrix
 

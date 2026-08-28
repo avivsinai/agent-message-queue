@@ -56,14 +56,46 @@ const (
 	// brew bookkeeping. Companions are never Homebrew-owned.
 	InstallHomebrew
 	// InstallScoop means the resolved path lives under the Scoop apps dir on
-	// Windows; amq upgrade delegates to scoop. Companions are never Scoop-owned.
+	// Windows user scope; amq upgrade delegates to scoop. Companions are never
+	// Scoop-owned.
 	InstallScoop
+	// InstallScoopGlobal means the resolved path lives under Scoop's global apps
+	// dir on Windows; the delegate must include Scoop's global flag.
+	InstallScoopGlobal
+	// InstallScoopUnknown means the path looks like a Scoop apps path but is not
+	// under a configured user or global Scoop root. It must never self-replace.
+	InstallScoopUnknown
 )
 
 // IsPackageManaged reports whether the kind delegates to an external package
 // manager rather than self-replacing.
 func (k InstallKind) IsPackageManaged() bool {
-	return k == InstallHomebrew || k == InstallScoop
+	return k == InstallHomebrew || k.IsScoop()
+}
+
+// IsScoop reports whether the kind came from a Scoop-shaped installation.
+func (k InstallKind) IsScoop() bool {
+	return k == InstallScoop || k == InstallScoopGlobal || k == InstallScoopUnknown
+}
+
+// IsScoopGlobal reports whether the kind is a known global Scoop install.
+func (k InstallKind) IsScoopGlobal() bool {
+	return k == InstallScoopGlobal
+}
+
+// ScoopScope identifies the Scoop installation scope for a configured root.
+type ScoopScope string
+
+const (
+	ScoopScopeUser   ScoopScope = "user"
+	ScoopScopeGlobal ScoopScope = "global"
+)
+
+// ScoopInstallRoot describes one Scoop apps directory and its installation
+// scope. Paths are absolute where the platform can make them absolute.
+type ScoopInstallRoot struct {
+	Path  string
+	Scope ScoopScope
 }
 
 var (
@@ -860,6 +892,20 @@ func ClassifyInstall(resolvedPath, homebrewPrefix string) InstallKind {
 // resolves into that same prefix's Cellar; a regular file there remains an
 // ambiguous direct install for the CLI's final safety guard.
 func ClassifyInstallAgainstPrefixes(resolvedPath string, homebrewPrefixes []string) InstallKind {
+	return classifyInstallAgainstPrefixesAndScoopRoots(
+		resolvedPath,
+		homebrewPrefixes,
+		ScoopInstallRoots(),
+		runtime.GOOS == "windows",
+	)
+}
+
+func classifyInstallAgainstPrefixesAndScoopRoots(
+	resolvedPath string,
+	homebrewPrefixes []string,
+	scoopRoots []ScoopInstallRoot,
+	scoopEnabled bool,
+) InstallKind {
 	if resolvedPath == "" {
 		return InstallDirect
 	}
@@ -878,9 +924,24 @@ func ClassifyInstallAgainstPrefixes(resolvedPath string, homebrewPrefixes []stri
 			return InstallHomebrew
 		}
 	}
-	if appsDir := scoopAppsDir(); appsDir != "" {
-		if pathWithinPrefix(path, CanonicalPath(appsDir)) {
-			return InstallScoop
+	if scoopEnabled {
+		// A global root wins if an operator configures overlapping roots. That
+		// keeps the delegate conservative and preserves the global scope.
+		for _, scope := range []ScoopScope{ScoopScopeGlobal, ScoopScopeUser} {
+			for _, root := range scoopRoots {
+				if root.Scope != scope || root.Path == "" {
+					continue
+				}
+				if pathWithinPrefix(path, CanonicalPath(root.Path)) {
+					if scope == ScoopScopeGlobal {
+						return InstallScoopGlobal
+					}
+					return InstallScoop
+				}
+			}
+		}
+		if isScoopShapedPath(rawPath) {
+			return InstallScoopUnknown
 		}
 	}
 	return InstallDirect
@@ -934,25 +995,84 @@ func pathWithinPrefix(path, prefix string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// scoopAppsDir returns the Scoop apps directory when Scoop is in use, else "".
-// Scoop honors $SCOOP; otherwise it defaults to ~/scoop.
-func scoopAppsDir() string {
+const defaultScoopGlobalRoot = `C:\ProgramData\scoop`
+
+// ScoopInstallRoots returns the configured user and global Scoop apps
+// directories on Windows. Scoop honors $SCOOP and $SCOOP_GLOBAL; the default
+// roots are ~/scoop and C:\ProgramData\scoop.
+func ScoopInstallRoots() []ScoopInstallRoot {
 	if runtime.GOOS != "windows" {
-		return ""
+		return nil
 	}
-	if scoop := strings.TrimSpace(os.Getenv("SCOOP")); scoop != "" {
-		if abs, err := filepath.Abs(scoop); err == nil {
-			return filepath.Join(filepath.Clean(abs), "apps")
+	home, _ := os.UserHomeDir()
+	return scoopInstallRootsFor(
+		runtime.GOOS,
+		strings.TrimSpace(os.Getenv("SCOOP")),
+		strings.TrimSpace(os.Getenv("SCOOP_GLOBAL")),
+		home,
+	)
+}
+
+func scoopInstallRootsFor(goos, scoop, scoopGlobal, home string) []ScoopInstallRoot {
+	if goos != "windows" {
+		return nil
+	}
+	roots := make([]ScoopInstallRoot, 0, 2)
+	seen := make(map[string]struct{}, 2)
+	add := func(root string, scope ScoopScope) {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			return
 		}
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+		apps := filepath.Join(filepath.Clean(root), "apps")
+		key := CanonicalPath(apps)
+		if _, ok := seen[key+"\x00"+string(scope)]; ok {
+			return
+		}
+		seen[key+"\x00"+string(scope)] = struct{}{}
+		roots = append(roots, ScoopInstallRoot{Path: apps, Scope: scope})
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, "scoop", "apps")
+
+	if scoop == "" && home != "" {
+		scoop = filepath.Join(home, "scoop")
+	}
+	if scoopGlobal == "" {
+		scoopGlobal = defaultScoopGlobalRoot
+	}
+	add(scoop, ScoopScopeUser)
+	add(scoopGlobal, ScoopScopeGlobal)
+	return roots
+}
+
+// ScoopAppsDir returns the user-scope Scoop apps directory on Windows. It is
+// empty on other operating systems and remains for callers that need only the
+// historical single-root view.
+func ScoopAppsDir() string {
+	for _, root := range ScoopInstallRoots() {
+		if root.Scope == ScoopScopeUser {
+			return root.Path
+		}
 	}
 	return ""
 }
 
-// ScoopAppsDir returns the active Scoop apps directory on Windows. It is
-// empty on other operating systems and can be used by replacement guards.
-func ScoopAppsDir() string {
-	return scoopAppsDir()
+// IsScoopShapedPath reports whether path contains the conventional Scoop
+// root/apps layout on Windows.
+func IsScoopShapedPath(path string) bool {
+	return runtime.GOOS == "windows" && isScoopShapedPath(path)
+}
+
+func isScoopShapedPath(path string) bool {
+	parts := strings.FieldsFunc(filepath.Clean(path), func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	for index := 0; index+1 < len(parts); index++ {
+		if strings.EqualFold(parts[index], "scoop") && strings.EqualFold(parts[index+1], "apps") {
+			return true
+		}
+	}
+	return false
 }
