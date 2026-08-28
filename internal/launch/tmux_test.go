@@ -138,6 +138,9 @@ func TestTmuxTargetMissingClassifiesExitedServer(t *testing.T) {
 }
 
 func TestTmuxCloseUsesPinnedSocketAfterEnvironmentCleanup(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
 	backend := NewTmuxBackend("tmux")
 	backend.socketName = ""
 	active := true
