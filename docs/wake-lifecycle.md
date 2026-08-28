@@ -592,19 +592,22 @@ rule: the incumbent may still use its `Main.Version` fallback, including for
 self-upgrade. Versioned `go install` and `-trimpath` builds are unsupported
 candidates; `-trimpath` omits the recorded `-ldflags` metadata required for
 discovery. The candidate is not executed to discover its version; an image
-whose build-info region cannot be read defers, while readable metadata does not
-prove that the rest of the executable is intact. Universal or fat Mach-O input
-is read from its first slice; AMQ release output is single-slice, and
-supporting other slices is a non-goal. An inconclusive live-image comparison or
-a hash-time identity change defers and retries on the next maintenance tick; it
-does not consume refusal memory.
+whose build-info region cannot be read, including a truncated, non-Go, or
+otherwise unknown image, defers, while readable metadata does not prove that the
+rest of the executable is intact. Wake does not invoke an untrusted candidate
+with `--version` for version discovery. Universal or fat Mach-O input is read
+from its first slice; AMQ release output is single-slice, and supporting other
+slices is a non-goal. An inconclusive live-image comparison or a hash-time
+identity change defers and retries on the next maintenance tick; it does not
+consume refusal memory.
 
-Two child executions remain on the wake side: a post-bind `--version`
-preflight and a launch-contract preflight. Both have a bounded process-group lifetime
-and run only after the image is bound and verified; neither discovers a
-version from an untrusted candidate. A descendant that leaves the process group
-(setsid or setpgid) can escape it, which remains an explicit limitation of
-bounded probe cleanup.
+Two child executions remain on the wake side. A post-bind `--version`
+preflight executes the already verified image to confirm the tentative recorded
+version. A separate launch-contract preflight confirms the exact wake argv and
+bootstrap. Both have a bounded process-group lifetime and run only after the
+image is bound and verified; neither discovers a version from an untrusted
+candidate. A descendant that leaves the process group (setsid or setpgid) can
+escape it, which remains an explicit limitation of bounded probe cleanup.
 
 Darwin treats a still-running, identity-confirmed wake whose recorded path is
 gone (`proc_pidpath` ENOENT or ESRCH after an installer unlink) as a
@@ -621,6 +624,28 @@ disabled with `amq wake --no-self-upgrade` or `AMQ_WAKE_NO_SELF_UPGRADE=1`;
 schema-2 wake/doctor JSON reports the latest decision under `self_upgrade`.
 The separate `amq-keepalive` supervisor has its own direct-image self-upgrade
 contract documented in `docs/amq-keepalive.md`.
+
+Before the in-place exec, wake writes a private `.wake.selfupgrade.attempt`
+sidecar. If wake exits after the exec before its first quiescent maintenance
+boundary, a later wake that reaches maintenance refuses the matching image while
+the attempt is fresh relative to its recorded timestamp under the current wall
+clock. The guard cannot help when the new image dies
+before any replacement wake reaches the maintenance code. Its bounded
+eight-entry ledger is scoped to the wake agent directory. The wake itself has
+no in-process rollback or retry; an external supervisor may restart it. The
+first quiescent boundary from the attempted image settles the attempt; an
+operator or package manager must restore a known-good image after a refusal.
+
+On Darwin, the bound wake stage is checked with the root-owned
+`/usr/bin/codesign --verify --strict`; a missing, unsafe, or failing verifier
+refuses the restart. Cleanup uses the root-owned `/bin/ps` with a conservative
+command-name check. The signature probe runs before wake ignores `SIGUSR1`,
+followed by a small final bound-image revalidation before exec.
+
+The wake attempt sidecar accepts the single-attempt schema 1 as migration input
+and writes the bounded ledger schema 2. A pre-feature wake ignores this marker,
+so mixed-version operation does not provide the new crash-loop protection on
+both faces until both faces run the upgraded code.
 
 AMQ does not write the executable or retain the previous image, so neither wake
 self-upgrade path has an in-process rollback. Recovery from a bad installed

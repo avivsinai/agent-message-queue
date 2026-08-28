@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
 	"golang.org/x/sys/unix"
 )
 
@@ -85,6 +86,7 @@ type wakeRestartReadiness struct {
 
 var (
 	errWakeRestartSchemaTooNew = errors.New("wake restart schema is newer than supported")
+	errWakeImageRefused        = errors.New("wake restart image refused")
 
 	wakeRestartNow            = time.Now
 	wakeRestartSleep          = time.Sleep
@@ -93,6 +95,8 @@ var (
 	wakeRestartPreflight      = preflightWakeRestartCandidate
 	wakeRestartBind           = bindWakeRestartCandidateForRecord
 	wakeRestartBoundPreflight = preflightBoundWakeRestartCandidate
+	wakeRestartIgnore         = signal.Ignore
+	wakeRestartSignalNotify   = signal.Notify
 )
 
 func runWakeRestart(args []string) error {
@@ -1373,6 +1377,7 @@ func executeWakeRestart(
 	argv []string,
 	incumbentVersion string,
 	restartSignals chan os.Signal,
+	armSelfUpgradeAttempt func(wakeRestartRecord) error,
 ) (returnErr error) {
 	bootstrapValue := wakeResumeBootstrap{
 		Schema:             wakeRestartSchemaV1,
@@ -1404,13 +1409,34 @@ func executeWakeRestart(
 		return err
 	}
 	env := setEnvVar(unsetEnvVar(os.Environ(), envWakeResumeBootstrap), envWakeResumeBootstrap, bootstrap)
+	if err := verifyWakeRestartBoundImagePlatform(bound); err != nil {
+		return fmt.Errorf("%w: verify wake restart image signature: %w", errWakeImageRefused, err)
+	}
 	// An ignored disposition survives exec, unlike a caught disposition. The
 	// bootstrap installs Notify before it rotates and advertises the successor
-	// generation. If exec fails, restore delivery to the incumbent loop.
-	signal.Ignore(syscall.SIGUSR1)
+	// generation. Keep the expensive platform probe outside the ignored window;
+	// only the final bound-image revalidation runs before exec. If exec fails,
+	// restore delivery to the incumbent loop.
+	wakeRestartIgnore(syscall.SIGUSR1)
+	if err := revalidateBoundWakeRestartImagePlatform(bound); err != nil {
+		if restartSignals != nil {
+			wakeRestartSignalNotify(restartSignals, syscall.SIGUSR1)
+		}
+		return fmt.Errorf("%w: revalidate wake restart image: %w", errWakeImageRefused, err)
+	}
+	// Bind/hash failures must not arm durable crash-loop debt. Arm only after
+	// bound-image validation completes, immediately before process replacement.
+	if armSelfUpgradeAttempt != nil {
+		if err := armSelfUpgradeAttempt(record); err != nil {
+			if restartSignals != nil {
+				wakeRestartSignalNotify(restartSignals, syscall.SIGUSR1)
+			}
+			return fmt.Errorf("arm wake self-upgrade attempt: %w", err)
+		}
+	}
 	err = wakeRestartExec(bound.executionPath, append([]string(nil), argv...), env)
 	if restartSignals != nil {
-		signal.Notify(restartSignals, syscall.SIGUSR1)
+		wakeRestartSignalNotify(restartSignals, syscall.SIGUSR1)
 	}
 	if err != nil {
 		return fmt.Errorf("exec wake restart candidate: %w", err)
@@ -1650,7 +1676,70 @@ func handleWakeRestartAtLoopBoundary(
 		recordSelfUpgradeDecision(wakeSelfUpgradeActionRefused, reason)
 		return
 	}
-	if err := executeWakeRestart(record, os.Args, cfg.terminalImageVersion, cfg.restartSignals); err != nil {
+	if record.Source == wakeRestartSourceSelf &&
+		(!cfg.selfUpgrade.Enabled || !cfg.selfUpgrade.Eligible) {
+		reason := cfg.selfUpgrade.Reason
+		if reason == "" {
+			reason = "self-upgrade is unavailable"
+		}
+		recordSelfUpgradeDecision(wakeSelfUpgradeActionIneligible, reason)
+		return
+	}
+	var armSelfUpgradeAttempt func(wakeRestartRecord) error
+	if record.Source == wakeRestartSourceSelf {
+		armSelfUpgradeAttempt = func(boundRecord wakeRestartRecord) error {
+			attempts, err := persistWakeSelfUpgradeAttemptAtBoundary(
+				agentDir,
+				cfg.inspectTerminalGeneration(),
+				boundRecord,
+			)
+			if err == nil {
+				cfg.selfUpgrade.attempts = attempts
+			}
+			return err
+		}
+	}
+	if err := executeWakeRestart(
+		record,
+		os.Args,
+		cfg.terminalImageVersion,
+		cfg.restartSignals,
+		armSelfUpgradeAttempt,
+	); err != nil {
+		if record.Source == wakeRestartSourceSelf {
+			var refusal wakeSelfUpgradeAttemptRefusalError
+			if errors.As(err, &refusal) {
+				reason := wakeRestartReasonWithRemedy(refusal.Error(), cfg.root, cfg.me)
+				refuseErr := refuseWakeRestartRecord(agentDir, record, reason)
+				if refuseErr == nil {
+					cfg.selfUpgrade.refusalPending = nil
+					cfg.selfUpgrade.restartPending = false
+					recordSelfUpgradeDecision(wakeSelfUpgradeActionRefused, reason)
+				} else {
+					cfg.selfUpgrade.refusalPending = &wakeSelfUpgradeRefusalPending{
+						Record: record,
+						Reason: reason,
+					}
+					recordSelfUpgradeDecision(
+						wakeSelfUpgradeActionRefusalPending,
+						fmt.Sprintf("%s; refusal persistence pending: %v", reason, refuseErr),
+					)
+				}
+				return
+			}
+			if errors.Is(err, errWakeSelfUpgradeAttemptTimestampUncertain) {
+				cfg.selfUpgrade.Eligible = false
+				cfg.selfUpgrade.Reason = "self-upgrade unavailable: replacement attempt timestamp is uncertain"
+				recordSelfUpgradeDecision(wakeSelfUpgradeActionIneligible, cfg.selfUpgrade.Reason)
+				return
+			}
+			if errors.Is(err, errWakeSelfUpgradeAttemptNotFresh) {
+				cfg.selfUpgrade.Eligible = false
+				cfg.selfUpgrade.Reason = "self-upgrade unavailable: replacement attempt is not fresh"
+				recordSelfUpgradeDecision(wakeSelfUpgradeActionIneligible, cfg.selfUpgrade.Reason)
+				return
+			}
+		}
 		if errors.Is(err, errWakeImageChangedWhileHashing) && record.Source == wakeRestartSourceSelf {
 			recordSelfUpgradeDecision(
 				wakeSelfUpgradeActionDeferred,
@@ -1723,6 +1812,55 @@ func maintainWakeSelfUpgradeAtLoopBoundary(
 		cfg.selfUpgrade.restartPending = false
 	}
 	if cfg.selfUpgrade.Enabled && cfg.selfUpgrade.Eligible {
+		for _, attempt := range cfg.selfUpgrade.attempts {
+			if attempt.Status == selfupgrade.AttemptStatusAttempt && attempt.IsFutureUncertain(wakeSelfUpgradeNow()) {
+				cfg.selfUpgrade.Eligible = false
+				cfg.selfUpgrade.Reason = "self-upgrade unavailable: replacement attempt timestamp is uncertain"
+				return recordWakeSelfUpgradeDecision(
+					agentDir,
+					cfg.inspectTerminalGeneration(),
+					cfg.selfUpgrade,
+					wakeSelfUpgradeDecision{
+						Action: wakeSelfUpgradeActionIneligible,
+						Reason: cfg.selfUpgrade.Reason,
+					},
+				)
+			}
+		}
+		attemptPending := false
+		for _, attempt := range cfg.selfUpgrade.attempts {
+			if attempt.Status == selfupgrade.AttemptStatusAttempt {
+				attemptPending = true
+				break
+			}
+		}
+		if attemptPending {
+			quiescence := classifyWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
+			if quiescence.Disposition != wakeResumeProceed {
+				return recordWakeSelfUpgradeDecision(
+					agentDir,
+					cfg.inspectTerminalGeneration(),
+					cfg.selfUpgrade,
+					wakeSelfUpgradeDecision{
+						Action: wakeSelfUpgradeActionDeferred,
+						Reason: quiescence.Reason,
+					},
+				)
+			}
+			inspection := cfg.inspectTerminalGeneration()
+			var running wakeImageEvidenceV1
+			if inspection.Lock.RunningImageEvidence != nil {
+				running = *inspection.Lock.RunningImageEvidence
+			}
+			if err := settleWakeSelfUpgradeAttemptAtBoundary(
+				&cfg.selfUpgrade,
+				agentDir,
+				inspection,
+				running,
+			); err != nil {
+				return err
+			}
+		}
 		probe, probeErr := probeWakeSelfUpgradeLocator(cfg.selfUpgrade.Locator)
 		if probeErr != nil {
 			return recordWakeSelfUpgradeDecision(
@@ -1738,17 +1876,19 @@ func maintainWakeSelfUpgradeAtLoopBoundary(
 		if sameWakeSelfUpgradeProbe(cfg.selfUpgrade.lastProbe, probe) {
 			return nil
 		}
-		quiescence := classifyWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
-		if quiescence.Disposition != wakeResumeProceed {
-			return recordWakeSelfUpgradeDecision(
-				agentDir,
-				cfg.inspectTerminalGeneration(),
-				cfg.selfUpgrade,
-				wakeSelfUpgradeDecision{
-					Action: wakeSelfUpgradeActionDeferred,
-					Reason: quiescence.Reason,
-				},
-			)
+		if !attemptPending {
+			quiescence := classifyWakeRestartAtLoopBoundary(cfg, watcher, terminalRetry, scanRetry)
+			if quiescence.Disposition != wakeResumeProceed {
+				return recordWakeSelfUpgradeDecision(
+					agentDir,
+					cfg.inspectTerminalGeneration(),
+					cfg.selfUpgrade,
+					wakeSelfUpgradeDecision{
+						Action: wakeSelfUpgradeActionDeferred,
+						Reason: quiescence.Reason,
+					},
+				)
+			}
 		}
 	}
 	decision, err := maintainWakeSelfUpgrade(

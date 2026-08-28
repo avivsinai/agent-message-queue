@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -45,6 +46,19 @@ printf 'probe-ok\n'
 		t.Fatalf("RunBoundedProbe() took %v, want at most %v", elapsed, boundedProbeWaitDelay+2*time.Second)
 	}
 	waitForBoundedProbeChildExit(t, pid)
+}
+
+func TestRunBoundedProbeIncludesTrimmedStderrInError(t *testing.T) {
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = RunBoundedProbe(ctx, shell, []string{"-c", "printf 'codesign: invalid signature  \\n' >&2; exit 1"}, BoundedProbeOptions{})
+	if err == nil || !strings.Contains(err.Error(), "stderr: codesign: invalid signature") {
+		t.Fatalf("RunBoundedProbe() error = %v, want trimmed stderr diagnostic", err)
+	}
 }
 
 func runBoundedProbeShellTest(t *testing.T, script string) (int, []byte, error) {

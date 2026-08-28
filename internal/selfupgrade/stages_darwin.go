@@ -3,6 +3,7 @@
 package selfupgrade
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,15 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
+)
+
+const selfUpgradeStagePIDProbeTimeout = 5 * time.Second
+
+var (
+	selfUpgradeStagePIDKill         = syscall.Kill
+	selfUpgradeStagePSPath          = "/bin/ps"
+	selfUpgradeStageRunBoundedProbe = RunBoundedProbe
 )
 
 func selfUpgradeStagePrefix(locator string) string {
@@ -84,6 +94,49 @@ func selfUpgradeStagePIDLive(pid int) bool {
 	if pid == os.Getpid() {
 		return false
 	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || !errors.Is(err, syscall.ESRCH)
+	err := selfUpgradeStagePIDKill(pid, 0)
+	switch {
+	case errors.Is(err, syscall.ESRCH):
+		return false
+	case errors.Is(err, syscall.EPERM):
+		return true
+	case err != nil:
+		return true
+	}
+
+	comm, err := selfUpgradeStagePIDComm(pid)
+	if err != nil {
+		return true
+	}
+	return comm == "amq" || comm == "amq-keepalive"
+}
+
+func selfUpgradeStagePIDComm(pid int) (string, error) {
+	if err := verifyDarwinSystemTool(selfUpgradeStagePSPath); err != nil {
+		return "", fmt.Errorf("verify ps for self-upgrade stage PID %d: %w", pid, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), selfUpgradeStagePIDProbeTimeout)
+	defer cancel()
+	out, err := selfUpgradeStageRunBoundedProbe(
+		ctx,
+		selfUpgradeStagePSPath,
+		[]string{"-o", "comm=", "-p", strconv.Itoa(pid)},
+		BoundedProbeOptions{Env: os.Environ()},
+	)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("inspect self-upgrade stage PID %d timed out: %w", pid, ctx.Err())
+		}
+		return "", fmt.Errorf("inspect self-upgrade stage PID %d: %w", pid, err)
+	}
+	trimmed := strings.TrimSpace(string(out))
+	lines := strings.Split(trimmed, "\n")
+	if trimmed == "" || len(lines) != 1 {
+		return "", fmt.Errorf("inspect self-upgrade stage PID %d: ps returned ambiguous command %q", pid, string(out))
+	}
+	comm := strings.TrimSpace(lines[0])
+	if comm == "" || strings.ContainsRune(comm, '\r') {
+		return "", fmt.Errorf("inspect self-upgrade stage PID %d: ps returned invalid command %q", pid, string(out))
+	}
+	return filepath.Base(comm), nil
 }

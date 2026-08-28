@@ -22,6 +22,63 @@ func TestDarwinWakeRestartBoundPayload(t *testing.T) {
 	_, _ = os.Stdout.WriteString("BOUND_IMAGE_A\n")
 }
 
+func TestDarwinWakeRestartVerifiesBoundStageBeforeExec(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	writeWakeRestartLoopCandidateCopy(t, &fixture)
+	fixture.record.Source = wakeRestartSourceForeign
+	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, fixture.record)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	verificationCalls := 0
+	execCalls := 0
+	sentinel := errors.New("codesign: invalid signature")
+	previousVerify := verifyWakeRestartBoundImage
+	previousPreflight := wakeRestartBoundPreflight
+	previousExec := wakeRestartExec
+	previousIgnore := wakeRestartIgnore
+	ignoreCalls := 0
+	verifyWakeRestartBoundImage = func(bound *wakeRestartBoundImage) error {
+		verificationCalls++
+		if bound == nil || bound.executionPath == "" {
+			t.Fatalf("verified bound image = %#v", bound)
+		}
+		return sentinel
+	}
+	wakeRestartBoundPreflight = func(*wakeRestartBoundImage, []string, wakeResumeBootstrap) error {
+		return nil
+	}
+	wakeRestartExec = func(string, []string, []string) error {
+		execCalls++
+		return errors.New("unexpected exec")
+	}
+	wakeRestartIgnore = func(...os.Signal) { ignoreCalls++ }
+	t.Cleanup(func() {
+		verifyWakeRestartBoundImage = previousVerify
+		wakeRestartBoundPreflight = previousPreflight
+		wakeRestartExec = previousExec
+		wakeRestartIgnore = previousIgnore
+	})
+	runWakeRestartLoopForTest(t, fixture)
+	if verificationCalls != 1 {
+		t.Fatalf("signature verification calls = %d, want one", verificationCalls)
+	}
+	if execCalls != 0 {
+		t.Fatalf("exec calls = %d, want zero after signature refusal", execCalls)
+	}
+	if ignoreCalls != 0 {
+		t.Fatalf("signal ignore calls = %d, want verifier to run before ignored window", ignoreCalls)
+	}
+	record := readRefusedWakeRestartForTest(t, fixture)
+	if !strings.Contains(record.Reason, sentinel.Error()) {
+		t.Fatalf("refusal reason = %q, want codesign diagnostic", record.Reason)
+	}
+	if !strings.Contains(record.Reason, errWakeImageRefused.Error()) {
+		t.Fatalf("refusal reason = %q, want the image-refused sentinel", record.Reason)
+	}
+}
+
 func TestDarwinStagedWakeImageCTimeExceptionDoesNotWeakenIdentityOrContent(t *testing.T) {
 	base, err := captureCurrentWakeImageEvidence()
 	if err != nil {
@@ -555,6 +612,10 @@ func wakeRestartLoopConfigForTest(fixture wakeRestartFixture) wakeConfig {
 		terminalGeneration: fixture.lock.Lock.Generation,
 		retainedAgent:      fixture.agentDir,
 		retainedInbox:      fixture.inboxDir,
+		selfUpgrade: wakeSelfUpgradeState{
+			Enabled:  true,
+			Eligible: true,
+		},
 		inspectTerminalGeneration: func() wakeLockInspection {
 			return inspectWakeLock(fixture.root, fixture.agent)
 		},

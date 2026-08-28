@@ -309,12 +309,12 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 	if detachedValidationErr != nil {
 		outcome.Err = newWakeDetachedCleanupOnlyError(detachedValidationErr)
 	}
-	if err := removeWakeSelfUpgradeDiagnosticAt(dirfd); err != nil {
+	if err := removeWakeSelfUpgradeArtifactsAt(dirfd); err != nil {
 		outcome.Err = errors.Join(
 			outcome.Err,
 			newWakeLockResidueError(
 				wakeLockResidueSelfUpgradeDiagnostic,
-				fmt.Errorf("remove wake self-upgrade diagnostic after lock removal: %w", err),
+				fmt.Errorf("remove wake self-upgrade metadata after lock removal: %w", err),
 			),
 		)
 	}

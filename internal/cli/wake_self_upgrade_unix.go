@@ -40,13 +40,16 @@ const (
 // once, before the wake loop starts; it is intentionally not derived from the
 // resolved image recorded in .wake.lock.
 type wakeSelfUpgradeState struct {
-	Enabled        bool
-	Eligible       bool
-	Locator        string
-	Reason         string
-	lastProbe      wakeSelfUpgradeProbe
-	restartPending bool
-	refusalPending *wakeSelfUpgradeRefusalPending
+	Enabled              bool
+	Eligible             bool
+	Locator              string
+	Reason               string
+	lastProbe            wakeSelfUpgradeProbe
+	refused              []wakeSelfUpgradeRefusedCandidate
+	attempts             []selfupgrade.Attempt
+	startupRefusalReason string
+	restartPending       bool
+	refusalPending       *wakeSelfUpgradeRefusalPending
 }
 
 type wakeSelfUpgradeRefusalPending struct {
@@ -438,6 +441,15 @@ func maintainWakeSelfUpgrade(
 		decision.Action = wakeSelfUpgradeActionIneligible
 		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
 	}
+	for _, attempt := range state.attempts {
+		if attempt.Status == selfupgrade.AttemptStatusAttempt && attempt.IsFutureUncertain(wakeSelfUpgradeNow()) {
+			state.Eligible = false
+			state.Reason = "self-upgrade unavailable: replacement attempt timestamp is uncertain"
+			decision.Action = wakeSelfUpgradeActionIneligible
+			decision.Reason = state.Reason
+			return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
+		}
+	}
 	if agentDir == nil {
 		return wakeSelfUpgradeDecision{}, fmt.Errorf("wake self-upgrade agent directory capability is missing")
 	}
@@ -494,7 +506,22 @@ func maintainWakeSelfUpgrade(
 		)
 		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
 	}
-
+	for _, attempt := range state.attempts {
+		if attempt.Status == selfupgrade.AttemptStatusAttempt &&
+			attempt.IsFresh(wakeSelfUpgradeNow()) && attempt.Matches(evidence) {
+			state.refused = rememberWakeSelfUpgradeRefusal(state.refused, evidence)
+			state.lastProbe = probe
+			decision.Action = wakeSelfUpgradeActionRefusedMemory
+			decision.Reason = attempt.RefusalReason()
+			return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
+		}
+	}
+	if wakeSelfUpgradeRefusedCandidatesContain(state.refused, evidence) {
+		state.lastProbe = probe
+		decision.Action = wakeSelfUpgradeActionRefusedMemory
+		decision.Reason = "candidate was already refused for this wake generation"
+		return decision, recordWakeSelfUpgradeDecision(agentDir, inspection, *state, decision)
+	}
 	different, comparisonErr := wakeSelfUpgradeLiveDifference(inspection, probe)
 	if comparisonErr != nil {
 		// Inconclusive identity is transient (Homebrew Cellar unlink, proc_pidpath
@@ -780,15 +807,4 @@ func removeWakeSelfUpgradeDiagnosticAt(dirfd int) error {
 		return fmt.Errorf("sync wake self-upgrade diagnostic removal: %w", err)
 	}
 	return nil
-}
-
-func removeWakeSelfUpgradeDiagnosticGuarded(root, agent string) error {
-	agentDir, err := openWakeAgentDir(root, agent)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = agentDir.Close() }()
-	return agentDir.withFD(func(dirfd int) error {
-		return removeWakeSelfUpgradeDiagnosticAt(dirfd)
-	})
 }

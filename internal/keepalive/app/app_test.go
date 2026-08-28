@@ -1962,6 +1962,26 @@ func TestSuperviseUsesInjectedClockOnWakeFailure(t *testing.T) {
 	}
 }
 
+func TestSelfUpgradeHealthyPassRequiresEnsuredResults(t *testing.T) {
+	tests := []struct {
+		name    string
+		results []supervisor.Result
+		want    bool
+	}{
+		{name: "empty", want: true},
+		{name: "ensured", results: []supervisor.Result{{Action: supervisor.ActionEnsured}}, want: true},
+		{name: "deferred", results: []supervisor.Result{{Action: supervisor.ActionDeferred}}, want: false},
+		{name: "failed", results: []supervisor.Result{{Action: supervisor.ActionStartFailed, Error: errors.New("start failed")}}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := selfUpgradeHealthyPass(test.results); got != test.want {
+				t.Fatalf("selfUpgradeHealthyPass(%#v) = %t, want %t", test.results, got, test.want)
+			}
+		})
+	}
+}
+
 func TestSuperviseWarnsOncePerPersistentFailureTransition(t *testing.T) {
 	dir := t.TempDir()
 	registryPath := testRegistryPath(t, dir)
@@ -3048,6 +3068,25 @@ func TestSuperviseRejectsNonPositiveInterval(t *testing.T) {
 		if code != 1 || !strings.Contains(stderr.String(), "--interval must be greater than zero") {
 			t.Fatalf("interval %s code=%d stderr=%q", interval, code, stderr.String())
 		}
+	}
+}
+
+func TestSuperviseOnceNoSelfUpgradePublishesJSONWithoutState(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registryPath := filepath.Join(dir, "registry.json")
+	var stdout, stderr bytes.Buffer
+	code := (App{Stdout: &stdout, Stderr: &stderr}).Run(
+		context.Background(),
+		[]string{"supervise", "--registry", registryPath, "--once", "--no-self-upgrade"},
+	)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q, want successful one-shot pass", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "[]" {
+		t.Fatalf("stdout=%q, want empty JSON results", got)
 	}
 }
 

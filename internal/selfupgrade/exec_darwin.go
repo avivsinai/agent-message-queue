@@ -3,17 +3,65 @@
 package selfupgrade
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
 
+const darwinCodeSignProbeTimeout = 5 * time.Second
+
+var (
+	selfUpgradeCodesignPath  = "/usr/bin/codesign"
+	selfUpgradeCodesignProbe = RunBoundedProbe
+	selfUpgradeDarwinExec    = syscall.Exec
+)
+
 func execSupportedPlatform() bool { return true }
+
+func verifyDarwinCodeSignature(stagePath string) error {
+	if err := verifyDarwinSystemTool(selfUpgradeCodesignPath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("verify Darwin code signature tool: %w", err)
+		}
+		return fmt.Errorf(
+			"verify Darwin code signature: /usr/bin/codesign must exist and pass validation; otherwise replacement is refused: %w",
+			err,
+		)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), darwinCodeSignProbeTimeout)
+	defer cancel()
+	out, err := selfUpgradeCodesignProbe(
+		ctx,
+		selfUpgradeCodesignPath,
+		[]string{"--verify", "--strict", stagePath},
+		BoundedProbeOptions{Env: os.Environ()},
+	)
+	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf(
+				"verify Darwin code signature: codesign probe timed out: %w",
+				errors.Join(ctx.Err(), err),
+			)
+		}
+		return fmt.Errorf("verify Darwin code signature for %s: %w", stagePath, err)
+	}
+	if diagnostic := strings.TrimSpace(string(out)); diagnostic != "" {
+		return fmt.Errorf("verify Darwin code signature for %s: ambiguous codesign output %q", stagePath, diagnostic)
+	}
+	return nil
+}
+
+func VerifyDarwinCodeSignature(stagePath string) error {
+	return verifyDarwinCodeSignature(stagePath)
+}
 
 func execImagePlatform(candidate ImageEvidence, argv, env []string) error {
 	if candidate.ExecutionPath == "" {
@@ -96,9 +144,12 @@ func execImagePlatform(candidate ImageEvidence, argv, env []string) error {
 	if !SameDarwinStagedImageEvidence(staged, candidate) {
 		return errors.New("self-upgrade stage changed while binding")
 	}
+	if err := verifyDarwinCodeSignature(stagePath); err != nil {
+		return err
+	}
 	// Darwin cannot exec an open file descriptor. The private 0700 stage
-	// directory named with our PID is re-verified immediately before exec;
-	// same-UID races in that window are outside AMQ's threat model, as for wake
-	// self-upgrade.
-	return syscall.Exec(stagePath, argv, env)
+	// directory named with our PID is signature-verified before pathname exec;
+	// same-UID races after that validation are outside AMQ's threat model, as for
+	// wake self-upgrade.
+	return selfUpgradeDarwinExec(stagePath, argv, env)
 }
