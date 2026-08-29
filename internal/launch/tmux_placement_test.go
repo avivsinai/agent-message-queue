@@ -145,7 +145,7 @@ func TestTmuxJoinReplacementBeforeEachMutationWritesNoForeignWindow(t *testing.T
 					if _, killErr := realRun(ctx, backend.args("kill-session", "-t", "="+name)...); killErr != nil {
 						return "", killErr
 					}
-					if _, createErr := realRun(ctx, backend.args("new-session", "-d", "-s", name, "-e", tmuxNonceEnvironment+"=foreign", "-P", "-F", "#{pane_id}", "/bin/sleep", "60")...); createErr != nil {
+					if _, createErr := backend.runNewSessionWithTransientRetry(ctx, backend.args("new-session", "-d", "-s", name, "-e", tmuxNonceEnvironment+"=foreign", "-P", "-F", "#{pane_id}", "/bin/sleep", "60")...); createErr != nil {
 						return "", createErr
 					}
 				}
@@ -1263,4 +1263,122 @@ func countLiveTmuxWindows(t *testing.T, backend *TmuxBackend) int {
 		}
 	}
 	return n
+}
+
+// TestTmuxNewSessionRetriesOnceOnServerExitRace is the az7 positive: when the
+// first `new-session` hits the transient "server exited unexpectedly" server
+// race, the create path retries exactly once and succeeds, yielding a working
+// session (one window). Verifies the retry is bounded to a single attempt.
+func TestTmuxNewSessionRetriesOnceOnServerExitRace(t *testing.T) {
+	backend, project, root, plan := newTmuxPlacementFixture(t, "claude")
+	realRun := backend.run
+	newSessionCalls := 0
+	backend.run = func(ctx context.Context, args ...string) (string, error) {
+		if tmuxArgsIsNewSession(args) {
+			newSessionCalls++
+			if newSessionCalls == 1 {
+				// Transient server startup race on the first attempt only.
+				return "", fmt.Errorf("tmux new-session: %w: server exited unexpectedly", errors.New("exit status 1"))
+			}
+		}
+		return realRun(ctx, args...)
+	}
+	_, err := backend.Create(CreateRequest{
+		ProjectRoot: project, Session: "az7-transient", Plan: plan,
+		AMQPath: writeTmuxSleepAMQ(t), Root: root,
+	})
+	if err != nil {
+		t.Fatalf("create after transient retry failed: %v", err)
+	}
+	if newSessionCalls != 2 {
+		t.Fatalf("new-session calls = %d, want exactly 2 (one transient + one retry)", newSessionCalls)
+	}
+	if got := countLiveTmuxWindows(t, backend); got != 1 {
+		t.Fatalf("live windows = %d after transient retry, want 1", got)
+	}
+}
+
+// TestTmuxNewSessionDoesNotRetryOnNonTransientError is the az7 negative: a
+// `new-session` that fails for any reason OTHER than "server exited
+// unexpectedly" must NOT be retried. The original error must surface, and
+// exactly one new-session invocation must have occurred.
+func TestTmuxNewSessionDoesNotRetryOnNonTransientError(t *testing.T) {
+	backend, project, root, plan := newTmuxPlacementFixture(t, "claude")
+	realRun := backend.run
+	newSessionCalls := 0
+	backend.run = func(ctx context.Context, args ...string) (string, error) {
+		if tmuxArgsIsNewSession(args) {
+			newSessionCalls++
+			// A genuine, non-transient refusal (e.g. a bad session name / flag
+			// error). Must not match the "server exited unexpectedly" gate.
+			return "", fmt.Errorf("tmux new-session: %w: bad session name: invalid use", errors.New("exit status 1"))
+		}
+		return realRun(ctx, args...)
+	}
+	_, err := backend.Create(CreateRequest{
+		ProjectRoot: project, Session: "az7-nontransient", Plan: plan,
+		AMQPath: writeTmuxSleepAMQ(t), Root: root,
+	})
+	if err == nil {
+		t.Fatal("create with a non-transient new-session error unexpectedly succeeded")
+	}
+	if newSessionCalls != 1 {
+		t.Fatalf("new-session calls = %d, want exactly 1 (no retry for non-transient)", newSessionCalls)
+	}
+	if !strings.Contains(err.Error(), "create tmux session") {
+		t.Fatalf("expected 'create tmux session' refusal to surface, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "server exited unexpectedly") {
+		t.Fatalf("non-transient error must not contain the transient signature: %v", err)
+	}
+}
+
+// TestTmuxNewSessionTransientRetryHonoursCtxCancellation verifies the retry's
+// ctx-aware backoff: if the context is cancelled during the backoff window,
+// the helper returns WITHOUT issuing a second new-session call, surfacing the
+// original transient error (no retry past a cancelled ctx).
+func TestTmuxNewSessionTransientRetryHonoursCtxCancellation(t *testing.T) {
+	backend, project, root, plan := newTmuxPlacementFixture(t, "claude")
+	realRun := backend.run
+	newSessionCalls := 0
+	backend.run = func(ctx context.Context, args ...string) (string, error) {
+		if tmuxArgsIsNewSession(args) {
+			newSessionCalls++
+			// First (and only) call: transient server race. The retry's backoff
+			// select must observe the cancelled ctx and skip the second call.
+			return "", fmt.Errorf("tmux new-session: %w: server exited unexpectedly", errors.New("exit status 1"))
+		}
+		return realRun(ctx, args...)
+	}
+	// Use a ctx that is ALREADY cancelled so the backoff select fires its
+	// ctx.Done branch immediately, before any second new-session call.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Drive the helper directly with the cancelled ctx to assert the retry
+	// gate; this isolates the ctx-cancellation contract from the full Create
+	// pipeline (which builds its own ctx).
+	_, err := backend.runNewSessionWithTransientRetry(ctx, backend.args("new-session", "-d", "-s", "unused", "-P", "-F", "#{pane_id}", "/bin/true")...)
+	if err == nil {
+		t.Fatal("expected the transient error to surface, got nil")
+	}
+	if !strings.Contains(err.Error(), "server exited unexpectedly") {
+		t.Fatalf("expected the original transient error to surface, got: %v", err)
+	}
+	if newSessionCalls != 1 {
+		t.Fatalf("new-session calls = %d, want exactly 1 (no retry after ctx cancelled during backoff)", newSessionCalls)
+	}
+	_ = project
+	_ = root
+	_ = plan
+}
+
+// tmuxArgsIsNewSession reports whether a tmux arg slice (which may be prefixed
+// by -L/-S socket flags from TmuxBackend.args) is a new-session command.
+func tmuxArgsIsNewSession(args []string) bool {
+	for _, a := range args {
+		if a == "new-session" {
+			return true
+		}
+	}
+	return false
 }
