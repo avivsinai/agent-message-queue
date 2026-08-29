@@ -877,10 +877,10 @@ func checkSkill(agent string) doctorCheck {
 	// ~/.<agent>/skills paths remain for installs created before the shared dir.
 	agentDir := "." + agent
 	candidates := []string{
-		filepath.Join(agentDir, "skills", "amq-cli"),                 // project-local, agent-specific
-		filepath.Join(".agents", "skills", "amq-cli"),                // project-local, shared
-		filepath.Join(home, agentDir, "skills", "amq-cli"),          // user-level, agent-specific
-		filepath.Join(home, ".agents", "skills", "amq-cli"),         // user-level, shared (npx skills add -g)
+		filepath.Join(agentDir, "skills", "amq-cli"),        // project-local, agent-specific
+		filepath.Join(".agents", "skills", "amq-cli"),       // project-local, shared
+		filepath.Join(home, agentDir, "skills", "amq-cli"),  // user-level, agent-specific
+		filepath.Join(home, ".agents", "skills", "amq-cli"), // user-level, shared (npx skills add -g)
 	}
 
 	// Check project-local candidates first, then user-level, in order.
