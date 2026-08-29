@@ -84,6 +84,7 @@ func TestDarwinSameVersionPathReplacementCannotReportCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runningEvidence := darwinWakeImageEvidenceForTest(t, executionPath, loadedInfo)
 	readyPath := filepath.Join(dir, "ready")
 	captureGatePath := filepath.Join(dir, "capture")
 	resultPath := filepath.Join(dir, "result.json")
@@ -153,9 +154,9 @@ func TestDarwinSameVersionPathReplacementCannotReportCurrent(t *testing.T) {
 		PID: cmd.Process.Pid,
 		Lock: wakeLock{
 			Started:              captured.Started,
-			ImagePath:            captured.Evidence.ExecutionPath,
-			ImageVersion:         captured.Evidence.EmbeddedVersion,
-			RunningImageEvidence: &captured.Evidence,
+			ImagePath:            runningEvidence.ExecutionPath,
+			ImageVersion:         runningEvidence.EmbeddedVersion,
+			RunningImageEvidence: &runningEvidence,
 		},
 	}
 	comparison, err := inspectWakeBinaryStalenessPlatform(
@@ -450,7 +451,11 @@ func TestDarwinWakeBinaryComparisonReportsDeletedLiveImageStale(t *testing.T) {
 		t.Fatal(err)
 	}
 	evidence := darwinWakeImageEvidenceForTest(t, runningPath, runningInfo)
-	stubDarwinProcessImage(t, darwinWakeProcessImage{Path: runningPath}, os.ErrNotExist)
+	mappedPath := filepath.Join(dir, "mapped-amq")
+	if err := os.Link(runningPath, mappedPath); err != nil {
+		t.Fatal(err)
+	}
+	stubDarwinProcessImage(t, darwinMappedImageForTest(t, mappedPath, runningInfo), nil)
 	if err := os.Remove(runningPath); err != nil {
 		t.Fatal(err)
 	}
@@ -480,17 +485,63 @@ func TestDarwinWakeBinaryComparisonReportsDeletedLiveImageStale(t *testing.T) {
 	}
 }
 
-func TestDarwinWakeBinaryComparisonReportsDeletedRecordedImageWhenProcPIDPathReturnsENOENT(t *testing.T) {
+func TestMaintainWakeSelfUpgradeRequestsRestartAfterRecordedImagePathUnlinked(t *testing.T) {
+	fixture := newWakeRestartFixture(t)
+	removeWakeRestartRecordForTest(t, fixture)
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runningPath := filepath.Join(t.TempDir(), "Cellar", "amq", "0.73.0", "bin", "amq")
+	if err := os.MkdirAll(filepath.Dir(runningPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(executable, runningPath); err != nil {
+		t.Fatal(err)
+	}
+	runningInfo, err := os.Stat(runningPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := captureWakeImageEvidence(runningPath, fixture.lock.Lock.ImageVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.lock.Lock.ImagePath = recorded.ExecutionPath
+	fixture.lock.Lock.RunningImageEvidence = &recorded
+	if err := os.Remove(runningPath); err != nil {
+		t.Fatal(err)
+	}
+	stubDarwinProcessImage(t, darwinMappedImageForTest(t, executable, runningInfo), nil)
+
+	candidate := writeWakeSelfUpgradeCandidate(t, t.TempDir(), "candidate")
+	state := selfUpgradeStateForCandidate(t, candidate)
+	stubWakeSelfUpgradeVersion(t, "0.57.0")
+	decision, err := maintainWakeSelfUpgrade(&state, fixture.agentDir, fixture.lock)
+	if err != nil || decision.Action != wakeSelfUpgradeActionPending {
+		t.Fatalf("unlinked-image decision=%#v err=%v, want pending restart", decision, err)
+	}
+	if decision.Candidate == nil || decision.Candidate.Version != "0.57.0" {
+		t.Fatalf("unlinked-image candidate=%#v, want strictly newer candidate", decision.Candidate)
+	}
+	assertWakeSelfUpgradeRecordStatus(t, fixture, wakeRestartPending)
+}
+
+func TestDarwinWakeBinaryComparisonDefersWhenProcessImageIdentityIsUnavailable(t *testing.T) {
 	started := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	for _, tc := range []struct {
-		name     string
-		inspect  error
-		remove   bool
-		wantGone bool
+		name    string
+		inspect error
+		remove  bool
 	}{
-		{name: "ENOENT deleted path", inspect: os.ErrNotExist, remove: true, wantGone: true},
-		{name: "ESRCH deleted path", inspect: fmt.Errorf("resolve wake process executable: proc_pidpath pid %d: %w", 4242, unix.ESRCH), remove: true, wantGone: true},
-		{name: "ESRCH path still present", inspect: fmt.Errorf("resolve wake process executable: proc_pidpath pid %d: %w", 4242, unix.ESRCH), remove: false, wantGone: false},
+		{name: "ENOENT deleted path", inspect: os.ErrNotExist, remove: true},
+		{name: "ESRCH deleted path", inspect: fmt.Errorf("resolve wake process executable: proc_pidpath pid %d: %w", 4242, unix.ESRCH), remove: true},
+		{name: "ESRCH path still present", inspect: fmt.Errorf("resolve wake process executable: proc_pidpath pid %d: %w", 4242, unix.ESRCH), remove: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -534,17 +585,8 @@ func TestDarwinWakeBinaryComparisonReportsDeletedRecordedImageWhenProcPIDPathRet
 				},
 				resolvedWakeBinary{Path: currentPath, Info: currentInfo},
 			)
-			if tc.wantGone {
-				if err != nil {
-					t.Fatalf("compare deleted recorded image: %v", err)
-				}
-				if !got.Stale || got.Method != wakeBinaryComparisonDarwinDeletedImage || got.Reason != deletedWakeImageReason {
-					t.Fatalf("deleted recorded image comparison = %#v, want proven stale", got)
-				}
-				return
-			}
 			if err == nil || got.Stale {
-				t.Fatalf("live image still present = %#v, %v; want unknown error", got, err)
+				t.Fatalf("unavailable live image = %#v, %v; want unknown error", got, err)
 			}
 		})
 	}
@@ -593,7 +635,7 @@ func TestDarwinWakeBinaryComparisonKeepsNonENOENTImageFailureUnknown(t *testing.
 	}
 }
 
-func TestDarwinWakeBinaryComparisonUsesMappedVnodeOverRecordedPathIdentity(t *testing.T) {
+func TestDarwinWakeBinaryComparisonDefersWhenRecordedIdentityDiffers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "amq")
 	if err := os.WriteFile(path, []byte("binary"), 0o700); err != nil {
 		t.Fatal(err)
@@ -618,8 +660,8 @@ func TestDarwinWakeBinaryComparisonUsesMappedVnodeOverRecordedPathIdentity(t *te
 		},
 		resolvedWakeBinary{Path: path, Info: info},
 	)
-	if err != nil || got.Stale || got.Method != wakeBinaryComparisonDarwinProcessImage {
-		t.Fatalf("mapped vnode comparison = %#v, %v; want current despite stale pathname identity", got, err)
+	if err == nil || got.Stale {
+		t.Fatalf("recorded identity mismatch = %#v, %v; want unknown error", got, err)
 	}
 }
 

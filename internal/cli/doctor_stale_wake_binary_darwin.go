@@ -9,21 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 const wakeStartedTimestampUncertainty = time.Second
 
 const deletedWakeImageReason = "wake is running a deleted image; restart it"
-
-// darwinWakeMappedImageGone reports whether Darwin could not name the live
-// process image because the vnode is already gone. Homebrew Cellar unlinks
-// produce ESRCH from proc_pidpath while the wake is still running; ENOENT is
-// the same class. Other inspection failures stay unknown.
-func darwinWakeMappedImageGone(err error) bool {
-	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ESRCH)
-}
 
 func inspectWakeBinaryStalenessPlatform(
 	inspection wakeLockInspection,
@@ -69,27 +59,25 @@ func inspectWakeBinaryStalenessPlatform(
 
 	running, err := inspectDarwinWakeProcessImage(inspection.PID)
 	if err != nil {
-		if darwinWakeMappedImageGone(err) && inspection.IdentityConfirmed && inspection.Process.Running {
-			imagePath := running.Path
-			if imagePath == "" {
-				imagePath = recorded.ExecutionPath
-			}
-			if imagePath == recorded.ExecutionPath {
-				if _, pathErr := os.Lstat(imagePath); errors.Is(pathErr, fs.ErrNotExist) {
-					return wakeBinaryStaleness{
-						Stale:    true,
-						Method:   wakeBinaryComparisonDarwinDeletedImage,
-						Evidence: comparisonEvidence,
-						Reason:   deletedWakeImageReason,
-					}, nil
-				}
-			}
-		}
 		return wakeBinaryStaleness{}, err
 	}
+	if running.Identity.Device != recorded.Device || running.Identity.Inode != recorded.Inode {
+		return wakeBinaryStaleness{}, fmt.Errorf("live wake image identity disagrees with recorded image evidence")
+	}
 	restartStageAlias := sameDarwinWakeRestartStageAlias(recorded, running)
+	deletedImage := false
 	if !sameDarwinWakeImagePath(recorded.ExecutionPath, running.Path) && !restartStageAlias {
-		return wakeBinaryStaleness{}, fmt.Errorf("live wake image path disagrees with recorded image evidence")
+		if _, pathErr := os.Lstat(recorded.ExecutionPath); errors.Is(pathErr, fs.ErrNotExist) {
+			deletedImage = true
+		} else {
+			return wakeBinaryStaleness{}, fmt.Errorf("live wake image path disagrees with recorded image evidence")
+		}
+	}
+	method := wakeBinaryComparisonDarwinProcessImage
+	reason := ""
+	if deletedImage {
+		method = wakeBinaryComparisonDarwinDeletedImage
+		reason = deletedWakeImageReason
 	}
 	comparisonEvidence.Running = wakeBinaryFileEvidenceFromIdentity(running.Identity)
 	if err := confirmResolvedDarwinWakeBinary(current, currentIdentity); err != nil {
@@ -99,8 +87,9 @@ func inspectWakeBinaryStalenessPlatform(
 	if running.Identity.Device != currentIdentity.Device || running.Identity.Inode != currentIdentity.Inode {
 		return wakeBinaryStaleness{
 			Stale:    true,
-			Method:   wakeBinaryComparisonDarwinProcessImage,
+			Method:   method,
 			Evidence: comparisonEvidence,
+			Reason:   reason,
 		}, nil
 	}
 	// The restart-stage hardlink changes the shared inode's ctime, while
@@ -125,8 +114,9 @@ func inspectWakeBinaryStalenessPlatform(
 		}, nil
 	}
 	return wakeBinaryStaleness{
-		Method:   wakeBinaryComparisonDarwinProcessImage,
+		Method:   method,
 		Evidence: comparisonEvidence,
+		Reason:   reason,
 	}, nil
 }
 

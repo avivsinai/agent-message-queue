@@ -614,9 +614,11 @@ image is bound and verified; neither discovers a version from an untrusted
 candidate. A descendant that leaves the process group (setsid or setpgid) can
 escape it, which remains an explicit limitation of bounded probe cleanup.
 
-Darwin treats a still-running, identity-confirmed wake whose recorded path is
-gone (`proc_pidpath` ENOENT or ESRCH after an installer unlink) as a
-conclusive deleted image, so Homebrew Cellar replacement can exec in place.
+Darwin treats a still-running, identity-confirmed wake whose live mapped
+executable has the recorded device and inode as the same image even when the
+recorded pathname is gone, so Homebrew Cellar replacement can exec in place.
+An unreadable live identity or a present pathname that resolves to a different
+image remains inconclusive.
 A failed upgrade candidate is attempted at most
 once per candidate within one wake generation, bounded to the 8 most recent
 distinct candidates; a new generation resets that refusal memory. A refused
