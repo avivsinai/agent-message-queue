@@ -8,6 +8,15 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.74.1](https://github.com/avivsinai/agent-message-queue/compare/v0.74.0...v0.74.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **doctor:** find the codex skill where npx skills add installs it ([#688](https://github.com/avivsinai/agent-message-queue/issues/688)) ([7d10de5](https://github.com/avivsinai/agent-message-queue/commit/7d10de5c910dfe84a1e2a5169358b60b75209e7c))
+* **launch:** retry tmux new-session once after server exit race ([#692](https://github.com/avivsinai/agent-message-queue/issues/692)) ([a51d19f](https://github.com/avivsinai/agent-message-queue/commit/a51d19ff62892fb135267c6e775a41d9bbf377eb))
+* **wake:** self-upgrade after the running image path is unlinked ([#691](https://github.com/avivsinai/agent-message-queue/issues/691)) ([9314771](https://github.com/avivsinai/agent-message-queue/commit/9314771d07b46c94a467bd0c82a1379fde4de188))
+
 ## [0.74.0](https://github.com/avivsinai/agent-message-queue/compare/v0.73.0...v0.74.0) (2026-08-28)
 
 
