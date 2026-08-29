@@ -582,10 +582,12 @@ symlink. When an installer atomically points that locator at a strictly newer
 image whose Go build metadata records a `-X main.version` linker assignment
 that supplies a semantic version, the wake waits for a fully quiescent
 delivery boundary and replaces its running image without changing PID,
-terminal ownership, or unread work. Package-managed installs (Homebrew, Scoop)
-are not a symlink swap: they upgrade through the package-manager-aware
-`amq upgrade` path, and a Homebrew `brew cleanup` removes the previous Cellar
-image. The last assignment wins over an
+terminal ownership, or unread work. Homebrew upgrades repoint the
+`/opt/homebrew/bin/amq` locator at the new Cellar image and `brew cleanup`
+then removes the previous Cellar directory, so a wake still running the old
+image continues from an unlinked path. On package-managed installs (Homebrew,
+Scoop) `amq upgrade` delegates to the package manager instead of replacing
+the binary. The last assignment wins over an
 allowlisted flag set. The parser accepts only the argument-free `-s` and `-w`
 flags plus the separate `-X main.version=...` and `-X=main.version=...` forms;
 any unrecognized linker option defers. The version is candidate-controlled
