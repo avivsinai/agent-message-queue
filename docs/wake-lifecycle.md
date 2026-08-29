@@ -617,7 +617,6 @@ escape it, which remains an explicit limitation of bounded probe cleanup.
 Darwin treats a still-running, identity-confirmed wake whose live mapped
 executable has the recorded device and inode as the same image even when the
 recorded pathname is gone, so Homebrew Cellar replacement can exec in place.
-Homebrew cleanup removes the previous Cellar; a wake still running that image upgrades normally because identity is compared by dev/ino, not pathname.
 An unreadable live identity or a present pathname that resolves to a different
 image remains inconclusive.
 A failed upgrade candidate is attempted at most
