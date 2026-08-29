@@ -582,7 +582,10 @@ symlink. When an installer atomically points that locator at a strictly newer
 image whose Go build metadata records a `-X main.version` linker assignment
 that supplies a semantic version, the wake waits for a fully quiescent
 delivery boundary and replaces its running image without changing PID,
-terminal ownership, or unread work. The last assignment wins over an
+terminal ownership, or unread work. Package-managed installs (Homebrew, Scoop)
+are not a symlink swap: they upgrade through the package-manager-aware
+`amq upgrade` path, and a Homebrew `brew cleanup` removes the previous Cellar
+image. The last assignment wins over an
 allowlisted flag set. The parser accepts only the argument-free `-s` and `-w`
 flags plus the separate `-X main.version=...` and `-X=main.version=...` forms;
 any unrecognized linker option defers. The version is candidate-controlled
@@ -631,7 +634,9 @@ boundary, a later wake that reaches maintenance refuses the matching image while
 the attempt is fresh relative to its recorded timestamp under the current wall
 clock. The guard cannot help when the new image dies
 before any replacement wake reaches the maintenance code. Its bounded
-eight-entry ledger is scoped to the wake agent directory. The wake itself has
+eight-entry attempt ledger is scoped to the wake agent directory; the
+per-candidate refusal memory is separate and is carried in the
+generation-scoped wake restart record. The wake itself has
 no in-process rollback or retry; an external supervisor may restart it. The
 first quiescent boundary from the attempted image settles the attempt; an
 operator or package manager must restore a known-good image after a refusal.
@@ -644,7 +649,7 @@ followed by a small final bound-image revalidation before exec.
 
 The wake attempt sidecar accepts the single-attempt schema 1 as migration input
 and writes the bounded ledger schema 2. A pre-feature wake ignores this marker,
-so mixed-version operation does not provide the new crash-loop protection on
+so mixed-version operation does not provide the crash-loop protection on
 both faces until both faces run the upgraded code.
 
 AMQ does not write the executable or retain the previous image, so neither wake
