@@ -170,7 +170,7 @@ func (b *TmuxBackend) Create(req CreateRequest) (CreateResult, error) {
 
 	first := req.Plan.Agents[0]
 	firstLine := b.agentCommand(req, first)
-	out, err := b.run(ctx, b.args("new-session", "-d", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}",
+	out, err := b.runNewSessionWithTransientRetry(ctx, b.args("new-session", "-d", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}",
 		"-s", name, "-n", first.Handle, "-e", tmuxNonceEnvironment+"="+first.LaunchNonce, firstLine)...)
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("create tmux session: %w", err)
@@ -1215,6 +1215,44 @@ func tmuxTargetMissing(err error) bool {
 		strings.Contains(msg, "server exited unexpectedly")
 }
 
+// tmuxServerExitedUnexpectedly reports the transient tmux server startup
+// race where `new-session` fails with "server exited unexpectedly" (the server
+// process exited before completing the command). This is not a missing-target
+// condition (see tmuxTargetMissing); it is a racy server launch that succeeds
+// on an immediate retry. Used only at the create `new-session` sites, where a
+// failure is provably pre-resource-creation and the retry is idempotent.
+func tmuxServerExitedUnexpectedly(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "server exited unexpectedly")
+}
+
+// tmuxNewSessionTransientBackoff is the bounded wait before a single retry of
+// a `new-session` that hit the server-exited race. It is intentionally short
+// and unconfigurable: the retry is a one-off race breaker, not a policy.
+const tmuxNewSessionTransientBackoff = 50 * time.Millisecond
+
+// runNewSessionWithTransientRetry executes a `new-session` create command,
+// retrying exactly once when tmux reports the transient "server exited
+// unexpectedly" startup race. Any other error (including a second occurrence)
+// is returned unwrapped-by-retry so the caller surfaces its original
+// `create tmux session` refusal. The retry is bounded to one attempt and
+// honors ctx cancellation during the backoff.
+func (b *TmuxBackend) runNewSessionWithTransientRetry(ctx context.Context, args ...string) (string, error) {
+	out, err := b.run(ctx, args...)
+	if err == nil || !tmuxServerExitedUnexpectedly(err) {
+		return out, err
+	}
+	// Transient server-exit race: retry once after a bounded backoff.
+	select {
+	case <-time.After(tmuxNewSessionTransientBackoff):
+	case <-ctx.Done():
+		return out, err
+	}
+	return b.run(ctx, args...)
+}
+
 func tmuxCreateTimeout(req CreateRequest) time.Duration {
 	includeFirst := req.Placement != nil && req.Placement.Target == PlacementTargetCurrentWindow
 	return tmuxCommandTimeout + placementStaggerBudget(req.Placement, len(req.Plan.Agents), includeFirst)
@@ -1378,7 +1416,7 @@ func (b *TmuxBackend) createSessionLayout(req CreateRequest, detect DetectResult
 		return CreateResult{}, fmt.Errorf("tmux session %q already exists; journal recovery must classify it", name)
 	}
 	first := req.Plan.Agents[0]
-	out, err := b.run(ctx, b.args("new-session", "-d", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}",
+	out, err := b.runNewSessionWithTransientRetry(ctx, b.args("new-session", "-d", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}",
 		"-s", name, "-n", first.Handle, "-e", tmuxNonceEnvironment+"="+first.LaunchNonce, b.agentCommand(req, first))...)
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("create tmux session: %w", err)
