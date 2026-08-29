@@ -249,9 +249,9 @@ func TestMaintainWakeSelfUpgradeUsesLiveProcessImageOverRecordedEvidence(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Action != wakeSelfUpgradeActionRefused ||
-		!strings.Contains(decision.Reason, "not conclusively different from the live wake") {
-		t.Fatalf("live image decision = %#v, want refused", decision)
+	if decision.Action != wakeSelfUpgradeActionDeferred ||
+		!strings.Contains(decision.Reason, "unknown or ambiguous") {
+		t.Fatalf("live image decision = %#v, want deferred", decision)
 	}
 	if _, err := os.Lstat(filepath.Join(fixture.agentDir.path, wakeRestartFileName)); !os.IsNotExist(err) {
 		t.Fatalf("same live image created restart record: %v", err)
