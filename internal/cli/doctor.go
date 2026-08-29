@@ -870,27 +870,43 @@ func checkSkill(agent string) doctorCheck {
 	}
 
 	home, _ := os.UserHomeDir()
-	skillDir := filepath.Join(home, "."+agent, "skills", "amq-cli")
-	localSkillDir := filepath.Join("."+agent, "skills", "amq-cli")
 
-	// Check project-local skills first, then user-level
-	switch {
-	case fileExists(filepath.Join(localSkillDir, "SKILL.md")):
-		check.Status = "ok"
-		check.Message = "installed (project-local)"
-
-	case fileExists(filepath.Join(skillDir, "SKILL.md")):
-		check.Status = "ok"
-		check.Message = "installed"
-
-	case dirExists(skillDir):
-		check.Status = "warn"
-		check.Message = "skill directory exists but SKILL.md missing"
-
-	default:
-		check.Status = "warn"
-		check.Message = "not installed (run: npx skills add avivsinai/agent-message-queue -g -y)"
+	// Candidate skill directories, in priority order. The shared ~/.agents/skills
+	// (and project-local .agents/skills) is where `npx skills add -g` installs,
+	// so every agent checks it in addition to its agent-specific dir. The legacy
+	// ~/.<agent>/skills paths remain for installs created before the shared dir.
+	agentDir := "." + agent
+	candidates := []string{
+		filepath.Join(agentDir, "skills", "amq-cli"),        // project-local, agent-specific
+		filepath.Join(".agents", "skills", "amq-cli"),       // project-local, shared
+		filepath.Join(home, agentDir, "skills", "amq-cli"),  // user-level, agent-specific
+		filepath.Join(home, ".agents", "skills", "amq-cli"), // user-level, shared (npx skills add -g)
 	}
 
+	// Check project-local candidates first, then user-level, in order.
+	for _, dir := range candidates {
+		if fileExists(filepath.Join(dir, "SKILL.md")) {
+			check.Status = "ok"
+			if strings.HasPrefix(dir, ".") {
+				check.Message = "installed (project-local)"
+			} else {
+				check.Message = "installed"
+			}
+			return check
+		}
+	}
+
+	// No SKILL.md in any candidate. Warn if a skill directory exists but is
+	// missing SKILL.md (partial install); otherwise recommend the remedy.
+	for _, dir := range candidates {
+		if dirExists(dir) {
+			check.Status = "warn"
+			check.Message = "skill directory exists but SKILL.md missing"
+			return check
+		}
+	}
+
+	check.Status = "warn"
+	check.Message = "not installed (run: npx skills add avivsinai/agent-message-queue -g -y)"
 	return check
 }
