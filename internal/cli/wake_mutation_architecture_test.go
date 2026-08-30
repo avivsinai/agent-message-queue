@@ -37,8 +37,8 @@ var wakeMutationUnprovableUnlinkExemptions = map[string]map[int]string{
 		220: "validated Darwin control-socket basename cleanup; lock name rejected locally",
 	},
 	"wake_lock_at_unix.go": {
-		692: "snapshot-validated generation artifact cleanup; lock name rejected locally",
-		732: "owned temporary generation file cleanup",
+		695: "snapshot-validated generation artifact cleanup; lock name rejected locally",
+		735: "owned temporary generation file cleanup",
 	},
 	"wake_owner_storage_unix.go": {
 		97:  "owned temporary target file cleanup",
