@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.75.0](https://github.com/avivsinai/agent-message-queue/compare/v0.74.1...v0.75.0) (2026-08-30)
+
+
+### Features
+
+* **bridge:** envelope v2 length-prefix and payload_b64 ([fe3ea1e](https://github.com/avivsinai/agent-message-queue/commit/fe3ea1e265794678d396ef2a296934b1037ddd92))
+
+
+### Bug Fixes
+
+* **bridge:** derive hop-probe ids and allow slash in thread_id ([fe3ea1e](https://github.com/avivsinai/agent-message-queue/commit/fe3ea1e265794678d396ef2a296934b1037ddd92))
+
 ## [0.74.1](https://github.com/avivsinai/agent-message-queue/compare/v0.74.0...v0.74.1) (2026-08-29)
 
 
